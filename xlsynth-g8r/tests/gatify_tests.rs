@@ -800,6 +800,25 @@ fn test_gatify_one_hot() {
 }
 
 #[test]
+fn test_sgt_negative_pow2_literal_stats() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let ir_text = "package sample
+
+top fn main(x: bits[64] id=1) -> bits[1] {
+  literal.2: bits[64] = literal(value=18446744073709551488, id=2)
+  ret result: bits[1] = sgt(x, literal.2, id=3)
+}
+";
+    let got = do_test_ir_conversion_no_equiv_with_stats(ir_text, Opt::Yes);
+    let want = SummaryStats {
+        live_nodes: 128,
+        deepest_path: 9,
+        fanout_histogram: btreemap! {1 => 126, 2 => 1},
+    };
+    assert_eq!(got, want);
+}
+
+#[test]
 fn test_gatify_ule() {
     let _ = env_logger::builder().is_test(true).try_init();
     let stats = gather_stats_for_widths(&[1, 2, 3, 4, 5, 6, 7, 8], |builder, bit_count| {

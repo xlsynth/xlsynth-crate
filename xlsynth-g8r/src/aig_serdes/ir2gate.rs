@@ -1031,6 +1031,43 @@ fn get_pow2_minus1_k(bits: &xlsynth::IrBits) -> Option<usize> {
     Some(k)
 }
 
+fn get_neg_pow2_k(bits: &xlsynth::IrBits) -> Option<usize> {
+    // Recognizes values of the form -2^k in two's complement, i.e. high bits are
+    // 1 and the low k bits are 0. k=0 => all ones, k=bit_count-1 => int_min.
+    let bit_count = bits.get_bit_count();
+    assert!(bit_count > 0);
+    if !bits.get_bit(bit_count - 1).unwrap() {
+        return None;
+    }
+    let mut k = 0usize;
+    while k < bit_count && !bits.get_bit(k).unwrap() {
+        k += 1;
+    }
+    if k == 0 || k == bit_count - 1 {
+        return None;
+    }
+    for i in k..bit_count {
+        if !bits.get_bit(i).unwrap() {
+            return None;
+        }
+    }
+    Some(k)
+}
+
+fn simplify_ugt_all_ones_above_k(
+    gb: &mut GateBuilder,
+    lhs_bits: &AigBitVector,
+    bit_count: usize,
+    k: usize,
+) -> AigOperand {
+    assert!(k > 0 && k < bit_count);
+    let upper = lhs_bits.get_lsb_slice(k, bit_count - k);
+    let upper_is_all_ones = gb.add_and_reduce(&upper, ReductionKind::Tree);
+    let low = lhs_bits.get_lsb_slice(0, k);
+    let low_is_nonzero = gb.add_or_reduce(&low, ReductionKind::Tree);
+    gb.add_and_binary(upper_is_all_ones, low_is_nonzero)
+}
+
 fn is_int_min(bits: &xlsynth::IrBits) -> bool {
     let bit_count = bits.get_bit_count();
     assert!(bit_count > 0);
@@ -1335,6 +1372,10 @@ fn try_simplify_cmp_literal_rhs(
                 Some(gb.add_ne_vec(lhs_bits, rhs_bits_vec, ReductionKind::Tree))
             } else if is_int_max(rhs_bits) {
                 Some(gb.get_false())
+            } else if let Some(k) = get_neg_pow2_k(rhs_bits) {
+                let nonneg = gb.add_not(msb);
+                let u = simplify_ugt_all_ones_above_k(gb, lhs_bits, bit_count, k);
+                Some(gb.add_or_binary(nonneg, u))
             } else if is_non_negative_signed(rhs_bits) {
                 let nonneg = gb.add_not(msb);
                 let u = try_simplify_cmp_literal_rhs(
