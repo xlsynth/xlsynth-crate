@@ -13,7 +13,9 @@ use xlsynth_pir::ir_parser;
 enum RhsSpec {
     Param,
     Zero,
+    One,
     AllOnes,
+    LowHalfOnes,
     Pow2 { bit_index: u8 },
     Pow2Minus1 { bit_index: u8 },
 }
@@ -23,7 +25,9 @@ impl RhsSpec {
         match self {
             RhsSpec::Param => "param",
             RhsSpec::Zero => "0",
+            RhsSpec::One => "1",
             RhsSpec::AllOnes => "all_ones",
+            RhsSpec::LowHalfOnes => "low_half_ones",
             RhsSpec::Pow2 { bit_index: 0 } => "pow2_0",
             RhsSpec::Pow2 { bit_index: 1 } => "pow2_1",
             RhsSpec::Pow2 { bit_index: 2 } => "pow2_2",
@@ -84,8 +88,17 @@ fn build_8b_cmp_ir_text(kind: ir::Binop, rhs_spec: RhsSpec) -> String {
             let v = IrValue::make_ubits(8, 0).expect("make_ubits");
             fb.literal(&v, Some("rhs"))
         }
+        RhsSpec::One => {
+            let v = IrValue::make_ubits(8, 1).expect("make_ubits");
+            fb.literal(&v, Some("rhs"))
+        }
         RhsSpec::AllOnes => {
             let v = IrValue::make_ubits(8, 0xff).expect("make_ubits");
+            fb.literal(&v, Some("rhs"))
+        }
+        RhsSpec::LowHalfOnes => {
+            // High half bits are zero; low half bits are ones: 0b0000_1111 for u8.
+            let v = IrValue::make_ubits(8, 0x0f).expect("make_ubits");
             fb.literal(&v, Some("rhs"))
         }
         RhsSpec::Pow2 { bit_index } => {
@@ -120,6 +133,25 @@ fn build_8b_cmp_ir_text(kind: ir::Binop, rhs_spec: RhsSpec) -> String {
 
     let _ = fb.build_with_return_value(&out).expect("build function");
     package.set_top_by_name(&fn_name).expect("set top");
+    package.to_string()
+}
+
+fn build_64b_slt_rhs_u32_max_ir_text() -> String {
+    let mut package = IrPackage::new("sample").expect("create package");
+    let fn_name = "cmp_slt_64b_u32_max";
+    let mut fb = FnBuilder::new(&mut package, fn_name, /* should_verify= */ true);
+
+    let ty_u64 = package.get_bits_type(64);
+    let lhs = fb.param("leaf_5", &ty_u64);
+
+    // 0x0000_0000_FFFF_FFFF, i.e. 2^32-1 (non-negative as a signed 64-bit value).
+    let v = IrValue::make_ubits(64, 0xffff_ffff).expect("make_ubits");
+    let rhs = fb.literal(&v, Some("rhs"));
+
+    let out = fb.slt(&lhs, &rhs, Some("cmp"));
+
+    let _ = fb.build_with_return_value(&out).expect("build function");
+    package.set_top_by_name(fn_name).expect("set top");
     package.to_string()
 }
 
@@ -168,8 +200,10 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
     let mut rhs_specs: Vec<RhsSpec> = Vec::new();
     rhs_specs.push(RhsSpec::Param);
     rhs_specs.push(RhsSpec::Zero);
+    rhs_specs.push(RhsSpec::One);
     rhs_specs.push(RhsSpec::AllOnes);
-    for bit_index in 0u8..8 {
+    rhs_specs.push(RhsSpec::LowHalfOnes);
+    for bit_index in 1u8..8 {
         rhs_specs.push(RhsSpec::Pow2 { bit_index });
     }
     for bit_index in 1u8..=8 {
@@ -186,8 +220,9 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
         // eq
         CmpRow { cmp: "eq", rhs: "param", live_nodes: 47, deepest_path: 6 },
         CmpRow { cmp: "eq", rhs: "0", live_nodes: 15, deepest_path: 4 },
+        CmpRow { cmp: "eq", rhs: "1", live_nodes: 15, deepest_path: 4 },
         CmpRow { cmp: "eq", rhs: "all_ones", live_nodes: 15, deepest_path: 4 },
-        CmpRow { cmp: "eq", rhs: "pow2_0", live_nodes: 15, deepest_path: 4 },
+        CmpRow { cmp: "eq", rhs: "low_half_ones", live_nodes: 15, deepest_path: 4 },
         CmpRow { cmp: "eq", rhs: "pow2_1", live_nodes: 15, deepest_path: 4 },
         CmpRow { cmp: "eq", rhs: "pow2_2", live_nodes: 15, deepest_path: 4 },
         CmpRow { cmp: "eq", rhs: "pow2_3", live_nodes: 15, deepest_path: 4 },
@@ -207,8 +242,9 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
         // ne
         CmpRow { cmp: "ne", rhs: "param", live_nodes: 47, deepest_path: 6 },
         CmpRow { cmp: "ne", rhs: "0", live_nodes: 15, deepest_path: 4 },
+        CmpRow { cmp: "ne", rhs: "1", live_nodes: 15, deepest_path: 4 },
         CmpRow { cmp: "ne", rhs: "all_ones", live_nodes: 15, deepest_path: 4 },
-        CmpRow { cmp: "ne", rhs: "pow2_0", live_nodes: 15, deepest_path: 4 },
+        CmpRow { cmp: "ne", rhs: "low_half_ones", live_nodes: 15, deepest_path: 4 },
         CmpRow { cmp: "ne", rhs: "pow2_1", live_nodes: 15, deepest_path: 4 },
         CmpRow { cmp: "ne", rhs: "pow2_2", live_nodes: 15, deepest_path: 4 },
         CmpRow { cmp: "ne", rhs: "pow2_3", live_nodes: 15, deepest_path: 4 },
@@ -228,8 +264,9 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
         // ult
         CmpRow { cmp: "ult", rhs: "param", live_nodes: 63, deepest_path: 10 },
         CmpRow { cmp: "ult", rhs: "0", live_nodes: 1, deepest_path: 1 },
+        CmpRow { cmp: "ult", rhs: "1", live_nodes: 15, deepest_path: 4 },
         CmpRow { cmp: "ult", rhs: "all_ones", live_nodes: 15, deepest_path: 4 },
-        CmpRow { cmp: "ult", rhs: "pow2_0", live_nodes: 15, deepest_path: 4 },
+        CmpRow { cmp: "ult", rhs: "low_half_ones", live_nodes: 15, deepest_path: 4 },
         CmpRow { cmp: "ult", rhs: "pow2_1", live_nodes: 13, deepest_path: 4 },
         CmpRow { cmp: "ult", rhs: "pow2_2", live_nodes: 11, deepest_path: 4 },
         CmpRow { cmp: "ult", rhs: "pow2_3", live_nodes: 9, deepest_path: 4 },
@@ -238,19 +275,20 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
         CmpRow { cmp: "ult", rhs: "pow2_6", live_nodes: 3, deepest_path: 2 },
         CmpRow { cmp: "ult", rhs: "pow2_7", live_nodes: 1, deepest_path: 1 },
         CmpRow { cmp: "ult", rhs: "pow2m1_1", live_nodes: 15, deepest_path: 4 },
-        CmpRow { cmp: "ult", rhs: "pow2m1_2", live_nodes: 21, deepest_path: 6 },
-        CmpRow { cmp: "ult", rhs: "pow2m1_3", live_nodes: 24, deepest_path: 7 },
-        CmpRow { cmp: "ult", rhs: "pow2m1_4", live_nodes: 26, deepest_path: 7 },
-        CmpRow { cmp: "ult", rhs: "pow2m1_5", live_nodes: 28, deepest_path: 8 },
-        CmpRow { cmp: "ult", rhs: "pow2m1_6", live_nodes: 30, deepest_path: 8 },
-        CmpRow { cmp: "ult", rhs: "pow2m1_7", live_nodes: 32, deepest_path: 8 },
+        CmpRow { cmp: "ult", rhs: "pow2m1_2", live_nodes: 15, deepest_path: 5 },
+        CmpRow { cmp: "ult", rhs: "pow2m1_3", live_nodes: 15, deepest_path: 5 },
+        CmpRow { cmp: "ult", rhs: "pow2m1_4", live_nodes: 15, deepest_path: 4 },
+        CmpRow { cmp: "ult", rhs: "pow2m1_5", live_nodes: 15, deepest_path: 5 },
+        CmpRow { cmp: "ult", rhs: "pow2m1_6", live_nodes: 15, deepest_path: 5 },
+        CmpRow { cmp: "ult", rhs: "pow2m1_7", live_nodes: 15, deepest_path: 5 },
         CmpRow { cmp: "ult", rhs: "pow2m1_8", live_nodes: 15, deepest_path: 4 },
 
         // ule
         CmpRow { cmp: "ule", rhs: "param", live_nodes: 69, deepest_path: 11 },
         CmpRow { cmp: "ule", rhs: "0", live_nodes: 15, deepest_path: 4 },
+        CmpRow { cmp: "ule", rhs: "1", live_nodes: 13, deepest_path: 4 },
         CmpRow { cmp: "ule", rhs: "all_ones", live_nodes: 1, deepest_path: 1 },
-        CmpRow { cmp: "ule", rhs: "pow2_0", live_nodes: 13, deepest_path: 4 },
+        CmpRow { cmp: "ule", rhs: "low_half_ones", live_nodes: 7, deepest_path: 3 },
         CmpRow { cmp: "ule", rhs: "pow2_1", live_nodes: 15, deepest_path: 5 },
         CmpRow { cmp: "ule", rhs: "pow2_2", live_nodes: 15, deepest_path: 5 },
         CmpRow { cmp: "ule", rhs: "pow2_3", live_nodes: 15, deepest_path: 5 },
@@ -270,8 +308,9 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
         // ugt
         CmpRow { cmp: "ugt", rhs: "param", live_nodes: 63, deepest_path: 10 },
         CmpRow { cmp: "ugt", rhs: "0", live_nodes: 15, deepest_path: 4 },
+        CmpRow { cmp: "ugt", rhs: "1", live_nodes: 13, deepest_path: 4 },
         CmpRow { cmp: "ugt", rhs: "all_ones", live_nodes: 1, deepest_path: 1 },
-        CmpRow { cmp: "ugt", rhs: "pow2_0", live_nodes: 13, deepest_path: 4 },
+        CmpRow { cmp: "ugt", rhs: "low_half_ones", live_nodes: 7, deepest_path: 3 },
         CmpRow { cmp: "ugt", rhs: "pow2_1", live_nodes: 15, deepest_path: 5 },
         CmpRow { cmp: "ugt", rhs: "pow2_2", live_nodes: 15, deepest_path: 5 },
         CmpRow { cmp: "ugt", rhs: "pow2_3", live_nodes: 15, deepest_path: 5 },
@@ -291,8 +330,9 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
         // uge
         CmpRow { cmp: "uge", rhs: "param", live_nodes: 69, deepest_path: 11 },
         CmpRow { cmp: "uge", rhs: "0", live_nodes: 1, deepest_path: 1 },
+        CmpRow { cmp: "uge", rhs: "1", live_nodes: 15, deepest_path: 4 },
         CmpRow { cmp: "uge", rhs: "all_ones", live_nodes: 15, deepest_path: 4 },
-        CmpRow { cmp: "uge", rhs: "pow2_0", live_nodes: 15, deepest_path: 4 },
+        CmpRow { cmp: "uge", rhs: "low_half_ones", live_nodes: 15, deepest_path: 4 },
         CmpRow { cmp: "uge", rhs: "pow2_1", live_nodes: 13, deepest_path: 4 },
         CmpRow { cmp: "uge", rhs: "pow2_2", live_nodes: 11, deepest_path: 4 },
         CmpRow { cmp: "uge", rhs: "pow2_3", live_nodes: 9, deepest_path: 4 },
@@ -312,8 +352,9 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
         // slt
         CmpRow { cmp: "slt", rhs: "param", live_nodes: 66, deepest_path: 12 },
         CmpRow { cmp: "slt", rhs: "0", live_nodes: 1, deepest_path: 1 },
+        CmpRow { cmp: "slt", rhs: "1", live_nodes: 16, deepest_path: 5 },
         CmpRow { cmp: "slt", rhs: "all_ones", live_nodes: 16, deepest_path: 5 },
-        CmpRow { cmp: "slt", rhs: "pow2_0", live_nodes: 16, deepest_path: 5 },
+        CmpRow { cmp: "slt", rhs: "low_half_ones", live_nodes: 16, deepest_path: 5 },
         CmpRow { cmp: "slt", rhs: "pow2_1", live_nodes: 14, deepest_path: 5 },
         CmpRow { cmp: "slt", rhs: "pow2_2", live_nodes: 12, deepest_path: 5 },
         CmpRow { cmp: "slt", rhs: "pow2_3", live_nodes: 10, deepest_path: 5 },
@@ -322,19 +363,20 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
         CmpRow { cmp: "slt", rhs: "pow2_6", live_nodes: 4, deepest_path: 3 },
         CmpRow { cmp: "slt", rhs: "pow2_7", live_nodes: 1, deepest_path: 1 },
         CmpRow { cmp: "slt", rhs: "pow2m1_1", live_nodes: 16, deepest_path: 5 },
-        CmpRow { cmp: "slt", rhs: "pow2m1_2", live_nodes: 22, deepest_path: 7 },
-        CmpRow { cmp: "slt", rhs: "pow2m1_3", live_nodes: 25, deepest_path: 8 },
-        CmpRow { cmp: "slt", rhs: "pow2m1_4", live_nodes: 27, deepest_path: 8 },
-        CmpRow { cmp: "slt", rhs: "pow2m1_5", live_nodes: 29, deepest_path: 9 },
-        CmpRow { cmp: "slt", rhs: "pow2m1_6", live_nodes: 31, deepest_path: 9 },
+        CmpRow { cmp: "slt", rhs: "pow2m1_2", live_nodes: 16, deepest_path: 6 },
+        CmpRow { cmp: "slt", rhs: "pow2m1_3", live_nodes: 16, deepest_path: 6 },
+        CmpRow { cmp: "slt", rhs: "pow2m1_4", live_nodes: 16, deepest_path: 5 },
+        CmpRow { cmp: "slt", rhs: "pow2m1_5", live_nodes: 16, deepest_path: 6 },
+        CmpRow { cmp: "slt", rhs: "pow2m1_6", live_nodes: 16, deepest_path: 6 },
         CmpRow { cmp: "slt", rhs: "pow2m1_7", live_nodes: 15, deepest_path: 4 },
         CmpRow { cmp: "slt", rhs: "pow2m1_8", live_nodes: 16, deepest_path: 5 },
 
         // sle
         CmpRow { cmp: "sle", rhs: "param", live_nodes: 72, deepest_path: 13 },
         CmpRow { cmp: "sle", rhs: "0", live_nodes: 16, deepest_path: 5 },
+        CmpRow { cmp: "sle", rhs: "1", live_nodes: 14, deepest_path: 5 },
         CmpRow { cmp: "sle", rhs: "all_ones", live_nodes: 1, deepest_path: 1 },
-        CmpRow { cmp: "sle", rhs: "pow2_0", live_nodes: 14, deepest_path: 5 },
+        CmpRow { cmp: "sle", rhs: "low_half_ones", live_nodes: 8, deepest_path: 4 },
         CmpRow { cmp: "sle", rhs: "pow2_1", live_nodes: 16, deepest_path: 6 },
         CmpRow { cmp: "sle", rhs: "pow2_2", live_nodes: 16, deepest_path: 6 },
         CmpRow { cmp: "sle", rhs: "pow2_3", live_nodes: 16, deepest_path: 6 },
@@ -354,8 +396,9 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
         // sgt
         CmpRow { cmp: "sgt", rhs: "param", live_nodes: 72, deepest_path: 13 },
         CmpRow { cmp: "sgt", rhs: "0", live_nodes: 16, deepest_path: 5 },
+        CmpRow { cmp: "sgt", rhs: "1", live_nodes: 14, deepest_path: 5 },
         CmpRow { cmp: "sgt", rhs: "all_ones", live_nodes: 1, deepest_path: 1 },
-        CmpRow { cmp: "sgt", rhs: "pow2_0", live_nodes: 14, deepest_path: 5 },
+        CmpRow { cmp: "sgt", rhs: "low_half_ones", live_nodes: 8, deepest_path: 4 },
         CmpRow { cmp: "sgt", rhs: "pow2_1", live_nodes: 16, deepest_path: 6 },
         CmpRow { cmp: "sgt", rhs: "pow2_2", live_nodes: 16, deepest_path: 6 },
         CmpRow { cmp: "sgt", rhs: "pow2_3", live_nodes: 16, deepest_path: 6 },
@@ -375,8 +418,9 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
         // sge
         CmpRow { cmp: "sge", rhs: "param", live_nodes: 73, deepest_path: 14 },
         CmpRow { cmp: "sge", rhs: "0", live_nodes: 1, deepest_path: 1 },
+        CmpRow { cmp: "sge", rhs: "1", live_nodes: 16, deepest_path: 5 },
         CmpRow { cmp: "sge", rhs: "all_ones", live_nodes: 16, deepest_path: 5 },
-        CmpRow { cmp: "sge", rhs: "pow2_0", live_nodes: 16, deepest_path: 5 },
+        CmpRow { cmp: "sge", rhs: "low_half_ones", live_nodes: 16, deepest_path: 5 },
         CmpRow { cmp: "sge", rhs: "pow2_1", live_nodes: 14, deepest_path: 5 },
         CmpRow { cmp: "sge", rhs: "pow2_2", live_nodes: 12, deepest_path: 5 },
         CmpRow { cmp: "sge", rhs: "pow2_3", live_nodes: 10, deepest_path: 5 },
@@ -395,4 +439,17 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
     ];
 
     assert_eq!(got.as_slice(), want);
+}
+
+#[test]
+fn test_cmp_gate_stats_slt_64b_rhs_u32_max() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = build_64b_slt_rhs_u32_max_ir_text();
+    let got = stats_for_ir_text(&ir_text, Opt::Yes);
+
+    // This is a "microbenchmark sweep" style test: lock in the expected gate
+    // count + depth so we can notice regressions and improvements.
+    assert_eq!(got.live_nodes, 128);
+    assert_eq!(got.deepest_path, 8);
 }
