@@ -855,6 +855,26 @@ fn main(x: bits[8] id=1) -> bits[1] {
     }
 
     #[test]
+    fn find_matches_gate_operator() {
+        let pkg_text = r#"package test
+
+fn main(pred: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  gated: bits[8] = gate(pred, x, id=3)
+  ret out: bits[8] = add(gated, x, id=4)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+
+        let query = parse_query("gate(pred, x)").unwrap();
+        let matches = find_matching_nodes(f, &query);
+        assert_eq!(matches.len(), 1);
+        let node_id = ir::node_textual_id(f, matches[0]);
+        assert_eq!(node_id, "gated");
+    }
+
+    #[test]
     fn find_matches_bit_slice_with_width_named_arg() {
         let pkg_text = r#"package test
 
