@@ -1186,6 +1186,18 @@ fn try_simplify_cmp_literal_rhs(
             } else if let Some(k) = get_pow2_lsb_index(rhs_bits) {
                 let slice = lhs_bits.get_lsb_slice(k, bit_count - k);
                 Some(gb.add_ez(&slice, ReductionKind::Tree))
+            } else if let Some(k) = get_pow2_minus1_k(rhs_bits) {
+                // x < (1<<k)-1  iff  upper_bits == 0  AND  low_bits != all_ones
+                //
+                // When k==0 => rhs==0, handled above. When k==bit_count => rhs==all_ones,
+                // handled above.
+                assert!(k > 0 && k < bit_count);
+                let upper = lhs_bits.get_lsb_slice(k, bit_count - k);
+                let upper_is_zero = gb.add_ez(&upper, ReductionKind::Tree);
+                let low = lhs_bits.get_lsb_slice(0, k);
+                let low_is_all_ones = gb.add_and_reduce(&low, ReductionKind::Tree);
+                let low_is_not_all_ones = gb.add_not(low_is_all_ones);
+                Some(gb.add_and_binary(upper_is_zero, low_is_not_all_ones))
             } else {
                 None
             }
