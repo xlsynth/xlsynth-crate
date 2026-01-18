@@ -70,9 +70,13 @@ cargo clean
 export XLS_DSO_PATH=$HOME/opt/xlsynth/lib/libxls-v0.0.173-ubuntu2004.so
 export DSLX_STDLIB_PATH=$HOME/opt/xlsynth/latest/xls/dslx/stdlib/
 cargo build -vv -p xlsynth-sys |& grep "Using XLS_DSO_PATH"
-export LD_LIBRARY_PATH=$HOME/opt/xlsynth/lib/:$LD_LIBRARY_PATH
+# Ensure host binaries (including Cargo build scripts) can locate the DSO at build/test time.
+export LD_LIBRARY_PATH="$(dirname "$XLS_DSO_PATH")":$LD_LIBRARY_PATH
 cargo test --workspace
 ```
+
+Note: `XLS_DSO_PATH` and `DSLX_STDLIB_PATH` are a paired build-time override for supplying
+pre-fetched XLS artifacts (DSO + DSLX stdlib). Setting only one will not enable the override.
 
 ## Development Notes
 

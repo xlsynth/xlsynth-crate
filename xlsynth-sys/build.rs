@@ -537,6 +537,33 @@ fn main() {
         );
     }
 
+    // If the user is trying to provide pre-fetched artifacts, they need to provide
+    // both the DSO and stdlib paths together.
+    //
+    // Note: we intentionally do *not* hard-fail when only one is set, since some
+    // environments export XLS_DSO_PATH globally (e.g. for runtime use), and we
+    // still want DEV_XLS_DSO_WORKSPACE or downloads to work in that case.
+    let have_xls_dso_path = std::env::var("XLS_DSO_PATH").is_ok();
+    let have_dslx_stdlib_path = std::env::var("DSLX_STDLIB_PATH").is_ok();
+    if have_xls_dso_path ^ have_dslx_stdlib_path {
+        let xls_dso_path = std::env::var("XLS_DSO_PATH").unwrap_or_else(|_| "<unset>".to_string());
+        let dslx_stdlib_path =
+            std::env::var("DSLX_STDLIB_PATH").unwrap_or_else(|_| "<unset>".to_string());
+        println!(
+            concat!(
+                "cargo:warning=",
+                "Only one of XLS_DSO_PATH / DSLX_STDLIB_PATH is set. These variables form a paired build-time override ",
+                "for pre-fetched XLS artifacts (DSO + DSLX stdlib). ",
+                "Ignoring the partial override and continuing (DEV_XLS_DSO_WORKSPACE or downloads may still be used). ",
+                "To use the pre-fetched override, set both. ",
+                "XLS_DSO_PATH={} ",
+                "DSLX_STDLIB_PATH={}"
+            ),
+            xls_dso_path,
+            dslx_stdlib_path
+        );
+    }
+
     if std::env::var("XLS_DSO_PATH").is_ok() && std::env::var("DSLX_STDLIB_PATH").is_ok() {
         println!(
             "cargo:info=Using XLS_DSO_PATH {:?} and DSLX_STDLIB_PATH {:?}",
