@@ -75,8 +75,8 @@ export LD_LIBRARY_PATH="$(dirname "$XLS_DSO_PATH")":$LD_LIBRARY_PATH
 cargo test --workspace
 ```
 
-Note: `XLS_DSO_PATH` and `DSLX_STDLIB_PATH` must be set together; setting only one is treated as a
-misconfiguration.
+Note: `XLS_DSO_PATH` and `DSLX_STDLIB_PATH` are a paired build-time override for supplying
+pre-fetched XLS artifacts (DSO + DSLX stdlib). Setting only one will not enable the override.
 
 ## Development Notes
 
