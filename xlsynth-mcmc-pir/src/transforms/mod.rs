@@ -25,6 +25,8 @@ mod eq_ne_add_literal_shift;
 mod eq_sel_distribute;
 mod eq_zero_or_reduce;
 mod nand_not_and_fold;
+mod narrow_add_from_wide_add_fold;
+mod nary_hoist;
 mod ne_zero_or_reduce;
 mod neg_neg_cancel;
 mod neg_sel_distribute;
@@ -37,6 +39,7 @@ mod priority_sel_1_to_sel;
 mod priority_sel_to_sel_chain;
 mod reassociate_add_sub;
 mod rewire_operand_to_same_type;
+mod rewire_users_to_sibling_add;
 mod sel_hoist;
 mod sel_same_arms_fold;
 mod sel_swap_arms_by_not_pred;
@@ -59,6 +62,8 @@ use eq_ne_add_literal_shift::EqNeAddLiteralShiftTransform;
 use eq_sel_distribute::EqSelDistributeTransform;
 use eq_zero_or_reduce::EqZeroOrReduceTransform;
 use nand_not_and_fold::NandNotAndFoldTransform;
+use narrow_add_from_wide_add_fold::NarrowAddFromWideAddFoldTransform;
+use nary_hoist::NaryHoistTransform;
 use ne_zero_or_reduce::NeZeroOrReduceTransform;
 use neg_neg_cancel::NegNegCancelTransform;
 use neg_sel_distribute::NegSelDistributeTransform;
@@ -71,6 +76,7 @@ use priority_sel_1_to_sel::PrioritySel1ToSelTransform;
 use priority_sel_to_sel_chain::PrioritySelToSelChainTransform;
 use reassociate_add_sub::ReassociateAddSubTransform;
 use rewire_operand_to_same_type::RewireOperandToSameTypeTransform;
+use rewire_users_to_sibling_add::RewireUsersToSiblingAddTransform;
 use sel_hoist::SelHoistTransform;
 use sel_same_arms_fold::SelSameArmsFoldTransform;
 use sel_swap_arms_by_not_pred::SelSwapArmsByNotPredTransform;
@@ -98,6 +104,8 @@ pub enum PirTransformKind {
     /// Constant-shift equality through add-with-literal (mod 2^w):
     ///   `eq(add(x, k), c) ↔ eq(x, c - k)` (and same for `ne`)
     EqNeAddLiteralShift,
+    /// Fold a narrow add from a matching wider add on zero-extended operands.
+    NarrowAddFromWideAddFold,
     /// Normalize subtraction via add+negation (two's complement) and reverse:
     /// `sub(x, y) ↔ add(x, neg(y))`
     SubToAddNeg,
@@ -131,6 +139,8 @@ pub enum PirTransformKind {
     /// Treat `sign_ext(b)` (b:bits[1]) as an all-ones/zeros mask and convert
     /// to/from sel: `and(x, sign_ext(b,w)) ↔ sel(b, cases=[0_w, x])`
     AndMaskSignExtToSel,
+    /// Rewire users between sibling wide/narrow adds via adapters.
+    RewireUsersToSiblingAdd,
     /// `xor(x, sign_ext(b,w))` is a conditional invert; convert to/from sel:
     /// `xor(x, sign_ext(b,w)) ↔ sel(b, cases=[x, not(x)])`
     XorMaskSignExtToSelNot,
@@ -142,6 +152,8 @@ pub enum PirTransformKind {
     SelSwapArmsByNotPred,
     /// Hoist unary/binary ops over `sel`.
     SelHoist,
+    /// Hoist unary/binary ops over `nary`.
+    NaryHoist,
     /// Cancel double NOT:
     /// `not(not(x)) ↔ x`
     NotNotCancel,
@@ -206,6 +218,7 @@ impl fmt::Display for PirTransformKind {
             PirTransformKind::CloneMultiUserNode => write!(f, "CloneMultiUserNode"),
             PirTransformKind::EqSelDistribute => write!(f, "EqSelDistribute"),
             PirTransformKind::EqNeAddLiteralShift => write!(f, "EqNeAddLiteralShift"),
+            PirTransformKind::NarrowAddFromWideAddFold => write!(f, "NarrowAddFromWideAddFold"),
             PirTransformKind::SubToAddNeg => write!(f, "SubToAddNeg"),
             PirTransformKind::NegSubSwap => write!(f, "NegSubSwap"),
             PirTransformKind::ReassociateAddSub => write!(f, "ReassociateAddSub"),
@@ -216,10 +229,12 @@ impl fmt::Display for PirTransformKind {
             PirTransformKind::SignExtSelDistribute => write!(f, "SignExtSelDistribute"),
             PirTransformKind::PrioritySel1ToSel => write!(f, "PrioritySel1ToSel"),
             PirTransformKind::AndMaskSignExtToSel => write!(f, "AndMaskSignExtToSel"),
+            PirTransformKind::RewireUsersToSiblingAdd => write!(f, "RewireUsersToSiblingAdd"),
             PirTransformKind::XorMaskSignExtToSelNot => write!(f, "XorMaskSignExtToSelNot"),
             PirTransformKind::SelSameArmsFold => write!(f, "SelSameArmsFold"),
             PirTransformKind::SelSwapArmsByNotPred => write!(f, "SelSwapArmsByNotPred"),
             PirTransformKind::SelHoist => write!(f, "SelHoist"),
+            PirTransformKind::NaryHoist => write!(f, "NaryHoist"),
             PirTransformKind::NotNotCancel => write!(f, "NotNotCancel"),
             PirTransformKind::NegNegCancel => write!(f, "NegNegCancel"),
             PirTransformKind::NotEqNeFlip => write!(f, "NotEqNeFlip"),
@@ -280,6 +295,7 @@ pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
         Box::new(CloneMultiUserNodeTransform),
         Box::new(EqSelDistributeTransform),
         Box::new(EqNeAddLiteralShiftTransform),
+        Box::new(NarrowAddFromWideAddFoldTransform),
         Box::new(SubToAddNegTransform),
         Box::new(NegSubSwapTransform),
         Box::new(ReassociateAddSubTransform),
@@ -290,10 +306,12 @@ pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
         Box::new(SignExtSelDistributeTransform),
         Box::new(PrioritySel1ToSelTransform),
         Box::new(AndMaskSignExtToSelTransform),
+        Box::new(RewireUsersToSiblingAddTransform),
         Box::new(XorMaskSignExtToSelNotTransform),
         Box::new(SelSameArmsFoldTransform),
         Box::new(SelSwapArmsByNotPredTransform),
         Box::new(SelHoistTransform),
+        Box::new(NaryHoistTransform),
         Box::new(NotNotCancelTransform),
         Box::new(NegNegCancelTransform),
         Box::new(NotEqNeFlipTransform),
