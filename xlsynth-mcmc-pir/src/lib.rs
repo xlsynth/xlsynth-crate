@@ -438,9 +438,27 @@ pub fn mcmc_iteration(
                     }
                 };
 
-                let curr_metric = objective.metric(&current_cost) as f64;
-                let new_metric = objective.metric(&new_candidate_cost) as f64;
-                let accept = metropolis_accept(curr_metric, new_metric, temp, context.rng);
+                let curr_metric_u64 = objective.metric(&current_cost);
+                let new_metric_u64 = objective.metric(&new_candidate_cost);
+                let accept = if new_metric_u64 == curr_metric_u64
+                    && new_candidate_cost.pir_nodes > current_cost.pir_nodes
+                {
+                    // Equal objective metric but PIR nodes grew: only accept if
+                    // the temperature still allows it.
+                    metropolis_accept(
+                        current_cost.pir_nodes as f64,
+                        new_candidate_cost.pir_nodes as f64,
+                        temp,
+                        context.rng,
+                    )
+                } else {
+                    metropolis_accept(
+                        curr_metric_u64 as f64,
+                        new_metric_u64 as f64,
+                        temp,
+                        context.rng,
+                    )
+                };
 
                 if accept {
                     let best_metric_u64 = objective.metric(best_cost);

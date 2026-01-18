@@ -26,6 +26,7 @@ Additionally, we emit a machine-readable mapping at repo root:
 with values that contain the corresponding xlsynth release version.
 """
 
+import argparse
 import re
 import os
 import subprocess
@@ -193,14 +194,48 @@ def crate_published(crate_version: str) -> bool:
         return False
 
 
-def get_version_mapping() -> List[VersionMapping]:
+def _load_existing_mappings(json_path: str) -> Dict[str, VersionMapping]:
+    """Load existing mappings from generated_version_compat.json if present."""
+    if not os.path.exists(json_path):
+        return {}
+    try:
+        with open(json_path, "r") as jf:
+            data = json.load(jf)
+    except Exception as e:
+        print(f"Error reading existing mapping file {json_path}: {e}", file=sys.stderr)
+        return {}
+    mappings: Dict[str, VersionMapping] = {}
+    for crate_version, entry in data.items():
+        lib_version = entry.get("xlsynth_release_version")
+        release_dt = entry.get("crate_release_datetime")
+        if not lib_version or not release_dt:
+            continue
+        mappings[crate_version] = VersionMapping(
+            crate_version=crate_version,
+            lib_version=lib_version,
+            crate_release_datetime=release_dt,
+        )
+    return mappings
+
+
+def get_version_mapping(recompute_all_entries: bool) -> List[VersionMapping]:
     file_path = "xlsynth-sys/build.rs"
     all_tags = get_all_tags()
     print(f"Found {len(all_tags)} tags. Processing...", flush=True)
     mappings: List[VersionMapping] = []
     skipped_unpublished = 0
+    existing_path = "generated_version_compat.json"
+    existing = {} if recompute_all_entries else _load_existing_mappings(existing_path)
     for tag in all_tags:
         print(f"Processing tag {tag}...", flush=True)
+        crate_version = tag.lstrip("v")
+        if not recompute_all_entries and crate_version in existing:
+            mappings.append(existing[crate_version])
+            print(
+                f"  Reused existing mapping for crate version {crate_version}",
+                flush=True,
+            )
+            continue
         content = get_file_content_at_commit(tag, file_path)
         if not content:
             print(f"  Skipped tag {tag}: no file content found.", flush=True)
@@ -209,7 +244,6 @@ def get_version_mapping() -> List[VersionMapping]:
         if not lib_version:
             print(f"  Skipped tag {tag}: no lib version extracted.", flush=True)
             continue
-        crate_version = tag.lstrip("v")
         release_dt = get_tag_datetime(tag) or "Unknown"
         if not crate_published(crate_version):
             print(
@@ -328,7 +362,17 @@ def mappings_to_json_object(
 
 
 def main() -> None:
-    mappings = get_version_mapping()
+    parser = argparse.ArgumentParser(
+        description="Generate version compatibility table and JSON mapping."
+    )
+    parser.add_argument(
+        "--recompute-all-entries",
+        action="store_true",
+        help="Recompute every mapping instead of reusing existing entries.",
+    )
+    args = parser.parse_args()
+
+    mappings = get_version_mapping(args.recompute_all_entries)
     if not mappings:
         print("No release tag mappings found in commit history", file=sys.stderr)
         sys.exit(1)
