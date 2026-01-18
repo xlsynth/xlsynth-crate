@@ -4,7 +4,7 @@ use std::cmp::min;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 
-use crate::aig_serdes::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
+use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 
@@ -19,9 +19,9 @@ use crate::aig::graph_logical_effort::{self, analyze_graph_logical_effort};
 use crate::aig::logical_effort;
 use crate::aig::logical_effort::compute_logical_effort_min_delay;
 use crate::aig_serdes::emit_netlist;
-use crate::aig_serdes::ir2gate;
 use crate::aig_sim::count_toggles;
 use crate::check_equivalence;
+use crate::gatify::ir2gate;
 use crate::ir2gates;
 use crate::use_count::get_id_to_use_count;
 use xlsynth_pir::ir;

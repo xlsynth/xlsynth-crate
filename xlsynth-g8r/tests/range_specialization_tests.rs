@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use xlsynth_g8r::aig::get_summary_stats::get_summary_stats;
-use xlsynth_g8r::aig_serdes::ir2gate::{GatifyOptions, gatify};
 use xlsynth_g8r::check_equivalence;
+use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify};
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_range_info::IrRangeInfo;

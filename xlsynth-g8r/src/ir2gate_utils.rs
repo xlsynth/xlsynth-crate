@@ -723,10 +723,10 @@ fn combine_prefix_pg(gb: &mut GateBuilder, lhs: PrefixPg, rhs: PrefixPg) -> Pref
 mod tests {
     use crate::{
         aig::gate::AigBitVector,
-        aig_serdes::ir2gate::{gatify_ule_via_adder, gatify_ule_via_bit_tests},
         aig_sim::gate_sim,
         check_equivalence,
         gate_builder::GateBuilderOptions,
+        gatify::ir2gate::{gatify_ule_via_adder, gatify_ule_via_bit_tests},
     };
 
     use super::*;

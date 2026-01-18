@@ -4,8 +4,8 @@ use xlsynth::FnBuilder;
 use xlsynth::IrPackage;
 use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::aig::get_summary_stats::{SummaryStats, get_summary_stats};
-use xlsynth_g8r::aig_serdes::ir2gate::{GatifyOptions, gatify};
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
+use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify};
 use xlsynth_g8r::ir2gate_utils::{
     PrefixScanStrategy, gatify_one_hot_with_nonzero_flag_prefix_strategy,
 };

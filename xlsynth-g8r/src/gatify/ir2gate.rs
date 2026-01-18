@@ -4,9 +4,9 @@
 //! `gatify`.
 
 use crate::aig::gate::{AigBitVector, AigOperand, GateFn};
-use crate::aig_serdes::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
 use crate::check_equivalence;
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
+use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
 use std::collections::HashMap;
 use std::sync::Arc;
 use xlsynth_pir::ir::{self, ParamId, StartAndLimit};
@@ -3179,8 +3179,8 @@ pub fn gatify_node_as_fn(
 mod tests {
     use crate::aig::get_summary_stats::{SummaryStats, get_summary_stats};
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
+    use crate::gatify::ir2gate::{GatifyOptions, gatify};
     use crate::ir2gate_utils::AdderMapping;
-    use crate::{aig_serdes::ir2gate::GatifyOptions, aig_serdes::ir2gate::gatify};
     use xlsynth_pir::ir;
     use xlsynth_pir::ir_parser;
 

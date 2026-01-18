@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::aig_serdes::ir2gate;
+use crate::gatify::ir2gate;
 use xlsynth_pir::desugar_extensions;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;

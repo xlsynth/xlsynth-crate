@@ -2,7 +2,7 @@
 
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use xlsynth_g8r::aig_serdes::ir2gate;
+use xlsynth_g8r::gatify::ir2gate;
 use xlsynth_g8r::ir2gate_utils;
 use xlsynth_pir::ir_fuzz::{FuzzSample, generate_ir_fn};
 use xlsynth_pir::ir_parser;
