@@ -37,9 +37,11 @@ mod priority_sel_1_to_sel;
 mod priority_sel_to_sel_chain;
 mod reassociate_add_sub;
 mod rewire_operand_to_same_type;
+mod sel_hoist;
 mod sel_same_arms_fold;
 mod sel_swap_arms_by_not_pred;
 mod shift_clamp;
+mod shift_hoist;
 mod sign_ext_sel_distribute;
 mod sub_to_add_neg;
 mod swap_commutative_binop_operands;
@@ -69,9 +71,11 @@ use priority_sel_1_to_sel::PrioritySel1ToSelTransform;
 use priority_sel_to_sel_chain::PrioritySelToSelChainTransform;
 use reassociate_add_sub::ReassociateAddSubTransform;
 use rewire_operand_to_same_type::RewireOperandToSameTypeTransform;
+use sel_hoist::SelHoistTransform;
 use sel_same_arms_fold::SelSameArmsFoldTransform;
 use sel_swap_arms_by_not_pred::SelSwapArmsByNotPredTransform;
 use shift_clamp::ShiftClampTransform;
+use shift_hoist::ShiftHoistTransform;
 use sign_ext_sel_distribute::SignExtSelDistributeTransform;
 use sub_to_add_neg::SubToAddNegTransform;
 use swap_commutative_binop_operands::SwapCommutativeBinopOperandsTransform;
@@ -136,6 +140,8 @@ pub enum PirTransformKind {
     /// Swap `sel` arms by negating predicate (2-case `sel` only):
     /// `sel(not(p), cases=[a, b]) ↔ sel(p, cases=[b, a])`
     SelSwapArmsByNotPred,
+    /// Hoist unary/binary ops over `sel`.
+    SelHoist,
     /// Cancel double NOT:
     /// `not(not(x)) ↔ x`
     NotNotCancel,
@@ -187,6 +193,8 @@ pub enum PirTransformKind {
     /// `sh{ll,rl,ra}(x, amount) -> sh{ll,rl,ra}(x, min(amount, max_amount))`
     /// where max_amount = min(width(x)-1, (2^amount_bits)-1).
     ShiftClamp,
+    /// Hoist unary/binary ops across shifts.
+    ShiftHoist,
 }
 
 impl fmt::Display for PirTransformKind {
@@ -211,6 +219,7 @@ impl fmt::Display for PirTransformKind {
             PirTransformKind::XorMaskSignExtToSelNot => write!(f, "XorMaskSignExtToSelNot"),
             PirTransformKind::SelSameArmsFold => write!(f, "SelSameArmsFold"),
             PirTransformKind::SelSwapArmsByNotPred => write!(f, "SelSwapArmsByNotPred"),
+            PirTransformKind::SelHoist => write!(f, "SelHoist"),
             PirTransformKind::NotNotCancel => write!(f, "NotNotCancel"),
             PirTransformKind::NegNegCancel => write!(f, "NegNegCancel"),
             PirTransformKind::NotEqNeFlip => write!(f, "NotEqNeFlip"),
@@ -225,6 +234,7 @@ impl fmt::Display for PirTransformKind {
             PirTransformKind::PrioritySelToSelChain => write!(f, "PrioritySelToSelChain"),
             PirTransformKind::RewireOperandToSameType => write!(f, "RewireOperandToSameType"),
             PirTransformKind::ShiftClamp => write!(f, "ShiftClamp"),
+            PirTransformKind::ShiftHoist => write!(f, "ShiftHoist"),
         }
     }
 }
@@ -283,6 +293,7 @@ pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
         Box::new(XorMaskSignExtToSelNotTransform),
         Box::new(SelSameArmsFoldTransform),
         Box::new(SelSwapArmsByNotPredTransform),
+        Box::new(SelHoistTransform),
         Box::new(NotNotCancelTransform),
         Box::new(NegNegCancelTransform),
         Box::new(NotEqNeFlipTransform),
@@ -297,6 +308,7 @@ pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
         Box::new(PrioritySelToSelChainTransform),
         Box::new(RewireOperandToSameTypeTransform),
         Box::new(ShiftClampTransform),
+        Box::new(ShiftHoistTransform),
     ]
 }
 
