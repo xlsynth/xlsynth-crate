@@ -1247,6 +1247,58 @@ top fn my_main(x: bits[32] id=5) -> bits[32] {
 
 #[test_case(true; "with_tool_path")]
 #[test_case(false; "without_tool_path")]
+fn test_ir2opt_subcommand_discovers_top(use_tool_path: bool) {
+    let _ = env_logger::try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("ir.ir");
+    std::fs::write(
+        &ir_path,
+        r#"package sample
+
+top fn my_main(x: bits[32]) -> bits[32] {
+    literal.3: bits[32] = literal(value=0, id=3)
+    ret add.4: bits[32] = add(literal.3, x, id=4)
+}"#,
+    )
+    .unwrap();
+
+    // Write out toolchain configuration.
+    let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = "[toolchain]\n".to_string();
+    let toolchain_toml_contents = if use_tool_path {
+        add_tool_path_value(&toolchain_toml_contents)
+    } else {
+        toolchain_toml_contents
+    };
+    std::fs::write(&toolchain_toml, toolchain_toml_contents).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_toml.to_str().unwrap())
+        .arg("ir2opt")
+        .arg(ir_path.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir2opt should succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout,
+        "package sample
+
+top fn my_main(x: bits[32] id=5) -> bits[32] {
+  ret x: bits[32] = param(name=x, id=5)
+}\n\n"
+    );
+}
+
+#[test_case(true; "with_tool_path")]
+#[test_case(false; "without_tool_path")]
 fn test_dslx2pipeline_with_dslx_path_two_entries(use_tool_path: bool) {
     let temp_dir = tempfile::tempdir().unwrap();
 
