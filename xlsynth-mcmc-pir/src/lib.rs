@@ -27,7 +27,7 @@ use xlsynth::IrBits;
 use xlsynth::IrPackage;
 use xlsynth::IrValue;
 use xlsynth_g8r::aig::get_summary_stats;
-use xlsynth_g8r::aig_serdes::ir2gate::{self, GatifyOptions};
+use xlsynth_g8r::gatify::ir2gate::{self, GatifyOptions};
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_mcmc::Best as SharedBest;
 use xlsynth_mcmc::MIN_TEMPERATURE_RATIO;

@@ -21,8 +21,8 @@ use xlsynth_mcmc::metropolis_accept;
 // Imports from the xlsynth_g8r crate
 use crate::aig::gate::GateFn;
 use crate::aig::{dce, get_summary_stats};
-use crate::aig_serdes::ir2gate::{self, GatifyOptions};
 use crate::aig_sim::gate_simd::{self, Vec256};
+use crate::gatify::ir2gate::{self, GatifyOptions};
 
 #[cfg(not(any(feature = "with-z3-system", feature = "with-z3-built")))]
 use crate::check_equivalence::prove_same_gate_fn_via_ir;

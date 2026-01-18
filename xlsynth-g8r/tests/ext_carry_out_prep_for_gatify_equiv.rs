@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
-use xlsynth_g8r::aig_serdes::ir2gate;
-use xlsynth_g8r::aig_serdes::prep_for_gatify::PrepForGatifyOptions;
 use xlsynth_g8r::check_equivalence;
+use xlsynth_g8r::gatify::ir2gate;
+use xlsynth_g8r::gatify::prep_for_gatify::PrepForGatifyOptions;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_range_info::IrRangeInfo;
@@ -66,7 +66,7 @@ top fn cone(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
     let pir_fn = parse_top_fn(ir_text);
 
     let range_info = build_range_info(ir_text, "cone", &pir_fn);
-    let prepared = xlsynth_g8r::aig_serdes::prep_for_gatify::prep_for_gatify(
+    let prepared = xlsynth_g8r::gatify::prep_for_gatify::prep_for_gatify(
         &pir_fn,
         Some(range_info.as_ref()),
         PrepForGatifyOptions {
@@ -105,7 +105,7 @@ fn carry_out_rewrite_sweep_up_to_4_bits_only_triggers_for_msb_slice() {
             let ir_text = make_add_slice_ir_text(w, start);
             let pir_fn = parse_top_fn(&ir_text);
 
-            let prepared = xlsynth_g8r::aig_serdes::prep_for_gatify::prep_for_gatify(
+            let prepared = xlsynth_g8r::gatify::prep_for_gatify::prep_for_gatify(
                 &pir_fn,
                 None,
                 PrepForGatifyOptions {
@@ -162,7 +162,7 @@ top fn cone(a: bits[9] id=1, b: bits[9] id=2) -> bits[1] {
 ";
     let pir_fn = parse_top_fn(ir_text);
 
-    let prepared = xlsynth_g8r::aig_serdes::prep_for_gatify::prep_for_gatify(
+    let prepared = xlsynth_g8r::gatify::prep_for_gatify::prep_for_gatify(
         &pir_fn,
         None,
         PrepForGatifyOptions {
@@ -212,7 +212,7 @@ top fn cone(p0: bits[9] id=1, p1: bits[9] id=2) -> bits[1] {
     let pir_fn = parse_top_fn(ir_text);
     let range_info = build_range_info(ir_text, "cone", &pir_fn);
 
-    let prepared = xlsynth_g8r::aig_serdes::prep_for_gatify::prep_for_gatify(
+    let prepared = xlsynth_g8r::gatify::prep_for_gatify::prep_for_gatify(
         &pir_fn,
         Some(range_info.as_ref()),
         PrepForGatifyOptions {

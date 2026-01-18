@@ -2,8 +2,8 @@
 
 use crate::aig::aig_hasher;
 use crate::aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output};
-use crate::aig_serdes::ir2gate;
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
+use crate::gatify::ir2gate;
 use crate::ir2gate_utils::gatify_add_ripple_carry;
 use half::bf16;
 use std::path::Path;

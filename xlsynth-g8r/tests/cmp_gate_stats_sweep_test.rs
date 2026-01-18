@@ -4,7 +4,7 @@ use xlsynth::FnBuilder;
 use xlsynth::IrPackage;
 use xlsynth::IrValue;
 use xlsynth_g8r::aig::get_summary_stats::{SummaryStats, get_summary_stats};
-use xlsynth_g8r::aig_serdes::ir2gate::{GatifyOptions, gatify};
+use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify};
 use xlsynth_g8r::test_utils::Opt;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;

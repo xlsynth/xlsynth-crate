@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use xlsynth_g8r::aig::get_summary_stats::get_summary_stats;
-use xlsynth_g8r::aig_serdes::ir2gate;
+use xlsynth_g8r::gatify::ir2gate;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::ir2gates;
 use xlsynth_pir::ir_parser;
