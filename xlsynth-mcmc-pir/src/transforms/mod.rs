@@ -39,6 +39,7 @@ mod reassociate_add_sub;
 mod rewire_operand_to_same_type;
 mod sel_same_arms_fold;
 mod sel_swap_arms_by_not_pred;
+mod shift_clamp;
 mod sign_ext_sel_distribute;
 mod sub_to_add_neg;
 mod swap_commutative_binop_operands;
@@ -70,6 +71,7 @@ use reassociate_add_sub::ReassociateAddSubTransform;
 use rewire_operand_to_same_type::RewireOperandToSameTypeTransform;
 use sel_same_arms_fold::SelSameArmsFoldTransform;
 use sel_swap_arms_by_not_pred::SelSwapArmsByNotPredTransform;
+use shift_clamp::ShiftClampTransform;
 use sign_ext_sel_distribute::SignExtSelDistributeTransform;
 use sub_to_add_neg::SubToAddNegTransform;
 use swap_commutative_binop_operands::SwapCommutativeBinopOperandsTransform;
@@ -180,6 +182,11 @@ pub enum PirTransformKind {
     /// This is *not* guaranteed to preserve semantics and therefore requires an
     /// equivalence oracle check before accepting.
     RewireOperandToSameType,
+    /// Clamp shift amounts to a bounded literal.
+    ///
+    /// `sh{ll,rl,ra}(x, amount) -> sh{ll,rl,ra}(x, min(amount, max_amount))`
+    /// where max_amount = min(width(x)-1, (2^amount_bits)-1).
+    ShiftClamp,
 }
 
 impl fmt::Display for PirTransformKind {
@@ -217,6 +224,7 @@ impl fmt::Display for PirTransformKind {
             PirTransformKind::ConstShllConcatZeroFold => write!(f, "ConstShllConcatZeroFold"),
             PirTransformKind::PrioritySelToSelChain => write!(f, "PrioritySelToSelChain"),
             PirTransformKind::RewireOperandToSameType => write!(f, "RewireOperandToSameType"),
+            PirTransformKind::ShiftClamp => write!(f, "ShiftClamp"),
         }
     }
 }
@@ -288,6 +296,7 @@ pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
         Box::new(ConstShllConcatZeroFoldTransform),
         Box::new(PrioritySelToSelChainTransform),
         Box::new(RewireOperandToSameTypeTransform),
+        Box::new(ShiftClampTransform),
     ]
 }
 
