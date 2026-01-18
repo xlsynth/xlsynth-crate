@@ -537,6 +537,30 @@ fn main() {
         );
     }
 
+    // If the user is trying to provide pre-fetched artifacts, require both the DSO
+    // and stdlib paths together. Supplying only one is almost certainly a
+    // misconfiguration and otherwise silently falls back to download/link
+    // defaults, which is confusing.
+    let have_xls_dso_path = std::env::var("XLS_DSO_PATH").is_ok();
+    let have_dslx_stdlib_path = std::env::var("DSLX_STDLIB_PATH").is_ok();
+    if have_xls_dso_path ^ have_dslx_stdlib_path {
+        let xls_dso_path = std::env::var("XLS_DSO_PATH").unwrap_or_else(|_| "<unset>".to_string());
+        let dslx_stdlib_path =
+            std::env::var("DSLX_STDLIB_PATH").unwrap_or_else(|_| "<unset>".to_string());
+        panic!(
+            concat!(
+                "Misconfigured build environment: XLS_DSO_PATH and DSLX_STDLIB_PATH must be set together.\n",
+                "Set both to use pre-fetched artifacts, or unset both to allow downloads.\n",
+                "Alternatively, set DEV_XLS_DSO_WORKSPACE to use a locally-built DSO.\n\n",
+                "Diagnostics:\n",
+                "  XLS_DSO_PATH: {}\n",
+                "  DSLX_STDLIB_PATH: {}\n",
+            ),
+            xls_dso_path,
+            dslx_stdlib_path
+        );
+    }
+
     if std::env::var("XLS_DSO_PATH").is_ok() && std::env::var("DSLX_STDLIB_PATH").is_ok() {
         println!(
             "cargo:info=Using XLS_DSO_PATH {:?} and DSLX_STDLIB_PATH {:?}",
