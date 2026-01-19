@@ -219,15 +219,27 @@ fn rewrite_and_nor_self_to_zero(f: &mut ir::Fn) -> usize {
                 if other.index == a.index {
                     continue;
                 }
-                let NodePayload::Nary(NaryOp::Nor, nor_ops) = f.get_node(other).payload.clone()
-                else {
-                    continue;
-                };
-                // Keep it narrow for now: the requested patterns are binary NORs.
-                if nor_ops.len() != 2 {
-                    continue;
+                let other_payload = f.get_node(other).payload.clone();
+
+                // Case 1: `nor(..., a, ...)` (support n-ary NOR as well).
+                if let NodePayload::Nary(NaryOp::Nor, nor_ops) = &other_payload {
+                    if nor_ops.len() >= 2 && nor_ops.iter().any(|&x| x.index == a.index) {
+                        matched = true;
+                        break;
+                    }
                 }
-                if nor_ops.iter().any(|&x| x.index == a.index) {
+
+                // Case 2: `not(or(..., a, ...))` (common canonicalization of NOR).
+                if let NodePayload::Unop(Unop::Not, inner) = &other_payload {
+                    if let NodePayload::Nary(NaryOp::Or, or_ops) = &f.get_node(*inner).payload {
+                        if or_ops.len() >= 2 && or_ops.iter().any(|&x| x.index == a.index) {
+                            matched = true;
+                            break;
+                        }
+                    }
+                }
+
+                if matched {
                     matched = true;
                     break;
                 }
@@ -503,6 +515,54 @@ top fn f(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
 }
 "#;
         let mut p1 = ir_parser::Parser::new(ir_text_1);
+        let pkg1 = p1.parse_and_validate_package().expect("parse/validate");
+        let mut f1 = pkg1.get_fn("f").unwrap().clone();
+        let rewrites1 = rewrite_and_nor_self_to_zero(&mut f1);
+        assert_eq!(rewrites1, 1);
+        let ret = f1.ret_node_ref.expect("ret");
+        let NodePayload::Literal(v) = &f1.get_node(ret).payload else {
+            panic!(
+                "expected ret payload to be Literal(0), got {:?}",
+                f1.get_node(ret).payload
+            );
+        };
+        assert_eq!(v.to_u64().ok(), Some(0));
+    }
+
+    #[test]
+    fn aug_opt_rewrites_and_nor_self_to_zero_nary_and_not_or_forms() {
+        // N-ary NOR case.
+        let ir_text_nary_nor = r#"package and_nor_self
+
+top fn f(a: bits[1] id=1, b: bits[1] id=2, c: bits[1] id=3) -> bits[1] {
+  nor.4: bits[1] = nor(b, a, c, id=4)
+  ret and.5: bits[1] = and(a, nor.4, id=5)
+}
+"#;
+        let mut p0 = ir_parser::Parser::new(ir_text_nary_nor);
+        let pkg0 = p0.parse_and_validate_package().expect("parse/validate");
+        let mut f0 = pkg0.get_fn("f").unwrap().clone();
+        let rewrites0 = rewrite_and_nor_self_to_zero(&mut f0);
+        assert_eq!(rewrites0, 1);
+        let ret = f0.ret_node_ref.expect("ret");
+        let NodePayload::Literal(v) = &f0.get_node(ret).payload else {
+            panic!(
+                "expected ret payload to be Literal(0), got {:?}",
+                f0.get_node(ret).payload
+            );
+        };
+        assert_eq!(v.to_u64().ok(), Some(0));
+
+        // not(or(...)) canonicalization form.
+        let ir_text_not_or = r#"package and_nor_self
+
+top fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  or.3: bits[1] = or(a, b, id=3)
+  not.4: bits[1] = not(or.3, id=4)
+  ret and.5: bits[1] = and(a, not.4, id=5)
+}
+"#;
+        let mut p1 = ir_parser::Parser::new(ir_text_not_or);
         let pkg1 = p1.parse_and_validate_package().expect("parse/validate");
         let mut f1 = pkg1.get_fn("f").unwrap().clone();
         let rewrites1 = rewrite_and_nor_self_to_zero(&mut f1);
