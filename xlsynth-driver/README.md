@@ -507,6 +507,26 @@ Example: find all consumers of `encode(one_hot(x))`:
 xlsynth-driver ir-query my_pkg.ir '$users(encode(one_hot(x)))'
 ```
 
+### `ir-query-corpus`
+
+Runs `ir-query` over every `.ir` file under a corpus directory (recursive) and prints matches as:
+`<path>: <match>`.
+
+- Positional arguments: `<corpus_dir> <query>`
+- Optional:
+  - `--top <NAME>` – function name to treat as top (overrides the package top).
+  - `--show-ret=false` – disable prefixing matches that are return values with `ret` (defaults to `true`).
+  - `--prefilter=true|false` – enable a fast textual prefilter based on explicit operator names in the query (defaults to `true`).
+  - `--ignore-parse-errors=true|false` – skip files that fail PIR parse/validate instead of exiting (defaults to `true`).
+  - `--max-files <N>` – stop after scanning N files (default: unlimited).
+  - `--max-matches <N>` – stop after emitting N matches (default: unlimited).
+
+Example:
+
+```shell
+xlsynth-driver ir-query-corpus /tmpfs/bf16_add_k3_cones 'and(a, nor(a, _))' --max-matches 20
+```
+
 ### `ir-structural-similarity`
 
 Computes a structural similarity summary between two IR functions by hashing node structure per depth and comparing multisets.
