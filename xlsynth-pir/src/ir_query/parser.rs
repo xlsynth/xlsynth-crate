@@ -313,7 +313,7 @@ impl<'a> QueryParser<'a> {
                 }
                 match expr {
                     QueryExpr::Placeholder(ref name) if name == "_" => NamedArgValue::Any,
-                    QueryExpr::Number(number) if ident == "width" => {
+                    QueryExpr::Number(number) if ident == "width" || ident == "start" => {
                         let number = usize::try_from(number).map_err(|_| {
                             self.error("named argument number does not fit in usize")
                         })?;

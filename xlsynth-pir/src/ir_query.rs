@@ -514,13 +514,15 @@ fn match_named_args_solutions(
         for b in &partials {
             let mut matched = Vec::new();
             match payload {
-                ir::NodePayload::BitSlice { width, .. } => {
-                    if arg.name.as_str() != "width" {
-                        continue;
-                    }
+                ir::NodePayload::BitSlice { start, width, .. } => {
+                    let actual: usize = match arg.name.as_str() {
+                        "width" => *width,
+                        "start" => *start,
+                        _ => continue,
+                    };
                     match &arg.value {
                         NamedArgValue::Number(v) => {
-                            if *v == *width {
+                            if *v == actual {
                                 matched.push(b.clone());
                             }
                         }
@@ -996,6 +998,26 @@ fn main(x: bits[8] id=1) -> bits[3] {
             .collect();
         ids.sort();
         assert_eq!(ids, vec!["slice1", "slice2"]);
+    }
+
+    #[test]
+    fn find_matches_bit_slice_with_start_and_width_named_args() {
+        let pkg_text = r#"package test
+
+fn main(x: bits[8] id=1) -> bits[1] {
+  slice0: bits[1] = bit_slice(x, start=0, width=1, id=2)
+  ret slice3: bits[1] = bit_slice(x, start=3, width=1, id=3)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+
+        let query = parse_query("bit_slice(x, start=3, width=1)").unwrap();
+        let matches = find_matching_nodes(f, &query);
+        assert_eq!(matches.len(), 1);
+        let node_id = ir::node_textual_id(f, matches[0]);
+        assert_eq!(node_id, "slice3");
     }
 
     #[test]
