@@ -1127,6 +1127,10 @@ extern "C" {
         m: *mut CVastModule,
         statement: *mut CVastMacroStatement,
     );
+    pub fn xls_vast_verilog_module_add_conditional(
+        m: *mut CVastModule,
+        cond: *mut CVastExpression,
+    ) -> *mut CVastConditional;
 
     pub fn xls_vast_verilog_module_add_parameter(
         m: *mut CVastModule,
@@ -2222,6 +2226,11 @@ extern "C" {
         lhs: *mut CVastExpression,
         rhs: *mut CVastExpression,
     ) -> *mut CVastStatement;
+    pub fn xls_vast_statement_block_add_continuous_assignment(
+        block: *mut CVastStatementBlock,
+        lhs: *mut CVastExpression,
+        rhs: *mut CVastExpression,
+    ) -> *mut CVastStatement;
 
     pub fn xls_vast_statement_block_add_comment_text(
         block: *mut CVastStatementBlock,
@@ -2299,6 +2308,10 @@ extern "C" {
         lhs: *mut CVastExpression,
         rhs: *mut CVastExpression,
     ) -> *mut CVastStatement;
+    pub fn xls_vast_generate_loop_add_conditional(
+        loop_: *mut CVastGenerateLoop,
+        cond: *mut CVastExpression,
+    ) -> *mut CVastConditional;
     pub fn xls_vast_generate_loop_add_blank_line(loop_: *mut CVastGenerateLoop);
     pub fn xls_vast_generate_loop_add_comment(
         loop_: *mut CVastGenerateLoop,

@@ -1301,6 +1301,115 @@ endmodule
 }
 
 #[test]
+fn test_module_level_conditional() {
+    let mut file = VastFile::new(VastFileType::Verilog);
+    let mut module = file.add_module("top");
+
+    // parameter A = 1;
+    // parameter B = 2;
+    let one_param = file.make_plain_literal(1, &IrFormatPreference::UnsignedDecimal);
+    let two_param = file.make_plain_literal(2, &IrFormatPreference::UnsignedDecimal);
+    let a = module.add_parameter("A", &one_param);
+    let b = module.add_parameter("B", &two_param);
+
+    // wire out;
+    let scalar = file.make_scalar_type();
+    let out = module.add_wire("out", &scalar);
+
+    // if (A == B) begin
+    //   assign out = 1'h1;
+    // end else begin
+    //   assign out = 1'h0;
+    // end
+    let cond_expr = file.make_eq(&a.to_expr(), &b.to_expr());
+    let cond = module.add_conditional(&cond_expr);
+    let mut then_block = cond.then_block();
+    let one = file
+        .make_literal("bits[1]:0x1", &IrFormatPreference::Hex)
+        .unwrap();
+    let zero = file
+        .make_literal("bits[1]:0x0", &IrFormatPreference::Hex)
+        .unwrap();
+    then_block.add_continuous_assignment(&out.to_expr(), &one);
+    let mut else_block = cond.add_else();
+    else_block.add_continuous_assignment(&out.to_expr(), &zero);
+
+    let verilog = file.emit();
+    let want = r#"module top;
+  parameter A = 1;
+  parameter B = 2;
+  wire out;
+  if (A == B) begin
+    assign out = 1'h1;
+  end else begin
+    assign out = 1'h0;
+  end
+endmodule
+"#;
+    assert_eq!(verilog, want);
+}
+
+#[test]
+fn test_generate_loop_conditional_assignments() {
+    let mut file = VastFile::new(VastFileType::SystemVerilog);
+    let mut module = file.add_module("top");
+
+    // wire [2:0] out;
+    let out_type = file.make_bit_vector_type(3, false);
+    let out = module.add_wire("out", &out_type);
+
+    // for (genvar i = 0; i < 3; i = i + 1) begin : g
+    let zero = file.make_plain_literal(0, &IrFormatPreference::UnsignedDecimal);
+    let three = file.make_plain_literal(3, &IrFormatPreference::UnsignedDecimal);
+    let mut gen = module.add_generate_loop("i", &zero, &three, Some("g"));
+
+    let i_ref = gen.get_genvar();
+    let i_expr = i_ref.to_expr();
+    let zero_cond = file.make_plain_literal(0, &IrFormatPreference::UnsignedDecimal);
+    let one_cond = file.make_plain_literal(1, &IrFormatPreference::UnsignedDecimal);
+
+    let cond0 = file.make_eq(&i_expr, &zero_cond);
+    let cond1 = file.make_eq(&i_expr, &one_cond);
+    let cond = gen.add_conditional(&cond0);
+    let mut then_block = cond.then_block();
+
+    let out_indexable = out.to_indexable_expr();
+    let idx = file.make_index_expr(&out_indexable, &i_expr);
+    let lhs = idx.to_expr();
+
+    let zero_val = file
+        .make_literal("bits[1]:0x0", &IrFormatPreference::Hex)
+        .unwrap();
+    let one_val = file
+        .make_literal("bits[1]:0x1", &IrFormatPreference::Hex)
+        .unwrap();
+    let x_val = file.make_unsized_x_literal();
+
+    then_block.add_continuous_assignment(&lhs, &zero_val);
+
+    let mut else_if_block = cond.add_else_if(&cond1);
+    else_if_block.add_continuous_assignment(&lhs, &one_val);
+
+    let mut else_block = cond.add_else();
+    else_block.add_continuous_assignment(&lhs, &x_val);
+
+    let verilog = file.emit();
+    let want = r#"module top;
+  wire [2:0] out;
+  for (genvar i = 0; i < 3; i = i + 1) begin : g
+    if (i == 0) begin
+      assign out[i] = 1'h0;
+    end else if (i == 1) begin
+      assign out[i] = 1'h1;
+    end else begin
+      assign out[i] = 'X;
+    end
+  end
+endmodule
+"#;
+    assert_eq!(verilog, want);
+}
+#[test]
 fn test_index_unpacked_array_parameter() {
     let mut file = VastFile::new(VastFileType::SystemVerilog);
     let mut module = file.add_module("top");
