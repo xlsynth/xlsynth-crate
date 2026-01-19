@@ -71,6 +71,7 @@ mod ir_fn_to_block;
 mod ir_ged;
 mod ir_localized_eco;
 mod ir_query;
+mod ir_query_corpus;
 mod ir_round_trip;
 mod ir_strip_pos_data;
 mod ir_structural_similarity;
@@ -403,6 +404,16 @@ fn main() {
                         .long("signature-depth")
                         .value_name("N")
                         .help("Depth for structural signature hashing (default 2)")
+                        .required(false)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("make_symlink_dir")
+                        .long("make-symlink-dir")
+                        .value_name("DIR")
+                        .help(
+                            "If set, create DIR (must be empty if it exists) and populate it with symlinks to each selected sample",
+                        )
                         .required(false)
                         .action(ArgAction::Set),
                 )
@@ -985,6 +996,54 @@ fn main() {
                     Arg::new("ir_top")
                         .long("top")
                         .help("Top-level function name (overrides package top)"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("ir-query-corpus")
+                .about("Runs `ir-query` over every .ir file in a corpus directory (with fast prefiltering)")
+                .arg(
+                    Arg::new("corpus_dir")
+                        .help("Root corpus directory to scan recursively for .ir files")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("query")
+                        .help("The IR query expression")
+                        .required(true)
+                        .index(2),
+                )
+                .arg(
+                    Arg::new("ir_top")
+                        .long("top")
+                        .help("Top-level function name (overrides package top)"),
+                )
+                .add_bool_arg(
+                    "show-ret",
+                    "Prefix matches that are return values with 'ret' (true by default)",
+                )
+                // Note: in corpus mode, showing the file is always enabled to disambiguate matches.
+                .add_bool_arg(
+                    "prefilter",
+                    "Use a fast textual prefilter (based on operator names in the query) before parsing IR (true by default)",
+                )
+                .add_bool_arg(
+                    "ignore-parse-errors",
+                    "Skip files that fail PIR parse/validate instead of erroring out (true by default)",
+                )
+                .arg(
+                    Arg::new("max-files")
+                        .long("max-files")
+                        .value_name("N")
+                        .help("Stop after scanning N files (default: unlimited)")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("max-matches")
+                        .long("max-matches")
+                        .value_name("N")
+                        .help("Stop after emitting N matches (default: unlimited)")
+                        .action(ArgAction::Set),
                 ),
         )
         .subcommand(
@@ -2040,6 +2099,9 @@ fn main() {
         }
         Some(("ir-query", subm)) => {
             ir_query::handle_ir_query(subm, &config);
+        }
+        Some(("ir-query-corpus", subm)) => {
+            ir_query_corpus::handle_ir_query_corpus(subm, &config);
         }
         Some(("ir-round-trip", subm)) => {
             ir_round_trip::handle_ir_round_trip(subm);

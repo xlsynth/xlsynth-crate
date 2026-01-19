@@ -17,6 +17,13 @@ use self::parser::QueryParser;
 pub enum QueryExpr {
     Placeholder(String),
     Number(u64),
+    /// Variadic wildcard for matching n-ary operand lists in operator matchers.
+    ///
+    /// Used in query syntax as `...` inside an operator argument list, e.g.:
+    /// - `nor(..., a, ...)` matches any-arity `nor` whose operands contain `a`.
+    /// - `nor(a, ...)` matches any-arity `nor` whose first operand is `a`.
+    /// - `nor(..., a)` matches any-arity `nor` whose last operand is `a`.
+    Ellipsis,
     Matcher(MatcherExpr),
 }
 
@@ -33,9 +40,16 @@ pub enum MatcherKind {
     AnyCmp,
     AnyMul,
     Users,
+    /// Numeric helper: yields the bit width of a bound placeholder node.
+    ///
+    /// This is not a node matcher; it is only valid in numeric named-arg
+    /// contexts like `start=$width(x)` or `width=$width(x)`.
+    Width,
     Msb,
     OpName(String),
-    Literal { predicate: Option<LiteralPredicate> },
+    Literal {
+        predicate: Option<LiteralPredicate>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,7 +117,91 @@ pub fn parse_query(input: &str) -> Result<QueryExpr, String> {
     if !parser.is_done() {
         return Err(parser.error_at("unexpected trailing input"));
     }
+    validate_ellipsis_placement(&expr)?;
+    validate_width_matcher_placement(&expr)?;
     Ok(expr)
+}
+
+fn validate_ellipsis_placement(expr: &QueryExpr) -> Result<(), String> {
+    fn walk(expr: &QueryExpr, ellipsis_allowed_here: bool) -> Result<(), String> {
+        match expr {
+            QueryExpr::Ellipsis => {
+                if ellipsis_allowed_here {
+                    Ok(())
+                } else {
+                    Err("ellipsis '...' is only valid inside an operator argument list".to_string())
+                }
+            }
+            QueryExpr::Placeholder(_) | QueryExpr::Number(_) => Ok(()),
+            QueryExpr::Matcher(m) => {
+                // Only explicit operator matchers (e.g. `nor(...)`) support ellipsis.
+                let allow_in_args = matches!(m.kind, MatcherKind::OpName(_));
+                for a in &m.args {
+                    walk(a, allow_in_args)?;
+                }
+
+                // Named args usually never support ellipsis; they are not operand lists.
+                //
+                // Exception: select-like nodes expose `cases=[...]` which is explicitly an
+                // operand list, and ellipsis provides useful "any arity" matching.
+                for na in &m.named_args {
+                    match &na.value {
+                        NamedArgValue::Any | NamedArgValue::Bool(_) | NamedArgValue::Number(_) => {}
+                        NamedArgValue::Expr(e) => walk(e, /* ellipsis_allowed_here= */ false)?,
+                        NamedArgValue::ExprList(es) => {
+                            let allow_in_list = na.name.as_str() == "cases";
+                            for e in es {
+                                walk(e, /* ellipsis_allowed_here= */ allow_in_list)?;
+                            }
+                        }
+                    }
+                }
+
+                Ok(())
+            }
+        }
+    }
+
+    walk(expr, /* ellipsis_allowed_here= */ false)
+}
+
+fn validate_width_matcher_placement(expr: &QueryExpr) -> Result<(), String> {
+    fn walk(expr: &QueryExpr, width_allowed_here: bool) -> Result<(), String> {
+        match expr {
+            QueryExpr::Ellipsis | QueryExpr::Placeholder(_) | QueryExpr::Number(_) => Ok(()),
+            QueryExpr::Matcher(m) => {
+                if matches!(m.kind, MatcherKind::Width) && !width_allowed_here {
+                    return Err(
+                        "$width(...) is only valid as a numeric expression for start=/width="
+                            .to_string(),
+                    );
+                }
+
+                // Width is never allowed in positional operand lists; it doesn't match nodes.
+                for a in &m.args {
+                    walk(a, /* width_allowed_here= */ false)?;
+                }
+
+                // Allow width only in the numeric named args where we know how to interpret it.
+                for na in &m.named_args {
+                    match &na.value {
+                        NamedArgValue::Any | NamedArgValue::Bool(_) | NamedArgValue::Number(_) => {}
+                        NamedArgValue::Expr(e) => {
+                            let allow = na.name.as_str() == "start" || na.name.as_str() == "width";
+                            walk(e, /* width_allowed_here= */ allow)?;
+                        }
+                        NamedArgValue::ExprList(es) => {
+                            for e in es {
+                                walk(e, /* width_allowed_here= */ false)?;
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+    walk(expr, /* width_allowed_here= */ false)
 }
 
 /// Finds all node references in `f` that satisfy the query expression.
@@ -138,6 +236,7 @@ fn match_solutions(
     bindings: &Bindings,
 ) -> Vec<Bindings> {
     match expr {
+        QueryExpr::Ellipsis => vec![],
         QueryExpr::Placeholder(name) => {
             if name == "_" {
                 // Wildcard: matches any node without creating/consulting a binding.
@@ -199,14 +298,15 @@ fn match_solutions(
                     return vec![];
                 }
             }
-            let named_arg_bindings =
-                match_named_args_solutions(&matcher.named_args, &node.payload, f, users, bindings);
-            if named_arg_bindings.is_empty() {
-                return vec![];
-            }
             if let MatcherKind::Literal { predicate } = matcher.kind {
                 let mut out = Vec::new();
-                for b in named_arg_bindings {
+                for b in match_named_args_solutions(
+                    &matcher.named_args,
+                    &node.payload,
+                    f,
+                    users,
+                    bindings,
+                ) {
                     out.extend(match_literal_solutions(
                         predicate,
                         &matcher.args,
@@ -217,9 +317,20 @@ fn match_solutions(
                 return out;
             }
             let operands = ir_utils::operands(&node.payload);
+            // Important: match operands first (binding placeholders), then evaluate named
+            // args. This allows named args like `start=$width(t)` to refer to placeholders
+            // bound within the operand expressions.
             let mut out = Vec::new();
-            for b in named_arg_bindings {
-                out.extend(match_args_solutions(&matcher.args, &operands, f, users, &b));
+            let operand_bindings =
+                match_args_solutions(&matcher.args, &operands, f, users, bindings);
+            for b in operand_bindings {
+                out.extend(match_named_args_solutions(
+                    &matcher.named_args,
+                    &node.payload,
+                    f,
+                    users,
+                    &b,
+                ));
             }
             out
         }
@@ -274,6 +385,7 @@ fn match_literal_solutions(
                 vec![]
             }
         }
+        QueryExpr::Ellipsis => vec![],
         QueryExpr::Matcher(_) => vec![],
     }
 }
@@ -346,6 +458,9 @@ fn match_args_solutions(
     if args.is_empty() {
         return vec![bindings.clone()];
     }
+    if args.iter().any(|a| matches!(a, QueryExpr::Ellipsis)) {
+        return match_args_with_ellipsis_solutions(args, operands, f, users, bindings);
+    }
     if args.len() == 1 {
         let mut out = Vec::new();
         for operand in operands {
@@ -368,6 +483,70 @@ fn match_args_solutions(
         partials = next;
     }
     partials
+}
+
+fn match_args_with_ellipsis_solutions(
+    pattern: &[QueryExpr],
+    operands: &[ir::NodeRef],
+    f: &ir::Fn,
+    users: &HashMap<ir::NodeRef, HashSet<ir::NodeRef>>,
+    bindings: &Bindings,
+) -> Vec<Bindings> {
+    fn non_ellipsis_count(p: &[QueryExpr]) -> usize {
+        p.iter()
+            .filter(|e| !matches!(e, QueryExpr::Ellipsis))
+            .count()
+    }
+
+    fn go(
+        pattern: &[QueryExpr],
+        operands: &[ir::NodeRef],
+        f: &ir::Fn,
+        users: &HashMap<ir::NodeRef, HashSet<ir::NodeRef>>,
+        pi: usize,
+        oi: usize,
+        bindings: &Bindings,
+    ) -> Vec<Bindings> {
+        // Prune: must have enough operands left to match remaining non-ellipsis
+        // pattern.
+        let remaining_non_ellipsis = non_ellipsis_count(&pattern[pi..]);
+        let remaining_operands = operands.len().saturating_sub(oi);
+        if remaining_non_ellipsis > remaining_operands {
+            return vec![];
+        }
+
+        if pi == pattern.len() {
+            return if oi == operands.len() {
+                vec![bindings.clone()]
+            } else {
+                vec![]
+            };
+        }
+
+        match &pattern[pi] {
+            QueryExpr::Ellipsis => {
+                // Match any number of operands (including zero).
+                let mut out = Vec::new();
+                for k in oi..=operands.len() {
+                    out.extend(go(pattern, operands, f, users, pi + 1, k, bindings));
+                }
+                out
+            }
+            other => {
+                if oi >= operands.len() {
+                    return vec![];
+                }
+                let mut out = Vec::new();
+                let bs = match_solutions(other, f, users, operands[oi], bindings);
+                for b in bs {
+                    out.extend(go(pattern, operands, f, users, pi + 1, oi + 1, &b));
+                }
+                out
+            }
+        }
+    }
+
+    go(pattern, operands, f, users, 0, 0, bindings)
 }
 
 /// Checks whether the node payload satisfies a matcher kind.
@@ -397,6 +576,7 @@ fn matches_kind(kind: &MatcherKind, payload: &ir::NodePayload) -> bool {
             _ => false,
         },
         MatcherKind::Users => false,
+        MatcherKind::Width => false,
         MatcherKind::Msb => matches!(payload, ir::NodePayload::BitSlice { .. }),
         MatcherKind::OpName(opname) => payload.get_operator() == opname,
         MatcherKind::Literal { .. } => matches!(payload, ir::NodePayload::Literal(_)),
@@ -435,18 +615,43 @@ fn match_named_args_solutions(
         for b in &partials {
             let mut matched = Vec::new();
             match payload {
-                ir::NodePayload::BitSlice { width, .. } => {
-                    if arg.name.as_str() != "width" {
-                        continue;
-                    }
-                    match &arg.value {
-                        NamedArgValue::Number(v) => {
-                            if *v == *width {
-                                matched.push(b.clone());
+                ir::NodePayload::BitSlice { start, width, .. } => {
+                    let actual: usize = match arg.name.as_str() {
+                        "width" => *width,
+                        "start" => *start,
+                        _ => continue,
+                    };
+
+                    let expected: Option<usize> = match &arg.value {
+                        NamedArgValue::Any => None,
+                        NamedArgValue::Number(v) => Some(*v),
+                        NamedArgValue::Expr(expr) => match expr {
+                            QueryExpr::Matcher(m) if matches!(m.kind, MatcherKind::Width) => {
+                                if m.args.len() != 1 {
+                                    None
+                                } else {
+                                    match &m.args[0] {
+                                        QueryExpr::Placeholder(name) => match b.get(name) {
+                                            Some(Binding::Node(nr)) => {
+                                                Some(f.get_node_ty(*nr).bit_count())
+                                            }
+                                            _ => None,
+                                        },
+                                        _ => None,
+                                    }
+                                }
                             }
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+
+                    if let Some(v) = expected {
+                        if v == actual {
+                            matched.push(b.clone());
                         }
-                        NamedArgValue::Any => matched.push(b.clone()),
-                        _ => {}
+                    } else if matches!(arg.value, NamedArgValue::Any) {
+                        matched.push(b.clone());
                     }
                 }
                 ir::NodePayload::OneHot { lsb_prio, .. } => {
@@ -513,10 +718,14 @@ fn match_select_named_arg(
                 match_args_solutions(&[expr.clone()], cases, f, users, bindings)
             }
             NamedArgValue::ExprList(exprs) => {
-                if exprs.len() != cases.len() {
-                    return vec![];
+                if exprs.iter().any(|e| matches!(e, QueryExpr::Ellipsis)) {
+                    match_args_solutions(exprs, cases, f, users, bindings)
+                } else {
+                    if exprs.len() != cases.len() {
+                        return vec![];
+                    }
+                    match_args_solutions(exprs, cases, f, users, bindings)
                 }
-                match_args_solutions(exprs, cases, f, users, bindings)
             }
             _ => vec![],
         },
@@ -560,6 +769,27 @@ mod tests {
         };
         assert_eq!(matcher.kind, MatcherKind::Users);
         assert_eq!(matcher.args.len(), 1);
+    }
+
+    #[test]
+    fn parse_rejects_ellipsis_outside_operator_args() {
+        // `...` cannot stand alone.
+        assert!(parse_query("...").is_err());
+
+        // `...` in non-operator matchers should be rejected (would otherwise
+        // silently match nothing).
+        assert!(parse_query("$users(...)").is_err());
+        assert!(parse_query("literal(...)").is_err());
+
+        // `...` in non-list named args should be rejected.
+        assert!(parse_query("sel(selector=...)").is_err());
+    }
+
+    #[test]
+    fn parse_allows_ellipsis_in_select_cases_list() {
+        // `cases=[...]` is explicitly a variable-arity operand list.
+        parse_query("sel(selector=s, cases=[...])").unwrap();
+        parse_query("priority_sel(selector=s, cases=[..., a, ...], default=d)").unwrap();
     }
 
     /// Verifies the parser accepts concrete operator matchers like
@@ -920,6 +1150,68 @@ fn main(x: bits[8] id=1) -> bits[3] {
     }
 
     #[test]
+    fn find_matches_sel_with_cases_ellipsis_named_arg() {
+        let pkg_text = r#"package test
+
+fn main(s: bits[1] id=1, a: bits[8] id=2, b: bits[8] id=3) -> bits[8] {
+  ret out: bits[8] = sel(s, cases=[a, b], id=4)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+
+        // Should match regardless of the number of cases.
+        let query = parse_query("sel(selector=s, cases=[...])").unwrap();
+        let matches = find_matching_nodes(f, &query);
+        assert_eq!(matches.len(), 1);
+        let node_id = ir::node_textual_id(f, matches[0]);
+        assert_eq!(node_id, "out");
+    }
+
+    #[test]
+    fn find_matches_bit_slice_with_start_and_width_named_args() {
+        let pkg_text = r#"package test
+
+fn main(x: bits[8] id=1) -> bits[1] {
+  slice0: bits[1] = bit_slice(x, start=0, width=1, id=2)
+  ret slice3: bits[1] = bit_slice(x, start=3, width=1, id=3)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+
+        let query = parse_query("bit_slice(x, start=3, width=1)").unwrap();
+        let matches = find_matching_nodes(f, &query);
+        assert_eq!(matches.len(), 1);
+        let node_id = ir::node_textual_id(f, matches[0]);
+        assert_eq!(node_id, "slice3");
+    }
+
+    #[test]
+    fn find_matches_bit_slice_with_start_width_matcher() {
+        let pkg_text = r#"package test
+
+fn main(t: bits[8] id=1) -> bits[1] {
+  z: bits[1] = literal(value=0, id=2)
+  widened: bits[9] = concat(z, t, id=3)
+  ret slice: bits[1] = bit_slice(widened, start=8, width=1, id=4)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+
+        // Match the carry bit by requiring start == $width(t), i.e. 8 for bits[8].
+        let query = parse_query("bit_slice(concat(_, t), start=$width(t), width=1)").unwrap();
+        let matches = find_matching_nodes(f, &query);
+        assert_eq!(matches.len(), 1);
+        let node_id = ir::node_textual_id(f, matches[0]);
+        assert_eq!(node_id, "slice");
+    }
+
+    #[test]
     fn find_matches_users_of_encode_one_hot() {
         let pkg_text = r#"package test
 
@@ -975,5 +1267,51 @@ fn main(x: bits[4] id=1) -> bits[1] {
             "unexpected error: {}",
             err
         );
+    }
+
+    #[test]
+    fn find_matches_variadic_ellipsis_in_nary_ops() {
+        let pkg_text = r#"package test
+
+top fn f(a: bits[1] id=1, b: bits[1] id=2, c: bits[1] id=3) -> bits[1] {
+  nor.4: bits[1] = nor(b, a, c, id=4)
+  and.5: bits[1] = and(a, nor.4, id=5)
+  nor.6: bits[1] = nor(a, b, c, id=6)
+  and.7: bits[1] = and(a, nor.6, id=7)
+  nor.8: bits[1] = nor(b, c, a, id=8)
+  ret and.9: bits[1] = and(a, nor.8, id=9)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+
+        // Contains `a` anywhere in the NOR operands.
+        let q_contains = parse_query("and(a, nor(..., a, ...))").unwrap();
+        let matches = find_matching_nodes(f, &q_contains);
+        let mut ids: Vec<String> = matches
+            .into_iter()
+            .map(|node_ref| ir::node_textual_id(f, node_ref))
+            .collect();
+        ids.sort();
+        assert_eq!(ids, vec!["and.5", "and.7", "and.9"]);
+
+        // `nor(a, ...)` means `a` is the first NOR operand (and the same `a` as
+        // the other AND operand).
+        let q_first = parse_query("and(a, nor(a, ...))").unwrap();
+        let ids: Vec<String> = find_matching_nodes(f, &q_first)
+            .into_iter()
+            .map(|node_ref| ir::node_textual_id(f, node_ref))
+            .collect();
+        assert_eq!(ids, vec!["and.7"]);
+
+        // `nor(..., a)` means `a` is the last NOR operand (and the same `a` as
+        // the other AND operand).
+        let q_last = parse_query("and(a, nor(..., a))").unwrap();
+        let ids: Vec<String> = find_matching_nodes(f, &q_last)
+            .into_iter()
+            .map(|node_ref| ir::node_textual_id(f, node_ref))
+            .collect();
+        assert_eq!(ids, vec!["and.9"]);
     }
 }

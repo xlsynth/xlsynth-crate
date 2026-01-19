@@ -460,6 +460,10 @@ Query expression basics:
 - `$anymul(...)` matches any multiply op (e.g., `umul`, `smul`, `umulp`, `smulp`).
 - `$users(pattern)` matches any node that consumes a node matching `pattern`.
 - Concrete operator matchers like `add(...)`, `sub(...)`, `and(...)`, etc. match nodes with that exact IR operator name.
+- `...` is a variadic wildcard usable inside operator argument lists for n-ary ops:
+  - `nor(..., a, ...)` means `a` appears in *some* operand position.
+  - `nor(a, ...)` means `a` is the *first* operand.
+  - `nor(..., a)` means `a` is the *last* operand.
 - Placeholders like `x` and `y` match any node (repeated placeholders must bind the same node).
 - The special placeholder `_` matches any node but does not create a binding (wildcard).
 - User-count constraints can be added as `[Nu]` (e.g., `[1u]` means exactly one user in the function).
@@ -505,6 +509,26 @@ Example: find all consumers of `encode(one_hot(x))`:
 
 ```shell
 xlsynth-driver ir-query my_pkg.ir '$users(encode(one_hot(x)))'
+```
+
+### `ir-query-corpus`
+
+Runs `ir-query` over every `.ir` file under a corpus directory (recursive) and prints matches as:
+`<path>: <match>`.
+
+- Positional arguments: `<corpus_dir> <query>`
+- Optional:
+  - `--top <NAME>` – function name to treat as top (overrides the package top).
+  - `--show-ret=false` – disable prefixing matches that are return values with `ret` (defaults to `true`).
+  - `--prefilter=true|false` – enable a fast textual prefilter based on explicit operator names in the query (defaults to `true`).
+  - `--ignore-parse-errors=true|false` – skip files that fail PIR parse/validate instead of exiting (defaults to `true`).
+  - `--max-files <N>` – stop after scanning N files (default: unlimited).
+  - `--max-matches <N>` – stop after emitting N matches (default: unlimited).
+
+Example:
+
+```shell
+xlsynth-driver ir-query-corpus /tmpfs/bf16_add_k3_cones 'and(a, nor(a, _))' --max-matches 20
 ```
 
 ### `ir-structural-similarity`
@@ -734,6 +758,7 @@ Walks a corpus directory recursively, finds all demonstration `.ir` files, and s
   - `--signature-depth <N>`: depth for structural signature hashing (default `2`)
   - `--log-skipped=<BOOL>`: log skipped samples (read/parse/lower failures) via the logger (default `false`)
   - `--explain-new-hashes=<BOOL>`: print the PIR node signatures that introduced new hashes for each selected sample (default `false`)
+  - `--make-symlink-dir <DIR>`: create `DIR` (must be empty if it exists) and populate it with symlinks to each selected sample
 - For each `.ir` file, we compute:
   - A set of **depth-N forward structural hashes** for all nodes in the package **top** function (computed from PIR parsing).
   - `g8r-nodes` and `g8r-levels` from `ir2gates` lowering with **fraiging disabled**.

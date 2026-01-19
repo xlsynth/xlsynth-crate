@@ -8,6 +8,11 @@ use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_query;
 
+fn extract_error_byte_offset(msg: &str) -> Option<usize> {
+    let (_prefix, suffix) = msg.rsplit_once(" at byte ")?;
+    suffix.parse::<usize>().ok()
+}
+
 pub fn handle_ir_query(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
     let input_file = matches
         .get_one::<String>("ir_input_file")
@@ -21,7 +26,15 @@ pub fn handle_ir_query(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
     let query = match ir_query::parse_query(query_text) {
         Ok(query) => query,
         Err(e) => {
-            let msg = format!("Failed to parse query: {}", e);
+            let msg = if let Some(pos) = extract_error_byte_offset(&e) {
+                let clamped = std::cmp::min(pos, query_text.len());
+                format!(
+                    "Failed to parse query: {e}\n  {query_text}\n  {}^",
+                    " ".repeat(clamped)
+                )
+            } else {
+                format!("Failed to parse query: {}", e)
+            };
             report_cli_error_and_exit(&msg, Some("ir-query"), vec![]);
         }
     };

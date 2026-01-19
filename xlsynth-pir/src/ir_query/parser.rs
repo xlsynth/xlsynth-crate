@@ -19,6 +19,17 @@ impl<'a> QueryParser<'a> {
 
     pub fn parse_expr(&mut self) -> Result<QueryExpr, String> {
         self.skip_ws();
+
+        // Variadic wildcard used inside operator arg lists, e.g. `nor(..., a, ...)`.
+        if self
+            .bytes
+            .get(self.pos..)
+            .is_some_and(|s| s.starts_with(b"..."))
+        {
+            self.pos += 3;
+            return Ok(QueryExpr::Ellipsis);
+        }
+
         match self.peek() {
             Some(b'$') => {
                 self.bump();
@@ -27,6 +38,7 @@ impl<'a> QueryParser<'a> {
                     "anycmp" => MatcherKind::AnyCmp,
                     "anymul" => MatcherKind::AnyMul,
                     "users" => MatcherKind::Users,
+                    "width" => MatcherKind::Width,
                     _ => return Err(self.error(&format!("unknown matcher ${}", ident))),
                 };
                 let user_count = if matches!(kind, MatcherKind::AnyCmp | MatcherKind::AnyMul) {
@@ -302,7 +314,7 @@ impl<'a> QueryParser<'a> {
                 }
                 match expr {
                     QueryExpr::Placeholder(ref name) if name == "_" => NamedArgValue::Any,
-                    QueryExpr::Number(number) if ident == "width" => {
+                    QueryExpr::Number(number) if ident == "width" || ident == "start" => {
                         let number = usize::try_from(number).map_err(|_| {
                             self.error("named argument number does not fit in usize")
                         })?;
@@ -378,6 +390,7 @@ fn expected_arity(kind: &MatcherKind) -> usize {
     match kind {
         MatcherKind::AnyCmp | MatcherKind::AnyMul => 2,
         MatcherKind::Users => 1,
+        MatcherKind::Width => 1,
         _ => 0,
     }
 }
