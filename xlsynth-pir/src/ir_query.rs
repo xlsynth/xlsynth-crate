@@ -40,9 +40,16 @@ pub enum MatcherKind {
     AnyCmp,
     AnyMul,
     Users,
+    /// Numeric helper: yields the bit width of a bound placeholder node.
+    ///
+    /// This is not a node matcher; it is only valid in numeric named-arg
+    /// contexts like `start=$width(x)` or `width=$width(x)`.
+    Width,
     Msb,
     OpName(String),
-    Literal { predicate: Option<LiteralPredicate> },
+    Literal {
+        predicate: Option<LiteralPredicate>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +118,7 @@ pub fn parse_query(input: &str) -> Result<QueryExpr, String> {
         return Err(parser.error_at("unexpected trailing input"));
     }
     validate_ellipsis_placement(&expr)?;
+    validate_width_matcher_placement(&expr)?;
     Ok(expr)
 }
 
@@ -155,6 +163,45 @@ fn validate_ellipsis_placement(expr: &QueryExpr) -> Result<(), String> {
     }
 
     walk(expr, /* ellipsis_allowed_here= */ false)
+}
+
+fn validate_width_matcher_placement(expr: &QueryExpr) -> Result<(), String> {
+    fn walk(expr: &QueryExpr, width_allowed_here: bool) -> Result<(), String> {
+        match expr {
+            QueryExpr::Ellipsis | QueryExpr::Placeholder(_) | QueryExpr::Number(_) => Ok(()),
+            QueryExpr::Matcher(m) => {
+                if matches!(m.kind, MatcherKind::Width) && !width_allowed_here {
+                    return Err(
+                        "$width(...) is only valid as a numeric expression for start=/width="
+                            .to_string(),
+                    );
+                }
+
+                // Width is never allowed in positional operand lists; it doesn't match nodes.
+                for a in &m.args {
+                    walk(a, /* width_allowed_here= */ false)?;
+                }
+
+                // Allow width only in the numeric named args where we know how to interpret it.
+                for na in &m.named_args {
+                    match &na.value {
+                        NamedArgValue::Any | NamedArgValue::Bool(_) | NamedArgValue::Number(_) => {}
+                        NamedArgValue::Expr(e) => {
+                            let allow = na.name.as_str() == "start" || na.name.as_str() == "width";
+                            walk(e, /* width_allowed_here= */ allow)?;
+                        }
+                        NamedArgValue::ExprList(es) => {
+                            for e in es {
+                                walk(e, /* width_allowed_here= */ false)?;
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+    walk(expr, /* width_allowed_here= */ false)
 }
 
 /// Finds all node references in `f` that satisfy the query expression.
@@ -251,14 +298,15 @@ fn match_solutions(
                     return vec![];
                 }
             }
-            let named_arg_bindings =
-                match_named_args_solutions(&matcher.named_args, &node.payload, f, users, bindings);
-            if named_arg_bindings.is_empty() {
-                return vec![];
-            }
             if let MatcherKind::Literal { predicate } = matcher.kind {
                 let mut out = Vec::new();
-                for b in named_arg_bindings {
+                for b in match_named_args_solutions(
+                    &matcher.named_args,
+                    &node.payload,
+                    f,
+                    users,
+                    bindings,
+                ) {
                     out.extend(match_literal_solutions(
                         predicate,
                         &matcher.args,
@@ -269,9 +317,20 @@ fn match_solutions(
                 return out;
             }
             let operands = ir_utils::operands(&node.payload);
+            // Important: match operands first (binding placeholders), then evaluate named
+            // args. This allows named args like `start=$width(t)` to refer to placeholders
+            // bound within the operand expressions.
             let mut out = Vec::new();
-            for b in named_arg_bindings {
-                out.extend(match_args_solutions(&matcher.args, &operands, f, users, &b));
+            let operand_bindings =
+                match_args_solutions(&matcher.args, &operands, f, users, bindings);
+            for b in operand_bindings {
+                out.extend(match_named_args_solutions(
+                    &matcher.named_args,
+                    &node.payload,
+                    f,
+                    users,
+                    &b,
+                ));
             }
             out
         }
@@ -517,6 +576,7 @@ fn matches_kind(kind: &MatcherKind, payload: &ir::NodePayload) -> bool {
             _ => false,
         },
         MatcherKind::Users => false,
+        MatcherKind::Width => false,
         MatcherKind::Msb => matches!(payload, ir::NodePayload::BitSlice { .. }),
         MatcherKind::OpName(opname) => payload.get_operator() == opname,
         MatcherKind::Literal { .. } => matches!(payload, ir::NodePayload::Literal(_)),
@@ -561,14 +621,37 @@ fn match_named_args_solutions(
                         "start" => *start,
                         _ => continue,
                     };
-                    match &arg.value {
-                        NamedArgValue::Number(v) => {
-                            if *v == actual {
-                                matched.push(b.clone());
+
+                    let expected: Option<usize> = match &arg.value {
+                        NamedArgValue::Any => None,
+                        NamedArgValue::Number(v) => Some(*v),
+                        NamedArgValue::Expr(expr) => match expr {
+                            QueryExpr::Matcher(m) if matches!(m.kind, MatcherKind::Width) => {
+                                if m.args.len() != 1 {
+                                    None
+                                } else {
+                                    match &m.args[0] {
+                                        QueryExpr::Placeholder(name) => match b.get(name) {
+                                            Some(Binding::Node(nr)) => {
+                                                Some(f.get_node_ty(*nr).bit_count())
+                                            }
+                                            _ => None,
+                                        },
+                                        _ => None,
+                                    }
+                                }
                             }
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+
+                    if let Some(v) = expected {
+                        if v == actual {
+                            matched.push(b.clone());
                         }
-                        NamedArgValue::Any => matched.push(b.clone()),
-                        _ => {}
+                    } else if matches!(arg.value, NamedArgValue::Any) {
+                        matched.push(b.clone());
                     }
                 }
                 ir::NodePayload::OneHot { lsb_prio, .. } => {
@@ -1104,6 +1187,28 @@ fn main(x: bits[8] id=1) -> bits[1] {
         assert_eq!(matches.len(), 1);
         let node_id = ir::node_textual_id(f, matches[0]);
         assert_eq!(node_id, "slice3");
+    }
+
+    #[test]
+    fn find_matches_bit_slice_with_start_width_matcher() {
+        let pkg_text = r#"package test
+
+fn main(t: bits[8] id=1) -> bits[1] {
+  z: bits[1] = literal(value=0, id=2)
+  widened: bits[9] = concat(z, t, id=3)
+  ret slice: bits[1] = bit_slice(widened, start=8, width=1, id=4)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+
+        // Match the carry bit by requiring start == $width(t), i.e. 8 for bits[8].
+        let query = parse_query("bit_slice(concat(_, t), start=$width(t), width=1)").unwrap();
+        let matches = find_matching_nodes(f, &query);
+        assert_eq!(matches.len(), 1);
+        let node_id = ir::node_textual_id(f, matches[0]);
+        assert_eq!(node_id, "slice");
     }
 
     #[test]
