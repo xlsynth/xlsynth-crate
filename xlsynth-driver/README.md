@@ -374,7 +374,8 @@ optimization, and gatification using either the toolchain or the runtime APIs.
 ### `ir2opt`: optimize IR
 
 Runs the XLS optimizer on an IR file and prints the optimized IR to **stdout**.
-Requires `--top <NAME>` to select the entry point.
+Uses `--top <NAME>` to select the entry point; when omitted, the package top in
+the IR is used.
 
 ### `ir2pipeline`: IR to pipelined Verilog
 

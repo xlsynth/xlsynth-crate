@@ -111,6 +111,16 @@ impl IrPackage {
         Ok(ir_package)
     }
 
+    pub fn top_name(&self) -> Result<Option<String>, XlsynthError> {
+        self.with_write(|guard| {
+            let top_ptr = unsafe { xlsynth_sys::xls_package_get_top(guard.mut_c_ptr()) };
+            if top_ptr.is_null() {
+                return Ok(None);
+            }
+            xls_function_get_name(top_ptr as *const CIrFunction).map(Some)
+        })
+    }
+
     pub fn verify(&self) -> Result<(), XlsynthError> {
         self.with_write(|guard| lib_support::xls_verify_package(guard.mut_c_ptr()))
     }

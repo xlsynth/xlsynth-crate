@@ -614,7 +614,7 @@ fn main() {
                     "Enable the experimental type-inference v2 algorithm",
                 ),
         )
-        // ir2opt subcommand requires a top symbol
+        // ir2opt subcommand optionally uses the IR's top symbol
         .subcommand(
             clap::Command::new("ir2opt")
                 .about("Converts IR to optimized IR")
@@ -624,13 +624,13 @@ fn main() {
                         .required(true)
                         .index(1),
                 )
-                // Top is given as a (non-positional) flag for symmetry but it is required.
+                // Top is given as a (non-positional) flag for symmetry.
                 .arg(
                     Arg::new("ir_top")
                         .long("top")
                         .value_name("TOP")
-                        .help("The top-level entry point")
-                        .required(true)
+                        .help("The top-level entry point (defaults to the IR package top)")
+                        .required(false)
                         .action(ArgAction::Set),
                 ),
         )
