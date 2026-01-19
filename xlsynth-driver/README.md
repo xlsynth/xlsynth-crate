@@ -291,6 +291,7 @@ DSLX warnings and errors appear on **stderr**.
 Optional optimization:
 
 - `--opt=true` – run the IR optimizer before emitting. When set, `--dslx_top` becomes required.
+- `--aug-opt=true|false` – use the augmented optimizer “opt sandwich” when `--opt=true` (default: `false`).
 
 Additional flags:
 
@@ -388,6 +389,7 @@ files is reported on **stderr**.
 Optional optimization:
 
 - `--opt=true` – optimize the IR before scheduling/codegen.
+- `--aug-opt=true|false` – use the augmented optimizer “opt sandwich” when `--opt=true` (default: `false`).
 
 ### `ir2combo`: IR to *combinational* SystemVerilog
 
@@ -399,6 +401,7 @@ All the usual code-gen flags (e.g., `--use_system_verilog`, `--add_invariant_ass
 Optional optimization:
 
 - `--opt=true` – optimize the IR before code generation.
+- `--aug-opt=true|false` – use the augmented optimizer “opt sandwich” when `--opt=true` (default: `false`).
 
 Example:
 

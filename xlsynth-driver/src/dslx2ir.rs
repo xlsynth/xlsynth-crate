@@ -2,6 +2,7 @@
 
 use clap::ArgMatches;
 use xlsynth::{DslxConvertOptions, IrPackage};
+use xlsynth_pir::{run_aug_opt_over_ir_text, AugOptOptions};
 
 use crate::{
     common::{parse_bool_flag_or, resolve_type_inference_v2},
@@ -19,6 +20,7 @@ fn dslx2ir(
     disable_warnings: Option<&[String]>,
     type_inference_v2: Option<bool>,
     opt: bool,
+    aug_opt: bool,
     convert_tests: bool,
 ) {
     log::info!("dslx2ir");
@@ -37,19 +39,39 @@ fn dslx2ir(
             type_inference_v2,
             convert_tests,
         );
+        if aug_opt && !opt {
+            eprintln!("error: dslx2ir: --aug-opt=true requires --opt=true");
+            std::process::exit(2);
+        }
         if opt {
             // Write the output of conversion to a temp file and then pass that.
             let temp_file = tempfile::NamedTempFile::new().unwrap();
             let temp_file_path = temp_file.path();
             std::fs::write(temp_file_path, output).unwrap();
             let ir_top = xlsynth::mangle_dslx_name(dslx_module_name, dslx_top.unwrap()).unwrap();
-            output = run_opt_main(temp_file_path, Some(&ir_top), tool_path);
+            if aug_opt {
+                output = run_aug_opt_over_ir_text(
+                    &std::fs::read_to_string(temp_file_path).unwrap(),
+                    Some(&ir_top),
+                    AugOptOptions {
+                        enable: true,
+                        rounds: 1,
+                    },
+                )
+                .unwrap();
+            } else {
+                output = run_opt_main(temp_file_path, Some(&ir_top), tool_path);
+            }
         }
         println!("{}", output);
     } else {
         if type_inference_v2 == Some(true) {
             eprintln!("error: --type_inference_v2 is only supported when using --toolchain (external tool path)");
             std::process::exit(1);
+        }
+        if aug_opt && !opt {
+            eprintln!("error: dslx2ir: --aug-opt=true requires --opt=true");
+            std::process::exit(2);
         }
         let dslx_contents = std::fs::read_to_string(input_file).expect(&format!(
             "file read should succeed for path {:?}",
@@ -82,9 +104,21 @@ fn dslx2ir(
 
         let result_text: String = if opt {
             let ir_top = xlsynth::mangle_dslx_name(dslx_module_name, dslx_top.unwrap()).unwrap();
-            let ir_package = IrPackage::parse_ir(&result.ir, Some(&ir_top)).unwrap();
-            let optimized_ir_package = xlsynth::optimize_ir(&ir_package, &ir_top).unwrap();
-            optimized_ir_package.to_string()
+            if aug_opt {
+                run_aug_opt_over_ir_text(
+                    &result.ir,
+                    Some(&ir_top),
+                    AugOptOptions {
+                        enable: true,
+                        rounds: 1,
+                    },
+                )
+                .unwrap()
+            } else {
+                let ir_package = IrPackage::parse_ir(&result.ir, Some(&ir_top)).unwrap();
+                let optimized_ir_package = xlsynth::optimize_ir(&ir_package, &ir_top).unwrap();
+                optimized_ir_package.to_string()
+            }
         } else {
             result.ir
         };
@@ -119,6 +153,7 @@ pub fn handle_dslx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
         .and_then(|c| c.dslx.as_ref()?.disable_warnings.as_deref());
 
     let opt = parse_bool_flag_or(matches, "opt", false);
+    let aug_opt = parse_bool_flag_or(matches, "aug_opt", false);
 
     let convert_tests = parse_bool_flag_or(
         matches,
@@ -149,6 +184,7 @@ pub fn handle_dslx2ir(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
         disable_warnings,
         type_inference_v2,
         opt,
+        aug_opt,
         convert_tests,
     );
 }

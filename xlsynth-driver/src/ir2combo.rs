@@ -10,6 +10,7 @@ use std::process;
 use crate::common::{extract_codegen_flags, CodegenFlags};
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::{run_codegen_combinational, run_opt_main};
+use xlsynth_pir::{run_aug_opt_over_ir_text, AugOptOptions};
 
 /// Entry point invoked from `main.rs` when the `ir2combo` subcommand is used.
 pub fn handle_ir2combo(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
@@ -28,6 +29,11 @@ pub fn handle_ir2combo(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
         .map(|s| s == "true")
         .unwrap_or(false);
 
+    let aug_opt = matches
+        .get_one::<String>("aug_opt")
+        .map(|s| s == "true")
+        .unwrap_or(false);
+
     let ir_top_opt = matches.get_one::<String>("ir_top");
 
     ir2combo(
@@ -35,6 +41,7 @@ pub fn handle_ir2combo(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
         delay_model,
         &codegen_flags,
         optimize,
+        aug_opt,
         ir_top_opt.map(|s| s.as_str()),
         &keep_temps,
         config,
@@ -46,11 +53,16 @@ fn ir2combo(
     delay_model: &str,
     codegen_flags: &CodegenFlags,
     optimize: bool,
+    aug_opt: bool,
     ir_top: Option<&str>,
     keep_temps: &Option<bool>,
     config: &Option<ToolchainConfig>,
 ) {
     log::info!("ir2combo");
+    if aug_opt && !optimize {
+        eprintln!("error: ir2combo: --aug-opt=true requires --opt=true");
+        process::exit(2);
+    }
 
     // We only support tool-path execution for now.
     let tool_path = match config.as_ref().and_then(|c| c.tool_path.as_deref()) {
@@ -67,7 +79,21 @@ fn ir2combo(
     // If requested, optimize first.
     let ir_for_codegen_path: std::path::PathBuf = if optimize {
         let top_name = ir_top.expect("--opt requires --top to be specified");
-        let opt_ir = run_opt_main(input_file, Some(top_name), tool_path);
+        let opt_ir = if aug_opt {
+            let input_text =
+                std::fs::read_to_string(input_file).expect("IR input file should be readable");
+            run_aug_opt_over_ir_text(
+                &input_text,
+                Some(top_name),
+                AugOptOptions {
+                    enable: true,
+                    rounds: 1,
+                },
+            )
+            .expect("aug_opt should succeed")
+        } else {
+            run_opt_main(input_file, Some(top_name), tool_path)
+        };
         let opt_ir_path = temp_dir.path().join("opt.ir");
         std::fs::write(&opt_ir_path, &opt_ir).unwrap();
         opt_ir_path
