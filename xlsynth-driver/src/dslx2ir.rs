@@ -56,6 +56,8 @@ fn dslx2ir(
                     AugOptOptions {
                         enable: true,
                         rounds: 1,
+                        run_xlsynth_opt_before: true,
+                        run_xlsynth_opt_after: true,
                     },
                 )
                 .unwrap();
@@ -111,6 +113,8 @@ fn dslx2ir(
                     AugOptOptions {
                         enable: true,
                         rounds: 1,
+                        run_xlsynth_opt_before: true,
+                        run_xlsynth_opt_after: true,
                     },
                 )
                 .unwrap()

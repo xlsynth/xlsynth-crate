@@ -18,6 +18,11 @@ use xlsynth::IrValue;
 pub struct AugOptOptions {
     pub enable: bool,
     pub rounds: usize,
+    /// When true, run an initial libxls `optimize_ir` pass before the
+    /// co-recursive rounds.
+    pub run_xlsynth_opt_before: bool,
+    /// When true, run libxls `optimize_ir` after the PIR rewrite in each round.
+    pub run_xlsynth_opt_after: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +42,8 @@ impl Default for AugOptOptions {
         Self {
             enable: false,
             rounds: 1,
+            run_xlsynth_opt_before: true,
+            run_xlsynth_opt_after: true,
         }
     }
 }
@@ -65,19 +72,56 @@ pub fn run_aug_opt_over_ir_text_with_stats(
     // Fail fast with a clear error before libxls parsing.
     verify_no_extension_ops_in_ir_text(ir_text)?;
 
-    // Start by letting libxls do its normal canonicalization.
-    let mut cur_pkg = xlsynth::IrPackage::parse_ir(ir_text, None)
-        .map_err(|e| format!("aug_opt: xlsynth parse_ir failed: {e}"))?;
     let top_name = top
         .ok_or_else(|| "aug_opt: top is required".to_string())?
         .to_string();
+
+    // Fast path: run PIR basis rewrites without libxls at all. This is useful
+    // for debugging whether a PIR pattern matcher is firing.
+    if !options.run_xlsynth_opt_before && !options.run_xlsynth_opt_after {
+        let mut pir_parser = ir_parser::Parser::new(ir_text);
+        let mut pir_pkg = pir_parser
+            .parse_and_validate_package()
+            .map_err(|e| format!("aug_opt: PIR parse/validate failed: {e}"))?;
+
+        let top_fn = pir_pkg
+            .get_fn(&top_name)
+            .ok_or_else(|| format!("aug_opt: PIR package missing top fn '{top_name}'"))?
+            .clone();
+        let (rewritten_top, rewrites) = apply_basis_rewrites_to_fn(&top_fn);
+
+        // Swap the rewritten top back into the PIR package.
+        for member in pir_pkg.members.iter_mut() {
+            match member {
+                ir::PackageMember::Function(f) if f.name == top_name => {
+                    *f = rewritten_top.clone();
+                }
+                ir::PackageMember::Block { func, .. } if func.name == top_name => {
+                    *func = rewritten_top.clone();
+                }
+                _ => {}
+            }
+        }
+        verify_no_extension_ops_in_package(&pir_pkg)?;
+
+        return Ok(AugOptRunResult {
+            output_text: pir_pkg.to_string(),
+            total_rewrites: rewrites,
+        });
+    }
+
+    // Start by letting libxls do its normal canonicalization.
+    let mut cur_pkg = xlsynth::IrPackage::parse_ir(ir_text, None)
+        .map_err(|e| format!("aug_opt: xlsynth parse_ir failed: {e}"))?;
     cur_pkg
         .set_top_by_name(&top_name)
         .map_err(|e| format!("aug_opt: set_top_by_name('{top_name}') failed: {e}"))?;
 
-    // One initial opt pass before the co-recursive rounds.
-    cur_pkg = xlsynth::optimize_ir(&cur_pkg, &top_name)
-        .map_err(|e| format!("aug_opt: optimize_ir initial failed: {e}"))?;
+    if options.run_xlsynth_opt_before {
+        // One initial opt pass before the co-recursive rounds.
+        cur_pkg = xlsynth::optimize_ir(&cur_pkg, &top_name)
+            .map_err(|e| format!("aug_opt: optimize_ir initial failed: {e}"))?;
+    }
 
     let mut total_rewrites = 0usize;
     for _round in 0..options.rounds {
@@ -121,8 +165,57 @@ pub fn run_aug_opt_over_ir_text_with_stats(
         next_pkg
             .set_top_by_name(&top_name)
             .map_err(|e| format!("aug_opt: set_top_by_name('{top_name}') failed: {e}"))?;
-        cur_pkg = xlsynth::optimize_ir(&next_pkg, &top_name)
-            .map_err(|e| format!("aug_opt: optimize_ir post-rewrite failed: {e}"))?;
+        if options.run_xlsynth_opt_after {
+            cur_pkg = xlsynth::optimize_ir(&next_pkg, &top_name)
+                .map_err(|e| format!("aug_opt: optimize_ir post-rewrite failed: {e}"))?;
+        } else {
+            cur_pkg = next_pkg;
+        }
+    }
+
+    // Final PIR rewrite pass: after libxls has canonicalized, apply basis-only
+    // rewrites one more time. This lets us match patterns that are only exposed
+    // after optimization (e.g. zero-tests over a mux between `x` and `neg(x)`).
+    //
+    // We intentionally do not run another libxls pass after this; the goal is
+    // to preserve the rewritten shape for downstream tools like g8r.
+    if options.run_xlsynth_opt_after {
+        let cur_text = cur_pkg.to_string();
+        let mut pir_parser = ir_parser::Parser::new(&cur_text);
+        let mut pir_pkg = pir_parser
+            .parse_and_validate_package()
+            .map_err(|e| format!("aug_opt: PIR parse/validate failed (final): {e}"))?;
+
+        let top_fn = pir_pkg
+            .get_fn(&top_name)
+            .ok_or_else(|| format!("aug_opt: PIR package missing top fn '{top_name}' (final)"))?
+            .clone();
+
+        let (rewritten_top, rewrites_in_final) = apply_basis_rewrites_to_fn(&top_fn);
+        if rewrites_in_final > 0 {
+            total_rewrites = total_rewrites.saturating_add(rewrites_in_final);
+
+            for member in pir_pkg.members.iter_mut() {
+                match member {
+                    ir::PackageMember::Function(f) if f.name == top_name => {
+                        *f = rewritten_top.clone();
+                    }
+                    ir::PackageMember::Block { func, .. } if func.name == top_name => {
+                        *func = rewritten_top.clone();
+                    }
+                    _ => {}
+                }
+            }
+            verify_no_extension_ops_in_package(&pir_pkg)?;
+
+            let lowered_text = pir_pkg.to_string();
+            let mut next_pkg = xlsynth::IrPackage::parse_ir(&lowered_text, None)
+                .map_err(|e| format!("aug_opt: xlsynth parse_ir (final) failed: {e}"))?;
+            next_pkg
+                .set_top_by_name(&top_name)
+                .map_err(|e| format!("aug_opt: set_top_by_name('{top_name}') failed: {e}"))?;
+            cur_pkg = next_pkg;
+        }
     }
 
     Ok(AugOptRunResult {
@@ -164,6 +257,14 @@ fn verify_no_extension_ops_in_fn(f: &ir::Fn) -> Result<(), String> {
 fn apply_basis_rewrites_to_fn(f: &ir::Fn) -> (ir::Fn, usize) {
     let mut cloned = f.clone();
     let mut rewrites = 0usize;
+    rewrites = rewrites.saturating_add(rewrite_and_of_nors_to_flat_nor(&mut cloned));
+    rewrites = rewrites.saturating_add(rewrite_nor_of_contiguous_bit_slices_to_not_or_reduce(
+        &mut cloned,
+    ));
+    rewrites = rewrites.saturating_add(rewrite_or_reduce_of_select_between_x_and_neg_to_or_reduce(
+        &mut cloned,
+    ));
+    rewrites = rewrites.saturating_add(rewrite_or_reduce_of_neg_to_or_reduce(&mut cloned));
     rewrites = rewrites.saturating_add(rewrite_guarded_sel_ne_literal1_nor(&mut cloned));
     rewrites = rewrites.saturating_add(rewrite_lsb_of_shll_via_shift_is_zero(&mut cloned));
     // Ensure textual IR is defs-before-uses by reordering body nodes into a
@@ -172,6 +273,13 @@ fn apply_basis_rewrites_to_fn(f: &ir::Fn) -> (ir::Fn, usize) {
     ir_utils::compact_and_toposort_in_place(&mut cloned)
         .expect("aug_opt: compact_and_toposort_in_place failed");
     (cloned, rewrites)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ContiguousBitSliceSpan {
+    arg: NodeRef,
+    start_min: usize,
+    width: usize,
 }
 
 fn next_text_id(f: &ir::Fn) -> usize {
@@ -211,6 +319,324 @@ fn is_ubits_literal_1_of_width(f: &ir::Fn, nr: NodeRef, w: usize) -> bool {
         return false;
     };
     v.to_u64().ok() == Some(1)
+}
+
+/// Rewrite:
+///
+/// `and(nor(a, b, ...), nor(c, d, ...), ...)`
+///   →
+/// `nor(a, b, ..., c, d, ...)`
+///
+/// This is a DeMorgan canonicalization for boolean cones that helps enable
+/// subsequent rewrites (e.g. recognizing `nor` of contiguous bit slices).
+fn rewrite_and_of_nors_to_flat_nor(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+
+    for and_index in 0..f.nodes.len() {
+        let NodePayload::Nary(NaryOp::And, and_operands) = f.nodes[and_index].payload.clone()
+        else {
+            continue;
+        };
+        if f.nodes[and_index].ty != Type::Bits(1) {
+            continue;
+        }
+        if and_operands.is_empty() {
+            continue;
+        }
+
+        let mut flat_nor_operands: Vec<NodeRef> = Vec::new();
+        let mut ok = true;
+        for and_operand in and_operands {
+            if *f.get_node_ty(and_operand) != Type::Bits(1) {
+                ok = false;
+                break;
+            }
+            let NodePayload::Nary(NaryOp::Nor, nor_operands) =
+                f.get_node(and_operand).payload.clone()
+            else {
+                ok = false;
+                break;
+            };
+            if nor_operands.is_empty() {
+                ok = false;
+                break;
+            }
+            flat_nor_operands.extend(nor_operands);
+        }
+        if !ok || flat_nor_operands.is_empty() {
+            continue;
+        }
+
+        // Rewrite the original and node in-place to preserve indices.
+        f.nodes[and_index].payload = NodePayload::Nary(NaryOp::Nor, flat_nor_operands);
+        f.nodes[and_index].ty = Type::Bits(1);
+        rewrites += 1;
+    }
+
+    rewrites
+}
+
+fn match_contiguous_1bit_bit_slices(
+    f: &ir::Fn,
+    operands: &[NodeRef],
+) -> Option<ContiguousBitSliceSpan> {
+    if operands.is_empty() {
+        return None;
+    }
+
+    let (arg0, start0) = match &f.get_node(operands[0]).payload {
+        NodePayload::BitSlice {
+            arg,
+            start,
+            width: 1,
+        } => (*arg, *start),
+        _ => return None,
+    };
+
+    let mut starts: Vec<usize> = Vec::with_capacity(operands.len());
+    starts.push(start0);
+    for &operand in operands.iter().skip(1) {
+        let NodePayload::BitSlice { arg, start, width } = &f.get_node(operand).payload else {
+            return None;
+        };
+        if *width != 1 || *arg != arg0 {
+            return None;
+        }
+        starts.push(*start);
+    }
+
+    starts.sort_unstable();
+    let start_min = *starts.first().expect("non-empty");
+    let start_max = *starts.last().expect("non-empty");
+    let width = operands.len();
+    if width == 0 {
+        return None;
+    }
+    if start_max.saturating_sub(start_min).saturating_add(1) != width {
+        return None;
+    }
+    for (i, s) in starts.iter().enumerate() {
+        if *s != start_min.saturating_add(i) {
+            return None;
+        }
+    }
+
+    Some(ContiguousBitSliceSpan {
+        arg: arg0,
+        start_min,
+        width,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SelectBetweenXAndNeg {
+    x: NodeRef,
+    selector: NodeRef,
+}
+
+fn match_select_between_x_and_neg(f: &ir::Fn, candidate: NodeRef) -> Option<SelectBetweenXAndNeg> {
+    if f.get_node_ty(candidate).bit_count() == 0 {
+        return None;
+    }
+    match &f.get_node(candidate).payload {
+        NodePayload::Sel {
+            selector,
+            cases,
+            default,
+        } => {
+            if default.is_some() || cases.len() != 2 {
+                return None;
+            }
+            if *f.get_node_ty(*selector) != Type::Bits(1) {
+                return None;
+            }
+            let a = cases[0];
+            let b = cases[1];
+            if *f.get_node_ty(a) != *f.get_node_ty(candidate)
+                || *f.get_node_ty(b) != *f.get_node_ty(candidate)
+            {
+                return None;
+            }
+            // Match either (x, neg(x)) or (neg(x), x).
+            if let NodePayload::Unop(Unop::Neg, inner) = f.get_node(a).payload {
+                if inner == b {
+                    return Some(SelectBetweenXAndNeg {
+                        x: b,
+                        selector: *selector,
+                    });
+                }
+            }
+            if let NodePayload::Unop(Unop::Neg, inner) = f.get_node(b).payload {
+                if inner == a {
+                    return Some(SelectBetweenXAndNeg {
+                        x: a,
+                        selector: *selector,
+                    });
+                }
+            }
+            None
+        }
+        NodePayload::PrioritySel {
+            selector,
+            cases,
+            default,
+        } => {
+            // Only handle the simple 1-case form: priority_sel(s, cases=[...], default=...)
+            // which behaves like a mux when `s: bits[1]`.
+            if cases.len() != 1 {
+                return None;
+            }
+            let Some(def) = *default else {
+                return None;
+            };
+            if *f.get_node_ty(*selector) != Type::Bits(1) {
+                return None;
+            }
+            let c0 = cases[0];
+            if *f.get_node_ty(c0) != *f.get_node_ty(candidate)
+                || *f.get_node_ty(def) != *f.get_node_ty(candidate)
+            {
+                return None;
+            }
+            // Match either cases=[neg(x)], default=x OR cases=[x], default=neg(x).
+            if let NodePayload::Unop(Unop::Neg, inner) = f.get_node(c0).payload {
+                if inner == def {
+                    return Some(SelectBetweenXAndNeg {
+                        x: def,
+                        selector: *selector,
+                    });
+                }
+            }
+            if let NodePayload::Unop(Unop::Neg, inner) = f.get_node(def).payload {
+                if inner == c0 {
+                    return Some(SelectBetweenXAndNeg {
+                        x: c0,
+                        selector: *selector,
+                    });
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Rewrite:
+///
+/// `nor(bit_slice(x, start=s, width=1), bit_slice(x, start=s+1, width=1), ...)`
+///   →
+/// `not(or_reduce(bit_slice(x, start=s, width=W)))`
+///
+/// Preconditions (kept intentionally narrow):
+/// - output is `bits[1]`
+/// - all operands are 1-bit slices from the same `arg`
+/// - the slice starts form a contiguous span
+fn rewrite_nor_of_contiguous_bit_slices_to_not_or_reduce(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+
+    for nor_index in 0..f.nodes.len() {
+        let NodePayload::Nary(NaryOp::Nor, operands) = f.nodes[nor_index].payload.clone() else {
+            continue;
+        };
+        if f.nodes[nor_index].ty != Type::Bits(1) {
+            continue;
+        }
+
+        let Some(span) = match_contiguous_1bit_bit_slices(f, &operands) else {
+            continue;
+        };
+        if span.width == 0 {
+            continue;
+        }
+
+        let wide_slice = push_node(
+            f,
+            Type::Bits(span.width),
+            NodePayload::BitSlice {
+                arg: span.arg,
+                start: span.start_min,
+                width: span.width,
+            },
+        );
+        let or_reduced = push_node(
+            f,
+            Type::Bits(1),
+            NodePayload::Unop(Unop::OrReduce, wide_slice),
+        );
+
+        // Rewrite the original nor node in-place to preserve indices.
+        f.nodes[nor_index].payload = NodePayload::Unop(Unop::Not, or_reduced);
+        f.nodes[nor_index].ty = Type::Bits(1);
+
+        rewrites += 1;
+    }
+
+    rewrites
+}
+
+/// Rewrite:
+///
+/// `or_reduce(neg(x))` → `or_reduce(x)`
+///
+/// Intuition: `or_reduce(x)` is a nonzero test (i.e. `x != 0`).
+/// Two's-complement negation preserves whether a value is zero: `neg(x) == 0`
+/// iff `x == 0`.
+fn rewrite_or_reduce_of_neg_to_or_reduce(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+
+    for node_index in 0..f.nodes.len() {
+        let NodePayload::Unop(Unop::OrReduce, arg) = f.nodes[node_index].payload.clone() else {
+            continue;
+        };
+        if f.nodes[node_index].ty != Type::Bits(1) {
+            continue;
+        }
+        let NodePayload::Unop(Unop::Neg, inner) = f.get_node(arg).payload.clone() else {
+            continue;
+        };
+        if f.get_node_ty(inner).bit_count() == 0 {
+            continue;
+        }
+
+        f.nodes[node_index].payload = NodePayload::Unop(Unop::OrReduce, inner);
+        f.nodes[node_index].ty = Type::Bits(1);
+        rewrites += 1;
+    }
+
+    rewrites
+}
+
+/// Rewrite:
+///
+/// `or_reduce(sel(s, cases=[x, neg(x)]))` → `or_reduce(x)`
+/// `or_reduce(priority_sel(s, cases=[neg(x)], default=x))` → `or_reduce(x)`
+///
+/// Intuition: `or_reduce(v)` is a nonzero test (`v != 0`). Negation preserves
+/// whether a value is zero, so selecting between `x` and `neg(x)` does not
+/// change the result.
+fn rewrite_or_reduce_of_select_between_x_and_neg_to_or_reduce(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+
+    for node_index in 0..f.nodes.len() {
+        let NodePayload::Unop(Unop::OrReduce, arg) = f.nodes[node_index].payload.clone() else {
+            continue;
+        };
+        if f.nodes[node_index].ty != Type::Bits(1) {
+            continue;
+        }
+
+        let Some(m) = match_select_between_x_and_neg(f, arg) else {
+            continue;
+        };
+        // No need to check selector polarity: `or_reduce(x) == or_reduce(neg(x))`.
+        let _ = m.selector;
+
+        f.nodes[node_index].payload = NodePayload::Unop(Unop::OrReduce, m.x);
+        f.nodes[node_index].ty = Type::Bits(1);
+        rewrites += 1;
+    }
+
+    rewrites
 }
 
 /// Rewrite:
@@ -380,6 +806,8 @@ top fn cone(leaf_22: bits[1] id=1, leaf_36: bits[8] id=2, leaf_37: bits[8] id=3)
             AugOptOptions {
                 enable: true,
                 rounds: 1,
+                run_xlsynth_opt_before: true,
+                run_xlsynth_opt_after: true,
             },
         )
         .expect("aug opt");
@@ -419,6 +847,8 @@ top fn f(x: bits[8] id=1, s: bits[4] id=2) -> bits[1] {
             AugOptOptions {
                 enable: true,
                 rounds: 1,
+                run_xlsynth_opt_before: true,
+                run_xlsynth_opt_after: true,
             },
         )
         .expect("aug opt");
@@ -428,6 +858,283 @@ top fn f(x: bits[8] id=1, s: bits[4] id=2) -> bits[1] {
             &out_text,
             "f",
             &[8, 4],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    /// Verifies that `aug_opt` recognizes the `and(of nor(of 1-bit slices))`
+    /// pattern and canonicalizes it into `not(or_reduce(bit_slice(...)))`,
+    /// enabling cheaper lowering in g8r.
+    #[test]
+    fn aug_opt_rewrites_and_of_nors_of_contiguous_slices_into_not_or_reduce() {
+        let ir_text = r#"package bool_cone2
+
+top fn cone(leaf_40: bits[27] id=1, leaf_52: bits[26] id=2, leaf_57: bits[1] id=3) -> bits[1] {
+
+  bit_slice.4: bits[25] = bit_slice(leaf_52, start=0, width=25, id=4)
+
+  bit_slice.5: bits[2] = bit_slice(leaf_40, start=1, width=2, id=5)
+
+  concat.6: bits[28] = concat(bit_slice.4, bit_slice.5, leaf_57, id=6)
+
+  bit_slice.7: bits[1] = bit_slice(leaf_52, start=25, width=1, id=7)
+
+  neg.8: bits[28] = neg(concat.6, id=8)
+
+  priority_sel.9: bits[28] = priority_sel(bit_slice.7, cases=[neg.8], default=concat.6, id=9)
+
+  bit_slice.10: bits[1] = bit_slice(priority_sel.9, start=3, width=1, id=10)
+
+  bit_slice.11: bits[1] = bit_slice(priority_sel.9, start=2, width=1, id=11)
+
+  bit_slice.12: bits[1] = bit_slice(priority_sel.9, start=1, width=1, id=12)
+
+  bit_slice.13: bits[1] = bit_slice(priority_sel.9, start=0, width=1, id=13)
+
+  nor.15: bits[1] = nor(bit_slice.10, bit_slice.11, id=15)
+
+  nor.14: bits[1] = nor(bit_slice.12, bit_slice.13, id=14)
+
+  ret and.16: bits[1] = and(nor.15, nor.14, id=16)
+
+}
+"#;
+
+        // Check the local PIR rewrite shape directly.
+        let mut p = ir_parser::Parser::new(ir_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let top_fn = pkg.get_fn("cone").expect("top fn");
+        let (rewritten, rewrites) = apply_basis_rewrites_to_fn(top_fn);
+        assert!(rewrites > 0, "expected at least one rewrite");
+
+        let mut found = false;
+        for node in &rewritten.nodes {
+            let NodePayload::Unop(Unop::Not, not_arg) = &node.payload else {
+                continue;
+            };
+            let NodePayload::Unop(Unop::OrReduce, red_arg) = &rewritten.get_node(*not_arg).payload
+            else {
+                continue;
+            };
+            let NodePayload::BitSlice { start, width, .. } = &rewritten.get_node(*red_arg).payload
+            else {
+                continue;
+            };
+            if *start == 0 && *width == 4 {
+                found = true;
+                break;
+            }
+        }
+        assert!(
+            found,
+            "expected not(or_reduce(bit_slice(start=0,width=4))); got:\n{rewritten}"
+        );
+
+        // And verify end-to-end equivalence through aug_opt's libxls sandwich.
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                run_xlsynth_opt_before: true,
+                run_xlsynth_opt_after: true,
+            },
+        )
+        .expect("aug opt");
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "cone",
+            &[27, 26, 1],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    /// Verifies the generic invariant `or_reduce(neg(x)) == or_reduce(x)`.
+    #[test]
+    fn aug_opt_rewrites_or_reduce_of_neg_to_or_reduce() {
+        let ir_text = r#"package or_reduce_neg
+
+top fn f(x: bits[8] id=1) -> bits[1] {
+  neg.2: bits[8] = neg(x, id=2)
+  ret or_reduce.3: bits[1] = or_reduce(neg.2, id=3)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("f"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                run_xlsynth_opt_before: true,
+                run_xlsynth_opt_after: true,
+            },
+        )
+        .expect("aug opt");
+
+        // Assert the output contains an or_reduce directly of x (no neg operand).
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("f").expect("top fn");
+        let mut saw_or_reduce_of_x = false;
+        for node in &f.nodes {
+            let NodePayload::Unop(Unop::OrReduce, arg) = &node.payload else {
+                continue;
+            };
+            if matches!(f.get_node(*arg).payload, NodePayload::GetParam(_)) {
+                saw_or_reduce_of_x = true;
+                break;
+            }
+        }
+        assert!(
+            saw_or_reduce_of_x,
+            "expected or_reduce(x) after rewrite; got:\n{}",
+            out_text
+        );
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "f",
+            &[8],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    /// Verifies the invariant `or_reduce(sel_between(x, neg(x))) ==
+    /// or_reduce(x)`.
+    #[test]
+    fn aug_opt_rewrites_or_reduce_of_select_between_x_and_neg_to_or_reduce() {
+        let ir_text = r#"package or_reduce_sel_neg
+
+top fn f(x: bits[8] id=1, s: bits[1] id=2) -> bits[1] {
+  neg.3: bits[8] = neg(x, id=3)
+  sel.4: bits[8] = sel(s, cases=[x, neg.3], id=4)
+  ret or_reduce.5: bits[1] = or_reduce(sel.4, id=5)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("f"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                run_xlsynth_opt_before: true,
+                run_xlsynth_opt_after: true,
+            },
+        )
+        .expect("aug opt");
+
+        // Assert the output contains an or_reduce directly of x (no sel operand).
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("f").expect("top fn");
+        let mut saw_or_reduce_of_x = false;
+        for node in &f.nodes {
+            let NodePayload::Unop(Unop::OrReduce, arg) = &node.payload else {
+                continue;
+            };
+            if matches!(f.get_node(*arg).payload, NodePayload::GetParam(_)) {
+                saw_or_reduce_of_x = true;
+                break;
+            }
+        }
+        assert!(
+            saw_or_reduce_of_x,
+            "expected or_reduce(x) after rewrite; got:\n{}",
+            out_text
+        );
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "f",
+            &[8, 1],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    /// Verifies the full cone regression: a zero-test on the low bits of a
+    /// conditional-negation (`priority_sel` selecting between `x` and `neg(x)`)
+    /// simplifies to a zero-test on `x` alone.
+    ///
+    /// This is a key canonicalization for g8r: after aug-opt, the AIGER/ABC
+    /// `and/lev` drops dramatically for this cone.
+    #[test]
+    fn aug_opt_regression_k3_cone_conditional_negation_zero_test() {
+        let ir_text = r#"package bool_cone
+
+top fn cone(leaf_40: bits[27] id=1, leaf_52: bits[26] id=2, leaf_57: bits[1] id=3) -> bits[1] {
+  bit_slice.4: bits[25] = bit_slice(leaf_52, start=0, width=25, id=4)
+  bit_slice.5: bits[2] = bit_slice(leaf_40, start=1, width=2, id=5)
+  concat.6: bits[28] = concat(bit_slice.4, bit_slice.5, leaf_57, id=6)
+  bit_slice.7: bits[1] = bit_slice(leaf_52, start=25, width=1, id=7)
+  neg.8: bits[28] = neg(concat.6, id=8)
+  priority_sel.9: bits[28] = priority_sel(bit_slice.7, cases=[neg.8], default=concat.6, id=9)
+  bit_slice.10: bits[1] = bit_slice(priority_sel.9, start=3, width=1, id=10)
+  bit_slice.11: bits[1] = bit_slice(priority_sel.9, start=2, width=1, id=11)
+  bit_slice.12: bits[1] = bit_slice(priority_sel.9, start=1, width=1, id=12)
+  bit_slice.13: bits[1] = bit_slice(priority_sel.9, start=0, width=1, id=13)
+  nor.15: bits[1] = nor(bit_slice.10, bit_slice.11, id=15)
+  nor.14: bits[1] = nor(bit_slice.12, bit_slice.13, id=14)
+  ret and.16: bits[1] = and(nor.15, nor.14, id=16)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                run_xlsynth_opt_before: true,
+                run_xlsynth_opt_after: true,
+            },
+        )
+        .expect("aug opt");
+
+        // Assert that the output performs `or_reduce` on the concat-derived value
+        // (i.e. the conditional negation was eliminated under the nonzero test),
+        // and does NOT reduce over the priority_sel result.
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+
+        let mut saw_or_reduce_of_concat = false;
+        let mut saw_or_reduce_of_priority_sel = false;
+        for node in &f.nodes {
+            let NodePayload::Unop(Unop::OrReduce, arg) = &node.payload else {
+                continue;
+            };
+            match &f.get_node(*arg).payload {
+                NodePayload::Nary(NaryOp::Concat, _) => {
+                    saw_or_reduce_of_concat = true;
+                }
+                NodePayload::PrioritySel { .. } => {
+                    saw_or_reduce_of_priority_sel = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            saw_or_reduce_of_concat,
+            "expected or_reduce(concat(...)) after aug_opt; got:\n{}",
+            out_text
+        );
+        assert!(
+            !saw_or_reduce_of_priority_sel,
+            "expected conditional negation to be eliminated under or_reduce; got:\n{}",
+            out_text
+        );
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "cone",
+            &[27, 26, 1],
             /* random_samples= */ 2000,
         );
     }

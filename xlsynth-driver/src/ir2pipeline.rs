@@ -85,6 +85,8 @@ fn ir2pipeline(
                     AugOptOptions {
                         enable: true,
                         rounds: 1,
+                        run_xlsynth_opt_before: true,
+                        run_xlsynth_opt_after: true,
                     },
                 )
                 .expect("aug_opt should succeed")
@@ -145,6 +147,8 @@ fn ir2pipeline(
                     AugOptOptions {
                         enable: true,
                         rounds: 1,
+                        run_xlsynth_opt_before: true,
+                        run_xlsynth_opt_after: true,
                     },
                 )
                 .expect("aug_opt should succeed");

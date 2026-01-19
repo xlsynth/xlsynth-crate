@@ -7,6 +7,7 @@
 
 use std::io::Read;
 
+use clap::ArgAction;
 use clap::Parser;
 use xlsynth_pir::{AugOptOptions, run_aug_opt_over_ir_text};
 
@@ -28,6 +29,21 @@ struct Args {
     /// Number of co-recursive rounds (default 1).
     #[arg(long, value_name = "N", default_value_t = 1)]
     rounds: usize,
+
+    /// Whether to run libxls optimization after the PIR rewrite step (default
+    /// true).
+    ///
+    /// When set to false, this helps inspect the direct effect of PIR rewrites
+    /// without libxls re-canonicalization.
+    #[arg(
+        long,
+        value_name = "BOOL",
+        default_value = "true",
+        value_parser = ["true", "false"],
+        num_args = 1,
+        action = ArgAction::Set
+    )]
+    run_xlsynth_opt_after: String,
 }
 
 fn read_ir_text(input: &str) -> Result<String, String> {
@@ -61,6 +77,8 @@ fn main() {
         AugOptOptions {
             enable: true,
             rounds: args.rounds,
+            run_xlsynth_opt_before: true,
+            run_xlsynth_opt_after: args.run_xlsynth_opt_after == "true",
         },
     ) {
         Ok(s) => s,
