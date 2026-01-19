@@ -856,7 +856,9 @@ impl VastStatementBlock {
     pub fn add_continuous_assignment(&mut self, lhs: &Expr, rhs: &Expr) -> VastStatement {
         let _locked = self.parent.lock().unwrap();
         let inner = unsafe {
-            sys::xls_vast_statement_block_add_continuous_assignment(self.inner, lhs.inner, rhs.inner)
+            sys::xls_vast_statement_block_add_continuous_assignment(
+                self.inner, lhs.inner, rhs.inner,
+            )
         };
         VastStatement {
             inner,
