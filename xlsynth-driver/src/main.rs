@@ -632,6 +632,15 @@ fn main() {
                         .help("The top-level entry point")
                         .required(true)
                         .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("aug_opt")
+                        .long("aug-opt")
+                        .value_name("BOOL")
+                        .action(ArgAction::Set)
+                        .value_parser(["true", "false"])
+                        .num_args(1)
+                        .help("Enable the augmented optimizer sandwich (default: false)"),
                 ),
         )
         // ir2pipeline subcommand

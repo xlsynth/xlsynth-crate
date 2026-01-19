@@ -376,6 +376,9 @@ optimization, and gatification using either the toolchain or the runtime APIs.
 Runs the XLS optimizer on an IR file and prints the optimized IR to **stdout**.
 Requires `--top <NAME>` to select the entry point.
 
+- Optional flags:
+  - `--aug-opt=true|false` – enable the augmented optimizer “opt sandwich” (default: `false`).
+
 ### `ir2pipeline`: IR to pipelined Verilog
 
 Produces a pipelined SystemVerilog design from an IR file. The generated code
