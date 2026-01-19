@@ -407,6 +407,16 @@ fn main() {
                         .required(false)
                         .action(ArgAction::Set),
                 )
+                .arg(
+                    clap::Arg::new("make_symlink_dir")
+                        .long("make-symlink-dir")
+                        .value_name("DIR")
+                        .help(
+                            "If set, create DIR (must be empty if it exists) and populate it with symlinks to each selected sample",
+                        )
+                        .required(false)
+                        .action(ArgAction::Set),
+                )
                 .add_bool_arg(
                     "log-skipped",
                     "Log skipped samples (read/parse/lower failures) to stderr via the logger",

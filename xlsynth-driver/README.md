@@ -758,6 +758,7 @@ Walks a corpus directory recursively, finds all demonstration `.ir` files, and s
   - `--signature-depth <N>`: depth for structural signature hashing (default `2`)
   - `--log-skipped=<BOOL>`: log skipped samples (read/parse/lower failures) via the logger (default `false`)
   - `--explain-new-hashes=<BOOL>`: print the PIR node signatures that introduced new hashes for each selected sample (default `false`)
+  - `--make-symlink-dir <DIR>`: create `DIR` (must be empty if it exists) and populate it with symlinks to each selected sample
 - For each `.ir` file, we compute:
   - A set of **depth-N forward structural hashes** for all nodes in the package **top** function (computed from PIR parsing).
   - `g8r-nodes` and `g8r-levels` from `ir2gates` lowering with **fraiging disabled**.
