@@ -218,6 +218,48 @@ fn get_zero_extended_low_bits(
     let msb_index = w;
     let text_id = f.get_node(nr).text_id;
 
+    // Fast-path: explicit `zero_ext` is inherently MSB=0.
+    if let NodePayload::ZeroExt {
+        arg: low,
+        new_bit_count,
+    } = f.get_node(nr).payload
+    {
+        if new_bit_count == node_w && f.get_node(low).ty.bit_count() == w {
+            return Some(low);
+        }
+    }
+
+    // Fast-path: `concat(0, low)` is an explicit 1-bit zero extension.
+    if let NodePayload::Nary(NaryOp::Concat, ref ops) = f.get_node(nr).payload {
+        if ops.len() == 2
+            && is_ubits_literal_0_or_1_of_width(f, ops[0], 1) == Some(false)
+            && f.get_node(ops[1]).ty.bit_count() == w
+        {
+            return Some(ops[1]);
+        }
+    }
+
+    // Fast-path: for a literal, directly check that the MSB is 0.
+    if let NodePayload::Literal(ref v) = f.get_node(nr).payload {
+        if let Ok(bits) = v.to_bits() {
+            if bits.get_bit_count() == node_w {
+                if let Ok(msb) = bits.get_bit(msb_index) {
+                    if !msb {
+                        return Some(push_node(
+                            f,
+                            Type::Bits(w),
+                            NodePayload::BitSlice {
+                                arg: nr,
+                                start: 0,
+                                width: w,
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     // Finally, if analysis can prove the MSB is always 0, it is safe to take
     // the low `w` bits for carry-out computation.
     if msb_is_provably_zero(range_info, text_id, msb_index) {
@@ -388,15 +430,23 @@ fn rewrite_add_slice_carry_out_to_ext_carry_out(
         let mut inner_add_to_nil: Option<NodeRef> = None;
 
         // Detect (b): add(add(x,y), literal(0/1))
+        //
+        // Important: only treat this as (b) if the non-literal operand is
+        // *actually an add*. Otherwise this is just the 2-operand form (c)
+        // with a literal operand.
         if let NodePayload::Binop(Binop::Add, a, b) = arg_payload {
             if let Some(ci) = is_ubits_literal_0_or_1_of_width(f, a, add_w) {
-                carry_in = ci;
-                base_add = b;
-                inner_add_to_nil = Some(base_add);
+                if matches!(f.nodes[b.index].payload, NodePayload::Binop(Binop::Add, ..)) {
+                    carry_in = ci;
+                    base_add = b;
+                    inner_add_to_nil = Some(base_add);
+                }
             } else if let Some(ci) = is_ubits_literal_0_or_1_of_width(f, b, add_w) {
-                carry_in = ci;
-                base_add = a;
-                inner_add_to_nil = Some(base_add);
+                if matches!(f.nodes[a.index].payload, NodePayload::Binop(Binop::Add, ..)) {
+                    carry_in = ci;
+                    base_add = a;
+                    inner_add_to_nil = Some(base_add);
+                }
             }
         }
 
@@ -507,9 +557,13 @@ pub fn prep_for_gatify(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aig::get_summary_stats::get_summary_stats;
+    use crate::gatify::ir2gate;
     use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
     use xlsynth_pir::ir_parser::Parser;
     use xlsynth_pir::ir_range_info::IrRangeInfo;
+    use xlsynth_prover::prover;
+    use xlsynth_prover::prover::types::EquivResult;
 
     #[test]
     fn or_reduces_with_single_use_are_combined() {
@@ -632,6 +686,151 @@ top fn cone(p0: bits[9] id=1, p1: bits[9] id=2) -> bits[1] {
             optimized_text.contains("ext_carry_out(") && !optimized_text.contains("add("),
             "expected carry-out rewrite to introduce ext_carry_out; got:\n{}",
             optimized_text
+        );
+    }
+
+    /// Verifies that the carry-out rewrite recognizes the idiom:
+    ///
+    /// `bit_slice(add(concat(0, t), literal(1)), start=width(t), width=1)`
+    ///
+    /// and rewrites it into an `ext_carry_out` form for cheaper gatification.
+    #[test]
+    fn carry_out_rewrite_handles_concat_zero_extend_plus_one() {
+        let ir_text = r#"package sample
+
+fn f(t: bits[3]) -> bits[1] {
+  t: bits[3] = param(name=t, id=1)
+  z: bits[1] = literal(value=0, id=2)
+  widened: bits[4] = concat(z, t, id=3)
+  one: bits[4] = literal(value=1, id=4)
+  sum: bits[4] = add(widened, one, id=5)
+  ret carry: bits[1] = bit_slice(sum, start=3, width=1, id=6)
+}
+"#;
+        let mut p = Parser::new(ir_text);
+        let pkg = p.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_fn("f").expect("get fn");
+
+        let optimized = prep_for_gatify(
+            f,
+            None,
+            PrepForGatifyOptions {
+                enable_rewrite_carry_out: true,
+            },
+        );
+
+        let Some(ret) = optimized.ret_node_ref else {
+            panic!("missing ret");
+        };
+        let ret_node = optimized.get_node(ret);
+        assert!(
+            matches!(ret_node.payload, NodePayload::ExtCarryOut { .. }),
+            "expected ext_carry_out at ret; got: {:?}",
+            ret_node.payload
+        );
+
+        // Sanity-check semantics on a small sample set.
+        for &tv in &[0u64, 1u64, 3u64, 7u64] {
+            let args = vec![IrValue::make_ubits(3, tv).unwrap()];
+            let got0 = match eval_fn(f, &args) {
+                FnEvalResult::Success(s) => s.value.clone(),
+                FnEvalResult::Failure(e) => panic!("eval failed (orig): {:?}", e),
+            };
+            let got1 = match eval_fn(&optimized, &args) {
+                FnEvalResult::Success(s) => s.value.clone(),
+                FnEvalResult::Failure(e) => panic!("eval failed (opt): {:?}", e),
+            };
+            assert_eq!(got0, got1, "mismatch for t={tv}");
+        }
+    }
+
+    /// Regression test: this is a real `k3_cones` corpus sample (trimmed down)
+    /// that returns the MSB carry-out bit of an add over two explicit 1-bit
+    /// zero-extended operands.
+    ///
+    /// We expect `prep_for_gatify` (with carry-out rewriting enabled) to turn
+    /// the `bit_slice(add(...), start=msb, width=1)` idiom into `ext_carry_out`
+    /// and preserve semantics.
+    #[test]
+    fn carry_out_rewrite_matches_real_k3_cones_sample_and_is_equivalent() {
+        // Source: `k3_cones/.../
+        // 280fd8180f242907fc2a712c99cd4df078598bd07546322c451d8910ee78af56.ir`
+        let ir_text = r#"package bool_cone
+
+top fn cone(leaf_3: bits[8] id=1, leaf_5: bits[8] id=2) -> bits[1] {
+  literal.3: bits[1] = literal(value=0, id=3)
+  not.4: bits[8] = not(leaf_3, id=4)
+  concat.5: bits[9] = concat(literal.3, leaf_5, id=5)
+  concat.6: bits[9] = concat(literal.3, not.4, id=6)
+  add.7: bits[9] = add(concat.5, concat.6, id=7)
+  ret bit_slice.8: bits[1] = bit_slice(add.7, start=8, width=1, id=8)
+}
+"#;
+        let mut p = Parser::new(ir_text);
+        let pkg = p.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top fn");
+
+        let optimized = prep_for_gatify(
+            f,
+            None,
+            PrepForGatifyOptions {
+                enable_rewrite_carry_out: true,
+            },
+        );
+
+        let ret = optimized.ret_node_ref.expect("ret");
+        let ret_node = optimized.get_node(ret);
+        assert!(
+            matches!(ret_node.payload, NodePayload::ExtCarryOut { .. }),
+            "expected ext_carry_out at ret; got: {:?}",
+            ret_node.payload
+        );
+
+        // Check whether this rewrite improves the gate live-node count metric.
+        let base = ir2gate::gatify(
+            f,
+            ir2gate::GatifyOptions {
+                fold: false,
+                hash: false,
+                check_equivalence: false,
+                adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
+                mul_adder_mapping: None,
+                range_info: None,
+                enable_rewrite_carry_out: false,
+            },
+        )
+        .expect("gatify baseline");
+        let improved = ir2gate::gatify(
+            f,
+            ir2gate::GatifyOptions {
+                fold: false,
+                hash: false,
+                check_equivalence: false,
+                adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
+                mul_adder_mapping: None,
+                range_info: None,
+                enable_rewrite_carry_out: true,
+            },
+        )
+        .expect("gatify improved");
+        let base_stats = get_summary_stats(&base.gate_fn);
+        let improved_stats = get_summary_stats(&improved.gate_fn);
+
+        // Prove equivalence via the IR prover (solver auto-selected based on
+        // available features / configuration).
+        let result = prover::prove_ir_fn_equiv(f, &optimized);
+        assert!(
+            matches!(result, EquivResult::Proved),
+            "expected equivalence proof, got: {result:?}"
+        );
+
+        // Microbenchmark-style expectation: the carry-out rewrite should be
+        // strictly cheaper than building the full 9-bit adder.
+        assert!(
+            improved_stats.live_nodes < base_stats.live_nodes,
+            "expected improved live_nodes; base={:?} improved={:?}",
+            base_stats,
+            improved_stats
         );
     }
 }

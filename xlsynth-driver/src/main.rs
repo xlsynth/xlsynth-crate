@@ -1019,6 +1019,10 @@ fn main() {
                         .help("Top-level function name (overrides package top)"),
                 )
                 .add_bool_arg(
+                    "include-extensionless",
+                    "Also scan files with no extension (e.g. hash-named CAS/symlink corpora) (false by default)",
+                )
+                .add_bool_arg(
                     "show-ret",
                     "Prefix matches that are return values with 'ret' (true by default)",
                 )

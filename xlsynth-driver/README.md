@@ -519,6 +519,7 @@ Runs `ir-query` over every `.ir` file under a corpus directory (recursive) and p
 - Positional arguments: `<corpus_dir> <query>`
 - Optional:
   - `--top <NAME>` – function name to treat as top (overrides the package top).
+  - `--include-extensionless=true|false` – also scan files with no extension (useful for CAS / hash-named symlink corpora) (defaults to `false`).
   - `--show-ret=false` – disable prefixing matches that are return values with `ret` (defaults to `true`).
   - `--prefilter=true|false` – enable a fast textual prefilter based on explicit operator names in the query (defaults to `true`).
   - `--ignore-parse-errors=true|false` – skip files that fail PIR parse/validate instead of exiting (defaults to `true`).
