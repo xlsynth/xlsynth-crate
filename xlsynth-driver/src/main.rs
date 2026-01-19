@@ -556,6 +556,15 @@ fn main() {
                         .num_args(1)
                         .help("Optimize the IR we emit as well")
                 )
+                .arg(
+                    Arg::new("aug_opt")
+                        .long("aug-opt")
+                        .value_name("BOOL")
+                        .action(ArgAction::Set)
+                        .value_parser(["true", "false"])
+                        .num_args(1)
+                        .help("Use augmented optimizer sandwich when --opt=true (default: false)"),
+                )
                 .add_bool_arg(
                     "type_inference_v2",
                     "Enable the experimental type-inference v2 algorithm",
@@ -632,6 +641,15 @@ fn main() {
                         .help("The top-level entry point")
                         .required(true)
                         .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("aug_opt")
+                        .long("aug-opt")
+                        .value_name("BOOL")
+                        .action(ArgAction::Set)
+                        .value_parser(["true", "false"])
+                        .num_args(1)
+                        .help("Enable the augmented optimizer sandwich (default: false)"),
                 ),
         )
         // ir2pipeline subcommand
@@ -651,6 +669,15 @@ fn main() {
                 .add_codegen_args()
                 .add_pipeline_args()
                 .add_bool_arg("opt", "Optimize the IR before scheduling pipeline")
+                .arg(
+                    Arg::new("aug_opt")
+                        .long("aug-opt")
+                        .value_name("BOOL")
+                        .action(ArgAction::Set)
+                        .value_parser(["true", "false"])
+                        .num_args(1)
+                        .help("Use augmented optimizer sandwich when --opt=true (default: false)"),
+                )
                 .add_bool_arg("keep_temps", "Keep temporary files"),
         )
         .subcommand(
@@ -666,6 +693,15 @@ fn main() {
                 .add_ir_top_arg(false)
                 .add_codegen_args()
                 .add_bool_arg("opt", "Optimize the IR before codegen")
+                .arg(
+                    Arg::new("aug_opt")
+                        .long("aug-opt")
+                        .value_name("BOOL")
+                        .action(ArgAction::Set)
+                        .value_parser(["true", "false"])
+                        .num_args(1)
+                        .help("Use augmented optimizer sandwich when --opt=true (default: false)"),
+                )
                 .add_bool_arg("keep_temps", "Keep temporary files"),
         )
         .subcommand(

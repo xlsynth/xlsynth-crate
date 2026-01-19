@@ -8,6 +8,7 @@ use crate::common::{
 };
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::{run_codegen_pipeline, run_opt_main};
+use xlsynth_pir::{run_aug_opt_over_ir_text, AugOptOptions};
 
 pub fn handle_ir2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
     let input_file = matches.get_one::<String>("ir_input_file").unwrap();
@@ -26,6 +27,11 @@ pub fn handle_ir2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>
         .map(|s| s == "true")
         .unwrap_or(false);
 
+    let aug_opt = matches
+        .get_one::<String>("aug_opt")
+        .map(|s| s == "true")
+        .unwrap_or(false);
+
     let ir_top_opt = matches.get_one::<String>("ir_top");
 
     ir2pipeline(
@@ -34,6 +40,7 @@ pub fn handle_ir2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>
         &pipeline_spec,
         &codegen_flags,
         optimize,
+        aug_opt,
         ir_top_opt.map(|s| s.as_str()),
         &keep_temps,
         config,
@@ -48,11 +55,16 @@ fn ir2pipeline(
     pipeline_spec: &PipelineSpec,
     codegen_flags: &CodegenFlags,
     optimize: bool,
+    aug_opt: bool,
     ir_top: Option<&str>,
     keep_temps: &Option<bool>,
     config: &Option<ToolchainConfig>,
 ) {
     log::info!("ir2pipeline");
+    if aug_opt && !optimize {
+        eprintln!("error: ir2pipeline: --aug-opt=true requires --opt=true");
+        std::process::exit(2);
+    }
     if let Some(tool_path) = config.as_ref().and_then(|c| c.tool_path.as_deref()) {
         log::info!("ir2pipeline: using tool path: {}", tool_path);
         // Temporary directory for any artifacts we create (optimized IR and generated
@@ -64,7 +76,21 @@ fn ir2pipeline(
             // Ensure top was provided.
             let top_name = ir_top.expect("--opt requires --top to be specified");
             // Optimize the incoming IR first.
-            let opt_ir = run_opt_main(input_file, Some(top_name), tool_path);
+            let opt_ir = if aug_opt {
+                let input_text =
+                    std::fs::read_to_string(input_file).expect("IR input file should be readable");
+                run_aug_opt_over_ir_text(
+                    &input_text,
+                    Some(top_name),
+                    AugOptOptions {
+                        enable: true,
+                        rounds: 1,
+                    },
+                )
+                .expect("aug_opt should succeed")
+            } else {
+                run_opt_main(input_file, Some(top_name), tool_path)
+            };
             let opt_ir_path = temp_dir.path().join("opt.ir");
             std::fs::write(&opt_ir_path, &opt_ir).unwrap();
             opt_ir_path
@@ -112,8 +138,25 @@ fn ir2pipeline(
         // Optionally optimize the IR package.
         if optimize {
             let top_name = ir_top.expect("--opt requires --top to be specified");
-            ir_package = xlsynth::optimize_ir(&ir_package, top_name)
-                .expect("IR optimization should succeed");
+            if aug_opt {
+                let out_text = run_aug_opt_over_ir_text(
+                    &ir_text,
+                    Some(top_name),
+                    AugOptOptions {
+                        enable: true,
+                        rounds: 1,
+                    },
+                )
+                .expect("aug_opt should succeed");
+                ir_package = xlsynth::IrPackage::parse_ir(
+                    &out_text,
+                    input_file.file_name().and_then(|s| s.to_str()),
+                )
+                .expect("IR parsing after aug_opt should succeed");
+            } else {
+                ir_package = xlsynth::optimize_ir(&ir_package, top_name)
+                    .expect("IR optimization should succeed");
+            }
         }
 
         let scheduling_options_flags_proto = scheduling_options_proto(delay_model, pipeline_spec);
