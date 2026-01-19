@@ -7,20 +7,27 @@
 
 use std::io::Read;
 
+use clap::Parser;
 use xlsynth_pir::{AugOptOptions, run_aug_opt_over_ir_text};
 
-fn usage_and_exit(msg: Option<&str>) -> ! {
-    if let Some(m) = msg {
-        eprintln!("error: {m}\n");
-    }
-    eprintln!(
-        "usage: xlsynth-pir-aug-opt <input_ir|- > --top <NAME> [--rounds <N>]\n\
-         \n\
-         Examples:\n\
-           xlsynth-pir-aug-opt input.ir --top cone > out.ir\n\
-           cat input.ir | xlsynth-pir-aug-opt - --top cone --rounds 1 > out.ir\n"
-    );
-    std::process::exit(2);
+#[derive(Debug, Parser)]
+#[command(
+    name = "xlsynth-pir-aug-opt",
+    about = "Co-recursive augmented optimization: libxls opt → PIR rewrite → libxls opt.",
+    version
+)]
+struct Args {
+    /// Input IR package path. Use '-' to read from stdin.
+    #[arg(value_name = "INPUT_IR", default_value = "-")]
+    input_ir: String,
+
+    /// Top function name (required).
+    #[arg(long, value_name = "NAME")]
+    top: String,
+
+    /// Number of co-recursive rounds (default 1).
+    #[arg(long, value_name = "N", default_value_t = 1)]
+    rounds: usize,
 }
 
 fn read_ir_text(input: &str) -> Result<String, String> {
@@ -38,44 +45,9 @@ fn read_ir_text(input: &str) -> Result<String, String> {
 }
 
 fn main() {
-    let mut args: Vec<String> = std::env::args().collect();
-    let _prog = args.remove(0);
+    let args = Args::parse();
 
-    if args.is_empty() {
-        usage_and_exit(None);
-    }
-
-    let input_ir = args.remove(0);
-    let mut top: Option<String> = None;
-    let mut rounds: usize = 1;
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--top" => {
-                if i + 1 >= args.len() {
-                    usage_and_exit(Some("--top requires a value"));
-                }
-                top = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--rounds" => {
-                if i + 1 >= args.len() {
-                    usage_and_exit(Some("--rounds requires a value"));
-                }
-                rounds = args[i + 1]
-                    .parse::<usize>()
-                    .unwrap_or_else(|_| usage_and_exit(Some("--rounds must be an integer")));
-                i += 2;
-            }
-            "--help" | "-h" => usage_and_exit(None),
-            other => usage_and_exit(Some(&format!("unknown argument: {other}"))),
-        }
-    }
-
-    let top = top.unwrap_or_else(|| usage_and_exit(Some("--top is required")));
-
-    let input_text = match read_ir_text(&input_ir) {
+    let input_text = match read_ir_text(&args.input_ir) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{e}");
@@ -85,10 +57,10 @@ fn main() {
 
     let out = match run_aug_opt_over_ir_text(
         &input_text,
-        Some(top.as_str()),
+        Some(args.top.as_str()),
         AugOptOptions {
             enable: true,
-            rounds,
+            rounds: args.rounds,
         },
     ) {
         Ok(s) => s,
