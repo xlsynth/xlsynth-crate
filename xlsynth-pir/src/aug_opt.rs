@@ -20,6 +20,18 @@ pub struct AugOptOptions {
     pub rounds: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct AugOptRunResult {
+    pub output_text: String,
+    pub total_rewrites: usize,
+}
+
+impl AugOptRunResult {
+    pub fn rewrote(&self) -> bool {
+        self.total_rewrites > 0
+    }
+}
+
 impl Default for AugOptOptions {
     fn default() -> Self {
         Self {
@@ -34,8 +46,19 @@ pub fn run_aug_opt_over_ir_text(
     top: Option<&str>,
     options: AugOptOptions,
 ) -> Result<String, String> {
+    run_aug_opt_over_ir_text_with_stats(ir_text, top, options).map(|result| result.output_text)
+}
+
+pub fn run_aug_opt_over_ir_text_with_stats(
+    ir_text: &str,
+    top: Option<&str>,
+    options: AugOptOptions,
+) -> Result<AugOptRunResult, String> {
     if !options.enable {
-        return Ok(ir_text.to_string());
+        return Ok(AugOptRunResult {
+            output_text: ir_text.to_string(),
+            total_rewrites: 0,
+        });
     }
 
     // Basis-only contract: aug-opt does not support PIR extension ops.
@@ -56,6 +79,7 @@ pub fn run_aug_opt_over_ir_text(
     cur_pkg = xlsynth::optimize_ir(&cur_pkg, &top_name)
         .map_err(|e| format!("aug_opt: optimize_ir initial failed: {e}"))?;
 
+    let mut total_rewrites = 0usize;
     for _round in 0..options.rounds {
         let cur_text = cur_pkg.to_string();
 
@@ -70,7 +94,8 @@ pub fn run_aug_opt_over_ir_text(
             .ok_or_else(|| format!("aug_opt: PIR package missing top fn '{top_name}'"))?
             .clone();
 
-        let rewritten_top = apply_basis_rewrites_to_fn(&top_fn);
+        let (rewritten_top, rewrites_in_round) = apply_basis_rewrites_to_fn(&top_fn);
+        total_rewrites = total_rewrites.saturating_add(rewrites_in_round);
 
         // Swap the rewritten top back into the PIR package.
         for member in pir_pkg.members.iter_mut() {
@@ -100,7 +125,10 @@ pub fn run_aug_opt_over_ir_text(
             .map_err(|e| format!("aug_opt: optimize_ir post-rewrite failed: {e}"))?;
     }
 
-    Ok(cur_pkg.to_string())
+    Ok(AugOptRunResult {
+        output_text: cur_pkg.to_string(),
+        total_rewrites,
+    })
 }
 
 fn verify_no_extension_ops_in_ir_text(ir_text: &str) -> Result<(), String> {
@@ -133,16 +161,17 @@ fn verify_no_extension_ops_in_fn(f: &ir::Fn) -> Result<(), String> {
     Ok(())
 }
 
-fn apply_basis_rewrites_to_fn(f: &ir::Fn) -> ir::Fn {
+fn apply_basis_rewrites_to_fn(f: &ir::Fn) -> (ir::Fn, usize) {
     let mut cloned = f.clone();
-    let _rewrites = rewrite_guarded_sel_ne_literal1_nor(&mut cloned);
-    let _rewrites = rewrite_lsb_of_shll_via_shift_is_zero(&mut cloned);
+    let mut rewrites = 0usize;
+    rewrites = rewrites.saturating_add(rewrite_guarded_sel_ne_literal1_nor(&mut cloned));
+    rewrites = rewrites.saturating_add(rewrite_lsb_of_shll_via_shift_is_zero(&mut cloned));
     // Ensure textual IR is defs-before-uses by reordering body nodes into a
     // topological order (while preserving PIR layout invariants). This makes
     // it safe for rewrites to append new nodes.
     ir_utils::compact_and_toposort_in_place(&mut cloned)
         .expect("aug_opt: compact_and_toposort_in_place failed");
-    cloned
+    (cloned, rewrites)
 }
 
 fn next_text_id(f: &ir::Fn) -> usize {
