@@ -21,6 +21,15 @@ Primarily tests:
 - Optimization preserves semantics
 - Cross-engine equivalence consistency (external tool vs SMT backends)
 
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_aug_opt_equiv.rs
+
+Generates a random XLS IR function, runs the PIR aug-opt rewrite loop, and checks toolchain equivalence between the original and rewritten IR when at least one rewrite fires. The target flags unexpected aug-opt failures or inequivalent rewrites.
+
+Primarily tests:
+
+- PIR aug-opt rewrites preserve semantics when they apply
+- End-to-end compatibility of PIR lowering and toolchain equivalence checks
+
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_gatify.rs
 
 Parses C++-emitted IR into the Rust IR, then converts (gatifies) to `GateFn` with folding on and off, checking equivalence when requested. Skips uninteresting degenerate inputs.
