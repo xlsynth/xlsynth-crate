@@ -110,10 +110,47 @@ pub fn parse_query(input: &str) -> Result<QueryExpr, String> {
     if !parser.is_done() {
         return Err(parser.error_at("unexpected trailing input"));
     }
-    if matches!(expr, QueryExpr::Ellipsis) {
-        return Err("ellipsis '...' is only valid inside an operator argument list".to_string());
-    }
+    validate_ellipsis_placement(&expr)?;
     Ok(expr)
+}
+
+fn validate_ellipsis_placement(expr: &QueryExpr) -> Result<(), String> {
+    fn walk(expr: &QueryExpr, ellipsis_allowed_here: bool) -> Result<(), String> {
+        match expr {
+            QueryExpr::Ellipsis => {
+                if ellipsis_allowed_here {
+                    Ok(())
+                } else {
+                    Err("ellipsis '...' is only valid inside an operator argument list".to_string())
+                }
+            }
+            QueryExpr::Placeholder(_) | QueryExpr::Number(_) => Ok(()),
+            QueryExpr::Matcher(m) => {
+                // Only explicit operator matchers (e.g. `nor(...)`) support ellipsis.
+                let allow_in_args = matches!(m.kind, MatcherKind::OpName(_));
+                for a in &m.args {
+                    walk(a, allow_in_args)?;
+                }
+
+                // Named args never support ellipsis; they are not operand lists.
+                for na in &m.named_args {
+                    match &na.value {
+                        NamedArgValue::Any | NamedArgValue::Bool(_) | NamedArgValue::Number(_) => {}
+                        NamedArgValue::Expr(e) => walk(e, /* ellipsis_allowed_here= */ false)?,
+                        NamedArgValue::ExprList(es) => {
+                            for e in es {
+                                walk(e, /* ellipsis_allowed_here= */ false)?;
+                            }
+                        }
+                    }
+                }
+
+                Ok(())
+            }
+        }
+    }
+
+    walk(expr, /* ellipsis_allowed_here= */ false)
 }
 
 /// Finds all node references in `f` that satisfy the query expression.
@@ -641,6 +678,20 @@ mod tests {
         };
         assert_eq!(matcher.kind, MatcherKind::Users);
         assert_eq!(matcher.args.len(), 1);
+    }
+
+    #[test]
+    fn parse_rejects_ellipsis_outside_operator_args() {
+        // `...` cannot stand alone.
+        assert!(parse_query("...").is_err());
+
+        // `...` in non-operator matchers should be rejected (would otherwise
+        // silently match nothing).
+        assert!(parse_query("$users(...)").is_err());
+        assert!(parse_query("literal(...)").is_err());
+
+        // `...` in named args should be rejected.
+        assert!(parse_query("sel(selector=...)").is_err());
     }
 
     /// Verifies the parser accepts concrete operator matchers like
