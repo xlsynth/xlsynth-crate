@@ -137,6 +137,7 @@ fn apply_basis_rewrites_to_fn(f: &ir::Fn) -> ir::Fn {
     let mut cloned = f.clone();
     let _rewrites = rewrite_guarded_sel_ne_literal1_nor(&mut cloned);
     let _rewrites = rewrite_lsb_of_shll_via_shift_is_zero(&mut cloned);
+    let _rewrites = rewrite_and_nor_self_to_zero(&mut cloned);
     // Ensure textual IR is defs-before-uses by reordering body nodes into a
     // topological order (while preserving PIR layout invariants). This makes
     // it safe for rewrites to append new nodes.
@@ -182,6 +183,71 @@ fn is_ubits_literal_1_of_width(f: &ir::Fn, nr: NodeRef, w: usize) -> bool {
         return false;
     };
     v.to_u64().ok() == Some(1)
+}
+
+/// Rewrite:
+///
+/// `and(..., a, ..., nor(..., a, ...), ...)` → `literal(0)`
+///
+/// In particular, this covers:
+/// - `and(a, nor(a, b))`
+/// - `and(a, nor(b, a))`
+///
+/// Valid for any bit width: \(a \,\&\, \neg(a \lor b) = 0\).
+fn rewrite_and_nor_self_to_zero(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+
+    for and_index in 0..f.nodes.len() {
+        let NodePayload::Nary(NaryOp::And, operands) = f.nodes[and_index].payload.clone() else {
+            continue;
+        };
+        if operands.len() < 2 {
+            continue;
+        }
+
+        let w = f.nodes[and_index].ty.bit_count();
+        if w == 0 {
+            continue;
+        }
+
+        let mut matched = false;
+        for &a in &operands {
+            if *f.get_node_ty(a) != Type::Bits(w) {
+                continue;
+            }
+            for &other in &operands {
+                if other.index == a.index {
+                    continue;
+                }
+                let NodePayload::Nary(NaryOp::Nor, nor_ops) = f.get_node(other).payload.clone()
+                else {
+                    continue;
+                };
+                // Keep it narrow for now: the requested patterns are binary NORs.
+                if nor_ops.len() != 2 {
+                    continue;
+                }
+                if nor_ops.iter().any(|&x| x.index == a.index) {
+                    matched = true;
+                    break;
+                }
+            }
+            if matched {
+                break;
+            }
+        }
+
+        if !matched {
+            continue;
+        }
+
+        // Rewrite the AND node in-place to a zero literal of matching width.
+        let lit0 = IrValue::make_ubits(w, 0).expect("zero literal should always fit");
+        f.nodes[and_index].payload = NodePayload::Literal(lit0);
+        rewrites += 1;
+    }
+
+    rewrites
 }
 
 /// Rewrite:
@@ -401,5 +467,53 @@ top fn f(x: bits[8] id=1, s: bits[4] id=2) -> bits[1] {
             &[8, 4],
             /* random_samples= */ 2000,
         );
+    }
+
+    #[test]
+    fn aug_opt_rewrites_and_nor_self_to_zero_both_orders() {
+        let ir_text_0 = r#"package and_nor_self
+
+top fn f(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
+  nor.3: bits[8] = nor(a, b, id=3)
+  ret and.4: bits[8] = and(a, nor.3, id=4)
+}
+"#;
+
+        // Directly test the local rewrite (no libxls involvement) by rewriting
+        // the parsed PIR function and checking the return node becomes literal(0).
+        let mut p0 = ir_parser::Parser::new(ir_text_0);
+        let pkg0 = p0.parse_and_validate_package().expect("parse/validate");
+        let mut f0 = pkg0.get_fn("f").unwrap().clone();
+        let rewrites0 = rewrite_and_nor_self_to_zero(&mut f0);
+        assert_eq!(rewrites0, 1);
+        let ret = f0.ret_node_ref.expect("ret");
+        let NodePayload::Literal(v) = &f0.get_node(ret).payload else {
+            panic!(
+                "expected ret payload to be Literal(0), got {:?}",
+                f0.get_node(ret).payload
+            );
+        };
+        assert_eq!(v.to_u64().ok(), Some(0));
+
+        let ir_text_1 = r#"package and_nor_self
+
+top fn f(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
+  nor.3: bits[8] = nor(b, a, id=3)
+  ret and.4: bits[8] = and(a, nor.3, id=4)
+}
+"#;
+        let mut p1 = ir_parser::Parser::new(ir_text_1);
+        let pkg1 = p1.parse_and_validate_package().expect("parse/validate");
+        let mut f1 = pkg1.get_fn("f").unwrap().clone();
+        let rewrites1 = rewrite_and_nor_self_to_zero(&mut f1);
+        assert_eq!(rewrites1, 1);
+        let ret = f1.ret_node_ref.expect("ret");
+        let NodePayload::Literal(v) = &f1.get_node(ret).payload else {
+            panic!(
+                "expected ret payload to be Literal(0), got {:?}",
+                f1.get_node(ret).payload
+            );
+        };
+        assert_eq!(v.to_u64().ok(), Some(0));
     }
 }
