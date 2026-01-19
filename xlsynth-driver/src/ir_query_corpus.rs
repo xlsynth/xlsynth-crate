@@ -10,6 +10,20 @@ use xlsynth_pir::ir_query;
 use crate::common::parse_bool_flag_or;
 use crate::toolchain_config::ToolchainConfig;
 
+fn extract_error_byte_offset(msg: &str) -> Option<usize> {
+    let (_prefix, suffix) = msg.rsplit_once(" at byte ")?;
+    suffix.parse::<usize>().ok()
+}
+
+fn eprint_query_parse_error(context: &str, query_text: &str, err: &str) {
+    eprintln!("error: {context}: failed to parse query: {err}");
+    eprintln!("  {query_text}");
+    if let Some(pos) = extract_error_byte_offset(err) {
+        let clamped = std::cmp::min(pos, query_text.len());
+        eprintln!("  {}^", " ".repeat(clamped));
+    }
+}
+
 fn collect_ir_files_recursively(root: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -79,7 +93,7 @@ pub fn handle_ir_query_corpus(matches: &ArgMatches, _config: &Option<ToolchainCo
     let query = match ir_query::parse_query(query_text) {
         Ok(q) => q,
         Err(e) => {
-            eprintln!("error: ir-query-corpus: failed to parse query: {e}");
+            eprint_query_parse_error("ir-query-corpus", query_text, &e);
             std::process::exit(2);
         }
     };

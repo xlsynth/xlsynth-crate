@@ -132,14 +132,18 @@ fn validate_ellipsis_placement(expr: &QueryExpr) -> Result<(), String> {
                     walk(a, allow_in_args)?;
                 }
 
-                // Named args never support ellipsis; they are not operand lists.
+                // Named args usually never support ellipsis; they are not operand lists.
+                //
+                // Exception: select-like nodes expose `cases=[...]` which is explicitly an
+                // operand list, and ellipsis provides useful "any arity" matching.
                 for na in &m.named_args {
                     match &na.value {
                         NamedArgValue::Any | NamedArgValue::Bool(_) | NamedArgValue::Number(_) => {}
                         NamedArgValue::Expr(e) => walk(e, /* ellipsis_allowed_here= */ false)?,
                         NamedArgValue::ExprList(es) => {
+                            let allow_in_list = na.name.as_str() == "cases";
                             for e in es {
-                                walk(e, /* ellipsis_allowed_here= */ false)?;
+                                walk(e, /* ellipsis_allowed_here= */ allow_in_list)?;
                             }
                         }
                     }
@@ -631,10 +635,14 @@ fn match_select_named_arg(
                 match_args_solutions(&[expr.clone()], cases, f, users, bindings)
             }
             NamedArgValue::ExprList(exprs) => {
-                if exprs.len() != cases.len() {
-                    return vec![];
+                if exprs.iter().any(|e| matches!(e, QueryExpr::Ellipsis)) {
+                    match_args_solutions(exprs, cases, f, users, bindings)
+                } else {
+                    if exprs.len() != cases.len() {
+                        return vec![];
+                    }
+                    match_args_solutions(exprs, cases, f, users, bindings)
                 }
-                match_args_solutions(exprs, cases, f, users, bindings)
             }
             _ => vec![],
         },
@@ -690,8 +698,15 @@ mod tests {
         assert!(parse_query("$users(...)").is_err());
         assert!(parse_query("literal(...)").is_err());
 
-        // `...` in named args should be rejected.
+        // `...` in non-list named args should be rejected.
         assert!(parse_query("sel(selector=...)").is_err());
+    }
+
+    #[test]
+    fn parse_allows_ellipsis_in_select_cases_list() {
+        // `cases=[...]` is explicitly a variable-arity operand list.
+        parse_query("sel(selector=s, cases=[...])").unwrap();
+        parse_query("priority_sel(selector=s, cases=[..., a, ...], default=d)").unwrap();
     }
 
     /// Verifies the parser accepts concrete operator matchers like
@@ -1049,6 +1064,26 @@ fn main(x: bits[8] id=1) -> bits[3] {
             .collect();
         ids.sort();
         assert_eq!(ids, vec!["slice1", "slice2"]);
+    }
+
+    #[test]
+    fn find_matches_sel_with_cases_ellipsis_named_arg() {
+        let pkg_text = r#"package test
+
+fn main(s: bits[1] id=1, a: bits[8] id=2, b: bits[8] id=3) -> bits[8] {
+  ret out: bits[8] = sel(s, cases=[a, b], id=4)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+
+        // Should match regardless of the number of cases.
+        let query = parse_query("sel(selector=s, cases=[...])").unwrap();
+        let matches = find_matching_nodes(f, &query);
+        assert_eq!(matches.len(), 1);
+        let node_id = ir::node_textual_id(f, matches[0]);
+        assert_eq!(node_id, "out");
     }
 
     #[test]
