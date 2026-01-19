@@ -12,6 +12,7 @@
 use crate::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
 use crate::ir_parser;
 use crate::ir_utils;
+use xlsynth::IrValue;
 
 #[derive(Debug, Clone, Copy)]
 pub struct AugOptOptions {
@@ -135,6 +136,7 @@ fn verify_no_extension_ops_in_fn(f: &ir::Fn) -> Result<(), String> {
 fn apply_basis_rewrites_to_fn(f: &ir::Fn) -> ir::Fn {
     let mut cloned = f.clone();
     let _rewrites = rewrite_guarded_sel_ne_literal1_nor(&mut cloned);
+    let _rewrites = rewrite_lsb_of_shll_via_shift_is_zero(&mut cloned);
     // Ensure textual IR is defs-before-uses by reordering body nodes into a
     // topological order (while preserving PIR layout invariants). This makes
     // it safe for rewrites to append new nodes.
@@ -165,6 +167,12 @@ fn push_node(f: &mut ir::Fn, ty: Type, payload: NodePayload) -> NodeRef {
     NodeRef { index: idx }
 }
 
+fn push_ubits_literal(f: &mut ir::Fn, w: usize, v: u64) -> NodeRef {
+    let ty = Type::Bits(w);
+    let lit = IrValue::make_ubits(w, v).expect("ubits literal construction should succeed");
+    push_node(f, ty, NodePayload::Literal(lit))
+}
+
 fn is_ubits_literal_1_of_width(f: &ir::Fn, nr: NodeRef, w: usize) -> bool {
     let node = f.get_node(nr);
     if node.ty != Type::Bits(w) {
@@ -174,6 +182,67 @@ fn is_ubits_literal_1_of_width(f: &ir::Fn, nr: NodeRef, w: usize) -> bool {
         return false;
     };
     v.to_u64().ok() == Some(1)
+}
+
+/// Rewrite:
+///
+/// `bit_slice(shll(x, s), start=0, width=1)`
+///   →
+/// `and(bit_slice(x, start=0, width=1), eq(s, literal(0)))`
+///
+/// Intuition: the LSB of a left-shifted value is preserved iff the shift amount
+/// is zero; otherwise it is forced to zero.
+fn rewrite_lsb_of_shll_via_shift_is_zero(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+
+    for slice_index in 0..f.nodes.len() {
+        let NodePayload::BitSlice { arg, start, width } = f.nodes[slice_index].payload.clone()
+        else {
+            continue;
+        };
+        if start != 0 || width != 1 {
+            continue;
+        }
+        if f.nodes[slice_index].ty != Type::Bits(1) {
+            continue;
+        }
+
+        let (x, s) = match f.get_node(arg).payload.clone() {
+            NodePayload::Binop(Binop::Shll, x, s) => (x, s),
+            _ => continue,
+        };
+        let w_x = f.get_node_ty(x).bit_count();
+        if w_x == 0 {
+            continue;
+        }
+
+        // Build: bit_slice(x, start=0, width=1)
+        let slice_x = push_node(
+            f,
+            Type::Bits(1),
+            NodePayload::BitSlice {
+                arg: x,
+                start: 0,
+                width: 1,
+            },
+        );
+
+        // Build: eq(s, 0) with a literal of the same width as s.
+        let w_s = f.get_node_ty(s).bit_count();
+        if w_s == 0 {
+            continue;
+        }
+        let lit0 = push_ubits_literal(f, w_s, 0);
+        let eq_s0 = push_node(f, Type::Bits(1), NodePayload::Binop(Binop::Eq, s, lit0));
+
+        // Rewrite the bit_slice node in-place.
+        f.nodes[slice_index].payload = NodePayload::Nary(NaryOp::And, vec![slice_x, eq_s0]);
+        f.nodes[slice_index].ty = Type::Bits(1);
+
+        rewrites += 1;
+    }
+
+    rewrites
 }
 
 /// Rewrite:
@@ -262,8 +331,7 @@ fn rewrite_guarded_sel_ne_literal1_nor(f: &mut ir::Fn) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir_eval::{FnEvalResult, eval_fn};
-    use xlsynth::IrValue;
+    use crate::test_utils::quickcheck_ir_text_fn_equivalence_ubits_le64;
 
     #[test]
     fn aug_opt_rewrites_guarded_sel_ne1_nor_and_opt_dces_sel() {
@@ -297,32 +365,41 @@ top fn cone(leaf_22: bits[1] id=1, leaf_36: bits[8] id=2, leaf_37: bits[8] id=3)
             .any(|n| matches!(n.payload, NodePayload::Sel { .. }));
         assert!(!has_sel, "expected sel to be DCE'd; got:\n{}", out_text);
 
-        // Sanity-check equivalence on a small, representative sample set.
-        let mut p0 = ir_parser::Parser::new(ir_text);
-        let pkg0 = p0.parse_and_validate_package().expect("parse/validate");
-        let f0 = pkg0.get_fn("cone").unwrap();
-        let f1 = f;
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "cone",
+            &[1, 8, 8],
+            /* random_samples= */ 2000,
+        );
+    }
 
-        let ys: [u64; 4] = [0, 1, 2, 255];
-        for a in 0u64..=1u64 {
-            for x in 0u64..=255u64 {
-                for y in ys {
-                    let args = [
-                        IrValue::make_ubits(1, a).unwrap(),
-                        IrValue::make_ubits(8, x).unwrap(),
-                        IrValue::make_ubits(8, y).unwrap(),
-                    ];
-                    let got0 = match eval_fn(f0, &args) {
-                        FnEvalResult::Success(s) => s.value.to_bool().unwrap(),
-                        FnEvalResult::Failure(e) => panic!("unexpected eval failure: {:?}", e),
-                    };
-                    let got1 = match eval_fn(f1, &args) {
-                        FnEvalResult::Success(s) => s.value.to_bool().unwrap(),
-                        FnEvalResult::Failure(e) => panic!("unexpected eval failure: {:?}", e),
-                    };
-                    assert_eq!(got0, got1, "mismatch at a={} x={} y={}", a, x, y);
-                }
-            }
-        }
+    #[test]
+    fn aug_opt_rewrites_lsb_of_shll_to_shift_is_zero() {
+        let ir_text = r#"package shll_lsb
+
+top fn f(x: bits[8] id=1, s: bits[4] id=2) -> bits[1] {
+  shll.3: bits[8] = shll(x, s, id=3)
+  ret bit_slice.4: bits[1] = bit_slice(shll.3, start=0, width=1, id=4)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("f"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+            },
+        )
+        .expect("aug opt");
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "f",
+            &[8, 4],
+            /* random_samples= */ 2000,
+        );
     }
 }

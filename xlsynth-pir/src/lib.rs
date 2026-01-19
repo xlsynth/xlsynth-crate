@@ -38,3 +38,6 @@ pub mod simple_rebase;
 pub mod structural_similarity;
 
 pub use aug_opt::{AugOptOptions, run_aug_opt_over_ir_text};
+
+#[cfg(test)]
+pub mod test_utils;
