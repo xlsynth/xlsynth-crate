@@ -5,6 +5,7 @@
 //! Functionality that is purely related to the XLS IR, i.e. parsing,
 //! representing, querying/manipulating, etc.
 
+pub mod aug_opt;
 pub mod corners;
 pub mod dce;
 pub mod desugar_extensions;
@@ -35,3 +36,5 @@ pub mod node_hashing;
 pub mod prove_equiv_via_toolchain;
 pub mod simple_rebase;
 pub mod structural_similarity;
+
+pub use aug_opt::{AugOptOptions, run_aug_opt_over_ir_text};

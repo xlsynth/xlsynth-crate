@@ -194,6 +194,7 @@ pub fn process_ir_path_for_cli(
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
             adder_mapping: options.adder_mapping,
             mul_adder_mapping: options.mul_adder_mapping,
+            aug_opt: Default::default(),
         },
     )
     .unwrap_or_else(|err| {

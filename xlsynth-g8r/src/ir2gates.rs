@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::gatify::ir2gate;
+use xlsynth_pir::aug_opt::AugOptOptions;
 use xlsynth_pir::desugar_extensions;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
@@ -13,6 +14,7 @@ pub struct Ir2GatesOptions {
     pub enable_rewrite_carry_out: bool,
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
     pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
+    pub aug_opt: AugOptOptions,
 }
 
 pub struct Ir2GatesOutput {
@@ -34,9 +36,11 @@ pub fn ir2gates_from_ir_text(
     top: Option<&str>,
     options: Ir2GatesOptions,
 ) -> Result<Ir2GatesOutput, String> {
+    let mut ir_text_for_processing: String = ir_text.to_string();
+
     // Parse with PIR for lowering.
-    let mut parser = ir_parser::Parser::new(ir_text);
-    let pir_package = parser
+    let mut parser = ir_parser::Parser::new(&ir_text_for_processing);
+    let mut pir_package = parser
         .parse_and_validate_package()
         .map_err(|e| format!("PIR parse/validate failed: {e}"))?;
 
@@ -49,6 +53,18 @@ pub fn ir2gates_from_ir_text(
             pir_top.name.clone()
         }
     };
+
+    if options.aug_opt.enable {
+        ir_text_for_processing = xlsynth_pir::aug_opt::run_aug_opt_over_ir_text(
+            &ir_text_for_processing,
+            Some(&top_fn_name),
+            options.aug_opt,
+        )?;
+        let mut parser = ir_parser::Parser::new(&ir_text_for_processing);
+        pir_package = parser
+            .parse_and_validate_package()
+            .map_err(|e| format!("PIR parse/validate failed after aug_opt: {e}"))?;
+    }
 
     let pir_fn = pir_package
         .get_fn(&top_fn_name)
