@@ -50,7 +50,7 @@ fuzz_target!(|sample: FuzzSample| {
             adder_mapping: ir2gate_utils::AdderMapping::default(),
             mul_adder_mapping: None,
             range_info: None,
-            enable_rewrite_carry_out: false,
+            enable_rewrite_carry_out: true,
         },
     );
 
@@ -66,7 +66,7 @@ fuzz_target!(|sample: FuzzSample| {
             adder_mapping: ir2gate_utils::AdderMapping::default(),
             mul_adder_mapping: None,
             range_info: None,
-            enable_rewrite_carry_out: false,
+            enable_rewrite_carry_out: true,
         },
     );
 
