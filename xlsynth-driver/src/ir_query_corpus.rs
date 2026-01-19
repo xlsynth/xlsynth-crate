@@ -32,7 +32,9 @@ fn collect_ir_files_recursively(root: &Path, out: &mut Vec<PathBuf>) -> std::io:
 fn required_opname_prefilter_tokens(query: &ir_query::QueryExpr) -> Vec<String> {
     fn walk(expr: &ir_query::QueryExpr, out: &mut Vec<String>) {
         match expr {
-            ir_query::QueryExpr::Placeholder(_) | ir_query::QueryExpr::Number(_) => {}
+            ir_query::QueryExpr::Placeholder(_)
+            | ir_query::QueryExpr::Number(_)
+            | ir_query::QueryExpr::Ellipsis => {}
             ir_query::QueryExpr::Matcher(m) => {
                 if let ir_query::MatcherKind::OpName(op) = &m.kind {
                     // Quick and effective heuristic: if the query contains an explicit

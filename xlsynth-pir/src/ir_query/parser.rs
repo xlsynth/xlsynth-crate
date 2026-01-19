@@ -19,6 +19,17 @@ impl<'a> QueryParser<'a> {
 
     pub fn parse_expr(&mut self) -> Result<QueryExpr, String> {
         self.skip_ws();
+
+        // Variadic wildcard used inside operator arg lists, e.g. `nor(..., a, ...)`.
+        if self
+            .bytes
+            .get(self.pos..)
+            .is_some_and(|s| s.starts_with(b"..."))
+        {
+            self.pos += 3;
+            return Ok(QueryExpr::Ellipsis);
+        }
+
         match self.peek() {
             Some(b'$') => {
                 self.bump();

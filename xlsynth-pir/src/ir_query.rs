@@ -17,6 +17,13 @@ use self::parser::QueryParser;
 pub enum QueryExpr {
     Placeholder(String),
     Number(u64),
+    /// Variadic wildcard for matching n-ary operand lists in operator matchers.
+    ///
+    /// Used in query syntax as `...` inside an operator argument list, e.g.:
+    /// - `nor(..., a, ...)` matches any-arity `nor` whose operands contain `a`.
+    /// - `nor(a, ...)` matches any-arity `nor` whose first operand is `a`.
+    /// - `nor(..., a)` matches any-arity `nor` whose last operand is `a`.
+    Ellipsis,
     Matcher(MatcherExpr),
 }
 
@@ -103,6 +110,9 @@ pub fn parse_query(input: &str) -> Result<QueryExpr, String> {
     if !parser.is_done() {
         return Err(parser.error_at("unexpected trailing input"));
     }
+    if matches!(expr, QueryExpr::Ellipsis) {
+        return Err("ellipsis '...' is only valid inside an operator argument list".to_string());
+    }
     Ok(expr)
 }
 
@@ -138,6 +148,7 @@ fn match_solutions(
     bindings: &Bindings,
 ) -> Vec<Bindings> {
     match expr {
+        QueryExpr::Ellipsis => vec![],
         QueryExpr::Placeholder(name) => {
             if name == "_" {
                 // Wildcard: matches any node without creating/consulting a binding.
@@ -274,6 +285,7 @@ fn match_literal_solutions(
                 vec![]
             }
         }
+        QueryExpr::Ellipsis => vec![],
         QueryExpr::Matcher(_) => vec![],
     }
 }
@@ -346,6 +358,9 @@ fn match_args_solutions(
     if args.is_empty() {
         return vec![bindings.clone()];
     }
+    if args.iter().any(|a| matches!(a, QueryExpr::Ellipsis)) {
+        return match_args_with_ellipsis_solutions(args, operands, f, users, bindings);
+    }
     if args.len() == 1 {
         let mut out = Vec::new();
         for operand in operands {
@@ -368,6 +383,70 @@ fn match_args_solutions(
         partials = next;
     }
     partials
+}
+
+fn match_args_with_ellipsis_solutions(
+    pattern: &[QueryExpr],
+    operands: &[ir::NodeRef],
+    f: &ir::Fn,
+    users: &HashMap<ir::NodeRef, HashSet<ir::NodeRef>>,
+    bindings: &Bindings,
+) -> Vec<Bindings> {
+    fn non_ellipsis_count(p: &[QueryExpr]) -> usize {
+        p.iter()
+            .filter(|e| !matches!(e, QueryExpr::Ellipsis))
+            .count()
+    }
+
+    fn go(
+        pattern: &[QueryExpr],
+        operands: &[ir::NodeRef],
+        f: &ir::Fn,
+        users: &HashMap<ir::NodeRef, HashSet<ir::NodeRef>>,
+        pi: usize,
+        oi: usize,
+        bindings: &Bindings,
+    ) -> Vec<Bindings> {
+        // Prune: must have enough operands left to match remaining non-ellipsis
+        // pattern.
+        let remaining_non_ellipsis = non_ellipsis_count(&pattern[pi..]);
+        let remaining_operands = operands.len().saturating_sub(oi);
+        if remaining_non_ellipsis > remaining_operands {
+            return vec![];
+        }
+
+        if pi == pattern.len() {
+            return if oi == operands.len() {
+                vec![bindings.clone()]
+            } else {
+                vec![]
+            };
+        }
+
+        match &pattern[pi] {
+            QueryExpr::Ellipsis => {
+                // Match any number of operands (including zero).
+                let mut out = Vec::new();
+                for k in oi..=operands.len() {
+                    out.extend(go(pattern, operands, f, users, pi + 1, k, bindings));
+                }
+                out
+            }
+            other => {
+                if oi >= operands.len() {
+                    return vec![];
+                }
+                let mut out = Vec::new();
+                let bs = match_solutions(other, f, users, operands[oi], bindings);
+                for b in bs {
+                    out.extend(go(pattern, operands, f, users, pi + 1, oi + 1, &b));
+                }
+                out
+            }
+        }
+    }
+
+    go(pattern, operands, f, users, 0, 0, bindings)
 }
 
 /// Checks whether the node payload satisfies a matcher kind.
@@ -975,5 +1054,51 @@ fn main(x: bits[4] id=1) -> bits[1] {
             "unexpected error: {}",
             err
         );
+    }
+
+    #[test]
+    fn find_matches_variadic_ellipsis_in_nary_ops() {
+        let pkg_text = r#"package test
+
+top fn f(a: bits[1] id=1, b: bits[1] id=2, c: bits[1] id=3) -> bits[1] {
+  nor.4: bits[1] = nor(b, a, c, id=4)
+  and.5: bits[1] = and(a, nor.4, id=5)
+  nor.6: bits[1] = nor(a, b, c, id=6)
+  and.7: bits[1] = and(a, nor.6, id=7)
+  nor.8: bits[1] = nor(b, c, a, id=8)
+  ret and.9: bits[1] = and(a, nor.8, id=9)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+
+        // Contains `a` anywhere in the NOR operands.
+        let q_contains = parse_query("and(a, nor(..., a, ...))").unwrap();
+        let matches = find_matching_nodes(f, &q_contains);
+        let mut ids: Vec<String> = matches
+            .into_iter()
+            .map(|node_ref| ir::node_textual_id(f, node_ref))
+            .collect();
+        ids.sort();
+        assert_eq!(ids, vec!["and.5", "and.7", "and.9"]);
+
+        // `nor(a, ...)` means `a` is the first NOR operand (and the same `a` as
+        // the other AND operand).
+        let q_first = parse_query("and(a, nor(a, ...))").unwrap();
+        let ids: Vec<String> = find_matching_nodes(f, &q_first)
+            .into_iter()
+            .map(|node_ref| ir::node_textual_id(f, node_ref))
+            .collect();
+        assert_eq!(ids, vec!["and.7"]);
+
+        // `nor(..., a)` means `a` is the last NOR operand (and the same `a` as
+        // the other AND operand).
+        let q_last = parse_query("and(a, nor(..., a))").unwrap();
+        let ids: Vec<String> = find_matching_nodes(f, &q_last)
+            .into_iter()
+            .map(|node_ref| ir::node_textual_id(f, node_ref))
+            .collect();
+        assert_eq!(ids, vec!["and.9"]);
     }
 }

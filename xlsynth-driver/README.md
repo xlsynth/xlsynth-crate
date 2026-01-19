@@ -460,6 +460,10 @@ Query expression basics:
 - `$anymul(...)` matches any multiply op (e.g., `umul`, `smul`, `umulp`, `smulp`).
 - `$users(pattern)` matches any node that consumes a node matching `pattern`.
 - Concrete operator matchers like `add(...)`, `sub(...)`, `and(...)`, etc. match nodes with that exact IR operator name.
+- `...` is a variadic wildcard usable inside operator argument lists for n-ary ops:
+  - `nor(..., a, ...)` means `a` appears in *some* operand position.
+  - `nor(a, ...)` means `a` is the *first* operand.
+  - `nor(..., a)` means `a` is the *last* operand.
 - Placeholders like `x` and `y` match any node (repeated placeholders must bind the same node).
 - The special placeholder `_` matches any node but does not create a binding (wildcard).
 - User-count constraints can be added as `[Nu]` (e.g., `[1u]` means exactly one user in the function).
