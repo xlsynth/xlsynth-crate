@@ -9,9 +9,9 @@
 //! - **Bounded effort**: intended as a fast front-end; keep rounds small.
 //! - **Deterministic**: stable iteration order and stable outputs.
 
-use crate::desugar_extensions;
 use crate::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
 use crate::ir_parser;
+use crate::ir_utils;
 
 #[derive(Debug, Clone, Copy)]
 pub struct AugOptOptions {
@@ -36,6 +36,10 @@ pub fn run_aug_opt_over_ir_text(
     if !options.enable {
         return Ok(ir_text.to_string());
     }
+
+    // Basis-only contract: aug-opt does not support PIR extension ops.
+    // Fail fast with a clear error before libxls parsing.
+    verify_no_extension_ops_in_ir_text(ir_text)?;
 
     // Start by letting libxls do its normal canonicalization.
     let mut cur_pkg = xlsynth::IrPackage::parse_ir(ir_text, None)
@@ -80,9 +84,11 @@ pub fn run_aug_opt_over_ir_text(
             }
         }
 
+        // Verify we did not introduce extension ops (basis-only contract).
+        verify_no_extension_ops_in_package(&pir_pkg)?;
+
         // Emit basis XLS IR text and hand it back to libxls.
-        let lowered_text = desugar_extensions::emit_package_as_xls_ir_text(&pir_pkg)
-            .map_err(|e| format!("aug_opt: emit_package_as_xls_ir_text failed: {e}"))?;
+        let lowered_text = pir_pkg.to_string();
 
         let mut next_pkg = xlsynth::IrPackage::parse_ir(&lowered_text, None)
             .map_err(|e| format!("aug_opt: xlsynth parse_ir (post-rewrite) failed: {e}"))?;
@@ -96,9 +102,44 @@ pub fn run_aug_opt_over_ir_text(
     Ok(cur_pkg.to_string())
 }
 
+fn verify_no_extension_ops_in_ir_text(ir_text: &str) -> Result<(), String> {
+    let mut pir_parser = ir_parser::Parser::new(ir_text);
+    let pir_pkg = pir_parser
+        .parse_and_validate_package()
+        .map_err(|e| format!("aug_opt: PIR parse/validate failed: {e}"))?;
+    verify_no_extension_ops_in_package(&pir_pkg)
+}
+
+fn verify_no_extension_ops_in_package(pkg: &ir::Package) -> Result<(), String> {
+    for member in &pkg.members {
+        match member {
+            ir::PackageMember::Function(f) => verify_no_extension_ops_in_fn(f)?,
+            ir::PackageMember::Block { func, .. } => verify_no_extension_ops_in_fn(func)?,
+        }
+    }
+    Ok(())
+}
+
+fn verify_no_extension_ops_in_fn(f: &ir::Fn) -> Result<(), String> {
+    for node in &f.nodes {
+        if node.payload.is_extension_op() {
+            return Err(format!(
+                "aug_opt: basis-only: found extension op in fn '{}': text_id={} payload={:?}",
+                f.name, node.text_id, node.payload
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn apply_basis_rewrites_to_fn(f: &ir::Fn) -> ir::Fn {
     let mut cloned = f.clone();
     let _rewrites = rewrite_guarded_sel_ne_literal1_nor(&mut cloned);
+    // Ensure textual IR is defs-before-uses by reordering body nodes into a
+    // topological order (while preserving PIR layout invariants). This makes
+    // it safe for rewrites to append new nodes.
+    ir_utils::compact_and_toposort_in_place(&mut cloned)
+        .expect("aug_opt: compact_and_toposort_in_place failed");
     cloned
 }
 
