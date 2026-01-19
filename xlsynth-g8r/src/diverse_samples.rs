@@ -279,6 +279,7 @@ pub fn select_ir_diverse_samples_with_options(
                     enable_rewrite_carry_out: false,
                     adder_mapping: AdderMapping::default(),
                     mul_adder_mapping: None,
+                    aug_opt: Default::default(),
                 },
             ) {
                 Ok(o) => o,

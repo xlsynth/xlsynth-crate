@@ -41,6 +41,7 @@ fn run_ir2gates_like_flow_for_umul(width: usize) {
             enable_rewrite_carry_out: false,
             adder_mapping: AdderMapping::default(),
             mul_adder_mapping: None,
+            aug_opt: Default::default(),
         },
     )
     .unwrap();

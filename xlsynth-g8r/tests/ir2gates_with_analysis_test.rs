@@ -28,6 +28,7 @@ top fn main(a0: bits[8] id=1, a1: bits[8] id=2, a2: bits[8] id=3, a3: bits[8] id
             enable_rewrite_carry_out: false,
             adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::default(),
             mul_adder_mapping: None,
+            aug_opt: Default::default(),
         },
     )
     .unwrap();
@@ -76,6 +77,7 @@ top fn f(x: bits[32] id=1, y: bits[7] id=2, z: bits[32] id=3) -> bits[1] {
             enable_rewrite_carry_out: false,
             adder_mapping: AdderMapping::default(),
             mul_adder_mapping: None,
+            aug_opt: Default::default(),
         },
     )
     .unwrap();
@@ -116,6 +118,7 @@ top fn f(x: bits[32] id=1, y: bits[7] id=2, z: bits[32] id=3) -> bits[1] {
             enable_rewrite_carry_out: false,
             adder_mapping: AdderMapping::default(),
             mul_adder_mapping: None,
+            aug_opt: Default::default(),
         },
     )
     .unwrap();
@@ -130,6 +133,7 @@ top fn f(x: bits[32] id=1, y: bits[7] id=2, z: bits[32] id=3) -> bits[1] {
             enable_rewrite_carry_out: false,
             adder_mapping: AdderMapping::default(),
             mul_adder_mapping: None,
+            aug_opt: Default::default(),
         },
     )
     .unwrap();

@@ -278,6 +278,7 @@ fn ir_to_gatefn_with_stats(
             enable_rewrite_carry_out,
             adder_mapping: AdderMapping::default(),
             mul_adder_mapping: None,
+            aug_opt: Default::default(),
         },
     )
     .unwrap_or_else(|err| {
