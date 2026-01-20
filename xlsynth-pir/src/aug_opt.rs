@@ -278,6 +278,9 @@ fn apply_basis_rewrites_to_fn(f: &ir::Fn) -> (ir::Fn, usize) {
     rewrites = rewrites.saturating_add(rewrite_sel_on_sign_of_abs_like_mux_to_passthrough_x_bit(
         &mut cloned,
     ));
+    rewrites = rewrites.saturating_add(rewrite_bit_slice_of_abs_like_sel_nand_msb_guard_to_x(
+        &mut cloned,
+    ));
     rewrites = rewrites.saturating_add(rewrite_or_reduce_of_select_between_x_and_neg_to_or_reduce(
         &mut cloned,
     ));
@@ -1076,6 +1079,126 @@ fn rewrite_sel_on_sign_of_abs_like_mux_to_passthrough_x_bit(f: &mut ir::Fn) -> u
         };
         f.nodes[node_index].ty = Type::Bits(1);
         rewrites += 1;
+    }
+
+    rewrites
+}
+
+/// Rewrite bit-slices taken from an "abs-like" mux when the mux is provably
+/// redundant for all inputs.
+///
+/// Matches the pattern:
+/// - `x = concat(0, inner)` (so `x < 2^(W-1)`)
+/// - `nx = neg(x)`
+/// - `g = nand(p, not(bit_slice(nx, start=W-1, width=1)))`
+/// - `y = sel(g, cases=[nx, x])`
+/// - `bit_slice(y, start=k, width=1)`
+///
+/// Observation:
+/// - if `x == 0`, then `nx == 0`, so `sel(g, [nx, x]) == x` regardless of `g`
+/// - if `x != 0`, then `nx[W-1] == 1` (because `nx = 2^W - x` and `x <
+///   2^(W-1)`), hence `not(nx[W-1]) == 0`, `g == nand(p, 0) == 1`, and the mux
+///   selects `x`
+///
+/// Therefore, for all inputs, `y == x`, and any `bit_slice(y,k,1)` can be
+/// replaced by a slice of `x` (or `inner` for low bits).
+fn rewrite_bit_slice_of_abs_like_sel_nand_msb_guard_to_x(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+
+    for slice_index in 0..f.nodes.len() {
+        let NodePayload::BitSlice {
+            arg: y,
+            start: k,
+            width,
+        } = f.nodes[slice_index].payload.clone()
+        else {
+            continue;
+        };
+        if width != 1 || f.nodes[slice_index].ty != Type::Bits(1) {
+            continue;
+        }
+
+        let Some(m) = match_select_between_x_and_neg(f, y) else {
+            continue;
+        };
+        let x = m.x;
+
+        let Some(cx) = match_concat_zero_msb(f, x) else {
+            continue;
+        };
+
+        let NodePayload::Sel {
+            selector: g,
+            cases,
+            default,
+        } = &f.get_node(y).payload
+        else {
+            continue;
+        };
+        if default.is_some() || cases.len() != 2 {
+            continue;
+        }
+
+        // Identify nx = neg(x) among the cases.
+        let mut nx = None;
+        for &c in cases {
+            if let NodePayload::Unop(Unop::Neg, inner) = f.get_node(c).payload {
+                if inner == x {
+                    nx = Some(c);
+                    break;
+                }
+            }
+        }
+        let Some(nx) = nx else {
+            continue;
+        };
+
+        // Match g = nand(p, not(msb(nx))) up to commutativity.
+        let NodePayload::Nary(NaryOp::Nand, ops) = &f.get_node(*g).payload else {
+            continue;
+        };
+        if ops.len() != 2 {
+            continue;
+        }
+        let mut saw_not_msb = false;
+        for &op in ops {
+            let NodePayload::Unop(Unop::Not, inner) = f.get_node(op).payload else {
+                continue;
+            };
+            let NodePayload::BitSlice { arg, start, width } = f.get_node(inner).payload else {
+                continue;
+            };
+            if width != 1 || arg != nx {
+                continue;
+            }
+            let w = f.get_node_ty(nx).bit_count();
+            if w == 0 || start != w.saturating_sub(1) {
+                continue;
+            }
+            saw_not_msb = true;
+            break;
+        }
+        if !saw_not_msb {
+            continue;
+        }
+
+        // Rewrite: slice from inner for low bits, or literal 0 for the forced MSB.
+        let inner_w = f.get_node_ty(cx.inner).bit_count();
+        if k < inner_w {
+            f.nodes[slice_index].payload = NodePayload::BitSlice {
+                arg: cx.inner,
+                start: k,
+                width: 1,
+            };
+            f.nodes[slice_index].ty = Type::Bits(1);
+            rewrites += 1;
+        } else if k == inner_w {
+            let lit0 =
+                IrValue::make_ubits(1, 0).expect("ubits literal construction should succeed");
+            f.nodes[slice_index].payload = NodePayload::Literal(lit0);
+            f.nodes[slice_index].ty = Type::Bits(1);
+            rewrites += 1;
+        }
     }
 
     rewrites
@@ -2048,6 +2171,78 @@ top fn cone(leaf_110: bits[24] id=1, leaf_114: bits[1] id=2) -> bits[1] {
         assert!(
             matches!(f.get_node(*arg).payload, NodePayload::GetParam(_)),
             "expected ret slice arg to be param; got:\n{out_text}"
+        );
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "cone",
+            &[24, 1],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    /// Regression: a nand/msb-guarded select between `x` and `neg(x)` (for
+    /// `x=concat(0, inner)`) is always `x`, and downstream bit-slices should be
+    /// rewritten to slices of `inner`.
+    #[test]
+    fn aug_opt_regression_abs_like_sel_nand_msb_guard_slices_to_inner() {
+        let ir_text = r#"package bool_cone
+
+top fn cone(leaf_110: bits[24] id=1, leaf_114: bits[1] id=2) -> bits[1] {
+  literal.3: bits[1] = literal(value=0, id=3)
+  concat.4: bits[25] = concat(literal.3, leaf_110, id=4)
+  neg.5: bits[25] = neg(concat.4, id=5)
+  bit_slice.19: bits[1] = bit_slice(neg.5, start=24, width=1, id=19)
+  not.31: bits[1] = not(bit_slice.19, id=31)
+  nand.32: bits[1] = nand(leaf_114, not.31, id=32)
+  sel.17: bits[25] = sel(nand.32, cases=[neg.5, concat.4], id=17)
+  bit_slice.11: bits[1] = bit_slice(sel.17, start=5, width=1, id=11)
+  bit_slice.10: bits[1] = bit_slice(sel.17, start=6, width=1, id=10)
+  not.12: bits[1] = not(bit_slice.11, id=12)
+  ret nor.13: bits[1] = nor(bit_slice.10, not.12, id=13)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                run_xlsynth_opt_before: false,
+                run_xlsynth_opt_after: false,
+            },
+        )
+        .expect("aug opt");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+
+        // Structural check: the two bit-slices feeding the final nor/not should
+        // come directly from leaf_110 (not from the sel).
+        let mut saw_slice5 = false;
+        let mut saw_slice6 = false;
+        for node in &f.nodes {
+            let NodePayload::BitSlice { arg, start, width } = &node.payload else {
+                continue;
+            };
+            if *width != 1 {
+                continue;
+            }
+            if !matches!(f.get_node(*arg).payload, NodePayload::GetParam(_)) {
+                continue;
+            }
+            if *start == 5 {
+                saw_slice5 = true;
+            } else if *start == 6 {
+                saw_slice6 = true;
+            }
+        }
+        assert!(
+            saw_slice5 && saw_slice6,
+            "expected slices of leaf_110[5] and leaf_110[6]; got:\n{out_text}"
         );
 
         quickcheck_ir_text_fn_equivalence_ubits_le64(
