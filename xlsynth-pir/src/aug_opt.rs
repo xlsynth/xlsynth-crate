@@ -281,6 +281,8 @@ fn apply_basis_rewrites_to_fn(f: &ir::Fn) -> (ir::Fn, usize) {
     rewrites = rewrites.saturating_add(rewrite_bit_slice_of_abs_like_sel_nand_msb_guard_to_x(
         &mut cloned,
     ));
+    rewrites = rewrites.saturating_add(rewrite_cmp_of_sel_with_literal_to_sel_of_cmp(&mut cloned));
+    rewrites = rewrites.saturating_add(rewrite_ugt_pow2_msb_to_and_msb_and_any_low(&mut cloned));
     rewrites = rewrites.saturating_add(rewrite_or_reduce_of_select_between_x_and_neg_to_or_reduce(
         &mut cloned,
     ));
@@ -1199,6 +1201,138 @@ fn rewrite_bit_slice_of_abs_like_sel_nand_msb_guard_to_x(f: &mut ir::Fn) -> usiz
             f.nodes[slice_index].ty = Type::Bits(1);
             rewrites += 1;
         }
+    }
+
+    rewrites
+}
+
+/// Distribute unsigned comparisons over a 1-bit mux when comparing against a
+/// literal.
+///
+/// This is a canonicalization that tends to help downstream AIG generation:
+/// boolean minimizers can then simplify each arm independently.
+///
+/// Matches:
+/// `cmp(sel(s, cases=[a, b]), literal_k)`  →
+/// `sel(s, cases=[cmp(a, literal_k), cmp(b, literal_k)])`
+///
+/// Supported `cmp`: `ult`, `ule`, `ugt`, `uge`.
+fn rewrite_cmp_of_sel_with_literal_to_sel_of_cmp(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+
+    for node_index in 0..f.nodes.len() {
+        let NodePayload::Binop(op, lhs, rhs) = f.nodes[node_index].payload.clone() else {
+            continue;
+        };
+        match op {
+            Binop::Ult | Binop::Ule | Binop::Ugt | Binop::Uge => {}
+            _ => continue,
+        }
+        if f.nodes[node_index].ty != Type::Bits(1) {
+            continue;
+        }
+
+        // Ensure RHS is a literal (no need to retain a borrow across push_node calls).
+        let NodePayload::Literal(_) = &f.get_node(rhs).payload else {
+            continue;
+        };
+        // Keep typing strict: literal width must match lhs width.
+        if *f.get_node_ty(lhs) != *f.get_node_ty(rhs) {
+            continue;
+        }
+
+        let NodePayload::Sel {
+            selector,
+            cases,
+            default,
+        } = f.get_node(lhs).payload.clone()
+        else {
+            continue;
+        };
+        if default.is_some() || cases.len() != 2 {
+            continue;
+        }
+        if *f.get_node_ty(selector) != Type::Bits(1) {
+            continue;
+        }
+        let a = cases[0];
+        let b = cases[1];
+        if *f.get_node_ty(a) != *f.get_node_ty(lhs) || *f.get_node_ty(b) != *f.get_node_ty(lhs) {
+            continue;
+        }
+
+        // Reuse the same literal node for both compares.
+        let cmp_a = push_node(f, Type::Bits(1), NodePayload::Binop(op, a, rhs));
+        let cmp_b = push_node(f, Type::Bits(1), NodePayload::Binop(op, b, rhs));
+        f.nodes[node_index].payload = NodePayload::Sel {
+            selector,
+            cases: vec![cmp_a, cmp_b],
+            default: None,
+        };
+        f.nodes[node_index].ty = Type::Bits(1);
+        rewrites += 1;
+    }
+
+    rewrites
+}
+
+/// Rewrite:
+///
+/// `ugt(x, 2^(W-1))` →
+/// `and(bit_slice(x, W-1, 1), or_reduce(bit_slice(x, 0, W-1)))`
+///
+/// For unsigned `W`-bit values, `x > 100..0` iff `msb(x)=1` and at least one
+/// lower bit is 1.
+fn rewrite_ugt_pow2_msb_to_and_msb_and_any_low(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+
+    for node_index in 0..f.nodes.len() {
+        let NodePayload::Binop(Binop::Ugt, x, k_node) = f.nodes[node_index].payload.clone() else {
+            continue;
+        };
+        if f.nodes[node_index].ty != Type::Bits(1) {
+            continue;
+        }
+        let w = f.get_node_ty(x).bit_count();
+        if w < 2 {
+            continue;
+        }
+        if *f.get_node_ty(x) != *f.get_node_ty(k_node) {
+            continue;
+        }
+        let NodePayload::Literal(k_lit) = &f.get_node(k_node).payload else {
+            continue;
+        };
+        let Some(k_u64) = k_lit.to_u64().ok() else {
+            continue;
+        };
+        let want = 1u64.checked_shl((w - 1) as u32);
+        if want != Some(k_u64) {
+            continue;
+        }
+
+        let msb = push_node(
+            f,
+            Type::Bits(1),
+            NodePayload::BitSlice {
+                arg: x,
+                start: w - 1,
+                width: 1,
+            },
+        );
+        let low = push_node(
+            f,
+            Type::Bits(w - 1),
+            NodePayload::BitSlice {
+                arg: x,
+                start: 0,
+                width: w - 1,
+            },
+        );
+        let any_low = push_node(f, Type::Bits(1), NodePayload::Unop(Unop::OrReduce, low));
+        f.nodes[node_index].payload = NodePayload::Nary(NaryOp::And, vec![msb, any_low]);
+        f.nodes[node_index].ty = Type::Bits(1);
+        rewrites += 1;
     }
 
     rewrites
@@ -2250,6 +2384,64 @@ top fn cone(leaf_110: bits[24] id=1, leaf_114: bits[1] id=2) -> bits[1] {
             &out_text,
             "cone",
             &[24, 1],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    /// Regression: `ugt(sel(s, [a,b]), 4)` for 3-bit values should simplify to
+    /// a small boolean cone equivalent to `msb(sel) & (sel[0] | sel[1])`.
+    #[test]
+    fn aug_opt_regression_ugt_sel_literal4_three_bits_simplifies() {
+        let ir_text = r#"package bool_cone
+
+top fn cone(leaf_81: bits[1] id=1, leaf_205: bits[3] id=2, leaf_206: bits[3] id=3) -> bits[1] {
+  sel.4: bits[3] = sel(leaf_81, cases=[leaf_205, leaf_206], id=4)
+  literal.5: bits[3] = literal(value=4, id=5)
+  ret ugt.6: bits[1] = ugt(sel.4, literal.5, id=6)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                run_xlsynth_opt_before: false,
+                run_xlsynth_opt_after: false,
+            },
+        )
+        .expect("aug opt");
+
+        // Structural check: we expect *some* `or_reduce(bit_slice(.., width=2))`
+        // introduced by the `ugt(x, 4)` peephole on each arm after distribution.
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+
+        let mut saw_or_reduce_w2 = false;
+        for node in &f.nodes {
+            let NodePayload::Unop(Unop::OrReduce, arg) = &node.payload else {
+                continue;
+            };
+            let NodePayload::BitSlice { width, .. } = &f.get_node(*arg).payload else {
+                continue;
+            };
+            if *width == 2 {
+                saw_or_reduce_w2 = true;
+                break;
+            }
+        }
+        assert!(
+            saw_or_reduce_w2,
+            "expected or_reduce(bit_slice(_, width=2)) from ugt(x,4) rewrite; got:\n{out_text}"
+        );
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "cone",
+            &[1, 3, 3],
             /* random_samples= */ 2000,
         );
     }
