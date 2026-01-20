@@ -293,6 +293,15 @@ impl AppExt for clap::Command {
         (self as clap::Command)
             .add_bool_arg("fold", "Fold the gate representation")
             .add_bool_arg("hash", "Hash the gate representation")
+            .arg(
+                clap::Arg::new("aug_opt")
+                    .long("aug-opt")
+                    .value_name("BOOL")
+                    .action(ArgAction::Set)
+                    .value_parser(["true", "false"])
+                    .num_args(1)
+                    .help("Enable the augmented optimizer sandwich (default: false)"),
+            )
             .add_bool_arg(
                 "enable-rewrite-carry-out",
                 "Enable carry-out rewrite in prep_for_gatify (introduces ext_carry_out)",

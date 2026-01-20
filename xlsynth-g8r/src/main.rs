@@ -88,6 +88,7 @@ fn main() {
         enable_rewrite_carry_out: false,
         adder_mapping: AdderMapping::default(),
         mul_adder_mapping: None,
+        aug_opt: Default::default(),
         fraig: args.fraig,
         emit_independent_op_stats: false,
         emit_netlist: args.emit_netlist,

@@ -24,6 +24,7 @@ use crate::check_equivalence;
 use crate::gatify::ir2gate;
 use crate::ir2gates;
 use crate::use_count::get_id_to_use_count;
+use xlsynth_pir::aug_opt::AugOptOptions;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_utils;
 
@@ -138,6 +139,7 @@ pub struct Options {
     pub enable_rewrite_carry_out: bool,
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
     pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
+    pub aug_opt: AugOptOptions,
     pub fraig: bool,
     pub emit_independent_op_stats: bool,
 
@@ -194,7 +196,7 @@ pub fn process_ir_path_for_cli(
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
             adder_mapping: options.adder_mapping,
             mul_adder_mapping: options.mul_adder_mapping,
-            aug_opt: Default::default(),
+            aug_opt: options.aug_opt,
         },
     )
     .unwrap_or_else(|err| {

@@ -26,6 +26,7 @@ use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::process_ir_path;
 use xlsynth_g8r::use_count::get_id_to_use_count;
 use xlsynth_pir::fuzz_utils::arbitrary_irbits;
+use xlsynth_pir::AugOptOptions;
 
 #[derive(Debug, Clone, Copy)]
 struct CutDbRewriteBounds {
@@ -38,6 +39,7 @@ fn ir2gates(
     quiet: bool,
     fold: bool,
     hash: bool,
+    aug_opt: bool,
     enable_rewrite_carry_out: bool,
     adder_mapping: AdderMapping,
     mul_adder_mapping: Option<AdderMapping>,
@@ -62,6 +64,10 @@ fn ir2gates(
         enable_rewrite_carry_out,
         adder_mapping,
         mul_adder_mapping,
+        aug_opt: AugOptOptions {
+            enable: aug_opt,
+            ..Default::default()
+        },
         fraig,
         emit_independent_op_stats,
         quiet,
@@ -94,6 +100,11 @@ fn ir2gates(
 
 pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
     let input_file = matches.get_one::<String>("ir_input_file").unwrap();
+    let aug_opt = match matches.get_one::<String>("aug_opt").map(|s| s.as_str()) {
+        Some("true") => true,
+        Some("false") => false,
+        _ => false, // default is false
+    };
     let quiet = match matches.get_one::<String>("quiet").map(|s| s.as_str()) {
         Some("true") => true,
         Some("false") => false,
@@ -224,6 +235,7 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         quiet,
         fold,
         hash,
+        aug_opt,
         enable_rewrite_carry_out,
         adder_mapping,
         mul_adder_mapping,
@@ -246,6 +258,7 @@ fn ir_to_gatefn_with_stats(
     input_file: &std::path::Path,
     fold: bool,
     hash: bool,
+    aug_opt: bool,
     enable_rewrite_carry_out: bool,
     fraig: bool,
     toggle_sample_count: usize,
@@ -278,7 +291,10 @@ fn ir_to_gatefn_with_stats(
             enable_rewrite_carry_out,
             adder_mapping: AdderMapping::default(),
             mul_adder_mapping: None,
-            aug_opt: Default::default(),
+            aug_opt: AugOptOptions {
+                enable: aug_opt,
+                ..Default::default()
+            },
         },
     )
     .unwrap_or_else(|err| {
@@ -403,6 +419,11 @@ fn ir_to_gatefn_with_stats(
 
 pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
     let input_file = matches.get_one::<String>("ir_input_file").unwrap();
+    let aug_opt = match matches.get_one::<String>("aug_opt").map(|s| s.as_str()) {
+        Some("true") => true,
+        Some("false") => false,
+        _ => false, // default is false
+    };
     let fold = match matches.get_one::<String>("fold").map(|s| s.as_str()) {
         Some("true") => true,
         Some("false") => false,
@@ -491,6 +512,7 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
         input_path,
         fold,
         hash,
+        aug_opt,
         enable_rewrite_carry_out,
         fraig,
         toggle_sample_count,
