@@ -295,6 +295,9 @@ fn apply_basis_rewrites_to_fn(f: &ir::Fn) -> (ir::Fn, usize) {
     rewrites = rewrites.saturating_add(rewrite_k3_cone_abs_of_condneg_shll_carry_and_to_false(
         &mut cloned,
     ));
+    rewrites = rewrites.saturating_add(rewrite_k3_cone_inc_carry_guards_lowbit_or_to_bit2(
+        &mut cloned,
+    ));
     // Ensure textual IR is defs-before-uses by reordering body nodes into a
     // topological order (while preserving PIR layout invariants). This makes
     // it safe for rewrites to append new nodes.
@@ -2163,6 +2166,198 @@ fn rewrite_k3_cone_abs_of_condneg_shll_carry_and_to_false(f: &mut ir::Fn) -> usi
     rewrites
 }
 
+/// Regression-driven rewrite for a k3 cone where an increment-carry condition
+/// (carry-out of `sel13[10:3] + 1`) guards a low-bit OR that becomes redundant.
+///
+/// Cone shape (narrow):
+/// - `carry = bit_slice(add(concat(0, bit_slice(sel13, start=3, width=8)), 1),
+///   start=8, width=1)`
+/// - `or23 = or(and(bit2, or_reduce(bit_slice(sel13,0,2))),
+///   eq(bit_slice(sel13,2,2), 3))`
+/// - `ret = and(or23, carry)`
+///
+/// Under `carry==1` we know `sel13[10:3] == 0xff`, hence `sel13[3] == 1`.
+/// This collapses `eq(sel13[3:2], 3)` to `sel13[2]`, and the `or` collapses to
+/// `sel13[2]`. Therefore `ret` rewrites to `and(sel13[2], carry)`.
+fn rewrite_k3_cone_inc_carry_guards_lowbit_or_to_bit2(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+
+    for and_index in 0..f.nodes.len() {
+        let NodePayload::Nary(NaryOp::And, and_ops) = f.nodes[and_index].payload.clone() else {
+            continue;
+        };
+        if f.nodes[and_index].ty != Type::Bits(1) || and_ops.len() != 2 {
+            continue;
+        }
+
+        // Try both operand orders: and(or23, carry) or and(carry, or23)
+        let candidates = [(and_ops[0], and_ops[1]), (and_ops[1], and_ops[0])];
+        let mut matched: Option<(NodeRef, NodeRef)> = None; // (bit2, carry)
+
+        for (maybe_or23, maybe_carry) in candidates {
+            // Match carry: bit_slice(add(concat(0, bit_slice(sel13,3,8)), 1), 8, 1)
+            let NodePayload::BitSlice {
+                arg: carry_arg,
+                start: carry_start,
+                width: carry_width,
+            } = f.get_node(maybe_carry).payload
+            else {
+                continue;
+            };
+            if *f.get_node_ty(maybe_carry) != Type::Bits(1) {
+                continue;
+            }
+            if carry_start != 8 || carry_width != 1 {
+                continue;
+            }
+            let NodePayload::Binop(Binop::Add, add_lhs, add_rhs) = f.get_node(carry_arg).payload
+            else {
+                continue;
+            };
+            if *f.get_node_ty(carry_arg) != Type::Bits(9) {
+                continue;
+            }
+            if !is_ubits_literal_1_of_width(f, add_rhs, /* w= */ 9) {
+                continue;
+            }
+            let NodePayload::Nary(NaryOp::Concat, concat_ops) = f.get_node(add_lhs).payload.clone()
+            else {
+                continue;
+            };
+            if *f.get_node_ty(add_lhs) != Type::Bits(9) || concat_ops.len() != 2 {
+                continue;
+            }
+            if !is_ubits_literal_of_width_and_value(
+                f,
+                concat_ops[0],
+                /* w= */ 1,
+                /* v= */ 0,
+            ) {
+                continue;
+            }
+            let NodePayload::BitSlice {
+                arg: sel13,
+                start: slice_start,
+                width: slice_width,
+            } = f.get_node(concat_ops[1]).payload
+            else {
+                continue;
+            };
+            if slice_start != 3 || slice_width != 8 {
+                continue;
+            }
+            if *f.get_node_ty(sel13) != Type::Bits(11) {
+                continue;
+            }
+
+            // Match or23:
+            //   or(and(bit2, or_reduce(bit_slice(sel13,0,2))), eq(bit_slice(sel13,2,2), 3))
+            let NodePayload::Nary(NaryOp::Or, or_ops) = f.get_node(maybe_or23).payload.clone()
+            else {
+                continue;
+            };
+            if *f.get_node_ty(maybe_or23) != Type::Bits(1) {
+                continue;
+            }
+            if or_ops.len() != 2 {
+                continue;
+            }
+            let or_lhs = or_ops[0];
+            let or_rhs = or_ops[1];
+
+            // Recognize `eq(...)` on either side.
+            let sides = [(or_lhs, or_rhs), (or_rhs, or_lhs)];
+            let mut ok: Option<NodeRef> = None; // bit2 node
+            for (maybe_eq, maybe_and19) in sides {
+                let NodePayload::Binop(Binop::Eq, eq_lhs, eq_rhs) = f.get_node(maybe_eq).payload
+                else {
+                    continue;
+                };
+                if *f.get_node_ty(maybe_eq) != Type::Bits(1) {
+                    continue;
+                }
+                let NodePayload::BitSlice {
+                    arg: eq_arg,
+                    start: eq_start,
+                    width: eq_width,
+                } = f.get_node(eq_lhs).payload
+                else {
+                    continue;
+                };
+                if eq_arg != sel13 || eq_start != 2 || eq_width != 2 {
+                    continue;
+                }
+                if !is_ubits_literal_of_width_and_value(f, eq_rhs, /* w= */ 2, /* v= */ 3) {
+                    continue;
+                }
+
+                // and19: and(bit2, or_reduce(bit_slice(sel13,0,2)))
+                let NodePayload::Nary(NaryOp::And, and19_ops) =
+                    f.get_node(maybe_and19).payload.clone()
+                else {
+                    continue;
+                };
+                if *f.get_node_ty(maybe_and19) != Type::Bits(1) || and19_ops.len() != 2 {
+                    continue;
+                }
+
+                // Expect one operand is bit_slice(sel13,2,1) and the other is
+                // or_reduce(bit_slice(sel13,0,2)).
+                let mut bit2: Option<NodeRef> = None;
+                let mut low_or_ok = false;
+                for op in and19_ops {
+                    match &f.get_node(op).payload {
+                        NodePayload::BitSlice {
+                            arg,
+                            start: 2,
+                            width: 1,
+                        } if *arg == sel13 => {
+                            bit2 = Some(op);
+                        }
+                        NodePayload::Unop(Unop::OrReduce, rarg) => {
+                            if let NodePayload::BitSlice {
+                                arg,
+                                start: 0,
+                                width: 2,
+                            } = f.get_node(*rarg).payload
+                            {
+                                if arg == sel13 {
+                                    low_or_ok = true;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(bit2) = bit2 {
+                    if low_or_ok {
+                        ok = Some(bit2);
+                        break;
+                    }
+                }
+            }
+
+            let Some(bit2) = ok else {
+                continue;
+            };
+
+            matched = Some((bit2, maybe_carry));
+            break;
+        }
+
+        let Some((bit2, carry)) = matched else {
+            continue;
+        };
+
+        // Rewrite ret in-place: and(bit2, carry).
+        f.nodes[and_index].payload = NodePayload::Nary(NaryOp::And, vec![bit2, carry]);
+        f.nodes[and_index].ty = Type::Bits(1);
+        rewrites += 1;
+    }
+
+    rewrites
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2693,6 +2888,70 @@ top fn cone(leaf_113: bits[25] id=1, leaf_114: bits[1] id=2, leaf_286: bits[5] i
             "cone",
             &[25, 1, 5],
             /* random_samples= */ 5000,
+        );
+    }
+
+    #[test]
+    fn aug_opt_regression_k3_cone_inc_carry_guards_lowbit_or_to_bit2() {
+        let ir_text = r#"package bool_cone
+
+top fn cone(leaf_68: bits[12] id=1, leaf_127: bits[4] id=2) -> bits[1] {
+  literal.3: bits[1] = literal(value=0, id=3)
+  concat.7: bits[13] = concat(literal.3, leaf_68, id=7)
+  bit_slice.5: bits[1] = bit_slice(leaf_68, start=1, width=1, id=5)
+  bit_slice.6: bits[1] = bit_slice(leaf_68, start=0, width=1, id=6)
+  shll.8: bits[13] = shll(concat.7, leaf_127, id=8)
+  bit_slice.9: bits[10] = bit_slice(leaf_68, start=2, width=10, id=9)
+  or.10: bits[1] = or(bit_slice.5, bit_slice.6, id=10)
+  bit_slice.4: bits[1] = bit_slice(leaf_68, start=11, width=1, id=4)
+  bit_slice.11: bits[11] = bit_slice(shll.8, start=1, width=11, id=11)
+  concat.12: bits[11] = concat(bit_slice.9, or.10, id=12)
+  sel.13: bits[11] = sel(bit_slice.4, cases=[bit_slice.11, concat.12], id=13)
+  bit_slice.51: bits[2] = bit_slice(sel.13, start=0, width=2, id=51)
+  bit_slice.18: bits[8] = bit_slice(sel.13, start=3, width=8, id=18)
+  bit_slice.52: bits[1] = bit_slice(sel.13, start=2, width=1, id=52)
+  or_reduce.37: bits[1] = or_reduce(bit_slice.51, id=37)
+  bit_slice.16: bits[2] = bit_slice(sel.13, start=2, width=2, id=16)
+  literal.17: bits[2] = literal(value=3, id=17)
+  concat.21: bits[9] = concat(literal.3, bit_slice.18, id=21)
+  literal.22: bits[9] = literal(value=1, id=22)
+  and.19: bits[1] = and(bit_slice.52, or_reduce.37, id=19)
+  eq.20: bits[1] = eq(bit_slice.16, literal.17, id=20)
+  add.24: bits[9] = add(concat.21, literal.22, id=24)
+  or.23: bits[1] = or(and.19, eq.20, id=23)
+  bit_slice.31: bits[1] = bit_slice(add.24, start=8, width=1, id=31)
+  ret and.34: bits[1] = and(or.23, bit_slice.31, id=34)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                run_xlsynth_opt_before: false,
+                run_xlsynth_opt_after: false,
+            },
+        )
+        .expect("aug opt");
+
+        // Structural check: the return must be a 2-input and of (bit2, carry).
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+        let ret = f.ret_node_ref.expect("ret node ref");
+        let NodePayload::Nary(NaryOp::And, ops) = &f.get_node(ret).payload else {
+            panic!("expected ret to be nary and; got:\n{out_text}");
+        };
+        assert_eq!(ops.len(), 2, "expected 2-input and; got:\n{out_text}");
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "cone",
+            &[12, 4],
+            /* random_samples= */ 2000,
         );
     }
 
