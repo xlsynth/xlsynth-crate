@@ -275,6 +275,8 @@ fn apply_basis_rewrites_to_fn(f: &ir::Fn) -> (ir::Fn, usize) {
     rewrites = rewrites.saturating_add(
         rewrite_or_reduce_of_encode_one_hot_lsb_prio_slice_ge2_to_nor_low2bits(&mut cloned),
     );
+    rewrites = rewrites
+        .saturating_add(rewrite_or_reduce_of_encode_slice_ge2_to_or_reduce_high_bits(&mut cloned));
     rewrites = rewrites.saturating_add(rewrite_sel_on_sign_of_abs_like_mux_to_passthrough_x_bit(
         &mut cloned,
     ));
@@ -1413,6 +1415,68 @@ fn rewrite_or_reduce_of_encode_one_hot_lsb_prio_slice_ge2_to_nor_low2bits(f: &mu
 
 /// Rewrite:
 ///
+/// `or_reduce(bit_slice(encode(x), start=1, width=E-1))`
+///   →
+/// `or_reduce(bit_slice(x, start=2, width=W-2))`
+///
+/// where:
+/// - `x` has width `W >= 3`
+/// - the encode result has width `E` and we match the full "drop LSB" slice
+///
+/// Intuition: XLS `encode` for general (non-one-hot) inputs bitwise-ORs
+/// together the indices of all set bits. Therefore, any output bit >=1 is set
+/// iff there exists some set bit in `x` whose index is >=2. This is equivalent
+/// to `or_reduce(x[W-1:2])`.
+fn rewrite_or_reduce_of_encode_slice_ge2_to_or_reduce_high_bits(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+
+    for node_index in 0..f.nodes.len() {
+        let NodePayload::Unop(Unop::OrReduce, slice_nr) = f.nodes[node_index].payload.clone()
+        else {
+            continue;
+        };
+        if f.nodes[node_index].ty != Type::Bits(1) {
+            continue;
+        }
+
+        let NodePayload::BitSlice { arg, start, width } = f.get_node(slice_nr).payload else {
+            continue;
+        };
+        if start != 1 {
+            continue;
+        }
+        let enc_w = f.get_node_ty(arg).bit_count();
+        if enc_w == 0 || width != enc_w.saturating_sub(1) {
+            continue;
+        }
+
+        let NodePayload::Encode { arg: x } = f.get_node(arg).payload else {
+            continue;
+        };
+        let w = f.get_node_ty(x).bit_count();
+        if w < 3 {
+            continue;
+        }
+
+        let high_slice = push_node(
+            f,
+            Type::Bits(w - 2),
+            NodePayload::BitSlice {
+                arg: x,
+                start: 2,
+                width: w - 2,
+            },
+        );
+        f.nodes[node_index].payload = NodePayload::Unop(Unop::OrReduce, high_slice);
+        f.nodes[node_index].ty = Type::Bits(1);
+        rewrites += 1;
+    }
+
+    rewrites
+}
+
+/// Rewrite:
+///
 /// `bit_slice(shll(x, s), start=0, width=1)`
 ///   →
 /// `and(bit_slice(x, start=0, width=1), eq(s, literal(0)))`
@@ -2510,6 +2574,65 @@ top fn cone(leaf_81: bits[1] id=1, leaf_205: bits[3] id=2, leaf_206: bits[3] id=
             &out_text,
             "cone",
             &[1, 3, 3],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    #[test]
+    fn aug_opt_rewrites_or_reduce_of_encode_slice_ge2_to_or_reduce_high_bits() {
+        let ir_text = r#"package enc_ge2
+
+top fn f(x: bits[6] id=1, g: bits[1] id=2) -> bits[1] {
+  encode.3: bits[3] = encode(x, id=3)
+  bit_slice.4: bits[2] = bit_slice(encode.3, start=1, width=2, id=4)
+  or_reduce.5: bits[1] = or_reduce(bit_slice.4, id=5)
+  ret nand.6: bits[1] = nand(g, or_reduce.5, id=6)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("f"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                run_xlsynth_opt_before: false,
+                run_xlsynth_opt_after: false,
+            },
+        )
+        .expect("aug opt");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("f").expect("top fn");
+
+        // Structural: see an `or_reduce(bit_slice(x, start=2, width=4))`.
+        let mut saw = false;
+        for node in &f.nodes {
+            let NodePayload::Unop(Unop::OrReduce, arg) = &node.payload else {
+                continue;
+            };
+            let NodePayload::BitSlice { arg, start, width } = &f.get_node(*arg).payload else {
+                continue;
+            };
+            if *start == 2
+                && *width == 4
+                && matches!(f.get_node(*arg).payload, NodePayload::GetParam(_))
+            {
+                saw = true;
+                break;
+            }
+        }
+        assert!(
+            saw,
+            "expected or_reduce(bit_slice(x,start=2,width=4)) after rewrite; got:\n{out_text}"
+        );
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "f",
+            &[6, 1],
             /* random_samples= */ 2000,
         );
     }
