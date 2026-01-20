@@ -267,6 +267,11 @@ fn apply_basis_rewrites_to_fn(f: &ir::Fn) -> (ir::Fn, usize) {
     rewrites = rewrites.saturating_add(
         rewrite_or_reduce_of_encode_one_hot_reverse_slice_ge2_to_nor_top2bits(&mut cloned),
     );
+    rewrites = rewrites.saturating_add(
+        rewrite_not_or_reduce_of_encode_one_hot_lsb_prio_slice_ge2_to_or_reduce_low2bits(
+            &mut cloned,
+        ),
+    );
     rewrites = rewrites.saturating_add(rewrite_or_reduce_of_select_between_x_and_neg_to_or_reduce(
         &mut cloned,
     ));
@@ -445,6 +450,11 @@ struct EncodeOneHotReverse {
     x: NodeRef,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EncodeOneHotDirect {
+    x: NodeRef,
+}
+
 fn match_encode_one_hot_reverse_lsb_prio_true(
     f: &ir::Fn,
     candidate: NodeRef,
@@ -470,6 +480,30 @@ fn match_encode_one_hot_reverse_lsb_prio_true(
     }
 
     Some(EncodeOneHotReverse { x })
+}
+
+fn match_encode_one_hot_lsb_prio_true(
+    f: &ir::Fn,
+    candidate: NodeRef,
+) -> Option<EncodeOneHotDirect> {
+    if f.get_node_ty(candidate).bit_count() == 0 {
+        return None;
+    }
+
+    let NodePayload::Encode { arg: one_hot } = f.get_node(candidate).payload else {
+        return None;
+    };
+    let NodePayload::OneHot { arg: x, lsb_prio } = f.get_node(one_hot).payload else {
+        return None;
+    };
+    if !lsb_prio {
+        return None;
+    }
+    if f.get_node_ty(x).bit_count() == 0 {
+        return None;
+    }
+
+    Some(EncodeOneHotDirect { x })
 }
 
 fn match_select_between_x_and_neg(f: &ir::Fn, candidate: NodeRef) -> Option<SelectBetweenXAndNeg> {
@@ -825,6 +859,76 @@ fn rewrite_or_reduce_of_encode_one_hot_reverse_slice_ge2_to_nor_top2bits(f: &mut
 
 /// Rewrite:
 ///
+/// `not(or_reduce(bit_slice(encode(one_hot(x, lsb_prio=true)), start=1,
+/// width=E-1)))`   →
+/// `or_reduce(bit_slice(x, start=0, width=2))`
+///
+/// where:
+/// - `x` has width `W >= 2`
+/// - the encode result has width `E` and we match the full "drop LSB" slice
+///
+/// Intuition: `encode(one_hot(x, lsb_prio=true))` yields the index of the
+/// least- significant 1 bit in `x` (with a sentinel for all-zero). Dropping bit
+/// 0 and `or_reduce` tests whether that index is >= 2. Negating it yields
+/// “index < 2”, which is equivalent to `x[0] | x[1]` (the least-significant 1
+/// is at bit 0 or 1).
+fn rewrite_not_or_reduce_of_encode_one_hot_lsb_prio_slice_ge2_to_or_reduce_low2bits(
+    f: &mut ir::Fn,
+) -> usize {
+    let mut rewrites = 0usize;
+
+    for node_index in 0..f.nodes.len() {
+        let NodePayload::Unop(Unop::Not, inner) = f.nodes[node_index].payload.clone() else {
+            continue;
+        };
+        if f.nodes[node_index].ty != Type::Bits(1) {
+            continue;
+        }
+
+        let NodePayload::Unop(Unop::OrReduce, slice_nr) = f.get_node(inner).payload else {
+            continue;
+        };
+        let NodePayload::BitSlice { arg, start, width } = f.get_node(slice_nr).payload else {
+            continue;
+        };
+        if start != 1 {
+            continue;
+        }
+
+        let enc_w = f.get_node_ty(arg).bit_count();
+        if enc_w == 0 || width != enc_w.saturating_sub(1) {
+            continue;
+        }
+
+        let Some(m) = match_encode_one_hot_lsb_prio_true(f, arg) else {
+            continue;
+        };
+        let w = f.get_node_ty(m.x).bit_count();
+        if w < 2 {
+            continue;
+        }
+
+        let low2 = push_node(
+            f,
+            Type::Bits(2),
+            NodePayload::BitSlice {
+                arg: m.x,
+                start: 0,
+                width: 2,
+            },
+        );
+
+        // Rewrite `not(or_reduce(...))` in-place to `or_reduce(low2)`.
+        f.nodes[node_index].payload = NodePayload::Unop(Unop::OrReduce, low2);
+        f.nodes[node_index].ty = Type::Bits(1);
+        rewrites += 1;
+    }
+
+    rewrites
+}
+
+/// Rewrite:
+///
 /// `bit_slice(shll(x, s), start=0, width=1)`
 ///   →
 /// `and(bit_slice(x, start=0, width=1), eq(s, literal(0)))`
@@ -970,7 +1074,60 @@ fn rewrite_guarded_sel_ne_literal1_nor(f: &mut ir::Fn) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fuzz_utils::arbitrary_irbits;
+    use crate::ir_eval::{FnEvalResult, eval_fn};
     use crate::test_utils::quickcheck_ir_text_fn_equivalence_ubits_le64;
+    use rand_pcg::Pcg64Mcg;
+    use xlsynth::{IrBits, IrValue};
+
+    fn quickcheck_ir_text_fn_equivalence_anywidth(
+        ir_text_0: &str,
+        ir_text_1: &str,
+        fn_name: &str,
+        param_widths: &[usize],
+        random_samples: usize,
+    ) {
+        let mut p0 = ir_parser::Parser::new(ir_text_0);
+        let pkg0 = p0.parse_and_validate_package().expect("parse/validate lhs");
+        let f0 = pkg0.get_fn(fn_name).expect("lhs missing function");
+
+        let mut p1 = ir_parser::Parser::new(ir_text_1);
+        let pkg1 = p1.parse_and_validate_package().expect("parse/validate rhs");
+        let f1 = pkg1.get_fn(fn_name).expect("rhs missing function");
+
+        let mut rng = Pcg64Mcg::new(0);
+
+        let run_case = |args: &[IrValue]| {
+            let got0 = match eval_fn(f0, args) {
+                FnEvalResult::Success(s) => s.value.clone(),
+                FnEvalResult::Failure(e) => panic!("unexpected eval failure (lhs): {:?}", e),
+            };
+            let got1 = match eval_fn(f1, args) {
+                FnEvalResult::Success(s) => s.value.clone(),
+                FnEvalResult::Failure(e) => panic!("unexpected eval failure (rhs): {:?}", e),
+            };
+            assert_eq!(got0, got1, "mismatch on args={args:?}");
+        };
+
+        // Deterministic edge case: all zeros.
+        {
+            let zeros: Vec<IrValue> = param_widths
+                .iter()
+                .map(|&w| IrValue::from_bits(&IrBits::make_ubits(w, 0).unwrap()))
+                .collect();
+            run_case(&zeros);
+        }
+
+        // Deterministic pseudo-random sampling.
+        for _ in 0..random_samples {
+            let mut args: Vec<IrValue> = Vec::with_capacity(param_widths.len());
+            for &w in param_widths {
+                let bits = arbitrary_irbits(&mut rng, w);
+                args.push(IrValue::from_bits(&bits));
+            }
+            run_case(&args);
+        }
+    }
 
     #[test]
     fn aug_opt_rewrites_guarded_sel_ne1_nor_and_opt_dces_sel() {
@@ -1468,6 +1625,75 @@ top fn f(x: bits[8] id=1) -> bits[1] {
             &out_text,
             "f",
             &[8],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    /// Regression for the lsb-priority one_hot/encode cone:
+    /// this should simplify to `or_reduce(x[0:2])`.
+    #[test]
+    fn aug_opt_regression_one_hot_encode_lsb_prio_not_or_reduce_slice_ge2() {
+        let ir_text = r#"package float64
+
+top fn cone(leaf_137: bits[161] id=1) -> bits[1] {
+  one_hot.2: bits[162] = one_hot(leaf_137, lsb_prio=true, id=2)
+  encode.3: bits[8] = encode(one_hot.2, id=3)
+  bit_slice.4: bits[7] = bit_slice(encode.3, start=1, width=7, id=4)
+  or_reduce.5: bits[1] = or_reduce(bit_slice.4, id=5)
+  ret not.6: bits[1] = not(or_reduce.5, id=6)
+}
+"#;
+
+        // Use PIR-only mode so the output preserves the rewrite shape.
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                run_xlsynth_opt_before: false,
+                run_xlsynth_opt_after: false,
+            },
+        )
+        .expect("aug opt");
+
+        // Structural assertion: expect an `or_reduce(bit_slice(leaf_137, start=0,
+        // width=2))`.
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+        let mut saw = false;
+        for node in &f.nodes {
+            let NodePayload::Unop(Unop::OrReduce, arg) = &node.payload else {
+                continue;
+            };
+            let NodePayload::BitSlice {
+                arg: slice_arg,
+                start,
+                width,
+            } = &f.get_node(*arg).payload
+            else {
+                continue;
+            };
+            if matches!(f.get_node(*slice_arg).payload, NodePayload::GetParam(_))
+                && *start == 0
+                && *width == 2
+            {
+                saw = true;
+                break;
+            }
+        }
+        assert!(
+            saw,
+            "expected or_reduce(bit_slice(x,start=0,width=2)); got:\n{out_text}"
+        );
+
+        // Semantics check with an any-width evaluator.
+        quickcheck_ir_text_fn_equivalence_anywidth(
+            ir_text,
+            &out_text,
+            "cone",
+            &[161],
             /* random_samples= */ 2000,
         );
     }
