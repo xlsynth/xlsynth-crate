@@ -1155,11 +1155,11 @@ fn rewrite_bit_slice_of_abs_like_sel_nand_msb_guard_to_x(f: &mut ir::Fn) -> usiz
             continue;
         };
 
-        // Match g = nand(p, not(msb(nx))) up to commutativity.
+        // Match g = nand(p0, p1, ..., not(msb(nx))) up to commutativity.
         let NodePayload::Nary(NaryOp::Nand, ops) = &f.get_node(*g).payload else {
             continue;
         };
-        if ops.len() != 2 {
+        if ops.len() < 2 {
             continue;
         }
         let mut saw_not_msb = false;
@@ -2384,6 +2384,74 @@ top fn cone(leaf_110: bits[24] id=1, leaf_114: bits[1] id=2) -> bits[1] {
             &out_text,
             "cone",
             &[24, 1],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    #[test]
+    fn aug_opt_regression_abs_like_sel_nand3_msb_guard_slices_to_inner() {
+        let ir_text = r#"package bool_cone
+
+top fn cone(leaf_110: bits[24] id=1, leaf_111: bits[1] id=2, leaf_112: bits[1] id=3) -> bits[1] {
+  literal.4: bits[1] = literal(value=0, id=4)
+  concat.5: bits[25] = concat(literal.4, leaf_110, id=5)
+  neg.7: bits[25] = neg(concat.5, id=7)
+  bit_slice.21: bits[1] = bit_slice(neg.7, start=24, width=1, id=21)
+  not.35: bits[1] = not(bit_slice.21, id=35)
+  nand.36: bits[1] = nand(leaf_111, leaf_112, not.35, id=36)
+  sel.19: bits[25] = sel(nand.36, cases=[neg.7, concat.5], id=19)
+  bit_slice.13: bits[1] = bit_slice(sel.19, start=15, width=1, id=13)
+  bit_slice.12: bits[1] = bit_slice(sel.19, start=16, width=1, id=12)
+  not.14: bits[1] = not(bit_slice.13, id=14)
+  ret nor.15: bits[1] = nor(bit_slice.12, not.14, id=15)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                run_xlsynth_opt_before: false,
+                run_xlsynth_opt_after: false,
+            },
+        )
+        .expect("aug opt");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+
+        // Structural check: slices 15/16 should come directly from leaf_110.
+        let mut saw_slice15 = false;
+        let mut saw_slice16 = false;
+        for node in &f.nodes {
+            let NodePayload::BitSlice { arg, start, width } = &node.payload else {
+                continue;
+            };
+            if *width != 1 {
+                continue;
+            }
+            if !matches!(f.get_node(*arg).payload, NodePayload::GetParam(_)) {
+                continue;
+            }
+            if *start == 15 {
+                saw_slice15 = true;
+            } else if *start == 16 {
+                saw_slice16 = true;
+            }
+        }
+        assert!(
+            saw_slice15 && saw_slice16,
+            "expected slices of leaf_110[15] and leaf_110[16]; got:\n{out_text}"
+        );
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "cone",
+            &[24, 1, 1],
             /* random_samples= */ 2000,
         );
     }
