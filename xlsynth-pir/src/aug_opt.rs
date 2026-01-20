@@ -275,6 +275,9 @@ fn apply_basis_rewrites_to_fn(f: &ir::Fn) -> (ir::Fn, usize) {
     rewrites = rewrites.saturating_add(
         rewrite_or_reduce_of_encode_one_hot_lsb_prio_slice_ge2_to_nor_low2bits(&mut cloned),
     );
+    rewrites = rewrites.saturating_add(rewrite_sel_on_sign_of_abs_like_mux_to_passthrough_x_bit(
+        &mut cloned,
+    ));
     rewrites = rewrites.saturating_add(rewrite_or_reduce_of_select_between_x_and_neg_to_or_reduce(
         &mut cloned,
     ));
@@ -458,6 +461,11 @@ struct EncodeOneHotDirect {
     x: NodeRef,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ConcatZeroMsb {
+    inner: NodeRef,
+}
+
 fn match_encode_one_hot_reverse_lsb_prio_true(
     f: &ir::Fn,
     candidate: NodeRef,
@@ -507,6 +515,35 @@ fn match_encode_one_hot_lsb_prio_true(
     }
 
     Some(EncodeOneHotDirect { x })
+}
+
+fn match_concat_zero_msb(f: &ir::Fn, candidate: NodeRef) -> Option<ConcatZeroMsb> {
+    let w = f.get_node_ty(candidate).bit_count();
+    if w == 0 {
+        return None;
+    }
+    let NodePayload::Nary(NaryOp::Concat, ops) = &f.get_node(candidate).payload else {
+        return None;
+    };
+    if ops.len() != 2 {
+        return None;
+    }
+    let msb = ops[0];
+    let inner = ops[1];
+    if f.get_node_ty(msb).bit_count() != 1 {
+        return None;
+    }
+    let NodePayload::Literal(v) = &f.get_node(msb).payload else {
+        return None;
+    };
+    if v.to_u64().ok() != Some(0) {
+        return None;
+    }
+    let inner_w = f.get_node_ty(inner).bit_count();
+    if inner_w.saturating_add(1) != w {
+        return None;
+    }
+    Some(ConcatZeroMsb { inner })
 }
 
 fn match_select_between_x_and_neg(f: &ir::Fn, candidate: NodeRef) -> Option<SelectBetweenXAndNeg> {
@@ -923,6 +960,120 @@ fn rewrite_not_or_reduce_of_encode_one_hot_lsb_prio_slice_ge2_to_or_reduce_low2b
 
         // Rewrite `not(or_reduce(...))` in-place to `or_reduce(low2)`.
         f.nodes[node_index].payload = NodePayload::Unop(Unop::OrReduce, low2);
+        f.nodes[node_index].ty = Type::Bits(1);
+        rewrites += 1;
+    }
+
+    rewrites
+}
+
+/// Rewrite a common "abs-like" bit-pick shape to a simple passthrough.
+///
+/// Matches:
+///
+/// - `y = sel(s, cases=[x, neg(x)])` (or `[neg(x), x]`) with no default
+/// - where `x = concat(0, inner)` (known 0 MSB)
+/// - `sign = bit_slice(y, start=W-1, width=1)` (sign bit of `y`)
+/// - `yk = bit_slice(y, start=k, width=1)`
+/// - `xk = bit_slice(inner, start=k, width=1)` (or bit-slice from `x` itself)
+/// - `ret = sel(sign, cases=[yk, xk])`
+///
+/// Then `ret` is always `xk`:
+/// - if `s=0`, `y=x` and `sign=0`, so `ret=yk=xk`
+/// - if `s=1` and `x=0`, `y=0` and `sign=0`, so `ret=yk=0=xk`
+/// - if `s=1` and `x!=0`, `y=-x` has `sign=1`, so `ret=xk`
+fn rewrite_sel_on_sign_of_abs_like_mux_to_passthrough_x_bit(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+
+    for node_index in 0..f.nodes.len() {
+        let NodePayload::Sel {
+            selector: sign_sel,
+            cases,
+            default,
+        } = f.nodes[node_index].payload.clone()
+        else {
+            continue;
+        };
+        if default.is_some() || cases.len() != 2 {
+            continue;
+        }
+        if f.nodes[node_index].ty != Type::Bits(1) || *f.get_node_ty(sign_sel) != Type::Bits(1) {
+            continue;
+        }
+
+        // Require cases=[bit_slice(y,k,1), bit_slice(x_or_inner,k,1)].
+        let yk = cases[0];
+        let xk = cases[1];
+        let NodePayload::BitSlice {
+            arg: y_from_yk,
+            start: k,
+            width: k_w,
+        } = f.get_node(yk).payload
+        else {
+            continue;
+        };
+        if k_w != 1 || *f.get_node_ty(yk) != Type::Bits(1) {
+            continue;
+        }
+        let NodePayload::BitSlice {
+            arg: x_from_xk,
+            start: k2,
+            width: k2_w,
+        } = f.get_node(xk).payload
+        else {
+            continue;
+        };
+        if k2_w != 1 || k2 != k || *f.get_node_ty(xk) != Type::Bits(1) {
+            continue;
+        }
+
+        // sign_sel must be the MSB of the same `y`.
+        let NodePayload::BitSlice {
+            arg: y_from_sign,
+            start: sign_start,
+            width: sign_w,
+        } = f.get_node(sign_sel).payload
+        else {
+            continue;
+        };
+        if sign_w != 1 || y_from_sign != y_from_yk {
+            continue;
+        }
+        let y_w = f.get_node_ty(y_from_sign).bit_count();
+        if y_w == 0 || sign_start != y_w.saturating_sub(1) {
+            continue;
+        }
+
+        // y must be a mux between x and neg(x).
+        let Some(m) = match_select_between_x_and_neg(f, y_from_sign) else {
+            continue;
+        };
+
+        // x must be concat(0, inner).
+        let Some(cx) = match_concat_zero_msb(f, m.x) else {
+            continue;
+        };
+
+        // xk must be a slice from either `x` or `inner`, with compatible start.
+        let ok_xk = if x_from_xk == m.x {
+            // bit-slice directly from x; only valid for low bits (not the forced 0 MSB).
+            k < y_w.saturating_sub(1)
+        } else if x_from_xk == cx.inner {
+            // bit-slice from inner; must fit.
+            k < f.get_node_ty(cx.inner).bit_count()
+        } else {
+            false
+        };
+        if !ok_xk {
+            continue;
+        }
+
+        // Replace the sel node with the xk slice directly.
+        f.nodes[node_index].payload = NodePayload::BitSlice {
+            arg: x_from_xk,
+            start: k,
+            width: 1,
+        };
         f.nodes[node_index].ty = Type::Bits(1);
         rewrites += 1;
     }
@@ -1845,6 +1996,65 @@ top fn cone(leaf_137: bits[161] id=1) -> bits[1] {
             &out_text,
             "cone",
             &[161],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    /// Regression: sign-bit-controlled bit pick over an "abs-like" mux
+    /// collapses to a passthrough of the original bit.
+    ///
+    /// This should optimize to `leaf_110[9]` (a wire), matching yosys/abc’s
+    /// constant/AND-free result.
+    #[test]
+    fn aug_opt_regression_abs_like_mux_signbit_bitpick_to_passthrough() {
+        let ir_text = r#"package bool_cone
+
+top fn cone(leaf_110: bits[24] id=1, leaf_114: bits[1] id=2) -> bits[1] {
+  literal.3: bits[1] = literal(value=0, id=3)
+  concat.4: bits[25] = concat(literal.3, leaf_110, id=4)
+  neg.5: bits[25] = neg(concat.4, id=5)
+  sel.6: bits[25] = sel(leaf_114, cases=[concat.4, neg.5], id=6)
+  bit_slice.7: bits[1] = bit_slice(sel.6, start=24, width=1, id=7)
+  bit_slice.11: bits[1] = bit_slice(sel.6, start=9, width=1, id=11)
+  bit_slice.14: bits[1] = bit_slice(leaf_110, start=9, width=1, id=14)
+  ret sel.13: bits[1] = sel(bit_slice.7, cases=[bit_slice.11, bit_slice.14], id=13)
+}
+"#;
+
+        // Use PIR-only mode so the output preserves the rewrite shape for
+        // structural assertions.
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                run_xlsynth_opt_before: false,
+                run_xlsynth_opt_after: false,
+            },
+        )
+        .expect("aug opt");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+
+        // Expect: the return node is bit_slice(param0, start=9, width=1).
+        let ret = f.nodes.last().expect("non-empty fn");
+        let NodePayload::BitSlice { arg, start, width } = &ret.payload else {
+            panic!("expected ret to be bit_slice; got:\n{out_text}");
+        };
+        assert_eq!((*start, *width), (9, 1));
+        assert!(
+            matches!(f.get_node(*arg).payload, NodePayload::GetParam(_)),
+            "expected ret slice arg to be param; got:\n{out_text}"
+        );
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "cone",
+            &[24, 1],
             /* random_samples= */ 2000,
         );
     }
