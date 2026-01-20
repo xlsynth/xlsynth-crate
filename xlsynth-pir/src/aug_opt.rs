@@ -291,6 +291,7 @@ fn apply_basis_rewrites_to_fn(f: &ir::Fn) -> (ir::Fn, usize) {
     rewrites = rewrites.saturating_add(rewrite_or_reduce_of_neg_to_or_reduce(&mut cloned));
     rewrites = rewrites.saturating_add(rewrite_guarded_sel_ne_literal1_nor(&mut cloned));
     rewrites = rewrites.saturating_add(rewrite_lsb_of_shll_via_shift_is_zero(&mut cloned));
+    rewrites = rewrites.saturating_add(rewrite_k3_cone_abs_shll_carry_and_to_false(&mut cloned));
     // Ensure textual IR is defs-before-uses by reordering body nodes into a
     // topological order (while preserving PIR layout invariants). This makes
     // it safe for rewrites to append new nodes.
@@ -332,6 +333,17 @@ fn push_ubits_literal(f: &mut ir::Fn, w: usize, v: u64) -> NodeRef {
     let ty = Type::Bits(w);
     let lit = IrValue::make_ubits(w, v).expect("ubits literal construction should succeed");
     push_node(f, ty, NodePayload::Literal(lit))
+}
+
+fn is_ubits_literal_of_width_and_value(f: &ir::Fn, nr: NodeRef, w: usize, v: u64) -> bool {
+    let node = f.get_node(nr);
+    if node.ty != Type::Bits(w) {
+        return false;
+    }
+    let NodePayload::Literal(lit) = &node.payload else {
+        return false;
+    };
+    lit.to_u64().ok() == Some(v)
 }
 
 fn is_ubits_literal_1_of_width(f: &ir::Fn, nr: NodeRef, w: usize) -> bool {
@@ -1619,6 +1631,261 @@ fn rewrite_guarded_sel_ne_literal1_nor(f: &mut ir::Fn) -> usize {
     rewrites
 }
 
+/// Regression-driven rewrite for a cone shape we see in k3.
+///
+/// Matches the following structure (kept intentionally narrow):
+/// - `ret = and(eq(bit_slice(sel12, 0, 2), 3), bit_slice(add((sel12>>1)+1), 24,
+///   1))`
+/// - where `sel12` is gated by the MSB of a conditional-negation select
+///   (`sel6`)
+/// - and the non-negated path flows through a `shll(concat(0, sel6, 000),
+///   shift)` and slice.
+///
+/// This cone is semantically always false, but g8r currently does not discover
+/// that, leading to large AIGs; yosys does. Rewriting to a literal 0 fixes it.
+fn rewrite_k3_cone_abs_shll_carry_and_to_false(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+
+    for and_index in 0..f.nodes.len() {
+        let NodePayload::Nary(NaryOp::And, and_ops) = f.nodes[and_index].payload.clone() else {
+            continue;
+        };
+        if f.nodes[and_index].ty != Type::Bits(1) || and_ops.len() != 2 {
+            continue;
+        }
+
+        // Try both operand orders:
+        // - `and(eq(...), bit_slice(add(...), 24, 1))`
+        // - `and(bit_slice(add(...), 24, 1), eq(...))`
+        let candidates = [(and_ops[0], and_ops[1]), (and_ops[1], and_ops[0])];
+        let mut sel12: Option<NodeRef> = None;
+
+        for (maybe_eq, maybe_carry_slice) in candidates {
+            // Match: eq(bit_slice(sel12, start=0, width=2), literal(3))
+            let NodePayload::Binop(Binop::Eq, eq_lhs, eq_rhs) = f.get_node(maybe_eq).payload else {
+                continue;
+            };
+            if *f.get_node_ty(maybe_eq) != Type::Bits(1) {
+                continue;
+            }
+            let NodePayload::BitSlice {
+                arg: eq_slice_arg,
+                start: eq_slice_start,
+                width: eq_slice_width,
+            } = f.get_node(eq_lhs).payload
+            else {
+                continue;
+            };
+            if eq_slice_start != 0 || eq_slice_width != 2 {
+                continue;
+            }
+            if !is_ubits_literal_of_width_and_value(f, eq_rhs, /* w= */ 2, /* v= */ 3) {
+                continue;
+            }
+
+            // Match: bit_slice(add(concat(0, bit_slice(sel12, 1, 24)), 1), start=24,
+            // width=1)
+            let NodePayload::BitSlice {
+                arg: carry_slice_arg,
+                start: carry_slice_start,
+                width: carry_slice_width,
+            } = f.get_node(maybe_carry_slice).payload
+            else {
+                continue;
+            };
+            if *f.get_node_ty(maybe_carry_slice) != Type::Bits(1) {
+                continue;
+            }
+            if carry_slice_start != 24 || carry_slice_width != 1 {
+                continue;
+            }
+
+            let NodePayload::Binop(Binop::Add, add_lhs, add_rhs) =
+                f.get_node(carry_slice_arg).payload
+            else {
+                continue;
+            };
+            if *f.get_node_ty(carry_slice_arg) != Type::Bits(25) {
+                continue;
+            }
+            if !is_ubits_literal_1_of_width(f, add_rhs, /* w= */ 25) {
+                continue;
+            }
+
+            let NodePayload::Nary(NaryOp::Concat, concat_ops) = f.get_node(add_lhs).payload.clone()
+            else {
+                continue;
+            };
+            if *f.get_node_ty(add_lhs) != Type::Bits(25) || concat_ops.len() != 2 {
+                continue;
+            }
+            if !is_ubits_literal_of_width_and_value(
+                f,
+                concat_ops[0],
+                /* w= */ 1,
+                /* v= */ 0,
+            ) {
+                continue;
+            }
+
+            let NodePayload::BitSlice {
+                arg: concat_slice_arg,
+                start: concat_slice_start,
+                width: concat_slice_width,
+            } = f.get_node(concat_ops[1]).payload
+            else {
+                continue;
+            };
+            if *f.get_node_ty(concat_ops[1]) != Type::Bits(24) {
+                continue;
+            }
+            if concat_slice_start != 1 || concat_slice_width != 24 {
+                continue;
+            }
+
+            if concat_slice_arg != eq_slice_arg {
+                continue;
+            }
+
+            sel12 = Some(concat_slice_arg);
+            break;
+        }
+
+        let Some(sel12) = sel12 else {
+            continue;
+        };
+
+        // Now validate the provenance of sel12 matches the known k3 cone:
+        // sel12: bits[25] = sel(bit_slice(sel6, 24),
+        // cases=[bit_slice(shll(concat(0,sel6,000),shift),3,25), neg(leaf_116)])
+        let NodePayload::Sel {
+            selector: sel12_selector,
+            cases: sel12_cases,
+            default: sel12_default,
+        } = f.get_node(sel12).payload.clone()
+        else {
+            continue;
+        };
+        if sel12_default.is_some() || sel12_cases.len() != 2 {
+            continue;
+        }
+        if *f.get_node_ty(sel12_selector) != Type::Bits(1) {
+            continue;
+        }
+
+        // selector is bit_slice(sel6, 24, 1)
+        let NodePayload::BitSlice {
+            arg: sel6,
+            start: sel6_msb_start,
+            width: sel6_msb_width,
+        } = f.get_node(sel12_selector).payload
+        else {
+            continue;
+        };
+        if sel6_msb_start != 24 || sel6_msb_width != 1 {
+            continue;
+        }
+
+        // sel6: bits[25] = sel(bit_slice(leaf_116, 24), cases=[leaf_116,
+        // neg(leaf_116)])
+        let NodePayload::Sel {
+            selector: sel6_selector,
+            cases: sel6_cases,
+            default: sel6_default,
+        } = f.get_node(sel6).payload.clone()
+        else {
+            continue;
+        };
+        if sel6_default.is_some() || sel6_cases.len() != 2 {
+            continue;
+        }
+        if *f.get_node_ty(sel6_selector) != Type::Bits(1) || *f.get_node_ty(sel6) != Type::Bits(25)
+        {
+            continue;
+        }
+        let NodePayload::BitSlice {
+            arg: leaf_116,
+            start: leaf_116_msb_start,
+            width: leaf_116_msb_width,
+        } = f.get_node(sel6_selector).payload
+        else {
+            continue;
+        };
+        if leaf_116_msb_start != 24 || leaf_116_msb_width != 1 {
+            continue;
+        }
+        if !matches!(f.get_node(leaf_116).payload, NodePayload::GetParam(_))
+            || *f.get_node_ty(leaf_116) != Type::Bits(25)
+        {
+            continue;
+        }
+
+        if sel6_cases[0] != leaf_116 {
+            continue;
+        }
+        let NodePayload::Unop(Unop::Neg, neg5_arg) = f.get_node(sel6_cases[1]).payload else {
+            continue;
+        };
+        if neg5_arg != leaf_116 || *f.get_node_ty(sel6_cases[1]) != Type::Bits(25) {
+            continue;
+        }
+
+        // sel12_cases[1] must be the same neg(leaf_116) as in sel6.
+        if sel12_cases[1] != sel6_cases[1] {
+            continue;
+        }
+
+        // sel12_cases[0] is bit_slice(shll(concat(0, sel6, 000), shift), start=3,
+        // width=25)
+        let NodePayload::BitSlice {
+            arg: shll10,
+            start: bs11_start,
+            width: bs11_width,
+        } = f.get_node(sel12_cases[0]).payload
+        else {
+            continue;
+        };
+        if bs11_start != 3 || bs11_width != 25 {
+            continue;
+        }
+        let NodePayload::Binop(Binop::Shll, concat9, leaf_286) = f.get_node(shll10).payload else {
+            continue;
+        };
+        if !matches!(f.get_node(leaf_286).payload, NodePayload::GetParam(_))
+            || *f.get_node_ty(leaf_286) != Type::Bits(5)
+        {
+            continue;
+        }
+        if *f.get_node_ty(concat9) != Type::Bits(29) {
+            continue;
+        }
+        let NodePayload::Nary(NaryOp::Concat, concat9_ops) = f.get_node(concat9).payload.clone()
+        else {
+            continue;
+        };
+        if concat9_ops.len() != 3 {
+            continue;
+        }
+        if !is_ubits_literal_of_width_and_value(f, concat9_ops[0], /* w= */ 1, /* v= */ 0) {
+            continue;
+        }
+        if concat9_ops[1] != sel6 {
+            continue;
+        }
+        if !is_ubits_literal_of_width_and_value(f, concat9_ops[2], /* w= */ 3, /* v= */ 0) {
+            continue;
+        }
+
+        // Match succeeded: rewrite to literal 0.
+        let lit0 = IrValue::make_ubits(1, 0).expect("literal should fit");
+        f.nodes[and_index].payload = NodePayload::Literal(lit0);
+        f.nodes[and_index].ty = Type::Bits(1);
+        rewrites += 1;
+    }
+
+    rewrites
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2025,6 +2292,67 @@ top fn cone(leaf_40: bits[27] id=1, leaf_52: bits[26] id=2, leaf_57: bits[1] id=
             "cone",
             &[27, 26, 1],
             /* random_samples= */ 2000,
+        );
+    }
+
+    #[test]
+    fn aug_opt_regression_k3_cone_abs_shll_carry_and_is_always_false() {
+        let ir_text = r#"package bool_cone
+
+top fn cone(leaf_116: bits[25] id=1, leaf_286: bits[5] id=2) -> bits[1] {
+  bit_slice.4: bits[1] = bit_slice(leaf_116, start=24, width=1, id=4)
+  neg.5: bits[25] = neg(leaf_116, id=5)
+  literal.3: bits[1] = literal(value=0, id=3)
+  sel.6: bits[25] = sel(bit_slice.4, cases=[leaf_116, neg.5], id=6)
+  literal.8: bits[3] = literal(value=0, id=8)
+  concat.9: bits[29] = concat(literal.3, sel.6, literal.8, id=9)
+  shll.10: bits[29] = shll(concat.9, leaf_286, id=10)
+  bit_slice.7: bits[1] = bit_slice(sel.6, start=24, width=1, id=7)
+  bit_slice.11: bits[25] = bit_slice(shll.10, start=3, width=25, id=11)
+  sel.12: bits[25] = sel(bit_slice.7, cases=[bit_slice.11, neg.5], id=12)
+  bit_slice.13: bits[24] = bit_slice(sel.12, start=1, width=24, id=13)
+  concat.16: bits[25] = concat(literal.3, bit_slice.13, id=16)
+  literal.17: bits[25] = literal(value=1, id=17)
+  bit_slice.14: bits[2] = bit_slice(sel.12, start=0, width=2, id=14)
+  literal.15: bits[2] = literal(value=3, id=15)
+  add.19: bits[25] = add(concat.16, literal.17, id=19)
+  eq.18: bits[1] = eq(bit_slice.14, literal.15, id=18)
+  bit_slice.24: bits[1] = bit_slice(add.19, start=24, width=1, id=24)
+  ret and.27: bits[1] = and(eq.18, bit_slice.24, id=27)
+}
+"#;
+
+        // PIR-only path so we can assert the rewrite fired structurally.
+        let result = run_aug_opt_over_ir_text_with_stats(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                run_xlsynth_opt_before: false,
+                run_xlsynth_opt_after: false,
+            },
+        )
+        .expect("aug opt");
+        assert!(result.rewrote(), "expected at least one rewrite");
+
+        let out_text = result.output_text;
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+        let ret = f.ret_node_ref.expect("ret node ref");
+        assert!(
+            is_ubits_literal_of_width_and_value(f, ret, /* w= */ 1, /* v= */ 0),
+            "expected ret to be literal 0; got:\n{}",
+            out_text
+        );
+
+        quickcheck_ir_text_fn_equivalence_anywidth(
+            ir_text,
+            &out_text,
+            "cone",
+            &[25, 5],
+            /* random_samples= */ 5000,
         );
     }
 
