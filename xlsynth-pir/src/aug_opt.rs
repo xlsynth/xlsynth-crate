@@ -261,6 +261,12 @@ fn apply_basis_rewrites_to_fn(f: &ir::Fn) -> (ir::Fn, usize) {
     rewrites = rewrites.saturating_add(rewrite_nor_of_contiguous_bit_slices_to_not_or_reduce(
         &mut cloned,
     ));
+    rewrites = rewrites.saturating_add(rewrite_encode_one_hot_reverse_ult_k_to_or_reduce_top_bits(
+        &mut cloned,
+    ));
+    rewrites = rewrites.saturating_add(
+        rewrite_or_reduce_of_encode_one_hot_reverse_slice_ge2_to_nor_top2bits(&mut cloned),
+    );
     rewrites = rewrites.saturating_add(rewrite_or_reduce_of_select_between_x_and_neg_to_or_reduce(
         &mut cloned,
     ));
@@ -432,6 +438,38 @@ fn match_contiguous_1bit_bit_slices(
 struct SelectBetweenXAndNeg {
     x: NodeRef,
     selector: NodeRef,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EncodeOneHotReverse {
+    x: NodeRef,
+}
+
+fn match_encode_one_hot_reverse_lsb_prio_true(
+    f: &ir::Fn,
+    candidate: NodeRef,
+) -> Option<EncodeOneHotReverse> {
+    if f.get_node_ty(candidate).bit_count() == 0 {
+        return None;
+    }
+
+    let NodePayload::Encode { arg: one_hot } = f.get_node(candidate).payload else {
+        return None;
+    };
+    let NodePayload::OneHot { arg: rev, lsb_prio } = f.get_node(one_hot).payload else {
+        return None;
+    };
+    if !lsb_prio {
+        return None;
+    }
+    let NodePayload::Unop(Unop::Reverse, x) = f.get_node(rev).payload else {
+        return None;
+    };
+    if f.get_node_ty(x).bit_count() == 0 {
+        return None;
+    }
+
+    Some(EncodeOneHotReverse { x })
 }
 
 fn match_select_between_x_and_neg(f: &ir::Fn, candidate: NodeRef) -> Option<SelectBetweenXAndNeg> {
@@ -632,6 +670,152 @@ fn rewrite_or_reduce_of_select_between_x_and_neg_to_or_reduce(f: &mut ir::Fn) ->
         let _ = m.selector;
 
         f.nodes[node_index].payload = NodePayload::Unop(Unop::OrReduce, m.x);
+        f.nodes[node_index].ty = Type::Bits(1);
+        rewrites += 1;
+    }
+
+    rewrites
+}
+
+/// Rewrite:
+///
+/// `ult(encode(one_hot(reverse(x), lsb_prio=true)), K)`
+///   →
+/// `or_reduce(bit_slice(x, start=W-K, width=K))`
+///
+/// Here `W` is the bit width of `x`, and `K` is a literal integer constant
+/// with `1 <= K <= W`.
+///
+/// Intuition: `encode(one_hot(reverse(x), lsb_prio=true))` is the distance from
+/// the MSB down to the first `1` bit in `x` (with an all-zero sentinel). Being
+/// `< K` is equivalent to “there exists a `1` in the top `K` bits of `x`”, i.e.
+/// `or_reduce(x[W-1 : W-K])`.
+fn rewrite_encode_one_hot_reverse_ult_k_to_or_reduce_top_bits(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+
+    for node_index in 0..f.nodes.len() {
+        let NodePayload::Binop(Binop::Ult, lhs, rhs) = f.nodes[node_index].payload.clone() else {
+            continue;
+        };
+        if f.nodes[node_index].ty != Type::Bits(1) {
+            continue;
+        }
+
+        let Some(m) = match_encode_one_hot_reverse_lsb_prio_true(f, lhs) else {
+            continue;
+        };
+
+        let NodePayload::Literal(k_lit) = &f.get_node(rhs).payload else {
+            continue;
+        };
+        let Some(k_u64) = k_lit.to_u64().ok() else {
+            continue;
+        };
+        let Some(k) = usize::try_from(k_u64).ok() else {
+            continue;
+        };
+
+        let w = f.get_node_ty(m.x).bit_count();
+        if w == 0 || k == 0 || k > w {
+            continue;
+        }
+
+        // Ensure the compare is well-typed: K literal width must match encode width.
+        if *f.get_node_ty(rhs) != *f.get_node_ty(lhs) {
+            continue;
+        }
+
+        let top_slice = push_node(
+            f,
+            Type::Bits(k),
+            NodePayload::BitSlice {
+                arg: m.x,
+                start: w - k,
+                width: k,
+            },
+        );
+        f.nodes[node_index].payload = NodePayload::Unop(Unop::OrReduce, top_slice);
+        f.nodes[node_index].ty = Type::Bits(1);
+        rewrites += 1;
+    }
+
+    rewrites
+}
+
+/// Rewrite:
+///
+/// `or_reduce(bit_slice(encode(one_hot(reverse(x), lsb_prio=true)), start=1,
+/// width=E-1))`   →
+/// `nor(bit_slice(x, start=W-1, width=1), bit_slice(x, start=W-2, width=1))`
+///
+/// where:
+/// - `W` is the width of `x` (and must satisfy `W >= 2`)
+/// - `E` is the width of the `encode(...)` result
+///
+/// Intuition: `encode(one_hot(reverse(x), lsb_prio=true))` yields the index of
+/// the most-significant 1 bit in `x`, with a sentinel value for the all-zero
+/// case. Slicing off bit 0 (i.e. `>> 1`) and `or_reduce` is testing whether
+/// that index is >= 2, which is equivalent to “the top two bits of `x` are both
+/// zero”.
+///
+/// This is a common consumer form in our k3 cones corpus (as opposed to an
+/// explicit `< K` compare).
+fn rewrite_or_reduce_of_encode_one_hot_reverse_slice_ge2_to_nor_top2bits(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+
+    for node_index in 0..f.nodes.len() {
+        let NodePayload::Unop(Unop::OrReduce, slice_nr) = f.nodes[node_index].payload.clone()
+        else {
+            continue;
+        };
+        if f.nodes[node_index].ty != Type::Bits(1) {
+            continue;
+        }
+
+        let NodePayload::BitSlice { arg, start, width } = f.get_node(slice_nr).payload else {
+            continue;
+        };
+        if start != 1 {
+            continue;
+        }
+
+        let enc_w = f.get_node_ty(arg).bit_count();
+        if enc_w == 0 {
+            continue;
+        }
+        // Only handle the full "drop the LSB" slice so this condition is exactly
+        // `encode(...) >= 2`.
+        if width != enc_w.saturating_sub(1) {
+            continue;
+        }
+
+        let Some(m) = match_encode_one_hot_reverse_lsb_prio_true(f, arg) else {
+            continue;
+        };
+        let w = f.get_node_ty(m.x).bit_count();
+        if w < 2 {
+            continue;
+        }
+
+        let msb = push_node(
+            f,
+            Type::Bits(1),
+            NodePayload::BitSlice {
+                arg: m.x,
+                start: w - 1,
+                width: 1,
+            },
+        );
+        let second_msb = push_node(
+            f,
+            Type::Bits(1),
+            NodePayload::BitSlice {
+                arg: m.x,
+                start: w - 2,
+                width: 1,
+            },
+        );
+        f.nodes[node_index].payload = NodePayload::Nary(NaryOp::Nor, vec![msb, second_msb]);
         f.nodes[node_index].ty = Type::Bits(1);
         rewrites += 1;
     }
@@ -1135,6 +1319,155 @@ top fn cone(leaf_40: bits[27] id=1, leaf_52: bits[26] id=2, leaf_57: bits[1] id=
             &out_text,
             "cone",
             &[27, 26, 1],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    /// Verifies:
+    /// `encode(one_hot(reverse(x), lsb_prio=true)) < K`
+    ///   ↔
+    /// `or_reduce(x[W-1 : W-K])`.
+    #[test]
+    fn aug_opt_rewrites_encode_one_hot_reverse_ult_k_to_or_reduce_top_bits() {
+        let ir_text = r#"package enc_onehot_rev
+
+top fn f(x: bits[8] id=1) -> bits[1] {
+  reverse.2: bits[8] = reverse(x, id=2)
+  one_hot.3: bits[9] = one_hot(reverse.2, lsb_prio=true, id=3)
+  encode.4: bits[4] = encode(one_hot.3, id=4)
+  literal.5: bits[4] = literal(value=3, id=5)
+  ret ult.6: bits[1] = ult(encode.4, literal.5, id=6)
+}
+"#;
+
+        // Use the PIR-only path so the output preserves the rewrite shape for
+        // structural assertions.
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("f"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                run_xlsynth_opt_before: false,
+                run_xlsynth_opt_after: false,
+            },
+        )
+        .expect("aug opt");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("f").expect("top fn");
+
+        let mut saw = false;
+        for node in &f.nodes {
+            let NodePayload::Unop(Unop::OrReduce, arg) = &node.payload else {
+                continue;
+            };
+            let NodePayload::BitSlice {
+                arg: slice_arg,
+                start,
+                width,
+            } = &f.get_node(*arg).payload
+            else {
+                continue;
+            };
+            if matches!(f.get_node(*slice_arg).payload, NodePayload::GetParam(_))
+                && *start == 5
+                && *width == 3
+            {
+                saw = true;
+                break;
+            }
+        }
+        assert!(
+            saw,
+            "expected or_reduce(bit_slice(x,start=5,width=3)); got:\n{out_text}"
+        );
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "f",
+            &[8],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    /// Verifies:
+    /// `or_reduce(bit_slice(encode(one_hot(reverse(x), lsb_prio=true)),
+    /// start=1, width=E-1))`   ↔
+    /// `nor(x[W-1], x[W-2])`.
+    #[test]
+    fn aug_opt_rewrites_encode_one_hot_reverse_encode_ge2_to_nor_top2bits() {
+        let ir_text = r#"package enc_onehot_rev_ge2
+
+top fn f(x: bits[8] id=1) -> bits[1] {
+  reverse.2: bits[8] = reverse(x, id=2)
+  one_hot.3: bits[9] = one_hot(reverse.2, lsb_prio=true, id=3)
+  encode.4: bits[4] = encode(one_hot.3, id=4)
+  bit_slice.5: bits[3] = bit_slice(encode.4, start=1, width=3, id=5)
+  ret or_reduce.6: bits[1] = or_reduce(bit_slice.5, id=6)
+}
+"#;
+
+        // Use the PIR-only path so the output preserves the rewrite shape for
+        // structural assertions.
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("f"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                run_xlsynth_opt_before: false,
+                run_xlsynth_opt_after: false,
+            },
+        )
+        .expect("aug opt");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("f").expect("top fn");
+
+        let mut saw = false;
+        for node in &f.nodes {
+            let NodePayload::Nary(NaryOp::Nor, operands) = &node.payload else {
+                continue;
+            };
+            if operands.len() != 2 {
+                continue;
+            }
+            let mut starts: Vec<usize> = Vec::new();
+            for &op in operands {
+                let NodePayload::BitSlice { arg, start, width } = &f.get_node(op).payload else {
+                    starts.clear();
+                    break;
+                };
+                if *width != 1 {
+                    starts.clear();
+                    break;
+                }
+                if !matches!(f.get_node(*arg).payload, NodePayload::GetParam(_)) {
+                    starts.clear();
+                    break;
+                }
+                starts.push(*start);
+            }
+            starts.sort_unstable();
+            if starts == vec![6, 7] {
+                saw = true;
+                break;
+            }
+        }
+        assert!(
+            saw,
+            "expected nor(bit_slice(x,6,1), bit_slice(x,7,1)); got:\n{out_text}"
+        );
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "f",
+            &[8],
             /* random_samples= */ 2000,
         );
     }
