@@ -46,5 +46,9 @@ name = "xlsynth_mcmc_pir"
 path = "src/lib.rs"
 
 [[bin]]
+name = "xlsynth-mcmc-pir"
+path = "src/bin/xlsynth-mcmc-pir.rs"
+
+[[bin]]
 name = "pir-mcmc-driver"
-path = "src/bin/pir-mcmc-driver.rs"
+path = "src/bin/xlsynth-mcmc-pir.rs"
