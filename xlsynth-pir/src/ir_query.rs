@@ -14,8 +14,14 @@ mod parser;
 use self::parser::QueryParser;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaceholderExpr {
+    pub name: String,
+    pub ty: Option<ir::Type>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryExpr {
-    Placeholder(String),
+    Placeholder(PlaceholderExpr),
     Number(u64),
     /// Variadic wildcard for matching n-ary operand lists in operator matchers.
     ///
@@ -177,6 +183,30 @@ fn validate_width_matcher_placement(expr: &QueryExpr) -> Result<(), String> {
                     );
                 }
 
+                if matches!(m.kind, MatcherKind::Width) {
+                    // `$width(...)` is a numeric helper; its argument must be a placeholder
+                    // reference to an already-bound node.
+                    if m.args.len() != 1 {
+                        return Err("$width(...) expects exactly 1 argument".to_string());
+                    }
+                    match &m.args[0] {
+                        QueryExpr::Placeholder(p) => {
+                            if p.name == "_" {
+                                return Err(
+                                    "$width(_) is not supported because '_' does not create a binding"
+                                        .to_string(),
+                                );
+                            }
+                        }
+                        _ => {
+                            return Err(
+                                "$width(...) expects a single placeholder identifier argument"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+
                 // Width is never allowed in positional operand lists; it doesn't match nodes.
                 for a in &m.args {
                     walk(a, /* width_allowed_here= */ false)?;
@@ -237,12 +267,18 @@ fn match_solutions(
 ) -> Vec<Bindings> {
     match expr {
         QueryExpr::Ellipsis => vec![],
-        QueryExpr::Placeholder(name) => {
-            if name == "_" {
+        QueryExpr::Placeholder(placeholder) => {
+            if let Some(ty) = &placeholder.ty {
+                if f.get_node_ty(node_ref) != ty {
+                    return vec![];
+                }
+            }
+
+            if placeholder.name == "_" {
                 // Wildcard: matches any node without creating/consulting a binding.
                 return vec![bindings.clone()];
             }
-            match bindings.get(name) {
+            match bindings.get(&placeholder.name) {
                 Some(existing) => match existing {
                     Binding::Node(existing_node_ref) if *existing_node_ref == node_ref => {
                         vec![bindings.clone()]
@@ -251,7 +287,7 @@ fn match_solutions(
                 },
                 None => {
                     let mut out = bindings.clone();
-                    out.insert(name.clone(), Binding::Node(node_ref));
+                    out.insert(placeholder.name.clone(), Binding::Node(node_ref));
                     vec![out]
                 }
             }
@@ -310,6 +346,7 @@ fn match_solutions(
                     out.extend(match_literal_solutions(
                         predicate,
                         &matcher.args,
+                        &node.ty,
                         &node.payload,
                         &b,
                     ));
@@ -340,6 +377,7 @@ fn match_solutions(
 fn match_literal_solutions(
     predicate: Option<LiteralPredicate>,
     args: &[QueryExpr],
+    node_ty: &ir::Type,
     payload: &ir::NodePayload,
     bindings: &Bindings,
 ) -> Vec<Bindings> {
@@ -358,13 +396,19 @@ fn match_literal_solutions(
     }
 
     match &args[0] {
-        QueryExpr::Placeholder(name) => {
-            if name == "_" {
+        QueryExpr::Placeholder(placeholder) => {
+            if let Some(ty) = &placeholder.ty {
+                if node_ty != ty {
+                    return vec![];
+                }
+            }
+
+            if placeholder.name == "_" {
                 // Wildcard literal argument: match any literal value without binding.
                 return vec![bindings.clone()];
             }
 
-            match bindings.get(name) {
+            match bindings.get(&placeholder.name) {
                 Some(existing) => match existing {
                     Binding::LiteralValue(existing_value) if *existing_value == *value => {
                         vec![bindings.clone()]
@@ -373,7 +417,10 @@ fn match_literal_solutions(
                 },
                 None => {
                     let mut out = bindings.clone();
-                    out.insert(name.clone(), Binding::LiteralValue(value.clone()));
+                    out.insert(
+                        placeholder.name.clone(),
+                        Binding::LiteralValue(value.clone()),
+                    );
                     vec![out]
                 }
             }
@@ -631,12 +678,28 @@ fn match_named_args_solutions(
                                     None
                                 } else {
                                     match &m.args[0] {
-                                        QueryExpr::Placeholder(name) => match b.get(name) {
-                                            Some(Binding::Node(nr)) => {
-                                                Some(f.get_node_ty(*nr).bit_count())
+                                        QueryExpr::Placeholder(placeholder) => {
+                                            if placeholder.name == "_" {
+                                                // Wildcard placeholders do not create bindings, so
+                                                // $width(_) cannot be evaluated.
+                                                None
+                                            } else {
+                                                match b.get(&placeholder.name) {
+                                                    Some(Binding::Node(nr)) => {
+                                                        if let Some(ty) = &placeholder.ty {
+                                                            if f.get_node_ty(*nr) != ty {
+                                                                None
+                                                            } else {
+                                                                Some(f.get_node_ty(*nr).bit_count())
+                                                            }
+                                                        } else {
+                                                            Some(f.get_node_ty(*nr).bit_count())
+                                                        }
+                                                    }
+                                                    _ => None,
+                                                }
                                             }
-                                            _ => None,
-                                        },
+                                        }
                                         _ => None,
                                     }
                                 }
@@ -833,7 +896,7 @@ mod tests {
             panic!("expected matcher");
         };
         match &matcher.named_args[0].value {
-            NamedArgValue::Expr(QueryExpr::Placeholder(name)) => assert_eq!(name, "true"),
+            NamedArgValue::Expr(QueryExpr::Placeholder(p)) => assert_eq!(p.name, "true"),
             other => panic!("expected selector expr placeholder, got {:?}", other),
         }
     }
@@ -845,6 +908,15 @@ mod tests {
             err.contains("literal expects 1 argument"),
             "unexpected error: {}",
             err
+        );
+    }
+
+    #[test]
+    fn parse_rejects_wildcard_inside_width_matcher() {
+        let err = parse_query("bit_slice(x, start=0, width=$width(_))").unwrap_err();
+        assert_eq!(
+            err,
+            "$width(_) is not supported because '_' does not create a binding"
         );
     }
 
