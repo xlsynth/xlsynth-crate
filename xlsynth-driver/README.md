@@ -465,6 +465,7 @@ Query expression basics:
   - `nor(a, ...)` means `a` is the *first* operand.
   - `nor(..., a)` means `a` is the *last* operand.
 - Placeholders like `x` and `y` match any node (repeated placeholders must bind the same node).
+- Placeholders can be constrained by type using `name: <type>` (e.g., `b: bits[1]`, `t: token`, `p: (bits[8], bits[1])`).
 - The special placeholder `_` matches any node but does not create a binding (wildcard).
 - User-count constraints can be added as `[Nu]` (e.g., `[1u]` means exactly one user in the function).
 - `$anycmp` and `$anymul` are binary operators, so they always take two arguments. Use `_` for a wildcard position.

@@ -2,7 +2,9 @@
 
 //! Parser for the lightweight IR query language.
 
-use super::{MatcherExpr, MatcherKind, NamedArg, NamedArgValue, QueryExpr};
+use crate::ir;
+
+use super::{MatcherExpr, MatcherKind, NamedArg, NamedArgValue, PlaceholderExpr, QueryExpr};
 
 pub struct QueryParser<'a> {
     bytes: &'a [u8],
@@ -85,12 +87,25 @@ impl<'a> QueryParser<'a> {
                 let ident = self.parse_ident("placeholder or operator")?;
                 self.skip_ws();
 
+                // Placeholder type constraint: `name: bits[1]`, `x: token`, etc.
+                if self.peek() == Some(b':') {
+                    self.bump();
+                    let ty = self.parse_type("type constraint")?;
+                    return Ok(QueryExpr::Placeholder(PlaceholderExpr {
+                        name: ident,
+                        ty: Some(ty),
+                    }));
+                }
+
                 // If an identifier is followed by a bracket clause and/or an argument
                 // list, interpret it as an operator matcher (e.g. `add(x, y)`).
                 //
                 // Otherwise it is a node placeholder binding (e.g. `x`, `y`, `_`).
                 if self.peek() != Some(b'[') && self.peek() != Some(b'(') {
-                    return Ok(QueryExpr::Placeholder(ident));
+                    return Ok(QueryExpr::Placeholder(PlaceholderExpr {
+                        name: ident,
+                        ty: None,
+                    }));
                 }
 
                 let mut user_count: Option<usize> = None;
@@ -313,7 +328,9 @@ impl<'a> QueryParser<'a> {
                     return self.parse_bool_named_arg(ident, expr);
                 }
                 match expr {
-                    QueryExpr::Placeholder(ref name) if name == "_" => NamedArgValue::Any,
+                    QueryExpr::Placeholder(ref p) if p.name == "_" && p.ty.is_none() => {
+                        NamedArgValue::Any
+                    }
                     QueryExpr::Number(number) if ident == "width" || ident == "start" => {
                         let number = usize::try_from(number).map_err(|_| {
                             self.error("named argument number does not fit in usize")
@@ -359,20 +376,83 @@ impl<'a> QueryParser<'a> {
         expr: QueryExpr,
     ) -> Result<Option<NamedArg>, String> {
         match expr {
-            QueryExpr::Placeholder(ref ident) if ident == "_" => Ok(Some(NamedArg {
-                name,
-                value: NamedArgValue::Any,
-            })),
-            QueryExpr::Placeholder(ref ident) if ident == "true" => Ok(Some(NamedArg {
-                name,
-                value: NamedArgValue::Bool(true),
-            })),
-            QueryExpr::Placeholder(ref ident) if ident == "false" => Ok(Some(NamedArg {
-                name,
-                value: NamedArgValue::Bool(false),
-            })),
+            QueryExpr::Placeholder(ref p) if p.name == "_" && p.ty.is_none() => {
+                Ok(Some(NamedArg {
+                    name,
+                    value: NamedArgValue::Any,
+                }))
+            }
+            QueryExpr::Placeholder(ref p) if p.name == "true" && p.ty.is_none() => {
+                Ok(Some(NamedArg {
+                    name,
+                    value: NamedArgValue::Bool(true),
+                }))
+            }
+            QueryExpr::Placeholder(ref p) if p.name == "false" && p.ty.is_none() => {
+                Ok(Some(NamedArg {
+                    name,
+                    value: NamedArgValue::Bool(false),
+                }))
+            }
             _ => Err(self.error("lsb_prio expects boolean literal or '_'")),
         }
+    }
+
+    fn parse_type(&mut self, ctx: &str) -> Result<ir::Type, String> {
+        self.skip_ws();
+
+        let mut ty: ir::Type = if self.peek() == Some(b'(') {
+            self.expect('(')?;
+            let mut members: Vec<Box<ir::Type>> = Vec::new();
+            self.skip_ws();
+            if self.peek() != Some(b')') {
+                loop {
+                    let member = self.parse_type("tuple member type")?;
+                    members.push(Box::new(member));
+                    self.skip_ws();
+                    match self.peek() {
+                        Some(b',') => {
+                            self.bump();
+                            self.skip_ws();
+                        }
+                        Some(b')') => break,
+                        _ => return Err(self.error("expected ',' or ')' in tuple type")),
+                    }
+                }
+            }
+            self.expect(')')?;
+            ir::Type::Tuple(members)
+        } else {
+            let kw = self.parse_ident(ctx)?;
+            match kw.as_str() {
+                "bits" => {
+                    self.expect('[')?;
+                    let count = self.parse_number("bit count")?;
+                    self.expect(']')?;
+                    let mut bits_ty = ir::Type::Bits(count);
+                    // `bits` can have array dimensions directly attached: `bits[8][4]`.
+                    while self.peek() == Some(b'[') {
+                        self.expect('[')?;
+                        let n = self.parse_number("array type size")?;
+                        self.expect(']')?;
+                        bits_ty = ir::Type::new_array(bits_ty, n);
+                    }
+                    bits_ty
+                }
+                "token" => ir::Type::Token,
+                _ => return Err(self.error(&format!("expected type, got {}", kw))),
+            }
+        };
+
+        // Additional array dimensions after any base type: `(bits[1], bits[2])[3]`,
+        // etc.
+        while self.peek() == Some(b'[') {
+            self.expect('[')?;
+            let n = self.parse_number("array type size")?;
+            self.expect(']')?;
+            ty = ir::Type::new_array(ty, n);
+        }
+        Ok(ty)
     }
 }
 
