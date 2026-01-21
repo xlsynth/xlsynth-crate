@@ -183,6 +183,30 @@ fn validate_width_matcher_placement(expr: &QueryExpr) -> Result<(), String> {
                     );
                 }
 
+                if matches!(m.kind, MatcherKind::Width) {
+                    // `$width(...)` is a numeric helper; its argument must be a placeholder
+                    // reference to an already-bound node.
+                    if m.args.len() != 1 {
+                        return Err("$width(...) expects exactly 1 argument".to_string());
+                    }
+                    match &m.args[0] {
+                        QueryExpr::Placeholder(p) => {
+                            if p.name == "_" {
+                                return Err(
+                                    "$width(_) is not supported because '_' does not create a binding"
+                                        .to_string(),
+                                );
+                            }
+                        }
+                        _ => {
+                            return Err(
+                                "$width(...) expects a single placeholder identifier argument"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+
                 // Width is never allowed in positional operand lists; it doesn't match nodes.
                 for a in &m.args {
                     walk(a, /* width_allowed_here= */ false)?;
@@ -655,11 +679,25 @@ fn match_named_args_solutions(
                                 } else {
                                     match &m.args[0] {
                                         QueryExpr::Placeholder(placeholder) => {
-                                            match b.get(&placeholder.name) {
-                                                Some(Binding::Node(nr)) => {
-                                                    Some(f.get_node_ty(*nr).bit_count())
+                                            if placeholder.name == "_" {
+                                                // Wildcard placeholders do not create bindings, so
+                                                // $width(_) cannot be evaluated.
+                                                None
+                                            } else {
+                                                match b.get(&placeholder.name) {
+                                                    Some(Binding::Node(nr)) => {
+                                                        if let Some(ty) = &placeholder.ty {
+                                                            if f.get_node_ty(*nr) != ty {
+                                                                None
+                                                            } else {
+                                                                Some(f.get_node_ty(*nr).bit_count())
+                                                            }
+                                                        } else {
+                                                            Some(f.get_node_ty(*nr).bit_count())
+                                                        }
+                                                    }
+                                                    _ => None,
                                                 }
-                                                _ => None,
                                             }
                                         }
                                         _ => None,
@@ -870,6 +908,15 @@ mod tests {
             err.contains("literal expects 1 argument"),
             "unexpected error: {}",
             err
+        );
+    }
+
+    #[test]
+    fn parse_rejects_wildcard_inside_width_matcher() {
+        let err = parse_query("bit_slice(x, start=0, width=$width(_))").unwrap_err();
+        assert_eq!(
+            err,
+            "$width(_) is not supported because '_' does not create a binding"
         );
     }
 
