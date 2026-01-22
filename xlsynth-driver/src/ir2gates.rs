@@ -35,6 +35,7 @@ struct CutDbRewriteBounds {
 
 fn ir2gates(
     input_file: &std::path::Path,
+    ir_top: Option<&str>,
     quiet: bool,
     fold: bool,
     hash: bool,
@@ -78,6 +79,7 @@ fn ir2gates(
         cut_db_rewrite_max_iterations: CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
         cut_db_rewrite_max_cuts_per_node: CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
         prepared_ir_out: prepared_ir_out.map(|p| p.to_path_buf()),
+        ir_top: ir_top.map(|s| s.to_string()),
     };
     let stats = process_ir_path::process_ir_path_for_cli(input_file, &options);
     if quiet {
@@ -94,6 +96,7 @@ fn ir2gates(
 
 pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
     let input_file = matches.get_one::<String>("ir_input_file").unwrap();
+    let ir_top = matches.get_one::<String>("ir_top").map(|s| s.as_str());
     let quiet = match matches.get_one::<String>("quiet").map(|s| s.as_str()) {
         Some("true") => true,
         Some("false") => false,
@@ -221,6 +224,7 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
     let input_path = std::path::Path::new(input_file);
     ir2gates(
         input_path,
+        ir_top,
         quiet,
         fold,
         hash,
@@ -244,6 +248,7 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
 
 fn ir_to_gatefn_with_stats(
     input_file: &std::path::Path,
+    ir_top: Option<&str>,
     fold: bool,
     hash: bool,
     enable_rewrite_carry_out: bool,
@@ -270,7 +275,7 @@ fn ir_to_gatefn_with_stats(
         .unwrap_or_else(|err| panic!("Failed to read {}: {}", input_file.display(), err));
     let ir2gates_output = xlsynth_g8r::ir2gates::ir2gates_from_ir_text(
         &file_content,
-        None,
+        ir_top,
         xlsynth_g8r::ir2gates::Ir2GatesOptions {
             fold,
             hash,
@@ -403,6 +408,7 @@ fn ir_to_gatefn_with_stats(
 
 pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
     let input_file = matches.get_one::<String>("ir_input_file").unwrap();
+    let ir_top = matches.get_one::<String>("ir_top").map(|s| s.as_str());
     let fold = match matches.get_one::<String>("fold").map(|s| s.as_str()) {
         Some("true") => true,
         Some("false") => false,
@@ -489,6 +495,7 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
     let input_path = std::path::Path::new(input_file);
     let (gate_fn, stats) = ir_to_gatefn_with_stats(
         input_path,
+        ir_top,
         fold,
         hash,
         enable_rewrite_carry_out,

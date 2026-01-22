@@ -14,6 +14,23 @@ pub struct SummaryStats {
     pub fanout_histogram: BTreeMap<usize, usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AigStats {
+    /// Count of live `AigNode::And2` nodes (i.e. the AIGER "A" count).
+    pub and_nodes: usize,
+    /// Maximum depth in terms of And-gate levels from primary inputs to any
+    /// primary output (0 if all outputs are literals/inputs or there are no
+    /// outputs).
+    pub max_depth: usize,
+    /// Histogram of fanout counts (use-counts), excluding literal nodes.
+    ///
+    /// Notes:
+    /// - Primary outputs are counted as a "use", so nodes that only feed a
+    ///   primary output will typically contribute to the `1` bin.
+    /// - This is computed over *live* nodes (reachable from primary outputs).
+    pub fanout_histogram: BTreeMap<usize, usize>,
+}
+
 // Add structured return type for gate depth info.
 #[derive(Debug)]
 pub struct GateDepthStats {
@@ -150,4 +167,42 @@ pub fn get_summary_stats(gate_fn: &gate::GateFn) -> SummaryStats {
         fanout_histogram: hist_sorted,
     };
     summary_stats
+}
+
+pub fn get_aig_stats(gate_fn: &gate::GateFn) -> AigStats {
+    let id_to_use_count: HashMap<gate::AigRef, usize> = get_id_to_use_count(gate_fn);
+    let live_nodes: Vec<gate::AigRef> = id_to_use_count.keys().cloned().collect();
+
+    let and_nodes = live_nodes
+        .iter()
+        .filter(|node_ref| matches!(gate_fn.gates[node_ref.id], AigNode::And2 { .. }))
+        .count();
+
+    let depth_stats = get_gate_depth(gate_fn, &live_nodes);
+    let mut max_depth: usize = 0;
+    for output in gate_fn.outputs.iter() {
+        for operand in output.bit_vector.iter_lsb_to_msb() {
+            if let Some(depth) = depth_stats.ref_to_depth.get(&operand.node) {
+                max_depth = std::cmp::max(max_depth, *depth);
+            }
+        }
+    }
+
+    let mut fanout_histogram: BTreeMap<usize, usize> = BTreeMap::new();
+    for node_ref in live_nodes.iter() {
+        // Skip literal nodes (AigRef 0/1).
+        if matches!(gate_fn.gates[node_ref.id], AigNode::Literal(_)) {
+            continue;
+        }
+        let fanout = *id_to_use_count
+            .get(node_ref)
+            .expect("live node missing from use-count map");
+        *fanout_histogram.entry(fanout).or_insert(0) += 1;
+    }
+
+    AigStats {
+        and_nodes,
+        max_depth,
+        fanout_histogram,
+    }
 }

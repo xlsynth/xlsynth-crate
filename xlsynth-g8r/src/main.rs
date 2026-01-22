@@ -90,6 +90,7 @@ fn main() {
         mul_adder_mapping: None,
         fraig: args.fraig,
         emit_independent_op_stats: false,
+        ir_top: None,
         emit_netlist: args.emit_netlist,
         quiet: args.emit_netlist,
         toggle_sample_count: args.toggle_sample_count,

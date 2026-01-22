@@ -103,6 +103,7 @@ pub fn handle_dslx_g8r_stats(matches: &ArgMatches, config: &Option<ToolchainConf
             mul_adder_mapping: None,
             fraig: true,
             emit_independent_op_stats: false,
+            ir_top: None,
             fraig_max_iterations: None,
             fraig_sim_samples: None,
             quiet: true,

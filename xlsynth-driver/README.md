@@ -85,6 +85,27 @@ xlsynth-driver gv2ir \
   --dff_cell_invert_formula IQN > add_mul.ir
 ```
 
+### `gv2aig`: gate-level netlist to AIGER
+
+Converts a gate-level netlist plus Liberty proto into an AIGER file.
+
+```shell
+xlsynth-driver gv2aig \
+  --netlist ~/my_design_gates.v \
+  --liberty_proto ~/asap7.proto \
+  --aiger-out ~/my_design_gates.aig
+```
+
+- Also prints a one-line summary of AIG stats to stdout (AND-node count, depth, and fanout histogram excluding literals).
+- Output format:
+  - Use a `.aig` suffix for **binary** AIGER (`aig`).
+  - Use a `.aag` suffix for **ASCII** AIGER (`aag`).
+- Optional flags:
+  - `--module_name <MODULE>` – select module when the netlist contains multiple modules.
+  - `--dff_cells <CSV>` – comma-separated list of DFF cell names to treat as identity (D->Q).
+  - `--dff_cell_formula <STR>` – auto-classify cells as DFFs for identity wiring when any output pin's Liberty function exactly matches this string (e.g., `IQ`). Identity wiring sets `Q = D`.
+  - `--dff_cell_invert_formula <STR>` – auto-classify cells as DFFs with inverted output when any output pin's Liberty function exactly matches this string (e.g., `IQN`). Inverted wiring sets `QN = NOT(D)`.
+
 ### `gv-read-stats`: netlist statistics
 
 Reads a gate-level netlist (optionally gzipped) and prints summary statistics such as
@@ -147,6 +168,7 @@ Converts an XLS IR file to an `xlsynth_g8r::GateFn` (i.e. a gate-level netlist i
   - `--netlist-out <PATH>` – write a human-readable gate-level netlist to a file.
 - The same optimization / analysis flags accepted by `ir2gates` are supported (`--fold`, `--hash`, `--fraig`, `--toggle-sample-count`, …).
   - `--enable-rewrite-carry-out=<BOOL>` – when `true`, enable a carry-out idiom rewrite during `prep_for_gatify` (introduces `ext_carry_out`). Default `false`.
+  - `--top <TOP>` – override the top-level entry point (required if the IR package has no `top fn`).
 
 Example:
 
@@ -530,7 +552,7 @@ Runs `ir-query` over every `.ir` file under a corpus directory (recursive) and p
 Example:
 
 ```shell
-xlsynth-driver ir-query-corpus /tmpfs/bf16_add_k3_cones 'and(a, nor(a, _))' --max-matches 20
+xlsynth-driver ir-query-corpus /tmpfs/my_design_k3_cones 'and(a, nor(a, _))' --max-matches 20
 ```
 
 ### `ir-structural-similarity`
@@ -617,6 +639,7 @@ the quiet setting.
 
 Supported flags include the common gate-optimization controls:
 
+- `--top <TOP>` – override the top-level entry point (required if the IR package has no `top fn`).
 - `--fold` – fold the gate representation (default `true`).
 - `--hash` – hash-cons the gate representation (default `true`).
 - `--enable-rewrite-carry-out=<BOOL>` – when `true`, enable a carry-out idiom rewrite during `prep_for_gatify` (introduces `ext_carry_out`). Default `false`.

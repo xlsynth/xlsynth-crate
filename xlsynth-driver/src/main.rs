@@ -52,6 +52,7 @@ mod fn_eval;
 mod g8r2ir;
 mod g8r2v;
 mod g8r_equiv;
+mod gv2aig;
 mod gv2ir;
 mod gv_dump_cone;
 mod gv_instance_csv;
@@ -1183,6 +1184,7 @@ fn main() {
                         .required(true)
                         .action(ArgAction::Set),
                 )
+                .add_ir_top_arg(false)
                 .add_bool_arg("quiet", "Quiet mode")
                 .arg(
                     clap::Arg::new("output_json")
@@ -1213,6 +1215,7 @@ fn main() {
                         .required(true)
                         .index(1),
                 )
+                .add_ir_top_arg(false)
                 .add_ir2g8r_flags()
                 .arg(
                     clap::Arg::new("bin_out")
@@ -1347,6 +1350,57 @@ fn main() {
                         .help("If set, any cell with an output pin function exactly matching this formula string is treated as a DFF with inverted output (QN = NOT(D)).")
                         .action(ArgAction::Set),
                 )
+        )
+        .subcommand(
+            clap::Command::new("gv2aig")
+                .about("Converts a gate-level netlist and Liberty proto to AIGER")
+                .arg(
+                    Arg::new("netlist")
+                        .long("netlist")
+                        .help("Input gate-level netlist (.gv, .v, or .gv.gz)")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("liberty_proto")
+                        .long("liberty_proto")
+                        .help("Input Liberty proto (.proto or .textproto)")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("aiger_out")
+                        .long("aiger-out")
+                        .value_name("PATH")
+                        .help("Path to write AIGER output; use .aag for ASCII or .aig for binary")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("module_name")
+                        .long("module_name")
+                        .value_name("MODULE")
+                        .help("Optional module name to select when netlist contains multiple modules")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("dff_cells")
+                        .long("dff_cells")
+                        .help("Comma-separated list of DFF cell names to treat as identity (D->Q)")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("dff_cell_formula")
+                        .long("dff_cell_formula")
+                        .help("If set, any cell with an output pin function exactly matching this formula string is treated as a DFF for D->Q identity override.")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("dff_cell_invert_formula")
+                        .long("dff_cell_invert_formula")
+                        .help("If set, any cell with an output pin function exactly matching this formula string is treated as a DFF with inverted output (QN = NOT(D)).")
+                        .action(ArgAction::Set),
+                ),
         )
         .subcommand(
             clap::Command::new("gv-read-stats")
@@ -2123,6 +2177,9 @@ fn main() {
         }
         Some(("gv2ir", subm)) => {
             gv2ir::handle_gv2ir(subm);
+        }
+        Some(("gv2aig", subm)) => {
+            gv2aig::handle_gv2aig(subm);
         }
         Some(("gv-read-stats", subm)) => {
             gv_read_stats::handle_gv_read_stats(subm);

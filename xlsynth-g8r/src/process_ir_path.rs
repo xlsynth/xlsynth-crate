@@ -140,6 +140,10 @@ pub struct Options {
     pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
     pub fraig: bool,
     pub emit_independent_op_stats: bool,
+    /// Optional override for the top-level entry point in the IR package.
+    ///
+    /// If unset, we require the IR package to have an explicit top function.
+    pub ir_top: Option<String>,
 
     /// If not set, we fraig to convergence.
     pub fraig_max_iterations: Option<usize>,
@@ -186,7 +190,7 @@ pub fn process_ir_path_for_cli(
         .unwrap_or_else(|err| panic!("Failed to read {}: {}", ir_path.display(), err));
     let ir2gates_output = ir2gates::ir2gates_from_ir_text(
         &file_content,
-        None,
+        options.ir_top.as_deref(),
         ir2gates::Ir2GatesOptions {
             fold: options.fold,
             hash: options.hash,
