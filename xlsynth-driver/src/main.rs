@@ -1184,6 +1184,7 @@ fn main() {
                         .required(true)
                         .action(ArgAction::Set),
                 )
+                .add_ir_top_arg(false)
                 .add_bool_arg("quiet", "Quiet mode")
                 .arg(
                     clap::Arg::new("output_json")
@@ -1214,6 +1215,7 @@ fn main() {
                         .required(true)
                         .index(1),
                 )
+                .add_ir_top_arg(false)
                 .add_ir2g8r_flags()
                 .arg(
                     clap::Arg::new("bin_out")
