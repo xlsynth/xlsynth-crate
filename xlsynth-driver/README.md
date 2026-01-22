@@ -85,6 +85,26 @@ xlsynth-driver gv2ir \
   --dff_cell_invert_formula IQN > add_mul.ir
 ```
 
+### `gv2aig`: gate-level netlist to AIGER
+
+Converts a gate-level netlist plus Liberty proto into an AIGER file.
+
+```shell
+xlsynth-driver gv2aig \
+  --netlist ~/bf16_add_gates.v \
+  --liberty_proto ~/asap7.proto \
+  --aiger-out ~/bf16_add_gates.aig
+```
+
+- Output format:
+  - Use a `.aig` suffix for **binary** AIGER (`aig`).
+  - Use a `.aag` suffix for **ASCII** AIGER (`aag`).
+- Optional flags:
+  - `--module_name <MODULE>` – select module when the netlist contains multiple modules.
+  - `--dff_cells <CSV>` – comma-separated list of DFF cell names to treat as identity (D->Q).
+  - `--dff_cell_formula <STR>` – auto-classify cells as DFFs for identity wiring when any output pin's Liberty function exactly matches this string (e.g., `IQ`). Identity wiring sets `Q = D`.
+  - `--dff_cell_invert_formula <STR>` – auto-classify cells as DFFs with inverted output when any output pin's Liberty function exactly matches this string (e.g., `IQN`). Inverted wiring sets `QN = NOT(D)`.
+
 ### `gv-read-stats`: netlist statistics
 
 Reads a gate-level netlist (optionally gzipped) and prints summary statistics such as
