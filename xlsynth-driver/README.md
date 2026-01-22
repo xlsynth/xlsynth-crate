@@ -96,6 +96,7 @@ xlsynth-driver gv2aig \
   --aiger-out ~/bf16_add_gates.aig
 ```
 
+- Also prints a one-line summary of AIG stats to stdout (AND-node count, depth, and fanout histogram excluding literals).
 - Output format:
   - Use a `.aig` suffix for **binary** AIGER (`aig`).
   - Use a `.aag` suffix for **ASCII** AIGER (`aag`).

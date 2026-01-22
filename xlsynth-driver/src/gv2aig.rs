@@ -4,9 +4,24 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::path::Path;
 
+use xlsynth_g8r::aig::get_summary_stats::get_aig_stats;
+use xlsynth_g8r::aig::get_summary_stats::AigStats;
 use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
 use xlsynth_g8r::aig_serdes::emit_aiger_binary::emit_aiger_binary;
 use xlsynth_g8r::netlist::gv2aig::{convert_gv2aig_paths, Gv2AigOptions};
+
+fn format_fanout_histogram(stats: &AigStats) -> String {
+    let mut s = String::new();
+    s.push('{');
+    for (i, (fanout, count)) in stats.fanout_histogram.iter().enumerate() {
+        if i != 0 {
+            s.push(',');
+        }
+        s.push_str(&format!("{}:{}", fanout, count));
+    }
+    s.push('}');
+    s
+}
 
 pub fn handle_gv2aig(matches: &clap::ArgMatches) {
     let netlist_path = matches.get_one::<String>("netlist").unwrap();
@@ -45,6 +60,8 @@ pub fn handle_gv2aig(matches: &clap::ArgMatches) {
             std::process::exit(1);
         }
     };
+
+    let stats = get_aig_stats(&gate_fn);
 
     let is_binary_aig = Path::new(aiger_out)
         .extension()
@@ -90,4 +107,11 @@ pub fn handle_gv2aig(matches: &clap::ArgMatches) {
             std::process::exit(1);
         }
     }
+
+    println!(
+        "aig stats: and_nodes={} depth={} fanout_hist={}",
+        stats.and_nodes,
+        stats.max_depth,
+        format_fanout_histogram(&stats)
+    );
 }
