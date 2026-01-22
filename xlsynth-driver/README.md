@@ -91,9 +91,9 @@ Converts a gate-level netlist plus Liberty proto into an AIGER file.
 
 ```shell
 xlsynth-driver gv2aig \
-  --netlist ~/bf16_add_gates.v \
+  --netlist ~/my_design_gates.v \
   --liberty_proto ~/asap7.proto \
-  --aiger-out ~/bf16_add_gates.aig
+  --aiger-out ~/my_design_gates.aig
 ```
 
 - Also prints a one-line summary of AIG stats to stdout (AND-node count, depth, and fanout histogram excluding literals).
@@ -552,7 +552,7 @@ Runs `ir-query` over every `.ir` file under a corpus directory (recursive) and p
 Example:
 
 ```shell
-xlsynth-driver ir-query-corpus /tmpfs/bf16_add_k3_cones 'and(a, nor(a, _))' --max-matches 20
+xlsynth-driver ir-query-corpus /tmpfs/my_design_k3_cones 'and(a, nor(a, _))' --max-matches 20
 ```
 
 ### `ir-structural-similarity`
