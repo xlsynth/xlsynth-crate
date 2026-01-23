@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use clap::ArgMatches;
@@ -24,23 +25,76 @@ fn eprint_query_parse_error(context: &str, query_text: &str, err: &str) {
     }
 }
 
-fn collect_ir_files_recursively(root: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+fn collect_ir_files_recursively(
+    root: &Path,
+    out: &mut Vec<PathBuf>,
+    include_extensionless: bool,
+) -> std::io::Result<()> {
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
             let path = entry.path();
-            let ty = entry.file_type()?;
-            if ty.is_dir() {
+            // Follow symlinks so CAS-style directories (hash-named symlinks) are scanned.
+            let md = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if md.is_dir() {
                 stack.push(path);
-            } else if ty.is_file() {
-                if path.extension().and_then(|s| s.to_str()) == Some("ir") {
+            } else if md.is_file() {
+                let is_ir = path.extension().and_then(|s| s.to_str()) == Some("ir");
+                let is_extensionless = include_extensionless && path.extension().is_none();
+                if is_ir || is_extensionless {
                     out.push(path);
                 }
             }
         }
     }
     Ok(())
+}
+
+fn maybe_read_ir_text_for_prefilter(
+    path: &Path,
+    include_extensionless: bool,
+    prefilter: bool,
+    prefilter_tokens: &[String],
+    ignore_parse_errors: bool,
+) -> Option<String> {
+    // If we're scanning extensionless files, do a quick prefix sniff to avoid
+    // attempting to read/parse arbitrary blobs.
+    if include_extensionless && path.extension().is_none() {
+        let mut f = std::fs::File::open(path).ok()?;
+        let mut buf = [0u8; 256];
+        let n = f.read(&mut buf).ok()?;
+        let prefix = std::str::from_utf8(&buf[..n]).ok()?;
+        // XLS IR starts with `package <name>` in practice; accept whitespace before it
+        // too.
+        if !prefix.trim_start().starts_with("package ") {
+            return None;
+        }
+    }
+
+    let file_content = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => {
+            if ignore_parse_errors {
+                return None;
+            }
+            // Caller will produce a structured error.
+            return Some(String::new());
+        }
+    };
+
+    if prefilter && !prefilter_tokens.is_empty() {
+        for tok in prefilter_tokens {
+            if !file_content.contains(tok) {
+                return None;
+            }
+        }
+    }
+
+    Some(file_content)
 }
 
 fn required_opname_prefilter_tokens(query: &ir_query::QueryExpr) -> Vec<String> {
@@ -98,6 +152,7 @@ pub fn handle_ir_query_corpus(matches: &ArgMatches, _config: &Option<ToolchainCo
         }
     };
 
+    let include_extensionless = parse_bool_flag_or(matches, "include-extensionless", false);
     let show_ret = parse_bool_flag_or(matches, "show-ret", true);
     let prefilter = parse_bool_flag_or(matches, "prefilter", true);
     let ignore_parse_errors = parse_bool_flag_or(matches, "ignore-parse-errors", true);
@@ -131,7 +186,7 @@ pub fn handle_ir_query_corpus(matches: &ArgMatches, _config: &Option<ToolchainCo
     // Deterministic scan order: gather and sort all candidate paths.
     let mut files: Vec<PathBuf> = Vec::new();
     let root = Path::new(corpus_dir);
-    if let Err(e) = collect_ir_files_recursively(root, &mut files) {
+    if let Err(e) = collect_ir_files_recursively(root, &mut files, include_extensionless) {
         eprintln!(
             "error: ir-query-corpus: failed to read corpus dir {}: {e}",
             root.display()
@@ -151,32 +206,21 @@ pub fn handle_ir_query_corpus(matches: &ArgMatches, _config: &Option<ToolchainCo
         }
         files_scanned += 1;
 
-        let file_content = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(e) => {
-                if ignore_parse_errors {
-                    continue;
-                }
-                eprintln!(
-                    "error: ir-query-corpus: failed to read {}: {e}",
-                    path.display()
-                );
+        let file_content = match maybe_read_ir_text_for_prefilter(
+            &path,
+            include_extensionless,
+            prefilter,
+            &prefilter_tokens,
+            ignore_parse_errors,
+        ) {
+            Some(s) if !s.is_empty() => s,
+            Some(_) => {
+                // Read failed and we're in strict mode.
+                eprintln!("error: ir-query-corpus: failed to read {}", path.display());
                 std::process::exit(2);
             }
+            None => continue,
         };
-
-        if prefilter && !prefilter_tokens.is_empty() {
-            let mut ok = true;
-            for tok in &prefilter_tokens {
-                if !file_content.contains(tok) {
-                    ok = false;
-                    break;
-                }
-            }
-            if !ok {
-                continue;
-            }
-        }
 
         let mut parser = ir_parser::Parser::new(&file_content);
         let mut pkg = match parser.parse_and_validate_package() {

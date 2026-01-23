@@ -58,6 +58,7 @@ maplit = "1.0.2"
 prost-build = "0.12"
 tempfile = "3.20"
 xlsynth-test-helpers = { path = "../xlsynth-test-helpers", version = "0.27.0" }
+xlsynth-prover = { path = "../xlsynth-prover", version = "0.27.0", features = ["with-boolector-built"] }
 
 [build-dependencies]
 prost-build = "0.12"
