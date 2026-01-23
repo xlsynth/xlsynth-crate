@@ -35,6 +35,7 @@ mod nor_not_or_fold;
 mod not_eq_ne_flip;
 mod not_not_cancel;
 mod not_sel_distribute;
+mod or_mask_sign_ext_to_sel;
 mod priority_sel_1_to_sel;
 mod priority_sel_to_sel_chain;
 mod reassociate_add_sub;
@@ -72,6 +73,7 @@ use nor_not_or_fold::NorNotOrFoldTransform;
 use not_eq_ne_flip::NotEqNeFlipTransform;
 use not_not_cancel::NotNotCancelTransform;
 use not_sel_distribute::NotSelDistributeTransform;
+use or_mask_sign_ext_to_sel::OrMaskSignExtToSelTransform;
 use priority_sel_1_to_sel::PrioritySel1ToSelTransform;
 use priority_sel_to_sel_chain::PrioritySelToSelChainTransform;
 use reassociate_add_sub::ReassociateAddSubTransform;
@@ -144,6 +146,9 @@ pub enum PirTransformKind {
     /// `xor(x, sign_ext(b,w))` is a conditional invert; convert to/from sel:
     /// `xor(x, sign_ext(b,w)) ↔ sel(b, cases=[x, not(x)])`
     XorMaskSignExtToSelNot,
+    /// Treat `sign_ext(b)` (b:bits[1]) as an all-ones/zeros mask and convert
+    /// to/from sel: `or(x, sign_ext(b,w)) ↔ sel(b, cases=[x, all_ones_w])`
+    OrMaskSignExtToSel,
     /// Fold `sel` when both cases are identical:
     /// `sel(p, cases=[a, a]) ↔ a`
     SelSameArmsFold,
@@ -231,6 +236,7 @@ impl fmt::Display for PirTransformKind {
             PirTransformKind::AndMaskSignExtToSel => write!(f, "AndMaskSignExtToSel"),
             PirTransformKind::RewireUsersToSiblingAdd => write!(f, "RewireUsersToSiblingAdd"),
             PirTransformKind::XorMaskSignExtToSelNot => write!(f, "XorMaskSignExtToSelNot"),
+            PirTransformKind::OrMaskSignExtToSel => write!(f, "OrMaskSignExtToSel"),
             PirTransformKind::SelSameArmsFold => write!(f, "SelSameArmsFold"),
             PirTransformKind::SelSwapArmsByNotPred => write!(f, "SelSwapArmsByNotPred"),
             PirTransformKind::SelHoist => write!(f, "SelHoist"),
@@ -308,6 +314,7 @@ pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
         Box::new(AndMaskSignExtToSelTransform),
         Box::new(RewireUsersToSiblingAddTransform),
         Box::new(XorMaskSignExtToSelNotTransform),
+        Box::new(OrMaskSignExtToSelTransform),
         Box::new(SelSameArmsFoldTransform),
         Box::new(SelSwapArmsByNotPredTransform),
         Box::new(SelHoistTransform),
@@ -1419,6 +1426,67 @@ mod tests {
         assert!(matches!(
             f.get_node(sel_ref).payload,
             NodePayload::Nary(NaryOp::Xor, _)
+        ));
+    }
+
+    #[test]
+    fn or_mask_sign_ext_to_sel_expands_or() {
+        let ir_text = r#"fn t(b: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  sign_ext.10: bits[8] = sign_ext(b, new_bit_count=8, id=10)
+  ret or.20: bits[8] = or(x, sign_ext.10, id=20)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let mut or_ref: Option<NodeRef> = None;
+        for nr in f.node_refs() {
+            if matches!(f.get_node(nr).payload, NodePayload::Nary(NaryOp::Or, _)) {
+                or_ref = Some(nr);
+            }
+        }
+        let or_ref = or_ref.expect("expected or node");
+
+        let t = OrMaskSignExtToSelTransform;
+        t.apply(&mut f, &TransformLocation::Node(or_ref))
+            .expect("apply");
+
+        match &f.get_node(or_ref).payload {
+            NodePayload::Sel { cases, default, .. } => {
+                assert!(default.is_none());
+                assert_eq!(cases.len(), 2);
+                assert!(matches!(
+                    f.get_node(cases[1]).payload,
+                    NodePayload::Literal(_)
+                ));
+            }
+            other => panic!("expected sel after rewrite, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn or_mask_sign_ext_to_sel_folds_sel() {
+        let ir_text = r#"fn t(b: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  literal.10: bits[8] = literal(value=255, id=10)
+  ret sel.20: bits[8] = sel(b, cases=[x, literal.10], id=20)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let mut sel_ref: Option<NodeRef> = None;
+        for nr in f.node_refs() {
+            if matches!(f.get_node(nr).payload, NodePayload::Sel { .. }) {
+                sel_ref = Some(nr);
+            }
+        }
+        let sel_ref = sel_ref.expect("expected sel node");
+
+        let t = OrMaskSignExtToSelTransform;
+        t.apply(&mut f, &TransformLocation::Node(sel_ref))
+            .expect("apply");
+
+        assert!(matches!(
+            f.get_node(sel_ref).payload,
+            NodePayload::Nary(NaryOp::Or, _)
         ));
     }
 
