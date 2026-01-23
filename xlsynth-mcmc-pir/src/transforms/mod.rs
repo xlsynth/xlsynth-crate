@@ -13,6 +13,7 @@ use xlsynth_pir::ir::{Binop, Fn as IrFn, NaryOp, Node, NodePayload, NodeRef, Typ
 #[allow(unused_imports)]
 use xlsynth_pir::ir_utils::{compute_users, remap_payload_with};
 
+mod add_sign_ext_u1_to_sub_zero_ext_u1;
 mod and_mask_sign_ext_to_sel;
 mod and_reduce_demorgan;
 mod bit_slice_bit_slice_fold;
@@ -47,10 +48,14 @@ mod sel_swap_arms_by_not_pred;
 mod shift_clamp;
 mod shift_hoist;
 mod sign_ext_sel_distribute;
+mod smul_sign_ext_u1_to_sel_neg;
+mod sub_sign_ext_u1_to_add_zero_ext_u1;
 mod sub_to_add_neg;
 mod swap_commutative_binop_operands;
+mod umul_sign_ext_u1_to_sel_neg;
 mod xor_mask_sign_ext_to_sel_not;
 
+use add_sign_ext_u1_to_sub_zero_ext_u1::AddSignExtU1ToSubZeroExtU1Transform;
 use and_mask_sign_ext_to_sel::AndMaskSignExtToSelTransform;
 use and_reduce_demorgan::AndReduceDeMorganTransform;
 use bit_slice_bit_slice_fold::BitSliceBitSliceFoldTransform;
@@ -85,8 +90,11 @@ use sel_swap_arms_by_not_pred::SelSwapArmsByNotPredTransform;
 use shift_clamp::ShiftClampTransform;
 use shift_hoist::ShiftHoistTransform;
 use sign_ext_sel_distribute::SignExtSelDistributeTransform;
+use smul_sign_ext_u1_to_sel_neg::SmulSignExtU1ToSelNegTransform;
+use sub_sign_ext_u1_to_add_zero_ext_u1::SubSignExtU1ToAddZeroExtU1Transform;
 use sub_to_add_neg::SubToAddNegTransform;
 use swap_commutative_binop_operands::SwapCommutativeBinopOperandsTransform;
+use umul_sign_ext_u1_to_sel_neg::UmulSignExtU1ToSelNegTransform;
 use xor_mask_sign_ext_to_sel_not::XorMaskSignExtToSelNotTransform;
 
 /// Kinds of PIR transforms used in PIR MCMC.
@@ -149,6 +157,27 @@ pub enum PirTransformKind {
     /// Treat `sign_ext(b)` (b:bits[1]) as an all-ones/zeros mask and convert
     /// to/from sel: `or(x, sign_ext(b,w)) ↔ sel(b, cases=[x, all_ones_w])`
     OrMaskSignExtToSel,
+    /// Normalize `add(x, sign_ext(b))` into `sub(x, zero_ext(b))` and reverse.
+    ///
+    /// For `b: bits[1]` and `x: bits[w]`:
+    /// `add(x, sign_ext(b,w)) ↔ sub(x, zero_ext(b,w))`
+    AddSignExtU1ToSubZeroExtU1,
+    /// Normalize `sub(x, sign_ext(b))` into `add(x, zero_ext(b))` and reverse.
+    ///
+    /// For `b: bits[1]` and `x: bits[w]`:
+    /// `sub(x, sign_ext(b,w)) ↔ add(x, zero_ext(b,w))`
+    SubSignExtU1ToAddZeroExtU1,
+    /// Normalize multiply by `sign_ext(b)` (b: bits[1]) into `sel` and reverse.
+    ///
+    /// For `b: bits[1]` and `x: bits[w]`:
+    /// `umul(x, sign_ext(b,w)) ↔ sel(b, cases=[0_w, neg(x)])`
+    UmulSignExtU1ToSelNeg,
+    /// Normalize signed multiply by `sign_ext(b)` (b: bits[1]) into `sel` and
+    /// reverse.
+    ///
+    /// For `b: bits[1]` and `x: bits[w]`:
+    /// `smul(x, sign_ext(b,w)) ↔ sel(b, cases=[0_w, neg(x)])`
+    SmulSignExtU1ToSelNeg,
     /// Fold `sel` when both cases are identical:
     /// `sel(p, cases=[a, a]) ↔ a`
     SelSameArmsFold,
@@ -237,6 +266,10 @@ impl fmt::Display for PirTransformKind {
             PirTransformKind::RewireUsersToSiblingAdd => write!(f, "RewireUsersToSiblingAdd"),
             PirTransformKind::XorMaskSignExtToSelNot => write!(f, "XorMaskSignExtToSelNot"),
             PirTransformKind::OrMaskSignExtToSel => write!(f, "OrMaskSignExtToSel"),
+            PirTransformKind::AddSignExtU1ToSubZeroExtU1 => write!(f, "AddSignExtU1ToSubZeroExtU1"),
+            PirTransformKind::SubSignExtU1ToAddZeroExtU1 => write!(f, "SubSignExtU1ToAddZeroExtU1"),
+            PirTransformKind::UmulSignExtU1ToSelNeg => write!(f, "UmulSignExtU1ToSelNeg"),
+            PirTransformKind::SmulSignExtU1ToSelNeg => write!(f, "SmulSignExtU1ToSelNeg"),
             PirTransformKind::SelSameArmsFold => write!(f, "SelSameArmsFold"),
             PirTransformKind::SelSwapArmsByNotPred => write!(f, "SelSwapArmsByNotPred"),
             PirTransformKind::SelHoist => write!(f, "SelHoist"),
@@ -315,6 +348,10 @@ pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
         Box::new(RewireUsersToSiblingAddTransform),
         Box::new(XorMaskSignExtToSelNotTransform),
         Box::new(OrMaskSignExtToSelTransform),
+        Box::new(AddSignExtU1ToSubZeroExtU1Transform),
+        Box::new(SubSignExtU1ToAddZeroExtU1Transform),
+        Box::new(UmulSignExtU1ToSelNegTransform),
+        Box::new(SmulSignExtU1ToSelNegTransform),
         Box::new(SelSameArmsFoldTransform),
         Box::new(SelSwapArmsByNotPredTransform),
         Box::new(SelHoistTransform),
@@ -1487,6 +1524,267 @@ mod tests {
         assert!(matches!(
             f.get_node(sel_ref).payload,
             NodePayload::Nary(NaryOp::Or, _)
+        ));
+    }
+
+    #[test]
+    fn add_sign_ext_u1_to_sub_zero_ext_u1_expands_add() {
+        let ir_text = r#"fn t(b: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  sign_ext.10: bits[8] = sign_ext(b, new_bit_count=8, id=10)
+  ret add.20: bits[8] = add(x, sign_ext.10, id=20)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let mut add_ref: Option<NodeRef> = None;
+        for nr in f.node_refs() {
+            if matches!(f.get_node(nr).payload, NodePayload::Binop(Binop::Add, _, _)) {
+                add_ref = Some(nr);
+            }
+        }
+        let add_ref = add_ref.expect("expected add node");
+
+        let t = AddSignExtU1ToSubZeroExtU1Transform;
+        t.apply(&mut f, &TransformLocation::Node(add_ref))
+            .expect("apply");
+
+        let NodePayload::Binop(Binop::Sub, _x, rhs) = &f.get_node(add_ref).payload else {
+            panic!("expected sub after rewrite");
+        };
+        assert!(matches!(
+            f.get_node(*rhs).payload,
+            NodePayload::ZeroExt { .. }
+        ));
+    }
+
+    #[test]
+    fn add_sign_ext_u1_to_sub_zero_ext_u1_folds_sub() {
+        let ir_text = r#"fn t(b: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  zero_ext.10: bits[8] = zero_ext(b, new_bit_count=8, id=10)
+  ret sub.20: bits[8] = sub(x, zero_ext.10, id=20)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let mut sub_ref: Option<NodeRef> = None;
+        for nr in f.node_refs() {
+            if matches!(f.get_node(nr).payload, NodePayload::Binop(Binop::Sub, _, _)) {
+                sub_ref = Some(nr);
+            }
+        }
+        let sub_ref = sub_ref.expect("expected sub node");
+
+        let t = AddSignExtU1ToSubZeroExtU1Transform;
+        t.apply(&mut f, &TransformLocation::Node(sub_ref))
+            .expect("apply");
+
+        let NodePayload::Binop(Binop::Add, _x, rhs) = &f.get_node(sub_ref).payload else {
+            panic!("expected add after rewrite");
+        };
+        assert!(matches!(
+            f.get_node(*rhs).payload,
+            NodePayload::SignExt { .. }
+        ));
+    }
+
+    #[test]
+    fn sub_sign_ext_u1_to_add_zero_ext_u1_expands_sub() {
+        let ir_text = r#"fn t(b: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  sign_ext.10: bits[8] = sign_ext(b, new_bit_count=8, id=10)
+  ret sub.20: bits[8] = sub(x, sign_ext.10, id=20)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let mut sub_ref: Option<NodeRef> = None;
+        for nr in f.node_refs() {
+            if matches!(f.get_node(nr).payload, NodePayload::Binop(Binop::Sub, _, _)) {
+                sub_ref = Some(nr);
+            }
+        }
+        let sub_ref = sub_ref.expect("expected sub node");
+
+        let t = SubSignExtU1ToAddZeroExtU1Transform;
+        t.apply(&mut f, &TransformLocation::Node(sub_ref))
+            .expect("apply");
+
+        let NodePayload::Binop(Binop::Add, _x, rhs) = &f.get_node(sub_ref).payload else {
+            panic!("expected add after rewrite");
+        };
+        assert!(matches!(
+            f.get_node(*rhs).payload,
+            NodePayload::ZeroExt { .. }
+        ));
+    }
+
+    #[test]
+    fn sub_sign_ext_u1_to_add_zero_ext_u1_folds_add() {
+        // Use `add(zero_ext(b), x)` to ensure we match both add operand orders.
+        let ir_text = r#"fn t(b: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  zero_ext.10: bits[8] = zero_ext(b, new_bit_count=8, id=10)
+  ret add.20: bits[8] = add(zero_ext.10, x, id=20)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let mut add_ref: Option<NodeRef> = None;
+        for nr in f.node_refs() {
+            if matches!(f.get_node(nr).payload, NodePayload::Binop(Binop::Add, _, _)) {
+                add_ref = Some(nr);
+            }
+        }
+        let add_ref = add_ref.expect("expected add node");
+
+        let t = SubSignExtU1ToAddZeroExtU1Transform;
+        t.apply(&mut f, &TransformLocation::Node(add_ref))
+            .expect("apply");
+
+        let NodePayload::Binop(Binop::Sub, _x, rhs) = &f.get_node(add_ref).payload else {
+            panic!("expected sub after rewrite");
+        };
+        assert!(matches!(
+            f.get_node(*rhs).payload,
+            NodePayload::SignExt { .. }
+        ));
+    }
+
+    #[test]
+    fn umul_sign_ext_u1_to_sel_neg_expands_umul() {
+        let ir_text = r#"fn t(b: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  sign_ext.10: bits[8] = sign_ext(b, new_bit_count=8, id=10)
+  ret umul.20: bits[8] = umul(x, sign_ext.10, id=20)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let mut umul_ref: Option<NodeRef> = None;
+        for nr in f.node_refs() {
+            if matches!(
+                f.get_node(nr).payload,
+                NodePayload::Binop(Binop::Umul, _, _)
+            ) {
+                umul_ref = Some(nr);
+            }
+        }
+        let umul_ref = umul_ref.expect("expected umul node");
+
+        let t = UmulSignExtU1ToSelNegTransform;
+        t.apply(&mut f, &TransformLocation::Node(umul_ref))
+            .expect("apply");
+
+        let NodePayload::Sel { cases, default, .. } = &f.get_node(umul_ref).payload else {
+            panic!("expected sel after rewrite");
+        };
+        assert!(default.is_none());
+        assert_eq!(cases.len(), 2);
+        assert!(matches!(
+            f.get_node(cases[0]).payload,
+            NodePayload::Literal(_)
+        ));
+        assert!(matches!(
+            f.get_node(cases[1]).payload,
+            NodePayload::Unop(Unop::Neg, _)
+        ));
+    }
+
+    #[test]
+    fn umul_sign_ext_u1_to_sel_neg_folds_sel() {
+        let ir_text = r#"fn t(b: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  literal.10: bits[8] = literal(value=0, id=10)
+  neg.11: bits[8] = neg(x, id=11)
+  ret sel.20: bits[8] = sel(b, cases=[literal.10, neg.11], id=20)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let mut sel_ref: Option<NodeRef> = None;
+        for nr in f.node_refs() {
+            if matches!(f.get_node(nr).payload, NodePayload::Sel { .. }) {
+                sel_ref = Some(nr);
+            }
+        }
+        let sel_ref = sel_ref.expect("expected sel node");
+
+        let t = UmulSignExtU1ToSelNegTransform;
+        t.apply(&mut f, &TransformLocation::Node(sel_ref))
+            .expect("apply");
+
+        let NodePayload::Binop(Binop::Umul, _x, rhs) = &f.get_node(sel_ref).payload else {
+            panic!("expected umul after rewrite");
+        };
+        assert!(matches!(
+            f.get_node(*rhs).payload,
+            NodePayload::SignExt { .. }
+        ));
+    }
+
+    #[test]
+    fn smul_sign_ext_u1_to_sel_neg_expands_smul() {
+        let ir_text = r#"fn t(b: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  sign_ext.10: bits[8] = sign_ext(b, new_bit_count=8, id=10)
+  ret smul.20: bits[8] = smul(x, sign_ext.10, id=20)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let mut smul_ref: Option<NodeRef> = None;
+        for nr in f.node_refs() {
+            if matches!(
+                f.get_node(nr).payload,
+                NodePayload::Binop(Binop::Smul, _, _)
+            ) {
+                smul_ref = Some(nr);
+            }
+        }
+        let smul_ref = smul_ref.expect("expected smul node");
+
+        let t = SmulSignExtU1ToSelNegTransform;
+        t.apply(&mut f, &TransformLocation::Node(smul_ref))
+            .expect("apply");
+
+        let NodePayload::Sel { cases, default, .. } = &f.get_node(smul_ref).payload else {
+            panic!("expected sel after rewrite");
+        };
+        assert!(default.is_none());
+        assert_eq!(cases.len(), 2);
+        assert!(matches!(
+            f.get_node(cases[0]).payload,
+            NodePayload::Literal(_)
+        ));
+        assert!(matches!(
+            f.get_node(cases[1]).payload,
+            NodePayload::Unop(Unop::Neg, _)
+        ));
+    }
+
+    #[test]
+    fn smul_sign_ext_u1_to_sel_neg_folds_sel() {
+        let ir_text = r#"fn t(b: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  literal.10: bits[8] = literal(value=0, id=10)
+  neg.11: bits[8] = neg(x, id=11)
+  ret sel.20: bits[8] = sel(b, cases=[literal.10, neg.11], id=20)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let mut sel_ref: Option<NodeRef> = None;
+        for nr in f.node_refs() {
+            if matches!(f.get_node(nr).payload, NodePayload::Sel { .. }) {
+                sel_ref = Some(nr);
+            }
+        }
+        let sel_ref = sel_ref.expect("expected sel node");
+
+        let t = SmulSignExtU1ToSelNegTransform;
+        t.apply(&mut f, &TransformLocation::Node(sel_ref))
+            .expect("apply");
+
+        let NodePayload::Binop(Binop::Smul, _x, rhs) = &f.get_node(sel_ref).payload else {
+            panic!("expected smul after rewrite");
+        };
+        assert!(matches!(
+            f.get_node(*rhs).payload,
+            NodePayload::SignExt { .. }
         ));
     }
 
