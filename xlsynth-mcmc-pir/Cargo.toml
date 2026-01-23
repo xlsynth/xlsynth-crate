@@ -48,3 +48,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "pir-mcmc-driver"
 path = "src/bin/pir-mcmc-driver.rs"
+
+[[bin]]
+name = "xlsynth-mcmc-pir-sampler"
+path = "src/bin/xlsynth-mcmc-pir-sampler.rs"

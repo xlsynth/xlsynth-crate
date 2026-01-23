@@ -44,6 +44,7 @@ use xlsynth_pir::ir::Type as PirType;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_utils::compact_and_toposort_in_place;
+use xlsynth_pir::structural_similarity::collect_structural_entries;
 
 pub mod transforms;
 
@@ -272,6 +273,45 @@ pub struct PirMcmcResult {
     pub stats: McmcStats,
 }
 
+/// Message sent from the PIR MCMC engine to an optional accepted-sample writer.
+///
+/// This is used by the `xlsynth-mcmc-pir-sampler` binary to build a
+/// deduplicated corpus of accepted equivalent samples.
+#[derive(Clone, Debug)]
+pub struct AcceptedSampleMsg {
+    pub chain_no: usize,
+    pub global_iter: u64,
+    pub digest: [u8; 32],
+    pub cost: Cost,
+    pub func: IrFn,
+}
+
+fn compute_fn_structural_digest(f: &IrFn) -> Option<[u8; 32]> {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let ret = f
+            .ret_node_ref
+            .expect("PIR functions must have a return node");
+        let (entries, _depths) = collect_structural_entries(f);
+        let h = entries[ret.index].hash.as_bytes();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(h);
+        out
+    }));
+    match result {
+        Ok(v) => Some(v),
+        Err(_panic) => None,
+    }
+}
+
+fn canonicalize_fn_for_sample(f: &IrFn) -> Result<IrFn> {
+    let mut f = f.clone();
+    compact_and_toposort_in_place(&mut f)
+        .map_err(|e| anyhow::anyhow!("compact_and_toposort_in_place failed: {}", e))?;
+    desugar_extensions::desugar_extensions_in_fn(&mut f)
+        .map_err(|e| anyhow::anyhow!("desugar_extensions_in_fn failed: {}", e))?;
+    Ok(f)
+}
+
 struct PirSegmentRunner {
     objective: Objective,
     initial_temperature: f64,
@@ -279,6 +319,7 @@ struct PirSegmentRunner {
     progress_iters: u64,
     checkpoint_iters: u64,
     checkpoint_tx: Option<Sender<CheckpointMsg>>,
+    accepted_sample_tx: Option<Sender<AcceptedSampleMsg>>,
     shared_best: Option<Arc<SharedBest<IrFn>>>,
     baseline_metric: usize,
 }
@@ -767,6 +808,58 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
                 self.objective,
             );
 
+            if let IterationOutcomeDetails::Accepted { .. } = iteration_output.outcome {
+                if let Some(ref tx) = self.accepted_sample_tx {
+                    match canonicalize_fn_for_sample(&iteration_output.output_state) {
+                        Ok(canon) => match optimize_pir_fn_via_xls(&canon) {
+                            Ok(mut opt) => {
+                                let _ = compact_and_toposort_in_place(&mut opt);
+                                match compute_fn_structural_digest(&opt) {
+                                    Some(digest) => {
+                                        let _ = tx.send(AcceptedSampleMsg {
+                                            chain_no: params.chain_no,
+                                            global_iter,
+                                            digest,
+                                            cost: iteration_output.output_cost,
+                                            func: opt,
+                                        });
+                                    }
+                                    None => {
+                                        log::warn!(
+                                            "[pir-mcmc] failed to compute structural digest for accepted sample '{}' after XLS optimize (c{:03}:i{:06}); skipping sample emission",
+                                            iteration_output.output_state.name,
+                                            params.chain_no,
+                                            global_iter
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                // The sampler wants uniqueness defined by the XLS-optimized form.
+                                // If we cannot obtain it, skip emission rather than falling back
+                                // to the pre-optimized state.
+                                log::warn!(
+                                    "[pir-mcmc] failed to XLS-optimize accepted sample '{}' (c{:03}:i{:06}): {}; skipping sample emission",
+                                    iteration_output.output_state.name,
+                                    params.chain_no,
+                                    global_iter,
+                                    e
+                                );
+                            }
+                        },
+                        Err(e) => {
+                            log::warn!(
+                                "[pir-mcmc] failed to canonicalize accepted sample '{}' (c{:03}:i{:06}): {}; skipping sample emission",
+                                iteration_output.output_state.name,
+                                params.chain_no,
+                                global_iter,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+
             current_fn = iteration_output.output_state.clone();
             current_cost = iteration_output.output_cost;
 
@@ -865,7 +958,7 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
 ///
 /// This function is deterministic for fixed `start_fn` and `options`.
 pub fn run_pir_mcmc(start_fn: IrFn, options: RunOptions) -> Result<PirMcmcResult> {
-    run_pir_mcmc_with_shared_best(start_fn, options, None, None)
+    run_pir_mcmc_with_shared_best(start_fn, options, None, None, None)
 }
 
 pub fn run_pir_mcmc_with_shared_best(
@@ -873,6 +966,7 @@ pub fn run_pir_mcmc_with_shared_best(
     options: RunOptions,
     shared_best: Option<Arc<SharedBest<IrFn>>>,
     checkpoint_tx: Option<Sender<CheckpointMsg>>,
+    accepted_sample_tx: Option<Sender<AcceptedSampleMsg>>,
 ) -> Result<PirMcmcResult> {
     let initial_cost = cost(&start_fn, options.objective)?;
     let initial_metric_u64 = options.objective.metric(&initial_cost);
@@ -884,6 +978,7 @@ pub fn run_pir_mcmc_with_shared_best(
         progress_iters: options.progress_iters,
         checkpoint_iters: options.checkpoint_iters,
         checkpoint_tx,
+        accepted_sample_tx,
         shared_best,
         baseline_metric,
     };
