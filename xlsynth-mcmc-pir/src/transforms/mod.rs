@@ -54,6 +54,7 @@ mod sub_to_add_neg;
 mod swap_commutative_binop_operands;
 mod umul_sign_ext_u1_to_sel_neg;
 mod xor_mask_sign_ext_to_sel_not;
+mod zero_ext_sel_distribute;
 
 use add_sign_ext_u1_to_sub_zero_ext_u1::AddSignExtU1ToSubZeroExtU1Transform;
 use and_mask_sign_ext_to_sel::AndMaskSignExtToSelTransform;
@@ -96,6 +97,7 @@ use sub_to_add_neg::SubToAddNegTransform;
 use swap_commutative_binop_operands::SwapCommutativeBinopOperandsTransform;
 use umul_sign_ext_u1_to_sel_neg::UmulSignExtU1ToSelNegTransform;
 use xor_mask_sign_ext_to_sel_not::XorMaskSignExtToSelNotTransform;
+use zero_ext_sel_distribute::ZeroExtSelDistributeTransform;
 
 /// Kinds of PIR transforms used in PIR MCMC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
@@ -143,6 +145,10 @@ pub enum PirTransformKind {
     /// `sign_ext(sel(p, cases=[a, b]), new_bit_count=n)
     ///    ↔ sel(p, cases=[sign_ext(a,n), sign_ext(b,n)])`
     SignExtSelDistribute,
+    /// Distribute zero_ext over select (and reverse folding form):
+    /// `zero_ext(sel(p, cases=[a, b]), new_bit_count=n)
+    ///    ↔ sel(p, cases=[zero_ext(a,n), zero_ext(b,n)])`
+    ZeroExtSelDistribute,
     /// Convert 1-bit priority_sel to sel (and reverse):
     /// `priority_sel(p:bits[1], cases=[a], default=b) ↔ sel(p, cases=[b, a])`
     PrioritySel1ToSel,
@@ -261,6 +267,7 @@ impl fmt::Display for PirTransformKind {
             PirTransformKind::NegSelDistribute => write!(f, "NegSelDistribute"),
             PirTransformKind::BitSliceSelDistribute => write!(f, "BitSliceSelDistribute"),
             PirTransformKind::SignExtSelDistribute => write!(f, "SignExtSelDistribute"),
+            PirTransformKind::ZeroExtSelDistribute => write!(f, "ZeroExtSelDistribute"),
             PirTransformKind::PrioritySel1ToSel => write!(f, "PrioritySel1ToSel"),
             PirTransformKind::AndMaskSignExtToSel => write!(f, "AndMaskSignExtToSel"),
             PirTransformKind::RewireUsersToSiblingAdd => write!(f, "RewireUsersToSiblingAdd"),
@@ -343,6 +350,7 @@ pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
         Box::new(NegSelDistributeTransform),
         Box::new(BitSliceSelDistributeTransform),
         Box::new(SignExtSelDistributeTransform),
+        Box::new(ZeroExtSelDistributeTransform),
         Box::new(PrioritySel1ToSelTransform),
         Box::new(AndMaskSignExtToSelTransform),
         Box::new(RewireUsersToSiblingAddTransform),
@@ -1291,6 +1299,88 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn zero_ext_sel_distribute_expands_zero_ext_of_sel() {
+        let ir_text = r#"fn t(p: bits[1] id=1, a: bits[8] id=2, b: bits[8] id=3) -> bits[16] {
+  sel.10: bits[8] = sel(p, cases=[a, b], id=10)
+  ret zero_ext.20: bits[16] = zero_ext(sel.10, new_bit_count=16, id=20)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let mut ze_ref: Option<NodeRef> = None;
+        for nr in f.node_refs() {
+            if matches!(f.get_node(nr).payload, NodePayload::ZeroExt { .. }) {
+                ze_ref = Some(nr);
+            }
+        }
+        let ze_ref = ze_ref.expect("expected zero_ext node");
+
+        let t = ZeroExtSelDistributeTransform;
+        t.apply(&mut f, &TransformLocation::Node(ze_ref))
+            .expect("apply");
+
+        match &f.get_node(ze_ref).payload {
+            NodePayload::Sel { cases, default, .. } => {
+                assert_eq!(cases.len(), 2);
+                assert!(default.is_none());
+                for case in cases {
+                    assert!(matches!(
+                        f.get_node(*case).payload,
+                        NodePayload::ZeroExt {
+                            new_bit_count: 16,
+                            ..
+                        }
+                    ));
+                }
+            }
+            other => panic!("expected sel after rewrite, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zero_ext_sel_distribute_folds_sel_of_zero_exts() {
+        let ir_text = r#"fn t(p: bits[1] id=1, a: bits[8] id=2, b: bits[8] id=3) -> bits[16] {
+  zero_ext.11: bits[16] = zero_ext(a, new_bit_count=16, id=11)
+  zero_ext.12: bits[16] = zero_ext(b, new_bit_count=16, id=12)
+  ret sel.20: bits[16] = sel(p, cases=[zero_ext.11, zero_ext.12], id=20)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let mut sel_ref: Option<NodeRef> = None;
+        for nr in f.node_refs() {
+            if matches!(f.get_node(nr).payload, NodePayload::Sel { .. }) {
+                sel_ref = Some(nr);
+            }
+        }
+        let sel_ref = sel_ref.expect("expected sel node");
+
+        let t = ZeroExtSelDistributeTransform;
+        t.apply(&mut f, &TransformLocation::Node(sel_ref))
+            .expect("apply");
+
+        let NodePayload::ZeroExt {
+            arg: inner_sel_ref,
+            new_bit_count,
+        } = &f.get_node(sel_ref).payload
+        else {
+            panic!("expected zero_ext after rewrite");
+        };
+        assert_eq!(*new_bit_count, 16);
+        let NodePayload::Sel { cases, default, .. } = &f.get_node(*inner_sel_ref).payload else {
+            panic!("expected sel under zero_ext");
+        };
+        assert_eq!(cases.len(), 2);
+        assert!(default.is_none());
+        for case in cases {
+            assert!(matches!(
+                f.get_node(*case).payload,
+                NodePayload::GetParam(_)
+            ));
+        }
     }
 
     #[test]
