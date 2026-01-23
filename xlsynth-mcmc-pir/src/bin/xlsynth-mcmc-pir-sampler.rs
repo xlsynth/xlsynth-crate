@@ -28,6 +28,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc;
+use std::time::Duration;
+use std::time::Instant;
 use tempfile::Builder;
 
 use xlsynth_mcmc::multichain::ChainStrategy;
@@ -98,6 +100,12 @@ struct CliArgs {
     /// Progress logging interval in iterations (0 disables progress logs).
     #[clap(long, value_parser, default_value_t = 1000)]
     progress_iters: u64,
+
+    /// Progress logging interval in seconds for sampler corpus emission.
+    ///
+    /// Set to 0 to disable progress logs.
+    #[clap(long, value_parser, default_value_t = 10)]
+    progress_seconds: u64,
 
     /// Enable a formal equivalence oracle (in addition to the interpreter-based
     /// oracle) for transforms that are not marked always-equivalent.
@@ -187,10 +195,19 @@ struct SampleWriter {
     pkg_template: Arc<Package>,
     samples_dir: PathBuf,
     seen: HashSet<[u8; 32]>,
+    start: Instant,
+    unique_written: u64,
+    total_msgs: u64,
+    last_report: Instant,
+    report_interval: Duration,
 }
 
 impl SampleWriter {
-    fn new(pkg_template: Arc<Package>, output_dir: &Path) -> Result<Self> {
+    fn new(
+        pkg_template: Arc<Package>,
+        output_dir: &Path,
+        report_interval: Duration,
+    ) -> Result<Self> {
         let samples_dir = output_dir.join("samples");
         std::fs::create_dir_all(&samples_dir)?;
 
@@ -210,14 +227,21 @@ impl SampleWriter {
             seen.insert(d);
         }
 
+        let now = Instant::now();
         Ok(SampleWriter {
             pkg_template,
             samples_dir,
             seen,
+            start: now,
+            unique_written: 0,
+            total_msgs: 0,
+            last_report: now,
+            report_interval,
         })
     }
 
     fn write_if_new(&mut self, msg: AcceptedSampleMsg) -> Result<()> {
+        self.total_msgs = self.total_msgs.saturating_add(1);
         if self.seen.contains(&msg.digest) {
             return Ok(());
         }
@@ -244,7 +268,31 @@ impl SampleWriter {
         std::fs::rename(&tmp_path, &final_path)?;
 
         self.seen.insert(msg.digest);
+        self.unique_written = self.unique_written.saturating_add(1);
         Ok(())
+    }
+
+    fn maybe_report_progress(&mut self) {
+        if self.report_interval.is_zero() {
+            return;
+        }
+        if self.last_report.elapsed() < self.report_interval {
+            return;
+        }
+        self.last_report = Instant::now();
+
+        let elapsed_secs = self.start.elapsed().as_secs_f64();
+        let unique_per_sec = if elapsed_secs > 0.0 {
+            (self.unique_written as f64) / elapsed_secs
+        } else {
+            0.0
+        };
+        log::info!(
+            "[pir-mcmc-sampler] unique_written={} total_msgs={} unique_samples_per_sec={:.2}",
+            self.unique_written,
+            self.total_msgs,
+            unique_per_sec
+        );
     }
 }
 
@@ -285,10 +333,26 @@ fn main() -> Result<()> {
     let (tx, rx) = mpsc::channel::<AcceptedSampleMsg>();
     let output_dir_for_thread = output_dir.clone();
     let pkg_template_for_thread = pkg_template.clone();
+    let report_interval = if cli.progress_seconds == 0 {
+        Duration::from_secs(0)
+    } else {
+        Duration::from_secs(cli.progress_seconds)
+    };
     let writer_handle = std::thread::spawn(move || -> Result<()> {
-        let mut writer = SampleWriter::new(pkg_template_for_thread, &output_dir_for_thread)?;
-        while let Ok(msg) = rx.recv() {
-            writer.write_if_new(msg)?;
+        let mut writer = SampleWriter::new(
+            pkg_template_for_thread,
+            &output_dir_for_thread,
+            report_interval,
+        )?;
+        loop {
+            match rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(msg) => {
+                    writer.write_if_new(msg)?;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+            writer.maybe_report_progress();
         }
         Ok(())
     });
