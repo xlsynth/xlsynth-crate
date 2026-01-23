@@ -350,7 +350,8 @@ fn main() -> Result<()> {
         None
     };
 
-    let result = run_pir_mcmc_with_shared_best(top_fn, opts, shared_best.clone(), checkpoint_tx)?;
+    let result =
+        run_pir_mcmc_with_shared_best(top_fn, opts, shared_best.clone(), checkpoint_tx, None)?;
 
     // Stop checkpoint writer cleanly before final artifact emission.
     if let Some(h) = writer_handle {
