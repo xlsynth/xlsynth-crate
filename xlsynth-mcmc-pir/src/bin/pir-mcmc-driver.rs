@@ -60,7 +60,9 @@ struct CliArgs {
     #[clap(short = 'S', long, value_parser, default_value_t = 1)]
     seed: u64,
 
-    /// Output file or directory. If a directory, 'best.ir' is saved there.
+    /// Output directory. Artifacts like `best.ir`, `orig.opt.ir`, and
+    /// `best.stats.json` are written under this directory.
+    ///
     /// If not specified, output goes to a new temporary directory.
     #[clap(short, long, value_parser)]
     output: Option<String>,
@@ -189,33 +191,17 @@ fn main() -> Result<()> {
         initial_cost.pir_nodes, initial_cost.g8r_nodes, initial_cost.g8r_depth
     );
 
-    // Determine output paths.
+    // Determine output directory and paths.
+    //
+    // We always treat `--output` as a directory so we have a stable place to
+    // write the full set of artifacts.
     let output_ir_filename = "best.ir";
 
-    let (output_ir_path, output_dir, _temp_dir_holder): (
-        PathBuf,
-        PathBuf,
-        Option<tempfile::TempDir>,
-    ) = match &cli.output {
+    let (output_dir, _temp_dir_holder): (PathBuf, Option<tempfile::TempDir>) = match &cli.output {
         Some(path_str) => {
-            let p = PathBuf::from(path_str);
-            let dir = if p.is_dir() || path_str.ends_with('/') || path_str.ends_with('\\') {
-                std::fs::create_dir_all(&p)?;
-                p.clone()
-            } else {
-                if let Some(parent) = p.parent() {
-                    if !parent.exists() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                }
-                p.parent().unwrap_or(&p).to_path_buf()
-            };
-            let ir = if p.is_dir() || path_str.ends_with('/') || path_str.ends_with('\\') {
-                p.join(output_ir_filename)
-            } else {
-                p.clone()
-            };
-            (ir, dir, None)
+            let dir = PathBuf::from(path_str);
+            std::fs::create_dir_all(&dir)?;
+            (dir, None)
         }
         None => {
             let temp_dir = Builder::new().prefix("pir_mcmc_output_").tempdir()?;
@@ -223,14 +209,11 @@ fn main() -> Result<()> {
                 "No output path specified, using temp dir: {}",
                 temp_dir.path().display()
             );
-            let base_path = temp_dir.path();
-            (
-                base_path.join(output_ir_filename),
-                base_path.to_path_buf(),
-                Some(temp_dir),
-            )
+            (temp_dir.path().to_path_buf(), Some(temp_dir))
         }
     };
+
+    let output_ir_path = output_dir.join(output_ir_filename);
 
     let opts = RunOptions {
         max_iters: cli.iters,
