@@ -20,7 +20,10 @@ mod bit_slice_bit_slice_fold;
 mod bit_slice_concat_distribute;
 mod bit_slice_sel_distribute;
 mod carry_split_add;
+mod clamp_chain_collapse;
 mod clone_multi_user_node;
+mod cmp_sel_canon;
+mod cmp_swap;
 mod const_shll_concat_zero_fold;
 mod eq_ne_add_literal_shift;
 mod eq_sel_distribute;
@@ -42,11 +45,13 @@ mod priority_sel_to_sel_chain;
 mod reassociate_add_sub;
 mod rewire_operand_to_same_type;
 mod rewire_users_to_sibling_add;
+mod sel_chain_to_priority_sel;
 mod sel_hoist;
 mod sel_same_arms_fold;
 mod sel_swap_arms_by_not_pred;
 mod shift_clamp;
 mod shift_hoist;
+mod shift_reclamp;
 mod sign_ext_sel_distribute;
 mod smul_sign_ext_u1_to_sel_neg;
 mod sub_sign_ext_u1_to_add_zero_ext_u1;
@@ -63,7 +68,10 @@ use bit_slice_bit_slice_fold::BitSliceBitSliceFoldTransform;
 use bit_slice_concat_distribute::BitSliceConcatDistributeTransform;
 use bit_slice_sel_distribute::BitSliceSelDistributeTransform;
 use carry_split_add::CarrySplitAddTransform;
+use clamp_chain_collapse::ClampChainCollapseTransform;
 use clone_multi_user_node::CloneMultiUserNodeTransform;
+use cmp_sel_canon::CmpSelCanonTransform;
+use cmp_swap::CmpSwapTransform;
 use const_shll_concat_zero_fold::ConstShllConcatZeroFoldTransform;
 use eq_ne_add_literal_shift::EqNeAddLiteralShiftTransform;
 use eq_sel_distribute::EqSelDistributeTransform;
@@ -85,11 +93,13 @@ use priority_sel_to_sel_chain::PrioritySelToSelChainTransform;
 use reassociate_add_sub::ReassociateAddSubTransform;
 use rewire_operand_to_same_type::RewireOperandToSameTypeTransform;
 use rewire_users_to_sibling_add::RewireUsersToSiblingAddTransform;
+use sel_chain_to_priority_sel::SelChainToPrioritySelTransform;
 use sel_hoist::SelHoistTransform;
 use sel_same_arms_fold::SelSameArmsFoldTransform;
 use sel_swap_arms_by_not_pred::SelSwapArmsByNotPredTransform;
 use shift_clamp::ShiftClampTransform;
 use shift_hoist::ShiftHoistTransform;
+use shift_reclamp::ShiftReclampTransform;
 use sign_ext_sel_distribute::SignExtSelDistributeTransform;
 use smul_sign_ext_u1_to_sel_neg::SmulSignExtU1ToSelNegTransform;
 use sub_sign_ext_u1_to_add_zero_ext_u1::SubSignExtU1ToAddZeroExtU1Transform;
@@ -116,6 +126,13 @@ pub enum PirTransformKind {
     /// Constant-shift equality through add-with-literal (mod 2^w):
     ///   `eq(add(x, k), c) ↔ eq(x, c - k)` (and same for `ne`)
     EqNeAddLiteralShift,
+    /// Swap comparison direction by swapping operands:
+    /// `ugt(x, y) ↔ ult(y, x)` and analogous for `uge/ule` and signed
+    /// comparisons.
+    CmpSwap,
+    /// Canonicalize `sel` over comparisons selecting between the compared
+    /// operands.
+    CmpSelCanon,
     /// Fold a narrow add from a matching wider add on zero-extended operands.
     NarrowAddFromWideAddFold,
     /// Normalize subtraction via add+negation (two's complement) and reverse:
@@ -234,6 +251,8 @@ pub enum PirTransformKind {
     /// `priority_sel(sel, cases=[c0..cM-1], default=d)`
     ///   ↔ nested sel(bit_i, [acc, c_i]) with i from M-1 down to 0
     PrioritySelToSelChain,
+    /// Reverse a sel-chain back into a compact priority_sel.
+    SelChainToPrioritySel,
     /// Rewire one operand of a node to any other node in the function with the
     /// same type.
     ///
@@ -245,8 +264,13 @@ pub enum PirTransformKind {
     /// `sh{ll,rl,ra}(x, amount) -> sh{ll,rl,ra}(x, min(amount, max_amount))`
     /// where max_amount = min(width(x)-1, (2^amount_bits)-1).
     ShiftClamp,
+    /// Replace complex shift-amount expressions with a shallow clamp.
+    ShiftReclamp,
     /// Hoist unary/binary ops across shifts.
     ShiftHoist,
+    /// Collapse deep clamp-like selector cones into a single compare-based
+    /// clamp.
+    ClampChainCollapse,
 }
 
 impl fmt::Display for PirTransformKind {
@@ -258,6 +282,8 @@ impl fmt::Display for PirTransformKind {
             PirTransformKind::CloneMultiUserNode => write!(f, "CloneMultiUserNode"),
             PirTransformKind::EqSelDistribute => write!(f, "EqSelDistribute"),
             PirTransformKind::EqNeAddLiteralShift => write!(f, "EqNeAddLiteralShift"),
+            PirTransformKind::CmpSwap => write!(f, "CmpSwap"),
+            PirTransformKind::CmpSelCanon => write!(f, "CmpSelCanon"),
             PirTransformKind::NarrowAddFromWideAddFold => write!(f, "NarrowAddFromWideAddFold"),
             PirTransformKind::SubToAddNeg => write!(f, "SubToAddNeg"),
             PirTransformKind::NegSubSwap => write!(f, "NegSubSwap"),
@@ -293,9 +319,12 @@ impl fmt::Display for PirTransformKind {
             PirTransformKind::BitSliceConcatDistribute => write!(f, "BitSliceConcatDistribute"),
             PirTransformKind::ConstShllConcatZeroFold => write!(f, "ConstShllConcatZeroFold"),
             PirTransformKind::PrioritySelToSelChain => write!(f, "PrioritySelToSelChain"),
+            PirTransformKind::SelChainToPrioritySel => write!(f, "SelChainToPrioritySel"),
             PirTransformKind::RewireOperandToSameType => write!(f, "RewireOperandToSameType"),
             PirTransformKind::ShiftClamp => write!(f, "ShiftClamp"),
+            PirTransformKind::ShiftReclamp => write!(f, "ShiftReclamp"),
             PirTransformKind::ShiftHoist => write!(f, "ShiftHoist"),
+            PirTransformKind::ClampChainCollapse => write!(f, "ClampChainCollapse"),
         }
     }
 }
@@ -341,6 +370,8 @@ pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
         Box::new(CloneMultiUserNodeTransform),
         Box::new(EqSelDistributeTransform),
         Box::new(EqNeAddLiteralShiftTransform),
+        Box::new(CmpSwapTransform),
+        Box::new(CmpSelCanonTransform),
         Box::new(NarrowAddFromWideAddFoldTransform),
         Box::new(SubToAddNegTransform),
         Box::new(NegSubSwapTransform),
@@ -376,9 +407,12 @@ pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
         Box::new(BitSliceConcatDistributeTransform),
         Box::new(ConstShllConcatZeroFoldTransform),
         Box::new(PrioritySelToSelChainTransform),
+        Box::new(SelChainToPrioritySelTransform),
         Box::new(RewireOperandToSameTypeTransform),
         Box::new(ShiftClampTransform),
+        Box::new(ShiftReclampTransform),
         Box::new(ShiftHoistTransform),
+        Box::new(ClampChainCollapseTransform),
     ]
 }
 
