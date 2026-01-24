@@ -1613,7 +1613,7 @@ fn main() {
                     clap::Arg::new("print")
                         .long("print")
                         .value_name("N")
-                        .help("Print the first N proofs (default 20)")
+                        .help("Print the first N per-candidate proof results (default 0)")
                         .action(clap::ArgAction::Set),
                 )
                 .arg(

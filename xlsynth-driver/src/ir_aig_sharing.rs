@@ -158,8 +158,8 @@ pub fn handle_ir_aig_sharing(matches: &ArgMatches, _config: &Option<ToolchainCon
         .unwrap_or(0);
     let print_limit = matches
         .get_one::<String>("print")
-        .map(|s| s.parse::<usize>().unwrap_or(20))
-        .unwrap_or(20);
+        .map(|s| s.parse::<usize>().unwrap_or(0))
+        .unwrap_or(0);
     let print_mappings_limit = matches
         .get_one::<String>("print_mappings")
         .map(|s| s.parse::<usize>().unwrap_or(0))

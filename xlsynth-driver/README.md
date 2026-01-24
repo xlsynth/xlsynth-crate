@@ -851,7 +851,7 @@ The flow is:
 Example:
 
 ```shell
-xlsynth-driver ir-aig-sharing my_design.ir my_design.aig --samples 256 --seed 0 --max-proofs 200 --print 20 --print-mappings 20
+xlsynth-driver ir-aig-sharing my_design.ir my_design.aig --samples 256 --seed 0 --max-proofs 200 --print-mappings 0
 ```
 
 ### `dslx-equiv`
