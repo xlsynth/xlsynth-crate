@@ -1,0 +1,584 @@
+// SPDX-License-Identifier: Apache-2.0
+
+use std::path::Path;
+
+use clap::ArgMatches;
+use serde::Serialize;
+use xlsynth_g8r::aig::gate::{AigBitVector, Input};
+use xlsynth_g8r::aig::GateFn;
+use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
+use xlsynth_g8r::gate_builder::GateBuilderOptions;
+use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
+use xlsynth_g8r::ir2gate_utils::AdderMapping;
+use xlsynth_g8r::ir_aig_sharing::{
+    get_equivalences, prove_equivalence_candidates_varisat_streaming, CandidateProofResult,
+    IrAigCandidateRhs, IrAigSharingOptions,
+};
+use xlsynth_pir::ir;
+use xlsynth_pir::ir_parser;
+use xlsynth_pir::ir_utils::is_structural_payload;
+
+use crate::common::parse_bool_flag_or;
+use crate::toolchain_config::ToolchainConfig;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind")]
+enum JsonBitMapping {
+    #[serde(rename = "aig")]
+    Aig { id: usize, negated: bool },
+    #[serde(rename = "const")]
+    Const { value: u8 },
+    #[serde(rename = "unknown")]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct JsonNodeEntry {
+    pir_node_ref_index: usize,
+    pir_text_id: usize,
+    pir_name: String,
+    width: usize,
+    bits_msb_to_lsb: Vec<JsonBitMapping>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct JsonInputs {
+    pir_ir_path: String,
+    aig_path: String,
+    top: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct JsonOptions {
+    samples: usize,
+    seed: u64,
+    exclude_structural_pir_nodes: bool,
+    max_proofs: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct JsonDetectedBitsByKind {
+    aig: usize,
+    #[serde(rename = "const")]
+    const_: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct JsonStats {
+    candidates: usize,
+    proved: usize,
+    disproved: usize,
+    skipped: usize,
+    interesting_nodes: usize,
+    interesting_bits: usize,
+    detected_bits: usize,
+    detected_percent: f64,
+    detected_bits_by_kind: JsonDetectedBitsByKind,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct JsonReport {
+    tool: String,
+    version: u32,
+    inputs: JsonInputs,
+    options: JsonOptions,
+    stats: JsonStats,
+    nodes: Vec<JsonNodeEntry>,
+}
+
+fn rhs_to_json(rhs: IrAigCandidateRhs) -> JsonBitMapping {
+    match rhs {
+        IrAigCandidateRhs::AigOperand(op) => JsonBitMapping::Aig {
+            id: op.node.id,
+            negated: op.negated,
+        },
+        IrAigCandidateRhs::Const(false) => JsonBitMapping::Const { value: 0 },
+        IrAigCandidateRhs::Const(true) => JsonBitMapping::Const { value: 1 },
+    }
+}
+
+fn format_mapping_rhs(rhs: IrAigCandidateRhs) -> String {
+    match rhs {
+        IrAigCandidateRhs::AigOperand(op) => {
+            if op.negated {
+                format!("!%{}", op.node.id)
+            } else {
+                format!("%{}", op.node.id)
+            }
+        }
+        IrAigCandidateRhs::Const(false) => "0".to_string(),
+        IrAigCandidateRhs::Const(true) => "1".to_string(),
+    }
+}
+
+fn choose_preferred_operand(
+    a: xlsynth_g8r::aig::gate::AigOperand,
+    b: xlsynth_g8r::aig::gate::AigOperand,
+) -> xlsynth_g8r::aig::gate::AigOperand {
+    // Deterministic choice: smaller node id wins; if tied, non-negated wins.
+    match a.node.id.cmp(&b.node.id) {
+        std::cmp::Ordering::Less => a,
+        std::cmp::Ordering::Greater => b,
+        std::cmp::Ordering::Equal => {
+            if a.negated == b.negated {
+                a
+            } else if !a.negated {
+                a
+            } else {
+                b
+            }
+        }
+    }
+}
+
+fn choose_preferred_rhs(a: IrAigCandidateRhs, b: IrAigCandidateRhs) -> IrAigCandidateRhs {
+    match (a, b) {
+        (IrAigCandidateRhs::Const(_), _) => a,
+        (_, IrAigCandidateRhs::Const(_)) => b,
+        (IrAigCandidateRhs::AigOperand(aop), IrAigCandidateRhs::AigOperand(bop)) => {
+            IrAigCandidateRhs::AigOperand(choose_preferred_operand(aop, bop))
+        }
+    }
+}
+
+fn load_aig_gate_fn(path: &Path) -> Result<GateFn, String> {
+    load_aiger_auto_from_path(path, GateBuilderOptions::no_opt())
+        .map(|res| res.gate_fn)
+        .map_err(|e| format!("failed to load {}: {}", path.display(), e))
+}
+
+fn repack_flat_aig_inputs_to_pir_params(
+    pir_fn: &ir::Fn,
+    mut gate_fn: GateFn,
+) -> Result<GateFn, String> {
+    let want_param_count = pir_fn.params.len();
+    let want_total_bits: usize = pir_fn.params.iter().map(|p| p.ty.bit_count()).sum();
+
+    let gate_total_bits: usize = gate_fn.inputs.iter().map(|i| i.get_bit_count()).sum();
+
+    // Only repack the common "AIGER loader created one 1-bit input per bit" case.
+    let all_one_bit_inputs = gate_fn.inputs.iter().all(|i| i.get_bit_count() == 1);
+    if !all_one_bit_inputs
+        || gate_fn.inputs.len() != want_total_bits
+        || gate_total_bits != want_total_bits
+    {
+        return Ok(gate_fn);
+    }
+
+    // Flatten the underlying input operands in AIGER order.
+    let mut flat_ops = Vec::with_capacity(want_total_bits);
+    for inp in &gate_fn.inputs {
+        flat_ops.push(*inp.bit_vector.get_lsb(0));
+    }
+    debug_assert_eq!(flat_ops.len(), want_total_bits);
+
+    let mut new_inputs: Vec<Input> = Vec::with_capacity(want_param_count);
+    let mut offset = 0usize;
+    for p in &pir_fn.params {
+        let w = p.ty.bit_count();
+        let slice = &flat_ops[offset..offset + w];
+        new_inputs.push(Input {
+            name: p.name.clone(),
+            bit_vector: AigBitVector::from_lsb_is_index_0(slice),
+        });
+        offset += w;
+    }
+    gate_fn.inputs = new_inputs;
+    Ok(gate_fn)
+}
+
+fn load_pir_top_fn(ir_path: &Path, top: Option<&str>) -> Result<(ir::Package, ir::Fn), String> {
+    let text = std::fs::read_to_string(ir_path)
+        .map_err(|e| format!("failed to read {}: {}", ir_path.display(), e))?;
+    let mut parser = ir_parser::Parser::new(&text);
+    let pkg = parser.parse_and_validate_package().map_err(|e| {
+        format!(
+            "failed to parse/validate PIR package {}: {}",
+            ir_path.display(),
+            e
+        )
+    })?;
+    let f = if let Some(name) = top {
+        pkg.get_fn(name)
+            .ok_or_else(|| format!("top function '{}' not found in {}", name, ir_path.display()))?
+            .clone()
+    } else {
+        pkg.get_top_fn()
+            .ok_or_else(|| format!("no top function found in {}", ir_path.display()))?
+            .clone()
+    };
+    Ok((pkg, f))
+}
+
+pub fn handle_ir_aig_sharing(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
+    let ir_path = Path::new(matches.get_one::<String>("pir_ir_file").unwrap());
+    let aig_path = Path::new(matches.get_one::<String>("aig_file").unwrap());
+    let top = matches.get_one::<String>("ir_top").map(|s| s.as_str());
+
+    let sample_count = matches
+        .get_one::<String>("sample_count")
+        .map(|s| s.parse::<usize>().unwrap_or(256))
+        .unwrap_or(256);
+    let sample_seed = matches
+        .get_one::<String>("sample_seed")
+        .map(|s| s.parse::<u64>().unwrap_or(0))
+        .unwrap_or(0);
+    let exclude_structural = parse_bool_flag_or(
+        matches,
+        "exclude_structural_pir_nodes",
+        /* default_value= */ true,
+    );
+
+    let max_proofs = matches
+        .get_one::<String>("max_proofs")
+        .map(|s| s.parse::<usize>().unwrap_or(0))
+        .unwrap_or(0);
+    let print_limit = matches
+        .get_one::<String>("print")
+        .map(|s| s.parse::<usize>().unwrap_or(0))
+        .unwrap_or(0);
+    let print_mappings_limit = matches
+        .get_one::<String>("print_mappings")
+        .map(|s| s.parse::<usize>().unwrap_or(0))
+        .unwrap_or(0);
+    let output_json_path = matches.get_one::<String>("output_json").map(|s| s.as_str());
+
+    let (pir_pkg, pir_fn) = match load_pir_top_fn(ir_path, top) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("ir-aig-sharing error: {}", e);
+            std::process::exit(2);
+        }
+    };
+    let gate_fn = match load_aig_gate_fn(aig_path) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("ir-aig-sharing error: {}", e);
+            std::process::exit(2);
+        }
+    };
+    let gate_fn = match repack_flat_aig_inputs_to_pir_params(&pir_fn, gate_fn) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("ir-aig-sharing error: {}", e);
+            std::process::exit(2);
+        }
+    };
+
+    let options = IrAigSharingOptions {
+        sample_count,
+        sample_seed,
+        exclude_structural_pir_nodes: exclude_structural,
+    };
+    let mut candidates = match get_equivalences(&pir_pkg, &pir_fn, &gate_fn, &options) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("ir-aig-sharing error: {}", e);
+            std::process::exit(2);
+        }
+    };
+
+    if max_proofs != 0 && candidates.len() > max_proofs {
+        candidates.truncate(max_proofs);
+    }
+
+    let gatify_opts = GatifyOptions {
+        fold: true,
+        hash: true,
+        check_equivalence: false,
+        adder_mapping: AdderMapping::default(),
+        mul_adder_mapping: None,
+        range_info: None,
+        enable_rewrite_carry_out: false,
+    };
+
+    // Streaming proof + streaming per-node mapping output (in PIR topo order).
+    let mut proved = 0usize;
+    let mut disproved = 0usize;
+    let mut skipped = 0usize;
+    let mut proof_index = 0usize;
+
+    // Coverage stats: "interesting" PIR bits vs detected/proved.
+    let mut interesting_total_bits = 0usize;
+    let mut interesting_total_nodes = 0usize;
+    for node_ref in pir_fn.node_refs() {
+        if node_ref.index == 0 {
+            continue; // reserved Nil
+        }
+        if exclude_structural {
+            let node = pir_fn.get_node(node_ref);
+            if is_structural_payload(&node.payload) {
+                continue;
+            }
+        }
+        let ir::Type::Bits(w) = pir_fn.get_node_ty(node_ref) else {
+            continue;
+        };
+        interesting_total_nodes += 1;
+        interesting_total_bits += *w;
+    }
+    let mut detected_bits: std::collections::HashSet<(usize, usize)> =
+        std::collections::HashSet::new();
+    let mut detected_bits_const = 0usize;
+    let mut detected_bits_aig = 0usize;
+
+    // State for streaming node vector printing.
+    let mut current_node: Option<ir::NodeRef> = None;
+    let mut current_width: usize = 0;
+    let mut current_bits: Vec<Option<IrAigCandidateRhs>> = Vec::new(); // LSB=0 indexing
+    let mut current_any_proved = false;
+    let mut printed_nodes = 0usize;
+    let mut json_nodes: Vec<JsonNodeEntry> = Vec::new();
+
+    let flush_current_node = |pir_fn: &ir::Fn,
+                              current_node: &mut Option<ir::NodeRef>,
+                              current_width: &mut usize,
+                              current_bits: &mut Vec<Option<IrAigCandidateRhs>>,
+                              current_any_proved: &mut bool,
+                              printed_nodes: &mut usize,
+                              print_mappings_limit: usize,
+                              json_nodes: &mut Vec<JsonNodeEntry>| {
+        let Some(nr) = *current_node else {
+            return;
+        };
+        if !*current_any_proved {
+            *current_node = None;
+            *current_width = 0;
+            current_bits.clear();
+            return;
+        }
+        let node = pir_fn.get_node(nr);
+        let pir_name = xlsynth_pir::ir::node_textual_id(pir_fn, nr);
+
+        let mut bits_msb_to_lsb: Vec<JsonBitMapping> = Vec::with_capacity(*current_width);
+        let mut items: Vec<String> = Vec::with_capacity(*current_width);
+        for bit_index in (0..*current_width).rev() {
+            match current_bits.get(bit_index).copied().flatten() {
+                Some(rhs) => {
+                    bits_msb_to_lsb.push(rhs_to_json(rhs));
+                    items.push(format_mapping_rhs(rhs));
+                }
+                None => {
+                    bits_msb_to_lsb.push(JsonBitMapping::Unknown);
+                    items.push("?".to_string());
+                }
+            }
+        }
+
+        json_nodes.push(JsonNodeEntry {
+            pir_node_ref_index: nr.index,
+            pir_text_id: node.text_id,
+            pir_name: pir_name.clone(),
+            width: *current_width,
+            bits_msb_to_lsb,
+        });
+
+        let should_print = print_mappings_limit == 0 || *printed_nodes < print_mappings_limit;
+        if should_print {
+            println!(
+                "{}: bits[{}] = [{}]",
+                pir_name,
+                current_width,
+                items.join(", ")
+            );
+            *printed_nodes += 1;
+        }
+
+        *current_node = None;
+        *current_width = 0;
+        current_bits.clear();
+        *current_any_proved = false;
+    };
+
+    let proofs = match prove_equivalence_candidates_varisat_streaming(
+        &pir_fn,
+        &gate_fn,
+        &candidates,
+        &gatify_opts,
+        |p| {
+            // Proof stats.
+            match &p.result {
+                CandidateProofResult::Proved => proved += 1,
+                CandidateProofResult::Disproved { .. } => disproved += 1,
+                CandidateProofResult::Skipped { .. } => skipped += 1,
+            }
+
+            // Streaming proof lines (optional).
+            if print_limit != 0 && proof_index < print_limit {
+                match &p.result {
+                    CandidateProofResult::Proved => {
+                        println!(
+                            "proof[{}]: PROVED pir_text_id={} bit={} <-> {}",
+                            proof_index,
+                            p.candidate.pir_node_text_id,
+                            p.candidate.bit_index,
+                            format_mapping_rhs(p.candidate.rhs)
+                        );
+                    }
+                    CandidateProofResult::Disproved {
+                        counterexample_inputs,
+                    } => {
+                        println!(
+                            "proof[{}]: DISPROVED pir_text_id={} bit={} <-> {} cex_inputs={:?}",
+                            proof_index,
+                            p.candidate.pir_node_text_id,
+                            p.candidate.bit_index,
+                            format_mapping_rhs(p.candidate.rhs),
+                            counterexample_inputs
+                        );
+                    }
+                    CandidateProofResult::Skipped { reason } => {
+                        println!(
+                            "proof[{}]: SKIPPED pir_text_id={} bit={} reason={}",
+                            proof_index,
+                            p.candidate.pir_node_text_id,
+                            p.candidate.bit_index,
+                            reason
+                        );
+                    }
+                }
+            }
+            proof_index += 1;
+
+            let nr = p.candidate.pir_node_ref;
+            let ty = pir_fn.get_node_ty(nr);
+            let ir::Type::Bits(w) = ty else {
+                return;
+            };
+            if exclude_structural && is_structural_payload(&pir_fn.get_node(nr).payload) {
+                return;
+            }
+
+            // If we moved to a new node in the candidate stream, flush the previous.
+            if current_node.map(|x| x.index) != Some(nr.index) {
+                flush_current_node(
+                    &pir_fn,
+                    &mut current_node,
+                    &mut current_width,
+                    &mut current_bits,
+                    &mut current_any_proved,
+                    &mut printed_nodes,
+                    print_mappings_limit,
+                    &mut json_nodes,
+                );
+
+                current_node = Some(nr);
+                current_width = *w;
+                current_bits = vec![None; *w];
+                current_any_proved = false;
+            }
+
+            if let CandidateProofResult::Proved = p.result {
+                // Coverage bookkeeping: count each (node,bit) once.
+                if detected_bits.insert((nr.index, p.candidate.bit_index)) {
+                    match p.candidate.rhs {
+                        IrAigCandidateRhs::Const(_) => detected_bits_const += 1,
+                        IrAigCandidateRhs::AigOperand(_) => detected_bits_aig += 1,
+                    }
+                }
+
+                current_any_proved = true;
+                let idx = p.candidate.bit_index;
+                if idx < current_bits.len() {
+                    current_bits[idx] = Some(match current_bits[idx] {
+                        Some(existing) => choose_preferred_rhs(existing, p.candidate.rhs),
+                        None => p.candidate.rhs,
+                    });
+                }
+            }
+        },
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("ir-aig-sharing error: {}", e);
+            std::process::exit(2);
+        }
+    };
+
+    // Flush last node in the stream.
+    flush_current_node(
+        &pir_fn,
+        &mut current_node,
+        &mut current_width,
+        &mut current_bits,
+        &mut current_any_proved,
+        &mut printed_nodes,
+        print_mappings_limit,
+        &mut json_nodes,
+    );
+
+    // Summary line at the end (since proving/mappings may be streamed).
+    println!(
+        "ir-aig-sharing: samples={} seed={} candidates={} proved={} disproved={} skipped={}",
+        sample_count,
+        sample_seed,
+        proofs.len(),
+        proved,
+        disproved,
+        skipped
+    );
+    if interesting_total_bits != 0 {
+        let detected_percent =
+            (detected_bits.len() as f64) * 100.0 / (interesting_total_bits as f64);
+        println!(
+            "ir-aig-sharing coverage: detected_bits={}/{} ({:.2}%) (aig={} const={}) interesting_nodes={}",
+            detected_bits.len(),
+            interesting_total_bits,
+            detected_percent,
+            detected_bits_aig,
+            detected_bits_const,
+            interesting_total_nodes
+        );
+    }
+
+    if let Some(path) = output_json_path {
+        let detected_percent = if interesting_total_bits == 0 {
+            0.0
+        } else {
+            (detected_bits.len() as f64) * 100.0 / (interesting_total_bits as f64)
+        };
+        let report = JsonReport {
+            tool: "xlsynth-driver ir-aig-sharing".to_string(),
+            version: 1,
+            inputs: JsonInputs {
+                pir_ir_path: ir_path.display().to_string(),
+                aig_path: aig_path.display().to_string(),
+                top: top.map(|s| s.to_string()),
+            },
+            options: JsonOptions {
+                samples: sample_count,
+                seed: sample_seed,
+                exclude_structural_pir_nodes: exclude_structural,
+                max_proofs,
+            },
+            stats: JsonStats {
+                candidates: proofs.len(),
+                proved,
+                disproved,
+                skipped,
+                interesting_nodes: interesting_total_nodes,
+                interesting_bits: interesting_total_bits,
+                detected_bits: detected_bits.len(),
+                detected_percent,
+                detected_bits_by_kind: JsonDetectedBitsByKind {
+                    aig: detected_bits_aig,
+                    const_: detected_bits_const,
+                },
+            },
+            nodes: json_nodes,
+        };
+
+        let s = serde_json::to_string_pretty(&report).expect("JSON serialization should not fail");
+        if let Err(e) = std::fs::write(path, s) {
+            eprintln!(
+                "ir-aig-sharing error: failed to write --output-json {}: {}",
+                path, e
+            );
+            std::process::exit(2);
+        }
+    }
+
+    if disproved != 0 {
+        std::process::exit(1);
+    }
+}

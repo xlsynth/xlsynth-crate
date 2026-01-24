@@ -18,7 +18,16 @@ pub enum TrivialFnBody {
     SingleBoolGate { op: String, param_count: usize },
 }
 
-fn is_structural_payload(payload: &NodePayload) -> bool {
+/// Returns whether `payload` is a "structural" operation.
+///
+/// Structural operations are treated as zero/near-zero semantic complexity for
+/// various analyses: they tend to rearrange, select, or repackage bits, rather
+/// than compute "new" boolean structure.
+///
+/// Note: This intentionally excludes `dynamic_bit_slice` and `bit_slice_update`
+/// because they can introduce substantial logic (e.g. barrel shifting / masked
+/// insertion).
+pub fn is_structural_payload(payload: &NodePayload) -> bool {
     match payload {
         NodePayload::Nil => true,
         NodePayload::GetParam(_) => true,
@@ -27,13 +36,14 @@ fn is_structural_payload(payload: &NodePayload) -> bool {
         NodePayload::Array(_) => true,
         NodePayload::ArraySlice { .. } => true,
         NodePayload::TupleIndex { .. } => true,
+        NodePayload::Binop(crate::ir::Binop::ArrayConcat, _, _) => true,
         NodePayload::Unop(op, _) => {
             matches!(op, crate::ir::Unop::Identity | crate::ir::Unop::Reverse)
         }
         NodePayload::SignExt { .. } => true,
         NodePayload::ZeroExt { .. } => true,
         NodePayload::BitSlice { .. } => true,
-        NodePayload::DynamicBitSlice { .. } => true,
+        NodePayload::Nary(crate::ir::NaryOp::Concat, _) => true,
         // Everything else is potentially semantically interesting (boolean logic,
         // arithmetic, selects, asserts/traces, invokes, etc.).
         _ => false,
