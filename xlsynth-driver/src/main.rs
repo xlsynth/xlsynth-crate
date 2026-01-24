@@ -62,6 +62,7 @@ mod ir2delayinfo;
 mod ir2gates;
 mod ir2opt;
 mod ir2pipeline;
+mod ir_aig_sharing;
 mod ir_annotate_ranges;
 mod ir_bool_cones;
 mod ir_diverse_samples;
@@ -1568,6 +1569,62 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new("ir-aig-sharing")
+                .about("Finds and proves PIR node bit correspondences to AIG node outputs")
+                .arg(
+                    clap::Arg::new("pir_ir_file")
+                        .help("PIR/XLS IR package file to analyze")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    clap::Arg::new("aig_file")
+                        .help("AIGER file (.aag or .aig) to compare against")
+                        .required(true)
+                        .index(2),
+                )
+                .add_ir_top_arg(false)
+                .arg(
+                    clap::Arg::new("sample_count")
+                        .long("samples")
+                        .value_name("N")
+                        .help("Number of random samples for candidate discovery (default 256)")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("sample_seed")
+                        .long("seed")
+                        .value_name("U64")
+                        .help("RNG seed for candidate discovery (default 0)")
+                        .action(clap::ArgAction::Set),
+                )
+                .add_bool_arg(
+                    "exclude_structural_pir_nodes",
+                    "Exclude structural PIR nodes (default true)",
+                )
+                .arg(
+                    clap::Arg::new("max_proofs")
+                        .long("max-proofs")
+                        .value_name("N")
+                        .help("Limit number of candidates to prove (0 = no limit)")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("print")
+                        .long("print")
+                        .value_name("N")
+                        .help("Print the first N proofs (default 20)")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("print_mappings")
+                        .long("print-mappings")
+                        .value_name("N")
+                        .help("Print the first N PIR nodes with proved bit mappings (default 20; 0 = no limit)")
+                        .action(clap::ArgAction::Set),
+                ),
+        )
+        .subcommand(
             clap::Command::new("ir-fn-eval")
                 .about("Interprets an IR function with the provided argument tuple")
                 .arg(
@@ -2200,6 +2257,9 @@ fn main() {
         }
         Some(("aig-equiv", subm)) => {
             aig_equiv::handle_aig_equiv(subm, &config);
+        }
+        Some(("ir-aig-sharing", subm)) => {
+            ir_aig_sharing::handle_ir_aig_sharing(subm, &config);
         }
         Some(("run-verilog-pipeline", subm)) => {
             run_verilog_pipeline::handle_run_verilog_pipeline(subm);

@@ -2957,6 +2957,7 @@ fn gatify_internal(
     Ok(())
 }
 
+#[derive(Clone)]
 pub struct GatifyOptions {
     pub fold: bool,
     pub hash: bool,

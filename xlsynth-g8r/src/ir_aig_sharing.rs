@@ -27,6 +27,10 @@ use xlsynth_pir::ir_utils::is_structural_payload;
 
 use crate::aig::gate::{AigNode, AigOperand, AigRef, GateFn};
 use crate::aig::topo::topo_sort_refs;
+use crate::gatify::ir2gate::{GatifyOptions, gatify};
+use crate::ir2gate_utils::AdderMapping;
+use varisat::ExtendFormula;
+use varisat::Solver;
 
 #[derive(Debug, Clone)]
 pub struct IrAigSharingOptions {
@@ -51,7 +55,30 @@ pub struct IrAigEquivalenceCandidate {
     pub pir_node_ref: ir::NodeRef,
     pub pir_node_text_id: usize,
     pub bit_index: usize,
-    pub aig_operand: AigOperand,
+    pub rhs: IrAigCandidateRhs,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrAigCandidateRhs {
+    AigOperand(AigOperand),
+    Const(bool),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CandidateProofResult {
+    /// Proved that the PIR node bit equals the given AIG operand for all
+    /// inputs.
+    Proved,
+    /// Disproved with a concrete counterexample input assignment.
+    Disproved { counterexample_inputs: Vec<IrBits> },
+    /// Skipped proof attempt (e.g. missing lowering map entry).
+    Skipped { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateProof {
+    pub candidate: IrAigEquivalenceCandidate,
+    pub result: CandidateProofResult,
 }
 
 #[derive(Debug)]
@@ -148,6 +175,7 @@ impl ir_eval::EvalObserver for PirHistoryObserver<'_> {
 }
 
 pub fn get_equivalences(
+    pir_pkg: &ir::Package,
     pir_fn: &ir::Fn,
     gate_fn: &GateFn,
     options: &IrAigSharingOptions,
@@ -174,10 +202,22 @@ pub fn get_equivalences(
         return Ok(Vec::new());
     }
 
+    // Candidate discovery via shared-input simulation.
+    //
+    // Important: we must drive PIR and GateFn with the *same* bit patterns in
+    // the same flattened order (LSB=0), otherwise history matching is meaningless
+    // for tuple/array parameters.
     let mut rng = Xoshiro256PlusPlus::seed_from_u64(options.sample_seed);
 
-    // --- 1) PIR simulation and node histories.
+    // PIR node histories keyed by node_text_id.
     let mut pir_histories = PirHistories::default();
+
+    // GateFn per-node histories keyed by AigRef.id (positive polarity).
+    let gate_count = gate_fn.gates.len();
+    let mut gate_node_histories: Vec<Vec<bool>> = (0..gate_count)
+        .map(|_| Vec::with_capacity(options.sample_count))
+        .collect();
+
     for _sample_idx in 0..options.sample_count {
         let (pir_args, gate_inputs) = make_random_args_for_both(pir_fn, gate_fn, &mut rng)?;
 
@@ -186,7 +226,12 @@ pub fn get_equivalences(
             histories: &mut pir_histories,
             exclude_structural: options.exclude_structural_pir_nodes,
         };
-        match ir_eval::eval_fn_with_observer(pir_fn, &pir_args, Some(&mut observer)) {
+        match ir_eval::eval_fn_in_package_with_observer(
+            pir_pkg,
+            pir_fn,
+            &pir_args,
+            Some(&mut observer),
+        ) {
             ir_eval::FnEvalResult::Success(_) => {}
             ir_eval::FnEvalResult::Failure(fail) => {
                 return Err(format!(
@@ -197,15 +242,11 @@ pub fn get_equivalences(
             }
         }
 
-        // GateFn inputs are only needed for GateFn simulation; keep them for the
-        // second pass by re-generating the same inputs above. (We already have
-        // them here; just consume below.)
-        drop(gate_inputs);
+        let values = eval_gate_fn_all_node_values_positive(gate_fn, &gate_inputs)?;
+        for (id, v) in values.into_iter().enumerate() {
+            gate_node_histories[id].push(v);
+        }
     }
-
-    // --- 2) GateFn simulation and node histories (positive AigRef values).
-    let gate_node_histories =
-        simulate_gate_fn_node_histories(gate_fn, options.sample_count, options.sample_seed)?;
 
     // Build signature->operands index from GateFn histories.
     let mut sig_to_operands: HashMap<Vec<u8>, Vec<AigOperand>> = HashMap::new();
@@ -228,7 +269,14 @@ pub fn get_equivalences(
 
     // --- 3) Match PIR bit histories against the GateFn index.
     let mut candidates: Vec<IrAigEquivalenceCandidate> = Vec::new();
-    for hist in pir_histories.by_text_id.values() {
+    // Deterministic iteration for deterministic output.
+    let mut pir_text_ids: Vec<usize> = pir_histories.by_text_id.keys().copied().collect();
+    pir_text_ids.sort_unstable();
+    for tid in pir_text_ids {
+        let hist = pir_histories
+            .by_text_id
+            .get(&tid)
+            .expect("text_id collected from keys must exist");
         for (bit_index, bit_hist) in hist.bit_histories.iter().enumerate() {
             if bit_hist.len() != options.sample_count {
                 return Err(format!(
@@ -239,6 +287,20 @@ pub fn get_equivalences(
                     options.sample_count
                 ));
             }
+
+            // If the observed history is constant, prefer generating a single
+            // "prove it's a constant" candidate over matching to arbitrary AIG
+            // nodes that merely *appear* constant over this sample set.
+            if let Some(const_value) = is_all_same_bool(bit_hist) {
+                candidates.push(IrAigEquivalenceCandidate {
+                    pir_node_ref: hist.node_ref,
+                    pir_node_text_id: hist.node_text_id,
+                    bit_index,
+                    rhs: IrAigCandidateRhs::Const(const_value),
+                });
+                continue;
+            }
+
             let sig = pack_bools_to_bytes(bit_hist);
             if let Some(ops) = sig_to_operands.get(&sig) {
                 for op in ops {
@@ -246,47 +308,311 @@ pub fn get_equivalences(
                         pir_node_ref: hist.node_ref,
                         pir_node_text_id: hist.node_text_id,
                         bit_index,
-                        aig_operand: *op,
+                        rhs: IrAigCandidateRhs::AigOperand(*op),
                     });
                 }
             }
         }
     }
 
+    candidates.sort_by(|a, b| {
+        let rhs_key = |rhs: &IrAigCandidateRhs| match rhs {
+            IrAigCandidateRhs::Const(false) => (0u8, 0usize, false),
+            IrAigCandidateRhs::Const(true) => (0u8, 0usize, true),
+            IrAigCandidateRhs::AigOperand(op) => (1u8, op.node.id, op.negated),
+        };
+        (a.pir_node_ref.index, a.bit_index, rhs_key(&a.rhs)).cmp(&(
+            b.pir_node_ref.index,
+            b.bit_index,
+            rhs_key(&b.rhs),
+        ))
+    });
+
     Ok(candidates)
 }
 
 pub fn confirm_or_deny_candidate_equivalence(
-    _pir_fn: &ir::Fn,
-    _gate_fn: &GateFn,
-    _candidate: &IrAigEquivalenceCandidate,
+    pir_fn: &ir::Fn,
+    gate_fn: &GateFn,
+    candidate: &IrAigEquivalenceCandidate,
 ) -> Result<bool, String> {
-    todo!("confirm candidate equivalence using a shared solver context")
+    let opts = GatifyOptions {
+        fold: true,
+        hash: true,
+        check_equivalence: false,
+        adder_mapping: AdderMapping::default(),
+        mul_adder_mapping: None,
+        range_info: None,
+        enable_rewrite_carry_out: false,
+    };
+    let proofs =
+        prove_equivalence_candidates_varisat(pir_fn, gate_fn, &[candidate.clone()], &opts)?;
+    match &proofs[0].result {
+        CandidateProofResult::Proved => Ok(true),
+        CandidateProofResult::Disproved { .. } => Ok(false),
+        CandidateProofResult::Skipped { reason } => Err(reason.clone()),
+    }
 }
 
-fn simulate_gate_fn_node_histories(
+/// Proves (or disproves) equivalence for all provided candidates using Varisat.
+///
+/// This is intended to be the "bulk" confirmation step after simulation-based
+/// candidate discovery: we encode both circuits once under shared inputs, then
+/// query each candidate via an XOR miter under an assumption.
+pub fn prove_equivalence_candidates_varisat(
+    pir_fn: &ir::Fn,
     gate_fn: &GateFn,
-    sample_count: usize,
-    sample_seed: u64,
-) -> Result<Vec<Vec<bool>>, String> {
-    let gate_count = gate_fn.gates.len();
-    let mut histories: Vec<Vec<bool>> = (0..gate_count)
-        .map(|_| Vec::with_capacity(sample_count))
-        .collect();
+    candidates: &[IrAigEquivalenceCandidate],
+    gatify_options: &GatifyOptions,
+) -> Result<Vec<CandidateProof>, String> {
+    // Gatify PIR once to get a GateFn and a per-node lowering map.
+    let gatify_output = gatify(pir_fn, gatify_options.clone())?;
+    let pir_gate_fn = gatify_output.gate_fn;
+    let lowering_map = gatify_output.lowering_map;
 
-    let mut rng = Xoshiro256PlusPlus::seed_from_u64(sample_seed);
-    for _ in 0..sample_count {
-        let mut inputs: Vec<IrBits> = Vec::with_capacity(gate_fn.inputs.len());
-        for inp in &gate_fn.inputs {
-            let w = inp.get_bit_count();
-            inputs.push(random_irbits(&mut rng, w));
-        }
-        let values = eval_gate_fn_all_node_values_positive(gate_fn, &inputs)?;
-        for (id, v) in values.into_iter().enumerate() {
-            histories[id].push(v);
+    // Ensure input shapes match so a single shared input vector drives both.
+    if pir_gate_fn.inputs.len() != gate_fn.inputs.len() {
+        return Err(format!(
+            "gate input arity mismatch: pir_gate_fn has {} inputs but gate_fn has {}",
+            pir_gate_fn.inputs.len(),
+            gate_fn.inputs.len()
+        ));
+    }
+    for (i, (a, b)) in pir_gate_fn
+        .inputs
+        .iter()
+        .zip(gate_fn.inputs.iter())
+        .enumerate()
+    {
+        if a.get_bit_count() != b.get_bit_count() {
+            return Err(format!(
+                "gate input width mismatch at input {}: pir_gate_fn bits[{}] vs gate_fn bits[{}]",
+                i,
+                a.get_bit_count(),
+                b.get_bit_count()
+            ));
         }
     }
-    Ok(histories)
+
+    let mut solver = Solver::new();
+
+    // Dedicated constant literals (so we can prove "PIR bit is constant 0/1").
+    let const_true = solver.new_lit();
+    solver.add_clause(&[const_true]);
+    let const_false = solver.new_lit();
+    solver.add_clause(&[!const_false]);
+
+    // Shared input literals: [input_port][bit_index_lsb0]
+    let mut input_lits: Vec<Vec<varisat::Lit>> = Vec::with_capacity(gate_fn.inputs.len());
+    for inp in gate_fn.inputs.iter() {
+        let mut bits: Vec<varisat::Lit> = Vec::with_capacity(inp.get_bit_count());
+        for _ in 0..inp.get_bit_count() {
+            bits.push(solver.new_lit());
+        }
+        input_lits.push(bits);
+    }
+
+    let pir_lits = encode_gate_fn_all_nodes(&mut solver, &pir_gate_fn, &input_lits)?;
+    let gate_lits = encode_gate_fn_all_nodes(&mut solver, gate_fn, &input_lits)?;
+
+    // GateFn primary input refs for counterexample reconstruction.
+    let gate_primary_inputs: Vec<AigRef> = gate_fn
+        .inputs
+        .iter()
+        .flat_map(|inp| inp.bit_vector.iter_lsb_to_msb())
+        .map(|op| op.node)
+        .collect();
+
+    let mut results: Vec<CandidateProof> = Vec::with_capacity(candidates.len());
+    for cand in candidates {
+        let Some(pir_bv) = lowering_map.get(&cand.pir_node_ref) else {
+            results.push(CandidateProof {
+                candidate: cand.clone(),
+                result: CandidateProofResult::Skipped {
+                    reason: format!(
+                        "missing lowering_map entry for pir_node_text_id={}",
+                        cand.pir_node_text_id
+                    ),
+                },
+            });
+            continue;
+        };
+        if cand.bit_index >= pir_bv.get_bit_count() {
+            results.push(CandidateProof {
+                candidate: cand.clone(),
+                result: CandidateProofResult::Skipped {
+                    reason: format!(
+                        "bit_index {} out of range for pir node bits[{}] (node_text_id={})",
+                        cand.bit_index,
+                        pir_bv.get_bit_count(),
+                        cand.pir_node_text_id
+                    ),
+                },
+            });
+            continue;
+        }
+
+        let pir_op: AigOperand = *pir_bv.get_lsb(cand.bit_index);
+        let pir_lit = lit_for_operand(&pir_lits, pir_op)?;
+        let gate_lit = match cand.rhs {
+            IrAigCandidateRhs::AigOperand(op) => lit_for_operand(&gate_lits, op)?,
+            IrAigCandidateRhs::Const(true) => const_true,
+            IrAigCandidateRhs::Const(false) => const_false,
+        };
+
+        // Ask the solver for a counterexample: (pir != gate).
+        let diff = solver.new_lit();
+        add_tseitsin_xor(&mut solver, pir_lit, gate_lit, diff);
+        solver.assume(&[diff]);
+        let sat = solver
+            .solve()
+            .map_err(|e| format!("varisat solve error: {e:?}"))?;
+        if !sat {
+            results.push(CandidateProof {
+                candidate: cand.clone(),
+                result: CandidateProofResult::Proved,
+            });
+            continue;
+        }
+
+        let model = solver
+            .model()
+            .ok_or_else(|| "expected model when SAT".to_string())?;
+        let model_set: std::collections::HashSet<varisat::Lit> = model.iter().cloned().collect();
+
+        let mut input_assignment: HashMap<AigRef, bool> = HashMap::new();
+        for aig_ref in &gate_primary_inputs {
+            let lit = gate_lits
+                .get(aig_ref)
+                .ok_or_else(|| format!("missing lit for gate primary input {:?}", aig_ref))?;
+            input_assignment.insert(*aig_ref, model_set.contains(lit));
+        }
+
+        let cex_inputs: Vec<IrBits> = gate_fn.map_to_inputs(input_assignment);
+        results.push(CandidateProof {
+            candidate: cand.clone(),
+            result: CandidateProofResult::Disproved {
+                counterexample_inputs: cex_inputs,
+            },
+        });
+    }
+
+    Ok(results)
+}
+
+fn is_all_same_bool(bits: &[bool]) -> Option<bool> {
+    let first = *bits.first()?;
+    if bits.iter().all(|b| *b == first) {
+        Some(first)
+    } else {
+        None
+    }
+}
+
+fn encode_gate_fn_all_nodes(
+    solver: &mut Solver,
+    gate_fn: &GateFn,
+    input_lits: &[Vec<varisat::Lit>],
+) -> Result<HashMap<AigRef, varisat::Lit>, String> {
+    if gate_fn.inputs.len() != input_lits.len() {
+        return Err(format!(
+            "input_lits arity mismatch: got {} expected {}",
+            input_lits.len(),
+            gate_fn.inputs.len()
+        ));
+    }
+
+    let mut map: HashMap<AigRef, varisat::Lit> = HashMap::new();
+
+    // Seed primary inputs using the shared literals (one per input bit).
+    for (i, inp) in gate_fn.inputs.iter().enumerate() {
+        if inp.get_bit_count() != input_lits[i].len() {
+            return Err(format!(
+                "input_lits width mismatch for input {} ('{}'): got {} expected {}",
+                i,
+                inp.name,
+                input_lits[i].len(),
+                inp.get_bit_count()
+            ));
+        }
+        for (j, op) in inp.bit_vector.iter_lsb_to_msb().enumerate() {
+            if op.negated {
+                return Err("gate_fn primary input operands should not be negated".to_string());
+            }
+            map.insert(op.node, input_lits[i][j]);
+        }
+    }
+
+    // Allocate literals for all non-input nodes.
+    for (id, node) in gate_fn.gates.iter().enumerate() {
+        let r = AigRef { id };
+        if matches!(node, AigNode::Input { .. }) {
+            if !map.contains_key(&r) {
+                return Err(format!(
+                    "AigNode::Input id={} not present in gate_fn.inputs mapping",
+                    id
+                ));
+            }
+            continue;
+        }
+        map.entry(r).or_insert_with(|| solver.new_lit());
+    }
+
+    // Add structural clauses for all nodes.
+    for (id, node) in gate_fn.gates.iter().enumerate() {
+        let r = AigRef { id };
+        let out = *map.get(&r).expect("lit allocated for node");
+        match node {
+            AigNode::Input { .. } => {}
+            AigNode::Literal(v) => {
+                if *v {
+                    solver.add_clause(&[out]);
+                } else {
+                    solver.add_clause(&[!out]);
+                }
+            }
+            AigNode::And2 { a, b, .. } => {
+                let a_lit = lit_for_operand(&map, *a)?;
+                let b_lit = lit_for_operand(&map, *b)?;
+                add_tseitsin_and(solver, a_lit, b_lit, out);
+            }
+        }
+    }
+
+    Ok(map)
+}
+
+fn lit_for_operand(
+    map: &HashMap<AigRef, varisat::Lit>,
+    op: AigOperand,
+) -> Result<varisat::Lit, String> {
+    let base = *map
+        .get(&op.node)
+        .ok_or_else(|| format!("missing lit for AigRef id={}", op.node.id))?;
+    Ok(if op.negated { !base } else { base })
+}
+
+fn add_tseitsin_and(
+    solver: &mut impl ExtendFormula,
+    a: varisat::Lit,
+    b: varisat::Lit,
+    output: varisat::Lit,
+) {
+    solver.add_clause(&[!a, !b, output]);
+    solver.add_clause(&[a, !output]);
+    solver.add_clause(&[b, !output]);
+}
+
+fn add_tseitsin_xor(
+    solver: &mut impl ExtendFormula,
+    a: varisat::Lit,
+    b: varisat::Lit,
+    output: varisat::Lit,
+) {
+    solver.add_clause(&[!a, !b, !output]);
+    solver.add_clause(&[a, b, !output]);
+    solver.add_clause(&[a, !b, output]);
+    solver.add_clause(&[!a, b, output]);
 }
 
 fn eval_gate_fn_all_node_values_positive(
@@ -359,8 +685,11 @@ fn make_random_args_for_both(
     let mut gate_inputs: Vec<IrBits> = Vec::with_capacity(gate_fn.inputs.len());
 
     for (param, gate_input) in pir_fn.params.iter().zip(gate_fn.inputs.iter()) {
-        let v = random_ir_value_for_type(rng, &param.ty)?;
-        let flat_bits = ir_value_to_flat_lsb0_bits(&v, &param.ty)?;
+        // Generate the *flat* bitvector first, then unflatten into an IrValue.
+        // This ensures the PIR evaluator and the GateFn see identical bit patterns
+        // in the same flattened order for tuple/array parameters.
+        let flat_bits = random_bool_vec(rng, param.ty.bit_count());
+        let v = unflatten_ir_value_from_lsb0_bits(&param.ty, &flat_bits)?;
         if flat_bits.len() != gate_input.get_bit_count() {
             return Err(format!(
                 "flattened arg width mismatch for param '{}': got {} expected {}",
@@ -376,45 +705,70 @@ fn make_random_args_for_both(
     Ok((pir_args, gate_inputs))
 }
 
-fn random_ir_value_for_type(rng: &mut impl RngCore, ty: &ir::Type) -> Result<IrValue, String> {
+fn random_bool_vec(rng: &mut impl RngCore, width: usize) -> Vec<bool> {
+    let mut bits: Vec<bool> = Vec::with_capacity(width);
+    for _ in 0..width {
+        bits.push((rng.next_u32() & 1) != 0);
+    }
+    bits
+}
+
+fn unflatten_ir_value_from_lsb0_bits(ty: &ir::Type, flat_bits: &[bool]) -> Result<IrValue, String> {
+    let (v, used) = unflatten_ir_value_from_lsb0_bits_at(ty, flat_bits, 0)?;
+    if used != flat_bits.len() {
+        return Err(format!(
+            "unflatten did not consume all bits: used {} of {}",
+            used,
+            flat_bits.len()
+        ));
+    }
+    Ok(v)
+}
+
+fn unflatten_ir_value_from_lsb0_bits_at(
+    ty: &ir::Type,
+    flat_bits: &[bool],
+    mut offset: usize,
+) -> Result<(IrValue, usize), String> {
     match ty {
-        ir::Type::Token => Ok(IrValue::make_token()),
-        ir::Type::Bits(w) => Ok(IrValue::from_bits(&random_irbits(rng, *w))),
-        ir::Type::Tuple(types) => {
-            let mut elems: Vec<IrValue> = Vec::with_capacity(types.len());
-            for t in types {
-                elems.push(random_ir_value_for_type(rng, t)?);
+        ir::Type::Token => Ok((IrValue::make_token(), offset)),
+        ir::Type::Bits(w) => {
+            let w = *w;
+            if offset + w > flat_bits.len() {
+                return Err("not enough bits to unflatten bits value".to_string());
             }
-            Ok(IrValue::make_tuple(&elems))
+            let slice = &flat_bits[offset..offset + w];
+            offset += w;
+            Ok((IrValue::from_bits(&IrBits::from_lsb_is_0(slice)), offset))
+        }
+        ir::Type::Tuple(types) => {
+            // Flattening places the *last* tuple element at the least-significant bits.
+            // So when unflattening, consume elements from the tail first.
+            let mut elems_rev: Vec<IrValue> = Vec::with_capacity(types.len());
+            for t in types.iter().rev() {
+                let (v, next) = unflatten_ir_value_from_lsb0_bits_at(t, flat_bits, offset)?;
+                offset = next;
+                elems_rev.push(v);
+            }
+            elems_rev.reverse();
+            Ok((IrValue::make_tuple(&elems_rev), offset))
         }
         ir::Type::Array(ir::ArrayTypeData {
             element_type,
             element_count,
         }) => {
-            let mut elems: Vec<IrValue> = Vec::with_capacity(*element_count);
+            let mut elems_rev: Vec<IrValue> = Vec::with_capacity(*element_count);
             for _ in 0..*element_count {
-                elems.push(random_ir_value_for_type(rng, element_type)?);
+                let (v, next) =
+                    unflatten_ir_value_from_lsb0_bits_at(element_type, flat_bits, offset)?;
+                offset = next;
+                elems_rev.push(v);
             }
-            IrValue::make_array(&elems).map_err(|e| e.to_string())
+            elems_rev.reverse();
+            let arr = IrValue::make_array(&elems_rev).map_err(|e| e.to_string())?;
+            Ok((arr, offset))
         }
     }
-}
-
-fn random_irbits(rng: &mut impl RngCore, width: usize) -> IrBits {
-    if width == 0 {
-        return IrBits::make_ubits(0, 0).expect("u0");
-    }
-    let mut bits: Vec<bool> = Vec::with_capacity(width);
-    for _ in 0..width {
-        bits.push((rng.next_u32() & 1) != 0);
-    }
-    IrBits::from_lsb_is_0(&bits)
-}
-
-fn ir_value_to_flat_lsb0_bits(v: &IrValue, ty: &ir::Type) -> Result<Vec<bool>, String> {
-    let mut out = Vec::with_capacity(ty.bit_count());
-    flatten_ir_value_to_lsb0_bits(v, ty, &mut out)?;
-    Ok(out)
 }
 
 fn flatten_ir_value_to_lsb0_bits(

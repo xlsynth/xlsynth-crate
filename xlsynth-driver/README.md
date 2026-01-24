@@ -836,6 +836,24 @@ Binary AIGER is also accepted:
 xlsynth-driver aig-equiv lhs.aig rhs.aig
 ```
 
+### `ir-aig-sharing`
+
+Finds and (optionally) proves correspondences between **PIR/XLS IR node output bits**
+and **AIG node outputs** (or their inverses). This is intended as a “sharing”
+analysis tool: it can identify places where an IR-visible boolean signal matches
+an existing internal AIG node, so downstream passes can potentially reuse logic.
+
+The flow is:
+
+- Simulate PIR and AIG over random inputs to propose candidate correspondences.
+- Use Varisat to prove or refute each candidate in bulk (incremental SAT).
+
+Example:
+
+```shell
+xlsynth-driver ir-aig-sharing my_design.ir my_design.aig --samples 256 --seed 0 --max-proofs 200 --print 20 --print-mappings 20
+```
+
 ### `dslx-equiv`
 
 Checks two DSLX functions for functional equivalence. By default it converts both to IR and uses the selected solver/toolchain to prove equivalence. Alternatively, you can provide a tactic script to drive a tactic-based prover flow.

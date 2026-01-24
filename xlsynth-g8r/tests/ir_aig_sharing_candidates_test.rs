@@ -2,7 +2,12 @@
 
 use xlsynth_g8r::aig::gate::{AigBitVector, AigOperand};
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
-use xlsynth_g8r::ir_aig_sharing::{IrAigSharingOptions, get_equivalences};
+use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
+use xlsynth_g8r::ir_aig_sharing::{
+    CandidateProofResult, IrAigCandidateRhs, IrAigSharingOptions, get_equivalences,
+    prove_equivalence_candidates_varisat,
+};
+use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_pir::ir_parser::Parser as PirParser;
 
 #[test]
@@ -33,7 +38,7 @@ top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
         sample_seed: 0,
         exclude_structural_pir_nodes: true,
     };
-    let cands = get_equivalences(pir_fn, &gate_fn, &opts).expect("get equivalences");
+    let cands = get_equivalences(&pkg, pir_fn, &gate_fn, &opts).expect("get equivalences");
 
     let hits: Vec<_> = cands
         .into_iter()
@@ -45,7 +50,25 @@ top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
     );
     assert!(
         hits.iter()
-            .any(|c| c.aig_operand == AigOperand::from(and_ref)),
+            .any(|c| c.rhs == IrAigCandidateRhs::AigOperand(AigOperand::from(and_ref))),
         "expected a candidate mapping to the AND node"
+    );
+
+    let gatify_opts = GatifyOptions {
+        fold: true,
+        hash: true,
+        check_equivalence: false,
+        adder_mapping: AdderMapping::default(),
+        mul_adder_mapping: None,
+        range_info: None,
+        enable_rewrite_carry_out: false,
+    };
+    let proofs = prove_equivalence_candidates_varisat(pir_fn, &gate_fn, &hits, &gatify_opts)
+        .expect("prove equivalence candidates");
+    assert!(
+        proofs
+            .iter()
+            .any(|p| matches!(p.result, CandidateProofResult::Proved)),
+        "expected at least one candidate to be proven equivalent"
     );
 }
