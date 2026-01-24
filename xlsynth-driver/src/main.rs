@@ -1622,6 +1622,13 @@ fn main() {
                         .value_name("N")
                         .help("Print PIR nodes with proved bit mappings (default: no limit; 0 = no limit)")
                         .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("output_json")
+                        .long("output-json")
+                        .value_name("PATH")
+                        .help("Write a JSON report with the proved correspondences to PATH")
+                        .action(clap::ArgAction::Set),
                 ),
         )
         .subcommand(

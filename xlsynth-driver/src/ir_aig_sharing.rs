@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use clap::ArgMatches;
+use serde::Serialize;
 use xlsynth_g8r::aig::gate::{AigBitVector, Input};
 use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
@@ -19,6 +20,82 @@ use xlsynth_pir::ir_utils::is_structural_payload;
 
 use crate::common::parse_bool_flag_or;
 use crate::toolchain_config::ToolchainConfig;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind")]
+enum JsonBitMapping {
+    #[serde(rename = "aig")]
+    Aig { id: usize, negated: bool },
+    #[serde(rename = "const")]
+    Const { value: u8 },
+    #[serde(rename = "unknown")]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct JsonNodeEntry {
+    pir_node_ref_index: usize,
+    pir_text_id: usize,
+    pir_name: String,
+    width: usize,
+    bits_msb_to_lsb: Vec<JsonBitMapping>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct JsonInputs {
+    pir_ir_path: String,
+    aig_path: String,
+    top: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct JsonOptions {
+    samples: usize,
+    seed: u64,
+    exclude_structural_pir_nodes: bool,
+    max_proofs: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct JsonDetectedBitsByKind {
+    aig: usize,
+    #[serde(rename = "const")]
+    const_: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct JsonStats {
+    candidates: usize,
+    proved: usize,
+    disproved: usize,
+    skipped: usize,
+    interesting_nodes: usize,
+    interesting_bits: usize,
+    detected_bits: usize,
+    detected_percent: f64,
+    detected_bits_by_kind: JsonDetectedBitsByKind,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct JsonReport {
+    tool: String,
+    version: u32,
+    inputs: JsonInputs,
+    options: JsonOptions,
+    stats: JsonStats,
+    nodes: Vec<JsonNodeEntry>,
+}
+
+fn rhs_to_json(rhs: IrAigCandidateRhs) -> JsonBitMapping {
+    match rhs {
+        IrAigCandidateRhs::AigOperand(op) => JsonBitMapping::Aig {
+            id: op.node.id,
+            negated: op.negated,
+        },
+        IrAigCandidateRhs::Const(false) => JsonBitMapping::Const { value: 0 },
+        IrAigCandidateRhs::Const(true) => JsonBitMapping::Const { value: 1 },
+    }
+}
 
 fn format_mapping_rhs(rhs: IrAigCandidateRhs) -> String {
     match rhs {
@@ -164,6 +241,7 @@ pub fn handle_ir_aig_sharing(matches: &ArgMatches, _config: &Option<ToolchainCon
         .get_one::<String>("print_mappings")
         .map(|s| s.parse::<usize>().unwrap_or(0))
         .unwrap_or(0);
+    let output_json_path = matches.get_one::<String>("output_json").map(|s| s.as_str());
 
     let (pir_pkg, pir_fn) = match load_pir_top_fn(ir_path, top) {
         Ok(v) => v,
@@ -250,13 +328,16 @@ pub fn handle_ir_aig_sharing(matches: &ArgMatches, _config: &Option<ToolchainCon
     let mut current_bits: Vec<Option<IrAigCandidateRhs>> = Vec::new(); // LSB=0 indexing
     let mut current_any_proved = false;
     let mut printed_nodes = 0usize;
+    let mut json_nodes: Vec<JsonNodeEntry> = Vec::new();
 
     let flush_current_node = |pir_fn: &ir::Fn,
                               current_node: &mut Option<ir::NodeRef>,
                               current_width: &mut usize,
                               current_bits: &mut Vec<Option<IrAigCandidateRhs>>,
                               current_any_proved: &mut bool,
-                              printed_nodes: &mut usize| {
+                              printed_nodes: &mut usize,
+                              print_mappings_limit: usize,
+                              json_nodes: &mut Vec<JsonNodeEntry>| {
         let Some(nr) = *current_node else {
             return;
         };
@@ -266,21 +347,42 @@ pub fn handle_ir_aig_sharing(matches: &ArgMatches, _config: &Option<ToolchainCon
             current_bits.clear();
             return;
         }
-        let node_name = xlsynth_pir::ir::node_textual_id(pir_fn, nr);
+        let node = pir_fn.get_node(nr);
+        let pir_name = xlsynth_pir::ir::node_textual_id(pir_fn, nr);
+
+        let mut bits_msb_to_lsb: Vec<JsonBitMapping> = Vec::with_capacity(*current_width);
         let mut items: Vec<String> = Vec::with_capacity(*current_width);
         for bit_index in (0..*current_width).rev() {
             match current_bits.get(bit_index).copied().flatten() {
-                Some(rhs) => items.push(format_mapping_rhs(rhs)),
-                None => items.push("?".to_string()),
+                Some(rhs) => {
+                    bits_msb_to_lsb.push(rhs_to_json(rhs));
+                    items.push(format_mapping_rhs(rhs));
+                }
+                None => {
+                    bits_msb_to_lsb.push(JsonBitMapping::Unknown);
+                    items.push("?".to_string());
+                }
             }
         }
-        println!(
-            "{}: bits[{}] = [{}]",
-            node_name,
-            current_width,
-            items.join(", ")
-        );
-        *printed_nodes += 1;
+
+        json_nodes.push(JsonNodeEntry {
+            pir_node_ref_index: nr.index,
+            pir_text_id: node.text_id,
+            pir_name: pir_name.clone(),
+            width: *current_width,
+            bits_msb_to_lsb,
+        });
+
+        let should_print = print_mappings_limit == 0 || *printed_nodes < print_mappings_limit;
+        if should_print {
+            println!(
+                "{}: bits[{}] = [{}]",
+                pir_name,
+                current_width,
+                items.join(", ")
+            );
+            *printed_nodes += 1;
+        }
 
         *current_node = None;
         *current_width = 0;
@@ -338,11 +440,6 @@ pub fn handle_ir_aig_sharing(matches: &ArgMatches, _config: &Option<ToolchainCon
             }
             proof_index += 1;
 
-            // Streaming per-node bitvector lines (optional).
-            if print_mappings_limit != 0 && printed_nodes >= print_mappings_limit {
-                return;
-            }
-
             let nr = p.candidate.pir_node_ref;
             let ty = pir_fn.get_node_ty(nr);
             let ir::Type::Bits(w) = ty else {
@@ -361,6 +458,8 @@ pub fn handle_ir_aig_sharing(matches: &ArgMatches, _config: &Option<ToolchainCon
                     &mut current_bits,
                     &mut current_any_proved,
                     &mut printed_nodes,
+                    print_mappings_limit,
+                    &mut json_nodes,
                 );
 
                 current_node = Some(nr);
@@ -397,16 +496,16 @@ pub fn handle_ir_aig_sharing(matches: &ArgMatches, _config: &Option<ToolchainCon
     };
 
     // Flush last node in the stream.
-    if print_mappings_limit == 0 || printed_nodes < print_mappings_limit {
-        flush_current_node(
-            &pir_fn,
-            &mut current_node,
-            &mut current_width,
-            &mut current_bits,
-            &mut current_any_proved,
-            &mut printed_nodes,
-        );
-    }
+    flush_current_node(
+        &pir_fn,
+        &mut current_node,
+        &mut current_width,
+        &mut current_bits,
+        &mut current_any_proved,
+        &mut printed_nodes,
+        print_mappings_limit,
+        &mut json_nodes,
+    );
 
     // Summary line at the end (since proving/mappings may be streamed).
     println!(
@@ -419,14 +518,64 @@ pub fn handle_ir_aig_sharing(matches: &ArgMatches, _config: &Option<ToolchainCon
         skipped
     );
     if interesting_total_bits != 0 {
+        let detected_percent =
+            (detected_bits.len() as f64) * 100.0 / (interesting_total_bits as f64);
         println!(
-            "ir-aig-sharing coverage: detected_bits={}/{} (aig={} const={}) interesting_nodes={}",
+            "ir-aig-sharing coverage: detected_bits={}/{} ({:.2}%) (aig={} const={}) interesting_nodes={}",
             detected_bits.len(),
             interesting_total_bits,
+            detected_percent,
             detected_bits_aig,
             detected_bits_const,
             interesting_total_nodes
         );
+    }
+
+    if let Some(path) = output_json_path {
+        let detected_percent = if interesting_total_bits == 0 {
+            0.0
+        } else {
+            (detected_bits.len() as f64) * 100.0 / (interesting_total_bits as f64)
+        };
+        let report = JsonReport {
+            tool: "xlsynth-driver ir-aig-sharing".to_string(),
+            version: 1,
+            inputs: JsonInputs {
+                pir_ir_path: ir_path.display().to_string(),
+                aig_path: aig_path.display().to_string(),
+                top: top.map(|s| s.to_string()),
+            },
+            options: JsonOptions {
+                samples: sample_count,
+                seed: sample_seed,
+                exclude_structural_pir_nodes: exclude_structural,
+                max_proofs,
+            },
+            stats: JsonStats {
+                candidates: proofs.len(),
+                proved,
+                disproved,
+                skipped,
+                interesting_nodes: interesting_total_nodes,
+                interesting_bits: interesting_total_bits,
+                detected_bits: detected_bits.len(),
+                detected_percent,
+                detected_bits_by_kind: JsonDetectedBitsByKind {
+                    aig: detected_bits_aig,
+                    const_: detected_bits_const,
+                },
+            },
+            nodes: json_nodes,
+        };
+
+        let s = serde_json::to_string_pretty(&report).expect("JSON serialization should not fail");
+        if let Err(e) = std::fs::write(path, s) {
+            eprintln!(
+                "ir-aig-sharing error: failed to write --output-json {}: {}",
+                path, e
+            );
+            std::process::exit(2);
+        }
     }
 
     if disproved != 0 {
