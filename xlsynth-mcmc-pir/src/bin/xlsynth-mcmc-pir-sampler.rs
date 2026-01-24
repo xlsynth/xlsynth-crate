@@ -32,6 +32,7 @@ use std::time::Duration;
 use std::time::Instant;
 use tempfile::Builder;
 
+use serde_json::json;
 use xlsynth_mcmc::multichain::ChainStrategy;
 use xlsynth_mcmc_pir::AcceptedSampleMsg;
 use xlsynth_mcmc_pir::Objective;
@@ -78,7 +79,7 @@ struct CliArgs {
     output: Option<String>,
 
     /// Metric to optimize (used by the MCMC acceptance criterion).
-    #[clap(long, value_enum, default_value_t = Objective::Nodes)]
+    #[clap(long, value_enum)]
     metric: Objective,
 
     /// Initial temperature for MCMC (default: 5.0).
@@ -106,6 +107,19 @@ struct CliArgs {
     /// Set to 0 to disable progress logs.
     #[clap(long, value_parser, default_value_t = 10)]
     progress_seconds: u64,
+
+    /// When true, write per-chain append-only JSONL trajectory logs under the
+    /// output directory.
+    ///
+    /// Files are written to `trajectory/trajectory.cXXX.jsonl`.
+    ///
+    /// Defaults to `true`. Disable with `--trajectory=false`.
+    #[clap(long, default_value_t = true)]
+    trajectory: bool,
+
+    /// Override trajectory directory (implies `--trajectory=true`).
+    #[clap(long, value_parser)]
+    trajectory_dir: Option<String>,
 
     /// Enable a formal equivalence oracle (in addition to the interpreter-based
     /// oracle) for transforms that are not marked always-equivalent.
@@ -194,6 +208,8 @@ fn replace_fn_in_pkg(pkg: &mut Package, new_fn: xlsynth_pir::ir::Fn) {
 struct SampleWriter {
     pkg_template: Arc<Package>,
     samples_dir: PathBuf,
+    manifest_path: PathBuf,
+    trajectory_dir: Option<PathBuf>,
     seen: HashSet<[u8; 32]>,
     start: Instant,
     unique_written: u64,
@@ -206,10 +222,12 @@ impl SampleWriter {
     fn new(
         pkg_template: Arc<Package>,
         output_dir: &Path,
+        trajectory_dir: Option<PathBuf>,
         report_interval: Duration,
     ) -> Result<Self> {
         let samples_dir = output_dir.join("samples");
         std::fs::create_dir_all(&samples_dir)?;
+        let manifest_path = samples_dir.join("manifest.jsonl");
 
         let mut seen: HashSet<[u8; 32]> = HashSet::new();
         for entry in std::fs::read_dir(&samples_dir)? {
@@ -231,6 +249,8 @@ impl SampleWriter {
         Ok(SampleWriter {
             pkg_template,
             samples_dir,
+            manifest_path,
+            trajectory_dir,
             seen,
             start: now,
             unique_written: 0,
@@ -266,6 +286,42 @@ impl SampleWriter {
         f.write_all(pkg_text.as_bytes())?;
         drop(f);
         std::fs::rename(&tmp_path, &final_path)?;
+
+        // Record a stable mapping from (chain, iter) to the digest/filename.
+        // This is append-only so users can correlate samples with trajectories.
+        let rec = json!({
+            "chain_no": msg.chain_no,
+            "global_iter": msg.global_iter,
+            "digest": hex,
+            "path": format!("samples/{}.ir", hex),
+            "pir_nodes": msg.cost.pir_nodes,
+            "g8r_nodes": msg.cost.g8r_nodes,
+            "g8r_depth": msg.cost.g8r_depth,
+        });
+        let mut mf = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.manifest_path)?;
+        writeln!(mf, "{}", rec.to_string())?;
+
+        // Also emit an explicit "write event" record under the trajectory
+        // directory (if enabled) so users can resolve written filenames from a
+        // subset of the trajectory outputs without dedup ambiguity.
+        if let Some(dir) = &self.trajectory_dir {
+            std::fs::create_dir_all(dir)?;
+            let path = dir.join(format!("writes.c{:03}.jsonl", msg.chain_no));
+            let write_rec = json!({
+                "chain_no": msg.chain_no,
+                "global_iter": msg.global_iter,
+                "digest": hex,
+                "path": format!("samples/{}.ir", hex),
+            });
+            let mut wf = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)?;
+            writeln!(wf, "{}", write_rec.to_string())?;
+        }
 
         self.seen.insert(msg.digest);
         self.unique_written = self.unique_written.saturating_add(1);
@@ -338,10 +394,18 @@ fn main() -> Result<()> {
     } else {
         Duration::from_secs(cli.progress_seconds)
     };
+    let trajectory_dir_for_writer = cli.trajectory_dir.as_ref().map(PathBuf::from).or_else(|| {
+        if cli.trajectory {
+            Some(output_dir.join("trajectory"))
+        } else {
+            None
+        }
+    });
     let writer_handle = std::thread::spawn(move || -> Result<()> {
         let mut writer = SampleWriter::new(
             pkg_template_for_thread,
             &output_dir_for_thread,
+            trajectory_dir_for_writer,
             report_interval,
         )?;
         loop {
@@ -367,6 +431,13 @@ fn main() -> Result<()> {
         initial_temperature: cli.initial_temperature,
         objective: cli.metric,
         enable_formal_oracle: cli.formal_oracle,
+        trajectory_dir: cli.trajectory_dir.as_ref().map(PathBuf::from).or_else(|| {
+            if cli.trajectory {
+                Some(output_dir.join("trajectory"))
+            } else {
+                None
+            }
+        }),
     };
 
     let _result = run_pir_mcmc_with_shared_best(top_fn, opts, None, None, Some(tx))?;

@@ -225,6 +225,7 @@ fn main() -> Result<()> {
         initial_temperature: cli.initial_temperature,
         objective: cli.metric,
         enable_formal_oracle: cli.formal_oracle,
+        trajectory_dir: None,
     };
 
     // Optional checkpoint writer: overwrites best.* artifacts periodically so

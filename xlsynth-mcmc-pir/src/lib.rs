@@ -14,7 +14,10 @@ use rand::distributions::Distribution;
 use rand::distributions::WeightedIndex;
 use rand::prelude::SliceRandom;
 use rand_pcg::Pcg64Mcg;
+use serde_json::json;
+use std::io::Write as IoWrite;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -242,6 +245,12 @@ pub struct RunOptions {
     /// oracle after the fast interpreter-based oracle for
     /// non-always-equivalent transforms.
     pub enable_formal_oracle: bool,
+
+    /// Optional directory for writing per-chain trajectory logs as JSONL.
+    ///
+    /// When set, each chain appends one JSON record per iteration to:
+    ///   `trajectory.c{chain_no:03}.jsonl`
+    pub trajectory_dir: Option<PathBuf>,
 }
 
 /// Message sent from the PIR MCMC engine to an optional checkpoint writer.
@@ -312,6 +321,25 @@ fn canonicalize_fn_for_sample(f: &IrFn) -> Result<IrFn> {
     Ok(f)
 }
 
+fn iteration_outcome_tag<K>(o: &xlsynth_mcmc::IterationOutcomeDetails<K>) -> &'static str {
+    match o {
+        xlsynth_mcmc::IterationOutcomeDetails::CandidateFailure => "CandidateFailure",
+        xlsynth_mcmc::IterationOutcomeDetails::ApplyFailure => "ApplyFailure",
+        xlsynth_mcmc::IterationOutcomeDetails::SimFailure => "SimFailure",
+        xlsynth_mcmc::IterationOutcomeDetails::OracleFailure => "OracleFailure",
+        xlsynth_mcmc::IterationOutcomeDetails::MetropolisReject => "MetropolisReject",
+        xlsynth_mcmc::IterationOutcomeDetails::Accepted { .. } => "Accepted",
+    }
+}
+
+fn hash_to_hex(bytes: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in bytes.iter() {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
 struct PirSegmentRunner {
     objective: Objective,
     initial_temperature: f64,
@@ -322,6 +350,7 @@ struct PirSegmentRunner {
     accepted_sample_tx: Option<Sender<AcceptedSampleMsg>>,
     shared_best: Option<Arc<SharedBest<IrFn>>>,
     baseline_metric: usize,
+    trajectory_dir: Option<PathBuf>,
 }
 
 /// Performs a single iteration of the PIR MCMC process.
@@ -748,6 +777,22 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
         start_state: IrFn,
         params: SegmentRunParams,
     ) -> Result<SegmentOutcome<IrFn, Cost, PirTransformKind>, Self::Error> {
+        let mut trajectory_writer: Option<std::io::BufWriter<std::fs::File>> =
+            if let Some(dir) = &self.trajectory_dir {
+                std::fs::create_dir_all(dir).map_err(|e| {
+                    anyhow::anyhow!("failed to create trajectory dir {}: {}", dir.display(), e)
+                })?;
+                let path = dir.join(format!("trajectory.c{:03}.jsonl", params.chain_no));
+                let f = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .map_err(|e| anyhow::anyhow!("failed to open {}: {}", path.display(), e))?;
+                Some(std::io::BufWriter::new(f))
+            } else {
+                None
+            };
+
         let mut iteration_rng = Pcg64Mcg::seed_from_u64(params.seed);
         let mut all_transforms = get_all_pir_transforms();
         if !self.enable_formal_oracle {
@@ -808,6 +853,9 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
                 self.objective,
             );
 
+            let mut accepted_digest: Option<[u8; 32]> = None;
+            let mut accepted_sample_sent = false;
+
             if let IterationOutcomeDetails::Accepted { .. } = iteration_output.outcome {
                 if let Some(ref tx) = self.accepted_sample_tx {
                     match canonicalize_fn_for_sample(&iteration_output.output_state) {
@@ -816,13 +864,16 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
                                 let _ = compact_and_toposort_in_place(&mut opt);
                                 match compute_fn_structural_digest(&opt) {
                                     Some(digest) => {
-                                        let _ = tx.send(AcceptedSampleMsg {
-                                            chain_no: params.chain_no,
-                                            global_iter,
-                                            digest,
-                                            cost: iteration_output.output_cost,
-                                            func: opt,
-                                        });
+                                        accepted_digest = Some(digest);
+                                        accepted_sample_sent = tx
+                                            .send(AcceptedSampleMsg {
+                                                chain_no: params.chain_no,
+                                                global_iter,
+                                                digest,
+                                                cost: iteration_output.output_cost,
+                                                func: opt,
+                                            })
+                                            .is_ok();
                                     }
                                     None => {
                                         log::warn!(
@@ -857,6 +908,34 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
                             );
                         }
                     }
+                }
+            }
+
+            if let Some(w) = trajectory_writer.as_mut() {
+                let rec = json!({
+                    "chain_no": params.chain_no,
+                    "role": format!("{:?}", params.role),
+                    "global_iter": global_iter,
+                    "temp": temp,
+                    "outcome": iteration_outcome_tag(&iteration_output.outcome),
+                    "best_updated": iteration_output.best_updated,
+                    "objective": format!("{:?}", self.objective),
+                    "metric": self.objective.metric(&iteration_output.output_cost),
+                    "pir_nodes": iteration_output.output_cost.pir_nodes,
+                    "g8r_nodes": iteration_output.output_cost.g8r_nodes,
+                    "g8r_depth": iteration_output.output_cost.g8r_depth,
+                    "oracle_time_micros": iteration_output.oracle_time_micros,
+                    "transform": iteration_output.transform.map(|k| format!("{:?}", k)),
+                    "transform_always_equivalent": iteration_output.transform_always_equivalent,
+                    "accepted_digest": accepted_digest.map(|d| hash_to_hex(&d)),
+                    "accepted_sample_sent": accepted_sample_sent,
+                });
+                // Best-effort: if trajectory logging fails, abort the segment. This should
+                // never happen and indicates an infrastructure issue (disk full, permissions,
+                // etc.).
+                writeln!(w, "{}", rec.to_string())?;
+                if global_iter % 1000 == 0 {
+                    w.flush()?;
                 }
             }
 
@@ -944,6 +1023,10 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
             }
         }
 
+        if let Some(mut w) = trajectory_writer {
+            w.flush()?;
+        }
+
         Ok(SegmentOutcome {
             end_state: current_fn,
             end_cost: current_cost,
@@ -981,6 +1064,7 @@ pub fn run_pir_mcmc_with_shared_best(
         accepted_sample_tx,
         shared_best,
         baseline_metric,
+        trajectory_dir: options.trajectory_dir.clone(),
     };
 
     let objective = options.objective;
@@ -1033,6 +1117,7 @@ mod tests {
             initial_temperature: 5.0,
             objective: Objective::Nodes,
             enable_formal_oracle: false,
+            trajectory_dir: None,
         };
 
         let res1 = run_pir_mcmc(ir_fn.clone(), opts.clone()).unwrap();
