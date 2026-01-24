@@ -1620,7 +1620,7 @@ fn main() {
                     clap::Arg::new("print_mappings")
                         .long("print-mappings")
                         .value_name("N")
-                        .help("Print the first N PIR nodes with proved bit mappings (default 20; 0 = no limit)")
+                        .help("Print PIR nodes with proved bit mappings (default: no limit; 0 = no limit)")
                         .action(clap::ArgAction::Set),
                 ),
         )

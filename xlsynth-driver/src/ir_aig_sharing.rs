@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use clap::ArgMatches;
@@ -11,11 +10,12 @@ use xlsynth_g8r::gate_builder::GateBuilderOptions;
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::ir_aig_sharing::{
-    get_equivalences, prove_equivalence_candidates_varisat, CandidateProofResult,
+    get_equivalences, prove_equivalence_candidates_varisat_streaming, CandidateProofResult,
     IrAigCandidateRhs, IrAigSharingOptions,
 };
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
+use xlsynth_pir::ir_utils::is_structural_payload;
 
 use crate::common::parse_bool_flag_or;
 use crate::toolchain_config::ToolchainConfig;
@@ -162,8 +162,8 @@ pub fn handle_ir_aig_sharing(matches: &ArgMatches, _config: &Option<ToolchainCon
         .unwrap_or(20);
     let print_mappings_limit = matches
         .get_one::<String>("print_mappings")
-        .map(|s| s.parse::<usize>().unwrap_or(20))
-        .unwrap_or(20);
+        .map(|s| s.parse::<usize>().unwrap_or(0))
+        .unwrap_or(0);
 
     let (pir_pkg, pir_fn) = match load_pir_top_fn(ir_path, top) {
         Ok(v) => v,
@@ -214,26 +214,201 @@ pub fn handle_ir_aig_sharing(matches: &ArgMatches, _config: &Option<ToolchainCon
         enable_rewrite_carry_out: false,
     };
 
-    let proofs =
-        match prove_equivalence_candidates_varisat(&pir_fn, &gate_fn, &candidates, &gatify_opts) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("ir-aig-sharing error: {}", e);
-                std::process::exit(2);
-            }
-        };
-
+    // Streaming proof + streaming per-node mapping output (in PIR topo order).
     let mut proved = 0usize;
     let mut disproved = 0usize;
     let mut skipped = 0usize;
-    for p in &proofs {
-        match &p.result {
-            CandidateProofResult::Proved => proved += 1,
-            CandidateProofResult::Disproved { .. } => disproved += 1,
-            CandidateProofResult::Skipped { .. } => skipped += 1,
+    let mut proof_index = 0usize;
+
+    // Coverage stats: "interesting" PIR bits vs detected/proved.
+    let mut interesting_total_bits = 0usize;
+    let mut interesting_total_nodes = 0usize;
+    for node_ref in pir_fn.node_refs() {
+        if node_ref.index == 0 {
+            continue; // reserved Nil
         }
+        if exclude_structural {
+            let node = pir_fn.get_node(node_ref);
+            if is_structural_payload(&node.payload) {
+                continue;
+            }
+        }
+        let ir::Type::Bits(w) = pir_fn.get_node_ty(node_ref) else {
+            continue;
+        };
+        interesting_total_nodes += 1;
+        interesting_total_bits += *w;
+    }
+    let mut detected_bits: std::collections::HashSet<(usize, usize)> =
+        std::collections::HashSet::new();
+    let mut detected_bits_const = 0usize;
+    let mut detected_bits_aig = 0usize;
+
+    // State for streaming node vector printing.
+    let mut current_node: Option<ir::NodeRef> = None;
+    let mut current_width: usize = 0;
+    let mut current_bits: Vec<Option<IrAigCandidateRhs>> = Vec::new(); // LSB=0 indexing
+    let mut current_any_proved = false;
+    let mut printed_nodes = 0usize;
+
+    let flush_current_node = |pir_fn: &ir::Fn,
+                              current_node: &mut Option<ir::NodeRef>,
+                              current_width: &mut usize,
+                              current_bits: &mut Vec<Option<IrAigCandidateRhs>>,
+                              current_any_proved: &mut bool,
+                              printed_nodes: &mut usize| {
+        let Some(nr) = *current_node else {
+            return;
+        };
+        if !*current_any_proved {
+            *current_node = None;
+            *current_width = 0;
+            current_bits.clear();
+            return;
+        }
+        let node_name = xlsynth_pir::ir::node_textual_id(pir_fn, nr);
+        let mut items: Vec<String> = Vec::with_capacity(*current_width);
+        for bit_index in (0..*current_width).rev() {
+            match current_bits.get(bit_index).copied().flatten() {
+                Some(rhs) => items.push(format_mapping_rhs(rhs)),
+                None => items.push("?".to_string()),
+            }
+        }
+        println!(
+            "{}: bits[{}] = [{}]",
+            node_name,
+            current_width,
+            items.join(", ")
+        );
+        *printed_nodes += 1;
+
+        *current_node = None;
+        *current_width = 0;
+        current_bits.clear();
+        *current_any_proved = false;
+    };
+
+    let proofs = match prove_equivalence_candidates_varisat_streaming(
+        &pir_fn,
+        &gate_fn,
+        &candidates,
+        &gatify_opts,
+        |p| {
+            // Proof stats.
+            match &p.result {
+                CandidateProofResult::Proved => proved += 1,
+                CandidateProofResult::Disproved { .. } => disproved += 1,
+                CandidateProofResult::Skipped { .. } => skipped += 1,
+            }
+
+            // Streaming proof lines (optional).
+            if print_limit != 0 && proof_index < print_limit {
+                match &p.result {
+                    CandidateProofResult::Proved => {
+                        println!(
+                            "proof[{}]: PROVED pir_text_id={} bit={} <-> {}",
+                            proof_index,
+                            p.candidate.pir_node_text_id,
+                            p.candidate.bit_index,
+                            format_mapping_rhs(p.candidate.rhs)
+                        );
+                    }
+                    CandidateProofResult::Disproved {
+                        counterexample_inputs,
+                    } => {
+                        println!(
+                            "proof[{}]: DISPROVED pir_text_id={} bit={} <-> {} cex_inputs={:?}",
+                            proof_index,
+                            p.candidate.pir_node_text_id,
+                            p.candidate.bit_index,
+                            format_mapping_rhs(p.candidate.rhs),
+                            counterexample_inputs
+                        );
+                    }
+                    CandidateProofResult::Skipped { reason } => {
+                        println!(
+                            "proof[{}]: SKIPPED pir_text_id={} bit={} reason={}",
+                            proof_index,
+                            p.candidate.pir_node_text_id,
+                            p.candidate.bit_index,
+                            reason
+                        );
+                    }
+                }
+            }
+            proof_index += 1;
+
+            // Streaming per-node bitvector lines (optional).
+            if print_mappings_limit != 0 && printed_nodes >= print_mappings_limit {
+                return;
+            }
+
+            let nr = p.candidate.pir_node_ref;
+            let ty = pir_fn.get_node_ty(nr);
+            let ir::Type::Bits(w) = ty else {
+                return;
+            };
+            if exclude_structural && is_structural_payload(&pir_fn.get_node(nr).payload) {
+                return;
+            }
+
+            // If we moved to a new node in the candidate stream, flush the previous.
+            if current_node.map(|x| x.index) != Some(nr.index) {
+                flush_current_node(
+                    &pir_fn,
+                    &mut current_node,
+                    &mut current_width,
+                    &mut current_bits,
+                    &mut current_any_proved,
+                    &mut printed_nodes,
+                );
+
+                current_node = Some(nr);
+                current_width = *w;
+                current_bits = vec![None; *w];
+                current_any_proved = false;
+            }
+
+            if let CandidateProofResult::Proved = p.result {
+                // Coverage bookkeeping: count each (node,bit) once.
+                if detected_bits.insert((nr.index, p.candidate.bit_index)) {
+                    match p.candidate.rhs {
+                        IrAigCandidateRhs::Const(_) => detected_bits_const += 1,
+                        IrAigCandidateRhs::AigOperand(_) => detected_bits_aig += 1,
+                    }
+                }
+
+                current_any_proved = true;
+                let idx = p.candidate.bit_index;
+                if idx < current_bits.len() {
+                    current_bits[idx] = Some(match current_bits[idx] {
+                        Some(existing) => choose_preferred_rhs(existing, p.candidate.rhs),
+                        None => p.candidate.rhs,
+                    });
+                }
+            }
+        },
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("ir-aig-sharing error: {}", e);
+            std::process::exit(2);
+        }
+    };
+
+    // Flush last node in the stream.
+    if print_mappings_limit == 0 || printed_nodes < print_mappings_limit {
+        flush_current_node(
+            &pir_fn,
+            &mut current_node,
+            &mut current_width,
+            &mut current_bits,
+            &mut current_any_proved,
+            &mut printed_nodes,
+        );
     }
 
+    // Summary line at the end (since proving/mappings may be streamed).
     println!(
         "ir-aig-sharing: samples={} seed={} candidates={} proved={} disproved={} skipped={}",
         sample_count,
@@ -243,95 +418,15 @@ pub fn handle_ir_aig_sharing(matches: &ArgMatches, _config: &Option<ToolchainCon
         disproved,
         skipped
     );
-
-    for (i, p) in proofs.iter().take(print_limit).enumerate() {
-        match &p.result {
-            CandidateProofResult::Proved => {
-                println!(
-                    "proof[{}]: PROVED pir_text_id={} bit={} <-> {}",
-                    i,
-                    p.candidate.pir_node_text_id,
-                    p.candidate.bit_index,
-                    format_mapping_rhs(p.candidate.rhs)
-                );
-            }
-            CandidateProofResult::Disproved {
-                counterexample_inputs,
-            } => {
-                println!(
-                    "proof[{}]: DISPROVED pir_text_id={} bit={} <-> {} cex_inputs={:?}",
-                    i,
-                    p.candidate.pir_node_text_id,
-                    p.candidate.bit_index,
-                    format_mapping_rhs(p.candidate.rhs),
-                    counterexample_inputs
-                );
-            }
-            CandidateProofResult::Skipped { reason } => {
-                println!(
-                    "proof[{}]: SKIPPED pir_text_id={} bit={} reason={}",
-                    i, p.candidate.pir_node_text_id, p.candidate.bit_index, reason
-                );
-            }
-        }
-    }
-
-    // --- Mapping-style output: PIR nodes in topo order, bits MSB..LSB.
-    //
-    // Build a deterministic map from (pir node ref, bit_index_lsb0) -> aig operand
-    // using only proved candidates.
-    let mut proved_map: HashMap<(usize, usize), IrAigCandidateRhs> = HashMap::new();
-    for p in &proofs {
-        if let CandidateProofResult::Proved = p.result {
-            let key = (p.candidate.pir_node_ref.index, p.candidate.bit_index);
-            proved_map
-                .entry(key)
-                .and_modify(|existing| {
-                    *existing = choose_preferred_rhs(*existing, p.candidate.rhs);
-                })
-                .or_insert(p.candidate.rhs);
-        }
-    }
-
-    let mut printed_nodes = 0usize;
-    for node_ref in pir_fn.node_refs() {
-        if node_ref.index == 0 {
-            continue; // reserved Nil
-        }
-        if print_mappings_limit != 0 && printed_nodes >= print_mappings_limit {
-            break;
-        }
-
-        let ty = pir_fn.get_node_ty(node_ref);
-        let ir::Type::Bits(w) = ty else {
-            continue;
-        };
-
-        // Only emit nodes that have at least one proved bit mapping.
-        let mut any = false;
-        for bit in 0..*w {
-            if proved_map.contains_key(&(node_ref.index, bit)) {
-                any = true;
-                break;
-            }
-        }
-        if !any {
-            continue;
-        }
-
-        let node_name = xlsynth_pir::ir::node_textual_id(&pir_fn, node_ref);
-
-        let mut items: Vec<String> = Vec::with_capacity(*w);
-        // Print MSB..LSB, while proved_map uses LSB=0 indexing.
-        for bit_index in (0..*w).rev() {
-            if let Some(rhs) = proved_map.get(&(node_ref.index, bit_index)) {
-                items.push(format_mapping_rhs(*rhs));
-            } else {
-                items.push("?".to_string());
-            }
-        }
-        println!("{}: bits[{}] = [{}]", node_name, w, items.join(", "));
-        printed_nodes += 1;
+    if interesting_total_bits != 0 {
+        println!(
+            "ir-aig-sharing coverage: detected_bits={}/{} (aig={} const={}) interesting_nodes={}",
+            detected_bits.len(),
+            interesting_total_bits,
+            detected_bits_aig,
+            detected_bits_const,
+            interesting_total_nodes
+        );
     }
 
     if disproved != 0 {

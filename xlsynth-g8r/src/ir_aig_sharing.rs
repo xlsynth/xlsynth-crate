@@ -365,6 +365,29 @@ pub fn prove_equivalence_candidates_varisat(
     candidates: &[IrAigEquivalenceCandidate],
     gatify_options: &GatifyOptions,
 ) -> Result<Vec<CandidateProof>, String> {
+    prove_equivalence_candidates_varisat_streaming(
+        pir_fn,
+        gate_fn,
+        candidates,
+        gatify_options,
+        |_p| {},
+    )
+}
+
+/// Streaming variant of `prove_equivalence_candidates_varisat`.
+///
+/// Calls `on_proof` as each candidate is proved/disproved/skipped, in the same
+/// order as `candidates`.
+pub fn prove_equivalence_candidates_varisat_streaming<F>(
+    pir_fn: &ir::Fn,
+    gate_fn: &GateFn,
+    candidates: &[IrAigEquivalenceCandidate],
+    gatify_options: &GatifyOptions,
+    mut on_proof: F,
+) -> Result<Vec<CandidateProof>, String>
+where
+    F: FnMut(&CandidateProof),
+{
     // Gatify PIR once to get a GateFn and a per-node lowering map.
     let gatify_output = gatify(pir_fn, gatify_options.clone())?;
     let pir_gate_fn = gatify_output.gate_fn;
@@ -426,7 +449,7 @@ pub fn prove_equivalence_candidates_varisat(
     let mut results: Vec<CandidateProof> = Vec::with_capacity(candidates.len());
     for cand in candidates {
         let Some(pir_bv) = lowering_map.get(&cand.pir_node_ref) else {
-            results.push(CandidateProof {
+            let proof = CandidateProof {
                 candidate: cand.clone(),
                 result: CandidateProofResult::Skipped {
                     reason: format!(
@@ -434,11 +457,13 @@ pub fn prove_equivalence_candidates_varisat(
                         cand.pir_node_text_id
                     ),
                 },
-            });
+            };
+            on_proof(&proof);
+            results.push(proof);
             continue;
         };
         if cand.bit_index >= pir_bv.get_bit_count() {
-            results.push(CandidateProof {
+            let proof = CandidateProof {
                 candidate: cand.clone(),
                 result: CandidateProofResult::Skipped {
                     reason: format!(
@@ -448,7 +473,9 @@ pub fn prove_equivalence_candidates_varisat(
                         cand.pir_node_text_id
                     ),
                 },
-            });
+            };
+            on_proof(&proof);
+            results.push(proof);
             continue;
         }
 
@@ -468,10 +495,12 @@ pub fn prove_equivalence_candidates_varisat(
             .solve()
             .map_err(|e| format!("varisat solve error: {e:?}"))?;
         if !sat {
-            results.push(CandidateProof {
+            let proof = CandidateProof {
                 candidate: cand.clone(),
                 result: CandidateProofResult::Proved,
-            });
+            };
+            on_proof(&proof);
+            results.push(proof);
             continue;
         }
 
@@ -489,12 +518,14 @@ pub fn prove_equivalence_candidates_varisat(
         }
 
         let cex_inputs: Vec<IrBits> = gate_fn.map_to_inputs(input_assignment);
-        results.push(CandidateProof {
+        let proof = CandidateProof {
             candidate: cand.clone(),
             result: CandidateProofResult::Disproved {
                 counterexample_inputs: cex_inputs,
             },
-        });
+        };
+        on_proof(&proof);
+        results.push(proof);
     }
 
     Ok(results)
