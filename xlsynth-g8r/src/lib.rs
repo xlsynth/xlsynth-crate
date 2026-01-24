@@ -8,6 +8,7 @@ pub mod aig;
 pub mod aig_serdes;
 pub mod aig_sim;
 pub mod gatify;
+pub mod ir_aig_sharing;
 
 pub mod check_equivalence;
 pub mod cut_db;
