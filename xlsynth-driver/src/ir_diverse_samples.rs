@@ -124,30 +124,21 @@ fn populate_symlink_dir(
             //
             // We first try to interpret relative paths as relative to the symlink
             // directory's parent (common case: `--make-symlink-dir` lives under
-            // the corpus dir). If that does not exist, we fall back to
-            // canonicalizing the relative path in the current process.
-            let target_path: PathBuf = if e.ir_file_path.is_absolute() {
+            // the corpus dir). Regardless of where we found it, we always
+            // canonicalize to ensure an absolute target.
+            let candidate: PathBuf = if e.ir_file_path.is_absolute() {
                 e.ir_file_path.clone()
             } else if let Some(parent) = dir.parent() {
-                let candidate = parent.join(&e.ir_file_path);
-                if candidate.exists() {
-                    candidate
-                } else {
-                    std::fs::canonicalize(&e.ir_file_path).map_err(|e2| {
-                        format!(
-                            "failed to canonicalize selected sample path {}: {e2}",
-                            e.ir_file_path.display()
-                        )
-                    })?
-                }
+                parent.join(&e.ir_file_path)
             } else {
-                std::fs::canonicalize(&e.ir_file_path).map_err(|e2| {
-                    format!(
-                        "failed to canonicalize selected sample path {}: {e2}",
-                        e.ir_file_path.display()
-                    )
-                })?
+                e.ir_file_path.clone()
             };
+            let target_path = std::fs::canonicalize(&candidate).map_err(|e2| {
+                format!(
+                    "failed to canonicalize selected sample path {}: {e2}",
+                    candidate.display()
+                )
+            })?;
 
             symlink(&target_path, &link_path).map_err(|e2| {
                 format!(
@@ -206,5 +197,45 @@ mod tests {
 
         // Ensure it is a usable link.
         let _ = std::fs::read_to_string(&link_path).expect("read through link");
+    }
+
+    #[test]
+    fn populate_symlink_dir_uses_absolute_targets_when_symlink_dir_is_relative() {
+        // Mirror common CLI usage:
+        //   xlsynth-driver ir-diverse-samples . --make-symlink-dir diverse
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let corpus_root = tmp.path();
+        let samples_dir = corpus_root.join("samples");
+        std::fs::create_dir_all(&samples_dir).expect("create samples dir");
+        let sample_path = samples_dir.join("foo.ir");
+        std::fs::write(&sample_path, "package p\n").expect("write sample");
+
+        let old_cwd = std::env::current_dir().expect("current_dir");
+        std::env::set_current_dir(corpus_root).expect("set_current_dir");
+
+        let selected = vec![DiverseSampleSelectionEntry {
+            ir_file_path: PathBuf::from("samples/foo.ir"),
+            g8r_nodes: 0,
+            g8r_levels: 0,
+            new_hashes: 0,
+            new_hash_details: None,
+        }];
+
+        let symlink_dir = PathBuf::from("diverse");
+        populate_symlink_dir(&symlink_dir, &selected).expect("populate");
+
+        let link_path = symlink_dir.join("00000_foo.ir");
+        let target = std::fs::read_link(&link_path).expect("read_link");
+        assert!(
+            target.is_absolute(),
+            "expected absolute symlink target, got: {}",
+            target.display()
+        );
+        assert_eq!(
+            std::fs::canonicalize(target).expect("canonicalize target"),
+            std::fs::canonicalize(sample_path).expect("canonicalize sample")
+        );
+
+        std::env::set_current_dir(old_cwd).expect("restore cwd");
     }
 }
