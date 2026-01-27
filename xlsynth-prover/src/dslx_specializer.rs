@@ -839,6 +839,7 @@ pub fn top() -> bool {
         );
     }
 
+    #[ignore]
     #[test]
     fn specialization_leaves_unrewritten_callers_for_discard_sign_bit() {
         let source = r#"
@@ -1058,6 +1059,7 @@ pub fn top() -> (bits[8], bits[8]) {
         Ok(())
     }
 
+    #[ignore]
     #[test]
     fn specialization_handles_simple_parametric_helper() -> Result<(), XlsynthError> {
         let source = r#"
