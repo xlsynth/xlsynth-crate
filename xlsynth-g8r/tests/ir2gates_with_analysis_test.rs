@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth_g8r::aig::get_summary_stats::get_summary_stats;
+use xlsynth_g8r::aig::get_summary_stats::{get_aig_stats, get_summary_stats};
 use xlsynth_g8r::gatify::ir2gate;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::ir2gates;
@@ -141,4 +141,38 @@ top fn f(x: bits[32] id=1, y: bits[7] id=2, z: bits[32] id=3) -> bits[1] {
     let stats_xy = get_summary_stats(&out_xy.gatify_output.gate_fn);
     let stats_yx = get_summary_stats(&out_yx.gatify_output.gate_fn);
     assert_eq!(stats_xy, stats_yx);
+}
+
+#[test]
+fn test_ir2gates_ugt_against_ir_literal_threshold_shape() {
+    // Historical reference baseline (tool-independent):
+    // - For this cone we expect and=8 lev=6.
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = "package bool_cone
+
+top fn cone(leaf_94: bits[9] id=1) -> bits[1] {
+  literal.2: bits[9] = literal(value=72, id=2)
+  ret ugt.3: bits[1] = ugt(leaf_94, literal.2, id=3)
+}
+";
+
+    let out = ir2gates::ir2gates_from_ir_text(
+        ir_text,
+        None,
+        ir2gates::Ir2GatesOptions {
+            fold: true,
+            hash: true,
+            check_equivalence: false,
+            enable_rewrite_carry_out: false,
+            adder_mapping: AdderMapping::default(),
+            mul_adder_mapping: None,
+            aug_opt: Default::default(),
+        },
+    )
+    .unwrap();
+
+    let stats = get_aig_stats(&out.gatify_output.gate_fn);
+    assert_eq!(stats.and_nodes, 8);
+    assert_eq!(stats.max_depth, 6);
 }
