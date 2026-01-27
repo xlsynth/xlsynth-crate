@@ -1,4 +1,8 @@
 {
+  "0.27.0": {
+    "xlsynth_release_version": "0.33.0",
+    "crate_release_datetime": "2026-01-27 07:58:36 PST"
+  },
   "0.26.0": {
     "xlsynth_release_version": "0.32.0",
     "crate_release_datetime": "2026-01-18 20:06:05 PST"
