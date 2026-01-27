@@ -1439,6 +1439,125 @@ fn try_simplify_cmp_literal_rhs(
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct UcmpConstResult {
+    lt: AigOperand,
+    gt: AigOperand,
+    eq: AigOperand,
+}
+
+fn gatify_eq_literal_rhs(
+    gb: &mut GateBuilder,
+    lhs_bits: &AigBitVector,
+    rhs_bits: &xlsynth::IrBits,
+) -> AigOperand {
+    let bit_count = lhs_bits.get_bit_count();
+    assert_eq!(
+        rhs_bits.get_bit_count(),
+        bit_count,
+        "eq literal rhs width mismatch"
+    );
+    assert!(bit_count > 0, "eq requires non-zero width");
+
+    let mut terms: Vec<AigOperand> = Vec::with_capacity(bit_count);
+    for i in 0..bit_count {
+        let lhs = *lhs_bits.get_lsb(i);
+        let rhs = rhs_bits.get_bit(i).unwrap();
+        terms.push(if rhs { lhs } else { gb.add_not(lhs) });
+    }
+    gb.add_and_nary(&terms, ReductionKind::Tree)
+}
+
+/// Builds `lt`/`gt` for `lhs_bits` compared to a constant RHS using a run-based
+/// factorization over the constant bits (LSB-first).
+///
+/// This avoids building N separate "prefix equality" terms that must then be
+/// OR'd together; instead it produces a nested OR/AND form whose AIG AND-count
+/// is close to what ABC tends to find for threshold predicates.
+fn gatify_ucmp_const_threshold(
+    gb: &mut GateBuilder,
+    lhs_bits: &AigBitVector,
+    rhs_bits: &xlsynth::IrBits,
+) -> UcmpConstResult {
+    let bit_count = lhs_bits.get_bit_count();
+    assert_eq!(
+        rhs_bits.get_bit_count(),
+        bit_count,
+        "ucmp literal rhs width mismatch"
+    );
+    assert!(bit_count > 0, "ucmp requires non-zero width");
+
+    // Equality is simply the conjunction of the per-bit equality literals.
+    let eq = gatify_eq_literal_rhs(gb, lhs_bits, rhs_bits);
+
+    // Build `gt` and `lt` with LSB-first recurrence, compressed over runs of
+    // identical RHS bits to allow balanced trees within runs.
+    let mut gt = gb.get_false();
+    let mut lt = gb.get_false();
+
+    let mut i = 0usize;
+    while i < bit_count {
+        let rhs_bit = rhs_bits.get_bit(i).unwrap();
+        let mut j = i + 1;
+        while j < bit_count && rhs_bits.get_bit(j).unwrap() == rhs_bit {
+            j += 1;
+        }
+        // Run is bits [i, j).
+        let run_len = j - i;
+        let mut lhs_run: Vec<AigOperand> = Vec::with_capacity(run_len);
+        let mut not_lhs_run: Vec<AigOperand> = Vec::with_capacity(run_len);
+        for k in i..j {
+            let lhs = *lhs_bits.get_lsb(k);
+            lhs_run.push(lhs);
+            not_lhs_run.push(gb.add_not(lhs));
+        }
+
+        if rhs_bit {
+            // For RHS=1 bits:
+            // - gt recurrence: gt = (AND over lhs_run) & gt
+            // - lt recurrence: lt = (OR over !lhs_run) | lt
+            let run_and = gb.add_and_nary(&lhs_run, ReductionKind::Tree);
+            gt = gb.add_and_binary(run_and, gt);
+
+            let run_or = gb.add_or_nary(&not_lhs_run, ReductionKind::Tree);
+            lt = gb.add_or_binary(run_or, lt);
+        } else {
+            // For RHS=0 bits:
+            // - gt recurrence: gt = (OR over lhs_run) | gt
+            // - lt recurrence: lt = (AND over !lhs_run) & lt
+            let run_or = gb.add_or_nary(&lhs_run, ReductionKind::Tree);
+            gt = gb.add_or_binary(run_or, gt);
+
+            let run_and = gb.add_and_nary(&not_lhs_run, ReductionKind::Tree);
+            lt = gb.add_and_binary(run_and, lt);
+        }
+
+        i = j;
+    }
+
+    UcmpConstResult { lt, gt, eq }
+}
+
+fn try_gatify_ucmp_literal_rhs_threshold(
+    gb: &mut GateBuilder,
+    binop: ir::Binop,
+    lhs_bits: &AigBitVector,
+    rhs_bits: &xlsynth::IrBits,
+) -> Option<AigOperand> {
+    match binop {
+        ir::Binop::Ult | ir::Binop::Ule | ir::Binop::Ugt | ir::Binop::Uge => {}
+        _ => return None,
+    }
+    let s = gatify_ucmp_const_threshold(gb, lhs_bits, rhs_bits);
+    Some(match binop {
+        ir::Binop::Ult => s.lt,
+        ir::Binop::Ugt => s.gt,
+        ir::Binop::Ule => gb.add_or_binary(s.lt, s.eq),
+        ir::Binop::Uge => gb.add_or_binary(s.gt, s.eq),
+        _ => unreachable!(),
+    })
+}
+
 fn gatify_ucmp_fallback(
     gb: &mut GateBuilder,
     text_id: usize,
@@ -1497,6 +1616,11 @@ fn gatify_cmp_with_optional_literal_rhs(
             .expect("cmp rhs should be present (normalized)");
         if let Some(gate) =
             try_simplify_cmp_literal_rhs(gb, n.binop, &lhs_bits, &rhs_bits_vec, &n.rhs_bits)
+        {
+            return gate;
+        }
+        if let Some(gate) =
+            try_gatify_ucmp_literal_rhs_threshold(gb, n.binop, &lhs_bits, &n.rhs_bits)
         {
             return gate;
         }
