@@ -31,6 +31,7 @@ fn ir2opt(
             AugOptOptions {
                 enable: true,
                 rounds: 1,
+                ..Default::default()
             },
         )
         .unwrap();

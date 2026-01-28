@@ -56,6 +56,7 @@ fn dslx2ir(
                     AugOptOptions {
                         enable: true,
                         rounds: 1,
+                        ..Default::default()
                     },
                 )
                 .unwrap();
@@ -111,6 +112,7 @@ fn dslx2ir(
                     AugOptOptions {
                         enable: true,
                         rounds: 1,
+                        ..Default::default()
                     },
                 )
                 .unwrap()

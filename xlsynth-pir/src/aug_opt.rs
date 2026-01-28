@@ -14,10 +14,20 @@ use crate::ir_parser;
 use crate::ir_utils;
 use xlsynth::IrValue;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AugOptMode {
+    /// The default "opt sandwich":
+    /// libxls opt -> PIR rewrites -> libxls opt.
+    Sandwich,
+    /// Apply PIR rewrites only (no libxls optimization passes).
+    PirOnly,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct AugOptOptions {
     pub enable: bool,
     pub rounds: usize,
+    pub mode: AugOptMode,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +47,7 @@ impl Default for AugOptOptions {
         Self {
             enable: false,
             rounds: 1,
+            mode: AugOptMode::Sandwich,
         }
     }
 }
@@ -65,70 +76,117 @@ pub fn run_aug_opt_over_ir_text_with_stats(
     // Fail fast with a clear error before libxls parsing.
     verify_no_extension_ops_in_ir_text(ir_text)?;
 
-    // Start by letting libxls do its normal canonicalization.
-    let mut cur_pkg = xlsynth::IrPackage::parse_ir(ir_text, None)
-        .map_err(|e| format!("aug_opt: xlsynth parse_ir failed: {e}"))?;
     let top_name = top
         .ok_or_else(|| "aug_opt: top is required".to_string())?
         .to_string();
-    cur_pkg
-        .set_top_by_name(&top_name)
-        .map_err(|e| format!("aug_opt: set_top_by_name('{top_name}') failed: {e}"))?;
+    match options.mode {
+        AugOptMode::Sandwich => {
+            // Start by letting libxls do its normal canonicalization.
+            let mut cur_pkg = xlsynth::IrPackage::parse_ir(ir_text, None)
+                .map_err(|e| format!("aug_opt: xlsynth parse_ir failed: {e}"))?;
+            cur_pkg
+                .set_top_by_name(&top_name)
+                .map_err(|e| format!("aug_opt: set_top_by_name('{top_name}') failed: {e}"))?;
 
-    // One initial opt pass before the co-recursive rounds.
-    cur_pkg = xlsynth::optimize_ir(&cur_pkg, &top_name)
-        .map_err(|e| format!("aug_opt: optimize_ir initial failed: {e}"))?;
+            // One initial opt pass before the co-recursive rounds.
+            cur_pkg = xlsynth::optimize_ir(&cur_pkg, &top_name)
+                .map_err(|e| format!("aug_opt: optimize_ir initial failed: {e}"))?;
 
-    let mut total_rewrites = 0usize;
-    for _round in 0..options.rounds {
-        let cur_text = cur_pkg.to_string();
+            let mut total_rewrites = 0usize;
+            for _round in 0..options.rounds {
+                let cur_text = cur_pkg.to_string();
+                let (lowered_text, rewrites_in_round) =
+                    apply_pir_rewrites_to_ir_text(&cur_text, &top_name)?;
+                total_rewrites = total_rewrites.saturating_add(rewrites_in_round);
 
-        // Parse with PIR, apply basis-only rewrites to the top function.
-        let mut pir_parser = ir_parser::Parser::new(&cur_text);
-        let mut pir_pkg = pir_parser
-            .parse_and_validate_package()
-            .map_err(|e| format!("aug_opt: PIR parse/validate failed: {e}"))?;
-
-        let top_fn = pir_pkg
-            .get_fn(&top_name)
-            .ok_or_else(|| format!("aug_opt: PIR package missing top fn '{top_name}'"))?
-            .clone();
-
-        let (rewritten_top, rewrites_in_round) = apply_basis_rewrites_to_fn(&top_fn);
-        total_rewrites = total_rewrites.saturating_add(rewrites_in_round);
-
-        // Swap the rewritten top back into the PIR package.
-        for member in pir_pkg.members.iter_mut() {
-            match member {
-                ir::PackageMember::Function(f) if f.name == top_name => {
-                    *f = rewritten_top.clone();
-                }
-                ir::PackageMember::Block { func, .. } if func.name == top_name => {
-                    *func = rewritten_top.clone();
-                }
-                _ => {}
+                let mut next_pkg = xlsynth::IrPackage::parse_ir(&lowered_text, None)
+                    .map_err(|e| format!("aug_opt: xlsynth parse_ir (post-rewrite) failed: {e}"))?;
+                next_pkg
+                    .set_top_by_name(&top_name)
+                    .map_err(|e| format!("aug_opt: set_top_by_name('{top_name}') failed: {e}"))?;
+                cur_pkg = xlsynth::optimize_ir(&next_pkg, &top_name)
+                    .map_err(|e| format!("aug_opt: optimize_ir post-rewrite failed: {e}"))?;
             }
+
+            Ok(AugOptRunResult {
+                output_text: cur_pkg.to_string(),
+                total_rewrites,
+            })
         }
+        AugOptMode::PirOnly => {
+            let mut cur_text = ir_text.to_string();
+            let mut total_rewrites = 0usize;
 
-        // Verify we did not introduce extension ops (basis-only contract).
-        verify_no_extension_ops_in_package(&pir_pkg)?;
+            // Even with zero rounds, we still want to validate the requested top
+            // and ensure the emitted text marks it as top.
+            if options.rounds == 0 {
+                let mut pir_parser = ir_parser::Parser::new(&cur_text);
+                let mut pir_pkg = pir_parser
+                    .parse_and_validate_package()
+                    .map_err(|e| format!("aug_opt: PIR parse/validate failed: {e}"))?;
+                pir_pkg
+                    .get_fn(&top_name)
+                    .ok_or_else(|| format!("aug_opt: PIR package missing top fn '{top_name}'"))?;
+                pir_pkg.set_top_fn(&top_name).map_err(|e| {
+                    format!("aug_opt: internal error: set_top_fn('{top_name}') failed: {e}")
+                })?;
+                return Ok(AugOptRunResult {
+                    output_text: pir_pkg.to_string(),
+                    total_rewrites: 0,
+                });
+            }
 
-        // Emit basis XLS IR text and hand it back to libxls.
-        let lowered_text = pir_pkg.to_string();
+            for _round in 0..options.rounds {
+                let (next_text, rewrites_in_round) =
+                    apply_pir_rewrites_to_ir_text(&cur_text, &top_name)?;
+                total_rewrites = total_rewrites.saturating_add(rewrites_in_round);
+                cur_text = next_text;
+            }
+            Ok(AugOptRunResult {
+                output_text: cur_text,
+                total_rewrites,
+            })
+        }
+    }
+}
 
-        let mut next_pkg = xlsynth::IrPackage::parse_ir(&lowered_text, None)
-            .map_err(|e| format!("aug_opt: xlsynth parse_ir (post-rewrite) failed: {e}"))?;
-        next_pkg
-            .set_top_by_name(&top_name)
-            .map_err(|e| format!("aug_opt: set_top_by_name('{top_name}') failed: {e}"))?;
-        cur_pkg = xlsynth::optimize_ir(&next_pkg, &top_name)
-            .map_err(|e| format!("aug_opt: optimize_ir post-rewrite failed: {e}"))?;
+fn apply_pir_rewrites_to_ir_text(ir_text: &str, top_name: &str) -> Result<(String, usize), String> {
+    // Parse with PIR, apply basis-only rewrites to the top function.
+    let mut pir_parser = ir_parser::Parser::new(ir_text);
+    let mut pir_pkg = pir_parser
+        .parse_and_validate_package()
+        .map_err(|e| format!("aug_opt: PIR parse/validate failed: {e}"))?;
+
+    let top_fn = pir_pkg
+        .get_fn(top_name)
+        .ok_or_else(|| format!("aug_opt: PIR package missing top fn '{top_name}'"))?
+        .clone();
+
+    let (rewritten_top, rewrites_in_round) = apply_basis_rewrites_to_fn(&top_fn);
+
+    // Swap the rewritten top back into the PIR package.
+    for member in pir_pkg.members.iter_mut() {
+        match member {
+            ir::PackageMember::Function(f) if f.name == top_name => {
+                *f = rewritten_top.clone();
+            }
+            ir::PackageMember::Block { func, .. } if func.name == top_name => {
+                *func = rewritten_top.clone();
+            }
+            _ => {}
+        }
     }
 
-    Ok(AugOptRunResult {
-        output_text: cur_pkg.to_string(),
-        total_rewrites,
-    })
+    // Preserve the caller-supplied top in emitted IR text (especially for
+    // aug-opt-only mode, where downstream tools may rely on the `top` marker).
+    pir_pkg
+        .set_top_fn(top_name)
+        .map_err(|e| format!("aug_opt: internal error: set_top_fn('{top_name}') failed: {e}"))?;
+
+    // Verify we did not introduce extension ops (basis-only contract).
+    verify_no_extension_ops_in_package(&pir_pkg)?;
+
+    Ok((pir_pkg.to_string(), rewrites_in_round))
 }
 
 fn verify_no_extension_ops_in_ir_text(ir_text: &str) -> Result<(), String> {
@@ -380,6 +438,7 @@ top fn cone(leaf_22: bits[1] id=1, leaf_36: bits[8] id=2, leaf_37: bits[8] id=3)
             AugOptOptions {
                 enable: true,
                 rounds: 1,
+                mode: AugOptMode::Sandwich,
             },
         )
         .expect("aug opt");
@@ -419,6 +478,7 @@ top fn f(x: bits[8] id=1, s: bits[4] id=2) -> bits[1] {
             AugOptOptions {
                 enable: true,
                 rounds: 1,
+                mode: AugOptMode::Sandwich,
             },
         )
         .expect("aug opt");
@@ -430,5 +490,144 @@ top fn f(x: bits[8] id=1, s: bits[4] id=2) -> bits[1] {
             &[8, 4],
             /* random_samples= */ 2000,
         );
+    }
+
+    #[test]
+    fn aug_opt_aug_opt_only_rewrites_without_liblxls_dce() {
+        let ir_text = r#"package bool_cone
+
+top fn cone(leaf_22: bits[1] id=1, leaf_36: bits[8] id=2, leaf_37: bits[8] id=3) -> bits[1] {
+  sel.4: bits[8] = sel(leaf_22, cases=[leaf_36, leaf_37], id=4)
+  literal.5: bits[8] = literal(value=1, id=5)
+  ne.6: bits[1] = ne(sel.4, literal.5, id=6)
+  ret nor.7: bits[1] = nor(leaf_22, ne.6, id=7)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt aug-opt-only");
+
+        // In aug-opt-only mode, we still expect the Nor rewrite to have fired...
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+        let has_nor = f
+            .nodes
+            .iter()
+            .any(|n| matches!(n.payload, NodePayload::Nary(NaryOp::Nor, _)));
+        assert!(!has_nor, "expected nor to be rewritten; got:\n{}", out_text);
+
+        // ...but we do not expect libxls DCE to have removed the Sel.
+        let has_sel = f
+            .nodes
+            .iter()
+            .any(|n| matches!(n.payload, NodePayload::Sel { .. }));
+        assert!(
+            has_sel,
+            "expected sel to remain without libxls opt; got:\n{}",
+            out_text
+        );
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "cone",
+            &[1, 8, 8],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    #[test]
+    fn aug_opt_aug_opt_only_preserves_requested_top_in_output() {
+        let ir_text = r#"package top_swap
+
+top fn a(x: bits[1] id=1) -> bits[1] {
+  ret identity.2: bits[1] = identity(x, id=2)
+}
+
+fn b(y: bits[1] id=10) -> bits[1] {
+  ret identity.11: bits[1] = identity(y, id=11)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("b"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt aug-opt-only");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        match &pkg.top {
+            Some((name, ir::MemberType::Function)) => assert_eq!(name, "b"),
+            other => panic!("expected top fn 'b', got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn aug_opt_aug_opt_only_rounds_zero_sets_requested_top_in_output() {
+        let ir_text = r#"package top_swap_zero_rounds
+
+top fn a(x: bits[1] id=1) -> bits[1] {
+  ret identity.2: bits[1] = identity(x, id=2)
+}
+
+fn b(y: bits[1] id=10) -> bits[1] {
+  ret identity.11: bits[1] = identity(y, id=11)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("b"),
+            AugOptOptions {
+                enable: true,
+                rounds: 0,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt aug-opt-only rounds=0");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        match &pkg.top {
+            Some((name, ir::MemberType::Function)) => assert_eq!(name, "b"),
+            other => panic!("expected top fn 'b', got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn aug_opt_aug_opt_only_rounds_zero_invalid_top_is_error() {
+        let ir_text = r#"package top_swap_zero_rounds_invalid_top
+
+top fn a(x: bits[1] id=1) -> bits[1] {
+  ret identity.2: bits[1] = identity(x, id=2)
+}
+"#;
+
+        let err = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("nope"),
+            AugOptOptions {
+                enable: true,
+                rounds: 0,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect_err("expected invalid top to error");
+        assert_eq!(err, "aug_opt: PIR package missing top fn 'nope'");
     }
 }

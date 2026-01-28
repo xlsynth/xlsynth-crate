@@ -37,6 +37,7 @@ fuzz_target!(|sample: FuzzSample| {
         AugOptOptions {
             enable: true,
             rounds: 1,
+            ..Default::default()
         },
     ) {
         Ok(result) => result,

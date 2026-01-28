@@ -85,6 +85,7 @@ fn ir2pipeline(
                     AugOptOptions {
                         enable: true,
                         rounds: 1,
+                        ..Default::default()
                     },
                 )
                 .expect("aug_opt should succeed")
@@ -145,6 +146,7 @@ fn ir2pipeline(
                     AugOptOptions {
                         enable: true,
                         rounds: 1,
+                        ..Default::default()
                     },
                 )
                 .expect("aug_opt should succeed");
