@@ -116,6 +116,26 @@ pub fn run_aug_opt_over_ir_text_with_stats(
         AugOptMode::PirOnly => {
             let mut cur_text = ir_text.to_string();
             let mut total_rewrites = 0usize;
+
+            // Even with zero rounds, we still want to validate the requested top
+            // and ensure the emitted text marks it as top.
+            if options.rounds == 0 {
+                let mut pir_parser = ir_parser::Parser::new(&cur_text);
+                let mut pir_pkg = pir_parser
+                    .parse_and_validate_package()
+                    .map_err(|e| format!("aug_opt: PIR parse/validate failed: {e}"))?;
+                pir_pkg
+                    .get_fn(&top_name)
+                    .ok_or_else(|| format!("aug_opt: PIR package missing top fn '{top_name}'"))?;
+                pir_pkg.set_top_fn(&top_name).map_err(|e| {
+                    format!("aug_opt: internal error: set_top_fn('{top_name}') failed: {e}")
+                })?;
+                return Ok(AugOptRunResult {
+                    output_text: pir_pkg.to_string(),
+                    total_rewrites: 0,
+                });
+            }
+
             for _round in 0..options.rounds {
                 let (next_text, rewrites_in_round) =
                     apply_pir_rewrites_to_ir_text(&cur_text, &top_name)?;
@@ -555,5 +575,59 @@ fn b(y: bits[1] id=10) -> bits[1] {
             Some((name, ir::MemberType::Function)) => assert_eq!(name, "b"),
             other => panic!("expected top fn 'b', got {:?}", other),
         }
+    }
+
+    #[test]
+    fn aug_opt_aug_opt_only_rounds_zero_sets_requested_top_in_output() {
+        let ir_text = r#"package top_swap_zero_rounds
+
+top fn a(x: bits[1] id=1) -> bits[1] {
+  ret identity.2: bits[1] = identity(x, id=2)
+}
+
+fn b(y: bits[1] id=10) -> bits[1] {
+  ret identity.11: bits[1] = identity(y, id=11)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("b"),
+            AugOptOptions {
+                enable: true,
+                rounds: 0,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt aug-opt-only rounds=0");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        match &pkg.top {
+            Some((name, ir::MemberType::Function)) => assert_eq!(name, "b"),
+            other => panic!("expected top fn 'b', got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn aug_opt_aug_opt_only_rounds_zero_invalid_top_is_error() {
+        let ir_text = r#"package top_swap_zero_rounds_invalid_top
+
+top fn a(x: bits[1] id=1) -> bits[1] {
+  ret identity.2: bits[1] = identity(x, id=2)
+}
+"#;
+
+        let err = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("nope"),
+            AugOptOptions {
+                enable: true,
+                rounds: 0,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect_err("expected invalid top to error");
+        assert_eq!(err, "aug_opt: PIR package missing top fn 'nope'");
     }
 }
