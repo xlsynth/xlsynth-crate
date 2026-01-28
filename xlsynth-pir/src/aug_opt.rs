@@ -241,6 +241,7 @@ fn apply_basis_rewrites_to_fn(f: &ir::Fn, range_info: Option<&IrRangeInfo>) -> (
         &mut cloned,
         range_info,
     ));
+    rewrites = rewrites.saturating_add(rewrite_eq_add_zero_to_eq_rhs_sub(&mut cloned));
     // Ensure textual IR is defs-before-uses by reordering body nodes into a
     // topological order (while preserving PIR layout invariants). This makes
     // it safe for rewrites to append new nodes.
@@ -613,6 +614,98 @@ fn rewrite_eq_priority_sel_to_selector_predicate(
     rewrites
 }
 
+fn is_bits_literal_zero(v: &IrValue) -> bool {
+    let Ok(bits) = v.to_bits() else {
+        return false;
+    };
+    for i in 0..bits.get_bit_count() {
+        if bits.get_bit(i).unwrap_or(false) {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_get_param_node(f: &ir::Fn, nr: NodeRef) -> bool {
+    matches!(f.get_node(nr).payload, NodePayload::GetParam(_))
+}
+
+/// Rewrite:
+///
+/// `eq(add(x, y), literal(0))`
+///   →
+/// `eq(y, sub(literal(0), x))`
+///
+/// This is a semantics-preserving normalization in fixed-width modular
+/// arithmetic. It can unlock further simplifications when `x` is range-bounded
+/// (e.g. a small set of possible constants) and libxls does not solve the
+/// modular equation directly.
+fn rewrite_eq_add_zero_to_eq_rhs_sub(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+
+    for eq_index in 0..f.nodes.len() {
+        let NodePayload::Binop(Binop::Eq, a, b) = f.nodes[eq_index].payload.clone() else {
+            continue;
+        };
+
+        // Try both orders: eq(add(..), 0) or eq(0, add(..)).
+        let candidates = [(a, b), (b, a)];
+        let mut matched: Option<(NodeRef, NodeRef, NodeRef)> = None; // (x, y, lit0)
+
+        for (maybe_add, maybe_lit0) in candidates {
+            let NodePayload::Binop(Binop::Add, x, y) = f.get_node(maybe_add).payload.clone() else {
+                continue;
+            };
+            let NodePayload::Literal(lit_v) = f.get_node(maybe_lit0).payload.clone() else {
+                continue;
+            };
+
+            let w = f.get_node_ty(maybe_add).bit_count();
+            if w == 0 || f.get_node_ty(maybe_lit0) != &Type::Bits(w) {
+                continue;
+            }
+            if !is_bits_literal_zero(&lit_v) {
+                continue;
+            }
+
+            matched = Some((x, y, maybe_lit0));
+            break;
+        }
+
+        let Some((x, y, lit0)) = matched else {
+            continue;
+        };
+
+        // Choose which operand to "solve for" deterministically: prefer a param
+        // node when available.
+        let (solve_for, other) = match (is_get_param_node(f, x), is_get_param_node(f, y)) {
+            (true, false) => (x, y),
+            (false, true) => (y, x),
+            _ => (y, x),
+        };
+
+        let w = f.get_node_ty(other).bit_count();
+        if w == 0
+            || f.get_node_ty(lit0) != &Type::Bits(w)
+            || f.get_node_ty(solve_for) != &Type::Bits(w)
+        {
+            continue;
+        }
+
+        let rhs_sub = push_node(
+            f,
+            Type::Bits(w),
+            NodePayload::Binop(Binop::Sub, lit0, other),
+        );
+
+        f.nodes[eq_index].payload = NodePayload::Binop(Binop::Eq, solve_for, rhs_sub);
+        f.nodes[eq_index].ty = Type::Bits(1);
+        rewrites += 1;
+    }
+
+    rewrites
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -822,6 +915,69 @@ top fn cone(sel: bits[1] id=1, x: bits[5] id=2) -> bits[1] {
             &out_text,
             "cone",
             &[1, 5],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    #[test]
+    fn aug_opt_rewrites_eq_add_zero_to_eq_rhs_sub_when_addend_is_small_set() {
+        let ir_text = r#"package add_eq_zero_smallset
+
+top fn cone(leaf_52: bits[2] id=1, y: bits[5] id=2) -> bits[1] {
+  literal.3: bits[3] = literal(value=5, id=3)
+  not.4: bits[2] = not(leaf_52, id=4)
+  concat.5: bits[5] = concat(literal.3, not.4, id=5)
+  add.6: bits[5] = add(concat.5, y, id=6)
+  literal.7: bits[5] = literal(value=0, id=7)
+  ret eq.8: bits[1] = eq(add.6, literal.7, id=8)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+
+        let ret_nr = f.ret_node_ref.expect("ret node");
+        let ret_node = f.get_node(ret_nr);
+        assert_eq!(ret_node.ty, Type::Bits(1));
+        let NodePayload::Binop(Binop::Eq, lhs, rhs) = ret_node.payload else {
+            panic!(
+                "expected ret to be eq(..); got {:?}\noutput:\n{}",
+                ret_node.payload, out_text
+            );
+        };
+
+        // We should solve for the `y` parameter (second param => node index 2).
+        assert_eq!(lhs, NodeRef { index: 2 });
+        let rhs_node = f.get_node(rhs);
+        let NodePayload::Binop(Binop::Sub, sub_lhs, sub_rhs) = rhs_node.payload else {
+            panic!(
+                "expected rhs to be sub(..); got {:?}\noutput:\n{}",
+                rhs_node.payload, out_text
+            );
+        };
+
+        // Ensure we reused the existing literal-0 node.
+        assert_eq!(f.get_node(sub_lhs).text_id, 7);
+        // Ensure we subtracted the small-set addend.
+        assert_eq!(f.get_node(sub_rhs).text_id, 5);
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "cone",
+            &[2, 5],
             /* random_samples= */ 2000,
         );
     }
