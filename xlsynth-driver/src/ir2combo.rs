@@ -88,6 +88,7 @@ fn ir2combo(
                 AugOptOptions {
                     enable: true,
                     rounds: 1,
+                    ..Default::default()
                 },
             )
             .expect("aug_opt should succeed")

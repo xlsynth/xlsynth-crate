@@ -106,6 +106,55 @@ that introduce a command without updating the README are subject to rejection.
 
 When adding or changing flags for an existing `xlsynth-driver` subcommand, update the corresponding section in `xlsynth-driver/README.md` to document the new/changed flags and their defaults.
 
+## Augmented optimizer (`aug-opt`): how to exercise it
+
+There are two primary ways to "play with" the augmented optimizer loop (libxls optimization + small PIR rewrites).
+
+### `xlsynth-driver` (preferred CLI surface)
+
+The driver exposes `--aug-opt=true` on several subcommands. The meaning is an "opt sandwich":
+libxls opt -> PIR rewrites -> libxls opt.
+
+- Only underlying libxls optimizations (no aug-opt):
+
+```bash
+cargo run -p xlsynth-driver -- ir2opt path/to/pkg.ir --top main
+```
+
+- libxls + aug-opt sandwich:
+
+```bash
+cargo run -p xlsynth-driver -- ir2opt path/to/pkg.ir --top main --aug-opt=true
+```
+
+Notes:
+
+- `ir2opt --aug-opt=true` currently does not support `--toolchain` (external tool path). It uses the in-process APIs.
+- For codegen flows, `--aug-opt=true` requires `--opt=true` (because it controls the optimization step before scheduling/codegen):
+
+```bash
+cargo run -p xlsynth-driver -- ir2combo path/to/pkg.ir --top main --delay_model=unit --opt=true --aug-opt=true
+cargo run -p xlsynth-driver -- ir2pipeline path/to/pkg.ir --top main --delay_model=unit --opt=true --aug-opt=true
+```
+
+### Standalone binary: `xlsynth-pir-aug-opt`
+
+The `xlsynth-pir` crate provides a dedicated debugging binary that runs the sandwich and allows multiple rounds:
+
+```bash
+cargo run -p xlsynth-pir --bin xlsynth-pir-aug-opt -- path/to/pkg.ir --top main --rounds 1
+```
+
+This binary also accepts `-` as input to read IR text from stdin.
+
+### Aug-opt-only mode (debug binary only)
+
+For isolating aug-opt rewrites (without any libxls optimization passes), use the debug binary's `--aug-opt-only` flag:
+
+```bash
+cargo run -p xlsynth-pir --bin xlsynth-pir-aug-opt -- path/to/pkg.ir --top main --rounds 1 --aug-opt-only
+```
+
 ## Test
 
 For changes related to boolector, you should test with
