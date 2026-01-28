@@ -11,6 +11,7 @@
 
 use crate::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
 use crate::ir_parser;
+use crate::ir_range_info::IrRangeInfo;
 use crate::ir_utils;
 use xlsynth::IrValue;
 
@@ -162,7 +163,19 @@ fn apply_pir_rewrites_to_ir_text(ir_text: &str, top_name: &str) -> Result<(Strin
         .ok_or_else(|| format!("aug_opt: PIR package missing top fn '{top_name}'"))?
         .clone();
 
-    let (rewritten_top, rewrites_in_round) = apply_basis_rewrites_to_fn(&top_fn);
+    let mut xls_pkg = xlsynth::IrPackage::parse_ir(ir_text, None)
+        .map_err(|e| format!("aug_opt: xlsynth parse_ir (analysis) failed: {e}"))?;
+    xls_pkg
+        .set_top_by_name(top_name)
+        .map_err(|e| format!("aug_opt: set_top_by_name('{top_name}') failed: {e}"))?;
+    let analysis = xls_pkg
+        .create_ir_analysis()
+        .map_err(|e| format!("aug_opt: create_ir_analysis failed: {e}"))?;
+    let range_info = IrRangeInfo::build_from_analysis(&analysis, &top_fn)
+        .map_err(|e| format!("aug_opt: building IrRangeInfo failed: {e}"))?;
+
+    let (rewritten_top, rewrites_in_round) =
+        apply_basis_rewrites_to_fn(&top_fn, Some(range_info.as_ref()));
 
     // Swap the rewritten top back into the PIR package.
     for member in pir_pkg.members.iter_mut() {
@@ -219,11 +232,15 @@ fn verify_no_extension_ops_in_fn(f: &ir::Fn) -> Result<(), String> {
     Ok(())
 }
 
-fn apply_basis_rewrites_to_fn(f: &ir::Fn) -> (ir::Fn, usize) {
+fn apply_basis_rewrites_to_fn(f: &ir::Fn, range_info: Option<&IrRangeInfo>) -> (ir::Fn, usize) {
     let mut cloned = f.clone();
     let mut rewrites = 0usize;
     rewrites = rewrites.saturating_add(rewrite_guarded_sel_ne_literal1_nor(&mut cloned));
     rewrites = rewrites.saturating_add(rewrite_lsb_of_shll_via_shift_is_zero(&mut cloned));
+    rewrites = rewrites.saturating_add(rewrite_eq_priority_sel_to_selector_predicate(
+        &mut cloned,
+        range_info,
+    ));
     // Ensure textual IR is defs-before-uses by reordering body nodes into a
     // topological order (while preserving PIR layout invariants). This makes
     // it safe for rewrites to append new nodes.
@@ -415,6 +432,187 @@ fn rewrite_guarded_sel_ne_literal1_nor(f: &mut ir::Fn) -> usize {
     rewrites
 }
 
+fn proves_node_ne_bits_literal(
+    range_info: &IrRangeInfo,
+    node_text_id: usize,
+    lit: &IrValue,
+) -> bool {
+    let Ok(lit_bits) = lit.to_bits() else {
+        return false;
+    };
+    let Some(info) = range_info.get(node_text_id) else {
+        return false;
+    };
+
+    if let Some(intervals) = info.intervals.as_ref() {
+        let lit_is_possible = intervals
+            .iter()
+            .any(|it| it.lo.ule(&lit_bits) && lit_bits.ule(&it.hi));
+        return !lit_is_possible;
+    }
+
+    if let Some(k) = info.known_bits.as_ref() {
+        let w = k.mask.get_bit_count();
+        if w != lit_bits.get_bit_count() {
+            return false;
+        }
+        for i in 0..w {
+            let is_known = k.mask.get_bit(i).unwrap_or(false);
+            if !is_known {
+                continue;
+            }
+            let kb = k.value.get_bit(i).unwrap_or(false);
+            let lb = lit_bits.get_bit(i).unwrap_or(false);
+            if kb != lb {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Rewrites:
+///
+/// `eq(priority_sel(sel, cases=[c0..cN-1], default=d), literal(L))`
+///   →
+/// `or(and(selected_0(sel), eq(c0, L)), ..., and(selected_{N-1}(sel),
+/// eq(c{N-1}, L)))`
+///
+/// When analysis proves `d != L`, the default term can be omitted safely.
+fn rewrite_eq_priority_sel_to_selector_predicate(
+    f: &mut ir::Fn,
+    range_info: Option<&IrRangeInfo>,
+) -> usize {
+    let Some(range_info) = range_info else {
+        return 0;
+    };
+
+    let mut rewrites = 0usize;
+
+    for eq_index in 0..f.nodes.len() {
+        let NodePayload::Binop(Binop::Eq, a, b) = f.nodes[eq_index].payload.clone() else {
+            continue;
+        };
+
+        // Try both operand orders: eq(priority_sel(...), literal) or eq(literal,
+        // priority_sel(...)).
+        let candidates = [(a, b), (b, a)];
+        let mut matched: Option<(NodeRef, NodeRef, NodeRef, Vec<NodeRef>, NodeRef, IrValue)> = None;
+
+        for (maybe_ps, maybe_lit) in candidates {
+            let NodePayload::PrioritySel {
+                selector,
+                cases,
+                default,
+            } = f.get_node(maybe_ps).payload.clone()
+            else {
+                continue;
+            };
+            let Some(default_nr) = default else {
+                continue;
+            };
+            let NodePayload::Literal(lit_v) = f.get_node(maybe_lit).payload.clone() else {
+                continue;
+            };
+
+            matched = Some((maybe_ps, selector, default_nr, cases, maybe_lit, lit_v));
+            break;
+        }
+
+        let Some((_ps_nr, selector, default_nr, cases, lit_nr, lit_v)) = matched else {
+            continue;
+        };
+
+        let selector_w = f.get_node_ty(selector).bit_count();
+        if selector_w == 0 || selector_w != cases.len() {
+            continue;
+        }
+
+        // Require analysis to prove the default cannot equal the literal.
+        let default_text_id = f.get_node(default_nr).text_id;
+        if !proves_node_ne_bits_literal(range_info, default_text_id, &lit_v) {
+            continue;
+        }
+
+        let mut terms: Vec<NodeRef> = Vec::new();
+        for i in 0..cases.len() {
+            // selected_i(sel) = bit_i(sel) & !or_reduce(sel[0..i])
+            let bit_i: NodeRef =
+                if selector_w == 1 && i == 0 && *f.get_node_ty(selector) == Type::Bits(1) {
+                    selector
+                } else {
+                    push_node(
+                        f,
+                        Type::Bits(1),
+                        NodePayload::BitSlice {
+                            arg: selector,
+                            start: i,
+                            width: 1,
+                        },
+                    )
+                };
+
+            let selected_i: NodeRef = if i == 0 {
+                bit_i
+            } else {
+                let lower_bits = push_node(
+                    f,
+                    Type::Bits(i),
+                    NodePayload::BitSlice {
+                        arg: selector,
+                        start: 0,
+                        width: i,
+                    },
+                );
+                let lower_any = push_node(
+                    f,
+                    Type::Bits(1),
+                    NodePayload::Unop(Unop::OrReduce, lower_bits),
+                );
+                let not_lower_any =
+                    push_node(f, Type::Bits(1), NodePayload::Unop(Unop::Not, lower_any));
+                push_node(
+                    f,
+                    Type::Bits(1),
+                    NodePayload::Nary(NaryOp::And, vec![bit_i, not_lower_any]),
+                )
+            };
+
+            let term = if cases[i] == lit_nr {
+                selected_i
+            } else {
+                let eq_case = push_node(
+                    f,
+                    Type::Bits(1),
+                    NodePayload::Binop(Binop::Eq, cases[i], lit_nr),
+                );
+                push_node(
+                    f,
+                    Type::Bits(1),
+                    NodePayload::Nary(NaryOp::And, vec![selected_i, eq_case]),
+                )
+            };
+
+            terms.push(term);
+        }
+
+        if terms.is_empty() {
+            continue;
+        }
+
+        f.nodes[eq_index].payload = if terms.len() == 1 {
+            NodePayload::Unop(Unop::Identity, terms[0])
+        } else {
+            NodePayload::Nary(NaryOp::Or, terms)
+        };
+        f.nodes[eq_index].ty = Type::Bits(1);
+        rewrites += 1;
+    }
+
+    rewrites
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,6 +773,57 @@ fn b(y: bits[1] id=10) -> bits[1] {
             Some((name, ir::MemberType::Function)) => assert_eq!(name, "b"),
             other => panic!("expected top fn 'b', got {:?}", other),
         }
+    }
+
+    #[test]
+    fn aug_opt_rewrites_eq_priority_sel_to_selector_predicate_when_default_cannot_match() {
+        let ir_text = r#"package prio_eq
+
+top fn cone(sel: bits[1] id=1, x: bits[5] id=2) -> bits[1] {
+  literal.3: bits[6] = literal(value=0, id=3)
+  literal.4: bits[1] = literal(value=1, id=4)
+  concat.5: bits[6] = concat(literal.4, x, id=5)
+  priority_sel.6: bits[6] = priority_sel(sel, cases=[literal.3], default=concat.5, id=6)
+  ret eq.7: bits[1] = eq(priority_sel.6, literal.3, id=7)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+
+        // In PirOnly mode we do not run libxls optimization after rewriting, so we
+        // do not expect dead nodes to be removed. Instead, assert that the return
+        // no longer depends on the priority_sel and is rewritten to the selector.
+        let ret_nr = f.ret_node_ref.expect("ret node");
+        let ret_node = f.get_node(ret_nr);
+        assert_eq!(ret_node.ty, Type::Bits(1));
+        match &ret_node.payload {
+            NodePayload::Unop(Unop::Identity, op) => {
+                // Param nodes are at indices 1..=params.len() in signature order.
+                assert_eq!(*op, NodeRef { index: 1 });
+            }
+            other => panic!("unexpected ret payload: {:?}\noutput:\n{}", other, out_text),
+        }
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "cone",
+            &[1, 5],
+            /* random_samples= */ 2000,
+        );
     }
 
     #[test]
