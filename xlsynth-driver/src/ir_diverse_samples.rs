@@ -10,6 +10,8 @@ pub fn handle_ir_diverse_samples(matches: &ArgMatches) -> Result<(), String> {
     let corpus_dir = matches
         .get_one::<String>("corpus_dir")
         .expect("corpus_dir is required");
+    let corpus_dir = std::fs::canonicalize(Path::new(corpus_dir))
+        .map_err(|e| format!("failed to canonicalize corpus dir {corpus_dir:?}: {e}"))?;
 
     let signature_depth: usize = match matches.get_one::<String>("signature_depth") {
         Some(s) => s
@@ -36,9 +38,18 @@ pub fn handle_ir_diverse_samples(matches: &ArgMatches) -> Result<(), String> {
     let make_symlink_dir: Option<PathBuf> = matches
         .get_one::<String>("make_symlink_dir")
         .map(|s| PathBuf::from(s));
+    let make_symlink_dir: Option<PathBuf> = match make_symlink_dir {
+        Some(p) if p.is_absolute() => Some(p),
+        Some(p) => {
+            let cwd = std::env::current_dir()
+                .map_err(|e| format!("failed to get current dir for --make-symlink-dir: {e}"))?;
+            Some(cwd.join(p))
+        }
+        None => None,
+    };
 
     let selected = xlsynth_g8r::diverse_samples::select_ir_diverse_samples_with_options(
-        Path::new(corpus_dir),
+        &corpus_dir,
         &xlsynth_g8r::diverse_samples::DiverseSamplesOptions {
             signature_depth,
             log_skipped,
@@ -76,6 +87,11 @@ fn populate_symlink_dir(
     dir: &Path,
     selected: &[xlsynth_g8r::diverse_samples::DiverseSampleSelectionEntry],
 ) -> Result<(), String> {
+    assert!(
+        dir.is_absolute(),
+        "internal error: expected --make-symlink-dir to be absolute, got: {}",
+        dir.display()
+    );
     if dir.exists() {
         if !dir.is_dir() {
             return Err(format!(
@@ -122,9 +138,9 @@ fn populate_symlink_dir(
             // `ir_file_path` is relative (e.g. when the corpus dir passed to
             // `ir-diverse-samples` was `.`).
             //
-            // We canonicalize `ir_file_path` in the current process. If it is
-            // relative (which can happen when `corpus_dir` is relative), it is
-            // interpreted relative to the current working directory.
+            // We canonicalize `ir_file_path` in the current process. The driver
+            // canonicalizes `corpus_dir` before selection, so this should not
+            // depend on the process CWD.
             let target_path = std::fs::canonicalize(&e.ir_file_path).map_err(|e2| {
                 format!(
                     "failed to canonicalize selected sample path {}: {e2}",
@@ -150,30 +166,22 @@ mod tests {
     use std::path::PathBuf;
     use xlsynth_g8r::diverse_samples::DiverseSampleSelectionEntry;
 
-    fn create_sample_under_cwd() -> (tempfile::TempDir, PathBuf, PathBuf) {
-        let cwd = std::env::current_dir().expect("current_dir");
-        let corpus_tmp = tempfile::tempdir_in(&cwd).expect("tempdir_in(cwd)");
+    fn create_sample_under_temp() -> (tempfile::TempDir, PathBuf) {
+        let corpus_tmp = tempfile::tempdir().expect("tempdir");
         let corpus_root = corpus_tmp.path();
         let samples_dir = corpus_root.join("samples");
         std::fs::create_dir_all(&samples_dir).expect("create samples dir");
         let sample_path = samples_dir.join("foo.ir");
         std::fs::write(&sample_path, "package p\n").expect("write sample");
-        let sample_rel = sample_path
-            .strip_prefix(&cwd)
-            .expect("sample_path should be under cwd")
-            .to_path_buf();
-        (corpus_tmp, sample_path, sample_rel)
+        (corpus_tmp, sample_path)
     }
 
     #[test]
-    fn populate_symlink_dir_uses_absolute_targets_for_relative_inputs() {
-        // Provide a relative path that is valid in the current process.
-        // Note: we intentionally avoid changing the process CWD since Rust tests
-        // run in parallel by default.
-        let (corpus_tmp, sample_path, sample_rel) = create_sample_under_cwd();
+    fn populate_symlink_dir_uses_absolute_targets() {
+        let (corpus_tmp, sample_path) = create_sample_under_temp();
         let symlink_dir = corpus_tmp.path().join("diverse");
         let selected = vec![DiverseSampleSelectionEntry {
-            ir_file_path: sample_rel,
+            ir_file_path: sample_path.clone(),
             g8r_nodes: 0,
             g8r_levels: 0,
             new_hashes: 0,
@@ -190,7 +198,7 @@ mod tests {
             target.display()
         );
         assert_eq!(
-            std::fs::canonicalize(target).expect("canonicalize target"),
+            std::fs::canonicalize(&target).expect("canonicalize target"),
             std::fs::canonicalize(sample_path).expect("canonicalize sample")
         );
 
@@ -199,54 +207,13 @@ mod tests {
     }
 
     #[test]
-    fn populate_symlink_dir_uses_absolute_targets_when_symlink_dir_is_relative() {
-        // Ensure a relative `--make-symlink-dir` still produces absolute targets.
-        let (corpus_tmp, sample_path, sample_rel) = create_sample_under_cwd();
-        let cwd = std::env::current_dir().expect("current_dir");
-        let corpus_rel = corpus_tmp
-            .path()
-            .strip_prefix(&cwd)
-            .expect("corpus_tmp should be under cwd")
-            .to_path_buf();
-        let symlink_dir = corpus_rel.join("diverse");
-        let selected = vec![DiverseSampleSelectionEntry {
-            ir_file_path: sample_rel,
-            g8r_nodes: 0,
-            g8r_levels: 0,
-            new_hashes: 0,
-            new_hash_details: None,
-        }];
-        populate_symlink_dir(&symlink_dir, &selected).expect("populate");
-
-        let link_path = symlink_dir.join("00000_foo.ir");
-        let target = std::fs::read_link(&link_path).expect("read_link");
-        assert!(
-            target.is_absolute(),
-            "expected absolute symlink target, got: {}",
-            target.display()
-        );
-        assert_eq!(
-            std::fs::canonicalize(target).expect("canonicalize target"),
-            std::fs::canonicalize(sample_path).expect("canonicalize sample")
-        );
-    }
-
-    #[test]
     fn populate_symlink_dir_works_when_symlink_dir_is_outside_corpus_tree() {
-        // Scenario:
-        //   - CWD is the corpus root
-        //   - `ir_file_path` is relative (e.g. from `corpus_dir = .`)
-        //   - `--make-symlink-dir` points outside the corpus tree
-        //
-        // In this case, we resolve `ir_file_path` relative to the current
-        // process and still produce absolute symlink targets.
-        let (_corpus_tmp, sample_path, sample_rel) = create_sample_under_cwd();
-        let cwd = std::env::current_dir().expect("current_dir");
-        let outside_tmp = tempfile::tempdir_in(&cwd).expect("tempdir_in(cwd)");
+        let (_corpus_tmp, sample_path) = create_sample_under_temp();
+        let outside_tmp = tempfile::tempdir().expect("tempdir");
         let symlink_dir = outside_tmp.path().join("diverse");
 
         let selected = vec![DiverseSampleSelectionEntry {
-            ir_file_path: sample_rel,
+            ir_file_path: sample_path.clone(),
             g8r_nodes: 0,
             g8r_levels: 0,
             new_hashes: 0,
@@ -263,7 +230,7 @@ mod tests {
             target.display()
         );
         assert_eq!(
-            std::fs::canonicalize(target).expect("canonicalize target"),
+            std::fs::canonicalize(&target).expect("canonicalize target"),
             std::fs::canonicalize(sample_path).expect("canonicalize sample")
         );
     }

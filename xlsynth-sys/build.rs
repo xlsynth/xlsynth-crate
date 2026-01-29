@@ -387,6 +387,13 @@ fn download_file_with_curl(
     }
 }
 
+fn os_release_value_is_rhel_like(id: &str) -> bool {
+    // We treat AlmaLinux as "effectively Rocky" for the purposes of selecting
+    // the prebuilt XLS DSO flavor. This matches common CI environments where
+    // AlmaLinux is used as a drop-in RHEL-like base.
+    matches!(id, "rocky" | "almalinux")
+}
+
 fn is_rocky() -> bool {
     // Define the path to /etc/os-release
     let os_release_path = Path::new("/etc/os-release");
@@ -403,17 +410,22 @@ fn is_rocky() -> bool {
         // Read through the lines in the file
         let reader = std::io::BufReader::new(file);
         for line in reader.lines().map_while(|line| line.ok()) {
-            // Check if the line contains `ID="rocky"`
-            if line.contains("ID=\"rocky\"") {
+            let Some(value) = line.strip_prefix("ID=") else {
+                continue;
+            };
+
+            // /etc/os-release values may be quoted.
+            let id = value.trim().trim_matches('"');
+            if os_release_value_is_rhel_like(id) {
                 return true;
             }
         }
-        println!("cargo:info=Did not find rocky ID line in OS release data");
+        println!("cargo:info=Did not find a recognized RHEL-like ID in OS release data");
     } else {
         println!("cargo:info=Could not open OS release data file");
     }
 
-    // Return false if `ID="rocky"` is not found
+    // Return false if no recognized ID is found.
     false
 }
 
