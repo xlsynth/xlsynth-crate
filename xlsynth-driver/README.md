@@ -795,6 +795,8 @@ Selected samples are printed to **stdout** as:
 <ir-file-path> g8r-nodes=<node-count> g8r-levels=<levels> new-hashes=<count>
 ```
 
+Note: `ir-diverse-samples` canonicalizes `<corpus-dir>` up front, so `<ir-file-path>` is printed as an absolute path (independent of the process CWD).
+
 With `--explain-new-hashes=true`, additional indented lines are printed after each selected sample:
 
 ```text

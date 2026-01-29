@@ -627,6 +627,71 @@ jobs:
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
           cargo test --features with-bitwuzla-system --workspace
 
+  # -----------------------------------------------------------
+  # 6) AlmaLinux 9 smoke test
+  # -----------------------------------------------------------
+  alma9-smoke:
+    name: AlmaLinux 9 Smoke Test
+    needs: [lint-check-ubuntu]
+    runs-on: ubuntu-latest
+    container: almalinux:9
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          dnf -y install \
+            ca-certificates \
+            curl-minimal \
+            gcc \
+            gcc-c++ \
+            git \
+            make \
+            openssl-devel \
+            pkgconf-pkg-config \
+            python3 \
+            python3-pip \
+            tar \
+            unzip \
+            xz \
+            zlib-devel
+
+      - name: Install Rust nightly (minimal)
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain nightly
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          "$HOME/.cargo/bin/rustc" --version
+          "$HOME/.cargo/bin/cargo" --version
+
+      - name: Install protobuf compiler
+        run: |
+          curl -L --retry 5 --retry-delay 2 --retry-connrefused -o protoc-29.1-linux-x86_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip
+          unzip protoc-29.1-linux-x86_64.zip -d protoc
+          mv protoc/bin/protoc /usr/local/bin/protoc
+          mv protoc /tmp/
+          mv protoc-*.zip /tmp/
+          protoc --version
+
+      - name: Download xlsynth binaries (rocky8 artifacts)
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          python3 -m pip install --upgrade pip
+          pip3 install -r requirements.txt
+          TAG=$(python3 scripts/get_required_xls_release_tag.py)
+          echo "Resolved XLS release tag: ${TAG}"
+          python3 scripts/download_release.py -p rocky8 -o xlsynth_tools -v ${TAG} -d
+
+      - name: Run AlmaLinux 9 smoke test
+        run: |
+          export XLSYNTH_TOOLS="$(realpath xlsynth_tools)"
+          export XLS_DSO_PATH="${XLSYNTH_TOOLS}/libxls-rocky8.so"
+          export DSLX_STDLIB_PATH="${XLSYNTH_TOOLS}/xls/dslx/stdlib"
+          export LD_LIBRARY_PATH="${XLSYNTH_TOOLS}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+          cargo test -p xlsynth test_convert_dslx_to_ir
+
   valgrind-tests:
     name: Valgrind Tests (Ubuntu)
     needs: [lint-check-ubuntu]
