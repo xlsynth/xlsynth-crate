@@ -8,6 +8,7 @@ use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_query;
 
 use crate::common::parse_bool_flag_or;
+use crate::common::write_stdout_line;
 use crate::toolchain_config::ToolchainConfig;
 
 fn extract_error_byte_offset(msg: &str) -> Option<usize> {
@@ -31,11 +32,20 @@ fn collect_ir_files_recursively(root: &Path, out: &mut Vec<PathBuf>) -> std::io:
             let entry = entry?;
             let path = entry.path();
             let ty = entry.file_type()?;
+            let is_ir = path.extension().and_then(|s| s.to_str()) == Some("ir");
             if ty.is_dir() {
                 stack.push(path);
             } else if ty.is_file() {
-                if path.extension().and_then(|s| s.to_str()) == Some("ir") {
+                if is_ir {
                     out.push(path);
+                }
+            } else if ty.is_symlink() {
+                if is_ir {
+                    if let Ok(meta) = std::fs::metadata(&path) {
+                        if meta.is_file() {
+                            out.push(path);
+                        }
+                    }
                 }
             }
         }
@@ -237,7 +247,7 @@ pub fn handle_ir_query_corpus(matches: &ArgMatches, _config: &Option<ToolchainCo
             }
 
             // Always show the file prefix in corpus mode.
-            println!("{}: {}", path.display(), line);
+            write_stdout_line(&format!("{}: {}", path.display(), line));
 
             matches_emitted += 1;
             if let Some(limit) = max_matches {
