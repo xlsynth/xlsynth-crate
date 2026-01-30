@@ -494,6 +494,7 @@ Query expression basics:
 - `$anycmp` and `$anymul` are binary operators, so they always take two arguments. Use `_` for a wildcard position.
 - `literal(L)` matches a `literal` node and binds `L` to the literal **value** (reusing `L` requires the same literal value, even if it is a different literal node).
 - `literal[pow2](L)` additionally constrains the literal to be a strict power-of-two bits value (exactly one bit set; `0` does not match).
+- `$all_ones()` matches a `literal` node whose value is all ones for its bit-width.
 - `msb(x)` is shorthand for matching a `bit_slice` of the highest bit (width 1) of `x`.
 - Named arguments are supported where the IR operator accepts them (e.g., `sel(selector=..., cases=[...], default=...)`).
   - Named-arg values use the same expression syntax as positional args, so numeric literals like `selector=1` and `default=0` match literal nodes.
@@ -521,6 +522,12 @@ Example: find comparisons against a power-of-two constant:
 
 ```shell
 xlsynth-driver ir-query my_pkg.ir '$anycmp(x, literal[pow2](L))'
+```
+
+Example: find comparisons against an all-ones constant:
+
+```shell
+xlsynth-driver ir-query my_pkg.ir 'eq(x, $all_ones())'
 ```
 
 Example: match the MSB of a negated value:
