@@ -4,7 +4,9 @@
 
 use crate::ir;
 
-use super::{MatcherExpr, MatcherKind, NamedArg, NamedArgValue, PlaceholderExpr, QueryExpr};
+use super::{
+    MatcherExpr, MatcherKind, NamedArg, NamedArgValue, NumericExpr, PlaceholderExpr, QueryExpr,
+};
 
 pub struct QueryParser<'a> {
     bytes: &'a [u8],
@@ -42,6 +44,7 @@ impl<'a> QueryParser<'a> {
                     "users" => MatcherKind::Users,
                     "width" => MatcherKind::Width,
                     "all_ones" => MatcherKind::AllOnes,
+                    "mask_low" => MatcherKind::MaskLow,
                     _ => return Err(self.error(&format!("unknown matcher ${}", ident))),
                 };
                 let user_count = if matches!(kind, MatcherKind::AnyCmp | MatcherKind::AnyMul) {
@@ -59,6 +62,16 @@ impl<'a> QueryParser<'a> {
                 };
                 self.skip_ws();
                 self.expect('(')?;
+                if matches!(kind, MatcherKind::MaskLow) {
+                    let expr = self.parse_numeric_expr()?;
+                    self.expect(')')?;
+                    return Ok(QueryExpr::Matcher(MatcherExpr {
+                        kind,
+                        user_count,
+                        args: vec![QueryExpr::Numeric(expr)],
+                        named_args: vec![],
+                    }));
+                }
                 let parsed_args = self.parse_args()?;
                 self.expect(')')?;
                 if !parsed_args.named_args.is_empty() {
@@ -324,21 +337,60 @@ impl<'a> QueryParser<'a> {
         let value = match self.peek() {
             Some(b'[') => NamedArgValue::ExprList(self.parse_expr_list()?),
             _ => {
-                let expr = self.parse_expr()?;
                 if ident == "lsb_prio" {
+                    let expr = self.parse_expr()?;
                     return self.parse_bool_named_arg(ident, expr);
                 }
-                match expr {
-                    QueryExpr::Placeholder(ref p) if p.name == "_" && p.ty.is_none() => {
-                        NamedArgValue::Any
+
+                if ident == "width" || ident == "start" {
+                    // Width/start named args accept numeric expressions like:
+                    // - `0`
+                    // - `$width(x)`
+                    // - `$width(x)-1`
+                    //
+                    // Keep `_` as a wildcard (NamedArgValue::Any) by routing it
+                    // through the normal expression parser.
+                    match self.peek() {
+                        Some(c) if c.is_ascii_digit() => {
+                            let expr = self.parse_numeric_expr()?;
+                            NamedArgValue::Expr(QueryExpr::Numeric(expr))
+                        }
+                        Some(b'$') | Some(b'(') => {
+                            let expr = self.parse_numeric_expr()?;
+                            NamedArgValue::Expr(QueryExpr::Numeric(expr))
+                        }
+                        _ => {
+                            let expr = self.parse_expr()?;
+                            match expr {
+                                QueryExpr::Placeholder(ref p)
+                                    if p.name == "_" && p.ty.is_none() =>
+                                {
+                                    NamedArgValue::Any
+                                }
+                                QueryExpr::Number(number) => {
+                                    let number = usize::try_from(number).map_err(|_| {
+                                        self.error("named argument number does not fit in usize")
+                                    })?;
+                                    NamedArgValue::Number(number)
+                                }
+                                _ => NamedArgValue::Expr(expr),
+                            }
+                        }
                     }
-                    QueryExpr::Number(number) if ident == "width" || ident == "start" => {
-                        let number = usize::try_from(number).map_err(|_| {
-                            self.error("named argument number does not fit in usize")
-                        })?;
-                        NamedArgValue::Number(number)
+                } else {
+                    let expr = self.parse_expr()?;
+                    match expr {
+                        QueryExpr::Placeholder(ref p) if p.name == "_" && p.ty.is_none() => {
+                            NamedArgValue::Any
+                        }
+                        QueryExpr::Number(number) if ident == "width" || ident == "start" => {
+                            let number = usize::try_from(number).map_err(|_| {
+                                self.error("named argument number does not fit in usize")
+                            })?;
+                            NamedArgValue::Number(number)
+                        }
+                        _ => NamedArgValue::Expr(expr),
                     }
-                    _ => NamedArgValue::Expr(expr),
                 }
             }
         };
@@ -369,6 +421,61 @@ impl<'a> QueryParser<'a> {
             }
         }
         Ok(items)
+    }
+
+    fn parse_numeric_expr(&mut self) -> Result<NumericExpr, String> {
+        let mut expr = self.parse_numeric_factor()?;
+        loop {
+            self.skip_ws();
+            match self.peek() {
+                Some(b'+') => {
+                    self.bump();
+                    let rhs = self.parse_numeric_factor()?;
+                    expr = NumericExpr::Add(Box::new(expr), Box::new(rhs));
+                }
+                Some(b'-') => {
+                    self.bump();
+                    let rhs = self.parse_numeric_factor()?;
+                    expr = NumericExpr::Sub(Box::new(expr), Box::new(rhs));
+                }
+                _ => break,
+            }
+        }
+        Ok(expr)
+    }
+
+    fn parse_numeric_factor(&mut self) -> Result<NumericExpr, String> {
+        self.skip_ws();
+        match self.peek() {
+            Some(b'(') => {
+                self.expect('(')?;
+                let expr = self.parse_numeric_expr()?;
+                self.expect(')')?;
+                Ok(expr)
+            }
+            Some(b'$') => {
+                self.bump();
+                let ident = self.parse_ident("numeric matcher name")?;
+                if ident != "width" {
+                    return Err(self.error(&format!("unknown numeric matcher ${}", ident)));
+                }
+                self.expect('(')?;
+                let name = self.parse_ident("placeholder")?;
+                let mut ty: Option<ir::Type> = None;
+                self.skip_ws();
+                if self.peek() == Some(b':') {
+                    self.bump();
+                    ty = Some(self.parse_type("type constraint")?);
+                }
+                self.expect(')')?;
+                Ok(NumericExpr::Width(PlaceholderExpr { name, ty }))
+            }
+            Some(c) if c.is_ascii_digit() => {
+                let number = self.parse_u64("number")?;
+                Ok(NumericExpr::Number(number))
+            }
+            _ => Err(self.error("expected numeric expression")),
+        }
     }
 
     fn parse_bool_named_arg(
@@ -473,6 +580,7 @@ fn expected_arity(kind: &MatcherKind) -> usize {
         MatcherKind::Users => 1,
         MatcherKind::Width => 1,
         MatcherKind::AllOnes => 0,
+        MatcherKind::MaskLow => 1,
         _ => 0,
     }
 }

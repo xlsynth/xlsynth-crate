@@ -58,6 +58,7 @@ fn required_opname_prefilter_tokens(query: &ir_query::QueryExpr) -> Vec<String> 
         match expr {
             ir_query::QueryExpr::Placeholder(_)
             | ir_query::QueryExpr::Number(_)
+            | ir_query::QueryExpr::Numeric(_)
             | ir_query::QueryExpr::Ellipsis => {}
             ir_query::QueryExpr::Matcher(m) => {
                 if let ir_query::MatcherKind::OpName(op) = &m.kind {
