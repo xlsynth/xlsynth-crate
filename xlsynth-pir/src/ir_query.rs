@@ -51,6 +51,9 @@ pub enum MatcherKind {
     /// This is not a node matcher; it is only valid in numeric named-arg
     /// contexts like `start=$width(x)` or `width=$width(x)`.
     Width,
+    /// Helper matcher: matches a literal node that is all ones for the given
+    /// width.
+    AllOnes,
     Msb,
     OpName(String),
     Literal {
@@ -172,6 +175,43 @@ fn validate_ellipsis_placement(expr: &QueryExpr) -> Result<(), String> {
 }
 
 fn validate_width_matcher_placement(expr: &QueryExpr) -> Result<(), String> {
+    fn validate_width_args(m: &MatcherExpr) -> Result<(), String> {
+        // `$width(...)` is a numeric helper; its argument must be a placeholder
+        // reference to an already-bound node.
+        if m.args.len() != 1 {
+            return Err("$width(...) expects exactly 1 argument".to_string());
+        }
+        match &m.args[0] {
+            QueryExpr::Placeholder(p) => {
+                if p.name == "_" {
+                    return Err(
+                        "$width(_) is not supported because '_' does not create a binding"
+                            .to_string(),
+                    );
+                }
+            }
+            _ => {
+                return Err(
+                    "$width(...) expects a single placeholder identifier argument".to_string(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_numeric_expr(expr: &QueryExpr) -> Result<(), String> {
+        match expr {
+            QueryExpr::Number(_) => Ok(()),
+            QueryExpr::Matcher(m) if matches!(m.kind, MatcherKind::Width) => {
+                validate_width_args(m)?;
+                Ok(())
+            }
+            _ => Err(
+                "numeric expression expected (e.g. 8 or $width(x)) for $all_ones(...)".to_string(),
+            ),
+        }
+    }
+
     fn walk(expr: &QueryExpr, width_allowed_here: bool) -> Result<(), String> {
         match expr {
             QueryExpr::Ellipsis | QueryExpr::Placeholder(_) | QueryExpr::Number(_) => Ok(()),
@@ -184,27 +224,15 @@ fn validate_width_matcher_placement(expr: &QueryExpr) -> Result<(), String> {
                 }
 
                 if matches!(m.kind, MatcherKind::Width) {
-                    // `$width(...)` is a numeric helper; its argument must be a placeholder
-                    // reference to an already-bound node.
+                    validate_width_args(m)?;
+                }
+
+                if matches!(m.kind, MatcherKind::AllOnes) {
                     if m.args.len() != 1 {
-                        return Err("$width(...) expects exactly 1 argument".to_string());
+                        return Err("$all_ones(...) expects exactly 1 argument".to_string());
                     }
-                    match &m.args[0] {
-                        QueryExpr::Placeholder(p) => {
-                            if p.name == "_" {
-                                return Err(
-                                    "$width(_) is not supported because '_' does not create a binding"
-                                        .to_string(),
-                                );
-                            }
-                        }
-                        _ => {
-                            return Err(
-                                "$width(...) expects a single placeholder identifier argument"
-                                    .to_string(),
-                            );
-                        }
-                    }
+                    validate_numeric_expr(&m.args[0])?;
+                    return Ok(());
                 }
 
                 // Width is never allowed in positional operand lists; it doesn't match nodes.
@@ -303,6 +331,21 @@ fn match_solutions(
             _ => vec![],
         },
         QueryExpr::Matcher(matcher) => {
+            if matches!(matcher.kind, MatcherKind::AllOnes) {
+                if matcher.args.len() != 1 {
+                    return vec![];
+                }
+                let Some(width) = eval_numeric_expr(&matcher.args[0], f, bindings) else {
+                    return vec![];
+                };
+                let ir::NodePayload::Literal(value) = &f.get_node(node_ref).payload else {
+                    return vec![];
+                };
+                if literal_is_all_ones(value, width) {
+                    return vec![bindings.clone()];
+                }
+                return vec![];
+            }
             if matches!(matcher.kind, MatcherKind::Users) {
                 if matcher.args.len() != 1 {
                     return vec![];
@@ -494,6 +537,62 @@ fn literal_matches_number(value: &IrValue, number: u64) -> bool {
     bits.equals(&expected)
 }
 
+fn literal_is_all_ones(value: &IrValue, width: usize) -> bool {
+    let Ok(bits) = value.to_bits() else {
+        return false;
+    };
+    if bits.get_bit_count() != width {
+        return false;
+    }
+    for i in 0..width {
+        let Ok(bit) = bits.get_bit(i) else {
+            return false;
+        };
+        if !bit {
+            return false;
+        }
+    }
+    true
+}
+
+fn eval_numeric_expr(expr: &QueryExpr, f: &ir::Fn, bindings: &Bindings) -> Option<usize> {
+    match expr {
+        QueryExpr::Number(number) => usize::try_from(*number).ok(),
+        QueryExpr::Matcher(matcher) if matches!(matcher.kind, MatcherKind::Width) => {
+            eval_width_expr(matcher, f, bindings)
+        }
+        _ => None,
+    }
+}
+
+fn eval_width_expr(matcher: &MatcherExpr, f: &ir::Fn, bindings: &Bindings) -> Option<usize> {
+    if matcher.args.len() != 1 {
+        return None;
+    }
+    match &matcher.args[0] {
+        QueryExpr::Placeholder(placeholder) => {
+            if placeholder.name == "_" {
+                return None;
+            }
+            match bindings.get(&placeholder.name) {
+                Some(Binding::Node(nr)) => {
+                    if let Some(ty) = &placeholder.ty {
+                        if f.get_node_ty(*nr) != ty {
+                            None
+                        } else {
+                            Some(f.get_node_ty(*nr).bit_count())
+                        }
+                    } else {
+                        Some(f.get_node_ty(*nr).bit_count())
+                    }
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Matches the query arguments against a node's operands.
 fn match_args_solutions(
     args: &[QueryExpr],
@@ -624,6 +723,7 @@ fn matches_kind(kind: &MatcherKind, payload: &ir::NodePayload) -> bool {
         },
         MatcherKind::Users => false,
         MatcherKind::Width => false,
+        MatcherKind::AllOnes => false,
         MatcherKind::Msb => matches!(payload, ir::NodePayload::BitSlice { .. }),
         MatcherKind::OpName(opname) => payload.get_operator() == opname,
         MatcherKind::Literal { .. } => matches!(payload, ir::NodePayload::Literal(_)),
@@ -672,40 +772,7 @@ fn match_named_args_solutions(
                     let expected: Option<usize> = match &arg.value {
                         NamedArgValue::Any => None,
                         NamedArgValue::Number(v) => Some(*v),
-                        NamedArgValue::Expr(expr) => match expr {
-                            QueryExpr::Matcher(m) if matches!(m.kind, MatcherKind::Width) => {
-                                if m.args.len() != 1 {
-                                    None
-                                } else {
-                                    match &m.args[0] {
-                                        QueryExpr::Placeholder(placeholder) => {
-                                            if placeholder.name == "_" {
-                                                // Wildcard placeholders do not create bindings, so
-                                                // $width(_) cannot be evaluated.
-                                                None
-                                            } else {
-                                                match b.get(&placeholder.name) {
-                                                    Some(Binding::Node(nr)) => {
-                                                        if let Some(ty) = &placeholder.ty {
-                                                            if f.get_node_ty(*nr) != ty {
-                                                                None
-                                                            } else {
-                                                                Some(f.get_node_ty(*nr).bit_count())
-                                                            }
-                                                        } else {
-                                                            Some(f.get_node_ty(*nr).bit_count())
-                                                        }
-                                                    }
-                                                    _ => None,
-                                                }
-                                            }
-                                        }
-                                        _ => None,
-                                    }
-                                }
-                            }
-                            _ => None,
-                        },
+                        NamedArgValue::Expr(expr) => eval_numeric_expr(expr, f, b),
                         _ => None,
                     };
 
@@ -917,6 +984,16 @@ mod tests {
         assert_eq!(
             err,
             "$width(_) is not supported because '_' does not create a binding"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_non_numeric_all_ones_arg() {
+        let err = parse_query("$all_ones(x)").unwrap_err();
+        assert!(
+            err.contains("numeric expression expected"),
+            "unexpected error: {}",
+            err
         );
     }
 
@@ -1281,6 +1358,28 @@ fn main(t: bits[8] id=1) -> bits[1] {
         assert_eq!(matches.len(), 1);
         let node_id = ir::node_textual_id(f, matches[0]);
         assert_eq!(node_id, "slice");
+    }
+
+    #[test]
+    fn find_matches_all_ones_literal_with_width_helper() {
+        let pkg_text = r#"package test
+
+fn main(x: bits[8] id=1) -> bits[1] {
+  ones: bits[8] = literal(value=255, id=2)
+  zeros: bits[8] = literal(value=0, id=3)
+  cmp1: bits[1] = eq(x, ones, id=4)
+  ret cmp0: bits[1] = eq(x, zeros, id=5)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+
+        let query = parse_query("eq(x, $all_ones($width(x)))").unwrap();
+        let matches = find_matching_nodes(f, &query);
+        assert_eq!(matches.len(), 1);
+        let node_id = ir::node_textual_id(f, matches[0]);
+        assert_eq!(node_id, "cmp1");
     }
 
     #[test]

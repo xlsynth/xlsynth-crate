@@ -41,6 +41,7 @@ impl<'a> QueryParser<'a> {
                     "anymul" => MatcherKind::AnyMul,
                     "users" => MatcherKind::Users,
                     "width" => MatcherKind::Width,
+                    "all_ones" => MatcherKind::AllOnes,
                     _ => return Err(self.error(&format!("unknown matcher ${}", ident))),
                 };
                 let user_count = if matches!(kind, MatcherKind::AnyCmp | MatcherKind::AnyMul) {
@@ -471,6 +472,7 @@ fn expected_arity(kind: &MatcherKind) -> usize {
         MatcherKind::AnyCmp | MatcherKind::AnyMul => 2,
         MatcherKind::Users => 1,
         MatcherKind::Width => 1,
+        MatcherKind::AllOnes => 1,
         _ => 0,
     }
 }
