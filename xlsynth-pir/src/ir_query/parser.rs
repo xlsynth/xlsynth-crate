@@ -472,7 +472,7 @@ fn expected_arity(kind: &MatcherKind) -> usize {
         MatcherKind::AnyCmp | MatcherKind::AnyMul => 2,
         MatcherKind::Users => 1,
         MatcherKind::Width => 1,
-        MatcherKind::AllOnes => 1,
+        MatcherKind::AllOnes => 0,
         _ => 0,
     }
 }
