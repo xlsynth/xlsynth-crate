@@ -4,8 +4,10 @@
 //! subprocess.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::io::Write;
 use std::process::Command;
+use std::process::Stdio;
 use xlsynth::IrBits;
 use xlsynth_g8r::aig::{AigBitVector, AigOperand, GateFn};
 use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
@@ -17,6 +19,9 @@ use test_case::test_case;
 
 use pretty_assertions::assert_eq;
 use xlsynth_test_helpers::{compare_golden_sv, compare_golden_text};
+
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 
 fn add_tool_path_value(toolchain_toml_contents: &str) -> String {
     let tool_path =
@@ -60,6 +65,22 @@ where
     let out_bit = make_output(*a.get_lsb(0), *b.get_lsb(0), &mut gb);
     gb.add_output("out".to_string(), AigBitVector::from_bit(out_bit));
     gb.build()
+}
+
+fn run_with_broken_stdout(mut command: Command) -> (std::process::ExitStatus, String) {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let mut stderr = String::new();
+    if let Some(mut err) = child.stderr.take() {
+        err.read_to_string(&mut stderr)
+            .expect("failed to read stderr");
+    }
+    let status = child.wait().expect("failed to wait on child");
+    (status, stderr)
 }
 
 #[test]
@@ -7978,4 +7999,103 @@ fn main(x: bits[4] id=1) -> bits[5] {
         "unexpected stderr: {}",
         stderr
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn test_ir_query_corpus_follows_symlinked_ir_files() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package test
+
+fn main(x: bits[4] id=1) -> bits[5] {
+  ret oh: bits[5] = one_hot(x, lsb_prio=true, id=2)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let real_dir = temp_dir.path().join("real");
+    std::fs::create_dir_all(&real_dir).unwrap();
+    let real_ir = real_dir.join("real.ir");
+    std::fs::write(&real_ir, ir_text).unwrap();
+
+    let corpus_dir = temp_dir.path().join("corpus");
+    std::fs::create_dir_all(&corpus_dir).unwrap();
+    let link_path = corpus_dir.join("link.ir");
+    symlink(&real_ir, &link_path).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-query-corpus")
+        .arg(corpus_dir.to_str().unwrap())
+        .arg("one_hot(x, lsb_prio=_)")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-query-corpus failed (status={});\nstdout:{}\nstderr:{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let expected = format!(
+        "{}: ret oh: bits[5] = one_hot(x, lsb_prio=true, id=2)\n",
+        link_path.to_str().unwrap()
+    );
+    assert_eq!(stdout, expected, "unexpected stdout: {}", stdout);
+}
+
+#[test]
+fn test_ir_query_exits_cleanly_on_broken_pipe() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package test
+
+fn main(x: bits[4] id=1) -> bits[5] {
+  ret oh: bits[5] = one_hot(x, lsb_prio=true, id=2)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("test.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let mut command = Command::new(driver);
+    command
+        .arg("ir-query")
+        .arg(ir_path.to_str().unwrap())
+        .arg("one_hot(x, lsb_prio=_)");
+
+    let (status, stderr) = run_with_broken_stdout(command);
+    assert!(status.success(), "ir-query status: {}", status);
+    assert_eq!(stderr, "", "unexpected stderr: {}", stderr);
+}
+
+#[test]
+fn test_ir_query_corpus_exits_cleanly_on_broken_pipe() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package test
+
+fn main(x: bits[4] id=1) -> bits[5] {
+  ret oh: bits[5] = one_hot(x, lsb_prio=true, id=2)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let corpus_dir = temp_dir.path().join("corpus");
+    std::fs::create_dir_all(&corpus_dir).unwrap();
+    let ir_path = corpus_dir.join("test.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let mut command = Command::new(driver);
+    command
+        .arg("ir-query-corpus")
+        .arg(corpus_dir.to_str().unwrap())
+        .arg("one_hot(x, lsb_prio=_)");
+
+    let (status, stderr) = run_with_broken_stdout(command);
+    assert!(status.success(), "ir-query-corpus status: {}", status);
+    assert_eq!(stderr, "", "unexpected stderr: {}", stderr);
 }

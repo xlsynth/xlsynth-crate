@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::common::parse_bool_flag_or;
+use crate::common::write_stdout_line;
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 use clap::ArgMatches;
@@ -74,9 +75,9 @@ pub fn handle_ir_query(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
             line = format!("ret {}", line);
         }
         if show_file {
-            println!("{}: {}", input_file, line);
+            write_stdout_line(&format!("{}: {}", input_file, line));
         } else {
-            println!("{}", line);
+            write_stdout_line(&line);
         }
     }
 }

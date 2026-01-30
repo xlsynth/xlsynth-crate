@@ -2,6 +2,7 @@
 
 use clap::ArgMatches;
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::process;
 use std::process::Command;
 use xlsynth::mangle_dslx_name;
@@ -53,6 +54,17 @@ pub fn extract_pipeline_spec(matches: &ArgMatches) -> PipelineSpec {
     } else {
         eprintln!("Must provide either --pipeline_stages or --clock_period_ps");
         process::exit(1)
+    }
+}
+
+pub fn write_stdout_line(line: &str) {
+    let mut out = std::io::stdout().lock();
+    if let Err(e) = writeln!(out, "{}", line) {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            process::exit(0);
+        }
+        eprintln!("error: failed to write stdout: {e}");
+        process::exit(1);
     }
 }
 
