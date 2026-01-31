@@ -57,7 +57,7 @@ fn stats_for_ir_text(ir_text: &str, opt: Opt) -> SummaryStats {
 
 fn gather_encode_one_hot_rows() -> Vec<EncodeOneHotRow> {
     let mut got: Vec<EncodeOneHotRow> = Vec::new();
-    for bit_count in 1..=8 {
+    for bit_count in 1..=16 {
         for lsb_prio in [true, false] {
             let prio = match lsb_prio {
                 true => "lsb",
@@ -77,7 +77,7 @@ fn gather_encode_one_hot_rows() -> Vec<EncodeOneHotRow> {
 }
 
 #[test]
-fn test_encode_one_hot_gate_stats_sweep_1_to_8() {
+fn test_encode_one_hot_gate_stats_sweep_1_to_16() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let got = gather_encode_one_hot_rows();
@@ -103,6 +103,22 @@ fn test_encode_one_hot_gate_stats_sweep_1_to_8() {
         EncodeOneHotRow { bit_count: 7, prio: "msb", live_nodes: 28, deepest_path: 7 },
         EncodeOneHotRow { bit_count: 8, prio: "lsb", live_nodes: 34, deepest_path: 8 },
         EncodeOneHotRow { bit_count: 8, prio: "msb", live_nodes: 32, deepest_path: 7 },
+        EncodeOneHotRow { bit_count: 9, prio: "lsb", live_nodes: 39, deepest_path: 9 },
+        EncodeOneHotRow { bit_count: 9, prio: "msb", live_nodes: 38, deepest_path: 8 },
+        EncodeOneHotRow { bit_count: 10, prio: "lsb", live_nodes: 46, deepest_path: 9 },
+        EncodeOneHotRow { bit_count: 10, prio: "msb", live_nodes: 44, deepest_path: 8 },
+        EncodeOneHotRow { bit_count: 11, prio: "lsb", live_nodes: 51, deepest_path: 9 },
+        EncodeOneHotRow { bit_count: 11, prio: "msb", live_nodes: 50, deepest_path: 9 },
+        EncodeOneHotRow { bit_count: 12, prio: "lsb", live_nodes: 59, deepest_path: 10 },
+        EncodeOneHotRow { bit_count: 12, prio: "msb", live_nodes: 57, deepest_path: 8 },
+        EncodeOneHotRow { bit_count: 13, prio: "lsb", live_nodes: 64, deepest_path: 10 },
+        EncodeOneHotRow { bit_count: 13, prio: "msb", live_nodes: 63, deepest_path: 9 },
+        EncodeOneHotRow { bit_count: 14, prio: "lsb", live_nodes: 71, deepest_path: 10 },
+        EncodeOneHotRow { bit_count: 14, prio: "msb", live_nodes: 69, deepest_path: 9 },
+        EncodeOneHotRow { bit_count: 15, prio: "lsb", live_nodes: 73, deepest_path: 10 },
+        EncodeOneHotRow { bit_count: 15, prio: "msb", live_nodes: 72, deepest_path: 10 },
+        EncodeOneHotRow { bit_count: 16, prio: "lsb", live_nodes: 79, deepest_path: 11 },
+        EncodeOneHotRow { bit_count: 16, prio: "msb", live_nodes: 77, deepest_path: 10 },
     ];
 
     assert_eq!(got.as_slice(), want);
