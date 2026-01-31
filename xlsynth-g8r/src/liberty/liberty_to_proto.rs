@@ -55,9 +55,14 @@ fn extract_sequential_blocks(
             _ => continue,
         } as i32;
 
-        let Some(state_var) = sub_block.qualifiers.first().and_then(qualifier_to_string) else {
+        let state_vars: Vec<String> = sub_block
+            .qualifiers
+            .iter()
+            .filter_map(qualifier_to_string)
+            .collect();
+        if state_vars.is_empty() {
             continue;
-        };
+        }
 
         let mut next_state = String::new();
         let mut data_in = String::new();
@@ -85,12 +90,14 @@ fn extract_sequential_blocks(
             continue;
         }
 
-        sequential.push(Sequential {
-            state_var,
-            next_state,
-            clock_expr,
-            kind,
-        });
+        for state_var in state_vars {
+            sequential.push(Sequential {
+                state_var,
+                next_state: next_state.clone(),
+                clock_expr: clock_expr.clone(),
+                kind,
+            });
+        }
     }
     sequential
 }
@@ -421,12 +428,78 @@ mod tests {
         let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
         let cell = &lib.cells[0];
         assert_eq!(cell.name, "my_scan_ff");
-        assert_eq!(cell.sequential.len(), 1);
-        let seq = &cell.sequential[0];
-        assert_eq!(seq.state_var, "IQ");
-        assert_eq!(seq.next_state, "(!D * !SE) + (SE * SI)");
-        assert_eq!(seq.clock_expr, "CLK");
-        assert_eq!(seq.kind, SequentialKind::Ff as i32);
+        assert_eq!(cell.sequential.len(), 2);
+        let mut iq = None;
+        let mut iqn = None;
+        for seq in &cell.sequential {
+            match seq.state_var.as_str() {
+                "IQ" => iq = Some(seq),
+                "IQN" => iqn = Some(seq),
+                other => panic!("Unexpected state var in test: {}", other),
+            }
+        }
+        let iq = iq.expect("missing IQ state");
+        let iqn = iqn.expect("missing IQN state");
+        assert_eq!(iq.next_state, "(!D * !SE) + (SE * SI)");
+        assert_eq!(iq.clock_expr, "CLK");
+        assert_eq!(iq.kind, SequentialKind::Ff as i32);
+        assert_eq!(iqn.next_state, "(!D * !SE) + (SE * SI)");
+        assert_eq!(iqn.clock_expr, "CLK");
+        assert_eq!(iqn.kind, SequentialKind::Ff as i32);
+    }
+
+    #[test]
+    fn test_ff_multiple_state_vars_are_captured() {
+        // Mirrors ASAP7 `DFFLQNx1_ASAP7_75t_R` with `ff (IQ,IQN)`.
+        let liberty_text = r#"
+        library (my_library) {
+            cell (my_ff) {
+                area: 2.0;
+                pin (CLK) {
+                    direction: input;
+                }
+                pin (D) {
+                    direction: input;
+                }
+                pin (Q) {
+                    direction: output;
+                    function: "IQ";
+                }
+                pin (QN) {
+                    direction: output;
+                    function: "IQN";
+                }
+                ff (IQ, IQN) {
+                    clocked_on : "CLK";
+                    next_state : "D";
+                    power_down_function : "(!VDD) + (VSS)";
+                }
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        let cell = &lib.cells[0];
+        assert_eq!(cell.name, "my_ff");
+        assert_eq!(cell.sequential.len(), 2);
+        let mut iq = None;
+        let mut iqn = None;
+        for seq in &cell.sequential {
+            match seq.state_var.as_str() {
+                "IQ" => iq = Some(seq),
+                "IQN" => iqn = Some(seq),
+                other => panic!("Unexpected state var in test: {}", other),
+            }
+        }
+        let iq = iq.expect("missing IQ state");
+        let iqn = iqn.expect("missing IQN state");
+        assert_eq!(iq.next_state, "D");
+        assert_eq!(iq.clock_expr, "CLK");
+        assert_eq!(iq.kind, SequentialKind::Ff as i32);
+        assert_eq!(iqn.next_state, "D");
+        assert_eq!(iqn.clock_expr, "CLK");
+        assert_eq!(iqn.kind, SequentialKind::Ff as i32);
     }
 
     #[test]
@@ -460,12 +533,24 @@ mod tests {
         assert_eq!(lib.cells.len(), 1);
         let cell = &lib.cells[0];
         assert_eq!(cell.name, "my_latch");
-        assert_eq!(cell.sequential.len(), 1);
-        let seq = &cell.sequential[0];
-        assert_eq!(seq.state_var, "IQ");
-        assert_eq!(seq.next_state, "D");
-        assert_eq!(seq.clock_expr, "CLK");
-        assert_eq!(seq.kind, SequentialKind::Latch as i32);
+        assert_eq!(cell.sequential.len(), 2);
+        let mut iq = None;
+        let mut iqn = None;
+        for seq in &cell.sequential {
+            match seq.state_var.as_str() {
+                "IQ" => iq = Some(seq),
+                "IQN" => iqn = Some(seq),
+                other => panic!("Unexpected state var in test: {}", other),
+            }
+        }
+        let iq = iq.expect("missing IQ state");
+        let iqn = iqn.expect("missing IQN state");
+        assert_eq!(iq.next_state, "D");
+        assert_eq!(iq.clock_expr, "CLK");
+        assert_eq!(iq.kind, SequentialKind::Latch as i32);
+        assert_eq!(iqn.next_state, "D");
+        assert_eq!(iqn.clock_expr, "CLK");
+        assert_eq!(iqn.kind, SequentialKind::Latch as i32);
         let mut clk_is_clocking = None;
         let mut d_is_clocking = None;
         let mut q_is_clocking = None;
