@@ -60,6 +60,7 @@ fn extract_sequential_blocks(
         };
 
         let mut next_state = String::new();
+        let mut data_in = String::new();
         let mut clock_expr = String::new();
         for seq_member in &sub_block.members {
             let crate::liberty::liberty_parser::BlockMember::BlockAttr(attr) = seq_member else {
@@ -67,6 +68,8 @@ fn extract_sequential_blocks(
             };
             if attr.attr_name == "next_state" {
                 next_state = value_to_string(&attr.value);
+            } else if sub_block.block_type == "latch" && attr.attr_name == "data_in" {
+                data_in = value_to_string(&attr.value);
             } else if (sub_block.block_type == "ff" && attr.attr_name == "clocked_on")
                 || (sub_block.block_type == "latch" && attr.attr_name == "enable")
             {
@@ -74,7 +77,11 @@ fn extract_sequential_blocks(
             }
         }
 
-        if next_state.is_empty() {
+        if next_state.is_empty() && kind == (SequentialKind::Latch as i32) && !data_in.is_empty() {
+            next_state = data_in;
+        }
+
+        if next_state.is_empty() && clock_expr.is_empty() {
             continue;
         }
 
@@ -420,6 +427,59 @@ mod tests {
         assert_eq!(seq.next_state, "(!D * !SE) + (SE * SI)");
         assert_eq!(seq.clock_expr, "CLK");
         assert_eq!(seq.kind, SequentialKind::Ff as i32);
+    }
+
+    #[test]
+    fn test_latch_enable_marks_clocking_pin_and_data_in_captured() {
+        // Mirrors ASAP7 `DHLx2_ASAP7_75t_R` latch block with data_in/enable.
+        let liberty_text = r#"
+        library (my_library) {
+            cell (my_latch) {
+                area: 1.5;
+                pin (CLK) {
+                    direction: input;
+                }
+                pin (D) {
+                    direction: input;
+                }
+                pin (Q) {
+                    direction: output;
+                    function: "IQ";
+                }
+                latch (IQ, IQN) {
+                    data_in : "D";
+                    enable : "CLK";
+                    power_down_function : "(!VDD) + (VSS)";
+                }
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        assert_eq!(lib.cells.len(), 1);
+        let cell = &lib.cells[0];
+        assert_eq!(cell.name, "my_latch");
+        assert_eq!(cell.sequential.len(), 1);
+        let seq = &cell.sequential[0];
+        assert_eq!(seq.state_var, "IQ");
+        assert_eq!(seq.next_state, "D");
+        assert_eq!(seq.clock_expr, "CLK");
+        assert_eq!(seq.kind, SequentialKind::Latch as i32);
+        let mut clk_is_clocking = None;
+        let mut d_is_clocking = None;
+        let mut q_is_clocking = None;
+        for pin in &cell.pins {
+            match pin.name.as_str() {
+                "CLK" => clk_is_clocking = Some(pin.is_clocking_pin),
+                "D" => d_is_clocking = Some(pin.is_clocking_pin),
+                "Q" => q_is_clocking = Some(pin.is_clocking_pin),
+                other => panic!("Unexpected pin name in test: {}", other),
+            }
+        }
+        assert_eq!(clk_is_clocking, Some(true));
+        assert_eq!(d_is_clocking, Some(false));
+        assert_eq!(q_is_clocking, Some(false));
     }
 
     #[test]
