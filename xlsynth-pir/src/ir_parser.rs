@@ -1025,6 +1025,26 @@ impl Parser {
                     maybe_id.unwrap(),
                 )
             }
+            "ext_prio_encode" => {
+                let arg = self.parse_node_ref(&node_env, "ext_prio_encode arg")?;
+                self.drop_or_error(",")?;
+                let lsb_prio = self.parse_bool_attribute("lsb_prio")?;
+                if self.peek_is(",") {
+                    self.dropc()?;
+                    let id_attr = self.parse_id_attribute()?;
+                    maybe_id = Some(id_attr);
+                }
+                if maybe_id.is_none() {
+                    return Err(ParseError::new(format!(
+                        "expected id for ext_prio_encode; rest_of_line: {:?}",
+                        self.rest_of_line()
+                    )));
+                }
+                (
+                    ir::NodePayload::ExtPrioEncode { arg, lsb_prio },
+                    maybe_id.unwrap(),
+                )
+            }
             "assert" => {
                 let token = self.parse_node_ref(&node_env, "assert token")?;
                 self.drop_or_error(",")?;

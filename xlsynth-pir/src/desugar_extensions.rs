@@ -13,6 +13,7 @@
 
 use crate::ir::{Binop, Fn, Node, NodePayload, NodeRef, Package, PackageMember, Type, Unop};
 use crate::ir_utils::compact_and_toposort_in_place;
+use crate::math::ceil_log2;
 
 #[derive(Debug, Clone)]
 pub struct DesugarError {
@@ -154,11 +155,45 @@ fn desugar_ext_carry_out_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
     Ok(changed)
 }
 
+fn desugar_ext_prio_encode_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
+    let mut changed = false;
+
+    // Snapshot length so we only visit original nodes; desugaring appends nodes.
+    let original_len = f.nodes.len();
+    for idx in 0..original_len {
+        let nr = NodeRef { index: idx };
+        let payload = f.get_node(nr).payload.clone();
+        let NodePayload::ExtPrioEncode { arg, lsb_prio } = payload else {
+            continue;
+        };
+        changed = true;
+
+        let n = expect_bits_width(f, arg, "ext_prio_encode.arg")?;
+        let one_hot_w = n.saturating_add(1);
+        let out_w = ceil_log2(one_hot_w);
+
+        let one_hot = push_node(
+            f,
+            Type::Bits(one_hot_w),
+            NodePayload::OneHot { arg, lsb_prio },
+        );
+        let encoded = push_node(f, Type::Bits(out_w), NodePayload::Encode { arg: one_hot });
+
+        // Overwrite the ext node in-place; compaction/toposort will place deps
+        // before this node.
+        let node = f.get_node_mut(nr);
+        node.ty = Type::Bits(out_w);
+        node.payload = NodePayload::Unop(Unop::Identity, encoded);
+    }
+
+    Ok(changed)
+}
+
 /// Desugars extension ops within `f` into upstream-compatible PIR operations.
 ///
 /// This function also normalizes the node list into a valid topological order.
 pub fn desugar_extensions_in_fn(f: &mut Fn) -> Result<(), DesugarError> {
-    let _changed = desugar_ext_carry_out_in_fn(f)?;
+    let _changed = desugar_ext_carry_out_in_fn(f)? | desugar_ext_prio_encode_in_fn(f)?;
     compact_and_toposort_in_place(f).map_err(DesugarError::new)?;
     Ok(())
 }

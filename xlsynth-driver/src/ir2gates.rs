@@ -281,6 +281,7 @@ fn ir_to_gatefn_with_stats(
             hash,
             check_equivalence: false,
             enable_rewrite_carry_out,
+            enable_rewrite_prio_encode: false,
             adder_mapping: AdderMapping::default(),
             mul_adder_mapping: None,
             aug_opt: Default::default(),

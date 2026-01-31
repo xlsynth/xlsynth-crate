@@ -391,6 +391,20 @@ pub enum NodePayload {
         rhs: NodeRef,
         c_in: NodeRef,
     },
+    /// Extended (non-upstream) op: specialized lowering for the idiom
+    /// `encode(one_hot(x, lsb_prio=<...>))` when `x` has a power-of-two bit
+    /// width.
+    ///
+    /// Semantics: equivalent to `encode(one_hot(arg, lsb_prio=...))`.
+    ///
+    /// Notably, this preserves the sentinel semantics of
+    /// `encode(one_hot(...))`: when `arg` is all-zeros, the result is the
+    /// index `N` (where `arg: bits[N]`), which corresponds to the extra
+    /// one-hot bit produced by `one_hot`.
+    ExtPrioEncode {
+        arg: NodeRef,
+        lsb_prio: bool,
+    },
     Assert {
         token: NodeRef,
         activate: NodeRef,
@@ -456,7 +470,10 @@ pub enum NodePayload {
 
 impl NodePayload {
     pub fn is_extension_op(&self) -> bool {
-        matches!(self, NodePayload::ExtCarryOut { .. })
+        matches!(
+            self,
+            NodePayload::ExtCarryOut { .. } | NodePayload::ExtPrioEncode { .. }
+        )
     }
 
     pub fn get_operator(&self) -> &str {
@@ -478,6 +495,7 @@ impl NodePayload {
             NodePayload::BitSlice { .. } => "bit_slice",
             NodePayload::BitSliceUpdate { .. } => "bit_slice_update",
             NodePayload::ExtCarryOut { .. } => "ext_carry_out",
+            NodePayload::ExtPrioEncode { .. } => "ext_prio_encode",
             NodePayload::Assert { .. } => "assert",
             NodePayload::Trace { .. } => "trace",
             NodePayload::AfterAll(_) => "after_all",
@@ -620,6 +638,12 @@ impl NodePayload {
                 get_name(*lhs),
                 get_name(*rhs),
                 get_name(*c_in),
+                id
+            ),
+            NodePayload::ExtPrioEncode { arg, lsb_prio } => format!(
+                "ext_prio_encode({}, lsb_prio={}, id={})",
+                get_name(*arg),
+                lsb_prio,
                 id
             ),
             NodePayload::Unop(op, arg) => {

@@ -71,6 +71,7 @@ top fn cone(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
         Some(range_info.as_ref()),
         PrepForGatifyOptions {
             enable_rewrite_carry_out: true,
+            ..PrepForGatifyOptions::default()
         },
     );
     let prepared_text = prepared.to_string();
@@ -90,6 +91,7 @@ top fn cone(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
             mul_adder_mapping: None,
             range_info: Some(range_info),
             enable_rewrite_carry_out: true,
+            enable_rewrite_prio_encode: false,
         },
     )
     .expect("gatify");
@@ -110,6 +112,7 @@ fn carry_out_rewrite_sweep_up_to_4_bits_only_triggers_for_msb_slice() {
                 None,
                 PrepForGatifyOptions {
                     enable_rewrite_carry_out: true,
+                    ..PrepForGatifyOptions::default()
                 },
             );
             let prepared_text = prepared.to_string();
@@ -137,6 +140,7 @@ fn carry_out_rewrite_sweep_up_to_4_bits_only_triggers_for_msb_slice() {
                     mul_adder_mapping: None,
                     range_info: None,
                     enable_rewrite_carry_out: true,
+                    enable_rewrite_prio_encode: false,
                 },
             )
             .expect("gatify");
@@ -167,6 +171,7 @@ top fn cone(a: bits[9] id=1, b: bits[9] id=2) -> bits[1] {
         None,
         PrepForGatifyOptions {
             enable_rewrite_carry_out: true,
+            ..PrepForGatifyOptions::default()
         },
     );
     let prepared_text = prepared.to_string();
@@ -186,6 +191,7 @@ top fn cone(a: bits[9] id=1, b: bits[9] id=2) -> bits[1] {
             mul_adder_mapping: None,
             range_info: None,
             enable_rewrite_carry_out: true,
+            enable_rewrite_prio_encode: false,
         },
     )
     .expect("gatify");
@@ -217,6 +223,7 @@ top fn cone(p0: bits[9] id=1, p1: bits[9] id=2) -> bits[1] {
         Some(range_info.as_ref()),
         PrepForGatifyOptions {
             enable_rewrite_carry_out: true,
+            ..PrepForGatifyOptions::default()
         },
     );
     let prepared_text = prepared.to_string();
@@ -236,6 +243,7 @@ top fn cone(p0: bits[9] id=1, p1: bits[9] id=2) -> bits[1] {
             mul_adder_mapping: None,
             range_info: Some(range_info),
             enable_rewrite_carry_out: true,
+            enable_rewrite_prio_encode: false,
         },
     )
     .expect("gatify");

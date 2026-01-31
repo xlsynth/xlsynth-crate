@@ -711,17 +711,17 @@ pub fn gatify_prio_encode(
     gb: &mut GateBuilder,
     bits: &AigBitVector,
     lsb_prio: bool,
-) -> (AigOperand, AigBitVector) {
+) -> Result<(AigOperand, AigBitVector), String> {
     let bit_count = bits.get_bit_count();
-    assert!(
-        bit_count > 0,
-        "gatify_prio_encode requires a non-empty input"
-    );
-    assert!(
-        bit_count.is_power_of_two(),
-        "gatify_prio_encode requires power-of-two input width; got {}",
-        bit_count
-    );
+    if bit_count == 0 {
+        return Err("gatify_prio_encode requires a non-empty input".to_string());
+    }
+    if !bit_count.is_power_of_two() {
+        return Err(format!(
+            "gatify_prio_encode requires power-of-two input width; got {}",
+            bit_count
+        ));
+    }
 
     fn prio_encode_recursive(
         gb: &mut GateBuilder,
@@ -768,7 +768,7 @@ pub fn gatify_prio_encode(
             *bit = gb.add_and_binary(any, inverted);
         }
     }
-    (any, AigBitVector::from_lsb_is_index_0(&idx_vec))
+    Ok((any, AigBitVector::from_lsb_is_index_0(&idx_vec)))
 }
 
 pub fn gatify_one_hot_with_nonzero_flag_for_area(
