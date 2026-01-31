@@ -34,6 +34,14 @@ pre-commit run --all-files
 
 PRs that fail this check will not be accepted.
 
+## Tests
+
+Completed changes must pass either `cargo test --workspace` or `cargo nextest run`.
+
+If network access is unavailable, it is acceptable to exclude the crates.io
+version checks in `xlsynth-test-helpers/tests/version_test.rs` (which require
+crates.io metadata). Document that exclusion in the change notes.
+
 ## Agent Guidance: xlsynth-g8r and Fuzz Targets
 
 If you are modifying code in the `xlsynth-g8r` crate, you **must** ensure that all related fuzz targets (such as those in `xlsynth-g8r/fuzz/fuzz_targets`) still build. CI will fail if any fuzz target does not build. Always check the build status of these fuzz targets after making changes to `xlsynth-g8r`.

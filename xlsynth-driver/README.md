@@ -459,6 +459,20 @@ Computes the Graph-Edit-Distance between two IR functions. Without further
 flags a summary line like `Distance: N` is printed on **stdout**. With
 `--json=true` the result is emitted as JSON.
 
+### `ir-fn-node-count`
+
+Prints the node count for a single IR function (including parameter nodes, excluding the reserved Nil node).
+
+- Positional arguments: `<ir_input_file>`
+- Optional:
+  - `--top <NAME>` – function name to count (overrides the package top).
+
+Example:
+
+```shell
+xlsynth-driver ir-fn-node-count my_pkg.ir --top main
+```
+
 ### `ir-query`
 
 Matches a query expression against the top function of an IR package and prints each matching node on **stdout**.
