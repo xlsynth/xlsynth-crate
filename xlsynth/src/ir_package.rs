@@ -152,17 +152,27 @@ impl IrPackage {
     }
 
     pub fn get_type_for_value(&self, value: &IrValue) -> Result<IrType, XlsynthError> {
-        self.with_write(|guard| xls_package_get_type_for_value(guard.mut_c_ptr(), value.ptr))
+        let parent = self.ptr.clone();
+        self.with_write(|guard| {
+            let ptr = xls_package_get_type_for_value(guard.mut_c_ptr(), value.ptr)?;
+            Ok(IrType::new(ptr, parent))
+        })
     }
 
     pub fn get_bits_type(&self, bit_count: u64) -> IrType {
+        let parent = self.ptr.clone();
         self.with_write(|guard| {
-            lib_support::xls_package_get_bits_type(guard.mut_c_ptr(), bit_count)
+            let ptr = lib_support::xls_package_get_bits_type(guard.mut_c_ptr(), bit_count);
+            IrType::new(ptr, parent)
         })
     }
 
     pub fn get_tuple_type(&self, members: &[IrType]) -> IrType {
-        self.with_write(|guard| lib_support::xls_package_get_tuple_type(guard.mut_c_ptr(), members))
+        let parent = self.ptr.clone();
+        self.with_write(|guard| {
+            let ptr = lib_support::xls_package_get_tuple_type(guard.mut_c_ptr(), members);
+            IrType::new(ptr, parent)
+        })
     }
 
     pub fn types_eq(&self, a: &IrType, b: &IrType) -> Result<bool, XlsynthError> {
@@ -170,12 +180,19 @@ impl IrPackage {
     }
 
     pub fn get_token_type(&self) -> IrType {
-        self.with_write(|guard| lib_support::xls_package_get_token_type(guard.mut_c_ptr()))
+        let parent = self.ptr.clone();
+        self.with_write(|guard| {
+            let ptr = lib_support::xls_package_get_token_type(guard.mut_c_ptr());
+            IrType::new(ptr, parent)
+        })
     }
 
     pub fn get_array_type(&self, element_type: &IrType, size: i64) -> IrType {
+        let parent = self.ptr.clone();
         self.with_write(|guard| {
-            lib_support::xls_package_get_array_type(guard.mut_c_ptr(), element_type.ptr, size)
+            let ptr =
+                lib_support::xls_package_get_array_type(guard.mut_c_ptr(), element_type.ptr, size);
+            IrType::new(ptr, parent)
         })
     }
 
@@ -186,6 +203,7 @@ impl IrPackage {
 
 pub struct IrType {
     pub(crate) ptr: *mut xlsynth_sys::CIrType,
+    pub(crate) _parent: Arc<RwLock<IrPackagePtr>>,
 }
 
 impl std::fmt::Display for IrType {
@@ -195,6 +213,13 @@ impl std::fmt::Display for IrType {
 }
 
 impl IrType {
+    pub(crate) fn new(ptr: *mut xlsynth_sys::CIrType, parent: Arc<RwLock<IrPackagePtr>>) -> Self {
+        Self {
+            ptr,
+            _parent: parent,
+        }
+    }
+
     pub fn get_flat_bit_count(&self) -> u64 {
         lib_support::xls_type_get_flat_bit_count(self.ptr)
     }
@@ -202,6 +227,7 @@ impl IrType {
 
 pub struct IrFunctionType {
     pub(crate) ptr: *mut xlsynth_sys::CIrFunctionType,
+    pub(crate) parent: Arc<RwLock<IrPackagePtr>>,
 }
 
 impl std::fmt::Display for IrFunctionType {
@@ -211,6 +237,13 @@ impl std::fmt::Display for IrFunctionType {
 }
 
 impl IrFunctionType {
+    pub(crate) fn new(
+        ptr: *mut xlsynth_sys::CIrFunctionType,
+        parent: Arc<RwLock<IrPackagePtr>>,
+    ) -> Self {
+        Self { ptr, parent }
+    }
+
     /// Returns the number of parameters in this function type.
     pub fn param_count(&self) -> usize {
         lib_support::xls_function_type_param_count(self.ptr) as usize
@@ -218,12 +251,14 @@ impl IrFunctionType {
 
     /// Returns the type of the `i`th parameter.
     pub fn param_type(&self, index: usize) -> Result<IrType, XlsynthError> {
-        lib_support::xls_function_type_get_param_type(self.ptr, index)
+        let ptr = lib_support::xls_function_type_get_param_type(self.ptr, index)?;
+        Ok(IrType::new(ptr, self.parent.clone()))
     }
 
     /// Returns the return type of the function.
     pub fn return_type(&self) -> IrType {
-        lib_support::xls_function_type_get_return_type(self.ptr)
+        let ptr = lib_support::xls_function_type_get_return_type(self.ptr);
+        IrType::new(ptr, self.parent.clone())
     }
 }
 
@@ -281,7 +316,8 @@ impl IrFunction {
 
     pub fn get_type(&self) -> Result<IrFunctionType, XlsynthError> {
         let package_write_guard: RwLockWriteGuard<IrPackagePtr> = self.parent.write().unwrap();
-        xls_function_get_type(&package_write_guard, self.ptr)
+        let ptr = xls_function_get_type(&package_write_guard, self.ptr)?;
+        Ok(IrFunctionType::new(ptr, self.parent.clone()))
     }
 
     /// Returns the name of the `i`th parameter to this function.
@@ -445,6 +481,25 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    #[test]
+    fn test_ir_types_keep_package_alive() {
+        let ir = r#"package test
+
+fn f(x: bits[8] id=1) -> bits[8] {
+  k: bits[8] = literal(value=240, id=2)
+  ret r: bits[8] = and(x, k, id=3)
+}
+"#;
+        let mut package = IrPackage::parse_ir(ir, None).expect("parse success");
+        package.set_top_by_name("f").expect("set top");
+        let f = package.get_function("f").expect("get function");
+        let f_type = f.get_type().expect("get function type");
+        let token_type = package.get_token_type();
+        drop(package);
+        assert_eq!(f_type.to_string(), "(bits[8]) -> bits[8]");
+        assert_eq!(token_type.to_string(), "token");
     }
 
     #[test]

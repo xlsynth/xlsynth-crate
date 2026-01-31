@@ -531,7 +531,9 @@ impl FnBuilder {
 
     pub fn get_type(&self, value: &BValue) -> Option<IrType> {
         let fn_builder_guard = self.fn_builder.read().unwrap();
+        let parent = self.package.clone();
         lib_support::xls_function_builder_get_type(fn_builder_guard, value.ptr.read().unwrap())
+            .map(|ptr| IrType::new(ptr, parent))
     }
 }
 

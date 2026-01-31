@@ -18,7 +18,7 @@ use xlsynth_sys::{
 };
 
 use crate::{
-    ir_package::{IrFunctionType, IrPackagePtr, IrType, ScheduleAndCodegenResult},
+    ir_package::{IrPackagePtr, IrType, ScheduleAndCodegenResult},
     IrBits, IrFunction, IrValue, XlsynthError,
 };
 
@@ -613,41 +613,39 @@ pub(crate) fn xls_verify_package(package: *mut CIrPackage) -> Result<(), Xlsynth
     Ok(())
 }
 
-pub(crate) fn xls_package_get_bits_type(package: *mut CIrPackage, bit_count: u64) -> IrType {
-    let type_raw = unsafe { xlsynth_sys::xls_package_get_bits_type(package, bit_count as i64) };
-    IrType { ptr: type_raw }
+pub(crate) fn xls_package_get_bits_type(package: *mut CIrPackage, bit_count: u64) -> *mut CIrType {
+    unsafe { xlsynth_sys::xls_package_get_bits_type(package, bit_count as i64) }
 }
 
-pub(crate) fn xls_package_get_tuple_type(package: *mut CIrPackage, members: &[IrType]) -> IrType {
+pub(crate) fn xls_package_get_tuple_type(
+    package: *mut CIrPackage,
+    members: &[IrType],
+) -> *mut CIrType {
     let mut members_ptrs: Vec<*mut CIrType> = members.iter().map(|v| v.ptr).collect();
     let members_ptr = members_ptrs.as_mut_ptr();
     let member_count = members_ptrs.len() as i64;
-    let type_raw =
-        unsafe { xlsynth_sys::xls_package_get_tuple_type(package, members_ptr, member_count) };
-    IrType { ptr: type_raw }
+    unsafe { xlsynth_sys::xls_package_get_tuple_type(package, members_ptr, member_count) }
 }
 
 pub(crate) fn xls_package_get_array_type(
     package: *mut CIrPackage,
     element_type: *mut CIrType,
     size: i64,
-) -> IrType {
-    let type_raw = unsafe { xlsynth_sys::xls_package_get_array_type(package, element_type, size) };
-    IrType { ptr: type_raw }
+) -> *mut CIrType {
+    unsafe { xlsynth_sys::xls_package_get_array_type(package, element_type, size) }
 }
 
-pub(crate) fn xls_package_get_token_type(package: *mut CIrPackage) -> IrType {
-    let type_raw = unsafe { xlsynth_sys::xls_package_get_token_type(package) };
-    IrType { ptr: type_raw }
+pub(crate) fn xls_package_get_token_type(package: *mut CIrPackage) -> *mut CIrType {
+    unsafe { xlsynth_sys::xls_package_get_token_type(package) }
 }
 
 pub(crate) fn xls_package_get_type_for_value(
-    package: *const CIrPackage,
-    value: *const CIrValue,
-) -> Result<IrType, XlsynthError> {
+    package: *mut CIrPackage,
+    value: *mut CIrValue,
+) -> Result<*mut CIrType, XlsynthError> {
     let mut result_out: *mut CIrType = std::ptr::null_mut();
     xls_ffi_call!(xlsynth_sys::xls_package_get_type_for_value, package, value; result_out)?;
-    Ok(IrType { ptr: result_out })
+    Ok(result_out)
 }
 
 pub(crate) fn xls_package_get_function(
@@ -706,12 +704,10 @@ pub(crate) fn xls_package_get_functions(
 pub(crate) fn xls_function_get_type(
     _package_write_guard: &RwLockWriteGuard<IrPackagePtr>,
     function: *const CIrFunction,
-) -> Result<IrFunctionType, XlsynthError> {
+) -> Result<*mut CIrFunctionType, XlsynthError> {
     let mut xls_fn_type_out: *mut CIrFunctionType = std::ptr::null_mut();
     xls_ffi_call!(xlsynth_sys::xls_function_get_type, function; xls_fn_type_out)?;
-    Ok(IrFunctionType {
-        ptr: xls_fn_type_out,
-    })
+    Ok(xls_fn_type_out)
 }
 
 pub(crate) fn xls_function_type_to_string(
@@ -1218,13 +1214,13 @@ pub(crate) fn xls_function_builder_last_value(
 pub(crate) fn xls_function_builder_get_type(
     builder: RwLockReadGuard<IrFnBuilderPtr>,
     value: RwLockReadGuard<BValuePtr>,
-) -> Option<IrType> {
+) -> Option<*mut CIrType> {
     let builder_base = unsafe { xlsynth_sys::xls_function_builder_as_builder_base(builder.ptr) };
     let type_raw = unsafe { xlsynth_sys::xls_builder_base_get_type(builder_base, value.ptr) };
     if type_raw.is_null() {
         None
     } else {
-        Some(IrType { ptr: type_raw })
+        Some(type_raw)
     }
 }
 
@@ -1324,14 +1320,14 @@ pub(crate) fn xls_function_type_param_count(t: *mut xlsynth_sys::CIrFunctionType
 pub(crate) fn xls_function_type_get_param_type(
     t: *mut xlsynth_sys::CIrFunctionType,
     index: usize,
-) -> Result<crate::ir_package::IrType, XlsynthError> {
+) -> Result<*mut xlsynth_sys::CIrType, XlsynthError> {
     let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
     let mut type_out: *mut xlsynth_sys::CIrType = std::ptr::null_mut();
     let success = unsafe {
         xlsynth_sys::xls_function_type_get_param_type(t, index, &mut error_out, &mut type_out)
     };
     if success {
-        Ok(crate::ir_package::IrType { ptr: type_out })
+        Ok(type_out)
     } else {
         Err(XlsynthError(unsafe { c_str_to_rust(error_out) }))
     }
@@ -1339,9 +1335,8 @@ pub(crate) fn xls_function_type_get_param_type(
 
 pub(crate) fn xls_function_type_get_return_type(
     t: *mut xlsynth_sys::CIrFunctionType,
-) -> crate::ir_package::IrType {
-    let ptr = unsafe { xlsynth_sys::xls_function_type_get_return_type(t) };
-    crate::ir_package::IrType { ptr }
+) -> *mut xlsynth_sys::CIrType {
+    unsafe { xlsynth_sys::xls_function_type_get_return_type(t) }
 }
 
 pub(crate) fn xls_function_get_param_name(
