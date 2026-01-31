@@ -31,10 +31,46 @@ pub struct AugOptOptions {
     pub mode: AugOptMode,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AugOptRewriteStats {
+    pub guarded_sel_ne1_nor: usize,
+    pub lsb_of_shll: usize,
+    pub pow2_msb_compare_with_eq_tiebreak: usize,
+    pub eq_priority_sel_to_selector_predicate: usize,
+    pub eq_add_zero_to_eq_rhs_sub: usize,
+}
+
+impl AugOptRewriteStats {
+    pub fn total(&self) -> usize {
+        self.guarded_sel_ne1_nor
+            .saturating_add(self.lsb_of_shll)
+            .saturating_add(self.pow2_msb_compare_with_eq_tiebreak)
+            .saturating_add(self.eq_priority_sel_to_selector_predicate)
+            .saturating_add(self.eq_add_zero_to_eq_rhs_sub)
+    }
+
+    fn saturating_add_assign(&mut self, other: AugOptRewriteStats) {
+        self.guarded_sel_ne1_nor = self
+            .guarded_sel_ne1_nor
+            .saturating_add(other.guarded_sel_ne1_nor);
+        self.lsb_of_shll = self.lsb_of_shll.saturating_add(other.lsb_of_shll);
+        self.pow2_msb_compare_with_eq_tiebreak = self
+            .pow2_msb_compare_with_eq_tiebreak
+            .saturating_add(other.pow2_msb_compare_with_eq_tiebreak);
+        self.eq_priority_sel_to_selector_predicate = self
+            .eq_priority_sel_to_selector_predicate
+            .saturating_add(other.eq_priority_sel_to_selector_predicate);
+        self.eq_add_zero_to_eq_rhs_sub = self
+            .eq_add_zero_to_eq_rhs_sub
+            .saturating_add(other.eq_add_zero_to_eq_rhs_sub);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AugOptRunResult {
     pub output_text: String,
     pub total_rewrites: usize,
+    pub rewrite_stats: AugOptRewriteStats,
 }
 
 impl AugOptRunResult {
@@ -70,6 +106,7 @@ pub fn run_aug_opt_over_ir_text_with_stats(
         return Ok(AugOptRunResult {
             output_text: ir_text.to_string(),
             total_rewrites: 0,
+            rewrite_stats: AugOptRewriteStats::default(),
         });
     }
 
@@ -93,12 +130,12 @@ pub fn run_aug_opt_over_ir_text_with_stats(
             cur_pkg = xlsynth::optimize_ir(&cur_pkg, &top_name)
                 .map_err(|e| format!("aug_opt: optimize_ir initial failed: {e}"))?;
 
-            let mut total_rewrites = 0usize;
+            let mut rewrite_stats = AugOptRewriteStats::default();
             for _round in 0..options.rounds {
                 let cur_text = cur_pkg.to_string();
                 let (lowered_text, rewrites_in_round) =
                     apply_pir_rewrites_to_ir_text(&cur_text, &top_name)?;
-                total_rewrites = total_rewrites.saturating_add(rewrites_in_round);
+                rewrite_stats.saturating_add_assign(rewrites_in_round);
 
                 let mut next_pkg = xlsynth::IrPackage::parse_ir(&lowered_text, None)
                     .map_err(|e| format!("aug_opt: xlsynth parse_ir (post-rewrite) failed: {e}"))?;
@@ -111,12 +148,13 @@ pub fn run_aug_opt_over_ir_text_with_stats(
 
             Ok(AugOptRunResult {
                 output_text: cur_pkg.to_string(),
-                total_rewrites,
+                total_rewrites: rewrite_stats.total(),
+                rewrite_stats,
             })
         }
         AugOptMode::PirOnly => {
             let mut cur_text = ir_text.to_string();
-            let mut total_rewrites = 0usize;
+            let mut rewrite_stats = AugOptRewriteStats::default();
 
             // Even with zero rounds, we still want to validate the requested top
             // and ensure the emitted text marks it as top.
@@ -134,24 +172,29 @@ pub fn run_aug_opt_over_ir_text_with_stats(
                 return Ok(AugOptRunResult {
                     output_text: pir_pkg.to_string(),
                     total_rewrites: 0,
+                    rewrite_stats: AugOptRewriteStats::default(),
                 });
             }
 
             for _round in 0..options.rounds {
                 let (next_text, rewrites_in_round) =
                     apply_pir_rewrites_to_ir_text(&cur_text, &top_name)?;
-                total_rewrites = total_rewrites.saturating_add(rewrites_in_round);
+                rewrite_stats.saturating_add_assign(rewrites_in_round);
                 cur_text = next_text;
             }
             Ok(AugOptRunResult {
                 output_text: cur_text,
-                total_rewrites,
+                total_rewrites: rewrite_stats.total(),
+                rewrite_stats,
             })
         }
     }
 }
 
-fn apply_pir_rewrites_to_ir_text(ir_text: &str, top_name: &str) -> Result<(String, usize), String> {
+fn apply_pir_rewrites_to_ir_text(
+    ir_text: &str,
+    top_name: &str,
+) -> Result<(String, AugOptRewriteStats), String> {
     // Parse with PIR, apply basis-only rewrites to the top function.
     let mut pir_parser = ir_parser::Parser::new(ir_text);
     let mut pir_pkg = pir_parser
@@ -232,23 +275,25 @@ fn verify_no_extension_ops_in_fn(f: &ir::Fn) -> Result<(), String> {
     Ok(())
 }
 
-fn apply_basis_rewrites_to_fn(f: &ir::Fn, range_info: Option<&IrRangeInfo>) -> (ir::Fn, usize) {
+fn apply_basis_rewrites_to_fn(
+    f: &ir::Fn,
+    range_info: Option<&IrRangeInfo>,
+) -> (ir::Fn, AugOptRewriteStats) {
     let mut cloned = f.clone();
-    let mut rewrites = 0usize;
-    rewrites = rewrites.saturating_add(rewrite_guarded_sel_ne_literal1_nor(&mut cloned));
-    rewrites = rewrites.saturating_add(rewrite_lsb_of_shll_via_shift_is_zero(&mut cloned));
-    rewrites = rewrites.saturating_add(rewrite_pow2_msb_compare_with_eq_tiebreak(&mut cloned));
-    rewrites = rewrites.saturating_add(rewrite_eq_priority_sel_to_selector_predicate(
-        &mut cloned,
-        range_info,
-    ));
-    rewrites = rewrites.saturating_add(rewrite_eq_add_zero_to_eq_rhs_sub(&mut cloned));
+    let mut stats = AugOptRewriteStats::default();
+    stats.guarded_sel_ne1_nor = rewrite_guarded_sel_ne_literal1_nor(&mut cloned);
+    stats.lsb_of_shll = rewrite_lsb_of_shll_via_shift_is_zero(&mut cloned);
+    stats.pow2_msb_compare_with_eq_tiebreak =
+        rewrite_pow2_msb_compare_with_eq_tiebreak(&mut cloned);
+    stats.eq_priority_sel_to_selector_predicate =
+        rewrite_eq_priority_sel_to_selector_predicate(&mut cloned, range_info);
+    stats.eq_add_zero_to_eq_rhs_sub = rewrite_eq_add_zero_to_eq_rhs_sub(&mut cloned);
     // Ensure textual IR is defs-before-uses by reordering body nodes into a
     // topological order (while preserving PIR layout invariants). This makes
     // it safe for rewrites to append new nodes.
     ir_utils::compact_and_toposort_in_place(&mut cloned)
         .expect("aug_opt: compact_and_toposort_in_place failed");
-    (cloned, rewrites)
+    (cloned, stats)
 }
 
 fn next_text_id(f: &ir::Fn) -> usize {
