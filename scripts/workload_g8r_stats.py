@@ -24,7 +24,9 @@ Environment:
 Usage:
   python scripts/workload_g8r_stats.py --workload bf16_add --out-dir /tmp/bf16stats
   python scripts/workload_g8r_stats.py --workload bf16_mul --out-dir /tmp/bf16stats
+  python scripts/workload_g8r_stats.py --workload clz_10   --out-dir /tmp/clzstats
   python scripts/workload_g8r_stats.py --workload clzt_10  --out-dir /tmp/clztstats
+  python scripts/workload_g8r_stats.py --workload popcount_32 --out-dir /tmp/popcountstats
   # If the driver is not at target/release/xlsynth-driver (e.g. macOS target triple),
   # pass an explicit path:
   python scripts/workload_g8r_stats.py --bin target/aarch64-apple-darwin/release/xlsynth-driver --workload bf16_add --out-dir /tmp/bf16stats
@@ -188,6 +190,27 @@ def _clzt10_dslx() -> str:
     return "import std;\n" "\n" "fn main(x: u10) -> u4 {\n" "    std::clzt(x)\n" "}\n"
 
 
+def _clz10_dslx() -> str:
+    return (
+        "fn main(x: u10) -> u4 {\n"
+        "    // 'clz' is the built-in count-leading-zeros (not the std::clzt helper).\n"
+        "    // Cast to u4 so the IO shape matches the clzt_10 workload.\n"
+        "    (clz(x) as u4)\n"
+        "}\n"
+    )
+
+
+def _popcount_32_dslx() -> str:
+    return (
+        "import std;\n"
+        "\n"
+        "fn main(x: u32) -> u6 {\n"
+        "    // std::popcount returns bits[N]; cast down to the needed count width.\n"
+        "    (std::popcount(x) as u6)\n"
+        "}\n"
+    )
+
+
 def _abs_diff_8_dslx() -> str:
     return (
         "import abs_diff;\n"
@@ -238,7 +261,14 @@ def _collect_env() -> Dict[str, Optional[str]]:
     return {k: os.environ.get(k) for k in keys}
 
 
-KNOWN_WORKLOADS = ("bf16_add", "bf16_mul", "clzt_10", "abs_diff_8")
+KNOWN_WORKLOADS = (
+    "bf16_add",
+    "bf16_mul",
+    "clz_10",
+    "clzt_10",
+    "abs_diff_8",
+    "popcount_32",
+)
 
 
 def main() -> int:
@@ -254,7 +284,7 @@ def main() -> int:
         "--workload",
         required=False,
         choices=list(KNOWN_WORKLOADS),
-        help="Workload to generate (bf16_add|bf16_mul|clzt_10). If omitted, prints a summary table for all.",
+        help="Workload to generate (bf16_add|bf16_mul|clz_10|clzt_10|abs_diff_8|popcount_32). If omitted, prints a summary table for all.",
     )
     parser.add_argument(
         "--out-dir",
@@ -301,8 +331,12 @@ def main() -> int:
                 if wl in ("bf16_add", "bf16_mul"):
                     op = "add" if wl == "bf16_add" else "mul"
                     _write_text(tmp_dslx, _bf16_dslx(op))
+                elif wl == "clz_10":
+                    _write_text(tmp_dslx, _clz10_dslx())
                 elif wl == "clzt_10":
                     _write_text(tmp_dslx, _clzt10_dslx())
+                elif wl == "popcount_32":
+                    _write_text(tmp_dslx, _popcount_32_dslx())
                 elif wl == "abs_diff_8":
                     _write_text(tmp_dslx, _abs_diff_8_dslx())
                 else:
@@ -437,8 +471,12 @@ def main() -> int:
     if args.workload in ("bf16_add", "bf16_mul"):
         op = "add" if args.workload == "bf16_add" else "mul"
         _write_text(dslx_path, _bf16_dslx(op))
+    elif args.workload == "clz_10":
+        _write_text(dslx_path, _clz10_dslx())
     elif args.workload == "clzt_10":
         _write_text(dslx_path, _clzt10_dslx())
+    elif args.workload == "popcount_32":
+        _write_text(dslx_path, _popcount_32_dslx())
     elif args.workload == "abs_diff_8":
         _write_text(dslx_path, _abs_diff_8_dslx())
     else:
