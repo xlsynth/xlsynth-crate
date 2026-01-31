@@ -4,6 +4,7 @@
 
 use crate::aig::gate::{AigBitVector, AigOperand, GateFn};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
+use crate::liberty::cell_formula::Term;
 use crate::liberty_proto::Library;
 use crate::netlist::parse::{Net, NetIndex, NetlistModule};
 use std::collections::HashMap;
@@ -11,10 +12,39 @@ use std::collections::HashSet;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
 
+fn substitute_state_vars_in_term(
+    term: &Term,
+    sequential_terms: &HashMap<String, (Term, String)>,
+) -> Term {
+    match term {
+        Term::Input(name) => sequential_terms
+            .get(name)
+            .map(|(replacement, _)| replacement.clone())
+            .unwrap_or_else(|| Term::Input(name.clone())),
+        Term::And(lhs, rhs) => Term::And(
+            Box::new(substitute_state_vars_in_term(lhs, sequential_terms)),
+            Box::new(substitute_state_vars_in_term(rhs, sequential_terms)),
+        ),
+        Term::Or(lhs, rhs) => Term::Or(
+            Box::new(substitute_state_vars_in_term(lhs, sequential_terms)),
+            Box::new(substitute_state_vars_in_term(rhs, sequential_terms)),
+        ),
+        Term::Xor(lhs, rhs) => Term::Xor(
+            Box::new(substitute_state_vars_in_term(lhs, sequential_terms)),
+            Box::new(substitute_state_vars_in_term(rhs, sequential_terms)),
+        ),
+        Term::Negate(inner) => Term::Negate(Box::new(substitute_state_vars_in_term(
+            inner,
+            sequential_terms,
+        ))),
+        Term::Constant(value) => Term::Constant(*value),
+    }
+}
+
 fn build_cell_formula_map(
     liberty_lib: &Library,
     collapse_sequential: bool,
-) -> Result<HashMap<(String, String), (crate::liberty::cell_formula::Term, String)>, String> {
+) -> Result<HashMap<(String, String), (Term, String)>, String> {
     let mut cell_formula_map = HashMap::new();
     for cell in &liberty_lib.cells {
         let pin_names: HashSet<String> = cell.pins.iter().map(|pin| pin.name.clone()).collect();
@@ -101,27 +131,31 @@ fn build_cell_formula_map(
         }
         for pin in &cell.pins {
             if pin.direction == 1 && !pin.function.is_empty() {
-                if collapse_sequential {
-                    // If the pin function references a sequential state variable (e.g. IQ),
-                    // prefer the sequential next_state formula as the driving logic.
-                    if let Some((term, next_state_string)) = sequential_terms.get(&pin.function) {
-                        cell_formula_map.insert(
-                            (cell.name.clone(), pin.name.clone()),
-                            (term.clone(), next_state_string.clone()),
-                        );
-                        continue;
-                    }
-                    if state_vars.contains(pin.function.as_str()) {
-                        return Err(format!(
-                            "collapse_sequential could not safely collapse state variable '{}' for cell '{}' output pin '{}' (function \"{}\")",
-                            pin.function, cell.name, pin.name, pin.function
-                        ));
-                    }
-                }
-
                 let original_formula_string = pin.function.clone();
                 match crate::liberty::cell_formula::parse_formula(&pin.function) {
                     Ok(term) => {
+                        let term = if collapse_sequential {
+                            let replaced = substitute_state_vars_in_term(&term, &sequential_terms);
+                            let mut remaining_state_refs: Vec<String> = replaced
+                                .inputs()
+                                .into_iter()
+                                .filter(|name| state_vars.contains(name))
+                                .collect();
+                            remaining_state_refs.sort();
+                            remaining_state_refs.dedup();
+                            if !remaining_state_refs.is_empty() {
+                                return Err(format!(
+                                    "collapse_sequential could not safely collapse state variables [{}] for cell '{}' output pin '{}' (function \"{}\")",
+                                    remaining_state_refs.join(", "),
+                                    cell.name,
+                                    pin.name,
+                                    pin.function
+                                ));
+                            }
+                            replaced
+                        } else {
+                            term
+                        };
                         cell_formula_map.insert(
                             (cell.name.clone(), pin.name.clone()),
                             (term, original_formula_string),
