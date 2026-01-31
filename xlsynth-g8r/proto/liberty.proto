@@ -45,4 +45,8 @@ message Sequential {
   string clock_expr = 3;
   // The originating Liberty block kind: ff or latch.
   SequentialKind kind = 4;
+  // Async clear expression when present on flops.
+  string clear_expr = 5;
+  // Async preset expression when present on flops.
+  string preset_expr = 6;
 }

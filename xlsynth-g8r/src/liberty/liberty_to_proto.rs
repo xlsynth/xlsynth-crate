@@ -67,6 +67,8 @@ fn extract_sequential_blocks(
         let mut next_state = String::new();
         let mut data_in = String::new();
         let mut clock_expr = String::new();
+        let mut clear_expr = String::new();
+        let mut preset_expr = String::new();
         for seq_member in &sub_block.members {
             let crate::liberty::liberty_parser::BlockMember::BlockAttr(attr) = seq_member else {
                 continue;
@@ -75,6 +77,10 @@ fn extract_sequential_blocks(
                 next_state = value_to_string(&attr.value);
             } else if sub_block.block_type == "latch" && attr.attr_name == "data_in" {
                 data_in = value_to_string(&attr.value);
+            } else if sub_block.block_type == "ff" && attr.attr_name == "clear" {
+                clear_expr = value_to_string(&attr.value);
+            } else if sub_block.block_type == "ff" && attr.attr_name == "preset" {
+                preset_expr = value_to_string(&attr.value);
             } else if (sub_block.block_type == "ff" && attr.attr_name == "clocked_on")
                 || (sub_block.block_type == "latch" && attr.attr_name == "enable")
             {
@@ -96,6 +102,8 @@ fn extract_sequential_blocks(
                 next_state: next_state.clone(),
                 clock_expr: clock_expr.clone(),
                 kind,
+                clear_expr: clear_expr.clone(),
+                preset_expr: preset_expr.clone(),
             });
         }
     }
