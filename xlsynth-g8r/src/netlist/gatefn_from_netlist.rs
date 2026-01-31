@@ -44,9 +44,13 @@ fn substitute_state_vars_in_term(
 fn build_cell_formula_map(
     liberty_lib: &Library,
     collapse_sequential: bool,
+    used_cells: &HashSet<String>,
 ) -> Result<HashMap<(String, String), (Term, String)>, String> {
     let mut cell_formula_map = HashMap::new();
     for cell in &liberty_lib.cells {
+        if !used_cells.contains(&cell.name) {
+            continue;
+        }
         let pin_names: HashSet<String> = cell.pins.iter().map(|pin| pin.name.clone()).collect();
         let state_vars: HashSet<String> = cell
             .sequential
@@ -323,7 +327,13 @@ pub fn project_gatefn_from_netlist_and_liberty_with_options(
     dff_cells_inverted: &std::collections::HashSet<String>,
     options: &GateFnProjectOptions,
 ) -> Result<GateFn, String> {
-    let cell_formula_map = build_cell_formula_map(liberty_lib, options.collapse_sequential)?;
+    let used_cell_names: HashSet<String> = module
+        .instances
+        .iter()
+        .filter_map(|inst| interner.resolve(inst.type_name).map(str::to_string))
+        .collect();
+    let cell_formula_map =
+        build_cell_formula_map(liberty_lib, options.collapse_sequential, &used_cell_names)?;
     let module_name = interner.resolve(module.name).unwrap();
     let mut gb = GateBuilder::new(module_name.to_string(), GateBuilderOptions::no_opt());
     let mut net_to_bv: HashMap<NetIndex, AigBitVector> = HashMap::new();
@@ -1899,6 +1909,130 @@ mod tests {
         let qn_bit = *qn_output.bit_vector.get_lsb(0);
         assert_eq!(q_bit, d_bit);
         assert_eq!(qn_bit, d_bit.negate());
+    }
+
+    #[test]
+    fn test_collapse_ignores_unsupported_unused_cells() {
+        let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
+        let a = interner.get_or_intern("a");
+        let y = interner.get_or_intern("y");
+        let inv = interner.get_or_intern("INV");
+        let u1 = interner.get_or_intern("u1");
+        let nets = vec![
+            Net {
+                name: a,
+                width: None,
+            },
+            Net {
+                name: y,
+                width: None,
+            },
+        ];
+        let ports = vec![
+            NetlistPort {
+                direction: PortDirection::Input,
+                width: None,
+                name: a,
+            },
+            NetlistPort {
+                direction: PortDirection::Output,
+                width: None,
+                name: y,
+            },
+        ];
+        let instances = vec![NetlistInstance {
+            type_name: inv,
+            instance_name: u1,
+            connections: vec![
+                (interner.get_or_intern("A"), NetRef::Simple(NetIndex(0))),
+                (interner.get_or_intern("Y"), NetRef::Simple(NetIndex(1))),
+            ],
+            inst_lineno: 0,
+            inst_colno: 0,
+        }];
+        let module = NetlistModule {
+            name: interner.get_or_intern("top"),
+            ports,
+            wires: vec![],
+            instances,
+        };
+        // Include an unsupported sequential cell in the library, but do not instantiate
+        // it.
+        let liberty_lib = crate::liberty_proto::Library {
+            cells: vec![
+                crate::liberty_proto::Cell {
+                    name: "INV".to_string(),
+                    pins: vec![
+                        crate::liberty_proto::Pin {
+                            name: "A".to_string(),
+                            direction: 2,
+                            function: String::new(),
+                            is_clocking_pin: false,
+                        },
+                        crate::liberty_proto::Pin {
+                            name: "Y".to_string(),
+                            direction: 1,
+                            function: "!A".to_string(),
+                            is_clocking_pin: false,
+                        },
+                    ],
+                    area: 1.0,
+                    sequential: vec![],
+                },
+                crate::liberty_proto::Cell {
+                    name: "DFFEN".to_string(),
+                    pins: vec![
+                        crate::liberty_proto::Pin {
+                            name: "D".to_string(),
+                            direction: 2,
+                            function: String::new(),
+                            is_clocking_pin: false,
+                        },
+                        crate::liberty_proto::Pin {
+                            name: "EN".to_string(),
+                            direction: 2,
+                            function: String::new(),
+                            is_clocking_pin: false,
+                        },
+                        crate::liberty_proto::Pin {
+                            name: "CLK".to_string(),
+                            direction: 2,
+                            function: String::new(),
+                            is_clocking_pin: true,
+                        },
+                        crate::liberty_proto::Pin {
+                            name: "Q".to_string(),
+                            direction: 1,
+                            function: "IQ".to_string(),
+                            is_clocking_pin: false,
+                        },
+                    ],
+                    area: 1.0,
+                    sequential: vec![crate::liberty_proto::Sequential {
+                        state_var: "IQ".to_string(),
+                        next_state: "(!EN * IQ) + (EN * D)".to_string(),
+                        clock_expr: "CLK".to_string(),
+                        kind: crate::liberty_proto::SequentialKind::Ff as i32,
+                        clear_expr: String::new(),
+                        preset_expr: String::new(),
+                    }],
+                },
+            ],
+        };
+        let gate_fn = project_gatefn_from_netlist_and_liberty_with_options(
+            &module,
+            &nets,
+            &interner,
+            &liberty_lib,
+            &HashSet::new(),
+            &HashSet::new(),
+            &GateFnProjectOptions {
+                collapse_sequential: true,
+            },
+        )
+        .expect("unused unsupported sequential cells should not cause collapse to fail");
+        let s = gate_fn.to_string();
+        assert!(s.contains("y[0] = not("), "GateFn output: {s}");
     }
 
     #[test]
