@@ -19,7 +19,6 @@ pub fn handle_ir_fn_node_count(matches: &ArgMatches, _config: &Option<ToolchainC
                 Some("ir-fn-node-count"),
                 vec![],
             );
-            return;
         }
     };
 
@@ -32,7 +31,6 @@ pub fn handle_ir_fn_node_count(matches: &ArgMatches, _config: &Option<ToolchainC
                 Some("ir-fn-node-count"),
                 vec![],
             );
-            return;
         }
     };
 
@@ -43,7 +41,6 @@ pub fn handle_ir_fn_node_count(matches: &ArgMatches, _config: &Option<ToolchainC
                 Some("ir-fn-node-count"),
                 vec![],
             );
-            return;
         }
     }
 
@@ -55,7 +52,6 @@ pub fn handle_ir_fn_node_count(matches: &ArgMatches, _config: &Option<ToolchainC
                 Some("ir-fn-node-count"),
                 vec![],
             );
-            return;
         }
     };
 
