@@ -31,10 +31,46 @@ pub struct AugOptOptions {
     pub mode: AugOptMode,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AugOptRewriteStats {
+    pub guarded_sel_ne1_nor: usize,
+    pub lsb_of_shll: usize,
+    pub pow2_msb_compare_with_eq_tiebreak: usize,
+    pub eq_priority_sel_to_selector_predicate: usize,
+    pub eq_add_zero_to_eq_rhs_sub: usize,
+}
+
+impl AugOptRewriteStats {
+    pub fn total(&self) -> usize {
+        self.guarded_sel_ne1_nor
+            .saturating_add(self.lsb_of_shll)
+            .saturating_add(self.pow2_msb_compare_with_eq_tiebreak)
+            .saturating_add(self.eq_priority_sel_to_selector_predicate)
+            .saturating_add(self.eq_add_zero_to_eq_rhs_sub)
+    }
+
+    fn saturating_add_assign(&mut self, other: AugOptRewriteStats) {
+        self.guarded_sel_ne1_nor = self
+            .guarded_sel_ne1_nor
+            .saturating_add(other.guarded_sel_ne1_nor);
+        self.lsb_of_shll = self.lsb_of_shll.saturating_add(other.lsb_of_shll);
+        self.pow2_msb_compare_with_eq_tiebreak = self
+            .pow2_msb_compare_with_eq_tiebreak
+            .saturating_add(other.pow2_msb_compare_with_eq_tiebreak);
+        self.eq_priority_sel_to_selector_predicate = self
+            .eq_priority_sel_to_selector_predicate
+            .saturating_add(other.eq_priority_sel_to_selector_predicate);
+        self.eq_add_zero_to_eq_rhs_sub = self
+            .eq_add_zero_to_eq_rhs_sub
+            .saturating_add(other.eq_add_zero_to_eq_rhs_sub);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AugOptRunResult {
     pub output_text: String,
     pub total_rewrites: usize,
+    pub rewrite_stats: AugOptRewriteStats,
 }
 
 impl AugOptRunResult {
@@ -70,6 +106,7 @@ pub fn run_aug_opt_over_ir_text_with_stats(
         return Ok(AugOptRunResult {
             output_text: ir_text.to_string(),
             total_rewrites: 0,
+            rewrite_stats: AugOptRewriteStats::default(),
         });
     }
 
@@ -93,12 +130,12 @@ pub fn run_aug_opt_over_ir_text_with_stats(
             cur_pkg = xlsynth::optimize_ir(&cur_pkg, &top_name)
                 .map_err(|e| format!("aug_opt: optimize_ir initial failed: {e}"))?;
 
-            let mut total_rewrites = 0usize;
+            let mut rewrite_stats = AugOptRewriteStats::default();
             for _round in 0..options.rounds {
                 let cur_text = cur_pkg.to_string();
                 let (lowered_text, rewrites_in_round) =
                     apply_pir_rewrites_to_ir_text(&cur_text, &top_name)?;
-                total_rewrites = total_rewrites.saturating_add(rewrites_in_round);
+                rewrite_stats.saturating_add_assign(rewrites_in_round);
 
                 let mut next_pkg = xlsynth::IrPackage::parse_ir(&lowered_text, None)
                     .map_err(|e| format!("aug_opt: xlsynth parse_ir (post-rewrite) failed: {e}"))?;
@@ -111,12 +148,13 @@ pub fn run_aug_opt_over_ir_text_with_stats(
 
             Ok(AugOptRunResult {
                 output_text: cur_pkg.to_string(),
-                total_rewrites,
+                total_rewrites: rewrite_stats.total(),
+                rewrite_stats,
             })
         }
         AugOptMode::PirOnly => {
             let mut cur_text = ir_text.to_string();
-            let mut total_rewrites = 0usize;
+            let mut rewrite_stats = AugOptRewriteStats::default();
 
             // Even with zero rounds, we still want to validate the requested top
             // and ensure the emitted text marks it as top.
@@ -134,24 +172,29 @@ pub fn run_aug_opt_over_ir_text_with_stats(
                 return Ok(AugOptRunResult {
                     output_text: pir_pkg.to_string(),
                     total_rewrites: 0,
+                    rewrite_stats: AugOptRewriteStats::default(),
                 });
             }
 
             for _round in 0..options.rounds {
                 let (next_text, rewrites_in_round) =
                     apply_pir_rewrites_to_ir_text(&cur_text, &top_name)?;
-                total_rewrites = total_rewrites.saturating_add(rewrites_in_round);
+                rewrite_stats.saturating_add_assign(rewrites_in_round);
                 cur_text = next_text;
             }
             Ok(AugOptRunResult {
                 output_text: cur_text,
-                total_rewrites,
+                total_rewrites: rewrite_stats.total(),
+                rewrite_stats,
             })
         }
     }
 }
 
-fn apply_pir_rewrites_to_ir_text(ir_text: &str, top_name: &str) -> Result<(String, usize), String> {
+fn apply_pir_rewrites_to_ir_text(
+    ir_text: &str,
+    top_name: &str,
+) -> Result<(String, AugOptRewriteStats), String> {
     // Parse with PIR, apply basis-only rewrites to the top function.
     let mut pir_parser = ir_parser::Parser::new(ir_text);
     let mut pir_pkg = pir_parser
@@ -232,22 +275,25 @@ fn verify_no_extension_ops_in_fn(f: &ir::Fn) -> Result<(), String> {
     Ok(())
 }
 
-fn apply_basis_rewrites_to_fn(f: &ir::Fn, range_info: Option<&IrRangeInfo>) -> (ir::Fn, usize) {
+fn apply_basis_rewrites_to_fn(
+    f: &ir::Fn,
+    range_info: Option<&IrRangeInfo>,
+) -> (ir::Fn, AugOptRewriteStats) {
     let mut cloned = f.clone();
-    let mut rewrites = 0usize;
-    rewrites = rewrites.saturating_add(rewrite_guarded_sel_ne_literal1_nor(&mut cloned));
-    rewrites = rewrites.saturating_add(rewrite_lsb_of_shll_via_shift_is_zero(&mut cloned));
-    rewrites = rewrites.saturating_add(rewrite_eq_priority_sel_to_selector_predicate(
-        &mut cloned,
-        range_info,
-    ));
-    rewrites = rewrites.saturating_add(rewrite_eq_add_zero_to_eq_rhs_sub(&mut cloned));
+    let mut stats = AugOptRewriteStats::default();
+    stats.guarded_sel_ne1_nor = rewrite_guarded_sel_ne_literal1_nor(&mut cloned);
+    stats.lsb_of_shll = rewrite_lsb_of_shll_via_shift_is_zero(&mut cloned);
+    stats.pow2_msb_compare_with_eq_tiebreak =
+        rewrite_pow2_msb_compare_with_eq_tiebreak(&mut cloned);
+    stats.eq_priority_sel_to_selector_predicate =
+        rewrite_eq_priority_sel_to_selector_predicate(&mut cloned, range_info);
+    stats.eq_add_zero_to_eq_rhs_sub = rewrite_eq_add_zero_to_eq_rhs_sub(&mut cloned);
     // Ensure textual IR is defs-before-uses by reordering body nodes into a
     // topological order (while preserving PIR layout invariants). This makes
     // it safe for rewrites to append new nodes.
     ir_utils::compact_and_toposort_in_place(&mut cloned)
         .expect("aug_opt: compact_and_toposort_in_place failed");
-    (cloned, rewrites)
+    (cloned, stats)
 }
 
 fn next_text_id(f: &ir::Fn) -> usize {
@@ -344,6 +390,175 @@ fn rewrite_lsb_of_shll_via_shift_is_zero(f: &mut ir::Fn) -> usize {
         f.nodes[slice_index].payload = NodePayload::Nary(NaryOp::And, vec![slice_x, eq_s0]);
         f.nodes[slice_index].ty = Type::Bits(1);
 
+        rewrites += 1;
+    }
+
+    rewrites
+}
+
+fn literal_one_hot_index(v: &IrValue) -> Option<usize> {
+    let Ok(bits) = v.to_bits() else {
+        return None;
+    };
+    let w = bits.get_bit_count();
+    if w == 0 {
+        return None;
+    }
+    let mut found: Option<usize> = None;
+    for i in 0..w {
+        if bits.get_bit(i).unwrap_or(false) {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(i);
+        }
+    }
+    found
+}
+
+fn literals_equal_bits(a: &IrValue, b: &IrValue) -> bool {
+    match (a.to_bits(), b.to_bits()) {
+        (Ok(ab), Ok(bb)) => ab == bb,
+        _ => false,
+    }
+}
+
+fn eq_against_literal(f: &ir::Fn, nr: NodeRef) -> Option<(NodeRef, NodeRef, IrValue)> {
+    let NodePayload::Binop(Binop::Eq, a, b) = f.get_node(nr).payload.clone() else {
+        return None;
+    };
+    let candidates = [(a, b), (b, a)];
+    for (maybe_x, maybe_lit) in candidates {
+        let NodePayload::Literal(lit_v) = f.get_node(maybe_lit).payload.clone() else {
+            continue;
+        };
+        return Some((maybe_x, maybe_lit, lit_v));
+    }
+    None
+}
+
+fn ugt_against_literal_rhs(f: &ir::Fn, nr: NodeRef) -> Option<(NodeRef, NodeRef, IrValue)> {
+    let NodePayload::Binop(Binop::Ugt, x, lit_nr) = f.get_node(nr).payload.clone() else {
+        return None;
+    };
+    let NodePayload::Literal(lit_v) = f.get_node(lit_nr).payload.clone() else {
+        return None;
+    };
+    Some((x, lit_nr, lit_v))
+}
+
+/// Rewrite a specific power-of-two compare shape:
+///
+/// `or(ugt(x, 2^(w-1)), and(eq(x, 2^(w-1)), hi))`
+///   →
+/// `and(msb(x), or(or_reduce(x[0..w-1)), hi))`
+///
+/// Notes:
+/// - We intentionally require the power-of-two to be the MSB of `x` (i.e.
+///   `2^(w-1)`) to keep the logic simple and obviously correct.
+/// - This targets the common "truncated compare with tie-breaker bit" pattern.
+fn rewrite_pow2_msb_compare_with_eq_tiebreak(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+
+    for or_index in 0..f.nodes.len() {
+        let NodePayload::Nary(NaryOp::Or, operands) = f.nodes[or_index].payload.clone() else {
+            continue;
+        };
+        if operands.len() != 2 || f.nodes[or_index].ty != Type::Bits(1) {
+            continue;
+        }
+
+        // Try both operand orders: (ugt, and) or (and, ugt).
+        let candidates = [(operands[0], operands[1]), (operands[1], operands[0])];
+        let mut matched: Option<(NodeRef, NodeRef, NodeRef, IrValue)> = None; // (x, hi, lit_nr, lit_v)
+
+        for (maybe_ugt, maybe_and) in candidates {
+            let Some((x_ugt, _lit_ugt_nr, lit_ugt_v)) = ugt_against_literal_rhs(f, maybe_ugt)
+            else {
+                continue;
+            };
+
+            let NodePayload::Nary(NaryOp::And, and_ops) = f.get_node(maybe_and).payload.clone()
+            else {
+                continue;
+            };
+            if and_ops.len() != 2 {
+                continue;
+            }
+
+            // The AND must be (eq(x, lit), hi) in either order.
+            let and_candidates = [(and_ops[0], and_ops[1]), (and_ops[1], and_ops[0])];
+            for (maybe_eq, maybe_hi) in and_candidates {
+                let Some((x_eq, lit_eq_nr, lit_eq_v)) = eq_against_literal(f, maybe_eq) else {
+                    continue;
+                };
+                if x_eq != x_ugt || !literals_equal_bits(&lit_eq_v, &lit_ugt_v) {
+                    continue;
+                }
+                if f.get_node_ty(maybe_hi) != &Type::Bits(1) {
+                    continue;
+                }
+
+                matched = Some((x_ugt, maybe_hi, lit_eq_nr, lit_eq_v));
+                break;
+            }
+            if matched.is_some() {
+                break;
+            }
+        }
+
+        let Some((x, hi, _lit_nr, lit_v)) = matched else {
+            continue;
+        };
+
+        let w = f.get_node_ty(x).bit_count();
+        if w < 2 || f.get_node_ty(x) != &Type::Bits(w) {
+            continue;
+        }
+
+        // Require the literal to be exactly the MSB power-of-two: 2^(w-1).
+        let Some(one_hot_idx) = literal_one_hot_index(&lit_v) else {
+            continue;
+        };
+        if one_hot_idx != w.saturating_sub(1) || f.get_node_ty(x) != &Type::Bits(w) {
+            continue;
+        }
+
+        // msb = x[w-1]
+        let msb = push_node(
+            f,
+            Type::Bits(1),
+            NodePayload::BitSlice {
+                arg: x,
+                start: w - 1,
+                width: 1,
+            },
+        );
+
+        // lo = x[0..w-1)
+        let lo = push_node(
+            f,
+            Type::Bits(w - 1),
+            NodePayload::BitSlice {
+                arg: x,
+                start: 0,
+                width: w - 1,
+            },
+        );
+
+        // lo_nz = or_reduce(lo)
+        let lo_nz = push_node(f, Type::Bits(1), NodePayload::Unop(Unop::OrReduce, lo));
+
+        // rhs = lo_nz | hi
+        let rhs = push_node(
+            f,
+            Type::Bits(1),
+            NodePayload::Nary(NaryOp::Or, vec![lo_nz, hi]),
+        );
+
+        // out = msb & rhs
+        f.nodes[or_index].payload = NodePayload::Nary(NaryOp::And, vec![msb, rhs]);
+        f.nodes[or_index].ty = Type::Bits(1);
         rewrites += 1;
     }
 
@@ -978,6 +1193,59 @@ top fn cone(leaf_52: bits[2] id=1, y: bits[5] id=2) -> bits[1] {
             &out_text,
             "cone",
             &[2, 5],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    #[test]
+    fn aug_opt_rewrites_pow2_msb_compare_with_eq_tiebreak() {
+        let ir_text = r#"package pow2_cmp
+
+top fn main(a: bits[10] id=1, b: bits[10] id=2) -> bits[1] {
+  smul.17: bits[20] = smul(a, b, id=17)
+  bit_slice.8: bits[9] = bit_slice(smul.17, start=0, width=9, id=8)
+  literal.9: bits[9] = literal(value=256, id=9)
+  eq.10: bits[1] = eq(bit_slice.8, literal.9, id=10)
+  bit_slice.11: bits[1] = bit_slice(smul.17, start=9, width=1, id=11)
+  ugt.12: bits[1] = ugt(bit_slice.8, literal.9, id=12)
+  and.13: bits[1] = and(eq.10, bit_slice.11, id=13)
+  ret or.14: bits[1] = or(ugt.12, and.13, id=14)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("main"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("main").expect("top fn");
+
+        let ret_nr = f.ret_node_ref.expect("ret node");
+        let ret_node = f.get_node(ret_nr);
+        assert_eq!(ret_node.ty, Type::Bits(1));
+        match &ret_node.payload {
+            NodePayload::Nary(NaryOp::And, ops) => {
+                assert_eq!(ops.len(), 2, "expected 2-input and; got:\n{}", out_text);
+            }
+            other => panic!(
+                "expected ret to be an and(..) after rewrite; got {:?}\noutput:\n{}",
+                other, out_text
+            ),
+        }
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "main",
+            &[10, 10],
             /* random_samples= */ 2000,
         );
     }
