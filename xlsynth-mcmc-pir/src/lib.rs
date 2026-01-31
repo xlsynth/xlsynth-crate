@@ -195,6 +195,7 @@ fn compute_g8r_stats_for_pir_fn_impl(f: &IrFn) -> Result<(usize, usize)> {
         mul_adder_mapping: None,
         range_info: None,
         enable_rewrite_carry_out: false,
+        enable_rewrite_prio_encode: false,
     };
     let gatify_output = ir2gate::gatify(&top_fn, gatify_options)
         .map_err(|e| anyhow::anyhow!("ir2gate::gatify failed: {}", e))?;

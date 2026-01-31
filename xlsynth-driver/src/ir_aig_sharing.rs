@@ -290,6 +290,7 @@ pub fn handle_ir_aig_sharing(matches: &ArgMatches, _config: &Option<ToolchainCon
         mul_adder_mapping: None,
         range_info: None,
         enable_rewrite_carry_out: false,
+        enable_rewrite_prio_encode: false,
     };
 
     // Streaming proof + streaming per-node mapping output (in PIR topo order).
