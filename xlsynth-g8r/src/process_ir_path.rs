@@ -196,6 +196,7 @@ pub fn process_ir_path_for_cli(
             hash: options.hash,
             check_equivalence: false, // check is done below if requested
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
+            enable_rewrite_prio_encode: false,
             adder_mapping: options.adder_mapping,
             mul_adder_mapping: options.mul_adder_mapping,
             aug_opt: Default::default(),
@@ -224,6 +225,7 @@ pub fn process_ir_path_for_cli(
             None,
             PrepForGatifyOptions {
                 enable_rewrite_carry_out: options.enable_rewrite_carry_out,
+                enable_rewrite_prio_encode: false,
             },
         );
         let mut prepared_pkg = ir_package.clone();
@@ -273,6 +275,7 @@ pub fn process_ir_path_for_cli(
             check_equivalence: false,
             range_info: None,
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
+            enable_rewrite_prio_encode: false,
         };
         let mut per_node: Vec<IndependentOpEntry> = Vec::new();
         let mut cost_by_node_index: Vec<usize> = vec![0; ir_top.nodes.len()];

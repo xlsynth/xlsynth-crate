@@ -17,7 +17,7 @@ use xlsynth_pir::ir_validate;
 use crate::ir2gate_utils::{
     AdderMapping, Direction, array_add_with_carry_out, gatify_add_brent_kung,
     gatify_add_kogge_stone, gatify_add_ripple_carry, gatify_barrel_shifter, gatify_one_hot,
-    gatify_one_hot_select, gatify_one_hot_with_nonzero_flag,
+    gatify_one_hot_select, gatify_one_hot_with_nonzero_flag, gatify_prio_encode,
 };
 
 use crate::gate_builder::ReductionKind;
@@ -2476,6 +2476,37 @@ fn gatify_node(
 
             env.add(node_ref, GateOrVec::Gate(carry));
         }
+        ir::NodePayload::ExtPrioEncode { arg, lsb_prio } => {
+            let arg_bits = env
+                .get_bit_vector(*arg)
+                .expect("ext_prio_encode arg should be present");
+            let (any, idx_bits) = gatify_prio_encode(g8_builder, &arg_bits, *lsb_prio);
+            let sentinel_bit = g8_builder.add_not(any);
+
+            let expected_out_w = idx_bits.get_bit_count().saturating_add(1);
+            assert_eq!(
+                node.ty.bit_count(),
+                expected_out_w,
+                "ExtPrioEncode output width mismatch; expected {} got {}",
+                expected_out_w,
+                node.ty.bit_count()
+            );
+
+            let mut out: Vec<AigOperand> = Vec::with_capacity(expected_out_w);
+            for bit in idx_bits.iter_lsb_to_msb() {
+                out.push(*bit);
+            }
+            out.push(sentinel_bit);
+
+            let out_bits = AigBitVector::from_lsb_is_index_0(&out);
+            for (i, gate) in out_bits.iter_lsb_to_msb().enumerate() {
+                g8_builder.add_tag(
+                    gate.node,
+                    format!("ext_prio_encode_{}_output_bit_{}", node.text_id, i),
+                );
+            }
+            env.add(node_ref, GateOrVec::BitVector(out_bits));
+        }
 
         // -- binary operations
         ir::NodePayload::Binop(ir::Binop::Eq, a, b) => {
@@ -3090,6 +3121,7 @@ pub struct GatifyOptions {
     pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
     pub range_info: Option<Arc<IrRangeInfo>>,
     pub enable_rewrite_carry_out: bool,
+    pub enable_rewrite_prio_encode: bool,
 }
 
 // Type alias for the lowering map
@@ -3136,6 +3168,7 @@ pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, 
         options.range_info.as_deref(),
         PrepForGatifyOptions {
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
+            enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
         },
     );
     validate_fn_for_gatify(&prepared_fn)
@@ -3199,6 +3232,7 @@ pub fn gatify_node_as_fn(
         options.range_info.as_deref(),
         PrepForGatifyOptions {
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
+            enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
         },
     );
     validate_fn_for_gatify(&prepared_fn)
@@ -3325,6 +3359,7 @@ mod tests {
                 mul_adder_mapping: None,
                 range_info: None,
                 enable_rewrite_carry_out: false,
+                enable_rewrite_prio_encode: false,
             },
         )
         .unwrap();
@@ -3360,6 +3395,7 @@ fn f(a: bits[8], b: bits[8]) -> bits[8] {
                 mul_adder_mapping: None,
                 range_info: None,
                 enable_rewrite_carry_out: false,
+                enable_rewrite_prio_encode: false,
             },
         )
         .unwrap();

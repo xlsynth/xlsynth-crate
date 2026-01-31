@@ -375,6 +375,18 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     bitvec: carry,
                 }
             }
+            NodePayload::ExtPrioEncode { arg, lsb_prio } => {
+                let a = env
+                    .get(arg)
+                    .expect("ext_prio_encode.arg must be present")
+                    .clone();
+                let one_hot = solver.xls_one_hot(&a.bitvec, *lsb_prio);
+                let encoded = solver.xls_encode(&one_hot);
+                IrTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec: encoded,
+                }
+            }
             NodePayload::Unop(op, arg) => {
                 let a = env.get(&arg).unwrap().clone();
                 let rep = match op {

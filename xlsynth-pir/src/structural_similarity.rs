@@ -31,7 +31,8 @@ fn compute_node_depth(f: &Fn, node_ref: NodeRef, child_depths: &[usize]) -> usiz
         | NodePayload::GetParam(_)
         | NodePayload::Literal(_)
         | NodePayload::Decode { .. }
-        | NodePayload::Encode { .. } => 0,
+        | NodePayload::Encode { .. }
+        | NodePayload::ExtPrioEncode { .. } => 0,
         _ => 1 + child_depths.iter().copied().max().unwrap_or(0),
     }
 }
@@ -71,6 +72,7 @@ pub fn collect_structural_entries(f: &Fn) -> (Vec<StructuralEntry<FwdHash>>, Vec
             | NodePayload::Unop(_, tuple)
             | NodePayload::Decode { arg: tuple, .. }
             | NodePayload::Encode { arg: tuple }
+            | NodePayload::ExtPrioEncode { arg: tuple, .. }
             | NodePayload::OneHot { arg: tuple, .. }
             | NodePayload::BitSlice { arg: tuple, .. } => {
                 child_hashes.push(hashes[tuple.index]);
