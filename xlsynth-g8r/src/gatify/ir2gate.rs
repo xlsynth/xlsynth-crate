@@ -2480,17 +2480,36 @@ fn gatify_node(
             let arg_bits = env
                 .get_bit_vector(*arg)
                 .expect("ext_prio_encode arg should be present");
-            let (any, idx_bits) = gatify_prio_encode(g8_builder, &arg_bits, *lsb_prio);
-            let sentinel_bit = g8_builder.add_not(any);
+            let in_w = arg_bits.get_bit_count();
+            let expected_out_w = xlsynth_pir::math::ceil_log2(in_w.saturating_add(1));
+            if node.ty.bit_count() != expected_out_w {
+                return Err(format!(
+                    "ExtPrioEncode output width mismatch; expected {} got {}",
+                    expected_out_w,
+                    node.ty.bit_count()
+                ));
+            }
 
-            let expected_out_w = idx_bits.get_bit_count().saturating_add(1);
-            assert_eq!(
-                node.ty.bit_count(),
-                expected_out_w,
-                "ExtPrioEncode output width mismatch; expected {} got {}",
-                expected_out_w,
-                node.ty.bit_count()
-            );
+            // `prep_for_gatify` currently only rewrites into `ext_prio_encode` for
+            // power-of-two widths so it can be lowered using `gatify_prio_encode`.
+            //
+            // However, `ext_prio_encode` is a parseable PIR op for any `bits[N]`,
+            // and other tooling/passes (or hand-authored PIR) might introduce it
+            // at non-power-of-two widths. Keep the contract tight: return a
+            // clean error (rather than panicking).
+            //
+            // In normal flows this should not error, because the upstream
+            // rewrite only emits `ext_prio_encode` for pow2 widths.
+            let (any, idx_bits) = gatify_prio_encode(g8_builder, &arg_bits, *lsb_prio)
+                .map_err(|e| format!("ExtPrioEncode lowering failed: {e}"))?;
+            let sentinel_bit = g8_builder.add_not(any);
+            if idx_bits.get_bit_count().saturating_add(1) != expected_out_w {
+                return Err(format!(
+                    "ExtPrioEncode internal width mismatch; expected {} got {}",
+                    expected_out_w,
+                    idx_bits.get_bit_count().saturating_add(1)
+                ));
+            }
 
             let mut out: Vec<AigOperand> = Vec::with_capacity(expected_out_w);
             for bit in idx_bits.iter_lsb_to_msb() {

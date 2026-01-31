@@ -15,7 +15,8 @@ struct PrioEncodeRow {
 fn stats_for_prio_encode(bit_count: usize, lsb_prio: bool) -> SummaryStats {
     let mut gb = GateBuilder::new("prio_encode".to_string(), GateBuilderOptions::opt());
     let input = gb.add_input("input".to_string(), bit_count);
-    let (any, idx_bits) = gatify_prio_encode(&mut gb, &input, lsb_prio);
+    let (any, idx_bits) =
+        gatify_prio_encode(&mut gb, &input, lsb_prio).expect("test uses pow2 widths only");
     gb.add_output("any".to_string(), any.into());
     gb.add_output("idx".to_string(), idx_bits);
     let gate_fn = gb.build();
