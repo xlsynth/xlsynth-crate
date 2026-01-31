@@ -484,6 +484,25 @@ mod tests {
     }
 
     #[test]
+    fn test_ir_types_keep_package_alive() {
+        let ir = r#"package test
+
+fn f(x: bits[8] id=1) -> bits[8] {
+  k: bits[8] = literal(value=240, id=2)
+  ret r: bits[8] = and(x, k, id=3)
+}
+"#;
+        let mut package = IrPackage::parse_ir(ir, None).expect("parse success");
+        package.set_top_by_name("f").expect("set top");
+        let f = package.get_function("f").expect("get function");
+        let f_type = f.get_type().expect("get function type");
+        let token_type = package.get_token_type();
+        drop(package);
+        assert_eq!(f_type.to_string(), "(bits[8]) -> bits[8]");
+        assert_eq!(token_type.to_string(), "token");
+    }
+
+    #[test]
     fn test_ir_type_tuple() {
         let package = IrPackage::new("test_package").unwrap();
         let u32 = package.get_bits_type(32);
