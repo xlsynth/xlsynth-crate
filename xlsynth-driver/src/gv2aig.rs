@@ -41,12 +41,17 @@ pub fn handle_gv2aig(matches: &clap::ArgMatches) {
     let dff_cell_invert_formula: Option<String> = matches
         .get_one::<String>("dff_cell_invert_formula")
         .map(|s| s.to_string());
+    let collapse_sequential = matches
+        .get_one::<bool>("collapse_sequential")
+        .copied()
+        .unwrap_or(true);
 
     let opts = Gv2AigOptions {
         module_name,
         dff_cells_identity,
         dff_cell_formula,
         dff_cell_invert_formula,
+        collapse_sequential,
     };
 
     let gate_fn = match convert_gv2aig_paths(

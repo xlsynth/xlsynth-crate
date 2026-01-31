@@ -20,6 +20,10 @@ pub fn handle_gv2ir(matches: &clap::ArgMatches) {
     let dff_cell_invert_formula: Option<String> = matches
         .get_one::<String>("dff_cell_invert_formula")
         .map(|s| s.to_string());
+    let collapse_sequential = matches
+        .get_one::<bool>("collapse_sequential")
+        .copied()
+        .unwrap_or(true);
 
     match convert_gv2ir_paths(
         Path::new(netlist_path),
@@ -27,6 +31,7 @@ pub fn handle_gv2ir(matches: &clap::ArgMatches) {
         &dff_cells,
         dff_cell_formula.as_deref(),
         dff_cell_invert_formula.as_deref(),
+        collapse_sequential,
     ) {
         Ok(ir_text) => println!("{}", ir_text),
         Err(e) => {

@@ -13,54 +13,59 @@ use string_interner::{StringInterner, backend::StringBackend};
 
 fn build_cell_formula_map(
     liberty_lib: &Library,
+    collapse_sequential: bool,
 ) -> HashMap<(String, String), (crate::liberty::cell_formula::Term, String)> {
     let mut cell_formula_map = HashMap::new();
     for cell in &liberty_lib.cells {
-        let state_vars: HashSet<String> = cell
-            .sequential
-            .iter()
-            .map(|seq| seq.state_var.clone())
-            .collect();
         let mut sequential_terms: HashMap<String, (crate::liberty::cell_formula::Term, String)> =
             HashMap::new();
-        for seq in &cell.sequential {
-            if seq.state_var.is_empty() || seq.next_state.is_empty() {
-                continue;
-            }
-            match crate::liberty::cell_formula::parse_formula(&seq.next_state) {
-                Ok(term) => {
-                    let mut term = term;
-                    let mut next_state_string = seq.next_state.clone();
-                    if let Some(base_var) = seq.state_var.strip_suffix('N') {
-                        if state_vars.contains(base_var) {
-                            // Common Liberty convention: IQN is the complement of IQ.
-                            term = crate::liberty::cell_formula::Term::Negate(Box::new(term));
-                            next_state_string = format!("!({})", seq.next_state);
-                        }
-                    }
-                    sequential_terms.insert(seq.state_var.clone(), (term, next_state_string));
+        if collapse_sequential {
+            let state_vars: HashSet<String> = cell
+                .sequential
+                .iter()
+                .map(|seq| seq.state_var.clone())
+                .collect();
+            for seq in &cell.sequential {
+                if seq.state_var.is_empty() || seq.next_state.is_empty() {
+                    continue;
                 }
-                Err(e) => {
-                    log::warn!(
-                        "Failed to parse next_state for cell '{}' state '{}' (next_state: \"{}\"): {}",
-                        cell.name,
-                        seq.state_var,
-                        seq.next_state,
-                        e
-                    );
+                match crate::liberty::cell_formula::parse_formula(&seq.next_state) {
+                    Ok(term) => {
+                        let mut term = term;
+                        let mut next_state_string = seq.next_state.clone();
+                        if let Some(base_var) = seq.state_var.strip_suffix('N') {
+                            if state_vars.contains(base_var) {
+                                // Common Liberty convention: IQN is the complement of IQ.
+                                term = crate::liberty::cell_formula::Term::Negate(Box::new(term));
+                                next_state_string = format!("!({})", seq.next_state);
+                            }
+                        }
+                        sequential_terms.insert(seq.state_var.clone(), (term, next_state_string));
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to parse next_state for cell '{}' state '{}' (next_state: \"{}\"): {}",
+                            cell.name,
+                            seq.state_var,
+                            seq.next_state,
+                            e
+                        );
+                    }
                 }
             }
         }
         for pin in &cell.pins {
             if pin.direction == 1 && !pin.function.is_empty() {
-                // If the pin function references a sequential state variable (e.g. IQ),
-                // prefer the sequential next_state formula as the driving logic.
-                if let Some((term, next_state_string)) = sequential_terms.get(&pin.function) {
-                    cell_formula_map.insert(
-                        (cell.name.clone(), pin.name.clone()),
-                        (term.clone(), next_state_string.clone()),
-                    );
-                    continue;
+                if collapse_sequential {
+                    // If the pin function references a sequential state variable (e.g. IQ),
+                    // prefer the sequential next_state formula as the driving logic.
+                    if let Some((term, next_state_string)) = sequential_terms.get(&pin.function) {
+                        cell_formula_map.insert(
+                            (cell.name.clone(), pin.name.clone()),
+                            (term.clone(), next_state_string.clone()),
+                        );
+                        continue;
+                    }
                 }
 
                 let original_formula_string = pin.function.clone();
@@ -199,7 +204,36 @@ pub fn project_gatefn_from_netlist_and_liberty(
     dff_cells_identity: &std::collections::HashSet<String>,
     dff_cells_inverted: &std::collections::HashSet<String>,
 ) -> Result<GateFn, String> {
-    let cell_formula_map = build_cell_formula_map(liberty_lib);
+    let options = GateFnProjectOptions {
+        collapse_sequential: false,
+    };
+    project_gatefn_from_netlist_and_liberty_with_options(
+        module,
+        nets,
+        interner,
+        liberty_lib,
+        dff_cells_identity,
+        dff_cells_inverted,
+        &options,
+    )
+}
+
+#[derive(Debug, Clone)]
+pub struct GateFnProjectOptions {
+    /// If true, collapse sequential state variables by substituting next_state.
+    pub collapse_sequential: bool,
+}
+
+pub fn project_gatefn_from_netlist_and_liberty_with_options(
+    module: &NetlistModule,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    liberty_lib: &Library,
+    dff_cells_identity: &std::collections::HashSet<String>,
+    dff_cells_inverted: &std::collections::HashSet<String>,
+    options: &GateFnProjectOptions,
+) -> Result<GateFn, String> {
+    let cell_formula_map = build_cell_formula_map(liberty_lib, options.collapse_sequential);
     let module_name = interner.resolve(module.name).unwrap();
     let mut gb = GateBuilder::new(module_name.to_string(), GateBuilderOptions::no_opt());
     let mut net_to_bv: HashMap<NetIndex, AigBitVector> = HashMap::new();
@@ -1628,8 +1662,9 @@ mod tests {
     }
 
     #[test]
-    fn test_sequential_iqn_inverts_next_state_formula() {
-        // IQN should be treated as the complement of IQ when substituting next_state.
+    fn test_sequential_iqn_inverts_next_state_when_collapsing() {
+        // Collapsing sequential state variables should treat IQN as the complement of
+        // IQ.
         let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
         let d = interner.get_or_intern("d");
         let q = interner.get_or_intern("q");
@@ -1725,13 +1760,16 @@ mod tests {
                 ],
             }],
         };
-        let gate_fn = project_gatefn_from_netlist_and_liberty(
+        let gate_fn = project_gatefn_from_netlist_and_liberty_with_options(
             &module,
             &nets,
             &interner,
             &liberty_lib,
             &HashSet::new(),
             &HashSet::new(),
+            &GateFnProjectOptions {
+                collapse_sequential: true,
+            },
         )
         .unwrap();
         let d_input = gate_fn

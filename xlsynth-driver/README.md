@@ -74,6 +74,7 @@ xlsynth-driver gv2ir \
   - `--dff_cells <CSV>` – comma-separated list of DFF cell names to treat as identity (D->Q).
   - `--dff_cell_formula <STR>` – auto-classify cells as DFFs for identity wiring when any output pin's Liberty function exactly matches this string (e.g., `IQ`). Identity wiring sets `Q = D`.
   - `--dff_cell_invert_formula <STR>` – auto-classify cells as DFFs with inverted output when any output pin's Liberty function exactly matches this string (e.g., `IQN`). Inverted wiring sets `QN = NOT(D)`.
+  - `--collapse_sequential <BOOL>` – if true (default), collapse sequential state variables by substituting next_state during projection. If false and a pin function references a sequential state variable (e.g., `IQ`/`IQN`), projection will fail unless the cell is handled by DFF overrides (via `--dff_cells` or the formula flags).
 
 Example (ASAP7):
 
@@ -105,6 +106,7 @@ xlsynth-driver gv2aig \
   - `--dff_cells <CSV>` – comma-separated list of DFF cell names to treat as identity (D->Q).
   - `--dff_cell_formula <STR>` – auto-classify cells as DFFs for identity wiring when any output pin's Liberty function exactly matches this string (e.g., `IQ`). Identity wiring sets `Q = D`.
   - `--dff_cell_invert_formula <STR>` – auto-classify cells as DFFs with inverted output when any output pin's Liberty function exactly matches this string (e.g., `IQN`). Inverted wiring sets `QN = NOT(D)`.
+  - `--collapse_sequential <BOOL>` – if true (default), collapse sequential state variables by substituting next_state during projection. If false and a pin function references a sequential state variable (e.g., `IQ`/`IQN`), projection will fail unless the cell is handled by DFF overrides (via `--dff_cells` or the formula flags).
 
 ### `gv-read-stats`: netlist statistics
 

@@ -4,13 +4,15 @@
 
 use crate::aig::GateFn;
 use crate::netlist::dff_classify::classify_dff_cells_from_liberty;
-use crate::netlist::gatefn_from_netlist::project_gatefn_from_netlist_and_liberty;
+use crate::netlist::gatefn_from_netlist::{
+    GateFnProjectOptions, project_gatefn_from_netlist_and_liberty_with_options,
+};
 use crate::netlist::io::{load_liberty_from_path, parse_netlist_from_path};
 use anyhow::{Result, anyhow};
 use std::collections::HashSet;
 use std::path::Path;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Gv2AigOptions {
     pub module_name: Option<String>,
 
@@ -25,6 +27,21 @@ pub struct Gv2AigOptions {
     /// If set, any cell with an output pin function exactly equal to this
     /// string is treated as an inverted-output DFF (QN = NOT(D)).
     pub dff_cell_invert_formula: Option<String>,
+
+    /// If true, collapse sequential state variables by substituting next_state.
+    pub collapse_sequential: bool,
+}
+
+impl Default for Gv2AigOptions {
+    fn default() -> Self {
+        Self {
+            module_name: None,
+            dff_cells_identity: HashSet::new(),
+            dff_cell_formula: None,
+            dff_cell_invert_formula: None,
+            collapse_sequential: true,
+        }
+    }
 }
 
 pub fn convert_gv2aig_paths(
@@ -94,13 +111,16 @@ pub fn convert_gv2aig_paths(
         opts.dff_cell_invert_formula.as_deref(),
     );
 
-    let gate_fn = project_gatefn_from_netlist_and_liberty(
+    let gate_fn = project_gatefn_from_netlist_and_liberty_with_options(
         module,
         &parsed.nets,
         &parsed.interner,
         &liberty_lib,
         &dff_sets.identity,
         &dff_sets.inverted,
+        &GateFnProjectOptions {
+            collapse_sequential: opts.collapse_sequential,
+        },
     )
     .map_err(|e| anyhow!(e))?;
 
