@@ -1334,21 +1334,12 @@ fn main() {
                         .action(ArgAction::Set),
                 )
                 .arg(
-                    Arg::new("dff_cells")
-                        .long("dff_cells")
-                        .help("Comma-separated list of DFF cell names to treat as identity (D->Q)")
-                        .action(ArgAction::Set),
-                )
-                .arg(
-                    Arg::new("dff_cell_formula")
-                        .long("dff_cell_formula")
-                        .help("If set, any cell with an output pin function exactly matching this formula string is treated as a DFF for D->Q identity override.")
-                        .action(ArgAction::Set),
-                )
-                .arg(
-                    Arg::new("dff_cell_invert_formula")
-                        .long("dff_cell_invert_formula")
-                        .help("If set, any cell with an output pin function exactly matching this formula string is treated as a DFF with inverted output (QN = NOT(D)).")
+                    Arg::new("collapse_sequential")
+                        .long("collapse_sequential")
+                        .value_name("BOOL")
+                        .default_value("true")
+                        .value_parser(clap::value_parser!(bool))
+                        .help("If true, collapse sequential state variables by substituting next_state.")
                         .action(ArgAction::Set),
                 )
         )
@@ -1385,21 +1376,12 @@ fn main() {
                         .action(ArgAction::Set),
                 )
                 .arg(
-                    Arg::new("dff_cells")
-                        .long("dff_cells")
-                        .help("Comma-separated list of DFF cell names to treat as identity (D->Q)")
-                        .action(ArgAction::Set),
-                )
-                .arg(
-                    Arg::new("dff_cell_formula")
-                        .long("dff_cell_formula")
-                        .help("If set, any cell with an output pin function exactly matching this formula string is treated as a DFF for D->Q identity override.")
-                        .action(ArgAction::Set),
-                )
-                .arg(
-                    Arg::new("dff_cell_invert_formula")
-                        .long("dff_cell_invert_formula")
-                        .help("If set, any cell with an output pin function exactly matching this formula string is treated as a DFF with inverted output (QN = NOT(D)).")
+                    Arg::new("collapse_sequential")
+                        .long("collapse_sequential")
+                        .value_name("BOOL")
+                        .default_value("true")
+                        .value_parser(clap::value_parser!(bool))
+                        .help("If true, collapse sequential state variables by substituting next_state.")
                         .action(ArgAction::Set),
                 ),
         )

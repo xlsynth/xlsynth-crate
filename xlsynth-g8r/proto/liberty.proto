@@ -12,6 +12,7 @@ message Cell {
   string name = 1;
   repeated Pin pins = 2;
   double area = 3;
+  repeated Sequential sequential = 4;
 }
 
 enum PinDirection {
@@ -25,4 +26,27 @@ message Pin {
   string function = 2;
   string name = 3;
   bool is_clocking_pin = 4;
+}
+
+enum SequentialKind {
+  SEQUENTIAL_KIND_UNKNOWN = 0;
+  SEQUENTIAL_KIND_FF = 1;
+  SEQUENTIAL_KIND_LATCH = 2;
+}
+
+// Represents sequential behavior specified via `ff (...) { ... }` or
+// `latch (...) { ... }` blocks in Liberty.
+message Sequential {
+  // The state variable name (e.g. IQ / IQN) referenced by pin functions.
+  string state_var = 1;
+  // The next-state boolean formula (e.g. scan muxing or fused logic).
+  string next_state = 2;
+  // The clock/enable expression when present (e.g. clocked_on / enable).
+  string clock_expr = 3;
+  // The originating Liberty block kind: ff or latch.
+  SequentialKind kind = 4;
+  // Async clear expression when present on flops.
+  string clear_expr = 5;
+  // Async preset expression when present on flops.
+  string preset_expr = 6;
 }

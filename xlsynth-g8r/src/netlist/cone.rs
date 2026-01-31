@@ -719,6 +719,7 @@ mod tests {
                 },
             ],
             area: 2.0,
+            sequential: vec![],
         });
 
         let indexed = IndexedLibrary::new(lib);

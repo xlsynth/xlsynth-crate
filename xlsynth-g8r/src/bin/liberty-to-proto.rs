@@ -74,6 +74,7 @@ mod tests {
                 is_clocking_pin: false,
             }],
             name: "test_cell".to_string(),
+            sequential: vec![],
         });
         assert_eq!(lib.cells.len(), 1);
         assert_eq!(lib.cells[0].pins[0].direction, PinDirection::Input as i32);

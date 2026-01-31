@@ -23,6 +23,7 @@ fn build_simple_lib() -> Library {
                     is_clocking_pin: false,
                 },
             ],
+            sequential: vec![],
         }],
     }
 }
