@@ -180,6 +180,78 @@ impl GateEnv {
         }
     }
 
+    pub fn apply_known_bits_if_any(
+        &mut self,
+        ir_node_ref: ir::NodeRef,
+        _f: &ir::Fn,
+        node: &ir::Node,
+        options: &GatifyOptions,
+        g8_builder: &mut GateBuilder,
+    ) {
+        let range_info = match options.range_info.as_ref() {
+            Some(ri) => ri,
+            None => return,
+        };
+        let info = match range_info.get(node.text_id) {
+            Some(i) => i,
+            None => return,
+        };
+        let known = match info.known_bits.as_ref() {
+            Some(k) => k,
+            None => return,
+        };
+        let mask = &known.mask;
+        let value = &known.value;
+
+        let Some(entry) = self.ir_to_g8.get_mut(&ir_node_ref) else {
+            return;
+        };
+        let bit_count = match entry {
+            GateOrVec::Gate(_) => 1,
+            GateOrVec::BitVector(bv) => bv.get_bit_count(),
+        };
+        if bit_count == 0 || mask.get_bit_count() != bit_count {
+            return;
+        }
+
+        let mut any_known = false;
+        let mut apply_masked_bits = |i: usize| -> Option<AigOperand> {
+            let is_known = mask.get_bit(i).unwrap_or(false);
+            if !is_known {
+                return None;
+            }
+            any_known = true;
+            let is_one = value.get_bit(i).unwrap_or(false);
+            Some(if is_one {
+                g8_builder.get_true()
+            } else {
+                g8_builder.get_false()
+            })
+        };
+
+        match entry {
+            GateOrVec::Gate(gate) => {
+                let Some(replacement) = apply_masked_bits(0) else {
+                    return;
+                };
+                *gate = replacement;
+            }
+            GateOrVec::BitVector(bits) => {
+                let mut updated: Vec<AigOperand> = Vec::with_capacity(bit_count);
+                for i in 0..bit_count {
+                    if let Some(replacement) = apply_masked_bits(i) {
+                        updated.push(replacement);
+                    } else {
+                        updated.push(*bits.get_lsb(i));
+                    }
+                }
+                if any_known {
+                    *bits = AigBitVector::from_lsb_is_index_0(&updated);
+                }
+            }
+        }
+    }
+
     pub fn get_bit_vector(&self, ir_node_ref: ir::NodeRef) -> Result<AigBitVector, String> {
         match self.ir_to_g8.get(&ir_node_ref) {
             Some(GateOrVec::BitVector(bv)) => Ok(bv.clone()),
@@ -3063,6 +3135,7 @@ fn gatify_node(
             return Err(msg);
         }
     }
+    env.apply_known_bits_if_any(node_ref, f, node, options, g8_builder);
     Ok(())
 }
 
