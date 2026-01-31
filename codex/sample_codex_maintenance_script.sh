@@ -90,7 +90,8 @@ append_source_if_missing "${HOME}/.profile"
 pre-commit install
 
 echo "==> Running pre-commit"
-pre-commit run --all-files
+# This is a non-interactive environment; avoid failing on branch protection checks.
+SKIP=no-commit-to-branch pre-commit run --all-files
 
 echo "==> Prefetching all Cargo dependencies"
 cargo fetch --quiet

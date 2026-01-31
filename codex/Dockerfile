@@ -21,4 +21,4 @@ ENV CARGO_NET_OFFLINE=true
 # Run tests and pre-commit offline; hooks and deps were fetched during maintenance.
 # We need to use `bash -lc` to get the bashrc to be sourced which has our env vars.
 RUN --network=none bash -lc 'cargo nextest run --workspace'
-RUN --network=none bash -lc 'pre-commit run --all-files'
+RUN --network=none bash -lc 'SKIP=no-commit-to-branch pre-commit run --all-files'
