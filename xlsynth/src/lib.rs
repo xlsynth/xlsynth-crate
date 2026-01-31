@@ -25,7 +25,7 @@ use lib_support::{
     xls_optimize_ir,
 };
 
-pub use ir_analysis::{Interval, IntervalSet, IrAnalysis, KnownBits};
+pub use ir_analysis::{Interval, IntervalSet, IrAnalysis, IrAnalysisLevel, KnownBits};
 pub use ir_builder::BValue;
 pub use ir_builder::FnBuilder;
 pub use ir_package::IrFunction;

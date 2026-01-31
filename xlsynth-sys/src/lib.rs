@@ -66,6 +66,17 @@ pub struct CIrIntervalSet {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
 
+// Selects how much work is done to compute ranges.
+pub type XlsIrAnalysisLevel = i32;
+pub const XLS_IR_ANALYSIS_LEVEL_FAST: XlsIrAnalysisLevel = 0;
+pub const XLS_IR_ANALYSIS_LEVEL_RANGE_WITH_CONTEXT: XlsIrAnalysisLevel = 1;
+
+// Options for creating an IR analysis handle.
+#[repr(C)]
+pub struct XlsIrAnalysisOptions {
+    pub level: XlsIrAnalysisLevel,
+}
+
 // "VAST" is the "Verilog AST" API which
 #[repr(C)]
 pub struct CVastFile {
@@ -707,6 +718,13 @@ extern "C" {
 
     pub fn xls_ir_analysis_create_from_package(
         p: *mut CIrPackage,
+        error_out: *mut *mut std::os::raw::c_char,
+        out: *mut *mut CIrAnalysis,
+    ) -> bool;
+
+    pub fn xls_ir_analysis_create_from_package_with_options(
+        p: *mut CIrPackage,
+        options: *const XlsIrAnalysisOptions,
         error_out: *mut *mut std::os::raw::c_char,
         out: *mut *mut CIrAnalysis,
     ) -> bool;

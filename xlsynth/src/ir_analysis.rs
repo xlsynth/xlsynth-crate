@@ -4,12 +4,29 @@ use std::sync::{Arc, RwLock};
 
 use crate::ir_package::IrPackagePtr;
 use crate::lib_support::{
-    xls_interval_set_get_interval_bounds, xls_ir_analysis_create_from_package,
+    xls_interval_set_get_interval_bounds, xls_ir_analysis_create_from_package_with_options,
     xls_ir_analysis_get_intervals_for_node_id, xls_ir_analysis_get_known_bits_for_node_id,
 };
 use crate::xlsynth_error::XlsynthError;
 use crate::IrBits;
 use xlsynth_sys::{CIrAnalysis, CIrIntervalSet};
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum IrAnalysisLevel {
+    Fast,
+    RangeWithContext,
+}
+
+impl IrAnalysisLevel {
+    fn to_sys(self) -> xlsynth_sys::XlsIrAnalysisLevel {
+        match self {
+            IrAnalysisLevel::Fast => xlsynth_sys::XLS_IR_ANALYSIS_LEVEL_FAST,
+            IrAnalysisLevel::RangeWithContext => {
+                xlsynth_sys::XLS_IR_ANALYSIS_LEVEL_RANGE_WITH_CONTEXT
+            }
+        }
+    }
+}
 
 pub struct KnownBits {
     pub mask: IrBits,
@@ -77,8 +94,19 @@ impl IrAnalysis {
     pub(crate) fn create_from_package_ptr(
         package: Arc<RwLock<IrPackagePtr>>,
     ) -> Result<Self, XlsynthError> {
+        Self::create_from_package_ptr_with_level(package, IrAnalysisLevel::RangeWithContext)
+    }
+
+    pub(crate) fn create_from_package_ptr_with_level(
+        package: Arc<RwLock<IrPackagePtr>>,
+        level: IrAnalysisLevel,
+    ) -> Result<Self, XlsynthError> {
         let guard = package.write().unwrap();
-        let analysis_ptr = xls_ir_analysis_create_from_package(guard.mut_c_ptr())?;
+        let options = xlsynth_sys::XlsIrAnalysisOptions {
+            level: level.to_sys(),
+        };
+        let analysis_ptr =
+            xls_ir_analysis_create_from_package_with_options(guard.mut_c_ptr(), Some(&options))?;
         drop(guard);
         Ok(Self {
             ptr: analysis_ptr,

@@ -342,11 +342,21 @@ pub(crate) fn xls_parse_ir_package(
     Ok(package)
 }
 
-pub(crate) fn xls_ir_analysis_create_from_package(
+pub(crate) fn xls_ir_analysis_create_from_package_with_options(
     p: *mut CIrPackage,
+    options: Option<&xlsynth_sys::XlsIrAnalysisOptions>,
 ) -> Result<*mut CIrAnalysis, XlsynthError> {
     let mut out: *mut CIrAnalysis = std::ptr::null_mut();
-    xls_ffi_call!(xlsynth_sys::xls_ir_analysis_create_from_package, p; out)?;
+    let options_ptr: *const xlsynth_sys::XlsIrAnalysisOptions = options
+        .map_or(std::ptr::null(), |o| {
+            o as *const xlsynth_sys::XlsIrAnalysisOptions
+        });
+    xls_ffi_call!(
+        xlsynth_sys::xls_ir_analysis_create_from_package_with_options,
+        p,
+        options_ptr;
+        out
+    )?;
     Ok(out)
 }
 
