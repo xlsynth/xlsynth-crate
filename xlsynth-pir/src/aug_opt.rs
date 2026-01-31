@@ -237,6 +237,7 @@ fn apply_basis_rewrites_to_fn(f: &ir::Fn, range_info: Option<&IrRangeInfo>) -> (
     let mut rewrites = 0usize;
     rewrites = rewrites.saturating_add(rewrite_guarded_sel_ne_literal1_nor(&mut cloned));
     rewrites = rewrites.saturating_add(rewrite_lsb_of_shll_via_shift_is_zero(&mut cloned));
+    rewrites = rewrites.saturating_add(rewrite_pow2_msb_compare_with_eq_tiebreak(&mut cloned));
     rewrites = rewrites.saturating_add(rewrite_eq_priority_sel_to_selector_predicate(
         &mut cloned,
         range_info,
@@ -344,6 +345,175 @@ fn rewrite_lsb_of_shll_via_shift_is_zero(f: &mut ir::Fn) -> usize {
         f.nodes[slice_index].payload = NodePayload::Nary(NaryOp::And, vec![slice_x, eq_s0]);
         f.nodes[slice_index].ty = Type::Bits(1);
 
+        rewrites += 1;
+    }
+
+    rewrites
+}
+
+fn literal_one_hot_index(v: &IrValue) -> Option<usize> {
+    let Ok(bits) = v.to_bits() else {
+        return None;
+    };
+    let w = bits.get_bit_count();
+    if w == 0 {
+        return None;
+    }
+    let mut found: Option<usize> = None;
+    for i in 0..w {
+        if bits.get_bit(i).unwrap_or(false) {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(i);
+        }
+    }
+    found
+}
+
+fn literals_equal_bits(a: &IrValue, b: &IrValue) -> bool {
+    match (a.to_bits(), b.to_bits()) {
+        (Ok(ab), Ok(bb)) => ab == bb,
+        _ => false,
+    }
+}
+
+fn eq_against_literal(f: &ir::Fn, nr: NodeRef) -> Option<(NodeRef, NodeRef, IrValue)> {
+    let NodePayload::Binop(Binop::Eq, a, b) = f.get_node(nr).payload.clone() else {
+        return None;
+    };
+    let candidates = [(a, b), (b, a)];
+    for (maybe_x, maybe_lit) in candidates {
+        let NodePayload::Literal(lit_v) = f.get_node(maybe_lit).payload.clone() else {
+            continue;
+        };
+        return Some((maybe_x, maybe_lit, lit_v));
+    }
+    None
+}
+
+fn ugt_against_literal_rhs(f: &ir::Fn, nr: NodeRef) -> Option<(NodeRef, NodeRef, IrValue)> {
+    let NodePayload::Binop(Binop::Ugt, x, lit_nr) = f.get_node(nr).payload.clone() else {
+        return None;
+    };
+    let NodePayload::Literal(lit_v) = f.get_node(lit_nr).payload.clone() else {
+        return None;
+    };
+    Some((x, lit_nr, lit_v))
+}
+
+/// Rewrite a specific power-of-two compare shape:
+///
+/// `or(ugt(x, 2^(w-1)), and(eq(x, 2^(w-1)), hi))`
+///   →
+/// `and(msb(x), or(or_reduce(x[0..w-1)), hi))`
+///
+/// Notes:
+/// - We intentionally require the power-of-two to be the MSB of `x` (i.e.
+///   `2^(w-1)`) to keep the logic simple and obviously correct.
+/// - This targets the common "truncated compare with tie-breaker bit" pattern.
+fn rewrite_pow2_msb_compare_with_eq_tiebreak(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+
+    for or_index in 0..f.nodes.len() {
+        let NodePayload::Nary(NaryOp::Or, operands) = f.nodes[or_index].payload.clone() else {
+            continue;
+        };
+        if operands.len() != 2 || f.nodes[or_index].ty != Type::Bits(1) {
+            continue;
+        }
+
+        // Try both operand orders: (ugt, and) or (and, ugt).
+        let candidates = [(operands[0], operands[1]), (operands[1], operands[0])];
+        let mut matched: Option<(NodeRef, NodeRef, NodeRef, IrValue)> = None; // (x, hi, lit_nr, lit_v)
+
+        for (maybe_ugt, maybe_and) in candidates {
+            let Some((x_ugt, _lit_ugt_nr, lit_ugt_v)) = ugt_against_literal_rhs(f, maybe_ugt)
+            else {
+                continue;
+            };
+
+            let NodePayload::Nary(NaryOp::And, and_ops) = f.get_node(maybe_and).payload.clone()
+            else {
+                continue;
+            };
+            if and_ops.len() != 2 {
+                continue;
+            }
+
+            // The AND must be (eq(x, lit), hi) in either order.
+            let and_candidates = [(and_ops[0], and_ops[1]), (and_ops[1], and_ops[0])];
+            for (maybe_eq, maybe_hi) in and_candidates {
+                let Some((x_eq, lit_eq_nr, lit_eq_v)) = eq_against_literal(f, maybe_eq) else {
+                    continue;
+                };
+                if x_eq != x_ugt || !literals_equal_bits(&lit_eq_v, &lit_ugt_v) {
+                    continue;
+                }
+                if f.get_node_ty(maybe_hi) != &Type::Bits(1) {
+                    continue;
+                }
+
+                matched = Some((x_ugt, maybe_hi, lit_eq_nr, lit_eq_v));
+                break;
+            }
+            if matched.is_some() {
+                break;
+            }
+        }
+
+        let Some((x, hi, _lit_nr, lit_v)) = matched else {
+            continue;
+        };
+
+        let w = f.get_node_ty(x).bit_count();
+        if w < 2 || f.get_node_ty(x) != &Type::Bits(w) {
+            continue;
+        }
+
+        // Require the literal to be exactly the MSB power-of-two: 2^(w-1).
+        let Some(one_hot_idx) = literal_one_hot_index(&lit_v) else {
+            continue;
+        };
+        if one_hot_idx != w.saturating_sub(1) || f.get_node_ty(x) != &Type::Bits(w) {
+            continue;
+        }
+
+        // msb = x[w-1]
+        let msb = push_node(
+            f,
+            Type::Bits(1),
+            NodePayload::BitSlice {
+                arg: x,
+                start: w - 1,
+                width: 1,
+            },
+        );
+
+        // lo = x[0..w-1)
+        let lo = push_node(
+            f,
+            Type::Bits(w - 1),
+            NodePayload::BitSlice {
+                arg: x,
+                start: 0,
+                width: w - 1,
+            },
+        );
+
+        // lo_nz = or_reduce(lo)
+        let lo_nz = push_node(f, Type::Bits(1), NodePayload::Unop(Unop::OrReduce, lo));
+
+        // rhs = lo_nz | hi
+        let rhs = push_node(
+            f,
+            Type::Bits(1),
+            NodePayload::Nary(NaryOp::Or, vec![lo_nz, hi]),
+        );
+
+        // out = msb & rhs
+        f.nodes[or_index].payload = NodePayload::Nary(NaryOp::And, vec![msb, rhs]);
+        f.nodes[or_index].ty = Type::Bits(1);
         rewrites += 1;
     }
 
@@ -978,6 +1148,59 @@ top fn cone(leaf_52: bits[2] id=1, y: bits[5] id=2) -> bits[1] {
             &out_text,
             "cone",
             &[2, 5],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    #[test]
+    fn aug_opt_rewrites_pow2_msb_compare_with_eq_tiebreak() {
+        let ir_text = r#"package pow2_cmp
+
+top fn main(a: bits[10] id=1, b: bits[10] id=2) -> bits[1] {
+  smul.17: bits[20] = smul(a, b, id=17)
+  bit_slice.8: bits[9] = bit_slice(smul.17, start=0, width=9, id=8)
+  literal.9: bits[9] = literal(value=256, id=9)
+  eq.10: bits[1] = eq(bit_slice.8, literal.9, id=10)
+  bit_slice.11: bits[1] = bit_slice(smul.17, start=9, width=1, id=11)
+  ugt.12: bits[1] = ugt(bit_slice.8, literal.9, id=12)
+  and.13: bits[1] = and(eq.10, bit_slice.11, id=13)
+  ret or.14: bits[1] = or(ugt.12, and.13, id=14)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("main"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("main").expect("top fn");
+
+        let ret_nr = f.ret_node_ref.expect("ret node");
+        let ret_node = f.get_node(ret_nr);
+        assert_eq!(ret_node.ty, Type::Bits(1));
+        match &ret_node.payload {
+            NodePayload::Nary(NaryOp::And, ops) => {
+                assert_eq!(ops.len(), 2, "expected 2-input and; got:\n{}", out_text);
+            }
+            other => panic!(
+                "expected ret to be an and(..) after rewrite; got {:?}\noutput:\n{}",
+                other, out_text
+            ),
+        }
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "main",
+            &[10, 10],
             /* random_samples= */ 2000,
         );
     }
