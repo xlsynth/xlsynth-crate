@@ -16,6 +16,11 @@ fn build_cell_formula_map(
 ) -> HashMap<(String, String), (crate::liberty::cell_formula::Term, String)> {
     let mut cell_formula_map = HashMap::new();
     for cell in &liberty_lib.cells {
+        let state_vars: HashSet<String> = cell
+            .sequential
+            .iter()
+            .map(|seq| seq.state_var.clone())
+            .collect();
         let mut sequential_terms: HashMap<String, (crate::liberty::cell_formula::Term, String)> =
             HashMap::new();
         for seq in &cell.sequential {
@@ -24,7 +29,16 @@ fn build_cell_formula_map(
             }
             match crate::liberty::cell_formula::parse_formula(&seq.next_state) {
                 Ok(term) => {
-                    sequential_terms.insert(seq.state_var.clone(), (term, seq.next_state.clone()));
+                    let mut term = term;
+                    let mut next_state_string = seq.next_state.clone();
+                    if let Some(base_var) = seq.state_var.strip_suffix('N') {
+                        if state_vars.contains(base_var) {
+                            // Common Liberty convention: IQN is the complement of IQ.
+                            term = crate::liberty::cell_formula::Term::Negate(Box::new(term));
+                            next_state_string = format!("!({})", seq.next_state);
+                        }
+                    }
+                    sequential_terms.insert(seq.state_var.clone(), (term, next_state_string));
                 }
                 Err(e) => {
                     log::warn!(
@@ -1611,6 +1625,135 @@ mod tests {
         let s = gate_fn.to_string();
         assert!(s.contains("  y[4] = not("), "GateFn output: {}", s);
         assert!(s.contains("  y[7] = not("), "GateFn output: {}", s);
+    }
+
+    #[test]
+    fn test_sequential_iqn_inverts_next_state_formula() {
+        // IQN should be treated as the complement of IQ when substituting next_state.
+        let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
+        let d = interner.get_or_intern("d");
+        let q = interner.get_or_intern("q");
+        let qn = interner.get_or_intern("qn");
+        // Synthetic cell name, not an ASAP7-specific alias.
+        let dff = interner.get_or_intern("DFFX");
+        let u1 = interner.get_or_intern("u1");
+        let nets = vec![
+            Net {
+                name: d,
+                width: None,
+            },
+            Net {
+                name: q,
+                width: None,
+            },
+            Net {
+                name: qn,
+                width: None,
+            },
+        ];
+        let ports = vec![
+            NetlistPort {
+                direction: PortDirection::Input,
+                width: None,
+                name: d,
+            },
+            NetlistPort {
+                direction: PortDirection::Output,
+                width: None,
+                name: q,
+            },
+            NetlistPort {
+                direction: PortDirection::Output,
+                width: None,
+                name: qn,
+            },
+        ];
+        let instances = vec![NetlistInstance {
+            type_name: dff,
+            instance_name: u1,
+            connections: vec![
+                (interner.get_or_intern("D"), NetRef::Simple(NetIndex(0))),
+                (interner.get_or_intern("Q"), NetRef::Simple(NetIndex(1))),
+                (interner.get_or_intern("QN"), NetRef::Simple(NetIndex(2))),
+            ],
+            inst_lineno: 0,
+            inst_colno: 0,
+        }];
+        let module = NetlistModule {
+            name: interner.get_or_intern("top"),
+            ports,
+            wires: vec![],
+            instances,
+        };
+        let liberty_lib = crate::liberty_proto::Library {
+            cells: vec![crate::liberty_proto::Cell {
+                name: "DFFX".to_string(),
+                pins: vec![
+                    crate::liberty_proto::Pin {
+                        name: "D".to_string(),
+                        direction: 2,
+                        function: "".to_string(),
+                        is_clocking_pin: false,
+                    },
+                    crate::liberty_proto::Pin {
+                        name: "Q".to_string(),
+                        direction: 1,
+                        function: "IQ".to_string(),
+                        is_clocking_pin: false,
+                    },
+                    crate::liberty_proto::Pin {
+                        name: "QN".to_string(),
+                        direction: 1,
+                        function: "IQN".to_string(),
+                        is_clocking_pin: false,
+                    },
+                ],
+                area: 1.0,
+                sequential: vec![
+                    crate::liberty_proto::Sequential {
+                        state_var: "IQ".to_string(),
+                        next_state: "D".to_string(),
+                        clock_expr: "CLK".to_string(),
+                        kind: crate::liberty_proto::SequentialKind::Ff as i32,
+                    },
+                    crate::liberty_proto::Sequential {
+                        state_var: "IQN".to_string(),
+                        next_state: "D".to_string(),
+                        clock_expr: "CLK".to_string(),
+                        kind: crate::liberty_proto::SequentialKind::Ff as i32,
+                    },
+                ],
+            }],
+        };
+        let gate_fn = project_gatefn_from_netlist_and_liberty(
+            &module,
+            &nets,
+            &interner,
+            &liberty_lib,
+            &HashSet::new(),
+            &HashSet::new(),
+        )
+        .unwrap();
+        let d_input = gate_fn
+            .inputs
+            .iter()
+            .find(|input| input.name == "d")
+            .unwrap();
+        let q_output = gate_fn
+            .outputs
+            .iter()
+            .find(|output| output.name == "q")
+            .unwrap();
+        let qn_output = gate_fn
+            .outputs
+            .iter()
+            .find(|output| output.name == "qn")
+            .unwrap();
+        let d_bit = *d_input.bit_vector.get_lsb(0);
+        let q_bit = *q_output.bit_vector.get_lsb(0);
+        let qn_bit = *qn_output.bit_vector.get_lsb(0);
+        assert_eq!(q_bit, d_bit);
+        assert_eq!(qn_bit, d_bit.negate());
     }
 
     #[test]
