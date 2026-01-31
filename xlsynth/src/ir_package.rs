@@ -3,7 +3,7 @@
 use std::fmt;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use crate::ir_analysis::IrAnalysis;
+use crate::ir_analysis::{IrAnalysis, IrAnalysisLevel};
 pub use crate::lib_support::RunResult;
 use crate::lib_support::{self, c_str_to_rust, xls_function_jit_run, xls_make_function_jit};
 use crate::xlsynth_error::XlsynthError;
@@ -127,6 +127,18 @@ impl IrPackage {
         IrAnalysis::create_from_package_ptr(self.ptr.clone())
     }
 
+    /// Creates an IR analysis handle for this package with the given analysis
+    /// level.
+    ///
+    /// Precondition: this package must have a top function base set (e.g. via
+    /// [`IrPackage::set_top_by_name`]).
+    pub fn create_ir_analysis_with_level(
+        &self,
+        level: IrAnalysisLevel,
+    ) -> Result<IrAnalysis, XlsynthError> {
+        IrAnalysis::create_from_package_ptr_with_level(self.ptr.clone(), level)
+    }
+
     pub fn get_function(&self, name: &str) -> Result<IrFunction, XlsynthError> {
         self.with_read(|guard| xls_package_get_function(&self.ptr, guard, name))
     }
@@ -237,6 +249,18 @@ impl IrFunction {
     /// via [`IrPackage::set_top_by_name`]).
     pub fn create_ir_analysis(&self) -> Result<IrAnalysis, XlsynthError> {
         IrAnalysis::create_from_package_ptr(self.parent.clone())
+    }
+
+    /// Creates an IR analysis handle for this function's owning package with
+    /// the given analysis level.
+    ///
+    /// Precondition: the owning package must have a top function base set (e.g.
+    /// via [`IrPackage::set_top_by_name`]).
+    pub fn create_ir_analysis_with_level(
+        &self,
+        level: IrAnalysisLevel,
+    ) -> Result<IrAnalysis, XlsynthError> {
+        IrAnalysis::create_from_package_ptr_with_level(self.parent.clone(), level)
     }
 
     pub fn interpret(&self, args: &[IrValue]) -> Result<IrValue, XlsynthError> {
