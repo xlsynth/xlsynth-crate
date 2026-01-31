@@ -130,6 +130,11 @@ pub fn classify_trivial_fn_body(f: &Fn) -> Option<TrivialFnBody> {
     None
 }
 
+/// Returns the count of nodes in the function, excluding the reserved Nil node.
+pub fn fn_node_count(f: &Fn) -> usize {
+    f.nodes.len().saturating_sub(1)
+}
+
 /// Returns the list of operands for the provided node.
 pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
     use NodePayload::*;

@@ -1787,6 +1787,62 @@ top fn main(x: bits[4] id=1, y: bits[4] id=2) -> bits[4] {
 }
 
 #[test]
+fn test_ir_fn_node_count() {
+    let ir_text = r#"package sample
+
+top fn main(x: bits[8] id=1) -> bits[8] {
+  ret x: bits[8] = param(name=x, id=1)
+}
+
+fn helper(x: bits[8] id=2, y: bits[8] id=3) -> bits[8] {
+  ret add.4: bits[8] = add(x, y, id=4)
+}
+"#;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("input.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    let output = std::process::Command::new(command_path)
+        .arg("ir-fn-node-count")
+        .arg(ir_path.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.is_empty(), "stderr should be empty; got: {}", stderr);
+    assert_eq!(stdout, "1\n");
+
+    let output = std::process::Command::new(command_path)
+        .arg("ir-fn-node-count")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("helper")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.is_empty(), "stderr should be empty; got: {}", stderr);
+    assert_eq!(stdout, "3\n");
+}
+
+#[test]
 fn test_dslx_add_sub_opt_ir2gates_pipeline() {
     let _ = env_logger::try_init();
     let dslx = "

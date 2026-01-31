@@ -69,6 +69,7 @@ mod ir_diverse_samples;
 mod ir_equiv;
 mod ir_equiv_blocks;
 mod ir_fn_eval;
+mod ir_fn_node_count;
 mod ir_fn_to_block;
 mod ir_ged;
 mod ir_localized_eco;
@@ -1636,6 +1637,17 @@ fn main() {
                 )
         )
         .subcommand(
+            clap::Command::new("ir-fn-node-count")
+                .about("Prints the node count for an IR function (excluding the reserved Nil node)")
+                .arg(
+                    clap::Arg::new("ir_input_file")
+                        .help("The input IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .add_ir_top_arg(false),
+        )
+        .subcommand(
             clap::Command::new("ir-strip-pos-data")
                 .about("Reads an .ir file and emits the same IR with all position data removed (file table and pos= attributes)")
                 .arg(
@@ -2267,6 +2279,9 @@ fn main() {
         }
         Some(("ir-fn-eval", subm)) => {
             ir_fn_eval::handle_ir_fn_eval(subm, &config);
+        }
+        Some(("ir-fn-node-count", subm)) => {
+            ir_fn_node_count::handle_ir_fn_node_count(subm, &config);
         }
         Some(("prove-quickcheck", subm)) => {
             prove_quickcheck::handle_prove_quickcheck(subm, &config);
