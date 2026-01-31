@@ -16,8 +16,39 @@ fn build_cell_formula_map(
 ) -> HashMap<(String, String), (crate::liberty::cell_formula::Term, String)> {
     let mut cell_formula_map = HashMap::new();
     for cell in &liberty_lib.cells {
+        let mut sequential_terms: HashMap<String, (crate::liberty::cell_formula::Term, String)> =
+            HashMap::new();
+        for seq in &cell.sequential {
+            if seq.state_var.is_empty() || seq.next_state.is_empty() {
+                continue;
+            }
+            match crate::liberty::cell_formula::parse_formula(&seq.next_state) {
+                Ok(term) => {
+                    sequential_terms.insert(seq.state_var.clone(), (term, seq.next_state.clone()));
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Failed to parse next_state for cell '{}' state '{}' (next_state: \"{}\"): {}",
+                        cell.name,
+                        seq.state_var,
+                        seq.next_state,
+                        e
+                    );
+                }
+            }
+        }
         for pin in &cell.pins {
             if pin.direction == 1 && !pin.function.is_empty() {
+                // If the pin function references a sequential state variable (e.g. IQ),
+                // prefer the sequential next_state formula as the driving logic.
+                if let Some((term, next_state_string)) = sequential_terms.get(&pin.function) {
+                    cell_formula_map.insert(
+                        (cell.name.clone(), pin.name.clone()),
+                        (term.clone(), next_state_string.clone()),
+                    );
+                    continue;
+                }
+
                 let original_formula_string = pin.function.clone();
                 match crate::liberty::cell_formula::parse_formula(&pin.function) {
                     Ok(term) => {
@@ -72,7 +103,7 @@ fn process_instance_outputs(
     cell_formula_map: &HashMap<(String, String), (crate::liberty::cell_formula::Term, String)>,
     input_map: &HashMap<String, AigOperand>,
     port_map: &HashMap<String, String>,
-) -> bool {
+) -> Result<bool, String> {
     let mut processed_any_output = false;
     for (port, netref) in &inst.connections {
         let port_name = interner.resolve(*port).unwrap();
@@ -89,7 +120,7 @@ fn process_instance_outputs(
                 dff_cells_identity,
                 dff_cells_inverted,
                 nets,
-            ) {
+            )? {
                 processed_any_output = true;
                 continue;
             }
@@ -143,7 +174,7 @@ fn process_instance_outputs(
             processed_any_output = true;
         }
     }
-    processed_any_output
+    Ok(processed_any_output)
 }
 
 pub fn project_gatefn_from_netlist_and_liberty(
@@ -247,7 +278,7 @@ pub fn project_gatefn_from_netlist_and_liberty(
                 &cell_formula_map,
                 &input_map,
                 &port_map,
-            );
+            )?;
             if processed {
                 unprocessed.remove(i);
                 processed_any = true;
@@ -640,26 +671,9 @@ fn handle_dff_identity_override(
     dff_cells_identity: &std::collections::HashSet<String>,
     dff_cells_inverted: &std::collections::HashSet<String>,
     nets: &[Net],
-) -> bool {
+) -> Result<bool, String> {
     if !dff_cells_identity.contains(type_name) && !dff_cells_inverted.contains(type_name) {
-        return false;
-    }
-    // Resolve D input
-    let d_input = inst.connections.iter().find_map(|(p, nref)| {
-        let pname = interner.resolve(*p).unwrap();
-        if pname.eq_ignore_ascii_case("d") {
-            Some(nref)
-        } else {
-            None
-        }
-    });
-    if d_input.is_none() {
-        log::warn!(
-            "DFF identity override: D input not found for cell '{}' instance '{}'",
-            type_name,
-            inst_name
-        );
-        return true;
+        return Ok(false);
     }
     // Decide identity vs inverted based on the current output port name and
     // membership.
@@ -676,19 +690,36 @@ fn handle_dff_identity_override(
             inst_name,
             port_name
         );
-        return true;
+        return Ok(true);
     };
+    // Resolve D input
+    let d_input = inst.connections.iter().find_map(|(p, nref)| {
+        let pname = interner.resolve(*p).unwrap();
+        if pname.eq_ignore_ascii_case("d") {
+            Some(nref)
+        } else {
+            None
+        }
+    });
+    if d_input.is_none() {
+        return Err(format!(
+            "DFF identity override: D input not found for cell '{}' instance '{}' (output '{}'). \
+This cell was classified as DFF-like but does not expose a 'd' pin. \
+Provide a more specific --dff_cells list or avoid formula-based DFF classification for this library.",
+            type_name, inst_name, target_port
+        ));
+    }
     // Build D (optionally inverted) and write to destination port.
     if let Some(d_bv) = build_d_bv(d_input.unwrap(), gb, net_to_bv, invert) {
         write_bv_to_port_destination(inst, interner, gb, net_to_bv, nets, target_port, &d_bv);
     } else {
-        log::warn!(
-            "DFF override: D net not available for cell '{}' instance '{}'",
-            type_name,
-            inst_name
-        );
+        return Err(format!(
+            "DFF override: D net not available for cell '{}' instance '{}' (output '{}'). \
+This indicates missing drivers or a DFF classification mismatch; re-run with RUST_LOG=trace to diagnose.",
+            type_name, inst_name, target_port
+        ));
     }
-    true
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -769,6 +800,7 @@ mod tests {
                     },
                 ],
                 area: 1.0,
+                sequential: vec![],
             }],
         };
         let gate_fn = project_gatefn_from_netlist_and_liberty(
@@ -848,6 +880,7 @@ mod tests {
                     },
                 ],
                 area: 1.0,
+                sequential: vec![],
             }],
         };
         let res = project_gatefn_from_netlist_and_liberty(
@@ -922,6 +955,7 @@ mod tests {
                     },
                 ],
                 area: 1.0,
+                sequential: vec![],
             }],
         };
         let err = project_gatefn_from_netlist_and_liberty(
@@ -1008,6 +1042,7 @@ mod tests {
                     },
                 ],
                 area: 1.0,
+                sequential: vec![],
             }],
         };
         let gate_fn = project_gatefn_from_netlist_and_liberty(
@@ -1105,6 +1140,7 @@ mod tests {
                     },
                 ],
                 area: 1.0,
+                sequential: vec![],
             }],
         };
         let mut dff_cells = std::collections::HashSet::new();
@@ -1201,6 +1237,7 @@ mod tests {
                     },
                 ],
                 area: 1.0,
+                sequential: vec![],
             }],
         };
         let mut dff_cells = std::collections::HashSet::new();
@@ -1288,6 +1325,7 @@ mod tests {
                     },
                 ],
                 area: 1.0,
+                sequential: vec![],
             }],
         };
         let mut dff_cells = std::collections::HashSet::new();
@@ -1380,6 +1418,7 @@ mod tests {
                     },
                 ],
                 area: 1.0,
+                sequential: vec![],
             }],
         };
         let dff_cells_identity = HashSet::new();
@@ -1465,6 +1504,7 @@ mod tests {
                     },
                 ],
                 area: 1.0,
+                sequential: vec![],
             }],
         };
         let dff_cells_identity = HashSet::new();
@@ -1553,6 +1593,7 @@ mod tests {
                     },
                 ],
                 area: 1.0,
+                sequential: vec![],
             }],
         };
         let dff_cells_identity = HashSet::new();
@@ -1648,6 +1689,7 @@ mod tests {
                     },
                 ],
                 area: 1.0,
+                sequential: vec![],
             }],
         };
         let gate_fn = project_gatefn_from_netlist_and_liberty(

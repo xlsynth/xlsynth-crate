@@ -3,7 +3,7 @@
 use crate::liberty::cell_formula::parse_formula;
 use crate::liberty::util::human_readable_size;
 use crate::liberty::{CharReader, LibertyParser};
-use crate::liberty_proto::{Cell, Library, Pin, PinDirection};
+use crate::liberty_proto::{Cell, Library, Pin, PinDirection, Sequential, SequentialKind};
 use flate2::bufread::GzDecoder;
 use std::collections::HashSet;
 use std::fs::File;
@@ -33,6 +33,61 @@ fn direction_from_str(s: &str) -> i32 {
     }
 }
 
+fn qualifier_to_string(value: &crate::liberty::liberty_parser::Value) -> Option<String> {
+    match value {
+        crate::liberty::liberty_parser::Value::Identifier(s)
+        | crate::liberty::liberty_parser::Value::String(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn extract_sequential_blocks(
+    cell_block: &crate::liberty::liberty_parser::Block,
+) -> Vec<Sequential> {
+    let mut sequential = Vec::new();
+    for cell_member in &cell_block.members {
+        let crate::liberty::liberty_parser::BlockMember::SubBlock(sub_block) = cell_member else {
+            continue;
+        };
+        let kind = match sub_block.block_type.as_str() {
+            "ff" => SequentialKind::Ff,
+            "latch" => SequentialKind::Latch,
+            _ => continue,
+        } as i32;
+
+        let Some(state_var) = sub_block.qualifiers.first().and_then(qualifier_to_string) else {
+            continue;
+        };
+
+        let mut next_state = String::new();
+        let mut clock_expr = String::new();
+        for seq_member in &sub_block.members {
+            let crate::liberty::liberty_parser::BlockMember::BlockAttr(attr) = seq_member else {
+                continue;
+            };
+            if attr.attr_name == "next_state" {
+                next_state = value_to_string(&attr.value);
+            } else if (sub_block.block_type == "ff" && attr.attr_name == "clocked_on")
+                || (sub_block.block_type == "latch" && attr.attr_name == "enable")
+            {
+                clock_expr = value_to_string(&attr.value);
+            }
+        }
+
+        if next_state.is_empty() {
+            continue;
+        }
+
+        sequential.push(Sequential {
+            state_var,
+            next_state,
+            clock_expr,
+            kind,
+        });
+    }
+    sequential
+}
+
 fn block_to_proto_cells(block: &crate::liberty::liberty_parser::Block) -> Vec<Cell> {
     let mut cells = Vec::new();
     for member in &block.members {
@@ -47,48 +102,33 @@ fn block_to_proto_cells(block: &crate::liberty::liberty_parser::Block) -> Vec<Ce
             };
             let mut area = 0.0;
             let mut clocking_pins: HashSet<String> = HashSet::new();
+            let sequential = extract_sequential_blocks(cell_block);
 
             // First pass: gather cell-level attributes (like area) and any clocking pins
-            // referenced by ff blocks via the clocked_on attribute.
+            // referenced by sequential blocks via clock expressions.
             for cell_member in &cell_block.members {
-                match cell_member {
-                    crate::liberty::liberty_parser::BlockMember::BlockAttr(attr) => {
-                        if attr.attr_name == "area" {
-                            area = value_to_f64(&attr.value);
+                if let crate::liberty::liberty_parser::BlockMember::BlockAttr(attr) = cell_member {
+                    if attr.attr_name == "area" {
+                        area = value_to_f64(&attr.value);
+                    }
+                }
+            }
+            for seq in &sequential {
+                if seq.clock_expr.is_empty() {
+                    continue;
+                }
+                match parse_formula(&seq.clock_expr) {
+                    Ok(term) => {
+                        for input in term.inputs() {
+                            clocking_pins.insert(input);
                         }
                     }
-                    crate::liberty::liberty_parser::BlockMember::SubBlock(sub_block) => {
-                        if sub_block.block_type != "ff" {
-                            continue;
-                        }
-                        for ff_member in &sub_block.members {
-                            if let crate::liberty::liberty_parser::BlockMember::BlockAttr(attr) =
-                                ff_member
-                            {
-                                if attr.attr_name == "clocked_on" {
-                                    match &attr.value {
-                                        crate::liberty::liberty_parser::Value::String(s)
-                                        | crate::liberty::liberty_parser::Value::Identifier(s) => {
-                                            let term = parse_formula(s).unwrap_or_else(|e| {
-                                                panic!(
-                                                    "Failed to parse clocked_on expression {:?}: {}",
-                                                    s, e
-                                                )
-                                            });
-                                            for input in term.inputs() {
-                                                clocking_pins.insert(input);
-                                            }
-                                        }
-                                        other => {
-                                            panic!(
-                                                "Expected string or identifier for clocked_on attribute, got {:?}",
-                                                other
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to parse sequential clock expression {:?}: {}",
+                            seq.clock_expr,
+                            e
+                        );
                     }
                 }
             }
@@ -139,7 +179,12 @@ fn block_to_proto_cells(block: &crate::liberty::liberty_parser::Block) -> Vec<Ce
                     });
                 }
             }
-            cells.push(Cell { area, pins, name });
+            cells.push(Cell {
+                area,
+                pins,
+                name,
+                sequential,
+            });
         }
     }
     cells
@@ -332,6 +377,49 @@ mod tests {
         assert_eq!(clk2, Some(true));
         assert_eq!(d, Some(false));
         assert_eq!(q, Some(false));
+    }
+
+    #[test]
+    fn test_ff_next_state_is_captured() {
+        // Inspired by the ASAP7 `SDFH*` scan-flop `ff { next_state: ... }` pattern.
+        let liberty_text = r#"
+        library (my_library) {
+            cell (my_scan_ff) {
+                area: 3.0;
+                pin (CLK) {
+                    direction: input;
+                }
+                pin (D) {
+                    direction: input;
+                }
+                pin (SE) {
+                    direction: input;
+                }
+                pin (SI) {
+                    direction: input;
+                }
+                pin (Q) {
+                    direction: output;
+                    function: "IQ";
+                }
+                ff (IQ, IQN) {
+                    clocked_on : "CLK";
+                    next_state : "(!D * !SE) + (SE * SI)";
+                }
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        let cell = &lib.cells[0];
+        assert_eq!(cell.name, "my_scan_ff");
+        assert_eq!(cell.sequential.len(), 1);
+        let seq = &cell.sequential[0];
+        assert_eq!(seq.state_var, "IQ");
+        assert_eq!(seq.next_state, "(!D * !SE) + (SE * SI)");
+        assert_eq!(seq.clock_expr, "CLK");
+        assert_eq!(seq.kind, SequentialKind::Ff as i32);
     }
 
     #[test]

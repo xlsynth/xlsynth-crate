@@ -38,6 +38,7 @@ pub mod test_utils {
                         },
                     ],
                     area: 1.0,
+                    sequential: vec![],
                 },
                 Cell {
                     name: "BUF".to_string(),
@@ -56,6 +57,7 @@ pub mod test_utils {
                         },
                     ],
                     area: 1.0,
+                    sequential: vec![],
                 },
                 Cell {
                     name: "DFF".to_string(),
@@ -80,6 +82,7 @@ pub mod test_utils {
                         },
                     ],
                     area: 1.0,
+                    sequential: vec![],
                 },
             ],
         }
