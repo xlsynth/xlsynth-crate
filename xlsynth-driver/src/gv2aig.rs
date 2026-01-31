@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
 use std::io::Write;
 use std::path::Path;
 
@@ -30,17 +29,6 @@ pub fn handle_gv2aig(matches: &clap::ArgMatches) {
 
     let module_name: Option<String> = matches.get_one::<String>("module_name").cloned();
 
-    let dff_cells_identity: HashSet<String> = matches
-        .get_one::<String>("dff_cells")
-        .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
-        .unwrap_or_default();
-
-    let dff_cell_formula: Option<String> = matches
-        .get_one::<String>("dff_cell_formula")
-        .map(|s| s.to_string());
-    let dff_cell_invert_formula: Option<String> = matches
-        .get_one::<String>("dff_cell_invert_formula")
-        .map(|s| s.to_string());
     let collapse_sequential = matches
         .get_one::<bool>("collapse_sequential")
         .copied()
@@ -48,9 +36,6 @@ pub fn handle_gv2aig(matches: &clap::ArgMatches) {
 
     let opts = Gv2AigOptions {
         module_name,
-        dff_cells_identity,
-        dff_cell_formula,
-        dff_cell_invert_formula,
         collapse_sequential,
     };
 

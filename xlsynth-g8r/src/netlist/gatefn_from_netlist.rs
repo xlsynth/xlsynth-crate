@@ -45,12 +45,20 @@ fn build_cell_formula_map(
     liberty_lib: &Library,
     collapse_sequential: bool,
     used_cells: &HashSet<String>,
+    dff_cells_identity: &HashSet<String>,
+    dff_cells_inverted: &HashSet<String>,
 ) -> Result<HashMap<(String, String), (Term, String)>, String> {
     let mut cell_formula_map = HashMap::new();
+    let override_cells: HashSet<String> = dff_cells_identity
+        .iter()
+        .cloned()
+        .chain(dff_cells_inverted.iter().cloned())
+        .collect();
     for cell in &liberty_lib.cells {
         if !used_cells.contains(&cell.name) {
             continue;
         }
+        let collapse_for_cell = collapse_sequential && !override_cells.contains(&cell.name);
         let pin_names: HashSet<String> = cell.pins.iter().map(|pin| pin.name.clone()).collect();
         let state_vars: HashSet<String> = cell
             .sequential
@@ -59,7 +67,7 @@ fn build_cell_formula_map(
             .collect();
         let mut sequential_terms: HashMap<String, (crate::liberty::cell_formula::Term, String)> =
             HashMap::new();
-        if collapse_sequential {
+        if collapse_for_cell {
             for seq in &cell.sequential {
                 if seq.kind == crate::liberty_proto::SequentialKind::Latch as i32
                     && !seq.clock_expr.is_empty()
@@ -138,7 +146,7 @@ fn build_cell_formula_map(
                 let original_formula_string = pin.function.clone();
                 match crate::liberty::cell_formula::parse_formula(&pin.function) {
                     Ok(term) => {
-                        let term = if collapse_sequential {
+                        let term = if collapse_for_cell {
                             let replaced = substitute_state_vars_in_term(&term, &sequential_terms);
                             let mut remaining_state_refs: Vec<String> = replaced
                                 .inputs()
@@ -332,8 +340,13 @@ pub fn project_gatefn_from_netlist_and_liberty_with_options(
         .iter()
         .filter_map(|inst| interner.resolve(inst.type_name).map(str::to_string))
         .collect();
-    let cell_formula_map =
-        build_cell_formula_map(liberty_lib, options.collapse_sequential, &used_cell_names)?;
+    let cell_formula_map = build_cell_formula_map(
+        liberty_lib,
+        options.collapse_sequential,
+        &used_cell_names,
+        dff_cells_identity,
+        dff_cells_inverted,
+    )?;
     let module_name = interner.resolve(module.name).unwrap();
     let mut gb = GateBuilder::new(module_name.to_string(), GateBuilderOptions::no_opt());
     let mut net_to_bv: HashMap<NetIndex, AigBitVector> = HashMap::new();
@@ -866,7 +879,7 @@ fn handle_dff_identity_override(
         return Err(format!(
             "DFF identity override: D input not found for cell '{}' instance '{}' (output '{}'). \
 This cell was classified as DFF-like but does not expose a 'd' pin. \
-Provide a more specific --dff_cells list or avoid formula-based DFF classification for this library.",
+Ensure the cell exposes a 'd' pin or do not classify it as DFF-like.",
             type_name, inst_name, target_port
         ));
     }

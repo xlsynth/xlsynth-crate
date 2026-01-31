@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::aig_serdes::gate2ir::gate_fn_to_xlsynth_ir;
-use crate::netlist::dff_classify::classify_dff_cells_from_liberty;
 use crate::netlist::gatefn_from_netlist::{
     GateFnProjectOptions, project_gatefn_from_netlist_and_liberty_with_options,
 };
@@ -47,9 +46,6 @@ fn line_lookup(path: &Path, is_gz: bool) -> Box<dyn Fn(u32) -> Option<String>> {
 pub fn convert_gv2ir_paths(
     netlist_path: &Path,
     liberty_proto_path: &Path,
-    dff_cells: &HashSet<String>,
-    dff_cell_formula: Option<&str>,
-    dff_cell_invert_formula: Option<&str>,
     collapse_sequential: bool,
 ) -> Result<String> {
     // Netlist parse
@@ -78,13 +74,7 @@ pub fn convert_gv2ir_paths(
 
     // Liberty
     let liberty_lib = load_liberty_from_path(liberty_proto_path)?;
-
-    let dff_sets = classify_dff_cells_from_liberty(
-        &liberty_lib,
-        dff_cells,
-        dff_cell_formula,
-        dff_cell_invert_formula,
-    );
+    let empty_dff_cells = HashSet::new();
 
     // Project GateFn
     let gate_fn = project_gatefn_from_netlist_and_liberty_with_options(
@@ -92,8 +82,8 @@ pub fn convert_gv2ir_paths(
         &parser.nets,
         &parser.interner,
         &liberty_lib,
-        &dff_sets.identity,
-        &dff_sets.inverted,
+        &empty_dff_cells,
+        &empty_dff_cells,
         &GateFnProjectOptions {
             collapse_sequential,
         },
