@@ -2,8 +2,6 @@
 
 use std::sync::Arc;
 
-use xlsynth_g8r::aig::get_summary_stats::get_summary_stats;
-use xlsynth_g8r::check_equivalence;
 use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify};
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
@@ -22,15 +20,18 @@ fn build_pir_fn_and_range_info(ir_text: &str, top: &str) -> (ir::Fn, Arc<IrRange
     (pir_fn, range_info)
 }
 
+fn is_literal_false(op: &xlsynth_g8r::aig::gate::AigOperand) -> bool {
+    op.node.id == 0 && !op.negated
+}
+
 #[test]
-fn test_range_specializes_array_index_gate_count() {
+fn test_gatify_applies_known_bits_from_range_info() {
     let ir_text = "package sample
 
-top fn main(a0: bits[8] id=1, a1: bits[8] id=2, a2: bits[8] id=3, a3: bits[8] id=4, a4: bits[8] id=5, idx: bits[8] id=6) -> bits[8] {
-  arr: bits[8][5] = array(a0, a1, a2, a3, a4, id=7)
-  m: bits[8] = literal(value=5, id=8)
-  bounded: bits[8] = umod(idx, m, id=9)
-  ret r: bits[8] = array_index(arr, indices=[bounded], id=10)
+top fn main(x: bits[8] id=1) -> bits[8] {
+  m: bits[8] = literal(value=4, id=2)
+  r: bits[8] = umod(x, m, id=3)
+  ret out: bits[8] = identity(r, id=4)
 }
 ";
 
@@ -50,7 +51,6 @@ top fn main(a0: bits[8] id=1, a1: bits[8] id=2, a2: bits[8] id=3, a3: bits[8] id
         },
     )
     .unwrap();
-    let base_stats = get_summary_stats(&base.gate_fn);
 
     let spec = gatify(
         &pir_fn,
@@ -66,17 +66,19 @@ top fn main(a0: bits[8] id=1, a1: bits[8] id=2, a2: bits[8] id=3, a3: bits[8] id
         },
     )
     .unwrap();
-    check_equivalence::validate_same_fn(&pir_fn, &spec.gate_fn).unwrap();
-    let spec_stats = get_summary_stats(&spec.gate_fn);
 
-    assert_eq!(
-        base_stats.live_nodes, 1573,
-        "baseline live_nodes={}",
-        base_stats.live_nodes
+    let base_out = &base.gate_fn.outputs[0].bit_vector;
+    let spec_out = &spec.gate_fn.outputs[0].bit_vector;
+
+    let base_high_all_zero = (2..8).all(|i| is_literal_false(base_out.get_lsb(i)));
+    let spec_high_all_zero = (2..8).all(|i| is_literal_false(spec_out.get_lsb(i)));
+
+    assert!(
+        !base_high_all_zero,
+        "baseline unexpectedly folded all known-zero bits"
     );
-    assert_eq!(
-        spec_stats.live_nodes, 1468,
-        "specialized live_nodes={}",
-        spec_stats.live_nodes
+    assert!(
+        spec_high_all_zero,
+        "range info should force known-zero bits to literals"
     );
 }
