@@ -51,6 +51,7 @@ fuzz_target!(|sample: FuzzSample| {
             mul_adder_mapping: None,
             range_info: None,
             enable_rewrite_carry_out: false,
+            enable_rewrite_prio_encode: false,
         },
     );
 
@@ -67,6 +68,7 @@ fuzz_target!(|sample: FuzzSample| {
             mul_adder_mapping: None,
             range_info: None,
             enable_rewrite_carry_out: false,
+            enable_rewrite_prio_encode: false,
         },
     );
 

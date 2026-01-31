@@ -191,6 +191,7 @@ pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
             update_value,
         } => vec![*arg, *start, *update_value],
         ExtCarryOut { lhs, rhs, c_in } => vec![*lhs, *rhs, *c_in],
+        ExtPrioEncode { arg, lsb_prio: _ } => vec![*arg],
         Assert {
             token,
             activate,
@@ -730,6 +731,10 @@ where
             lhs: map((0, *lhs)),
             rhs: map((1, *rhs)),
             c_in: map((2, *c_in)),
+        },
+        NodePayload::ExtPrioEncode { arg, lsb_prio } => NodePayload::ExtPrioEncode {
+            arg: map((0, *arg)),
+            lsb_prio: *lsb_prio,
         },
         NodePayload::Assert {
             token,

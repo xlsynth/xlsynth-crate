@@ -138,6 +138,7 @@ fn mul_bf16_bf16(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {
             mul_adder_mapping: None,
             range_info: None,
             enable_rewrite_carry_out: false,
+            enable_rewrite_prio_encode: false,
         },
     )
     .unwrap();
@@ -187,6 +188,7 @@ pub fn load_bf16_add_sample(opt: Opt) -> LoadedSample {
             mul_adder_mapping: None,
             range_info: None,
             enable_rewrite_carry_out: false,
+            enable_rewrite_prio_encode: false,
         },
     )
     .unwrap();

@@ -67,6 +67,9 @@ pub fn verify_fn_operand_indices_in_bounds(f: &Fn) -> Result<(), String> {
                 check(*rhs, &format!("node {} ext_carry_out.rhs", i))?;
                 check(*c_in, &format!("node {} ext_carry_out.c_in", i))?;
             }
+            NodePayload::ExtPrioEncode { arg, lsb_prio: _ } => {
+                check(*arg, &format!("node {} ext_prio_encode.arg", i))?;
+            }
             NodePayload::SignExt { arg, .. } | NodePayload::ZeroExt { arg, .. } => {
                 check(*arg, &format!("node {} ext.arg", i))?;
             }

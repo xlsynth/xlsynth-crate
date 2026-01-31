@@ -11,6 +11,7 @@ use crate::corners::{
 use crate::ir;
 use crate::ir::NodePayload as P;
 use crate::ir_utils::get_topological;
+use crate::math::ceil_log2;
 use xlsynth::{IrBits, IrValue};
 
 fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
@@ -160,6 +161,43 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
             };
             let sum_w1_ci = sum_w1.add(&c_in_w1);
             IrValue::bool(sum_w1_ci.get_bit(w).unwrap())
+        }
+        ir::NodePayload::ExtPrioEncode { arg, lsb_prio } => {
+            let bits: IrBits = env.get(&arg).unwrap().to_bits().unwrap();
+            let n = bits.get_bit_count();
+
+            let mut found: Option<usize> = None;
+            if lsb_prio {
+                for i in 0..n {
+                    if bits.get_bit(i).unwrap() {
+                        found = Some(i);
+                        break;
+                    }
+                }
+            } else {
+                for i in (0..n).rev() {
+                    if bits.get_bit(i).unwrap() {
+                        found = Some(i);
+                        break;
+                    }
+                }
+            }
+
+            // Preserve `encode(one_hot(...))` sentinel semantics: if no bits are
+            // set, return `n` (for `arg: bits[n]`).
+            let idx = found.unwrap_or(n);
+
+            let out_w = ceil_log2(n.saturating_add(1));
+            let mut out: Vec<bool> = vec![false; out_w];
+            for (i, bit) in out.iter_mut().enumerate() {
+                let bit_is_one = if i < usize::BITS as usize {
+                    ((idx >> i) & 1) == 1
+                } else {
+                    false
+                };
+                *bit = bit_is_one;
+            }
+            IrValue::from_bits(&IrBits::from_lsb_is_0(&out))
         }
         ir::NodePayload::Unop(unop, ref operand) => {
             let operand_value: &IrValue = env.get(operand).unwrap();

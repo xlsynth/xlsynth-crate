@@ -32,6 +32,7 @@ top fn add_{n}_bits(a: bits[{n}] id=1, b: bits[{n}] id=2) -> bits[{n}] {{
             mul_adder_mapping: None,
             range_info: None,
             enable_rewrite_carry_out: false,
+            enable_rewrite_prio_encode: false,
         },
     )
     .unwrap();

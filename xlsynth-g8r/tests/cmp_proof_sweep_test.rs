@@ -165,6 +165,7 @@ fn assert_ir_gate_equivalent_for_built(
             mul_adder_mapping: None,
             range_info: None,
             enable_rewrite_carry_out: false,
+            enable_rewrite_prio_encode: false,
         },
     )
     .unwrap();

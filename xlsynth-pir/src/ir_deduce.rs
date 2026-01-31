@@ -368,6 +368,15 @@ where
                 _ => Err(DeduceError::ExpectedBits("ext_carry_out.c_in")),
             }
         }
+        NodePayload::ExtPrioEncode { .. } => {
+            let arg_ty = operand_types
+                .get(0)
+                .ok_or(DeduceError::MissingOperand("ext_prio_encode.arg"))?;
+            match arg_ty {
+                Type::Bits(n) => Ok(Some(Type::Bits(ceil_log2(n.saturating_add(1))))),
+                _ => Err(DeduceError::ExpectedBits("ext_prio_encode.arg")),
+            }
+        }
 
         NodePayload::Assert { .. } | NodePayload::Trace { .. } | NodePayload::AfterAll(_) => {
             Ok(Some(Type::Token))

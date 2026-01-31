@@ -21,6 +21,7 @@ use xlsynth::IrValue;
 use xlsynth_pir::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
 use xlsynth_pir::ir_range_info::IrRangeInfo;
 use xlsynth_pir::ir_utils;
+use xlsynth_pir::math::ceil_log2;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PrepForGatifyOptions {
@@ -29,6 +30,14 @@ pub struct PrepForGatifyOptions {
     ///
     /// Default is false because the rewrite is not always profitable.
     pub enable_rewrite_carry_out: bool,
+
+    /// When true, rewrite the idiom `encode(one_hot(x))` (for power-of-two `x`
+    /// width) into the extension op `ext_prio_encode(x, lsb_prio=...)` so
+    /// gatification can use a specialized priority-encoder lowering.
+    ///
+    /// Default is false because this is a QoR strategy choice and we want to be
+    /// able to compare old vs new circuits easily.
+    pub enable_rewrite_prio_encode: bool,
 }
 
 /// Returns per-node use counts for the provided function.
@@ -107,6 +116,62 @@ fn combine_or_reduces(f: &mut ir::Fn) {
             unused_node.ty = ir::Type::nil();
         }
     }
+}
+
+/// Rewrites `encode(one_hot(x, lsb_prio=...))` into `ext_prio_encode(x,
+/// lsb_prio=...)` when:
+/// - `x` has power-of-two bit width
+/// - the `one_hot` node has a single user (the `encode`)
+///
+/// This preserves the sentinel behavior of `encode(one_hot(...))` where `x==0`
+/// yields the index `N` (for `x: bits[N]`).
+fn rewrite_encode_one_hot_to_ext_prio_encode(f: &mut ir::Fn) -> usize {
+    let use_counts = get_use_counts(f);
+    let mut rewrites: usize = 0;
+
+    // Snapshot length so we only visit original nodes.
+    let original_len = f.nodes.len();
+    for node_index in 0..original_len {
+        let payload = f.nodes[node_index].payload.clone();
+        let NodePayload::Encode { arg: one_hot } = payload else {
+            continue;
+        };
+        if one_hot.index >= f.nodes.len() {
+            continue;
+        }
+        if use_counts[one_hot.index] != 1 {
+            continue;
+        }
+
+        let one_hot_payload = f.nodes[one_hot.index].payload.clone();
+        let NodePayload::OneHot { arg, lsb_prio } = one_hot_payload else {
+            continue;
+        };
+        let n = f.nodes[arg.index].ty.bit_count();
+        if n == 0 || !n.is_power_of_two() {
+            continue;
+        }
+
+        // Ensure the node result type matches the encode(one_hot) idiom shape:
+        // one_hot makes width N+1, encode returns ceil_log2(N+1).
+        let expected_out_w = ceil_log2(n.saturating_add(1));
+        if f.nodes[node_index].ty.bit_count() != expected_out_w {
+            continue;
+        }
+
+        let node_ref = ir::NodeRef { index: node_index };
+        ir_utils::replace_node_payload(
+            f,
+            node_ref,
+            NodePayload::ExtPrioEncode { arg, lsb_prio },
+            Some(Type::Bits(expected_out_w)),
+        )
+        .expect("prep_for_gatify: ext_prio_encode payload replacement failed");
+
+        rewrites += 1;
+    }
+
+    rewrites
 }
 
 fn nil_out_node(f: &mut ir::Fn, node_ref: ir::NodeRef) {
@@ -500,6 +565,9 @@ pub fn prep_for_gatify(
     if options.enable_rewrite_carry_out {
         let _rewrites = rewrite_add_slice_carry_out_to_ext_carry_out(&mut cloned, range_info);
     }
+    if options.enable_rewrite_prio_encode {
+        let _rewrites = rewrite_encode_one_hot_to_ext_prio_encode(&mut cloned);
+    }
     mark_dead_nodes_as_nil(&mut cloned);
     cloned
 }
@@ -566,6 +634,7 @@ top fn cone(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
             Some(range_info.as_ref()),
             PrepForGatifyOptions {
                 enable_rewrite_carry_out: true,
+                ..PrepForGatifyOptions::default()
             },
         );
         let optimized_text = optimized.to_string();
@@ -625,6 +694,7 @@ top fn cone(p0: bits[9] id=1, p1: bits[9] id=2) -> bits[1] {
             Some(range_info.as_ref()),
             PrepForGatifyOptions {
                 enable_rewrite_carry_out: true,
+                ..PrepForGatifyOptions::default()
             },
         );
         let optimized_text = optimized.to_string();
