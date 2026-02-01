@@ -2318,6 +2318,73 @@ fn test_ir2gates_output_json_file() {
     assert_eq!(json["live_nodes"], 96);
 }
 
+#[test]
+fn test_ir2gates_prepared_ir_default_enables_prio_encode_rewrite() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("main.ir");
+    let prepared_path = temp_dir.path().join("prepared.ir");
+    let prepared_disabled_path = temp_dir.path().join("prepared_disabled.ir");
+
+    // `encode(one_hot(x))` should rewrite to `ext_prio_encode(x, ...)` by
+    // default in prep_for_gatify.
+    let ir_text = r#"package p
+
+top fn main(x: bits[32] id=1) -> bits[5] {
+  one_hot.2: bits[33] = one_hot(x, lsb_prio=false, id=2)
+  encode.3: bits[6] = encode(one_hot.2, id=3)
+  ret bit_slice.4: bits[5] = bit_slice(encode.3, start=0, width=5, id=4)
+}"#;
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    let output = std::process::Command::new(command_path)
+        .arg("ir2gates")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--fraig=false")
+        .arg(format!("--prepared-ir-out={}", prepared_path.display()))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "ir2gates failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let prepared_text = std::fs::read_to_string(&prepared_path).unwrap();
+    assert!(
+        prepared_text.contains("ext_prio_encode("),
+        "expected ext_prio_encode rewrite in prepared IR, got:\n{}",
+        prepared_text
+    );
+
+    // Explicitly disabling the rewrite should suppress the extension op.
+    let output_disabled = std::process::Command::new(command_path)
+        .arg("ir2gates")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--fraig=false")
+        .arg("--enable-rewrite-prio-encode=false")
+        .arg(format!(
+            "--prepared-ir-out={}",
+            prepared_disabled_path.display()
+        ))
+        .output()
+        .unwrap();
+    assert!(
+        output_disabled.status.success(),
+        "ir2gates (rewrite disabled) failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output_disabled.stdout),
+        String::from_utf8_lossy(&output_disabled.stderr)
+    );
+    let prepared_disabled_text = std::fs::read_to_string(&prepared_disabled_path).unwrap();
+    assert!(
+        !prepared_disabled_text.contains("ext_prio_encode("),
+        "did not expect ext_prio_encode when rewrite is disabled, got:\n{}",
+        prepared_disabled_text
+    );
+}
+
 // Test for ir-equiv subcommand using Solver
 #[allow(dead_code)]
 fn test_irequiv_subcommand_solver_equivalent(solver: &str) {

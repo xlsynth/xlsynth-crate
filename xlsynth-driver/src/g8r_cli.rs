@@ -5,6 +5,7 @@ use xlsynth_g8r::cut_db::loader::CutDb;
 use xlsynth_g8r::cut_db_cli_defaults::{
     CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI, CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
 };
+use xlsynth_g8r::gatify::prep_for_gatify::PrepForGatifyOptions;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::process_ir_path;
 
@@ -105,15 +106,16 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> G8rCliOptions {
     let fold = parse_bool(matches, "fold", /* default= */ true);
     let hash = parse_bool(matches, "hash", /* default= */ true);
     let fraig = parse_bool(matches, "fraig", /* default= */ true);
+    let prep_defaults = PrepForGatifyOptions::all_opts_enabled();
     let enable_rewrite_carry_out = parse_bool(
         matches,
         "enable-rewrite-carry-out",
-        /* default= */ false,
+        prep_defaults.enable_rewrite_carry_out,
     );
     let enable_rewrite_prio_encode = parse_bool(
         matches,
         "enable-rewrite-prio-encode",
-        /* default= */ false,
+        prep_defaults.enable_rewrite_prio_encode,
     );
     let (adder_mapping, mul_adder_mapping) = parse_adder_mappings(matches);
     let toggle_sample_count =
