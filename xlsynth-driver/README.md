@@ -162,6 +162,7 @@ Converts an XLS IR file to an `xlsynth_g8r::GateFn` (i.e. a gate-level netlist i
   - `--netlist-out <PATH>` – write a human-readable gate-level netlist to a file.
 - The same optimization / analysis flags accepted by `ir2gates` are supported (`--fold`, `--hash`, `--fraig`, `--toggle-sample-count`, …).
   - `--enable-rewrite-carry-out=<BOOL>` – when `true`, enable a carry-out idiom rewrite during `prep_for_gatify` (introduces `ext_carry_out`). Default `false`.
+  - `--enable-rewrite-prio-encode=<BOOL>` – when `true`, enable a prio-encode idiom rewrite during `prep_for_gatify` (introduces `ext_prio_encode`). Default `false`.
   - `--top <TOP>` – override the top-level entry point (required if the IR package has no `top fn`).
 
 Example:
@@ -387,6 +388,7 @@ optimization, and gatification using either the toolchain or the runtime APIs.
 
 - The `--type_inference_v2` flag enables the experimental type inference v2 algorithm.
   **Requires:** `--toolchain` (external tool path). If used without `--toolchain`, the driver will print an error and exit.
+- Gate-lowering flags are shared with `ir2g8r` / `ir2gates` (e.g. `--fold`, `--hash`, `--fraig`, `--adder-mapping`, and `--enable-rewrite-*`).
 
 ### `ir2opt`: optimize IR
 
@@ -687,6 +689,7 @@ Supported flags include the common gate-optimization controls:
 - `--fold` – fold the gate representation (default `true`).
 - `--hash` – hash-cons the gate representation (default `true`).
 - `--enable-rewrite-carry-out=<BOOL>` – when `true`, enable a carry-out idiom rewrite during `prep_for_gatify` (introduces `ext_carry_out`). Default `false`.
+- `--enable-rewrite-prio-encode=<BOOL>` – when `true`, enable a prio-encode idiom rewrite during `prep_for_gatify` (introduces `ext_prio_encode`). Default `false`.
 - `--prepared-ir-out=<PATH>` – write the residual PIR (after `prep_for_gatify`) to `PATH`.
 - `--adder-mapping=<ripple-carry|brent-kung|kogge-stone>` – choose the adder
   topology.

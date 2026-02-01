@@ -86,6 +86,7 @@ fn main() {
         fold: args.fold,
         hash: args.hash,
         enable_rewrite_carry_out: false,
+        enable_rewrite_prio_encode: false,
         adder_mapping: AdderMapping::default(),
         mul_adder_mapping: None,
         fraig: args.fraig,

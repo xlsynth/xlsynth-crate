@@ -7,11 +7,6 @@ use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConf
 use crate::tools::{run_ir_converter_main, run_opt_main};
 use tempfile::NamedTempFile;
 use xlsynth::DslxConvertOptions;
-use xlsynth_g8r::cut_db::loader::CutDb;
-use xlsynth_g8r::cut_db_cli_defaults::{
-    CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI, CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
-};
-use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::process_ir_path::{process_ir_path_for_cli, Options as G8rOptions};
 
 pub fn handle_dslx_g8r_stats(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
@@ -92,33 +87,12 @@ pub fn handle_dslx_g8r_stats(matches: &ArgMatches, config: &Option<ToolchainConf
     let temp_ir = NamedTempFile::new().unwrap();
     std::fs::write(temp_ir.path(), &ir_text).unwrap();
 
-    let stats = process_ir_path_for_cli(
-        temp_ir.path(),
-        &G8rOptions {
-            check_equivalence: false,
-            fold: true,
-            hash: true,
-            enable_rewrite_carry_out: false,
-            adder_mapping: AdderMapping::default(),
-            mul_adder_mapping: None,
-            fraig: true,
-            emit_independent_op_stats: false,
-            ir_top: None,
-            fraig_max_iterations: None,
-            fraig_sim_samples: None,
-            quiet: true,
-            emit_netlist: false,
-            toggle_sample_count: 0,
-            toggle_sample_seed: 0,
-            compute_graph_logical_effort: true,
-            graph_logical_effort_beta1: 1.0,
-            graph_logical_effort_beta2: 0.0,
-            cut_db: Some(CutDb::load_default()),
-            cut_db_rewrite_max_iterations: CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
-            cut_db_rewrite_max_cuts_per_node: CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
-            prepared_ir_out: None,
-        },
+    let options: G8rOptions = crate::g8r_cli::build_process_ir_path_options_for_cli(
+        matches, /* quiet= */ true, /* emit_netlist= */ false,
+        /* emit_independent_op_stats= */ false, /* ir_top= */ None,
+        /* prepared_ir_out= */ None,
     );
+    let stats = process_ir_path_for_cli(temp_ir.path(), &options);
 
     serde_json::to_writer(std::io::stdout(), &stats).unwrap();
     println!();
