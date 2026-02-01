@@ -181,10 +181,10 @@ pub struct Options {
 }
 
 /// Command line entry point (e.g. it exits the process on error).
-pub fn process_ir_path_for_cli(
+pub fn process_ir_path_with_gatefn(
     ir_path: &std::path::Path,
     options: &Options,
-) -> Ir2GatesSummaryStats {
+) -> (crate::aig::GateFn, Ir2GatesSummaryStats) {
     // Read the file into a string.
     let file_content = std::fs::read_to_string(&ir_path)
         .unwrap_or_else(|err| panic!("Failed to read {}: {}", ir_path.display(), err));
@@ -526,7 +526,7 @@ pub fn process_ir_path_for_cli(
     };
 
     if options.quiet {
-        return summary_stats;
+        return (gate_fn, summary_stats);
     }
 
     println!("== Deepest path ({}):", depth_stats.deepest_path.len());
@@ -658,7 +658,16 @@ pub fn process_ir_path_for_cli(
         println!("  Primary output toggles: {}", stats.primary_output_toggles);
     }
 
-    summary_stats
+    (gate_fn, summary_stats)
+}
+
+/// Command line entry point (e.g. it exits the process on error).
+pub fn process_ir_path_for_cli(
+    ir_path: &std::path::Path,
+    options: &Options,
+) -> Ir2GatesSummaryStats {
+    let (_gate_fn, stats) = process_ir_path_with_gatefn(ir_path, options);
+    stats
 }
 
 fn round_up_to_nearest_multiple<T>(x: T, y: T) -> T

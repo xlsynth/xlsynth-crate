@@ -3,34 +3,51 @@
 //! Accepts input IR and then performs the g8r IR-to-gates mapping on it.
 
 use clap::ArgMatches;
-use rand_xoshiro::rand_core::SeedableRng;
-use xlsynth_g8r::aig::{self, fraig, logical_effort};
 
 use crate::toolchain_config::ToolchainConfig;
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
-use xlsynth_g8r::aig::fanout::fanout_histogram;
-use xlsynth_g8r::aig::get_summary_stats::get_gate_depth;
-use xlsynth_g8r::aig::graph_logical_effort::{self, analyze_graph_logical_effort};
-use xlsynth_g8r::aig::logical_effort::compute_logical_effort_min_delay;
 use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
 use xlsynth_g8r::aig_serdes::emit_aiger_binary::emit_aiger_binary;
 use xlsynth_g8r::aig_serdes::emit_netlist;
-use xlsynth_g8r::aig_sim::count_toggles;
 use xlsynth_g8r::cut_db::loader::CutDb;
 use xlsynth_g8r::cut_db_cli_defaults::{
     CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI, CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
 };
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::process_ir_path;
-use xlsynth_g8r::use_count::get_id_to_use_count;
-use xlsynth_pir::fuzz_utils::arbitrary_irbits;
 
 #[derive(Debug, Clone, Copy)]
 struct CutDbRewriteBounds {
     max_cuts_per_node: usize,
     max_iterations: usize,
+}
+
+fn parse_adder_mapping(value: Option<&str>) -> AdderMapping {
+    match value {
+        Some("ripple-carry") => AdderMapping::RippleCarry,
+        Some("brent-kung") => AdderMapping::BrentKung,
+        Some("kogge-stone") => AdderMapping::KoggeStone,
+        _ => AdderMapping::default(),
+    }
+}
+
+fn parse_adder_mappings(matches: &ArgMatches) -> (AdderMapping, Option<AdderMapping>) {
+    let adder_mapping = parse_adder_mapping(
+        matches
+            .get_one::<String>("adder_mapping")
+            .map(|s| s.as_str()),
+    );
+    let mul_adder_mapping = match matches
+        .get_one::<String>("mul_adder_mapping")
+        .map(|s| s.as_str())
+    {
+        Some("ripple-carry") => Some(AdderMapping::RippleCarry),
+        Some("brent-kung") => Some(AdderMapping::BrentKung),
+        Some("kogge-stone") => Some(AdderMapping::KoggeStone),
+        _ => None,
+    };
+    (adder_mapping, mul_adder_mapping)
 }
 
 fn ir2gates(
@@ -112,24 +129,7 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         Some("false") => false,
         _ => true, // default for hashing is true
     };
-    let adder_mapping = match matches
-        .get_one::<String>("adder_mapping")
-        .map(|s| s.as_str())
-    {
-        Some("ripple-carry") => AdderMapping::RippleCarry,
-        Some("brent-kung") => AdderMapping::BrentKung,
-        Some("kogge-stone") => AdderMapping::KoggeStone,
-        _ => AdderMapping::default(),
-    };
-    let mul_adder_mapping = match matches
-        .get_one::<String>("mul_adder_mapping")
-        .map(|s| s.as_str())
-    {
-        Some("ripple-carry") => Some(AdderMapping::RippleCarry),
-        Some("brent-kung") => Some(AdderMapping::BrentKung),
-        Some("kogge-stone") => Some(AdderMapping::KoggeStone),
-        _ => None,
-    };
+    let (adder_mapping, mul_adder_mapping) = parse_adder_mappings(matches);
     let fraig = match matches.get_one::<String>("fraig").map(|s| s.as_str()) {
         Some("true") => true,
         Some("false") => false,
@@ -252,6 +252,8 @@ fn ir_to_gatefn_with_stats(
     fold: bool,
     hash: bool,
     enable_rewrite_carry_out: bool,
+    adder_mapping: AdderMapping,
+    mul_adder_mapping: Option<AdderMapping>,
     fraig: bool,
     toggle_sample_count: usize,
     toggle_sample_seed: u64,
@@ -266,145 +268,31 @@ fn ir_to_gatefn_with_stats(
     xlsynth_g8r::aig::GateFn,
     process_ir_path::Ir2GatesSummaryStats,
 ) {
-    // Build GateFn directly and compute stats (duplicates selected logic from
-    // process_ir_path so we can return both GateFn and summary stats without
-    // doing two passes).
-    //
-    // Read the file into a string.
-    let file_content = std::fs::read_to_string(&input_file)
-        .unwrap_or_else(|err| panic!("Failed to read {}: {}", input_file.display(), err));
-    let ir2gates_output = xlsynth_g8r::ir2gates::ir2gates_from_ir_text(
-        &file_content,
-        ir_top,
-        xlsynth_g8r::ir2gates::Ir2GatesOptions {
-            fold,
-            hash,
-            check_equivalence: false,
-            enable_rewrite_carry_out,
-            enable_rewrite_prio_encode: false,
-            adder_mapping: AdderMapping::default(),
-            mul_adder_mapping: None,
-            aug_opt: Default::default(),
-        },
-    )
-    .unwrap_or_else(|err| {
-        eprintln!("Error encountered lowering IR to gates: {}", err);
-        std::process::exit(1);
-    });
-
-    let mut gate_fn = ir2gates_output.gatify_output.gate_fn;
-    // Prepare to capture fraig statistics if fraig is enabled.
-    let mut fraig_did_converge: Option<fraig::DidConverge> = None;
-    let mut fraig_iteration_stats: Option<Vec<fraig::FraigIterationStat>> = None;
-    // Apply fraig if requested
-    if fraig {
-        let iteration_bounds = if let Some(max_iterations) = fraig_max_iterations {
-            fraig::IterationBounds::MaxIterations(max_iterations)
-        } else {
-            fraig::IterationBounds::ToConvergence
-        };
-        let sim_samples = match fraig_sim_samples {
-            Some(n) => n,
-            None => {
-                let gate_count = gate_fn.gates.len();
-                let scaled = (gate_count as f64 / 8.0).ceil() as usize;
-                let result = ((scaled + 255) / 256) * 256;
-                result
-            }
-        };
-        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(0);
-        let fraig_result = fraig::fraig_optimize(&gate_fn, sim_samples, iteration_bounds, &mut rng);
-        match fraig_result {
-            Ok((optimized_fn, did_converge, iteration_stats)) => {
-                gate_fn = optimized_fn;
-                fraig_did_converge = Some(did_converge);
-                fraig_iteration_stats = Some(iteration_stats);
-            }
-            Err(e) => {
-                eprintln!("Fraig optimization failed: {}", e);
-                std::process::exit(1);
-            }
-        }
-    }
-
-    if let Some(db) = cut_db.as_ref() {
-        log::info!(
-            "cut-db rewrite enabled (bounded): max_cuts_per_node={} max_iterations={}",
-            cut_db_rewrite_bounds.max_cuts_per_node,
-            cut_db_rewrite_bounds.max_iterations
-        );
-        gate_fn = xlsynth_g8r::aig::cut_db_rewrite::rewrite_gatefn_with_cut_db(
-            &gate_fn,
-            db.as_ref(),
-            xlsynth_g8r::aig::cut_db_rewrite::RewriteOptions {
-                max_cuts_per_node: cut_db_rewrite_bounds.max_cuts_per_node,
-                max_iterations: cut_db_rewrite_bounds.max_iterations,
-            },
-        );
-    }
-
-    // Compute statistics directly from the GateFn (mirrors process_ir_path)
-    let id_to_use_count: HashMap<aig::AigRef, usize> = get_id_to_use_count(&gate_fn);
-    let live_nodes: Vec<aig::AigRef> = id_to_use_count.keys().cloned().collect();
-
-    let depth_stats = get_gate_depth(&gate_fn, &live_nodes);
-
-    let logical_effort_deepest_path_min_delay =
-        compute_logical_effort_min_delay(&gate_fn, &logical_effort::Options::default());
-
-    let hist = fanout_histogram(&gate_fn);
-    let hist_sorted: std::collections::BTreeMap<usize, usize> = hist.clone().into_iter().collect();
-
-    // Compute toggle stats if requested
-    let (toggle_stats, toggle_transitions) = if toggle_sample_count > 0 {
-        let mut rng = rand_xoshiro::Xoshiro256PlusPlus::seed_from_u64(toggle_sample_seed);
-        let mut batch_inputs = Vec::with_capacity(toggle_sample_count);
-        let input_widths: Vec<usize> = gate_fn
-            .inputs
-            .iter()
-            .map(|input| input.bit_vector.get_bit_count())
-            .collect();
-        for _ in 0..toggle_sample_count {
-            let mut input_vec = Vec::with_capacity(input_widths.len());
-            for &width in &input_widths {
-                let bits = arbitrary_irbits(&mut rng, width);
-                input_vec.push(bits);
-            }
-            batch_inputs.push(input_vec);
-        }
-        let stats = count_toggles::count_toggles(&gate_fn, &batch_inputs);
-        (Some(stats), Some(toggle_sample_count.saturating_sub(1)))
-    } else {
-        (None, None)
+    let options = process_ir_path::Options {
+        check_equivalence: false,
+        fold,
+        hash,
+        enable_rewrite_carry_out,
+        adder_mapping,
+        mul_adder_mapping,
+        fraig,
+        emit_independent_op_stats: false,
+        quiet: true,
+        emit_netlist: false,
+        toggle_sample_count,
+        toggle_sample_seed,
+        compute_graph_logical_effort,
+        graph_logical_effort_beta1,
+        graph_logical_effort_beta2,
+        fraig_max_iterations,
+        fraig_sim_samples,
+        cut_db,
+        cut_db_rewrite_max_iterations: cut_db_rewrite_bounds.max_iterations,
+        cut_db_rewrite_max_cuts_per_node: cut_db_rewrite_bounds.max_cuts_per_node,
+        prepared_ir_out: None,
+        ir_top: ir_top.map(|s| s.to_string()),
     };
-
-    let graph_logical_effort_worst_case_delay = if compute_graph_logical_effort {
-        let analysis = analyze_graph_logical_effort(
-            &gate_fn,
-            &graph_logical_effort::GraphLogicalEffortOptions {
-                beta1: graph_logical_effort_beta1,
-                beta2: graph_logical_effort_beta2,
-            },
-        );
-        Some(analysis.delay)
-    } else {
-        None
-    };
-
-    let summary_stats = process_ir_path::Ir2GatesSummaryStats {
-        live_nodes: live_nodes.len(),
-        deepest_path: depth_stats.deepest_path.len(),
-        fanout_histogram: hist_sorted,
-        toggle_stats,
-        toggle_transitions,
-        logical_effort_deepest_path_min_delay,
-        graph_logical_effort_worst_case_delay,
-        fraig_did_converge,
-        fraig_iteration_stats,
-        independent_op_stats: None,
-    };
-
-    (gate_fn, summary_stats)
+    process_ir_path::process_ir_path_with_gatefn(input_file, &options)
 }
 
 pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
@@ -433,6 +321,7 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
         Some("false") => false,
         _ => false,
     };
+    let (adder_mapping, mul_adder_mapping) = parse_adder_mappings(matches);
     let toggle_sample_count = matches
         .get_one::<String>("toggle_sample_count")
         .map(|s| s.parse::<usize>().unwrap_or(0))
@@ -500,6 +389,8 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
         fold,
         hash,
         enable_rewrite_carry_out,
+        adder_mapping,
+        mul_adder_mapping,
         fraig,
         toggle_sample_count,
         toggle_sample_seed,
