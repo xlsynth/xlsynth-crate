@@ -38,6 +38,7 @@ pub struct AugOptRewriteStats {
     pub pow2_msb_compare_with_eq_tiebreak: usize,
     pub eq_priority_sel_to_selector_predicate: usize,
     pub eq_add_zero_to_eq_rhs_sub: usize,
+    pub ne_shrl_slice_known_one_shift_nonzero: usize,
 }
 
 impl AugOptRewriteStats {
@@ -47,6 +48,7 @@ impl AugOptRewriteStats {
             .saturating_add(self.pow2_msb_compare_with_eq_tiebreak)
             .saturating_add(self.eq_priority_sel_to_selector_predicate)
             .saturating_add(self.eq_add_zero_to_eq_rhs_sub)
+            .saturating_add(self.ne_shrl_slice_known_one_shift_nonzero)
     }
 
     fn saturating_add_assign(&mut self, other: AugOptRewriteStats) {
@@ -63,6 +65,9 @@ impl AugOptRewriteStats {
         self.eq_add_zero_to_eq_rhs_sub = self
             .eq_add_zero_to_eq_rhs_sub
             .saturating_add(other.eq_add_zero_to_eq_rhs_sub);
+        self.ne_shrl_slice_known_one_shift_nonzero = self
+            .ne_shrl_slice_known_one_shift_nonzero
+            .saturating_add(other.ne_shrl_slice_known_one_shift_nonzero);
     }
 }
 
@@ -288,6 +293,8 @@ fn apply_basis_rewrites_to_fn(
     stats.eq_priority_sel_to_selector_predicate =
         rewrite_eq_priority_sel_to_selector_predicate(&mut cloned, range_info);
     stats.eq_add_zero_to_eq_rhs_sub = rewrite_eq_add_zero_to_eq_rhs_sub(&mut cloned);
+    stats.ne_shrl_slice_known_one_shift_nonzero =
+        rewrite_ne_shrl_slice_known_one_shift_nonzero(&mut cloned, range_info);
     // Ensure textual IR is defs-before-uses by reordering body nodes into a
     // topological order (while preserving PIR layout invariants). This makes
     // it safe for rewrites to append new nodes.
@@ -845,6 +852,242 @@ fn is_get_param_node(f: &ir::Fn, nr: NodeRef) -> bool {
     matches!(f.get_node(nr).payload, NodePayload::GetParam(_))
 }
 
+fn known_one_positions(range_info: &IrRangeInfo, text_id: usize) -> Vec<usize> {
+    let Some(info) = range_info.get(text_id) else {
+        return Vec::new();
+    };
+    let Some(k) = info.known_bits.as_ref() else {
+        return Vec::new();
+    };
+    let w = k.mask.get_bit_count();
+    let mut out = Vec::new();
+    for i in 0..w {
+        let is_known = k.mask.get_bit(i).unwrap_or(false);
+        if !is_known {
+            continue;
+        }
+        let is_one = k.value.get_bit(i).unwrap_or(false);
+        if is_one {
+            out.push(i);
+        }
+    }
+    out
+}
+
+fn unsigned_bounds_u64(range_info: &IrRangeInfo, text_id: usize) -> Option<(u64, u64)> {
+    let info = range_info.get(text_id)?;
+    let min_bits = info.unsigned_min.as_ref()?;
+    let max_bits = info.unsigned_max.as_ref()?;
+    let min_u = min_bits.to_u64().ok()?;
+    let max_u = max_bits.to_u64().ok()?;
+    Some((min_u, max_u))
+}
+
+fn const_fits_in_width(v: u64, width: usize) -> bool {
+    if width == 0 {
+        return v == 0;
+    }
+    if width >= 64 {
+        return true;
+    }
+    v < (1u64 << width)
+}
+
+/// Given a set of inclusive intervals, returns true iff they cover every point
+/// in [lo, hi] (inclusive).
+fn intervals_cover_range(mut intervals: Vec<(usize, usize)>, lo: usize, hi: usize) -> bool {
+    if lo > hi {
+        return true;
+    }
+    if intervals.is_empty() {
+        return false;
+    }
+    intervals.sort_by_key(|(l, _)| *l);
+    let mut cur = lo;
+    for (l, h) in intervals {
+        if h < cur {
+            continue;
+        }
+        if l > cur {
+            return false;
+        }
+        cur = cur.max(h.saturating_add(1));
+        if cur > hi {
+            return true;
+        }
+    }
+    cur > hi
+}
+
+/// Rewrite (range-info guarded):
+///
+/// `ne(bit_slice(shrl(x, s), start=0, width=W), 0)`
+///   →
+/// `or(and(s in [1, hi]), and(eq(s, 0), ne(bit_slice(x, 0, W), 0)))`
+///
+/// where `hi = min(s_max, x_width-1)` and known-bits proves that every shift
+/// amount in [1, hi] must land at least one provably-one bit into the low-W
+/// slice.
+///
+/// This avoids materializing a large dynamic shifter cone when the
+/// nonzero-after-shift predicate can be discharged cheaply by known bits and
+/// shift bounds.
+fn rewrite_ne_shrl_slice_known_one_shift_nonzero(
+    f: &mut ir::Fn,
+    range_info: Option<&IrRangeInfo>,
+) -> usize {
+    let Some(range_info) = range_info else {
+        return 0;
+    };
+    let mut rewrites = 0usize;
+
+    for ne_index in 0..f.nodes.len() {
+        let NodePayload::Binop(Binop::Ne, a, b) = f.nodes[ne_index].payload.clone() else {
+            continue;
+        };
+
+        // Match ne(slice, 0) in either operand order.
+        let candidates = [(a, b), (b, a)];
+        let mut matched: Option<(NodeRef, NodeRef, usize, usize)> = None;
+        // (x, s, W, shrl_width)
+
+        for (maybe_slice, maybe_lit0) in candidates {
+            let NodePayload::BitSlice { arg, start, width } =
+                f.get_node(maybe_slice).payload.clone()
+            else {
+                continue;
+            };
+            if start != 0 || width == 0 {
+                continue;
+            }
+            let NodePayload::Binop(Binop::Shrl, x, s) = f.get_node(arg).payload.clone() else {
+                continue;
+            };
+            let NodePayload::Literal(lit_v) = f.get_node(maybe_lit0).payload.clone() else {
+                continue;
+            };
+            if !is_bits_literal_zero(&lit_v) {
+                continue;
+            }
+            let slice_ty = f.get_node_ty(maybe_slice);
+            if *slice_ty != Type::Bits(width) || f.get_node_ty(maybe_lit0) != slice_ty {
+                continue;
+            }
+            matched = Some((x, s, width, f.get_node_ty(arg).bit_count()));
+            break;
+        }
+
+        let Some((x, s, w, shrl_width)) = matched else {
+            continue;
+        };
+        if shrl_width == 0 || shrl_width < w {
+            continue;
+        }
+
+        let s_width = f.get_node_ty(s).bit_count();
+        if s_width == 0 || s_width > 64 {
+            continue;
+        }
+
+        let x_text_id = f.get_node(x).text_id;
+        let s_text_id = f.get_node(s).text_id;
+        let Some((s_min, s_max)) = unsigned_bounds_u64(range_info, s_text_id) else {
+            continue;
+        };
+
+        // We only reason about shifts that could still affect the low-W slice.
+        let hi_req = s_max.min((shrl_width.saturating_sub(1)) as u64);
+        if hi_req == 0 {
+            // Only shift=0 is possible; no win here.
+            continue;
+        }
+
+        let lo_req = s_min.max(1);
+        if lo_req > hi_req {
+            continue;
+        }
+
+        // Gather known-one bit positions in x that are above the low-W slice.
+        let known_ones = known_one_positions(range_info, x_text_id);
+        let upper_known_ones: Vec<usize> = known_ones
+            .into_iter()
+            .filter(|k| *k >= w && *k < shrl_width)
+            .collect();
+        if upper_known_ones.is_empty() {
+            continue;
+        }
+
+        // For a known-one bit at position k, the low-W slice is guaranteed
+        // nonzero when s is in [k-W+1, k].
+        let mut intervals: Vec<(usize, usize)> = Vec::new();
+        for k in upper_known_ones {
+            let lb = k.saturating_sub(w.saturating_sub(1));
+            let ub = k;
+            intervals.push((lb, ub));
+        }
+
+        let lo_req_usize = usize::try_from(lo_req).ok();
+        let hi_req_usize = usize::try_from(hi_req).ok();
+        let (Some(lo_req_u), Some(hi_req_u)) = (lo_req_usize, hi_req_usize) else {
+            continue;
+        };
+
+        // Conservative proof: assume s can take any value in [lo_req, hi_req].
+        // Only rewrite if known ones cover the full required interval.
+        if !intervals_cover_range(intervals, lo_req_u, hi_req_u) {
+            continue;
+        }
+
+        // Ensure constants fit the shift amount type.
+        if !const_fits_in_width(lo_req, s_width) || !const_fits_in_width(hi_req, s_width) {
+            continue;
+        }
+
+        let lo_lit = push_ubits_literal(f, s_width, lo_req);
+        let hi_lit = push_ubits_literal(f, s_width, hi_req);
+        let zero_lit = push_ubits_literal(f, s_width, 0);
+
+        // s in [lo_req, hi_req]
+        let s_ge_lo = push_node(f, Type::Bits(1), NodePayload::Binop(Binop::Uge, s, lo_lit));
+        let s_le_hi = push_node(f, Type::Bits(1), NodePayload::Binop(Binop::Ule, s, hi_lit));
+        let s_in_interval = push_node(
+            f,
+            Type::Bits(1),
+            NodePayload::Nary(NaryOp::And, vec![s_ge_lo, s_le_hi]),
+        );
+
+        // s == 0 && ne(bit_slice(x, 0, W), 0)
+        let s_eq_zero = push_node(f, Type::Bits(1), NodePayload::Binop(Binop::Eq, s, zero_lit));
+        let low_slice = push_node(
+            f,
+            Type::Bits(w),
+            NodePayload::BitSlice {
+                arg: x,
+                start: 0,
+                width: w,
+            },
+        );
+        let low_zero = push_ubits_literal(f, w, 0);
+        let low_ne_zero = push_node(
+            f,
+            Type::Bits(1),
+            NodePayload::Binop(Binop::Ne, low_slice, low_zero),
+        );
+        let s0_and_low_nonzero = push_node(
+            f,
+            Type::Bits(1),
+            NodePayload::Nary(NaryOp::And, vec![s_eq_zero, low_ne_zero]),
+        );
+
+        f.nodes[ne_index].payload =
+            NodePayload::Nary(NaryOp::Or, vec![s_in_interval, s0_and_low_nonzero]);
+        f.nodes[ne_index].ty = Type::Bits(1);
+        rewrites += 1;
+    }
+
+    rewrites
+}
+
 /// Rewrite:
 ///
 /// `eq(add(x, y), literal(0))`
@@ -1246,6 +1489,58 @@ top fn main(a: bits[10] id=1, b: bits[10] id=2) -> bits[1] {
             &out_text,
             "main",
             &[10, 10],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    #[test]
+    fn aug_opt_rewrites_ne_shrl_slice_with_upper_known_ones_and_bounded_shift() {
+        // Known-one bits are injected above the low-W slice. When the shift
+        // amount is in [1, x_width-1], those known ones must land in-range.
+        let ir_text = r#"package shrl_known_one
+
+top fn cone(x: bits[8] id=1, a: bits[7] id=2) -> bits[1] {
+  literal.3: bits[2] = literal(value=3, id=3)
+  concat.4: bits[10] = concat(literal.3, x, id=4)
+  literal.5: bits[7] = literal(value=15, id=5)
+  and.6: bits[7] = and(a, literal.5, id=6)
+  shrl.7: bits[10] = shrl(concat.4, and.6, id=7)
+  bit_slice.8: bits[8] = bit_slice(shrl.7, start=0, width=8, id=8)
+  literal.9: bits[8] = literal(value=0, id=9)
+  ret ne.10: bits[1] = ne(bit_slice.8, literal.9, id=10)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+        let ret_nr = f.ret_node_ref.expect("ret node");
+        let ret_node = f.get_node(ret_nr);
+        assert_eq!(ret_node.ty, Type::Bits(1));
+        // The return should no longer be a direct ne(bit_slice(shrl(...)), 0).
+        assert!(
+            !matches!(ret_node.payload, NodePayload::Binop(Binop::Ne, _, _)),
+            "expected ret to be predicate-based; got {:?}\noutput:\n{}",
+            ret_node.payload,
+            out_text
+        );
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "cone",
+            &[8, 7],
             /* random_samples= */ 2000,
         );
     }
