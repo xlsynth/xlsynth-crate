@@ -51,25 +51,13 @@ def find_fuzz_dirs(repo_root: Path) -> list[Path]:
     return fuzz_dirs
 
 
-def run_cmd(cmd: list[str], env_overrides: dict[str, str] | None = None) -> None:
+def run_cmd(cmd: list[str]) -> None:
     """Print the command to be run, then execute it.
 
     The command is echoed in a shell-safe, quoted form for easy copy/paste.
     """
-    env_prefix = ""
-    if env_overrides:
-        env_prefix = " ".join(
-            f"{key}={shlex.quote(value)}" for key, value in env_overrides.items()
-        )
-        env_prefix += " "
-    print(
-        "  => " + env_prefix + " ".join(shlex.quote(part) for part in cmd),
-        file=sys.stderr,
-    )
-    env = os.environ.copy()
-    if env_overrides:
-        env.update(env_overrides)
-    subprocess.check_call(cmd, env=env)
+    print("  => " + " ".join(shlex.quote(part) for part in cmd), file=sys.stderr)
+    subprocess.check_call(cmd)
 
 
 def get_crate_features(crate_path: Path) -> list[str]:
@@ -161,8 +149,7 @@ def main() -> int:
                 *sanitizer_args,
                 *features_args,
                 *fuzz_run_args_list,
-            ],
-            env_overrides=env_overrides,
+            ]
         )
     for fuzz_dir, targets in fuzz_targets:
         print(f"\n=== Running fuzz targets in {fuzz_dir} ===", file=sys.stderr)
@@ -190,8 +177,7 @@ def main() -> int:
                     target,
                     "--",
                     *fuzz_bin_args_list,
-                ],
-                env_overrides=env_overrides,
+                ]
             )
     return 0
 
