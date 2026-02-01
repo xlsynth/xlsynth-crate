@@ -40,6 +40,24 @@ pub struct PrepForGatifyOptions {
     pub enable_rewrite_prio_encode: bool,
 }
 
+impl PrepForGatifyOptions {
+    /// Returns options with all prep-for-gatify rewrites enabled.
+    pub const fn all_opts_enabled() -> Self {
+        Self {
+            enable_rewrite_carry_out: true,
+            enable_rewrite_prio_encode: true,
+        }
+    }
+
+    /// Returns options with all prep-for-gatify rewrites disabled.
+    pub const fn all_opts_disabled() -> Self {
+        Self {
+            enable_rewrite_carry_out: false,
+            enable_rewrite_prio_encode: false,
+        }
+    }
+}
+
 /// Returns per-node use counts for the provided function.
 fn get_use_counts(f: &ir::Fn) -> Vec<usize> {
     let mut use_counts = vec![0usize; f.nodes.len()];

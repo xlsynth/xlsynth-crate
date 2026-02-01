@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::gatify::ir2gate;
+use crate::gatify::prep_for_gatify::PrepForGatifyOptions;
 use xlsynth_pir::aug_opt::AugOptOptions;
 use xlsynth_pir::desugar_extensions;
 use xlsynth_pir::ir;
@@ -16,6 +17,22 @@ pub struct Ir2GatesOptions {
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
     pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
     pub aug_opt: AugOptOptions,
+}
+
+impl Default for Ir2GatesOptions {
+    fn default() -> Self {
+        let prep_defaults = PrepForGatifyOptions::all_opts_enabled();
+        Self {
+            fold: true,
+            hash: true,
+            check_equivalence: false,
+            enable_rewrite_carry_out: prep_defaults.enable_rewrite_carry_out,
+            enable_rewrite_prio_encode: prep_defaults.enable_rewrite_prio_encode,
+            adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
+            mul_adder_mapping: None,
+            aug_opt: AugOptOptions::default(),
+        }
+    }
 }
 
 pub struct Ir2GatesOutput {

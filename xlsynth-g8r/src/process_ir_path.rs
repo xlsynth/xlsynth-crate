@@ -25,6 +25,7 @@ use crate::gatify::ir2gate;
 use crate::ir2gates;
 use crate::use_count::get_id_to_use_count;
 use xlsynth_pir::ir;
+use xlsynth_pir::ir_range_info::IrRangeInfo;
 use xlsynth_pir::ir_utils;
 
 #[derive(Debug, serde::Serialize)]
@@ -180,32 +181,63 @@ pub struct Options {
     pub prepared_ir_out: Option<std::path::PathBuf>,
 }
 
+impl From<&Options> for ir2gates::Ir2GatesOptions {
+    fn from(options: &Options) -> Self {
+        Self {
+            fold: options.fold,
+            hash: options.hash,
+            check_equivalence: false, // check is done below if requested
+            // Preserve existing CLI behavior for carry-out rewrite, but use
+            // defaults for other prep-for-gatify rewrites.
+            enable_rewrite_carry_out: options.enable_rewrite_carry_out,
+            adder_mapping: options.adder_mapping,
+            mul_adder_mapping: options.mul_adder_mapping,
+            aug_opt: Default::default(),
+            ..Self::default()
+        }
+    }
+}
+
+struct GatifyOptionsInput<'a> {
+    options: &'a Options,
+    range_info: std::sync::Arc<IrRangeInfo>,
+    prep_opts: PrepForGatifyOptions,
+}
+
+impl From<GatifyOptionsInput<'_>> for ir2gate::GatifyOptions {
+    fn from(input: GatifyOptionsInput<'_>) -> Self {
+        Self {
+            fold: input.options.fold,
+            hash: input.options.hash,
+            check_equivalence: false,
+            adder_mapping: input.options.adder_mapping,
+            mul_adder_mapping: input.options.mul_adder_mapping,
+            range_info: Some(input.range_info),
+            enable_rewrite_carry_out: input.prep_opts.enable_rewrite_carry_out,
+            enable_rewrite_prio_encode: input.prep_opts.enable_rewrite_prio_encode,
+        }
+    }
+}
+
 /// Command line entry point (e.g. it exits the process on error).
 pub fn process_ir_path_with_gatefn(
     ir_path: &std::path::Path,
     options: &Options,
 ) -> (crate::aig::GateFn, Ir2GatesSummaryStats) {
+    let prep_opts = PrepForGatifyOptions {
+        enable_rewrite_carry_out: options.enable_rewrite_carry_out,
+        ..PrepForGatifyOptions::all_opts_enabled()
+    };
     // Read the file into a string.
     let file_content = std::fs::read_to_string(&ir_path)
         .unwrap_or_else(|err| panic!("Failed to read {}: {}", ir_path.display(), err));
-    let ir2gates_output = ir2gates::ir2gates_from_ir_text(
-        &file_content,
-        options.ir_top.as_deref(),
-        ir2gates::Ir2GatesOptions {
-            fold: options.fold,
-            hash: options.hash,
-            check_equivalence: false, // check is done below if requested
-            enable_rewrite_carry_out: options.enable_rewrite_carry_out,
-            enable_rewrite_prio_encode: false,
-            adder_mapping: options.adder_mapping,
-            mul_adder_mapping: options.mul_adder_mapping,
-            aug_opt: Default::default(),
-        },
-    )
-    .unwrap_or_else(|err| {
-        eprintln!("Error encountered lowering IR to gates: {}", err);
-        std::process::exit(1);
-    });
+    let ir2gates_options = ir2gates::Ir2GatesOptions::from(options);
+    let ir2gates_output =
+        ir2gates::ir2gates_from_ir_text(&file_content, options.ir_top.as_deref(), ir2gates_options)
+            .unwrap_or_else(|err| {
+                eprintln!("Error encountered lowering IR to gates: {}", err);
+                std::process::exit(1);
+            });
 
     let ir2gates::Ir2GatesOutput {
         pir_package: ir_package,
@@ -221,14 +253,7 @@ pub fn process_ir_path_with_gatefn(
     log::info!("IR top:\n{}", ir_top.to_string());
 
     if let Some(out_path) = options.prepared_ir_out.as_ref() {
-        let prepared_fn = prep_for_gatify(
-            ir_top,
-            Some(range_info.as_ref()),
-            PrepForGatifyOptions {
-                enable_rewrite_carry_out: options.enable_rewrite_carry_out,
-                enable_rewrite_prio_encode: false,
-            },
-        );
+        let prepared_fn = prep_for_gatify(ir_top, Some(range_info.as_ref()), prep_opts);
         let mut prepared_pkg = ir_package.clone();
         for member in prepared_pkg.members.iter_mut() {
             match member {
@@ -268,16 +293,11 @@ pub fn process_ir_path_with_gatefn(
     let lowering_map = gatify_output.lowering_map;
 
     let independent_op_stats = if options.emit_independent_op_stats {
-        let gatify_options = ir2gate::GatifyOptions {
-            fold: options.fold,
-            hash: options.hash,
-            adder_mapping: options.adder_mapping,
-            mul_adder_mapping: options.mul_adder_mapping,
-            check_equivalence: false,
-            range_info: Some(range_info.clone()),
-            enable_rewrite_carry_out: options.enable_rewrite_carry_out,
-            enable_rewrite_prio_encode: false,
-        };
+        let gatify_options = ir2gate::GatifyOptions::from(GatifyOptionsInput {
+            options,
+            range_info: range_info.clone(),
+            prep_opts,
+        });
         let mut per_node: Vec<IndependentOpEntry> = Vec::new();
         let mut cost_by_node_index: Vec<usize> = vec![0; ir_top.nodes.len()];
         let mut independent_sum_live_nodes: usize = 0;
