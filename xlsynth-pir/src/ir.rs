@@ -417,6 +417,15 @@ pub enum NodePayload {
         format: String,
         operands: Vec<NodeRef>,
     },
+    InstantiationInput {
+        instantiation: String,
+        port_name: String,
+        arg: NodeRef,
+    },
+    InstantiationOutput {
+        instantiation: String,
+        port_name: String,
+    },
     RegisterRead {
         register: String,
     },
@@ -507,6 +516,8 @@ impl NodePayload {
             NodePayload::ExtPrioEncode { .. } => "ext_prio_encode",
             NodePayload::Assert { .. } => "assert",
             NodePayload::Trace { .. } => "trace",
+            NodePayload::InstantiationInput { .. } => "instantiation_input",
+            NodePayload::InstantiationOutput { .. } => "instantiation_output",
             NodePayload::RegisterRead { .. } => "register_read",
             NodePayload::RegisterWrite { .. } => "register_write",
             NodePayload::AfterAll(_) => "after_all",
@@ -793,6 +804,28 @@ impl NodePayload {
                     format,
                     operands_str,
                     id
+                )
+            }
+            NodePayload::InstantiationInput {
+                instantiation,
+                port_name,
+                arg,
+            } => {
+                format!(
+                    "instantiation_input({}, instantiation={}, port_name={}, id={})",
+                    get_name(*arg),
+                    instantiation,
+                    port_name,
+                    id
+                )
+            }
+            NodePayload::InstantiationOutput {
+                instantiation,
+                port_name,
+            } => {
+                format!(
+                    "instantiation_output(instantiation={}, port_name={}, id={})",
+                    instantiation, port_name, id
                 )
             }
             NodePayload::RegisterRead { register } => {
@@ -1217,6 +1250,8 @@ impl Fn {
                     } => {
                         token == &node_ref || activated == &node_ref || operands.contains(&node_ref)
                     }
+                    InstantiationInput { arg, .. } => arg == &node_ref,
+                    InstantiationOutput { .. } => false,
                     RegisterRead { .. } => false,
                     RegisterWrite {
                         arg,
@@ -1588,6 +1623,12 @@ pub struct Register {
 }
 
 #[derive(Debug, Clone)]
+pub struct Instantiation {
+    pub name: String,
+    pub block: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct BlockResetMetadata {
     pub port_name: String,
     pub asynchronous: bool,
@@ -1602,6 +1643,7 @@ pub struct BlockMetadata {
     pub output_names: Vec<String>,
     pub reset: Option<BlockResetMetadata>,
     pub registers: Vec<Register>,
+    pub instantiations: Vec<Instantiation>,
 }
 
 impl Package {

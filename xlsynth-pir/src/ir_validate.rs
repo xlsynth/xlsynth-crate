@@ -75,6 +75,59 @@ pub enum ValidationError {
         node_index: usize,
         actual: Type,
     },
+    /// An instantiation op references an unknown instantiation.
+    UnknownInstantiation {
+        func: String,
+        node_index: usize,
+        instantiation: String,
+    },
+    /// An instantiation declaration references a missing or later block.
+    InstantiationBlockNotFound {
+        func: String,
+        instantiation: String,
+        block: String,
+    },
+    /// An instantiation op appears in a function (not a block).
+    InstantiationOpInFunction { func: String, node_index: usize },
+    /// instantiation port name not found on callee block.
+    UnknownInstantiationPort {
+        func: String,
+        node_index: usize,
+        instantiation: String,
+        port_name: String,
+        direction: InstantiationPortDirection,
+    },
+    /// instantiation port type mismatch with callee port type.
+    InstantiationPortTypeMismatch {
+        func: String,
+        node_index: usize,
+        instantiation: String,
+        port_name: String,
+        direction: InstantiationPortDirection,
+        expected: Type,
+        actual: Type,
+    },
+    /// Duplicate instantiation port mapping.
+    DuplicateInstantiationPort {
+        func: String,
+        node_index: usize,
+        instantiation: String,
+        port_name: String,
+        direction: InstantiationPortDirection,
+    },
+    /// Missing instantiation port mappings.
+    MissingInstantiationPorts {
+        func: String,
+        instantiation: String,
+        missing: Vec<String>,
+        direction: InstantiationPortDirection,
+    },
+    /// Block output arity mismatch when mapping ports.
+    BlockOutputArityMismatch {
+        func: String,
+        expected: usize,
+        actual: usize,
+    },
     /// Bitwise n-ary ops (and/or/xor/nand/nor) must have identical bits-typed
     /// operands.
     NaryBitwiseOperandTypeMismatch { func: String, node_index: usize },
@@ -242,6 +295,99 @@ impl std::fmt::Display for ValidationError {
                     func, node_index, actual
                 )
             }
+            ValidationError::UnknownInstantiation {
+                func,
+                node_index,
+                instantiation,
+            } => {
+                write!(
+                    f,
+                    "function '{}' node {} references unknown instantiation '{}'",
+                    func, node_index, instantiation
+                )
+            }
+            ValidationError::InstantiationBlockNotFound {
+                func,
+                instantiation,
+                block,
+            } => {
+                write!(
+                    f,
+                    "function '{}' instantiation '{}' references missing block '{}'",
+                    func, instantiation, block
+                )
+            }
+            ValidationError::InstantiationOpInFunction { func, node_index } => {
+                write!(
+                    f,
+                    "function '{}' node {} uses instantiation op outside a block",
+                    func, node_index
+                )
+            }
+            ValidationError::UnknownInstantiationPort {
+                func,
+                node_index,
+                instantiation,
+                port_name,
+                direction,
+            } => {
+                write!(
+                    f,
+                    "function '{}' node {} instantiation '{}' {} port '{}' not found",
+                    func, node_index, instantiation, direction, port_name
+                )
+            }
+            ValidationError::InstantiationPortTypeMismatch {
+                func,
+                node_index,
+                instantiation,
+                port_name,
+                direction,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "function '{}' node {} instantiation '{}' {} '{}' type mismatch: expected {} got {}",
+                    func, node_index, instantiation, direction, port_name, expected, actual
+                )
+            }
+            ValidationError::DuplicateInstantiationPort {
+                func,
+                node_index,
+                instantiation,
+                port_name,
+                direction,
+            } => {
+                write!(
+                    f,
+                    "function '{}' node {} instantiation '{}' {} '{}' mapped multiple times",
+                    func, node_index, instantiation, direction, port_name
+                )
+            }
+            ValidationError::MissingInstantiationPorts {
+                func,
+                instantiation,
+                missing,
+                direction,
+            } => {
+                write!(
+                    f,
+                    "function '{}' instantiation '{}' missing {} ports: {:?}",
+                    func, instantiation, direction, missing
+                )
+            }
+            ValidationError::BlockOutputArityMismatch {
+                func,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "function '{}' output arity mismatch: expected {} outputs, got {}",
+                    func, expected, actual
+                )
+            }
             ValidationError::NaryBitwiseOperandTypeMismatch { func, node_index } => {
                 write!(
                     f,
@@ -327,6 +473,26 @@ impl std::fmt::Display for ValidationError {
 
 impl std::error::Error for ValidationError {}
 
+pub(crate) struct InstantiationInfo {
+    input_types: std::collections::HashMap<String, Type>,
+    output_types: std::collections::HashMap<String, Type>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InstantiationPortDirection {
+    Input,
+    Output,
+}
+
+impl std::fmt::Display for InstantiationPortDirection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InstantiationPortDirection::Input => write!(f, "input"),
+            InstantiationPortDirection::Output => write!(f, "output"),
+        }
+    }
+}
+
 /// Validates an entire package, ensuring all member names are unique, the top
 /// function (if set) exists, and all contained functions are valid.
 pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
@@ -347,10 +513,10 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
         }
     }
 
-    for member in &p.members {
+    for (idx, member) in p.members.iter().enumerate() {
         match member {
             PackageMember::Function(f) => validate_fn(f, p)?,
-            PackageMember::Block { func, metadata } => validate_block(func, metadata, p)?,
+            PackageMember::Block { func, metadata } => validate_block(func, metadata, p, idx)?,
         }
     }
 
@@ -385,6 +551,7 @@ pub fn validate_fn(f: &Fn, parent: &Package) -> Result<(), ValidationError> {
         parent,
         |name: &str| parent.get_fn_type(name).map(|ft| ft.return_type),
         |_register| None,
+        None,
         false,
     )
 }
@@ -393,7 +560,19 @@ pub fn validate_block(
     f: &Fn,
     metadata: &BlockMetadata,
     parent: &Package,
+    member_index: usize,
 ) -> Result<(), ValidationError> {
+    let prior_blocks = collect_prior_blocks(parent, member_index);
+    for inst in metadata.instantiations.iter() {
+        if !prior_blocks.contains_key(&inst.block) {
+            return Err(ValidationError::InstantiationBlockNotFound {
+                func: f.name.clone(),
+                instantiation: inst.name.clone(),
+                block: inst.block.clone(),
+            });
+        }
+    }
+    let instantiation_info = build_instantiation_info(metadata, &prior_blocks)?;
     validate_fn_with(
         f,
         parent,
@@ -405,17 +584,19 @@ pub fn validate_block(
                 .find(|r| r.name == register)
                 .map(|r| r.ty.clone())
         },
+        Some(&instantiation_info),
         true,
     )
 }
 
 /// Validates a function within the context of its parent package, using a
 /// dependency-injected resolver for callee return types.
-pub fn validate_fn_with<F, R>(
+pub(crate) fn validate_fn_with<F, R>(
     f: &Fn,
     parent: &Package,
     callee_ret_type_resolver: F,
     register_type_resolver: R,
+    instantiation_info: Option<&std::collections::HashMap<String, InstantiationInfo>>,
     allow_registers: bool,
 ) -> Result<(), ValidationError>
 where
@@ -424,6 +605,16 @@ where
 {
     // Track ids used by non-parameter nodes to ensure uniqueness.
     let mut seen_nonparam_ids: HashSet<usize> = HashSet::new();
+    let mut used_instantiation_inputs: std::collections::HashMap<String, HashSet<String>> =
+        std::collections::HashMap::new();
+    let mut used_instantiation_outputs: std::collections::HashMap<String, HashSet<String>> =
+        std::collections::HashMap::new();
+    if let Some(info) = instantiation_info {
+        for inst_name in info.keys() {
+            used_instantiation_inputs.insert(inst_name.clone(), HashSet::new());
+            used_instantiation_outputs.insert(inst_name.clone(), HashSet::new());
+        }
+    }
     // Track GetParam node ids to verify 1:1 mapping with signature params.
     let mut seen_param_ids: HashSet<usize> = HashSet::new();
     // Map parameter names to their declared ids from the function signature, and
@@ -624,6 +815,108 @@ where
                     }
                 }
             }
+            NodePayload::InstantiationInput {
+                instantiation,
+                port_name,
+                arg,
+            } => {
+                let Some(info_map) = instantiation_info else {
+                    return Err(ValidationError::InstantiationOpInFunction {
+                        func: f.name.clone(),
+                        node_index: i,
+                    });
+                };
+                let inst_info = info_map.get(instantiation).ok_or_else(|| {
+                    ValidationError::UnknownInstantiation {
+                        func: f.name.clone(),
+                        node_index: i,
+                        instantiation: instantiation.clone(),
+                    }
+                })?;
+                let expected_ty = inst_info.input_types.get(port_name).ok_or_else(|| {
+                    ValidationError::UnknownInstantiationPort {
+                        func: f.name.clone(),
+                        node_index: i,
+                        instantiation: instantiation.clone(),
+                        port_name: port_name.clone(),
+                        direction: InstantiationPortDirection::Input,
+                    }
+                })?;
+                let arg_ty = f.get_node(*arg).ty.clone();
+                if &arg_ty != expected_ty {
+                    return Err(ValidationError::InstantiationPortTypeMismatch {
+                        func: f.name.clone(),
+                        node_index: i,
+                        instantiation: instantiation.clone(),
+                        port_name: port_name.clone(),
+                        direction: InstantiationPortDirection::Input,
+                        expected: expected_ty.clone(),
+                        actual: arg_ty,
+                    });
+                }
+                let used_ports = used_instantiation_inputs
+                    .get_mut(instantiation)
+                    .expect("instantiation input map must exist");
+                if !used_ports.insert(port_name.clone()) {
+                    return Err(ValidationError::DuplicateInstantiationPort {
+                        func: f.name.clone(),
+                        node_index: i,
+                        instantiation: instantiation.clone(),
+                        port_name: port_name.clone(),
+                        direction: InstantiationPortDirection::Input,
+                    });
+                }
+            }
+            NodePayload::InstantiationOutput {
+                instantiation,
+                port_name,
+            } => {
+                let Some(info_map) = instantiation_info else {
+                    return Err(ValidationError::InstantiationOpInFunction {
+                        func: f.name.clone(),
+                        node_index: i,
+                    });
+                };
+                let inst_info = info_map.get(instantiation).ok_or_else(|| {
+                    ValidationError::UnknownInstantiation {
+                        func: f.name.clone(),
+                        node_index: i,
+                        instantiation: instantiation.clone(),
+                    }
+                })?;
+                let expected_ty = inst_info.output_types.get(port_name).ok_or_else(|| {
+                    ValidationError::UnknownInstantiationPort {
+                        func: f.name.clone(),
+                        node_index: i,
+                        instantiation: instantiation.clone(),
+                        port_name: port_name.clone(),
+                        direction: InstantiationPortDirection::Output,
+                    }
+                })?;
+                if &node.ty != expected_ty {
+                    return Err(ValidationError::InstantiationPortTypeMismatch {
+                        func: f.name.clone(),
+                        node_index: i,
+                        instantiation: instantiation.clone(),
+                        port_name: port_name.clone(),
+                        direction: InstantiationPortDirection::Output,
+                        expected: expected_ty.clone(),
+                        actual: node.ty.clone(),
+                    });
+                }
+                let used_ports = used_instantiation_outputs
+                    .get_mut(instantiation)
+                    .expect("instantiation output map must exist");
+                if !used_ports.insert(port_name.clone()) {
+                    return Err(ValidationError::DuplicateInstantiationPort {
+                        func: f.name.clone(),
+                        node_index: i,
+                        instantiation: instantiation.clone(),
+                        port_name: port_name.clone(),
+                        direction: InstantiationPortDirection::Output,
+                    });
+                }
+            }
             _ => {}
         }
 
@@ -693,6 +986,47 @@ where
             }
         }
     }
+
+    if let Some(info_map) = instantiation_info {
+        for (inst_name, inst_info) in info_map.iter() {
+            let used_inputs = used_instantiation_inputs
+                .get(inst_name)
+                .cloned()
+                .unwrap_or_default();
+            let missing_inputs: Vec<String> = inst_info
+                .input_types
+                .keys()
+                .filter(|k| !used_inputs.contains(*k))
+                .cloned()
+                .collect();
+            if !missing_inputs.is_empty() {
+                return Err(ValidationError::MissingInstantiationPorts {
+                    func: f.name.clone(),
+                    instantiation: inst_name.clone(),
+                    missing: missing_inputs,
+                    direction: InstantiationPortDirection::Input,
+                });
+            }
+            let used_outputs = used_instantiation_outputs
+                .get(inst_name)
+                .cloned()
+                .unwrap_or_default();
+            let missing_outputs: Vec<String> = inst_info
+                .output_types
+                .keys()
+                .filter(|k| !used_outputs.contains(*k))
+                .cloned()
+                .collect();
+            if !missing_outputs.is_empty() {
+                return Err(ValidationError::MissingInstantiationPorts {
+                    func: f.name.clone(),
+                    instantiation: inst_name.clone(),
+                    missing: missing_outputs,
+                    direction: InstantiationPortDirection::Output,
+                });
+            }
+        }
+    }
     // Ensure every declared parameter has a corresponding GetParam node.
     for p in &f.params {
         let pid = p.id.get_wrapped_id();
@@ -718,6 +1052,74 @@ where
     }
 
     Ok(())
+}
+
+fn collect_prior_blocks<'a>(
+    p: &'a Package,
+    member_index: usize,
+) -> std::collections::HashMap<String, (&'a Fn, &'a BlockMetadata)> {
+    let mut prior = std::collections::HashMap::new();
+    for member in p.members.iter().take(member_index) {
+        if let PackageMember::Block { func, metadata } = member {
+            prior.insert(func.name.clone(), (func, metadata));
+        }
+    }
+    prior
+}
+
+fn build_instantiation_info(
+    metadata: &BlockMetadata,
+    prior_blocks: &std::collections::HashMap<String, (&Fn, &BlockMetadata)>,
+) -> Result<std::collections::HashMap<String, InstantiationInfo>, ValidationError> {
+    let mut info_map = std::collections::HashMap::new();
+    for inst in metadata.instantiations.iter() {
+        let (callee_fn, callee_meta) = prior_blocks
+            .get(&inst.block)
+            .expect("prior block missing after check");
+        let mut input_types = std::collections::HashMap::new();
+        for p in callee_fn.params.iter() {
+            input_types.insert(p.name.clone(), p.ty.clone());
+        }
+        let mut output_types = std::collections::HashMap::new();
+        if callee_meta.output_names.is_empty() {
+            // no outputs
+        } else if callee_meta.output_names.len() == 1 {
+            output_types.insert(
+                callee_meta.output_names[0].clone(),
+                callee_fn.ret_ty.clone(),
+            );
+        } else {
+            match &callee_fn.ret_ty {
+                Type::Tuple(tys) => {
+                    if tys.len() != callee_meta.output_names.len() {
+                        return Err(ValidationError::BlockOutputArityMismatch {
+                            func: callee_fn.name.clone(),
+                            expected: callee_meta.output_names.len(),
+                            actual: tys.len(),
+                        });
+                    }
+                    for (name, ty) in callee_meta.output_names.iter().zip(tys.iter()) {
+                        output_types.insert(name.clone(), (**ty).clone());
+                    }
+                }
+                _ => {
+                    return Err(ValidationError::BlockOutputArityMismatch {
+                        func: callee_fn.name.clone(),
+                        expected: callee_meta.output_names.len(),
+                        actual: 1,
+                    });
+                }
+            }
+        }
+        info_map.insert(
+            inst.name.clone(),
+            InstantiationInfo {
+                input_types,
+                output_types,
+            },
+        );
+    }
+    Ok(info_map)
 }
 
 fn package_has_fn(p: &Package, name: &str) -> bool {
@@ -1040,5 +1442,105 @@ mod tests {
             ValidationError::NodeTypeMismatch { .. } => {}
             other => panic!("expected NodeTypeMismatch, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn instantiation_requires_prior_block() {
+        let ir = r#"
+package inst_test
+
+block my_block(in0: bits[32], in1: bits[32], out0: bits[32], out1: bits[32]) {
+  instantiation inst_add(block=add_block, kind=block)
+  in0: bits[32] = input_port(name=in0, id=1)
+  in1: bits[32] = input_port(name=in1, id=2)
+  instantiation_input.10: () = instantiation_input(in0, instantiation=inst_add, port_name=a, id=10)
+  instantiation_input.11: () = instantiation_input(in1, instantiation=inst_add, port_name=b, id=11)
+  instantiation_output.12: bits[32] = instantiation_output(instantiation=inst_add, port_name=x, id=12)
+  instantiation_output.13: bits[32] = instantiation_output(instantiation=inst_add, port_name=y, id=13)
+  out0: () = output_port(instantiation_output.12, name=out0, id=14)
+  out1: () = output_port(instantiation_output.13, name=out1, id=15)
+}
+
+block add_block(a: bits[32], b: bits[32], x: bits[32], y: bits[32]) {
+  a: bits[32] = input_port(name=a, id=3)
+  b: bits[32] = input_port(name=b, id=4)
+  x: () = output_port(a, name=x, id=5)
+  y: () = output_port(b, name=y, id=6)
+}
+"#;
+        let mut parser = Parser::new(ir);
+        let pkg = parser.parse_package().unwrap();
+        assert!(matches!(
+            validate_package(&pkg),
+            Err(ValidationError::InstantiationBlockNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn instantiation_missing_input_port_fails() {
+        let ir = r#"
+package inst_test
+
+block add_block(a: bits[32], b: bits[32], x: bits[32], y: bits[32]) {
+  a: bits[32] = input_port(name=a, id=1)
+  b: bits[32] = input_port(name=b, id=2)
+  x: () = output_port(a, name=x, id=3)
+  y: () = output_port(b, name=y, id=4)
+}
+
+block my_block(in0: bits[32], in1: bits[32], out0: bits[32], out1: bits[32]) {
+  instantiation inst_add(block=add_block, kind=block)
+  in0: bits[32] = input_port(name=in0, id=5)
+  in1: bits[32] = input_port(name=in1, id=6)
+  instantiation_input.10: () = instantiation_input(in0, instantiation=inst_add, port_name=a, id=10)
+  instantiation_output.12: bits[32] = instantiation_output(instantiation=inst_add, port_name=x, id=12)
+  instantiation_output.13: bits[32] = instantiation_output(instantiation=inst_add, port_name=y, id=13)
+  out0: () = output_port(instantiation_output.12, name=out0, id=14)
+  out1: () = output_port(instantiation_output.13, name=out1, id=15)
+}
+"#;
+        let mut parser = Parser::new(ir);
+        let pkg = parser.parse_package().unwrap();
+        assert!(matches!(
+            validate_package(&pkg),
+            Err(ValidationError::MissingInstantiationPorts {
+                direction: InstantiationPortDirection::Input,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn instantiation_missing_output_port_fails() {
+        let ir = r#"
+package inst_test
+
+block add_block(a: bits[32], b: bits[32], x: bits[32], y: bits[32]) {
+  a: bits[32] = input_port(name=a, id=1)
+  b: bits[32] = input_port(name=b, id=2)
+  x: () = output_port(a, name=x, id=3)
+  y: () = output_port(b, name=y, id=4)
+}
+
+block my_block(in0: bits[32], in1: bits[32], out0: bits[32], out1: bits[32]) {
+  instantiation inst_add(block=add_block, kind=block)
+  in0: bits[32] = input_port(name=in0, id=5)
+  in1: bits[32] = input_port(name=in1, id=6)
+  instantiation_input.10: () = instantiation_input(in0, instantiation=inst_add, port_name=a, id=10)
+  instantiation_input.11: () = instantiation_input(in1, instantiation=inst_add, port_name=b, id=11)
+  instantiation_output.12: bits[32] = instantiation_output(instantiation=inst_add, port_name=x, id=12)
+  out0: () = output_port(instantiation_output.12, name=out0, id=14)
+  out1: () = output_port(instantiation_output.12, name=out1, id=15)
+}
+"#;
+        let mut parser = Parser::new(ir);
+        let pkg = parser.parse_package().unwrap();
+        assert!(matches!(
+            validate_package(&pkg),
+            Err(ValidationError::MissingInstantiationPorts {
+                direction: InstantiationPortDirection::Output,
+                ..
+            })
+        ));
     }
 }

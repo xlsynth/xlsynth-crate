@@ -122,6 +122,10 @@ pub fn verify_fn_operand_indices_in_bounds(f: &Fn) -> Result<(), String> {
                     check(*r, &format!("node {} trace.operand", i))?;
                 }
             }
+            NodePayload::InstantiationInput { arg, .. } => {
+                check(*arg, &format!("node {} instantiation_input.arg", i))?;
+            }
+            NodePayload::InstantiationOutput { .. } => {}
             NodePayload::RegisterRead { .. } => {}
             NodePayload::RegisterWrite {
                 arg,

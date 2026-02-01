@@ -714,6 +714,12 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     bitvec: BitVec::ZeroWidth,
                 }
             }
+            NodePayload::InstantiationInput { .. } => {
+                panic!("InstantiationInput is not supported in prover translation");
+            }
+            NodePayload::InstantiationOutput { .. } => {
+                panic!("InstantiationOutput is not supported in prover translation");
+            }
             NodePayload::RegisterRead { .. } => {
                 panic!("RegisterRead is not supported in prover translation");
             }
