@@ -21,7 +21,7 @@ pub struct Ir2GatesOptions {
 
 impl Default for Ir2GatesOptions {
     fn default() -> Self {
-        let prep_defaults = PrepForGatifyOptions::default();
+        let prep_defaults = PrepForGatifyOptions::all_opts_enabled();
         Self {
             fold: true,
             hash: true,

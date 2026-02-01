@@ -40,6 +40,7 @@ pub struct AugOptRewriteStats {
     pub eq_add_zero_to_eq_rhs_sub: usize,
     pub ne_shrl_slice_known_one_shift_nonzero: usize,
     pub predicate_hoist_across_select: usize,
+    pub umod_distribute_across_select: usize,
 }
 
 impl AugOptRewriteStats {
@@ -51,6 +52,7 @@ impl AugOptRewriteStats {
             .saturating_add(self.eq_add_zero_to_eq_rhs_sub)
             .saturating_add(self.ne_shrl_slice_known_one_shift_nonzero)
             .saturating_add(self.predicate_hoist_across_select)
+            .saturating_add(self.umod_distribute_across_select)
     }
 
     fn saturating_add_assign(&mut self, other: AugOptRewriteStats) {
@@ -73,6 +75,9 @@ impl AugOptRewriteStats {
         self.predicate_hoist_across_select = self
             .predicate_hoist_across_select
             .saturating_add(other.predicate_hoist_across_select);
+        self.umod_distribute_across_select = self
+            .umod_distribute_across_select
+            .saturating_add(other.umod_distribute_across_select);
     }
 }
 
@@ -298,6 +303,9 @@ fn apply_basis_rewrites_to_fn(
     stats.eq_priority_sel_to_selector_predicate =
         rewrite_eq_priority_sel_to_selector_predicate(&mut cloned, range_info);
     stats.eq_add_zero_to_eq_rhs_sub = rewrite_eq_add_zero_to_eq_rhs_sub(&mut cloned);
+    // Distribute unsigned mod across selectors so each arm can be folded by
+    // downstream optimization (e.g. when divisors are constants).
+    stats.umod_distribute_across_select = rewrite_umod_distribute_across_select(&mut cloned);
     // Hoist predicate reductions/comparisons across sel/priority_sel first so
     // downstream rewrites can see through the selector.
     stats.predicate_hoist_across_select = rewrite_predicate_hoist_across_select(&mut cloned);
@@ -965,6 +973,192 @@ fn count_users(f: &ir::Fn, target: NodeRef) -> usize {
         .iter()
         .filter(|n| ir_utils::operands(&n.payload).contains(&target))
         .count()
+}
+
+#[derive(Clone, Copy)]
+enum SelectLikeKind {
+    Sel,
+    PrioritySel,
+}
+
+#[derive(Clone)]
+struct SelectLikeNode {
+    kind: SelectLikeKind,
+    selector: NodeRef,
+    cases: Vec<NodeRef>,
+    default: Option<NodeRef>,
+}
+
+fn as_select_like(f: &ir::Fn, nr: NodeRef) -> Option<SelectLikeNode> {
+    match f.get_node(nr).payload.clone() {
+        NodePayload::Sel {
+            selector,
+            cases,
+            default,
+        } => Some(SelectLikeNode {
+            kind: SelectLikeKind::Sel,
+            selector,
+            cases,
+            default,
+        }),
+        NodePayload::PrioritySel {
+            selector,
+            cases,
+            default,
+        } => Some(SelectLikeNode {
+            kind: SelectLikeKind::PrioritySel,
+            selector,
+            cases,
+            default,
+        }),
+        _ => None,
+    }
+}
+
+fn push_select_like(
+    f: &mut ir::Fn,
+    result_ty: Type,
+    kind: SelectLikeKind,
+    selector: NodeRef,
+    cases: Vec<NodeRef>,
+    default: Option<NodeRef>,
+) -> NodeRef {
+    let payload = match kind {
+        SelectLikeKind::Sel => NodePayload::Sel {
+            selector,
+            cases,
+            default,
+        },
+        SelectLikeKind::PrioritySel => NodePayload::PrioritySel {
+            selector,
+            cases,
+            default,
+        },
+    };
+    push_node(f, result_ty, payload)
+}
+
+// Bound recursive umod distribution so selector-heavy inputs do not cause
+// multiplicative IR growth before downstream folding/strength reduction.
+const UMOD_DISTRIBUTION_MAX_COMBINATIONS: usize = 32;
+
+fn select_leaf_count_bounded(
+    f: &ir::Fn,
+    nr: NodeRef,
+    memo: &mut [Option<usize>],
+    cap: usize,
+) -> usize {
+    if let Some(v) = memo[nr.index] {
+        return v;
+    }
+
+    let value = if let Some(sel) = as_select_like(f, nr) {
+        let cap_plus_one = cap.saturating_add(1);
+        let mut sum = 0usize;
+        for c in sel.cases {
+            let leaves = select_leaf_count_bounded(f, c, memo, cap);
+            sum = sum.saturating_add(leaves).min(cap_plus_one);
+        }
+        if let Some(d) = sel.default {
+            let leaves = select_leaf_count_bounded(f, d, memo, cap);
+            sum = sum.saturating_add(leaves).min(cap_plus_one);
+        }
+        sum
+    } else {
+        1
+    };
+    memo[nr.index] = Some(value);
+    value
+}
+
+fn estimate_umod_distribution_combinations_bounded(
+    f: &ir::Fn,
+    lhs: NodeRef,
+    rhs: NodeRef,
+) -> usize {
+    let cap = UMOD_DISTRIBUTION_MAX_COMBINATIONS;
+    let cap_plus_one = cap.saturating_add(1);
+    let mut memo = vec![None; f.nodes.len()];
+    let lhs_leaves = select_leaf_count_bounded(f, lhs, &mut memo, cap);
+    let rhs_leaves = select_leaf_count_bounded(f, rhs, &mut memo, cap);
+    lhs_leaves.saturating_mul(rhs_leaves).min(cap_plus_one)
+}
+
+fn build_distributed_umod(f: &mut ir::Fn, lhs: NodeRef, rhs: NodeRef, result_ty: Type) -> NodeRef {
+    if let Some(sel_lhs) = as_select_like(f, lhs) {
+        let mapped_cases = sel_lhs
+            .cases
+            .iter()
+            .map(|c| build_distributed_umod(f, *c, rhs, result_ty.clone()))
+            .collect::<Vec<_>>();
+        let mapped_default = sel_lhs
+            .default
+            .map(|d| build_distributed_umod(f, d, rhs, result_ty.clone()));
+        return push_select_like(
+            f,
+            result_ty,
+            sel_lhs.kind,
+            sel_lhs.selector,
+            mapped_cases,
+            mapped_default,
+        );
+    }
+    if let Some(sel_rhs) = as_select_like(f, rhs) {
+        let mapped_cases = sel_rhs
+            .cases
+            .iter()
+            .map(|c| build_distributed_umod(f, lhs, *c, result_ty.clone()))
+            .collect::<Vec<_>>();
+        let mapped_default = sel_rhs
+            .default
+            .map(|d| build_distributed_umod(f, lhs, d, result_ty.clone()));
+        return push_select_like(
+            f,
+            result_ty,
+            sel_rhs.kind,
+            sel_rhs.selector,
+            mapped_cases,
+            mapped_default,
+        );
+    }
+    push_node(f, result_ty, NodePayload::Binop(Binop::Umod, lhs, rhs))
+}
+
+/// Distribute unsigned modulo across selectors:
+///
+/// - `umod(sel(s, cases=[a,b], default=d), y)` -> `sel(s, cases=[umod(a,y),
+///   umod(b,y)], default=umod(d,y))`
+/// - `umod(x, priority_sel(p, cases=[c0,c1], default=d))` -> `priority_sel(p,
+///   cases=[umod(x,c0), umod(x,c1)], default=umod(x,d))`
+///
+/// If both operands are selection-like nodes, distribution is applied
+/// recursively so the resulting IR does not retain `umod` with a selection-like
+/// operand.
+fn rewrite_umod_distribute_across_select(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+    for idx in 0..f.nodes.len() {
+        let NodePayload::Binop(Binop::Umod, lhs, rhs) = f.nodes[idx].payload.clone() else {
+            continue;
+        };
+        if as_select_like(f, lhs).is_none() && as_select_like(f, rhs).is_none() {
+            continue;
+        }
+        let estimated_combinations = estimate_umod_distribution_combinations_bounded(f, lhs, rhs);
+        if estimated_combinations > UMOD_DISTRIBUTION_MAX_COMBINATIONS {
+            log::warn!(
+                "aug_opt: skipping umod distribution at node {} due to estimated expansion > cap (cap={})",
+                idx,
+                UMOD_DISTRIBUTION_MAX_COMBINATIONS
+            );
+            continue;
+        }
+        let result_ty = f.nodes[idx].ty.clone();
+        let replacement = build_distributed_umod(f, lhs, rhs, result_ty.clone());
+        f.nodes[idx].payload = NodePayload::Unop(Unop::Identity, replacement);
+        f.nodes[idx].ty = result_ty;
+        rewrites += 1;
+    }
+    rewrites
 }
 
 /// Hoist predicate reductions/comparisons across selection:
@@ -1984,5 +2178,179 @@ top fn a(x: bits[1] id=1) -> bits[1] {
         )
         .expect_err("expected invalid top to error");
         assert_eq!(err, "aug_opt: PIR package missing top fn 'nope'");
+    }
+
+    fn node_is_selection_like(f: &ir::Fn, nr: NodeRef) -> bool {
+        matches!(
+            f.get_node(nr).payload,
+            NodePayload::Sel { .. } | NodePayload::PrioritySel { .. }
+        )
+    }
+
+    #[test]
+    fn aug_opt_distributes_umod_across_sel_operand() {
+        let ir_text = r#"package umod_sel
+
+top fn cone(s: bits[1] id=1, x: bits[8] id=2, a: bits[8] id=3, b: bits[8] id=4) -> bits[8] {
+  sel.5: bits[8] = sel(s, cases=[a, b], id=5)
+  ret umod.6: bits[8] = umod(x, sel.5, id=6)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+
+        for n in &f.nodes {
+            if let NodePayload::Binop(Binop::Umod, lhs, rhs) = n.payload {
+                assert!(
+                    !node_is_selection_like(f, lhs),
+                    "lhs of umod should not be selection-like after rewrite; output:\n{}",
+                    out_text
+                );
+                assert!(
+                    !node_is_selection_like(f, rhs),
+                    "rhs of umod should not be selection-like after rewrite; output:\n{}",
+                    out_text
+                );
+            }
+        }
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "cone",
+            &[1, 8, 8, 8],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    #[test]
+    fn aug_opt_distributes_umod_when_both_operands_are_selections() {
+        let ir_text = r#"package umod_both_selects
+
+top fn cone(
+  s0: bits[1] id=1,
+  p: bits[2] id=2,
+  a0: bits[8] id=3, a1: bits[8] id=4,
+  b0: bits[8] id=5, b1: bits[8] id=6, bd: bits[8] id=7
+) -> bits[8] {
+  sel.10: bits[8] = sel(s0, cases=[a0, a1], id=10)
+  priority_sel.11: bits[8] = priority_sel(p, cases=[b0, b1], default=bd, id=11)
+  ret umod.12: bits[8] = umod(sel.10, priority_sel.11, id=12)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+
+        for n in &f.nodes {
+            if let NodePayload::Binop(Binop::Umod, lhs, rhs) = n.payload {
+                assert!(
+                    !node_is_selection_like(f, lhs),
+                    "lhs of umod should not be selection-like after rewrite; output:\n{}",
+                    out_text
+                );
+                assert!(
+                    !node_is_selection_like(f, rhs),
+                    "rhs of umod should not be selection-like after rewrite; output:\n{}",
+                    out_text
+                );
+            }
+        }
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "cone",
+            &[1, 2, 8, 8, 8, 8, 8],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    #[test]
+    fn aug_opt_skips_umod_distribution_when_estimated_expansion_exceeds_cap() {
+        let ir_text = r#"package umod_skip_large_expansion
+
+top fn cone(
+  s0: bits[1] id=1, s1: bits[1] id=2, s2: bits[1] id=3, s3: bits[1] id=4, s4: bits[1] id=5, s5: bits[1] id=6,
+  t0: bits[1] id=7, t1: bits[1] id=8, t2: bits[1] id=9, t3: bits[1] id=10, t4: bits[1] id=11, t5: bits[1] id=12,
+  a0: bits[8] id=20, a1: bits[8] id=21, a2: bits[8] id=22, a3: bits[8] id=23,
+  a4: bits[8] id=24, a5: bits[8] id=25, a6: bits[8] id=26, a7: bits[8] id=27,
+  b0: bits[8] id=30, b1: bits[8] id=31, b2: bits[8] id=32, b3: bits[8] id=33,
+  b4: bits[8] id=34, b5: bits[8] id=35, b6: bits[8] id=36, b7: bits[8] id=37
+) -> bits[8] {
+  a01: bits[8] = sel(s0, cases=[a0, a1], id=100)
+  a23: bits[8] = sel(s1, cases=[a2, a3], id=101)
+  a45: bits[8] = sel(s2, cases=[a4, a5], id=102)
+  a67: bits[8] = sel(s3, cases=[a6, a7], id=103)
+  a0123: bits[8] = sel(s4, cases=[a01, a23], id=104)
+  a4567: bits[8] = sel(s5, cases=[a45, a67], id=105)
+  lhs: bits[8] = sel(s0, cases=[a0123, a4567], id=106)
+
+  b01: bits[8] = sel(t0, cases=[b0, b1], id=110)
+  b23: bits[8] = sel(t1, cases=[b2, b3], id=111)
+  b45: bits[8] = sel(t2, cases=[b4, b5], id=112)
+  b67: bits[8] = sel(t3, cases=[b6, b7], id=113)
+  b0123: bits[8] = sel(t4, cases=[b01, b23], id=114)
+  b4567: bits[8] = sel(t5, cases=[b45, b67], id=115)
+  rhs: bits[8] = sel(t0, cases=[b0123, b4567], id=116)
+
+  ret umod.200: bits[8] = umod(lhs, rhs, id=200)
+}
+"#;
+
+        let out = run_aug_opt_over_ir_text_with_stats(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt");
+        assert_eq!(out.rewrite_stats.umod_distribute_across_select, 0);
+
+        let mut p = ir_parser::Parser::new(&out.output_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+        let mut found_umod_with_selection_operand = false;
+        for n in &f.nodes {
+            if let NodePayload::Binop(Binop::Umod, lhs, rhs) = n.payload {
+                if node_is_selection_like(f, lhs) || node_is_selection_like(f, rhs) {
+                    found_umod_with_selection_operand = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            found_umod_with_selection_operand,
+            "expected capped rewrite to keep at least one umod with selection-like operand; output:\n{}",
+            out.output_text
+        );
     }
 }
