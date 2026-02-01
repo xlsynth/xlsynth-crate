@@ -137,6 +137,7 @@ pub struct Options {
     pub fold: bool,
     pub hash: bool,
     pub enable_rewrite_carry_out: bool,
+    pub enable_rewrite_prio_encode: bool,
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
     pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
     pub fraig: bool,
@@ -187,9 +188,8 @@ impl From<&Options> for ir2gates::Ir2GatesOptions {
             fold: options.fold,
             hash: options.hash,
             check_equivalence: false, // check is done below if requested
-            // Preserve existing CLI behavior for carry-out rewrite, but use
-            // defaults for other prep-for-gatify rewrites.
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
+            enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
             adder_mapping: options.adder_mapping,
             mul_adder_mapping: options.mul_adder_mapping,
             aug_opt: Default::default(),
@@ -226,7 +226,7 @@ pub fn process_ir_path_with_gatefn(
 ) -> (crate::aig::GateFn, Ir2GatesSummaryStats) {
     let prep_opts = PrepForGatifyOptions {
         enable_rewrite_carry_out: options.enable_rewrite_carry_out,
-        ..PrepForGatifyOptions::all_opts_enabled()
+        enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
     };
     // Read the file into a string.
     let file_content = std::fs::read_to_string(&ir_path)

@@ -27,16 +27,11 @@ use xlsynth_pir::math::ceil_log2;
 pub struct PrepForGatifyOptions {
     /// When true, rewrite carry-out idioms like
     /// `bit_slice(add(...), start=msb, width=1)` into `ext_carry_out`.
-    ///
-    /// Default is false because the rewrite is not always profitable.
     pub enable_rewrite_carry_out: bool,
 
     /// When true, rewrite the idiom `encode(one_hot(x))` (for power-of-two `x`
     /// width) into the extension op `ext_prio_encode(x, lsb_prio=...)` so
     /// gatification can use a specialized priority-encoder lowering.
-    ///
-    /// Default is false because this is a QoR strategy choice and we want to be
-    /// able to compare old vs new circuits easily.
     pub enable_rewrite_prio_encode: bool,
 }
 

@@ -51,6 +51,7 @@ mod flag_defaults;
 mod fn_eval;
 mod g8r2ir;
 mod g8r2v;
+mod g8r_cli;
 mod g8r_equiv;
 mod gv2aig;
 mod gv2ir;
@@ -114,7 +115,7 @@ trait AppExt {
     fn add_codegen_args(self) -> Self;
     fn add_bool_arg(self, long: &'static str, help: &'static str) -> Self;
     fn add_ir_top_arg(self, required: bool) -> Self;
-    fn add_ir2g8r_flags(self) -> Self;
+    fn add_g8r_lowering_flags(self) -> Self;
 }
 
 // TODO: Change flags from using strings to using clap::ValueEnum.
@@ -293,13 +294,17 @@ impl AppExt for clap::Command {
         )
     }
 
-    fn add_ir2g8r_flags(self) -> Self {
+    fn add_g8r_lowering_flags(self) -> Self {
         (self as clap::Command)
             .add_bool_arg("fold", "Fold the gate representation")
             .add_bool_arg("hash", "Hash the gate representation")
             .add_bool_arg(
                 "enable-rewrite-carry-out",
                 "Enable carry-out rewrite in prep_for_gatify (introduces ext_carry_out)",
+            )
+            .add_bool_arg(
+                "enable-rewrite-prio-encode",
+                "Enable prio-encode rewrite in prep_for_gatify (introduces ext_prio_encode)",
             )
             .arg(
                 clap::Arg::new("adder_mapping")
@@ -633,6 +638,7 @@ fn main() {
             clap::Command::new("dslx-g8r-stats")
                 .about("Emit gate-level summary stats for a DSLX entry point")
                 .add_dslx_input_args(true)
+                .add_g8r_lowering_flags()
                 .add_bool_arg(
                     "type_inference_v2",
                     "Enable the experimental type-inference v2 algorithm",
@@ -1203,7 +1209,7 @@ fn main() {
                         .help("Write the residual PIR after prep_for_gatify to PATH")
                         .action(clap::ArgAction::Set),
                 )
-                .add_ir2g8r_flags()
+                .add_g8r_lowering_flags()
                 .add_bool_arg(
                     "emit-independent-op-stats",
                     "Emit independent-op (per-node) GateFn stats; can be expensive",
@@ -1219,7 +1225,7 @@ fn main() {
                         .index(1),
                 )
                 .add_ir_top_arg(false)
-                .add_ir2g8r_flags()
+                .add_g8r_lowering_flags()
                 .arg(
                     clap::Arg::new("bin_out")
                         .long("bin-out")
