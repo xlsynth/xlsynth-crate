@@ -68,6 +68,7 @@ mod ir_bool_cones;
 mod ir_diverse_samples;
 mod ir_equiv;
 mod ir_equiv_blocks;
+mod ir_fn_cone_extract;
 mod ir_fn_eval;
 mod ir_fn_node_count;
 mod ir_fn_to_block;
@@ -1648,6 +1649,27 @@ fn main() {
                 .add_ir_top_arg(false),
         )
         .subcommand(
+            clap::Command::new("ir-fn-cone-extract")
+                .about("Extracts the backward cone feeding a selected node down to primary inputs (function parameters)")
+                .arg(
+                    clap::Arg::new("ir_input_file")
+                        .help("The input IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    clap::Arg::new("sink")
+                        .help("Sink node selector: node name (e.g. 'my_node') or id/text_id (e.g. '123' or 'and.123')")
+                        .required(true)
+                        .index(2),
+                )
+                .add_ir_top_arg(false)
+                .add_bool_arg(
+                    "emit_pos_data",
+                    "Whether to retain position metadata (pos=...) and file_number table in the extracted cone",
+                ),
+        )
+        .subcommand(
             clap::Command::new("ir-strip-pos-data")
                 .about("Reads an .ir file and emits the same IR with all position data removed (file table and pos= attributes)")
                 .arg(
@@ -2282,6 +2304,9 @@ fn main() {
         }
         Some(("ir-fn-node-count", subm)) => {
             ir_fn_node_count::handle_ir_fn_node_count(subm, &config);
+        }
+        Some(("ir-fn-cone-extract", subm)) => {
+            ir_fn_cone_extract::handle_ir_fn_cone_extract(subm, &config);
         }
         Some(("prove-quickcheck", subm)) => {
             prove_quickcheck::handle_prove_quickcheck(subm, &config);

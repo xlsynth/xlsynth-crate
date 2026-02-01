@@ -473,6 +473,27 @@ Example:
 xlsynth-driver ir-fn-node-count my_pkg.ir --top main
 ```
 
+### `ir-fn-cone-extract`
+
+Extracts the backward cone feeding a selected sink node down to primary inputs (function parameters) and emits the extracted package IR on **stdout**.
+
+- Positional arguments:
+  - `<ir_input_file>` – path to the package IR file.
+  - `<sink>` – sink node selector:
+    - node name (e.g. `my_node`)
+    - numeric `id=` / `text_id` (e.g. `123`)
+    - or `op.id` shorthand (e.g. `and.123`)
+- Optional:
+  - `--top <NAME>` – function name to treat as top (overrides the package top).
+  - `--emit_pos_data=<BOOL>` – retain `pos=...` metadata and the package file table in the extracted IR (defaults to false).
+
+Examples:
+
+```shell
+xlsynth-driver ir-fn-cone-extract my_pkg.ir 123 --top main > cone.ir
+xlsynth-driver ir-fn-cone-extract my_pkg.ir my_node --top main > cone.ir
+```
+
 ### `ir-query`
 
 Matches a query expression against the top function of an IR package and prints each matching node on **stdout**.
