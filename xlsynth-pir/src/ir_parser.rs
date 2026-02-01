@@ -648,6 +648,57 @@ impl Parser {
         })
     }
 
+    fn parse_instantiation_decl(
+        &mut self,
+        block_name: &str,
+        instantiation_names: &mut std::collections::HashSet<String>,
+    ) -> Result<ir::Instantiation, ParseError> {
+        let inst_name = self.pop_identifier_or_error("instantiation name")?;
+        if !instantiation_names.insert(inst_name.clone()) {
+            return Err(ParseError::new(format!(
+                "duplicate instantiation '{}' in block '{}'",
+                inst_name, block_name
+            )));
+        }
+        self.drop_or_error("(")?;
+        let mut block_ref: Option<String> = None;
+        let mut kind: Option<String> = None;
+        loop {
+            self.drop_whitespace_and_comments();
+            if self.try_drop(")") {
+                break;
+            }
+            if self.peek_is("block=") {
+                block_ref = Some(self.parse_identifier_attribute("block")?);
+            } else if self.peek_is("kind=") {
+                kind = Some(self.parse_identifier_attribute("kind")?);
+            } else {
+                return Err(ParseError::new(format!(
+                    "unexpected instantiation attribute; rest_of_line: {:?}",
+                    self.rest_of_line()
+                )));
+            }
+            if !self.try_drop(",") {
+                self.drop_or_error(")")?;
+                break;
+            }
+        }
+        let block_ref = block_ref
+            .ok_or_else(|| ParseError::new("instantiation missing block attribute".to_string()))?;
+        let kind = kind
+            .ok_or_else(|| ParseError::new("instantiation missing kind attribute".to_string()))?;
+        if kind != "block" {
+            return Err(ParseError::new(format!(
+                "unsupported instantiation kind '{}'",
+                kind
+            )));
+        }
+        Ok(ir::Instantiation {
+            name: inst_name,
+            block: block_ref,
+        })
+    }
+
     fn parse_node_ref_array_attribute(
         &mut self,
         attr_name: &str,
@@ -1249,6 +1300,102 @@ impl Parser {
                         register,
                         load_enable,
                         reset,
+                    },
+                    maybe_id.unwrap(),
+                )
+            }
+            "instantiation_input" => {
+                let arg = self.parse_node_ref(&node_env, "instantiation_input arg")?;
+                let mut instantiation: Option<String> = None;
+                let mut port_name: Option<String> = None;
+                loop {
+                    self.drop_whitespace_and_comments();
+                    if !self.try_drop(",") {
+                        break;
+                    }
+                    self.drop_whitespace_and_comments();
+                    if self.peek_is("instantiation") {
+                        instantiation = Some(self.parse_identifier_attribute("instantiation")?);
+                        continue;
+                    }
+                    if self.peek_is("port_name") {
+                        port_name = Some(self.parse_identifier_attribute("port_name")?);
+                        continue;
+                    }
+                    if self.peek_is("id=") {
+                        let id_attr = self.parse_id_attribute()?;
+                        maybe_id = Some(id_attr);
+                        continue;
+                    }
+                    break;
+                }
+                let instantiation = instantiation.ok_or_else(|| {
+                    ParseError::new("instantiation_input missing instantiation attribute".to_string())
+                })?;
+                let port_name = port_name.ok_or_else(|| {
+                    ParseError::new("instantiation_input missing port_name attribute".to_string())
+                })?;
+                if maybe_id.is_none() {
+                    return Err(ParseError::new(format!(
+                        "expected id for instantiation_input; rest_of_line: {:?}",
+                        self.rest_of_line()
+                    )));
+                }
+                (
+                    ir::NodePayload::InstantiationInput {
+                        instantiation,
+                        port_name,
+                        arg,
+                    },
+                    maybe_id.unwrap(),
+                )
+            }
+            "instantiation_output" => {
+                let mut instantiation: Option<String> = None;
+                let mut port_name: Option<String> = None;
+                let mut saw_attr = false;
+                loop {
+                    self.drop_whitespace_and_comments();
+                    if saw_attr {
+                        if !self.try_drop(",") {
+                            break;
+                        }
+                        self.drop_whitespace_and_comments();
+                    } else {
+                        saw_attr = true;
+                    }
+                    self.drop_whitespace_and_comments();
+                    if self.peek_is("instantiation") {
+                        instantiation = Some(self.parse_identifier_attribute("instantiation")?);
+                        continue;
+                    }
+                    if self.peek_is("port_name") {
+                        port_name = Some(self.parse_identifier_attribute("port_name")?);
+                        continue;
+                    }
+                    if self.peek_is("id=") {
+                        let id_attr = self.parse_id_attribute()?;
+                        maybe_id = Some(id_attr);
+                        continue;
+                    }
+                    break;
+                }
+                let instantiation = instantiation.ok_or_else(|| {
+                    ParseError::new("instantiation_output missing instantiation attribute".to_string())
+                })?;
+                let port_name = port_name.ok_or_else(|| {
+                    ParseError::new("instantiation_output missing port_name attribute".to_string())
+                })?;
+                if maybe_id.is_none() {
+                    return Err(ParseError::new(format!(
+                        "expected id for instantiation_output; rest_of_line: {:?}",
+                        self.rest_of_line()
+                    )));
+                }
+                (
+                    ir::NodePayload::InstantiationOutput {
+                        instantiation,
+                        port_name,
                     },
                     maybe_id.unwrap(),
                 )
@@ -1984,6 +2131,9 @@ impl Parser {
         let mut registers: Vec<ir::Register> = Vec::new();
         let mut register_names: std::collections::HashSet<String> =
             std::collections::HashSet::new();
+        let mut instantiations: Vec<ir::Instantiation> = Vec::new();
+        let mut instantiation_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         // Parse body lines until '}'.
         while !self.try_drop("}") {
@@ -1992,6 +2142,11 @@ impl Parser {
             if self.try_drop_keyword("reg") {
                 let reg = self.parse_register_decl(&block_name, &mut register_names)?;
                 registers.push(reg);
+                continue;
+            }
+            if self.try_drop_keyword("instantiation") {
+                let inst = self.parse_instantiation_decl(&block_name, &mut instantiation_names)?;
+                instantiations.push(inst);
                 continue;
             }
             // If this is an input_port or output_port, handle specially.
@@ -2218,6 +2373,7 @@ impl Parser {
                     output_names: header_output_names,
                     reset: reset_metadata,
                     registers,
+                    instantiations,
                 },
             ));
         }
@@ -2261,6 +2417,7 @@ impl Parser {
                 output_names: header_output_names,
                 reset: reset_metadata,
                 registers,
+                instantiations,
             },
         ))
     }
@@ -2501,6 +2658,12 @@ pub fn emit_fn_as_block(
             } else {
                 lines.push(format!("  reg {}({})", reg.name, reg.ty));
             }
+        }
+        for inst in &pi.instantiations {
+            lines.push(format!(
+                "  instantiation {}(block={}, kind=block)",
+                inst.name, inst.block
+            ));
         }
     }
     // input_port lines for each param (in order).
@@ -3458,6 +3621,18 @@ fn id(x: bits[1] id=1) -> bits[1] {
   out: () = output_port(foo_q, name=out, id=6)
 }"#;
 
+    const BLK_WITH_INSTANTIATION: &str = r#"block my_block(in0: bits[32], in1: bits[32], out0: bits[32], out1: bits[32]) {
+  instantiation inst_add(block=add_block, kind=block)
+  in0: bits[32] = input_port(name=in0, id=15)
+  in1: bits[32] = input_port(name=in1, id=16)
+  instantiation_input.23: () = instantiation_input(in0, instantiation=inst_add, port_name=a, id=23)
+  instantiation_input.24: () = instantiation_input(in1, instantiation=inst_add, port_name=b, id=24)
+  instantiation_output.25: bits[32] = instantiation_output(instantiation=inst_add, port_name=x, id=25)
+  instantiation_output.26: bits[32] = instantiation_output(instantiation=inst_add, port_name=y, id=26)
+  out0: () = output_port(instantiation_output.25, name=out0, id=21)
+  out1: () = output_port(instantiation_output.26, name=out1, id=22)
+}"#;
+
     #[test]
     fn test_roundtrip_block_parse_then_emit_single_output() {
         let _ = env_logger::builder().is_test(true).try_init();
@@ -3511,6 +3686,20 @@ fn id(x: bits[1] id=1) -> bits[1] {
         let (f, metadata) = parser.parse_block_to_fn_with_ports().unwrap();
         let emitted = emit_fn_as_block(&f, Some(&["out".to_string()]), Some(&metadata), false);
         assert_eq!(emitted, BLK_REG_RESET_AND_LOAD_ENABLE);
+    }
+
+    #[test]
+    fn test_roundtrip_block_parse_then_emit_instantiation() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let mut parser = Parser::new(BLK_WITH_INSTANTIATION);
+        let (f, metadata) = parser.parse_block_to_fn_with_ports().unwrap();
+        let emitted = emit_fn_as_block(
+            &f,
+            Some(&["out0".to_string(), "out1".to_string()]),
+            Some(&metadata),
+            false,
+        );
+        assert_eq!(emitted, BLK_WITH_INSTANTIATION);
     }
     #[test]
     fn test_parse_block_to_fn_add_two_inputs_one_output() {

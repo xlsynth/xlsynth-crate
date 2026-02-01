@@ -203,6 +203,8 @@ pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
             message: _,
             label: _,
         } => vec![*token, *activate],
+        InstantiationInput { arg, .. } => vec![*arg],
+        InstantiationOutput { .. } => vec![],
         RegisterRead { .. } => vec![],
         RegisterWrite {
             arg,
@@ -782,6 +784,22 @@ where
                 .enumerate()
                 .map(|(i, r)| map((i + 2, *r)))
                 .collect(),
+        },
+        NodePayload::InstantiationInput {
+            instantiation,
+            port_name,
+            arg,
+        } => NodePayload::InstantiationInput {
+            instantiation: instantiation.clone(),
+            port_name: port_name.clone(),
+            arg: map((0, *arg)),
+        },
+        NodePayload::InstantiationOutput {
+            instantiation,
+            port_name,
+        } => NodePayload::InstantiationOutput {
+            instantiation: instantiation.clone(),
+            port_name: port_name.clone(),
         },
         NodePayload::RegisterRead { register } => NodePayload::RegisterRead {
             register: register.clone(),

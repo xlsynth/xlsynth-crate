@@ -345,6 +345,8 @@ where
                 Ok(None)
             }
         }
+        NodePayload::InstantiationInput { .. } => Ok(Some(Type::nil())),
+        NodePayload::InstantiationOutput { .. } => Ok(None),
         NodePayload::RegisterWrite { .. } => Ok(Some(Type::nil())),
 
         NodePayload::DynamicBitSlice { width, .. } | NodePayload::BitSlice { width, .. } => {

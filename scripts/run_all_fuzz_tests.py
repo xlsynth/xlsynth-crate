@@ -87,7 +87,13 @@ def main() -> int:
         default=DEFAULT_FEATURES,
         help='Features to pass to the fuzz targets. Example: "with-z3-system,with-foo"',
     )
+    parser.add_argument(
+        "--sanitizer",
+        default="none",
+        help='Sanitizer to enable via RUSTFLAGS, e.g. "address", "thread", or "none".',
+    )
     args = parser.parse_args()
+    sanitizer_args = ["--sanitizer", args.sanitizer]
 
     # scripts/ is one level below the repo root.
     repo_root = Path(__file__).resolve().parent.parent
@@ -138,6 +144,7 @@ def main() -> int:
                 "build",
                 "--fuzz-dir",
                 fuzz_dir.as_posix(),
+                *sanitizer_args,
                 *features_args,
                 *fuzz_run_args_list,
             ]
@@ -162,6 +169,7 @@ def main() -> int:
                     "run",
                     "--fuzz-dir",
                     fuzz_dir.as_posix(),
+                    *sanitizer_args,
                     *features_args,
                     *fuzz_run_args_list,
                     target,

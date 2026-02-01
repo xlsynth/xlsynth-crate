@@ -121,6 +121,21 @@ fn hash_payload_attributes(f: &Fn, payload: &NodePayload, hasher: &mut blake3::H
             format: _,
             operands: _,
         } => {}
+        NodePayload::InstantiationInput {
+            instantiation,
+            port_name,
+            ..
+        } => {
+            update_hash_str(hasher, instantiation);
+            update_hash_str(hasher, port_name);
+        }
+        NodePayload::InstantiationOutput {
+            instantiation,
+            port_name,
+        } => {
+            update_hash_str(hasher, instantiation);
+            update_hash_str(hasher, port_name);
+        }
         NodePayload::RegisterRead { register } => {
             update_hash_str(hasher, register);
         }
@@ -256,6 +271,21 @@ pub fn node_structural_signature_string(f: &Fn, node_ref: NodeRef) -> String {
         NodePayload::Invoke { to_apply, operands } => {
             attrs.push(format!("to_apply={to_apply}"));
             attrs.push(format!("len={}", operands.len()));
+        }
+        NodePayload::InstantiationInput {
+            instantiation,
+            port_name,
+            ..
+        } => {
+            attrs.push(format!("instantiation={instantiation}"));
+            attrs.push(format!("port_name={port_name}"));
+        }
+        NodePayload::InstantiationOutput {
+            instantiation,
+            port_name,
+        } => {
+            attrs.push(format!("instantiation={instantiation}"));
+            attrs.push(format!("port_name={port_name}"));
         }
         NodePayload::RegisterRead { register } => {
             attrs.push(format!("register={register}"));
