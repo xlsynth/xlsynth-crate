@@ -69,6 +69,36 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                     let r = lhs_bits.umul(&rhs_bits);
                     IrValue::from_bits(&r)
                 }
+                ir::Binop::Umod => {
+                    let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
+                    let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
+                    let w = lhs_bits.get_bit_count();
+                    assert_eq!(
+                        w,
+                        rhs_bits.get_bit_count(),
+                        "umod width mismatch: lhs bits[{}] vs rhs bits[{}]",
+                        w,
+                        rhs_bits.get_bit_count()
+                    );
+
+                    // Match XLS behavior for division by zero: result is zero.
+                    let rhs_u = rhs_bits
+                        .to_u64()
+                        .expect("umod evaluator currently requires rhs width <= 64");
+                    if rhs_u == 0 {
+                        let zero = IrBits::make_ubits(w, 0)
+                            .expect("make_ubits should succeed for zero literal");
+                        IrValue::from_bits(&zero)
+                    } else {
+                        let lhs_u = lhs_bits
+                            .to_u64()
+                            .expect("umod evaluator currently requires lhs width <= 64");
+                        let rem = lhs_u % rhs_u;
+                        let out = IrBits::make_ubits(w, rem)
+                            .expect("make_ubits should succeed for computed remainder");
+                        IrValue::from_bits(&out)
+                    }
+                }
                 ir::Binop::Uge => {
                     let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
                     let rhs_bits: IrBits = rhs_value.to_bits().unwrap();

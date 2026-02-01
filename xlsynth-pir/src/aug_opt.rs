@@ -40,6 +40,7 @@ pub struct AugOptRewriteStats {
     pub eq_add_zero_to_eq_rhs_sub: usize,
     pub ne_shrl_slice_known_one_shift_nonzero: usize,
     pub predicate_hoist_across_select: usize,
+    pub umod_distribute_across_select: usize,
 }
 
 impl AugOptRewriteStats {
@@ -51,6 +52,7 @@ impl AugOptRewriteStats {
             .saturating_add(self.eq_add_zero_to_eq_rhs_sub)
             .saturating_add(self.ne_shrl_slice_known_one_shift_nonzero)
             .saturating_add(self.predicate_hoist_across_select)
+            .saturating_add(self.umod_distribute_across_select)
     }
 
     fn saturating_add_assign(&mut self, other: AugOptRewriteStats) {
@@ -73,6 +75,9 @@ impl AugOptRewriteStats {
         self.predicate_hoist_across_select = self
             .predicate_hoist_across_select
             .saturating_add(other.predicate_hoist_across_select);
+        self.umod_distribute_across_select = self
+            .umod_distribute_across_select
+            .saturating_add(other.umod_distribute_across_select);
     }
 }
 
@@ -298,6 +303,9 @@ fn apply_basis_rewrites_to_fn(
     stats.eq_priority_sel_to_selector_predicate =
         rewrite_eq_priority_sel_to_selector_predicate(&mut cloned, range_info);
     stats.eq_add_zero_to_eq_rhs_sub = rewrite_eq_add_zero_to_eq_rhs_sub(&mut cloned);
+    // Distribute unsigned mod across selectors so each arm can be folded by
+    // downstream optimization (e.g. when divisors are constants).
+    stats.umod_distribute_across_select = rewrite_umod_distribute_across_select(&mut cloned);
     // Hoist predicate reductions/comparisons across sel/priority_sel first so
     // downstream rewrites can see through the selector.
     stats.predicate_hoist_across_select = rewrite_predicate_hoist_across_select(&mut cloned);
@@ -965,6 +973,137 @@ fn count_users(f: &ir::Fn, target: NodeRef) -> usize {
         .iter()
         .filter(|n| ir_utils::operands(&n.payload).contains(&target))
         .count()
+}
+
+#[derive(Clone, Copy)]
+enum SelectLikeKind {
+    Sel,
+    PrioritySel,
+}
+
+#[derive(Clone)]
+struct SelectLikeNode {
+    kind: SelectLikeKind,
+    selector: NodeRef,
+    cases: Vec<NodeRef>,
+    default: Option<NodeRef>,
+}
+
+fn as_select_like(f: &ir::Fn, nr: NodeRef) -> Option<SelectLikeNode> {
+    match f.get_node(nr).payload.clone() {
+        NodePayload::Sel {
+            selector,
+            cases,
+            default,
+        } => Some(SelectLikeNode {
+            kind: SelectLikeKind::Sel,
+            selector,
+            cases,
+            default,
+        }),
+        NodePayload::PrioritySel {
+            selector,
+            cases,
+            default,
+        } => Some(SelectLikeNode {
+            kind: SelectLikeKind::PrioritySel,
+            selector,
+            cases,
+            default,
+        }),
+        _ => None,
+    }
+}
+
+fn push_select_like(
+    f: &mut ir::Fn,
+    result_ty: Type,
+    kind: SelectLikeKind,
+    selector: NodeRef,
+    cases: Vec<NodeRef>,
+    default: Option<NodeRef>,
+) -> NodeRef {
+    let payload = match kind {
+        SelectLikeKind::Sel => NodePayload::Sel {
+            selector,
+            cases,
+            default,
+        },
+        SelectLikeKind::PrioritySel => NodePayload::PrioritySel {
+            selector,
+            cases,
+            default,
+        },
+    };
+    push_node(f, result_ty, payload)
+}
+
+fn build_distributed_umod(f: &mut ir::Fn, lhs: NodeRef, rhs: NodeRef, result_ty: Type) -> NodeRef {
+    if let Some(sel_lhs) = as_select_like(f, lhs) {
+        let mapped_cases = sel_lhs
+            .cases
+            .iter()
+            .map(|c| build_distributed_umod(f, *c, rhs, result_ty.clone()))
+            .collect::<Vec<_>>();
+        let mapped_default = sel_lhs
+            .default
+            .map(|d| build_distributed_umod(f, d, rhs, result_ty.clone()));
+        return push_select_like(
+            f,
+            result_ty,
+            sel_lhs.kind,
+            sel_lhs.selector,
+            mapped_cases,
+            mapped_default,
+        );
+    }
+    if let Some(sel_rhs) = as_select_like(f, rhs) {
+        let mapped_cases = sel_rhs
+            .cases
+            .iter()
+            .map(|c| build_distributed_umod(f, lhs, *c, result_ty.clone()))
+            .collect::<Vec<_>>();
+        let mapped_default = sel_rhs
+            .default
+            .map(|d| build_distributed_umod(f, lhs, d, result_ty.clone()));
+        return push_select_like(
+            f,
+            result_ty,
+            sel_rhs.kind,
+            sel_rhs.selector,
+            mapped_cases,
+            mapped_default,
+        );
+    }
+    push_node(f, result_ty, NodePayload::Binop(Binop::Umod, lhs, rhs))
+}
+
+/// Distribute unsigned modulo across selectors:
+///
+/// - `umod(sel(s, cases=[a,b], default=d), y)` -> `sel(s, cases=[umod(a,y),
+///   umod(b,y)], default=umod(d,y))`
+/// - `umod(x, priority_sel(p, cases=[c0,c1], default=d))` -> `priority_sel(p,
+///   cases=[umod(x,c0), umod(x,c1)], default=umod(x,d))`
+///
+/// If both operands are selection-like nodes, distribution is applied
+/// recursively so the resulting IR does not retain `umod` with a selection-like
+/// operand.
+fn rewrite_umod_distribute_across_select(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+    for idx in 0..f.nodes.len() {
+        let NodePayload::Binop(Binop::Umod, lhs, rhs) = f.nodes[idx].payload.clone() else {
+            continue;
+        };
+        if as_select_like(f, lhs).is_none() && as_select_like(f, rhs).is_none() {
+            continue;
+        }
+        let result_ty = f.nodes[idx].ty.clone();
+        let replacement = build_distributed_umod(f, lhs, rhs, result_ty.clone());
+        f.nodes[idx].payload = NodePayload::Unop(Unop::Identity, replacement);
+        f.nodes[idx].ty = result_ty;
+        rewrites += 1;
+    }
+    rewrites
 }
 
 /// Hoist predicate reductions/comparisons across selection:
@@ -1984,5 +2123,116 @@ top fn a(x: bits[1] id=1) -> bits[1] {
         )
         .expect_err("expected invalid top to error");
         assert_eq!(err, "aug_opt: PIR package missing top fn 'nope'");
+    }
+
+    fn node_is_selection_like(f: &ir::Fn, nr: NodeRef) -> bool {
+        matches!(
+            f.get_node(nr).payload,
+            NodePayload::Sel { .. } | NodePayload::PrioritySel { .. }
+        )
+    }
+
+    #[test]
+    fn aug_opt_distributes_umod_across_sel_operand() {
+        let ir_text = r#"package umod_sel
+
+top fn cone(s: bits[1] id=1, x: bits[8] id=2, a: bits[8] id=3, b: bits[8] id=4) -> bits[8] {
+  sel.5: bits[8] = sel(s, cases=[a, b], id=5)
+  ret umod.6: bits[8] = umod(x, sel.5, id=6)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+
+        for n in &f.nodes {
+            if let NodePayload::Binop(Binop::Umod, lhs, rhs) = n.payload {
+                assert!(
+                    !node_is_selection_like(f, lhs),
+                    "lhs of umod should not be selection-like after rewrite; output:\n{}",
+                    out_text
+                );
+                assert!(
+                    !node_is_selection_like(f, rhs),
+                    "rhs of umod should not be selection-like after rewrite; output:\n{}",
+                    out_text
+                );
+            }
+        }
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "cone",
+            &[1, 8, 8, 8],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    #[test]
+    fn aug_opt_distributes_umod_when_both_operands_are_selections() {
+        let ir_text = r#"package umod_both_selects
+
+top fn cone(
+  s0: bits[1] id=1,
+  p: bits[2] id=2,
+  a0: bits[8] id=3, a1: bits[8] id=4,
+  b0: bits[8] id=5, b1: bits[8] id=6, bd: bits[8] id=7
+) -> bits[8] {
+  sel.10: bits[8] = sel(s0, cases=[a0, a1], id=10)
+  priority_sel.11: bits[8] = priority_sel(p, cases=[b0, b1], default=bd, id=11)
+  ret umod.12: bits[8] = umod(sel.10, priority_sel.11, id=12)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+
+        for n in &f.nodes {
+            if let NodePayload::Binop(Binop::Umod, lhs, rhs) = n.payload {
+                assert!(
+                    !node_is_selection_like(f, lhs),
+                    "lhs of umod should not be selection-like after rewrite; output:\n{}",
+                    out_text
+                );
+                assert!(
+                    !node_is_selection_like(f, rhs),
+                    "rhs of umod should not be selection-like after rewrite; output:\n{}",
+                    out_text
+                );
+            }
+        }
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "cone",
+            &[1, 2, 8, 8, 8, 8, 8],
+            /* random_samples= */ 2000,
+        );
     }
 }
