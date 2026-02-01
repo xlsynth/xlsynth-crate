@@ -1038,6 +1038,52 @@ fn push_select_like(
     push_node(f, result_ty, payload)
 }
 
+// Bound recursive umod distribution so selector-heavy inputs do not cause
+// multiplicative IR growth before downstream folding/strength reduction.
+const UMOD_DISTRIBUTION_MAX_COMBINATIONS: usize = 32;
+
+fn select_leaf_count_bounded(
+    f: &ir::Fn,
+    nr: NodeRef,
+    memo: &mut [Option<usize>],
+    cap: usize,
+) -> usize {
+    if let Some(v) = memo[nr.index] {
+        return v;
+    }
+
+    let value = if let Some(sel) = as_select_like(f, nr) {
+        let cap_plus_one = cap.saturating_add(1);
+        let mut sum = 0usize;
+        for c in sel.cases {
+            let leaves = select_leaf_count_bounded(f, c, memo, cap);
+            sum = sum.saturating_add(leaves).min(cap_plus_one);
+        }
+        if let Some(d) = sel.default {
+            let leaves = select_leaf_count_bounded(f, d, memo, cap);
+            sum = sum.saturating_add(leaves).min(cap_plus_one);
+        }
+        sum
+    } else {
+        1
+    };
+    memo[nr.index] = Some(value);
+    value
+}
+
+fn estimate_umod_distribution_combinations_bounded(
+    f: &ir::Fn,
+    lhs: NodeRef,
+    rhs: NodeRef,
+) -> usize {
+    let cap = UMOD_DISTRIBUTION_MAX_COMBINATIONS;
+    let cap_plus_one = cap.saturating_add(1);
+    let mut memo = vec![None; f.nodes.len()];
+    let lhs_leaves = select_leaf_count_bounded(f, lhs, &mut memo, cap);
+    let rhs_leaves = select_leaf_count_bounded(f, rhs, &mut memo, cap);
+    lhs_leaves.saturating_mul(rhs_leaves).min(cap_plus_one)
+}
+
 fn build_distributed_umod(f: &mut ir::Fn, lhs: NodeRef, rhs: NodeRef, result_ty: Type) -> NodeRef {
     if let Some(sel_lhs) = as_select_like(f, lhs) {
         let mapped_cases = sel_lhs
@@ -1095,6 +1141,15 @@ fn rewrite_umod_distribute_across_select(f: &mut ir::Fn) -> usize {
             continue;
         };
         if as_select_like(f, lhs).is_none() && as_select_like(f, rhs).is_none() {
+            continue;
+        }
+        let estimated_combinations = estimate_umod_distribution_combinations_bounded(f, lhs, rhs);
+        if estimated_combinations > UMOD_DISTRIBUTION_MAX_COMBINATIONS {
+            log::warn!(
+                "aug_opt: skipping umod distribution at node {} due to estimated expansion > cap (cap={})",
+                idx,
+                UMOD_DISTRIBUTION_MAX_COMBINATIONS
+            );
             continue;
         }
         let result_ty = f.nodes[idx].ty.clone();
@@ -2233,6 +2288,69 @@ top fn cone(
             "cone",
             &[1, 2, 8, 8, 8, 8, 8],
             /* random_samples= */ 2000,
+        );
+    }
+
+    #[test]
+    fn aug_opt_skips_umod_distribution_when_estimated_expansion_exceeds_cap() {
+        let ir_text = r#"package umod_skip_large_expansion
+
+top fn cone(
+  s0: bits[1] id=1, s1: bits[1] id=2, s2: bits[1] id=3, s3: bits[1] id=4, s4: bits[1] id=5, s5: bits[1] id=6,
+  t0: bits[1] id=7, t1: bits[1] id=8, t2: bits[1] id=9, t3: bits[1] id=10, t4: bits[1] id=11, t5: bits[1] id=12,
+  a0: bits[8] id=20, a1: bits[8] id=21, a2: bits[8] id=22, a3: bits[8] id=23,
+  a4: bits[8] id=24, a5: bits[8] id=25, a6: bits[8] id=26, a7: bits[8] id=27,
+  b0: bits[8] id=30, b1: bits[8] id=31, b2: bits[8] id=32, b3: bits[8] id=33,
+  b4: bits[8] id=34, b5: bits[8] id=35, b6: bits[8] id=36, b7: bits[8] id=37
+) -> bits[8] {
+  a01: bits[8] = sel(s0, cases=[a0, a1], id=100)
+  a23: bits[8] = sel(s1, cases=[a2, a3], id=101)
+  a45: bits[8] = sel(s2, cases=[a4, a5], id=102)
+  a67: bits[8] = sel(s3, cases=[a6, a7], id=103)
+  a0123: bits[8] = sel(s4, cases=[a01, a23], id=104)
+  a4567: bits[8] = sel(s5, cases=[a45, a67], id=105)
+  lhs: bits[8] = sel(s0, cases=[a0123, a4567], id=106)
+
+  b01: bits[8] = sel(t0, cases=[b0, b1], id=110)
+  b23: bits[8] = sel(t1, cases=[b2, b3], id=111)
+  b45: bits[8] = sel(t2, cases=[b4, b5], id=112)
+  b67: bits[8] = sel(t3, cases=[b6, b7], id=113)
+  b0123: bits[8] = sel(t4, cases=[b01, b23], id=114)
+  b4567: bits[8] = sel(t5, cases=[b45, b67], id=115)
+  rhs: bits[8] = sel(t0, cases=[b0123, b4567], id=116)
+
+  ret umod.200: bits[8] = umod(lhs, rhs, id=200)
+}
+"#;
+
+        let out = run_aug_opt_over_ir_text_with_stats(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt");
+        assert_eq!(out.rewrite_stats.umod_distribute_across_select, 0);
+
+        let mut p = ir_parser::Parser::new(&out.output_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+        let mut found_umod_with_selection_operand = false;
+        for n in &f.nodes {
+            if let NodePayload::Binop(Binop::Umod, lhs, rhs) = n.payload {
+                if node_is_selection_like(f, lhs) || node_is_selection_like(f, rhs) {
+                    found_umod_with_selection_operand = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            found_umod_with_selection_operand,
+            "expected capped rewrite to keep at least one umod with selection-like operand; output:\n{}",
+            out.output_text
         );
     }
 }
