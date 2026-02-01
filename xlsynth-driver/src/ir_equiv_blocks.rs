@@ -93,7 +93,7 @@ pub fn handle_ir_equiv_blocks(matches: &clap::ArgMatches, config: &Option<Toolch
     fn select_block_from_package<'a>(
         pkg: &'a ir_mod::Package,
         name_opt: Option<&str>,
-) -> Option<(&'a ir_mod::Fn, &'a BlockMetadata)> {
+    ) -> Option<(&'a ir_mod::Fn, &'a BlockMetadata)> {
         if let Some(name) = name_opt {
             for m in pkg.members.iter() {
                 if let PackageMember::Block { func, metadata } = m {
