@@ -94,7 +94,6 @@ def main() -> int:
         help='Sanitizer to enable via RUSTFLAGS, e.g. "address", "thread", or "none".',
     )
     args = parser.parse_args()
-    env_overrides: dict[str, str] | None = None
     sanitizer_args = ["--sanitizer", args.sanitizer]
 
     # scripts/ is one level below the repo root.
