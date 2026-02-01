@@ -39,6 +39,7 @@ pub struct AugOptRewriteStats {
     pub eq_priority_sel_to_selector_predicate: usize,
     pub eq_add_zero_to_eq_rhs_sub: usize,
     pub ne_shrl_slice_known_one_shift_nonzero: usize,
+    pub predicate_hoist_across_select: usize,
 }
 
 impl AugOptRewriteStats {
@@ -49,6 +50,7 @@ impl AugOptRewriteStats {
             .saturating_add(self.eq_priority_sel_to_selector_predicate)
             .saturating_add(self.eq_add_zero_to_eq_rhs_sub)
             .saturating_add(self.ne_shrl_slice_known_one_shift_nonzero)
+            .saturating_add(self.predicate_hoist_across_select)
     }
 
     fn saturating_add_assign(&mut self, other: AugOptRewriteStats) {
@@ -68,6 +70,9 @@ impl AugOptRewriteStats {
         self.ne_shrl_slice_known_one_shift_nonzero = self
             .ne_shrl_slice_known_one_shift_nonzero
             .saturating_add(other.ne_shrl_slice_known_one_shift_nonzero);
+        self.predicate_hoist_across_select = self
+            .predicate_hoist_across_select
+            .saturating_add(other.predicate_hoist_across_select);
     }
 }
 
@@ -293,6 +298,9 @@ fn apply_basis_rewrites_to_fn(
     stats.eq_priority_sel_to_selector_predicate =
         rewrite_eq_priority_sel_to_selector_predicate(&mut cloned, range_info);
     stats.eq_add_zero_to_eq_rhs_sub = rewrite_eq_add_zero_to_eq_rhs_sub(&mut cloned);
+    // Hoist predicate reductions/comparisons across sel/priority_sel first so
+    // downstream rewrites can see through the selector.
+    stats.predicate_hoist_across_select = rewrite_predicate_hoist_across_select(&mut cloned);
     stats.ne_shrl_slice_known_one_shift_nonzero =
         rewrite_ne_shrl_slice_known_one_shift_nonzero(&mut cloned, range_info);
     // Ensure textual IR is defs-before-uses by reordering body nodes into a
@@ -852,6 +860,204 @@ fn is_get_param_node(f: &ir::Fn, nr: NodeRef) -> bool {
     matches!(f.get_node(nr).payload, NodePayload::GetParam(_))
 }
 
+#[derive(Debug, Clone, Copy)]
+enum PredicateShape {
+    Reduce(Unop),
+    CompareConst {
+        binop: Binop,
+        const_nr: NodeRef,
+        const_on_lhs: bool,
+        value_width: usize,
+    },
+}
+
+fn is_reduce_predicate(unop: Unop) -> bool {
+    matches!(unop, Unop::OrReduce | Unop::AndReduce | Unop::XorReduce)
+}
+
+fn is_compare_predicate(binop: Binop) -> bool {
+    matches!(
+        binop,
+        Binop::Eq
+            | Binop::Ne
+            | Binop::Uge
+            | Binop::Ugt
+            | Binop::Ult
+            | Binop::Ule
+            | Binop::Sgt
+            | Binop::Sge
+            | Binop::Slt
+            | Binop::Sle
+    )
+}
+
+fn match_predicate_shape(f: &ir::Fn, nr: NodeRef) -> Option<(PredicateShape, NodeRef)> {
+    let node = f.get_node(nr);
+    if node.ty != Type::Bits(1) {
+        return None;
+    }
+    match node.payload.clone() {
+        NodePayload::Unop(unop, arg) if is_reduce_predicate(unop) => {
+            if f.get_node_ty(arg).bit_count() == 0 {
+                return None;
+            }
+            Some((PredicateShape::Reduce(unop), arg))
+        }
+        NodePayload::Binop(binop, a, b) if is_compare_predicate(binop) => {
+            let (value_nr, const_nr, const_on_lhs) = match f.get_node(a).payload {
+                NodePayload::Literal(_) => (b, a, true),
+                _ => match f.get_node(b).payload {
+                    NodePayload::Literal(_) => (a, b, false),
+                    _ => return None,
+                },
+            };
+            let value_ty = f.get_node_ty(value_nr);
+            let const_ty = f.get_node_ty(const_nr);
+            let value_w = value_ty.bit_count();
+            if value_w == 0 || *const_ty != Type::Bits(value_w) {
+                return None;
+            }
+            Some((
+                PredicateShape::CompareConst {
+                    binop,
+                    const_nr,
+                    const_on_lhs,
+                    value_width: value_w,
+                },
+                value_nr,
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn build_predicate_on_value(f: &mut ir::Fn, shape: PredicateShape, value_nr: NodeRef) -> NodeRef {
+    match shape {
+        PredicateShape::Reduce(unop) => {
+            push_node(f, Type::Bits(1), NodePayload::Unop(unop, value_nr))
+        }
+        PredicateShape::CompareConst {
+            binop,
+            const_nr,
+            const_on_lhs,
+            value_width,
+        } => {
+            debug_assert_eq!(f.get_node_ty(value_nr), &Type::Bits(value_width));
+            if const_on_lhs {
+                push_node(
+                    f,
+                    Type::Bits(1),
+                    NodePayload::Binop(binop, const_nr, value_nr),
+                )
+            } else {
+                push_node(
+                    f,
+                    Type::Bits(1),
+                    NodePayload::Binop(binop, value_nr, const_nr),
+                )
+            }
+        }
+    }
+}
+
+fn count_users(f: &ir::Fn, target: NodeRef) -> usize {
+    f.nodes
+        .iter()
+        .filter(|n| ir_utils::operands(&n.payload).contains(&target))
+        .count()
+}
+
+/// Hoist predicate reductions/comparisons across selection:
+///
+/// - `pred(sel(s, cases=[a,b]))` → `sel(s, cases=[pred(a), pred(b)])`
+/// - `pred(priority_sel(sel, cases, default))` → `priority_sel(sel,
+///   cases=map(pred), default=pred(default))`
+///
+/// This keeps the result as a selector of predicates, which is generally
+/// friendlier to downstream lowering than SOP expansion.
+fn rewrite_predicate_hoist_across_select(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+
+    for idx in 0..f.nodes.len() {
+        let nr = NodeRef { index: idx };
+        let Some((shape, value_nr)) = match_predicate_shape(f, nr) else {
+            continue;
+        };
+        // For compare-to-constant predicates, only hoist when the selected value
+        // has a single user. This bounds compare replication in membership-like
+        // shapes (e.g. OR-of-many EQs on the same selected value).
+        if matches!(shape, PredicateShape::CompareConst { .. }) && count_users(f, value_nr) != 1 {
+            continue;
+        }
+
+        match f.get_node(value_nr).payload.clone() {
+            NodePayload::Sel {
+                selector,
+                cases,
+                default,
+            } => {
+                // Keep this narrow and predictable: 2-way boolean selects only.
+                if f.get_node_ty(selector) != &Type::Bits(1) || cases.len() != 2 {
+                    continue;
+                }
+                let case_ty = f.get_node_ty(cases[0]).clone();
+                if cases.iter().any(|c| f.get_node_ty(*c) != &case_ty) {
+                    continue;
+                }
+                if let Some(d) = default {
+                    if f.get_node_ty(d) != &case_ty {
+                        continue;
+                    }
+                }
+
+                let pred_cases: Vec<NodeRef> = cases
+                    .iter()
+                    .map(|c| build_predicate_on_value(f, shape, *c))
+                    .collect();
+                let pred_default = default.map(|d| build_predicate_on_value(f, shape, d));
+
+                f.nodes[idx].payload = NodePayload::Sel {
+                    selector,
+                    cases: pred_cases,
+                    default: pred_default,
+                };
+                f.nodes[idx].ty = Type::Bits(1);
+                rewrites += 1;
+            }
+            NodePayload::PrioritySel {
+                selector,
+                cases,
+                default,
+            } => {
+                let Some(default_nr) = default else {
+                    continue;
+                };
+                let case_ty = f.get_node_ty(default_nr).clone();
+                if cases.iter().any(|c| f.get_node_ty(*c) != &case_ty) {
+                    continue;
+                }
+
+                let pred_cases: Vec<NodeRef> = cases
+                    .iter()
+                    .map(|c| build_predicate_on_value(f, shape, *c))
+                    .collect();
+                let pred_default = build_predicate_on_value(f, shape, default_nr);
+
+                f.nodes[idx].payload = NodePayload::PrioritySel {
+                    selector,
+                    cases: pred_cases,
+                    default: Some(pred_default),
+                };
+                f.nodes[idx].ty = Type::Bits(1);
+                rewrites += 1;
+            }
+            _ => {}
+        }
+    }
+
+    rewrites
+}
+
 fn known_one_positions(range_info: &IrRangeInfo, text_id: usize) -> Vec<usize> {
     let Some(info) = range_info.get(text_id) else {
         return Vec::new();
@@ -1169,6 +1375,18 @@ mod tests {
     use super::*;
     use crate::test_utils::quickcheck_ir_text_fn_equivalence_ubits_le64;
 
+    fn resolve_identity<'a>(f: &'a ir::Fn, mut nr: NodeRef) -> &'a ir::Node {
+        loop {
+            let n = f.get_node(nr);
+            match n.payload {
+                NodePayload::Unop(Unop::Identity, inner) => {
+                    nr = inner;
+                }
+                _ => return n,
+            }
+        }
+    }
+
     #[test]
     fn aug_opt_rewrites_guarded_sel_ne1_nor_and_opt_dces_sel() {
         let ir_text = r#"package bool_cone
@@ -1237,6 +1455,175 @@ top fn f(x: bits[8] id=1, s: bits[4] id=2) -> bits[1] {
             &out_text,
             "f",
             &[8, 4],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    #[test]
+    fn aug_opt_hoists_or_reduce_across_sel() {
+        let ir_text = r#"package sel_reduce
+
+top fn cone(s: bits[1] id=1, a: bits[8] id=2, b: bits[8] id=3) -> bits[1] {
+  sel.4: bits[8] = sel(s, cases=[a, b], id=4)
+  ret or_reduce.5: bits[1] = or_reduce(sel.4, id=5)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+
+        let ret_nr = f.ret_node_ref.expect("ret node");
+        let ret_node = resolve_identity(f, ret_nr);
+        match &ret_node.payload {
+            NodePayload::Sel {
+                selector, cases, ..
+            } => {
+                assert_eq!(f.get_node_ty(*selector), &Type::Bits(1));
+                assert_eq!(cases.len(), 2, "expected 2-case sel; got:\n{}", out_text);
+                for c in cases {
+                    let cn = f.get_node(*c);
+                    assert!(
+                        matches!(cn.payload, NodePayload::Unop(Unop::OrReduce, _)),
+                        "expected sel case to be or_reduce(..); got {:?}\noutput:\n{}",
+                        cn.payload,
+                        out_text
+                    );
+                }
+            }
+            other => panic!(
+                "expected ret to be sel(or_reduce(..)); got {:?}\noutput:\n{}",
+                other, out_text
+            ),
+        }
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "cone",
+            &[1, 8, 8],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    #[test]
+    fn aug_opt_hoists_const_compare_across_priority_sel() {
+        let ir_text = r#"package prio_cmp
+
+top fn cone(sel: bits[2] id=1, a: bits[6] id=2, b: bits[6] id=3, d: bits[6] id=4) -> bits[1] {
+  priority_sel.5: bits[6] = priority_sel(sel, cases=[a, b], default=d, id=5)
+  literal.6: bits[6] = literal(value=21, id=6)
+  ret eq.7: bits[1] = eq(priority_sel.5, literal.6, id=7)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+
+        let ret_nr = f.ret_node_ref.expect("ret node");
+        let ret_node = resolve_identity(f, ret_nr);
+        match &ret_node.payload {
+            NodePayload::PrioritySel { cases, default, .. } => {
+                assert_eq!(cases.len(), 2);
+                let default = default.expect("priority_sel should retain default");
+                for c in cases.iter().chain([default].iter()) {
+                    let cn = resolve_identity(f, *c);
+                    assert!(
+                        matches!(cn.payload, NodePayload::Binop(Binop::Eq, _, _)),
+                        "expected priority_sel arm to be eq(..); got {:?}\noutput:\n{}",
+                        cn.payload,
+                        out_text
+                    );
+                }
+            }
+            other => panic!(
+                "expected ret to be priority_sel(eq(..)); got {:?}\noutput:\n{}",
+                other, out_text
+            ),
+        }
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "cone",
+            &[2, 6, 6, 6],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    #[test]
+    fn aug_opt_does_not_hoist_compare_when_selected_value_has_multiple_users() {
+        let ir_text = r#"package no_hoist_multi_user
+
+top fn cone(s: bits[1] id=1, a: bits[3] id=2, b: bits[3] id=3) -> bits[1] {
+  sel.4: bits[3] = sel(s, cases=[a, b], id=4)
+  literal.5: bits[3] = literal(value=1, id=5)
+  literal.6: bits[3] = literal(value=2, id=6)
+  eq.7: bits[1] = eq(sel.4, literal.5, id=7)
+  eq.8: bits[1] = eq(sel.4, literal.6, id=8)
+  ret or.9: bits[1] = or(eq.7, eq.8, id=9)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+
+        let mut saw_eq_over_sel = 0usize;
+        for node in &f.nodes {
+            if let NodePayload::Binop(Binop::Eq, lhs, rhs) = node.payload {
+                let lhs_is_sel = matches!(f.get_node(lhs).payload, NodePayload::Sel { .. });
+                let rhs_is_sel = matches!(f.get_node(rhs).payload, NodePayload::Sel { .. });
+                if lhs_is_sel || rhs_is_sel {
+                    saw_eq_over_sel += 1;
+                }
+            }
+        }
+        assert!(
+            saw_eq_over_sel >= 2,
+            "expected compares to remain over selected value when it has multiple users;\noutput:\n{}",
+            out_text
+        );
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "cone",
+            &[1, 3, 3],
             /* random_samples= */ 2000,
         );
     }
