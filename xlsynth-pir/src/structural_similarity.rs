@@ -166,6 +166,24 @@ pub fn collect_structural_entries(f: &Fn) -> (Vec<StructuralEntry<FwdHash>>, Vec
                     child_depths.push(depths[r.index]);
                 }
             }
+            NodePayload::RegisterRead { .. } => {}
+            NodePayload::RegisterWrite {
+                arg,
+                load_enable,
+                reset,
+                ..
+            } => {
+                child_hashes.push(hashes[arg.index]);
+                child_depths.push(depths[arg.index]);
+                if let Some(le) = load_enable {
+                    child_hashes.push(hashes[le.index]);
+                    child_depths.push(depths[le.index]);
+                }
+                if let Some(rst) = reset {
+                    child_hashes.push(hashes[rst.index]);
+                    child_depths.push(depths[rst.index]);
+                }
+            }
             NodePayload::Invoke { operands, .. } => {
                 for r in operands.iter() {
                     child_hashes.push(hashes[r.index]);

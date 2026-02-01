@@ -111,10 +111,25 @@ pub fn deduce_result_type(
 pub fn deduce_result_type_with<F>(
     payload: &NodePayload,
     operand_types: &[Type],
-    mut resolve_callee_ret_ty: F,
+    resolve_callee_ret_ty: F,
 ) -> Result<Option<Type>, DeduceError>
 where
     F: FnMut(&str) -> Option<Type>,
+{
+    deduce_result_type_with_registers(payload, operand_types, resolve_callee_ret_ty, |_| None)
+}
+
+/// Like `deduce_result_type_with` but also allows resolving register types
+/// by name for `register_read`.
+pub fn deduce_result_type_with_registers<F, R>(
+    payload: &NodePayload,
+    operand_types: &[Type],
+    mut resolve_callee_ret_ty: F,
+    mut resolve_register_ty: R,
+) -> Result<Option<Type>, DeduceError>
+where
+    F: FnMut(&str) -> Option<Type>,
+    R: FnMut(&str) -> Option<Type>,
 {
     match payload {
         NodePayload::Nil => Ok(Some(Type::nil())),
@@ -322,6 +337,15 @@ where
                 _ => Err(DeduceError::ExpectedArray("array_slice")),
             }
         }
+
+        NodePayload::RegisterRead { register } => {
+            if let Some(ty) = resolve_register_ty(register) {
+                Ok(Some(ty))
+            } else {
+                Ok(None)
+            }
+        }
+        NodePayload::RegisterWrite { .. } => Ok(Some(Type::nil())),
 
         NodePayload::DynamicBitSlice { width, .. } | NodePayload::BitSlice { width, .. } => {
             Ok(Some(Type::Bits(*width)))

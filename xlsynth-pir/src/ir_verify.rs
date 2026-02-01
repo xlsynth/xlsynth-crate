@@ -122,6 +122,21 @@ pub fn verify_fn_operand_indices_in_bounds(f: &Fn) -> Result<(), String> {
                     check(*r, &format!("node {} trace.operand", i))?;
                 }
             }
+            NodePayload::RegisterRead { .. } => {}
+            NodePayload::RegisterWrite {
+                arg,
+                load_enable,
+                reset,
+                ..
+            } => {
+                check(*arg, &format!("node {} register_write.arg", i))?;
+                if let Some(le) = load_enable {
+                    check(*le, &format!("node {} register_write.load_enable", i))?;
+                }
+                if let Some(rst) = reset {
+                    check(*rst, &format!("node {} register_write.reset", i))?;
+                }
+            }
             NodePayload::Invoke { operands, .. } => {
                 for r in operands.iter() {
                     check(*r, &format!("node {} invoke.operand", i))?;

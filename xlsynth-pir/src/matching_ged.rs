@@ -3,7 +3,7 @@
 //! Library for computing heuristic graph edit distance (GED) between two XLS IR
 //! functions using an incremental node matching approach.
 
-use crate::ir::{self, BlockPortInfo, Fn, Node, NodeRef};
+use crate::ir::{self, BlockMetadata, Fn, Node, NodeRef};
 use crate::ir_utils::{compact_and_toposort_in_place, operands, remap_payload_with};
 use crate::node_hashing::{FwdHash, compute_node_local_structural_hash};
 use std::cmp::Reverse;
@@ -346,7 +346,7 @@ pub fn compute_block_edit<S: MatchSelector>(
         (
             crate::ir::PackageMember::Block {
                 func: old_fn,
-                port_info: old_port_info,
+                metadata: old_port_info,
                 ..
             },
             crate::ir::PackageMember::Block { func: new_fn, .. },
@@ -579,12 +579,12 @@ pub fn apply_block_edits(
     match old {
         crate::ir::PackageMember::Block {
             func: old_fn,
-            port_info,
+            metadata,
         } => {
             let new_fn = apply_fn_edits(old_fn, edits)?;
             Ok(crate::ir::PackageMember::Block {
                 func: new_fn,
-                port_info: port_info.clone(),
+                metadata: metadata.clone(),
             })
         }
         _ => Err("apply_block_edits requires a Block package member".to_string()),
@@ -597,7 +597,7 @@ pub fn convert_match_set_to_edit_set(
     old: &Fn,
     new: &Fn,
     m: &IrMatchSet,
-    old_port_info: Option<&BlockPortInfo>,
+    old_port_info: Option<&BlockMetadata>,
 ) -> IrEditSet {
     // Build cross-reference maps between matched nodes for operand redirection.
     let mut new_to_old: HashMap<usize, usize> = HashMap::new();

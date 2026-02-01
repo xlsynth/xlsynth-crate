@@ -4,8 +4,8 @@
 
 use std::collections::HashSet;
 
-use super::ir::{Fn, MemberType, NaryOp, NodePayload, Package, PackageMember, Type};
-use super::ir_deduce::deduce_result_type_with;
+use super::ir::{BlockMetadata, Fn, MemberType, NaryOp, NodePayload, Package, PackageMember, Type};
+use super::ir_deduce::deduce_result_type_with_registers;
 use super::ir_utils::operands;
 
 /// Errors that can arise during validation of XLS IR structures.
@@ -47,6 +47,34 @@ pub enum ValidationError {
     /// The function refers to another function that does not exist in the
     /// package.
     UnknownCallee { func: String, callee: String },
+    /// A register op references a register that does not exist in the block.
+    UnknownRegister {
+        func: String,
+        node_index: usize,
+        register: String,
+    },
+    /// A register op appears in a function (not a block).
+    RegisterOpInFunction { func: String, node_index: usize },
+    /// A register_write arg type does not match the register type.
+    RegisterWriteTypeMismatch {
+        func: String,
+        node_index: usize,
+        register: String,
+        expected: Type,
+        actual: Type,
+    },
+    /// A register_write load_enable is not bits[1].
+    RegisterWriteLoadEnableTypeMismatch {
+        func: String,
+        node_index: usize,
+        actual: Type,
+    },
+    /// A register_write reset is not bits[1].
+    RegisterWriteResetTypeMismatch {
+        func: String,
+        node_index: usize,
+        actual: Type,
+    },
     /// Bitwise n-ary ops (and/or/xor/nand/nor) must have identical bits-typed
     /// operands.
     NaryBitwiseOperandTypeMismatch { func: String, node_index: usize },
@@ -161,6 +189,59 @@ impl std::fmt::Display for ValidationError {
                     func, callee
                 )
             }
+            ValidationError::UnknownRegister {
+                func,
+                node_index,
+                register,
+            } => {
+                write!(
+                    f,
+                    "function '{}' node {} references unknown register '{}'",
+                    func, node_index, register
+                )
+            }
+            ValidationError::RegisterOpInFunction { func, node_index } => {
+                write!(
+                    f,
+                    "function '{}' node {} uses register op outside a block",
+                    func, node_index
+                )
+            }
+            ValidationError::RegisterWriteTypeMismatch {
+                func,
+                node_index,
+                register,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "function '{}' node {} register '{}' type mismatch: expected {} got {}",
+                    func, node_index, register, expected, actual
+                )
+            }
+            ValidationError::RegisterWriteLoadEnableTypeMismatch {
+                func,
+                node_index,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "function '{}' node {} register_write load_enable type mismatch: expected bits[1] got {}",
+                    func, node_index, actual
+                )
+            }
+            ValidationError::RegisterWriteResetTypeMismatch {
+                func,
+                node_index,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "function '{}' node {} register_write reset type mismatch: expected bits[1] got {}",
+                    func, node_index, actual
+                )
+            }
             ValidationError::NaryBitwiseOperandTypeMismatch { func, node_index } => {
                 write!(
                     f,
@@ -269,7 +350,7 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
     for member in &p.members {
         match member {
             PackageMember::Function(f) => validate_fn(f, p)?,
-            PackageMember::Block { func, .. } => validate_fn(func, p)?,
+            PackageMember::Block { func, metadata } => validate_block(func, metadata, p)?,
         }
     }
 
@@ -299,20 +380,47 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
 
 /// Validates a function within the context of its parent package.
 pub fn validate_fn(f: &Fn, parent: &Package) -> Result<(), ValidationError> {
-    validate_fn_with(f, parent, |name: &str| {
-        parent.get_fn_type(name).map(|ft| ft.return_type)
-    })
+    validate_fn_with(
+        f,
+        parent,
+        |name: &str| parent.get_fn_type(name).map(|ft| ft.return_type),
+        |_register| None,
+        false,
+    )
+}
+
+pub fn validate_block(
+    f: &Fn,
+    metadata: &BlockMetadata,
+    parent: &Package,
+) -> Result<(), ValidationError> {
+    validate_fn_with(
+        f,
+        parent,
+        |name: &str| parent.get_fn_type(name).map(|ft| ft.return_type),
+        |register| {
+            metadata
+                .registers
+                .iter()
+                .find(|r| r.name == register)
+                .map(|r| r.ty.clone())
+        },
+        true,
+    )
 }
 
 /// Validates a function within the context of its parent package, using a
 /// dependency-injected resolver for callee return types.
-pub fn validate_fn_with<F>(
+pub fn validate_fn_with<F, R>(
     f: &Fn,
     parent: &Package,
     callee_ret_type_resolver: F,
+    register_type_resolver: R,
+    allow_registers: bool,
 ) -> Result<(), ValidationError>
 where
     F: std::ops::Fn(&str) -> Option<Type>,
+    R: std::ops::Fn(&str) -> Option<Type>,
 {
     // Track ids used by non-parameter nodes to ensure uniqueness.
     let mut seen_nonparam_ids: HashSet<usize> = HashSet::new();
@@ -449,6 +557,76 @@ where
             _ => {}
         }
 
+        // Validate register usage (block-only).
+        match &node.payload {
+            NodePayload::RegisterRead { register } => {
+                if !allow_registers {
+                    return Err(ValidationError::RegisterOpInFunction {
+                        func: f.name.clone(),
+                        node_index: i,
+                    });
+                }
+                if register_type_resolver(register).is_none() {
+                    return Err(ValidationError::UnknownRegister {
+                        func: f.name.clone(),
+                        node_index: i,
+                        register: register.clone(),
+                    });
+                }
+            }
+            NodePayload::RegisterWrite {
+                register,
+                arg,
+                load_enable,
+                reset,
+            } => {
+                if !allow_registers {
+                    return Err(ValidationError::RegisterOpInFunction {
+                        func: f.name.clone(),
+                        node_index: i,
+                    });
+                }
+                let reg_ty = register_type_resolver(register).ok_or_else(|| {
+                    ValidationError::UnknownRegister {
+                        func: f.name.clone(),
+                        node_index: i,
+                        register: register.clone(),
+                    }
+                })?;
+                let arg_ty = f.get_node(*arg).ty.clone();
+                if reg_ty != arg_ty {
+                    return Err(ValidationError::RegisterWriteTypeMismatch {
+                        func: f.name.clone(),
+                        node_index: i,
+                        register: register.clone(),
+                        expected: reg_ty,
+                        actual: arg_ty,
+                    });
+                }
+                if let Some(le) = load_enable {
+                    let le_ty = f.get_node(*le).ty.clone();
+                    if le_ty != Type::Bits(1) {
+                        return Err(ValidationError::RegisterWriteLoadEnableTypeMismatch {
+                            func: f.name.clone(),
+                            node_index: i,
+                            actual: le_ty,
+                        });
+                    }
+                }
+                if let Some(rst) = reset {
+                    let rst_ty = f.get_node(*rst).ty.clone();
+                    if rst_ty != Type::Bits(1) {
+                        return Err(ValidationError::RegisterWriteResetTypeMismatch {
+                            func: f.name.clone(),
+                            node_index: i,
+                            actual: rst_ty,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+
         // Enforce that bitwise n-ary ops have identically typed bit operands.
         if let NodePayload::Nary(op, elems) = &node.payload {
             match op {
@@ -487,9 +665,12 @@ where
         for nr in op_refs.iter() {
             op_types.push(f.get_node(*nr).ty.clone());
         }
-        match deduce_result_type_with(&node.payload, &op_types, |callee| {
-            callee_ret_type_resolver(callee)
-        }) {
+        match deduce_result_type_with_registers(
+            &node.payload,
+            &op_types,
+            |callee| callee_ret_type_resolver(callee),
+            |register| register_type_resolver(register),
+        ) {
             Ok(Some(deduced)) => {
                 if deduced != node.ty {
                     return Err(ValidationError::NodeTypeMismatch {

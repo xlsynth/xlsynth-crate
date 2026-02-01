@@ -3,7 +3,7 @@
 //! Parser for XLS IR (just functions for the time being).
 
 use crate::ir::{
-    self, ArrayTypeData, BlockPortInfo, FileTable, MemberType, PackageMember, operator_to_nary_op,
+    self, ArrayTypeData, BlockMetadata, FileTable, MemberType, PackageMember, operator_to_nary_op,
 };
 use crate::ir_node_env::{IrNodeEnv, NameOrId};
 use crate::ir_validate;
@@ -594,6 +594,60 @@ impl Parser {
         self.pop_string_or_error()
     }
 
+    fn parse_identifier_attribute(&mut self, attr_name: &str) -> Result<String, ParseError> {
+        self.drop_whitespace_and_comments();
+        self.drop_or_error(attr_name)?;
+        self.drop_or_error("=")?;
+        self.pop_identifier_or_error(&format!("{} attribute", attr_name))
+    }
+
+    fn parse_node_ref_attribute(
+        &mut self,
+        attr_name: &str,
+        node_env: &IrNodeEnv,
+        ctx: &str,
+    ) -> Result<ir::NodeRef, ParseError> {
+        self.drop_whitespace_and_comments();
+        self.drop_or_error(attr_name)?;
+        self.drop_or_error("=")?;
+        self.parse_node_ref(node_env, ctx)
+    }
+
+    fn parse_register_decl(
+        &mut self,
+        block_name: &str,
+        register_names: &mut std::collections::HashSet<String>,
+    ) -> Result<ir::Register, ParseError> {
+        let reg_name = self.pop_identifier_or_error("register name")?;
+        if !register_names.insert(reg_name.clone()) {
+            return Err(ParseError::new(format!(
+                "duplicate register '{}' in block '{}'",
+                reg_name, block_name
+            )));
+        }
+        self.drop_or_error("(")?;
+        let reg_ty = self.parse_type()?;
+        let mut reset_value: Option<xlsynth::IrValue> = None;
+        if self.try_drop(",") {
+            self.drop_whitespace_and_comments();
+            if self.peek_is("reset_value=") {
+                self.drop_or_error("reset_value=")?;
+                reset_value = Some(self.parse_value_with_ty(&reg_ty, "register reset_value")?);
+            } else {
+                return Err(ParseError::new(format!(
+                    "unexpected register attribute; rest_of_line: {:?}",
+                    self.rest_of_line()
+                )));
+            }
+        }
+        self.drop_or_error(")")?;
+        Ok(ir::Register {
+            name: reg_name,
+            ty: reg_ty,
+            reset_value,
+        })
+    }
+
     fn parse_node_ref_array_attribute(
         &mut self,
         attr_name: &str,
@@ -1124,6 +1178,81 @@ impl Parser {
                     maybe_id.unwrap(),
                 )
             }
+            "register_read" => {
+                let register = self.parse_identifier_attribute("register")?;
+                if self.peek_is(",") {
+                    self.dropc()?;
+                    let id_attr = self.parse_id_attribute()?;
+                    maybe_id = Some(id_attr);
+                }
+                if maybe_id.is_none() {
+                    return Err(ParseError::new(format!(
+                        "expected id for register_read; rest_of_line: {:?}",
+                        self.rest_of_line()
+                    )));
+                }
+                (
+                    ir::NodePayload::RegisterRead { register },
+                    maybe_id.unwrap(),
+                )
+            }
+            "register_write" => {
+                let arg = self.parse_node_ref(&node_env, "register_write arg")?;
+                let mut register: Option<String> = None;
+                let mut load_enable: Option<ir::NodeRef> = None;
+                let mut reset: Option<ir::NodeRef> = None;
+                loop {
+                    self.drop_whitespace_and_comments();
+                    if !self.try_drop(",") {
+                        break;
+                    }
+                    self.drop_whitespace_and_comments();
+                    if self.peek_is("register") {
+                        register = Some(self.parse_identifier_attribute("register")?);
+                        continue;
+                    }
+                    if self.peek_is("load_enable") {
+                        load_enable = Some(self.parse_node_ref_attribute(
+                            "load_enable",
+                            &node_env,
+                            "register_write load_enable",
+                        )?);
+                        continue;
+                    }
+                    if self.peek_is("reset") {
+                        reset = Some(self.parse_node_ref_attribute(
+                            "reset",
+                            &node_env,
+                            "register_write reset",
+                        )?);
+                        continue;
+                    }
+                    if self.peek_is("id=") {
+                        let id_attr = self.parse_id_attribute()?;
+                        maybe_id = Some(id_attr);
+                        continue;
+                    }
+                    break;
+                }
+                let register = register.ok_or_else(|| {
+                    ParseError::new("register_write missing register attribute".to_string())
+                })?;
+                if maybe_id.is_none() {
+                    return Err(ParseError::new(format!(
+                        "expected id for register_write; rest_of_line: {:?}",
+                        self.rest_of_line()
+                    )));
+                }
+                (
+                    ir::NodePayload::RegisterWrite {
+                        arg,
+                        register,
+                        load_enable,
+                        reset,
+                    },
+                    maybe_id.unwrap(),
+                )
+            }
             "after_all" => {
                 // This is a variadic operation that puts the variadic node refs at the top
                 // level instead of in an attribute.
@@ -1583,6 +1712,105 @@ impl Parser {
         Ok(attrs)
     }
 
+    fn extract_block_reset_metadata(
+        &self,
+        attrs: Vec<String>,
+    ) -> Result<(Vec<String>, Option<ir::BlockResetMetadata>), ParseError> {
+        let mut filtered: Vec<String> = Vec::new();
+        let mut reset_metadata: Option<ir::BlockResetMetadata> = None;
+        for attr in attrs.into_iter() {
+            if let Some(parsed) = Self::parse_reset_attr(&attr)? {
+                if reset_metadata.is_some() {
+                    return Err(ParseError::new(
+                        "multiple reset attributes in block".to_string(),
+                    ));
+                }
+                reset_metadata = Some(parsed);
+            } else {
+                filtered.push(attr);
+            }
+        }
+        Ok((filtered, reset_metadata))
+    }
+
+    fn parse_reset_attr(attr: &str) -> Result<Option<ir::BlockResetMetadata>, ParseError> {
+        let prefix = "#![reset(";
+        let suffix = ")]";
+        if !attr.starts_with(prefix) {
+            return Ok(None);
+        }
+        if !attr.ends_with(suffix) {
+            return Err(ParseError::new(format!(
+                "malformed reset attribute: {:?}",
+                attr
+            )));
+        }
+        let inner = &attr[prefix.len()..attr.len() - suffix.len()];
+        let mut port_name: Option<String> = None;
+        let mut asynchronous: Option<bool> = None;
+        let mut active_low: Option<bool> = None;
+        for part in inner.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let mut iter = part.splitn(2, '=');
+            let key = iter
+                .next()
+                .ok_or_else(|| ParseError::new("missing reset attribute key".to_string()))?
+                .trim();
+            let value = iter
+                .next()
+                .ok_or_else(|| ParseError::new("missing reset attribute value".to_string()))?
+                .trim();
+            match key {
+                "port" => {
+                    if !(value.starts_with('"') && value.ends_with('"')) {
+                        return Err(ParseError::new(format!(
+                            "reset port must be quoted, got {:?}",
+                            value
+                        )));
+                    }
+                    port_name = Some(value[1..value.len() - 1].to_string());
+                }
+                "asynchronous" => {
+                    asynchronous = Some(Self::parse_bool_literal(value)?);
+                }
+                "active_low" => {
+                    active_low = Some(Self::parse_bool_literal(value)?);
+                }
+                _ => {
+                    return Err(ParseError::new(format!(
+                        "unknown reset attribute '{}'",
+                        key
+                    )));
+                }
+            }
+        }
+        let port_name =
+            port_name.ok_or_else(|| ParseError::new("reset attribute missing port".to_string()))?;
+        let asynchronous = asynchronous
+            .ok_or_else(|| ParseError::new("reset attribute missing asynchronous".to_string()))?;
+        let active_low = active_low
+            .ok_or_else(|| ParseError::new("reset attribute missing active_low".to_string()))?;
+        Ok(Some(ir::BlockResetMetadata {
+            port_name,
+            asynchronous,
+            active_low,
+        }))
+    }
+
+    fn parse_bool_literal(value: &str) -> Result<bool, ParseError> {
+        match value {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            _ => Err(ParseError::new(format!(
+                "expected boolean literal, got {:?}",
+                value
+            ))),
+        }
+    }
+
     /// Like parse_fn but with pre-scanned outer attributes supplied by caller.
     pub fn parse_fn_with_outer(&mut self, outer_attrs: Vec<String>) -> Result<ir::Fn, ParseError> {
         log::debug!("parse_fn_with_outer");
@@ -1702,7 +1930,7 @@ impl Parser {
     pub fn parse_block_to_fn_with_ports_outer(
         &mut self,
         outer_attrs: Vec<String>,
-    ) -> Result<(ir::Fn, BlockPortInfo), ParseError> {
+    ) -> Result<(ir::Fn, BlockMetadata), ParseError> {
         self.drop_or_error("block")?;
         let block_name = self.pop_identifier_or_error("block name")?;
         let mut clock_port_name: Option<String> = None;
@@ -1752,10 +1980,20 @@ impl Parser {
 
         // Collect inner attributes at the top of the block body.
         let inner_attrs: Vec<String> = self.parse_inner_attributes()?;
+        let (inner_attrs, reset_metadata) = self.extract_block_reset_metadata(inner_attrs)?;
+        let mut registers: Vec<ir::Register> = Vec::new();
+        let mut register_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         // Parse body lines until '}'.
         while !self.try_drop("}") {
             self.drop_whitespace_and_comments();
+            // Handle register declarations.
+            if self.try_drop_keyword("reg") {
+                let reg = self.parse_register_decl(&block_name, &mut register_names)?;
+                registers.push(reg);
+                continue;
+            }
             // If this is an input_port or output_port, handle specially.
             // Peek ahead to capture the operator by temporarily parsing the LHS name and
             // type. Save current offset to backtrack for normal node parsing.
@@ -1970,7 +2208,7 @@ impl Parser {
                     outer_attrs,
                     inner_attrs,
                 },
-                BlockPortInfo {
+                BlockMetadata {
                     clock_port_name,
                     input_port_ids: input_params
                         .iter()
@@ -1978,6 +2216,8 @@ impl Parser {
                         .collect(),
                     output_port_ids: output_ids_by_name,
                     output_names: header_output_names,
+                    reset: reset_metadata,
+                    registers,
                 },
             ));
         }
@@ -2011,7 +2251,7 @@ impl Parser {
                 outer_attrs,
                 inner_attrs,
             },
-            BlockPortInfo {
+            BlockMetadata {
                 clock_port_name,
                 input_port_ids: input_params
                     .iter()
@@ -2019,11 +2259,13 @@ impl Parser {
                     .collect(),
                 output_port_ids: output_ids_by_name,
                 output_names: header_output_names,
+                reset: reset_metadata,
+                registers,
             },
         ))
     }
 
-    pub fn parse_block_to_fn_with_ports(&mut self) -> Result<(ir::Fn, BlockPortInfo), ParseError> {
+    pub fn parse_block_to_fn_with_ports(&mut self) -> Result<(ir::Fn, BlockMetadata), ParseError> {
         let outer_attrs: Vec<String> = Vec::new();
         self.parse_block_to_fn_with_ports_outer(outer_attrs)
     }
@@ -2069,11 +2311,11 @@ impl Parser {
                     members.push(PackageMember::Function(f));
                 } else if self.peek_keyword_is("block") {
                     // Allow top block (even if not present in inputs yet).
-                    let (f, port_info) = self.parse_block_to_fn_with_ports_outer(
+                    let (f, metadata) = self.parse_block_to_fn_with_ports_outer(
                         pending_outer_attrs.drain(..).collect(),
                     )?;
                     top = Some((f.name.clone(), MemberType::Block));
-                    members.push(PackageMember::Block { func: f, port_info });
+                    members.push(PackageMember::Block { func: f, metadata });
                 } else {
                     return Err(ParseError::new(format!(
                         "expected fn or block after top; rest: {:?}",
@@ -2084,9 +2326,9 @@ impl Parser {
                 let f = self.parse_fn_with_outer(pending_outer_attrs.drain(..).collect())?;
                 members.push(PackageMember::Function(f));
             } else if self.peek_keyword_is("block") {
-                let (f, port_info) = self
+                let (f, metadata) = self
                     .parse_block_to_fn_with_ports_outer(pending_outer_attrs.drain(..).collect())?;
-                members.push(PackageMember::Block { func: f, port_info });
+                members.push(PackageMember::Block { func: f, metadata });
             } else if self.peek_keyword_is("proc") {
                 return Err(ParseError::new(format!(
                     "only functions are supported, got proc; rest: {:?}",
@@ -2124,7 +2366,7 @@ impl Parser {
 pub fn emit_fn_as_block(
     f: &ir::Fn,
     output_names: Option<&[String]>,
-    port_ids: Option<&BlockPortInfo>,
+    port_ids: Option<&BlockMetadata>,
     is_top: bool,
 ) -> String {
     // Helper to get reference name for a node as used in operand positions.
@@ -2211,7 +2453,7 @@ pub fn emit_fn_as_block(
     } else if let Some(pi) = port_ids {
         assert!(
             pi.output_names.len() == ret_nodes.len(),
-            "BlockPortInfo.output_names length must match number of outputs"
+            "BlockMetadata.output_names length must match number of outputs"
         );
         pi.output_names.clone()
     } else if ret_nodes.len() == 1 {
@@ -2240,12 +2482,33 @@ pub fn emit_fn_as_block(
     for attr in &f.inner_attrs {
         lines.push(format!("  {}", attr));
     }
+    if let Some(pi) = port_ids {
+        if let Some(reset) = &pi.reset {
+            lines.push(format!(
+                "  #![reset(port=\"{}\", asynchronous={}, active_low={})]",
+                reset.port_name, reset.asynchronous, reset.active_low
+            ));
+        }
+        for reg in &pi.registers {
+            if let Some(reset_value) = &reg.reset_value {
+                let reset_str = reset_value
+                    .to_string_fmt_no_prefix(xlsynth::ir_value::IrFormatPreference::Default)
+                    .unwrap();
+                lines.push(format!(
+                    "  reg {}({}, reset_value={})",
+                    reg.name, reg.ty, reset_str
+                ));
+            } else {
+                lines.push(format!("  reg {}({})", reg.name, reg.ty));
+            }
+        }
+    }
     // input_port lines for each param (in order).
     for p in f.params.iter() {
         let input_id = if let Some(pi) = port_ids {
             *pi.input_port_ids
                 .get(&p.name)
-                .expect("input id missing in BlockPortInfo for parameter")
+                .expect("input id missing in BlockMetadata for parameter")
         } else {
             p.id.get_wrapped_id()
         };
@@ -2273,7 +2536,7 @@ pub fn emit_fn_as_block(
     }
 
     // Compute output ids: prefer provided ids; otherwise choose fresh ids after
-    // max. If a provided BlockPortInfo is missing a name we decided, allocate
+    // max. If a provided BlockMetadata is missing a name we decided, allocate
     // a fresh id for that output instead of panicking.
     let mut next_id: usize = f.nodes.iter().map(|n| n.text_id).max().unwrap_or(0) + 1;
     for (i, nr) in ret_nodes.iter().enumerate() {
@@ -3165,6 +3428,36 @@ fn id(x: bits[1] id=1) -> bits[1] {
   b_out: () = output_port(b, name=b_out, id=6)
 }"#;
 
+    const BLK_REG_LOAD_ENABLE: &str = r#"block my_block(clk: clock, in: bits[32], le: bits[1], out: bits[32]) {
+  reg foo(bits[32])
+  in: bits[32] = input_port(name=in, id=1)
+  le: bits[1] = input_port(name=le, id=2)
+  foo_d: () = register_write(in, register=foo, load_enable=le, id=4)
+  foo_q: bits[32] = register_read(register=foo, id=3)
+  out: () = output_port(foo_q, name=out, id=5)
+}"#;
+
+    const BLK_REG_RESET: &str = r#"block my_block(clk: clock, rst: bits[1], in: bits[32], out: bits[32]) {
+  #![reset(port="rst", asynchronous=true, active_low=false)]
+  reg foo(bits[32], reset_value=42)
+  rst: bits[1] = input_port(name=rst, id=1)
+  in: bits[32] = input_port(name=in, id=2)
+  foo_d: () = register_write(in, register=foo, reset=rst, id=4)
+  foo_q: bits[32] = register_read(register=foo, id=3)
+  out: () = output_port(foo_q, name=out, id=5)
+}"#;
+
+    const BLK_REG_RESET_AND_LOAD_ENABLE: &str = r#"block my_block(clk: clock, rst: bits[1], in: bits[32], le: bits[1], out: bits[32]) {
+  #![reset(port="rst", asynchronous=false, active_low=true)]
+  reg foo(bits[32], reset_value=7)
+  rst: bits[1] = input_port(name=rst, id=1)
+  in: bits[32] = input_port(name=in, id=2)
+  le: bits[1] = input_port(name=le, id=3)
+  foo_d: () = register_write(in, register=foo, load_enable=le, reset=rst, id=5)
+  foo_q: bits[32] = register_read(register=foo, id=4)
+  out: () = output_port(foo_q, name=out, id=6)
+}"#;
+
     #[test]
     fn test_roundtrip_block_parse_then_emit_single_output() {
         let _ = env_logger::builder().is_test(true).try_init();
@@ -3172,10 +3465,10 @@ fn id(x: bits[1] id=1) -> bits[1] {
         let mut parser = Parser::new(BLK_ADD_TWO_INPUTS_ONE_OUTPUT);
         let f = parser.parse_block_to_fn().unwrap();
         // Emit -> block text (provide output name to match header)
-        // When parsing from block, preserve original port ids via BlockPortInfo.
+        // When parsing from block, preserve original port ids via BlockMetadata.
         let mut parser2 = Parser::new(BLK_ADD_TWO_INPUTS_ONE_OUTPUT);
-        let (_f2, port_info) = parser2.parse_block_to_fn_with_ports().unwrap();
-        let emitted = emit_fn_as_block(&f, Some(&["out".to_string()]), Some(&port_info), false);
+        let (_f2, metadata) = parser2.parse_block_to_fn_with_ports().unwrap();
+        let emitted = emit_fn_as_block(&f, Some(&["out".to_string()]), Some(&metadata), false);
         assert_eq!(emitted, BLK_ADD_TWO_INPUTS_ONE_OUTPUT);
     }
 
@@ -3183,14 +3476,41 @@ fn id(x: bits[1] id=1) -> bits[1] {
     fn test_roundtrip_block_parse_then_emit_multi_output() {
         let _ = env_logger::builder().is_test(true).try_init();
         let mut parser = Parser::new(BLK_TWO_INPUTS_TWO_OUTPUTS_RT);
-        let (f, port_info) = parser.parse_block_to_fn_with_ports().unwrap();
+        let (f, metadata) = parser.parse_block_to_fn_with_ports().unwrap();
         let emitted = emit_fn_as_block(
             &f,
             Some(&["a_out".to_string(), "b_out".to_string()]),
-            Some(&port_info),
+            Some(&metadata),
             false,
         );
         assert_eq!(emitted, BLK_TWO_INPUTS_TWO_OUTPUTS_RT);
+    }
+
+    #[test]
+    fn test_roundtrip_block_parse_then_emit_register_load_enable() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let mut parser = Parser::new(BLK_REG_LOAD_ENABLE);
+        let (f, metadata) = parser.parse_block_to_fn_with_ports().unwrap();
+        let emitted = emit_fn_as_block(&f, Some(&["out".to_string()]), Some(&metadata), false);
+        assert_eq!(emitted, BLK_REG_LOAD_ENABLE);
+    }
+
+    #[test]
+    fn test_roundtrip_block_parse_then_emit_register_reset() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let mut parser = Parser::new(BLK_REG_RESET);
+        let (f, metadata) = parser.parse_block_to_fn_with_ports().unwrap();
+        let emitted = emit_fn_as_block(&f, Some(&["out".to_string()]), Some(&metadata), false);
+        assert_eq!(emitted, BLK_REG_RESET);
+    }
+
+    #[test]
+    fn test_roundtrip_block_parse_then_emit_register_reset_and_load_enable() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let mut parser = Parser::new(BLK_REG_RESET_AND_LOAD_ENABLE);
+        let (f, metadata) = parser.parse_block_to_fn_with_ports().unwrap();
+        let emitted = emit_fn_as_block(&f, Some(&["out".to_string()]), Some(&metadata), false);
+        assert_eq!(emitted, BLK_REG_RESET_AND_LOAD_ENABLE);
     }
     #[test]
     fn test_parse_block_to_fn_add_two_inputs_one_output() {

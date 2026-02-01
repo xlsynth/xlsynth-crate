@@ -14,7 +14,7 @@ use std::path::Path;
 use xlsynth::IrValue;
 use xlsynth_g8r::check_equivalence;
 use xlsynth_pir::ir::Type;
-use xlsynth_pir::ir::{self as ir_mod, BlockPortInfo, MemberType, PackageMember};
+use xlsynth_pir::ir::{self as ir_mod, BlockMetadata, MemberType, PackageMember};
 use xlsynth_pir::ir_parser::{self, emit_fn_as_block};
 
 #[derive(serde::Serialize)]
@@ -406,12 +406,12 @@ fn get_output_types_for_emission(f: &ir_mod::Fn, expected_outputs: usize) -> Vec
 fn select_block_from_package<'a>(
     pkg: &'a ir_mod::Package,
     name_opt: Option<&str>,
-) -> Option<(&'a ir_mod::Fn, &'a BlockPortInfo)> {
+) -> Option<(&'a ir_mod::Fn, &'a BlockMetadata)> {
     if let Some(name) = name_opt {
         for m in pkg.members.iter() {
-            if let PackageMember::Block { func, port_info } = m {
+            if let PackageMember::Block { func, metadata } = m {
                 if func.name == name {
-                    return Some((func, port_info));
+                    return Some((func, metadata));
                 }
             }
         }
@@ -419,16 +419,16 @@ fn select_block_from_package<'a>(
     }
     if let Some((top_name, MemberType::Block)) = &pkg.top {
         for m in pkg.members.iter() {
-            if let PackageMember::Block { func, port_info } = m {
+            if let PackageMember::Block { func, metadata } = m {
                 if &func.name == top_name {
-                    return Some((func, port_info));
+                    return Some((func, metadata));
                 }
             }
         }
     }
     for m in pkg.members.iter() {
-        if let PackageMember::Block { func, port_info } = m {
-            return Some((func, port_info));
+        if let PackageMember::Block { func, metadata } = m {
+            return Some((func, metadata));
         }
     }
     None
@@ -441,9 +441,9 @@ fn handle_ir_localized_eco_blocks_in_packages(
     _old_text: &str,
     _new_text: &str,
     old_fn: &ir_mod::Fn,
-    old_ports: &BlockPortInfo,
+    old_ports: &BlockMetadata,
     new_fn: &ir_mod::Fn,
-    new_ports: &BlockPortInfo,
+    new_ports: &BlockMetadata,
 ) {
     // Summaries (rebase-based): will compute added_count after building applied.
     let added_ops: Vec<AddedOpsSummaryItem> = Vec::new();
