@@ -14,6 +14,7 @@ Usage:
 """
 
 import argparse
+import os
 import shlex
 import subprocess
 import sys
@@ -50,13 +51,25 @@ def find_fuzz_dirs(repo_root: Path) -> list[Path]:
     return fuzz_dirs
 
 
-def run_cmd(cmd: list[str]) -> None:
+def run_cmd(cmd: list[str], env_overrides: dict[str, str] | None = None) -> None:
     """Print the command to be run, then execute it.
 
     The command is echoed in a shell-safe, quoted form for easy copy/paste.
     """
-    print("  => " + " ".join(shlex.quote(part) for part in cmd), file=sys.stderr)
-    subprocess.check_call(cmd)
+    env_prefix = ""
+    if env_overrides:
+        env_prefix = " ".join(
+            f"{key}={shlex.quote(value)}" for key, value in env_overrides.items()
+        )
+        env_prefix += " "
+    print(
+        "  => " + env_prefix + " ".join(shlex.quote(part) for part in cmd),
+        file=sys.stderr,
+    )
+    env = os.environ.copy()
+    if env_overrides:
+        env.update(env_overrides)
+    subprocess.check_call(cmd, env=env)
 
 
 def get_crate_features(crate_path: Path) -> list[str]:
@@ -87,7 +100,14 @@ def main() -> int:
         default=DEFAULT_FEATURES,
         help='Features to pass to the fuzz targets. Example: "with-z3-system,with-foo"',
     )
+    parser.add_argument(
+        "--sanitizer",
+        default="none",
+        help='Sanitizer to enable via RUSTFLAGS, e.g. "address", "thread", or "none".',
+    )
     args = parser.parse_args()
+    env_overrides: dict[str, str] | None = None
+    sanitizer_args = ["--sanitizer", args.sanitizer]
 
     # scripts/ is one level below the repo root.
     repo_root = Path(__file__).resolve().parent.parent
@@ -138,9 +158,11 @@ def main() -> int:
                 "build",
                 "--fuzz-dir",
                 fuzz_dir.as_posix(),
+                *sanitizer_args,
                 *features_args,
                 *fuzz_run_args_list,
-            ]
+            ],
+            env_overrides=env_overrides,
         )
     for fuzz_dir, targets in fuzz_targets:
         print(f"\n=== Running fuzz targets in {fuzz_dir} ===", file=sys.stderr)
@@ -162,12 +184,14 @@ def main() -> int:
                     "run",
                     "--fuzz-dir",
                     fuzz_dir.as_posix(),
+                    *sanitizer_args,
                     *features_args,
                     *fuzz_run_args_list,
                     target,
                     "--",
                     *fuzz_bin_args_list,
-                ]
+                ],
+                env_overrides=env_overrides,
             )
     return 0
 

@@ -479,7 +479,7 @@ pub(crate) struct InstantiationInfo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InstantiationPortDirection {
+pub enum InstantiationPortDirection {
     Input,
     Output,
 }
