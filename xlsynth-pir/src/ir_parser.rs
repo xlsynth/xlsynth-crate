@@ -3447,6 +3447,17 @@ fn id(x: bits[1] id=1) -> bits[1] {
   out: () = output_port(foo_q, name=out, id=5)
 }"#;
 
+    const BLK_REG_RESET_AND_LOAD_ENABLE: &str = r#"block my_block(clk: clock, rst: bits[1], in: bits[32], le: bits[1], out: bits[32]) {
+  #![reset(port="rst", asynchronous=false, active_low=true)]
+  reg foo(bits[32], reset_value=7)
+  rst: bits[1] = input_port(name=rst, id=1)
+  in: bits[32] = input_port(name=in, id=2)
+  le: bits[1] = input_port(name=le, id=3)
+  foo_d: () = register_write(in, register=foo, load_enable=le, reset=rst, id=5)
+  foo_q: bits[32] = register_read(register=foo, id=4)
+  out: () = output_port(foo_q, name=out, id=6)
+}"#;
+
     #[test]
     fn test_roundtrip_block_parse_then_emit_single_output() {
         let _ = env_logger::builder().is_test(true).try_init();
@@ -3491,6 +3502,15 @@ fn id(x: bits[1] id=1) -> bits[1] {
         let (f, metadata) = parser.parse_block_to_fn_with_ports().unwrap();
         let emitted = emit_fn_as_block(&f, Some(&["out".to_string()]), Some(&metadata), false);
         assert_eq!(emitted, BLK_REG_RESET);
+    }
+
+    #[test]
+    fn test_roundtrip_block_parse_then_emit_register_reset_and_load_enable() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let mut parser = Parser::new(BLK_REG_RESET_AND_LOAD_ENABLE);
+        let (f, metadata) = parser.parse_block_to_fn_with_ports().unwrap();
+        let emitted = emit_fn_as_block(&f, Some(&["out".to_string()]), Some(&metadata), false);
+        assert_eq!(emitted, BLK_REG_RESET_AND_LOAD_ENABLE);
     }
     #[test]
     fn test_parse_block_to_fn_add_two_inputs_one_output() {
