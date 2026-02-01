@@ -211,6 +211,7 @@ pub fn process_ir_path_with_gatefn(
         pir_package: ir_package,
         top_fn_name,
         gatify_output,
+        range_info,
     } = ir2gates_output;
 
     let ir_top = ir_package
@@ -222,7 +223,7 @@ pub fn process_ir_path_with_gatefn(
     if let Some(out_path) = options.prepared_ir_out.as_ref() {
         let prepared_fn = prep_for_gatify(
             ir_top,
-            None,
+            Some(range_info.as_ref()),
             PrepForGatifyOptions {
                 enable_rewrite_carry_out: options.enable_rewrite_carry_out,
                 enable_rewrite_prio_encode: false,
@@ -273,7 +274,7 @@ pub fn process_ir_path_with_gatefn(
             adder_mapping: options.adder_mapping,
             mul_adder_mapping: options.mul_adder_mapping,
             check_equivalence: false,
-            range_info: None,
+            range_info: Some(range_info.clone()),
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
             enable_rewrite_prio_encode: false,
         };

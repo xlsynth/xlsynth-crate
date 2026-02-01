@@ -22,6 +22,7 @@ pub struct Ir2GatesOutput {
     pub pir_package: ir::Package,
     pub top_fn_name: String,
     pub gatify_output: ir2gate::GatifyOutput,
+    pub range_info: std::sync::Arc<IrRangeInfo>,
 }
 
 impl Ir2GatesOutput {
@@ -94,7 +95,7 @@ pub fn ir2gates_from_ir_text(
             check_equivalence: options.check_equivalence,
             adder_mapping: options.adder_mapping,
             mul_adder_mapping: options.mul_adder_mapping,
-            range_info: Some(range_info),
+            range_info: Some(range_info.clone()),
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
             enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
         },
@@ -104,5 +105,6 @@ pub fn ir2gates_from_ir_text(
         pir_package,
         top_fn_name,
         gatify_output,
+        range_info,
     })
 }
