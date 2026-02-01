@@ -714,6 +714,12 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     bitvec: BitVec::ZeroWidth,
                 }
             }
+            NodePayload::RegisterRead { .. } => {
+                panic!("RegisterRead is not supported in prover translation");
+            }
+            NodePayload::RegisterWrite { .. } => {
+                panic!("RegisterWrite is not supported in prover translation");
+            }
             NodePayload::AfterAll(_) => {
                 // AfterAll is a no-op for Boolector; do not insert a BV (like Nil)
                 IrTypedBitVec {

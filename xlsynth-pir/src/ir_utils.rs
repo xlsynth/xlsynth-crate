@@ -203,6 +203,22 @@ pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
             message: _,
             label: _,
         } => vec![*token, *activate],
+        RegisterRead { .. } => vec![],
+        RegisterWrite {
+            arg,
+            load_enable,
+            reset,
+            ..
+        } => {
+            let mut deps = vec![*arg];
+            if let Some(le) = load_enable {
+                deps.push(*le);
+            }
+            if let Some(rst) = reset {
+                deps.push(*rst);
+            }
+            deps
+        }
         Trace {
             token,
             activated,
@@ -767,6 +783,33 @@ where
                 .map(|(i, r)| map((i + 2, *r)))
                 .collect(),
         },
+        NodePayload::RegisterRead { register } => NodePayload::RegisterRead {
+            register: register.clone(),
+        },
+        NodePayload::RegisterWrite {
+            arg,
+            register,
+            load_enable,
+            reset,
+        } => {
+            let mut next_index = 1;
+            let mapped_load_enable = load_enable.map(|nr| {
+                let mapped = map((next_index, nr));
+                next_index += 1;
+                mapped
+            });
+            let mapped_reset = reset.map(|nr| {
+                let mapped = map((next_index, nr));
+                next_index += 1;
+                mapped
+            });
+            NodePayload::RegisterWrite {
+                arg: map((0, *arg)),
+                register: register.clone(),
+                load_enable: mapped_load_enable,
+                reset: mapped_reset,
+            }
+        }
         NodePayload::AfterAll(elems) => NodePayload::AfterAll(
             elems
                 .iter()

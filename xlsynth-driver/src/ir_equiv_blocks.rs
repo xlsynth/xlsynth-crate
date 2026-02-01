@@ -5,7 +5,7 @@ use crate::toolchain_config::ToolchainConfig;
 use xlsynth_prover::prover::types::EquivParallelism;
 
 use xlsynth_pir::ir::{
-    self as ir_mod, BlockPortInfo, FileTable, MemberType, Package, PackageMember,
+    self as ir_mod, BlockMetadata, FileTable, MemberType, Package, PackageMember,
 };
 use xlsynth_pir::ir_parser;
 use xlsynth_prover::prover::types::AssertionSemantics;
@@ -93,12 +93,12 @@ pub fn handle_ir_equiv_blocks(matches: &clap::ArgMatches, config: &Option<Toolch
     fn select_block_from_package<'a>(
         pkg: &'a ir_mod::Package,
         name_opt: Option<&str>,
-    ) -> Option<(&'a ir_mod::Fn, &'a BlockPortInfo)> {
+) -> Option<(&'a ir_mod::Fn, &'a BlockMetadata)> {
         if let Some(name) = name_opt {
             for m in pkg.members.iter() {
-                if let PackageMember::Block { func, port_info } = m {
+                if let PackageMember::Block { func, metadata } = m {
                     if func.name == name {
-                        return Some((func, port_info));
+                        return Some((func, metadata));
                     }
                 }
             }
@@ -106,16 +106,16 @@ pub fn handle_ir_equiv_blocks(matches: &clap::ArgMatches, config: &Option<Toolch
         }
         if let Some((top_name, MemberType::Block)) = &pkg.top {
             for m in pkg.members.iter() {
-                if let PackageMember::Block { func, port_info } = m {
+                if let PackageMember::Block { func, metadata } = m {
                     if &func.name == top_name {
-                        return Some((func, port_info));
+                        return Some((func, metadata));
                     }
                 }
             }
         }
         for m in pkg.members.iter() {
-            if let PackageMember::Block { func, port_info } = m {
-                return Some((func, port_info));
+            if let PackageMember::Block { func, metadata } = m {
+                return Some((func, metadata));
             }
         }
         None

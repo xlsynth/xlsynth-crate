@@ -42,13 +42,13 @@ pub fn handle_ir_round_trip(matches: &ArgMatches) {
                     let block_slice = &ir_text[block_idx..];
                     let mut parser = Parser::new(block_slice);
                     match parser.parse_block_to_fn_with_ports() {
-                        Ok((mut f, port_info)) => {
+                        Ok((mut f, metadata)) => {
                             if strip_pos {
                                 for n in f.nodes.iter_mut() {
                                     n.pos = None;
                                 }
                             }
-                            let block_text = emit_fn_as_block(&f, None, Some(&port_info), false);
+                            let block_text = emit_fn_as_block(&f, None, Some(&metadata), false);
                             print!("{}", block_text);
                         }
                         Err(_e2) => {
@@ -65,7 +65,7 @@ pub fn handle_ir_round_trip(matches: &ArgMatches) {
     } else {
         // Treat as a standalone block (allowing outer attributes).
         let mut parser = Parser::new(&ir_text);
-        let (mut f, port_info) = parser
+        let (mut f, metadata) = parser
             .parse_block_to_fn_with_ports()
             .expect("parse block IR should succeed");
         if strip_pos {
@@ -73,7 +73,7 @@ pub fn handle_ir_round_trip(matches: &ArgMatches) {
                 n.pos = None;
             }
         }
-        let block_text = emit_fn_as_block(&f, None, Some(&port_info), false);
+        let block_text = emit_fn_as_block(&f, None, Some(&metadata), false);
         print!("{}", block_text);
     }
 }

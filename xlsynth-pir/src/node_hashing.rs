@@ -121,6 +121,19 @@ fn hash_payload_attributes(f: &Fn, payload: &NodePayload, hasher: &mut blake3::H
             format: _,
             operands: _,
         } => {}
+        NodePayload::RegisterRead { register } => {
+            update_hash_str(hasher, register);
+        }
+        NodePayload::RegisterWrite {
+            arg: _,
+            register,
+            load_enable,
+            reset,
+        } => {
+            update_hash_str(hasher, register);
+            update_hash_bool(hasher, load_enable.is_some());
+            update_hash_bool(hasher, reset.is_some());
+        }
         NodePayload::AfterAll(nodes) => update_hash_u64(hasher, nodes.len() as u64),
         NodePayload::Nary(op, nodes) => {
             update_hash_str(hasher, ir::nary_op_to_operator(*op));
@@ -243,6 +256,19 @@ pub fn node_structural_signature_string(f: &Fn, node_ref: NodeRef) -> String {
         NodePayload::Invoke { to_apply, operands } => {
             attrs.push(format!("to_apply={to_apply}"));
             attrs.push(format!("len={}", operands.len()));
+        }
+        NodePayload::RegisterRead { register } => {
+            attrs.push(format!("register={register}"));
+        }
+        NodePayload::RegisterWrite {
+            register,
+            load_enable,
+            reset,
+            ..
+        } => {
+            attrs.push(format!("register={register}"));
+            attrs.push(format!("has_load_enable={}", load_enable.is_some()));
+            attrs.push(format!("has_reset={}", reset.is_some()));
         }
         NodePayload::PrioritySel { cases, default, .. } => {
             attrs.push(format!("len={}", cases.len()));

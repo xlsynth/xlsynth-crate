@@ -417,6 +417,15 @@ pub enum NodePayload {
         format: String,
         operands: Vec<NodeRef>,
     },
+    RegisterRead {
+        register: String,
+    },
+    RegisterWrite {
+        arg: NodeRef,
+        register: String,
+        load_enable: Option<NodeRef>,
+        reset: Option<NodeRef>,
+    },
     AfterAll(Vec<NodeRef>),
     Nary(NaryOp, Vec<NodeRef>),
     Invoke {
@@ -498,6 +507,8 @@ impl NodePayload {
             NodePayload::ExtPrioEncode { .. } => "ext_prio_encode",
             NodePayload::Assert { .. } => "assert",
             NodePayload::Trace { .. } => "trace",
+            NodePayload::RegisterRead { .. } => "register_read",
+            NodePayload::RegisterWrite { .. } => "register_write",
             NodePayload::AfterAll(_) => "after_all",
             NodePayload::Nary(op, _) => nary_op_to_operator(*op),
             NodePayload::Invoke { .. } => "invoke",
@@ -783,6 +794,26 @@ impl NodePayload {
                     operands_str,
                     id
                 )
+            }
+            NodePayload::RegisterRead { register } => {
+                format!("register_read(register={}, id={})", register, id)
+            }
+            NodePayload::RegisterWrite {
+                arg,
+                register,
+                load_enable,
+                reset,
+            } => {
+                let mut parts = vec![format!("{}", get_name(*arg))];
+                parts.push(format!("register={}", register));
+                if let Some(le) = load_enable {
+                    parts.push(format!("load_enable={}", get_name(*le)));
+                }
+                if let Some(rst) = reset {
+                    parts.push(format!("reset={}", get_name(*rst)));
+                }
+                parts.push(format!("id={}", id));
+                format!("register_write({})", parts.join(", "))
             }
             NodePayload::AfterAll(nodes) => {
                 if nodes.is_empty() {
@@ -1186,6 +1217,17 @@ impl Fn {
                     } => {
                         token == &node_ref || activated == &node_ref || operands.contains(&node_ref)
                     }
+                    RegisterRead { .. } => false,
+                    RegisterWrite {
+                        arg,
+                        load_enable,
+                        reset,
+                        ..
+                    } => {
+                        arg == &node_ref
+                            || load_enable.map_or(false, |le| le == node_ref)
+                            || reset.map_or(false, |rst| rst == node_ref)
+                    }
                     AfterAll(nodes) => nodes.contains(&node_ref),
                     Nary(_, nodes) => nodes.contains(&node_ref),
                     Invoke { operands, .. } => operands.contains(&node_ref),
@@ -1418,13 +1460,13 @@ where
                 let func_text = override_fn(func, is_top).unwrap_or_else(|| emit_fn(func, is_top));
                 out.push_str(&func_text);
             }
-            PackageMember::Block { func, port_info } => {
+            PackageMember::Block { func, metadata } => {
                 let is_top = match &pkg.top {
                     Some((top_name, MemberType::Block)) => func.name == top_name.as_str(),
                     _ => false,
                 };
                 // Emit as a block using helper from the parser module.
-                let block_text = ir_parser::emit_fn_as_block(func, None, Some(port_info), is_top);
+                let block_text = ir_parser::emit_fn_as_block(func, None, Some(metadata), is_top);
                 out.push_str(&block_text);
             }
         }
@@ -1535,15 +1577,31 @@ pub struct Package {
 #[derive(Debug, Clone)]
 pub enum PackageMember {
     Function(Fn),
-    Block { func: Fn, port_info: BlockPortInfo },
+    Block { func: Fn, metadata: BlockMetadata },
 }
 
 #[derive(Debug, Clone)]
-pub struct BlockPortInfo {
+pub struct Register {
+    pub name: String,
+    pub ty: Type,
+    pub reset_value: Option<IrValue>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BlockResetMetadata {
+    pub port_name: String,
+    pub asynchronous: bool,
+    pub active_low: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct BlockMetadata {
     pub clock_port_name: Option<String>,
     pub input_port_ids: std::collections::HashMap<String, usize>,
     pub output_port_ids: std::collections::HashMap<String, usize>,
     pub output_names: Vec<String>,
+    pub reset: Option<BlockResetMetadata>,
+    pub registers: Vec<Register>,
 }
 
 impl Package {
