@@ -157,6 +157,16 @@ impl IrBits {
         xls_bits_to_bytes(self.ptr)
     }
 
+    pub fn is_zero(&self) -> bool {
+        if self.get_bit_count() == 0 {
+            return true;
+        }
+        self.to_bytes()
+            .expect("to_bytes should succeed for IrBits")
+            .iter()
+            .all(|b| *b == 0)
+    }
+
     pub fn add(&self, rhs: &IrBits) -> IrBits {
         self.apply_binary_op(rhs, xlsynth_sys::xls_bits_add)
     }

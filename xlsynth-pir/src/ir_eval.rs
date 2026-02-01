@@ -14,6 +14,32 @@ use crate::ir_utils::get_topological;
 use crate::math::ceil_log2;
 use xlsynth::{IrBits, IrValue};
 
+fn umod_bits(lhs: &IrBits, rhs: &IrBits) -> IrBits {
+    let w = lhs.get_bit_count();
+    assert_eq!(w, rhs.get_bit_count(), "umod bit widths must match");
+    if w == 0 {
+        return IrBits::make_ubits(0, 0).expect("bits[0] zero literal must construct");
+    }
+    if rhs.is_zero() {
+        // XLS umod-by-zero: result is zero (see solver test coverage).
+        return IrBits::make_ubits(w, 0).expect("make_ubits should succeed for zero literal");
+    }
+
+    // Unsigned restoring division, returning remainder only.
+    let one = IrBits::make_ubits(w, 1).expect("make_ubits should succeed for 1");
+    let mut rem = IrBits::make_ubits(w, 0).expect("make_ubits should succeed for 0");
+    for i in (0..w).rev() {
+        rem = rem.shll(1);
+        if lhs.get_bit(i).expect("bit index is in bounds") {
+            rem = rem.or(&one);
+        }
+        if rem.uge(rhs) {
+            rem = rem.sub(rhs);
+        }
+    }
+    rem
+}
+
 fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
     log::trace!("eval_pure: {:?}", n);
     match n.payload {
@@ -80,24 +106,8 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                         w,
                         rhs_bits.get_bit_count()
                     );
-
-                    // Match XLS behavior for division by zero: result is zero.
-                    let rhs_u = rhs_bits
-                        .to_u64()
-                        .expect("umod evaluator currently requires rhs width <= 64");
-                    if rhs_u == 0 {
-                        let zero = IrBits::make_ubits(w, 0)
-                            .expect("make_ubits should succeed for zero literal");
-                        IrValue::from_bits(&zero)
-                    } else {
-                        let lhs_u = lhs_bits
-                            .to_u64()
-                            .expect("umod evaluator currently requires lhs width <= 64");
-                        let rem = lhs_u % rhs_u;
-                        let out = IrBits::make_ubits(w, rem)
-                            .expect("make_ubits should succeed for computed remainder");
-                        IrValue::from_bits(&out)
-                    }
+                    let out = umod_bits(&lhs_bits, &rhs_bits);
+                    IrValue::from_bits(&out)
                 }
                 ir::Binop::Uge => {
                     let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
@@ -1893,6 +1903,52 @@ mod tests {
         };
         let v: IrValue = eval_pure(&n, &env);
         assert_eq!(v, IrValue::make_ubits(4, 0b1010).unwrap());
+    }
+
+    #[test]
+    fn test_eval_pure_binop_umod_arbitrary_width_does_not_panic() {
+        let lhs = IrValue::parse_typed("bits[72]:0x1234_5678_9abc_def012").unwrap();
+        let rhs = IrValue::make_ubits(72, 256).unwrap();
+        let env = hashmap!(
+            ir::NodeRef { index: 1 } => lhs,
+            ir::NodeRef { index: 2 } => rhs,
+        );
+        let n = ir::Node {
+            text_id: 3001,
+            name: None,
+            ty: ir::Type::Bits(72),
+            payload: ir::NodePayload::Binop(
+                ir::Binop::Umod,
+                ir::NodeRef { index: 1 },
+                ir::NodeRef { index: 2 },
+            ),
+            pos: None,
+        };
+        let v: IrValue = eval_pure(&n, &env);
+        assert_eq!(v, IrValue::make_ubits(72, 0x12).unwrap());
+    }
+
+    #[test]
+    fn test_eval_pure_binop_umod_div_by_zero_is_zero() {
+        let lhs = IrValue::parse_typed("bits[72]:0x1234_5678_9abc_def012").unwrap();
+        let rhs = IrValue::make_ubits(72, 0).unwrap();
+        let env = hashmap!(
+            ir::NodeRef { index: 1 } => lhs,
+            ir::NodeRef { index: 2 } => rhs,
+        );
+        let n = ir::Node {
+            text_id: 3002,
+            name: None,
+            ty: ir::Type::Bits(72),
+            payload: ir::NodePayload::Binop(
+                ir::Binop::Umod,
+                ir::NodeRef { index: 1 },
+                ir::NodeRef { index: 2 },
+            ),
+            pos: None,
+        };
+        let v: IrValue = eval_pure(&n, &env);
+        assert_eq!(v, IrValue::make_ubits(72, 0).unwrap());
     }
 
     #[test]
