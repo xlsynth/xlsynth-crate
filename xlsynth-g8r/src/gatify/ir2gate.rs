@@ -3,7 +3,7 @@
 //! Functionality for converting an IR function into a gate function via
 //! `gatify`.
 
-use crate::aig::gate::{AigBitVector, AigOperand, GateFn};
+use crate::aig::gate::{AigBitVector, AigOperand, GateFn, Split};
 use crate::check_equivalence;
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
@@ -2042,139 +2042,90 @@ fn gatify_shra(
     arg_bits: &AigBitVector,
     amount_bits: &AigBitVector,
     text_id: usize,
+    range_info: Option<&Arc<IrRangeInfo>>,
+    amount_text_id: usize,
 ) -> AigBitVector {
-    let input_bit_count = arg_bits.get_bit_count();
+    let w = arg_bits.get_bit_count();
+    assert!(w > 0, "shra requires non-zero-width operands");
 
-    // The shift amount is given in its own bit width
-    let shift_amount_width = amount_bits.get_bit_count();
-
-    // Compute the required number of bits for a valid shift amount
-    let required_shift_bits = if input_bit_count > 1 {
-        (input_bit_count as f64).log2().ceil() as usize
+    // Effective shift bits needed to represent [0..w-1]. When w<=1, shifting is a
+    // no-op.
+    let required_k = if w <= 1 {
+        0
     } else {
-        1
+        xlsynth_pir::math::ceil_log2(w)
     };
 
-    // Get the MSB (sign bit) of the input
-    let msb = arg_bits.get_msb(0);
-
-    // First perform a logical right shift
-    let logical_shift = gatify_barrel_shifter(
-        &arg_bits,
-        &amount_bits,
-        Direction::Right,
-        &format!("shra_logical_{}", text_id),
-        gb,
-    );
-
-    // Computes the conditional mux bits used in both narrow and wide cases.
-    fn compute_shifted_bits(
-        gb: &mut GateBuilder,
-        msb: &AigOperand,
-        logical_shift: &AigBitVector,
-        input_bit_count: usize,
-        decode_len: usize,
-        decoded_amount: &AigBitVector,
-    ) -> Vec<AigOperand> {
-        let mut bits = Vec::with_capacity(input_bit_count);
-        for j in 0..input_bit_count {
-            let start_n = if input_bit_count > j {
-                input_bit_count - j
-            } else {
-                0
-            };
-            let mut cond_terms = Vec::new();
-            for n in start_n..decode_len {
-                cond_terms.push(decoded_amount.get_lsb(n).clone());
-            }
-            let condition = if cond_terms.is_empty() {
-                gb.get_false()
-            } else if cond_terms.len() == 1 {
-                cond_terms[0]
-            } else {
-                gb.add_or_nary(&cond_terms, ReductionKind::Tree)
-            };
-            let res_bit = gb.add_mux2(condition, *msb, *logical_shift.get_lsb(j));
-            bits.push(res_bit);
-        }
-        bits
-    }
-
-    if shift_amount_width <= required_shift_bits {
-        // Narrow case: use the full amount_bits
-        let decode_len = 1 << shift_amount_width;
-        let decoded_amount = gatify_decode(gb, decode_len, &amount_bits);
-        let result_bits = compute_shifted_bits(
-            gb,
-            msb,
-            &logical_shift,
-            input_bit_count,
-            decode_len,
-            &decoded_amount,
+    // If range_info proves amount < w, there can be no out-of-bounds case and we
+    // may ignore any provably-irrelevant high bits.
+    let (k_for_shift, oob): (usize, AigOperand) = if range_info.is_some_and(|ri| {
+        // `proves_ult(amount, w)` means the dynamic shift amount is always in-bounds
+        // for this consumer.
+        ri.proves_ult(amount_text_id, w)
+    }) {
+        let max_effective_bits = range_info
+            .and_then(|ri| ri.effective_amount_bits_for_ult(amount_text_id, w))
+            .expect("effective_amount_bits_for_ult should succeed when proves_ult is true");
+        let k = std::cmp::min(
+            required_k,
+            std::cmp::min(max_effective_bits, amount_bits.get_bit_count()),
         );
-        return AigBitVector::from_lsb_is_index_0(&result_bits);
-    }
-
-    // Applies the out-of-bounds mux on each bit
-    fn apply_out_of_bounds_mux(
-        gb: &mut GateBuilder,
-        input_bit_count: usize,
-        out_of_bounds: &AigOperand,
-        mask: &AigBitVector,
-        in_bound_result: &AigBitVector,
-    ) -> Vec<AigOperand> {
-        let mut bits = Vec::with_capacity(input_bit_count);
-        for j in 0..input_bit_count {
-            let final_bit = gb.add_mux2(
-                out_of_bounds.clone(),
-                *mask.get_lsb(j),
-                *in_bound_result.get_lsb(j),
-            );
-            bits.push(final_bit);
-        }
-        bits
-    }
-
-    // Wide case: use only the lower effective bits
-    let effective_shift_width = required_shift_bits;
-    let effective_decode_len = 1 << effective_shift_width;
-
-    // Extract the lower bits of amount_bits (effective shift amount)
-    let mut effective_amount_bits_vec = Vec::with_capacity(effective_shift_width);
-    for n in 0..effective_shift_width {
-        effective_amount_bits_vec.push(amount_bits.get_lsb(n).clone());
-    }
-    let effective_amount_bits = AigBitVector::from_lsb_is_index_0(&effective_amount_bits_vec);
-
-    // Compute out-of-bound condition from the higher bits
-    let mut high_amt_terms = Vec::new();
-    for n in effective_shift_width..shift_amount_width {
-        high_amt_terms.push(amount_bits.get_lsb(n).clone());
-    }
-    let out_of_bounds = if high_amt_terms.len() == 1 {
-        high_amt_terms[0].clone()
+        (k, gb.get_false())
     } else {
-        gb.add_or_nary(&high_amt_terms, ReductionKind::Tree)
+        let amount_w = amount_bits.get_bit_count();
+        let k = std::cmp::min(required_k, amount_w);
+        let Split {
+            msbs: amt_hi,
+            lsbs: amt_lo,
+        } = amount_bits.get_lsb_partition(k);
+
+        // `oob_hi` is true when any higher (beyond `k`) shift amount bit is set.
+        let oob_hi = if amt_hi.get_bit_count() == 0 {
+            gb.get_false()
+        } else {
+            gb.add_nez(&amt_hi, ReductionKind::Tree)
+        };
+
+        // For non-power-of-two widths, `k=ceil_log2(w)` may allow values in `amt_lo`
+        // that are >= w (e.g. w=6,k=3 allows 6 and 7). Detect those as out-of-bounds.
+        // For power-of-two widths, `amt_lo` is always < w when `amt_hi` is zero.
+        let oob_lo = if k == 0 || w.is_power_of_two() || k != required_k {
+            gb.get_false()
+        } else {
+            let w_bits = xlsynth::IrBits::make_ubits(k, w as u64)
+                .expect("w must fit in k bits for non-power-of-two widths");
+            try_gatify_ucmp_literal_rhs_threshold(gb, ir::Binop::Uge, &amt_lo, &w_bits)
+                .expect("Uge threshold compare should be supported")
+        };
+
+        (k, gb.add_or_binary(oob_hi, oob_lo))
     };
 
-    let decoded_amount = gatify_decode(gb, effective_decode_len, &effective_amount_bits);
-    let in_bound_bits = compute_shifted_bits(
+    // Sign bit (MSB) of the input.
+    let sign = *arg_bits.get_msb(0);
+
+    // Construct arg_ext: concat(replicate(sign, w), arg) => 2w bits.
+    let sign_ext = gb.replicate(sign, w);
+    let arg_ext = AigBitVector::concat(sign_ext, arg_bits.clone());
+
+    // Barrel shift the extended value by the low `k_for_shift` amount bits.
+    let amt_lo = amount_bits.get_lsb_slice(0, k_for_shift);
+    let shifted = gatify_barrel_shifter(
+        &arg_ext,
+        &amt_lo,
+        Direction::Right,
+        &format!("shra_ext_{}", text_id),
         gb,
-        msb,
-        &logical_shift,
-        input_bit_count,
-        effective_decode_len,
-        &decoded_amount,
     );
-    let in_bound_result = AigBitVector::from_lsb_is_index_0(&in_bound_bits);
+    let arith = shifted.get_lsb_slice(0, w);
 
-    // Create mask: replicate msb over the entire bit vector
-    let mask = AigBitVector::from_lsb_is_index_0(&vec![*msb; input_bit_count]);
-
-    // Final result: if out_of_bounds then select mask, else use in_bound_result
-    let final_bits =
-        apply_out_of_bounds_mux(gb, input_bit_count, &out_of_bounds, &mask, &in_bound_result);
-    AigBitVector::from_lsb_is_index_0(&final_bits)
+    // Saturating/oob rule: shift >= w => all sign bits.
+    if gb.is_known_false(oob) {
+        arith
+    } else {
+        let all_sign = gb.replicate(sign, w);
+        gb.add_mux2_vec(&oob, &all_sign, &arith)
+    }
 }
 
 fn flatten_literal_to_bits(
@@ -2919,14 +2870,22 @@ fn gatify_node(
             let amount_gates = env
                 .get_bit_vector(*amount)
                 .expect("shra amount should be present");
+            let amount_text_id = f.get_node(*amount).text_id;
 
             maybe_warn_shift_amount_truncatable(
                 options.range_info.as_ref(),
-                f.get_node(*amount).text_id,
+                amount_text_id,
                 arg_gates.get_bit_count(),
                 &amount_gates,
             );
-            let result = gatify_shra(g8_builder, &arg_gates, &amount_gates, node.text_id);
+            let result = gatify_shra(
+                g8_builder,
+                &arg_gates,
+                &amount_gates,
+                node.text_id,
+                options.range_info.as_ref(),
+                amount_text_id,
+            );
             env.add(node_ref, GateOrVec::BitVector(result));
         }
         ir::NodePayload::Binop(ir::Binop::Shll, arg, amount) => {

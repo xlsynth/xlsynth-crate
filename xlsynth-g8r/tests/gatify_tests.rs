@@ -498,6 +498,28 @@ bit_count_test_cases!(test_shll_dslx_to_gates, |input_bits: u32, opt: Opt| -> ()
     );
 });
 
+#[test]
+fn test_shra_wide_amount_equivalence_w6_amt4() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let ir_text = "package sample
+fn shra_w6_amt4(x: bits[6], amt: bits[4]) -> bits[6] {
+  ret result: bits[6] = shra(x, amt, id=3)
+}
+";
+    do_test_ir_conversion(ir_text, Opt::Yes);
+}
+
+#[test]
+fn test_shra_wide_amount_equivalence_w1_amt4() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let ir_text = "package sample
+fn shra_w1_amt4(x: bits[1], amt: bits[4]) -> bits[1] {
+  ret result: bits[1] = shra(x, amt, id=3)
+}
+";
+    do_test_ir_conversion(ir_text, Opt::Yes);
+}
+
 bit_count_test_cases!(test_sel_cond_dslx_to_gates, |input_bits: u32,
                                                     opt: Opt|
  -> () {
