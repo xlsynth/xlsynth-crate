@@ -382,6 +382,13 @@ fn main() -> Result<()> {
                     .saturating_mul(result.best_cost.g8r_depth as u64),
             );
         }
+        Objective::G8rLeGraph => {
+            println!(
+                "PIR MCMC finished. Best stats: g8r_le_graph={:.3} (metric_milli={})",
+                (result.best_cost.g8r_le_graph_milli as f64) / 1000.0,
+                result.best_cost.g8r_le_graph_milli,
+            );
+        }
     }
 
     // Replace the top function in the package with the optimized version.

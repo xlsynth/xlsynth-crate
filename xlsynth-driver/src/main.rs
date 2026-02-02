@@ -35,6 +35,7 @@
 //! ```
 
 mod aig_equiv;
+mod aig_stats;
 mod common;
 mod dslx2ir;
 mod dslx2pipeline;
@@ -1596,6 +1597,51 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new("aig-stats")
+                .about("Reads an AIGER file and reports structural + logical-effort statistics")
+                .arg(
+                    clap::Arg::new("aig_input_file")
+                        .help("The input AIGER file (.aag or .aig)")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    clap::Arg::new("compute_graph_logical_effort")
+                        .long("compute-graph-logical-effort")
+                        .value_name("BOOL")
+                        .action(clap::ArgAction::Set)
+                        .value_parser(["true", "false"])
+                        .num_args(1)
+                        .help("Compute the graph logical effort worst case delay"),
+                )
+                .arg(
+                    clap::Arg::new("graph_logical_effort_beta1")
+                        .long("graph-logical-effort-beta1")
+                        .value_name("BETA1")
+                        .help("Beta1 value for graph logical effort computation (default 1.0)")
+                        .value_parser(clap::value_parser!(f64))
+                        .default_value("1.0")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("graph_logical_effort_beta2")
+                        .long("graph-logical-effort-beta2")
+                        .value_name("BETA2")
+                        .help("Beta2 value for graph logical effort computation (default 0.0)")
+                        .value_parser(clap::value_parser!(f64))
+                        .default_value("0.0")
+                        .action(clap::ArgAction::Set),
+                )
+                .add_bool_arg("quiet", "Quiet mode")
+                .arg(
+                    clap::Arg::new("output_json")
+                        .long("output_json")
+                        .value_name("PATH")
+                        .help("Write the JSON summary to PATH")
+                        .action(clap::ArgAction::Set),
+                ),
+        )
+        .subcommand(
             clap::Command::new("ir-aig-sharing")
                 .about("Finds and proves PIR node bit correspondences to AIG node outputs")
                 .arg(
@@ -2326,6 +2372,9 @@ fn main() {
         }
         Some(("aig-equiv", subm)) => {
             aig_equiv::handle_aig_equiv(subm, &config);
+        }
+        Some(("aig-stats", subm)) => {
+            aig_stats::handle_aig_stats(subm, &config);
         }
         Some(("ir-aig-sharing", subm)) => {
             ir_aig_sharing::handle_ir_aig_sharing(subm, &config);
