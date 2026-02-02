@@ -6,6 +6,7 @@ pub mod descriptor;
 pub mod indexed;
 pub mod liberty_parser;
 pub mod liberty_to_proto;
+pub mod query;
 pub mod util;
 pub use indexed::IndexedLibrary;
 pub use liberty_parser::{CharReader, LibertyParser};
