@@ -62,6 +62,28 @@ xlsynth-driver lib2proto \
   ~/src/asap7/asap7sc7p5t_28/LIB/NLDM/*TT*.lib
 ```
 
+### `lib-query`: query Liberty AST blocks
+
+Runs a rough XPath-like query over Liberty AST blocks and prints matching paths/blocks.
+
+```shell
+xlsynth-driver lib-query ~/asap7.lib.gz "//cell[qual0='NAND2']//timing"
+```
+
+Key flags:
+
+- `--max-matches <N>`: maximum number of matches to print (default: `20`).
+- `--path-only`: print only matched paths (suppress full block debug dumps).
+- `--jsonl`: emit each match as one JSON line with fields `path` and `block`.
+
+Regex predicate example:
+
+```shell
+xlsynth-driver lib-query ~/asap7.lib \
+  "//cell[matches(qual0, '^(NAND2|NOR2)$')]//timing" \
+  --max-matches 10 --path-only
+```
+
 ### `gv2ir`: gate-level netlist to IR
 
 ```shell

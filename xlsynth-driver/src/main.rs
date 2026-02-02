@@ -81,6 +81,7 @@ mod ir_round_trip;
 mod ir_strip_pos_data;
 mod ir_structural_similarity;
 mod lib2proto;
+mod lib_query;
 mod proofs;
 mod prove_enum_in_bound;
 mod prove_quickcheck;
@@ -1325,6 +1326,42 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new("lib-query")
+                .about("Runs a rough XPath-like query over Liberty AST blocks and debug-prints matches")
+                .arg(
+                    Arg::new("liberty_file")
+                        .help("Input Liberty file (.lib or .lib.gz)")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("query")
+                        .help("Query string, e.g. //cell[qual0='NAND2']//timing or //cell[matches(qual0, '^(NAND2|NOR2)$')]//timing")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("max_matches")
+                        .long("max-matches")
+                        .help("Maximum number of matches to print")
+                        .default_value("20")
+                        .value_parser(clap::value_parser!(usize))
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("path_only")
+                        .long("path-only")
+                        .help("Only print matched paths, not full Debug block dumps")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("jsonl")
+                        .long("jsonl")
+                        .help("Emit each match as one JSON line with fields: path, block")
+                        .action(ArgAction::SetTrue),
+                ),
+        )
+        .subcommand(
             clap::Command::new("gv2ir")
                 .about("Converts a gate-level netlist and Liberty proto to XLS IR")
                 .arg(
@@ -2260,6 +2297,9 @@ fn main() {
         }
         Some(("lib2proto", subm)) => {
             lib2proto::handle_lib2proto(subm);
+        }
+        Some(("lib-query", subm)) => {
+            lib_query::handle_lib_query(subm, &config);
         }
         Some(("gv2ir", subm)) => {
             gv2ir::handle_gv2ir(subm);
