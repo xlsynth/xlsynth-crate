@@ -33,13 +33,6 @@ fn parse_bool(matches: &ArgMatches, name: &str, default: bool) -> bool {
     }
 }
 
-fn parse_f64_default(matches: &ArgMatches, name: &str, default: f64) -> f64 {
-    matches
-        .get_one::<String>(name)
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(default)
-}
-
 fn format_fanout_histogram(hist: &BTreeMap<usize, usize>) -> String {
     let mut s = String::new();
     s.push('{');
@@ -64,8 +57,12 @@ pub fn handle_aig_stats(matches: &ArgMatches, _config: &Option<ToolchainConfig>)
     let output_json = matches.get_one::<String>("output_json");
     let quiet = parse_bool(matches, "quiet", false);
     let compute_graph_logical_effort = parse_bool(matches, "compute_graph_logical_effort", true);
-    let graph_logical_effort_beta1 = parse_f64_default(matches, "graph_logical_effort_beta1", 1.0);
-    let graph_logical_effort_beta2 = parse_f64_default(matches, "graph_logical_effort_beta2", 0.0);
+    let graph_logical_effort_beta1 = *matches
+        .get_one::<f64>("graph_logical_effort_beta1")
+        .expect("graph_logical_effort_beta1 has a default and is parsed by clap");
+    let graph_logical_effort_beta2 = *matches
+        .get_one::<f64>("graph_logical_effort_beta2")
+        .expect("graph_logical_effort_beta2 has a default and is parsed by clap");
 
     let gate_fn = match load_aig_gate_fn(Path::new(input_file)) {
         Ok(g) => g,

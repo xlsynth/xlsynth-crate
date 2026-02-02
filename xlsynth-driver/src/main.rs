@@ -1619,6 +1619,7 @@ fn main() {
                         .long("graph-logical-effort-beta1")
                         .value_name("BETA1")
                         .help("Beta1 value for graph logical effort computation (default 1.0)")
+                        .value_parser(clap::value_parser!(f64))
                         .default_value("1.0")
                         .action(clap::ArgAction::Set),
                 )
@@ -1627,6 +1628,7 @@ fn main() {
                         .long("graph-logical-effort-beta2")
                         .value_name("BETA2")
                         .help("Beta2 value for graph logical effort computation (default 0.0)")
+                        .value_parser(clap::value_parser!(f64))
                         .default_value("0.0")
                         .action(clap::ArgAction::Set),
                 )
