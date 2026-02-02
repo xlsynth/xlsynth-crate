@@ -577,40 +577,59 @@ mod tests {
 
     #[test]
     fn test_committed_liberty_bin_matches_generated() {
+        if let Ok(value) = std::env::var("XLSYNTH_CRATE_NO_PROTO_CHECK") {
+            if value.trim() == "1" {
+                eprintln!(
+                    "Skipping descriptor byte comparison: XLSYNTH_CRATE_NO_PROTO_CHECK={}",
+                    value.trim()
+                );
+                eprintln!("To run this test, unset XLSYNTH_CRATE_NO_PROTO_CHECK or set it to 0.");
+                return;
+            }
+        }
         // Check protoc version
         let output = std::process::Command::new("protoc")
             .arg("--version")
             .output()
             .expect("failed to run protoc");
         let version_str = String::from_utf8_lossy(&output.stdout);
-        let expected_version = "libprotoc 3.21.12"; // Update to your canonical version
-        if !version_str.trim().starts_with(expected_version) {
-            eprintln!(
-                "Skipping descriptor byte comparison: protoc version is '{}', expected '{}'",
-                version_str.trim(),
-                expected_version
-            );
-            return;
-        }
+        let expected_version = "libprotoc 29.1"; // Update to your canonical version
+        let found_version = version_str.trim();
         let committed = include_bytes!("../../proto/liberty.bin") as &[u8];
         // Generate a fresh descriptor set in a temp dir
         let tmp = tempfile::tempdir().unwrap();
         let descriptor_path = tmp.path().join("liberty.bin");
-        // Use absolute path to proto/liberty.proto for robustness
-        let proto_path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("proto/liberty.proto");
-        let proto_path_str = proto_path.to_str().unwrap();
+        // Use absolute paths to proto files for robustness.
+        let proto_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("proto");
+        let liberty_proto = proto_dir.join("liberty.proto");
+        let result_proto = proto_dir.join("result.proto");
+        let liberty_proto_str = liberty_proto.to_str().unwrap();
+        let result_proto_str = result_proto.to_str().unwrap();
         prost_build::Config::new()
+            // Keep in sync with build.rs for descriptor determinism.
+            .protoc_arg("--experimental_allow_proto3_optional")
             .file_descriptor_set_path(&descriptor_path)
             .compile_protos(
-                &[proto_path_str],
-                &[proto_path.parent().unwrap().to_str().unwrap()],
+                &[liberty_proto_str, result_proto_str],
+                &[proto_dir.to_str().unwrap()],
             )
             .expect("Failed to compile proto");
         let generated = std::fs::read(&descriptor_path).expect("read generated liberty.bin");
-        assert_eq!(
-            committed, generated,
-            "Committed proto/liberty.bin is out of date; re-run build and commit the new file"
+        let message = format_args!(
+            concat!(
+                "Committed proto/liberty.bin does not match the generated file.\n",
+                "Expected protoc version: '{expected_version}', installed version: '{found_version}'.\n",
+                "If these differ, the version mismatch is likely the reason for the failure.\n",
+                "Otherwise, to rebuild proto/liberty.bin, use a matching protoc, run ",
+                "`cargo build -p xlsynth-g8r`, then copy ",
+                "`target/*/build/xlsynth-g8r-*/out/liberty.bin` to ",
+                "`xlsynth-g8r/proto/liberty.bin`.\n",
+                "If the test still fails, this test may be out of sync with how build.rs generates the file.\n",
+                "To skip this test, set XLSYNTH_CRATE_NO_PROTO_CHECK=1 or true.\n",
+            ),
+            expected_version = expected_version,
+            found_version = found_version
         );
+        assert!(committed == generated, "{message}");
     }
 }
