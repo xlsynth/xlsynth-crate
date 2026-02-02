@@ -513,7 +513,10 @@ fn build_top_block(
                         anyhow!(format!(
                             "clock pin '{}' on instance '{}' is not driven by a simple net",
                             port,
-                            parsed.interner.resolve(inst.instance_name).unwrap_or("<unknown>")
+                            parsed
+                                .interner
+                                .resolve(inst.instance_name)
+                                .unwrap_or("<unknown>")
                         ))
                     })?;
                     match &clock_net_name {
