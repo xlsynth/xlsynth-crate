@@ -28,6 +28,7 @@ mod const_shll_concat_zero_fold;
 mod eq_ne_add_literal_shift;
 mod eq_sel_distribute;
 mod eq_zero_or_reduce;
+mod mask_operand_bit;
 mod nand_not_and_fold;
 mod narrow_add_from_wide_add_fold;
 mod nary_hoist;
@@ -76,6 +77,7 @@ use const_shll_concat_zero_fold::ConstShllConcatZeroFoldTransform;
 use eq_ne_add_literal_shift::EqNeAddLiteralShiftTransform;
 use eq_sel_distribute::EqSelDistributeTransform;
 use eq_zero_or_reduce::EqZeroOrReduceTransform;
+use mask_operand_bit::{MaskOperandHighBitTransform, MaskOperandLowBitTransform};
 use nand_not_and_fold::NandNotAndFoldTransform;
 use narrow_add_from_wide_add_fold::NarrowAddFromWideAddFoldTransform;
 use nary_hoist::NaryHoistTransform;
@@ -227,6 +229,16 @@ pub enum PirTransformKind {
     /// Normalize NAND via NOT(AND) (variadic-friendly) and reverse:
     /// `nand(xs...) ↔ not(and(xs...))`
     NandNotAndFold,
+    /// Toggle a high-bit mask on an operand:
+    /// `op(..., x, ...) ↔ op(..., and(x, high_bit_cleared_mask), ...)`
+    ///
+    /// Not always equivalent; requires oracle acceptance.
+    MaskOperandHighBit,
+    /// Toggle a low-bit mask on an operand:
+    /// `op(..., x, ...) ↔ op(..., and(x, low_bit_cleared_mask), ...)`
+    ///
+    /// Not always equivalent; requires oracle acceptance.
+    MaskOperandLowBit,
     /// Zero-test via OR-reduce and reverse:
     /// `eq(x, 0_w) ↔ not(or_reduce(x))`
     EqZeroOrReduce,
@@ -312,6 +324,8 @@ impl fmt::Display for PirTransformKind {
             PirTransformKind::NotEqNeFlip => write!(f, "NotEqNeFlip"),
             PirTransformKind::NorNotOrFold => write!(f, "NorNotOrFold"),
             PirTransformKind::NandNotAndFold => write!(f, "NandNotAndFold"),
+            PirTransformKind::MaskOperandHighBit => write!(f, "MaskOperandHighBit"),
+            PirTransformKind::MaskOperandLowBit => write!(f, "MaskOperandLowBit"),
             PirTransformKind::EqZeroOrReduce => write!(f, "EqZeroOrReduce"),
             PirTransformKind::NeZeroOrReduce => write!(f, "NeZeroOrReduce"),
             PirTransformKind::BitSliceBitSliceFold => write!(f, "BitSliceBitSliceFold"),
@@ -400,6 +414,8 @@ pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
         Box::new(NotEqNeFlipTransform),
         Box::new(NorNotOrFoldTransform),
         Box::new(NandNotAndFoldTransform),
+        Box::new(MaskOperandHighBitTransform),
+        Box::new(MaskOperandLowBitTransform),
         Box::new(EqZeroOrReduceTransform),
         Box::new(NeZeroOrReduceTransform),
         Box::new(AndReduceDeMorganTransform),
