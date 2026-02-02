@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth-pir"
-version = "0.28.0"
+version = "0.29.0"
 edition = "2024"
 authors = ["Christopher D. Leary <cdleary@gmail.com>"]
 description = "partial XLS IR focused on functions"
@@ -13,7 +13,7 @@ homepage = "https://github.com/xlsynth/xlsynth-crate"
 workspace = true
 
 [dependencies]
-xlsynth = { path = "../xlsynth", version = "0.28.0" }
+xlsynth = { path = "../xlsynth", version = "0.29.0" }
 env_logger = "0.11"
 log = "0.4"
 clap = { version = "4.5.21", features = ["derive"] }
