@@ -103,6 +103,16 @@ xlsynth-driver gv2ir \
   --liberty_proto ~/asap7.proto > add_mul.ir
 ```
 
+### `gv2block`: gate-level netlist to Block IR
+
+Converts a gate-level netlist plus Liberty proto into an XLS block IR package. Cells are defined as separate blocks instantiated in the top block. The netlist must contain exactly one module.
+
+```shell
+xlsynth-driver gv2block \
+  --netlist ~/my_netlist.v \
+  --liberty_proto ~/asap7.proto > ~/my_netlist.block.ir
+```
+
 ### `gv2aig`: gate-level netlist to AIGER
 
 Converts a gate-level netlist plus Liberty proto into an AIGER file.
