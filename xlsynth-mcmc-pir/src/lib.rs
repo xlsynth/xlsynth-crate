@@ -30,6 +30,8 @@ use xlsynth::IrBits;
 use xlsynth::IrPackage;
 use xlsynth::IrValue;
 use xlsynth_g8r::aig::get_summary_stats;
+use xlsynth_g8r::aig::graph_logical_effort::GraphLogicalEffortOptions;
+use xlsynth_g8r::aig::graph_logical_effort::analyze_graph_logical_effort;
 use xlsynth_g8r::gatify::ir2gate::{self, GatifyOptions};
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_mcmc::Best as SharedBest;
@@ -78,6 +80,10 @@ pub struct Cost {
     /// Depth of the corresponding `GateFn` (deepest path) after running the XLS
     /// optimizer and gatifying.
     pub g8r_depth: usize,
+    /// Graph logical-effort worst-case delay, scaled by 1e3 and rounded.
+    ///
+    /// This is populated when objective=`g8r-le-graph`; otherwise it is `0`.
+    pub g8r_le_graph_milli: usize,
 }
 
 /// Calculates the cost of a PIR function.
@@ -88,19 +94,20 @@ pub struct Cost {
 pub fn cost(f: &IrFn, objective: Objective) -> Result<Cost> {
     let pir_nodes = f.nodes.len();
 
-    let (g8r_nodes, g8r_depth) = if matches!(
+    let (g8r_nodes, g8r_depth, g8r_le_graph_milli) = if matches!(
         objective,
-        Objective::G8rNodes | Objective::G8rNodesTimesDepth
+        Objective::G8rNodes | Objective::G8rNodesTimesDepth | Objective::G8rLeGraph
     ) {
-        compute_g8r_stats_for_pir_fn(f)?
+        compute_g8r_stats_for_pir_fn(f, matches!(objective, Objective::G8rLeGraph))?
     } else {
-        (pir_nodes, pir_nodes)
+        (pir_nodes, pir_nodes, 0)
     };
 
     Ok(Cost {
         pir_nodes,
         g8r_nodes,
         g8r_depth,
+        g8r_le_graph_milli,
     })
 }
 
@@ -147,6 +154,12 @@ pub enum Objective {
     Nodes,
     G8rNodes,
     G8rNodesTimesDepth,
+    #[value(
+        name = "g8r-le-graph",
+        alias = "g8r-graph-le",
+        alias = "g8r-graph-logical-effort"
+    )]
+    G8rLeGraph,
 }
 
 impl Objective {
@@ -157,6 +170,7 @@ impl Objective {
             Objective::G8rNodesTimesDepth => {
                 (c.g8r_nodes as u64).saturating_mul(c.g8r_depth as u64)
             }
+            Objective::G8rLeGraph => c.g8r_le_graph_milli as u64,
         }
     }
 }
@@ -166,14 +180,19 @@ impl Objective {
 ///   2) Running the XLS optimizer.
 ///   3) Parsing the optimized IR back into PIR.
 ///   4) Gatifying the top function into a `GateFn` and counting live nodes.
-fn compute_g8r_stats_for_pir_fn(f: &IrFn) -> Result<(usize, usize)> {
+fn compute_g8r_stats_for_pir_fn(
+    f: &IrFn,
+    compute_graph_logical_effort: bool,
+) -> Result<(usize, usize, usize)> {
     // The PIR → text → XLS → optimize → PIR → gatify pipeline assumes a DAG.
     // Random rewiring transforms can (transiently) create cycles; if that happens
     // we treat it as a candidate failure and fall back to PIR node count.
     //
     // Note: we intentionally catch panics here because some PIR utilities
     // currently panic on cycle detection.
-    let result = catch_unwind(AssertUnwindSafe(|| compute_g8r_stats_for_pir_fn_impl(f)));
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        compute_g8r_stats_for_pir_fn_impl(f, compute_graph_logical_effort)
+    }));
     match result {
         Ok(r) => r,
         Err(_panic) => Err(anyhow::anyhow!(
@@ -182,7 +201,25 @@ fn compute_g8r_stats_for_pir_fn(f: &IrFn) -> Result<(usize, usize)> {
     }
 }
 
-fn compute_g8r_stats_for_pir_fn_impl(f: &IrFn) -> Result<(usize, usize)> {
+fn graph_le_delay_to_milli(delay: f64) -> usize {
+    if !delay.is_finite() {
+        return usize::MAX;
+    }
+    if delay <= 0.0 {
+        return 0;
+    }
+    let scaled = delay * 1000.0;
+    if scaled >= usize::MAX as f64 {
+        usize::MAX
+    } else {
+        scaled.round() as usize
+    }
+}
+
+fn compute_g8r_stats_for_pir_fn_impl(
+    f: &IrFn,
+    compute_graph_logical_effort: bool,
+) -> Result<(usize, usize, usize)> {
     // 1-3) Optimize the PIR function via the XLS pipeline.
     let top_fn = optimize_pir_fn_via_xls(f)?;
 
@@ -201,7 +238,19 @@ fn compute_g8r_stats_for_pir_fn_impl(f: &IrFn) -> Result<(usize, usize)> {
         .map_err(|e| anyhow::anyhow!("ir2gate::gatify failed: {}", e))?;
     let gate_fn = gatify_output.gate_fn;
     let stats = get_summary_stats::get_summary_stats(&gate_fn);
-    Ok((stats.live_nodes, stats.deepest_path))
+    let g8r_le_graph_milli = if compute_graph_logical_effort {
+        let graph_le = analyze_graph_logical_effort(
+            &gate_fn,
+            &GraphLogicalEffortOptions {
+                beta1: 1.0,
+                beta2: 0.0,
+            },
+        );
+        graph_le_delay_to_milli(graph_le.delay)
+    } else {
+        0
+    };
+    Ok((stats.live_nodes, stats.deepest_path, g8r_le_graph_milli))
 }
 
 /// Type aliases specializing the generic MCMC helpers from `xlsynth-mcmc` to
@@ -925,6 +974,7 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
                     "pir_nodes": iteration_output.output_cost.pir_nodes,
                     "g8r_nodes": iteration_output.output_cost.g8r_nodes,
                     "g8r_depth": iteration_output.output_cost.g8r_depth,
+                    "g8r_le_graph_milli": iteration_output.output_cost.g8r_le_graph_milli,
                     "oracle_time_micros": iteration_output.oracle_time_micros,
                     "transform": iteration_output.transform.map(|k| format!("{:?}", k)),
                     "transform_always_equivalent": iteration_output.transform_always_equivalent,

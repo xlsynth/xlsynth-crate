@@ -1605,9 +1605,14 @@ fn main() {
                         .required(true)
                         .index(1),
                 )
-                .add_bool_arg(
-                    "compute_graph_logical_effort",
-                    "Compute the graph logical effort worst case delay",
+                .arg(
+                    clap::Arg::new("compute_graph_logical_effort")
+                        .long("compute-graph-logical-effort")
+                        .value_name("BOOL")
+                        .action(clap::ArgAction::Set)
+                        .value_parser(["true", "false"])
+                        .num_args(1)
+                        .help("Compute the graph logical effort worst case delay"),
                 )
                 .arg(
                     clap::Arg::new("graph_logical_effort_beta1")

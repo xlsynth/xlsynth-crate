@@ -297,6 +297,7 @@ impl SampleWriter {
             "pir_nodes": msg.cost.pir_nodes,
             "g8r_nodes": msg.cost.g8r_nodes,
             "g8r_depth": msg.cost.g8r_depth,
+            "g8r_le_graph_milli": msg.cost.g8r_le_graph_milli,
         });
         let mut mf = std::fs::OpenOptions::new()
             .create(true)
