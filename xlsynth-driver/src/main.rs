@@ -54,6 +54,7 @@ mod g8r2v;
 mod g8r_cli;
 mod g8r_equiv;
 mod gv2aig;
+mod gv2block;
 mod gv2ir;
 mod gv_dump_cone;
 mod gv_instance_csv;
@@ -1325,6 +1326,24 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new("gv2block")
+                .about("Converts a gate-level netlist and Liberty proto to block IR")
+                .arg(
+                    Arg::new("netlist")
+                        .long("netlist")
+                        .help("Input gate-level netlist (.gv, .v, or .gv.gz)")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("liberty_proto")
+                        .long("liberty_proto")
+                        .help("Input Liberty proto (.proto or .textproto)")
+                        .required(true)
+                        .action(ArgAction::Set),
+                ),
+        )
+        .subcommand(
             clap::Command::new("gv2ir")
                 .about("Converts a gate-level netlist and Liberty proto to XLS IR")
                 .arg(
@@ -2260,6 +2279,9 @@ fn main() {
         }
         Some(("lib2proto", subm)) => {
             lib2proto::handle_lib2proto(subm);
+        }
+        Some(("gv2block", subm)) => {
+            gv2block::handle_gv2block(subm);
         }
         Some(("gv2ir", subm)) => {
             gv2ir::handle_gv2ir(subm);

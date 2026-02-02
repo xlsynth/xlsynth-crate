@@ -5,6 +5,7 @@ pub mod cone;
 pub mod connectivity;
 pub mod gatefn_from_netlist;
 pub mod gv2aig;
+pub mod gv2block;
 pub mod gv2ir;
 pub mod integrity;
 pub mod io;
