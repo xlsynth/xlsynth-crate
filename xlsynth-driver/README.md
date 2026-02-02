@@ -736,6 +736,33 @@ Supported flags include the common gate-optimization controls:
 - `--graph-logical-effort-beta1=<BETA1>` / `--graph-logical-effort-beta2=<BETA2>`
   – parameters for graph logical effort analysis.
 
+### `aig-stats`: AIGER structural + logical-effort statistics
+
+Reads an AIGER file (`.aag` or `.aig`) and reports:
+
+- `and_nodes`
+- `depth`
+- `fanout_histogram`
+- logical effort deepest-path min delay (FO4 units)
+- optional graph logical effort worst-case delay (FO4 units)
+
+Flags:
+
+- positional: `<AIG_INPUT_FILE>`
+- `--compute-graph-logical-effort=<BOOL>` (default `true`)
+- `--graph-logical-effort-beta1=<BETA1>` / `--graph-logical-effort-beta2=<BETA2>`
+- `--quiet=<BOOL>` – emit JSON to stdout
+- `--output_json=<PATH>` – write JSON summary to file
+
+Example:
+
+```shell
+xlsynth-driver aig-stats /tmp/design.aag \
+  --compute-graph-logical-effort=true \
+  --graph-logical-effort-beta1=1.0 \
+  --graph-logical-effort-beta2=0.0
+```
+
 ### `ir-fn-eval`
 
 Interprets an IR function with a tuple of typed argument values and prints the
