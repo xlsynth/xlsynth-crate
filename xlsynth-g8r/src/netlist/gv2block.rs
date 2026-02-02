@@ -509,20 +509,41 @@ fn build_top_block(
             for (port_name, net_ref) in &inst.connections {
                 let port = parsed.interner.resolve(*port_name).unwrap_or("");
                 if dff_clock_pins.iter().any(|p| p == port) {
-                    if let Some(net_name) = net_ref_to_name(net_ref, parsed) {
-                        match &clock_net_name {
-                            None => clock_net_name = Some(net_name),
-                            Some(existing) if existing != &net_name => {
-                                return Err(anyhow!(format!(
-                                    "multiple clock nets detected: '{}' vs '{}'",
-                                    existing, net_name
-                                )));
-                            }
-                            _ => {}
+                    let net_name = net_ref_to_name(net_ref, parsed).ok_or_else(|| {
+                        anyhow!(format!(
+                            "clock pin '{}' on instance '{}' is not driven by a simple net",
+                            port,
+                            parsed.interner.resolve(inst.instance_name).unwrap_or("<unknown>")
+                        ))
+                    })?;
+                    match &clock_net_name {
+                        None => clock_net_name = Some(net_name),
+                        Some(existing) if existing != &net_name => {
+                            return Err(anyhow!(format!(
+                                "multiple clock nets detected: '{}' vs '{}'",
+                                existing, net_name
+                            )));
                         }
+                        _ => {}
                     }
                 }
             }
+        }
+    }
+
+    if let Some(ref clk_net) = clock_net_name {
+        let is_top_input = module.ports.iter().any(|p| {
+            p.direction == crate::netlist::parse::PortDirection::Input
+                && parsed
+                    .interner
+                    .resolve(p.name)
+                    .is_some_and(|name| name == clk_net)
+        });
+        if !is_top_input {
+            return Err(anyhow!(format!(
+                "derived clock '{}' is not a top-level input port",
+                clk_net
+            )));
         }
     }
 

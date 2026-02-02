@@ -61,6 +61,13 @@ cells: {
   }
 }
 cells: {
+  name: "AND2"
+  pins: { name: "A" direction: INPUT }
+  pins: { name: "B" direction: INPUT }
+  pins: { name: "Y" direction: OUTPUT function: "(A * B)" }
+  area: 1.0
+}
+cells: {
   name: "DFFNAND"
   pins: { name: "D" direction: INPUT }
   pins: { name: "EN" direction: INPUT }
@@ -387,4 +394,31 @@ top block top(a: bits[1], y: bits[2]) {
 }
 "#;
     assert_eq!(got, want);
+}
+
+#[test]
+fn test_gv2block_rejects_derived_clock() {
+    let netlist = r#"
+module top (clk, en, d, q);
+  input clk;
+  input en;
+  input d;
+  output q;
+  wire clk;
+  wire en;
+  wire d;
+  wire q;
+  wire gclk;
+  AND2 u0 (.A(clk), .B(en), .Y(gclk));
+  DFF u1 (.D(d), .CLK(gclk), .Q(q));
+endmodule
+"#;
+    let mut liberty_file = NamedTempFile::new().unwrap();
+    write!(liberty_file, "{}", LIBERTY_TEXTPROTO).unwrap();
+    let mut netlist_file = NamedTempFile::new().unwrap();
+    write!(netlist_file, "{}", netlist).unwrap();
+
+    let err = convert_gv2block_paths_to_string(netlist_file.path(), liberty_file.path())
+        .expect_err("expected derived clock rejection");
+    assert!(err.to_string().contains("derived clock 'gclk'"));
 }
