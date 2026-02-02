@@ -615,13 +615,6 @@ mod tests {
             )
             .expect("Failed to compile proto");
         let generated = std::fs::read(&descriptor_path).expect("read generated liberty.bin");
-        let debug_copy_path = std::path::Path::new("/tmp/xlsynth-liberty.bin");
-        if let Err(err) = std::fs::copy(&descriptor_path, debug_copy_path) {
-            eprintln!(
-                "Failed to copy generated liberty.bin to {}: {err}",
-                debug_copy_path.display()
-            );
-        }
         let message = format_args!(
             concat!(
                 "Committed proto/liberty.bin does not match the generated file.\n",
