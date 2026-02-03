@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Converts a (bits-only) XLS IR function into DSLX.
+//! Converts an XLS IR function into DSLX.
 
 use std::collections::{HashMap, HashSet};
 
@@ -81,9 +81,9 @@ pub fn convert_ir_package_fn_to_dslx(
 /// Converts an in-memory IR function into DSLX function text.
 pub fn convert_ir_fn_to_dslx(func: &ir::Fn) -> Result<IrFnToDslxResult, IrFnToDslxError> {
     for p in &func.params {
-        let _ = bits_type_to_dslx(&p.ty)?;
+        let _ = type_to_dslx(&p.ty)?;
     }
-    let ret_ty_str = bits_type_to_dslx(&func.ret_ty)?;
+    let ret_ty_str = type_to_dslx(&func.ret_ty)?;
     let ret_node_ref = func
         .ret_node_ref
         .ok_or_else(|| IrFnToDslxError::MissingReturnNode(func.name.clone()))?;
@@ -138,7 +138,7 @@ pub fn convert_ir_fn_to_dslx(func: &ir::Fn) -> Result<IrFnToDslxResult, IrFnToDs
         let lhs_name = node_names[nr.index]
             .as_ref()
             .ok_or(IrFnToDslxError::MissingNodeName(nr.index))?;
-        let lhs_ty = bits_type_to_dslx(&node.ty)?;
+        let lhs_ty = type_to_dslx(&node.ty)?;
         let rhs_expr = lower_node_payload(func, nr, &node_names)?;
         body_lines.push(format!("  let {}: {} = {};", lhs_name, lhs_ty, rhs_expr));
     }
@@ -154,7 +154,7 @@ pub fn convert_ir_fn_to_dslx(func: &ir::Fn) -> Result<IrFnToDslxResult, IrFnToDs
         .iter()
         .zip(param_names.iter())
         .map(|(p, name)| {
-            let ty = bits_type_to_dslx(&p.ty)?;
+            let ty = type_to_dslx(&p.ty)?;
             Ok(format!("{}: {}", name, ty))
         })
         .collect::<Result<Vec<String>, IrFnToDslxError>>()?
@@ -178,13 +178,27 @@ pub fn convert_ir_fn_to_dslx(func: &ir::Fn) -> Result<IrFnToDslxResult, IrFnToDs
     })
 }
 
-fn bits_type_to_dslx(ty: &Type) -> Result<String, IrFnToDslxError> {
+fn type_to_dslx(ty: &Type) -> Result<String, IrFnToDslxError> {
     match ty {
         Type::Bits(w) => Ok(format!("uN[{}]", w)),
-        _ => Err(IrFnToDslxError::UnsupportedType(format!(
-            "only bits types are supported in MVP; got {}",
-            ty
-        ))),
+        Type::Token => Ok("token".to_string()),
+        Type::Tuple(members) => {
+            let members = members
+                .iter()
+                .map(|m| type_to_dslx(m))
+                .collect::<Result<Vec<String>, IrFnToDslxError>>()?;
+            if members.is_empty() {
+                Ok("()".to_string())
+            } else if members.len() == 1 {
+                Ok(format!("({},)", members[0]))
+            } else {
+                Ok(format!("({})", members.join(", ")))
+            }
+        }
+        Type::Array(data) => {
+            let elem = type_to_dslx(&data.element_type)?;
+            Ok(format!("{}[{}]", elem, data.element_count))
+        }
     }
 }
 
@@ -202,6 +216,60 @@ fn node_name(node_names: &[Option<String>], nr: NodeRef) -> Result<&str, IrFnToD
     node_names[nr.index]
         .as_deref()
         .ok_or(IrFnToDslxError::MissingNodeName(nr.index))
+}
+
+fn render_tuple_expr(elements: &[String]) -> String {
+    if elements.is_empty() {
+        "()".to_string()
+    } else if elements.len() == 1 {
+        format!("({},)", elements[0])
+    } else {
+        format!("({})", elements.join(", "))
+    }
+}
+
+fn render_array_index_expr(base: &str, indices: &[String]) -> String {
+    let mut expr = base.to_string();
+    for idx in indices {
+        expr.push_str(&format!("[{}]", idx));
+    }
+    expr
+}
+
+fn render_array_update_expr(base: &str, indices: &[String], value: &str) -> String {
+    if indices.is_empty() {
+        return value.to_string();
+    }
+    let mut update_expr = value.to_string();
+    for depth in (0..indices.len()).rev() {
+        let prefix = render_array_index_expr(base, &indices[..depth]);
+        update_expr = format!("update({}, {}, {})", prefix, indices[depth], update_expr);
+    }
+    update_expr
+}
+
+fn zero_value_expr_for_type(ty: &Type) -> Result<String, IrFnToDslxError> {
+    match ty {
+        Type::Bits(w) => Ok(format!("uN[{}]:0", w)),
+        Type::Token => Err(IrFnToDslxError::UnsupportedType(
+            "cannot synthesize a token zero literal".to_string(),
+        )),
+        Type::Tuple(members) => {
+            let members = members
+                .iter()
+                .map(|m| zero_value_expr_for_type(m))
+                .collect::<Result<Vec<String>, IrFnToDslxError>>()?;
+            Ok(render_tuple_expr(&members))
+        }
+        Type::Array(data) => {
+            let elem_zero = zero_value_expr_for_type(&data.element_type)?;
+            let elems = std::iter::repeat_n(elem_zero, data.element_count)
+                .collect::<Vec<String>>()
+                .join(", ");
+            let ty_str = type_to_dslx(ty)?;
+            Ok(format!("{}:[{}]", ty_str, elems))
+        }
+    }
 }
 
 fn lower_node_payload(
@@ -227,17 +295,12 @@ fn lower_node_payload(
                 Unop::OrReduce => Ok(format!("or_reduce({}) as uN[1]", arg_name)),
                 Unop::AndReduce => Ok(format!("and_reduce({}) as uN[1]", arg_name)),
                 Unop::XorReduce => Ok(format!("xor_reduce({}) as uN[1]", arg_name)),
-                Unop::Reverse => Err(IrFnToDslxError::UnsupportedNode(
-                    "reverse is not yet supported in MVP".to_string(),
-                )),
+                Unop::Reverse => Ok(format!("rev({})", arg_name)),
             }
         }
         NodePayload::Binop(op, lhs, rhs) => {
             let lhs_name = node_name(node_names, *lhs)?;
             let rhs_name = node_name(node_names, *rhs)?;
-            let lhs_w = bits_width(&func.get_node(*lhs).ty)?;
-            let rhs_w = bits_width(&func.get_node(*rhs).ty)?;
-            let out_w = bits_width(&node.ty)?;
             match op {
                 Binop::Add => Ok(format!("{} + {}", lhs_name, rhs_name)),
                 Binop::Sub => Ok(format!("{} - {}", lhs_name, rhs_name)),
@@ -253,6 +316,9 @@ fn lower_node_payload(
                 Binop::Udiv => Ok(format!("{} / {}", lhs_name, rhs_name)),
                 Binop::Umod => Ok(format!("{} % {}", lhs_name, rhs_name)),
                 Binop::Smul => {
+                    let lhs_w = bits_width(&func.get_node(*lhs).ty)?;
+                    let rhs_w = bits_width(&func.get_node(*rhs).ty)?;
+                    let out_w = bits_width(&node.ty)?;
                     if lhs_w != rhs_w {
                         return Err(IrFnToDslxError::UnsupportedNode(format!(
                             "smul requires equal operand widths in MVP; got {} and {}",
@@ -265,6 +331,9 @@ fn lower_node_payload(
                     ))
                 }
                 Binop::Sdiv => {
+                    let lhs_w = bits_width(&func.get_node(*lhs).ty)?;
+                    let rhs_w = bits_width(&func.get_node(*rhs).ty)?;
+                    let out_w = bits_width(&node.ty)?;
                     if lhs_w != rhs_w {
                         return Err(IrFnToDslxError::UnsupportedNode(format!(
                             "sdiv requires equal operand widths in MVP; got {} and {}",
@@ -277,6 +346,9 @@ fn lower_node_payload(
                     ))
                 }
                 Binop::Smod => {
+                    let lhs_w = bits_width(&func.get_node(*lhs).ty)?;
+                    let rhs_w = bits_width(&func.get_node(*rhs).ty)?;
+                    let out_w = bits_width(&node.ty)?;
                     if lhs_w != rhs_w {
                         return Err(IrFnToDslxError::UnsupportedNode(format!(
                             "smod requires equal operand widths in MVP; got {} and {}",
@@ -289,6 +361,8 @@ fn lower_node_payload(
                     ))
                 }
                 Binop::Sge => {
+                    let lhs_w = bits_width(&func.get_node(*lhs).ty)?;
+                    let rhs_w = bits_width(&func.get_node(*rhs).ty)?;
                     if lhs_w != rhs_w {
                         return Err(IrFnToDslxError::UnsupportedNode(format!(
                             "sge requires equal operand widths in MVP; got {} and {}",
@@ -301,6 +375,8 @@ fn lower_node_payload(
                     ))
                 }
                 Binop::Sgt => {
+                    let lhs_w = bits_width(&func.get_node(*lhs).ty)?;
+                    let rhs_w = bits_width(&func.get_node(*rhs).ty)?;
                     if lhs_w != rhs_w {
                         return Err(IrFnToDslxError::UnsupportedNode(format!(
                             "sgt requires equal operand widths in MVP; got {} and {}",
@@ -313,6 +389,8 @@ fn lower_node_payload(
                     ))
                 }
                 Binop::Slt => {
+                    let lhs_w = bits_width(&func.get_node(*lhs).ty)?;
+                    let rhs_w = bits_width(&func.get_node(*rhs).ty)?;
                     if lhs_w != rhs_w {
                         return Err(IrFnToDslxError::UnsupportedNode(format!(
                             "slt requires equal operand widths in MVP; got {} and {}",
@@ -325,6 +403,8 @@ fn lower_node_payload(
                     ))
                 }
                 Binop::Sle => {
+                    let lhs_w = bits_width(&func.get_node(*lhs).ty)?;
+                    let rhs_w = bits_width(&func.get_node(*rhs).ty)?;
                     if lhs_w != rhs_w {
                         return Err(IrFnToDslxError::UnsupportedNode(format!(
                             "sle requires equal operand widths in MVP; got {} and {}",
@@ -336,17 +416,86 @@ fn lower_node_payload(
                         lhs_name, lhs_w, rhs_name, rhs_w
                     ))
                 }
-                Binop::Shra => Ok(format!(
-                    "(({} as sN[{}]) >> {}) as uN[{}]",
-                    lhs_name, lhs_w, rhs_name, out_w
-                )),
-                Binop::ArrayConcat | Binop::Smulp | Binop::Umulp | Binop::Gate => {
-                    Err(IrFnToDslxError::UnsupportedNode(format!(
-                        "binop not yet supported in MVP: {:?}",
-                        op
-                    )))
+                Binop::Shra => {
+                    let lhs_w = bits_width(&func.get_node(*lhs).ty)?;
+                    let out_w = bits_width(&node.ty)?;
+                    Ok(format!(
+                        "(({} as sN[{}]) >> {}) as uN[{}]",
+                        lhs_name, lhs_w, rhs_name, out_w
+                    ))
+                }
+                Binop::ArrayConcat => Ok(format!("{} ++ {}", lhs_name, rhs_name)),
+                Binop::Umulp => Ok(format!("umulp({}, {})", lhs_name, rhs_name)),
+                Binop::Smulp => {
+                    let lhs_w = bits_width(&func.get_node(*lhs).ty)?;
+                    let rhs_w = bits_width(&func.get_node(*rhs).ty)?;
+                    Ok(format!(
+                        "smulp({} as sN[{}], {} as sN[{}])",
+                        lhs_name, lhs_w, rhs_name, rhs_w
+                    ))
+                }
+                Binop::Gate => {
+                    let zeros = zero_value_expr_for_type(&node.ty)?;
+                    Ok(format!(
+                        "if {} == u1:1 {{ {} }} else {{ {} }}",
+                        lhs_name, rhs_name, zeros
+                    ))
                 }
             }
+        }
+        NodePayload::Tuple(elements) => {
+            let values = elements
+                .iter()
+                .map(|nr| node_name(node_names, *nr).map(|s| s.to_string()))
+                .collect::<Result<Vec<String>, IrFnToDslxError>>()?;
+            Ok(render_tuple_expr(&values))
+        }
+        NodePayload::TupleIndex { tuple, index } => {
+            let tuple_name = node_name(node_names, *tuple)?;
+            Ok(format!("{}.{}", tuple_name, index))
+        }
+        NodePayload::Array(elements) => {
+            let values = elements
+                .iter()
+                .map(|nr| node_name(node_names, *nr).map(|s| s.to_string()))
+                .collect::<Result<Vec<String>, IrFnToDslxError>>()?;
+            let ty = type_to_dslx(&node.ty)?;
+            Ok(format!("{}:[{}]", ty, values.join(", ")))
+        }
+        NodePayload::ArrayIndex { array, indices, .. } => {
+            let array_name = node_name(node_names, *array)?;
+            let indices = indices
+                .iter()
+                .map(|nr| node_name(node_names, *nr).map(|s| s.to_string()))
+                .collect::<Result<Vec<String>, IrFnToDslxError>>()?;
+            Ok(render_array_index_expr(array_name, &indices))
+        }
+        NodePayload::ArrayUpdate {
+            array,
+            value,
+            indices,
+            ..
+        } => {
+            let array_name = node_name(node_names, *array)?;
+            let value_name = node_name(node_names, *value)?;
+            let indices = indices
+                .iter()
+                .map(|nr| node_name(node_names, *nr).map(|s| s.to_string()))
+                .collect::<Result<Vec<String>, IrFnToDslxError>>()?;
+            Ok(render_array_update_expr(array_name, &indices, value_name))
+        }
+        NodePayload::ArraySlice {
+            array,
+            start,
+            width: _,
+        } => {
+            let array_name = node_name(node_names, *array)?;
+            let start_name = node_name(node_names, *start)?;
+            let default_value = zero_value_expr_for_type(&node.ty)?;
+            Ok(format!(
+                "array_slice({}, {}, {})",
+                array_name, start_name, default_value
+            ))
         }
         NodePayload::Nary(op, nodes) => {
             if nodes.is_empty() {
@@ -421,6 +570,7 @@ fn lower_node_payload(
             Ok(format!("encode({}) as uN[{}]", arg_name, out_w))
         }
         NodePayload::OneHotSel { selector, cases } => {
+            let _ = bits_width(&node.ty)?;
             let selector_name = node_name(node_names, *selector)?;
             let case_text = cases
                 .iter()
@@ -434,6 +584,7 @@ fn lower_node_payload(
             cases,
             default,
         } => {
+            let _ = bits_width(&node.ty)?;
             let selector_name = node_name(node_names, *selector)?;
             let case_text = cases
                 .iter()
@@ -602,16 +753,79 @@ top fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
     }
 
     #[test]
-    fn test_unsupported_non_bits_type_errors() {
+    fn test_convert_tuple_type_and_tuple_index() {
         let ir_text = r#"package sample
 
-top fn f(x: bits[8] id=1) -> (bits[8], bits[8]) {
+top fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
   x: bits[8] = param(name=x, id=1)
-  ret t: (bits[8], bits[8]) = tuple(x, x, id=2)
+  y: bits[8] = param(name=y, id=2)
+  t: (bits[8], bits[8]) = tuple(x, y, id=3)
+  ret out: bits[8] = tuple_index(t, index=1, id=4)
 }
 "#;
-        let err = convert_ir_package_fn_to_dslx(ir_text, None).unwrap_err();
-        assert!(format!("{}", err).contains("only bits types are supported"));
+        let result = convert_ir_package_fn_to_dslx(ir_text, None).unwrap();
+        assert!(result.dslx_text.contains("let t: (uN[8], uN[8]) = (x, y);"));
+        assert!(result.dslx_text.contains("t.1"));
+    }
+
+    #[test]
+    fn test_convert_array_update_and_slice() {
+        let ir_text = r#"package sample
+
+top fn f(a: bits[8][4] id=1, i: bits[2] id=2, v: bits[8] id=3) -> bits[8][2] {
+  a: bits[8][4] = param(name=a, id=1)
+  i: bits[2] = param(name=i, id=2)
+  v: bits[8] = param(name=v, id=3)
+  updated: bits[8][4] = array_update(a, v, indices=[i], id=4)
+  ret out: bits[8][2] = array_slice(updated, i, width=2, id=5)
+}
+"#;
+        let result = convert_ir_package_fn_to_dslx(ir_text, None).unwrap();
+        assert!(
+            result
+                .dslx_text
+                .contains("let updated: uN[8][4] = update(a, i, v);")
+        );
+        assert!(
+            result
+                .dslx_text
+                .contains("array_slice(updated, i, uN[8][2]:[uN[8]:0, uN[8]:0])")
+        );
+    }
+
+    #[test]
+    fn test_convert_reverse_gate_and_umulp() {
+        let ir_text = r#"package sample
+
+top fn f(p: bits[1] id=1, x: bits[8] id=2, y: bits[8] id=3) -> (bits[16], bits[16]) {
+  p: bits[1] = param(name=p, id=1)
+  x: bits[8] = param(name=x, id=2)
+  y: bits[8] = param(name=y, id=3)
+  g: bits[8] = gate(p, x, id=4)
+  r: bits[8] = reverse(g, id=5)
+  ret out: (bits[16], bits[16]) = umulp(r, y, id=6)
+}
+"#;
+        let result = convert_ir_package_fn_to_dslx(ir_text, None).unwrap();
+        assert!(
+            result
+                .dslx_text
+                .contains("if p == u1:1 { x } else { uN[8]:0 }")
+        );
+        assert!(result.dslx_text.contains("rev(g)"));
+        assert!(result.dslx_text.contains("umulp(r, y)"));
+    }
+
+    #[test]
+    fn test_convert_token_param_and_return_type() {
+        let ir_text = r#"package sample
+
+top fn f(t: token id=1) -> token {
+  ret t: token = param(name=t, id=1)
+}
+"#;
+        let result = convert_ir_package_fn_to_dslx(ir_text, None).unwrap();
+        assert!(result.dslx_text.contains("fn f(t: token) -> token"));
     }
 
     #[test]
