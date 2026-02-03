@@ -1843,6 +1843,89 @@ fn helper(x: bits[8] id=2, y: bits[8] id=3) -> bits[8] {
 }
 
 #[test]
+fn test_ir_fn_to_json() {
+    let ir_text = r#"package sample
+
+top fn main(x: bits[8] id=1) -> bits[8] {
+  ret x: bits[8] = param(name=x, id=1)
+}
+
+fn helper(x: bits[8] id=2, y: bits[8] id=3) -> bits[8] {
+  ret add.4: bits[8] = add(x, y, id=4)
+}
+"#;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("input.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    let output = std::process::Command::new(command_path)
+        .arg("ir-fn-to-json")
+        .arg(ir_path.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.is_empty(), "stderr should be empty; got: {}", stderr);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("Output JSON");
+    assert_eq!(json["package_name"], "sample");
+    assert_eq!(json["selected_top"], "main");
+    assert_eq!(json["return_type"], "bits[8]");
+    assert_eq!(json["node_count"], 2);
+    assert!(
+        json["pir"].as_str().unwrap().contains("top fn main("),
+        "pir field should contain emitted top function: {}",
+        json["pir"]
+    );
+    let nodes = json["nodes"].as_array().expect("nodes array");
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(nodes[0]["op"], "nil");
+    assert_eq!(nodes[1]["op"], "get_param");
+    assert_eq!(nodes[1]["name"], "x");
+    assert_eq!(nodes[1]["is_param"], true);
+    assert_eq!(nodes[1]["is_ret"], true);
+
+    let output = std::process::Command::new(command_path)
+        .arg("ir-fn-to-json")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("helper")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.is_empty(), "stderr should be empty; got: {}", stderr);
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("Output JSON");
+    assert_eq!(json["selected_top"], "helper");
+    assert_eq!(json["node_count"], 4);
+    assert!(
+        json["pir"].as_str().unwrap().contains("top fn helper("),
+        "pir field should contain emitted top function: {}",
+        json["pir"]
+    );
+    let nodes = json["nodes"].as_array().expect("nodes array");
+    assert_eq!(nodes[3]["op"], "add");
+    assert_eq!(nodes[3]["is_ret"], true);
+    assert_eq!(nodes[3]["operands"], serde_json::json!([1, 2]));
+}
+
+#[test]
 fn test_dslx_add_sub_opt_ir2gates_pipeline() {
     let _ = env_logger::try_init();
     let dslx = "
