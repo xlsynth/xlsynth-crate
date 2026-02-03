@@ -74,6 +74,7 @@ mod ir_equiv_blocks;
 mod ir_fn_cone_extract;
 mod ir_fn_eval;
 mod ir_fn_node_count;
+mod ir_fn_structural_hash;
 mod ir_fn_to_block;
 mod ir_fn_to_json;
 mod ir_ged;
@@ -1758,6 +1759,18 @@ fn main() {
                 .add_ir_top_arg(false),
         )
         .subcommand(
+            clap::Command::new("ir-fn-structural-hash")
+                .about("Prints a rename-insensitive structural hash for an IR function")
+                .arg(
+                    clap::Arg::new("ir_input_file")
+                        .help("The input IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .add_ir_top_arg(false)
+                .add_bool_arg("json", "Output in JSON format"),
+        )
+        .subcommand(
             clap::Command::new("ir-fn-to-json")
                 .about("Emits the selected IR function as JSON (including PIR text)")
                 .arg(
@@ -2433,6 +2446,9 @@ fn main() {
         }
         Some(("ir-fn-node-count", subm)) => {
             ir_fn_node_count::handle_ir_fn_node_count(subm, &config);
+        }
+        Some(("ir-fn-structural-hash", subm)) => {
+            ir_fn_structural_hash::handle_ir_fn_structural_hash(subm, &config);
         }
         Some(("ir-fn-to-json", subm)) => {
             ir_fn_to_json::handle_ir_fn_to_json(subm, &config);
