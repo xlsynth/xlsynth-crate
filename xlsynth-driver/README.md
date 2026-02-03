@@ -481,6 +481,27 @@ xlsynth-driver --toolchain=$HOME/xlsynth-toolchain.toml \
   ir-fn-to-block my_pkg.ir --top my_main > my_main.block.ir
 ```
 
+### `ir-fn-to-dslx`: IR function to DSLX function text
+
+Converts a selected IR function in a package into DSLX function text and writes it to **stdout**.
+
+- Positional arguments and flags:
+  - `<ir_input_file>` – path to the package IR file.
+  - `--top <NAME>` – IR function name to translate.
+  - `--verify-roundtrip=<BOOL>` – when `true`, compiles emitted DSLX back to IR and proves equivalence against the input function (default: `false`).
+
+Example:
+
+```shell
+xlsynth-driver ir-fn-to-dslx my_pkg.ir --top my_main > my_main.x
+```
+
+Roundtrip check:
+
+```shell
+xlsynth-driver ir-fn-to-dslx my_pkg.ir --top my_main --verify-roundtrip=true > my_main.x
+```
+
 ### `ir2delayinfo`
 
 Runs the `delay_info_main` tool for a given IR entry point and delay model.

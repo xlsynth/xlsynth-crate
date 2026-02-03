@@ -18,6 +18,7 @@ pub mod ir_bool_cones;
 pub mod ir_deduce;
 pub mod ir_eval;
 pub mod ir_fn_cone_extract;
+pub mod ir_fn_to_dslx;
 pub mod ir_fuzz;
 pub mod ir_node_env;
 pub mod ir_outline;
