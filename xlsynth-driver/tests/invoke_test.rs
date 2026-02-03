@@ -1926,6 +1926,110 @@ fn helper(x: bits[8] id=2, y: bits[8] id=3) -> bits[8] {
 }
 
 #[test]
+fn test_ir_fn_structural_hash() {
+    let ir_text = r#"package sample
+
+top fn main(x: bits[8] id=1) -> bits[8] {
+  ret add.3: bits[8] = add(x, x, id=3)
+}
+
+fn helper(y: bits[8] id=22) -> bits[8] {
+  ret add.99: bits[8] = add(y, y, id=99)
+}
+
+fn different(z: bits[8] id=100) -> bits[8] {
+  ret sub.7: bits[8] = sub(z, z, id=7)
+}
+"#;
+
+    fn is_hex_64(s: &str) -> bool {
+        s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
+    }
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("input.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    let output = std::process::Command::new(command_path)
+        .arg("ir-fn-structural-hash")
+        .arg(ir_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.is_empty(), "stderr should be empty; got: {}", stderr);
+    let main_hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert!(
+        is_hex_64(&main_hash),
+        "Expected 64-hex hash; got: {}",
+        main_hash
+    );
+
+    let output = std::process::Command::new(command_path)
+        .arg("ir-fn-structural-hash")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("helper")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let helper_hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_eq!(
+        main_hash, helper_hash,
+        "expected rename-insensitive structural hashes to match"
+    );
+
+    let output = std::process::Command::new(command_path)
+        .arg("ir-fn-structural-hash")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("different")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let different_hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_ne!(main_hash, different_hash);
+
+    let output = std::process::Command::new(command_path)
+        .arg("ir-fn-structural-hash")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--json=true")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim())
+            .expect("Expected valid JSON");
+    let json_hash = json["structural_hash"]
+        .as_str()
+        .expect("structural_hash string");
+    assert!(is_hex_64(json_hash));
+    assert_eq!(json_hash, main_hash);
+}
+
+#[test]
 fn test_dslx_add_sub_opt_ir2gates_pipeline() {
     let _ = env_logger::try_init();
     let dslx = "

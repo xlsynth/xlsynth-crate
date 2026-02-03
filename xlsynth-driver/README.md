@@ -507,6 +507,21 @@ Example:
 xlsynth-driver ir-fn-node-count my_pkg.ir --top main
 ```
 
+### `ir-fn-structural-hash`
+
+Prints a rename-insensitive structural hash for a single IR function.
+
+- Positional arguments: `<ir_input_file>`
+- Optional:
+  - `--top <NAME>` – function name to hash (overrides the package top).
+  - `--json=<BOOL>` – when true, emits `{"structural_hash":"<hex>"}` (default: false).
+
+Example:
+
+```shell
+xlsynth-driver ir-fn-structural-hash my_pkg.ir --top main
+```
+
 ### `ir-fn-to-json`
 
 Emits a JSON object for a selected IR function. The output includes package/name metadata, canonical PIR text, and a `nodes` array where each node is a structured record (index/id/op/type/operands/etc.).

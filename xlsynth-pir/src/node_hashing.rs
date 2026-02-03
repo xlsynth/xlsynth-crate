@@ -380,29 +380,8 @@ pub fn functions_structurally_equivalent(lhs: &Fn, rhs: &Fn) -> bool {
         return false;
     }
 
-    fn compute_forward_hashes(f: &Fn) -> Vec<FwdHash> {
-        let n = f.nodes.len();
-        if n == 0 {
-            return vec![];
-        }
-        let order = get_topological(f);
-        let mut out: Vec<Option<FwdHash>> = vec![None; n];
-        for nr in order {
-            let deps = operands(&f.get_node(nr).payload);
-            let child_hashes: Vec<FwdHash> = deps
-                .into_iter()
-                .map(|c| out[c.index].expect("child hash must be computed first"))
-                .collect();
-            let h = compute_node_structural_hash(f, nr, &child_hashes);
-            out[nr.index] = Some(h);
-        }
-        out.into_iter()
-            .map(|o| o.expect("hash must be computed for all nodes"))
-            .collect()
-    }
-
-    let lhs_fwd = compute_forward_hashes(lhs);
-    let rhs_fwd = compute_forward_hashes(rhs);
+    let lhs_fwd = compute_forward_structural_hashes(lhs);
+    let rhs_fwd = compute_forward_structural_hashes(rhs);
     lhs_fwd[lhs.ret_node_ref.unwrap().index] == rhs_fwd[rhs.ret_node_ref.unwrap().index]
 }
 
@@ -447,6 +426,56 @@ pub fn compute_depth_limited_forward_hashes(f: &Fn, depth: usize) -> Vec<FwdHash
             .collect();
     }
     hashes
+}
+
+/// Computes forward structural hashes for all nodes in topological order.
+///
+/// The resulting vector index corresponds to `NodeRef.index`.
+pub fn compute_forward_structural_hashes(f: &Fn) -> Vec<FwdHash> {
+    let n = f.nodes.len();
+    if n == 0 {
+        return vec![];
+    }
+    let order = get_topological(f);
+    let mut out: Vec<Option<FwdHash>> = vec![None; n];
+    for nr in order {
+        let deps = operands(&f.get_node(nr).payload);
+        let child_hashes: Vec<FwdHash> = deps
+            .into_iter()
+            .map(|c| out[c.index].expect("child hash must be computed first"))
+            .collect();
+        let h = compute_node_structural_hash(f, nr, &child_hashes);
+        out[nr.index] = Some(h);
+    }
+    out.into_iter()
+        .map(|o| o.expect("hash must be computed for all nodes"))
+        .collect()
+}
+
+/// Computes a rename-insensitive structural hash for a function.
+///
+/// This hash is intentionally based on:
+/// - the return cone structural hash, and
+/// - the function interface (parameter types + return type),
+///
+/// so textual names / ids do not affect the result.
+pub fn compute_function_structural_hash(f: &Fn) -> FwdHash {
+    let mut hasher = blake3::Hasher::new();
+    update_hash_str(&mut hasher, "fn_structural_hash_v1");
+
+    let fwd_hashes = compute_forward_structural_hashes(f);
+    if let Some(ret_nr) = f.ret_node_ref {
+        hasher.update(fwd_hashes[ret_nr.index].as_bytes());
+    } else {
+        update_hash_str(&mut hasher, "<no_ret_node>");
+    }
+
+    update_hash_u64(&mut hasher, f.params.len() as u64);
+    for p in f.params.iter() {
+        update_hash_type(&mut hasher, &p.ty);
+    }
+    update_hash_type(&mut hasher, &f.ret_ty);
+    FwdHash(hasher.finalize())
 }
 
 #[cfg(test)]
@@ -518,5 +547,53 @@ mod tests {
             "#,
         );
         assert!(functions_structurally_equivalent(&lhs, &rhs));
+    }
+
+    #[test]
+    fn function_structural_hash_ignores_param_names_and_text_ids() {
+        let lhs = parse_top_fn(
+            r#"package p
+            top fn f(x: bits[8], y: bits[8]) -> bits[8] {
+              t0: bits[8] = add(x, y, id=3)
+              ret t1: bits[8] = xor(t0, y, id=4)
+            }
+            "#,
+        );
+        let rhs = parse_top_fn(
+            r#"package q
+            top fn g(alpha: bits[8], beta: bits[8]) -> bits[8] {
+              n99: bits[8] = add(alpha, beta, id=103)
+              ret n100: bits[8] = xor(n99, beta, id=104)
+            }
+            "#,
+        );
+        assert_eq!(
+            compute_function_structural_hash(&lhs),
+            compute_function_structural_hash(&rhs)
+        );
+    }
+
+    #[test]
+    fn function_structural_hash_changes_when_logic_changes() {
+        let lhs = parse_top_fn(
+            r#"package p
+            top fn f(x: bits[8], y: bits[8]) -> bits[8] {
+              t0: bits[8] = add(x, y, id=3)
+              ret t1: bits[8] = xor(t0, y, id=4)
+            }
+            "#,
+        );
+        let rhs = parse_top_fn(
+            r#"package q
+            top fn g(x: bits[8], y: bits[8]) -> bits[8] {
+              t0: bits[8] = add(x, y, id=3)
+              ret t1: bits[8] = and(t0, y, id=4)
+            }
+            "#,
+        );
+        assert_ne!(
+            compute_function_structural_hash(&lhs),
+            compute_function_structural_hash(&rhs)
+        );
     }
 }
