@@ -96,9 +96,18 @@ pub fn cost(f: &IrFn, objective: Objective) -> Result<Cost> {
 
     let (g8r_nodes, g8r_depth, g8r_le_graph_milli) = if matches!(
         objective,
-        Objective::G8rNodes | Objective::G8rNodesTimesDepth | Objective::G8rLeGraph
+        Objective::G8rNodes
+            | Objective::G8rNodesTimesDepth
+            | Objective::G8rLeGraph
+            | Objective::G8rLeGraphTimesProduct
     ) {
-        compute_g8r_stats_for_pir_fn(f, matches!(objective, Objective::G8rLeGraph))?
+        compute_g8r_stats_for_pir_fn(
+            f,
+            matches!(
+                objective,
+                Objective::G8rLeGraph | Objective::G8rLeGraphTimesProduct
+            ),
+        )?
     } else {
         (pir_nodes, pir_nodes, 0)
     };
@@ -160,6 +169,8 @@ pub enum Objective {
         alias = "g8r-graph-logical-effort"
     )]
     G8rLeGraph,
+    #[value(name = "g8r-le-graph-times-product")]
+    G8rLeGraphTimesProduct,
 }
 
 impl Objective {
@@ -171,6 +182,10 @@ impl Objective {
                 (c.g8r_nodes as u64).saturating_mul(c.g8r_depth as u64)
             }
             Objective::G8rLeGraph => c.g8r_le_graph_milli as u64,
+            Objective::G8rLeGraphTimesProduct => {
+                let product = (c.g8r_nodes as u64).saturating_mul(c.g8r_depth as u64);
+                (c.g8r_le_graph_milli as u64).saturating_mul(product)
+            }
         }
     }
 }
