@@ -75,6 +75,7 @@ mod ir_fn_cone_extract;
 mod ir_fn_eval;
 mod ir_fn_node_count;
 mod ir_fn_to_block;
+mod ir_fn_to_json;
 mod ir_ged;
 mod ir_localized_eco;
 mod ir_query;
@@ -1757,6 +1758,17 @@ fn main() {
                 .add_ir_top_arg(false),
         )
         .subcommand(
+            clap::Command::new("ir-fn-to-json")
+                .about("Emits the selected IR function as JSON (including PIR text)")
+                .arg(
+                    clap::Arg::new("ir_input_file")
+                        .help("The input IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .add_ir_top_arg(false),
+        )
+        .subcommand(
             clap::Command::new("ir-fn-cone-extract")
                 .about("Extracts the backward cone feeding a selected node down to primary inputs (function parameters)")
                 .arg(
@@ -2421,6 +2433,9 @@ fn main() {
         }
         Some(("ir-fn-node-count", subm)) => {
             ir_fn_node_count::handle_ir_fn_node_count(subm, &config);
+        }
+        Some(("ir-fn-to-json", subm)) => {
+            ir_fn_to_json::handle_ir_fn_to_json(subm, &config);
         }
         Some(("ir-fn-cone-extract", subm)) => {
             ir_fn_cone_extract::handle_ir_fn_cone_extract(subm, &config);

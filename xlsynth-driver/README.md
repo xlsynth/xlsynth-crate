@@ -507,6 +507,20 @@ Example:
 xlsynth-driver ir-fn-node-count my_pkg.ir --top main
 ```
 
+### `ir-fn-to-json`
+
+Emits a JSON object for a selected IR function. The output includes package/name metadata, canonical PIR text, and a `nodes` array where each node is a structured record (index/id/op/type/operands/etc.).
+
+- Positional arguments: `<ir_input_file>`
+- Optional:
+  - `--top <NAME>` – function name to emit (overrides the package top).
+
+Example:
+
+```shell
+xlsynth-driver ir-fn-to-json my_pkg.ir --top main
+```
+
 ### `ir-fn-cone-extract`
 
 Extracts the backward cone feeding a selected sink node down to primary inputs (function parameters) and emits the extracted package IR on **stdout**.
