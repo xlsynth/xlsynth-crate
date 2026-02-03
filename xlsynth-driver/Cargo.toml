@@ -17,6 +17,7 @@ workspace = true
 xlsynth = { path = "../xlsynth", version = "0.29.0" }
 xlsynth-g8r = { path = "../xlsynth-g8r", version = "0.29.0" }
 xlsynth-pir = { path = "../xlsynth-pir", version = "0.29.0" }
+xlsynth-mcmc-pir = { path = "../xlsynth-mcmc-pir", version = "0.29.0" }
 xlsynth-prover = { path = "../xlsynth-prover", version = "0.29.0" }
 clap = "4.5.21"
 tempfile = "3.20"

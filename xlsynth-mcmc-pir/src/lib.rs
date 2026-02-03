@@ -51,6 +51,7 @@ use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_utils::compact_and_toposort_in_place;
 use xlsynth_pir::structural_similarity::collect_structural_entries;
 
+pub mod driver_cli;
 pub mod transforms;
 
 use crate::transforms::{
