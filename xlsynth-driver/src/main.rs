@@ -79,6 +79,7 @@ mod ir_fn_to_block;
 mod ir_fn_to_json;
 mod ir_ged;
 mod ir_localized_eco;
+mod ir_mcmc_opt;
 mod ir_query;
 mod ir_query_corpus;
 mod ir_round_trip;
@@ -677,6 +678,12 @@ fn main() {
                         .num_args(1)
                         .help("Enable the augmented optimizer sandwich (default: false)"),
                 ),
+        )
+        .subcommand(
+            xlsynth_mcmc_pir::driver_cli::add_pir_mcmc_args(
+                clap::Command::new("ir-mcmc-opt")
+                    .about("Optimizes PIR IR with MCMC and emits best artifacts"),
+            ),
         )
         // ir2pipeline subcommand
         // requires a delay model flag
@@ -2324,6 +2331,9 @@ fn main() {
         }
         Some(("ir2opt", subm)) => {
             ir2opt::handle_ir2opt(subm, &config);
+        }
+        Some(("ir-mcmc-opt", subm)) => {
+            ir_mcmc_opt::handle_ir_mcmc_opt(subm);
         }
         Some(("ir2pipeline", subm)) => {
             ir2pipeline::handle_ir2pipeline(subm, &config);

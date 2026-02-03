@@ -178,6 +178,19 @@ fn test_xlsynth_mcmc_crate_version() {
 }
 
 #[test]
+fn test_xlsynth_mcmc_pir_crate_version() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    if std::env::var("CARGO_NET_OFFLINE").is_ok() {
+        eprintln!("CARGO_NET_OFFLINE set - skipping network dependent test");
+        return;
+    }
+    let workspace_root = get_workspace_root();
+    let workspace_path = workspace_root.join("xlsynth-mcmc-pir");
+    validate_local_version_is_latest_patch_version("xlsynth-mcmc-pir", workspace_path.as_path())
+        .unwrap();
+}
+
+#[test]
 fn test_crate_versions_are_equal() {
     let _ = env_logger::builder().is_test(true).try_init();
     let workspace_root = get_workspace_root();
@@ -186,6 +199,7 @@ fn test_crate_versions_are_equal() {
         workspace_root.join("xlsynth-sys"),
         workspace_root.join("xlsynth-driver"),
         workspace_root.join("xlsynth-mcmc"),
+        workspace_root.join("xlsynth-mcmc-pir"),
     ];
     let mut local_versions = vec![];
     for dir in released_crate_dirs {
