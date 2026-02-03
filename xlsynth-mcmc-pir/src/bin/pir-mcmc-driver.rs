@@ -389,6 +389,19 @@ fn main() -> Result<()> {
                 result.best_cost.g8r_le_graph_milli,
             );
         }
+        Objective::G8rLeGraphTimesProduct => {
+            let product = (result.best_cost.g8r_nodes as u64)
+                .saturating_mul(result.best_cost.g8r_depth as u64);
+            let metric = (result.best_cost.g8r_le_graph_milli as u64).saturating_mul(product);
+            println!(
+                "PIR MCMC finished. Best stats: g8r_le_graph={:.3}, g8r_nodes={}, g8r_depth={}, product={}, metric={}",
+                (result.best_cost.g8r_le_graph_milli as f64) / 1000.0,
+                result.best_cost.g8r_nodes,
+                result.best_cost.g8r_depth,
+                product,
+                metric,
+            );
+        }
     }
 
     // Replace the top function in the package with the optimized version.
