@@ -248,6 +248,122 @@ fn render_array_update_expr(base: &str, indices: &[String], value: &str) -> Stri
     update_expr
 }
 
+fn array_literal_expr_for_type(ty: &Type, elements: &[String]) -> Result<String, IrFnToDslxError> {
+    let data = match ty {
+        Type::Array(data) => data,
+        _ => {
+            return Err(IrFnToDslxError::UnsupportedType(format!(
+                "expected array type for array literal rendering, got {}",
+                ty
+            )));
+        }
+    };
+    if elements.len() != data.element_count {
+        return Err(IrFnToDslxError::Internal(format!(
+            "array literal element count mismatch: expected {}, got {}",
+            data.element_count,
+            elements.len()
+        )));
+    }
+    let ty_str = type_to_dslx(ty)?;
+    Ok(format!("{}:[{}]", ty_str, elements.join(", ")))
+}
+
+fn literal_value_to_dslx(value: &xlsynth::IrValue, ty: &Type) -> Result<String, IrFnToDslxError> {
+    match ty {
+        Type::Bits(w) => {
+            let value = value
+                .to_string_fmt_no_prefix(IrFormatPreference::Default)
+                .map_err(|e| IrFnToDslxError::UnsupportedNode(e.to_string()))?;
+            Ok(format!("uN[{}]:{}", w, value))
+        }
+        Type::Tuple(members) => {
+            let elements = value
+                .get_elements()
+                .map_err(|e| IrFnToDslxError::UnsupportedNode(e.to_string()))?;
+            if elements.len() != members.len() {
+                return Err(IrFnToDslxError::Internal(format!(
+                    "tuple literal element count mismatch: expected {}, got {}",
+                    members.len(),
+                    elements.len()
+                )));
+            }
+            let rendered = elements
+                .iter()
+                .zip(members.iter())
+                .map(|(elem, member_ty)| literal_value_to_dslx(elem, member_ty))
+                .collect::<Result<Vec<String>, IrFnToDslxError>>()?;
+            Ok(render_tuple_expr(&rendered))
+        }
+        Type::Array(data) => {
+            let count = value
+                .get_element_count()
+                .map_err(|e| IrFnToDslxError::UnsupportedNode(e.to_string()))?;
+            if count != data.element_count {
+                return Err(IrFnToDslxError::Internal(format!(
+                    "array literal element count mismatch: expected {}, got {}",
+                    data.element_count, count
+                )));
+            }
+            let rendered = (0..count)
+                .map(|i| {
+                    let elem = value
+                        .get_element(i)
+                        .map_err(|e| IrFnToDslxError::UnsupportedNode(e.to_string()))?;
+                    literal_value_to_dslx(&elem, &data.element_type)
+                })
+                .collect::<Result<Vec<String>, IrFnToDslxError>>()?;
+            array_literal_expr_for_type(ty, &rendered)
+        }
+        Type::Token => Err(IrFnToDslxError::UnsupportedType(
+            "token literals are not supported in DSLX function lowering".to_string(),
+        )),
+    }
+}
+
+fn array_slice_default_with_clamping(
+    func: &ir::Fn,
+    array_ref: NodeRef,
+    array_name: &str,
+    out_ty: &Type,
+) -> Result<String, IrFnToDslxError> {
+    let source_data = match &func.get_node(array_ref).ty {
+        Type::Array(data) => data,
+        other => {
+            return Err(IrFnToDslxError::UnsupportedType(format!(
+                "array_slice source must be array type, got {}",
+                other
+            )));
+        }
+    };
+    if source_data.element_count == 0 {
+        return Err(IrFnToDslxError::UnsupportedNode(
+            "array_slice on zero-length source arrays is unsupported".to_string(),
+        ));
+    }
+
+    let out_data = match out_ty {
+        Type::Array(data) => data,
+        other => {
+            return Err(IrFnToDslxError::UnsupportedType(format!(
+                "array_slice output must be array type, got {}",
+                other
+            )));
+        }
+    };
+    if source_data.element_type != out_data.element_type {
+        return Err(IrFnToDslxError::UnsupportedType(format!(
+            "array_slice source/output element type mismatch: source={} output={}",
+            source_data.element_type, out_data.element_type
+        )));
+    }
+
+    let last_index = source_data.element_count - 1;
+    let last_elem_expr = format!("{}[{}]", array_name, last_index);
+    let defaults = std::iter::repeat_n(last_elem_expr, out_data.element_count).collect::<Vec<_>>();
+    array_literal_expr_for_type(out_ty, &defaults)
+}
+
 fn zero_value_expr_for_type(ty: &Type) -> Result<String, IrFnToDslxError> {
     match ty {
         Type::Bits(w) => Ok(format!("uN[{}]:0", w)),
@@ -263,11 +379,8 @@ fn zero_value_expr_for_type(ty: &Type) -> Result<String, IrFnToDslxError> {
         }
         Type::Array(data) => {
             let elem_zero = zero_value_expr_for_type(&data.element_type)?;
-            let elems = std::iter::repeat_n(elem_zero, data.element_count)
-                .collect::<Vec<String>>()
-                .join(", ");
-            let ty_str = type_to_dslx(ty)?;
-            Ok(format!("{}:[{}]", ty_str, elems))
+            let elems = std::iter::repeat_n(elem_zero, data.element_count).collect::<Vec<String>>();
+            array_literal_expr_for_type(ty, &elems)
         }
     }
 }
@@ -279,13 +392,7 @@ fn lower_node_payload(
 ) -> Result<String, IrFnToDslxError> {
     let node = func.get_node(nr);
     match &node.payload {
-        NodePayload::Literal(v) => {
-            let w = bits_width(&node.ty)?;
-            let value = v
-                .to_string_fmt_no_prefix(IrFormatPreference::Default)
-                .map_err(|e| IrFnToDslxError::UnsupportedNode(e.to_string()))?;
-            Ok(format!("uN[{}]:{}", w, value))
-        }
+        NodePayload::Literal(v) => literal_value_to_dslx(v, &node.ty),
         NodePayload::Unop(op, arg) => {
             let arg_name = node_name(node_names, *arg)?;
             match op {
@@ -459,8 +566,7 @@ fn lower_node_payload(
                 .iter()
                 .map(|nr| node_name(node_names, *nr).map(|s| s.to_string()))
                 .collect::<Result<Vec<String>, IrFnToDslxError>>()?;
-            let ty = type_to_dslx(&node.ty)?;
-            Ok(format!("{}:[{}]", ty, values.join(", ")))
+            array_literal_expr_for_type(&node.ty, &values)
         }
         NodePayload::ArrayIndex { array, indices, .. } => {
             let array_name = node_name(node_names, *array)?;
@@ -491,7 +597,8 @@ fn lower_node_payload(
         } => {
             let array_name = node_name(node_names, *array)?;
             let start_name = node_name(node_names, *start)?;
-            let default_value = zero_value_expr_for_type(&node.ty)?;
+            let default_value =
+                array_slice_default_with_clamping(func, *array, array_name, &node.ty)?;
             Ok(format!(
                 "array_slice({}, {}, {})",
                 array_name, start_name, default_value
@@ -789,7 +896,7 @@ top fn f(a: bits[8][4] id=1, i: bits[2] id=2, v: bits[8] id=3) -> bits[8][2] {
         assert!(
             result
                 .dslx_text
-                .contains("array_slice(updated, i, uN[8][2]:[uN[8]:0, uN[8]:0])")
+                .contains("array_slice(updated, i, uN[8][2]:[updated[3], updated[3]])")
         );
     }
 
@@ -826,6 +933,38 @@ top fn f(t: token id=1) -> token {
 "#;
         let result = convert_ir_package_fn_to_dslx(ir_text, None).unwrap();
         assert!(result.dslx_text.contains("fn f(t: token) -> token"));
+    }
+
+    #[test]
+    fn test_convert_array_literal_node() {
+        let ir_text = r#"package sample
+
+top fn f() -> bits[8][3] {
+  ret lit: bits[8][3] = literal(value=[1, 2, 3], id=1)
+}
+"#;
+        let result = convert_ir_package_fn_to_dslx(ir_text, None).unwrap();
+        assert!(
+            result
+                .dslx_text
+                .contains("let lit: uN[8][3] = uN[8][3]:[uN[8]:1, uN[8]:2, uN[8]:3];")
+        );
+    }
+
+    #[test]
+    fn test_convert_tuple_literal_node() {
+        let ir_text = r#"package sample
+
+top fn f() -> (bits[8], bits[8]) {
+  ret lit: (bits[8], bits[8]) = literal(value=(1, 2), id=1)
+}
+"#;
+        let result = convert_ir_package_fn_to_dslx(ir_text, None).unwrap();
+        assert!(
+            result
+                .dslx_text
+                .contains("let lit: (uN[8], uN[8]) = (uN[8]:1, uN[8]:2);")
+        );
     }
 
     #[test]

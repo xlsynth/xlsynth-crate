@@ -69,8 +69,37 @@ fn verify_roundtrip_equivalence(
     config: &Option<ToolchainConfig>,
 ) -> Result<(), String> {
     let fake_dslx_path = Path::new("ir_fn_to_dslx_roundtrip.x");
+
+    // Honor DSLX stdlib/search-path settings from toolchain config so
+    // --verify-roundtrip behaves like other DSLX conversion subcommands.
+    let dslx_stdlib_path_owned = config
+        .as_ref()
+        .and_then(|c| c.dslx.as_ref()?.dslx_stdlib_path.clone());
+    let dslx_stdlib_path = dslx_stdlib_path_owned.as_deref().map(Path::new);
+    let additional_search_paths_owned = config
+        .as_ref()
+        .and_then(|c| c.dslx.as_ref()?.dslx_path.clone())
+        .unwrap_or_default();
+    let additional_search_paths: Vec<&Path> = additional_search_paths_owned
+        .iter()
+        .map(|p| Path::new(p.as_str()))
+        .collect();
+    let enable_warnings = config
+        .as_ref()
+        .and_then(|c| c.dslx.as_ref()?.enable_warnings.as_deref());
+    let disable_warnings = config
+        .as_ref()
+        .and_then(|c| c.dslx.as_ref()?.disable_warnings.as_deref());
+    let dslx_convert_options = DslxConvertOptions {
+        dslx_stdlib_path,
+        additional_search_paths,
+        enable_warnings,
+        disable_warnings,
+        force_implicit_token_calling_convention: false,
+    };
+
     let dslx_convert =
-        xlsynth::convert_dslx_to_ir_text(dslx_text, fake_dslx_path, &DslxConvertOptions::default())
+        xlsynth::convert_dslx_to_ir_text(dslx_text, fake_dslx_path, &dslx_convert_options)
             .map_err(|e| format!("DSLX to IR conversion failed: {}", e))?;
 
     let module_name = fake_dslx_path
