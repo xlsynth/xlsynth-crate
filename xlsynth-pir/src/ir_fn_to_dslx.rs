@@ -798,33 +798,98 @@ fn make_unique_identifier(base: &str, used: &mut HashSet<String>) -> String {
 }
 
 fn is_dslx_keyword(s: &str) -> bool {
+    // Keep this in sync with XLS's scanner keyword table:
+    // xls/dslx/frontend/scanner_keywords.inc
     matches!(
         s,
-        "as" | "const"
+        "as" | "bits"
+            | "bool"
+            | "chan"
+            | "const"
             | "else"
             | "enum"
             | "false"
             | "fn"
             | "for"
             | "if"
+            | "impl"
             | "import"
             | "in"
             | "let"
             | "match"
-            | "mod"
+            | "mut"
+            | "out"
+            | "proc"
             | "pub"
+            | "self"
+            | "spawn"
             | "struct"
-            | "test"
+            | "token"
+            | "trait"
             | "true"
             | "type"
             | "use"
-            | "while"
-    )
+            | "uN"
+            | "sN"
+            | "xN"
+            | "Self"
+    ) || is_dslx_sized_type_keyword(s)
+}
+
+fn is_dslx_sized_type_keyword(s: &str) -> bool {
+    for prefix in ['u', 's'] {
+        if let Some(digits) = s.strip_prefix(prefix) {
+            if digits.is_empty() || digits.starts_with('0') {
+                return false;
+            }
+            if let Ok(width) = digits.parse::<u8>() {
+                return (1..=64).contains(&width);
+            }
+            return false;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_sanitize_dslx_reserved_words() {
+        let keywords = [
+            "as", "bits", "bool", "chan", "const", "else", "enum", "false", "fn", "for", "if",
+            "impl", "import", "in", "let", "match", "mut", "out", "proc", "pub", "self", "spawn",
+            "struct", "token", "trait", "true", "type", "use", "uN", "sN", "xN", "Self",
+        ];
+        for keyword in keywords {
+            assert_eq!(sanitize_identifier(keyword), format!("{}_v", keyword));
+        }
+        for width in 1..=64 {
+            for prefix in ["u", "s"] {
+                let keyword = format!("{}{}", prefix, width);
+                assert_eq!(sanitize_identifier(&keyword), format!("{}_v", keyword));
+            }
+        }
+    }
+
+    #[test]
+    fn test_convert_reserved_names_are_sanitized() {
+        let ir_text = r#"package sample
+
+top fn proc(bits: bits[8] id=1, token: bits[8] id=2) -> bits[8] {
+  bits: bits[8] = param(name=bits, id=1)
+  token: bits[8] = param(name=token, id=2)
+  ret trait: bits[8] = add(bits, token, id=3)
+}
+"#;
+        let result = convert_ir_package_fn_to_dslx(ir_text, None).unwrap();
+        assert!(result.dslx_text.contains("fn proc_v("));
+        assert!(result.dslx_text.contains("bits_v: uN[8]"));
+        assert!(result.dslx_text.contains("token_v: uN[8]"));
+        assert!(result.dslx_text.contains("trait_v"));
+        assert!(result.dslx_text.contains("bits_v + token_v"));
+    }
 
     #[test]
     fn test_convert_simple_add_function() {
