@@ -250,8 +250,11 @@ fn gatify_ir_text_to_g8r_text_and_stats(ir_text: &str) -> Result<(String, Summar
     Ok((gate_fn.to_string(), stats))
 }
 
-pub fn run_pir_mcmc_driver(cli: PirMcmcCliArgs) -> Result<()> {
-    println!("PIR MCMC Driver started with args: {:?}", cli);
+pub fn run_pir_mcmc_driver<F>(cli: PirMcmcCliArgs, mut report: F) -> Result<()>
+where
+    F: FnMut(String),
+{
+    report(format!("PIR MCMC Driver started with args: {:?}", cli));
 
     // Parse IR package.
     let input_path = PathBuf::from(&cli.input_path);
@@ -269,10 +272,10 @@ pub fn run_pir_mcmc_driver(cli: PirMcmcCliArgs) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("No top function found in PIR package"))?;
 
     let initial_cost = cost(&top_fn, cli.metric)?;
-    println!(
+    report(format!(
         "Successfully loaded top function. Initial stats: pir_nodes={}, g8r_nodes={}, g8r_depth={}",
         initial_cost.pir_nodes, initial_cost.g8r_nodes, initial_cost.g8r_depth
-    );
+    ));
 
     // Determine output directory and paths.
     //
@@ -288,10 +291,10 @@ pub fn run_pir_mcmc_driver(cli: PirMcmcCliArgs) -> Result<()> {
         }
         None => {
             let temp_dir = Builder::new().prefix("pir_mcmc_output_").tempdir()?;
-            println!(
+            report(format!(
                 "No output path specified, using temp dir: {}",
                 temp_dir.path().display()
-            );
+            ));
             (temp_dir.path().to_path_buf(), Some(temp_dir))
         }
     };
@@ -444,45 +447,45 @@ pub fn run_pir_mcmc_driver(cli: PirMcmcCliArgs) -> Result<()> {
 
     match cli.metric {
         Objective::Nodes => {
-            println!(
+            report(format!(
                 "PIR MCMC finished. Best stats: pir_nodes={}",
                 result.best_cost.pir_nodes
-            );
+            ));
         }
         Objective::G8rNodes => {
-            println!(
+            report(format!(
                 "PIR MCMC finished. Best stats: g8r_nodes={}",
                 result.best_cost.g8r_nodes
-            );
+            ));
         }
         Objective::G8rNodesTimesDepth => {
-            println!(
+            report(format!(
                 "PIR MCMC finished. Best stats: g8r_nodes={}, g8r_depth={}, product={}",
                 result.best_cost.g8r_nodes,
                 result.best_cost.g8r_depth,
                 (result.best_cost.g8r_nodes as u64)
                     .saturating_mul(result.best_cost.g8r_depth as u64),
-            );
+            ));
         }
         Objective::G8rLeGraph => {
-            println!(
+            report(format!(
                 "PIR MCMC finished. Best stats: g8r_le_graph={:.3} (metric_milli={})",
                 (result.best_cost.g8r_le_graph_milli as f64) / 1000.0,
                 result.best_cost.g8r_le_graph_milli,
-            );
+            ));
         }
         Objective::G8rLeGraphTimesProduct => {
             let product = (result.best_cost.g8r_nodes as u64)
                 .saturating_mul(result.best_cost.g8r_depth as u64);
             let metric = (result.best_cost.g8r_le_graph_milli as u64).saturating_mul(product);
-            println!(
+            report(format!(
                 "PIR MCMC finished. Best stats: g8r_le_graph={:.3}, g8r_nodes={}, g8r_depth={}, product={}, metric={}",
                 (result.best_cost.g8r_le_graph_milli as f64) / 1000.0,
                 result.best_cost.g8r_nodes,
                 result.best_cost.g8r_depth,
                 product,
                 metric,
-            );
+            ));
         }
     }
 
@@ -495,17 +498,17 @@ pub fn run_pir_mcmc_driver(cli: PirMcmcCliArgs) -> Result<()> {
         *top_mut = result.best_fn;
     }
 
-    println!(
+    report(format!(
         "Writing optimized PIR package to {}",
         output_ir_path.display()
-    );
+    ));
     let mut f_ir = std::fs::File::create(&output_ir_path)?;
     let pkg_text_out = emit_pkg_text_toposorted(&pkg)?;
     f_ir.write_all(pkg_text_out.as_bytes())?;
-    println!(
+    report(format!(
         "Successfully wrote optimized PIR to {}",
         output_ir_path.display()
-    );
+    ));
 
     // Emit best artifacts (alongside best.ir even if output_ir_path was
     // customized).

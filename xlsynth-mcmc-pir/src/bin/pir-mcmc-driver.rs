@@ -19,5 +19,5 @@ fn main() -> Result<()> {
         .about("Optimize PIR IR with MCMC and emit best artifacts");
     let matches = add_pir_mcmc_args(cmd).get_matches();
     let cli = parse_pir_mcmc_args(&matches);
-    run_pir_mcmc_driver(cli)
+    run_pir_mcmc_driver(cli, |msg| eprintln!("{msg}"))
 }
