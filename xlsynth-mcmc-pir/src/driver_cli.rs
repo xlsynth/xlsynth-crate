@@ -362,6 +362,9 @@ where
             // Track last written metric to reduce redundant writes when multiple
             // chains hit the same checkpoint boundary.
             let mut last_written: Option<usize> = None;
+            // Monotonic snapshot write index (per run) so filenames sort by
+            // checkpoint write order across chains.
+            let mut write_index: u64 = 0;
             // Track the last "new global best" message so snapshots use the
             // chain/iteration that actually produced the improvement, even if a
             // later periodic tick triggers the write.
@@ -407,9 +410,10 @@ where
                 // message; if not available, fall back to the message that
                 // triggered this write.
                 let snapshot_msg = last_best_update_msg.unwrap_or(msg);
+                write_index = write_index.saturating_add(1);
                 let best_opt_ir_snapshot_path = output_dir_for_thread.join(format!(
-                    "best.c{:03}-i{:06}.opt.ir",
-                    snapshot_msg.chain_no, snapshot_msg.global_iter
+                    "best.w{:06}.c{:03}-i{:06}.opt.ir",
+                    write_index, snapshot_msg.chain_no, snapshot_msg.global_iter
                 ));
                 let _ = std::fs::write(&best_opt_ir_snapshot_path, best_opt_ir_text.as_bytes());
 
@@ -426,8 +430,8 @@ where
                     let _ = std::fs::write(&best_stats_path, stats_json.as_bytes());
 
                     let best_stats_snapshot_path = output_dir_for_thread.join(format!(
-                        "best.c{:03}-i{:06}.stats.json",
-                        snapshot_msg.chain_no, snapshot_msg.global_iter
+                        "best.w{:06}.c{:03}-i{:06}.stats.json",
+                        write_index, snapshot_msg.chain_no, snapshot_msg.global_iter
                     ));
                     let _ = std::fs::write(&best_stats_snapshot_path, stats_json.as_bytes());
                 }
