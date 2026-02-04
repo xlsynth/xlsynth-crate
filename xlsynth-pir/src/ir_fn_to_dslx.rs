@@ -726,8 +726,34 @@ fn lower_node_payload(
                     "sel with zero cases is unsupported".to_string(),
                 ));
             }
-            let mut arms: Vec<String> = Vec::with_capacity(cases.len() + 1);
-            for (i, c) in cases.iter().enumerate() {
+            let selector_shift: u32 = selector_w.try_into().map_err(|_| {
+                IrFnToDslxError::UnsupportedNode(format!(
+                    "sel selector width {} too large for domain calculation",
+                    selector_w
+                ))
+            })?;
+            let selector_domain = 1usize.checked_shl(selector_shift).ok_or_else(|| {
+                IrFnToDslxError::UnsupportedNode(format!(
+                    "sel selector width {} too large for domain calculation",
+                    selector_w
+                ))
+            })?;
+            if default.is_none() && cases.len() != selector_domain {
+                return Err(IrFnToDslxError::UnsupportedNode(format!(
+                    "sel without default requires exactly 2^selector_width cases; got {} cases and selector width {}",
+                    cases.len(),
+                    selector_w
+                )));
+            }
+            // With a default arm, selector values outside [0, 2^selector_width)
+            // are impossible; extra case entries are therefore unreachable.
+            let emitted_case_count = if default.is_some() {
+                std::cmp::min(cases.len(), selector_domain)
+            } else {
+                cases.len()
+            };
+            let mut arms: Vec<String> = Vec::with_capacity(emitted_case_count + 1);
+            for (i, c) in cases.iter().take(emitted_case_count).enumerate() {
                 let case_name = node_name(node_names, *c)?;
                 arms.push(format!("uN[{}]:{} => {}", selector_w, i, case_name));
             }
@@ -736,22 +762,7 @@ fn lower_node_payload(
                     let default_name = node_name(node_names, *d)?;
                     arms.push(format!("_ => {}", default_name));
                 }
-                None => {
-                    let selector_domain =
-                        1usize.checked_shl(selector_w as u32).ok_or_else(|| {
-                            IrFnToDslxError::UnsupportedNode(format!(
-                                "sel selector width {} too large for domain calculation",
-                                selector_w
-                            ))
-                        })?;
-                    if cases.len() != selector_domain {
-                        return Err(IrFnToDslxError::UnsupportedNode(format!(
-                            "sel without default requires exactly 2^selector_width cases; got {} cases and selector width {}",
-                            cases.len(),
-                            selector_w
-                        )));
-                    }
-                }
+                None => {}
             }
             Ok(format!("match {} {{ {} }}", selector_name, arms.join(", ")))
         }
@@ -889,6 +900,26 @@ top fn proc(bits: bits[8] id=1, token: bits[8] id=2) -> bits[8] {
         assert!(result.dslx_text.contains("token_v: uN[8]"));
         assert!(result.dslx_text.contains("trait_v"));
         assert!(result.dslx_text.contains("bits_v + token_v"));
+    }
+
+    #[test]
+    fn test_convert_sel_with_default_ignores_unreachable_extra_cases() {
+        let ir_text = r#"package sample
+
+top fn f(s: bits[1] id=1, a: bits[8] id=2, b: bits[8] id=3, c: bits[8] id=4, d: bits[8] id=5) -> bits[8] {
+  s: bits[1] = param(name=s, id=1)
+  a: bits[8] = param(name=a, id=2)
+  b: bits[8] = param(name=b, id=3)
+  c: bits[8] = param(name=c, id=4)
+  d: bits[8] = param(name=d, id=5)
+  ret out: bits[8] = sel(s, cases=[a, b, c], default=d, id=6)
+}
+"#;
+        let result = convert_ir_package_fn_to_dslx(ir_text, None).unwrap();
+        assert!(result.dslx_text.contains("uN[1]:0 => a"));
+        assert!(result.dslx_text.contains("uN[1]:1 => b"));
+        assert!(result.dslx_text.contains("_ => d"));
+        assert!(!result.dslx_text.contains("uN[1]:2 =>"));
     }
 
     #[test]
