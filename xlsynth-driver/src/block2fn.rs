@@ -90,11 +90,12 @@ fn parse_csv_set(input: &str) -> Result<BTreeSet<String>, String> {
 
 fn parse_literal_bits(value: &str) -> Result<IrBits, String> {
     let trimmed = value.trim();
-    let typed = if trimmed.starts_with("bits[") {
-        trimmed.to_string()
-    } else {
-        format!("bits[1]:{trimmed}")
-    };
+    if !trimmed.starts_with("bits[") {
+        return Err(format!(
+            "tie-input-ports literal '{trimmed}' must include a bits[N]: prefix"
+        ));
+    }
+    let typed = trimmed.to_string();
     let ir_value =
         IrValue::parse_typed(&typed).map_err(|e| format!("parse literal '{trimmed}': {e}"))?;
     ir_value
