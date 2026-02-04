@@ -1048,7 +1048,7 @@ fn match_select_named_arg(
 mod tests {
     use super::*;
     use crate::ir;
-    use crate::ir::{PackageMember};
+    use crate::ir::PackageMember;
     use crate::ir_parser::Parser;
 
     #[test]

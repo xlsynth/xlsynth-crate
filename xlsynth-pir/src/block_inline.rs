@@ -5,6 +5,8 @@ use std::collections::{BTreeMap, HashMap};
 use crate::ir::{self, BlockMetadata, MemberType, NodePayload, NodeRef, PackageMember, Register};
 use crate::ir_utils::{compact_and_toposort_in_place, get_topological, remap_payload_with};
 
+// Inlines all block instantiations in the package. All blocks are removed after
+// inlining except for the top block.
 pub fn inline_all_blocks_in_package(pkg: &mut ir::Package) -> Result<(), String> {
     loop {
         let mut progress = false;

@@ -26,6 +26,8 @@ pub struct Block2FnResult {
     pub function: ir::Fn,
 }
 
+// Converts the top block of the package into a function. Optionally tie off
+// inputs, drop outputs and clock input.
 pub fn block_package_to_fn(
     pkg: &ir::Package,
     options: &Block2FnOptions,

@@ -36,6 +36,7 @@
 
 mod aig_equiv;
 mod aig_stats;
+mod block2fn;
 mod common;
 mod dslx2ir;
 mod dslx2pipeline;
@@ -55,7 +56,6 @@ mod g8r2v;
 mod g8r_cli;
 mod g8r_equiv;
 mod gv2aig;
-mod block2fn;
 mod gv2block;
 mod gv2ir;
 mod gv_dump_cone;

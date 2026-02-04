@@ -117,12 +117,12 @@ xlsynth-driver gv2block \
 
 Inlines blocks and converts the resulting Block IR into a PIR function. The following steps are performed:
 
-* Optionally removes inputs ports and ties their uses to a constant. Specified via `--tie-input-ports`.
-* Optionally removes output ports (`--drop-output-ports`).
-* Performs a trivial optimization pass handled the tied input ports. The motivation for this is to remove feedback loops caused input ports which feed load-enable functionality (for example, `input_valid`).
-* Collapses registers into wires. If a cycle is created after collapsing, an error is returned.
-* Optionally drop a clock input port (`clock-port`).
-* Converts the resulting combinational block into a function.
+- Optionally removes inputs ports and ties their uses to a constant. Specified via `--tie-input-ports`.
+- Optionally removes output ports (`--drop-output-ports`).
+- Performs a trivial optimization pass handling the tied input ports. The motivation for this is to remove feedback loops caused by load-enable functionality. A common case is an `input_valid` signal muxing the register output with data to form the register input. Tying `input_valid` to
+- Collapses registers into wires. If a cycle is created after collapsing, an error is returned.
+- Optionally drop a clock input port (`clock-port`).
+- Converts the resulting combinational block into a function.
 
 This is useful for converting a block generated from a netlist into a function.
 
