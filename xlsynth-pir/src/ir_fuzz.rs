@@ -137,6 +137,11 @@ pub enum FuzzOp {
         array: FuzzOperand,
         index: FuzzOperand,
     },
+    ArraySlice {
+        array: FuzzOperand,
+        start: FuzzOperand,
+        width: u64,
+    },
     ArrayUpdate {
         array: FuzzOperand,
         value: FuzzOperand,
@@ -186,6 +191,7 @@ pub enum FuzzOpFlat {
     Sel,
     PrioritySel,
     ArrayIndex,
+    ArraySlice,
     Array,
     ArrayUpdate,
     Decode,
@@ -214,6 +220,7 @@ fn to_flat(op: &FuzzOp) -> FuzzOpFlat {
         FuzzOp::Sel { .. } => FuzzOpFlat::Sel,
         FuzzOp::PrioritySel { .. } => FuzzOpFlat::PrioritySel,
         FuzzOp::ArrayIndex { .. } => FuzzOpFlat::ArrayIndex,
+        FuzzOp::ArraySlice { .. } => FuzzOpFlat::ArraySlice,
         FuzzOp::Array { .. } => FuzzOpFlat::Array,
         FuzzOp::ArrayUpdate { .. } => FuzzOpFlat::ArrayUpdate,
         FuzzOp::Decode { .. } => FuzzOpFlat::Decode,
@@ -534,6 +541,16 @@ pub fn generate_ir_fn(
                 let array = &available_nodes[array.index % available_nodes.len()];
                 let index = &available_nodes[index.index % available_nodes.len()];
                 fn_builder.array_index(array, index, None)
+            }
+            FuzzOp::ArraySlice {
+                array,
+                start,
+                width,
+            } => {
+                assert!(width > 0, "array slice has no width");
+                let array_bv = &available_nodes[array.index % available_nodes.len()];
+                let start_bv = &available_nodes[start.index % available_nodes.len()];
+                fn_builder.array_slice(array_bv, start_bv, width, None)
             }
             FuzzOp::Array { elements } => {
                 let elements: Vec<BValue> = elements
@@ -1010,6 +1027,28 @@ fn generate_fuzz_op(
                 index: FuzzOperand { index },
             };
             (op, aty.get_array_element_type().clone())
+        }
+        FuzzOpFlat::ArraySlice => {
+            let (array_idx, array_ty) = pick_array_type(u, node_types)?;
+            let (start_idx, _) = pick_bits_type(u, node_types)?;
+            let (element_ty, element_count) = match &array_ty {
+                InternalType::Array(arr) if arr.element_count > 0 => {
+                    (arr.element_type.as_ref().clone(), arr.element_count)
+                }
+                _ => return Err(arbitrary::Error::IncorrectFormat),
+            };
+            let width = u.int_in_range(1..=element_count as u64)?;
+            (
+                FuzzOp::ArraySlice {
+                    array: FuzzOperand { index: array_idx },
+                    start: FuzzOperand { index: start_idx },
+                    width,
+                },
+                InternalType::Array(crate::ir::ArrayTypeData {
+                    element_type: Box::new(element_ty),
+                    element_count: width as usize,
+                }),
+            )
         }
         FuzzOpFlat::Array => {
             let num_elements = u.int_in_range(1..=MAX_ELEMENTS_PER_ARRAY)?;

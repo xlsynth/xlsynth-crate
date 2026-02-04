@@ -76,6 +76,7 @@ mod ir_fn_eval;
 mod ir_fn_node_count;
 mod ir_fn_structural_hash;
 mod ir_fn_to_block;
+mod ir_fn_to_dslx;
 mod ir_fn_to_json;
 mod ir_ged;
 mod ir_localized_eco;
@@ -747,6 +748,28 @@ fn main() {
                         .index(1),
                 )
                 .add_ir_top_arg(true),
+        )
+        .subcommand(
+            clap::Command::new("ir-fn-to-dslx")
+                .about("Converts an IR function to DSLX function text")
+                .arg(
+                    clap::Arg::new("ir_input_file")
+                        .help("The input IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .add_ir_top_arg(true)
+                .arg(
+                    Arg::new("verify_roundtrip")
+                        .long("verify-roundtrip")
+                        .value_name("BOOL")
+                        .action(ArgAction::Set)
+                        .value_parser(["true", "false"])
+                        .num_args(1)
+                        .help(
+                            "Convert emitted DSLX back to IR and prove equivalence against input IR",
+                        ),
+                ),
         )
         .subcommand(
             clap::Command::new("ir2delayinfo")
@@ -2367,6 +2390,9 @@ fn main() {
         }
         Some(("ir-fn-to-block", subm)) => {
             ir_fn_to_block::handle_ir_fn_to_block(subm, &config);
+        }
+        Some(("ir-fn-to-dslx", subm)) => {
+            ir_fn_to_dslx::handle_ir_fn_to_dslx(subm, &config);
         }
         Some(("ir-structural-similarity", subm)) => {
             ir_structural_similarity::handle_ir_structural_similarity(subm, &config);
