@@ -669,6 +669,27 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
     }
 }
 
+pub(crate) fn eval_pure_if_supported(
+    n: &ir::Node,
+    env: &HashMap<ir::NodeRef, IrValue>,
+) -> Option<IrValue> {
+    match n.payload {
+        ir::NodePayload::Nil
+        | ir::NodePayload::GetParam(_)
+        | ir::NodePayload::Assert { .. }
+        | ir::NodePayload::Trace { .. }
+        | ir::NodePayload::InstantiationInput { .. }
+        | ir::NodePayload::InstantiationOutput { .. }
+        | ir::NodePayload::RegisterRead { .. }
+        | ir::NodePayload::RegisterWrite { .. }
+        | ir::NodePayload::AfterAll(_)
+        | ir::NodePayload::Invoke { .. }
+        | ir::NodePayload::Cover { .. }
+        | ir::NodePayload::CountedFor { .. } => None,
+        _ => Some(eval_pure(n, env)),
+    }
+}
+
 fn observed_type_string_for_expected(expected: &ir::Type, value: &IrValue) -> String {
     match expected {
         ir::Type::Bits(_) => match value.to_bits() {

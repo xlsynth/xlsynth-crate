@@ -55,6 +55,7 @@ mod g8r2v;
 mod g8r_cli;
 mod g8r_equiv;
 mod gv2aig;
+mod block2fn;
 mod gv2block;
 mod gv2ir;
 mod gv_dump_cone;
@@ -1364,6 +1365,38 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new("block2fn")
+                .about("Inlines a block and converts it to a PIR function")
+                .arg(
+                    Arg::new("block_ir")
+                        .long("block_ir")
+                        .help("Input Block IR file")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("tie_input_ports")
+                        .long("tie-input-ports")
+                        .help("Comma-separated input ties (e.g., A=0,B=0b1011)")
+                        .required(false)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("drop_output_ports")
+                        .long("drop-output-ports")
+                        .help("Comma-separated output port names to drop")
+                        .required(false)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("clock_port")
+                        .long("clock-port")
+                        .help("Clock port name to strip from the function signature")
+                        .required(false)
+                        .action(ArgAction::Set),
+                ),
+        )
+        .subcommand(
             clap::Command::new("gv2block")
                 .about("Converts a gate-level netlist and Liberty proto to block IR")
                 .arg(
@@ -2365,6 +2398,9 @@ fn main() {
         }
         Some(("lib-query", subm)) => {
             lib_query::handle_lib_query(subm, &config);
+        }
+        Some(("block2fn", subm)) => {
+            block2fn::handle_block2fn(subm, &config);
         }
         Some(("gv2block", subm)) => {
             gv2block::handle_gv2block(subm);

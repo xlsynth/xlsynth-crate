@@ -6,6 +6,8 @@
 //! representing, querying/manipulating, etc.
 
 pub mod aug_opt;
+pub mod block2fn;
+pub mod block_inline;
 pub mod corners;
 pub mod dce;
 pub mod desugar_extensions;
@@ -42,3 +44,6 @@ pub use aug_opt::{AugOptMode, AugOptOptions, run_aug_opt_over_ir_text};
 
 #[cfg(test)]
 pub mod test_utils;
+
+#[cfg(test)]
+mod block2fn_test;

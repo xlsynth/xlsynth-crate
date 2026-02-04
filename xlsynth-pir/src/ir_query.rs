@@ -81,6 +81,7 @@ pub enum NamedArgValue {
     Bool(bool),
     Number(usize),
     Any,
+    String(String),
     Expr(QueryExpr),
     ExprList(Vec<QueryExpr>),
 }
@@ -167,7 +168,10 @@ fn validate_ellipsis_placement(expr: &QueryExpr) -> Result<(), String> {
                 // operand list, and ellipsis provides useful "any arity" matching.
                 for na in &m.named_args {
                     match &na.value {
-                        NamedArgValue::Any | NamedArgValue::Bool(_) | NamedArgValue::Number(_) => {}
+                        NamedArgValue::Any
+                        | NamedArgValue::Bool(_)
+                        | NamedArgValue::Number(_)
+                        | NamedArgValue::String(_) => {}
                         NamedArgValue::Expr(e) => walk(e, /* ellipsis_allowed_here= */ false)?,
                         NamedArgValue::ExprList(es) => {
                             let allow_in_list = na.name.as_str() == "cases";
@@ -280,7 +284,10 @@ fn validate_width_matcher_placement(expr: &QueryExpr) -> Result<(), String> {
                 // Allow width only in the numeric named args where we know how to interpret it.
                 for na in &m.named_args {
                     match &na.value {
-                        NamedArgValue::Any | NamedArgValue::Bool(_) | NamedArgValue::Number(_) => {}
+                        NamedArgValue::Any
+                        | NamedArgValue::Bool(_)
+                        | NamedArgValue::Number(_)
+                        | NamedArgValue::String(_) => {}
                         NamedArgValue::Expr(e) => {
                             let allow = na.name.as_str() == "start" || na.name.as_str() == "width";
                             walk(e, /* width_allowed_here= */ allow)?;
@@ -311,6 +318,14 @@ pub fn find_matching_nodes(f: &ir::Fn, query: &QueryExpr) -> Vec<ir::NodeRef> {
         }
     }
     matches
+}
+
+/// Returns true if `query` matches the given node. This is expensive: O(n) with
+/// the number of nodes in the function.
+pub fn matches_node(f: &ir::Fn, query: &QueryExpr, node_ref: ir::NodeRef) -> bool {
+    let users = ir_utils::compute_users(f);
+    let bindings = HashMap::new();
+    !match_solutions(query, f, &users, node_ref, &bindings).is_empty()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -438,6 +453,7 @@ fn match_solutions(
                     &node.payload,
                     f,
                     users,
+                    node_ref,
                     bindings,
                 ) {
                     out.extend(match_literal_solutions(
@@ -463,6 +479,7 @@ fn match_solutions(
                     &node.payload,
                     f,
                     users,
+                    node_ref,
                     &b,
                 ));
             }
@@ -871,6 +888,7 @@ fn match_named_args_solutions(
     payload: &ir::NodePayload,
     f: &ir::Fn,
     users: &HashMap<ir::NodeRef, HashSet<ir::NodeRef>>,
+    node_ref: ir::NodeRef,
     bindings: &Bindings,
 ) -> Vec<Bindings> {
     if named_args.is_empty() {
@@ -881,7 +899,39 @@ fn match_named_args_solutions(
         let mut next = Vec::new();
         for b in &partials {
             let mut matched = Vec::new();
+            if arg.name.as_str() == "name" {
+                let node_name = f.get_node(node_ref).name.as_deref();
+                match &arg.value {
+                    NamedArgValue::Any => {
+                        if node_name.is_some() {
+                            matched.push(b.clone());
+                        }
+                    }
+                    NamedArgValue::String(expected) => {
+                        if node_name == Some(expected.as_str()) {
+                            matched.push(b.clone());
+                        }
+                    }
+                    _ => {}
+                }
+                next.extend(matched);
+                continue;
+            }
             match payload {
+                ir::NodePayload::RegisterRead { register }
+                | ir::NodePayload::RegisterWrite { register, .. }
+                    if arg.name.as_str() == "register" =>
+                {
+                    match &arg.value {
+                        NamedArgValue::Any => matched.push(b.clone()),
+                        NamedArgValue::String(expected) => {
+                            if register == expected {
+                                matched.push(b.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 ir::NodePayload::BitSlice { start, width, .. } => {
                     let actual: usize = match arg.name.as_str() {
                         "width" => *width,
@@ -998,6 +1048,7 @@ fn match_select_named_arg(
 mod tests {
     use super::*;
     use crate::ir;
+    use crate::ir::{PackageMember};
     use crate::ir_parser::Parser;
 
     #[test]
@@ -1149,6 +1200,94 @@ fn main(x: bits[4] id=1) -> bits[5] {
             .collect();
         ids.sort();
         assert_eq!(ids, vec!["oh_f", "oh_t"]);
+    }
+
+    #[test]
+    fn find_matches_with_name_named_arg() {
+        let pkg_text = r#"package test
+
+fn main(x: bits[1] id=1, y: bits[1] id=2) -> bits[1] {
+  foo: bits[1] = and(x, y, id=3)
+  bar: bits[1] = or(x, y, id=4)
+  ret out: bits[1] = xor(foo, bar, id=5)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+
+        let query = parse_query("and(name=\"foo\", _, _)").unwrap();
+        let matches = find_matching_nodes(f, &query);
+        assert_eq!(matches.len(), 1);
+        let node_id = ir::node_textual_id(f, matches[0]);
+        assert_eq!(node_id, "foo");
+    }
+
+    #[test]
+    fn matches_node_checks_single_node() {
+        let pkg_text = r#"package test
+
+fn main(x: bits[1] id=1, y: bits[1] id=2) -> bits[1] {
+  foo: bits[1] = and(x, y, id=3)
+  ret out: bits[1] = or(x, y, id=4)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+
+        let foo_ref = f
+            .nodes
+            .iter()
+            .enumerate()
+            .find(|(_, node)| node.name.as_deref() == Some("foo"))
+            .map(|(idx, _)| ir::NodeRef { index: idx })
+            .expect("foo node");
+
+        let query = parse_query("and(name=\"foo\", _, _)").unwrap();
+        assert!(matches_node(f, &query, foo_ref));
+
+        let out_ref = f.ret_node_ref.expect("return node");
+        assert!(!matches_node(f, &query, out_ref));
+    }
+
+    #[test]
+    fn find_matches_register_read_write_name_named_arg() {
+        let pkg_text = r#"package test
+
+block top(x: bits[1], y: bits[1]) {
+  reg r(bits[1])
+  x: bits[1] = input_port(name=x, id=1)
+  r_q: bits[1] = register_read(register=r, id=2)
+  r_d: () = register_write(x, register=r, id=3)
+  y: () = output_port(r_q, name=y, id=4)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let PackageMember::Block { func: f, .. } = pkg.get_block("top").unwrap() else {
+            panic!("expected block");
+        };
+
+        let read_query = parse_query("register_read(name=\"r_q\")").unwrap();
+        let read_matches = find_matching_nodes(f, &read_query);
+        assert_eq!(read_matches.len(), 1);
+        assert_eq!(ir::node_textual_id(&f, read_matches[0]), "r_q");
+
+        let write_query = parse_query("register_write(name=\"r_d\")").unwrap();
+        let write_matches = find_matching_nodes(f, &write_query);
+        assert_eq!(write_matches.len(), 1);
+        assert_eq!(ir::node_textual_id(&f, write_matches[0]), "r_d");
+
+        let read_reg_query = parse_query("register_read(register=\"r\")").unwrap();
+        let read_reg_matches = find_matching_nodes(f, &read_reg_query);
+        assert_eq!(read_reg_matches.len(), 1);
+        assert_eq!(ir::node_textual_id(&f, read_reg_matches[0]), "r_q");
+
+        let write_reg_query = parse_query("register_write(register=\"r\")").unwrap();
+        let write_reg_matches = find_matching_nodes(f, &write_reg_query);
+        assert_eq!(write_reg_matches.len(), 1);
+        assert_eq!(ir::node_textual_id(&f, write_reg_matches[0]), "r_d");
     }
 
     #[test]
