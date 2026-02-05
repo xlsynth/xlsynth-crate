@@ -335,6 +335,7 @@ impl<'a> QueryParser<'a> {
         self.bump();
         self.skip_ws();
         let value = match self.peek() {
+            Some(b'"') => NamedArgValue::String(self.parse_string_literal()?),
             Some(b'[') => NamedArgValue::ExprList(self.parse_expr_list()?),
             _ => {
                 if ident == "lsb_prio" {
@@ -395,6 +396,51 @@ impl<'a> QueryParser<'a> {
             }
         };
         Ok(Some(NamedArg { name: ident, value }))
+    }
+
+    fn parse_string_literal(&mut self) -> Result<String, String> {
+        self.expect('"')?;
+        let mut out = String::new();
+        loop {
+            match self.peek() {
+                Some(b'"') => {
+                    self.bump();
+                    break;
+                }
+                Some(b'\\') => {
+                    self.bump();
+                    match self.peek() {
+                        Some(b'"') => {
+                            self.bump();
+                            out.push('"');
+                        }
+                        Some(b'\\') => {
+                            self.bump();
+                            out.push('\\');
+                        }
+                        Some(b'n') => {
+                            self.bump();
+                            out.push('\n');
+                        }
+                        Some(b't') => {
+                            self.bump();
+                            out.push('\t');
+                        }
+                        Some(b'r') => {
+                            self.bump();
+                            out.push('\r');
+                        }
+                        _ => return Err(self.error("invalid escape in string literal")),
+                    }
+                }
+                Some(b) => {
+                    self.bump();
+                    out.push(b as char);
+                }
+                None => return Err(self.error("unterminated string literal")),
+            }
+        }
+        Ok(out)
     }
 
     fn parse_expr_list(&mut self) -> Result<Vec<QueryExpr>, String> {

@@ -113,6 +113,27 @@ xlsynth-driver gv2block \
   --liberty_proto ~/asap7.proto > ~/my_netlist.block.ir
 ```
 
+### `block2fn`: Block IR to PIR function
+
+Inlines blocks and converts the resulting Block IR into a PIR function. The following steps are performed:
+
+- Optionally removes inputs ports and ties their uses to a constant. Specified via `--tie-input-ports`.
+- Optionally removes output ports (`--drop-output-ports`).
+- Performs a trivial optimization pass handling the tied input ports. The motivation for this is to remove feedback loops caused by load-enable functionality. A common case is an `input_valid` signal muxing the register output with data to form the register input. Tying `input_valid` to 1 and optimizing cuts this cycle.
+- Collapses registers into wires. If a cycle is created after collapsing, an error is returned.
+- Optionally drop a clock input port (`clock-port`).
+- Converts the resulting combinational block into a function.
+
+This is useful for converting a block generated from a netlist into a function.
+
+```shell
+xlsynth-driver block2fn \
+  --block_ir ~/my_netlist.block.ir \
+  --tie-input-ports "A=bits[1]:0,B=bits[4]:0b1011" \
+  --drop-output-ports "unused_out" \
+  --clock-port "clk" > ~/my_netlist.fn.ir
+```
+
 ### `gv2aig`: gate-level netlist to AIGER
 
 Converts a gate-level netlist plus Liberty proto into an AIGER file.
@@ -646,6 +667,8 @@ Query expression basics:
 - `msb(x)` is shorthand for matching a `bit_slice` of the highest bit (width 1) of `x`.
 - Named arguments are supported where the IR operator accepts them (e.g., `sel(selector=..., cases=[...], default=...)`).
   - Named-arg values use the same expression syntax as positional args, so numeric literals like `selector=1` and `default=0` match literal nodes.
+  - String literals are supported in named args (e.g., `name="foo"`).
+  - `name="foo"` is a universal named-arg matcher that checks the node's name.
   - `lsb_prio` accepts only `true`, `false`, or `_` and is rejected otherwise.
 
 Example:

@@ -2,7 +2,7 @@
 
 //! Utility functions for working with / on XLS IR.
 
-use crate::ir::{Fn, Node, NodePayload, NodeRef, Package, PackageMember, Type};
+use crate::ir::{self, Fn, Node, NodePayload, NodeRef, Package, PackageMember, Type};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -408,6 +408,68 @@ pub fn param_type_by_name(f: &Fn, param_name: &str) -> Option<Type> {
         .iter()
         .find(|param| param.name == param_name)
         .map(|param| param.ty.clone())
+}
+
+/// Returns Err with a cycle description if any exist.
+pub fn verify_no_cycle(f: &Fn) -> Result<(), String> {
+    let n = f.nodes.len();
+    if n == 0 {
+        return Ok(());
+    }
+
+    let mut state: Vec<u8> = vec![0; n]; // 0=unvisited,1=visiting,2=done
+    let mut parent: Vec<Option<usize>> = vec![None; n];
+
+    for start in 0..n {
+        if state[start] != 0 {
+            continue;
+        }
+        let mut stack: Vec<(usize, usize)> = vec![(start, 0)];
+        state[start] = 1;
+
+        while let Some((node_idx, next_child)) = stack.pop() {
+            let deps = operands(&f.nodes[node_idx].payload);
+            if next_child < deps.len() {
+                let child = deps[next_child].index;
+                stack.push((node_idx, next_child + 1));
+                if state[child] == 0 {
+                    state[child] = 1;
+                    parent[child] = Some(node_idx);
+                    stack.push((child, 0));
+                } else if state[child] == 1 {
+                    let mut cycle: Vec<NodeRef> = Vec::new();
+                    cycle.push(NodeRef { index: child });
+                    let mut cur = node_idx;
+                    while cur != child {
+                        cycle.push(NodeRef { index: cur });
+                        cur = parent[cur].unwrap_or(child);
+                    }
+                    cycle.push(NodeRef { index: child });
+                    cycle.reverse();
+                    let cycle_desc = cycle
+                        .iter()
+                        .map(|nr| ir::node_textual_id(f, *nr))
+                        .collect::<Vec<String>>()
+                        .join(" -> ");
+                    return Err(format!("cycle detected: {cycle_desc}"));
+                }
+                continue;
+            }
+            state[node_idx] = 2;
+        }
+    }
+    Ok(())
+}
+
+/// Returns the `NodeRef` corresponding to the node named `name` in `f`, if any.
+pub fn find_node_by_name(f: &Fn, name: &str) -> Option<NodeRef> {
+    f.nodes.iter().enumerate().find_map(|(idx, node)| {
+        if node.name.as_deref() == Some(name) {
+            Some(NodeRef { index: idx })
+        } else {
+            None
+        }
+    })
 }
 
 /// Compacts and reorders the nodes of a function in place.
@@ -966,20 +1028,6 @@ mod tests {
             .unwrap()
     }
 
-    fn find_node_by_name(f: &Fn, name: &str) -> NodeRef {
-        f.nodes
-            .iter()
-            .enumerate()
-            .find_map(|(idx, node)| {
-                if node.name.as_deref() == Some(name) {
-                    Some(NodeRef { index: idx })
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| panic!("node named {name} not found"))
-    }
-
     fn verify_topo_property(f: &Fn, order: &[NodeRef]) {
         // Build position map
         let mut pos: Vec<usize> = vec![0; f.nodes.len()];
@@ -1252,9 +1300,9 @@ mod tests {
   ret and_node: bits[1] = and(a, x, id=3)
 }"#,
         );
-        let a_ref = find_node_by_name(&f, "a");
-        let param_ref = find_node_by_name(&f, "x");
-        let ret_ref = find_node_by_name(&f, "and_node");
+        let a_ref = find_node_by_name(&f, "a").unwrap();
+        let param_ref = find_node_by_name(&f, "x").unwrap();
+        let ret_ref = find_node_by_name(&f, "and_node").unwrap();
 
         replace_node_with_ref(&mut f, a_ref, param_ref).expect("replace should succeed");
 
@@ -1278,7 +1326,7 @@ mod tests {
   ret out: bits[1] = identity(tmp, id=3)
 }"#,
         );
-        let param_ref = find_node_by_name(&f, "x");
+        let param_ref = find_node_by_name(&f, "x").unwrap();
         let ret_ref = f.ret_node_ref.expect("ret node ref");
 
         replace_node_with_ref(&mut f, ret_ref, param_ref).expect("replace should succeed");
@@ -1295,8 +1343,8 @@ mod tests {
   ret out: bits[1] = identity(a, id=4)
 }"#,
         );
-        let wide_ref = find_node_by_name(&f, "wide");
-        let out_ref = find_node_by_name(&f, "out");
+        let wide_ref = find_node_by_name(&f, "wide").unwrap();
+        let out_ref = find_node_by_name(&f, "out").unwrap();
         let result = replace_node_with_ref(&mut f, out_ref, wide_ref);
         assert!(result.is_err());
     }
@@ -1309,7 +1357,7 @@ mod tests {
   ret out: bits[2] = identity(x, id=3)
 }"#,
         );
-        let dead_ref = find_node_by_name(&f, "dead");
+        let dead_ref = find_node_by_name(&f, "dead").unwrap();
         let new_payload = NodePayload::GetParam(f.params[0].id);
         replace_node_payload(&mut f, dead_ref, new_payload.clone(), Some(Type::Bits(2)))
             .expect("payload replacement should succeed");
@@ -1325,7 +1373,7 @@ mod tests {
   ret out: bits[1] = identity(x, id=2)
 }"#,
         );
-        let out_ref = find_node_by_name(&f, "out");
+        let out_ref = find_node_by_name(&f, "out").unwrap();
         let bogus_payload = NodePayload::Unop(
             Unop::Identity,
             NodeRef {
