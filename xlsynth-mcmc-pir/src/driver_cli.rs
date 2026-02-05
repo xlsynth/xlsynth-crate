@@ -95,7 +95,7 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 .long("output")
                 .value_name("OUTPUT_DIR")
                 .help(
-                    "Output directory for artifacts like best.ir, orig.opt.ir, and best.stats.json.",
+                    "Output directory for artifacts like best.ir, orig.opt.ir, best.stats.json, and trajectory.cNNN.jsonl.",
                 )
                 .action(ArgAction::Set),
         )
@@ -311,7 +311,7 @@ where
         initial_temperature: cli.initial_temperature,
         objective: cli.metric,
         enable_formal_oracle: cli.formal_oracle,
-        trajectory_dir: None,
+        trajectory_dir: Some(output_dir.clone()),
     };
 
     // Optional checkpoint writer: overwrites best.* artifacts periodically so

@@ -455,7 +455,8 @@ Requires `--top <NAME>` to select the entry point.
 
 Runs the PIR MCMC optimizer and emits optimization artifacts to an output
 directory (`best.ir`, `best.opt.ir`, `best.g8r`, `best.stats.json`,
-`orig.ir`, `orig.opt.ir`, `orig.g8r`, `orig.stats.json`).
+`orig.ir`, `orig.opt.ir`, `orig.g8r`, `orig.stats.json`,
+`trajectory.cNNN.jsonl`).
 
 This subcommand intentionally shares the same flag surface as
 `pir-mcmc-driver` from the `xlsynth-mcmc-pir` crate.
