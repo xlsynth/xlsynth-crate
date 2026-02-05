@@ -19,7 +19,7 @@ detect_platform() {
 }
 
 required_xls_tag() {
-  /usr/bin/python3 "${repo_root}/scripts/get_required_xls_release_tag.py"
+  /usr/bin/python3 "${repo_root}/scripts/get_required_libxls_dso_and_tools_release_tag.py"
 }
 
 platform="$(detect_platform)"

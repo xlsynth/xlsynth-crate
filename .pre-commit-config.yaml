@@ -75,10 +75,10 @@ repos:
         language: system
         pass_filenames: false
 
-      - id: get-required-xls-release-tag
-        name: get_required_xls_release_tag.py runs successfully
-        description: Ensure the scripts/get_required_xls_release_tag.py script exits with code 0
-        entry: python3 scripts/get_required_xls_release_tag.py
+      - id: get-required-libxls-dso-and-tools-release-tag
+        name: get_required_libxls_dso_and_tools_release_tag.py runs successfully
+        description: Ensure the scripts/get_required_libxls_dso_and_tools_release_tag.py script exits with code 0
+        entry: python3 scripts/get_required_libxls_dso_and_tools_release_tag.py
         language: system
         pass_filenames: false
 
