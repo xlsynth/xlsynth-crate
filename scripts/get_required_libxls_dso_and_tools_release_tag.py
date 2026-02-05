@@ -5,7 +5,7 @@ Emits the XLS release tag required by this repo, as defined in
 `xlsynth-sys/build.rs` (RELEASE_LIB_VERSION_TAG).
 
 Usage:
-  python3 scripts/get_required_xls_release_tag.py
+  python3 scripts/get_required_libxls_dso_and_tools_release_tag.py
 
 Prints the tag string (e.g., "v0.0.224") to stdout.
 """

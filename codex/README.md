@@ -9,7 +9,7 @@ script modifications seem sound before trying in the Codex web environment.
 Notes:
 
 - The repo expects a specific XLS release tag (as defined by `xlsynth-sys/build.rs`). The
-  maintenance script uses `scripts/get_required_xls_release_tag.py` to fetch the matching DSO and
-  DSLX stdlib, and sets `XLS_DSO_PATH` and `DSLX_STDLIB_PATH` so `cargo test` and pre-commit hooks
-  do not attempt network downloads. It also persists `CARGO_NET_OFFLINE=true` so subsequent
-  `cargo` and `pre-commit` invocations remain fully offline.
+  maintenance script uses `scripts/get_required_libxls_dso_and_tools_release_tag.py` to fetch the
+  matching DSO and DSLX stdlib, and sets `XLS_DSO_PATH` and `DSLX_STDLIB_PATH` so `cargo test` and
+  pre-commit hooks do not attempt network downloads. It also persists `CARGO_NET_OFFLINE=true` so
+  subsequent `cargo` and `pre-commit` invocations remain fully offline.
