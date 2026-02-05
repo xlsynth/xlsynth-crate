@@ -740,6 +740,35 @@ Example:
 xlsynth-driver ir-query-corpus /tmpfs/my_design_k3_cones 'and(a, nor(a, _))' --max-matches 20
 ```
 
+### `ir-op-histo-corpus`
+
+Scans every `.ir` file under a corpus directory (recursive), prints a per-file
+operation histogram as each file is processed, then prints a cumulative
+`total` histogram at the end.
+
+- Positional arguments: `<corpus_dir>`
+- Optional:
+  - `--top <NAME>` – function name to treat as top (overrides the package top).
+  - `--ignore-parse-errors=true|false` – skip files that fail PIR parse/validate instead of exiting (defaults to `true`).
+  - `--max-files <N>` – stop after scanning N files (default: unlimited).
+
+Output format:
+
+- Per file: `<path>: {op_a: count, op_b: count, ...}`
+- Final line: `total: {op_a: count, op_b: count, ...}`
+
+Notes:
+
+- Histograms are deterministic: files are visited in sorted path order and
+  operator keys are printed in sorted order.
+- Histograms exclude bookkeeping-only nodes (`nil` and `get_param`).
+
+Example:
+
+```shell
+xlsynth-driver ir-op-histo-corpus ./corpus --max-files 100
+```
+
 ### `ir-structural-similarity`
 
 Computes a structural similarity summary between two IR functions by hashing node structure per depth and comparing multisets.

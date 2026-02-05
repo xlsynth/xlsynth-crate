@@ -3,7 +3,7 @@
 //! Utility functions for working with / on XLS IR.
 
 use crate::ir::{self, Fn, Node, NodePayload, NodeRef, Package, PackageMember, Type};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrivialFnBody {
@@ -133,6 +133,24 @@ pub fn classify_trivial_fn_body(f: &Fn) -> Option<TrivialFnBody> {
 /// Returns the count of nodes in the function, excluding the reserved Nil node.
 pub fn fn_node_count(f: &Fn) -> usize {
     f.nodes.len().saturating_sub(1)
+}
+
+/// Returns a deterministic histogram mapping operator name to count.
+///
+/// Excludes bookkeeping-only nodes (`nil` and `get_param`) so the histogram
+/// reflects explicit operation nodes present in the function body.
+pub fn op_histogram(f: &Fn) -> BTreeMap<String, usize> {
+    let mut hist = BTreeMap::new();
+    for node in f.nodes.iter() {
+        match node.payload {
+            NodePayload::Nil | NodePayload::GetParam(_) => continue,
+            _ => {
+                let op = node.payload.get_operator().to_string();
+                *hist.entry(op).or_insert(0) += 1;
+            }
+        }
+    }
+    hist
 }
 
 /// Returns the list of operands for the provided node.
@@ -1056,6 +1074,21 @@ mod tests {
         let order = get_topological(&f);
         assert_eq!(order.len(), f.nodes.len());
         verify_topo_property(&f, &order);
+    }
+
+    #[test]
+    fn op_histogram_excludes_nil_and_get_param() {
+        let f = parse_fn(
+            r#"fn f(x: bits[1] id=1, y: bits[1] id=2) -> bits[1] {
+  both: bits[1] = and(x, y, id=3)
+  ret out: bits[1] = or(both, x, id=4)
+}"#,
+        );
+        let hist = op_histogram(&f);
+        let mut expected = BTreeMap::new();
+        expected.insert("and".to_string(), 1);
+        expected.insert("or".to_string(), 1);
+        assert_eq!(hist, expected);
     }
 
     #[test]

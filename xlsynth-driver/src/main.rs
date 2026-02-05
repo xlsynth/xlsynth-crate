@@ -82,6 +82,7 @@ mod ir_fn_to_json;
 mod ir_ged;
 mod ir_localized_eco;
 mod ir_mcmc_opt;
+mod ir_op_histo_corpus;
 mod ir_query;
 mod ir_query_corpus;
 mod ir_round_trip;
@@ -1089,6 +1090,32 @@ fn main() {
                         .long("max-matches")
                         .value_name("N")
                         .help("Stop after emitting N matches (default: unlimited)")
+                        .action(ArgAction::Set),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("ir-op-histo-corpus")
+                .about("Computes per-file and total operation histograms for .ir files in a corpus")
+                .arg(
+                    Arg::new("corpus_dir")
+                        .help("Root corpus directory to scan recursively for .ir files")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("ir_top")
+                        .long("top")
+                        .help("Top-level function name (overrides package top)"),
+                )
+                .add_bool_arg(
+                    "ignore-parse-errors",
+                    "Skip files that fail PIR parse/validate instead of erroring out (true by default)",
+                )
+                .arg(
+                    Arg::new("max-files")
+                        .long("max-files")
+                        .value_name("N")
+                        .help("Stop after scanning N files (default: unlimited)")
                         .action(ArgAction::Set),
                 ),
         )
@@ -2438,6 +2465,9 @@ fn main() {
         }
         Some(("ir-query-corpus", subm)) => {
             ir_query_corpus::handle_ir_query_corpus(subm, &config);
+        }
+        Some(("ir-op-histo-corpus", subm)) => {
+            ir_op_histo_corpus::handle_ir_op_histo_corpus(subm, &config);
         }
         Some(("ir-round-trip", subm)) => {
             ir_round_trip::handle_ir_round_trip(subm);
