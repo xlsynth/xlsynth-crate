@@ -127,7 +127,7 @@ jobs:
       - name: Resolve XLS release tag
         id: resolve-xls-tag-matrix
         run: |
-          TAG=$(python3 scripts/get_required_xls_release_tag.py)
+          TAG=$(python3 scripts/get_required_libxls_dso_and_tools_release_tag.py)
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Cache xlsynth tools (ubuntu matrix)
@@ -268,7 +268,7 @@ jobs:
       - name: Resolve XLS release tag
         id: resolve-xls-tag-2004
         run: |
-          TAG=$(python3 scripts/get_required_xls_release_tag.py)
+          TAG=$(python3 scripts/get_required_libxls_dso_and_tools_release_tag.py)
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Cache xlsynth tools (ubuntu 20.04)
@@ -427,7 +427,7 @@ jobs:
       - name: Resolve XLS release tag
         id: resolve-xls-tag-macos
         run: |
-          TAG=$(python3 scripts/get_required_xls_release_tag.py)
+          TAG=$(python3 scripts/get_required_libxls_dso_and_tools_release_tag.py)
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Note Xcode version
@@ -558,7 +558,7 @@ jobs:
           dnf install -y python3 python3-pip
           python3 -V  # Print the python3 version.
           pip3 install -r requirements.txt
-          TAG=$(python3 scripts/get_required_xls_release_tag.py)
+          TAG=$(python3 scripts/get_required_libxls_dso_and_tools_release_tag.py)
           echo "Resolved XLS release tag: ${TAG}"
           python3 scripts/download_release.py -p rocky8 -o xlsynth_tools -v ${TAG}
 
@@ -680,7 +680,7 @@ jobs:
         run: |
           python3 -m pip install --upgrade pip
           pip3 install -r requirements.txt
-          TAG=$(python3 scripts/get_required_xls_release_tag.py)
+          TAG=$(python3 scripts/get_required_libxls_dso_and_tools_release_tag.py)
           echo "Resolved XLS release tag: ${TAG}"
           python3 scripts/download_release.py -p rocky8 -o xlsynth_tools -v ${TAG} -d
 
@@ -703,7 +703,7 @@ jobs:
       - name: Resolve XLS release tag
         id: resolve-xls-tag-valgrind
         run: |
-          TAG=$(python3 scripts/get_required_xls_release_tag.py)
+          TAG=$(python3 scripts/get_required_libxls_dso_and_tools_release_tag.py)
           echo "tag=$TAG" >> $GITHUB_OUTPUT
       - name: Set up Rust nightly
         uses: actions-rs/toolchain@v1
@@ -832,7 +832,7 @@ jobs:
       - name: Resolve XLS release tag
         id: resolve-xls-tag-predownload
         run: |
-          TAG=$(python3 scripts/get_required_xls_release_tag.py)
+          TAG=$(python3 scripts/get_required_libxls_dso_and_tools_release_tag.py)
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Set up Rust
@@ -889,7 +889,7 @@ jobs:
       - name: Resolve XLS release tag
         id: resolve-xls-tag-smoke
         run: |
-          TAG=$(python3 scripts/get_required_xls_release_tag.py)
+          TAG=$(python3 scripts/get_required_libxls_dso_and_tools_release_tag.py)
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Set up Rust

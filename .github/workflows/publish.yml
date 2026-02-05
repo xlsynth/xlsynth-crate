@@ -45,7 +45,7 @@ jobs:
         run: |
           python3 -V
           pip3 install --break-system-packages requests
-          REQUIRED_TAG=$(python3 scripts/get_required_xls_release_tag.py)
+          REQUIRED_TAG=$(python3 scripts/get_required_libxls_dso_and_tools_release_tag.py)
           echo "Required XLS release tag: $REQUIRED_TAG"
           python3 scripts/download_release.py -p arm64 -o xlsynth_tools -v "$REQUIRED_TAG"
 
