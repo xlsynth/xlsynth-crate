@@ -17,6 +17,7 @@ pub mod greedy_matching_ged;
 pub mod ir;
 pub mod ir_annotate_ranges;
 pub mod ir_bool_cones;
+pub mod ir_corpus;
 pub mod ir_deduce;
 pub mod ir_eval;
 pub mod ir_fn_cone_extract;

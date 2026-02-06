@@ -6,40 +6,13 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
 use clap::ArgMatches;
+use xlsynth_pir::ir_corpus::collect_ir_files_sorted;
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_utils::fn_node_count;
 
 use crate::common::parse_bool_flag_or;
 use crate::common::write_stdout_line;
 use crate::toolchain_config::ToolchainConfig;
-
-fn collect_ir_files_recursively(root: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            let ty = entry.file_type()?;
-            let is_ir = path.extension().and_then(|s| s.to_str()) == Some("ir");
-            if ty.is_dir() {
-                stack.push(path);
-            } else if ty.is_file() {
-                if is_ir {
-                    out.push(path);
-                }
-            } else if ty.is_symlink() {
-                if is_ir {
-                    if let Ok(meta) = std::fs::metadata(&path) {
-                        if meta.is_file() {
-                            out.push(path);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
 
 fn count_nodes_in_file(path: &Path, top: Option<&str>) -> Result<usize, String> {
     let file_content = std::fs::read_to_string(path)
@@ -85,16 +58,14 @@ pub fn handle_ir_fn_node_count_corpus(matches: &ArgMatches, _config: &Option<Too
         })
         .filter(|&n| n != 0);
 
-    let mut files: Vec<PathBuf> = Vec::new();
     let root = Path::new(corpus_dir);
-    if let Err(e) = collect_ir_files_recursively(root, &mut files) {
+    let mut files = collect_ir_files_sorted(root).unwrap_or_else(|e| {
         eprintln!(
             "error: ir-fn-node-count-corpus: failed to read corpus dir {}: {e}",
             root.display()
         );
         std::process::exit(2);
-    }
-    files.sort();
+    });
 
     if let Some(limit) = max_files {
         files.truncate(limit);

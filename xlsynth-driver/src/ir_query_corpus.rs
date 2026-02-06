@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use clap::ArgMatches;
 use xlsynth_pir::ir;
+use xlsynth_pir::ir_corpus::walk_ir_files_sorted;
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_query;
 
@@ -23,34 +24,6 @@ fn eprint_query_parse_error(context: &str, query_text: &str, err: &str) {
         let clamped = std::cmp::min(pos, query_text.len());
         eprintln!("  {}^", " ".repeat(clamped));
     }
-}
-
-fn collect_ir_files_recursively(root: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            let ty = entry.file_type()?;
-            let is_ir = path.extension().and_then(|s| s.to_str()) == Some("ir");
-            if ty.is_dir() {
-                stack.push(path);
-            } else if ty.is_file() {
-                if is_ir {
-                    out.push(path);
-                }
-            } else if ty.is_symlink() {
-                if is_ir {
-                    if let Ok(meta) = std::fs::metadata(&path) {
-                        if meta.is_file() {
-                            out.push(path);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 fn required_opname_prefilter_tokens(query: &ir_query::QueryExpr) -> Vec<String> {
@@ -139,34 +112,15 @@ pub fn handle_ir_query_corpus(matches: &ArgMatches, _config: &Option<ToolchainCo
         Vec::new()
     };
 
-    // Deterministic scan order: gather and sort all candidate paths.
-    let mut files: Vec<PathBuf> = Vec::new();
     let root = Path::new(corpus_dir);
-    if let Err(e) = collect_ir_files_recursively(root, &mut files) {
-        eprintln!(
-            "error: ir-query-corpus: failed to read corpus dir {}: {e}",
-            root.display()
-        );
-        std::process::exit(2);
-    }
-    files.sort();
-
-    let mut files_scanned = 0usize;
     let mut matches_emitted = 0usize;
 
-    for path in files {
-        if let Some(limit) = max_files {
-            if files_scanned >= limit {
-                break;
-            }
-        }
-        files_scanned += 1;
-
+    if let Err(e) = walk_ir_files_sorted(root, max_files, |path| {
         let file_content = match std::fs::read_to_string(&path) {
             Ok(s) => s,
             Err(e) => {
                 if ignore_parse_errors {
-                    continue;
+                    return true;
                 }
                 eprintln!(
                     "error: ir-query-corpus: failed to read {}: {e}",
@@ -185,7 +139,7 @@ pub fn handle_ir_query_corpus(matches: &ArgMatches, _config: &Option<ToolchainCo
                 }
             }
             if !ok {
-                continue;
+                return true;
             }
         }
 
@@ -194,7 +148,7 @@ pub fn handle_ir_query_corpus(matches: &ArgMatches, _config: &Option<ToolchainCo
             Ok(pkg) => pkg,
             Err(e) => {
                 if ignore_parse_errors {
-                    continue;
+                    return true;
                 }
                 eprintln!(
                     "error: ir-query-corpus: parse/validate failed for {}: {e}",
@@ -207,7 +161,7 @@ pub fn handle_ir_query_corpus(matches: &ArgMatches, _config: &Option<ToolchainCo
         if let Some(top) = matches.get_one::<String>("ir_top") {
             if let Err(e) = pkg.set_top_fn(top) {
                 if ignore_parse_errors {
-                    continue;
+                    return true;
                 }
                 eprintln!(
                     "error: ir-query-corpus: failed to set --top for {}: {e}",
@@ -221,7 +175,7 @@ pub fn handle_ir_query_corpus(matches: &ArgMatches, _config: &Option<ToolchainCo
             Some(f) => f,
             None => {
                 if ignore_parse_errors {
-                    continue;
+                    return true;
                 }
                 eprintln!(
                     "error: ir-query-corpus: no top function found in {}",
@@ -233,7 +187,7 @@ pub fn handle_ir_query_corpus(matches: &ArgMatches, _config: &Option<ToolchainCo
 
         let matches = ir_query::find_matching_nodes(top_fn, &query);
         if matches.is_empty() {
-            continue;
+            return true;
         }
 
         for node_ref in matches {
@@ -253,9 +207,16 @@ pub fn handle_ir_query_corpus(matches: &ArgMatches, _config: &Option<ToolchainCo
             matches_emitted += 1;
             if let Some(limit) = max_matches {
                 if matches_emitted >= limit {
-                    return;
+                    return false;
                 }
             }
         }
+        true
+    }) {
+        eprintln!(
+            "error: ir-query-corpus: failed to read corpus dir {}: {e}",
+            root.display()
+        );
+        std::process::exit(2);
     }
 }
