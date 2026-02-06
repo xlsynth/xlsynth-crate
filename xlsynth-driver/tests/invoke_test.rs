@@ -8406,6 +8406,55 @@ fn main(x: bits[1] id=1, y: bits[1] id=2, z: bits[1] id=3) -> bits[1] {
 }
 
 #[test]
+fn test_ir_fn_node_count_corpus_streams_per_file() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_a = r#"package test
+
+fn main(x: bits[1] id=1) -> bits[1] {
+  ret x: bits[1] = param(name=x, id=1)
+}
+"#;
+    let ir_b = r#"package test
+
+fn main(x: bits[1] id=1, y: bits[1] id=2) -> bits[1] {
+  ret out: bits[1] = and(x, y, id=3)
+}
+"#;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let corpus_dir = temp_dir.path().join("corpus");
+    std::fs::create_dir_all(&corpus_dir).unwrap();
+    let a_path = corpus_dir.join("a.ir");
+    let b_path = corpus_dir.join("b.ir");
+    std::fs::write(&a_path, ir_a).unwrap();
+    std::fs::write(&b_path, ir_b).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-fn-node-count-corpus")
+        .arg(corpus_dir.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-fn-node-count-corpus failed (status={});\nstdout:{}\nstderr:{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let expected = format!(
+        "{}: 1\n{}: 3\n",
+        a_path.to_str().unwrap(),
+        b_path.to_str().unwrap()
+    );
+    assert_eq!(stdout, expected, "unexpected stdout: {}", stdout);
+}
+
+#[test]
 fn test_ir_query_exits_cleanly_on_broken_pipe() {
     let _ = env_logger::builder().is_test(true).try_init();
 
@@ -8483,5 +8532,36 @@ fn main(x: bits[4] id=1) -> bits[4] {
 
     let (status, stderr) = run_with_broken_stdout(command);
     assert!(status.success(), "ir-op-histo-corpus status: {}", status);
+    assert_eq!(stderr, "", "unexpected stderr: {}", stderr);
+}
+
+#[test]
+fn test_ir_fn_node_count_corpus_exits_cleanly_on_broken_pipe() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package test
+
+fn main(x: bits[4] id=1) -> bits[4] {
+  ret y: bits[4] = identity(x, id=2)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let corpus_dir = temp_dir.path().join("corpus");
+    std::fs::create_dir_all(&corpus_dir).unwrap();
+    let ir_path = corpus_dir.join("test.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let mut command = Command::new(driver);
+    command
+        .arg("ir-fn-node-count-corpus")
+        .arg(corpus_dir.to_str().unwrap());
+
+    let (status, stderr) = run_with_broken_stdout(command);
+    assert!(
+        status.success(),
+        "ir-fn-node-count-corpus status: {}",
+        status
+    );
     assert_eq!(stderr, "", "unexpected stderr: {}", stderr);
 }

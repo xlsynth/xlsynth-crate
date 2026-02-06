@@ -583,6 +583,24 @@ Example:
 xlsynth-driver ir-fn-node-count my_pkg.ir --top main
 ```
 
+### `ir-fn-node-count-corpus`
+
+Recursively scans a corpus directory for `.ir` files, computes node count per file in parallel using `num_cpus::get()` worker threads, and streams one line per file as:
+
+`<path>: <node_count>`
+
+- Positional arguments: `<corpus_dir>`
+- Optional:
+  - `--top <NAME>` – function name to count in each package (overrides each package top).
+  - `--ignore-parse-errors=<BOOL>` – skip unreadable/unparseable files or files where `--top` cannot be selected (default: `true`).
+  - `--max-files <N>` – optional cap after deterministic path sorting (`0` means no cap).
+
+Example:
+
+```shell
+xlsynth-driver ir-fn-node-count-corpus ./ir_corpus --top main
+```
+
 ### `ir-fn-structural-hash`
 
 Prints a rename-insensitive structural hash for a single IR function.
