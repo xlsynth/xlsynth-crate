@@ -7,6 +7,7 @@ use clap::ArgMatches;
 use xlsynth_pir::ir_corpus::walk_ir_files_sorted;
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_utils::op_histogram;
+use xlsynth_pir::ir_utils::op_histogram_with_types;
 
 use crate::common::parse_bool_flag_or;
 use crate::common::write_stdout_line;
@@ -34,6 +35,7 @@ pub fn handle_ir_op_histo_corpus(matches: &ArgMatches, _config: &Option<Toolchai
         .get_one::<String>("corpus_dir")
         .expect("corpus_dir is required");
     let ignore_parse_errors = parse_bool_flag_or(matches, "ignore-parse-errors", true);
+    let include_types = parse_bool_flag_or(matches, "include-types", true);
 
     let max_files: Option<usize> = matches
         .get_one::<String>("max-files")
@@ -105,7 +107,11 @@ pub fn handle_ir_op_histo_corpus(matches: &ArgMatches, _config: &Option<Toolchai
             }
         };
 
-        let per_file_hist = op_histogram(top_fn);
+        let per_file_hist = if include_types {
+            op_histogram_with_types(top_fn)
+        } else {
+            op_histogram(top_fn)
+        };
         add_hist(&mut total_hist, &per_file_hist);
         write_stdout_line(&format!(
             "{}: {}",

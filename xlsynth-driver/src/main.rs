@@ -1112,6 +1112,10 @@ fn main() {
                     "ignore-parse-errors",
                     "Skip files that fail PIR parse/validate instead of erroring out (true by default)",
                 )
+                .add_bool_arg(
+                    "include-types",
+                    "Include operand/result types in histogram keys (true by default)",
+                )
                 .arg(
                     Arg::new("max-files")
                         .long("max-files")
