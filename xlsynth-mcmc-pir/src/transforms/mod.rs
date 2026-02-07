@@ -13,6 +13,7 @@ use xlsynth_pir::ir::{Binop, Fn as IrFn, NaryOp, Node, NodePayload, NodeRef, Typ
 #[allow(unused_imports)]
 use xlsynth_pir::ir_utils::{compute_users, remap_payload_with};
 
+mod add_fission;
 mod add_sign_ext_u1_to_sub_zero_ext_u1;
 mod and_mask_sign_ext_to_sel;
 mod and_reduce_demorgan;
@@ -25,6 +26,8 @@ mod clone_multi_user_node;
 mod cmp_sel_canon;
 mod cmp_swap;
 mod const_shll_concat_zero_fold;
+mod csa_fuse_into_consumer;
+mod csa_rebalance_triplet;
 mod eq_ne_add_literal_shift;
 mod eq_sel_distribute;
 mod eq_zero_or_reduce;
@@ -62,6 +65,7 @@ mod umul_sign_ext_u1_to_sel_neg;
 mod xor_mask_sign_ext_to_sel_not;
 mod zero_ext_sel_distribute;
 
+use add_fission::AddFissionTransform;
 use add_sign_ext_u1_to_sub_zero_ext_u1::AddSignExtU1ToSubZeroExtU1Transform;
 use and_mask_sign_ext_to_sel::AndMaskSignExtToSelTransform;
 use and_reduce_demorgan::AndReduceDeMorganTransform;
@@ -74,6 +78,8 @@ use clone_multi_user_node::CloneMultiUserNodeTransform;
 use cmp_sel_canon::CmpSelCanonTransform;
 use cmp_swap::CmpSwapTransform;
 use const_shll_concat_zero_fold::ConstShllConcatZeroFoldTransform;
+use csa_fuse_into_consumer::CsaFuseIntoConsumerTransform;
+use csa_rebalance_triplet::CsaRebalanceTripletTransform;
 use eq_ne_add_literal_shift::EqNeAddLiteralShiftTransform;
 use eq_sel_distribute::EqSelDistributeTransform;
 use eq_zero_or_reduce::EqZeroOrReduceTransform;
@@ -150,6 +156,14 @@ pub enum PirTransformKind {
     /// explicit carry. This is a structure-changing move intended to affect
     /// depth/product.
     CarrySplitAdd,
+    /// Introduce carry-save form for `add(a, b)`:
+    /// `add(a, b) ↔ add(xor(a, b), shll(and(a, b), 1))`.
+    AddFission,
+    /// Reassociate a fissioned add into its consumer so the carry-propagate
+    /// add is pushed later in the chain.
+    CsaFuseIntoConsumer,
+    /// Rebalance a three-operand add chain into a 3:2 compressor form and back.
+    CsaRebalanceTriplet,
     /// Distribute NOT over select (and reverse folding form):
     /// `not(sel(p, cases=[a, b])) ↔ sel(p, cases=[not(a), not(b)])`
     NotSelDistribute,
@@ -301,6 +315,9 @@ impl fmt::Display for PirTransformKind {
             PirTransformKind::NegSubSwap => write!(f, "NegSubSwap"),
             PirTransformKind::ReassociateAddSub => write!(f, "ReassociateAddSub"),
             PirTransformKind::CarrySplitAdd => write!(f, "CarrySplitAdd"),
+            PirTransformKind::AddFission => write!(f, "AddFission"),
+            PirTransformKind::CsaFuseIntoConsumer => write!(f, "CsaFuseIntoConsumer"),
+            PirTransformKind::CsaRebalanceTriplet => write!(f, "CsaRebalanceTriplet"),
             PirTransformKind::NotSelDistribute => write!(f, "NotSelDistribute"),
             PirTransformKind::NegSelDistribute => write!(f, "NegSelDistribute"),
             PirTransformKind::BitSliceSelDistribute => write!(f, "BitSliceSelDistribute"),
@@ -391,6 +408,9 @@ pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
         Box::new(NegSubSwapTransform),
         Box::new(ReassociateAddSubTransform),
         Box::new(CarrySplitAddTransform),
+        Box::new(AddFissionTransform),
+        Box::new(CsaFuseIntoConsumerTransform),
+        Box::new(CsaRebalanceTripletTransform),
         Box::new(NotSelDistributeTransform),
         Box::new(NegSelDistributeTransform),
         Box::new(BitSliceSelDistributeTransform),
