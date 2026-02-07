@@ -172,6 +172,12 @@ impl PirTransform for AddFissionTransform {
         let mut out: Vec<TransformLocation> = Vec::new();
         for nr in f.node_refs() {
             if let NodePayload::Binop(Binop::Add, _, _) = f.get_node(nr).payload {
+                // `bits[0]` is permitted in the IR, but this transform materializes a
+                // shift-amount literal `1`, which cannot be represented as `bits[0]`.
+                // Skip zero-width adds rather than risking panics in literal creation.
+                if Self::bits_width(f, nr) == Some(0) {
+                    continue;
+                }
                 if Self::match_fission_add(f, nr).is_some() || Self::add_has_add_user(f, nr) {
                     out.push(TransformLocation::Node(nr));
                 }
@@ -194,6 +200,13 @@ impl PirTransform for AddFissionTransform {
         let w = Self::bits_width(f, target_ref)
             .ok_or_else(|| "AddFissionTransform: output must be bits[w]".to_string())?;
 
+        if w == 0 {
+            // `bits[0]` is permitted elsewhere in the IR, but this transform requires
+            // constructing a shift-amount literal `1`. Avoid panicking on
+            // `IrBits::make_ubits(0, 1)` by treating this as a non-applicable site.
+            return Err("AddFissionTransform: zero-width bits are not supported".to_string());
+        }
+
         if let Some((a, b, _xor_ref, _shll_ref)) = Self::match_fission_add(f, target_ref) {
             f.get_node_mut(target_ref).payload = NodePayload::Binop(Binop::Add, a, b);
             return Ok(());
@@ -213,5 +226,37 @@ impl PirTransform for AddFissionTransform {
 
         f.get_node_mut(target_ref).payload = NodePayload::Binop(Binop::Add, xor_ref, shll_ref);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xlsynth_pir::ir_parser;
+
+    #[test]
+    fn add_fission_rejects_zero_width_add_instead_of_panicking() {
+        let ir_text = r#"fn t(a: bits[0] id=1, b: bits[0] id=2) -> bits[0] {
+  ret add.3: bits[0] = add(a, b, id=3)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let add_ref = f
+            .node_refs()
+            .into_iter()
+            .find(|nr| {
+                matches!(
+                    f.get_node(*nr).payload,
+                    NodePayload::Binop(Binop::Add, _, _)
+                )
+            })
+            .expect("expected add node");
+
+        let t = AddFissionTransform;
+        let err = t
+            .apply(&mut f, &TransformLocation::Node(add_ref))
+            .expect_err("expected zero-width add to be rejected");
+        assert!(err.contains("zero-width"));
     }
 }

@@ -201,6 +201,12 @@ impl PirTransform for CsaRebalanceTripletTransform {
         let mut out: Vec<TransformLocation> = Vec::new();
         for nr in f.node_refs() {
             if matches!(f.get_node(nr).payload, NodePayload::Binop(Binop::Add, _, _)) {
+                // `bits[0]` is permitted in the IR, but this transform materializes a
+                // shift-amount literal `1`, which cannot be represented as `bits[0]`.
+                // Skip zero-width adds rather than risking panics in literal creation.
+                if Self::bits_width(f, nr) == Some(0) {
+                    continue;
+                }
                 if Self::match_add_chain(f, nr).is_some() || Self::match_csa_add(f, nr).is_some() {
                     out.push(TransformLocation::Node(nr));
                 }
@@ -222,6 +228,15 @@ impl PirTransform for CsaRebalanceTripletTransform {
 
         let w = Self::bits_width(f, target_ref)
             .ok_or_else(|| "CsaRebalanceTripletTransform: output must be bits[w]".to_string())?;
+
+        if w == 0 {
+            // `bits[0]` is permitted elsewhere in the IR, but this transform requires
+            // constructing a shift-amount literal `1`. Avoid panicking on
+            // `IrBits::make_ubits(0, 1)` by treating this as a non-applicable site.
+            return Err(
+                "CsaRebalanceTripletTransform: zero-width bits are not supported".to_string(),
+            );
+        }
 
         if let Some((a, b, c, _carry_ref)) = Self::match_csa_add(f, target_ref) {
             if Self::bits_width(f, a) != Some(w)
@@ -255,5 +270,33 @@ impl PirTransform for CsaRebalanceTripletTransform {
 
         f.get_node_mut(target_ref).payload = NodePayload::Binop(Binop::Add, sum_ref, shll_ref);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xlsynth_pir::ir_parser;
+
+    #[test]
+    fn csa_rebalance_triplet_rejects_zero_width_add_chain_instead_of_panicking() {
+        let ir_text = r#"fn t(a: bits[0] id=1, b: bits[0] id=2, c: bits[0] id=3) -> bits[0] {
+  add.4: bits[0] = add(a, b, id=4)
+  ret add.5: bits[0] = add(add.4, c, id=5)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let outer_add_ref = f
+            .node_refs()
+            .into_iter()
+            .find(|nr| f.get_node(*nr).text_id == 5)
+            .expect("expected outer add node");
+
+        let t = CsaRebalanceTripletTransform;
+        let err = t
+            .apply(&mut f, &TransformLocation::Node(outer_add_ref))
+            .expect_err("expected zero-width add chain to be rejected");
+        assert!(err.contains("zero-width"));
     }
 }
