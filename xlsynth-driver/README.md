@@ -768,12 +768,16 @@ operation histogram as each file is processed, then prints a cumulative
 - Optional:
   - `--top <NAME>` – function name to treat as top (overrides the package top).
   - `--ignore-parse-errors=true|false` – skip files that fail PIR parse/validate instead of exiting (defaults to `true`).
+  - `--include-types=true|false` – include operand/result types in histogram keys (defaults to `true`).
   - `--max-files <N>` – stop after scanning N files (default: unlimited).
 
 Output format:
 
 - Per file: `<path>: {op_a: count, op_b: count, ...}`
 - Final line: `total: {op_a: count, op_b: count, ...}`
+
+When `--include-types=true`, keys are operation signatures, e.g.
+`and(bits[1], bits[1]) -> bits[1]`.
 
 Notes:
 

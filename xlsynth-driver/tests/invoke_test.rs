@@ -8398,6 +8398,56 @@ fn main(x: bits[1] id=1, y: bits[1] id=2, z: bits[1] id=3) -> bits[1] {
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let expected = format!(
+        "{}: {{and(bits[1], bits[1]) -> bits[1]: 1}}\n{}: {{and(bits[1], bits[1]) -> bits[1]: 1, or(bits[1], bits[1]) -> bits[1]: 1}}\ntotal: {{and(bits[1], bits[1]) -> bits[1]: 2, or(bits[1], bits[1]) -> bits[1]: 1}}\n",
+        a_path.to_str().unwrap(),
+        b_path.to_str().unwrap()
+    );
+    assert_eq!(stdout, expected, "unexpected stdout: {}", stdout);
+}
+
+#[test]
+fn test_ir_op_histo_corpus_include_types_false_streams_per_file_and_total() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_a = r#"package test
+
+fn main(x: bits[1] id=1, y: bits[1] id=2) -> bits[1] {
+  ret out: bits[1] = and(x, y, id=3)
+}
+"#;
+    let ir_b = r#"package test
+
+fn main(x: bits[2] id=1, y: bits[2] id=2, z: bits[2] id=3) -> bits[2] {
+  n: bits[2] = and(x, y, id=4)
+  ret out: bits[2] = or(n, z, id=5)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let corpus_dir = temp_dir.path().join("corpus");
+    std::fs::create_dir_all(&corpus_dir).unwrap();
+    let a_path = corpus_dir.join("a.ir");
+    let b_path = corpus_dir.join("b.ir");
+    std::fs::write(&a_path, ir_a).unwrap();
+    std::fs::write(&b_path, ir_b).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-op-histo-corpus")
+        .arg(corpus_dir.to_str().unwrap())
+        .arg("--include-types=false")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-op-histo-corpus failed (status={});\nstdout:{}\nstderr:{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let expected = format!(
         "{}: {{and: 1}}\n{}: {{and: 1, or: 1}}\ntotal: {{and: 2, or: 1}}\n",
         a_path.to_str().unwrap(),
         b_path.to_str().unwrap()

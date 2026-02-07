@@ -140,13 +140,31 @@ pub fn fn_node_count(f: &Fn) -> usize {
 /// Excludes bookkeeping-only nodes (`nil` and `get_param`) so the histogram
 /// reflects explicit operation nodes present in the function body.
 pub fn op_histogram(f: &Fn) -> BTreeMap<String, usize> {
+    op_histogram_impl(f, false)
+}
+
+/// Returns a deterministic histogram mapping operation signatures to count.
+///
+/// Signatures include the operator, operand types, and result type, e.g.
+/// `and(bits[1], bits[1]) -> bits[1]`.
+///
+/// Excludes bookkeeping-only nodes (`nil` and `get_param`).
+pub fn op_histogram_with_types(f: &Fn) -> BTreeMap<String, usize> {
+    op_histogram_impl(f, true)
+}
+
+fn op_histogram_impl(f: &Fn, include_types: bool) -> BTreeMap<String, usize> {
     let mut hist = BTreeMap::new();
     for node in f.nodes.iter() {
-        match node.payload {
+        match &node.payload {
             NodePayload::Nil | NodePayload::GetParam(_) => continue,
             _ => {
-                let op = node.payload.get_operator().to_string();
-                *hist.entry(op).or_insert(0) += 1;
+                let key = if include_types {
+                    node.to_signature_string(f)
+                } else {
+                    node.payload.get_operator().to_string()
+                };
+                *hist.entry(key).or_insert(0) += 1;
             }
         }
     }
@@ -1088,6 +1106,26 @@ mod tests {
         let mut expected = BTreeMap::new();
         expected.insert("and".to_string(), 1);
         expected.insert("or".to_string(), 1);
+        assert_eq!(hist, expected);
+    }
+
+    #[test]
+    fn op_histogram_with_types_keys_by_signature() {
+        let f = parse_fn(
+            r#"fn f(a: bits[1] id=1, b: bits[1] id=2, c: bits[2] id=3, d: bits[2] id=4) -> (bits[1], bits[2]) {
+  and1: bits[1] = and(a, b, id=5)
+  and2: bits[2] = and(c, d, id=6)
+  ret out: (bits[1], bits[2]) = tuple(and1, and2, id=7)
+}"#,
+        );
+        let hist = op_histogram_with_types(&f);
+        let mut expected = BTreeMap::new();
+        expected.insert("and(bits[1], bits[1]) -> bits[1]".to_string(), 1);
+        expected.insert("and(bits[2], bits[2]) -> bits[2]".to_string(), 1);
+        expected.insert(
+            "tuple(bits[1], bits[2]) -> (bits[1], bits[2])".to_string(),
+            1,
+        );
         assert_eq!(hist, expected);
     }
 
