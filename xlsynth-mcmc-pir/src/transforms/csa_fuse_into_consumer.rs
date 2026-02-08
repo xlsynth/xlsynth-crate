@@ -37,11 +37,31 @@ impl CsaFuseIntoConsumerTransform {
         NodeRef { index: new_index }
     }
 
-    fn literal_u64_value(f: &IrFn, r: NodeRef) -> Option<u64> {
+    fn literal_is_one(f: &IrFn, r: NodeRef) -> bool {
         let NodePayload::Literal(v) = &f.get_node(r).payload else {
-            return None;
+            return false;
         };
-        v.to_u64().ok()
+        let bits = match v.to_bits() {
+            Ok(bits) => bits,
+            Err(_) => return false,
+        };
+        // Width-agnostic check: accept any bits[N] literal that equals integer 1.
+        //
+        // NOTE: Do not use `IrValue::to_u64()` here; it fails for widths > 64.
+        if bits.get_bit_count() == 0 {
+            return false;
+        }
+        let bytes = match bits.to_bytes() {
+            Ok(bytes) => bytes,
+            Err(_) => return false,
+        };
+        if bytes.is_empty() {
+            return false;
+        }
+        if bytes[0] != 1 {
+            return false;
+        }
+        bytes.iter().skip(1).all(|b| *b == 0)
     }
 
     fn match_xor_and_pair(
@@ -80,10 +100,7 @@ impl CsaFuseIntoConsumerTransform {
         if Self::bits_width(f, and_ref) != Some(w) {
             return None;
         }
-        let Some(amount) = Self::literal_u64_value(f, amount_ref) else {
-            return None;
-        };
-        if amount != 1 {
+        if !Self::literal_is_one(f, amount_ref) {
             return None;
         }
         let NodePayload::Nary(NaryOp::And, _) = f.get_node(and_ref).payload else {
@@ -134,6 +151,56 @@ impl CsaFuseIntoConsumerTransform {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xlsynth_pir::ir_parser;
+
+    #[test]
+    fn csa_fuse_into_consumer_matches_wide_shift_one_literal() {
+        // Regression test: for widths > 64, `IrValue::to_u64()` fails, so we
+        // must match the shift amount literal via bits inspection.
+        let ir_text = r#"fn t(a: bits[128] id=1, b: bits[128] id=2, c: bits[128] id=3) -> bits[128] {
+  xor.4: bits[128] = xor(a, b, id=4)
+  and.5: bits[128] = and(a, b, id=5)
+  literal.6: bits[128] = literal(value=1, id=6)
+  shll.7: bits[128] = shll(and.5, literal.6, id=7)
+  add.8: bits[128] = add(xor.4, shll.7, id=8)
+  ret add.9: bits[128] = add(add.8, c, id=9)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let outer_add_ref = f
+            .node_refs()
+            .into_iter()
+            .find(|nr| f.get_node(*nr).text_id == 9)
+            .expect("expected outer add node");
+
+        let t = CsaFuseIntoConsumerTransform;
+        t.apply(&mut f, &TransformLocation::Node(outer_add_ref))
+            .expect("apply");
+
+        // Expect: add(add(xor(a,b), c), shll(and(a,b), 1))
+        let NodePayload::Binop(Binop::Add, inner_add_ref, shll_ref) =
+            f.get_node(outer_add_ref).payload
+        else {
+            panic!("expected outer add after reassociation");
+        };
+        assert_eq!(f.get_node(shll_ref).text_id, 7);
+
+        let NodePayload::Binop(Binop::Add, xor_ref, c_ref) = f.get_node(inner_add_ref).payload
+        else {
+            panic!("expected inner add after reassociation");
+        };
+        assert_eq!(f.get_node(xor_ref).text_id, 4);
+        assert!(matches!(
+            f.get_node(c_ref).payload,
+            NodePayload::GetParam(_)
+        ));
     }
 }
 
