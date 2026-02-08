@@ -167,6 +167,31 @@ impl IrBits {
             .all(|b| *b == 0)
     }
 
+    /// Returns whether this bits value equals the given `u64` integer value.
+    ///
+    /// This routine is **width-agnostic**: it works for bits widths larger than
+    /// 64 by requiring all bits above bit 63 to be zero.
+    ///
+    /// Note that `bits[0]` can only represent the value 0.
+    pub fn equals_u64_value(&self, value: u64) -> bool {
+        let w = self.get_bit_count();
+        if w == 0 {
+            return value == 0;
+        }
+        // If the width of this bits object is smaller than the value needs, it cannot
+        // be represented, and so cannot be equal.
+        if w < 64 && (value >> w) != 0 {
+            return false;
+        }
+        // Delegate the representation details to libxls: at this point we know
+        // the integer `value` is representable in `w` bits (either `w >= 64` or
+        // the high bits above `w` are clear), so constructing `bits[w]:value`
+        // must succeed.
+        let expected =
+            IrBits::make_ubits(w, value).expect("IrBits::make_ubits should succeed for u64 value");
+        self.equals(&expected)
+    }
+
     pub fn add(&self, rhs: &IrBits) -> IrBits {
         self.apply_binary_op(rhs, xlsynth_sys::xls_bits_add)
     }
@@ -531,6 +556,18 @@ impl IrValue {
     /// If this value is not a bits type, an error is returned.
     pub fn to_bits(&self) -> Result<IrBits, XlsynthError> {
         xls_value_get_bits(self.ptr)
+    }
+
+    /// Returns whether this value is a bits-typed literal equal to `value`.
+    ///
+    /// This routine is width-agnostic for values wider than 64 bits: it works
+    /// by inspecting the underlying `IrBits` bytes rather than using
+    /// `to_u64()`.
+    pub fn bits_equals_u64_value(&self, value: u64) -> bool {
+        let Ok(bits) = self.to_bits() else {
+            return false;
+        };
+        bits.equals_u64_value(value)
     }
 
     pub fn get_element(&self, index: usize) -> Result<IrValue, XlsynthError> {
@@ -973,6 +1010,27 @@ mod tests {
     fn test_ir_bits_to_bytes() {
         let bits = IrBits::u32(0x12345678);
         assert_eq!(bits.to_bytes().unwrap(), vec![0x78, 0x56, 0x34, 0x12]);
+    }
+
+    #[test]
+    fn test_ir_bits_equals_u64_value_zero_width() {
+        let bits0 = IrBits::make_ubits(0, 0).expect("make_ubits success");
+        assert!(bits0.equals_u64_value(0));
+        assert!(!bits0.equals_u64_value(1));
+    }
+
+    #[test]
+    fn test_ir_bits_equals_u64_value_wide() {
+        let bits128 = IrBits::make_ubits(128, 1).expect("make_ubits success");
+        assert!(bits128.equals_u64_value(1));
+        assert!(!bits128.equals_u64_value(2));
+    }
+
+    #[test]
+    fn test_ir_bits_equals_u64_value_non_byte_aligned_width() {
+        let bits9 = IrBits::make_ubits(9, 0x1ff).expect("make_ubits success");
+        assert!(bits9.equals_u64_value(0x1ff));
+        assert!(!bits9.equals_u64_value(0x3ff));
     }
 
     #[test]

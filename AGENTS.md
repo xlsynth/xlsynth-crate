@@ -93,6 +93,8 @@ module level (or at the top of a `mod tests` section) for clarity.
 
 In general, when representing IR values with arbitrary bit widths, prefer `xlsynth::IrBits` / `xlsynth::IrValue` over fixed-width Rust integers (e.g. `u64`). Do not assume "64 bits is probably wide enough." In particular, avoid `IrValue::to_u64()` when matching literals in transforms; it errors for widths > 64. Prefer `IrValue::to_bits()` plus `IrBits::{to_bytes,is_zero,get_bit}` style helpers for width-agnostic inspection.
 
+**Process guard**: in transform/matcher code, do not use `IrValue::to_u64()` / `IrBits::to_u64()` to recognize literals. Use width-agnostic helpers (`IrBits::equals_u64_value()` or `IrValue::bits_equals_u64_value()`), so patterns keep matching for widths > 64.
+
 When using C-style inline comments to document a named argument style in function calls, prefer:
 
 ```text

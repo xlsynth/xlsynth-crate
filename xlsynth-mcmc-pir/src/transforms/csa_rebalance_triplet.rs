@@ -69,27 +69,7 @@ impl CsaRebalanceTripletTransform {
         let NodePayload::Literal(v) = &f.get_node(r).payload else {
             return false;
         };
-        let bits = match v.to_bits() {
-            Ok(bits) => bits,
-            Err(_) => return false,
-        };
-        // Width-agnostic check: accept any bits[N] literal that equals integer 1.
-        //
-        // NOTE: Do not use `IrValue::to_u64()` here; it fails for widths > 64.
-        if bits.get_bit_count() == 0 {
-            return false;
-        }
-        let bytes = match bits.to_bytes() {
-            Ok(bytes) => bytes,
-            Err(_) => return false,
-        };
-        if bytes.is_empty() {
-            return false;
-        }
-        if bytes[0] != 1 {
-            return false;
-        }
-        bytes.iter().skip(1).all(|b| *b == 0)
+        v.bits_equals_u64_value(1)
     }
 
     fn match_add_chain(f: &IrFn, add_ref: NodeRef) -> Option<(NodeRef, NodeRef, NodeRef)> {
