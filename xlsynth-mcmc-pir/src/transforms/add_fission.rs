@@ -66,11 +66,31 @@ impl AddFissionTransform {
         NodeRef { index: new_index }
     }
 
-    fn literal_u64_value(f: &IrFn, r: NodeRef) -> Option<u64> {
+    fn literal_is_one(f: &IrFn, r: NodeRef) -> bool {
         let NodePayload::Literal(v) = &f.get_node(r).payload else {
-            return None;
+            return false;
         };
-        v.to_u64().ok()
+        let bits = match v.to_bits() {
+            Ok(bits) => bits,
+            Err(_) => return false,
+        };
+        // Width-agnostic check: accept any bits[N] literal that equals integer 1.
+        //
+        // NOTE: Do not use `IrValue::to_u64()` here; it fails for widths > 64.
+        if bits.get_bit_count() == 0 {
+            return false;
+        }
+        let bytes = match bits.to_bytes() {
+            Ok(bytes) => bytes,
+            Err(_) => return false,
+        };
+        if bytes.is_empty() {
+            return false;
+        }
+        if bytes[0] != 1 {
+            return false;
+        }
+        bytes.iter().skip(1).all(|b| *b == 0)
     }
 
     fn match_xor_and_pair(
@@ -138,10 +158,7 @@ impl AddFissionTransform {
         if Self::bits_width(f, and_ref) != Some(w) {
             return None;
         }
-        let Some(amount) = Self::literal_u64_value(f, amount_ref) else {
-            return None;
-        };
-        if amount != 1 {
+        if !Self::literal_is_one(f, amount_ref) {
             return None;
         }
 
@@ -258,5 +275,36 @@ mod tests {
             .apply(&mut f, &TransformLocation::Node(add_ref))
             .expect_err("expected zero-width add to be rejected");
         assert!(err.contains("zero-width"));
+    }
+
+    #[test]
+    fn add_fission_folds_wide_shift_one_literal() {
+        // Regression test: for widths > 64, `IrValue::to_u64()` fails, so we
+        // must match the shift amount literal via bits inspection.
+        let ir_text = r#"fn t(a: bits[128] id=1, b: bits[128] id=2) -> bits[128] {
+  xor.3: bits[128] = xor(a, b, id=3)
+  and.4: bits[128] = and(a, b, id=4)
+  literal.5: bits[128] = literal(value=1, id=5)
+  shll.6: bits[128] = shll(and.4, literal.5, id=6)
+  ret add.7: bits[128] = add(xor.3, shll.6, id=7)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let mut f = parser.parse_fn().unwrap();
+
+        let add_ref = f
+            .node_refs()
+            .into_iter()
+            .find(|nr| f.get_node(*nr).text_id == 7)
+            .expect("expected add node");
+
+        let t = AddFissionTransform;
+        t.apply(&mut f, &TransformLocation::Node(add_ref))
+            .expect("apply");
+
+        let NodePayload::Binop(Binop::Add, lhs, rhs) = f.get_node(add_ref).payload else {
+            panic!("expected add payload after fold");
+        };
+        assert!(matches!(f.get_node(lhs).payload, NodePayload::GetParam(_)));
+        assert!(matches!(f.get_node(rhs).payload, NodePayload::GetParam(_)));
     }
 }
