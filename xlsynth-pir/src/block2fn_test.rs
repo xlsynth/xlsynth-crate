@@ -19,15 +19,6 @@ fn run_block2fn(
     tie_input_ports: &[(&str, &str)],
     drop_output_ports: &[&str],
 ) -> crate::ir::Fn {
-    run_block2fn_with_clock(block_ir, tie_input_ports, drop_output_ports, None)
-}
-
-fn run_block2fn_with_clock(
-    block_ir: &str,
-    tie_input_ports: &[(&str, &str)],
-    drop_output_ports: &[&str],
-    clock_port: Option<&str>,
-) -> crate::ir::Fn {
     let mut tie_map = BTreeMap::new();
     for (name, value) in tie_input_ports.iter() {
         tie_map.insert((*name).to_string(), parse_bits(value));
@@ -36,7 +27,6 @@ fn run_block2fn_with_clock(
     let opts = Block2FnOptions {
         tie_input_ports: tie_map,
         drop_output_ports: drop_set,
-        clock_port: clock_port.map(|s| s.to_string()),
     };
     block_ir_to_fn(block_ir, &opts)
         .expect("block2fn should succeed")
@@ -221,26 +211,21 @@ fn e2e_netlist_load_enable_feedback_elided() {
 }
 
 #[test]
-fn e2e_clock_port_used_in_logic_errors() {
+fn e2e_clock_header_converts_without_clock_flag() {
     let block_ir = r#"package test
 
-top block top(clk: bits[1], data: bits[1], out: bits[1]) {
-  clk: bits[1] = input_port(name=clk, id=1)
-  data: bits[1] = input_port(name=data, id=2)
-  and.3: bits[1] = and(clk, data, id=3)
-  out: () = output_port(and.3, name=out, id=4)
+top block top(clk: clock, data: bits[1], out: bits[1]) {
+  reg r(bits[1])
+  data: bits[1] = input_port(name=data, id=1)
+  q: bits[1] = register_read(register=r, id=2)
+  d: () = register_write(data, register=r, id=3)
+  out: () = output_port(q, name=out, id=4)
 }
 "#;
-    let opts = Block2FnOptions {
-        tie_input_ports: BTreeMap::new(),
-        drop_output_ports: BTreeSet::new(),
-        clock_port: Some("clk".to_string()),
-    };
-    let err = block_ir_to_fn(block_ir, &opts).expect_err("expected error");
-    assert!(
-        err.contains("clock port 'clk' is used by non-register nodes"),
-        "unexpected error: {err}"
-    );
+    let f = run_block2fn(block_ir, &[], &[]);
+    assert_eq!(f.params.len(), 1, "clock should not appear as data param");
+    assert_eq!(f.params[0].name, "data");
+    assert_return_matches(&f, "get_param(name=\"data\")");
 }
 
 #[test]
@@ -248,7 +233,6 @@ fn e2e_netlist_load_enable_feedback_cycle_errors() {
     let opts = Block2FnOptions {
         tie_input_ports: BTreeMap::new(),
         drop_output_ports: BTreeSet::new(),
-        clock_port: None,
     };
     let err = block_ir_to_fn(NETLIST_LOAD_ENABLE_BLOCK, &opts).expect_err("expected error");
     assert_eq!(

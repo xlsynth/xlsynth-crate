@@ -122,9 +122,9 @@ block INV(A: bits[1], Y: bits[1]) {
 top block top(a: bits[1], y: bits[1]) {
   instantiation u1(block=INV, kind=block)
   a: bits[1] = input_port(name=a, id=1)
-  instantiation_output.2: bits[1] = instantiation_output(instantiation=u1, port_name=Y, id=2)
-  instantiation_input.3: () = instantiation_input(a, instantiation=u1, port_name=A, id=3)
-  y: () = output_port(instantiation_output.2, name=y, id=4)
+  u1_Y: bits[1] = instantiation_output(instantiation=u1, port_name=Y, id=2)
+  u1_A: () = instantiation_input(a, instantiation=u1, port_name=A, id=3)
+  y: () = output_port(u1_Y, name=y, id=4)
 }
 "#;
     assert_eq!(got, want);
@@ -163,9 +163,9 @@ block DFF(CLK: clock, D: bits[1], Q: bits[1]) {
 top block top(clk: clock, d: bits[1], q: bits[1]) {
   instantiation u1(block=DFF, kind=block)
   d: bits[1] = input_port(name=d, id=1)
-  instantiation_output.2: bits[1] = instantiation_output(instantiation=u1, port_name=Q, id=2)
-  instantiation_input.3: () = instantiation_input(d, instantiation=u1, port_name=D, id=3)
-  q: () = output_port(instantiation_output.2, name=q, id=4)
+  u1_Q: bits[1] = instantiation_output(instantiation=u1, port_name=Q, id=2)
+  u1_D: () = instantiation_input(d, instantiation=u1, port_name=D, id=3)
+  q: () = output_port(u1_Q, name=q, id=4)
 }
 "#;
     assert_eq!(got, want);
@@ -210,10 +210,10 @@ top block top(clk: clock, d: bits[1], en: bits[1], q: bits[1]) {
   instantiation u1(block=DFFNAND, kind=block)
   d: bits[1] = input_port(name=d, id=1)
   en: bits[1] = input_port(name=en, id=2)
-  instantiation_output.3: bits[1] = instantiation_output(instantiation=u1, port_name=Q, id=3)
-  instantiation_input.4: () = instantiation_input(d, instantiation=u1, port_name=D, id=4)
-  instantiation_input.5: () = instantiation_input(en, instantiation=u1, port_name=EN, id=5)
-  q: () = output_port(instantiation_output.3, name=q, id=6)
+  u1_Q: bits[1] = instantiation_output(instantiation=u1, port_name=Q, id=3)
+  u1_D: () = instantiation_input(d, instantiation=u1, port_name=D, id=4)
+  u1_EN: () = instantiation_input(en, instantiation=u1, port_name=EN, id=5)
+  q: () = output_port(u1_Q, name=q, id=6)
 }
 "#;
     assert_eq!(got, want);
@@ -257,10 +257,10 @@ top block top(clk: clock, d: bits[1], rst: bits[1], q: bits[1]) {
   instantiation u1(block=DFFCLR, kind=block)
   d: bits[1] = input_port(name=d, id=1)
   rst: bits[1] = input_port(name=rst, id=2)
-  instantiation_output.3: bits[1] = instantiation_output(instantiation=u1, port_name=Q, id=3)
-  instantiation_input.4: () = instantiation_input(d, instantiation=u1, port_name=D, id=4)
-  instantiation_input.5: () = instantiation_input(rst, instantiation=u1, port_name=RST, id=5)
-  q: () = output_port(instantiation_output.3, name=q, id=6)
+  u1_Q: bits[1] = instantiation_output(instantiation=u1, port_name=Q, id=3)
+  u1_D: () = instantiation_input(d, instantiation=u1, port_name=D, id=4)
+  u1_RST: () = instantiation_input(rst, instantiation=u1, port_name=RST, id=5)
+  q: () = output_port(u1_Q, name=q, id=6)
 }
 "#;
     assert_eq!(got, want);
@@ -304,10 +304,10 @@ top block top(clk: clock, d: bits[1], rstn: bits[1], q: bits[1]) {
   instantiation u1(block=DFFPRE, kind=block)
   d: bits[1] = input_port(name=d, id=1)
   rstn: bits[1] = input_port(name=rstn, id=2)
-  instantiation_output.3: bits[1] = instantiation_output(instantiation=u1, port_name=Q, id=3)
-  instantiation_input.4: () = instantiation_input(d, instantiation=u1, port_name=D, id=4)
-  instantiation_input.5: () = instantiation_input(rstn, instantiation=u1, port_name=RSTN, id=5)
-  q: () = output_port(instantiation_output.3, name=q, id=6)
+  u1_Q: bits[1] = instantiation_output(instantiation=u1, port_name=Q, id=3)
+  u1_D: () = instantiation_input(d, instantiation=u1, port_name=D, id=4)
+  u1_RSTN: () = instantiation_input(rstn, instantiation=u1, port_name=RSTN, id=5)
+  q: () = output_port(u1_Q, name=q, id=6)
 }
 "#;
     assert_eq!(got, want);
@@ -351,16 +351,16 @@ top block top(a: bits[3], y: bits[3]) {
   instantiation u1(block=BUF, kind=block)
   instantiation u2(block=INV, kind=block)
   a: bits[3] = input_port(name=a, id=1)
-  instantiation_output.2: bits[1] = instantiation_output(instantiation=u0, port_name=Y, id=2)
-  instantiation_output.3: bits[1] = instantiation_output(instantiation=u1, port_name=Y, id=3)
-  instantiation_output.4: bits[1] = instantiation_output(instantiation=u2, port_name=Y, id=4)
+  u0_Y: bits[1] = instantiation_output(instantiation=u0, port_name=Y, id=2)
+  u1_Y: bits[1] = instantiation_output(instantiation=u1, port_name=Y, id=3)
+  u2_Y: bits[1] = instantiation_output(instantiation=u2, port_name=Y, id=4)
   bit_slice.5: bits[1] = bit_slice(a, start=0, width=1, id=5)
-  instantiation_input.6: () = instantiation_input(bit_slice.5, instantiation=u0, port_name=A, id=6)
+  u0_A: () = instantiation_input(bit_slice.5, instantiation=u0, port_name=A, id=6)
   bit_slice.7: bits[1] = bit_slice(a, start=1, width=1, id=7)
-  instantiation_input.8: () = instantiation_input(bit_slice.7, instantiation=u1, port_name=A, id=8)
+  u1_A: () = instantiation_input(bit_slice.7, instantiation=u1, port_name=A, id=8)
   bit_slice.9: bits[1] = bit_slice(a, start=2, width=1, id=9)
-  instantiation_input.10: () = instantiation_input(bit_slice.9, instantiation=u2, port_name=A, id=10)
-  concat.11: bits[3] = concat(instantiation_output.4, instantiation_output.3, instantiation_output.2, id=11)
+  u2_A: () = instantiation_input(bit_slice.9, instantiation=u2, port_name=A, id=10)
+  concat.11: bits[3] = concat(u2_Y, u1_Y, u0_Y, id=11)
   y: () = output_port(concat.11, name=y, id=12)
 }
 "#;
@@ -396,10 +396,10 @@ block INV(A: bits[1], Y: bits[1]) {
 top block top(a: bits[1], y: bits[2]) {
   instantiation u0(block=INV, kind=block)
   a: bits[1] = input_port(name=a, id=1)
-  instantiation_output.2: bits[1] = instantiation_output(instantiation=u0, port_name=Y, id=2)
-  instantiation_input.3: () = instantiation_input(a, instantiation=u0, port_name=A, id=3)
+  u0_Y: bits[1] = instantiation_output(instantiation=u0, port_name=Y, id=2)
+  u0_A: () = instantiation_input(a, instantiation=u0, port_name=A, id=3)
   literal.4: bits[1] = literal(value=0, id=4)
-  concat.5: bits[2] = concat(literal.4, instantiation_output.2, id=5)
+  concat.5: bits[2] = concat(literal.4, u0_Y, id=5)
   y: () = output_port(concat.5, name=y, id=6)
 }
 "#;
@@ -441,9 +441,9 @@ block DFF(CLK: clock, D: bits[1], Q: bits[1]) {
 top block top(clk: clock, d: bits[1], q: bits[1]) {
   instantiation u1(block=DFF, kind=block)
   d: bits[1] = input_port(name=d, id=1)
-  instantiation_output.2: bits[1] = instantiation_output(instantiation=u1, port_name=Q, id=2)
-  instantiation_input.3: () = instantiation_input(d, instantiation=u1, port_name=D, id=3)
-  q: () = output_port(instantiation_output.2, name=q, id=4)
+  u1_Q: bits[1] = instantiation_output(instantiation=u1, port_name=Q, id=2)
+  u1_D: () = instantiation_input(d, instantiation=u1, port_name=D, id=3)
+  q: () = output_port(u1_Q, name=q, id=4)
 }
 "#;
     assert_eq!(got, want);

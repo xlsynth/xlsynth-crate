@@ -17,7 +17,6 @@ use xlsynth::{IrBits, IrValue};
 pub struct Block2FnOptions {
     pub tie_input_ports: BTreeMap<String, IrBits>,
     pub drop_output_ports: BTreeSet<String>,
-    pub clock_port: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -26,8 +25,8 @@ pub struct Block2FnResult {
     pub function: ir::Fn,
 }
 
-// Converts the top block of the package into a function. Optionally tie off
-// inputs, drop outputs and clock input.
+// Converts the top block of the package into a function. Optionally ties off
+// inputs and drops outputs.
 pub fn block_package_to_fn(
     pkg: &ir::Package,
     options: &Block2FnOptions,
@@ -52,7 +51,7 @@ pub fn block_package_to_fn(
     }
 
     tie_input_ports(&mut f, &mut metadata, options)?;
-    strip_clock_port(&mut f, &mut metadata, options)?;
+    strip_clock_port(&mut f, &mut metadata)?;
     drop_output_ports(&mut f, &mut metadata, options)?;
 
     if metadata.output_names.len() != 1 {
@@ -158,35 +157,18 @@ fn tie_input_ports(
     Ok(())
 }
 
-fn strip_clock_port(
-    f: &mut ir::Fn,
-    metadata: &mut BlockMetadata,
-    options: &Block2FnOptions,
-) -> Result<(), String> {
-    let Some(clock_name) = options.clock_port.as_ref() else {
+fn strip_clock_port(f: &mut ir::Fn, metadata: &mut BlockMetadata) -> Result<(), String> {
+    let Some(clock_name) = metadata.clock_port_name.clone() else {
         return Ok(());
     };
 
-    if let Some(header_clock) = metadata.clock_port_name.as_ref() {
-        if header_clock != clock_name {
-            return Err(format!(
-                "block2fn: requested clock port '{}' does not match header clock '{}'",
-                clock_name, header_clock
-            ));
-        }
+    let Some(param_id) = f.params.iter().find(|p| p.name == clock_name).map(|p| p.id) else {
         metadata.clock_port_name = None;
-    }
-
-    let Some(param_id) = f
-        .params
-        .iter()
-        .find(|p| p.name == *clock_name)
-        .map(|p| p.id)
-    else {
         return Ok(());
     };
 
     let Some(param_node_index) = find_get_param_node_index(f, param_id) else {
+        metadata.clock_port_name = None;
         return Ok(());
     };
     let param_ref = NodeRef {
@@ -226,7 +208,8 @@ fn strip_clock_port(
 
     f.nodes[param_node_index].payload = NodePayload::Nil;
     f.params.retain(|p| p.id != param_id);
-    metadata.input_port_ids.remove(clock_name);
+    metadata.input_port_ids.remove(&clock_name);
+    metadata.clock_port_name = None;
     reorder_params_and_compact(f)?;
     Ok(())
 }
@@ -743,7 +726,6 @@ top block top(out0: bits[1], out1: bits[1], out2: bits[1]) {
         let opts = Block2FnOptions {
             tie_input_ports: tie_map,
             drop_output_ports: drop_set,
-            clock_port: None,
         };
         let result = block_ir_to_fn(block_ir, &opts).expect("block2fn should succeed");
         result.function
@@ -769,7 +751,6 @@ top block top(out0: bits[1], out1: bits[1], out2: bits[1]) {
         let opts = Block2FnOptions {
             tie_input_ports: BTreeMap::from([("a".to_string(), bits1("0"))]),
             drop_output_ports: BTreeSet::new(),
-            clock_port: None,
         };
         tie_input_ports(&mut f, &mut metadata, &opts).expect("tie_input_ports succeeds");
         f.check_pir_layout_invariants()
@@ -791,7 +772,6 @@ top block top(out0: bits[1], out1: bits[1], out2: bits[1]) {
                 ("b".to_string(), bits1("1")),
             ]),
             drop_output_ports: BTreeSet::new(),
-            clock_port: None,
         };
         tie_input_ports(&mut f, &mut metadata, &opts).expect("tie_input_ports succeeds");
         f.check_pir_layout_invariants()
@@ -807,7 +787,6 @@ top block top(out0: bits[1], out1: bits[1], out2: bits[1]) {
         let opts = Block2FnOptions {
             tie_input_ports: BTreeMap::new(),
             drop_output_ports: BTreeSet::from(["out0".to_string(), "out2".to_string()]),
-            clock_port: None,
         };
         drop_output_ports(&mut f, &mut metadata, &opts).expect("drop_output_ports succeeds");
 
@@ -896,7 +875,6 @@ top block top(a: bits[1], b: bits[1], out: (bits[1], bits[1])) {
                 ("b".to_string(), bits1("1")),
             ]),
             drop_output_ports: BTreeSet::new(),
-            clock_port: None,
         };
         tie_input_ports(&mut f, &mut metadata, &opts).expect("tie_input_ports succeeds");
         assert_eq!(f.params.len(), 0, "tied inputs should be removed");
@@ -920,7 +898,6 @@ top block top(a: bits[1], b: bits[1], out0: bits[1], out1: bits[1]) {
         let opts = Block2FnOptions {
             tie_input_ports: BTreeMap::new(),
             drop_output_ports: BTreeSet::from(["out1".to_string()]),
-            clock_port: None,
         };
         drop_output_ports(&mut f, &mut metadata, &opts).expect("drop_output_ports succeeds");
         assert!(has_output_port(&metadata, "out0"));

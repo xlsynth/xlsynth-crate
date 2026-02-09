@@ -1451,13 +1451,6 @@ fn main() {
                         .help("Comma-separated output port names to drop")
                         .required(false)
                         .action(ArgAction::Set),
-                )
-                .arg(
-                    Arg::new("clock_port")
-                        .long("clock-port")
-                        .help("Clock port name to strip from the function signature")
-                        .required(false)
-                        .action(ArgAction::Set),
                 ),
         )
         .subcommand(

@@ -914,13 +914,14 @@ fn build_top_block(
             .unwrap_or_default();
         let mut output_refs: Vec<(String, NodeRef)> = Vec::new();
         for pin in outputs {
+            let output_node_name = format!("{}_{}", inst_name, pin.name);
             let nr = b.add_node(
                 NodePayload::InstantiationOutput {
                     instantiation: inst_name.clone(),
                     port_name: pin.name.clone(),
                 },
                 Type::Bits(1),
-                None,
+                Some(&output_node_name),
             );
             output_refs.push((pin.name.clone(), nr));
         }
@@ -1024,6 +1025,7 @@ fn build_top_block(
                 }
             }
             let val = net_ref_to_node(net_ref, parsed, &net_drivers, &net_widths, &mut b, 1)?;
+            let input_node_name = format!("{}_{}", inst_name, port_name);
             b.add_node(
                 NodePayload::InstantiationInput {
                     instantiation: inst_name.clone(),
@@ -1031,7 +1033,7 @@ fn build_top_block(
                     arg: val,
                 },
                 Type::Tuple(vec![]),
-                None,
+                Some(&input_node_name),
             );
         }
     }

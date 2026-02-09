@@ -37,12 +37,9 @@ pub fn handle_block2fn(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
             std::process::exit(1);
         })
         .unwrap_or_default();
-    let clock_port = matches.get_one::<String>("clock_port").cloned();
-
     let options = Block2FnOptions {
         tie_input_ports,
         drop_output_ports,
-        clock_port,
     };
     let result = block_package_to_fn(&pkg, &options).unwrap_or_else(|e| {
         eprintln!("Failed to convert block IR to function: {e}");
