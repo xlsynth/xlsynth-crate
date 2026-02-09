@@ -1,0 +1,7 @@
+package test
+
+file_number 0 "test.x"
+
+top fn __test__one_cycle0(x: bits[32] id=1, y: bits[32] id=2) -> bits[32] {
+  ret add.3: bits[32] = add(x, y, id=3, pos=[(0,0,39)])
+}

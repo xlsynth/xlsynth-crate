@@ -4,7 +4,42 @@ use crate::common::get_dslx_paths;
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 use clap::ArgMatches;
+use flate2::write::GzEncoder;
+use flate2::Compression;
+use std::io::Write;
+use tar::Builder;
+use xlsynth_g8r::dslx_stitch_pipeline::IrPackageTextFile;
 use xlsynth_g8r::verilog_version::VerilogVersion;
+
+/// Writes the given IR files to a tar.gz file.
+///
+/// The filenames come from the `file_name` recorded on the IrPackageTextFile
+/// struct.
+fn write_ir_tgz(tar_gz_path: &str, ir_files: &[IrPackageTextFile]) -> Result<(), String> {
+    let file = std::fs::File::create(tar_gz_path)
+        .map_err(|e| format!("could not create tar.gz output file '{tar_gz_path}': {e}"))?;
+    let enc = GzEncoder::new(file, Compression::default());
+    let mut tar = Builder::new(enc);
+
+    for f in ir_files {
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o644);
+        header.set_size(f.ir_text.as_bytes().len() as u64);
+        header.set_cksum();
+        tar.append_data(&mut header, f.file_name.as_str(), f.ir_text.as_bytes())
+            .map_err(|e| format!("could not append '{}' to tarball: {e}", f.file_name))?;
+    }
+
+    let enc = tar
+        .into_inner()
+        .map_err(|e| format!("could not finish tarball '{tar_gz_path}': {e}"))?;
+    let mut file = enc
+        .finish()
+        .map_err(|e| format!("could not finish gzip stream '{tar_gz_path}': {e}"))?;
+    file.flush()
+        .map_err(|e| format!("could not flush gzip file '{tar_gz_path}': {e}"))?;
+    Ok(())
+}
 
 /// Handles the `dslx-stitch-pipeline` subcommand.
 pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
@@ -93,6 +128,13 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
         .get_one::<String>("flop_outputs")
         .map(|s| s == "true")
         .unwrap_or(crate::flag_defaults::CODEGEN_FLOP_OUTPUTS);
+    let output_unopt_ir_tgz = matches
+        .get_one::<String>("output_unopt_ir_tgz")
+        .map(|s| s.as_str());
+    let output_opt_ir_tgz = matches
+        .get_one::<String>("output_opt_ir_tgz")
+        .map(|s| s.as_str());
+
     // Determine:
     //  * stage-discovery prefix: only used for implicit discovery of
     //    `<prefix>_cycleN` when `--stages` is not provided (from `--dslx_top`).
@@ -132,7 +174,32 @@ pub fn handle_dslx_stitch_pipeline(matches: &ArgMatches, config: &Option<Toolcha
         &options,
     );
     match result {
-        Ok(sv) => println!("{}", sv),
+        Ok(stitch_output) => {
+            if let Some(unopt_ir_tgz_path) = output_unopt_ir_tgz {
+                let unopt_files = vec![IrPackageTextFile {
+                    file_name: "unopt.ir".to_string(),
+                    ir_text: stitch_output.unopt_ir_text.clone(),
+                }];
+                if let Err(msg) = write_ir_tgz(unopt_ir_tgz_path, &unopt_files) {
+                    report_cli_error_and_exit(
+                        "could not write unoptimized IR tarball",
+                        Some(&msg),
+                        vec![],
+                    );
+                }
+            }
+            if let Some(opt_ir_tgz_path) = output_opt_ir_tgz {
+                if let Err(msg) = write_ir_tgz(opt_ir_tgz_path, &stitch_output.opt_ir_files) {
+                    report_cli_error_and_exit(
+                        "could not write optimized IR tarball",
+                        Some(&msg),
+                        vec![],
+                    );
+                }
+            }
+
+            println!("{}", stitch_output.sv_text)
+        }
         Err(e) => report_cli_error_and_exit("stitch error", Some(&e.0), vec![]),
     }
 }

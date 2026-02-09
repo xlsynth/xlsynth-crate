@@ -1,0 +1,9 @@
+package test
+
+file_number 0 "test.x"
+
+top fn __test__foo_cycle1(s: (bits[32], bits[32]) id=2) -> bits[32] {
+  s_a: bits[32] = tuple_index(s, index=0, id=3, pos=[(0,2,30)])
+  s_b: bits[32] = tuple_index(s, index=1, id=4, pos=[(0,2,36)])
+  ret add.5: bits[32] = add(s_a, s_b, id=5, pos=[(0,2,30)])
+}

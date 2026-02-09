@@ -1,0 +1,12 @@
+package test
+
+file_number 0 "test.x"
+
+fn __test__mul_add_cycle0(x: bits[32] id=1, y: bits[32] id=2, z: bits[32] id=3) -> (bits[32], bits[32]) {
+  umul.4: bits[32] = umul(x, y, id=4, pos=[(0,0,59)])
+  ret tuple.5: (bits[32], bits[32]) = tuple(umul.4, z, id=5, pos=[(0,0,58)])
+}
+
+fn __test__mul_add_cycle1(partial: bits[32] id=6, z: bits[32] id=7) -> bits[32] {
+  ret add.8: bits[32] = add(partial, z, id=8, pos=[(0,1,49)])
+}
