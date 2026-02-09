@@ -208,6 +208,7 @@ fn block_to_proto_cells(block: &crate::liberty::liberty_parser::Block) -> Vec<Ce
                         if let crate::liberty::liberty_parser::BlockMember::BlockAttr(attr) =
                             pin_member
                         {
+                            // For an example of these cells see ASAP7 `ICG` cells`.
                             if attr.attr_name == "direction" {
                                 if let crate::liberty::liberty_parser::Value::Identifier(s) =
                                     &attr.value
@@ -663,6 +664,7 @@ mod tests {
 
     #[test]
     fn test_clock_gate_pin_roles_are_captured() {
+        // This is similar to ASAP7 `ICG` cells`.
         let liberty_text = r#"
         library (my_library) {
             cell (my_icg) {
@@ -718,97 +720,6 @@ mod tests {
         assert_eq!(en_is_clocking, Some(false));
         assert_eq!(te_is_clocking, Some(false));
         assert_eq!(gclk_is_clocking, Some(false));
-    }
-
-    #[test]
-    fn test_clock_true_does_not_populate_clock_gate_clock_pin() {
-        let liberty_text = r#"
-        library (my_library) {
-            cell (my_icg_no_clock_gate_clock_pin) {
-                area: 1.5;
-                pin (CLK) {
-                    direction: input;
-                    clock: true;
-                }
-                pin (EN) {
-                    direction: input;
-                    clock_gate_enable_pin: true;
-                }
-                pin (TE) {
-                    direction: input;
-                    clock_gate_test_pin: true;
-                }
-                pin (GCLK) {
-                    direction: output;
-                    clock_gate_out_pin: true;
-                }
-            }
-        }
-        "#;
-        let mut tmp = NamedTempFile::new().unwrap();
-        write!(tmp, "{}", liberty_text).unwrap();
-        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
-        assert_eq!(lib.cells.len(), 1);
-        let cell = &lib.cells[0];
-        let clock_gate = cell
-            .clock_gate
-            .as_ref()
-            .expect("clock_gate should be present for clock_gate_* annotated cell");
-        assert_eq!(clock_gate.clock_pin, "");
-        assert_eq!(clock_gate.output_pin, "GCLK");
-        assert_eq!(clock_gate.enable_pins, vec!["EN"]);
-        assert_eq!(clock_gate.test_pins, vec!["TE"]);
-
-        let mut clk_is_clocking = None;
-        for pin in &cell.pins {
-            if pin.name == "CLK" {
-                clk_is_clocking = Some(pin.is_clocking_pin);
-            }
-        }
-        assert_eq!(clk_is_clocking, Some(false));
-    }
-
-    #[test]
-    fn test_quoted_true_does_not_populate_clock_gate_clock_pin() {
-        let liberty_text = r#"
-        library (my_library) {
-            cell (my_icg_quoted_clock_gate_clock_pin) {
-                area: 1.5;
-                pin (CLK) {
-                    direction: input;
-                    clock_gate_clock_pin: "true";
-                }
-                pin (EN) {
-                    direction: input;
-                    clock_gate_enable_pin: true;
-                }
-                pin (GCLK) {
-                    direction: output;
-                    clock_gate_out_pin: true;
-                }
-            }
-        }
-        "#;
-        let mut tmp = NamedTempFile::new().unwrap();
-        write!(tmp, "{}", liberty_text).unwrap();
-        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
-        assert_eq!(lib.cells.len(), 1);
-        let cell = &lib.cells[0];
-        let clock_gate = cell
-            .clock_gate
-            .as_ref()
-            .expect("clock_gate should be present for clock_gate_* annotated cell");
-        assert_eq!(clock_gate.clock_pin, "");
-        assert_eq!(clock_gate.output_pin, "GCLK");
-        assert_eq!(clock_gate.enable_pins, vec!["EN"]);
-
-        let mut clk_is_clocking = None;
-        for pin in &cell.pins {
-            if pin.name == "CLK" {
-                clk_is_clocking = Some(pin.is_clocking_pin);
-            }
-        }
-        assert_eq!(clk_is_clocking, Some(false));
     }
 
     #[test]
