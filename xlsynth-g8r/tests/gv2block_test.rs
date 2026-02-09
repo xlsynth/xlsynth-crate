@@ -18,6 +18,16 @@ cells: {
   area: 1.0
 }
 cells: {
+  name: "CKG"
+  pins: { name: "CLK" direction: INPUT is_clocking_pin: true }
+  pins: { name: "GCLK" direction: OUTPUT }
+  area: 1.0
+  clock_gate: {
+    clock_pin: "CLK"
+    output_pin: "GCLK"
+  }
+}
+cells: {
   name: "DFF"
   pins: { name: "D" direction: INPUT }
   pins: { name: "CLK" direction: INPUT is_clocking_pin: true }
@@ -397,6 +407,49 @@ top block top(a: bits[1], y: bits[2]) {
 }
 
 #[test]
+fn test_gv2block_elides_clock_gate_cell() {
+    let netlist = r#"
+module top (clk, d, q);
+  input clk;
+  input d;
+  output q;
+  wire clk;
+  wire d;
+  wire q;
+  wire gclk;
+  CKG u_cg (.CLK(clk), .GCLK(gclk));
+  DFF u1 (.D(d), .CLK(gclk), .Q(q));
+endmodule
+"#;
+    let mut liberty_file = NamedTempFile::new().unwrap();
+    write!(liberty_file, "{}", LIBERTY_TEXTPROTO).unwrap();
+    let mut netlist_file = NamedTempFile::new().unwrap();
+    write!(netlist_file, "{}", netlist).unwrap();
+
+    let got = convert_gv2block_paths_to_string(netlist_file.path(), liberty_file.path()).unwrap();
+
+    let want = r#"package top
+
+block DFF(CLK: clock, D: bits[1], Q: bits[1]) {
+  reg Q_reg(bits[1])
+  D: bits[1] = input_port(name=D, id=1)
+  Q_q: bits[1] = register_read(register=Q_reg, id=2)
+  Q_d: () = register_write(D, register=Q_reg, id=3)
+  Q: () = output_port(Q_q, name=Q, id=4)
+}
+
+top block top(clk: clock, d: bits[1], q: bits[1]) {
+  instantiation u1(block=DFF, kind=block)
+  d: bits[1] = input_port(name=d, id=1)
+  instantiation_output.2: bits[1] = instantiation_output(instantiation=u1, port_name=Q, id=2)
+  instantiation_input.3: () = instantiation_input(d, instantiation=u1, port_name=D, id=3)
+  q: () = output_port(instantiation_output.2, name=q, id=4)
+}
+"#;
+    assert_eq!(got, want);
+}
+
+#[test]
 fn test_gv2block_rejects_derived_clock() {
     let netlist = r#"
 module top (clk, en, d, q);
@@ -421,4 +474,37 @@ endmodule
     let err = convert_gv2block_paths_to_string(netlist_file.path(), liberty_file.path())
         .expect_err("expected derived clock rejection");
     assert!(err.to_string().contains("derived clock 'gclk'"));
+}
+
+#[test]
+fn test_gv2block_rejects_multiple_clocks() {
+    let netlist = r#"
+module top (clk0, clk1, d0, d1, q0, q1);
+  input clk0;
+  input clk1;
+  input d0;
+  input d1;
+  output q0;
+  output q1;
+  wire clk0;
+  wire clk1;
+  wire d0;
+  wire d1;
+  wire q0;
+  wire q1;
+  DFF u0 (.D(d0), .CLK(clk0), .Q(q0));
+  DFF u1 (.D(d1), .CLK(clk1), .Q(q1));
+endmodule
+"#;
+    let mut liberty_file = NamedTempFile::new().unwrap();
+    write!(liberty_file, "{}", LIBERTY_TEXTPROTO).unwrap();
+    let mut netlist_file = NamedTempFile::new().unwrap();
+    write!(netlist_file, "{}", netlist).unwrap();
+
+    let err = convert_gv2block_paths_to_string(netlist_file.path(), liberty_file.path())
+        .expect_err("expected multi-clock rejection");
+    let err_text = err.to_string();
+    assert!(err_text.contains("multiple clock nets detected"));
+    assert!(err_text.contains("clk0"));
+    assert!(err_text.contains("clk1"));
 }

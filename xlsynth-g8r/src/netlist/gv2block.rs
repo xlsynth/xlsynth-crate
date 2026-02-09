@@ -6,7 +6,7 @@ use crate::liberty::cell_formula::{EmitContext as FormulaEmitContext, Term, pars
 use crate::liberty::indexed::IndexedLibrary;
 use crate::liberty_proto::{Cell, PinDirection, SequentialKind};
 use crate::netlist::io::{ParsedNetlist, load_liberty_from_path, parse_netlist_from_path};
-use crate::netlist::parse::{Net, NetIndex, NetRef, NetlistModule};
+use crate::netlist::parse::{Net, NetIndex, NetRef, NetlistInstance, NetlistModule};
 use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -35,6 +35,310 @@ pub fn convert_gv2block_paths_to_string(
     liberty_proto_path: &Path,
 ) -> Result<String> {
     Ok(convert_gv2block_paths(netlist_path, liberty_proto_path)?.to_string())
+}
+
+/// Canonical clock/output pin names for a Liberty clock-gate cell.
+#[derive(Clone)]
+struct ClockGatePassthroughSpec {
+    clock_pin: String,
+    output_pin: String,
+}
+
+/// Net connections for one elided clock-gate instance in the netlist.
+#[derive(Clone)]
+struct ClockGatePassthroughInstance {
+    instance_name: String,
+    clock_ref: NetRef,
+    output_ref: NetRef,
+}
+
+/// Aggregated clock-gate passthrough data used while building the top block.
+struct ClockGatePassthroughAnalysis {
+    /// Per-instance clock->output passthrough wiring for elided clock gates.
+    passthroughs: Vec<ClockGatePassthroughInstance>,
+    /// Clock gaten istance names that should be skipped from normal block
+    /// instantiation.
+    elided_instance_names: HashSet<String>,
+    /// Alias map from clock-gate output net to its source clock net.
+    net_aliases: HashMap<NetIndex, NetIndex>,
+}
+
+fn get_clock_gate_passthrough_spec(cell: &Cell) -> Result<Option<ClockGatePassthroughSpec>> {
+    let Some(clock_gate) = cell.clock_gate.as_ref() else {
+        return Ok(None);
+    };
+
+    let clock_pin = if !clock_gate.clock_pin.is_empty() {
+        clock_gate.clock_pin.clone()
+    } else {
+        let candidates: Vec<String> = cell
+            .pins
+            .iter()
+            .filter(|p| p.is_clocking_pin)
+            .map(|p| p.name.clone())
+            .collect();
+        match candidates.as_slice() {
+            [pin] => pin.clone(),
+            [] => {
+                return Err(anyhow!(format!(
+                    "cell '{}' has clock_gate metadata but no clock_pin and no is_clocking_pin input",
+                    cell.name
+                )));
+            }
+            _ => {
+                return Err(anyhow!(format!(
+                    "cell '{}' has clock_gate metadata but ambiguous clock pin candidates {:?}",
+                    cell.name, candidates
+                )));
+            }
+        }
+    };
+
+    let output_pin = if !clock_gate.output_pin.is_empty() {
+        clock_gate.output_pin.clone()
+    } else {
+        let candidates: Vec<String> = cell
+            .pins
+            .iter()
+            .filter(|p| p.direction == PinDirection::Output as i32)
+            .map(|p| p.name.clone())
+            .collect();
+        match candidates.as_slice() {
+            [pin] => pin.clone(),
+            [] => {
+                return Err(anyhow!(format!(
+                    "cell '{}' has clock_gate metadata but no output_pin and no output pins",
+                    cell.name
+                )));
+            }
+            _ => {
+                return Err(anyhow!(format!(
+                    "cell '{}' has clock_gate metadata but ambiguous output pin candidates {:?}",
+                    cell.name, candidates
+                )));
+            }
+        }
+    };
+
+    let clock_pin_ok = cell
+        .pins
+        .iter()
+        .any(|p| p.name == clock_pin && p.direction == PinDirection::Input as i32);
+    if !clock_pin_ok {
+        return Err(anyhow!(format!(
+            "cell '{}' clock_gate clock pin '{}' is missing or not INPUT",
+            cell.name, clock_pin
+        )));
+    }
+
+    let output_pin_ok = cell
+        .pins
+        .iter()
+        .any(|p| p.name == output_pin && p.direction == PinDirection::Output as i32);
+    if !output_pin_ok {
+        return Err(anyhow!(format!(
+            "cell '{}' clock_gate output pin '{}' is missing or not OUTPUT",
+            cell.name, output_pin
+        )));
+    }
+
+    Ok(Some(ClockGatePassthroughSpec {
+        clock_pin,
+        output_pin,
+    }))
+}
+
+fn instance_connection_for_port(
+    inst: &NetlistInstance,
+    parsed: &ParsedNetlist,
+    port_name: &str,
+) -> Option<NetRef> {
+    inst.connections.iter().find_map(|(port_id, net_ref)| {
+        let Some(name) = parsed.interner.resolve(*port_id) else {
+            return None;
+        };
+        if name == port_name {
+            return Some(net_ref.clone());
+        }
+        None
+    })
+}
+
+fn resolve_net_alias(idx: NetIndex, aliases: &HashMap<NetIndex, NetIndex>) -> Result<NetIndex> {
+    let mut visited: HashSet<NetIndex> = HashSet::new();
+    let mut cur = idx;
+    while let Some(next) = aliases.get(&cur).copied() {
+        if !visited.insert(cur) {
+            return Err(anyhow!(format!(
+                "clock-gate net alias cycle detected at {:?}",
+                cur
+            )));
+        }
+        cur = next;
+    }
+    Ok(cur)
+}
+
+fn net_ref_to_simple_index(net_ref: &NetRef) -> Option<NetIndex> {
+    match net_ref {
+        NetRef::Simple(idx) => Some(*idx),
+        _ => None,
+    }
+}
+
+fn collect_clock_gate_passthroughs(
+    module: &NetlistModule,
+    parsed: &ParsedNetlist,
+    lib_indexed: &IndexedLibrary,
+) -> Result<ClockGatePassthroughAnalysis> {
+    let mut passthroughs: Vec<ClockGatePassthroughInstance> = Vec::new();
+    let mut elided_instance_names: HashSet<String> = HashSet::new();
+    let mut net_aliases: HashMap<NetIndex, NetIndex> = HashMap::new();
+
+    for inst in &module.instances {
+        let inst_name = parsed
+            .interner
+            .resolve(inst.instance_name)
+            .unwrap_or("<unknown>")
+            .to_string();
+        let cell_name = parsed.interner.resolve(inst.type_name).unwrap_or("");
+        let cell = lib_indexed
+            .get_cell(cell_name)
+            .ok_or_else(|| anyhow!(format!("cell '{}' not found in Liberty", cell_name)))?;
+        let Some(spec) = get_clock_gate_passthrough_spec(cell)? else {
+            continue;
+        };
+
+        let clock_ref =
+            instance_connection_for_port(inst, parsed, &spec.clock_pin).ok_or_else(|| {
+                anyhow!(format!(
+                    "clock-gate instance '{}' missing connection for clock pin '{}'",
+                    inst_name, spec.clock_pin
+                ))
+            })?;
+        let output_ref =
+            instance_connection_for_port(inst, parsed, &spec.output_pin).ok_or_else(|| {
+                anyhow!(format!(
+                    "clock-gate instance '{}' missing connection for output pin '{}'",
+                    inst_name, spec.output_pin
+                ))
+            })?;
+
+        let clock_idx = net_ref_to_simple_index(&clock_ref).ok_or_else(|| {
+            anyhow!(format!(
+                "clock-gate instance '{}' clock pin '{}' is not connected to a simple net",
+                inst_name, spec.clock_pin
+            ))
+        })?;
+        let output_idx = net_ref_to_simple_index(&output_ref).ok_or_else(|| {
+            anyhow!(format!(
+                "clock-gate instance '{}' output pin '{}' is not connected to a simple net",
+                inst_name, spec.output_pin
+            ))
+        })?;
+
+        if let Some(existing) = net_aliases.insert(output_idx, clock_idx) {
+            if existing != clock_idx {
+                return Err(anyhow!(format!(
+                    "clock-gate output net '{}' is aliased to multiple clock nets",
+                    net_name_by_index(output_idx, parsed)
+                )));
+            }
+        }
+
+        elided_instance_names.insert(inst_name.clone());
+        passthroughs.push(ClockGatePassthroughInstance {
+            instance_name: inst_name,
+            clock_ref,
+            output_ref,
+        });
+    }
+
+    Ok(ClockGatePassthroughAnalysis {
+        passthroughs,
+        elided_instance_names,
+        net_aliases,
+    })
+}
+
+fn apply_clock_gate_passthroughs(
+    passthroughs: &[ClockGatePassthroughInstance],
+    parsed: &ParsedNetlist,
+    net_drivers: &mut NetDrivers,
+    net_widths: &HashMap<NetIndex, (usize, i64)>,
+    b: &mut PirFnBuilder,
+) -> Result<HashSet<NetIndex>> {
+    let mut pending_passthroughs = passthroughs.to_vec();
+    let mut unresolved_passthrough_output_nets: HashSet<NetIndex> = HashSet::new();
+
+    while !pending_passthroughs.is_empty() {
+        let mut progressed = false;
+        let mut next_pending: Vec<ClockGatePassthroughInstance> = Vec::new();
+        for passthrough in pending_passthroughs {
+            if !net_ref_is_resolved(&passthrough.clock_ref, net_drivers, net_widths) {
+                next_pending.push(passthrough);
+                continue;
+            }
+
+            let source_node = net_ref_to_node(
+                &passthrough.clock_ref,
+                parsed,
+                net_drivers,
+                net_widths,
+                b,
+                1,
+            )?;
+            match &passthrough.output_ref {
+                NetRef::Simple(net_idx) => {
+                    net_drivers.set_whole(*net_idx, source_node, net_widths, parsed)?;
+                }
+                NetRef::BitSelect(net_idx, bit) => {
+                    net_drivers.set_bit(
+                        *net_idx,
+                        i64::from(*bit),
+                        source_node,
+                        net_widths,
+                        parsed,
+                    )?;
+                }
+                NetRef::PartSelect(net_idx, msb, lsb) => {
+                    if msb != lsb {
+                        return Err(anyhow!(format!(
+                            "clock-gate instance '{}' output connection is unsupported multi-bit part-select on net '{}'",
+                            passthrough.instance_name,
+                            net_name_by_index(*net_idx, parsed)
+                        )));
+                    }
+                    net_drivers.set_bit(
+                        *net_idx,
+                        i64::from(*lsb),
+                        source_node,
+                        net_widths,
+                        parsed,
+                    )?;
+                }
+                NetRef::Unconnected => {}
+                _ => {
+                    return Err(anyhow!(format!(
+                        "clock-gate instance '{}' output connection is unsupported net reference",
+                        passthrough.instance_name
+                    )));
+                }
+            }
+            progressed = true;
+        }
+        if !progressed {
+            for passthrough in &next_pending {
+                if let Some(output_idx) = net_ref_to_simple_index(&passthrough.output_ref) {
+                    unresolved_passthrough_output_nets.insert(output_idx);
+                }
+            }
+            break;
+        }
+        pending_passthroughs = next_pending;
+    }
+
+    Ok(unresolved_passthrough_output_nets)
 }
 
 fn build_package_from_netlist(
@@ -67,6 +371,9 @@ fn build_package_from_netlist(
         let cell = lib_indexed
             .get_cell(cell_name)
             .ok_or_else(|| anyhow!(format!("cell '{}' not found in Liberty proto", cell_name)))?;
+        if get_clock_gate_passthrough_spec(cell)?.is_some() {
+            continue;
+        }
         let (f, meta) = build_cell_block(cell, lib_indexed)?;
         cell_blocks.push((cell_name.to_string(), f, meta));
     }
@@ -472,6 +779,12 @@ fn build_top_block(
         net_widths.insert(idx, net_width_bits(net));
     }
 
+    let ClockGatePassthroughAnalysis {
+        passthroughs: clock_gate_passthroughs,
+        elided_instance_names: elided_clock_gate_instances,
+        net_aliases: clock_gate_net_aliases,
+    } = collect_clock_gate_passthroughs(module, parsed, lib_indexed)?;
+
     // Identify a shared clock net name for DFFs (if any).
     let mut clock_net_name: Option<String> = None;
     let mut dff_clock_pins: Vec<String> = Vec::new();
@@ -509,7 +822,7 @@ fn build_top_block(
             for (port_name, net_ref) in &inst.connections {
                 let port = parsed.interner.resolve(*port_name).unwrap_or("");
                 if dff_clock_pins.iter().any(|p| p == port) {
-                    let net_name = net_ref_to_name(net_ref, parsed).ok_or_else(|| {
+                    let net_idx = net_ref_to_simple_index(net_ref).ok_or_else(|| {
                         anyhow!(format!(
                             "clock pin '{}' on instance '{}' is not driven by a simple net",
                             port,
@@ -519,6 +832,8 @@ fn build_top_block(
                                 .unwrap_or("<unknown>")
                         ))
                     })?;
+                    let resolved_net_idx = resolve_net_alias(net_idx, &clock_gate_net_aliases)?;
+                    let net_name = net_name_by_index(resolved_net_idx, parsed);
                     match &clock_net_name {
                         None => clock_net_name = Some(net_name),
                         Some(existing) if existing != &net_name => {
@@ -581,6 +896,9 @@ fn build_top_block(
             .resolve(inst.instance_name)
             .unwrap_or("")
             .to_string();
+        if elided_clock_gate_instances.contains(&inst_name) {
+            continue;
+        }
         let cell_name = parsed
             .interner
             .resolve(inst.type_name)
@@ -646,6 +964,14 @@ fn build_top_block(
         }
     }
 
+    let unresolved_passthrough_output_nets = apply_clock_gate_passthroughs(
+        &clock_gate_passthroughs,
+        parsed,
+        &mut net_drivers,
+        &net_widths,
+        &mut b,
+    )?;
+
     // Emit instantiation inputs.
     for inst in &module.instances {
         let inst_name = parsed
@@ -653,6 +979,9 @@ fn build_top_block(
             .resolve(inst.instance_name)
             .unwrap_or("")
             .to_string();
+        if elided_clock_gate_instances.contains(&inst_name) {
+            continue;
+        }
         let cell_name = parsed
             .interner
             .resolve(inst.type_name)
@@ -732,6 +1061,12 @@ fn build_top_block(
                 )
             }
         } else {
+            if unresolved_passthrough_output_nets.contains(&net_idx) {
+                return Err(anyhow!(format!(
+                    "clock-gate output net '{}' is unresolved as data (clock-only passthrough)",
+                    name
+                )));
+            }
             b.add_literal_bits(width, 0)
         };
         output_names.push(name);
@@ -793,10 +1128,63 @@ fn net_name_by_index(idx: NetIndex, parsed: &ParsedNetlist) -> String {
         .to_string()
 }
 
-fn net_ref_to_name(net_ref: &NetRef, parsed: &ParsedNetlist) -> Option<String> {
+fn net_ref_is_resolved(
+    net_ref: &NetRef,
+    net_drivers: &NetDrivers,
+    net_widths: &HashMap<NetIndex, (usize, i64)>,
+) -> bool {
     match net_ref {
-        NetRef::Simple(idx) => Some(net_name_by_index(*idx, parsed)),
-        _ => None,
+        NetRef::Simple(idx) => {
+            if net_drivers.get_whole(*idx).is_some() {
+                return true;
+            }
+            net_drivers
+                .get_bits(*idx)
+                .is_some_and(|bits| bits.iter().all(|b| b.is_some()))
+        }
+        NetRef::BitSelect(idx, bit) => {
+            if net_drivers.get_whole(*idx).is_some() {
+                return true;
+            }
+            let Some(bits) = net_drivers.get_bits(*idx) else {
+                return false;
+            };
+            let (_, lsb) = net_widths.get(idx).copied().unwrap_or((1, 0));
+            let offset_i64 = i64::from(*bit) - lsb;
+            if offset_i64 < 0 {
+                return false;
+            }
+            bits.get(offset_i64 as usize).is_some_and(|n| n.is_some())
+        }
+        NetRef::PartSelect(idx, msb, lsb_select) => {
+            if msb < lsb_select {
+                return false;
+            }
+            if net_drivers.get_whole(*idx).is_some() {
+                return true;
+            }
+            let Some(bits) = net_drivers.get_bits(*idx) else {
+                return false;
+            };
+            let (_, net_lsb) = net_widths.get(idx).copied().unwrap_or((1, 0));
+            for bit in *lsb_select..=*msb {
+                let offset_i64 = i64::from(bit) - net_lsb;
+                if offset_i64 < 0 {
+                    return false;
+                }
+                let Some(nr_opt) = bits.get(offset_i64 as usize) else {
+                    return false;
+                };
+                if nr_opt.is_none() {
+                    return false;
+                }
+            }
+            true
+        }
+        NetRef::Literal(_) | NetRef::Unconnected => true,
+        NetRef::Concat(elems) => elems
+            .iter()
+            .all(|e| net_ref_is_resolved(e, net_drivers, net_widths)),
     }
 }
 
