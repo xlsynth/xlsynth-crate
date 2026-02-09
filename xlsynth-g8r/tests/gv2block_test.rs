@@ -508,3 +508,31 @@ endmodule
     assert!(err_text.contains("clk0"));
     assert!(err_text.contains("clk1"));
 }
+
+#[test]
+fn test_gv2block_rejects_clock_net_used_as_data() {
+    let netlist = r#"
+module top (clk, d, q, nclk);
+  input clk;
+  input d;
+  output q;
+  output nclk;
+  wire clk;
+  wire d;
+  wire q;
+  wire nclk;
+  DFF u0 (.D(d), .CLK(clk), .Q(q));
+  INV u1 (.A(clk), .Y(nclk));
+endmodule
+"#;
+    let mut liberty_file = NamedTempFile::new().unwrap();
+    write!(liberty_file, "{}", LIBERTY_TEXTPROTO).unwrap();
+    let mut netlist_file = NamedTempFile::new().unwrap();
+    write!(netlist_file, "{}", netlist).unwrap();
+
+    let err = convert_gv2block_paths_to_string(netlist_file.path(), liberty_file.path())
+        .expect_err("expected rejection when selected clock net is used as data");
+    let err_text = err.to_string();
+    assert!(err_text.contains("clock net 'clk' is connected to non-clock input"));
+    assert!(err_text.contains("u1.A"));
+}

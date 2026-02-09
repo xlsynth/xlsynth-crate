@@ -1012,6 +1012,17 @@ fn build_top_block(
             if !input_pin_names.contains(&port_name) || clock_pin_names.contains(&port_name) {
                 continue;
             }
+            if let (Some(clock_net), Some(net_idx)) =
+                (clock_net_name.as_ref(), net_ref_to_simple_index(net_ref))
+            {
+                let resolved_net_idx = resolve_net_alias(net_idx, &clock_gate_net_aliases)?;
+                if net_name_by_index(resolved_net_idx, parsed) == *clock_net {
+                    return Err(anyhow!(format!(
+                        "clock net '{}' is connected to non-clock input '{}.{}' (cell '{}'); gv2block does not support feeding the selected clock into ordinary logic",
+                        clock_net, inst_name, port_name, cell_name
+                    )));
+                }
+            }
             let val = net_ref_to_node(net_ref, parsed, &net_drivers, &net_widths, &mut b, 1)?;
             b.add_node(
                 NodePayload::InstantiationInput {
