@@ -40,6 +40,7 @@ pub mod test_utils {
                     ],
                     area: 1.0,
                     sequential: vec![],
+                    clock_gate: None,
                 },
                 Cell {
                     name: "BUF".to_string(),
@@ -59,6 +60,7 @@ pub mod test_utils {
                     ],
                     area: 1.0,
                     sequential: vec![],
+                    clock_gate: None,
                 },
                 Cell {
                     name: "DFF".to_string(),
@@ -84,6 +86,7 @@ pub mod test_utils {
                     ],
                     area: 1.0,
                     sequential: vec![],
+                    clock_gate: None,
                 },
             ],
         }

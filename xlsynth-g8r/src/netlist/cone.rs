@@ -720,6 +720,7 @@ mod tests {
             ],
             area: 2.0,
             sequential: vec![],
+            clock_gate: None,
         });
 
         let indexed = IndexedLibrary::new(lib);

@@ -75,6 +75,7 @@ mod tests {
             }],
             name: "test_cell".to_string(),
             sequential: vec![],
+            clock_gate: None,
         });
         assert_eq!(lib.cells.len(), 1);
         assert_eq!(lib.cells[0].pins[0].direction, PinDirection::Input as i32);

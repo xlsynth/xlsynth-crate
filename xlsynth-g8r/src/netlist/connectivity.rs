@@ -425,6 +425,7 @@ mod tests {
                 ],
                 area: 1.0,
                 sequential: vec![],
+                clock_gate: None,
             }],
         };
         let indexed = IndexedLibrary::new(lib_proto);

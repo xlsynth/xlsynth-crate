@@ -3,7 +3,9 @@
 use crate::liberty::cell_formula::parse_formula;
 use crate::liberty::util::human_readable_size;
 use crate::liberty::{CharReader, LibertyParser};
-use crate::liberty_proto::{Cell, Library, Pin, PinDirection, Sequential, SequentialKind};
+use crate::liberty_proto::{
+    Cell, ClockGate, Library, Pin, PinDirection, Sequential, SequentialKind,
+};
 use flate2::bufread::GzDecoder;
 use std::collections::HashSet;
 use std::fs::File;
@@ -22,6 +24,23 @@ fn value_to_string(value: &crate::liberty::liberty_parser::Value) -> String {
         crate::liberty::liberty_parser::Value::String(s) => s.clone(),
         crate::liberty::liberty_parser::Value::Identifier(s) => s.clone(),
         _ => panic!("Expected string or identifier for function attribute"),
+    }
+}
+
+fn value_to_bool(value: &crate::liberty::liberty_parser::Value) -> Option<bool> {
+    match value {
+        crate::liberty::liberty_parser::Value::Identifier(s) => {
+            if s.eq_ignore_ascii_case("true") {
+                Some(true)
+            } else if s.eq_ignore_ascii_case("false") {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        crate::liberty::liberty_parser::Value::String(_) => None,
+        crate::liberty::liberty_parser::Value::Number(_) => None,
+        crate::liberty::liberty_parser::Value::Tuple(_) => None,
     }
 }
 
@@ -158,6 +177,10 @@ fn block_to_proto_cells(block: &crate::liberty::liberty_parser::Block) -> Vec<Ce
             // Second pass: build Pin protos, marking pins that are referred to by any
             // clocked_on attribute in an ff block as clocking pins.
             let mut pins = Vec::new();
+            let mut clock_gate_clock_pins = Vec::new();
+            let mut clock_gate_output_pins = Vec::new();
+            let mut clock_gate_enable_pins = Vec::new();
+            let mut clock_gate_test_pins = Vec::new();
             for cell_member in &cell_block.members {
                 if let crate::liberty::liberty_parser::BlockMember::SubBlock(pin_block) =
                     cell_member
@@ -177,6 +200,10 @@ fn block_to_proto_cells(block: &crate::liberty::liberty_parser::Block) -> Vec<Ce
                     {
                         pin_name = s.clone();
                     }
+                    let mut pin_is_clock_gate_clock = false;
+                    let mut pin_is_clock_gate_out = false;
+                    let mut pin_is_clock_gate_enable = false;
+                    let mut pin_is_clock_gate_test = false;
                     for pin_member in &pin_block.members {
                         if let crate::liberty::liberty_parser::BlockMember::BlockAttr(attr) =
                             pin_member
@@ -189,10 +216,34 @@ fn block_to_proto_cells(block: &crate::liberty::liberty_parser::Block) -> Vec<Ce
                                 }
                             } else if attr.attr_name == "function" {
                                 function = value_to_string(&attr.value);
+                            } else if attr.attr_name == "clock_gate_clock_pin" {
+                                pin_is_clock_gate_clock =
+                                    value_to_bool(&attr.value).unwrap_or(false);
+                            } else if attr.attr_name == "clock_gate_out_pin" {
+                                pin_is_clock_gate_out = value_to_bool(&attr.value).unwrap_or(false);
+                            } else if attr.attr_name == "clock_gate_enable_pin" {
+                                pin_is_clock_gate_enable =
+                                    value_to_bool(&attr.value).unwrap_or(false);
+                            } else if attr.attr_name == "clock_gate_test_pin" {
+                                pin_is_clock_gate_test =
+                                    value_to_bool(&attr.value).unwrap_or(false);
                             }
                         }
                     }
-                    let is_clocking_pin = clocking_pins.contains(&pin_name);
+                    if pin_is_clock_gate_clock {
+                        clock_gate_clock_pins.push(pin_name.clone());
+                    }
+                    if pin_is_clock_gate_out {
+                        clock_gate_output_pins.push(pin_name.clone());
+                    }
+                    if pin_is_clock_gate_enable {
+                        clock_gate_enable_pins.push(pin_name.clone());
+                    }
+                    if pin_is_clock_gate_test {
+                        clock_gate_test_pins.push(pin_name.clone());
+                    }
+                    let is_clocking_pin =
+                        clocking_pins.contains(&pin_name) || pin_is_clock_gate_clock;
                     pins.push(Pin {
                         direction,
                         function,
@@ -201,11 +252,46 @@ fn block_to_proto_cells(block: &crate::liberty::liberty_parser::Block) -> Vec<Ce
                     });
                 }
             }
+            let has_clock_gate_roles = !clock_gate_clock_pins.is_empty()
+                || !clock_gate_output_pins.is_empty()
+                || !clock_gate_enable_pins.is_empty()
+                || !clock_gate_test_pins.is_empty();
+            if clock_gate_clock_pins.len() > 1 {
+                log::warn!(
+                    "Cell '{}' has multiple clock_gate_clock_pin pins; selecting first: {:?}",
+                    name,
+                    clock_gate_clock_pins
+                );
+            }
+            if clock_gate_output_pins.len() > 1 {
+                log::warn!(
+                    "Cell '{}' has multiple clock_gate_out_pin pins; selecting first: {:?}",
+                    name,
+                    clock_gate_output_pins
+                );
+            }
+            let clock_pin = if let Some(first) = clock_gate_clock_pins.first() {
+                first.clone()
+            } else {
+                String::new()
+            };
+            let output_pin = clock_gate_output_pins.first().cloned().unwrap_or_default();
+            let clock_gate = if has_clock_gate_roles {
+                Some(ClockGate {
+                    clock_pin,
+                    output_pin,
+                    enable_pins: clock_gate_enable_pins,
+                    test_pins: clock_gate_test_pins,
+                })
+            } else {
+                None
+            };
             cells.push(Cell {
                 area,
                 pins,
                 name,
                 sequential,
+                clock_gate,
             });
         }
     }
@@ -573,6 +659,156 @@ mod tests {
         assert_eq!(clk_is_clocking, Some(true));
         assert_eq!(d_is_clocking, Some(false));
         assert_eq!(q_is_clocking, Some(false));
+    }
+
+    #[test]
+    fn test_clock_gate_pin_roles_are_captured() {
+        let liberty_text = r#"
+        library (my_library) {
+            cell (my_icg) {
+                area: 1.5;
+                pin (CLK) {
+                    direction: input;
+                    clock_gate_clock_pin: true;
+                }
+                pin (EN) {
+                    direction: input;
+                    clock_gate_enable_pin: true;
+                }
+                pin (TE) {
+                    direction: input;
+                    clock_gate_test_pin: true;
+                }
+                pin (GCLK) {
+                    direction: output;
+                    clock_gate_out_pin: true;
+                }
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        assert_eq!(lib.cells.len(), 1);
+        let cell = &lib.cells[0];
+        assert_eq!(cell.name, "my_icg");
+        let clock_gate = cell
+            .clock_gate
+            .as_ref()
+            .expect("clock_gate should be present for clock_gate_* annotated cell");
+        assert_eq!(clock_gate.clock_pin, "CLK");
+        assert_eq!(clock_gate.output_pin, "GCLK");
+        assert_eq!(clock_gate.enable_pins, vec!["EN"]);
+        assert_eq!(clock_gate.test_pins, vec!["TE"]);
+
+        let mut clk_is_clocking = None;
+        let mut en_is_clocking = None;
+        let mut te_is_clocking = None;
+        let mut gclk_is_clocking = None;
+        for pin in &cell.pins {
+            match pin.name.as_str() {
+                "CLK" => clk_is_clocking = Some(pin.is_clocking_pin),
+                "EN" => en_is_clocking = Some(pin.is_clocking_pin),
+                "TE" => te_is_clocking = Some(pin.is_clocking_pin),
+                "GCLK" => gclk_is_clocking = Some(pin.is_clocking_pin),
+                other => panic!("Unexpected pin name in test: {}", other),
+            }
+        }
+        assert_eq!(clk_is_clocking, Some(true));
+        assert_eq!(en_is_clocking, Some(false));
+        assert_eq!(te_is_clocking, Some(false));
+        assert_eq!(gclk_is_clocking, Some(false));
+    }
+
+    #[test]
+    fn test_clock_true_does_not_populate_clock_gate_clock_pin() {
+        let liberty_text = r#"
+        library (my_library) {
+            cell (my_icg_no_clock_gate_clock_pin) {
+                area: 1.5;
+                pin (CLK) {
+                    direction: input;
+                    clock: true;
+                }
+                pin (EN) {
+                    direction: input;
+                    clock_gate_enable_pin: true;
+                }
+                pin (TE) {
+                    direction: input;
+                    clock_gate_test_pin: true;
+                }
+                pin (GCLK) {
+                    direction: output;
+                    clock_gate_out_pin: true;
+                }
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        assert_eq!(lib.cells.len(), 1);
+        let cell = &lib.cells[0];
+        let clock_gate = cell
+            .clock_gate
+            .as_ref()
+            .expect("clock_gate should be present for clock_gate_* annotated cell");
+        assert_eq!(clock_gate.clock_pin, "");
+        assert_eq!(clock_gate.output_pin, "GCLK");
+        assert_eq!(clock_gate.enable_pins, vec!["EN"]);
+        assert_eq!(clock_gate.test_pins, vec!["TE"]);
+
+        let mut clk_is_clocking = None;
+        for pin in &cell.pins {
+            if pin.name == "CLK" {
+                clk_is_clocking = Some(pin.is_clocking_pin);
+            }
+        }
+        assert_eq!(clk_is_clocking, Some(false));
+    }
+
+    #[test]
+    fn test_quoted_true_does_not_populate_clock_gate_clock_pin() {
+        let liberty_text = r#"
+        library (my_library) {
+            cell (my_icg_quoted_clock_gate_clock_pin) {
+                area: 1.5;
+                pin (CLK) {
+                    direction: input;
+                    clock_gate_clock_pin: "true";
+                }
+                pin (EN) {
+                    direction: input;
+                    clock_gate_enable_pin: true;
+                }
+                pin (GCLK) {
+                    direction: output;
+                    clock_gate_out_pin: true;
+                }
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        assert_eq!(lib.cells.len(), 1);
+        let cell = &lib.cells[0];
+        let clock_gate = cell
+            .clock_gate
+            .as_ref()
+            .expect("clock_gate should be present for clock_gate_* annotated cell");
+        assert_eq!(clock_gate.clock_pin, "");
+        assert_eq!(clock_gate.output_pin, "GCLK");
+        assert_eq!(clock_gate.enable_pins, vec!["EN"]);
+
+        let mut clk_is_clocking = None;
+        for pin in &cell.pins {
+            if pin.name == "CLK" {
+                clk_is_clocking = Some(pin.is_clocking_pin);
+            }
+        }
+        assert_eq!(clk_is_clocking, Some(false));
     }
 
     #[test]
