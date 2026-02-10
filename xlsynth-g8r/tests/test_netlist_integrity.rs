@@ -24,6 +24,7 @@ fn build_simple_lib() -> Library {
                 },
             ],
             sequential: vec![],
+            clock_gate: None,
         }],
     }
 }

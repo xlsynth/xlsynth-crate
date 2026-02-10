@@ -13,6 +13,7 @@ message Cell {
   repeated Pin pins = 2;
   double area = 3;
   repeated Sequential sequential = 4;
+  ClockGate clock_gate = 5;
 }
 
 enum PinDirection {
@@ -26,6 +27,13 @@ message Pin {
   string function = 2;
   string name = 3;
   bool is_clocking_pin = 4;
+}
+
+message ClockGate {
+  string clock_pin = 1;
+  string output_pin = 2;
+  repeated string enable_pins = 3;
+  repeated string test_pins = 4;
 }
 
 enum SequentialKind {

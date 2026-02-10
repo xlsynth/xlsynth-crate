@@ -975,6 +975,7 @@ mod tests {
                 ],
                 area: 1.0,
                 sequential: vec![],
+                clock_gate: None,
             }],
         };
         let gate_fn = project_gatefn_from_netlist_and_liberty(
@@ -1055,6 +1056,7 @@ mod tests {
                 ],
                 area: 1.0,
                 sequential: vec![],
+                clock_gate: None,
             }],
         };
         let res = project_gatefn_from_netlist_and_liberty(
@@ -1130,6 +1132,7 @@ mod tests {
                 ],
                 area: 1.0,
                 sequential: vec![],
+                clock_gate: None,
             }],
         };
         let err = project_gatefn_from_netlist_and_liberty(
@@ -1217,6 +1220,7 @@ mod tests {
                 ],
                 area: 1.0,
                 sequential: vec![],
+                clock_gate: None,
             }],
         };
         let gate_fn = project_gatefn_from_netlist_and_liberty(
@@ -1315,6 +1319,7 @@ mod tests {
                 ],
                 area: 1.0,
                 sequential: vec![],
+                clock_gate: None,
             }],
         };
         let mut dff_cells = std::collections::HashSet::new();
@@ -1412,6 +1417,7 @@ mod tests {
                 ],
                 area: 1.0,
                 sequential: vec![],
+                clock_gate: None,
             }],
         };
         let mut dff_cells = std::collections::HashSet::new();
@@ -1500,6 +1506,7 @@ mod tests {
                 ],
                 area: 1.0,
                 sequential: vec![],
+                clock_gate: None,
             }],
         };
         let mut dff_cells = std::collections::HashSet::new();
@@ -1593,6 +1600,7 @@ mod tests {
                 ],
                 area: 1.0,
                 sequential: vec![],
+                clock_gate: None,
             }],
         };
         let dff_cells_identity = HashSet::new();
@@ -1679,6 +1687,7 @@ mod tests {
                 ],
                 area: 1.0,
                 sequential: vec![],
+                clock_gate: None,
             }],
         };
         let dff_cells_identity = HashSet::new();
@@ -1768,6 +1777,7 @@ mod tests {
                 ],
                 area: 1.0,
                 sequential: vec![],
+                clock_gate: None,
             }],
         };
         let dff_cells_identity = HashSet::new();
@@ -1888,6 +1898,7 @@ mod tests {
                         preset_expr: String::new(),
                     },
                 ],
+                clock_gate: None,
             }],
         };
         let gate_fn = project_gatefn_from_netlist_and_liberty_with_options(
@@ -1991,6 +2002,7 @@ mod tests {
                     ],
                     area: 1.0,
                     sequential: vec![],
+                    clock_gate: None,
                 },
                 crate::liberty_proto::Cell {
                     name: "DFFEN".to_string(),
@@ -2029,6 +2041,7 @@ mod tests {
                         clear_expr: String::new(),
                         preset_expr: String::new(),
                     }],
+                    clock_gate: None,
                 },
             ],
         };
@@ -2143,6 +2156,7 @@ mod tests {
                     clear_expr: "!RN".to_string(),
                     preset_expr: String::new(),
                 }],
+                clock_gate: None,
             }],
         };
         let err = project_gatefn_from_netlist_and_liberty_with_options(
@@ -2251,6 +2265,7 @@ mod tests {
                     clear_expr: String::new(),
                     preset_expr: String::new(),
                 }],
+                clock_gate: None,
             }],
         };
         let err = project_gatefn_from_netlist_and_liberty_with_options(
@@ -2365,6 +2380,7 @@ mod tests {
                     clear_expr: String::new(),
                     preset_expr: String::new(),
                 }],
+                clock_gate: None,
             }],
         };
         let err = project_gatefn_from_netlist_and_liberty_with_options(
@@ -2463,6 +2479,7 @@ mod tests {
                     clear_expr: String::new(),
                     preset_expr: String::new(),
                 }],
+                clock_gate: None,
             }],
         };
         let err = project_gatefn_from_netlist_and_liberty_with_options(
@@ -2533,6 +2550,7 @@ mod tests {
                 ],
                 area: 1.0,
                 sequential: vec![],
+                clock_gate: None,
             }],
         };
         let mut dff_cells_identity = HashSet::new();
@@ -2630,6 +2648,7 @@ mod tests {
                 ],
                 area: 1.0,
                 sequential: vec![],
+                clock_gate: None,
             }],
         };
         let gate_fn = project_gatefn_from_netlist_and_liberty(

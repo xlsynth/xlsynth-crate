@@ -121,7 +121,7 @@ Inlines blocks and converts the resulting Block IR into a PIR function. The foll
 - Optionally removes output ports (`--drop-output-ports`).
 - Performs a trivial optimization pass handling the tied input ports. The motivation for this is to remove feedback loops caused by load-enable functionality. A common case is an `input_valid` signal muxing the register output with data to form the register input. Tying `input_valid` to 1 and optimizing cuts this cycle.
 - Collapses registers into wires. If a cycle is created after collapsing, an error is returned.
-- Optionally drop a clock input port (`clock-port`).
+- Removes clock port.
 - Converts the resulting combinational block into a function.
 
 This is useful for converting a block generated from a netlist into a function.
@@ -130,8 +130,7 @@ This is useful for converting a block generated from a netlist into a function.
 xlsynth-driver block2fn \
   --block_ir ~/my_netlist.block.ir \
   --tie-input-ports "A=bits[1]:0,B=bits[4]:0b1011" \
-  --drop-output-ports "unused_out" \
-  --clock-port "clk" > ~/my_netlist.fn.ir
+  --drop-output-ports "unused_out" > ~/my_netlist.fn.ir
 ```
 
 ### `gv2aig`: gate-level netlist to AIGER
