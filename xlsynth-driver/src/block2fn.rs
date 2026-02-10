@@ -7,6 +7,7 @@ use clap::ArgMatches;
 use crate::toolchain_config::ToolchainConfig;
 use xlsynth::{IrBits, IrValue};
 use xlsynth_pir::block2fn::{block_package_to_fn, Block2FnOptions};
+use xlsynth_pir::ir::{FileTable, MemberType, Package, PackageMember};
 use xlsynth_pir::ir_parser::Parser;
 
 pub fn handle_block2fn(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
@@ -16,9 +17,10 @@ pub fn handle_block2fn(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
     let block_ir_text =
         std::fs::read_to_string(input_path).expect("read block IR file should succeed");
     let mut parser = Parser::new(&block_ir_text);
-    let pkg = parser
-        .parse_package()
-        .expect("parse block IR package should succeed");
+    let pkg = parser.parse_package().unwrap_or_else(|e| {
+        eprintln!("Failed to parse block IR package: {e}");
+        std::process::exit(1);
+    });
     let tie_input_ports = matches
         .get_one::<String>("tie_input_ports")
         .map(|s| parse_csv_kv(s))
@@ -42,10 +44,16 @@ pub fn handle_block2fn(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
         drop_output_ports,
     };
     let result = block_package_to_fn(&pkg, &options).unwrap_or_else(|e| {
-        eprintln!("Failed to convert block IR to function: {e}");
+        eprintln!("Failed to convert block IR to function package: {e}");
         std::process::exit(1);
     });
-    println!("{}", result.function);
+    let package = Package {
+        name: result.package_name,
+        file_table: FileTable::new(),
+        members: vec![PackageMember::Function(result.function.clone())],
+        top: Some((result.function.name.clone(), MemberType::Function)),
+    };
+    println!("{}", package);
 }
 
 fn parse_csv_kv(input: &str) -> Result<BTreeMap<String, IrBits>, String> {

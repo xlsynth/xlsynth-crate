@@ -113,9 +113,9 @@ xlsynth-driver gv2block \
   --liberty_proto ~/asap7.proto > ~/my_netlist.block.ir
 ```
 
-### `block2fn`: Block IR to PIR function
+### `block2fn`: Block IR to PIR function package
 
-Inlines blocks and converts the resulting Block IR into a PIR function. The following steps are performed:
+Inlines blocks and converts the resulting Block IR into a PIR package that contains a single top function. The following steps are performed:
 
 - Optionally removes inputs ports and ties their uses to a constant. Specified via `--tie-input-ports`.
 - Optionally removes output ports (`--drop-output-ports`).
@@ -124,7 +124,7 @@ Inlines blocks and converts the resulting Block IR into a PIR function. The foll
 - Removes clock port.
 - Converts the resulting combinational block into a function.
 
-This is useful for converting a block generated from a netlist into a function.
+This is useful for converting a block generated from a netlist into a package-form function IR that can be consumed directly by package-oriented tooling such as `ir-equiv`.
 
 ```shell
 xlsynth-driver block2fn \

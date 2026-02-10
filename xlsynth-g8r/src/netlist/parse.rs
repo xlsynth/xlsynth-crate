@@ -1657,6 +1657,20 @@ impl<R: Read + 'static> Parser<R> {
                 None => break,
             }
         }
+        // Preserve top-level port order from the module header list, even when
+        // non-ANSI input/output declarations are grouped by direction in the body.
+        // Ports not present in the header (if any) are left at the end in their
+        // original declaration order.
+        let mut header_port_index: HashMap<PortId, usize> = HashMap::new();
+        for (i, port_name) in port_names.into_iter().enumerate() {
+            header_port_index.entry(port_name).or_insert(i);
+        }
+        ports.sort_by_key(|port| {
+            header_port_index
+                .get(&port.name)
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
         Ok(NetlistModule {
             name,
             ports,
@@ -2965,6 +2979,29 @@ endmodule
             .unwrap();
         assert_eq!(a_net.width, None);
         assert_eq!(y_net.width, None);
+    }
+
+    #[test]
+    fn test_non_ansi_ports_are_ordered_by_header_list() {
+        let src = r#"
+module m(p0, p1, p2, p3, p4, p5, p6);
+  input p0, p1, p3;
+  input [57:0] p2;
+  input [14:0] p4, p5;
+  output [18:0] p6;
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
+        let port_names: Vec<String> = modules[0]
+            .ports
+            .iter()
+            .map(|p| parser.interner.resolve(p.name).unwrap().to_string())
+            .collect();
+        assert_eq!(port_names, vec!["p0", "p1", "p2", "p3", "p4", "p5", "p6",]);
+        assert_eq!(modules[0].ports[2].width, Some((57, 0)));
+        assert_eq!(modules[0].ports[6].width, Some((18, 0)));
     }
 
     #[test]
