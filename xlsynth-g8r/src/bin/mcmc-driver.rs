@@ -180,9 +180,9 @@ fn run_chain(
         },
     )?;
     let metric_val = match cfg.metric {
-        Objective::Nodes => cost(&gfn).nodes as usize,
-        Objective::Depth => cost(&gfn).depth as usize,
-        Objective::Product => cost(&gfn).nodes * cost(&gfn).depth,
+        Objective::Nodes => cost(&gfn).nodes as u128,
+        Objective::Depth => cost(&gfn).depth as u128,
+        Objective::Product => (cost(&gfn).nodes as u128).saturating_mul(cost(&gfn).depth as u128),
     };
     let fraig_gfn = {
         let mut rng_f = Pcg64Mcg::seed_from_u64(seed);
@@ -271,11 +271,11 @@ fn run_explore_exploit(
                     Ok(new_gfn) => {
                         local_gfn = new_gfn;
                         let metric_val = match cfg_cl.metric {
-                            Objective::Nodes => cost(&local_gfn).nodes as usize,
-                            Objective::Depth => cost(&local_gfn).depth as usize,
+                            Objective::Nodes => cost(&local_gfn).nodes as u128,
+                            Objective::Depth => cost(&local_gfn).depth as u128,
                             Objective::Product => {
                                 let cst = cost(&local_gfn);
-                                cst.nodes * cst.depth
+                                (cst.nodes as u128).saturating_mul(cst.depth as u128)
                             }
                         };
                         let fraig_gfn = {
@@ -295,7 +295,9 @@ fn run_explore_exploit(
                         // All chains (including explorer) may jump to the
                         // latest global best if they drift too far behind.
                         let global_best_cost = best_cl.cost.load(Ordering::SeqCst);
-                        if metric_val > global_best_cost + cfg_cl.initial_temperature as usize {
+                        if metric_val
+                            > global_best_cost.saturating_add(cfg_cl.initial_temperature as u128)
+                        {
                             local_gfn = best_cl.get();
                         }
                     }
@@ -413,9 +415,9 @@ fn main() -> Result<()> {
 
     let init_cost = cost(&start_gfn);
     let init_metric = match cli.metric {
-        Objective::Nodes => init_cost.nodes as usize,
-        Objective::Depth => init_cost.depth as usize,
-        Objective::Product => init_cost.nodes * init_cost.depth,
+        Objective::Nodes => init_cost.nodes as u128,
+        Objective::Depth => init_cost.depth as u128,
+        Objective::Product => (init_cost.nodes as u128).saturating_mul(init_cost.depth as u128),
     };
 
     let best = Arc::new(Best::new(init_metric, start_gfn.clone()));
@@ -461,9 +463,10 @@ fn main() -> Result<()> {
                         let stats = get_summary_stats::get_summary_stats(&best_gfn);
                         let rss_mb = rss_megabytes().unwrap_or(0) as f64;
                         let best_cost = match cli.metric {
-                            Objective::Nodes => stats.live_nodes as usize,
-                            Objective::Depth => stats.deepest_path as usize,
-                            Objective::Product => stats.live_nodes * stats.deepest_path,
+                            Objective::Nodes => stats.live_nodes as u128,
+                            Objective::Depth => stats.deepest_path as u128,
+                            Objective::Product => (stats.live_nodes as u128)
+                                .saturating_mul(stats.deepest_path as u128),
                         };
                         let improvement = if init_metric == 0 {
                             0.0

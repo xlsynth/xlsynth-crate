@@ -37,6 +37,7 @@ use xlsynth_mcmc::multichain::ChainStrategy;
 use xlsynth_mcmc_pir::AcceptedSampleMsg;
 use xlsynth_mcmc_pir::Objective;
 use xlsynth_mcmc_pir::RunOptions;
+use xlsynth_mcmc_pir::parse_irvals_tuple_file;
 use xlsynth_mcmc_pir::run_pir_mcmc_with_shared_best;
 use xlsynth_pir::ir::{Package, PackageMember};
 use xlsynth_pir::ir_parser::ParseOptions;
@@ -81,6 +82,11 @@ struct CliArgs {
     /// Metric to optimize (used by the MCMC acceptance criterion).
     #[clap(long, value_enum)]
     metric: Objective,
+
+    /// Path to .irvals stimulus (one typed tuple per line) required for the
+    /// toggle-based metric.
+    #[clap(long, value_parser)]
+    toggle_stimulus: Option<String>,
 
     /// Initial temperature for MCMC (default: 5.0).
     #[clap(long, value_parser, default_value_t = 5.0)]
@@ -298,6 +304,7 @@ impl SampleWriter {
             "g8r_nodes": msg.cost.g8r_nodes,
             "g8r_depth": msg.cost.g8r_depth,
             "g8r_le_graph_milli": msg.cost.g8r_le_graph_milli,
+            "g8r_gate_output_toggles": msg.cost.g8r_gate_output_toggles,
         });
         let mut mf = std::fs::OpenOptions::new()
             .create(true)
@@ -439,6 +446,11 @@ fn main() -> Result<()> {
                 None
             }
         }),
+        toggle_stimulus: cli
+            .toggle_stimulus
+            .as_ref()
+            .map(|p| parse_irvals_tuple_file(Path::new(p)))
+            .transpose()?,
     };
 
     let _result = run_pir_mcmc_with_shared_best(top_fn, opts, None, None, Some(tx))?;

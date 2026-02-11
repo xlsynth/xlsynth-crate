@@ -26,7 +26,8 @@ use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_utils::compact_and_toposort_in_place;
 
 use crate::{
-    CheckpointKind, CheckpointMsg, Objective, RunOptions, cost, run_pir_mcmc_with_shared_best,
+    CheckpointKind, CheckpointMsg, Objective, RunOptions, cost, cost_with_toggle_stimulus,
+    lower_toggle_stimulus_for_fn, parse_irvals_tuple_file, run_pir_mcmc_with_shared_best,
 };
 
 #[derive(ValueEnum, Debug, Clone, Copy)]
@@ -51,6 +52,7 @@ pub struct PirMcmcCliArgs {
     pub seed: u64,
     pub output: Option<String>,
     pub metric: Objective,
+    pub toggle_stimulus: Option<String>,
     pub initial_temperature: f64,
     pub threads: u64,
     pub checkpoint_iters: u64,
@@ -106,6 +108,15 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 .help("Metric to optimize.")
                 .value_parser(clap::builder::EnumValueParser::<Objective>::new())
                 .default_value("nodes")
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("toggle_stimulus")
+                .long("toggle-stimulus")
+                .value_name("IRVALS_PATH")
+                .help(
+                    "Path to .irvals stimulus (one typed tuple per line) for toggle-based objective.",
+                )
                 .action(ArgAction::Set),
         )
         .arg(
@@ -172,6 +183,7 @@ pub fn parse_pir_mcmc_args(matches: &ArgMatches) -> PirMcmcCliArgs {
         seed: *matches.get_one::<u64>("seed").unwrap(),
         output: matches.get_one::<String>("output").cloned(),
         metric: *matches.get_one::<Objective>("metric").unwrap(),
+        toggle_stimulus: matches.get_one::<String>("toggle_stimulus").cloned(),
         initial_temperature: *matches.get_one::<f64>("initial_temperature").unwrap(),
         threads: matches
             .get_one::<u64>("threads")
@@ -271,11 +283,46 @@ where
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("No top function found in PIR package"))?;
 
-    let initial_cost = cost(&top_fn, cli.metric)?;
-    report(format!(
-        "Successfully loaded top function. Initial stats: pir_nodes={}, g8r_nodes={}, g8r_depth={}",
-        initial_cost.pir_nodes, initial_cost.g8r_nodes, initial_cost.g8r_depth
-    ));
+    let toggle_stimulus_values = match &cli.toggle_stimulus {
+        Some(path) => Some(parse_irvals_tuple_file(PathBuf::from(path).as_path())?),
+        None => None,
+    };
+    if cli.metric.needs_toggle_stimulus() && toggle_stimulus_values.is_none() {
+        return Err(anyhow::anyhow!(
+            "--toggle-stimulus is required when --metric={}",
+            cli.metric.value_name()
+        ));
+    }
+    if !cli.metric.needs_toggle_stimulus() && toggle_stimulus_values.is_some() {
+        return Err(anyhow::anyhow!(
+            "--toggle-stimulus is only valid with --metric={}",
+            Objective::G8rNodesTimesDepthTimesToggles.value_name()
+        ));
+    }
+    let prepared_toggle_stimulus = toggle_stimulus_values
+        .as_ref()
+        .map(|samples| lower_toggle_stimulus_for_fn(samples, &top_fn))
+        .transpose()?;
+
+    let initial_cost = if cli.metric.needs_toggle_stimulus() {
+        cost_with_toggle_stimulus(&top_fn, cli.metric, prepared_toggle_stimulus.as_deref())?
+    } else {
+        cost(&top_fn, cli.metric)?
+    };
+    if cli.metric.needs_toggle_stimulus() {
+        report(format!(
+            "Successfully loaded top function. Initial stats: pir_nodes={}, g8r_nodes={}, g8r_depth={}, g8r_gate_output_toggles={}",
+            initial_cost.pir_nodes,
+            initial_cost.g8r_nodes,
+            initial_cost.g8r_depth,
+            initial_cost.g8r_gate_output_toggles
+        ));
+    } else {
+        report(format!(
+            "Successfully loaded top function. Initial stats: pir_nodes={}, g8r_nodes={}, g8r_depth={}",
+            initial_cost.pir_nodes, initial_cost.g8r_nodes, initial_cost.g8r_depth
+        ));
+    }
 
     // Determine output directory and paths.
     //
@@ -312,6 +359,7 @@ where
         objective: cli.metric,
         enable_formal_oracle: cli.formal_oracle,
         trajectory_dir: Some(output_dir.clone()),
+        toggle_stimulus: toggle_stimulus_values,
     };
 
     // Optional checkpoint writer: overwrites best.* artifacts periodically so
@@ -324,9 +372,8 @@ where
     };
 
     let shared_best = if cli.checkpoint_iters > 0 {
-        let metric_u64 = cli.metric.metric(&initial_cost);
-        let metric_usize = usize::try_from(metric_u64).unwrap_or(usize::MAX);
-        Some(Arc::new(Best::new(metric_usize, top_fn.clone())))
+        let metric_u128 = cli.metric.metric(&initial_cost);
+        Some(Arc::new(Best::new(metric_u128, top_fn.clone())))
     } else {
         None
     };
@@ -361,7 +408,7 @@ where
         Some(std::thread::spawn(move || {
             // Track last written metric to reduce redundant writes when multiple
             // chains hit the same checkpoint boundary.
-            let mut last_written: Option<usize> = None;
+            let mut last_written: Option<u128> = None;
             // Monotonic snapshot write index (per run) so filenames sort by
             // checkpoint write order across chains.
             let mut write_index: u64 = 0;
@@ -463,12 +510,23 @@ where
             ));
         }
         Objective::G8rNodesTimesDepth => {
+            let product = (result.best_cost.g8r_nodes as u128)
+                .saturating_mul(result.best_cost.g8r_depth as u128);
             report(format!(
                 "PIR MCMC finished. Best stats: g8r_nodes={}, g8r_depth={}, product={}",
+                result.best_cost.g8r_nodes, result.best_cost.g8r_depth, product,
+            ));
+        }
+        Objective::G8rNodesTimesDepthTimesToggles => {
+            let nd = (result.best_cost.g8r_nodes as u128)
+                .saturating_mul(result.best_cost.g8r_depth as u128);
+            let metric = nd.saturating_mul(result.best_cost.g8r_gate_output_toggles as u128);
+            report(format!(
+                "PIR MCMC finished. Best stats: g8r_nodes={}, g8r_depth={}, g8r_gate_output_toggles={}, metric={}",
                 result.best_cost.g8r_nodes,
                 result.best_cost.g8r_depth,
-                (result.best_cost.g8r_nodes as u64)
-                    .saturating_mul(result.best_cost.g8r_depth as u64),
+                result.best_cost.g8r_gate_output_toggles,
+                metric,
             ));
         }
         Objective::G8rLeGraph => {
@@ -479,9 +537,9 @@ where
             ));
         }
         Objective::G8rLeGraphTimesProduct => {
-            let product = (result.best_cost.g8r_nodes as u64)
-                .saturating_mul(result.best_cost.g8r_depth as u64);
-            let metric = (result.best_cost.g8r_le_graph_milli as u64).saturating_mul(product);
+            let product = (result.best_cost.g8r_nodes as u128)
+                .saturating_mul(result.best_cost.g8r_depth as u128);
+            let metric = (result.best_cost.g8r_le_graph_milli as u128).saturating_mul(product);
             report(format!(
                 "PIR MCMC finished. Best stats: g8r_le_graph={:.3}, g8r_nodes={}, g8r_depth={}, product={}, metric={}",
                 (result.best_cost.g8r_le_graph_milli as f64) / 1000.0,

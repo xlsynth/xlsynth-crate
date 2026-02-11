@@ -56,7 +56,7 @@ pub trait SegmentRunner<S, C, K>: Send + Sync {
 }
 
 fn choose_better<S, C>(
-    objective_metric: impl Fn(&C) -> u64,
+    objective_metric: impl Fn(&C) -> u128,
     tiebreak_key: impl Fn(&S) -> String,
     a: (&S, &C),
     b: (&S, &C),
@@ -82,7 +82,7 @@ pub fn run_multichain<S, C, K, R>(
     strategy: ChainStrategy,
     checkpoint_iters: u64,
     runner: Arc<R>,
-    objective_metric: impl Fn(&C) -> u64 + Copy + Send + Sync + 'static,
+    objective_metric: impl Fn(&C) -> u128 + Copy + Send + Sync + 'static,
     tiebreak_key: impl Fn(&S) -> String + Copy + Send + Sync + 'static,
     should_jump_to_best: impl Fn(&C, &C) -> bool + Copy + Send + Sync + 'static,
 ) -> Result<(S, C, McmcStats<K>), R::Error>

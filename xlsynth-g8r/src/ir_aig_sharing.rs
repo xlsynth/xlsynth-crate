@@ -24,6 +24,7 @@ use xlsynth::IrValue;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_eval;
 use xlsynth_pir::ir_utils::is_structural_payload;
+use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;
 
 use crate::aig::gate::{AigNode, AigOperand, AigRef, GateFn};
 use crate::aig::topo::topo_sort_refs;
@@ -105,7 +106,7 @@ impl PirHistories {
     ) -> Result<(), String> {
         let ty = f.get_node_ty(node_ref);
         let mut flat_bits: Vec<bool> = Vec::with_capacity(ty.bit_count());
-        flatten_ir_value_to_lsb0_bits(value, ty, &mut flat_bits)?;
+        flatten_ir_value_to_lsb0_bits_for_type(value, ty, &mut flat_bits)?;
 
         let bit_count = ty.bit_count();
         if flat_bits.len() != bit_count {
@@ -799,63 +800,6 @@ fn unflatten_ir_value_from_lsb0_bits_at(
             elems_rev.reverse();
             let arr = IrValue::make_array(&elems_rev).map_err(|e| e.to_string())?;
             Ok((arr, offset))
-        }
-    }
-}
-
-fn flatten_ir_value_to_lsb0_bits(
-    v: &IrValue,
-    ty: &ir::Type,
-    out: &mut Vec<bool>,
-) -> Result<(), String> {
-    match ty {
-        ir::Type::Token => Ok(()),
-        ir::Type::Bits(w) => {
-            let bits = v.to_bits().map_err(|e| e.to_string())?;
-            if bits.get_bit_count() != *w {
-                return Err(format!(
-                    "bits width mismatch: value has bits[{}] but type is bits[{}]",
-                    bits.get_bit_count(),
-                    w
-                ));
-            }
-            for i in 0..*w {
-                out.push(bits.get_bit(i).map_err(|e| e.to_string())?);
-            }
-            Ok(())
-        }
-        ir::Type::Tuple(types) => {
-            let elems = v.get_elements().map_err(|e| e.to_string())?;
-            if elems.len() != types.len() {
-                return Err(format!(
-                    "tuple arity mismatch: value has {} elems but type expects {}",
-                    elems.len(),
-                    types.len()
-                ));
-            }
-            // PIR/XLS tuple flattening: last element occupies least-significant bits.
-            for (elem, elem_ty) in elems.iter().rev().zip(types.iter().rev()) {
-                flatten_ir_value_to_lsb0_bits(elem, elem_ty, out)?;
-            }
-            Ok(())
-        }
-        ir::Type::Array(ir::ArrayTypeData {
-            element_type,
-            element_count,
-        }) => {
-            let got_count = v.get_element_count().map_err(|e| e.to_string())?;
-            if got_count != *element_count {
-                return Err(format!(
-                    "array length mismatch: value has {} elems but type expects {}",
-                    got_count, element_count
-                ));
-            }
-            // Flatten arrays similarly: element (N-1) occupies least-significant bits.
-            for i in (0..*element_count).rev() {
-                let elem = v.get_element(i).map_err(|e| e.to_string())?;
-                flatten_ir_value_to_lsb0_bits(&elem, element_type, out)?;
-            }
-            Ok(())
         }
     }
 }

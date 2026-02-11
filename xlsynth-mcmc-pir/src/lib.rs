@@ -17,7 +17,7 @@ use rand_pcg::Pcg64Mcg;
 use serde_json::json;
 use std::io::Write as IoWrite;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -32,6 +32,7 @@ use xlsynth::IrValue;
 use xlsynth_g8r::aig::get_summary_stats;
 use xlsynth_g8r::aig::graph_logical_effort::GraphLogicalEffortOptions;
 use xlsynth_g8r::aig::graph_logical_effort::analyze_graph_logical_effort;
+use xlsynth_g8r::aig_sim::count_toggles;
 use xlsynth_g8r::gatify::ir2gate::{self, GatifyOptions};
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_mcmc::Best as SharedBest;
@@ -49,6 +50,7 @@ use xlsynth_pir::ir::Type as PirType;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_utils::compact_and_toposort_in_place;
+use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;
 use xlsynth_pir::structural_similarity::collect_structural_entries;
 
 pub mod driver_cli;
@@ -85,6 +87,12 @@ pub struct Cost {
     ///
     /// This is populated when objective=`g8r-le-graph`; otherwise it is `0`.
     pub g8r_le_graph_milli: usize,
+    /// Number of interior AIG gate output toggles across a provided input
+    /// stimulus sequence.
+    ///
+    /// This is populated when objective=`g8r-nodes-times-depth-times-toggles`;
+    /// otherwise it is `0`.
+    pub g8r_gate_output_toggles: usize,
 }
 
 /// Calculates the cost of a PIR function.
@@ -93,31 +101,49 @@ pub struct Cost {
 /// pipeline to obtain live gate count and depth. Failures are returned as an
 /// error (callers can choose to reject the candidate).
 pub fn cost(f: &IrFn, objective: Objective) -> Result<Cost> {
+    cost_with_toggle_stimulus(f, objective, None)
+}
+
+/// Calculates cost and, for toggle-based objectives, evaluates the candidate on
+/// a fixed gate-level toggle stimulus.
+pub fn cost_with_toggle_stimulus(
+    f: &IrFn,
+    objective: Objective,
+    toggle_stimulus: Option<&[Vec<IrBits>]>,
+) -> Result<Cost> {
     let pir_nodes = f.nodes.len();
 
-    let (g8r_nodes, g8r_depth, g8r_le_graph_milli) = if matches!(
-        objective,
-        Objective::G8rNodes
-            | Objective::G8rNodesTimesDepth
-            | Objective::G8rLeGraph
-            | Objective::G8rLeGraphTimesProduct
-    ) {
-        compute_g8r_stats_for_pir_fn(
-            f,
-            matches!(
-                objective,
-                Objective::G8rLeGraph | Objective::G8rLeGraphTimesProduct
-            ),
-        )?
-    } else {
-        (pir_nodes, pir_nodes, 0)
-    };
+    if objective.needs_toggle_stimulus() && toggle_stimulus.is_none() {
+        return Err(anyhow::anyhow!(
+            "objective {} requires toggle stimulus",
+            objective.value_name()
+        ));
+    }
+    if !objective.needs_toggle_stimulus() && toggle_stimulus.is_some() {
+        return Err(anyhow::anyhow!(
+            "toggle stimulus provided but objective {} does not use toggles",
+            objective.value_name()
+        ));
+    }
+
+    let (g8r_nodes, g8r_depth, g8r_le_graph_milli, g8r_gate_output_toggles) =
+        if objective.uses_g8r_costing() {
+            compute_g8r_stats_for_pir_fn(
+                f,
+                objective.needs_graph_logical_effort(),
+                objective.needs_toggle_stimulus(),
+                toggle_stimulus,
+            )?
+        } else {
+            (pir_nodes, pir_nodes, 0, 0)
+        };
 
     Ok(Cost {
         pir_nodes,
         g8r_nodes,
         g8r_depth,
         g8r_le_graph_milli,
+        g8r_gate_output_toggles,
     })
 }
 
@@ -164,6 +190,8 @@ pub enum Objective {
     Nodes,
     G8rNodes,
     G8rNodesTimesDepth,
+    #[value(name = "g8r-nodes-times-depth-times-toggles")]
+    G8rNodesTimesDepthTimesToggles,
     #[value(
         name = "g8r-le-graph",
         alias = "g8r-graph-le",
@@ -175,17 +203,53 @@ pub enum Objective {
 }
 
 impl Objective {
-    pub fn metric(self, c: &Cost) -> u64 {
+    pub fn uses_g8r_costing(self) -> bool {
+        matches!(
+            self,
+            Objective::G8rNodes
+                | Objective::G8rNodesTimesDepth
+                | Objective::G8rNodesTimesDepthTimesToggles
+                | Objective::G8rLeGraph
+                | Objective::G8rLeGraphTimesProduct
+        )
+    }
+
+    pub fn needs_graph_logical_effort(self) -> bool {
+        matches!(
+            self,
+            Objective::G8rLeGraph | Objective::G8rLeGraphTimesProduct
+        )
+    }
+
+    pub fn needs_toggle_stimulus(self) -> bool {
+        matches!(self, Objective::G8rNodesTimesDepthTimesToggles)
+    }
+
+    pub fn value_name(self) -> &'static str {
         match self {
-            Objective::Nodes => c.pir_nodes as u64,
-            Objective::G8rNodes => c.g8r_nodes as u64,
+            Objective::Nodes => "nodes",
+            Objective::G8rNodes => "g8r-nodes",
+            Objective::G8rNodesTimesDepth => "g8r-nodes-times-depth",
+            Objective::G8rNodesTimesDepthTimesToggles => "g8r-nodes-times-depth-times-toggles",
+            Objective::G8rLeGraph => "g8r-le-graph",
+            Objective::G8rLeGraphTimesProduct => "g8r-le-graph-times-product",
+        }
+    }
+
+    pub fn metric(self, c: &Cost) -> u128 {
+        match self {
+            Objective::Nodes => c.pir_nodes as u128,
+            Objective::G8rNodes => c.g8r_nodes as u128,
             Objective::G8rNodesTimesDepth => {
-                (c.g8r_nodes as u64).saturating_mul(c.g8r_depth as u64)
+                (c.g8r_nodes as u128).saturating_mul(c.g8r_depth as u128)
             }
-            Objective::G8rLeGraph => c.g8r_le_graph_milli as u64,
+            Objective::G8rNodesTimesDepthTimesToggles => (c.g8r_nodes as u128)
+                .saturating_mul(c.g8r_depth as u128)
+                .saturating_mul(c.g8r_gate_output_toggles as u128),
+            Objective::G8rLeGraph => c.g8r_le_graph_milli as u128,
             Objective::G8rLeGraphTimesProduct => {
-                let product = (c.g8r_nodes as u64).saturating_mul(c.g8r_depth as u64);
-                (c.g8r_le_graph_milli as u64).saturating_mul(product)
+                let product = (c.g8r_nodes as u128).saturating_mul(c.g8r_depth as u128);
+                (c.g8r_le_graph_milli as u128).saturating_mul(product)
             }
         }
     }
@@ -199,7 +263,9 @@ impl Objective {
 fn compute_g8r_stats_for_pir_fn(
     f: &IrFn,
     compute_graph_logical_effort: bool,
-) -> Result<(usize, usize, usize)> {
+    compute_toggles: bool,
+    toggle_stimulus: Option<&[Vec<IrBits>]>,
+) -> Result<(usize, usize, usize, usize)> {
     // The PIR → text → XLS → optimize → PIR → gatify pipeline assumes a DAG.
     // Random rewiring transforms can (transiently) create cycles; if that happens
     // we treat it as a candidate failure and fall back to PIR node count.
@@ -207,7 +273,12 @@ fn compute_g8r_stats_for_pir_fn(
     // Note: we intentionally catch panics here because some PIR utilities
     // currently panic on cycle detection.
     let result = catch_unwind(AssertUnwindSafe(|| {
-        compute_g8r_stats_for_pir_fn_impl(f, compute_graph_logical_effort)
+        compute_g8r_stats_for_pir_fn_impl(
+            f,
+            compute_graph_logical_effort,
+            compute_toggles,
+            toggle_stimulus,
+        )
     }));
     match result {
         Ok(r) => r,
@@ -235,7 +306,9 @@ fn graph_le_delay_to_milli(delay: f64) -> usize {
 fn compute_g8r_stats_for_pir_fn_impl(
     f: &IrFn,
     compute_graph_logical_effort: bool,
-) -> Result<(usize, usize, usize)> {
+    compute_toggles: bool,
+    toggle_stimulus: Option<&[Vec<IrBits>]>,
+) -> Result<(usize, usize, usize, usize)> {
     // 1-3) Optimize the PIR function via the XLS pipeline.
     let top_fn = optimize_pir_fn_via_xls(f)?;
 
@@ -266,7 +339,138 @@ fn compute_g8r_stats_for_pir_fn_impl(
     } else {
         0
     };
-    Ok((stats.live_nodes, stats.deepest_path, g8r_le_graph_milli))
+    let g8r_gate_output_toggles = if compute_toggles {
+        let batch = toggle_stimulus.ok_or_else(|| {
+            anyhow::anyhow!("toggle-based objective requires prepared toggle stimulus")
+        })?;
+        if batch.len() < 2 {
+            return Err(anyhow::anyhow!(
+                "toggle stimulus must contain at least two samples; got {}",
+                batch.len()
+            ));
+        }
+        let expected_input_count = gate_fn.inputs.len();
+        for (sample_idx, sample) in batch.iter().enumerate() {
+            if sample.len() != expected_input_count {
+                return Err(anyhow::anyhow!(
+                    "toggle sample {} has {} inputs, expected {}",
+                    sample_idx + 1,
+                    sample.len(),
+                    expected_input_count
+                ));
+            }
+            for (input_idx, (bits, gate_input)) in
+                sample.iter().zip(gate_fn.inputs.iter()).enumerate()
+            {
+                let expected_width = gate_input.get_bit_count();
+                if bits.get_bit_count() != expected_width {
+                    return Err(anyhow::anyhow!(
+                        "toggle sample {} input {} has width {}, expected {}",
+                        sample_idx + 1,
+                        input_idx,
+                        bits.get_bit_count(),
+                        expected_width
+                    ));
+                }
+            }
+        }
+        count_toggles::count_toggles(&gate_fn, batch).gate_output_toggles
+    } else {
+        0
+    };
+    Ok((
+        stats.live_nodes,
+        stats.deepest_path,
+        g8r_le_graph_milli,
+        g8r_gate_output_toggles,
+    ))
+}
+
+/// Parses `.irvals`-style stimulus text where each line is one typed tuple
+/// value.
+pub fn parse_irvals_tuple_lines(irvals_text: &str) -> Result<Vec<IrValue>> {
+    let mut values = Vec::new();
+    for (lineno, line) in irvals_text.lines().enumerate() {
+        let line_no = lineno + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return Err(anyhow::anyhow!(
+                "empty line {} in stimulus file is not allowed",
+                line_no
+            ));
+        }
+        let tuple_val = IrValue::parse_typed(trimmed).map_err(|e| {
+            anyhow::anyhow!("failed to parse stimulus tuple at line {}: {}", line_no, e)
+        })?;
+        tuple_val.get_elements().map_err(|e| {
+            anyhow::anyhow!("stimulus line {} is not a tuple value: {}", line_no, e)
+        })?;
+        values.push(tuple_val);
+    }
+    Ok(values)
+}
+
+/// Reads and parses a `.irvals` stimulus file.
+pub fn parse_irvals_tuple_file(path: &Path) -> Result<Vec<IrValue>> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("failed to read {}: {}", path.display(), e))?;
+    parse_irvals_tuple_lines(&text)
+}
+
+/// Validates tuple-valued stimulus samples against `f`'s parameter signature
+/// and lowers each sample to GateFn input vectors (`Vec<IrBits>`).
+pub fn lower_toggle_stimulus_for_fn(samples: &[IrValue], f: &IrFn) -> Result<Vec<Vec<IrBits>>> {
+    if samples.len() < 2 {
+        return Err(anyhow::anyhow!(
+            "toggle stimulus must contain at least two samples; got {}",
+            samples.len()
+        ));
+    }
+
+    let mut lowered: Vec<Vec<IrBits>> = Vec::with_capacity(samples.len());
+    for (sample_idx, tuple_val) in samples.iter().enumerate() {
+        let elems = tuple_val.get_elements().map_err(|e| {
+            anyhow::anyhow!("sample {} is not a tuple value: {}", sample_idx + 1, e)
+        })?;
+        if elems.len() != f.params.len() {
+            return Err(anyhow::anyhow!(
+                "sample {} tuple arity mismatch: expected {}, got {}",
+                sample_idx + 1,
+                f.params.len(),
+                elems.len()
+            ));
+        }
+
+        let mut sample_bits = Vec::with_capacity(f.params.len());
+        for (param_idx, (elem, param)) in elems.iter().zip(f.params.iter()).enumerate() {
+            let mut flat_bits: Vec<bool> = Vec::with_capacity(param.ty.bit_count());
+            flatten_ir_value_to_lsb0_bits_for_type(elem, &param.ty, &mut flat_bits).map_err(
+                |e| {
+                    anyhow::anyhow!(
+                        "sample {} param {} ('{}') incompatible with {}: {}",
+                        sample_idx + 1,
+                        param_idx,
+                        param.name,
+                        param.ty.to_string(),
+                        e
+                    )
+                },
+            )?;
+            if flat_bits.len() != param.ty.bit_count() {
+                return Err(anyhow::anyhow!(
+                    "sample {} param {} ('{}') flattened width mismatch: expected {}, got {}",
+                    sample_idx + 1,
+                    param_idx,
+                    param.name,
+                    param.ty.bit_count(),
+                    flat_bits.len()
+                ));
+            }
+            sample_bits.push(IrBits::from_lsb_is_0(&flat_bits));
+        }
+        lowered.push(sample_bits);
+    }
+    Ok(lowered)
 }
 
 /// Type aliases specializing the generic MCMC helpers from `xlsynth-mcmc` to
@@ -317,6 +521,10 @@ pub struct RunOptions {
     /// When set, each chain appends one JSON record per iteration to:
     ///   `trajectory.c{chain_no:03}.jsonl`
     pub trajectory_dir: Option<PathBuf>,
+
+    /// Optional toggle stimulus samples in `.irvals` tuple form (one tuple per
+    /// sample) used by toggle-based objectives.
+    pub toggle_stimulus: Option<Vec<IrValue>>,
 }
 
 /// Message sent from the PIR MCMC engine to an optional checkpoint writer.
@@ -415,8 +623,9 @@ struct PirSegmentRunner {
     checkpoint_tx: Option<Sender<CheckpointMsg>>,
     accepted_sample_tx: Option<Sender<AcceptedSampleMsg>>,
     shared_best: Option<Arc<SharedBest<IrFn>>>,
-    baseline_metric: usize,
+    baseline_metric: u128,
     trajectory_dir: Option<PathBuf>,
+    prepared_toggle_stimulus: Option<Arc<Vec<Vec<IrBits>>>>,
 }
 
 /// Performs a single iteration of the PIR MCMC process.
@@ -429,6 +638,7 @@ pub fn mcmc_iteration(
     context: &mut PirMcmcContext,
     temp: f64,
     objective: Objective,
+    toggle_stimulus: Option<&[Vec<IrBits>]>,
 ) -> McmcIterationOutput {
     let mut iteration_best_updated = false;
 
@@ -520,7 +730,11 @@ pub fn mcmc_iteration(
                 }
             } else {
                 let cost_start = Instant::now();
-                let new_candidate_cost = match cost(&candidate_fn, objective) {
+                let new_candidate_cost = match cost_with_toggle_stimulus(
+                    &candidate_fn,
+                    objective,
+                    toggle_stimulus,
+                ) {
                     Ok(c) => c,
                     Err(e) => {
                         let sim_micros = cost_start.elapsed().as_micros();
@@ -574,9 +788,9 @@ pub fn mcmc_iteration(
                     }
                 };
 
-                let curr_metric_u64 = objective.metric(&current_cost);
-                let new_metric_u64 = objective.metric(&new_candidate_cost);
-                let accept = if new_metric_u64 == curr_metric_u64
+                let curr_metric_u128 = objective.metric(&current_cost);
+                let new_metric_u128 = objective.metric(&new_candidate_cost);
+                let accept = if new_metric_u128 == curr_metric_u128
                     && new_candidate_cost.pir_nodes > current_cost.pir_nodes
                 {
                     // Equal objective metric but PIR nodes grew: only accept if
@@ -589,17 +803,17 @@ pub fn mcmc_iteration(
                     )
                 } else {
                     metropolis_accept(
-                        curr_metric_u64 as f64,
-                        new_metric_u64 as f64,
+                        curr_metric_u128 as f64,
+                        new_metric_u128 as f64,
                         temp,
                         context.rng,
                     )
                 };
 
                 if accept {
-                    let best_metric_u64 = objective.metric(best_cost);
-                    let new_metric_u64 = objective.metric(&new_candidate_cost);
-                    if new_metric_u64 < best_metric_u64 {
+                    let best_metric_u128 = objective.metric(best_cost);
+                    let new_metric_u128 = objective.metric(&new_candidate_cost);
+                    if new_metric_u128 < best_metric_u128 {
                         // When storing a new global best, prefer the optimized IR form so
                         // artifacts (and subsequent segments via shared best) are based on
                         // the canonical optimized representation, not the raw exploration
@@ -876,15 +1090,20 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
             enable_formal_oracle: self.enable_formal_oracle,
         };
 
+        let toggle_stimulus = self.prepared_toggle_stimulus.as_ref().map(|v| v.as_slice());
+
         let mut current_fn = start_state.clone();
-        let mut current_cost = cost(&current_fn, self.objective).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to evaluate initial cost for '{}' under {:?}: {}",
-                current_fn.name,
-                self.objective,
-                e
-            )
-        })?;
+        let mut current_cost =
+            cost_with_toggle_stimulus(&current_fn, self.objective, toggle_stimulus).map_err(
+                |e| {
+                    anyhow::anyhow!(
+                        "failed to evaluate initial cost for '{}' under {:?}: {}",
+                        current_fn.name,
+                        self.objective,
+                        e
+                    )
+                },
+            )?;
         let mut best_fn = start_state;
         let mut best_cost = current_cost;
         let mut stats = McmcStats::default();
@@ -917,6 +1136,7 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
                 &mut context,
                 temp,
                 self.objective,
+                toggle_stimulus,
             );
 
             let mut accepted_digest: Option<[u8; 32]> = None;
@@ -991,6 +1211,7 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
                     "g8r_nodes": iteration_output.output_cost.g8r_nodes,
                     "g8r_depth": iteration_output.output_cost.g8r_depth,
                     "g8r_le_graph_milli": iteration_output.output_cost.g8r_le_graph_milli,
+                    "g8r_gate_output_toggles": iteration_output.output_cost.g8r_gate_output_toggles,
                     "oracle_time_micros": iteration_output.oracle_time_micros,
                     "transform": iteration_output.transform.map(|k| format!("{:?}", k)),
                     "transform_always_equivalent": iteration_output.transform_always_equivalent,
@@ -1012,13 +1233,12 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
             if iteration_output.best_updated {
                 if let Some(ref shared_best) = self.shared_best {
                     let before = shared_best.cost.load(Ordering::SeqCst);
-                    let metric_u64 = self.objective.metric(&best_cost);
-                    let metric_usize = usize::try_from(metric_u64).unwrap_or(usize::MAX);
-                    let _ = shared_best.try_update(metric_usize, best_fn.clone());
+                    let metric_u128 = self.objective.metric(&best_cost);
+                    let _ = shared_best.try_update(metric_u128, best_fn.clone());
                     let after = shared_best.cost.load(Ordering::SeqCst);
                     if after < before {
                         let improvement_pct = if self.baseline_metric > 0 {
-                            ((self.baseline_metric as f64) - (after as f64)) * 100.0
+                            (self.baseline_metric.saturating_sub(after) as f64) * 100.0
                                 / (self.baseline_metric as f64)
                         } else {
                             0.0
@@ -1075,7 +1295,7 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
                     self.shared_best
                         .as_ref()
                         .map(|b| b.cost.load(Ordering::SeqCst))
-                        .unwrap_or(usize::MAX),
+                        .unwrap_or(u128::MAX),
                     best_cost.pir_nodes,
                     best_cost.g8r_nodes,
                     best_cost.g8r_depth,
@@ -1118,9 +1338,31 @@ pub fn run_pir_mcmc_with_shared_best(
     checkpoint_tx: Option<Sender<CheckpointMsg>>,
     accepted_sample_tx: Option<Sender<AcceptedSampleMsg>>,
 ) -> Result<PirMcmcResult> {
-    let initial_cost = cost(&start_fn, options.objective)?;
-    let initial_metric_u64 = options.objective.metric(&initial_cost);
-    let baseline_metric = usize::try_from(initial_metric_u64).unwrap_or(usize::MAX);
+    if !options.objective.needs_toggle_stimulus() && options.toggle_stimulus.is_some() {
+        return Err(anyhow::anyhow!(
+            "toggle stimulus is only valid with objective {}",
+            Objective::G8rNodesTimesDepthTimesToggles.value_name()
+        ));
+    }
+
+    let prepared_toggle_stimulus = if options.objective.needs_toggle_stimulus() {
+        let samples = options.toggle_stimulus.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "objective {} requires toggle stimulus",
+                options.objective.value_name()
+            )
+        })?;
+        Some(Arc::new(lower_toggle_stimulus_for_fn(samples, &start_fn)?))
+    } else {
+        None
+    };
+
+    let initial_cost = cost_with_toggle_stimulus(
+        &start_fn,
+        options.objective,
+        prepared_toggle_stimulus.as_ref().map(|v| v.as_slice()),
+    )?;
+    let baseline_metric = options.objective.metric(&initial_cost);
     let runner = PirSegmentRunner {
         objective: options.objective,
         initial_temperature: options.initial_temperature,
@@ -1132,10 +1374,11 @@ pub fn run_pir_mcmc_with_shared_best(
         shared_best,
         baseline_metric,
         trajectory_dir: options.trajectory_dir.clone(),
+        prepared_toggle_stimulus,
     };
 
     let objective = options.objective;
-    let threshold = options.initial_temperature as u64;
+    let threshold = options.initial_temperature as u128;
 
     let (best_fn, best_cost, stats) = run_multichain(
         start_fn,
@@ -1185,6 +1428,7 @@ mod tests {
             objective: Objective::Nodes,
             enable_formal_oracle: false,
             trajectory_dir: None,
+            toggle_stimulus: None,
         };
 
         let res1 = run_pir_mcmc(ir_fn.clone(), opts.clone()).unwrap();
@@ -1246,5 +1490,133 @@ mod tests {
             4,
             /* enable_formal_oracle= */ false,
         ));
+    }
+
+    #[test]
+    fn objective_metric_toggles_product_saturates() {
+        let c = Cost {
+            pir_nodes: 0,
+            g8r_nodes: usize::MAX,
+            g8r_depth: usize::MAX,
+            g8r_le_graph_milli: 0,
+            g8r_gate_output_toggles: 2,
+        };
+        assert_eq!(
+            Objective::G8rNodesTimesDepthTimesToggles.metric(&c),
+            u128::MAX
+        );
+    }
+
+    #[test]
+    fn parse_irvals_tuple_lines_accepts_valid_tuples() {
+        let text = "(bits[1]:0, bits[1]:1)\n(bits[1]:1, bits[1]:1)\n";
+        let got = parse_irvals_tuple_lines(text).unwrap();
+        assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn parse_irvals_tuple_lines_rejects_invalid_or_non_tuple_lines() {
+        let bad_parse = parse_irvals_tuple_lines("not_a_value\n").unwrap_err();
+        assert!(
+            bad_parse.to_string().contains("line 1"),
+            "expected line number in parse error"
+        );
+
+        let non_tuple = parse_irvals_tuple_lines("bits[1]:1\n").unwrap_err();
+        assert!(
+            non_tuple.to_string().contains("not a tuple"),
+            "expected tuple-specific error"
+        );
+    }
+
+    #[test]
+    fn lower_toggle_stimulus_rejects_arity_and_type_mismatch() {
+        let mut parser = ir_parser::Parser::new(
+            r#"fn f(a: bits[1] id=1, b: bits[2] id=2) -> bits[1] {
+  ret identity.3: bits[1] = identity(a, id=3)
+}"#,
+        );
+        let f = parser.parse_fn().unwrap();
+
+        let arity_bad = vec![
+            IrValue::parse_typed("(bits[1]:0, bits[2]:0, bits[1]:0)").unwrap(),
+            IrValue::parse_typed("(bits[1]:1, bits[2]:1, bits[1]:1)").unwrap(),
+        ];
+        assert!(lower_toggle_stimulus_for_fn(&arity_bad, &f).is_err());
+
+        let type_bad = vec![
+            IrValue::parse_typed("(bits[1]:0, bits[1]:0)").unwrap(),
+            IrValue::parse_typed("(bits[1]:1, bits[1]:1)").unwrap(),
+        ];
+        assert!(lower_toggle_stimulus_for_fn(&type_bad, &f).is_err());
+    }
+
+    #[test]
+    fn run_pir_mcmc_rejects_invalid_toggle_stimulus_usage() {
+        let mut parser = ir_parser::Parser::new(
+            r#"fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret and.3: bits[1] = and(a, b, id=3)
+}"#,
+        );
+        let f = parser.parse_fn().unwrap();
+
+        let opts_missing = RunOptions {
+            max_iters: 1,
+            threads: 1,
+            chain_strategy: ChainStrategy::Independent,
+            checkpoint_iters: 1,
+            progress_iters: 0,
+            seed: 1,
+            initial_temperature: 1.0,
+            objective: Objective::G8rNodesTimesDepthTimesToggles,
+            enable_formal_oracle: false,
+            trajectory_dir: None,
+            toggle_stimulus: None,
+        };
+        assert!(run_pir_mcmc(f.clone(), opts_missing).is_err());
+
+        let opts_wrong_objective = RunOptions {
+            max_iters: 1,
+            threads: 1,
+            chain_strategy: ChainStrategy::Independent,
+            checkpoint_iters: 1,
+            progress_iters: 0,
+            seed: 1,
+            initial_temperature: 1.0,
+            objective: Objective::Nodes,
+            enable_formal_oracle: false,
+            trajectory_dir: None,
+            toggle_stimulus: Some(vec![
+                IrValue::parse_typed("(bits[1]:0, bits[1]:0)").unwrap(),
+                IrValue::parse_typed("(bits[1]:1, bits[1]:1)").unwrap(),
+            ]),
+        };
+        assert!(run_pir_mcmc(f, opts_wrong_objective).is_err());
+    }
+
+    #[test]
+    fn cost_with_toggle_objective_populates_toggle_count() {
+        let mut parser = ir_parser::Parser::new(
+            r#"fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret and.3: bits[1] = and(a, b, id=3)
+}"#,
+        );
+        let f = parser.parse_fn().unwrap();
+        let samples = vec![
+            IrValue::parse_typed("(bits[1]:0, bits[1]:0)").unwrap(),
+            IrValue::parse_typed("(bits[1]:1, bits[1]:1)").unwrap(),
+            IrValue::parse_typed("(bits[1]:0, bits[1]:0)").unwrap(),
+        ];
+        let lowered = lower_toggle_stimulus_for_fn(&samples, &f).unwrap();
+        let c = cost_with_toggle_stimulus(
+            &f,
+            Objective::G8rNodesTimesDepthTimesToggles,
+            Some(&lowered),
+        )
+        .unwrap();
+        assert!(
+            c.g8r_gate_output_toggles > 0,
+            "expected positive interior toggle count"
+        );
     }
 }

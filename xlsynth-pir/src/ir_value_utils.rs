@@ -131,6 +131,66 @@ pub fn ir_bits_from_value_with_type(value: &IrValue, ty: &ir::Type) -> IrBits {
     }
 }
 
+/// Flattens `value` into LSB-first bits following PIR/Gatify lowering layout.
+///
+/// This differs from [`ir_bits_from_value_with_type`] for tuples/arrays:
+/// tuple/array tails occupy the least-significant bits, matching the layout
+/// used when lowering PIR params into gate-level inputs.
+pub fn flatten_ir_value_to_lsb0_bits_for_type(
+    value: &IrValue,
+    ty: &ir::Type,
+    out: &mut Vec<bool>,
+) -> Result<(), String> {
+    match ty {
+        ir::Type::Token => Ok(()),
+        ir::Type::Bits(width) => {
+            let bits = value.to_bits().map_err(|e| e.to_string())?;
+            if bits.get_bit_count() != *width {
+                return Err(format!(
+                    "bits width mismatch: value has bits[{}] but type is bits[{}]",
+                    bits.get_bit_count(),
+                    width
+                ));
+            }
+            for i in 0..*width {
+                out.push(bits.get_bit(i).map_err(|e| e.to_string())?);
+            }
+            Ok(())
+        }
+        ir::Type::Tuple(elem_types) => {
+            let elems = value.get_elements().map_err(|e| e.to_string())?;
+            if elems.len() != elem_types.len() {
+                return Err(format!(
+                    "tuple arity mismatch: value has {} elems but type expects {}",
+                    elems.len(),
+                    elem_types.len()
+                ));
+            }
+            for (elem, elem_ty) in elems.iter().rev().zip(elem_types.iter().rev()) {
+                flatten_ir_value_to_lsb0_bits_for_type(elem, elem_ty, out)?;
+            }
+            Ok(())
+        }
+        ir::Type::Array(ir::ArrayTypeData {
+            element_type,
+            element_count,
+        }) => {
+            let got_count = value.get_element_count().map_err(|e| e.to_string())?;
+            if got_count != *element_count {
+                return Err(format!(
+                    "array length mismatch: value has {} elems but type expects {}",
+                    got_count, element_count
+                ));
+            }
+            for i in (0..*element_count).rev() {
+                let elem = value.get_element(i).map_err(|e| e.to_string())?;
+                flatten_ir_value_to_lsb0_bits_for_type(&elem, element_type, out)?;
+            }
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,5 +316,31 @@ mod tests {
         assert_eq!(bits.get_bit_count(), ty.bit_count());
         let v2 = ir_value_from_bits_with_type(&bits, &ty);
         assert_eq!(v2, v);
+    }
+
+    #[test]
+    fn test_flatten_ir_value_to_lsb0_bits_for_type_tuple_tail_first() {
+        let ty = ir::Type::Tuple(vec![
+            Box::new(ir::Type::Bits(2)),
+            Box::new(ir::Type::Bits(3)),
+        ]);
+        let v = IrValue::make_tuple(&[
+            IrValue::make_ubits(2, 0b10).unwrap(),
+            IrValue::make_ubits(3, 0b101).unwrap(),
+        ]);
+        let mut out = Vec::new();
+        flatten_ir_value_to_lsb0_bits_for_type(&v, &ty, &mut out).unwrap();
+        // Tail-first flattening:
+        // bits[3]:101 contributes [1,0,1], then bits[2]:10 contributes [0,1].
+        assert_eq!(out, vec![true, false, true, false, true]);
+    }
+
+    #[test]
+    fn test_flatten_ir_value_to_lsb0_bits_for_type_rejects_mismatch() {
+        let ty = ir::Type::Bits(4);
+        let v = IrValue::make_ubits(3, 0b111).unwrap();
+        let mut out = Vec::new();
+        let err = flatten_ir_value_to_lsb0_bits_for_type(&v, &ty, &mut out).unwrap_err();
+        assert!(err.contains("bits width mismatch"));
     }
 }
