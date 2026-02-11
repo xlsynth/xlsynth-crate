@@ -2,9 +2,13 @@
 
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use clap::ArgMatches;
+use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
+use signal_hook::low_level as siglow;
 use xlsynth::IrValue;
 use xlsynth_autocov::{
     AutocovConfig, AutocovEngine, AutocovProgress, CorpusSink, MuxNodeKind, ProgressSink,
@@ -338,6 +342,21 @@ pub fn handle_ir_fn_autocov(matches: &ArgMatches, _config: &Option<ToolchainConf
         last_report: now,
         last_report_iters: 0,
     };
+    let stop = Arc::new(AtomicBool::new(false));
+    engine.set_stop_flag(Arc::clone(&stop));
+    let mut sig_ids = Vec::new();
+    for sig in [SIGINT, SIGTERM, SIGHUP] {
+        let stop = Arc::clone(&stop);
+        // Set the run-scoped stop flag so Ctrl-C exits via normal report/flush path.
+        match unsafe { siglow::register(sig, move || stop.store(true, Ordering::Relaxed)) } {
+            Ok(id) => sig_ids.push(id),
+            Err(e) => eprintln!(
+                "warning: failed to register signal handler for signal {}: {}",
+                sig, e
+            ),
+        }
+    }
+
     let threads = threads.unwrap_or_else(|| std::thread::available_parallelism().unwrap().get());
     let report = if threads <= 1 {
         engine.run_with_sinks(Some(&mut sink), Some(&mut progress), Some(progress_every))
@@ -349,6 +368,9 @@ pub fn handle_ir_fn_autocov(matches: &ArgMatches, _config: &Option<ToolchainConf
             Some(progress_every),
         )
     };
+    for id in sig_ids.drain(..) {
+        let _ = siglow::unregister(id);
+    }
     if let Err(e) = writer.flush() {
         report_cli_error_and_exit(
             &format!(
