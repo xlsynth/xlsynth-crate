@@ -5,20 +5,58 @@ use std::collections::HashMap;
 use std::fmt;
 use std::hash::Hash;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 
 pub mod multichain;
 
+/// Compatibility wrapper for atomically managed `u128` metrics.
+///
+/// This toolchain does not provide stable `AtomicU128`, so we expose a
+/// compare-exchange style API backed by a mutex.
+pub struct AtomicMetricU128 {
+    inner: Mutex<u128>,
+}
+
+impl AtomicMetricU128 {
+    pub fn new(value: u128) -> Self {
+        Self {
+            inner: Mutex::new(value),
+        }
+    }
+
+    pub fn load(&self, order: Ordering) -> u128 {
+        let _ = order;
+        *self.inner.lock().unwrap()
+    }
+
+    pub fn compare_exchange(
+        &self,
+        current: u128,
+        new: u128,
+        success: Ordering,
+        failure: Ordering,
+    ) -> Result<u128, u128> {
+        let _ = (success, failure);
+        let mut guard = self.inner.lock().unwrap();
+        if *guard == current {
+            *guard = new;
+            Ok(current)
+        } else {
+            Err(*guard)
+        }
+    }
+}
+
 /// Shared best-so-far candidate across threads.
 pub struct Best<T> {
-    pub cost: AtomicUsize,
+    pub cost: AtomicMetricU128,
     pub value: Mutex<T>,
 }
 
 impl<T: Clone> Best<T> {
-    pub fn new(initial_cost: usize, value: T) -> Self {
+    pub fn new(initial_cost: u128, value: T) -> Self {
         Self {
-            cost: AtomicUsize::new(initial_cost),
+            cost: AtomicMetricU128::new(initial_cost),
             value: Mutex::new(value),
         }
     }
@@ -26,7 +64,7 @@ impl<T: Clone> Best<T> {
     /// Attempts to update the best-so-far candidate.
     ///
     /// Returns `true` if this call updated the global best, `false` otherwise.
-    pub fn try_update(&self, new_cost: usize, new_value: T) -> bool {
+    pub fn try_update(&self, new_cost: u128, new_value: T) -> bool {
         let mut current = self.cost.load(Ordering::SeqCst);
         while new_cost < current {
             match self

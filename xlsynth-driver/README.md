@@ -465,7 +465,8 @@ This subcommand intentionally shares the same flag surface as
   - `-n, --iters <ITERS>` – MCMC iterations.
 - Common options:
   - `-o, --output <OUTPUT_DIR>` – artifact directory (temporary directory if omitted).
-  - `--metric <nodes|g8r-nodes|g8r-nodes-times-depth|g8r-le-graph|g8r-le-graph-times-product>` – objective (default: `nodes`).
+  - `--metric <nodes|g8r-nodes|g8r-nodes-times-depth|g8r-nodes-times-depth-times-toggles|g8r-le-graph|g8r-le-graph-times-product>` – objective (default: `nodes`).
+  - `--toggle-stimulus <IRVALS_PATH>` – `.irvals` file containing one typed tuple stimulus per line; required for `--metric=g8r-nodes-times-depth-times-toggles` and invalid with other metrics.
   - `--threads <THREADS>` – number of parallel chains (default: host CPU count).
   - `--chain-strategy <independent|explore-exploit>` – multi-chain policy (default: `independent`).
   - `--checkpoint-iters <N>` – synchronization/checkpoint interval (default: `5000`).
@@ -480,6 +481,17 @@ Example:
 xlsynth-driver ir-mcmc-opt my_design.ir \
   --iters 20000 \
   --metric g8r-nodes-times-depth \
+  --threads 8 \
+  --output /tmp/pir-mcmc-artifacts
+```
+
+Toggle-aware objective example:
+
+```shell
+xlsynth-driver ir-mcmc-opt my_design.ir \
+  --iters 20000 \
+  --metric g8r-nodes-times-depth-times-toggles \
+  --toggle-stimulus my_design.irvals \
   --threads 8 \
   --output /tmp/pir-mcmc-artifacts
 ```

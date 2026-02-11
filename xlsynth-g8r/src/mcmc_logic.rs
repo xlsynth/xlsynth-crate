@@ -106,11 +106,11 @@ pub enum Objective {
 }
 
 impl Objective {
-    fn metric(self, c: &Cost) -> u64 {
+    fn metric(self, c: &Cost) -> u128 {
         match self {
-            Objective::Nodes => c.nodes as u64,
-            Objective::Depth => c.depth as u64,
-            Objective::Product => (c.nodes as u64) * (c.depth as u64),
+            Objective::Nodes => c.nodes as u128,
+            Objective::Depth => c.depth as u128,
+            Objective::Product => (c.nodes as u128).saturating_mul(c.depth as u128),
         }
     }
 }
@@ -359,7 +359,7 @@ pub fn mcmc(
     let mut best_cost = current_cost;
 
     if let Some(ref b) = shared_best {
-        b.try_update(objective.metric(&best_cost) as usize, best_gfn.clone());
+        b.try_update(objective.metric(&best_cost), best_gfn.clone());
     }
 
     let mut stats = McmcStats::default();
@@ -504,7 +504,7 @@ pub fn mcmc(
 
         if iteration_output.best_updated {
             if let Some(ref b) = shared_best {
-                let _ = b.try_update(objective.metric(&best_cost) as usize, best_gfn.clone());
+                let _ = b.try_update(objective.metric(&best_cost), best_gfn.clone());
             }
         }
 
