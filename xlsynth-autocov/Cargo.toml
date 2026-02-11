@@ -20,6 +20,7 @@ blake3 = "1.5"
 rand = "0.8"
 log = "0.4"
 ctrlc = "3.4.7"
+signal-hook = "0.3"
 clap = { version = "4.5.21", features = ["derive"] }
 anyhow = "1.0"
 
