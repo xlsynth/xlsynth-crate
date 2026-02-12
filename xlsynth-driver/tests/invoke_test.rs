@@ -1843,6 +1843,65 @@ fn helper(x: bits[8] id=2, y: bits[8] id=3) -> bits[8] {
 }
 
 #[test]
+fn test_ir_fn_autocov_writes_irvals_corpus() {
+    let ir_text = r#"package sample
+
+top fn main(sel: bits[1] id=1, a: bits[1] id=2, b: bits[1] id=3) -> bits[1] {
+  ret out: bits[1] = sel(sel, cases=[a, b], id=4)
+}
+"#;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("input.ir");
+    let corpus_path = temp_dir.path().join("interesting.irvals");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("ir-fn-autocov")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--corpus-file")
+        .arg(corpus_path.to_str().unwrap())
+        .arg("--max-iters")
+        .arg("128")
+        .arg("--progress-every")
+        .arg("0")
+        .arg("--seed-two-hot-max-bits")
+        .arg("64")
+        .arg("--seed-structured=true")
+        .arg("--no-mux-space=true")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("iters=") && stdout.contains("corpus_len="),
+        "expected summary line in stdout, got:\n{}",
+        stdout
+    );
+
+    let corpus_text = std::fs::read_to_string(&corpus_path).unwrap();
+    let lines: Vec<&str> = corpus_text.lines().collect();
+    assert!(
+        !lines.is_empty(),
+        "expected non-empty corpus, got file:\n{}",
+        corpus_text
+    );
+    assert!(
+        lines[0].starts_with('(') && lines[0].contains("bits[1]"),
+        "unexpected first corpus line: {}",
+        lines[0]
+    );
+}
+
+#[test]
 fn test_ir_fn_to_json() {
     let ir_text = r#"package sample
 

@@ -29,6 +29,11 @@ use xlsynth_prover::ir_equiv::{IrEquivRequest, IrModule, run_ir_equiv};
 use xlsynth_prover::prover::SolverChoice;
 use xlsynth_prover::prover::types::{AssertionSemantics, EquivParallelism, EquivResult};
 
+mod ir_fn_autocov_runner;
+pub use ir_fn_autocov_runner::{
+    IrFnAutocovRunConfig, resolve_entry_fn_from_ir_path, run_ir_fn_autocov_with_writers,
+};
+
 pub const FEATURE_MAP_SIZE: usize = 65_536;
 const FEATURE_MAP_BYTES: usize = FEATURE_MAP_SIZE / 8;
 

@@ -18,6 +18,7 @@ xlsynth = { path = "../xlsynth", version = "0.30.0" }
 xlsynth-g8r = { path = "../xlsynth-g8r", version = "0.30.0" }
 xlsynth-pir = { path = "../xlsynth-pir", version = "0.30.0" }
 xlsynth-mcmc-pir = { path = "../xlsynth-mcmc-pir", version = "0.30.0" }
+xlsynth-autocov = { path = "../xlsynth-autocov", version = "0.30.0" }
 xlsynth-prover = { path = "../xlsynth-prover", version = "0.30.0" }
 clap = "4.5.21"
 tempfile = "3.20"
@@ -57,20 +58,52 @@ glob = "0.3"
 [features]
 default = []
 unstable-dslx-specialize = ["xlsynth-prover/unstable-dslx-specialize"]
-has-boolector = ["xlsynth-prover/has-boolector"]
-has-easy-smt = ["xlsynth-prover/has-easy-smt"]
-has-bitwuzla = ["xlsynth-prover/has-bitwuzla"]
+has-boolector = ["xlsynth-prover/has-boolector", "xlsynth-autocov/has-boolector"]
+has-easy-smt = ["xlsynth-prover/has-easy-smt", "xlsynth-autocov/has-easy-smt"]
+has-bitwuzla = ["xlsynth-prover/has-bitwuzla", "xlsynth-autocov/has-bitwuzla"]
 # Enables boolector support, defaulting to system linking
-with-boolector-system = ["xlsynth-prover/with-boolector-system", "has-boolector"]
+with-boolector-system = [
+    "xlsynth-prover/with-boolector-system",
+    "xlsynth-autocov/with-boolector-system",
+    "has-boolector",
+]
 # Enables boolector support AND builds it from source
-with-boolector-built = ["xlsynth-prover/with-boolector-built", "has-boolector"]
+with-boolector-built = [
+    "xlsynth-prover/with-boolector-built",
+    "xlsynth-autocov/with-boolector-built",
+    "has-boolector",
+]
 with-z3-system = ["xlsynth-g8r/with-z3-system"]
 with-z3-built = ["xlsynth-g8r/with-z3-built"]
-with-easy-smt = ["xlsynth-prover/with-easy-smt", "has-easy-smt"]
-with-boolector-binary-test = ["xlsynth-prover/with-easy-smt", "with-easy-smt"]
-with-bitwuzla-binary-test = ["xlsynth-prover/with-easy-smt", "with-easy-smt"]
-with-z3-binary-test = ["xlsynth-prover/with-easy-smt", "with-easy-smt"]
-with-bitwuzla-system = ["xlsynth-prover/with-bitwuzla-system", "has-bitwuzla"]
-with-bitwuzla-built = ["xlsynth-prover/with-bitwuzla-built", "has-bitwuzla"]
+with-easy-smt = [
+    "xlsynth-prover/with-easy-smt",
+    "xlsynth-autocov/with-easy-smt",
+    "has-easy-smt",
+]
+with-boolector-binary-test = [
+    "xlsynth-prover/with-easy-smt",
+    "xlsynth-autocov/with-boolector-binary-test",
+    "with-easy-smt",
+]
+with-bitwuzla-binary-test = [
+    "xlsynth-prover/with-easy-smt",
+    "xlsynth-autocov/with-bitwuzla-binary-test",
+    "with-easy-smt",
+]
+with-z3-binary-test = [
+    "xlsynth-prover/with-easy-smt",
+    "xlsynth-autocov/with-z3-binary-test",
+    "with-easy-smt",
+]
+with-bitwuzla-system = [
+    "xlsynth-prover/with-bitwuzla-system",
+    "xlsynth-autocov/with-bitwuzla-system",
+    "has-bitwuzla",
+]
+with-bitwuzla-built = [
+    "xlsynth-prover/with-bitwuzla-built",
+    "xlsynth-autocov/with-bitwuzla-built",
+    "has-bitwuzla",
+]
 # Enable a fake task kind and lightweight shell-based worker for scheduler fuzzing and testing.
 enable-fake-task = []

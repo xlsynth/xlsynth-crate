@@ -72,6 +72,7 @@ mod ir_bool_cones;
 mod ir_diverse_samples;
 mod ir_equiv;
 mod ir_equiv_blocks;
+mod ir_fn_autocov;
 mod ir_fn_cone_extract;
 mod ir_fn_eval;
 mod ir_fn_node_count;
@@ -1814,6 +1815,88 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new("ir-fn-autocov")
+                .about("Runs coverage-guided corpus growth for an IR function and writes interesting tuples to an .irvals file")
+                .arg(
+                    clap::Arg::new("ir_input_file")
+                        .help("The input IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .add_ir_top_arg(false)
+                .arg(
+                    clap::Arg::new("corpus_file")
+                        .long("corpus-file")
+                        .value_name("CORPUS_FILE")
+                        .help("Newline-delimited .irvals corpus file to append to")
+                        .required(true)
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("seed")
+                        .long("seed")
+                        .value_name("SEED")
+                        .help("PRNG seed")
+                        .value_parser(clap::value_parser!(u64))
+                        .default_value("0")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("max_iters")
+                        .long("max-iters")
+                        .value_name("MAX_ITERS")
+                        .help("Maximum number of candidates to evaluate (omit to run until interrupted)")
+                        .value_parser(clap::value_parser!(u64))
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("progress_every")
+                        .long("progress-every")
+                        .value_name("N")
+                        .help("Emit progress every N iterations (0 disables periodic progress lines)")
+                        .value_parser(clap::value_parser!(u64))
+                        .default_value("10000")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("threads")
+                        .long("threads")
+                        .value_name("THREADS")
+                        .help("Number of worker threads to use for candidate evaluation")
+                        .value_parser(clap::value_parser!(usize))
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("seed_two_hot_max_bits")
+                        .long("seed-two-hot-max-bits")
+                        .value_name("BITS")
+                        .help("Upper bit-width bound for two-hot structured seeds")
+                        .value_parser(clap::value_parser!(usize))
+                        .default_value("4096")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("no_mux_space")
+                        .long("no-mux-space")
+                        .value_name("BOOL")
+                        .help("Disable printing the full mux-space summary at startup")
+                        .value_parser(["true", "false"])
+                        .default_value("false")
+                        .num_args(1)
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("seed_structured")
+                        .long("seed-structured")
+                        .value_name("BOOL")
+                        .help("Seed with structured patterns (all-zeros/ones/one-hot/two-hot)")
+                        .value_parser(["true", "false"])
+                        .default_value("true")
+                        .num_args(1)
+                        .action(clap::ArgAction::Set),
+                ),
+        )
+        .subcommand(
             clap::Command::new("ir-fn-eval")
                 .about("Interprets an IR function with the provided argument tuple")
                 .arg(
@@ -2562,6 +2645,9 @@ fn main() {
                 eprintln!("error in ir-diverse-samples: {e}");
                 std::process::exit(1);
             }
+        }
+        Some(("ir-fn-autocov", subm)) => {
+            ir_fn_autocov::handle_ir_fn_autocov(subm, &config);
         }
         Some(("ir-fn-eval", subm)) => {
             ir_fn_eval::handle_ir_fn_eval(subm, &config);

@@ -951,6 +951,34 @@ result. Example:
 xlsynth-driver ir-fn-eval my_mod.ir add '(bits[32]:1, bits[32]:2)'
 ```
 
+### `ir-fn-autocov`
+
+Runs coverage-guided corpus growth for an IR function and appends interesting
+typed argument tuples to a newline-delimited `.irvals` file.
+
+- Required:
+  - `<ir_input_file>` – input IR package path.
+  - `--corpus-file <CORPUS_FILE>` – output corpus path (created if needed; appended to if it exists).
+- Optional:
+  - `--top <NAME>` – function to analyze (defaults to package top).
+  - `--seed <SEED>` – PRNG seed (default `0`).
+  - `--max-iters <MAX_ITERS>` – max candidates to evaluate (omit to run until interrupted).
+  - `--progress-every <N>` – progress interval in iterations (default `10000`; `0` disables periodic progress lines).
+  - `--threads <THREADS>` – worker thread count (default: host parallelism).
+  - `--seed-structured <true|false>` – seed corpus with structured patterns (default `true`).
+  - `--seed-two-hot-max-bits <BITS>` – max width for two-hot seed generation (default `4096`).
+  - `--no-mux-space <true|false>` – suppress startup mux-space summary (default `false`).
+
+Example:
+
+```shell
+xlsynth-driver ir-fn-autocov my_design.opt.ir \
+  --top my_main \
+  --corpus-file my_design.interesting.irvals \
+  --max-iters 20000 \
+  --threads 32
+```
+
 ### `dslx-fn-eval`
 
 Evaluates a DSLX function for each input tuple in a `.irvals` file and prints one output per line (XLS IR typed values).
