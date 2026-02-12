@@ -536,3 +536,38 @@ endmodule
     assert!(err_text.contains("clock net 'clk' is connected to non-clock input"));
     assert!(err_text.contains("u1.A"));
 }
+
+#[test]
+fn test_gv2block_legalizes_escaped_instance_identifier() {
+    let netlist = r#"
+module top (a, b, y);
+  input a;
+  input b;
+  output y;
+  wire a;
+  wire b;
+  wire y;
+  AND2 \foo[0]_blah (.A(a), .B(b), .Y(y));
+endmodule
+"#;
+    let mut liberty_file = NamedTempFile::new().unwrap();
+    write!(liberty_file, "{}", LIBERTY_TEXTPROTO).unwrap();
+    let mut netlist_file = NamedTempFile::new().unwrap();
+    write!(netlist_file, "{}", netlist).unwrap();
+
+    let got = convert_gv2block_paths_to_string(netlist_file.path(), liberty_file.path()).unwrap();
+
+    let legalized = "foo_0__blah";
+    assert!(got.contains(&format!(
+        "instantiation {}(block=AND2, kind=block)",
+        legalized
+    )));
+    assert!(got.contains(&format!(
+        "{}_Y: bits[1] = instantiation_output(instantiation={}, port_name=Y",
+        legalized, legalized
+    )));
+    assert!(got.contains(&format!(
+        "{}_A: () = instantiation_input(a, instantiation={}, port_name=A",
+        legalized, legalized
+    )));
+}
