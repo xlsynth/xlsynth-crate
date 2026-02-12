@@ -37,6 +37,56 @@ pub fn convert_gv2block_paths_to_string(
     Ok(convert_gv2block_paths(netlist_path, liberty_proto_path)?.to_string())
 }
 
+fn sanitize_to_xls_identifier(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 1);
+    for (idx, ch) in raw.chars().enumerate() {
+        let is_valid = if idx == 0 {
+            ch == '_' || ch.is_ascii_alphabetic()
+        } else {
+            ch == '_' || ch.is_ascii_alphanumeric()
+        };
+        if is_valid {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        out.push('_');
+    } else if !out
+        .as_bytes()
+        .first()
+        .is_some_and(|b| *b == b'_' || b.is_ascii_alphabetic())
+    {
+        out.insert(0, '_');
+    }
+    out
+}
+
+#[derive(Default)]
+struct IdentifierLegalizer {
+    raw_to_legal: HashMap<String, String>,
+    used_legal_names: HashSet<String>,
+}
+
+impl IdentifierLegalizer {
+    fn legalize(&mut self, raw: &str) -> String {
+        if let Some(existing) = self.raw_to_legal.get(raw) {
+            return existing.clone();
+        }
+        let base = sanitize_to_xls_identifier(raw);
+        let mut candidate = base.clone();
+        let mut suffix = 0usize;
+        while self.used_legal_names.contains(&candidate) {
+            suffix += 1;
+            candidate = format!("{}_{}", base, suffix);
+        }
+        self.used_legal_names.insert(candidate.clone());
+        self.raw_to_legal.insert(raw.to_string(), candidate.clone());
+        candidate
+    }
+}
+
 /// Canonical clock/output pin names for a Liberty clock-gate cell.
 #[derive(Clone)]
 struct ClockGatePassthroughSpec {
@@ -346,11 +396,8 @@ fn build_package_from_netlist(
     parsed: &ParsedNetlist,
     lib_indexed: &IndexedLibrary,
 ) -> Result<Package> {
-    let module_name = parsed
-        .interner
-        .resolve(module.name)
-        .unwrap_or("top")
-        .to_string();
+    let module_name =
+        sanitize_to_xls_identifier(parsed.interner.resolve(module.name).unwrap_or("top"));
 
     let mut pkg = Package {
         name: module_name.clone(),
@@ -764,15 +811,14 @@ fn build_top_block(
     parsed: &ParsedNetlist,
     lib_indexed: &IndexedLibrary,
 ) -> Result<(PirFn, BlockMetadata)> {
-    let module_name = parsed
-        .interner
-        .resolve(module.name)
-        .unwrap_or("top")
-        .to_string();
+    let module_name_raw = parsed.interner.resolve(module.name).unwrap_or("top");
+    let module_name = sanitize_to_xls_identifier(module_name_raw);
     let mut b = PirFnBuilder::new(&module_name);
 
     let mut net_drivers = NetDrivers::new();
     let mut net_widths: HashMap<NetIndex, (usize, i64)> = HashMap::new();
+    let mut top_port_name_legalizer = IdentifierLegalizer::default();
+    let mut instance_name_legalizer = IdentifierLegalizer::default();
 
     for (i, net) in parsed.nets.iter().enumerate() {
         let idx = NetIndex(i);
@@ -869,10 +915,11 @@ fn build_top_block(
         if port.direction != crate::netlist::parse::PortDirection::Input {
             continue;
         }
-        let name = parsed.interner.resolve(port.name).unwrap_or("").to_string();
-        if clock_net_name.as_ref().is_some_and(|clk| clk == &name) {
+        let name_raw = parsed.interner.resolve(port.name).unwrap_or("").to_string();
+        if clock_net_name.as_ref().is_some_and(|clk| clk == &name_raw) {
             continue;
         }
+        let name = top_port_name_legalizer.legalize(&name_raw);
         let width = port
             .width
             .map(|(msb, lsb)| (msb as i64 - lsb as i64).abs() as usize + 1)
@@ -888,17 +935,18 @@ fn build_top_block(
     }
 
     let mut instantiations: Vec<Instantiation> = Vec::new();
-    let mut instance_outputs: Vec<(String, Vec<(String, NodeRef)>)> = Vec::new();
+    let mut instance_outputs: Vec<(String, String, Vec<(String, NodeRef)>)> = Vec::new();
 
     for inst in &module.instances {
-        let inst_name = parsed
+        let inst_name_raw = parsed
             .interner
             .resolve(inst.instance_name)
             .unwrap_or("")
             .to_string();
-        if elided_clock_gate_instances.contains(&inst_name) {
+        if elided_clock_gate_instances.contains(&inst_name_raw) {
             continue;
         }
+        let inst_name = instance_name_legalizer.legalize(&inst_name_raw);
         let cell_name = parsed
             .interner
             .resolve(inst.type_name)
@@ -925,16 +973,16 @@ fn build_top_block(
             );
             output_refs.push((pin.name.clone(), nr));
         }
-        instance_outputs.push((inst_name, output_refs));
+        instance_outputs.push((inst_name_raw, inst_name, output_refs));
     }
 
     // Map instance outputs to nets.
-    for (inst_name, output_refs) in &instance_outputs {
+    for (inst_name_raw, _inst_name_legal, output_refs) in &instance_outputs {
         let inst = module
             .instances
             .iter()
-            .find(|i| parsed.interner.resolve(i.instance_name).unwrap_or("") == inst_name)
-            .ok_or_else(|| anyhow!(format!("instance '{}' not found", inst_name)))?;
+            .find(|i| parsed.interner.resolve(i.instance_name).unwrap_or("") == inst_name_raw)
+            .ok_or_else(|| anyhow!(format!("instance '{}' not found", inst_name_raw)))?;
         for (port_id, net_ref) in &inst.connections {
             let port_name = parsed.interner.resolve(*port_id).unwrap_or("").to_string();
             let Some(node_ref) = output_refs
@@ -975,14 +1023,15 @@ fn build_top_block(
 
     // Emit instantiation inputs.
     for inst in &module.instances {
-        let inst_name = parsed
+        let inst_name_raw = parsed
             .interner
             .resolve(inst.instance_name)
             .unwrap_or("")
             .to_string();
-        if elided_clock_gate_instances.contains(&inst_name) {
+        if elided_clock_gate_instances.contains(&inst_name_raw) {
             continue;
         }
+        let inst_name = instance_name_legalizer.legalize(&inst_name_raw);
         let cell_name = parsed
             .interner
             .resolve(inst.type_name)
@@ -1045,13 +1094,14 @@ fn build_top_block(
         if port.direction != crate::netlist::parse::PortDirection::Output {
             continue;
         }
-        let name = parsed.interner.resolve(port.name).unwrap_or("").to_string();
+        let name_raw = parsed.interner.resolve(port.name).unwrap_or("").to_string();
+        let name = top_port_name_legalizer.legalize(&name_raw);
         let net_idx = parsed
             .nets
             .iter()
             .position(|n| n.name == port.name)
             .map(NetIndex)
-            .ok_or_else(|| anyhow!(format!("output port net '{}' not found", name)))?;
+            .ok_or_else(|| anyhow!(format!("output port net '{}' not found", name_raw)))?;
         let (width, _) = net_widths.get(&net_idx).copied().unwrap_or((1, 0));
         let node = if let Some(nr) = net_drivers.get_whole(net_idx) {
             nr
@@ -1093,8 +1143,12 @@ fn build_top_block(
         input_port_ids.insert(p.name.clone(), p.id.get_wrapped_id());
     }
 
+    let clock_port_name = clock_net_name
+        .as_ref()
+        .map(|name| top_port_name_legalizer.legalize(name));
+
     let meta = BlockMetadata {
-        clock_port_name: clock_net_name,
+        clock_port_name,
         input_port_ids,
         output_port_ids: HashMap::new(),
         output_names,
