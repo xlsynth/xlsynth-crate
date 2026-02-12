@@ -97,13 +97,15 @@ fn install_signal_handlers<W: Write>(
 
 struct FileSink<'a, W: Write> {
     writer: &'a mut W,
+    stop: Arc<AtomicBool>,
     write_error: Option<String>,
 }
 
 impl<W: Write> FileSink<'_, W> {
-    fn new(writer: &mut W) -> FileSink<'_, W> {
+    fn new(writer: &mut W, stop: Arc<AtomicBool>) -> FileSink<'_, W> {
         FileSink {
             writer,
+            stop,
             write_error: None,
         }
     }
@@ -120,6 +122,7 @@ impl<W: Write> CorpusSink for FileSink<'_, W> {
         }
         if let Err(e) = writeln!(self.writer, "{}", tuple_value) {
             self.write_error = Some(format!("Failed to append corpus sample: {}", e));
+            self.stop.store(true, Ordering::Relaxed);
         }
     }
 }
@@ -325,6 +328,9 @@ pub fn run_ir_fn_autocov_with_writers<WOut: Write, WErr: Write>(
         .map_err(|e| format!("Failed writing corpus replay end line: {}", e))?;
     }
 
+    let stop = Arc::new(AtomicBool::new(false));
+    engine.set_stop_flag(Arc::clone(&stop));
+
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -337,7 +343,7 @@ pub fn run_ir_fn_autocov_with_writers<WOut: Write, WErr: Write>(
             )
         })?;
     let mut writer = BufWriter::new(file);
-    let mut sink = FileSink::new(&mut writer);
+    let mut sink = FileSink::new(&mut writer, Arc::clone(&stop));
 
     if config.seed_structured {
         let added = engine.seed_structured_corpus(config.seed_two_hot_max_bits, Some(&mut sink));
@@ -377,8 +383,6 @@ pub fn run_ir_fn_autocov_with_writers<WOut: Write, WErr: Write>(
         }
     }
 
-    let stop = Arc::new(AtomicBool::new(false));
-    engine.set_stop_flag(Arc::clone(&stop));
     let _signal_handlers = if config.install_signal_handlers {
         Some(install_signal_handlers(stop, stderr)?)
     } else {
@@ -450,4 +454,48 @@ pub fn run_ir_fn_autocov_with_writers<WOut: Write, WErr: Write>(
     .map_err(|e| format!("Failed writing final summary line: {}", e))?;
 
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    struct AlwaysFailWriter;
+
+    impl Write for AlwaysFailWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "simulated ENOSPC",
+            ))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn file_sink_sets_stop_flag_on_write_error() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut writer = AlwaysFailWriter;
+        let mut sink = FileSink::new(&mut writer, Arc::clone(&stop));
+        let tuple_value = IrValue::make_tuple(&[
+            IrValue::parse_typed("bits[1]:0").expect("literal should parse"),
+            IrValue::parse_typed("bits[1]:1").expect("literal should parse"),
+        ]);
+
+        sink.on_new_sample(&tuple_value);
+
+        assert!(
+            stop.load(Ordering::Relaxed),
+            "write failure should immediately request stop"
+        );
+        let err = sink.take_error().expect("write error should be captured");
+        assert!(
+            err.contains("Failed to append corpus sample"),
+            "unexpected error message: {err}"
+        );
+    }
 }
