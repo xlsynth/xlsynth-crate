@@ -227,6 +227,14 @@ pub fn run_ir_fn_autocov_with_writers<WOut: Write, WErr: Write>(
     let mut engine = AutocovEngine::from_ir_path(&config.ir_input_file, &config.entry_fn, cfg)
         .map_err(|e| format!("Failed to initialize autocov engine: {}", e))?;
 
+    let stop = Arc::new(AtomicBool::new(false));
+    engine.set_stop_flag(Arc::clone(&stop));
+    let _signal_handlers = if config.install_signal_handlers {
+        Some(install_signal_handlers(Arc::clone(&stop), stderr)?)
+    } else {
+        None
+    };
+
     if !config.no_mux_space {
         let summary = engine.get_mux_space_summary();
         writeln!(
@@ -265,6 +273,9 @@ pub fn run_ir_fn_autocov_with_writers<WOut: Write, WErr: Write>(
         let mut replay_lines: u64 = 0;
 
         for (line_index, line_result) in reader.lines().enumerate() {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
             let line = line_result
                 .map_err(|e| format!("Failed reading corpus line {}: {}", line_index + 1, e))?;
             let line = line.trim();
@@ -328,9 +339,6 @@ pub fn run_ir_fn_autocov_with_writers<WOut: Write, WErr: Write>(
         .map_err(|e| format!("Failed writing corpus replay end line: {}", e))?;
     }
 
-    let stop = Arc::new(AtomicBool::new(false));
-    engine.set_stop_flag(Arc::clone(&stop));
-
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -345,7 +353,7 @@ pub fn run_ir_fn_autocov_with_writers<WOut: Write, WErr: Write>(
     let mut writer = BufWriter::new(file);
     let mut sink = FileSink::new(&mut writer, Arc::clone(&stop));
 
-    if config.seed_structured {
+    if config.seed_structured && !stop.load(Ordering::Relaxed) {
         let added = engine.seed_structured_corpus(config.seed_two_hot_max_bits, Some(&mut sink));
         if let Some(e) = sink.take_error() {
             return Err(e);
@@ -382,12 +390,6 @@ pub fn run_ir_fn_autocov_with_writers<WOut: Write, WErr: Write>(
             .map_err(|e| format!("Failed writing mux_outcomes entry line: {}", e))?;
         }
     }
-
-    let _signal_handlers = if config.install_signal_handlers {
-        Some(install_signal_handlers(stop, stderr)?)
-    } else {
-        None
-    };
 
     let report = {
         let now = Instant::now();
