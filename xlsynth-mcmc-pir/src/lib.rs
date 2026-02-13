@@ -150,6 +150,9 @@ pub fn cost_with_effort_options_and_toggle_stimulus(
             objective.value_name()
         ));
     }
+    if objective.needs_weighted_switching() {
+        validate_weighted_switching_options(weighted_switching_options)?;
+    }
 
     let (
         g8r_nodes,
@@ -178,6 +181,26 @@ pub fn cost_with_effort_options_and_toggle_stimulus(
         g8r_gate_output_toggles,
         g8r_weighted_switching_milli,
     })
+}
+
+fn validate_weighted_switching_options(
+    options: &count_toggles::WeightedSwitchingOptions,
+) -> Result<()> {
+    let checks = [
+        ("beta1", options.beta1),
+        ("beta2", options.beta2),
+        ("primary_output_load", options.primary_output_load),
+    ];
+    for (name, value) in checks {
+        if !value.is_finite() {
+            return Err(anyhow::anyhow!(
+                "weighted switching option '{}' must be finite; got {}",
+                name,
+                value
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Produces the XLS-optimized PIR function for `f`.
@@ -1791,6 +1814,38 @@ mod tests {
         assert!(
             c.g8r_weighted_switching_milli > 0,
             "expected positive weighted switching estimate"
+        );
+    }
+
+    #[test]
+    fn cost_with_weighted_switching_rejects_non_finite_options() {
+        let mut parser = ir_parser::Parser::new(
+            r#"fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret and.3: bits[1] = and(a, b, id=3)
+}"#,
+        );
+        let f = parser.parse_fn().unwrap();
+        let samples = vec![
+            IrValue::parse_typed("(bits[1]:0, bits[1]:0)").unwrap(),
+            IrValue::parse_typed("(bits[1]:1, bits[1]:1)").unwrap(),
+        ];
+        let lowered = lower_toggle_stimulus_for_fn(&samples, &f).unwrap();
+
+        let err = cost_with_effort_options_and_toggle_stimulus(
+            &f,
+            Objective::G8rWeightedSwitching,
+            Some(&lowered),
+            &WeightedSwitchingOptions {
+                beta1: f64::NAN,
+                beta2: 0.0,
+                primary_output_load: 1.0,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("must be finite"),
+            "expected finite-coefficient validation error, got: {}",
+            err
         );
     }
 }

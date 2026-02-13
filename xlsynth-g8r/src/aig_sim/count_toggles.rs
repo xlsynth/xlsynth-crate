@@ -100,7 +100,17 @@ fn collect_and2_indices(gate_fn: &GateFn) -> Vec<usize> {
 fn f64_to_u128_round_saturating(v: f64) -> u128 {
     // We use f64 because the load coefficients (`beta1`, `beta2`,
     // `primary_output_load`) are runtime-configurable floats.
-    if !v.is_finite() {
+    // Keep clamping sign-aware for non-finite values:
+    // - `NaN` / `-inf` => 0
+    // - `+inf` => u128::MAX
+    // This avoids poisoning metrics with maximal costs for malformed negatives.
+    if v.is_nan() {
+        return 0;
+    }
+    if v == f64::NEG_INFINITY {
+        return 0;
+    }
+    if v == f64::INFINITY {
         return u128::MAX;
     }
     if v <= 0.0 {
@@ -466,6 +476,13 @@ mod tests {
             defaults.gate_output_toggles, toggle_stats.gate_output_toggles,
             "weighted switching should report the same raw interior gate-output toggles"
         );
+    }
+
+    #[test]
+    fn test_f64_to_u128_round_saturating_non_finite_sign_aware() {
+        assert_eq!(f64_to_u128_round_saturating(f64::NAN), 0);
+        assert_eq!(f64_to_u128_round_saturating(f64::NEG_INFINITY), 0);
+        assert_eq!(f64_to_u128_round_saturating(f64::INFINITY), u128::MAX);
     }
 }
 
