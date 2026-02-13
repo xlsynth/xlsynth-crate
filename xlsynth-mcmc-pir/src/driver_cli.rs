@@ -26,8 +26,9 @@ use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_utils::compact_and_toposort_in_place;
 
 use crate::{
-    CheckpointKind, CheckpointMsg, Objective, RunOptions, cost, cost_with_toggle_stimulus,
-    lower_toggle_stimulus_for_fn, parse_irvals_tuple_file, run_pir_mcmc_with_shared_best,
+    CheckpointKind, CheckpointMsg, Objective, RunOptions,
+    cost_with_effort_options_and_toggle_stimulus, lower_toggle_stimulus_for_fn,
+    parse_irvals_tuple_file, run_pir_mcmc_with_shared_best,
 };
 
 #[derive(ValueEnum, Debug, Clone, Copy)]
@@ -58,6 +59,9 @@ pub struct PirMcmcCliArgs {
     pub checkpoint_iters: u64,
     pub progress_iters: u64,
     pub formal_oracle: bool,
+    pub switching_beta1: f64,
+    pub switching_beta2: f64,
+    pub switching_primary_output_load: f64,
     chain_strategy: CliChainStrategy,
 }
 
@@ -174,6 +178,33 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 .value_parser(clap::value_parser!(bool))
                 .action(ArgAction::Set),
         )
+        .arg(
+            Arg::new("switching_beta1")
+                .long("switching-beta1")
+                .value_name("BETA1")
+                .help("Linear load coefficient for weighted switching objectives.")
+                .default_value("1.0")
+                .value_parser(clap::value_parser!(f64))
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("switching_beta2")
+                .long("switching-beta2")
+                .value_name("BETA2")
+                .help("Quadratic load coefficient for weighted switching objectives.")
+                .default_value("0.0")
+                .value_parser(clap::value_parser!(f64))
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("switching_primary_output_load")
+                .long("switching-primary-output-load")
+                .value_name("LOAD")
+                .help("Additional load per primary-output use in weighted switching.")
+                .default_value("1.0")
+                .value_parser(clap::value_parser!(f64))
+                .action(ArgAction::Set),
+        )
 }
 
 pub fn parse_pir_mcmc_args(matches: &ArgMatches) -> PirMcmcCliArgs {
@@ -192,6 +223,11 @@ pub fn parse_pir_mcmc_args(matches: &ArgMatches) -> PirMcmcCliArgs {
         checkpoint_iters: *matches.get_one::<u64>("checkpoint_iters").unwrap(),
         progress_iters: *matches.get_one::<u64>("progress_iters").unwrap(),
         formal_oracle: *matches.get_one::<bool>("formal_oracle").unwrap(),
+        switching_beta1: *matches.get_one::<f64>("switching_beta1").unwrap(),
+        switching_beta2: *matches.get_one::<f64>("switching_beta2").unwrap(),
+        switching_primary_output_load: *matches
+            .get_one::<f64>("switching_primary_output_load")
+            .unwrap(),
         chain_strategy: *matches
             .get_one::<CliChainStrategy>("chain_strategy")
             .unwrap(),
@@ -295,8 +331,8 @@ where
     }
     if !cli.metric.needs_toggle_stimulus() && toggle_stimulus_values.is_some() {
         return Err(anyhow::anyhow!(
-            "--toggle-stimulus is only valid with --metric={}",
-            Objective::G8rNodesTimesDepthTimesToggles.value_name()
+            "--toggle-stimulus is not valid with --metric={}",
+            cli.metric.value_name()
         ));
     }
     let prepared_toggle_stimulus = toggle_stimulus_values
@@ -304,12 +340,27 @@ where
         .map(|samples| lower_toggle_stimulus_for_fn(samples, &top_fn))
         .transpose()?;
 
-    let initial_cost = if cli.metric.needs_toggle_stimulus() {
-        cost_with_toggle_stimulus(&top_fn, cli.metric, prepared_toggle_stimulus.as_deref())?
-    } else {
-        cost(&top_fn, cli.metric)?
-    };
-    if cli.metric.needs_toggle_stimulus() {
+    let weighted_switching_options =
+        xlsynth_g8r::aig_sim::count_toggles::WeightedSwitchingOptions {
+            beta1: cli.switching_beta1,
+            beta2: cli.switching_beta2,
+            primary_output_load: cli.switching_primary_output_load,
+        };
+    let initial_cost = cost_with_effort_options_and_toggle_stimulus(
+        &top_fn,
+        cli.metric,
+        prepared_toggle_stimulus.as_deref(),
+        &weighted_switching_options,
+    )?;
+    if cli.metric.needs_weighted_switching() {
+        report(format!(
+            "Successfully loaded top function. Initial stats: pir_nodes={}, g8r_nodes={}, g8r_depth={}, g8r_weighted_switching_milli={}",
+            initial_cost.pir_nodes,
+            initial_cost.g8r_nodes,
+            initial_cost.g8r_depth,
+            initial_cost.g8r_weighted_switching_milli
+        ));
+    } else if cli.metric.needs_toggle_stimulus() {
         report(format!(
             "Successfully loaded top function. Initial stats: pir_nodes={}, g8r_nodes={}, g8r_depth={}, g8r_gate_output_toggles={}",
             initial_cost.pir_nodes,
@@ -357,6 +408,7 @@ where
         seed: cli.seed,
         initial_temperature: cli.initial_temperature,
         objective: cli.metric,
+        weighted_switching_options,
         enable_formal_oracle: cli.formal_oracle,
         trajectory_dir: Some(output_dir.clone()),
         toggle_stimulus: toggle_stimulus_values,
@@ -546,6 +598,23 @@ where
                 result.best_cost.g8r_nodes,
                 result.best_cost.g8r_depth,
                 product,
+                metric,
+            ));
+        }
+        Objective::G8rWeightedSwitching => {
+            report(format!(
+                "PIR MCMC finished. Best stats: g8r_weighted_switching_milli={}",
+                result.best_cost.g8r_weighted_switching_milli,
+            ));
+        }
+        Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress => {
+            let metric = (result.best_cost.g8r_nodes as u128)
+                .saturating_mul(result.best_cost.g8r_weighted_switching_milli);
+            report(format!(
+                "PIR MCMC finished. Best stats: g8r_nodes={}, g8r_depth={} (non-regressing), g8r_weighted_switching_milli={}, metric={}",
+                result.best_cost.g8r_nodes,
+                result.best_cost.g8r_depth,
+                result.best_cost.g8r_weighted_switching_milli,
                 metric,
             ));
         }

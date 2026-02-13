@@ -465,8 +465,11 @@ This subcommand intentionally shares the same flag surface as
   - `-n, --iters <ITERS>` – MCMC iterations.
 - Common options:
   - `-o, --output <OUTPUT_DIR>` – artifact directory (temporary directory if omitted).
-  - `--metric <nodes|g8r-nodes|g8r-nodes-times-depth|g8r-nodes-times-depth-times-toggles|g8r-le-graph|g8r-le-graph-times-product>` – objective (default: `nodes`).
-  - `--toggle-stimulus <IRVALS_PATH>` – `.irvals` file containing one typed tuple stimulus per line; required for `--metric=g8r-nodes-times-depth-times-toggles` and invalid with other metrics.
+  - `--metric <nodes|g8r-nodes|g8r-nodes-times-depth|g8r-nodes-times-depth-times-toggles|g8r-le-graph|g8r-le-graph-times-product|g8r-weighted-switching|g8r-nodes-times-weighted-switching-no-depth-regress>` – objective (default: `nodes`).
+  - `--toggle-stimulus <IRVALS_PATH>` – `.irvals` file containing one typed tuple stimulus per line; required for toggle/stimulus-based metrics (`g8r-nodes-times-depth-times-toggles`, `g8r-weighted-switching`, and `g8r-nodes-times-weighted-switching-no-depth-regress`) and invalid with other metrics.
+  - `--switching-beta1 <BETA1>` – linear load coefficient for weighted-switching objectives (default: `1.0`).
+  - `--switching-beta2 <BETA2>` – quadratic load coefficient for weighted-switching objectives (default: `0.0`).
+  - `--switching-primary-output-load <LOAD>` – additional load per primary-output use for weighted-switching objectives (default: `1.0`).
   - `--threads <THREADS>` – number of parallel chains (default: host CPU count).
   - `--chain-strategy <independent|explore-exploit>` – multi-chain policy (default: `independent`).
   - `--checkpoint-iters <N>` – synchronization/checkpoint interval (default: `5000`).
@@ -492,6 +495,20 @@ xlsynth-driver ir-mcmc-opt my_design.ir \
   --iters 20000 \
   --metric g8r-nodes-times-depth-times-toggles \
   --toggle-stimulus my_design.irvals \
+  --threads 8 \
+  --output /tmp/pir-mcmc-artifacts
+```
+
+Weighted switching + node-count objective (without depth regression) example:
+
+```shell
+xlsynth-driver ir-mcmc-opt my_design.ir \
+  --iters 20000 \
+  --metric g8r-nodes-times-weighted-switching-no-depth-regress \
+  --toggle-stimulus my_design.irvals \
+  --switching-beta1 1.0 \
+  --switching-beta2 0.0 \
+  --switching-primary-output-load 1.0 \
   --threads 8 \
   --output /tmp/pir-mcmc-artifacts
 ```

@@ -438,6 +438,8 @@ fn main() -> Result<()> {
         seed: cli.seed,
         initial_temperature: cli.initial_temperature,
         objective: cli.metric,
+        weighted_switching_options:
+            xlsynth_g8r::aig_sim::count_toggles::WeightedSwitchingOptions::default(),
         enable_formal_oracle: cli.formal_oracle,
         trajectory_dir: cli.trajectory_dir.as_ref().map(PathBuf::from).or_else(|| {
             if cli.trajectory {
