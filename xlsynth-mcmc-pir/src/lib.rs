@@ -1339,6 +1339,7 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
             }
 
             if let Some(w) = trajectory_writer.as_mut() {
+                let metric_u128 = self.objective.metric(&iteration_output.output_cost);
                 let rec = json!({
                     "chain_no": params.chain_no,
                     "role": format!("{:?}", params.role),
@@ -1347,7 +1348,7 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
                     "outcome": iteration_outcome_tag(&iteration_output.outcome),
                     "best_updated": iteration_output.best_updated,
                     "objective": format!("{:?}", self.objective),
-                    "metric": self.objective.metric(&iteration_output.output_cost),
+                    "metric": metric_u128,
                     "pir_nodes": iteration_output.output_cost.pir_nodes,
                     "g8r_nodes": iteration_output.output_cost.g8r_nodes,
                     "g8r_depth": iteration_output.output_cost.g8r_depth,
@@ -1846,6 +1847,19 @@ mod tests {
             err.to_string().contains("must be finite"),
             "expected finite-coefficient validation error, got: {}",
             err
+        );
+    }
+
+    #[test]
+    fn trajectory_json_preserves_large_u128_metrics() {
+        let rec = serde_json::json!({
+            "metric": u128::MAX,
+            "g8r_weighted_switching_milli": u128::MAX,
+        });
+        let s = serde_json::to_string(&rec).unwrap();
+        assert!(
+            s.contains(&u128::MAX.to_string()),
+            "expected full u128 JSON number in serialized output"
         );
     }
 }
