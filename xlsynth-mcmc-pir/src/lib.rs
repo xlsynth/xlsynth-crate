@@ -93,6 +93,11 @@ pub struct Cost {
     /// This is populated when objective=`g8r-nodes-times-depth-times-toggles`;
     /// otherwise it is `0`.
     pub g8r_gate_output_toggles: usize,
+    /// Load-weighted switching activity (`alpha*C`) proxy, scaled by 1e3.
+    ///
+    /// This is populated for weighted-switching objectives; otherwise it is
+    /// `0`.
+    pub g8r_weighted_switching_milli: u128,
 }
 
 /// Calculates the cost of a PIR function.
@@ -101,7 +106,12 @@ pub struct Cost {
 /// pipeline to obtain live gate count and depth. Failures are returned as an
 /// error (callers can choose to reject the candidate).
 pub fn cost(f: &IrFn, objective: Objective) -> Result<Cost> {
-    cost_with_toggle_stimulus(f, objective, None)
+    cost_with_effort_options_and_toggle_stimulus(
+        f,
+        objective,
+        None,
+        &count_toggles::WeightedSwitchingOptions::default(),
+    )
 }
 
 /// Calculates cost and, for toggle-based objectives, evaluates the candidate on
@@ -110,6 +120,21 @@ pub fn cost_with_toggle_stimulus(
     f: &IrFn,
     objective: Objective,
     toggle_stimulus: Option<&[Vec<IrBits>]>,
+) -> Result<Cost> {
+    cost_with_effort_options_and_toggle_stimulus(
+        f,
+        objective,
+        toggle_stimulus,
+        &count_toggles::WeightedSwitchingOptions::default(),
+    )
+}
+
+/// Calculates cost with explicit load-weighting options.
+pub fn cost_with_effort_options_and_toggle_stimulus(
+    f: &IrFn,
+    objective: Objective,
+    toggle_stimulus: Option<&[Vec<IrBits>]>,
+    weighted_switching_options: &count_toggles::WeightedSwitchingOptions,
 ) -> Result<Cost> {
     let pir_nodes = f.nodes.len();
 
@@ -126,17 +151,24 @@ pub fn cost_with_toggle_stimulus(
         ));
     }
 
-    let (g8r_nodes, g8r_depth, g8r_le_graph_milli, g8r_gate_output_toggles) =
-        if objective.uses_g8r_costing() {
-            compute_g8r_stats_for_pir_fn(
-                f,
-                objective.needs_graph_logical_effort(),
-                objective.needs_toggle_stimulus(),
-                toggle_stimulus,
-            )?
-        } else {
-            (pir_nodes, pir_nodes, 0, 0)
-        };
+    let (
+        g8r_nodes,
+        g8r_depth,
+        g8r_le_graph_milli,
+        g8r_gate_output_toggles,
+        g8r_weighted_switching_milli,
+    ) = if objective.uses_g8r_costing() {
+        compute_g8r_stats_for_pir_fn(
+            f,
+            objective.needs_graph_logical_effort(),
+            objective.needs_gate_output_toggles(),
+            objective.needs_weighted_switching(),
+            toggle_stimulus,
+            weighted_switching_options,
+        )?
+    } else {
+        (pir_nodes, pir_nodes, 0, 0, 0u128)
+    };
 
     Ok(Cost {
         pir_nodes,
@@ -144,6 +176,7 @@ pub fn cost_with_toggle_stimulus(
         g8r_depth,
         g8r_le_graph_milli,
         g8r_gate_output_toggles,
+        g8r_weighted_switching_milli,
     })
 }
 
@@ -200,6 +233,10 @@ pub enum Objective {
     G8rLeGraph,
     #[value(name = "g8r-le-graph-times-product")]
     G8rLeGraphTimesProduct,
+    #[value(name = "g8r-weighted-switching")]
+    G8rWeightedSwitching,
+    #[value(name = "g8r-nodes-times-weighted-switching-no-depth-regress")]
+    G8rNodesTimesWeightedSwitchingNoDepthRegress,
 }
 
 impl Objective {
@@ -211,6 +248,8 @@ impl Objective {
                 | Objective::G8rNodesTimesDepthTimesToggles
                 | Objective::G8rLeGraph
                 | Objective::G8rLeGraphTimesProduct
+                | Objective::G8rWeightedSwitching
+                | Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress
         )
     }
 
@@ -222,7 +261,26 @@ impl Objective {
     }
 
     pub fn needs_toggle_stimulus(self) -> bool {
+        self.needs_gate_output_toggles() || self.needs_weighted_switching()
+    }
+
+    pub fn needs_gate_output_toggles(self) -> bool {
         matches!(self, Objective::G8rNodesTimesDepthTimesToggles)
+    }
+
+    pub fn needs_weighted_switching(self) -> bool {
+        matches!(
+            self,
+            Objective::G8rWeightedSwitching
+                | Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress
+        )
+    }
+
+    pub fn enforces_non_regressing_depth(self) -> bool {
+        matches!(
+            self,
+            Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress
+        )
     }
 
     pub fn value_name(self) -> &'static str {
@@ -233,6 +291,10 @@ impl Objective {
             Objective::G8rNodesTimesDepthTimesToggles => "g8r-nodes-times-depth-times-toggles",
             Objective::G8rLeGraph => "g8r-le-graph",
             Objective::G8rLeGraphTimesProduct => "g8r-le-graph-times-product",
+            Objective::G8rWeightedSwitching => "g8r-weighted-switching",
+            Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress => {
+                "g8r-nodes-times-weighted-switching-no-depth-regress"
+            }
         }
     }
 
@@ -251,6 +313,10 @@ impl Objective {
                 let product = (c.g8r_nodes as u128).saturating_mul(c.g8r_depth as u128);
                 (c.g8r_le_graph_milli as u128).saturating_mul(product)
             }
+            Objective::G8rWeightedSwitching => c.g8r_weighted_switching_milli,
+            Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress => {
+                (c.g8r_nodes as u128).saturating_mul(c.g8r_weighted_switching_milli)
+            }
         }
     }
 }
@@ -263,9 +329,11 @@ impl Objective {
 fn compute_g8r_stats_for_pir_fn(
     f: &IrFn,
     compute_graph_logical_effort: bool,
-    compute_toggles: bool,
+    compute_gate_output_toggles: bool,
+    compute_weighted_switching: bool,
     toggle_stimulus: Option<&[Vec<IrBits>]>,
-) -> Result<(usize, usize, usize, usize)> {
+    weighted_switching_options: &count_toggles::WeightedSwitchingOptions,
+) -> Result<(usize, usize, usize, usize, u128)> {
     // The PIR → text → XLS → optimize → PIR → gatify pipeline assumes a DAG.
     // Random rewiring transforms can (transiently) create cycles; if that happens
     // we treat it as a candidate failure and fall back to PIR node count.
@@ -276,8 +344,10 @@ fn compute_g8r_stats_for_pir_fn(
         compute_g8r_stats_for_pir_fn_impl(
             f,
             compute_graph_logical_effort,
-            compute_toggles,
+            compute_gate_output_toggles,
+            compute_weighted_switching,
             toggle_stimulus,
+            weighted_switching_options,
         )
     }));
     match result {
@@ -306,9 +376,11 @@ fn graph_le_delay_to_milli(delay: f64) -> usize {
 fn compute_g8r_stats_for_pir_fn_impl(
     f: &IrFn,
     compute_graph_logical_effort: bool,
-    compute_toggles: bool,
+    compute_gate_output_toggles: bool,
+    compute_weighted_switching: bool,
     toggle_stimulus: Option<&[Vec<IrBits>]>,
-) -> Result<(usize, usize, usize, usize)> {
+    weighted_switching_options: &count_toggles::WeightedSwitchingOptions,
+) -> Result<(usize, usize, usize, usize, u128)> {
     // 1-3) Optimize the PIR function via the XLS pipeline.
     let top_fn = optimize_pir_fn_via_xls(f)?;
 
@@ -339,7 +411,9 @@ fn compute_g8r_stats_for_pir_fn_impl(
     } else {
         0
     };
-    let g8r_gate_output_toggles = if compute_toggles {
+    let (g8r_gate_output_toggles, g8r_weighted_switching_milli) = if compute_gate_output_toggles
+        || compute_weighted_switching
+    {
         let batch = toggle_stimulus.ok_or_else(|| {
             anyhow::anyhow!("toggle-based objective requires prepared toggle stimulus")
         })?;
@@ -374,15 +448,32 @@ fn compute_g8r_stats_for_pir_fn_impl(
                 }
             }
         }
-        count_toggles::count_toggles(&gate_fn, batch).gate_output_toggles
+        let mut gate_output_toggles = 0usize;
+        let mut weighted_switching_milli = 0u128;
+        if compute_weighted_switching {
+            let weighted_stats = count_toggles::count_weighted_switching(
+                &gate_fn,
+                batch,
+                weighted_switching_options,
+            );
+            weighted_switching_milli = weighted_stats.weighted_switching_milli;
+            if compute_gate_output_toggles {
+                gate_output_toggles = weighted_stats.gate_output_toggles;
+            }
+        }
+        if compute_gate_output_toggles && !compute_weighted_switching {
+            gate_output_toggles = count_toggles::count_toggles(&gate_fn, batch).gate_output_toggles;
+        }
+        (gate_output_toggles, weighted_switching_milli)
     } else {
-        0
+        (0, 0u128)
     };
     Ok((
         stats.live_nodes,
         stats.deepest_path,
         g8r_le_graph_milli,
         g8r_gate_output_toggles,
+        g8r_weighted_switching_milli,
     ))
 }
 
@@ -510,6 +601,9 @@ pub struct RunOptions {
     pub initial_temperature: f64,
     /// Objective to optimize.
     pub objective: Objective,
+    /// Parameters used to convert per-node fanout to load weighting when
+    /// computing weighted-switching objectives.
+    pub weighted_switching_options: count_toggles::WeightedSwitchingOptions,
     /// When true, and when the crate is built with a formal solver feature
     /// (e.g. `--features with-boolector-built`), run a formal equivalence
     /// oracle after the fast interpreter-based oracle for
@@ -616,7 +710,9 @@ fn hash_to_hex(bytes: &[u8; 32]) -> String {
 
 struct PirSegmentRunner {
     objective: Objective,
+    weighted_switching_options: count_toggles::WeightedSwitchingOptions,
     initial_temperature: f64,
+    max_allowed_depth: Option<usize>,
     enable_formal_oracle: bool,
     progress_iters: u64,
     checkpoint_iters: u64,
@@ -639,6 +735,8 @@ pub fn mcmc_iteration(
     temp: f64,
     objective: Objective,
     toggle_stimulus: Option<&[Vec<IrBits>]>,
+    weighted_switching_options: &count_toggles::WeightedSwitchingOptions,
+    max_allowed_depth: Option<usize>,
 ) -> McmcIterationOutput {
     let mut iteration_best_updated = false;
 
@@ -730,10 +828,11 @@ pub fn mcmc_iteration(
                 }
             } else {
                 let cost_start = Instant::now();
-                let new_candidate_cost = match cost_with_toggle_stimulus(
+                let new_candidate_cost = match cost_with_effort_options_and_toggle_stimulus(
                     &candidate_fn,
                     objective,
                     toggle_stimulus,
+                    weighted_switching_options,
                 ) {
                     Ok(c) => c,
                     Err(e) => {
@@ -787,6 +886,20 @@ pub fn mcmc_iteration(
                         };
                     }
                 };
+
+                if let Some(max_depth) = max_allowed_depth
+                    && new_candidate_cost.g8r_depth > max_depth
+                {
+                    return McmcIterationOutput {
+                        output_state: current_fn,
+                        output_cost: current_cost,
+                        best_updated: false,
+                        outcome: IterationOutcomeDetails::MetropolisReject,
+                        oracle_time_micros,
+                        transform_always_equivalent: chosen_transform.always_equivalent(),
+                        transform: Some(current_transform_kind),
+                    };
+                }
 
                 let curr_metric_u128 = objective.metric(&current_cost);
                 let new_metric_u128 = objective.metric(&new_candidate_cost);
@@ -1093,17 +1206,20 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
         let toggle_stimulus = self.prepared_toggle_stimulus.as_ref().map(|v| v.as_slice());
 
         let mut current_fn = start_state.clone();
-        let mut current_cost =
-            cost_with_toggle_stimulus(&current_fn, self.objective, toggle_stimulus).map_err(
-                |e| {
-                    anyhow::anyhow!(
-                        "failed to evaluate initial cost for '{}' under {:?}: {}",
-                        current_fn.name,
-                        self.objective,
-                        e
-                    )
-                },
-            )?;
+        let mut current_cost = cost_with_effort_options_and_toggle_stimulus(
+            &current_fn,
+            self.objective,
+            toggle_stimulus,
+            &self.weighted_switching_options,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to evaluate initial cost for '{}' under {:?}: {}",
+                current_fn.name,
+                self.objective,
+                e
+            )
+        })?;
         let mut best_fn = start_state;
         let mut best_cost = current_cost;
         let mut stats = McmcStats::default();
@@ -1137,6 +1253,8 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
                 temp,
                 self.objective,
                 toggle_stimulus,
+                &self.weighted_switching_options,
+                self.max_allowed_depth,
             );
 
             let mut accepted_digest: Option<[u8; 32]> = None;
@@ -1212,6 +1330,7 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
                     "g8r_depth": iteration_output.output_cost.g8r_depth,
                     "g8r_le_graph_milli": iteration_output.output_cost.g8r_le_graph_milli,
                     "g8r_gate_output_toggles": iteration_output.output_cost.g8r_gate_output_toggles,
+                    "g8r_weighted_switching_milli": iteration_output.output_cost.g8r_weighted_switching_milli,
                     "oracle_time_micros": iteration_output.oracle_time_micros,
                     "transform": iteration_output.transform.map(|k| format!("{:?}", k)),
                     "transform_always_equivalent": iteration_output.transform_always_equivalent,
@@ -1340,8 +1459,8 @@ pub fn run_pir_mcmc_with_shared_best(
 ) -> Result<PirMcmcResult> {
     if !options.objective.needs_toggle_stimulus() && options.toggle_stimulus.is_some() {
         return Err(anyhow::anyhow!(
-            "toggle stimulus is only valid with objective {}",
-            Objective::G8rNodesTimesDepthTimesToggles.value_name()
+            "toggle stimulus is not valid with objective {}",
+            options.objective.value_name()
         ));
     }
 
@@ -1357,15 +1476,22 @@ pub fn run_pir_mcmc_with_shared_best(
         None
     };
 
-    let initial_cost = cost_with_toggle_stimulus(
+    let initial_cost = cost_with_effort_options_and_toggle_stimulus(
         &start_fn,
         options.objective,
         prepared_toggle_stimulus.as_ref().map(|v| v.as_slice()),
+        &options.weighted_switching_options,
     )?;
     let baseline_metric = options.objective.metric(&initial_cost);
     let runner = PirSegmentRunner {
         objective: options.objective,
+        weighted_switching_options: options.weighted_switching_options,
         initial_temperature: options.initial_temperature,
+        max_allowed_depth: if options.objective.enforces_non_regressing_depth() {
+            Some(initial_cost.g8r_depth)
+        } else {
+            None
+        },
         enable_formal_oracle: options.enable_formal_oracle,
         progress_iters: options.progress_iters,
         checkpoint_iters: options.checkpoint_iters,
@@ -1406,6 +1532,7 @@ pub fn run_pir_mcmc_with_shared_best(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use count_toggles::WeightedSwitchingOptions;
     use xlsynth_pir::ir_parser;
     use xlsynth_pir::ir_utils::remap_payload_with;
 
@@ -1426,6 +1553,7 @@ mod tests {
             seed: 1,
             initial_temperature: 5.0,
             objective: Objective::Nodes,
+            weighted_switching_options: WeightedSwitchingOptions::default(),
             enable_formal_oracle: false,
             trajectory_dir: None,
             toggle_stimulus: None,
@@ -1500,9 +1628,26 @@ mod tests {
             g8r_depth: usize::MAX,
             g8r_le_graph_milli: 0,
             g8r_gate_output_toggles: 2,
+            g8r_weighted_switching_milli: 0,
         };
         assert_eq!(
             Objective::G8rNodesTimesDepthTimesToggles.metric(&c),
+            u128::MAX
+        );
+    }
+
+    #[test]
+    fn objective_metric_nodes_times_weighted_switching_saturates() {
+        let c = Cost {
+            pir_nodes: 0,
+            g8r_nodes: usize::MAX,
+            g8r_depth: 0,
+            g8r_le_graph_milli: 0,
+            g8r_gate_output_toggles: 0,
+            g8r_weighted_switching_milli: u128::MAX,
+        };
+        assert_eq!(
+            Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress.metric(&c),
             u128::MAX
         );
     }
@@ -1569,6 +1714,7 @@ mod tests {
             seed: 1,
             initial_temperature: 1.0,
             objective: Objective::G8rNodesTimesDepthTimesToggles,
+            weighted_switching_options: WeightedSwitchingOptions::default(),
             enable_formal_oracle: false,
             trajectory_dir: None,
             toggle_stimulus: None,
@@ -1584,6 +1730,7 @@ mod tests {
             seed: 1,
             initial_temperature: 1.0,
             objective: Objective::Nodes,
+            weighted_switching_options: WeightedSwitchingOptions::default(),
             enable_formal_oracle: false,
             trajectory_dir: None,
             toggle_stimulus: Some(vec![
@@ -1617,6 +1764,33 @@ mod tests {
         assert!(
             c.g8r_gate_output_toggles > 0,
             "expected positive interior toggle count"
+        );
+    }
+
+    #[test]
+    fn cost_with_weighted_switching_objective_populates_weighted_metric() {
+        let mut parser = ir_parser::Parser::new(
+            r#"fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret and.3: bits[1] = and(a, b, id=3)
+}"#,
+        );
+        let f = parser.parse_fn().unwrap();
+        let samples = vec![
+            IrValue::parse_typed("(bits[1]:0, bits[1]:0)").unwrap(),
+            IrValue::parse_typed("(bits[1]:1, bits[1]:1)").unwrap(),
+            IrValue::parse_typed("(bits[1]:0, bits[1]:0)").unwrap(),
+        ];
+        let lowered = lower_toggle_stimulus_for_fn(&samples, &f).unwrap();
+        let c = cost_with_effort_options_and_toggle_stimulus(
+            &f,
+            Objective::G8rWeightedSwitching,
+            Some(&lowered),
+            &WeightedSwitchingOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            c.g8r_weighted_switching_milli > 0,
+            "expected positive weighted switching estimate"
         );
     }
 }
