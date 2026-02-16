@@ -104,40 +104,40 @@ fn parse_scalar_list(value: &Value) -> Result<Vec<f64>, String> {
 }
 
 #[derive(Debug)]
-struct NumericTensor {
+struct NumericArray {
     values: Vec<f64>,
     dimensions: Vec<u32>,
 }
 
-fn parse_numeric_tensor(value: &Value) -> Result<NumericTensor, String> {
+fn parse_numeric_array(value: &Value) -> Result<NumericArray, String> {
     match value {
-        Value::Number(n) => Ok(NumericTensor {
+        Value::Number(n) => Ok(NumericArray {
             values: vec![*n],
             dimensions: Vec::new(),
         }),
         Value::String(s) | Value::Identifier(s) => {
             let values = parse_csv_f64s(s)?;
-            Ok(NumericTensor {
+            Ok(NumericArray {
                 dimensions: vec![values.len() as u32],
                 values,
             })
         }
         Value::Tuple(xs) => {
             if xs.is_empty() {
-                return Ok(NumericTensor {
+                return Ok(NumericArray {
                     values: Vec::new(),
                     dimensions: vec![0],
                 });
             }
             let mut children = Vec::with_capacity(xs.len());
             for x in xs {
-                children.push(parse_numeric_tensor(x)?);
+                children.push(parse_numeric_array(x)?);
             }
             let first_dims = children[0].dimensions.clone();
             for child in &children[1..] {
                 if child.dimensions != first_dims {
                     return Err(format!(
-                        "ragged tensor in Liberty values payload: first child dims={:?}, other dims={:?}",
+                        "ragged array in Liberty values payload: first child dims={:?}, other dims={:?}",
                         first_dims, child.dimensions
                     ));
                 }
@@ -148,7 +148,7 @@ fn parse_numeric_tensor(value: &Value) -> Result<NumericTensor, String> {
             }
             let mut dimensions = vec![xs.len() as u32];
             dimensions.extend(first_dims);
-            Ok(NumericTensor { values, dimensions })
+            Ok(NumericArray { values, dimensions })
         }
     }
 }
@@ -336,10 +336,10 @@ fn parse_timing_table(block: &Block) -> Option<TimingTable> {
                     );
                 }
             },
-            "values" => match parse_numeric_tensor(&attr.value) {
-                Ok(tensor) => {
-                    table.values = tensor.values;
-                    table.dimensions = tensor.dimensions;
+            "values" => match parse_numeric_array(&attr.value) {
+                Ok(array) => {
+                    table.values = array.values;
+                    table.dimensions = array.dimensions;
                 }
                 Err(e) => {
                     log::warn!(
@@ -1243,6 +1243,281 @@ mod tests {
         let tmpl_b = &lib.lu_table_templates[(table_b.template_id - 1) as usize];
         assert_eq!(tmpl_b.index_1, vec![0.05]);
         assert_eq!(tmpl_b.index_2, vec![0.90, 1.10, 1.30]);
+    }
+
+    #[test]
+    fn test_cross_library_missing_template_does_not_backfill_from_other_library() {
+        let lib_missing = r#"
+        library (lib_missing) {
+            cell (BUF_MISS) {
+                area: 1.0;
+                pin (A) {
+                    direction: input;
+                }
+                pin (Y) {
+                    direction: output;
+                    function: "A";
+                    timing () {
+                        related_pin : "A";
+                        timing_type : combinational;
+                        cell_rise (shared_tmpl) {
+                            values ("0.10, 0.20");
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        let lib_with_template = r#"
+        library (lib_with_template) {
+            lu_table_template (shared_tmpl) {
+                variable_1 : input_net_transition;
+                variable_2 : total_output_net_capacitance;
+                index_1 ("0.01");
+                index_2 ("0.10, 0.20");
+            }
+            cell (DUMMY) {
+                area: 1.0;
+                pin (A) {
+                    direction: input;
+                }
+                pin (Y) {
+                    direction: output;
+                    function: "A";
+                }
+            }
+        }
+        "#;
+        let mut tmp1 = NamedTempFile::new().unwrap();
+        write!(tmp1, "{}", lib_missing).unwrap();
+        let mut tmp2 = NamedTempFile::new().unwrap();
+        write!(tmp2, "{}", lib_with_template).unwrap();
+
+        let lib = parse_liberty_files_to_proto(&[tmp1.path(), tmp2.path()]).unwrap();
+        let cell = lib.cells.iter().find(|c| c.name == "BUF_MISS").unwrap();
+        let table = cell
+            .pins
+            .iter()
+            .find(|p| p.name == "Y")
+            .unwrap()
+            .timing_arcs
+            .iter()
+            .find(|a| a.related_pin == "A")
+            .unwrap()
+            .tables
+            .iter()
+            .find(|t| t.kind == "cell_rise")
+            .unwrap();
+        assert_eq!(table.template_id, 0);
+        assert_eq!(table.template_name, "shared_tmpl");
+    }
+
+    #[test]
+    fn test_conflicting_template_bindings_are_order_independent() {
+        let lib_a = r#"
+        library (lib_a) {
+            lu_table_template (shared_tmpl) {
+                variable_1 : input_net_transition;
+                variable_2 : total_output_net_capacitance;
+                index_1 ("0.01, 0.02");
+                index_2 ("0.10, 0.20");
+            }
+            cell (BUF_A) {
+                area: 1.0;
+                pin (A) {
+                    direction: input;
+                }
+                pin (Y) {
+                    direction: output;
+                    function: "A";
+                    timing () {
+                        related_pin : "A";
+                        timing_type : combinational;
+                        cell_rise (shared_tmpl) {
+                            values ("0.10, 0.20", "0.30, 0.40");
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        let lib_b = r#"
+        library (lib_b) {
+            lu_table_template (shared_tmpl) {
+                variable_1 : input_net_transition;
+                variable_2 : total_output_net_capacitance;
+                index_1 ("0.05");
+                index_2 ("0.90, 1.10, 1.30");
+            }
+            cell (BUF_B) {
+                area: 1.0;
+                pin (A) {
+                    direction: input;
+                }
+                pin (Y) {
+                    direction: output;
+                    function: "A";
+                    timing () {
+                        related_pin : "A";
+                        timing_type : combinational;
+                        cell_rise (shared_tmpl) {
+                            values ("1.00, 2.00, 3.00");
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        let mut tmp_a = NamedTempFile::new().unwrap();
+        write!(tmp_a, "{}", lib_a).unwrap();
+        let mut tmp_b = NamedTempFile::new().unwrap();
+        write!(tmp_b, "{}", lib_b).unwrap();
+
+        let resolve_axes = |lib: &Library, cell_name: &str| -> (Vec<f64>, Vec<f64>, u32) {
+            let cell = lib.cells.iter().find(|c| c.name == cell_name).unwrap();
+            let table = cell
+                .pins
+                .iter()
+                .find(|p| p.name == "Y")
+                .unwrap()
+                .timing_arcs
+                .iter()
+                .find(|a| a.related_pin == "A")
+                .unwrap()
+                .tables
+                .iter()
+                .find(|t| t.kind == "cell_rise")
+                .unwrap();
+            let tmpl = &lib.lu_table_templates[(table.template_id - 1) as usize];
+            (
+                tmpl.index_1.clone(),
+                tmpl.index_2.clone(),
+                table.template_id,
+            )
+        };
+
+        let lib_ab = parse_liberty_files_to_proto(&[tmp_a.path(), tmp_b.path()]).unwrap();
+        let lib_ba = parse_liberty_files_to_proto(&[tmp_b.path(), tmp_a.path()]).unwrap();
+
+        let (a_i1_ab, a_i2_ab, a_id_ab) = resolve_axes(&lib_ab, "BUF_A");
+        let (b_i1_ab, b_i2_ab, b_id_ab) = resolve_axes(&lib_ab, "BUF_B");
+        let (a_i1_ba, a_i2_ba, a_id_ba) = resolve_axes(&lib_ba, "BUF_A");
+        let (b_i1_ba, b_i2_ba, b_id_ba) = resolve_axes(&lib_ba, "BUF_B");
+
+        assert_eq!(a_i1_ab, vec![0.01, 0.02]);
+        assert_eq!(a_i2_ab, vec![0.10, 0.20]);
+        assert_eq!(b_i1_ab, vec![0.05]);
+        assert_eq!(b_i2_ab, vec![0.90, 1.10, 1.30]);
+        assert_ne!(a_id_ab, 0);
+        assert_ne!(b_id_ab, 0);
+
+        assert_eq!(a_i1_ba, vec![0.01, 0.02]);
+        assert_eq!(a_i2_ba, vec![0.10, 0.20]);
+        assert_eq!(b_i1_ba, vec![0.05]);
+        assert_eq!(b_i2_ba, vec![0.90, 1.10, 1.30]);
+        assert_ne!(a_id_ba, 0);
+        assert_ne!(b_id_ba, 0);
+    }
+
+    #[test]
+    fn test_identical_templates_across_inputs_both_canonicalize() {
+        let lib1 = r#"
+        library (lib_one) {
+            lu_table_template (shared_tmpl) {
+                variable_1 : input_net_transition;
+                variable_2 : total_output_net_capacitance;
+                index_1 ("0.01, 0.02");
+                index_2 ("0.10, 0.20");
+            }
+            cell (BUF_1) {
+                area: 1.0;
+                pin (A) {
+                    direction: input;
+                }
+                pin (Y) {
+                    direction: output;
+                    function: "A";
+                    timing () {
+                        related_pin : "A";
+                        timing_type : combinational;
+                        cell_rise (shared_tmpl) {
+                            values ("0.10, 0.20", "0.30, 0.40");
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        let lib2 = r#"
+        library (lib_two) {
+            lu_table_template (shared_tmpl) {
+                variable_1 : input_net_transition;
+                variable_2 : total_output_net_capacitance;
+                index_1 ("0.01, 0.02");
+                index_2 ("0.10, 0.20");
+            }
+            cell (BUF_2) {
+                area: 1.0;
+                pin (A) {
+                    direction: input;
+                }
+                pin (Y) {
+                    direction: output;
+                    function: "A";
+                    timing () {
+                        related_pin : "A";
+                        timing_type : combinational;
+                        cell_rise (shared_tmpl) {
+                            values ("0.50, 0.60", "0.70, 0.80");
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        let mut tmp1 = NamedTempFile::new().unwrap();
+        write!(tmp1, "{}", lib1).unwrap();
+        let mut tmp2 = NamedTempFile::new().unwrap();
+        write!(tmp2, "{}", lib2).unwrap();
+
+        let lib = parse_liberty_files_to_proto(&[tmp1.path(), tmp2.path()]).unwrap();
+        assert_eq!(lib.lu_table_templates.len(), 2);
+
+        let table_for = |cell_name: &str| {
+            let cell = lib.cells.iter().find(|c| c.name == cell_name).unwrap();
+            cell.pins
+                .iter()
+                .find(|p| p.name == "Y")
+                .unwrap()
+                .timing_arcs
+                .iter()
+                .find(|a| a.related_pin == "A")
+                .unwrap()
+                .tables
+                .iter()
+                .find(|t| t.kind == "cell_rise")
+                .unwrap()
+        };
+        let t1 = table_for("BUF_1");
+        let t2 = table_for("BUF_2");
+        assert_ne!(t1.template_id, 0);
+        assert_ne!(t2.template_id, 0);
+        assert_eq!(t1.template_name, "");
+        assert_eq!(t2.template_name, "");
+        assert_eq!(t1.index_1, Vec::<f64>::new());
+        assert_eq!(t1.index_2, Vec::<f64>::new());
+        assert_eq!(t2.index_1, Vec::<f64>::new());
+        assert_eq!(t2.index_2, Vec::<f64>::new());
+        assert_eq!(t1.dimensions, vec![2, 2]);
+        assert_eq!(t2.dimensions, vec![2, 2]);
+        assert_ne!(t1.template_id, t2.template_id);
+
+        let tmpl1 = &lib.lu_table_templates[(t1.template_id - 1) as usize];
+        let tmpl2 = &lib.lu_table_templates[(t2.template_id - 1) as usize];
+        assert_eq!(tmpl1.index_1, vec![0.01, 0.02]);
+        assert_eq!(tmpl1.index_2, vec![0.10, 0.20]);
+        assert_eq!(tmpl2.index_1, vec![0.01, 0.02]);
+        assert_eq!(tmpl2.index_2, vec![0.10, 0.20]);
     }
 
     #[test]

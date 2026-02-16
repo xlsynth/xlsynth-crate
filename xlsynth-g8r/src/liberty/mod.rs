@@ -8,10 +8,12 @@ pub mod liberty_parser;
 pub mod liberty_to_proto;
 pub mod load;
 pub mod query;
+pub mod timing_table;
 pub mod util;
 pub use indexed::IndexedLibrary;
 pub use liberty_parser::{CharReader, LibertyParser};
 pub use load::{Library, LibraryWithTimingData};
+pub use timing_table::{TimingTableArrayError, TimingTableArrayView};
 
 #[cfg(test)]
 pub mod test_utils {
