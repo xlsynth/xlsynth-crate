@@ -4,8 +4,8 @@ use std::fmt;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::ir_analysis::{IrAnalysis, IrAnalysisLevel};
-pub use crate::lib_support::RunResult;
 use crate::lib_support::{self, c_str_to_rust, xls_function_jit_run, xls_make_function_jit};
+pub use crate::lib_support::{RunResult, TraceMessage};
 use crate::xlsynth_error::XlsynthError;
 use crate::{
     lib_support::{

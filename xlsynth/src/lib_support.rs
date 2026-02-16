@@ -746,11 +746,13 @@ pub(crate) fn xls_optimize_ir(ir: &str, top: &str) -> Result<String, XlsynthErro
     Ok(ir_str)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceMessage {
     pub message: String,
     pub verbosity: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunResult {
     pub value: IrValue,
     pub trace_messages: Vec<TraceMessage>,

@@ -528,7 +528,13 @@ impl TypecheckedModule {
         let mut rule_storage: Vec<sys::CDslxInvocationRewriteRule> =
             Vec::with_capacity(rules.len());
         for rule in rules {
-            debug!("Replace invocations in module: from_callee: {:?}, to_callee: {:?}, match_callee_env: {:?}, to_callee_env: {:?}", rule.from_callee.get_identifier(), rule.to_callee.get_identifier(), rule.match_callee_env.as_ref().map(|env| env.to_string()), rule.to_callee_env.as_ref().map(|env| env.to_string()));
+            debug!(
+                "Replace invocations in module: from_callee: {:?}, to_callee: {:?}, match_callee_env: {:?}, to_callee_env: {:?}",
+                rule.from_callee.get_identifier(),
+                rule.to_callee.get_identifier(),
+                rule.match_callee_env.as_ref().map(|env| env.to_string()),
+                rule.to_callee_env.as_ref().map(|env| env.to_string())
+            );
             rule_storage.push(sys::CDslxInvocationRewriteRule {
                 from_callee: rule.from_callee.ptr,
                 to_callee: rule.to_callee.ptr,
