@@ -188,7 +188,7 @@ fn parse_library_units(block: &Block) -> LibraryUnits {
     units
 }
 
-fn parse_lu_table_templates(block: &Block) -> Vec<LuTableTemplate> {
+fn parse_table_templates(block: &Block) -> Vec<LuTableTemplate> {
     let mut out = Vec::new();
     for member in &block.members {
         let BlockMember::SubBlock(sub_block) = member else {
@@ -790,11 +790,11 @@ pub fn parse_liberty_files_to_proto<P: AsRef<Path>>(paths: &[P]) -> Result<Libra
     }
     log::info!("Flattening cells from {} libraries...", libraries.len());
     let mut all_cells = Vec::new();
-    let mut all_templates = Vec::new();
+    let mut all_table_templates = Vec::new();
     let mut units: Option<LibraryUnits> = None;
     for lib in &libraries {
         all_cells.extend(block_to_proto_cells(lib));
-        all_templates.extend(parse_lu_table_templates(lib));
+        all_table_templates.extend(parse_table_templates(lib));
         let parsed_units = parse_library_units(lib);
         let parsed_units_populated = !parsed_units.time_unit.is_empty()
             || !parsed_units.capacitance_unit.is_empty()
@@ -818,10 +818,11 @@ pub fn parse_liberty_files_to_proto<P: AsRef<Path>>(paths: &[P]) -> Result<Libra
             units = Some(parsed_units);
         }
     }
-    all_templates.sort_by(|a, b| a.kind.cmp(&b.kind).then(a.name.cmp(&b.name)));
-    let mut deduped_templates: Vec<LuTableTemplate> = Vec::with_capacity(all_templates.len());
-    for tmpl in all_templates {
-        if let Some(last) = deduped_templates.last() {
+    all_table_templates.sort_by(|a, b| a.kind.cmp(&b.kind).then(a.name.cmp(&b.name)));
+    let mut deduped_table_templates: Vec<LuTableTemplate> =
+        Vec::with_capacity(all_table_templates.len());
+    for tmpl in all_table_templates {
+        if let Some(last) = deduped_table_templates.last() {
             if last.kind == tmpl.kind && last.name == tmpl.name {
                 if last != &tmpl {
                     log::warn!(
@@ -833,13 +834,14 @@ pub fn parse_liberty_files_to_proto<P: AsRef<Path>>(paths: &[P]) -> Result<Libra
                 continue;
             }
         }
-        deduped_templates.push(tmpl);
+        deduped_table_templates.push(tmpl);
     }
     log::info!("Flattened {} cells", all_cells.len());
     let mut library = Library {
         cells: all_cells,
         units: Some(units.unwrap_or_default()),
-        lu_table_templates: deduped_templates,
+        // Field name is historical; it stores all parsed Liberty template kinds.
+        lu_table_templates: deduped_table_templates,
     };
     canonicalize_timing_table_references(&mut library);
     Ok(library)
