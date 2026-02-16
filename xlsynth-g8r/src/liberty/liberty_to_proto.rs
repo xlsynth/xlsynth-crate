@@ -376,37 +376,45 @@ fn parse_timing_arc(block: &Block) -> TimingArc {
     arc
 }
 
-fn build_template_id_map_by_name(
+fn build_template_id_map_by_kind_and_name(
     templates: &[LuTableTemplate],
-) -> (HashMap<String, u32>, HashSet<String>) {
-    let mut id_by_name: HashMap<String, u32> = HashMap::new();
-    let mut ambiguous_names: HashSet<String> = HashSet::new();
+) -> (HashMap<(String, String), u32>, HashSet<(String, String)>) {
+    let mut id_by_kind_name: HashMap<(String, String), u32> = HashMap::new();
+    let mut ambiguous_keys: HashSet<(String, String)> = HashSet::new();
     for (i, tmpl) in templates.iter().enumerate() {
-        if ambiguous_names.contains(&tmpl.name) {
+        let key = (tmpl.kind.clone(), tmpl.name.clone());
+        if ambiguous_keys.contains(&key) {
             continue;
         }
         let id = (i as u32) + 1;
-        match id_by_name.entry(tmpl.name.clone()) {
+        match id_by_kind_name.entry(key.clone()) {
             Entry::Vacant(v) => {
                 v.insert(id);
             }
             Entry::Occupied(_) => {
-                ambiguous_names.insert(tmpl.name.clone());
+                ambiguous_keys.insert(key);
             }
         }
     }
-    for name in &ambiguous_names {
-        id_by_name.remove(name);
+    for key in &ambiguous_keys {
+        id_by_kind_name.remove(key);
     }
-    (id_by_name, ambiguous_names)
+    (id_by_kind_name, ambiguous_keys)
+}
+
+fn expected_template_kind_for_timing_table(_table: &TimingTable) -> &'static str {
+    // Timing arc tables (cell_rise/fall and transition-style tables) use
+    // `lu_table_template` in Liberty.
+    "lu_table_template"
 }
 
 fn canonicalize_timing_table_references(library: &mut Library) {
-    let (template_id_by_name, ambiguous_names) =
-        build_template_id_map_by_name(&library.lu_table_templates);
-    for template_name in &ambiguous_names {
+    let (template_id_by_kind_name, ambiguous_keys) =
+        build_template_id_map_by_kind_and_name(&library.lu_table_templates);
+    for (template_kind, template_name) in &ambiguous_keys {
         log::warn!(
-            "Template name '{}' is ambiguous across template kinds; keeping per-table template_name strings",
+            "Template key ({}, {}) is ambiguous; keeping per-table template_name strings",
+            template_kind,
             template_name
         );
     }
@@ -432,11 +440,14 @@ fn canonicalize_timing_table_references(library: &mut Library) {
             for arc in &mut pin.timing_arcs {
                 for table in &mut arc.tables {
                     if table.template_id == 0 && !table.template_name.is_empty() {
-                        if let Some(template_id) = template_id_by_name.get(&table.template_name) {
+                        let expected_kind = expected_template_kind_for_timing_table(table);
+                        let key = (expected_kind.to_string(), table.template_name.clone());
+                        if let Some(template_id) = template_id_by_kind_name.get(&key) {
                             table.template_id = *template_id;
-                        } else if !ambiguous_names.contains(&table.template_name) {
+                        } else if !ambiguous_keys.contains(&key) {
                             log::warn!(
-                                "Could not resolve timing table template '{}' for {}.{}; keeping legacy name",
+                                "Could not resolve timing table template kind='{}' name='{}' for {}.{}; keeping legacy name",
+                                expected_kind,
                                 table.template_name,
                                 cell.name,
                                 pin.name
@@ -970,6 +981,73 @@ mod tests {
         assert_eq!(cell_rise.index_2, Vec::<f64>::new());
         assert_eq!(cell_rise.dimensions, vec![2, 2]);
         assert_eq!(cell_rise.values, vec![0.10, 0.20, 0.30, 0.40]);
+    }
+
+    #[test]
+    fn test_timing_template_resolution_ignores_power_template_name_collisions() {
+        let liberty_text = r#"
+        library (my_library) {
+            time_unit : "1ns";
+            capacitance_unit : "1pf";
+
+            lu_table_template (shared_tmpl) {
+                variable_1 : input_net_transition;
+                variable_2 : total_output_net_capacitance;
+                index_1 ("0.01, 0.02");
+                index_2 ("0.10, 0.20");
+            }
+
+            power_lut_template (shared_tmpl) {
+                variable_1 : input_transition_time;
+                variable_2 : total_output_net_capacitance;
+                index_1 ("1.0, 2.0");
+                index_2 ("3.0, 4.0");
+            }
+
+            cell (NAND2) {
+                area: 1.1;
+                pin (A) {
+                    direction: input;
+                }
+                pin (Y) {
+                    direction: output;
+                    function: "!A";
+                    timing () {
+                        related_pin : "A";
+                        timing_type : combinational;
+                        cell_fall (shared_tmpl) {
+                            index_1 ("0.01, 0.02");
+                            index_2 ("0.10, 0.20");
+                            values ("0.20, 0.30", "0.40, 0.50");
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+
+        let cell = lib.cells.iter().find(|c| c.name == "NAND2").unwrap();
+        let pin_y = cell.pins.iter().find(|p| p.name == "Y").unwrap();
+        let arc = pin_y
+            .timing_arcs
+            .iter()
+            .find(|a| a.related_pin == "A")
+            .unwrap();
+        let table = arc.tables.iter().find(|t| t.kind == "cell_fall").unwrap();
+
+        assert_ne!(
+            table.template_id, 0,
+            "timing table should resolve template_id even when a power template shares the same name"
+        );
+        let resolved_template = &lib.lu_table_templates[(table.template_id - 1) as usize];
+        assert_eq!(resolved_template.kind, "lu_table_template");
+        assert_eq!(resolved_template.name, "shared_tmpl");
+        assert_eq!(table.template_name, "");
+        assert_eq!(table.index_1, Vec::<f64>::new());
+        assert_eq!(table.index_2, Vec::<f64>::new());
     }
 
     #[test]

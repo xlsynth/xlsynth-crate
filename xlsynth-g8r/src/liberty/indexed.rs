@@ -176,29 +176,37 @@ impl IndexedLibrary {
         Some(&pin.timing_arcs)
     }
 
-    /// Looks up a table template by exact name.
+    /// Looks up a table template by exact kind and name.
     pub fn lu_table_template_by_name(
         &self,
+        template_kind: &str,
         template_name: &str,
     ) -> Option<&crate::liberty_proto::LuTableTemplate> {
         self.proto
             .lu_table_templates
             .iter()
-            .find(|tmpl| tmpl.name == template_name)
+            .find(|tmpl| tmpl.kind == template_kind && tmpl.name == template_name)
     }
 
     /// Looks up a table template by 1-based template ID as stored in
-    /// TimingTable.
+    /// `TimingTable`, requiring the expected template kind.
     pub fn lu_table_template_by_id(
         &self,
         template_id: u32,
+        template_kind: &str,
     ) -> Option<&crate::liberty_proto::LuTableTemplate> {
         if template_id == 0 {
             return None;
         }
-        self.proto
+        let tmpl = self
+            .proto
             .lu_table_templates
-            .get((template_id - 1) as usize)
+            .get((template_id - 1) as usize)?;
+        if tmpl.kind == template_kind {
+            Some(tmpl)
+        } else {
+            None
+        }
     }
 }
 
@@ -335,12 +343,76 @@ mod tests {
         assert_eq!(arc.tables[0].template_id, 1);
 
         let tmpl = indexed
-            .lu_table_template_by_name("tmpl_2x2")
+            .lu_table_template_by_name("lu_table_template", "tmpl_2x2")
             .expect("template should exist");
         assert_eq!(tmpl.kind, "lu_table_template");
         let tmpl_by_id = indexed
-            .lu_table_template_by_id(1)
+            .lu_table_template_by_id(1, "lu_table_template")
             .expect("template should exist by id");
         assert_eq!(tmpl_by_id.name, "tmpl_2x2");
+        assert!(
+            indexed
+                .lu_table_template_by_name("power_lut_template", "tmpl_2x2")
+                .is_none()
+        );
+        assert!(
+            indexed
+                .lu_table_template_by_id(1, "power_lut_template")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn template_lookup_is_kind_aware_under_name_collisions() {
+        let lib = ProtoLibrary {
+            cells: vec![],
+            units: None,
+            lu_table_templates: vec![
+                LuTableTemplate {
+                    kind: "lu_table_template".to_string(),
+                    name: "shared".to_string(),
+                    variable_1: "input_net_transition".to_string(),
+                    variable_2: "total_output_net_capacitance".to_string(),
+                    variable_3: String::new(),
+                    index_1: vec![0.01, 0.02],
+                    index_2: vec![0.1, 0.2],
+                    index_3: vec![],
+                },
+                LuTableTemplate {
+                    kind: "power_lut_template".to_string(),
+                    name: "shared".to_string(),
+                    variable_1: "input_transition_time".to_string(),
+                    variable_2: "total_output_net_capacitance".to_string(),
+                    variable_3: String::new(),
+                    index_1: vec![1.0, 2.0],
+                    index_2: vec![3.0, 4.0],
+                    index_3: vec![],
+                },
+            ],
+        };
+        let indexed = IndexedLibrary::new(lib);
+
+        let lu = indexed
+            .lu_table_template_by_name("lu_table_template", "shared")
+            .expect("lu template should resolve by kind and name");
+        assert_eq!(lu.kind, "lu_table_template");
+        let power = indexed
+            .lu_table_template_by_name("power_lut_template", "shared")
+            .expect("power template should resolve by kind and name");
+        assert_eq!(power.kind, "power_lut_template");
+
+        let lu_by_id = indexed
+            .lu_table_template_by_id(1, "lu_table_template")
+            .expect("id 1 should be lu template when kind matches");
+        assert_eq!(lu_by_id.name, "shared");
+        assert!(
+            indexed
+                .lu_table_template_by_id(1, "power_lut_template")
+                .is_none()
+        );
+        let power_by_id = indexed
+            .lu_table_template_by_id(2, "power_lut_template")
+            .expect("id 2 should be power template when kind matches");
+        assert_eq!(power_by_id.name, "shared");
     }
 }
