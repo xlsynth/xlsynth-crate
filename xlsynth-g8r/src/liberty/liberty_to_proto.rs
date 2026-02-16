@@ -199,6 +199,80 @@ fn parse_library_units(block: &Block) -> LibraryUnits {
     units
 }
 
+fn library_units_is_populated(units: &LibraryUnits) -> bool {
+    !units.time_unit.is_empty()
+        || !units.capacitance_unit.is_empty()
+        || !units.voltage_unit.is_empty()
+        || !units.current_unit.is_empty()
+        || !units.resistance_unit.is_empty()
+        || !units.pulling_resistance_unit.is_empty()
+        || !units.leakage_power_unit.is_empty()
+}
+
+fn merge_library_unit_field(
+    field_name: &'static str,
+    existing: &mut String,
+    incoming: &str,
+    conflicts: &mut Vec<&'static str>,
+) {
+    if existing.is_empty() {
+        if !incoming.is_empty() {
+            *existing = incoming.to_owned();
+        }
+        return;
+    }
+    if !incoming.is_empty() && *existing != incoming {
+        conflicts.push(field_name);
+    }
+}
+
+fn merge_library_units(existing: &mut LibraryUnits, incoming: &LibraryUnits) -> Vec<&'static str> {
+    let mut conflicts = Vec::new();
+    merge_library_unit_field(
+        "time_unit",
+        &mut existing.time_unit,
+        incoming.time_unit.as_str(),
+        &mut conflicts,
+    );
+    merge_library_unit_field(
+        "capacitance_unit",
+        &mut existing.capacitance_unit,
+        incoming.capacitance_unit.as_str(),
+        &mut conflicts,
+    );
+    merge_library_unit_field(
+        "voltage_unit",
+        &mut existing.voltage_unit,
+        incoming.voltage_unit.as_str(),
+        &mut conflicts,
+    );
+    merge_library_unit_field(
+        "current_unit",
+        &mut existing.current_unit,
+        incoming.current_unit.as_str(),
+        &mut conflicts,
+    );
+    merge_library_unit_field(
+        "resistance_unit",
+        &mut existing.resistance_unit,
+        incoming.resistance_unit.as_str(),
+        &mut conflicts,
+    );
+    merge_library_unit_field(
+        "pulling_resistance_unit",
+        &mut existing.pulling_resistance_unit,
+        incoming.pulling_resistance_unit.as_str(),
+        &mut conflicts,
+    );
+    merge_library_unit_field(
+        "leakage_power_unit",
+        &mut existing.leakage_power_unit,
+        incoming.leakage_power_unit.as_str(),
+        &mut conflicts,
+    );
+    conflicts
+}
+
 fn parse_table_templates(block: &Block) -> Vec<LuTableTemplate> {
     let mut out = Vec::new();
     for member in &block.members {
@@ -417,6 +491,21 @@ fn expected_template_kind_for_timing_table(_table: &TimingTable) -> &'static str
     "lu_table_template"
 }
 
+fn axis_rank(index_1: &[f64], index_2: &[f64], index_3: &[f64]) -> usize {
+    [index_1, index_2, index_3]
+        .iter()
+        .filter(|axis| !axis.is_empty())
+        .count()
+}
+
+fn normalize_dimensions_for_expected_rank(dimensions: &mut Vec<u32>, expected_rank: usize) {
+    // Liberty values("a, b") parses as a 1-element tuple around a CSV row.
+    // For genuine rank-1 tables this should be dimensions [N], not [1, N].
+    if expected_rank > 0 && dimensions.len() == expected_rank + 1 && dimensions[0] == 1 {
+        dimensions.remove(0);
+    }
+}
+
 fn canonicalize_timing_table_references(library: &mut Library) {
     let (template_id_by_kind_name, ambiguous_keys) =
         build_template_id_map_by_kind_and_name(&library.lu_table_templates);
@@ -464,6 +553,12 @@ fn canonicalize_timing_table_references(library: &mut Library) {
                         }
                     }
                     if table.template_id == 0 {
+                        let explicit_rank =
+                            axis_rank(&table.index_1, &table.index_2, &table.index_3);
+                        normalize_dimensions_for_expected_rank(
+                            &mut table.dimensions,
+                            explicit_rank,
+                        );
                         continue;
                     }
                     let template_idx = (table.template_id - 1) as usize;
@@ -479,6 +574,14 @@ fn canonicalize_timing_table_references(library: &mut Library) {
                     }
                     resolved_template_refs += 1;
                     let (tmpl_index_1, tmpl_index_2, tmpl_index_3) = &template_axes[template_idx];
+                    let explicit_rank = axis_rank(&table.index_1, &table.index_2, &table.index_3);
+                    let template_rank = axis_rank(tmpl_index_1, tmpl_index_2, tmpl_index_3);
+                    let expected_rank = if explicit_rank > 0 {
+                        explicit_rank
+                    } else {
+                        template_rank
+                    };
+                    normalize_dimensions_for_expected_rank(&mut table.dimensions, expected_rank);
                     if table.index_1 == *tmpl_index_1 && !table.index_1.is_empty() {
                         table.index_1.clear();
                         elided_index_1 += 1;
@@ -833,20 +936,15 @@ pub fn parse_liberty_files_to_proto<P: AsRef<Path>>(paths: &[P]) -> Result<Libra
         all_table_templates.extend(per_library.lu_table_templates);
 
         let parsed_units = parse_library_units(lib);
-        let parsed_units_populated = !parsed_units.time_unit.is_empty()
-            || !parsed_units.capacitance_unit.is_empty()
-            || !parsed_units.voltage_unit.is_empty()
-            || !parsed_units.current_unit.is_empty()
-            || !parsed_units.resistance_unit.is_empty()
-            || !parsed_units.pulling_resistance_unit.is_empty()
-            || !parsed_units.leakage_power_unit.is_empty();
-        if !parsed_units_populated {
+        if !library_units_is_populated(&parsed_units) {
             continue;
         }
-        if let Some(existing) = &units {
-            if existing != &parsed_units {
+        if let Some(existing) = &mut units {
+            let conflicts = merge_library_units(existing, &parsed_units);
+            if !conflicts.is_empty() {
                 log::warn!(
-                    "Multiple Liberty libraries provided different unit declarations; keeping first: {:?}, ignoring: {:?}",
+                    "Multiple Liberty libraries provided conflicting unit declarations in fields {:?}; keeping first non-empty values: {:?}, incoming: {:?}",
+                    conflicts,
                     existing,
                     parsed_units
                 );
@@ -1031,6 +1129,56 @@ mod tests {
     }
 
     #[test]
+    fn test_units_merge_complements_partial_declarations() {
+        let lib1 = r#"
+        library (lib_one) {
+            time_unit : "1ns";
+        }
+        "#;
+        let lib2 = r#"
+        library (lib_two) {
+            capacitance_unit : "1pf";
+            voltage_unit : "1V";
+        }
+        "#;
+        let mut tmp1 = NamedTempFile::new().unwrap();
+        write!(tmp1, "{}", lib1).unwrap();
+        let mut tmp2 = NamedTempFile::new().unwrap();
+        write!(tmp2, "{}", lib2).unwrap();
+
+        let lib = parse_liberty_files_to_proto(&[tmp1.path(), tmp2.path()]).unwrap();
+        let units = lib.units.as_ref().expect("units should be present");
+        assert_eq!(units.time_unit, "1ns");
+        assert_eq!(units.capacitance_unit, "1pf");
+        assert_eq!(units.voltage_unit, "1V");
+        assert_eq!(units.current_unit, "");
+    }
+
+    #[test]
+    fn test_units_merge_keeps_first_value_on_conflict() {
+        let lib1 = r#"
+        library (lib_one) {
+            time_unit : "1ns";
+        }
+        "#;
+        let lib2 = r#"
+        library (lib_two) {
+            time_unit : "1ps";
+            capacitance_unit : "1pf";
+        }
+        "#;
+        let mut tmp1 = NamedTempFile::new().unwrap();
+        write!(tmp1, "{}", lib1).unwrap();
+        let mut tmp2 = NamedTempFile::new().unwrap();
+        write!(tmp2, "{}", lib2).unwrap();
+
+        let lib = parse_liberty_files_to_proto(&[tmp1.path(), tmp2.path()]).unwrap();
+        let units = lib.units.as_ref().expect("units should be present");
+        assert_eq!(units.time_unit, "1ns");
+        assert_eq!(units.capacitance_unit, "1pf");
+    }
+
+    #[test]
     fn test_timing_table_dimensions_preserve_singleton_axes() {
         let liberty_text = r#"
         library (my_library) {
@@ -1075,6 +1223,51 @@ mod tests {
         assert_eq!(table.template_id, 1);
         assert_eq!(table.template_name, "");
         assert_eq!(table.dimensions, vec![1, 2]);
+        assert_eq!(table.values, vec![0.10, 0.20]);
+    }
+
+    #[test]
+    fn test_timing_table_dimensions_for_rank1_do_not_gain_fake_leading_axis() {
+        let liberty_text = r#"
+        library (my_library) {
+            time_unit : "1ns";
+            capacitance_unit : "1pf";
+            lu_table_template (tmpl_1d) {
+                variable_1 : input_net_transition;
+                index_1 ("0.01, 0.02");
+            }
+            cell (BUF) {
+                area: 1.0;
+                pin (A) {
+                    direction: input;
+                }
+                pin (Y) {
+                    direction: output;
+                    function: "A";
+                    timing () {
+                        related_pin : "A";
+                        timing_type : combinational;
+                        cell_rise (tmpl_1d) {
+                            values ("0.10, 0.20");
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        let cell = lib.cells.iter().find(|c| c.name == "BUF").unwrap();
+        let pin_y = cell.pins.iter().find(|p| p.name == "Y").unwrap();
+        let arc = pin_y
+            .timing_arcs
+            .iter()
+            .find(|a| a.related_pin == "A")
+            .unwrap();
+        let table = arc.tables.iter().find(|t| t.kind == "cell_rise").unwrap();
+        assert_eq!(table.template_id, 1);
+        assert_eq!(table.dimensions, vec![2]);
         assert_eq!(table.values, vec![0.10, 0.20]);
     }
 
