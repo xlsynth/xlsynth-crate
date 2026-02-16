@@ -9,13 +9,12 @@
 //! - Producing the parsed modules together with the global `nets` array and
 //!   `StringInterner`.
 
-use crate::liberty::descriptor::liberty_descriptor_pool;
-use crate::liberty_proto::Library;
+use crate::liberty::load::{
+    Library, LibraryWithTimingData, load_library_from_path, load_library_with_timing_data_from_path,
+};
 use crate::netlist::parse::{Net, NetlistModule, Parser as NetlistParser, TokenScanner};
 use anyhow::{Result, anyhow};
 use flate2::read::MultiGzDecoder;
-use prost::Message;
-use prost_reflect::DynamicMessage;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
@@ -82,21 +81,10 @@ pub fn parse_netlist_from_path(path: &Path) -> Result<ParsedNetlist> {
 /// This helper is shared by higher-level routines that need to work from
 /// Liberty files but want to keep I/O concerns out of their core logic.
 pub fn load_liberty_from_path(path: &Path) -> Result<Library> {
-    let mut buf: Vec<u8> = Vec::new();
-    File::open(path)
-        .map_err(|e| anyhow!(format!("opening liberty proto '{}': {}", path.display(), e)))?
-        .read_to_end(&mut buf)
-        .map_err(|e| anyhow!(format!("reading liberty proto '{}': {}", path.display(), e)))?;
+    load_library_from_path(path)
+}
 
-    let lib = Library::decode(&buf[..]).or_else(|_| {
-        let descriptor_pool = liberty_descriptor_pool();
-        let msg_desc = descriptor_pool
-            .get_message_by_name("liberty.Library")
-            .ok_or_else(|| anyhow!("missing liberty.Library descriptor"))?;
-        let dyn_msg = DynamicMessage::parse_text_format(msg_desc, std::str::from_utf8(&buf)?)?;
-        let encoded = dyn_msg.encode_to_vec();
-        Ok::<Library, anyhow::Error>(Library::decode(&encoded[..])?)
-    })?;
-
-    Ok(lib)
+/// Load a Liberty proto (binary or textproto) with full timing payloads.
+pub fn load_liberty_with_timing_data_from_path(path: &Path) -> Result<LibraryWithTimingData> {
+    load_library_with_timing_data_from_path(path)
 }

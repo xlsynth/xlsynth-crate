@@ -415,18 +415,22 @@ mod tests {
                         function: "".to_string(),
                         name: "A".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                     Pin {
                         direction: PinDirection::Output as i32,
                         function: "(!A)".to_string(),
                         name: "Y".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                 ],
                 area: 1.0,
                 sequential: vec![],
                 clock_gate: None,
+                ..Default::default()
             }],
+            ..Default::default()
         };
         let indexed = IndexedLibrary::new(lib_proto);
 

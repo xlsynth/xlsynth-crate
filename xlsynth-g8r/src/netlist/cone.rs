@@ -704,23 +704,27 @@ mod tests {
                     function: "".to_string(),
                     name: "A".to_string(),
                     is_clocking_pin: false,
+                    ..Default::default()
                 },
                 crate::liberty_proto::Pin {
                     direction: crate::liberty_proto::PinDirection::Input as i32,
                     function: "".to_string(),
                     name: "B".to_string(),
                     is_clocking_pin: false,
+                    ..Default::default()
                 },
                 crate::liberty_proto::Pin {
                     direction: crate::liberty_proto::PinDirection::Output as i32,
                     function: "(A*B)".to_string(),
                     name: "Y".to_string(),
                     is_clocking_pin: false,
+                    ..Default::default()
                 },
             ],
             area: 2.0,
             sequential: vec![],
             clock_gate: None,
+            ..Default::default()
         });
 
         let indexed = IndexedLibrary::new(lib);

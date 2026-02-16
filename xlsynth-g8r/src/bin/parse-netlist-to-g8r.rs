@@ -5,15 +5,14 @@
 
 use clap::Parser;
 use std::collections::HashMap;
-use std::io::Read;
 use std::{fs::File, path::PathBuf};
 use xlsynth_g8r::liberty::cell_formula::{self, Term};
 
 // Use the crate's prost-generated proto module
 use xlsynth_g8r::liberty_proto;
 
-use prost::Message;
 use xlsynth_g8r::aig_serdes::gate2ir::gate_fn_to_xlsynth_ir;
+use xlsynth_g8r::netlist::io::load_liberty_from_path;
 use xlsynth_g8r::netlist::parse::{Parser as NetlistParser, TokenScanner};
 
 #[derive(Parser, Debug)]
@@ -58,14 +57,8 @@ fn main() {
     let file = File::open(&args.netlist).unwrap();
     let scanner = TokenScanner::from_file_with_path(file, args.netlist.clone());
     let mut parser = NetlistParser::new(scanner);
-    // Read and decode Liberty proto once
-    let mut liberty_file = File::open(&args.liberty_proto).expect("failed to open liberty proto");
-    let mut buf = Vec::new();
-    liberty_file
-        .read_to_end(&mut buf)
-        .expect("failed to read liberty proto");
-    let liberty_lib =
-        liberty_proto::Library::decode(&*buf).expect("failed to decode liberty proto");
+    // Read and decode Liberty once, skipping timing payloads by default.
+    let liberty_lib = load_liberty_from_path(&args.liberty_proto).expect("failed to load liberty");
     let modules = match parser.parse_file() {
         Ok(m) => m,
         Err(e) => {

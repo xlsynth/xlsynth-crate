@@ -15,17 +15,21 @@ fn build_simple_lib() -> Library {
                     direction: PinDirection::Input as i32,
                     function: String::new(),
                     is_clocking_pin: false,
+                    ..Default::default()
                 },
                 Pin {
                     name: "Y".to_string(),
                     direction: PinDirection::Output as i32,
                     function: String::new(),
                     is_clocking_pin: false,
+                    ..Default::default()
                 },
             ],
             sequential: vec![],
             clock_gate: None,
+            ..Default::default()
         }],
+        ..Default::default()
     }
 }
 

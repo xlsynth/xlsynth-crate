@@ -8,7 +8,7 @@
 //! `Library` remains the single source of truth; indices are derived from it
 //! on demand.
 
-use crate::liberty_proto::{Cell, Library, Pin, PinDirection};
+use crate::liberty_proto::{Cell, Library as ProtoLibrary, Pin, PinDirection};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -25,7 +25,7 @@ struct CellPinsByDir {
 
 /// Owning wrapper around a `Library` with lazily built indices for fast lookup.
 pub struct IndexedLibrary {
-    proto: Library,
+    proto: ProtoLibrary,
     /// Map from cell name to index in `proto.cells`.
     cell_by_name: RefCell<Option<HashMap<String, usize>>>,
     /// Map from cell index to directional pin groupings.
@@ -34,7 +34,8 @@ pub struct IndexedLibrary {
 
 impl IndexedLibrary {
     /// Constructs a new indexed view over the given `Library`.
-    pub fn new(proto: Library) -> Self {
+    pub fn new<T: Into<ProtoLibrary>>(proto: T) -> Self {
+        let proto = proto.into();
         IndexedLibrary {
             proto,
             cell_by_name: RefCell::new(None),
@@ -43,7 +44,7 @@ impl IndexedLibrary {
     }
 
     /// Returns a shared reference to the underlying `Library`.
-    pub fn library(&self) -> &Library {
+    pub fn library(&self) -> &ProtoLibrary {
         &self.proto
     }
 
@@ -151,12 +152,61 @@ impl IndexedLibrary {
         }
         None
     }
+
+    /// Looks up a timing arc for the given output pin and related input pin.
+    pub fn timing_arc_for_pin(
+        &self,
+        cell_name: &str,
+        output_pin_name: &str,
+        related_pin_name: &str,
+    ) -> Option<&crate::liberty_proto::TimingArc> {
+        let pin = self.pin_by_name(cell_name, output_pin_name)?;
+        pin.timing_arcs
+            .iter()
+            .find(|arc| arc.related_pin == related_pin_name)
+    }
+
+    /// Returns all timing arcs defined on the named pin.
+    pub fn timing_arcs_for_pin(
+        &self,
+        cell_name: &str,
+        output_pin_name: &str,
+    ) -> Option<&[crate::liberty_proto::TimingArc]> {
+        let pin = self.pin_by_name(cell_name, output_pin_name)?;
+        Some(&pin.timing_arcs)
+    }
+
+    /// Looks up a table template by exact name.
+    pub fn lu_table_template_by_name(
+        &self,
+        template_name: &str,
+    ) -> Option<&crate::liberty_proto::LuTableTemplate> {
+        self.proto
+            .lu_table_templates
+            .iter()
+            .find(|tmpl| tmpl.name == template_name)
+    }
+
+    /// Looks up a table template by 1-based template ID as stored in
+    /// TimingTable.
+    pub fn lu_table_template_by_id(
+        &self,
+        template_id: u32,
+    ) -> Option<&crate::liberty_proto::LuTableTemplate> {
+        if template_id == 0 {
+            return None;
+        }
+        self.proto
+            .lu_table_templates
+            .get((template_id - 1) as usize)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::liberty::test_utils::make_test_library;
+    use crate::liberty_proto::{LuTableTemplate, TimingArc, TimingTable};
 
     #[test]
     fn get_cell_finds_by_name() {
@@ -208,5 +258,89 @@ mod tests {
 
         assert!(indexed.pin_by_name("INV", "NO_SUCH_PIN").is_none());
         assert!(indexed.pin_by_name("NO_SUCH_CELL", "Y").is_none());
+    }
+
+    #[test]
+    fn timing_lookup_finds_arc_and_template() {
+        let lib = ProtoLibrary {
+            cells: vec![Cell {
+                name: "NAND2".to_string(),
+                pins: vec![
+                    Pin {
+                        direction: PinDirection::Input as i32,
+                        function: "".to_string(),
+                        name: "A".to_string(),
+                        is_clocking_pin: false,
+                        ..Default::default()
+                    },
+                    Pin {
+                        direction: PinDirection::Input as i32,
+                        function: "".to_string(),
+                        name: "B".to_string(),
+                        is_clocking_pin: false,
+                        ..Default::default()
+                    },
+                    Pin {
+                        direction: PinDirection::Output as i32,
+                        function: "!(A * B)".to_string(),
+                        name: "Y".to_string(),
+                        is_clocking_pin: false,
+                        timing_arcs: vec![TimingArc {
+                            related_pin: "A".to_string(),
+                            timing_sense: "negative_unate".to_string(),
+                            timing_type: "combinational".to_string(),
+                            when: String::new(),
+                            tables: vec![TimingTable {
+                                kind: "cell_rise".to_string(),
+                                template_id: 1,
+                                template_name: String::new(),
+                                index_1: vec![0.01, 0.02],
+                                index_2: vec![0.1, 0.2],
+                                index_3: vec![],
+                                values: vec![1.0, 2.0, 3.0, 4.0],
+                                dimensions: vec![2, 2],
+                            }],
+                        }],
+                        ..Default::default()
+                    },
+                ],
+                area: 1.0,
+                sequential: vec![],
+                clock_gate: None,
+            }],
+            units: None,
+            lu_table_templates: vec![LuTableTemplate {
+                kind: "lu_table_template".to_string(),
+                name: "tmpl_2x2".to_string(),
+                variable_1: "input_net_transition".to_string(),
+                variable_2: "total_output_net_capacitance".to_string(),
+                variable_3: String::new(),
+                index_1: vec![0.01, 0.02],
+                index_2: vec![0.1, 0.2],
+                index_3: vec![],
+            }],
+        };
+        let indexed = IndexedLibrary::new(lib);
+
+        let arcs = indexed
+            .timing_arcs_for_pin("NAND2", "Y")
+            .expect("timing arcs should exist for NAND2.Y");
+        assert_eq!(arcs.len(), 1);
+
+        let arc = indexed
+            .timing_arc_for_pin("NAND2", "Y", "A")
+            .expect("arc for related pin A should exist");
+        assert_eq!(arc.timing_sense, "negative_unate");
+        assert_eq!(arc.tables.len(), 1);
+        assert_eq!(arc.tables[0].template_id, 1);
+
+        let tmpl = indexed
+            .lu_table_template_by_name("tmpl_2x2")
+            .expect("template should exist");
+        assert_eq!(tmpl.kind, "lu_table_template");
+        let tmpl_by_id = indexed
+            .lu_table_template_by_id(1)
+            .expect("template should exist by id");
+        assert_eq!(tmpl_by_id.name, "tmpl_2x2");
     }
 }
