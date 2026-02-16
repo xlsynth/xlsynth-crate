@@ -109,7 +109,7 @@ struct NumericTensor {
     dimensions: Vec<u32>,
 }
 
-fn parse_numeric_tensor(value: &Value, collapse_singletons: bool) -> Result<NumericTensor, String> {
+fn parse_numeric_tensor(value: &Value) -> Result<NumericTensor, String> {
     match value {
         Value::Number(n) => Ok(NumericTensor {
             values: vec![*n],
@@ -131,10 +131,7 @@ fn parse_numeric_tensor(value: &Value, collapse_singletons: bool) -> Result<Nume
             }
             let mut children = Vec::with_capacity(xs.len());
             for x in xs {
-                children.push(parse_numeric_tensor(x, collapse_singletons)?);
-            }
-            if collapse_singletons && xs.len() == 1 {
-                return Ok(children.into_iter().next().expect("single child expected"));
+                children.push(parse_numeric_tensor(x)?);
             }
             let first_dims = children[0].dimensions.clone();
             for child in &children[1..] {
@@ -164,6 +161,17 @@ fn value_to_optional_f64(value: &Value) -> Option<f64> {
     }
 }
 
+fn parse_capacitive_load_unit(value: &Value) -> String {
+    match value {
+        Value::Tuple(parts) if parts.len() == 2 => {
+            let magnitude = value_to_attr_string(parts[0].as_ref());
+            let unit = value_to_attr_string(parts[1].as_ref());
+            format!("{}{}", magnitude.trim(), unit.trim())
+        }
+        _ => value_to_attr_string(value),
+    }
+}
+
 fn parse_library_units(block: &Block) -> LibraryUnits {
     let mut units = LibraryUnits::default();
     for member in &block.members {
@@ -174,6 +182,9 @@ fn parse_library_units(block: &Block) -> LibraryUnits {
         match attr.attr_name.as_str() {
             "time_unit" => units.time_unit = value,
             "capacitance_unit" => units.capacitance_unit = value,
+            "capacitive_load_unit" => {
+                units.capacitance_unit = parse_capacitive_load_unit(&attr.value)
+            }
             "voltage_unit" => units.voltage_unit = value,
             "current_unit" => units.current_unit = value,
             "resistance_unit" => units.resistance_unit = value,
@@ -325,23 +336,21 @@ fn parse_timing_table(block: &Block) -> Option<TimingTable> {
                     );
                 }
             },
-            "values" => {
-                match parse_numeric_tensor(&attr.value, /* collapse_singletons= */ true) {
-                    Ok(tensor) => {
-                        table.values = tensor.values;
-                        table.dimensions = tensor.dimensions;
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "Failed to parse {}.{} values {:?}: {}",
-                            table.kind,
-                            table.template_name,
-                            value_to_attr_string(&attr.value),
-                            e
-                        );
-                    }
+            "values" => match parse_numeric_tensor(&attr.value) {
+                Ok(tensor) => {
+                    table.values = tensor.values;
+                    table.dimensions = tensor.dimensions;
                 }
-            }
+                Err(e) => {
+                    log::warn!(
+                        "Failed to parse {}.{} values {:?}: {}",
+                        table.kind,
+                        table.template_name,
+                        value_to_attr_string(&attr.value),
+                        e
+                    );
+                }
+            },
             _ => {
                 // Keep only typed table payload fields (axes and numeric
                 // values).
@@ -983,6 +992,80 @@ mod tests {
         assert_eq!(cell_rise.index_2, Vec::<f64>::new());
         assert_eq!(cell_rise.dimensions, vec![2, 2]);
         assert_eq!(cell_rise.values, vec![0.10, 0.20, 0.30, 0.40]);
+    }
+
+    #[test]
+    fn test_capacitive_load_unit_maps_to_capacitance_unit() {
+        let liberty_text = r#"
+        library (my_library) {
+            time_unit : "1ns";
+            capacitive_load_unit (1,pf);
+            cell (INV) {
+                area: 1.0;
+                pin (A) {
+                    direction: input;
+                }
+                pin (Y) {
+                    direction: output;
+                    function: "!A";
+                }
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        let units = lib.units.as_ref().expect("units should be present");
+        assert_eq!(units.time_unit, "1ns");
+        assert_eq!(units.capacitance_unit, "1pf");
+    }
+
+    #[test]
+    fn test_timing_table_dimensions_preserve_singleton_axes() {
+        let liberty_text = r#"
+        library (my_library) {
+            time_unit : "1ns";
+            capacitance_unit : "1pf";
+            lu_table_template (tmpl_1x2) {
+                variable_1 : input_net_transition;
+                variable_2 : total_output_net_capacitance;
+                index_1 ("0.01");
+                index_2 ("0.10, 0.20");
+            }
+            cell (BUF) {
+                area: 1.0;
+                pin (A) {
+                    direction: input;
+                }
+                pin (Y) {
+                    direction: output;
+                    function: "A";
+                    timing () {
+                        related_pin : "A";
+                        timing_type : combinational;
+                        cell_rise (tmpl_1x2) {
+                            values ("0.10, 0.20");
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        let cell = lib.cells.iter().find(|c| c.name == "BUF").unwrap();
+        let pin_y = cell.pins.iter().find(|p| p.name == "Y").unwrap();
+        let arc = pin_y
+            .timing_arcs
+            .iter()
+            .find(|a| a.related_pin == "A")
+            .unwrap();
+        let table = arc.tables.iter().find(|t| t.kind == "cell_rise").unwrap();
+        assert_eq!(table.template_id, 1);
+        assert_eq!(table.template_name, "");
+        assert_eq!(table.dimensions, vec![1, 2]);
+        assert_eq!(table.values, vec![0.10, 0.20]);
     }
 
     #[test]
