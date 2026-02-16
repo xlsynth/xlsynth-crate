@@ -224,15 +224,24 @@ impl IndexedLibrary {
     }
 
     /// Looks up a table template by exact kind and name.
+    ///
+    /// Returns `None` when no template matches, or when multiple templates
+    /// share the same `(kind, name)` key.
     pub fn lu_table_template_by_name(
         &self,
         template_kind: &str,
         template_name: &str,
     ) -> Option<&crate::liberty_proto::LuTableTemplate> {
-        self.proto
+        let mut matches = self
+            .proto
             .lu_table_templates
             .iter()
-            .find(|tmpl| tmpl.kind == template_kind && tmpl.name == template_name)
+            .filter(|tmpl| tmpl.kind == template_kind && tmpl.name == template_name);
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(first)
     }
 
     /// Looks up a table template by 1-based template ID as stored in
@@ -461,6 +470,42 @@ mod tests {
             .lu_table_template_by_id(2, "power_lut_template")
             .expect("id 2 should be power template when kind matches");
         assert_eq!(power_by_id.name, "shared");
+    }
+
+    #[test]
+    fn template_lookup_by_name_returns_none_for_ambiguous_same_kind_name() {
+        let lib = ProtoLibrary {
+            cells: vec![],
+            units: None,
+            lu_table_templates: vec![
+                LuTableTemplate {
+                    kind: "lu_table_template".to_string(),
+                    name: "shared".to_string(),
+                    variable_1: "input_net_transition".to_string(),
+                    variable_2: "total_output_net_capacitance".to_string(),
+                    variable_3: String::new(),
+                    index_1: vec![0.01, 0.02],
+                    index_2: vec![0.1, 0.2],
+                    index_3: vec![],
+                },
+                LuTableTemplate {
+                    kind: "lu_table_template".to_string(),
+                    name: "shared".to_string(),
+                    variable_1: "input_net_transition".to_string(),
+                    variable_2: "total_output_net_capacitance".to_string(),
+                    variable_3: String::new(),
+                    index_1: vec![0.05],
+                    index_2: vec![0.9, 1.1, 1.3],
+                    index_3: vec![],
+                },
+            ],
+        };
+        let indexed = IndexedLibrary::new(lib);
+        assert!(
+            indexed
+                .lu_table_template_by_name("lu_table_template", "shared")
+                .is_none()
+        );
     }
 
     #[test]
