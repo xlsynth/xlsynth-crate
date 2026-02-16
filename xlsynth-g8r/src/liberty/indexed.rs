@@ -160,10 +160,57 @@ impl IndexedLibrary {
         output_pin_name: &str,
         related_pin_name: &str,
     ) -> Option<&crate::liberty_proto::TimingArc> {
+        self.timing_arc_for_pin_filtered(
+            cell_name,
+            output_pin_name,
+            related_pin_name,
+            /* timing_type= */ None,
+            /* timing_sense= */ None,
+            /* when= */ None,
+        )
+    }
+
+    /// Looks up a single timing arc for the given output pin with optional
+    /// selectors in addition to `related_pin`.
+    ///
+    /// Returns `None` when no arc matches, or when multiple arcs match the
+    /// selectors (to avoid silently choosing the wrong arc).
+    pub fn timing_arc_for_pin_filtered(
+        &self,
+        cell_name: &str,
+        output_pin_name: &str,
+        related_pin_name: &str,
+        timing_type: Option<&str>,
+        timing_sense: Option<&str>,
+        when: Option<&str>,
+    ) -> Option<&crate::liberty_proto::TimingArc> {
         let pin = self.pin_by_name(cell_name, output_pin_name)?;
-        pin.timing_arcs
-            .iter()
-            .find(|arc| arc.related_pin == related_pin_name)
+        let mut matches = pin.timing_arcs.iter().filter(|arc| {
+            if arc.related_pin != related_pin_name {
+                return false;
+            }
+            if let Some(v) = timing_type {
+                if arc.timing_type != v {
+                    return false;
+                }
+            }
+            if let Some(v) = timing_sense {
+                if arc.timing_sense != v {
+                    return false;
+                }
+            }
+            if let Some(v) = when {
+                if arc.when != v {
+                    return false;
+                }
+            }
+            true
+        });
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(first)
     }
 
     /// Returns all timing arcs defined on the named pin.
@@ -414,5 +461,82 @@ mod tests {
             .lu_table_template_by_id(2, "power_lut_template")
             .expect("id 2 should be power template when kind matches");
         assert_eq!(power_by_id.name, "shared");
+    }
+
+    #[test]
+    fn timing_arc_lookup_avoids_ambiguous_related_pin_matches() {
+        let lib = ProtoLibrary {
+            cells: vec![Cell {
+                name: "NAND2".to_string(),
+                pins: vec![
+                    Pin {
+                        direction: PinDirection::Input as i32,
+                        function: "".to_string(),
+                        name: "A".to_string(),
+                        is_clocking_pin: false,
+                        ..Default::default()
+                    },
+                    Pin {
+                        direction: PinDirection::Output as i32,
+                        function: "!(A)".to_string(),
+                        name: "Y".to_string(),
+                        is_clocking_pin: false,
+                        timing_arcs: vec![
+                            TimingArc {
+                                related_pin: "A".to_string(),
+                                timing_sense: "negative_unate".to_string(),
+                                timing_type: "combinational".to_string(),
+                                when: String::new(),
+                                tables: vec![],
+                            },
+                            TimingArc {
+                                related_pin: "A".to_string(),
+                                timing_sense: "positive_unate".to_string(),
+                                timing_type: "setup_rising".to_string(),
+                                when: "B".to_string(),
+                                tables: vec![],
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                ],
+                area: 1.0,
+                sequential: vec![],
+                clock_gate: None,
+            }],
+            units: None,
+            lu_table_templates: vec![],
+        };
+        let indexed = IndexedLibrary::new(lib);
+
+        assert!(indexed.timing_arc_for_pin("NAND2", "Y", "A").is_none());
+
+        let comb = indexed
+            .timing_arc_for_pin_filtered(
+                "NAND2",
+                "Y",
+                "A",
+                Some("combinational"),
+                Some("negative_unate"),
+                Some(""),
+            )
+            .expect("combinational arc should resolve uniquely");
+        assert_eq!(comb.timing_type, "combinational");
+        assert_eq!(comb.timing_sense, "negative_unate");
+        assert_eq!(comb.when, "");
+
+        let setup = indexed
+            .timing_arc_for_pin_filtered(
+                "NAND2",
+                "Y",
+                "A",
+                Some("setup_rising"),
+                Some("positive_unate"),
+                Some("B"),
+            )
+            .expect("setup arc should resolve uniquely");
+        assert_eq!(setup.timing_type, "setup_rising");
+        assert_eq!(setup.timing_sense, "positive_unate");
+        assert_eq!(setup.when, "B");
     }
 }

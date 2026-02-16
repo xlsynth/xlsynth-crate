@@ -858,7 +858,7 @@ pub fn parse_liberty_files_to_proto<P: AsRef<Path>>(paths: &[P]) -> Result<Libra
     log::info!("Flattened {} cells", all_cells.len());
     let library = Library {
         cells: all_cells,
-        units: Some(units.unwrap_or_default()),
+        units,
         // Field name is historical; it stores all parsed Liberty template kinds.
         lu_table_templates: all_table_templates,
     };
@@ -897,6 +897,7 @@ mod tests {
         write!(tmp, "{}", liberty_text).unwrap();
         let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
         assert_eq!(lib.cells.len(), 1);
+        assert!(lib.units.is_none());
         assert_eq!(lib.cells[0].name, "my_and");
         assert_eq!(lib.cells[0].area, 1.0);
         assert_eq!(lib.cells[0].pins.len(), 3);
