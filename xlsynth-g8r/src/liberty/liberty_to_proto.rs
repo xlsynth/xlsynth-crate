@@ -763,6 +763,23 @@ fn block_to_proto_cells(block: &Block) -> Vec<Cell> {
     cells
 }
 
+fn apply_template_id_offset(cells: &mut [Cell], offset: u32) {
+    if offset == 0 {
+        return;
+    }
+    for cell in cells {
+        for pin in &mut cell.pins {
+            for arc in &mut pin.timing_arcs {
+                for table in &mut arc.tables {
+                    if table.template_id != 0 {
+                        table.template_id += offset;
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn parse_liberty_files_to_proto<P: AsRef<Path>>(paths: &[P]) -> Result<Library, String> {
     let mut libraries = Vec::new();
     for path in paths {
@@ -802,8 +819,19 @@ pub fn parse_liberty_files_to_proto<P: AsRef<Path>>(paths: &[P]) -> Result<Libra
     let mut all_table_templates = Vec::new();
     let mut units: Option<LibraryUnits> = None;
     for lib in &libraries {
-        all_cells.extend(block_to_proto_cells(lib));
-        all_table_templates.extend(parse_table_templates(lib));
+        let mut per_library = Library {
+            cells: block_to_proto_cells(lib),
+            units: None,
+            // Field name is historical; this stores all parsed template kinds.
+            lu_table_templates: parse_table_templates(lib),
+        };
+        canonicalize_timing_table_references(&mut per_library);
+
+        let template_id_offset = all_table_templates.len() as u32;
+        apply_template_id_offset(&mut per_library.cells, template_id_offset);
+        all_cells.extend(per_library.cells);
+        all_table_templates.extend(per_library.lu_table_templates);
+
         let parsed_units = parse_library_units(lib);
         let parsed_units_populated = !parsed_units.time_unit.is_empty()
             || !parsed_units.capacitance_unit.is_empty()
@@ -827,32 +855,13 @@ pub fn parse_liberty_files_to_proto<P: AsRef<Path>>(paths: &[P]) -> Result<Libra
             units = Some(parsed_units);
         }
     }
-    all_table_templates.sort_by(|a, b| a.kind.cmp(&b.kind).then(a.name.cmp(&b.name)));
-    let mut deduped_table_templates: Vec<LuTableTemplate> =
-        Vec::with_capacity(all_table_templates.len());
-    for tmpl in all_table_templates {
-        if let Some(last) = deduped_table_templates.last() {
-            if last.kind == tmpl.kind && last.name == tmpl.name {
-                if last != &tmpl {
-                    log::warn!(
-                        "Conflicting template definitions for {}({}); keeping first",
-                        tmpl.kind,
-                        tmpl.name
-                    );
-                }
-                continue;
-            }
-        }
-        deduped_table_templates.push(tmpl);
-    }
     log::info!("Flattened {} cells", all_cells.len());
-    let mut library = Library {
+    let library = Library {
         cells: all_cells,
         units: Some(units.unwrap_or_default()),
         // Field name is historical; it stores all parsed Liberty template kinds.
-        lu_table_templates: deduped_table_templates,
+        lu_table_templates: all_table_templates,
     };
-    canonicalize_timing_table_references(&mut library);
     Ok(library)
 }
 
@@ -1133,6 +1142,107 @@ mod tests {
         assert_eq!(table.template_name, "");
         assert_eq!(table.index_1, Vec::<f64>::new());
         assert_eq!(table.index_2, Vec::<f64>::new());
+    }
+
+    #[test]
+    fn test_conflicting_template_definitions_are_preserved_across_inputs() {
+        let lib1 = r#"
+        library (lib_one) {
+            lu_table_template (shared_tmpl) {
+                variable_1 : input_net_transition;
+                variable_2 : total_output_net_capacitance;
+                index_1 ("0.01, 0.02");
+                index_2 ("0.10, 0.20");
+            }
+            cell (BUF_A) {
+                area: 1.0;
+                pin (A) {
+                    direction: input;
+                }
+                pin (Y) {
+                    direction: output;
+                    function: "A";
+                    timing () {
+                        related_pin : "A";
+                        timing_type : combinational;
+                        cell_rise (shared_tmpl) {
+                            values ("0.10, 0.20", "0.30, 0.40");
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        let lib2 = r#"
+        library (lib_two) {
+            lu_table_template (shared_tmpl) {
+                variable_1 : input_net_transition;
+                variable_2 : total_output_net_capacitance;
+                index_1 ("0.05");
+                index_2 ("0.90, 1.10, 1.30");
+            }
+            cell (BUF_B) {
+                area: 1.0;
+                pin (A) {
+                    direction: input;
+                }
+                pin (Y) {
+                    direction: output;
+                    function: "A";
+                    timing () {
+                        related_pin : "A";
+                        timing_type : combinational;
+                        cell_rise (shared_tmpl) {
+                            values ("1.00, 2.00, 3.00");
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        let mut tmp1 = NamedTempFile::new().unwrap();
+        write!(tmp1, "{}", lib1).unwrap();
+        let mut tmp2 = NamedTempFile::new().unwrap();
+        write!(tmp2, "{}", lib2).unwrap();
+
+        let lib = parse_liberty_files_to_proto(&[tmp1.path(), tmp2.path()]).unwrap();
+        assert_eq!(lib.lu_table_templates.len(), 2);
+
+        let cell_a = lib.cells.iter().find(|c| c.name == "BUF_A").unwrap();
+        let table_a = cell_a
+            .pins
+            .iter()
+            .find(|p| p.name == "Y")
+            .unwrap()
+            .timing_arcs
+            .iter()
+            .find(|a| a.related_pin == "A")
+            .unwrap()
+            .tables
+            .iter()
+            .find(|t| t.kind == "cell_rise")
+            .unwrap();
+        let tmpl_a = &lib.lu_table_templates[(table_a.template_id - 1) as usize];
+        assert_eq!(tmpl_a.index_1, vec![0.01, 0.02]);
+        assert_eq!(tmpl_a.index_2, vec![0.10, 0.20]);
+
+        let cell_b = lib.cells.iter().find(|c| c.name == "BUF_B").unwrap();
+        let table_b = cell_b
+            .pins
+            .iter()
+            .find(|p| p.name == "Y")
+            .unwrap()
+            .timing_arcs
+            .iter()
+            .find(|a| a.related_pin == "A")
+            .unwrap()
+            .tables
+            .iter()
+            .find(|t| t.kind == "cell_rise")
+            .unwrap();
+        let tmpl_b = &lib.lu_table_templates[(table_b.template_id - 1) as usize];
+        assert_eq!(tmpl_b.index_1, vec![0.05]);
+        assert_eq!(tmpl_b.index_2, vec![0.90, 1.10, 1.30]);
     }
 
     #[test]
