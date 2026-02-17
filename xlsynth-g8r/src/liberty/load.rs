@@ -95,8 +95,14 @@ impl From<LibraryWithTimingData> for Library {
     }
 }
 
+fn is_timing_template_kind(kind: &str) -> bool {
+    kind == "lu_table_template"
+}
+
 pub fn strip_timing_data(proto: &mut liberty_proto::Library) {
-    proto.lu_table_templates.clear();
+    proto
+        .lu_table_templates
+        .retain(|tmpl| !is_timing_template_kind(&tmpl.kind));
     for cell in &mut proto.cells {
         for pin in &mut cell.pins {
             pin.timing_arcs.clear();
@@ -553,6 +559,23 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn strip_timing_data_preserves_non_timing_templates() {
+        let mut lib = make_with_timing_payload();
+        lib.lu_table_templates.push(liberty_proto::LuTableTemplate {
+            kind: "power_lut_template".to_string(),
+            name: "power_tmpl".to_string(),
+            index_1: vec![0.1],
+            ..Default::default()
+        });
+
+        strip_timing_data(&mut lib);
+
+        assert_eq!(lib.lu_table_templates.len(), 1);
+        assert_eq!(lib.lu_table_templates[0].kind, "power_lut_template");
+        assert!(lib.cells[0].pins[0].timing_arcs.is_empty());
     }
 
     #[test]

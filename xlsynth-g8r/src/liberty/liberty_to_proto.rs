@@ -1043,7 +1043,10 @@ pub fn validate_library_consistency(library: &Library) -> Result<(), String> {
     Ok(())
 }
 
-pub fn parse_liberty_files_to_proto<P: AsRef<Path>>(paths: &[P]) -> Result<Library, String> {
+fn parse_liberty_files_to_proto_impl<P: AsRef<Path>>(
+    paths: &[P],
+    validate_timing: bool,
+) -> Result<Library, String> {
     let mut libraries = Vec::new();
     for path in paths {
         log::info!("Parsing Liberty file: {}", path.as_ref().display());
@@ -1118,14 +1121,31 @@ pub fn parse_liberty_files_to_proto<P: AsRef<Path>>(paths: &[P]) -> Result<Libra
         // Field name is historical; it stores all parsed Liberty template kinds.
         lu_table_templates: all_table_templates,
     };
-    validate_library_consistency(&library)?;
+    if validate_timing {
+        validate_library_consistency(&library)?;
+    }
     Ok(library)
+}
+
+pub fn parse_liberty_files_to_proto<P: AsRef<Path>>(paths: &[P]) -> Result<Library, String> {
+    parse_liberty_files_to_proto_impl(paths, /* validate_timing= */ true)
+}
+
+/// Parses Liberty files and skips timing payload validation.
+///
+/// This is intended for `--no-timing-data` conversion paths where timing
+/// payloads are stripped from the final output.
+pub fn parse_liberty_files_to_proto_without_timing_validation<P: AsRef<Path>>(
+    paths: &[P],
+) -> Result<Library, String> {
+    parse_liberty_files_to_proto_impl(paths, /* validate_timing= */ false)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::liberty::descriptor::LIBERTY_DESCRIPTOR;
+    use crate::liberty::load::strip_timing_data;
     use prost::Message;
     use prost_reflect::{DescriptorPool, DynamicMessage};
     use std::io::Write;
@@ -1603,6 +1623,61 @@ mod tests {
         write!(tmp, "{}", liberty_text).unwrap();
         let err = parse_liberty_files_to_proto(&[tmp.path()]).unwrap_err();
         assert!(err.contains("references unknown related_pin 'A'"));
+    }
+
+    #[test]
+    fn test_parse_without_timing_validation_allows_strip_no_timing_data_path() {
+        let liberty_text = r#"
+        library (my_library) {
+            lu_table_template (tmpl_1d) {
+                variable_1 : input_net_transition;
+                index_1 ("0.01, 0.02");
+            }
+            cell (BUF) {
+                area: 1.0;
+                pin (Y) {
+                    direction: output;
+                    function: "A";
+                    timing () {
+                        related_pin : "A";
+                        timing_type : combinational;
+                        cell_rise (tmpl_1d) {
+                            values ("0.10, 0.20");
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+        let err = parse_liberty_files_to_proto(&[tmp.path()]).unwrap_err();
+        assert!(err.contains("references unknown related_pin"));
+
+        let mut lib =
+            parse_liberty_files_to_proto_without_timing_validation(&[tmp.path()]).unwrap();
+        let pin = lib
+            .cells
+            .iter()
+            .find(|c| c.name == "BUF")
+            .unwrap()
+            .pins
+            .iter()
+            .find(|p| p.name == "Y")
+            .unwrap();
+        assert_eq!(pin.timing_arcs.len(), 1);
+
+        strip_timing_data(&mut lib);
+        let pin = lib
+            .cells
+            .iter()
+            .find(|c| c.name == "BUF")
+            .unwrap()
+            .pins
+            .iter()
+            .find(|p| p.name == "Y")
+            .unwrap();
+        assert!(pin.timing_arcs.is_empty());
     }
 
     #[test]

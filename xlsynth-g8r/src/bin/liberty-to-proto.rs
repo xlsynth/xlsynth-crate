@@ -12,7 +12,9 @@ pub mod liberty_proto {
     include!(concat!(env!("OUT_DIR"), "/liberty.rs"));
 }
 
-use xlsynth_g8r::liberty::liberty_to_proto::parse_liberty_files_to_proto;
+use xlsynth_g8r::liberty::liberty_to_proto::{
+    parse_liberty_files_to_proto, parse_liberty_files_to_proto_without_timing_validation,
+};
 use xlsynth_g8r::liberty::load::strip_timing_data;
 
 #[derive(Parser, Debug)]
@@ -33,7 +35,11 @@ fn main() {
     let _ = env_logger::builder().try_init();
     let args = Args::parse();
     println!("Parsing and consolidating cells from all libraries...");
-    let mut proto_lib = parse_liberty_files_to_proto(&args.inputs).unwrap();
+    let mut proto_lib = if args.no_timing_data {
+        parse_liberty_files_to_proto_without_timing_validation(&args.inputs).unwrap()
+    } else {
+        parse_liberty_files_to_proto(&args.inputs).unwrap()
+    };
     if args.no_timing_data {
         strip_timing_data(&mut proto_lib);
     }
