@@ -932,23 +932,30 @@ pub fn validate_library_consistency(library: &Library) -> Result<(), String> {
 
         for pin in &cell.pins {
             for (arc_i, arc) in pin.timing_arcs.iter().enumerate() {
-                if arc.related_pin.is_empty() {
+                let related_pin = arc.related_pin.trim();
+                if related_pin.is_empty() {
                     return Err(format!(
                         "Cell '{}' pin '{}' timing arc #{} has empty related_pin",
                         cell.name, pin.name, arc_i
                     ));
                 }
-                if !pin_direction_by_name.contains_key(&arc.related_pin) {
+                if related_pin.split_whitespace().nth(1).is_some() {
+                    return Err(format!(
+                        "Cell '{}' pin '{}' timing arc #{} uses unsupported multi-pin related_pin selector '{}'",
+                        cell.name, pin.name, arc_i, arc.related_pin
+                    ));
+                }
+                if !pin_direction_by_name.contains_key(related_pin) {
                     return Err(format!(
                         "Cell '{}' pin '{}' timing arc #{} references unknown related_pin '{}'",
-                        cell.name, pin.name, arc_i, arc.related_pin
+                        cell.name, pin.name, arc_i, related_pin
                     ));
                 }
 
                 for table in &arc.tables {
                     let context = format!(
                         "Cell '{}' pin '{}' arc related_pin='{}' table '{}'",
-                        cell.name, pin.name, arc.related_pin, table.kind
+                        cell.name, pin.name, related_pin, table.kind
                     );
                     if let Err(e) = TimingTableArrayView::from_timing_table(table) {
                         return Err(format!("{context} has invalid values/dimensions: {e}"));
@@ -1685,6 +1692,41 @@ mod tests {
         assert!(err.contains("references unknown related_pin 'A'"));
     }
 
+    #[test]
+    fn test_parse_liberty_files_to_proto_errors_on_multi_pin_related_pin_selector() {
+        let liberty_text = r#"
+        library (my_library) {
+            lu_table_template (tmpl_1d) {
+                variable_1 : input_net_transition;
+                index_1 ("0.01, 0.02");
+            }
+            cell (BUF) {
+                area: 1.0;
+                pin (A) {
+                    direction: input;
+                }
+                pin (B) {
+                    direction: input;
+                }
+                pin (Y) {
+                    direction: output;
+                    function: "A";
+                    timing () {
+                        related_pin : "A B";
+                        timing_type : combinational;
+                        cell_rise (tmpl_1d) {
+                            values ("0.10, 0.20");
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+        let err = parse_liberty_files_to_proto(&[tmp.path()]).unwrap_err();
+        assert!(err.contains("unsupported multi-pin related_pin selector 'A B'"));
+    }
     #[test]
     fn test_parse_without_timing_validation_allows_strip_no_timing_data_path() {
         let liberty_text = r#"
