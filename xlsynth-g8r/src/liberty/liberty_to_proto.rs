@@ -486,10 +486,14 @@ fn build_template_id_map_by_kind_and_name(
     (id_by_kind_name, ambiguous_keys)
 }
 
-fn expected_template_kind_for_timing_table(_table: &TimingTable) -> &'static str {
-    // Timing arc tables (cell_rise/fall and transition-style tables) use
-    // `lu_table_template` in Liberty.
-    "lu_table_template"
+fn expected_template_kind_for_timing_table(table: &TimingTable) -> &'static str {
+    // Derive the template kind from the table kind instead of hard-coding all
+    // tables to `lu_table_template`.
+    if table.kind.contains("power") {
+        "power_lut_template"
+    } else {
+        "lu_table_template"
+    }
 }
 
 fn axis_rank(index_1: &[f64], index_2: &[f64], index_3: &[f64]) -> usize {
@@ -1593,6 +1597,62 @@ mod tests {
         assert_eq!(table.template_name, "");
         assert_eq!(table.index_1, Vec::<f64>::new());
         assert_eq!(table.index_2, Vec::<f64>::new());
+    }
+
+    #[test]
+    fn test_power_table_resolution_prefers_power_template_kind() {
+        let liberty_text = r#"
+        library (my_library) {
+            time_unit : "1ns";
+            capacitance_unit : "1pf";
+
+            lu_table_template (shared_tmpl) {
+                variable_1 : input_net_transition;
+                index_1 ("0.01, 0.02");
+            }
+
+            power_lut_template (shared_tmpl) {
+                variable_1 : input_transition_time;
+                index_1 ("1.0, 2.0");
+            }
+
+            cell (INV) {
+                area: 1.0;
+                pin (A) {
+                    direction: input;
+                }
+                pin (Y) {
+                    direction: output;
+                    function: "!A";
+                    timing () {
+                        related_pin : "A";
+                        timing_type : combinational;
+                        rise_power (shared_tmpl) {
+                            values ("0.20, 0.30");
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+
+        let cell = lib.cells.iter().find(|c| c.name == "INV").unwrap();
+        let pin_y = cell.pins.iter().find(|p| p.name == "Y").unwrap();
+        let arc = pin_y
+            .timing_arcs
+            .iter()
+            .find(|a| a.related_pin == "A")
+            .unwrap();
+        let table = arc.tables.iter().find(|t| t.kind == "rise_power").unwrap();
+
+        assert_ne!(table.template_id, 0);
+        let resolved_template = &lib.lu_table_templates[(table.template_id - 1) as usize];
+        assert_eq!(resolved_template.kind, "power_lut_template");
+        assert_eq!(resolved_template.name, "shared_tmpl");
+        assert_eq!(table.template_name, "");
     }
 
     #[test]
