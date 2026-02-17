@@ -231,6 +231,8 @@ struct LibraryNoTimingPayload {
     cells: Vec<CellNoTimingPayload>,
     #[prost(message, optional, tag = "2")]
     units: Option<LibraryUnitsNoTimingPayload>,
+    #[prost(message, repeated, tag = "3")]
+    lu_table_templates: Vec<LuTableTemplateNoTimingPayload>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -298,6 +300,26 @@ struct LibraryUnitsNoTimingPayload {
 }
 
 #[derive(Clone, PartialEq, Message)]
+struct LuTableTemplateNoTimingPayload {
+    #[prost(string, tag = "1")]
+    kind: String,
+    #[prost(string, tag = "2")]
+    name: String,
+    #[prost(string, tag = "3")]
+    variable_1: String,
+    #[prost(string, tag = "4")]
+    variable_2: String,
+    #[prost(string, tag = "5")]
+    variable_3: String,
+    #[prost(double, repeated, tag = "6")]
+    index_1: Vec<f64>,
+    #[prost(double, repeated, tag = "7")]
+    index_2: Vec<f64>,
+    #[prost(double, repeated, tag = "8")]
+    index_3: Vec<f64>,
+}
+
+#[derive(Clone, PartialEq, Message)]
 struct SequentialNoTimingPayload {
     #[prost(string, tag = "1")]
     state_var: String,
@@ -318,7 +340,11 @@ impl From<LibraryNoTimingPayload> for liberty_proto::Library {
         liberty_proto::Library {
             cells: value.cells.into_iter().map(Into::into).collect(),
             units: value.units.map(Into::into),
-            lu_table_templates: vec![],
+            lu_table_templates: value
+                .lu_table_templates
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         }
     }
 }
@@ -372,6 +398,21 @@ impl From<LibraryUnitsNoTimingPayload> for liberty_proto::LibraryUnits {
             resistance_unit: value.resistance_unit,
             pulling_resistance_unit: value.pulling_resistance_unit,
             leakage_power_unit: value.leakage_power_unit,
+        }
+    }
+}
+
+impl From<LuTableTemplateNoTimingPayload> for liberty_proto::LuTableTemplate {
+    fn from(value: LuTableTemplateNoTimingPayload) -> Self {
+        liberty_proto::LuTableTemplate {
+            kind: value.kind,
+            name: value.name,
+            variable_1: value.variable_1,
+            variable_2: value.variable_2,
+            variable_3: value.variable_3,
+            index_1: value.index_1,
+            index_2: value.index_2,
+            index_3: value.index_3,
         }
     }
 }
@@ -586,6 +627,28 @@ mod tests {
         assert!(loaded.lu_table_templates.is_empty());
         assert_eq!(loaded.cells.len(), 1);
         assert_eq!(loaded.cells[0].pins.len(), 1);
+        assert!(loaded.cells[0].pins[0].timing_arcs.is_empty());
+    }
+
+    #[test]
+    fn decode_without_timing_preserves_non_timing_templates_for_binary() {
+        let mut with_timing = make_with_timing_payload();
+        with_timing
+            .lu_table_templates
+            .push(liberty_proto::LuTableTemplate {
+                kind: "power_lut_template".to_string(),
+                name: "power_tmpl".to_string(),
+                index_1: vec![0.1],
+                ..Default::default()
+            });
+
+        let bytes = with_timing.encode_to_vec();
+        let loaded = decode_library_from_bytes(&bytes, "unit-test").unwrap();
+
+        assert_eq!(loaded.lu_table_templates.len(), 1);
+        assert_eq!(loaded.lu_table_templates[0].kind, "power_lut_template");
+        assert_eq!(loaded.lu_table_templates[0].name, "power_tmpl");
+        assert_eq!(loaded.lu_table_templates[0].index_1, vec![0.1]);
         assert!(loaded.cells[0].pins[0].timing_arcs.is_empty());
     }
 
