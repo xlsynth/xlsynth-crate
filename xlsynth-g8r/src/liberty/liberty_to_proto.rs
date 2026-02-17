@@ -1004,7 +1004,7 @@ pub fn validate_library_consistency(library: &Library) -> Result<(), String> {
 
                     let expected_rank =
                         axis_rank(effective_index_1, effective_index_2, effective_index_3);
-                    if expected_rank > 0 && table.dimensions.len() != expected_rank {
+                    if table.dimensions.len() != expected_rank {
                         return Err(format!(
                             "{context} has dimension rank {} but expected {} from effective axes",
                             table.dimensions.len(),
@@ -1102,12 +1102,10 @@ pub fn parse_liberty_files_to_proto<P: AsRef<Path>>(paths: &[P]) -> Result<Libra
         if let Some(existing) = &mut units {
             let conflicts = merge_library_units(existing, &parsed_units);
             if !conflicts.is_empty() {
-                log::warn!(
-                    "Multiple Liberty libraries provided conflicting unit declarations in fields {:?}; keeping first non-empty values: {:?}, incoming: {:?}",
-                    conflicts,
-                    existing,
-                    parsed_units
-                );
+                return Err(format!(
+                    "Multiple Liberty libraries provided conflicting unit declarations in fields {:?}; existing merged units: {:?}, incoming units: {:?}",
+                    conflicts, existing, parsed_units
+                ));
             }
         } else {
             units = Some(parsed_units);
@@ -1316,7 +1314,7 @@ mod tests {
     }
 
     #[test]
-    fn test_units_merge_keeps_first_value_on_conflict() {
+    fn test_units_merge_errors_on_conflict() {
         let lib1 = r#"
         library (lib_one) {
             time_unit : "1ns";
@@ -1333,10 +1331,38 @@ mod tests {
         let mut tmp2 = NamedTempFile::new().unwrap();
         write!(tmp2, "{}", lib2).unwrap();
 
-        let lib = parse_liberty_files_to_proto(&[tmp1.path(), tmp2.path()]).unwrap();
-        let units = lib.units.as_ref().expect("units should be present");
-        assert_eq!(units.time_unit, "1ns");
-        assert_eq!(units.capacitance_unit, "1pf");
+        let err = parse_liberty_files_to_proto(&[tmp1.path(), tmp2.path()]).unwrap_err();
+        assert!(err.contains("conflicting unit declarations"));
+        assert!(err.contains("time_unit"));
+    }
+
+    #[test]
+    fn test_validate_library_consistency_rejects_rank0_tables_with_dimensions() {
+        let liberty_text = r#"
+        library (my_library) {
+            cell (BUF) {
+                area: 1.0;
+                pin (A) {
+                    direction: input;
+                }
+                pin (Y) {
+                    direction: output;
+                    function: "A";
+                    timing () {
+                        related_pin : "A";
+                        timing_type : combinational;
+                        cell_rise () {
+                            values ("0.10, 0.20");
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+        let err = parse_liberty_files_to_proto(&[tmp.path()]).unwrap_err();
+        assert!(err.contains("expected 0 from effective axes"));
     }
 
     #[test]
@@ -1768,6 +1794,8 @@ mod tests {
                         related_pin : "A";
                         timing_type : combinational;
                         cell_rise (shared_tmpl) {
+                            index_1 ("0.01");
+                            index_2 ("0.10, 0.20");
                             values ("0.10, 0.20");
                         }
                     }

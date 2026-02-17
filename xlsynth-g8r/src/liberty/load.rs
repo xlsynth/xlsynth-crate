@@ -105,9 +105,6 @@ pub fn strip_timing_data(proto: &mut liberty_proto::Library) {
 }
 
 fn has_timing_data(proto: &liberty_proto::Library) -> bool {
-    if !proto.lu_table_templates.is_empty() {
-        return true;
-    }
     for cell in &proto.cells {
         for pin in &cell.pins {
             if !pin.timing_arcs.is_empty() {
@@ -528,6 +525,36 @@ mod tests {
         }
     }
 
+    fn make_templates_only_payload() -> liberty_proto::Library {
+        liberty_proto::Library {
+            cells: vec![liberty_proto::Cell {
+                name: "INV".to_string(),
+                pins: vec![
+                    liberty_proto::Pin {
+                        direction: liberty_proto::PinDirection::Input as i32,
+                        function: "".to_string(),
+                        name: "A".to_string(),
+                        ..Default::default()
+                    },
+                    liberty_proto::Pin {
+                        direction: liberty_proto::PinDirection::Output as i32,
+                        function: "!A".to_string(),
+                        name: "Y".to_string(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            lu_table_templates: vec![liberty_proto::LuTableTemplate {
+                kind: "lu_table_template".to_string(),
+                name: "tmpl_1".to_string(),
+                index_1: vec![0.1],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn decode_without_timing_removes_timing_payloads() {
         let with_timing = make_with_timing_payload();
@@ -581,6 +608,17 @@ mod tests {
     fn decode_with_timing_errors_when_payload_absent() {
         let without_timing = make_without_timing_payload();
         let bytes = without_timing.encode_to_vec();
+        let err = decode_library_with_timing_data_from_bytes(&bytes, "unit-test").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("has no timing payloads"),
+            "expected missing-timing error, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn decode_with_timing_errors_when_only_templates_are_present() {
+        let templates_only = make_templates_only_payload();
+        let bytes = templates_only.encode_to_vec();
         let err = decode_library_with_timing_data_from_bytes(&bytes, "unit-test").unwrap_err();
         assert!(
             format!("{err:#}").contains("has no timing payloads"),
