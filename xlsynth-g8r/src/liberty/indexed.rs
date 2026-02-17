@@ -185,6 +185,9 @@ impl IndexedLibrary {
         when: Option<&str>,
     ) -> Option<&crate::liberty_proto::TimingArc> {
         let pin = self.pin_by_name(cell_name, output_pin_name)?;
+        if pin.direction != PinDirection::Output as i32 {
+            return None;
+        }
         let mut matches = pin.timing_arcs.iter().filter(|arc| {
             if arc.related_pin != related_pin_name {
                 return false;
@@ -220,6 +223,9 @@ impl IndexedLibrary {
         output_pin_name: &str,
     ) -> Option<&[crate::liberty_proto::TimingArc]> {
         let pin = self.pin_by_name(cell_name, output_pin_name)?;
+        if pin.direction != PinDirection::Output as i32 {
+            return None;
+        }
         Some(&pin.timing_arcs)
     }
 
@@ -583,5 +589,70 @@ mod tests {
         assert_eq!(setup.timing_type, "setup_rising");
         assert_eq!(setup.timing_sense, "positive_unate");
         assert_eq!(setup.when, "B");
+    }
+
+    #[test]
+    fn timing_arc_lookup_requires_output_pin() {
+        let lib = ProtoLibrary {
+            cells: vec![Cell {
+                name: "U1".to_string(),
+                pins: vec![
+                    Pin {
+                        direction: PinDirection::Input as i32,
+                        function: "".to_string(),
+                        name: "A".to_string(),
+                        is_clocking_pin: false,
+                        timing_arcs: vec![TimingArc {
+                            related_pin: "CLK".to_string(),
+                            timing_sense: "non_unate".to_string(),
+                            timing_type: "setup_rising".to_string(),
+                            when: String::new(),
+                            tables: vec![],
+                        }],
+                        ..Default::default()
+                    },
+                    Pin {
+                        direction: PinDirection::Output as i32,
+                        function: "A".to_string(),
+                        name: "Y".to_string(),
+                        is_clocking_pin: false,
+                        timing_arcs: vec![TimingArc {
+                            related_pin: "A".to_string(),
+                            timing_sense: "positive_unate".to_string(),
+                            timing_type: "combinational".to_string(),
+                            when: String::new(),
+                            tables: vec![],
+                        }],
+                        ..Default::default()
+                    },
+                ],
+                area: 1.0,
+                sequential: vec![],
+                clock_gate: None,
+            }],
+            units: None,
+            lu_table_templates: vec![],
+        };
+        let indexed = IndexedLibrary::new(lib);
+
+        assert!(indexed.timing_arcs_for_pin("U1", "A").is_none());
+        assert!(indexed.timing_arc_for_pin("U1", "A", "CLK").is_none());
+        assert!(
+            indexed
+                .timing_arc_for_pin_filtered(
+                    "U1",
+                    "A",
+                    "CLK",
+                    Some("setup_rising"),
+                    Some("non_unate"),
+                    Some(""),
+                )
+                .is_none()
+        );
+
+        let arc = indexed
+            .timing_arc_for_pin("U1", "Y", "A")
+            .expect("output combinational arc should still be found");
+        assert_eq!(arc.timing_type, "combinational");
     }
 }
