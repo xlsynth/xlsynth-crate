@@ -6,10 +6,14 @@ pub mod descriptor;
 pub mod indexed;
 pub mod liberty_parser;
 pub mod liberty_to_proto;
+pub mod load;
 pub mod query;
+pub mod timing_table;
 pub mod util;
 pub use indexed::IndexedLibrary;
 pub use liberty_parser::{CharReader, LibertyParser};
+pub use load::{Library, LibraryWithTimingData};
+pub use timing_table::{TimingTableArrayError, TimingTableArrayView};
 
 #[cfg(test)]
 pub mod test_utils {
@@ -30,17 +34,20 @@ pub mod test_utils {
                             function: "".to_string(),
                             name: "A".to_string(),
                             is_clocking_pin: false,
+                            ..Default::default()
                         },
                         Pin {
                             direction: PinDirection::Output as i32,
                             function: "(!A)".to_string(),
                             name: "Y".to_string(),
                             is_clocking_pin: false,
+                            ..Default::default()
                         },
                     ],
                     area: 1.0,
                     sequential: vec![],
                     clock_gate: None,
+                    ..Default::default()
                 },
                 Cell {
                     name: "BUF".to_string(),
@@ -50,17 +57,20 @@ pub mod test_utils {
                             function: "".to_string(),
                             name: "I".to_string(),
                             is_clocking_pin: false,
+                            ..Default::default()
                         },
                         Pin {
                             direction: PinDirection::Output as i32,
                             function: "I".to_string(),
                             name: "O".to_string(),
                             is_clocking_pin: false,
+                            ..Default::default()
                         },
                     ],
                     area: 1.0,
                     sequential: vec![],
                     clock_gate: None,
+                    ..Default::default()
                 },
                 Cell {
                     name: "DFF".to_string(),
@@ -70,25 +80,30 @@ pub mod test_utils {
                             function: "".to_string(),
                             name: "D".to_string(),
                             is_clocking_pin: false,
+                            ..Default::default()
                         },
                         Pin {
                             direction: PinDirection::Input as i32,
                             function: "".to_string(),
                             name: "CLK".to_string(),
                             is_clocking_pin: true,
+                            ..Default::default()
                         },
                         Pin {
                             direction: PinDirection::Output as i32,
                             function: "D".to_string(),
                             name: "Q".to_string(),
                             is_clocking_pin: false,
+                            ..Default::default()
                         },
                     ],
                     area: 1.0,
                     sequential: vec![],
                     clock_gate: None,
+                    ..Default::default()
                 },
             ],
+            ..Default::default()
         }
     }
 }

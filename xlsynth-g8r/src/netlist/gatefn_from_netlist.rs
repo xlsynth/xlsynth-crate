@@ -965,18 +965,22 @@ mod tests {
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "Y".to_string(),
                         direction: 1,
                         function: "(!A)".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                 ],
                 area: 1.0,
                 sequential: vec![],
                 clock_gate: None,
+                ..Default::default()
             }],
+            ..Default::default()
         };
         let gate_fn = project_gatefn_from_netlist_and_liberty(
             &module,
@@ -1046,18 +1050,22 @@ mod tests {
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "Y".to_string(),
                         direction: 1,
                         function: "(!A)".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                 ],
                 area: 1.0,
                 sequential: vec![],
                 clock_gate: None,
+                ..Default::default()
             }],
+            ..Default::default()
         };
         let res = project_gatefn_from_netlist_and_liberty(
             &module,
@@ -1116,24 +1124,29 @@ mod tests {
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "B".to_string(),
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "Y".to_string(),
                         direction: 1,
                         function: "(A & B)".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                 ],
                 area: 1.0,
                 sequential: vec![],
                 clock_gate: None,
+                ..Default::default()
             }],
+            ..Default::default()
         };
         let err = project_gatefn_from_netlist_and_liberty(
             &module,
@@ -1210,18 +1223,22 @@ mod tests {
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "Y".to_string(),
                         direction: 1,
                         function: "A".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                 ],
                 area: 1.0,
                 sequential: vec![],
                 clock_gate: None,
+                ..Default::default()
             }],
+            ..Default::default()
         };
         let gate_fn = project_gatefn_from_netlist_and_liberty(
             &module,
@@ -1309,18 +1326,22 @@ mod tests {
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "Q".to_string(),
                         direction: 1,
                         function: "Q".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                 ],
                 area: 1.0,
                 sequential: vec![],
                 clock_gate: None,
+                ..Default::default()
             }],
+            ..Default::default()
         };
         let mut dff_cells = std::collections::HashSet::new();
         dff_cells.insert("DFF".to_string());
@@ -1407,18 +1428,22 @@ mod tests {
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "Q".to_string(),
                         direction: 1,
                         function: "Q".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                 ],
                 area: 1.0,
                 sequential: vec![],
                 clock_gate: None,
+                ..Default::default()
             }],
+            ..Default::default()
         };
         let mut dff_cells = std::collections::HashSet::new();
         dff_cells.insert("DFF".to_string());
@@ -1496,18 +1521,22 @@ mod tests {
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "q".to_string(),
                         direction: 1,
                         function: "d".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                 ],
                 area: 1.0,
                 sequential: vec![],
                 clock_gate: None,
+                ..Default::default()
             }],
+            ..Default::default()
         };
         let mut dff_cells = std::collections::HashSet::new();
         dff_cells.insert("DFF".to_string());
@@ -1590,18 +1619,22 @@ mod tests {
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "QN".to_string(),
                         direction: 1,
                         function: "IQN".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                 ],
                 area: 1.0,
                 sequential: vec![],
                 clock_gate: None,
+                ..Default::default()
             }],
+            ..Default::default()
         };
         let dff_cells_identity = HashSet::new();
         let mut dff_cells_inverted = HashSet::new();
@@ -1677,18 +1710,22 @@ mod tests {
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "QN".to_string(),
                         direction: 1,
                         function: "IQN".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                 ],
                 area: 1.0,
                 sequential: vec![],
                 clock_gate: None,
+                ..Default::default()
             }],
+            ..Default::default()
         };
         let dff_cells_identity = HashSet::new();
         let mut dff_cells_inverted = HashSet::new();
@@ -1767,18 +1804,22 @@ mod tests {
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "QN".to_string(),
                         direction: 1,
                         function: "IQN".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                 ],
                 area: 1.0,
                 sequential: vec![],
                 clock_gate: None,
+                ..Default::default()
             }],
+            ..Default::default()
         };
         let dff_cells_identity = HashSet::new();
         let mut dff_cells_inverted = HashSet::new();
@@ -1865,18 +1906,21 @@ mod tests {
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "Q".to_string(),
                         direction: 1,
                         function: "IQ".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "QN".to_string(),
                         direction: 1,
                         function: "IQN".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                 ],
                 area: 1.0,
@@ -1899,7 +1943,9 @@ mod tests {
                     },
                 ],
                 clock_gate: None,
+                ..Default::default()
             }],
+            ..Default::default()
         };
         let gate_fn = project_gatefn_from_netlist_and_liberty_with_options(
             &module,
@@ -1992,17 +2038,20 @@ mod tests {
                             direction: 2,
                             function: String::new(),
                             is_clocking_pin: false,
+                            ..Default::default()
                         },
                         crate::liberty_proto::Pin {
                             name: "Y".to_string(),
                             direction: 1,
                             function: "!A".to_string(),
                             is_clocking_pin: false,
+                            ..Default::default()
                         },
                     ],
                     area: 1.0,
                     sequential: vec![],
                     clock_gate: None,
+                    ..Default::default()
                 },
                 crate::liberty_proto::Cell {
                     name: "DFFEN".to_string(),
@@ -2012,24 +2061,28 @@ mod tests {
                             direction: 2,
                             function: String::new(),
                             is_clocking_pin: false,
+                            ..Default::default()
                         },
                         crate::liberty_proto::Pin {
                             name: "EN".to_string(),
                             direction: 2,
                             function: String::new(),
                             is_clocking_pin: false,
+                            ..Default::default()
                         },
                         crate::liberty_proto::Pin {
                             name: "CLK".to_string(),
                             direction: 2,
                             function: String::new(),
                             is_clocking_pin: true,
+                            ..Default::default()
                         },
                         crate::liberty_proto::Pin {
                             name: "Q".to_string(),
                             direction: 1,
                             function: "IQ".to_string(),
                             is_clocking_pin: false,
+                            ..Default::default()
                         },
                     ],
                     area: 1.0,
@@ -2042,8 +2095,10 @@ mod tests {
                         preset_expr: String::new(),
                     }],
                     clock_gate: None,
+                    ..Default::default()
                 },
             ],
+            ..Default::default()
         };
         let gate_fn = project_gatefn_from_netlist_and_liberty_with_options(
             &module,
@@ -2127,24 +2182,28 @@ mod tests {
                         direction: 2,
                         function: String::new(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "RN".to_string(),
                         direction: 2,
                         function: String::new(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "CLK".to_string(),
                         direction: 2,
                         function: String::new(),
                         is_clocking_pin: true,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "Q".to_string(),
                         direction: 1,
                         function: "IQ".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                 ],
                 area: 1.0,
@@ -2157,7 +2216,9 @@ mod tests {
                     preset_expr: String::new(),
                 }],
                 clock_gate: None,
+                ..Default::default()
             }],
+            ..Default::default()
         };
         let err = project_gatefn_from_netlist_and_liberty_with_options(
             &module,
@@ -2242,18 +2303,21 @@ mod tests {
                         direction: 2,
                         function: String::new(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "CLK".to_string(),
                         direction: 2,
                         function: String::new(),
                         is_clocking_pin: true,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "Q".to_string(),
                         direction: 1,
                         function: "IQ".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                 ],
                 area: 1.0,
@@ -2266,7 +2330,9 @@ mod tests {
                     preset_expr: String::new(),
                 }],
                 clock_gate: None,
+                ..Default::default()
             }],
+            ..Default::default()
         };
         let err = project_gatefn_from_netlist_and_liberty_with_options(
             &module,
@@ -2351,24 +2417,28 @@ mod tests {
                         direction: 2,
                         function: String::new(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "EN".to_string(),
                         direction: 2,
                         function: String::new(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "CLK".to_string(),
                         direction: 2,
                         function: String::new(),
                         is_clocking_pin: true,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "Q".to_string(),
                         direction: 1,
                         function: "IQ".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                 ],
                 area: 1.0,
@@ -2381,7 +2451,9 @@ mod tests {
                     preset_expr: String::new(),
                 }],
                 clock_gate: None,
+                ..Default::default()
             }],
+            ..Default::default()
         };
         let err = project_gatefn_from_netlist_and_liberty_with_options(
             &module,
@@ -2456,18 +2528,21 @@ mod tests {
                         direction: 2,
                         function: String::new(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "CLK".to_string(),
                         direction: 2,
                         function: String::new(),
                         is_clocking_pin: true,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "Q".to_string(),
                         direction: 1,
                         function: "IQ".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                 ],
                 area: 1.0,
@@ -2480,7 +2555,9 @@ mod tests {
                     preset_expr: String::new(),
                 }],
                 clock_gate: None,
+                ..Default::default()
             }],
+            ..Default::default()
         };
         let err = project_gatefn_from_netlist_and_liberty_with_options(
             &module,
@@ -2540,18 +2617,22 @@ mod tests {
                         direction: 2,
                         function: String::new(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "Q".to_string(),
                         direction: 1,
                         function: "IQ".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                 ],
                 area: 1.0,
                 sequential: vec![],
                 clock_gate: None,
+                ..Default::default()
             }],
+            ..Default::default()
         };
         let mut dff_cells_identity = HashSet::new();
         dff_cells_identity.insert("DFF".to_string());
@@ -2632,24 +2713,29 @@ mod tests {
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "B".to_string(),
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                     crate::liberty_proto::Pin {
                         name: "Y".to_string(),
                         direction: 1,
                         function: "(A & B)".to_string(),
                         is_clocking_pin: false,
+                        ..Default::default()
                     },
                 ],
                 area: 1.0,
                 sequential: vec![],
                 clock_gate: None,
+                ..Default::default()
             }],
+            ..Default::default()
         };
         let gate_fn = project_gatefn_from_netlist_and_liberty(
             &module,

@@ -11,6 +11,10 @@
 
 Most functionality is exposed via the `xlsynth_g8r` library and thin binaries under `src/bin/`.
 
+## Additional docs
+
+- `docs/g8r_lib_timing_design.md`: why Liberty loading has `Library` (no timing) vs `LibraryWithTimingData` and the observed ASAP7 size/load tradeoffs.
+
 ## Netlist parse benchmark
 
 Run the synthetic netlist-parse microbenchmark with:

@@ -8,7 +8,7 @@
 //! `Library` remains the single source of truth; indices are derived from it
 //! on demand.
 
-use crate::liberty_proto::{Cell, Library, Pin, PinDirection};
+use crate::liberty_proto::{Cell, Library as ProtoLibrary, Pin, PinDirection};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -25,7 +25,7 @@ struct CellPinsByDir {
 
 /// Owning wrapper around a `Library` with lazily built indices for fast lookup.
 pub struct IndexedLibrary {
-    proto: Library,
+    proto: ProtoLibrary,
     /// Map from cell name to index in `proto.cells`.
     cell_by_name: RefCell<Option<HashMap<String, usize>>>,
     /// Map from cell index to directional pin groupings.
@@ -34,7 +34,8 @@ pub struct IndexedLibrary {
 
 impl IndexedLibrary {
     /// Constructs a new indexed view over the given `Library`.
-    pub fn new(proto: Library) -> Self {
+    pub fn new<T: Into<ProtoLibrary>>(proto: T) -> Self {
+        let proto = proto.into();
         IndexedLibrary {
             proto,
             cell_by_name: RefCell::new(None),
@@ -43,7 +44,7 @@ impl IndexedLibrary {
     }
 
     /// Returns a shared reference to the underlying `Library`.
-    pub fn library(&self) -> &Library {
+    pub fn library(&self) -> &ProtoLibrary {
         &self.proto
     }
 
@@ -151,12 +152,131 @@ impl IndexedLibrary {
         }
         None
     }
+
+    /// Looks up a timing arc for the given output pin and related input pin.
+    pub fn timing_arc_for_pin(
+        &self,
+        cell_name: &str,
+        output_pin_name: &str,
+        related_pin_name: &str,
+    ) -> Option<&crate::liberty_proto::TimingArc> {
+        self.timing_arc_for_pin_filtered(
+            cell_name,
+            output_pin_name,
+            related_pin_name,
+            /* timing_type= */ None,
+            /* timing_sense= */ None,
+            /* when= */ None,
+        )
+    }
+
+    /// Looks up a single timing arc for the given output pin with optional
+    /// selectors in addition to `related_pin`.
+    ///
+    /// Returns `None` when no arc matches, or when multiple arcs match the
+    /// selectors (to avoid silently choosing the wrong arc).
+    pub fn timing_arc_for_pin_filtered(
+        &self,
+        cell_name: &str,
+        output_pin_name: &str,
+        related_pin_name: &str,
+        timing_type: Option<&str>,
+        timing_sense: Option<&str>,
+        when: Option<&str>,
+    ) -> Option<&crate::liberty_proto::TimingArc> {
+        let pin = self.pin_by_name(cell_name, output_pin_name)?;
+        if pin.direction != PinDirection::Output as i32 {
+            return None;
+        }
+        let mut matches = pin.timing_arcs.iter().filter(|arc| {
+            if arc.related_pin != related_pin_name {
+                return false;
+            }
+            if let Some(v) = timing_type {
+                if arc.timing_type != v {
+                    return false;
+                }
+            }
+            if let Some(v) = timing_sense {
+                if arc.timing_sense != v {
+                    return false;
+                }
+            }
+            if let Some(v) = when {
+                if arc.when != v {
+                    return false;
+                }
+            }
+            true
+        });
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(first)
+    }
+
+    /// Returns all timing arcs defined on the named pin.
+    pub fn timing_arcs_for_pin(
+        &self,
+        cell_name: &str,
+        output_pin_name: &str,
+    ) -> Option<&[crate::liberty_proto::TimingArc]> {
+        let pin = self.pin_by_name(cell_name, output_pin_name)?;
+        if pin.direction != PinDirection::Output as i32 {
+            return None;
+        }
+        Some(&pin.timing_arcs)
+    }
+
+    /// Looks up a table template by exact kind and name.
+    ///
+    /// Returns `None` when no template matches, or when multiple templates
+    /// share the same `(kind, name)` key.
+    pub fn lu_table_template_by_name(
+        &self,
+        template_kind: &str,
+        template_name: &str,
+    ) -> Option<&crate::liberty_proto::LuTableTemplate> {
+        let mut matches = self
+            .proto
+            .lu_table_templates
+            .iter()
+            .filter(|tmpl| tmpl.kind == template_kind && tmpl.name == template_name);
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(first)
+    }
+
+    /// Looks up a table template by 1-based template ID as stored in
+    /// `TimingTable`, requiring the expected template kind.
+    pub fn lu_table_template_by_id(
+        &self,
+        template_id: u32,
+        template_kind: &str,
+    ) -> Option<&crate::liberty_proto::LuTableTemplate> {
+        if template_id == 0 {
+            return None;
+        }
+        let tmpl = self
+            .proto
+            .lu_table_templates
+            .get((template_id - 1) as usize)?;
+        if tmpl.kind == template_kind {
+            Some(tmpl)
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::liberty::test_utils::make_test_library;
+    use crate::liberty_proto::{LuTableTemplate, TimingArc, TimingTable};
 
     #[test]
     fn get_cell_finds_by_name() {
@@ -208,5 +328,331 @@ mod tests {
 
         assert!(indexed.pin_by_name("INV", "NO_SUCH_PIN").is_none());
         assert!(indexed.pin_by_name("NO_SUCH_CELL", "Y").is_none());
+    }
+
+    #[test]
+    fn timing_lookup_finds_arc_and_template() {
+        let lib = ProtoLibrary {
+            cells: vec![Cell {
+                name: "NAND2".to_string(),
+                pins: vec![
+                    Pin {
+                        direction: PinDirection::Input as i32,
+                        function: "".to_string(),
+                        name: "A".to_string(),
+                        is_clocking_pin: false,
+                        ..Default::default()
+                    },
+                    Pin {
+                        direction: PinDirection::Input as i32,
+                        function: "".to_string(),
+                        name: "B".to_string(),
+                        is_clocking_pin: false,
+                        ..Default::default()
+                    },
+                    Pin {
+                        direction: PinDirection::Output as i32,
+                        function: "!(A * B)".to_string(),
+                        name: "Y".to_string(),
+                        is_clocking_pin: false,
+                        timing_arcs: vec![TimingArc {
+                            related_pin: "A".to_string(),
+                            timing_sense: "negative_unate".to_string(),
+                            timing_type: "combinational".to_string(),
+                            when: String::new(),
+                            tables: vec![TimingTable {
+                                kind: "cell_rise".to_string(),
+                                template_id: 1,
+                                template_name: String::new(),
+                                index_1: vec![0.01, 0.02],
+                                index_2: vec![0.1, 0.2],
+                                index_3: vec![],
+                                values: vec![1.0, 2.0, 3.0, 4.0],
+                                dimensions: vec![2, 2],
+                            }],
+                        }],
+                        ..Default::default()
+                    },
+                ],
+                area: 1.0,
+                sequential: vec![],
+                clock_gate: None,
+            }],
+            units: None,
+            lu_table_templates: vec![LuTableTemplate {
+                kind: "lu_table_template".to_string(),
+                name: "tmpl_2x2".to_string(),
+                variable_1: "input_net_transition".to_string(),
+                variable_2: "total_output_net_capacitance".to_string(),
+                variable_3: String::new(),
+                index_1: vec![0.01, 0.02],
+                index_2: vec![0.1, 0.2],
+                index_3: vec![],
+            }],
+        };
+        let indexed = IndexedLibrary::new(lib);
+
+        let arcs = indexed
+            .timing_arcs_for_pin("NAND2", "Y")
+            .expect("timing arcs should exist for NAND2.Y");
+        assert_eq!(arcs.len(), 1);
+
+        let arc = indexed
+            .timing_arc_for_pin("NAND2", "Y", "A")
+            .expect("arc for related pin A should exist");
+        assert_eq!(arc.timing_sense, "negative_unate");
+        assert_eq!(arc.tables.len(), 1);
+        assert_eq!(arc.tables[0].template_id, 1);
+
+        let tmpl = indexed
+            .lu_table_template_by_name("lu_table_template", "tmpl_2x2")
+            .expect("template should exist");
+        assert_eq!(tmpl.kind, "lu_table_template");
+        let tmpl_by_id = indexed
+            .lu_table_template_by_id(1, "lu_table_template")
+            .expect("template should exist by id");
+        assert_eq!(tmpl_by_id.name, "tmpl_2x2");
+        assert!(
+            indexed
+                .lu_table_template_by_name("power_lut_template", "tmpl_2x2")
+                .is_none()
+        );
+        assert!(
+            indexed
+                .lu_table_template_by_id(1, "power_lut_template")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn template_lookup_is_kind_aware_under_name_collisions() {
+        let lib = ProtoLibrary {
+            cells: vec![],
+            units: None,
+            lu_table_templates: vec![
+                LuTableTemplate {
+                    kind: "lu_table_template".to_string(),
+                    name: "shared".to_string(),
+                    variable_1: "input_net_transition".to_string(),
+                    variable_2: "total_output_net_capacitance".to_string(),
+                    variable_3: String::new(),
+                    index_1: vec![0.01, 0.02],
+                    index_2: vec![0.1, 0.2],
+                    index_3: vec![],
+                },
+                LuTableTemplate {
+                    kind: "power_lut_template".to_string(),
+                    name: "shared".to_string(),
+                    variable_1: "input_transition_time".to_string(),
+                    variable_2: "total_output_net_capacitance".to_string(),
+                    variable_3: String::new(),
+                    index_1: vec![1.0, 2.0],
+                    index_2: vec![3.0, 4.0],
+                    index_3: vec![],
+                },
+            ],
+        };
+        let indexed = IndexedLibrary::new(lib);
+
+        let lu = indexed
+            .lu_table_template_by_name("lu_table_template", "shared")
+            .expect("lu template should resolve by kind and name");
+        assert_eq!(lu.kind, "lu_table_template");
+        let power = indexed
+            .lu_table_template_by_name("power_lut_template", "shared")
+            .expect("power template should resolve by kind and name");
+        assert_eq!(power.kind, "power_lut_template");
+
+        let lu_by_id = indexed
+            .lu_table_template_by_id(1, "lu_table_template")
+            .expect("id 1 should be lu template when kind matches");
+        assert_eq!(lu_by_id.name, "shared");
+        assert!(
+            indexed
+                .lu_table_template_by_id(1, "power_lut_template")
+                .is_none()
+        );
+        let power_by_id = indexed
+            .lu_table_template_by_id(2, "power_lut_template")
+            .expect("id 2 should be power template when kind matches");
+        assert_eq!(power_by_id.name, "shared");
+    }
+
+    #[test]
+    fn template_lookup_by_name_returns_none_for_ambiguous_same_kind_name() {
+        let lib = ProtoLibrary {
+            cells: vec![],
+            units: None,
+            lu_table_templates: vec![
+                LuTableTemplate {
+                    kind: "lu_table_template".to_string(),
+                    name: "shared".to_string(),
+                    variable_1: "input_net_transition".to_string(),
+                    variable_2: "total_output_net_capacitance".to_string(),
+                    variable_3: String::new(),
+                    index_1: vec![0.01, 0.02],
+                    index_2: vec![0.1, 0.2],
+                    index_3: vec![],
+                },
+                LuTableTemplate {
+                    kind: "lu_table_template".to_string(),
+                    name: "shared".to_string(),
+                    variable_1: "input_net_transition".to_string(),
+                    variable_2: "total_output_net_capacitance".to_string(),
+                    variable_3: String::new(),
+                    index_1: vec![0.05],
+                    index_2: vec![0.9, 1.1, 1.3],
+                    index_3: vec![],
+                },
+            ],
+        };
+        let indexed = IndexedLibrary::new(lib);
+        assert!(
+            indexed
+                .lu_table_template_by_name("lu_table_template", "shared")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn timing_arc_lookup_avoids_ambiguous_related_pin_matches() {
+        let lib = ProtoLibrary {
+            cells: vec![Cell {
+                name: "NAND2".to_string(),
+                pins: vec![
+                    Pin {
+                        direction: PinDirection::Input as i32,
+                        function: "".to_string(),
+                        name: "A".to_string(),
+                        is_clocking_pin: false,
+                        ..Default::default()
+                    },
+                    Pin {
+                        direction: PinDirection::Output as i32,
+                        function: "!(A)".to_string(),
+                        name: "Y".to_string(),
+                        is_clocking_pin: false,
+                        timing_arcs: vec![
+                            TimingArc {
+                                related_pin: "A".to_string(),
+                                timing_sense: "negative_unate".to_string(),
+                                timing_type: "combinational".to_string(),
+                                when: String::new(),
+                                tables: vec![],
+                            },
+                            TimingArc {
+                                related_pin: "A".to_string(),
+                                timing_sense: "positive_unate".to_string(),
+                                timing_type: "setup_rising".to_string(),
+                                when: "B".to_string(),
+                                tables: vec![],
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                ],
+                area: 1.0,
+                sequential: vec![],
+                clock_gate: None,
+            }],
+            units: None,
+            lu_table_templates: vec![],
+        };
+        let indexed = IndexedLibrary::new(lib);
+
+        assert!(indexed.timing_arc_for_pin("NAND2", "Y", "A").is_none());
+
+        let comb = indexed
+            .timing_arc_for_pin_filtered(
+                "NAND2",
+                "Y",
+                "A",
+                Some("combinational"),
+                Some("negative_unate"),
+                Some(""),
+            )
+            .expect("combinational arc should resolve uniquely");
+        assert_eq!(comb.timing_type, "combinational");
+        assert_eq!(comb.timing_sense, "negative_unate");
+        assert_eq!(comb.when, "");
+
+        let setup = indexed
+            .timing_arc_for_pin_filtered(
+                "NAND2",
+                "Y",
+                "A",
+                Some("setup_rising"),
+                Some("positive_unate"),
+                Some("B"),
+            )
+            .expect("setup arc should resolve uniquely");
+        assert_eq!(setup.timing_type, "setup_rising");
+        assert_eq!(setup.timing_sense, "positive_unate");
+        assert_eq!(setup.when, "B");
+    }
+
+    #[test]
+    fn timing_arc_lookup_requires_output_pin() {
+        let lib = ProtoLibrary {
+            cells: vec![Cell {
+                name: "U1".to_string(),
+                pins: vec![
+                    Pin {
+                        direction: PinDirection::Input as i32,
+                        function: "".to_string(),
+                        name: "A".to_string(),
+                        is_clocking_pin: false,
+                        timing_arcs: vec![TimingArc {
+                            related_pin: "CLK".to_string(),
+                            timing_sense: "non_unate".to_string(),
+                            timing_type: "setup_rising".to_string(),
+                            when: String::new(),
+                            tables: vec![],
+                        }],
+                        ..Default::default()
+                    },
+                    Pin {
+                        direction: PinDirection::Output as i32,
+                        function: "A".to_string(),
+                        name: "Y".to_string(),
+                        is_clocking_pin: false,
+                        timing_arcs: vec![TimingArc {
+                            related_pin: "A".to_string(),
+                            timing_sense: "positive_unate".to_string(),
+                            timing_type: "combinational".to_string(),
+                            when: String::new(),
+                            tables: vec![],
+                        }],
+                        ..Default::default()
+                    },
+                ],
+                area: 1.0,
+                sequential: vec![],
+                clock_gate: None,
+            }],
+            units: None,
+            lu_table_templates: vec![],
+        };
+        let indexed = IndexedLibrary::new(lib);
+
+        assert!(indexed.timing_arcs_for_pin("U1", "A").is_none());
+        assert!(indexed.timing_arc_for_pin("U1", "A", "CLK").is_none());
+        assert!(
+            indexed
+                .timing_arc_for_pin_filtered(
+                    "U1",
+                    "A",
+                    "CLK",
+                    Some("setup_rising"),
+                    Some("non_unate"),
+                    Some(""),
+                )
+                .is_none()
+        );
+
+        let arc = indexed
+            .timing_arc_for_pin("U1", "Y", "A")
+            .expect("output combinational arc should still be found");
+        assert_eq!(arc.timing_type, "combinational");
     }
 }

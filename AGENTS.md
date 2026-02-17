@@ -103,6 +103,8 @@ foo(/*kwarg=*/false)
 
 Note there is no space before the value: `/*kwarg=*/false` (not `/*kwarg=*/ false`).
 
+- When intentionally using a no-op match arm such as `_ => {}` (or otherwise ignoring a case), include a brief comment in that block explaining why ignoring it is correct/safe for that code path.
+
 - When creating fake Liberty cell libraries or gate-level netlists in tests or benches, prefer simple, unsized cell
   names such as `INV`, `BUF`, `AND2`, `DFF`, `DFFN`, etc., unless drive strength or sizing is explicitly part of the
   behavior under test. This keeps examples clearer and avoids suggesting unnecessary realism.
