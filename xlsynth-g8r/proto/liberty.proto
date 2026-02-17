@@ -8,8 +8,18 @@ package liberty;
 // This schema prefers explicit typed fields for data consumed by algorithms.
 // We intentionally avoid a generic key/value "attributes" bag.
 // If new Liberty data is needed, add explicit typed fields where consumed.
+//
+// Validation policy:
+// `parse_liberty_files_to_proto()` validates consistency before returning.
+// Protos produced by that path are expected to satisfy the invariants noted
+// below. If consuming third-party protos, run the same validator before
+// relying on those invariants.
 
 message Library {
+  // In validated payloads:
+  // - cell pin names are unique per cell.
+  // - timing arcs reference existing related_pin names.
+  // - timing-table/template axes are contiguous (no index_2 without index_1).
   repeated Cell cells = 1;
   LibraryUnits units = 2;
   repeated LuTableTemplate lu_table_templates = 3;
@@ -83,6 +93,7 @@ message TimingTable {
   string kind = 1;
   // Compact reference into `Library.lu_table_templates`, using 1-based IDs.
   // 0 means "unset".
+  // In validated payloads, nonzero IDs are in-range and kind-compatible.
   uint32 template_id = 2;
   // Axes are only populated when this table overrides template axes.
   repeated double index_1 = 3;
@@ -90,7 +101,11 @@ message TimingTable {
   repeated double index_3 = 5;
   // Flattened numeric payload in row-major order.
   repeated double values = 6;
-  // Tensor shape for `values` payload.
+  // Shape for `values` payload.
+  // In validated payloads:
+  // - rank matches effective table axes (explicit index_* or template defaults).
+  // - each extent matches the corresponding effective axis length.
+  // - `values.len()` equals the product of extents.
   repeated uint32 dimensions = 7;
   // Legacy fallback for compatibility when template_id cannot be resolved.
   string template_name = 8;

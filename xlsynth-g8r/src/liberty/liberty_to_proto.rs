@@ -2,6 +2,7 @@
 
 use crate::liberty::cell_formula::parse_formula;
 use crate::liberty::liberty_parser::{Block, BlockMember, Value};
+use crate::liberty::timing_table::TimingTableArrayView;
 use crate::liberty::util::human_readable_size;
 use crate::liberty::{CharReader, LibertyParser};
 use crate::liberty_proto::{
@@ -492,10 +493,15 @@ fn expected_template_kind_for_timing_table(_table: &TimingTable) -> &'static str
 }
 
 fn axis_rank(index_1: &[f64], index_2: &[f64], index_3: &[f64]) -> usize {
-    [index_1, index_2, index_3]
-        .iter()
-        .filter(|axis| !axis.is_empty())
-        .count()
+    if !index_3.is_empty() {
+        3
+    } else if !index_2.is_empty() {
+        2
+    } else if !index_1.is_empty() {
+        1
+    } else {
+        0
+    }
 }
 
 fn normalize_dimensions_for_expected_rank(dimensions: &mut Vec<u32>, expected_rank: usize) {
@@ -576,11 +582,9 @@ fn canonicalize_timing_table_references(library: &mut Library) {
                     let (tmpl_index_1, tmpl_index_2, tmpl_index_3) = &template_axes[template_idx];
                     let explicit_rank = axis_rank(&table.index_1, &table.index_2, &table.index_3);
                     let template_rank = axis_rank(tmpl_index_1, tmpl_index_2, tmpl_index_3);
-                    let expected_rank = if explicit_rank > 0 {
-                        explicit_rank
-                    } else {
-                        template_rank
-                    };
+                    // A table may override only a subset of template axes.
+                    // Preserve inherited template rank so singleton axes are not dropped.
+                    let expected_rank = std::cmp::max(explicit_rank, template_rank);
                     normalize_dimensions_for_expected_rank(&mut table.dimensions, expected_rank);
                     if table.index_1 == *tmpl_index_1 && !table.index_1.is_empty() {
                         table.index_1.clear();
@@ -883,6 +887,162 @@ fn apply_template_id_offset(cells: &mut [Cell], offset: u32) {
     }
 }
 
+fn axes_are_contiguous(index_1: &[f64], index_2: &[f64], index_3: &[f64]) -> bool {
+    if !index_3.is_empty() && (index_1.is_empty() || index_2.is_empty()) {
+        return false;
+    }
+    if !index_2.is_empty() && index_1.is_empty() {
+        return false;
+    }
+    true
+}
+
+pub fn validate_library_consistency(library: &Library) -> Result<(), String> {
+    for (template_idx, tmpl) in library.lu_table_templates.iter().enumerate() {
+        if !axes_are_contiguous(&tmpl.index_1, &tmpl.index_2, &tmpl.index_3) {
+            return Err(format!(
+                "Template id={} kind='{}' name='{}' has non-contiguous axes (index_1={}, index_2={}, index_3={})",
+                template_idx + 1,
+                tmpl.kind,
+                tmpl.name,
+                tmpl.index_1.len(),
+                tmpl.index_2.len(),
+                tmpl.index_3.len()
+            ));
+        }
+    }
+
+    for cell in &library.cells {
+        let mut pin_direction_by_name: HashMap<String, i32> = HashMap::new();
+        for pin in &cell.pins {
+            if pin_direction_by_name
+                .insert(pin.name.clone(), pin.direction)
+                .is_some()
+            {
+                return Err(format!(
+                    "Cell '{}' has duplicate pin name '{}'",
+                    cell.name, pin.name
+                ));
+            }
+        }
+
+        for pin in &cell.pins {
+            for (arc_i, arc) in pin.timing_arcs.iter().enumerate() {
+                if arc.related_pin.is_empty() {
+                    return Err(format!(
+                        "Cell '{}' pin '{}' timing arc #{} has empty related_pin",
+                        cell.name, pin.name, arc_i
+                    ));
+                }
+                if !pin_direction_by_name.contains_key(&arc.related_pin) {
+                    return Err(format!(
+                        "Cell '{}' pin '{}' timing arc #{} references unknown related_pin '{}'",
+                        cell.name, pin.name, arc_i, arc.related_pin
+                    ));
+                }
+
+                for table in &arc.tables {
+                    let context = format!(
+                        "Cell '{}' pin '{}' arc related_pin='{}' table '{}'",
+                        cell.name, pin.name, arc.related_pin, table.kind
+                    );
+                    if let Err(e) = TimingTableArrayView::from_timing_table(table) {
+                        return Err(format!("{context} has invalid values/dimensions: {e}"));
+                    }
+
+                    let template = if table.template_id == 0 {
+                        None
+                    } else {
+                        let template_idx = (table.template_id - 1) as usize;
+                        let Some(tmpl) = library.lu_table_templates.get(template_idx) else {
+                            return Err(format!(
+                                "{context} references out-of-range template_id={}",
+                                table.template_id
+                            ));
+                        };
+                        let expected_kind = expected_template_kind_for_timing_table(table);
+                        if tmpl.kind != expected_kind {
+                            return Err(format!(
+                                "{context} template_id={} resolves to kind='{}', expected '{}'",
+                                table.template_id, tmpl.kind, expected_kind
+                            ));
+                        }
+                        Some(tmpl)
+                    };
+
+                    let effective_index_1 = if !table.index_1.is_empty() {
+                        table.index_1.as_slice()
+                    } else if let Some(tmpl) = template {
+                        tmpl.index_1.as_slice()
+                    } else {
+                        &[]
+                    };
+                    let effective_index_2 = if !table.index_2.is_empty() {
+                        table.index_2.as_slice()
+                    } else if let Some(tmpl) = template {
+                        tmpl.index_2.as_slice()
+                    } else {
+                        &[]
+                    };
+                    let effective_index_3 = if !table.index_3.is_empty() {
+                        table.index_3.as_slice()
+                    } else if let Some(tmpl) = template {
+                        tmpl.index_3.as_slice()
+                    } else {
+                        &[]
+                    };
+
+                    if !axes_are_contiguous(effective_index_1, effective_index_2, effective_index_3)
+                    {
+                        return Err(format!(
+                            "{context} has non-contiguous effective axes (index_1={}, index_2={}, index_3={})",
+                            effective_index_1.len(),
+                            effective_index_2.len(),
+                            effective_index_3.len()
+                        ));
+                    }
+
+                    let expected_rank =
+                        axis_rank(effective_index_1, effective_index_2, effective_index_3);
+                    if expected_rank > 0 && table.dimensions.len() != expected_rank {
+                        return Err(format!(
+                            "{context} has dimension rank {} but expected {} from effective axes",
+                            table.dimensions.len(),
+                            expected_rank
+                        ));
+                    }
+
+                    if expected_rank >= 1 && table.dimensions[0] as usize != effective_index_1.len()
+                    {
+                        return Err(format!(
+                            "{context} axis-1 dimension {} does not match effective index_1 length {}",
+                            table.dimensions[0],
+                            effective_index_1.len()
+                        ));
+                    }
+                    if expected_rank >= 2 && table.dimensions[1] as usize != effective_index_2.len()
+                    {
+                        return Err(format!(
+                            "{context} axis-2 dimension {} does not match effective index_2 length {}",
+                            table.dimensions[1],
+                            effective_index_2.len()
+                        ));
+                    }
+                    if expected_rank >= 3 && table.dimensions[2] as usize != effective_index_3.len()
+                    {
+                        return Err(format!(
+                            "{context} axis-3 dimension {} does not match effective index_3 length {}",
+                            table.dimensions[2],
+                            effective_index_3.len()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn parse_liberty_files_to_proto<P: AsRef<Path>>(paths: &[P]) -> Result<Library, String> {
     let mut libraries = Vec::new();
     for path in paths {
@@ -960,6 +1120,7 @@ pub fn parse_liberty_files_to_proto<P: AsRef<Path>>(paths: &[P]) -> Result<Libra
         // Field name is historical; it stores all parsed Liberty template kinds.
         lu_table_templates: all_table_templates,
     };
+    validate_library_consistency(&library)?;
     Ok(library)
 }
 
@@ -1272,6 +1433,56 @@ mod tests {
     }
 
     #[test]
+    fn test_timing_table_dimensions_preserve_inherited_rank_with_partial_override() {
+        let liberty_text = r#"
+        library (my_library) {
+            time_unit : "1ns";
+            capacitance_unit : "1pf";
+            lu_table_template (tmpl_1x2) {
+                variable_1 : input_net_transition;
+                variable_2 : total_output_net_capacitance;
+                index_1 ("0.01");
+                index_2 ("0.10, 0.20");
+            }
+            cell (BUF) {
+                area: 1.0;
+                pin (A) {
+                    direction: input;
+                }
+                pin (Y) {
+                    direction: output;
+                    function: "A";
+                    timing () {
+                        related_pin : "A";
+                        timing_type : combinational;
+                        cell_rise (tmpl_1x2) {
+                            index_1 ("0.05");
+                            values ("0.10, 0.20");
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        let cell = lib.cells.iter().find(|c| c.name == "BUF").unwrap();
+        let pin_y = cell.pins.iter().find(|p| p.name == "Y").unwrap();
+        let arc = pin_y
+            .timing_arcs
+            .iter()
+            .find(|a| a.related_pin == "A")
+            .unwrap();
+        let table = arc.tables.iter().find(|t| t.kind == "cell_rise").unwrap();
+        assert_eq!(table.template_id, 1);
+        assert_eq!(table.dimensions, vec![1, 2]);
+        assert_eq!(table.index_1, vec![0.05]);
+        assert_eq!(table.index_2, Vec::<f64>::new());
+        assert_eq!(table.values, vec![0.10, 0.20]);
+    }
+
+    #[test]
     fn test_timing_template_resolution_ignores_power_template_name_collisions() {
         let liberty_text = r#"
         library (my_library) {
@@ -1336,6 +1547,108 @@ mod tests {
         assert_eq!(table.template_name, "");
         assert_eq!(table.index_1, Vec::<f64>::new());
         assert_eq!(table.index_2, Vec::<f64>::new());
+    }
+
+    #[test]
+    fn test_parse_liberty_files_to_proto_errors_on_missing_related_pin() {
+        let liberty_text = r#"
+        library (my_library) {
+            lu_table_template (tmpl_1d) {
+                variable_1 : input_net_transition;
+                index_1 ("0.01, 0.02");
+            }
+            cell (BUF) {
+                area: 1.0;
+                pin (Y) {
+                    direction: output;
+                    function: "A";
+                    timing () {
+                        related_pin : "A";
+                        timing_type : combinational;
+                        cell_rise (tmpl_1d) {
+                            values ("0.10, 0.20");
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+        let err = parse_liberty_files_to_proto(&[tmp.path()]).unwrap_err();
+        assert!(err.contains("references unknown related_pin 'A'"));
+    }
+
+    #[test]
+    fn test_validate_library_consistency_rejects_out_of_range_template_id() {
+        let liberty_text = r#"
+        library (my_library) {
+            lu_table_template (tmpl_1d) {
+                variable_1 : input_net_transition;
+                index_1 ("0.01, 0.02");
+            }
+            cell (BUF) {
+                area: 1.0;
+                pin (A) {
+                    direction: input;
+                }
+                pin (Y) {
+                    direction: output;
+                    function: "A";
+                    timing () {
+                        related_pin : "A";
+                        timing_type : combinational;
+                        cell_rise (tmpl_1d) {
+                            values ("0.10, 0.20");
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+        let mut lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        lib.cells[0].pins[1].timing_arcs[0].tables[0].template_id = 999;
+        let err = validate_library_consistency(&lib).unwrap_err();
+        assert!(err.contains("out-of-range template_id=999"));
+    }
+
+    #[test]
+    fn test_validate_library_consistency_rejects_axis_shape_mismatch() {
+        let liberty_text = r#"
+        library (my_library) {
+            lu_table_template (tmpl_1x2) {
+                variable_1 : input_net_transition;
+                variable_2 : total_output_net_capacitance;
+                index_1 ("0.01");
+                index_2 ("0.10, 0.20");
+            }
+            cell (BUF) {
+                area: 1.0;
+                pin (A) {
+                    direction: input;
+                }
+                pin (Y) {
+                    direction: output;
+                    function: "A";
+                    timing () {
+                        related_pin : "A";
+                        timing_type : combinational;
+                        cell_rise (tmpl_1x2) {
+                            values ("0.10, 0.20");
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+        let mut lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        lib.cells[0].pins[1].timing_arcs[0].tables[0].dimensions = vec![2];
+        let err = validate_library_consistency(&lib).unwrap_err();
+        assert!(err.contains("dimension rank 1 but expected 2"));
     }
 
     #[test]
