@@ -26,6 +26,7 @@ pub use ir_builder::BValue;
 pub use ir_builder::FnBuilder;
 pub use ir_package::IrFunction;
 pub use ir_package::IrFunctionJit;
+pub use ir_package::IrFunctionJitRunContext;
 pub use ir_package::IrPackage;
 pub use ir_package::IrType;
 pub use ir_package::RunResult;

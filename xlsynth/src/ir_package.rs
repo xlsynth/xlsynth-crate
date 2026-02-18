@@ -4,7 +4,10 @@ use std::fmt;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 pub use crate::lib_support::RunResult;
-use crate::lib_support::{self, c_str_to_rust, xls_function_jit_run, xls_make_function_jit};
+use crate::lib_support::{
+    self, c_str_to_rust, xls_function_jit_run, xls_function_jit_run_value_with_context,
+    xls_function_jit_run_with_context, xls_make_function_jit, JitRunContext,
+};
 use crate::xlsynth_error::XlsynthError;
 use crate::{
     lib_support::{
@@ -239,6 +242,11 @@ pub struct IrFunctionJit {
     pub(crate) ptr: *mut xlsynth_sys::CIrFunctionJit,
 }
 
+#[derive(Default)]
+pub struct IrFunctionJitRunContext {
+    pub(crate) context: JitRunContext,
+}
+
 impl Drop for IrFunctionJit {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
@@ -262,6 +270,34 @@ impl IrFunctionJit {
     pub fn run(&self, args: &[IrValue]) -> Result<RunResult, XlsynthError> {
         let package_read_guard: RwLockReadGuard<IrPackagePtr> = self.parent.read().unwrap();
         xls_function_jit_run(&package_read_guard, self.ptr, args)
+    }
+
+    pub fn run_with_context(
+        &self,
+        args: &[IrValue],
+        context: &mut IrFunctionJitRunContext,
+    ) -> Result<RunResult, XlsynthError> {
+        let package_read_guard: RwLockReadGuard<IrPackagePtr> = self.parent.read().unwrap();
+        xls_function_jit_run_with_context(&package_read_guard, self.ptr, args, &mut context.context)
+    }
+
+    pub fn run_value(&self, args: &[IrValue]) -> Result<IrValue, XlsynthError> {
+        let mut context = IrFunctionJitRunContext::default();
+        self.run_value_with_context(args, &mut context)
+    }
+
+    pub fn run_value_with_context(
+        &self,
+        args: &[IrValue],
+        context: &mut IrFunctionJitRunContext,
+    ) -> Result<IrValue, XlsynthError> {
+        let package_read_guard: RwLockReadGuard<IrPackagePtr> = self.parent.read().unwrap();
+        xls_function_jit_run_value_with_context(
+            &package_read_guard,
+            self.ptr,
+            args,
+            &mut context.context,
+        )
     }
 }
 
@@ -307,6 +343,45 @@ mod tests {
             package.get_type_for_value(&want).unwrap().to_string(),
             "bits[32]".to_string()
         );
+    }
+
+    #[test]
+    fn test_plus_one_fn_jit_run_value() {
+        let ir = "package test\nfn plus_one(x: bits[32]) -> bits[32] {
+    literal.2: bits[32] = literal(value=1)
+    ret add.1: bits[32] = add(x, literal.2)
+}";
+        let package = IrPackage::parse_ir(ir, None).expect("parse success");
+        let f = package
+            .get_function("plus_one")
+            .expect("should find function");
+        let jit = IrFunctionJit::new(&f).expect("jit creation success");
+        let arg = IrValue::parse_typed("bits[32]:42").unwrap();
+        let result = jit.run_value(&[arg]).expect("jit run_value success");
+        let want = IrValue::parse_typed("bits[32]:43").unwrap();
+        assert_eq!(result, want);
+    }
+
+    #[test]
+    fn test_plus_one_fn_jit_run_value_with_context() {
+        let ir = "package test\nfn plus_one(x: bits[32]) -> bits[32] {
+    literal.2: bits[32] = literal(value=1)
+    ret add.1: bits[32] = add(x, literal.2)
+}";
+        let package = IrPackage::parse_ir(ir, None).expect("parse success");
+        let f = package
+            .get_function("plus_one")
+            .expect("should find function");
+        let jit = IrFunctionJit::new(&f).expect("jit creation success");
+        let mut context = IrFunctionJitRunContext::default();
+        for input in [0u64, 1, 2, 3, 4] {
+            let arg = IrValue::parse_typed(&format!("bits[32]:{input}")).unwrap();
+            let result = jit
+                .run_value_with_context(&[arg], &mut context)
+                .expect("jit run_value_with_context success");
+            let want = IrValue::parse_typed(&format!("bits[32]:{}", input + 1)).unwrap();
+            assert_eq!(result, want);
+        }
     }
 
     #[test]

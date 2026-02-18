@@ -623,6 +623,28 @@ pub struct RunResult {
     pub assert_messages: Vec<String>,
 }
 
+#[derive(Default)]
+pub(crate) struct JitRunContext {
+    args_ptrs: Vec<*const CIrValue>,
+}
+
+impl JitRunContext {
+    fn update_arg_ptrs(&mut self, args: &[IrValue]) {
+        self.args_ptrs.clear();
+        self.args_ptrs.reserve(args.len());
+        self.args_ptrs
+            .extend(args.iter().map(|v| -> *const CIrValue { v.ptr }));
+    }
+}
+
+struct RawJitRunOutput {
+    result_out: *mut CIrValue,
+    trace_messages_out: *mut CTraceMessage,
+    trace_messages_count: usize,
+    assert_messages_out: *mut *mut std::os::raw::c_char,
+    assert_messages_count: usize,
+}
+
 // Helper that converts the trace messages to Rust objects and deallocates the C
 // value.
 unsafe fn trace_messages_to_rust(
@@ -675,11 +697,18 @@ pub(crate) fn xls_function_jit_run(
     jit: *const CIrFunctionJit,
     args: &[IrValue],
 ) -> Result<RunResult, XlsynthError> {
+    let mut context = JitRunContext::default();
+    xls_function_jit_run_with_context(_package_guard, jit, args, &mut context)
+}
+
+fn xls_function_jit_run_raw(
+    jit: *const CIrFunctionJit,
+    args: &[IrValue],
+    context: &mut JitRunContext,
+) -> Result<RawJitRunOutput, XlsynthError> {
     let mut result_out: *mut CIrValue = std::ptr::null_mut();
     let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
-    let argc = args.len();
-    let args_ptrs: Vec<*const CIrValue> =
-        args.iter().map(|v| -> *const CIrValue { v.ptr }).collect();
+    context.update_arg_ptrs(args);
     let mut trace_messages_out: *mut CTraceMessage = std::ptr::null_mut();
     let mut trace_messages_count: usize = 0;
     let mut assert_messages_out: *mut *mut std::os::raw::c_char = std::ptr::null_mut();
@@ -687,8 +716,8 @@ pub(crate) fn xls_function_jit_run(
     let success = unsafe {
         xlsynth_sys::xls_function_jit_run(
             jit,
-            argc,
-            args_ptrs.as_ptr(),
+            context.args_ptrs.len(),
+            context.args_ptrs.as_ptr(),
             &mut error_out,
             &mut trace_messages_out,
             &mut trace_messages_count,
@@ -703,13 +732,48 @@ pub(crate) fn xls_function_jit_run(
             "Failed to run JIT function: {error_message}"
         )));
     }
+    Ok(RawJitRunOutput {
+        result_out,
+        trace_messages_out,
+        trace_messages_count,
+        assert_messages_out,
+        assert_messages_count,
+    })
+}
+
+pub(crate) fn xls_function_jit_run_with_context(
+    _package_guard: &RwLockReadGuard<IrPackagePtr>,
+    jit: *const CIrFunctionJit,
+    args: &[IrValue],
+    context: &mut JitRunContext,
+) -> Result<RunResult, XlsynthError> {
+    let raw = xls_function_jit_run_raw(jit, args, context)?;
     let trace_messages =
-        unsafe { trace_messages_to_rust(trace_messages_out, trace_messages_count) };
-    let assert_messages = unsafe { c_strs_to_rust(assert_messages_out, assert_messages_count) };
+        unsafe { trace_messages_to_rust(raw.trace_messages_out, raw.trace_messages_count) };
+    let assert_messages =
+        unsafe { c_strs_to_rust(raw.assert_messages_out, raw.assert_messages_count) };
     Ok(RunResult {
-        value: IrValue { ptr: result_out },
+        value: IrValue {
+            ptr: raw.result_out,
+        },
         trace_messages,
         assert_messages,
+    })
+}
+
+pub(crate) fn xls_function_jit_run_value_with_context(
+    _package_guard: &RwLockReadGuard<IrPackagePtr>,
+    jit: *const CIrFunctionJit,
+    args: &[IrValue],
+    context: &mut JitRunContext,
+) -> Result<IrValue, XlsynthError> {
+    let raw = xls_function_jit_run_raw(jit, args, context)?;
+    unsafe {
+        xlsynth_sys::xls_trace_messages_free(raw.trace_messages_out, raw.trace_messages_count);
+        xlsynth_sys::xls_c_strs_free(raw.assert_messages_out, raw.assert_messages_count);
+    }
+    Ok(IrValue {
+        ptr: raw.result_out,
     })
 }
 
