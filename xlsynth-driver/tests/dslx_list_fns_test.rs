@@ -145,3 +145,41 @@ fn qc_reflexive(x: u8) -> bool { ordinary(x) == x }
     assert_eq!(records.len(), 1, "stdout: {}", stdout);
     assert_eq!(records[0]["name"], "ordinary");
 }
+
+#[test]
+fn test_dslx_list_fns_handles_missing_return_type_annotation() {
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    let tmp =
+        xlsynth_test_helpers::make_test_tmpdir("dslx_list_fns_missing_return_type_annotation");
+    let dir = tmp.path();
+
+    let dslx_path = dir.join("inferred_ret.x");
+    let dslx_src = "fn inferred(x: u32) { let _y = x; }";
+    std::fs::write(&dslx_path, dslx_src).expect("write dslx");
+
+    let output = Command::new(driver)
+        .arg("dslx-list-fns")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .output()
+        .expect("run driver");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let records: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_str(line).expect("valid JSONL record"))
+        .collect();
+
+    assert_eq!(records.len(), 1, "stdout: {}", stdout);
+    assert_eq!(records[0]["name"], "inferred");
+    assert!(records[0]["return_type"].is_null());
+    assert!(records[0]["function_type"].is_null());
+}
