@@ -2383,6 +2383,9 @@ extern "C" {
         index: i64,
     ) -> *mut CDslxParametricBinding;
     pub fn xls_dslx_function_get_body(function: *const CDslxFunction) -> *mut CDslxExpr;
+    // Returns the declared return type annotation node.
+    // May return nullptr when the function omits an explicit return
+    // annotation and relies on inferred return type.
     pub fn xls_dslx_function_get_return_type(
         function: *const CDslxFunction,
     ) -> *mut CDslxTypeAnnotation;

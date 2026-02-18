@@ -79,7 +79,10 @@ fn make_function_record(
         });
     }
 
-    let return_type = match f.try_get_return_type() {
+    // `get_return_type()` is `None` when source omits an explicit return
+    // annotation. A present annotation can still map to `None` below if its
+    // concrete type is unresolved (e.g. unspecialized parametrics).
+    let return_type = match f.get_return_type() {
         Some(return_type) => resolve_type_annotation_text(type_info, &return_type)?,
         None => None,
     };

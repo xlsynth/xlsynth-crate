@@ -1417,7 +1417,16 @@ impl Function {
         }
     }
 
-    pub fn try_get_return_type(&self) -> Option<TypeAnnotation> {
+    /// Returns the function's declared return type annotation, if one exists.
+    ///
+    /// This maps directly to the underlying DSLX AST node and returns `None`
+    /// when the source omits an explicit return annotation (for example:
+    /// `fn inferred(x: u32) { ... }`).
+    ///
+    /// Note that this is different from type resolution. A return annotation
+    /// can be present while still not resolving to a concrete type in
+    /// `TypeInfo` (e.g. unspecialized parametric functions).
+    pub fn get_return_type(&self) -> Option<TypeAnnotation> {
         let ptr = unsafe { sys::xls_dslx_function_get_return_type(self.ptr) };
         if ptr.is_null() {
             return None;
@@ -1426,11 +1435,6 @@ impl Function {
             parent: self.parent.clone(),
             ptr,
         })
-    }
-
-    pub fn get_return_type(&self) -> TypeAnnotation {
-        self.try_get_return_type()
-            .expect("xls_dslx_function_get_return_type returned null pointer")
     }
 }
 
@@ -2560,6 +2564,7 @@ pub fn parse_and_typecheck(
 
 #[cfg(test)]
 mod tests {
+    use crate::dslx::MatchableModuleMember;
     use crate::ir_value::IrFormatPreference;
 
     use super::*;
@@ -2672,8 +2677,6 @@ fn without_assert(a: u32, b: u32) -> u32 {
         let module = typechecked_module.get_module();
         let type_info = typechecked_module.get_type_info();
 
-        use crate::dslx::MatchableModuleMember;
-
         let mut with_assert_fn: Option<Function> = None;
         let mut without_assert_fn: Option<Function> = None;
         for i in 0..module.get_member_count() {
@@ -2715,8 +2718,6 @@ fn main() -> u32 {
             .expect("parse-and-typecheck success");
         let module = tcm.get_module();
         let type_info = tcm.get_type_info();
-
-        use crate::dslx::MatchableModuleMember;
 
         let mut id_fn: Option<Function> = None;
         let mut caller_fn: Option<Function> = None;
@@ -2808,7 +2809,6 @@ fn main() -> u32 {
         .expect("parse-and-typecheck success");
         let module = tcm.get_module();
         let type_info = tcm.get_type_info();
-        use crate::dslx::MatchableModuleMember;
         let mut found = false;
         for i in 0..module.get_member_count() {
             if let Some(MatchableModuleMember::Function(f)) = module.get_member(i).to_matchable() {
@@ -2854,8 +2854,6 @@ fn helper(x: u32) -> u32 { x }
         let module = tcm.get_module();
         let type_info = tcm.get_type_info();
 
-        use crate::dslx::MatchableModuleMember;
-
         let mut add_fn: Option<Function> = None;
         let mut helper_fn: Option<Function> = None;
         for i in 0..module.get_member_count() {
@@ -2896,7 +2894,9 @@ fn helper(x: u32) -> u32 { x }
             )
         );
 
-        let return_type_annotation = add_fn.get_return_type();
+        let return_type_annotation = add_fn
+            .get_return_type()
+            .expect("parametric add has an explicit return annotation");
         let return_type = type_info.get_type_for_type_annotation(&return_type_annotation);
         assert!(
             return_type.is_none(),
@@ -2913,13 +2913,58 @@ fn helper(x: u32) -> u32 { x }
         assert!(!helper_fn.is_public());
         assert!(!helper_fn.is_parametric());
         assert_eq!(helper_fn.get_parametric_binding_count(), 0);
-        let helper_return_type_annotation = helper_fn.get_return_type();
+        let helper_return_type_annotation = helper_fn
+            .get_return_type()
+            .expect("helper has an explicit return annotation");
         let helper_return_type = type_info
             .get_type_for_type_annotation(&helper_return_type_annotation)
             .unwrap()
             .to_string()
             .expect("helper return type string");
         assert_eq!(helper_return_type, "uN[32]");
+    }
+
+    #[test]
+    fn test_get_return_type_none_when_annotation_omitted() {
+        let dslx = r#"
+fn inferred(x: u32) { let _y = x; }
+fn explicit(x: u32) -> u32 { x }
+"#;
+        let mut import_data = ImportData::default();
+        let tcm = parse_and_typecheck(
+            dslx,
+            "/fake/return_type_nullability_test.x",
+            "return_type_nullability_test_mod",
+            &mut import_data,
+        )
+        .expect("parse-and-typecheck success");
+        let module = tcm.get_module();
+
+        let mut inferred_fn: Option<Function> = None;
+        let mut explicit_fn: Option<Function> = None;
+        for i in 0..module.get_member_count() {
+            if let Some(MatchableModuleMember::Function(f)) = module.get_member(i).to_matchable() {
+                match f.get_identifier().as_str() {
+                    "inferred" => inferred_fn = Some(f),
+                    "explicit" => explicit_fn = Some(f),
+                    _ => {
+                        // Other members are irrelevant to this nullability
+                        // check.
+                    }
+                }
+            }
+        }
+
+        let inferred_fn = inferred_fn.expect("inferred function present");
+        let explicit_fn = explicit_fn.expect("explicit function present");
+        assert!(
+            inferred_fn.get_return_type().is_none(),
+            "inferred return should have no explicit return annotation"
+        );
+        assert!(
+            explicit_fn.get_return_type().is_some(),
+            "explicit return should provide a return annotation"
+        );
     }
 
     #[test]
@@ -2937,8 +2982,6 @@ fn plain_fn(x: u32) -> u32 { x }
         let tcm = parse_and_typecheck(dslx, "/fake/attr_test.x", "attr_test_mod", &mut import_data)
             .expect("parse-and-typecheck success");
         let module = tcm.get_module();
-
-        use crate::dslx::MatchableModuleMember;
 
         let mut cfg_fn: Option<Function> = None;
         let mut fmt_fn: Option<Function> = None;
@@ -3022,7 +3065,6 @@ fn plain_fn(x: u32) -> u32 { x }
         let main_type_info = main_tcm.get_type_info();
 
         // Find function f and its first parameter's type annotation.
-        use crate::dslx::MatchableModuleMember;
         let mut f_opt: Option<Function> = None;
         for i in 0..main_module.get_member_count() {
             if let Some(MatchableModuleMember::Function(f)) =
