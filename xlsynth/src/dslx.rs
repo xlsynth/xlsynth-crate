@@ -1417,15 +1417,20 @@ impl Function {
         }
     }
 
-    pub fn get_return_type(&self) -> TypeAnnotation {
+    pub fn try_get_return_type(&self) -> Option<TypeAnnotation> {
         let ptr = unsafe { sys::xls_dslx_function_get_return_type(self.ptr) };
         if ptr.is_null() {
-            panic!("xls_dslx_function_get_return_type returned null pointer");
+            return None;
         }
-        TypeAnnotation {
+        Some(TypeAnnotation {
             parent: self.parent.clone(),
             ptr,
-        }
+        })
+    }
+
+    pub fn get_return_type(&self) -> TypeAnnotation {
+        self.try_get_return_type()
+            .expect("xls_dslx_function_get_return_type returned null pointer")
     }
 }
 

@@ -79,7 +79,10 @@ fn make_function_record(
         });
     }
 
-    let return_type = resolve_type_annotation_text(type_info, &f.get_return_type())?;
+    let return_type = match f.try_get_return_type() {
+        Some(return_type) => resolve_type_annotation_text(type_info, &return_type)?,
+        None => None,
+    };
     let function_type = if !is_parametric
         && return_type.is_some()
         && param_type_texts.iter().all(|p| p.is_some())
@@ -138,7 +141,10 @@ fn collect_function_records(
                     out.push(make_function_record(&module_name, &type_info, &f)?);
                 }
             }
-            _ => {}
+            _ => {
+                // Non-function module members are intentionally excluded from
+                // function listing.
+            }
         }
     }
     Ok(out)
