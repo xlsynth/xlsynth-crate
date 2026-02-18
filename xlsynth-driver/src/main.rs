@@ -45,6 +45,7 @@ mod dslx2sv_types;
 mod dslx_equiv;
 mod dslx_fn_eval;
 mod dslx_g8r_stats;
+mod dslx_list_fns;
 mod dslx_show;
 #[cfg(feature = "unstable-dslx-specialize")]
 mod dslx_specialize;
@@ -637,6 +638,41 @@ fn main() {
                         .help("Symbol to show; supports dotted module path + member like 'foo.bar.baz::Name', or just 'Name' with --dslx_input_file")
                         .required(true)
                         .index(1)
+                        .action(ArgAction::Set),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("dslx-list-fns")
+                .about("Lists DSLX functions with parametric/concrete metadata in structured form")
+                .arg(
+                    clap::Arg::new("dslx_input_file")
+                        .long("dslx_input_file")
+                        .value_name("DSLX_INPUT_FILE")
+                        .help("Input DSLX file to inspect")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("dslx_path")
+                        .long("dslx_path")
+                        .value_name("DSLX_PATH_SEMI_SEPARATED")
+                        .help("Semi-separated paths for DSLX lookup")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("dslx_stdlib_path")
+                        .long("dslx_stdlib_path")
+                        .value_name("DSLX_STDLIB_PATH")
+                        .help("Path to the DSLX standard library")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("format")
+                        .long("format")
+                        .value_name("FORMAT")
+                        .help("Output format: jsonl (default) or json")
+                        .value_parser(["jsonl", "json"])
+                        .default_value("jsonl")
                         .action(ArgAction::Set),
                 ),
         )
@@ -2532,6 +2568,9 @@ fn main() {
         }
         Some(("dslx-show", subm)) => {
             dslx_show::handle_dslx_show(subm, &config);
+        }
+        Some(("dslx-list-fns", subm)) => {
+            dslx_list_fns::handle_dslx_list_fns(subm, &config);
         }
         Some(("dslx-g8r-stats", subm)) => {
             dslx_g8r_stats::handle_dslx_g8r_stats(subm, &config);

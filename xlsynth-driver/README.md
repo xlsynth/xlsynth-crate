@@ -404,6 +404,41 @@ xlsynth-driver dslx-show \
 
 The definition is printed to stdout; errors are written to stderr and a non-zero status is returned if the symbol cannot be resolved.
 
+### `dslx-list-fns`: List DSLX functions in structured form
+
+Parses and typechecks a DSLX file, then emits one structured record per function found in the module.
+
+- Required flags:
+  - `--dslx_input_file <FILE>` – DSLX source file to inspect.
+- Optional flags:
+  - `--dslx_path <P1;P2;...>` – semicolon-separated list of additional search directories.
+  - `--dslx_stdlib_path <PATH>` – path to the DSLX standard library root.
+  - `--format <jsonl|json>` – output format (default: `jsonl`).
+
+Output schema (`jsonl` default; one object per line):
+
+- `module_name`: module name.
+- `name`: function identifier.
+- `is_public`: whether the function is public.
+- `is_parametric`: whether the function is parametric.
+- `params`: array of `{name, type}` objects; `type` is `null` when not concretely resolvable.
+- `parametric_bindings`: array of `{name, type, default_expr}` objects; empty for non-parametric functions.
+- `return_type`: concrete return type string, or `null`.
+- `function_type`: formatted type `(<param types>) -> <return type>` for concrete functions, or `null`.
+
+Note: parametric functions may have unresolved (`null`) parameter/return type strings until specialized.
+Note: this command only lists ordinary functions and excludes `#[test]` / `#[quickcheck]`-annotated entries.
+
+Examples:
+
+```shell
+# JSONL (default): one function record per line
+xlsynth-driver dslx-list-fns --dslx_input_file sample-usage/src/sample.x
+
+# JSON array
+xlsynth-driver dslx-list-fns --dslx_input_file sample-usage/src/sample.x --format json
+```
+
 ### `dslx-specialize`: Specialize parametric DSLX functions
 
 Creates a new DSLX module in which every parametric function reachable from a given top function (within the same source file) is specialized for the concrete instantiations observed in the type information. Imported functions are never specialized; invocations targeting them are left untouched.
