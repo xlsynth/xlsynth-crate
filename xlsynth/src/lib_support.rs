@@ -640,37 +640,50 @@ impl JitRunContext {
 #[derive(Default)]
 pub(crate) struct PackedJitRunContext {
     args_ptrs: Vec<*const u8>,
-    arg_sizes: Vec<usize>,
-    validated_arg_sizes: Vec<usize>,
-    validated_result_size: usize,
-    packed_contract_validated: bool,
+    packed_arg_sizes: Vec<usize>,
+    packed_return_size: usize,
+    cached_jit_ptr: *const CIrFunctionJit,
 }
 
 impl PackedJitRunContext {
-    fn update_arg_buffers(&mut self, args: &[&[u8]]) {
+    fn update_arg_ptrs(&mut self, args: &[&[u8]]) {
         self.args_ptrs.clear();
-        self.arg_sizes.clear();
         self.args_ptrs.reserve(args.len());
-        self.arg_sizes.reserve(args.len());
         for arg in args {
             self.args_ptrs.push(arg.as_ptr());
-            self.arg_sizes.push(arg.len());
         }
     }
 
-    fn packed_contract_matches_current_shape(&self, result_buffer_size: usize) -> bool {
-        self.packed_contract_validated
-            && self.validated_result_size == result_buffer_size
-            && self.validated_arg_sizes == self.arg_sizes
+    fn is_layout_cached_for_jit(&self, jit: *const CIrFunctionJit, arg_count: usize) -> bool {
+        self.cached_jit_ptr == jit && self.packed_arg_sizes.len() == arg_count
     }
 
-    fn record_validated_shape(&mut self, result_buffer_size: usize) {
-        self.validated_arg_sizes.clear();
-        self.validated_arg_sizes.reserve(self.arg_sizes.len());
-        self.validated_arg_sizes
-            .extend(self.arg_sizes.iter().copied());
-        self.validated_result_size = result_buffer_size;
-        self.packed_contract_validated = true;
+    fn refresh_layout_cache(
+        &mut self,
+        jit: *const CIrFunctionJit,
+        arg_count: usize,
+    ) -> Result<(), XlsynthError> {
+        self.packed_arg_sizes.clear();
+        self.packed_arg_sizes.reserve(arg_count);
+        for arg_index in 0..arg_count {
+            let mut packed_size_out: usize = 0;
+            xls_ffi_call!(
+                xlsynth_sys::xls_function_jit_get_packed_arg_size,
+                jit,
+                arg_index;
+                packed_size_out
+            )?;
+            self.packed_arg_sizes.push(packed_size_out);
+        }
+        let mut packed_return_size_out: usize = 0;
+        xls_ffi_call!(
+            xlsynth_sys::xls_function_jit_get_packed_return_size,
+            jit;
+            packed_return_size_out
+        )?;
+        self.packed_return_size = packed_return_size_out;
+        self.cached_jit_ptr = jit;
+        Ok(())
     }
 }
 
@@ -850,17 +863,31 @@ pub(crate) fn xls_function_jit_run_packed_with_context(
     result_buffer: &mut [u8],
     context: &mut PackedJitRunContext,
 ) -> Result<(), XlsynthError> {
-    context.update_arg_buffers(args);
-    if !context.packed_contract_matches_current_shape(result_buffer.len()) {
-        xls_ffi_call_noreturn!(
-            xlsynth_sys::xls_function_jit_validate_packed_call,
-            jit,
-            context.args_ptrs.len(),
-            context.arg_sizes.as_ptr(),
-            result_buffer.len()
-        )?;
-        context.record_validated_shape(result_buffer.len());
+    context.update_arg_ptrs(args);
+    if !context.is_layout_cached_for_jit(jit, args.len()) {
+        context.refresh_layout_cache(jit, args.len())?;
     }
+
+    for (arg_index, (arg, required_size)) in
+        args.iter().zip(context.packed_arg_sizes.iter()).enumerate()
+    {
+        if arg.len() < *required_size {
+            return Err(XlsynthError(format!(
+                "packed argument {} too small: expected at least {} bytes, got {} bytes",
+                arg_index,
+                required_size,
+                arg.len()
+            )));
+        }
+    }
+    if result_buffer.len() < context.packed_return_size {
+        return Err(XlsynthError(format!(
+            "packed result buffer too small: expected at least {} bytes, got {} bytes",
+            context.packed_return_size,
+            result_buffer.len()
+        )));
+    }
+
     xls_ffi_call_noreturn!(
         xlsynth_sys::xls_function_jit_run_packed_trusted,
         jit,
