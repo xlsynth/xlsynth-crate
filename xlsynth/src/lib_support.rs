@@ -637,6 +637,25 @@ impl JitRunContext {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct PackedJitRunContext {
+    args_ptrs: Vec<*const u8>,
+    arg_sizes: Vec<usize>,
+}
+
+impl PackedJitRunContext {
+    fn update_arg_buffers(&mut self, args: &[&[u8]]) {
+        self.args_ptrs.clear();
+        self.arg_sizes.clear();
+        self.args_ptrs.reserve(args.len());
+        self.arg_sizes.reserve(args.len());
+        for arg in args {
+            self.args_ptrs.push(arg.as_ptr());
+            self.arg_sizes.push(arg.len());
+        }
+    }
+}
+
 struct RawJitRunOutput {
     result_out: *mut CIrValue,
     trace_messages_out: *mut CTraceMessage,
@@ -775,6 +794,55 @@ pub(crate) fn xls_function_jit_run_value_with_context(
     Ok(IrValue {
         ptr: raw.result_out,
     })
+}
+
+pub(crate) fn xls_function_jit_get_packed_arg_size(
+    _package_guard: &RwLockReadGuard<IrPackagePtr>,
+    jit: *const CIrFunctionJit,
+    arg_index: usize,
+) -> Result<usize, XlsynthError> {
+    let mut size_out: usize = 0;
+    xls_ffi_call!(xlsynth_sys::xls_function_jit_get_packed_arg_size, jit, arg_index; size_out)?;
+    Ok(size_out)
+}
+
+pub(crate) fn xls_function_jit_get_packed_return_size(
+    _package_guard: &RwLockReadGuard<IrPackagePtr>,
+    jit: *const CIrFunctionJit,
+) -> Result<usize, XlsynthError> {
+    let mut size_out: usize = 0;
+    xls_ffi_call!(xlsynth_sys::xls_function_jit_get_packed_return_size, jit; size_out)?;
+    Ok(size_out)
+}
+
+pub(crate) fn xls_function_jit_run_packed(
+    _package_guard: &RwLockReadGuard<IrPackagePtr>,
+    jit: *const CIrFunctionJit,
+    args: &[&[u8]],
+    result_buffer: &mut [u8],
+) -> Result<(), XlsynthError> {
+    let mut context = PackedJitRunContext::default();
+    xls_function_jit_run_packed_with_context(_package_guard, jit, args, result_buffer, &mut context)
+}
+
+pub(crate) fn xls_function_jit_run_packed_with_context(
+    _package_guard: &RwLockReadGuard<IrPackagePtr>,
+    jit: *const CIrFunctionJit,
+    args: &[&[u8]],
+    result_buffer: &mut [u8],
+    context: &mut PackedJitRunContext,
+) -> Result<(), XlsynthError> {
+    context.update_arg_buffers(args);
+    xls_ffi_call_noreturn!(
+        xlsynth_sys::xls_function_jit_run_packed,
+        jit,
+        context.args_ptrs.len(),
+        context.args_ptrs.as_ptr(),
+        context.arg_sizes.as_ptr(),
+        result_buffer.len(),
+        result_buffer.as_mut_ptr()
+    )?;
+    Ok(())
 }
 
 pub(crate) fn xls_mangle_dslx_name(

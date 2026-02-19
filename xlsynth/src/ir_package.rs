@@ -5,8 +5,10 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 pub use crate::lib_support::RunResult;
 use crate::lib_support::{
-    self, c_str_to_rust, xls_function_jit_run, xls_function_jit_run_value_with_context,
-    xls_function_jit_run_with_context, xls_make_function_jit, JitRunContext,
+    self, c_str_to_rust, xls_function_jit_get_packed_arg_size,
+    xls_function_jit_get_packed_return_size, xls_function_jit_run, xls_function_jit_run_packed,
+    xls_function_jit_run_packed_with_context, xls_function_jit_run_value_with_context,
+    xls_function_jit_run_with_context, xls_make_function_jit, JitRunContext, PackedJitRunContext,
 };
 use crate::xlsynth_error::XlsynthError;
 use crate::{
@@ -247,6 +249,11 @@ pub struct IrFunctionJitRunContext {
     pub(crate) context: JitRunContext,
 }
 
+#[derive(Default)]
+pub struct IrFunctionJitPackedRunContext {
+    pub(crate) context: PackedJitRunContext,
+}
+
 impl Drop for IrFunctionJit {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
@@ -296,6 +303,37 @@ impl IrFunctionJit {
             &package_read_guard,
             self.ptr,
             args,
+            &mut context.context,
+        )
+    }
+
+    pub fn get_packed_arg_size(&self, arg_index: usize) -> Result<usize, XlsynthError> {
+        let package_read_guard: RwLockReadGuard<IrPackagePtr> = self.parent.read().unwrap();
+        xls_function_jit_get_packed_arg_size(&package_read_guard, self.ptr, arg_index)
+    }
+
+    pub fn get_packed_return_size(&self) -> Result<usize, XlsynthError> {
+        let package_read_guard: RwLockReadGuard<IrPackagePtr> = self.parent.read().unwrap();
+        xls_function_jit_get_packed_return_size(&package_read_guard, self.ptr)
+    }
+
+    pub fn run_packed(&self, args: &[&[u8]], result_buffer: &mut [u8]) -> Result<(), XlsynthError> {
+        let package_read_guard: RwLockReadGuard<IrPackagePtr> = self.parent.read().unwrap();
+        xls_function_jit_run_packed(&package_read_guard, self.ptr, args, result_buffer)
+    }
+
+    pub fn run_packed_with_context(
+        &self,
+        args: &[&[u8]],
+        result_buffer: &mut [u8],
+        context: &mut IrFunctionJitPackedRunContext,
+    ) -> Result<(), XlsynthError> {
+        let package_read_guard: RwLockReadGuard<IrPackagePtr> = self.parent.read().unwrap();
+        xls_function_jit_run_packed_with_context(
+            &package_read_guard,
+            self.ptr,
+            args,
+            result_buffer,
             &mut context.context,
         )
     }
@@ -381,6 +419,34 @@ mod tests {
                 .expect("jit run_value_with_context success");
             let want = IrValue::parse_typed(&format!("bits[32]:{}", input + 1)).unwrap();
             assert_eq!(result, want);
+        }
+    }
+
+    #[test]
+    fn test_plus_one_fn_jit_run_packed_with_context() {
+        let ir = "package test\nfn plus_one(x: bits[32]) -> bits[32] {
+    literal.2: bits[32] = literal(value=1)
+    ret add.1: bits[32] = add(x, literal.2)
+}";
+        let package = IrPackage::parse_ir(ir, None).expect("parse success");
+        let f = package
+            .get_function("plus_one")
+            .expect("should find function");
+        let jit = IrFunctionJit::new(&f).expect("jit creation success");
+
+        assert_eq!(jit.get_packed_arg_size(0).expect("arg size"), 4);
+        assert_eq!(jit.get_packed_return_size().expect("return size"), 4);
+
+        let mut context = IrFunctionJitPackedRunContext::default();
+        let mut result_buffer = [0u8; 4];
+
+        for input in [0u32, 1, 2, 3, 4] {
+            let arg0 = input.to_le_bytes();
+            let args: [&[u8]; 1] = [&arg0];
+            jit.run_packed_with_context(&args, &mut result_buffer, &mut context)
+                .expect("jit run_packed_with_context success");
+            let got = u32::from_le_bytes(result_buffer);
+            assert_eq!(got, input + 1);
         }
     }
 
