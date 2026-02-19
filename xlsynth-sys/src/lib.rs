@@ -704,6 +704,21 @@ extern "C" {
         result_buffer: *mut u8,
         error_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
+    pub fn xls_function_jit_validate_packed_call(
+        jit: *const CIrFunctionJit,
+        argc: libc::size_t,
+        arg_sizes: *const libc::size_t,
+        result_buffer_size: libc::size_t,
+        error_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
+    pub fn xls_function_jit_run_packed_trusted(
+        jit: *const CIrFunctionJit,
+        argc: libc::size_t,
+        args: *const *const u8,
+        result_buffer_size: libc::size_t,
+        result_buffer: *mut u8,
+        error_out: *mut *mut std::os::raw::c_char,
+    ) -> bool;
     pub fn xls_trace_messages_free(trace_messages: *mut CTraceMessage, count: libc::size_t);
 
     // -- VAST APIs

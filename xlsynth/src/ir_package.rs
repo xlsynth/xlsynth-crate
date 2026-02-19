@@ -451,6 +451,46 @@ mod tests {
     }
 
     #[test]
+    fn test_plus_one_fn_jit_run_packed_with_context_revalidates_shape() {
+        let ir = "package test\nfn plus_one(x: bits[32]) -> bits[32] {
+    literal.2: bits[32] = literal(value=1)
+    ret add.1: bits[32] = add(x, literal.2)
+}";
+        let package = IrPackage::parse_ir(ir, None).expect("parse success");
+        let f = package
+            .get_function("plus_one")
+            .expect("should find function");
+        let jit = IrFunctionJit::new(&f).expect("jit creation success");
+
+        let mut context = IrFunctionJitPackedRunContext::default();
+        let mut result_buffer = [0u8; 4];
+
+        let good = 41u32.to_le_bytes();
+        let good_args: [&[u8]; 1] = [&good];
+        jit.run_packed_with_context(&good_args, &mut result_buffer, &mut context)
+            .expect("first run success");
+        assert_eq!(u32::from_le_bytes(result_buffer), 42);
+
+        let too_short = [0u8; 3];
+        let bad_args: [&[u8]; 1] = [&too_short];
+        let err = jit
+            .run_packed_with_context(&bad_args, &mut result_buffer, &mut context)
+            .expect_err("shape mismatch should fail");
+        assert!(
+            err.to_string().contains("too small"),
+            "unexpected error: {}",
+            err
+        );
+
+        // Prior validated shape should still execute correctly.
+        let again = 9u32.to_le_bytes();
+        let again_args: [&[u8]; 1] = [&again];
+        jit.run_packed_with_context(&again_args, &mut result_buffer, &mut context)
+            .expect("run after mismatch success");
+        assert_eq!(u32::from_le_bytes(result_buffer), 10);
+    }
+
+    #[test]
     fn test_ir_package_set_top_by_name() {
         let mut package = IrPackage::new("test_package").unwrap();
         // Build the identity function inside of the package that is not marked as top.

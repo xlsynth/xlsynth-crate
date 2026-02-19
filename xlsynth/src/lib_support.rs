@@ -641,6 +641,9 @@ impl JitRunContext {
 pub(crate) struct PackedJitRunContext {
     args_ptrs: Vec<*const u8>,
     arg_sizes: Vec<usize>,
+    validated_arg_sizes: Vec<usize>,
+    validated_result_size: usize,
+    packed_contract_validated: bool,
 }
 
 impl PackedJitRunContext {
@@ -653,6 +656,21 @@ impl PackedJitRunContext {
             self.args_ptrs.push(arg.as_ptr());
             self.arg_sizes.push(arg.len());
         }
+    }
+
+    fn packed_contract_matches_current_shape(&self, result_buffer_size: usize) -> bool {
+        self.packed_contract_validated
+            && self.validated_result_size == result_buffer_size
+            && self.validated_arg_sizes == self.arg_sizes
+    }
+
+    fn record_validated_shape(&mut self, result_buffer_size: usize) {
+        self.validated_arg_sizes.clear();
+        self.validated_arg_sizes.reserve(self.arg_sizes.len());
+        self.validated_arg_sizes
+            .extend(self.arg_sizes.iter().copied());
+        self.validated_result_size = result_buffer_size;
+        self.packed_contract_validated = true;
     }
 }
 
@@ -833,12 +851,21 @@ pub(crate) fn xls_function_jit_run_packed_with_context(
     context: &mut PackedJitRunContext,
 ) -> Result<(), XlsynthError> {
     context.update_arg_buffers(args);
+    if !context.packed_contract_matches_current_shape(result_buffer.len()) {
+        xls_ffi_call_noreturn!(
+            xlsynth_sys::xls_function_jit_validate_packed_call,
+            jit,
+            context.args_ptrs.len(),
+            context.arg_sizes.as_ptr(),
+            result_buffer.len()
+        )?;
+        context.record_validated_shape(result_buffer.len());
+    }
     xls_ffi_call_noreturn!(
-        xlsynth_sys::xls_function_jit_run_packed,
+        xlsynth_sys::xls_function_jit_run_packed_trusted,
         jit,
         context.args_ptrs.len(),
         context.args_ptrs.as_ptr(),
-        context.arg_sizes.as_ptr(),
         result_buffer.len(),
         result_buffer.as_mut_ptr()
     )?;
