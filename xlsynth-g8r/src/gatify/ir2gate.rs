@@ -1103,6 +1103,55 @@ fn get_pow2_minus1_k(bits: &xlsynth::IrBits) -> Option<usize> {
     Some(k)
 }
 
+fn normalize_add_literal_rhs(
+    f: &ir::Fn,
+    a: ir::NodeRef,
+    b: ir::NodeRef,
+) -> Option<(ir::NodeRef, xlsynth::IrBits)> {
+    let a_lit = literal_bits_if_bits_node(f, a);
+    let b_lit = literal_bits_if_bits_node(f, b);
+
+    match (a_lit, b_lit) {
+        (None, Some(rhs_bits)) => Some((a, rhs_bits)),
+        (Some(rhs_bits), None) => Some((b, rhs_bits)),
+        // If both are literals, we expect folding to have handled this.
+        (Some(_), Some(_)) => None,
+        (None, None) => None,
+    }
+}
+
+fn gatify_add_const_pow2_minus1(
+    gb: &mut GateBuilder,
+    lhs_bits: &AigBitVector,
+    k: usize,
+) -> AigBitVector {
+    let bit_count = lhs_bits.get_bit_count();
+    assert!(k > 0 && k < bit_count);
+
+    let mut sum = Vec::with_capacity(bit_count);
+    // For low bits where rhs_i=1, carry recurrence is c_{i+1} = lhs_i | c_i,
+    // and sum_i = !(lhs_i ^ c_i).
+    let mut carry = gb.get_false();
+    for i in 0..k {
+        let lhs_i = *lhs_bits.get_lsb(i);
+        let lhs_xor_carry = gb.add_xor_binary(lhs_i, carry);
+        let sum_i = gb.add_not(lhs_xor_carry);
+        sum.push(sum_i);
+        carry = gb.add_or_binary(lhs_i, carry);
+    }
+
+    // For upper bits where rhs_i=0, this is an increment-by-carry chain:
+    // sum_i = lhs_i ^ carry and c_{i+1} = lhs_i & carry.
+    for i in k..bit_count {
+        let lhs_i = *lhs_bits.get_lsb(i);
+        let sum_i = gb.add_xor_binary(lhs_i, carry);
+        sum.push(sum_i);
+        carry = gb.add_and_binary(lhs_i, carry);
+    }
+
+    AigBitVector::from_lsb_is_index_0(&sum)
+}
+
 fn get_neg_pow2_k(bits: &xlsynth::IrBits) -> Option<usize> {
     // Recognizes values of the form -2^k in two's complement, i.e. high bits are
     // 1 and the low k bits are 0. k=0 => all ones, k=bit_count-1 => int_min.
@@ -2753,20 +2802,64 @@ fn gatify_node(
             env.add(node_ref, GateOrVec::BitVector(gates));
         }
         ir::NodePayload::Binop(ir::Binop::Add, a, b) => {
-            let a_gate_refs = env.get_bit_vector(*a).expect("add lhs should be present");
-            let b_gate_refs = env.get_bit_vector(*b).expect("add rhs should be present");
-            assert_eq!(a_gate_refs.get_bit_count(), b_gate_refs.get_bit_count());
-            let add_tag = format!("add_{}", node.text_id);
-            let (_c_out, gates) = gatify_add_with_mapping(
-                options.adder_mapping,
-                &a_gate_refs,
-                &b_gate_refs,
-                g8_builder.get_false(),
-                Some(&add_tag),
-                g8_builder,
-            );
-            assert_eq!(gates.get_bit_count(), a_gate_refs.get_bit_count());
-            env.add(node_ref, GateOrVec::BitVector(gates));
+            if let Some((lhs, rhs_bits)) = normalize_add_literal_rhs(f, *a, *b) {
+                if let Some(k) = get_pow2_minus1_k(&rhs_bits) {
+                    let lhs_gate_refs = env
+                        .get_bit_vector(lhs)
+                        .expect("add lhs should be present for literal-rhs rewrite");
+                    assert_eq!(lhs_gate_refs.get_bit_count(), rhs_bits.get_bit_count());
+                    let gates = if k == 0 {
+                        lhs_gate_refs.clone()
+                    } else if k == lhs_gate_refs.get_bit_count() {
+                        // (2^N - 1) for N-bit values is all ones; adding this is the same
+                        // as subtracting one modulo 2^N.
+                        let ones = g8_builder.add_literal(&rhs_bits);
+                        let add_tag = format!("add_{}", node.text_id);
+                        let (_c_out, gates) = gatify_add_with_mapping(
+                            options.adder_mapping,
+                            &lhs_gate_refs,
+                            &ones,
+                            g8_builder.get_false(),
+                            Some(&add_tag),
+                            g8_builder,
+                        );
+                        gates
+                    } else {
+                        gatify_add_const_pow2_minus1(g8_builder, &lhs_gate_refs, k)
+                    };
+                    env.add(node_ref, GateOrVec::BitVector(gates));
+                } else {
+                    let a_gate_refs = env.get_bit_vector(*a).expect("add lhs should be present");
+                    let b_gate_refs = env.get_bit_vector(*b).expect("add rhs should be present");
+                    assert_eq!(a_gate_refs.get_bit_count(), b_gate_refs.get_bit_count());
+                    let add_tag = format!("add_{}", node.text_id);
+                    let (_c_out, gates) = gatify_add_with_mapping(
+                        options.adder_mapping,
+                        &a_gate_refs,
+                        &b_gate_refs,
+                        g8_builder.get_false(),
+                        Some(&add_tag),
+                        g8_builder,
+                    );
+                    assert_eq!(gates.get_bit_count(), a_gate_refs.get_bit_count());
+                    env.add(node_ref, GateOrVec::BitVector(gates));
+                }
+            } else {
+                let a_gate_refs = env.get_bit_vector(*a).expect("add lhs should be present");
+                let b_gate_refs = env.get_bit_vector(*b).expect("add rhs should be present");
+                assert_eq!(a_gate_refs.get_bit_count(), b_gate_refs.get_bit_count());
+                let add_tag = format!("add_{}", node.text_id);
+                let (_c_out, gates) = gatify_add_with_mapping(
+                    options.adder_mapping,
+                    &a_gate_refs,
+                    &b_gate_refs,
+                    g8_builder.get_false(),
+                    Some(&add_tag),
+                    g8_builder,
+                );
+                assert_eq!(gates.get_bit_count(), a_gate_refs.get_bit_count());
+                env.add(node_ref, GateOrVec::BitVector(gates));
+            }
         }
         ir::NodePayload::Binop(ir::Binop::Sub, a, b) => {
             let a_gate_refs = env.get_bit_vector(*a).expect("sub lhs should be present");
