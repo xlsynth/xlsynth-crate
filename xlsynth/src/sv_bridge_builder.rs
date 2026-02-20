@@ -295,20 +295,12 @@ fn convert_extern_type(
 }
 
 impl SvBridgeBuilder {
-    /// Creates a builder that preserves the historical enum-case naming
-    /// behavior.
-    ///
-    /// Callers that need enum-qualified SV case names should use
-    /// [`Self::with_enum_case_naming_policy`] to make the policy choice
-    /// explicit.
-    pub fn new() -> Self {
-        Self::with_enum_case_naming_policy(SvEnumCaseNamingPolicy::Unqualified)
-    }
-
     /// Creates a builder with an explicit policy for enum member symbol
     /// naming.
     ///
-    /// Using [`SvEnumCaseNamingPolicy::Unqualified`] keeps the previous output
+    /// Callers must choose a policy at construction time so the generated SV
+    /// enum member spelling is explicit at each call site. Using
+    /// [`SvEnumCaseNamingPolicy::Unqualified`] keeps the historical output
     /// shape, while [`SvEnumCaseNamingPolicy::EnumQualified`] prefixes each
     /// case with the containing enum name to avoid cross-enum collisions in
     /// the flat generated SV namespace.
@@ -366,12 +358,6 @@ impl SvBridgeBuilder {
                 Self::enum_case_name_component_to_sv(member_name)
             ),
         }
-    }
-}
-
-impl Default for SvBridgeBuilder {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -684,7 +670,8 @@ mod tests {
             dslx::parse_and_typecheck(importer_dslx, "importer.x", "importer", &mut import_data)
                 .unwrap();
 
-        let mut builder = SvBridgeBuilder::new();
+        let mut builder =
+            SvBridgeBuilder::with_enum_case_policy(SvEnumCaseNamingPolicy::Unqualified);
         convert_imported_module(&importer_typechecked, &mut builder).unwrap();
         let sv = builder.build();
         assert_eq!(
