@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use pretty_assertions::assert_eq;
-use xlsynth::{dslx, dslx_bridge::convert_imported_module, sv_bridge_builder::SvBridgeBuilder};
+use xlsynth::{
+    dslx,
+    dslx_bridge::convert_imported_module,
+    sv_bridge_builder::{SvBridgeBuilder, SvEnumCaseNamingPolicy},
+};
 
 /// Tests that we can convert the whole "structure_zoo.x" file to SystemVerilog.
 #[test]
@@ -26,7 +30,8 @@ fn test_sv_bridge_structure_zoo() {
 
     // Make a builder to convert the "imported" module.
     let imported_sv = {
-        let mut builder = SvBridgeBuilder::new();
+        let mut builder =
+            SvBridgeBuilder::with_enum_case_policy(SvEnumCaseNamingPolicy::Unqualified);
         convert_imported_module(&common_zoo, &mut builder).unwrap();
         let contents = builder.build();
         format!("package common_zoo_sv_pkg;\n{contents}endpackage : common_zoo_sv_pkg")
@@ -39,7 +44,7 @@ fn test_sv_bridge_structure_zoo() {
     assert_eq!(imported_sv, imported_sv_golden);
 
     // Make a builder to convert the "importer" module.
-    let mut builder = SvBridgeBuilder::new();
+    let mut builder = SvBridgeBuilder::with_enum_case_policy(SvEnumCaseNamingPolicy::Unqualified);
     convert_imported_module(&zoo, &mut builder).unwrap();
     let got_sv = builder.build();
     log::info!("structure_zoo.sv:\n{got_sv}");
