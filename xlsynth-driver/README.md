@@ -13,7 +13,8 @@ cargo run -p xlsynth-driver -- --toolchain=$HOME/xlsynth-toolchain.toml \
 cargo run -p xlsynth-driver -- --toolchain=$HOME/xlsynth-toolchain.toml \
     dslx2pipeline ../sample-usage/src/sample.x add1 \
     --delay_model=asap7 --pipeline_stages=2
-cargo run -p xlsynth-driver -- dslx2sv-types ../tests/structure_zoo.x
+cargo run -p xlsynth-driver -- dslx2sv-types ../tests/structure_zoo.x \
+    --sv_enum_case_naming_policy=unqualified
 ```
 
 For a full list of options, run `xlsynth-driver <subcommand> --help`.
@@ -370,6 +371,10 @@ Additional flags:
 
 Generates SystemVerilog type declarations for the definitions in a DSLX file.
 The output is written to **stdout**.
+
+Required flags:
+
+- `--sv_enum_case_naming_policy <unqualified|enum_qualified>` – controls whether enum members are emitted as unqualified case names (e.g. `Read`) or prefixed with the enum name (e.g. `OpType_Read`).
 
 ### `dslx-show`: Show a DSLX symbol definition
 

@@ -31,7 +31,8 @@
 //!     --input_valid_signal=input_valid \
 //!     --output_valid_signal=output_valid
 //! $ cargo run -- \
-//!     dslx2sv-types ../tests/structure_zoo.x
+//!     dslx2sv-types ../tests/structure_zoo.x \
+//!     --sv_enum_case_naming_policy=unqualified
 //! ```
 
 mod aig_equiv;
@@ -681,7 +682,20 @@ fn main() {
         .subcommand(
             clap::Command::new("dslx2sv-types")
                 .about("Converts DSLX type definitions to SystemVerilog")
-                .add_dslx_input_args(false),
+                .add_dslx_input_args(false)
+                // Intentionally no default: callers must opt into a naming
+                // policy so generated SV enum symbol spelling is explicit.
+                .arg(
+                    Arg::new("sv_enum_case_naming_policy")
+                        .long("sv_enum_case_naming_policy")
+                        .value_name("POLICY")
+                        .help(
+                            "Enum case naming policy for generated SystemVerilog enum members",
+                        )
+                        .required(true)
+                        .action(ArgAction::Set)
+                        .value_parser(["unqualified", "enum_qualified"]),
+                ),
         )
         .subcommand(
             clap::Command::new("dslx-g8r-stats")
