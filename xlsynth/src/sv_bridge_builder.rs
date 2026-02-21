@@ -31,6 +31,8 @@ const TYPE_ALIAS_SUFFIX: &str = "_t";
 /// `OpType_Read`); it does not change the emitted enum typedef name. The bridge
 /// still applies the existing case-normalization rules to each component before
 /// combining them.
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
+#[cfg_attr(feature = "clap", value(rename_all = "snake_case"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SvEnumCaseNamingPolicy {
     /// Emit only the normalized case name (for example `Read`).
@@ -307,9 +309,9 @@ impl SvBridgeBuilder {
     /// naming.
     ///
     /// Using [`SvEnumCaseNamingPolicy::Unqualified`] keeps the previous output
-    /// shape, while [`SvEnumCaseNamingPolicy::EnumQualified`] prefixes each case
-    /// with the containing enum name to avoid cross-enum collisions in the flat
-    /// generated SV namespace.
+    /// shape, while [`SvEnumCaseNamingPolicy::EnumQualified`] prefixes each
+    /// case with the containing enum name to avoid cross-enum collisions in
+    /// the flat generated SV namespace.
     pub fn with_enum_case_policy(enum_case_naming_policy: SvEnumCaseNamingPolicy) -> Self {
         Self {
             lines: vec![],
@@ -347,10 +349,11 @@ impl SvBridgeBuilder {
         }
     }
 
-    /// Computes the emitted SV enum member symbol under the active naming policy.
+    /// Computes the emitted SV enum member symbol under the active naming
+    /// policy.
     ///
-    /// Both `enum_name` and `member_name` are normalized with the same helper so
-    /// the `EnumQualified` policy composes exactly with the historical
+    /// Both `enum_name` and `member_name` are normalized with the same helper
+    /// so the `EnumQualified` policy composes exactly with the historical
     /// `Unqualified` formatting behavior.
     fn enum_member_name_to_sv(&self, enum_name: &str, member_name: &str) -> String {
         match self.enum_case_naming_policy {

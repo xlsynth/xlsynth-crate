@@ -47,9 +47,10 @@ pub fn dslx2sv_types(
 /// Handles the `dslx2sv-types` subcommand from the top-level Clap dispatch.
 ///
 /// The CLI definition in `main.rs` requires and validates
-/// `--sv_enum_case_naming_policy`, so this function can map the parsed string to
-/// [`SvEnumCaseNamingPolicy`] and then delegate to [`dslx2sv_types`]. Calling
-/// this with `ArgMatches` from another subcommand would panic because the code
+/// `--sv_enum_case_naming_policy` using Clap's `ValueEnum` support on
+/// [`SvEnumCaseNamingPolicy`], so this function can retrieve the typed value
+/// directly and then delegate to [`dslx2sv_types`]. Calling this with
+/// `ArgMatches` from another subcommand would panic because the code
 /// unwraps/`expect`s required `dslx2sv-types` arguments.
 pub fn handle_dslx2sv_types(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
     log::info!("handle_dslx2sv_types");
@@ -57,15 +58,9 @@ pub fn handle_dslx2sv_types(matches: &ArgMatches, config: &Option<ToolchainConfi
     let input_path = std::path::Path::new(input_file);
     // Clap guarantees presence and allowed values for this flag in the
     // `dslx2sv-types` subcommand definition.
-    let enum_case_naming_policy = match matches
-        .get_one::<String>("sv_enum_case_naming_policy")
-        .map(|s| s.as_str())
-        .expect("clap should require sv_enum_case_naming_policy")
-    {
-        "unqualified" => SvEnumCaseNamingPolicy::Unqualified,
-        "enum_qualified" => SvEnumCaseNamingPolicy::EnumQualified,
-        other => unreachable!("unexpected clap-validated sv enum case naming policy: {other}"),
-    };
+    let enum_case_naming_policy = *matches
+        .get_one::<SvEnumCaseNamingPolicy>("sv_enum_case_naming_policy")
+        .expect("clap should require sv_enum_case_naming_policy");
 
     let paths = get_dslx_paths(matches, config);
     let dslx_stdlib_path = paths.stdlib_path.as_ref().map(|p| p.as_path());

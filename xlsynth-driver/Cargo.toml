@@ -11,7 +11,7 @@ documentation = "https://docs.rs/xlsynth"
 homepage = "https://github.com/xlsynth/xlsynth-crate"
 
 [dependencies]
-xlsynth = { path = "../xlsynth", version = "0.6.4" }
+xlsynth = { path = "../xlsynth", version = "0.6.4", features = ["clap"] }
 xlsynth-g8r = { path = "../xlsynth-g8r", version = "0.6.4" }
 xlsynth-pir = { path = "../xlsynth-pir", version = "0.6.4" }
 xlsynth-prover = { path = "../xlsynth-prover", version = "0.6.4" }
