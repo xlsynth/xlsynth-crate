@@ -112,6 +112,7 @@ use clap::{Arg, ArgAction};
 use once_cell::sync::Lazy;
 use report_cli_error::report_cli_error_and_exit;
 use serde::Deserialize;
+use xlsynth::sv_bridge_builder::SvEnumCaseNamingPolicy;
 use xlsynth_prover::prover::types::AssertionSemantics;
 use xlsynth_prover::prover::types::QuickCheckAssertionSemantics;
 
@@ -694,7 +695,9 @@ fn main() {
                         )
                         .required(true)
                         .action(ArgAction::Set)
-                        .value_parser(["unqualified", "enum_qualified"]),
+                        .value_parser(clap::builder::EnumValueParser::<
+                            SvEnumCaseNamingPolicy,
+                        >::new()),
                 ),
         )
         .subcommand(
