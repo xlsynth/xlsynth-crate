@@ -830,25 +830,10 @@ fn render_generated_module(
     run_body.push_str("        decode_output_0(self.inner.output(0), &mut output);\n");
     run_body.push_str("        Ok(output)\n");
 
-    run_with_events_body.push_str("        let stats = self.inner.run_with_events();\n");
-    run_with_events_body
-        .push_str("        let mut trace_messages = Vec::with_capacity(stats.trace_count);\n");
-    run_with_events_body.push_str("        for index in 0..stats.trace_count {\n");
-    run_with_events_body
-        .push_str("            trace_messages.push(self.inner.trace_message(index)?);\n");
-    run_with_events_body.push_str("        }\n");
-    run_with_events_body
-        .push_str("        let mut assert_messages = Vec::with_capacity(stats.assert_count);\n");
-    run_with_events_body.push_str("        for index in 0..stats.assert_count {\n");
-    run_with_events_body
-        .push_str("            assert_messages.push(self.inner.assert_message(index)?);\n");
-    run_with_events_body.push_str("        }\n");
-    run_with_events_body.push_str("        let mut output: Output = Default::default();\n");
-    run_with_events_body.push_str("        decode_output_0(self.inner.output(0), &mut output);\n");
-    run_with_events_body.push_str("        Ok(xlsynth::AotRunResult {\n");
-    run_with_events_body.push_str("            output,\n");
-    run_with_events_body.push_str("            trace_messages,\n");
-    run_with_events_body.push_str("            assert_messages,\n");
+    run_with_events_body.push_str("        self.inner.run_with_events(|inner| {\n");
+    run_with_events_body.push_str("            let mut output: Output = Default::default();\n");
+    run_with_events_body.push_str("            decode_output_0(inner.output(0), &mut output);\n");
+    run_with_events_body.push_str("            output\n");
     run_with_events_body.push_str("        })\n");
 
     Ok(format!(

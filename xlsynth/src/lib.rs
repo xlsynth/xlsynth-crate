@@ -30,7 +30,7 @@ use lib_support::{
 };
 
 pub use aot_lib::{AotCompiled, AotEntrypointMetadata, AotResult};
-pub use aot_runner::{AotEntrypointDescriptor, AotRunResult, AotRunner, RunStats};
+pub use aot_runner::{AotEntrypointDescriptor, AotRunResult, AotRunner};
 pub use ir_analysis::{Interval, IntervalSet, IrAnalysis, IrAnalysisLevel, KnownBits};
 pub use ir_builder::BValue;
 pub use ir_builder::FnBuilder;

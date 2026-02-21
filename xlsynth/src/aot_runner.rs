@@ -16,13 +16,6 @@ pub struct AotEntrypointDescriptor<'a> {
     pub metadata: AotEntrypointMetadata,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RunStats {
-    pub continuation: i64,
-    pub trace_count: usize,
-    pub assert_count: usize,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AotRunResult<T> {
     pub output: T,
@@ -276,19 +269,14 @@ impl<'a> AotRunner<'a> {
         dst.copy_from_slice(src);
     }
 
-    /// Runs the AOT entrypoint and returns the raw run stats.
-    ///
-    /// This does not treat assertion failures as errors; callers can inspect
-    /// `RunStats::{trace_count, assert_count}` and then query messages via
-    /// `trace_message()` / `assert_message()`.
-    pub fn run_with_events(&mut self) -> RunStats {
+    fn run_trampoline(&mut self) -> (usize, usize) {
         if self.clear_events_before_run {
             self.context.clear_events();
         }
 
         let mut trace_count = 0usize;
         let mut assert_count = 0usize;
-        let continuation = unsafe {
+        let _continuation = unsafe {
             xlsynth_sys::xls_aot_entrypoint_trampoline(
                 self.descriptor.function_ptr,
                 self.input_ptrs.as_ptr(),
@@ -301,16 +289,12 @@ impl<'a> AotRunner<'a> {
             )
         };
 
-        RunStats {
-            continuation,
-            trace_count,
-            assert_count,
-        }
+        (trace_count, assert_count)
     }
 
     pub fn run(&mut self) -> AotResult<()> {
-        let stats = self.run_with_events();
-        if stats.assert_count > 0 {
+        let (_trace_count, assert_count) = self.run_trampoline();
+        if assert_count > 0 {
             // The AOT engine ran successfully, but the compiled function surfaced an
             // assertion. Surface the first assertion message as an error for
             // the "simple run" API.
@@ -318,6 +302,31 @@ impl<'a> AotRunner<'a> {
             return Err(XlsynthError(format!("XLS assertion failed: {first}")));
         }
         Ok(())
+    }
+
+    pub fn run_with_events<T>(
+        &mut self,
+        make_output: impl FnOnce(&Self) -> T,
+    ) -> AotResult<AotRunResult<T>> {
+        let (trace_count, assert_count) = self.run_trampoline();
+
+        let output = make_output(self);
+
+        let mut trace_messages = Vec::with_capacity(trace_count);
+        for index in 0..trace_count {
+            trace_messages.push(self.trace_message(index)?);
+        }
+
+        let mut assert_messages = Vec::with_capacity(assert_count);
+        for index in 0..assert_count {
+            assert_messages.push(self.assert_message(index)?);
+        }
+
+        Ok(AotRunResult {
+            output,
+            trace_messages,
+            assert_messages,
+        })
     }
 
     pub fn trace_message(&self, index: usize) -> AotResult<TraceMessage> {

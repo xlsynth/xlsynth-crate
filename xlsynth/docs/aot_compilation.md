@@ -1,33 +1,72 @@
 # Ahead-of-time (AOT) compilation
 
-DSLX or XLS IR is compiled into object code at build time, and the resulting object code is wrapped in generated Rust code to enable easy integration into user code.
+DSLX or XLS IR is compiled into object code at build time, and the resulting
+object code is wrapped in generated Rust code to enable easy integration into
+user code.
 
 Advantages compared to the DSLX interpreter or the XLS JIT:
 
 - Avoids compilation overhead at runtime.
-- Exposed interface uses native Rust types (e.g. `u64`, `[u8]`, structs, arrays).
-- High-performance interface avoids per-call allocation/deallocation, with minimal copying of arguments and outputs.
+- Exposed interface uses native Rust types (e.g. `u64`, `[u8]`, structs,
+  arrays).
+- High-performance interface avoids per-call allocation/deallocation, with
+  minimal copying of arguments and outputs.
 
 ## AOT Design
 
 The `xlsynth` AOT framework consists of the following pieces:
 
-- The libxls library exposes a C API for compiling XLS IR into object code and metadata about how to invoke the code (buffer sizes, alignments, etc.).
-- The XLS C API is wrapped in Rust code for convenience and safety: [`xlsynth/src/aot_lib.rs`](../src/aot_lib.rs).
-- Builder code ([`xlsynth/src/aot_builder.rs`](../src/aot_builder.rs)) generates Rust code that provides a native, high-performance interface to the underlying XLS object code. The generated code is encapsulated in an object that allocates the necessary buffers at creation time and exposes a simple entry point for calling the function. The generated code includes native Rust types for the interface.
-- Runner code ([`xlsynth/src/aot_runner.rs`](../src/aot_runner.rs)) is a library used by the generated code for tasks like allocating buffers and packing/unpacking arguments.
+- The libxls library exposes a C API for compiling XLS IR into object code and
+  metadata about how to invoke the code (buffer sizes, alignments, etc.).
+- The XLS C API is wrapped in Rust code for convenience and safety:
+  [`xlsynth/src/aot_lib.rs`](../src/aot_lib.rs).
+- Builder code ([`xlsynth/src/aot_builder.rs`](../src/aot_builder.rs)) generates
+  Rust code that provides a native, high-performance interface to the underlying
+  XLS object code. The generated code is encapsulated in an object that
+  allocates the necessary buffers at creation time and exposes a simple entry
+  point for calling the function. The generated code includes native Rust types
+  for the interface.
+- Runner code ([`xlsynth/src/aot_runner.rs`](../src/aot_runner.rs)) is a library
+  used by the generated code for tasks like allocating buffers and
+  packing/unpacking arguments.
 
 ## Using AOT compilation
 
-- Invoke the builder API from the `build.rs` file of the project to AOT-compile the XLS code and create the generated Rust code at build time.
-- Add `mod`s in the project code (e.g. `lib.rs`) that pull in the generated Rust code via `include!`.
+- Invoke the builder API from the `build.rs` file of the project to AOT-compile
+  the XLS code and create the generated Rust code at build time.
+- Add `mod`s in the project code (e.g. `lib.rs`) that pull in the generated Rust
+  code via `include!`.
 - Call the exported API to create the AOT object and invoke its `run` method.
 
 For an example, see [`xlsynth/tests/aot-test-crate`](../tests/aot-test-crate/).
 
+## Thread safety
+
+The underlying object code is thread safe, but the `AotRunner` object is not.
+The object allocates internal buffers which are used for each invocation of the
+AOT-compiled function. Each thread should create it's own runner by calling
+`new_runner`.
+
 ## Generated code
 
-As a simple example, consider a DSLX function that multiplies two 8-bit unsigned values and returns a 16-bit unsigned product:
+When AOT-compiled, the generated Rust wrapper module exposes a small typed
+interface for calling the compiled code. The generated code is a wrapper around
+`AotRunner` defined in `aot_runner.rs` with a method for creating the object and
+two methods for running the compiled code:
+
+- `run(...)`: Runs the compiled function and returns the output value. Raises an
+  error if an assert failed.
+- `run_with_events(...)`: Runs the compiled function and returns any trace or
+  assert messages along with the output value. Does not rais an error if an
+  assert failed. The caller can instead check for any assert messages.
+
+Types are defined for each function input (`Input0`, `Input1`, etc) and the
+function output (`Output`). Bits types of 64-bits or less are defined as aliases
+of `u64`. Wider types are aliases of arrays of `u8` (eg, `[u8; 16]`). Tuples and
+arrays are defined as `structs` and arrays respectively.
+
+As a simple example, consider a DSLX function that multiplies two 8-bit unsigned
+values and returns a 16-bit unsigned product:
 
 ```dslx
 pub fn mul8x8(a: u8, b: u8) -> u16 {
@@ -35,7 +74,7 @@ pub fn mul8x8(a: u8, b: u8) -> u16 {
 }
 ```
 
-When AOT-compiled, the generated Rust wrapper module exposes a small typed interface for calling the compiled code. The exact contents vary based on the signature, but the caller-facing pieces look like:
+The generated Rust code looks like:
 
 ```rust
 // Type aliases generated from the XLS signature.
