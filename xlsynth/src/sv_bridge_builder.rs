@@ -24,12 +24,40 @@ const STRUCT_ALIAS_SUFFIX: &str = "_t";
 /// The suffix used when we typedef a type alias to a type name.
 const TYPE_ALIAS_SUFFIX: &str = "_t";
 
+/// Selects how DSLX enum case symbols are emitted into the generated SV
+/// namespace.
+///
+/// This only affects enum member identifiers (for example `Read` vs
+/// `OpType_Read`); it does not change the emitted enum typedef name. The bridge
+/// still applies the existing case-normalization rules to each component before
+/// combining them.
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
+#[cfg_attr(feature = "clap", value(rename_all = "snake_case"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SvEnumCaseNamingPolicy {
+    /// Emit only the normalized case name (for example `Read`).
+    Unqualified,
+    /// Emit `<NormalizedEnumName>_<NormalizedCaseName>` (for example
+    /// `OpType_Read`).
+    EnumQualified,
+}
+
+/// Accumulates SV type declarations for a DSLX module while enforcing a flat
+/// generated-name namespace.
+///
+/// DSLX allows enum members from different enums to share the same case name,
+/// but the generated SV emitted by this builder places those case symbols in a
+/// single namespace. `defined` tracks all emitted symbols so collisions are
+/// reported deterministically during generation instead of surfacing later in a
+/// downstream parser or linter.
 pub struct SvBridgeBuilder {
     lines: Vec<String>,
     /// We keep a record of all the names we define flat within the namespace so
     /// that we can detect and report collisions at generation time instead
     /// of in a subsequent linting step.
     defined: HashSet<String>,
+    /// Controls how enum member symbols are derived before collision checks.
+    enum_case_naming_policy: SvEnumCaseNamingPolicy,
 }
 
 fn camel_to_snake(name: &str) -> String {
@@ -267,13 +295,27 @@ fn convert_extern_type(
 }
 
 impl SvBridgeBuilder {
-    pub fn new() -> Self {
+    /// Creates a builder with an explicit policy for enum member symbol
+    /// naming.
+    ///
+    /// Callers must choose a policy at construction time so the generated SV
+    /// enum member spelling is explicit at each call site. Using
+    /// [`SvEnumCaseNamingPolicy::Unqualified`] keeps the historical output
+    /// shape, while [`SvEnumCaseNamingPolicy::EnumQualified`] prefixes each
+    /// case with the containing enum name to avoid cross-enum collisions in
+    /// the flat generated SV namespace.
+    pub fn with_enum_case_policy(enum_case_naming_policy: SvEnumCaseNamingPolicy) -> Self {
         Self {
             lines: vec![],
             defined: HashSet::new(),
+            enum_case_naming_policy,
         }
     }
 
+    /// Returns the generated SV source accumulated so far.
+    ///
+    /// Callers typically invoke this after `dslx_bridge` conversion has emitted
+    /// all reachable type definitions into the builder.
     pub fn build(&self) -> String {
         self.lines.join("\n")
     }
@@ -289,18 +331,33 @@ impl SvBridgeBuilder {
         }
     }
 
-    fn enum_member_name_to_sv(dslx_name: &str) -> String {
+    /// Normalizes one enum-name or case-name component using the existing case
+    /// conversion rules.
+    fn enum_case_name_component_to_sv(dslx_name: &str) -> String {
         if is_screaming_snake_case(dslx_name) {
             screaming_snake_to_upper_camel(dslx_name)
         } else {
             dslx_name.to_string()
         }
     }
-}
 
-impl Default for SvBridgeBuilder {
-    fn default() -> Self {
-        Self::new()
+    /// Computes the emitted SV enum member symbol under the active naming
+    /// policy.
+    ///
+    /// Both `enum_name` and `member_name` are normalized with the same helper
+    /// so the `EnumQualified` policy composes exactly with the historical
+    /// `Unqualified` formatting behavior.
+    fn enum_member_name_to_sv(&self, enum_name: &str, member_name: &str) -> String {
+        match self.enum_case_naming_policy {
+            SvEnumCaseNamingPolicy::Unqualified => {
+                Self::enum_case_name_component_to_sv(member_name)
+            }
+            SvEnumCaseNamingPolicy::EnumQualified => format!(
+                "{}_{}",
+                Self::enum_case_name_component_to_sv(enum_name),
+                Self::enum_case_name_component_to_sv(member_name)
+            ),
+        }
     }
 }
 
@@ -336,7 +393,7 @@ impl BridgeBuilder for SvBridgeBuilder {
             let member_value_str = member_value.to_string_fmt(format)?;
             let digits = member_value_str.split(':').nth(1).expect("split success");
             let maybe_comma = if i < members.len() - 1 { "," } else { "" };
-            let sv_member_name = Self::enum_member_name_to_sv(member_name);
+            let sv_member_name = self.enum_member_name_to_sv(dslx_name, member_name);
             self.define_or_error(&sv_member_name, &ctx)?;
             lines.push(format!(
                 "    {sv_member_name} = {underlying_bit_count}'d{digits}{maybe_comma}"
@@ -451,9 +508,16 @@ mod tests {
 
     /// Reusable scaffolding for converting a single DSLX module contents to SV.
     fn simple_convert_for_test(dslx: &str) -> Result<String, XlsynthError> {
+        simple_convert_for_test_with_policy(dslx, SvEnumCaseNamingPolicy::Unqualified)
+    }
+
+    fn simple_convert_for_test_with_policy(
+        dslx: &str,
+        enum_case_naming_policy: SvEnumCaseNamingPolicy,
+    ) -> Result<String, XlsynthError> {
         let mut import_data = dslx::ImportData::default();
         let path = std::path::PathBuf::from_str("/memfile/my_module.x").unwrap();
-        let mut builder = SvBridgeBuilder::new();
+        let mut builder = SvBridgeBuilder::with_enum_case_policy(enum_case_naming_policy);
         convert_leaf_module(&mut import_data, dslx, &path, &mut builder)?;
         Ok(builder.build())
     }
@@ -505,6 +569,28 @@ mod tests {
         );
     }
 
+    // Verifies: EnumQualified prefixes normalized enum names onto normalized
+    // case names in emitted SV.
+    // Catches: Regressions where enum-qualified mode reuses the unqualified
+    // symbol path or skips normalization.
+    #[test]
+    fn test_convert_leaf_module_enum_def_enum_qualified_case_names() {
+        let dslx = r#"
+        enum MyEnum : u2 { MY_FIRST_VALUE = 0, MY_SECOND_VALUE = 1 }
+        "#;
+        let sv = simple_convert_for_test_with_policy(dslx, SvEnumCaseNamingPolicy::EnumQualified)
+            .unwrap();
+        xlsynth_test_helpers::assert_valid_sv(&sv);
+        assert_eq!(
+            sv,
+            r#"typedef enum logic [1:0] {
+    MyEnum_MyFirstValue = 2'd0,
+    MyEnum_MySecondValue = 2'd1
+} my_enum_t;
+"#
+        );
+    }
+
     #[test]
     fn test_convert_leaf_module_struct_def_only() {
         let dslx = r#"
@@ -547,6 +633,21 @@ mod tests {
         assert!(err.to_string().contains("name collision detected for SV name in generated module namespace: `A` context: DSLX enum `MySecondEnum`"));
     }
 
+    // Verifies: EnumQualified allows two DSLX enums to reuse member names
+    // without SV symbol collisions.
+    // Catches: Regressions where collision detection still sees flat
+    // unqualified names under EnumQualified mode.
+    #[test]
+    fn test_convert_leaf_module_enum_defs_with_enum_qualified_case_names_no_collision() {
+        let dslx = "enum MyFirstEnum : u1 { A = 0, B = 1 }
+        enum MySecondEnum: u3 { A = 3, B = 4 }";
+        let sv = simple_convert_for_test_with_policy(dslx, SvEnumCaseNamingPolicy::EnumQualified)
+            .unwrap();
+        xlsynth_test_helpers::assert_valid_sv(&sv);
+        assert!(sv.contains("MyFirstEnum_A = 1'd0"));
+        assert!(sv.contains("MySecondEnum_A = 3'd3"));
+    }
+
     #[test]
     fn test_is_screaming_snake_case() {
         assert!(is_screaming_snake_case("FOO_BAR"));
@@ -569,7 +670,8 @@ mod tests {
             dslx::parse_and_typecheck(importer_dslx, "importer.x", "importer", &mut import_data)
                 .unwrap();
 
-        let mut builder = SvBridgeBuilder::new();
+        let mut builder =
+            SvBridgeBuilder::with_enum_case_policy(SvEnumCaseNamingPolicy::Unqualified);
         convert_imported_module(&importer_typechecked, &mut builder).unwrap();
         let sv = builder.build();
         assert_eq!(
