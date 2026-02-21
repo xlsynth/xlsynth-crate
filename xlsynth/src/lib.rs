@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod aot_builder;
+pub mod aot_entrypoint_metadata;
+pub mod aot_lib;
+pub mod aot_runner;
 pub mod dslx;
 pub mod dslx_bridge;
 pub mod ir_analysis;
@@ -25,6 +29,8 @@ use lib_support::{
     xls_optimize_ir,
 };
 
+pub use aot_lib::{AotCompiled, AotEntrypointMetadata, AotResult};
+pub use aot_runner::{AotEntrypointDescriptor, AotRunResult, AotRunner, RunStats};
 pub use ir_analysis::{Interval, IntervalSet, IrAnalysis, IrAnalysisLevel, KnownBits};
 pub use ir_builder::BValue;
 pub use ir_builder::FnBuilder;
@@ -33,6 +39,7 @@ pub use ir_package::IrFunctionJit;
 pub use ir_package::IrPackage;
 pub use ir_package::IrType;
 pub use ir_package::RunResult;
+pub use ir_package::TraceMessage;
 pub use ir_value::IrValue;
 pub use xlsynth_error::XlsynthError;
 use xlsynth_sys::CIrValue;
