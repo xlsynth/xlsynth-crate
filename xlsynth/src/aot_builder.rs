@@ -364,7 +364,7 @@ fn render_type_declarations(
         if *bit_count <= 64 {
             out.push_str(&format!("pub type Bits{bit_count} = u64;\n"));
         } else {
-            let byte_count = (bit_count + 7) / 8;
+            let byte_count = bit_count.div_ceil(8);
             out.push_str(&format!("pub type Bits{bit_count} = [u8; {byte_count}];\n"));
         }
     }
@@ -428,8 +428,8 @@ fn render_layout_constants(prefix: &str, layouts: &[AotTypeLayout]) -> String {
     out
 }
 
-fn push_line(lines: &mut Vec<String>, indent: usize, text: impl AsRef<str>) {
-    lines.push(format!("{:indent$}{}", "", text.as_ref(), indent = indent));
+fn push_line(lines: &mut Vec<String>, text: impl AsRef<str>) {
+    lines.push(text.as_ref().to_string());
 }
 
 fn emit_pack_statements(
@@ -439,7 +439,6 @@ fn emit_pack_statements(
     dst_name: &str,
     leaf_index_expr: &str,
     lines: &mut Vec<String>,
-    indent: usize,
     next_loop_index: &mut usize,
 ) {
     match ty {
@@ -447,7 +446,6 @@ fn emit_pack_statements(
             if *bit_count <= 64 {
                 push_line(
                     lines,
-                    indent,
                     format!(
                         "xlsynth::aot_runner::write_leaf_element({dst_name}, &{layout_name}[{leaf_index_expr}], &({value_expr}).to_ne_bytes());"
                     ),
@@ -455,7 +453,6 @@ fn emit_pack_statements(
             } else {
                 push_line(
                     lines,
-                    indent,
                     format!(
                         "xlsynth::aot_runner::write_leaf_element({dst_name}, &{layout_name}[{leaf_index_expr}], &({value_expr}));"
                     ),
@@ -465,7 +462,6 @@ fn emit_pack_statements(
         ResolvedType::Token => {
             push_line(
                 lines,
-                indent,
                 format!(
                     "xlsynth::aot_runner::write_leaf_element({dst_name}, &{layout_name}[{leaf_index_expr}], &[]);"
                 ),
@@ -486,7 +482,6 @@ fn emit_pack_statements(
                     dst_name,
                     &field_leaf_base,
                     lines,
-                    indent,
                     next_loop_index,
                 );
                 offset = offset.saturating_add(leaf_count(field));
@@ -499,7 +494,7 @@ fn emit_pack_statements(
             }
             let loop_name = format!("index_{}", *next_loop_index);
             *next_loop_index += 1;
-            push_line(lines, indent, format!("for {loop_name} in 0..{size} {{"));
+            push_line(lines, format!("for {loop_name} in 0..{size} {{"));
             let element_leaf_base = if element_leaves == 1 {
                 format!("{leaf_index_expr} + {loop_name}")
             } else {
@@ -512,10 +507,9 @@ fn emit_pack_statements(
                 dst_name,
                 &element_leaf_base,
                 lines,
-                indent + 4,
                 next_loop_index,
             );
-            push_line(lines, indent, "}");
+            push_line(lines, "}");
         }
     }
 }
@@ -527,34 +521,29 @@ fn emit_unpack_statements(
     src_name: &str,
     leaf_index_expr: &str,
     lines: &mut Vec<String>,
-    indent: usize,
     next_loop_index: &mut usize,
 ) {
     match ty {
         ResolvedType::Bits { bit_count } => {
             if *bit_count <= 64 {
-                push_line(lines, indent + 4, "let mut dst_bytes = [0u8; 8];");
+                push_line(lines, "let mut dst_bytes = [0u8; 8];");
                 push_line(
                     lines,
-                    indent + 4,
                     format!(
                         "xlsynth::aot_runner::read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], &mut dst_bytes);"
                     ),
                 );
                 push_line(
                     lines,
-                    indent + 4,
                     format!("{value_expr} = u64::from_ne_bytes(dst_bytes);"),
                 );
             } else {
                 push_line(
                     lines,
-                    indent + 4,
                     format!("let dst_bytes: &mut [u8] = &mut ({value_expr});"),
                 );
                 push_line(
                     lines,
-                    indent + 4,
                     format!(
                         "xlsynth::aot_runner::read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], dst_bytes);"
                     ),
@@ -562,10 +551,9 @@ fn emit_unpack_statements(
             }
         }
         ResolvedType::Token => {
-            push_line(lines, indent + 4, "let mut dst_bytes = [0u8; 0];");
+            push_line(lines, "let mut dst_bytes = [0u8; 0];");
             push_line(
                 lines,
-                indent + 4,
                 format!(
                     "xlsynth::aot_runner::read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], &mut dst_bytes);"
                 ),
@@ -586,7 +574,6 @@ fn emit_unpack_statements(
                     src_name,
                     &field_leaf_base,
                     lines,
-                    indent,
                     next_loop_index,
                 );
                 offset = offset.saturating_add(leaf_count(field));
@@ -599,7 +586,7 @@ fn emit_unpack_statements(
             }
             let loop_name = format!("index_{}", *next_loop_index);
             *next_loop_index += 1;
-            push_line(lines, indent, format!("for {loop_name} in 0..{size} {{"));
+            push_line(lines, format!("for {loop_name} in 0..{size} {{"));
             let element_leaf_base = if element_leaves == 1 {
                 format!("{leaf_index_expr} + {loop_name}")
             } else {
@@ -612,10 +599,9 @@ fn emit_unpack_statements(
                 src_name,
                 &element_leaf_base,
                 lines,
-                indent + 4,
                 next_loop_index,
             );
-            push_line(lines, indent, "}");
+            push_line(lines, "}");
         }
     }
 }
@@ -640,15 +626,13 @@ fn render_encode_function(index: usize, ty: &ResolvedType, expected_size: usize)
     let mut lines = Vec::new();
     push_line(
         &mut lines,
-        0,
         format!("fn encode_input_{index}(_value: &Input{index}, dst: &mut [u8]) {{"),
     );
     push_line(
         &mut lines,
-        4,
         format!("debug_assert_eq!(dst.len(), {expected_size});"),
     );
-    push_line(&mut lines, 4, "dst.fill(0);");
+    push_line(&mut lines, "dst.fill(0);");
     let mut loop_index = 0usize;
     emit_pack_statements(
         ty,
@@ -657,16 +641,14 @@ fn render_encode_function(index: usize, ty: &ResolvedType, expected_size: usize)
         "dst",
         "0usize",
         &mut lines,
-        4,
         &mut loop_index,
     );
     let expected_leaves = leaf_count(ty);
     push_line(
         &mut lines,
-        4,
         format!("debug_assert_eq!({layout_name}.len(), {expected_leaves});"),
     );
-    push_line(&mut lines, 0, "}");
+    push_line(&mut lines, "}");
     lines.join("\n")
 }
 
@@ -675,12 +657,10 @@ fn render_decode_function(ty: &ResolvedType, expected_size: usize) -> String {
     let mut lines = Vec::new();
     push_line(
         &mut lines,
-        0,
         "fn decode_output_0(src: &[u8], _value: &mut Output) {",
     );
     push_line(
         &mut lines,
-        4,
         format!("debug_assert_eq!(src.len(), {expected_size});"),
     );
     let mut loop_index = 0usize;
@@ -691,16 +671,14 @@ fn render_decode_function(ty: &ResolvedType, expected_size: usize) -> String {
         "src",
         "0usize",
         &mut lines,
-        4,
         &mut loop_index,
     );
     let expected_leaves = leaf_count(ty);
     push_line(
         &mut lines,
-        4,
         format!("debug_assert_eq!({layout_name}.len(), {expected_leaves});"),
     );
-    push_line(&mut lines, 0, "}");
+    push_line(&mut lines, "}");
     lines.join("\n")
 }
 
