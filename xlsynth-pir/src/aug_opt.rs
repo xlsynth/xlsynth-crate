@@ -39,6 +39,7 @@ pub struct AugOptRewriteStats {
     pub pow2_msb_compare_with_eq_tiebreak: usize,
     pub eq_priority_sel_to_selector_predicate: usize,
     pub eq_add_zero_to_eq_rhs_sub: usize,
+    pub ne_add_all_ones_to_ne_not: usize,
     pub ne_shrl_slice_known_one_shift_nonzero: usize,
     pub predicate_hoist_across_select: usize,
     pub umod_distribute_across_select: usize,
@@ -52,6 +53,7 @@ impl AugOptRewriteStats {
             .saturating_add(self.pow2_msb_compare_with_eq_tiebreak)
             .saturating_add(self.eq_priority_sel_to_selector_predicate)
             .saturating_add(self.eq_add_zero_to_eq_rhs_sub)
+            .saturating_add(self.ne_add_all_ones_to_ne_not)
             .saturating_add(self.ne_shrl_slice_known_one_shift_nonzero)
             .saturating_add(self.predicate_hoist_across_select)
             .saturating_add(self.umod_distribute_across_select)
@@ -74,6 +76,9 @@ impl AugOptRewriteStats {
         self.eq_add_zero_to_eq_rhs_sub = self
             .eq_add_zero_to_eq_rhs_sub
             .saturating_add(other.eq_add_zero_to_eq_rhs_sub);
+        self.ne_add_all_ones_to_ne_not = self
+            .ne_add_all_ones_to_ne_not
+            .saturating_add(other.ne_add_all_ones_to_ne_not);
         self.ne_shrl_slice_known_one_shift_nonzero = self
             .ne_shrl_slice_known_one_shift_nonzero
             .saturating_add(other.ne_shrl_slice_known_one_shift_nonzero);
@@ -309,6 +314,7 @@ fn apply_basis_rewrites_to_fn(
     stats.eq_priority_sel_to_selector_predicate =
         rewrite_eq_priority_sel_to_selector_predicate(&mut cloned, range_info);
     stats.eq_add_zero_to_eq_rhs_sub = rewrite_eq_add_zero_to_eq_rhs_sub(&mut cloned);
+    stats.ne_add_all_ones_to_ne_not = rewrite_ne_add_all_ones_to_ne_not(&mut cloned);
     // Distribute unsigned mod across selectors so each arm can be folded by
     // downstream optimization (e.g. when divisors are constants).
     stats.umod_distribute_across_select = rewrite_umod_distribute_across_select(&mut cloned);
@@ -1808,6 +1814,78 @@ fn rewrite_eq_add_zero_to_eq_rhs_sub(f: &mut ir::Fn) -> usize {
     rewrites
 }
 
+fn is_bits_literal_all_ones(v: &IrValue) -> bool {
+    let Ok(bits) = v.to_bits() else {
+        return false;
+    };
+    for i in 0..bits.get_bit_count() {
+        if !bits.get_bit(i).unwrap_or(false) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Rewrite:
+///
+/// `ne(add(x, y), all_ones)`
+///   →
+/// `ne(not(x), y)`
+///
+/// In fixed-width arithmetic, `x + y == 2^w-1` iff `y == ~x`; negating the
+/// equality gives an equivalent and often shallower predicate.
+fn rewrite_ne_add_all_ones_to_ne_not(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+
+    for ne_index in 0..f.nodes.len() {
+        let NodePayload::Binop(Binop::Ne, a, b) = f.nodes[ne_index].payload.clone() else {
+            continue;
+        };
+
+        // Try both operand orders: ne(add(..), all_ones) or ne(all_ones, add(..)).
+        let candidates = [(a, b), (b, a)];
+        let mut matched: Option<(NodeRef, NodeRef)> = None; // (x, y)
+
+        for (maybe_add, maybe_all_ones) in candidates {
+            let NodePayload::Binop(Binop::Add, x, y) = f.get_node(maybe_add).payload.clone() else {
+                continue;
+            };
+            let NodePayload::Literal(lit_v) = f.get_node(maybe_all_ones).payload.clone() else {
+                continue;
+            };
+
+            let w = f.get_node_ty(maybe_add).bit_count();
+            if w == 0 || f.get_node_ty(maybe_all_ones) != &Type::Bits(w) {
+                continue;
+            }
+            if !is_bits_literal_all_ones(&lit_v) {
+                continue;
+            }
+            if f.get_node_ty(x) != &Type::Bits(w) || f.get_node_ty(y) != &Type::Bits(w) {
+                continue;
+            }
+
+            matched = Some((x, y));
+            break;
+        }
+
+        let Some((x, y)) = matched else {
+            continue;
+        };
+
+        let not_x = push_node(
+            f,
+            Type::Bits(f.get_node_ty(x).bit_count()),
+            NodePayload::Unop(Unop::Not, x),
+        );
+        f.nodes[ne_index].payload = NodePayload::Binop(Binop::Ne, not_x, y);
+        f.nodes[ne_index].ty = Type::Bits(1);
+        rewrites += 1;
+    }
+
+    rewrites
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2312,6 +2390,63 @@ top fn cone(leaf_52: bits[2] id=1, y: bits[5] id=2) -> bits[1] {
             &out_text,
             "cone",
             &[2, 5],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    #[test]
+    fn aug_opt_rewrites_ne_add_all_ones_to_ne_not() {
+        let ir_text = r#"package add_ne_all_ones
+
+top fn cone(leaf_303: bits[8] id=1, leaf_304: bits[8] id=2) -> bits[1] {
+  literal.3: bits[8] = literal(value=255, id=3)
+  add.4: bits[8] = add(leaf_303, leaf_304, id=4)
+  ret ne.5: bits[1] = ne(add.4, literal.3, id=5)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+
+        let ret_nr = f.ret_node_ref.expect("ret node");
+        let ret_node = f.get_node(ret_nr);
+        assert_eq!(ret_node.ty, Type::Bits(1));
+
+        let NodePayload::Binop(Binop::Ne, lhs, rhs) = ret_node.payload else {
+            panic!(
+                "expected ret to be ne(..); got {:?}\noutput:\n{}",
+                ret_node.payload, out_text
+            );
+        };
+        let lhs_node = f.get_node(lhs);
+        match lhs_node.payload {
+            NodePayload::Unop(Unop::Not, arg) => {
+                assert_eq!(f.get_node(arg).text_id, 1);
+            }
+            _ => panic!(
+                "expected lhs to be not(param); got {:?}\noutput:\n{}",
+                lhs_node.payload, out_text
+            ),
+        }
+        assert_eq!(f.get_node(rhs).text_id, 2);
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "cone",
+            &[8, 8],
             /* random_samples= */ 2000,
         );
     }
