@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-//! AOT compilation and execution-context helpers built on the `xlsynth_sys` FFI.
+//! AOT compilation and execution-context helpers built on the `xlsynth_sys`
+//! FFI.
 
 use crate::aot_entrypoint_metadata::get_entrypoint_metadata;
 pub use crate::aot_entrypoint_metadata::AotEntrypointMetadata;
@@ -22,7 +23,8 @@ pub struct AotCompiled {
 }
 
 impl AotCompiled {
-    /// Compiles the `top` function from IR text into object code plus entrypoint metadata.
+    /// Compiles the `top` function from IR text into object code plus
+    /// entrypoint metadata.
     ///
     /// This method eagerly parses the returned entrypoint proto so malformed or
     /// unsupported metadata fails during compilation rather than later at run
@@ -104,7 +106,8 @@ fn aot_compile_function(function: *mut xlsynth_sys::CIrFunction) -> AotResult<(V
     Ok((object_code, entrypoints_proto))
 }
 
-/// Owns the XLS AOT execution context used to collect traces/asserts across runs.
+/// Owns the XLS AOT execution context used to collect traces/asserts across
+/// runs.
 ///
 /// The runner keeps one context per compiled entrypoint instance and reuses it
 /// between invocations so event extraction remains tied to a stable native
@@ -114,7 +117,8 @@ pub(crate) struct AotExecContext {
 }
 
 impl AotExecContext {
-    /// Creates a native execution context from the serialized entrypoints proto.
+    /// Creates a native execution context from the serialized entrypoints
+    /// proto.
     pub(crate) fn create(entrypoints_proto: &[u8]) -> Result<Self, XlsynthError> {
         if entrypoints_proto.is_empty() {
             return Err(XlsynthError(

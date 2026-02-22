@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Build-script helpers that compile XLS IR to AOT artifacts and generate Rust wrappers.
+//! Build-script helpers that compile XLS IR to AOT artifacts and generate Rust
+//! wrappers.
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -13,7 +14,8 @@ use crate::aot_lib::{AotCompiled, AotResult};
 use crate::xlsynth_error::XlsynthError;
 
 #[derive(Debug, Clone)]
-/// Inputs required to compile one XLS IR function into generated AOT wrapper artifacts.
+/// Inputs required to compile one XLS IR function into generated AOT wrapper
+/// artifacts.
 pub struct AotBuildSpec<'a> {
     pub name: &'a str,
     pub ir_text: &'a str,
@@ -21,7 +23,8 @@ pub struct AotBuildSpec<'a> {
 }
 
 #[derive(Debug, Clone)]
-/// Paths and metadata for emitted AOT wrapper artifacts in a build output directory.
+/// Paths and metadata for emitted AOT wrapper artifacts in a build output
+/// directory.
 ///
 /// The generated Rust wrapper includes typed encode/decode helpers and a thin
 /// `Runner` wrapper over `xlsynth::AotRunner`.
