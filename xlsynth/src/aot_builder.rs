@@ -650,7 +650,10 @@ fn emit_unpack_statements(
                     let native_type = scalar_bits_rust_type(*bit_count);
                     let storage_bytes = scalar_bits_storage_bytes(*bit_count);
                     let native_width = scalar_bits_native_width(*bit_count);
-                    push_line(lines, format!("let mut dst_bytes = [0u8; {storage_bytes}];"));
+                    push_line(
+                        lines,
+                        format!("let mut dst_bytes = [0u8; {storage_bytes}];"),
+                    );
                     push_line(
                         lines,
                         format!(
