@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth-prover"
-version = "0.32.0"
+version = "0.33.0"
 edition = "2024"
 authors = ["Christopher D. Leary <cdleary@gmail.com>"]
 description = "XLS formal pProvers"
@@ -13,8 +13,8 @@ homepage = "https://github.com/xlsynth/xlsynth-crate"
 workspace = true
 
 [dependencies]
-xlsynth = { path = "../xlsynth", version = "0.32.0" }
-xlsynth-pir = { path = "../xlsynth-pir", version = "0.32.0" }
+xlsynth = { path = "../xlsynth", version = "0.33.0" }
+xlsynth-pir = { path = "../xlsynth-pir", version = "0.33.0" }
 tempfile = "3.20"
 num_cpus = "1.16"
 clap = { version = "4.5.21", features = ["derive"] }
