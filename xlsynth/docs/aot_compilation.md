@@ -62,8 +62,9 @@ two methods for running the compiled code:
 
 Types are defined for each function input (`Input0`, `Input1`, etc) and the
 function output (`Output`). Bits types of 64-bits or less are defined as aliases
-of `u64`. Wider types are aliases of arrays of `u8` (eg, `[u8; 16]`). Tuples and
-arrays are defined as `structs` and arrays respectively.
+of the smallest unsigned type which can hold the value (`bool`, `u8`, `u16`,
+`u32`, or `u64`). Wider types are aliases of arrays of `u8` (eg, `[u8; 16]`).
+Tuples and arrays are defined as `structs` and arrays respectively.
 
 As a simple example, consider a DSLX function that multiplies two 8-bit unsigned
 values and returns a 16-bit unsigned product:

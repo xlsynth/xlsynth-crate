@@ -49,7 +49,7 @@ fn generated_runner_supports_empty_tuple() {
 fn generated_runner_supports_varied_bit_widths_including_wide_values() {
     let mut runner = wide_sizes_aot::new_runner().expect("runner creation should succeed");
     let input = wide_sizes_aot::Input0 {
-        field0: 1,
+        field0: true,
         field1: 0x55,
         field2: 0xAB,
         field3: 0x1234,
@@ -68,7 +68,7 @@ fn generated_runner_supports_varied_bit_widths_including_wide_values() {
     };
 
     let output = runner.run(&input).expect("run should succeed");
-    assert_eq!(output.field0, 1);
+    assert_eq!(output.field0, true);
     assert_eq!(output.field1, 0x55);
     assert_eq!(output.field2, 0xAB);
     assert_eq!(output.field3, 0x1234);

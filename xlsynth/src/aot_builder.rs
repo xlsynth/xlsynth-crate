@@ -272,6 +272,48 @@ fn is_rust_keyword(name: &str) -> bool {
     )
 }
 
+fn scalar_bits_rust_type(bit_count: usize) -> &'static str {
+    match bit_count {
+        1 => "bool",
+        0..=8 => "u8",
+        9..=16 => "u16",
+        17..=32 => "u32",
+        33..=64 => "u64",
+        _ => panic!(
+            "scalar_bits_rust_type only supports widths <= 64, got {}",
+            bit_count
+        ),
+    }
+}
+
+fn scalar_bits_native_width(bit_count: usize) -> usize {
+    match bit_count {
+        1 => 1,
+        0..=8 => 8,
+        9..=16 => 16,
+        17..=32 => 32,
+        33..=64 => 64,
+        _ => panic!(
+            "scalar_bits_native_width only supports widths <= 64, got {}",
+            bit_count
+        ),
+    }
+}
+
+fn scalar_bits_storage_bytes(bit_count: usize) -> usize {
+    match bit_count {
+        1 => 1,
+        0..=8 => 1,
+        9..=16 => 2,
+        17..=32 => 4,
+        33..=64 => 8,
+        _ => panic!(
+            "scalar_bits_storage_bytes only supports widths <= 64, got {}",
+            bit_count
+        ),
+    }
+}
+
 fn format_usize_array(values: &[usize]) -> String {
     if values.is_empty() {
         "&[]".to_string()
@@ -385,7 +427,10 @@ fn render_type_declarations(
 
     for bit_count in &resolver.bit_widths {
         if *bit_count <= 64 {
-            out.push_str(&format!("pub type Bits{bit_count} = u64;\n"));
+            out.push_str(&format!(
+                "pub type Bits{bit_count} = {};\n",
+                scalar_bits_rust_type(*bit_count)
+            ));
         } else {
             let byte_count = bit_count.div_ceil(8);
             out.push_str(&format!("pub type Bits{bit_count} = [u8; {byte_count}];\n"));
@@ -467,13 +512,52 @@ fn emit_pack_statements(
     match ty {
         ResolvedType::Bits { bit_count } => {
             if *bit_count <= 64 {
-                push_line(
-                    lines,
-                    format!(
-                        "xlsynth::aot_runner::write_leaf_element({dst_name}, &{layout_name}[{leaf_index_expr}], &({value_expr}).to_ne_bytes());"
-                    ),
-                );
+                if *bit_count == 1 {
+                    push_line(
+                        lines,
+                        format!("let encoded_bit: u8 = u8::from(*&({value_expr}));"),
+                    );
+                    push_line(
+                        lines,
+                        format!(
+                            "xlsynth::aot_runner::write_leaf_element({dst_name}, &{layout_name}[{leaf_index_expr}], &[encoded_bit]);"
+                        ),
+                    );
+                } else {
+                    let native_width = scalar_bits_native_width(*bit_count);
+                    if *bit_count == 0 {
+                        push_line(
+                            lines,
+                            format!(
+                                "assert!(({value_expr}) == 0, \"AOT encode overflow: value does not fit in 0 bits\");"
+                            ),
+                        );
+                    } else if *bit_count < native_width {
+                        push_line(
+                            lines,
+                            format!(
+                                "assert!((({value_expr}) >> {bit_count}) == 0, \"AOT encode overflow: value does not fit in {bit_count} bits\");"
+                            ),
+                        );
+                    }
+                    push_line(
+                        lines,
+                        format!(
+                            "xlsynth::aot_runner::write_leaf_element({dst_name}, &{layout_name}[{leaf_index_expr}], &({value_expr}).to_ne_bytes());"
+                        ),
+                    );
+                }
             } else {
+                let bit_remainder = bit_count % 8;
+                if bit_remainder != 0 {
+                    let last_byte_index = bit_count.div_ceil(8) - 1;
+                    push_line(
+                        lines,
+                        format!(
+                            "assert!((({value_expr})[{last_byte_index}] >> {bit_remainder}) == 0, \"AOT encode overflow: value does not fit in {bit_count} bits\");"
+                        ),
+                    );
+                }
                 push_line(
                     lines,
                     format!(
@@ -549,17 +633,49 @@ fn emit_unpack_statements(
     match ty {
         ResolvedType::Bits { bit_count } => {
             if *bit_count <= 64 {
-                push_line(lines, "let mut dst_bytes = [0u8; 8];");
-                push_line(
-                    lines,
-                    format!(
-                        "xlsynth::aot_runner::read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], &mut dst_bytes);"
-                    ),
-                );
-                push_line(
-                    lines,
-                    format!("{value_expr} = u64::from_ne_bytes(dst_bytes);"),
-                );
+                if *bit_count == 1 {
+                    push_line(lines, "let mut dst_bytes = [0u8; 1];");
+                    push_line(
+                        lines,
+                        format!(
+                            "xlsynth::aot_runner::read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], &mut dst_bytes);"
+                        ),
+                    );
+                    push_line(
+                        lines,
+                        "assert!(dst_bytes[0] <= 1, \"AOT decode overflow: value does not fit in 1 bit\");",
+                    );
+                    push_line(lines, format!("{value_expr} = dst_bytes[0] != 0;"));
+                } else {
+                    let native_type = scalar_bits_rust_type(*bit_count);
+                    let storage_bytes = scalar_bits_storage_bytes(*bit_count);
+                    let native_width = scalar_bits_native_width(*bit_count);
+                    push_line(lines, format!("let mut dst_bytes = [0u8; {storage_bytes}];"));
+                    push_line(
+                        lines,
+                        format!(
+                            "xlsynth::aot_runner::read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], &mut dst_bytes);"
+                        ),
+                    );
+                    push_line(
+                        lines,
+                        format!("let decoded = {native_type}::from_ne_bytes(dst_bytes);"),
+                    );
+                    if *bit_count == 0 {
+                        push_line(
+                            lines,
+                            "assert!(decoded == 0, \"AOT decode overflow: value does not fit in 0 bits\");",
+                        );
+                    } else if *bit_count < native_width {
+                        push_line(
+                            lines,
+                            format!(
+                                "assert!((decoded >> {bit_count}) == 0, \"AOT decode overflow: value does not fit in {bit_count} bits\");"
+                            ),
+                        );
+                    }
+                    push_line(lines, format!("{value_expr} = decoded;"));
+                }
             } else {
                 push_line(
                     lines,
@@ -571,6 +687,16 @@ fn emit_unpack_statements(
                         "xlsynth::aot_runner::read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], dst_bytes);"
                     ),
                 );
+                let bit_remainder = bit_count % 8;
+                if bit_remainder != 0 {
+                    let last_byte_index = bit_count.div_ceil(8) - 1;
+                    push_line(
+                        lines,
+                        format!(
+                            "assert!((dst_bytes[{last_byte_index}] >> {bit_remainder}) == 0, \"AOT decode overflow: value does not fit in {bit_count} bits\");"
+                        ),
+                    );
+                }
             }
         }
         ResolvedType::Token => {
