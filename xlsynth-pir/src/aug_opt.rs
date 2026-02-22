@@ -549,6 +549,21 @@ fn rewrite_eq_shll_slice_literal_to_shift_terms(f: &mut ir::Fn) -> usize {
             };
             terms.push(term);
         }
+        // If the compared literal has zeros for all bits in the sliced window,
+        // then any sufficiently large shift (that fully moves the window beyond
+        // available payload bits) also satisfies the equality.
+        if literal_low_bits_are_zero(f, lit_nr, width) {
+            let limit = start.saturating_add(width);
+            if const_fits_in_width(limit as u64, w_s) {
+                let shift_limit_lit = push_ubits_literal(f, w_s, limit as u64);
+                let s_ge_limit = push_node(
+                    f,
+                    Type::Bits(1),
+                    NodePayload::Binop(Binop::Uge, s, shift_limit_lit),
+                );
+                terms.push(s_ge_limit);
+            }
+        }
 
         if terms.is_empty() {
             continue;
@@ -1732,7 +1747,9 @@ fn rewrite_eq_add_zero_to_eq_rhs_sub(f: &mut ir::Fn) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir_eval::{FnEvalResult, eval_fn};
     use crate::test_utils::quickcheck_ir_text_fn_equivalence_ubits_le64;
+    use xlsynth::IrValue;
 
     fn resolve_identity<'a>(f: &'a ir::Fn, mut nr: NodeRef) -> &'a ir::Node {
         loop {
@@ -1743,6 +1760,55 @@ mod tests {
                 }
                 _ => return n,
             }
+        }
+    }
+
+    fn exhaustive_ir_text_fn_equivalence_ubits(
+        ir_text_0: &str,
+        ir_text_1: &str,
+        fn_name: &str,
+        param_widths: &[usize],
+    ) {
+        let mut p0 = ir_parser::Parser::new(ir_text_0);
+        let pkg0 = p0.parse_and_validate_package().expect("parse/validate lhs");
+        let f0 = pkg0.get_fn(fn_name).expect("lhs missing function");
+
+        let mut p1 = ir_parser::Parser::new(ir_text_1);
+        let pkg1 = p1.parse_and_validate_package().expect("parse/validate rhs");
+        let f1 = pkg1.get_fn(fn_name).expect("rhs missing function");
+
+        let mut total_cases: u128 = 1;
+        for &w in param_widths {
+            assert!(
+                w <= 63,
+                "exhaustive helper only supports widths <=63 (got {w})"
+            );
+            total_cases = total_cases.saturating_mul(1u128 << w);
+        }
+        assert!(
+            total_cases <= 1_000_000,
+            "exhaustive helper case count too large: {total_cases}"
+        );
+
+        for case_idx in 0..total_cases {
+            let mut rem = case_idx;
+            let mut args: Vec<IrValue> = Vec::with_capacity(param_widths.len());
+            for &w in param_widths {
+                let radix: u128 = 1u128 << w;
+                let value = rem % radix;
+                rem /= radix;
+                args.push(IrValue::make_ubits(w, value as u64).expect("ubits arg"));
+            }
+
+            let got0 = match eval_fn(f0, &args) {
+                FnEvalResult::Success(s) => s.value.clone(),
+                FnEvalResult::Failure(e) => panic!("unexpected eval failure (lhs): {:?}", e),
+            };
+            let got1 = match eval_fn(f1, &args) {
+                FnEvalResult::Success(s) => s.value.clone(),
+                FnEvalResult::Failure(e) => panic!("unexpected eval failure (rhs): {:?}", e),
+            };
+            assert_eq!(got0, got1, "mismatch on args={args:?}");
         }
     }
 
@@ -2292,6 +2358,93 @@ top fn cone(x: bits[10] id=1, s: bits[4] id=2) -> bits[1] {
             &[10, 4],
             /* random_samples= */ 2000,
         );
+    }
+
+    #[test]
+    fn aug_opt_eq_shll_slice_zero_literal_covers_high_shift_tail() {
+        let ir_text = r#"package shll_eq_zero_high_shift_tail
+
+top fn cone(x: bits[9] id=1, s: bits[4] id=2) -> bits[1] {
+  shll.3: bits[9] = shll(x, s, id=3)
+  bit_slice.4: bits[7] = bit_slice(shll.3, start=1, width=7, id=4)
+  literal.5: bits[7] = literal(value=0, id=5)
+  ret eq.6: bits[1] = eq(bit_slice.4, literal.5, id=6)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+        let ret_nr = f.ret_node_ref.expect("ret node");
+        let ret_node = f.get_node(ret_nr);
+        assert_eq!(ret_node.ty, Type::Bits(1));
+        assert!(
+            matches!(
+                ret_node.payload,
+                NodePayload::Nary(NaryOp::Or, _) | NodePayload::Unop(Unop::Identity, _)
+            ),
+            "expected disjunction/identity shift-case rewrite; got {:?}\noutput:\n{}",
+            ret_node.payload,
+            out_text
+        );
+
+        // Proof-style check for the reported regression shape: verify all x,s.
+        exhaustive_ir_text_fn_equivalence_ubits(ir_text, &out_text, "cone", &[9, 4]);
+    }
+
+    #[test]
+    fn aug_opt_eq_shll_slice_literal_small_width_exhaustive_sweep() {
+        for x_width in 1..=4usize {
+            for s_width in 1..=3usize {
+                for start in 0..x_width {
+                    for width in 1..=(x_width - start) {
+                        let literal_count = 1usize << width;
+                        for literal in 0..literal_count {
+                            let ir_text = format!(
+                                r#"package shll_eq_sweep
+
+top fn cone(x: bits[{x_width}] id=1, s: bits[{s_width}] id=2) -> bits[1] {{
+  shll.3: bits[{x_width}] = shll(x, s, id=3)
+  bit_slice.4: bits[{width}] = bit_slice(shll.3, start={start}, width={width}, id=4)
+  literal.5: bits[{width}] = literal(value={literal}, id=5)
+  ret eq.6: bits[1] = eq(bit_slice.4, literal.5, id=6)
+}}
+"#
+                            );
+
+                            let out_text = run_aug_opt_over_ir_text(
+                                &ir_text,
+                                Some("cone"),
+                                AugOptOptions {
+                                    enable: true,
+                                    rounds: 1,
+                                    mode: AugOptMode::PirOnly,
+                                },
+                            )
+                            .expect("aug opt");
+
+                            exhaustive_ir_text_fn_equivalence_ubits(
+                                &ir_text,
+                                &out_text,
+                                "cone",
+                                &[x_width, s_width],
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

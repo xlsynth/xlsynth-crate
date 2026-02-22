@@ -18,7 +18,7 @@ static POW2_MSB_TIEBREAK_REWRITES: AtomicU64 = AtomicU64::new(0);
 
 fuzz_target!(|data: &[u8]| {
     let mut u = Unstructured::new(data);
-    let mut sample = match FuzzSample::arbitrary(&mut u) {
+    let sample = match FuzzSample::arbitrary(&mut u) {
         Ok(s) => s,
         Err(_) => return,
     };
