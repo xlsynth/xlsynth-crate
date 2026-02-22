@@ -1,13 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
+//! AOT compilation and execution-context helpers built on the `xlsynth_sys` FFI.
 
 use crate::aot_entrypoint_metadata::get_entrypoint_metadata;
 pub use crate::aot_entrypoint_metadata::AotEntrypointMetadata;
 use crate::ir_package::{IrPackage, TraceMessage};
 use crate::xlsynth_error::XlsynthError;
 
+/// Common result type for AOT build/run helpers.
 pub type AotResult<T> = Result<T, XlsynthError>;
 
 #[derive(Debug, Clone)]
+/// Owns the raw outputs of compiling an XLS function to AOT object code.
+///
+/// The `entrypoints_proto` is preserved alongside parsed `metadata` so callers
+/// can both execute the compiled code and inspect the original proto-derived
+/// details without reparsing.
 pub struct AotCompiled {
     pub object_code: Vec<u8>,
     pub entrypoints_proto: Vec<u8>,
@@ -15,6 +22,11 @@ pub struct AotCompiled {
 }
 
 impl AotCompiled {
+    /// Compiles the `top` function from IR text into object code plus entrypoint metadata.
+    ///
+    /// This method eagerly parses the returned entrypoint proto so malformed or
+    /// unsupported metadata fails during compilation rather than later at run
+    /// time in the AOT runner.
     pub fn compile_ir(ir_text: &str, top: &str) -> AotResult<Self> {
         if top.is_empty() {
             return Err(XlsynthError(
@@ -92,11 +104,17 @@ fn aot_compile_function(function: *mut xlsynth_sys::CIrFunction) -> AotResult<(V
     Ok((object_code, entrypoints_proto))
 }
 
+/// Owns the XLS AOT execution context used to collect traces/asserts across runs.
+///
+/// The runner keeps one context per compiled entrypoint instance and reuses it
+/// between invocations so event extraction remains tied to a stable native
+/// context handle.
 pub(crate) struct AotExecContext {
     ptr: *mut xlsynth_sys::CXlsAotExecContext,
 }
 
 impl AotExecContext {
+    /// Creates a native execution context from the serialized entrypoints proto.
     pub(crate) fn create(entrypoints_proto: &[u8]) -> Result<Self, XlsynthError> {
         if entrypoints_proto.is_empty() {
             return Err(XlsynthError(
@@ -131,16 +149,19 @@ impl AotExecContext {
         Ok(Self { ptr: out })
     }
 
+    /// Returns the raw FFI handle for trampoline and event APIs.
     pub(crate) fn as_ptr(&self) -> *mut xlsynth_sys::CXlsAotExecContext {
         self.ptr
     }
 
+    /// Clears any accumulated trace/assert events in the native context.
     pub(crate) fn clear_events(&mut self) {
         unsafe {
             xlsynth_sys::xls_aot_exec_context_clear_events(self.ptr);
         }
     }
 
+    /// Reads one recorded trace message by index from the native context.
     pub(crate) fn trace_message(&self, index: usize) -> Result<TraceMessage, XlsynthError> {
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let mut trace = xlsynth_sys::CTraceMessage {
@@ -168,6 +189,7 @@ impl AotExecContext {
         })
     }
 
+    /// Reads one recorded assertion message by index from the native context.
     pub(crate) fn assert_message(&self, index: usize) -> Result<String, XlsynthError> {
         let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
         let mut assert_out: *mut std::os::raw::c_char = std::ptr::null_mut();

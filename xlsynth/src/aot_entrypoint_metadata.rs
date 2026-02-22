@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Parsing and validation helpers for XLS AOT entrypoint metadata protos.
 
 use std::convert::TryFrom;
 
@@ -7,6 +8,11 @@ use prost::Message;
 use crate::xlsynth_error::XlsynthError;
 
 #[derive(Debug, Clone)]
+/// Runtime buffer metadata extracted from a single XLS AOT entrypoint proto.
+///
+/// The runner uses these sizes/alignments to allocate buffers and to populate
+/// the trampoline ABI call. This struct intentionally carries only the fields
+/// needed for execution, not the full XLS entrypointproto.
 pub struct AotEntrypointMetadata {
     pub symbol: String,
     pub input_buffer_sizes: Vec<usize>,
@@ -18,6 +24,10 @@ pub struct AotEntrypointMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// A simplified Rust representation of an XLS type from AOT metadata.
+///
+/// This is used by code generation and layout validation; it mirrors the
+/// subset of type information surfaced in the entrypoint proto.
 pub enum AotType {
     Bits { bit_count: usize },
     Tuple { elements: Vec<AotType> },
@@ -32,6 +42,11 @@ pub struct AotFunctionParameter {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Function signature and layout information for a single AOT entrypoint.
+///
+/// The signature carries both semantic types (`params`, `return_type`) and the
+/// flattened byte layouts used to pack/unpack buffers for the generated
+/// wrapper.
 pub struct AotFunctionSignature {
     pub function_name: String,
     pub params: Vec<AotFunctionParameter>,
@@ -41,6 +56,10 @@ pub struct AotFunctionSignature {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Layout information for one leaf element in a packed AOT buffer.
+///
+/// `data_size` is the meaningful payload bytes and `padded_size` is the full
+/// reserved slot size in the ABI buffer.
 pub struct AotElementLayout {
     pub offset: usize,
     pub data_size: usize,
@@ -48,6 +67,7 @@ pub struct AotElementLayout {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Byte layout for a logical value, expressed as flattened leaf elements.
 pub struct AotTypeLayout {
     pub size: usize,
     pub elements: Vec<AotElementLayout>,
@@ -191,6 +211,10 @@ struct FunctionMetadataProto {
     function_interface: Option<PackageInterfaceFunctionProto>,
 }
 
+/// Decodes the execution metadata for a single compiled AOT entrypoint.
+///
+/// This expects the proto blob to contain exactly one entrypoint and validates
+/// size/alignment fields into `usize` values suitable for buffer allocation.
 pub fn get_entrypoint_metadata(
     entrypoints_proto: &[u8],
 ) -> Result<AotEntrypointMetadata, XlsynthError> {
@@ -198,6 +222,11 @@ pub fn get_entrypoint_metadata(
     parse_entrypoint_metadata(&entrypoint)
 }
 
+/// Decodes the typed function signature and pack/unpack layouts for an AOT
+/// entrypoint.
+///
+/// Generated Rust wrappers use this to emit strongly-typed argument and output
+/// adapters around the raw trampoline ABI.
 pub fn get_entrypoint_function_signature(
     entrypoints_proto: &[u8],
 ) -> Result<AotFunctionSignature, XlsynthError> {

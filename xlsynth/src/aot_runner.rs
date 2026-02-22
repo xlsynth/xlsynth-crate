@@ -1,4 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Runtime support for invoking XLS AOT entrypoints via the trampoline ABI.
+//!
+//! This module owns aligned input/output/temp buffers, marshals them into the
+//! C ABI expected by the generated AOT function, and exposes helper routines
+//! for packing/unpacking input and output data.
 
 use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::ffi::c_void;
@@ -10,6 +15,11 @@ use crate::ir_package::TraceMessage;
 use crate::xlsynth_error::XlsynthError;
 
 #[derive(Debug, Clone)]
+/// Opaque descriptor for one compiled AOT entrypoint.
+///
+/// Generated wrapper code constructs this from linked symbols and parsed proto
+/// metadata, then passes it into `AotRunner::new` to allocate buffers and build
+/// an execution context.
 pub struct AotEntrypointDescriptor<'a> {
     entrypoints_proto: &'a [u8],
     function_ptr: usize,
@@ -40,10 +50,13 @@ impl<'a> AotEntrypointDescriptor<'a> {
         }
     }
 
+    /// Returns the serialized entrypoint proto bytes used to create the exec
+    /// context.
     pub fn entrypoints_proto(&self) -> &'a [u8] {
         self.entrypoints_proto
     }
 
+    /// Returns parsed buffer metadata for this entrypoint.
     pub fn metadata(&self) -> &AotEntrypointMetadata {
         &self.metadata
     }
@@ -56,6 +69,8 @@ pub struct AotRunResult<T> {
     pub assert_messages: Vec<String>,
 }
 
+/// Writes one leaf element of a data value into its slot in a buffer
+/// holding the entire data value.
 pub fn write_leaf_element(dst: &mut [u8], layout: &AotElementLayout, src: &[u8]) {
     debug_assert!(
         layout.padded_size >= layout.data_size,
@@ -85,6 +100,7 @@ pub fn write_leaf_element(dst: &mut [u8], layout: &AotElementLayout, src: &[u8])
     }
 }
 
+/// Reads one leaf element from a buffer holding a data value.
 pub fn read_leaf_element(src: &[u8], layout: &AotElementLayout, dst: &mut [u8]) {
     debug_assert!(
         layout.padded_size >= layout.data_size,
@@ -114,6 +130,11 @@ pub fn read_leaf_element(src: &[u8], layout: &AotElementLayout, dst: &mut [u8]) 
     }
 }
 
+/// Reusable execution harness for one compiled AOT entrypoint.
+///
+/// An `AotRunner` allocates aligned buffers once, reuses a native execution
+/// context across runs, and exposes raw buffer access for generated pack/unpack
+/// code.
 pub struct AotRunner<'a> {
     descriptor: AotEntrypointDescriptor<'a>,
     context: AotExecContext,
@@ -126,6 +147,11 @@ pub struct AotRunner<'a> {
 }
 
 impl<'a> AotRunner<'a> {
+    /// Creates a runner from a trusted entrypoint descriptor and allocates
+    /// buffers.
+    ///
+    /// The descriptor must describe the same compiled function and entrypoint
+    /// proto bytes; mismatches are surfaced as validation or execution errors.
     pub fn new(descriptor: AotEntrypointDescriptor<'a>) -> AotResult<Self> {
         if descriptor.function_ptr == 0 {
             return Err(XlsynthError(
@@ -205,6 +231,8 @@ impl<'a> AotRunner<'a> {
         self.clear_events_before_run = value;
     }
 
+    /// Clears previously collected trace/assert events from the execution
+    /// context.
     pub fn clear_events(&mut self) {
         self.context.clear_events();
     }
@@ -325,6 +353,9 @@ impl<'a> AotRunner<'a> {
         (trace_count, assert_count)
     }
 
+    /// Runs the compiled entrypoint and treats XLS assertions as errors.
+    /// If an assertion fires, the first assertion message is returned as an
+    /// `Err`.
     pub fn run(&mut self) -> AotResult<()> {
         let (_trace_count, assert_count) = self.run_trampoline();
         if assert_count > 0 {
@@ -337,6 +368,10 @@ impl<'a> AotRunner<'a> {
         Ok(())
     }
 
+    /// Runs the compiled entrypoint and returns output plus collected events.
+    ///
+    /// Unlike `run`, XLS assertions are reported in `assert_messages` instead
+    /// of being converted into an error.
     pub fn run_with_events<T>(
         &mut self,
         make_output: impl FnOnce(&Self) -> T,
@@ -362,15 +397,18 @@ impl<'a> AotRunner<'a> {
         })
     }
 
+    /// Returns a trace message recorded during the most recent run.
     pub fn trace_message(&self, index: usize) -> AotResult<TraceMessage> {
         self.context.trace_message(index)
     }
 
+    /// Returns an assertion message recorded during the most recent run.
     pub fn assert_message(&self, index: usize) -> AotResult<String> {
         self.context.assert_message(index)
     }
 }
 
+/// Small RAII helper for aligned byte buffers passed through the AOT C ABI.
 struct AlignedBuffer {
     ptr: NonNull<u8>,
     len: usize,

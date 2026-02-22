@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Build-script helpers that compile XLS IR to AOT artifacts and generate Rust wrappers.
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -12,6 +13,7 @@ use crate::aot_lib::{AotCompiled, AotResult};
 use crate::xlsynth_error::XlsynthError;
 
 #[derive(Debug, Clone)]
+/// Inputs required to compile one XLS IR function into generated AOT wrapper artifacts.
 pub struct AotBuildSpec<'a> {
     pub name: &'a str,
     pub ir_text: &'a str,
@@ -19,6 +21,10 @@ pub struct AotBuildSpec<'a> {
 }
 
 #[derive(Debug, Clone)]
+/// Paths and metadata for emitted AOT wrapper artifacts in a build output directory.
+///
+/// The generated Rust wrapper includes typed encode/decode helpers and a thin
+/// `Runner` wrapper over `xlsynth::AotRunner`.
 pub struct GeneratedAotModule {
     pub name: String,
     pub rust_file: PathBuf,
@@ -27,10 +33,15 @@ pub struct GeneratedAotModule {
     pub metadata: AotEntrypointMetadata,
 }
 
+/// Compiles IR text into raw AOT object code and parsed entrypoint metadata.
 pub fn compile_ir_to_aot(ir_text: &str, top: &str) -> AotResult<AotCompiled> {
     AotCompiled::compile_ir(ir_text, top)
 }
 
+/// Emits AOT artifacts into Cargo's `OUT_DIR`.
+///
+/// This is the build-script friendly entry point and requires `OUT_DIR` to be
+/// set in the environment.
 pub fn emit_aot_module_from_ir_text(spec: &AotBuildSpec<'_>) -> AotResult<GeneratedAotModule> {
     let out_dir = std::env::var("OUT_DIR").map_err(|e| {
         XlsynthError(format!(
@@ -40,6 +51,11 @@ pub fn emit_aot_module_from_ir_text(spec: &AotBuildSpec<'_>) -> AotResult<Genera
     emit_aot_module_from_ir_text_with_out_dir(spec, Path::new(&out_dir))
 }
 
+/// Emits AOT object/proto/wrapper artifacts into an explicit output directory.
+///
+/// This compiles the target function, writes the object and entrypoint proto,
+/// generates a typed Rust wrapper module, and emits a static archive suitable
+/// for linking into the final crate.
 pub fn emit_aot_module_from_ir_text_with_out_dir(
     spec: &AotBuildSpec<'_>,
     out_dir: &Path,
@@ -104,6 +120,10 @@ pub fn emit_aot_module_from_ir_text_with_out_dir(
     })
 }
 
+/// Reads IR text from disk and emits AOT artifacts into `OUT_DIR`.
+///
+/// This helper also emits `cargo:rerun-if-changed` for the IR file so Cargo
+/// rebuilds generated artifacts when the input IR changes.
 pub fn emit_aot_module_from_ir_file(
     name: &str,
     ir_path: &Path,
@@ -758,6 +778,7 @@ fn make_unique_argument_names(signature: &AotFunctionSignature) -> Vec<String> {
     out
 }
 
+/// Renders the generated Rust wrapper source for one compiled AOT entrypoint.
 fn render_generated_module(
     base_name: &str,
     proto_file_name: &str,
