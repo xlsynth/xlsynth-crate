@@ -92,6 +92,9 @@ fn find_missing_spdx_files(root: &Path) -> Vec<PathBuf> {
             }
 
             let filename = path.file_name().unwrap().to_str().unwrap();
+            if filename == "abc.history" {
+                continue;
+            }
             if path_str.ends_with(".golden.sv")
                 || path_str.ends_with(".golden.v")
                 || path_str.ends_with(".golden.txt")

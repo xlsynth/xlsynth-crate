@@ -35,6 +35,7 @@
 //! ```
 
 mod aig_equiv;
+mod aig_ir_equiv;
 mod aig_stats;
 mod block2fn;
 mod common;
@@ -1743,6 +1744,95 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new("aig-ir-equiv")
+                .about("Checks if an AIGER and an IR are equivalent by lifting AIGER into IR")
+                .arg(
+                    Arg::new("aig_file")
+                        .help("The AIGER file (.aag or .aig)")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("rhs_ir_file")
+                        .help("The right-hand side IR file")
+                        .required(true)
+                        .index(2),
+                )
+                .add_ir_top_arg(false)
+                .arg(
+                    Arg::new("solver")
+                        .long("solver")
+                        .value_name("SOLVER")
+                        .help("Use the specified solver for equivalence checking (requires --features=with-easy-smt)")
+                        .value_parser([
+                            "auto",
+                            #[cfg(feature = "has-easy-smt")]
+                            "z3-binary",
+                            #[cfg(feature = "has-easy-smt")]
+                            "bitwuzla-binary",
+                            #[cfg(feature = "has-easy-smt")]
+                            "boolector-binary",
+                            #[cfg(feature = "has-bitwuzla")]
+                            "bitwuzla",
+                            #[cfg(feature = "has-boolector")]
+                            "boolector",
+                            "toolchain",
+                        ])
+                        .default_value("auto")
+                        .action(ArgAction::Set),
+                )
+                .add_bool_arg(
+                    "flatten_aggregates",
+                    "Flatten tuple and array types to bits for equivalence checking",
+                )
+                .arg(
+                    Arg::new("drop_params")
+                        .long("drop_params")
+                        .help("Comma-separated list of parameter names to drop from both functions before equivalence checking")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("parallelism_strategy")
+                        .long("parallelism-strategy")
+                        .value_name("STRATEGY")
+                        .help("Parallelism strategy")
+                        .value_parser(["single-threaded", "output-bits", "input-bit-split"])
+                        .default_value("single-threaded")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("assertion_semantics")
+                        .long("assertion-semantics")
+                        .value_name("SEMANTICS")
+                        .help("Assertion semantics")
+                        .value_parser(clap::value_parser!(AssertionSemantics))
+                        .default_value("ignore")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("assert_label_filter")
+                        .long("assert-label-filter")
+                        .value_name("REGEX")
+                        .help("Include only assertions whose label matches this regex (use `|` to combine labels)")
+                        .action(ArgAction::Set),
+                )
+                .add_bool_arg(
+                    "lhs_fixed_implicit_activation",
+                    "Fix the implicit activation bit to true for the lifted AIGER LHS IR",
+                )
+                .add_bool_arg(
+                    "rhs_fixed_implicit_activation",
+                    "Fix the implicit activation bit to true for the RHS IR",
+                )
+                .arg(
+                    clap::Arg::new("output_json")
+                        .long("output_json")
+                        .value_name("PATH")
+                        .help("Write the JSON result to PATH")
+                        .action(clap::ArgAction::Set),
+                ),
+        )
+        .subcommand(
             clap::Command::new("aig-stats")
                 .about("Reads an AIGER file and reports structural + logical-effort statistics")
                 .arg(
@@ -2663,6 +2753,9 @@ fn main() {
         }
         Some(("aig-equiv", subm)) => {
             aig_equiv::handle_aig_equiv(subm, &config);
+        }
+        Some(("aig-ir-equiv", subm)) => {
+            aig_ir_equiv::handle_aig_ir_equiv(subm, &config);
         }
         Some(("aig-stats", subm)) => {
             aig_stats::handle_aig_stats(subm, &config);
