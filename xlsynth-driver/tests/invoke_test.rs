@@ -8127,6 +8127,287 @@ fn test_aig_equiv_accepts_binary_aiger() {
 }
 
 #[test]
+fn test_aig_ir_equiv_reports_equivalent_designs() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let lhs_gate = two_input_gate_fn("main", |a, b, gb| gb.add_and_binary(a, b));
+    let lhs_aag = write_aiger_file(&temp_dir, "lhs.aag", &lhs_gate);
+    let rhs_ir = r#"package sample
+
+top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret and.3: bits[1] = and(a, b, id=3)
+}
+"#;
+    let rhs_ir_path = temp_dir.path().join("rhs.ir");
+    std::fs::write(&rhs_ir_path, rhs_ir).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("aig-ir-equiv")
+        .arg(lhs_aag.to_str().unwrap())
+        .arg(rhs_ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--solver")
+        .arg("toolchain")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "aig-ir-equiv failed for equivalent design; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("[aig-ir-equiv] success: Solver proved equivalence"),
+        "unexpected stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn test_aig_ir_equiv_reports_non_equivalent_designs() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let lhs_gate = two_input_gate_fn("main", |a, b, gb| gb.add_and_binary(a, b));
+    let lhs_aag = write_aiger_file(&temp_dir, "lhs_not_equiv.aag", &lhs_gate);
+    let rhs_ir = r#"package sample
+
+top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret or.3: bits[1] = or(a, b, id=3)
+}
+"#;
+    let rhs_ir_path = temp_dir.path().join("rhs_not_equiv.ir");
+    std::fs::write(&rhs_ir_path, rhs_ir).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("aig-ir-equiv")
+        .arg(lhs_aag.to_str().unwrap())
+        .arg(rhs_ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--solver")
+        .arg("toolchain")
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "expected aig-ir-equiv to fail for inequivalent designs; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_aig_ir_equiv_accepts_binary_aiger() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let lhs_gate = two_input_gate_fn("main", |a, b, gb| gb.add_and_binary(a, b));
+    let lhs_aig = write_aiger_binary_file(&temp_dir, "lhs.aig", &lhs_gate);
+    let rhs_ir = r#"package sample
+
+top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret and.3: bits[1] = and(a, b, id=3)
+}
+"#;
+    let rhs_ir_path = temp_dir.path().join("rhs.ir");
+    std::fs::write(&rhs_ir_path, rhs_ir).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("aig-ir-equiv")
+        .arg(lhs_aig.to_str().unwrap())
+        .arg(rhs_ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--solver")
+        .arg("toolchain")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "aig-ir-equiv failed on binary AIGER: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_aig_ir_equiv_repacks_flattened_aiger_inputs() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let lhs_gate = two_input_gate_fn("main", |a, b, gb| gb.add_and_binary(a, b));
+    let lhs_aag = write_aiger_file(&temp_dir, "lhs_flat.aag", &lhs_gate);
+    let rhs_ir = r#"package sample
+
+top fn main(x: bits[2] id=1) -> bits[1] {
+  x0: bits[1] = bit_slice(x, start=0, width=1, id=2)
+  x1: bits[1] = bit_slice(x, start=1, width=1, id=3)
+  ret and.4: bits[1] = and(x0, x1, id=4)
+}
+"#;
+    let rhs_ir_path = temp_dir.path().join("rhs_flat.ir");
+    std::fs::write(&rhs_ir_path, rhs_ir).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("aig-ir-equiv")
+        .arg(lhs_aag.to_str().unwrap())
+        .arg(rhs_ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--solver")
+        .arg("toolchain")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "aig-ir-equiv should succeed after repacking flattened AIGER inputs; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_aig_ir_equiv_reports_signature_mismatch() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let lhs_gate = two_input_gate_fn("main", |a, b, gb| gb.add_and_binary(a, b));
+    let lhs_aag = write_aiger_file(&temp_dir, "lhs_sig.aag", &lhs_gate);
+    let rhs_ir = r#"package sample
+
+top fn main(x: bits[3] id=1) -> bits[1] {
+  ret literal.2: bits[1] = literal(value=1, id=2)
+}
+"#;
+    let rhs_ir_path = temp_dir.path().join("rhs_sig_mismatch.ir");
+    std::fs::write(&rhs_ir_path, rhs_ir).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("aig-ir-equiv")
+        .arg(lhs_aag.to_str().unwrap())
+        .arg(rhs_ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--solver")
+        .arg("toolchain")
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "expected signature mismatch to fail; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("mismatch"),
+        "expected mismatch error in stderr, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_aig_ir_equiv_roundtrip_from_ir2g8r_aiger_out() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let ir_text = r#"package sample
+
+top fn main() -> bits[1] {
+  ret literal.1: bits[1] = literal(value=1, id=1)
+}
+"#;
+    let ir_path = temp_dir.path().join("orig.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+    let aiger_path = temp_dir.path().join("orig.aig");
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let ir2g8r = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("ir2g8r")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--aiger-out")
+        .arg(aiger_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        ir2g8r.status.success(),
+        "ir2g8r failed; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&ir2g8r.stdout),
+        String::from_utf8_lossy(&ir2g8r.stderr)
+    );
+
+    let equiv = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("aig-ir-equiv")
+        .arg(aiger_path.to_str().unwrap())
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--solver")
+        .arg("toolchain")
+        .output()
+        .unwrap();
+    assert!(
+        equiv.status.success(),
+        "aig-ir-equiv should succeed for ir2g8r roundtrip; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&equiv.stdout),
+        String::from_utf8_lossy(&equiv.stderr)
+    );
+}
+
+#[test]
 #[cfg(feature = "unstable-dslx-specialize")]
 fn test_dslx_specialize_parametric_top_binding() {
     let _ = env_logger::builder().is_test(true).try_init();

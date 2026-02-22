@@ -1193,6 +1193,39 @@ Binary AIGER is also accepted:
 xlsynth-driver aig-equiv lhs.aig rhs.aig
 ```
 
+### `aig-ir-equiv`
+
+Checks an **AIGER (`.aag` or `.aig`)** design against an **IR** function by first
+lifting the AIGER into IR and then running the same IR equivalence flow as
+`ir-equiv`.
+
+- Positional arguments: `<aig_file> <rhs_ir_file>`
+- Top selection:
+  - `--top <NAME>` selects the entry function in `<rhs_ir_file>`.
+  - The AIGER side has a natural single entry point and does not use per-side top flags.
+- Proving flags (same shape as `ir-equiv`):
+  - `--solver <auto|toolchain|bitwuzla|boolector|z3-binary|bitwuzla-binary|boolector-binary>`
+  - `--flatten_aggregates=<BOOL>`
+  - `--drop_params <CSV>`
+  - `--parallelism-strategy <single-threaded|output-bits|input-bit-split>`
+  - `--assertion-semantics <ignore|never|same|assume|implies>`
+  - `--assert-label-filter <REGEX>`
+  - `--lhs_fixed_implicit_activation=<BOOL>` / `--rhs_fixed_implicit_activation=<BOOL>`
+  - `--output_json <PATH>`
+
+Examples:
+
+```shell
+xlsynth-driver aig-ir-equiv my_design.aig my_design.ir --top main
+```
+
+Roundtrip-style check from IR lowering:
+
+```shell
+xlsynth-driver ir2g8r my_design.ir --top main --aiger-out /tmp/my_design.aig
+xlsynth-driver aig-ir-equiv /tmp/my_design.aig my_design.ir --top main
+```
+
 ### `ir-aig-sharing`
 
 Finds and (optionally) proves correspondences between **PIR/XLS IR node output bits**
