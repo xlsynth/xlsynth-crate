@@ -425,6 +425,44 @@ fn rewrite_lsb_of_shll_via_shift_is_zero(f: &mut ir::Fn) -> usize {
     rewrites
 }
 
+/// Prevent pathological OR-term blowups for wide shll-slice literal compares.
+///
+/// Characterization sweeps (Feb 2026) across non-zero starts/literals and wider
+/// shift amounts showed generalized expansion improving gate QoR for sampled
+/// cases; this cap is retained primarily to bound compile-time IR growth.
+const EQ_SHLL_SLICE_LITERAL_MAX_SHIFT_CASE_TERMS: usize = 64;
+
+/// Returns a saturating upper bound for the number of distinct values a
+/// `bits[width]` shift operand can represent (`2^width`).
+///
+/// This helper is intentionally host-sized (`usize`) because it is used only
+/// for rewrite-cost estimation (how many shift cases we might enumerate), not
+/// for IR value semantics. IR values themselves remain width-agnostic
+/// elsewhere.
+fn host_shift_value_domain_size_upper_bound(width: usize) -> usize {
+    u32::try_from(width)
+        .ok()
+        .and_then(|w| 1usize.checked_shl(w))
+        .unwrap_or(usize::MAX)
+}
+
+/// Returns whether a host-sized non-negative integer can be represented in
+/// `bits[width]`, without panicking on large `width`.
+///
+/// This is a guard for constructing shift-literal constants from host indices.
+/// When `width` exceeds host integer width, every `usize` value trivially fits.
+fn host_usize_value_fits_in_bits_width(value: usize, width: usize) -> bool {
+    if width == 0 {
+        return value == 0;
+    }
+    u32::try_from(width)
+        .ok()
+        .and_then(|w| 1usize.checked_shl(w))
+        .map(|limit| value < limit)
+        // When width exceeds host usize bit-width, any usize value fits.
+        .unwrap_or(true)
+}
+
 /// Rewrite a constant compare over a left-shifted slice into explicit
 /// shift-case terms:
 ///
@@ -488,10 +526,34 @@ fn rewrite_eq_shll_slice_literal_to_shift_terms(f: &mut ir::Fn) -> usize {
         if w_s == 0 {
             continue;
         }
+        let shift_case_space = start.saturating_add(width);
+        let shift_domain_upper = host_shift_value_domain_size_upper_bound(w_s);
+        let shift_eq_term_upper = shift_case_space.min(shift_domain_upper);
+        let high_shift_tail_upper = if literal_low_bits_are_zero(f, lit_nr, width)
+            && host_usize_value_fits_in_bits_width(shift_case_space, w_s)
+            && u64::try_from(shift_case_space).is_ok()
+        {
+            1usize
+        } else {
+            0usize
+        };
+        let term_upper_bound = shift_eq_term_upper.saturating_add(high_shift_tail_upper);
+        if term_upper_bound > EQ_SHLL_SLICE_LITERAL_MAX_SHIFT_CASE_TERMS {
+            log::debug!(
+                "aug_opt: skipping eq_shll_slice_literal rewrite at node {} due to estimated term expansion > cap (estimate={} cap={})",
+                f.nodes[eq_index].text_id,
+                term_upper_bound,
+                EQ_SHLL_SLICE_LITERAL_MAX_SHIFT_CASE_TERMS
+            );
+            continue;
+        }
 
         let mut terms = Vec::new();
-        for k in 0..start.saturating_add(width) {
-            if !const_fits_in_width(k as u64, w_s) {
+        for k in 0..shift_case_space {
+            let Ok(k_u64) = u64::try_from(k) else {
+                continue;
+            };
+            if !const_fits_in_width(k_u64, w_s) {
                 continue;
             }
             let truncated = k.saturating_sub(start);
@@ -502,7 +564,7 @@ fn rewrite_eq_shll_slice_literal_to_shift_terms(f: &mut ir::Fn) -> usize {
                 continue;
             }
 
-            let shift_k_lit = push_ubits_literal(f, w_s, k as u64);
+            let shift_k_lit = push_ubits_literal(f, w_s, k_u64);
             let s_eq_k = push_node(
                 f,
                 Type::Bits(1),
@@ -554,8 +616,11 @@ fn rewrite_eq_shll_slice_literal_to_shift_terms(f: &mut ir::Fn) -> usize {
         // available payload bits) also satisfies the equality.
         if literal_low_bits_are_zero(f, lit_nr, width) {
             let limit = start.saturating_add(width);
-            if const_fits_in_width(limit as u64, w_s) {
-                let shift_limit_lit = push_ubits_literal(f, w_s, limit as u64);
+            if host_usize_value_fits_in_bits_width(limit, w_s) {
+                let Ok(limit_u64) = u64::try_from(limit) else {
+                    continue;
+                };
+                let shift_limit_lit = push_ubits_literal(f, w_s, limit_u64);
                 let s_ge_limit = push_node(
                     f,
                     Type::Bits(1),
@@ -2445,6 +2510,46 @@ top fn cone(x: bits[{x_width}] id=1, s: bits[{s_width}] id=2) -> bits[1] {{
                 }
             }
         }
+    }
+
+    #[test]
+    fn aug_opt_skips_eq_shll_slice_literal_when_term_estimate_exceeds_cap() {
+        let cap = EQ_SHLL_SLICE_LITERAL_MAX_SHIFT_CASE_TERMS;
+        let width = cap.saturating_add(1);
+        let ir_text = format!(
+            r#"package shll_eq_skip_cap
+
+top fn cone(x: bits[{width}] id=1, s: bits[7] id=2) -> bits[1] {{
+  shll.3: bits[{width}] = shll(x, s, id=3)
+  bit_slice.4: bits[{width}] = bit_slice(shll.3, start=0, width={width}, id=4)
+  literal.5: bits[{width}] = literal(value=0, id=5)
+  ret eq.6: bits[1] = eq(bit_slice.4, literal.5, id=6)
+}}
+"#
+        );
+
+        let out_text = run_aug_opt_over_ir_text(
+            &ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+        let ret_nr = f.ret_node_ref.expect("ret node");
+        let ret_node = f.get_node(ret_nr);
+        assert!(
+            matches!(ret_node.payload, NodePayload::Binop(Binop::Eq, _, _)),
+            "rewrite should bail out above cap; got {:?}\noutput:\n{}",
+            ret_node.payload,
+            out_text
+        );
     }
 
     #[test]
