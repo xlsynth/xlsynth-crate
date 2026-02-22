@@ -27,6 +27,9 @@ path = "src/lib.rs"
 [workspace]
 members = ["."]
 
+[workspace.lints.rust]
+warnings = "deny"
+
 [[bin]]
 name = "fuzz_gatify"
 path = "fuzz_targets/fuzz_gatify.rs"

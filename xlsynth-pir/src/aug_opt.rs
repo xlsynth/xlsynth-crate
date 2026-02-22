@@ -35,6 +35,7 @@ pub struct AugOptOptions {
 pub struct AugOptRewriteStats {
     pub guarded_sel_ne1_nor: usize,
     pub lsb_of_shll: usize,
+    pub eq_shll_slice_literal: usize,
     pub pow2_msb_compare_with_eq_tiebreak: usize,
     pub eq_priority_sel_to_selector_predicate: usize,
     pub eq_add_zero_to_eq_rhs_sub: usize,
@@ -47,6 +48,7 @@ impl AugOptRewriteStats {
     pub fn total(&self) -> usize {
         self.guarded_sel_ne1_nor
             .saturating_add(self.lsb_of_shll)
+            .saturating_add(self.eq_shll_slice_literal)
             .saturating_add(self.pow2_msb_compare_with_eq_tiebreak)
             .saturating_add(self.eq_priority_sel_to_selector_predicate)
             .saturating_add(self.eq_add_zero_to_eq_rhs_sub)
@@ -60,6 +62,9 @@ impl AugOptRewriteStats {
             .guarded_sel_ne1_nor
             .saturating_add(other.guarded_sel_ne1_nor);
         self.lsb_of_shll = self.lsb_of_shll.saturating_add(other.lsb_of_shll);
+        self.eq_shll_slice_literal = self
+            .eq_shll_slice_literal
+            .saturating_add(other.eq_shll_slice_literal);
         self.pow2_msb_compare_with_eq_tiebreak = self
             .pow2_msb_compare_with_eq_tiebreak
             .saturating_add(other.pow2_msb_compare_with_eq_tiebreak);
@@ -298,6 +303,7 @@ fn apply_basis_rewrites_to_fn(
     let mut stats = AugOptRewriteStats::default();
     stats.guarded_sel_ne1_nor = rewrite_guarded_sel_ne_literal1_nor(&mut cloned);
     stats.lsb_of_shll = rewrite_lsb_of_shll_via_shift_is_zero(&mut cloned);
+    stats.eq_shll_slice_literal = rewrite_eq_shll_slice_literal_to_shift_terms(&mut cloned);
     stats.pow2_msb_compare_with_eq_tiebreak =
         rewrite_pow2_msb_compare_with_eq_tiebreak(&mut cloned);
     stats.eq_priority_sel_to_selector_predicate =
@@ -413,6 +419,226 @@ fn rewrite_lsb_of_shll_via_shift_is_zero(f: &mut ir::Fn) -> usize {
         f.nodes[slice_index].payload = NodePayload::Nary(NaryOp::And, vec![slice_x, eq_s0]);
         f.nodes[slice_index].ty = Type::Bits(1);
 
+        rewrites += 1;
+    }
+
+    rewrites
+}
+
+/// Prevent pathological OR-term blowups for wide shll-slice literal compares.
+///
+/// Characterization sweeps (Feb 2026) across non-zero starts/literals and wider
+/// shift amounts showed generalized expansion improving gate QoR for sampled
+/// cases; this cap is retained primarily to bound compile-time IR growth.
+const EQ_SHLL_SLICE_LITERAL_MAX_SHIFT_CASE_TERMS: usize = 64;
+
+/// Returns a saturating upper bound for the number of distinct values a
+/// `bits[width]` shift operand can represent (`2^width`).
+///
+/// This helper is intentionally host-sized (`usize`) because it is used only
+/// for rewrite-cost estimation (how many shift cases we might enumerate), not
+/// for IR value semantics. IR values themselves remain width-agnostic
+/// elsewhere.
+fn host_shift_value_domain_size_upper_bound(width: usize) -> usize {
+    u32::try_from(width)
+        .ok()
+        .and_then(|w| 1usize.checked_shl(w))
+        .unwrap_or(usize::MAX)
+}
+
+/// Returns whether a host-sized non-negative integer can be represented in
+/// `bits[width]`, without panicking on large `width`.
+///
+/// This is a guard for constructing shift-literal constants from host indices.
+/// When `width` exceeds host integer width, every `usize` value trivially fits.
+fn host_usize_value_fits_in_bits_width(value: usize, width: usize) -> bool {
+    if width == 0 {
+        return value == 0;
+    }
+    u32::try_from(width)
+        .ok()
+        .and_then(|w| 1usize.checked_shl(w))
+        .map(|limit| value < limit)
+        // When width exceeds host usize bit-width, any usize value fits.
+        .unwrap_or(true)
+}
+
+/// Rewrite a constant compare over a left-shifted slice into explicit
+/// shift-case terms:
+///
+/// `eq(bit_slice(shll(x, s), start=S, width=W), C)`
+///   →
+/// `or_k and(eq(s, k), guards_for_k)`
+///
+/// where each `k` term captures one exact shift amount that can match `C`:
+/// - if `k <= S`, the compared window is `bit_slice(x, start=S-k, width=W)`
+/// - if `k > S`, the low `k-S` bits of `C` must be zero, and only the upper
+///   `W-(k-S)` bits are compared against `bit_slice(x, start=0,
+///   width=W-(k-S))`.
+///
+/// This makes shifter behavior explicit and often exposes simpler predicate
+/// structure for downstream optimization / gatify.
+fn rewrite_eq_shll_slice_literal_to_shift_terms(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+
+    for eq_index in 0..f.nodes.len() {
+        let NodePayload::Binop(Binop::Eq, a, b) = f.nodes[eq_index].payload.clone() else {
+            continue;
+        };
+
+        let candidates = [(a, b), (b, a)];
+        let mut matched: Option<(NodeRef, NodeRef, usize, usize, NodeRef)> = None;
+        // (x, s, start, width, lit_nr)
+
+        for (maybe_slice, maybe_lit) in candidates {
+            let NodePayload::BitSlice { arg, start, width } =
+                f.get_node(maybe_slice).payload.clone()
+            else {
+                continue;
+            };
+            if width == 0 {
+                continue;
+            }
+            let NodePayload::Binop(Binop::Shll, x, s) = f.get_node(arg).payload.clone() else {
+                continue;
+            };
+            if !matches!(f.get_node(maybe_lit).payload, NodePayload::Literal(_)) {
+                continue;
+            }
+            if f.get_node_ty(maybe_slice) != &Type::Bits(width)
+                || f.get_node_ty(maybe_lit) != &Type::Bits(width)
+            {
+                continue;
+            }
+            matched = Some((x, s, start, width, maybe_lit));
+            break;
+        }
+
+        let Some((x, s, start, width, lit_nr)) = matched else {
+            continue;
+        };
+
+        let w_x = f.get_node_ty(x).bit_count();
+        if w_x < start.saturating_add(width) {
+            continue;
+        }
+        let w_s = f.get_node_ty(s).bit_count();
+        if w_s == 0 {
+            continue;
+        }
+        let shift_case_space = start.saturating_add(width);
+        let shift_domain_upper = host_shift_value_domain_size_upper_bound(w_s);
+        let shift_eq_term_upper = shift_case_space.min(shift_domain_upper);
+        let high_shift_tail_upper = if literal_low_bits_are_zero(f, lit_nr, width)
+            && host_usize_value_fits_in_bits_width(shift_case_space, w_s)
+            && u64::try_from(shift_case_space).is_ok()
+        {
+            1usize
+        } else {
+            0usize
+        };
+        let term_upper_bound = shift_eq_term_upper.saturating_add(high_shift_tail_upper);
+        if term_upper_bound > EQ_SHLL_SLICE_LITERAL_MAX_SHIFT_CASE_TERMS {
+            log::debug!(
+                "aug_opt: skipping eq_shll_slice_literal rewrite at node {} due to estimated term expansion > cap (estimate={} cap={})",
+                f.nodes[eq_index].text_id,
+                term_upper_bound,
+                EQ_SHLL_SLICE_LITERAL_MAX_SHIFT_CASE_TERMS
+            );
+            continue;
+        }
+
+        let mut terms = Vec::new();
+        // Only iterate representable shift values for `s`; larger `k` can never
+        // satisfy `eq(s, k)` and would only add compile-time work.
+        for k in 0..shift_eq_term_upper {
+            let Ok(k_u64) = u64::try_from(k) else {
+                continue;
+            };
+            let truncated = k.saturating_sub(start);
+            if truncated >= width {
+                continue;
+            }
+            if !literal_low_bits_are_zero(f, lit_nr, truncated) {
+                continue;
+            }
+
+            let shift_k_lit = push_ubits_literal(f, w_s, k_u64);
+            let s_eq_k = push_node(
+                f,
+                Type::Bits(1),
+                NodePayload::Binop(Binop::Eq, s, shift_k_lit),
+            );
+
+            let compared_width = width.saturating_sub(truncated);
+            let term = if compared_width == 0 {
+                // Safe to omit the data-compare arm when no payload bits remain.
+                s_eq_k
+            } else {
+                let x_slice = push_node(
+                    f,
+                    Type::Bits(compared_width),
+                    NodePayload::BitSlice {
+                        arg: x,
+                        start: start.saturating_sub(k),
+                        width: compared_width,
+                    },
+                );
+                let lit_slice = if truncated == 0 {
+                    lit_nr
+                } else {
+                    push_node(
+                        f,
+                        Type::Bits(compared_width),
+                        NodePayload::BitSlice {
+                            arg: lit_nr,
+                            start: truncated,
+                            width: compared_width,
+                        },
+                    )
+                };
+                let slice_eq = push_node(
+                    f,
+                    Type::Bits(1),
+                    NodePayload::Binop(Binop::Eq, x_slice, lit_slice),
+                );
+                push_node(
+                    f,
+                    Type::Bits(1),
+                    NodePayload::Nary(NaryOp::And, vec![s_eq_k, slice_eq]),
+                )
+            };
+            terms.push(term);
+        }
+        // If the compared literal has zeros for all bits in the sliced window,
+        // then any sufficiently large shift (that fully moves the window beyond
+        // available payload bits) also satisfies the equality.
+        if literal_low_bits_are_zero(f, lit_nr, width) {
+            let limit = start.saturating_add(width);
+            if host_usize_value_fits_in_bits_width(limit, w_s) {
+                let Ok(limit_u64) = u64::try_from(limit) else {
+                    continue;
+                };
+                let shift_limit_lit = push_ubits_literal(f, w_s, limit_u64);
+                let s_ge_limit = push_node(
+                    f,
+                    Type::Bits(1),
+                    NodePayload::Binop(Binop::Uge, s, shift_limit_lit),
+                );
+                terms.push(s_ge_limit);
+            }
+        }
+
+        if terms.is_empty() {
+            continue;
+        }
+
+        f.nodes[eq_index].payload = if terms.len() == 1 {
+            NodePayload::Unop(Unop::Identity, terms[0])
+        } else {
+            NodePayload::Nary(NaryOp::Or, terms)
+        };
+        f.nodes[eq_index].ty = Type::Bits(1);
         rewrites += 1;
     }
 
@@ -857,6 +1083,24 @@ fn is_bits_literal_zero(v: &IrValue) -> bool {
         return false;
     };
     for i in 0..bits.get_bit_count() {
+        if bits.get_bit(i).unwrap_or(false) {
+            return false;
+        }
+    }
+    true
+}
+
+fn literal_low_bits_are_zero(f: &ir::Fn, lit_nr: NodeRef, low_bits: usize) -> bool {
+    let NodePayload::Literal(v) = &f.get_node(lit_nr).payload else {
+        return false;
+    };
+    let Ok(bits) = v.to_bits() else {
+        return false;
+    };
+    if low_bits > bits.get_bit_count() {
+        return false;
+    }
+    for i in 0..low_bits {
         if bits.get_bit(i).unwrap_or(false) {
             return false;
         }
@@ -1567,7 +1811,9 @@ fn rewrite_eq_add_zero_to_eq_rhs_sub(f: &mut ir::Fn) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir_eval::{FnEvalResult, eval_fn};
     use crate::test_utils::quickcheck_ir_text_fn_equivalence_ubits_le64;
+    use xlsynth::IrValue;
 
     fn resolve_identity<'a>(f: &'a ir::Fn, mut nr: NodeRef) -> &'a ir::Node {
         loop {
@@ -1578,6 +1824,55 @@ mod tests {
                 }
                 _ => return n,
             }
+        }
+    }
+
+    fn exhaustive_ir_text_fn_equivalence_ubits(
+        ir_text_0: &str,
+        ir_text_1: &str,
+        fn_name: &str,
+        param_widths: &[usize],
+    ) {
+        let mut p0 = ir_parser::Parser::new(ir_text_0);
+        let pkg0 = p0.parse_and_validate_package().expect("parse/validate lhs");
+        let f0 = pkg0.get_fn(fn_name).expect("lhs missing function");
+
+        let mut p1 = ir_parser::Parser::new(ir_text_1);
+        let pkg1 = p1.parse_and_validate_package().expect("parse/validate rhs");
+        let f1 = pkg1.get_fn(fn_name).expect("rhs missing function");
+
+        let mut total_cases: u128 = 1;
+        for &w in param_widths {
+            assert!(
+                w <= 63,
+                "exhaustive helper only supports widths <=63 (got {w})"
+            );
+            total_cases = total_cases.saturating_mul(1u128 << w);
+        }
+        assert!(
+            total_cases <= 1_000_000,
+            "exhaustive helper case count too large: {total_cases}"
+        );
+
+        for case_idx in 0..total_cases {
+            let mut rem = case_idx;
+            let mut args: Vec<IrValue> = Vec::with_capacity(param_widths.len());
+            for &w in param_widths {
+                let radix: u128 = 1u128 << w;
+                let value = rem % radix;
+                rem /= radix;
+                args.push(IrValue::make_ubits(w, value as u64).expect("ubits arg"));
+            }
+
+            let got0 = match eval_fn(f0, &args) {
+                FnEvalResult::Success(s) => s.value.clone(),
+                FnEvalResult::Failure(e) => panic!("unexpected eval failure (lhs): {:?}", e),
+            };
+            let got1 = match eval_fn(f1, &args) {
+                FnEvalResult::Success(s) => s.value.clone(),
+                FnEvalResult::Failure(e) => panic!("unexpected eval failure (rhs): {:?}", e),
+            };
+            assert_eq!(got0, got1, "mismatch on args={args:?}");
         }
     }
 
@@ -2018,6 +2313,241 @@ top fn cone(leaf_52: bits[2] id=1, y: bits[5] id=2) -> bits[1] {
             "cone",
             &[2, 5],
             /* random_samples= */ 2000,
+        );
+    }
+
+    #[test]
+    fn aug_opt_rewrites_eq_shll_slice_literal_to_require_zero_shift() {
+        let ir_text = r#"package shll_eq_all_ones
+
+top fn cone(leaf_168: bits[10] id=1, leaf_236: bits[4] id=2) -> bits[1] {
+  bit_slice.3: bits[9] = bit_slice(leaf_168, start=0, width=9, id=3)
+  shll.4: bits[9] = shll(bit_slice.3, leaf_236, id=4)
+  bit_slice.5: bits[7] = bit_slice(shll.4, start=1, width=7, id=5)
+  literal.6: bits[7] = literal(value=127, id=6)
+  ret eq.7: bits[1] = eq(bit_slice.5, literal.6, id=7)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+
+        let ret_nr = f.ret_node_ref.expect("ret node");
+        let ret_node = f.get_node(ret_nr);
+        assert_eq!(ret_node.ty, Type::Bits(1));
+
+        let NodePayload::Nary(NaryOp::Or, terms) = &ret_node.payload else {
+            panic!(
+                "expected ret to be or(..) after rewrite; got {:?}\noutput:\n{}",
+                ret_node.payload, out_text
+            );
+        };
+        assert_eq!(
+            terms.len(),
+            2,
+            "expected 2-term or; got:
+{}",
+            out_text
+        );
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "cone",
+            &[10, 4],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    #[test]
+    fn aug_opt_rewrites_eq_shll_slice_non_all_ones_literal_to_shift_terms() {
+        let ir_text = r#"package shll_eq_literal
+
+top fn cone(x: bits[10] id=1, s: bits[4] id=2) -> bits[1] {
+  bit_slice.3: bits[9] = bit_slice(x, start=0, width=9, id=3)
+  shll.4: bits[9] = shll(bit_slice.3, s, id=4)
+  bit_slice.5: bits[7] = bit_slice(shll.4, start=1, width=7, id=5)
+  literal.6: bits[7] = literal(value=62, id=6)
+  ret eq.7: bits[1] = eq(bit_slice.5, literal.6, id=7)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+
+        let ret_nr = f.ret_node_ref.expect("ret node");
+        let ret_node = f.get_node(ret_nr);
+        assert_eq!(ret_node.ty, Type::Bits(1));
+        let NodePayload::Nary(NaryOp::Or, terms) = &ret_node.payload else {
+            panic!(
+                "expected ret to be or(..) after rewrite; got {:?}\noutput:\n{}",
+                ret_node.payload, out_text
+            );
+        };
+        assert!(
+            terms.len() >= 2,
+            "expected >=2 terms after shift-case expansion; got {}\n{}",
+            terms.len(),
+            out_text
+        );
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out_text,
+            "cone",
+            &[10, 4],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    #[test]
+    fn aug_opt_eq_shll_slice_zero_literal_covers_high_shift_tail() {
+        let ir_text = r#"package shll_eq_zero_high_shift_tail
+
+top fn cone(x: bits[9] id=1, s: bits[4] id=2) -> bits[1] {
+  shll.3: bits[9] = shll(x, s, id=3)
+  bit_slice.4: bits[7] = bit_slice(shll.3, start=1, width=7, id=4)
+  literal.5: bits[7] = literal(value=0, id=5)
+  ret eq.6: bits[1] = eq(bit_slice.4, literal.5, id=6)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+        let ret_nr = f.ret_node_ref.expect("ret node");
+        let ret_node = f.get_node(ret_nr);
+        assert_eq!(ret_node.ty, Type::Bits(1));
+        assert!(
+            matches!(
+                ret_node.payload,
+                NodePayload::Nary(NaryOp::Or, _) | NodePayload::Unop(Unop::Identity, _)
+            ),
+            "expected disjunction/identity shift-case rewrite; got {:?}\noutput:\n{}",
+            ret_node.payload,
+            out_text
+        );
+
+        // Proof-style check for the reported regression shape: verify all x,s.
+        exhaustive_ir_text_fn_equivalence_ubits(ir_text, &out_text, "cone", &[9, 4]);
+    }
+
+    #[test]
+    fn aug_opt_eq_shll_slice_literal_small_width_exhaustive_sweep() {
+        for x_width in 1..=4usize {
+            for s_width in 1..=3usize {
+                for start in 0..x_width {
+                    for width in 1..=(x_width - start) {
+                        let literal_count = 1usize << width;
+                        for literal in 0..literal_count {
+                            let ir_text = format!(
+                                r#"package shll_eq_sweep
+
+top fn cone(x: bits[{x_width}] id=1, s: bits[{s_width}] id=2) -> bits[1] {{
+  shll.3: bits[{x_width}] = shll(x, s, id=3)
+  bit_slice.4: bits[{width}] = bit_slice(shll.3, start={start}, width={width}, id=4)
+  literal.5: bits[{width}] = literal(value={literal}, id=5)
+  ret eq.6: bits[1] = eq(bit_slice.4, literal.5, id=6)
+}}
+"#
+                            );
+
+                            let out_text = run_aug_opt_over_ir_text(
+                                &ir_text,
+                                Some("cone"),
+                                AugOptOptions {
+                                    enable: true,
+                                    rounds: 1,
+                                    mode: AugOptMode::PirOnly,
+                                },
+                            )
+                            .expect("aug opt");
+
+                            exhaustive_ir_text_fn_equivalence_ubits(
+                                &ir_text,
+                                &out_text,
+                                "cone",
+                                &[x_width, s_width],
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn aug_opt_skips_eq_shll_slice_literal_when_term_estimate_exceeds_cap() {
+        let cap = EQ_SHLL_SLICE_LITERAL_MAX_SHIFT_CASE_TERMS;
+        let width = cap.saturating_add(1);
+        let ir_text = format!(
+            r#"package shll_eq_skip_cap
+
+top fn cone(x: bits[{width}] id=1, s: bits[7] id=2) -> bits[1] {{
+  shll.3: bits[{width}] = shll(x, s, id=3)
+  bit_slice.4: bits[{width}] = bit_slice(shll.3, start=0, width={width}, id=4)
+  literal.5: bits[{width}] = literal(value=0, id=5)
+  ret eq.6: bits[1] = eq(bit_slice.4, literal.5, id=6)
+}}
+"#
+        );
+
+        let out_text = run_aug_opt_over_ir_text(
+            &ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+        let ret_nr = f.ret_node_ref.expect("ret node");
+        let ret_node = f.get_node(ret_nr);
+        assert!(
+            matches!(ret_node.payload, NodePayload::Binop(Binop::Eq, _, _)),
+            "rewrite should bail out above cap; got {:?}\noutput:\n{}",
+            ret_node.payload,
+            out_text
         );
     }
 
