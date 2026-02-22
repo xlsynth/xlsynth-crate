@@ -71,6 +71,31 @@ def registry_token_env_var_name(registry: str) -> str:
     return f"CARGO_REGISTRIES_{normalized}_TOKEN"
 
 
+def has_cargo_credentials_token(registry: str | None) -> bool:
+    credential_paths = [
+        pathlib.Path.home() / ".cargo" / "credentials.toml",
+        pathlib.Path.home() / ".cargo" / "credentials",
+    ]
+    for path in credential_paths:
+        if not path.exists():
+            continue
+        try:
+            with path.open("rb") as f:
+                data = tomllib.load(f)
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+
+        default_token = data.get("registry", {}).get("token")
+        if isinstance(default_token, str) and default_token:
+            return True
+
+        if registry:
+            registry_token = data.get("registries", {}).get(registry, {}).get("token")
+            if isinstance(registry_token, str) and registry_token:
+                return True
+    return False
+
+
 def preflight_auth_check(
     args: argparse.Namespace, workspace_root: pathlib.Path
 ) -> tuple[bool, str]:
@@ -83,9 +108,14 @@ def preflight_auth_check(
         if os.getenv(registry_env_var):
             return True, f"token found in {registry_env_var}"
 
+    if has_cargo_credentials_token(args.registry):
+        return True, "token found in Cargo credentials file"
+
     hints = ["CARGO_REGISTRY_TOKEN"]
     if args.registry:
         hints.append(registry_token_env_var_name(args.registry))
+    hints.append("~/.cargo/credentials.toml")
+    hints.append("~/.cargo/credentials")
     hint_list = ", ".join(hints)
     return False, (
         "No cargo registry token source found for --execute mode. "
