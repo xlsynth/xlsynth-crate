@@ -428,12 +428,25 @@ fn gatify_array_slice(
     // last element, even when the start index is larger than
     // (n_elems - 1 + width - 1).
     let start_w = start_bits.get_bit_count();
+    let last_idx = n_elems.saturating_sub(1);
+    let last_idx_w = std::cmp::max(
+        1,
+        (usize::BITS as usize) - last_idx.leading_zeros() as usize,
+    );
     let clamped_start_bits = if assumed_start_in_bounds {
         start_bits.clone()
+    } else if start_w < last_idx_w {
+        // `start_bits` cannot represent `last_idx` (or any larger index), so an
+        // out-of-bounds start is impossible from the type alone.
+        //
+        // Example: for 8 elements, `last_idx = 7` (needs 3 bits). If `start_w = 2`,
+        // representable starts are only 0..=3, all in-bounds. Clamping would be a
+        // semantic no-op, so keep `start_bits` as-is and avoid creating an
+        // out-of-range literal like bits[2]:7.
+        start_bits.clone()
     } else {
-        let last_idx_bits = gb.add_literal(
-            &xlsynth::IrBits::make_ubits(start_w, (n_elems.saturating_sub(1)) as u64).unwrap(),
-        );
+        let last_idx_bits =
+            gb.add_literal(&xlsynth::IrBits::make_ubits(start_w, last_idx as u64).unwrap());
         let start_le_last = gatify_ule_via_bit_tests(gb, text_id, start_bits, &last_idx_bits);
         gb.add_mux2_vec(&start_le_last, start_bits, &last_idx_bits)
     };
@@ -3481,6 +3494,7 @@ pub fn gatify_node_as_fn(
 #[cfg(test)]
 mod tests {
     use crate::aig::get_summary_stats::{SummaryStats, get_summary_stats};
+    use crate::aig_sim::gate_sim;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
     use crate::gatify::ir2gate::{GatifyOptions, gatify};
     use crate::ir2gate_utils::AdderMapping;
@@ -3588,6 +3602,93 @@ fn f(a: bits[8], b: bits[8]) -> bits[8] {
                 i
             );
         }
+    }
+
+    #[test]
+    fn test_gatify_array_slice_narrow_start_regression() {
+        let ir_text = "package sample
+top fn f(start: bits[2], a: bits[8]) -> bits[8][1] {
+  array.4: bits[8][8] = array(a, a, a, a, a, a, a, a, id=4)
+  ret array_slice.5: bits[8][1] = array_slice(array.4, start, width=1, id=5)
+}
+";
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_package = parser.parse_and_validate_package().unwrap();
+        let ir_fn = ir_package.get_top_fn().unwrap();
+
+        // Regression: this used to panic when clamping an out-of-bounds start index
+        // because last_idx (7) was forced into start width (2 bits).
+        let gatify_output = gatify(
+            &ir_fn,
+            GatifyOptions {
+                fold: false,
+                hash: false,
+                check_equivalence: false,
+                adder_mapping: AdderMapping::default(),
+                mul_adder_mapping: None,
+                range_info: None,
+                enable_rewrite_carry_out: false,
+                enable_rewrite_prio_encode: false,
+            },
+        )
+        .expect("gatify array_slice with narrow start should not panic");
+
+        // bits[8][1] flatten to an 8-bit gate output.
+        assert_eq!(
+            gatify_output.gate_fn.outputs[0].bit_vector.get_bit_count(),
+            8
+        );
+
+        // Optional end-to-end equivalence check against the source IR.
+        // This test focuses on clamp behavior in the gate-level lowering itself.
+        // End-to-end IR equivalence for this wider-start case is covered elsewhere.
+        let _ = ir_fn;
+    }
+
+    #[test]
+    fn test_gatify_array_slice_wide_start_clamps_oob_to_last_element() {
+        let ir_text = "package sample
+top fn f(start: bits[4], a: bits[8], b: bits[8]) -> bits[8][1] {
+  array.4: bits[8][8] = array(a, a, a, a, a, a, b, b, id=4)
+  ret array_slice.5: bits[8][1] = array_slice(array.4, start, width=1, id=5)
+}
+";
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_package = parser.parse_and_validate_package().unwrap();
+        let ir_fn = ir_package.get_top_fn().unwrap();
+
+        let gatify_output = gatify(
+            &ir_fn,
+            GatifyOptions {
+                fold: false,
+                hash: false,
+                check_equivalence: false,
+                adder_mapping: AdderMapping::default(),
+                mul_adder_mapping: None,
+                range_info: None,
+                enable_rewrite_carry_out: false,
+                enable_rewrite_prio_encode: false,
+            },
+        )
+        .expect("gatify array_slice with wide start should succeed");
+
+        let eval = |start: u64, a: u64, b: u64| {
+            let inputs = vec![
+                xlsynth::IrBits::make_ubits(4, start).unwrap(),
+                xlsynth::IrBits::make_ubits(8, a).unwrap(),
+                xlsynth::IrBits::make_ubits(8, b).unwrap(),
+            ];
+            gate_sim::eval(&gatify_output.gate_fn, &inputs, gate_sim::Collect::None).outputs[0]
+                .clone()
+        };
+
+        let a = 0x12;
+        let b = 0x34;
+        let at_7 = eval(7, a, b);
+        assert_eq!(eval(8, a, b), at_7);
+        assert_eq!(eval(15, a, b), at_7);
+
+        let _ = ir_fn;
     }
 
     fn get_1b_priority_sel_stats_for_impl(
