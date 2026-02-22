@@ -57,11 +57,6 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional cargo --index URL.",
     )
-    parser.add_argument(
-        "--token",
-        default=None,
-        help="Optional crates.io API token (otherwise cargo defaults apply).",
-    )
     return parser.parse_args()
 
 
@@ -80,9 +75,6 @@ def preflight_auth_check(
     args: argparse.Namespace, workspace_root: pathlib.Path
 ) -> tuple[bool, str]:
     _ = workspace_root  # kept in signature for call-site clarity
-    if args.token:
-        return True, "token provided via --token"
-
     if os.getenv("CARGO_REGISTRY_TOKEN"):
         return True, "token found in CARGO_REGISTRY_TOKEN"
 
@@ -91,7 +83,7 @@ def preflight_auth_check(
         if os.getenv(registry_env_var):
             return True, f"token found in {registry_env_var}"
 
-    hints = ["--token", "CARGO_REGISTRY_TOKEN"]
+    hints = ["CARGO_REGISTRY_TOKEN"]
     if args.registry:
         hints.append(registry_token_env_var_name(args.registry))
     hint_list = ", ".join(hints)
@@ -143,7 +135,6 @@ def build_cargo_yank_command(
     undo: bool,
     registry: str | None,
     index: str | None,
-    token: str | None,
 ) -> list[str]:
     cmd = ["cargo", "yank", crate_name, "--version", version]
     if undo:
@@ -152,8 +143,6 @@ def build_cargo_yank_command(
         cmd.extend(["--registry", registry])
     if index:
         cmd.extend(["--index", index])
-    if token:
-        cmd.extend(["--token", token])
     return cmd
 
 
@@ -191,7 +180,6 @@ def main() -> int:
             undo=args.undo,
             registry=args.registry,
             index=args.index,
-            token=args.token,
         )
         rendered = shlex.join(cmd)
         if not args.execute:
