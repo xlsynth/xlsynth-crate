@@ -57,6 +57,14 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional cargo --index URL.",
     )
+    parser.add_argument(
+        "--nonstandard-auth",
+        action="store_true",
+        help=(
+            "Bypass simple preflight token check and defer authentication handling "
+            "to cargo (e.g. credential files/providers)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -66,60 +74,24 @@ def normalize_version(raw: str) -> str:
     return raw
 
 
-def registry_token_env_var_name(registry: str) -> str:
-    normalized = registry.upper().replace("-", "_")
-    return f"CARGO_REGISTRIES_{normalized}_TOKEN"
-
-
-def has_cargo_credentials_token(registry: str | None) -> bool:
-    credential_paths = [
-        pathlib.Path.home() / ".cargo" / "credentials.toml",
-        pathlib.Path.home() / ".cargo" / "credentials",
-    ]
-    for path in credential_paths:
-        if not path.exists():
-            continue
-        try:
-            with path.open("rb") as f:
-                data = tomllib.load(f)
-        except (OSError, tomllib.TOMLDecodeError):
-            continue
-
-        default_token = data.get("registry", {}).get("token")
-        if isinstance(default_token, str) and default_token:
-            return True
-
-        if registry:
-            registry_token = data.get("registries", {}).get(registry, {}).get("token")
-            if isinstance(registry_token, str) and registry_token:
-                return True
-    return False
-
-
 def preflight_auth_check(
     args: argparse.Namespace, workspace_root: pathlib.Path
 ) -> tuple[bool, str]:
-    _ = workspace_root  # kept in signature for call-site clarity
+    _ = workspace_root
+    if args.nonstandard_auth:
+        return (
+            True,
+            "--nonstandard-auth set; skipping strict env-var auth preflight",
+        )
+
+    # Intentionally simple: require explicit env var auth by default.
+    # This keeps behavior easy to reason about in automation and local use.
     if os.getenv("CARGO_REGISTRY_TOKEN"):
         return True, "token found in CARGO_REGISTRY_TOKEN"
-
-    if args.registry:
-        registry_env_var = registry_token_env_var_name(args.registry)
-        if os.getenv(registry_env_var):
-            return True, f"token found in {registry_env_var}"
-
-    if has_cargo_credentials_token(args.registry):
-        return True, "token found in Cargo credentials file"
-
-    hints = ["CARGO_REGISTRY_TOKEN"]
-    if args.registry:
-        hints.append(registry_token_env_var_name(args.registry))
-    hints.append("~/.cargo/credentials.toml")
-    hints.append("~/.cargo/credentials")
-    hint_list = ", ".join(hints)
     return False, (
-        "No cargo registry token source found for --execute mode. "
-        f"Provide one of: {hint_list}."
+        "CARGO_REGISTRY_TOKEN is not set. "
+        "Set CARGO_REGISTRY_TOKEN or rerun with --nonstandard-auth "
+        "to defer authentication handling to cargo."
     )
 
 
