@@ -11,9 +11,42 @@ use crate::xlsynth_error::XlsynthError;
 
 #[derive(Debug, Clone)]
 pub struct AotEntrypointDescriptor<'a> {
-    pub entrypoints_proto: &'a [u8],
-    pub function_ptr: usize,
-    pub metadata: AotEntrypointMetadata,
+    entrypoints_proto: &'a [u8],
+    function_ptr: usize,
+    metadata: AotEntrypointMetadata,
+}
+
+impl<'a> AotEntrypointDescriptor<'a> {
+    /// Creates an AOT entrypoint descriptor from raw parts.
+    ///
+    /// This is intended for generated wrapper code and other trusted callers
+    /// that obtain the function pointer from a linked XLS AOT symbol.
+    ///
+    /// # Safety
+    ///
+    /// `function_ptr` must be a valid pointer to an XLS AOT entrypoint
+    /// function with the ABI expected by `xls_aot_entrypoint_trampoline`, and
+    /// it must remain valid for the lifetime of the returned descriptor.
+    #[doc(hidden)]
+    pub unsafe fn from_raw_parts_unchecked(
+        entrypoints_proto: &'a [u8],
+        function_ptr: usize,
+        metadata: AotEntrypointMetadata,
+    ) -> Self {
+        Self {
+            entrypoints_proto,
+            function_ptr,
+            metadata,
+        }
+    }
+
+    pub fn entrypoints_proto(&self) -> &'a [u8] {
+        self.entrypoints_proto
+    }
+
+    pub fn metadata(&self) -> &AotEntrypointMetadata {
+        &self.metadata
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

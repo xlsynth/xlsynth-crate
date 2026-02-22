@@ -858,18 +858,20 @@ const OUTPUT_BUFFER_ALIGNMENTS: &[usize] = {output_alignments};\n\
 {helper_functions}\n\
 \n\
 pub fn descriptor() -> xlsynth::AotEntrypointDescriptor<'static> {{\n\
-    xlsynth::AotEntrypointDescriptor {{\n\
-        entrypoints_proto: ENTRYPOINTS_PROTO,\n\
-        function_ptr: {symbol_ident} as *const () as usize,\n\
-        metadata: xlsynth::AotEntrypointMetadata {{\n\
-            symbol: {link_symbol_literal}.to_string(),\n\
-            input_buffer_sizes: INPUT_BUFFER_SIZES.to_vec(),\n\
-            input_buffer_alignments: INPUT_BUFFER_ALIGNMENTS.to_vec(),\n\
-            output_buffer_sizes: OUTPUT_BUFFER_SIZES.to_vec(),\n\
-            output_buffer_alignments: OUTPUT_BUFFER_ALIGNMENTS.to_vec(),\n\
-            temp_buffer_size: {temp_size},\n\
-            temp_buffer_alignment: {temp_align},\n\
-        }},\n\
+    unsafe {{\n\
+        xlsynth::AotEntrypointDescriptor::from_raw_parts_unchecked(\n\
+            ENTRYPOINTS_PROTO,\n\
+            {symbol_ident} as *const () as usize,\n\
+            xlsynth::AotEntrypointMetadata {{\n\
+                symbol: {link_symbol_literal}.to_string(),\n\
+                input_buffer_sizes: INPUT_BUFFER_SIZES.to_vec(),\n\
+                input_buffer_alignments: INPUT_BUFFER_ALIGNMENTS.to_vec(),\n\
+                output_buffer_sizes: OUTPUT_BUFFER_SIZES.to_vec(),\n\
+                output_buffer_alignments: OUTPUT_BUFFER_ALIGNMENTS.to_vec(),\n\
+                temp_buffer_size: {temp_size},\n\
+                temp_buffer_alignment: {temp_align},\n\
+            }},\n\
+        )\n\
     }}\n\
 }}\n\
 \n\
