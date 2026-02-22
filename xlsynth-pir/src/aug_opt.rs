@@ -549,13 +549,12 @@ fn rewrite_eq_shll_slice_literal_to_shift_terms(f: &mut ir::Fn) -> usize {
         }
 
         let mut terms = Vec::new();
-        for k in 0..shift_case_space {
+        // Only iterate representable shift values for `s`; larger `k` can never
+        // satisfy `eq(s, k)` and would only add compile-time work.
+        for k in 0..shift_eq_term_upper {
             let Ok(k_u64) = u64::try_from(k) else {
                 continue;
             };
-            if !const_fits_in_width(k_u64, w_s) {
-                continue;
-            }
             let truncated = k.saturating_sub(start);
             if truncated >= width {
                 continue;
