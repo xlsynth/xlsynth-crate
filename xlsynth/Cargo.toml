@@ -15,10 +15,15 @@ readme = "../README.md"
 [lints]
 workspace = true
 
+[features]
+default = []
+clap = ["dep:clap"]
+
 [dependencies]
 xlsynth-sys = {path = "../xlsynth-sys", version = "0.33.0"}
 cargo_metadata = "0.18"
 thiserror = "1"
+clap = { version = "4.5.21", features = ["derive"], optional = true }
 log = "0.4"
 regex = "1.11.1"
 serde = { version = "1.0", features = ["derive"] }

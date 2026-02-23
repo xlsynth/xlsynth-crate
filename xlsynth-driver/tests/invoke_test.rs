@@ -717,6 +717,10 @@ top fn main(sel: bits[1] id=1, a: bits[1] id=2, b: bits[1] id=3) -> bits[1] {
 }
 
 /// Simple test that converts a DSLX module with an enum into a SV definition.
+// Verifies: dslx2sv-types accepts an explicit unqualified enum-case policy and
+// preserves legacy enum member spelling.
+// Catches: Regressions where the new required policy flag breaks the existing
+// unqualified output path.
 #[test_case(true; "with_tool_path")]
 #[test_case(false; "without_tool_path")]
 fn test_dslx2sv_types_subcommand(use_tool_path: bool) {
@@ -744,6 +748,8 @@ fn test_dslx2sv_types_subcommand(use_tool_path: bool) {
         .arg("dslx2sv-types")
         .arg("--dslx_input_file")
         .arg(dslx_path.to_str().unwrap())
+        .arg("--sv_enum_case_naming_policy")
+        .arg("unqualified")
         .output()
         .unwrap();
 
@@ -764,6 +770,107 @@ fn test_dslx2sv_types_subcommand(use_tool_path: bool) {
     );
 }
 
+// Verifies: dslx2sv-types emits enum-qualified SV members when enum_qualified
+// policy is requested.
+// Catches: Regressions where the CLI accepts enum_qualified but the bridge
+// still emits unqualified case names.
+#[test]
+fn test_dslx2sv_types_subcommand_enum_qualified_policy() {
+    let dslx = "enum OpType : u2 { READ = 0, WRITE = 1 }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("my_module.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("dslx2sv-types")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--sv_enum_case_naming_policy")
+        .arg("enum_qualified")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    xlsynth_test_helpers::assert_valid_sv(&stdout);
+    assert_eq!(
+        stdout.trim(),
+        r"typedef enum logic [1:0] {
+    OpType_Read = 2'd0,
+    OpType_Write = 2'd1
+} op_type_t;"
+    );
+}
+
+// Negative test: omitting the required enum-case naming policy flag returns a
+// CLI error instead of silently choosing a default.
+#[test]
+fn test_dslx2sv_types_requires_sv_enum_case_naming_policy_flag() {
+    let dslx = "enum OpType : u2 { READ = 0, WRITE = 1 }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("my_module.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("dslx2sv-types")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--sv_enum_case_naming_policy"));
+    assert!(stderr.contains("required"));
+}
+
+// Negative test: invalid enum-case naming policy values are rejected by CLI
+// validation with a helpful allowed-values error.
+#[test]
+fn test_dslx2sv_types_rejects_invalid_sv_enum_case_naming_policy_flag_value() {
+    let dslx = "enum OpType : u2 { READ = 0, WRITE = 1 }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("my_module.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("dslx2sv-types")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--sv_enum_case_naming_policy")
+        .arg("bad_policy")
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("bad_policy"));
+    assert!(stderr.contains("unqualified"));
+    assert!(stderr.contains("enum_qualified"));
+}
+
+// Verifies: dslx2sv-types still resolves stdlib-dependent type expressions
+// when the explicit policy flag is present.
+// Catches: Regressions where requiring the policy flag breaks non-enum DSLX
+// conversion flows.
 #[test]
 fn test_dslx2sv_types_with_std_clog2() {
     let dslx = "import std;
@@ -785,6 +892,8 @@ struct MyStruct {
         .arg("dslx2sv-types")
         .arg("--dslx_input_file")
         .arg(dslx_path.to_str().unwrap())
+        .arg("--sv_enum_case_naming_policy")
+        .arg("unqualified")
         .output()
         .unwrap();
 
