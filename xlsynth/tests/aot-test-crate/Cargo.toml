@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "xlsynth-aot-test-crate"
+version = "0.33.0"
+edition = "2018"
+authors = ["Christopher D. Leary <cdleary@gmail.com>", "Mark Heffernan <meheff@gmail.com>"]
+description = "Integration tests for xlsynth build.rs AOT workflow"
+license = "Apache-2.0"
+repository = "https://github.com/xlsynth/xlsynth-crate"
+
+[lints]
+workspace = true
+
+[dependencies]
+xlsynth = { path = "../.." }
+
+[build-dependencies]
+xlsynth = { path = "../.." }

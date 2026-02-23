@@ -40,6 +40,11 @@ pub struct CIrFunctionJit {
 }
 
 #[repr(C)]
+pub struct CXlsAotExecContext {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
 pub struct CTraceMessage {
     pub message: *mut std::os::raw::c_char,
     pub verbosity: i64,
@@ -857,6 +862,46 @@ extern "C" {
         function: *const CIrFunction,
         error_out: *mut *mut std::os::raw::c_char,
         result_out: *mut *mut CIrFunctionJit,
+    ) -> bool;
+    pub fn xls_aot_compile_function(
+        function: *mut CIrFunction,
+        error_out: *mut *mut std::os::raw::c_char,
+        object_code_out: *mut *mut u8,
+        object_code_count_out: *mut libc::size_t,
+        entrypoints_proto_out: *mut *mut u8,
+        entrypoints_proto_count_out: *mut libc::size_t,
+    ) -> bool;
+    pub fn xls_aot_object_code_free(object_code: *mut u8);
+    pub fn xls_aot_entrypoints_proto_free(entrypoints_proto: *mut u8);
+    pub fn xls_aot_exec_context_create(
+        entrypoints_proto: *const u8,
+        entrypoints_proto_count: libc::size_t,
+        error_out: *mut *mut std::os::raw::c_char,
+        out: *mut *mut CXlsAotExecContext,
+    ) -> bool;
+    pub fn xls_aot_exec_context_clear_events(context: *mut CXlsAotExecContext);
+    pub fn xls_aot_exec_context_free(context: *mut CXlsAotExecContext);
+    pub fn xls_aot_entrypoint_trampoline(
+        function_ptr: usize,
+        inputs: *const *const u8,
+        outputs: *const *mut u8,
+        temp_buffer: *mut libc::c_void,
+        context: *mut CXlsAotExecContext,
+        continuation_point: i64,
+        trace_messages_count_out: *mut libc::size_t,
+        assert_messages_count_out: *mut libc::size_t,
+    ) -> i64;
+    pub fn xls_aot_exec_context_get_trace_message(
+        context: *const CXlsAotExecContext,
+        index: libc::size_t,
+        error_out: *mut *mut std::os::raw::c_char,
+        trace_message_out: *mut CTraceMessage,
+    ) -> bool;
+    pub fn xls_aot_exec_context_get_assert_message(
+        context: *const CXlsAotExecContext,
+        index: libc::size_t,
+        error_out: *mut *mut std::os::raw::c_char,
+        assert_message_out: *mut *mut std::os::raw::c_char,
     ) -> bool;
     pub fn xls_function_jit_free(jit: *mut CIrFunctionJit);
     pub fn xls_function_jit_run(

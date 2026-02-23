@@ -1085,7 +1085,13 @@ mod tests {
         let result = IrValue::make_ubits(1, 2);
         assert!(result.is_err());
         let error = result.unwrap_err();
-        assert!(error.to_string().contains("0x2 requires 2 bits to fit in an unsigned datatype, but attempting to fit in 1 bit"), "got: {}", error);
+        assert!(
+            error.to_string().contains(
+                "0x2 requires 2 bits to fit in an unsigned datatype, but attempting to fit in 1 bit"
+            ),
+            "got: {}",
+            error
+        );
 
         let result = IrValue::make_sbits(1, -2);
         assert!(result.is_err());
