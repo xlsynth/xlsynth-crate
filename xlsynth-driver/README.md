@@ -1003,6 +1003,28 @@ result. Example:
 xlsynth-driver ir-fn-eval my_mod.ir add '(bits[32]:1, bits[32]:2)'
 ```
 
+### `aig-eval`
+
+Evaluates an AIGER file (`.aag` or `.aig`) with a tuple of typed IR argument
+values and prints the result as an IR typed value.
+
+- Required:
+  - `<AIG_FILE>`
+  - `<ARG_TUPLE>` – typed tuple, e.g. `(bits[8]:7, bits[8]:13)`.
+- Optional:
+  - `--fn-type <FN_TYPE>` – superimposed function type used to repack flattened
+    AIG inputs and shape the output value, e.g. `(bits[8], bits[8]) -> bits[8]`.
+
+Examples:
+
+```shell
+# Evaluate with native AIG input/output packing.
+xlsynth-driver aig-eval add.aag '(bits[8]:7, bits[8]:13)'
+
+# Evaluate with an explicit function type (useful when AIGER flattened all inputs to 1-bit ports).
+xlsynth-driver aig-eval add.aag '(bits[8]:7, bits[8]:13)'   --fn-type '(bits[8], bits[8]) -> bits[8]'
+```
+
 ### `ir-fn-autocov`
 
 Runs coverage-guided corpus growth for an IR function and appends interesting

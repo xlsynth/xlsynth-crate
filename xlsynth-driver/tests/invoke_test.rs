@@ -3880,6 +3880,130 @@ fn test_ir_fn_eval() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "bits[32]:3\n");
 }
 
+#[test]
+fn test_aig_eval_matches_ir_fn_eval() {
+    let ir = "package test
+
+fn f(a: bits[1] id=1, b: bits[1] id=2, c: bits[1] id=3) -> bits[1] {
+  and.4: bits[1] = and(a, b, id=4)
+  ret xor.5: bits[1] = xor(and.4, c, id=5)
+}
+";
+    let dir = tempfile::tempdir().unwrap();
+    let ir_path = dir.path().join("f.ir");
+    let aag_path = dir.path().join("f.aag");
+    std::fs::write(&ir_path, ir).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let ir2g8r_output = Command::new(command_path)
+        .arg("ir2g8r")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("f")
+        .arg("--aiger-out")
+        .arg(aag_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        ir2g8r_output.status.success(),
+        "ir2g8r failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&ir2g8r_output.stdout),
+        String::from_utf8_lossy(&ir2g8r_output.stderr)
+    );
+
+    let args = "(bits[1]:1, bits[1]:0, bits[1]:1)";
+    let ir_eval_output = Command::new(command_path)
+        .arg("ir-fn-eval")
+        .arg(ir_path.to_str().unwrap())
+        .arg("f")
+        .arg(args)
+        .output()
+        .unwrap();
+    assert!(
+        ir_eval_output.status.success(),
+        "ir-fn-eval failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&ir_eval_output.stdout),
+        String::from_utf8_lossy(&ir_eval_output.stderr)
+    );
+
+    let aig_eval_output = Command::new(command_path)
+        .arg("aig-eval")
+        .arg(aag_path.to_str().unwrap())
+        .arg(args)
+        .output()
+        .unwrap();
+    assert!(
+        aig_eval_output.status.success(),
+        "aig-eval failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&aig_eval_output.stdout),
+        String::from_utf8_lossy(&aig_eval_output.stderr)
+    );
+
+    assert_eq!(ir_eval_output.stdout, aig_eval_output.stdout);
+}
+#[test]
+fn test_aig_eval_matches_ir_fn_eval_with_tuple_input_output() {
+    let ir = r#"package test
+
+fn f(x: (bits[1], bits[8], bits[7]) id=1) -> (bits[1], bits[8], bits[7]) {
+  ret identity.2: (bits[1], bits[8], bits[7]) = identity(x, id=2)
+}
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let ir_path = dir.path().join("tuple_round_trip.ir");
+    let aag_path = dir.path().join("tuple_round_trip.aag");
+    std::fs::write(&ir_path, ir).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let ir2g8r_output = Command::new(command_path)
+        .arg("ir2g8r")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("f")
+        .arg("--aiger-out")
+        .arg(aag_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        ir2g8r_output.status.success(),
+        "ir2g8r failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&ir2g8r_output.stdout),
+        String::from_utf8_lossy(&ir2g8r_output.stderr)
+    );
+
+    let args = "((bits[1]:1, bits[8]:0xaa, bits[7]:0x55))";
+    let ir_eval_output = Command::new(command_path)
+        .arg("ir-fn-eval")
+        .arg(ir_path.to_str().unwrap())
+        .arg("f")
+        .arg(args)
+        .output()
+        .unwrap();
+    assert!(
+        ir_eval_output.status.success(),
+        "ir-fn-eval failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&ir_eval_output.stdout),
+        String::from_utf8_lossy(&ir_eval_output.stderr)
+    );
+
+    let aig_eval_output = Command::new(command_path)
+        .arg("aig-eval")
+        .arg(aag_path.to_str().unwrap())
+        .arg(args)
+        .arg("--fn-type")
+        .arg("((bits[1], bits[8], bits[7])) -> (bits[1], bits[8], bits[7])")
+        .output()
+        .unwrap();
+    assert!(
+        aig_eval_output.status.success(),
+        "aig-eval failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&aig_eval_output.stdout),
+        String::from_utf8_lossy(&aig_eval_output.stderr)
+    );
+
+    assert_eq!(ir_eval_output.stdout, aig_eval_output.stdout);
+}
+
 /// TODO(cdleary): 2025-06-10 This only works when there is a tool path
 /// available because the runtime APIs don't support specifying TIv2.
 #[test_case(true; "with_tool_path")]
