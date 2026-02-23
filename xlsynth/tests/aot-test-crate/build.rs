@@ -3,6 +3,13 @@
 use xlsynth::aot_builder::{emit_aot_module_from_ir_text, AotBuildSpec};
 
 fn main() {
+    struct AotCase {
+        name: &'static str,
+        top: &'static str,
+        env_var: &'static str,
+        ir_text: &'static str,
+    }
+
     let add_one_ir = r#"package aot_tests
 
 top fn add_one(x: bits[8]) -> bits[8] {
@@ -88,72 +95,58 @@ top fn trace_assert_pair(tok: token, pair: (bits[8], bits[8])) -> (bits[8], bits
 }
 "#;
 
-    let add_one = emit_aot_module_from_ir_text(&AotBuildSpec {
-        name: "add_one",
-        ir_text: add_one_ir,
-        top: "add_one",
-    })
-    .expect("AOT compile for add_one should succeed");
+    let cases = [
+        AotCase {
+            name: "add_one",
+            top: "add_one",
+            env_var: "XLSYNTH_AOT_ADD_ONE_RS",
+            ir_text: add_one_ir,
+        },
+        AotCase {
+            name: "add_inputs",
+            top: "add_inputs",
+            env_var: "XLSYNTH_AOT_ADD_INPUTS_RS",
+            ir_text: add_inputs_ir,
+        },
+        AotCase {
+            name: "compound_shapes",
+            top: "compound_shapes",
+            env_var: "XLSYNTH_AOT_COMPOUND_SHAPES_RS",
+            ir_text: compound_shapes_ir,
+        },
+        AotCase {
+            name: "empty_tuple",
+            top: "make_empty_tuple",
+            env_var: "XLSYNTH_AOT_EMPTY_TUPLE_RS",
+            ir_text: empty_tuple_ir,
+        },
+        AotCase {
+            name: "wide_sizes",
+            top: "wide_sizes",
+            env_var: "XLSYNTH_AOT_WIDE_SIZES_RS",
+            ir_text: wide_sizes_ir,
+        },
+        AotCase {
+            name: "trace_assert",
+            top: "trace_assert_pair",
+            env_var: "XLSYNTH_AOT_TRACE_ASSERT_RS",
+            ir_text: trace_assert_ir,
+        },
+    ];
 
-    let add_inputs = emit_aot_module_from_ir_text(&AotBuildSpec {
-        name: "add_inputs",
-        ir_text: add_inputs_ir,
-        top: "add_inputs",
-    })
-    .expect("AOT compile for add_inputs should succeed");
-
-    let compound_shapes = emit_aot_module_from_ir_text(&AotBuildSpec {
-        name: "compound_shapes",
-        ir_text: compound_shapes_ir,
-        top: "compound_shapes",
-    })
-    .expect("AOT compile for compound_shapes should succeed");
-
-    let empty_tuple = emit_aot_module_from_ir_text(&AotBuildSpec {
-        name: "empty_tuple",
-        ir_text: empty_tuple_ir,
-        top: "make_empty_tuple",
-    })
-    .expect("AOT compile for make_empty_tuple should succeed");
-
-    let wide_sizes = emit_aot_module_from_ir_text(&AotBuildSpec {
-        name: "wide_sizes",
-        ir_text: wide_sizes_ir,
-        top: "wide_sizes",
-    })
-    .expect("AOT compile for wide_sizes should succeed");
-
-    let trace_assert = emit_aot_module_from_ir_text(&AotBuildSpec {
-        name: "trace_assert",
-        ir_text: trace_assert_ir,
-        top: "trace_assert_pair",
-    })
-    .expect("AOT compile for trace_assert_pair should succeed");
-
-    println!(
-        "cargo:rustc-env=XLSYNTH_AOT_ADD_ONE_RS={}",
-        add_one.rust_file.display()
-    );
-    println!(
-        "cargo:rustc-env=XLSYNTH_AOT_ADD_INPUTS_RS={}",
-        add_inputs.rust_file.display()
-    );
-    println!(
-        "cargo:rustc-env=XLSYNTH_AOT_COMPOUND_SHAPES_RS={}",
-        compound_shapes.rust_file.display()
-    );
-    println!(
-        "cargo:rustc-env=XLSYNTH_AOT_EMPTY_TUPLE_RS={}",
-        empty_tuple.rust_file.display()
-    );
-    println!(
-        "cargo:rustc-env=XLSYNTH_AOT_WIDE_SIZES_RS={}",
-        wide_sizes.rust_file.display()
-    );
-    println!(
-        "cargo:rustc-env=XLSYNTH_AOT_TRACE_ASSERT_RS={}",
-        trace_assert.rust_file.display()
-    );
+    for case in cases {
+        let output = emit_aot_module_from_ir_text(&AotBuildSpec {
+            name: case.name,
+            ir_text: case.ir_text,
+            top: case.top,
+        })
+        .unwrap_or_else(|err| panic!("AOT compile for {} should succeed: {}", case.top, err));
+        println!(
+            "cargo:rustc-env={}={}",
+            case.env_var,
+            output.rust_file.display()
+        );
+    }
 
     println!("cargo:rerun-if-changed=build.rs");
 }

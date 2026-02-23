@@ -79,9 +79,8 @@ The generated Rust code looks like:
 
 ```rust
 // Type aliases generated from the XLS signature.
-// Note: for bit widths <= 64, the generated wrapper currently uses `u64`.
-pub type Bits8 = u64;
-pub type Bits16 = u64;
+pub type Bits8 = u8;
+pub type Bits16 = u16;
 
 pub type Input0 = Bits8; // `a: bits[8]`
 pub type Input1 = Bits8; // `b: bits[8]`
