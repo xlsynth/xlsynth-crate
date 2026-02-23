@@ -42,9 +42,9 @@ For an example, see [`xlsynth/tests/aot-test-crate`](../tests/aot-test-crate/).
 
 ## Thread safety
 
-The underlying object code is thread safe, but the `AotRunner` object is not.
+The underlying object code is thread-safe, but the `AotRunner` object is not.
 The object allocates internal buffers which are used for each invocation of the
-AOT-compiled function. Each thread should create it's own runner by calling
+AOT-compiled function. Each thread should create its own runner by calling
 `new_runner`.
 
 ## Generated code
@@ -57,13 +57,13 @@ two methods for running the compiled code:
 - `run(...)`: Runs the compiled function and returns the output value. Raises an
   error if an assert failed.
 - `run_with_events(...)`: Runs the compiled function and returns any trace or
-  assert messages along with the output value. Does not rais an error if an
+  assert messages along with the output value. Does not raise an error if an
   assert failed. The caller can instead check for any assert messages.
 
 Types are defined for each function input (`Input0`, `Input1`, etc) and the
-function output (`Output`). Bits types of 64-bits or less are defined as aliases
+function output (`Output`). Bits types of 64 bits or less are defined as aliases
 of the smallest unsigned type which can hold the value (`bool`, `u8`, `u16`,
-`u32`, or `u64`). Wider types are aliases of arrays of `u8` (eg, `[u8; 16]`).
+`u32`, or `u64`). Wider types are aliases of arrays of `u8` (e.g., `[u8; 16]`).
 Tuples and arrays are defined as `structs` and arrays respectively.
 
 As a simple example, consider a DSLX function that multiplies two 8-bit unsigned
