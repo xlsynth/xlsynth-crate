@@ -31,7 +31,8 @@
 //!     --input_valid_signal=input_valid \
 //!     --output_valid_signal=output_valid
 //! $ cargo run -- \
-//!     dslx2sv-types ../tests/structure_zoo.x
+//!     dslx2sv-types ../tests/structure_zoo.x \
+//!     --sv_enum_case_naming_policy=unqualified
 //! ```
 
 mod common;
@@ -80,6 +81,7 @@ use clap::{Arg, ArgAction};
 use once_cell::sync::Lazy;
 use report_cli_error::report_cli_error_and_exit;
 use serde::Deserialize;
+use xlsynth::sv_bridge_builder::SvEnumCaseNamingPolicy;
 use xlsynth_prover::types::AssertionSemantics;
 use xlsynth_prover::types::QuickCheckAssertionSemantics;
 
@@ -509,7 +511,22 @@ fn main() {
         .subcommand(
             clap::Command::new("dslx2sv-types")
                 .about("Converts DSLX type definitions to SystemVerilog")
-                .add_dslx_input_args(false),
+                .add_dslx_input_args(false)
+                // Intentionally no default: callers must opt into a naming
+                // policy so generated SV enum symbol spelling is explicit.
+                .arg(
+                    Arg::new("sv_enum_case_naming_policy")
+                        .long("sv_enum_case_naming_policy")
+                        .value_name("POLICY")
+                        .help(
+                            "Enum case naming policy for generated SystemVerilog enum members",
+                        )
+                        .required(true)
+                        .action(ArgAction::Set)
+                        .value_parser(clap::builder::EnumValueParser::<
+                            SvEnumCaseNamingPolicy,
+                        >::new()),
+                ),
         )
         .subcommand(
             clap::Command::new("dslx-g8r-stats")
