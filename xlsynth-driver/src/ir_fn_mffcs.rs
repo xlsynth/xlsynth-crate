@@ -6,7 +6,8 @@ use clap::ArgMatches;
 use serde::Serialize;
 use std::io::Write;
 use xlsynth_pir::ir_fn_mffcs::{
-    enumerate_all_mffc_specs, extract_mffc, rank_and_select_mffc_specs, MffcConfig,
+    enumerate_all_mffc_specs, extract_mffc, has_nonlocal_callee_refs, rank_and_select_mffc_specs,
+    MffcConfig,
 };
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_utils::{classify_trivial_fn_body, TrivialFnBody};
@@ -112,6 +113,14 @@ pub fn handle_ir_fn_mffcs(matches: &ArgMatches, _config: &Option<ToolchainConfig
         Some(f) => f,
         None => report_cli_error_and_exit("No top function found in package", Some(cmd), vec![]),
     };
+
+    if has_nonlocal_callee_refs(top_fn) {
+        report_cli_error_and_exit(
+            "ir-fn-mffcs does not support top functions containing invoke/counted_for nodes; run an inlining/optimization flow first",
+            Some(cmd),
+            vec![],
+        );
+    }
 
     let cfg = MffcConfig {
         max_mffcs,

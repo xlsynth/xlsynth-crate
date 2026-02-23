@@ -74,6 +74,18 @@ fn is_root_eligible(node: &Node) -> bool {
     )
 }
 
+/// Returns true if this function contains nodes that reference external callee
+/// definitions (which MFFC extraction does not currently copy into the emitted
+/// package).
+pub fn has_nonlocal_callee_refs(f: &ir::Fn) -> bool {
+    f.nodes.iter().any(|n| {
+        matches!(
+            n.payload,
+            NodePayload::Invoke { .. } | NodePayload::CountedFor { .. }
+        )
+    })
+}
+
 /// Returns immediate users for each node index.
 ///
 /// We deduplicate repeated operands from the same user node so each user is
@@ -324,6 +336,14 @@ pub fn extract_mffc(
             continue;
         }
         let old_node = &f.nodes[old_idx];
+        if matches!(
+            old_node.payload,
+            NodePayload::Invoke { .. } | NodePayload::CountedFor { .. }
+        ) {
+            panic!(
+                "MFFC extraction does not support invoke/counted_for nodes because callee definitions are not copied into extracted packages"
+            );
+        }
         let new_payload = remap_payload_with(&old_node.payload, |(_slot, r): (usize, NodeRef)| {
             let new_index = *old_to_new.get(&r.index).unwrap_or_else(|| {
                 panic!("missing mapping for operand {:?} while extracting MFFC", r)
@@ -479,5 +499,43 @@ top fn f(a: bits[8] id=1, b: bits[8] id=2, c: bits[8] id=3) -> bits[8] {
 
         assert_eq!(a.sha256_hex, b.sha256_hex);
         assert_eq!(a.package.to_string(), b.package.to_string());
+    }
+
+    #[test]
+    fn has_nonlocal_callee_refs_detects_invoke_and_counted_for() {
+        let invoke_pkg = r#"package p
+
+fn g(x: bits[8] id=1) -> bits[8] {
+  ret not.2: bits[8] = not(x, id=2)
+}
+
+top fn f(a: bits[8] id=10) -> bits[8] {
+  ret invoke.11: bits[8] = invoke(a, to_apply=g, id=11)
+}
+"#;
+        let invoke_f = parse_top_fn(invoke_pkg);
+        assert!(has_nonlocal_callee_refs(&invoke_f));
+
+        let counted_for_pkg = r#"package p
+
+fn body(x: bits[8] id=1) -> bits[8] {
+  ret add.2: bits[8] = add(x, x, id=2)
+}
+
+top fn f(a: bits[8] id=10) -> bits[8] {
+  ret counted_for.11: bits[8] = counted_for(a, trip_count=2, stride=1, body=body, id=11)
+}
+"#;
+        let counted_for_f = parse_top_fn(counted_for_pkg);
+        assert!(has_nonlocal_callee_refs(&counted_for_f));
+
+        let plain_pkg = r#"package p
+
+top fn f(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
+  ret add.3: bits[8] = add(a, b, id=3)
+}
+"#;
+        let plain_f = parse_top_fn(plain_pkg);
+        assert!(!has_nonlocal_callee_refs(&plain_f));
     }
 }
