@@ -714,6 +714,42 @@ xlsynth-driver ir-fn-cone-extract my_pkg.ir 123 --top main > cone.ir
 xlsynth-driver ir-fn-cone-extract my_pkg.ir my_node --top main > cone.ir
 ```
 
+### `ir-fn-mffcs`
+
+Extracts ranked MFFCs (maximal fanout-free cones) from a selected IR function and writes each selected cone as a standalone package to an output directory.
+
+- MFFCs are enumerated for eligible roots first, then ranked by a "meat" score:
+  - `internal_non_literal_count^2 / (frontier_non_literal_count + 1)`
+- This favors large internal logic with smaller frontiers.
+- Literals are embedded into extracted cones and do not count toward frontier-size thresholding.
+- Output files are named by SHA-256 of emitted package text: `${sha256}.ir`.
+
+Required:
+
+- Positional: `<ir_input_file>`
+- `--output_dir <DIR>`
+
+Optional:
+
+- `--top <NAME>`: select the IR function to analyze (defaults to package `top` or first function).
+- `--max_mffcs <N>`: cap emitted MFFCs after ranking (default `200`; `0` means no cap).
+- `--min_internal_non_literal <N>`: drop candidates with fewer internal non-literal nodes (default `4`).
+- `--max_frontier_non_literal <N>`: optional frontier cap (default `0`, meaning no cap).
+- `--emit_pos_data=<BOOL>`: retain `pos=...` metadata and `file_number` table in emitted cones (default `false`).
+- `--manifest_jsonl <PATH>`: write JSONL manifest here (default `<output_dir>/manifest.jsonl`).
+
+Example:
+
+```shell
+xlsynth-driver ir-fn-mffcs my_design.opt.ir \
+  --top main \
+  --output_dir ./mffcs_out \
+  --max_mffcs 150 \
+  --min_internal_non_literal 8 \
+  --max_frontier_non_literal 24 \
+  --emit_pos_data=false
+```
+
 ### `ir-query`
 
 Matches a query expression against the top function of an IR package and prints each matching node on **stdout**.

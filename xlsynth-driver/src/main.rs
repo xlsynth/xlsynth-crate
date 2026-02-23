@@ -77,6 +77,7 @@ mod ir_equiv_blocks;
 mod ir_fn_autocov;
 mod ir_fn_cone_extract;
 mod ir_fn_eval;
+mod ir_fn_mffcs;
 mod ir_fn_node_count;
 mod ir_fn_node_count_corpus;
 mod ir_fn_structural_hash;
@@ -2122,6 +2123,60 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new("ir-fn-mffcs")
+                .about("Extracts ranked MFFCs (maximal fanout-free cones) from an IR function and writes selected cones to an output directory")
+                .arg(
+                    clap::Arg::new("ir_input_file")
+                        .help("The input IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .add_ir_top_arg(false)
+                .arg(
+                    clap::Arg::new("output_dir")
+                        .long("output_dir")
+                        .value_name("DIR")
+                        .help("Directory to write extracted MFFC packages as ${sha256}.ir")
+                        .required(true)
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("max_mffcs")
+                        .long("max_mffcs")
+                        .value_name("N")
+                        .help("Optional cap on emitted MFFCs after ranking (0 means no cap)")
+                        .default_value("200")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("min_internal_non_literal")
+                        .long("min_internal_non_literal")
+                        .value_name("N")
+                        .help("Minimum non-literal internal-node count required to keep a candidate")
+                        .default_value("4")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("max_frontier_non_literal")
+                        .long("max_frontier_non_literal")
+                        .value_name("N")
+                        .help("Optional cap on non-literal frontier size (0 means no cap)")
+                        .default_value("0")
+                        .action(clap::ArgAction::Set),
+                )
+                .add_bool_arg(
+                    "emit_pos_data",
+                    "Whether to retain position metadata (pos=...) and file_number table in emitted cones",
+                )
+                .arg(
+                    clap::Arg::new("manifest_jsonl")
+                        .long("manifest_jsonl")
+                        .value_name("PATH")
+                        .help("Optional path for JSONL manifest output (default: <output_dir>/manifest.jsonl)")
+                        .action(clap::ArgAction::Set),
+                ),
+        )
+        .subcommand(
             clap::Command::new("ir-strip-pos-data")
                 .about("Reads an .ir file and emits the same IR with all position data removed (file table and pos= attributes)")
                 .arg(
@@ -2798,6 +2853,9 @@ fn main() {
         }
         Some(("ir-fn-cone-extract", subm)) => {
             ir_fn_cone_extract::handle_ir_fn_cone_extract(subm, &config);
+        }
+        Some(("ir-fn-mffcs", subm)) => {
+            ir_fn_mffcs::handle_ir_fn_mffcs(subm, &config);
         }
         Some(("prove-quickcheck", subm)) => {
             prove_quickcheck::handle_prove_quickcheck(subm, &config);
