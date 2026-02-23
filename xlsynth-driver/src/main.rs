@@ -35,6 +35,7 @@
 //! ```
 
 mod aig_equiv;
+mod aig_eval;
 mod aig_ir_equiv;
 mod aig_stats;
 mod block2fn;
@@ -1728,6 +1729,29 @@ fn main() {
                 )
         )
         .subcommand(
+            clap::Command::new("aig-eval")
+                .about("Evaluates an AIGER file with the provided argument tuple")
+                .arg(
+                    clap::Arg::new("aig_file")
+                        .help("The AIGER file (.aag or .aig)")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    clap::Arg::new("arg_tuple")
+                        .help("Tuple of typed IR values for the function arguments")
+                        .required(true)
+                        .index(2),
+                )
+                .arg(
+                    clap::Arg::new("fn_type")
+                        .long("fn-type")
+                        .value_name("FN_TYPE")
+                        .help("Optional superimposed function type, e.g. '(bits[32], bits[32]) -> bits[32]'")
+                        .action(clap::ArgAction::Set),
+                ),
+        )
+        .subcommand(
             clap::Command::new("aig-equiv")
                 .about("Checks if two ASCII AIGER files are equivalent using available engines")
                 .arg(
@@ -2753,6 +2777,9 @@ fn main() {
         }
         Some(("aig-equiv", subm)) => {
             aig_equiv::handle_aig_equiv(subm, &config);
+        }
+        Some(("aig-eval", subm)) => {
+            aig_eval::handle_aig_eval(subm, &config);
         }
         Some(("aig-ir-equiv", subm)) => {
             aig_ir_equiv::handle_aig_ir_equiv(subm, &config);
