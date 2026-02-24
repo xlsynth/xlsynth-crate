@@ -130,6 +130,26 @@ python3 scripts/update_golden_files.py
 python3 scripts/run_all_fuzz_tests.py --fuzz-bin-args=-max_total_time=5
 ```
 
+### Release process (this Rust crate workspace)
+
+This repository publishes crates to crates.io via the GitHub Actions workflow in `.github/workflows/publish.yml`. The workflow runs when a `v*` tag is pushed.
+
+1. Look at the latest release tag (`vX.Y.Z`) and choose the next tag version.
+1. For the normal mainline release flow, bump `Y` and reset `Z` to `0` (for example, `v0.33.0` -> `v0.34.0`).
+1. Before creating the tag, check that the workspace `Cargo.toml` versions already match the intended tag version (for example, `xlsynth/Cargo.toml` and `xlsynth-sys/Cargo.toml`).
+   - If they do not match, update the workspace crate versions to the intended tag version, commit that change (and merge it to the release branch or `main`, as appropriate), and then create the tag on that commit.
+1. Create and push the tag (`git tag vX.Y.Z` then `git push origin vX.Y.Z`).
+1. The publish workflow validates that the checked-in crate versions match the tag, runs tests, and publishes the crates.
+
+Important: the version for the next release is often already "waiting" in the repository. After a successful mainline `.0` release, the workflow pushes two follow-up commits:
+
+- `Bump version numbers after successful publish`
+- `Update version metadata after successful publish`
+
+For example, after publishing `v0.33.0`, the automation bumped the workspace manifests to `0.34.0`. That means the next mainline tag should usually be `v0.34.0` (unless you intentionally prepare a different release), not `v0.33.1`.
+
+If you intentionally release a patch version (`Z != 0`), first make the checked-in crate versions match that patch tag. The current workflow only performs the automatic post-publish version bump and version-metadata update for `.0` tags.
+
 ### Developer note: xlsynth DSO/dylib release versioning
 
 The following versioning convention applies to the underlying DSO/dylib artifacts (e.g., `libxls.so`, `libxls.dylib`) released by the [xlsynth/xlsynth](https://github.com/xlsynth/xlsynth) repository, not to the versioning of this Rust crate itself. Occasionally, we need to create a successor to a patch release without bumping the minor or major version. In these cases, we use a dash-suffixed version tag (e.g., `v0.0.219-1`, `v0.0.219-2`). The plain form (e.g., `v0.0.219`) is implicitly equivalent to `v0.0.219-0`. This allows us to cherry-pick fixes onto a patch release when necessary.
