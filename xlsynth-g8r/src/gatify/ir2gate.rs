@@ -1456,23 +1456,22 @@ fn try_simplify_cmp_literal_rhs(
                 Some(gb.get_false())
             } else if is_int_max(rhs_bits) {
                 Some(gb.add_ne_vec(lhs_bits, rhs_bits_vec, ReductionKind::Tree))
-            } else if is_non_negative_signed(rhs_bits) {
-                let u = try_simplify_cmp_literal_rhs(
+            } else {
+                let u = gatify_ucmp_literal_rhs_best_effort(
                     gb,
                     ir::Binop::Ult,
                     lhs_bits,
                     rhs_bits_vec,
                     rhs_bits,
-                )
-                .unwrap_or_else(|| {
-                    gatify_ucmp_fallback(gb, 0, ir::Binop::Ult, lhs_bits, rhs_bits_vec)
-                });
-                // If rhs is non-negative, then for negative lhs (msb==1) the unsigned
-                // comparison is necessarily false, so we can drop the nonneg
-                // guard.
-                Some(gb.add_or_binary(msb, u))
-            } else {
-                None
+                );
+                if is_non_negative_signed(rhs_bits) {
+                    // rhs is non-negative: any negative lhs is strictly less.
+                    Some(gb.add_or_binary(msb, u))
+                } else {
+                    // rhs is negative: lhs must also be negative, and then signed
+                    // ordering matches unsigned ordering.
+                    Some(gb.add_and_binary(msb, u))
+                }
             }
         }
         ir::Binop::Sle => {
@@ -1486,23 +1485,22 @@ fn try_simplify_cmp_literal_rhs(
                 Some(gb.add_eq_vec(lhs_bits, rhs_bits_vec, ReductionKind::Tree))
             } else if is_int_max(rhs_bits) {
                 Some(gb.get_true())
-            } else if is_non_negative_signed(rhs_bits) {
-                let u = try_simplify_cmp_literal_rhs(
+            } else {
+                let u = gatify_ucmp_literal_rhs_best_effort(
                     gb,
                     ir::Binop::Ule,
                     lhs_bits,
                     rhs_bits_vec,
                     rhs_bits,
-                )
-                .unwrap_or_else(|| {
-                    gatify_ucmp_fallback(gb, 0, ir::Binop::Ule, lhs_bits, rhs_bits_vec)
-                });
-                // If rhs is non-negative, then for negative lhs (msb==1) the unsigned
-                // comparison is necessarily false, so we can drop the nonneg
-                // guard.
-                Some(gb.add_or_binary(msb, u))
-            } else {
-                None
+                );
+                if is_non_negative_signed(rhs_bits) {
+                    // rhs is non-negative: any negative lhs is <= rhs.
+                    Some(gb.add_or_binary(msb, u))
+                } else {
+                    // rhs is negative: lhs must be negative, and then signed
+                    // ordering matches unsigned ordering.
+                    Some(gb.add_and_binary(msb, u))
+                }
             }
         }
         ir::Binop::Sgt => {
@@ -1522,21 +1520,23 @@ fn try_simplify_cmp_literal_rhs(
                 let nonneg = gb.add_not(msb);
                 let u = simplify_ugt_all_ones_above_k(gb, lhs_bits, bit_count, k);
                 Some(gb.add_or_binary(nonneg, u))
-            } else if is_non_negative_signed(rhs_bits) {
+            } else {
                 let nonneg = gb.add_not(msb);
-                let u = try_simplify_cmp_literal_rhs(
+                let u = gatify_ucmp_literal_rhs_best_effort(
                     gb,
                     ir::Binop::Ugt,
                     lhs_bits,
                     rhs_bits_vec,
                     rhs_bits,
-                )
-                .unwrap_or_else(|| {
-                    gatify_ucmp_fallback(gb, 0, ir::Binop::Ugt, lhs_bits, rhs_bits_vec)
-                });
-                Some(gb.add_and_binary(nonneg, u))
-            } else {
-                None
+                );
+                if is_non_negative_signed(rhs_bits) {
+                    // rhs is non-negative: lhs must be non-negative, and then signed
+                    // ordering matches unsigned ordering.
+                    Some(gb.add_and_binary(nonneg, u))
+                } else {
+                    // rhs is negative: any non-negative lhs is strictly greater.
+                    Some(gb.add_or_binary(nonneg, u))
+                }
             }
         }
         ir::Binop::Sge => {
@@ -1551,25 +1551,52 @@ fn try_simplify_cmp_literal_rhs(
                 Some(gb.get_true())
             } else if is_int_max(rhs_bits) {
                 Some(gb.add_eq_vec(lhs_bits, rhs_bits_vec, ReductionKind::Tree))
-            } else if is_non_negative_signed(rhs_bits) {
+            } else {
                 let nonneg = gb.add_not(msb);
-                let u = try_simplify_cmp_literal_rhs(
+                let u = gatify_ucmp_literal_rhs_best_effort(
                     gb,
                     ir::Binop::Uge,
                     lhs_bits,
                     rhs_bits_vec,
                     rhs_bits,
-                )
-                .unwrap_or_else(|| {
-                    gatify_ucmp_fallback(gb, 0, ir::Binop::Uge, lhs_bits, rhs_bits_vec)
-                });
-                Some(gb.add_and_binary(nonneg, u))
-            } else {
-                None
+                );
+                if is_non_negative_signed(rhs_bits) {
+                    // rhs is non-negative: lhs must be non-negative, and then signed
+                    // ordering matches unsigned ordering.
+                    Some(gb.add_and_binary(nonneg, u))
+                } else {
+                    // rhs is negative: any non-negative lhs is >= rhs.
+                    Some(gb.add_or_binary(nonneg, u))
+                }
             }
         }
 
         _ => None,
+    }
+}
+
+fn gatify_ucmp_literal_rhs_best_effort(
+    gb: &mut GateBuilder,
+    binop: ir::Binop,
+    lhs_bits: &AigBitVector,
+    rhs_bits_vec: &AigBitVector,
+    rhs_bits: &xlsynth::IrBits,
+) -> AigOperand {
+    assert!(
+        matches!(
+            binop,
+            ir::Binop::Ult | ir::Binop::Ule | ir::Binop::Ugt | ir::Binop::Uge
+        ),
+        "expected unsigned compare binop; got {:?}",
+        binop
+    );
+    if let Some(gate) = try_simplify_cmp_literal_rhs(gb, binop, lhs_bits, rhs_bits_vec, rhs_bits) {
+        gate
+    } else if let Some(gate) = try_gatify_ucmp_literal_rhs_threshold(gb, binop, lhs_bits, rhs_bits)
+    {
+        gate
+    } else {
+        gatify_ucmp_fallback(gb, 0, binop, lhs_bits, rhs_bits_vec)
     }
 }
 
@@ -3493,6 +3520,7 @@ pub fn gatify_node_as_fn(
 
 #[cfg(test)]
 mod tests {
+    use crate::aig::gate::GateFn;
     use crate::aig::get_summary_stats::{SummaryStats, get_summary_stats};
     use crate::aig_sim::gate_sim;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
@@ -3689,6 +3717,155 @@ top fn f(start: bits[4], a: bits[8], b: bits[8]) -> bits[8][1] {
         assert_eq!(eval(15, a, b), at_7);
 
         let _ = ir_fn;
+    }
+
+    fn gatify_ir_text(ir_text: &str) -> GateFn {
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_package = parser.parse_and_validate_package().unwrap();
+        let ir_fn = ir_package.get_top_fn().unwrap();
+        gatify(
+            &ir_fn,
+            GatifyOptions {
+                fold: true,
+                hash: true,
+                check_equivalence: false,
+                adder_mapping: AdderMapping::default(),
+                mul_adder_mapping: None,
+                range_info: None,
+                enable_rewrite_carry_out: false,
+                enable_rewrite_prio_encode: false,
+            },
+        )
+        .unwrap()
+        .gate_fn
+    }
+
+    fn gate_eval_1bit(gate_fn: &GateFn, lhs: u64, lhs_width: usize) -> bool {
+        let inputs = vec![xlsynth::IrBits::make_ubits(lhs_width, lhs).unwrap()];
+        gate_sim::eval(gate_fn, &inputs, gate_sim::Collect::None).outputs[0]
+            .get_bit(0)
+            .unwrap()
+    }
+
+    fn bits_as_signed(value: u64, width: usize) -> i64 {
+        assert!(width > 0 && width < 63);
+        let sign_bit = 1u64 << (width - 1);
+        if (value & sign_bit) == 0 {
+            value as i64
+        } else {
+            (value as i64) - (1i64 << width)
+        }
+    }
+
+    fn expected_signed_cmp(binop: ir::Binop, lhs: u64, rhs: u64, width: usize) -> bool {
+        let lhs_signed = bits_as_signed(lhs, width);
+        let rhs_signed = bits_as_signed(rhs, width);
+        match binop {
+            ir::Binop::Slt => lhs_signed < rhs_signed,
+            ir::Binop::Sle => lhs_signed <= rhs_signed,
+            ir::Binop::Sgt => lhs_signed > rhs_signed,
+            ir::Binop::Sge => lhs_signed >= rhs_signed,
+            _ => panic!(
+                "unexpected binop for signed-compare proof test: {:?}",
+                binop
+            ),
+        }
+    }
+
+    #[test]
+    fn test_signed_literal_cmp_proof_matrix_rhs_and_lhs_literal() {
+        let width = 5usize;
+        let values = [9u64, 26u64];
+        let cases: &[(ir::Binop, &str)] = &[
+            (ir::Binop::Slt, "slt"),
+            (ir::Binop::Sle, "sle"),
+            (ir::Binop::Sgt, "sgt"),
+            (ir::Binop::Sge, "sge"),
+        ];
+
+        for &(binop, op_name) in cases {
+            for &rhs in &values {
+                for literal_on_lhs in [false, true] {
+                    let expr = if literal_on_lhs {
+                        format!("{op_name}(k, x, id=11)")
+                    } else {
+                        format!("{op_name}(x, k, id=11)")
+                    };
+                    let ir_text = format!(
+                        r#"package sample
+top fn f(x: bits[{width}]) -> bits[1] {{
+  k: bits[{width}] = literal(value={rhs}, id=10)
+  ret out: bits[1] = {expr}
+}}
+"#
+                    );
+                    let gate_fn = gatify_ir_text(&ir_text);
+                    for lhs in 0u64..(1u64 << width) {
+                        let got = gate_eval_1bit(&gate_fn, lhs, width);
+                        let want = if literal_on_lhs {
+                            expected_signed_cmp(binop, rhs, lhs, width)
+                        } else {
+                            expected_signed_cmp(binop, lhs, rhs, width)
+                        };
+                        assert_eq!(
+                            got, want,
+                            "signed literal compare mismatch: op={} rhs={} literal_on_lhs={} lhs={}",
+                            op_name, rhs, literal_on_lhs, lhs
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_signed_literal_cmp_cone_quality_matches_manual_decomposition() {
+        let cone_ir = r#"package sample
+top fn cone(leaf_7: bits[5], leaf_9: bits[33]) -> bits[1] {
+  sign_ext.3431: bits[33] = sign_ext(leaf_7, new_bit_count=33, id=3431)
+  add.3432: bits[33] = add(leaf_9, sign_ext.3431, id=3432)
+  literal.3433: bits[33] = literal(value=8589934578, id=3433)
+  ret slt.3434: bits[1] = slt(add.3432, literal.3433, id=3434)
+}
+"#;
+        let decomp_ir = r#"package sample
+top fn cone(leaf_7: bits[5], leaf_9: bits[33]) -> bits[1] {
+  sign_ext.3431: bits[33] = sign_ext(leaf_7, new_bit_count=33, id=3431)
+  add.3432: bits[33] = add(leaf_9, sign_ext.3431, id=3432)
+  literal.3433: bits[33] = literal(value=8589934578, id=3433)
+  bit_slice.3435: bits[1] = bit_slice(add.3432, start=32, width=1, id=3435)
+  ult.3436: bits[1] = ult(add.3432, literal.3433, id=3436)
+  ret and.3437: bits[1] = and(bit_slice.3435, ult.3436, id=3437)
+}
+"#;
+
+        let cone_gate_fn = gatify_ir_text(cone_ir);
+        let decomp_gate_fn = gatify_ir_text(decomp_ir);
+        let cone_stats = get_summary_stats(&cone_gate_fn);
+        let decomp_stats = get_summary_stats(&decomp_gate_fn);
+
+        assert_eq!(
+            cone_stats.live_nodes, decomp_stats.live_nodes,
+            "literal signed-compare lowering should match manual decomposition node count"
+        );
+        assert_eq!(
+            cone_stats.deepest_path, decomp_stats.deepest_path,
+            "literal signed-compare lowering should match manual decomposition depth"
+        );
+
+        // Characterization guard for the original regression report:
+        // before this lowering path, this cone was observed at roughly
+        // 562 nodes / 33 levels in g8r output.
+        assert!(
+            cone_stats.live_nodes <= 434,
+            "expected improved node count for regression cone; got {}",
+            cone_stats.live_nodes
+        );
+        assert!(
+            cone_stats.deepest_path <= 28,
+            "expected improved depth for regression cone; got {}",
+            cone_stats.deepest_path
+        );
     }
 
     fn get_1b_priority_sel_stats_for_impl(
