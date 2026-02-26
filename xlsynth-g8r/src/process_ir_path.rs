@@ -254,18 +254,37 @@ pub fn process_ir_path_with_gatefn(
 
     if let Some(out_path) = options.prepared_ir_out.as_ref() {
         let prepared_fn = prep_for_gatify(ir_top, Some(range_info.as_ref()), prep_opts);
-        let mut prepared_pkg = ir_package.clone();
-        for member in prepared_pkg.members.iter_mut() {
-            match member {
-                ir::PackageMember::Function(f) if f.name == top_fn_name => {
-                    *f = prepared_fn.clone();
-                }
-                ir::PackageMember::Block { func, .. } if func.name == top_fn_name => {
-                    *func = prepared_fn.clone();
-                }
-                _ => {}
-            }
+        let external_refs = ir_utils::external_function_references(&prepared_fn);
+        if !external_refs.is_empty() {
+            let refs = external_refs.into_iter().collect::<Vec<_>>().join(", ");
+            eprintln!(
+                "Refusing to emit --prepared-ir-out with external function references from top `{}`: {}",
+                prepared_fn.name, refs
+            );
+            std::process::exit(1);
         }
+        let prepared_member = ir_package
+            .members
+            .iter()
+            .find_map(|member| match member {
+                ir::PackageMember::Function(f) if f.name == top_fn_name => {
+                    Some(ir::PackageMember::Function(prepared_fn.clone()))
+                }
+                ir::PackageMember::Block { func, metadata } if func.name == top_fn_name => {
+                    Some(ir::PackageMember::Block {
+                        func: prepared_fn.clone(),
+                        metadata: metadata.clone(),
+                    })
+                }
+                _ => None,
+            })
+            .expect("top member should exist in pir_package");
+        let prepared_pkg = ir::Package {
+            name: ir_package.name.clone(),
+            file_table: ir_package.file_table.clone(),
+            members: vec![prepared_member],
+            top: ir_package.top.clone(),
+        };
         let prepared_text = prepared_pkg.to_string();
         let mut file = std::fs::File::create(out_path).unwrap_or_else(|e| {
             panic!(

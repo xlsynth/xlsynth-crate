@@ -3,7 +3,7 @@
 //! Utility functions for working with / on XLS IR.
 
 use crate::ir::{self, Fn, Node, NodePayload, NodeRef, Package, PackageMember, Type};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrivialFnBody {
@@ -133,6 +133,37 @@ pub fn classify_trivial_fn_body(f: &Fn) -> Option<TrivialFnBody> {
 /// Returns the count of nodes in the function, excluding the reserved Nil node.
 pub fn fn_node_count(f: &Fn) -> usize {
     f.nodes.len().saturating_sub(1)
+}
+
+/// Returns a deterministically ordered set of function names referenced by
+/// `invoke` / `counted_for` nodes in `f`, excluding self-references.
+pub fn external_function_references(f: &Fn) -> BTreeSet<String> {
+    let mut refs = BTreeSet::new();
+    for node in f.nodes.iter() {
+        match &node.payload {
+            NodePayload::Invoke { to_apply, .. } => {
+                if to_apply != &f.name {
+                    refs.insert(to_apply.clone());
+                }
+            }
+            NodePayload::CountedFor { body, .. } => {
+                if body != &f.name {
+                    refs.insert(body.clone());
+                }
+            }
+            _ => {
+                // All other node kinds do not reference out-of-function
+                // callees.
+            }
+        }
+    }
+    refs
+}
+
+/// Returns true when `f` references another function via `invoke` or
+/// `counted_for`.
+pub fn has_external_function_references(f: &Fn) -> bool {
+    !external_function_references(f).is_empty()
 }
 
 /// Returns a deterministic histogram mapping operator name to count.
@@ -1064,6 +1095,13 @@ mod tests {
             .unwrap()
     }
 
+    fn parse_fn_named(pkg_body: &str, fn_name: &str) -> Fn {
+        let pkg_text = format!("package test\n\n{}\n", pkg_body);
+        let mut p = Parser::new(&pkg_text);
+        let pkg = p.parse_and_validate_package().unwrap();
+        pkg.get_fn(fn_name).unwrap().clone()
+    }
+
     fn verify_topo_property(f: &Fn, order: &[NodeRef]) {
         // Build position map
         let mut pos: Vec<usize> = vec![0; f.nodes.len()];
@@ -1079,6 +1117,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn external_function_references_detects_invoke_and_counted_for() {
+        let f = parse_fn_named(
+            r#"fn callee(x: bits[8] id=10) -> bits[8] {
+  ret y: bits[8] = identity(x, id=11)
+}
+
+fn loop_body(i: bits[8] id=20, acc: bits[8] id=21) -> bits[8] {
+  ret y: bits[8] = add(i, acc, id=22)
+}
+
+fn main(x: bits[8] id=1) -> bits[8] {
+  i: bits[8] = invoke(x, to_apply=callee, id=2)
+  ret loop: bits[8] = counted_for(i, trip_count=4, stride=1, body=loop_body, id=3)
+}"#,
+            "main",
+        );
+        let refs = external_function_references(&f);
+        assert_eq!(
+            refs.into_iter().collect::<Vec<_>>(),
+            vec!["callee", "loop_body"]
+        );
+        assert!(has_external_function_references(&f));
+    }
+
+    #[test]
+    fn external_function_references_ignores_self_references() {
+        let f = parse_fn_named(
+            r#"fn main(x: bits[8] id=1) -> bits[8] {
+  i: bits[8] = invoke(x, to_apply=main, id=2)
+  ret loop: bits[8] = counted_for(i, trip_count=2, stride=1, body=main, id=3)
+}"#,
+            "main",
+        );
+        let refs = external_function_references(&f);
+        assert!(refs.is_empty());
+        assert!(!has_external_function_references(&f));
     }
 
     #[test]
@@ -1621,7 +1698,6 @@ mod users_tests {
             .next()
             .unwrap()
     }
-
     #[test]
     fn users_linear_chain() {
         let f = parse_fn(

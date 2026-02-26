@@ -2685,6 +2685,10 @@ fn test_ir2gates_prepared_ir_default_enables_prio_encode_rewrite() {
     // default in prep_for_gatify.
     let ir_text = r#"package p
 
+fn helper(x: bits[1] id=10) -> bits[1] {
+  ret not.11: bits[1] = not(x, id=11)
+}
+
 top fn main(x: bits[32] id=1) -> bits[5] {
   one_hot.2: bits[33] = one_hot(x, lsb_prio=false, id=2)
   encode.3: bits[6] = encode(one_hot.2, id=3)
@@ -2711,6 +2715,22 @@ top fn main(x: bits[32] id=1) -> bits[5] {
     assert!(
         prepared_text.contains("ext_prio_encode("),
         "expected ext_prio_encode rewrite in prepared IR, got:\n{}",
+        prepared_text
+    );
+
+    assert!(
+        !prepared_text.contains("fn helper("),
+        "expected prepared IR output to contain only the prepared top member, got:\n{}",
+        prepared_text
+    );
+    assert!(
+        !prepared_text.contains("invoke("),
+        "did not expect invoke() in top-only prepared IR output, got:\n{}",
+        prepared_text
+    );
+    assert!(
+        !prepared_text.contains("counted_for("),
+        "did not expect counted_for() in top-only prepared IR output, got:\n{}",
         prepared_text
     );
 
