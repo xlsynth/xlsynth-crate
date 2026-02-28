@@ -38,9 +38,18 @@ PRs that fail this check will not be accepted.
 
 Completed changes must pass either `cargo test --workspace` or `cargo nextest run`.
 
+Prefer `cargo nextest run` when it is available; for this workspace size it
+usually gives better concurrency and faster feedback than plain `cargo test`.
+
 If network access is unavailable, it is acceptable to exclude the crates.io
 version checks in `xlsynth-test-helpers/tests/version_test.rs` (which require
 crates.io metadata). Document that exclusion in the change notes.
+
+For non-trivial GitHub Actions logic, prefer a small reusable Python script
+under `scripts/` over duplicating shell helpers inline in `.github/workflows`.
+Those CI helper scripts should be compatible with the oldest runner/container in
+the matrix rather than assuming modern tool versions; for example, do not assume
+new `curl` flags or post-3.6 Python syntax are available everywhere.
 
 ## Agent Guidance: xlsynth-g8r and Fuzz Targets
 
@@ -88,6 +97,10 @@ All tools, and especially the `xlsynth-driver` subcommands, are expected to prod
 
 Prefer using raw string syntax (`r#"..."#`) for multi-line strings to avoid needless escaping.
 
+For non-trivial functions, prefer a one-line Rustdoc comment (`/// ...`) over no
+comment at all. A short summary helps readers understand both the local code and
+how it fits into the surrounding codebase.
+
 Avoid `use` statements inside local function scopes; place all imports at the
 module level (or at the top of a `mod tests` section) for clarity.
 
@@ -102,6 +115,9 @@ foo(/*kwarg=*/false)
 ```
 
 Note there is no space before the value: `/*kwarg=*/false` (not `/*kwarg=*/ false`).
+
+- When adding a `TODO`, include the creation date in ISO format (for example
+  `TODO(name): 2026-02-28 ...`) so readers can quickly judge how recent it is.
 
 - When intentionally using a no-op match arm such as `_ => {}` (or otherwise ignoring a case), include a brief comment in that block explaining why ignoring it is correct/safe for that code path.
 

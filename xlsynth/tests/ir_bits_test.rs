@@ -96,3 +96,29 @@ fn comparison_methods_require_matching_widths() -> Result<(), XlsynthError> {
 
     Ok(())
 }
+
+#[test]
+fn division_mod_and_construction_helpers() -> Result<(), XlsynthError> {
+    assert_eq!(IrBits::zero(8).to_u64()?, 0);
+    assert_eq!(IrBits::all_ones(8).to_u64()?, 0xFF);
+    assert_eq!(IrBits::signed_max_value(8).to_u64()?, 0x7F);
+    assert_eq!(IrBits::signed_min_value(8).to_u64()?, 0x80);
+    assert!(!IrBits::signed_max_value(8).is_negative());
+    assert!(IrBits::signed_min_value(8).is_negative());
+
+    let lhs_u = IrBits::make_ubits(8, 0xBC)?;
+    let rhs_u = IrBits::make_ubits(8, 0x07)?;
+    assert_eq!(lhs_u.udiv(&rhs_u).to_u64()?, 0x1A);
+    assert_eq!(lhs_u.umod(&rhs_u).to_u64()?, 0x06);
+    assert_eq!(lhs_u.udiv(&IrBits::zero(8)).to_u64()?, 0xFF);
+    assert_eq!(lhs_u.umod(&IrBits::zero(8)).to_u64()?, 0x00);
+
+    let lhs_s = IrBits::make_sbits(8, -68)?;
+    let rhs_s = IrBits::make_sbits(8, -7)?;
+    assert_eq!(lhs_s.sdiv(&rhs_s).to_i64()?, 9);
+    assert_eq!(lhs_s.smod(&rhs_s).to_i64()?, -5);
+    assert_eq!(lhs_s.sdiv(&IrBits::zero(8)).to_u64()?, 0x80);
+    assert_eq!(lhs_s.smod(&IrBits::zero(8)).to_u64()?, 0x00);
+
+    Ok(())
+}

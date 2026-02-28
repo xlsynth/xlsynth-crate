@@ -2536,7 +2536,102 @@ pub fn generate_ir_fn_corpus_from_ir_path_with_replay(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arbitrary::{Arbitrary, Unstructured};
+    use rand::{RngCore, SeedableRng};
     use xlsynth::IrValue;
+    use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
+    use xlsynth_pir::ir_fuzz::{FuzzSample, generate_ir_fn};
+    use xlsynth_pir::ir_parser::Parser;
+
+    fn find_fuzz_generated_ir_for_interp_parity(seed: u64) -> (String, String) {
+        let mut rng = StdRng::seed_from_u64(seed);
+        for attempt in 0..256usize {
+            let mut bytes = vec![0u8; 512];
+            rng.fill_bytes(&mut bytes);
+            let mut u = Unstructured::new(&bytes);
+            let Ok(sample) = FuzzSample::arbitrary(&mut u) else {
+                continue;
+            };
+            if sample.ops.is_empty() {
+                continue;
+            }
+
+            let mut pkg = match xlsynth::IrPackage::new(&format!("autocov_fuzz_pkg_{attempt}")) {
+                Ok(pkg) => pkg,
+                Err(_) => continue,
+            };
+            let Ok(_xls_f) = generate_ir_fn(sample.ops.clone(), &mut pkg, None) else {
+                continue;
+            };
+            let ir_text = pkg.to_string();
+
+            let mut parser = Parser::new(&ir_text);
+            let Ok(parsed_pkg) = parser.parse_and_validate_package() else {
+                continue;
+            };
+            let Some(pir_f) = parsed_pkg.get_fn("fuzz_test") else {
+                continue;
+            };
+            if pir_f.params.is_empty() {
+                continue;
+            }
+            return (ir_text, "fuzz_test".to_string());
+        }
+        panic!("failed to find a seeded fuzz sample that builds a non-nullary function");
+    }
+
+    fn assert_autocov_corpus_matches_xlsynth_and_pir_interpreters(
+        fuzz_seed: u64,
+        autocov_seed: u64,
+        max_iters: u64,
+        max_corpus_len: usize,
+    ) {
+        let (ir_text, fn_name) = find_fuzz_generated_ir_for_interp_parity(fuzz_seed);
+
+        let xls_pkg = xlsynth::IrPackage::parse_ir(&ir_text, None).expect("xls parse");
+        let xls_f = xls_pkg.get_function(&fn_name).expect("xls function");
+
+        let mut parser = Parser::new(&ir_text);
+        let pir_pkg = parser
+            .parse_and_validate_package()
+            .expect("pir parse+validate");
+        let pir_f = pir_pkg.get_fn(&fn_name).expect("pir function");
+
+        let corpus_result = generate_ir_fn_corpus_from_ir_text(
+            &ir_text,
+            &fn_name,
+            IrFnAutocovGenerateConfig {
+                seed: autocov_seed,
+                max_iters: Some(max_iters),
+                max_corpus_len: Some(max_corpus_len),
+                progress_every: None,
+                threads: Some(1),
+                seed_structured: true,
+                seed_two_hot_max_bits: 64,
+            },
+        )
+        .expect("autocov corpus generation should succeed");
+
+        assert!(
+            !corpus_result.corpus.is_empty(),
+            "autocov should produce at least one corpus sample"
+        );
+
+        for tuple_value in &corpus_result.corpus {
+            let args = tuple_value
+                .get_elements()
+                .expect("corpus samples should be typed tuples");
+            let xls_got = xls_f.interpret(&args).expect("xls interpret");
+            let pir_got = match eval_fn_in_package(&pir_pkg, pir_f, &args) {
+                FnEvalResult::Success(success) => success.value,
+                other => panic!("expected pir eval success, got {:?}", other),
+            };
+            assert_eq!(
+                pir_got, xls_got,
+                "pir/xls mismatch for fuzz_seed={fuzz_seed} autocov_seed={autocov_seed} sample={tuple_value}"
+            );
+        }
+    }
 
     #[test]
     fn clone_fn_with_stuck_at_bool_node_replaces_payload_with_literal() {
@@ -3482,5 +3577,31 @@ fn f(a: bits[8] id=1, b: bits[8] id=2, c: bits[8] id=3, d: bits[8] id=4) -> bits
             engine.max_iters.unwrap(),
             engine.corpus.len()
         );
+    }
+
+    #[test]
+    fn autocov_corpus_matches_xlsynth_and_pir_interpreters_for_seeded_fuzz_sample() {
+        assert_autocov_corpus_matches_xlsynth_and_pir_interpreters(
+            0x5eed_f00d,
+            0xabc0_5eed,
+            4096,
+            1024,
+        );
+    }
+
+    #[test]
+    #[ignore = "soak test"]
+    fn autocov_corpus_matches_xlsynth_and_pir_interpreters_soak() {
+        const SOAK_CASES: usize = 256;
+        for i in 0..SOAK_CASES {
+            let fuzz_seed = 0x5eed_f00d_u64.wrapping_add(i as u64);
+            let autocov_seed = 0xabc0_5eed_u64 ^ ((i as u64).wrapping_mul(0x9e37_79b9));
+            assert_autocov_corpus_matches_xlsynth_and_pir_interpreters(
+                fuzz_seed,
+                autocov_seed,
+                4096,
+                1024,
+            );
+        }
     }
 }

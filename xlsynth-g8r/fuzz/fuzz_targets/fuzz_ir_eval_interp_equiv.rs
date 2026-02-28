@@ -3,84 +3,96 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
-use xlsynth_pir::ir_eval::{eval_fn, FnEvalResult};
-use xlsynth_pir::ir_fuzz::{generate_ir_fn, FuzzBinop, FuzzOp, FuzzSampleWithArgs};
-use xlsynth_pir::ir_parser;
+use xlsynth_autocov::{generate_ir_fn_corpus_from_ir_text, IrFnAutocovGenerateConfig};
+use xlsynth_pir::ir_eval::{eval_fn_in_package, FnEvalResult};
+use xlsynth_pir::ir_fuzz::{generate_ir_fn, FuzzSample};
+use xlsynth_pir::ir_parser::Parser;
 
-fuzz_target!(|with: FuzzSampleWithArgs| {
-    // Skip degenerate base cases as in other targets.
-    if with.sample.ops.is_empty() {
-        // Early return on degenerate generator inputs (see FUZZ.md for target policy).
+const AUTOCOV_MAX_ITERS: u64 = 256;
+const AUTOCOV_MAX_CORPUS_LEN: usize = 64;
+const AUTOCOV_TWO_HOT_MAX_BITS: usize = 64;
+
+fn stable_hash_u64(text: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in text.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+fuzz_target!(|sample: FuzzSample| {
+    // Empty op lists cannot form a function body, so they do not exercise the
+    // interpreter parity property.
+    if sample.ops.is_empty() {
         return;
     }
 
     let _ = env_logger::builder().is_test(true).try_init();
 
-    // 1) Generate an XLS IR function via C++ bindings. Filter out ops we don't
-    //    currently support in the pure evaluator.
-    let filtered_ops: Vec<FuzzOp> = with
-        .sample
-        .ops
-        .iter()
-        .cloned()
-        .filter(|op| match op {
-            FuzzOp::Binop(kind, _, _) => match kind {
-                // Filter division/modulus (not supported yet).
-                FuzzBinop::Udiv | FuzzBinop::Sdiv | FuzzBinop::Umod | FuzzBinop::Smod => false,
-                _ => true,
-            },
-            _ => true,
-        })
-        .collect();
+    // Generate an XLS IR function via C++ bindings.
     let mut pkg = xlsynth::IrPackage::new("fuzz_pkg").expect("IrPackage::new should not fail");
-    let ir_fn = match generate_ir_fn(filtered_ops, &mut pkg, None) {
+    let xls_fn = match generate_ir_fn(sample.ops.clone(), &mut pkg, None) {
         Ok(f) => f,
         Err(_) => {
-            // Generator can yield edge cases that are not useful here; skip.
+            // The generator can intentionally reject unsupported op/type
+            // combinations; those are not actionable parity failures.
             return;
         }
     };
-
-    // 2) Parse into internal IR.
     let pkg_text = pkg.to_string();
+    let fn_name = xls_fn.get_name();
 
     log::info!("pkg_text:\n{}", pkg_text);
 
-    let parsed_pkg = ir_parser::Parser::new(&pkg_text)
+    let parsed_pkg = Parser::new(&pkg_text)
         .parse_and_validate_package()
-        .expect("parse_and_validate_package should not fail");
-    let parsed_top = match parsed_pkg.get_top_fn() {
-        Some(f) => f.clone(),
-        None => return,
+        .expect("parse_and_validate_package should succeed for generated IR");
+    let parsed_fn = match parsed_pkg.get_fn(&fn_name) {
+        Some(f) => f,
+        None => panic!("missing function {fn_name} in parsed package"),
     };
 
-    // 3) Build arguments consistent with the function's parameter types.
-    let args: Vec<xlsynth::IrValue> = with.gen_args_for_fn(&parsed_top);
+    // Nullary functions do not benefit from autocov-driven input exploration and
+    // are covered by simpler direct tests elsewhere.
+    if parsed_fn.params.is_empty() {
+        return;
+    }
 
-    // 4) Evaluate via our interpreter. If our interpreter panics (paranoia
-    //    asserts), skip.
-    let ours = match std::panic::catch_unwind(|| eval_fn(&parsed_top, &args)) {
-        Ok(FnEvalResult::Success(s)) => s.value,
-        Ok(FnEvalResult::Failure(_)) => {
-            // Treat early-failures as unsupported for this target.
-            return;
-        }
-        Err(_) => return,
-    };
+    let corpus_result = generate_ir_fn_corpus_from_ir_text(
+        &pkg_text,
+        &fn_name,
+        IrFnAutocovGenerateConfig {
+            seed: stable_hash_u64(&pkg_text),
+            max_iters: Some(AUTOCOV_MAX_ITERS),
+            max_corpus_len: Some(AUTOCOV_MAX_CORPUS_LEN),
+            progress_every: None,
+            threads: Some(1),
+            seed_structured: true,
+            seed_two_hot_max_bits: AUTOCOV_TWO_HOT_MAX_BITS,
+        },
+    )
+    .expect("autocov corpus generation should succeed for generated IR");
 
-    // 5) Evaluate via xlsynth C++ interpreter.
-    let theirs = match ir_fn.interpret(&args) {
-        Ok(v) => v,
-        Err(_) => {
-            // If the external interpreter rejects, skip; other targets cover interpreter
-            // stability.
-            return;
-        }
-    };
-
-    // 6) Compare results.
-    assert_eq!(
-        ours, theirs,
-        "eval_fn result disagrees with xlsynth interpreter"
+    assert!(
+        !corpus_result.corpus.is_empty(),
+        "autocov should produce at least one corpus sample"
     );
+
+    for tuple_value in &corpus_result.corpus {
+        let args = tuple_value
+            .get_elements()
+            .expect("autocov corpus samples should be tuples");
+        let ours = match eval_fn_in_package(&parsed_pkg, parsed_fn, &args) {
+            FnEvalResult::Success(success) => success.value,
+            other => panic!("expected PIR evaluator success, got {:?}", other),
+        };
+        let theirs = xls_fn
+            .interpret(&args)
+            .expect("xlsynth interpreter should succeed on autocov corpus values");
+        assert_eq!(
+            ours, theirs,
+            "eval_fn result disagrees with xlsynth interpreter for corpus sample {tuple_value}"
+        );
+    }
 });

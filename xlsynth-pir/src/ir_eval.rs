@@ -17,32 +17,6 @@ use crate::ir_value_utils::{
 use crate::math::ceil_log2;
 use xlsynth::{IrBits, IrValue};
 
-fn umod_bits(lhs: &IrBits, rhs: &IrBits) -> IrBits {
-    let w = lhs.get_bit_count();
-    assert_eq!(w, rhs.get_bit_count(), "umod bit widths must match");
-    if w == 0 {
-        return IrBits::make_ubits(0, 0).expect("bits[0] zero literal must construct");
-    }
-    if rhs.is_zero() {
-        // XLS umod-by-zero: result is zero (see solver test coverage).
-        return IrBits::make_ubits(w, 0).expect("make_ubits should succeed for zero literal");
-    }
-
-    // Unsigned restoring division, returning remainder only.
-    let one = IrBits::make_ubits(w, 1).expect("make_ubits should succeed for 1");
-    let mut rem = IrBits::make_ubits(w, 0).expect("make_ubits should succeed for 0");
-    for i in (0..w).rev() {
-        rem = rem.shll(1);
-        if lhs.get_bit(i).expect("bit index is in bounds") {
-            rem = rem.or(&one);
-        }
-        if rem.uge(rhs) {
-            rem = rem.sub(rhs);
-        }
-    }
-    rem
-}
-
 #[derive(Clone, Copy)]
 enum ShiftKind {
     Shll,
@@ -119,6 +93,44 @@ fn checked_end_index(start: Option<usize>, width: usize, limit: usize) -> Option
     (end <= limit).then_some(end)
 }
 
+fn eval_zero_filled_bit_slice(arg_bits: &IrBits, start: Option<usize>, width: usize) -> IrBits {
+    let Some(start_u) = start else {
+        return IrBits::zero(width);
+    };
+
+    let arg_w = arg_bits.get_bit_count();
+    let mut out: Vec<bool> = Vec::with_capacity(width);
+    for offset in 0..width {
+        let bit = match start_u.checked_add(offset) {
+            Some(bit_index) if bit_index < arg_w => arg_bits.get_bit(bit_index).unwrap(),
+            _ => false,
+        };
+        out.push(bit);
+    }
+    IrBits::from_lsb_is_0(&out)
+}
+
+fn eval_bit_slice_update_bits(arg_bits: &IrBits, start_bits: &IrBits, upd_bits: &IrBits) -> IrBits {
+    let arg_w = arg_bits.get_bit_count();
+    let upd_w = upd_bits.get_bit_count();
+    let Some(start_u) = ir_bits_to_usize_in_range(start_bits, arg_w) else {
+        // XLS semantics: when the update start lies beyond the destination
+        // width, the result is unchanged.
+        return arg_bits.clone();
+    };
+
+    let write_width = std::cmp::min(upd_w, arg_w - start_u);
+    let mut out: Vec<bool> = Vec::with_capacity(arg_w);
+    for i in 0..arg_w {
+        if i >= start_u && i < start_u + write_width {
+            out.push(upd_bits.get_bit(i - start_u).unwrap());
+        } else {
+            out.push(arg_bits.get_bit(i).unwrap());
+        }
+    }
+    IrBits::from_lsb_is_0(&out)
+}
+
 fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
     log::trace!("eval_pure: {:?}", n);
     match n.payload {
@@ -171,6 +183,18 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                     let r = lhs_bits.umul(&rhs_bits);
                     IrValue::from_bits(&r)
                 }
+                ir::Binop::Udiv => {
+                    let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
+                    let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
+                    let out = lhs_bits.udiv(&rhs_bits);
+                    IrValue::from_bits(&out)
+                }
+                ir::Binop::Sdiv => {
+                    let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
+                    let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
+                    let out = lhs_bits.sdiv(&rhs_bits);
+                    IrValue::from_bits(&out)
+                }
                 ir::Binop::Umod => {
                     let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
                     let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
@@ -182,7 +206,13 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                         w,
                         rhs_bits.get_bit_count()
                     );
-                    let out = umod_bits(&lhs_bits, &rhs_bits);
+                    let out = lhs_bits.umod(&rhs_bits);
+                    IrValue::from_bits(&out)
+                }
+                ir::Binop::Smod => {
+                    let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
+                    let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
+                    let out = lhs_bits.smod(&rhs_bits);
                     IrValue::from_bits(&out)
                 }
                 ir::Binop::Uge => {
@@ -478,20 +508,7 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
             let arg_bits: IrBits = env.get(arg).unwrap().to_bits().unwrap();
             let start_bits: IrBits = env.get(start).unwrap().to_bits().unwrap();
             let start_u = ir_bits_to_usize(&start_bits);
-            let bit_count = arg_bits.get_bit_count();
-            let start_text = match start_u {
-                Some(v) => v.to_string(),
-                None => format!("<{}-bit out-of-range>", start_bits.get_bit_count()),
-            };
-            assert!(
-                checked_end_index(start_u, width, bit_count).is_some(),
-                "DynamicBitSlice OOB: start={} width={} arg_width={}",
-                start_text,
-                width,
-                bit_count
-            );
-            let r = arg_bits.width_slice(start_u.unwrap() as i64, width as i64);
-            IrValue::from_bits(&r)
+            IrValue::from_bits(&eval_zero_filled_bit_slice(&arg_bits, start_u, width))
         }
         ir::NodePayload::ZeroExt { arg, new_bit_count } => {
             let arg_bits: IrBits = env.get(&arg).unwrap().to_bits().unwrap();
@@ -677,33 +694,13 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
             update_value,
         } => {
             let arg_bits: IrBits = env.get(&arg).unwrap().to_bits().unwrap();
-            let start_bits: IrBits = env.get(&start).unwrap().to_bits().unwrap();
-            let start_i = ir_bits_to_usize(&start_bits);
             let upd_bits: IrBits = env.get(&update_value).unwrap().to_bits().unwrap();
-            let arg_w = arg_bits.get_bit_count();
-            let upd_w = upd_bits.get_bit_count();
-            let start_text = match start_i {
-                Some(v) => v.to_string(),
-                None => format!("<{}-bit out-of-range>", start_bits.get_bit_count()),
-            };
-            assert!(
-                checked_end_index(start_i, upd_w, arg_w).is_some(),
-                "BitSliceUpdate out of bounds: start={}, update_width={}, arg_width={}",
-                start_text,
-                upd_w,
-                arg_w
-            );
-            let start_i = start_i.unwrap();
-            let mut out: Vec<bool> = Vec::with_capacity(arg_w);
-            for i in 0..arg_w {
-                if i >= start_i && i < start_i + upd_w {
-                    out.push(upd_bits.get_bit(i - start_i).unwrap());
-                } else {
-                    out.push(arg_bits.get_bit(i).unwrap());
-                }
-            }
-            let out_bits = IrBits::from_lsb_is_0(&out);
-            IrValue::from_bits(&out_bits)
+            let start_bits: IrBits = env.get(&start).unwrap().to_bits().unwrap();
+            IrValue::from_bits(&eval_bit_slice_update_bits(
+                &arg_bits,
+                &start_bits,
+                &upd_bits,
+            ))
         }
         ir::NodePayload::Sel {
             selector,
@@ -1326,7 +1323,6 @@ fn eval_fn_impl<'a>(
     let mut env: HashMap<ir::NodeRef, IrValue> = HashMap::with_capacity(f.nodes.len());
     let mut trace_messages: Vec<TraceMessage> = Vec::new();
     let mut assertion_failures: Vec<AssertionFailure> = Vec::new();
-
     for nr in get_topological(f) {
         let node = f.get_node(nr);
         let value: IrValue = match &node.payload {
@@ -1488,7 +1484,6 @@ fn eval_fn_impl<'a>(
                 IrValue::from_bits(&r)
             }
             P::DynamicBitSlice { arg, start, width } => {
-                // Guard against OOB; return Failure instead of panicking.
                 let arg_bits = env
                     .get(arg)
                     .expect("arg must be evaluated")
@@ -1510,20 +1505,9 @@ fn eval_fn_impl<'a>(
                                 kind: CornerKind::DynamicBitSlice,
                                 tag: DynamicBitSliceCornerTag::OutOfBounds.into(),
                             });
-                            (&mut *observer).on_failure_event(FailureEvent {
-                                node_ref: nr,
-                                node_text_id: node.text_id,
-                                kind: FailureKind::DynamicBitSliceOob,
-                                tag: 0,
-                            });
                         }
                     }
-                    return FnEvalResult::Failure(FnEvalFailure {
-                        assertion_failures,
-                        trace_messages,
-                    });
-                }
-                if let Some(observer) = observer {
+                } else if let Some(observer) = observer {
                     unsafe {
                         (&mut *observer).on_corner_event(CornerEvent {
                             node_ref: nr,
@@ -1533,15 +1517,13 @@ fn eval_fn_impl<'a>(
                         });
                     }
                 }
-                let r = arg_bits.width_slice(start_u.unwrap() as i64, *width as i64);
-                IrValue::from_bits(&r)
+                IrValue::from_bits(&eval_zero_filled_bit_slice(&arg_bits, start_u, *width))
             }
             P::BitSliceUpdate {
                 arg,
                 start,
                 update_value,
             } => {
-                // Guard against OOB; return Failure instead of panicking.
                 let arg_bits = env
                     .get(arg)
                     .expect("arg must be evaluated")
@@ -1557,36 +1539,11 @@ fn eval_fn_impl<'a>(
                     .expect("update_value must be evaluated")
                     .to_bits()
                     .unwrap();
-                let start_u = ir_bits_to_usize(&start_bits);
-                let arg_w = arg_bits.get_bit_count();
-                let upd_w = upd_bits.get_bit_count();
-                if checked_end_index(start_u, upd_w, arg_w).is_none() {
-                    if let Some(observer) = observer {
-                        unsafe {
-                            (&mut *observer).on_failure_event(FailureEvent {
-                                node_ref: nr,
-                                node_text_id: node.text_id,
-                                kind: FailureKind::BitSliceUpdateOob,
-                                tag: 0,
-                            });
-                        }
-                    }
-                    return FnEvalResult::Failure(FnEvalFailure {
-                        assertion_failures,
-                        trace_messages,
-                    });
-                }
-                let start_u = start_u.unwrap();
-                let mut outs: Vec<bool> = Vec::with_capacity(arg_w);
-                for i in 0..arg_w {
-                    if i >= start_u && i < start_u + upd_w {
-                        outs.push(upd_bits.get_bit(i - start_u).unwrap());
-                    } else {
-                        outs.push(arg_bits.get_bit(i).unwrap());
-                    }
-                }
-                let out_bits = IrBits::from_lsb_is_0(&outs);
-                IrValue::from_bits(&out_bits)
+                IrValue::from_bits(&eval_bit_slice_update_bits(
+                    &arg_bits,
+                    &start_bits,
+                    &upd_bits,
+                ))
             }
             P::Decode { arg, width: _ } => {
                 // Produce a one-hot vector of the node's annotated width, setting bit[arg].
@@ -1968,6 +1925,34 @@ mod tests {
         assert_eq!(&pir_got, expected);
     }
 
+    fn assert_eval_cases_match_xlsynth<I>(ir_text: &str, fn_name: &str, label: &str, cases: I)
+    where
+        I: IntoIterator<Item = Vec<IrValue>>,
+    {
+        let xls_pkg = xlsynth::IrPackage::parse_ir(ir_text, None).expect("xls parse");
+        let xls_f = xls_pkg.get_function(fn_name).expect("xls function");
+
+        let mut pir_parser = Parser::new(ir_text);
+        let pir_pkg = pir_parser
+            .parse_and_validate_package()
+            .expect("pir parse+validate");
+        let pir_f = pir_pkg.get_fn(fn_name).expect("pir function");
+
+        for args in cases {
+            let xls_got = xls_f.interpret(&args).expect("xls interpret");
+            let pir_got = match eval_fn_in_package(&pir_pkg, pir_f, &args) {
+                FnEvalResult::Success(success) => success.value,
+                other => panic!("expected success, got {:?}", other),
+            };
+            let args_text = args
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            assert_eq!(pir_got, xls_got, "{label} mismatch for args=[{args_text}]");
+        }
+    }
+
     fn ir_value_from_lsb_bools(bits: &[bool]) -> IrValue {
         IrValue::from_bits(&IrBits::from_lsb_is_0(bits))
     }
@@ -1977,6 +1962,113 @@ mod tests {
         let mut bits = vec![false; width];
         bits[bit_index] = true;
         ir_value_from_lsb_bools(&bits)
+    }
+
+    fn make_binop_ir_text(op: &str, width: usize) -> String {
+        format!(
+            r#"package test
+
+fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
+  ret o: bits[{width}] = {op}(x, y, id=3)
+}}
+"#
+        )
+    }
+
+    fn divmod_cases_for_width(width: usize) -> Vec<Vec<IrValue>> {
+        if width <= 6 {
+            let value_count = 1usize << width;
+            let mut cases = Vec::with_capacity(value_count * value_count);
+            for lhs in 0..value_count {
+                for rhs in 0..value_count {
+                    cases.push(vec![
+                        IrValue::make_ubits(width, lhs as u64).unwrap(),
+                        IrValue::make_ubits(width, rhs as u64).unwrap(),
+                    ]);
+                }
+            }
+            return cases;
+        }
+
+        let mut cases = vec![
+            vec![
+                IrValue::make_ubits(width, 0).unwrap(),
+                IrValue::make_ubits(width, 0).unwrap(),
+            ],
+            vec![
+                IrValue::make_ubits(width, 1).unwrap(),
+                IrValue::make_ubits(width, 0).unwrap(),
+            ],
+            vec![
+                IrValue::make_sbits(width, -1).unwrap(),
+                IrValue::make_ubits(width, 0).unwrap(),
+            ],
+            vec![
+                IrValue::signed_max_bits(width),
+                IrValue::make_ubits(width, 0).unwrap(),
+            ],
+            vec![
+                IrValue::signed_min_bits(width),
+                IrValue::make_ubits(width, 0).unwrap(),
+            ],
+            vec![
+                IrValue::make_sbits(width, 7).unwrap(),
+                IrValue::make_sbits(width, 3).unwrap(),
+            ],
+            vec![
+                IrValue::make_sbits(width, -7).unwrap(),
+                IrValue::make_sbits(width, 3).unwrap(),
+            ],
+            vec![
+                IrValue::make_sbits(width, 7).unwrap(),
+                IrValue::make_sbits(width, -3).unwrap(),
+            ],
+            vec![
+                IrValue::make_sbits(width, -7).unwrap(),
+                IrValue::make_sbits(width, -3).unwrap(),
+            ],
+            vec![
+                IrValue::signed_min_bits(width),
+                IrValue::make_sbits(width, -1).unwrap(),
+            ],
+            vec![
+                IrValue::signed_min_bits(width),
+                IrValue::make_sbits(width, 1).unwrap(),
+            ],
+            vec![
+                make_one_hot_ir_value(width, width - 2),
+                IrValue::make_sbits(width, -3).unwrap(),
+            ],
+            vec![
+                make_one_hot_ir_value(width, width - 1),
+                IrValue::make_sbits(width, 5).unwrap(),
+            ],
+            vec![IrValue::all_ones_bits(width), IrValue::all_ones_bits(width)],
+            vec![
+                IrValue::all_ones_bits(width),
+                make_one_hot_ir_value(width, width / 2),
+            ],
+        ];
+        if width > 2 {
+            cases.push(vec![
+                make_one_hot_ir_value(width, width - 3),
+                make_one_hot_ir_value(width, 1),
+            ]);
+        }
+        cases
+    }
+
+    fn assert_divmod_binop_matches_xlsynth(op: &str) {
+        for width in 0..=6 {
+            let ir_text = make_binop_ir_text(op, width);
+            let label = format!("{op} width={width}");
+            assert_eval_cases_match_xlsynth(&ir_text, "f", &label, divmod_cases_for_width(width));
+        }
+        for width in [7usize, 8, 16, 33, 65] {
+            let ir_text = make_binop_ir_text(op, width);
+            let label = format!("{op} width={width}");
+            assert_eval_cases_match_xlsynth(&ir_text, "f", &label, divmod_cases_for_width(width));
+        }
     }
 
     #[test]
@@ -2091,6 +2183,98 @@ mod tests {
         };
         let v: IrValue = eval_pure(&n, &env);
         assert_eq!(v, IrValue::make_ubits(72, 0).unwrap());
+    }
+
+    #[test]
+    fn test_eval_pure_binop_udiv_div_by_zero_is_all_ones() {
+        let lhs = IrValue::parse_typed("bits[72]:0x1234_5678_9abc_def012").unwrap();
+        let rhs = IrValue::make_ubits(72, 0).unwrap();
+        let env = hashmap!(
+            ir::NodeRef { index: 1 } => lhs,
+            ir::NodeRef { index: 2 } => rhs,
+        );
+        let n = ir::Node {
+            text_id: 3003,
+            name: None,
+            ty: ir::Type::Bits(72),
+            payload: ir::NodePayload::Binop(
+                ir::Binop::Udiv,
+                ir::NodeRef { index: 1 },
+                ir::NodeRef { index: 2 },
+            ),
+            pos: None,
+        };
+        let v: IrValue = eval_pure(&n, &env);
+        assert_eq!(v, IrValue::all_ones_bits(72));
+    }
+
+    #[test]
+    fn test_eval_pure_binop_sdiv_pos_div_by_zero_clamps_to_signed_max() {
+        let lhs = IrValue::make_sbits(72, 123).unwrap();
+        let rhs = IrValue::make_ubits(72, 0).unwrap();
+        let env = hashmap!(
+            ir::NodeRef { index: 1 } => lhs,
+            ir::NodeRef { index: 2 } => rhs,
+        );
+        let n = ir::Node {
+            text_id: 3004,
+            name: None,
+            ty: ir::Type::Bits(72),
+            payload: ir::NodePayload::Binop(
+                ir::Binop::Sdiv,
+                ir::NodeRef { index: 1 },
+                ir::NodeRef { index: 2 },
+            ),
+            pos: None,
+        };
+        let v: IrValue = eval_pure(&n, &env);
+        assert_eq!(v, IrValue::signed_max_bits(72));
+    }
+
+    #[test]
+    fn test_eval_pure_binop_sdiv_neg_div_by_zero_clamps_to_signed_min() {
+        let lhs = IrValue::make_sbits(72, -123).unwrap();
+        let rhs = IrValue::make_ubits(72, 0).unwrap();
+        let env = hashmap!(
+            ir::NodeRef { index: 1 } => lhs,
+            ir::NodeRef { index: 2 } => rhs,
+        );
+        let n = ir::Node {
+            text_id: 3005,
+            name: None,
+            ty: ir::Type::Bits(72),
+            payload: ir::NodePayload::Binop(
+                ir::Binop::Sdiv,
+                ir::NodeRef { index: 1 },
+                ir::NodeRef { index: 2 },
+            ),
+            pos: None,
+        };
+        let v: IrValue = eval_pure(&n, &env);
+        assert_eq!(v, IrValue::signed_min_bits(72));
+    }
+
+    #[test]
+    fn test_eval_pure_binop_smod_neg_divisor_keeps_dividend_sign() {
+        let lhs = IrValue::make_sbits(72, -17).unwrap();
+        let rhs = IrValue::make_sbits(72, -5).unwrap();
+        let env = hashmap!(
+            ir::NodeRef { index: 1 } => lhs,
+            ir::NodeRef { index: 2 } => rhs,
+        );
+        let n = ir::Node {
+            text_id: 3006,
+            name: None,
+            ty: ir::Type::Bits(72),
+            payload: ir::NodePayload::Binop(
+                ir::Binop::Smod,
+                ir::NodeRef { index: 1 },
+                ir::NodeRef { index: 2 },
+            ),
+            pos: None,
+        };
+        let v: IrValue = eval_pure(&n, &env);
+        assert_eq!(v, IrValue::make_sbits(72, -2).unwrap());
     }
 
     #[test]
@@ -2486,6 +2670,26 @@ mod tests {
     }
 
     #[test]
+    fn test_udiv_matches_xlsynth_interpreter_across_widths_and_values() {
+        assert_divmod_binop_matches_xlsynth("udiv");
+    }
+
+    #[test]
+    fn test_sdiv_matches_xlsynth_interpreter_across_widths_and_values() {
+        assert_divmod_binop_matches_xlsynth("sdiv");
+    }
+
+    #[test]
+    fn test_umod_matches_xlsynth_interpreter_across_widths_and_values() {
+        assert_divmod_binop_matches_xlsynth("umod");
+    }
+
+    #[test]
+    fn test_smod_matches_xlsynth_interpreter_across_widths_and_values() {
+        assert_divmod_binop_matches_xlsynth("smod");
+    }
+
+    #[test]
     fn test_one_hot_sel_bits_matches_xlsynth_interpreter() {
         let ir_text = r#"package test
 
@@ -2754,6 +2958,38 @@ fn f(x: bits[16] id=1, s: bits[80] id=2) -> bits[4] {
     }
 
     #[test]
+    fn test_dynamic_bit_slice_partial_overrun_zero_fills_matches_xlsynth_interpreter() {
+        let ir_text = r#"package test
+
+fn f(x: bits[8] id=1, s: bits[4] id=2) -> bits[4] {
+  ret o: bits[4] = dynamic_bit_slice(x, s, width=4, id=3)
+}
+"#;
+        let args = vec![
+            IrValue::make_ubits(8, 0b1011_0101).unwrap(),
+            IrValue::make_ubits(4, 6).unwrap(),
+        ];
+        let expected = IrValue::make_ubits(4, 0b0010).unwrap();
+        assert_eval_matches_xlsynth(ir_text, "f", &args, &expected);
+    }
+
+    #[test]
+    fn test_dynamic_bit_slice_huge_start_zero_fills_matches_xlsynth_interpreter() {
+        let ir_text = r#"package test
+
+fn f(x: bits[8] id=1, s: bits[80] id=2) -> bits[8] {
+  ret o: bits[8] = dynamic_bit_slice(x, s, width=8, id=3)
+}
+"#;
+        let args = vec![
+            IrValue::make_ubits(8, 0xab).unwrap(),
+            make_one_hot_ir_value(80, 70),
+        ];
+        let expected = IrValue::make_ubits(8, 0).unwrap();
+        assert_eval_matches_xlsynth(ir_text, "f", &args, &expected);
+    }
+
+    #[test]
     fn test_bit_slice_update_wide_start_matches_xlsynth_interpreter() {
         let ir_text = r#"package test
 
@@ -2767,6 +3003,58 @@ fn f(x: bits[16] id=1, s: bits[80] id=2, y: bits[4] id=3) -> bits[16] {
             IrValue::make_ubits(4, 0xF).unwrap(),
         ];
         let expected = IrValue::make_ubits(16, 0x12F4).unwrap();
+        assert_eval_matches_xlsynth(ir_text, "f", &args, &expected);
+    }
+
+    #[test]
+    fn test_bit_slice_update_huge_start_is_noop_matches_xlsynth_interpreter() {
+        let ir_text = r#"package test
+
+fn f(x: bits[8] id=1, s: bits[80] id=2, y: bits[8] id=3) -> bits[8] {
+  ret o: bits[8] = bit_slice_update(x, s, y, id=4)
+}
+"#;
+        let args = vec![
+            IrValue::make_ubits(8, 0xab).unwrap(),
+            make_one_hot_ir_value(80, 70),
+            IrValue::make_ubits(8, 0x34).unwrap(),
+        ];
+        let expected = IrValue::make_ubits(8, 0xab).unwrap();
+        assert_eval_matches_xlsynth(ir_text, "f", &args, &expected);
+    }
+
+    #[test]
+    fn test_bit_slice_update_truncates_update_at_end_matches_xlsynth_interpreter() {
+        let ir_text = r#"package test
+
+fn f(x: bits[8] id=1, s: bits[4] id=2, y: bits[6] id=3) -> bits[8] {
+  ret o: bits[8] = bit_slice_update(x, s, y, id=4)
+}
+"#;
+        let args = vec![
+            IrValue::make_ubits(8, 0b0001_1110).unwrap(),
+            IrValue::make_ubits(4, 6).unwrap(),
+            IrValue::make_ubits(6, 0b11_0011).unwrap(),
+        ];
+        let expected = IrValue::make_ubits(8, 0b1101_1110).unwrap();
+        assert_eval_matches_xlsynth(ir_text, "f", &args, &expected);
+    }
+
+    #[test]
+    fn test_dead_bit_slice_update_oob_is_ignored_matches_xlsynth_interpreter() {
+        let ir_text = r#"package test
+
+fn f(p0: bits[8] id=1, p1: bits[8] id=2, p2: bits[8] id=3) -> bits[8] {
+  bit_slice_update.4: bits[8] = bit_slice_update(p0, p0, p0, id=4)
+  ret p0: bits[8] = param(name=p0, id=1)
+}
+"#;
+        let args = vec![
+            IrValue::make_ubits(8, 0xff).unwrap(),
+            IrValue::make_ubits(8, 0x12).unwrap(),
+            IrValue::make_ubits(8, 0x34).unwrap(),
+        ];
+        let expected = IrValue::make_ubits(8, 0xff).unwrap();
         assert_eval_matches_xlsynth(ir_text, "f", &args, &expected);
     }
 
@@ -2855,9 +3143,8 @@ fn f(a: bits[5][4] id=1, v: bits[5] id=2, i: bits[80] id=3) -> bits[5][4] {
     }
 
     #[test]
-    #[should_panic]
-    fn test_eval_pure_dynamic_bit_slice_oob_panics() {
-        // arg width 3, dynamic start=3, width=1 => OOB, should panic
+    fn test_eval_pure_dynamic_bit_slice_oob_zero_fills() {
+        // arg width 3, dynamic start=3, width=1 => zero-filled result
         let env = hashmap!(
             ir::NodeRef { index: 1 } => IrValue::make_ubits(3, 0b101).unwrap(),
             ir::NodeRef { index: 2 } => IrValue::make_ubits(32, 3).unwrap(),
@@ -2873,7 +3160,8 @@ fn f(a: bits[5][4] id=1, v: bits[5] id=2, i: bits[80] id=3) -> bits[5][4] {
             },
             pos: None,
         };
-        let _ = eval_pure(&n, &env);
+        let got = eval_pure(&n, &env);
+        assert_eq!(got, IrValue::make_ubits(1, 0).unwrap());
     }
 
     #[test]
@@ -3768,22 +4056,20 @@ fn f(x: bits[8] id=1, s: bits[3] id=2) -> bits[4] {
         );
         assert!(obs_in.failure_events.is_empty());
 
-        // OOB: start=6, width=4, arg_width=8
+        // OOB: start=6, width=4, arg_width=8. XLS zero-fills rather than
+        // treating the sample as a failure.
         let args_oob = vec![
             IrValue::make_ubits(8, 0b1111_0000).unwrap(),
             IrValue::make_ubits(3, 6).unwrap(),
         ];
         let mut obs_oob = RecordingCornerFailureObserver::default();
         let r_oob = eval_fn_with_observer(&f, &args_oob, Some(&mut obs_oob));
-        assert!(matches!(r_oob, FnEvalResult::Failure(_)));
+        assert!(matches!(r_oob, FnEvalResult::Success(_)));
         assert_eq!(
             obs_oob.corner_events,
             vec![(10, CornerKind::DynamicBitSlice, 1)]
         );
-        assert_eq!(
-            obs_oob.failure_events,
-            vec![(10, FailureKind::DynamicBitSliceOob)]
-        );
+        assert!(obs_oob.failure_events.is_empty());
     }
 
     #[test]
