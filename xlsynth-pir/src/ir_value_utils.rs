@@ -175,6 +175,35 @@ pub fn deep_or_ir_values_for_type(ty: &ir::Type, lhs: &IrValue, rhs: &IrValue) -
     }
 }
 
+/// Converts an `IrBits` value to `usize` when all set bits are representable on
+/// the current host width, and returns `None` when any set bit lies above the
+/// host `usize` width.
+pub fn ir_bits_to_usize(bits: &IrBits) -> Option<usize> {
+    let usize_width = usize::BITS as usize;
+    for i in usize_width..bits.get_bit_count() {
+        if bits.get_bit(i).expect("bit index is in bounds") {
+            return None;
+        }
+    }
+
+    let mut value = 0usize;
+    let low_width = std::cmp::min(bits.get_bit_count(), usize_width);
+    for i in 0..low_width {
+        if bits.get_bit(i).expect("bit index is in bounds") {
+            value |= 1usize << i;
+        }
+    }
+    Some(value)
+}
+
+/// Converts an `IrBits` value to `usize` when it is strictly less than the
+/// given exclusive upper bound, and returns `None` when the value is not
+/// representable as a host `usize` or is out of range.
+pub fn ir_bits_to_usize_in_range(bits: &IrBits, upper_bound_exclusive: usize) -> Option<usize> {
+    let value = ir_bits_to_usize(bits)?;
+    (value < upper_bound_exclusive).then_some(value)
+}
+
 /// Flattens `value` into a single `IrBits`, using `ty` to define and validate
 /// the shape.
 ///
