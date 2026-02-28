@@ -3,9 +3,9 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
-use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
-use xlsynth_pir::ir_fuzz::{FuzzBinop, FuzzOp, FuzzSampleWithArgs, generate_ir_fn};
-use xlsynth_pir::{ir, ir_parser};
+use xlsynth_pir::ir_eval::{eval_fn, FnEvalResult};
+use xlsynth_pir::ir_fuzz::{generate_ir_fn, FuzzBinop, FuzzOp, FuzzSampleWithArgs};
+use xlsynth_pir::ir_parser;
 
 fuzz_target!(|with: FuzzSampleWithArgs| {
     // Skip degenerate base cases as in other targets.
@@ -16,8 +16,8 @@ fuzz_target!(|with: FuzzSampleWithArgs| {
 
     let _ = env_logger::builder().is_test(true).try_init();
 
-    // 1) Generate an XLS IR function via C++ bindings. Filter out ops we don't currently
-    //    support in the pure evaluator.
+    // 1) Generate an XLS IR function via C++ bindings. Filter out ops we don't
+    //    currently support in the pure evaluator.
     let filtered_ops: Vec<FuzzOp> = with
         .sample
         .ops
@@ -26,11 +26,7 @@ fuzz_target!(|with: FuzzSampleWithArgs| {
         .filter(|op| match op {
             FuzzOp::Binop(kind, _, _) => match kind {
                 // Filter division/modulus (not supported yet).
-                | FuzzBinop::Udiv
-                | FuzzBinop::Sdiv
-                | FuzzBinop::Umod
-                | FuzzBinop::Smod
-                => false,
+                FuzzBinop::Udiv | FuzzBinop::Sdiv | FuzzBinop::Umod | FuzzBinop::Smod => false,
                 _ => true,
             },
             _ => true,
@@ -57,19 +53,6 @@ fuzz_target!(|with: FuzzSampleWithArgs| {
         Some(f) => f.clone(),
         None => return,
     };
-
-    // Guard: skip samples that contain one_hot_sel with non-bits-typed cases.
-    for nr in parsed_top.node_refs() {
-        let n = parsed_top.get_node(nr);
-        if let ir::NodePayload::OneHotSel { selector: _, cases } = &n.payload {
-            if !cases.is_empty() {
-                let case_ty = parsed_top.get_node_ty(cases[0]);
-                if !matches!(case_ty, ir::Type::Bits(_)) {
-                    return;
-                }
-            }
-        }
-    }
 
     // 3) Build arguments consistent with the function's parameter types.
     let args: Vec<xlsynth::IrValue> = with.gen_args_for_fn(&parsed_top);

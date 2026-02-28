@@ -11,6 +11,7 @@ use crate::corners::{
 use crate::ir;
 use crate::ir::NodePayload as P;
 use crate::ir_utils::get_topological;
+use crate::ir_value_utils::{deep_or_ir_values_for_type, zero_ir_value_for_type};
 use crate::math::ceil_log2;
 use xlsynth::{IrBits, IrValue};
 
@@ -648,22 +649,21 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
             assert!(!cases.is_empty(), "OneHotSel must have at least one case");
             let sel_bits: IrBits = env.get(&selector).unwrap().to_bits().unwrap();
             let sel_w = sel_bits.get_bit_count();
-            // Initialize accumulator with zeros of the case width.
-            let first_case_bits: IrBits = env.get(&cases[0]).unwrap().to_bits().unwrap();
-            let case_w = first_case_bits.get_bit_count();
-            let mut acc = IrBits::make_ubits(case_w, 0).unwrap();
+            let mut acc = zero_ir_value_for_type(&n.ty);
             for (i, case_ref) in cases.iter().enumerate() {
-                let case_bits: IrBits = env.get(case_ref).unwrap().to_bits().unwrap();
                 let bit_set = if i < sel_w {
                     sel_bits.get_bit(i).unwrap()
                 } else {
                     false
                 };
                 if bit_set {
-                    acc = acc.or(&case_bits);
+                    let case_value = env
+                        .get(case_ref)
+                        .expect("one_hot_sel case must be evaluated");
+                    acc = deep_or_ir_values_for_type(&n.ty, &acc, case_value);
                 }
             }
-            IrValue::from_bits(&acc)
+            acc
         }
         ir::NodePayload::GetParam(..) | _ => panic!("Cannot evaluate node as pure: {:?}", n),
     }
@@ -1858,6 +1858,30 @@ mod tests {
         }
     }
 
+    fn assert_eval_matches_xlsynth(
+        ir_text: &str,
+        fn_name: &str,
+        args: &[IrValue],
+        expected: &IrValue,
+    ) {
+        let xls_pkg = xlsynth::IrPackage::parse_ir(ir_text, None).expect("xls parse");
+        let xls_f = xls_pkg.get_function(fn_name).expect("xls function");
+
+        let mut pir_parser = Parser::new(ir_text);
+        let pir_pkg = pir_parser
+            .parse_and_validate_package()
+            .expect("pir parse+validate");
+        let pir_f = pir_pkg.get_fn(fn_name).expect("pir function");
+
+        let xls_got = xls_f.interpret(args).expect("xls interpret");
+        let pir_got = match eval_fn_in_package(&pir_pkg, pir_f, args) {
+            FnEvalResult::Success(success) => success.value,
+            other => panic!("expected success, got {:?}", other),
+        };
+        assert_eq!(pir_got, xls_got);
+        assert_eq!(&pir_got, expected);
+    }
+
     #[test]
     fn test_eval_pure_literal() {
         let env = HashMap::new();
@@ -2328,6 +2352,231 @@ mod tests {
             ir::NodeRef { index: 3 } => IrValue::make_ubits(8, 0x0A).unwrap(),
         );
         assert_eq!(eval_pure(&n, &env2), IrValue::make_ubits(8, 0x0B).unwrap());
+    }
+
+    #[test]
+    fn test_eval_pure_one_hot_sel_tuple_multi_hot() {
+        let tuple_ty = ir::Type::Tuple(vec![
+            Box::new(ir::Type::Bits(4)),
+            Box::new(ir::Type::Bits(4)),
+        ]);
+        let env = hashmap!(
+            ir::NodeRef { index: 0 } => IrValue::make_ubits(2, 0b11).unwrap(),
+            ir::NodeRef { index: 1 } => IrValue::make_tuple(&[
+                IrValue::make_ubits(4, 0x1).unwrap(),
+                IrValue::make_ubits(4, 0x2).unwrap(),
+            ]),
+            ir::NodeRef { index: 2 } => IrValue::make_tuple(&[
+                IrValue::make_ubits(4, 0x4).unwrap(),
+                IrValue::make_ubits(4, 0x8).unwrap(),
+            ]),
+        );
+        let n = ir::Node {
+            text_id: 71,
+            name: None,
+            ty: tuple_ty,
+            payload: ir::NodePayload::OneHotSel {
+                selector: ir::NodeRef { index: 0 },
+                cases: vec![ir::NodeRef { index: 1 }, ir::NodeRef { index: 2 }],
+            },
+            pos: None,
+        };
+        let expected = IrValue::make_tuple(&[
+            IrValue::make_ubits(4, 0x5).unwrap(),
+            IrValue::make_ubits(4, 0xA).unwrap(),
+        ]);
+        assert_eq!(eval_pure(&n, &env), expected);
+    }
+
+    #[test]
+    fn test_one_hot_sel_bits_matches_xlsynth_interpreter() {
+        let ir_text = r#"package test
+
+fn f(sel: bits[3] id=1, a: bits[8] id=2, b: bits[8] id=3, c: bits[8] id=4) -> bits[8] {
+  ret o: bits[8] = one_hot_sel(sel, cases=[a, b, c], id=5)
+}
+"#;
+        let args = vec![
+            IrValue::make_ubits(3, 0b010).unwrap(),
+            IrValue::make_ubits(8, 0x03).unwrap(),
+            IrValue::make_ubits(8, 0x05).unwrap(),
+            IrValue::make_ubits(8, 0x0A).unwrap(),
+        ];
+        let expected = IrValue::make_ubits(8, 0x05).unwrap();
+        assert_eval_matches_xlsynth(ir_text, "f", &args, &expected);
+    }
+
+    #[test]
+    fn test_one_hot_sel_tuple_matches_xlsynth_interpreter() {
+        let ir_text = r#"package test
+
+fn f(sel: bits[2] id=1, a: (bits[4], bits[4]) id=2, b: (bits[4], bits[4]) id=3) -> (bits[4], bits[4]) {
+  ret o: (bits[4], bits[4]) = one_hot_sel(sel, cases=[a, b], id=4)
+}
+"#;
+        let args = vec![
+            IrValue::make_ubits(2, 0b01).unwrap(),
+            IrValue::make_tuple(&[
+                IrValue::make_ubits(4, 0x1).unwrap(),
+                IrValue::make_ubits(4, 0x2).unwrap(),
+            ]),
+            IrValue::make_tuple(&[
+                IrValue::make_ubits(4, 0x4).unwrap(),
+                IrValue::make_ubits(4, 0x8).unwrap(),
+            ]),
+        ];
+        let expected = IrValue::make_tuple(&[
+            IrValue::make_ubits(4, 0x1).unwrap(),
+            IrValue::make_ubits(4, 0x2).unwrap(),
+        ]);
+        assert_eval_matches_xlsynth(ir_text, "f", &args, &expected);
+    }
+
+    #[test]
+    fn test_one_hot_sel_nested_tuple_matches_xlsynth_interpreter() {
+        let ir_text = r#"package test
+
+fn f(sel: bits[2] id=1, a: ((bits[4], bits[4]), bits[4], (bits[4], bits[4])) id=2, b: ((bits[4], bits[4]), bits[4], (bits[4], bits[4])) id=3) -> ((bits[4], bits[4]), bits[4], (bits[4], bits[4])) {
+  ret o: ((bits[4], bits[4]), bits[4], (bits[4], bits[4])) = one_hot_sel(sel, cases=[a, b], id=4)
+}
+"#;
+        let a = IrValue::make_tuple(&[
+            IrValue::make_tuple(&[
+                IrValue::make_ubits(4, 0x1).unwrap(),
+                IrValue::make_ubits(4, 0x2).unwrap(),
+            ]),
+            IrValue::make_ubits(4, 0x3).unwrap(),
+            IrValue::make_tuple(&[
+                IrValue::make_ubits(4, 0x4).unwrap(),
+                IrValue::make_ubits(4, 0x5).unwrap(),
+            ]),
+        ]);
+        let b = IrValue::make_tuple(&[
+            IrValue::make_tuple(&[
+                IrValue::make_ubits(4, 0x6).unwrap(),
+                IrValue::make_ubits(4, 0x7).unwrap(),
+            ]),
+            IrValue::make_ubits(4, 0x8).unwrap(),
+            IrValue::make_tuple(&[
+                IrValue::make_ubits(4, 0x9).unwrap(),
+                IrValue::make_ubits(4, 0xA).unwrap(),
+            ]),
+        ]);
+        let args = vec![IrValue::make_ubits(2, 0b10).unwrap(), a, b.clone()];
+        assert_eval_matches_xlsynth(ir_text, "f", &args, &b);
+    }
+
+    #[test]
+    fn test_one_hot_sel_array_matches_xlsynth_interpreter() {
+        let ir_text = r#"package test
+
+fn f(sel: bits[2] id=1, a: bits[4][3] id=2, b: bits[4][3] id=3) -> bits[4][3] {
+  ret o: bits[4][3] = one_hot_sel(sel, cases=[a, b], id=4)
+}
+"#;
+        let a = IrValue::make_array(&[
+            IrValue::make_ubits(4, 0x1).unwrap(),
+            IrValue::make_ubits(4, 0x2).unwrap(),
+            IrValue::make_ubits(4, 0x3).unwrap(),
+        ])
+        .unwrap();
+        let b = IrValue::make_array(&[
+            IrValue::make_ubits(4, 0x4).unwrap(),
+            IrValue::make_ubits(4, 0x5).unwrap(),
+            IrValue::make_ubits(4, 0x6).unwrap(),
+        ])
+        .unwrap();
+        let args = vec![IrValue::make_ubits(2, 0b01).unwrap(), a.clone(), b];
+        assert_eval_matches_xlsynth(ir_text, "f", &args, &a);
+    }
+
+    #[test]
+    fn test_one_hot_sel_2d_array_matches_xlsynth_interpreter() {
+        let ir_text = r#"package test
+
+fn f(sel: bits[2] id=1, a: bits[4][2][2] id=2, b: bits[4][2][2] id=3) -> bits[4][2][2] {
+  ret o: bits[4][2][2] = one_hot_sel(sel, cases=[a, b], id=4)
+}
+"#;
+        let a = IrValue::make_array(&[
+            IrValue::make_array(&[
+                IrValue::make_ubits(4, 0x1).unwrap(),
+                IrValue::make_ubits(4, 0x2).unwrap(),
+            ])
+            .unwrap(),
+            IrValue::make_array(&[
+                IrValue::make_ubits(4, 0x3).unwrap(),
+                IrValue::make_ubits(4, 0x4).unwrap(),
+            ])
+            .unwrap(),
+        ])
+        .unwrap();
+        let b = IrValue::make_array(&[
+            IrValue::make_array(&[
+                IrValue::make_ubits(4, 0x5).unwrap(),
+                IrValue::make_ubits(4, 0x6).unwrap(),
+            ])
+            .unwrap(),
+            IrValue::make_array(&[
+                IrValue::make_ubits(4, 0x7).unwrap(),
+                IrValue::make_ubits(4, 0x8).unwrap(),
+            ])
+            .unwrap(),
+        ])
+        .unwrap();
+        let args = vec![IrValue::make_ubits(2, 0b10).unwrap(), a, b.clone()];
+        assert_eval_matches_xlsynth(ir_text, "f", &args, &b);
+    }
+
+    #[test]
+    fn test_one_hot_sel_multi_hot_non_bits_matches_xlsynth_interpreter() {
+        let ir_text = r#"package test
+
+fn f(sel: bits[2] id=1, a: bits[4][2][2] id=2, b: bits[4][2][2] id=3) -> bits[4][2][2] {
+  ret o: bits[4][2][2] = one_hot_sel(sel, cases=[a, b], id=4)
+}
+"#;
+        let a = IrValue::make_array(&[
+            IrValue::make_array(&[
+                IrValue::make_ubits(4, 0x1).unwrap(),
+                IrValue::make_ubits(4, 0x2).unwrap(),
+            ])
+            .unwrap(),
+            IrValue::make_array(&[
+                IrValue::make_ubits(4, 0x4).unwrap(),
+                IrValue::make_ubits(4, 0x8).unwrap(),
+            ])
+            .unwrap(),
+        ])
+        .unwrap();
+        let b = IrValue::make_array(&[
+            IrValue::make_array(&[
+                IrValue::make_ubits(4, 0x8).unwrap(),
+                IrValue::make_ubits(4, 0x4).unwrap(),
+            ])
+            .unwrap(),
+            IrValue::make_array(&[
+                IrValue::make_ubits(4, 0x2).unwrap(),
+                IrValue::make_ubits(4, 0x1).unwrap(),
+            ])
+            .unwrap(),
+        ])
+        .unwrap();
+        let expected = IrValue::make_array(&[
+            IrValue::make_array(&[
+                IrValue::make_ubits(4, 0x9).unwrap(),
+                IrValue::make_ubits(4, 0x6).unwrap(),
+            ])
+            .unwrap(),
+            IrValue::make_array(&[
+                IrValue::make_ubits(4, 0x6).unwrap(),
+                IrValue::make_ubits(4, 0x9).unwrap(),
+            ])
+            .unwrap(),
+        ])
+        .unwrap();
+        let args = vec![IrValue::make_ubits(2, 0b11).unwrap(), a, b];
+        assert_eval_matches_xlsynth(ir_text, "f", &args, &expected);
     }
 
     #[test]
