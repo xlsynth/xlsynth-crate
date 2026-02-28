@@ -31,6 +31,11 @@ struct Args {
     #[arg(long)]
     max_iters: Option<u64>,
 
+    /// Maximum corpus length, counting replayed entries, structured seeds, and
+    /// newly discovered entries.
+    #[arg(long)]
+    max_corpus_len: Option<usize>,
+
     /// Emit a progress line every N iterations (and also on each accepted
     /// sample).
     ///
@@ -68,6 +73,7 @@ fn main() -> anyhow::Result<()> {
         corpus_file: args.corpus_file,
         seed: args.seed,
         max_iters: args.max_iters,
+        max_corpus_len: args.max_corpus_len,
         progress_every: args.progress_every,
         no_mux_space: args.no_mux_space,
         threads: args.threads,

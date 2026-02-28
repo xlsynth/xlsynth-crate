@@ -2017,6 +2017,14 @@ fn main() {
                         .action(clap::ArgAction::Set),
                 )
                 .arg(
+                    clap::Arg::new("max_corpus_len")
+                        .long("max-corpus-len")
+                        .value_name("MAX_CORPUS_LEN")
+                        .help("Stop successfully once the replayed/seeded/discovered corpus reaches this size")
+                        .value_parser(clap::value_parser!(usize))
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
                     clap::Arg::new("progress_every")
                         .long("progress-every")
                         .value_name("N")

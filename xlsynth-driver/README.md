@@ -1042,6 +1042,7 @@ typed argument tuples to a newline-delimited `.irvals` file.
   - `--top <NAME>` – function to analyze (defaults to package top).
   - `--seed <SEED>` – PRNG seed (default `0`).
   - `--max-iters <MAX_ITERS>` – max candidates to evaluate (omit to run until interrupted).
+  - `--max-corpus-len <MAX_CORPUS_LEN>` – stop successfully once the replayed/seeded/discovered corpus reaches this size.
   - `--progress-every <N>` – progress interval in iterations (default `10000`; `0` disables periodic progress lines).
   - `--threads <THREADS>` – worker thread count (default: host parallelism).
   - `--seed-structured <true|false>` – seed corpus with structured patterns (default `true`).
@@ -1054,6 +1055,7 @@ Example:
 xlsynth-driver ir-fn-autocov my_design.opt.ir \
   --top my_main \
   --corpus-file my_design.interesting.irvals \
+  --max-corpus-len 1000 \
   --max-iters 20000 \
   --threads 32
 ```

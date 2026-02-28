@@ -1991,7 +1991,9 @@ top fn main(sel: bits[1] id=1, a: bits[1] id=2, b: bits[1] id=3) -> bits[1] {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("iters=") && stdout.contains("corpus_len="),
+        stdout.contains("summary iters=")
+            && stdout.contains("corpus_len=")
+            && stdout.contains("stop_reason="),
         "expected summary line in stdout, got:\n{}",
         stdout
     );
@@ -2007,6 +2009,126 @@ top fn main(sel: bits[1] id=1, a: bits[1] id=2, b: bits[1] id=3) -> bits[1] {
         lines[0].starts_with('(') && lines[0].contains("bits[1]"),
         "unexpected first corpus line: {}",
         lines[0]
+    );
+}
+
+#[test]
+fn test_ir_fn_autocov_stops_at_max_corpus_len_during_structured_seed() {
+    let ir_text = r#"package sample
+
+top fn main(sel: bits[1] id=1, a: bits[1] id=2, b: bits[1] id=3) -> bits[1] {
+  ret out: bits[1] = sel(sel, cases=[a, b], id=4)
+}
+"#;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("input.ir");
+    let corpus_path = temp_dir.path().join("interesting.irvals");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("ir-fn-autocov")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--corpus-file")
+        .arg(corpus_path.to_str().unwrap())
+        .arg("--max-corpus-len")
+        .arg("4")
+        .arg("--max-iters")
+        .arg("128")
+        .arg("--progress-every")
+        .arg("0")
+        .arg("--seed-two-hot-max-bits")
+        .arg("64")
+        .arg("--seed-structured=true")
+        .arg("--no-mux-space=true")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("summary iters=0")
+            && stdout.contains("corpus_len=4")
+            && stdout.contains("stop_reason=max_corpus_len"),
+        "expected max_corpus_len summary, got:\n{}",
+        stdout
+    );
+
+    let corpus_text = std::fs::read_to_string(&corpus_path).unwrap();
+    let lines: Vec<&str> = corpus_text.lines().collect();
+    assert_eq!(
+        lines.len(),
+        4,
+        "expected capped corpus file, got:\n{}",
+        corpus_text
+    );
+}
+
+#[test]
+fn test_ir_fn_autocov_replay_counts_toward_max_corpus_len() {
+    let ir_text = r#"package sample
+
+top fn main(sel: bits[1] id=1, a: bits[1] id=2, b: bits[1] id=3) -> bits[1] {
+  ret out: bits[1] = sel(sel, cases=[a, b], id=4)
+}
+"#;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("input.ir");
+    let corpus_path = temp_dir.path().join("interesting.irvals");
+    std::fs::write(&ir_path, ir_text).unwrap();
+    std::fs::write(
+        &corpus_path,
+        "(bits[1]:0x0, bits[1]:0x0, bits[1]:0x0)\n(bits[1]:0x1, bits[1]:0x1, bits[1]:0x1)\n",
+    )
+    .unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("ir-fn-autocov")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--corpus-file")
+        .arg(corpus_path.to_str().unwrap())
+        .arg("--max-corpus-len")
+        .arg("2")
+        .arg("--max-iters")
+        .arg("128")
+        .arg("--progress-every")
+        .arg("0")
+        .arg("--seed-two-hot-max-bits")
+        .arg("64")
+        .arg("--seed-structured=true")
+        .arg("--no-mux-space=true")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("summary iters=0")
+            && stdout.contains("corpus_len=2")
+            && stdout.contains("stop_reason=max_corpus_len"),
+        "expected replay-bound summary, got:\n{}",
+        stdout
+    );
+
+    let corpus_text = std::fs::read_to_string(&corpus_path).unwrap();
+    assert_eq!(
+        corpus_text,
+        "(bits[1]:0x0, bits[1]:0x0, bits[1]:0x0)\n(bits[1]:0x1, bits[1]:0x1, bits[1]:0x1)\n"
     );
 }
 

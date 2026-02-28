@@ -66,6 +66,7 @@ fn main() -> anyhow::Result<()> {
     let cfg = xlsynth_autocov::AutocovConfig {
         seed: 0,
         max_iters: None,
+        max_corpus_len: None,
     };
     let mut engine =
         xlsynth_autocov::AutocovEngine::from_ir_path(&args.ir_file, &args.entry_fn, cfg)
@@ -187,6 +188,7 @@ fn main() -> anyhow::Result<()> {
                 let cfg = xlsynth_autocov::AutocovConfig {
                     seed: 0,
                     max_iters: None,
+                    max_corpus_len: None,
                 };
                 let engine = xlsynth_autocov::AutocovEngine::from_ir_text(
                     ir_text.as_str(),

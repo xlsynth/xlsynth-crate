@@ -3,6 +3,7 @@
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -434,12 +435,39 @@ impl Ord for CornerEventId {
 pub struct AutocovConfig {
     pub seed: u64,
     pub max_iters: Option<u64>,
+    pub max_corpus_len: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutocovStopReason {
+    MaxIters,
+    MaxCorpusLen,
+    StopFlag,
+    Exhausted,
+}
+
+impl AutocovStopReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MaxIters => "max_iters",
+            Self::MaxCorpusLen => "max_corpus_len",
+            Self::StopFlag => "stop_flag",
+            Self::Exhausted => "exhausted",
+        }
+    }
+}
+
+impl fmt::Display for AutocovStopReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct AutocovReport {
     pub iters: u64,
     pub corpus_len: usize,
+    pub stop_reason: AutocovStopReason,
     pub mux_features_set: usize,
     pub path_features_set: usize,
     pub bools_features_set: usize,
@@ -508,6 +536,24 @@ pub struct AutocovProgress {
 
 pub trait ProgressSink {
     fn on_progress(&mut self, p: AutocovProgress);
+}
+
+#[derive(Debug, Clone)]
+pub struct IrFnAutocovGenerateConfig {
+    pub seed: u64,
+    pub max_iters: Option<u64>,
+    pub max_corpus_len: Option<usize>,
+    pub progress_every: Option<u64>,
+    pub threads: Option<usize>,
+    pub seed_structured: bool,
+    pub seed_two_hot_max_bits: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct IrFnAutocovGenerateResult {
+    pub corpus: Vec<IrValue>,
+    pub report: AutocovReport,
+    pub stop_reason: AutocovStopReason,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -942,6 +988,7 @@ pub struct AutocovEngine {
     args_bit_count: usize,
     rng: StdRng,
     max_iters: Option<u64>,
+    max_corpus_len: Option<usize>,
     stop: Arc<AtomicBool>,
 
     input_slices_by_width: BTreeMap<usize, Vec<usize>>,
@@ -987,6 +1034,18 @@ impl AutocovEngine {
 
     pub fn corpus_len(&self) -> usize {
         self.corpus.len()
+    }
+
+    pub fn corpus_values(&self) -> Vec<IrValue> {
+        self.corpus
+            .iter()
+            .map(|bits| ir_value_from_bits_with_type(bits, &self.args_tuple_type))
+            .collect()
+    }
+
+    pub fn max_corpus_len_reached(&self) -> bool {
+        self.max_corpus_len
+            .is_some_and(|max_corpus_len| self.corpus.len() >= max_corpus_len)
     }
 
     pub fn mux_features_set(&self) -> usize {
@@ -1400,6 +1459,7 @@ impl AutocovEngine {
             args_bit_count,
             rng: StdRng::seed_from_u64(cfg.seed),
             max_iters: cfg.max_iters,
+            max_corpus_len: cfg.max_corpus_len,
             stop,
             input_slices_by_width: BTreeMap::new(),
             bit_constant_dict: Vec::new(),
@@ -1572,6 +1632,9 @@ impl AutocovEngine {
         &mut self,
         tuple_value: &IrValue,
     ) -> Result<(), String> {
+        if self.max_corpus_len_reached() {
+            return Ok(());
+        }
         let elems = tuple_value
             .get_elements()
             .map_err(|e| format!("corpus line is not a tuple: {}", e))?;
@@ -1611,15 +1674,24 @@ impl AutocovEngine {
 
         // One-hot.
         for i in 0..n {
+            if self.max_corpus_len_reached() {
+                break;
+            }
             added += self.force_add_seed_bits(self.make_one_hot_bits(i), sink_ptr) as usize;
         }
 
         // Two-hot (can be quadratic).
-        if n <= two_hot_max_bits {
+        if n <= two_hot_max_bits && !self.max_corpus_len_reached() {
             for i in 0..n {
                 for j in (i + 1)..n {
+                    if self.max_corpus_len_reached() {
+                        break;
+                    }
                     added +=
                         self.force_add_seed_bits(self.make_two_hot_bits(i, j), sink_ptr) as usize;
+                }
+                if self.max_corpus_len_reached() {
+                    break;
                 }
             }
         }
@@ -1763,14 +1835,9 @@ impl AutocovEngine {
         let progress_ptr: Option<*mut (dyn ProgressSink + 'a)> =
             progress.map(|p| p as *mut (dyn ProgressSink + 'a));
         let mut iters: u64 = 0;
-        loop {
-            if self.stop.load(Ordering::Relaxed) {
-                break;
-            }
-            if let Some(max) = self.max_iters {
-                if iters >= max {
-                    break;
-                }
+        let stop_reason = loop {
+            if let Some(stop_reason) = self.stop_reason_if_done(iters) {
+                break stop_reason;
             }
 
             let cand = self.generate_proposal();
@@ -1807,24 +1874,9 @@ impl AutocovEngine {
             }
 
             iters += 1;
-        }
+        };
 
-        let mux_outcomes_observed = self.mux_outcomes_observed_total;
-        let mux_outcomes_possible = self.mux_outcomes_possible_total;
-        let mux_outcomes_missing = mux_outcomes_possible - mux_outcomes_observed;
-        AutocovReport {
-            iters,
-            corpus_len: self.corpus.len(),
-            mux_features_set: self.mux_map.set_count(),
-            path_features_set: self.path_map.set_count(),
-            bools_features_set: self.bools_map.set_count(),
-            corner_features_set: self.corner_map.set_count(),
-            compare_distance_features_set: self.compare_distance_map.set_count(),
-            failure_features_set: self.failure_map.set_count(),
-            mux_outcomes_observed,
-            mux_outcomes_possible,
-            mux_outcomes_missing,
-        }
+        self.make_report(iters, stop_reason)
     }
 
     pub fn run_parallel_with_sinks<'a>(
@@ -1915,18 +1967,13 @@ impl AutocovEngine {
         let mut inflight: usize = 0;
         let mut pending: BTreeMap<u64, WorkResult> = BTreeMap::new();
 
-        loop {
-            if self.stop.load(Ordering::Relaxed) {
-                break;
-            }
-            if let Some(max) = self.max_iters {
-                if seq_next_send >= max {
-                    break;
-                }
+        let stop_reason = loop {
+            if let Some(stop_reason) = self.stop_reason_if_done(seq_next_apply) {
+                break stop_reason;
             }
 
             while inflight < work_cap {
-                if self.stop.load(Ordering::Relaxed) {
+                if self.stop_reason_if_done(seq_next_apply).is_some() {
                     break;
                 }
                 if let Some(max) = self.max_iters {
@@ -1949,12 +1996,18 @@ impl AutocovEngine {
             }
 
             if inflight == 0 {
-                break;
+                break self
+                    .stop_reason_if_done(seq_next_apply)
+                    .unwrap_or(AutocovStopReason::Exhausted);
             }
 
             let r = match res_rx.recv() {
                 Ok(r) => r,
-                Err(_) => break,
+                Err(_) => {
+                    break self
+                        .stop_reason_if_done(seq_next_apply)
+                        .unwrap_or(AutocovStopReason::StopFlag);
+                }
             };
             pending.insert(r.seq, r);
 
@@ -1992,7 +2045,7 @@ impl AutocovEngine {
 
                 seq_next_apply += 1;
             }
-        }
+        };
 
         // Stop workers and drain outstanding results for determinism.
         drop(work_tx);
@@ -2013,22 +2066,7 @@ impl AutocovEngine {
             let _ = h.join();
         }
 
-        let mux_outcomes_observed = self.mux_outcomes_observed_total;
-        let mux_outcomes_possible = self.mux_outcomes_possible_total;
-        let mux_outcomes_missing = mux_outcomes_possible - mux_outcomes_observed;
-        AutocovReport {
-            iters: seq_next_apply,
-            corpus_len: self.corpus.len(),
-            mux_features_set: self.mux_map.set_count(),
-            path_features_set: self.path_map.set_count(),
-            bools_features_set: self.bools_map.set_count(),
-            corner_features_set: self.corner_map.set_count(),
-            compare_distance_features_set: self.compare_distance_map.set_count(),
-            failure_features_set: self.failure_map.set_count(),
-            mux_outcomes_observed,
-            mux_outcomes_possible,
-            mux_outcomes_missing,
-        }
+        self.make_report(seq_next_apply, stop_reason)
     }
 
     fn generate_proposal(&mut self) -> IrBits {
@@ -2150,6 +2188,9 @@ impl AutocovEngine {
         bits: IrBits,
         sink_ptr: Option<*mut (dyn CorpusSink + '_)>,
     ) -> bool {
+        if self.max_corpus_len_reached() {
+            return false;
+        }
         if !self.insert_corpus_hash(&bits) {
             return false;
         }
@@ -2331,6 +2372,9 @@ impl AutocovEngine {
         features: &CandidateFeatures,
         sink: Option<*mut (dyn CorpusSink + '_)>,
     ) -> Option<NewCoverage> {
+        if self.max_corpus_len_reached() {
+            return None;
+        }
         if !self.insert_corpus_hash(&cand) {
             return None;
         }
@@ -2349,6 +2393,144 @@ impl AutocovEngine {
         self.corpus.push(cand);
         Some(new_cov)
     }
+
+    fn stop_reason_if_done(&self, iters: u64) -> Option<AutocovStopReason> {
+        if self.max_corpus_len_reached() {
+            return Some(AutocovStopReason::MaxCorpusLen);
+        }
+        if self.stop.load(Ordering::Relaxed) {
+            return Some(AutocovStopReason::StopFlag);
+        }
+        if let Some(max_iters) = self.max_iters {
+            if iters >= max_iters {
+                return Some(AutocovStopReason::MaxIters);
+            }
+        }
+        if self.is_exhausted() {
+            return Some(AutocovStopReason::Exhausted);
+        }
+        None
+    }
+
+    fn is_exhausted(&self) -> bool {
+        self.exact_input_space_size()
+            .is_some_and(|space| (self.corpus.len() as u128) >= space)
+    }
+
+    fn exact_input_space_size(&self) -> Option<u128> {
+        if self.args_bit_count >= u128::BITS as usize {
+            return None;
+        }
+        Some(1u128 << self.args_bit_count)
+    }
+
+    fn make_report(&self, iters: u64, stop_reason: AutocovStopReason) -> AutocovReport {
+        let mux_outcomes_observed = self.mux_outcomes_observed_total;
+        let mux_outcomes_possible = self.mux_outcomes_possible_total;
+        let mux_outcomes_missing = mux_outcomes_possible - mux_outcomes_observed;
+        AutocovReport {
+            iters,
+            corpus_len: self.corpus.len(),
+            stop_reason,
+            mux_features_set: self.mux_map.set_count(),
+            path_features_set: self.path_map.set_count(),
+            bools_features_set: self.bools_map.set_count(),
+            corner_features_set: self.corner_map.set_count(),
+            compare_distance_features_set: self.compare_distance_map.set_count(),
+            failure_features_set: self.failure_map.set_count(),
+            mux_outcomes_observed,
+            mux_outcomes_possible,
+            mux_outcomes_missing,
+        }
+    }
+}
+
+fn generate_ir_fn_corpus_with_engine(
+    mut engine: AutocovEngine,
+    cfg: &IrFnAutocovGenerateConfig,
+    initial_corpus: &[IrValue],
+) -> Result<IrFnAutocovGenerateResult, String> {
+    for (index, tuple_value) in initial_corpus.iter().enumerate() {
+        if engine.max_corpus_len_reached() {
+            break;
+        }
+        engine
+            .add_corpus_sample_from_arg_tuple(tuple_value)
+            .map_err(|e| format!("Failed to replay initial corpus entry {}: {}", index + 1, e))?;
+    }
+
+    if cfg.seed_structured && !engine.max_corpus_len_reached() {
+        let _ = engine.seed_structured_corpus(cfg.seed_two_hot_max_bits, None);
+    }
+
+    let threads = cfg
+        .threads
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from));
+    let report = if threads <= 1 {
+        engine.run_with_sinks(None, None, cfg.progress_every)
+    } else {
+        engine.run_parallel_with_sinks(threads, None, None, cfg.progress_every)
+    };
+    let stop_reason = report.stop_reason;
+    let corpus = engine.corpus_values();
+    Ok(IrFnAutocovGenerateResult {
+        corpus,
+        report,
+        stop_reason,
+    })
+}
+
+pub fn generate_ir_fn_corpus_from_ir_text(
+    ir_text: &str,
+    entry_fn: &str,
+    cfg: IrFnAutocovGenerateConfig,
+) -> Result<IrFnAutocovGenerateResult, String> {
+    generate_ir_fn_corpus_from_ir_text_with_replay(ir_text, entry_fn, &[], cfg)
+}
+
+pub fn generate_ir_fn_corpus_from_ir_text_with_replay(
+    ir_text: &str,
+    entry_fn: &str,
+    initial_corpus: &[IrValue],
+    cfg: IrFnAutocovGenerateConfig,
+) -> Result<IrFnAutocovGenerateResult, String> {
+    let engine = AutocovEngine::from_ir_text(
+        ir_text,
+        None,
+        entry_fn,
+        AutocovConfig {
+            seed: cfg.seed,
+            max_iters: cfg.max_iters,
+            max_corpus_len: cfg.max_corpus_len,
+        },
+    )?;
+    generate_ir_fn_corpus_with_engine(engine, &cfg, initial_corpus)
+}
+
+pub fn generate_ir_fn_corpus_from_ir_path(
+    ir_file: &Path,
+    entry_fn: &str,
+    cfg: IrFnAutocovGenerateConfig,
+) -> Result<IrFnAutocovGenerateResult, String> {
+    generate_ir_fn_corpus_from_ir_path_with_replay(ir_file, entry_fn, &[], cfg)
+}
+
+pub fn generate_ir_fn_corpus_from_ir_path_with_replay(
+    ir_file: &Path,
+    entry_fn: &str,
+    initial_corpus: &[IrValue],
+    cfg: IrFnAutocovGenerateConfig,
+) -> Result<IrFnAutocovGenerateResult, String> {
+    let engine = AutocovEngine::from_ir_path(
+        ir_file,
+        entry_fn,
+        AutocovConfig {
+            seed: cfg.seed,
+            max_iters: cfg.max_iters,
+            max_corpus_len: cfg.max_corpus_len,
+        },
+    )?;
+    generate_ir_fn_corpus_with_engine(engine, &cfg, initial_corpus)
 }
 
 #[cfg(test)]
@@ -2461,6 +2643,7 @@ fn f(selidx: bits[2] id=1, a: bits[8] id=2, b: bits[8] id=3, d: bits[8] id=4) ->
             AutocovConfig {
                 seed: 0,
                 max_iters: Some(1),
+                max_corpus_len: None,
             },
         )
         .unwrap();
@@ -2514,6 +2697,7 @@ fn f(x: bits[16] id=1) -> bits[16] {
             AutocovConfig {
                 seed: 0,
                 max_iters: Some(1),
+                max_corpus_len: None,
             },
         )
         .unwrap();
@@ -2541,6 +2725,7 @@ fn f(selidx: bits[2] id=1, a: bits[8] id=2, b: bits[8] id=3, d: bits[8] id=4) ->
         let cfg = AutocovConfig {
             seed: 0,
             max_iters: Some(200),
+            max_corpus_len: None,
         };
         let mut s1 = AutocovEngine::from_ir_text(ir_text, None, "f", cfg.clone()).unwrap();
         let mut s2 = AutocovEngine::from_ir_text(ir_text, None, "f", cfg).unwrap();
@@ -2567,6 +2752,7 @@ fn f(x: bits[4] id=1) -> bits[4] {
             AutocovConfig {
                 seed: 0,
                 max_iters: Some(1),
+                max_corpus_len: None,
             },
         )
         .unwrap();
@@ -2577,6 +2763,105 @@ fn f(x: bits[4] id=1) -> bits[4] {
         let expected = 2 + n + (n * (n - 1) / 2);
         assert_eq!(added, expected);
         assert_eq!(engine.corpus.len(), expected);
+    }
+
+    #[test]
+    fn structured_seed_respects_max_corpus_len() {
+        let ir_text = r#"package test
+
+fn f(x: bits[4] id=1) -> bits[4] {
+  ret y: bits[4] = identity(x, id=2)
+}
+"#;
+        let mut engine = AutocovEngine::from_ir_text(
+            ir_text,
+            None,
+            "f",
+            AutocovConfig {
+                seed: 0,
+                max_iters: Some(0),
+                max_corpus_len: Some(3),
+            },
+        )
+        .unwrap();
+
+        let added = engine.seed_structured_corpus(/* two_hot_max_bits= */ 64, None);
+        assert_eq!(added, 3);
+        assert_eq!(engine.corpus_len(), 3);
+
+        let report = engine.run();
+        assert_eq!(report.iters, 0);
+        assert_eq!(report.corpus_len, 3);
+        assert_eq!(report.stop_reason, AutocovStopReason::MaxCorpusLen);
+    }
+
+    #[test]
+    fn generate_ir_fn_corpus_with_replay_returns_typed_tuples() {
+        let ir_text = r#"package test
+
+fn f(sel: bits[1] id=1, a: bits[1] id=2, b: bits[1] id=3) -> bits[1] {
+  ret out: bits[1] = sel(sel, cases=[a, b], id=4)
+}
+"#;
+        let initial = IrValue::make_tuple(&[
+            IrValue::make_ubits(1, 0).unwrap(),
+            IrValue::make_ubits(1, 0).unwrap(),
+            IrValue::make_ubits(1, 0).unwrap(),
+        ]);
+
+        let result = generate_ir_fn_corpus_from_ir_text_with_replay(
+            ir_text,
+            "f",
+            &[initial.clone()],
+            IrFnAutocovGenerateConfig {
+                seed: 0,
+                max_iters: Some(128),
+                max_corpus_len: Some(2),
+                progress_every: None,
+                threads: Some(1),
+                seed_structured: true,
+                seed_two_hot_max_bits: 64,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.stop_reason, AutocovStopReason::MaxCorpusLen);
+        assert_eq!(result.report.stop_reason, AutocovStopReason::MaxCorpusLen);
+        assert_eq!(result.report.iters, 0);
+        assert_eq!(result.corpus.len(), 2);
+        assert_eq!(result.corpus[0].to_string(), initial.to_string());
+        for tuple_value in &result.corpus {
+            let elems = tuple_value
+                .get_elements()
+                .expect("generated corpus entries should remain typed tuples");
+            assert_eq!(elems.len(), 3);
+        }
+    }
+
+    #[test]
+    fn zero_bit_input_reports_exhausted() {
+        let ir_text = r#"package test
+
+fn f() -> bits[1] {
+  ret y: bits[1] = literal(value=1, id=2)
+}
+"#;
+        let mut engine = AutocovEngine::from_ir_text(
+            ir_text,
+            None,
+            "f",
+            AutocovConfig {
+                seed: 0,
+                max_iters: None,
+                max_corpus_len: None,
+            },
+        )
+        .unwrap();
+
+        let report = engine.run();
+        assert_eq!(report.iters, 1);
+        assert_eq!(report.corpus_len, 1);
+        assert_eq!(report.stop_reason, AutocovStopReason::Exhausted);
     }
 
     #[test]
@@ -2594,6 +2879,7 @@ fn f(oh: bits[3] id=1, a: bits[8] id=2, b: bits[8] id=3, c: bits[8] id=4) -> bit
             AutocovConfig {
                 seed: 0,
                 max_iters: Some(0),
+                max_corpus_len: None,
             },
         )
         .unwrap();
@@ -2649,6 +2935,7 @@ fn f(x: bits[2] id=1) -> bits[1] {
             AutocovConfig {
                 seed: 0,
                 max_iters: Some(0),
+                max_corpus_len: None,
             },
         )
         .unwrap();
@@ -2684,6 +2971,7 @@ fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
             AutocovConfig {
                 seed: 0,
                 max_iters: Some(0),
+                max_corpus_len: None,
             },
         )
         .unwrap();
@@ -2711,6 +2999,7 @@ fn f(a: bits[8][4] id=1, i: bits[3] id=2) -> bits[8] {
             AutocovConfig {
                 seed: 0,
                 max_iters: Some(0),
+                max_corpus_len: None,
             },
         )
         .unwrap();
@@ -2747,6 +3036,7 @@ fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
             AutocovConfig {
                 seed: 0,
                 max_iters: Some(0),
+                max_corpus_len: None,
             },
         )
         .unwrap();
@@ -2806,6 +3096,7 @@ fn f(
             AutocovConfig {
                 seed: 0,
                 max_iters: Some(0),
+                max_corpus_len: None,
             },
         )
         .unwrap();
@@ -2887,6 +3178,7 @@ fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
             AutocovConfig {
                 seed: 0,
                 max_iters: Some(0),
+                max_corpus_len: None,
             },
         )
         .unwrap();
@@ -2934,6 +3226,7 @@ fn f(x: bits[1] id=1) -> bits[1] {
             AutocovConfig {
                 seed: 0,
                 max_iters: Some(0),
+                max_corpus_len: None,
             },
         )
         .unwrap();
@@ -2970,6 +3263,7 @@ fn f(x: bits[2] id=1) -> bits[2] {
         let cfg = AutocovConfig {
             seed: 0,
             max_iters: Some(0),
+            max_corpus_len: None,
         };
         let mut a = AutocovEngine::from_ir_text(ir_text, None, "f", cfg.clone()).unwrap();
         let mut b = AutocovEngine::from_ir_text(ir_text, None, "f", cfg).unwrap();
@@ -3004,6 +3298,7 @@ fn f(x: bits[4] id=1, y: bits[4] id=2) -> bits[1] {
         let cfg = AutocovConfig {
             seed: 0,
             max_iters: Some(0),
+            max_corpus_len: None,
         };
         let mut single = AutocovEngine::from_ir_text(ir_text, None, "f", cfg.clone()).unwrap();
         let mut parallel = AutocovEngine::from_ir_text(ir_text, None, "f", cfg).unwrap();
@@ -3032,6 +3327,7 @@ fn f(x: bits[4] id=1, y: bits[4] id=2) -> bits[1] {
             AutocovConfig {
                 seed: 0,
                 max_iters: Some(0),
+                max_corpus_len: None,
             },
         )
         .unwrap();
@@ -3042,6 +3338,7 @@ fn f(x: bits[4] id=1, y: bits[4] id=2) -> bits[1] {
             AutocovConfig {
                 seed: 0,
                 max_iters: Some(0),
+                max_corpus_len: None,
             },
         )
         .unwrap();
@@ -3107,6 +3404,7 @@ fn f(a: bits[8] id=1, b: bits[8] id=2, c: bits[8] id=3, d: bits[8] id=4) -> bits
         let cfg = AutocovConfig {
             seed: 0,
             max_iters: Some(10_000),
+            max_corpus_len: None,
         };
         let mut engine = AutocovEngine::from_ir_text(ir_text, None, "f", cfg).unwrap();
         assert_eq!(
