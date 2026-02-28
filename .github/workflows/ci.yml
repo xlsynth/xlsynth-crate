@@ -166,22 +166,10 @@ jobs:
 
       - name: Download Bitwuzla shared library (rocky8)
         run: |
-          download_and_verify_elf() {
-            local out="$1"
-            local url="$2"
-            curl -fL --retry 5 --retry-delay 2 --retry-all-errors -o "${out}" "${url}"
-            local file_out
-            file_out="$(file -b "${out}")"
-            echo "${out}: ${file_out}"
-            if [[ "${file_out}" != *"ELF"* ]]; then
-              echo "Expected ELF shared library, got '${file_out}' from ${url}" >&2
-              exit 1
-            fi
-          }
           BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
           for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
             src="lib${lib}-rocky8.so"
-            download_and_verify_elf "${src}" "${BASE_URL}/${src}"
+            python3 scripts/download_and_verify_shared_lib.py elf "${src}" "${BASE_URL}/${src}"
             sudo install -m 0644 "${src}" "/usr/lib/lib${lib}.so"
           done
           sudo ldconfig || true
@@ -227,20 +215,8 @@ jobs:
 
       - name: Download and set up Boolector
         run: |
-          download_and_verify_elf() {
-            local out="$1"
-            local url="$2"
-            curl -fL --retry 5 --retry-delay 2 --retry-all-errors -o "${out}" "${url}"
-            local file_out
-            file_out="$(file -b "${out}")"
-            echo "${out}: ${file_out}"
-            if [[ "${file_out}" != *"ELF"* ]]; then
-              echo "Expected ELF shared library, got '${file_out}' from ${url}" >&2
-              exit 1
-            fi
-          }
           mkdir -p boolector_libs
-          download_and_verify_elf boolector_libs/libboolector.so https://github.com/xlsynth/boolector-build/releases/download/boolector-binaries-3.2.2/libboolector-rocky8.so
+          python3 scripts/download_and_verify_shared_lib.py elf boolector_libs/libboolector.so https://github.com/xlsynth/boolector-build/releases/download/boolector-binaries-3.2.2/libboolector-rocky8.so
           sudo install -m 0644 boolector_libs/libboolector.so /usr/lib/libboolector.so
           sudo ldconfig
           echo "Listing /usr/lib for libboolector.so:"
@@ -391,22 +367,10 @@ jobs:
 
       - name: Download Bitwuzla shared library (ubuntu20.04)
         run: |
-          download_and_verify_elf() {
-            local out="$1"
-            local url="$2"
-            curl -fL --retry 5 --retry-delay 2 --retry-all-errors -o "${out}" "${url}"
-            local file_out
-            file_out="$(file -b "${out}")"
-            echo "${out}: ${file_out}"
-            if [[ "${file_out}" != *"ELF"* ]]; then
-              echo "Expected ELF shared library, got '${file_out}' from ${url}" >&2
-              exit 1
-            fi
-          }
           BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
           for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
             src="lib${lib}-rocky8.so"
-            download_and_verify_elf "${src}" "${BASE_URL}/${src}"
+            python3 scripts/download_and_verify_shared_lib.py elf "${src}" "${BASE_URL}/${src}"
             install -m 0644 "${src}" "/usr/lib/lib${lib}.so"
           done
           ldconfig || true
@@ -481,23 +445,11 @@ jobs:
 
       - name: Download Bitwuzla shared library (macOS arm64)
         run: |
-          download_and_verify_dylib() {
-            local out="$1"
-            local url="$2"
-            curl -fL --retry 5 --retry-delay 2 --retry-all-errors -o "${out}" "${url}"
-            local file_out
-            file_out="$(file -b "${out}")"
-            echo "${out}: ${file_out}"
-            if [[ "${file_out}" != *"Mach-O"* ]]; then
-              echo "Expected Mach-O dynamic library, got '${file_out}' from ${url}" >&2
-              exit 1
-            fi
-          }
           sudo mkdir -p /usr/local/lib
           BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
           for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
             src="lib${lib}-osx-arm64.dylib"
-            download_and_verify_dylib "${src}" "${BASE_URL}/${src}"
+            python3 scripts/download_and_verify_shared_lib.py dylib "${src}" "${BASE_URL}/${src}"
             sudo install -m 0644 "${src}" "/usr/local/lib/lib${lib}.dylib"
             sudo install_name_tool -id "@rpath/lib${lib}.dylib" "/usr/local/lib/lib${lib}.dylib"
             sudo rm -f "${src}"
@@ -508,20 +460,8 @@ jobs:
 
       - name: Download Boolector dylib (macOS arm64)
         run: |
-          download_and_verify_dylib() {
-            local out="$1"
-            local url="$2"
-            curl -fL --retry 5 --retry-delay 2 --retry-all-errors -o "${out}" "${url}"
-            local file_out
-            file_out="$(file -b "${out}")"
-            echo "${out}: ${file_out}"
-            if [[ "${file_out}" != *"Mach-O"* ]]; then
-              echo "Expected Mach-O dynamic library, got '${file_out}' from ${url}" >&2
-              exit 1
-            fi
-          }
           sudo mkdir -p /usr/local/lib
-          download_and_verify_dylib libboolector-osx-arm64.dylib https://github.com/xlsynth/boolector-build/releases/download/boolector-binaries-3.2.2/libboolector-osx-arm64.dylib
+          python3 scripts/download_and_verify_shared_lib.py dylib libboolector-osx-arm64.dylib https://github.com/xlsynth/boolector-build/releases/download/boolector-binaries-3.2.2/libboolector-osx-arm64.dylib
           sudo install -m 0644 libboolector-osx-arm64.dylib /usr/local/lib/libboolector.dylib
           sudo install_name_tool -id "@rpath/libboolector.dylib" /usr/local/lib/libboolector.dylib
           rm -f libboolector-osx-arm64.dylib
@@ -656,22 +596,10 @@ jobs:
       - name: Download Bitwuzla shared library (rocky8)
         run: |
           dnf install -y curl
-          download_and_verify_elf() {
-            local out="$1"
-            local url="$2"
-            curl -fL --retry 5 --retry-delay 2 --retry-all-errors -o "${out}" "${url}"
-            local file_out
-            file_out="$(file -b "${out}")"
-            echo "${out}: ${file_out}"
-            if [[ "${file_out}" != *"ELF"* ]]; then
-              echo "Expected ELF shared library, got '${file_out}' from ${url}" >&2
-              exit 1
-            fi
-          }
           BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
           for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
             src="lib${lib}-rocky8.so"
-            download_and_verify_elf "${src}" "${BASE_URL}/${src}"
+            python3 scripts/download_and_verify_shared_lib.py elf "${src}" "${BASE_URL}/${src}"
             install -m 0644 "${src}" "/usr/lib/lib${lib}.so"
           done
           ldconfig
@@ -812,22 +740,10 @@ jobs:
 
       - name: Download Bitwuzla shared library (rocky8)
         run: |
-          download_and_verify_elf() {
-            local out="$1"
-            local url="$2"
-            curl -fL --retry 5 --retry-delay 2 --retry-all-errors -o "${out}" "${url}"
-            local file_out
-            file_out="$(file -b "${out}")"
-            echo "${out}: ${file_out}"
-            if [[ "${file_out}" != *"ELF"* ]]; then
-              echo "Expected ELF shared library, got '${file_out}' from ${url}" >&2
-              exit 1
-            fi
-          }
           BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
           for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
             src="lib${lib}-rocky8.so"
-            download_and_verify_elf "${src}" "${BASE_URL}/${src}"
+            python3 scripts/download_and_verify_shared_lib.py elf "${src}" "${BASE_URL}/${src}"
             sudo install -m 0644 "${src}" "/usr/lib/lib${lib}.so"
           done
           sudo ldconfig || true
@@ -835,20 +751,8 @@ jobs:
 
       - name: Download and set up Boolector
         run: |
-          download_and_verify_elf() {
-            local out="$1"
-            local url="$2"
-            curl -fL --retry 5 --retry-delay 2 --retry-all-errors -o "${out}" "${url}"
-            local file_out
-            file_out="$(file -b "${out}")"
-            echo "${out}: ${file_out}"
-            if [[ "${file_out}" != *"ELF"* ]]; then
-              echo "Expected ELF shared library, got '${file_out}' from ${url}" >&2
-              exit 1
-            fi
-          }
           mkdir -p boolector_libs
-          download_and_verify_elf boolector_libs/libboolector.so https://github.com/xlsynth/boolector-build/releases/download/boolector-debian10-171b2783200bf9f7636f3e595587ee822a0a6d07/libboolector-debian10.so
+          python3 scripts/download_and_verify_shared_lib.py elf boolector_libs/libboolector.so https://github.com/xlsynth/boolector-build/releases/download/boolector-debian10-171b2783200bf9f7636f3e595587ee822a0a6d07/libboolector-debian10.so
           sudo install -m 0644 boolector_libs/libboolector.so /usr/lib/libboolector.so
           sudo ldconfig
           echo "Listing /usr/lib for libboolector.so:"
@@ -1021,20 +925,8 @@ jobs:
 
       - name: Download and set up Boolector
         run: |
-          download_and_verify_elf() {
-            local out="$1"
-            local url="$2"
-            curl -fL --retry 5 --retry-delay 2 --retry-all-errors -o "${out}" "${url}"
-            local file_out
-            file_out="$(file -b "${out}")"
-            echo "${out}: ${file_out}"
-            if [[ "${file_out}" != *"ELF"* ]]; then
-              echo "Expected ELF shared library, got '${file_out}' from ${url}" >&2
-              exit 1
-            fi
-          }
           mkdir -p boolector_libs
-          download_and_verify_elf boolector_libs/libboolector.so https://github.com/xlsynth/boolector-build/releases/download/boolector-binaries-3.2.2/libboolector-rocky8.so
+          python3 scripts/download_and_verify_shared_lib.py elf boolector_libs/libboolector.so https://github.com/xlsynth/boolector-build/releases/download/boolector-binaries-3.2.2/libboolector-rocky8.so
           sudo install -m 0644 boolector_libs/libboolector.so /usr/lib/libboolector.so
           sudo ldconfig
 
@@ -1045,22 +937,10 @@ jobs:
 
       - name: Download Bitwuzla shared library (rocky8)
         run: |
-          download_and_verify_elf() {
-            local out="$1"
-            local url="$2"
-            curl -fL --retry 5 --retry-delay 2 --retry-all-errors -o "${out}" "${url}"
-            local file_out
-            file_out="$(file -b "${out}")"
-            echo "${out}: ${file_out}"
-            if [[ "${file_out}" != *"ELF"* ]]; then
-              echo "Expected ELF shared library, got '${file_out}' from ${url}" >&2
-              exit 1
-            fi
-          }
           BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
           for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
             src="lib${lib}-rocky8.so"
-            download_and_verify_elf "${src}" "${BASE_URL}/${src}"
+            python3 scripts/download_and_verify_shared_lib.py elf "${src}" "${BASE_URL}/${src}"
             sudo install -m 0644 "${src}" "/usr/lib/lib${lib}.so"
           done
           sudo ldconfig || true
@@ -1151,22 +1031,10 @@ jobs:
 
       - name: Download Bitwuzla shared library (rocky8)
         run: |
-          download_and_verify_elf() {
-            local out="$1"
-            local url="$2"
-            curl -fL --retry 5 --retry-delay 2 --retry-all-errors -o "${out}" "${url}"
-            local file_out
-            file_out="$(file -b "${out}")"
-            echo "${out}: ${file_out}"
-            if [[ "${file_out}" != *"ELF"* ]]; then
-              echo "Expected ELF shared library, got '${file_out}' from ${url}" >&2
-              exit 1
-            fi
-          }
           BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
           for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
             src="lib${lib}-rocky8.so"
-            download_and_verify_elf "${src}" "${BASE_URL}/${src}"
+            python3 scripts/download_and_verify_shared_lib.py elf "${src}" "${BASE_URL}/${src}"
             sudo install -m 0644 "${src}" "/usr/lib/lib${lib}.so"
           done
           sudo ldconfig || true
