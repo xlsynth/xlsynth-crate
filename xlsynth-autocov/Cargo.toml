@@ -44,3 +44,6 @@ with-bitwuzla-built = ["xlsynth-prover/with-bitwuzla-built", "has-bitwuzla"]
 [lib]
 name = "xlsynth_autocov"
 path = "src/lib.rs"
+
+[dev-dependencies]
+arbitrary = "1.3"

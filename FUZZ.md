@@ -54,18 +54,19 @@ Builds a random `GateFn`, emits AIGER, reloads AIGER into a new `GateFn`, and ch
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ir_eval_interp_equiv.rs
 
-Differentially compares our Rust IR function interpreter (`eval_fn`) with the xlsynth C++ interpreter on the same randomly generated function and arguments.
+Differentially compares our Rust IR function interpreter with the xlsynth C++ interpreter on the same randomly generated function, but instead of checking a single arbitrary argument tuple it uses autocov to grow a bounded corpus of interesting typed inputs for each `FuzzSample`.
 
 - Generates a random XLS IR function (via C++ builder), pretty-prints, and reparses to the Rust internal IR.
-- Samples argument values that match the function parameter types using an `Arbitrary`-driven seed.
-- Evaluates with both engines and asserts the results are equal, including composite-valued `one_hot_sel` cases.
+- Runs autocov on the generated IR text to synthesize a small corpus of semantically interesting input tuples.
+- Evaluates every corpus sample with both engines and asserts the results are equal, including division/modulus edge cases and composite-valued `one_hot_sel` cases.
 
 See inline comments in the target source for early-return rationales.
 
 Primarily tests:
 
-- AIGER emitter/loader roundtrip
-- Structural equivalence stability across AIGER boundary
+- Autocov-selected boundary-ish inputs expose the same interpreter semantics as direct xlsynth interpretation
+- Generated IR text remains parseable and executable across the C++ and PIR interpreters
+- Arbitrary generated ops and value shapes behave identically in both interpreters across autocov-selected inputs
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_gate_transform_equiv.rs
 

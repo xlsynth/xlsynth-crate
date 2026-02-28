@@ -38,6 +38,9 @@ PRs that fail this check will not be accepted.
 
 Completed changes must pass either `cargo test --workspace` or `cargo nextest run`.
 
+Prefer `cargo nextest run` when it is available; for this workspace size it
+usually gives better concurrency and faster feedback than plain `cargo test`.
+
 If network access is unavailable, it is acceptable to exclude the crates.io
 version checks in `xlsynth-test-helpers/tests/version_test.rs` (which require
 crates.io metadata). Document that exclusion in the change notes.
@@ -87,6 +90,10 @@ All tools, and especially the `xlsynth-driver` subcommands, are expected to prod
 ## Style
 
 Prefer using raw string syntax (`r#"..."#`) for multi-line strings to avoid needless escaping.
+
+For non-trivial functions, prefer a one-line Rustdoc comment (`/// ...`) over no
+comment at all. A short summary helps readers understand both the local code and
+how it fits into the surrounding codebase.
 
 Avoid `use` statements inside local function scopes; place all imports at the
 module level (or at the top of a `mod tests` section) for clarity.
