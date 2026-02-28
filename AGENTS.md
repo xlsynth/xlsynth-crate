@@ -110,6 +110,9 @@ foo(/*kwarg=*/false)
 
 Note there is no space before the value: `/*kwarg=*/false` (not `/*kwarg=*/ false`).
 
+- When adding a `TODO`, include the creation date in ISO format (for example
+  `TODO(name): 2026-02-28 ...`) so readers can quickly judge how recent it is.
+
 - When intentionally using a no-op match arm such as `_ => {}` (or otherwise ignoring a case), include a brief comment in that block explaining why ignoring it is correct/safe for that code path.
 
 - When creating fake Liberty cell libraries or gate-level netlists in tests or benches, prefer simple, unsized cell

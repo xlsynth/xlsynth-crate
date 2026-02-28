@@ -264,6 +264,10 @@ impl IrBits {
             return (Self::all_ones(bit_count), Self::zero(bit_count));
         }
 
+        // TODO(cdleary): 2026-02-28 Once
+        // https://github.com/google/xls/pull/3898 lands and the bit-level
+        // div/mod ops are exposed via our FFI, replace this polyfill (and the
+        // signed wrappers built on it) with direct libxls calls.
         // Unsigned restoring division with XLS division-by-zero behavior.
         let one = Self::make_ubits(bit_count, 1).expect("make_ubits should succeed for 1");
         let mut remainder = Self::zero(bit_count);
