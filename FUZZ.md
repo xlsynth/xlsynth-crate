@@ -58,7 +58,7 @@ Differentially compares our Rust IR function interpreter (`eval_fn`) with the xl
 
 - Generates a random XLS IR function (via C++ builder), pretty-prints, and reparses to the Rust internal IR.
 - Samples argument values that match the function parameter types using an `Arbitrary`-driven seed.
-- Evaluates with both engines and asserts the results are equal.
+- Evaluates with both engines and asserts the results are equal, including composite-valued `one_hot_sel` cases.
 
 See inline comments in the target source for early-return rationales.
 

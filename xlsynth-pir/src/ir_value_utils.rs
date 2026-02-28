@@ -68,6 +68,113 @@ pub fn ir_value_from_bits_with_type(bits: &IrBits, ty: &ir::Type) -> IrValue {
     }
 }
 
+pub fn zero_ir_value_for_type(ty: &ir::Type) -> IrValue {
+    match ty {
+        ir::Type::Token => IrValue::make_token(),
+        ir::Type::Bits(width) => IrValue::make_ubits(*width, 0).expect("bits zero must construct"),
+        ir::Type::Tuple(member_types) => {
+            let elements: Vec<IrValue> = member_types
+                .iter()
+                .map(|member_ty| zero_ir_value_for_type(member_ty))
+                .collect();
+            IrValue::make_tuple(&elements)
+        }
+        ir::Type::Array(array_ty) => {
+            let elements: Vec<IrValue> = (0..array_ty.element_count)
+                .map(|_| zero_ir_value_for_type(&array_ty.element_type))
+                .collect();
+            IrValue::make_array(&elements).expect("zero array elements must share the same type")
+        }
+    }
+}
+
+/// Recursively ORs two values according to the provided PIR type.
+pub fn deep_or_ir_values_for_type(ty: &ir::Type, lhs: &IrValue, rhs: &IrValue) -> IrValue {
+    match ty {
+        ir::Type::Token => IrValue::make_token(),
+        ir::Type::Bits(width) => {
+            let lhs_bits = lhs
+                .to_bits()
+                .expect("one_hot_sel bits case lhs must be bits");
+            let rhs_bits = rhs
+                .to_bits()
+                .expect("one_hot_sel bits case rhs must be bits");
+            assert_eq!(
+                lhs_bits.get_bit_count(),
+                *width,
+                "one_hot_sel lhs width must match node type"
+            );
+            assert_eq!(
+                rhs_bits.get_bit_count(),
+                *width,
+                "one_hot_sel rhs width must match node type"
+            );
+            IrValue::from_bits(&lhs_bits.or(&rhs_bits))
+        }
+        ir::Type::Tuple(member_types) => {
+            let lhs_count = lhs
+                .get_element_count()
+                .expect("one_hot_sel tuple lhs must have elements");
+            let rhs_count = rhs
+                .get_element_count()
+                .expect("one_hot_sel tuple rhs must have elements");
+            assert_eq!(
+                lhs_count,
+                member_types.len(),
+                "one_hot_sel tuple lhs arity must match node type"
+            );
+            assert_eq!(
+                rhs_count,
+                member_types.len(),
+                "one_hot_sel tuple rhs arity must match node type"
+            );
+            let elements: Vec<IrValue> = member_types
+                .iter()
+                .enumerate()
+                .map(|(i, member_ty)| {
+                    let lhs_elem = lhs
+                        .get_element(i)
+                        .expect("one_hot_sel tuple lhs element must exist");
+                    let rhs_elem = rhs
+                        .get_element(i)
+                        .expect("one_hot_sel tuple rhs element must exist");
+                    deep_or_ir_values_for_type(member_ty, &lhs_elem, &rhs_elem)
+                })
+                .collect();
+            IrValue::make_tuple(&elements)
+        }
+        ir::Type::Array(array_ty) => {
+            let lhs_count = lhs
+                .get_element_count()
+                .expect("one_hot_sel array lhs must have elements");
+            let rhs_count = rhs
+                .get_element_count()
+                .expect("one_hot_sel array rhs must have elements");
+            assert_eq!(
+                lhs_count, array_ty.element_count,
+                "one_hot_sel array lhs length must match node type"
+            );
+            assert_eq!(
+                rhs_count, array_ty.element_count,
+                "one_hot_sel array rhs length must match node type"
+            );
+            let elements: Vec<IrValue> = (0..array_ty.element_count)
+                .map(|i| {
+                    let lhs_elem = lhs
+                        .get_element(i)
+                        .expect("one_hot_sel array lhs element must exist");
+                    let rhs_elem = rhs
+                        .get_element(i)
+                        .expect("one_hot_sel array rhs element must exist");
+                    deep_or_ir_values_for_type(&array_ty.element_type, &lhs_elem, &rhs_elem)
+                })
+                .collect();
+            IrValue::make_array(&elements)
+                .expect("one_hot_sel array deep-or elements must share the same type")
+        }
+    }
+}
+
 /// Flattens `value` into a single `IrBits`, using `ty` to define and validate
 /// the shape.
 ///
