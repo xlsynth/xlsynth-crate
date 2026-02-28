@@ -24,6 +24,7 @@ pub struct IrFnAutocovRunConfig {
     pub corpus_file: PathBuf,
     pub seed: u64,
     pub max_iters: Option<u64>,
+    pub max_corpus_len: Option<usize>,
     pub progress_every: u64,
     pub no_mux_space: bool,
     pub threads: Option<usize>,
@@ -223,6 +224,7 @@ pub fn run_ir_fn_autocov_with_writers<WOut: Write, WErr: Write>(
     let cfg = AutocovConfig {
         seed: config.seed,
         max_iters: config.max_iters,
+        max_corpus_len: config.max_corpus_len,
     };
     let mut engine = AutocovEngine::from_ir_path(&config.ir_input_file, &config.entry_fn, cfg)
         .map_err(|e| format!("Failed to initialize autocov engine: {}", e))?;
@@ -273,7 +275,7 @@ pub fn run_ir_fn_autocov_with_writers<WOut: Write, WErr: Write>(
         let mut replay_lines: u64 = 0;
 
         for (line_index, line_result) in reader.lines().enumerate() {
-            if stop.load(Ordering::Relaxed) {
+            if stop.load(Ordering::Relaxed) || engine.max_corpus_len_reached() {
                 break;
             }
             let line = line_result
@@ -353,7 +355,7 @@ pub fn run_ir_fn_autocov_with_writers<WOut: Write, WErr: Write>(
     let mut writer = BufWriter::new(file);
     let mut sink = FileSink::new(&mut writer, Arc::clone(&stop));
 
-    if config.seed_structured && !stop.load(Ordering::Relaxed) {
+    if config.seed_structured && !stop.load(Ordering::Relaxed) && !engine.max_corpus_len_reached() {
         let added = engine.seed_structured_corpus(config.seed_two_hot_max_bits, Some(&mut sink));
         if let Some(e) = sink.take_error() {
             return Err(e);
@@ -440,9 +442,10 @@ pub fn run_ir_fn_autocov_with_writers<WOut: Write, WErr: Write>(
 
     writeln!(
         stdout,
-        "iters={} corpus_len={} mux_features_set={} path_features_set={} bools_features_set={} corner_features_set={} compare_distance_features_set={} failure_features_set={} mux_outcomes_observed={} mux_outcomes_possible={} mux_outcomes_missing={}",
+        "summary iters={} corpus_len={} stop_reason={} mux_features_set={} path_features_set={} bools_features_set={} corner_features_set={} compare_distance_features_set={} failure_features_set={} mux_outcomes_observed={} mux_outcomes_possible={} mux_outcomes_missing={}",
         report.iters,
         report.corpus_len,
+        report.stop_reason,
         report.mux_features_set,
         report.path_features_set,
         report.bools_features_set,

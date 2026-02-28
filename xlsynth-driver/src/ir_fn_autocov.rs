@@ -26,6 +26,7 @@ pub fn handle_ir_fn_autocov(matches: &ArgMatches, _config: &Option<ToolchainConf
         .get_one::<u64>("seed")
         .expect("seed has a default value");
     let max_iters = matches.get_one::<u64>("max_iters").copied();
+    let max_corpus_len = matches.get_one::<usize>("max_corpus_len").copied();
     let progress_every = *matches
         .get_one::<u64>("progress_every")
         .expect("progress_every has a default value");
@@ -52,6 +53,7 @@ pub fn handle_ir_fn_autocov(matches: &ArgMatches, _config: &Option<ToolchainConf
         corpus_file,
         seed,
         max_iters,
+        max_corpus_len,
         progress_every,
         no_mux_space,
         threads,

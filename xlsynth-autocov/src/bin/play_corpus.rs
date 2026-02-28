@@ -571,6 +571,7 @@ fn main() -> anyhow::Result<()> {
     let cfg = xlsynth_autocov::AutocovConfig {
         seed: 0,
         max_iters: Some(0),
+        max_corpus_len: None,
     };
     let engine = xlsynth_autocov::AutocovEngine::from_ir_path(&args.ir_file, &args.entry_fn, cfg)
         .map_err(|e| anyhow::anyhow!(e))?;
