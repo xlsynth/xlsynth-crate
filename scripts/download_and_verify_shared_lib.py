@@ -109,8 +109,9 @@ def describe_binary(path: Path) -> str:
         result = subprocess.run(
             ["file", "-b", str(path)],
             check=False,
-            capture_output=True,
-            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
         )
         if result.returncode == 0:
             return result.stdout.strip()
