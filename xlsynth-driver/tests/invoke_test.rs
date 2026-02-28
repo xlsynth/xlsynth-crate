@@ -4918,6 +4918,127 @@ fn test_prove_quickcheck_script_mode() {
     );
 }
 
+#[cfg_attr(feature="has-boolector", test_case("boolector"; "boolector_success"))]
+#[cfg_attr(feature="has-bitwuzla", test_case("bitwuzla"; "bitwuzla_success"))]
+#[cfg_attr(feature="with-z3-binary-test", test_case("z3-binary"; "z3_binary_success"))]
+#[cfg_attr(feature="with-bitwuzla-binary-test", test_case("bitwuzla-binary"; "bitwuzla_bin_success"))]
+#[cfg_attr(feature="with-boolector-binary-test", test_case("boolector-binary"; "boolector_bin_success"))]
+fn test_prove_quickcheck_focus_tactic_transforms_to_lec(solver: &str) {
+    use std::collections::BTreeMap;
+    use xlsynth_driver::proofs::obligations::{
+        FileWithHistory, ObligationPayload, ProverObligation, QcObligation,
+    };
+    use xlsynth_driver::proofs::script::{Command, ScriptStep};
+    use xlsynth_driver::proofs::tactics::focus::{FocusPair, FocusTactic};
+    use xlsynth_driver::proofs::tactics::IsTactic;
+    use xlsynth_driver::proofs::tactics::Tactic;
+
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    const FOCUS_QC_DSLX: &str = r#"
+fn lhs(x: u32) -> u32 { x + u32:1 }
+fn rhs(x: u32) -> u32 { x + u32:1 }
+
+#[quickcheck]
+fn prop_equiv(x: u32) -> bool {
+  lhs(x) == rhs(x)
+}
+"#;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("focus_qc.x");
+    std::fs::write(&dslx_path, FOCUS_QC_DSLX).unwrap();
+
+    let focus_tactic = FocusTactic {
+        pairs: vec![FocusPair {
+            lhs: "lhs".to_string(),
+            rhs: "rhs".to_string(),
+        }],
+    };
+
+    // Preview the obligations produced by the focus tactic so we can inspect the
+    // specialized DSLX prior to invoking the driver.
+    let preview_base = ProverObligation {
+        selector_segment: "root".to_string(),
+        description: None,
+        payload: ObligationPayload::QuickCheck(QcObligation {
+            file: FileWithHistory::from_text(FOCUS_QC_DSLX),
+            tests: vec!["prop_equiv".to_string()],
+            uf_map: BTreeMap::new(),
+        }),
+    };
+    let preview_obligations = focus_tactic
+        .apply(&preview_base)
+        .expect("preview focus application should succeed");
+    for ob in &preview_obligations {
+        if let ObligationPayload::Lec(lec) = &ob.payload {
+            println!(
+                "[preview] obligation {} LHS file:\n{}",
+                ob.selector_segment, lec.lhs.file.text
+            );
+            println!(
+                "[preview] obligation {} RHS file:\n{}",
+                ob.selector_segment, lec.rhs.file.text
+            );
+        }
+    }
+
+    let steps = vec![
+        ScriptStep {
+            selector: vec!["root".to_string()],
+            command: Command::Apply(Tactic::Focus(focus_tactic.clone())),
+        },
+        ScriptStep {
+            selector: vec!["root".to_string(), "pair_1".to_string()],
+            command: Command::Solve,
+        },
+        ScriptStep {
+            selector: vec!["root".to_string(), "skeleton".to_string()],
+            command: Command::Solve,
+        },
+    ];
+    let script_json = serde_json::to_string(&steps).unwrap();
+    let script_path = temp_dir.path().join("focus_script.json");
+    std::fs::write(&script_path, script_json).unwrap();
+
+    let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml, toolchain_contents).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml.to_str().unwrap())
+        .arg("prove-quickcheck")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--test_filter")
+        .arg("prop_equiv")
+        .arg("--solver")
+        .arg(solver)
+        .arg("--tactic_json")
+        .arg(script_path.to_str().unwrap())
+        .output()
+        .expect("prove-quickcheck focus tactic invocation should run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    println!("focus tactic stdout:\n{}", stdout);
+    println!(
+        "focus tactic stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success(),
+        "prove-quickcheck focus tactic run should succeed. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("[prove-quickcheck] success: QuickCheck obligations proved"),
+        "unexpected stdout: {}",
+        stdout
+    );
+}
+
 // Parameterized version of the multi-quickcheck test that explicitly invokes
 // each solver (external or SMT backend) to ensure the fallback to
 // implicit-token mangled names works with each configured solver backend. Only
