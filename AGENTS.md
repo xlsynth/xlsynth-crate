@@ -45,6 +45,12 @@ If network access is unavailable, it is acceptable to exclude the crates.io
 version checks in `xlsynth-test-helpers/tests/version_test.rs` (which require
 crates.io metadata). Document that exclusion in the change notes.
 
+For non-trivial GitHub Actions logic, prefer a small reusable Python script
+under `scripts/` over duplicating shell helpers inline in `.github/workflows`.
+Those CI helper scripts should be compatible with the oldest runner/container in
+the matrix rather than assuming modern tool versions; for example, do not assume
+new `curl` flags or post-3.6 Python syntax are available everywhere.
+
 ## Agent Guidance: xlsynth-g8r and Fuzz Targets
 
 If you are modifying code in the `xlsynth-g8r` crate, you **must** ensure that all related fuzz targets (such as those in `xlsynth-g8r/fuzz/fuzz_targets`) still build. CI will fail if any fuzz target does not build. Always check the build status of these fuzz targets after making changes to `xlsynth-g8r`.

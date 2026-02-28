@@ -10,8 +10,6 @@ in Python also avoids depending on runner-specific curl features such as
 `--retry-all-errors`, which are missing on older images like Rocky 8.
 """
 
-from __future__ import annotations
-
 import argparse
 import os
 import shutil
@@ -65,7 +63,7 @@ def download_with_retry(
     os.close(fd)
     temp_path = Path(temp_path_str)
     delay_seconds = 2
-    last_error: Exception | None = None
+    last_error = None  # type: Optional[Exception]
     try:
         for attempt in range(1, attempts + 1):
             try:
