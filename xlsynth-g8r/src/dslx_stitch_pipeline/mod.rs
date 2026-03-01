@@ -4,19 +4,18 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use xlsynth::dslx::{self, MatchableModuleMember};
+use xlsynth::dslx;
+use xlsynth::dslx::MatchableModuleMember;
+use xlsynth::mangle_dslx_name;
+use xlsynth::vast;
 use xlsynth::vast::VastDataType;
 use xlsynth::vast::VastFile;
 use xlsynth::vast::VastModule;
-use xlsynth::{
-    DslxConvertOptions, convert_dslx_to_ir, mangle_dslx_name, optimize_ir, schedule_and_codegen,
-};
 
 mod common;
 use common::{PipelineCfg, Port, StageInfo};
 
 mod build_pipeline;
-use build_pipeline::{PipelineConfig as BuildPipelineConfig, build_pipeline as build_wrapper};
 
 use crate::verilog_version::VerilogVersion;
 
@@ -38,7 +37,8 @@ pub struct StitchPipelineOptions<'a> {
     pub output_module_name: &'a str,
 }
 
-/// Creates a VAST "stub" module from the given `StageInfo`.
+/// Creates a VAST "stub" module from the given `StageInfo`, that has the
+/// input/output ports we'll expect in the real output module.
 ///
 /// XLS code-gen returns each combinational stage as a *string* of
 /// SystemVerilog; it does **not** give us a structured representation we can
@@ -78,6 +78,8 @@ fn make_stub_module<'a>(
     m
 }
 
+/// Extracts the information on what ports will be created for the given IR
+/// function (which has the given IR function type).
 fn build_ports_from_ir(
     func: &xlsynth::ir_package::IrFunction,
     fty: &xlsynth::ir_package::IrFunctionType,
@@ -110,6 +112,15 @@ fn build_ports_from_ir(
     });
 
     Ok((ports, ret_width))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IrPackageTextFile {
+    /// File name to use when writing the IR package text to disk (e.g.
+    /// `foo_cycle0.ir`).
+    pub file_name: String,
+    /// Full IR package text.
+    pub ir_text: String,
 }
 
 /// Collect user-specified or auto-discovered stage names and their mangled IR
@@ -191,15 +202,18 @@ fn verify_stage_signatures(
     Ok(())
 }
 
-// Run XLS optimise + schedule + codegen for a stage without inserting any
-// flops so the resulting module is purely combinational.
+/// Runs XLS optimize + schedule + codegen for a stage without inserting any
+/// flops so the resulting module is purely combinational.
+///
+/// The returned `StageInfo` contains the SV text for the stage.
 fn make_stage_info_comb(
     cfg: &PipelineCfg,
     stage_name_unmangled: &str,
     stage_mangled: &str,
-    _is_last: bool,
 ) -> Result<StageInfo, xlsynth::XlsynthError> {
-    let opt = optimize_ir(cfg.ir, stage_mangled)?;
+    let opt = xlsynth::optimize_ir(cfg.ir, stage_mangled)?;
+    let opt_ir_text = opt.to_string();
+
     let sched = "delay_model: \"unit\"\npipeline_stages: 1";
     // Use the XLS "combinational" generator so the resulting module has *no* clock.
     let mut codegen = format!(
@@ -225,7 +239,7 @@ use_system_verilog: {sv}"#,
         "\narray_index_bounds_checking: {}",
         cfg.array_index_bounds_checking
     ));
-    let result = schedule_and_codegen(&opt, sched, &codegen)?;
+    let result = xlsynth::schedule_and_codegen(&opt, sched, &codegen)?;
     let sv_text = result.get_verilog_text()?;
 
     let func = cfg.ir.get_function(stage_mangled)?;
@@ -237,6 +251,7 @@ use_system_verilog: {sv}"#,
 
     Ok(StageInfo {
         sv_text,
+        opt_ir_text,
         ports,
         output_width,
     })
@@ -357,6 +372,13 @@ fn check_for_parametric_stages(
     Ok(())
 }
 
+#[derive(Debug)]
+pub struct StitchPipelineOutput {
+    pub sv_text: String,
+    pub unopt_ir_text: String,
+    pub opt_ir_files: Vec<IrPackageTextFile>,
+}
+
 /// Generates SystemVerilog for pipeline stages `top_cycle0`, `top_cycle1`, ...
 /// in `dslx` and stitches them together into a wrapper module.
 ///
@@ -369,7 +391,7 @@ pub fn stitch_pipeline<'a>(
     path: &Path,
     top: &str,
     opts: &StitchPipelineOptions<'a>,
-) -> Result<String, xlsynth::XlsynthError> {
+) -> Result<StitchPipelineOutput, xlsynth::XlsynthError> {
     // Extract option fields for backwards-compat ease.
     let verilog_version = opts.verilog_version;
     let explicit_stages = opts.explicit_stages.as_ref().map(|v| v.as_slice());
@@ -399,14 +421,17 @@ pub fn stitch_pipeline<'a>(
     if explicit_stages.is_none() {
         check_implicit_stage_numbering(&typechecked_module, top)?;
     }
-    let convert_opts = DslxConvertOptions {
+
+    // Now that we've checked the convention is appropriately present in the DSLX
+    // code, we can convert the DSLX code to IR with confidence.
+    let convert_opts = xlsynth::DslxConvertOptions {
         dslx_stdlib_path: stdlib_path,
         additional_search_paths: search_paths.to_vec(),
         enable_warnings: None,
         disable_warnings: None,
         force_implicit_token_calling_convention: false,
     };
-    let conv = convert_dslx_to_ir(dslx, path, &convert_opts)?;
+    let conv = xlsynth::convert_dslx_to_ir(dslx, path, &convert_opts)?;
     let ir = conv.ir;
 
     let cfg = PipelineCfg {
@@ -422,24 +447,20 @@ pub fn stitch_pipeline<'a>(
     // For each stage run codegen immediately so we can parse its port list.
     let mut stage_infos = Vec::with_capacity(stages.len());
     for (stage_unmangled, stage_mangled) in &stages {
-        stage_infos.push(make_stage_info_comb(
-            &cfg,
-            stage_unmangled,
-            stage_mangled,
-            false,
-        )?);
+        stage_infos.push(make_stage_info_comb(&cfg, stage_unmangled, stage_mangled)?);
     }
 
     // Prepare VAST stubs for the new build_pipeline implementation.
     let file_type = match verilog_version {
-        VerilogVersion::SystemVerilog => xlsynth::vast::VastFileType::SystemVerilog,
-        VerilogVersion::Verilog => xlsynth::vast::VastFileType::Verilog,
+        VerilogVersion::SystemVerilog => vast::VastFileType::SystemVerilog,
+        VerilogVersion::Verilog => vast::VastFileType::Verilog,
     };
-    let mut stub_file = xlsynth::vast::VastFile::new(file_type);
+    let mut stub_file = vast::VastFile::new(file_type);
     let scalar_type_stub = stub_file.make_scalar_type();
-    let mut dynamic_types_stub: Vec<xlsynth::vast::VastDataType> = Vec::new();
-    let mut stub_modules: Vec<xlsynth::vast::VastModule> = Vec::with_capacity(stage_infos.len());
+    let mut dynamic_types_stub: Vec<vast::VastDataType> = Vec::new();
 
+    // First we build the stub modules for the stage functions.
+    let mut stub_modules: Vec<vast::VastModule> = Vec::with_capacity(stage_infos.len());
     for (idx, stage_info) in stage_infos.iter().enumerate() {
         let module_name = &stages[idx].0;
         let m = make_stub_module(
@@ -451,15 +472,14 @@ pub fn stitch_pipeline<'a>(
         );
         stub_modules.push(m);
     }
-
-    let stage_module_refs: Vec<&xlsynth::vast::VastModule> = stub_modules.iter().collect();
+    let stage_module_refs: Vec<&vast::VastModule> = stub_modules.iter().collect();
 
     // Generate wrapper using shared implementation.
-    let mut wrapper_file = xlsynth::vast::VastFile::new(match verilog_version {
-        VerilogVersion::SystemVerilog => xlsynth::vast::VastFileType::SystemVerilog,
-        VerilogVersion::Verilog => xlsynth::vast::VastFileType::Verilog,
+    let mut wrapper_file = vast::VastFile::new(match verilog_version {
+        VerilogVersion::SystemVerilog => vast::VastFileType::SystemVerilog,
+        VerilogVersion::Verilog => vast::VastFileType::Verilog,
     });
-    let pipeline_cfg = BuildPipelineConfig {
+    let pipeline_cfg = build_pipeline::PipelineConfig {
         top_module_name: opts.output_module_name.to_string(),
         clk_port_name: "clk".to_string(),
         stage_modules: stage_module_refs,
@@ -470,15 +490,32 @@ pub fn stitch_pipeline<'a>(
         reset_signal,
         reset_active_low,
     };
-    let wrapper_sv = build_wrapper(&mut wrapper_file, &pipeline_cfg)?;
+    let wrapper_sv = build_pipeline::build_pipeline(&mut wrapper_file, &pipeline_cfg)?;
 
-    let mut text = stage_infos
+    let mut sv_text = stage_infos
         .iter()
-        .map(|s| s.sv_text.clone())
+        .map(|s| s.sv_text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    text.push_str(&wrapper_sv);
-    Ok(text)
+    sv_text.push_str(&wrapper_sv);
+
+    let unopt_ir_text = ir.to_string();
+    let opt_ir_files = stages
+        .iter()
+        .zip(stage_infos.iter())
+        .map(
+            |((stage_unmangled, _stage_mangled), info)| IrPackageTextFile {
+                file_name: format!("{}.ir", stage_unmangled),
+                ir_text: info.opt_ir_text.clone(),
+            },
+        )
+        .collect::<Vec<_>>();
+
+    Ok(StitchPipelineOutput {
+        sv_text,
+        unopt_ir_text,
+        opt_ir_files,
+    })
 }
 
 #[cfg(test)]
@@ -486,11 +523,19 @@ mod tests {
     use super::*;
     use env_logger;
     use xlsynth::ir_value::IrBits;
-    use xlsynth_test_helpers::{self, compare_golden_sv};
+    use xlsynth_test_helpers::{self, compare_golden_sv, compare_golden_text};
+
+    fn compare_golden_ir_files(files: &[IrPackageTextFile], golden_dir: &str) {
+        for f in files {
+            let path = format!("{}/{}", golden_dir, f.file_name);
+            compare_golden_text(&f.ir_text, &path);
+        }
+    }
 
     #[test]
     fn test_stitch_pipeline_tuple() {
-        let dslx = "fn mul_add_cycle0(x: u32, y: u32, z: u32) -> (u32, u32) { (x * y, z) }\nfn mul_add_cycle1(partial: u32, z: u32) -> u32 { partial + z }";
+        let dslx = "fn mul_add_cycle0(x: u32, y: u32, z: u32) -> (u32, u32) { (x * y, z) }
+fn mul_add_cycle1(partial: u32, z: u32) -> u32 { partial + z }";
         let result = stitch_pipeline(
             dslx,
             Path::new("test.x"),
@@ -513,9 +558,19 @@ mod tests {
         )
         .unwrap();
         // Validate generated SV.
-        xlsynth_test_helpers::assert_valid_sv(&result);
+        xlsynth_test_helpers::assert_valid_sv(&result.sv_text);
 
-        compare_golden_sv(&result, "tests/goldens/mul_add.golden.sv");
+        compare_golden_sv(&result.sv_text, "tests/goldens/mul_add.golden.sv");
+        compare_golden_text(&result.unopt_ir_text, "tests/goldens/mul_add.unopt.ir");
+        assert_eq!(
+            result
+                .opt_ir_files
+                .iter()
+                .map(|f| f.file_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["mul_add_cycle0.ir", "mul_add_cycle1.ir"]
+        );
+        compare_golden_ir_files(&result.opt_ir_files, "tests/goldens/mul_add.opt");
     }
 
     #[test]
@@ -547,7 +602,17 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
         )
         .unwrap();
 
-        compare_golden_sv(&result, "tests/goldens/foo.golden.sv");
+        compare_golden_sv(&result.sv_text, "tests/goldens/foo.golden.sv");
+        compare_golden_text(&result.unopt_ir_text, "tests/goldens/foo.unopt.ir");
+        assert_eq!(
+            result
+                .opt_ir_files
+                .iter()
+                .map(|f| f.file_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["foo_cycle0.ir", "foo_cycle1.ir"]
+        );
+        compare_golden_ir_files(&result.opt_ir_files, "tests/goldens/foo.opt");
     }
 
     #[test]
@@ -574,7 +639,17 @@ fn foo_cycle1(s: S) -> u32 { s.a + s.b }
             },
         )
         .unwrap();
-        compare_golden_sv(&result, "tests/goldens/one.golden.sv");
+        compare_golden_sv(&result.sv_text, "tests/goldens/one.golden.sv");
+        compare_golden_text(&result.unopt_ir_text, "tests/goldens/one.unopt.ir");
+        assert_eq!(
+            result
+                .opt_ir_files
+                .iter()
+                .map(|f| f.file_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["one_cycle0.ir"]
+        );
+        compare_golden_ir_files(&result.opt_ir_files, "tests/goldens/one.opt");
     }
 
     #[test]
@@ -608,15 +683,16 @@ fn stitchme_cycle1(x: u32) -> u32 { parmetric_not_stitched1<u32:4>(x) }
         )
         .unwrap();
 
-        xlsynth_test_helpers::assert_valid_sv(&result);
+        xlsynth_test_helpers::assert_valid_sv(&result.sv_text);
     }
 
     /// Generates the verilog for two stages composed in DSLX stitching:
     /// * The first stage adds 1
     /// * The second stage adds 2
     fn verilog_for_foo_pipeline_with_valid() -> String {
-        let dslx = "fn foo_cycle0(x: u32) -> u32 { x + u32:1 }\nfn foo_cycle1(y: u32) -> u32 { y + u32:2 }";
-        stitch_pipeline(
+        let dslx = "fn foo_cycle0(x: u32) -> u32 { x + u32:1 }
+fn foo_cycle1(y: u32) -> u32 { y + u32:2 }";
+        let result = stitch_pipeline(
             dslx,
             Path::new("test.x"),
             "foo",
@@ -636,7 +712,8 @@ fn stitchme_cycle1(x: u32) -> u32 { parmetric_not_stitched1<u32:4>(x) }
                 output_module_name: "foo",
             },
         )
-        .unwrap()
+        .unwrap();
+        result.sv_text
     }
 
     #[test]
@@ -663,7 +740,8 @@ fn stitchme_cycle1(x: u32) -> u32 { parmetric_not_stitched1<u32:4>(x) }
         let _ = env_logger::builder().is_test(true).try_init();
 
         // Two-stage pipeline: add 1 then add 2.
-        let dslx = "fn foo_cycle0(x: u32) -> u32 { x + u32:1 }\nfn foo_cycle1(y: u32) -> u32 { y + u32:2 }";
+        let dslx = "fn foo_cycle0(x: u32) -> u32 { x + u32:1 }
+fn foo_cycle1(y: u32) -> u32 { y + u32:2 }";
 
         let result = stitch_pipeline(
             dslx,
@@ -688,7 +766,7 @@ fn stitchme_cycle1(x: u32) -> u32 { parmetric_not_stitched1<u32:4>(x) }
         .unwrap();
 
         compare_golden_sv(
-            &result,
+            &result.sv_text,
             "tests/goldens/foo_pipeline_with_valid_no_reset.golden.sv",
         );
     }

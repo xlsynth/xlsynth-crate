@@ -539,6 +539,22 @@ fn main() {
                     "flop_outputs",
                     "Whether to insert output pipeline flops (default true)",
                 )
+                .arg(
+                    Arg::new("output_unopt_ir_tgz")
+                        .long("output_unopt_ir_tgz")
+                        .value_name("TAR_GZ_PATH")
+                        .help("Path to write a .tar.gz containing unoptimized IR package files (one .ir per stitched stage)")
+                        .required(false)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("output_opt_ir_tgz")
+                        .long("output_opt_ir_tgz")
+                        .value_name("TAR_GZ_PATH")
+                        .help("Path to write a .tar.gz containing optimized IR package files (one .ir per stitched stage)")
+                        .required(false)
+                        .action(ArgAction::Set),
+                )
                 .add_bool_arg(
                     "array_index_bounds_checking",
                     "Whether to emit array index bounds checking",
