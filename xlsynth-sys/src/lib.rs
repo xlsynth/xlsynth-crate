@@ -634,6 +634,10 @@ extern "C" {
     pub fn xls_bits_sub(lhs: *const CIrBits, rhs: *const CIrBits) -> *mut CIrBits;
     pub fn xls_bits_umul(lhs: *const CIrBits, rhs: *const CIrBits) -> *mut CIrBits;
     pub fn xls_bits_smul(lhs: *const CIrBits, rhs: *const CIrBits) -> *mut CIrBits;
+    pub fn xls_bits_udiv(lhs: *const CIrBits, rhs: *const CIrBits) -> *mut CIrBits;
+    pub fn xls_bits_sdiv(lhs: *const CIrBits, rhs: *const CIrBits) -> *mut CIrBits;
+    pub fn xls_bits_umod(lhs: *const CIrBits, rhs: *const CIrBits) -> *mut CIrBits;
+    pub fn xls_bits_smod(lhs: *const CIrBits, rhs: *const CIrBits) -> *mut CIrBits;
     pub fn xls_bits_negate(bits: *const CIrBits) -> *mut CIrBits;
     pub fn xls_bits_abs(bits: *const CIrBits) -> *mut CIrBits;
     pub fn xls_bits_not(bits: *const CIrBits) -> *mut CIrBits;

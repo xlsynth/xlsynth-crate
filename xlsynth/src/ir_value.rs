@@ -254,95 +254,24 @@ impl IrBits {
                 .expect("sign bit index must be in bounds")
     }
 
-    fn udivmod(&self, rhs: &IrBits) -> (IrBits, IrBits) {
-        let bit_count = self.get_bit_count();
-        self.assert_matching_bit_count(rhs);
-        if bit_count == 0 {
-            return (Self::zero(0), Self::zero(0));
-        }
-        if rhs.is_zero() {
-            return (Self::all_ones(bit_count), Self::zero(bit_count));
-        }
-
-        // TODO(cdleary): 2026-02-28 Once
-        // https://github.com/google/xls/pull/3898 lands and the bit-level
-        // div/mod ops are exposed via our FFI, replace this polyfill (and the
-        // signed wrappers built on it) with direct libxls calls.
-        // Unsigned restoring division with XLS division-by-zero behavior.
-        let one = Self::make_ubits(bit_count, 1).expect("make_ubits should succeed for 1");
-        let mut remainder = Self::zero(bit_count);
-        let mut quotient = vec![false; bit_count];
-        for i in (0..bit_count).rev() {
-            remainder = remainder.shll(1);
-            if self.get_bit(i).expect("bit index is in bounds") {
-                remainder = remainder.or(&one);
-            }
-            if remainder.uge(rhs) {
-                remainder = remainder.sub(rhs);
-                quotient[i] = true;
-            }
-        }
-        (Self::from_lsb_is_0(&quotient), remainder)
-    }
-
     pub fn udiv(&self, rhs: &IrBits) -> IrBits {
-        self.udivmod(rhs).0
+        self.assert_matching_bit_count(rhs);
+        self.apply_binary_op(rhs, xlsynth_sys::xls_bits_udiv)
     }
 
     pub fn umod(&self, rhs: &IrBits) -> IrBits {
-        let bit_count = self.get_bit_count();
         self.assert_matching_bit_count(rhs);
-        if bit_count == 0 {
-            return Self::zero(0);
-        }
-        if rhs.is_zero() {
-            return Self::zero(bit_count);
-        }
-        self.udivmod(rhs).1
+        self.apply_binary_op(rhs, xlsynth_sys::xls_bits_umod)
     }
 
     pub fn sdiv(&self, rhs: &IrBits) -> IrBits {
-        let bit_count = self.get_bit_count();
         self.assert_matching_bit_count(rhs);
-        if bit_count == 0 {
-            return Self::zero(0);
-        }
-        if rhs.is_zero() {
-            return if self.is_negative() {
-                Self::signed_min_value(bit_count)
-            } else {
-                Self::signed_max_value(bit_count)
-            };
-        }
-
-        let lhs_abs = self.abs();
-        let rhs_abs = rhs.abs();
-        let quotient = lhs_abs.udiv(&rhs_abs);
-        if self.is_negative() ^ rhs.is_negative() {
-            quotient.negate()
-        } else {
-            quotient
-        }
+        self.apply_binary_op(rhs, xlsynth_sys::xls_bits_sdiv)
     }
 
     pub fn smod(&self, rhs: &IrBits) -> IrBits {
-        let bit_count = self.get_bit_count();
         self.assert_matching_bit_count(rhs);
-        if bit_count == 0 {
-            return Self::zero(0);
-        }
-        if rhs.is_zero() {
-            return Self::zero(bit_count);
-        }
-
-        let lhs_abs = self.abs();
-        let rhs_abs = rhs.abs();
-        let remainder = lhs_abs.umod(&rhs_abs);
-        if self.is_negative() {
-            remainder.negate()
-        } else {
-            remainder
-        }
+        self.apply_binary_op(rhs, xlsynth_sys::xls_bits_smod)
     }
 
     pub fn shll(&self, shift_amount: i64) -> IrBits {

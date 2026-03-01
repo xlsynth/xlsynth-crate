@@ -25,7 +25,7 @@ module __test__main(
   end
   assign out = p1_gated;
   `ifdef ASSERT_ON
-  `BR_ASSERT(should_be_one, p0_x)
+  `BR_ASSERT(__test__main_0_non_synth___test__main_should_be_one, p0_x)
   `endif  // ASSERT_ON
 endmodule
 
