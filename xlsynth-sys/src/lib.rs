@@ -2503,9 +2503,17 @@ extern "C" {
     pub fn xls_dslx_quickcheck_get_count(qc: *const CDslxQuickcheck, result_out: *mut i64) -> bool;
 }
 
-pub const DSLX_STDLIB_PATH: &str = env!("DSLX_STDLIB_PATH");
+mod generated_artifact_paths {
+    include!(concat!(env!("OUT_DIR"), "/artifact_paths.rs"));
+}
 
-/// Directory containing the libxls DSO.
+pub const DSLX_STDLIB_PATH: &str = generated_artifact_paths::DSLX_STDLIB_PATH;
+
+/// Path describing where the libxls shared library was materialized.
+///
+/// This value is a shared-library file path when the build uses explicit
+/// artifact overrides, and a directory path when `xlsynth-sys` downloaded or
+/// symlinked the DSO into its own output directory.
 ///
 /// *** DO NOT USE THIS VARIABLE FROM WITHIN YOUR build.rs ***
 ///
@@ -2534,7 +2542,7 @@ pub const DSLX_STDLIB_PATH: &str = env!("DSLX_STDLIB_PATH");
 ///
 /// (If you use this envvar from your crate proper -- i.e. not from build.rs --
 /// then it's perfectly fine.)
-pub const XLS_DSO_PATH: &str = env!("XLS_DSO_PATH");
+pub const XLS_DSO_PATH: &str = generated_artifact_paths::XLS_DSO_PATH;
 
 // Add opaque types for module port and def.
 #[repr(C)]
