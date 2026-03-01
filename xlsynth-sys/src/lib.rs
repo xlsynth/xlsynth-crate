@@ -2537,6 +2537,13 @@ pub const DSLX_STDLIB_PATH: &str = generated_artifact_paths::DSLX_STDLIB_PATH;
 /// let dylib_path = std::env::var("DEP_XLSYNTH_DSO_PATH").unwrap();
 /// ```
 ///
+/// `DEP_XLSYNTH_DSO_PATH` follows the same contract as `XLS_DSO_PATH`: it is a
+/// shared-library file path when `xlsynth-sys` uses explicit artifact
+/// overrides, and a directory path when `xlsynth-sys` downloaded or symlinked
+/// the DSO into its own output directory. Downstream `build.rs` code that needs
+/// a directory for link-search or rpath setup should normalize a file path to
+/// its parent directory before using it.
+///
 /// More details are available at
 /// <https://doc.rust-lang.org/cargo/reference/build-script-examples.html#using-another-sys-crate>.
 ///
