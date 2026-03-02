@@ -131,8 +131,12 @@ pub fn handle_ir_fn_mffcs(matches: &ArgMatches, _config: &Option<ToolchainConfig
 
     let all_specs = enumerate_all_mffc_specs(top_fn);
     let all_count = all_specs.len();
-    let selected_specs = rank_and_select_mffc_specs(all_specs, &cfg);
-    let selected_count = selected_specs.len();
+    let ranking_cfg = MffcConfig {
+        max_mffcs: None,
+        ..cfg.clone()
+    };
+    let ranked_specs = rank_and_select_mffc_specs(all_specs, &ranking_cfg);
+    let ranked_count = ranked_specs.len();
 
     let out_dir_path = std::path::Path::new(output_dir);
     if let Err(e) = std::fs::create_dir_all(out_dir_path) {
@@ -163,8 +167,24 @@ pub fn handle_ir_fn_mffcs(matches: &ArgMatches, _config: &Option<ToolchainConfig
     };
 
     let mut emitted = 0usize;
-    for (rank, spec) in selected_specs.iter().enumerate() {
-        let extracted = extract_mffc(top_fn, Some(&pkg.file_table), spec, &cfg);
+    for (rank, spec) in ranked_specs.iter().enumerate() {
+        if let Some(max) = cfg.max_mffcs {
+            if emitted >= max {
+                break;
+            }
+        }
+
+        let extracted = match extract_mffc(top_fn, Some(&pkg.file_table), spec, &cfg) {
+            Ok(extracted) => extracted,
+            Err(e) => report_cli_error_and_exit(
+                &format!(
+                    "Failed to extract ranked MFFC at rank {} (root_text_id={}): {}",
+                    rank, spec.root_text_id, e
+                ),
+                Some(cmd),
+                vec![],
+            ),
+        };
 
         // Skip structurally trivial outputs; these are typically not useful as
         // mined "meaty" MFFCs.
@@ -225,9 +245,9 @@ pub fn handle_ir_fn_mffcs(matches: &ArgMatches, _config: &Option<ToolchainConfig
     }
 
     eprintln!(
-        "ir-fn-mffcs: enumerated {} candidates, selected {}, emitted {} into {}; manifest: {}",
+        "ir-fn-mffcs: enumerated {} candidates, ranked {} after filtering, emitted {} into {}; manifest: {}",
         all_count,
-        selected_count,
+        ranked_count,
         emitted,
         out_dir_path.display(),
         manifest_path.display()

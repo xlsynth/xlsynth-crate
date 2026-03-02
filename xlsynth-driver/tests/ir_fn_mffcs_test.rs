@@ -69,3 +69,65 @@ top fn f(a: bits[8] id=1, b: bits[8] id=2, c: bits[8] id=3) -> bits[8] {
         emitted_ir_path.display()
     );
 }
+
+#[test]
+fn ir_fn_mffcs_backfills_when_higher_ranked_cones_are_trivial() {
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    let pkg_ir = r#"package p
+
+top fn f(a: bits[8] id=1, b: bits[8] id=2, c: bits[8] id=3, d: bits[8] id=4) -> bits[8] {
+  bit_slice.5: bits[4] = bit_slice(a, start=0, width=4, id=5)
+  bit_slice.6: bits[4] = bit_slice(a, start=4, width=4, id=6)
+  concat.7: bits[8] = concat(bit_slice.5, bit_slice.6, id=7)
+  and.8: bits[8] = and(b, c, id=8)
+  or.9: bits[8] = or(and.8, d, id=9)
+  ret xor.10: bits[8] = xor(or.9, a, id=10)
+}
+"#;
+
+    let temp_dir = tempfile::tempdir().expect("create tempdir");
+    let ir_path = temp_dir.path().join("in.ir");
+    std::fs::write(&ir_path, pkg_ir).expect("write package IR");
+    let out_dir = temp_dir.path().join("mffcs_out");
+
+    let output = Command::new(driver)
+        .arg("ir-fn-mffcs")
+        .arg(ir_path.as_os_str())
+        .arg("--output_dir")
+        .arg(out_dir.as_os_str())
+        .arg("--max_mffcs")
+        .arg("1")
+        .arg("--min_internal_non_literal")
+        .arg("3")
+        .output()
+        .expect("ir-fn-mffcs invocation should run");
+
+    assert!(
+        output.status.success(),
+        "ir-fn-mffcs failed: status={:?}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let manifest_path = out_dir.join("manifest.jsonl");
+    let manifest_text = std::fs::read_to_string(&manifest_path).expect("read manifest");
+    let manifest_lines: Vec<&str> = manifest_text
+        .lines()
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert_eq!(
+        manifest_lines.len(),
+        1,
+        "expected the emit cap to apply after trivial cones are skipped"
+    );
+
+    let first: serde_json::Value =
+        serde_json::from_str(manifest_lines[0]).expect("parse first manifest line");
+    assert_eq!(
+        first["root_text_id"].as_u64(),
+        Some(10),
+        "expected the driver to backfill to the next non-trivial ranked cone"
+    );
+}

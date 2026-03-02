@@ -63,6 +63,65 @@ pub struct ExtractedMffc {
     pub score_denominator: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExtractMffcError {
+    InvalidSpecNodeIndex {
+        node_role: &'static str,
+        node_index: usize,
+        node_count: usize,
+    },
+    UnsupportedNodePayload {
+        old_node_index: usize,
+        operator: String,
+    },
+    MissingOperandMapping {
+        old_node_index: usize,
+        operand_node_index: usize,
+    },
+    MissingRootMapping {
+        root_node_index: usize,
+    },
+}
+
+impl std::fmt::Display for ExtractMffcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExtractMffcError::InvalidSpecNodeIndex {
+                node_role,
+                node_index,
+                node_count,
+            } => write!(
+                f,
+                "MFFC spec {} node index {} is out of bounds for function with {} nodes",
+                node_role, node_index, node_count
+            ),
+            ExtractMffcError::UnsupportedNodePayload {
+                old_node_index,
+                operator,
+            } => write!(
+                f,
+                "MFFC extraction does not support '{}' at old node index {} because callee definitions are not copied into extracted packages",
+                operator, old_node_index
+            ),
+            ExtractMffcError::MissingOperandMapping {
+                old_node_index,
+                operand_node_index,
+            } => write!(
+                f,
+                "missing mapping for operand node {} while extracting old node {}",
+                operand_node_index, old_node_index
+            ),
+            ExtractMffcError::MissingRootMapping { root_node_index } => write!(
+                f,
+                "root node {} was not mapped while extracting MFFC",
+                root_node_index
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ExtractMffcError {}
+
 fn is_literal_node(f: &ir::Fn, idx: usize) -> bool {
     matches!(f.nodes[idx].payload, NodePayload::Literal(_))
 }
@@ -266,6 +325,21 @@ pub fn enumerate_mffc_specs(f: &ir::Fn, cfg: &MffcConfig) -> Vec<MffcSpec> {
     rank_and_select_mffc_specs(all, cfg)
 }
 
+fn validate_spec_node_index(
+    f: &ir::Fn,
+    node_index: usize,
+    node_role: &'static str,
+) -> Result<(), ExtractMffcError> {
+    if node_index >= f.nodes.len() {
+        return Err(ExtractMffcError::InvalidSpecNodeIndex {
+            node_role,
+            node_index,
+            node_count: f.nodes.len(),
+        });
+    }
+    Ok(())
+}
+
 /// Extracts a single MFFC into a standalone package with one function.
 ///
 /// - `pkg_file_table` is used only when `cfg.emit_pos_data == true`.
@@ -274,16 +348,18 @@ pub fn extract_mffc(
     pkg_file_table: Option<&ir::FileTable>,
     spec: &MffcSpec,
     cfg: &MffcConfig,
-) -> ExtractedMffc {
+) -> Result<ExtractedMffc, ExtractMffcError> {
     let root = spec.root_node_index;
+    validate_spec_node_index(f, root, "root")?;
 
     // Frontier params are all non-literal leaves.
-    let mut param_leaf_indices: Vec<usize> = spec
-        .frontier_leaf_indices
-        .iter()
-        .copied()
-        .filter(|&idx| !is_literal_node(f, idx))
-        .collect();
+    let mut param_leaf_indices: Vec<usize> = Vec::new();
+    for idx in spec.frontier_leaf_indices.iter().copied() {
+        validate_spec_node_index(f, idx, "frontier")?;
+        if !is_literal_node(f, idx) {
+            param_leaf_indices.push(idx);
+        }
+    }
     param_leaf_indices.sort_unstable();
     param_leaf_indices.dedup();
 
@@ -291,6 +367,7 @@ pub fn extract_mffc(
         spec.internal_node_indices.iter().copied().collect();
     // Include literal frontier leaves as constants (instead of parameters).
     for idx in spec.frontier_leaf_indices.iter().copied() {
+        validate_spec_node_index(f, idx, "frontier")?;
         if is_literal_node(f, idx) {
             included_internal.insert(idx);
         }
@@ -335,21 +412,36 @@ pub fn extract_mffc(
         if old_to_new.contains_key(&old_idx) {
             continue;
         }
+        validate_spec_node_index(f, old_idx, "internal")?;
         let old_node = &f.nodes[old_idx];
         if matches!(
             old_node.payload,
             NodePayload::Invoke { .. } | NodePayload::CountedFor { .. }
         ) {
-            panic!(
-                "MFFC extraction does not support invoke/counted_for nodes because callee definitions are not copied into extracted packages"
-            );
-        }
-        let new_payload = remap_payload_with(&old_node.payload, |(_slot, r): (usize, NodeRef)| {
-            let new_index = *old_to_new.get(&r.index).unwrap_or_else(|| {
-                panic!("missing mapping for operand {:?} while extracting MFFC", r)
+            return Err(ExtractMffcError::UnsupportedNodePayload {
+                old_node_index: old_idx,
+                operator: old_node.payload.get_operator().to_string(),
             });
+        }
+        let mut operand_mapping_error: Option<ExtractMffcError> = None;
+        let new_payload = remap_payload_with(&old_node.payload, |(_slot, r): (usize, NodeRef)| {
+            let new_index = match old_to_new.get(&r.index) {
+                Some(new_index) => *new_index,
+                None => {
+                    if operand_mapping_error.is_none() {
+                        operand_mapping_error = Some(ExtractMffcError::MissingOperandMapping {
+                            old_node_index: old_idx,
+                            operand_node_index: r.index,
+                        });
+                    }
+                    0
+                }
+            };
             NodeRef { index: new_index }
         });
+        if let Some(err) = operand_mapping_error {
+            return Err(err);
+        }
         nodes.push(Node {
             text_id: next_text_id,
             name: None,
@@ -368,7 +460,9 @@ pub fn extract_mffc(
     let new_root_ref = NodeRef {
         index: *old_to_new
             .get(&root)
-            .unwrap_or_else(|| panic!("root must be mapped while extracting MFFC: {}", root)),
+            .ok_or(ExtractMffcError::MissingRootMapping {
+                root_node_index: root,
+            })?,
     };
 
     let func = ir::Fn {
@@ -397,7 +491,7 @@ pub fn extract_mffc(
     hasher.update(text.as_bytes());
     let sha256_hex = format!("{:x}", hasher.finalize());
 
-    ExtractedMffc {
+    Ok(ExtractedMffc {
         package,
         sha256_hex,
         root_node_index: spec.root_node_index,
@@ -406,7 +500,7 @@ pub fn extract_mffc(
         frontier_non_literal_count: spec.frontier_non_literal_count,
         score_numerator: spec.score_numerator,
         score_denominator: spec.score_denominator,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -494,8 +588,8 @@ top fn f(a: bits[8] id=1, b: bits[8] id=2, c: bits[8] id=3) -> bits[8] {
             .find(|s| s.root_text_id == 7)
             .expect("expected root add.7");
 
-        let a = extract_mffc(f, Some(&pkg.file_table), top_spec, &cfg);
-        let b = extract_mffc(f, Some(&pkg.file_table), top_spec, &cfg);
+        let a = extract_mffc(f, Some(&pkg.file_table), top_spec, &cfg).unwrap();
+        let b = extract_mffc(f, Some(&pkg.file_table), top_spec, &cfg).unwrap();
 
         assert_eq!(a.sha256_hex, b.sha256_hex);
         assert_eq!(a.package.to_string(), b.package.to_string());
@@ -537,5 +631,57 @@ top fn f(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
 "#;
         let plain_f = parse_top_fn(plain_pkg);
         assert!(!has_nonlocal_callee_refs(&plain_f));
+    }
+
+    #[test]
+    fn extract_mffc_returns_error_for_unsupported_callee_nodes() {
+        fn expect_unsupported_operator(pkg_text: &str, root_text_id: usize, operator: &str) {
+            let mut parser = ir_parser::Parser::new(pkg_text);
+            let pkg = parser.parse_and_validate_package().unwrap();
+            let f = pkg.get_top_fn().unwrap();
+            let cfg = MffcConfig {
+                max_mffcs: None,
+                min_internal_non_literal_count: 0,
+                max_frontier_non_literal_count: None,
+                emit_pos_data: false,
+            };
+            let spec = enumerate_all_mffc_specs(f)
+                .into_iter()
+                .find(|spec| spec.root_text_id == root_text_id)
+                .expect("expected MFFC spec for unsupported root");
+
+            let err = extract_mffc(f, Some(&pkg.file_table), &spec, &cfg).unwrap_err();
+            match err {
+                ExtractMffcError::UnsupportedNodePayload {
+                    old_node_index: _,
+                    operator: err_operator,
+                } => assert_eq!(err_operator, operator),
+                other => panic!("expected unsupported-node error, got {other:?}"),
+            }
+        }
+
+        let invoke_pkg = r#"package p
+
+fn g(x: bits[8] id=1) -> bits[8] {
+  ret not.2: bits[8] = not(x, id=2)
+}
+
+top fn f(a: bits[8] id=10) -> bits[8] {
+  ret invoke.11: bits[8] = invoke(a, to_apply=g, id=11)
+}
+"#;
+        expect_unsupported_operator(invoke_pkg, 11, "invoke");
+
+        let counted_for_pkg = r#"package p
+
+fn body(x: bits[8] id=1) -> bits[8] {
+  ret add.2: bits[8] = add(x, x, id=2)
+}
+
+top fn f(a: bits[8] id=10) -> bits[8] {
+  ret counted_for.11: bits[8] = counted_for(a, trip_count=2, stride=1, body=body, id=11)
+}
+"#;
+        expect_unsupported_operator(counted_for_pkg, 11, "counted_for");
     }
 }
