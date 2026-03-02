@@ -30,6 +30,20 @@ Primarily tests:
 - PIR aug-opt rewrites preserve semantics when they apply
 - End-to-end compatibility of PIR lowering and toolchain equivalence checks
 
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_mul_by_const_csd_equiv.rs
+
+Builds small `umul(x, literal)` PIR functions (with the literal on either side),
+then gatifies with built-in mul-by-const lowering. Each run requests IR-to-gate
+equivalence checking so the target surfaces any semantic
+mismatch introduced by the Canonical Signed Digit (CSD) / Non-Adjacent Form
+(NAF) gate-level lowering path.
+
+Primarily tests:
+
+- Built-in gatify mul-by-const lowering preserves semantics
+- Canonical Signed Digit (CSD) / Non-Adjacent Form (NAF) decomposition plus
+  shift/add/sub array-add accumulation remain equivalent
+
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_gatify.rs
 
 Parses C++-emitted IR into the Rust IR, then converts (gatifies) to `GateFn` with folding on and off, checking equivalence when requested. Skips uninteresting degenerate inputs.

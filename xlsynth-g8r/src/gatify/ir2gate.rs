@@ -6,6 +6,7 @@
 use crate::aig::gate::{AigBitVector, AigOperand, GateFn, Split};
 use crate::check_equivalence;
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
+use crate::gatify::mul_by_const_csd::{SignedDigitSign, decompose_umul_const_terms};
 use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -676,6 +677,76 @@ fn gatify_umul(
     array_add_with_carry_out(gb, &partial_products, None, mul_adder_mapping).sum
 }
 
+fn shll_const_and_resize(
+    arg_bits: &AigBitVector,
+    shift: usize,
+    output_bit_count: usize,
+    gb: &mut GateBuilder,
+) -> AigBitVector {
+    if output_bit_count == 0 {
+        return AigBitVector::zeros(0);
+    }
+    let mut shifted = vec![gb.get_false(); shift];
+    shifted.extend(arg_bits.iter_lsb_to_msb().cloned());
+    if shifted.len() > output_bit_count {
+        shifted.truncate(output_bit_count);
+    }
+    while shifted.len() < output_bit_count {
+        shifted.push(gb.get_false());
+    }
+    AigBitVector::from_lsb_is_index_0(&shifted)
+}
+
+fn usize_as_aig_bits(value: usize, bit_count: usize, gb: &mut GateBuilder) -> AigBitVector {
+    let mut bits = Vec::with_capacity(bit_count);
+    for i in 0..bit_count {
+        let bit_is_set = if i < usize::BITS as usize {
+            ((value >> i) & 1) != 0
+        } else {
+            false
+        };
+        bits.push(if bit_is_set {
+            gb.get_true()
+        } else {
+            gb.get_false()
+        });
+    }
+    AigBitVector::from_lsb_is_index_0(&bits)
+}
+
+fn gatify_umul_const_via_csd(
+    multiplicand_bits: &AigBitVector,
+    constant_bits: &xlsynth::IrBits,
+    output_bit_count: usize,
+    mul_adder_mapping: AdderMapping,
+    gb: &mut GateBuilder,
+) -> AigBitVector {
+    if output_bit_count == 0 {
+        return AigBitVector::zeros(0);
+    }
+    let terms = decompose_umul_const_terms(constant_bits, output_bit_count);
+    if terms.is_empty() {
+        return AigBitVector::zeros(output_bit_count);
+    }
+
+    let mut operands: Vec<AigBitVector> = Vec::with_capacity(terms.len() + 1);
+    let mut neg_term_count = 0usize;
+    for term in terms {
+        let shifted = shll_const_and_resize(multiplicand_bits, term.shift, output_bit_count, gb);
+        match term.sign {
+            SignedDigitSign::Plus => operands.push(shifted),
+            SignedDigitSign::Minus => {
+                operands.push(gb.add_not_vec(&shifted));
+                neg_term_count = neg_term_count.saturating_add(1);
+            }
+        }
+    }
+    if neg_term_count != 0 {
+        operands.push(usize_as_aig_bits(neg_term_count, output_bit_count, gb));
+    }
+    array_add_with_carry_out(gb, &operands, None, mul_adder_mapping).sum
+}
+
 fn gatify_twos_complement(bits: &AigBitVector, gb: &mut GateBuilder) -> AigBitVector {
     let inverted = gb.add_not_vec(bits);
     let one = gb.add_literal(&xlsynth::IrBits::make_ubits(bits.get_bit_count(), 1).unwrap());
@@ -1128,6 +1199,21 @@ fn normalize_add_literal_rhs(
         (None, Some(rhs_bits)) => Some((a, rhs_bits)),
         (Some(rhs_bits), None) => Some((b, rhs_bits)),
         // If both are literals, we expect folding to have handled this.
+        (Some(_), Some(_)) => None,
+        (None, None) => None,
+    }
+}
+
+fn normalize_umul_literal_rhs(
+    f: &ir::Fn,
+    a: ir::NodeRef,
+    b: ir::NodeRef,
+) -> Option<(ir::NodeRef, xlsynth::IrBits)> {
+    let a_lit = literal_bits_if_bits_node(f, a);
+    let b_lit = literal_bits_if_bits_node(f, b);
+    match (a_lit, b_lit) {
+        (None, Some(rhs_bits)) => Some((a, rhs_bits)),
+        (Some(rhs_bits), None) => Some((b, rhs_bits)),
         (Some(_), Some(_)) => None,
         (None, None) => None,
     }
@@ -3066,8 +3152,6 @@ fn gatify_node(
         }
         ir::NodePayload::Binop(ir::Binop::Umul | ir::Binop::Smul, lhs, rhs) => {
             let output_bit_count = node.ty.bit_count();
-            let lhs_bits = env.get_bit_vector(*lhs).expect("mul lhs should be present");
-            let rhs_bits = env.get_bit_vector(*rhs).expect("mul rhs should be present");
             let signedness = if matches!(node.payload, ir::NodePayload::Binop(ir::Binop::Smul, ..))
             {
                 Signedness::Signed
@@ -3075,14 +3159,44 @@ fn gatify_node(
                 Signedness::Unsigned
             };
             let mul_adder_mapping = options.mul_adder_mapping.unwrap_or(options.adder_mapping);
-            let gates = gatify_mul(
-                &lhs_bits,
-                &rhs_bits,
-                output_bit_count,
-                signedness,
-                mul_adder_mapping,
-                g8_builder,
-            );
+            let gates = if matches!(signedness, Signedness::Unsigned) {
+                if let Some((multiplicand, constant_bits)) =
+                    normalize_umul_literal_rhs(f, *lhs, *rhs)
+                {
+                    let multiplicand_bits = env
+                        .get_bit_vector(multiplicand)
+                        .expect("mul multiplicand should be present");
+                    gatify_umul_const_via_csd(
+                        &multiplicand_bits,
+                        &constant_bits,
+                        output_bit_count,
+                        mul_adder_mapping,
+                        g8_builder,
+                    )
+                } else {
+                    let lhs_bits = env.get_bit_vector(*lhs).expect("mul lhs should be present");
+                    let rhs_bits = env.get_bit_vector(*rhs).expect("mul rhs should be present");
+                    gatify_mul(
+                        &lhs_bits,
+                        &rhs_bits,
+                        output_bit_count,
+                        signedness,
+                        mul_adder_mapping,
+                        g8_builder,
+                    )
+                }
+            } else {
+                let lhs_bits = env.get_bit_vector(*lhs).expect("mul lhs should be present");
+                let rhs_bits = env.get_bit_vector(*rhs).expect("mul rhs should be present");
+                gatify_mul(
+                    &lhs_bits,
+                    &rhs_bits,
+                    output_bit_count,
+                    signedness,
+                    mul_adder_mapping,
+                    g8_builder,
+                )
+            };
             env.add(node_ref, GateOrVec::BitVector(gates));
         }
         ir::NodePayload::Binop(ir::Binop::Udiv | ir::Binop::Sdiv, lhs, rhs) => {
