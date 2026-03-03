@@ -497,12 +497,7 @@ fn canonical_bindings_key(bindings: &ir_query::QueryBindings) -> String {
 fn canonical_binding_value(binding: &ir_query::Binding) -> String {
     match binding {
         ir_query::Binding::Node(node_ref) => format!("node:{}", node_ref.index),
-        ir_query::Binding::LiteralValue(value) => {
-            let rendered = value
-                .to_string_fmt_no_prefix(xlsynth::ir_value::IrFormatPreference::Default)
-                .unwrap_or_else(|_| "<literal>".to_string());
-            format!("lit:{}", rendered)
-        }
+        ir_query::Binding::LiteralValue(value) => format!("lit:{}", value),
     }
 }
 
@@ -1698,6 +1693,26 @@ mod tests {
   ret and.10: bits[8] = and(a, b, id=10)
 }"#;
         let rule = MatchRewriteRule::from_strings("and(x)", "x").unwrap();
+        let err = rule
+            .apply_to_fn(&parse_fn(ir_text), RewriteApplyMode::FirstMatch)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            MatchRewriteRuleApplyError::AmbiguousMatch {
+                root: NodeRef { index: 3 },
+                match_count: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn apply_errors_on_ambiguous_literal_bindings_with_different_widths() {
+        let ir_text = r#"fn t() -> bits[24] {
+  literal.10: bits[8] = literal(value=1, id=10)
+  literal.11: bits[16] = literal(value=1, id=11)
+  ret concat.12: bits[24] = concat(literal.10, literal.11, id=12)
+}"#;
+        let rule = MatchRewriteRule::from_strings("concat(literal(L))", "L").unwrap();
         let err = rule
             .apply_to_fn(&parse_fn(ir_text), RewriteApplyMode::FirstMatch)
             .unwrap_err();
