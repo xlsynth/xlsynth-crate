@@ -86,6 +86,9 @@ TOML file containing `dso_path` and `dslx_stdlib_path`.
 - `XLSYNTH_ARTIFACT_CONFIG` itself must be an absolute path.
 - `dso_path` and `dslx_stdlib_path` inside that TOML may be absolute paths, or relative paths
   resolved from the TOML file's directory.
+- Build systems that declare the shared library separately can set
+  `XLSYNTH_SYS_LINK_MODE=declared` so `build.rs` records the artifact paths without emitting its
+  own native `-l...` directives.
 
 ## Development Notes
 
