@@ -14,6 +14,29 @@ struct ArtifactPaths {
     dslx_stdlib_path: String,
 }
 
+#[derive(Clone, Copy)]
+enum LinkDirectiveMode {
+    Native,
+    Declared,
+}
+
+fn parse_link_directive_mode() -> LinkDirectiveMode {
+    match std::env::var("XLSYNTH_SYS_LINK_MODE") {
+        Ok(value) => match value.as_str() {
+            "native" => LinkDirectiveMode::Native,
+            "declared" => LinkDirectiveMode::Declared,
+            _ => panic!(
+                "XLSYNTH_SYS_LINK_MODE must be one of 'native' or 'declared'; got {:?}",
+                value
+            ),
+        },
+        Err(std::env::VarError::NotPresent) => LinkDirectiveMode::Native,
+        Err(std::env::VarError::NotUnicode(value)) => {
+            panic!("XLSYNTH_SYS_LINK_MODE must be valid UTF-8; got {:?}", value)
+        }
+    }
+}
+
 fn xlsynth_release_tuple_from_tag(tag: &str) -> (u32, u32, u32, u32) {
     let s = tag.strip_prefix('v').unwrap_or(tag);
     let mut dash_split = s.splitn(2, '-');
@@ -620,13 +643,23 @@ fn emit_explicit_artifact_override(
     out_dir: &Path,
     artifact_paths: &ArtifactPaths,
     source_name: &str,
+    link_directive_mode: LinkDirectiveMode,
 ) {
     println!(
         "cargo:info=Using {} with DSO {:?} and DSLX stdlib {:?}",
         source_name, artifact_paths.dso_path, artifact_paths.dslx_stdlib_path
     );
     write_artifact_paths_rs(out_dir, artifact_paths);
-    emit_link_directives_for_explicit_dso(Path::new(&artifact_paths.dso_path));
+    let dso_path = Path::new(&artifact_paths.dso_path);
+    match link_directive_mode {
+        LinkDirectiveMode::Native => emit_link_directives_for_explicit_dso(dso_path),
+        LinkDirectiveMode::Declared => {
+            println!(
+                "cargo:info=Skipping native link directives because XLSYNTH_SYS_LINK_MODE=declared"
+            );
+            println!("cargo:DSO_PATH={}", dso_path.display());
+        }
+    }
 }
 
 /// Downloads the dynamic shared object for XLS from the release page if it does
@@ -695,10 +728,12 @@ fn main() {
     println!("cargo:rerun-if-env-changed=XLSYNTH_ARTIFACT_CONFIG");
     println!("cargo:rerun-if-env-changed=XLS_DSO_PATH");
     println!("cargo:rerun-if-env-changed=DSLX_STDLIB_PATH");
+    println!("cargo:rerun-if-env-changed=XLSYNTH_SYS_LINK_MODE");
     println!("cargo:rerun-if-env-changed=CARGO_NET_OFFLINE");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     std::fs::create_dir_all(&out_dir).expect("OUT_DIR should be creatable");
+    let link_directive_mode = parse_link_directive_mode();
 
     // Detect if building on docs.rs
     if std::env::var("DOCS_RS").is_ok() {
@@ -732,7 +767,12 @@ fn main() {
     // variables. The config path itself must be absolute, while TOML entries
     // may still be relative to that file's directory.
     if let Some(artifact_paths) = load_artifact_paths_from_config() {
-        emit_explicit_artifact_override(&out_dir, &artifact_paths, "XLSYNTH_ARTIFACT_CONFIG");
+        emit_explicit_artifact_override(
+            &out_dir,
+            &artifact_paths,
+            "XLSYNTH_ARTIFACT_CONFIG",
+            link_directive_mode,
+        );
         return;
     }
 
@@ -772,6 +812,7 @@ fn main() {
             &out_dir,
             &artifact_paths,
             "paired XLS_DSO_PATH / DSLX_STDLIB_PATH override",
+            link_directive_mode,
         );
         return;
     }
