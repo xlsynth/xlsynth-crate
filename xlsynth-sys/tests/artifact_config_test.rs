@@ -215,9 +215,11 @@ fn run_nested_cargo_with_artifact_config(
     temp_crate_dir: &Path,
     target_dir: &Path,
     artifact_config_path: &OsStr,
+    link_mode: Option<&str>,
 ) -> std::process::Output {
     let cargo_binary = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    Command::new(&cargo_binary)
+    let mut command = Command::new(&cargo_binary);
+    command
         .arg("run")
         .arg("--quiet")
         .arg("--offline")
@@ -226,14 +228,16 @@ fn run_nested_cargo_with_artifact_config(
         .env("XLSYNTH_ARTIFACT_CONFIG", artifact_config_path)
         .env("XLS_DSO_PATH", "/definitely/not/the/configured/libxls.so")
         .env("DSLX_STDLIB_PATH", "/definitely/not/the/configured/stdlib/")
-        .current_dir(temp_crate_dir)
-        .output()
-        .unwrap_or_else(|err| {
-            panic!(
-                "Failed to run nested cargo for artifact-config test: {}",
-                err
-            )
-        })
+        .current_dir(temp_crate_dir);
+    if let Some(link_mode) = link_mode {
+        command.env("XLSYNTH_SYS_LINK_MODE", link_mode);
+    }
+    command.output().unwrap_or_else(|err| {
+        panic!(
+            "Failed to run nested cargo for artifact-config test: {}",
+            err
+        )
+    })
 }
 
 #[test]
@@ -266,6 +270,7 @@ fn artifact_config_resolves_relative_toml_paths_from_absolute_config_path() {
         &temp_crate_dir,
         &target_dir,
         config_path.as_os_str(),
+        None,
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -333,6 +338,7 @@ fn artifact_config_requires_absolute_config_path() {
         &temp_crate_dir,
         &target_dir,
         OsStr::new("config/artifact-config.toml"),
+        None,
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -358,6 +364,84 @@ fn artifact_config_requires_absolute_config_path() {
     assert!(
         !stderr.contains("No such file or directory"),
         "Nested cargo stderr should reject relative XLSYNTH_ARTIFACT_CONFIG directly instead of failing with a file lookup error.\nstdout:\n{}\nstderr:\n{}",
+        stdout,
+        stderr
+    );
+
+    fs::remove_dir_all(&temp_dir).ok();
+}
+
+#[test]
+fn artifact_config_declared_mode_rejects_non_library_dso_paths() {
+    let temp_dir = make_temp_dir();
+    let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let temp_crate_dir = temp_dir.join("artifact-config-declared-invalid-dso");
+    let config_root_dir = temp_dir.join("config-root");
+    let config_artifacts_dir = config_root_dir.join("artifacts");
+    let (_expected_dso_path, expected_stdlib_path) = copy_config_artifacts(&config_artifacts_dir);
+    let invalid_dso_dir = config_artifacts_dir.join("not-a-lib-dir");
+    fs::create_dir_all(&invalid_dso_dir).unwrap_or_else(|err| {
+        panic!(
+            "Failed to create invalid DSO directory {}: {}",
+            invalid_dso_dir.display(),
+            err
+        )
+    });
+    let config_path = config_root_dir.join("artifact-config.toml");
+    write_artifact_config(
+        &config_path,
+        invalid_dso_dir
+            .strip_prefix(&config_root_dir)
+            .unwrap_or_else(|err| {
+                panic!(
+                    "Failed to relativize invalid DSO directory {} against {}: {}",
+                    invalid_dso_dir.display(),
+                    config_root_dir.display(),
+                    err
+                )
+            })
+            .to_string_lossy()
+            .as_ref(),
+        expected_stdlib_path
+            .strip_prefix(&config_root_dir)
+            .unwrap_or_else(|err| {
+                panic!(
+                    "Failed to relativize stdlib path {} against {}: {}",
+                    expected_stdlib_path.display(),
+                    config_root_dir.display(),
+                    err
+                )
+            })
+            .to_string_lossy()
+            .as_ref(),
+    );
+    write_smoke_crate(&temp_crate_dir, &manifest_path);
+
+    let target_dir = temp_dir.join("declared-invalid-dso-target");
+    let output = run_nested_cargo_with_artifact_config(
+        &temp_crate_dir,
+        &target_dir,
+        config_path.as_os_str(),
+        Some("declared"),
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "Nested cargo run unexpectedly succeeded with a directory DSO path in declared mode.\nstdout:\n{}\nstderr:\n{}",
+        stdout,
+        stderr
+    );
+    assert!(
+        stderr.contains("Explicit XLS DSO path must end with a shared library extension"),
+        "Nested cargo stderr did not explain the invalid explicit DSO path.\nstdout:\n{}\nstderr:\n{}",
+        stdout,
+        stderr
+    );
+    assert!(
+        !stderr.contains("Skipping native link directives"),
+        "Declared-mode validation should fail before the build script reports skipped link directives.\nstdout:\n{}\nstderr:\n{}",
         stdout,
         stderr
     );

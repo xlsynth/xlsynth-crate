@@ -14,6 +14,12 @@ struct ArtifactPaths {
     dslx_stdlib_path: String,
 }
 
+struct ExplicitDsoPath {
+    link_name: String,
+    path: PathBuf,
+    parent_dir: PathBuf,
+}
+
 #[derive(Clone, Copy)]
 enum LinkDirectiveMode {
     Native,
@@ -596,7 +602,7 @@ fn load_artifact_paths_from_config() -> Option<ArtifactPaths> {
     })
 }
 
-fn emit_link_directives_for_explicit_dso(dso_path: &Path) {
+fn validate_explicit_dso_path(dso_path: &Path) -> ExplicitDsoPath {
     let dso_dir = dso_path.parent().unwrap_or_else(|| {
         panic!(
             "Explicit XLS DSO path must have a parent directory: {}",
@@ -632,11 +638,24 @@ fn emit_link_directives_for_explicit_dso(dso_path: &Path) {
         "DSO name should start with 'lib'; dso_name: {:?}",
         dso_name
     );
-    let dso_name = &dso_name[3..];
-    println!("cargo:rustc-link-search=native={}", dso_dir.display());
-    println!("cargo:rustc-link-lib=dylib={dso_name}");
-    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", dso_dir.display());
-    println!("cargo:DSO_PATH={}", dso_path.display());
+    ExplicitDsoPath {
+        link_name: dso_name[3..].to_string(),
+        path: dso_path.to_path_buf(),
+        parent_dir: dso_dir.to_path_buf(),
+    }
+}
+
+fn emit_link_directives_for_explicit_dso(dso_path: &ExplicitDsoPath) {
+    println!(
+        "cargo:rustc-link-search=native={}",
+        dso_path.parent_dir.display()
+    );
+    println!("cargo:rustc-link-lib=dylib={}", dso_path.link_name);
+    println!(
+        "cargo:rustc-link-arg=-Wl,-rpath,{}",
+        dso_path.parent_dir.display()
+    );
+    println!("cargo:DSO_PATH={}", dso_path.path.display());
 }
 
 fn emit_explicit_artifact_override(
@@ -650,14 +669,14 @@ fn emit_explicit_artifact_override(
         source_name, artifact_paths.dso_path, artifact_paths.dslx_stdlib_path
     );
     write_artifact_paths_rs(out_dir, artifact_paths);
-    let dso_path = Path::new(&artifact_paths.dso_path);
+    let dso_path = validate_explicit_dso_path(Path::new(&artifact_paths.dso_path));
     match link_directive_mode {
-        LinkDirectiveMode::Native => emit_link_directives_for_explicit_dso(dso_path),
+        LinkDirectiveMode::Native => emit_link_directives_for_explicit_dso(&dso_path),
         LinkDirectiveMode::Declared => {
             println!(
                 "cargo:info=Skipping native link directives because XLSYNTH_SYS_LINK_MODE=declared"
             );
-            println!("cargo:DSO_PATH={}", dso_path.display());
+            println!("cargo:DSO_PATH={}", dso_path.path.display());
         }
     }
 }
