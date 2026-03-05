@@ -457,7 +457,7 @@ pub struct CDslxInvocationRewriteRule {
     pub to_callee_env: *const CDslxParametricEnv,
 }
 
-extern "C" {
+unsafe extern "C" {
     pub fn xls_convert_dslx_to_ir(
         dslx: *const std::os::raw::c_char,
         path: *const std::os::raw::c_char,
@@ -2558,7 +2558,7 @@ pub type VastModulePortDirection = i32;
 pub const XLS_VAST_MODULE_PORT_DIRECTION_INPUT: VastModulePortDirection = 0;
 pub const XLS_VAST_MODULE_PORT_DIRECTION_OUTPUT: VastModulePortDirection = 1;
 
-extern "C" {
+unsafe extern "C" {
     // -- Module port inspection APIs
     pub fn xls_vast_verilog_module_get_ports(
         m: *mut CVastModule,
