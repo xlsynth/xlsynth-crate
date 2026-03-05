@@ -70,8 +70,8 @@ jobs:
           else
             echo ".git directory found, skipping init."
           fi
-          python3 -m pip install --upgrade pip
-          pip3 install pre-commit
+          python3 -m venv .venv-precommit
+          ./.venv-precommit/bin/pip install pre-commit
           # Configure git for pre-commit install
           echo "Configuring git safe directory and user..."
           git config --global --add safe.directory ${GITHUB_WORKSPACE}
@@ -87,19 +87,58 @@ jobs:
           echo "Git top level:"
           git rev-parse --show-toplevel
           echo "--- End Git Diagnostics ---"
-          pre-commit install
+          ./.venv-precommit/bin/pre-commit install
 
       - name: Run pre-commit (which can include your rustfmt checks, etc.)
         env:
           SKIP: no-commit-to-branch
         run: |
-          pre-commit run --all-files
+          ./.venv-precommit/bin/pre-commit run --all-files
 
       - name: Run version check test
         run: cargo test --test version_test
 
   # -----------------------------------------------------------
-  # 2) Build/test on Ubuntu 22.04 and 24.04
+  # 2) xlsynth-vastly optional oracle lane (iverilog/vvp)
+  # -----------------------------------------------------------
+  xlsynth-vastly-iverilog-tests:
+    needs: [lint-check-ubuntu]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v2
+
+      - name: Install libc++ runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget gnupg curl cmake
+          cd /tmp/
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 18
+          sudo apt-get install -y libc++-18-dev libc++abi-18-dev
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          profile: minimal
+          override: true
+
+      - name: Install Icarus Verilog
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iverilog
+          iverilog -V
+          vvp -V
+
+      - name: Run xlsynth-vastly oracle tests
+        run: |
+          cargo test -p xlsynth-vastly --features iverilog-tests
+
+  # -----------------------------------------------------------
+  # 3) Build/test on Ubuntu 22.04 and 24.04
   # -----------------------------------------------------------
   build-and-test-ubuntu:
     needs: [lint-check-ubuntu] # Ensure lint checks pass first
@@ -248,7 +287,7 @@ jobs:
 
 
   # -----------------------------------------------------------
-  # 3) Ubuntu 20.04 job (no Slang download)
+  # 4) Ubuntu 20.04 job (no Slang download)
   # -----------------------------------------------------------
   build-and-test-ubuntu-2004-no-slang:
     needs: [lint-check-ubuntu]

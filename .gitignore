@@ -18,3 +18,4 @@ slang
 .venv
 .spr.yml
 **/abc.history
+*.vcd
