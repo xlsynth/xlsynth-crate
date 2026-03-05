@@ -316,6 +316,9 @@ fn exec_observers<W: Write>(
         return Ok(());
     }
     let mut env = Env::new();
+    for (k, v) in &m.combo.consts {
+        env.insert(k.clone(), v.clone());
+    }
     for (k, v) in values {
         env.insert(k.clone(), v.clone());
     }

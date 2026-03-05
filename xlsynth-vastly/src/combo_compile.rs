@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::Result;
 use crate::Signedness;
+use crate::Value4;
 use crate::ast::Expr;
 use crate::ast_spanned::SpannedExpr;
 use crate::ast_spanned::SpannedExprKind;
@@ -92,6 +93,7 @@ pub enum ComboFunctionImpl {
 #[derive(Debug, Clone)]
 pub struct CompiledComboModule {
     pub module_name: String,
+    pub consts: BTreeMap<String, Value4>,
     pub input_ports: Vec<Port>,
     pub output_ports: Vec<Port>,
     pub decls: BTreeMap<String, DeclInfo>,
@@ -276,6 +278,7 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
 
     Ok(CompiledComboModule {
         module_name,
+        consts: parsed.params.clone(),
         input_ports,
         output_ports,
         decls,
@@ -845,6 +848,10 @@ fn denormalize_expr(expr: Expr, placeholders: &BTreeMap<String, String>) -> Expr
             count: Box::new(denormalize_expr(*count, placeholders)),
             expr: Box::new(denormalize_expr(*expr, placeholders)),
         },
+        Expr::Cast { width, expr } => Expr::Cast {
+            width: Box::new(denormalize_expr(*width, placeholders)),
+            expr: Box::new(denormalize_expr(*expr, placeholders)),
+        },
         Expr::Index { expr, index } => Expr::Index {
             expr: Box::new(denormalize_expr(*expr, placeholders)),
             index: Box::new(denormalize_expr(*index, placeholders)),
@@ -904,6 +911,10 @@ fn denormalize_spanned_expr(expr: &mut SpannedExpr, placeholders: &BTreeMap<Stri
         }
         SpannedExprKind::Replicate { count, expr } => {
             denormalize_spanned_expr(count, placeholders);
+            denormalize_spanned_expr(expr, placeholders);
+        }
+        SpannedExprKind::Cast { width, expr } => {
+            denormalize_spanned_expr(width, placeholders);
             denormalize_spanned_expr(expr, placeholders);
         }
         SpannedExprKind::Index { expr, index } => {

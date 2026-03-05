@@ -377,6 +377,7 @@ pub fn compile_pipeline_module_with_defines(
 
     let combo = CompiledComboModule {
         module_name: module_name.clone(),
+        consts: parsed.params.clone(),
         input_ports,
         output_ports,
         decls: decls.clone(),
@@ -412,6 +413,7 @@ pub fn compile_pipeline_module_with_defines(
         seqs.push(CompiledModule {
             module_name: module_name.clone(),
             clk_name: af.clk_name,
+            consts: parsed.params.clone(),
             decls: decls.clone(),
             state_regs,
             body: af.body,

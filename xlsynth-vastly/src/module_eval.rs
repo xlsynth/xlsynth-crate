@@ -16,6 +16,9 @@ use crate::sv_ast::Stmt;
 pub fn step_module(m: &CompiledModule, inputs: &crate::Env, state: &State) -> Result<State> {
     // Build evaluation environment: inputs shadow state (as per plan default).
     let mut env = crate::Env::new();
+    for (k, v) in m.consts.iter() {
+        env.insert(k.clone(), v.clone());
+    }
     for (k, v) in state.iter() {
         env.insert(k.clone(), v.clone());
     }
@@ -27,8 +30,15 @@ pub fn step_module(m: &CompiledModule, inputs: &crate::Env, state: &State) -> Re
 }
 
 pub fn step_module_with_env(m: &CompiledModule, env: &crate::Env, state: &State) -> Result<State> {
+    let mut exec_env = crate::Env::new();
+    for (k, v) in m.consts.iter() {
+        exec_env.insert(k.clone(), v.clone());
+    }
+    for (k, v) in env.iter() {
+        exec_env.insert(k.clone(), v.clone());
+    }
     let mut pending: BTreeMap<String, PendingBits> = BTreeMap::new();
-    exec_stmt(&m.body, env, m, &mut pending)?;
+    exec_stmt(&m.body, &exec_env, m, &mut pending)?;
 
     let mut next = state.clone();
     for (reg, pb) in pending {
@@ -248,6 +258,11 @@ fn render_vexpr(e: &VExpr) -> String {
             let c = render_vexpr(count);
             let ee = render_vexpr(expr);
             format!("{{{c}{{{ee}}}}}")
+        }
+        VExpr::Cast { width, expr } => {
+            let ww = render_vexpr(width);
+            let ee = render_vexpr(expr);
+            format!("({ww})'({ee})")
         }
         VExpr::Index { expr, index } => {
             let ee = render_vexpr(expr);

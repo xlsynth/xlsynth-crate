@@ -97,6 +97,9 @@ pub fn eval_combo(
     for (name, info) in &m.decls {
         env.insert(name.clone(), x_value(info.width, info.signedness));
     }
+    for (name, value) in &m.consts {
+        env.insert(name.clone(), value.clone());
+    }
     // Drive inputs.
     for p in &m.input_ports {
         let v = inputs
@@ -113,8 +116,10 @@ pub fn eval_combo(
 
     // Snapshot.
     let mut out: BTreeMap<String, Value4> = BTreeMap::new();
-    for (k, v) in env.iter() {
-        out.insert(k.clone(), v.clone());
+    for name in m.decls.keys() {
+        if let Some(v) = env.get(name) {
+            out.insert(name.clone(), v.clone());
+        }
     }
     Ok(out)
 }
@@ -129,6 +134,9 @@ pub fn eval_combo_seeded(
     for (name, info) in &m.decls {
         env.insert(name.clone(), x_value(info.width, info.signedness));
     }
+    for (name, value) in &m.consts {
+        env.insert(name.clone(), value.clone());
+    }
     // Overlay seed values.
     for (k, v) in seed.iter() {
         let info = m
@@ -142,8 +150,10 @@ pub fn eval_combo_seeded(
 
     // Snapshot.
     let mut out: BTreeMap<String, Value4> = BTreeMap::new();
-    for (k, v) in env.iter() {
-        out.insert(k.clone(), v.clone());
+    for name in m.decls.keys() {
+        if let Some(v) = env.get(name) {
+            out.insert(name.clone(), v.clone());
+        }
     }
     Ok(out)
 }
@@ -176,6 +186,9 @@ pub fn eval_combo_seeded_with_coverage(
     for (name, info) in &m.decls {
         env.insert(name.clone(), x_value(info.width, info.signedness));
     }
+    for (name, value) in &m.consts {
+        env.insert(name.clone(), value.clone());
+    }
     for (k, v) in seed.iter() {
         let info = m
             .decls
@@ -203,8 +216,10 @@ pub fn eval_combo_seeded_with_coverage(
         env.insert(a.lhs.clone(), coerce_to_declinfo(&rhs_v, info));
     }
     let mut out: BTreeMap<String, Value4> = BTreeMap::new();
-    for (k, v) in env.iter() {
-        out.insert(k.clone(), v.clone());
+    for name in m.decls.keys() {
+        if let Some(v) = env.get(name) {
+            out.insert(name.clone(), v.clone());
+        }
     }
     Ok(out)
 }
@@ -289,6 +304,15 @@ fn eval_spanned_expr_with_funcs(
             let count_u = replication_count_to_u32(&c)?;
             let v = eval_spanned_expr_with_funcs(expr, env, funcs, None, None, cov, src, fn_meta)?;
             Ok(Value4::replicate(count_u, &v))
+        }
+        SpannedExprKind::Cast { width, expr } => {
+            let width_v = eval_spanned_expr_with_funcs(width, env, funcs, None, cov, src, fn_meta)?;
+            let width_u = width_v
+                .to_u32_if_known()
+                .ok_or_else(|| Error::Parse("cast width must be known".to_string()))?;
+            let v =
+                eval_spanned_expr_with_funcs(expr, env, funcs, Some(width_u), cov, src, fn_meta)?;
+            Ok(v.resize(width_u))
         }
         SpannedExprKind::Index { expr, index } => {
             let v = eval_spanned_expr_with_funcs(expr, env, funcs, None, None, cov, src, fn_meta)?;
@@ -787,6 +811,10 @@ fn collect_idents(e: &Expr, out: &mut BTreeSet<String>) {
         }
         Expr::Replicate { count, expr } => {
             collect_idents(count, out);
+            collect_idents(expr, out);
+        }
+        Expr::Cast { width, expr } => {
+            collect_idents(width, out);
             collect_idents(expr, out);
         }
         Expr::Index { expr, index } => {

@@ -7,6 +7,7 @@ use crate::Result;
 pub enum Token {
     Ident(String),
     Number(String),
+    Apostrophe,
     LParen,
     RParen,
     LBrace,
@@ -63,7 +64,14 @@ impl<'a> Lexer<'a> {
         let b = self.peek_byte().unwrap();
         match b {
             b'$' => Ok(Token::Ident(self.lex_dollar_ident()?)),
-            b'\'' => Ok(Token::Number(self.lex_numberish())),
+            b'\'' => {
+                if self.apostrophe_starts_cast(self.idx) {
+                    self.idx += 1;
+                    Ok(Token::Apostrophe)
+                } else {
+                    Ok(Token::Number(self.lex_numberish()))
+                }
+            }
             b'(' => {
                 self.idx += 1;
                 Ok(Token::LParen)
@@ -261,6 +269,9 @@ impl<'a> Lexer<'a> {
             if c.is_whitespace() {
                 break;
             }
+            if c == '\'' && self.apostrophe_starts_cast(self.idx) {
+                break;
+            }
             // Stop on clear expression delimiters.
             if matches!(c, '(' | ')' | '{' | '}' | '[' | ']' | ',' | ':') {
                 break;
@@ -310,5 +321,18 @@ impl<'a> Lexer<'a> {
 
     fn peek_char(&self) -> Option<char> {
         self.s[self.idx..].chars().next()
+    }
+
+    fn apostrophe_starts_cast(&self, apostrophe_idx: usize) -> bool {
+        let mut idx = apostrophe_idx + 1;
+        while idx < self.s.len() {
+            let c = self.s[idx..].chars().next().unwrap();
+            if c.is_whitespace() {
+                idx += c.len_utf8();
+                continue;
+            }
+            return c == '(';
+        }
+        false
     }
 }

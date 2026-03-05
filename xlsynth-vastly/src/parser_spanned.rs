@@ -527,6 +527,23 @@ impl<'a> Parser<'a> {
         let mut base = self.parse_primary()?;
         loop {
             match self.cur.tok.clone() {
+                Token::Apostrophe => {
+                    let _ = self.expect_and_bump(Token::Apostrophe)?;
+                    let _ = self.expect_and_bump(Token::LParen)?;
+                    let inner = self.parse_ternary()?;
+                    let rpar = self.expect_and_bump(Token::RParen)?;
+                    let span = Span {
+                        start: base.span.start,
+                        end: rpar.end,
+                    };
+                    base = SpannedExpr {
+                        span,
+                        kind: SpannedExprKind::Cast {
+                            width: Box::new(base),
+                            expr: Box::new(inner),
+                        },
+                    };
+                }
                 Token::LBracket => {
                     let lbr = self.expect_and_bump(Token::LBracket)?;
                     let first = self.parse_ternary()?;

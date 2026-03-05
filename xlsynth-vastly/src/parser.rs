@@ -468,50 +468,62 @@ impl<'a> Parser<'a> {
             }
         };
 
-        // Postfix selects: a[expr] or a[msb:lsb]
+        // Postfix sized-casts/selects: a'(expr), a[expr], a[msb:lsb]
         loop {
-            // Allow calling the result of a call? (Not needed for v1.)
-            if self.cur != Token::LBracket {
-                break;
-            }
-            self.bump()?;
-            let idx_or_msb = self.parse_ternary()?;
-            if self.cur == Token::Colon {
-                self.bump()?;
-                let lsb = self.parse_ternary()?;
-                self.expect_and_bump(Token::RBracket)?;
-                if !expr_is_constant(&idx_or_msb) || !expr_is_constant(&lsb) {
-                    return Err(Error::Parse(
-                        "part-select bounds must be constant expressions".to_string(),
-                    ));
+            match self.cur {
+                Token::Apostrophe => {
+                    self.bump()?;
+                    self.expect_and_bump(Token::LParen)?;
+                    let inner = self.parse_ternary()?;
+                    self.expect_and_bump(Token::RParen)?;
+                    expr = Expr::Cast {
+                        width: Box::new(expr),
+                        expr: Box::new(inner),
+                    };
                 }
-                expr = Expr::Slice {
-                    expr: Box::new(expr),
-                    msb: Box::new(idx_or_msb),
-                    lsb: Box::new(lsb),
-                };
-            } else if matches!(self.cur, Token::PlusColon | Token::MinusColon) {
-                let upward = self.cur == Token::PlusColon;
-                self.bump()?;
-                let width = self.parse_ternary()?;
-                self.expect_and_bump(Token::RBracket)?;
-                if !expr_is_constant(&width) {
-                    return Err(Error::Parse(
-                        "indexed part-select width must be a constant expression".to_string(),
-                    ));
+                Token::LBracket => {
+                    self.bump()?;
+                    let idx_or_msb = self.parse_ternary()?;
+                    if self.cur == Token::Colon {
+                        self.bump()?;
+                        let lsb = self.parse_ternary()?;
+                        self.expect_and_bump(Token::RBracket)?;
+                        if !expr_is_constant(&idx_or_msb) || !expr_is_constant(&lsb) {
+                            return Err(Error::Parse(
+                                "part-select bounds must be constant expressions".to_string(),
+                            ));
+                        }
+                        expr = Expr::Slice {
+                            expr: Box::new(expr),
+                            msb: Box::new(idx_or_msb),
+                            lsb: Box::new(lsb),
+                        };
+                    } else if matches!(self.cur, Token::PlusColon | Token::MinusColon) {
+                        let upward = self.cur == Token::PlusColon;
+                        self.bump()?;
+                        let width = self.parse_ternary()?;
+                        self.expect_and_bump(Token::RBracket)?;
+                        if !expr_is_constant(&width) {
+                            return Err(Error::Parse(
+                                "indexed part-select width must be a constant expression"
+                                    .to_string(),
+                            ));
+                        }
+                        expr = Expr::IndexedSlice {
+                            expr: Box::new(expr),
+                            base: Box::new(idx_or_msb),
+                            width: Box::new(width),
+                            upward,
+                        };
+                    } else {
+                        self.expect_and_bump(Token::RBracket)?;
+                        expr = Expr::Index {
+                            expr: Box::new(expr),
+                            index: Box::new(idx_or_msb),
+                        };
+                    }
                 }
-                expr = Expr::IndexedSlice {
-                    expr: Box::new(expr),
-                    base: Box::new(idx_or_msb),
-                    width: Box::new(width),
-                    upward,
-                };
-            } else {
-                self.expect_and_bump(Token::RBracket)?;
-                expr = Expr::Index {
-                    expr: Box::new(expr),
-                    index: Box::new(idx_or_msb),
-                };
+                _ => break,
             }
         }
 

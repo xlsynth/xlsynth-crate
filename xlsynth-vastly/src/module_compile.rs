@@ -20,6 +20,7 @@ pub type State = BTreeMap<String, Value4>;
 pub struct CompiledModule {
     pub module_name: String,
     pub clk_name: String,
+    pub consts: BTreeMap<String, Value4>,
     pub decls: BTreeMap<String, DeclInfo>,
     pub state_regs: BTreeSet<String>,
     pub body: Stmt,
@@ -64,6 +65,7 @@ pub fn compile_module(src: &str) -> Result<CompiledModule> {
     Ok(CompiledModule {
         module_name: m.name,
         clk_name: m.always_ff.clk_name,
+        consts: m.params,
         decls,
         state_regs,
         body: m.always_ff.body,
