@@ -534,7 +534,8 @@ fn parse_verilog_number(s: &str) -> Result<Value4> {
         return parse_based_digits(width_opt, signedness, base, &digits);
     }
 
-    // Unsized decimal: treat as 32-bit signed (Verilog-ish).
+    // Unsized decimal literals are at least 32 bits and signed unless marked
+    // otherwise.
     Value4::parse_numeric_token(32, Signedness::Signed, s)
 }
 
@@ -600,15 +601,19 @@ where
     }
 
     let implied_width = bits_msb_first.len() as u32;
-    let width = width_opt.unwrap_or(implied_width);
+    let width = width_opt.unwrap_or(implied_width.max(32));
     validate_literal_width(width, digits)?;
 
     // If specified width is smaller, truncate from the left (MSB side).
     let bits_msb_first = if width < implied_width {
         bits_msb_first[(implied_width - width) as usize..].to_vec()
     } else if width > implied_width {
-        // Extend on the left with zeros per Verilog constant sizing (simplified).
-        let mut ext = vec![LogicBit::Zero; (width - implied_width) as usize];
+        let ext_bit = match bits_msb_first.first().copied().unwrap_or(LogicBit::Zero) {
+            LogicBit::X => LogicBit::X,
+            LogicBit::Z => LogicBit::Z,
+            LogicBit::Zero | LogicBit::One => LogicBit::Zero,
+        };
+        let mut ext = vec![ext_bit; (width - implied_width) as usize];
         ext.extend(bits_msb_first);
         ext
     } else {

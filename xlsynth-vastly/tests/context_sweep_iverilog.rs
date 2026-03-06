@@ -85,6 +85,39 @@ fn mk_unsigned_value_from_msb(bits_msb: &str) -> Value4 {
 }
 
 #[test]
+fn mixed_signedness_equality_context_sweep_matches_oracle() {
+    for &lhs_w in &[4_u32, 8, 12] {
+        for &rhs_w in &[8_u32, 16, 33] {
+            if rhs_w <= lhs_w {
+                continue;
+            }
+            let lhs = format!("{}'sb{}", lhs_w, "1".repeat(lhs_w as usize));
+            let rhs_all_ones = format!("{}'b{}", rhs_w, "1".repeat(rhs_w as usize));
+            let rhs_low_ones = mk_u_dec(rhs_w, (1_u32 << lhs_w) - 1);
+            let rhs_sum = mk_u_dec(rhs_w, 1_u32 << lhs_w);
+
+            let direct_false = format!("(({lhs}) == ({rhs_all_ones}))");
+            let direct_case_false = format!("(({lhs}) === ({rhs_all_ones}))");
+            let direct_true = format!("(({lhs}) == ({rhs_low_ones}))");
+            let direct_case_true = format!("(({lhs}) === ({rhs_low_ones}))");
+            let arith_true = format!("(((({lhs}) + 4'sd1)) == ({rhs_sum}))");
+            let arith_case_true = format!("(((({lhs}) + 4'sd1)) === ({rhs_sum}))");
+
+            let false_label = format!("mixed-eq-false lw={lhs_w} rw={rhs_w}");
+            let true_label = format!("mixed-eq-true lw={lhs_w} rw={rhs_w}");
+            let arith_label = format!("mixed-eq-arith lw={lhs_w} rw={rhs_w}");
+
+            assert_eval_matches_oracle(&direct_false, &false_label);
+            assert_eval_matches_oracle(&direct_case_false, &false_label);
+            assert_eval_matches_oracle(&direct_true, &true_label);
+            assert_eval_matches_oracle(&direct_case_true, &true_label);
+            assert_eval_matches_oracle(&arith_true, &arith_label);
+            assert_eval_matches_oracle(&arith_case_true, &arith_label);
+        }
+    }
+}
+
+#[test]
 fn arithmetic_context_sweep_matches_oracle() {
     let widths = [1_u32, 8, 32, 33];
     let parent_widths = [8_u32, 32, 44];

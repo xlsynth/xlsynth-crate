@@ -545,21 +545,26 @@ fn eval_ast_with_calls_inner(
                 | BinaryOp::BitXor => {
                     Some(expected_signedness.unwrap_or_else(|| merged_signedness(&a0, &b0)))
                 }
-                BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-                    Some(merged_signedness(&a0, &b0))
-                }
-                BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sshr => expected_signedness,
-                BinaryOp::LogicalAnd
-                | BinaryOp::LogicalOr
+                BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge
                 | BinaryOp::Eq
                 | BinaryOp::Neq
                 | BinaryOp::CaseEq
-                | BinaryOp::CaseNeq => None,
+                | BinaryOp::CaseNeq => Some(merged_signedness(&a0, &b0)),
+                BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sshr => expected_signedness,
+                BinaryOp::LogicalAnd | BinaryOp::LogicalOr => None,
             };
             let op_lhs_expected_signedness_rhs_expected_signedness = match op {
-                BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-                    (op_expected_signedness, op_expected_signedness)
-                }
+                BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge
+                | BinaryOp::Eq
+                | BinaryOp::Neq
+                | BinaryOp::CaseEq
+                | BinaryOp::CaseNeq => (op_expected_signedness, op_expected_signedness),
                 _ => binary_operand_expected_signednesses(*op, op_expected_signedness),
             };
             let needs_recontext = op_expected_signedness != expected_signedness

@@ -582,8 +582,16 @@ impl Value4 {
 
     pub fn eq_logical(&self, rhs: &Value4) -> Value4 {
         let w = self.width.max(rhs.width);
-        let a = self.resize(w);
-        let b = rhs.resize(w);
+        let use_signed =
+            self.signedness == Signedness::Signed && rhs.signedness == Signedness::Signed;
+        let (a, b) = if use_signed {
+            (self.resize(w), rhs.resize(w))
+        } else {
+            (
+                self.with_signedness(Signedness::Unsigned).resize(w),
+                rhs.with_signedness(Signedness::Unsigned).resize(w),
+            )
+        };
 
         let mut saw_unknown = false;
         for i in 0..w {
@@ -615,8 +623,16 @@ impl Value4 {
 
     pub fn eq_case(&self, rhs: &Value4) -> Value4 {
         let w = self.width.max(rhs.width);
-        let a = self.resize(w);
-        let b = rhs.resize(w);
+        let use_signed =
+            self.signedness == Signedness::Signed && rhs.signedness == Signedness::Signed;
+        let (a, b) = if use_signed {
+            (self.resize(w), rhs.resize(w))
+        } else {
+            (
+                self.with_signedness(Signedness::Unsigned).resize(w),
+                rhs.with_signedness(Signedness::Unsigned).resize(w),
+            )
+        };
 
         for i in 0..w {
             if a.bit(i) != b.bit(i) {

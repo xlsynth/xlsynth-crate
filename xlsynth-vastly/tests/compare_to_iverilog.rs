@@ -91,6 +91,28 @@ fn unbased_unsized_literals_match_oracle_in_equality_contexts() {
 }
 
 #[test]
+fn based_literal_sizing_and_unknown_fill_match_oracle() {
+    let env = Env::new();
+
+    assert_eval_matches_oracle("'h1", &env);
+    assert_eval_matches_oracle("'hx", &env);
+    assert_eval_matches_oracle("'bz", &env);
+    assert_eval_matches_oracle("8'hx", &env);
+}
+
+#[test]
+fn mixed_signedness_equality_uses_common_context_matches_oracle() {
+    let env = Env::new();
+
+    assert_eval_matches_oracle("4'sb1111 == 8'd255", &env);
+    assert_eval_matches_oracle("4'sb1111 === 8'd255", &env);
+    assert_eval_matches_oracle("4'sb1111 == 8'd15", &env);
+    assert_eval_matches_oracle("4'sb1111 === 8'd15", &env);
+    assert_eval_matches_oracle("((4'sb1111 + 4'sd1) == 8'd16)", &env);
+    assert_eval_matches_oracle("((4'sb1111 + 4'sd1) === 8'd16)", &env);
+}
+
+#[test]
 fn logical_ops_4state_truth_tables() {
     let env = Env::new();
 
