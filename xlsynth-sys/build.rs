@@ -681,6 +681,28 @@ fn emit_explicit_artifact_override(
     }
 }
 
+fn emit_link_directives_for_managed_dso(
+    out_dir: &Path,
+    link_name: &str,
+    include_rpath: bool,
+    link_directive_mode: LinkDirectiveMode,
+) {
+    match link_directive_mode {
+        LinkDirectiveMode::Native => {
+            if include_rpath {
+                println!("cargo:rustc-link-arg=-Wl,-rpath,{}", out_dir.display());
+            }
+            println!("cargo:rustc-link-search=native={}", out_dir.display());
+            println!("cargo:rustc-link-lib=dylib={link_name}");
+        }
+        LinkDirectiveMode::Declared => {
+            println!(
+                "cargo:info=Skipping native link directives because XLSYNTH_SYS_LINK_MODE=declared"
+            );
+        }
+    }
+}
+
 /// Downloads the dynamic shared object for XLS from the release page if it does
 /// not already exist.
 fn download_dso_if_dne(url_base: &str, out_dir: &Path) -> DsoInfo {
@@ -946,10 +968,8 @@ fn main() {
             dso_dest.display()
         );
 
-        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", out_dir.display());
-        println!("cargo:rustc-link-search=native={}", out_dir.display());
         let dso_name_str = dso_info.get_dso_name();
-        println!("cargo:rustc-link-lib=dylib={dso_name_str}");
+        emit_link_directives_for_managed_dso(&out_dir, &dso_name_str, true, link_directive_mode);
         write_artifact_paths_rs(
             &out_dir,
             &ArtifactPaths {
@@ -964,9 +984,8 @@ fn main() {
     let dso_info = download_dso_if_dne(&url_base, &out_dir);
 
     // Ensure the DSO is copied to the correct location
-    println!("cargo:rustc-link-search=native={}", out_dir.display());
     let dso_name_str = dso_info.get_dso_name();
-    println!("cargo:rustc-link-lib=dylib={dso_name_str}");
+    emit_link_directives_for_managed_dso(&out_dir, &dso_name_str, false, link_directive_mode);
 
     // This is exposed as `xlsynth_sys::XLS_DSO_PATH` from Rust via the
     // generated `artifact_paths.rs` include in `xlsynth-sys/src/lib.rs`.
