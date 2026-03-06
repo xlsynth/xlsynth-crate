@@ -21,9 +21,15 @@ use crate::combo_compile::ComboFunction;
 use crate::combo_compile::ComboFunctionImpl;
 use crate::combo_compile::CompiledComboModule;
 use crate::eval::CallResolver;
+use crate::eval::binary_operand_expected_signednesses;
+use crate::eval::binary_operand_expected_widths;
 use crate::eval::eval_ast_with_calls;
+use crate::eval::eval_ast_with_calls_and_ctx;
 use crate::eval::eval_binary_op;
 use crate::eval::eval_unary_op;
+use crate::eval::merged_signedness;
+use crate::eval::operand_with_own_sign_ctx;
+use crate::eval::unary_operand_expected_width;
 use crate::value::LogicBit;
 
 pub struct ComboEvalPlan {
@@ -188,6 +194,7 @@ pub fn eval_combo_seeded_with_coverage(
             &env,
             &m.functions,
             Some(info.width),
+            None,
             cov,
             src,
             fn_meta,
@@ -206,6 +213,7 @@ fn eval_spanned_expr_with_funcs(
     env: &Env,
     funcs: &BTreeMap<String, ComboFunction>,
     expected_width: Option<u32>,
+    expected_signedness: Option<Signedness>,
     cov: &mut CoverageCounters,
     src: &SourceText,
     fn_meta: &BTreeMap<String, crate::pipeline_compile::FunctionMeta>,
@@ -233,6 +241,7 @@ fn eval_spanned_expr_with_funcs(
                     env,
                     funcs,
                     expected_width,
+                    expected_signedness,
                     cov,
                     src,
                     fn_meta,
@@ -257,38 +266,50 @@ fn eval_spanned_expr_with_funcs(
             let mut avs: Vec<Value4> = Vec::with_capacity(args.len());
             for a in args {
                 avs.push(eval_spanned_expr_with_funcs(
-                    a, env, funcs, None, cov, src, fn_meta,
+                    a, env, funcs, None, None, cov, src, fn_meta,
                 )?);
             }
-            eval_compiled_function(f, &avs, funcs, expected_width, cov, src, fn_meta)
+            eval_compiled_function(
+                f,
+                &avs,
+                funcs,
+                expected_width,
+                expected_signedness,
+                cov,
+                src,
+                fn_meta,
+            )
         }
         SpannedExprKind::Concat(parts) => {
             let mut vs: Vec<Value4> = Vec::with_capacity(parts.len());
             for p in parts {
                 vs.push(eval_spanned_expr_with_funcs(
-                    p, env, funcs, None, cov, src, fn_meta,
+                    p, env, funcs, None, None, cov, src, fn_meta,
                 )?);
             }
             Ok(Value4::concat(&vs))
         }
         SpannedExprKind::Replicate { count, expr } => {
-            let c = eval_spanned_expr_with_funcs(count, env, funcs, None, cov, src, fn_meta)?;
+            let c = eval_spanned_expr_with_funcs(count, env, funcs, None, None, cov, src, fn_meta)?;
             let count_u = c.to_u32_saturating_if_known().unwrap_or(0);
-            let v = eval_spanned_expr_with_funcs(expr, env, funcs, None, cov, src, fn_meta)?;
+            let v = eval_spanned_expr_with_funcs(expr, env, funcs, None, None, cov, src, fn_meta)?;
             Ok(Value4::replicate(count_u, &v))
         }
         SpannedExprKind::Index { expr, index } => {
-            let v = eval_spanned_expr_with_funcs(expr, env, funcs, None, cov, src, fn_meta)?;
-            let idx_v = eval_spanned_expr_with_funcs(index, env, funcs, None, cov, src, fn_meta)?;
+            let v = eval_spanned_expr_with_funcs(expr, env, funcs, None, None, cov, src, fn_meta)?;
+            let idx_v =
+                eval_spanned_expr_with_funcs(index, env, funcs, None, None, cov, src, fn_meta)?;
             match idx_v.to_u32_saturating_if_known() {
                 Some(idx_u) => Ok(v.index(idx_u)),
                 None => Ok(Value4::new(1, Signedness::Unsigned, vec![LogicBit::X])),
             }
         }
         SpannedExprKind::Slice { expr, msb, lsb } => {
-            let v = eval_spanned_expr_with_funcs(expr, env, funcs, None, cov, src, fn_meta)?;
-            let msb_v = eval_spanned_expr_with_funcs(msb, env, funcs, None, cov, src, fn_meta)?;
-            let lsb_v = eval_spanned_expr_with_funcs(lsb, env, funcs, None, cov, src, fn_meta)?;
+            let v = eval_spanned_expr_with_funcs(expr, env, funcs, None, None, cov, src, fn_meta)?;
+            let msb_v =
+                eval_spanned_expr_with_funcs(msb, env, funcs, None, None, cov, src, fn_meta)?;
+            let lsb_v =
+                eval_spanned_expr_with_funcs(lsb, env, funcs, None, None, cov, src, fn_meta)?;
             match (
                 msb_v.to_u32_saturating_if_known(),
                 lsb_v.to_u32_saturating_if_known(),
@@ -310,9 +331,11 @@ fn eval_spanned_expr_with_funcs(
             width,
             upward,
         } => {
-            let v = eval_spanned_expr_with_funcs(expr, env, funcs, None, cov, src, fn_meta)?;
-            let base_v = eval_spanned_expr_with_funcs(base, env, funcs, None, cov, src, fn_meta)?;
-            let width_v = eval_spanned_expr_with_funcs(width, env, funcs, None, cov, src, fn_meta)?;
+            let v = eval_spanned_expr_with_funcs(expr, env, funcs, None, None, cov, src, fn_meta)?;
+            let base_v =
+                eval_spanned_expr_with_funcs(base, env, funcs, None, None, cov, src, fn_meta)?;
+            let width_v =
+                eval_spanned_expr_with_funcs(width, env, funcs, None, None, cov, src, fn_meta)?;
             let width_u = width_v.to_u32_saturating_if_known().ok_or_else(|| {
                 Error::Parse("indexed slice width is unknown (contains x/z)".to_string())
             })?;
@@ -326,31 +349,45 @@ fn eval_spanned_expr_with_funcs(
             }
         }
         SpannedExprKind::Unary { op, expr } => {
-            let child_expected_width = match op {
-                crate::ast::UnaryOp::BitNot
-                | crate::ast::UnaryOp::UnaryPlus
-                | crate::ast::UnaryOp::UnaryMinus => expected_width,
-                crate::ast::UnaryOp::LogicalNot
-                | crate::ast::UnaryOp::ReduceAnd
-                | crate::ast::UnaryOp::ReduceNand
-                | crate::ast::UnaryOp::ReduceOr
-                | crate::ast::UnaryOp::ReduceNor
-                | crate::ast::UnaryOp::ReduceXor
-                | crate::ast::UnaryOp::ReduceXnor => None,
-            };
+            let child_expected_width = unary_operand_expected_width(*op, expected_width);
             let v = eval_spanned_expr_with_funcs(
                 expr,
                 env,
                 funcs,
                 child_expected_width,
+                expected_signedness,
                 cov,
                 src,
                 fn_meta,
             )?;
-            Ok(eval_unary_op(*op, v, expected_width, None))
+            Ok(eval_unary_op(*op, v, expected_width, expected_signedness))
         }
         SpannedExprKind::Binary { op, lhs, rhs } => {
-            let (lhs_expected_width, rhs_expected_width) = match op {
+            let (lhs_expected_width, rhs_expected_width) =
+                binary_operand_expected_widths(*op, expected_width);
+            let (lhs_expected_signedness, rhs_expected_signedness) =
+                binary_operand_expected_signednesses(*op, expected_signedness);
+            let a0 = eval_spanned_expr_with_funcs(
+                lhs,
+                env,
+                funcs,
+                lhs_expected_width,
+                lhs_expected_signedness,
+                cov,
+                src,
+                fn_meta,
+            )?;
+            let b0 = eval_spanned_expr_with_funcs(
+                rhs,
+                env,
+                funcs,
+                rhs_expected_width,
+                rhs_expected_signedness,
+                cov,
+                src,
+                fn_meta,
+            )?;
+            let op_expected_width = match op {
                 crate::ast::BinaryOp::Add
                 | crate::ast::BinaryOp::Sub
                 | crate::ast::BinaryOp::Mul
@@ -358,56 +395,189 @@ fn eval_spanned_expr_with_funcs(
                 | crate::ast::BinaryOp::Mod
                 | crate::ast::BinaryOp::BitAnd
                 | crate::ast::BinaryOp::BitOr
-                | crate::ast::BinaryOp::BitXor => (expected_width, expected_width),
-                crate::ast::BinaryOp::Shl
-                | crate::ast::BinaryOp::Shr
-                | crate::ast::BinaryOp::Sshr => (expected_width, None),
-                crate::ast::BinaryOp::LogicalAnd
-                | crate::ast::BinaryOp::LogicalOr
-                | crate::ast::BinaryOp::Lt
+                | crate::ast::BinaryOp::BitXor => {
+                    Some(expected_width.unwrap_or(0).max(a0.width.max(b0.width)))
+                }
+                crate::ast::BinaryOp::Lt
                 | crate::ast::BinaryOp::Le
                 | crate::ast::BinaryOp::Gt
                 | crate::ast::BinaryOp::Ge
                 | crate::ast::BinaryOp::Eq
                 | crate::ast::BinaryOp::Neq
                 | crate::ast::BinaryOp::CaseEq
-                | crate::ast::BinaryOp::CaseNeq => (None, None),
+                | crate::ast::BinaryOp::CaseNeq => Some(a0.width.max(b0.width)),
+                crate::ast::BinaryOp::Shl
+                | crate::ast::BinaryOp::Shr
+                | crate::ast::BinaryOp::Sshr => expected_width,
+                crate::ast::BinaryOp::LogicalAnd | crate::ast::BinaryOp::LogicalOr => None,
             };
-            let a = eval_spanned_expr_with_funcs(
-                lhs,
-                env,
-                funcs,
-                lhs_expected_width,
-                cov,
-                src,
-                fn_meta,
-            )?;
-            let b = eval_spanned_expr_with_funcs(
-                rhs,
-                env,
-                funcs,
-                rhs_expected_width,
-                cov,
-                src,
-                fn_meta,
-            )?;
-            Ok(eval_binary_op(*op, a, b, expected_width, None))
+            let op_lhs_expected_width_rhs_expected_width = match op {
+                crate::ast::BinaryOp::Lt
+                | crate::ast::BinaryOp::Le
+                | crate::ast::BinaryOp::Gt
+                | crate::ast::BinaryOp::Ge
+                | crate::ast::BinaryOp::Eq
+                | crate::ast::BinaryOp::Neq
+                | crate::ast::BinaryOp::CaseEq
+                | crate::ast::BinaryOp::CaseNeq => (op_expected_width, op_expected_width),
+                _ => binary_operand_expected_widths(*op, op_expected_width),
+            };
+            let op_expected_signedness = match op {
+                crate::ast::BinaryOp::Add
+                | crate::ast::BinaryOp::Sub
+                | crate::ast::BinaryOp::Mul
+                | crate::ast::BinaryOp::Div
+                | crate::ast::BinaryOp::Mod
+                | crate::ast::BinaryOp::BitAnd
+                | crate::ast::BinaryOp::BitOr
+                | crate::ast::BinaryOp::BitXor => {
+                    Some(expected_signedness.unwrap_or_else(|| merged_signedness(&a0, &b0)))
+                }
+                crate::ast::BinaryOp::Lt
+                | crate::ast::BinaryOp::Le
+                | crate::ast::BinaryOp::Gt
+                | crate::ast::BinaryOp::Ge
+                | crate::ast::BinaryOp::Eq
+                | crate::ast::BinaryOp::Neq
+                | crate::ast::BinaryOp::CaseEq
+                | crate::ast::BinaryOp::CaseNeq => Some(merged_signedness(&a0, &b0)),
+                crate::ast::BinaryOp::Shl
+                | crate::ast::BinaryOp::Shr
+                | crate::ast::BinaryOp::Sshr => expected_signedness,
+                crate::ast::BinaryOp::LogicalAnd | crate::ast::BinaryOp::LogicalOr => None,
+            };
+            let op_lhs_expected_signedness_rhs_expected_signedness = match op {
+                crate::ast::BinaryOp::Lt
+                | crate::ast::BinaryOp::Le
+                | crate::ast::BinaryOp::Gt
+                | crate::ast::BinaryOp::Ge
+                | crate::ast::BinaryOp::Eq
+                | crate::ast::BinaryOp::Neq
+                | crate::ast::BinaryOp::CaseEq
+                | crate::ast::BinaryOp::CaseNeq => (op_expected_signedness, op_expected_signedness),
+                _ => binary_operand_expected_signednesses(*op, op_expected_signedness),
+            };
+            let needs_recontext = op_expected_signedness != expected_signedness
+                || op_expected_width != expected_width
+                || op_lhs_expected_width_rhs_expected_width
+                    != (lhs_expected_width, rhs_expected_width)
+                || op_lhs_expected_signedness_rhs_expected_signedness
+                    != (lhs_expected_signedness, rhs_expected_signedness);
+            let (a, b) = if needs_recontext {
+                let a = eval_spanned_expr_with_funcs(
+                    lhs,
+                    env,
+                    funcs,
+                    op_lhs_expected_width_rhs_expected_width.0,
+                    op_lhs_expected_signedness_rhs_expected_signedness.0,
+                    cov,
+                    src,
+                    fn_meta,
+                )?;
+                let b = eval_spanned_expr_with_funcs(
+                    rhs,
+                    env,
+                    funcs,
+                    op_lhs_expected_width_rhs_expected_width.1,
+                    op_lhs_expected_signedness_rhs_expected_signedness.1,
+                    cov,
+                    src,
+                    fn_meta,
+                )?;
+                (a, b)
+            } else {
+                (a0, b0)
+            };
+            Ok(eval_binary_op(
+                *op,
+                a,
+                b,
+                op_expected_width,
+                op_expected_signedness,
+            ))
         }
         SpannedExprKind::Ternary { cond, t, f } => {
-            let c = eval_spanned_expr_with_funcs(cond, env, funcs, None, cov, src, fn_meta)?;
+            let c = eval_spanned_expr_with_funcs(cond, env, funcs, None, None, cov, src, fn_meta)?;
             cov.record_ternary_decision_with_spans(
                 SpanKey::from(expr.span),
                 SpanKey::from(t.span),
                 SpanKey::from(f.span),
                 c.to_bool4(),
             );
-            let tv =
-                eval_spanned_expr_with_funcs(t, env, funcs, expected_width, cov, src, fn_meta)?;
-            let fv =
-                eval_spanned_expr_with_funcs(f, env, funcs, expected_width, cov, src, fn_meta)?;
-            Ok(Value4::ternary(&c, &tv, &fv))
+            let tv0 = eval_spanned_expr_with_funcs(
+                t,
+                env,
+                funcs,
+                expected_width,
+                expected_signedness,
+                cov,
+                src,
+                fn_meta,
+            )?;
+            let fv0 = eval_spanned_expr_with_funcs(
+                f,
+                env,
+                funcs,
+                expected_width,
+                expected_signedness,
+                cov,
+                src,
+                fn_meta,
+            )?;
+            let branch_expected_width =
+                Some(expected_width.unwrap_or(0).max(tv0.width.max(fv0.width)));
+            let recontext_t = branch_expected_width != expected_width
+                && ternary_branch_needs_width_recontext_spanned(t);
+            let recontext_f = branch_expected_width != expected_width
+                && ternary_branch_needs_width_recontext_spanned(f);
+            let tv = if recontext_t {
+                eval_spanned_expr_with_funcs(
+                    t,
+                    env,
+                    funcs,
+                    branch_expected_width,
+                    expected_signedness,
+                    cov,
+                    src,
+                    fn_meta,
+                )?
+            } else {
+                tv0
+            };
+            let fv = if recontext_f {
+                eval_spanned_expr_with_funcs(
+                    f,
+                    env,
+                    funcs,
+                    branch_expected_width,
+                    expected_signedness,
+                    cov,
+                    src,
+                    fn_meta,
+                )?
+            } else {
+                fv0
+            };
+            let tv = operand_with_own_sign_ctx(tv, expected_width, expected_signedness);
+            let fv = operand_with_own_sign_ctx(fv, expected_width, expected_signedness);
+            Ok(operand_with_own_sign_ctx(
+                Value4::ternary(&c, &tv, &fv),
+                expected_width,
+                expected_signedness,
+            ))
         }
     }
+}
+
+fn ternary_branch_needs_width_recontext_spanned(expr: &SpannedExpr) -> bool {
+    matches!(
+        expr.kind,
+        SpannedExprKind::UnbasedUnsized(_)
+            | SpannedExprKind::Call { .. }
+            | SpannedExprKind::Unary { .. }
+            | SpannedExprKind::Binary { .. }
+            | SpannedExprKind::Ternary { .. }
+    )
 }
 
 fn eval_compiled_function(
@@ -415,6 +585,7 @@ fn eval_compiled_function(
     args: &[Value4],
     funcs: &BTreeMap<String, ComboFunction>,
     expected_width: Option<u32>,
+    _expected_signedness: Option<Signedness>,
     cov: &mut CoverageCounters,
     src: &SourceText,
     fn_meta: &BTreeMap<String, crate::pipeline_compile::FunctionMeta>,
@@ -437,17 +608,26 @@ fn eval_compiled_function(
                 }
             }
             let v = if let Some(spanned) = expr_spanned {
+                let ret = function_return_decl(f);
                 eval_spanned_expr_with_funcs(
                     spanned,
                     &env,
                     funcs,
-                    expected_width,
+                    Some(ret.width),
+                    Some(ret.signedness),
                     cov,
                     src,
                     fn_meta,
                 )?
             } else {
-                eval_ast_with_calls(expr, &env, Some(&ComboResolver { funcs }), expected_width)?
+                let ret = function_return_decl(f);
+                eval_ast_with_calls_and_ctx(
+                    expr,
+                    &env,
+                    Some(&ComboResolver { funcs }),
+                    Some(ret.width),
+                    Some(ret.signedness),
+                )?
             };
             Ok(coerce_to_declinfo(&v, &function_return_decl(f)))
         }

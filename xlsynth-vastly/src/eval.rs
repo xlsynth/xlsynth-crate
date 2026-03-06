@@ -28,7 +28,7 @@ pub trait EvalObserver {
     fn on_ternary(&mut self, context_span: Option<Span>, expr: &Expr, cond: &Value4);
 }
 
-fn merged_signedness(lhs: &Value4, rhs: &Value4) -> Signedness {
+pub(crate) fn merged_signedness(lhs: &Value4, rhs: &Value4) -> Signedness {
     if lhs.signedness == Signedness::Signed && rhs.signedness == Signedness::Signed {
         Signedness::Signed
     } else {
@@ -36,7 +36,7 @@ fn merged_signedness(lhs: &Value4, rhs: &Value4) -> Signedness {
     }
 }
 
-fn operand_with_own_sign_ctx(
+pub(crate) fn operand_with_own_sign_ctx(
     v: Value4,
     expected_width: Option<u32>,
     expected_signedness: Option<Signedness>,
@@ -65,7 +65,7 @@ fn operand_with_merged_sign_ctx(
     (lhs, rhs)
 }
 
-fn ternary_branch_needs_width_recontext(expr: &Expr) -> bool {
+pub(crate) fn ternary_branch_needs_width_recontext(expr: &Expr) -> bool {
     matches!(
         expr,
         Expr::UnbasedUnsized(_)
@@ -76,7 +76,10 @@ fn ternary_branch_needs_width_recontext(expr: &Expr) -> bool {
     )
 }
 
-fn unary_operand_expected_width(op: UnaryOp, expected_width: Option<u32>) -> Option<u32> {
+pub(crate) fn unary_operand_expected_width(
+    op: UnaryOp,
+    expected_width: Option<u32>,
+) -> Option<u32> {
     match op {
         UnaryOp::BitNot | UnaryOp::UnaryPlus | UnaryOp::UnaryMinus => expected_width,
         UnaryOp::LogicalNot
@@ -89,7 +92,7 @@ fn unary_operand_expected_width(op: UnaryOp, expected_width: Option<u32>) -> Opt
     }
 }
 
-fn binary_operand_expected_widths(
+pub(crate) fn binary_operand_expected_widths(
     op: BinaryOp,
     expected_width: Option<u32>,
 ) -> (Option<u32>, Option<u32>) {
@@ -113,7 +116,7 @@ fn binary_operand_expected_widths(
     }
 }
 
-fn binary_operand_expected_signednesses(
+pub(crate) fn binary_operand_expected_signednesses(
     op: BinaryOp,
     expected_signedness: Option<Signedness>,
 ) -> (Option<Signedness>, Option<Signedness>) {
@@ -241,6 +244,24 @@ pub(crate) fn eval_ast_with_calls(
     expected_width: Option<u32>,
 ) -> Result<Value4> {
     eval_ast_with_calls_inner(expr, env, calls, expected_width, None, None, None)
+}
+
+pub(crate) fn eval_ast_with_calls_and_ctx(
+    expr: &Expr,
+    env: &Env,
+    calls: Option<&dyn CallResolver>,
+    expected_width: Option<u32>,
+    expected_signedness: Option<Signedness>,
+) -> Result<Value4> {
+    eval_ast_with_calls_inner(
+        expr,
+        env,
+        calls,
+        expected_width,
+        expected_signedness,
+        None,
+        None,
+    )
 }
 
 fn eval_ast_with_calls_inner(
