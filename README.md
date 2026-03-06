@@ -78,6 +78,17 @@ cargo test --workspace
 
 Note: `XLS_DSO_PATH` and `DSLX_STDLIB_PATH` are a paired build-time override for supplying
 pre-fetched XLS artifacts (DSO + DSLX stdlib). Setting only one will not enable the override.
+Build systems that prefer a single declared input can instead set `XLSYNTH_ARTIFACT_CONFIG` to a
+TOML file containing `dso_path` and `dslx_stdlib_path`.
+
+- If `XLSYNTH_ARTIFACT_CONFIG` is set, it takes precedence over `XLS_DSO_PATH` and
+  `DSLX_STDLIB_PATH`, and the paired env override is ignored.
+- `XLSYNTH_ARTIFACT_CONFIG` itself must be an absolute path.
+- `dso_path` and `dslx_stdlib_path` inside that TOML may be absolute paths, or relative paths
+  resolved from the TOML file's directory.
+- Build systems that declare the shared library separately can set
+  `XLSYNTH_SYS_LINK_MODE=declared` so `build.rs` records the artifact paths without emitting its
+  own native `-l...` directives.
 
 ## Development Notes
 
