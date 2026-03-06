@@ -195,6 +195,9 @@ pub fn run_pipeline_and_collect_coverage(
         }
 
         if !m.seqs.is_empty() {
+            for s in &m.seq_spans {
+                cov.hit_span(src, *s);
+            }
             let seed = build_seed_env(m, &state, &cyc.inputs, LogicLevel::High)?;
             let values = eval_combo_seeded(&m.combo, &plan, &seed)?;
             let env = env_from_values(&values);
@@ -400,6 +403,9 @@ fn literal_assigned_names(m: &crate::pipeline_compile::CompiledPipelineModule) -
     for a in &m.combo.assigns {
         match &a.rhs_spanned.kind {
             crate::ast_spanned::SpannedExprKind::Literal(_) => {
+                s.insert(a.lhs.clone());
+            }
+            crate::ast_spanned::SpannedExprKind::UnsizedNumber(_) => {
                 s.insert(a.lhs.clone());
             }
             crate::ast_spanned::SpannedExprKind::UnbasedUnsized(_) => {

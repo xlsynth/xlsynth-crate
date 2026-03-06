@@ -28,7 +28,7 @@ pub trait EvalObserver {
     fn on_ternary(&mut self, context_span: Option<Span>, expr: &Expr, cond: &Value4);
 }
 
-fn merged_signedness(lhs: &Value4, rhs: &Value4) -> Signedness {
+pub(crate) fn merged_signedness(lhs: &Value4, rhs: &Value4) -> Signedness {
     if lhs.signedness == Signedness::Signed && rhs.signedness == Signedness::Signed {
         Signedness::Signed
     } else {
@@ -36,7 +36,7 @@ fn merged_signedness(lhs: &Value4, rhs: &Value4) -> Signedness {
     }
 }
 
-fn operand_with_own_sign_ctx(
+pub(crate) fn operand_with_own_sign_ctx(
     v: Value4,
     expected_width: Option<u32>,
     expected_signedness: Option<Signedness>,
@@ -52,6 +52,21 @@ fn operand_with_own_sign_ctx(
     if width <= v.width { v } else { v.resize(width) }
 }
 
+pub(crate) fn replication_count_to_u32(v: &Value4) -> Result<u32> {
+    if v.has_unknown() {
+        return Err(Error::Parse(
+            "replication count must be a non-negative known constant expression".to_string(),
+        ));
+    }
+    if v.signedness == Signedness::Signed && v.msb() == LogicBit::One {
+        return Err(Error::Parse(
+            "replication count must be non-negative".to_string(),
+        ));
+    }
+    v.to_u32_if_known()
+        .ok_or_else(|| Error::Parse("replication count exceeds supported width".to_string()))
+}
+
 fn operand_with_merged_sign_ctx(
     lhs: Value4,
     rhs: Value4,
@@ -65,7 +80,21 @@ fn operand_with_merged_sign_ctx(
     (lhs, rhs)
 }
 
-fn unary_operand_expected_width(op: UnaryOp, expected_width: Option<u32>) -> Option<u32> {
+pub(crate) fn ternary_branch_needs_width_recontext(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::UnbasedUnsized(_)
+            | Expr::Call { .. }
+            | Expr::Unary { .. }
+            | Expr::Binary { .. }
+            | Expr::Ternary { .. }
+    )
+}
+
+pub(crate) fn unary_operand_expected_width(
+    op: UnaryOp,
+    expected_width: Option<u32>,
+) -> Option<u32> {
     match op {
         UnaryOp::BitNot | UnaryOp::UnaryPlus | UnaryOp::UnaryMinus => expected_width,
         UnaryOp::LogicalNot
@@ -78,7 +107,7 @@ fn unary_operand_expected_width(op: UnaryOp, expected_width: Option<u32>) -> Opt
     }
 }
 
-fn binary_operand_expected_widths(
+pub(crate) fn binary_operand_expected_widths(
     op: BinaryOp,
     expected_width: Option<u32>,
 ) -> (Option<u32>, Option<u32>) {
@@ -102,7 +131,7 @@ fn binary_operand_expected_widths(
     }
 }
 
-fn binary_operand_expected_signednesses(
+pub(crate) fn binary_operand_expected_signednesses(
     op: BinaryOp,
     expected_signedness: Option<Signedness>,
 ) -> (Option<Signedness>, Option<Signedness>) {
@@ -232,6 +261,24 @@ pub(crate) fn eval_ast_with_calls(
     eval_ast_with_calls_inner(expr, env, calls, expected_width, None, None, None)
 }
 
+pub(crate) fn eval_ast_with_calls_and_ctx(
+    expr: &Expr,
+    env: &Env,
+    calls: Option<&dyn CallResolver>,
+    expected_width: Option<u32>,
+    expected_signedness: Option<Signedness>,
+) -> Result<Value4> {
+    eval_ast_with_calls_inner(
+        expr,
+        env,
+        calls,
+        expected_width,
+        expected_signedness,
+        None,
+        None,
+    )
+}
+
 fn eval_ast_with_calls_inner(
     expr: &Expr,
     env: &Env,
@@ -247,6 +294,7 @@ fn eval_ast_with_calls_inner(
             .cloned()
             .ok_or_else(|| Error::UnknownIdentifier(name.clone())),
         Expr::Literal(v) => Ok(v.clone()),
+        Expr::UnsizedNumber(v) => Ok(v.clone()),
         Expr::UnbasedUnsized(bit) => {
             let w = expected_width.unwrap_or(1);
             Ok(Value4::new(
@@ -268,21 +316,13 @@ fn eval_ast_with_calls_inner(
                         &args[0],
                         env,
                         calls,
-                        expected_width,
-                        expected_signedness,
+                        None,
+                        None,
                         Some(obs),
                         context_span,
                     )?
                 } else {
-                    eval_ast_with_calls_inner(
-                        &args[0],
-                        env,
-                        calls,
-                        expected_width,
-                        expected_signedness,
-                        None,
-                        context_span,
-                    )?
+                    eval_ast_with_calls_inner(&args[0], env, calls, None, None, None, context_span)?
                 };
                 return Ok(if name == "$signed" {
                     v.with_signedness(crate::Signedness::Signed)
@@ -332,7 +372,7 @@ fn eval_ast_with_calls_inner(
             } else {
                 eval_ast_with_calls_inner(count, env, calls, None, None, None, context_span)?
             };
-            let count_u = c.to_u32_saturating_if_known().unwrap_or(0);
+            let count_u = replication_count_to_u32(&c)?;
             let v = if let Some(obs) = observer.as_deref_mut() {
                 eval_ast_with_calls_inner(expr, env, calls, None, None, Some(obs), context_span)?
             } else {
@@ -501,21 +541,26 @@ fn eval_ast_with_calls_inner(
                 | BinaryOp::BitAnd
                 | BinaryOp::BitOr
                 | BinaryOp::BitXor => Some(expected_width.unwrap_or(0).max(a0.width.max(b0.width))),
-                BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-                    Some(a0.width.max(b0.width))
-                }
-                BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sshr => expected_width,
-                BinaryOp::LogicalAnd
-                | BinaryOp::LogicalOr
+                BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge
                 | BinaryOp::Eq
                 | BinaryOp::Neq
                 | BinaryOp::CaseEq
-                | BinaryOp::CaseNeq => None,
+                | BinaryOp::CaseNeq => Some(a0.width.max(b0.width)),
+                BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sshr => expected_width,
+                BinaryOp::LogicalAnd | BinaryOp::LogicalOr => None,
             };
             let op_lhs_expected_width_rhs_expected_width = match op {
-                BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-                    (op_expected_width, op_expected_width)
-                }
+                BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge
+                | BinaryOp::Eq
+                | BinaryOp::Neq
+                | BinaryOp::CaseEq
+                | BinaryOp::CaseNeq => (op_expected_width, op_expected_width),
                 _ => binary_operand_expected_widths(*op, op_expected_width),
             };
             let op_expected_signedness = match op {
@@ -529,21 +574,26 @@ fn eval_ast_with_calls_inner(
                 | BinaryOp::BitXor => {
                     Some(expected_signedness.unwrap_or_else(|| merged_signedness(&a0, &b0)))
                 }
-                BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-                    Some(merged_signedness(&a0, &b0))
-                }
-                BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sshr => expected_signedness,
-                BinaryOp::LogicalAnd
-                | BinaryOp::LogicalOr
+                BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge
                 | BinaryOp::Eq
                 | BinaryOp::Neq
                 | BinaryOp::CaseEq
-                | BinaryOp::CaseNeq => None,
+                | BinaryOp::CaseNeq => Some(merged_signedness(&a0, &b0)),
+                BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sshr => expected_signedness,
+                BinaryOp::LogicalAnd | BinaryOp::LogicalOr => None,
             };
             let op_lhs_expected_signedness_rhs_expected_signedness = match op {
-                BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-                    (op_expected_signedness, op_expected_signedness)
-                }
+                BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge
+                | BinaryOp::Eq
+                | BinaryOp::Neq
+                | BinaryOp::CaseEq
+                | BinaryOp::CaseNeq => (op_expected_signedness, op_expected_signedness),
                 _ => binary_operand_expected_signednesses(*op, op_expected_signedness),
             };
             let needs_recontext = op_expected_signedness != expected_signedness
@@ -616,7 +666,7 @@ fn eval_ast_with_calls_inner(
             if let Some(obs) = observer.as_deref_mut() {
                 obs.on_ternary(context_span, expr, &c);
             }
-            let tv = if let Some(obs) = observer.as_deref_mut() {
+            let tv0 = if let Some(obs) = observer.as_deref_mut() {
                 eval_ast_with_calls_inner(
                     t,
                     env,
@@ -636,29 +686,85 @@ fn eval_ast_with_calls_inner(
                     None,
                     context_span,
                 )?
+            };
+            let fv0 = if let Some(obs) = observer.as_deref_mut() {
+                eval_ast_with_calls_inner(
+                    f,
+                    env,
+                    calls,
+                    expected_width,
+                    expected_signedness,
+                    Some(obs),
+                    context_span,
+                )?
+            } else {
+                eval_ast_with_calls_inner(
+                    f,
+                    env,
+                    calls,
+                    expected_width,
+                    expected_signedness,
+                    None,
+                    context_span,
+                )?
+            };
+            let branch_expected_width =
+                Some(expected_width.unwrap_or(0).max(tv0.width.max(fv0.width)));
+            let recontext_t =
+                branch_expected_width != expected_width && ternary_branch_needs_width_recontext(t);
+            let recontext_f =
+                branch_expected_width != expected_width && ternary_branch_needs_width_recontext(f);
+            let tv = if recontext_t {
+                if let Some(obs) = observer.as_deref_mut() {
+                    eval_ast_with_calls_inner(
+                        t,
+                        env,
+                        calls,
+                        branch_expected_width,
+                        expected_signedness,
+                        Some(obs),
+                        context_span,
+                    )?
+                } else {
+                    eval_ast_with_calls_inner(
+                        t,
+                        env,
+                        calls,
+                        branch_expected_width,
+                        expected_signedness,
+                        None,
+                        context_span,
+                    )?
+                }
+            } else {
+                tv0
+            };
+            let fv = if recontext_f {
+                if let Some(obs) = observer.as_deref_mut() {
+                    eval_ast_with_calls_inner(
+                        f,
+                        env,
+                        calls,
+                        branch_expected_width,
+                        expected_signedness,
+                        Some(obs),
+                        context_span,
+                    )?
+                } else {
+                    eval_ast_with_calls_inner(
+                        f,
+                        env,
+                        calls,
+                        branch_expected_width,
+                        expected_signedness,
+                        None,
+                        context_span,
+                    )?
+                }
+            } else {
+                fv0
             };
             let tv = operand_with_own_sign_ctx(tv, expected_width, expected_signedness);
-            let fv = if let Some(obs) = observer.as_deref_mut() {
-                eval_ast_with_calls_inner(
-                    f,
-                    env,
-                    calls,
-                    expected_width,
-                    expected_signedness,
-                    Some(obs),
-                    context_span,
-                )?
-            } else {
-                eval_ast_with_calls_inner(
-                    f,
-                    env,
-                    calls,
-                    expected_width,
-                    expected_signedness,
-                    None,
-                    context_span,
-                )?
-            };
             let fv = operand_with_own_sign_ctx(fv, expected_width, expected_signedness);
             Ok(operand_with_own_sign_ctx(
                 Value4::ternary(&c, &tv, &fv),

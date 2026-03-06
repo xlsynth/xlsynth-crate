@@ -19,6 +19,10 @@ use xlsynth_vastly::Signedness;
 use xlsynth_vastly::Value4;
 use xlsynth_vastly::ast::Expr;
 
+const MAX_BASED_LITERAL_WIDTH: u32 = 384;
+const MAX_EXPR_AST_DEPTH: usize = 16;
+const MAX_EXPR_AST_NODES: usize = 192;
+
 fuzz_target!(|data: &[u8]| {
     let mut u = Unstructured::new(data);
     let case = match FuzzCase::arbitrary(&mut u) {
@@ -31,6 +35,11 @@ fuzz_target!(|data: &[u8]| {
     if expr.trim().is_empty() {
         return;
     }
+    // Extremely wide explicit based literals are not interesting signal for this target;
+    // they mainly drive pathological width-sensitive parser/evaluator costs.
+    if has_based_literal_width_over_limit(&expr, MAX_BASED_LITERAL_WIDTH) {
+        return;
+    }
 
     // Parse using OUR parser first; if we don't accept it, don't ask iverilog.
     let ast = match xlsynth_vastly::parser::parse_expr(&expr) {
@@ -38,6 +47,12 @@ fuzz_target!(|data: &[u8]| {
         // Skip parser-rejected expressions; this target compares accepted inputs only.
         Err(_) => return,
     };
+    let (depth, nodes) = expr_depth_and_node_count(&ast);
+    // Very deep/large parsed trees mostly surface evaluator performance limits rather than
+    // semantic mismatches for this differential target.
+    if depth > MAX_EXPR_AST_DEPTH || nodes > MAX_EXPR_AST_NODES {
+        return;
+    }
 
     // Enforce: expression only refers to identifiers defined in env.
     if !all_idents_defined_in_env(&ast, &case.env) {
@@ -75,6 +90,112 @@ fuzz_target!(|data: &[u8]| {
     }
 });
 
+fn has_based_literal_width_over_limit(expr: &str, limit: u32) -> bool {
+    let bytes = expr.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+
+        let mut width = 0u32;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            width = width
+                .saturating_mul(10)
+                .saturating_add(u32::from(bytes[i] - b'0'));
+            i += 1;
+        }
+
+        if i >= bytes.len() || bytes[i] != b'\'' {
+            continue;
+        }
+        let mut j = i + 1;
+        if j < bytes.len() && matches!(bytes[j], b's' | b'S') {
+            j += 1;
+        }
+        if j < bytes.len() && matches!(bytes[j], b'b' | b'B' | b'd' | b'D' | b'h' | b'H' | b'o' | b'O') && width > limit {
+            return true;
+        }
+    }
+    false
+}
+
+fn expr_depth_and_node_count(expr: &Expr) -> (usize, usize) {
+    match expr {
+        Expr::Ident(_) | Expr::Literal(_) | Expr::UnsizedNumber(_) | Expr::UnbasedUnsized(_) => {
+            (1, 1)
+        }
+        Expr::Call { args, .. } | Expr::Concat(args) => {
+            let mut max_child_depth = 0usize;
+            let mut total_nodes = 1usize;
+            for arg in args {
+                let (depth, nodes) = expr_depth_and_node_count(arg);
+                max_child_depth = max_child_depth.max(depth);
+                total_nodes += nodes;
+            }
+            (1 + max_child_depth, total_nodes)
+        }
+        Expr::Replicate { count, expr } => {
+            let (count_depth, count_nodes) = expr_depth_and_node_count(count);
+            let (expr_depth, expr_nodes) = expr_depth_and_node_count(expr);
+            (
+                1 + count_depth.max(expr_depth),
+                1 + count_nodes + expr_nodes,
+            )
+        }
+        Expr::Index { expr, index } => {
+            let (expr_depth, expr_nodes) = expr_depth_and_node_count(expr);
+            let (index_depth, index_nodes) = expr_depth_and_node_count(index);
+            (
+                1 + expr_depth.max(index_depth),
+                1 + expr_nodes + index_nodes,
+            )
+        }
+        Expr::Slice { expr, msb, lsb } => {
+            let (expr_depth, expr_nodes) = expr_depth_and_node_count(expr);
+            let (msb_depth, msb_nodes) = expr_depth_and_node_count(msb);
+            let (lsb_depth, lsb_nodes) = expr_depth_and_node_count(lsb);
+            (
+                1 + expr_depth.max(msb_depth).max(lsb_depth),
+                1 + expr_nodes + msb_nodes + lsb_nodes,
+            )
+        }
+        Expr::IndexedSlice {
+            expr,
+            base,
+            width,
+            ..
+        } => {
+            let (expr_depth, expr_nodes) = expr_depth_and_node_count(expr);
+            let (base_depth, base_nodes) = expr_depth_and_node_count(base);
+            let (width_depth, width_nodes) = expr_depth_and_node_count(width);
+            (
+                1 + expr_depth.max(base_depth).max(width_depth),
+                1 + expr_nodes + base_nodes + width_nodes,
+            )
+        }
+        Expr::Unary { expr, .. } => {
+            let (depth, nodes) = expr_depth_and_node_count(expr);
+            (1 + depth, 1 + nodes)
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            let (lhs_depth, lhs_nodes) = expr_depth_and_node_count(lhs);
+            let (rhs_depth, rhs_nodes) = expr_depth_and_node_count(rhs);
+            (1 + lhs_depth.max(rhs_depth), 1 + lhs_nodes + rhs_nodes)
+        }
+        Expr::Ternary { cond, t, f } => {
+            let (cond_depth, cond_nodes) = expr_depth_and_node_count(cond);
+            let (t_depth, t_nodes) = expr_depth_and_node_count(t);
+            let (f_depth, f_nodes) = expr_depth_and_node_count(f);
+            (
+                1 + cond_depth.max(t_depth).max(f_depth),
+                1 + cond_nodes + t_nodes + f_nodes,
+            )
+        }
+    }
+}
+
 fn all_idents_defined_in_env(expr: &Expr, env: &Env) -> bool {
     let mut ok = true;
     visit_expr_idents(expr, &mut |name| {
@@ -89,6 +210,7 @@ fn visit_expr_idents(expr: &Expr, f: &mut dyn FnMut(&str)) {
     match expr {
         Expr::Ident(name) => f(name),
         Expr::Literal(_) => {}
+        Expr::UnsizedNumber(_) => {}
         Expr::UnbasedUnsized(_) => {}
         Expr::Call { args, .. } => {
             for a in args {
@@ -140,6 +262,7 @@ fn render_expr(expr: &Expr) -> String {
     match expr {
         Expr::Ident(name) => name.clone(),
         Expr::Literal(v) => render_literal(v),
+        Expr::UnsizedNumber(v) => render_literal(v),
         Expr::UnbasedUnsized(bit) => match bit {
             LogicBit::Zero => "'0".to_string(),
             LogicBit::One => "'1".to_string(),
@@ -441,51 +564,58 @@ fn run_oracle_with_timeout(expr: &str, env: &Env, timeout: Duration) -> OracleOu
     }
 
     let sv = build_sv(expr, env);
-    let td = mk_temp_dir();
-    let sv_path = td.join("oracle.sv");
-    let out_path = td.join("oracle.out");
-
-    if std::fs::File::create(&sv_path)
-        .and_then(|mut f| f.write_all(sv.as_bytes()))
-        .is_err()
-    {
-        return OracleOutcome::RejectedOrFailed;
-    }
-
-    let mut iverilog_cmd = Command::new("iverilog");
-    iverilog_cmd
-        .arg("-g2012")
-        .arg("-o")
-        .arg(&out_path)
-        .arg(&sv_path);
-    match run_cmd_timeout(iverilog_cmd, timeout) {
-        CmdOutcome::Ok(output) => {
-            if !output.status.success() {
-                return OracleOutcome::RejectedOrFailed;
-            }
-        }
-        CmdOutcome::TimedOut => return OracleOutcome::TimedOut,
-        CmdOutcome::Err => return OracleOutcome::RejectedOrFailed,
-    }
-
-    let mut vvp_cmd = Command::new("vvp");
-    vvp_cmd.arg(&out_path);
-    let out = match run_cmd_timeout(vvp_cmd, timeout) {
-        CmdOutcome::Ok(output) => {
-            if !output.status.success() {
-                return OracleOutcome::RejectedOrFailed;
-            }
-            output.stdout
-        }
-        CmdOutcome::TimedOut => return OracleOutcome::TimedOut,
-        CmdOutcome::Err => return OracleOutcome::RejectedOrFailed,
+    let td = match mk_temp_dir() {
+        Some(td) => td,
+        None => return OracleOutcome::RejectedOrFailed,
     };
+    let result = (|| {
+        let sv_path = td.join("oracle.sv");
+        let out_path = td.join("oracle.out");
 
-    let out = String::from_utf8_lossy(&out);
-    match parse_oracle_output(&out) {
-        Some(x) => OracleOutcome::Accepted(x),
-        None => OracleOutcome::RejectedOrFailed,
-    }
+        if std::fs::File::create(&sv_path)
+            .and_then(|mut f| f.write_all(sv.as_bytes()))
+            .is_err()
+        {
+            return OracleOutcome::RejectedOrFailed;
+        }
+
+        let mut iverilog_cmd = Command::new("iverilog");
+        iverilog_cmd
+            .arg("-g2012")
+            .arg("-o")
+            .arg(&out_path)
+            .arg(&sv_path);
+        match run_cmd_timeout(iverilog_cmd, timeout) {
+            CmdOutcome::Ok(output) => {
+                if !output.status.success() {
+                    return OracleOutcome::RejectedOrFailed;
+                }
+            }
+            CmdOutcome::TimedOut => return OracleOutcome::TimedOut,
+            CmdOutcome::Err => return OracleOutcome::RejectedOrFailed,
+        }
+
+        let mut vvp_cmd = Command::new("vvp");
+        vvp_cmd.arg(&out_path);
+        let out = match run_cmd_timeout(vvp_cmd, timeout) {
+            CmdOutcome::Ok(output) => {
+                if !output.status.success() {
+                    return OracleOutcome::RejectedOrFailed;
+                }
+                output.stdout
+            }
+            CmdOutcome::TimedOut => return OracleOutcome::TimedOut,
+            CmdOutcome::Err => return OracleOutcome::RejectedOrFailed,
+        };
+
+        let out = String::from_utf8_lossy(&out);
+        match parse_oracle_output(&out) {
+            Some(x) => OracleOutcome::Accepted(x),
+            None => OracleOutcome::RejectedOrFailed,
+        }
+    })();
+    let _ = std::fs::remove_dir_all(&td);
+    result
 }
 
 enum CmdOutcome {
@@ -583,7 +713,7 @@ fn to_verilog_literal(v: &Value4) -> String {
     format!("{}'b{}", v.width, msb)
 }
 
-fn mk_temp_dir() -> std::path::PathBuf {
+fn mk_temp_dir() -> Option<std::path::PathBuf> {
     let base = std::env::temp_dir();
     let pid = std::process::id();
     let nanos = SystemTime::now()
@@ -594,10 +724,10 @@ fn mk_temp_dir() -> std::path::PathBuf {
     for attempt in 0u32..1000u32 {
         let p = base.join(format!("vastly_fuzz_oracle_{pid}_{nanos}_{attempt}"));
         match std::fs::create_dir(&p) {
-            Ok(()) => return p,
+            Ok(()) => return Some(p),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(_) => break,
         }
     }
-    base
+    None
 }

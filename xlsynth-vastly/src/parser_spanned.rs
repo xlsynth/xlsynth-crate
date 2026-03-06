@@ -29,6 +29,44 @@ struct Parser<'a> {
     cur: SpannedTok,
 }
 
+fn spanned_expr_is_constant(expr: &SpannedExpr) -> bool {
+    match &expr.kind {
+        SpannedExprKind::Ident(_) => false,
+        SpannedExprKind::Literal(_)
+        | SpannedExprKind::UnsizedNumber(_)
+        | SpannedExprKind::UnbasedUnsized(_) => true,
+        SpannedExprKind::Call { .. } => false,
+        SpannedExprKind::Concat(parts) => parts.iter().all(spanned_expr_is_constant),
+        SpannedExprKind::Replicate { count, expr } => {
+            spanned_expr_is_constant(count) && spanned_expr_is_constant(expr)
+        }
+        SpannedExprKind::Index { expr, index } => {
+            spanned_expr_is_constant(expr) && spanned_expr_is_constant(index)
+        }
+        SpannedExprKind::Slice { expr, msb, lsb } => {
+            spanned_expr_is_constant(expr)
+                && spanned_expr_is_constant(msb)
+                && spanned_expr_is_constant(lsb)
+        }
+        SpannedExprKind::IndexedSlice {
+            expr, base, width, ..
+        } => {
+            spanned_expr_is_constant(expr)
+                && spanned_expr_is_constant(base)
+                && spanned_expr_is_constant(width)
+        }
+        SpannedExprKind::Unary { expr, .. } => spanned_expr_is_constant(expr),
+        SpannedExprKind::Binary { lhs, rhs, .. } => {
+            spanned_expr_is_constant(lhs) && spanned_expr_is_constant(rhs)
+        }
+        SpannedExprKind::Ternary { cond, t, f } => {
+            spanned_expr_is_constant(cond)
+                && spanned_expr_is_constant(t)
+                && spanned_expr_is_constant(f)
+        }
+    }
+}
+
 impl<'a> Parser<'a> {
     fn new(s: &'a str) -> Result<Self> {
         let mut lex = LexerSpanned::new(s);
@@ -496,6 +534,11 @@ impl<'a> Parser<'a> {
                         self.bump()?;
                         let lsb = self.parse_ternary()?;
                         let rbr = self.expect_and_bump(Token::RBracket)?;
+                        if !spanned_expr_is_constant(&first) || !spanned_expr_is_constant(&lsb) {
+                            return Err(Error::Parse(
+                                "part-select bounds must be constant expressions".to_string(),
+                            ));
+                        }
                         let span = Span {
                             start: base.span.start,
                             end: rbr.end,
@@ -514,6 +557,12 @@ impl<'a> Parser<'a> {
                         self.bump()?;
                         let width = self.parse_ternary()?;
                         let rbr = self.expect_and_bump(Token::RBracket)?;
+                        if !spanned_expr_is_constant(&width) {
+                            return Err(Error::Parse(
+                                "indexed part-select width must be a constant expression"
+                                    .to_string(),
+                            ));
+                        }
                         let span = Span {
                             start: base.span.start,
                             end: rbr.end,
@@ -601,6 +650,11 @@ impl<'a> Parser<'a> {
                     let inner = self.parse_ternary()?;
                     let _ = self.expect_and_bump(Token::RBrace)?;
                     let r = self.expect_and_bump(Token::RBrace)?;
+                    if !spanned_expr_is_constant(&first) {
+                        return Err(Error::Parse(
+                            "replication count must be a constant expression".to_string(),
+                        ));
+                    }
                     Ok(SpannedExpr {
                         span: Span {
                             start: l.start,
@@ -618,6 +672,14 @@ impl<'a> Parser<'a> {
                         parts.push(self.parse_ternary()?);
                     }
                     let r = self.expect_and_bump(Token::RBrace)?;
+                    if parts
+                        .iter()
+                        .any(|p| matches!(p.kind, SpannedExprKind::UnsizedNumber(_)))
+                    {
+                        return Err(Error::Parse(
+                            "unsized constant numbers are illegal in concatenations".to_string(),
+                        ));
+                    }
                     Ok(SpannedExpr {
                         span: Span {
                             start: l.start,
@@ -656,6 +718,7 @@ fn parse_number_to_spanned_kind(n: &str) -> Result<SpannedExprKind> {
     let e: Expr = crate::parser::parse_expr(n)?;
     match e {
         Expr::Literal(v) => Ok(SpannedExprKind::Literal(v)),
+        Expr::UnsizedNumber(v) => Ok(SpannedExprKind::UnsizedNumber(v)),
         Expr::UnbasedUnsized(b) => Ok(SpannedExprKind::UnbasedUnsized(b)),
         _ => Err(Error::Parse(format!("unsupported numeric token `{n}`"))),
     }

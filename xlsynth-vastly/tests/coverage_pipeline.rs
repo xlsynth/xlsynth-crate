@@ -169,3 +169,47 @@ fn pipeline_observer_eval_failures_are_not_swallowed() {
     let err = run_pipeline_and_collect_coverage(&cm, &stimulus, &init, &src, &mut cov).unwrap_err();
     assert!(format!("{err:?}").contains("function call `helper` not supported"));
 }
+
+#[test]
+fn coverage_attributes_stateful_always_ff_lines() {
+    let dut = concat!(
+        "module m(\n",
+        "  input logic clk,\n",
+        "  input logic en,\n",
+        "  output logic [3:0] q\n",
+        ");\n",
+        "  always_ff @ (posedge clk) begin\n",
+        "    if (en) begin\n",
+        "      q <= q + 4'd1;\n",
+        "    end\n",
+        "  end\n",
+        "endmodule\n",
+    );
+    let cm = compile_pipeline_module(dut).unwrap();
+    let src = SourceText::new(dut.to_string());
+
+    let stimulus = PipelineStimulus {
+        half_period: 5,
+        cycles: vec![
+            PipelineCycle {
+                inputs: [("en".to_string(), vbits(1, Signedness::Unsigned, "0"))]
+                    .into_iter()
+                    .collect(),
+            },
+            PipelineCycle {
+                inputs: [("en".to_string(), vbits(1, Signedness::Unsigned, "1"))]
+                    .into_iter()
+                    .collect(),
+            },
+        ],
+    };
+    let init = BTreeMap::new();
+    let mut cov = CoverageCounters::default();
+    run_pipeline_and_collect_coverage(&cm, &stimulus, &init, &src, &mut cov).unwrap();
+
+    // The always_ff block executes at every posedge, so its source lines must
+    // be attributed as hit even when the guard is false.
+    assert!(cov.line_hits.get(&6).copied().unwrap_or(0) > 0);
+    assert!(cov.line_hits.get(&7).copied().unwrap_or(0) > 0);
+    assert!(cov.line_hits.get(&8).copied().unwrap_or(0) > 0);
+}

@@ -1274,7 +1274,7 @@ impl<'a> Parser<'a> {
 fn eval_const_u32(e: &VExpr) -> Result<u32> {
     // Very small constant evaluator for decl widths (accept only numeric literals).
     match e {
-        VExpr::Literal(v) => v.to_u32_if_known().ok_or_else(|| {
+        VExpr::Literal(v) | VExpr::UnsizedNumber(v) => v.to_u32_if_known().ok_or_else(|| {
             Error::Parse("decl width literal must be known and fit in u32".to_string())
         }),
         _ => Err(Error::Parse(

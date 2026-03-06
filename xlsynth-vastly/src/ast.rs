@@ -7,6 +7,11 @@ use crate::value::Value4;
 pub enum Expr {
     Ident(String),
     Literal(Value4),
+    /// Unsized numeric literal such as `123` or `'hff`.
+    ///
+    /// This remains distinct from sized literals so parser-enforced context
+    /// rules, such as concatenation legality, can follow the standard.
+    UnsizedNumber(Value4),
     /// SystemVerilog unbased unsized literal: `'0`, `'1`, `'x`, `'z`.
     ///
     /// This is context-sized; our combo evaluator supplies the expected width

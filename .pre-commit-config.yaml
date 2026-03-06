@@ -75,6 +75,13 @@ repos:
         language: system
         pass_filenames: false
 
+      - id: fuzz-build-xlsynth-vastly
+        name: fuzz build (xlsynth-vastly)
+        description: Ensure xlsynth-vastly fuzz targets compile.
+        entry: cargo fuzz build --fuzz-dir xlsynth-vastly/fuzz --sanitizer none
+        language: system
+        pass_filenames: false
+
       - id: get-required-libxls-dso-and-tools-release-tag
         name: get_required_libxls_dso_and_tools_release_tag.py runs successfully
         description: Ensure the scripts/get_required_libxls_dso_and_tools_release_tag.py script exits with code 0

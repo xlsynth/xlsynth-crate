@@ -76,9 +76,17 @@ pub struct ComboFunction {
 
 #[derive(Debug, Clone)]
 pub enum ComboFunctionImpl {
-    Casez { selector: Expr, arms: Vec<CasezArm> },
-    Expr { expr: Expr },
-    Procedure { assigns: Vec<FunctionAssign> },
+    Casez {
+        selector: Expr,
+        arms: Vec<CasezArm>,
+    },
+    Expr {
+        expr: Expr,
+        expr_spanned: Option<SpannedExpr>,
+    },
+    Procedure {
+        assigns: Vec<FunctionAssign>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -211,7 +219,16 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
                             parse_expr(value_src)?,
                             &normalized.placeholder_to_original,
                         );
-                        ComboFunctionImpl::Expr { expr }
+                        let mut expr_spanned = parse_expr_spanned(value_src)?;
+                        denormalize_spanned_expr(
+                            &mut expr_spanned,
+                            &normalized.placeholder_to_original,
+                        );
+                        expr_spanned.shift_spans(value.start);
+                        ComboFunctionImpl::Expr {
+                            expr,
+                            expr_spanned: Some(expr_spanned),
+                        }
                     }
                     ComboFunctionBody::Procedure { assigns } => {
                         let mut out_assigns = Vec::with_capacity(assigns.len());
@@ -809,6 +826,7 @@ fn denormalize_expr(expr: Expr, placeholders: &BTreeMap<String, String>) -> Expr
     match expr {
         Expr::Ident(name) => Expr::Ident(placeholders.get(&name).cloned().unwrap_or(name)),
         Expr::Literal(v) => Expr::Literal(v),
+        Expr::UnsizedNumber(v) => Expr::UnsizedNumber(v),
         Expr::UnbasedUnsized(b) => Expr::UnbasedUnsized(b),
         Expr::Call { name, args } => Expr::Call {
             name,
@@ -871,7 +889,9 @@ fn denormalize_spanned_expr(expr: &mut SpannedExpr, placeholders: &BTreeMap<Stri
                 *name = original.clone();
             }
         }
-        SpannedExprKind::Literal(_) | SpannedExprKind::UnbasedUnsized(_) => {}
+        SpannedExprKind::Literal(_)
+        | SpannedExprKind::UnsizedNumber(_)
+        | SpannedExprKind::UnbasedUnsized(_) => {}
         SpannedExprKind::Call { args, .. } => {
             for a in args {
                 denormalize_spanned_expr(a, placeholders);

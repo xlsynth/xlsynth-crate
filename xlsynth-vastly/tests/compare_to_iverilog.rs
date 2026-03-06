@@ -46,6 +46,24 @@ fn ternary_cond_0_1_x_z() {
 }
 
 #[test]
+fn ternary_mixed_signedness_arithmetic_branch_uses_merged_type_matches_oracle() {
+    let env = Env::new();
+
+    assert_eval_matches_oracle(
+        "(1'b0 ? 96'b101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010 : (32'sb00000000000000000000000000000100 - 80'b10101010101010101010101010101010101010101010101010101010101010101010101010101010))",
+        &env,
+    );
+    assert_eval_matches_oracle(
+        "(1'b1 ? (32'sb00000000000000000000000000000100 - 80'b10101010101010101010101010101010101010101010101010101010101010101010101010101010) : 96'b101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010)",
+        &env,
+    );
+    assert_eval_matches_oracle(
+        "(1'bx ? 96'b101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010 : (32'sb00000000000000000000000000000100 - 80'b10101010101010101010101010101010101010101010101010101010101010101010101010101010))",
+        &env,
+    );
+}
+
+#[test]
 fn equality_vs_case_equality_with_unknowns() {
     let env = Env::new();
 
@@ -56,6 +74,63 @@ fn equality_vs_case_equality_with_unknowns() {
 
     assert_eval_matches_oracle("4'b10x1 === 4'b10z1", &env);
     assert_eval_matches_oracle("4'b10x1 !== 4'b10z1", &env);
+}
+
+#[test]
+fn unbased_unsized_literals_match_oracle_in_equality_contexts() {
+    let env = Env::new();
+
+    assert_eval_matches_oracle("12'b110111011011 == 'x", &env);
+    assert_eval_matches_oracle("12'b110111011011 == 'z", &env);
+    assert_eval_matches_oracle("12'b110111011011 != 'x", &env);
+    assert_eval_matches_oracle("12'b110111011011 != 'z", &env);
+    assert_eval_matches_oracle("12'b000000000000 === '0", &env);
+    assert_eval_matches_oracle("12'b111111111111 === '1", &env);
+    assert_eval_matches_oracle("'x === 12'bxxxxxxxxxxxx", &env);
+    assert_eval_matches_oracle("'z === 12'bzzzzzzzzzzzz", &env);
+}
+
+#[test]
+fn based_literal_sizing_and_unknown_fill_match_oracle() {
+    let env = Env::new();
+
+    assert_eval_matches_oracle("'h1", &env);
+    assert_eval_matches_oracle("'hx", &env);
+    assert_eval_matches_oracle("'bz", &env);
+    assert_eval_matches_oracle("'d4294967296", &env);
+    assert_eval_matches_oracle("8'hx", &env);
+    assert_eval_matches_oracle("4'b10?1", &env);
+    assert_eval_matches_oracle("8'h?f", &env);
+}
+
+#[test]
+fn unsized_decimal_literals_expand_to_minimum_required_width_matches_oracle() {
+    let env = Env::new();
+
+    assert_eval_matches_oracle("4294967296 === 34'd4294967296", &env);
+    assert_eval_matches_oracle("'d4294967296 === 33'd4294967296", &env);
+}
+
+#[test]
+fn illegal_unsized_concat_and_dynamic_replication_are_rejected() {
+    let env = Env::new();
+
+    assert!(xlsynth_vastly::eval_expr("{1, 1'b0}", &env).is_err());
+    assert!(xlsynth_vastly::eval_expr("{foo{1'b1}}", &env).is_err());
+    assert!(xlsynth_vastly::eval_expr("a[i+3:i]", &env).is_err());
+    assert!(xlsynth_vastly::eval_expr("a[0 +: w]", &env).is_err());
+}
+
+#[test]
+fn mixed_signedness_equality_uses_common_context_matches_oracle() {
+    let env = Env::new();
+
+    assert_eval_matches_oracle("4'sb1111 == 8'd255", &env);
+    assert_eval_matches_oracle("4'sb1111 === 8'd255", &env);
+    assert_eval_matches_oracle("4'sb1111 == 8'd15", &env);
+    assert_eval_matches_oracle("4'sb1111 === 8'd15", &env);
+    assert_eval_matches_oracle("((4'sb1111 + 4'sd1) == 8'd16)", &env);
+    assert_eval_matches_oracle("((4'sb1111 + 4'sd1) === 8'd16)", &env);
 }
 
 #[test]
@@ -131,6 +206,9 @@ fn signed_and_unsigned_cast_builtins_match_oracle() {
 
     assert_eval_matches_oracle("$signed(7'b1111111) >>> 1", &env);
     assert_eval_matches_oracle("$unsigned($signed(7'b1111111)) >>> 1", &env);
+    assert_eval_matches_oracle("$signed('1 + '1) === 4'sb0000", &env);
+    assert_eval_matches_oracle("4'sb0000 === $signed('1 + '1)", &env);
+    assert_eval_matches_oracle("4'sb1000 <<< 1", &env);
 }
 
 #[test]

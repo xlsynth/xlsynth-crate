@@ -85,6 +85,39 @@ fn mk_unsigned_value_from_msb(bits_msb: &str) -> Value4 {
 }
 
 #[test]
+fn mixed_signedness_equality_context_sweep_matches_oracle() {
+    for &lhs_w in &[4_u32, 8, 12] {
+        for &rhs_w in &[8_u32, 16, 33] {
+            if rhs_w <= lhs_w {
+                continue;
+            }
+            let lhs = format!("{}'sb{}", lhs_w, "1".repeat(lhs_w as usize));
+            let rhs_all_ones = format!("{}'b{}", rhs_w, "1".repeat(rhs_w as usize));
+            let rhs_low_ones = mk_u_dec(rhs_w, (1_u32 << lhs_w) - 1);
+            let rhs_sum = mk_u_dec(rhs_w, 1_u32 << lhs_w);
+
+            let direct_false = format!("(({lhs}) == ({rhs_all_ones}))");
+            let direct_case_false = format!("(({lhs}) === ({rhs_all_ones}))");
+            let direct_true = format!("(({lhs}) == ({rhs_low_ones}))");
+            let direct_case_true = format!("(({lhs}) === ({rhs_low_ones}))");
+            let arith_true = format!("(((({lhs}) + 4'sd1)) == ({rhs_sum}))");
+            let arith_case_true = format!("(((({lhs}) + 4'sd1)) === ({rhs_sum}))");
+
+            let false_label = format!("mixed-eq-false lw={lhs_w} rw={rhs_w}");
+            let true_label = format!("mixed-eq-true lw={lhs_w} rw={rhs_w}");
+            let arith_label = format!("mixed-eq-arith lw={lhs_w} rw={rhs_w}");
+
+            assert_eval_matches_oracle(&direct_false, &false_label);
+            assert_eval_matches_oracle(&direct_case_false, &false_label);
+            assert_eval_matches_oracle(&direct_true, &true_label);
+            assert_eval_matches_oracle(&direct_case_true, &true_label);
+            assert_eval_matches_oracle(&arith_true, &arith_label);
+            assert_eval_matches_oracle(&arith_case_true, &arith_label);
+        }
+    }
+}
+
+#[test]
 fn arithmetic_context_sweep_matches_oracle() {
     let widths = [1_u32, 8, 32, 33];
     let parent_widths = [8_u32, 32, 44];
@@ -198,6 +231,38 @@ fn equality_and_case_equality_unknown_bit_sweep_matches_oracle() {
                 let expr = format!("((({lhs}) {op} ({rhs})) ^ ({parent}))");
                 let label = format!("eq op={op} lhs={lhs} rhs={rhs}");
                 assert_eval_matches_oracle(&expr, &label);
+            }
+        }
+    }
+}
+
+#[test]
+fn unbased_unsized_equality_context_sweep_matches_oracle() {
+    let lhs_values = [
+        "1'b0",
+        "1'b1",
+        "8'b00001111",
+        "8'b11110000",
+        "12'b110111011011",
+        "12'bxxxxxxxxxxxx",
+        "12'bzzzzzzzzzzzz",
+    ];
+    let rhs_values = ["'0", "'1", "'x", "'z"];
+    let eq_ops = ["==", "!=", "===", "!=="];
+    let mut ordinal = 0_u32;
+
+    for &lhs in &lhs_values {
+        for &rhs in &rhs_values {
+            for (op_i, op) in eq_ops.iter().enumerate() {
+                ordinal = ordinal.wrapping_add(1);
+                let parent = mk_lit(16, false, 850 + ordinal + op_i as u32, false);
+                let expr = format!("((({lhs}) {op} ({rhs})) ^ ({parent}))");
+                let label = format!("unbased-unsized lhs={lhs} rhs={rhs} op={op}");
+                assert_eval_matches_oracle(&expr, &label);
+
+                let swapped = format!("((({rhs}) {op} ({lhs})) ^ ({parent}))");
+                let swapped_label = format!("unbased-unsized lhs={rhs} rhs={lhs} op={op}");
+                assert_eval_matches_oracle(&swapped, &swapped_label);
             }
         }
     }
@@ -399,6 +464,41 @@ fn ternary_known_cond_still_uses_merged_branch_type_sweep_matches_oracle() {
                             format!("ternary-known cond={cond} tw={tw} fw={fw} ts={ts} fs={fs}");
                         assert_eval_matches_oracle(&expr, &label);
                     }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn ternary_mixed_signedness_branch_context_sweep_matches_oracle() {
+    let conds = ["1'b0", "1'b1", "1'bx", "1'bz"];
+    let mut ordinal = 0_u32;
+    for &signed_w in &[8_u32, 32, 44] {
+        for &arith_unsigned_w in &[33_u32, 64, 80] {
+            for &other_w in &[64_u32, 96, 128] {
+                if other_w <= arith_unsigned_w {
+                    continue;
+                }
+                ordinal = ordinal.wrapping_add(1);
+                let signed_branch_lhs = mk_lit(signed_w, true, 2900 + ordinal, true);
+                let arith_branch_rhs = mk_lit(arith_unsigned_w, false, 3000 + ordinal, false);
+                let arith_branch = format!("(({signed_branch_lhs}) - ({arith_branch_rhs}))");
+                let other_branch = mk_lit(other_w, false, 3100 + ordinal, false);
+                for &cond in &conds {
+                    let expr_arith_true =
+                        format!("(({cond}) ? ({arith_branch}) : ({other_branch}))");
+                    let label_arith_true = format!(
+                        "ternary-branch-ctx cond={cond} arith_true sw={signed_w} aw={arith_unsigned_w} ow={other_w}"
+                    );
+                    assert_eval_matches_oracle(&expr_arith_true, &label_arith_true);
+
+                    let expr_arith_false =
+                        format!("(({cond}) ? ({other_branch}) : ({arith_branch}))");
+                    let label_arith_false = format!(
+                        "ternary-branch-ctx cond={cond} arith_false sw={signed_w} aw={arith_unsigned_w} ow={other_w}"
+                    );
+                    assert_eval_matches_oracle(&expr_arith_false, &label_arith_false);
                 }
             }
         }

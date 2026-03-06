@@ -22,6 +22,28 @@ fn validate_literal_width(width: u32, literal: &str) -> Result<()> {
     Ok(())
 }
 
+fn expr_is_constant(expr: &Expr) -> bool {
+    match expr {
+        Expr::Ident(_) => false,
+        Expr::Literal(_) | Expr::UnsizedNumber(_) | Expr::UnbasedUnsized(_) => true,
+        Expr::Call { .. } => false,
+        Expr::Concat(parts) => parts.iter().all(expr_is_constant),
+        Expr::Replicate { count, expr } => expr_is_constant(count) && expr_is_constant(expr),
+        Expr::Index { expr, index } => expr_is_constant(expr) && expr_is_constant(index),
+        Expr::Slice { expr, msb, lsb } => {
+            expr_is_constant(expr) && expr_is_constant(msb) && expr_is_constant(lsb)
+        }
+        Expr::IndexedSlice {
+            expr, base, width, ..
+        } => expr_is_constant(expr) && expr_is_constant(base) && expr_is_constant(width),
+        Expr::Unary { expr, .. } => expr_is_constant(expr),
+        Expr::Binary { lhs, rhs, .. } => expr_is_constant(lhs) && expr_is_constant(rhs),
+        Expr::Ternary { cond, t, f } => {
+            expr_is_constant(cond) && expr_is_constant(t) && expr_is_constant(f)
+        }
+    }
+}
+
 pub fn parse_expr(input: &str) -> Result<Expr> {
     let mut p = Parser::new(input)?;
     let expr = p.parse_ternary()?;
@@ -392,8 +414,12 @@ impl<'a> Parser<'a> {
                         }
                     }
                 }
-                let v = parse_verilog_number(&lit)?;
-                Expr::Literal(v)
+                let (v, is_unsized_number) = parse_verilog_number_with_origin(&lit)?;
+                if is_unsized_number {
+                    Expr::UnsizedNumber(v)
+                } else {
+                    Expr::Literal(v)
+                }
             }
             Token::LParen => {
                 self.bump()?;
@@ -410,6 +436,11 @@ impl<'a> Parser<'a> {
                     let inner = self.parse_ternary()?;
                     self.expect_and_bump(Token::RBrace)?;
                     self.expect_and_bump(Token::RBrace)?;
+                    if !expr_is_constant(&first) {
+                        return Err(Error::Parse(
+                            "replication count must be a constant expression".to_string(),
+                        ));
+                    }
                     Expr::Replicate {
                         count: Box::new(first),
                         expr: Box::new(inner),
@@ -421,6 +452,11 @@ impl<'a> Parser<'a> {
                         parts.push(self.parse_ternary()?);
                     }
                     self.expect_and_bump(Token::RBrace)?;
+                    if parts.iter().any(|p| matches!(p, Expr::UnsizedNumber(_))) {
+                        return Err(Error::Parse(
+                            "unsized constant numbers are illegal in concatenations".to_string(),
+                        ));
+                    }
                     Expr::Concat(parts)
                 }
             }
@@ -444,6 +480,11 @@ impl<'a> Parser<'a> {
                 self.bump()?;
                 let lsb = self.parse_ternary()?;
                 self.expect_and_bump(Token::RBracket)?;
+                if !expr_is_constant(&idx_or_msb) || !expr_is_constant(&lsb) {
+                    return Err(Error::Parse(
+                        "part-select bounds must be constant expressions".to_string(),
+                    ));
+                }
                 expr = Expr::Slice {
                     expr: Box::new(expr),
                     msb: Box::new(idx_or_msb),
@@ -454,6 +495,11 @@ impl<'a> Parser<'a> {
                 self.bump()?;
                 let width = self.parse_ternary()?;
                 self.expect_and_bump(Token::RBracket)?;
+                if !expr_is_constant(&width) {
+                    return Err(Error::Parse(
+                        "indexed part-select width must be a constant expression".to_string(),
+                    ));
+                }
                 expr = Expr::IndexedSlice {
                     expr: Box::new(expr),
                     base: Box::new(idx_or_msb),
@@ -473,7 +519,7 @@ impl<'a> Parser<'a> {
     }
 }
 
-fn parse_verilog_number(s: &str) -> Result<Value4> {
+fn parse_verilog_number_with_origin(s: &str) -> Result<(Value4, bool)> {
     // Strip underscores; they are allowed as separators.
     let compact: String = s.chars().filter(|c| *c != '_').collect();
     let s = compact.as_str();
@@ -531,11 +577,17 @@ fn parse_verilog_number(s: &str) -> Result<Value4> {
             Signedness::Unsigned
         };
 
-        return parse_based_digits(width_opt, signedness, base, &digits);
+        return Ok((
+            parse_based_digits(width_opt, signedness, base, &digits)?,
+            width_opt.is_none(),
+        ));
     }
 
-    // Unsized decimal: treat as 32-bit signed (Verilog-ish).
-    Value4::parse_numeric_token(32, Signedness::Signed, s)
+    // Unsized decimal literals are at least 32 bits and signed unless marked
+    // otherwise.
+    let v = Value4::parse_unsized_decimal_token(Signedness::Signed, s)?;
+    validate_literal_width(v.width, s)?;
+    Ok((v, true))
 }
 
 fn parse_based_digits(
@@ -555,8 +607,16 @@ fn parse_based_digits(
 
 fn parse_dec_based(width_opt: Option<u32>, signedness: Signedness, digits: &str) -> Result<Value4> {
     let width = width_opt.unwrap_or(32);
-    validate_literal_width(width, digits)?;
+    if digits.eq_ignore_ascii_case("?") {
+        validate_literal_width(width, digits)?;
+        return Ok(Value4::new(
+            width,
+            signedness,
+            vec![LogicBit::Z; width as usize],
+        ));
+    }
     if digits.eq_ignore_ascii_case("x") {
+        validate_literal_width(width, digits)?;
         return Ok(Value4::new(
             width,
             signedness,
@@ -564,12 +624,19 @@ fn parse_dec_based(width_opt: Option<u32>, signedness: Signedness, digits: &str)
         ));
     }
     if digits.eq_ignore_ascii_case("z") {
+        validate_literal_width(width, digits)?;
         return Ok(Value4::new(
             width,
             signedness,
             vec![LogicBit::Z; width as usize],
         ));
     }
+    if width_opt.is_none() {
+        let v = Value4::parse_unsized_decimal_token(signedness, digits)?;
+        validate_literal_width(v.width, digits)?;
+        return Ok(v);
+    }
+    validate_literal_width(width, digits)?;
     if digits.chars().any(|c| !c.is_ascii_digit()) {
         return Err(Error::Parse(format!(
             "unsupported decimal digits in literal: {digits}"
@@ -600,15 +667,19 @@ where
     }
 
     let implied_width = bits_msb_first.len() as u32;
-    let width = width_opt.unwrap_or(implied_width);
+    let width = width_opt.unwrap_or(implied_width.max(32));
     validate_literal_width(width, digits)?;
 
     // If specified width is smaller, truncate from the left (MSB side).
     let bits_msb_first = if width < implied_width {
         bits_msb_first[(implied_width - width) as usize..].to_vec()
     } else if width > implied_width {
-        // Extend on the left with zeros per Verilog constant sizing (simplified).
-        let mut ext = vec![LogicBit::Zero; (width - implied_width) as usize];
+        let ext_bit = match bits_msb_first.first().copied().unwrap_or(LogicBit::Zero) {
+            LogicBit::X => LogicBit::X,
+            LogicBit::Z => LogicBit::Z,
+            LogicBit::Zero | LogicBit::One => LogicBit::Zero,
+        };
+        let mut ext = vec![ext_bit; (width - implied_width) as usize];
         ext.extend(bits_msb_first);
         ext
     } else {
@@ -627,7 +698,7 @@ fn parse_bin_digit(c: char) -> Result<Vec<LogicBit>> {
         '0' => LogicBit::Zero,
         '1' => LogicBit::One,
         'x' | 'X' => LogicBit::X,
-        'z' | 'Z' => LogicBit::Z,
+        'z' | 'Z' | '?' => LogicBit::Z,
         _ => return Err(Error::Parse(format!("bad binary digit: {c}"))),
     };
     Ok(vec![b])
@@ -636,7 +707,7 @@ fn parse_bin_digit(c: char) -> Result<Vec<LogicBit>> {
 fn parse_oct_digit(c: char) -> Result<Vec<LogicBit>> {
     match c {
         'x' | 'X' => Ok(vec![LogicBit::X, LogicBit::X, LogicBit::X]),
-        'z' | 'Z' => Ok(vec![LogicBit::Z, LogicBit::Z, LogicBit::Z]),
+        'z' | 'Z' | '?' => Ok(vec![LogicBit::Z, LogicBit::Z, LogicBit::Z]),
         _ => {
             let v = c
                 .to_digit(8)
@@ -664,7 +735,7 @@ fn parse_oct_digit(c: char) -> Result<Vec<LogicBit>> {
 fn parse_hex_digit(c: char) -> Result<Vec<LogicBit>> {
     match c {
         'x' | 'X' => Ok(vec![LogicBit::X, LogicBit::X, LogicBit::X, LogicBit::X]),
-        'z' | 'Z' => Ok(vec![LogicBit::Z, LogicBit::Z, LogicBit::Z, LogicBit::Z]),
+        'z' | 'Z' | '?' => Ok(vec![LogicBit::Z, LogicBit::Z, LogicBit::Z, LogicBit::Z]),
         _ => {
             let v = c
                 .to_digit(16)

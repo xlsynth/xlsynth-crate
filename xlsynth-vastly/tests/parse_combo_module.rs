@@ -150,6 +150,7 @@ module ctx_ops_v(
   output wire [7:0] neg_out,
   output wire [7:0] not_out,
   output wire [7:0] shl_out,
+  output wire [7:0] ashl_out,
   output wire [7:0] lshr_out,
   output wire signed [7:0] sshr_out,
   output wire signed [7:0] bor_ss_out,
@@ -164,6 +165,7 @@ module ctx_ops_v(
   assign neg_out = -4'd1;
   assign not_out = ~4'd1;
   assign shl_out = 4'sb1000 << 1;
+  assign ashl_out = 4'sb1000 <<< 1;
   assign lshr_out = 4'sb1000 >> 1;
   assign sshr_out = 4'sb1000 >>> 1;
   assign bor_ss_out = 4'sb1000 | 4'sb0001;
@@ -192,10 +194,100 @@ endmodule
     assert_eq!(out["neg_out"].to_bit_string_msb_first(), "11111111");
     assert_eq!(out["not_out"].to_bit_string_msb_first(), "11111110");
     assert_eq!(out["shl_out"].to_bit_string_msb_first(), "11110000");
+    assert_eq!(out["ashl_out"].to_bit_string_msb_first(), "11110000");
     assert_eq!(out["lshr_out"].to_bit_string_msb_first(), "01111100");
     assert_eq!(out["sshr_out"].to_bit_string_msb_first(), "11111100");
     assert_eq!(out["bor_ss_out"].to_bit_string_msb_first(), "11111001");
     assert_eq!(out["bor_su_out"].to_bit_string_msb_first(), "00001111");
+}
+
+#[test]
+fn parses_and_evals_question_mark_digits_as_z() {
+    let dut = r#"
+module qmark_v(
+  output wire [3:0] out_bin,
+  output wire [7:0] out_hex
+);
+  assign out_bin = 4'b10?1;
+  assign out_hex = 8'h?f;
+endmodule
+"#;
+
+    let m = compile_combo_module(dut).unwrap();
+    let plan = plan_combo_eval(&m).unwrap();
+    let out = eval_combo(&m, &plan, &BTreeMap::new()).unwrap();
+
+    assert_eq!(out["out_bin"].to_bit_string_msb_first(), "10z1");
+    assert_eq!(out["out_hex"].to_bit_string_msb_first(), "zzzz1111");
+}
+
+#[test]
+fn rejects_unsized_numeric_concat_and_dynamic_replication() {
+    let bad_concat = r#"
+module bad_concat_v(
+  output wire [32:0] out
+);
+  assign out = {1, 1'b0};
+endmodule
+"#;
+    assert!(compile_combo_module(bad_concat).is_err());
+
+    let bad_repl = r#"
+module bad_repl_v(
+  input wire [1:0] n,
+  output wire [1:0] out
+);
+  assign out = {n{1'b1}};
+endmodule
+"#;
+    assert!(compile_combo_module(bad_repl).is_err());
+
+    let bad_part_select = r#"
+module bad_part_select_v(
+  input wire [7:0] a,
+  input wire [2:0] i,
+  output wire [3:0] out
+);
+  assign out = a[i+3:i];
+endmodule
+"#;
+    assert!(compile_combo_module(bad_part_select).is_err());
+
+    let bad_indexed_width = r#"
+module bad_indexed_width_v(
+  input wire [7:0] a,
+  input wire [2:0] w,
+  output wire [3:0] out
+);
+  assign out = a[1 +: w];
+endmodule
+"#;
+    assert!(compile_combo_module(bad_indexed_width).is_err());
+}
+
+#[test]
+fn signed_casts_are_self_determined_before_assignment_context() {
+    let dut = r#"
+module signed_cast_ctx_v(
+  input wire dummy,
+  output wire [3:0] out
+);
+  assign out = $signed('1 + '1);
+endmodule
+"#;
+
+    let m = compile_combo_module(dut).unwrap();
+    let plan = plan_combo_eval(&m).unwrap();
+    let out = eval_combo(
+        &m,
+        &plan,
+        &[("dummy".to_string(), vbits(1, Signedness::Unsigned, "0"))]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>(),
+    )
+    .unwrap();
+
+    assert_eq!(out["out"].to_bit_string_msb_first(), "0000");
 }
 
 #[test]

@@ -130,9 +130,8 @@ impl<'a> LexerSpanned<'a> {
             }
             b'<' => {
                 if self.consume_str("<<<") {
-                    return Err(Error::Lex("unexpected '<<<' (not supported)".to_string()));
-                }
-                if self.consume_str("<<") {
+                    Token::Shl
+                } else if self.consume_str("<<") {
                     Token::Shl
                 } else if self.consume_str("<=") {
                     Token::Le
@@ -224,12 +223,37 @@ impl<'a> LexerSpanned<'a> {
 
     fn lex_numberish(&mut self) -> String {
         let start = self.idx;
+        let mut saw_quote = false;
+        let mut saw_base = false;
         while let Some(c) = self.peek_char() {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '\'' {
-                self.idx += c.len_utf8();
-            } else {
+            if c.is_whitespace() || matches!(c, '(' | ')' | '{' | '}' | '[' | ']' | ',' | ':') {
                 break;
             }
+            if matches!(
+                c,
+                '!' | '~' | '&' | '|' | '=' | '+' | '-' | '*' | '/' | '%' | '<' | '>' | '^'
+            ) {
+                break;
+            }
+            if c == '?' && !saw_base {
+                break;
+            }
+            if c == '\'' {
+                saw_quote = true;
+                self.idx += c.len_utf8();
+                continue;
+            }
+            if saw_quote && !saw_base && matches!(c, 'b' | 'B' | 'o' | 'O' | 'd' | 'D' | 'h' | 'H')
+            {
+                saw_base = true;
+                self.idx += c.len_utf8();
+                continue;
+            }
+            if c.is_ascii_alphanumeric() || c == '_' || (c == '?' && saw_base) {
+                self.idx += c.len_utf8();
+                continue;
+            }
+            break;
         }
         self.s[start..self.idx].to_string()
     }
