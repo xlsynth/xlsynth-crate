@@ -159,15 +159,16 @@ pub fn eval_combo_seeded(
 }
 
 fn eval_combo_assigns(m: &CompiledComboModule, plan: &ComboEvalPlan, env: &mut Env) -> Result<()> {
-    let resolver = ComboResolver {
-        funcs: &m.functions,
-    };
     for &ai in &plan.assign_order {
         let a = &m.assigns[ai];
         let info = m
             .decls
             .get(&a.lhs)
             .ok_or_else(|| Error::Parse(format!("no decl for assign lhs `{}`", a.lhs)))?;
+        let resolver = ComboResolver {
+            funcs: &m.functions,
+            globals: env,
+        };
         let rhs_v = eval_ast_with_calls(&a.rhs, env, Some(&resolver), Some(info.width))?;
         env.insert(a.lhs.clone(), coerce_to_declinfo(&rhs_v, info));
     }
@@ -283,6 +284,7 @@ fn eval_spanned_expr_with_funcs(
                 f,
                 &avs,
                 funcs,
+                env,
                 expected_width,
                 expected_signedness,
                 cov,
@@ -612,13 +614,14 @@ fn eval_compiled_function(
     f: &ComboFunction,
     args: &[Value4],
     funcs: &BTreeMap<String, ComboFunction>,
+    globals: &Env,
     expected_width: Option<u32>,
     _expected_signedness: Option<Signedness>,
     cov: &mut CoverageCounters,
     src: &SourceText,
     fn_meta: &BTreeMap<String, crate::pipeline_compile::FunctionMeta>,
 ) -> Result<Value4> {
-    let mut env = init_function_env(f, args);
+    let mut env = init_function_env(f, args, globals);
     if let Some(meta) = fn_meta.get(&f.name) {
         // Attribute function execution only to scaffold spans, not whole body,
         // so unselected arms remain line-missed.
@@ -649,10 +652,11 @@ fn eval_compiled_function(
                 )?
             } else {
                 let ret = function_return_decl(f);
+                let resolver = ComboResolver { funcs, globals };
                 eval_ast_with_calls_and_ctx(
                     expr,
                     &env,
-                    Some(&ComboResolver { funcs }),
+                    Some(&resolver),
                     Some(ret.width),
                     Some(ret.signedness),
                 )?
@@ -660,7 +664,8 @@ fn eval_compiled_function(
             Ok(coerce_to_declinfo(&v, &function_return_decl(f)))
         }
         ComboFunctionImpl::Casez { selector, arms } => {
-            let sel_v = eval_ast_with_calls(selector, &env, Some(&ComboResolver { funcs }), None)?;
+            let resolver = ComboResolver { funcs, globals };
+            let sel_v = eval_ast_with_calls(selector, &env, Some(&resolver), None)?;
             let sel_bits = sel_v.to_bit_string_msb_first();
             let mut default_arm: Option<&CasezArm> = None;
             let mut default_idx: Option<usize> = None;
@@ -683,7 +688,7 @@ fn eval_compiled_function(
                     let mut v = eval_ast_with_calls(
                         &arm.value,
                         &env,
-                        Some(&ComboResolver { funcs }),
+                        Some(&resolver),
                         Some(f.ret_width),
                     )?;
                     v = coerce_to_declinfo(&v, &function_return_decl(f));
@@ -709,7 +714,7 @@ fn eval_compiled_function(
                 let mut v = eval_ast_with_calls(
                     &d.value,
                     &env,
-                    Some(&ComboResolver { funcs }),
+                    Some(&resolver),
                     Some(f.ret_width),
                 )?;
                 v = coerce_to_declinfo(&v, &function_return_decl(f));
@@ -719,7 +724,8 @@ fn eval_compiled_function(
             Ok(x_value(w, Signedness::Unsigned))
         }
         ComboFunctionImpl::Procedure { assigns } => {
-            exec_function_procedure(f, &mut env, assigns, &ComboResolver { funcs })
+            let resolver = ComboResolver { funcs, globals };
+            exec_function_procedure(f, &mut env, assigns, &resolver)
         }
     }
 }
@@ -744,8 +750,8 @@ fn coerce_to_declinfo(v: &Value4, info: &crate::module_compile::DeclInfo) -> Val
     )
 }
 
-fn init_function_env(f: &ComboFunction, args: &[Value4]) -> Env {
-    let mut env = Env::new();
+fn init_function_env(f: &ComboFunction, args: &[Value4], globals: &Env) -> Env {
+    let mut env = globals.clone();
     for (arg, av) in f.args.iter().zip(args.iter()) {
         let info = crate::module_compile::DeclInfo {
             width: arg.width,
@@ -859,6 +865,7 @@ fn collect_idents(e: &Expr, out: &mut BTreeSet<String>) {
 
 struct ComboResolver<'a> {
     funcs: &'a BTreeMap<String, ComboFunction>,
+    globals: &'a Env,
 }
 
 impl<'a> CallResolver for ComboResolver<'a> {
@@ -874,7 +881,7 @@ impl<'a> CallResolver for ComboResolver<'a> {
                 f.args.len()
             )));
         }
-        let mut env = init_function_env(f, args);
+        let mut env = init_function_env(f, args, self.globals);
         match &f.body {
             ComboFunctionImpl::Expr { expr, .. } => {
                 let mut v = eval_ast_with_calls(expr, &env, Some(self), Some(f.ret_width))?;

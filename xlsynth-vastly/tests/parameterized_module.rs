@@ -10,9 +10,12 @@ use xlsynth_vastly::Value4;
 use xlsynth_vastly::compile_combo_module;
 use xlsynth_vastly::compile_pipeline_module;
 use xlsynth_vastly::eval_combo;
+use xlsynth_vastly::eval_combo_seeded_with_coverage;
 use xlsynth_vastly::eval_expr;
 use xlsynth_vastly::plan_combo_eval;
 use xlsynth_vastly::run_pipeline_and_collect_outputs;
+use xlsynth_vastly::CoverageCounters;
+use xlsynth_vastly::SourceText;
 
 fn ubits(width: u32, token: &str) -> Value4 {
     Value4::parse_numeric_token(width, Signedness::Unsigned, token).unwrap()
@@ -64,6 +67,50 @@ endmodule
     let values = eval_combo(&m, &plan, &inputs).unwrap();
     assert_eq!(
         values.get("y").unwrap().to_bit_string_msb_first(),
+        "00001010"
+    );
+}
+
+#[test]
+fn parameterized_function_can_read_module_parameter() {
+    let sv = r#"
+module mycombo_with_fn #(
+  parameter BusWidth = 8,
+  parameter logic [BusWidth - 1:0] Mask = 8'h0f
+) (
+  input logic [BusWidth - 1:0] x,
+  output logic [BusWidth - 1:0] y
+);
+  function automatic logic [BusWidth - 1:0] apply_mask(input logic [BusWidth - 1:0] v);
+    begin
+      apply_mask = v & Mask;
+    end
+  endfunction
+  assign y = apply_mask(x);
+endmodule
+"#;
+
+    let m = compile_combo_module(sv).unwrap();
+    let plan = plan_combo_eval(&m).unwrap();
+    let inputs = BTreeMap::from([("x".to_string(), ubits(8, "170"))]);
+
+    let values = eval_combo(&m, &plan, &inputs).unwrap();
+    assert_eq!(
+        values.get("y").unwrap().to_bit_string_msb_first(),
+        "00001010"
+    );
+
+    // Also exercise the coverage path, which evaluates function bodies via the
+    // spanned-expression evaluator.
+    let mut cov = CoverageCounters::default();
+    let src = SourceText::new(sv.to_string());
+    let mut seed = Env::new();
+    seed.insert("x", ubits(8, "170"));
+    let values_cov =
+        eval_combo_seeded_with_coverage(&m, &plan, &seed, &src, &mut cov, &BTreeMap::new())
+            .unwrap();
+    assert_eq!(
+        values_cov.get("y").unwrap().to_bit_string_msb_first(),
         "00001010"
     );
 }
