@@ -123,7 +123,9 @@ fn has_based_literal_width_over_limit(expr: &str, limit: u32) -> bool {
 
 fn expr_depth_and_node_count(expr: &Expr) -> (usize, usize) {
     match expr {
-        Expr::Ident(_) | Expr::Literal(_) | Expr::UnbasedUnsized(_) => (1, 1),
+        Expr::Ident(_) | Expr::Literal(_) | Expr::UnsizedNumber(_) | Expr::UnbasedUnsized(_) => {
+            (1, 1)
+        }
         Expr::Call { args, .. } | Expr::Concat(args) => {
             let mut max_child_depth = 0usize;
             let mut total_nodes = 1usize;
@@ -208,6 +210,7 @@ fn visit_expr_idents(expr: &Expr, f: &mut dyn FnMut(&str)) {
     match expr {
         Expr::Ident(name) => f(name),
         Expr::Literal(_) => {}
+        Expr::UnsizedNumber(_) => {}
         Expr::UnbasedUnsized(_) => {}
         Expr::Call { args, .. } => {
             for a in args {
@@ -259,6 +262,7 @@ fn render_expr(expr: &Expr) -> String {
     match expr {
         Expr::Ident(name) => name.clone(),
         Expr::Literal(v) => render_literal(v),
+        Expr::UnsizedNumber(v) => render_literal(v),
         Expr::UnbasedUnsized(bit) => match bit {
             LogicBit::Zero => "'0".to_string(),
             LogicBit::One => "'1".to_string(),
