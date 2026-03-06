@@ -685,12 +685,8 @@ fn eval_compiled_function(
                             cov.hit_span(src, am.arm_span);
                         }
                     }
-                    let mut v = eval_ast_with_calls(
-                        &arm.value,
-                        &env,
-                        Some(&resolver),
-                        Some(f.ret_width),
-                    )?;
+                    let mut v =
+                        eval_ast_with_calls(&arm.value, &env, Some(&resolver), Some(f.ret_width))?;
                     v = coerce_to_declinfo(&v, &function_return_decl(f));
                     return Ok(v);
                 }
@@ -711,12 +707,8 @@ fn eval_compiled_function(
                         cov.hit_span(src, am.arm_span);
                     }
                 }
-                let mut v = eval_ast_with_calls(
-                    &d.value,
-                    &env,
-                    Some(&resolver),
-                    Some(f.ret_width),
-                )?;
+                let mut v =
+                    eval_ast_with_calls(&d.value, &env, Some(&resolver), Some(f.ret_width))?;
                 v = coerce_to_declinfo(&v, &function_return_decl(f));
                 return Ok(v);
             }

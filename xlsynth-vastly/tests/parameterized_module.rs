@@ -2,10 +2,12 @@
 
 use std::collections::BTreeMap;
 
+use xlsynth_vastly::CoverageCounters;
 use xlsynth_vastly::Env;
 use xlsynth_vastly::PipelineCycle;
 use xlsynth_vastly::PipelineStimulus;
 use xlsynth_vastly::Signedness;
+use xlsynth_vastly::SourceText;
 use xlsynth_vastly::Value4;
 use xlsynth_vastly::compile_combo_module;
 use xlsynth_vastly::compile_pipeline_module;
@@ -14,8 +16,6 @@ use xlsynth_vastly::eval_combo_seeded_with_coverage;
 use xlsynth_vastly::eval_expr;
 use xlsynth_vastly::plan_combo_eval;
 use xlsynth_vastly::run_pipeline_and_collect_outputs;
-use xlsynth_vastly::CoverageCounters;
-use xlsynth_vastly::SourceText;
 
 fn ubits(width: u32, token: &str) -> Value4 {
     Value4::parse_numeric_token(width, Signedness::Unsigned, token).unwrap()
