@@ -20,6 +20,8 @@ use xlsynth_vastly::Value4;
 use xlsynth_vastly::ast::Expr;
 
 const MAX_BASED_LITERAL_WIDTH: u32 = 384;
+const MAX_EXPR_AST_DEPTH: usize = 32;
+const MAX_EXPR_AST_NODES: usize = 192;
 
 fuzz_target!(|data: &[u8]| {
     let mut u = Unstructured::new(data);
@@ -45,6 +47,12 @@ fuzz_target!(|data: &[u8]| {
         // Skip parser-rejected expressions; this target compares accepted inputs only.
         Err(_) => return,
     };
+    let (depth, nodes) = expr_depth_and_node_count(&ast);
+    // Very deep/large parsed trees mostly surface evaluator performance limits rather than
+    // semantic mismatches for this differential target.
+    if depth > MAX_EXPR_AST_DEPTH || nodes > MAX_EXPR_AST_NODES {
+        return;
+    }
 
     // Enforce: expression only refers to identifiers defined in env.
     if !all_idents_defined_in_env(&ast, &case.env) {
@@ -111,6 +119,79 @@ fn has_based_literal_width_over_limit(expr: &str, limit: u32) -> bool {
         }
     }
     false
+}
+
+fn expr_depth_and_node_count(expr: &Expr) -> (usize, usize) {
+    match expr {
+        Expr::Ident(_) | Expr::Literal(_) | Expr::UnbasedUnsized(_) => (1, 1),
+        Expr::Call { args, .. } | Expr::Concat(args) => {
+            let mut max_child_depth = 0usize;
+            let mut total_nodes = 1usize;
+            for arg in args {
+                let (depth, nodes) = expr_depth_and_node_count(arg);
+                max_child_depth = max_child_depth.max(depth);
+                total_nodes += nodes;
+            }
+            (1 + max_child_depth, total_nodes)
+        }
+        Expr::Replicate { count, expr } => {
+            let (count_depth, count_nodes) = expr_depth_and_node_count(count);
+            let (expr_depth, expr_nodes) = expr_depth_and_node_count(expr);
+            (
+                1 + count_depth.max(expr_depth),
+                1 + count_nodes + expr_nodes,
+            )
+        }
+        Expr::Index { expr, index } => {
+            let (expr_depth, expr_nodes) = expr_depth_and_node_count(expr);
+            let (index_depth, index_nodes) = expr_depth_and_node_count(index);
+            (
+                1 + expr_depth.max(index_depth),
+                1 + expr_nodes + index_nodes,
+            )
+        }
+        Expr::Slice { expr, msb, lsb } => {
+            let (expr_depth, expr_nodes) = expr_depth_and_node_count(expr);
+            let (msb_depth, msb_nodes) = expr_depth_and_node_count(msb);
+            let (lsb_depth, lsb_nodes) = expr_depth_and_node_count(lsb);
+            (
+                1 + expr_depth.max(msb_depth).max(lsb_depth),
+                1 + expr_nodes + msb_nodes + lsb_nodes,
+            )
+        }
+        Expr::IndexedSlice {
+            expr,
+            base,
+            width,
+            ..
+        } => {
+            let (expr_depth, expr_nodes) = expr_depth_and_node_count(expr);
+            let (base_depth, base_nodes) = expr_depth_and_node_count(base);
+            let (width_depth, width_nodes) = expr_depth_and_node_count(width);
+            (
+                1 + expr_depth.max(base_depth).max(width_depth),
+                1 + expr_nodes + base_nodes + width_nodes,
+            )
+        }
+        Expr::Unary { expr, .. } => {
+            let (depth, nodes) = expr_depth_and_node_count(expr);
+            (1 + depth, 1 + nodes)
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            let (lhs_depth, lhs_nodes) = expr_depth_and_node_count(lhs);
+            let (rhs_depth, rhs_nodes) = expr_depth_and_node_count(rhs);
+            (1 + lhs_depth.max(rhs_depth), 1 + lhs_nodes + rhs_nodes)
+        }
+        Expr::Ternary { cond, t, f } => {
+            let (cond_depth, cond_nodes) = expr_depth_and_node_count(cond);
+            let (t_depth, t_nodes) = expr_depth_and_node_count(t);
+            let (f_depth, f_nodes) = expr_depth_and_node_count(f);
+            (
+                1 + cond_depth.max(t_depth).max(f_depth),
+                1 + cond_nodes + t_nodes + f_nodes,
+            )
+        }
+    }
 }
 
 fn all_idents_defined_in_env(expr: &Expr, env: &Env) -> bool {

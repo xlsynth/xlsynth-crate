@@ -140,3 +140,53 @@ fn function_expr_ternary_coverage_is_tracked() {
     assert_eq!(counts.t_taken, 3);
     assert_eq!(counts.cond_unknown, 0);
 }
+
+#[test]
+fn function_expr_ternary_equality_recontexts_unbased_unsized_rhs() {
+    let dut = concat!(
+        "module m(input logic clk, input logic [1:0] sel, input logic a, input logic b, output logic y);\n",
+        "  function automatic logic pick(input logic [1:0] s, input logic t, input logic f);\n",
+        "    begin\n",
+        "      pick = (s == '1) ? t : f;\n",
+        "    end\n",
+        "  endfunction\n",
+        "  assign y = pick(sel, a, b);\n",
+        "endmodule\n",
+    );
+    let cm = compile_pipeline_module(dut).unwrap();
+    let src = SourceText::new(dut.to_string());
+    let stimulus = PipelineStimulus {
+        half_period: 5,
+        cycles: vec![
+            PipelineCycle {
+                inputs: [
+                    ("sel".to_string(), vbits(2, Signedness::Unsigned, "01")),
+                    ("a".to_string(), vbits(1, Signedness::Unsigned, "1")),
+                    ("b".to_string(), vbits(1, Signedness::Unsigned, "0")),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            PipelineCycle {
+                inputs: [
+                    ("sel".to_string(), vbits(2, Signedness::Unsigned, "10")),
+                    ("a".to_string(), vbits(1, Signedness::Unsigned, "1")),
+                    ("b".to_string(), vbits(1, Signedness::Unsigned, "0")),
+                ]
+                .into_iter()
+                .collect(),
+            },
+        ],
+    };
+    let init = BTreeMap::new();
+
+    let mut cov = CoverageCounters::default();
+    cov.register_functions(&cm.fn_meta);
+    run_pipeline_and_collect_coverage(&cm, &stimulus, &init, &src, &mut cov).unwrap();
+
+    assert_eq!(cov.ternary_branches.len(), 1);
+    let counts = cov.ternary_branches.values().next().unwrap();
+    assert_eq!(counts.t_taken, 3);
+    assert_eq!(counts.f_taken, 3);
+    assert_eq!(counts.cond_unknown, 0);
+}
