@@ -89,6 +89,10 @@ jobs:
           echo "--- End Git Diagnostics ---"
           ./.venv-precommit/bin/pre-commit install
 
+      - name: Install cargo-fuzz
+        run: |
+          cargo install cargo-fuzz
+
       - name: Run pre-commit (which can include your rustfmt checks, etc.)
         env:
           SKIP: no-commit-to-branch
@@ -352,6 +356,10 @@ jobs:
           echo "--- End Git Diagnostics ---"
           pre-commit install
 
+      - name: Install cargo-fuzz
+        run: |
+          cargo install cargo-fuzz
+
       - name: Run pre-commit checks
         env:
           SKIP: no-commit-to-branch
@@ -561,6 +569,10 @@ jobs:
           echo "C_INCLUDE_PATH=$(brew --prefix z3)/include:$C_INCLUDE_PATH" >> $GITHUB_ENV
           echo "LIBRARY_PATH=$(brew --prefix z3)/lib:$LIBRARY_PATH" >> $GITHUB_ENV
           pkg-config --modversion z3 || true
+
+      - name: Install cargo-fuzz
+        run: |
+          cargo install cargo-fuzz
 
       - name: Run pre-commit
         env:
