@@ -82,6 +82,9 @@ fn expr_is_two_value_safe_inner(expr: &Expr) -> bool {
         Expr::Replicate { count, expr } => {
             expr_is_two_value_safe_inner(count) && expr_is_two_value_safe_inner(expr)
         }
+        Expr::Cast { width, expr } => {
+            expr_is_two_value_safe_inner(width) && expr_is_two_value_safe_inner(expr)
+        }
         Expr::Index { expr, index } => {
             expr_is_two_value_safe_inner(expr) && expr_is_two_value_safe_inner(index)
         }
@@ -157,6 +160,7 @@ mod tests {
         let env = Env::new();
         let expr = parse("((4'b0011 + 4'b0001) == 4'd4) ? 1'b1 : 1'b0");
         assert!(expr_is_two_value_safe(&expr, &env));
+        assert!(expr_is_two_value_safe(&parse("4'(2'b11)"), &env));
     }
 
     #[test]
