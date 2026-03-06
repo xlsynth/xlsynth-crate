@@ -30,6 +30,7 @@ pub mod ir_parser;
 pub mod ir_query;
 pub mod ir_range_info;
 pub mod ir_rebase_ids;
+pub mod ir_rewrite;
 pub mod ir_utils;
 pub mod ir_validate;
 pub mod ir_value_utils;
