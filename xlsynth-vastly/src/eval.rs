@@ -501,21 +501,26 @@ fn eval_ast_with_calls_inner(
                 | BinaryOp::BitAnd
                 | BinaryOp::BitOr
                 | BinaryOp::BitXor => Some(expected_width.unwrap_or(0).max(a0.width.max(b0.width))),
-                BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-                    Some(a0.width.max(b0.width))
-                }
-                BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sshr => expected_width,
-                BinaryOp::LogicalAnd
-                | BinaryOp::LogicalOr
+                BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge
                 | BinaryOp::Eq
                 | BinaryOp::Neq
                 | BinaryOp::CaseEq
-                | BinaryOp::CaseNeq => None,
+                | BinaryOp::CaseNeq => Some(a0.width.max(b0.width)),
+                BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sshr => expected_width,
+                BinaryOp::LogicalAnd | BinaryOp::LogicalOr => None,
             };
             let op_lhs_expected_width_rhs_expected_width = match op {
-                BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-                    (op_expected_width, op_expected_width)
-                }
+                BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge
+                | BinaryOp::Eq
+                | BinaryOp::Neq
+                | BinaryOp::CaseEq
+                | BinaryOp::CaseNeq => (op_expected_width, op_expected_width),
                 _ => binary_operand_expected_widths(*op, op_expected_width),
             };
             let op_expected_signedness = match op {

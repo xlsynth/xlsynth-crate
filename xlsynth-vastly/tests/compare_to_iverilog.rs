@@ -59,6 +59,20 @@ fn equality_vs_case_equality_with_unknowns() {
 }
 
 #[test]
+fn unbased_unsized_literals_match_oracle_in_equality_contexts() {
+    let env = Env::new();
+
+    assert_eval_matches_oracle("12'b110111011011 == 'x", &env);
+    assert_eval_matches_oracle("12'b110111011011 == 'z", &env);
+    assert_eval_matches_oracle("12'b110111011011 != 'x", &env);
+    assert_eval_matches_oracle("12'b110111011011 != 'z", &env);
+    assert_eval_matches_oracle("12'b000000000000 === '0", &env);
+    assert_eval_matches_oracle("12'b111111111111 === '1", &env);
+    assert_eval_matches_oracle("'x === 12'bxxxxxxxxxxxx", &env);
+    assert_eval_matches_oracle("'z === 12'bzzzzzzzzzzzz", &env);
+}
+
+#[test]
 fn logical_ops_4state_truth_tables() {
     let env = Env::new();
 

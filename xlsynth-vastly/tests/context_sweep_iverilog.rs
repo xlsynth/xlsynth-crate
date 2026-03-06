@@ -204,6 +204,38 @@ fn equality_and_case_equality_unknown_bit_sweep_matches_oracle() {
 }
 
 #[test]
+fn unbased_unsized_equality_context_sweep_matches_oracle() {
+    let lhs_values = [
+        "1'b0",
+        "1'b1",
+        "8'b00001111",
+        "8'b11110000",
+        "12'b110111011011",
+        "12'bxxxxxxxxxxxx",
+        "12'bzzzzzzzzzzzz",
+    ];
+    let rhs_values = ["'0", "'1", "'x", "'z"];
+    let eq_ops = ["==", "!=", "===", "!=="];
+    let mut ordinal = 0_u32;
+
+    for &lhs in &lhs_values {
+        for &rhs in &rhs_values {
+            for (op_i, op) in eq_ops.iter().enumerate() {
+                ordinal = ordinal.wrapping_add(1);
+                let parent = mk_lit(16, false, 850 + ordinal + op_i as u32, false);
+                let expr = format!("((({lhs}) {op} ({rhs})) ^ ({parent}))");
+                let label = format!("unbased-unsized lhs={lhs} rhs={rhs} op={op}");
+                assert_eval_matches_oracle(&expr, &label);
+
+                let swapped = format!("((({rhs}) {op} ({lhs})) ^ ({parent}))");
+                let swapped_label = format!("unbased-unsized lhs={rhs} rhs={lhs} op={op}");
+                assert_eval_matches_oracle(&swapped, &swapped_label);
+            }
+        }
+    }
+}
+
+#[test]
 fn shift_edge_sweep_matches_oracle() {
     let widths = [8_u32, 32, 33, 44];
     let shift_ops = ["<<", ">>", ">>>"];
