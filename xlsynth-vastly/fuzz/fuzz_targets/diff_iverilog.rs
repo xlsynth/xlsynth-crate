@@ -20,7 +20,7 @@ use xlsynth_vastly::Value4;
 use xlsynth_vastly::ast::Expr;
 
 const MAX_BASED_LITERAL_WIDTH: u32 = 384;
-const MAX_EXPR_AST_DEPTH: usize = 32;
+const MAX_EXPR_AST_DEPTH: usize = 16;
 const MAX_EXPR_AST_NODES: usize = 192;
 
 fuzz_target!(|data: &[u8]| {

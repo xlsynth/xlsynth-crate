@@ -65,6 +65,17 @@ fn operand_with_merged_sign_ctx(
     (lhs, rhs)
 }
 
+fn ternary_branch_needs_width_recontext(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::UnbasedUnsized(_)
+            | Expr::Call { .. }
+            | Expr::Unary { .. }
+            | Expr::Binary { .. }
+            | Expr::Ternary { .. }
+    )
+}
+
 fn unary_operand_expected_width(op: UnaryOp, expected_width: Option<u32>) -> Option<u32> {
     match op {
         UnaryOp::BitNot | UnaryOp::UnaryPlus | UnaryOp::UnaryMinus => expected_width,
@@ -621,7 +632,7 @@ fn eval_ast_with_calls_inner(
             if let Some(obs) = observer.as_deref_mut() {
                 obs.on_ternary(context_span, expr, &c);
             }
-            let tv = if let Some(obs) = observer.as_deref_mut() {
+            let tv0 = if let Some(obs) = observer.as_deref_mut() {
                 eval_ast_with_calls_inner(
                     t,
                     env,
@@ -641,29 +652,85 @@ fn eval_ast_with_calls_inner(
                     None,
                     context_span,
                 )?
+            };
+            let fv0 = if let Some(obs) = observer.as_deref_mut() {
+                eval_ast_with_calls_inner(
+                    f,
+                    env,
+                    calls,
+                    expected_width,
+                    expected_signedness,
+                    Some(obs),
+                    context_span,
+                )?
+            } else {
+                eval_ast_with_calls_inner(
+                    f,
+                    env,
+                    calls,
+                    expected_width,
+                    expected_signedness,
+                    None,
+                    context_span,
+                )?
+            };
+            let branch_expected_width =
+                Some(expected_width.unwrap_or(0).max(tv0.width.max(fv0.width)));
+            let recontext_t =
+                branch_expected_width != expected_width && ternary_branch_needs_width_recontext(t);
+            let recontext_f =
+                branch_expected_width != expected_width && ternary_branch_needs_width_recontext(f);
+            let tv = if recontext_t {
+                if let Some(obs) = observer.as_deref_mut() {
+                    eval_ast_with_calls_inner(
+                        t,
+                        env,
+                        calls,
+                        branch_expected_width,
+                        expected_signedness,
+                        Some(obs),
+                        context_span,
+                    )?
+                } else {
+                    eval_ast_with_calls_inner(
+                        t,
+                        env,
+                        calls,
+                        branch_expected_width,
+                        expected_signedness,
+                        None,
+                        context_span,
+                    )?
+                }
+            } else {
+                tv0
+            };
+            let fv = if recontext_f {
+                if let Some(obs) = observer.as_deref_mut() {
+                    eval_ast_with_calls_inner(
+                        f,
+                        env,
+                        calls,
+                        branch_expected_width,
+                        expected_signedness,
+                        Some(obs),
+                        context_span,
+                    )?
+                } else {
+                    eval_ast_with_calls_inner(
+                        f,
+                        env,
+                        calls,
+                        branch_expected_width,
+                        expected_signedness,
+                        None,
+                        context_span,
+                    )?
+                }
+            } else {
+                fv0
             };
             let tv = operand_with_own_sign_ctx(tv, expected_width, expected_signedness);
-            let fv = if let Some(obs) = observer.as_deref_mut() {
-                eval_ast_with_calls_inner(
-                    f,
-                    env,
-                    calls,
-                    expected_width,
-                    expected_signedness,
-                    Some(obs),
-                    context_span,
-                )?
-            } else {
-                eval_ast_with_calls_inner(
-                    f,
-                    env,
-                    calls,
-                    expected_width,
-                    expected_signedness,
-                    None,
-                    context_span,
-                )?
-            };
             let fv = operand_with_own_sign_ctx(fv, expected_width, expected_signedness);
             Ok(operand_with_own_sign_ctx(
                 Value4::ternary(&c, &tv, &fv),

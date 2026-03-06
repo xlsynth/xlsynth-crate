@@ -438,6 +438,41 @@ fn ternary_known_cond_still_uses_merged_branch_type_sweep_matches_oracle() {
 }
 
 #[test]
+fn ternary_mixed_signedness_branch_context_sweep_matches_oracle() {
+    let conds = ["1'b0", "1'b1", "1'bx", "1'bz"];
+    let mut ordinal = 0_u32;
+    for &signed_w in &[8_u32, 32, 44] {
+        for &arith_unsigned_w in &[33_u32, 64, 80] {
+            for &other_w in &[64_u32, 96, 128] {
+                if other_w <= arith_unsigned_w {
+                    continue;
+                }
+                ordinal = ordinal.wrapping_add(1);
+                let signed_branch_lhs = mk_lit(signed_w, true, 2900 + ordinal, true);
+                let arith_branch_rhs = mk_lit(arith_unsigned_w, false, 3000 + ordinal, false);
+                let arith_branch = format!("(({signed_branch_lhs}) - ({arith_branch_rhs}))");
+                let other_branch = mk_lit(other_w, false, 3100 + ordinal, false);
+                for &cond in &conds {
+                    let expr_arith_true =
+                        format!("(({cond}) ? ({arith_branch}) : ({other_branch}))");
+                    let label_arith_true = format!(
+                        "ternary-branch-ctx cond={cond} arith_true sw={signed_w} aw={arith_unsigned_w} ow={other_w}"
+                    );
+                    assert_eval_matches_oracle(&expr_arith_true, &label_arith_true);
+
+                    let expr_arith_false =
+                        format!("(({cond}) ? ({other_branch}) : ({arith_branch}))");
+                    let label_arith_false = format!(
+                        "ternary-branch-ctx cond={cond} arith_false sw={signed_w} aw={arith_unsigned_w} ow={other_w}"
+                    );
+                    assert_eval_matches_oracle(&expr_arith_false, &label_arith_false);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn shift_rhs_context_isolation_sweep_matches_oracle() {
     let mut ordinal = 0_u32;
     for &op in &[">>", ">>>"] {
