@@ -103,9 +103,9 @@ jobs:
         run: cargo test --test version_test
 
   # -----------------------------------------------------------
-  # 2) xlsynth-vastly optional oracle lane (iverilog/vvp)
+  # 2) xlsynth-vastly reference simulator lane (currently Icarus)
   # -----------------------------------------------------------
-  xlsynth-vastly-iverilog-tests:
+  xlsynth-vastly-reference-sim-tests:
     needs: [lint-check-ubuntu]
     runs-on: ubuntu-latest
 
@@ -130,16 +130,16 @@ jobs:
           profile: minimal
           override: true
 
-      - name: Install Icarus Verilog
+      - name: Install Icarus Verilog reference simulator
         run: |
           sudo apt-get update
           sudo apt-get install -y iverilog
           iverilog -V
           vvp -V
 
-      - name: Run xlsynth-vastly oracle tests
+      - name: Run xlsynth-vastly reference simulator tests
         run: |
-          cargo test -p xlsynth-vastly --features iverilog-tests
+          cargo test -p xlsynth-vastly --features reference-sim-tests
 
   # -----------------------------------------------------------
   # 3) Build/test on Ubuntu 22.04 and 24.04

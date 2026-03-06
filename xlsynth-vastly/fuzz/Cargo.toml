@@ -28,8 +28,8 @@ members = ["."]
 warnings = "deny"
 
 [[bin]]
-name = "diff_iverilog"
-path = "fuzz_targets/diff_iverilog.rs"
+name = "diff_refsim_4value"
+path = "fuzz_targets/diff_refsim_4value.rs"
 test = false
 doc = false
 

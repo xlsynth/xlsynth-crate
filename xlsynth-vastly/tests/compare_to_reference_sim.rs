@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-#![cfg(feature = "iverilog-tests")]
+#![cfg(feature = "reference-sim-tests")]
 
-mod iverilog_oracle;
+mod reference_sim_iverilog;
 
 use xlsynth_vastly::Env;
 use xlsynth_vastly::LogicBit;
@@ -25,7 +25,7 @@ fn vbits(width: u32, signedness: Signedness, msb: &str) -> Value4 {
 
 fn assert_eval_matches_oracle(expr: &str, env: &Env) {
     let ours = xlsynth_vastly::eval_expr(expr, env).expect("eval_expr");
-    let oracle = iverilog_oracle::run_oracle(expr, env);
+    let oracle = reference_sim_iverilog::run_oracle(expr, env);
 
     assert_eq!(ours.value.width, oracle.width, "width mismatch for {expr}");
     assert_eq!(
@@ -159,8 +159,8 @@ fn signedness_observable_via_extension_for_literals() {
     let env = Env::new();
 
     // 4'sb1000 should be signed, 4'b1000 should be unsigned.
-    let o_signed = iverilog_oracle::run_oracle("4'sb1000", &env);
-    let o_unsigned = iverilog_oracle::run_oracle("4'b1000", &env);
+    let o_signed = reference_sim_iverilog::run_oracle("4'sb1000", &env);
+    let o_unsigned = reference_sim_iverilog::run_oracle("4'b1000", &env);
 
     let ours_signed = xlsynth_vastly::eval_expr("4'sb1000", &env)
         .unwrap()
@@ -175,11 +175,11 @@ fn signedness_observable_via_extension_for_literals() {
     assert_eq!(ours_unsigned, Signedness::Unsigned);
 
     assert_eq!(
-        iverilog_oracle::infer_signedness_from_ext(&o_signed),
+        reference_sim_iverilog::infer_signedness_from_ext(&o_signed),
         Some(true)
     );
     assert_eq!(
-        iverilog_oracle::infer_signedness_from_ext(&o_unsigned),
+        reference_sim_iverilog::infer_signedness_from_ext(&o_unsigned),
         Some(false)
     );
 }

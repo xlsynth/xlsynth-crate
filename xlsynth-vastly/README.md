@@ -3,8 +3,28 @@
 `xlsynth-vastly` simulates Verilog/SystemVerilog that XLS codegen emits, with
 support for both combinational (`combo`) and pipelined designs over the
 constructs we target. We ground correctness with fuzzing over XLS-generated
-artifacts in both forms, and with oracle-style comparisons such as semantic VCD
-diffing against `iverilog`/`vvp`.
+artifacts in both forms, and with differential checks against external
+reference implementations such as semantic VCD diffing against an external
+simulator backend.
+
+The language standards are the semantic source of truth here. External
+simulators are used as independent implementations to cross-check against the
+spec, not as spec providers themselves.
+
+## Scope and Trust Model
+
+`xlsynth-vastly` is a deliberately limited simulator intended for testing and
+debugging the subset of Verilog/SystemVerilog emitted by XLS and VAST.
+
+It is not designed or intended to be a general-purpose Verilog simulator. The
+implementation makes a best-effort attempt to reflect the Verilog/SystemVerilog
+specification, but any trust in its behavior should be limited to the language
+subset exercised by generated XLS/VAST outputs and the surrounding regression
+and differential-test coverage.
+
+In other words: if `xlsynth-vastly` accepts and correctly simulates broader
+source-language inputs, that is useful, but it is not the primary contract of
+the crate.
 
 ## Quickstart Commands
 
@@ -27,13 +47,13 @@ cargo run -p xlsynth-vastly --bin vastly-sim-pipeline -- /path/to/foo.sv \
   --vcd-out ./pipeline.vcd
 ```
 
-- Compare combo simulation results with Icarus Verilog (best as a semantic oracle check):
+- Compare combo simulation results against a reference simulator:
 
 ```bash
 cargo run -p xlsynth-vastly --bin vastly-sim-combo -- /path/to/foo.combo.v \
   --inputs "0xf00,0xba5;0x0000,0x3f80" \
   --vcd-out ./combo.vcd \
-  --compare-to-iverilog
+  --compare-to-reference-sim=iverilog
 ```
 
 - Run baseline tests that do not require external simulators:
@@ -42,23 +62,23 @@ cargo run -p xlsynth-vastly --bin vastly-sim-combo -- /path/to/foo.combo.v \
 cargo test -p xlsynth-vastly
 ```
 
-- Run extended oracle tests that use `iverilog`/`vvp`:
+- Run extended reference-simulator tests:
 
 ```bash
-cargo test -p xlsynth-vastly --features iverilog-tests
+cargo test -p xlsynth-vastly --features reference-sim-tests
 ```
 
 ## Tooling Requirements
 
-- Core unit/integration tests do not require `iverilog`/`vvp`.
-- Oracle/differential tests against Icarus Verilog require `iverilog` and `vvp`
-  on `PATH`, and are enabled with `--features iverilog-tests`.
-- `iverilog-tests` exists so default `cargo test` remains tool-independent,
-  while still providing an explicit opt-in lane for oracle-backed comparisons.
-- In `iverilog-tests` mode, `iverilog`/`vvp` are only invoked as subprocesses to
-  produce oracle outputs; the oracle backend is intentionally pluggable so
-  additional simulators can be slotted in later (e.g. for further SV support
-  comparisons).
+- Core unit/integration tests do not require external simulators.
+- Reference-simulator tests require the current external simulator backend to
+  be available on `PATH`; enable them with `--features reference-sim-tests`.
+- `reference-sim-tests` exists so default `cargo test` remains
+  tool-independent while still providing an explicit opt-in lane for
+  differential checks against external implementations.
+- The reference-simulator layer is intentionally pluggable so additional
+  implementations can be slotted in later, including backends with only
+  two-value semantics such as Yosys/CXXRTL.
 
 ## Stimulus Format
 
@@ -96,15 +116,16 @@ cargo run -p xlsynth-vastly --bin vastly-sim-combo -- /path/to/foo.combo.v \
 - Values may be hex (`0x...`) or decimal.
 - Values map positionally to module input ports in module-header order.
 
-### Compare against Icarus Verilog
+### Compare against a reference simulator
 
-If `iverilog`/`vvp` are on `PATH`, generate an Icarus VCD and semantically diff:
+If the current reference-simulator backend is on `PATH`, generate a reference
+VCD and semantically diff:
 
 ```bash
 cargo run -p xlsynth-vastly --bin vastly-sim-combo -- /path/to/foo.combo.v \
   --inputs "0xf00,0xba5;0x0000,0x3f80" \
   --vcd-out ./combo.vcd \
-  --compare-to-iverilog
+  --compare-to-reference-sim=iverilog
 ```
 
 ## `vastly-sim-pipeline`
@@ -130,8 +151,8 @@ cargo run -p xlsynth-vastly --bin vastly-sim-pipeline -- /path/to/foo.sv \
 
 ## Testing
 
-- Baseline tests (no Icarus dependency):
+- Baseline tests (no external-simulator dependency):
   `cargo test -p xlsynth-vastly`
-- Extended oracle tests (requires `iverilog`/`vvp`):
-  `cargo test -p xlsynth-vastly --features iverilog-tests`
+- Extended reference-simulator tests:
+  `cargo test -p xlsynth-vastly --features reference-sim-tests`
 - Fuzz targets live under `xlsynth-vastly/fuzz`; see workspace `FUZZ.md`.

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-#![cfg(feature = "iverilog-tests")]
+#![cfg(feature = "reference-sim-tests")]
 
 mod vcd_oracle;
 
@@ -32,7 +32,7 @@ fn vbits(width: u32, signedness: Signedness, msb: &str) -> Value4 {
 }
 
 #[test]
-fn vcd_matches_iverilog_for_simple_counter() {
+fn vcd_matches_reference_sim_for_simple_counter() {
     vcd_oracle::require_iverilog();
 
     let dut = r#"
@@ -71,7 +71,7 @@ endmodule
 
     let td = mk_temp_dir();
     let ours_vcd = td.join("ours.vcd");
-    let iv_vcd = td.join("iverilog.vcd");
+    let iv_vcd = td.join("reference_sim.vcd");
 
     xlsynth_vastly::run_and_write_vcd(&cm, &stimulus, &init, &ours_vcd).unwrap();
     vcd_oracle::run_iverilog_and_collect_vcd(dut, &stimulus, &init, &iv_vcd);

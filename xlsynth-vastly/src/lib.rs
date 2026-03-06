@@ -3,6 +3,9 @@
 //! Verilog(-ish) expression evaluator with 4-state values (0/1/X/Z).
 //!
 //! v1 focuses on a small operator subset centered on the ternary operator.
+//! Verilog/SystemVerilog semantics are defined by the language standard;
+//! external simulators are used here as differential reference
+//! implementations rather than as spec providers.
 
 pub mod ast;
 pub mod ast_spanned;
@@ -23,6 +26,7 @@ pub mod parser;
 mod parser_spanned;
 mod pipeline_compile;
 mod pipeline_harness;
+mod reference_sim;
 mod sim_harness;
 mod sim_observer;
 mod sv_ast;
@@ -32,6 +36,7 @@ mod value;
 mod vcd;
 mod vcd_diff;
 mod vcd_writer;
+mod yosys_cxxrtl_combo;
 
 pub use crate::ast_spanned::SpannedExpr;
 pub use crate::ast_spanned::SpannedExprKind;
@@ -75,6 +80,11 @@ pub use crate::pipeline_harness::run_pipeline_and_collect_coverage;
 pub use crate::pipeline_harness::run_pipeline_and_collect_outputs;
 pub use crate::pipeline_harness::run_pipeline_and_write_vcd;
 pub use crate::pipeline_harness::step_pipeline_state_with_env;
+pub use crate::reference_sim::ReferenceSimCapabilities;
+pub use crate::reference_sim::ReferenceSimKind;
+pub use crate::reference_sim::ValueDomain;
+pub use crate::reference_sim::env_is_two_value_safe;
+pub use crate::reference_sim::expr_is_two_value_safe;
 pub use crate::sim_harness::Cycle;
 pub use crate::sim_harness::Stimulus;
 pub use crate::sim_harness::run_and_write_vcd;
@@ -85,6 +95,8 @@ pub use crate::value::Value4;
 pub use crate::vcd::Vcd;
 pub use crate::vcd_diff::VcdDiffOptions;
 pub use crate::vcd_diff::diff_vcd_exact;
+pub use crate::yosys_cxxrtl_combo::eval_yosys_cxxrtl_combo;
+pub use crate::yosys_cxxrtl_combo::has_yosys_cxxrtl_toolchain;
 
 use std::collections::BTreeMap;
 
