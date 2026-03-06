@@ -22,4 +22,4 @@ xlsynth = { path = "../xlsynth", version = "0.36.0" }
 
 [features]
 default = []
-iverilog-tests = []
+reference-sim-tests = []

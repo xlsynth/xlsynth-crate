@@ -5,6 +5,8 @@ use std::time::SystemTime;
 
 use xlsynth_vastly::compile_combo_module;
 use xlsynth_vastly::eval_combo;
+use xlsynth_vastly::eval_yosys_cxxrtl_combo;
+use xlsynth_vastly::has_yosys_cxxrtl_toolchain;
 use xlsynth_vastly::plan_combo_eval;
 use xlsynth_vastly::run_iverilog_combo_and_collect_vcd;
 use xlsynth_vastly::LogicBit;
@@ -140,6 +142,24 @@ fn eval_codegen_with_iverilog_verilog(
     result
 }
 
+fn eval_codegen_with_yosys_cxxrtl_verilog(
+    src: &str,
+    module_name: &str,
+    inputs: &BTreeMap<String, Value4>,
+) -> Result<Value4, String> {
+    let m = compile_combo_module(src).map_err(|e| format!("compile_combo_module failed: {e:?}"))?;
+    if m.output_ports.len() != 1 {
+        return Err(format!("expected exactly one output port, got {}", m.output_ports.len()));
+    }
+    let out_name = m.output_ports[0].name.clone();
+    let outputs = eval_yosys_cxxrtl_combo(src, module_name, inputs)
+        .map_err(|e| format!("eval_yosys_cxxrtl_combo failed: {e:?}"))?;
+    outputs
+        .get(&out_name)
+        .cloned()
+        .ok_or_else(|| format!("missing output `{out_name}`"))
+}
+
 fn value4_from_msb_bits(bits: &str) -> Result<Value4, String> {
     let mut out = Vec::with_capacity(bits.len());
     for c in bits.chars().rev() {
@@ -217,8 +237,22 @@ fn typed_top_level_codegen_matches_ir_and_oracles() {
     let got_v = eval_codegen_with_vastly(&verilog_src, &input_map).unwrap();
     let got_sv = eval_codegen_with_vastly(&sv_src, &input_map).unwrap();
     let got_iv = eval_codegen_with_iverilog_verilog(&verilog_src, &input_map).unwrap();
+    let got_cxxrtl = if has_yosys_cxxrtl_toolchain() {
+        Some(
+            eval_codegen_with_yosys_cxxrtl_verilog(&verilog_src, "compound_shapes_v", &input_map)
+                .unwrap(),
+        )
+    } else {
+        None
+    };
 
     assert_eq!(got_v.to_bit_string_msb_first(), want.to_bit_string_msb_first());
     assert_eq!(got_sv.to_bit_string_msb_first(), want.to_bit_string_msb_first());
     assert_eq!(got_iv.to_bit_string_msb_first(), want.to_bit_string_msb_first());
+    if let Some(got_cxxrtl) = got_cxxrtl {
+        assert_eq!(
+            got_cxxrtl.to_bit_string_msb_first(),
+            want.to_bit_string_msb_first()
+        );
+    }
 }

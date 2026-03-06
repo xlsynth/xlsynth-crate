@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-#![cfg(feature = "iverilog-tests")]
+#![cfg(feature = "reference-sim-tests")]
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -37,7 +37,7 @@ fn vbits(width: u32, signedness: Signedness, msb: &str) -> Value4 {
 }
 
 #[test]
-fn vcd_matches_iverilog_for_pipeline_with_combo_outputs() {
+fn vcd_matches_reference_sim_for_pipeline_with_combo_outputs() {
     require_iverilog();
 
     let dut = r#"
@@ -97,7 +97,7 @@ endmodule
 
     let td = mk_temp_dir();
     let ours_vcd = td.join("ours.vcd");
-    let iv_vcd = td.join("iverilog.vcd");
+    let iv_vcd = td.join("reference_sim.vcd");
 
     run_pipeline_and_write_vcd(&cm, &stimulus, &init, &ours_vcd).unwrap();
     run_iverilog_pipeline_and_collect_vcd(dut, &cm, &stimulus, &init, &iv_vcd);
@@ -110,7 +110,7 @@ endmodule
 }
 
 #[test]
-fn vcd_matches_iverilog_for_pipeline_with_two_stateful_stages() {
+fn vcd_matches_reference_sim_for_pipeline_with_two_stateful_stages() {
     require_iverilog();
 
     let dut = r#"
@@ -258,7 +258,7 @@ endmodule
 
     let td = mk_temp_dir();
     let ours_vcd = td.join("ours.vcd");
-    let iv_vcd = td.join("iverilog.vcd");
+    let iv_vcd = td.join("reference_sim.vcd");
 
     run_pipeline_and_write_vcd(&cm, &stimulus, &init, &ours_vcd).unwrap();
     run_iverilog_pipeline_and_collect_vcd(dut, &cm, &stimulus, &init, &iv_vcd);

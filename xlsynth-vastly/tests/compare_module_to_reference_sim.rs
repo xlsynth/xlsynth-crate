@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-#![cfg(feature = "iverilog-tests")]
+#![cfg(feature = "reference-sim-tests")]
 
-mod iverilog_oracle;
+mod reference_sim_iverilog;
 
 use std::io::Write;
 use std::process::Command;
@@ -30,7 +30,7 @@ fn vbits(width: u32, signedness: Signedness, msb: &str) -> Value4 {
 
 #[test]
 fn module_step_matches_iverilog_simple_counter() {
-    iverilog_oracle::require_iverilog();
+    reference_sim_iverilog::require_iverilog();
 
     let src = r#"
 module m(input logic clk, input logic en, output logic [3:0] q);
@@ -60,7 +60,7 @@ endmodule
 
 #[test]
 fn module_step_part_select_and_concat() {
-    iverilog_oracle::require_iverilog();
+    reference_sim_iverilog::require_iverilog();
 
     let src = r#"
 module m(input logic clk, input logic [3:0] a, output logic [7:0] q);

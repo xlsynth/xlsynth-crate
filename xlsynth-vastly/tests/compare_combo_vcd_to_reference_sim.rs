@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-#![cfg(feature = "iverilog-tests")]
+#![cfg(feature = "reference-sim-tests")]
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -61,7 +61,7 @@ fn assert_common_var_timelines_match(a: &Vcd, b: &Vcd) {
 }
 
 #[test]
-fn combo_vcd_matches_iverilog_for_casez_function() {
+fn combo_vcd_matches_reference_sim_for_casez_function() {
     let dut = r#"
 module m(
   input wire [1:0] sel,
@@ -127,7 +127,7 @@ endmodule
     let td = mk_temp_dir();
     let dut_path = td.join("dut.v");
     let ours_vcd = td.join("ours.vcd");
-    let iv_vcd = td.join("iverilog.vcd");
+    let iv_vcd = td.join("reference_sim.vcd");
 
     {
         let mut f = std::fs::File::create(&dut_path).unwrap();
@@ -145,7 +145,7 @@ endmodule
 }
 
 #[test]
-fn helper_function_with_locals_and_signed_casts_matches_iverilog() {
+fn helper_function_with_locals_and_signed_casts_matches_reference_sim() {
     let dut = r#"
 module fuzz_codegen_v(
   input wire [6:0] p0,
@@ -192,7 +192,7 @@ endmodule
     let td = mk_temp_dir();
     let dut_path = td.join("dut.v");
     let ours_vcd = td.join("ours.vcd");
-    let iv_vcd = td.join("iverilog.vcd");
+    let iv_vcd = td.join("reference_sim.vcd");
 
     {
         let mut f = std::fs::File::create(&dut_path).unwrap();
@@ -256,7 +256,7 @@ endmodule
     let td = mk_temp_dir();
     let dut_path = td.join("dut.v");
     let ours_vcd = td.join("ours.vcd");
-    let iv_vcd = td.join("iverilog.vcd");
+    let iv_vcd = td.join("reference_sim.vcd");
 
     {
         let mut f = std::fs::File::create(&dut_path).unwrap();
@@ -317,7 +317,7 @@ endmodule
     let td = mk_temp_dir();
     let dut_path = td.join("dut.v");
     let ours_vcd = td.join("ours.vcd");
-    let iv_vcd = td.join("iverilog.vcd");
+    let iv_vcd = td.join("reference_sim.vcd");
 
     {
         let mut f = std::fs::File::create(&dut_path).unwrap();
@@ -335,7 +335,7 @@ endmodule
 }
 
 #[test]
-fn priority_sel_helper_with_decimal_x_default_matches_iverilog() {
+fn priority_sel_helper_with_decimal_x_default_matches_reference_sim() {
     let dut = r#"
 module fuzz_codegen_v(
   input wire [7:0] p0,
@@ -403,7 +403,7 @@ endmodule
     let td = mk_temp_dir();
     let dut_path = td.join("dut.v");
     let ours_vcd = td.join("ours.vcd");
-    let iv_vcd = td.join("iverilog.vcd");
+    let iv_vcd = td.join("reference_sim.vcd");
 
     {
         let mut f = std::fs::File::create(&dut_path).unwrap();
@@ -421,7 +421,7 @@ endmodule
 }
 
 #[test]
-fn dynamic_bit_slice_helper_matches_iverilog() {
+fn dynamic_bit_slice_helper_matches_reference_sim() {
     let dut = r#"
 module dbs_mod_v(
   input wire [7:0] x,
@@ -468,7 +468,7 @@ endmodule
     let td = mk_temp_dir();
     let dut_path = td.join("dut.v");
     let ours_vcd = td.join("ours.vcd");
-    let iv_vcd = td.join("iverilog.vcd");
+    let iv_vcd = td.join("reference_sim.vcd");
 
     {
         let mut f = std::fs::File::create(&dut_path).unwrap();
@@ -486,7 +486,7 @@ endmodule
 }
 
 #[test]
-fn bit_slice_update_helper_matches_iverilog() {
+fn bit_slice_update_helper_matches_reference_sim() {
     let dut = r#"
 module bsu_mod_v(
   input wire [7:0] x,
@@ -535,7 +535,7 @@ endmodule
     let td = mk_temp_dir();
     let dut_path = td.join("dut.v");
     let ours_vcd = td.join("ours.vcd");
-    let iv_vcd = td.join("iverilog.vcd");
+    let iv_vcd = td.join("reference_sim.vcd");
 
     {
         let mut f = std::fs::File::create(&dut_path).unwrap();
@@ -553,7 +553,7 @@ endmodule
 }
 
 #[test]
-fn array_index_helper_matches_iverilog() {
+fn array_index_helper_matches_reference_sim() {
     let dut = r#"
 module f(
   input wire [31:0] arr,
@@ -607,7 +607,7 @@ endmodule
     let td = mk_temp_dir();
     let dut_path = td.join("dut.v");
     let ours_vcd = td.join("ours.vcd");
-    let iv_vcd = td.join("iverilog.vcd");
+    let iv_vcd = td.join("reference_sim.vcd");
 
     {
         let mut f = std::fs::File::create(&dut_path).unwrap();
@@ -625,7 +625,7 @@ endmodule
 }
 
 #[test]
-fn array_slice_helper_matches_iverilog() {
+fn array_slice_helper_matches_reference_sim() {
     let dut = r#"
 module f(
   input wire [31:0] arr,
@@ -681,7 +681,7 @@ endmodule
     let td = mk_temp_dir();
     let dut_path = td.join("dut.v");
     let ours_vcd = td.join("ours.vcd");
-    let iv_vcd = td.join("iverilog.vcd");
+    let iv_vcd = td.join("reference_sim.vcd");
 
     {
         let mut f = std::fs::File::create(&dut_path).unwrap();
@@ -699,7 +699,7 @@ endmodule
 }
 
 #[test]
-fn array_update_helper_matches_iverilog() {
+fn array_update_helper_matches_reference_sim() {
     let dut = r#"
 module f(
   input wire [31:0] arr,
@@ -768,7 +768,7 @@ endmodule
     let td = mk_temp_dir();
     let dut_path = td.join("dut.v");
     let ours_vcd = td.join("ours.vcd");
-    let iv_vcd = td.join("iverilog.vcd");
+    let iv_vcd = td.join("reference_sim.vcd");
 
     {
         let mut f = std::fs::File::create(&dut_path).unwrap();
@@ -786,7 +786,7 @@ endmodule
 }
 
 #[test]
-fn unpacked_array_generated_combo_matches_iverilog() {
+fn unpacked_array_generated_combo_matches_reference_sim() {
     let dut = r#"
 module fuzz_codegen_v(
   input wire [2:0] p0,
@@ -827,7 +827,7 @@ endmodule
     let td = mk_temp_dir();
     let dut_path = td.join("dut.v");
     let ours_vcd = td.join("ours.vcd");
-    let iv_vcd = td.join("iverilog.vcd");
+    let iv_vcd = td.join("reference_sim.vcd");
 
     {
         let mut f = std::fs::File::create(&dut_path).unwrap();
@@ -845,7 +845,7 @@ endmodule
 }
 
 #[test]
-fn nested_unpacked_array_generated_combo_matches_iverilog() {
+fn nested_unpacked_array_generated_combo_matches_reference_sim() {
     let dut = r#"
 module fuzz_codegen_v(
   input wire [1:0] p0,
@@ -886,7 +886,7 @@ endmodule
     let td = mk_temp_dir();
     let dut_path = td.join("dut.v");
     let ours_vcd = td.join("ours.vcd");
-    let iv_vcd = td.join("iverilog.vcd");
+    let iv_vcd = td.join("reference_sim.vcd");
 
     {
         let mut f = std::fs::File::create(&dut_path).unwrap();
@@ -904,7 +904,7 @@ endmodule
 }
 
 #[test]
-fn finding96_codegen_decode_guarded_shift_matches_iverilog() {
+fn finding96_codegen_decode_guarded_shift_matches_reference_sim() {
     // Repro from fuzz finding 96 trace.
     let dut = r#"
 module fuzz_codegen_v(
@@ -946,7 +946,7 @@ endmodule
     let td = mk_temp_dir();
     let dut_path = td.join("dut.v");
     let ours_vcd = td.join("ours.vcd");
-    let iv_vcd = td.join("iverilog.vcd");
+    let iv_vcd = td.join("reference_sim.vcd");
 
     {
         let mut f = std::fs::File::create(&dut_path).unwrap();
@@ -964,7 +964,7 @@ endmodule
 }
 
 #[test]
-fn finding57_codegen_wide_unary_minus_slice_matches_iverilog() {
+fn finding57_codegen_wide_unary_minus_slice_matches_reference_sim() {
     // Repro class from fuzz finding 57 trace.
     let dut = r#"
 module fuzz_codegen_v(
@@ -1006,7 +1006,7 @@ endmodule
     let td = mk_temp_dir();
     let dut_path = td.join("dut.v");
     let ours_vcd = td.join("ours.vcd");
-    let iv_vcd = td.join("iverilog.vcd");
+    let iv_vcd = td.join("reference_sim.vcd");
 
     {
         let mut f = std::fs::File::create(&dut_path).unwrap();
@@ -1024,7 +1024,7 @@ endmodule
 }
 
 #[test]
-fn finding1_codegen_wide_multiply_slice_matches_iverilog() {
+fn finding1_codegen_wide_multiply_slice_matches_reference_sim() {
     // Repro class from fuzz finding 1 trace.
     let dut = r#"
 module fuzz_codegen_v(
@@ -1071,7 +1071,7 @@ endmodule
     let td = mk_temp_dir();
     let dut_path = td.join("dut.v");
     let ours_vcd = td.join("ours.vcd");
-    let iv_vcd = td.join("iverilog.vcd");
+    let iv_vcd = td.join("reference_sim.vcd");
 
     {
         let mut f = std::fs::File::create(&dut_path).unwrap();

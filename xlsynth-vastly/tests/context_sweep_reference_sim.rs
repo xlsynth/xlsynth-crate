@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
-#![cfg(feature = "iverilog-tests")]
+#![cfg(feature = "reference-sim-tests")]
 
 // This file provides deterministic, oracle-backed "context sweep" coverage for
 // expression semantics that frequently break under width/signedness inference.
 //
 // Why this exists:
-// - The `diff_iverilog` fuzzer is excellent at finding edge cases, but it is
-//   stochastic and can regress silently if a previously-found corner case
+// - The `diff_refsim_4value` fuzzer is excellent at finding edge cases, but it
+//   is stochastic and can regress silently if a previously-found corner case
 //   becomes harder to rediscover.
 // - These sweeps pin down families of context-sensitive rules as stable,
-//   reproducible integration tests against an external oracle (`iverilog`).
+//   reproducible integration tests against an external reference
+//   implementation.
 //
 // How this is structured:
 // - Generate bounded cartesian-style combinations across widths, signedness,
@@ -18,7 +19,7 @@
 // - Assert both width and value bits against oracle results for each
 //   expression.
 
-mod iverilog_oracle;
+mod reference_sim_iverilog;
 
 use xlsynth_vastly::Env;
 use xlsynth_vastly::LogicBit;
@@ -57,7 +58,7 @@ fn assert_eval_matches_oracle(expr: &str, label: &str) {
 
 fn assert_eval_matches_oracle_with_env(expr: &str, env: &Env, label: &str) {
     let ours = xlsynth_vastly::eval_expr(expr, &env).expect("eval_expr");
-    let oracle = iverilog_oracle::run_oracle(expr, &env);
+    let oracle = reference_sim_iverilog::run_oracle(expr, &env);
     assert_eq!(
         ours.value.width, oracle.width,
         "width mismatch [{label}] expr={expr}"

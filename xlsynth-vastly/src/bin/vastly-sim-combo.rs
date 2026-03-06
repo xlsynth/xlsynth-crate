@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use clap::ArgAction;
 use clap::Parser;
+use clap::ValueEnum;
 
 use xlsynth_vastly::Signedness;
 use xlsynth_vastly::Value4;
@@ -16,6 +17,11 @@ use xlsynth_vastly::eval_combo;
 use xlsynth_vastly::plan_combo_eval;
 use xlsynth_vastly::run_combo_and_write_vcd;
 use xlsynth_vastly::run_iverilog_combo_and_collect_vcd;
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum ReferenceSimBackend {
+    Iverilog,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "vastly-sim-combo")]
@@ -33,9 +39,9 @@ struct Args {
     #[arg(long, default_value = "combo.vcd")]
     vcd_out: PathBuf,
 
-    /// Compare our VCD to Icarus Verilog (iverilog/vvp) by semantic VCD diff.
-    #[arg(long)]
-    compare_to_iverilog: bool,
+    /// Compare our VCD to a reference simulator by semantic VCD diff.
+    #[arg(long, value_enum)]
+    compare_to_reference_sim: Option<ReferenceSimBackend>,
 
     /// Print top-level output port values for each input vector to stdout.
     #[arg(long, default_value_t = true, action = ArgAction::Set)]
@@ -78,18 +84,27 @@ fn main_inner() -> xlsynth_vastly::Result<()> {
 
     run_combo_and_write_vcd(&m, &plan, &vectors, &args.vcd_out)?;
 
-    if args.compare_to_iverilog {
+    if let Some(reference_sim_backend) = args.compare_to_reference_sim {
         let td = mk_temp_dir()?;
-        let iv_vcd = td.join("iverilog.vcd");
-        run_iverilog_combo_and_collect_vcd(&args.combo_v, &m, &vectors, &iv_vcd)?;
+        let reference_sim_vcd = td.join("reference_sim.vcd");
+        match reference_sim_backend {
+            ReferenceSimBackend::Iverilog => {
+                run_iverilog_combo_and_collect_vcd(
+                    &args.combo_v,
+                    &m,
+                    &vectors,
+                    &reference_sim_vcd,
+                )?;
+            }
+        }
 
         let ours_text = std::fs::read_to_string(&args.vcd_out)
             .map_err(|e| xlsynth_vastly::Error::Parse(format!("io error: {e}")))?;
-        let iv_text = std::fs::read_to_string(&iv_vcd)
+        let reference_sim_text = std::fs::read_to_string(&reference_sim_vcd)
             .map_err(|e| xlsynth_vastly::Error::Parse(format!("io error: {e}")))?;
         let ours = Vcd::parse(&ours_text)?;
-        let iv = Vcd::parse(&iv_text)?;
-        diff_vcd_exact(&ours, &iv, &VcdDiffOptions::default())?;
+        let reference_sim = Vcd::parse(&reference_sim_text)?;
+        diff_vcd_exact(&ours, &reference_sim, &VcdDiffOptions::default())?;
     }
 
     Ok(())
