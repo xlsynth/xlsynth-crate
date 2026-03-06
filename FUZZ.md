@@ -164,6 +164,34 @@ Primarily tests:
   concatenations are tokenized correctly.
 - Top-level annotation tokenization with string-valued fields
 
+### xlsynth-vastly/fuzz/fuzz_targets/diff_iverilog.rs
+
+Builds random expression+environment pairs, normalizes expressions through the
+local parser/renderer, and compares evaluation results against an
+`iverilog`/`vvp` oracle for accepted samples. The target surfaces semantic
+mismatches in value bits and inferred widths.
+
+Primarily tests:
+
+- Consistency between `xlsynth-vastly` expression evaluation and
+  `iverilog`/`vvp` semantics on shared accepted inputs
+- Stability of parser+pretty-printer normalization before differential
+  evaluation
+
+### xlsynth-vastly/fuzz/fuzz_targets/xls_ir_codegen_semantics.rs
+
+Generates XLS IR functions and checks that code generated from those functions
+behaves consistently across `xlsynth` interpretation and `xlsynth-vastly`
+simulation paths (including combo and pipelined forms) when supported by the
+sample/tooling.
+
+Primarily tests:
+
+- End-to-end semantic equivalence between XLS IR interpretation and generated
+  Verilog/SystemVerilog simulation
+- Codegen/simulation consistency across combo and pipelined lowering paths
+  under random typed inputs
+
 ______________________________________________________________________
 
 Notes:

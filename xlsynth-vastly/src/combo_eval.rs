@@ -1,0 +1,747 @@
+// SPDX-License-Identifier: Apache-2.0
+
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::VecDeque;
+
+use crate::CoverageCounters;
+use crate::Env;
+use crate::Error;
+use crate::Result;
+use crate::Signedness;
+use crate::SourceText;
+use crate::SpanKey;
+use crate::Value4;
+use crate::ast::Expr;
+use crate::ast_spanned::SpannedExpr;
+use crate::ast_spanned::SpannedExprKind;
+use crate::combo_compile::CasezArm;
+use crate::combo_compile::CasezPattern;
+use crate::combo_compile::ComboFunction;
+use crate::combo_compile::ComboFunctionImpl;
+use crate::combo_compile::CompiledComboModule;
+use crate::eval::CallResolver;
+use crate::eval::eval_ast_with_calls;
+use crate::eval::eval_binary_op;
+use crate::eval::eval_unary_op;
+use crate::value::LogicBit;
+
+pub struct ComboEvalPlan {
+    /// Assign indices in evaluation order.
+    pub assign_order: Vec<usize>,
+}
+
+pub fn plan_combo_eval(m: &CompiledComboModule) -> Result<ComboEvalPlan> {
+    let mut lhs_to_idx: BTreeMap<String, usize> = BTreeMap::new();
+    for (i, a) in m.assigns.iter().enumerate() {
+        if lhs_to_idx.insert(a.lhs.clone(), i).is_some() {
+            return Err(Error::Parse(format!("multiple assigns to `{}`", a.lhs)));
+        }
+    }
+
+    let mut indeg: Vec<u32> = vec![0; m.assigns.len()];
+    let mut succ: Vec<Vec<usize>> = vec![Vec::new(); m.assigns.len()];
+
+    for (i, a) in m.assigns.iter().enumerate() {
+        let mut deps: BTreeSet<String> = BTreeSet::new();
+        collect_idents(&a.rhs, &mut deps);
+        for d in deps {
+            if let Some(&j) = lhs_to_idx.get(&d) {
+                // i depends on j => edge j -> i
+                succ[j].push(i);
+                indeg[i] += 1;
+            }
+        }
+    }
+
+    let mut q: VecDeque<usize> = VecDeque::new();
+    for i in 0..indeg.len() {
+        if indeg[i] == 0 {
+            q.push_back(i);
+        }
+    }
+    let mut order: Vec<usize> = Vec::with_capacity(m.assigns.len());
+    while let Some(n) = q.pop_front() {
+        order.push(n);
+        for &s in &succ[n] {
+            indeg[s] -= 1;
+            if indeg[s] == 0 {
+                q.push_back(s);
+            }
+        }
+    }
+    if order.len() != m.assigns.len() {
+        return Err(Error::Parse(
+            "combinational cycle detected in assigns".to_string(),
+        ));
+    }
+    Ok(ComboEvalPlan {
+        assign_order: order,
+    })
+}
+
+pub fn eval_combo(
+    m: &CompiledComboModule,
+    plan: &ComboEvalPlan,
+    inputs: &BTreeMap<String, Value4>,
+) -> Result<BTreeMap<String, Value4>> {
+    let mut env = Env::new();
+    // Initialize everything to X.
+    for (name, info) in &m.decls {
+        env.insert(name.clone(), x_value(info.width, info.signedness));
+    }
+    // Drive inputs.
+    for p in &m.input_ports {
+        let v = inputs
+            .get(&p.name)
+            .ok_or_else(|| Error::Parse(format!("missing input `{}`", p.name)))?;
+        let info = m
+            .decls
+            .get(&p.name)
+            .ok_or_else(|| Error::Parse(format!("no decl for input `{}`", p.name)))?;
+        env.insert(p.name.clone(), coerce_to_declinfo(v, info));
+    }
+
+    eval_combo_assigns(m, plan, &mut env)?;
+
+    // Snapshot.
+    let mut out: BTreeMap<String, Value4> = BTreeMap::new();
+    for (k, v) in env.iter() {
+        out.insert(k.clone(), v.clone());
+    }
+    Ok(out)
+}
+
+pub fn eval_combo_seeded(
+    m: &CompiledComboModule,
+    plan: &ComboEvalPlan,
+    seed: &Env,
+) -> Result<BTreeMap<String, Value4>> {
+    let mut env = Env::new();
+    // Initialize everything to X.
+    for (name, info) in &m.decls {
+        env.insert(name.clone(), x_value(info.width, info.signedness));
+    }
+    // Overlay seed values.
+    for (k, v) in seed.iter() {
+        let info = m
+            .decls
+            .get(k)
+            .ok_or_else(|| Error::Parse(format!("no decl for seeded identifier `{}`", k)))?;
+        env.insert(k.clone(), coerce_to_declinfo(v, info));
+    }
+
+    eval_combo_assigns(m, plan, &mut env)?;
+
+    // Snapshot.
+    let mut out: BTreeMap<String, Value4> = BTreeMap::new();
+    for (k, v) in env.iter() {
+        out.insert(k.clone(), v.clone());
+    }
+    Ok(out)
+}
+
+fn eval_combo_assigns(m: &CompiledComboModule, plan: &ComboEvalPlan, env: &mut Env) -> Result<()> {
+    let resolver = ComboResolver {
+        funcs: &m.functions,
+    };
+    for &ai in &plan.assign_order {
+        let a = &m.assigns[ai];
+        let info = m
+            .decls
+            .get(&a.lhs)
+            .ok_or_else(|| Error::Parse(format!("no decl for assign lhs `{}`", a.lhs)))?;
+        let rhs_v = eval_ast_with_calls(&a.rhs, env, Some(&resolver), Some(info.width))?;
+        env.insert(a.lhs.clone(), coerce_to_declinfo(&rhs_v, info));
+    }
+    Ok(())
+}
+
+pub fn eval_combo_seeded_with_coverage(
+    m: &CompiledComboModule,
+    plan: &ComboEvalPlan,
+    seed: &Env,
+    src: &SourceText,
+    cov: &mut CoverageCounters,
+    fn_meta: &BTreeMap<String, crate::pipeline_compile::FunctionMeta>,
+) -> Result<BTreeMap<String, Value4>> {
+    let mut env = Env::new();
+    for (name, info) in &m.decls {
+        env.insert(name.clone(), x_value(info.width, info.signedness));
+    }
+    for (k, v) in seed.iter() {
+        let info = m
+            .decls
+            .get(k)
+            .ok_or_else(|| Error::Parse(format!("no decl for seeded identifier `{}`", k)))?;
+        env.insert(k.clone(), coerce_to_declinfo(v, info));
+    }
+    for &ai in &plan.assign_order {
+        let a = &m.assigns[ai];
+        cov.hit_span(src, a.rhs_span);
+        let info = m
+            .decls
+            .get(&a.lhs)
+            .ok_or_else(|| Error::Parse(format!("no decl for assign lhs `{}`", a.lhs)))?;
+        let rhs_v = eval_spanned_expr_with_funcs(
+            &a.rhs_spanned,
+            &env,
+            &m.functions,
+            Some(info.width),
+            cov,
+            src,
+            fn_meta,
+        )?;
+        env.insert(a.lhs.clone(), coerce_to_declinfo(&rhs_v, info));
+    }
+    let mut out: BTreeMap<String, Value4> = BTreeMap::new();
+    for (k, v) in env.iter() {
+        out.insert(k.clone(), v.clone());
+    }
+    Ok(out)
+}
+
+fn eval_spanned_expr_with_funcs(
+    expr: &SpannedExpr,
+    env: &Env,
+    funcs: &BTreeMap<String, ComboFunction>,
+    expected_width: Option<u32>,
+    cov: &mut CoverageCounters,
+    src: &SourceText,
+    fn_meta: &BTreeMap<String, crate::pipeline_compile::FunctionMeta>,
+) -> Result<Value4> {
+    match &expr.kind {
+        SpannedExprKind::Ident(name) => env
+            .get(name)
+            .cloned()
+            .ok_or_else(|| Error::UnknownIdentifier(name.clone())),
+        SpannedExprKind::Literal(v) => Ok(v.clone()),
+        SpannedExprKind::UnbasedUnsized(bit) => {
+            let w = expected_width.unwrap_or(1);
+            Ok(Value4::new(w, Signedness::Unsigned, vec![*bit; w as usize]))
+        }
+        SpannedExprKind::Call { name, args } => {
+            if name == "$signed" || name == "$unsigned" {
+                if args.len() != 1 {
+                    return Err(Error::Parse(format!(
+                        "builtin cast `{name}` expects 1 argument, got {}",
+                        args.len()
+                    )));
+                }
+                let v = eval_spanned_expr_with_funcs(
+                    &args[0],
+                    env,
+                    funcs,
+                    expected_width,
+                    cov,
+                    src,
+                    fn_meta,
+                )?;
+                return Ok(if name == "$signed" {
+                    v.with_signedness(Signedness::Signed)
+                } else {
+                    v.with_signedness(Signedness::Unsigned)
+                });
+            }
+            *cov.function_calls.entry(name.clone()).or_insert(0) += 1;
+            let f = funcs
+                .get(name)
+                .ok_or_else(|| Error::Parse(format!("unknown function `{name}`")))?;
+            if args.len() != f.args.len() {
+                return Err(Error::Parse(format!(
+                    "function `{name}` arg count mismatch: got {} want {}",
+                    args.len(),
+                    f.args.len()
+                )));
+            }
+            let mut avs: Vec<Value4> = Vec::with_capacity(args.len());
+            for a in args {
+                avs.push(eval_spanned_expr_with_funcs(
+                    a, env, funcs, None, cov, src, fn_meta,
+                )?);
+            }
+            eval_compiled_function(f, &avs, funcs, expected_width, cov, src, fn_meta)
+        }
+        SpannedExprKind::Concat(parts) => {
+            let mut vs: Vec<Value4> = Vec::with_capacity(parts.len());
+            for p in parts {
+                vs.push(eval_spanned_expr_with_funcs(
+                    p, env, funcs, None, cov, src, fn_meta,
+                )?);
+            }
+            Ok(Value4::concat(&vs))
+        }
+        SpannedExprKind::Replicate { count, expr } => {
+            let c = eval_spanned_expr_with_funcs(count, env, funcs, None, cov, src, fn_meta)?;
+            let count_u = c.to_u32_saturating_if_known().unwrap_or(0);
+            let v = eval_spanned_expr_with_funcs(expr, env, funcs, None, cov, src, fn_meta)?;
+            Ok(Value4::replicate(count_u, &v))
+        }
+        SpannedExprKind::Index { expr, index } => {
+            let v = eval_spanned_expr_with_funcs(expr, env, funcs, None, cov, src, fn_meta)?;
+            let idx_v = eval_spanned_expr_with_funcs(index, env, funcs, None, cov, src, fn_meta)?;
+            match idx_v.to_u32_saturating_if_known() {
+                Some(idx_u) => Ok(v.index(idx_u)),
+                None => Ok(Value4::new(1, Signedness::Unsigned, vec![LogicBit::X])),
+            }
+        }
+        SpannedExprKind::Slice { expr, msb, lsb } => {
+            let v = eval_spanned_expr_with_funcs(expr, env, funcs, None, cov, src, fn_meta)?;
+            let msb_v = eval_spanned_expr_with_funcs(msb, env, funcs, None, cov, src, fn_meta)?;
+            let lsb_v = eval_spanned_expr_with_funcs(lsb, env, funcs, None, cov, src, fn_meta)?;
+            match (
+                msb_v.to_u32_saturating_if_known(),
+                lsb_v.to_u32_saturating_if_known(),
+            ) {
+                (Some(msb_u), Some(lsb_u)) => Ok(v.slice(msb_u, lsb_u)),
+                _ => {
+                    let width = expected_width.unwrap_or(1);
+                    Ok(Value4::new(
+                        width,
+                        Signedness::Unsigned,
+                        vec![LogicBit::X; width as usize],
+                    ))
+                }
+            }
+        }
+        SpannedExprKind::IndexedSlice {
+            expr,
+            base,
+            width,
+            upward,
+        } => {
+            let v = eval_spanned_expr_with_funcs(expr, env, funcs, None, cov, src, fn_meta)?;
+            let base_v = eval_spanned_expr_with_funcs(base, env, funcs, None, cov, src, fn_meta)?;
+            let width_v = eval_spanned_expr_with_funcs(width, env, funcs, None, cov, src, fn_meta)?;
+            let width_u = width_v.to_u32_saturating_if_known().ok_or_else(|| {
+                Error::Parse("indexed slice width is unknown (contains x/z)".to_string())
+            })?;
+            match base_v.to_u32_saturating_if_known() {
+                Some(base_u) => Ok(v.indexed_slice(base_u, width_u, *upward)),
+                None => Ok(Value4::new(
+                    width_u,
+                    Signedness::Unsigned,
+                    vec![LogicBit::X; width_u as usize],
+                )),
+            }
+        }
+        SpannedExprKind::Unary { op, expr } => {
+            let child_expected_width = match op {
+                crate::ast::UnaryOp::BitNot
+                | crate::ast::UnaryOp::UnaryPlus
+                | crate::ast::UnaryOp::UnaryMinus => expected_width,
+                crate::ast::UnaryOp::LogicalNot
+                | crate::ast::UnaryOp::ReduceAnd
+                | crate::ast::UnaryOp::ReduceNand
+                | crate::ast::UnaryOp::ReduceOr
+                | crate::ast::UnaryOp::ReduceNor
+                | crate::ast::UnaryOp::ReduceXor
+                | crate::ast::UnaryOp::ReduceXnor => None,
+            };
+            let v = eval_spanned_expr_with_funcs(
+                expr,
+                env,
+                funcs,
+                child_expected_width,
+                cov,
+                src,
+                fn_meta,
+            )?;
+            Ok(eval_unary_op(*op, v, expected_width, None))
+        }
+        SpannedExprKind::Binary { op, lhs, rhs } => {
+            let (lhs_expected_width, rhs_expected_width) = match op {
+                crate::ast::BinaryOp::Add
+                | crate::ast::BinaryOp::Sub
+                | crate::ast::BinaryOp::Mul
+                | crate::ast::BinaryOp::Div
+                | crate::ast::BinaryOp::Mod
+                | crate::ast::BinaryOp::BitAnd
+                | crate::ast::BinaryOp::BitOr
+                | crate::ast::BinaryOp::BitXor => (expected_width, expected_width),
+                crate::ast::BinaryOp::Shl
+                | crate::ast::BinaryOp::Shr
+                | crate::ast::BinaryOp::Sshr => (expected_width, None),
+                crate::ast::BinaryOp::LogicalAnd
+                | crate::ast::BinaryOp::LogicalOr
+                | crate::ast::BinaryOp::Lt
+                | crate::ast::BinaryOp::Le
+                | crate::ast::BinaryOp::Gt
+                | crate::ast::BinaryOp::Ge
+                | crate::ast::BinaryOp::Eq
+                | crate::ast::BinaryOp::Neq
+                | crate::ast::BinaryOp::CaseEq
+                | crate::ast::BinaryOp::CaseNeq => (None, None),
+            };
+            let a = eval_spanned_expr_with_funcs(
+                lhs,
+                env,
+                funcs,
+                lhs_expected_width,
+                cov,
+                src,
+                fn_meta,
+            )?;
+            let b = eval_spanned_expr_with_funcs(
+                rhs,
+                env,
+                funcs,
+                rhs_expected_width,
+                cov,
+                src,
+                fn_meta,
+            )?;
+            Ok(eval_binary_op(*op, a, b, expected_width, None))
+        }
+        SpannedExprKind::Ternary { cond, t, f } => {
+            let c = eval_spanned_expr_with_funcs(cond, env, funcs, None, cov, src, fn_meta)?;
+            cov.record_ternary_decision(SpanKey::from(expr.span), c.to_bool4());
+            let tv =
+                eval_spanned_expr_with_funcs(t, env, funcs, expected_width, cov, src, fn_meta)?;
+            let fv =
+                eval_spanned_expr_with_funcs(f, env, funcs, expected_width, cov, src, fn_meta)?;
+            Ok(Value4::ternary(&c, &tv, &fv))
+        }
+    }
+}
+
+fn eval_compiled_function(
+    f: &ComboFunction,
+    args: &[Value4],
+    funcs: &BTreeMap<String, ComboFunction>,
+    expected_width: Option<u32>,
+    cov: &mut CoverageCounters,
+    src: &SourceText,
+    fn_meta: &BTreeMap<String, crate::pipeline_compile::FunctionMeta>,
+) -> Result<Value4> {
+    let mut env = init_function_env(f, args);
+    if let Some(meta) = fn_meta.get(&f.name) {
+        // Attribute function execution only to scaffold spans, not whole body,
+        // so unselected arms remain line-missed.
+        for s in &meta.scaffold_spans {
+            cov.bump_span(*s);
+            cov.hit_span(src, *s);
+        }
+    }
+    match &f.body {
+        ComboFunctionImpl::Expr { expr } => {
+            if let Some(meta) = fn_meta.get(&f.name) {
+                if let Some(s) = meta.assign_expr_span {
+                    cov.bump_span(s);
+                    cov.hit_span(src, s);
+                }
+            }
+            // No spans for function bodies yet; fallback to unspanned evaluation.
+            let v =
+                eval_ast_with_calls(expr, &env, Some(&ComboResolver { funcs }), expected_width)?;
+            Ok(coerce_to_declinfo(&v, &function_return_decl(f)))
+        }
+        ComboFunctionImpl::Casez { selector, arms } => {
+            let sel_v = eval_ast_with_calls(selector, &env, Some(&ComboResolver { funcs }), None)?;
+            let sel_bits = sel_v.to_bit_string_msb_first();
+            let mut default_arm: Option<&CasezArm> = None;
+            let mut default_idx: Option<usize> = None;
+            for (i, arm) in arms.iter().enumerate() {
+                if arm.pat.is_none() {
+                    default_arm = Some(arm);
+                    default_idx = Some(i);
+                    continue;
+                }
+                let pat = arm.pat.as_ref().unwrap();
+                if casez_matches(&sel_bits, pat) {
+                    if let Some(meta) = fn_meta.get(&f.name) {
+                        if let Some(am) = meta.arms.get(i) {
+                            cov.bump_selected_arm(am.arm_span);
+                            cov.bump_span(am.value_span);
+                            cov.hit_span(src, am.value_span);
+                            cov.hit_span(src, am.arm_span);
+                        }
+                    }
+                    let mut v = eval_ast_with_calls(
+                        &arm.value,
+                        &env,
+                        Some(&ComboResolver { funcs }),
+                        Some(f.ret_width),
+                    )?;
+                    v = coerce_to_declinfo(&v, &function_return_decl(f));
+                    return Ok(v);
+                }
+            }
+            if let Some(d) = default_arm {
+                if let Some(meta) = fn_meta.get(&f.name) {
+                    if let Some(di) = default_idx {
+                        if let Some(am) = meta.arms.get(di) {
+                            cov.bump_selected_arm(am.arm_span);
+                            cov.bump_span(am.value_span);
+                            cov.hit_span(src, am.value_span);
+                            cov.hit_span(src, am.arm_span);
+                        }
+                    } else if let Some(am) = meta.arms.last() {
+                        cov.bump_selected_arm(am.arm_span);
+                        cov.bump_span(am.value_span);
+                        cov.hit_span(src, am.value_span);
+                        cov.hit_span(src, am.arm_span);
+                    }
+                }
+                let mut v = eval_ast_with_calls(
+                    &d.value,
+                    &env,
+                    Some(&ComboResolver { funcs }),
+                    Some(f.ret_width),
+                )?;
+                v = coerce_to_declinfo(&v, &function_return_decl(f));
+                return Ok(v);
+            }
+            let w = expected_width.unwrap_or(f.ret_width);
+            Ok(x_value(w, Signedness::Unsigned))
+        }
+        ComboFunctionImpl::Procedure { assigns } => {
+            exec_function_procedure(f, &mut env, assigns, &ComboResolver { funcs })
+        }
+    }
+}
+
+fn x_value(width: u32, signedness: Signedness) -> Value4 {
+    Value4::new(width, signedness, vec![LogicBit::X; width as usize])
+}
+
+fn function_return_decl(f: &ComboFunction) -> crate::module_compile::DeclInfo {
+    crate::module_compile::DeclInfo {
+        width: f.ret_width,
+        signedness: f.ret_signedness,
+    }
+}
+
+fn coerce_to_declinfo(v: &Value4, info: &crate::module_compile::DeclInfo) -> Value4 {
+    let resized = v.resize(info.width);
+    Value4::new(
+        info.width,
+        info.signedness,
+        resized.bits_lsb_first().to_vec(),
+    )
+}
+
+fn init_function_env(f: &ComboFunction, args: &[Value4]) -> Env {
+    let mut env = Env::new();
+    for (arg, av) in f.args.iter().zip(args.iter()) {
+        let info = crate::module_compile::DeclInfo {
+            width: arg.width,
+            signedness: arg.signedness,
+        };
+        env.insert(arg.name.clone(), coerce_to_declinfo(av, &info));
+    }
+    for (name, info) in &f.locals {
+        env.insert(name.clone(), x_value(info.width, info.signedness));
+    }
+    let ret = function_return_decl(f);
+    env.insert(f.name.clone(), x_value(ret.width, ret.signedness));
+    env
+}
+
+fn function_target_decl(f: &ComboFunction, lhs: &str) -> Option<crate::module_compile::DeclInfo> {
+    if lhs == f.name {
+        return Some(function_return_decl(f));
+    }
+    if let Some(info) = f.locals.get(lhs) {
+        return Some(info.clone());
+    }
+    f.args
+        .iter()
+        .find(|a| a.name == lhs)
+        .map(|a| crate::module_compile::DeclInfo {
+            width: a.width,
+            signedness: a.signedness,
+        })
+}
+
+fn exec_function_procedure(
+    f: &ComboFunction,
+    env: &mut Env,
+    assigns: &[crate::combo_compile::FunctionAssign],
+    resolver: &dyn CallResolver,
+) -> Result<Value4> {
+    for a in assigns {
+        let info = function_target_decl(f, &a.lhs).ok_or_else(|| {
+            Error::Parse(format!(
+                "unknown function-local assignment target `{}` in `{}`",
+                a.lhs, f.name
+            ))
+        })?;
+        let rhs_v = eval_ast_with_calls(&a.expr, env, Some(resolver), Some(info.width))?;
+        env.insert(a.lhs.clone(), coerce_to_declinfo(&rhs_v, &info));
+    }
+    let ret = env
+        .get(&f.name)
+        .cloned()
+        .unwrap_or_else(|| x_value(f.ret_width, f.ret_signedness));
+    Ok(coerce_to_declinfo(&ret, &function_return_decl(f)))
+}
+
+fn collect_idents(e: &Expr, out: &mut BTreeSet<String>) {
+    match e {
+        Expr::Ident(s) => {
+            out.insert(s.clone());
+        }
+        Expr::Literal(_) => {}
+        Expr::UnbasedUnsized(_) => {}
+        Expr::Call { args, .. } => {
+            for a in args {
+                collect_idents(a, out);
+            }
+        }
+        Expr::Concat(ps) => {
+            for p in ps {
+                collect_idents(p, out);
+            }
+        }
+        Expr::Replicate { count, expr } => {
+            collect_idents(count, out);
+            collect_idents(expr, out);
+        }
+        Expr::Index { expr, index } => {
+            collect_idents(expr, out);
+            collect_idents(index, out);
+        }
+        Expr::Slice { expr, msb, lsb } => {
+            collect_idents(expr, out);
+            collect_idents(msb, out);
+            collect_idents(lsb, out);
+        }
+        Expr::IndexedSlice {
+            expr, base, width, ..
+        } => {
+            collect_idents(expr, out);
+            collect_idents(base, out);
+            collect_idents(width, out);
+        }
+        Expr::Unary { expr, .. } => {
+            collect_idents(expr, out);
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            collect_idents(lhs, out);
+            collect_idents(rhs, out);
+        }
+        Expr::Ternary { cond, t, f } => {
+            collect_idents(cond, out);
+            collect_idents(t, out);
+            collect_idents(f, out);
+        }
+    }
+}
+
+struct ComboResolver<'a> {
+    funcs: &'a BTreeMap<String, ComboFunction>,
+}
+
+impl<'a> CallResolver for ComboResolver<'a> {
+    fn call(&self, name: &str, args: &[Value4], expected_width: Option<u32>) -> Result<Value4> {
+        let f = self
+            .funcs
+            .get(name)
+            .ok_or_else(|| Error::Parse(format!("unknown function `{name}`")))?;
+        if args.len() != f.args.len() {
+            return Err(Error::Parse(format!(
+                "function `{name}` arg count mismatch: got {} want {}",
+                args.len(),
+                f.args.len()
+            )));
+        }
+        let mut env = init_function_env(f, args);
+        match &f.body {
+            ComboFunctionImpl::Expr { expr } => {
+                let mut v = eval_ast_with_calls(expr, &env, Some(self), Some(f.ret_width))?;
+                v = coerce_to_declinfo(&v, &function_return_decl(f));
+                Ok(v)
+            }
+            ComboFunctionImpl::Casez { selector, arms } => {
+                let sel_v = eval_ast_with_calls(selector, &env, Some(self), None)?;
+                let sel_bits = sel_v.to_bit_string_msb_first();
+
+                let mut default_arm: Option<&CasezArm> = None;
+                for arm in arms {
+                    if arm.pat.is_none() {
+                        default_arm = Some(arm);
+                        continue;
+                    }
+                    let pat = arm.pat.as_ref().unwrap();
+                    if casez_matches(&sel_bits, pat) {
+                        let mut v =
+                            eval_ast_with_calls(&arm.value, &env, Some(self), Some(f.ret_width))?;
+                        v = coerce_to_declinfo(&v, &function_return_decl(f));
+                        return Ok(v);
+                    }
+                }
+                if let Some(d) = default_arm {
+                    let mut v = eval_ast_with_calls(&d.value, &env, Some(self), Some(f.ret_width))?;
+                    v = coerce_to_declinfo(&v, &function_return_decl(f));
+                    return Ok(v);
+                }
+
+                let w = expected_width.unwrap_or(f.ret_width);
+                Ok(x_value(w, Signedness::Unsigned))
+            }
+            ComboFunctionImpl::Procedure { assigns } => {
+                exec_function_procedure(f, &mut env, assigns, self)
+            }
+        }
+    }
+}
+
+fn casez_matches(sel_bits_msb: &str, pat: &CasezPattern) -> bool {
+    // Align widths by truncating/left-padding sel with Xs (conservative).
+    let mut sel: String = sel_bits_msb.to_string();
+    if sel.len() > pat.width as usize {
+        sel = sel[sel.len() - pat.width as usize..].to_string();
+    } else if sel.len() < pat.width as usize {
+        let mut pad = "x".repeat(pat.width as usize - sel.len());
+        pad.push_str(&sel);
+        sel = pad;
+    }
+    let bits = pat.bits_msb.as_str();
+    if bits.len() != pat.width as usize {
+        // Accept shorter patterns by left-padding with zeros (generator shouldn't do
+        // this).
+        if bits.len() > pat.width as usize {
+            return false;
+        }
+        let mut pad = "0".repeat(pat.width as usize - bits.len());
+        pad.push_str(bits);
+        return casez_matches(
+            &sel,
+            &CasezPattern {
+                width: pat.width,
+                bits_msb: pad,
+            },
+        );
+    }
+
+    for (sb, pb) in sel.chars().zip(bits.chars()) {
+        // `casez` treats z/? bits in either selector or pattern as wildcards.
+        if matches!(sb, '?' | 'z' | 'Z') || matches!(pb, '?' | 'z' | 'Z') {
+            continue;
+        }
+        match pb {
+            '0' => {
+                if sb != '0' {
+                    return false;
+                }
+            }
+            '1' => {
+                if sb != '1' {
+                    return false;
+                }
+            }
+            'x' | 'X' => {
+                if !matches!(sb, 'x' | 'X') {
+                    return false;
+                }
+            }
+            other => {
+                // Unknown pattern char => no match.
+                let _ = other;
+                return false;
+            }
+        }
+    }
+    true
+}

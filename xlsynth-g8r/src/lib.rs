@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#![feature(map_try_insert)]
-#![feature(custom_test_frameworks)]
 #![feature(portable_simd)]
 
 pub mod aig;

@@ -1,0 +1,7 @@
+target/
+fuzz/artifacts
+fuzz/corpus
+Cargo.lock
+*.vcd
+.fuzzmgr_vastly
+*.sqlite3

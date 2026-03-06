@@ -11,6 +11,7 @@ members = [
     "xlsynth-pir",
     "xlsynth-prover",
     "xlsynth-autocov",
+    "xlsynth-vastly",
     "sample-usage",
 ]
 resolver = "2"
