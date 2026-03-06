@@ -13,11 +13,11 @@ use std::process::Stdio;
 use std::time::Duration;
 use std::time::SystemTime;
 
+use xlsynth_vastly::ast::Expr;
 use xlsynth_vastly::Env;
 use xlsynth_vastly::LogicBit;
 use xlsynth_vastly::Signedness;
 use xlsynth_vastly::Value4;
-use xlsynth_vastly::ast::Expr;
 
 const MAX_BASED_LITERAL_WIDTH: u32 = 384;
 const MAX_EXPR_AST_DEPTH: usize = 16;
@@ -35,8 +35,9 @@ fuzz_target!(|data: &[u8]| {
     if expr.trim().is_empty() {
         return;
     }
-    // Extremely wide explicit based literals are not interesting signal for this target;
-    // they mainly drive pathological width-sensitive parser/evaluator costs.
+    // Extremely wide explicit based literals are not interesting signal for this
+    // target; they mainly drive pathological width-sensitive parser/evaluator
+    // costs.
     if has_based_literal_width_over_limit(&expr, MAX_BASED_LITERAL_WIDTH) {
         return;
     }
@@ -48,8 +49,8 @@ fuzz_target!(|data: &[u8]| {
         Err(_) => return,
     };
     let (depth, nodes) = expr_depth_and_node_count(&ast);
-    // Very deep/large parsed trees mostly surface evaluator performance limits rather than
-    // semantic mismatches for this differential target.
+    // Very deep/large parsed trees mostly surface evaluator performance limits
+    // rather than semantic mismatches for this differential target.
     if depth > MAX_EXPR_AST_DEPTH || nodes > MAX_EXPR_AST_NODES {
         return;
     }
@@ -62,13 +63,15 @@ fuzz_target!(|data: &[u8]| {
     // Feed a normalized rendering of the parsed AST into both evaluators.
     let normalized_expr = render_expr(&ast);
 
-    let oracle = match run_oracle_with_timeout(&normalized_expr, &case.env, Duration::from_millis(250)) {
-        OracleOutcome::Accepted(x) => x,
-        // Oracle-side rejection/runtime failures are not sample failures for this differential check.
-        OracleOutcome::RejectedOrFailed => return,
-        // Timeout is infrastructure noise; skip instead of treating as semantic mismatch.
-        OracleOutcome::TimedOut => return,
-    };
+    let oracle =
+        match run_oracle_with_timeout(&normalized_expr, &case.env, Duration::from_millis(250)) {
+            OracleOutcome::Accepted(x) => x,
+            // Oracle-side rejection/runtime failures are not sample failures for this differential
+            // check.
+            OracleOutcome::RejectedOrFailed => return,
+            // Timeout is infrastructure noise; skip instead of treating as semantic mismatch.
+            OracleOutcome::TimedOut => return,
+        };
 
     let ours = match xlsynth_vastly::eval_expr(&normalized_expr, &case.env) {
         Ok(x) => x,
@@ -114,7 +117,13 @@ fn has_based_literal_width_over_limit(expr: &str, limit: u32) -> bool {
         if j < bytes.len() && matches!(bytes[j], b's' | b'S') {
             j += 1;
         }
-        if j < bytes.len() && matches!(bytes[j], b'b' | b'B' | b'd' | b'D' | b'h' | b'H' | b'o' | b'O') && width > limit {
+        if j < bytes.len()
+            && matches!(
+                bytes[j],
+                b'b' | b'B' | b'd' | b'D' | b'h' | b'H' | b'o' | b'O'
+            )
+            && width > limit
+        {
             return true;
         }
     }
@@ -144,6 +153,14 @@ fn expr_depth_and_node_count(expr: &Expr) -> (usize, usize) {
                 1 + count_nodes + expr_nodes,
             )
         }
+        Expr::Cast { width, expr } => {
+            let (width_depth, width_nodes) = expr_depth_and_node_count(width);
+            let (expr_depth, expr_nodes) = expr_depth_and_node_count(expr);
+            (
+                1 + width_depth.max(expr_depth),
+                1 + width_nodes + expr_nodes,
+            )
+        }
         Expr::Index { expr, index } => {
             let (expr_depth, expr_nodes) = expr_depth_and_node_count(expr);
             let (index_depth, index_nodes) = expr_depth_and_node_count(index);
@@ -162,10 +179,7 @@ fn expr_depth_and_node_count(expr: &Expr) -> (usize, usize) {
             )
         }
         Expr::IndexedSlice {
-            expr,
-            base,
-            width,
-            ..
+            expr, base, width, ..
         } => {
             let (expr_depth, expr_nodes) = expr_depth_and_node_count(expr);
             let (base_depth, base_nodes) = expr_depth_and_node_count(base);
@@ -226,6 +240,10 @@ fn visit_expr_idents(expr: &Expr, f: &mut dyn FnMut(&str)) {
             visit_expr_idents(count, f);
             visit_expr_idents(expr, f);
         }
+        Expr::Cast { width, expr } => {
+            visit_expr_idents(width, f);
+            visit_expr_idents(expr, f);
+        }
         Expr::Index { expr, index } => {
             visit_expr_idents(expr, f);
             visit_expr_idents(index, f);
@@ -236,10 +254,7 @@ fn visit_expr_idents(expr: &Expr, f: &mut dyn FnMut(&str)) {
             visit_expr_idents(lsb, f);
         }
         Expr::IndexedSlice {
-            expr,
-            base,
-            width,
-            ..
+            expr, base, width, ..
         } => {
             visit_expr_idents(expr, f);
             visit_expr_idents(base, f);
@@ -298,6 +313,11 @@ fn render_expr(expr: &Expr) -> String {
             let c = render_expr(count);
             let e = render_expr(expr);
             format!("{{{c}{{{e}}}}}")
+        }
+        Expr::Cast { width, expr } => {
+            let w = render_expr(width);
+            let e = render_expr(expr);
+            format!("({w})'({e})")
         }
         Expr::Index { expr, index } => {
             let e = render_expr(expr);
@@ -478,7 +498,11 @@ impl<'a> Arbitrary<'a> for ArbValue4 {
         let width = 1 + ((w as u32) % 64); // 1..=64
 
         let signed: bool = u.arbitrary()?;
-        let signedness = if signed { Signedness::Signed } else { Signedness::Unsigned };
+        let signedness = if signed {
+            Signedness::Signed
+        } else {
+            Signedness::Unsigned
+        };
 
         let mut bits = Vec::with_capacity(width as usize);
         for _ in 0..width {
@@ -532,7 +556,8 @@ impl<'a> Arbitrary<'a> for ExprText {
 }
 
 fn map_expr_char(b: u8) -> char {
-    // Restricted set to improve chance of valid tokens for our subset + numeric literals.
+    // Restricted set to improve chance of valid tokens for our subset + numeric
+    // literals.
     const TABLE: &[u8] =
         b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_()?:!~&|=<>^+-*/%{}[],: 'bdhBDHxoXOzZ\t\n";
     let idx = (b as usize) % TABLE.len();
@@ -698,8 +723,11 @@ fn build_sv(expr: &str, env: &Env) -> String {
 
     s.push_str("  initial begin\n");
     // Avoid $bits(...) in a constant context; some iverilog versions are picky.
-    // Printing the expression directly lets iverilog choose the self-determined size for %b.
-    s.push_str(&format!("    $display(\"W=%0d V=%b\", $bits({expr}), ({expr}));\n"));
+    // Printing the expression directly lets iverilog choose the self-determined
+    // size for %b.
+    s.push_str(&format!(
+        "    $display(\"W=%0d V=%b\", $bits({expr}), ({expr}));\n"
+    ));
     s.push_str("  end\n");
     s.push_str("endmodule\n");
     s

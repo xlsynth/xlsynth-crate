@@ -380,6 +380,38 @@ fn eval_ast_with_calls_inner(
             };
             Ok(Value4::replicate(count_u, &v))
         }
+        Expr::Cast { width, expr } => {
+            let width_v = if let Some(obs) = observer.as_deref_mut() {
+                eval_ast_with_calls_inner(width, env, calls, None, None, Some(obs), context_span)?
+            } else {
+                eval_ast_with_calls_inner(width, env, calls, None, None, None, context_span)?
+            };
+            let width_u = width_v
+                .to_u32_if_known()
+                .ok_or_else(|| Error::Parse("cast width must be known".to_string()))?;
+            let v = if let Some(obs) = observer.as_deref_mut() {
+                eval_ast_with_calls_inner(
+                    expr,
+                    env,
+                    calls,
+                    Some(width_u),
+                    None,
+                    Some(obs),
+                    context_span,
+                )?
+            } else {
+                eval_ast_with_calls_inner(
+                    expr,
+                    env,
+                    calls,
+                    Some(width_u),
+                    None,
+                    None,
+                    context_span,
+                )?
+            };
+            Ok(v.resize(width_u))
+        }
         Expr::Index { expr, index } => {
             let v = if let Some(obs) = observer.as_deref_mut() {
                 eval_ast_with_calls_inner(expr, env, calls, None, None, Some(obs), context_span)?

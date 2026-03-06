@@ -28,6 +28,10 @@ pub enum SpannedExprKind {
         count: Box<SpannedExpr>,
         expr: Box<SpannedExpr>,
     },
+    Cast {
+        width: Box<SpannedExpr>,
+        expr: Box<SpannedExpr>,
+    },
     Index {
         expr: Box<SpannedExpr>,
         index: Box<SpannedExpr>,
@@ -80,6 +84,10 @@ impl SpannedExpr {
             }
             SpannedExprKind::Replicate { count, expr } => {
                 count.shift_spans(delta);
+                expr.shift_spans(delta);
+            }
+            SpannedExprKind::Cast { width, expr } => {
+                width.shift_spans(delta);
                 expr.shift_spans(delta);
             }
             SpannedExprKind::Index { expr, index } => {

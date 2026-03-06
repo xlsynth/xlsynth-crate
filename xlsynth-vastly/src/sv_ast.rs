@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::ast::Expr as VExpr;
+use crate::value::Value4;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct Span {
@@ -32,6 +34,7 @@ pub struct PortDecl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComboModule {
     pub name: String,
+    pub params: BTreeMap<String, Value4>,
     pub ports: Vec<PortDecl>,
     pub items: Vec<ComboItem>,
 }
@@ -94,6 +97,7 @@ pub struct CasezArm {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Module {
     pub name: String,
+    pub params: BTreeMap<String, Value4>,
     pub decls: Vec<Decl>,
     pub always_ff: AlwaysFf,
 }
@@ -114,6 +118,7 @@ pub struct AlwaysFf {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineModule {
     pub name: String,
+    pub params: BTreeMap<String, Value4>,
     pub ports: Vec<PortDecl>,
     pub header_span: Span,
     pub endmodule_span: Span,

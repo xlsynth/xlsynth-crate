@@ -236,6 +236,10 @@ fn collect_ternaries_spanned(expr: &SpannedExpr, out: &mut BTreeMap<SpanKey, Ter
             collect_ternaries_spanned(count, out);
             collect_ternaries_spanned(expr, out);
         }
+        SpannedExprKind::Cast { width, expr } => {
+            collect_ternaries_spanned(width, out);
+            collect_ternaries_spanned(expr, out);
+        }
         SpannedExprKind::Index { expr, index } => {
             collect_ternaries_spanned(expr, out);
             collect_ternaries_spanned(index, out);

@@ -27,6 +27,10 @@ pub enum Expr {
         count: Box<Expr>,
         expr: Box<Expr>,
     },
+    Cast {
+        width: Box<Expr>,
+        expr: Box<Expr>,
+    },
     Index {
         expr: Box<Expr>,
         index: Box<Expr>,

@@ -2,7 +2,10 @@
 
 use crate::Error;
 use crate::Result;
+use crate::Signedness;
+use crate::Value4;
 use crate::ast::Expr as VExpr;
+use crate::eval::eval_ast_with_calls;
 use crate::parser::parse_expr;
 use crate::sv_ast::AlwaysFf;
 use crate::sv_ast::CasezArm;
@@ -24,6 +27,7 @@ use crate::sv_ast::Span;
 use crate::sv_ast::Stmt;
 use crate::sv_lexer::Tok;
 use crate::sv_lexer::TokKind;
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 pub fn parse_module(src: &str) -> Result<Module> {
@@ -32,6 +36,7 @@ pub fn parse_module(src: &str) -> Result<Module> {
         src,
         toks,
         idx: 0,
+        params: BTreeMap::new(),
         defines: BTreeSet::new(),
         ifdef_stack: Vec::new(),
     };
@@ -44,6 +49,7 @@ pub fn parse_combo_module(src: &str) -> Result<ComboModule> {
         src,
         toks,
         idx: 0,
+        params: BTreeMap::new(),
         defines: BTreeSet::new(),
         ifdef_stack: Vec::new(),
     };
@@ -57,6 +63,7 @@ pub fn parse_pipeline_module(src: &str) -> Result<PipelineModule> {
         src,
         toks,
         idx: 0,
+        params: BTreeMap::new(),
         defines: BTreeSet::new(),
         ifdef_stack: Vec::new(),
     };
@@ -72,6 +79,7 @@ pub fn parse_pipeline_module_with_defines(
         src,
         toks,
         idx: 0,
+        params: BTreeMap::new(),
         defines: defines.clone(),
         ifdef_stack: Vec::new(),
     };
@@ -82,6 +90,7 @@ struct Parser<'a> {
     src: &'a str,
     toks: Vec<Tok>,
     idx: usize,
+    params: BTreeMap<String, Value4>,
     defines: BTreeSet<String>,
     ifdef_stack: Vec<IfdefFrame>,
 }
@@ -193,6 +202,122 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn params_env(&self) -> crate::Env {
+        let mut env = crate::Env::new();
+        for (name, value) in &self.params {
+            env.insert(name.clone(), value.clone());
+        }
+        env
+    }
+
+    fn eval_const_expr_value(&self, expr: &VExpr, expected_width: Option<u32>) -> Result<Value4> {
+        let env = self.params_env();
+        eval_ast_with_calls(expr, &env, None, expected_width)
+    }
+
+    fn eval_const_u32(&self, expr: &VExpr) -> Result<u32> {
+        let value = self.eval_const_expr_value(expr, None)?;
+        value.to_u32_if_known().ok_or_else(|| {
+            Error::Parse("decl width constant must be known and fit in u32".to_string())
+        })
+    }
+
+    fn parse_optional_param_list(&mut self) -> Result<()> {
+        if *self.cur() != TokKind::Other('#') {
+            return Ok(());
+        }
+        self.bump();
+        self.expect(TokKind::LParen)?;
+        loop {
+            if *self.cur() == TokKind::RParen {
+                self.bump();
+                break;
+            }
+            self.parse_parameter_decl()?;
+            match self.cur() {
+                TokKind::Comma => {
+                    self.bump();
+                }
+                TokKind::RParen => {}
+                _ => {
+                    return Err(Error::Parse(
+                        "expected `,` or `)` in parameter list".to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn parse_parameter_decl(&mut self) -> Result<()> {
+        self.expect(TokKind::KwParameter)?;
+
+        let mut saw_logic = false;
+        let mut is_signed = false;
+        loop {
+            match self.cur() {
+                TokKind::KwLogic if !saw_logic => {
+                    saw_logic = true;
+                    self.bump();
+                }
+                TokKind::KwSigned if !is_signed => {
+                    is_signed = true;
+                    self.bump();
+                }
+                _ => break,
+            }
+        }
+
+        let mut declared_width: Option<u32> = None;
+        if *self.cur() == TokKind::LBracket {
+            self.bump();
+            let msb_expr = self.parse_expr_until(&[TokKind::Colon])?;
+            self.expect(TokKind::Colon)?;
+            let lsb_expr = self.parse_expr_until(&[TokKind::RBracket])?;
+            self.expect(TokKind::RBracket)?;
+            let msb = self.eval_const_u32(&msb_expr)?;
+            let lsb = self.eval_const_u32(&lsb_expr)?;
+            if msb < lsb {
+                return Err(Error::Parse("decl range msb<lsb not supported".to_string()));
+            }
+            declared_width = Some(msb - lsb + 1);
+        } else if saw_logic {
+            declared_width = Some(1);
+        }
+
+        let name = match self.toks[self.idx].kind.clone() {
+            TokKind::Ident(s) => {
+                self.bump();
+                s
+            }
+            _ => return Err(Error::Parse("expected parameter identifier".to_string())),
+        };
+        if *self.cur() != TokKind::Eq {
+            return Err(Error::Parse(format!(
+                "parameter `{name}` must have a default value via `=`; parameter overrides are not supported yet"
+            )));
+        }
+        self.bump();
+        let default_expr = self.parse_expr_until(&[TokKind::Comma, TokKind::RParen])?;
+
+        let mut value = self.eval_const_expr_value(&default_expr, declared_width)?;
+        if let Some(width) = declared_width {
+            let signedness = if is_signed {
+                Signedness::Signed
+            } else {
+                Signedness::Unsigned
+            };
+            value = value.with_signedness(signedness).resize(width);
+        } else if is_signed {
+            value = value.with_signedness(Signedness::Signed);
+        }
+
+        if self.params.insert(name.clone(), value).is_some() {
+            return Err(Error::Parse(format!("duplicate parameter `{name}`")));
+        }
+        Ok(())
+    }
+
     fn parse_module(&mut self) -> Result<Module> {
         self.expect(TokKind::KwModule)?;
         let name = match self.toks[self.idx].kind.clone() {
@@ -202,6 +327,7 @@ impl<'a> Parser<'a> {
             }
             _ => return Err(Error::Parse("expected module name".to_string())),
         };
+        self.parse_optional_param_list()?;
         let mut decls: Vec<Decl> = Vec::new();
 
         // Optional port list: ( input/output logic [..] name, ... )
@@ -246,6 +372,7 @@ impl<'a> Parser<'a> {
         let always_ff = always_ff.ok_or_else(|| Error::Parse("missing always_ff".to_string()))?;
         Ok(Module {
             name,
+            params: self.params.clone(),
             decls,
             always_ff,
         })
@@ -260,6 +387,7 @@ impl<'a> Parser<'a> {
             }
             _ => return Err(Error::Parse("expected module name".to_string())),
         };
+        self.parse_optional_param_list()?;
 
         let ports = if *self.cur() == TokKind::LParen {
             self.parse_port_list_ports()?
@@ -306,7 +434,12 @@ impl<'a> Parser<'a> {
             }
         }
 
-        Ok(ComboModule { name, ports, items })
+        Ok(ComboModule {
+            name,
+            params: self.params.clone(),
+            ports,
+            items,
+        })
     }
 
     fn parse_pipeline_module(&mut self) -> Result<PipelineModule> {
@@ -319,6 +452,7 @@ impl<'a> Parser<'a> {
             }
             _ => return Err(Error::Parse("expected module name".to_string())),
         };
+        self.parse_optional_param_list()?;
 
         let ports = if *self.cur() == TokKind::LParen {
             self.parse_port_list_ports()?
@@ -435,6 +569,7 @@ impl<'a> Parser<'a> {
 
         Ok(PipelineModule {
             name,
+            params: self.params.clone(),
             ports,
             header_span,
             endmodule_span,
@@ -487,8 +622,8 @@ impl<'a> Parser<'a> {
                 let lsb_expr = self.parse_expr_until(&[TokKind::RBracket])?;
                 self.expect(TokKind::RBracket)?;
 
-                let msb = eval_const_u32(&msb_expr)?;
-                let lsb = eval_const_u32(&lsb_expr)?;
+                let msb = self.eval_const_u32(&msb_expr)?;
+                let lsb = self.eval_const_u32(&lsb_expr)?;
                 if msb < lsb {
                     return Err(Error::Parse("decl range msb<lsb not supported".to_string()));
                 }
@@ -576,8 +711,8 @@ impl<'a> Parser<'a> {
                 self.expect(TokKind::Colon)?;
                 let lsb_expr = self.parse_expr_until(&[TokKind::RBracket])?;
                 self.expect(TokKind::RBracket)?;
-                let msb = eval_const_u32(&msb_expr)?;
-                let lsb = eval_const_u32(&lsb_expr)?;
+                let msb = self.eval_const_u32(&msb_expr)?;
+                let lsb = self.eval_const_u32(&lsb_expr)?;
                 if msb < lsb {
                     return Err(Error::Parse("decl range msb<lsb not supported".to_string()));
                 }
@@ -635,8 +770,8 @@ impl<'a> Parser<'a> {
             self.expect(TokKind::Colon)?;
             let lsb_expr = self.parse_expr_until(&[TokKind::RBracket])?;
             self.expect(TokKind::RBracket)?;
-            let msb = eval_const_u32(&msb_expr)?;
-            let lsb = eval_const_u32(&lsb_expr)?;
+            let msb = self.eval_const_u32(&msb_expr)?;
+            let lsb = self.eval_const_u32(&lsb_expr)?;
             if msb < lsb {
                 return Err(Error::Parse("decl range msb<lsb not supported".to_string()));
             }
@@ -724,8 +859,8 @@ impl<'a> Parser<'a> {
             self.expect(TokKind::Colon)?;
             let lsb_expr = self.parse_expr_until(&[TokKind::RBracket])?;
             self.expect(TokKind::RBracket)?;
-            let msb = eval_const_u32(&msb_expr)?;
-            let lsb = eval_const_u32(&lsb_expr)?;
+            let msb = self.eval_const_u32(&msb_expr)?;
+            let lsb = self.eval_const_u32(&lsb_expr)?;
             if msb < lsb {
                 return Err(Error::Parse("decl range msb<lsb not supported".to_string()));
             }
@@ -876,8 +1011,8 @@ impl<'a> Parser<'a> {
             self.expect(TokKind::Colon)?;
             let lsb_expr = self.parse_expr_until(&[TokKind::RBracket])?;
             self.expect(TokKind::RBracket)?;
-            let msb = eval_const_u32(&msb_expr)?;
-            let lsb = eval_const_u32(&lsb_expr)?;
+            let msb = self.eval_const_u32(&msb_expr)?;
+            let lsb = self.eval_const_u32(&lsb_expr)?;
             if msb < lsb {
                 return Err(Error::Parse("decl range msb<lsb not supported".to_string()));
             }
@@ -1036,8 +1171,8 @@ impl<'a> Parser<'a> {
             let lsb_expr = self.parse_expr_until(&[TokKind::RBracket])?;
             self.expect(TokKind::RBracket)?;
 
-            let msb = eval_const_u32(&msb_expr)?;
-            let lsb = eval_const_u32(&lsb_expr)?;
+            let msb = self.eval_const_u32(&msb_expr)?;
+            let lsb = self.eval_const_u32(&lsb_expr)?;
             if msb < lsb {
                 return Err(Error::Parse("decl range msb<lsb not supported".to_string()));
             }
@@ -1269,18 +1404,6 @@ impl<'a> Parser<'a> {
     }
 
     // no skip_balanced_parens in v1; we parse a restricted port list.
-}
-
-fn eval_const_u32(e: &VExpr) -> Result<u32> {
-    // Very small constant evaluator for decl widths (accept only numeric literals).
-    match e {
-        VExpr::Literal(v) | VExpr::UnsizedNumber(v) => v.to_u32_if_known().ok_or_else(|| {
-            Error::Parse("decl width literal must be known and fit in u32".to_string())
-        }),
-        _ => Err(Error::Parse(
-            "decl width must be a literal in v1".to_string(),
-        )),
-    }
 }
 
 fn parse_casez_pattern(s: &str) -> Result<CasezPattern> {

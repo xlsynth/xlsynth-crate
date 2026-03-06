@@ -29,7 +29,14 @@ impl<'a> LexerSpanned<'a> {
         let b = self.peek_byte().unwrap();
         let tok = match b {
             b'$' => Token::Ident(self.lex_dollar_ident()?),
-            b'\'' => Token::Number(self.lex_numberish()),
+            b'\'' => {
+                if self.apostrophe_starts_cast(self.idx) {
+                    self.idx += 1;
+                    Token::Apostrophe
+                } else {
+                    Token::Number(self.lex_numberish())
+                }
+            }
             b'(' => {
                 self.idx += 1;
                 Token::LParen
@@ -239,6 +246,9 @@ impl<'a> LexerSpanned<'a> {
                 break;
             }
             if c == '\'' {
+                if self.apostrophe_starts_cast(self.idx) {
+                    break;
+                }
                 saw_quote = true;
                 self.idx += c.len_utf8();
                 continue;
@@ -273,5 +283,18 @@ impl<'a> LexerSpanned<'a> {
 
     fn peek_byte(&self) -> Option<u8> {
         self.s.as_bytes().get(self.idx).copied()
+    }
+
+    fn apostrophe_starts_cast(&self, apostrophe_idx: usize) -> bool {
+        let mut idx = apostrophe_idx + 1;
+        while idx < self.s.len() {
+            let c = self.s[idx..].chars().next().unwrap();
+            if c.is_whitespace() {
+                idx += c.len_utf8();
+                continue;
+            }
+            return c == '(';
+        }
+        false
     }
 }
