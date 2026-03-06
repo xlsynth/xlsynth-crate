@@ -31,6 +31,8 @@ use crate::eval::merged_signedness;
 use crate::eval::operand_with_own_sign_ctx;
 use crate::eval::replication_count_to_u32;
 use crate::eval::unary_operand_expected_width;
+use crate::packed::packed_index_selection;
+use crate::sv_ast::Lhs;
 use crate::value::LogicBit;
 
 pub struct ComboEvalPlan {
@@ -39,10 +41,52 @@ pub struct ComboEvalPlan {
 }
 
 pub fn plan_combo_eval(m: &CompiledComboModule) -> Result<ComboEvalPlan> {
-    let mut lhs_to_idx: BTreeMap<String, usize> = BTreeMap::new();
+    let mut lhs_to_idxs: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for (i, a) in m.assigns.iter().enumerate() {
-        if lhs_to_idx.insert(a.lhs.clone(), i).is_some() {
-            return Err(Error::Parse(format!("multiple assigns to `{}`", a.lhs)));
+        lhs_to_idxs
+            .entry(a.lhs_base().to_string())
+            .or_default()
+            .push(i);
+    }
+    let mut const_env = Env::new();
+    for (name, value) in &m.consts {
+        const_env.insert(name.clone(), value.clone());
+    }
+
+    for (lhs, writer_indices) in &lhs_to_idxs {
+        if writer_indices.len() <= 1 {
+            continue;
+        }
+        let info = m
+            .decls
+            .get(lhs)
+            .ok_or_else(|| Error::Parse(format!("no decl for assign lhs `{lhs}`")))?;
+        let mut seen_writers_by_bit: Vec<Option<usize>> = vec![None; info.width as usize];
+        for &writer in writer_indices {
+            let assign = &m.assigns[writer];
+            let mut deps: BTreeSet<String> = BTreeSet::new();
+            collect_idents(&assign.rhs, &mut deps);
+            if deps.contains(lhs) {
+                return Err(Error::Parse(format!(
+                    "multiple assigns to `{lhs}` with RHS dependency on `{lhs}` are not supported"
+                )));
+            }
+            let static_bits =
+                static_written_bits(&assign.lhs, info, &const_env).map_err(|e| match e {
+                    Error::Parse(msg) => Error::Parse(format!(
+                        "multiple assigns to `{lhs}` require static disjoint LHS selections: {msg}"
+                    )),
+                    other => other,
+                })?;
+            for bit in static_bits {
+                let slot = bit as usize;
+                if let Some(prev_writer) = seen_writers_by_bit[slot] {
+                    return Err(Error::Parse(format!(
+                        "overlapping assigns to `{lhs}` are not supported (assign {prev_writer} overlaps assign {writer})"
+                    )));
+                }
+                seen_writers_by_bit[slot] = Some(writer);
+            }
         }
     }
 
@@ -53,10 +97,12 @@ pub fn plan_combo_eval(m: &CompiledComboModule) -> Result<ComboEvalPlan> {
         let mut deps: BTreeSet<String> = BTreeSet::new();
         collect_idents(&a.rhs, &mut deps);
         for d in deps {
-            if let Some(&j) = lhs_to_idx.get(&d) {
-                // i depends on j => edge j -> i
-                succ[j].push(i);
-                indeg[i] += 1;
+            if let Some(writers) = lhs_to_idxs.get(&d) {
+                for &j in writers {
+                    // i depends on j => edge j -> i
+                    succ[j].push(i);
+                    indeg[i] += 1;
+                }
             }
         }
     }
@@ -161,16 +207,18 @@ pub fn eval_combo_seeded(
 fn eval_combo_assigns(m: &CompiledComboModule, plan: &ComboEvalPlan, env: &mut Env) -> Result<()> {
     for &ai in &plan.assign_order {
         let a = &m.assigns[ai];
+        let lhs_base = a.lhs_base();
         let info = m
             .decls
-            .get(&a.lhs)
-            .ok_or_else(|| Error::Parse(format!("no decl for assign lhs `{}`", a.lhs)))?;
+            .get(lhs_base)
+            .ok_or_else(|| Error::Parse(format!("no decl for assign lhs `{lhs_base}`")))?;
+        let expected_width = lhs_expected_write_width(&a.lhs, info)?;
         let resolver = ComboResolver {
             funcs: &m.functions,
             globals: env,
         };
-        let rhs_v = eval_ast_with_calls(&a.rhs, env, Some(&resolver), Some(info.width))?;
-        env.insert(a.lhs.clone(), coerce_to_declinfo(&rhs_v, info));
+        let rhs_v = eval_ast_with_calls(&a.rhs, env, Some(&resolver), expected_width)?;
+        apply_lhs_to_env(&a.lhs, &rhs_v, env, info)?;
     }
     Ok(())
 }
@@ -199,22 +247,24 @@ pub fn eval_combo_seeded_with_coverage(
     }
     for &ai in &plan.assign_order {
         let a = &m.assigns[ai];
+        let lhs_base = a.lhs_base();
         cov.hit_span(src, a.rhs_span);
         let info = m
             .decls
-            .get(&a.lhs)
-            .ok_or_else(|| Error::Parse(format!("no decl for assign lhs `{}`", a.lhs)))?;
+            .get(lhs_base)
+            .ok_or_else(|| Error::Parse(format!("no decl for assign lhs `{lhs_base}`")))?;
+        let expected_width = lhs_expected_write_width(&a.lhs, info)?;
         let rhs_v = eval_spanned_expr_with_funcs(
             &a.rhs_spanned,
             &env,
             &m.functions,
-            Some(info.width),
+            expected_width,
             None,
             cov,
             src,
             fn_meta,
         )?;
-        env.insert(a.lhs.clone(), coerce_to_declinfo(&rhs_v, info));
+        apply_lhs_to_env(&a.lhs, &rhs_v, &mut env, info)?;
     }
     let mut out: BTreeMap<String, Value4> = BTreeMap::new();
     for name in m.decls.keys() {
@@ -730,6 +780,7 @@ fn function_return_decl(f: &ComboFunction) -> crate::module_compile::DeclInfo {
     crate::module_compile::DeclInfo {
         width: f.ret_width,
         signedness: f.ret_signedness,
+        packed_dims: vec![f.ret_width],
     }
 }
 
@@ -742,12 +793,178 @@ fn coerce_to_declinfo(v: &Value4, info: &crate::module_compile::DeclInfo) -> Val
     )
 }
 
+fn lhs_expected_write_width(
+    lhs: &Lhs,
+    info: &crate::module_compile::DeclInfo,
+) -> Result<Option<u32>> {
+    match lhs {
+        Lhs::Ident(_) => Ok(Some(info.width)),
+        Lhs::Index { .. } => {
+            let (_offset, width) = packed_index_selection(info, &[0])?;
+            Ok(Some(width))
+        }
+        Lhs::PackedIndex { indices, .. } => {
+            let zeros = vec![0; indices.len()];
+            let (_offset, width) = packed_index_selection(info, &zeros)?;
+            Ok(Some(width))
+        }
+        Lhs::Slice { .. } => Ok(None),
+    }
+}
+
+fn apply_lhs_to_env(
+    lhs: &Lhs,
+    rhs: &Value4,
+    env: &mut Env,
+    info: &crate::module_compile::DeclInfo,
+) -> Result<()> {
+    match lhs {
+        Lhs::Ident(base) => {
+            env.insert(base.clone(), coerce_to_declinfo(rhs, info));
+            Ok(())
+        }
+        Lhs::Index { base, index } => {
+            let index_v = eval_ast_with_calls(index, env, None, None)?;
+            let Some(index_u) = index_v.to_u32_saturating_if_known() else {
+                clobber_lhs_base_to_x(base, info, env);
+                return Ok(());
+            };
+            let (offset, width) = packed_index_selection(info, &[index_u])?;
+            write_partial_lhs(base, info, rhs, offset, width, env);
+            Ok(())
+        }
+        Lhs::PackedIndex { base, indices } => {
+            let mut index_values: Vec<u32> = Vec::with_capacity(indices.len());
+            for index in indices {
+                let index_v = eval_ast_with_calls(index, env, None, None)?;
+                let Some(index_u) = index_v.to_u32_saturating_if_known() else {
+                    clobber_lhs_base_to_x(base, info, env);
+                    return Ok(());
+                };
+                index_values.push(index_u);
+            }
+            let (offset, width) = packed_index_selection(info, &index_values)?;
+            write_partial_lhs(base, info, rhs, offset, width, env);
+            Ok(())
+        }
+        Lhs::Slice { base, msb, lsb } => {
+            let msb_v = eval_ast_with_calls(msb, env, None, None)?;
+            let lsb_v = eval_ast_with_calls(lsb, env, None, None)?;
+            let (Some(msb_u), Some(lsb_u)) = (
+                msb_v.to_u32_saturating_if_known(),
+                lsb_v.to_u32_saturating_if_known(),
+            ) else {
+                clobber_lhs_base_to_x(base, info, env);
+                return Ok(());
+            };
+            if msb_u < lsb_u {
+                return Ok(());
+            }
+            let width = msb_u - lsb_u + 1;
+            write_partial_lhs(base, info, rhs, lsb_u, width, env);
+            Ok(())
+        }
+    }
+}
+
+fn write_partial_lhs(
+    base: &str,
+    info: &crate::module_compile::DeclInfo,
+    rhs: &Value4,
+    offset: u32,
+    width: u32,
+    env: &mut Env,
+) {
+    let current = env
+        .get(base)
+        .cloned()
+        .unwrap_or_else(|| x_value(info.width, info.signedness));
+    let mut bits = current.resize(info.width).bits_lsb_first().to_vec();
+    let rhs_bits = rhs.resize(width);
+    for i in 0..width {
+        let dst = offset + i;
+        if dst < info.width {
+            bits[dst as usize] = rhs_bits.bits_lsb_first()[i as usize];
+        }
+    }
+    env.insert(
+        base.to_string(),
+        Value4::new(info.width, info.signedness, bits),
+    );
+}
+
+fn clobber_lhs_base_to_x(base: &str, info: &crate::module_compile::DeclInfo, env: &mut Env) {
+    env.insert(base.to_string(), x_value(info.width, info.signedness));
+}
+
+fn static_written_bits(
+    lhs: &Lhs,
+    info: &crate::module_compile::DeclInfo,
+    consts: &Env,
+) -> Result<Vec<u32>> {
+    match lhs {
+        Lhs::Ident(_) => Ok((0..info.width).collect()),
+        Lhs::Index { index, .. } => {
+            let Some(index_u) = eval_static_u32(index, consts)? else {
+                return Err(Error::Parse(
+                    "index expression is not statically known".to_string(),
+                ));
+            };
+            let (offset, width) = packed_index_selection(info, &[index_u])?;
+            Ok((0..width)
+                .map(|i| offset + i)
+                .filter(|bit| *bit < info.width)
+                .collect())
+        }
+        Lhs::PackedIndex { indices, .. } => {
+            let mut values: Vec<u32> = Vec::with_capacity(indices.len());
+            for index in indices {
+                let Some(index_u) = eval_static_u32(index, consts)? else {
+                    return Err(Error::Parse(
+                        "packed index expression is not statically known".to_string(),
+                    ));
+                };
+                values.push(index_u);
+            }
+            let (offset, width) = packed_index_selection(info, &values)?;
+            Ok((0..width)
+                .map(|i| offset + i)
+                .filter(|bit| *bit < info.width)
+                .collect())
+        }
+        Lhs::Slice { msb, lsb, .. } => {
+            let Some(msb_u) = eval_static_u32(msb, consts)? else {
+                return Err(Error::Parse(
+                    "slice msb expression is not statically known".to_string(),
+                ));
+            };
+            let Some(lsb_u) = eval_static_u32(lsb, consts)? else {
+                return Err(Error::Parse(
+                    "slice lsb expression is not statically known".to_string(),
+                ));
+            };
+            if msb_u < lsb_u {
+                return Ok(Vec::new());
+            }
+            Ok((lsb_u..=msb_u).filter(|bit| *bit < info.width).collect())
+        }
+    }
+}
+
+fn eval_static_u32(expr: &Expr, consts: &Env) -> Result<Option<u32>> {
+    match eval_ast_with_calls(expr, consts, None, None) {
+        Ok(value) => Ok(value.to_u32_saturating_if_known()),
+        Err(_) => Ok(None),
+    }
+}
+
 fn init_function_env(f: &ComboFunction, args: &[Value4], globals: &Env) -> Env {
     let mut env = globals.clone();
     for (arg, av) in f.args.iter().zip(args.iter()) {
         let info = crate::module_compile::DeclInfo {
             width: arg.width,
             signedness: arg.signedness,
+            packed_dims: vec![arg.width],
         };
         env.insert(arg.name.clone(), coerce_to_declinfo(av, &info));
     }
@@ -772,6 +989,7 @@ fn function_target_decl(f: &ComboFunction, lhs: &str) -> Option<crate::module_co
         .map(|a| crate::module_compile::DeclInfo {
             width: a.width,
             signedness: a.signedness,
+            packed_dims: vec![a.width],
         })
 }
 

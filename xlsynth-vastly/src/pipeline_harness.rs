@@ -406,13 +406,13 @@ fn literal_assigned_names(m: &crate::pipeline_compile::CompiledPipelineModule) -
     for a in &m.combo.assigns {
         match &a.rhs_spanned.kind {
             crate::ast_spanned::SpannedExprKind::Literal(_) => {
-                s.insert(a.lhs.clone());
+                s.insert(a.lhs_base().to_string());
             }
             crate::ast_spanned::SpannedExprKind::UnsizedNumber(_) => {
-                s.insert(a.lhs.clone());
+                s.insert(a.lhs_base().to_string());
             }
             crate::ast_spanned::SpannedExprKind::UnbasedUnsized(_) => {
-                s.insert(a.lhs.clone());
+                s.insert(a.lhs_base().to_string());
             }
             _ => {}
         }

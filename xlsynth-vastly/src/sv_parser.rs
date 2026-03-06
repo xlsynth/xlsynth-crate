@@ -613,22 +613,8 @@ impl<'a> Parser<'a> {
                 false
             };
 
-            let mut width: u32 = 1;
-            if *self.cur() == TokKind::LBracket {
-                // [msb:lsb]
-                self.bump();
-                let msb_expr = self.parse_expr_until(&[TokKind::Colon])?;
-                self.expect(TokKind::Colon)?;
-                let lsb_expr = self.parse_expr_until(&[TokKind::RBracket])?;
-                self.expect(TokKind::RBracket)?;
-
-                let msb = self.eval_const_u32(&msb_expr)?;
-                let lsb = self.eval_const_u32(&lsb_expr)?;
-                if msb < lsb {
-                    return Err(Error::Parse("decl range msb<lsb not supported".to_string()));
-                }
-                width = msb - lsb + 1;
-            }
+            let packed_dims = self.parse_packed_dims()?;
+            let width = packed_dims_width(&packed_dims)?;
 
             let name = match self.toks[self.idx].kind.clone() {
                 TokKind::Ident(s) => {
@@ -642,6 +628,7 @@ impl<'a> Parser<'a> {
                 name,
                 signed,
                 width,
+                packed_dims,
             });
 
             match self.cur() {
@@ -704,20 +691,8 @@ impl<'a> Parser<'a> {
                 false
             };
 
-            let mut width: u32 = 1;
-            if *self.cur() == TokKind::LBracket {
-                self.bump();
-                let msb_expr = self.parse_expr_until(&[TokKind::Colon])?;
-                self.expect(TokKind::Colon)?;
-                let lsb_expr = self.parse_expr_until(&[TokKind::RBracket])?;
-                self.expect(TokKind::RBracket)?;
-                let msb = self.eval_const_u32(&msb_expr)?;
-                let lsb = self.eval_const_u32(&lsb_expr)?;
-                if msb < lsb {
-                    return Err(Error::Parse("decl range msb<lsb not supported".to_string()));
-                }
-                width = msb - lsb + 1;
-            }
+            let packed_dims = self.parse_packed_dims()?;
+            let width = packed_dims_width(&packed_dims)?;
 
             let name = match self.toks[self.idx].kind.clone() {
                 TokKind::Ident(s) => {
@@ -732,6 +707,7 @@ impl<'a> Parser<'a> {
                 ty,
                 signed,
                 width,
+                packed_dims,
                 name,
             });
 
@@ -745,6 +721,27 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(ports)
+    }
+
+    fn parse_packed_dims(&mut self) -> Result<Vec<u32>> {
+        let mut dims: Vec<u32> = Vec::new();
+        while *self.cur() == TokKind::LBracket {
+            self.bump();
+            let msb_expr = self.parse_expr_until(&[TokKind::Colon])?;
+            self.expect(TokKind::Colon)?;
+            let lsb_expr = self.parse_expr_until(&[TokKind::RBracket])?;
+            self.expect(TokKind::RBracket)?;
+            let msb = self.eval_const_u32(&msb_expr)?;
+            let lsb = self.eval_const_u32(&lsb_expr)?;
+            if msb < lsb {
+                return Err(Error::Parse("decl range msb<lsb not supported".to_string()));
+            }
+            dims.push(msb - lsb + 1);
+        }
+        if dims.is_empty() {
+            dims.push(1);
+        }
+        Ok(dims)
     }
 
     fn parse_wire_decl(&mut self) -> Result<Decl> {
@@ -763,20 +760,8 @@ impl<'a> Parser<'a> {
             false
         };
 
-        let mut width: u32 = 1;
-        if *self.cur() == TokKind::LBracket {
-            self.bump();
-            let msb_expr = self.parse_expr_until(&[TokKind::Colon])?;
-            self.expect(TokKind::Colon)?;
-            let lsb_expr = self.parse_expr_until(&[TokKind::RBracket])?;
-            self.expect(TokKind::RBracket)?;
-            let msb = self.eval_const_u32(&msb_expr)?;
-            let lsb = self.eval_const_u32(&lsb_expr)?;
-            if msb < lsb {
-                return Err(Error::Parse("decl range msb<lsb not supported".to_string()));
-            }
-            width = msb - lsb + 1;
-        }
+        let packed_dims = self.parse_packed_dims()?;
+        let width = packed_dims_width(&packed_dims)?;
 
         let name = match self.toks[self.idx].kind.clone() {
             TokKind::Ident(s) => {
@@ -792,6 +777,7 @@ impl<'a> Parser<'a> {
                 name,
                 signed,
                 width,
+                packed_dims,
             },
             Span { start, end },
         ))
@@ -806,21 +792,11 @@ impl<'a> Parser<'a> {
 
     fn parse_assign_item(&mut self) -> Result<ComboItem> {
         self.expect(TokKind::KwAssign)?;
-        let lhs_ident = match self.toks[self.idx].kind.clone() {
-            TokKind::Ident(s) => {
-                self.bump();
-                s
-            }
-            _ => {
-                return Err(Error::Parse(
-                    "expected identifier on assign LHS".to_string(),
-                ));
-            }
-        };
+        let lhs = self.parse_lhs()?;
         self.expect(TokKind::Eq)?;
         let rhs = self.parse_span_until_semi()?;
         self.expect(TokKind::Semi)?;
-        Ok(ComboItem::Assign { lhs_ident, rhs })
+        Ok(ComboItem::Assign { lhs, rhs })
     }
 
     fn parse_combo_function(&mut self) -> Result<ComboFunction> {
@@ -1004,20 +980,8 @@ impl<'a> Parser<'a> {
             false
         };
 
-        let mut width: u32 = 1;
-        if *self.cur() == TokKind::LBracket {
-            self.bump();
-            let msb_expr = self.parse_expr_until(&[TokKind::Colon])?;
-            self.expect(TokKind::Colon)?;
-            let lsb_expr = self.parse_expr_until(&[TokKind::RBracket])?;
-            self.expect(TokKind::RBracket)?;
-            let msb = self.eval_const_u32(&msb_expr)?;
-            let lsb = self.eval_const_u32(&lsb_expr)?;
-            if msb < lsb {
-                return Err(Error::Parse("decl range msb<lsb not supported".to_string()));
-            }
-            width = msb - lsb + 1;
-        }
+        let packed_dims = self.parse_packed_dims()?;
+        let width = packed_dims_width(&packed_dims)?;
 
         let name = match self.toks[self.idx].kind.clone() {
             TokKind::Ident(s) => {
@@ -1033,6 +997,7 @@ impl<'a> Parser<'a> {
             name,
             signed,
             width,
+            packed_dims,
         })
     }
 
@@ -1162,22 +1127,8 @@ impl<'a> Parser<'a> {
             false
         };
 
-        let mut width: u32 = 1;
-        if *self.cur() == TokKind::LBracket {
-            // [msb:lsb]
-            self.bump();
-            let msb_expr = self.parse_expr_until(&[TokKind::Colon])?;
-            self.expect(TokKind::Colon)?;
-            let lsb_expr = self.parse_expr_until(&[TokKind::RBracket])?;
-            self.expect(TokKind::RBracket)?;
-
-            let msb = self.eval_const_u32(&msb_expr)?;
-            let lsb = self.eval_const_u32(&lsb_expr)?;
-            if msb < lsb {
-                return Err(Error::Parse("decl range msb<lsb not supported".to_string()));
-            }
-            width = msb - lsb + 1;
-        }
+        let packed_dims = self.parse_packed_dims()?;
+        let width = packed_dims_width(&packed_dims)?;
 
         let name = match self.toks[self.idx].kind.clone() {
             TokKind::Ident(s) => {
@@ -1191,6 +1142,7 @@ impl<'a> Parser<'a> {
             name,
             signed,
             width,
+            packed_dims,
         })
     }
 
@@ -1313,20 +1265,43 @@ impl<'a> Parser<'a> {
         if *self.cur() != TokKind::LBracket {
             return Ok(Lhs::Ident(base));
         }
-        self.expect(TokKind::LBracket)?;
-        let first = self.parse_expr_until(&[TokKind::Colon, TokKind::RBracket])?;
-        if *self.cur() == TokKind::Colon {
-            self.bump();
-            let lsb = self.parse_expr_until(&[TokKind::RBracket])?;
+        let mut indices: Vec<VExpr> = Vec::new();
+        loop {
+            self.expect(TokKind::LBracket)?;
+            let first = self.parse_expr_until(&[TokKind::Colon, TokKind::RBracket])?;
+            if *self.cur() == TokKind::Colon {
+                if !indices.is_empty() {
+                    return Err(Error::Parse(
+                        "mixed packed index and slice lhs not supported".to_string(),
+                    ));
+                }
+                self.bump();
+                let lsb = self.parse_expr_until(&[TokKind::RBracket])?;
+                self.expect(TokKind::RBracket)?;
+                if *self.cur() == TokKind::LBracket {
+                    return Err(Error::Parse(
+                        "multiple bracket groups after slice lhs not supported".to_string(),
+                    ));
+                }
+                return Ok(Lhs::Slice {
+                    base,
+                    msb: first,
+                    lsb,
+                });
+            }
             self.expect(TokKind::RBracket)?;
-            Ok(Lhs::Slice {
+            indices.push(first);
+            if *self.cur() != TokKind::LBracket {
+                break;
+            }
+        }
+        if indices.len() == 1 {
+            Ok(Lhs::Index {
                 base,
-                msb: first,
-                lsb,
+                index: indices.pop().expect("checked len"),
             })
         } else {
-            self.expect(TokKind::RBracket)?;
-            Ok(Lhs::Index { base, index: first })
+            Ok(Lhs::PackedIndex { base, indices })
         }
     }
 
@@ -1427,6 +1402,13 @@ fn parse_casez_pattern(s: &str) -> Result<CasezPattern> {
         width,
         bits_msb,
         span: Span { start: 0, end: 0 },
+    })
+}
+
+fn packed_dims_width(dims: &[u32]) -> Result<u32> {
+    dims.iter().try_fold(1u32, |acc, dim| {
+        acc.checked_mul(*dim)
+            .ok_or_else(|| Error::Parse("packed decl width overflow".to_string()))
     })
 }
 

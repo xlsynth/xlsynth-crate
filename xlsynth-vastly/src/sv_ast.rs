@@ -28,6 +28,7 @@ pub struct PortDecl {
     pub ty: PortTy,
     pub signed: bool,
     pub width: u32,
+    pub packed_dims: Vec<u32>,
     pub name: String,
 }
 
@@ -42,7 +43,7 @@ pub struct ComboModule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComboItem {
     WireDecl(Decl),
-    Assign { lhs_ident: String, rhs: Span },
+    Assign { lhs: Lhs, rhs: Span },
     Function(ComboFunction),
 }
 
@@ -107,6 +108,7 @@ pub struct Decl {
     pub name: String,
     pub signed: bool,
     pub width: u32,
+    pub packed_dims: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,6 +176,10 @@ pub enum Lhs {
     Index {
         base: String,
         index: VExpr,
+    },
+    PackedIndex {
+        base: String,
+        indices: Vec<VExpr>,
     },
     Slice {
         base: String,

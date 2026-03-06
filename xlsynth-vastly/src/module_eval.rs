@@ -10,6 +10,7 @@ use crate::Value4;
 use crate::ast::Expr as VExpr;
 use crate::module_compile::CompiledModule;
 use crate::module_compile::State;
+use crate::packed::packed_index_selection;
 use crate::sv_ast::Lhs;
 use crate::sv_ast::Stmt;
 
@@ -176,11 +177,48 @@ fn apply_nba(
                 }
                 return Ok(());
             };
-            let idx = idx_u;
-            let bit = rhs.resize(1).bits_lsb_first()[0];
+            let (offset, elem_width) = packed_index_selection(info, &[idx_u])?;
             let pb = ensure_pending(pending, base, info.width);
-            if idx < info.width {
-                pb.bits[idx as usize] = Some(bit);
+            if elem_width == 1 {
+                if offset < info.width {
+                    pb.bits[offset as usize] = Some(rhs.resize(1).bits_lsb_first()[0]);
+                }
+            } else {
+                let rhs2 = rhs.resize(elem_width);
+                for i in 0..elem_width {
+                    let dst = offset + i;
+                    if dst < info.width {
+                        pb.bits[dst as usize] = Some(rhs2.bits_lsb_first()[i as usize]);
+                    }
+                }
+            }
+            Ok(())
+        }
+        Lhs::PackedIndex { base, indices } => {
+            let info = m
+                .decls
+                .get(base)
+                .ok_or_else(|| Error::Parse(format!("no decl for {base}")))?;
+            let mut idx_vals: Vec<u32> = Vec::with_capacity(indices.len());
+            for index in indices {
+                let idx_v = eval_expr(index, env)?;
+                let Some(idx_u) = idx_v.to_u32_saturating_if_known() else {
+                    let pb = ensure_pending(pending, base, info.width);
+                    for i in 0..(info.width as usize) {
+                        pb.bits[i] = Some(LogicBit::X);
+                    }
+                    return Ok(());
+                };
+                idx_vals.push(idx_u);
+            }
+            let (offset, elem_width) = packed_index_selection(info, &idx_vals)?;
+            let rhs2 = rhs.resize(elem_width);
+            let pb = ensure_pending(pending, base, info.width);
+            for i in 0..elem_width {
+                let dst = offset + i;
+                if dst < info.width {
+                    pb.bits[dst as usize] = Some(rhs2.bits_lsb_first()[i as usize]);
+                }
             }
             Ok(())
         }
