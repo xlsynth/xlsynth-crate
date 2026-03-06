@@ -564,51 +564,58 @@ fn run_oracle_with_timeout(expr: &str, env: &Env, timeout: Duration) -> OracleOu
     }
 
     let sv = build_sv(expr, env);
-    let td = mk_temp_dir();
-    let sv_path = td.join("oracle.sv");
-    let out_path = td.join("oracle.out");
-
-    if std::fs::File::create(&sv_path)
-        .and_then(|mut f| f.write_all(sv.as_bytes()))
-        .is_err()
-    {
-        return OracleOutcome::RejectedOrFailed;
-    }
-
-    let mut iverilog_cmd = Command::new("iverilog");
-    iverilog_cmd
-        .arg("-g2012")
-        .arg("-o")
-        .arg(&out_path)
-        .arg(&sv_path);
-    match run_cmd_timeout(iverilog_cmd, timeout) {
-        CmdOutcome::Ok(output) => {
-            if !output.status.success() {
-                return OracleOutcome::RejectedOrFailed;
-            }
-        }
-        CmdOutcome::TimedOut => return OracleOutcome::TimedOut,
-        CmdOutcome::Err => return OracleOutcome::RejectedOrFailed,
-    }
-
-    let mut vvp_cmd = Command::new("vvp");
-    vvp_cmd.arg(&out_path);
-    let out = match run_cmd_timeout(vvp_cmd, timeout) {
-        CmdOutcome::Ok(output) => {
-            if !output.status.success() {
-                return OracleOutcome::RejectedOrFailed;
-            }
-            output.stdout
-        }
-        CmdOutcome::TimedOut => return OracleOutcome::TimedOut,
-        CmdOutcome::Err => return OracleOutcome::RejectedOrFailed,
+    let td = match mk_temp_dir() {
+        Some(td) => td,
+        None => return OracleOutcome::RejectedOrFailed,
     };
+    let result = (|| {
+        let sv_path = td.join("oracle.sv");
+        let out_path = td.join("oracle.out");
 
-    let out = String::from_utf8_lossy(&out);
-    match parse_oracle_output(&out) {
-        Some(x) => OracleOutcome::Accepted(x),
-        None => OracleOutcome::RejectedOrFailed,
-    }
+        if std::fs::File::create(&sv_path)
+            .and_then(|mut f| f.write_all(sv.as_bytes()))
+            .is_err()
+        {
+            return OracleOutcome::RejectedOrFailed;
+        }
+
+        let mut iverilog_cmd = Command::new("iverilog");
+        iverilog_cmd
+            .arg("-g2012")
+            .arg("-o")
+            .arg(&out_path)
+            .arg(&sv_path);
+        match run_cmd_timeout(iverilog_cmd, timeout) {
+            CmdOutcome::Ok(output) => {
+                if !output.status.success() {
+                    return OracleOutcome::RejectedOrFailed;
+                }
+            }
+            CmdOutcome::TimedOut => return OracleOutcome::TimedOut,
+            CmdOutcome::Err => return OracleOutcome::RejectedOrFailed,
+        }
+
+        let mut vvp_cmd = Command::new("vvp");
+        vvp_cmd.arg(&out_path);
+        let out = match run_cmd_timeout(vvp_cmd, timeout) {
+            CmdOutcome::Ok(output) => {
+                if !output.status.success() {
+                    return OracleOutcome::RejectedOrFailed;
+                }
+                output.stdout
+            }
+            CmdOutcome::TimedOut => return OracleOutcome::TimedOut,
+            CmdOutcome::Err => return OracleOutcome::RejectedOrFailed,
+        };
+
+        let out = String::from_utf8_lossy(&out);
+        match parse_oracle_output(&out) {
+            Some(x) => OracleOutcome::Accepted(x),
+            None => OracleOutcome::RejectedOrFailed,
+        }
+    })();
+    let _ = std::fs::remove_dir_all(&td);
+    result
 }
 
 enum CmdOutcome {
@@ -706,7 +713,7 @@ fn to_verilog_literal(v: &Value4) -> String {
     format!("{}'b{}", v.width, msb)
 }
 
-fn mk_temp_dir() -> std::path::PathBuf {
+fn mk_temp_dir() -> Option<std::path::PathBuf> {
     let base = std::env::temp_dir();
     let pid = std::process::id();
     let nanos = SystemTime::now()
@@ -717,10 +724,10 @@ fn mk_temp_dir() -> std::path::PathBuf {
     for attempt in 0u32..1000u32 {
         let p = base.join(format!("vastly_fuzz_oracle_{pid}_{nanos}_{attempt}"));
         match std::fs::create_dir(&p) {
-            Ok(()) => return p,
+            Ok(()) => return Some(p),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(_) => break,
         }
     }
-    base
+    None
 }
