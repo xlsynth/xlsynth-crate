@@ -153,6 +153,37 @@ impl CoverageCounters {
         }
     }
 
+    /// Records a ternary branch decision, initializing branch spans on first
+    /// hit.
+    pub fn record_ternary_decision_with_spans(
+        &mut self,
+        ternary_span: SpanKey,
+        t_span: SpanKey,
+        f_span: SpanKey,
+        cond: LogicBit,
+    ) {
+        let e = self
+            .ternary_branches
+            .entry(ternary_span)
+            .or_insert_with(|| TernaryBranchCounts {
+                t_span,
+                f_span,
+                ..TernaryBranchCounts::default()
+            });
+        // Keep existing spans if the ternary was pre-registered.
+        if e.t_span == SpanKey::default() {
+            e.t_span = t_span;
+        }
+        if e.f_span == SpanKey::default() {
+            e.f_span = f_span;
+        }
+        match cond {
+            LogicBit::One => e.t_taken += 1,
+            LogicBit::Zero => e.f_taken += 1,
+            LogicBit::X | LogicBit::Z => e.cond_unknown += 1,
+        }
+    }
+
     pub fn observe_toggles(&mut self, prev: Option<&Value4>, cur: &Value4, name: &str) {
         let counts = self
             .toggle_counts

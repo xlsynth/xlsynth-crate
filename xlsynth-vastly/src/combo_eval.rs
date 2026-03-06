@@ -395,7 +395,12 @@ fn eval_spanned_expr_with_funcs(
         }
         SpannedExprKind::Ternary { cond, t, f } => {
             let c = eval_spanned_expr_with_funcs(cond, env, funcs, None, cov, src, fn_meta)?;
-            cov.record_ternary_decision(SpanKey::from(expr.span), c.to_bool4());
+            cov.record_ternary_decision_with_spans(
+                SpanKey::from(expr.span),
+                SpanKey::from(t.span),
+                SpanKey::from(f.span),
+                c.to_bool4(),
+            );
             let tv =
                 eval_spanned_expr_with_funcs(t, env, funcs, expected_width, cov, src, fn_meta)?;
             let fv =
@@ -424,16 +429,26 @@ fn eval_compiled_function(
         }
     }
     match &f.body {
-        ComboFunctionImpl::Expr { expr } => {
+        ComboFunctionImpl::Expr { expr, expr_spanned } => {
             if let Some(meta) = fn_meta.get(&f.name) {
                 if let Some(s) = meta.assign_expr_span {
                     cov.bump_span(s);
                     cov.hit_span(src, s);
                 }
             }
-            // No spans for function bodies yet; fallback to unspanned evaluation.
-            let v =
-                eval_ast_with_calls(expr, &env, Some(&ComboResolver { funcs }), expected_width)?;
+            let v = if let Some(spanned) = expr_spanned {
+                eval_spanned_expr_with_funcs(
+                    spanned,
+                    &env,
+                    funcs,
+                    expected_width,
+                    cov,
+                    src,
+                    fn_meta,
+                )?
+            } else {
+                eval_ast_with_calls(expr, &env, Some(&ComboResolver { funcs }), expected_width)?
+            };
             Ok(coerce_to_declinfo(&v, &function_return_decl(f)))
         }
         ComboFunctionImpl::Casez { selector, arms } => {
@@ -648,7 +663,7 @@ impl<'a> CallResolver for ComboResolver<'a> {
         }
         let mut env = init_function_env(f, args);
         match &f.body {
-            ComboFunctionImpl::Expr { expr } => {
+            ComboFunctionImpl::Expr { expr, .. } => {
                 let mut v = eval_ast_with_calls(expr, &env, Some(self), Some(f.ret_width))?;
                 v = coerce_to_declinfo(&v, &function_return_decl(f));
                 Ok(v)

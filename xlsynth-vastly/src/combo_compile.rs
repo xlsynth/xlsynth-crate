@@ -76,9 +76,17 @@ pub struct ComboFunction {
 
 #[derive(Debug, Clone)]
 pub enum ComboFunctionImpl {
-    Casez { selector: Expr, arms: Vec<CasezArm> },
-    Expr { expr: Expr },
-    Procedure { assigns: Vec<FunctionAssign> },
+    Casez {
+        selector: Expr,
+        arms: Vec<CasezArm>,
+    },
+    Expr {
+        expr: Expr,
+        expr_spanned: Option<SpannedExpr>,
+    },
+    Procedure {
+        assigns: Vec<FunctionAssign>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -211,7 +219,16 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
                             parse_expr(value_src)?,
                             &normalized.placeholder_to_original,
                         );
-                        ComboFunctionImpl::Expr { expr }
+                        let mut expr_spanned = parse_expr_spanned(value_src)?;
+                        denormalize_spanned_expr(
+                            &mut expr_spanned,
+                            &normalized.placeholder_to_original,
+                        );
+                        expr_spanned.shift_spans(value.start);
+                        ComboFunctionImpl::Expr {
+                            expr,
+                            expr_spanned: Some(expr_spanned),
+                        }
                     }
                     ComboFunctionBody::Procedure { assigns } => {
                         let mut out_assigns = Vec::with_capacity(assigns.len());

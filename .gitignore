@@ -19,3 +19,5 @@ slang
 .spr.yml
 **/abc.history
 *.vcd
+.fuzzmgr
+fuzzmgr.toml

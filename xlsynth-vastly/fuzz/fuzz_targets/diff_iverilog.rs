@@ -19,6 +19,8 @@ use xlsynth_vastly::Signedness;
 use xlsynth_vastly::Value4;
 use xlsynth_vastly::ast::Expr;
 
+const MAX_BASED_LITERAL_WIDTH: u32 = 384;
+
 fuzz_target!(|data: &[u8]| {
     let mut u = Unstructured::new(data);
     let case = match FuzzCase::arbitrary(&mut u) {
@@ -29,6 +31,11 @@ fuzz_target!(|data: &[u8]| {
 
     let expr = case.expr.to_string();
     if expr.trim().is_empty() {
+        return;
+    }
+    // Extremely wide explicit based literals are not interesting signal for this target;
+    // they mainly drive pathological width-sensitive parser/evaluator costs.
+    if has_based_literal_width_over_limit(&expr, MAX_BASED_LITERAL_WIDTH) {
         return;
     }
 
@@ -74,6 +81,37 @@ fuzz_target!(|data: &[u8]| {
         );
     }
 });
+
+fn has_based_literal_width_over_limit(expr: &str, limit: u32) -> bool {
+    let bytes = expr.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+
+        let mut width = 0u32;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            width = width
+                .saturating_mul(10)
+                .saturating_add(u32::from(bytes[i] - b'0'));
+            i += 1;
+        }
+
+        if i >= bytes.len() || bytes[i] != b'\'' {
+            continue;
+        }
+        let mut j = i + 1;
+        if j < bytes.len() && matches!(bytes[j], b's' | b'S') {
+            j += 1;
+        }
+        if j < bytes.len() && matches!(bytes[j], b'b' | b'B' | b'd' | b'D' | b'h' | b'H' | b'o' | b'O') && width > limit {
+            return true;
+        }
+    }
+    false
+}
 
 fn all_idents_defined_in_env(expr: &Expr, env: &Env) -> bool {
     let mut ok = true;

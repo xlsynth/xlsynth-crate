@@ -34,6 +34,7 @@ pub struct CompiledPipelineModule {
     pub clk_name: String,
     pub combo: CompiledComboModule,
     pub seqs: Vec<CompiledModule>,
+    pub seq_spans: Vec<Span>,
     pub observers: Vec<SimObserver>,
     pub observer_spans: Vec<Span>,
     pub fn_meta: BTreeMap<String, FunctionMeta>,
@@ -228,7 +229,13 @@ pub fn compile_pipeline_module_with_defines(
                     crate::sv_ast::ComboFunctionBody::Assign { value } => {
                         let value_src = src[value.start..value.end].trim();
                         let expr = crate::parser::parse_expr(value_src)?;
-                        ComboFunctionImpl::Expr { expr }
+                        let mut expr_spanned =
+                            crate::parser_spanned::parse_expr_spanned(value_src)?;
+                        expr_spanned.shift_spans(value.start);
+                        ComboFunctionImpl::Expr {
+                            expr,
+                            expr_spanned: Some(expr_spanned),
+                        }
                     }
                     crate::sv_ast::ComboFunctionBody::Procedure { assigns } => {
                         let mut out_assigns: Vec<FunctionAssign> =
@@ -327,10 +334,8 @@ pub fn compile_pipeline_module_with_defines(
             )
         })?;
 
-    // Partition always_ff blocks into zero or more stateful seq blocks and N
-    // observer blocks.
-    let mut stateful: Vec<crate::sv_ast::AlwaysFf> = Vec::new();
-    // Also remember per-item spans so we can attribute coverage in observer mode.
+    // Partition always_ff blocks into stateful seq blocks and observer blocks.
+    // Also remember per-item spans so we can attribute coverage.
     let mut always_ff_items: Vec<(crate::sv_ast::AlwaysFf, Span)> = Vec::new();
     for it in &parsed.items {
         if let PipelineItem::AlwaysFf {
@@ -342,7 +347,7 @@ pub fn compile_pipeline_module_with_defines(
         }
     }
 
-    for (af, af_span) in always_ff_items {
+    for (af, af_span) in &always_ff_items {
         if af.clk_name != clk_name {
             return Err(Error::Parse(format!(
                 "always_ff clock mismatch: saw `{}` but expected `{}`",
@@ -357,10 +362,9 @@ pub fn compile_pipeline_module_with_defines(
                     "mixed nba assigns and $display in one always_ff is not supported".to_string(),
                 ));
             }
-            stateful.push(af);
         } else if has_disp {
             observers.extend(crate::sim_observer::extract_observers(&clk_name, &af.body)?);
-            observer_spans.push(af_span);
+            observer_spans.push(*af_span);
         } else {
             // Empty / unsupported: ignore (v1).
         }
@@ -381,8 +385,14 @@ pub fn compile_pipeline_module_with_defines(
     };
 
     let mut seen_state_regs: BTreeSet<String> = BTreeSet::new();
-    let mut seqs: Vec<CompiledModule> = Vec::with_capacity(stateful.len());
-    for af in stateful {
+    let mut seqs: Vec<CompiledModule> = Vec::new();
+    let mut seq_spans: Vec<Span> = Vec::new();
+    for (af, af_span) in always_ff_items {
+        let has_nba = stmt_contains_nba(&af.body);
+        let has_disp = stmt_contains_display(&af.body);
+        if !has_nba || has_disp {
+            continue;
+        }
         let mut state_regs: BTreeSet<String> = BTreeSet::new();
         collect_state_regs(&af.body, &mut state_regs);
         for r in &state_regs {
@@ -406,6 +416,7 @@ pub fn compile_pipeline_module_with_defines(
             state_regs,
             body: af.body,
         });
+        seq_spans.push(af_span);
     }
 
     Ok(CompiledPipelineModule {
@@ -413,6 +424,7 @@ pub fn compile_pipeline_module_with_defines(
         clk_name,
         combo,
         seqs,
+        seq_spans,
         observers,
         observer_spans,
         fn_meta,
