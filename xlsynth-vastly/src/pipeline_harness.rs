@@ -405,6 +405,9 @@ fn literal_assigned_names(m: &crate::pipeline_compile::CompiledPipelineModule) -
             crate::ast_spanned::SpannedExprKind::Literal(_) => {
                 s.insert(a.lhs.clone());
             }
+            crate::ast_spanned::SpannedExprKind::UnsizedNumber(_) => {
+                s.insert(a.lhs.clone());
+            }
             crate::ast_spanned::SpannedExprKind::UnbasedUnsized(_) => {
                 s.insert(a.lhs.clone());
             }

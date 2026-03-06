@@ -29,6 +29,7 @@ use crate::eval::eval_binary_op;
 use crate::eval::eval_unary_op;
 use crate::eval::merged_signedness;
 use crate::eval::operand_with_own_sign_ctx;
+use crate::eval::replication_count_to_u32;
 use crate::eval::unary_operand_expected_width;
 use crate::value::LogicBit;
 
@@ -224,6 +225,7 @@ fn eval_spanned_expr_with_funcs(
             .cloned()
             .ok_or_else(|| Error::UnknownIdentifier(name.clone())),
         SpannedExprKind::Literal(v) => Ok(v.clone()),
+        SpannedExprKind::UnsizedNumber(v) => Ok(v.clone()),
         SpannedExprKind::UnbasedUnsized(bit) => {
             let w = expected_width.unwrap_or(1);
             Ok(Value4::new(w, Signedness::Unsigned, vec![*bit; w as usize]))
@@ -291,7 +293,7 @@ fn eval_spanned_expr_with_funcs(
         }
         SpannedExprKind::Replicate { count, expr } => {
             let c = eval_spanned_expr_with_funcs(count, env, funcs, None, None, cov, src, fn_meta)?;
-            let count_u = c.to_u32_saturating_if_known().unwrap_or(0);
+            let count_u = replication_count_to_u32(&c)?;
             let v = eval_spanned_expr_with_funcs(expr, env, funcs, None, None, cov, src, fn_meta)?;
             Ok(Value4::replicate(count_u, &v))
         }
@@ -778,6 +780,7 @@ fn collect_idents(e: &Expr, out: &mut BTreeSet<String>) {
             out.insert(s.clone());
         }
         Expr::Literal(_) => {}
+        Expr::UnsizedNumber(_) => {}
         Expr::UnbasedUnsized(_) => {}
         Expr::Call { args, .. } => {
             for a in args {

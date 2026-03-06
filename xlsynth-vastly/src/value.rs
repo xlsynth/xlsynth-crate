@@ -225,6 +225,48 @@ impl Value4 {
         Ok(Value4::new(width, signedness, bits))
     }
 
+    pub fn parse_unsized_decimal_token(signedness: Signedness, text: &str) -> crate::Result<Self> {
+        let compact: String = text.chars().filter(|c| *c != '_').collect();
+        let digits = compact.as_str();
+        if digits.is_empty() {
+            return Err(crate::Error::Parse(format!(
+                "bad integer literal `{text}`: missing digits"
+            )));
+        }
+        if digits.chars().any(|c| !c.is_ascii_digit()) {
+            return Err(crate::Error::Parse(format!(
+                "bad integer literal `{text}`: invalid decimal digits"
+            )));
+        }
+        let working_width = digits
+            .len()
+            .checked_mul(4)
+            .and_then(|v| v.checked_add(1))
+            .ok_or_else(|| {
+                crate::Error::Parse(format!(
+                    "bad integer literal `{text}`: decimal width overflow"
+                ))
+            })?;
+        let working_width = u32::try_from(working_width).map_err(|_| {
+            crate::Error::Parse(format!(
+                "bad integer literal `{text}`: decimal width overflow"
+            ))
+        })?;
+        let parsed = Self::parse_numeric_token(working_width, signedness, digits)?;
+        let magnitude_width = parsed
+            .bits
+            .iter()
+            .rposition(|b| *b == LogicBit::One)
+            .map(|i| (i as u32) + 1)
+            .unwrap_or(1);
+        let minimal_width = match signedness {
+            Signedness::Unsigned => magnitude_width,
+            Signedness::Signed => magnitude_width.saturating_add(1),
+        }
+        .max(32);
+        Ok(parsed.resize(minimal_width))
+    }
+
     pub fn resize(&self, new_width: u32) -> Self {
         if new_width == self.width {
             return self.clone();

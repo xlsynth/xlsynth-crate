@@ -199,6 +199,48 @@ endmodule
 }
 
 #[test]
+fn parses_and_evals_question_mark_digits_as_z() {
+    let dut = r#"
+module qmark_v(
+  output wire [3:0] out_bin,
+  output wire [7:0] out_hex
+);
+  assign out_bin = 4'b10?1;
+  assign out_hex = 8'h?f;
+endmodule
+"#;
+
+    let m = compile_combo_module(dut).unwrap();
+    let plan = plan_combo_eval(&m).unwrap();
+    let out = eval_combo(&m, &plan, &BTreeMap::new()).unwrap();
+
+    assert_eq!(out["out_bin"].to_bit_string_msb_first(), "10z1");
+    assert_eq!(out["out_hex"].to_bit_string_msb_first(), "zzzz1111");
+}
+
+#[test]
+fn rejects_unsized_numeric_concat_and_dynamic_replication() {
+    let bad_concat = r#"
+module bad_concat_v(
+  output wire [32:0] out
+);
+  assign out = {1, 1'b0};
+endmodule
+"#;
+    assert!(compile_combo_module(bad_concat).is_err());
+
+    let bad_repl = r#"
+module bad_repl_v(
+  input wire [1:0] n,
+  output wire [1:0] out
+);
+  assign out = {n{1'b1}};
+endmodule
+"#;
+    assert!(compile_combo_module(bad_repl).is_err());
+}
+
+#[test]
 fn parses_and_evals_function_helper_assignment_context_sized_ops() {
     let dut = r#"
 module ctx_helper_v(

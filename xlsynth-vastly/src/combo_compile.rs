@@ -826,6 +826,7 @@ fn denormalize_expr(expr: Expr, placeholders: &BTreeMap<String, String>) -> Expr
     match expr {
         Expr::Ident(name) => Expr::Ident(placeholders.get(&name).cloned().unwrap_or(name)),
         Expr::Literal(v) => Expr::Literal(v),
+        Expr::UnsizedNumber(v) => Expr::UnsizedNumber(v),
         Expr::UnbasedUnsized(b) => Expr::UnbasedUnsized(b),
         Expr::Call { name, args } => Expr::Call {
             name,
@@ -888,7 +889,9 @@ fn denormalize_spanned_expr(expr: &mut SpannedExpr, placeholders: &BTreeMap<Stri
                 *name = original.clone();
             }
         }
-        SpannedExprKind::Literal(_) | SpannedExprKind::UnbasedUnsized(_) => {}
+        SpannedExprKind::Literal(_)
+        | SpannedExprKind::UnsizedNumber(_)
+        | SpannedExprKind::UnbasedUnsized(_) => {}
         SpannedExprKind::Call { args, .. } => {
             for a in args {
                 denormalize_spanned_expr(a, placeholders);

@@ -17,6 +17,7 @@ pub struct SpannedExpr {
 pub enum SpannedExprKind {
     Ident(String),
     Literal(Value4),
+    UnsizedNumber(Value4),
     UnbasedUnsized(LogicBit),
     Call {
         name: String,
@@ -65,6 +66,7 @@ impl SpannedExpr {
         match &mut self.kind {
             SpannedExprKind::Ident(_) => {}
             SpannedExprKind::Literal(_) => {}
+            SpannedExprKind::UnsizedNumber(_) => {}
             SpannedExprKind::UnbasedUnsized(_) => {}
             SpannedExprKind::Call { args, .. } => {
                 for a in args {

@@ -97,7 +97,26 @@ fn based_literal_sizing_and_unknown_fill_match_oracle() {
     assert_eval_matches_oracle("'h1", &env);
     assert_eval_matches_oracle("'hx", &env);
     assert_eval_matches_oracle("'bz", &env);
+    assert_eval_matches_oracle("'d4294967296", &env);
     assert_eval_matches_oracle("8'hx", &env);
+    assert_eval_matches_oracle("4'b10?1", &env);
+    assert_eval_matches_oracle("8'h?f", &env);
+}
+
+#[test]
+fn unsized_decimal_literals_expand_to_minimum_required_width_matches_oracle() {
+    let env = Env::new();
+
+    assert_eval_matches_oracle("4294967296 === 34'd4294967296", &env);
+    assert_eval_matches_oracle("'d4294967296 === 33'd4294967296", &env);
+}
+
+#[test]
+fn illegal_unsized_concat_and_dynamic_replication_are_rejected() {
+    let env = Env::new();
+
+    assert!(xlsynth_vastly::eval_expr("{1, 1'b0}", &env).is_err());
+    assert!(xlsynth_vastly::eval_expr("{foo{1'b1}}", &env).is_err());
 }
 
 #[test]

@@ -220,6 +220,7 @@ fn collect_ternaries_spanned(expr: &SpannedExpr, out: &mut BTreeMap<SpanKey, Ter
     match &expr.kind {
         SpannedExprKind::Ident(_) => {}
         SpannedExprKind::Literal(_) => {}
+        SpannedExprKind::UnsizedNumber(_) => {}
         SpannedExprKind::UnbasedUnsized(_) => {}
         SpannedExprKind::Call { args, .. } => {
             for a in args {

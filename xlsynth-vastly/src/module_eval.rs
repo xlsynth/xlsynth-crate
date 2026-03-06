@@ -211,7 +211,7 @@ fn apply_nba(
 fn render_vexpr(e: &VExpr) -> String {
     match e {
         VExpr::Ident(name) => name.clone(),
-        VExpr::Literal(v) => {
+        VExpr::Literal(v) | VExpr::UnsizedNumber(v) => {
             let bits = v.to_bit_string_msb_first();
             match v.signedness {
                 Signedness::Signed => format!("{}'sb{}", v.width, bits),

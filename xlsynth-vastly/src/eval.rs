@@ -52,6 +52,21 @@ pub(crate) fn operand_with_own_sign_ctx(
     if width <= v.width { v } else { v.resize(width) }
 }
 
+pub(crate) fn replication_count_to_u32(v: &Value4) -> Result<u32> {
+    if v.has_unknown() {
+        return Err(Error::Parse(
+            "replication count must be a non-negative known constant expression".to_string(),
+        ));
+    }
+    if v.signedness == Signedness::Signed && v.msb() == LogicBit::One {
+        return Err(Error::Parse(
+            "replication count must be non-negative".to_string(),
+        ));
+    }
+    v.to_u32_if_known()
+        .ok_or_else(|| Error::Parse("replication count exceeds supported width".to_string()))
+}
+
 fn operand_with_merged_sign_ctx(
     lhs: Value4,
     rhs: Value4,
@@ -279,6 +294,7 @@ fn eval_ast_with_calls_inner(
             .cloned()
             .ok_or_else(|| Error::UnknownIdentifier(name.clone())),
         Expr::Literal(v) => Ok(v.clone()),
+        Expr::UnsizedNumber(v) => Ok(v.clone()),
         Expr::UnbasedUnsized(bit) => {
             let w = expected_width.unwrap_or(1);
             Ok(Value4::new(
@@ -364,7 +380,7 @@ fn eval_ast_with_calls_inner(
             } else {
                 eval_ast_with_calls_inner(count, env, calls, None, None, None, context_span)?
             };
-            let count_u = c.to_u32_saturating_if_known().unwrap_or(0);
+            let count_u = replication_count_to_u32(&c)?;
             let v = if let Some(obs) = observer.as_deref_mut() {
                 eval_ast_with_calls_inner(expr, env, calls, None, None, Some(obs), context_span)?
             } else {
