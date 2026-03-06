@@ -534,6 +534,11 @@ impl<'a> Parser<'a> {
                         self.bump()?;
                         let lsb = self.parse_ternary()?;
                         let rbr = self.expect_and_bump(Token::RBracket)?;
+                        if !spanned_expr_is_constant(&first) || !spanned_expr_is_constant(&lsb) {
+                            return Err(Error::Parse(
+                                "part-select bounds must be constant expressions".to_string(),
+                            ));
+                        }
                         let span = Span {
                             start: base.span.start,
                             end: rbr.end,
@@ -552,6 +557,12 @@ impl<'a> Parser<'a> {
                         self.bump()?;
                         let width = self.parse_ternary()?;
                         let rbr = self.expect_and_bump(Token::RBracket)?;
+                        if !spanned_expr_is_constant(&width) {
+                            return Err(Error::Parse(
+                                "indexed part-select width must be a constant expression"
+                                    .to_string(),
+                            ));
+                        }
                         let span = Span {
                             start: base.span.start,
                             end: rbr.end,

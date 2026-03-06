@@ -130,9 +130,8 @@ impl<'a> LexerSpanned<'a> {
             }
             b'<' => {
                 if self.consume_str("<<<") {
-                    return Err(Error::Lex("unexpected '<<<' (not supported)".to_string()));
-                }
-                if self.consume_str("<<") {
+                    Token::Shl
+                } else if self.consume_str("<<") {
                     Token::Shl
                 } else if self.consume_str("<=") {
                     Token::Le

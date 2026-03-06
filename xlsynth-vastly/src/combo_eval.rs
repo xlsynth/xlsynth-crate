@@ -239,14 +239,7 @@ fn eval_spanned_expr_with_funcs(
                     )));
                 }
                 let v = eval_spanned_expr_with_funcs(
-                    &args[0],
-                    env,
-                    funcs,
-                    expected_width,
-                    expected_signedness,
-                    cov,
-                    src,
-                    fn_meta,
+                    &args[0], env, funcs, None, None, cov, src, fn_meta,
                 )?;
                 return Ok(if name == "$signed" {
                     v.with_signedness(Signedness::Signed)

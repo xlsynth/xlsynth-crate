@@ -480,6 +480,11 @@ impl<'a> Parser<'a> {
                 self.bump()?;
                 let lsb = self.parse_ternary()?;
                 self.expect_and_bump(Token::RBracket)?;
+                if !expr_is_constant(&idx_or_msb) || !expr_is_constant(&lsb) {
+                    return Err(Error::Parse(
+                        "part-select bounds must be constant expressions".to_string(),
+                    ));
+                }
                 expr = Expr::Slice {
                     expr: Box::new(expr),
                     msb: Box::new(idx_or_msb),
@@ -490,6 +495,11 @@ impl<'a> Parser<'a> {
                 self.bump()?;
                 let width = self.parse_ternary()?;
                 self.expect_and_bump(Token::RBracket)?;
+                if !expr_is_constant(&width) {
+                    return Err(Error::Parse(
+                        "indexed part-select width must be a constant expression".to_string(),
+                    ));
+                }
                 expr = Expr::IndexedSlice {
                     expr: Box::new(expr),
                     base: Box::new(idx_or_msb),

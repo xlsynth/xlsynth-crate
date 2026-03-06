@@ -117,6 +117,8 @@ fn illegal_unsized_concat_and_dynamic_replication_are_rejected() {
 
     assert!(xlsynth_vastly::eval_expr("{1, 1'b0}", &env).is_err());
     assert!(xlsynth_vastly::eval_expr("{foo{1'b1}}", &env).is_err());
+    assert!(xlsynth_vastly::eval_expr("a[i+3:i]", &env).is_err());
+    assert!(xlsynth_vastly::eval_expr("a[0 +: w]", &env).is_err());
 }
 
 #[test]
@@ -204,6 +206,9 @@ fn signed_and_unsigned_cast_builtins_match_oracle() {
 
     assert_eval_matches_oracle("$signed(7'b1111111) >>> 1", &env);
     assert_eval_matches_oracle("$unsigned($signed(7'b1111111)) >>> 1", &env);
+    assert_eval_matches_oracle("$signed('1 + '1) === 4'sb0000", &env);
+    assert_eval_matches_oracle("4'sb0000 === $signed('1 + '1)", &env);
+    assert_eval_matches_oracle("4'sb1000 <<< 1", &env);
 }
 
 #[test]

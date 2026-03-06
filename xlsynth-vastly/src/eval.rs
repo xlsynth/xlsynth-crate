@@ -316,21 +316,13 @@ fn eval_ast_with_calls_inner(
                         &args[0],
                         env,
                         calls,
-                        expected_width,
-                        expected_signedness,
+                        None,
+                        None,
                         Some(obs),
                         context_span,
                     )?
                 } else {
-                    eval_ast_with_calls_inner(
-                        &args[0],
-                        env,
-                        calls,
-                        expected_width,
-                        expected_signedness,
-                        None,
-                        context_span,
-                    )?
+                    eval_ast_with_calls_inner(&args[0], env, calls, None, None, None, context_span)?
                 };
                 return Ok(if name == "$signed" {
                     v.with_signedness(crate::Signedness::Signed)

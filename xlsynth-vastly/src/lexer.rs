@@ -164,7 +164,7 @@ impl<'a> Lexer<'a> {
             }
             b'<' => {
                 if self.consume_str("<<<") {
-                    return Err(Error::Lex("unexpected '<<<' (not supported)".to_string()));
+                    return Ok(Token::Shl);
                 }
                 if self.consume_str("<<") {
                     return Ok(Token::Shl);
