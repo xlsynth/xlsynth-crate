@@ -2,11 +2,14 @@
 
 use std::collections::BTreeMap;
 
+use xlsynth_vastly::CoverageCounters;
 use xlsynth_vastly::LogicBit;
 use xlsynth_vastly::Signedness;
+use xlsynth_vastly::SourceText;
 use xlsynth_vastly::Value4;
 use xlsynth_vastly::compile_combo_module;
 use xlsynth_vastly::eval_combo;
+use xlsynth_vastly::eval_combo_seeded_with_coverage;
 use xlsynth_vastly::plan_combo_eval;
 
 fn vbits(width: u32, signedness: Signedness, msb: &str) -> Value4 {
@@ -835,6 +838,70 @@ endmodule
     assert_eq!(out["y"].to_bit_string_msb_first(), "x");
     assert_eq!(out["p_up"].to_bit_string_msb_first(), "xxx");
     assert_eq!(out["p_down"].to_bit_string_msb_first(), "xxx");
+}
+
+#[test]
+fn coverage_eval_supports_signed_unsigned_cast_builtins() {
+    let dut = r#"
+module cov_cast_builtin_v(
+  input wire signed [3:0] a,
+  input wire [3:0] b,
+  output wire signed [4:0] y
+);
+  assign y = $signed(a) + $unsigned(b);
+endmodule
+"#;
+    let m = compile_combo_module(dut).unwrap();
+    let plan = plan_combo_eval(&m).unwrap();
+    let mut cov = CoverageCounters::default();
+    let src = SourceText::new(dut.to_string());
+    let seed: BTreeMap<String, Value4> = [
+        ("a".to_string(), vbits(4, Signedness::Signed, "1101")),
+        ("b".to_string(), vbits(4, Signedness::Unsigned, "0011")),
+    ]
+    .into_iter()
+    .collect();
+    let mut env = xlsynth_vastly::Env::new();
+    for (k, v) in &seed {
+        env.insert(k.clone(), v.clone());
+    }
+
+    let out_cov =
+        eval_combo_seeded_with_coverage(&m, &plan, &env, &src, &mut cov, &BTreeMap::new()).unwrap();
+    let out_ref = eval_combo(&m, &plan, &seed).unwrap();
+    assert_eq!(
+        out_cov["y"].to_bit_string_msb_first(),
+        out_ref["y"].to_bit_string_msb_first()
+    );
+}
+
+#[test]
+fn coverage_eval_preserves_unknown_dynamic_selectors() {
+    let dut = r#"
+module cov_dyn_sel_unknown_v(
+  input wire [3:0] a,
+  input wire [1:0] i,
+  input wire [2:0] b,
+  output wire y,
+  output wire [2:0] p
+);
+  assign y = a[i];
+  assign p = a[b +: 3];
+endmodule
+"#;
+    let m = compile_combo_module(dut).unwrap();
+    let plan = plan_combo_eval(&m).unwrap();
+    let mut cov = CoverageCounters::default();
+    let src = SourceText::new(dut.to_string());
+    let mut env = xlsynth_vastly::Env::new();
+    env.insert("a", vbits(4, Signedness::Unsigned, "1010"));
+    env.insert("i", vbits(2, Signedness::Unsigned, "x1"));
+    env.insert("b", vbits(3, Signedness::Unsigned, "x01"));
+
+    let out =
+        eval_combo_seeded_with_coverage(&m, &plan, &env, &src, &mut cov, &BTreeMap::new()).unwrap();
+    assert_eq!(out["y"].to_bit_string_msb_first(), "x");
+    assert_eq!(out["p"].to_bit_string_msb_first(), "xxx");
 }
 
 #[test]

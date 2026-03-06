@@ -221,6 +221,28 @@ fn eval_spanned_expr_with_funcs(
             Ok(Value4::new(w, Signedness::Unsigned, vec![*bit; w as usize]))
         }
         SpannedExprKind::Call { name, args } => {
+            if name == "$signed" || name == "$unsigned" {
+                if args.len() != 1 {
+                    return Err(Error::Parse(format!(
+                        "builtin cast `{name}` expects 1 argument, got {}",
+                        args.len()
+                    )));
+                }
+                let v = eval_spanned_expr_with_funcs(
+                    &args[0],
+                    env,
+                    funcs,
+                    expected_width,
+                    cov,
+                    src,
+                    fn_meta,
+                )?;
+                return Ok(if name == "$signed" {
+                    v.with_signedness(Signedness::Signed)
+                } else {
+                    v.with_signedness(Signedness::Unsigned)
+                });
+            }
             *cov.function_calls.entry(name.clone()).or_insert(0) += 1;
             let f = funcs
                 .get(name)
@@ -258,16 +280,29 @@ fn eval_spanned_expr_with_funcs(
         SpannedExprKind::Index { expr, index } => {
             let v = eval_spanned_expr_with_funcs(expr, env, funcs, None, cov, src, fn_meta)?;
             let idx_v = eval_spanned_expr_with_funcs(index, env, funcs, None, cov, src, fn_meta)?;
-            let idx_u = idx_v.to_u32_saturating_if_known().unwrap_or(0);
-            Ok(v.index(idx_u))
+            match idx_v.to_u32_saturating_if_known() {
+                Some(idx_u) => Ok(v.index(idx_u)),
+                None => Ok(Value4::new(1, Signedness::Unsigned, vec![LogicBit::X])),
+            }
         }
         SpannedExprKind::Slice { expr, msb, lsb } => {
             let v = eval_spanned_expr_with_funcs(expr, env, funcs, None, cov, src, fn_meta)?;
             let msb_v = eval_spanned_expr_with_funcs(msb, env, funcs, None, cov, src, fn_meta)?;
             let lsb_v = eval_spanned_expr_with_funcs(lsb, env, funcs, None, cov, src, fn_meta)?;
-            let msb_u = msb_v.to_u32_saturating_if_known().unwrap_or(0);
-            let lsb_u = lsb_v.to_u32_saturating_if_known().unwrap_or(0);
-            Ok(v.slice(msb_u, lsb_u))
+            match (
+                msb_v.to_u32_saturating_if_known(),
+                lsb_v.to_u32_saturating_if_known(),
+            ) {
+                (Some(msb_u), Some(lsb_u)) => Ok(v.slice(msb_u, lsb_u)),
+                _ => {
+                    let width = expected_width.unwrap_or(1);
+                    Ok(Value4::new(
+                        width,
+                        Signedness::Unsigned,
+                        vec![LogicBit::X; width as usize],
+                    ))
+                }
+            }
         }
         SpannedExprKind::IndexedSlice {
             expr,
@@ -278,9 +313,17 @@ fn eval_spanned_expr_with_funcs(
             let v = eval_spanned_expr_with_funcs(expr, env, funcs, None, cov, src, fn_meta)?;
             let base_v = eval_spanned_expr_with_funcs(base, env, funcs, None, cov, src, fn_meta)?;
             let width_v = eval_spanned_expr_with_funcs(width, env, funcs, None, cov, src, fn_meta)?;
-            let base_u = base_v.to_u32_saturating_if_known().unwrap_or(0);
-            let width_u = width_v.to_u32_saturating_if_known().unwrap_or(0);
-            Ok(v.indexed_slice(base_u, width_u, *upward))
+            let width_u = width_v.to_u32_saturating_if_known().ok_or_else(|| {
+                Error::Parse("indexed slice width is unknown (contains x/z)".to_string())
+            })?;
+            match base_v.to_u32_saturating_if_known() {
+                Some(base_u) => Ok(v.indexed_slice(base_u, width_u, *upward)),
+                None => Ok(Value4::new(
+                    width_u,
+                    Signedness::Unsigned,
+                    vec![LogicBit::X; width_u as usize],
+                )),
+            }
         }
         SpannedExprKind::Unary { op, expr } => {
             let child_expected_width = match op {

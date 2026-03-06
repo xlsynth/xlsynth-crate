@@ -7,7 +7,6 @@ use crate::Signedness;
 use crate::Value4;
 use crate::ast::BinaryOp;
 use crate::ast::Expr as VExpr;
-use crate::ast::UnaryOp;
 use crate::eval::eval_ast_with_calls;
 use crate::sv_ast::Stmt;
 
@@ -47,11 +46,7 @@ fn collect(
             collect(then_branch, then_cond, clk_name, out)?;
 
             if let Some(e) = else_branch {
-                let not_cond = VExpr::Unary {
-                    op: UnaryOp::LogicalNot,
-                    expr: Box::new(cond.clone()),
-                };
-                let else_cond = and_opt(cur_cond, not_cond);
+                let else_cond = and_opt(cur_cond, else_taken_cond(cond.clone()));
                 collect(e, else_cond, clk_name, out)?;
             }
             Ok(())
@@ -86,6 +81,46 @@ fn and_opt(a: Option<VExpr>, b: VExpr) -> Option<VExpr> {
 
 fn true_expr() -> VExpr {
     VExpr::Literal(Value4::new(1, Signedness::Unsigned, vec![LogicBit::One]))
+}
+
+fn else_taken_cond(cond: VExpr) -> VExpr {
+    // Procedural Verilog if/else control flow takes else when condition is 0/X/Z.
+    let cond_is_zero = VExpr::Binary {
+        op: BinaryOp::CaseEq,
+        lhs: Box::new(cond.clone()),
+        rhs: Box::new(VExpr::Literal(Value4::new(
+            1,
+            Signedness::Unsigned,
+            vec![LogicBit::Zero],
+        ))),
+    };
+    let cond_is_x = VExpr::Binary {
+        op: BinaryOp::CaseEq,
+        lhs: Box::new(cond.clone()),
+        rhs: Box::new(VExpr::Literal(Value4::new(
+            1,
+            Signedness::Unsigned,
+            vec![LogicBit::X],
+        ))),
+    };
+    let cond_is_z = VExpr::Binary {
+        op: BinaryOp::CaseEq,
+        lhs: Box::new(cond),
+        rhs: Box::new(VExpr::Literal(Value4::new(
+            1,
+            Signedness::Unsigned,
+            vec![LogicBit::Z],
+        ))),
+    };
+    VExpr::Binary {
+        op: BinaryOp::LogicalOr,
+        lhs: Box::new(VExpr::Binary {
+            op: BinaryOp::LogicalOr,
+            lhs: Box::new(cond_is_zero),
+            rhs: Box::new(cond_is_x),
+        }),
+        rhs: Box::new(cond_is_z),
+    }
 }
 
 impl SimObserver {
