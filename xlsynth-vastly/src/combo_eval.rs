@@ -306,12 +306,21 @@ fn eval_spanned_expr_with_funcs(
             Ok(Value4::replicate(count_u, &v))
         }
         SpannedExprKind::Cast { width, expr } => {
-            let width_v = eval_spanned_expr_with_funcs(width, env, funcs, None, cov, src, fn_meta)?;
+            let width_v =
+                eval_spanned_expr_with_funcs(width, env, funcs, None, None, cov, src, fn_meta)?;
             let width_u = width_v
                 .to_u32_if_known()
                 .ok_or_else(|| Error::Parse("cast width must be known".to_string()))?;
-            let v =
-                eval_spanned_expr_with_funcs(expr, env, funcs, Some(width_u), cov, src, fn_meta)?;
+            let v = eval_spanned_expr_with_funcs(
+                expr,
+                env,
+                funcs,
+                Some(width_u),
+                None,
+                cov,
+                src,
+                fn_meta,
+            )?;
             Ok(v.resize(width_u))
         }
         SpannedExprKind::Index { expr, index } => {

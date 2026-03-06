@@ -40,6 +40,9 @@ fn spanned_expr_is_constant(expr: &SpannedExpr) -> bool {
         SpannedExprKind::Replicate { count, expr } => {
             spanned_expr_is_constant(count) && spanned_expr_is_constant(expr)
         }
+        SpannedExprKind::Cast { width, expr } => {
+            spanned_expr_is_constant(width) && spanned_expr_is_constant(expr)
+        }
         SpannedExprKind::Index { expr, index } => {
             spanned_expr_is_constant(expr) && spanned_expr_is_constant(index)
         }

@@ -29,6 +29,7 @@ fn expr_is_constant(expr: &Expr) -> bool {
         Expr::Call { .. } => false,
         Expr::Concat(parts) => parts.iter().all(expr_is_constant),
         Expr::Replicate { count, expr } => expr_is_constant(count) && expr_is_constant(expr),
+        Expr::Cast { width, expr } => expr_is_constant(width) && expr_is_constant(expr),
         Expr::Index { expr, index } => expr_is_constant(expr) && expr_is_constant(index),
         Expr::Slice { expr, msb, lsb } => {
             expr_is_constant(expr) && expr_is_constant(msb) && expr_is_constant(lsb)
