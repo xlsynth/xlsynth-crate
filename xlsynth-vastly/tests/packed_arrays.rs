@@ -323,3 +323,281 @@ endmodule
         "10"
     );
 }
+
+#[test]
+fn combo_module_supports_dynamic_index_on_unpacked_array_of_packed_values() {
+    let dut = r#"
+module m(
+  input logic [1:0][3:0] a0,
+  input logic [1:0][3:0] a1,
+  input logic sel,
+  output logic [1:0][3:0] y
+);
+  logic [1:0][3:0] arr[0:1];
+  assign arr[0] = a0;
+  assign arr[1] = a1;
+  assign y = arr[sel];
+endmodule
+"#;
+
+    let m = compile_combo_module(dut).unwrap();
+    let plan = plan_combo_eval(&m).unwrap();
+
+    let out_sel0 = eval_combo(
+        &m,
+        &plan,
+        &[
+            ("a0".to_string(), vbits(8, Signedness::Unsigned, "00111100")),
+            ("a1".to_string(), vbits(8, Signedness::Unsigned, "10100101")),
+            ("sel".to_string(), vbits(1, Signedness::Unsigned, "0")),
+        ]
+        .into_iter()
+        .collect::<BTreeMap<_, _>>(),
+    )
+    .unwrap();
+    assert_eq!(out_sel0["y"].to_bit_string_msb_first(), "00111100");
+
+    let out_sel1 = eval_combo(
+        &m,
+        &plan,
+        &[
+            ("a0".to_string(), vbits(8, Signedness::Unsigned, "00111100")),
+            ("a1".to_string(), vbits(8, Signedness::Unsigned, "10100101")),
+            ("sel".to_string(), vbits(1, Signedness::Unsigned, "1")),
+        ]
+        .into_iter()
+        .collect::<BTreeMap<_, _>>(),
+    )
+    .unwrap();
+    assert_eq!(out_sel1["y"].to_bit_string_msb_first(), "10100101");
+}
+
+#[test]
+fn pipeline_module_supports_dynamic_index_on_unpacked_array_of_packed_values() {
+    let dut = r#"
+module m(
+  input logic clk,
+  input logic rst,
+  input logic [1:0][3:0] a0,
+  input logic [1:0][3:0] a1,
+  input logic sel,
+  output logic [1:0][3:0] out_data
+);
+  logic [1:0][3:0] arr[0:1];
+  logic [1:0][3:0] q;
+
+  assign arr[0] = a0;
+  assign arr[1] = a1;
+
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      q <= 8'h00;
+    end else begin
+      q <= arr[sel];
+    end
+  end
+
+  assign out_data = q;
+endmodule
+"#;
+
+    let m = compile_pipeline_module(dut).unwrap();
+    let stimulus = PipelineStimulus {
+        half_period: 5,
+        cycles: vec![
+            PipelineCycle {
+                inputs: [
+                    ("rst".to_string(), vbits(1, Signedness::Unsigned, "1")),
+                    ("a0".to_string(), vbits(8, Signedness::Unsigned, "00111100")),
+                    ("a1".to_string(), vbits(8, Signedness::Unsigned, "10100101")),
+                    ("sel".to_string(), vbits(1, Signedness::Unsigned, "0")),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            PipelineCycle {
+                inputs: [
+                    ("rst".to_string(), vbits(1, Signedness::Unsigned, "0")),
+                    ("a0".to_string(), vbits(8, Signedness::Unsigned, "00111100")),
+                    ("a1".to_string(), vbits(8, Signedness::Unsigned, "10100101")),
+                    ("sel".to_string(), vbits(1, Signedness::Unsigned, "0")),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            PipelineCycle {
+                inputs: [
+                    ("rst".to_string(), vbits(1, Signedness::Unsigned, "0")),
+                    ("a0".to_string(), vbits(8, Signedness::Unsigned, "00111100")),
+                    ("a1".to_string(), vbits(8, Signedness::Unsigned, "10100101")),
+                    ("sel".to_string(), vbits(1, Signedness::Unsigned, "1")),
+                ]
+                .into_iter()
+                .collect(),
+            },
+        ],
+    };
+
+    let init: State = BTreeMap::new();
+    let outputs = run_pipeline_and_collect_outputs(&m, &stimulus, &init).unwrap();
+    assert_eq!(
+        outputs[0]
+            .get("out_data")
+            .unwrap()
+            .to_bit_string_msb_first(),
+        "00000000"
+    );
+    assert_eq!(
+        outputs[1]
+            .get("out_data")
+            .unwrap()
+            .to_bit_string_msb_first(),
+        "00111100"
+    );
+    assert_eq!(
+        outputs[2]
+            .get("out_data")
+            .unwrap()
+            .to_bit_string_msb_first(),
+        "10100101"
+    );
+}
+
+#[test]
+fn pipeline_oob_lhs_indexed_write_is_noop_for_unpacked_array_of_packed_values() {
+    let dut = r#"
+module m(
+  input logic clk,
+  input logic rst,
+  input logic [1:0] in0,
+  input logic [1:0] in1,
+  output logic [3:0] snapshot
+);
+  logic [1:0] lanes[0:1];
+
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      lanes[0] <= in0;
+      lanes[1] <= in1;
+    end else begin
+      lanes[2] <= 2'b11;
+    end
+  end
+
+  assign snapshot = {lanes[1], lanes[0]};
+endmodule
+"#;
+
+    let m = compile_pipeline_module(dut).unwrap();
+    let stimulus = PipelineStimulus {
+        half_period: 5,
+        cycles: vec![
+            PipelineCycle {
+                inputs: [
+                    ("rst".to_string(), vbits(1, Signedness::Unsigned, "1")),
+                    ("in0".to_string(), vbits(2, Signedness::Unsigned, "01")),
+                    ("in1".to_string(), vbits(2, Signedness::Unsigned, "10")),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            PipelineCycle {
+                inputs: [
+                    ("rst".to_string(), vbits(1, Signedness::Unsigned, "0")),
+                    ("in0".to_string(), vbits(2, Signedness::Unsigned, "00")),
+                    ("in1".to_string(), vbits(2, Signedness::Unsigned, "00")),
+                ]
+                .into_iter()
+                .collect(),
+            },
+        ],
+    };
+
+    let init: State = BTreeMap::new();
+    let outputs = run_pipeline_and_collect_outputs(&m, &stimulus, &init).unwrap();
+    assert_eq!(
+        outputs[0]
+            .get("snapshot")
+            .unwrap()
+            .to_bit_string_msb_first(),
+        "1001"
+    );
+    assert_eq!(
+        outputs[1]
+            .get("snapshot")
+            .unwrap()
+            .to_bit_string_msb_first(),
+        "1001"
+    );
+}
+
+#[test]
+fn pipeline_oob_rhs_index_read_returns_x_for_unpacked_array_of_packed_values() {
+    let dut = r#"
+module m(
+  input logic clk,
+  input logic rst,
+  input logic [1:0] in_data,
+  input logic [1:0] sel,
+  output logic [1:0] out_data
+);
+  logic [1:0] lanes[0:1];
+  logic [1:0] q;
+
+  assign lanes[0] = in_data;
+  assign lanes[1] = ~in_data;
+
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      q <= 2'b00;
+    end else begin
+      q <= lanes[sel];
+    end
+  end
+
+  assign out_data = q;
+endmodule
+"#;
+
+    let m = compile_pipeline_module(dut).unwrap();
+    let stimulus = PipelineStimulus {
+        half_period: 5,
+        cycles: vec![
+            PipelineCycle {
+                inputs: [
+                    ("rst".to_string(), vbits(1, Signedness::Unsigned, "1")),
+                    ("in_data".to_string(), vbits(2, Signedness::Unsigned, "01")),
+                    ("sel".to_string(), vbits(2, Signedness::Unsigned, "00")),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            PipelineCycle {
+                inputs: [
+                    ("rst".to_string(), vbits(1, Signedness::Unsigned, "0")),
+                    ("in_data".to_string(), vbits(2, Signedness::Unsigned, "01")),
+                    ("sel".to_string(), vbits(2, Signedness::Unsigned, "10")),
+                ]
+                .into_iter()
+                .collect(),
+            },
+        ],
+    };
+
+    let init: State = BTreeMap::new();
+    let outputs = run_pipeline_and_collect_outputs(&m, &stimulus, &init).unwrap();
+    assert_eq!(
+        outputs[0]
+            .get("out_data")
+            .unwrap()
+            .to_bit_string_msb_first(),
+        "00"
+    );
+    assert_eq!(
+        outputs[1]
+            .get("out_data")
+            .unwrap()
+            .to_bit_string_msb_first(),
+        "xx"
+    );
+}
