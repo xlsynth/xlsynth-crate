@@ -29,6 +29,7 @@ pub struct PortDecl {
     pub signed: bool,
     pub width: u32,
     pub packed_dims: Vec<u32>,
+    pub unpacked_dims: Vec<u32>,
     pub name: String,
 }
 
@@ -128,6 +129,7 @@ pub struct Decl {
     pub signed: bool,
     pub width: u32,
     pub packed_dims: Vec<u32>,
+    pub unpacked_dims: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

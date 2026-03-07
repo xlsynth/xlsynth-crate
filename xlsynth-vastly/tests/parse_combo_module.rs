@@ -1235,8 +1235,7 @@ endmodule
     )
     .unwrap();
     assert_eq!(out["out"].to_bit_string_msb_first(), "00000000101");
-    assert_eq!(out["array_12[0]"].to_bit_string_msb_first(), "101");
-    assert_eq!(out["array_12[1]"].to_bit_string_msb_first(), "101");
+    assert_eq!(out["array_12"].to_bit_string_msb_first(), "101101");
 }
 
 #[test]
@@ -1313,8 +1312,8 @@ endmodule
     )
     .unwrap();
     assert_eq!(out["out"].to_bit_string_msb_first(), "10");
-    assert_eq!(out["array_11[0][1]"].to_bit_string_msb_first(), "10");
-    assert_eq!(out["sel_12[1][0]"].to_bit_string_msb_first(), "10");
+    assert_eq!(out["array_11"].to_bit_string_msb_first(), "01101001");
+    assert_eq!(out["sel_12"].to_bit_string_msb_first(), "01101001");
 }
 
 #[test]
@@ -1353,7 +1352,7 @@ endmodule
     )
     .unwrap();
     assert_eq!(out_nonzero["out"].to_bit_string_msb_first(), "01");
-    assert_eq!(out_nonzero["sel_13[1][0]"].to_bit_string_msb_first(), "01");
+    assert_eq!(out_nonzero["sel_13"].to_bit_string_msb_first(), "10010110");
 
     let out_zero = eval_combo(
         &m,
@@ -1364,7 +1363,7 @@ endmodule
     )
     .unwrap();
     assert_eq!(out_zero["out"].to_bit_string_msb_first(), "00");
-    assert_eq!(out_zero["array_11[1][0]"].to_bit_string_msb_first(), "00");
+    assert_eq!(out_zero["array_11"].to_bit_string_msb_first(), "11001100");
 }
 
 #[test]

@@ -43,6 +43,13 @@ fn remaining_width_after(dims: &[u32], consumed_indices: usize) -> Result<u32> {
     }
 }
 
+fn selection_dims(info: &DeclInfo) -> Vec<u32> {
+    let mut dims = Vec::with_capacity(info.unpacked_dims.len() + info.packed_dims.len());
+    dims.extend_from_slice(&info.unpacked_dims);
+    dims.extend_from_slice(&info.packed_dims);
+    dims
+}
+
 fn build_linear_index<T: Clone, FMul, FAdd>(
     indices: &[T],
     packed_dims: &[u32],
@@ -205,13 +212,12 @@ fn lower_expr_index_chain(
     if indices.is_empty() {
         return Ok(None);
     }
-    if indices.len() > info.packed_dims.len() {
-        return Err(Error::Parse(format!(
-            "too many packed indices for `{base_name}`"
-        )));
+    let dims = selection_dims(info);
+    if indices.len() > dims.len() {
+        return Err(Error::Parse(format!("too many indices for `{base_name}`")));
     }
-    let linear_index = build_linear_index(&indices, &info.packed_dims, mul_expr, add_expr)?;
-    let remaining_width = remaining_width_after(&info.packed_dims, indices.len())?;
+    let linear_index = build_linear_index(&indices, &dims, mul_expr, add_expr)?;
+    let remaining_width = remaining_width_after(&dims, indices.len())?;
     let base_expr = Expr::Ident(base_name.to_string());
     if remaining_width == 1 {
         Ok(Some(Expr::Index {
@@ -243,18 +249,17 @@ fn lower_spanned_index_chain(
     if indices.is_empty() {
         return Ok(None);
     }
-    if indices.len() > info.packed_dims.len() {
-        return Err(Error::Parse(format!(
-            "too many packed indices for `{base_name}`"
-        )));
+    let dims = selection_dims(info);
+    if indices.len() > dims.len() {
+        return Err(Error::Parse(format!("too many indices for `{base_name}`")));
     }
     let linear_index = build_linear_index(
         &indices,
-        &info.packed_dims,
+        &dims,
         |index, stride| mul_expr_spanned(index, stride, expr_span),
         |lhs, rhs| add_expr_spanned(lhs, rhs, expr_span),
     )?;
-    let remaining_width = remaining_width_after(&info.packed_dims, indices.len())?;
+    let remaining_width = remaining_width_after(&dims, indices.len())?;
     if remaining_width == 1 {
         Ok(Some(SpannedExpr {
             span: expr_span,
@@ -528,13 +533,12 @@ pub fn packed_index_selection(info: &DeclInfo, indices: &[u32]) -> Result<(u32, 
     if indices.is_empty() {
         return Ok((0, info.width));
     }
-    if indices.len() > info.packed_dims.len() {
-        return Err(Error::Parse(
-            "too many packed indices for declaration".to_string(),
-        ));
+    let dims = selection_dims(info);
+    if indices.len() > dims.len() {
+        return Err(Error::Parse("too many indices for declaration".to_string()));
     }
-    let offset = checked_packed_offset(&info.packed_dims, indices)?;
-    let width = remaining_width_after(&info.packed_dims, indices.len())?;
+    let offset = checked_packed_offset(&dims, indices)?;
+    let width = remaining_width_after(&dims, indices.len())?;
     Ok((offset, width))
 }
 
@@ -545,14 +549,13 @@ pub fn packed_index_selection_if_in_bounds(
     if indices.is_empty() {
         return Ok(Some((0, info.width)));
     }
-    if indices.len() > info.packed_dims.len() {
-        return Err(Error::Parse(
-            "too many packed indices for declaration".to_string(),
-        ));
+    let dims = selection_dims(info);
+    if indices.len() > dims.len() {
+        return Err(Error::Parse("too many indices for declaration".to_string()));
     }
-    let Some(offset) = checked_packed_offset_if_in_bounds(&info.packed_dims, indices)? else {
+    let Some(offset) = checked_packed_offset_if_in_bounds(&dims, indices)? else {
         return Ok(None);
     };
-    let width = remaining_width_after(&info.packed_dims, indices.len())?;
+    let width = remaining_width_after(&dims, indices.len())?;
     Ok(Some((offset, width)))
 }

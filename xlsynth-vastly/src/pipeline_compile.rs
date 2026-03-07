@@ -87,10 +87,14 @@ pub fn compile_pipeline_module_with_defines(
     src: &str,
     defines: &BTreeSet<String>,
 ) -> Result<CompiledPipelineModule> {
+    let parse_src = src;
     let parsed: PipelineModule =
-        crate::sv_parser::parse_pipeline_module_with_defines(src, defines)?;
-    let items =
-        crate::generate_constructs::elaborate_pipeline_items(src, &parsed.params, &parsed.items)?;
+        crate::sv_parser::parse_pipeline_module_with_defines(parse_src, defines)?;
+    let items = crate::generate_constructs::elaborate_pipeline_items(
+        parse_src,
+        &parsed.params,
+        &parsed.items,
+    )?;
 
     let module_name = parsed.name.clone();
 
@@ -147,7 +151,7 @@ pub fn compile_pipeline_module_with_defines(
             } => {
                 let rhs_src = rhs_text
                     .as_deref()
-                    .unwrap_or_else(|| src[rhs.start..rhs.end].trim());
+                    .unwrap_or_else(|| parse_src[rhs.start..rhs.end].trim());
                 let lhs = rewrite_packed_lhs(lhs.clone(), &decls)?;
                 let rhs_expr = rewrite_packed_expr(crate::parser::parse_expr(rhs_src)?, &decls)?;
                 let mut rhs_spanned = crate::parser_spanned::parse_expr_spanned(rhs_src)?;
@@ -204,7 +208,7 @@ pub fn compile_pipeline_module_with_defines(
 
                 let body = match &f.body {
                     crate::sv_ast::ComboFunctionBody::UniqueCasez { selector, arms, .. } => {
-                        let selector_src = src[selector.start..selector.end].trim();
+                        let selector_src = parse_src[selector.start..selector.end].trim();
                         let selector_expr = rewrite_packed_expr(
                             crate::parser::parse_expr(selector_src)?,
                             &fn_decls,
@@ -212,7 +216,7 @@ pub fn compile_pipeline_module_with_defines(
 
                         let mut out_arms: Vec<CasezArm> = Vec::new();
                         for a in arms {
-                            let value_src = src[a.value.start..a.value.end].trim();
+                            let value_src = parse_src[a.value.start..a.value.end].trim();
                             let value_expr = rewrite_packed_expr(
                                 crate::parser::parse_expr(value_src)?,
                                 &fn_decls,
@@ -232,7 +236,7 @@ pub fn compile_pipeline_module_with_defines(
                         }
                     }
                     crate::sv_ast::ComboFunctionBody::Assign { value } => {
-                        let value_src = src[value.start..value.end].trim();
+                        let value_src = parse_src[value.start..value.end].trim();
                         let expr =
                             rewrite_packed_expr(crate::parser::parse_expr(value_src)?, &fn_decls)?;
                         let mut expr_spanned =
@@ -248,7 +252,7 @@ pub fn compile_pipeline_module_with_defines(
                         let mut out_assigns: Vec<FunctionAssign> =
                             Vec::with_capacity(assigns.len());
                         for a in assigns {
-                            let value_src = src[a.value.start..a.value.end].trim();
+                            let value_src = parse_src[a.value.start..a.value.end].trim();
                             let expr = rewrite_packed_expr(
                                 crate::parser::parse_expr(value_src)?,
                                 &fn_decls,
@@ -506,6 +510,7 @@ fn decl_info_from_decl(d: &crate::sv_ast::Decl) -> DeclInfo {
             Signedness::Unsigned
         },
         packed_dims: d.packed_dims.clone(),
+        unpacked_dims: d.unpacked_dims.clone(),
     }
 }
 
@@ -518,6 +523,7 @@ fn decl_info_from_port_decl(p: &crate::sv_ast::PortDecl) -> DeclInfo {
             Signedness::Unsigned
         },
         packed_dims: p.packed_dims.clone(),
+        unpacked_dims: p.unpacked_dims.clone(),
     }
 }
 
