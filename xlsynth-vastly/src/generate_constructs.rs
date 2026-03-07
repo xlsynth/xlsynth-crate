@@ -26,7 +26,7 @@ pub fn elaborate_combo_items(
     for (name, value) in params {
         env.insert(name.clone(), value.clone());
     }
-    elaborate_combo_items_impl(src, items, &env, &BTreeMap::new())
+    elaborate_combo_items_impl(src, items, &env, &BTreeMap::new(), false)
 }
 
 pub fn elaborate_pipeline_items(
@@ -38,7 +38,7 @@ pub fn elaborate_pipeline_items(
     for (name, value) in params {
         env.insert(name.clone(), value.clone());
     }
-    elaborate_pipeline_items_impl(src, items, &env, &BTreeMap::new())
+    elaborate_pipeline_items_impl(src, items, &env, &BTreeMap::new(), false)
 }
 
 fn elaborate_combo_items_impl(
@@ -46,10 +46,11 @@ fn elaborate_combo_items_impl(
     items: &[ComboItem],
     env: &crate::Env,
     substs: &BTreeMap<String, Value4>,
+    in_generate: bool,
 ) -> Result<Vec<ComboItem>> {
     let mut out = Vec::new();
     for item in items {
-        elaborate_combo_item(src, item, env, substs, &mut out)?;
+        elaborate_combo_item(src, item, env, substs, in_generate, &mut out)?;
     }
     Ok(out)
 }
@@ -59,10 +60,18 @@ fn elaborate_combo_item(
     item: &ComboItem,
     env: &crate::Env,
     substs: &BTreeMap<String, Value4>,
+    in_generate: bool,
     out: &mut Vec<ComboItem>,
 ) -> Result<()> {
     match item {
-        ComboItem::WireDecl(_) => out.push(item.clone()),
+        ComboItem::WireDecl(_) => {
+            if in_generate {
+                return Err(Error::Parse(
+                    "declarations inside generate blocks are not supported".to_string(),
+                ));
+            }
+            out.push(item.clone());
+        }
         ComboItem::Assign { lhs, rhs, rhs_text } => {
             let base_text = rhs_text
                 .as_deref()
@@ -106,6 +115,7 @@ fn elaborate_combo_item(
                     body,
                     &next_env,
                     &next_substs,
+                    true,
                 )?);
             }
         }
@@ -116,6 +126,7 @@ fn elaborate_combo_item(
                     &selected.body,
                     env,
                     substs,
+                    true,
                 )?);
             }
         }
@@ -128,10 +139,11 @@ fn elaborate_pipeline_items_impl(
     items: &[PipelineItem],
     env: &crate::Env,
     substs: &BTreeMap<String, Value4>,
+    in_generate: bool,
 ) -> Result<Vec<PipelineItem>> {
     let mut out = Vec::new();
     for item in items {
-        elaborate_pipeline_item(src, item, env, substs, &mut out)?;
+        elaborate_pipeline_item(src, item, env, substs, in_generate, &mut out)?;
     }
     Ok(out)
 }
@@ -141,10 +153,18 @@ fn elaborate_pipeline_item(
     item: &PipelineItem,
     env: &crate::Env,
     substs: &BTreeMap<String, Value4>,
+    in_generate: bool,
     out: &mut Vec<PipelineItem>,
 ) -> Result<()> {
     match item {
-        PipelineItem::Decl { .. } => out.push(item.clone()),
+        PipelineItem::Decl { .. } => {
+            if in_generate {
+                return Err(Error::Parse(
+                    "declarations inside generate blocks are not supported".to_string(),
+                ));
+            }
+            out.push(item.clone());
+        }
         PipelineItem::Assign {
             lhs,
             rhs,
@@ -204,6 +224,7 @@ fn elaborate_pipeline_item(
                     body,
                     &next_env,
                     &next_substs,
+                    true,
                 )?);
             }
         }
@@ -214,6 +235,7 @@ fn elaborate_pipeline_item(
                     &selected.body,
                     env,
                     substs,
+                    true,
                 )?);
             }
         }

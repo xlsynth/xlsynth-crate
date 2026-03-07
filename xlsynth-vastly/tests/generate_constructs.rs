@@ -219,3 +219,45 @@ endmodule
         "1011110111111101"
     );
 }
+
+#[test]
+fn combo_module_rejects_declaration_inside_generate_loop() {
+    let dut = r#"
+module m(
+  input wire [1:0] in_data,
+  output wire [1:0] out_data
+);
+  for (genvar i = 0; i < 2; i = i + 1) begin : gi
+    wire t;
+    assign t = in_data[i];
+    assign out_data[i] = t;
+  end
+endmodule
+"#;
+
+    let err = compile_combo_module(dut).unwrap_err();
+    assert!(format!("{err:?}").contains("declarations inside generate blocks are not supported"));
+}
+
+#[test]
+fn pipeline_module_rejects_declaration_inside_generate_loop() {
+    let dut = r#"
+module m(
+  input logic clk,
+  input logic [1:0] in_data,
+  output logic [1:0] out_data
+);
+  for (genvar i = 0; i < 2; i = i + 1) begin : gi
+    logic t;
+    assign t = in_data[i];
+    assign out_data[i] = t;
+  end
+
+  always_ff @(posedge clk) begin
+  end
+endmodule
+"#;
+
+    let err = compile_pipeline_module(dut).unwrap_err();
+    assert!(format!("{err:?}").contains("declarations inside generate blocks are not supported"));
+}
