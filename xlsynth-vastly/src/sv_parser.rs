@@ -900,12 +900,15 @@ impl<'a> Parser<'a> {
                 }
                 _ => return Err(Error::Parse("expected port identifier".to_string())),
             };
+            let unpacked_dims = self.parse_unpacked_dims()?;
+            let width = dims_total_width(width, &unpacked_dims)?;
 
             decls.push(Decl {
                 name,
                 signed,
                 width,
                 packed_dims,
+                unpacked_dims,
             });
 
             match self.cur() {
@@ -978,6 +981,8 @@ impl<'a> Parser<'a> {
                 }
                 _ => return Err(Error::Parse("expected port identifier".to_string())),
             };
+            let unpacked_dims = self.parse_unpacked_dims()?;
+            let width = dims_total_width(width, &unpacked_dims)?;
 
             ports.push(PortDecl {
                 dir,
@@ -985,6 +990,7 @@ impl<'a> Parser<'a> {
                 signed,
                 width,
                 packed_dims,
+                unpacked_dims,
                 name,
             });
 
@@ -1010,6 +1016,11 @@ impl<'a> Parser<'a> {
             self.expect(TokKind::RBracket)?;
             let msb = self.eval_const_u32(&msb_expr)?;
             let lsb = self.eval_const_u32(&lsb_expr)?;
+            if lsb != 0 {
+                return Err(Error::Parse(
+                    "packed declaration ranges must be zero-based `[N:0]`".to_string(),
+                ));
+            }
             if msb < lsb {
                 return Err(Error::Parse("decl range msb<lsb not supported".to_string()));
             }
@@ -1017,6 +1028,36 @@ impl<'a> Parser<'a> {
         }
         if dims.is_empty() {
             dims.push(1);
+        }
+        Ok(dims)
+    }
+
+    fn parse_unpacked_dims(&mut self) -> Result<Vec<u32>> {
+        let mut dims: Vec<u32> = Vec::new();
+        while *self.cur() == TokKind::LBracket {
+            self.bump();
+            let first = self.parse_expr_until(&[TokKind::Colon, TokKind::RBracket])?;
+            let dim = if *self.cur() == TokKind::Colon {
+                self.bump();
+                let second = self.parse_expr_until(&[TokKind::RBracket])?;
+                let first_u = self.eval_const_u32(&first)?;
+                let second_u = self.eval_const_u32(&second)?;
+                if second_u != 0 {
+                    return Err(Error::Parse(
+                        "unpacked declaration ranges must be zero-based `[N:0]`".to_string(),
+                    ));
+                }
+                first_u + 1
+            } else {
+                self.eval_const_u32(&first)?
+            };
+            self.expect(TokKind::RBracket)?;
+            if dim == 0 {
+                return Err(Error::Parse(
+                    "unpacked array dimension must be > 0".to_string(),
+                ));
+            }
+            dims.push(dim);
         }
         Ok(dims)
     }
@@ -1047,6 +1088,8 @@ impl<'a> Parser<'a> {
             }
             _ => return Err(Error::Parse("expected identifier in wire decl".to_string())),
         };
+        let unpacked_dims = self.parse_unpacked_dims()?;
+        let width = dims_total_width(width, &unpacked_dims)?;
         self.expect(TokKind::Semi)?;
         let end = self.toks[self.idx - 1].end;
         Ok((
@@ -1055,6 +1098,7 @@ impl<'a> Parser<'a> {
                 signed,
                 width,
                 packed_dims,
+                unpacked_dims,
             },
             Span { start, end },
         ))
@@ -1271,6 +1315,8 @@ impl<'a> Parser<'a> {
             }
             _ => return Err(Error::Parse("expected identifier in decl".to_string())),
         };
+        let unpacked_dims = self.parse_unpacked_dims()?;
+        let width = dims_total_width(width, &unpacked_dims)?;
         if expect_semi {
             self.expect(TokKind::Semi)?;
         }
@@ -1279,6 +1325,7 @@ impl<'a> Parser<'a> {
             signed,
             width,
             packed_dims,
+            unpacked_dims,
         })
     }
 
@@ -1418,12 +1465,15 @@ impl<'a> Parser<'a> {
             }
             _ => return Err(Error::Parse("expected identifier in decl".to_string())),
         };
+        let unpacked_dims = self.parse_unpacked_dims()?;
+        let width = dims_total_width(width, &unpacked_dims)?;
         self.expect(TokKind::Semi)?;
         Ok(Decl {
             name,
             signed,
             width,
             packed_dims,
+            unpacked_dims,
         })
     }
 
@@ -1688,6 +1738,13 @@ fn parse_casez_pattern(s: &str) -> Result<CasezPattern> {
 
 fn packed_dims_width(dims: &[u32]) -> Result<u32> {
     dims.iter().try_fold(1u32, |acc, dim| {
+        acc.checked_mul(*dim)
+            .ok_or_else(|| Error::Parse("packed decl width overflow".to_string()))
+    })
+}
+
+fn dims_total_width(packed_width: u32, unpacked_dims: &[u32]) -> Result<u32> {
+    unpacked_dims.iter().try_fold(packed_width, |acc, dim| {
         acc.checked_mul(*dim)
             .ok_or_else(|| Error::Parse("packed decl width overflow".to_string()))
     })

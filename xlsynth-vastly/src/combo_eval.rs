@@ -782,6 +782,7 @@ fn function_return_decl(f: &ComboFunction) -> crate::module_compile::DeclInfo {
         width: f.ret_width,
         signedness: f.ret_signedness,
         packed_dims: vec![f.ret_width],
+        unpacked_dims: vec![],
     }
 }
 
@@ -979,6 +980,7 @@ fn init_function_env(f: &ComboFunction, args: &[Value4], globals: &Env) -> Env {
             width: arg.width,
             signedness: arg.signedness,
             packed_dims: vec![arg.width],
+            unpacked_dims: vec![],
         };
         env.insert(arg.name.clone(), coerce_to_declinfo(av, &info));
     }
@@ -1004,6 +1006,7 @@ fn function_target_decl(f: &ComboFunction, lhs: &str) -> Option<crate::module_co
             width: a.width,
             signedness: a.signedness,
             packed_dims: vec![a.width],
+            unpacked_dims: vec![],
         })
 }
 

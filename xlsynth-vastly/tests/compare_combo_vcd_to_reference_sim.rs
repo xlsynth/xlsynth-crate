@@ -794,7 +794,7 @@ module fuzz_codegen_v(
 );
   wire [2:0] tuple_11;
   wire [5:0] tuple_13;
-  wire [2:0] array_12[0:1];
+  wire [2:0] array_12[1:0];
   wire [38:0] tuple_15;
   wire [2:0] tuple_index_16;
   wire [10:0] zero_ext_17;
@@ -851,9 +851,9 @@ module fuzz_codegen_v(
   input wire [1:0] p0,
   output wire [1:0] out
 );
-  wire [1:0] array_10[0:1];
-  wire [1:0] array_11[0:1][0:1];
-  wire [1:0] sel_12[0:1][0:1];
+  wire [1:0] array_10[1:0];
+  wire [1:0] array_11[1:0][1:0];
+  wire [1:0] sel_12[1:0][1:0];
   assign array_10[0] = p0;
   assign array_10[1] = ~p0;
   assign array_11[0][0] = array_10[0];

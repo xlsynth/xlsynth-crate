@@ -332,6 +332,42 @@ endmodule
 }
 
 #[test]
+fn rejects_non_zero_based_decl_ranges() {
+    let bad_packed = r#"
+module bad_packed_decl_v(
+  input wire [7:1] a,
+  output wire [6:0] out
+);
+  assign out = a;
+endmodule
+"#;
+    let err = compile_combo_module(bad_packed).unwrap_err();
+    assert!(matches!(
+        err,
+        xlsynth_vastly::Error::Parse(msg)
+            if msg.contains("packed declaration ranges must be zero-based")
+    ));
+
+    let bad_unpacked = r#"
+module bad_unpacked_decl_v(
+  input wire [1:0] in_data,
+  output wire [1:0] out
+);
+  wire [1:0] lanes[0:1];
+  assign lanes[0] = in_data;
+  assign lanes[1] = in_data;
+  assign out = lanes[0];
+endmodule
+"#;
+    let err = compile_combo_module(bad_unpacked).unwrap_err();
+    assert!(matches!(
+        err,
+        xlsynth_vastly::Error::Parse(msg)
+            if msg.contains("unpacked declaration ranges must be zero-based")
+    ));
+}
+
+#[test]
 fn signed_casts_are_self_determined_before_assignment_context() {
     let dut = r#"
 module signed_cast_ctx_v(
@@ -1208,7 +1244,7 @@ module fuzz_codegen_v(
 );
   wire [2:0] tuple_11;
   wire [5:0] tuple_13;
-  wire [2:0] array_12[0:1];
+  wire [2:0] array_12[1:0];
   wire [38:0] tuple_15;
   wire [2:0] tuple_index_16;
   wire [10:0] zero_ext_17;
@@ -1235,8 +1271,7 @@ endmodule
     )
     .unwrap();
     assert_eq!(out["out"].to_bit_string_msb_first(), "00000000101");
-    assert_eq!(out["array_12[0]"].to_bit_string_msb_first(), "101");
-    assert_eq!(out["array_12[1]"].to_bit_string_msb_first(), "101");
+    assert_eq!(out["array_12"].to_bit_string_msb_first(), "101101");
 }
 
 #[test]
@@ -1284,9 +1319,9 @@ module fuzz_codegen_v(
   input wire [1:0] p0,
   output wire [1:0] out
 );
-  wire [1:0] array_10[0:1];
-  wire [1:0] array_11[0:1][0:1];
-  wire [1:0] sel_12[0:1][0:1];
+  wire [1:0] array_10[1:0];
+  wire [1:0] array_11[1:0][1:0];
+  wire [1:0] sel_12[1:0][1:0];
   assign array_10[0] = p0;
   assign array_10[1] = ~p0;
   assign array_11[0][0] = array_10[0];
@@ -1313,8 +1348,8 @@ endmodule
     )
     .unwrap();
     assert_eq!(out["out"].to_bit_string_msb_first(), "10");
-    assert_eq!(out["array_11[0][1]"].to_bit_string_msb_first(), "10");
-    assert_eq!(out["sel_12[1][0]"].to_bit_string_msb_first(), "10");
+    assert_eq!(out["array_11"].to_bit_string_msb_first(), "01101001");
+    assert_eq!(out["sel_12"].to_bit_string_msb_first(), "01101001");
 }
 
 #[test]
@@ -1353,7 +1388,7 @@ endmodule
     )
     .unwrap();
     assert_eq!(out_nonzero["out"].to_bit_string_msb_first(), "01");
-    assert_eq!(out_nonzero["sel_13[1][0]"].to_bit_string_msb_first(), "01");
+    assert_eq!(out_nonzero["sel_13"].to_bit_string_msb_first(), "10010110");
 
     let out_zero = eval_combo(
         &m,
@@ -1364,7 +1399,7 @@ endmodule
     )
     .unwrap();
     assert_eq!(out_zero["out"].to_bit_string_msb_first(), "00");
-    assert_eq!(out_zero["array_11[1][0]"].to_bit_string_msb_first(), "00");
+    assert_eq!(out_zero["array_11"].to_bit_string_msb_first(), "11001100");
 }
 
 #[test]

@@ -116,6 +116,64 @@ endmodule
 }
 
 #[test]
+fn function_indexing_matches_between_plain_and_coverage_eval() {
+    let sv = r#"
+module combo_fn_index(
+  input logic [1:0][3:0] in_data,
+  input logic sel,
+  output logic [3:0] y
+);
+  function automatic logic [3:0] pick(input logic [1:0][3:0] data, input logic s);
+    begin
+      pick = data[s];
+    end
+  endfunction
+  assign y = pick(in_data, sel);
+endmodule
+"#;
+
+    let m = compile_combo_module(sv).unwrap();
+    let plan = plan_combo_eval(&m).unwrap();
+    let src = SourceText::new(sv.to_string());
+
+    let inputs0 = BTreeMap::from([
+        ("in_data".to_string(), ubits(8, "163")),
+        ("sel".to_string(), ubits(1, "0")),
+    ]);
+    let plain0 = eval_combo(&m, &plan, &inputs0).unwrap();
+    assert_eq!(plain0.get("y").unwrap().to_bit_string_msb_first(), "0011");
+    let mut cov0 = CoverageCounters::default();
+    let mut seed0 = Env::new();
+    seed0.insert("in_data".to_string(), ubits(8, "163"));
+    seed0.insert("sel".to_string(), ubits(1, "0"));
+    let covered0 =
+        eval_combo_seeded_with_coverage(&m, &plan, &seed0, &src, &mut cov0, &BTreeMap::new())
+            .unwrap();
+    assert_eq!(
+        covered0.get("y").unwrap().to_bit_string_msb_first(),
+        plain0.get("y").unwrap().to_bit_string_msb_first()
+    );
+
+    let inputs1 = BTreeMap::from([
+        ("in_data".to_string(), ubits(8, "163")),
+        ("sel".to_string(), ubits(1, "1")),
+    ]);
+    let plain1 = eval_combo(&m, &plan, &inputs1).unwrap();
+    assert_eq!(plain1.get("y").unwrap().to_bit_string_msb_first(), "1010");
+    let mut cov1 = CoverageCounters::default();
+    let mut seed1 = Env::new();
+    seed1.insert("in_data".to_string(), ubits(8, "163"));
+    seed1.insert("sel".to_string(), ubits(1, "1"));
+    let covered1 =
+        eval_combo_seeded_with_coverage(&m, &plan, &seed1, &src, &mut cov1, &BTreeMap::new())
+            .unwrap();
+    assert_eq!(
+        covered1.get("y").unwrap().to_bit_string_msb_first(),
+        plain1.get("y").unwrap().to_bit_string_msb_first()
+    );
+}
+
+#[test]
 fn compile_and_eval_parameterized_pipeline_module_with_pipeline_api() {
     let sv = r#"
 module mymodule #(

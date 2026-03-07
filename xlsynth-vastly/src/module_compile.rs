@@ -32,6 +32,7 @@ pub struct DeclInfo {
     pub width: u32,
     pub signedness: Signedness,
     pub packed_dims: Vec<u32>,
+    pub unpacked_dims: Vec<u32>,
 }
 
 pub fn compile_module(src: &str) -> Result<CompiledModule> {
@@ -42,6 +43,7 @@ pub fn compile_module(src: &str) -> Result<CompiledModule> {
         signed,
         width,
         packed_dims,
+        unpacked_dims,
     } in m.decls.clone()
     {
         let signedness = if signed {
@@ -55,6 +57,7 @@ pub fn compile_module(src: &str) -> Result<CompiledModule> {
                 width,
                 signedness,
                 packed_dims,
+                unpacked_dims,
             },
         );
     }
