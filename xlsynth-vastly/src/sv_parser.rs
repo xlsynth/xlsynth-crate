@@ -1016,6 +1016,11 @@ impl<'a> Parser<'a> {
             self.expect(TokKind::RBracket)?;
             let msb = self.eval_const_u32(&msb_expr)?;
             let lsb = self.eval_const_u32(&lsb_expr)?;
+            if lsb != 0 {
+                return Err(Error::Parse(
+                    "packed declaration ranges must be zero-based `[N:0]`".to_string(),
+                ));
+            }
             if msb < lsb {
                 return Err(Error::Parse("decl range msb<lsb not supported".to_string()));
             }
@@ -1037,11 +1042,12 @@ impl<'a> Parser<'a> {
                 let second = self.parse_expr_until(&[TokKind::RBracket])?;
                 let first_u = self.eval_const_u32(&first)?;
                 let second_u = self.eval_const_u32(&second)?;
-                if first_u >= second_u {
-                    first_u - second_u + 1
-                } else {
-                    second_u - first_u + 1
+                if second_u != 0 {
+                    return Err(Error::Parse(
+                        "unpacked declaration ranges must be zero-based `[N:0]`".to_string(),
+                    ));
                 }
+                first_u + 1
             } else {
                 self.eval_const_u32(&first)?
             };

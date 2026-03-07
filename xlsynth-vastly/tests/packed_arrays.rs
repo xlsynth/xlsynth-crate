@@ -168,7 +168,7 @@ module m(
   output logic [1:0] out_data,
   output logic [3:0] snapshot
 );
-  logic [1:0] lanes[0:1];
+  logic [1:0] lanes[1:0];
   logic [1:0] q;
 
   assign lanes[0] = in_data;
@@ -252,7 +252,7 @@ module m(
   output logic [1:0] out_data,
   output logic [3:0] tap
 );
-  logic [1:0] table[0:1][0:1];
+  logic [1:0] table[1:0][1:0];
   logic [1:0] pick;
   logic [1:0] q;
 
@@ -333,7 +333,7 @@ module m(
   input logic sel,
   output logic [1:0][3:0] y
 );
-  logic [1:0][3:0] arr[0:1];
+  logic [1:0][3:0] arr[1:0];
   assign arr[0] = a0;
   assign arr[1] = a1;
   assign y = arr[sel];
@@ -383,7 +383,7 @@ module m(
   input logic sel,
   output logic [1:0][3:0] out_data
 );
-  logic [1:0][3:0] arr[0:1];
+  logic [1:0][3:0] arr[1:0];
   logic [1:0][3:0] q;
 
   assign arr[0] = a0;
@@ -473,7 +473,7 @@ module m(
   input logic [1:0] in1,
   output logic [3:0] snapshot
 );
-  logic [1:0] lanes[0:1];
+  logic [1:0] lanes[1:0];
 
   always_ff @(posedge clk) begin
     if (rst) begin
@@ -541,7 +541,7 @@ module m(
   input logic [1:0] sel,
   output logic [1:0] out_data
 );
-  logic [1:0] lanes[0:1];
+  logic [1:0] lanes[1:0];
   logic [1:0] q;
 
   assign lanes[0] = in_data;
