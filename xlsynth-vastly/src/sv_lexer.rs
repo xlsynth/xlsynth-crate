@@ -35,6 +35,7 @@ pub enum TokKind {
     KwEnd,
     KwIf,
     KwElse,
+    KwFor,
 
     At,
     LParen,
@@ -153,6 +154,7 @@ impl<'a> Lexer<'a> {
                     "end" => TokKind::KwEnd,
                     "if" => TokKind::KwIf,
                     "else" => TokKind::KwElse,
+                    "for" => TokKind::KwFor,
                     _ => TokKind::Ident(ident),
                 }
             }

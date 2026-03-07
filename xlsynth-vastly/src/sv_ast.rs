@@ -43,8 +43,27 @@ pub struct ComboModule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComboItem {
     WireDecl(Decl),
-    Assign { lhs: Lhs, rhs: Span },
+    Assign {
+        lhs: Lhs,
+        rhs: Span,
+        rhs_text: Option<String>,
+    },
     Function(ComboFunction),
+    GenerateFor {
+        genvar: String,
+        start: VExpr,
+        limit: VExpr,
+        body: Vec<ComboItem>,
+    },
+    GenerateIf {
+        branches: Vec<ComboGenerateBranch>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComboGenerateBranch {
+    pub cond: Option<VExpr>,
+    pub body: Vec<ComboItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,8 +153,9 @@ pub enum PipelineItem {
         span: Span,
     },
     Assign {
-        lhs_ident: String,
+        lhs: Lhs,
         rhs: Span,
+        rhs_text: Option<String>,
         span: Span,
     },
     Function {
@@ -149,6 +169,24 @@ pub enum PipelineItem {
         always_ff: AlwaysFf,
         span: Span,
     },
+    GenerateFor {
+        genvar: String,
+        start: VExpr,
+        limit: VExpr,
+        body: Vec<PipelineItem>,
+        span: Span,
+    },
+    GenerateIf {
+        branches: Vec<GenerateBranch>,
+        span: Span,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerateBranch {
+    pub cond: Option<VExpr>,
+    pub body: Vec<PipelineItem>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

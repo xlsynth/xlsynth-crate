@@ -16,6 +16,7 @@ mod coverability;
 mod coverage;
 mod coverage_render2;
 mod eval;
+mod generate_constructs;
 mod irvals;
 mod iverilog_combo;
 mod lexer;

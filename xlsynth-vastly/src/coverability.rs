@@ -58,6 +58,8 @@ pub fn compute_coverability_with_defines(
     }
 
     let pm = crate::sv_parser::parse_pipeline_module_with_defines(&src.text, defines)?;
+    let items =
+        crate::generate_constructs::elaborate_pipeline_items(&src.text, &pm.params, &pm.items)?;
 
     // Structural: module header.
     mark_span(
@@ -74,7 +76,7 @@ pub fn compute_coverability_with_defines(
     );
 
     // Structural and executable spans from items.
-    for it in pm.items {
+    for it in items {
         match it {
             PipelineItem::Decl { span, .. } => {
                 mark_span(
@@ -131,6 +133,9 @@ pub fn compute_coverability_with_defines(
                     def_end_line,
                     LineCoverability::NonCoverableStructural,
                 );
+            }
+            PipelineItem::GenerateFor { .. } | PipelineItem::GenerateIf { .. } => {
+                unreachable!("pipeline items should be elaborated")
             }
         }
     }
