@@ -14,7 +14,7 @@ use crate::Value4;
 use crate::combo_eval::eval_combo_seeded;
 use crate::combo_eval::eval_combo_seeded_with_coverage;
 use crate::combo_eval::plan_combo_eval;
-use crate::module_compile::State;
+use crate::compiled_module::State;
 use crate::vcd_writer::VcdWriter;
 use std::io::Write;
 

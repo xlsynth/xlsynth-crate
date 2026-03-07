@@ -8,13 +8,13 @@ use crate::Result;
 use crate::Signedness;
 use crate::Value4;
 use crate::ast::Expr as VExpr;
-use crate::module_compile::CompiledModule;
-use crate::module_compile::State;
+use crate::compiled_module::CompiledSeqBlock;
+use crate::compiled_module::State;
 use crate::packed::packed_index_selection_if_in_bounds;
 use crate::sv_ast::Lhs;
 use crate::sv_ast::Stmt;
 
-pub fn step_module(m: &CompiledModule, inputs: &crate::Env, state: &State) -> Result<State> {
+pub fn step_module(m: &CompiledSeqBlock, inputs: &crate::Env, state: &State) -> Result<State> {
     // Build evaluation environment: inputs shadow state (as per plan default).
     let mut env = crate::Env::new();
     for (k, v) in m.consts.iter() {
@@ -30,7 +30,11 @@ pub fn step_module(m: &CompiledModule, inputs: &crate::Env, state: &State) -> Re
     step_module_with_env(m, &env, state)
 }
 
-pub fn step_module_with_env(m: &CompiledModule, env: &crate::Env, state: &State) -> Result<State> {
+pub fn step_module_with_env(
+    m: &CompiledSeqBlock,
+    env: &crate::Env,
+    state: &State,
+) -> Result<State> {
     let mut exec_env = crate::Env::new();
     for (k, v) in m.consts.iter() {
         exec_env.insert(k.clone(), v.clone());
@@ -75,7 +79,7 @@ struct PendingBits {
 fn exec_stmt(
     stmt: &Stmt,
     env: &crate::Env,
-    m: &CompiledModule,
+    m: &CompiledSeqBlock,
     pending: &mut BTreeMap<String, PendingBits>,
 ) -> Result<()> {
     match stmt {
@@ -147,7 +151,7 @@ fn apply_nba(
     lhs: &Lhs,
     rhs: &Value4,
     env: &crate::Env,
-    m: &CompiledModule,
+    m: &CompiledSeqBlock,
     pending: &mut BTreeMap<String, PendingBits>,
 ) -> Result<()> {
     match lhs {

@@ -5,11 +5,12 @@ mod vcd_oracle;
 
 use std::time::SystemTime;
 
+use xlsynth_vastly::CompiledSeqBlock;
 use xlsynth_vastly::Cycle;
 use xlsynth_vastly::Stimulus;
 use xlsynth_vastly::Vcd;
 use xlsynth_vastly::VcdDiffOptions;
-use xlsynth_vastly::compile_module;
+use xlsynth_vastly::compile_pipeline_module;
 use xlsynth_vastly::diff_vcd_exact;
 
 use xlsynth_vastly::LogicBit;
@@ -42,7 +43,7 @@ module m(input logic clk, input logic en, output logic [3:0] q);
   end
 endmodule
 "#;
-    let cm = compile_module(dut).unwrap();
+    let cm = compile_single_seq_block(dut);
 
     let stimulus = Stimulus {
         half_period: 5,
@@ -100,4 +101,22 @@ fn mk_temp_dir() -> std::path::PathBuf {
         }
     }
     panic!("failed to create temp dir");
+}
+
+fn compile_single_seq_block(src: &str) -> CompiledSeqBlock {
+    let pm = compile_pipeline_module(src).expect("compile pipeline module");
+    assert!(
+        pm.combo.assigns.is_empty(),
+        "expected no combo assigns for legacy-style seq test"
+    );
+    assert!(
+        pm.combo.functions.is_empty(),
+        "expected no combo functions for legacy-style seq test"
+    );
+    assert_eq!(
+        pm.seqs.len(),
+        1,
+        "expected exactly one sequential block for legacy-style seq test"
+    );
+    pm.seqs[0].clone()
 }

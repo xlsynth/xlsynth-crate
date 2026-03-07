@@ -11,7 +11,7 @@ use crate::LogicBit;
 use crate::Result;
 use crate::Value4;
 use crate::combo_compile::Port;
-use crate::module_compile::DeclInfo;
+use crate::compiled_module::DeclInfo;
 use crate::pipeline_compile::CompiledPipelineModule;
 use crate::pipeline_harness::PipelineCycle;
 
