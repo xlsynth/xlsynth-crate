@@ -12,6 +12,7 @@ use crate::sv_ast::CasezArm;
 use crate::sv_ast::CasezPattern;
 use crate::sv_ast::ComboFunction;
 use crate::sv_ast::ComboFunctionBody;
+use crate::sv_ast::ComboGenerateBranch;
 use crate::sv_ast::ComboItem;
 use crate::sv_ast::ComboModule;
 use crate::sv_ast::Decl;
@@ -400,20 +401,6 @@ impl<'a> Parser<'a> {
         let mut items: Vec<ComboItem> = Vec::new();
         loop {
             match self.cur().clone() {
-                TokKind::KwWire => {
-                    let d = self.parse_wire_decl()?;
-                    items.push(ComboItem::WireDecl(d));
-                }
-                TokKind::KwLogic | TokKind::KwReg => {
-                    let d = self.parse_logic_decl()?;
-                    items.push(ComboItem::WireDecl(d));
-                }
-                TokKind::KwAssign => {
-                    items.push(self.parse_assign_item()?);
-                }
-                TokKind::KwFunction => {
-                    items.push(ComboItem::Function(self.parse_combo_function()?));
-                }
                 TokKind::KwEndmodule => {
                     self.bump();
                     break;
@@ -426,12 +413,7 @@ impl<'a> Parser<'a> {
                 TokKind::Semi => {
                     self.bump();
                 }
-                other => {
-                    return Err(Error::Parse(format!(
-                        "unsupported combo module item token: {:?}",
-                        other
-                    )));
-                }
+                _ => items.push(self.parse_combo_item()?),
             }
         }
 
@@ -441,6 +423,152 @@ impl<'a> Parser<'a> {
             ports,
             items,
         })
+    }
+
+    fn parse_combo_item(&mut self) -> Result<ComboItem> {
+        match self.cur().clone() {
+            TokKind::KwWire => {
+                let d = self.parse_wire_decl()?;
+                Ok(ComboItem::WireDecl(d))
+            }
+            TokKind::KwLogic | TokKind::KwReg => {
+                let d = self.parse_logic_decl()?;
+                Ok(ComboItem::WireDecl(d))
+            }
+            TokKind::KwAssign => self.parse_assign_item(),
+            TokKind::KwFunction => Ok(ComboItem::Function(self.parse_combo_function()?)),
+            TokKind::KwFor => self.parse_combo_generate_for_item(),
+            TokKind::KwIf => self.parse_combo_generate_if_item(),
+            other => Err(Error::Parse(format!(
+                "unsupported combo module item token: {:?}",
+                other
+            ))),
+        }
+    }
+
+    fn parse_combo_generate_for_item(&mut self) -> Result<ComboItem> {
+        self.expect(TokKind::KwFor)?;
+        self.expect(TokKind::LParen)?;
+        match self.toks[self.idx].kind.clone() {
+            TokKind::Ident(s) if s == "genvar" => self.bump(),
+            _ => {
+                return Err(Error::Parse(
+                    "expected `genvar` in generate for".to_string(),
+                ));
+            }
+        }
+        let genvar = match self.toks[self.idx].kind.clone() {
+            TokKind::Ident(s) => {
+                self.bump();
+                s
+            }
+            _ => return Err(Error::Parse("expected genvar identifier".to_string())),
+        };
+        self.expect(TokKind::Eq)?;
+        let start_expr = self.parse_expr_until(&[TokKind::Semi])?;
+        self.expect(TokKind::Semi)?;
+        match self.toks[self.idx].kind.clone() {
+            TokKind::Ident(s) if s == genvar => self.bump(),
+            _ => {
+                return Err(Error::Parse(format!(
+                    "expected loop variable `{genvar}` in generate for condition"
+                )));
+            }
+        }
+        if *self.cur() != TokKind::Other('<') {
+            return Err(Error::Parse(
+                "generate for condition must use `<`".to_string(),
+            ));
+        }
+        self.bump();
+        let limit_expr = self.parse_expr_until(&[TokKind::Semi])?;
+        self.expect(TokKind::Semi)?;
+        match self.toks[self.idx].kind.clone() {
+            TokKind::Ident(s) if s == genvar => self.bump(),
+            _ => {
+                return Err(Error::Parse(format!(
+                    "expected loop variable `{genvar}` in generate for step"
+                )));
+            }
+        }
+        self.expect(TokKind::Eq)?;
+        match self.toks[self.idx].kind.clone() {
+            TokKind::Ident(s) if s == genvar => self.bump(),
+            _ => {
+                return Err(Error::Parse(format!(
+                    "expected loop variable `{genvar}` on generate for rhs"
+                )));
+            }
+        }
+        if *self.cur() != TokKind::Other('+') {
+            return Err(Error::Parse("generate for step must use `+ 1`".to_string()));
+        }
+        self.bump();
+        match self.toks[self.idx].kind.clone() {
+            TokKind::Number(s) if s == "1" => self.bump(),
+            _ => {
+                return Err(Error::Parse(
+                    "generate for step must increment by 1".to_string(),
+                ));
+            }
+        }
+        self.expect(TokKind::RParen)?;
+        let body = self.parse_combo_item_block()?;
+        Ok(ComboItem::GenerateFor {
+            genvar,
+            start: start_expr,
+            limit: limit_expr,
+            body,
+        })
+    }
+
+    fn parse_combo_generate_if_item(&mut self) -> Result<ComboItem> {
+        let mut branches = Vec::new();
+        loop {
+            let cond = if *self.cur() == TokKind::KwIf {
+                self.expect(TokKind::KwIf)?;
+                self.expect(TokKind::LParen)?;
+                let cond = self.parse_expr_until(&[TokKind::RParen])?;
+                self.expect(TokKind::RParen)?;
+                Some(cond)
+            } else {
+                None
+            };
+            let body = self.parse_combo_item_block()?;
+            branches.push(ComboGenerateBranch { cond, body });
+
+            if *self.cur() != TokKind::KwElse {
+                break;
+            }
+            self.bump();
+            if *self.cur() != TokKind::KwIf {
+                let body = self.parse_combo_item_block()?;
+                branches.push(ComboGenerateBranch { cond: None, body });
+                break;
+            }
+        }
+        Ok(ComboItem::GenerateIf { branches })
+    }
+
+    fn parse_combo_item_block(&mut self) -> Result<Vec<ComboItem>> {
+        self.expect(TokKind::KwBegin)?;
+        if *self.cur() == TokKind::Colon {
+            self.bump();
+            match self.toks[self.idx].kind.clone() {
+                TokKind::Ident(_) => self.bump(),
+                _ => return Err(Error::Parse("expected generate block label".to_string())),
+            }
+        }
+        let mut items = Vec::new();
+        while *self.cur() != TokKind::KwEnd {
+            if *self.cur() == TokKind::Semi {
+                self.bump();
+                continue;
+            }
+            items.push(self.parse_combo_item()?);
+        }
+        self.expect(TokKind::KwEnd)?;
+        Ok(items)
     }
 
     fn parse_pipeline_module(&mut self) -> Result<PipelineModule> {
@@ -945,7 +1073,11 @@ impl<'a> Parser<'a> {
         self.expect(TokKind::Eq)?;
         let rhs = self.parse_span_until_semi()?;
         self.expect(TokKind::Semi)?;
-        Ok(ComboItem::Assign { lhs, rhs })
+        Ok(ComboItem::Assign {
+            lhs,
+            rhs,
+            rhs_text: None,
+        })
     }
 
     fn parse_combo_function(&mut self) -> Result<ComboFunction> {

@@ -90,7 +90,7 @@ pub fn compile_pipeline_module_with_defines(
     let parsed: PipelineModule =
         crate::sv_parser::parse_pipeline_module_with_defines(src, defines)?;
     let items =
-        crate::pipeline_generate::elaborate_pipeline_items(src, &parsed.params, &parsed.items)?;
+        crate::generate_constructs::elaborate_pipeline_items(src, &parsed.params, &parsed.items)?;
 
     let module_name = parsed.name.clone();
 

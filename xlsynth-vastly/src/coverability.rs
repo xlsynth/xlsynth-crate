@@ -59,7 +59,7 @@ pub fn compute_coverability_with_defines(
 
     let pm = crate::sv_parser::parse_pipeline_module_with_defines(&src.text, defines)?;
     let items =
-        crate::pipeline_generate::elaborate_pipeline_items(&src.text, &pm.params, &pm.items)?;
+        crate::generate_constructs::elaborate_pipeline_items(&src.text, &pm.params, &pm.items)?;
 
     // Structural: module header.
     mark_span(

@@ -120,6 +120,11 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
     let normalized = normalize_generated_unpacked_arrays(src);
     let parse_src = normalized.normalized_src.as_str();
     let parsed: ComboModule = crate::sv_parser::parse_combo_module(parse_src)?;
+    let items = crate::generate_constructs::elaborate_combo_items(
+        parse_src,
+        &parsed.params,
+        &parsed.items,
+    )?;
 
     let module_name = parsed.name;
 
@@ -151,7 +156,7 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
     let mut functions: BTreeMap<String, ComboFunction> = BTreeMap::new();
     let mut assigns: Vec<ComboAssign> = Vec::new();
 
-    for it in &parsed.items {
+    for it in &items {
         match it {
             ComboItem::WireDecl(d) => {
                 decls.insert(
@@ -160,14 +165,19 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
                 );
             }
             ComboItem::Assign { .. } | ComboItem::Function(_) => {}
+            ComboItem::GenerateFor { .. } | ComboItem::GenerateIf { .. } => {
+                unreachable!("combo items should be elaborated")
+            }
         }
     }
 
-    for it in &parsed.items {
+    for it in &items {
         match it {
             ComboItem::WireDecl(_) => {}
-            ComboItem::Assign { lhs, rhs } => {
-                let rhs_src = parse_src[rhs.start..rhs.end].trim();
+            ComboItem::Assign { lhs, rhs, rhs_text } => {
+                let rhs_src = rhs_text
+                    .as_deref()
+                    .unwrap_or_else(|| parse_src[rhs.start..rhs.end].trim());
                 let lhs = denormalize_lhs(lhs.clone(), &normalized.placeholder_to_original);
                 let lhs = rewrite_packed_lhs(lhs, &decls)?;
                 let rhs_expr =
@@ -315,6 +325,9 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
                     },
                 );
             }
+            ComboItem::GenerateFor { .. } | ComboItem::GenerateIf { .. } => {
+                unreachable!("combo items should be elaborated")
+            }
         }
     }
 
@@ -400,20 +413,23 @@ fn normalize_generated_unpacked_arrays(src: &str) -> ArrayNormalization {
         }
 
         if let Some(loop_info) = parse_generated_genvar_for_header(line) {
-            let mut body_lines: Vec<&str> = Vec::new();
-            let mut j = i + 1;
-            while j < lines.len() && lines[j].trim() != "end" {
-                body_lines.push(lines[j]);
-                j += 1;
-            }
-            if j == lines.len() {
+            if decls_by_base.is_empty() {
+                // Keep generic generate loops intact when we are not doing
+                // generated-unpacked-array normalization.
                 out_lines.push(line.to_string());
-                out_lines.extend(body_lines.into_iter().map(str::to_string));
-                break;
+                i += 1;
+                continue;
             }
+
+            let Some(j) = find_matching_end_line(&lines, i + 1) else {
+                out_lines.push(line.to_string());
+                i += 1;
+                continue;
+            };
+            let body_lines = &lines[i + 1..j];
             for iter in loop_info.start..loop_info.limit {
                 let iter_text = iter.to_string();
-                for body_line in &body_lines {
+                for body_line in body_lines {
                     let substituted = replace_ident_token(body_line, &loop_info.var, &iter_text);
                     out_lines.extend(expand_generated_unpacked_array_assign_line(
                         &substituted,
@@ -785,6 +801,50 @@ fn parse_generated_genvar_for_header(line: &str) -> Option<GeneratedGenvarLoop> 
         return None;
     }
     Some(GeneratedGenvarLoop { var, start, limit })
+}
+
+fn find_matching_end_line(lines: &[&str], start: usize) -> Option<usize> {
+    let mut depth: i32 = 1;
+    let mut i = start;
+    while i < lines.len() {
+        let line = strip_line_comment(lines[i]);
+        let begin_count = count_keyword_token(line, "begin") as i32;
+        let end_count = count_keyword_token(line, "end") as i32;
+        depth += begin_count - end_count;
+        if depth == 0 {
+            return Some(i);
+        }
+        if depth < 0 {
+            return None;
+        }
+        i += 1;
+    }
+    None
+}
+
+fn strip_line_comment(line: &str) -> &str {
+    line.split_once("//").map_or(line, |(prefix, _)| prefix)
+}
+
+fn count_keyword_token(s: &str, keyword: &str) -> usize {
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    let mut count = 0usize;
+    while i < bytes.len() {
+        if is_ident_start(bytes[i]) {
+            let start = i;
+            i += 1;
+            while i < bytes.len() && is_ident_continue(bytes[i]) {
+                i += 1;
+            }
+            if &s[start..i] == keyword {
+                count += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    count
 }
 
 fn replace_ident_token(s: &str, target: &str, replacement: &str) -> String {
