@@ -8,7 +8,7 @@ use crate::LogicBit;
 use crate::Result;
 use crate::Signedness;
 use crate::Value4;
-use crate::sv_ast::Module;
+use crate::sv_ast::ParsedModule;
 use crate::sv_ast::Stmt;
 use crate::sv_parser::parse_module;
 
@@ -35,7 +35,7 @@ pub struct DeclInfo {
 pub fn compile_module(src: &str) -> Result<CompiledModule> {
     // Keep the legacy parser gate for this API surface, but switch lowering to
     // the unified pipeline compiler path.
-    let _legacy_shape: Module = parse_module(src)?;
+    let _legacy_shape: ParsedModule = parse_module(src)?;
     let pipeline = crate::pipeline_compile::compile_pipeline_module(src)?;
     lower_pipeline_to_legacy(pipeline)
 }

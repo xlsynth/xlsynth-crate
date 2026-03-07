@@ -10,16 +10,14 @@ use crate::parser::parse_expr;
 use crate::sv_ast::AlwaysFf;
 use crate::sv_ast::CasezArm;
 use crate::sv_ast::CasezPattern;
-use crate::sv_ast::ComboModule;
 use crate::sv_ast::Decl;
 use crate::sv_ast::FunctionAssign;
 use crate::sv_ast::FunctionBody;
 use crate::sv_ast::FunctionDecl;
 use crate::sv_ast::GenerateBranch;
 use crate::sv_ast::Lhs;
-use crate::sv_ast::Module;
 use crate::sv_ast::ModuleItem;
-use crate::sv_ast::PipelineModule;
+use crate::sv_ast::ParsedModule;
 use crate::sv_ast::PortDecl;
 use crate::sv_ast::PortDir;
 use crate::sv_ast::PortTy;
@@ -30,7 +28,7 @@ use crate::sv_lexer::TokKind;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-pub fn parse_module(src: &str) -> Result<Module> {
+pub fn parse_module(src: &str) -> Result<ParsedModule> {
     let toks = crate::sv_lexer::lex_all(src)?;
     let mut p = Parser {
         src,
@@ -43,7 +41,7 @@ pub fn parse_module(src: &str) -> Result<Module> {
     p.parse_module()
 }
 
-pub fn parse_combo_module(src: &str) -> Result<ComboModule> {
+pub fn parse_combo_module(src: &str) -> Result<ParsedModule> {
     let toks = crate::sv_lexer::lex_all(src)?;
     let mut p = Parser {
         src,
@@ -57,7 +55,7 @@ pub fn parse_combo_module(src: &str) -> Result<ComboModule> {
 }
 
 #[allow(dead_code)]
-pub fn parse_pipeline_module(src: &str) -> Result<PipelineModule> {
+pub fn parse_pipeline_module(src: &str) -> Result<ParsedModule> {
     let toks = crate::sv_lexer::lex_all(src)?;
     let mut p = Parser {
         src,
@@ -73,7 +71,7 @@ pub fn parse_pipeline_module(src: &str) -> Result<PipelineModule> {
 pub fn parse_pipeline_module_with_defines(
     src: &str,
     defines: &BTreeSet<String>,
-) -> Result<PipelineModule> {
+) -> Result<ParsedModule> {
     let toks = crate::sv_lexer::lex_all(src)?;
     let mut p = Parser {
         src,
@@ -318,8 +316,9 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn parse_module(&mut self) -> Result<Module> {
+    fn parse_module(&mut self) -> Result<ParsedModule> {
         self.expect(TokKind::KwModule)?;
+        let header_start = self.toks[self.idx - 1].start;
         let name = match self.toks[self.idx].kind.clone() {
             TokKind::Ident(s) => {
                 self.bump();
@@ -335,24 +334,50 @@ impl<'a> Parser<'a> {
             decls.extend(self.parse_port_list_decls()?);
         }
         self.expect(TokKind::Semi)?;
-        let mut always_ff: Option<AlwaysFf> = None;
+        let header_end = self.toks[self.idx - 1].end;
+        let header_span = Span {
+            start: header_start,
+            end: header_end,
+        };
 
-        loop {
+        let mut items: Vec<ModuleItem> = decls
+            .into_iter()
+            .map(|decl| ModuleItem::Decl {
+                decl,
+                span: header_span,
+            })
+            .collect();
+        let mut saw_always_ff = false;
+        let endmodule_span: Span = loop {
             match self.cur().clone() {
                 TokKind::KwLogic | TokKind::KwReg => {
-                    decls.push(self.parse_logic_decl()?);
+                    let (decl, span) = self.parse_logic_decl_with_span()?;
+                    items.push(ModuleItem::Decl { decl, span });
                 }
                 TokKind::KwAlwaysFf => {
-                    if always_ff.is_some() {
+                    if saw_always_ff {
                         return Err(Error::Parse(
                             "multiple always_ff blocks not supported".to_string(),
                         ));
                     }
-                    always_ff = Some(self.parse_always_ff()?);
+                    saw_always_ff = true;
+                    let stmt_start = self.toks[self.idx].start;
+                    let af = self.parse_always_ff()?;
+                    let stmt_end = self.toks[self.idx - 1].end;
+                    let span = Span {
+                        start: stmt_start,
+                        end: stmt_end,
+                    };
+                    items.push(ModuleItem::AlwaysFf {
+                        always_ff: af,
+                        span,
+                    });
                 }
                 TokKind::KwEndmodule => {
+                    let start = self.toks[self.idx].start;
+                    let end = self.toks[self.idx].end;
                     self.bump();
-                    break;
+                    break Span { start, end };
                 }
                 TokKind::End => {
                     return Err(Error::Parse(
@@ -367,19 +392,24 @@ impl<'a> Parser<'a> {
                     )));
                 }
             }
-        }
+        };
 
-        let always_ff = always_ff.ok_or_else(|| Error::Parse("missing always_ff".to_string()))?;
-        Ok(Module {
+        if !saw_always_ff {
+            return Err(Error::Parse("missing always_ff".to_string()));
+        }
+        Ok(ParsedModule {
             name,
             params: self.params.clone(),
-            decls,
-            always_ff,
+            ports: Vec::new(),
+            header_span,
+            endmodule_span,
+            items,
         })
     }
 
-    fn parse_combo_module(&mut self) -> Result<ComboModule> {
+    fn parse_combo_module(&mut self) -> Result<ParsedModule> {
         self.expect(TokKind::KwModule)?;
+        let header_start = self.toks[self.idx - 1].start;
         let name = match self.toks[self.idx].kind.clone() {
             TokKind::Ident(s) => {
                 self.bump();
@@ -395,13 +425,20 @@ impl<'a> Parser<'a> {
             Vec::new()
         };
         self.expect(TokKind::Semi)?;
+        let header_end = self.toks[self.idx - 1].end;
+        let header_span = Span {
+            start: header_start,
+            end: header_end,
+        };
 
         let mut items: Vec<ModuleItem> = Vec::new();
-        loop {
+        let endmodule_span: Span = loop {
             match self.cur().clone() {
                 TokKind::KwEndmodule => {
+                    let start = self.toks[self.idx].start;
+                    let end = self.toks[self.idx].end;
                     self.bump();
-                    break;
+                    break Span { start, end };
                 }
                 TokKind::End => {
                     return Err(Error::Parse(
@@ -413,12 +450,14 @@ impl<'a> Parser<'a> {
                 }
                 _ => items.push(self.parse_combo_item()?),
             }
-        }
+        };
 
-        Ok(ComboModule {
+        Ok(ParsedModule {
             name,
             params: self.params.clone(),
             ports,
+            header_span,
+            endmodule_span,
             items,
         })
     }
@@ -607,7 +646,7 @@ impl<'a> Parser<'a> {
         Ok(items)
     }
 
-    fn parse_pipeline_module(&mut self) -> Result<PipelineModule> {
+    fn parse_pipeline_module(&mut self) -> Result<ParsedModule> {
         self.expect(TokKind::KwModule)?;
         let header_start = self.toks[self.idx - 1].start;
         let name = match self.toks[self.idx].kind.clone() {
@@ -667,7 +706,7 @@ impl<'a> Parser<'a> {
             }
         };
 
-        Ok(PipelineModule {
+        Ok(ParsedModule {
             name,
             params: self.params.clone(),
             ports,

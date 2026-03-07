@@ -13,11 +13,11 @@ use crate::packed::rewrite_packed_lhs;
 use crate::packed::rewrite_packed_spanned_expr;
 use crate::parser::parse_expr;
 use crate::parser_spanned::parse_expr_spanned;
-use crate::sv_ast::ComboModule;
 use crate::sv_ast::Decl;
 use crate::sv_ast::FunctionBody;
 use crate::sv_ast::Lhs;
 use crate::sv_ast::ModuleItem;
+use crate::sv_ast::ParsedModule;
 use crate::sv_ast::PortDir as SvPortDir;
 use crate::sv_ast::Span;
 
@@ -117,7 +117,7 @@ pub struct CompiledComboModule {
 
 pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
     let parse_src = src;
-    let parsed: ComboModule = crate::sv_parser::parse_combo_module(parse_src)?;
+    let parsed: ParsedModule = crate::sv_parser::parse_combo_module(parse_src)?;
     let items = crate::generate_constructs::elaborate_combo_items(
         parse_src,
         &parsed.params,

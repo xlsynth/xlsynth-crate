@@ -34,10 +34,12 @@ pub struct PortDecl {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ComboModule {
+pub struct ParsedModule {
     pub name: String,
     pub params: BTreeMap<String, Value4>,
     pub ports: Vec<PortDecl>,
+    pub header_span: Span,
+    pub endmodule_span: Span,
     pub items: Vec<ModuleItem>,
 }
 
@@ -90,14 +92,6 @@ pub struct CasezArm {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Module {
-    pub name: String,
-    pub params: BTreeMap<String, Value4>,
-    pub decls: Vec<Decl>,
-    pub always_ff: AlwaysFf,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decl {
     pub name: String,
     pub signed: bool,
@@ -110,16 +104,6 @@ pub struct Decl {
 pub struct AlwaysFf {
     pub clk_name: String,
     pub body: Stmt,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PipelineModule {
-    pub name: String,
-    pub params: BTreeMap<String, Value4>,
-    pub ports: Vec<PortDecl>,
-    pub header_span: Span,
-    pub endmodule_span: Span,
-    pub items: Vec<ModuleItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -28,7 +28,7 @@ use crate::sim_observer::SimObserver;
 use crate::sv_ast::FunctionBody;
 use crate::sv_ast::Lhs;
 use crate::sv_ast::ModuleItem;
-use crate::sv_ast::PipelineModule;
+use crate::sv_ast::ParsedModule;
 use crate::sv_ast::PortDir as SvPortDir;
 use crate::sv_ast::Span;
 use crate::sv_ast::Stmt;
@@ -89,7 +89,7 @@ pub fn compile_pipeline_module_with_defines(
     defines: &BTreeSet<String>,
 ) -> Result<CompiledPipelineModule> {
     let parse_src = src;
-    let parsed: PipelineModule =
+    let parsed: ParsedModule =
         crate::sv_parser::parse_pipeline_module_with_defines(parse_src, defines)?;
     let items = crate::generate_constructs::elaborate_pipeline_items(
         parse_src,
