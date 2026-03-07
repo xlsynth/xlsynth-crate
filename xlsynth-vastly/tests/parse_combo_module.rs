@@ -137,6 +137,72 @@ endmodule
 }
 
 #[test]
+fn indexed_assign_lhs_supports_bitvector_build_up() {
+    let dut = r#"
+module bitvector_lhs_build_up(
+  input wire a,
+  input wire b,
+  input wire c,
+  input wire d,
+  output wire [3:0] out
+);
+  wire [3:0] v;
+  assign v[0] = a;
+  assign v[1] = b;
+  assign v[2] = c;
+  assign v[3] = d;
+  assign out = v;
+endmodule
+"#;
+    let m = compile_combo_module(dut).unwrap();
+    let plan = plan_combo_eval(&m).unwrap();
+    let out = eval_combo(
+        &m,
+        &plan,
+        &[
+            ("a".to_string(), vbits(1, Signedness::Unsigned, "1")),
+            ("b".to_string(), vbits(1, Signedness::Unsigned, "0")),
+            ("c".to_string(), vbits(1, Signedness::Unsigned, "1")),
+            ("d".to_string(), vbits(1, Signedness::Unsigned, "0")),
+        ]
+        .into_iter()
+        .collect::<BTreeMap<_, _>>(),
+    )
+    .unwrap();
+    assert_eq!(out["out"].to_bit_string_msb_first(), "0101");
+}
+
+#[test]
+fn indexed_assign_lhs_supports_packed_array_build_up_with_cast() {
+    let dut = r#"
+module packed_lhs_build_up(
+  input wire [1:0] lo,
+  input wire [1:0] hi,
+  output wire [3:0] out
+);
+  wire [1:0][1:0] p;
+  assign p[0] = lo;
+  assign p[1] = hi;
+  assign out = $unsigned(p);
+endmodule
+"#;
+    let m = compile_combo_module(dut).unwrap();
+    let plan = plan_combo_eval(&m).unwrap();
+    let out = eval_combo(
+        &m,
+        &plan,
+        &[
+            ("lo".to_string(), vbits(2, Signedness::Unsigned, "10")),
+            ("hi".to_string(), vbits(2, Signedness::Unsigned, "01")),
+        ]
+        .into_iter()
+        .collect::<BTreeMap<_, _>>(),
+    )
+    .unwrap();
+    assert_eq!(out["out"].to_bit_string_msb_first(), "0110");
+}
+
+#[test]
 fn parses_and_evals_assignment_context_sized_ops() {
     let dut = r#"
 module ctx_ops_v(
@@ -933,6 +999,100 @@ endmodule
 }
 
 #[test]
+fn oob_lhs_indexed_assign_is_noop_for_bitvector() {
+    let dut = r#"
+module oob_lhs_bitvector(
+  output wire [3:0] out
+);
+  wire [3:0] v;
+  assign v = 4'b1010;
+  assign v[7] = 1'b1;
+  assign out = v;
+endmodule
+"#;
+
+    let m = compile_combo_module(dut).unwrap();
+    let plan = plan_combo_eval(&m).unwrap();
+    let out = eval_combo(&m, &plan, &BTreeMap::new()).unwrap();
+    assert_eq!(out["out"].to_bit_string_msb_first(), "1010");
+}
+
+#[test]
+fn oob_lhs_indexed_assign_is_noop_for_packed_array() {
+    let dut = r#"
+module oob_lhs_packed(
+  output wire [7:0] out
+);
+  wire [1:0][3:0] p;
+  assign p = 8'b10100011;
+  assign p[2] = 4'b1111;
+  assign out = p;
+endmodule
+"#;
+
+    let m = compile_combo_module(dut).unwrap();
+    let plan = plan_combo_eval(&m).unwrap();
+    let out = eval_combo(&m, &plan, &BTreeMap::new()).unwrap();
+    assert_eq!(out["out"].to_bit_string_msb_first(), "10100011");
+}
+
+#[test]
+fn oob_rhs_index_read_returns_x_for_bitvector() {
+    let dut = r#"
+module oob_rhs_bitvector(
+  input wire [3:0] a,
+  input wire [2:0] idx,
+  output wire y
+);
+  assign y = a[idx];
+endmodule
+"#;
+
+    let m = compile_combo_module(dut).unwrap();
+    let plan = plan_combo_eval(&m).unwrap();
+    let out = eval_combo(
+        &m,
+        &plan,
+        &[
+            ("a".to_string(), vbits(4, Signedness::Unsigned, "1010")),
+            ("idx".to_string(), vbits(3, Signedness::Unsigned, "100")),
+        ]
+        .into_iter()
+        .collect::<BTreeMap<_, _>>(),
+    )
+    .unwrap();
+    assert_eq!(out["y"].to_bit_string_msb_first(), "x");
+}
+
+#[test]
+fn oob_rhs_index_read_returns_x_for_packed_array() {
+    let dut = r#"
+module oob_rhs_packed(
+  input wire [1:0][3:0] a,
+  input wire [1:0] idx,
+  output wire [3:0] y
+);
+  assign y = a[idx];
+endmodule
+"#;
+
+    let m = compile_combo_module(dut).unwrap();
+    let plan = plan_combo_eval(&m).unwrap();
+    let out = eval_combo(
+        &m,
+        &plan,
+        &[
+            ("a".to_string(), vbits(8, Signedness::Unsigned, "10100011")),
+            ("idx".to_string(), vbits(2, Signedness::Unsigned, "10")),
+        ]
+        .into_iter()
+        .collect::<BTreeMap<_, _>>(),
+    )
+    .unwrap();
+    assert_eq!(out["y"].to_bit_string_msb_first(), "xxxx");
+}
+
+#[test]
 fn coverage_eval_supports_signed_unsigned_cast_builtins() {
     let dut = r#"
 module cov_cast_builtin_v(
@@ -961,6 +1121,49 @@ endmodule
     let out_cov =
         eval_combo_seeded_with_coverage(&m, &plan, &env, &src, &mut cov, &BTreeMap::new()).unwrap();
     let out_ref = eval_combo(&m, &plan, &seed).unwrap();
+    assert_eq!(
+        out_cov["y"].to_bit_string_msb_first(),
+        out_ref["y"].to_bit_string_msb_first()
+    );
+}
+
+#[test]
+fn coverage_eval_matches_plain_eval_for_packed_index_in_function_assign() {
+    let dut = r#"
+module packed_fn_cov(
+  input logic [1:0][3:0] a,
+  input logic idx,
+  output logic [3:0] y
+);
+  function automatic logic [3:0] pick(input logic i);
+    begin
+      pick = a[i];
+    end
+  endfunction
+  assign y = pick(idx);
+endmodule
+"#;
+
+    let m = compile_combo_module(dut).unwrap();
+    let plan = plan_combo_eval(&m).unwrap();
+    let seed: BTreeMap<String, Value4> = [
+        ("a".to_string(), vbits(8, Signedness::Unsigned, "10100011")),
+        ("idx".to_string(), vbits(1, Signedness::Unsigned, "1")),
+    ]
+    .into_iter()
+    .collect();
+    let out_ref = eval_combo(&m, &plan, &seed).unwrap();
+
+    let src = SourceText::new(dut.to_string());
+    let mut cov = CoverageCounters::default();
+    let mut env = xlsynth_vastly::Env::new();
+    for (k, v) in &seed {
+        env.insert(k.clone(), v.clone());
+    }
+    let out_cov =
+        eval_combo_seeded_with_coverage(&m, &plan, &env, &src, &mut cov, &BTreeMap::new()).unwrap();
+
+    assert_eq!(out_ref["y"].to_bit_string_msb_first(), "1010");
     assert_eq!(
         out_cov["y"].to_bit_string_msb_first(),
         out_ref["y"].to_bit_string_msb_first()

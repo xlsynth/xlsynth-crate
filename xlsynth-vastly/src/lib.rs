@@ -22,6 +22,7 @@ mod lexer;
 mod lexer_spanned;
 mod module_compile;
 mod module_eval;
+mod packed;
 pub mod parser;
 mod parser_spanned;
 mod pipeline_compile;

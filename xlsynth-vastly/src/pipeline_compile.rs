@@ -20,6 +20,9 @@ use crate::combo_compile::Port;
 use crate::combo_compile::PortDir;
 use crate::module_compile::CompiledModule;
 use crate::module_compile::DeclInfo;
+use crate::packed::rewrite_packed_expr;
+use crate::packed::rewrite_packed_spanned_expr;
+use crate::packed::rewrite_packed_stmt;
 use crate::sim_observer::SimObserver;
 use crate::sv_ast::Lhs;
 use crate::sv_ast::PipelineItem;
@@ -106,22 +109,12 @@ pub fn compile_pipeline_module_with_defines(
             PortDir::Input => input_ports_all.push(port),
             PortDir::Output => output_ports.push(port),
         }
-        decls.insert(
-            p.name.clone(),
-            DeclInfo {
-                width: p.width,
-                signedness: if p.signed {
-                    Signedness::Signed
-                } else {
-                    Signedness::Unsigned
-                },
-            },
-        );
+        decls.insert(p.name.clone(), decl_info_from_port_decl(p));
     }
 
     let mut assigns: Vec<ComboAssign> = Vec::new();
     let mut functions: BTreeMap<String, ComboFunction> = BTreeMap::new();
-    let mut always_ffs: Vec<crate::sv_ast::AlwaysFf> = Vec::new();
+    let mut always_ffs: Vec<(crate::sv_ast::AlwaysFf, Span)> = Vec::new();
     let mut fn_meta: BTreeMap<String, FunctionMeta> = BTreeMap::new();
     let mut observers: Vec<SimObserver> = Vec::new();
     let mut observer_spans: Vec<Span> = Vec::new();
@@ -132,25 +125,25 @@ pub fn compile_pipeline_module_with_defines(
                 if decls.contains_key(&d.name) {
                     return Err(Error::Parse(format!("duplicate decl `{}`", d.name)));
                 }
-                decls.insert(
-                    d.name.clone(),
-                    DeclInfo {
-                        width: d.width,
-                        signedness: if d.signed {
-                            Signedness::Signed
-                        } else {
-                            Signedness::Unsigned
-                        },
-                    },
-                );
+                decls.insert(d.name.clone(), decl_info_from_decl(d));
             }
+            PipelineItem::Assign { .. }
+            | PipelineItem::Function { .. }
+            | PipelineItem::AlwaysFf { .. } => {}
+        }
+    }
+
+    for it in &parsed.items {
+        match it {
+            PipelineItem::Decl { .. } => {}
             PipelineItem::Assign { lhs_ident, rhs, .. } => {
                 let rhs_src = src[rhs.start..rhs.end].trim();
-                let rhs_expr = crate::parser::parse_expr(rhs_src)?;
+                let rhs_expr = rewrite_packed_expr(crate::parser::parse_expr(rhs_src)?, &decls)?;
                 let mut rhs_spanned = crate::parser_spanned::parse_expr_spanned(rhs_src)?;
                 rhs_spanned.shift_spans(rhs.start);
+                rhs_spanned = rewrite_packed_spanned_expr(rhs_spanned, &decls)?;
                 assigns.push(ComboAssign {
-                    lhs: lhs_ident.clone(),
+                    lhs: Lhs::Ident(lhs_ident.clone()),
                     rhs: rhs_expr,
                     rhs_span: *rhs,
                     rhs_spanned,
@@ -172,6 +165,13 @@ pub fn compile_pipeline_module_with_defines(
                         f.name
                     )));
                 }
+                let mut fn_decls = decls.clone();
+                for arg in &f.args {
+                    fn_decls.insert(arg.name.clone(), decl_info_from_decl(arg));
+                }
+                for local in &f.locals {
+                    fn_decls.insert(local.name.clone(), decl_info_from_decl(local));
+                }
                 let args: Vec<FunctionVar> = f
                     .args
                     .iter()
@@ -188,30 +188,24 @@ pub fn compile_pipeline_module_with_defines(
                 let locals: BTreeMap<String, DeclInfo> = f
                     .locals
                     .iter()
-                    .map(|d| {
-                        (
-                            d.name.clone(),
-                            DeclInfo {
-                                width: d.width,
-                                signedness: if d.signed {
-                                    Signedness::Signed
-                                } else {
-                                    Signedness::Unsigned
-                                },
-                            },
-                        )
-                    })
+                    .map(|d| (d.name.clone(), decl_info_from_decl(d)))
                     .collect();
 
                 let body = match &f.body {
                     crate::sv_ast::ComboFunctionBody::UniqueCasez { selector, arms, .. } => {
                         let selector_src = src[selector.start..selector.end].trim();
-                        let selector_expr = crate::parser::parse_expr(selector_src)?;
+                        let selector_expr = rewrite_packed_expr(
+                            crate::parser::parse_expr(selector_src)?,
+                            &fn_decls,
+                        )?;
 
                         let mut out_arms: Vec<CasezArm> = Vec::new();
                         for a in arms {
                             let value_src = src[a.value.start..a.value.end].trim();
-                            let value_expr = crate::parser::parse_expr(value_src)?;
+                            let value_expr = rewrite_packed_expr(
+                                crate::parser::parse_expr(value_src)?,
+                                &fn_decls,
+                            )?;
                             let pat = a.pat.as_ref().map(|p| CasezPattern {
                                 width: p.width,
                                 bits_msb: p.bits_msb.clone(),
@@ -228,10 +222,12 @@ pub fn compile_pipeline_module_with_defines(
                     }
                     crate::sv_ast::ComboFunctionBody::Assign { value } => {
                         let value_src = src[value.start..value.end].trim();
-                        let expr = crate::parser::parse_expr(value_src)?;
+                        let expr =
+                            rewrite_packed_expr(crate::parser::parse_expr(value_src)?, &fn_decls)?;
                         let mut expr_spanned =
                             crate::parser_spanned::parse_expr_spanned(value_src)?;
                         expr_spanned.shift_spans(value.start);
+                        expr_spanned = rewrite_packed_spanned_expr(expr_spanned, &fn_decls)?;
                         ComboFunctionImpl::Expr {
                             expr,
                             expr_spanned: Some(expr_spanned),
@@ -242,7 +238,10 @@ pub fn compile_pipeline_module_with_defines(
                             Vec::with_capacity(assigns.len());
                         for a in assigns {
                             let value_src = src[a.value.start..a.value.end].trim();
-                            let expr = crate::parser::parse_expr(value_src)?;
+                            let expr = rewrite_packed_expr(
+                                crate::parser::parse_expr(value_src)?,
+                                &fn_decls,
+                            )?;
                             out_assigns.push(FunctionAssign {
                                 lhs: a.lhs.clone(),
                                 expr,
@@ -311,15 +310,24 @@ pub fn compile_pipeline_module_with_defines(
                     },
                 );
             }
-            PipelineItem::AlwaysFf { always_ff: af, .. } => {
-                always_ffs.push(af.clone());
+            PipelineItem::AlwaysFf {
+                always_ff: af,
+                span,
+            } => {
+                always_ffs.push((
+                    crate::sv_ast::AlwaysFf {
+                        clk_name: af.clk_name.clone(),
+                        body: rewrite_packed_stmt(af.body.clone(), &decls)?,
+                    },
+                    *span,
+                ));
             }
         }
     }
 
     let clk_name = always_ffs
         .first()
-        .map(|af| af.clk_name.clone())
+        .map(|(af, _)| af.clk_name.clone())
         .or_else(|| {
             let has_clk = input_ports_all.iter().any(|p| p.name == "clk");
             if has_clk {
@@ -334,20 +342,10 @@ pub fn compile_pipeline_module_with_defines(
             )
         })?;
 
-    // Partition always_ff blocks into stateful seq blocks and observer blocks.
-    // Also remember per-item spans so we can attribute coverage.
-    let mut always_ff_items: Vec<(crate::sv_ast::AlwaysFf, Span)> = Vec::new();
-    for it in &parsed.items {
-        if let PipelineItem::AlwaysFf {
-            always_ff: af,
-            span,
-        } = it
-        {
-            always_ff_items.push((af.clone(), *span));
-        }
-    }
-
-    for (af, af_span) in &always_ff_items {
+    // Partition always_ff blocks into zero or more stateful seq blocks and observer
+    // blocks.
+    let mut stateful: Vec<(crate::sv_ast::AlwaysFf, Span)> = Vec::new();
+    for (af, af_span) in always_ffs {
         if af.clk_name != clk_name {
             return Err(Error::Parse(format!(
                 "always_ff clock mismatch: saw `{}` but expected `{}`",
@@ -362,9 +360,10 @@ pub fn compile_pipeline_module_with_defines(
                     "mixed nba assigns and $display in one always_ff is not supported".to_string(),
                 ));
             }
+            stateful.push((af, af_span));
         } else if has_disp {
             observers.extend(crate::sim_observer::extract_observers(&clk_name, &af.body)?);
-            observer_spans.push(*af_span);
+            observer_spans.push(af_span);
         } else {
             // Empty / unsupported: ignore (v1).
         }
@@ -386,14 +385,9 @@ pub fn compile_pipeline_module_with_defines(
     };
 
     let mut seen_state_regs: BTreeSet<String> = BTreeSet::new();
-    let mut seqs: Vec<CompiledModule> = Vec::new();
+    let mut seqs: Vec<CompiledModule> = Vec::with_capacity(stateful.len());
     let mut seq_spans: Vec<Span> = Vec::new();
-    for (af, af_span) in always_ff_items {
-        let has_nba = stmt_contains_nba(&af.body);
-        let has_disp = stmt_contains_display(&af.body);
-        if !has_nba || has_disp {
-            continue;
-        }
+    for (af, af_span) in stateful {
         let mut state_regs: BTreeSet<String> = BTreeSet::new();
         collect_state_regs(&af.body, &mut state_regs);
         for r in &state_regs {
@@ -473,6 +467,30 @@ fn stmt_contains_display(stmt: &Stmt) -> bool {
     }
 }
 
+fn decl_info_from_decl(d: &crate::sv_ast::Decl) -> DeclInfo {
+    DeclInfo {
+        width: d.width,
+        signedness: if d.signed {
+            Signedness::Signed
+        } else {
+            Signedness::Unsigned
+        },
+        packed_dims: d.packed_dims.clone(),
+    }
+}
+
+fn decl_info_from_port_decl(p: &crate::sv_ast::PortDecl) -> DeclInfo {
+    DeclInfo {
+        width: p.width,
+        signedness: if p.signed {
+            Signedness::Signed
+        } else {
+            Signedness::Unsigned
+        },
+        packed_dims: p.packed_dims.clone(),
+    }
+}
+
 fn collect_state_regs(stmt: &Stmt, out: &mut BTreeSet<String>) {
     match stmt {
         Stmt::Begin(stmts) => {
@@ -495,6 +513,9 @@ fn collect_state_regs(stmt: &Stmt, out: &mut BTreeSet<String>) {
                 out.insert(b.clone());
             }
             Lhs::Index { base, .. } => {
+                out.insert(base.clone());
+            }
+            Lhs::PackedIndex { base, .. } => {
                 out.insert(base.clone());
             }
             Lhs::Slice { base, .. } => {

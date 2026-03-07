@@ -8,6 +8,7 @@ use crate::LogicBit;
 use crate::Result;
 use crate::Signedness;
 use crate::Value4;
+use crate::packed::rewrite_packed_stmt;
 use crate::sv_ast::Decl;
 use crate::sv_ast::Lhs;
 use crate::sv_ast::Module;
@@ -30,6 +31,7 @@ pub struct CompiledModule {
 pub struct DeclInfo {
     pub width: u32,
     pub signedness: Signedness,
+    pub packed_dims: Vec<u32>,
 }
 
 pub fn compile_module(src: &str) -> Result<CompiledModule> {
@@ -39,6 +41,7 @@ pub fn compile_module(src: &str) -> Result<CompiledModule> {
         name,
         signed,
         width,
+        packed_dims,
     } in m.decls.clone()
     {
         let signedness = if signed {
@@ -46,11 +49,20 @@ pub fn compile_module(src: &str) -> Result<CompiledModule> {
         } else {
             Signedness::Unsigned
         };
-        decls.insert(name, DeclInfo { width, signedness });
+        decls.insert(
+            name,
+            DeclInfo {
+                width,
+                signedness,
+                packed_dims,
+            },
+        );
     }
 
+    let body = rewrite_packed_stmt(m.always_ff.body.clone(), &decls)?;
+
     let mut state_regs: BTreeSet<String> = BTreeSet::new();
-    collect_state_regs(&m.always_ff.body, &mut state_regs);
+    collect_state_regs(&body, &mut state_regs);
 
     // Require state regs declared so we can size initial X state.
     for r in &state_regs {
@@ -68,7 +80,7 @@ pub fn compile_module(src: &str) -> Result<CompiledModule> {
         consts: m.params,
         decls,
         state_regs,
-        body: m.always_ff.body,
+        body,
     })
 }
 
@@ -117,6 +129,9 @@ fn collect_state_regs(stmt: &Stmt, out: &mut BTreeSet<String>) {
                 out.insert(b.clone());
             }
             Lhs::Index { base, .. } => {
+                out.insert(base.clone());
+            }
+            Lhs::PackedIndex { base, .. } => {
                 out.insert(base.clone());
             }
             Lhs::Slice { base, .. } => {

@@ -317,6 +317,62 @@ fn function_expr_ternary_equality_recontexts_unbased_unsized_rhs() {
 }
 
 #[test]
+fn function_expr_packed_index_matches_plain_eval_in_coverage_mode() {
+    let dut = concat!(
+        "module m(input logic clk, input logic [1:0][3:0] a, input logic idx, output logic [3:0] y);\n",
+        "  function automatic logic [3:0] pick(input logic i);\n",
+        "    begin\n",
+        "      pick = a[i];\n",
+        "    end\n",
+        "  endfunction\n",
+        "  assign y = pick(idx);\n",
+        "endmodule\n",
+    );
+    let cm = compile_pipeline_module(dut).unwrap();
+    let src = SourceText::new(dut.to_string());
+    let stimulus = PipelineStimulus {
+        half_period: 5,
+        cycles: vec![
+            PipelineCycle {
+                inputs: [
+                    ("a".to_string(), vbits(8, Signedness::Unsigned, "10100011")),
+                    ("idx".to_string(), vbits(1, Signedness::Unsigned, "0")),
+                ]
+                .into_iter()
+                .collect(),
+            },
+            PipelineCycle {
+                inputs: [
+                    ("a".to_string(), vbits(8, Signedness::Unsigned, "10100011")),
+                    ("idx".to_string(), vbits(1, Signedness::Unsigned, "1")),
+                ]
+                .into_iter()
+                .collect(),
+            },
+        ],
+    };
+
+    let (coverage_steps, _cov) =
+        run_combinational_pipeline_with_output_equivalence(&cm, &stimulus, &src);
+
+    let ys: Vec<String> = coverage_steps
+        .into_iter()
+        .map(|snapshot| snapshot.get("y").unwrap().clone())
+        .collect();
+    assert_eq!(
+        ys,
+        vec![
+            "0011".to_string(),
+            "0011".to_string(),
+            "0011".to_string(),
+            "1010".to_string(),
+            "1010".to_string(),
+            "1010".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn function_expr_ternary_unbased_unsized_rhs_matrix_tracks_outputs_and_counts() {
     let lhs_decls = ["logic [3:0]", "logic signed [3:0]"];
     let known_cases = [

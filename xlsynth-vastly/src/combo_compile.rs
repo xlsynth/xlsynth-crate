@@ -9,12 +9,16 @@ use crate::ast::Expr;
 use crate::ast_spanned::SpannedExpr;
 use crate::ast_spanned::SpannedExprKind;
 use crate::module_compile::DeclInfo;
+use crate::packed::rewrite_packed_expr;
+use crate::packed::rewrite_packed_lhs;
+use crate::packed::rewrite_packed_spanned_expr;
 use crate::parser::parse_expr;
 use crate::parser_spanned::parse_expr_spanned;
 use crate::sv_ast::ComboFunctionBody;
 use crate::sv_ast::ComboItem;
 use crate::sv_ast::ComboModule;
 use crate::sv_ast::Decl;
+use crate::sv_ast::Lhs;
 use crate::sv_ast::PortDir as SvPortDir;
 use crate::sv_ast::Span;
 
@@ -33,10 +37,21 @@ pub struct Port {
 
 #[derive(Debug, Clone)]
 pub struct ComboAssign {
-    pub lhs: String,
+    pub lhs: Lhs,
     pub rhs: Expr,
     pub rhs_span: Span,
     pub rhs_spanned: SpannedExpr,
+}
+
+impl ComboAssign {
+    pub fn lhs_base(&self) -> &str {
+        match &self.lhs {
+            Lhs::Ident(base) => base,
+            Lhs::Index { base, .. } => base,
+            Lhs::PackedIndex { base, .. } => base,
+            Lhs::Slice { base, .. } => base,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -129,14 +144,7 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
         }
         decls.insert(
             normalized.denormalize_ident(&p.name),
-            DeclInfo {
-                width: p.width,
-                signedness: if p.signed {
-                    Signedness::Signed
-                } else {
-                    Signedness::Unsigned
-                },
-            },
+            decl_info_from_port_decl(p),
         );
     }
 
@@ -148,31 +156,48 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
             ComboItem::WireDecl(d) => {
                 decls.insert(
                     normalized.denormalize_ident(&d.name),
-                    DeclInfo {
-                        width: d.width,
-                        signedness: if d.signed {
-                            Signedness::Signed
-                        } else {
-                            Signedness::Unsigned
-                        },
-                    },
+                    decl_info_from_decl(d),
                 );
             }
-            ComboItem::Assign { lhs_ident, rhs } => {
+            ComboItem::Assign { .. } | ComboItem::Function(_) => {}
+        }
+    }
+
+    for it in &parsed.items {
+        match it {
+            ComboItem::WireDecl(_) => {}
+            ComboItem::Assign { lhs, rhs } => {
                 let rhs_src = parse_src[rhs.start..rhs.end].trim();
                 let rhs_expr =
                     denormalize_expr(parse_expr(rhs_src)?, &normalized.placeholder_to_original);
+                let rhs_expr = rewrite_packed_expr(rhs_expr, &decls)?;
                 let mut rhs_spanned = parse_expr_spanned(rhs_src)?;
                 denormalize_spanned_expr(&mut rhs_spanned, &normalized.placeholder_to_original);
                 rhs_spanned.shift_spans(rhs.start);
+                rhs_spanned = rewrite_packed_spanned_expr(rhs_spanned, &decls)?;
+                let lhs = denormalize_lhs(lhs.clone(), &normalized.placeholder_to_original);
+                let lhs = rewrite_packed_lhs(lhs, &decls)?;
                 assigns.push(ComboAssign {
-                    lhs: normalized.denormalize_ident(lhs_ident),
+                    lhs,
                     rhs: rhs_expr,
                     rhs_span: *rhs,
                     rhs_spanned,
                 });
             }
             ComboItem::Function(f) => {
+                let mut fn_decls = decls.clone();
+                for arg in &f.args {
+                    fn_decls.insert(
+                        normalized.denormalize_ident(&arg.name),
+                        decl_info_from_decl(arg),
+                    );
+                }
+                for local in &f.locals {
+                    fn_decls.insert(
+                        normalized.denormalize_ident(&local.name),
+                        decl_info_from_decl(local),
+                    );
+                }
                 let args: Vec<FunctionVar> =
                     f.args.iter().map(lower_decl_to_function_var).collect();
                 let locals: BTreeMap<String, DeclInfo> = f
@@ -189,18 +214,26 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
                 let body = match &f.body {
                     ComboFunctionBody::UniqueCasez { selector, arms, .. } => {
                         let selector_src = parse_src[selector.start..selector.end].trim();
-                        let selector_expr = denormalize_expr(
-                            parse_expr(selector_src)?,
-                            &normalized.placeholder_to_original,
+                        let selector_expr = rewrite_packed_expr(
+                            denormalize_expr(
+                                parse_expr(selector_src)?,
+                                &normalized.placeholder_to_original,
+                            ),
+                            &fn_decls,
                         );
+                        let selector_expr = selector_expr?;
 
                         let mut out_arms: Vec<CasezArm> = Vec::new();
                         for a in arms {
                             let value_src = parse_src[a.value.start..a.value.end].trim();
-                            let value_expr = denormalize_expr(
-                                parse_expr(value_src)?,
-                                &normalized.placeholder_to_original,
+                            let value_expr = rewrite_packed_expr(
+                                denormalize_expr(
+                                    parse_expr(value_src)?,
+                                    &normalized.placeholder_to_original,
+                                ),
+                                &fn_decls,
                             );
+                            let value_expr = value_expr?;
                             let pat = a.pat.as_ref().map(|p| CasezPattern {
                                 width: p.width,
                                 bits_msb: p.bits_msb.clone(),
@@ -217,16 +250,21 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
                     }
                     ComboFunctionBody::Assign { value } => {
                         let value_src = parse_src[value.start..value.end].trim();
-                        let expr = denormalize_expr(
-                            parse_expr(value_src)?,
-                            &normalized.placeholder_to_original,
+                        let expr = rewrite_packed_expr(
+                            denormalize_expr(
+                                parse_expr(value_src)?,
+                                &normalized.placeholder_to_original,
+                            ),
+                            &fn_decls,
                         );
+                        let expr = expr?;
                         let mut expr_spanned = parse_expr_spanned(value_src)?;
                         denormalize_spanned_expr(
                             &mut expr_spanned,
                             &normalized.placeholder_to_original,
                         );
                         expr_spanned.shift_spans(value.start);
+                        expr_spanned = rewrite_packed_spanned_expr(expr_spanned, &fn_decls)?;
                         ComboFunctionImpl::Expr {
                             expr,
                             expr_spanned: Some(expr_spanned),
@@ -236,10 +274,14 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
                         let mut out_assigns = Vec::with_capacity(assigns.len());
                         for a in assigns {
                             let value_src = parse_src[a.value.start..a.value.end].trim();
-                            let expr = denormalize_expr(
-                                parse_expr(value_src)?,
-                                &normalized.placeholder_to_original,
+                            let expr = rewrite_packed_expr(
+                                denormalize_expr(
+                                    parse_expr(value_src)?,
+                                    &normalized.placeholder_to_original,
+                                ),
+                                &fn_decls,
                             );
+                            let expr = expr?;
                             out_assigns.push(FunctionAssign {
                                 lhs: normalized.denormalize_ident(&a.lhs),
                                 expr,
@@ -295,6 +337,19 @@ fn decl_info_from_decl(d: &Decl) -> DeclInfo {
         } else {
             Signedness::Unsigned
         },
+        packed_dims: d.packed_dims.clone(),
+    }
+}
+
+fn decl_info_from_port_decl(p: &crate::sv_ast::PortDecl) -> DeclInfo {
+    DeclInfo {
+        width: p.width,
+        signedness: if p.signed {
+            Signedness::Signed
+        } else {
+            Signedness::Unsigned
+        },
+        packed_dims: p.packed_dims.clone(),
     }
 }
 
@@ -885,6 +940,28 @@ fn denormalize_expr(expr: Expr, placeholders: &BTreeMap<String, String>) -> Expr
             cond: Box::new(denormalize_expr(*cond, placeholders)),
             t: Box::new(denormalize_expr(*t, placeholders)),
             f: Box::new(denormalize_expr(*f, placeholders)),
+        },
+    }
+}
+
+fn denormalize_lhs(lhs: Lhs, placeholders: &BTreeMap<String, String>) -> Lhs {
+    match lhs {
+        Lhs::Ident(name) => Lhs::Ident(placeholders.get(&name).cloned().unwrap_or(name)),
+        Lhs::Index { base, index } => Lhs::Index {
+            base: placeholders.get(&base).cloned().unwrap_or(base),
+            index: denormalize_expr(index, placeholders),
+        },
+        Lhs::PackedIndex { base, indices } => Lhs::PackedIndex {
+            base: placeholders.get(&base).cloned().unwrap_or(base),
+            indices: indices
+                .into_iter()
+                .map(|e| denormalize_expr(e, placeholders))
+                .collect(),
+        },
+        Lhs::Slice { base, msb, lsb } => Lhs::Slice {
+            base: placeholders.get(&base).cloned().unwrap_or(base),
+            msb: denormalize_expr(msb, placeholders),
+            lsb: denormalize_expr(lsb, placeholders),
         },
     }
 }
