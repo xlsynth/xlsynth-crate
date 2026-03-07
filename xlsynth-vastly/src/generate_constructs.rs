@@ -10,61 +10,59 @@ use crate::Value4;
 use crate::ast::Expr;
 use crate::eval::eval_ast_with_calls;
 use crate::sv_ast::AlwaysFf;
-use crate::sv_ast::ComboGenerateBranch;
-use crate::sv_ast::ComboItem;
 use crate::sv_ast::GenerateBranch;
 use crate::sv_ast::Lhs;
-use crate::sv_ast::PipelineItem;
+use crate::sv_ast::ModuleItem;
 use crate::sv_ast::Stmt;
 
 pub fn elaborate_combo_items(
     src: &str,
     params: &BTreeMap<String, Value4>,
-    items: &[ComboItem],
-) -> Result<Vec<ComboItem>> {
+    items: &[ModuleItem],
+) -> Result<Vec<ModuleItem>> {
     let mut env = crate::Env::new();
     for (name, value) in params {
         env.insert(name.clone(), value.clone());
     }
-    elaborate_combo_items_impl(src, items, &env, &BTreeMap::new(), false)
+    elaborate_items_impl(src, items, &env, &BTreeMap::new(), false)
 }
 
 pub fn elaborate_pipeline_items(
     src: &str,
     params: &BTreeMap<String, Value4>,
-    items: &[PipelineItem],
-) -> Result<Vec<PipelineItem>> {
+    items: &[ModuleItem],
+) -> Result<Vec<ModuleItem>> {
     let mut env = crate::Env::new();
     for (name, value) in params {
         env.insert(name.clone(), value.clone());
     }
-    elaborate_pipeline_items_impl(src, items, &env, &BTreeMap::new(), false)
+    elaborate_items_impl(src, items, &env, &BTreeMap::new(), false)
 }
 
-fn elaborate_combo_items_impl(
+fn elaborate_items_impl(
     src: &str,
-    items: &[ComboItem],
+    items: &[ModuleItem],
     env: &crate::Env,
     substs: &BTreeMap<String, Value4>,
     in_generate: bool,
-) -> Result<Vec<ComboItem>> {
+) -> Result<Vec<ModuleItem>> {
     let mut out = Vec::new();
     for item in items {
-        elaborate_combo_item(src, item, env, substs, in_generate, &mut out)?;
+        elaborate_item(src, item, env, substs, in_generate, &mut out)?;
     }
     Ok(out)
 }
 
-fn elaborate_combo_item(
+fn elaborate_item(
     src: &str,
-    item: &ComboItem,
+    item: &ModuleItem,
     env: &crate::Env,
     substs: &BTreeMap<String, Value4>,
     in_generate: bool,
-    out: &mut Vec<ComboItem>,
+    out: &mut Vec<ModuleItem>,
 ) -> Result<()> {
     match item {
-        ComboItem::WireDecl(_) => {
+        ModuleItem::Decl { .. } => {
             if in_generate {
                 return Err(Error::Parse(
                     "declarations inside generate blocks are not supported".to_string(),
@@ -72,100 +70,7 @@ fn elaborate_combo_item(
             }
             out.push(item.clone());
         }
-        ComboItem::Assign { lhs, rhs, rhs_text } => {
-            let base_text = rhs_text
-                .as_deref()
-                .unwrap_or_else(|| src[rhs.start..rhs.end].trim());
-            let substituted_text = if substs.is_empty() {
-                None
-            } else {
-                Some(substitute_text(base_text, substs))
-            };
-            out.push(ComboItem::Assign {
-                lhs: substitute_lhs(lhs, substs),
-                rhs: *rhs,
-                rhs_text: substituted_text,
-            });
-        }
-        ComboItem::Function(_) => {
-            if substs.is_empty() {
-                out.push(item.clone());
-            } else {
-                return Err(Error::Parse(
-                    "functions inside generate blocks are not supported".to_string(),
-                ));
-            }
-        }
-        ComboItem::GenerateFor {
-            genvar,
-            start,
-            limit,
-            body,
-        } => {
-            let start_u = eval_const_u32(start, env)?;
-            let limit_u = eval_const_u32(limit, env)?;
-            for idx in start_u..limit_u {
-                let genvar_value = u32_value(idx);
-                let mut next_env = env.clone();
-                next_env.insert(genvar.clone(), genvar_value.clone());
-                let mut next_substs = substs.clone();
-                next_substs.insert(genvar.clone(), genvar_value);
-                out.extend(elaborate_combo_items_impl(
-                    src,
-                    body,
-                    &next_env,
-                    &next_substs,
-                    true,
-                )?);
-            }
-        }
-        ComboItem::GenerateIf { branches } => {
-            if let Some(selected) = select_combo_branch(branches, env)? {
-                out.extend(elaborate_combo_items_impl(
-                    src,
-                    &selected.body,
-                    env,
-                    substs,
-                    true,
-                )?);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn elaborate_pipeline_items_impl(
-    src: &str,
-    items: &[PipelineItem],
-    env: &crate::Env,
-    substs: &BTreeMap<String, Value4>,
-    in_generate: bool,
-) -> Result<Vec<PipelineItem>> {
-    let mut out = Vec::new();
-    for item in items {
-        elaborate_pipeline_item(src, item, env, substs, in_generate, &mut out)?;
-    }
-    Ok(out)
-}
-
-fn elaborate_pipeline_item(
-    src: &str,
-    item: &PipelineItem,
-    env: &crate::Env,
-    substs: &BTreeMap<String, Value4>,
-    in_generate: bool,
-    out: &mut Vec<PipelineItem>,
-) -> Result<()> {
-    match item {
-        PipelineItem::Decl { .. } => {
-            if in_generate {
-                return Err(Error::Parse(
-                    "declarations inside generate blocks are not supported".to_string(),
-                ));
-            }
-            out.push(item.clone());
-        }
-        PipelineItem::Assign {
+        ModuleItem::Assign {
             lhs,
             rhs,
             rhs_text,
@@ -179,14 +84,14 @@ fn elaborate_pipeline_item(
             } else {
                 Some(substitute_text(base_text, substs))
             };
-            out.push(PipelineItem::Assign {
+            out.push(ModuleItem::Assign {
                 lhs: substitute_lhs(lhs, substs),
                 rhs: *rhs,
                 rhs_text: substituted_text,
                 span: *span,
             });
         }
-        PipelineItem::Function { .. } => {
+        ModuleItem::Function { .. } => {
             if substs.is_empty() {
                 out.push(item.clone());
             } else {
@@ -195,8 +100,8 @@ fn elaborate_pipeline_item(
                 ));
             }
         }
-        PipelineItem::AlwaysFf { always_ff, span } => {
-            out.push(PipelineItem::AlwaysFf {
+        ModuleItem::AlwaysFf { always_ff, span } => {
+            out.push(ModuleItem::AlwaysFf {
                 always_ff: AlwaysFf {
                     clk_name: always_ff.clk_name.clone(),
                     body: substitute_stmt(&always_ff.body, substs),
@@ -204,12 +109,12 @@ fn elaborate_pipeline_item(
                 span: *span,
             });
         }
-        PipelineItem::GenerateFor {
+        ModuleItem::GenerateFor {
             genvar,
             start,
             limit,
             body,
-            ..
+            span: _,
         } => {
             let start_u = eval_const_u32(start, env)?;
             let limit_u = eval_const_u32(limit, env)?;
@@ -219,7 +124,7 @@ fn elaborate_pipeline_item(
                 next_env.insert(genvar.clone(), genvar_value.clone());
                 let mut next_substs = substs.clone();
                 next_substs.insert(genvar.clone(), genvar_value);
-                out.extend(elaborate_pipeline_items_impl(
+                out.extend(elaborate_items_impl(
                     src,
                     body,
                     &next_env,
@@ -228,9 +133,9 @@ fn elaborate_pipeline_item(
                 )?);
             }
         }
-        PipelineItem::GenerateIf { branches, .. } => {
-            if let Some(selected) = select_pipeline_branch(branches, env)? {
-                out.extend(elaborate_pipeline_items_impl(
+        ModuleItem::GenerateIf { branches, span: _ } => {
+            if let Some(selected) = select_branch(branches, env)? {
+                out.extend(elaborate_items_impl(
                     src,
                     &selected.body,
                     env,
@@ -243,24 +148,7 @@ fn elaborate_pipeline_item(
     Ok(())
 }
 
-fn select_combo_branch<'a>(
-    branches: &'a [ComboGenerateBranch],
-    env: &crate::Env,
-) -> Result<Option<&'a ComboGenerateBranch>> {
-    for branch in branches {
-        match &branch.cond {
-            Some(cond) => {
-                if eval_const_bool(cond, env)? {
-                    return Ok(Some(branch));
-                }
-            }
-            None => return Ok(Some(branch)),
-        }
-    }
-    Ok(None)
-}
-
-fn select_pipeline_branch<'a>(
+fn select_branch<'a>(
     branches: &'a [GenerateBranch],
     env: &crate::Env,
 ) -> Result<Option<&'a GenerateBranch>> {

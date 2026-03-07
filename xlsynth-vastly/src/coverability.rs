@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::SourceText;
-use crate::sv_ast::PipelineItem;
+use crate::sv_ast::ModuleItem;
 use crate::sv_ast::Span;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -78,7 +78,7 @@ pub fn compute_coverability_with_defines(
     // Structural and executable spans from items.
     for it in items {
         match it {
-            PipelineItem::Decl { span, .. } => {
+            ModuleItem::Decl { span, .. } => {
                 mark_span(
                     src,
                     &mut per_line,
@@ -86,7 +86,7 @@ pub fn compute_coverability_with_defines(
                     LineCoverability::NonCoverableStructural,
                 );
             }
-            PipelineItem::Assign { span, .. } => {
+            ModuleItem::Assign { span, .. } => {
                 mark_span(
                     src,
                     &mut per_line,
@@ -94,7 +94,7 @@ pub fn compute_coverability_with_defines(
                     LineCoverability::CoverableExecutable,
                 );
             }
-            PipelineItem::AlwaysFf { span, .. } => {
+            ModuleItem::AlwaysFf { span, .. } => {
                 mark_span(
                     src,
                     &mut per_line,
@@ -102,7 +102,7 @@ pub fn compute_coverability_with_defines(
                     LineCoverability::CoverableExecutable,
                 );
             }
-            PipelineItem::Function {
+            ModuleItem::Function {
                 span, body_span, ..
             } => {
                 // The signature/definition is structural; the body is executable when invoked.
@@ -134,7 +134,7 @@ pub fn compute_coverability_with_defines(
                     LineCoverability::NonCoverableStructural,
                 );
             }
-            PipelineItem::GenerateFor { .. } | PipelineItem::GenerateIf { .. } => {
+            ModuleItem::GenerateFor { .. } | ModuleItem::GenerateIf { .. } => {
                 unreachable!("pipeline items should be elaborated")
             }
         }
