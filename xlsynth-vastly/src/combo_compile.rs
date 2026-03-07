@@ -264,6 +264,7 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
                             &normalized.placeholder_to_original,
                         );
                         expr_spanned.shift_spans(value.start);
+                        expr_spanned = rewrite_packed_spanned_expr(expr_spanned, &fn_decls)?;
                         ComboFunctionImpl::Expr {
                             expr,
                             expr_spanned: Some(expr_spanned),

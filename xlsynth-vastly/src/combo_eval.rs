@@ -32,6 +32,7 @@ use crate::eval::operand_with_own_sign_ctx;
 use crate::eval::replication_count_to_u32;
 use crate::eval::unary_operand_expected_width;
 use crate::packed::packed_index_selection;
+use crate::packed::packed_index_selection_if_in_bounds;
 use crate::sv_ast::Lhs;
 use crate::value::LogicBit;
 
@@ -829,7 +830,11 @@ fn apply_lhs_to_env(
                 clobber_lhs_base_to_x(base, info, env);
                 return Ok(());
             };
-            let (offset, width) = packed_index_selection(info, &[index_u])?;
+            let Some((offset, width)) = packed_index_selection_if_in_bounds(info, &[index_u])?
+            else {
+                // Out-of-bounds indexed write is a no-op.
+                return Ok(());
+            };
             write_partial_lhs(base, info, rhs, offset, width, env);
             Ok(())
         }
@@ -843,7 +848,11 @@ fn apply_lhs_to_env(
                 };
                 index_values.push(index_u);
             }
-            let (offset, width) = packed_index_selection(info, &index_values)?;
+            let Some((offset, width)) = packed_index_selection_if_in_bounds(info, &index_values)?
+            else {
+                // Out-of-bounds indexed write is a no-op.
+                return Ok(());
+            };
             write_partial_lhs(base, info, rhs, offset, width, env);
             Ok(())
         }
@@ -910,7 +919,10 @@ fn static_written_bits(
                     "index expression is not statically known".to_string(),
                 ));
             };
-            let (offset, width) = packed_index_selection(info, &[index_u])?;
+            let Some((offset, width)) = packed_index_selection_if_in_bounds(info, &[index_u])?
+            else {
+                return Ok(Vec::new());
+            };
             Ok((0..width)
                 .map(|i| offset + i)
                 .filter(|bit| *bit < info.width)
@@ -926,7 +938,9 @@ fn static_written_bits(
                 };
                 values.push(index_u);
             }
-            let (offset, width) = packed_index_selection(info, &values)?;
+            let Some((offset, width)) = packed_index_selection_if_in_bounds(info, &values)? else {
+                return Ok(Vec::new());
+            };
             Ok((0..width)
                 .map(|i| offset + i)
                 .filter(|bit| *bit < info.width)

@@ -227,6 +227,7 @@ pub fn compile_pipeline_module_with_defines(
                         let mut expr_spanned =
                             crate::parser_spanned::parse_expr_spanned(value_src)?;
                         expr_spanned.shift_spans(value.start);
+                        expr_spanned = rewrite_packed_spanned_expr(expr_spanned, &fn_decls)?;
                         ComboFunctionImpl::Expr {
                             expr,
                             expr_spanned: Some(expr_spanned),

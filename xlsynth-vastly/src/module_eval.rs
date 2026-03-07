@@ -10,7 +10,7 @@ use crate::Value4;
 use crate::ast::Expr as VExpr;
 use crate::module_compile::CompiledModule;
 use crate::module_compile::State;
-use crate::packed::packed_index_selection;
+use crate::packed::packed_index_selection_if_in_bounds;
 use crate::sv_ast::Lhs;
 use crate::sv_ast::Stmt;
 
@@ -177,7 +177,11 @@ fn apply_nba(
                 }
                 return Ok(());
             };
-            let (offset, elem_width) = packed_index_selection(info, &[idx_u])?;
+            let Some((offset, elem_width)) = packed_index_selection_if_in_bounds(info, &[idx_u])?
+            else {
+                // Out-of-bounds indexed write is a no-op.
+                return Ok(());
+            };
             let pb = ensure_pending(pending, base, info.width);
             if elem_width == 1 {
                 if offset < info.width {
@@ -211,7 +215,11 @@ fn apply_nba(
                 };
                 idx_vals.push(idx_u);
             }
-            let (offset, elem_width) = packed_index_selection(info, &idx_vals)?;
+            let Some((offset, elem_width)) = packed_index_selection_if_in_bounds(info, &idx_vals)?
+            else {
+                // Out-of-bounds indexed write is a no-op.
+                return Ok(());
+            };
             let rhs2 = rhs.resize(elem_width);
             let pb = ensure_pending(pending, base, info.width);
             for i in 0..elem_width {

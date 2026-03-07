@@ -88,6 +88,27 @@ fn checked_packed_offset(dims: &[u32], indices: &[u32]) -> Result<u32> {
     Ok(offset)
 }
 
+fn checked_packed_offset_if_in_bounds(dims: &[u32], indices: &[u32]) -> Result<Option<u32>> {
+    let mut offset = 0u32;
+    for (dim_index, index) in indices.iter().copied().enumerate() {
+        let dim_width = dims
+            .get(dim_index)
+            .copied()
+            .ok_or_else(|| Error::Parse("too many packed indices for declaration".to_string()))?;
+        if index >= dim_width {
+            return Ok(None);
+        }
+        let stride = stride_after(dims, dim_index)?;
+        let term = index
+            .checked_mul(stride)
+            .ok_or_else(|| Error::Parse("packed index offset overflow".to_string()))?;
+        offset = offset
+            .checked_add(term)
+            .ok_or_else(|| Error::Parse("packed index offset overflow".to_string()))?;
+    }
+    Ok(Some(offset))
+}
+
 fn literal_u32(value: u32) -> Expr {
     Expr::Literal(
         Value4::parse_numeric_token(32, Signedness::Unsigned, &value.to_string()).unwrap(),
@@ -515,4 +536,23 @@ pub fn packed_index_selection(info: &DeclInfo, indices: &[u32]) -> Result<(u32, 
     let offset = checked_packed_offset(&info.packed_dims, indices)?;
     let width = remaining_width_after(&info.packed_dims, indices.len())?;
     Ok((offset, width))
+}
+
+pub fn packed_index_selection_if_in_bounds(
+    info: &DeclInfo,
+    indices: &[u32],
+) -> Result<Option<(u32, u32)>> {
+    if indices.is_empty() {
+        return Ok(Some((0, info.width)));
+    }
+    if indices.len() > info.packed_dims.len() {
+        return Err(Error::Parse(
+            "too many packed indices for declaration".to_string(),
+        ));
+    }
+    let Some(offset) = checked_packed_offset_if_in_bounds(&info.packed_dims, indices)? else {
+        return Ok(None);
+    };
+    let width = remaining_width_after(&info.packed_dims, indices.len())?;
+    Ok(Some((offset, width)))
 }
