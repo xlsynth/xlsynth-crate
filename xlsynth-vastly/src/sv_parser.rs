@@ -28,19 +28,6 @@ use crate::sv_lexer::TokKind;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-pub fn parse_module(src: &str) -> Result<ParsedModule> {
-    let toks = crate::sv_lexer::lex_all(src)?;
-    let mut p = Parser {
-        src,
-        toks,
-        idx: 0,
-        params: BTreeMap::new(),
-        defines: BTreeSet::new(),
-        ifdef_stack: Vec::new(),
-    };
-    p.parse_module()
-}
-
 pub fn parse_combo_module(src: &str) -> Result<ParsedModule> {
     let toks = crate::sv_lexer::lex_all(src)?;
     let mut p = Parser {
@@ -314,97 +301,6 @@ impl<'a> Parser<'a> {
             return Err(Error::Parse(format!("duplicate parameter `{name}`")));
         }
         Ok(())
-    }
-
-    fn parse_module(&mut self) -> Result<ParsedModule> {
-        self.expect(TokKind::KwModule)?;
-        let header_start = self.toks[self.idx - 1].start;
-        let name = match self.toks[self.idx].kind.clone() {
-            TokKind::Ident(s) => {
-                self.bump();
-                s
-            }
-            _ => return Err(Error::Parse("expected module name".to_string())),
-        };
-        self.parse_optional_param_list()?;
-        let mut decls: Vec<Decl> = Vec::new();
-
-        // Optional port list: ( input/output logic [..] name, ... )
-        if *self.cur() == TokKind::LParen {
-            decls.extend(self.parse_port_list_decls()?);
-        }
-        self.expect(TokKind::Semi)?;
-        let header_end = self.toks[self.idx - 1].end;
-        let header_span = Span {
-            start: header_start,
-            end: header_end,
-        };
-
-        let mut items: Vec<ModuleItem> = decls
-            .into_iter()
-            .map(|decl| ModuleItem::Decl {
-                decl,
-                span: header_span,
-            })
-            .collect();
-        let mut saw_always_ff = false;
-        let endmodule_span: Span = loop {
-            match self.cur().clone() {
-                TokKind::KwLogic | TokKind::KwReg => {
-                    let (decl, span) = self.parse_logic_decl_with_span()?;
-                    items.push(ModuleItem::Decl { decl, span });
-                }
-                TokKind::KwAlwaysFf => {
-                    if saw_always_ff {
-                        return Err(Error::Parse(
-                            "multiple always_ff blocks not supported".to_string(),
-                        ));
-                    }
-                    saw_always_ff = true;
-                    let stmt_start = self.toks[self.idx].start;
-                    let af = self.parse_always_ff()?;
-                    let stmt_end = self.toks[self.idx - 1].end;
-                    let span = Span {
-                        start: stmt_start,
-                        end: stmt_end,
-                    };
-                    items.push(ModuleItem::AlwaysFf {
-                        always_ff: af,
-                        span,
-                    });
-                }
-                TokKind::KwEndmodule => {
-                    let start = self.toks[self.idx].start;
-                    let end = self.toks[self.idx].end;
-                    self.bump();
-                    break Span { start, end };
-                }
-                TokKind::End => {
-                    return Err(Error::Parse(
-                        "unexpected EOF (missing endmodule)".to_string(),
-                    ));
-                }
-                _ => {
-                    // Skip unknown module items (v1 strictness could reject; for now reject).
-                    return Err(Error::Parse(format!(
-                        "unsupported module item token: {:?}",
-                        self.cur()
-                    )));
-                }
-            }
-        };
-
-        if !saw_always_ff {
-            return Err(Error::Parse("missing always_ff".to_string()));
-        }
-        Ok(ParsedModule {
-            name,
-            params: self.params.clone(),
-            ports: Vec::new(),
-            header_span,
-            endmodule_span,
-            items,
-        })
     }
 
     fn parse_combo_module(&mut self) -> Result<ParsedModule> {
@@ -927,75 +823,6 @@ impl<'a> Parser<'a> {
         }
         self.expect(TokKind::KwEnd)?;
         Ok(items)
-    }
-
-    fn parse_port_list_decls(&mut self) -> Result<Vec<Decl>> {
-        self.expect(TokKind::LParen)?;
-        let mut decls: Vec<Decl> = Vec::new();
-        loop {
-            if *self.cur() == TokKind::RParen {
-                self.bump();
-                break;
-            }
-
-            // direction
-            match self.cur() {
-                TokKind::KwInput | TokKind::KwOutput => {
-                    self.bump();
-                }
-                _ => {
-                    return Err(Error::Parse(
-                        "expected `input` or `output` in port list (v1)".to_string(),
-                    ));
-                }
-            }
-
-            // type
-            if *self.cur() != TokKind::KwLogic {
-                return Err(Error::Parse(
-                    "expected `logic` in port list (v1)".to_string(),
-                ));
-            }
-            self.bump();
-
-            let signed = if *self.cur() == TokKind::KwSigned {
-                self.bump();
-                true
-            } else {
-                false
-            };
-
-            let packed_dims = self.parse_packed_dims()?;
-            let width = packed_dims_width(&packed_dims)?;
-
-            let name = match self.toks[self.idx].kind.clone() {
-                TokKind::Ident(s) => {
-                    self.bump();
-                    s
-                }
-                _ => return Err(Error::Parse("expected port identifier".to_string())),
-            };
-            let unpacked_dims = self.parse_unpacked_dims()?;
-            let width = dims_total_width(width, &unpacked_dims)?;
-
-            decls.push(Decl {
-                name,
-                signed,
-                width,
-                packed_dims,
-                unpacked_dims,
-            });
-
-            match self.cur() {
-                TokKind::Comma => {
-                    self.bump();
-                    continue;
-                }
-                TokKind::RParen => continue,
-                _ => return Err(Error::Parse("expected `,` or `)` in port list".to_string())),
-            }
-        }
-        Ok(decls)
     }
 
     fn parse_port_list_ports(&mut self) -> Result<Vec<PortDecl>> {

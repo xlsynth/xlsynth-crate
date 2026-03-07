@@ -7,11 +7,12 @@ use std::io::Write;
 use std::process::Command;
 use std::time::SystemTime;
 
+use xlsynth_vastly::CompiledSeqBlock;
 use xlsynth_vastly::Env;
 use xlsynth_vastly::LogicBit;
 use xlsynth_vastly::Signedness;
 use xlsynth_vastly::Value4;
-use xlsynth_vastly::compile_module;
+use xlsynth_vastly::compile_pipeline_module;
 
 fn vbits(width: u32, signedness: Signedness, msb: &str) -> Value4 {
     assert_eq!(msb.len(), width as usize);
@@ -40,7 +41,7 @@ module m(input logic clk, input logic en, output logic [3:0] q);
 endmodule
 "#;
 
-    let cm = compile_module(src).unwrap();
+    let cm = compile_single_seq_block(src);
     let mut state = cm.initial_state_x(); // time-zero X requirement
 
     // Override initial state to a known value so we can compare deterministically.
@@ -70,7 +71,7 @@ module m(input logic clk, input logic [3:0] a, output logic [7:0] q);
   end
 endmodule
 "#;
-    let cm = compile_module(src).unwrap();
+    let cm = compile_single_seq_block(src);
     let mut state = cm.initial_state_x();
     state.insert("q".to_string(), vbits(8, Signedness::Unsigned, "00000000"));
 
@@ -135,6 +136,24 @@ fn run_module_oracle(
         }
     }
     panic!("no Q= line in vvp output:\n{out}\nsource:\n{tb}");
+}
+
+fn compile_single_seq_block(src: &str) -> CompiledSeqBlock {
+    let pm = compile_pipeline_module(src).expect("compile pipeline module");
+    assert!(
+        pm.combo.assigns.is_empty(),
+        "expected no combo assigns for legacy-style seq test"
+    );
+    assert!(
+        pm.combo.functions.is_empty(),
+        "expected no combo functions for legacy-style seq test"
+    );
+    assert_eq!(
+        pm.seqs.len(),
+        1,
+        "expected exactly one sequential block for legacy-style seq test"
+    );
+    pm.seqs[0].clone()
 }
 
 fn build_tb(dut_src: &str, inputs: &Env, state: &xlsynth_vastly::State, watch: &str) -> String {

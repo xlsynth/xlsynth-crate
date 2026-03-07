@@ -777,8 +777,8 @@ fn x_value(width: u32, signedness: Signedness) -> Value4 {
     Value4::new(width, signedness, vec![LogicBit::X; width as usize])
 }
 
-fn function_return_decl(f: &CompiledFunction) -> crate::module_compile::DeclInfo {
-    crate::module_compile::DeclInfo {
+fn function_return_decl(f: &CompiledFunction) -> crate::compiled_module::DeclInfo {
+    crate::compiled_module::DeclInfo {
         width: f.ret_width,
         signedness: f.ret_signedness,
         packed_dims: vec![f.ret_width],
@@ -786,7 +786,7 @@ fn function_return_decl(f: &CompiledFunction) -> crate::module_compile::DeclInfo
     }
 }
 
-fn coerce_to_declinfo(v: &Value4, info: &crate::module_compile::DeclInfo) -> Value4 {
+fn coerce_to_declinfo(v: &Value4, info: &crate::compiled_module::DeclInfo) -> Value4 {
     let resized = v.resize(info.width);
     Value4::new(
         info.width,
@@ -797,7 +797,7 @@ fn coerce_to_declinfo(v: &Value4, info: &crate::module_compile::DeclInfo) -> Val
 
 fn lhs_expected_write_width(
     lhs: &Lhs,
-    info: &crate::module_compile::DeclInfo,
+    info: &crate::compiled_module::DeclInfo,
 ) -> Result<Option<u32>> {
     match lhs {
         Lhs::Ident(_) => Ok(Some(info.width)),
@@ -818,7 +818,7 @@ fn apply_lhs_to_env(
     lhs: &Lhs,
     rhs: &Value4,
     env: &mut Env,
-    info: &crate::module_compile::DeclInfo,
+    info: &crate::compiled_module::DeclInfo,
 ) -> Result<()> {
     match lhs {
         Lhs::Ident(base) => {
@@ -879,7 +879,7 @@ fn apply_lhs_to_env(
 
 fn write_partial_lhs(
     base: &str,
-    info: &crate::module_compile::DeclInfo,
+    info: &crate::compiled_module::DeclInfo,
     rhs: &Value4,
     offset: u32,
     width: u32,
@@ -903,13 +903,13 @@ fn write_partial_lhs(
     );
 }
 
-fn clobber_lhs_base_to_x(base: &str, info: &crate::module_compile::DeclInfo, env: &mut Env) {
+fn clobber_lhs_base_to_x(base: &str, info: &crate::compiled_module::DeclInfo, env: &mut Env) {
     env.insert(base.to_string(), x_value(info.width, info.signedness));
 }
 
 fn static_written_bits(
     lhs: &Lhs,
-    info: &crate::module_compile::DeclInfo,
+    info: &crate::compiled_module::DeclInfo,
     consts: &Env,
 ) -> Result<Vec<u32>> {
     match lhs {
@@ -976,7 +976,7 @@ fn eval_static_u32(expr: &Expr, consts: &Env) -> Result<Option<u32>> {
 fn init_function_env(f: &CompiledFunction, args: &[Value4], globals: &Env) -> Env {
     let mut env = globals.clone();
     for (arg, av) in f.args.iter().zip(args.iter()) {
-        let info = crate::module_compile::DeclInfo {
+        let info = crate::compiled_module::DeclInfo {
             width: arg.width,
             signedness: arg.signedness,
             packed_dims: vec![arg.width],
@@ -995,7 +995,7 @@ fn init_function_env(f: &CompiledFunction, args: &[Value4], globals: &Env) -> En
 fn function_target_decl(
     f: &CompiledFunction,
     lhs: &str,
-) -> Option<crate::module_compile::DeclInfo> {
+) -> Option<crate::compiled_module::DeclInfo> {
     if lhs == f.name {
         return Some(function_return_decl(f));
     }
@@ -1005,7 +1005,7 @@ fn function_target_decl(
     f.args
         .iter()
         .find(|a| a.name == lhs)
-        .map(|a| crate::module_compile::DeclInfo {
+        .map(|a| crate::compiled_module::DeclInfo {
             width: a.width,
             signedness: a.signedness,
             packed_dims: vec![a.width],

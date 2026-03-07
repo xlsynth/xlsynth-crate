@@ -10,7 +10,7 @@ use crate::ast::BinaryOp;
 use crate::ast::Expr;
 use crate::ast_spanned::SpannedExpr;
 use crate::ast_spanned::SpannedExprKind;
-use crate::module_compile::DeclInfo;
+use crate::compiled_module::DeclInfo;
 use crate::sv_ast::Lhs;
 use crate::sv_ast::Span;
 use crate::sv_ast::Stmt;

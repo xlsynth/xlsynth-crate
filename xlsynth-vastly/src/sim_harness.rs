@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use crate::Env;
 use crate::Error;
 use crate::Result;
-use crate::module_compile::CompiledModule;
-use crate::module_compile::State;
+use crate::compiled_module::CompiledSeqBlock;
+use crate::compiled_module::State;
 use crate::vcd_writer::VcdWriter;
 
 #[derive(Debug, Clone)]
@@ -21,7 +21,7 @@ pub struct Cycle {
 }
 
 pub fn run_and_write_vcd(
-    m: &CompiledModule,
+    m: &CompiledSeqBlock,
     stimulus: &Stimulus,
     initial_state: &State,
     out_path: &std::path::Path,
