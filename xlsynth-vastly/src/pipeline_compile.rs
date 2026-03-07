@@ -10,12 +10,12 @@ use crate::Signedness;
 use crate::Value4;
 use crate::combo_compile::CasezArm;
 use crate::combo_compile::CasezPattern;
-use crate::combo_compile::ComboAssign;
-use crate::combo_compile::ComboFunction;
-use crate::combo_compile::ComboFunctionImpl;
 use crate::combo_compile::CompiledComboModule;
+use crate::combo_compile::CompiledFunction;
+use crate::combo_compile::CompiledFunctionBody;
 use crate::combo_compile::FunctionAssign;
 use crate::combo_compile::FunctionVar;
+use crate::combo_compile::ModuleAssign;
 use crate::combo_compile::Port;
 use crate::combo_compile::PortDir;
 use crate::module_compile::CompiledModule;
@@ -25,8 +25,9 @@ use crate::packed::rewrite_packed_lhs;
 use crate::packed::rewrite_packed_spanned_expr;
 use crate::packed::rewrite_packed_stmt;
 use crate::sim_observer::SimObserver;
+use crate::sv_ast::FunctionBody;
 use crate::sv_ast::Lhs;
-use crate::sv_ast::PipelineItem;
+use crate::sv_ast::ModuleItem;
 use crate::sv_ast::PipelineModule;
 use crate::sv_ast::PortDir as SvPortDir;
 use crate::sv_ast::Span;
@@ -119,8 +120,8 @@ pub fn compile_pipeline_module_with_defines(
         decls.insert(p.name.clone(), decl_info_from_port_decl(p));
     }
 
-    let mut assigns: Vec<ComboAssign> = Vec::new();
-    let mut functions: BTreeMap<String, ComboFunction> = BTreeMap::new();
+    let mut assigns: Vec<ModuleAssign> = Vec::new();
+    let mut functions: BTreeMap<String, CompiledFunction> = BTreeMap::new();
     let mut always_ffs: Vec<(crate::sv_ast::AlwaysFf, Span)> = Vec::new();
     let mut fn_meta: BTreeMap<String, FunctionMeta> = BTreeMap::new();
     let mut observers: Vec<SimObserver> = Vec::new();
@@ -128,16 +129,16 @@ pub fn compile_pipeline_module_with_defines(
 
     for it in &items {
         match it {
-            PipelineItem::Decl { decl: d, .. } => {
+            ModuleItem::Decl { decl: d, .. } => {
                 if decls.contains_key(&d.name) {
                     return Err(Error::Parse(format!("duplicate decl `{}`", d.name)));
                 }
                 decls.insert(d.name.clone(), decl_info_from_decl(d));
             }
-            PipelineItem::Assign { .. }
-            | PipelineItem::Function { .. }
-            | PipelineItem::AlwaysFf { .. } => {}
-            PipelineItem::GenerateFor { .. } | PipelineItem::GenerateIf { .. } => {
+            ModuleItem::Assign { .. }
+            | ModuleItem::Function { .. }
+            | ModuleItem::AlwaysFf { .. } => {}
+            ModuleItem::GenerateFor { .. } | ModuleItem::GenerateIf { .. } => {
                 unreachable!("pipeline items should be elaborated")
             }
         }
@@ -145,8 +146,8 @@ pub fn compile_pipeline_module_with_defines(
 
     for it in &items {
         match it {
-            PipelineItem::Decl { .. } => {}
-            PipelineItem::Assign {
+            ModuleItem::Decl { .. } => {}
+            ModuleItem::Assign {
                 lhs, rhs, rhs_text, ..
             } => {
                 let rhs_src = rhs_text
@@ -157,14 +158,14 @@ pub fn compile_pipeline_module_with_defines(
                 let mut rhs_spanned = crate::parser_spanned::parse_expr_spanned(rhs_src)?;
                 rhs_spanned.shift_spans(rhs.start);
                 rhs_spanned = rewrite_packed_spanned_expr(rhs_spanned, &decls)?;
-                assigns.push(ComboAssign {
+                assigns.push(ModuleAssign {
                     lhs,
                     rhs: rhs_expr,
                     rhs_span: *rhs,
                     rhs_spanned,
                 });
             }
-            PipelineItem::Function {
+            ModuleItem::Function {
                 func: f,
                 span,
                 body_span,
@@ -207,7 +208,7 @@ pub fn compile_pipeline_module_with_defines(
                     .collect();
 
                 let body = match &f.body {
-                    crate::sv_ast::ComboFunctionBody::UniqueCasez { selector, arms, .. } => {
+                    FunctionBody::UniqueCasez { selector, arms, .. } => {
                         let selector_src = parse_src[selector.start..selector.end].trim();
                         let selector_expr = rewrite_packed_expr(
                             crate::parser::parse_expr(selector_src)?,
@@ -230,12 +231,12 @@ pub fn compile_pipeline_module_with_defines(
                                 value: value_expr,
                             });
                         }
-                        ComboFunctionImpl::Casez {
+                        CompiledFunctionBody::Casez {
                             selector: selector_expr,
                             arms: out_arms,
                         }
                     }
-                    crate::sv_ast::ComboFunctionBody::Assign { value } => {
+                    FunctionBody::Assign { value } => {
                         let value_src = parse_src[value.start..value.end].trim();
                         let expr =
                             rewrite_packed_expr(crate::parser::parse_expr(value_src)?, &fn_decls)?;
@@ -243,12 +244,12 @@ pub fn compile_pipeline_module_with_defines(
                             crate::parser_spanned::parse_expr_spanned(value_src)?;
                         expr_spanned.shift_spans(value.start);
                         expr_spanned = rewrite_packed_spanned_expr(expr_spanned, &fn_decls)?;
-                        ComboFunctionImpl::Expr {
+                        CompiledFunctionBody::Expr {
                             expr,
                             expr_spanned: Some(expr_spanned),
                         }
                     }
-                    crate::sv_ast::ComboFunctionBody::Procedure { assigns } => {
+                    FunctionBody::Procedure { assigns } => {
                         let mut out_assigns: Vec<FunctionAssign> =
                             Vec::with_capacity(assigns.len());
                         for a in assigns {
@@ -262,14 +263,14 @@ pub fn compile_pipeline_module_with_defines(
                                 expr,
                             });
                         }
-                        ComboFunctionImpl::Procedure {
+                        CompiledFunctionBody::Procedure {
                             assigns: out_assigns,
                         }
                     }
                 };
                 functions.insert(
                     f.name.clone(),
-                    ComboFunction {
+                    CompiledFunction {
                         name: f.name.clone(),
                         ret_width: f.ret_width,
                         ret_signedness: if f.ret_signed {
@@ -287,7 +288,7 @@ pub fn compile_pipeline_module_with_defines(
                 let mut assign_expr_span: Option<Span> = None;
                 let mut scaffold_spans: Vec<Span> = Vec::new();
                 match &f.body {
-                    crate::sv_ast::ComboFunctionBody::UniqueCasez {
+                    FunctionBody::UniqueCasez {
                         casez_span,
                         endcase_span,
                         arms,
@@ -304,12 +305,12 @@ pub fn compile_pipeline_module_with_defines(
                             });
                         }
                     }
-                    crate::sv_ast::ComboFunctionBody::Assign { value } => {
+                    FunctionBody::Assign { value } => {
                         scaffold_spans.push(*begin_span);
                         scaffold_spans.push(*end_span);
                         assign_expr_span = Some(*value);
                     }
-                    crate::sv_ast::ComboFunctionBody::Procedure { .. } => {
+                    FunctionBody::Procedure { .. } => {
                         scaffold_spans.push(*begin_span);
                         scaffold_spans.push(*end_span);
                     }
@@ -325,7 +326,7 @@ pub fn compile_pipeline_module_with_defines(
                     },
                 );
             }
-            PipelineItem::AlwaysFf {
+            ModuleItem::AlwaysFf {
                 always_ff: af,
                 span,
             } => {
@@ -337,7 +338,7 @@ pub fn compile_pipeline_module_with_defines(
                     *span,
                 ));
             }
-            PipelineItem::GenerateFor { .. } | PipelineItem::GenerateIf { .. } => {
+            ModuleItem::GenerateFor { .. } | ModuleItem::GenerateIf { .. } => {
                 unreachable!("pipeline items should be elaborated")
             }
         }

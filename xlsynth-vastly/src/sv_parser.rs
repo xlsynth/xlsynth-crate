@@ -10,17 +10,15 @@ use crate::parser::parse_expr;
 use crate::sv_ast::AlwaysFf;
 use crate::sv_ast::CasezArm;
 use crate::sv_ast::CasezPattern;
-use crate::sv_ast::ComboFunction;
-use crate::sv_ast::ComboFunctionBody;
-use crate::sv_ast::ComboGenerateBranch;
-use crate::sv_ast::ComboItem;
 use crate::sv_ast::ComboModule;
 use crate::sv_ast::Decl;
 use crate::sv_ast::FunctionAssign;
+use crate::sv_ast::FunctionBody;
+use crate::sv_ast::FunctionDecl;
 use crate::sv_ast::GenerateBranch;
 use crate::sv_ast::Lhs;
 use crate::sv_ast::Module;
-use crate::sv_ast::PipelineItem;
+use crate::sv_ast::ModuleItem;
 use crate::sv_ast::PipelineModule;
 use crate::sv_ast::PortDecl;
 use crate::sv_ast::PortDir;
@@ -398,7 +396,7 @@ impl<'a> Parser<'a> {
         };
         self.expect(TokKind::Semi)?;
 
-        let mut items: Vec<ComboItem> = Vec::new();
+        let mut items: Vec<ModuleItem> = Vec::new();
         loop {
             match self.cur().clone() {
                 TokKind::KwEndmodule => {
@@ -425,18 +423,30 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_combo_item(&mut self) -> Result<ComboItem> {
+    fn parse_combo_item(&mut self) -> Result<ModuleItem> {
         match self.cur().clone() {
             TokKind::KwWire => {
-                let d = self.parse_wire_decl()?;
-                Ok(ComboItem::WireDecl(d))
+                let (d, span) = self.parse_wire_decl_with_span()?;
+                Ok(ModuleItem::Decl { decl: d, span })
             }
             TokKind::KwLogic | TokKind::KwReg => {
-                let d = self.parse_logic_decl()?;
-                Ok(ComboItem::WireDecl(d))
+                let (d, span) = self.parse_logic_decl_with_span()?;
+                Ok(ModuleItem::Decl { decl: d, span })
             }
             TokKind::KwAssign => self.parse_assign_item(),
-            TokKind::KwFunction => Ok(ComboItem::Function(self.parse_combo_function()?)),
+            TokKind::KwFunction => {
+                let start = self.toks[self.idx].start;
+                let (f, body_span, begin_span, end_span) =
+                    self.parse_combo_function_with_spans()?;
+                let end = self.toks[self.idx - 1].end; // endfunction
+                Ok(ModuleItem::Function {
+                    func: f,
+                    span: Span { start, end },
+                    body_span,
+                    begin_span,
+                    end_span,
+                })
+            }
             TokKind::KwFor => self.parse_combo_generate_for_item(),
             TokKind::KwIf => self.parse_combo_generate_if_item(),
             other => Err(Error::Parse(format!(
@@ -446,7 +456,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_combo_generate_for_item(&mut self) -> Result<ComboItem> {
+    fn parse_combo_generate_for_item(&mut self) -> Result<ModuleItem> {
+        let start = self.toks[self.idx].start;
         self.expect(TokKind::KwFor)?;
         self.expect(TokKind::LParen)?;
         match self.toks[self.idx].kind.clone() {
@@ -514,17 +525,21 @@ impl<'a> Parser<'a> {
         }
         self.expect(TokKind::RParen)?;
         let body = self.parse_combo_item_block()?;
-        Ok(ComboItem::GenerateFor {
+        let end = self.toks[self.idx - 1].end;
+        Ok(ModuleItem::GenerateFor {
             genvar,
             start: start_expr,
             limit: limit_expr,
             body,
+            span: Span { start, end },
         })
     }
 
-    fn parse_combo_generate_if_item(&mut self) -> Result<ComboItem> {
+    fn parse_combo_generate_if_item(&mut self) -> Result<ModuleItem> {
+        let start = self.toks[self.idx].start;
         let mut branches = Vec::new();
         loop {
+            let branch_start = self.toks[self.idx].start;
             let cond = if *self.cur() == TokKind::KwIf {
                 self.expect(TokKind::KwIf)?;
                 self.expect(TokKind::LParen)?;
@@ -535,22 +550,43 @@ impl<'a> Parser<'a> {
                 None
             };
             let body = self.parse_combo_item_block()?;
-            branches.push(ComboGenerateBranch { cond, body });
+            let branch_end = self.toks[self.idx - 1].end;
+            branches.push(GenerateBranch {
+                cond,
+                body,
+                span: Span {
+                    start: branch_start,
+                    end: branch_end,
+                },
+            });
 
             if *self.cur() != TokKind::KwElse {
                 break;
             }
+            let else_start = self.toks[self.idx].start;
             self.bump();
             if *self.cur() != TokKind::KwIf {
                 let body = self.parse_combo_item_block()?;
-                branches.push(ComboGenerateBranch { cond: None, body });
+                let branch_end = self.toks[self.idx - 1].end;
+                branches.push(GenerateBranch {
+                    cond: None,
+                    body,
+                    span: Span {
+                        start: else_start,
+                        end: branch_end,
+                    },
+                });
                 break;
             }
         }
-        Ok(ComboItem::GenerateIf { branches })
+        let end = self.toks[self.idx - 1].end;
+        Ok(ModuleItem::GenerateIf {
+            branches,
+            span: Span { start, end },
+        })
     }
 
-    fn parse_combo_item_block(&mut self) -> Result<Vec<ComboItem>> {
+    fn parse_combo_item_block(&mut self) -> Result<Vec<ModuleItem>> {
         self.expect(TokKind::KwBegin)?;
         if *self.cur() == TokKind::Colon {
             self.bump();
@@ -595,7 +631,7 @@ impl<'a> Parser<'a> {
             end: header_end,
         };
 
-        let mut items: Vec<PipelineItem> = Vec::new();
+        let mut items: Vec<ModuleItem> = Vec::new();
         let endmodule_span: Span = loop {
             // If we're inside a disabled `ifdef branch, skip tokens until we see a
             // directive (which can update nesting) or endmodule/EOF.
@@ -641,15 +677,15 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_pipeline_item(&mut self) -> Result<PipelineItem> {
+    fn parse_pipeline_item(&mut self) -> Result<ModuleItem> {
         match self.cur().clone() {
             TokKind::KwWire => {
                 let (d, span) = self.parse_wire_decl_with_span()?;
-                Ok(PipelineItem::Decl { decl: d, span })
+                Ok(ModuleItem::Decl { decl: d, span })
             }
             TokKind::KwLogic | TokKind::KwReg => {
                 let (d, span) = self.parse_logic_decl_with_span()?;
-                Ok(PipelineItem::Decl { decl: d, span })
+                Ok(ModuleItem::Decl { decl: d, span })
             }
             TokKind::KwAssign => {
                 let stmt_start = self.toks[self.idx].start;
@@ -659,7 +695,7 @@ impl<'a> Parser<'a> {
                 let rhs = self.parse_span_until_semi()?;
                 self.expect(TokKind::Semi)?;
                 let stmt_end = self.toks[self.idx - 1].end;
-                Ok(PipelineItem::Assign {
+                Ok(ModuleItem::Assign {
                     lhs,
                     rhs,
                     rhs_text: None,
@@ -674,7 +710,7 @@ impl<'a> Parser<'a> {
                 let (f, body_span, begin_span, end_span) =
                     self.parse_combo_function_with_spans()?;
                 let end = self.toks[self.idx - 1].end; // endfunction
-                Ok(PipelineItem::Function {
+                Ok(ModuleItem::Function {
                     func: f,
                     span: Span { start, end },
                     body_span,
@@ -686,7 +722,7 @@ impl<'a> Parser<'a> {
                 let stmt_start = self.toks[self.idx].start;
                 let af = self.parse_always_ff()?;
                 let stmt_end = self.toks[self.idx - 1].end;
-                Ok(PipelineItem::AlwaysFf {
+                Ok(ModuleItem::AlwaysFf {
                     always_ff: af,
                     span: Span {
                         start: stmt_start,
@@ -703,7 +739,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_generate_for_item(&mut self) -> Result<PipelineItem> {
+    fn parse_generate_for_item(&mut self) -> Result<ModuleItem> {
         let start = self.toks[self.idx].start;
         self.expect(TokKind::KwFor)?;
         self.expect(TokKind::LParen)?;
@@ -773,7 +809,7 @@ impl<'a> Parser<'a> {
         self.expect(TokKind::RParen)?;
         let body = self.parse_pipeline_item_block()?;
         let end = self.toks[self.idx - 1].end;
-        Ok(PipelineItem::GenerateFor {
+        Ok(ModuleItem::GenerateFor {
             genvar,
             start: start_expr,
             limit: limit_expr,
@@ -782,7 +818,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_generate_if_item(&mut self) -> Result<PipelineItem> {
+    fn parse_generate_if_item(&mut self) -> Result<ModuleItem> {
         let start = self.toks[self.idx].start;
         let mut branches = Vec::new();
         loop {
@@ -827,13 +863,13 @@ impl<'a> Parser<'a> {
             }
         }
         let end = self.toks[self.idx - 1].end;
-        Ok(PipelineItem::GenerateIf {
+        Ok(ModuleItem::GenerateIf {
             branches,
             span: Span { start, end },
         })
     }
 
-    fn parse_pipeline_item_block(&mut self) -> Result<Vec<PipelineItem>> {
+    fn parse_pipeline_item_block(&mut self) -> Result<Vec<ModuleItem>> {
         self.expect(TokKind::KwBegin)?;
         if *self.cur() == TokKind::Colon {
             self.bump();
@@ -1062,11 +1098,6 @@ impl<'a> Parser<'a> {
         Ok(dims)
     }
 
-    fn parse_wire_decl(&mut self) -> Result<Decl> {
-        let (d, _span) = self.parse_wire_decl_with_span()?;
-        Ok(d)
-    }
-
     fn parse_wire_decl_with_span(&mut self) -> Result<(Decl, Span)> {
         let start = self.toks[self.idx].start;
         self.expect(TokKind::KwWire)?;
@@ -1111,25 +1142,26 @@ impl<'a> Parser<'a> {
         Ok((d, Span { start, end }))
     }
 
-    fn parse_assign_item(&mut self) -> Result<ComboItem> {
+    fn parse_assign_item(&mut self) -> Result<ModuleItem> {
+        let stmt_start = self.toks[self.idx].start;
         self.expect(TokKind::KwAssign)?;
         let lhs = self.parse_lhs()?;
         self.expect(TokKind::Eq)?;
         let rhs = self.parse_span_until_semi()?;
         self.expect(TokKind::Semi)?;
-        Ok(ComboItem::Assign {
+        let stmt_end = self.toks[self.idx - 1].end;
+        Ok(ModuleItem::Assign {
             lhs,
             rhs,
             rhs_text: None,
+            span: Span {
+                start: stmt_start,
+                end: stmt_end,
+            },
         })
     }
 
-    fn parse_combo_function(&mut self) -> Result<ComboFunction> {
-        let (f, _body_span, _begin_span, _end_span) = self.parse_combo_function_with_spans()?;
-        Ok(f)
-    }
-
-    fn parse_combo_function_with_spans(&mut self) -> Result<(ComboFunction, Span, Span, Span)> {
+    fn parse_combo_function_with_spans(&mut self) -> Result<(FunctionDecl, Span, Span, Span)> {
         self.expect(TokKind::KwFunction)?;
         if *self.cur() == TokKind::KwAutomatic {
             self.bump();
@@ -1190,11 +1222,11 @@ impl<'a> Parser<'a> {
             _ => {
                 let assigns = self.parse_procedural_function_body()?;
                 if assigns.len() == 1 && assigns[0].lhs == name {
-                    ComboFunctionBody::Assign {
+                    FunctionBody::Assign {
                         value: assigns[0].value,
                     }
                 } else {
-                    ComboFunctionBody::Procedure { assigns }
+                    FunctionBody::Procedure { assigns }
                 }
             }
         };
@@ -1217,7 +1249,7 @@ impl<'a> Parser<'a> {
         };
 
         Ok((
-            ComboFunction {
+            FunctionDecl {
                 name,
                 ret_width,
                 ret_signed,
@@ -1329,7 +1361,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_unique_casez_body(&mut self, fn_name: &str) -> Result<ComboFunctionBody> {
+    fn parse_unique_casez_body(&mut self, fn_name: &str) -> Result<FunctionBody> {
         let casez_start = self.toks[self.idx].start;
         if *self.cur() == TokKind::KwUnique {
             self.bump();
@@ -1435,7 +1467,7 @@ impl<'a> Parser<'a> {
                 value,
             });
         };
-        Ok(ComboFunctionBody::UniqueCasez {
+        Ok(FunctionBody::UniqueCasez {
             casez_span,
             selector,
             endcase_span,

@@ -17,9 +17,9 @@ use crate::ast_spanned::SpannedExpr;
 use crate::ast_spanned::SpannedExprKind;
 use crate::combo_compile::CasezArm;
 use crate::combo_compile::CasezPattern;
-use crate::combo_compile::ComboFunction;
-use crate::combo_compile::ComboFunctionImpl;
 use crate::combo_compile::CompiledComboModule;
+use crate::combo_compile::CompiledFunction;
+use crate::combo_compile::CompiledFunctionBody;
 use crate::eval::CallResolver;
 use crate::eval::binary_operand_expected_signednesses;
 use crate::eval::binary_operand_expected_widths;
@@ -279,7 +279,7 @@ pub fn eval_combo_seeded_with_coverage(
 fn eval_spanned_expr_with_funcs(
     expr: &SpannedExpr,
     env: &Env,
-    funcs: &BTreeMap<String, ComboFunction>,
+    funcs: &BTreeMap<String, CompiledFunction>,
     expected_width: Option<u32>,
     expected_signedness: Option<Signedness>,
     cov: &mut CoverageCounters,
@@ -662,9 +662,9 @@ fn ternary_branch_needs_width_recontext_spanned(expr: &SpannedExpr) -> bool {
 }
 
 fn eval_compiled_function(
-    f: &ComboFunction,
+    f: &CompiledFunction,
     args: &[Value4],
-    funcs: &BTreeMap<String, ComboFunction>,
+    funcs: &BTreeMap<String, CompiledFunction>,
     globals: &Env,
     expected_width: Option<u32>,
     _expected_signedness: Option<Signedness>,
@@ -682,7 +682,7 @@ fn eval_compiled_function(
         }
     }
     match &f.body {
-        ComboFunctionImpl::Expr { expr, expr_spanned } => {
+        CompiledFunctionBody::Expr { expr, expr_spanned } => {
             if let Some(meta) = fn_meta.get(&f.name) {
                 if let Some(s) = meta.assign_expr_span {
                     cov.bump_span(s);
@@ -714,7 +714,7 @@ fn eval_compiled_function(
             };
             Ok(coerce_to_declinfo(&v, &function_return_decl(f)))
         }
-        ComboFunctionImpl::Casez { selector, arms } => {
+        CompiledFunctionBody::Casez { selector, arms } => {
             let resolver = ComboResolver { funcs, globals };
             let sel_v = eval_ast_with_calls(selector, &env, Some(&resolver), None)?;
             let sel_bits = sel_v.to_bit_string_msb_first();
@@ -766,7 +766,7 @@ fn eval_compiled_function(
             let w = expected_width.unwrap_or(f.ret_width);
             Ok(x_value(w, Signedness::Unsigned))
         }
-        ComboFunctionImpl::Procedure { assigns } => {
+        CompiledFunctionBody::Procedure { assigns } => {
             let resolver = ComboResolver { funcs, globals };
             exec_function_procedure(f, &mut env, assigns, &resolver)
         }
@@ -777,7 +777,7 @@ fn x_value(width: u32, signedness: Signedness) -> Value4 {
     Value4::new(width, signedness, vec![LogicBit::X; width as usize])
 }
 
-fn function_return_decl(f: &ComboFunction) -> crate::module_compile::DeclInfo {
+fn function_return_decl(f: &CompiledFunction) -> crate::module_compile::DeclInfo {
     crate::module_compile::DeclInfo {
         width: f.ret_width,
         signedness: f.ret_signedness,
@@ -973,7 +973,7 @@ fn eval_static_u32(expr: &Expr, consts: &Env) -> Result<Option<u32>> {
     }
 }
 
-fn init_function_env(f: &ComboFunction, args: &[Value4], globals: &Env) -> Env {
+fn init_function_env(f: &CompiledFunction, args: &[Value4], globals: &Env) -> Env {
     let mut env = globals.clone();
     for (arg, av) in f.args.iter().zip(args.iter()) {
         let info = crate::module_compile::DeclInfo {
@@ -992,7 +992,10 @@ fn init_function_env(f: &ComboFunction, args: &[Value4], globals: &Env) -> Env {
     env
 }
 
-fn function_target_decl(f: &ComboFunction, lhs: &str) -> Option<crate::module_compile::DeclInfo> {
+fn function_target_decl(
+    f: &CompiledFunction,
+    lhs: &str,
+) -> Option<crate::module_compile::DeclInfo> {
     if lhs == f.name {
         return Some(function_return_decl(f));
     }
@@ -1011,7 +1014,7 @@ fn function_target_decl(f: &ComboFunction, lhs: &str) -> Option<crate::module_co
 }
 
 fn exec_function_procedure(
-    f: &ComboFunction,
+    f: &CompiledFunction,
     env: &mut Env,
     assigns: &[crate::combo_compile::FunctionAssign],
     resolver: &dyn CallResolver,
@@ -1091,7 +1094,7 @@ fn collect_idents(e: &Expr, out: &mut BTreeSet<String>) {
 }
 
 struct ComboResolver<'a> {
-    funcs: &'a BTreeMap<String, ComboFunction>,
+    funcs: &'a BTreeMap<String, CompiledFunction>,
     globals: &'a Env,
 }
 
@@ -1110,12 +1113,12 @@ impl<'a> CallResolver for ComboResolver<'a> {
         }
         let mut env = init_function_env(f, args, self.globals);
         match &f.body {
-            ComboFunctionImpl::Expr { expr, .. } => {
+            CompiledFunctionBody::Expr { expr, .. } => {
                 let mut v = eval_ast_with_calls(expr, &env, Some(self), Some(f.ret_width))?;
                 v = coerce_to_declinfo(&v, &function_return_decl(f));
                 Ok(v)
             }
-            ComboFunctionImpl::Casez { selector, arms } => {
+            CompiledFunctionBody::Casez { selector, arms } => {
                 let sel_v = eval_ast_with_calls(selector, &env, Some(self), None)?;
                 let sel_bits = sel_v.to_bit_string_msb_first();
 
@@ -1142,7 +1145,7 @@ impl<'a> CallResolver for ComboResolver<'a> {
                 let w = expected_width.unwrap_or(f.ret_width);
                 Ok(x_value(w, Signedness::Unsigned))
             }
-            ComboFunctionImpl::Procedure { assigns } => {
+            CompiledFunctionBody::Procedure { assigns } => {
                 exec_function_procedure(f, &mut env, assigns, self)
             }
         }

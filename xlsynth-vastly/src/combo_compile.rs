@@ -13,11 +13,11 @@ use crate::packed::rewrite_packed_lhs;
 use crate::packed::rewrite_packed_spanned_expr;
 use crate::parser::parse_expr;
 use crate::parser_spanned::parse_expr_spanned;
-use crate::sv_ast::ComboFunctionBody;
-use crate::sv_ast::ComboItem;
 use crate::sv_ast::ComboModule;
 use crate::sv_ast::Decl;
+use crate::sv_ast::FunctionBody;
 use crate::sv_ast::Lhs;
+use crate::sv_ast::ModuleItem;
 use crate::sv_ast::PortDir as SvPortDir;
 use crate::sv_ast::Span;
 
@@ -35,14 +35,14 @@ pub struct Port {
 }
 
 #[derive(Debug, Clone)]
-pub struct ComboAssign {
+pub struct ModuleAssign {
     pub lhs: Lhs,
     pub rhs: Expr,
     pub rhs_span: Span,
     pub rhs_spanned: SpannedExpr,
 }
 
-impl ComboAssign {
+impl ModuleAssign {
     pub fn lhs_base(&self) -> &str {
         match &self.lhs {
             Lhs::Ident(base) => base,
@@ -80,17 +80,17 @@ pub struct FunctionAssign {
 }
 
 #[derive(Debug, Clone)]
-pub struct ComboFunction {
+pub struct CompiledFunction {
     pub name: String,
     pub ret_width: u32,
     pub ret_signedness: Signedness,
     pub args: Vec<FunctionVar>,
     pub locals: BTreeMap<String, DeclInfo>,
-    pub body: ComboFunctionImpl,
+    pub body: CompiledFunctionBody,
 }
 
 #[derive(Debug, Clone)]
-pub enum ComboFunctionImpl {
+pub enum CompiledFunctionBody {
     Casez {
         selector: Expr,
         arms: Vec<CasezArm>,
@@ -111,8 +111,8 @@ pub struct CompiledComboModule {
     pub input_ports: Vec<Port>,
     pub output_ports: Vec<Port>,
     pub decls: BTreeMap<String, DeclInfo>,
-    pub assigns: Vec<ComboAssign>,
-    pub functions: BTreeMap<String, ComboFunction>,
+    pub assigns: Vec<ModuleAssign>,
+    pub functions: BTreeMap<String, CompiledFunction>,
 }
 
 pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
@@ -148,16 +148,21 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
         decls.insert(p.name.clone(), decl_info_from_port_decl(p));
     }
 
-    let mut functions: BTreeMap<String, ComboFunction> = BTreeMap::new();
-    let mut assigns: Vec<ComboAssign> = Vec::new();
+    let mut functions: BTreeMap<String, CompiledFunction> = BTreeMap::new();
+    let mut assigns: Vec<ModuleAssign> = Vec::new();
 
     for it in &items {
         match it {
-            ComboItem::WireDecl(d) => {
+            ModuleItem::Decl { decl: d, .. } => {
                 decls.insert(d.name.clone(), decl_info_from_decl(d));
             }
-            ComboItem::Assign { .. } | ComboItem::Function(_) => {}
-            ComboItem::GenerateFor { .. } | ComboItem::GenerateIf { .. } => {
+            ModuleItem::Assign { .. } | ModuleItem::Function { .. } => {}
+            ModuleItem::AlwaysFf { .. } => {
+                return Err(crate::Error::Parse(
+                    "always_ff is not supported in combo modules".to_string(),
+                ));
+            }
+            ModuleItem::GenerateFor { .. } | ModuleItem::GenerateIf { .. } => {
                 unreachable!("combo items should be elaborated")
             }
         }
@@ -165,8 +170,10 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
 
     for it in &items {
         match it {
-            ComboItem::WireDecl(_) => {}
-            ComboItem::Assign { lhs, rhs, rhs_text } => {
+            ModuleItem::Decl { .. } => {}
+            ModuleItem::Assign {
+                lhs, rhs, rhs_text, ..
+            } => {
                 let rhs_src = rhs_text
                     .as_deref()
                     .unwrap_or_else(|| parse_src[rhs.start..rhs.end].trim());
@@ -176,14 +183,14 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
                 let mut rhs_spanned = parse_expr_spanned(rhs_src)?;
                 rhs_spanned.shift_spans(rhs.start);
                 rhs_spanned = rewrite_packed_spanned_expr(rhs_spanned, &decls)?;
-                assigns.push(ComboAssign {
+                assigns.push(ModuleAssign {
                     lhs,
                     rhs: rhs_expr,
                     rhs_span: *rhs,
                     rhs_spanned,
                 });
             }
-            ComboItem::Function(f) => {
+            ModuleItem::Function { func: f, .. } => {
                 let mut fn_decls = decls.clone();
                 for arg in &f.args {
                     fn_decls.insert(arg.name.clone(), decl_info_from_decl(arg));
@@ -200,7 +207,7 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
                     .collect();
 
                 let body = match &f.body {
-                    ComboFunctionBody::UniqueCasez { selector, arms, .. } => {
+                    FunctionBody::UniqueCasez { selector, arms, .. } => {
                         let selector_src = parse_src[selector.start..selector.end].trim();
                         let selector_expr =
                             rewrite_packed_expr(parse_expr(selector_src)?, &fn_decls);
@@ -220,24 +227,24 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
                                 value: value_expr,
                             });
                         }
-                        ComboFunctionImpl::Casez {
+                        CompiledFunctionBody::Casez {
                             selector: selector_expr,
                             arms: out_arms,
                         }
                     }
-                    ComboFunctionBody::Assign { value } => {
+                    FunctionBody::Assign { value } => {
                         let value_src = parse_src[value.start..value.end].trim();
                         let expr = rewrite_packed_expr(parse_expr(value_src)?, &fn_decls);
                         let expr = expr?;
                         let mut expr_spanned = parse_expr_spanned(value_src)?;
                         expr_spanned.shift_spans(value.start);
                         expr_spanned = rewrite_packed_spanned_expr(expr_spanned, &fn_decls)?;
-                        ComboFunctionImpl::Expr {
+                        CompiledFunctionBody::Expr {
                             expr,
                             expr_spanned: Some(expr_spanned),
                         }
                     }
-                    ComboFunctionBody::Procedure { assigns } => {
+                    FunctionBody::Procedure { assigns } => {
                         let mut out_assigns = Vec::with_capacity(assigns.len());
                         for a in assigns {
                             let value_src = parse_src[a.value.start..a.value.end].trim();
@@ -248,7 +255,7 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
                                 expr,
                             });
                         }
-                        ComboFunctionImpl::Procedure {
+                        CompiledFunctionBody::Procedure {
                             assigns: out_assigns,
                         }
                     }
@@ -256,7 +263,7 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
 
                 functions.insert(
                     f.name.clone(),
-                    ComboFunction {
+                    CompiledFunction {
                         name: f.name.clone(),
                         ret_width: f.ret_width,
                         ret_signedness: if f.ret_signed {
@@ -270,7 +277,12 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
                     },
                 );
             }
-            ComboItem::GenerateFor { .. } | ComboItem::GenerateIf { .. } => {
+            ModuleItem::AlwaysFf { .. } => {
+                return Err(crate::Error::Parse(
+                    "always_ff is not supported in combo modules".to_string(),
+                ));
+            }
+            ModuleItem::GenerateFor { .. } | ModuleItem::GenerateIf { .. } => {
                 unreachable!("combo items should be elaborated")
             }
         }

@@ -38,47 +38,21 @@ pub struct ComboModule {
     pub name: String,
     pub params: BTreeMap<String, Value4>,
     pub ports: Vec<PortDecl>,
-    pub items: Vec<ComboItem>,
+    pub items: Vec<ModuleItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ComboItem {
-    WireDecl(Decl),
-    Assign {
-        lhs: Lhs,
-        rhs: Span,
-        rhs_text: Option<String>,
-    },
-    Function(ComboFunction),
-    GenerateFor {
-        genvar: String,
-        start: VExpr,
-        limit: VExpr,
-        body: Vec<ComboItem>,
-    },
-    GenerateIf {
-        branches: Vec<ComboGenerateBranch>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ComboGenerateBranch {
-    pub cond: Option<VExpr>,
-    pub body: Vec<ComboItem>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ComboFunction {
+pub struct FunctionDecl {
     pub name: String,
     pub ret_width: u32,
     pub ret_signed: bool,
     pub args: Vec<Decl>,
     pub locals: Vec<Decl>,
-    pub body: ComboFunctionBody,
+    pub body: FunctionBody,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ComboFunctionBody {
+pub enum FunctionBody {
     UniqueCasez {
         casez_span: Span,
         selector: Span,
@@ -145,11 +119,11 @@ pub struct PipelineModule {
     pub ports: Vec<PortDecl>,
     pub header_span: Span,
     pub endmodule_span: Span,
-    pub items: Vec<PipelineItem>,
+    pub items: Vec<ModuleItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PipelineItem {
+pub enum ModuleItem {
     Decl {
         decl: Decl,
         span: Span,
@@ -161,7 +135,7 @@ pub enum PipelineItem {
         span: Span,
     },
     Function {
-        func: ComboFunction,
+        func: FunctionDecl,
         span: Span,
         body_span: Span,
         begin_span: Span,
@@ -175,7 +149,7 @@ pub enum PipelineItem {
         genvar: String,
         start: VExpr,
         limit: VExpr,
-        body: Vec<PipelineItem>,
+        body: Vec<ModuleItem>,
         span: Span,
     },
     GenerateIf {
@@ -187,7 +161,7 @@ pub enum PipelineItem {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenerateBranch {
     pub cond: Option<VExpr>,
-    pub body: Vec<PipelineItem>,
+    pub body: Vec<ModuleItem>,
     pub span: Span,
 }
 
