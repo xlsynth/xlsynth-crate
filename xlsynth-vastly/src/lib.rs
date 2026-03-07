@@ -26,6 +26,7 @@ mod packed;
 pub mod parser;
 mod parser_spanned;
 mod pipeline_compile;
+mod pipeline_generate;
 mod pipeline_harness;
 mod reference_sim;
 mod sim_harness;

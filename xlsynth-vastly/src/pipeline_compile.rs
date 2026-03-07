@@ -21,6 +21,7 @@ use crate::combo_compile::PortDir;
 use crate::module_compile::CompiledModule;
 use crate::module_compile::DeclInfo;
 use crate::packed::rewrite_packed_expr;
+use crate::packed::rewrite_packed_lhs;
 use crate::packed::rewrite_packed_spanned_expr;
 use crate::packed::rewrite_packed_stmt;
 use crate::sim_observer::SimObserver;
@@ -88,8 +89,10 @@ pub fn compile_pipeline_module_with_defines(
 ) -> Result<CompiledPipelineModule> {
     let parsed: PipelineModule =
         crate::sv_parser::parse_pipeline_module_with_defines(src, defines)?;
+    let items =
+        crate::pipeline_generate::elaborate_pipeline_items(src, &parsed.params, &parsed.items)?;
 
-    let module_name = parsed.name;
+    let module_name = parsed.name.clone();
 
     let mut input_ports_all: Vec<Port> = Vec::new();
     let mut output_ports: Vec<Port> = Vec::new();
@@ -119,7 +122,7 @@ pub fn compile_pipeline_module_with_defines(
     let mut observers: Vec<SimObserver> = Vec::new();
     let mut observer_spans: Vec<Span> = Vec::new();
 
-    for it in &parsed.items {
+    for it in &items {
         match it {
             PipelineItem::Decl { decl: d, .. } => {
                 if decls.contains_key(&d.name) {
@@ -130,20 +133,28 @@ pub fn compile_pipeline_module_with_defines(
             PipelineItem::Assign { .. }
             | PipelineItem::Function { .. }
             | PipelineItem::AlwaysFf { .. } => {}
+            PipelineItem::GenerateFor { .. } | PipelineItem::GenerateIf { .. } => {
+                unreachable!("pipeline items should be elaborated")
+            }
         }
     }
 
-    for it in &parsed.items {
+    for it in &items {
         match it {
             PipelineItem::Decl { .. } => {}
-            PipelineItem::Assign { lhs_ident, rhs, .. } => {
-                let rhs_src = src[rhs.start..rhs.end].trim();
+            PipelineItem::Assign {
+                lhs, rhs, rhs_text, ..
+            } => {
+                let rhs_src = rhs_text
+                    .as_deref()
+                    .unwrap_or_else(|| src[rhs.start..rhs.end].trim());
+                let lhs = rewrite_packed_lhs(lhs.clone(), &decls)?;
                 let rhs_expr = rewrite_packed_expr(crate::parser::parse_expr(rhs_src)?, &decls)?;
                 let mut rhs_spanned = crate::parser_spanned::parse_expr_spanned(rhs_src)?;
                 rhs_spanned.shift_spans(rhs.start);
                 rhs_spanned = rewrite_packed_spanned_expr(rhs_spanned, &decls)?;
                 assigns.push(ComboAssign {
-                    lhs: Lhs::Ident(lhs_ident.clone()),
+                    lhs,
                     rhs: rhs_expr,
                     rhs_span: *rhs,
                     rhs_spanned,
@@ -322,6 +333,9 @@ pub fn compile_pipeline_module_with_defines(
                     *span,
                 ));
             }
+            PipelineItem::GenerateFor { .. } | PipelineItem::GenerateIf { .. } => {
+                unreachable!("pipeline items should be elaborated")
+            }
         }
     }
 
@@ -384,12 +398,35 @@ pub fn compile_pipeline_module_with_defines(
         functions,
     };
 
-    let mut seen_state_regs: BTreeSet<String> = BTreeSet::new();
-    let mut seqs: Vec<CompiledModule> = Vec::with_capacity(stateful.len());
-    let mut seq_spans: Vec<Span> = Vec::new();
-    for (af, af_span) in stateful {
-        let mut state_regs: BTreeSet<String> = BTreeSet::new();
-        collect_state_regs(&af.body, &mut state_regs);
+    let seq_spans: Vec<Span> = stateful.iter().map(|(_, span)| *span).collect();
+    let mut groups: Vec<(BTreeSet<String>, Vec<Stmt>)> = Vec::new();
+    for (af, _af_span) in stateful {
+        let mut regs = BTreeSet::new();
+        collect_state_regs(&af.body, &mut regs);
+        let mut hits = Vec::new();
+        for (idx, (group_regs, _)) in groups.iter().enumerate() {
+            if !group_regs.is_disjoint(&regs) {
+                hits.push(idx);
+            }
+        }
+
+        if hits.is_empty() {
+            groups.push((regs, vec![af.body]));
+            continue;
+        }
+
+        let first = hits[0];
+        groups[first].0.extend(regs);
+        groups[first].1.push(af.body);
+        for idx in hits.into_iter().skip(1).rev() {
+            let (other_regs, other_bodies) = groups.remove(idx);
+            groups[first].0.extend(other_regs);
+            groups[first].1.extend(other_bodies);
+        }
+    }
+
+    let mut seqs: Vec<CompiledModule> = Vec::with_capacity(groups.len());
+    for (state_regs, bodies) in groups {
         for r in &state_regs {
             if !decls.contains_key(r) {
                 return Err(Error::Parse(format!(
@@ -397,22 +434,15 @@ pub fn compile_pipeline_module_with_defines(
                     r
                 )));
             }
-            if !seen_state_regs.insert(r.clone()) {
-                return Err(Error::Parse(format!(
-                    "state reg `{}` assigned from multiple always_ff blocks is not supported",
-                    r
-                )));
-            }
         }
         seqs.push(CompiledModule {
             module_name: module_name.clone(),
-            clk_name: af.clk_name,
+            clk_name: clk_name.clone(),
             consts: parsed.params.clone(),
             decls: decls.clone(),
             state_regs,
-            body: af.body,
+            body: Stmt::Begin(bodies),
         });
-        seq_spans.push(af_span);
     }
 
     Ok(CompiledPipelineModule {

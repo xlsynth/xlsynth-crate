@@ -45,3 +45,28 @@ fn skipped_preprocessor_lines_are_unknown_coverable() {
     assert_eq!(c.line(3), LineCoverability::CoverableUnknown);
     assert_eq!(c.line(4), LineCoverability::NonCoverableStructural);
 }
+
+#[test]
+fn generated_items_are_marked_coverable() {
+    let src = concat!(
+        "module m(\n",
+        "  input logic clk,\n",
+        "  input logic a,\n",
+        "  output logic y\n",
+        ");\n",
+        "  logic q;\n",
+        "  for (genvar i = 0; i < 1; i = i + 1) begin : g\n",
+        "    assign y = q;\n",
+        "    always_ff @(posedge clk) begin\n",
+        "      q <= a;\n",
+        "    end\n",
+        "  end\n",
+        "endmodule\n",
+    );
+    let st = SourceText::new(src.to_string());
+    let c = compute_coverability_or_fallback(&st);
+    assert_eq!(c.line(7), LineCoverability::CoverableUnknown);
+    assert_eq!(c.line(8), LineCoverability::CoverableExecutable);
+    assert_eq!(c.line(9), LineCoverability::CoverableExecutable);
+    assert_eq!(c.line(10), LineCoverability::CoverableExecutable);
+}

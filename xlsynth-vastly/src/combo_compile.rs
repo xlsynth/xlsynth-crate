@@ -168,6 +168,8 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
             ComboItem::WireDecl(_) => {}
             ComboItem::Assign { lhs, rhs } => {
                 let rhs_src = parse_src[rhs.start..rhs.end].trim();
+                let lhs = denormalize_lhs(lhs.clone(), &normalized.placeholder_to_original);
+                let lhs = rewrite_packed_lhs(lhs, &decls)?;
                 let rhs_expr =
                     denormalize_expr(parse_expr(rhs_src)?, &normalized.placeholder_to_original);
                 let rhs_expr = rewrite_packed_expr(rhs_expr, &decls)?;
@@ -175,8 +177,6 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
                 denormalize_spanned_expr(&mut rhs_spanned, &normalized.placeholder_to_original);
                 rhs_spanned.shift_spans(rhs.start);
                 rhs_spanned = rewrite_packed_spanned_expr(rhs_spanned, &decls)?;
-                let lhs = denormalize_lhs(lhs.clone(), &normalized.placeholder_to_original);
-                let lhs = rewrite_packed_lhs(lhs, &decls)?;
                 assigns.push(ComboAssign {
                     lhs,
                     rhs: rhs_expr,
