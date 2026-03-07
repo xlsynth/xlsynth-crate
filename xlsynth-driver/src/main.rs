@@ -113,7 +113,7 @@ use clap::{Arg, ArgAction};
 use once_cell::sync::Lazy;
 use report_cli_error::report_cli_error_and_exit;
 use serde::Deserialize;
-use xlsynth::sv_bridge_builder::SvEnumCaseNamingPolicy;
+use xlsynth::sv_bridge_builder::{SvEnumCaseNamingPolicy, SvStructFieldOrderingPolicy};
 use xlsynth_prover::prover::types::AssertionSemantics;
 use xlsynth_prover::prover::types::QuickCheckAssertionSemantics;
 
@@ -698,6 +698,19 @@ fn main() {
                         .action(ArgAction::Set)
                         .value_parser(clap::builder::EnumValueParser::<
                             SvEnumCaseNamingPolicy,
+                        >::new()),
+                )
+                .arg(
+                    Arg::new("sv_struct_field_ordering")
+                        .long("sv_struct_field_ordering")
+                        .value_name("POLICY")
+                        .help(
+                            "Packed-struct layout policy for generated SystemVerilog packed structs; member order controls the packed bit layout",
+                        )
+                        .default_value("as_declared")
+                        .action(ArgAction::Set)
+                        .value_parser(clap::builder::EnumValueParser::<
+                            SvStructFieldOrderingPolicy,
                         >::new()),
                 ),
         )

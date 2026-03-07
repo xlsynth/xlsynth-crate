@@ -808,6 +808,94 @@ fn test_dslx2sv_types_subcommand_enum_qualified_policy() {
     );
 }
 
+// Verifies: dslx2sv-types keeps the default packed-struct layout when the new
+// struct field ordering flag is omitted.
+// Catches: Regressions where adding the optional struct-ordering flag silently
+// changes the default packed-struct member layout.
+#[test]
+fn test_dslx2sv_types_subcommand_struct_ordering_defaults_to_as_declared() {
+    let dslx = r#"
+struct MyStruct {
+    first: u8,
+    second: u16,
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("my_module.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("dslx2sv-types")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--sv_enum_case_naming_policy")
+        .arg("unqualified")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    xlsynth_test_helpers::assert_valid_sv(&stdout);
+    assert_eq!(
+        stdout.trim(),
+        r#"typedef struct packed {
+    logic [7:0] first;
+    logic [15:0] second;
+} my_struct_t;"#
+    );
+}
+
+// Verifies: dslx2sv-types reverses packed-struct member declarations, which
+// changes the emitted packed layout, when the new policy is selected.
+// Catches: Regressions where the CLI accepts the new policy but the builder
+// still emits the default packed layout.
+#[test]
+fn test_dslx2sv_types_subcommand_struct_ordering_reversed() {
+    let dslx = r#"
+struct MyStruct {
+    first: u8,
+    second: u16,
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("my_module.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("dslx2sv-types")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--sv_enum_case_naming_policy")
+        .arg("unqualified")
+        .arg("--sv_struct_field_ordering")
+        .arg("reversed")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    xlsynth_test_helpers::assert_valid_sv(&stdout);
+    assert_eq!(
+        stdout.trim(),
+        r#"typedef struct packed {
+    logic [15:0] second;
+    logic [7:0] first;
+} my_struct_t;"#
+    );
+}
+
 // Negative test: omitting the required enum-case naming policy flag returns a
 // CLI error instead of silently choosing a default.
 #[test]
@@ -834,6 +922,39 @@ fn test_dslx2sv_types_requires_sv_enum_case_naming_policy_flag() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("--sv_enum_case_naming_policy"));
     assert!(stderr.contains("required"));
+}
+
+// Negative test: invalid struct field ordering policy values are rejected by
+// CLI validation with a helpful allowed-values error.
+#[test]
+fn test_dslx2sv_types_rejects_invalid_sv_struct_field_ordering_flag_value() {
+    let dslx = "struct MyStruct { first: u8, second: u16 }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("my_module.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("dslx2sv-types")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--sv_enum_case_naming_policy")
+        .arg("unqualified")
+        .arg("--sv_struct_field_ordering")
+        .arg("bad_policy")
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("bad_policy"));
+    assert!(stderr.contains("as_declared"));
+    assert!(stderr.contains("reversed"));
 }
 
 // Negative test: invalid enum-case naming policy values are rejected by CLI

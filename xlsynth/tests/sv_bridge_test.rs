@@ -4,7 +4,7 @@ use pretty_assertions::assert_eq;
 use xlsynth::{
     dslx,
     dslx_bridge::convert_imported_module,
-    sv_bridge_builder::{SvBridgeBuilder, SvEnumCaseNamingPolicy},
+    sv_bridge_builder::{SvBridgeBuilder, SvEnumCaseNamingPolicy, SvStructFieldOrderingPolicy},
 };
 
 /// Tests that we can convert the whole "structure_zoo.x" file to SystemVerilog.
@@ -65,4 +65,38 @@ fn test_sv_bridge_structure_zoo() {
     let structure_zoo_sv_golden =
         std::fs::read_to_string("tests/want_structure_zoo.golden.sv").unwrap();
     assert_eq!(got_sv, structure_zoo_sv_golden);
+}
+
+/// Tests that reversed struct-field ordering changes the emitted packed-struct
+/// layout by reversing member declaration order.
+#[test]
+fn test_sv_bridge_struct_field_ordering_reversed() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let mut import_data = dslx::ImportData::default();
+    let dslx_path = "tests/reversed_struct_field_ordering.x";
+    let dslx_contents = std::fs::read_to_string(dslx_path).unwrap();
+    let typechecked = dslx::parse_and_typecheck(
+        &dslx_contents,
+        dslx_path,
+        "reversed_struct_field_ordering",
+        &mut import_data,
+    )
+    .unwrap();
+
+    let mut builder = SvBridgeBuilder::with_policies(
+        SvEnumCaseNamingPolicy::Unqualified,
+        SvStructFieldOrderingPolicy::Reversed,
+    );
+    convert_imported_module(&typechecked, &mut builder).unwrap();
+    let got_sv = builder.build();
+
+    xlsynth_test_helpers::assert_valid_sv(&got_sv);
+    assert_eq!(
+        got_sv,
+        r#"typedef struct packed {
+    logic [15:0] second;
+    logic [7:0] first;
+} my_struct_t;
+"#
+    );
 }
