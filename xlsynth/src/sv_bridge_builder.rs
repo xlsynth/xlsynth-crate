@@ -42,6 +42,25 @@ pub enum SvEnumCaseNamingPolicy {
     EnumQualified,
 }
 
+/// Selects how DSLX struct members are ordered in emitted SV packed struct
+/// declarations.
+///
+/// In SystemVerilog `typedef struct packed`, member declaration order defines
+/// the packed bit layout. Choosing [`SvStructFieldOrderingPolicy::Reversed`]
+/// therefore changes the generated wire contract, not just the textual output
+/// order. This does not change the DSLX-side type model or the enum naming
+/// policy.
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
+#[cfg_attr(feature = "clap", value(rename_all = "snake_case"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SvStructFieldOrderingPolicy {
+    /// Emit members in the same order they are declared in DSLX.
+    AsDeclared,
+    /// Emit members in the reverse of their DSLX declaration order, which also
+    /// reverses their packed-layout positions in the generated SV.
+    Reversed,
+}
+
 /// Accumulates SV type declarations for a DSLX module while enforcing a flat
 /// generated-name namespace.
 ///
@@ -58,6 +77,8 @@ pub struct SvBridgeBuilder {
     defined: HashSet<String>,
     /// Controls how enum member symbols are derived before collision checks.
     enum_case_naming_policy: SvEnumCaseNamingPolicy,
+    /// Controls the emitted order of packed struct members.
+    struct_field_ordering_policy: SvStructFieldOrderingPolicy,
 }
 
 fn camel_to_snake(name: &str) -> String {
@@ -295,6 +316,19 @@ fn convert_extern_type(
 }
 
 impl SvBridgeBuilder {
+    /// Creates a builder with explicit enum and struct emission policies.
+    pub fn with_policies(
+        enum_case_naming_policy: SvEnumCaseNamingPolicy,
+        struct_field_ordering_policy: SvStructFieldOrderingPolicy,
+    ) -> Self {
+        Self {
+            lines: vec![],
+            defined: HashSet::new(),
+            enum_case_naming_policy,
+            struct_field_ordering_policy,
+        }
+    }
+
     /// Creates a builder with an explicit policy for enum member symbol
     /// naming.
     ///
@@ -305,11 +339,10 @@ impl SvBridgeBuilder {
     /// case with the containing enum name to avoid cross-enum collisions in
     /// the flat generated SV namespace.
     pub fn with_enum_case_policy(enum_case_naming_policy: SvEnumCaseNamingPolicy) -> Self {
-        Self {
-            lines: vec![],
-            defined: HashSet::new(),
+        Self::with_policies(
             enum_case_naming_policy,
-        }
+            SvStructFieldOrderingPolicy::AsDeclared,
+        )
     }
 
     /// Returns the generated SV source accumulated so far.
@@ -357,6 +390,36 @@ impl SvBridgeBuilder {
                 Self::enum_case_name_component_to_sv(enum_name),
                 Self::enum_case_name_component_to_sv(member_name)
             ),
+        }
+    }
+
+    fn struct_member_line(member: &StructMemberData) -> Result<String, XlsynthError> {
+        let member_name = &member.name;
+
+        // Note: this is the type that type inference determined the member is; i.e. it
+        // will be something like `BitsType`, `StructType`, `ArrayType`,
+        // etc.
+        let member_concrete_ty = &member.concrete_type;
+
+        let member_annotated_ty = &member.type_annotation;
+
+        if let Some(extern_ref) = get_extern_type_ref(member_annotated_ty, member_concrete_ty) {
+            Ok(format!("    {extern_ref} {member_name};"))
+        } else if let Some(type_ref_type_annotation) =
+            member_annotated_ty.to_type_ref_type_annotation()
+        {
+            let type_ref = type_ref_type_annotation.get_type_ref();
+            let type_def = type_ref.get_type_definition();
+            if let Some(type_alias) = type_def.to_type_alias() {
+                let sv_type_name = struct_name_to_sv(&type_alias.get_identifier());
+                Ok(format!("    {sv_type_name} {member_name};"))
+            } else {
+                let member_sv_ty = convert_type(member_concrete_ty, None)?;
+                Ok(format!("    {member_sv_ty} {member_name};"))
+            }
+        } else {
+            let member_sv_ty = convert_type(member_concrete_ty, None)?;
+            Ok(format!("    {member_sv_ty} {member_name};"))
         }
     }
 }
@@ -411,37 +474,21 @@ impl BridgeBuilder for SvBridgeBuilder {
     ) -> Result<(), XlsynthError> {
         let mut lines = vec![];
         lines.push("typedef struct packed {".to_string());
-        for member in members {
-            let member_name = &member.name;
-
-            // Note: this is the type that type inference determined the member is; i.e. it
-            // will be something like `BitsType`, `StructType`, `ArrayType`,
-            // etc.
-            let member_concrete_ty = &member.concrete_type;
-
-            let member_annotated_ty = &member.type_annotation;
-
-            if let Some(extern_ref) = get_extern_type_ref(member_annotated_ty, member_concrete_ty) {
-                lines.push(format!("    {extern_ref} {member_name};"));
-                continue;
-            }
-
-            // If the member_annotated_ty is a local alias, we want to emit the type via
-            // its local identifier.
-            if let Some(type_ref_type_annotation) =
-                member_annotated_ty.to_type_ref_type_annotation()
-            {
-                let type_ref = type_ref_type_annotation.get_type_ref();
-                let type_def = type_ref.get_type_definition();
-                if let Some(type_alias) = type_def.to_type_alias() {
-                    let sv_type_name = struct_name_to_sv(&type_alias.get_identifier());
-                    lines.push(format!("    {sv_type_name} {member_name};"));
-                    continue;
-                }
-            }
-
-            let member_sv_ty = convert_type(member_concrete_ty, None)?;
-            lines.push(format!("    {member_sv_ty} {member_name};"));
+        let member_lines =
+            if self.struct_field_ordering_policy == SvStructFieldOrderingPolicy::AsDeclared {
+                members
+                    .iter()
+                    .map(Self::struct_member_line)
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                members
+                    .iter()
+                    .rev()
+                    .map(Self::struct_member_line)
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+        for member_line in member_lines {
+            lines.push(member_line);
         }
         lines.push(format!("}} {};\n", struct_name_to_sv(dslx_name)));
         self.lines.push(lines.join("\n"));
@@ -515,9 +562,22 @@ mod tests {
         dslx: &str,
         enum_case_naming_policy: SvEnumCaseNamingPolicy,
     ) -> Result<String, XlsynthError> {
+        simple_convert_for_test_with_policies(
+            dslx,
+            enum_case_naming_policy,
+            SvStructFieldOrderingPolicy::AsDeclared,
+        )
+    }
+
+    fn simple_convert_for_test_with_policies(
+        dslx: &str,
+        enum_case_naming_policy: SvEnumCaseNamingPolicy,
+        struct_field_ordering_policy: SvStructFieldOrderingPolicy,
+    ) -> Result<String, XlsynthError> {
         let mut import_data = dslx::ImportData::default();
         let path = std::path::PathBuf::from_str("/memfile/my_module.x").unwrap();
-        let mut builder = SvBridgeBuilder::with_enum_case_policy(enum_case_naming_policy);
+        let mut builder =
+            SvBridgeBuilder::with_policies(enum_case_naming_policy, struct_field_ordering_policy);
         convert_leaf_module(&mut import_data, dslx, &path, &mut builder)?;
         Ok(builder.build())
     }
@@ -605,6 +665,30 @@ mod tests {
             r#"typedef struct packed {
     logic [9:0] [7:0] byte_array;
     logic [15:0] word_data;
+} my_struct_t;
+"#
+        );
+    }
+
+    #[test]
+    fn test_convert_leaf_module_struct_def_reversed_field_order() {
+        let dslx = r#"
+        struct MyStruct {
+            byte_array: u8[10],
+            word_data: u16,
+        }
+        "#;
+        let sv = simple_convert_for_test_with_policies(
+            dslx,
+            SvEnumCaseNamingPolicy::Unqualified,
+            SvStructFieldOrderingPolicy::Reversed,
+        )
+        .unwrap();
+        assert_eq!(
+            sv,
+            r#"typedef struct packed {
+    logic [15:0] word_data;
+    logic [9:0] [7:0] byte_array;
 } my_struct_t;
 "#
         );

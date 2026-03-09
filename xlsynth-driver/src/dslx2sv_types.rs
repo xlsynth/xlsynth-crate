@@ -2,30 +2,31 @@
 
 //! Execution path for the `xlsynth-driver dslx2sv-types` subcommand.
 //!
-//! This module parses the CLI-selected enum-case naming policy and routes it to
-//! the shared `SvBridgeBuilder` so callers (for example Bazel rules) can choose
-//! whether generated SV enum members are emitted as case-only symbols or
-//! enum-qualified symbols.
+//! This module parses the CLI-selected SV emission policies and routes them to
+//! the shared `SvBridgeBuilder` so callers (for example Bazel rules) can
+//! choose enum-member spelling and packed-struct bit layout.
 
 use clap::ArgMatches;
 
 use crate::common::get_dslx_paths;
 use crate::toolchain_config::ToolchainConfig;
-use xlsynth::sv_bridge_builder::SvEnumCaseNamingPolicy;
+use xlsynth::sv_bridge_builder::{SvEnumCaseNamingPolicy, SvStructFieldOrderingPolicy};
 
 /// Converts DSLX type definitions to SV type declarations and writes the result
 /// to stdout.
 ///
 /// This function is intentionally thin: it wires file contents, import search
-/// paths, and the caller-selected [`SvEnumCaseNamingPolicy`] into the shared
-/// bridge implementation. Passing `Unqualified` for a module whose enums reuse
-/// case names across types will surface as a generation-time collision error in
-/// the builder.
+/// paths, and the caller-selected SV emission policies into the shared bridge
+/// implementation. Passing `Unqualified` for a module whose enums reuse case
+/// names across types will surface as a generation-time collision error in the
+/// builder. Choosing `Reversed` for `struct_field_ordering_policy` changes the
+/// packed bit layout of emitted SV structs, not only their textual order.
 pub fn dslx2sv_types(
     input_file: &std::path::Path,
     dslx_stdlib_path: Option<&std::path::Path>,
     search_paths: &[&std::path::Path],
     enum_case_naming_policy: SvEnumCaseNamingPolicy,
+    struct_field_ordering_policy: SvStructFieldOrderingPolicy,
 ) {
     log::info!("dslx2sv_types");
     let dslx = std::fs::read_to_string(input_file).unwrap();
@@ -36,8 +37,10 @@ pub fn dslx2sv_types(
 
     let mut import_data =
         xlsynth::dslx::ImportData::new(dslx_stdlib_path, additional_search_path_views);
-    let mut builder =
-        xlsynth::sv_bridge_builder::SvBridgeBuilder::with_enum_case_policy(enum_case_naming_policy);
+    let mut builder = xlsynth::sv_bridge_builder::SvBridgeBuilder::with_policies(
+        enum_case_naming_policy,
+        struct_field_ordering_policy,
+    );
     xlsynth::dslx_bridge::convert_leaf_module(&mut import_data, &dslx, input_file, &mut builder)
         .unwrap();
     let sv = builder.build();
@@ -47,11 +50,12 @@ pub fn dslx2sv_types(
 /// Handles the `dslx2sv-types` subcommand from the top-level Clap dispatch.
 ///
 /// The CLI definition in `main.rs` requires and validates
-/// `--sv_enum_case_naming_policy` using Clap's `ValueEnum` support on
-/// [`SvEnumCaseNamingPolicy`], so this function can retrieve the typed value
+/// `--sv_enum_case_naming_policy` and `--sv_struct_field_ordering` using
+/// Clap's `ValueEnum` support on [`SvEnumCaseNamingPolicy`] and
+/// [`SvStructFieldOrderingPolicy`], so this function can retrieve typed values
 /// directly and then delegate to [`dslx2sv_types`]. Calling this with
-/// `ArgMatches` from another subcommand would panic because the code
-/// unwraps/`expect`s required `dslx2sv-types` arguments.
+/// `ArgMatches` from another subcommand would panic because the code unwraps
+/// required `dslx2sv-types` arguments.
 pub fn handle_dslx2sv_types(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
     log::info!("handle_dslx2sv_types");
     let input_file = matches.get_one::<String>("dslx_input_file").unwrap();
@@ -61,6 +65,9 @@ pub fn handle_dslx2sv_types(matches: &ArgMatches, config: &Option<ToolchainConfi
     let enum_case_naming_policy = *matches
         .get_one::<SvEnumCaseNamingPolicy>("sv_enum_case_naming_policy")
         .expect("clap should require sv_enum_case_naming_policy");
+    let struct_field_ordering_policy = *matches
+        .get_one::<SvStructFieldOrderingPolicy>("sv_struct_field_ordering")
+        .expect("clap should default sv_struct_field_ordering");
 
     let paths = get_dslx_paths(matches, config);
     let dslx_stdlib_path = paths.stdlib_path.as_ref().map(|p| p.as_path());
@@ -70,5 +77,6 @@ pub fn handle_dslx2sv_types(matches: &ArgMatches, config: &Option<ToolchainConfi
         dslx_stdlib_path,
         &search_views,
         enum_case_naming_policy,
+        struct_field_ordering_policy,
     );
 }
