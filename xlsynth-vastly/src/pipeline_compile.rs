@@ -3,10 +3,6 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-use crate::Error;
-use crate::LogicBit;
-use crate::Result;
-use crate::Value4;
 use crate::compiled_module::CompiledFunction;
 use crate::compiled_module::ModuleAssign;
 use crate::compiled_module::Port;
@@ -17,6 +13,10 @@ use crate::sv_ast::ModuleItem;
 use crate::sv_ast::ParsedModule;
 use crate::sv_ast::Span;
 use crate::sv_ast::Stmt;
+use crate::Error;
+use crate::LogicBit;
+use crate::Result;
+use crate::Value4;
 
 #[derive(Debug, Clone)]
 pub struct CompiledPipelineModule {
@@ -66,21 +66,28 @@ impl CompiledPipelineModule {
 }
 
 pub fn compile_pipeline_module(src: &str) -> Result<CompiledPipelineModule> {
-    compile_pipeline_module_with_defines(src, &BTreeSet::new())
+    compile_pipeline_module_with_options(src, &BTreeSet::new(), true)
+}
+
+pub fn compile_pipeline_module_fast(src: &str) -> Result<CompiledPipelineModule> {
+    compile_pipeline_module_with_options(src, &BTreeSet::new(), false)
 }
 
 pub fn compile_pipeline_module_with_defines(
     src: &str,
     defines: &BTreeSet<String>,
 ) -> Result<CompiledPipelineModule> {
-    let parse_src = src;
-    let parsed: ParsedModule =
-        crate::sv_parser::parse_pipeline_module_with_defines(parse_src, defines)?;
-    let items = crate::generate_constructs::elaborate_pipeline_items(
-        parse_src,
-        &parsed.params,
-        &parsed.items,
-    )?;
+    compile_pipeline_module_with_options(src, defines, true)
+}
+
+fn compile_pipeline_module_with_options(
+    src: &str,
+    defines: &BTreeSet<String>,
+    preserve_spans: bool,
+) -> Result<CompiledPipelineModule> {
+    let parsed: ParsedModule = crate::sv_parser::parse_pipeline_module_with_defines(src, defines)?;
+    let items =
+        crate::generate_constructs::elaborate_pipeline_items(src, &parsed.params, &parsed.items)?;
 
     let module_name = parsed.name.clone();
 
@@ -102,14 +109,15 @@ pub fn compile_pipeline_module_with_defines(
         match it {
             ModuleItem::Decl { .. } => {}
             ModuleItem::Assign {
-                lhs, rhs, rhs_text, ..
+                lhs, rhs, rhs_span, ..
             } => {
                 assigns.push(crate::compiled_module::lower_assign(
-                    parse_src,
+                    src,
                     lhs,
-                    *rhs,
-                    rhs_text.as_deref(),
+                    rhs,
+                    *rhs_span,
                     &decls,
+                    preserve_spans,
                 )?);
             }
             ModuleItem::Function {
@@ -130,7 +138,7 @@ pub fn compile_pipeline_module_with_defines(
                 }
                 functions.insert(
                     f.name.clone(),
-                    crate::compiled_module::lower_function(parse_src, f, &decls)?,
+                    crate::compiled_module::lower_function(src, f, &decls, preserve_spans)?,
                 );
 
                 let mut arms_meta: Vec<FunctionArmMeta> = Vec::new();
@@ -150,14 +158,14 @@ pub fn compile_pipeline_module_with_defines(
                         for a in arms {
                             arms_meta.push(FunctionArmMeta {
                                 arm_span: a.arm_span,
-                                value_span: a.value,
+                                value_span: a.value_span,
                             });
                         }
                     }
-                    crate::sv_ast::FunctionBody::Assign { value } => {
+                    crate::sv_ast::FunctionBody::Assign { value_span, .. } => {
                         scaffold_spans.push(*begin_span);
                         scaffold_spans.push(*end_span);
-                        assign_expr_span = Some(*value);
+                        assign_expr_span = Some(*value_span);
                     }
                     crate::sv_ast::FunctionBody::Procedure { .. } => {
                         scaffold_spans.push(*begin_span);

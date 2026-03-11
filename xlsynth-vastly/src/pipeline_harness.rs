@@ -3,6 +3,11 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
+use crate::combo_eval::eval_combo_seeded;
+use crate::combo_eval::eval_combo_seeded_with_coverage;
+use crate::combo_eval::plan_combo_eval;
+use crate::compiled_module::State;
+use crate::vcd_writer::VcdWriter;
 use crate::CoverageCounters;
 use crate::Env;
 use crate::Error;
@@ -11,11 +16,6 @@ use crate::Result;
 use crate::Signedness;
 use crate::SourceText;
 use crate::Value4;
-use crate::combo_eval::eval_combo_seeded;
-use crate::combo_eval::eval_combo_seeded_with_coverage;
-use crate::combo_eval::plan_combo_eval;
-use crate::compiled_module::State;
-use crate::vcd_writer::VcdWriter;
 use std::io::Write;
 
 #[derive(Debug, Clone)]
@@ -404,7 +404,11 @@ fn update_toggles(
 fn literal_assigned_names(m: &crate::pipeline_compile::CompiledPipelineModule) -> BTreeSet<String> {
     let mut s: BTreeSet<String> = BTreeSet::new();
     for a in &m.combo.assigns {
-        match &a.rhs_spanned.kind {
+        let rhs_spanned = a
+            .rhs_spanned
+            .as_ref()
+            .expect("coverage registration requires spanned assign expressions");
+        match &rhs_spanned.kind {
             crate::ast_spanned::SpannedExprKind::Literal(_) => {
                 s.insert(a.lhs_base().to_string());
             }

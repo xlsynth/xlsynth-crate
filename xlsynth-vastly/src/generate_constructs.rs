@@ -2,11 +2,6 @@
 
 use std::collections::BTreeMap;
 
-use crate::Error;
-use crate::LogicBit;
-use crate::Result;
-use crate::Signedness;
-use crate::Value4;
 use crate::ast::Expr;
 use crate::eval::eval_ast_with_calls;
 use crate::sv_ast::AlwaysFf;
@@ -14,6 +9,11 @@ use crate::sv_ast::GenerateBranch;
 use crate::sv_ast::Lhs;
 use crate::sv_ast::ModuleItem;
 use crate::sv_ast::Stmt;
+use crate::Error;
+use crate::LogicBit;
+use crate::Result;
+use crate::Signedness;
+use crate::Value4;
 
 pub fn elaborate_combo_items(
     src: &str,
@@ -73,21 +73,13 @@ fn elaborate_item(
         ModuleItem::Assign {
             lhs,
             rhs,
-            rhs_text,
+            rhs_span,
             span,
         } => {
-            let base_text = rhs_text
-                .as_deref()
-                .unwrap_or_else(|| src[rhs.start..rhs.end].trim());
-            let substituted_text = if substs.is_empty() {
-                None
-            } else {
-                Some(substitute_text(base_text, substs))
-            };
             out.push(ModuleItem::Assign {
                 lhs: substitute_lhs(lhs, substs),
-                rhs: *rhs,
-                rhs_text: substituted_text,
+                rhs: substitute_expr(rhs, substs),
+                rhs_span: *rhs_span,
                 span: *span,
             });
         }
@@ -309,49 +301,4 @@ fn substitute_stmt(stmt: &Stmt, substs: &BTreeMap<String, Value4>) -> Stmt {
         },
         Stmt::Empty => Stmt::Empty,
     }
-}
-
-fn substitute_text(text: &str, substs: &BTreeMap<String, Value4>) -> String {
-    let mut out = String::from(text);
-    for (name, value) in substs {
-        let replacement = value
-            .to_u32_if_known()
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| value.to_bit_string_msb_first());
-        out = replace_ident_token(&out, name, &replacement);
-    }
-    out
-}
-
-fn replace_ident_token(s: &str, target: &str, replacement: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = String::with_capacity(s.len());
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if is_ident_start(bytes[i]) {
-            let start = i;
-            i += 1;
-            while i < bytes.len() && is_ident_continue(bytes[i]) {
-                i += 1;
-            }
-            let ident = &s[start..i];
-            if ident == target {
-                out.push_str(replacement);
-            } else {
-                out.push_str(ident);
-            }
-        } else {
-            out.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-    out
-}
-
-fn is_ident_start(b: u8) -> bool {
-    b == b'_' || b.is_ascii_alphabetic()
-}
-
-fn is_ident_continue(b: u8) -> bool {
-    b == b'_' || b.is_ascii_alphanumeric()
 }
