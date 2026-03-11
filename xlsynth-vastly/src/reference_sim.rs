@@ -6,11 +6,11 @@
 //! which external implementations are suitable for differential grounding over
 //! a given subset of the language.
 
+use crate::ast::BinaryOp;
+use crate::ast::Expr;
 use crate::Env;
 use crate::LogicBit;
 use crate::Value4;
-use crate::ast::BinaryOp;
-use crate::ast::Expr;
 
 /// Whether a reference implementation can credibly ground two-value-only or
 /// full four-value semantics for a sample.
@@ -123,13 +123,13 @@ fn value_is_two_value(value: &Value4) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::ReferenceSimKind;
-    use super::ValueDomain;
     use super::env_is_two_value_safe;
     use super::expr_is_two_value_safe;
+    use super::ReferenceSimKind;
+    use super::ValueDomain;
+    use crate::parser::parse_expr;
     use crate::Env;
     use crate::Value4;
-    use crate::parser::parse_expr;
 
     fn parse(text: &str) -> crate::ast::Expr {
         parse_expr(text).unwrap_or_else(|e| panic!("parse failed for {text:?}: {e:?}"))

@@ -5,10 +5,10 @@ use std::io::Write;
 use std::process::Command;
 use std::time::SystemTime;
 
+use crate::combo_compile::CompiledComboModule;
 use crate::Error;
 use crate::Result;
 use crate::Value4;
-use crate::combo_compile::CompiledComboModule;
 
 pub struct IverilogComboRun {
     pub out_vcd_path: std::path::PathBuf,

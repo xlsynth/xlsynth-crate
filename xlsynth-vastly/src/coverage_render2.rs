@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::coverage::SpanKey;
+use crate::sv_lexer::TokKind;
 use crate::CoverabilityMap;
 use crate::CoverageCounters;
 use crate::SourceText;
-use crate::coverage::SpanKey;
-use crate::sv_lexer::TokKind;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum LineClass {

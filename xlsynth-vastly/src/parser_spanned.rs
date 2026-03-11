@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::Error;
-use crate::Result;
 use crate::ast::BinaryOp;
 use crate::ast::Expr;
 use crate::ast::UnaryOp;
@@ -11,6 +9,8 @@ use crate::ast_spanned::SpannedTok;
 use crate::lexer::Token;
 use crate::lexer_spanned::LexerSpanned;
 use crate::sv_ast::Span;
+use crate::Error;
+use crate::Result;
 
 pub fn parse_expr_spanned(input: &str) -> Result<SpannedExpr> {
     let mut p = Parser::new(input)?;

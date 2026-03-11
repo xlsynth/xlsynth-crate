@@ -145,8 +145,12 @@ impl Env {
         }
     }
 
-    pub fn insert<S: Into<String>>(&mut self, name: S, value: Value4) {
-        self.vars.insert(name.into(), value);
+    pub fn insert<S: Into<String>>(&mut self, name: S, value: Value4) -> Option<Value4> {
+        self.vars.insert(name.into(), value)
+    }
+
+    pub fn remove(&mut self, name: &str) -> Option<Value4> {
+        self.vars.remove(name)
     }
 
     pub fn get(&self, name: &str) -> Option<&Value4> {

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::Error;
-use crate::Result;
 use crate::ast_spanned::SpannedTok;
 use crate::lexer::Token;
 use crate::sv_ast::Span;
+use crate::Error;
+use crate::Result;
 
 pub struct LexerSpanned<'a> {
     s: &'a str,

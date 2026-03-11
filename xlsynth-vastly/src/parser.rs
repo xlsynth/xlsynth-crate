@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::Error;
-use crate::Result;
 use crate::ast::BinaryOp;
 use crate::ast::Expr;
 use crate::ast::UnaryOp;
@@ -10,6 +8,8 @@ use crate::lexer::Token;
 use crate::value::LogicBit;
 use crate::value::Signedness;
 use crate::value::Value4;
+use crate::Error;
+use crate::Result;
 
 const MAX_LITERAL_WIDTH_BITS: u32 = 1_000_000;
 

@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::Env;
-use crate::Error;
-use crate::EvalResult;
-use crate::Result;
-use crate::Signedness;
-use crate::Value4;
 use crate::ast::BinaryOp;
 use crate::ast::Expr;
 use crate::ast::UnaryOp;
@@ -13,6 +7,12 @@ use crate::parser::parse_expr;
 use crate::sv_ast::Span;
 use crate::value::LogicBit;
 use crate::value::RelOp;
+use crate::Env;
+use crate::Error;
+use crate::EvalResult;
+use crate::Result;
+use crate::Signedness;
+use crate::Value4;
 
 pub fn eval_expr(expr: &str, env: &Env) -> Result<EvalResult> {
     let ast = parse_expr(expr)?;
@@ -41,15 +41,9 @@ pub(crate) fn operand_with_own_sign_ctx(
     expected_width: Option<u32>,
     expected_signedness: Option<Signedness>,
 ) -> Value4 {
-    let v = if let Some(signedness) = expected_signedness {
-        v.with_signedness(signedness)
-    } else {
-        v
-    };
-    let Some(width) = expected_width else {
-        return v;
-    };
-    if width <= v.width { v } else { v.resize(width) }
+    let signedness = expected_signedness.unwrap_or(v.signedness);
+    let width = expected_width.unwrap_or(v.width).max(v.width);
+    v.into_width_and_signedness(width, signedness)
 }
 
 pub(crate) fn replication_count_to_u32(v: &Value4) -> Result<u32> {
@@ -75,8 +69,8 @@ fn operand_with_merged_sign_ctx(
 ) -> (Value4, Value4) {
     let width = expected_width.unwrap_or(0).max(lhs.width.max(rhs.width));
     let signedness = expected_signedness.unwrap_or_else(|| merged_signedness(&lhs, &rhs));
-    let lhs = lhs.with_signedness(signedness).resize(width);
-    let rhs = rhs.with_signedness(signedness).resize(width);
+    let lhs = lhs.into_width_and_signedness(width, signedness);
+    let rhs = rhs.into_width_and_signedness(width, signedness);
     (lhs, rhs)
 }
 

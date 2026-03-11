@@ -24,7 +24,10 @@ pub fn elaborate_combo_items(
     for (name, value) in params {
         env.insert(name.clone(), value.clone());
     }
-    elaborate_items_impl(src, items, &env, &BTreeMap::new(), false)
+    let mut substs = BTreeMap::new();
+    let mut out = Vec::new();
+    elaborate_items_impl(src, items, &mut env, &mut substs, false, &mut out)?;
+    Ok(out)
 }
 
 pub fn elaborate_pipeline_items(
@@ -36,28 +39,31 @@ pub fn elaborate_pipeline_items(
     for (name, value) in params {
         env.insert(name.clone(), value.clone());
     }
-    elaborate_items_impl(src, items, &env, &BTreeMap::new(), false)
+    let mut substs = BTreeMap::new();
+    let mut out = Vec::new();
+    elaborate_items_impl(src, items, &mut env, &mut substs, false, &mut out)?;
+    Ok(out)
 }
 
 fn elaborate_items_impl(
     src: &str,
     items: &[ModuleItem],
-    env: &crate::Env,
-    substs: &BTreeMap<String, Value4>,
+    env: &mut crate::Env,
+    substs: &mut BTreeMap<String, Value4>,
     in_generate: bool,
-) -> Result<Vec<ModuleItem>> {
-    let mut out = Vec::new();
+    out: &mut Vec<ModuleItem>,
+) -> Result<()> {
     for item in items {
-        elaborate_item(src, item, env, substs, in_generate, &mut out)?;
+        elaborate_item(src, item, env, substs, in_generate, out)?;
     }
-    Ok(out)
+    Ok(())
 }
 
 fn elaborate_item(
     src: &str,
     item: &ModuleItem,
-    env: &crate::Env,
-    substs: &BTreeMap<String, Value4>,
+    env: &mut crate::Env,
+    substs: &mut BTreeMap<String, Value4>,
     in_generate: bool,
     out: &mut Vec<ModuleItem>,
 ) -> Result<()> {
@@ -112,32 +118,43 @@ fn elaborate_item(
             let limit_u = eval_const_u32(limit, env)?;
             for idx in start_u..limit_u {
                 let genvar_value = u32_value(idx);
-                let mut next_env = env.clone();
-                next_env.insert(genvar.clone(), genvar_value.clone());
-                let mut next_substs = substs.clone();
-                next_substs.insert(genvar.clone(), genvar_value);
-                out.extend(elaborate_items_impl(
-                    src,
-                    body,
-                    &next_env,
-                    &next_substs,
-                    true,
-                )?);
+                let prev_env = env.insert(genvar.clone(), genvar_value.clone());
+                let prev_subst = substs.insert(genvar.clone(), genvar_value);
+                let elaborate_result = elaborate_items_impl(src, body, env, substs, true, out);
+                restore_env_binding(env, genvar, prev_env);
+                restore_subst_binding(substs, genvar, prev_subst);
+                elaborate_result?;
             }
         }
         ModuleItem::GenerateIf { branches, span: _ } => {
             if let Some(selected) = select_branch(branches, env)? {
-                out.extend(elaborate_items_impl(
-                    src,
-                    &selected.body,
-                    env,
-                    substs,
-                    true,
-                )?);
+                elaborate_items_impl(src, &selected.body, env, substs, true, out)?;
             }
         }
     }
     Ok(())
+}
+
+fn restore_env_binding(env: &mut crate::Env, key: &str, previous: Option<Value4>) {
+    match previous {
+        Some(value) => {
+            env.insert(key.to_string(), value);
+        }
+        None => {
+            env.remove(key);
+        }
+    }
+}
+
+fn restore_subst_binding(map: &mut BTreeMap<String, Value4>, key: &str, previous: Option<Value4>) {
+    match previous {
+        Some(value) => {
+            map.insert(key.to_string(), value);
+        }
+        None => {
+            map.remove(key);
+        }
+    }
 }
 
 fn select_branch<'a>(

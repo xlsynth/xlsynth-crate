@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::ast::BinaryOp;
+use crate::ast::Expr as VExpr;
+use crate::eval::eval_ast_with_calls;
+use crate::sv_ast::Stmt;
 use crate::Error;
 use crate::LogicBit;
 use crate::Result;
 use crate::Signedness;
 use crate::Value4;
-use crate::ast::BinaryOp;
-use crate::ast::Expr as VExpr;
-use crate::eval::eval_ast_with_calls;
-use crate::sv_ast::Stmt;
 
 #[derive(Debug, Clone)]
 pub struct SimObserver {

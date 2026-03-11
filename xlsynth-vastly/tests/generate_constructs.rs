@@ -2,17 +2,17 @@
 
 use std::collections::BTreeMap;
 
+use xlsynth_vastly::compile_combo_module;
+use xlsynth_vastly::compile_pipeline_module;
+use xlsynth_vastly::eval_combo;
+use xlsynth_vastly::plan_combo_eval;
+use xlsynth_vastly::run_pipeline_and_collect_outputs;
 use xlsynth_vastly::LogicBit;
 use xlsynth_vastly::PipelineCycle;
 use xlsynth_vastly::PipelineStimulus;
 use xlsynth_vastly::Signedness;
 use xlsynth_vastly::State;
 use xlsynth_vastly::Value4;
-use xlsynth_vastly::compile_combo_module;
-use xlsynth_vastly::compile_pipeline_module;
-use xlsynth_vastly::eval_combo;
-use xlsynth_vastly::plan_combo_eval;
-use xlsynth_vastly::run_pipeline_and_collect_outputs;
 
 fn vbits(width: u32, signedness: Signedness, msb: &str) -> Value4 {
     assert_eq!(msb.len(), width as usize);
@@ -164,6 +164,39 @@ endmodule
 
     assert_eq!(out["mask_data"].to_bit_string_msb_first(), "11000011");
     assert_eq!(out["out_data"].to_bit_string_msb_first(), "10011001");
+}
+
+#[test]
+fn combo_module_restores_parameter_env_after_generate_loop_shadowing() {
+    let dut = r#"
+module m #(
+  parameter Shadowed = 1
+) (
+  output wire hit,
+  output wire loop_bit
+);
+  wire tmp;
+
+  for (genvar Shadowed = 0; Shadowed < 1; Shadowed = Shadowed + 1) begin : g
+    assign tmp = 1'b0;
+  end
+
+  if (Shadowed == 1) begin
+    assign hit = 1'b1;
+  end else begin
+    assign hit = 1'b0;
+  end
+
+  assign loop_bit = tmp;
+endmodule
+"#;
+
+    let m = compile_combo_module(dut).unwrap();
+    let plan = plan_combo_eval(&m).unwrap();
+    let out = eval_combo(&m, &plan, &BTreeMap::new()).unwrap();
+
+    assert_eq!(out["hit"].to_bit_string_msb_first(), "1");
+    assert_eq!(out["loop_bit"].to_bit_string_msb_first(), "0");
 }
 
 #[test]
