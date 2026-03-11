@@ -18,8 +18,9 @@ path = "src/lib.rs"
 
 [dependencies]
 clap = { version = "4.5.21", features = ["derive"] }
-xlsynth = { path = "../xlsynth", version = "0.37.0" }
+xlsynth = { path = "../xlsynth", version = "0.37.0", optional = true }
 
 [features]
 default = []
+irvals = ["dep:xlsynth"]
 reference-sim-tests = []

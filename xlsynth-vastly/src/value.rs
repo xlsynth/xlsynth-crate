@@ -66,6 +66,24 @@ impl Value4 {
         }
     }
 
+    pub fn from_u64(width: u32, signedness: Signedness, value: u64) -> Self {
+        let mut bits = Vec::with_capacity(width as usize);
+        for bit in 0..width {
+            bits.push(if bit >= 64 {
+                LogicBit::Zero
+            } else if value & (1u64 << bit) == 0 {
+                LogicBit::Zero
+            } else {
+                LogicBit::One
+            });
+        }
+        Self {
+            width,
+            signedness,
+            bits,
+        }
+    }
+
     pub fn from_bits_msb_first(
         width: u32,
         signedness: Signedness,
@@ -190,6 +208,65 @@ impl Value4 {
             out.insert(0, '-');
         }
         Some(out)
+    }
+
+    pub fn to_u64_if_known(&self) -> Option<u64> {
+        if self.width > 64 || !self.is_all_known_01() {
+            return None;
+        }
+        let mut out = 0u64;
+        for bit in 0..self.width {
+            if self.bit(bit) == LogicBit::One {
+                out |= 1u64 << bit;
+            }
+        }
+        Some(out)
+    }
+
+    pub fn slice_lsb_width(&self, lsb: u32, width: u32) -> crate::Result<Self> {
+        let end = lsb
+            .checked_add(width)
+            .ok_or_else(|| crate::Error::Parse("bit slice overflow".to_string()))?;
+        if width == 0 {
+            return Err(crate::Error::Parse(
+                "bit slice width must be > 0".to_string(),
+            ));
+        }
+        if end > self.width {
+            return Err(crate::Error::Parse(format!(
+                "bit slice {}..{} is out of bounds for width {}",
+                lsb, end, self.width
+            )));
+        }
+        Ok(Self {
+            width,
+            signedness: self.signedness,
+            bits: self.bits[lsb as usize..end as usize].to_vec(),
+        })
+    }
+
+    pub fn replace_slice(&self, lsb: u32, value: &Value4) -> crate::Result<Self> {
+        let end = lsb
+            .checked_add(value.width)
+            .ok_or_else(|| crate::Error::Parse("bit slice overflow".to_string()))?;
+        if value.width == 0 {
+            return Err(crate::Error::Parse(
+                "replacement slice width must be > 0".to_string(),
+            ));
+        }
+        if end > self.width {
+            return Err(crate::Error::Parse(format!(
+                "replacement slice {}..{} is out of bounds for width {}",
+                lsb, end, self.width
+            )));
+        }
+        let mut bits = self.bits.clone();
+        bits[lsb as usize..end as usize].copy_from_slice(value.bits_lsb_first());
+        Ok(Self {
+            width: self.width,
+            signedness: self.signedness,
+            bits,
+        })
     }
 
     pub fn parse_numeric_token(
