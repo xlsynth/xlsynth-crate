@@ -34,10 +34,19 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
         match it {
             ModuleItem::Decl { .. } => {}
             ModuleItem::Assign {
-                lhs, rhs, rhs_span, ..
+                lhs,
+                rhs,
+                rhs_spanned,
+                rhs_span,
+                ..
             } => {
                 assigns.push(crate::compiled_module::lower_assign(
-                    parse_src, lhs, rhs, *rhs_span, &decls, true,
+                    lhs,
+                    rhs,
+                    rhs_spanned,
+                    *rhs_span,
+                    &decls,
+                    true,
                 )?);
             }
             ModuleItem::Function { func: f, .. } => {

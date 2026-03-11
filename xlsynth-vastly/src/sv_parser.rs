@@ -3,6 +3,7 @@
 use crate::ast::Expr as VExpr;
 use crate::eval::eval_ast_with_calls;
 use crate::parser::parse_expr;
+use crate::parser_spanned::parse_expr_spanned;
 use crate::sv_ast::AlwaysFf;
 use crate::sv_ast::CasezArm;
 use crate::sv_ast::CasezPattern;
@@ -627,12 +628,14 @@ impl<'a> Parser<'a> {
                 self.expect(TokKind::KwAssign)?;
                 let lhs = self.parse_lhs()?;
                 self.expect(TokKind::Eq)?;
-                let (rhs, rhs_span) = self.parse_expr_with_span_until_semi()?;
+                let (rhs, rhs_spanned, rhs_span) =
+                    self.parse_expr_and_spanned_with_span_until_semi()?;
                 self.expect(TokKind::Semi)?;
                 let stmt_end = self.toks[self.idx - 1].end;
                 Ok(ModuleItem::Assign {
                     lhs,
                     rhs,
+                    rhs_spanned,
                     rhs_span,
                     span: Span {
                         start: stmt_start,
@@ -1013,12 +1016,13 @@ impl<'a> Parser<'a> {
         self.expect(TokKind::KwAssign)?;
         let lhs = self.parse_lhs()?;
         self.expect(TokKind::Eq)?;
-        let (rhs, rhs_span) = self.parse_expr_with_span_until_semi()?;
+        let (rhs, rhs_spanned, rhs_span) = self.parse_expr_and_spanned_with_span_until_semi()?;
         self.expect(TokKind::Semi)?;
         let stmt_end = self.toks[self.idx - 1].end;
         Ok(ModuleItem::Assign {
             lhs,
             rhs,
+            rhs_spanned,
             rhs_span,
             span: Span {
                 start: stmt_start,
@@ -1555,6 +1559,20 @@ impl<'a> Parser<'a> {
         self.parse_expr_with_span_until(&[TokKind::Semi])
     }
 
+    fn parse_expr_and_spanned_with_span_until_semi(
+        &mut self,
+    ) -> Result<(VExpr, crate::ast_spanned::SpannedExpr, Span)> {
+        self.parse_expr_and_spanned_with_span_until(&[TokKind::Semi])
+    }
+
+    fn parse_expr_and_spanned_with_span_until(
+        &mut self,
+        end_kinds: &[TokKind],
+    ) -> Result<(VExpr, crate::ast_spanned::SpannedExpr, Span)> {
+        let span = self.parse_span_until(end_kinds)?;
+        self.parse_expr_and_spanned_in_span(span)
+    }
+
     fn parse_expr_in_span(&self, span: Span) -> Result<(VExpr, Span)> {
         let slice = self.src[span.start..span.end].trim();
         if slice.is_empty() {
@@ -1562,6 +1580,20 @@ impl<'a> Parser<'a> {
         }
         let expr = parse_expr(slice)?;
         Ok((expr, span))
+    }
+
+    fn parse_expr_and_spanned_in_span(
+        &self,
+        span: Span,
+    ) -> Result<(VExpr, crate::ast_spanned::SpannedExpr, Span)> {
+        let slice = self.src[span.start..span.end].trim();
+        if slice.is_empty() {
+            return Err(Error::Parse("empty expression".to_string()));
+        }
+        let expr = parse_expr(slice)?;
+        let mut spanned = parse_expr_spanned(slice)?;
+        spanned.shift_spans(span.start);
+        Ok((expr, spanned, span))
     }
 
     fn parse_span_until(&mut self, end_kinds: &[TokKind]) -> Result<Span> {

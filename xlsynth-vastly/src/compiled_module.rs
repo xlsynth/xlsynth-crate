@@ -209,9 +209,9 @@ pub(crate) fn extend_decls_from_items(
 
 /// Lowers an assign item using packed rewrites and span-preserving parsed AST.
 pub(crate) fn lower_assign(
-    parse_src: &str,
     lhs: &Lhs,
     rhs: &Expr,
+    rhs_spanned: &SpannedExpr,
     rhs_span: Span,
     decls: &BTreeMap<String, DeclInfo>,
     preserve_spans: bool,
@@ -219,10 +219,7 @@ pub(crate) fn lower_assign(
     let lhs = rewrite_packed_lhs(lhs.clone(), decls)?;
     let rhs = rewrite_packed_expr(rhs.clone(), decls)?;
     let rhs_spanned = if preserve_spans {
-        Some(rewrite_packed_spanned_expr(
-            parse_expr_spanned_in_span(parse_src, rhs_span)?,
-            decls,
-        )?)
+        Some(rewrite_packed_spanned_expr(rhs_spanned.clone(), decls)?)
     } else {
         None
     };

@@ -69,7 +69,7 @@ pub fn compile_pipeline_module(src: &str) -> Result<CompiledPipelineModule> {
     compile_pipeline_module_with_options(src, &BTreeSet::new(), true)
 }
 
-pub fn compile_pipeline_module_fast(src: &str) -> Result<CompiledPipelineModule> {
+pub fn compile_pipeline_module_without_spans(src: &str) -> Result<CompiledPipelineModule> {
     compile_pipeline_module_with_options(src, &BTreeSet::new(), false)
 }
 
@@ -109,12 +109,16 @@ fn compile_pipeline_module_with_options(
         match it {
             ModuleItem::Decl { .. } => {}
             ModuleItem::Assign {
-                lhs, rhs, rhs_span, ..
+                lhs,
+                rhs,
+                rhs_spanned,
+                rhs_span,
+                ..
             } => {
                 assigns.push(crate::compiled_module::lower_assign(
-                    src,
                     lhs,
                     rhs,
+                    rhs_spanned,
                     *rhs_span,
                     &decls,
                     preserve_spans,

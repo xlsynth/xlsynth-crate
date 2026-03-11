@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 
 use crate::ast::Expr;
+use crate::ast_spanned::SpannedExpr;
+use crate::ast_spanned::SpannedExprKind;
 use crate::eval::eval_ast_with_calls;
 use crate::sv_ast::AlwaysFf;
 use crate::sv_ast::GenerateBranch;
@@ -79,12 +81,14 @@ fn elaborate_item(
         ModuleItem::Assign {
             lhs,
             rhs,
+            rhs_spanned,
             rhs_span,
             span,
         } => {
             out.push(ModuleItem::Assign {
                 lhs: substitute_lhs(lhs, substs),
                 rhs: substitute_expr(rhs, substs),
+                rhs_spanned: substitute_spanned_expr(rhs_spanned, substs),
                 rhs_span: *rhs_span,
                 span: *span,
             });
@@ -261,6 +265,78 @@ fn substitute_expr(expr: &Expr, substs: &BTreeMap<String, Value4>) -> Expr {
             t: Box::new(substitute_expr(t, substs)),
             f: Box::new(substitute_expr(f, substs)),
         },
+    }
+}
+
+fn substitute_spanned_expr(expr: &SpannedExpr, substs: &BTreeMap<String, Value4>) -> SpannedExpr {
+    let kind = match &expr.kind {
+        SpannedExprKind::Ident(name) => substs
+            .get(name)
+            .cloned()
+            .map(SpannedExprKind::Literal)
+            .unwrap_or_else(|| SpannedExprKind::Ident(name.clone())),
+        SpannedExprKind::Literal(v) => SpannedExprKind::Literal(v.clone()),
+        SpannedExprKind::UnsizedNumber(v) => SpannedExprKind::UnsizedNumber(v.clone()),
+        SpannedExprKind::UnbasedUnsized(bit) => SpannedExprKind::UnbasedUnsized(*bit),
+        SpannedExprKind::Call { name, args } => SpannedExprKind::Call {
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|arg| substitute_spanned_expr(arg, substs))
+                .collect(),
+        },
+        SpannedExprKind::Concat(parts) => SpannedExprKind::Concat(
+            parts
+                .iter()
+                .map(|part| substitute_spanned_expr(part, substs))
+                .collect(),
+        ),
+        SpannedExprKind::Replicate { count, expr } => SpannedExprKind::Replicate {
+            count: Box::new(substitute_spanned_expr(count, substs)),
+            expr: Box::new(substitute_spanned_expr(expr, substs)),
+        },
+        SpannedExprKind::Cast { width, expr } => SpannedExprKind::Cast {
+            width: Box::new(substitute_spanned_expr(width, substs)),
+            expr: Box::new(substitute_spanned_expr(expr, substs)),
+        },
+        SpannedExprKind::Index { expr, index } => SpannedExprKind::Index {
+            expr: Box::new(substitute_spanned_expr(expr, substs)),
+            index: Box::new(substitute_spanned_expr(index, substs)),
+        },
+        SpannedExprKind::Slice { expr, msb, lsb } => SpannedExprKind::Slice {
+            expr: Box::new(substitute_spanned_expr(expr, substs)),
+            msb: Box::new(substitute_spanned_expr(msb, substs)),
+            lsb: Box::new(substitute_spanned_expr(lsb, substs)),
+        },
+        SpannedExprKind::IndexedSlice {
+            expr,
+            base,
+            width,
+            upward,
+        } => SpannedExprKind::IndexedSlice {
+            expr: Box::new(substitute_spanned_expr(expr, substs)),
+            base: Box::new(substitute_spanned_expr(base, substs)),
+            width: Box::new(substitute_spanned_expr(width, substs)),
+            upward: *upward,
+        },
+        SpannedExprKind::Unary { op, expr } => SpannedExprKind::Unary {
+            op: *op,
+            expr: Box::new(substitute_spanned_expr(expr, substs)),
+        },
+        SpannedExprKind::Binary { op, lhs, rhs } => SpannedExprKind::Binary {
+            op: *op,
+            lhs: Box::new(substitute_spanned_expr(lhs, substs)),
+            rhs: Box::new(substitute_spanned_expr(rhs, substs)),
+        },
+        SpannedExprKind::Ternary { cond, t, f } => SpannedExprKind::Ternary {
+            cond: Box::new(substitute_spanned_expr(cond, substs)),
+            t: Box::new(substitute_spanned_expr(t, substs)),
+            f: Box::new(substitute_spanned_expr(f, substs)),
+        },
+    };
+    SpannedExpr {
+        span: expr.span,
+        kind,
     }
 }
 

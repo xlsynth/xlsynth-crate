@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::ast::Expr as VExpr;
+use crate::ast_spanned::SpannedExpr;
 use crate::value::Value4;
 use std::collections::BTreeMap;
 
@@ -119,6 +120,7 @@ pub enum ModuleItem {
     Assign {
         lhs: Lhs,
         rhs: VExpr,
+        rhs_spanned: SpannedExpr,
         rhs_span: Span,
         span: Span,
     },
