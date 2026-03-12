@@ -26,8 +26,41 @@ endmodule
     let err = ports.input("missing").unwrap_err();
     assert!(format!("{err:?}").contains("input port `missing` was not found"));
 
+    let err = ports.input("clk").unwrap_err();
+    assert!(
+        format!("{err:?}")
+            .contains("clock `clk` is managed internally and is not exposed as a fixture input")
+    );
+
     let err = ports.output_with_width("done", 2).unwrap_err();
     assert!(format!("{err:?}").contains("output port `done` has width 1, expected 2"));
+}
+
+#[test]
+fn fixture_runner_rejects_clock_dependent_outputs() {
+    let dut = r#"
+module m(
+  input logic clk,
+  output logic observed
+);
+  function automatic logic helper(input logic enable);
+    begin
+      helper = enable & clk;
+    end
+  endfunction
+
+  assign observed = helper(1'b1);
+endmodule
+"#;
+
+    let module = compile_pipeline_module(dut).unwrap();
+    let err = match FixtureRunner::new(&module) {
+        Ok(_) => panic!("expected clock-sensitive outputs to be rejected"),
+        Err(err) => err,
+    };
+    assert!(format!("{err:?}").contains(
+        "fixture runner does not support combinational outputs that depend on clock `clk`: observed"
+    ));
 }
 
 #[test]

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use crate::ComboEvalPlan;
 use crate::CompiledPipelineModule;
@@ -10,6 +11,9 @@ use crate::Result;
 use crate::Signedness;
 use crate::State;
 use crate::Value4;
+use crate::ast::Expr;
+use crate::compiled_module::CompiledFunction;
+use crate::compiled_module::CompiledFunctionBody;
 use crate::eval_combo_seeded;
 use crate::packed::packed_index_selection_if_in_bounds;
 use crate::plan_combo_eval;
@@ -89,6 +93,11 @@ impl<'a> PortBindings<'a> {
     }
 
     pub fn input(&self, name: &str) -> Result<InputPortHandle> {
+        if name == self.module.clk_name {
+            return Err(crate::Error::Parse(format!(
+                "clock `{name}` is managed internally and is not exposed as a fixture input"
+            )));
+        }
         self.maybe_input(name)
             .ok_or_else(|| crate::Error::Parse(format!("input port `{name}` was not found")))
     }
@@ -383,6 +392,7 @@ pub struct FixtureRunner {
 impl FixtureRunner {
     pub fn new(module: &CompiledPipelineModule) -> Result<Self> {
         let module = module.clone();
+        reject_clock_sensitive_outputs(&module)?;
         let plan = plan_combo_eval(&module.combo)?;
         Ok(Self {
             last_inputs: zero_inputs(&module)?,
@@ -545,6 +555,191 @@ fn env_from_values(values: &BTreeMap<String, Value4>) -> Env {
         env.insert(name.clone(), value.clone());
     }
     env
+}
+
+fn reject_clock_sensitive_outputs(module: &CompiledPipelineModule) -> Result<()> {
+    let mut analyzer = ClockDependencyAnalyzer::new(module);
+    let sensitive_outputs = analyzer.clock_sensitive_outputs()?;
+    if sensitive_outputs.is_empty() {
+        return Ok(());
+    }
+    Err(crate::Error::Parse(format!(
+        "fixture runner does not support combinational outputs that depend on clock `{}`: {}",
+        module.clk_name,
+        sensitive_outputs.join(", ")
+    )))
+}
+
+struct ClockDependencyAnalyzer<'a> {
+    module: &'a CompiledPipelineModule,
+    ident_memo: BTreeMap<String, bool>,
+    ident_visiting: BTreeSet<String>,
+    function_memo: BTreeMap<String, bool>,
+    function_visiting: BTreeSet<String>,
+}
+
+impl<'a> ClockDependencyAnalyzer<'a> {
+    fn new(module: &'a CompiledPipelineModule) -> Self {
+        Self {
+            module,
+            ident_memo: BTreeMap::new(),
+            ident_visiting: BTreeSet::new(),
+            function_memo: BTreeMap::new(),
+            function_visiting: BTreeSet::new(),
+        }
+    }
+
+    /// Returns output ports whose combinational value can vary with the
+    /// internal clock phase.
+    fn clock_sensitive_outputs(&mut self) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        for port in &self.module.combo.output_ports {
+            if self.ident_depends_on_clock(&port.name)? {
+                out.push(port.name.clone());
+            }
+        }
+        Ok(out)
+    }
+
+    fn ident_depends_on_clock(&mut self, name: &str) -> Result<bool> {
+        if name == self.module.clk_name {
+            return Ok(true);
+        }
+        if let Some(depends) = self.ident_memo.get(name) {
+            return Ok(*depends);
+        }
+        if !self.ident_visiting.insert(name.to_string()) {
+            // Combo assign cycles are rejected earlier; treat any unexpected re-entry
+            // conservatively so the fixture runner stays sound.
+            return Ok(true);
+        }
+
+        let mut depends = false;
+        for assign in &self.module.combo.assigns {
+            if assign.lhs_base() != name {
+                continue;
+            }
+            if self.expr_depends_on_clock(&assign.rhs, &BTreeMap::new())? {
+                depends = true;
+                break;
+            }
+        }
+
+        self.ident_visiting.remove(name);
+        self.ident_memo.insert(name.to_string(), depends);
+        Ok(depends)
+    }
+
+    fn function_depends_on_clock(&mut self, name: &str) -> Result<bool> {
+        if let Some(depends) = self.function_memo.get(name) {
+            return Ok(*depends);
+        }
+        if !self.function_visiting.insert(name.to_string()) {
+            // Recursive helper analysis is not expected here; reject recursively
+            // referenced functions conservatively.
+            return Ok(true);
+        }
+
+        let function = self
+            .module
+            .combo
+            .functions
+            .get(name)
+            .ok_or_else(|| crate::Error::Parse(format!("unknown function `{name}`")))?;
+        let depends = self.function_body_depends_on_clock(function)?;
+
+        self.function_visiting.remove(name);
+        self.function_memo.insert(name.to_string(), depends);
+        Ok(depends)
+    }
+
+    fn function_body_depends_on_clock(&mut self, function: &CompiledFunction) -> Result<bool> {
+        let mut local_deps = BTreeMap::new();
+        for arg in &function.args {
+            local_deps.insert(arg.name.clone(), false);
+        }
+        for name in function.locals.keys() {
+            local_deps.insert(name.clone(), false);
+        }
+        local_deps.insert(function.name.clone(), false);
+
+        match &function.body {
+            CompiledFunctionBody::Casez { selector, arms } => {
+                if self.expr_depends_on_clock(selector, &local_deps)? {
+                    return Ok(true);
+                }
+                for arm in arms {
+                    if self.expr_depends_on_clock(&arm.value, &local_deps)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            CompiledFunctionBody::Expr { expr, .. } => {
+                self.expr_depends_on_clock(expr, &local_deps)
+            }
+            CompiledFunctionBody::Procedure { assigns } => {
+                for assign in assigns {
+                    let depends = self.expr_depends_on_clock(&assign.expr, &local_deps)?;
+                    local_deps.insert(assign.lhs.clone(), depends);
+                }
+                Ok(local_deps.get(&function.name).copied().unwrap_or(false))
+            }
+        }
+    }
+
+    fn expr_depends_on_clock(
+        &mut self,
+        expr: &Expr,
+        local_deps: &BTreeMap<String, bool>,
+    ) -> Result<bool> {
+        match expr {
+            Expr::Ident(name) => Ok(local_deps
+                .get(name)
+                .copied()
+                .unwrap_or(self.ident_depends_on_clock(name)?)),
+            Expr::Literal(_) | Expr::UnsizedNumber(_) | Expr::UnbasedUnsized(_) => Ok(false),
+            Expr::Call { name, args } => {
+                for arg in args {
+                    if self.expr_depends_on_clock(arg, local_deps)? {
+                        return Ok(true);
+                    }
+                }
+                if name == "$signed" || name == "$unsigned" {
+                    return Ok(false);
+                }
+                self.function_depends_on_clock(name)
+            }
+            Expr::Concat(parts) => {
+                for part in parts {
+                    if self.expr_depends_on_clock(part, local_deps)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            Expr::Replicate { count, expr } => Ok(self.expr_depends_on_clock(count, local_deps)?
+                || self.expr_depends_on_clock(expr, local_deps)?),
+            Expr::Cast { width, expr } => Ok(self.expr_depends_on_clock(width, local_deps)?
+                || self.expr_depends_on_clock(expr, local_deps)?),
+            Expr::Index { expr, index } => Ok(self.expr_depends_on_clock(expr, local_deps)?
+                || self.expr_depends_on_clock(index, local_deps)?),
+            Expr::Slice { expr, msb, lsb } => Ok(self.expr_depends_on_clock(expr, local_deps)?
+                || self.expr_depends_on_clock(msb, local_deps)?
+                || self.expr_depends_on_clock(lsb, local_deps)?),
+            Expr::IndexedSlice {
+                expr, base, width, ..
+            } => Ok(self.expr_depends_on_clock(expr, local_deps)?
+                || self.expr_depends_on_clock(base, local_deps)?
+                || self.expr_depends_on_clock(width, local_deps)?),
+            Expr::Unary { expr, .. } => self.expr_depends_on_clock(expr, local_deps),
+            Expr::Binary { lhs, rhs, .. } => Ok(self.expr_depends_on_clock(lhs, local_deps)?
+                || self.expr_depends_on_clock(rhs, local_deps)?),
+            Expr::Ternary { cond, t, f } => Ok(self.expr_depends_on_clock(cond, local_deps)?
+                || self.expr_depends_on_clock(t, local_deps)?
+                || self.expr_depends_on_clock(f, local_deps)?),
+        }
+    }
 }
 
 fn selected_range(
