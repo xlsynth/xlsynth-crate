@@ -228,6 +228,32 @@ endmodule
 }
 
 #[test]
+fn combo_generate_assign_preserves_unsized_signed_genvar_semantics() {
+    let dut = r#"
+module m(
+  output wire [1:0] out
+);
+  for (genvar i = 0; i < 2; i = i + 1) begin : g
+    assign out[i] = (i < -1);
+  end
+endmodule
+"#;
+
+    let m = compile_combo_module(dut).unwrap();
+    let plan = plan_combo_eval(&m).unwrap();
+    let src = SourceText::new(dut.to_string());
+    let mut cov = CoverageCounters::default();
+    let env = Env::new();
+
+    let out = eval_combo(&m, &plan, &BTreeMap::new()).unwrap();
+    assert_eq!(out["out"].to_bit_string_msb_first(), "00");
+
+    let out =
+        eval_combo_seeded_with_coverage(&m, &plan, &env, &src, &mut cov, &BTreeMap::new()).unwrap();
+    assert_eq!(out["out"].to_bit_string_msb_first(), "00");
+}
+
+#[test]
 fn combo_module_elaborates_nested_generate_loops() {
     let dut = r#"
 module m(

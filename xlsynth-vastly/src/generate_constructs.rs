@@ -26,7 +26,7 @@ pub fn elaborate_combo_items(
     for (name, value) in params {
         env.insert(name.clone(), value.clone());
     }
-    let mut substs = BTreeMap::new();
+    let mut substs: BTreeMap<String, u32> = BTreeMap::new();
     let mut out = Vec::new();
     elaborate_items_impl(src, items, &mut env, &mut substs, false, &mut out)?;
     Ok(out)
@@ -41,7 +41,7 @@ pub fn elaborate_pipeline_items(
     for (name, value) in params {
         env.insert(name.clone(), value.clone());
     }
-    let mut substs = BTreeMap::new();
+    let mut substs: BTreeMap<String, u32> = BTreeMap::new();
     let mut out = Vec::new();
     elaborate_items_impl(src, items, &mut env, &mut substs, false, &mut out)?;
     Ok(out)
@@ -51,7 +51,7 @@ fn elaborate_items_impl(
     src: &str,
     items: &[ModuleItem],
     env: &mut crate::Env,
-    substs: &mut BTreeMap<String, Value4>,
+    substs: &mut BTreeMap<String, u32>,
     in_generate: bool,
     out: &mut Vec<ModuleItem>,
 ) -> Result<()> {
@@ -65,7 +65,7 @@ fn elaborate_item(
     src: &str,
     item: &ModuleItem,
     env: &mut crate::Env,
-    substs: &mut BTreeMap<String, Value4>,
+    substs: &mut BTreeMap<String, u32>,
     in_generate: bool,
     out: &mut Vec<ModuleItem>,
 ) -> Result<()> {
@@ -123,7 +123,7 @@ fn elaborate_item(
             for idx in start_u..limit_u {
                 let genvar_value = u32_value(idx);
                 let prev_env = env.insert(genvar.clone(), genvar_value.clone());
-                let prev_subst = substs.insert(genvar.clone(), genvar_value);
+                let prev_subst = substs.insert(genvar.clone(), idx);
                 let elaborate_result = elaborate_items_impl(src, body, env, substs, true, out);
                 restore_env_binding(env, genvar, prev_env);
                 restore_subst_binding(substs, genvar, prev_subst);
@@ -150,7 +150,7 @@ fn restore_env_binding(env: &mut crate::Env, key: &str, previous: Option<Value4>
     }
 }
 
-fn restore_subst_binding(map: &mut BTreeMap<String, Value4>, key: &str, previous: Option<Value4>) {
+fn restore_subst_binding(map: &mut BTreeMap<String, u32>, key: &str, previous: Option<u32>) {
     match previous {
         Some(value) => {
             map.insert(key.to_string(), value);
@@ -200,12 +200,15 @@ fn u32_value(value: u32) -> Value4 {
     Value4::parse_numeric_token(32, Signedness::Unsigned, &value.to_string()).unwrap()
 }
 
-fn substitute_expr(expr: &Expr, substs: &BTreeMap<String, Value4>) -> Expr {
+fn unsized_decimal_value(value: u32) -> Value4 {
+    Value4::parse_unsized_decimal_token(Signedness::Signed, &value.to_string()).unwrap()
+}
+
+fn substitute_expr(expr: &Expr, substs: &BTreeMap<String, u32>) -> Expr {
     match expr {
         Expr::Ident(name) => substs
             .get(name)
-            .cloned()
-            .map(Expr::Literal)
+            .map(|value| Expr::UnsizedNumber(unsized_decimal_value(*value)))
             .unwrap_or_else(|| Expr::Ident(name.clone())),
         Expr::Literal(v) => Expr::Literal(v.clone()),
         Expr::UnsizedNumber(v) => Expr::UnsizedNumber(v.clone()),
@@ -268,12 +271,11 @@ fn substitute_expr(expr: &Expr, substs: &BTreeMap<String, Value4>) -> Expr {
     }
 }
 
-fn substitute_spanned_expr(expr: &SpannedExpr, substs: &BTreeMap<String, Value4>) -> SpannedExpr {
+fn substitute_spanned_expr(expr: &SpannedExpr, substs: &BTreeMap<String, u32>) -> SpannedExpr {
     let kind = match &expr.kind {
         SpannedExprKind::Ident(name) => substs
             .get(name)
-            .cloned()
-            .map(SpannedExprKind::Literal)
+            .map(|value| SpannedExprKind::UnsizedNumber(unsized_decimal_value(*value)))
             .unwrap_or_else(|| SpannedExprKind::Ident(name.clone())),
         SpannedExprKind::Literal(v) => SpannedExprKind::Literal(v.clone()),
         SpannedExprKind::UnsizedNumber(v) => SpannedExprKind::UnsizedNumber(v.clone()),
@@ -340,7 +342,7 @@ fn substitute_spanned_expr(expr: &SpannedExpr, substs: &BTreeMap<String, Value4>
     }
 }
 
-fn substitute_lhs(lhs: &Lhs, substs: &BTreeMap<String, Value4>) -> Lhs {
+fn substitute_lhs(lhs: &Lhs, substs: &BTreeMap<String, u32>) -> Lhs {
     match lhs {
         Lhs::Ident(name) => Lhs::Ident(name.clone()),
         Lhs::Index { base, index } => Lhs::Index {
@@ -362,7 +364,7 @@ fn substitute_lhs(lhs: &Lhs, substs: &BTreeMap<String, Value4>) -> Lhs {
     }
 }
 
-fn substitute_stmt(stmt: &Stmt, substs: &BTreeMap<String, Value4>) -> Stmt {
+fn substitute_stmt(stmt: &Stmt, substs: &BTreeMap<String, u32>) -> Stmt {
     match stmt {
         Stmt::Begin(stmts) => Stmt::Begin(
             stmts
