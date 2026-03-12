@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::ast::Expr as VExpr;
+use crate::ast_spanned::SpannedExpr;
 use crate::value::Value4;
 use std::collections::BTreeMap;
 
@@ -57,12 +58,14 @@ pub struct FunctionDecl {
 pub enum FunctionBody {
     UniqueCasez {
         casez_span: Span,
-        selector: Span,
+        selector: VExpr,
+        selector_span: Span,
         endcase_span: Span,
         arms: Vec<CasezArm>,
     },
     Assign {
-        value: Span,
+        value: VExpr,
+        value_span: Span,
     },
     Procedure {
         assigns: Vec<FunctionAssign>,
@@ -72,7 +75,8 @@ pub enum FunctionBody {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionAssign {
     pub lhs: String,
-    pub value: Span,
+    pub value: VExpr,
+    pub value_span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,7 +92,8 @@ pub struct CasezArm {
     pub pat: Option<CasezPattern>, // None => default
     pub pat_span: Option<Span>,
     pub arm_span: Span,
-    pub value: Span,
+    pub value: VExpr,
+    pub value_span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,8 +119,9 @@ pub enum ModuleItem {
     },
     Assign {
         lhs: Lhs,
-        rhs: Span,
-        rhs_text: Option<String>,
+        rhs: VExpr,
+        rhs_spanned: SpannedExpr,
+        rhs_span: Span,
         span: Span,
     },
     Function {

@@ -11,6 +11,7 @@ use xlsynth_vastly::SourceText;
 use xlsynth_vastly::Value4;
 use xlsynth_vastly::compile_pipeline_module;
 use xlsynth_vastly::compile_pipeline_module_with_defines;
+use xlsynth_vastly::compile_pipeline_module_without_spans;
 use xlsynth_vastly::run_pipeline_and_collect_coverage;
 use xlsynth_vastly::run_pipeline_and_write_vcd;
 
@@ -65,7 +66,11 @@ fn collects_line_ternary_and_toggle_coverage() {
 
     let mut cov = CoverageCounters::default();
     for a in &cm.combo.assigns {
-        cov.register_ternaries_from_spanned_expr(&a.rhs_spanned);
+        cov.register_ternaries_from_spanned_expr(
+            a.rhs_spanned
+                .as_ref()
+                .expect("coverage registration requires spanned assign expressions"),
+        );
     }
 
     run_pipeline_and_collect_coverage(&cm, &stimulus, &init, &src, &mut cov).unwrap();
@@ -212,4 +217,32 @@ fn coverage_attributes_stateful_always_ff_lines() {
     assert!(cov.line_hits.get(&6).copied().unwrap_or(0) > 0);
     assert!(cov.line_hits.get(&7).copied().unwrap_or(0) > 0);
     assert!(cov.line_hits.get(&8).copied().unwrap_or(0) > 0);
+}
+
+#[test]
+fn coverage_rejects_modules_compiled_without_spans() {
+    let dut = concat!(
+        "module m(\n",
+        "  input logic clk,\n",
+        "  input logic a,\n",
+        "  output wire y\n",
+        ");\n",
+        "  assign y = a;\n",
+        "endmodule\n",
+    );
+    let cm = compile_pipeline_module_without_spans(dut).unwrap();
+    let src = SourceText::new(dut.to_string());
+    let stimulus = PipelineStimulus {
+        half_period: 5,
+        cycles: vec![PipelineCycle {
+            inputs: [("a".to_string(), vbits(1, Signedness::Unsigned, "0"))]
+                .into_iter()
+                .collect(),
+        }],
+    };
+    let init = BTreeMap::new();
+    let mut cov = CoverageCounters::default();
+
+    let err = run_pipeline_and_collect_coverage(&cm, &stimulus, &init, &src, &mut cov).unwrap_err();
+    assert!(format!("{err:?}").contains("coverage requires a module compiled with spans"));
 }

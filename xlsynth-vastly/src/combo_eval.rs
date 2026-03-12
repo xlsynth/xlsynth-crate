@@ -255,8 +255,12 @@ pub fn eval_combo_seeded_with_coverage(
             .get(lhs_base)
             .ok_or_else(|| Error::Parse(format!("no decl for assign lhs `{lhs_base}`")))?;
         let expected_width = lhs_expected_write_width(&a.lhs, info)?;
+        let rhs_spanned = a
+            .rhs_spanned
+            .as_ref()
+            .expect("coverage evaluation requires spanned assign expressions");
         let rhs_v = eval_spanned_expr_with_funcs(
-            &a.rhs_spanned,
+            rhs_spanned,
             &env,
             &m.functions,
             expected_width,

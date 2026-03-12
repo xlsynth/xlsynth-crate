@@ -17,12 +17,9 @@ use crate::sv_ast::ParsedModule;
 
 pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
     let parse_src = src;
-    let parsed: ParsedModule = crate::sv_parser::parse_combo_module(parse_src)?;
-    let items = crate::generate_constructs::elaborate_combo_items(
-        parse_src,
-        &parsed.params,
-        &parsed.items,
-    )?;
+    let parsed: ParsedModule = crate::sv_parser::parse_combo_module(src)?;
+    let items =
+        crate::generate_constructs::elaborate_combo_items(src, &parsed.params, &parsed.items)?;
 
     let module_name = parsed.name;
     let (input_ports, output_ports, mut decls) = crate::compiled_module::lower_ports(&parsed.ports);
@@ -37,20 +34,25 @@ pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
         match it {
             ModuleItem::Decl { .. } => {}
             ModuleItem::Assign {
-                lhs, rhs, rhs_text, ..
+                lhs,
+                rhs,
+                rhs_spanned,
+                rhs_span,
+                ..
             } => {
                 assigns.push(crate::compiled_module::lower_assign(
-                    parse_src,
                     lhs,
-                    *rhs,
-                    rhs_text.as_deref(),
+                    rhs,
+                    rhs_spanned,
+                    *rhs_span,
                     &decls,
+                    true,
                 )?);
             }
             ModuleItem::Function { func: f, .. } => {
                 functions.insert(
                     f.name.clone(),
-                    crate::compiled_module::lower_function(parse_src, f, &decls)?,
+                    crate::compiled_module::lower_function(parse_src, f, &decls, true)?,
                 );
             }
             ModuleItem::AlwaysFf { .. } => {

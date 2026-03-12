@@ -154,7 +154,7 @@ pub fn run_pipeline_and_collect_coverage(
         return Err(Error::Parse("no cycles provided".to_string()));
     }
     let plan = plan_combo_eval(&m.combo)?;
-    let skip_toggle_names = literal_assigned_names(m);
+    let skip_toggle_names = literal_assigned_names(m)?;
     let mut state = initial_state.clone();
     let mut last_values: BTreeMap<String, Value4> = BTreeMap::new();
 
@@ -401,10 +401,18 @@ fn update_toggles(
     }
 }
 
-fn literal_assigned_names(m: &crate::pipeline_compile::CompiledPipelineModule) -> BTreeSet<String> {
+fn literal_assigned_names(
+    m: &crate::pipeline_compile::CompiledPipelineModule,
+) -> Result<BTreeSet<String>> {
     let mut s: BTreeSet<String> = BTreeSet::new();
     for a in &m.combo.assigns {
-        match &a.rhs_spanned.kind {
+        let rhs_spanned = a.rhs_spanned.as_ref().ok_or_else(|| {
+            Error::Parse(
+                "coverage requires a module compiled with spans; use compile_pipeline_module or compile_pipeline_module_with_defines"
+                    .to_string(),
+            )
+        })?;
+        match &rhs_spanned.kind {
             crate::ast_spanned::SpannedExprKind::Literal(_) => {
                 s.insert(a.lhs_base().to_string());
             }
@@ -417,5 +425,5 @@ fn literal_assigned_names(m: &crate::pipeline_compile::CompiledPipelineModule) -
             _ => {}
         }
     }
-    s
+    Ok(s)
 }

@@ -66,6 +66,24 @@ impl Value4 {
         }
     }
 
+    pub fn from_u64(width: u32, signedness: Signedness, value: u64) -> Self {
+        let mut bits = Vec::with_capacity(width as usize);
+        for bit in 0..width {
+            bits.push(if bit >= 64 {
+                LogicBit::Zero
+            } else if value & (1u64 << bit) == 0 {
+                LogicBit::Zero
+            } else {
+                LogicBit::One
+            });
+        }
+        Self {
+            width,
+            signedness,
+            bits,
+        }
+    }
+
     pub fn from_bits_msb_first(
         width: u32,
         signedness: Signedness,
@@ -192,6 +210,65 @@ impl Value4 {
         Some(out)
     }
 
+    pub fn to_u64_if_known(&self) -> Option<u64> {
+        if self.width > 64 || !self.is_all_known_01() {
+            return None;
+        }
+        let mut out = 0u64;
+        for bit in 0..self.width {
+            if self.bit(bit) == LogicBit::One {
+                out |= 1u64 << bit;
+            }
+        }
+        Some(out)
+    }
+
+    pub fn slice_lsb_width(&self, lsb: u32, width: u32) -> crate::Result<Self> {
+        let end = lsb
+            .checked_add(width)
+            .ok_or_else(|| crate::Error::Parse("bit slice overflow".to_string()))?;
+        if width == 0 {
+            return Err(crate::Error::Parse(
+                "bit slice width must be > 0".to_string(),
+            ));
+        }
+        if end > self.width {
+            return Err(crate::Error::Parse(format!(
+                "bit slice {}..{} is out of bounds for width {}",
+                lsb, end, self.width
+            )));
+        }
+        Ok(Self {
+            width,
+            signedness: self.signedness,
+            bits: self.bits[lsb as usize..end as usize].to_vec(),
+        })
+    }
+
+    pub fn replace_slice(&self, lsb: u32, value: &Value4) -> crate::Result<Self> {
+        let end = lsb
+            .checked_add(value.width)
+            .ok_or_else(|| crate::Error::Parse("bit slice overflow".to_string()))?;
+        if value.width == 0 {
+            return Err(crate::Error::Parse(
+                "replacement slice width must be > 0".to_string(),
+            ));
+        }
+        if end > self.width {
+            return Err(crate::Error::Parse(format!(
+                "replacement slice {}..{} is out of bounds for width {}",
+                lsb, end, self.width
+            )));
+        }
+        let mut bits = self.bits.clone();
+        bits[lsb as usize..end as usize].copy_from_slice(value.bits_lsb_first());
+        Ok(Self {
+            width: self.width,
+            signedness: self.signedness,
+            bits,
+        })
+    }
+
     pub fn parse_numeric_token(
         width: u32,
         signedness: Signedness,
@@ -268,41 +345,40 @@ impl Value4 {
     }
 
     pub fn resize(&self, new_width: u32) -> Self {
-        if new_width == self.width {
-            return self.clone();
-        }
-        if new_width < self.width {
-            let mut bits = self.bits.clone();
-            bits.truncate(new_width as usize);
-            return Self {
-                width: new_width,
-                signedness: self.signedness,
-                bits,
-            };
-        }
-
-        let mut bits = self.bits.clone();
-        let ext_bit = match self.signedness {
-            Signedness::Unsigned => LogicBit::Zero,
-            Signedness::Signed => self.msb(),
-        };
-        bits.extend(std::iter::repeat(ext_bit).take((new_width - self.width) as usize));
-        Self {
-            width: new_width,
-            signedness: self.signedness,
-            bits,
-        }
+        self.clone().into_width(new_width)
     }
 
     pub fn with_signedness(&self, signedness: Signedness) -> Self {
-        if self.signedness == signedness {
-            return self.clone();
+        self.clone().into_signedness(signedness)
+    }
+
+    pub fn into_width(mut self, new_width: u32) -> Self {
+        if new_width == self.width {
+            return self;
         }
-        Self {
-            width: self.width,
-            signedness,
-            bits: self.bits.clone(),
+        if new_width < self.width {
+            self.bits.truncate(new_width as usize);
+            self.width = new_width;
+            return self;
         }
+
+        let ext_bit = match self.signedness {
+            Signedness::Unsigned => LogicBit::Zero,
+            Signedness::Signed if self.width == 0 => LogicBit::Zero,
+            Signedness::Signed => self.msb(),
+        };
+        self.bits.resize(new_width as usize, ext_bit);
+        self.width = new_width;
+        self
+    }
+
+    pub fn into_signedness(mut self, signedness: Signedness) -> Self {
+        self.signedness = signedness;
+        self
+    }
+
+    pub fn into_width_and_signedness(self, new_width: u32, signedness: Signedness) -> Self {
+        self.into_signedness(signedness).into_width(new_width)
     }
 
     pub fn bitwise_not(&self) -> Self {
@@ -325,8 +401,8 @@ impl Value4 {
 
     pub fn bitwise_and(&self, rhs: &Value4) -> Value4 {
         let w = self.width.max(rhs.width);
-        let a = self.resize(w);
-        let b = rhs.resize(w);
+        let a = Value4Ref::resize(self, w);
+        let b = Value4Ref::resize(rhs, w);
         let mut bits = Vec::with_capacity(w as usize);
         for i in 0..w {
             bits.push(bit_and_4(a.bit(i), b.bit(i)));
@@ -336,8 +412,8 @@ impl Value4 {
 
     pub fn bitwise_or(&self, rhs: &Value4) -> Value4 {
         let w = self.width.max(rhs.width);
-        let a = self.resize(w);
-        let b = rhs.resize(w);
+        let a = Value4Ref::resize(self, w);
+        let b = Value4Ref::resize(rhs, w);
         let mut bits = Vec::with_capacity(w as usize);
         for i in 0..w {
             bits.push(bit_or_4(a.bit(i), b.bit(i)));
@@ -347,8 +423,8 @@ impl Value4 {
 
     pub fn bitwise_xor(&self, rhs: &Value4) -> Value4 {
         let w = self.width.max(rhs.width);
-        let a = self.resize(w);
-        let b = rhs.resize(w);
+        let a = Value4Ref::resize(self, w);
+        let b = Value4Ref::resize(rhs, w);
         let mut bits = Vec::with_capacity(w as usize);
         for i in 0..w {
             bits.push(bit_xor_4(a.bit(i), b.bit(i)));
@@ -362,8 +438,8 @@ impl Value4 {
         if self.has_unknown() || rhs.has_unknown() {
             return Value4::new(w, signedness, vec![LogicBit::X; w as usize]);
         }
-        let a = self.resize(w);
-        let b = rhs.resize(w);
+        let a = Value4Ref::resize(self, w);
+        let b = Value4Ref::resize(rhs, w);
         let bits = add_known_bits_lsb(a.bits_lsb_first(), b.bits_lsb_first());
         Value4::new(w, signedness, bits)
     }
@@ -374,8 +450,8 @@ impl Value4 {
         if self.has_unknown() || rhs.has_unknown() {
             return Value4::new(w, signedness, vec![LogicBit::X; w as usize]);
         }
-        let a = self.resize(w);
-        let b = rhs.resize(w);
+        let a = Value4Ref::resize(self, w);
+        let b = Value4Ref::resize(rhs, w);
         let bits = sub_known_bits_lsb(a.bits_lsb_first(), b.bits_lsb_first());
         Value4::new(w, signedness, bits)
     }
@@ -386,8 +462,38 @@ impl Value4 {
         if self.has_unknown() || rhs.has_unknown() {
             return Value4::new(w, signedness, vec![LogicBit::X; w as usize]);
         }
-        let a = self.resize(w);
-        let b = rhs.resize(w);
+        let a = Value4Ref::resize(self, w);
+        let b = Value4Ref::resize(rhs, w);
+
+        if is_all_zero_known_bits(a.bits_lsb_first()) || is_all_zero_known_bits(b.bits_lsb_first())
+        {
+            return Value4::zeros(w, signedness);
+        }
+        if is_known_one_bits(a.bits_lsb_first()) {
+            return b.with_signedness(signedness);
+        }
+        if is_known_one_bits(b.bits_lsb_first()) {
+            return a.with_signedness(signedness);
+        }
+        if is_all_one_known_bits(a.bits_lsb_first()) {
+            return b.unary_minus().with_signedness(signedness);
+        }
+        if is_all_one_known_bits(b.bits_lsb_first()) {
+            return a.unary_minus().with_signedness(signedness);
+        }
+        if let Some(shift) = known_single_bit_index(a.bits_lsb_first()) {
+            return shl_known_bits(a.width, signedness, b.bits_lsb_first(), shift);
+        }
+        if let Some(shift) = known_single_bit_index(b.bits_lsb_first()) {
+            return shl_known_bits(a.width, signedness, a.bits_lsb_first(), shift);
+        }
+        if w <= 128 {
+            let a_bits = known_bits_to_u128(a.bits_lsb_first());
+            let b_bits = known_bits_to_u128(b.bits_lsb_first());
+            let product = a_bits.wrapping_mul(b_bits) & mask_for_width(w);
+            return Value4::new(w, signedness, u128_to_known_bits_lsb(product, w as usize));
+        }
+
         let bits = mul_known_bits_lsb(a.bits_lsb_first(), b.bits_lsb_first(), w as usize);
         Value4::new(w, signedness, bits)
     }
@@ -398,8 +504,8 @@ impl Value4 {
         if self.has_unknown() || rhs.has_unknown() {
             return Value4::new(w, signedness, vec![LogicBit::X; w as usize]);
         }
-        let numer = self.resize(w);
-        let denom = rhs.resize(w);
+        let numer = Value4Ref::resize(self, w);
+        let denom = Value4Ref::resize(rhs, w);
         if is_all_zero_known_bits(denom.bits_lsb_first()) {
             return Value4::new(w, signedness, vec![LogicBit::X; w as usize]);
         }
@@ -434,8 +540,8 @@ impl Value4 {
         if self.has_unknown() || rhs.has_unknown() {
             return Value4::new(w, signedness, vec![LogicBit::X; w as usize]);
         }
-        let numer = self.resize(w);
-        let denom = rhs.resize(w);
+        let numer = Value4Ref::resize(self, w);
+        let denom = Value4Ref::resize(rhs, w);
         if is_all_zero_known_bits(denom.bits_lsb_first()) {
             return Value4::new(w, signedness, vec![LogicBit::X; w as usize]);
         }
@@ -553,11 +659,11 @@ impl Value4 {
         let use_signed =
             self.signedness == Signedness::Signed && rhs.signedness == Signedness::Signed;
         let (a, b) = if use_signed {
-            (self.resize(w), rhs.resize(w))
+            (Value4Ref::resize(self, w), Value4Ref::resize(rhs, w))
         } else {
             (
-                self.with_signedness(Signedness::Unsigned).resize(w),
-                rhs.with_signedness(Signedness::Unsigned).resize(w),
+                Value4Ref::recontext(self, w, Signedness::Unsigned),
+                Value4Ref::recontext(rhs, w, Signedness::Unsigned),
             )
         };
         let ord = if use_signed {
@@ -627,11 +733,11 @@ impl Value4 {
         let use_signed =
             self.signedness == Signedness::Signed && rhs.signedness == Signedness::Signed;
         let (a, b) = if use_signed {
-            (self.resize(w), rhs.resize(w))
+            (Value4Ref::resize(self, w), Value4Ref::resize(rhs, w))
         } else {
             (
-                self.with_signedness(Signedness::Unsigned).resize(w),
-                rhs.with_signedness(Signedness::Unsigned).resize(w),
+                Value4Ref::recontext(self, w, Signedness::Unsigned),
+                Value4Ref::recontext(rhs, w, Signedness::Unsigned),
             )
         };
 
@@ -668,11 +774,11 @@ impl Value4 {
         let use_signed =
             self.signedness == Signedness::Signed && rhs.signedness == Signedness::Signed;
         let (a, b) = if use_signed {
-            (self.resize(w), rhs.resize(w))
+            (Value4Ref::resize(self, w), Value4Ref::resize(rhs, w))
         } else {
             (
-                self.with_signedness(Signedness::Unsigned).resize(w),
-                rhs.with_signedness(Signedness::Unsigned).resize(w),
+                Value4Ref::recontext(self, w, Signedness::Unsigned),
+                Value4Ref::recontext(rhs, w, Signedness::Unsigned),
             )
         };
 
@@ -702,11 +808,11 @@ impl Value4 {
             } else {
                 Signedness::Unsigned
             };
-        let t2 = t.with_signedness(out_signedness).resize(out_width);
-        let f2 = f.with_signedness(out_signedness).resize(out_width);
+        let t2 = Value4Ref::recontext(t, out_width, out_signedness);
+        let f2 = Value4Ref::recontext(f, out_width, out_signedness);
         match c {
-            LogicBit::One => t2,
-            LogicBit::Zero => f2,
+            LogicBit::One => t2.into_owned(),
+            LogicBit::Zero => f2.into_owned(),
             LogicBit::X | LogicBit::Z => {
                 let mut bits = Vec::with_capacity(out_width as usize);
                 for i in 0..out_width {
@@ -915,6 +1021,47 @@ fn logic_bit_from_bool(v: bool) -> LogicBit {
     if v { LogicBit::One } else { LogicBit::Zero }
 }
 
+enum Value4Ref<'a> {
+    Borrowed(&'a Value4),
+    Owned(Value4),
+}
+
+impl<'a> Value4Ref<'a> {
+    fn resize(value: &'a Value4, width: u32) -> Self {
+        if value.width == width {
+            Self::Borrowed(value)
+        } else {
+            Self::Owned(value.clone().into_width(width))
+        }
+    }
+
+    fn recontext(value: &'a Value4, width: u32, signedness: Signedness) -> Self {
+        if value.width == width && value.signedness == signedness {
+            Self::Borrowed(value)
+        } else {
+            Self::Owned(value.clone().into_width_and_signedness(width, signedness))
+        }
+    }
+
+    fn into_owned(self) -> Value4 {
+        match self {
+            Self::Borrowed(value) => value.clone(),
+            Self::Owned(value) => value,
+        }
+    }
+}
+
+impl std::ops::Deref for Value4Ref<'_> {
+    type Target = Value4;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Borrowed(value) => value,
+            Self::Owned(value) => value,
+        }
+    }
+}
+
 fn cmp_known_bits_unsigned_lsb(a: &[LogicBit], b: &[LogicBit]) -> Ordering {
     debug_assert_eq!(a.len(), b.len());
     debug_assert!(a.iter().all(|bit| bit.is_known_01()));
@@ -1028,6 +1175,79 @@ fn shl1_known_bits_assign_lsb(bits: &mut [LogicBit], lsb_in: LogicBit) {
 fn is_all_zero_known_bits(bits: &[LogicBit]) -> bool {
     debug_assert!(bits.iter().all(|bit| bit.is_known_01()));
     bits.iter().all(|bit| *bit == LogicBit::Zero)
+}
+
+fn is_all_one_known_bits(bits: &[LogicBit]) -> bool {
+    debug_assert!(bits.iter().all(|bit| bit.is_known_01()));
+    bits.iter().all(|bit| *bit == LogicBit::One)
+}
+
+fn is_known_one_bits(bits: &[LogicBit]) -> bool {
+    debug_assert!(bits.iter().all(|bit| bit.is_known_01()));
+    bits.first() == Some(&LogicBit::One) && bits[1..].iter().all(|bit| *bit == LogicBit::Zero)
+}
+
+fn known_single_bit_index(bits: &[LogicBit]) -> Option<u32> {
+    debug_assert!(bits.iter().all(|bit| bit.is_known_01()));
+    let mut found: Option<u32> = None;
+    for (idx, bit) in bits.iter().enumerate() {
+        if *bit != LogicBit::One {
+            continue;
+        }
+        let idx = idx as u32;
+        if found.is_some() {
+            return None;
+        }
+        found = Some(idx);
+    }
+    found
+}
+
+fn shl_known_bits(width: u32, signedness: Signedness, bits: &[LogicBit], shift: u32) -> Value4 {
+    debug_assert_eq!(bits.len(), width as usize);
+    debug_assert!(bits.iter().all(|bit| bit.is_known_01()));
+    if shift >= width {
+        return Value4::zeros(width, signedness);
+    }
+    let mut out = vec![LogicBit::Zero; width as usize];
+    for src in 0..(width - shift) as usize {
+        out[src + shift as usize] = bits[src];
+    }
+    Value4::new(width, signedness, out)
+}
+
+fn known_bits_to_u128(bits: &[LogicBit]) -> u128 {
+    debug_assert!(bits.len() <= 128);
+    debug_assert!(bits.iter().all(|bit| bit.is_known_01()));
+    let mut out = 0u128;
+    for (idx, bit) in bits.iter().enumerate() {
+        if *bit == LogicBit::One {
+            out |= 1u128 << idx;
+        }
+    }
+    out
+}
+
+fn u128_to_known_bits_lsb(value: u128, width: usize) -> Vec<LogicBit> {
+    let mut out = Vec::with_capacity(width);
+    for idx in 0..width {
+        out.push(if (value >> idx) & 1 == 0 {
+            LogicBit::Zero
+        } else {
+            LogicBit::One
+        });
+    }
+    out
+}
+
+fn mask_for_width(width: u32) -> u128 {
+    if width >= 128 {
+        u128::MAX
+    } else if width == 0 {
+        0
+    } else {
+        (1u128 << width) - 1
+    }
 }
 
 fn div_mod_known_bits_lsb(
@@ -1300,6 +1520,19 @@ mod tests {
         let b = ubits(136, &[0, 88]);
 
         assert_eq!(a.mul(&b), ubits(136, &[0, 89, 128]));
+    }
+
+    #[test]
+    fn mul_width_128_wraps_with_native_fast_path() {
+        let all_ones = Value4::new(128, Signedness::Unsigned, vec![LogicBit::One; 128]);
+        let two = ubits(128, &[1]);
+        let mut expected_bits = vec![LogicBit::One; 128];
+        expected_bits[0] = LogicBit::Zero;
+
+        assert_eq!(
+            all_ones.mul(&two),
+            Value4::new(128, Signedness::Unsigned, expected_bits)
+        );
     }
 
     #[test]

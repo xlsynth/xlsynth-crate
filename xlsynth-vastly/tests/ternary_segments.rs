@@ -47,7 +47,11 @@ fn distinct_ternaries_on_same_line_are_disambiguated_by_span() {
     let cm = compile_pipeline_module(dut).unwrap();
     let mut cov = CoverageCounters::default();
     for a in &cm.combo.assigns {
-        cov.register_ternaries_from_spanned_expr(&a.rhs_spanned);
+        cov.register_ternaries_from_spanned_expr(
+            a.rhs_spanned
+                .as_ref()
+                .expect("coverage registration requires spanned assign expressions"),
+        );
     }
     assert_eq!(cov.ternary_branches.len(), 2);
     let mut spans: Vec<(usize, usize)> = cov
@@ -93,7 +97,11 @@ fn annotated_source_plain_shows_branch_hits() {
 
     let mut cov = CoverageCounters::default();
     for a in &cm.combo.assigns {
-        cov.register_ternaries_from_spanned_expr(&a.rhs_spanned);
+        cov.register_ternaries_from_spanned_expr(
+            a.rhs_spanned
+                .as_ref()
+                .expect("coverage registration requires spanned assign expressions"),
+        );
     }
     run_pipeline_and_collect_coverage(&cm, &stimulus, &init, &src, &mut cov).unwrap();
 
@@ -148,7 +156,11 @@ fn nested_ternary_shows_leaf_level_branch_hits_and_annotation() {
 
     let mut cov = CoverageCounters::default();
     for a in &cm.combo.assigns {
-        cov.register_ternaries_from_spanned_expr(&a.rhs_spanned);
+        cov.register_ternaries_from_spanned_expr(
+            a.rhs_spanned
+                .as_ref()
+                .expect("coverage registration requires spanned assign expressions"),
+        );
     }
     run_pipeline_and_collect_coverage(&cm, &stimulus, &init, &src, &mut cov).unwrap();
 

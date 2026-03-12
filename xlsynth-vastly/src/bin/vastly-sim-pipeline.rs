@@ -170,7 +170,11 @@ fn main_inner() -> xlsynth_vastly::Result<()> {
         let mut cov = CoverageCounters::default();
         cov.defines = defines.clone();
         for a in &m.combo.assigns {
-            cov.register_ternaries_from_spanned_expr(&a.rhs_spanned);
+            cov.register_ternaries_from_spanned_expr(
+                a.rhs_spanned
+                    .as_ref()
+                    .expect("coverage registration requires spanned assign expressions"),
+            );
         }
         cov.register_functions(&m.fn_meta);
         let cover = compute_coverability_or_fallback_with_defines(&src_text, &defines);

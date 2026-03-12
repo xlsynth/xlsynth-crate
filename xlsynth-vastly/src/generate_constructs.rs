@@ -8,6 +8,8 @@ use crate::Result;
 use crate::Signedness;
 use crate::Value4;
 use crate::ast::Expr;
+use crate::ast_spanned::SpannedExpr;
+use crate::ast_spanned::SpannedExprKind;
 use crate::eval::eval_ast_with_calls;
 use crate::sv_ast::AlwaysFf;
 use crate::sv_ast::GenerateBranch;
@@ -24,7 +26,10 @@ pub fn elaborate_combo_items(
     for (name, value) in params {
         env.insert(name.clone(), value.clone());
     }
-    elaborate_items_impl(src, items, &env, &BTreeMap::new(), false)
+    let mut substs: BTreeMap<String, u32> = BTreeMap::new();
+    let mut out = Vec::new();
+    elaborate_items_impl(src, items, &mut env, &mut substs, false, &mut out)?;
+    Ok(out)
 }
 
 pub fn elaborate_pipeline_items(
@@ -36,28 +41,31 @@ pub fn elaborate_pipeline_items(
     for (name, value) in params {
         env.insert(name.clone(), value.clone());
     }
-    elaborate_items_impl(src, items, &env, &BTreeMap::new(), false)
+    let mut substs: BTreeMap<String, u32> = BTreeMap::new();
+    let mut out = Vec::new();
+    elaborate_items_impl(src, items, &mut env, &mut substs, false, &mut out)?;
+    Ok(out)
 }
 
 fn elaborate_items_impl(
     src: &str,
     items: &[ModuleItem],
-    env: &crate::Env,
-    substs: &BTreeMap<String, Value4>,
+    env: &mut crate::Env,
+    substs: &mut BTreeMap<String, u32>,
     in_generate: bool,
-) -> Result<Vec<ModuleItem>> {
-    let mut out = Vec::new();
+    out: &mut Vec<ModuleItem>,
+) -> Result<()> {
     for item in items {
-        elaborate_item(src, item, env, substs, in_generate, &mut out)?;
+        elaborate_item(src, item, env, substs, in_generate, out)?;
     }
-    Ok(out)
+    Ok(())
 }
 
 fn elaborate_item(
     src: &str,
     item: &ModuleItem,
-    env: &crate::Env,
-    substs: &BTreeMap<String, Value4>,
+    env: &mut crate::Env,
+    substs: &mut BTreeMap<String, u32>,
     in_generate: bool,
     out: &mut Vec<ModuleItem>,
 ) -> Result<()> {
@@ -73,21 +81,15 @@ fn elaborate_item(
         ModuleItem::Assign {
             lhs,
             rhs,
-            rhs_text,
+            rhs_spanned,
+            rhs_span,
             span,
         } => {
-            let base_text = rhs_text
-                .as_deref()
-                .unwrap_or_else(|| src[rhs.start..rhs.end].trim());
-            let substituted_text = if substs.is_empty() {
-                None
-            } else {
-                Some(substitute_text(base_text, substs))
-            };
             out.push(ModuleItem::Assign {
                 lhs: substitute_lhs(lhs, substs),
-                rhs: *rhs,
-                rhs_text: substituted_text,
+                rhs: substitute_expr(rhs, substs),
+                rhs_spanned: substitute_spanned_expr(rhs_spanned, substs),
+                rhs_span: *rhs_span,
                 span: *span,
             });
         }
@@ -120,32 +122,43 @@ fn elaborate_item(
             let limit_u = eval_const_u32(limit, env)?;
             for idx in start_u..limit_u {
                 let genvar_value = u32_value(idx);
-                let mut next_env = env.clone();
-                next_env.insert(genvar.clone(), genvar_value.clone());
-                let mut next_substs = substs.clone();
-                next_substs.insert(genvar.clone(), genvar_value);
-                out.extend(elaborate_items_impl(
-                    src,
-                    body,
-                    &next_env,
-                    &next_substs,
-                    true,
-                )?);
+                let prev_env = env.insert(genvar.clone(), genvar_value.clone());
+                let prev_subst = substs.insert(genvar.clone(), idx);
+                let elaborate_result = elaborate_items_impl(src, body, env, substs, true, out);
+                restore_env_binding(env, genvar, prev_env);
+                restore_subst_binding(substs, genvar, prev_subst);
+                elaborate_result?;
             }
         }
         ModuleItem::GenerateIf { branches, span: _ } => {
             if let Some(selected) = select_branch(branches, env)? {
-                out.extend(elaborate_items_impl(
-                    src,
-                    &selected.body,
-                    env,
-                    substs,
-                    true,
-                )?);
+                elaborate_items_impl(src, &selected.body, env, substs, true, out)?;
             }
         }
     }
     Ok(())
+}
+
+fn restore_env_binding(env: &mut crate::Env, key: &str, previous: Option<Value4>) {
+    match previous {
+        Some(value) => {
+            env.insert(key.to_string(), value);
+        }
+        None => {
+            env.remove(key);
+        }
+    }
+}
+
+fn restore_subst_binding(map: &mut BTreeMap<String, u32>, key: &str, previous: Option<u32>) {
+    match previous {
+        Some(value) => {
+            map.insert(key.to_string(), value);
+        }
+        None => {
+            map.remove(key);
+        }
+    }
 }
 
 fn select_branch<'a>(
@@ -187,12 +200,15 @@ fn u32_value(value: u32) -> Value4 {
     Value4::parse_numeric_token(32, Signedness::Unsigned, &value.to_string()).unwrap()
 }
 
-fn substitute_expr(expr: &Expr, substs: &BTreeMap<String, Value4>) -> Expr {
+fn unsized_decimal_value(value: u32) -> Value4 {
+    Value4::parse_unsized_decimal_token(Signedness::Signed, &value.to_string()).unwrap()
+}
+
+fn substitute_expr(expr: &Expr, substs: &BTreeMap<String, u32>) -> Expr {
     match expr {
         Expr::Ident(name) => substs
             .get(name)
-            .cloned()
-            .map(Expr::Literal)
+            .map(|value| Expr::UnsizedNumber(unsized_decimal_value(*value)))
             .unwrap_or_else(|| Expr::Ident(name.clone())),
         Expr::Literal(v) => Expr::Literal(v.clone()),
         Expr::UnsizedNumber(v) => Expr::UnsizedNumber(v.clone()),
@@ -255,7 +271,78 @@ fn substitute_expr(expr: &Expr, substs: &BTreeMap<String, Value4>) -> Expr {
     }
 }
 
-fn substitute_lhs(lhs: &Lhs, substs: &BTreeMap<String, Value4>) -> Lhs {
+fn substitute_spanned_expr(expr: &SpannedExpr, substs: &BTreeMap<String, u32>) -> SpannedExpr {
+    let kind = match &expr.kind {
+        SpannedExprKind::Ident(name) => substs
+            .get(name)
+            .map(|value| SpannedExprKind::UnsizedNumber(unsized_decimal_value(*value)))
+            .unwrap_or_else(|| SpannedExprKind::Ident(name.clone())),
+        SpannedExprKind::Literal(v) => SpannedExprKind::Literal(v.clone()),
+        SpannedExprKind::UnsizedNumber(v) => SpannedExprKind::UnsizedNumber(v.clone()),
+        SpannedExprKind::UnbasedUnsized(bit) => SpannedExprKind::UnbasedUnsized(*bit),
+        SpannedExprKind::Call { name, args } => SpannedExprKind::Call {
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|arg| substitute_spanned_expr(arg, substs))
+                .collect(),
+        },
+        SpannedExprKind::Concat(parts) => SpannedExprKind::Concat(
+            parts
+                .iter()
+                .map(|part| substitute_spanned_expr(part, substs))
+                .collect(),
+        ),
+        SpannedExprKind::Replicate { count, expr } => SpannedExprKind::Replicate {
+            count: Box::new(substitute_spanned_expr(count, substs)),
+            expr: Box::new(substitute_spanned_expr(expr, substs)),
+        },
+        SpannedExprKind::Cast { width, expr } => SpannedExprKind::Cast {
+            width: Box::new(substitute_spanned_expr(width, substs)),
+            expr: Box::new(substitute_spanned_expr(expr, substs)),
+        },
+        SpannedExprKind::Index { expr, index } => SpannedExprKind::Index {
+            expr: Box::new(substitute_spanned_expr(expr, substs)),
+            index: Box::new(substitute_spanned_expr(index, substs)),
+        },
+        SpannedExprKind::Slice { expr, msb, lsb } => SpannedExprKind::Slice {
+            expr: Box::new(substitute_spanned_expr(expr, substs)),
+            msb: Box::new(substitute_spanned_expr(msb, substs)),
+            lsb: Box::new(substitute_spanned_expr(lsb, substs)),
+        },
+        SpannedExprKind::IndexedSlice {
+            expr,
+            base,
+            width,
+            upward,
+        } => SpannedExprKind::IndexedSlice {
+            expr: Box::new(substitute_spanned_expr(expr, substs)),
+            base: Box::new(substitute_spanned_expr(base, substs)),
+            width: Box::new(substitute_spanned_expr(width, substs)),
+            upward: *upward,
+        },
+        SpannedExprKind::Unary { op, expr } => SpannedExprKind::Unary {
+            op: *op,
+            expr: Box::new(substitute_spanned_expr(expr, substs)),
+        },
+        SpannedExprKind::Binary { op, lhs, rhs } => SpannedExprKind::Binary {
+            op: *op,
+            lhs: Box::new(substitute_spanned_expr(lhs, substs)),
+            rhs: Box::new(substitute_spanned_expr(rhs, substs)),
+        },
+        SpannedExprKind::Ternary { cond, t, f } => SpannedExprKind::Ternary {
+            cond: Box::new(substitute_spanned_expr(cond, substs)),
+            t: Box::new(substitute_spanned_expr(t, substs)),
+            f: Box::new(substitute_spanned_expr(f, substs)),
+        },
+    };
+    SpannedExpr {
+        span: expr.span,
+        kind,
+    }
+}
+
+fn substitute_lhs(lhs: &Lhs, substs: &BTreeMap<String, u32>) -> Lhs {
     match lhs {
         Lhs::Ident(name) => Lhs::Ident(name.clone()),
         Lhs::Index { base, index } => Lhs::Index {
@@ -277,7 +364,7 @@ fn substitute_lhs(lhs: &Lhs, substs: &BTreeMap<String, Value4>) -> Lhs {
     }
 }
 
-fn substitute_stmt(stmt: &Stmt, substs: &BTreeMap<String, Value4>) -> Stmt {
+fn substitute_stmt(stmt: &Stmt, substs: &BTreeMap<String, u32>) -> Stmt {
     match stmt {
         Stmt::Begin(stmts) => Stmt::Begin(
             stmts
@@ -309,49 +396,4 @@ fn substitute_stmt(stmt: &Stmt, substs: &BTreeMap<String, Value4>) -> Stmt {
         },
         Stmt::Empty => Stmt::Empty,
     }
-}
-
-fn substitute_text(text: &str, substs: &BTreeMap<String, Value4>) -> String {
-    let mut out = String::from(text);
-    for (name, value) in substs {
-        let replacement = value
-            .to_u32_if_known()
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| value.to_bit_string_msb_first());
-        out = replace_ident_token(&out, name, &replacement);
-    }
-    out
-}
-
-fn replace_ident_token(s: &str, target: &str, replacement: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = String::with_capacity(s.len());
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if is_ident_start(bytes[i]) {
-            let start = i;
-            i += 1;
-            while i < bytes.len() && is_ident_continue(bytes[i]) {
-                i += 1;
-            }
-            let ident = &s[start..i];
-            if ident == target {
-                out.push_str(replacement);
-            } else {
-                out.push_str(ident);
-            }
-        } else {
-            out.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-    out
-}
-
-fn is_ident_start(b: u8) -> bool {
-    b == b'_' || b.is_ascii_alphabetic()
-}
-
-fn is_ident_continue(b: u8) -> bool {
-    b == b'_' || b.is_ascii_alphanumeric()
 }
