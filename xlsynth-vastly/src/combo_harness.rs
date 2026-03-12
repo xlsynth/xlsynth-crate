@@ -3,13 +3,13 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-use crate::combo_compile::CompiledComboModule;
-use crate::combo_eval::eval_combo;
-use crate::combo_eval::ComboEvalPlan;
-use crate::vcd_writer::VcdWriter;
 use crate::Error;
 use crate::Result;
 use crate::Value4;
+use crate::combo_compile::CompiledComboModule;
+use crate::combo_eval::ComboEvalPlan;
+use crate::combo_eval::eval_combo;
+use crate::vcd_writer::VcdWriter;
 
 pub fn run_combo_and_write_vcd(
     m: &CompiledComboModule,

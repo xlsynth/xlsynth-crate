@@ -2,10 +2,6 @@
 
 use std::collections::BTreeMap;
 
-use crate::eval_combo_seeded;
-use crate::packed::packed_index_selection_if_in_bounds;
-use crate::plan_combo_eval;
-use crate::step_pipeline_state_with_env;
 use crate::ComboEvalPlan;
 use crate::CompiledPipelineModule;
 use crate::Env;
@@ -14,6 +10,10 @@ use crate::Result;
 use crate::Signedness;
 use crate::State;
 use crate::Value4;
+use crate::eval_combo_seeded;
+use crate::packed::packed_index_selection_if_in_bounds;
+use crate::plan_combo_eval;
+use crate::step_pipeline_state_with_env;
 
 #[derive(Debug, Clone)]
 pub struct InputPortHandle {

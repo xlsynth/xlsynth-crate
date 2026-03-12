@@ -7,6 +7,13 @@ use clap::ArgAction;
 use clap::Parser;
 
 use std::collections::BTreeSet;
+use xlsynth_vastly::CoverageCounters;
+use xlsynth_vastly::LogicBit;
+use xlsynth_vastly::PipelineCycle;
+use xlsynth_vastly::PipelineStimulus;
+use xlsynth_vastly::Signedness;
+use xlsynth_vastly::SourceText;
+use xlsynth_vastly::Value4;
 use xlsynth_vastly::compile_pipeline_module_with_defines;
 use xlsynth_vastly::compute_coverability_or_fallback_with_defines;
 use xlsynth_vastly::cycles_from_irvals_file;
@@ -16,13 +23,6 @@ use xlsynth_vastly::render_annotated_source;
 use xlsynth_vastly::run_pipeline_and_collect_coverage;
 use xlsynth_vastly::run_pipeline_and_write_vcd;
 use xlsynth_vastly::step_pipeline_state_with_env;
-use xlsynth_vastly::CoverageCounters;
-use xlsynth_vastly::LogicBit;
-use xlsynth_vastly::PipelineCycle;
-use xlsynth_vastly::PipelineStimulus;
-use xlsynth_vastly::Signedness;
-use xlsynth_vastly::SourceText;
-use xlsynth_vastly::Value4;
 
 #[derive(Parser, Debug)]
 #[command(name = "vastly-sim-pipeline")]

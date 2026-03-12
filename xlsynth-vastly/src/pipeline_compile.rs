@@ -3,6 +3,10 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
+use crate::Error;
+use crate::LogicBit;
+use crate::Result;
+use crate::Value4;
 use crate::compiled_module::CompiledFunction;
 use crate::compiled_module::ModuleAssign;
 use crate::compiled_module::Port;
@@ -13,10 +17,6 @@ use crate::sv_ast::ModuleItem;
 use crate::sv_ast::ParsedModule;
 use crate::sv_ast::Span;
 use crate::sv_ast::Stmt;
-use crate::Error;
-use crate::LogicBit;
-use crate::Result;
-use crate::Value4;
 
 #[derive(Debug, Clone)]
 pub struct CompiledPipelineModule {

@@ -3,12 +3,12 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
+use crate::LogicBit;
+use crate::Value4;
 use crate::ast_spanned::SpannedExpr;
 use crate::ast_spanned::SpannedExprKind;
 use crate::pipeline_compile::FunctionMeta;
 use crate::sv_ast::Span;
-use crate::LogicBit;
-use crate::Value4;
 
 #[derive(Debug, Clone)]
 pub struct SourceText {

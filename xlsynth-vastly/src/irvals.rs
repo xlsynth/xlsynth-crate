@@ -6,14 +6,14 @@ use xlsynth::IrBits;
 use xlsynth::IrValue;
 use xlsynth::XlsynthError;
 
-use crate::combo_compile::Port;
-use crate::compiled_module::DeclInfo;
-use crate::pipeline_compile::CompiledPipelineModule;
-use crate::pipeline_harness::PipelineCycle;
 use crate::Error;
 use crate::LogicBit;
 use crate::Result;
 use crate::Value4;
+use crate::combo_compile::Port;
+use crate::compiled_module::DeclInfo;
+use crate::pipeline_compile::CompiledPipelineModule;
+use crate::pipeline_harness::PipelineCycle;
 
 pub fn cycles_from_irvals_file(
     m: &CompiledPipelineModule,

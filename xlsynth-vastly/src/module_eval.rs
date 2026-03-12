@@ -2,17 +2,17 @@
 
 use std::collections::BTreeMap;
 
+use crate::Error;
+use crate::LogicBit;
+use crate::Result;
+use crate::Signedness;
+use crate::Value4;
 use crate::ast::Expr as VExpr;
 use crate::compiled_module::CompiledSeqBlock;
 use crate::compiled_module::State;
 use crate::packed::packed_index_selection_if_in_bounds;
 use crate::sv_ast::Lhs;
 use crate::sv_ast::Stmt;
-use crate::Error;
-use crate::LogicBit;
-use crate::Result;
-use crate::Signedness;
-use crate::Value4;
 
 pub fn step_module(m: &CompiledSeqBlock, inputs: &crate::Env, state: &State) -> Result<State> {
     // Build evaluation environment: inputs shadow state (as per plan default).

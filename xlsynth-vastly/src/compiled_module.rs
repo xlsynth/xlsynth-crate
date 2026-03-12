@@ -3,6 +3,11 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
+use crate::Error;
+use crate::LogicBit;
+use crate::Result;
+use crate::Signedness;
+use crate::Value4;
 use crate::ast::Expr;
 use crate::ast_spanned::SpannedExpr;
 use crate::packed::rewrite_packed_expr;
@@ -18,11 +23,6 @@ use crate::sv_ast::PortDecl;
 use crate::sv_ast::PortDir as SvPortDir;
 use crate::sv_ast::Span;
 use crate::sv_ast::Stmt;
-use crate::Error;
-use crate::LogicBit;
-use crate::Result;
-use crate::Signedness;
-use crate::Value4;
 
 pub type State = BTreeMap<String, Value4>;
 

@@ -2,10 +2,6 @@
 
 use std::collections::BTreeMap;
 
-use xlsynth_vastly::compile_pipeline_module;
-use xlsynth_vastly::parse_expr_spanned;
-use xlsynth_vastly::render_annotated_source;
-use xlsynth_vastly::run_pipeline_and_collect_coverage;
 use xlsynth_vastly::CoverageCounters;
 use xlsynth_vastly::LogicBit;
 use xlsynth_vastly::PipelineCycle;
@@ -14,6 +10,10 @@ use xlsynth_vastly::Signedness;
 use xlsynth_vastly::SourceText;
 use xlsynth_vastly::SpannedExprKind;
 use xlsynth_vastly::Value4;
+use xlsynth_vastly::compile_pipeline_module;
+use xlsynth_vastly::parse_expr_spanned;
+use xlsynth_vastly::render_annotated_source;
+use xlsynth_vastly::run_pipeline_and_collect_coverage;
 
 fn vbits(width: u32, signedness: Signedness, msb: &str) -> Value4 {
     assert_eq!(msb.len(), width as usize);

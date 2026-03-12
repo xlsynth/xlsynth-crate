@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::Error;
+use crate::Result;
+use crate::Signedness;
+use crate::Value4;
 use crate::ast::Expr as VExpr;
 use crate::eval::eval_ast_with_calls;
 use crate::parser::parse_expr;
@@ -22,10 +26,6 @@ use crate::sv_ast::Span;
 use crate::sv_ast::Stmt;
 use crate::sv_lexer::Tok;
 use crate::sv_lexer::TokKind;
-use crate::Error;
-use crate::Result;
-use crate::Signedness;
-use crate::Value4;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 

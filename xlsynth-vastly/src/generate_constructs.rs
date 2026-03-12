@@ -2,6 +2,11 @@
 
 use std::collections::BTreeMap;
 
+use crate::Error;
+use crate::LogicBit;
+use crate::Result;
+use crate::Signedness;
+use crate::Value4;
 use crate::ast::Expr;
 use crate::ast_spanned::SpannedExpr;
 use crate::ast_spanned::SpannedExprKind;
@@ -11,11 +16,6 @@ use crate::sv_ast::GenerateBranch;
 use crate::sv_ast::Lhs;
 use crate::sv_ast::ModuleItem;
 use crate::sv_ast::Stmt;
-use crate::Error;
-use crate::LogicBit;
-use crate::Result;
-use crate::Signedness;
-use crate::Value4;
 
 pub fn elaborate_combo_items(
     src: &str,

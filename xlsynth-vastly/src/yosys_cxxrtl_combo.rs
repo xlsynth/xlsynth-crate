@@ -5,8 +5,6 @@ use std::fmt::Write as _;
 use std::process::Command;
 use std::time::SystemTime;
 
-use crate::compile_combo_module;
-use crate::env_is_two_value_safe;
 use crate::CompiledComboModule;
 use crate::Env;
 use crate::Error;
@@ -14,6 +12,8 @@ use crate::LogicBit;
 use crate::Result;
 use crate::Signedness;
 use crate::Value4;
+use crate::compile_combo_module;
+use crate::env_is_two_value_safe;
 
 /// Returns whether the local Yosys/CXXRTL toolchain required for the
 /// two-valued reference-implementation path is available on `PATH`.

@@ -4,6 +4,14 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
 
+use crate::CoverageCounters;
+use crate::Env;
+use crate::Error;
+use crate::Result;
+use crate::Signedness;
+use crate::SourceText;
+use crate::SpanKey;
+use crate::Value4;
 use crate::ast::Expr;
 use crate::ast_spanned::SpannedExpr;
 use crate::ast_spanned::SpannedExprKind;
@@ -12,6 +20,7 @@ use crate::combo_compile::CasezPattern;
 use crate::combo_compile::CompiledComboModule;
 use crate::combo_compile::CompiledFunction;
 use crate::combo_compile::CompiledFunctionBody;
+use crate::eval::CallResolver;
 use crate::eval::binary_operand_expected_signednesses;
 use crate::eval::binary_operand_expected_widths;
 use crate::eval::eval_ast_with_calls;
@@ -22,19 +31,10 @@ use crate::eval::merged_signedness;
 use crate::eval::operand_with_own_sign_ctx;
 use crate::eval::replication_count_to_u32;
 use crate::eval::unary_operand_expected_width;
-use crate::eval::CallResolver;
 use crate::packed::packed_index_selection;
 use crate::packed::packed_index_selection_if_in_bounds;
 use crate::sv_ast::Lhs;
 use crate::value::LogicBit;
-use crate::CoverageCounters;
-use crate::Env;
-use crate::Error;
-use crate::Result;
-use crate::Signedness;
-use crate::SourceText;
-use crate::SpanKey;
-use crate::Value4;
 
 pub struct ComboEvalPlan {
     /// Assign indices in evaluation order.

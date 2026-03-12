@@ -2,9 +2,9 @@
 
 use std::collections::BTreeSet;
 
-use crate::vcd::Vcd;
 use crate::Error;
 use crate::Result;
+use crate::vcd::Vcd;
 
 #[derive(Debug, Clone)]
 pub struct VcdDiffOptions {

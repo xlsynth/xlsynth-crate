@@ -1018,11 +1018,7 @@ fn cmp_known_signed(a: &Value4, b: &Value4) -> Ordering {
 }
 
 fn logic_bit_from_bool(v: bool) -> LogicBit {
-    if v {
-        LogicBit::One
-    } else {
-        LogicBit::Zero
-    }
+    if v { LogicBit::One } else { LogicBit::Zero }
 }
 
 enum Value4Ref<'a> {

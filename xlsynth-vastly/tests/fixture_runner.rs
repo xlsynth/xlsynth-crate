@@ -318,7 +318,10 @@ endmodule
     runner.bind_fixtures(&mut fixtures).unwrap();
 
     let err = runner.step_cycle(&mut fixtures).unwrap_err();
-    assert!(format!("{err:?}").contains("input port `shared_in` was already driven earlier in the cycle"));
+    assert!(
+        format!("{err:?}")
+            .contains("input port `shared_in` was already driven earlier in the cycle")
+    );
 }
 
 #[test]

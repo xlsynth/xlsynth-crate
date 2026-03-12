@@ -2,6 +2,10 @@
 
 use std::collections::BTreeMap;
 
+use crate::Error;
+use crate::Result;
+use crate::Signedness;
+use crate::Value4;
 use crate::ast::BinaryOp;
 use crate::ast::Expr;
 use crate::ast_spanned::SpannedExpr;
@@ -10,10 +14,6 @@ use crate::compiled_module::DeclInfo;
 use crate::sv_ast::Lhs;
 use crate::sv_ast::Span;
 use crate::sv_ast::Stmt;
-use crate::Error;
-use crate::Result;
-use crate::Signedness;
-use crate::Value4;
 
 fn dims_width(dims: &[u32]) -> Result<u32> {
     dims.iter().try_fold(1u32, |acc, dim| {

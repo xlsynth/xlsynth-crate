@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::Env;
+use crate::Error;
+use crate::EvalResult;
+use crate::Result;
+use crate::Signedness;
+use crate::Value4;
 use crate::ast::BinaryOp;
 use crate::ast::Expr;
 use crate::ast::UnaryOp;
@@ -7,12 +13,6 @@ use crate::parser::parse_expr;
 use crate::sv_ast::Span;
 use crate::value::LogicBit;
 use crate::value::RelOp;
-use crate::Env;
-use crate::Error;
-use crate::EvalResult;
-use crate::Result;
-use crate::Signedness;
-use crate::Value4;
 
 pub fn eval_expr(expr: &str, env: &Env) -> Result<EvalResult> {
     let ast = parse_expr(expr)?;

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::SourceText;
 use crate::sv_ast::ModuleItem;
 use crate::sv_ast::Span;
-use crate::SourceText;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum LineCoverability {

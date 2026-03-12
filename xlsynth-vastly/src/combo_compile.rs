@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::Result;
 pub use crate::compiled_module::CasezArm;
 pub use crate::compiled_module::CasezPattern;
 pub use crate::compiled_module::CompiledFunction;
@@ -13,7 +14,6 @@ pub use crate::compiled_module::Port;
 pub use crate::compiled_module::PortDir;
 use crate::sv_ast::ModuleItem;
 use crate::sv_ast::ParsedModule;
-use crate::Result;
 
 pub fn compile_combo_module(src: &str) -> Result<CompiledComboModule> {
     let parse_src = src;

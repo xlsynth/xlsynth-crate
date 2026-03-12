@@ -2,12 +2,12 @@
 
 use std::collections::BTreeMap;
 
-use crate::compiled_module::CompiledSeqBlock;
-use crate::compiled_module::State;
-use crate::vcd_writer::VcdWriter;
 use crate::Env;
 use crate::Error;
 use crate::Result;
+use crate::compiled_module::CompiledSeqBlock;
+use crate::compiled_module::State;
+use crate::vcd_writer::VcdWriter;
 
 #[derive(Debug, Clone)]
 pub struct Stimulus {
