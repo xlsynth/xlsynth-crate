@@ -2507,9 +2507,17 @@ unsafe extern "C" {
     pub fn xls_dslx_quickcheck_get_count(qc: *const CDslxQuickcheck, result_out: *mut i64) -> bool;
 }
 
-pub const DSLX_STDLIB_PATH: &str = env!("DSLX_STDLIB_PATH");
+mod generated_artifact_paths {
+    include!(concat!(env!("OUT_DIR"), "/artifact_paths.rs"));
+}
 
-/// Directory containing the libxls DSO.
+pub const DSLX_STDLIB_PATH: &str = generated_artifact_paths::DSLX_STDLIB_PATH;
+
+/// Path describing where the libxls shared library was materialized.
+///
+/// This value is a shared-library file path when the build uses explicit
+/// artifact overrides, and a directory path when `xlsynth-sys` downloaded or
+/// symlinked the DSO into its own output directory.
 ///
 /// *** DO NOT USE THIS VARIABLE FROM WITHIN YOUR build.rs ***
 ///
@@ -2533,12 +2541,19 @@ pub const DSLX_STDLIB_PATH: &str = env!("DSLX_STDLIB_PATH");
 /// let dylib_path = std::env::var("DEP_XLSYNTH_DSO_PATH").unwrap();
 /// ```
 ///
+/// `DEP_XLSYNTH_DSO_PATH` follows the same contract as `XLS_DSO_PATH`: it is a
+/// shared-library file path when `xlsynth-sys` uses explicit artifact
+/// overrides, and a directory path when `xlsynth-sys` downloaded or symlinked
+/// the DSO into its own output directory. Downstream `build.rs` code that needs
+/// a directory for link-search or rpath setup should normalize a file path to
+/// its parent directory before using it.
+///
 /// More details are available at
 /// <https://doc.rust-lang.org/cargo/reference/build-script-examples.html#using-another-sys-crate>.
 ///
 /// (If you use this envvar from your crate proper -- i.e. not from build.rs --
 /// then it's perfectly fine.)
-pub const XLS_DSO_PATH: &str = env!("XLS_DSO_PATH");
+pub const XLS_DSO_PATH: &str = generated_artifact_paths::XLS_DSO_PATH;
 
 // Add opaque types for module port and def.
 #[repr(C)]
