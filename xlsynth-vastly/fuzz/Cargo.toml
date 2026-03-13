@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth-vastly-fuzz"
-version = "0.39.0"
+version = "0.40.0"
 publish = false
 edition = "2021"
 
@@ -11,9 +11,9 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1.3", features = ["derive"] }
 wait-timeout = "0.2"
-xlsynth = { path = "../../xlsynth", version = "0.39.0" }
-xlsynth-pir = { path = "../../xlsynth-pir", version = "0.39.0" }
-xlsynth-autocov = { path = "../../xlsynth-autocov", version = "0.39.0" }
+xlsynth = { path = "../../xlsynth", version = "0.40.0" }
+xlsynth-pir = { path = "../../xlsynth-pir", version = "0.40.0" }
+xlsynth-autocov = { path = "../../xlsynth-autocov", version = "0.40.0" }
 xlsynth-vastly = { path = "..", package = "xlsynth-vastly" }
 
 [lib]
