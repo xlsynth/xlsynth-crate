@@ -86,6 +86,7 @@ mod ir_fn_structural_hash;
 mod ir_fn_to_block;
 mod ir_fn_to_dslx;
 mod ir_fn_to_json;
+mod ir_fn_to_z3_smtlib;
 mod ir_ged;
 mod ir_localized_eco;
 mod ir_mcmc_opt;
@@ -2164,6 +2165,17 @@ fn main() {
                 .add_ir_top_arg(false),
         )
         .subcommand(
+            clap::Command::new("xls-ir-fn-to-z3-smtlib")
+                .about("Emits Z3 SMT-LIB text for a selected XLS IR function")
+                .arg(
+                    clap::Arg::new("ir_input_file")
+                        .help("The input IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .add_ir_top_arg(true),
+        )
+        .subcommand(
             clap::Command::new("ir-fn-cone-extract")
                 .about("Extracts the backward cone feeding a selected node down to primary inputs (function parameters)")
                 .arg(
@@ -2915,6 +2927,9 @@ fn main() {
         }
         Some(("ir-fn-to-json", subm)) => {
             ir_fn_to_json::handle_ir_fn_to_json(subm, &config);
+        }
+        Some(("xls-ir-fn-to-z3-smtlib", subm)) => {
+            ir_fn_to_z3_smtlib::handle_ir_fn_to_z3_smtlib(subm, &config);
         }
         Some(("ir-fn-cone-extract", subm)) => {
             ir_fn_cone_extract::handle_ir_fn_cone_extract(subm, &config);

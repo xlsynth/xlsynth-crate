@@ -123,6 +123,14 @@ pub(crate) fn xls_function_to_string(f: *const CIrFunction) -> Result<String, Xl
     }
 }
 
+pub(crate) fn xls_function_to_z3_smtlib(
+    function: *mut CIrFunction,
+) -> Result<String, XlsynthError> {
+    let mut c_str_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+    xls_ffi_call!(xlsynth_sys::xls_function_to_z3_smtlib, function; c_str_out)?;
+    unsafe { Ok(c_str_to_rust(c_str_out)) }
+}
+
 pub(crate) unsafe fn c_str_to_rust_no_dealloc(xls_c_str: *mut std::os::raw::c_char) -> String {
     if xls_c_str.is_null() {
         String::new()

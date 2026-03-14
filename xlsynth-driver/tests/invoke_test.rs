@@ -2337,6 +2337,50 @@ fn helper(x: bits[8] id=2, y: bits[8] id=3) -> bits[8] {
 }
 
 #[test]
+fn test_xls_ir_fn_to_z3_smtlib() {
+    let ir_text = r#"package sample
+
+top fn main(x: bits[8] id=1) -> bits[8] {
+  ret add.2: bits[8] = add(x, x, id=2)
+}
+"#;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("input.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("xls-ir-fn-to-z3-smtlib")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.is_empty(), "stderr should be empty; got: {}", stderr);
+    assert!(
+        stdout.contains("declare-fun"),
+        "expected SMT-LIB output to contain declare-fun; stdout: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("main"),
+        "expected SMT-LIB output to reference function name; stdout: {}",
+        stdout
+    );
+}
+
+#[test]
 fn test_ir_fn_structural_hash() {
     let ir_text = r#"package sample
 
