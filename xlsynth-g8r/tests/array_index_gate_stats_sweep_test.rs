@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use xlsynth_g8r::aig::get_summary_stats::{SummaryStats, get_summary_stats};
-use xlsynth_g8r::gatify::ir2gate::{
-    ArrayIndexLoweringStrategy, GatifyOptions, gatify,
-    with_array_index_lowering_strategy_for_testing,
-};
+use xlsynth_g8r::gatify::ir2gate::{ArrayIndexLoweringStrategy, GatifyOptions, gatify};
 use xlsynth_g8r::test_utils::Opt;
 use xlsynth_pir::ir_parser;
 
@@ -38,23 +35,22 @@ fn stats_for_ir_text_with_strategy(
     let mut parser = ir_parser::Parser::new(ir_text);
     let ir_package = parser.parse_and_validate_package().expect("parse package");
     let ir_fn = ir_package.get_top_fn().expect("top fn");
-    with_array_index_lowering_strategy_for_testing(strategy, || {
-        let out = gatify(
-            &ir_fn,
-            GatifyOptions {
-                fold: opt == Opt::Yes,
-                check_equivalence: false,
-                hash: opt == Opt::Yes,
-                adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::RippleCarry,
-                mul_adder_mapping: None,
-                range_info: None,
-                enable_rewrite_carry_out: false,
-                enable_rewrite_prio_encode: false,
-            },
-        )
-        .expect("gatify");
-        get_summary_stats(&out.gate_fn)
-    })
+    let out = gatify(
+        &ir_fn,
+        GatifyOptions {
+            fold: opt == Opt::Yes,
+            check_equivalence: false,
+            hash: opt == Opt::Yes,
+            adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::RippleCarry,
+            mul_adder_mapping: None,
+            range_info: None,
+            enable_rewrite_carry_out: false,
+            enable_rewrite_prio_encode: false,
+            array_index_lowering_strategy: strategy,
+        },
+    )
+    .expect("gatify");
+    get_summary_stats(&out.gate_fn)
 }
 
 fn gather_array_index_rows() -> Vec<ArrayIndexRow> {

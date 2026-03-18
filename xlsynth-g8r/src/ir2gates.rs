@@ -115,6 +115,7 @@ pub fn ir2gates_from_ir_text(
             range_info: Some(range_info.clone()),
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
             enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
+            array_index_lowering_strategy: Default::default(),
         },
     )?;
 

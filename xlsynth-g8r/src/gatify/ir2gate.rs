@@ -23,7 +23,6 @@ use crate::ir2gate_utils::{
 };
 
 use crate::gate_builder::ReductionKind;
-use std::cell::Cell;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArrayIndexLoweringStrategy {
@@ -32,36 +31,10 @@ pub enum ArrayIndexLoweringStrategy {
     ForceNearPow2MuxTree,
 }
 
-thread_local! {
-    static ARRAY_INDEX_STRATEGY_OVERRIDE: Cell<Option<ArrayIndexLoweringStrategy>> = const {
-        Cell::new(None)
-    };
-}
-
-fn get_array_index_strategy_override() -> Option<ArrayIndexLoweringStrategy> {
-    ARRAY_INDEX_STRATEGY_OVERRIDE.with(|cell| cell.get())
-}
-
-#[doc(hidden)]
-pub fn with_array_index_lowering_strategy_for_testing<R>(
-    strategy: ArrayIndexLoweringStrategy,
-    f: impl FnOnce() -> R,
-) -> R {
-    ARRAY_INDEX_STRATEGY_OVERRIDE.with(|cell| {
-        struct Reset<'a> {
-            cell: &'a Cell<Option<ArrayIndexLoweringStrategy>>,
-            prior: Option<ArrayIndexLoweringStrategy>,
-        }
-        impl Drop for Reset<'_> {
-            fn drop(&mut self) {
-                self.cell.set(self.prior);
-            }
-        }
-
-        let prior = cell.replace(Some(strategy));
-        let _reset = Reset { cell, prior };
-        f()
-    })
+impl Default for ArrayIndexLoweringStrategy {
+    fn default() -> Self {
+        Self::Auto
+    }
 }
 
 #[derive(Debug)]
@@ -423,12 +396,12 @@ fn gatify_array_index(
     array_bits: &AigBitVector,
     index_bits: &AigBitVector,
     assumed_in_bounds: bool,
+    strategy: ArrayIndexLoweringStrategy,
 ) -> AigBitVector {
     if assumed_in_bounds {
         return gatify_array_index_exact(gb, array_ty, array_bits, index_bits);
     }
 
-    let strategy = get_array_index_strategy_override().unwrap_or(ArrayIndexLoweringStrategy::Auto);
     match strategy {
         ArrayIndexLoweringStrategy::Auto => {
             if let Some(result) = gatify_array_index_near_pow2_mux_tree_if_profitable(
@@ -450,6 +423,7 @@ fn gatify_array_index(
     gatify_array_index_oob_one_hot(gb, array_ty, array_bits, index_bits)
 }
 
+/// Lowers an in-bounds array index with an exact one-hot selection.
 fn gatify_array_index_exact(
     gb: &mut GateBuilder,
     array_ty: &ir::ArrayTypeData,
@@ -466,6 +440,7 @@ fn gatify_array_index_exact(
     gatify_one_hot_select(gb, &index_decoded, &cases)
 }
 
+/// Lowers a clamped array index with the existing decode-plus-one-hot path.
 fn gatify_array_index_oob_one_hot(
     gb: &mut GateBuilder,
     array_ty: &ir::ArrayTypeData,
@@ -489,6 +464,8 @@ fn gatify_array_index_oob_one_hot(
     gatify_one_hot_select(gb, &one_hot_selector, &cases)
 }
 
+/// Lowers a non-power-of-two clamped array index with a pad-last mux tree when
+/// the index type fits.
 fn gatify_array_index_near_pow2_mux_tree_if_type_fits(
     gb: &mut GateBuilder,
     array_ty: &ir::ArrayTypeData,
@@ -514,6 +491,7 @@ fn gatify_array_index_near_pow2_mux_tree_if_type_fits(
     gatify_indexed_select_mux_tree_pad_last_if_type_fits(gb, index_bits, &cases).ok()
 }
 
+/// Uses the pad-last mux-tree lowering only in the measured profitable region.
 fn gatify_array_index_near_pow2_mux_tree_if_profitable(
     gb: &mut GateBuilder,
     array_ty: &ir::ArrayTypeData,
@@ -2525,6 +2503,7 @@ fn gatify_node(
                     &array_bits,
                     &index_bits,
                     *assumed_in_bounds || proven_in_bounds,
+                    options.array_index_lowering_strategy,
                 );
                 if i + 1 < indices.len() {
                     array_ty = match array_ty.element_type.as_ref() {
@@ -3547,6 +3526,7 @@ pub struct GatifyOptions {
     pub range_info: Option<Arc<IrRangeInfo>>,
     pub enable_rewrite_carry_out: bool,
     pub enable_rewrite_prio_encode: bool,
+    pub array_index_lowering_strategy: ArrayIndexLoweringStrategy,
 }
 
 // Type alias for the lowering map
@@ -3788,6 +3768,7 @@ mod tests {
                 range_info: None,
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
+                array_index_lowering_strategy: Default::default(),
             },
         )
         .unwrap();
@@ -3824,6 +3805,7 @@ fn f(a: bits[8], b: bits[8]) -> bits[8] {
                 range_info: None,
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
+                array_index_lowering_strategy: Default::default(),
             },
         )
         .unwrap();
@@ -3899,6 +3881,7 @@ top fn f(start: bits[2], a: bits[8]) -> bits[8][1] {
                 range_info: None,
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
+                array_index_lowering_strategy: Default::default(),
             },
         )
         .expect("gatify array_slice with narrow start should not panic");
@@ -3938,6 +3921,7 @@ top fn f(start: bits[4], a: bits[8], b: bits[8]) -> bits[8][1] {
                 range_info: None,
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
+                array_index_lowering_strategy: Default::default(),
             },
         )
         .expect("gatify array_slice with wide start should succeed");
@@ -3976,6 +3960,7 @@ top fn f(start: bits[4], a: bits[8], b: bits[8]) -> bits[8][1] {
                 range_info: None,
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
+                array_index_lowering_strategy: Default::default(),
             },
         )
         .unwrap()
@@ -4348,6 +4333,7 @@ top fn cone(leaf_7: bits[5], leaf_9: bits[33]) -> bits[1] {
         array_len: usize,
         payload_width: usize,
         index_width: usize,
+        strategy: super::ArrayIndexLoweringStrategy,
     ) -> SummaryStats {
         let tuple_ty = ir::Type::Tuple(vec![
             Box::new(ir::Type::Bits(1)),
@@ -4365,8 +4351,14 @@ top fn cone(leaf_7: bits[5], leaf_9: bits[33]) -> bits[1] {
         );
         let array_bits = gb.add_input("arr".to_string(), tuple_ty.bit_count() * array_len);
         let index_bits = gb.add_input("idx".to_string(), index_width);
-        let selected =
-            super::gatify_array_index(&mut gb, &array_ty, &array_bits, &index_bits, false);
+        let selected = super::gatify_array_index(
+            &mut gb,
+            &array_ty,
+            &array_bits,
+            &index_bits,
+            false,
+            strategy,
+        );
         let result = selected.get_lsb_slice(field0.start, field0.limit - field0.start);
         gb.add_output("result".to_string(), result);
         get_summary_stats(&gb.build())
@@ -4463,7 +4455,14 @@ top fn cone(leaf_7: bits[5], leaf_9: bits[33]) -> bits[1] {
         );
         let array_bits = gb.add_input("arr".to_string(), array_len);
         let index_bits = gb.add_input("idx".to_string(), index_width);
-        let result = super::gatify_array_index(&mut gb, &array_ty, &array_bits, &index_bits, false);
+        let result = super::gatify_array_index(
+            &mut gb,
+            &array_ty,
+            &array_bits,
+            &index_bits,
+            false,
+            super::ArrayIndexLoweringStrategy::Auto,
+        );
         gb.add_output("result".to_string(), result);
         get_summary_stats(&gb.build())
     }
@@ -4537,7 +4536,14 @@ top fn cone(leaf_7: bits[5], leaf_9: bits[33]) -> bits[1] {
         );
         let array_bits = gb.add_input("arr".to_string(), element_width * array_len);
         let index_bits = gb.add_input("idx".to_string(), index_width);
-        let result = super::gatify_array_index(&mut gb, &array_ty, &array_bits, &index_bits, false);
+        let result = super::gatify_array_index(
+            &mut gb,
+            &array_ty,
+            &array_bits,
+            &index_bits,
+            false,
+            super::ArrayIndexLoweringStrategy::Auto,
+        );
         gb.add_output("result".to_string(), result);
         get_summary_stats(&gb.build())
     }
@@ -4556,6 +4562,7 @@ top fn cone(leaf_7: bits[5], leaf_9: bits[33]) -> bits[1] {
                 /* array_len= */ 27,
                 payload_width,
                 /* index_width= */ 5,
+                super::ArrayIndexLoweringStrategy::ForceOobOneHot,
             );
             assert_eq!(
                 got.live_nodes, want_live_nodes,
@@ -4573,7 +4580,10 @@ top fn cone(leaf_7: bits[5], leaf_9: bits[33]) -> bits[1] {
     #[test]
     fn test_tuple_index_array_index_field0_width2_tuple_hits_public_mux_tree_strategy() {
         let got = get_tuple_field0_array_index_stats(
-            /* array_len= */ 27, /* payload_width= */ 1, 5,
+            /* array_len= */ 27,
+            /* payload_width= */ 1,
+            5,
+            super::ArrayIndexLoweringStrategy::Auto,
         );
         assert_eq!(got.live_nodes, 118);
         assert_eq!(got.deepest_path, 11);
