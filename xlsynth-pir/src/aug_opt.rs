@@ -9,7 +9,10 @@
 //! - **Bounded effort**: intended as a fast front-end; keep rounds small.
 //! - **Deterministic**: stable iteration order and stable outputs.
 
-use crate::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
+use crate::ir::{
+    self, Binop, FileTable, FnInPkgMut, MemberType, NaryOp, NodePayload, NodeRef, Package,
+    PackageMember, Type, Unop,
+};
 use crate::ir_parser;
 use crate::ir_range_info::IrRangeInfo;
 use crate::ir_utils;
@@ -305,7 +308,17 @@ fn apply_basis_rewrites_to_fn(
     f: &ir::Fn,
     range_info: Option<&IrRangeInfo>,
 ) -> (ir::Fn, AugOptRewriteStats) {
-    let mut cloned = f.clone();
+    let cloned = f.clone();
+    let top_name = cloned.name.clone();
+    let mut pkg = Package::new(
+        "__aug_opt".to_string(),
+        FileTable::new(),
+        vec![PackageMember::Function(cloned)],
+        Some((top_name.clone(), MemberType::Function)),
+    );
+    let mut cloned = pkg
+        .get_top_fn_in_pkg_mut()
+        .expect("aug_opt: synthetic package must have a top function");
     let mut stats = AugOptRewriteStats::default();
     stats.guarded_sel_ne1_nor = rewrite_guarded_sel_ne_literal1_nor(&mut cloned);
     stats.lsb_of_shll = rewrite_lsb_of_shll_via_shift_is_zero(&mut cloned);
@@ -327,34 +340,17 @@ fn apply_basis_rewrites_to_fn(
     // Ensure textual IR is defs-before-uses by reordering body nodes into a
     // topological order (while preserving PIR layout invariants). This makes
     // it safe for rewrites to append new nodes.
-    ir_utils::compact_and_toposort_in_place(&mut cloned)
+    ir_utils::compact_and_toposort_in_place(cloned.function_mut())
         .expect("aug_opt: compact_and_toposort_in_place failed");
+    let cloned = cloned.function().clone();
     (cloned, stats)
 }
 
-fn next_text_id(f: &ir::Fn) -> usize {
-    f.nodes
-        .iter()
-        .map(|n| n.text_id)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1)
+fn push_node(f: &mut FnInPkgMut<'_>, ty: Type, payload: NodePayload) -> NodeRef {
+    f.push_node(ty, payload)
 }
 
-fn push_node(f: &mut ir::Fn, ty: Type, payload: NodePayload) -> NodeRef {
-    let text_id = next_text_id(f);
-    let idx = f.nodes.len();
-    f.nodes.push(ir::Node {
-        text_id,
-        name: None,
-        ty,
-        payload,
-        pos: None,
-    });
-    NodeRef { index: idx }
-}
-
-fn push_ubits_literal(f: &mut ir::Fn, w: usize, v: u64) -> NodeRef {
+fn push_ubits_literal(f: &mut FnInPkgMut<'_>, w: usize, v: u64) -> NodeRef {
     let ty = Type::Bits(w);
     let lit = IrValue::make_ubits(w, v).expect("ubits literal construction should succeed");
     push_node(f, ty, NodePayload::Literal(lit))
@@ -379,7 +375,7 @@ fn is_ubits_literal_1_of_width(f: &ir::Fn, nr: NodeRef, w: usize) -> bool {
 ///
 /// Intuition: the LSB of a left-shifted value is preserved iff the shift amount
 /// is zero; otherwise it is forced to zero.
-fn rewrite_lsb_of_shll_via_shift_is_zero(f: &mut ir::Fn) -> usize {
+fn rewrite_lsb_of_shll_via_shift_is_zero(f: &mut FnInPkgMut<'_>) -> usize {
     let mut rewrites = 0usize;
 
     for slice_index in 0..f.nodes.len() {
@@ -485,7 +481,7 @@ fn host_usize_value_fits_in_bits_width(value: usize, width: usize) -> bool {
 ///
 /// This makes shifter behavior explicit and often exposes simpler predicate
 /// structure for downstream optimization / gatify.
-fn rewrite_eq_shll_slice_literal_to_shift_terms(f: &mut ir::Fn) -> usize {
+fn rewrite_eq_shll_slice_literal_to_shift_terms(f: &mut FnInPkgMut<'_>) -> usize {
     let mut rewrites = 0usize;
 
     for eq_index in 0..f.nodes.len() {
@@ -713,7 +709,7 @@ fn ugt_against_literal_rhs(f: &ir::Fn, nr: NodeRef) -> Option<(NodeRef, NodeRef,
 /// - We intentionally require the power-of-two to be the MSB of `x` (i.e.
 ///   `2^(w-1)`) to keep the logic simple and obviously correct.
 /// - This targets the common "truncated compare with tie-breaker bit" pattern.
-fn rewrite_pow2_msb_compare_with_eq_tiebreak(f: &mut ir::Fn) -> usize {
+fn rewrite_pow2_msb_compare_with_eq_tiebreak(f: &mut FnInPkgMut<'_>) -> usize {
     let mut rewrites = 0usize;
 
     for or_index in 0..f.nodes.len() {
@@ -831,7 +827,7 @@ fn rewrite_pow2_msb_compare_with_eq_tiebreak(f: &mut ir::Fn) -> usize {
 /// - `s: bits[1]`
 /// - `sel` has exactly 2 cases and no default
 /// - comparison is against literal(1) of the same width as the select result
-fn rewrite_guarded_sel_ne_literal1_nor(f: &mut ir::Fn) -> usize {
+fn rewrite_guarded_sel_ne_literal1_nor(f: &mut FnInPkgMut<'_>) -> usize {
     let mut rewrites = 0usize;
 
     for nor_index in 0..f.nodes.len() {
@@ -953,7 +949,7 @@ fn proves_node_ne_bits_literal(
 ///
 /// When analysis proves `d != L`, the default term can be omitted safely.
 fn rewrite_eq_priority_sel_to_selector_predicate(
-    f: &mut ir::Fn,
+    f: &mut FnInPkgMut<'_>,
     range_info: Option<&IrRangeInfo>,
 ) -> usize {
     let Some(range_info) = range_info else {
@@ -1190,7 +1186,11 @@ fn match_predicate_shape(f: &ir::Fn, nr: NodeRef) -> Option<(PredicateShape, Nod
     }
 }
 
-fn build_predicate_on_value(f: &mut ir::Fn, shape: PredicateShape, value_nr: NodeRef) -> NodeRef {
+fn build_predicate_on_value(
+    f: &mut FnInPkgMut<'_>,
+    shape: PredicateShape,
+    value_nr: NodeRef,
+) -> NodeRef {
     match shape {
         PredicateShape::Reduce(unop) => {
             push_node(f, Type::Bits(1), NodePayload::Unop(unop, value_nr))
@@ -1267,7 +1267,7 @@ fn as_select_like(f: &ir::Fn, nr: NodeRef) -> Option<SelectLikeNode> {
 }
 
 fn push_select_like(
-    f: &mut ir::Fn,
+    f: &mut FnInPkgMut<'_>,
     result_ty: Type,
     kind: SelectLikeKind,
     selector: NodeRef,
@@ -1335,7 +1335,12 @@ fn estimate_umod_distribution_combinations_bounded(
     lhs_leaves.saturating_mul(rhs_leaves).min(cap_plus_one)
 }
 
-fn build_distributed_umod(f: &mut ir::Fn, lhs: NodeRef, rhs: NodeRef, result_ty: Type) -> NodeRef {
+fn build_distributed_umod(
+    f: &mut FnInPkgMut<'_>,
+    lhs: NodeRef,
+    rhs: NodeRef,
+    result_ty: Type,
+) -> NodeRef {
     if let Some(sel_lhs) = as_select_like(f, lhs) {
         let mapped_cases = sel_lhs
             .cases
@@ -1385,7 +1390,7 @@ fn build_distributed_umod(f: &mut ir::Fn, lhs: NodeRef, rhs: NodeRef, result_ty:
 /// If both operands are selection-like nodes, distribution is applied
 /// recursively so the resulting IR does not retain `umod` with a selection-like
 /// operand.
-fn rewrite_umod_distribute_across_select(f: &mut ir::Fn) -> usize {
+fn rewrite_umod_distribute_across_select(f: &mut FnInPkgMut<'_>) -> usize {
     let mut rewrites = 0usize;
     for idx in 0..f.nodes.len() {
         let NodePayload::Binop(Binop::Umod, lhs, rhs) = f.nodes[idx].payload.clone() else {
@@ -1420,7 +1425,7 @@ fn rewrite_umod_distribute_across_select(f: &mut ir::Fn) -> usize {
 ///
 /// This keeps the result as a selector of predicates, which is generally
 /// friendlier to downstream lowering than SOP expansion.
-fn rewrite_predicate_hoist_across_select(f: &mut ir::Fn) -> usize {
+fn rewrite_predicate_hoist_across_select(f: &mut FnInPkgMut<'_>) -> usize {
     let mut rewrites = 0usize;
 
     for idx in 0..f.nodes.len() {
@@ -1584,7 +1589,7 @@ fn intervals_cover_range(mut intervals: Vec<(usize, usize)>, lo: usize, hi: usiz
 /// nonzero-after-shift predicate can be discharged cheaply by known bits and
 /// shift bounds.
 fn rewrite_ne_shrl_slice_known_one_shift_nonzero(
-    f: &mut ir::Fn,
+    f: &mut FnInPkgMut<'_>,
     range_info: Option<&IrRangeInfo>,
 ) -> usize {
     let Some(range_info) = range_info else {
@@ -1749,7 +1754,7 @@ fn rewrite_ne_shrl_slice_known_one_shift_nonzero(
 /// arithmetic. It can unlock further simplifications when `x` is range-bounded
 /// (e.g. a small set of possible constants) and libxls does not solve the
 /// modular equation directly.
-fn rewrite_eq_add_zero_to_eq_rhs_sub(f: &mut ir::Fn) -> usize {
+fn rewrite_eq_add_zero_to_eq_rhs_sub(f: &mut FnInPkgMut<'_>) -> usize {
     let mut rewrites = 0usize;
 
     for eq_index in 0..f.nodes.len() {
@@ -1835,7 +1840,7 @@ fn is_bits_literal_all_ones(v: &IrValue) -> bool {
 ///
 /// In fixed-width arithmetic, `x + y == 2^w-1` iff `y == ~x`; negating the
 /// equality gives an equivalent and often shallower predicate.
-fn rewrite_ne_add_all_ones_to_ne_not(f: &mut ir::Fn) -> usize {
+fn rewrite_ne_add_all_ones_to_ne_not(f: &mut FnInPkgMut<'_>) -> usize {
     let mut rewrites = 0usize;
 
     for ne_index in 0..f.nodes.len() {

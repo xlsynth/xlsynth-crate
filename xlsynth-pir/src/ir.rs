@@ -3,6 +3,7 @@
 #![allow(unused)]
 
 use std::collections::{HashMap, hash_map::OccupiedError};
+use std::ops::{Deref, DerefMut};
 
 use xlsynth::{IrValue, ir_value::IrFormatPreference};
 
@@ -1641,6 +1642,133 @@ pub enum PackageMember {
     Block { func: Fn, metadata: BlockMetadata },
 }
 
+/// Read-only access to a function or block body together with its parent
+/// package.
+pub struct FnInPkg<'a> {
+    pkg: &'a Package,
+    member_index: usize,
+}
+
+impl<'a> FnInPkg<'a> {
+    /// Creates a package-aware function view for `member_index`.
+    pub fn new(pkg: &'a Package, member_index: usize) -> Result<Self, String> {
+        if member_index >= pkg.members.len() {
+            return Err(format!(
+                "FnInPkg::new: member index {} out of bounds (len={})",
+                member_index,
+                pkg.members.len()
+            ));
+        }
+        Ok(Self { pkg, member_index })
+    }
+
+    /// Returns the parent package for this function view.
+    pub const fn package(&self) -> &'a Package {
+        self.pkg
+    }
+
+    /// Returns the package member index for this function view.
+    pub const fn member_index(&self) -> usize {
+        self.member_index
+    }
+
+    /// Returns the wrapped function body.
+    pub fn function(&self) -> &Fn {
+        match &self.pkg.members[self.member_index] {
+            PackageMember::Function(f) => f,
+            PackageMember::Block { func, .. } => func,
+        }
+    }
+}
+
+impl Deref for FnInPkg<'_> {
+    type Target = Fn;
+
+    fn deref(&self) -> &Self::Target {
+        self.function()
+    }
+}
+
+/// Mutable access to a function or block body together with its parent package.
+pub struct FnInPkgMut<'a> {
+    pkg: &'a mut Package,
+    member_index: usize,
+}
+
+impl<'a> FnInPkgMut<'a> {
+    /// Creates a mutable package-aware function view for `member_index`.
+    pub fn new(pkg: &'a mut Package, member_index: usize) -> Result<Self, String> {
+        if member_index >= pkg.members.len() {
+            return Err(format!(
+                "FnInPkgMut::new: member index {} out of bounds (len={})",
+                member_index,
+                pkg.members.len()
+            ));
+        }
+        Ok(Self { pkg, member_index })
+    }
+
+    /// Returns the parent package for this function view.
+    pub fn package(&self) -> &Package {
+        self.pkg
+    }
+
+    /// Returns the package member index for this function view.
+    pub const fn member_index(&self) -> usize {
+        self.member_index
+    }
+
+    /// Returns the wrapped function body.
+    pub fn function(&self) -> &Fn {
+        match &self.pkg.members[self.member_index] {
+            PackageMember::Function(f) => f,
+            PackageMember::Block { func, .. } => func,
+        }
+    }
+
+    /// Returns the wrapped function body mutably.
+    pub fn function_mut(&mut self) -> &mut Fn {
+        match &mut self.pkg.members[self.member_index] {
+            PackageMember::Function(f) => f,
+            PackageMember::Block { func, .. } => func,
+        }
+    }
+
+    /// Returns the next package-owned `text_id` and bumps the package state.
+    pub fn take_next_text_id(&mut self) -> usize {
+        self.pkg.take_next_text_id()
+    }
+
+    /// Appends a new node to the wrapped function using a fresh package-owned
+    /// `text_id`.
+    pub fn push_node(&mut self, ty: Type, payload: NodePayload) -> NodeRef {
+        let idx = self.function().nodes.len();
+        let text_id = self.take_next_text_id();
+        self.function_mut().nodes.push(Node {
+            text_id,
+            name: None,
+            ty,
+            payload,
+            pos: None,
+        });
+        NodeRef { index: idx }
+    }
+}
+
+impl Deref for FnInPkgMut<'_> {
+    type Target = Fn;
+
+    fn deref(&self) -> &Self::Target {
+        self.function()
+    }
+}
+
+impl DerefMut for FnInPkgMut<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.function_mut()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Register {
     pub name: String,
@@ -1725,6 +1853,78 @@ impl Package {
     /// Returns a get-and-bump allocator for fresh package-wide `text_id`s.
     pub fn text_id_allocator(&self) -> TextIdAllocator {
         TextIdAllocator::new(self.next_text_id)
+    }
+
+    /// Returns a package-aware read-only function view for `member_index`.
+    pub fn fn_in_pkg(&self, member_index: usize) -> Option<FnInPkg<'_>> {
+        FnInPkg::new(self, member_index).ok()
+    }
+
+    /// Returns a package-aware mutable function view for `member_index`.
+    pub fn fn_in_pkg_mut(&mut self, member_index: usize) -> Option<FnInPkgMut<'_>> {
+        FnInPkgMut::new(self, member_index).ok()
+    }
+
+    /// Returns a package-aware read-only view for the named function.
+    pub fn get_fn_in_pkg(&self, name: &str) -> Option<FnInPkg<'_>> {
+        self.members
+            .iter()
+            .enumerate()
+            .find_map(|(idx, m)| match m {
+                PackageMember::Function(f) if f.name == name => self.fn_in_pkg(idx),
+                _ => None,
+            })
+    }
+
+    /// Returns a package-aware mutable view for the named function.
+    pub fn get_fn_in_pkg_mut(&mut self, name: &str) -> Option<FnInPkgMut<'_>> {
+        let idx = self
+            .members
+            .iter()
+            .enumerate()
+            .find_map(|(idx, m)| match m {
+                PackageMember::Function(f) if f.name == name => Some(idx),
+                _ => None,
+            })?;
+        self.fn_in_pkg_mut(idx)
+    }
+
+    /// Returns a package-aware read-only view for the package top function.
+    pub fn get_top_fn_in_pkg(&self) -> Option<FnInPkg<'_>> {
+        match &self.top {
+            Some((_, MemberType::Block)) => None,
+            Some((name, MemberType::Function)) => self.get_fn_in_pkg(name),
+            None => self
+                .members
+                .iter()
+                .enumerate()
+                .find_map(|(idx, m)| match m {
+                    PackageMember::Function(_) => self.fn_in_pkg(idx),
+                    PackageMember::Block { .. } => None,
+                }),
+        }
+    }
+
+    /// Returns a package-aware mutable view for the package top function.
+    pub fn get_top_fn_in_pkg_mut(&mut self) -> Option<FnInPkgMut<'_>> {
+        match &self.top {
+            Some((_, MemberType::Block)) => None,
+            Some((name, MemberType::Function)) => {
+                let name = name.clone();
+                self.get_fn_in_pkg_mut(&name)
+            }
+            None => {
+                let idx = self
+                    .members
+                    .iter()
+                    .enumerate()
+                    .find_map(|(idx, m)| match m {
+                        PackageMember::Function(_) => Some(idx),
+                        PackageMember::Block { .. } => None,
+                    })?;
+                self.fn_in_pkg_mut(idx)
+            }
+        }
     }
 
     /// Sets the package top to the given function name, if it exists.

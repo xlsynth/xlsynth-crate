@@ -18,7 +18,10 @@
 //! `xlsynth_pir::desugar_extensions`).
 
 use xlsynth::IrValue;
-use xlsynth_pir::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
+use xlsynth_pir::ir::{
+    self, Binop, FileTable, FnInPkgMut, MemberType, NaryOp, NodePayload, NodeRef, Package,
+    PackageMember, Type, Unop,
+};
 use xlsynth_pir::ir_range_info::IrRangeInfo;
 use xlsynth_pir::ir_utils;
 use xlsynth_pir::math::ceil_log2;
@@ -193,29 +196,11 @@ fn nil_out_node(f: &mut ir::Fn, node_ref: ir::NodeRef) {
     node.ty = Type::nil();
 }
 
-fn next_text_id(f: &ir::Fn) -> usize {
-    f.nodes
-        .iter()
-        .map(|n| n.text_id)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1)
+fn push_node(f: &mut FnInPkgMut<'_>, ty: Type, payload: NodePayload) -> NodeRef {
+    f.push_node(ty, payload)
 }
 
-fn push_node(f: &mut ir::Fn, ty: Type, payload: NodePayload) -> NodeRef {
-    let text_id = next_text_id(f);
-    let idx = f.nodes.len();
-    f.nodes.push(ir::Node {
-        text_id,
-        name: None,
-        ty,
-        payload,
-        pos: None,
-    });
-    NodeRef { index: idx }
-}
-
-fn get_or_insert_bits1_literal(f: &mut ir::Fn, value: bool) -> NodeRef {
+fn get_or_insert_bits1_literal(f: &mut FnInPkgMut<'_>, value: bool) -> NodeRef {
     // Prefer reusing an existing bits[1] literal to keep node count stable.
     for (idx, n) in f.nodes.iter().enumerate() {
         if let NodePayload::Literal(lit) = &n.payload {
@@ -281,7 +266,7 @@ fn msb_is_provably_zero(
 }
 
 fn get_zero_extended_low_bits(
-    f: &mut ir::Fn,
+    f: &mut FnInPkgMut<'_>,
     nr: NodeRef,
     w: usize,
     range_info: Option<&IrRangeInfo>,
@@ -359,7 +344,7 @@ fn mark_dead_nodes_as_nil(f: &mut ir::Fn) {
 /// width=1)` into `ext_carry_out(lhs, rhs, c_in)` when the add-chain nodes have
 /// a single use (the slice) so we can safely DCE the chain.
 fn rewrite_add_slice_carry_out_to_ext_carry_out(
-    f: &mut ir::Fn,
+    f: &mut FnInPkgMut<'_>,
     range_info: Option<&IrRangeInfo>,
 ) -> usize {
     let use_counts = get_use_counts(f);
@@ -573,16 +558,29 @@ pub fn prep_for_gatify(
     range_info: Option<&IrRangeInfo>,
     options: PrepForGatifyOptions,
 ) -> ir::Fn {
-    let mut cloned = f.clone();
-    combine_or_reduces(&mut cloned);
-    if options.enable_rewrite_carry_out {
-        let _rewrites = rewrite_add_slice_carry_out_to_ext_carry_out(&mut cloned, range_info);
+    let mut pkg = Package::new(
+        "prep_for_gatify".to_string(),
+        FileTable::new(),
+        vec![PackageMember::Function(f.clone())],
+        Some((f.name.clone(), MemberType::Function)),
+    );
+    {
+        let mut fn_in_pkg = pkg
+            .get_top_fn_in_pkg_mut()
+            .expect("prep_for_gatify: synthetic package must have a top fn");
+        combine_or_reduces(&mut fn_in_pkg);
+        if options.enable_rewrite_carry_out {
+            let _rewrites =
+                rewrite_add_slice_carry_out_to_ext_carry_out(&mut fn_in_pkg, range_info);
+        }
+        if options.enable_rewrite_prio_encode {
+            let _rewrites = rewrite_encode_one_hot_to_ext_prio_encode(&mut fn_in_pkg);
+        }
+        mark_dead_nodes_as_nil(&mut fn_in_pkg);
     }
-    if options.enable_rewrite_prio_encode {
-        let _rewrites = rewrite_encode_one_hot_to_ext_prio_encode(&mut cloned);
-    }
-    mark_dead_nodes_as_nil(&mut cloned);
-    cloned
+    pkg.get_top_fn()
+        .expect("prep_for_gatify: synthetic package must retain top fn")
+        .clone()
 }
 
 #[cfg(test)]

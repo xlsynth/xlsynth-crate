@@ -219,7 +219,7 @@ fn optimize_pir_fn_via_xls(f: &IrFn) -> Result<IrFn> {
 
     // Upstream XLS IR does not understand PIR extension ops; desugar them before
     // round-tripping through the XLS optimizer.
-    desugar_extensions::desugar_extensions_in_fn(&mut fn_for_text)
+    desugar_extensions::desugar_extensions_in_standalone_fn(&mut fn_for_text)
         .map_err(|e| anyhow::anyhow!("desugar_extensions_in_fn failed: {}", e))?;
 
     let pkg_text = format!("package pir_mcmc\n\n{}\n", fn_for_text);
@@ -708,7 +708,7 @@ fn canonicalize_fn_for_sample(f: &IrFn) -> Result<IrFn> {
     let mut f = f.clone();
     compact_and_toposort_in_place(&mut f)
         .map_err(|e| anyhow::anyhow!("compact_and_toposort_in_place failed: {}", e))?;
-    desugar_extensions::desugar_extensions_in_fn(&mut f)
+    desugar_extensions::desugar_extensions_in_standalone_fn(&mut f)
         .map_err(|e| anyhow::anyhow!("desugar_extensions_in_fn failed: {}", e))?;
     Ok(f)
 }
