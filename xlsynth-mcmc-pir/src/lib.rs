@@ -47,6 +47,7 @@ use xlsynth_pir::desugar_extensions;
 use xlsynth_pir::fuzz_utils::arbitrary_irbits;
 use xlsynth_pir::ir::Fn as IrFn;
 use xlsynth_pir::ir::Type as PirType;
+use xlsynth_pir::ir::{FileTable, MemberType, Package, PackageMember};
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_utils::compact_and_toposort_in_place;
@@ -203,6 +204,27 @@ fn validate_weighted_switching_options(
     Ok(())
 }
 
+fn desugar_detached_fn_via_synthetic_package(f: &mut IrFn) -> Result<()> {
+    let mut pkg = Package::new(
+        "__xlsynth_mcmc_pir_desugar".to_string(),
+        FileTable::new(),
+        vec![PackageMember::Function(f.clone())],
+        Some((f.name.clone(), MemberType::Function)),
+    );
+    {
+        let mut fn_in_pkg = pkg.get_top_fn_in_pkg_mut().expect(
+            "desugar_detached_fn_via_synthetic_package: synthetic package must have top fn",
+        );
+        desugar_extensions::desugar_extensions_in_fn(&mut fn_in_pkg)
+            .map_err(|e| anyhow::anyhow!("desugar_extensions_in_fn failed: {}", e))?;
+    }
+    *f = pkg
+        .get_top_fn()
+        .expect("desugar_detached_fn_via_synthetic_package: synthetic package lost top fn")
+        .clone();
+    Ok(())
+}
+
 /// Produces the XLS-optimized PIR function for `f`.
 ///
 /// This uses the same PIR → text → XLS optimize → PIR parsing pipeline used by
@@ -219,8 +241,7 @@ fn optimize_pir_fn_via_xls(f: &IrFn) -> Result<IrFn> {
 
     // Upstream XLS IR does not understand PIR extension ops; desugar them before
     // round-tripping through the XLS optimizer.
-    desugar_extensions::desugar_extensions_in_standalone_fn(&mut fn_for_text)
-        .map_err(|e| anyhow::anyhow!("desugar_extensions_in_fn failed: {}", e))?;
+    desugar_detached_fn_via_synthetic_package(&mut fn_for_text)?;
 
     let pkg_text = format!("package pir_mcmc\n\n{}\n", fn_for_text);
 
@@ -708,8 +729,7 @@ fn canonicalize_fn_for_sample(f: &IrFn) -> Result<IrFn> {
     let mut f = f.clone();
     compact_and_toposort_in_place(&mut f)
         .map_err(|e| anyhow::anyhow!("compact_and_toposort_in_place failed: {}", e))?;
-    desugar_extensions::desugar_extensions_in_standalone_fn(&mut f)
-        .map_err(|e| anyhow::anyhow!("desugar_extensions_in_fn failed: {}", e))?;
+    desugar_detached_fn_via_synthetic_package(&mut f)?;
     Ok(f)
 }
 

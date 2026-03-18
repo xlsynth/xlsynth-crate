@@ -180,25 +180,6 @@ pub fn desugar_extensions_in_fn(f: &mut FnInPkgMut<'_>) -> Result<(), DesugarErr
     Ok(())
 }
 
-/// Desugars extension ops within a standalone function by using a synthetic
-/// package.
-///
-/// This function also normalizes the node list into a valid topological order.
-pub fn desugar_extensions_in_standalone_fn(f: &mut Fn) -> Result<(), DesugarError> {
-    let mut pkg = Package::new(
-        "__desugar_extensions".to_string(),
-        crate::ir::FileTable::new(),
-        vec![crate::ir::PackageMember::Function(f.clone())],
-        Some((f.name.clone(), crate::ir::MemberType::Function)),
-    );
-    let mut fn_in_pkg = pkg
-        .get_top_fn_in_pkg_mut()
-        .expect("desugar_extensions_in_standalone_fn: synthetic package must have a top function");
-    desugar_extensions_in_fn(&mut fn_in_pkg)?;
-    *f = fn_in_pkg.function().clone();
-    Ok(())
-}
-
 /// Desugars extension ops within `pkg` into upstream-compatible PIR operations.
 pub fn desugar_extensions_in_package(pkg: &mut Package) -> Result<(), DesugarError> {
     for member_index in 0..pkg.members.len() {
@@ -265,13 +246,23 @@ top fn f(x: bits[4] id=1, y: bits[4] id=2, cin: bits[1] id=3) -> (bits[1], bits[
     }
 
     #[test]
-    fn standalone_desugar_matches_package_backed_desugar() {
+    fn explicit_synthetic_package_desugar_matches_package_backed_desugar() {
         let pkg = parse_sample_package();
         let mut standalone = pkg.get_top_fn().unwrap().clone();
-        desugar_extensions_in_standalone_fn(&mut standalone).unwrap();
+        let mut standalone_pkg = Package::new(
+            "standalone".to_string(),
+            FileTable::new(),
+            vec![PackageMember::Function(standalone)],
+            Some(("f".to_string(), MemberType::Function)),
+        );
+        {
+            let mut f = standalone_pkg.get_top_fn_in_pkg_mut().unwrap();
+            desugar_extensions_in_fn(&mut f).unwrap();
+        }
+        standalone = standalone_pkg.get_top_fn().unwrap().clone();
         assert!(
             !fn_has_extension_ops(&standalone),
-            "standalone desugar should eliminate extension ops"
+            "explicit synthetic-package desugar should eliminate extension ops"
         );
 
         let mut pkg_backed = pkg.clone();
@@ -281,13 +272,6 @@ top fn f(x: bits[4] id=1, y: bits[4] id=2, cin: bits[1] id=3) -> (bits[1], bits[
         }
         let expected = pkg_backed.get_top_fn().unwrap().clone();
         assert_eq!(standalone.to_string(), expected.to_string());
-
-        let validate_pkg = Package::new(
-            "standalone".to_string(),
-            FileTable::new(),
-            vec![PackageMember::Function(standalone)],
-            Some(("f".to_string(), MemberType::Function)),
-        );
-        ir_validate::validate_package(&validate_pkg).unwrap();
+        ir_validate::validate_package(&standalone_pkg).unwrap();
     }
 }
