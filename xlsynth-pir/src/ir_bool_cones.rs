@@ -435,16 +435,16 @@ pub fn extract_bool_cone(
         inner_attrs: Vec::new(),
     };
 
-    let package = Package {
-        name: "bool_cone".to_string(),
-        file_table: if cfg.emit_pos_data {
+    let package = Package::new(
+        "bool_cone".to_string(),
+        if cfg.emit_pos_data {
             pkg_file_table.cloned().unwrap_or_else(ir::FileTable::new)
         } else {
             ir::FileTable::new()
         },
-        members: vec![PackageMember::Function(func)],
-        top: Some(("cone".to_string(), MemberType::Function)),
-    };
+        vec![PackageMember::Function(func)],
+        Some(("cone".to_string(), MemberType::Function)),
+    );
 
     // Compute sha256 of the exact printed package text.
     let text = package.to_string();

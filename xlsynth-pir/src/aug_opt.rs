@@ -263,6 +263,7 @@ fn apply_pir_rewrites_to_ir_text(
     pir_pkg
         .set_top_fn(top_name)
         .map_err(|e| format!("aug_opt: internal error: set_top_fn('{top_name}') failed: {e}"))?;
+    pir_pkg.sync_next_text_id();
 
     // Verify we did not introduce extension ops (basis-only contract).
     verify_no_extension_ops_in_package(&pir_pkg)?;

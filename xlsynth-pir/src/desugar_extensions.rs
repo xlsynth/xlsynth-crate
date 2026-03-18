@@ -206,6 +206,7 @@ pub fn desugar_extensions_in_package(pkg: &mut Package) -> Result<(), DesugarErr
             PackageMember::Block { func, .. } => desugar_extensions_in_fn(func)?,
         }
     }
+    pkg.sync_next_text_id();
     Ok(())
 }
 

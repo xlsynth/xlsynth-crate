@@ -255,16 +255,16 @@ pub fn extract_fn_cone_to_params(
         inner_attrs: Vec::new(),
     };
 
-    let package = ir::Package {
-        name: "fn_cone".to_string(),
-        file_table: if emit_pos_data {
+    let package = ir::Package::new(
+        "fn_cone".to_string(),
+        if emit_pos_data {
             pkg_file_table.cloned().unwrap_or_else(ir::FileTable::new)
         } else {
             ir::FileTable::new()
         },
-        members: vec![ir::PackageMember::Function(func)],
-        top: Some(("cone".to_string(), ir::MemberType::Function)),
-    };
+        vec![ir::PackageMember::Function(func)],
+        Some(("cone".to_string(), ir::MemberType::Function)),
+    );
 
     Ok(ExtractedFnCone {
         package,

@@ -3548,12 +3548,12 @@ fn validate_fn_for_gatify(f: &ir::Fn) -> Result<(), String> {
     // This catches structural issues (operand bounds/order, return node/type,
     // text-id uniqueness within the function, etc.) before and after
     // `prep_for_gatify`.
-    let pkg = ir::Package {
-        name: "gatify_validate".to_string(),
-        file_table: ir::FileTable::new(),
-        members: vec![ir::PackageMember::Function(f.clone())],
-        top: Some((f.name.clone(), ir::MemberType::Function)),
-    };
+    let pkg = ir::Package::new(
+        "gatify_validate".to_string(),
+        ir::FileTable::new(),
+        vec![ir::PackageMember::Function(f.clone())],
+        Some((f.name.clone(), ir::MemberType::Function)),
+    );
     ir_validate::validate_package(&pkg).map_err(|e| e.to_string())
 }
 

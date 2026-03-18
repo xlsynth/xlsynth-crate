@@ -280,12 +280,12 @@ pub fn process_ir_path_with_gatefn(
                 _ => None,
             })
             .expect("top member should exist in pir_package");
-        let prepared_pkg = ir::Package {
-            name: ir_package.name.clone(),
-            file_table: ir_package.file_table.clone(),
-            members: vec![prepared_member],
-            top: ir_package.top.clone(),
-        };
+        let prepared_pkg = ir::Package::new(
+            ir_package.name.clone(),
+            ir_package.file_table.clone(),
+            vec![prepared_member],
+            ir_package.top.clone(),
+        );
         let prepared_text = prepared_pkg.to_string();
         let mut file = std::fs::File::create(out_path).unwrap_or_else(|e| {
             panic!(

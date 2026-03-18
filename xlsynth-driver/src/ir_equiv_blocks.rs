@@ -158,18 +158,18 @@ pub fn handle_ir_equiv_blocks(matches: &clap::ArgMatches, config: &Option<Toolch
         rhs_top = Some(rhs_fn.name.as_str());
     }
 
-    let lhs_pkg = Package {
-        name: "lhs_pkg".to_string(),
-        file_table: FileTable::new(),
-        members: vec![PackageMember::Function(lhs_fn.clone())],
-        top: Some((lhs_fn.name.clone(), MemberType::Block)),
-    };
-    let rhs_pkg = Package {
-        name: "rhs_pkg".to_string(),
-        file_table: FileTable::new(),
-        members: vec![PackageMember::Function(rhs_fn.clone())],
-        top: Some((rhs_fn.name.clone(), MemberType::Block)),
-    };
+    let lhs_pkg = Package::new(
+        "lhs_pkg".to_string(),
+        FileTable::new(),
+        vec![PackageMember::Function(lhs_fn.clone())],
+        Some((lhs_fn.name.clone(), MemberType::Block)),
+    );
+    let rhs_pkg = Package::new(
+        "rhs_pkg".to_string(),
+        FileTable::new(),
+        vec![PackageMember::Function(rhs_fn.clone())],
+        Some((rhs_fn.name.clone(), MemberType::Block)),
+    );
     let lhs_pkg_text = lhs_pkg.to_string();
     let rhs_pkg_text = rhs_pkg.to_string();
 

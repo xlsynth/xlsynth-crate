@@ -1607,6 +1607,32 @@ pub struct Package {
     pub file_table: FileTable,
     pub members: Vec<PackageMember>,
     pub top: Option<(String, MemberType)>,
+    pub next_text_id: usize,
+}
+
+/// Allocates fresh package-wide `text_id` ordinals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextIdAllocator {
+    next_text_id: usize,
+}
+
+impl TextIdAllocator {
+    /// Creates an allocator seeded with the next unused `text_id`.
+    pub const fn new(next_text_id: usize) -> Self {
+        Self { next_text_id }
+    }
+
+    /// Returns the next fresh `text_id` without advancing the allocator.
+    pub const fn peek(&self) -> usize {
+        self.next_text_id
+    }
+
+    /// Returns the next fresh `text_id` and advances the allocator.
+    pub fn take_next(&mut self) -> usize {
+        let text_id = self.next_text_id;
+        self.next_text_id = self.next_text_id.saturating_add(1);
+        text_id
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1647,6 +1673,60 @@ pub struct BlockMetadata {
 }
 
 impl Package {
+    /// Builds a package and seeds its owned `next_text_id` from the members.
+    pub fn new(
+        name: String,
+        file_table: FileTable,
+        members: Vec<PackageMember>,
+        top: Option<(String, MemberType)>,
+    ) -> Self {
+        let mut pkg = Self {
+            name,
+            file_table,
+            members,
+            top,
+            next_text_id: 0,
+        };
+        pkg.next_text_id = pkg.recompute_next_unused_text_id();
+        pkg
+    }
+
+    /// Recomputes the next unused `text_id` across all package members.
+    pub fn recompute_next_unused_text_id(&self) -> usize {
+        self.members
+            .iter()
+            .flat_map(|member| match member {
+                PackageMember::Function(f) => &f.nodes,
+                PackageMember::Block { func, .. } => &func.nodes,
+            })
+            .map(|n| n.text_id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+    }
+
+    /// Returns the next package-owned `text_id` without advancing it.
+    pub const fn peek_next_text_id(&self) -> usize {
+        self.next_text_id
+    }
+
+    /// Returns the next package-owned `text_id` and bumps the package state.
+    pub fn take_next_text_id(&mut self) -> usize {
+        let text_id = self.next_text_id;
+        self.next_text_id = self.next_text_id.saturating_add(1);
+        text_id
+    }
+
+    /// Recomputes and stores the next unused package-owned `text_id`.
+    pub fn sync_next_text_id(&mut self) {
+        self.next_text_id = self.recompute_next_unused_text_id();
+    }
+
+    /// Returns a get-and-bump allocator for fresh package-wide `text_id`s.
+    pub fn text_id_allocator(&self) -> TextIdAllocator {
+        TextIdAllocator::new(self.next_text_id)
+    }
+
     /// Sets the package top to the given function name, if it exists.
     pub fn set_top_fn(&mut self, name: &str) -> Result<(), String> {
         let exists = self.members.iter().any(|m| match m {

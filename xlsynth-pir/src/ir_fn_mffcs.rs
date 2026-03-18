@@ -475,16 +475,16 @@ pub fn extract_mffc(
         inner_attrs: Vec::new(),
     };
 
-    let package = Package {
-        name: "fn_mffc".to_string(),
-        file_table: if cfg.emit_pos_data {
+    let package = Package::new(
+        "fn_mffc".to_string(),
+        if cfg.emit_pos_data {
             pkg_file_table.cloned().unwrap_or_else(ir::FileTable::new)
         } else {
             ir::FileTable::new()
         },
-        members: vec![PackageMember::Function(func)],
-        top: Some(("cone".to_string(), MemberType::Function)),
-    };
+        vec![PackageMember::Function(func)],
+        Some(("cone".to_string(), MemberType::Function)),
+    );
 
     let text = package.to_string();
     let mut hasher = sha2::Sha256::new();

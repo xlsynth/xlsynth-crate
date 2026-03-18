@@ -2,7 +2,7 @@
 
 //! Utility functions for working with / on XLS IR.
 
-use crate::ir::{self, Fn, Node, NodePayload, NodeRef, Package, PackageMember, Type};
+use crate::ir::{self, Fn, Node, NodePayload, NodeRef, Package, Type};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -428,16 +428,7 @@ pub fn get_topological_nodes(nodes: &[Node]) -> Vec<NodeRef> {
 }
 
 pub fn next_text_id(pkg: &Package) -> usize {
-    pkg.members
-        .iter()
-        .flat_map(|member| match member {
-            PackageMember::Function(f) => &f.nodes,
-            PackageMember::Block { func, .. } => &func.nodes,
-        })
-        .map(|n| n.text_id)
-        .max()
-        .unwrap_or(0)
-        + 1
+    pkg.peek_next_text_id()
 }
 
 /// Returns the `NodeRef` corresponding to the `index`-th parameter of `f`, if
@@ -1288,12 +1279,12 @@ fn main(x: bits[8] id=1) -> bits[8] {
   ret identity.2: bits[1] = identity(x, id=2)
 }"#,
         );
-        let pkg = Package {
-            name: "test".to_string(),
-            file_table: FileTable::new(),
-            members: vec![PackageMember::Function(f.clone())],
-            top: None,
-        };
+        let pkg = Package::new(
+            "test".to_string(),
+            FileTable::new(),
+            vec![PackageMember::Function(f.clone())],
+            None,
+        );
         let max_id = f
             .nodes
             .iter()
@@ -1314,13 +1305,34 @@ fn main(x: bits[8] id=1) -> bits[8] {
         for node in f.nodes.iter_mut() {
             node.text_id = 0;
         }
-        let pkg = Package {
-            name: "test".to_string(),
-            file_table: FileTable::new(),
-            members: vec![PackageMember::Function(f)],
-            top: None,
-        };
+        let pkg = Package::new(
+            "test".to_string(),
+            FileTable::new(),
+            vec![PackageMember::Function(f)],
+            None,
+        );
         assert_eq!(next_text_id(&pkg), 1);
+    }
+
+    #[test]
+    fn text_id_allocator_gets_and_bumps_from_package() {
+        let f = parse_fn(
+            r#"fn f(x: bits[1] id=1) -> bits[1] {
+  ret identity.2: bits[1] = identity(x, id=2)
+}"#,
+        );
+        let pkg = Package::new(
+            "test".to_string(),
+            FileTable::new(),
+            vec![PackageMember::Function(f)],
+            None,
+        );
+
+        let mut alloc = pkg.text_id_allocator();
+        assert_eq!(alloc.peek(), 3);
+        assert_eq!(alloc.take_next(), 3);
+        assert_eq!(alloc.peek(), 4);
+        assert_eq!(alloc.take_next(), 4);
     }
 
     #[test]

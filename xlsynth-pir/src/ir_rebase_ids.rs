@@ -60,12 +60,12 @@ mod tests {
     }
 
     fn package_with_function(f: &ir::Fn) -> ir::Package {
-        ir::Package {
-            name: "test_pkg".to_string(),
-            file_table: ir::FileTable::new(),
-            members: vec![ir::PackageMember::Function(f.clone())],
-            top: Some((f.name.clone(), ir::MemberType::Function)),
-        }
+        ir::Package::new(
+            "test_pkg".to_string(),
+            ir::FileTable::new(),
+            vec![ir::PackageMember::Function(f.clone())],
+            Some((f.name.clone(), ir::MemberType::Function)),
+        )
     }
 
     fn sample_two_param_function() -> ir::Fn {

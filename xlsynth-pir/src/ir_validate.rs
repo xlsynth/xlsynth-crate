@@ -37,6 +37,8 @@ pub enum ValidationError {
     },
     /// A node's text id is not unique among non-parameter nodes.
     DuplicateTextId { func: String, text_id: usize },
+    /// The package-owned next text id is not `max(text_id) + 1`.
+    NextTextIdMismatch { expected: usize, actual: usize },
     /// A parameter node's text id does not match its declared parameter id.
     ParamIdMismatch {
         func: String,
@@ -222,6 +224,13 @@ impl std::fmt::Display for ValidationError {
             }
             ValidationError::DuplicateTextId { func, text_id } => {
                 write!(f, "function '{}' has duplicate text id {}", func, text_id)
+            }
+            ValidationError::NextTextIdMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "package next_text_id mismatch: expected {}, got {}",
+                    expected, actual
+                )
             }
             ValidationError::ParamIdMismatch {
                 func,
@@ -539,6 +548,14 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
                 });
             }
         }
+    }
+
+    let expected_next_text_id = p.recompute_next_unused_text_id();
+    if p.next_text_id != expected_next_text_id {
+        return Err(ValidationError::NextTextIdMismatch {
+            expected: expected_next_text_id,
+            actual: p.next_text_id,
+        });
     }
 
     Ok(())
@@ -1150,6 +1167,27 @@ mod tests {
     }
 
     #[test]
+    fn package_next_text_id_mismatch_fails() {
+        let ir = r#"
+        package test
+
+        fn foo(x: bits[1]) -> bits[1] {
+          ret add.2: bits[1] = add(x, x)
+        }
+        "#;
+        let mut parser = Parser::new(ir);
+        let mut pkg = parser.parse_package().unwrap();
+        pkg.next_text_id = 999;
+        assert!(matches!(
+            validate_package(&pkg),
+            Err(ValidationError::NextTextIdMismatch {
+                expected: 3,
+                actual: 999,
+            })
+        ));
+    }
+
+    #[test]
     fn undefined_operand_fails() {
         let ir = r#"
         package test
@@ -1266,12 +1304,12 @@ mod tests {
     fn manual_construct_one_dot_id_literal_fails() {
         // Build a function programmatically containing a node named "one.2"
         // with operator literal(id=2). This should fail with NodeNameOpMismatch.
-        let mut pkg = ir::Package {
-            name: "test".to_string(),
-            file_table: ir::FileTable::new(),
-            members: Vec::new(),
-            top: Some(("f".to_string(), ir::MemberType::Function)),
-        };
+        let mut pkg = ir::Package::new(
+            "test".to_string(),
+            ir::FileTable::new(),
+            Vec::new(),
+            Some(("f".to_string(), ir::MemberType::Function)),
+        );
         let lit_node = ir::Node {
             text_id: 2,
             name: Some("one.2".to_string()),
