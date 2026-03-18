@@ -413,6 +413,7 @@ fn compute_g8r_stats_for_pir_fn_impl(
         hash: true,
         check_equivalence: false,
         adder_mapping: AdderMapping::default(),
+        array_index_lowering_strategy: Default::default(),
         mul_adder_mapping: None,
         range_info: None,
         enable_rewrite_carry_out: false,

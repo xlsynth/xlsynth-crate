@@ -17,11 +17,25 @@ use xlsynth_pir::ir_validate;
 
 use crate::ir2gate_utils::{
     AdderMapping, Direction, array_add_with_carry_out, gatify_add_brent_kung,
-    gatify_add_kogge_stone, gatify_add_ripple_carry, gatify_barrel_shifter, gatify_one_hot,
-    gatify_one_hot_select, gatify_one_hot_with_nonzero_flag, gatify_prio_encode,
+    gatify_add_kogge_stone, gatify_add_ripple_carry, gatify_barrel_shifter,
+    gatify_indexed_select_mux_tree_pad_last_if_type_fits, gatify_one_hot, gatify_one_hot_select,
+    gatify_one_hot_with_nonzero_flag, gatify_prio_encode,
 };
 
 use crate::gate_builder::ReductionKind;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArrayIndexLoweringStrategy {
+    Auto,
+    ForceOobOneHot,
+    ForceNearPow2MuxTree,
+}
+
+impl Default for ArrayIndexLoweringStrategy {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
 
 #[derive(Debug)]
 enum GateOrVec {
@@ -382,19 +396,61 @@ fn gatify_array_index(
     array_bits: &AigBitVector,
     index_bits: &AigBitVector,
     assumed_in_bounds: bool,
+    strategy: ArrayIndexLoweringStrategy,
 ) -> AigBitVector {
-    let element_bit_count = array_ty.element_type.bit_count();
-
     if assumed_in_bounds {
-        let index_decoded = gatify_decode(gb, array_ty.element_count, index_bits);
-        let mut cases = Vec::new();
-        for i in (0..array_ty.element_count).rev() {
-            let case_bits = array_bits.get_lsb_slice(i * element_bit_count, element_bit_count);
-            cases.push(case_bits);
-        }
-        return gatify_one_hot_select(gb, &index_decoded, &cases);
+        return gatify_array_index_exact(gb, array_ty, array_bits, index_bits);
     }
 
+    match strategy {
+        ArrayIndexLoweringStrategy::Auto => {
+            if let Some(result) = gatify_array_index_near_pow2_mux_tree_if_profitable(
+                gb, array_ty, array_bits, index_bits,
+            ) {
+                return result;
+            }
+        }
+        ArrayIndexLoweringStrategy::ForceOobOneHot => {
+            // Intentionally fall through to the existing OOB one-hot lowering
+            // below.
+        }
+        ArrayIndexLoweringStrategy::ForceNearPow2MuxTree => {
+            if let Some(result) = gatify_array_index_near_pow2_mux_tree_if_type_fits(
+                gb, array_ty, array_bits, index_bits,
+            ) {
+                return result;
+            }
+        }
+    }
+
+    gatify_array_index_oob_one_hot(gb, array_ty, array_bits, index_bits)
+}
+
+/// Lowers an in-bounds array index with an exact one-hot selection.
+fn gatify_array_index_exact(
+    gb: &mut GateBuilder,
+    array_ty: &ir::ArrayTypeData,
+    array_bits: &AigBitVector,
+    index_bits: &AigBitVector,
+) -> AigBitVector {
+    let element_bit_count = array_ty.element_type.bit_count();
+    let index_decoded = gatify_decode(gb, array_ty.element_count, index_bits);
+    let mut cases = Vec::new();
+    for i in (0..array_ty.element_count).rev() {
+        let case_bits = array_bits.get_lsb_slice(i * element_bit_count, element_bit_count);
+        cases.push(case_bits);
+    }
+    gatify_one_hot_select(gb, &index_decoded, &cases)
+}
+
+/// Lowers a clamped array index with the existing decode-plus-one-hot path.
+fn gatify_array_index_oob_one_hot(
+    gb: &mut GateBuilder,
+    array_ty: &ir::ArrayTypeData,
+    array_bits: &AigBitVector,
+    index_bits: &AigBitVector,
+) -> AigBitVector {
+    let element_bit_count = array_ty.element_type.bit_count();
     let array_element_count = array_ty.element_count;
     let index_decoded = gatify_decode(gb, array_element_count, index_bits);
     let oob = gb.add_ez(&index_decoded, ReductionKind::Tree);
@@ -408,8 +464,60 @@ fn gatify_array_index(
         cases.push(case_bits);
     }
     cases.push(cases.last().unwrap().clone());
-    let result = gatify_one_hot_select(gb, &one_hot_selector, &cases);
-    result
+    gatify_one_hot_select(gb, &one_hot_selector, &cases)
+}
+
+/// Lowers a non-power-of-two clamped array index with a pad-last mux tree when
+/// the index type fits.
+fn gatify_array_index_near_pow2_mux_tree_if_type_fits(
+    gb: &mut GateBuilder,
+    array_ty: &ir::ArrayTypeData,
+    array_bits: &AigBitVector,
+    index_bits: &AigBitVector,
+) -> Option<AigBitVector> {
+    let array_element_count = array_ty.element_count;
+    let padded_case_count = array_element_count.next_power_of_two();
+    if padded_case_count == array_element_count {
+        return None;
+    }
+    let required_index_bits = padded_case_count.trailing_zeros() as usize;
+    if index_bits.get_bit_count() > required_index_bits {
+        return None;
+    }
+
+    let mut cases = Vec::with_capacity(array_element_count);
+    for i in (0..array_element_count).rev() {
+        let element_bit_count = array_ty.element_type.bit_count();
+        let case_bits = array_bits.get_lsb_slice(i * element_bit_count, element_bit_count);
+        cases.push(case_bits);
+    }
+    gatify_indexed_select_mux_tree_pad_last_if_type_fits(gb, index_bits, &cases).ok()
+}
+
+/// Uses the pad-last mux-tree lowering only in the measured profitable region.
+fn gatify_array_index_near_pow2_mux_tree_if_profitable(
+    gb: &mut GateBuilder,
+    array_ty: &ir::ArrayTypeData,
+    array_bits: &AigBitVector,
+    index_bits: &AigBitVector,
+) -> Option<AigBitVector> {
+    const MAX_PADDED_COUNT: usize = 32;
+    const MAX_EXTRA_ELEMS: usize = 8;
+    const MAX_ELEMENT_BIT_COUNT: usize = 2;
+
+    let element_bit_count = array_ty.element_type.bit_count();
+    let array_element_count = array_ty.element_count;
+    let padded_case_count = array_element_count.next_power_of_two();
+    if element_bit_count == 0
+        || element_bit_count > MAX_ELEMENT_BIT_COUNT
+        || padded_case_count == array_element_count
+        || padded_case_count > MAX_PADDED_COUNT
+        || padded_case_count - array_element_count > MAX_EXTRA_ELEMS
+    {
+        return None;
+    }
+
+    gatify_array_index_near_pow2_mux_tree_if_type_fits(gb, array_ty, array_bits, index_bits)
 }
 
 fn gatify_array_slice(
@@ -2398,6 +2506,7 @@ fn gatify_node(
                     &array_bits,
                     &index_bits,
                     *assumed_in_bounds || proven_in_bounds,
+                    options.array_index_lowering_strategy,
                 );
                 if i + 1 < indices.len() {
                     array_ty = match array_ty.element_type.as_ref() {
@@ -3420,6 +3529,7 @@ pub struct GatifyOptions {
     pub range_info: Option<Arc<IrRangeInfo>>,
     pub enable_rewrite_carry_out: bool,
     pub enable_rewrite_prio_encode: bool,
+    pub array_index_lowering_strategy: ArrayIndexLoweringStrategy,
 }
 
 // Type alias for the lowering map
@@ -3634,6 +3744,7 @@ pub fn gatify_node_as_fn(
 
 #[cfg(test)]
 mod tests {
+    use crate::aig::AigBitVector;
     use crate::aig::gate::GateFn;
     use crate::aig::get_summary_stats::{SummaryStats, get_summary_stats};
     use crate::aig_sim::gate_sim;
@@ -3660,6 +3771,7 @@ mod tests {
                 range_info: None,
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
+                array_index_lowering_strategy: Default::default(),
             },
         )
         .unwrap();
@@ -3696,6 +3808,7 @@ fn f(a: bits[8], b: bits[8]) -> bits[8] {
                 range_info: None,
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
+                array_index_lowering_strategy: Default::default(),
             },
         )
         .unwrap();
@@ -3771,6 +3884,7 @@ top fn f(start: bits[2], a: bits[8]) -> bits[8][1] {
                 range_info: None,
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
+                array_index_lowering_strategy: Default::default(),
             },
         )
         .expect("gatify array_slice with narrow start should not panic");
@@ -3810,6 +3924,7 @@ top fn f(start: bits[4], a: bits[8], b: bits[8]) -> bits[8][1] {
                 range_info: None,
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
+                array_index_lowering_strategy: Default::default(),
             },
         )
         .expect("gatify array_slice with wide start should succeed");
@@ -3848,6 +3963,7 @@ top fn f(start: bits[4], a: bits[8], b: bits[8]) -> bits[8][1] {
                 range_info: None,
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
+                array_index_lowering_strategy: Default::default(),
             },
         )
         .unwrap()
@@ -4213,6 +4329,376 @@ top fn cone(leaf_7: bits[5], leaf_9: bits[33]) -> bits[1] {
                     w, want.operand_count, computed
                 );
             }
+        }
+    }
+
+    fn get_tuple_field0_array_index_stats(
+        array_len: usize,
+        payload_width: usize,
+        index_width: usize,
+        strategy: super::ArrayIndexLoweringStrategy,
+    ) -> SummaryStats {
+        let tuple_ty = ir::Type::Tuple(vec![
+            Box::new(ir::Type::Bits(1)),
+            Box::new(ir::Type::Bits(payload_width)),
+        ]);
+        let array_ty = ir::ArrayTypeData {
+            element_type: Box::new(tuple_ty.clone()),
+            element_count: array_len,
+        };
+        let field0 = tuple_ty.tuple_get_flat_bit_slice_for_index(0).unwrap();
+
+        let mut gb = GateBuilder::new(
+            format!("tuple_field0_w{}_n{}", payload_width, array_len),
+            GateBuilderOptions::opt(),
+        );
+        let array_bits = gb.add_input("arr".to_string(), tuple_ty.bit_count() * array_len);
+        let index_bits = gb.add_input("idx".to_string(), index_width);
+        let selected = super::gatify_array_index(
+            &mut gb,
+            &array_ty,
+            &array_bits,
+            &index_bits,
+            false,
+            strategy,
+        );
+        let result = selected.get_lsb_slice(field0.start, field0.limit - field0.start);
+        gb.add_output("result".to_string(), result);
+        get_summary_stats(&gb.build())
+    }
+
+    fn get_1b_array_index_oob_one_hot_stats(array_len: usize, index_width: usize) -> SummaryStats {
+        let array_ty = ir::ArrayTypeData {
+            element_type: Box::new(ir::Type::Bits(1)),
+            element_count: array_len,
+        };
+
+        let mut gb = GateBuilder::new(
+            format!("array_index_1b_n{}_oob", array_len),
+            GateBuilderOptions::opt(),
+        );
+        let array_bits = gb.add_input("arr".to_string(), array_len);
+        let index_bits = gb.add_input("idx".to_string(), index_width);
+        let result =
+            super::gatify_array_index_oob_one_hot(&mut gb, &array_ty, &array_bits, &index_bits);
+        gb.add_output("result".to_string(), result);
+        get_summary_stats(&gb.build())
+    }
+
+    fn get_1b_array_index_exact_stats(array_len: usize, index_width: usize) -> SummaryStats {
+        let array_ty = ir::ArrayTypeData {
+            element_type: Box::new(ir::Type::Bits(1)),
+            element_count: array_len,
+        };
+
+        let mut gb = GateBuilder::new(
+            format!("array_index_1b_n{}_exact", array_len),
+            GateBuilderOptions::opt(),
+        );
+        let array_bits = gb.add_input("arr".to_string(), array_len);
+        let index_bits = gb.add_input("idx".to_string(), index_width);
+        let result = super::gatify_array_index_exact(&mut gb, &array_ty, &array_bits, &index_bits);
+        gb.add_output("result".to_string(), result);
+        get_summary_stats(&gb.build())
+    }
+
+    fn get_1b_array_index_near_pow2_padded_stats(
+        array_len: usize,
+        index_width: usize,
+    ) -> SummaryStats {
+        const MAX_PADDED_COUNT: usize = 32;
+        const MAX_EXTRA_ELEMS: usize = 8;
+        let padded_count = array_len.next_power_of_two();
+        assert!(
+            padded_count > array_len
+                && padded_count <= MAX_PADDED_COUNT
+                && padded_count - array_len <= MAX_EXTRA_ELEMS
+        );
+
+        let mut gb = GateBuilder::new(
+            format!("array_index_1b_n{}_padpow2", array_len),
+            GateBuilderOptions::opt(),
+        );
+        let array_bits = gb.add_input("arr".to_string(), array_len);
+        let index_bits = gb.add_input("idx".to_string(), index_width);
+        let padded_last_bits = gb.add_literal(
+            &xlsynth::IrBits::make_ubits(index_width, (padded_count - 1) as u64).unwrap(),
+        );
+        let idx_le_padded_last =
+            super::gatify_ule_via_bit_tests(&mut gb, 0, &index_bits, &padded_last_bits);
+        let clamped_index = gb.add_mux2_vec(&idx_le_padded_last, &index_bits, &padded_last_bits);
+        let last_elem = array_bits.get_lsb_slice(array_len - 1, 1);
+        let mut padded_array_bits = array_bits.clone();
+        for _ in array_len..padded_count {
+            padded_array_bits = AigBitVector::concat(last_elem.clone(), padded_array_bits);
+        }
+        let padded_ty = ir::ArrayTypeData {
+            element_type: Box::new(ir::Type::Bits(1)),
+            element_count: padded_count,
+        };
+        let result = super::gatify_array_index_exact(
+            &mut gb,
+            &padded_ty,
+            &padded_array_bits,
+            &clamped_index,
+        );
+        gb.add_output("result".to_string(), result);
+        get_summary_stats(&gb.build())
+    }
+
+    fn get_1b_array_index_public_stats(array_len: usize, index_width: usize) -> SummaryStats {
+        let array_ty = ir::ArrayTypeData {
+            element_type: Box::new(ir::Type::Bits(1)),
+            element_count: array_len,
+        };
+
+        let mut gb = GateBuilder::new(
+            format!("array_index_1b_n{}_public", array_len),
+            GateBuilderOptions::opt(),
+        );
+        let array_bits = gb.add_input("arr".to_string(), array_len);
+        let index_bits = gb.add_input("idx".to_string(), index_width);
+        let result = super::gatify_array_index(
+            &mut gb,
+            &array_ty,
+            &array_bits,
+            &index_bits,
+            false,
+            super::ArrayIndexLoweringStrategy::Auto,
+        );
+        gb.add_output("result".to_string(), result);
+        get_summary_stats(&gb.build())
+    }
+
+    fn get_array_index_mux_tree_pad_last_stats(
+        array_len: usize,
+        element_width: usize,
+        index_width: usize,
+    ) -> SummaryStats {
+        let mut gb = GateBuilder::new(
+            format!("array_index_mux_tree_n{}_w{}", array_len, element_width),
+            GateBuilderOptions::opt(),
+        );
+        let array_bits = gb.add_input("arr".to_string(), element_width * array_len);
+        let index_bits = gb.add_input("idx".to_string(), index_width);
+        let mut cases = Vec::with_capacity(array_len);
+        for i in (0..array_len).rev() {
+            let case_bits = array_bits.get_lsb_slice(i * element_width, element_width);
+            cases.push(case_bits);
+        }
+        let result = crate::ir2gate_utils::gatify_indexed_select_mux_tree_pad_last_if_type_fits(
+            &mut gb,
+            &index_bits,
+            &cases,
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "pad-last mux-tree helper should apply for array_len={} element_width={} index_width={}: {}",
+                array_len, element_width, index_width, e
+            )
+        });
+        gb.add_output("result".to_string(), result);
+        get_summary_stats(&gb.build())
+    }
+
+    fn get_array_index_oob_one_hot_stats(
+        array_len: usize,
+        element_width: usize,
+        index_width: usize,
+    ) -> SummaryStats {
+        let array_ty = ir::ArrayTypeData {
+            element_type: Box::new(ir::Type::Bits(element_width)),
+            element_count: array_len,
+        };
+
+        let mut gb = GateBuilder::new(
+            format!("array_index_ohs_n{}_w{}", array_len, element_width),
+            GateBuilderOptions::opt(),
+        );
+        let array_bits = gb.add_input("arr".to_string(), element_width * array_len);
+        let index_bits = gb.add_input("idx".to_string(), index_width);
+        let result =
+            super::gatify_array_index_oob_one_hot(&mut gb, &array_ty, &array_bits, &index_bits);
+        gb.add_output("result".to_string(), result);
+        get_summary_stats(&gb.build())
+    }
+
+    fn get_array_index_public_stats(
+        array_len: usize,
+        element_width: usize,
+        index_width: usize,
+    ) -> SummaryStats {
+        let array_ty = ir::ArrayTypeData {
+            element_type: Box::new(ir::Type::Bits(element_width)),
+            element_count: array_len,
+        };
+
+        let mut gb = GateBuilder::new(
+            format!("array_index_public_n{}_w{}", array_len, element_width),
+            GateBuilderOptions::opt(),
+        );
+        let array_bits = gb.add_input("arr".to_string(), element_width * array_len);
+        let index_bits = gb.add_input("idx".to_string(), index_width);
+        let result = super::gatify_array_index(
+            &mut gb,
+            &array_ty,
+            &array_bits,
+            &index_bits,
+            false,
+            super::ArrayIndexLoweringStrategy::Auto,
+        );
+        gb.add_output("result".to_string(), result);
+        get_summary_stats(&gb.build())
+    }
+
+    #[test]
+    fn test_tuple_index_array_index_field0_dce_stays_flat_across_dead_payload_width() {
+        #[rustfmt::skip]
+        const WANT: &[(usize, usize, usize)] = &[
+            (8, 155, 15),
+            (32, 155, 15),
+            (128, 155, 15),
+        ];
+
+        for &(payload_width, want_live_nodes, want_deepest_path) in WANT {
+            let got = get_tuple_field0_array_index_stats(
+                /* array_len= */ 27,
+                payload_width,
+                /* index_width= */ 5,
+                super::ArrayIndexLoweringStrategy::ForceOobOneHot,
+            );
+            assert_eq!(
+                got.live_nodes, want_live_nodes,
+                "tuple field0 array-index live_nodes mismatch for payload_width={}",
+                payload_width
+            );
+            assert_eq!(
+                got.deepest_path, want_deepest_path,
+                "tuple field0 array-index depth mismatch for payload_width={}",
+                payload_width
+            );
+        }
+    }
+
+    #[test]
+    fn test_tuple_index_array_index_field0_width2_tuple_hits_public_mux_tree_strategy() {
+        let got = get_tuple_field0_array_index_stats(
+            /* array_len= */ 27,
+            /* payload_width= */ 1,
+            5,
+            super::ArrayIndexLoweringStrategy::Auto,
+        );
+        assert_eq!(got.live_nodes, 118);
+        assert_eq!(got.deepest_path, 11);
+    }
+
+    #[test]
+    fn test_1b_array_index_near_pow2_padding_characterization() {
+        let oob_27 = get_1b_array_index_oob_one_hot_stats(
+            /* array_len= */ 27, /* index_width= */ 5,
+        );
+        let padded_27 = get_1b_array_index_near_pow2_padded_stats(
+            /* array_len= */ 27, /* index_width= */ 5,
+        );
+        let public_27 =
+            get_1b_array_index_public_stats(/* array_len= */ 27, /* index_width= */ 5);
+        let exact_32 =
+            get_1b_array_index_exact_stats(/* array_len= */ 32, /* index_width= */ 5);
+
+        assert_eq!(oob_27.live_nodes, 155);
+        assert_eq!(oob_27.deepest_path, 15);
+        assert_eq!(padded_27.live_nodes, 168);
+        assert_eq!(padded_27.deepest_path, 19);
+        assert_eq!(public_27.live_nodes, 118);
+        assert_eq!(public_27.deepest_path, 11);
+        assert_eq!(exact_32.live_nodes, 148);
+        assert_eq!(exact_32.deepest_path, 10);
+
+        assert!(
+            padded_27.live_nodes > oob_27.live_nodes,
+            "expected naive padded near-pow2 clamping to increase live_nodes in g8r: {:?} vs {:?}",
+            padded_27,
+            oob_27
+        );
+        assert!(
+            padded_27.deepest_path > oob_27.deepest_path,
+            "expected naive padded near-pow2 clamping to increase depth in g8r: {:?} vs {:?}",
+            padded_27,
+            oob_27
+        );
+    }
+
+    #[test]
+    fn test_array_index_near_pow2_mux_tree_vs_one_hot_sweep_characterization() {
+        let widths = [1usize, 2, 3, 4, 5, 6, 8, 12, 16, 24, 32];
+        for element_width in widths {
+            let ohs = get_array_index_oob_one_hot_stats(
+                /* array_len= */ 27,
+                element_width,
+                /* index_width= */ 5,
+            );
+            let mux = get_array_index_mux_tree_pad_last_stats(
+                /* array_len= */ 27,
+                element_width,
+                /* index_width= */ 5,
+            );
+            let ohs_product = ohs.live_nodes * ohs.deepest_path;
+            let mux_product = mux.live_nodes * mux.deepest_path;
+            assert!(
+                mux.deepest_path < ohs.deepest_path,
+                "expected mux-tree to reduce depth for element_width={}: ohs={:?} mux={:?}",
+                element_width,
+                ohs,
+                mux
+            );
+            assert!(
+                mux_product < ohs_product,
+                "expected mux-tree to reduce nodes*depth for element_width={}: ohs_product={} mux_product={}",
+                element_width,
+                ohs_product,
+                mux_product
+            );
+            if element_width <= 2 {
+                assert!(
+                    mux.live_nodes < ohs.live_nodes,
+                    "expected mux-tree to reduce live_nodes for element_width={}: ohs={:?} mux={:?}",
+                    element_width,
+                    ohs,
+                    mux
+                );
+            } else {
+                assert!(
+                    mux.live_nodes > ohs.live_nodes,
+                    "expected mux-tree to trade nodes for depth beyond width-2 crossover for element_width={}: ohs={:?} mux={:?}",
+                    element_width,
+                    ohs,
+                    mux
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_array_index_public_strategy_uses_mux_tree_only_in_measured_profitable_region() {
+        for element_width in [1usize, 2] {
+            let public = get_array_index_public_stats(/* array_len= */ 27, element_width, 5);
+            let mux =
+                get_array_index_mux_tree_pad_last_stats(/* array_len= */ 27, element_width, 5);
+            assert_eq!(
+                public, mux,
+                "expected public strategy to use near-pow2 mux-tree for element_width={}",
+                element_width
+            );
+        }
+
+        for element_width in [3usize, 4, 8] {
+            let public = get_array_index_public_stats(/* array_len= */ 27, element_width, 5);
+            let ohs = get_array_index_oob_one_hot_stats(/* array_len= */ 27, element_width, 5);
+            assert_eq!(
+                public, ohs,
+                "expected public strategy to keep OHS lowering for element_width={}",
+                element_width
+            );
         }
     }
 }

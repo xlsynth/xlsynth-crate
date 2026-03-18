@@ -215,6 +215,7 @@ impl From<GatifyOptionsInput<'_>> for ir2gate::GatifyOptions {
             range_info: Some(input.range_info),
             enable_rewrite_carry_out: input.prep_opts.enable_rewrite_carry_out,
             enable_rewrite_prio_encode: input.prep_opts.enable_rewrite_prio_encode,
+            array_index_lowering_strategy: Default::default(),
         }
     }
 }

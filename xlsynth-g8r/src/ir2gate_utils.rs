@@ -572,6 +572,122 @@ pub fn gatify_one_hot_select(
     result
 }
 
+/// Selects from `cases` using `index_bits` via a balanced binary mux tree.
+///
+/// `cases.len()` must be a power of two, and `index_bits` must contain exactly
+/// `log2(cases.len())` bits. Case 0 is selected when `index_bits == 0`, case 1
+/// when `index_bits == 1`, and so on.
+pub fn gatify_indexed_select_mux_tree_exact(
+    gb: &mut GateBuilder,
+    index_bits: &AigBitVector,
+    cases: &[AigBitVector],
+) -> Result<AigBitVector, String> {
+    if cases.is_empty() {
+        return Err("gatify_indexed_select_mux_tree_exact requires at least one case".to_string());
+    }
+    if !cases.len().is_power_of_two() {
+        return Err(format!(
+            "gatify_indexed_select_mux_tree_exact requires power-of-two case count; got {}",
+            cases.len()
+        ));
+    }
+    let case_bit_count = cases[0].get_bit_count();
+    for case in cases.iter() {
+        if case.get_bit_count() != case_bit_count {
+            return Err("all cases must have the same bit count".to_string());
+        }
+    }
+    let required_index_bits = if cases.len() <= 1 {
+        0
+    } else {
+        cases.len().trailing_zeros() as usize
+    };
+    if index_bits.get_bit_count() != required_index_bits {
+        return Err(format!(
+            "gatify_indexed_select_mux_tree_exact requires {} index bits for {} cases; got {}",
+            required_index_bits,
+            cases.len(),
+            index_bits.get_bit_count()
+        ));
+    }
+
+    fn recurse(
+        gb: &mut GateBuilder,
+        index_bits: &AigBitVector,
+        cases: &[AigBitVector],
+    ) -> AigBitVector {
+        if cases.len() == 1 {
+            return cases[0].clone();
+        }
+        let half = cases.len() / 2;
+        let low = recurse(gb, index_bits, &cases[..half]);
+        let high = recurse(gb, index_bits, &cases[half..]);
+        let select_bit_index = (cases.len().trailing_zeros() as usize) - 1;
+        let select_high = index_bits.get_lsb(select_bit_index);
+        gb.add_mux2_vec(select_high, &high, &low)
+    }
+
+    Ok(recurse(gb, index_bits, cases))
+}
+
+/// Pads `cases` to the next power of two by repeating the last case, then
+/// lowers the selection via a balanced mux tree.
+///
+/// This helper is sound only when the type of `index_bits` cannot represent a
+/// value beyond the padded range, i.e. `index_bits.width <= log2(next_pow2)`.
+/// In that case, selecting the repeated tail cases implements clamp-to-last
+/// semantics for the original non-power-of-two case count.
+pub fn gatify_indexed_select_mux_tree_pad_last_if_type_fits(
+    gb: &mut GateBuilder,
+    index_bits: &AigBitVector,
+    cases: &[AigBitVector],
+) -> Result<AigBitVector, String> {
+    if cases.is_empty() {
+        return Err(
+            "gatify_indexed_select_mux_tree_pad_last_if_type_fits requires at least one case"
+                .to_string(),
+        );
+    }
+    let padded_case_count = cases.len().next_power_of_two();
+    let required_index_bits = if padded_case_count <= 1 {
+        0
+    } else {
+        padded_case_count.trailing_zeros() as usize
+    };
+    if index_bits.get_bit_count() > required_index_bits {
+        return Err(format!(
+            "index width {} is too wide for pad-last mux-tree with {} cases (padded to {})",
+            index_bits.get_bit_count(),
+            cases.len(),
+            padded_case_count
+        ));
+    }
+
+    let case_bit_count = cases[0].get_bit_count();
+    for case in cases.iter() {
+        if case.get_bit_count() != case_bit_count {
+            return Err("all cases must have the same bit count".to_string());
+        }
+    }
+
+    let mut padded_cases: Vec<AigBitVector> = cases.to_vec();
+    let last_case = padded_cases
+        .last()
+        .expect("cases is non-empty by check above")
+        .clone();
+    while padded_cases.len() < padded_case_count {
+        padded_cases.push(last_case.clone());
+    }
+
+    let exact_index_bits = if index_bits.get_bit_count() == required_index_bits {
+        index_bits.clone()
+    } else {
+        let zeros = AigBitVector::zeros(required_index_bits - index_bits.get_bit_count());
+        AigBitVector::concat(zeros, index_bits.clone())
+    };
+    gatify_indexed_select_mux_tree_exact(gb, &exact_index_bits, &padded_cases)
+}
+
 pub fn gatify_one_hot(gb: &mut GateBuilder, bits: &AigBitVector, lsb_prio: bool) -> AigBitVector {
     gatify_one_hot_with_nonzero_flag(gb, bits, lsb_prio, /* value_cannot_be_zero= */ false)
 }

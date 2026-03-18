@@ -139,6 +139,7 @@ fn mul_bf16_bf16(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {
             range_info: None,
             enable_rewrite_carry_out: false,
             enable_rewrite_prio_encode: false,
+            array_index_lowering_strategy: Default::default(),
         },
     )
     .unwrap();
@@ -189,6 +190,7 @@ pub fn load_bf16_add_sample(opt: Opt) -> LoadedSample {
             range_info: None,
             enable_rewrite_carry_out: false,
             enable_rewrite_prio_encode: false,
+            array_index_lowering_strategy: Default::default(),
         },
     )
     .unwrap();

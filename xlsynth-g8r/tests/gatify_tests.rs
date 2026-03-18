@@ -44,6 +44,7 @@ fn do_test_ir_conversion_with_top(
             range_info: None,
             enable_rewrite_carry_out: false,
             enable_rewrite_prio_encode: false,
+            array_index_lowering_strategy: Default::default(),
         },
     )
     .unwrap();
@@ -82,6 +83,7 @@ fn do_test_ir_conversion_no_equiv(ir_package_text: &str, opt: Opt) {
             range_info: None,
             enable_rewrite_carry_out: false,
             enable_rewrite_prio_encode: false,
+            array_index_lowering_strategy: Default::default(),
         },
     )
     .unwrap();
@@ -105,6 +107,7 @@ fn do_test_ir_conversion_no_equiv_with_stats(ir_package_text: &str, opt: Opt) ->
             range_info: None,
             enable_rewrite_carry_out: false,
             enable_rewrite_prio_encode: false,
+            array_index_lowering_strategy: Default::default(),
         },
     )
     .unwrap();

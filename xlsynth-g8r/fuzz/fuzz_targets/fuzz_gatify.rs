@@ -52,6 +52,7 @@ fuzz_target!(|sample: FuzzSample| {
             range_info: None,
             enable_rewrite_carry_out: false,
             enable_rewrite_prio_encode: false,
+            array_index_lowering_strategy: Default::default(),
         },
     );
 
@@ -69,6 +70,7 @@ fuzz_target!(|sample: FuzzSample| {
             range_info: None,
             enable_rewrite_carry_out: false,
             enable_rewrite_prio_encode: false,
+            array_index_lowering_strategy: Default::default(),
         },
     );
 

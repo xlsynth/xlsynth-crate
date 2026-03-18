@@ -90,6 +90,7 @@ fn assert_ir_gate_equivalent_unary_cmp(
             range_info: None,
             enable_rewrite_carry_out: false,
             enable_rewrite_prio_encode: false,
+            array_index_lowering_strategy: Default::default(),
         },
     )
     .unwrap();

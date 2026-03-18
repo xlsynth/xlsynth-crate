@@ -63,6 +63,7 @@ top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
         range_info: None,
         enable_rewrite_carry_out: false,
         enable_rewrite_prio_encode: false,
+        array_index_lowering_strategy: Default::default(),
     };
     let proofs = prove_equivalence_candidates_varisat(pir_fn, &gate_fn, &hits, &gatify_opts)
         .expect("prove equivalence candidates");

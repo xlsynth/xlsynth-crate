@@ -48,6 +48,7 @@ top fn main(x: bits[8] id=1) -> bits[8] {
             range_info: None,
             enable_rewrite_carry_out: false,
             enable_rewrite_prio_encode: false,
+            array_index_lowering_strategy: Default::default(),
         },
     )
     .unwrap();
@@ -63,6 +64,7 @@ top fn main(x: bits[8] id=1) -> bits[8] {
             range_info: Some(range_info),
             enable_rewrite_carry_out: false,
             enable_rewrite_prio_encode: false,
+            array_index_lowering_strategy: Default::default(),
         },
     )
     .unwrap();

@@ -304,6 +304,7 @@ top fn do_and(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
                 range_info: None,
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
+                array_index_lowering_strategy: Default::default(),
             },
         )
         .unwrap();
@@ -334,6 +335,7 @@ top fn do_not(a: bits[1] id=1) -> bits[1] {
                 range_info: None,
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
+                array_index_lowering_strategy: Default::default(),
             },
         )
         .unwrap();
@@ -366,6 +368,7 @@ top fn do_nand(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
                 range_info: None,
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
+                array_index_lowering_strategy: Default::default(),
             },
         )
         .unwrap();
