@@ -410,7 +410,10 @@ fn gatify_array_index(
                 return result;
             }
         }
-        ArrayIndexLoweringStrategy::ForceOobOneHot => {}
+        ArrayIndexLoweringStrategy::ForceOobOneHot => {
+            // Intentionally fall through to the existing OOB one-hot lowering
+            // below.
+        }
         ArrayIndexLoweringStrategy::ForceNearPow2MuxTree => {
             if let Some(result) = gatify_array_index_near_pow2_mux_tree_if_type_fits(
                 gb, array_ty, array_bits, index_bits,

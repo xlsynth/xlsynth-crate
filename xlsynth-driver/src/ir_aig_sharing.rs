@@ -287,6 +287,7 @@ pub fn handle_ir_aig_sharing(matches: &ArgMatches, _config: &Option<ToolchainCon
         hash: true,
         check_equivalence: false,
         adder_mapping: AdderMapping::default(),
+        array_index_lowering_strategy: Default::default(),
         mul_adder_mapping: None,
         range_info: None,
         enable_rewrite_carry_out: false,
