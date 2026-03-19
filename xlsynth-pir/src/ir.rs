@@ -1611,27 +1611,27 @@ pub struct Package {
     pub next_text_id: usize,
 }
 
-/// Allocates fresh package-wide `text_id` ordinals.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TextIdAllocator {
-    next_text_id: usize,
+/// Allocates fresh package-wide `text_id` ordinals from a mutable package.
+#[derive(Debug)]
+pub struct TextIdAllocator<'a> {
+    next_text_id: &'a mut usize,
 }
 
-impl TextIdAllocator {
-    /// Creates an allocator seeded with the next unused `text_id`.
-    pub const fn new(next_text_id: usize) -> Self {
+impl<'a> TextIdAllocator<'a> {
+    /// Creates an allocator backed by the package-owned next unused `text_id`.
+    pub fn new(next_text_id: &'a mut usize) -> Self {
         Self { next_text_id }
     }
 
     /// Returns the next fresh `text_id` without advancing the allocator.
     pub const fn peek(&self) -> usize {
-        self.next_text_id
+        *self.next_text_id
     }
 
     /// Returns the next fresh `text_id` and advances the allocator.
     pub fn take_next(&mut self) -> usize {
-        let text_id = self.next_text_id;
-        self.next_text_id = self.next_text_id.saturating_add(1);
+        let text_id = *self.next_text_id;
+        *self.next_text_id = (*self.next_text_id).saturating_add(1);
         text_id
     }
 }
@@ -1851,8 +1851,8 @@ impl Package {
     }
 
     /// Returns a get-and-bump allocator for fresh package-wide `text_id`s.
-    pub fn text_id_allocator(&self) -> TextIdAllocator {
-        TextIdAllocator::new(self.next_text_id)
+    pub fn text_id_allocator(&mut self) -> TextIdAllocator<'_> {
+        TextIdAllocator::new(&mut self.next_text_id)
     }
 
     /// Returns a package-aware read-only function view for `member_index`.

@@ -9,10 +9,7 @@
 //! - **Bounded effort**: intended as a fast front-end; keep rounds small.
 //! - **Deterministic**: stable iteration order and stable outputs.
 
-use crate::ir::{
-    self, Binop, FileTable, FnInPkgMut, MemberType, NaryOp, NodePayload, NodeRef, Package,
-    PackageMember, Type, Unop,
-};
+use crate::ir::{self, Binop, FnInPkgMut, NaryOp, NodePayload, NodeRef, Type, Unop};
 use crate::ir_parser;
 use crate::ir_range_info::IrRangeInfo;
 use crate::ir_utils;
@@ -245,21 +242,12 @@ fn apply_pir_rewrites_to_ir_text(
     let range_info = IrRangeInfo::build_from_analysis(&analysis, &top_fn)
         .map_err(|e| format!("aug_opt: building IrRangeInfo failed: {e}"))?;
 
-    let (rewritten_top, rewrites_in_round) =
-        apply_basis_rewrites_to_fn(&top_fn, Some(range_info.as_ref()));
-
-    // Swap the rewritten top back into the PIR package.
-    for member in pir_pkg.members.iter_mut() {
-        match member {
-            ir::PackageMember::Function(f) if f.name == top_name => {
-                *f = rewritten_top.clone();
-            }
-            ir::PackageMember::Block { func, .. } if func.name == top_name => {
-                *func = rewritten_top.clone();
-            }
-            _ => {}
-        }
-    }
+    let rewrites_in_round = {
+        let mut top_fn = pir_pkg
+            .get_fn_in_pkg_mut(top_name)
+            .ok_or_else(|| format!("aug_opt: PIR package missing mutable top fn '{top_name}'"))?;
+        apply_basis_rewrites_to_fn(&mut top_fn, Some(range_info.as_ref()))
+    };
 
     // Preserve the caller-supplied top in emitted IR text (especially for
     // aug-opt-only mode, where downstream tools may rely on the `top` marker).
@@ -304,46 +292,34 @@ fn verify_no_extension_ops_in_fn(f: &ir::Fn) -> Result<(), String> {
     Ok(())
 }
 
+/// Applies aug-opt basis rewrites in place to a package-backed function.
 fn apply_basis_rewrites_to_fn(
-    f: &ir::Fn,
+    f: &mut FnInPkgMut<'_>,
     range_info: Option<&IrRangeInfo>,
-) -> (ir::Fn, AugOptRewriteStats) {
-    let cloned = f.clone();
-    let top_name = cloned.name.clone();
-    let mut pkg = Package::new(
-        "__aug_opt".to_string(),
-        FileTable::new(),
-        vec![PackageMember::Function(cloned)],
-        Some((top_name.clone(), MemberType::Function)),
-    );
-    let mut cloned = pkg
-        .get_top_fn_in_pkg_mut()
-        .expect("aug_opt: synthetic package must have a top function");
+) -> AugOptRewriteStats {
     let mut stats = AugOptRewriteStats::default();
-    stats.guarded_sel_ne1_nor = rewrite_guarded_sel_ne_literal1_nor(&mut cloned);
-    stats.lsb_of_shll = rewrite_lsb_of_shll_via_shift_is_zero(&mut cloned);
-    stats.eq_shll_slice_literal = rewrite_eq_shll_slice_literal_to_shift_terms(&mut cloned);
-    stats.pow2_msb_compare_with_eq_tiebreak =
-        rewrite_pow2_msb_compare_with_eq_tiebreak(&mut cloned);
+    stats.guarded_sel_ne1_nor = rewrite_guarded_sel_ne_literal1_nor(f);
+    stats.lsb_of_shll = rewrite_lsb_of_shll_via_shift_is_zero(f);
+    stats.eq_shll_slice_literal = rewrite_eq_shll_slice_literal_to_shift_terms(f);
+    stats.pow2_msb_compare_with_eq_tiebreak = rewrite_pow2_msb_compare_with_eq_tiebreak(f);
     stats.eq_priority_sel_to_selector_predicate =
-        rewrite_eq_priority_sel_to_selector_predicate(&mut cloned, range_info);
-    stats.eq_add_zero_to_eq_rhs_sub = rewrite_eq_add_zero_to_eq_rhs_sub(&mut cloned);
-    stats.ne_add_all_ones_to_ne_not = rewrite_ne_add_all_ones_to_ne_not(&mut cloned);
+        rewrite_eq_priority_sel_to_selector_predicate(f, range_info);
+    stats.eq_add_zero_to_eq_rhs_sub = rewrite_eq_add_zero_to_eq_rhs_sub(f);
+    stats.ne_add_all_ones_to_ne_not = rewrite_ne_add_all_ones_to_ne_not(f);
     // Distribute unsigned mod across selectors so each arm can be folded by
     // downstream optimization (e.g. when divisors are constants).
-    stats.umod_distribute_across_select = rewrite_umod_distribute_across_select(&mut cloned);
+    stats.umod_distribute_across_select = rewrite_umod_distribute_across_select(f);
     // Hoist predicate reductions/comparisons across sel/priority_sel first so
     // downstream rewrites can see through the selector.
-    stats.predicate_hoist_across_select = rewrite_predicate_hoist_across_select(&mut cloned);
+    stats.predicate_hoist_across_select = rewrite_predicate_hoist_across_select(f);
     stats.ne_shrl_slice_known_one_shift_nonzero =
-        rewrite_ne_shrl_slice_known_one_shift_nonzero(&mut cloned, range_info);
+        rewrite_ne_shrl_slice_known_one_shift_nonzero(f, range_info);
     // Ensure textual IR is defs-before-uses by reordering body nodes into a
     // topological order (while preserving PIR layout invariants). This makes
     // it safe for rewrites to append new nodes.
-    ir_utils::compact_and_toposort_in_place(cloned.function_mut())
+    ir_utils::compact_and_toposort_in_place(f.function_mut())
         .expect("aug_opt: compact_and_toposort_in_place failed");
-    let cloned = cloned.function().clone();
-    (cloned, stats)
+    stats
 }
 
 fn push_node(f: &mut FnInPkgMut<'_>, ty: Type, payload: NodePayload) -> NodeRef {
@@ -3022,6 +2998,40 @@ top fn cone(
             found_umod_with_selection_operand,
             "expected capped rewrite to keep at least one umod with selection-like operand; output:\n{}",
             out.output_text
+        );
+    }
+
+    #[test]
+    fn aug_opt_output_preserves_package_next_text_id_after_in_place_rewrites() {
+        let ir_text = r#"package next_text_id_regression
+
+top fn f(x: bits[8] id=1, s: bits[3] id=2) -> bits[1] {
+  sh: bits[8] = shll(x, s, id=3)
+  ret out: bits[1] = bit_slice(sh, start=0, width=1, id=4)
+}
+"#;
+
+        let out = run_aug_opt_over_ir_text_with_stats(
+            ir_text,
+            Some("f"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt");
+        assert!(
+            out.rewrite_stats.lsb_of_shll > 0,
+            "expected the lsb-of-shll rewrite to fire"
+        );
+
+        let mut p = ir_parser::Parser::new(&out.output_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        assert_eq!(
+            pkg.peek_next_text_id(),
+            pkg.recompute_next_unused_text_id(),
+            "aug-opt output should preserve the package next_text_id invariant"
         );
     }
 }

@@ -1321,7 +1321,7 @@ fn main(x: bits[8] id=1) -> bits[8] {
   ret identity.2: bits[1] = identity(x, id=2)
 }"#,
         );
-        let pkg = Package::new(
+        let mut pkg = Package::new(
             "test".to_string(),
             FileTable::new(),
             vec![PackageMember::Function(f)],
@@ -1333,6 +1333,9 @@ fn main(x: bits[8] id=1) -> bits[8] {
         assert_eq!(alloc.take_next(), 3);
         assert_eq!(alloc.peek(), 4);
         assert_eq!(alloc.take_next(), 4);
+        drop(alloc);
+        assert_eq!(pkg.peek_next_text_id(), 5);
+        assert_eq!(pkg.take_next_text_id(), 5);
     }
 
     #[test]
