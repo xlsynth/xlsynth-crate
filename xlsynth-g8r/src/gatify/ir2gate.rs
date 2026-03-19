@@ -7,7 +7,7 @@ use crate::aig::gate::{AigBitVector, AigOperand, GateFn, Split};
 use crate::check_equivalence;
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use crate::gatify::mul_by_const_csd::{SignedDigitSign, decompose_umul_const_terms};
-use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
+use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify_in_fn};
 use std::collections::HashMap;
 use std::sync::Arc;
 use xlsynth_pir::ir::{self, ParamId, StartAndLimit};
@@ -3548,13 +3548,37 @@ fn validate_fn_for_gatify(f: &ir::Fn) -> Result<(), String> {
     // This catches structural issues (operand bounds/order, return node/type,
     // text-id uniqueness within the function, etc.) before and after
     // `prep_for_gatify`.
-    let pkg = ir::Package {
-        name: "gatify_validate".to_string(),
-        file_table: ir::FileTable::new(),
-        members: vec![ir::PackageMember::Function(f.clone())],
-        top: Some((f.name.clone(), ir::MemberType::Function)),
-    };
+    let pkg = ir::Package::new(
+        "gatify_validate".to_string(),
+        ir::FileTable::new(),
+        vec![ir::PackageMember::Function(f.clone())],
+        Some((f.name.clone(), ir::MemberType::Function)),
+    );
     ir_validate::validate_package(&pkg).map_err(|e| e.to_string())
+}
+
+/// Prepares a detached function for gatify via an explicit single-function
+/// package.
+fn prep_standalone_fn_for_gatify(
+    f: &ir::Fn,
+    range_info: Option<&IrRangeInfo>,
+    options: PrepForGatifyOptions,
+) -> ir::Fn {
+    let mut pkg = ir::Package::new(
+        "prep_for_gatify".to_string(),
+        ir::FileTable::new(),
+        vec![ir::PackageMember::Function(f.clone())],
+        Some((f.name.clone(), ir::MemberType::Function)),
+    );
+    {
+        let mut fn_in_pkg = pkg
+            .get_top_fn_in_pkg_mut()
+            .expect("prep_standalone_fn_for_gatify: synthetic package must have a top fn");
+        prep_for_gatify_in_fn(&mut fn_in_pkg, range_info, options);
+    }
+    pkg.get_top_fn()
+        .expect("prep_standalone_fn_for_gatify: synthetic package must retain top fn")
+        .clone()
 }
 
 pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String> {
@@ -3571,7 +3595,7 @@ pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, 
         orig_ref_by_text_id.insert(n.text_id, ir::NodeRef { index: idx });
     }
 
-    let prepared_fn = prep_for_gatify(
+    let prepared_fn = prep_standalone_fn_for_gatify(
         orig_fn,
         options.range_info.as_deref(),
         PrepForGatifyOptions {
@@ -3635,7 +3659,7 @@ pub fn gatify_node_as_fn(
     let target_text_id = f.get_node(node_ref).text_id;
     validate_fn_for_gatify(f)
         .map_err(|e| format!("PIR validation failed before prep_for_gatify: {e}"))?;
-    let prepared_fn = prep_for_gatify(
+    let prepared_fn = prep_standalone_fn_for_gatify(
         f,
         options.range_info.as_deref(),
         PrepForGatifyOptions {

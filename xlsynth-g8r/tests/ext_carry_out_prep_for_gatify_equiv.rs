@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use xlsynth_g8r::check_equivalence;
 use xlsynth_g8r::gatify::ir2gate;
-use xlsynth_g8r::gatify::prep_for_gatify::PrepForGatifyOptions;
-use xlsynth_pir::ir;
+use xlsynth_g8r::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify_in_fn};
+use xlsynth_pir::ir::{self, FileTable, MemberType, Package, PackageMember};
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_range_info::IrRangeInfo;
 
@@ -13,6 +13,28 @@ fn parse_top_fn(ir_text: &str) -> ir::Fn {
     let mut parser = ir_parser::Parser::new(ir_text);
     let pkg = parser.parse_and_validate_package().expect("parse/validate");
     pkg.get_top_fn().expect("top fn").clone()
+}
+
+fn prep_for_gatify_standalone(
+    f: &ir::Fn,
+    range_info: Option<&IrRangeInfo>,
+    options: PrepForGatifyOptions,
+) -> ir::Fn {
+    let mut pkg = Package::new(
+        "prep_for_gatify_test".to_string(),
+        FileTable::new(),
+        vec![PackageMember::Function(f.clone())],
+        Some((f.name.clone(), MemberType::Function)),
+    );
+    {
+        let mut fn_in_pkg = pkg
+            .get_top_fn_in_pkg_mut()
+            .expect("prep_for_gatify test: synthetic package must have a top fn");
+        prep_for_gatify_in_fn(&mut fn_in_pkg, range_info, options);
+    }
+    pkg.get_top_fn()
+        .expect("prep_for_gatify test: synthetic package must retain top fn")
+        .clone()
 }
 
 fn build_range_info(ir_text: &str, top: &str, pir_fn: &ir::Fn) -> Arc<IrRangeInfo> {
@@ -66,7 +88,7 @@ top fn cone(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
     let pir_fn = parse_top_fn(ir_text);
 
     let range_info = build_range_info(ir_text, "cone", &pir_fn);
-    let prepared = xlsynth_g8r::gatify::prep_for_gatify::prep_for_gatify(
+    let prepared = prep_for_gatify_standalone(
         &pir_fn,
         Some(range_info.as_ref()),
         PrepForGatifyOptions {
@@ -108,7 +130,7 @@ fn carry_out_rewrite_sweep_up_to_4_bits_only_triggers_for_msb_slice() {
             let ir_text = make_add_slice_ir_text(w, start);
             let pir_fn = parse_top_fn(&ir_text);
 
-            let prepared = xlsynth_g8r::gatify::prep_for_gatify::prep_for_gatify(
+            let prepared = prep_for_gatify_standalone(
                 &pir_fn,
                 None,
                 PrepForGatifyOptions {
@@ -168,7 +190,7 @@ top fn cone(a: bits[9] id=1, b: bits[9] id=2) -> bits[1] {
 ";
     let pir_fn = parse_top_fn(ir_text);
 
-    let prepared = xlsynth_g8r::gatify::prep_for_gatify::prep_for_gatify(
+    let prepared = prep_for_gatify_standalone(
         &pir_fn,
         None,
         PrepForGatifyOptions {
@@ -221,7 +243,7 @@ top fn cone(p0: bits[9] id=1, p1: bits[9] id=2) -> bits[1] {
     let pir_fn = parse_top_fn(ir_text);
     let range_info = build_range_info(ir_text, "cone", &pir_fn);
 
-    let prepared = xlsynth_g8r::gatify::prep_for_gatify::prep_for_gatify(
+    let prepared = prep_for_gatify_standalone(
         &pir_fn,
         Some(range_info.as_ref()),
         PrepForGatifyOptions {

@@ -11,7 +11,7 @@
 //! Gate-level QoR strategies belong in `xlsynth-g8r` (gatify), where different
 //! circuits can be chosen for the same semantics.
 
-use crate::ir::{Binop, Fn, Node, NodePayload, NodeRef, Package, PackageMember, Type, Unop};
+use crate::ir::{Binop, Fn, FnInPkgMut, NodePayload, NodeRef, Package, Type, Unop};
 use crate::ir_utils::compact_and_toposort_in_place;
 use crate::math::ceil_log2;
 
@@ -34,15 +34,6 @@ impl std::fmt::Display for DesugarError {
 
 impl std::error::Error for DesugarError {}
 
-fn next_text_id(f: &Fn) -> usize {
-    f.nodes
-        .iter()
-        .map(|n| n.text_id)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1)
-}
-
 fn expect_bits_width(f: &Fn, r: NodeRef, ctx: &str) -> Result<usize, DesugarError> {
     let ty = f.get_node_ty(r);
     match ty {
@@ -54,20 +45,11 @@ fn expect_bits_width(f: &Fn, r: NodeRef, ctx: &str) -> Result<usize, DesugarErro
     }
 }
 
-fn push_node(f: &mut Fn, ty: Type, payload: NodePayload) -> NodeRef {
-    let text_id = next_text_id(f);
-    let new_index = f.nodes.len();
-    f.nodes.push(Node {
-        text_id,
-        name: None,
-        ty,
-        payload,
-        pos: None,
-    });
-    NodeRef { index: new_index }
+fn push_node(f: &mut FnInPkgMut<'_>, ty: Type, payload: NodePayload) -> NodeRef {
+    f.push_node(ty, payload)
 }
 
-fn desugar_ext_carry_out_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
+fn desugar_ext_carry_out_in_fn(f: &mut FnInPkgMut<'_>) -> Result<bool, DesugarError> {
     let mut changed = false;
 
     // Snapshot length so we only visit original nodes; desugaring appends nodes.
@@ -155,7 +137,7 @@ fn desugar_ext_carry_out_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
     Ok(changed)
 }
 
-fn desugar_ext_prio_encode_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
+fn desugar_ext_prio_encode_in_fn(f: &mut FnInPkgMut<'_>) -> Result<bool, DesugarError> {
     let mut changed = false;
 
     // Snapshot length so we only visit original nodes; desugaring appends nodes.
@@ -189,23 +171,24 @@ fn desugar_ext_prio_encode_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
     Ok(changed)
 }
 
-/// Desugars extension ops within `f` into upstream-compatible PIR operations.
+/// Desugars extension ops within a package-backed function mutation context.
 ///
 /// This function also normalizes the node list into a valid topological order.
-pub fn desugar_extensions_in_fn(f: &mut Fn) -> Result<(), DesugarError> {
+pub fn desugar_extensions_in_fn(f: &mut FnInPkgMut<'_>) -> Result<(), DesugarError> {
     let _changed = desugar_ext_carry_out_in_fn(f)? | desugar_ext_prio_encode_in_fn(f)?;
-    compact_and_toposort_in_place(f).map_err(DesugarError::new)?;
+    compact_and_toposort_in_place(f.function_mut()).map_err(DesugarError::new)?;
     Ok(())
 }
 
 /// Desugars extension ops within `pkg` into upstream-compatible PIR operations.
 pub fn desugar_extensions_in_package(pkg: &mut Package) -> Result<(), DesugarError> {
-    for member in pkg.members.iter_mut() {
-        match member {
-            PackageMember::Function(f) => desugar_extensions_in_fn(f)?,
-            PackageMember::Block { func, .. } => desugar_extensions_in_fn(func)?,
-        }
+    for member_index in 0..pkg.members.len() {
+        let mut fn_in_pkg = pkg
+            .fn_in_pkg_mut(member_index)
+            .expect("desugar_extensions_in_package: member index should be valid");
+        desugar_extensions_in_fn(&mut fn_in_pkg)?;
     }
+    pkg.sync_next_text_id();
     Ok(())
 }
 
@@ -215,4 +198,80 @@ pub fn emit_package_as_xls_ir_text(pkg: &Package) -> Result<String, DesugarError
     let mut desugared = pkg.clone();
     desugar_extensions_in_package(&mut desugared)?;
     Ok(desugared.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{FileTable, MemberType, PackageMember};
+    use crate::ir_parser;
+    use crate::ir_validate;
+
+    fn parse_sample_package() -> Package {
+        let ir_text = r#"package sample
+
+top fn f(x: bits[4] id=1, y: bits[4] id=2, cin: bits[1] id=3) -> (bits[1], bits[2]) {
+  carry: bits[1] = ext_carry_out(x, y, cin, id=4)
+  enc_in: bits[2] = bit_slice(x, start=0, width=2, id=5)
+  enc: bits[2] = ext_prio_encode(enc_in, lsb_prio=true, id=6)
+  ret out: (bits[1], bits[2]) = tuple(carry, enc, id=7)
+}
+"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        parser.parse_and_validate_package().unwrap()
+    }
+
+    fn fn_has_extension_ops(f: &Fn) -> bool {
+        f.nodes.iter().any(|n| n.payload.is_extension_op())
+    }
+
+    #[test]
+    fn desugar_extensions_in_fn_advances_package_next_text_id_and_validates() {
+        let mut pkg = parse_sample_package();
+        let before_next = pkg.peek_next_text_id();
+        {
+            let mut f = pkg.get_top_fn_in_pkg_mut().unwrap();
+            desugar_extensions_in_fn(&mut f).unwrap();
+            assert!(
+                !fn_has_extension_ops(f.function()),
+                "package-backed desugar should eliminate extension ops"
+            );
+        }
+        assert!(
+            pkg.peek_next_text_id() > before_next,
+            "package-backed desugar should allocate fresh text ids"
+        );
+        assert_eq!(pkg.peek_next_text_id(), pkg.recompute_next_unused_text_id());
+        ir_validate::validate_package(&pkg).unwrap();
+    }
+
+    #[test]
+    fn explicit_synthetic_package_desugar_matches_package_backed_desugar() {
+        let pkg = parse_sample_package();
+        let mut standalone = pkg.get_top_fn().unwrap().clone();
+        let mut standalone_pkg = Package::new(
+            "standalone".to_string(),
+            FileTable::new(),
+            vec![PackageMember::Function(standalone)],
+            Some(("f".to_string(), MemberType::Function)),
+        );
+        {
+            let mut f = standalone_pkg.get_top_fn_in_pkg_mut().unwrap();
+            desugar_extensions_in_fn(&mut f).unwrap();
+        }
+        standalone = standalone_pkg.get_top_fn().unwrap().clone();
+        assert!(
+            !fn_has_extension_ops(&standalone),
+            "explicit synthetic-package desugar should eliminate extension ops"
+        );
+
+        let mut pkg_backed = pkg.clone();
+        {
+            let mut f = pkg_backed.get_top_fn_in_pkg_mut().unwrap();
+            desugar_extensions_in_fn(&mut f).unwrap();
+        }
+        let expected = pkg_backed.get_top_fn().unwrap().clone();
+        assert_eq!(standalone.to_string(), expected.to_string());
+        ir_validate::validate_package(&standalone_pkg).unwrap();
+    }
 }

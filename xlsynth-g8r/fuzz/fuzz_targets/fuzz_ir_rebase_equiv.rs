@@ -74,12 +74,12 @@ fuzz_target!(|pair: FuzzSampleSameTypedPair| {
     });
 
     // 5a) Verify the rebased function via the composite validator
-    let pkg = ir::Package {
-        name: "rebased_pkg".to_string(),
-        file_table: ir::FileTable::new(),
-        members: vec![ir::PackageMember::Function(rebased.clone())],
-        top: Some(("rebased".to_string(), ir::MemberType::Function)),
-    };
+    let pkg = ir::Package::new(
+        "rebased_pkg".to_string(),
+        ir::FileTable::new(),
+        vec![ir::PackageMember::Function(rebased.clone())],
+        Some(("rebased".to_string(), ir::MemberType::Function)),
+    );
     if let Err(e) = validate_fn(&rebased, &pkg) {
         panic!("rebased IR failed composite validation: {}", e);
     }

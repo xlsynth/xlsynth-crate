@@ -399,12 +399,12 @@ fn build_package_from_netlist(
     let module_name =
         sanitize_to_xls_identifier(parsed.interner.resolve(module.name).unwrap_or("top"));
 
-    let mut pkg = Package {
-        name: module_name.clone(),
-        file_table: xlsynth_pir::ir::FileTable::new(),
-        members: Vec::new(),
-        top: None,
-    };
+    let mut pkg = Package::new(
+        module_name.clone(),
+        xlsynth_pir::ir::FileTable::new(),
+        Vec::new(),
+        None,
+    );
 
     let mut needed_cells: HashSet<String> = HashSet::new();
     for inst in &module.instances {
@@ -439,6 +439,7 @@ fn build_package_from_netlist(
         metadata: top_meta,
     });
     pkg.set_top_block(&top_fn.name).map_err(|e| anyhow!(e))?;
+    pkg.sync_next_text_id();
 
     Ok(pkg)
 }

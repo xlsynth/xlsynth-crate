@@ -4,7 +4,7 @@ use std::cmp::min;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 
-use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
+use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify_in_fn};
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 
@@ -254,7 +254,16 @@ pub fn process_ir_path_with_gatefn(
     log::info!("IR top:\n{}", ir_top.to_string());
 
     if let Some(out_path) = options.prepared_ir_out.as_ref() {
-        let prepared_fn = prep_for_gatify(ir_top, Some(range_info.as_ref()), prep_opts);
+        let mut prepared_pkg = ir_package.clone();
+        {
+            let mut prepared_fn = prepared_pkg
+                .get_fn_in_pkg_mut(&top_fn_name)
+                .expect("top fn should exist mutably in prepared package");
+            prep_for_gatify_in_fn(&mut prepared_fn, Some(range_info.as_ref()), prep_opts);
+        }
+        let prepared_fn = prepared_pkg
+            .get_fn(&top_fn_name)
+            .expect("top fn should exist in prepared package");
         let external_refs = ir_utils::external_function_references(&prepared_fn);
         if !external_refs.is_empty() {
             let refs = external_refs.into_iter().collect::<Vec<_>>().join(", ");
@@ -264,7 +273,7 @@ pub fn process_ir_path_with_gatefn(
             );
             std::process::exit(1);
         }
-        let prepared_member = ir_package
+        let prepared_member = prepared_pkg
             .members
             .iter()
             .find_map(|member| match member {
@@ -280,12 +289,12 @@ pub fn process_ir_path_with_gatefn(
                 _ => None,
             })
             .expect("top member should exist in pir_package");
-        let prepared_pkg = ir::Package {
-            name: ir_package.name.clone(),
-            file_table: ir_package.file_table.clone(),
-            members: vec![prepared_member],
-            top: ir_package.top.clone(),
-        };
+        let prepared_pkg = ir::Package::new(
+            prepared_pkg.name.clone(),
+            prepared_pkg.file_table.clone(),
+            vec![prepared_member],
+            prepared_pkg.top.clone(),
+        );
         let prepared_text = prepared_pkg.to_string();
         let mut file = std::fs::File::create(out_path).unwrap_or_else(|e| {
             panic!(

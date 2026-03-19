@@ -348,6 +348,7 @@ fn prune_to_single_top_block(pkg: &mut ir::Package) -> Result<(), String> {
         _ => false,
     });
     pkg.top = Some((top_name, MemberType::Block));
+    pkg.sync_next_text_id();
     Ok(())
 }
 

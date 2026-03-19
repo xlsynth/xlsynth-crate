@@ -47,12 +47,12 @@ pub fn handle_block2fn(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
         eprintln!("Failed to convert block IR to function package: {e}");
         std::process::exit(1);
     });
-    let package = Package {
-        name: result.package_name,
-        file_table: FileTable::new(),
-        members: vec![PackageMember::Function(result.function.clone())],
-        top: Some((result.function.name.clone(), MemberType::Function)),
-    };
+    let package = Package::new(
+        result.package_name,
+        FileTable::new(),
+        vec![PackageMember::Function(result.function.clone())],
+        Some((result.function.name.clone(), MemberType::Function)),
+    );
     println!("{}", package);
 }
 

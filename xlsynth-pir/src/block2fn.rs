@@ -91,12 +91,12 @@ pub fn block_ir_to_fn_package(
     options: &Block2FnOptions,
 ) -> Result<ir::Package, String> {
     let result = block_ir_to_fn(block_ir_text, options)?;
-    Ok(ir::Package {
-        name: result.package_name,
-        file_table: ir::FileTable::new(),
-        members: vec![PackageMember::Function(result.function.clone())],
-        top: Some((result.function.name.clone(), MemberType::Function)),
-    })
+    Ok(ir::Package::new(
+        result.package_name,
+        ir::FileTable::new(),
+        vec![PackageMember::Function(result.function.clone())],
+        Some((result.function.name.clone(), MemberType::Function)),
+    ))
 }
 
 fn tie_input_ports(
