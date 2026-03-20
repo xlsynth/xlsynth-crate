@@ -241,9 +241,9 @@ fn run_nested_cargo_with_artifact_config(
     })
 }
 
-#[test]
 /// Verifies that relative TOML paths are resolved relative to an absolute
 /// config path.
+#[test]
 fn artifact_config_resolves_relative_toml_paths_from_absolute_config_path() {
     let temp_dir = make_temp_dir();
     let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -309,9 +309,9 @@ fn artifact_config_resolves_relative_toml_paths_from_absolute_config_path() {
     );
 }
 
-#[test]
 /// Verifies that `XLSYNTH_ARTIFACT_CONFIG` itself must be passed as an absolute
 /// path.
+#[test]
 fn artifact_config_requires_absolute_config_path() {
     let temp_dir = make_temp_dir();
     let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -372,9 +372,9 @@ fn artifact_config_requires_absolute_config_path() {
     );
 }
 
-#[test]
 /// Verifies that declared mode still rejects directory-valued explicit DSO
 /// paths.
+#[test]
 fn artifact_config_declared_mode_rejects_non_library_dso_paths() {
     let temp_dir = make_temp_dir();
     let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
