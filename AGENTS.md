@@ -41,6 +41,10 @@ Completed changes must pass either `cargo test --workspace` or `cargo nextest ru
 Prefer `cargo nextest run` when it is available; for this workspace size it
 usually gives better concurrency and faster feedback than plain `cargo test`.
 
+For temporary files or directories in tests, prefer `tempfile` (or an existing
+workspace helper built on it) over ad hoc paths under `std::env::temp_dir()`.
+This avoids parallel-test collisions and makes cleanup automatic.
+
 If network access is unavailable, it is acceptable to exclude the crates.io
 version checks in `xlsynth-test-helpers/tests/version_test.rs` (which require
 crates.io metadata). Document that exclusion in the change notes.

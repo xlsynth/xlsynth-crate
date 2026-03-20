@@ -25,3 +25,4 @@ toml = "0.8"
 
 [dev-dependencies]
 syn = { version = "2", features = ["full"] }
+tempfile = "3.20"

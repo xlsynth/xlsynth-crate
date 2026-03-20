@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Exercises `XLSYNTH_ARTIFACT_CONFIG` resolution and validation via nested
+//! Cargo smoke crates.
 
 use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
+use tempfile::TempDir;
 
+/// Resolves the configured XLS DSO to a concrete shared-library file for test
+/// fixtures.
 fn resolve_config_dso_path() -> PathBuf {
     let configured_path = PathBuf::from(xlsynth_sys::XLS_DSO_PATH);
     if configured_path.is_file() {
@@ -53,30 +56,22 @@ fn resolve_config_dso_path() -> PathBuf {
     );
 }
 
-fn make_temp_dir() -> PathBuf {
-    let unique_id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let temp_dir = std::env::temp_dir().join(format!(
-        "xlsynth-sys-artifact-config-test-{}-{unique_id}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&temp_dir).unwrap_or_else(|err| {
-        panic!(
-            "Failed to create temporary test directory {}: {}",
-            temp_dir.display(),
-            err
-        )
-    });
-    temp_dir
+/// Creates an isolated temporary directory for one artifact-config test case.
+fn make_temp_dir() -> TempDir {
+    tempfile::Builder::new()
+        .prefix("xlsynth-sys-artifact-config-test-")
+        .tempdir()
+        .unwrap_or_else(|err| panic!("Failed to create temporary test directory: {}", err))
 }
 
+/// Writes a text file and panics with path context on failure.
 fn write_file(path: &Path, contents: &str) {
     fs::write(path, contents)
         .unwrap_or_else(|err| panic!("Failed to write {}: {}", path.display(), err));
 }
 
+/// Writes a minimal binary crate that prints the resolved `xlsynth-sys`
+/// artifact paths.
 fn write_smoke_crate(temp_crate_dir: &Path, manifest_path: &Path) {
     let temp_src_dir = temp_crate_dir.join("src");
     fs::create_dir_all(&temp_src_dir).unwrap_or_else(|err| {
@@ -111,6 +106,7 @@ fn write_smoke_crate(temp_crate_dir: &Path, manifest_path: &Path) {
     );
 }
 
+/// Recursively copies one directory tree into another for nested test fixtures.
 fn copy_dir_recursive(source_dir: &Path, target_dir: &Path) {
     fs::create_dir_all(target_dir).unwrap_or_else(|err| {
         panic!(
@@ -158,6 +154,8 @@ fn copy_dir_recursive(source_dir: &Path, target_dir: &Path) {
     }
 }
 
+/// Copies the current test process artifacts into a fixture-local artifact
+/// directory.
 fn copy_config_artifacts(config_artifacts_dir: &Path) -> (PathBuf, PathBuf) {
     fs::create_dir_all(config_artifacts_dir).unwrap_or_else(|err| {
         panic!(
@@ -188,6 +186,7 @@ fn copy_config_artifacts(config_artifacts_dir: &Path) -> (PathBuf, PathBuf) {
     (expected_dso_path, expected_stdlib_path)
 }
 
+/// Writes an artifact-config TOML file with the given DSO and stdlib paths.
 fn write_artifact_config(config_path: &Path, dso_path: &str, dslx_stdlib_path: &str) {
     let config_dir = config_path.parent().unwrap_or_else(|| {
         panic!(
@@ -211,6 +210,8 @@ fn write_artifact_config(config_path: &Path, dso_path: &str, dslx_stdlib_path: &
     );
 }
 
+/// Runs a nested offline Cargo build using the requested artifact-config
+/// override.
 fn run_nested_cargo_with_artifact_config(
     temp_crate_dir: &Path,
     target_dir: &Path,
@@ -241,11 +242,13 @@ fn run_nested_cargo_with_artifact_config(
 }
 
 #[test]
+/// Verifies that relative TOML paths are resolved relative to an absolute
+/// config path.
 fn artifact_config_resolves_relative_toml_paths_from_absolute_config_path() {
     let temp_dir = make_temp_dir();
     let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let temp_crate_dir = temp_dir.join("artifact-config-smoke");
-    let config_root_dir = temp_dir.join("config-root");
+    let temp_crate_dir = temp_dir.path().join("artifact-config-smoke");
+    let config_root_dir = temp_dir.path().join("config-root");
     let config_artifacts_dir = config_root_dir.join("artifacts");
     let (expected_dso_path, expected_stdlib_path) = copy_config_artifacts(&config_artifacts_dir);
     let config_path = config_root_dir.join("artifact-config.toml");
@@ -265,7 +268,7 @@ fn artifact_config_resolves_relative_toml_paths_from_absolute_config_path() {
     );
     write_smoke_crate(&temp_crate_dir, &manifest_path);
 
-    let target_dir = temp_dir.join("target");
+    let target_dir = temp_dir.path().join("target");
     let output = run_nested_cargo_with_artifact_config(
         &temp_crate_dir,
         &target_dir,
@@ -304,15 +307,15 @@ fn artifact_config_resolves_relative_toml_paths_from_absolute_config_path() {
         stdout,
         stderr
     );
-
-    fs::remove_dir_all(&temp_dir).ok();
 }
 
 #[test]
+/// Verifies that `XLSYNTH_ARTIFACT_CONFIG` itself must be passed as an absolute
+/// path.
 fn artifact_config_requires_absolute_config_path() {
     let temp_dir = make_temp_dir();
     let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let temp_crate_dir = temp_dir.join("artifact-config-relative-smoke");
+    let temp_crate_dir = temp_dir.path().join("artifact-config-relative-smoke");
     let config_root_dir = temp_crate_dir.join("config");
     let config_artifacts_dir = temp_crate_dir.join("artifacts");
     let (expected_dso_path, _expected_stdlib_path) = copy_config_artifacts(&config_artifacts_dir);
@@ -333,7 +336,7 @@ fn artifact_config_requires_absolute_config_path() {
     );
     write_smoke_crate(&temp_crate_dir, &manifest_path);
 
-    let target_dir = temp_dir.join("relative-target");
+    let target_dir = temp_dir.path().join("relative-target");
     let output = run_nested_cargo_with_artifact_config(
         &temp_crate_dir,
         &target_dir,
@@ -367,16 +370,16 @@ fn artifact_config_requires_absolute_config_path() {
         stdout,
         stderr
     );
-
-    fs::remove_dir_all(&temp_dir).ok();
 }
 
 #[test]
+/// Verifies that declared mode still rejects directory-valued explicit DSO
+/// paths.
 fn artifact_config_declared_mode_rejects_non_library_dso_paths() {
     let temp_dir = make_temp_dir();
     let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let temp_crate_dir = temp_dir.join("artifact-config-declared-invalid-dso");
-    let config_root_dir = temp_dir.join("config-root");
+    let temp_crate_dir = temp_dir.path().join("artifact-config-declared-invalid-dso");
+    let config_root_dir = temp_dir.path().join("config-root");
     let config_artifacts_dir = config_root_dir.join("artifacts");
     let (_expected_dso_path, expected_stdlib_path) = copy_config_artifacts(&config_artifacts_dir);
     let invalid_dso_dir = config_artifacts_dir.join("not-a-lib-dir");
@@ -417,7 +420,7 @@ fn artifact_config_declared_mode_rejects_non_library_dso_paths() {
     );
     write_smoke_crate(&temp_crate_dir, &manifest_path);
 
-    let target_dir = temp_dir.join("declared-invalid-dso-target");
+    let target_dir = temp_dir.path().join("declared-invalid-dso-target");
     let output = run_nested_cargo_with_artifact_config(
         &temp_crate_dir,
         &target_dir,
@@ -445,6 +448,4 @@ fn artifact_config_declared_mode_rejects_non_library_dso_paths() {
         stdout,
         stderr
     );
-
-    fs::remove_dir_all(&temp_dir).ok();
 }
