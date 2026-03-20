@@ -310,6 +310,14 @@ impl IrFunction {
         xls_function_to_string(self.ptr)
     }
 
+    /// Converts this function to Z3 SMT-LIB text.
+    pub fn to_z3_smtlib(&self) -> Result<String, XlsynthError> {
+        // We take a read guard to document that `self.ptr` is owned by the
+        // package and must not be used after the package is dropped.
+        let _package_read_guard: RwLockReadGuard<IrPackagePtr> = self.parent.read().unwrap();
+        lib_support::xls_function_to_z3_smtlib(self.ptr)
+    }
+
     pub fn get_name(&self) -> String {
         xls_function_get_name(self.ptr).unwrap()
     }

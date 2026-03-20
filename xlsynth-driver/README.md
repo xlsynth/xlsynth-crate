@@ -704,6 +704,20 @@ Example:
 xlsynth-driver ir-fn-to-json my_pkg.ir --top main
 ```
 
+### `xls-ir-fn-to-z3-smtlib`
+
+Emits Z3 SMT-LIB text for a selected XLS IR function.
+
+- Positional arguments: `<ir_input_file>`
+- Required:
+  - `--top <NAME>` – function name to convert.
+
+Example:
+
+```shell
+xlsynth-driver xls-ir-fn-to-z3-smtlib my_pkg.ir --top main
+```
+
 ### `ir-fn-cone-extract`
 
 Extracts the backward cone feeding a selected sink node down to primary inputs (function parameters) and emits the extracted package IR on **stdout**.
