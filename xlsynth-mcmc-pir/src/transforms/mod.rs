@@ -17,9 +17,11 @@ mod add_fission;
 mod add_sign_ext_u1_to_sub_zero_ext_u1;
 mod and_mask_sign_ext_to_sel;
 mod and_reduce_demorgan;
+mod bit_slice_add_sub_distribute;
 mod bit_slice_bit_slice_fold;
 mod bit_slice_concat_distribute;
 mod bit_slice_sel_distribute;
+mod concat_sel_hoist;
 mod carry_split_add;
 mod clamp_chain_collapse;
 mod clone_multi_user_node;
@@ -28,6 +30,7 @@ mod cmp_swap;
 mod const_shll_concat_zero_fold;
 mod csa_fuse_into_consumer;
 mod csa_rebalance_triplet;
+mod dual_sel_hoist;
 mod eq_ne_add_literal_shift;
 mod eq_sel_distribute;
 mod eq_zero_or_reduce;
@@ -69,9 +72,11 @@ use add_fission::AddFissionTransform;
 use add_sign_ext_u1_to_sub_zero_ext_u1::AddSignExtU1ToSubZeroExtU1Transform;
 use and_mask_sign_ext_to_sel::AndMaskSignExtToSelTransform;
 use and_reduce_demorgan::AndReduceDeMorganTransform;
+use bit_slice_add_sub_distribute::BitSliceAddSubDistributeTransform;
 use bit_slice_bit_slice_fold::BitSliceBitSliceFoldTransform;
 use bit_slice_concat_distribute::BitSliceConcatDistributeTransform;
 use bit_slice_sel_distribute::BitSliceSelDistributeTransform;
+use concat_sel_hoist::ConcatSelHoistTransform;
 use carry_split_add::CarrySplitAddTransform;
 use clamp_chain_collapse::ClampChainCollapseTransform;
 use clone_multi_user_node::CloneMultiUserNodeTransform;
@@ -80,6 +85,7 @@ use cmp_swap::CmpSwapTransform;
 use const_shll_concat_zero_fold::ConstShllConcatZeroFoldTransform;
 use csa_fuse_into_consumer::CsaFuseIntoConsumerTransform;
 use csa_rebalance_triplet::CsaRebalanceTripletTransform;
+use dual_sel_hoist::DualSelHoistTransform;
 use eq_ne_add_literal_shift::EqNeAddLiteralShiftTransform;
 use eq_sel_distribute::EqSelDistributeTransform;
 use eq_zero_or_reduce::EqZeroOrReduceTransform;
@@ -170,6 +176,9 @@ pub enum PirTransformKind {
     /// Distribute NEG over select (and reverse folding form):
     /// `neg(sel(p, cases=[a, b])) ↔ sel(p, cases=[neg(a), neg(b)])`
     NegSelDistribute,
+    /// Distribute low-bit truncation over add/sub (and reverse):
+    /// `bit_slice(add/sub(x,y), start=0, width=k) ↔ add/sub(bit_slice(x,0,k), bit_slice(y,0,k))`
+    BitSliceAddSubDistribute,
     /// Distribute bit_slice over select (and reverse folding form):
     /// `bit_slice(sel(p, cases=[a, b]), start=s, width=w)
     ///    ↔ sel(p, cases=[bit_slice(a,s,w), bit_slice(b,s,w)])`
@@ -225,6 +234,10 @@ pub enum PirTransformKind {
     SelSwapArmsByNotPred,
     /// Hoist unary/binary ops over `sel`.
     SelHoist,
+    /// Hoist/fold a binop through two aligned 2-case sels with the same selector.
+    DualSelHoist,
+    /// Hoist a single 2-case sel operand through concat and fold back.
+    ConcatSelHoist,
     /// Hoist unary/binary ops over `nary`.
     NaryHoist,
     /// Cancel double NOT:
@@ -320,6 +333,7 @@ impl fmt::Display for PirTransformKind {
             PirTransformKind::CsaRebalanceTriplet => write!(f, "CsaRebalanceTriplet"),
             PirTransformKind::NotSelDistribute => write!(f, "NotSelDistribute"),
             PirTransformKind::NegSelDistribute => write!(f, "NegSelDistribute"),
+            PirTransformKind::BitSliceAddSubDistribute => write!(f, "BitSliceAddSubDistribute"),
             PirTransformKind::BitSliceSelDistribute => write!(f, "BitSliceSelDistribute"),
             PirTransformKind::SignExtSelDistribute => write!(f, "SignExtSelDistribute"),
             PirTransformKind::ZeroExtSelDistribute => write!(f, "ZeroExtSelDistribute"),
@@ -335,6 +349,8 @@ impl fmt::Display for PirTransformKind {
             PirTransformKind::SelSameArmsFold => write!(f, "SelSameArmsFold"),
             PirTransformKind::SelSwapArmsByNotPred => write!(f, "SelSwapArmsByNotPred"),
             PirTransformKind::SelHoist => write!(f, "SelHoist"),
+            PirTransformKind::DualSelHoist => write!(f, "DualSelHoist"),
+            PirTransformKind::ConcatSelHoist => write!(f, "ConcatSelHoist"),
             PirTransformKind::NaryHoist => write!(f, "NaryHoist"),
             PirTransformKind::NotNotCancel => write!(f, "NotNotCancel"),
             PirTransformKind::NegNegCancel => write!(f, "NegNegCancel"),
@@ -413,6 +429,7 @@ pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
         Box::new(CsaRebalanceTripletTransform),
         Box::new(NotSelDistributeTransform),
         Box::new(NegSelDistributeTransform),
+        Box::new(BitSliceAddSubDistributeTransform),
         Box::new(BitSliceSelDistributeTransform),
         Box::new(SignExtSelDistributeTransform),
         Box::new(ZeroExtSelDistributeTransform),
@@ -428,6 +445,8 @@ pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
         Box::new(SelSameArmsFoldTransform),
         Box::new(SelSwapArmsByNotPredTransform),
         Box::new(SelHoistTransform),
+        Box::new(DualSelHoistTransform),
+        Box::new(ConcatSelHoistTransform),
         Box::new(NaryHoistTransform),
         Box::new(NotNotCancelTransform),
         Box::new(NegNegCancelTransform),
