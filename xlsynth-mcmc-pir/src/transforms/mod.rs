@@ -21,12 +21,12 @@ mod bit_slice_add_sub_distribute;
 mod bit_slice_bit_slice_fold;
 mod bit_slice_concat_distribute;
 mod bit_slice_sel_distribute;
-mod concat_sel_hoist;
 mod carry_split_add;
 mod clamp_chain_collapse;
 mod clone_multi_user_node;
 mod cmp_sel_canon;
 mod cmp_swap;
+mod concat_sel_hoist;
 mod const_shll_concat_zero_fold;
 mod csa_fuse_into_consumer;
 mod csa_rebalance_triplet;
@@ -76,12 +76,12 @@ use bit_slice_add_sub_distribute::BitSliceAddSubDistributeTransform;
 use bit_slice_bit_slice_fold::BitSliceBitSliceFoldTransform;
 use bit_slice_concat_distribute::BitSliceConcatDistributeTransform;
 use bit_slice_sel_distribute::BitSliceSelDistributeTransform;
-use concat_sel_hoist::ConcatSelHoistTransform;
 use carry_split_add::CarrySplitAddTransform;
 use clamp_chain_collapse::ClampChainCollapseTransform;
 use clone_multi_user_node::CloneMultiUserNodeTransform;
 use cmp_sel_canon::CmpSelCanonTransform;
 use cmp_swap::CmpSwapTransform;
+use concat_sel_hoist::ConcatSelHoistTransform;
 use const_shll_concat_zero_fold::ConstShllConcatZeroFoldTransform;
 use csa_fuse_into_consumer::CsaFuseIntoConsumerTransform;
 use csa_rebalance_triplet::CsaRebalanceTripletTransform;
@@ -177,7 +177,8 @@ pub enum PirTransformKind {
     /// `neg(sel(p, cases=[a, b])) ↔ sel(p, cases=[neg(a), neg(b)])`
     NegSelDistribute,
     /// Distribute low-bit truncation over add/sub (and reverse):
-    /// `bit_slice(add/sub(x,y), start=0, width=k) ↔ add/sub(bit_slice(x,0,k), bit_slice(y,0,k))`
+    /// `bit_slice(add/sub(x,y), start=0, width=k) ↔ add/sub(bit_slice(x,0,k),
+    /// bit_slice(y,0,k))`
     BitSliceAddSubDistribute,
     /// Distribute bit_slice over select (and reverse folding form):
     /// `bit_slice(sel(p, cases=[a, b]), start=s, width=w)
@@ -234,7 +235,8 @@ pub enum PirTransformKind {
     SelSwapArmsByNotPred,
     /// Hoist unary/binary ops over `sel`.
     SelHoist,
-    /// Hoist/fold a binop through two aligned 2-case sels with the same selector.
+    /// Hoist/fold a binop through two aligned 2-case sels with the same
+    /// selector.
     DualSelHoist,
     /// Hoist a single 2-case sel operand through concat and fold back.
     ConcatSelHoist,

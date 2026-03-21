@@ -7,8 +7,10 @@ use super::{PirTransform, PirTransformKind, TransformLocation};
 /// Distributes low-bit truncation over add/sub (and folds back).
 ///
 /// Supported reversible forms:
-/// - `bit_slice(add(x, y), start=0, width=k) ↔ add(bit_slice(x,0,k), bit_slice(y,0,k))`
-/// - `bit_slice(sub(x, y), start=0, width=k) ↔ sub(bit_slice(x,0,k), bit_slice(y,0,k))`
+/// - `bit_slice(add(x, y), start=0, width=k) ↔ add(bit_slice(x,0,k),
+///   bit_slice(y,0,k))`
+/// - `bit_slice(sub(x, y), start=0, width=k) ↔ sub(bit_slice(x,0,k),
+///   bit_slice(y,0,k))`
 #[derive(Debug)]
 pub struct BitSliceAddSubDistributeTransform;
 
@@ -163,8 +165,10 @@ impl PirTransform for BitSliceAddSubDistributeTransform {
                             .to_string(),
                     );
                 }
-                let (op, lhs, rhs) = Self::add_sub_op(&f.get_node(arg).payload)
-                    .ok_or_else(|| "BitSliceAddSubDistributeTransform: expected add/sub".to_string())?;
+                let (op, lhs, rhs) =
+                    Self::add_sub_op(&f.get_node(arg).payload).ok_or_else(|| {
+                        "BitSliceAddSubDistributeTransform: expected add/sub".to_string()
+                    })?;
                 let lhs_slice = Self::mk_bit_slice_node(f, lhs, 0, k);
                 let rhs_slice = Self::mk_bit_slice_node(f, rhs, 0, k);
                 f.get_node_mut(target_ref).payload = NodePayload::Binop(op, lhs_slice, rhs_slice);
@@ -180,7 +184,9 @@ impl PirTransform for BitSliceAddSubDistributeTransform {
                     width: wx,
                 } = lhs_node
                 else {
-                    return Err("BitSliceAddSubDistributeTransform: lhs must be low bit_slice".to_string());
+                    return Err(
+                        "BitSliceAddSubDistributeTransform: lhs must be low bit_slice".to_string(),
+                    );
                 };
                 let NodePayload::BitSlice {
                     arg: y,
@@ -188,17 +194,26 @@ impl PirTransform for BitSliceAddSubDistributeTransform {
                     width: wy,
                 } = rhs_node
                 else {
-                    return Err("BitSliceAddSubDistributeTransform: rhs must be low bit_slice".to_string());
+                    return Err(
+                        "BitSliceAddSubDistributeTransform: rhs must be low bit_slice".to_string(),
+                    );
                 };
                 if sx != 0 || sy != 0 || wx != k || wy != k {
-                    return Err("BitSliceAddSubDistributeTransform: expected matching low slices".to_string());
+                    return Err(
+                        "BitSliceAddSubDistributeTransform: expected matching low slices"
+                            .to_string(),
+                    );
                 }
-                let w = Self::bits_width(&f.get_node(x).ty)
-                    .ok_or_else(|| "BitSliceAddSubDistributeTransform: x must be bits[w]".to_string())?;
-                let wy_src = Self::bits_width(&f.get_node(y).ty)
-                    .ok_or_else(|| "BitSliceAddSubDistributeTransform: y must be bits[w]".to_string())?;
+                let w = Self::bits_width(&f.get_node(x).ty).ok_or_else(|| {
+                    "BitSliceAddSubDistributeTransform: x must be bits[w]".to_string()
+                })?;
+                let wy_src = Self::bits_width(&f.get_node(y).ty).ok_or_else(|| {
+                    "BitSliceAddSubDistributeTransform: y must be bits[w]".to_string()
+                })?;
                 if w != wy_src || k > w {
-                    return Err("BitSliceAddSubDistributeTransform: source widths must match".to_string());
+                    return Err(
+                        "BitSliceAddSubDistributeTransform: source widths must match".to_string(),
+                    );
                 }
                 let wide_ref = Self::mk_binop_node(f, op, Type::Bits(w), x, y);
                 f.get_node_mut(target_ref).payload = NodePayload::BitSlice {
@@ -230,7 +245,10 @@ mod tests {
         let mut f = parser.parse_fn().unwrap();
         let mut t = BitSliceAddSubDistributeTransform;
         let cand = t.find_candidates(&f).pop().expect("candidate");
-        let target = match cand.clone() { TransformLocation::Node(nr) => nr, _ => unreachable!() };
+        let target = match cand.clone() {
+            TransformLocation::Node(nr) => nr,
+            _ => unreachable!(),
+        };
         t.apply(&mut f, &cand).expect("apply");
         match &f.get_node(target).payload {
             NodePayload::Binop(Binop::Add, _, _) => {}
@@ -249,7 +267,10 @@ mod tests {
         let mut f = parser.parse_fn().unwrap();
         let mut t = BitSliceAddSubDistributeTransform;
         let cand = t.find_candidates(&f).pop().expect("candidate");
-        let target = match cand.clone() { TransformLocation::Node(nr) => nr, _ => unreachable!() };
+        let target = match cand.clone() {
+            TransformLocation::Node(nr) => nr,
+            _ => unreachable!(),
+        };
         t.apply(&mut f, &cand).expect("apply");
         match &f.get_node(target).payload {
             NodePayload::BitSlice { start, width, .. } => {

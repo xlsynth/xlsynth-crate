@@ -6,7 +6,8 @@ use super::{PirTransform, PirTransformKind, TransformLocation};
 
 /// Hoists/folds a binary op through two 2-case sels sharing the same selector.
 ///
-/// `binop(sel(p,[a0,a1]), sel(p,[b0,b1])) ↔ sel(p,[binop(a0,b0), binop(a1,b1)])`
+/// `binop(sel(p,[a0,a1]), sel(p,[b0,b1])) ↔ sel(p,[binop(a0,b0),
+/// binop(a1,b1)])`
 #[derive(Debug)]
 pub struct DualSelHoistTransform;
 
@@ -101,7 +102,11 @@ impl PirTransform for DualSelHoistTransform {
                     if Self::bits_width(&f.get_node(*ls).ty) != Some(1) {
                         continue;
                     }
-                    if lc.iter().chain(rc.iter()).any(|op| Self::bits_width(&f.get_node(*op).ty) != Some(w)) {
+                    if lc
+                        .iter()
+                        .chain(rc.iter())
+                        .any(|op| Self::bits_width(&f.get_node(*op).ty) != Some(w))
+                    {
                         continue;
                     }
                     out.push(TransformLocation::Node(nr));
@@ -149,7 +154,7 @@ impl PirTransform for DualSelHoistTransform {
         let target_ref = match loc {
             TransformLocation::Node(nr) => *nr,
             TransformLocation::RewireOperand { .. } => {
-                return Err("DualSelHoistTransform: expected TransformLocation::Node".to_string())
+                return Err("DualSelHoistTransform: expected TransformLocation::Node".to_string());
             }
         };
         let target_ty = f.get_node(target_ref).ty.clone();
@@ -178,8 +183,10 @@ impl PirTransform for DualSelHoistTransform {
                 if selector != rhs_selector || lhs_cases.len() != 2 || rhs_cases.len() != 2 {
                     return Err("DualSelHoistTransform: sels must align".to_string());
                 }
-                let case0 = Self::mk_binop_node(f, op, target_ty.clone(), lhs_cases[0], rhs_cases[0]);
-                let case1 = Self::mk_binop_node(f, op, target_ty.clone(), lhs_cases[1], rhs_cases[1]);
+                let case0 =
+                    Self::mk_binop_node(f, op, target_ty.clone(), lhs_cases[0], rhs_cases[0]);
+                let case1 =
+                    Self::mk_binop_node(f, op, target_ty.clone(), lhs_cases[1], rhs_cases[1]);
                 f.get_node_mut(target_ref).payload = NodePayload::Sel {
                     selector,
                     cases: vec![case0, case1],
@@ -234,9 +241,15 @@ mod tests {
         let mut f = parser.parse_fn().unwrap();
         let mut t = DualSelHoistTransform;
         let cand = t.find_candidates(&f).pop().expect("candidate");
-        let target = match cand.clone() { TransformLocation::Node(nr) => nr, _ => unreachable!() };
+        let target = match cand.clone() {
+            TransformLocation::Node(nr) => nr,
+            _ => unreachable!(),
+        };
         t.apply(&mut f, &cand).expect("apply");
-        assert!(matches!(f.get_node(target).payload, NodePayload::Sel { .. }));
+        assert!(matches!(
+            f.get_node(target).payload,
+            NodePayload::Sel { .. }
+        ));
     }
 
     #[test]
@@ -250,8 +263,14 @@ mod tests {
         let mut f = parser.parse_fn().unwrap();
         let mut t = DualSelHoistTransform;
         let cand = t.find_candidates(&f).pop().expect("candidate");
-        let target = match cand.clone() { TransformLocation::Node(nr) => nr, _ => unreachable!() };
+        let target = match cand.clone() {
+            TransformLocation::Node(nr) => nr,
+            _ => unreachable!(),
+        };
         t.apply(&mut f, &cand).expect("apply");
-        assert!(matches!(f.get_node(target).payload, NodePayload::Binop(Binop::Add, _, _)));
+        assert!(matches!(
+            f.get_node(target).payload,
+            NodePayload::Binop(Binop::Add, _, _)
+        ));
     }
 }
