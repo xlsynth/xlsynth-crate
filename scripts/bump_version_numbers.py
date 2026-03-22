@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import difflib
+from typing import Optional, Tuple
 
 
 class VersionBumpError(Exception):
@@ -300,7 +301,7 @@ def check_all_packages_at_version(expected_version: str) -> dict:
 
 def set_package_version(
     file_path: str, new_version: str, do_write: bool
-) -> tuple[bool, str | None, str | None]:
+) -> Tuple[bool, Optional[str], Optional[str]]:
     """Replace the [package] version in a Cargo.toml file with new_version."""
     with open(file_path, "r") as f:
         lines = f.readlines()
