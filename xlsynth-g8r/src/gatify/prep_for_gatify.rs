@@ -18,7 +18,7 @@
 //! `xlsynth_pir::desugar_extensions`).
 
 use xlsynth::IrValue;
-use xlsynth_pir::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
+use xlsynth_pir::ir::{self, Binop, FnInPkgMut, NaryOp, NodePayload, NodeRef, Type, Unop};
 use xlsynth_pir::ir_range_info::IrRangeInfo;
 use xlsynth_pir::ir_utils;
 use xlsynth_pir::math::ceil_log2;
@@ -193,29 +193,11 @@ fn nil_out_node(f: &mut ir::Fn, node_ref: ir::NodeRef) {
     node.ty = Type::nil();
 }
 
-fn next_text_id(f: &ir::Fn) -> usize {
-    f.nodes
-        .iter()
-        .map(|n| n.text_id)
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1)
+fn push_node(f: &mut FnInPkgMut<'_>, ty: Type, payload: NodePayload) -> NodeRef {
+    f.push_node(ty, payload)
 }
 
-fn push_node(f: &mut ir::Fn, ty: Type, payload: NodePayload) -> NodeRef {
-    let text_id = next_text_id(f);
-    let idx = f.nodes.len();
-    f.nodes.push(ir::Node {
-        text_id,
-        name: None,
-        ty,
-        payload,
-        pos: None,
-    });
-    NodeRef { index: idx }
-}
-
-fn get_or_insert_bits1_literal(f: &mut ir::Fn, value: bool) -> NodeRef {
+fn get_or_insert_bits1_literal(f: &mut FnInPkgMut<'_>, value: bool) -> NodeRef {
     // Prefer reusing an existing bits[1] literal to keep node count stable.
     for (idx, n) in f.nodes.iter().enumerate() {
         if let NodePayload::Literal(lit) = &n.payload {
@@ -281,7 +263,7 @@ fn msb_is_provably_zero(
 }
 
 fn get_zero_extended_low_bits(
-    f: &mut ir::Fn,
+    f: &mut FnInPkgMut<'_>,
     nr: NodeRef,
     w: usize,
     range_info: Option<&IrRangeInfo>,
@@ -359,7 +341,7 @@ fn mark_dead_nodes_as_nil(f: &mut ir::Fn) {
 /// width=1)` into `ext_carry_out(lhs, rhs, c_in)` when the add-chain nodes have
 /// a single use (the slice) so we can safely DCE the chain.
 fn rewrite_add_slice_carry_out_to_ext_carry_out(
-    f: &mut ir::Fn,
+    f: &mut FnInPkgMut<'_>,
     range_info: Option<&IrRangeInfo>,
 ) -> usize {
     let use_counts = get_use_counts(f);
@@ -560,7 +542,7 @@ fn rewrite_add_slice_carry_out_to_ext_carry_out(
     rewrites
 }
 
-/// Runs lightweight PIR rewrites that make gatification cleaner.
+/// Runs lightweight PIR rewrites in place on a package-backed function.
 ///
 /// This pass:
 /// - may rewrite into extension ops (e.g. `ExtCarryOut`) to expose intent for
@@ -568,29 +550,50 @@ fn rewrite_add_slice_carry_out_to_ext_carry_out(
 /// - may mark dead nodes `Nil`
 /// - does **not** reindex/compact nodes and does **not** change the function
 ///   signature
-pub fn prep_for_gatify(
-    f: &ir::Fn,
+pub fn prep_for_gatify_in_fn(
+    f: &mut FnInPkgMut<'_>,
     range_info: Option<&IrRangeInfo>,
     options: PrepForGatifyOptions,
-) -> ir::Fn {
-    let mut cloned = f.clone();
-    combine_or_reduces(&mut cloned);
+) {
+    combine_or_reduces(f.function_mut());
     if options.enable_rewrite_carry_out {
-        let _rewrites = rewrite_add_slice_carry_out_to_ext_carry_out(&mut cloned, range_info);
+        let _rewrites = rewrite_add_slice_carry_out_to_ext_carry_out(f, range_info);
     }
     if options.enable_rewrite_prio_encode {
-        let _rewrites = rewrite_encode_one_hot_to_ext_prio_encode(&mut cloned);
+        let _rewrites = rewrite_encode_one_hot_to_ext_prio_encode(f);
     }
-    mark_dead_nodes_as_nil(&mut cloned);
-    cloned
+    mark_dead_nodes_as_nil(f.function_mut());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xlsynth_pir::ir::{FileTable, MemberType, Package, PackageMember};
     use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
     use xlsynth_pir::ir_parser::Parser;
     use xlsynth_pir::ir_range_info::IrRangeInfo;
+
+    fn prep_for_gatify_standalone_for_test(
+        f: &ir::Fn,
+        range_info: Option<&IrRangeInfo>,
+        options: PrepForGatifyOptions,
+    ) -> ir::Fn {
+        let mut pkg = Package::new(
+            "prep_for_gatify_test".to_string(),
+            FileTable::new(),
+            vec![PackageMember::Function(f.clone())],
+            Some((f.name.clone(), MemberType::Function)),
+        );
+        {
+            let mut fn_in_pkg = pkg
+                .get_top_fn_in_pkg_mut()
+                .expect("prep_for_gatify tests: synthetic package must have a top fn");
+            prep_for_gatify_in_fn(&mut fn_in_pkg, range_info, options);
+        }
+        pkg.get_top_fn()
+            .expect("prep_for_gatify tests: synthetic package must retain top fn")
+            .clone()
+    }
 
     #[test]
     fn or_reduces_with_single_use_are_combined() {
@@ -607,7 +610,8 @@ fn f(x: bits[2], y: bits[3]) -> bits[1] {
         let pkg = parser.parse_and_validate_package().unwrap();
         let f = pkg.get_top_fn().unwrap();
 
-        let optimized = prep_for_gatify(f, None, PrepForGatifyOptions::default());
+        let optimized =
+            prep_for_gatify_standalone_for_test(f, None, PrepForGatifyOptions::default());
 
         let expected = r#"fn f(x: bits[2] id=1, y: bits[3] id=2) -> bits[1] {
   x_any: bits[5] = concat(x, y, id=3)
@@ -642,7 +646,7 @@ top fn cone(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
         let analysis = xlsynth_pkg.create_ir_analysis().unwrap();
         let range_info = IrRangeInfo::build_from_analysis(&analysis, f).unwrap();
 
-        let optimized = prep_for_gatify(
+        let optimized = prep_for_gatify_standalone_for_test(
             f,
             Some(range_info.as_ref()),
             PrepForGatifyOptions {
@@ -702,7 +706,7 @@ top fn cone(p0: bits[9] id=1, p1: bits[9] id=2) -> bits[1] {
         let analysis = xlsynth_pkg.create_ir_analysis().unwrap();
         let range_info = IrRangeInfo::build_from_analysis(&analysis, pir_fn).unwrap();
 
-        let optimized = prep_for_gatify(
+        let optimized = prep_for_gatify_standalone_for_test(
             pir_fn,
             Some(range_info.as_ref()),
             PrepForGatifyOptions {

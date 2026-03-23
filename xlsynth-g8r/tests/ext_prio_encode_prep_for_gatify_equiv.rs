@@ -4,14 +4,32 @@ use xlsynth::FnBuilder;
 use xlsynth::IrPackage;
 use xlsynth_g8r::check_equivalence;
 use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify};
-use xlsynth_g8r::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
-use xlsynth_pir::ir;
+use xlsynth_g8r::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify_in_fn};
+use xlsynth_pir::ir::{self, FileTable, MemberType, Package, PackageMember};
 use xlsynth_pir::ir_parser;
 
 fn parse_top_fn(ir_text: &str) -> ir::Fn {
     let mut parser = ir_parser::Parser::new(ir_text);
     let pkg = parser.parse_and_validate_package().expect("parse/validate");
     pkg.get_top_fn().expect("top fn").clone()
+}
+
+fn prep_for_gatify_standalone(f: &ir::Fn, options: PrepForGatifyOptions) -> ir::Fn {
+    let mut pkg = Package::new(
+        "prep_for_gatify_test".to_string(),
+        FileTable::new(),
+        vec![PackageMember::Function(f.clone())],
+        Some((f.name.clone(), MemberType::Function)),
+    );
+    {
+        let mut fn_in_pkg = pkg
+            .get_top_fn_in_pkg_mut()
+            .expect("prep_for_gatify test: synthetic package must have a top fn");
+        prep_for_gatify_in_fn(&mut fn_in_pkg, None, options);
+    }
+    pkg.get_top_fn()
+        .expect("prep_for_gatify test: synthetic package must retain top fn")
+        .clone()
 }
 
 fn build_encode_one_hot_ir_text(bit_count: u32, lsb_prio: bool) -> String {
@@ -80,9 +98,8 @@ fn rewrite_triggers_only_for_pow2_width() {
             let ir_text = build_encode_one_hot_ir_text(bit_count, lsb_prio);
             let pir_fn = parse_top_fn(&ir_text);
 
-            let prepared = prep_for_gatify(
+            let prepared = prep_for_gatify_standalone(
                 &pir_fn,
-                None,
                 PrepForGatifyOptions {
                     enable_rewrite_prio_encode: true,
                     ..PrepForGatifyOptions::default()
@@ -113,9 +130,8 @@ fn rewrite_does_not_trigger_when_one_hot_has_multiple_users() {
         let ir_text = build_encode_one_hot_with_extra_user_ir_text(bit_count, lsb_prio);
         let pir_fn = parse_top_fn(&ir_text);
 
-        let prepared = prep_for_gatify(
+        let prepared = prep_for_gatify_standalone(
             &pir_fn,
-            None,
             PrepForGatifyOptions {
                 enable_rewrite_prio_encode: true,
                 ..PrepForGatifyOptions::default()

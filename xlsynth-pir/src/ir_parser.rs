@@ -2506,12 +2506,7 @@ impl Parser {
                 )));
             }
         }
-        Ok(ir::Package {
-            name: package_name,
-            file_table,
-            members,
-            top,
-        })
+        Ok(ir::Package::new(package_name, file_table, members, top))
     }
 }
 
