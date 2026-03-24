@@ -497,8 +497,14 @@ fn canonical_bindings_key(bindings: &ir_query::QueryBindings) -> String {
 fn canonical_binding_value(binding: &ir_query::Binding) -> String {
     match binding {
         ir_query::Binding::Node(node_ref) => format!("node:{}", node_ref.index),
-        ir_query::Binding::LiteralValue(value) => format!("lit:{}", value),
+        ir_query::Binding::LiteralValue(value) => canonical_literal_binding_key(value),
     }
+}
+
+fn canonical_literal_binding_key(value: &IrValue) -> String {
+    // Preserve the typed literal text so bits[8]:1 and bits[16]:1 do not
+    // dedup together and mask ambiguous matches.
+    format!("lit:{}", value)
 }
 
 struct MaterializeState<'a> {
@@ -1487,6 +1493,7 @@ struct ParsedTemplateArgs {
 mod tests {
     use super::*;
     use crate::ir_parser;
+    use std::collections::HashMap;
 
     fn parse_fn(text: &str) -> ir::Fn {
         let mut parser = ir_parser::Parser::new(text);
@@ -1702,6 +1709,22 @@ mod tests {
                 root: NodeRef { index: 3 },
                 match_count: 2,
             }
+        );
+    }
+
+    #[test]
+    fn canonical_binding_key_distinguishes_literal_widths() {
+        let narrow = HashMap::from([(
+            "L".to_string(),
+            ir_query::Binding::LiteralValue(IrValue::parse_typed("bits[8]:1").unwrap()),
+        )]);
+        let wide = HashMap::from([(
+            "L".to_string(),
+            ir_query::Binding::LiteralValue(IrValue::parse_typed("bits[16]:1").unwrap()),
+        )]);
+        assert_ne!(
+            canonical_bindings_key(&narrow),
+            canonical_bindings_key(&wide)
         );
     }
 
