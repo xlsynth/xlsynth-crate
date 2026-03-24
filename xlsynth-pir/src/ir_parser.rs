@@ -3885,7 +3885,7 @@ fn id(x: bits[1] id=1) -> bits[1] {
     fn test_parse_block_to_fn_simple() {
         let _ = env_logger::builder().is_test(true).try_init();
         let input = r#"block my_main(x: bits[8], out: bits[8]) {
-  #![provenance(name=\"my_main\", kind=\"function\")]
+  #![provenance(name="my_main", kind="function")]
   x: bits[8] = input_port(name=x, id=5)
   one: bits[8] = literal(value=1, id=6)
   add.7: bits[8] = add(x, one, id=7)
@@ -3894,7 +3894,7 @@ fn id(x: bits[1] id=1) -> bits[1] {
         let mut parser = Parser::new(input);
         let f = parser.parse_block_to_fn().unwrap();
         let want = r#"fn my_main(x: bits[8] id=5) -> bits[8] {
-  #![provenance(name=\"my_main\", kind=\"function\")]
+  #![provenance(name="my_main", kind="function")]
   one: bits[8] = literal(value=1, id=6)
   ret add.7: bits[8] = add(x, one, id=7)
 }"#;
