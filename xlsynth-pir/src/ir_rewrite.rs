@@ -311,18 +311,28 @@ impl MatchRewriteRule {
                 .into_iter()
                 .next()
                 .expect("expected one binding");
-            apply_rule_at_root(
+            let rewritten_root = apply_rule_at_root(
                 &mut rewritten,
                 node_ref,
                 &self.rewrite_template.expr,
                 &bindings,
             )?;
-            ir_utils::compact_and_toposort_in_place(&mut rewritten)
+            let old_to_new = ir_utils::compact_and_toposort_with_mapping_in_place(&mut rewritten)
                 .map_err(MatchRewriteRuleApplyError::Toposort)?;
+            let matched_root = old_to_new
+                .get(rewritten_root.index)
+                .copied()
+                .flatten()
+                .ok_or_else(|| {
+                    MatchRewriteRuleApplyError::Toposort(format!(
+                        "rewritten root {} was removed during compaction",
+                        rewritten_root.index
+                    ))
+                })?;
             return Ok(MatchRewriteOutcome {
                 rewritten_fn: rewritten,
                 rewrote: true,
-                matched_root: Some(node_ref),
+                matched_root: Some(matched_root),
             });
         }
 
@@ -550,23 +560,27 @@ fn apply_rule_at_root(
     root_ref: NodeRef,
     expr: &TemplateExpr,
     bindings: &ir_query::QueryBindings,
-) -> Result<(), MatchRewriteRuleApplyError> {
+) -> Result<NodeRef, MatchRewriteRuleApplyError> {
     let mut state = MaterializeState::new(f, root_ref, bindings);
+    let root_ty = state.original_root.ty.clone();
     match expr {
         TemplateExpr::Placeholder(name) => match bindings.get(name) {
             Some(ir_query::Binding::Node(node_ref)) => {
                 ir_utils::replace_node_with_ref(state.f, root_ref, *node_ref)
-                    .map_err(MatchRewriteRuleApplyError::Validation)
+                    .map_err(MatchRewriteRuleApplyError::Validation)?;
+                Ok(*node_ref)
             }
             Some(ir_query::Binding::LiteralValue(value)) => {
                 let ty = literal_type(value)?;
+                ensure_rewrite_preserves_root_type(&root_ty, &ty)?;
                 ir_utils::replace_node_payload(
                     state.f,
                     root_ref,
                     NodePayload::Literal(value.clone()),
                     Some(ty),
                 )
-                .map_err(MatchRewriteRuleApplyError::Validation)
+                .map_err(MatchRewriteRuleApplyError::Validation)?;
+                Ok(root_ref)
             }
             None => Err(MatchRewriteRuleApplyError::InvalidRewriteTemplate(format!(
                 "unknown placeholder '{}'",
@@ -575,15 +589,32 @@ fn apply_rule_at_root(
         },
         TemplateExpr::Const(helper) => {
             let (payload, ty) = build_const_payload(&state, helper)?;
+            ensure_rewrite_preserves_root_type(&root_ty, &ty)?;
             ir_utils::replace_node_payload(state.f, root_ref, payload, Some(ty))
-                .map_err(MatchRewriteRuleApplyError::Validation)
+                .map_err(MatchRewriteRuleApplyError::Validation)?;
+            Ok(root_ref)
         }
         TemplateExpr::OperatorCall(call) => {
             let (payload, ty) = build_operator_payload(&mut state, call)?;
+            ensure_rewrite_preserves_root_type(&root_ty, &ty)?;
             ir_utils::replace_node_payload(state.f, root_ref, payload, Some(ty))
-                .map_err(MatchRewriteRuleApplyError::Validation)
+                .map_err(MatchRewriteRuleApplyError::Validation)?;
+            Ok(root_ref)
         }
     }
+}
+
+fn ensure_rewrite_preserves_root_type(
+    root_ty: &Type,
+    rewritten_ty: &Type,
+) -> Result<(), MatchRewriteRuleApplyError> {
+    if root_ty != rewritten_ty {
+        return Err(MatchRewriteRuleApplyError::Validation(format!(
+            "rewrite would change matched node type from {} to {}",
+            root_ty, rewritten_ty
+        )));
+    }
+    Ok(())
 }
 
 fn materialize_expr(
@@ -1085,13 +1116,59 @@ fn eval_numeric_expr(
 }
 
 fn literal_type(value: &IrValue) -> Result<Type, MatchRewriteRuleApplyError> {
-    let width = value.bit_count().map_err(|e| {
+    if let Ok(width) = value.bit_count() {
+        return Ok(Type::Bits(width));
+    }
+
+    let rendered = value.to_string();
+    if rendered == "token" {
+        return Ok(Type::Token);
+    }
+
+    let element_count = value.get_element_count().map_err(|e| {
         MatchRewriteRuleApplyError::LiteralConstruction(format!(
-            "failed to determine literal width: {}",
-            e
+            "failed to determine literal shape for {}: {}",
+            rendered, e
         ))
     })?;
-    Ok(Type::Bits(width))
+
+    let mut element_types = Vec::with_capacity(element_count);
+    for index in 0..element_count {
+        let element = value.get_element(index).map_err(|e| {
+            MatchRewriteRuleApplyError::LiteralConstruction(format!(
+                "failed to get element {} for {}: {}",
+                index, rendered, e
+            ))
+        })?;
+        element_types.push(literal_type(&element)?);
+    }
+
+    if rendered.starts_with('(') {
+        return Ok(Type::Tuple(
+            element_types.into_iter().map(Box::new).collect(),
+        ));
+    }
+    if rendered.starts_with('[') {
+        let Some(element_ty) = element_types.first().cloned() else {
+            return Err(MatchRewriteRuleApplyError::LiteralConstruction(
+                "empty array literals are not supported".to_string(),
+            ));
+        };
+        for candidate in element_types.iter().skip(1) {
+            if candidate != &element_ty {
+                return Err(MatchRewriteRuleApplyError::LiteralConstruction(format!(
+                    "array literal {} has mixed element types {} and {}",
+                    rendered, element_ty, candidate
+                )));
+            }
+        }
+        return Ok(Type::new_array(element_ty, element_count));
+    }
+
+    Err(MatchRewriteRuleApplyError::LiteralConstruction(format!(
+        "failed to determine literal type for {}",
+        rendered
+    )))
 }
 
 fn push_node(
@@ -1593,7 +1670,8 @@ mod tests {
             .apply_to_fn(&parse_fn(ir_text), RewriteApplyMode::FirstMatch)
             .unwrap();
         assert!(outcome.rewrote());
-        assert_eq!(outcome.matched_root(), Some(NodeRef { index: 3 }));
+        assert_eq!(outcome.matched_root(), Some(NodeRef { index: 2 }));
+        assert_eq!(outcome.rewritten_fn().ret_node_ref, outcome.matched_root());
         assert_eq!(
             outcome.rewritten_fn().to_string(),
             normalized_fn_text(
@@ -1680,6 +1758,20 @@ mod tests {
     }
 
     #[test]
+    fn apply_rewrite_supports_token_literal_placeholders() {
+        let ir_text = r#"fn t() -> token {
+  ret literal.10: token = literal(value=token, id=10)
+}"#;
+        let input = parse_fn(ir_text);
+        let rule = MatchRewriteRule::from_strings("literal(L)", "L").unwrap();
+        let outcome = rule
+            .apply_to_fn(&input, RewriteApplyMode::FirstMatch)
+            .unwrap();
+        assert!(outcome.rewrote());
+        assert_eq!(outcome.rewritten_fn().to_string(), input.to_string());
+    }
+
+    #[test]
     fn apply_no_match_returns_unchanged_function() {
         let ir_text = r#"fn t(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
   ret add.10: bits[8] = add(x, y, id=10)
@@ -1713,6 +1805,23 @@ mod tests {
     }
 
     #[test]
+    fn apply_rejects_type_changing_rewrite() {
+        let ir_text = r#"fn t(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  add.10: bits[8] = add(x, y, id=10)
+  ret not.11: bits[8] = not(add.10, id=11)
+}"#;
+        let rule = MatchRewriteRule::from_strings("add(x, y)", "eq(x, y)").unwrap();
+        let err = rule
+            .apply_to_fn(&parse_fn(ir_text), RewriteApplyMode::FirstMatch)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MatchRewriteRuleApplyError::Validation(ref msg)
+                if msg == "rewrite would change matched node type from bits[8] to bits[1]"
+        ));
+    }
+
+    #[test]
     fn canonical_binding_key_distinguishes_literal_widths() {
         let narrow = HashMap::from([(
             "L".to_string(),
@@ -1725,6 +1834,31 @@ mod tests {
         assert_ne!(
             canonical_bindings_key(&narrow),
             canonical_bindings_key(&wide)
+        );
+    }
+
+    #[test]
+    fn literal_type_supports_non_bits_literals() {
+        let token = IrValue::make_token();
+        assert_eq!(literal_type(&token).unwrap(), Type::Token);
+
+        let array = IrValue::make_array(&[
+            IrValue::make_ubits(8, 1).unwrap(),
+            IrValue::make_ubits(8, 2).unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(
+            literal_type(&array).unwrap(),
+            Type::new_array(Type::Bits(8), 2)
+        );
+
+        let tuple = IrValue::make_tuple(&[IrValue::make_ubits(1, 1).unwrap(), array]);
+        assert_eq!(
+            literal_type(&tuple).unwrap(),
+            Type::Tuple(vec![
+                Box::new(Type::Bits(1)),
+                Box::new(Type::new_array(Type::Bits(8), 2))
+            ])
         );
     }
 
