@@ -71,7 +71,11 @@ block myb(a: bits[1], out: bits[1]) {
         .arg(path.to_str().unwrap())
         .output()
         .unwrap();
-    assert!(!out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        !out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("parse IR package should succeed"),

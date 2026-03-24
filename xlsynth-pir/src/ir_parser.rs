@@ -294,6 +294,26 @@ fn convert_ffi_invokes_to_extended_ops_in_fn(
             }
         }
     }
+    for node in &f.nodes {
+        match &node.payload {
+            ir::NodePayload::CountedFor { body, .. } => {
+                if wrappers.contains_key(body) {
+                    let node_name = node
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| format!("counted_for.{}", node.text_id));
+                    return Err(ParseError::new(format!(
+                        "wrapped extension helper '{}' is referenced from counted_for body by node '{}' in function '{}'; only invoke nodes may reference wrapped extension helpers",
+                        body, node_name, f.name
+                    )));
+                }
+            }
+            _ => {
+                // Wrapped extension helpers are only referenced via
+                // invoke/counted_for today.
+            }
+        }
+    }
     Ok(())
 }
 

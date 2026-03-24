@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use xlsynth_pir::desugar_extensions::{ExtensionEmitMode, emit_package_with_extension_mode};
-use xlsynth_pir::ir_parser::Parser;
+use xlsynth_pir::ir_parser::{ParseOrValidateError, Parser};
 
 fn assert_wrapped_text_round_trips_via_pir(
     ir_text: &str,
@@ -101,4 +101,57 @@ fn f(arg: bits[4] id=1) -> bits[3] {
         "f",
         "__pir_ext__ext_prio_encode__w4__lsb1",
     );
+}
+
+#[test]
+fn verilogffi_wrapped_helper_referenced_from_counted_for_is_rejected() {
+    let ir_text = r#"package carry_out_wrapped_counted_for
+
+#[ffi_proto("""code_template: "pir_ext_carry_out {fn} (.lhs({lhs}), .rhs({rhs}), .c_in({c_in}), .out({return})); /* xlsynth_pir_ext=ext_carry_out;width=8 */"
+""")]
+fn __pir_ext__ext_carry_out__w8(lhs: bits[8] id=5, rhs: bits[8] id=6, c_in: bits[1] id=7) -> bits[1] {
+  literal.8: bits[1] = literal(value=0, id=8)
+  ret identity.9: bits[1] = identity(literal.8, id=9)
+}
+
+fn f(init: bits[1] id=1) -> bits[1] {
+  ret loop: bits[1] = counted_for(init, trip_count=2, stride=1, body=__pir_ext__ext_carry_out__w8, id=2)
+}
+"#;
+
+    let err = {
+        let mut parser = Parser::new(ir_text);
+        parser
+            .parse_package()
+            .expect_err("expected parse error for non-invoke wrapped helper reference")
+    };
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains("only invoke nodes may reference wrapped extension helpers"),
+        "unexpected parse error: {}",
+        msg
+    );
+    assert!(
+        msg.contains("counted_for"),
+        "expected counted_for context in parse error: {}",
+        msg
+    );
+
+    let err = {
+        let mut parser = Parser::new(ir_text);
+        parser
+            .parse_and_validate_package()
+            .expect_err("expected parse error for non-invoke wrapped helper reference")
+    };
+    match err {
+        ParseOrValidateError::Parse(parse_err) => {
+            let msg = format!("{}", parse_err);
+            assert!(
+                msg.contains("only invoke nodes may reference wrapped extension helpers"),
+                "unexpected parse error: {}",
+                msg
+            );
+        }
+        other => panic!("expected parse error, got {:?}", other),
+    }
 }
