@@ -4,7 +4,7 @@
 //! PIR / XLS IR basis operations.
 //!
 //! ## Design invariant
-//! This module is a *semantic projection* from the extended PIR opcode set onto
+//! This module is a *semantic projection* from the PIR extension-op set onto
 //! the canonical XLS IR opcode basis. It must be deterministic and
 //! semantics-preserving; it is **not** where QoR strategies belong.
 //!
@@ -45,7 +45,7 @@ pub enum ExtensionEmitMode {
     /// This form is not compatible with XLS.
     /// For example:
     ///   x: bits[3] = ext_carry_out(lhs, rhs, c_in);
-    AsExtendedOp,
+    AsExtensionOp,
     /// Replace extension ops with the equivalent inline XLS IR operations.
     Desugared,
     /// Replace extension ops with invokes of synthetic FFI helper functions.
@@ -594,7 +594,7 @@ pub fn emit_package_with_extension_mode(
     mode: ExtensionEmitMode,
 ) -> Result<String, DesugarError> {
     match mode {
-        ExtensionEmitMode::AsExtendedOp => Ok(pkg.to_string()),
+        ExtensionEmitMode::AsExtensionOp => Ok(pkg.to_string()),
         ExtensionEmitMode::Desugared => {
             let mut desugared = pkg.clone();
             desugar_extensions_in_package(&mut desugared)?;

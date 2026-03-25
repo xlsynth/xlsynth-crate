@@ -381,7 +381,7 @@ pub enum NodePayload {
         start: NodeRef,
         update_value: NodeRef,
     },
-    /// Extended (non-upstream) op: carry-out bit of addition.
+    /// Extension (non-upstream) op: carry-out bit of addition.
     ///
     /// Semantics: for `lhs, rhs: bits[w]` and `c_in: bits[1]`, returns
     /// `bit_slice(zero_ext(lhs,w+1) + zero_ext(rhs,w+1) + zero_ext(c_in,w+1),
@@ -391,7 +391,7 @@ pub enum NodePayload {
         rhs: NodeRef,
         c_in: NodeRef,
     },
-    /// Extended (non-upstream) op: specialized lowering for the idiom
+    /// Extension (non-upstream) op: specialized lowering for the idiom
     /// `encode(one_hot(x, lsb_prio=<...>))` when `x` has a power-of-two bit
     /// width.
     ///

@@ -235,7 +235,7 @@ fn validate_wrapped_extension_helper_signature(
     Ok(())
 }
 
-fn convert_ffi_invokes_to_extended_ops_in_fn(
+fn convert_ffi_invokes_to_extension_ops_in_fn(
     f: &mut ir::Fn,
     wrappers: &BTreeMap<String, WrappedExtensionSpec>,
 ) -> Result<(), ParseError> {
@@ -317,7 +317,7 @@ fn convert_ffi_invokes_to_extended_ops_in_fn(
     Ok(())
 }
 
-fn convert_ffi_invokes_to_extended_ops(pkg: &mut ir::Package) -> Result<(), ParseError> {
+fn convert_ffi_invokes_to_extension_ops(pkg: &mut ir::Package) -> Result<(), ParseError> {
     let mut wrappers: BTreeMap<String, WrappedExtensionSpec> = BTreeMap::new();
     for member in &pkg.members {
         let PackageMember::Function(f) = member else {
@@ -335,9 +335,9 @@ fn convert_ffi_invokes_to_extended_ops(pkg: &mut ir::Package) -> Result<(), Pars
 
     for member in pkg.members.iter_mut() {
         match member {
-            PackageMember::Function(f) => convert_ffi_invokes_to_extended_ops_in_fn(f, &wrappers)?,
+            PackageMember::Function(f) => convert_ffi_invokes_to_extension_ops_in_fn(f, &wrappers)?,
             PackageMember::Block { func, .. } => {
-                convert_ffi_invokes_to_extended_ops_in_fn(func, &wrappers)?
+                convert_ffi_invokes_to_extension_ops_in_fn(func, &wrappers)?
             }
         }
     }
@@ -2826,7 +2826,7 @@ impl Parser {
             members,
             top,
         };
-        convert_ffi_invokes_to_extended_ops(&mut pkg)?;
+        convert_ffi_invokes_to_extension_ops(&mut pkg)?;
         Ok(pkg)
     }
 }
