@@ -13,7 +13,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::ir::{Binop, Fn, Node, NodePayload, NodeRef, Package, PackageMember, Type, Unop};
+use crate::ir::{
+    Binop, ExtNaryAddArchitecture, Fn, Node, NodePayload, NodeRef, Package, PackageMember, Type,
+    Unop,
+};
 use crate::ir::{Param, ParamId};
 use crate::ir_rebase_ids::rebase_fn_ids;
 use crate::ir_utils::compact_and_toposort_in_place;
@@ -292,6 +295,7 @@ fn desugar_ext_carry_out_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
 struct ExtNaryAddShape {
     output_width: usize,
     operand_widths: Vec<usize>,
+    arch: ExtNaryAddArchitecture,
 }
 
 /// Validates `ext_nary_add` shape and returns the widths needed by both inline
@@ -300,6 +304,7 @@ fn analyze_ext_nary_add(
     f: &Fn,
     result: NodeRef,
     operands: &[NodeRef],
+    arch: ExtNaryAddArchitecture,
 ) -> Result<ExtNaryAddShape, DesugarError> {
     let output_width = match f.get_node(result).ty {
         Type::Bits(width) => width,
@@ -321,6 +326,7 @@ fn analyze_ext_nary_add(
     Ok(ExtNaryAddShape {
         output_width,
         operand_widths,
+        arch,
     })
 }
 
@@ -364,6 +370,7 @@ enum FfiWrapKey {
     ExtNaryAdd {
         output_width: usize,
         operand_widths: Vec<usize>,
+        arch: ExtNaryAddArchitecture,
     },
     ExtPrioEncode {
         input_width: usize,
@@ -379,15 +386,18 @@ fn helper_base_name(key: &FfiWrapKey) -> String {
         FfiWrapKey::ExtNaryAdd {
             output_width,
             operand_widths,
-        } => format!(
-            "__pir_ext__ext_nary_add__outw{}__ops{}",
-            output_width,
-            operand_widths
+            arch,
+        } => {
+            let operand_widths_text = operand_widths
                 .iter()
                 .map(usize::to_string)
                 .collect::<Vec<_>>()
-                .join("_")
-        ),
+                .join("_");
+            format!(
+                "__pir_ext__ext_nary_add__outw{}__ops{}__arch{}",
+                output_width, operand_widths_text, arch
+            )
+        }
         FfiWrapKey::ExtPrioEncode {
             input_width,
             lsb_prio,
@@ -428,6 +438,7 @@ fn helper_code_template(key: &FfiWrapKey) -> String {
         FfiWrapKey::ExtNaryAdd {
             output_width,
             operand_widths,
+            arch,
         } => {
             let operand_bindings = operand_widths
                 .iter()
@@ -446,7 +457,7 @@ fn helper_code_template(key: &FfiWrapKey) -> String {
                 format!("{operand_bindings}, .out({{return}})")
             };
             format!(
-                "pir_ext_nary_add {{fn}} ({port_list}); /* xlsynth_pir_ext=ext_nary_add;out_width={output_width};operand_widths={operand_width_list} */"
+                "pir_ext_nary_add {{fn}} ({port_list}); /* xlsynth_pir_ext=ext_nary_add;out_width={output_width};operand_widths={operand_width_list};arch={arch} */"
             )
         }
         FfiWrapKey::ExtPrioEncode {
@@ -531,6 +542,7 @@ fn make_helper_fn(name: String, key: &FfiWrapKey) -> Fn {
         FfiWrapKey::ExtNaryAdd {
             output_width,
             operand_widths,
+            arch: _,
         } => {
             let params = operand_widths
                 .iter()
@@ -652,11 +664,12 @@ fn wrap_extensions_in_fn(
                 };
                 changed = true;
             }
-            NodePayload::ExtNaryAdd { operands } => {
-                let shape = analyze_ext_nary_add(f, nr, &operands)?;
+            NodePayload::ExtNaryAdd { operands, arch } => {
+                let shape = analyze_ext_nary_add(f, nr, &operands, arch)?;
                 let key = FfiWrapKey::ExtNaryAdd {
                     output_width: shape.output_width,
                     operand_widths: shape.operand_widths.clone(),
+                    arch: shape.arch,
                 };
                 let helper_name = get_or_create_helper_name(
                     &key,
@@ -754,12 +767,12 @@ fn desugar_ext_nary_add_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
     for idx in 0..original_len {
         let nr = NodeRef { index: idx };
         let payload = f.get_node(nr).payload.clone();
-        let NodePayload::ExtNaryAdd { operands } = payload else {
+        let NodePayload::ExtNaryAdd { operands, arch } = payload else {
             continue;
         };
         changed = true;
 
-        let shape = analyze_ext_nary_add(f, nr, &operands)?;
+        let shape = analyze_ext_nary_add(f, nr, &operands, arch)?;
         let lowered = append_lowered_ext_nary_add(f, &operands, shape.output_width)?;
 
         let node = f.get_node_mut(nr);

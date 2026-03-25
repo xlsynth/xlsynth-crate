@@ -349,7 +349,10 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
             }
             IrValue::from_bits(&IrBits::from_lsb_is_0(&out))
         }
-        ir::NodePayload::ExtNaryAdd { ref operands } => {
+        ir::NodePayload::ExtNaryAdd {
+            ref operands,
+            arch: _,
+        } => {
             let ir::Type::Bits(out_w) = &n.ty else {
                 panic!("ExtNaryAdd result must be bits-typed");
             };

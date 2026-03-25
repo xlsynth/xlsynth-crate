@@ -113,6 +113,7 @@ enum WrappedExtensionSpec {
     ExtNaryAdd {
         output_width: usize,
         operand_widths: Vec<usize>,
+        arch: ir::ExtNaryAddArchitecture,
     },
     ExtPrioEncode {
         input_width: usize,
@@ -189,9 +190,19 @@ fn parse_wrapped_extension_spec_from_attr(
                     })
                     .collect::<Result<Vec<_>, _>>()?
             };
+            let arch = fields
+                .get("arch")
+                .copied()
+                .ok_or_else(|| {
+                    ParseError::new("missing arch for ext_nary_add metadata".to_string())
+                })
+                .and_then(|value| {
+                    ir::ExtNaryAddArchitecture::from_ir_identifier(value).map_err(ParseError::new)
+                })?;
             Ok(Some(WrappedExtensionSpec::ExtNaryAdd {
                 output_width,
                 operand_widths,
+                arch,
             }))
         }
         "ext_prio_encode" => {
@@ -257,6 +268,7 @@ fn validate_wrapped_extension_helper_signature(
         WrappedExtensionSpec::ExtNaryAdd {
             output_width,
             operand_widths,
+            arch: _,
         } => {
             if f.params.len() != operand_widths.len()
                 || f.ret_ty != ir::Type::Bits(*output_width)
@@ -348,6 +360,7 @@ fn convert_ffi_invokes_to_extension_ops_in_fn(
             WrappedExtensionSpec::ExtNaryAdd {
                 output_width,
                 operand_widths,
+                arch,
             } => {
                 if operands.len() != operand_widths.len() {
                     return Err(ParseError::new(format!(
@@ -375,7 +388,7 @@ fn convert_ffi_invokes_to_extension_ops_in_fn(
                         )));
                     }
                 }
-                f.nodes[idx].payload = ir::NodePayload::ExtNaryAdd { operands };
+                f.nodes[idx].payload = ir::NodePayload::ExtNaryAdd { operands, arch };
             }
             WrappedExtensionSpec::ExtPrioEncode {
                 input_width,
@@ -1310,6 +1323,64 @@ impl Parser {
         Ok(members)
     }
 
+    fn parse_ext_nary_add_op(
+        &mut self,
+        node_env: &IrNodeEnv,
+        maybe_id: &mut Option<usize>,
+    ) -> Result<(Vec<ir::NodeRef>, ir::ExtNaryAddArchitecture), ParseError> {
+        let mut operands = Vec::new();
+        let mut arch = None;
+        let mut saw_arch = false;
+
+        loop {
+            self.drop_whitespace_and_comments();
+            if self.peek_is(")") {
+                break;
+            }
+
+            if self.peek_is("id=") {
+                *maybe_id = Some(self.parse_id_attribute()?);
+            } else if self.peek_is("arch=") {
+                if saw_arch {
+                    return Err(ParseError::new(
+                        "duplicate arch for ext_nary_add".to_string(),
+                    ));
+                }
+                let raw = self.parse_identifier_attribute("arch")?;
+                arch = Some(
+                    ir::ExtNaryAddArchitecture::from_ir_identifier(&raw)
+                        .map_err(ParseError::new)?,
+                );
+                saw_arch = true;
+            } else {
+                let operand = self.parse_node_ref(node_env, "ext_nary_add operand")?;
+                operands.push(operand);
+            }
+
+            self.drop_whitespace_and_comments();
+            if self.peek_is(")") {
+                break;
+            }
+            if !self.try_drop(",") {
+                break;
+            }
+        }
+
+        if maybe_id.is_none() {
+            return Err(ParseError::new(format!(
+                "expected id for ext_nary_add; rest: {:?}",
+                self.rest()
+            )));
+        }
+        let arch = arch.ok_or_else(|| {
+            ParseError::new(format!(
+                "expected arch for ext_nary_add; rest: {:?}",
+                self.rest()
+            ))
+        })?;
+        Ok((operands, arch))
+    }
+
     fn parse_node(&mut self, node_env: &mut IrNodeEnv) -> Result<ir::Node, ParseError> {
         log::debug!("parse_node");
         let (name_or_id, dotted_prefix_opt) =
@@ -1606,10 +1677,13 @@ impl Parser {
                 )
             }
             "ext_nary_add" => {
-                let operands =
-                    self.parse_variadic_op(&node_env, &mut maybe_id, operator.as_str())?;
+                let (operands, arch) =
+                    self.parse_ext_nary_add_op(&node_env, &mut maybe_id)?;
                 (
-                    ir::NodePayload::ExtNaryAdd { operands },
+                    ir::NodePayload::ExtNaryAdd {
+                        operands,
+                        arch,
+                    },
                     maybe_id.unwrap(),
                 )
             }

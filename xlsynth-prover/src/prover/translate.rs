@@ -387,7 +387,7 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     bitvec: encoded,
                 }
             }
-            NodePayload::ExtNaryAdd { operands } => {
+            NodePayload::ExtNaryAdd { operands, arch: _ } => {
                 let ir::Type::Bits(out_w) = node.ty else {
                     panic!("ext_nary_add result must be bits-typed");
                 };

@@ -37,6 +37,16 @@ impl std::fmt::Display for AdderMapping {
     }
 }
 
+impl From<xlsynth_pir::ir::ExtNaryAddArchitecture> for AdderMapping {
+    fn from(value: xlsynth_pir::ir::ExtNaryAddArchitecture) -> Self {
+        match value {
+            xlsynth_pir::ir::ExtNaryAddArchitecture::RippleCarry => Self::RippleCarry,
+            xlsynth_pir::ir::ExtNaryAddArchitecture::KoggeStone => Self::KoggeStone,
+            xlsynth_pir::ir::ExtNaryAddArchitecture::BrentKung => Self::BrentKung,
+        }
+    }
+}
+
 /// Emits a carry-select adder for the given inputs.
 ///
 /// A carry-select adder specializes groups of bits on whether the carry-in to
