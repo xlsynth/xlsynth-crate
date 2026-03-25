@@ -294,16 +294,20 @@ fn convert_ffi_invokes_to_extension_ops_in_fn(
     f: &mut ir::Fn,
     wrappers: &BTreeMap<String, WrappedExtensionSpec>,
 ) -> Result<(), ParseError> {
-    for node in &mut f.nodes {
-        let payload = node.payload.clone();
+    for idx in 0..f.nodes.len() {
+        let payload = f.nodes[idx].payload.clone();
         let ir::NodePayload::Invoke { to_apply, operands } = payload else {
             continue;
         };
         let Some(spec) = wrappers.get(&to_apply).cloned() else {
             continue;
         };
+        let operand_tys: Vec<ir::Type> = operands
+            .iter()
+            .map(|operand| f.get_node_ty(*operand).clone())
+            .collect();
         match spec {
-            WrappedExtensionSpec::ExtCarryOut { .. } => {
+            WrappedExtensionSpec::ExtCarryOut { width } => {
                 if operands.len() != 3 {
                     return Err(ParseError::new(format!(
                         "invoke of wrapped ext_carry_out helper '{}' expected 3 operands, got {}",
@@ -312,13 +316,30 @@ fn convert_ffi_invokes_to_extension_ops_in_fn(
                     )));
                 }
                 let expected_ty = ir::Type::Bits(1);
-                if node.ty != expected_ty {
+                if f.nodes[idx].ty != expected_ty {
                     return Err(ParseError::new(format!(
                         "invoke of wrapped ext_carry_out helper '{}' had type {}, expected {}",
-                        to_apply, node.ty, expected_ty
+                        to_apply, f.nodes[idx].ty, expected_ty
                     )));
                 }
-                node.payload = ir::NodePayload::ExtCarryOut {
+                let expected_operand_tys = [
+                    ir::Type::Bits(width),
+                    ir::Type::Bits(width),
+                    ir::Type::Bits(1),
+                ];
+                for (operand_idx, (got_ty, expected_operand_ty)) in operand_tys
+                    .iter()
+                    .zip(expected_operand_tys.iter())
+                    .enumerate()
+                {
+                    if got_ty != expected_operand_ty {
+                        return Err(ParseError::new(format!(
+                            "invoke of wrapped ext_carry_out helper '{}' operand {} had type {}, expected {}",
+                            to_apply, operand_idx, got_ty, expected_operand_ty
+                        )));
+                    }
+                }
+                f.nodes[idx].payload = ir::NodePayload::ExtCarryOut {
                     lhs: operands[0],
                     rhs: operands[1],
                     c_in: operands[2],
@@ -337,13 +358,24 @@ fn convert_ffi_invokes_to_extension_ops_in_fn(
                     )));
                 }
                 let expected_ty = ir::Type::Bits(output_width);
-                if node.ty != expected_ty {
+                if f.nodes[idx].ty != expected_ty {
                     return Err(ParseError::new(format!(
                         "invoke of wrapped ext_nary_add helper '{}' had type {}, expected {}",
-                        to_apply, node.ty, expected_ty
+                        to_apply, f.nodes[idx].ty, expected_ty
                     )));
                 }
-                node.payload = ir::NodePayload::ExtNaryAdd { operands };
+                for (operand_idx, (got_ty, expected_width)) in
+                    operand_tys.iter().zip(operand_widths.iter()).enumerate()
+                {
+                    let expected_operand_ty = ir::Type::Bits(*expected_width);
+                    if *got_ty != expected_operand_ty {
+                        return Err(ParseError::new(format!(
+                            "invoke of wrapped ext_nary_add helper '{}' operand {} had type {}, expected {}",
+                            to_apply, operand_idx, got_ty, expected_operand_ty
+                        )));
+                    }
+                }
+                f.nodes[idx].payload = ir::NodePayload::ExtNaryAdd { operands };
             }
             WrappedExtensionSpec::ExtPrioEncode {
                 input_width,
@@ -357,13 +389,20 @@ fn convert_ffi_invokes_to_extension_ops_in_fn(
                     )));
                 }
                 let expected_ty = ir::Type::Bits(ceil_log2(input_width.saturating_add(1)));
-                if node.ty != expected_ty {
+                if f.nodes[idx].ty != expected_ty {
                     return Err(ParseError::new(format!(
                         "invoke of wrapped ext_prio_encode helper '{}' had type {}, expected {}",
-                        to_apply, node.ty, expected_ty
+                        to_apply, f.nodes[idx].ty, expected_ty
                     )));
                 }
-                node.payload = ir::NodePayload::ExtPrioEncode {
+                let expected_operand_ty = ir::Type::Bits(input_width);
+                if operand_tys[0] != expected_operand_ty {
+                    return Err(ParseError::new(format!(
+                        "invoke of wrapped ext_prio_encode helper '{}' operand 0 had type {}, expected {}",
+                        to_apply, operand_tys[0], expected_operand_ty
+                    )));
+                }
+                f.nodes[idx].payload = ir::NodePayload::ExtPrioEncode {
                     arg: operands[0],
                     lsb_prio,
                 };
