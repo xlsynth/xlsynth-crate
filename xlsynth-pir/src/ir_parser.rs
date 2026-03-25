@@ -2,11 +2,14 @@
 
 //! Parser for XLS IR (just functions for the time being).
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::ir::{
     self, ArrayTypeData, BlockMetadata, FileTable, MemberType, PackageMember, operator_to_nary_op,
 };
 use crate::ir_node_env::{IrNodeEnv, NameOrId};
 use crate::ir_validate;
+use crate::math::ceil_log2;
 
 pub fn parse_path_to_package(path: &std::path::Path) -> Result<ir::Package, ParseError> {
     let file_content = std::fs::read_to_string(path)
@@ -100,6 +103,260 @@ impl Default for ParseOptions {
             retain_pos_data: true,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum WrappedExtensionSpec {
+    ExtCarryOut { width: usize },
+    ExtPrioEncode { input_width: usize, lsb_prio: bool },
+}
+
+fn parse_wrapped_extension_spec_from_attr(
+    attr: &str,
+) -> Result<Option<WrappedExtensionSpec>, ParseError> {
+    let Some(marker_start) = attr.find("xlsynth_pir_ext=") else {
+        return Ok(None);
+    };
+    let metadata_end = attr[marker_start..]
+        .find("*/")
+        .map(|offset| marker_start + offset)
+        .ok_or_else(|| {
+            ParseError::new("unterminated xlsynth_pir_ext metadata comment".to_string())
+        })?;
+    let metadata = &attr[marker_start..metadata_end];
+
+    let mut fields: BTreeMap<&str, &str> = BTreeMap::new();
+    for part in metadata.split(';') {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let (key, value) = trimmed.split_once('=').ok_or_else(|| {
+            ParseError::new(format!(
+                "malformed xlsynth_pir_ext metadata field {:?} in attr {:?}",
+                trimmed, attr
+            ))
+        })?;
+        fields.insert(key.trim(), value.trim());
+    }
+
+    let op = fields
+        .get("xlsynth_pir_ext")
+        .copied()
+        .ok_or_else(|| ParseError::new("missing xlsynth_pir_ext op kind".to_string()))?;
+    match op {
+        "ext_carry_out" => {
+            let width = fields
+                .get("width")
+                .copied()
+                .ok_or_else(|| {
+                    ParseError::new("missing width for ext_carry_out metadata".to_string())
+                })?
+                .parse::<usize>()
+                .map_err(|e| ParseError::new(format!("invalid ext_carry_out width: {e}")))?;
+            Ok(Some(WrappedExtensionSpec::ExtCarryOut { width }))
+        }
+        "ext_prio_encode" => {
+            let input_width = fields
+                .get("width")
+                .copied()
+                .ok_or_else(|| {
+                    ParseError::new("missing width for ext_prio_encode metadata".to_string())
+                })?
+                .parse::<usize>()
+                .map_err(|e| ParseError::new(format!("invalid ext_prio_encode width: {e}")))?;
+            let lsb_prio =
+                Parser::parse_bool_literal(fields.get("lsb_prio").copied().ok_or_else(|| {
+                    ParseError::new("missing lsb_prio for ext_prio_encode metadata".to_string())
+                })?)?;
+            Ok(Some(WrappedExtensionSpec::ExtPrioEncode {
+                input_width,
+                lsb_prio,
+            }))
+        }
+        other => Err(ParseError::new(format!(
+            "unsupported xlsynth_pir_ext op kind {:?}",
+            other
+        ))),
+    }
+}
+
+fn wrapped_extension_spec_for_fn(f: &ir::Fn) -> Result<Option<WrappedExtensionSpec>, ParseError> {
+    let mut found: Option<WrappedExtensionSpec> = None;
+    for attr in &f.outer_attrs {
+        let Some(spec) = parse_wrapped_extension_spec_from_attr(attr)? else {
+            continue;
+        };
+        if found.is_some() {
+            return Err(ParseError::new(format!(
+                "multiple xlsynth_pir_ext wrapper attrs found on function '{}'",
+                f.name
+            )));
+        }
+        found = Some(spec);
+    }
+    Ok(found)
+}
+
+fn validate_wrapped_extension_helper_signature(
+    f: &ir::Fn,
+    spec: WrappedExtensionSpec,
+) -> Result<(), ParseError> {
+    match spec {
+        WrappedExtensionSpec::ExtCarryOut { width } => {
+            if f.params.len() != 3
+                || f.params[0].ty != ir::Type::Bits(width)
+                || f.params[1].ty != ir::Type::Bits(width)
+                || f.params[2].ty != ir::Type::Bits(1)
+                || f.ret_ty != ir::Type::Bits(1)
+            {
+                return Err(ParseError::new(format!(
+                    "ffi wrapper helper '{}' does not match ext_carry_out signature for width {}",
+                    f.name, width
+                )));
+            }
+        }
+        WrappedExtensionSpec::ExtPrioEncode {
+            input_width,
+            lsb_prio: _,
+        } => {
+            let expected_ret_ty = ir::Type::Bits(ceil_log2(input_width.saturating_add(1)));
+            if f.params.len() != 1
+                || f.params[0].ty != ir::Type::Bits(input_width)
+                || f.ret_ty != expected_ret_ty
+            {
+                return Err(ParseError::new(format!(
+                    "ffi wrapper helper '{}' does not match ext_prio_encode signature for width {}",
+                    f.name, input_width
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn convert_ffi_invokes_to_extension_ops_in_fn(
+    f: &mut ir::Fn,
+    wrappers: &BTreeMap<String, WrappedExtensionSpec>,
+) -> Result<(), ParseError> {
+    for node in &mut f.nodes {
+        let payload = node.payload.clone();
+        let ir::NodePayload::Invoke { to_apply, operands } = payload else {
+            continue;
+        };
+        let Some(spec) = wrappers.get(&to_apply).copied() else {
+            continue;
+        };
+        match spec {
+            WrappedExtensionSpec::ExtCarryOut { .. } => {
+                if operands.len() != 3 {
+                    return Err(ParseError::new(format!(
+                        "invoke of wrapped ext_carry_out helper '{}' expected 3 operands, got {}",
+                        to_apply,
+                        operands.len()
+                    )));
+                }
+                let expected_ty = ir::Type::Bits(1);
+                if node.ty != expected_ty {
+                    return Err(ParseError::new(format!(
+                        "invoke of wrapped ext_carry_out helper '{}' had type {}, expected {}",
+                        to_apply, node.ty, expected_ty
+                    )));
+                }
+                node.payload = ir::NodePayload::ExtCarryOut {
+                    lhs: operands[0],
+                    rhs: operands[1],
+                    c_in: operands[2],
+                };
+            }
+            WrappedExtensionSpec::ExtPrioEncode {
+                input_width,
+                lsb_prio,
+            } => {
+                if operands.len() != 1 {
+                    return Err(ParseError::new(format!(
+                        "invoke of wrapped ext_prio_encode helper '{}' expected 1 operand, got {}",
+                        to_apply,
+                        operands.len()
+                    )));
+                }
+                let expected_ty = ir::Type::Bits(ceil_log2(input_width.saturating_add(1)));
+                if node.ty != expected_ty {
+                    return Err(ParseError::new(format!(
+                        "invoke of wrapped ext_prio_encode helper '{}' had type {}, expected {}",
+                        to_apply, node.ty, expected_ty
+                    )));
+                }
+                node.payload = ir::NodePayload::ExtPrioEncode {
+                    arg: operands[0],
+                    lsb_prio,
+                };
+            }
+        }
+    }
+    for node in &f.nodes {
+        match &node.payload {
+            ir::NodePayload::CountedFor { body, .. } => {
+                if wrappers.contains_key(body) {
+                    let node_name = node
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| format!("counted_for.{}", node.text_id));
+                    return Err(ParseError::new(format!(
+                        "wrapped extension helper '{}' is referenced from counted_for body by node '{}' in function '{}'; only invoke nodes may reference wrapped extension helpers",
+                        body, node_name, f.name
+                    )));
+                }
+            }
+            _ => {
+                // Wrapped extension helpers are only referenced via
+                // invoke/counted_for today.
+            }
+        }
+    }
+    Ok(())
+}
+
+fn convert_ffi_invokes_to_extension_ops(pkg: &mut ir::Package) -> Result<(), ParseError> {
+    let mut wrappers: BTreeMap<String, WrappedExtensionSpec> = BTreeMap::new();
+    for member in &pkg.members {
+        let PackageMember::Function(f) = member else {
+            continue;
+        };
+        let Some(spec) = wrapped_extension_spec_for_fn(f)? else {
+            continue;
+        };
+        validate_wrapped_extension_helper_signature(f, spec)?;
+        wrappers.insert(f.name.clone(), spec);
+    }
+    if wrappers.is_empty() {
+        return Ok(());
+    }
+
+    for member in pkg.members.iter_mut() {
+        match member {
+            PackageMember::Function(f) => convert_ffi_invokes_to_extension_ops_in_fn(f, &wrappers)?,
+            PackageMember::Block { func, .. } => {
+                convert_ffi_invokes_to_extension_ops_in_fn(func, &wrappers)?
+            }
+        }
+    }
+
+    let wrapper_names: BTreeSet<String> = wrappers.keys().cloned().collect();
+    if let Some((top_name, MemberType::Function)) = &pkg.top {
+        if wrapper_names.contains(top_name) {
+            return Err(ParseError::new(format!(
+                "top function '{}' is a wrapped extension helper and cannot be lifted away",
+                top_name
+            )));
+        }
+    }
+
+    pkg.members.retain(|member| match member {
+        PackageMember::Function(f) => !wrapper_names.contains(&f.name),
+        PackageMember::Block { .. } => true,
+    });
+    Ok(())
 }
 
 impl Parser {
@@ -272,6 +529,89 @@ impl Parser {
             return Err(ParseError::new("unterminated quoted string".to_string()));
         }
         Ok(string)
+    }
+
+    /// Parses and preserves a raw `#[...]` or `#![...]` attribute.
+    fn parse_raw_attribute(&mut self, prefix: &str) -> Result<String, ParseError> {
+        self.drop_whitespace_and_comments();
+        if !self.peek_is(prefix) {
+            return Err(ParseError::new(format!(
+                "expected attribute starting with {:?}; line: {:?}",
+                prefix,
+                self.current_line()
+            )));
+        }
+        self.offset += prefix.len();
+
+        let mut attr = prefix.to_string();
+        let mut bracket_depth = 1usize;
+        let mut in_string = false;
+        let mut in_triple_quoted_string = false;
+        let mut escaped = false;
+
+        while self.offset < self.chars.len() {
+            if in_triple_quoted_string {
+                if self.peek_is("\"\"\"") {
+                    attr.push_str("\"\"\"");
+                    self.offset += 3;
+                    in_triple_quoted_string = false;
+                    continue;
+                }
+                let c = self.popc().ok_or_else(|| {
+                    ParseError::new("unterminated triple-quoted attribute string".to_string())
+                })?;
+                attr.push(c);
+                continue;
+            }
+
+            if in_string {
+                let c = self.popc().ok_or_else(|| {
+                    ParseError::new("unterminated quoted attribute string".to_string())
+                })?;
+                attr.push(c);
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if c == '\\' {
+                    escaped = true;
+                    continue;
+                }
+                if c == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+
+            if self.peek_is("\"\"\"") {
+                attr.push_str("\"\"\"");
+                self.offset += 3;
+                in_triple_quoted_string = true;
+                continue;
+            }
+
+            let c = self.popc().ok_or_else(|| {
+                ParseError::new(format!("unterminated attribute starting with {:?}", prefix))
+            })?;
+            attr.push(c);
+
+            match c {
+                '"' => in_string = true,
+                '[' => bracket_depth = bracket_depth.saturating_add(1),
+                ']' => {
+                    bracket_depth = bracket_depth.saturating_sub(1);
+                    if bracket_depth == 0 {
+                        return Ok(attr);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Err(ParseError::new(format!(
+            "unterminated attribute starting with {:?}",
+            prefix
+        )))
     }
 
     fn pop_number_string_or_error(&mut self, ctx: &str) -> Result<String, ParseError> {
@@ -1838,20 +2178,7 @@ impl Parser {
         loop {
             self.drop_whitespace_and_comments();
             if self.peek_is("#![") {
-                let mut s = String::new();
-                if self.try_drop("#![") {
-                    s.push_str("#![");
-                } else {
-                    unreachable!("inner attribute must start with '#!['");
-                }
-                while let Some(c) = self.peekc() {
-                    self.dropc()?;
-                    s.push(c);
-                    if c == ']' {
-                        break;
-                    }
-                }
-                attrs.push(s);
+                attrs.push(self.parse_raw_attribute("#![")?);
                 continue;
             }
             break;
@@ -2442,20 +2769,7 @@ impl Parser {
         while !self.at_eof() {
             self.drop_whitespace_and_comments();
             if self.peek_is("#[") {
-                let mut s = String::new();
-                if self.try_drop("#[") {
-                    s.push_str("#[");
-                } else {
-                    unreachable!("outer attribute must start with '#['");
-                }
-                while let Some(c) = self.peekc() {
-                    self.dropc()?;
-                    s.push(c);
-                    if c == ']' {
-                        break;
-                    }
-                }
-                pending_outer_attrs.push(s);
+                pending_outer_attrs.push(self.parse_raw_attribute("#[")?);
                 // Continue scanning for the next member after the attribute.
                 self.drop_whitespace_and_comments();
             }
@@ -2506,12 +2820,14 @@ impl Parser {
                 )));
             }
         }
-        Ok(ir::Package {
+        let mut pkg = ir::Package {
             name: package_name,
             file_table,
             members,
             top,
-        })
+        };
+        convert_ffi_invokes_to_extension_ops(&mut pkg)?;
+        Ok(pkg)
     }
 }
 
@@ -2908,6 +3224,35 @@ fn foo() -> (bits[8], bits[8], bits[8]) {
         } else {
             panic!("expected literal");
         }
+    }
+
+    #[test]
+    fn test_parse_outer_ffi_proto_attribute_with_triple_quotes() {
+        let _ = env_logger::builder().is_test(true).try_init();
+        let input = r#"package ffi_attr
+
+#[ffi_proto("""code_template: "verilog_module {fn} (.a({x}), .out({return})); /* keep [7:0] */"
+""")]
+fn ffi_callee(x: bits[8] id=1) -> bits[8] {
+  ret add.2: bits[8] = add(x, x, id=2)
+}
+"#;
+
+        let mut parser = Parser::new(input);
+        let package = parser.parse_package().unwrap();
+        let f = package.get_fn("ffi_callee").expect("ffi_callee present");
+        assert_eq!(f.outer_attrs.len(), 1);
+        assert!(
+            f.outer_attrs[0].contains("ffi_proto"),
+            "expected ffi_proto attribute, got {:?}",
+            f.outer_attrs
+        );
+        assert!(
+            f.outer_attrs[0].contains("keep [7:0]"),
+            "expected bracketed text to survive attribute parsing, got {:?}",
+            f.outer_attrs
+        );
+        assert_eq!(package.to_string(), input);
     }
 
     #[test]
@@ -3560,7 +3905,7 @@ fn id(x: bits[1] id=1) -> bits[1] {
     fn test_parse_block_to_fn_simple() {
         let _ = env_logger::builder().is_test(true).try_init();
         let input = r#"block my_main(x: bits[8], out: bits[8]) {
-  #![provenance(name=\"my_main\", kind=\"function\")]
+  #![provenance(name="my_main", kind="function")]
   x: bits[8] = input_port(name=x, id=5)
   one: bits[8] = literal(value=1, id=6)
   add.7: bits[8] = add(x, one, id=7)
@@ -3569,7 +3914,7 @@ fn id(x: bits[1] id=1) -> bits[1] {
         let mut parser = Parser::new(input);
         let f = parser.parse_block_to_fn().unwrap();
         let want = r#"fn my_main(x: bits[8] id=5) -> bits[8] {
-  #![provenance(name=\"my_main\", kind=\"function\")]
+  #![provenance(name="my_main", kind="function")]
   one: bits[8] = literal(value=1, id=6)
   ret add.7: bits[8] = add(x, one, id=7)
 }"#;

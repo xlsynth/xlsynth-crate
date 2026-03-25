@@ -47,9 +47,10 @@ top block myb(a: bits[1], out: bits[1]) {
 }
 
 #[test]
-fn test_ir_round_trip_package_invalid_fn_but_valid_block_recovers_block() {
+fn test_ir_round_trip_package_invalid_fn_but_valid_block_fails() {
     // Package starts with an invalid top fn (missing -> ...) but contains a valid
-    // block.
+    // block. ir-round-trip should reject the malformed package instead of
+    // recovering a later block member.
     let input_ir = r#"package p
 
 top fn broken() {
@@ -60,10 +61,6 @@ block myb(a: bits[1], out: bits[1]) {
   out: () = output_port(a, name=out, id=2)
 }
 "#;
-    let expected_block = r#"block myb(a: bits[1], out: bits[1]) {
-  a: bits[1] = input_port(name=a, id=1)
-  out: () = output_port(a, name=out, id=2)
-}"#;
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("in.ir");
     std::fs::write(&path, input_ir).unwrap();
@@ -74,9 +71,16 @@ block myb(a: bits[1], out: bits[1]) {
         .arg(path.to_str().unwrap())
         .output()
         .unwrap();
-    assert!(out.status.success());
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(stdout, expected_block);
+    assert!(
+        !out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("parse IR package should succeed"),
+        "unexpected stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -107,7 +111,7 @@ fn test_ir_round_trip_multi_output_block_preserves_order_and_ids() {
 fn test_ir_round_trip_block_with_attributes_and_pos() {
     let input = r#"package my_test
 
-#[signature("""")]
+#[signature("""""")]
 block attr_test(a: bits[1], out: bits[1]) {
   #![provenance(name="attr_test", kind="function")]
   a: bits[1] = input_port(name=a, id=1, pos=[(0,0,0)])
@@ -116,7 +120,7 @@ block attr_test(a: bits[1], out: bits[1]) {
 "#;
     let want = r#"package my_test
 
-#[signature("""")]
+#[signature("""""")]
 block attr_test(a: bits[1], out: bits[1]) {
   #![provenance(name="attr_test", kind="function")]
   a: bits[1] = input_port(name=a, id=1)
