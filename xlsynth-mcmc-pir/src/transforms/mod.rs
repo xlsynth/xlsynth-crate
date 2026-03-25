@@ -34,6 +34,7 @@ mod dual_sel_hoist;
 mod eq_ne_add_literal_shift;
 mod eq_sel_distribute;
 mod eq_zero_or_reduce;
+mod ext_nary_add_rewrites;
 mod mask_operand_bit;
 mod nand_not_and_fold;
 mod narrow_add_from_wide_add_fold;
@@ -89,6 +90,10 @@ use dual_sel_hoist::DualSelHoistTransform;
 use eq_ne_add_literal_shift::EqNeAddLiteralShiftTransform;
 use eq_sel_distribute::EqSelDistributeTransform;
 use eq_zero_or_reduce::EqZeroOrReduceTransform;
+use ext_nary_add_rewrites::{
+    AddToExtNaryAddTransform, BinaryExtNaryAddToAddTransform, ChangeExtNaryAddToBrentKungTransform,
+    ChangeExtNaryAddToKoggeStoneTransform, ChangeExtNaryAddToRippleCarryTransform,
+};
 use mask_operand_bit::{MaskOperandHighBitTransform, MaskOperandLowBitTransform};
 use nand_not_and_fold::NandNotAndFoldTransform;
 use narrow_add_from_wide_add_fold::NarrowAddFromWideAddFoldTransform;
@@ -165,6 +170,16 @@ pub enum PirTransformKind {
     /// Introduce carry-save form for `add(a, b)`:
     /// `add(a, b) ↔ add(xor(a, b), shll(and(a, b), 1))`.
     AddFission,
+    /// Replace `add(a, b)` with `ext_nary_add(a, b, arch=brent_kung)`.
+    AddToExtNaryAdd,
+    /// Rewrite an explicit `ext_nary_add` architecture to `ripple_carry`.
+    ChangeExtNaryAddToRippleCarry,
+    /// Rewrite an explicit `ext_nary_add` architecture to `brent_kung`.
+    ChangeExtNaryAddToBrentKung,
+    /// Rewrite an explicit `ext_nary_add` architecture to `kogge_stone`.
+    ChangeExtNaryAddToKoggeStone,
+    /// Replace a width-preserving 2-input `ext_nary_add` with `add(a, b)`.
+    BinaryExtNaryAddToAdd,
     /// Reassociate a fissioned add into its consumer so the carry-propagate
     /// add is pushed later in the chain.
     CsaFuseIntoConsumer,
@@ -331,6 +346,17 @@ impl fmt::Display for PirTransformKind {
             PirTransformKind::ReassociateAddSub => write!(f, "ReassociateAddSub"),
             PirTransformKind::CarrySplitAdd => write!(f, "CarrySplitAdd"),
             PirTransformKind::AddFission => write!(f, "AddFission"),
+            PirTransformKind::AddToExtNaryAdd => write!(f, "AddToExtNaryAdd"),
+            PirTransformKind::ChangeExtNaryAddToRippleCarry => {
+                write!(f, "ChangeExtNaryAddToRippleCarry")
+            }
+            PirTransformKind::ChangeExtNaryAddToBrentKung => {
+                write!(f, "ChangeExtNaryAddToBrentKung")
+            }
+            PirTransformKind::ChangeExtNaryAddToKoggeStone => {
+                write!(f, "ChangeExtNaryAddToKoggeStone")
+            }
+            PirTransformKind::BinaryExtNaryAddToAdd => write!(f, "BinaryExtNaryAddToAdd"),
             PirTransformKind::CsaFuseIntoConsumer => write!(f, "CsaFuseIntoConsumer"),
             PirTransformKind::CsaRebalanceTriplet => write!(f, "CsaRebalanceTriplet"),
             PirTransformKind::NotSelDistribute => write!(f, "NotSelDistribute"),
@@ -427,6 +453,11 @@ pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
         Box::new(ReassociateAddSubTransform),
         Box::new(CarrySplitAddTransform),
         Box::new(AddFissionTransform),
+        Box::new(AddToExtNaryAddTransform),
+        Box::new(ChangeExtNaryAddToRippleCarryTransform),
+        Box::new(ChangeExtNaryAddToBrentKungTransform),
+        Box::new(ChangeExtNaryAddToKoggeStoneTransform),
+        Box::new(BinaryExtNaryAddToAddTransform),
         Box::new(CsaFuseIntoConsumerTransform),
         Box::new(CsaRebalanceTripletTransform),
         Box::new(NotSelDistributeTransform),
