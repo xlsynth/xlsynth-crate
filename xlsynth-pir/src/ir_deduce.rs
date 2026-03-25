@@ -403,6 +403,14 @@ where
                 _ => Err(DeduceError::ExpectedBits("ext_prio_encode.arg")),
             }
         }
+        NodePayload::ExtNaryAdd { .. } => {
+            for operand_ty in operand_types.iter() {
+                if !matches!(operand_ty, Type::Bits(_)) {
+                    return Err(DeduceError::ExpectedBits("ext_nary_add"));
+                }
+            }
+            Ok(None)
+        }
 
         NodePayload::Assert { .. } | NodePayload::Trace { .. } | NodePayload::AfterAll(_) => {
             Ok(Some(Type::Token))

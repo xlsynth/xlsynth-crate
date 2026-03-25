@@ -1490,6 +1490,14 @@ impl Parser {
                     maybe_id.unwrap(),
                 )
             }
+            "ext_nary_add" => {
+                let operands =
+                    self.parse_variadic_op(&node_env, &mut maybe_id, operator.as_str())?;
+                (
+                    ir::NodePayload::ExtNaryAdd { operands },
+                    maybe_id.unwrap(),
+                )
+            }
             "assert" => {
                 let token = self.parse_node_ref(&node_env, "assert token")?;
                 self.drop_or_error(",")?;

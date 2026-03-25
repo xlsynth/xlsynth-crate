@@ -131,6 +131,14 @@ pub enum ValidationError {
     /// Bitwise n-ary ops (and/or/xor/nand/nor) must have identical bits-typed
     /// operands.
     NaryBitwiseOperandTypeMismatch { func: String, node_index: usize },
+    /// `ext_nary_add` requires all operands to be bits-typed.
+    ExtNaryAddOperandTypeMismatch { func: String, node_index: usize },
+    /// `ext_nary_add` requires a bits-typed result.
+    ExtNaryAddResultTypeMismatch {
+        func: String,
+        node_index: usize,
+        actual: Type,
+    },
     /// Two parameters share the same name within a function.
     DuplicateParamName { func: String, param_name: String },
     /// A parameter declared in the function signature has no corresponding
@@ -393,6 +401,24 @@ impl std::fmt::Display for ValidationError {
                     f,
                     "function '{}' node {} has mismatched operand types for bitwise n-ary op",
                     func, node_index
+                )
+            }
+            ValidationError::ExtNaryAddOperandTypeMismatch { func, node_index } => {
+                write!(
+                    f,
+                    "function '{}' node {} ext_nary_add requires bits operands",
+                    func, node_index
+                )
+            }
+            ValidationError::ExtNaryAddResultTypeMismatch {
+                func,
+                node_index,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "function '{}' node {} ext_nary_add requires bits result type, got {}",
+                    func, node_index, actual
                 )
             }
             ValidationError::DuplicateParamName { func, param_name } => {
@@ -948,6 +974,24 @@ where
                 }
                 NaryOp::Concat => {
                     // Does not require identical types across all operands.
+                }
+            }
+        }
+
+        if let NodePayload::ExtNaryAdd { operands } = &node.payload {
+            if !matches!(node.ty, Type::Bits(_)) {
+                return Err(ValidationError::ExtNaryAddResultTypeMismatch {
+                    func: f.name.clone(),
+                    node_index: i,
+                    actual: node.ty.clone(),
+                });
+            }
+            for nr in operands.iter() {
+                if !matches!(f.get_node(*nr).ty, Type::Bits(_)) {
+                    return Err(ValidationError::ExtNaryAddOperandTypeMismatch {
+                        func: f.name.clone(),
+                        node_index: i,
+                    });
                 }
             }
         }

@@ -728,6 +728,14 @@ fn gatify_zero_ext(new_bit_count: usize, arg_bits: &AigBitVector) -> AigBitVecto
     AigBitVector::concat(zeros, arg_bits.clone())
 }
 
+fn gatify_zext_or_truncate(new_bit_count: usize, arg_bits: &AigBitVector) -> AigBitVector {
+    match arg_bits.get_bit_count().cmp(&new_bit_count) {
+        std::cmp::Ordering::Less => gatify_zero_ext(new_bit_count, arg_bits),
+        std::cmp::Ordering::Equal => arg_bits.clone(),
+        std::cmp::Ordering::Greater => arg_bits.get_lsb_slice(0, new_bit_count),
+    }
+}
+
 fn gatify_umul(
     lhs_bits: &AigBitVector,
     rhs_bits: &AigBitVector,
@@ -2832,6 +2840,32 @@ fn gatify_node(
                 );
             }
             env.add(node_ref, GateOrVec::BitVector(out_bits));
+        }
+        ir::NodePayload::ExtNaryAdd { operands } => {
+            let ir::Type::Bits(output_width) = node.ty else {
+                return Err("ExtNaryAdd result must be bits-typed".to_string());
+            };
+            if output_width == 0 {
+                env.add(node_ref, GateOrVec::BitVector(AigBitVector::zeros(0)));
+            } else if operands.is_empty() {
+                env.add(
+                    node_ref,
+                    GateOrVec::BitVector(AigBitVector::zeros(output_width)),
+                );
+            } else {
+                let resized: Vec<AigBitVector> = operands
+                    .iter()
+                    .map(|operand| {
+                        let bits = env
+                            .get_bit_vector(*operand)
+                            .expect("ext_nary_add operand should be present");
+                        gatify_zext_or_truncate(output_width, &bits)
+                    })
+                    .collect();
+                let sum =
+                    array_add_with_carry_out(g8_builder, &resized, None, options.adder_mapping).sum;
+                env.add(node_ref, GateOrVec::BitVector(sum));
+            }
         }
 
         // -- binary operations
