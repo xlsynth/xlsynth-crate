@@ -18,6 +18,7 @@ use crate::ir::{Param, ParamId};
 use crate::ir_rebase_ids::rebase_fn_ids;
 use crate::ir_utils::compact_and_toposort_in_place;
 use crate::math::ceil_log2;
+use xlsynth::IrValue;
 
 #[derive(Debug, Clone)]
 pub struct DesugarError {
@@ -222,6 +223,45 @@ fn push_node(f: &mut Fn, ty: Type, payload: NodePayload) -> NodeRef {
     NodeRef { index: new_index }
 }
 
+fn make_zero_bits_literal(f: &mut Fn, width: usize) -> NodeRef {
+    push_node(
+        f,
+        Type::Bits(width),
+        NodePayload::Literal(IrValue::make_ubits(width, 0).expect("zero bits literal")),
+    )
+}
+
+fn zext_or_truncate_to_width(
+    f: &mut Fn,
+    operand: NodeRef,
+    output_width: usize,
+    ctx: &str,
+) -> Result<NodeRef, DesugarError> {
+    let operand_width = expect_bits_width(f, operand, ctx)?;
+    if operand_width == output_width {
+        Ok(operand)
+    } else if operand_width < output_width {
+        Ok(push_node(
+            f,
+            Type::Bits(output_width),
+            NodePayload::ZeroExt {
+                arg: operand,
+                new_bit_count: output_width,
+            },
+        ))
+    } else {
+        Ok(push_node(
+            f,
+            Type::Bits(output_width),
+            NodePayload::BitSlice {
+                arg: operand,
+                start: 0,
+                width: output_width,
+            },
+        ))
+    }
+}
+
 fn desugar_ext_carry_out_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
     let mut changed = false;
 
@@ -249,9 +289,86 @@ fn desugar_ext_carry_out_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ExtNaryAddShape {
+    output_width: usize,
+    operand_widths: Vec<usize>,
+}
+
+/// Validates `ext_nary_add` shape and returns the widths needed by both inline
+/// lowering and FFI wrapper synthesis.
+fn analyze_ext_nary_add(
+    f: &Fn,
+    result: NodeRef,
+    operands: &[NodeRef],
+) -> Result<ExtNaryAddShape, DesugarError> {
+    let output_width = match f.get_node(result).ty {
+        Type::Bits(width) => width,
+        ref ty => {
+            return Err(DesugarError::new(format!(
+                "ext_nary_add: result type must be bits, got {}",
+                ty
+            )));
+        }
+    };
+    let mut operand_widths = Vec::with_capacity(operands.len());
+    for (i, operand) in operands.iter().enumerate() {
+        operand_widths.push(expect_bits_width(
+            f,
+            *operand,
+            &format!("ext_nary_add.operand[{i}]"),
+        )?);
+    }
+    Ok(ExtNaryAddShape {
+        output_width,
+        operand_widths,
+    })
+}
+
+/// Appends the basis-op implementation of `ext_nary_add` and returns the
+/// lowered sum node.
+fn append_lowered_ext_nary_add(
+    f: &mut Fn,
+    operands: &[NodeRef],
+    output_width: usize,
+) -> Result<NodeRef, DesugarError> {
+    if output_width == 0 || operands.is_empty() {
+        return Ok(make_zero_bits_literal(f, output_width));
+    }
+
+    let mut resized_operands = Vec::with_capacity(operands.len());
+    for operand in operands {
+        resized_operands.push(zext_or_truncate_to_width(
+            f,
+            *operand,
+            output_width,
+            "ext_nary_add.operand",
+        )?);
+    }
+
+    let mut acc = resized_operands[0];
+    for operand in resized_operands.into_iter().skip(1) {
+        acc = push_node(
+            f,
+            Type::Bits(output_width),
+            NodePayload::Binop(Binop::Add, acc, operand),
+        );
+    }
+    Ok(acc)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum FfiWrapKey {
-    ExtCarryOut { width: usize },
-    ExtPrioEncode { input_width: usize, lsb_prio: bool },
+    ExtCarryOut {
+        width: usize,
+    },
+    ExtNaryAdd {
+        output_width: usize,
+        operand_widths: Vec<usize>,
+    },
+    ExtPrioEncode {
+        input_width: usize,
+        lsb_prio: bool,
+    },
 }
 
 fn helper_base_name(key: &FfiWrapKey) -> String {
@@ -259,6 +376,18 @@ fn helper_base_name(key: &FfiWrapKey) -> String {
         FfiWrapKey::ExtCarryOut { width } => {
             format!("__pir_ext__ext_carry_out__w{width}")
         }
+        FfiWrapKey::ExtNaryAdd {
+            output_width,
+            operand_widths,
+        } => format!(
+            "__pir_ext__ext_nary_add__outw{}__ops{}",
+            output_width,
+            operand_widths
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join("_")
+        ),
         FfiWrapKey::ExtPrioEncode {
             input_width,
             lsb_prio,
@@ -296,6 +425,30 @@ fn helper_code_template(key: &FfiWrapKey) -> String {
         FfiWrapKey::ExtCarryOut { width } => format!(
             "pir_ext_carry_out {{fn}} (.lhs({{lhs}}), .rhs({{rhs}}), .c_in({{c_in}}), .out({{return}})); /* xlsynth_pir_ext=ext_carry_out;width={width} */"
         ),
+        FfiWrapKey::ExtNaryAdd {
+            output_width,
+            operand_widths,
+        } => {
+            let operand_bindings = operand_widths
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!(".op{i}({{op{i}}})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let operand_width_list = operand_widths
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            let port_list = if operand_bindings.is_empty() {
+                ".out({return})".to_string()
+            } else {
+                format!("{operand_bindings}, .out({{return}})")
+            };
+            format!(
+                "pir_ext_nary_add {{fn}} ({port_list}); /* xlsynth_pir_ext=ext_nary_add;out_width={output_width};operand_widths={operand_width_list} */"
+            )
+        }
         FfiWrapKey::ExtPrioEncode {
             input_width,
             lsb_prio,
@@ -370,6 +523,37 @@ fn make_helper_fn(name: String, key: &FfiWrapKey) -> Fn {
             let ret_node_ref = push_node(
                 &mut helper,
                 Type::Bits(1),
+                NodePayload::Unop(Unop::Identity, lowered),
+            );
+            helper.ret_node_ref = Some(ret_node_ref);
+            helper
+        }
+        FfiWrapKey::ExtNaryAdd {
+            output_width,
+            operand_widths,
+        } => {
+            let params = operand_widths
+                .iter()
+                .enumerate()
+                .map(|(i, width)| Param {
+                    name: format!("op{i}"),
+                    ty: Type::Bits(*width),
+                    id: ParamId::new(i.saturating_add(1)),
+                })
+                .collect::<Vec<_>>();
+            let mut helper = make_helper_with_params(name, params, Type::Bits(*output_width), key);
+            let operand_refs = operand_widths
+                .iter()
+                .enumerate()
+                .map(|(i, _)| NodeRef {
+                    index: i.saturating_add(1),
+                })
+                .collect::<Vec<_>>();
+            let lowered = append_lowered_ext_nary_add(&mut helper, &operand_refs, *output_width)
+                .expect("helper ext_nary_add lowering must be well-typed");
+            let ret_node_ref = push_node(
+                &mut helper,
+                Type::Bits(*output_width),
                 NodePayload::Unop(Unop::Identity, lowered),
             );
             helper.ret_node_ref = Some(ret_node_ref);
@@ -468,6 +652,27 @@ fn wrap_extensions_in_fn(
                 };
                 changed = true;
             }
+            NodePayload::ExtNaryAdd { operands } => {
+                let shape = analyze_ext_nary_add(f, nr, &operands)?;
+                let key = FfiWrapKey::ExtNaryAdd {
+                    output_width: shape.output_width,
+                    operand_widths: shape.operand_widths.clone(),
+                };
+                let helper_name = get_or_create_helper_name(
+                    &key,
+                    helper_names,
+                    helper_fns,
+                    existing_names,
+                    current_max_text_id,
+                );
+                let node = f.get_node_mut(nr);
+                node.ty = Type::Bits(shape.output_width);
+                node.payload = NodePayload::Invoke {
+                    to_apply: helper_name,
+                    operands,
+                };
+                changed = true;
+            }
             NodePayload::ExtPrioEncode { arg, lsb_prio } => {
                 let shape = analyze_ext_prio_encode(f, arg, lsb_prio)?;
                 let key = FfiWrapKey::ExtPrioEncode {
@@ -542,6 +747,29 @@ fn wrap_extensions_in_package(pkg: &mut Package) -> Result<(), DesugarError> {
     Ok(())
 }
 
+fn desugar_ext_nary_add_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
+    let mut changed = false;
+
+    let original_len = f.nodes.len();
+    for idx in 0..original_len {
+        let nr = NodeRef { index: idx };
+        let payload = f.get_node(nr).payload.clone();
+        let NodePayload::ExtNaryAdd { operands } = payload else {
+            continue;
+        };
+        changed = true;
+
+        let shape = analyze_ext_nary_add(f, nr, &operands)?;
+        let lowered = append_lowered_ext_nary_add(f, &operands, shape.output_width)?;
+
+        let node = f.get_node_mut(nr);
+        node.ty = Type::Bits(shape.output_width);
+        node.payload = NodePayload::Unop(Unop::Identity, lowered);
+    }
+
+    Ok(changed)
+}
+
 fn desugar_ext_prio_encode_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
     let mut changed = false;
 
@@ -572,7 +800,9 @@ fn desugar_ext_prio_encode_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
 ///
 /// This function also normalizes the node list into a valid topological order.
 pub fn desugar_extensions_in_fn(f: &mut Fn) -> Result<(), DesugarError> {
-    let _changed = desugar_ext_carry_out_in_fn(f)? | desugar_ext_prio_encode_in_fn(f)?;
+    let _changed = desugar_ext_carry_out_in_fn(f)?
+        | desugar_ext_nary_add_in_fn(f)?
+        | desugar_ext_prio_encode_in_fn(f)?;
     compact_and_toposort_in_place(f).map_err(DesugarError::new)?;
     Ok(())
 }

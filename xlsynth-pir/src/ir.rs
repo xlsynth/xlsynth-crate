@@ -405,6 +405,15 @@ pub enum NodePayload {
         arg: NodeRef,
         lsb_prio: bool,
     },
+    /// Extended (non-upstream) op: add zero or more bits operands after
+    /// resizing each to the result width.
+    ///
+    /// Semantics: if the node result type is `bits[w]`, each operand is
+    /// zero-extended or truncated to `bits[w]`, then all resized operands are
+    /// added modulo `2^w`. With zero operands, the result is `bits[w]:0`.
+    ExtNaryAdd {
+        operands: Vec<NodeRef>,
+    },
     Assert {
         token: NodeRef,
         activate: NodeRef,
@@ -490,7 +499,9 @@ impl NodePayload {
     pub fn is_extension_op(&self) -> bool {
         matches!(
             self,
-            NodePayload::ExtCarryOut { .. } | NodePayload::ExtPrioEncode { .. }
+            NodePayload::ExtCarryOut { .. }
+                | NodePayload::ExtPrioEncode { .. }
+                | NodePayload::ExtNaryAdd { .. }
         )
     }
 
@@ -514,6 +525,7 @@ impl NodePayload {
             NodePayload::BitSliceUpdate { .. } => "bit_slice_update",
             NodePayload::ExtCarryOut { .. } => "ext_carry_out",
             NodePayload::ExtPrioEncode { .. } => "ext_prio_encode",
+            NodePayload::ExtNaryAdd { .. } => "ext_nary_add",
             NodePayload::Assert { .. } => "assert",
             NodePayload::Trace { .. } => "trace",
             NodePayload::InstantiationInput { .. } => "instantiation_input",
@@ -574,6 +586,14 @@ impl NodePayload {
                 for case in cases.iter() {
                     if f.get_node_ty(*case) != case_ty {
                         return Err(format!("all cases must be the same type"));
+                    }
+                }
+                Ok(())
+            }
+            NodePayload::ExtNaryAdd { operands } => {
+                for operand in operands.iter() {
+                    if !matches!(f.get_node_ty(*operand), Type::Bits(_)) {
+                        return Err("ext_nary_add operands must be bits-typed".to_string());
                     }
                 }
                 Ok(())
@@ -668,6 +688,21 @@ impl NodePayload {
                 lsb_prio,
                 id
             ),
+            NodePayload::ExtNaryAdd { operands } => {
+                if operands.is_empty() {
+                    format!("ext_nary_add(id={})", id)
+                } else {
+                    format!(
+                        "ext_nary_add({}, id={})",
+                        operands
+                            .iter()
+                            .map(|n| get_name(*n))
+                            .collect::<Vec<String>>()
+                            .join(", "),
+                        id
+                    )
+                }
+            }
             NodePayload::Unop(op, arg) => {
                 format!("{}({}, id={})", unop_to_operator(*op), get_name(*arg), id)
             }

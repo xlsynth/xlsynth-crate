@@ -98,6 +98,12 @@ pub fn collect_structural_entries(f: &Fn) -> (Vec<StructuralEntry<FwdHash>>, Vec
                 child_hashes.push(hashes[c_in.index]);
                 child_depths.push(depths[c_in.index]);
             }
+            NodePayload::ExtNaryAdd { operands } => {
+                for operand in operands.iter() {
+                    child_hashes.push(hashes[operand.index]);
+                    child_depths.push(depths[operand.index]);
+                }
+            }
             NodePayload::SignExt { arg, .. } | NodePayload::ZeroExt { arg, .. } => {
                 child_hashes.push(hashes[arg.index]);
                 child_depths.push(depths[arg.index]);

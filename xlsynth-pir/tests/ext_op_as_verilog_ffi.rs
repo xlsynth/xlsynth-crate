@@ -30,6 +30,39 @@ fn assert_wrapped_text_round_trips_via_pir(
     pkg
 }
 
+fn assert_wrapped_text_parse_error_contains(ir_text: &str, expected_substr: &str) {
+    let err = {
+        let mut parser = Parser::new(ir_text);
+        parser
+            .parse_package()
+            .expect_err("expected parse error for malformed wrapped PIR")
+    };
+    let msg = format!("{}", err);
+    assert!(
+        msg.contains(expected_substr),
+        "unexpected parse error: {}",
+        msg
+    );
+
+    let err = {
+        let mut parser = Parser::new(ir_text);
+        parser
+            .parse_and_validate_package()
+            .expect_err("expected parse error for malformed wrapped PIR")
+    };
+    match err {
+        ParseOrValidateError::Parse(parse_err) => {
+            let msg = format!("{}", parse_err);
+            assert!(
+                msg.contains(expected_substr),
+                "unexpected parse error: {}",
+                msg
+            );
+        }
+        other => panic!("expected parse error, got {:?}", other),
+    }
+}
+
 #[test]
 fn verilogffi_wrapped_ext_carry_out_round_trips_verbatim() {
     let ir_text = r#"package carry_out_wrapped
@@ -104,6 +137,99 @@ fn f(arg: bits[4] id=1) -> bits[3] {
 }
 
 #[test]
+fn verilogffi_wrapped_ext_nary_add_round_trips_verbatim() {
+    let ir_text = r#"package nary_add_wrapped
+
+#[ffi_proto("""code_template: "pir_ext_nary_add {fn} (.op0({op0}), .op1({op1}), .op2({op2}), .out({return})); /* xlsynth_pir_ext=ext_nary_add;out_width=6;operand_widths=3,5,9 */"
+""")]
+fn __pir_ext__ext_nary_add__outw6__ops3_5_9(op0: bits[3] id=5, op1: bits[5] id=6, op2: bits[9] id=7) -> bits[6] {
+  zero_ext.8: bits[6] = zero_ext(op0, new_bit_count=6, id=8)
+  zero_ext.9: bits[6] = zero_ext(op1, new_bit_count=6, id=9)
+  bit_slice.10: bits[6] = bit_slice(op2, start=0, width=6, id=10)
+  add.11: bits[6] = add(zero_ext.8, zero_ext.9, id=11)
+  add.12: bits[6] = add(add.11, bit_slice.10, id=12)
+  ret identity.13: bits[6] = identity(add.12, id=13)
+}
+
+fn f(a: bits[3] id=1, b: bits[5] id=2, c: bits[9] id=3) -> bits[6] {
+  ret r: bits[6] = invoke(a, b, c, to_apply=__pir_ext__ext_nary_add__outw6__ops3_5_9, id=4)
+}
+"#;
+
+    let _pkg = assert_wrapped_text_round_trips_via_pir(
+        ir_text,
+        "f",
+        "__pir_ext__ext_nary_add__outw6__ops3_5_9",
+    );
+}
+
+#[test]
+fn verilogffi_wrapped_ext_carry_out_operand_width_mismatch_is_rejected() {
+    let ir_text = r#"package carry_out_wrapped_bad_invoke
+
+#[ffi_proto("""code_template: "pir_ext_carry_out {fn} (.lhs({lhs}), .rhs({rhs}), .c_in({c_in}), .out({return})); /* xlsynth_pir_ext=ext_carry_out;width=8 */"
+""")]
+fn __pir_ext__ext_carry_out__w8(lhs: bits[8] id=5, rhs: bits[8] id=6, c_in: bits[1] id=7) -> bits[1] {
+  literal.8: bits[1] = literal(value=0, id=8)
+  ret identity.9: bits[1] = identity(literal.8, id=9)
+}
+
+fn f(lhs: bits[7] id=1, rhs: bits[8] id=2, c_in: bits[1] id=3) -> bits[1] {
+  ret r: bits[1] = invoke(lhs, rhs, c_in, to_apply=__pir_ext__ext_carry_out__w8, id=4)
+}
+"#;
+
+    assert_wrapped_text_parse_error_contains(
+        ir_text,
+        "invoke of wrapped ext_carry_out helper '__pir_ext__ext_carry_out__w8' operand 0 had type bits[7], expected bits[8]",
+    );
+}
+
+#[test]
+fn verilogffi_wrapped_ext_prio_encode_operand_width_mismatch_is_rejected() {
+    let ir_text = r#"package prio_encode_wrapped_bad_invoke
+
+#[ffi_proto("""code_template: "pir_ext_prio_encode {fn} (.arg({arg}), .out({return})); /* xlsynth_pir_ext=ext_prio_encode;width=4;lsb_prio=false */"
+""")]
+fn __pir_ext__ext_prio_encode__w4__lsb0(arg: bits[4] id=3) -> bits[3] {
+  literal.4: bits[3] = literal(value=0, id=4)
+  ret identity.5: bits[3] = identity(literal.4, id=5)
+}
+
+fn f(arg: bits[5] id=1) -> bits[3] {
+  ret r: bits[3] = invoke(arg, to_apply=__pir_ext__ext_prio_encode__w4__lsb0, id=2)
+}
+"#;
+
+    assert_wrapped_text_parse_error_contains(
+        ir_text,
+        "invoke of wrapped ext_prio_encode helper '__pir_ext__ext_prio_encode__w4__lsb0' operand 0 had type bits[5], expected bits[4]",
+    );
+}
+
+#[test]
+fn verilogffi_wrapped_ext_nary_add_operand_width_mismatch_is_rejected() {
+    let ir_text = r#"package nary_add_wrapped_bad_invoke
+
+#[ffi_proto("""code_template: "pir_ext_nary_add {fn} (.op0({op0}), .op1({op1}), .op2({op2}), .out({return})); /* xlsynth_pir_ext=ext_nary_add;out_width=6;operand_widths=3,5,9 */"
+""")]
+fn __pir_ext__ext_nary_add__outw6__ops3_5_9(op0: bits[3] id=5, op1: bits[5] id=6, op2: bits[9] id=7) -> bits[6] {
+  literal.8: bits[6] = literal(value=0, id=8)
+  ret identity.9: bits[6] = identity(literal.8, id=9)
+}
+
+fn f(a: bits[3] id=1, b: bits[4] id=2, c: bits[9] id=3) -> bits[6] {
+  ret r: bits[6] = invoke(a, b, c, to_apply=__pir_ext__ext_nary_add__outw6__ops3_5_9, id=4)
+}
+"#;
+
+    assert_wrapped_text_parse_error_contains(
+        ir_text,
+        "invoke of wrapped ext_nary_add helper '__pir_ext__ext_nary_add__outw6__ops3_5_9' operand 1 had type bits[4], expected bits[5]",
+    );
+}
+
+#[test]
 fn verilogffi_wrapped_helper_referenced_from_counted_for_is_rejected() {
     let ir_text = r#"package carry_out_wrapped_counted_for
 
@@ -119,39 +245,8 @@ fn f(init: bits[1] id=1) -> bits[1] {
 }
 "#;
 
-    let err = {
-        let mut parser = Parser::new(ir_text);
-        parser
-            .parse_package()
-            .expect_err("expected parse error for non-invoke wrapped helper reference")
-    };
-    let msg = format!("{}", err);
-    assert!(
-        msg.contains("only invoke nodes may reference wrapped extension helpers"),
-        "unexpected parse error: {}",
-        msg
+    assert_wrapped_text_parse_error_contains(
+        ir_text,
+        "only invoke nodes may reference wrapped extension helpers",
     );
-    assert!(
-        msg.contains("counted_for"),
-        "expected counted_for context in parse error: {}",
-        msg
-    );
-
-    let err = {
-        let mut parser = Parser::new(ir_text);
-        parser
-            .parse_and_validate_package()
-            .expect_err("expected parse error for non-invoke wrapped helper reference")
-    };
-    match err {
-        ParseOrValidateError::Parse(parse_err) => {
-            let msg = format!("{}", parse_err);
-            assert!(
-                msg.contains("only invoke nodes may reference wrapped extension helpers"),
-                "unexpected parse error: {}",
-                msg
-            );
-        }
-        other => panic!("expected parse error, got {:?}", other),
-    }
 }

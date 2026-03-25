@@ -110,6 +110,10 @@ fn eval_zero_filled_bit_slice(arg_bits: &IrBits, start: Option<usize>, width: us
     IrBits::from_lsb_is_0(&out)
 }
 
+fn eval_zero_resize_bits(arg_bits: &IrBits, width: usize) -> IrBits {
+    eval_zero_filled_bit_slice(arg_bits, Some(0), width)
+}
+
 fn eval_bit_slice_update_bits(arg_bits: &IrBits, start_bits: &IrBits, upd_bits: &IrBits) -> IrBits {
     let arg_w = arg_bits.get_bit_count();
     let upd_w = upd_bits.get_bit_count();
@@ -344,6 +348,18 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                 *bit = bit_is_one;
             }
             IrValue::from_bits(&IrBits::from_lsb_is_0(&out))
+        }
+        ir::NodePayload::ExtNaryAdd { ref operands } => {
+            let ir::Type::Bits(out_w) = &n.ty else {
+                panic!("ExtNaryAdd result must be bits-typed");
+            };
+            let mut acc = IrBits::make_ubits(*out_w, 0).expect("ext_nary_add zero must construct");
+            for operand in operands.iter() {
+                let operand_bits: IrBits = env.get(operand).unwrap().to_bits().unwrap();
+                let resized = eval_zero_resize_bits(&operand_bits, *out_w);
+                acc = acc.add(&resized);
+            }
+            IrValue::from_bits(&acc)
         }
         ir::NodePayload::Unop(unop, ref operand) => {
             let operand_value: &IrValue = env.get(operand).unwrap();
