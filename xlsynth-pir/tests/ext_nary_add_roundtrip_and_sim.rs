@@ -99,6 +99,30 @@ fn f(a: bits[3] id=1, b: bits[5] id=2, c: bits[9] id=3) -> bits[6] {
         "expected invoke of synthesized ext_nary_add helper:\n{}",
         wrapped
     );
+
+    let reparsed = {
+        let mut p = Parser::new(&wrapped);
+        p.parse_and_validate_package()
+            .expect("parse/validate ffi-wrapped text")
+    };
+    assert_eq!(
+        reparsed.members.len(),
+        1,
+        "expected wrapped helper to be lifted away after parse"
+    );
+    let reparsed_fn = reparsed
+        .get_fn("f")
+        .expect("fn f present after wrapped parse");
+    let ext_count: usize = reparsed_fn
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.payload, NodePayload::ExtNaryAdd { .. }))
+        .count();
+    assert_eq!(ext_count, 1, "expected ext_nary_add to be reconstructed");
+
+    let rewrapped = emit_package_with_extension_mode(&reparsed, ExtensionEmitMode::AsFfiFunction)
+        .expect("re-emit ffi-wrapped text");
+    assert_eq!(rewrapped, wrapped);
 }
 
 #[test]

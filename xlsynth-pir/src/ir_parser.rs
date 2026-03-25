@@ -105,10 +105,19 @@ impl Default for ParseOptions {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum WrappedExtensionSpec {
-    ExtCarryOut { width: usize },
-    ExtPrioEncode { input_width: usize, lsb_prio: bool },
+    ExtCarryOut {
+        width: usize,
+    },
+    ExtNaryAdd {
+        output_width: usize,
+        operand_widths: Vec<usize>,
+    },
+    ExtPrioEncode {
+        input_width: usize,
+        lsb_prio: bool,
+    },
 }
 
 fn parse_wrapped_extension_spec_from_attr(
@@ -156,6 +165,35 @@ fn parse_wrapped_extension_spec_from_attr(
                 .map_err(|e| ParseError::new(format!("invalid ext_carry_out width: {e}")))?;
             Ok(Some(WrappedExtensionSpec::ExtCarryOut { width }))
         }
+        "ext_nary_add" => {
+            let output_width = fields
+                .get("out_width")
+                .copied()
+                .ok_or_else(|| {
+                    ParseError::new("missing out_width for ext_nary_add metadata".to_string())
+                })?
+                .parse::<usize>()
+                .map_err(|e| ParseError::new(format!("invalid ext_nary_add out_width: {e}")))?;
+            let operand_widths_text = fields.get("operand_widths").copied().ok_or_else(|| {
+                ParseError::new("missing operand_widths for ext_nary_add metadata".to_string())
+            })?;
+            let operand_widths = if operand_widths_text.is_empty() {
+                Vec::new()
+            } else {
+                operand_widths_text
+                    .split(',')
+                    .map(|width| {
+                        width.parse::<usize>().map_err(|e| {
+                            ParseError::new(format!("invalid ext_nary_add operand width: {e}"))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            Ok(Some(WrappedExtensionSpec::ExtNaryAdd {
+                output_width,
+                operand_widths,
+            }))
+        }
         "ext_prio_encode" => {
             let input_width = fields
                 .get("width")
@@ -200,13 +238,13 @@ fn wrapped_extension_spec_for_fn(f: &ir::Fn) -> Result<Option<WrappedExtensionSp
 
 fn validate_wrapped_extension_helper_signature(
     f: &ir::Fn,
-    spec: WrappedExtensionSpec,
+    spec: &WrappedExtensionSpec,
 ) -> Result<(), ParseError> {
     match spec {
         WrappedExtensionSpec::ExtCarryOut { width } => {
             if f.params.len() != 3
-                || f.params[0].ty != ir::Type::Bits(width)
-                || f.params[1].ty != ir::Type::Bits(width)
+                || f.params[0].ty != ir::Type::Bits(*width)
+                || f.params[1].ty != ir::Type::Bits(*width)
                 || f.params[2].ty != ir::Type::Bits(1)
                 || f.ret_ty != ir::Type::Bits(1)
             {
@@ -216,13 +254,30 @@ fn validate_wrapped_extension_helper_signature(
                 )));
             }
         }
+        WrappedExtensionSpec::ExtNaryAdd {
+            output_width,
+            operand_widths,
+        } => {
+            if f.params.len() != operand_widths.len()
+                || f.ret_ty != ir::Type::Bits(*output_width)
+                || f.params
+                    .iter()
+                    .zip(operand_widths.iter())
+                    .any(|(param, width)| param.ty != ir::Type::Bits(*width))
+            {
+                return Err(ParseError::new(format!(
+                    "ffi wrapper helper '{}' does not match ext_nary_add signature for output width {} and operand widths {:?}",
+                    f.name, output_width, operand_widths
+                )));
+            }
+        }
         WrappedExtensionSpec::ExtPrioEncode {
             input_width,
             lsb_prio: _,
         } => {
             let expected_ret_ty = ir::Type::Bits(ceil_log2(input_width.saturating_add(1)));
             if f.params.len() != 1
-                || f.params[0].ty != ir::Type::Bits(input_width)
+                || f.params[0].ty != ir::Type::Bits(*input_width)
                 || f.ret_ty != expected_ret_ty
             {
                 return Err(ParseError::new(format!(
@@ -244,7 +299,7 @@ fn convert_ffi_invokes_to_extension_ops_in_fn(
         let ir::NodePayload::Invoke { to_apply, operands } = payload else {
             continue;
         };
-        let Some(spec) = wrappers.get(&to_apply).copied() else {
+        let Some(spec) = wrappers.get(&to_apply).cloned() else {
             continue;
         };
         match spec {
@@ -268,6 +323,27 @@ fn convert_ffi_invokes_to_extension_ops_in_fn(
                     rhs: operands[1],
                     c_in: operands[2],
                 };
+            }
+            WrappedExtensionSpec::ExtNaryAdd {
+                output_width,
+                operand_widths,
+            } => {
+                if operands.len() != operand_widths.len() {
+                    return Err(ParseError::new(format!(
+                        "invoke of wrapped ext_nary_add helper '{}' expected {} operands, got {}",
+                        to_apply,
+                        operand_widths.len(),
+                        operands.len()
+                    )));
+                }
+                let expected_ty = ir::Type::Bits(output_width);
+                if node.ty != expected_ty {
+                    return Err(ParseError::new(format!(
+                        "invoke of wrapped ext_nary_add helper '{}' had type {}, expected {}",
+                        to_apply, node.ty, expected_ty
+                    )));
+                }
+                node.payload = ir::NodePayload::ExtNaryAdd { operands };
             }
             WrappedExtensionSpec::ExtPrioEncode {
                 input_width,
@@ -326,7 +402,7 @@ fn convert_ffi_invokes_to_extension_ops(pkg: &mut ir::Package) -> Result<(), Par
         let Some(spec) = wrapped_extension_spec_for_fn(f)? else {
             continue;
         };
-        validate_wrapped_extension_helper_signature(f, spec)?;
+        validate_wrapped_extension_helper_signature(f, &spec)?;
         wrappers.insert(f.name.clone(), spec);
     }
     if wrappers.is_empty() {

@@ -104,6 +104,33 @@ fn f(arg: bits[4] id=1) -> bits[3] {
 }
 
 #[test]
+fn verilogffi_wrapped_ext_nary_add_round_trips_verbatim() {
+    let ir_text = r#"package nary_add_wrapped
+
+#[ffi_proto("""code_template: "pir_ext_nary_add {fn} (.op0({op0}), .op1({op1}), .op2({op2}), .out({return})); /* xlsynth_pir_ext=ext_nary_add;out_width=6;operand_widths=3,5,9 */"
+""")]
+fn __pir_ext__ext_nary_add__outw6__ops3_5_9(op0: bits[3] id=5, op1: bits[5] id=6, op2: bits[9] id=7) -> bits[6] {
+  zero_ext.8: bits[6] = zero_ext(op0, new_bit_count=6, id=8)
+  zero_ext.9: bits[6] = zero_ext(op1, new_bit_count=6, id=9)
+  bit_slice.10: bits[6] = bit_slice(op2, start=0, width=6, id=10)
+  add.11: bits[6] = add(zero_ext.8, zero_ext.9, id=11)
+  add.12: bits[6] = add(add.11, bit_slice.10, id=12)
+  ret identity.13: bits[6] = identity(add.12, id=13)
+}
+
+fn f(a: bits[3] id=1, b: bits[5] id=2, c: bits[9] id=3) -> bits[6] {
+  ret r: bits[6] = invoke(a, b, c, to_apply=__pir_ext__ext_nary_add__outw6__ops3_5_9, id=4)
+}
+"#;
+
+    let _pkg = assert_wrapped_text_round_trips_via_pir(
+        ir_text,
+        "f",
+        "__pir_ext__ext_nary_add__outw6__ops3_5_9",
+    );
+}
+
+#[test]
 fn verilogffi_wrapped_helper_referenced_from_counted_for_is_rejected() {
     let ir_text = r#"package carry_out_wrapped_counted_for
 
