@@ -446,7 +446,7 @@ pub enum NodePayload {
     /// added modulo `2^w`. With zero operands, the result is `bits[w]:0`.
     ExtNaryAdd {
         operands: Vec<NodeRef>,
-        arch: ExtNaryAddArchitecture,
+        arch: Option<ExtNaryAddArchitecture>,
     },
     Assert {
         token: NodeRef,
@@ -722,10 +722,10 @@ impl NodePayload {
                 lsb_prio,
                 id
             ),
-            NodePayload::ExtNaryAdd { operands, arch } => {
-                if operands.is_empty() {
-                    format!("ext_nary_add(arch={}, id={})", arch, id)
-                } else {
+            NodePayload::ExtNaryAdd { operands, arch } => match (operands.is_empty(), arch) {
+                (true, Some(arch)) => format!("ext_nary_add(arch={}, id={})", arch, id),
+                (true, None) => format!("ext_nary_add(id={})", id),
+                (false, Some(arch)) => {
                     let operands_text = operands
                         .iter()
                         .map(|n| get_name(*n))
@@ -733,7 +733,15 @@ impl NodePayload {
                         .join(", ");
                     format!("ext_nary_add({}, arch={}, id={})", operands_text, arch, id)
                 }
-            }
+                (false, None) => {
+                    let operands_text = operands
+                        .iter()
+                        .map(|n| get_name(*n))
+                        .collect::<Vec<String>>()
+                        .join(", ");
+                    format!("ext_nary_add({}, id={})", operands_text, id)
+                }
+            },
             NodePayload::Unop(op, arg) => {
                 format!("{}({}, id={})", unop_to_operator(*op), get_name(*arg), id)
             }

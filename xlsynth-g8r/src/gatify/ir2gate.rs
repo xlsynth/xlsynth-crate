@@ -2862,7 +2862,9 @@ fn gatify_node(
                         gatify_zext_or_truncate(output_width, &bits)
                     })
                     .collect();
-                let selected_adder_mapping: AdderMapping = (*arch).into();
+                let selected_adder_mapping = (*arch)
+                    .map(AdderMapping::from)
+                    .unwrap_or(options.adder_mapping);
                 let selected_adder_mapping_name = match selected_adder_mapping {
                     AdderMapping::RippleCarry => "ripple_carry",
                     AdderMapping::BrentKung => "brent_kung",

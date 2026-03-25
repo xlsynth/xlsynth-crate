@@ -295,7 +295,7 @@ fn desugar_ext_carry_out_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
 struct ExtNaryAddShape {
     output_width: usize,
     operand_widths: Vec<usize>,
-    arch: ExtNaryAddArchitecture,
+    arch: Option<ExtNaryAddArchitecture>,
 }
 
 /// Validates `ext_nary_add` shape and returns the widths needed by both inline
@@ -304,7 +304,7 @@ fn analyze_ext_nary_add(
     f: &Fn,
     result: NodeRef,
     operands: &[NodeRef],
-    arch: ExtNaryAddArchitecture,
+    arch: Option<ExtNaryAddArchitecture>,
 ) -> Result<ExtNaryAddShape, DesugarError> {
     let output_width = match f.get_node(result).ty {
         Type::Bits(width) => width,
@@ -370,7 +370,7 @@ enum FfiWrapKey {
     ExtNaryAdd {
         output_width: usize,
         operand_widths: Vec<usize>,
-        arch: ExtNaryAddArchitecture,
+        arch: Option<ExtNaryAddArchitecture>,
     },
     ExtPrioEncode {
         input_width: usize,
@@ -393,10 +393,16 @@ fn helper_base_name(key: &FfiWrapKey) -> String {
                 .map(usize::to_string)
                 .collect::<Vec<_>>()
                 .join("_");
-            format!(
-                "__pir_ext__ext_nary_add__outw{}__ops{}__arch{}",
-                output_width, operand_widths_text, arch
-            )
+            match arch {
+                Some(arch) => format!(
+                    "__pir_ext__ext_nary_add__outw{}__ops{}__arch{}",
+                    output_width, operand_widths_text, arch
+                ),
+                None => format!(
+                    "__pir_ext__ext_nary_add__outw{}__ops{}",
+                    output_width, operand_widths_text
+                ),
+            }
         }
         FfiWrapKey::ExtPrioEncode {
             input_width,
@@ -456,9 +462,14 @@ fn helper_code_template(key: &FfiWrapKey) -> String {
             } else {
                 format!("{operand_bindings}, .out({{return}})")
             };
-            format!(
-                "pir_ext_nary_add {{fn}} ({port_list}); /* xlsynth_pir_ext=ext_nary_add;out_width={output_width};operand_widths={operand_width_list};arch={arch} */"
-            )
+            match arch {
+                Some(arch) => format!(
+                    "pir_ext_nary_add {{fn}} ({port_list}); /* xlsynth_pir_ext=ext_nary_add;out_width={output_width};operand_widths={operand_width_list};arch={arch} */"
+                ),
+                None => format!(
+                    "pir_ext_nary_add {{fn}} ({port_list}); /* xlsynth_pir_ext=ext_nary_add;out_width={output_width};operand_widths={operand_width_list} */"
+                ),
+            }
         }
         FfiWrapKey::ExtPrioEncode {
             input_width,

@@ -6,7 +6,7 @@ use xlsynth_pir::ir::{ExtNaryAddArchitecture, Fn, NodePayload};
 use xlsynth_pir::ir_eval::eval_fn;
 use xlsynth_pir::ir_parser::Parser;
 
-fn get_ext_nary_add_arch(f: &Fn) -> ExtNaryAddArchitecture {
+fn get_ext_nary_add_arch(f: &Fn) -> Option<ExtNaryAddArchitecture> {
     f.nodes
         .iter()
         .find_map(|n| match n.payload {
@@ -30,7 +30,10 @@ fn f(a: bits[3] id=1, b: bits[5] id=2, c: bits[9] id=3) -> bits[6] {
         p.parse_and_validate_package().expect("parse/validate")
     };
     let f = pkg.get_fn("f").expect("fn f present");
-    assert_eq!(get_ext_nary_add_arch(f), ExtNaryAddArchitecture::KoggeStone);
+    assert_eq!(
+        get_ext_nary_add_arch(f),
+        Some(ExtNaryAddArchitecture::KoggeStone)
+    );
     let ext_count: usize = f
         .nodes
         .iter()
@@ -52,7 +55,7 @@ fn f(a: bits[3] id=1, b: bits[5] id=2, c: bits[9] id=3) -> bits[6] {
     let f2 = pkg2.get_fn("f").expect("fn f present in reparsed");
     assert_eq!(
         get_ext_nary_add_arch(f2),
-        ExtNaryAddArchitecture::KoggeStone
+        Some(ExtNaryAddArchitecture::KoggeStone)
     );
     let ext_count2: usize = f2
         .nodes
@@ -76,7 +79,7 @@ fn f() -> bits[7] {
     };
     assert_eq!(
         get_ext_nary_add_arch(pkg.get_fn("f").expect("fn f present")),
-        ExtNaryAddArchitecture::BrentKung
+        Some(ExtNaryAddArchitecture::BrentKung)
     );
     let text = pkg.to_string();
     assert!(
@@ -95,20 +98,26 @@ fn f() -> bits[7] {
 }
 
 #[test]
-fn ext_nary_add_requires_arch_in_text() {
+fn ext_nary_add_arch_is_optional_in_text() {
     let ir = r#"package test
 
 fn f(a: bits[3] id=1, b: bits[5] id=2) -> bits[6] {
   ret r: bits[6] = ext_nary_add(a, b, id=3)
 }
 "#;
-    let mut p = Parser::new(ir);
-    let err = p
-        .parse_and_validate_package()
-        .expect_err("missing arch should fail");
+    let pkg = {
+        let mut p = Parser::new(ir);
+        p.parse_and_validate_package()
+            .expect("missing arch should use lowering default")
+    };
     assert!(
-        err.to_string().contains("expected arch for ext_nary_add"),
-        "unexpected parse error: {err}"
+        pkg.to_string().contains("ext_nary_add(a, b, id=3)"),
+        "expected emitted text to omit arch when not specified:\n{}",
+        pkg.to_string()
+    );
+    assert_eq!(
+        get_ext_nary_add_arch(pkg.get_fn("f").expect("fn f present")),
+        None
     );
 }
 
@@ -161,7 +170,7 @@ fn f(a: bits[3] id=1, b: bits[5] id=2, c: bits[9] id=3) -> bits[6] {
     let wrapped_f = wrapped_pkg.get_fn("f").expect("fn f present after reparse");
     assert_eq!(
         get_ext_nary_add_arch(wrapped_f),
-        ExtNaryAddArchitecture::KoggeStone
+        Some(ExtNaryAddArchitecture::KoggeStone)
     );
     let ext_count: usize = wrapped_f
         .nodes
@@ -174,6 +183,43 @@ fn f(a: bits[3] id=1, b: bits[5] id=2, c: bits[9] id=3) -> bits[6] {
         emit_package_with_extension_mode(&wrapped_pkg, ExtensionEmitMode::AsFfiFunction)
             .expect("re-emit ffi-wrapped text");
     assert_eq!(wrapped_again, wrapped);
+}
+
+#[test]
+fn ext_nary_add_without_arch_round_trips_via_ffi_wrapped_text() {
+    let ir = r#"package test
+
+fn f(a: bits[3] id=1, b: bits[5] id=2, c: bits[9] id=3) -> bits[6] {
+  ret r: bits[6] = ext_nary_add(a, b, c, id=4)
+}
+"#;
+
+    let pkg = {
+        let mut p = Parser::new(ir);
+        p.parse_and_validate_package().expect("parse/validate")
+    };
+    let wrapped = emit_package_with_extension_mode(&pkg, ExtensionEmitMode::AsFfiFunction)
+        .expect("emit ffi-wrapped text");
+    assert!(
+        wrapped.contains("to_apply=__pir_ext__ext_nary_add__outw6__ops3_5_9"),
+        "expected invoke of synthesized ext_nary_add helper without arch suffix:\n{}",
+        wrapped
+    );
+    assert!(
+        !wrapped.contains("arch="),
+        "expected wrapped metadata to omit arch when not specified:\n{}",
+        wrapped
+    );
+
+    let wrapped_pkg = {
+        let mut p = Parser::new(&wrapped);
+        p.parse_and_validate_package()
+            .expect("parse/validate wrapped text")
+    };
+    assert_eq!(
+        get_ext_nary_add_arch(wrapped_pkg.get_fn("f").expect("fn f present after reparse")),
+        None
+    );
 }
 
 #[test]

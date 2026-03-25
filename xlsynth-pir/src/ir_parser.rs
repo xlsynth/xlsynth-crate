@@ -113,7 +113,7 @@ enum WrappedExtensionSpec {
     ExtNaryAdd {
         output_width: usize,
         operand_widths: Vec<usize>,
-        arch: ir::ExtNaryAddArchitecture,
+        arch: Option<ir::ExtNaryAddArchitecture>,
     },
     ExtPrioEncode {
         input_width: usize,
@@ -193,12 +193,10 @@ fn parse_wrapped_extension_spec_from_attr(
             let arch = fields
                 .get("arch")
                 .copied()
-                .ok_or_else(|| {
-                    ParseError::new("missing arch for ext_nary_add metadata".to_string())
-                })
-                .and_then(|value| {
+                .map(|value| {
                     ir::ExtNaryAddArchitecture::from_ir_identifier(value).map_err(ParseError::new)
-                })?;
+                })
+                .transpose()?;
             Ok(Some(WrappedExtensionSpec::ExtNaryAdd {
                 output_width,
                 operand_widths,
@@ -1327,7 +1325,7 @@ impl Parser {
         &mut self,
         node_env: &IrNodeEnv,
         maybe_id: &mut Option<usize>,
-    ) -> Result<(Vec<ir::NodeRef>, ir::ExtNaryAddArchitecture), ParseError> {
+    ) -> Result<(Vec<ir::NodeRef>, Option<ir::ExtNaryAddArchitecture>), ParseError> {
         let mut operands = Vec::new();
         let mut arch = None;
         let mut saw_arch = false;
@@ -1372,12 +1370,6 @@ impl Parser {
                 self.rest()
             )));
         }
-        let arch = arch.ok_or_else(|| {
-            ParseError::new(format!(
-                "expected arch for ext_nary_add; rest: {:?}",
-                self.rest()
-            ))
-        })?;
         Ok((operands, arch))
     }
 
