@@ -736,6 +736,25 @@ fn gatify_zext_or_truncate(new_bit_count: usize, arg_bits: &AigBitVector) -> Aig
     }
 }
 
+fn gatify_sext_or_truncate(
+    gb: &mut GateBuilder,
+    text_id: usize,
+    new_bit_count: usize,
+    arg_bits: &AigBitVector,
+) -> AigBitVector {
+    match arg_bits.get_bit_count().cmp(&new_bit_count) {
+        std::cmp::Ordering::Less => {
+            if arg_bits.get_bit_count() == 0 {
+                AigBitVector::zeros(new_bit_count)
+            } else {
+                gatify_sign_ext(gb, text_id, new_bit_count, arg_bits)
+            }
+        }
+        std::cmp::Ordering::Equal => arg_bits.clone(),
+        std::cmp::Ordering::Greater => arg_bits.get_lsb_slice(0, new_bit_count),
+    }
+}
+
 fn gatify_umul(
     lhs_bits: &AigBitVector,
     rhs_bits: &AigBitVector,
@@ -2841,27 +2860,45 @@ fn gatify_node(
             }
             env.add(node_ref, GateOrVec::BitVector(out_bits));
         }
-        ir::NodePayload::ExtNaryAdd { operands, arch } => {
+        ir::NodePayload::ExtNaryAdd { terms, arch } => {
             let ir::Type::Bits(output_width) = node.ty else {
                 return Err("ExtNaryAdd result must be bits-typed".to_string());
             };
             if output_width == 0 {
                 env.add(node_ref, GateOrVec::BitVector(AigBitVector::zeros(0)));
-            } else if operands.is_empty() {
+            } else if terms.is_empty() {
                 env.add(
                     node_ref,
                     GateOrVec::BitVector(AigBitVector::zeros(output_width)),
                 );
             } else {
-                let resized: Vec<AigBitVector> = operands
+                let mut negated_term_count = 0usize;
+                let mut lowered_terms: Vec<AigBitVector> = terms
                     .iter()
-                    .map(|operand| {
+                    .map(|term| {
                         let bits = env
-                            .get_bit_vector(*operand)
+                            .get_bit_vector(term.operand)
                             .expect("ext_nary_add operand should be present");
-                        gatify_zext_or_truncate(output_width, &bits)
+                        let resized = if term.signed {
+                            gatify_sext_or_truncate(g8_builder, node.text_id, output_width, &bits)
+                        } else {
+                            gatify_zext_or_truncate(output_width, &bits)
+                        };
+                        if term.negated {
+                            negated_term_count = negated_term_count.saturating_add(1);
+                            g8_builder.add_not_vec(&resized)
+                        } else {
+                            resized
+                        }
                     })
                     .collect();
+                if negated_term_count != 0 {
+                    lowered_terms.push(usize_as_aig_bits(
+                        negated_term_count,
+                        output_width,
+                        g8_builder,
+                    ));
+                }
                 let selected_adder_mapping = (*arch)
                     .map(AdderMapping::from)
                     .unwrap_or(options.adder_mapping);
@@ -2870,9 +2907,13 @@ fn gatify_node(
                     AdderMapping::BrentKung => "brent_kung",
                     AdderMapping::KoggeStone => "kogge_stone",
                 };
-                let sum =
-                    array_add_with_carry_out(g8_builder, &resized, None, selected_adder_mapping)
-                        .sum;
+                let sum = array_add_with_carry_out(
+                    g8_builder,
+                    &lowered_terms,
+                    None,
+                    selected_adder_mapping,
+                )
+                .sum;
                 for (i, gate) in sum.iter_lsb_to_msb().enumerate() {
                     g8_builder.add_tag(
                         gate.node,

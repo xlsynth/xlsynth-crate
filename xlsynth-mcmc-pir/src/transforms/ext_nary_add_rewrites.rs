@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use xlsynth_pir::ir::ExtNaryAddArchitecture;
+use xlsynth_pir::ir::{ExtNaryAddArchitecture, ExtNaryAddTerm};
 
-/// Rewrites `add(a, b)` into `ext_nary_add(a, b, arch=brent_kung)`.
+/// Rewrites `add(a, b)` into
+/// `ext_nary_add(a, b, signed=[false, false], negated=[false, false],
+/// arch=brent_kung)`.
 #[derive(Debug)]
 pub struct AddToExtNaryAddTransform;
 
@@ -34,14 +36,14 @@ fn binary_ext_nary_add_operands_matching_result(
     let Type::Bits(w) = f.get_node(nr).ty else {
         return None;
     };
-    let NodePayload::ExtNaryAdd { operands, .. } = &f.get_node(nr).payload else {
+    let NodePayload::ExtNaryAdd { terms, .. } = &f.get_node(nr).payload else {
         return None;
     };
-    if operands.len() != 2 {
+    if terms.len() != 2 || !terms.iter().all(|term| !term.signed && !term.negated) {
         return None;
     }
-    let lhs = operands[0];
-    let rhs = operands[1];
+    let lhs = terms[0].operand;
+    let rhs = terms[1].operand;
     if !is_bits_w(f, lhs, w) || !is_bits_w(f, rhs, w) {
         return None;
     }
@@ -140,7 +142,18 @@ impl PirTransform for AddToExtNaryAddTransform {
             );
         }
         f.get_node_mut(nr).payload = NodePayload::ExtNaryAdd {
-            operands: vec![lhs, rhs],
+            terms: vec![
+                ExtNaryAddTerm {
+                    operand: lhs,
+                    signed: false,
+                    negated: false,
+                },
+                ExtNaryAddTerm {
+                    operand: rhs,
+                    signed: false,
+                    negated: false,
+                },
+            ],
             arch: Some(ExtNaryAddArchitecture::BrentKung),
         };
         Ok(())
@@ -268,8 +281,9 @@ mod tests {
             .expect("apply");
 
         match &f.get_node(add_ref).payload {
-            NodePayload::ExtNaryAdd { operands, arch } => {
-                assert_eq!(operands.len(), 2);
+            NodePayload::ExtNaryAdd { terms, arch } => {
+                assert_eq!(terms.len(), 2);
+                assert!(terms.iter().all(|term| !term.signed && !term.negated));
                 assert_eq!(*arch, Some(ExtNaryAddArchitecture::BrentKung));
             }
             other => panic!("expected ext_nary_add after rewrite, got {other:?}"),
@@ -279,7 +293,7 @@ mod tests {
     #[test]
     fn change_ext_nary_add_to_ripple_carry_rewrites_other_architecture() {
         let ir_text = r#"fn t(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
-  ret ext_nary_add.3: bits[8] = ext_nary_add(a, b, arch=brent_kung, id=3)
+  ret ext_nary_add.3: bits[8] = ext_nary_add(a, b, signed=[false, false], negated=[false, false], arch=brent_kung, id=3)
 }"#;
         let mut parser = ir_parser::Parser::new(ir_text);
         let mut f = parser.parse_fn().unwrap();
@@ -305,7 +319,7 @@ mod tests {
     #[test]
     fn change_ext_nary_add_to_brent_kung_rewrites_other_architecture() {
         let ir_text = r#"fn t(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
-  ret ext_nary_add.3: bits[8] = ext_nary_add(a, b, arch=kogge_stone, id=3)
+  ret ext_nary_add.3: bits[8] = ext_nary_add(a, b, signed=[false, false], negated=[false, false], arch=kogge_stone, id=3)
 }"#;
         let mut parser = ir_parser::Parser::new(ir_text);
         let mut f = parser.parse_fn().unwrap();
@@ -331,7 +345,7 @@ mod tests {
     #[test]
     fn change_ext_nary_add_to_kogge_stone_rewrites_other_architecture() {
         let ir_text = r#"fn t(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
-  ret ext_nary_add.3: bits[8] = ext_nary_add(a, b, arch=ripple_carry, id=3)
+  ret ext_nary_add.3: bits[8] = ext_nary_add(a, b, signed=[false, false], negated=[false, false], arch=ripple_carry, id=3)
 }"#;
         let mut parser = ir_parser::Parser::new(ir_text);
         let mut f = parser.parse_fn().unwrap();
@@ -357,7 +371,7 @@ mod tests {
     #[test]
     fn change_ext_nary_add_to_target_skips_same_architecture() {
         let ir_text = r#"fn t(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
-  ret ext_nary_add.3: bits[8] = ext_nary_add(a, b, arch=brent_kung, id=3)
+  ret ext_nary_add.3: bits[8] = ext_nary_add(a, b, signed=[false, false], negated=[false, false], arch=brent_kung, id=3)
 }"#;
         let mut parser = ir_parser::Parser::new(ir_text);
         let f = parser.parse_fn().unwrap();
@@ -374,7 +388,7 @@ mod tests {
     #[test]
     fn binary_ext_nary_add_to_add_rewrites_width_preserving_case() {
         let ir_text = r#"fn t(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
-  ret ext_nary_add.3: bits[8] = ext_nary_add(a, b, arch=ripple_carry, id=3)
+  ret ext_nary_add.3: bits[8] = ext_nary_add(a, b, signed=[false, false], negated=[false, false], arch=ripple_carry, id=3)
 }"#;
         let mut parser = ir_parser::Parser::new(ir_text);
         let mut f = parser.parse_fn().unwrap();
@@ -395,7 +409,7 @@ mod tests {
     #[test]
     fn binary_ext_nary_add_to_add_skips_resizing_case() {
         let ir_text = r#"fn t(a: bits[4] id=1, b: bits[6] id=2) -> bits[8] {
-  ret ext_nary_add.3: bits[8] = ext_nary_add(a, b, arch=ripple_carry, id=3)
+  ret ext_nary_add.3: bits[8] = ext_nary_add(a, b, signed=[false, false], negated=[false, false], arch=ripple_carry, id=3)
 }"#;
         let mut parser = ir_parser::Parser::new(ir_text);
         let f = parser.parse_fn().unwrap();

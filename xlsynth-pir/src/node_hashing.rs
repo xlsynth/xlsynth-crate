@@ -109,8 +109,12 @@ fn hash_payload_attributes(f: &Fn, payload: &NodePayload, hasher: &mut blake3::H
         } => {}
         NodePayload::ExtCarryOut { .. } => {}
         NodePayload::ExtPrioEncode { arg: _, lsb_prio } => update_hash_bool(hasher, *lsb_prio),
-        NodePayload::ExtNaryAdd { operands, arch } => {
-            update_hash_u64(hasher, operands.len() as u64);
+        NodePayload::ExtNaryAdd { terms, arch } => {
+            update_hash_u64(hasher, terms.len() as u64);
+            for term in terms.iter() {
+                update_hash_bool(hasher, term.signed);
+                update_hash_bool(hasher, term.negated);
+            }
             update_hash_bool(hasher, arch.is_some());
             if let Some(arch) = arch {
                 update_hash_str(hasher, &arch.to_string());

@@ -113,6 +113,8 @@ enum WrappedExtensionSpec {
     ExtNaryAdd {
         output_width: usize,
         operand_widths: Vec<usize>,
+        operand_signed: Vec<bool>,
+        operand_negated: Vec<bool>,
         arch: Option<ir::ExtNaryAddArchitecture>,
     },
     ExtPrioEncode {
@@ -175,21 +177,29 @@ fn parse_wrapped_extension_spec_from_attr(
                 })?
                 .parse::<usize>()
                 .map_err(|e| ParseError::new(format!("invalid ext_nary_add out_width: {e}")))?;
-            let operand_widths_text = fields.get("operand_widths").copied().ok_or_else(|| {
-                ParseError::new("missing operand_widths for ext_nary_add metadata".to_string())
-            })?;
-            let operand_widths = if operand_widths_text.is_empty() {
-                Vec::new()
-            } else {
-                operand_widths_text
+            let operand_widths = match fields.get("operand_widths").copied() {
+                Some(operand_widths_text) if !operand_widths_text.is_empty() => operand_widths_text
                     .split(',')
                     .map(|width| {
                         width.parse::<usize>().map_err(|e| {
                             ParseError::new(format!("invalid ext_nary_add operand width: {e}"))
                         })
                     })
-                    .collect::<Result<Vec<_>, _>>()?
+                    .collect::<Result<Vec<_>, _>>()?,
+                Some(_) | None => Vec::new(),
             };
+            let operand_signed = parse_bool_list_field(
+                fields.get("operand_signed").copied().ok_or_else(|| {
+                    ParseError::new("missing operand_signed for ext_nary_add metadata".to_string())
+                })?,
+                "operand_signed",
+            )?;
+            let operand_negated = parse_bool_list_field(
+                fields.get("operand_negated").copied().ok_or_else(|| {
+                    ParseError::new("missing operand_negated for ext_nary_add metadata".to_string())
+                })?,
+                "operand_negated",
+            )?;
             let arch = fields
                 .get("arch")
                 .copied()
@@ -200,6 +210,8 @@ fn parse_wrapped_extension_spec_from_attr(
             Ok(Some(WrappedExtensionSpec::ExtNaryAdd {
                 output_width,
                 operand_widths,
+                operand_signed,
+                operand_negated,
                 arch,
             }))
         }
@@ -228,6 +240,17 @@ fn parse_wrapped_extension_spec_from_attr(
     }
 }
 
+fn parse_bool_list_field(value: &str, field_name: &str) -> Result<Vec<bool>, ParseError> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split(',')
+        .map(Parser::parse_bool_literal)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| ParseError::new(format!("invalid {} entry: {}", field_name, e.msg)))
+}
+
 fn wrapped_extension_spec_for_fn(f: &ir::Fn) -> Result<Option<WrappedExtensionSpec>, ParseError> {
     let mut found: Option<WrappedExtensionSpec> = None;
     for attr in &f.outer_attrs {
@@ -245,15 +268,15 @@ fn wrapped_extension_spec_for_fn(f: &ir::Fn) -> Result<Option<WrappedExtensionSp
     Ok(found)
 }
 
-fn validate_wrapped_extension_helper_signature(
+fn canonicalize_wrapped_extension_helper_spec(
     f: &ir::Fn,
-    spec: &WrappedExtensionSpec,
-) -> Result<(), ParseError> {
+    spec: WrappedExtensionSpec,
+) -> Result<WrappedExtensionSpec, ParseError> {
     match spec {
         WrappedExtensionSpec::ExtCarryOut { width } => {
             if f.params.len() != 3
-                || f.params[0].ty != ir::Type::Bits(*width)
-                || f.params[1].ty != ir::Type::Bits(*width)
+                || f.params[0].ty != ir::Type::Bits(width)
+                || f.params[1].ty != ir::Type::Bits(width)
                 || f.params[2].ty != ir::Type::Bits(1)
                 || f.ret_ty != ir::Type::Bits(1)
             {
@@ -262,32 +285,73 @@ fn validate_wrapped_extension_helper_signature(
                     f.name, width
                 )));
             }
+            Ok(WrappedExtensionSpec::ExtCarryOut { width })
         }
         WrappedExtensionSpec::ExtNaryAdd {
             output_width,
             operand_widths,
-            arch: _,
+            operand_signed,
+            operand_negated,
+            arch,
         } => {
-            if f.params.len() != operand_widths.len()
-                || f.ret_ty != ir::Type::Bits(*output_width)
-                || f.params
-                    .iter()
-                    .zip(operand_widths.iter())
-                    .any(|(param, width)| param.ty != ir::Type::Bits(*width))
-            {
+            let helper_operand_widths = f
+                .params
+                .iter()
+                .map(|param| match param.ty {
+                    ir::Type::Bits(width) => Ok(width),
+                    ref other => Err(ParseError::new(format!(
+                        "ffi wrapper helper '{}' ext_nary_add operand '{}' must be bits-typed, got {}",
+                        f.name, param.name, other
+                    ))),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if f.ret_ty != ir::Type::Bits(output_width) {
+                return Err(ParseError::new(format!(
+                    "ffi wrapper helper '{}' does not match ext_nary_add result width {}",
+                    f.name, output_width
+                )));
+            }
+            if !operand_widths.is_empty() && operand_widths != helper_operand_widths {
                 return Err(ParseError::new(format!(
                     "ffi wrapper helper '{}' does not match ext_nary_add signature for output width {} and operand widths {:?}",
                     f.name, output_width, operand_widths
                 )));
             }
+            let operand_signed = if operand_signed.len() == helper_operand_widths.len() {
+                operand_signed
+            } else {
+                return Err(ParseError::new(format!(
+                    "ffi wrapper helper '{}' ext_nary_add operand_signed length {} did not match operand count {}",
+                    f.name,
+                    operand_signed.len(),
+                    helper_operand_widths.len()
+                )));
+            };
+            let operand_negated = if operand_negated.len() == helper_operand_widths.len() {
+                operand_negated
+            } else {
+                return Err(ParseError::new(format!(
+                    "ffi wrapper helper '{}' ext_nary_add operand_negated length {} did not match operand count {}",
+                    f.name,
+                    operand_negated.len(),
+                    helper_operand_widths.len()
+                )));
+            };
+            Ok(WrappedExtensionSpec::ExtNaryAdd {
+                output_width,
+                operand_widths: helper_operand_widths,
+                operand_signed,
+                operand_negated,
+                arch,
+            })
         }
         WrappedExtensionSpec::ExtPrioEncode {
             input_width,
-            lsb_prio: _,
+            lsb_prio,
         } => {
             let expected_ret_ty = ir::Type::Bits(ceil_log2(input_width.saturating_add(1)));
             if f.params.len() != 1
-                || f.params[0].ty != ir::Type::Bits(*input_width)
+                || f.params[0].ty != ir::Type::Bits(input_width)
                 || f.ret_ty != expected_ret_ty
             {
                 return Err(ParseError::new(format!(
@@ -295,9 +359,12 @@ fn validate_wrapped_extension_helper_signature(
                     f.name, input_width
                 )));
             }
+            Ok(WrappedExtensionSpec::ExtPrioEncode {
+                input_width,
+                lsb_prio,
+            })
         }
     }
-    Ok(())
 }
 
 fn convert_ffi_invokes_to_extension_ops_in_fn(
@@ -358,6 +425,8 @@ fn convert_ffi_invokes_to_extension_ops_in_fn(
             WrappedExtensionSpec::ExtNaryAdd {
                 output_width,
                 operand_widths,
+                operand_signed,
+                operand_negated,
                 arch,
             } => {
                 if operands.len() != operand_widths.len() {
@@ -386,7 +455,17 @@ fn convert_ffi_invokes_to_extension_ops_in_fn(
                         )));
                     }
                 }
-                f.nodes[idx].payload = ir::NodePayload::ExtNaryAdd { operands, arch };
+                let terms = operands
+                    .into_iter()
+                    .zip(operand_signed.into_iter())
+                    .zip(operand_negated.into_iter())
+                    .map(|((operand, signed), negated)| ir::ExtNaryAddTerm {
+                        operand,
+                        signed,
+                        negated,
+                    })
+                    .collect();
+                f.nodes[idx].payload = ir::NodePayload::ExtNaryAdd { terms, arch };
             }
             WrappedExtensionSpec::ExtPrioEncode {
                 input_width,
@@ -452,7 +531,7 @@ fn convert_ffi_invokes_to_extension_ops(pkg: &mut ir::Package) -> Result<(), Par
         let Some(spec) = wrapped_extension_spec_for_fn(f)? else {
             continue;
         };
-        validate_wrapped_extension_helper_signature(f, &spec)?;
+        let spec = canonicalize_wrapped_extension_helper_spec(f, spec)?;
         wrappers.insert(f.name.clone(), spec);
     }
     if wrappers.is_empty() {
@@ -1239,6 +1318,31 @@ impl Parser {
         }
     }
 
+    fn parse_bool_list_attribute(&mut self, attr_name: &str) -> Result<Vec<bool>, ParseError> {
+        self.drop_or_error(attr_name)?;
+        self.drop_or_error("=")?;
+        self.drop_whitespace_and_comments();
+        self.drop_or_error("[")?;
+        let mut values = Vec::new();
+        loop {
+            self.drop_whitespace_and_comments();
+            if self.peek_is("]") {
+                self.drop_or_error("]")?;
+                break;
+            }
+            let raw = self
+                .pop_identifier_or_error(&format!("bool list attribute element: {}", attr_name))?;
+            values.push(Self::parse_bool_literal(&raw)?);
+            self.drop_whitespace_and_comments();
+            if self.peek_is("]") {
+                self.drop_or_error("]")?;
+                break;
+            }
+            self.drop_or_error(",")?;
+        }
+        Ok(values)
+    }
+
     fn parse_value_with_ty(
         &mut self,
         ty: &ir::Type,
@@ -1325,10 +1429,14 @@ impl Parser {
         &mut self,
         node_env: &IrNodeEnv,
         maybe_id: &mut Option<usize>,
-    ) -> Result<(Vec<ir::NodeRef>, Option<ir::ExtNaryAddArchitecture>), ParseError> {
+    ) -> Result<(Vec<ir::ExtNaryAddTerm>, Option<ir::ExtNaryAddArchitecture>), ParseError> {
         let mut operands = Vec::new();
         let mut arch = None;
+        let mut signed = None;
+        let mut negated = None;
         let mut saw_arch = false;
+        let mut saw_signed = false;
+        let mut saw_negated = false;
 
         loop {
             self.drop_whitespace_and_comments();
@@ -1350,9 +1458,24 @@ impl Parser {
                         .map_err(ParseError::new)?,
                 );
                 saw_arch = true;
+            } else if self.peek_is("signed=") {
+                if saw_signed {
+                    return Err(ParseError::new(
+                        "duplicate signed for ext_nary_add".to_string(),
+                    ));
+                }
+                signed = Some(self.parse_bool_list_attribute("signed")?);
+                saw_signed = true;
+            } else if self.peek_is("negated=") {
+                if saw_negated {
+                    return Err(ParseError::new(
+                        "duplicate negated for ext_nary_add".to_string(),
+                    ));
+                }
+                negated = Some(self.parse_bool_list_attribute("negated")?);
+                saw_negated = true;
             } else {
-                let operand = self.parse_node_ref(node_env, "ext_nary_add operand")?;
-                operands.push(operand);
+                operands.push(self.parse_node_ref(node_env, "ext_nary_add operand")?);
             }
 
             self.drop_whitespace_and_comments();
@@ -1370,7 +1493,37 @@ impl Parser {
                 self.rest()
             )));
         }
-        Ok((operands, arch))
+        let signed = signed.ok_or_else(|| {
+            ParseError::new("missing signed attribute for ext_nary_add".to_string())
+        })?;
+        if signed.len() != operands.len() {
+            return Err(ParseError::new(format!(
+                "signed attribute for ext_nary_add had {} entries; expected {}",
+                signed.len(),
+                operands.len()
+            )));
+        }
+        let negated = negated.ok_or_else(|| {
+            ParseError::new("missing negated attribute for ext_nary_add".to_string())
+        })?;
+        if negated.len() != operands.len() {
+            return Err(ParseError::new(format!(
+                "negated attribute for ext_nary_add had {} entries; expected {}",
+                negated.len(),
+                operands.len()
+            )));
+        }
+        let terms = operands
+            .into_iter()
+            .zip(signed)
+            .zip(negated)
+            .map(|((operand, signed), negated)| ir::ExtNaryAddTerm {
+                operand,
+                signed,
+                negated,
+            })
+            .collect();
+        Ok((terms, arch))
     }
 
     fn parse_node(&mut self, node_env: &mut IrNodeEnv) -> Result<ir::Node, ParseError> {
@@ -1669,13 +1822,9 @@ impl Parser {
                 )
             }
             "ext_nary_add" => {
-                let (operands, arch) =
-                    self.parse_ext_nary_add_op(&node_env, &mut maybe_id)?;
+                let (terms, arch) = self.parse_ext_nary_add_op(&node_env, &mut maybe_id)?;
                 (
-                    ir::NodePayload::ExtNaryAdd {
-                        operands,
-                        arch,
-                    },
+                    ir::NodePayload::ExtNaryAdd { terms, arch },
                     maybe_id.unwrap(),
                 )
             }

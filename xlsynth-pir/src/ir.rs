@@ -358,6 +358,14 @@ pub struct NodeRef {
     pub index: usize,
 }
 
+/// Describes one operand contribution to an `ext_nary_add`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExtNaryAddTerm {
+    pub operand: NodeRef,
+    pub signed: bool,
+    pub negated: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodePayload {
     Nil,
@@ -441,11 +449,12 @@ pub enum NodePayload {
     /// Extended (non-upstream) op: add zero or more bits operands after
     /// resizing each to the result width.
     ///
-    /// Semantics: if the node result type is `bits[w]`, each operand is
-    /// zero-extended or truncated to `bits[w]`, then all resized operands are
-    /// added modulo `2^w`. With zero operands, the result is `bits[w]:0`.
+    /// Semantics: if the node result type is `bits[w]`, each term operand is
+    /// resized to `bits[w]` using its `signed` flag, optionally negated in
+    /// `bits[w]`, then all resized term values are added modulo `2^w`. With
+    /// zero operands, the result is `bits[w]:0`.
     ExtNaryAdd {
-        operands: Vec<NodeRef>,
+        terms: Vec<ExtNaryAddTerm>,
         arch: Option<ExtNaryAddArchitecture>,
     },
     Assert {
@@ -624,9 +633,9 @@ impl NodePayload {
                 }
                 Ok(())
             }
-            NodePayload::ExtNaryAdd { operands, arch: _ } => {
-                for operand in operands.iter() {
-                    if !matches!(f.get_node_ty(*operand), Type::Bits(_)) {
+            NodePayload::ExtNaryAdd { terms, arch: _ } => {
+                for term in terms.iter() {
+                    if !matches!(f.get_node_ty(term.operand), Type::Bits(_)) {
                         return Err("ext_nary_add operands must be bits-typed".to_string());
                     }
                 }
@@ -722,26 +731,38 @@ impl NodePayload {
                 lsb_prio,
                 id
             ),
-            NodePayload::ExtNaryAdd { operands, arch } => match (operands.is_empty(), arch) {
-                (true, Some(arch)) => format!("ext_nary_add(arch={}, id={})", arch, id),
-                (true, None) => format!("ext_nary_add(id={})", id),
-                (false, Some(arch)) => {
-                    let operands_text = operands
-                        .iter()
-                        .map(|n| get_name(*n))
-                        .collect::<Vec<String>>()
-                        .join(", ");
-                    format!("ext_nary_add({}, arch={}, id={})", operands_text, arch, id)
+            NodePayload::ExtNaryAdd { terms, arch } => {
+                let operand_text = terms
+                    .iter()
+                    .map(|term| get_name(term.operand))
+                    .collect::<Vec<String>>()
+                    .join(", ");
+                let mut attrs = Vec::new();
+                if !operand_text.is_empty() {
+                    attrs.push(operand_text);
                 }
-                (false, None) => {
-                    let operands_text = operands
+                attrs.push(format!(
+                    "signed=[{}]",
+                    terms
                         .iter()
-                        .map(|n| get_name(*n))
+                        .map(|term| term.signed.to_string())
                         .collect::<Vec<String>>()
-                        .join(", ");
-                    format!("ext_nary_add({}, id={})", operands_text, id)
+                        .join(", ")
+                ));
+                attrs.push(format!(
+                    "negated=[{}]",
+                    terms
+                        .iter()
+                        .map(|term| term.negated.to_string())
+                        .collect::<Vec<String>>()
+                        .join(", ")
+                ));
+                if let Some(arch) = arch {
+                    attrs.push(format!("arch={}", arch));
                 }
-            },
+                attrs.push(format!("id={}", id));
+                format!("ext_nary_add({})", attrs.join(", "))
+            }
             NodePayload::Unop(op, arg) => {
                 format!("{}({}, id={})", unop_to_operator(*op), get_name(*arg), id)
             }

@@ -978,7 +978,7 @@ where
             }
         }
 
-        if let NodePayload::ExtNaryAdd { operands, arch: _ } = &node.payload {
+        if let NodePayload::ExtNaryAdd { terms, arch: _ } = &node.payload {
             if !matches!(node.ty, Type::Bits(_)) {
                 return Err(ValidationError::ExtNaryAddResultTypeMismatch {
                     func: f.name.clone(),
@@ -986,8 +986,8 @@ where
                     actual: node.ty.clone(),
                 });
             }
-            for nr in operands.iter() {
-                if !matches!(f.get_node(*nr).ty, Type::Bits(_)) {
+            for term in terms.iter() {
+                if !matches!(f.get_node(term.operand).ty, Type::Bits(_)) {
                     return Err(ValidationError::ExtNaryAddOperandTypeMismatch {
                         func: f.name.clone(),
                         node_index: i,
