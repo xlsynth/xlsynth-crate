@@ -262,6 +262,39 @@ pub enum Unop {
     XorReduce,
 }
 
+/// Selects the adder architecture used when lowering `ext_nary_add`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub enum ExtNaryAddArchitecture {
+    RippleCarry,
+    KoggeStone,
+    BrentKung,
+}
+
+impl ExtNaryAddArchitecture {
+    /// Parses the textual PIR spelling for an n-way adder architecture.
+    pub fn from_ir_identifier(value: &str) -> Result<Self, String> {
+        match value {
+            "ripple_carry" => Ok(Self::RippleCarry),
+            "kogge_stone" => Ok(Self::KoggeStone),
+            "brent_kung" => Ok(Self::BrentKung),
+            _ => Err(format!(
+                "unknown ext_nary_add arch {:?}; expected ripple_carry, kogge_stone, or brent_kung",
+                value
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for ExtNaryAddArchitecture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RippleCarry => write!(f, "ripple_carry"),
+            Self::KoggeStone => write!(f, "kogge_stone"),
+            Self::BrentKung => write!(f, "brent_kung"),
+        }
+    }
+}
+
 pub fn operator_to_unop(operator: &str) -> Option<Unop> {
     match operator {
         "neg" => Some(Unop::Neg),
@@ -413,6 +446,7 @@ pub enum NodePayload {
     /// added modulo `2^w`. With zero operands, the result is `bits[w]:0`.
     ExtNaryAdd {
         operands: Vec<NodeRef>,
+        arch: Option<ExtNaryAddArchitecture>,
     },
     Assert {
         token: NodeRef,
@@ -590,7 +624,7 @@ impl NodePayload {
                 }
                 Ok(())
             }
-            NodePayload::ExtNaryAdd { operands } => {
+            NodePayload::ExtNaryAdd { operands, arch: _ } => {
                 for operand in operands.iter() {
                     if !matches!(f.get_node_ty(*operand), Type::Bits(_)) {
                         return Err("ext_nary_add operands must be bits-typed".to_string());
@@ -688,21 +722,26 @@ impl NodePayload {
                 lsb_prio,
                 id
             ),
-            NodePayload::ExtNaryAdd { operands } => {
-                if operands.is_empty() {
-                    format!("ext_nary_add(id={})", id)
-                } else {
-                    format!(
-                        "ext_nary_add({}, id={})",
-                        operands
-                            .iter()
-                            .map(|n| get_name(*n))
-                            .collect::<Vec<String>>()
-                            .join(", "),
-                        id
-                    )
+            NodePayload::ExtNaryAdd { operands, arch } => match (operands.is_empty(), arch) {
+                (true, Some(arch)) => format!("ext_nary_add(arch={}, id={})", arch, id),
+                (true, None) => format!("ext_nary_add(id={})", id),
+                (false, Some(arch)) => {
+                    let operands_text = operands
+                        .iter()
+                        .map(|n| get_name(*n))
+                        .collect::<Vec<String>>()
+                        .join(", ");
+                    format!("ext_nary_add({}, arch={}, id={})", operands_text, arch, id)
                 }
-            }
+                (false, None) => {
+                    let operands_text = operands
+                        .iter()
+                        .map(|n| get_name(*n))
+                        .collect::<Vec<String>>()
+                        .join(", ");
+                    format!("ext_nary_add({}, id={})", operands_text, id)
+                }
+            },
             NodePayload::Unop(op, arg) => {
                 format!("{}({}, id={})", unop_to_operator(*op), get_name(*arg), id)
             }

@@ -121,6 +121,16 @@ fn find_missing_spdx_files(root: &Path) -> Vec<PathBuf> {
             {
                 continue;
             }
+            // VCDs are generated simulation waveforms, not maintained source files.
+            if path
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .ends_with(".vcd")
+            {
+                continue;
+            }
 
             if let Some(extension) = path.extension() {
                 if extension == "md"

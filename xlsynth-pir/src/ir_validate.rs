@@ -978,7 +978,7 @@ where
             }
         }
 
-        if let NodePayload::ExtNaryAdd { operands } = &node.payload {
+        if let NodePayload::ExtNaryAdd { operands, arch: _ } = &node.payload {
             if !matches!(node.ty, Type::Bits(_)) {
                 return Err(ValidationError::ExtNaryAddResultTypeMismatch {
                     func: f.name.clone(),

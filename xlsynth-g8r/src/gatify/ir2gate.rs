@@ -2841,7 +2841,7 @@ fn gatify_node(
             }
             env.add(node_ref, GateOrVec::BitVector(out_bits));
         }
-        ir::NodePayload::ExtNaryAdd { operands } => {
+        ir::NodePayload::ExtNaryAdd { operands, arch } => {
             let ir::Type::Bits(output_width) = node.ty else {
                 return Err("ExtNaryAdd result must be bits-typed".to_string());
             };
@@ -2862,8 +2862,26 @@ fn gatify_node(
                         gatify_zext_or_truncate(output_width, &bits)
                     })
                     .collect();
+                let selected_adder_mapping = (*arch)
+                    .map(AdderMapping::from)
+                    .unwrap_or(options.adder_mapping);
+                let selected_adder_mapping_name = match selected_adder_mapping {
+                    AdderMapping::RippleCarry => "ripple_carry",
+                    AdderMapping::BrentKung => "brent_kung",
+                    AdderMapping::KoggeStone => "kogge_stone",
+                };
                 let sum =
-                    array_add_with_carry_out(g8_builder, &resized, None, options.adder_mapping).sum;
+                    array_add_with_carry_out(g8_builder, &resized, None, selected_adder_mapping)
+                        .sum;
+                for (i, gate) in sum.iter_lsb_to_msb().enumerate() {
+                    g8_builder.add_tag(
+                        gate.node,
+                        format!(
+                            "ext_nary_add_{}_{}_output_bit_{}",
+                            node.text_id, selected_adder_mapping_name, i
+                        ),
+                    );
+                }
                 env.add(node_ref, GateOrVec::BitVector(sum));
             }
         }

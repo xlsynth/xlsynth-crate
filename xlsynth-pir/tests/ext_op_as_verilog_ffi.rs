@@ -140,9 +140,9 @@ fn f(arg: bits[4] id=1) -> bits[3] {
 fn verilogffi_wrapped_ext_nary_add_round_trips_verbatim() {
     let ir_text = r#"package nary_add_wrapped
 
-#[ffi_proto("""code_template: "pir_ext_nary_add {fn} (.op0({op0}), .op1({op1}), .op2({op2}), .out({return})); /* xlsynth_pir_ext=ext_nary_add;out_width=6;operand_widths=3,5,9 */"
+#[ffi_proto("""code_template: "pir_ext_nary_add {fn} (.op0({op0}), .op1({op1}), .op2({op2}), .out({return})); /* xlsynth_pir_ext=ext_nary_add;out_width=6;operand_widths=3,5,9;arch=brent_kung */"
 """)]
-fn __pir_ext__ext_nary_add__outw6__ops3_5_9(op0: bits[3] id=5, op1: bits[5] id=6, op2: bits[9] id=7) -> bits[6] {
+fn __pir_ext__ext_nary_add__outw6__ops3_5_9__archbrent_kung(op0: bits[3] id=5, op1: bits[5] id=6, op2: bits[9] id=7) -> bits[6] {
   zero_ext.8: bits[6] = zero_ext(op0, new_bit_count=6, id=8)
   zero_ext.9: bits[6] = zero_ext(op1, new_bit_count=6, id=9)
   bit_slice.10: bits[6] = bit_slice(op2, start=0, width=6, id=10)
@@ -152,14 +152,14 @@ fn __pir_ext__ext_nary_add__outw6__ops3_5_9(op0: bits[3] id=5, op1: bits[5] id=6
 }
 
 fn f(a: bits[3] id=1, b: bits[5] id=2, c: bits[9] id=3) -> bits[6] {
-  ret r: bits[6] = invoke(a, b, c, to_apply=__pir_ext__ext_nary_add__outw6__ops3_5_9, id=4)
+  ret r: bits[6] = invoke(a, b, c, to_apply=__pir_ext__ext_nary_add__outw6__ops3_5_9__archbrent_kung, id=4)
 }
 "#;
 
     let _pkg = assert_wrapped_text_round_trips_via_pir(
         ir_text,
         "f",
-        "__pir_ext__ext_nary_add__outw6__ops3_5_9",
+        "__pir_ext__ext_nary_add__outw6__ops3_5_9__archbrent_kung",
     );
 }
 
@@ -211,21 +211,21 @@ fn f(arg: bits[5] id=1) -> bits[3] {
 fn verilogffi_wrapped_ext_nary_add_operand_width_mismatch_is_rejected() {
     let ir_text = r#"package nary_add_wrapped_bad_invoke
 
-#[ffi_proto("""code_template: "pir_ext_nary_add {fn} (.op0({op0}), .op1({op1}), .op2({op2}), .out({return})); /* xlsynth_pir_ext=ext_nary_add;out_width=6;operand_widths=3,5,9 */"
+#[ffi_proto("""code_template: "pir_ext_nary_add {fn} (.op0({op0}), .op1({op1}), .op2({op2}), .out({return})); /* xlsynth_pir_ext=ext_nary_add;out_width=6;operand_widths=3,5,9;arch=brent_kung */"
 """)]
-fn __pir_ext__ext_nary_add__outw6__ops3_5_9(op0: bits[3] id=5, op1: bits[5] id=6, op2: bits[9] id=7) -> bits[6] {
+fn __pir_ext__ext_nary_add__outw6__ops3_5_9__archbrent_kung(op0: bits[3] id=5, op1: bits[5] id=6, op2: bits[9] id=7) -> bits[6] {
   literal.8: bits[6] = literal(value=0, id=8)
   ret identity.9: bits[6] = identity(literal.8, id=9)
 }
 
 fn f(a: bits[3] id=1, b: bits[4] id=2, c: bits[9] id=3) -> bits[6] {
-  ret r: bits[6] = invoke(a, b, c, to_apply=__pir_ext__ext_nary_add__outw6__ops3_5_9, id=4)
+  ret r: bits[6] = invoke(a, b, c, to_apply=__pir_ext__ext_nary_add__outw6__ops3_5_9__archbrent_kung, id=4)
 }
 "#;
 
     assert_wrapped_text_parse_error_contains(
         ir_text,
-        "invoke of wrapped ext_nary_add helper '__pir_ext__ext_nary_add__outw6__ops3_5_9' operand 1 had type bits[4], expected bits[5]",
+        "invoke of wrapped ext_nary_add helper '__pir_ext__ext_nary_add__outw6__ops3_5_9__archbrent_kung' operand 1 had type bits[4], expected bits[5]",
     );
 }
 
