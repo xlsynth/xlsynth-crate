@@ -2,6 +2,7 @@
 
 //! Lightweight library support for matching and rewriting PIR functions.
 
+use crate::dce;
 use crate::ir::{self, NodePayload, NodeRef, Type};
 use crate::ir_deduce;
 use crate::ir_query;
@@ -281,8 +282,15 @@ impl MatchRewriteRule {
         f: &ir::Fn,
     ) -> Result<MatchRewriteOutcome, MatchRewriteRuleApplyError> {
         let mut rewritten = f.clone();
+        let mut ret_reachable = vec![true; rewritten.nodes.len()];
+        for dead_node in dce::get_dead_nodes(&rewritten) {
+            ret_reachable[dead_node.index] = false;
+        }
         let users = ir_utils::compute_users(&rewritten);
         for node_ref in rewritten.node_refs() {
+            if !ret_reachable[node_ref.index] {
+                continue;
+            }
             if matches!(
                 rewritten.get_node(node_ref).payload,
                 NodePayload::Nil | NodePayload::GetParam(_)
@@ -507,14 +515,15 @@ fn canonical_bindings_key(bindings: &ir_query::QueryBindings) -> String {
 fn canonical_binding_value(binding: &ir_query::Binding) -> String {
     match binding {
         ir_query::Binding::Node(node_ref) => format!("node:{}", node_ref.index),
-        ir_query::Binding::LiteralValue(value) => canonical_literal_binding_key(value),
+        ir_query::Binding::LiteralValue { value, ty } => canonical_literal_binding_key(value, ty),
     }
 }
 
-fn canonical_literal_binding_key(value: &IrValue) -> String {
-    // Preserve the typed literal text so bits[8]:1 and bits[16]:1 do not
-    // dedup together and mask ambiguous matches.
-    format!("lit:{}", value)
+fn canonical_literal_binding_key(value: &IrValue, ty: &Type) -> String {
+    // Preserve both the matched node type and the value text so zero-length
+    // arrays, which do not carry their element type in `IrValue` alone, still
+    // dedup correctly.
+    format!("lit:{}:{}", ty, value)
 }
 
 struct MaterializeState<'a> {
@@ -570,14 +579,13 @@ fn apply_rule_at_root(
                     .map_err(MatchRewriteRuleApplyError::Validation)?;
                 Ok(*node_ref)
             }
-            Some(ir_query::Binding::LiteralValue(value)) => {
-                let ty = literal_type(value)?;
-                ensure_rewrite_preserves_root_type(&root_ty, &ty)?;
+            Some(ir_query::Binding::LiteralValue { value, ty }) => {
+                ensure_rewrite_preserves_root_type(&root_ty, ty)?;
                 ir_utils::replace_node_payload(
                     state.f,
                     root_ref,
                     NodePayload::Literal(value.clone()),
-                    Some(ty),
+                    Some(ty.clone()),
                 )
                 .map_err(MatchRewriteRuleApplyError::Validation)?;
                 Ok(root_ref)
@@ -630,12 +638,11 @@ fn materialize_expr(
                     Ok(*node_ref)
                 }
             }
-            Some(ir_query::Binding::LiteralValue(value)) => {
+            Some(ir_query::Binding::LiteralValue { value, ty }) => {
                 if let Some(node_ref) = state.literal_cache.get(name) {
                     return Ok(*node_ref);
                 }
-                let ty = literal_type(value)?;
-                let node_ref = push_node(state.f, ty, NodePayload::Literal(value.clone()))?;
+                let node_ref = push_node(state.f, ty.clone(), NodePayload::Literal(value.clone()))?;
                 state.literal_cache.insert(name.clone(), node_ref);
                 Ok(node_ref)
             }
@@ -1070,7 +1077,7 @@ fn eval_numeric_expr(
                 Some(ir_query::Binding::Node(node_ref)) => {
                     Ok(i128::try_from(state.f.get_node_ty(*node_ref).bit_count()).unwrap())
                 }
-                Some(ir_query::Binding::LiteralValue(_)) => {
+                Some(ir_query::Binding::LiteralValue { .. }) => {
                     Err(MatchRewriteRuleApplyError::NumericEvaluation(format!(
                         "$width({}) requires a node binding",
                         name
@@ -1115,6 +1122,7 @@ fn eval_numeric_expr(
     })
 }
 
+#[cfg(test)]
 fn literal_type(value: &IrValue) -> Result<Type, MatchRewriteRuleApplyError> {
     if let Ok(width) = value.bit_count() {
         return Ok(Type::Bits(width));
@@ -1437,13 +1445,24 @@ impl<'a> RewriteTemplateParser<'a> {
     fn parse_string_literal(&mut self) -> Result<String, String> {
         self.expect('"')?;
         let mut out = String::new();
+        let mut chunk_start = self.pos;
         loop {
             match self.peek() {
                 Some(b'"') => {
+                    if chunk_start < self.pos {
+                        let chunk = std::str::from_utf8(&self.bytes[chunk_start..self.pos])
+                            .map_err(|_| self.error("invalid utf-8 in string literal"))?;
+                        out.push_str(chunk);
+                    }
                     self.bump();
                     break;
                 }
                 Some(b'\\') => {
+                    if chunk_start < self.pos {
+                        let chunk = std::str::from_utf8(&self.bytes[chunk_start..self.pos])
+                            .map_err(|_| self.error("invalid utf-8 in string literal"))?;
+                        out.push_str(chunk);
+                    }
                     self.bump();
                     match self.peek() {
                         Some(b'"') => {
@@ -1468,10 +1487,10 @@ impl<'a> RewriteTemplateParser<'a> {
                         }
                         _ => return Err(self.error("invalid escape in string literal")),
                     }
+                    chunk_start = self.pos;
                 }
-                Some(byte) => {
+                Some(_) => {
                     self.bump();
-                    out.push(byte as char);
                 }
                 None => return Err(self.error("unterminated string literal")),
             }
@@ -1603,6 +1622,29 @@ mod tests {
         assert!(template.placeholder_refs.contains("x"));
         assert!(template.placeholder_refs.contains("s"));
         assert!(template.width_refs.contains("s"));
+    }
+
+    #[test]
+    fn rewrite_template_parse_preserves_utf8_string_literals() {
+        let template =
+            RewriteTemplate::parse(r#"assert(tok, pred, message="µ\n", label="µ")"#).unwrap();
+        let TemplateExpr::OperatorCall(call) = &template.expr else {
+            panic!("expected operator call");
+        };
+        assert_eq!(call.operator, "assert");
+        assert_eq!(
+            call.named_args,
+            vec![
+                TemplateNamedArg {
+                    name: "message".to_string(),
+                    value: TemplateNamedArgValue::String("µ\n".to_string()),
+                },
+                TemplateNamedArg {
+                    name: "label".to_string(),
+                    value: TemplateNamedArgValue::String("µ".to_string()),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -1772,6 +1814,43 @@ mod tests {
     }
 
     #[test]
+    fn apply_rule_at_root_uses_bound_literal_node_type() {
+        let mut f = parse_fn(
+            r#"fn t() -> bits[1] {
+  ret literal.10: bits[1] = literal(value=0, id=10)
+}"#,
+        );
+        let empty_array_ty = Type::new_array(Type::Bits(8), 0);
+        let ret_node_ref = f.ret_node_ref.expect("return node");
+        f.ret_ty = empty_array_ty.clone();
+        f.get_node_mut(ret_node_ref).ty = empty_array_ty.clone();
+
+        // Current `IrValue` helpers do not expose empty-array construction, so
+        // use a synthetic binding to verify the rewrite path consumes the
+        // stored literal node type instead of re-deriving it from the value.
+        let bindings = HashMap::from([(
+            "L".to_string(),
+            ir_query::Binding::LiteralValue {
+                value: IrValue::make_token(),
+                ty: empty_array_ty.clone(),
+            },
+        )]);
+        let rewritten_root = apply_rule_at_root(
+            &mut f,
+            ret_node_ref,
+            &TemplateExpr::Placeholder("L".to_string()),
+            &bindings,
+        )
+        .unwrap();
+        assert_eq!(rewritten_root, ret_node_ref);
+        assert_eq!(f.get_node(ret_node_ref).ty, empty_array_ty);
+        assert!(matches!(
+            f.get_node(ret_node_ref).payload,
+            NodePayload::Literal(_)
+        ));
+    }
+
+    #[test]
     fn apply_no_match_returns_unchanged_function() {
         let ir_text = r#"fn t(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
   ret add.10: bits[8] = add(x, y, id=10)
@@ -1784,6 +1863,30 @@ mod tests {
         assert!(!outcome.rewrote());
         assert_eq!(outcome.matched_root(), None);
         assert_eq!(outcome.rewritten_fn().to_string(), input.to_string());
+    }
+
+    #[test]
+    fn apply_first_match_skips_ret_unreachable_nodes() {
+        let ir_text = r#"fn t(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  dead_add: bits[8] = add(x, x, id=10)
+  live_add: bits[8] = add(y, y, id=11)
+  ret identity.12: bits[8] = identity(live_add, id=12)
+}"#;
+        let rule = MatchRewriteRule::from_strings("add(a, a)", "a").unwrap();
+        let outcome = rule
+            .apply_to_fn(&parse_fn(ir_text), RewriteApplyMode::FirstMatch)
+            .unwrap();
+        assert!(outcome.rewrote());
+        assert_eq!(outcome.matched_root(), Some(NodeRef { index: 2 }));
+        assert_eq!(
+            outcome.rewritten_fn().to_string(),
+            normalized_fn_text(
+                r#"fn t(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  dead_add: bits[8] = add(x, x, id=10)
+  ret identity.12: bits[8] = identity(y, id=12)
+}"#
+            )
+        );
     }
 
     #[test]
@@ -1825,11 +1928,17 @@ mod tests {
     fn canonical_binding_key_distinguishes_literal_widths() {
         let narrow = HashMap::from([(
             "L".to_string(),
-            ir_query::Binding::LiteralValue(IrValue::parse_typed("bits[8]:1").unwrap()),
+            ir_query::Binding::LiteralValue {
+                value: IrValue::parse_typed("bits[8]:1").unwrap(),
+                ty: Type::Bits(8),
+            },
         )]);
         let wide = HashMap::from([(
             "L".to_string(),
-            ir_query::Binding::LiteralValue(IrValue::parse_typed("bits[16]:1").unwrap()),
+            ir_query::Binding::LiteralValue {
+                value: IrValue::parse_typed("bits[16]:1").unwrap(),
+                ty: Type::Bits(16),
+            },
         )]);
         assert_ne!(
             canonical_bindings_key(&narrow),

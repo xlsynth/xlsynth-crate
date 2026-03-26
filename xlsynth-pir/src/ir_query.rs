@@ -331,7 +331,7 @@ pub fn matches_node(f: &ir::Fn, query: &QueryExpr, node_ref: ir::NodeRef) -> boo
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Binding {
     Node(ir::NodeRef),
-    LiteralValue(IrValue),
+    LiteralValue { value: IrValue, ty: ir::Type },
 }
 
 type Bindings = HashMap<String, Binding>;
@@ -537,7 +537,10 @@ fn match_literal_solutions(
 
             match bindings.get(&placeholder.name) {
                 Some(existing) => match existing {
-                    Binding::LiteralValue(existing_value) if *existing_value == *value => {
+                    Binding::LiteralValue {
+                        value: existing_value,
+                        ty: existing_ty,
+                    } if *existing_value == *value && existing_ty == node_ty => {
                         vec![bindings.clone()]
                     }
                     _ => vec![],
@@ -546,7 +549,10 @@ fn match_literal_solutions(
                     let mut out = bindings.clone();
                     out.insert(
                         placeholder.name.clone(),
-                        Binding::LiteralValue(value.clone()),
+                        Binding::LiteralValue {
+                            value: value.clone(),
+                            ty: node_ty.clone(),
+                        },
                     );
                     vec![out]
                 }
