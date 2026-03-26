@@ -43,9 +43,12 @@ use xlsynth_mcmc::McmcStats as SharedMcmcStats;
 use xlsynth_mcmc::metropolis_accept;
 use xlsynth_mcmc::multichain::{ChainRole, ChainStrategy, SegmentOutcome, SegmentRunParams};
 use xlsynth_mcmc::multichain::{SegmentRunner, run_multichain};
-use xlsynth_pir::desugar_extensions;
+use xlsynth_pir::desugar_extensions::{self, ExtensionEmitMode};
 use xlsynth_pir::fuzz_utils::arbitrary_irbits;
+use xlsynth_pir::ir::FileTable as PirFileTable;
 use xlsynth_pir::ir::Fn as IrFn;
+use xlsynth_pir::ir::Package as PirPackage;
+use xlsynth_pir::ir::PackageMember as PirPackageMember;
 use xlsynth_pir::ir::Type as PirType;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
 use xlsynth_pir::ir_parser;
@@ -203,12 +206,31 @@ fn validate_weighted_switching_options(
     Ok(())
 }
 
+/// Optimizes a PIR package by wrapping extension ops in stable FFI helpers for
+/// the XLS-facing round-trip, then reconstructing the extensions on reparse.
+fn optimize_pir_package_via_xls(pkg: &PirPackage, top: &str) -> Result<PirPackage> {
+    let wrapped_ir_text =
+        desugar_extensions::emit_package_with_extension_mode(pkg, ExtensionEmitMode::AsFfiFunction)
+            .map_err(|e| anyhow::anyhow!("emit_package_with_extension_mode failed: {}", e))?;
+
+    let ir_pkg = IrPackage::parse_ir(&wrapped_ir_text, None)
+        .map_err(|e| anyhow::anyhow!("IrPackage::parse_ir failed: {:?}", e))?;
+    let optimized_ir_pkg = xlsynth::optimize_ir(&ir_pkg, top)
+        .map_err(|e| anyhow::anyhow!("optimize_ir failed: {:?}", e))?;
+    let optimized_ir_text = optimized_ir_pkg.to_string();
+
+    let mut parser = ir_parser::Parser::new(&optimized_ir_text);
+    parser
+        .parse_and_validate_package()
+        .map_err(|e| anyhow::anyhow!("PIR parse_and_validate_package failed: {:?}", e))
+}
+
 /// Produces the XLS-optimized PIR function for `f`.
 ///
-/// This uses the same PIR → text → XLS optimize → PIR parsing pipeline used by
-/// g8r-costing. We prefer storing "best" candidates in this optimized form so
-/// emitted artifacts (`best.ir`) reflect the canonical optimized IR rather than
-/// an intermediate exploration state.
+/// This uses the same PIR → FFI-wrapped XLS text → XLS optimize → PIR parsing
+/// pipeline used by g8r-costing. We prefer storing "best" candidates in this
+/// optimized form so emitted artifacts (`best.ir`) reflect the canonical
+/// optimized IR rather than an intermediate exploration state.
 fn optimize_pir_fn_via_xls(f: &IrFn) -> Result<IrFn> {
     // The pipeline assumes the IR is a DAG and that textual IR references only
     // previously-defined names. MCMC exploration can transiently violate that;
@@ -217,23 +239,17 @@ fn optimize_pir_fn_via_xls(f: &IrFn) -> Result<IrFn> {
     compact_and_toposort_in_place(&mut fn_for_text)
         .map_err(|e| anyhow::anyhow!("compact_and_toposort_in_place failed: {}", e))?;
 
-    // Upstream XLS IR does not understand PIR extension ops; desugar them before
-    // round-tripping through the XLS optimizer.
-    desugar_extensions::desugar_extensions_in_fn(&mut fn_for_text)
-        .map_err(|e| anyhow::anyhow!("desugar_extensions_in_fn failed: {}", e))?;
+    let mut pir_pkg = PirPackage {
+        name: "pir_mcmc".to_string(),
+        file_table: PirFileTable::new(),
+        members: vec![PirPackageMember::Function(fn_for_text)],
+        top: None,
+    };
+    pir_pkg
+        .set_top_fn(&f.name)
+        .map_err(|e| anyhow::anyhow!("set_top_fn failed: {}", e))?;
 
-    let pkg_text = format!("package pir_mcmc\n\n{}\n", fn_for_text);
-
-    let ir_pkg = IrPackage::parse_ir(&pkg_text, None)
-        .map_err(|e| anyhow::anyhow!("IrPackage::parse_ir failed: {:?}", e))?;
-    let optimized_ir_pkg = xlsynth::optimize_ir(&ir_pkg, &f.name)
-        .map_err(|e| anyhow::anyhow!("optimize_ir failed: {:?}", e))?;
-    let optimized_ir_text = optimized_ir_pkg.to_string();
-
-    let mut parser = ir_parser::Parser::new(&optimized_ir_text);
-    let pir_pkg = parser
-        .parse_and_validate_package()
-        .map_err(|e| anyhow::anyhow!("PIR parse_and_validate_package failed: {:?}", e))?;
+    let pir_pkg = optimize_pir_package_via_xls(&pir_pkg, &f.name)?;
     let top_fn = pir_pkg
         .get_top_fn()
         .ok_or_else(|| anyhow::anyhow!("No top function found in optimized PIR package"))?;
@@ -708,8 +724,6 @@ fn canonicalize_fn_for_sample(f: &IrFn) -> Result<IrFn> {
     let mut f = f.clone();
     compact_and_toposort_in_place(&mut f)
         .map_err(|e| anyhow::anyhow!("compact_and_toposort_in_place failed: {}", e))?;
-    desugar_extensions::desugar_extensions_in_fn(&mut f)
-        .map_err(|e| anyhow::anyhow!("desugar_extensions_in_fn failed: {}", e))?;
     Ok(f)
 }
 
@@ -1558,6 +1572,7 @@ pub fn run_pir_mcmc_with_shared_best(
 mod tests {
     use super::*;
     use count_toggles::WeightedSwitchingOptions;
+    use xlsynth_pir::ir::{ExtNaryAddArchitecture, NodePayload};
     use xlsynth_pir::ir_parser;
     use xlsynth_pir::ir_utils::remap_payload_with;
 
@@ -1643,6 +1658,84 @@ mod tests {
             4,
             /* enable_formal_oracle= */ false,
         ));
+    }
+
+    #[test]
+    fn optimize_pir_fn_via_xls_preserves_ext_nary_add_arch_via_ffi_wrappers() {
+        let mut parser = ir_parser::Parser::new(
+            r#"fn f(a: bits[8] id=1, b: bits[8] id=2, c: bits[8] id=3) -> bits[8] {
+  ret sum: bits[8] = ext_nary_add(a, b, c, arch=brent_kung, id=4)
+}"#,
+        );
+        let f = parser.parse_fn().unwrap();
+
+        let optimized = optimize_pir_fn_via_xls(&f).unwrap();
+        let ext_nodes = optimized
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    &node.payload,
+                    NodePayload::ExtNaryAdd {
+                        arch: Some(ExtNaryAddArchitecture::BrentKung),
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            ext_nodes, 1,
+            "expected optimized PIR to reconstruct brent_kung ext_nary_add:\n{}",
+            optimized
+        );
+    }
+
+    #[test]
+    fn ext_nary_add_arch_reaches_g8r_tags_after_xls_round_trip() {
+        let mut parser = ir_parser::Parser::new(
+            r#"fn f(a: bits[8] id=1, b: bits[8] id=2, c: bits[8] id=3) -> bits[8] {
+  ret sum: bits[8] = ext_nary_add(a, b, c, arch=brent_kung, id=4)
+}"#,
+        );
+        let f = parser.parse_fn().unwrap();
+
+        let optimized = optimize_pir_fn_via_xls(&f).unwrap();
+        let ext_text_id = optimized
+            .nodes
+            .iter()
+            .find_map(|node| match &node.payload {
+                NodePayload::ExtNaryAdd {
+                    arch: Some(ExtNaryAddArchitecture::BrentKung),
+                    ..
+                } => Some(node.text_id),
+                _ => None,
+            })
+            .expect("expected reconstructed brent_kung ext_nary_add");
+
+        let gatify_output = ir2gate::gatify(
+            &optimized,
+            GatifyOptions {
+                fold: true,
+                hash: true,
+                check_equivalence: false,
+                adder_mapping: AdderMapping::default(),
+                array_index_lowering_strategy: Default::default(),
+                mul_adder_mapping: None,
+                range_info: None,
+                enable_rewrite_carry_out: false,
+                enable_rewrite_prio_encode: false,
+            },
+        )
+        .unwrap();
+        let gate_fn_text = gatify_output.gate_fn.to_string();
+        assert!(
+            gate_fn_text.contains(&format!(
+                "ext_nary_add_{}_brent_kung_output_bit_",
+                ext_text_id
+            )),
+            "expected gatify tags to reflect the ext_nary_add arch after XLS round-trip:\n{}",
+            gate_fn_text
+        );
     }
 
     #[test]

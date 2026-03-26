@@ -20,7 +20,6 @@ use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_mcmc::Best;
 use xlsynth_mcmc::multichain::ChainStrategy;
-use xlsynth_pir::desugar_extensions;
 use xlsynth_pir::ir::{Package, PackageMember};
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_utils::compact_and_toposort_in_place;
@@ -235,24 +234,12 @@ pub fn parse_pir_mcmc_args(matches: &ArgMatches) -> PirMcmcCliArgs {
 }
 
 fn optimize_ir_text(ir_text: &str, top: &str) -> Result<String> {
-    // The CLI accepts PIR text which may contain extension ops (e.g.
-    // ext_carry_out), but upstream XLS does not. Desugar extensions before
-    // invoking upstream.
-    let lowered_ir_text = {
-        let mut p = xlsynth_pir::ir_parser::Parser::new(ir_text);
-        let mut pir_pkg = p
-            .parse_package()
-            .map_err(|e| anyhow::anyhow!("PIR parse_package failed: {:?}", e))?;
-        desugar_extensions::desugar_extensions_in_package(&mut pir_pkg)
-            .map_err(|e| anyhow::anyhow!("desugar_extensions_in_package failed: {}", e))?;
-        pir_pkg.to_string()
-    };
-
-    let ir_pkg = xlsynth::IrPackage::parse_ir(&lowered_ir_text, None)
-        .map_err(|e| anyhow::anyhow!("IrPackage::parse_ir failed: {:?}", e))?;
-    let optimized_ir_pkg = xlsynth::optimize_ir(&ir_pkg, top)
-        .map_err(|e| anyhow::anyhow!("optimize_ir failed: {:?}", e))?;
-    Ok(optimized_ir_pkg.to_string())
+    let mut p = xlsynth_pir::ir_parser::Parser::new(ir_text);
+    let pir_pkg = p
+        .parse_and_validate_package()
+        .map_err(|e| anyhow::anyhow!("PIR parse_and_validate_package failed: {:?}", e))?;
+    let optimized_pir_pkg = super::optimize_pir_package_via_xls(&pir_pkg, top)?;
+    Ok(optimized_pir_pkg.to_string())
 }
 
 fn emit_pkg_text_toposorted(pkg: &Package) -> Result<String> {
