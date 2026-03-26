@@ -1664,7 +1664,7 @@ mod tests {
     fn optimize_pir_fn_via_xls_preserves_ext_nary_add_arch_via_ffi_wrappers() {
         let mut parser = ir_parser::Parser::new(
             r#"fn f(a: bits[8] id=1, b: bits[8] id=2, c: bits[8] id=3) -> bits[8] {
-  ret sum: bits[8] = ext_nary_add(a, b, c, arch=brent_kung, id=4)
+  ret sum: bits[8] = ext_nary_add(a, b, c, signed=[false, false, false], negated=[false, false, false], arch=brent_kung, id=4)
 }"#,
         );
         let f = parser.parse_fn().unwrap();
@@ -1694,7 +1694,7 @@ mod tests {
     fn ext_nary_add_arch_reaches_g8r_tags_after_xls_round_trip() {
         let mut parser = ir_parser::Parser::new(
             r#"fn f(a: bits[8] id=1, b: bits[8] id=2, c: bits[8] id=3) -> bits[8] {
-  ret sum: bits[8] = ext_nary_add(a, b, c, arch=brent_kung, id=4)
+  ret sum: bits[8] = ext_nary_add(a, b, c, signed=[false, false, false], negated=[false, false, false], arch=brent_kung, id=4)
 }"#,
         );
         let f = parser.parse_fn().unwrap();

@@ -114,6 +114,27 @@ fn eval_zero_resize_bits(arg_bits: &IrBits, width: usize) -> IrBits {
     eval_zero_filled_bit_slice(arg_bits, Some(0), width)
 }
 
+fn eval_sign_resize_bits(arg_bits: &IrBits, width: usize) -> IrBits {
+    let arg_width = arg_bits.get_bit_count();
+    if arg_width == 0 {
+        return IrBits::zero(width);
+    }
+    if width <= arg_width {
+        return eval_zero_filled_bit_slice(arg_bits, Some(0), width);
+    }
+    let sign_bit = arg_bits
+        .get_bit(arg_width - 1)
+        .expect("sign bit index must be in bounds");
+    let mut out = Vec::with_capacity(width);
+    for i in 0..arg_width {
+        out.push(arg_bits.get_bit(i).expect("bit index must be in bounds"));
+    }
+    for _ in arg_width..width {
+        out.push(sign_bit);
+    }
+    IrBits::from_lsb_is_0(&out)
+}
+
 fn eval_bit_slice_update_bits(arg_bits: &IrBits, start_bits: &IrBits, upd_bits: &IrBits) -> IrBits {
     let arg_w = arg_bits.get_bit_count();
     let upd_w = upd_bits.get_bit_count();
@@ -349,18 +370,24 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
             }
             IrValue::from_bits(&IrBits::from_lsb_is_0(&out))
         }
-        ir::NodePayload::ExtNaryAdd {
-            ref operands,
-            arch: _,
-        } => {
+        ir::NodePayload::ExtNaryAdd { ref terms, arch: _ } => {
             let ir::Type::Bits(out_w) = &n.ty else {
                 panic!("ExtNaryAdd result must be bits-typed");
             };
             let mut acc = IrBits::make_ubits(*out_w, 0).expect("ext_nary_add zero must construct");
-            for operand in operands.iter() {
-                let operand_bits: IrBits = env.get(operand).unwrap().to_bits().unwrap();
-                let resized = eval_zero_resize_bits(&operand_bits, *out_w);
-                acc = acc.add(&resized);
+            for term in terms.iter() {
+                let operand_bits: IrBits = env.get(&term.operand).unwrap().to_bits().unwrap();
+                let resized = if term.signed {
+                    eval_sign_resize_bits(&operand_bits, *out_w)
+                } else {
+                    eval_zero_resize_bits(&operand_bits, *out_w)
+                };
+                let term_value = if term.negated {
+                    resized.negate()
+                } else {
+                    resized
+                };
+                acc = acc.add(&term_value);
             }
             IrValue::from_bits(&acc)
         }

@@ -14,8 +14,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ir::{
-    Binop, ExtNaryAddArchitecture, Fn, Node, NodePayload, NodeRef, Package, PackageMember, Type,
-    Unop,
+    Binop, ExtNaryAddArchitecture, ExtNaryAddTerm, Fn, Node, NodePayload, NodeRef, Package,
+    PackageMember, Type, Unop,
 };
 use crate::ir::{Param, ParamId};
 use crate::ir_rebase_ids::rebase_fn_ids;
@@ -234,22 +234,33 @@ fn make_zero_bits_literal(f: &mut Fn, width: usize) -> NodeRef {
     )
 }
 
-fn zext_or_truncate_to_width(
+/// Sign- or zero-extends, or truncates, a bits-typed value to `output_width`.
+fn extend_or_truncate_to_width(
     f: &mut Fn,
     operand: NodeRef,
     output_width: usize,
+    signed: bool,
     ctx: &str,
 ) -> Result<NodeRef, DesugarError> {
     let operand_width = expect_bits_width(f, operand, ctx)?;
     if operand_width == output_width {
         Ok(operand)
+    } else if signed && operand_width == 0 {
+        Ok(make_zero_bits_literal(f, output_width))
     } else if operand_width < output_width {
         Ok(push_node(
             f,
             Type::Bits(output_width),
-            NodePayload::ZeroExt {
-                arg: operand,
-                new_bit_count: output_width,
+            if signed {
+                NodePayload::SignExt {
+                    arg: operand,
+                    new_bit_count: output_width,
+                }
+            } else {
+                NodePayload::ZeroExt {
+                    arg: operand,
+                    new_bit_count: output_width,
+                }
             },
         ))
     } else {
@@ -295,6 +306,8 @@ fn desugar_ext_carry_out_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
 struct ExtNaryAddShape {
     output_width: usize,
     operand_widths: Vec<usize>,
+    operand_signed: Vec<bool>,
+    operand_negated: Vec<bool>,
     arch: Option<ExtNaryAddArchitecture>,
 }
 
@@ -303,7 +316,7 @@ struct ExtNaryAddShape {
 fn analyze_ext_nary_add(
     f: &Fn,
     result: NodeRef,
-    operands: &[NodeRef],
+    terms: &[ExtNaryAddTerm],
     arch: Option<ExtNaryAddArchitecture>,
 ) -> Result<ExtNaryAddShape, DesugarError> {
     let output_width = match f.get_node(result).ty {
@@ -315,17 +328,23 @@ fn analyze_ext_nary_add(
             )));
         }
     };
-    let mut operand_widths = Vec::with_capacity(operands.len());
-    for (i, operand) in operands.iter().enumerate() {
+    let mut operand_widths = Vec::with_capacity(terms.len());
+    let mut operand_signed = Vec::with_capacity(terms.len());
+    let mut operand_negated = Vec::with_capacity(terms.len());
+    for (i, term) in terms.iter().enumerate() {
         operand_widths.push(expect_bits_width(
             f,
-            *operand,
+            term.operand,
             &format!("ext_nary_add.operand[{i}]"),
         )?);
+        operand_signed.push(term.signed);
+        operand_negated.push(term.negated);
     }
     Ok(ExtNaryAddShape {
         output_width,
         operand_widths,
+        operand_signed,
+        operand_negated,
         arch,
     })
 }
@@ -334,25 +353,36 @@ fn analyze_ext_nary_add(
 /// lowered sum node.
 fn append_lowered_ext_nary_add(
     f: &mut Fn,
-    operands: &[NodeRef],
+    terms: &[ExtNaryAddTerm],
     output_width: usize,
 ) -> Result<NodeRef, DesugarError> {
-    if output_width == 0 || operands.is_empty() {
+    if output_width == 0 || terms.is_empty() {
         return Ok(make_zero_bits_literal(f, output_width));
     }
 
-    let mut resized_operands = Vec::with_capacity(operands.len());
-    for operand in operands {
-        resized_operands.push(zext_or_truncate_to_width(
+    let mut lowered_terms = Vec::with_capacity(terms.len());
+    for term in terms {
+        let resized = extend_or_truncate_to_width(
             f,
-            *operand,
+            term.operand,
             output_width,
+            term.signed,
             "ext_nary_add.operand",
-        )?);
+        )?;
+        let lowered = if term.negated {
+            push_node(
+                f,
+                Type::Bits(output_width),
+                NodePayload::Unop(Unop::Neg, resized),
+            )
+        } else {
+            resized
+        };
+        lowered_terms.push(lowered);
     }
 
-    let mut acc = resized_operands[0];
-    for operand in resized_operands.into_iter().skip(1) {
+    let mut acc = lowered_terms[0];
+    for operand in lowered_terms.into_iter().skip(1) {
         acc = push_node(
             f,
             Type::Bits(output_width),
@@ -370,6 +400,8 @@ enum FfiWrapKey {
     ExtNaryAdd {
         output_width: usize,
         operand_widths: Vec<usize>,
+        operand_signed: Vec<bool>,
+        operand_negated: Vec<bool>,
         arch: Option<ExtNaryAddArchitecture>,
     },
     ExtPrioEncode {
@@ -386,6 +418,8 @@ fn helper_base_name(key: &FfiWrapKey) -> String {
         FfiWrapKey::ExtNaryAdd {
             output_width,
             operand_widths,
+            operand_signed,
+            operand_negated,
             arch,
         } => {
             let operand_widths_text = operand_widths
@@ -393,15 +427,29 @@ fn helper_base_name(key: &FfiWrapKey) -> String {
                 .map(usize::to_string)
                 .collect::<Vec<_>>()
                 .join("_");
+            let mut base = format!(
+                "__pir_ext__ext_nary_add__outw{}__ops{}",
+                output_width, operand_widths_text
+            );
+            if operand_signed.iter().any(|bit| *bit) {
+                let signed_text = operand_signed
+                    .iter()
+                    .map(|bit| if *bit { "1" } else { "0" })
+                    .collect::<Vec<_>>()
+                    .join("_");
+                base.push_str(&format!("__sgn{signed_text}"));
+            }
+            if operand_negated.iter().any(|bit| *bit) {
+                let negated_text = operand_negated
+                    .iter()
+                    .map(|bit| if *bit { "1" } else { "0" })
+                    .collect::<Vec<_>>()
+                    .join("_");
+                base.push_str(&format!("__neg{negated_text}"));
+            }
             match arch {
-                Some(arch) => format!(
-                    "__pir_ext__ext_nary_add__outw{}__ops{}__arch{}",
-                    output_width, operand_widths_text, arch
-                ),
-                None => format!(
-                    "__pir_ext__ext_nary_add__outw{}__ops{}",
-                    output_width, operand_widths_text
-                ),
+                Some(arch) => format!("{base}__arch{arch}"),
+                None => base,
             }
         }
         FfiWrapKey::ExtPrioEncode {
@@ -436,6 +484,14 @@ fn format_ffi_proto_outer_attr(code_template: &str) -> String {
     )
 }
 
+fn format_bool_list_csv(values: &[bool]) -> String {
+    values
+        .iter()
+        .map(|bit| if *bit { "true" } else { "false" })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn helper_code_template(key: &FfiWrapKey) -> String {
     match key {
         FfiWrapKey::ExtCarryOut { width } => format!(
@@ -444,6 +500,8 @@ fn helper_code_template(key: &FfiWrapKey) -> String {
         FfiWrapKey::ExtNaryAdd {
             output_width,
             operand_widths,
+            operand_signed,
+            operand_negated,
             arch,
         } => {
             let operand_bindings = operand_widths
@@ -452,24 +510,24 @@ fn helper_code_template(key: &FfiWrapKey) -> String {
                 .map(|(i, _)| format!(".op{i}({{op{i}}})"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let operand_width_list = operand_widths
-                .iter()
-                .map(usize::to_string)
-                .collect::<Vec<_>>()
-                .join(",");
             let port_list = if operand_bindings.is_empty() {
                 ".out({return})".to_string()
             } else {
                 format!("{operand_bindings}, .out({{return}})")
             };
-            match arch {
-                Some(arch) => format!(
-                    "pir_ext_nary_add {{fn}} ({port_list}); /* xlsynth_pir_ext=ext_nary_add;out_width={output_width};operand_widths={operand_width_list};arch={arch} */"
-                ),
-                None => format!(
-                    "pir_ext_nary_add {{fn}} ({port_list}); /* xlsynth_pir_ext=ext_nary_add;out_width={output_width};operand_widths={operand_width_list} */"
-                ),
+            let mut metadata_fields = vec![
+                "xlsynth_pir_ext=ext_nary_add".to_string(),
+                format!("out_width={output_width}"),
+                format!("operand_signed={}", format_bool_list_csv(operand_signed)),
+                format!("operand_negated={}", format_bool_list_csv(operand_negated)),
+            ];
+            if let Some(arch) = arch {
+                metadata_fields.push(format!("arch={arch}"));
             }
+            format!(
+                "pir_ext_nary_add {{fn}} ({port_list}); /* {} */",
+                metadata_fields.join(";")
+            )
         }
         FfiWrapKey::ExtPrioEncode {
             input_width,
@@ -553,6 +611,8 @@ fn make_helper_fn(name: String, key: &FfiWrapKey) -> Fn {
         FfiWrapKey::ExtNaryAdd {
             output_width,
             operand_widths,
+            operand_signed,
+            operand_negated,
             arch: _,
         } => {
             let params = operand_widths
@@ -572,7 +632,17 @@ fn make_helper_fn(name: String, key: &FfiWrapKey) -> Fn {
                     index: i.saturating_add(1),
                 })
                 .collect::<Vec<_>>();
-            let lowered = append_lowered_ext_nary_add(&mut helper, &operand_refs, *output_width)
+            let terms = operand_refs
+                .iter()
+                .zip(operand_signed.iter())
+                .zip(operand_negated.iter())
+                .map(|((operand, signed), negated)| ExtNaryAddTerm {
+                    operand: *operand,
+                    signed: *signed,
+                    negated: *negated,
+                })
+                .collect::<Vec<_>>();
+            let lowered = append_lowered_ext_nary_add(&mut helper, &terms, *output_width)
                 .expect("helper ext_nary_add lowering must be well-typed");
             let ret_node_ref = push_node(
                 &mut helper,
@@ -675,11 +745,13 @@ fn wrap_extensions_in_fn(
                 };
                 changed = true;
             }
-            NodePayload::ExtNaryAdd { operands, arch } => {
-                let shape = analyze_ext_nary_add(f, nr, &operands, arch)?;
+            NodePayload::ExtNaryAdd { terms, arch } => {
+                let shape = analyze_ext_nary_add(f, nr, &terms, arch)?;
                 let key = FfiWrapKey::ExtNaryAdd {
                     output_width: shape.output_width,
                     operand_widths: shape.operand_widths.clone(),
+                    operand_signed: shape.operand_signed.clone(),
+                    operand_negated: shape.operand_negated.clone(),
                     arch: shape.arch,
                 };
                 let helper_name = get_or_create_helper_name(
@@ -693,7 +765,7 @@ fn wrap_extensions_in_fn(
                 node.ty = Type::Bits(shape.output_width);
                 node.payload = NodePayload::Invoke {
                     to_apply: helper_name,
-                    operands,
+                    operands: terms.iter().map(|term| term.operand).collect(),
                 };
                 changed = true;
             }
@@ -778,13 +850,13 @@ fn desugar_ext_nary_add_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
     for idx in 0..original_len {
         let nr = NodeRef { index: idx };
         let payload = f.get_node(nr).payload.clone();
-        let NodePayload::ExtNaryAdd { operands, arch } = payload else {
+        let NodePayload::ExtNaryAdd { terms, arch } = payload else {
             continue;
         };
         changed = true;
 
-        let shape = analyze_ext_nary_add(f, nr, &operands, arch)?;
-        let lowered = append_lowered_ext_nary_add(f, &operands, shape.output_width)?;
+        let shape = analyze_ext_nary_add(f, nr, &terms, arch)?;
+        let lowered = append_lowered_ext_nary_add(f, &terms, shape.output_width)?;
 
         let node = f.get_node_mut(nr);
         node.ty = Type::Bits(shape.output_width);
