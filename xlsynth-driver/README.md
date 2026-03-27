@@ -1253,18 +1253,68 @@ xlsynth-driver ir-diverse-samples ./corpus_dir > selected.txt
 
 ### `g8r-equiv`
 
-Checks two GateFns for functional equivalence using the available engines. A
-JSON report is written to **stdout**. The command exits with a non-zero status
-if any engine finds a counter-example. Errors are printed to **stderr**.
+Checks two GateFns for functional equivalence by lifting both sides to IR and
+running the same prover-backed flow as `ir-equiv`.
+
+- Positional arguments: `<lhs_g8r_file> <rhs_g8r_file>`
+- Solver selection:
+  - `--solver auto|z3-binary|bitwuzla-binary|boolector-binary|bitwuzla|boolector|toolchain`
+  - Default: `auto`
+- Optional JSON output:
+  - `--output_json <path>` writes the structured result to a file
+
+On success the command prints timing and a success line to **stdout**. On
+inequivalence or prover failure it prints details to **stderr** and exits
+non-zero.
+
+### `g8r-ir-equiv`
+
+Checks a **GateFn (`.g8r` or `.g8rbin`)** design against an **IR** function by
+lifting the GateFn into IR and then running the same IR equivalence flow as
+`ir-equiv`.
+
+- Positional arguments: `<g8r_file> <rhs_ir_file>`
+- Top selection:
+  - `--top <NAME>` selects the entry function in `<rhs_ir_file>`.
+  - The GateFn side uses the GateFn's own name as its lifted IR top.
+- Proving flags (same shape as `ir-equiv`):
+  - `--solver <auto|toolchain|bitwuzla|boolector|z3-binary|bitwuzla-binary|boolector-binary>`
+  - `--flatten_aggregates=<BOOL>`
+  - `--drop_params <CSV>`
+  - `--parallelism-strategy <single-threaded|output-bits|input-bit-split>`
+  - `--assertion-semantics <ignore|never|same|assume|implies>`
+  - `--assert-label-filter <REGEX>`
+  - `--lhs_fixed_implicit_activation=<BOOL>` / `--rhs_fixed_implicit_activation=<BOOL>`
+  - `--output_json <PATH>`
+
+Examples:
+
+```shell
+xlsynth-driver g8r-ir-equiv my_design.g8r my_design.ir --top main
+```
+
+Binary GateFn is also accepted:
+
+```shell
+xlsynth-driver g8r-ir-equiv my_design.g8rbin my_design.ir --top main
+```
 
 ### `aig-equiv`
 
-Checks two **AIGER (`.aag` or `.aig`)** files for functional equivalence using the
-available engines. The files are parsed into GateFn form using
-`xlsynth-g8r`'s strict AIGER loader and then proven equivalent with the same
-engines as `g8r-equiv`. A JSON report is written to **stdout** and the command
-exits non-zero if any engine finds a counter-example. Errors are printed to
-**stderr**.
+Checks two **AIGER (`.aag` or `.aig`)** files for functional equivalence by
+loading them into GateFn form, lifting both sides to IR, and then running the
+same prover-backed flow as `ir-equiv`.
+
+- Positional arguments: `<lhs_aig_file> <rhs_aig_file>`
+- Solver selection:
+  - `--solver auto|z3-binary|bitwuzla-binary|boolector-binary|bitwuzla|boolector|toolchain`
+  - Default: `auto`
+- Optional JSON output:
+  - `--output_json <path>` writes the structured result to a file
+
+On success the command prints timing and a success line to **stdout**. On
+inequivalence or prover failure it prints details to **stderr** and exits
+non-zero.
 
 Example:
 
