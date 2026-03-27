@@ -909,6 +909,12 @@ fn build_special_payload(
         }
         "sel" | "priority_sel" | "one_hot_sel" => {
             let selector = if let Some(selector) = named_args.exprs.get("selector") {
+                if !positional_refs.is_empty() {
+                    return Err(MatchRewriteRuleApplyError::InvalidRewriteTemplate(format!(
+                        "{} does not allow positional selector args when selector=<expr> is provided",
+                        operator
+                    )));
+                }
                 *selector
             } else if positional_refs.len() == 1 {
                 positional_refs[0]
@@ -920,6 +926,12 @@ fn build_special_payload(
             };
 
             let cases = named_args.require_expr_list("cases")?;
+            if cases.is_empty() {
+                return Err(MatchRewriteRuleApplyError::InvalidRewriteTemplate(format!(
+                    "{} requires a non-empty cases=[...] list",
+                    operator
+                )));
+            }
             match operator {
                 "sel" => {
                     named_args.require_no_extra(operator, &["selector", "cases", "default"])?;
@@ -1887,6 +1899,47 @@ mod tests {
 }"#
             )
         );
+    }
+
+    #[test]
+    fn apply_rejects_empty_sel_cases_list() {
+        let ir_text = r#"fn t(p: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  ret sel.10: bits[8] = sel(p, cases=[x, x], id=10)
+}"#;
+        let rule = MatchRewriteRule::from_strings(
+            "sel(selector=p, cases=[x, x])",
+            "sel(selector=p, cases=[], default=x)",
+        )
+        .unwrap();
+        let err = rule
+            .apply_to_fn(&parse_fn(ir_text), RewriteApplyMode::FirstMatch)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MatchRewriteRuleApplyError::InvalidRewriteTemplate(ref msg)
+                if msg == "sel requires a non-empty cases=[...] list"
+        ));
+    }
+
+    #[test]
+    fn apply_rejects_positional_selector_when_selector_named_arg_is_present() {
+        let ir_text = r#"fn t(p: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  ret sel.10: bits[8] = sel(p, cases=[x, x], id=10)
+}"#;
+        let rule = MatchRewriteRule::from_strings(
+            "sel(selector=p, cases=[x, x])",
+            "sel(x, selector=p, cases=[x, x])",
+        )
+        .unwrap();
+        let err = rule
+            .apply_to_fn(&parse_fn(ir_text), RewriteApplyMode::FirstMatch)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            MatchRewriteRuleApplyError::InvalidRewriteTemplate(ref msg)
+                if msg
+                    == "sel does not allow positional selector args when selector=<expr> is provided"
+        ));
     }
 
     #[test]
