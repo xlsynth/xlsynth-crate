@@ -105,6 +105,24 @@ Primarily tests:
 - Gate-to-IR conversion of the gatified result stays semantically aligned with
   the exported XLS IR form
 
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_node_provenance.rs
+
+Builds a random PIR function using the shared `xlsynth_pir::ir_fuzz`
+generator, reparses it into PIR, then gatifies with `fold=false` and
+`hash=false`. For each resulting AIG node, the target checks the initial
+provenance seeding invariant against the original parsed PIR function: the
+builder's dedicated constant-false literal is the only allowed empty
+provenance node, and every lowered `Input` / `And2` must carry exactly one PIR
+`text_id`, which must correspond to some node in the original pre-prep PIR
+function.
+
+Primarily tests:
+
+- Initial PIR-to-g8r lowering seeds exactly one provenance id onto every
+  lowered `Input` / `And2`
+- Seeded provenance ids refer to real original PIR nodes, so prep-for-gatify
+  does not silently shift provenance onto prep-introduced helper nodes
+
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_gate_transform_equiv.rs
 
 Applies a randomly selected equivalence-preserving transform to a random `GateFn` and proves equivalence via IR-based checker; panics if a claimed always-equivalent transform breaks equivalence.
