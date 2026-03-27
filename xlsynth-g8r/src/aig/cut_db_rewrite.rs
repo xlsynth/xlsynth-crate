@@ -132,7 +132,7 @@ fn compute_cuts(g: &GateFn, max_cuts_per_node: usize) -> Vec<Vec<Cut>> {
             AigNode::Input { .. } => {
                 // Inputs already covered by self-cut.
             }
-            AigNode::Literal(v) => {
+            AigNode::Literal { value: v, .. } => {
                 // Constant cut with no leaves.
                 cuts.insert(Cut {
                     leaves: Vec::new(),
@@ -400,7 +400,7 @@ fn rebuild_with_replacement(g: &GateFn, repl: &Replacement) -> GateFn {
                 // Inputs already mapped above.
                 processing.remove(&r);
             }
-            AigNode::Literal(v) => {
+            AigNode::Literal { value: v, .. } => {
                 let op = if *v { gb.get_true() } else { gb.get_false() };
                 orig_to_new.insert(r, op);
                 processing.remove(&r);

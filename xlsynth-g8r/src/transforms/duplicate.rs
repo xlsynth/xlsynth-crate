@@ -19,13 +19,18 @@ fn duplicate_gate_transform_internal(
         return Err("cannot duplicate: AigRef out of bounds");
     }
     match &g.gates[which.id] {
-        AigNode::Literal(_) => return Err("cannot duplicate literal"),
+        AigNode::Literal { .. } => return Err("cannot duplicate literal"),
         AigNode::Input { .. } => return Err("cannot duplicate input"),
         AigNode::And2 { a, b, .. } => {
             let new_gate = AigNode::And2 {
                 a: *a,
                 b: *b,
                 tags: None, // Duplicated gates don't inherit tags by default
+                pir_node_ids: g.gates[which.id]
+                    .get_pir_node_ids()
+                    .iter()
+                    .copied()
+                    .collect(),
             };
             let new_ref = AigRef { id: g.gates.len() };
             g.gates.push(new_gate);
@@ -49,13 +54,18 @@ pub fn duplicate(g: &mut GateFn, which: AigRef) -> Result<AigRef, &'static str> 
         return Err("cannot duplicate: AigRef out of bounds");
     }
     match &g.gates[which.id] {
-        AigNode::Literal(_) => return Err("cannot duplicate literal"),
+        AigNode::Literal { .. } => return Err("cannot duplicate literal"),
         AigNode::Input { .. } => return Err("cannot duplicate input"),
         AigNode::And2 { a, b, .. } => {
             let new_gate = AigNode::And2 {
                 a: *a,
                 b: *b,
                 tags: None,
+                pir_node_ids: g.gates[which.id]
+                    .get_pir_node_ids()
+                    .iter()
+                    .copied()
+                    .collect(),
             };
             let new_ref = AigRef { id: g.gates.len() };
             g.gates.push(new_gate);
@@ -73,7 +83,7 @@ pub fn unduplicate<R: rand::Rng + ?Sized>(g: &mut GateFn, rng: &mut R) -> Option
     for &node_ref in &topo {
         match &g.gates[node_ref.id] {
             AigNode::Input { .. } => continue,
-            AigNode::Literal(val) => {
+            AigNode::Literal { value: val, .. } => {
                 let key = format!("Literal({})", val);
                 buckets.entry(key).or_default().push(node_ref);
             }

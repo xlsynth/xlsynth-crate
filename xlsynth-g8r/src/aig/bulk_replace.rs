@@ -272,7 +272,7 @@ pub fn bulk_substitute(
             }
             // If the substitute is a constant, use get_true/get_false
             let subst_node = &orig_fn.gates[subst_op.node.id];
-            let final_op = if let AigNode::Literal(value) = subst_node {
+            let final_op = if let AigNode::Literal { value, .. } = subst_node {
                 let base_const_op = if *value {
                     new_builder.get_true()
                 } else {
@@ -313,7 +313,7 @@ pub fn bulk_substitute(
                 processing.remove(&orig_ref);
                 continue;
             }
-            AigNode::Literal(value) => {
+            AigNode::Literal { value, .. } => {
                 if *value {
                     new_builder.get_true()
                 } else {
@@ -502,10 +502,14 @@ mod tests {
         let final_out_op = replaced_fn.outputs[0].bit_vector.get_lsb(0);
 
         let final_out_node = &replaced_fn.gates[final_out_op.node.id];
-        let is_const = matches!(final_out_node, AigNode::Literal(_));
+        let is_const = matches!(final_out_node, AigNode::Literal { .. });
         assert!(is_const, "Output should be a constant after replacement");
 
-        if let AigNode::Literal(literal_value) = final_out_node {
+        if let AigNode::Literal {
+            value: literal_value,
+            ..
+        } = final_out_node
+        {
             let effective_value = *literal_value ^ final_out_op.negated;
             assert!(effective_value, "Output constant should be True");
         } else {

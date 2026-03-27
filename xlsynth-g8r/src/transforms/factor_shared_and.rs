@@ -188,6 +188,7 @@ pub fn unfactor_shared_and_primitive(g: &mut GateFn, outer: AigRef) -> Result<()
         a: common_op,
         b: unique_op,
         tags: None,
+        pir_node_ids: Default::default(),
     };
     let new_ref = AigRef { id: g.gates.len() };
     // Extra safety: neither operand of the new gate may reference new_ref itself.

@@ -15,6 +15,7 @@ pub fn insert_redundant_and_primitive(g: &mut GateFn, op: AigOperand) -> AigRef 
         a: op,
         b: op,
         tags: None,
+        pir_node_ids: Default::default(),
     };
     let new_ref = AigRef { id: g.gates.len() };
     g.gates.push(new_gate);

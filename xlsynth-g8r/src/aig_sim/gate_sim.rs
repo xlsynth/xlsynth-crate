@@ -73,11 +73,11 @@ pub fn eval(gate_fn: &GateFn, inputs: &[IrBits], collect: Collect) -> GateSimRes
                     base_value
                 }
             }
-            AigNode::Literal(value) => {
+            AigNode::Literal { value, .. } => {
                 // Apply negation if the operand using the literal is negated
                 if operand.negated { !*value } else { *value }
             }
-            AigNode::And2 { a, b, tags } => {
+            AigNode::And2 { a, b, tags, .. } => {
                 // Get the final values already computed for the input operands
                 let a_value = *env.get(a)
                     .unwrap_or_else(|| panic!("Input operand 'a' value not found for AND node. Operand a: {:?}, negated: {}", a.node, a.negated));

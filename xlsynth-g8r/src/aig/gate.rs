@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::{Deserialize, Serialize};
+use smallvec::{SmallVec, smallvec};
 use std::collections::HashMap;
 
 use bitvec::vec::BitVec;
@@ -53,18 +54,25 @@ impl From<&AigRef> for AigOperand {
     }
 }
 
+pub type PirNodeIds = SmallVec<[u32; 2]>;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AigNode {
     Input {
         name: String,
         /// Index where 0 is the least significant bit of the input.
         lsb_index: usize,
+        pir_node_ids: PirNodeIds,
     },
-    Literal(bool),
+    Literal {
+        value: bool,
+        pir_node_ids: PirNodeIds,
+    },
     And2 {
         a: AigOperand,
         b: AigOperand,
         tags: Option<Vec<String>>,
+        pir_node_ids: PirNodeIds,
     },
 }
 
@@ -72,7 +80,7 @@ impl AigNode {
     pub fn get_operands(&self) -> Vec<AigOperand> {
         match self {
             AigNode::Input { .. } => vec![],
-            AigNode::Literal(_) => vec![],
+            AigNode::Literal { .. } => vec![],
             AigNode::And2 { a, b, .. } => vec![a.clone(), b.clone()],
         }
     }
@@ -80,7 +88,7 @@ impl AigNode {
     pub fn get_args(&self) -> Vec<AigRef> {
         match self {
             AigNode::Input { .. } => vec![],
-            AigNode::Literal(_) => vec![],
+            AigNode::Literal { .. } => vec![],
             AigNode::And2 { a, b, .. } => vec![a.node, b.node],
         }
     }
@@ -95,6 +103,43 @@ impl AigNode {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn pir_node_ids_mut(&mut self) -> &mut PirNodeIds {
+        match self {
+            AigNode::Input { pir_node_ids, .. }
+            | AigNode::Literal { pir_node_ids, .. }
+            | AigNode::And2 { pir_node_ids, .. } => pir_node_ids,
+        }
+    }
+
+    pub fn add_pir_node_id(&mut self, pir_node_id: u32) {
+        let pir_node_ids = self.pir_node_ids_mut();
+        match pir_node_ids.binary_search(&pir_node_id) {
+            Ok(_) => {}
+            Err(index) => pir_node_ids.insert(index, pir_node_id),
+        }
+    }
+
+    pub fn try_add_pir_node_ids(&mut self, pir_node_ids_to_add: &[u32]) {
+        for pir_node_id in pir_node_ids_to_add {
+            self.add_pir_node_id(*pir_node_id);
+        }
+    }
+
+    pub fn get_pir_node_ids(&self) -> &[u32] {
+        match self {
+            AigNode::Input { pir_node_ids, .. }
+            | AigNode::Literal { pir_node_ids, .. }
+            | AigNode::And2 { pir_node_ids, .. } => pir_node_ids.as_slice(),
+        }
+    }
+
+    pub fn with_pir_node_id(pir_node_id: Option<u32>) -> PirNodeIds {
+        match pir_node_id {
+            Some(pir_node_id) => smallvec![pir_node_id],
+            None => PirNodeIds::new(),
         }
     }
 
@@ -412,7 +457,9 @@ impl GateFn {
         let get_node_str = |id: usize| {
             // If it's an input, we use the input name.
             match &self.gates[id] {
-                AigNode::Input { name, lsb_index } => format!("{}[{}]", name, lsb_index),
+                AigNode::Input {
+                    name, lsb_index, ..
+                } => format!("{}[{}]", name, lsb_index),
                 _ => format!("%{}", id),
             }
         };
@@ -425,7 +472,7 @@ impl GateFn {
             let aig_ref = operand.node;
             let this_node = self.get(aig_ref);
             match this_node {
-                AigNode::And2 { a, b, tags } => {
+                AigNode::And2 { a, b, tags, .. } => {
                     let a_node_str = get_node_str(a.node.id);
                     let b_node_str = get_node_str(b.node.id);
                     let a_str = if a.negated {
@@ -450,7 +497,7 @@ impl GateFn {
                 AigNode::Input { .. } => {
                     continue;
                 }
-                AigNode::Literal(value) => {
+                AigNode::Literal { value, .. } => {
                     s.push_str(&format!("  %{} = literal({})\n", aig_ref.id, value));
                 }
             }
@@ -581,7 +628,7 @@ impl GateFn {
                         gate_count
                     );
                 }
-                AigNode::Input { .. } | AigNode::Literal(_) => {}
+                AigNode::Input { .. } | AigNode::Literal { .. } => {}
             }
         }
     }

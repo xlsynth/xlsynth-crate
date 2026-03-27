@@ -117,7 +117,7 @@ pub fn eval(gate_fn: &GateFn, inputs: &[Vec256]) -> GateSimdResult {
             AigNode::Input { .. } => {
                 // Already seeded above.
             }
-            AigNode::Literal(value) => {
+            AigNode::Literal { value, .. } => {
                 env[aig_ref.id] = Vec256::splat(*value);
             }
             AigNode::And2 { a, b, .. } => {

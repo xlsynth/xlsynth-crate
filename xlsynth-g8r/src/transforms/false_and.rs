@@ -22,6 +22,7 @@ pub fn insert_false_and_primitive(g: &mut GateFn, x: AigRef) -> Result<AigRef, &
             negated: true,
         },
         tags: None,
+        pir_node_ids: Default::default(),
     };
     let new_ref = AigRef { id: g.gates.len() };
     g.gates.push(new_gate);

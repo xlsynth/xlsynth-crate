@@ -32,7 +32,7 @@ use xlsynth::IrBits;
 use crate::{
     aig::aig_hasher::AigHasher,
     aig::aig_simplify,
-    aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output},
+    aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output, PirNodeIds},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +48,7 @@ pub struct GateBuilder {
     pub outputs: Vec<Output>,
     pub options: GateBuilderOptions,
     pub hasher: Option<AigHasher>,
+    current_pir_node_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,7 +91,10 @@ impl GateBuilder {
     pub fn new(name: String, options: GateBuilderOptions) -> Self {
         Self {
             name,
-            gates: vec![AigNode::Literal(false)],
+            gates: vec![AigNode::Literal {
+                value: false,
+                pir_node_ids: PirNodeIds::new(),
+            }],
             inputs: Vec::new(),
             outputs: Vec::new(),
             options,
@@ -99,6 +103,7 @@ impl GateBuilder {
             } else {
                 None
             },
+            current_pir_node_id: None,
         }
     }
 
@@ -118,6 +123,18 @@ impl GateBuilder {
     pub fn add_tag(&mut self, aig_ref: AigRef, tag: String) {
         let gate = &mut self.gates[aig_ref.id];
         gate.add_tag(tag)
+    }
+
+    pub fn set_current_pir_node_id(&mut self, pir_node_id: Option<u32>) {
+        self.current_pir_node_id = pir_node_id;
+    }
+
+    pub fn add_pir_node_id(&mut self, aig_ref: AigRef, pir_node_id: u32) {
+        self.gates[aig_ref.id].add_pir_node_id(pir_node_id);
+    }
+
+    pub fn add_pir_node_ids(&mut self, aig_ref: AigRef, pir_node_ids: &[u32]) {
+        self.gates[aig_ref.id].try_add_pir_node_ids(pir_node_ids);
     }
 
     pub fn to_operand(&self, aig_ref: AigRef) -> AigOperand {
@@ -158,6 +175,7 @@ impl GateBuilder {
             self.gates.push(AigNode::Input {
                 name: name.clone(),
                 lsb_index: lsb_i,
+                pir_node_ids: AigNode::with_pir_node_id(self.current_pir_node_id),
             });
             bits.push(gate_ref.into());
         }
@@ -208,6 +226,7 @@ impl GateBuilder {
             a: lhs,
             b: rhs,
             tags: None,
+            pir_node_ids: AigNode::with_pir_node_id(self.current_pir_node_id),
         };
         let gate_ref = AigRef {
             id: self.gates.len(),

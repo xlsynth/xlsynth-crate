@@ -443,6 +443,7 @@ impl Transform for UnbalanceAndTreeTransform {
                                 a: *a,
                                 b: *b,
                                 tags: None,
+                                pir_node_ids: Default::default(),
                             },
                             _ => unreachable!(),
                         };
