@@ -51,3 +51,9 @@ name = "fuzz_ir_fn_to_dslx_roundtrip_equiv"
 path = "fuzz_targets/fuzz_ir_fn_to_dslx_roundtrip_equiv.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_ext_nary_add_eval_equiv"
+path = "fuzz_targets/fuzz_ext_nary_add_eval_equiv.rs"
+test = false
+doc = false
