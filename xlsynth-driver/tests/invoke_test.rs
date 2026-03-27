@@ -13,7 +13,6 @@ use xlsynth_g8r::aig::{AigBitVector, AigOperand, GateFn};
 use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
 use xlsynth_g8r::aig_serdes::emit_aiger_binary::emit_aiger_binary;
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
-use xlsynth_g8r::gate_fn_equiv_report::{EngineResult, EquivReport};
 
 use test_case::test_case;
 
@@ -8574,6 +8573,9 @@ fn test_aig_equiv_reports_equivalent_designs() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let temp_dir = tempfile::tempdir().unwrap();
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
     let lhs_gate = two_input_gate_fn("and_lhs", |a, b, gb| gb.add_and_binary(a, b));
     let rhs_gate = two_input_gate_fn("and_rhs", |a, b, gb| gb.add_and_binary(b, a));
     let lhs_aag = write_aiger_file(&temp_dir, "lhs.aag", &lhs_gate);
@@ -8581,9 +8583,13 @@ fn test_aig_equiv_reports_equivalent_designs() {
 
     let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
         .arg("aig-equiv")
         .arg(lhs_aag.to_str().unwrap())
         .arg(rhs_aag.to_str().unwrap())
+        .arg("--solver")
+        .arg("toolchain")
         .output()
         .unwrap();
 
@@ -8594,12 +8600,11 @@ fn test_aig_equiv_reports_equivalent_designs() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let report: EquivReport =
-        serde_json::from_slice(&output.stdout).expect("valid JSON report expected");
     assert!(
-        report.results.values().all(EngineResult::is_equiv),
-        "expected all engines to report equivalence: {:?}",
-        report
+        String::from_utf8_lossy(&output.stdout)
+            .contains("[aig-equiv] success: Solver proved equivalence"),
+        "unexpected stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
     );
 }
 
@@ -8608,6 +8613,9 @@ fn test_aig_equiv_reports_non_equivalent_designs() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let temp_dir = tempfile::tempdir().unwrap();
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
     let lhs_gate = two_input_gate_fn("and_lhs", |a, b, gb| gb.add_and_binary(a, b));
     let rhs_gate = two_input_gate_fn("or_rhs", |a, b, gb| gb.add_or_binary(a, b));
     let lhs_aag = write_aiger_file(&temp_dir, "lhs_not_equiv.aag", &lhs_gate);
@@ -8615,9 +8623,13 @@ fn test_aig_equiv_reports_non_equivalent_designs() {
 
     let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
         .arg("aig-equiv")
         .arg(lhs_aag.to_str().unwrap())
         .arg(rhs_aag.to_str().unwrap())
+        .arg("--solver")
+        .arg("toolchain")
         .output()
         .unwrap();
 
@@ -8628,15 +8640,10 @@ fn test_aig_equiv_reports_non_equivalent_designs() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let report: EquivReport =
-        serde_json::from_slice(&output.stdout).expect("valid JSON report expected");
     assert!(
-        report
-            .results
-            .values()
-            .any(|res| !matches!(res, EngineResult::Equiv)),
-        "expected at least one engine to report inequivalence: {:?}",
-        report
+        String::from_utf8_lossy(&output.stderr).contains("[aig-equiv] failure:"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -8645,6 +8652,9 @@ fn test_aig_equiv_accepts_binary_aiger() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let temp_dir = tempfile::tempdir().unwrap();
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
     let lhs_gate = two_input_gate_fn("and_lhs", |a, b, gb| gb.add_and_binary(a, b));
     let rhs_gate = two_input_gate_fn("and_rhs", |a, b, gb| gb.add_and_binary(b, a));
     let lhs_aig = write_aiger_binary_file(&temp_dir, "lhs.aig", &lhs_gate);
@@ -8652,9 +8662,13 @@ fn test_aig_equiv_accepts_binary_aiger() {
 
     let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
         .arg("aig-equiv")
         .arg(lhs_aig.to_str().unwrap())
         .arg(rhs_aig.to_str().unwrap())
+        .arg("--solver")
+        .arg("toolchain")
         .output()
         .unwrap();
 
@@ -8662,6 +8676,145 @@ fn test_aig_equiv_accepts_binary_aiger() {
         output.status.success(),
         "aig-equiv failed on binary AIGER: stdout: {} stderr: {}",
         String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_g8r_equiv_reports_equivalent_designs() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let lhs_gate = two_input_gate_fn("and_lhs", |a, b, gb| gb.add_and_binary(a, b));
+    let rhs_gate = two_input_gate_fn("and_rhs", |a, b, gb| gb.add_and_binary(b, a));
+    let lhs_g8r_path = temp_dir.path().join("lhs.g8r");
+    let rhs_g8r_path = temp_dir.path().join("rhs.g8r");
+    std::fs::write(&lhs_g8r_path, lhs_gate.to_string()).unwrap();
+    std::fs::write(&rhs_g8r_path, rhs_gate.to_string()).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("g8r-equiv")
+        .arg(lhs_g8r_path.to_str().unwrap())
+        .arg(rhs_g8r_path.to_str().unwrap())
+        .arg("--solver")
+        .arg("toolchain")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "g8r-equiv failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("[g8r-equiv] success: Solver proved equivalence"),
+        "unexpected stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn test_g8r_ir_equiv_reports_equivalent_designs() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let lhs_gate = two_input_gate_fn("main", |a, b, gb| gb.add_and_binary(a, b));
+    let lhs_g8r_path = temp_dir.path().join("lhs.g8r");
+    std::fs::write(&lhs_g8r_path, lhs_gate.to_string()).unwrap();
+    let rhs_ir = r#"package sample
+
+top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret and.3: bits[1] = and(a, b, id=3)
+}
+"#;
+    let rhs_ir_path = temp_dir.path().join("rhs.ir");
+    std::fs::write(&rhs_ir_path, rhs_ir).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("g8r-ir-equiv")
+        .arg(lhs_g8r_path.to_str().unwrap())
+        .arg(rhs_ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--solver")
+        .arg("toolchain")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "g8r-ir-equiv failed for equivalent design; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("[g8r-ir-equiv] success: Solver proved equivalence"),
+        "unexpected stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
+fn test_g8r_ir_equiv_reports_non_equivalent_designs() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let lhs_gate = two_input_gate_fn("main", |a, b, gb| gb.add_and_binary(a, b));
+    let lhs_g8r_path = temp_dir.path().join("lhs_not_equiv.g8r");
+    std::fs::write(&lhs_g8r_path, lhs_gate.to_string()).unwrap();
+    let rhs_ir = r#"package sample
+
+top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret or.3: bits[1] = or(a, b, id=3)
+}
+"#;
+    let rhs_ir_path = temp_dir.path().join("rhs_not_equiv.ir");
+    std::fs::write(&rhs_ir_path, rhs_ir).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("g8r-ir-equiv")
+        .arg(lhs_g8r_path.to_str().unwrap())
+        .arg(rhs_ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--solver")
+        .arg("toolchain")
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "expected g8r-ir-equiv to fail for inequivalent designs; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("[g8r-ir-equiv] failure:"),
+        "unexpected stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }

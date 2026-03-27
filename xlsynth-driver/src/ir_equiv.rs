@@ -108,23 +108,7 @@ pub fn handle_ir_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainConf
     .with_tool_path(tool_path_ref);
 
     let outcome = dispatch_ir_equiv(&request, SUBCOMMAND);
-    if let Some(path) = output_json {
-        std::fs::write(path, serde_json::to_string(&outcome).unwrap()).unwrap();
-    }
-    let dur = std::time::Duration::from_micros(outcome.time_micros as u64);
-    if outcome.success {
-        println!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
-        println!("[{}] success: Solver proved equivalence", SUBCOMMAND);
-        std::process::exit(0);
-    } else {
-        eprintln!("[{}] Time taken: {:?}", SUBCOMMAND, dur);
-        if let Some(err) = outcome.error_str.as_ref() {
-            eprintln!("[{}] failure: {}", SUBCOMMAND, err);
-        } else {
-            eprintln!("[{}] failure", SUBCOMMAND);
-        }
-        std::process::exit(1);
-    }
+    emit_equiv_outcome_and_exit(&outcome, SUBCOMMAND, output_json);
 }
 
 pub fn dispatch_ir_equiv(request: &IrEquivRequest<'_>, subcommand: &str) -> EquivOutcome {
@@ -147,5 +131,29 @@ pub fn outcome_from_report(report: EquivReport) -> EquivOutcome {
         time_micros: report.duration.as_micros(),
         success: report.is_success(),
         error_str: report.error_str(),
+    }
+}
+
+pub fn emit_equiv_outcome_and_exit(
+    outcome: &EquivOutcome,
+    subcommand: &str,
+    output_json: Option<&String>,
+) -> ! {
+    if let Some(path) = output_json {
+        std::fs::write(path, serde_json::to_string(outcome).unwrap()).unwrap();
+    }
+    let dur = std::time::Duration::from_micros(outcome.time_micros as u64);
+    if outcome.success {
+        println!("[{}] Time taken: {:?}", subcommand, dur);
+        println!("[{}] success: Solver proved equivalence", subcommand);
+        std::process::exit(0);
+    } else {
+        eprintln!("[{}] Time taken: {:?}", subcommand, dur);
+        if let Some(err) = outcome.error_str.as_ref() {
+            eprintln!("[{}] failure: {}", subcommand, err);
+        } else {
+            eprintln!("[{}] failure", subcommand);
+        }
+        std::process::exit(1);
     }
 }
