@@ -3,7 +3,7 @@
 //! Lightweight library support for matching and rewriting PIR functions.
 
 use crate::dce;
-use crate::ir::{self, NodePayload, NodeRef, Type};
+use crate::ir::{self, MemberType, NodePayload, NodeRef, Type};
 use crate::ir_deduce;
 use crate::ir_query;
 use crate::ir_utils;
@@ -46,6 +46,14 @@ pub struct MatchRewriteOutcome {
     matched_root: Option<ir::NodeRef>,
 }
 
+#[derive(Debug, Clone)]
+pub struct MatchRewritePackageOutcome {
+    rewritten_package: ir::Package,
+    rewrote: bool,
+    matched_root: Option<ir::NodeRef>,
+    target_fn_name: String,
+}
+
 impl MatchRewriteOutcome {
     pub fn rewritten_fn(&self) -> &ir::Fn {
         &self.rewritten_fn
@@ -61,6 +69,28 @@ impl MatchRewriteOutcome {
 
     pub fn matched_root(&self) -> Option<ir::NodeRef> {
         self.matched_root
+    }
+}
+
+impl MatchRewritePackageOutcome {
+    pub fn rewritten_package(&self) -> &ir::Package {
+        &self.rewritten_package
+    }
+
+    pub fn into_rewritten_package(self) -> ir::Package {
+        self.rewritten_package
+    }
+
+    pub fn rewrote(&self) -> bool {
+        self.rewrote
+    }
+
+    pub fn matched_root(&self) -> Option<ir::NodeRef> {
+        self.matched_root
+    }
+
+    pub fn target_fn_name(&self) -> &str {
+        &self.target_fn_name
     }
 }
 
@@ -96,6 +126,14 @@ pub enum MatchRewriteRuleApplyError {
     Validation(String),
     Toposort(String),
     LiteralConstruction(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MatchRewritePackageError {
+    TargetFunctionNotFound { name: String },
+    TargetIsBlock { name: String },
+    NoTargetFunction,
+    Apply(MatchRewriteRuleApplyError),
 }
 
 impl fmt::Display for MatchPatternParseError {
@@ -167,10 +205,90 @@ impl fmt::Display for MatchRewriteRuleApplyError {
     }
 }
 
+impl fmt::Display for MatchRewritePackageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MatchRewritePackageError::TargetFunctionNotFound { name } => {
+                write!(f, "target function '{}' not found", name)
+            }
+            MatchRewritePackageError::TargetIsBlock { name } => {
+                write!(f, "target '{}' is a block, not a function", name)
+            }
+            MatchRewritePackageError::NoTargetFunction => {
+                write!(f, "package has no target function (top may be a block)")
+            }
+            MatchRewritePackageError::Apply(err) => write!(f, "{}", err),
+        }
+    }
+}
+
 impl std::error::Error for MatchPatternParseError {}
 impl std::error::Error for RewriteTemplateParseError {}
 impl std::error::Error for MatchRewriteRuleBuildError {}
 impl std::error::Error for MatchRewriteRuleApplyError {}
+impl std::error::Error for MatchRewritePackageError {}
+
+fn resolve_target_fn_name(
+    pkg: &ir::Package,
+    target_fn_name: Option<&str>,
+) -> Result<String, MatchRewritePackageError> {
+    if let Some(target_fn_name) = target_fn_name {
+        if pkg.get_fn(target_fn_name).is_some() {
+            return Ok(target_fn_name.to_string());
+        }
+        if pkg.get_block(target_fn_name).is_some() {
+            return Err(MatchRewritePackageError::TargetIsBlock {
+                name: target_fn_name.to_string(),
+            });
+        }
+        return Err(MatchRewritePackageError::TargetFunctionNotFound {
+            name: target_fn_name.to_string(),
+        });
+    }
+
+    match &pkg.top {
+        Some((name, MemberType::Block)) => {
+            Err(MatchRewritePackageError::TargetIsBlock { name: name.clone() })
+        }
+        _ => pkg
+            .get_top_fn()
+            .map(|f| f.name.clone())
+            .ok_or(MatchRewritePackageError::NoTargetFunction),
+    }
+}
+
+/// Applies a match/rewrite rule to a selected function in a PIR package.
+pub fn apply_rule_to_package(
+    pkg: &ir::Package,
+    rule: &MatchRewriteRule,
+    target_fn_name: Option<&str>,
+    mode: RewriteApplyMode,
+) -> Result<MatchRewritePackageOutcome, MatchRewritePackageError> {
+    let target_fn_name = resolve_target_fn_name(pkg, target_fn_name)?;
+    let target_fn = pkg
+        .get_fn(&target_fn_name)
+        .expect("resolved target function should exist");
+    let outcome = rule
+        .apply_to_fn(target_fn, mode)
+        .map_err(MatchRewritePackageError::Apply)?;
+
+    let rewrote = outcome.rewrote();
+    let matched_root = outcome.matched_root();
+    let rewritten_fn = outcome.into_rewritten_fn();
+
+    let mut rewritten_package = pkg.clone();
+    let target_fn = rewritten_package
+        .get_fn_mut(&target_fn_name)
+        .expect("resolved target function should exist in cloned package");
+    *target_fn = rewritten_fn;
+
+    Ok(MatchRewritePackageOutcome {
+        rewritten_package,
+        rewrote,
+        matched_root,
+        target_fn_name,
+    })
+}
 
 impl MatchPattern {
     pub fn parse(text: &str) -> Result<Self, MatchPatternParseError> {
@@ -1608,6 +1726,13 @@ mod tests {
         parser.parse_fn().expect("function should parse")
     }
 
+    fn parse_package(text: &str) -> ir::Package {
+        let mut parser = ir_parser::Parser::new(text);
+        parser
+            .parse_and_validate_package()
+            .expect("package should parse")
+    }
+
     fn normalized_fn_text(text: &str) -> String {
         let f = parse_fn(text);
         f.to_string()
@@ -1875,6 +2000,52 @@ mod tests {
         assert!(!outcome.rewrote());
         assert_eq!(outcome.matched_root(), None);
         assert_eq!(outcome.rewritten_fn().to_string(), input.to_string());
+    }
+
+    #[test]
+    fn apply_rule_to_package_rewrites_selected_top_function() {
+        let pkg = parse_package(
+            r#"package test
+
+top fn main(p: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  ret sel.10: bits[8] = sel(p, cases=[x, x], id=10)
+}"#,
+        );
+        let rule = MatchRewriteRule::from_strings("sel(selector=p, cases=[x, x])", "x").unwrap();
+        let outcome =
+            apply_rule_to_package(&pkg, &rule, None, RewriteApplyMode::FirstMatch).unwrap();
+        assert!(outcome.rewrote());
+        assert_eq!(outcome.target_fn_name(), "main");
+        assert_eq!(
+            outcome.rewritten_package().to_string(),
+            r#"package test
+
+top fn main(p: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  ret x: bits[8] = param(name=x, id=2)
+}
+"#
+        );
+    }
+
+    #[test]
+    fn apply_rule_to_package_reports_block_target() {
+        let pkg = parse_package(
+            r#"package test
+
+top block blk(x: bits[8], out: bits[8]) {
+  x: bits[8] = input_port(name=x, id=1)
+  out: () = output_port(x, name=out, id=2)
+}"#,
+        );
+        let rule = MatchRewriteRule::from_strings("identity(x)", "x").unwrap();
+        let err =
+            apply_rule_to_package(&pkg, &rule, None, RewriteApplyMode::FirstMatch).unwrap_err();
+        assert_eq!(
+            err,
+            MatchRewritePackageError::TargetIsBlock {
+                name: "blk".to_string()
+            }
+        );
     }
 
     #[test]
