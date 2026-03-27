@@ -89,8 +89,9 @@ over zero to five operands with source mix (3/10 literals, 1/10 existing
 parameters, 6/10 newly introduced parameters), `signed` flags, `negated`
 flags, and optional adder architecture. This target restricts all generated
 operand, literal, and parameter widths to 1..=8 bits to avoid zero-width
-gate-to-IR cases while exercising the g8r lowering path. The target gatifies
-that function, exports the original package to desugared XLS IR, converts the
+gate-to-IR cases while exercising the g8r lowering path. The input package is
+constructed programmatically, then the target gatifies that function, exports
+the original package to desugared XLS IR, converts the
 resulting `GateFn` back to XLS IR, reparses both packages into PIR, and then
 formally proves the two top functions equivalent with an in-process solver
 backend (Bitwuzla or Boolector, depending on enabled features).
