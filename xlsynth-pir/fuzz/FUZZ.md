@@ -101,7 +101,8 @@ chosen with a 3/10 probability of being a literal, 1/10 probability of using an
 existing parameter, and 6/10 probability of introducing a new parameter, so
 parameter lists are driven by actual term usage instead of being generated
 independently. Each term also carries random `signed` and `negated` flags. The
-target evaluates the native extension-op package and a desugared clone over a
+target constructs the PIR package directly in code, evaluates the native
+extension-op package and a desugared clone over a
 deterministic, non-coverage-guided corpus of argument tuples and asserts that
 the results are identical. Operand, literal, and parameter widths are bounded
 to 0..=8 bits in this target.
@@ -120,14 +121,8 @@ Essential property under test:
   across random widths, operand mixes, signedness, negation, and architecture
   annotations.
 
-Early returns justification:
-
-- Samples that do not provide enough entropy to describe a full typed
-  `ExtNaryAddFnSample` are skipped; this is an `arbitrary` input-length issue,
-  not an `ext_nary_add` semantic failure.
-
 Main failure modes surfaced:
 
 - Native `ext_nary_add` evaluator behavior diverges from desugared evaluation.
-- Generated `ext_nary_add` pretty-printed text fails to parse or validate.
+- Programmatically generated `ext_nary_add` packages fail structural validation.
 - Desugaring rejects a generated `ext_nary_add` shape that should be supported.
