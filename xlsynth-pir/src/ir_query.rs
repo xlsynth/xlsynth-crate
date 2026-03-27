@@ -329,12 +329,25 @@ pub fn matches_node(f: &ir::Fn, query: &QueryExpr, node_ref: ir::NodeRef) -> boo
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Binding {
+pub(crate) enum Binding {
     Node(ir::NodeRef),
-    LiteralValue(IrValue),
+    LiteralValue { value: IrValue, ty: ir::Type },
 }
 
 type Bindings = HashMap<String, Binding>;
+
+pub(crate) type QueryBindings = HashMap<String, Binding>;
+
+/// Returns all binding environments that satisfy `query` at `node_ref`.
+pub(crate) fn find_root_query_bindings(
+    query: &QueryExpr,
+    f: &ir::Fn,
+    users: &HashMap<ir::NodeRef, HashSet<ir::NodeRef>>,
+    node_ref: ir::NodeRef,
+) -> Vec<QueryBindings> {
+    let bindings = HashMap::new();
+    match_solutions(query, f, users, node_ref, &bindings)
+}
 
 /// Returns the set of binding environments that satisfy `expr` at `node_ref`,
 /// starting from `bindings`.
@@ -524,7 +537,10 @@ fn match_literal_solutions(
 
             match bindings.get(&placeholder.name) {
                 Some(existing) => match existing {
-                    Binding::LiteralValue(existing_value) if *existing_value == *value => {
+                    Binding::LiteralValue {
+                        value: existing_value,
+                        ty: existing_ty,
+                    } if *existing_value == *value && existing_ty == node_ty => {
                         vec![bindings.clone()]
                     }
                     _ => vec![],
@@ -533,7 +549,10 @@ fn match_literal_solutions(
                     let mut out = bindings.clone();
                     out.insert(
                         placeholder.name.clone(),
-                        Binding::LiteralValue(value.clone()),
+                        Binding::LiteralValue {
+                            value: value.clone(),
+                            ty: node_ty.clone(),
+                        },
                     );
                     vec![out]
                 }

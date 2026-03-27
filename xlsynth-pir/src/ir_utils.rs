@@ -555,9 +555,18 @@ pub fn find_node_by_name(f: &Fn, name: &str) -> Option<NodeRef> {
 ///
 /// Returns `Err` if remapping encounters a reference to a removed (Nil) node.
 pub fn compact_and_toposort_in_place(f: &mut Fn) -> Result<(), String> {
+    compact_and_toposort_with_mapping_in_place(f).map(|_| ())
+}
+
+/// Compacts away non-reserved `Nil` nodes, topologically reorders the body,
+/// and returns the old-to-new node mapping for callers that need to remap
+/// references after compaction.
+pub fn compact_and_toposort_with_mapping_in_place(
+    f: &mut Fn,
+) -> Result<Vec<Option<NodeRef>>, String> {
     let n = f.nodes.len();
     if n == 0 {
-        return Ok(());
+        return Ok(vec![]);
     }
 
     let param_count = f.params.len();
@@ -653,20 +662,25 @@ pub fn compact_and_toposort_in_place(f: &mut Fn) -> Result<(), String> {
         });
     }
 
+    let old_to_new_refs: Vec<Option<NodeRef>> = old_to_new
+        .into_iter()
+        .map(|mapped| mapped.map(|index| NodeRef { index }))
+        .collect();
+
     // Remap return node ref, if present.
     if let Some(old_ret) = f.ret_node_ref {
-        let mapped = old_to_new[old_ret.index].ok_or_else(|| {
+        let mapped = old_to_new_refs[old_ret.index].ok_or_else(|| {
             format!(
                 "compact_and_toposort_in_place: return node {} was removed (Nil)",
                 old_ret.index
             )
         })?;
-        f.ret_node_ref = Some(NodeRef { index: mapped });
+        f.ret_node_ref = Some(mapped);
     }
 
     // Install new nodes.
     f.nodes = new_nodes;
-    Ok(())
+    Ok(old_to_new_refs)
 }
 
 /// Computes the immediate users of each node in the function.
