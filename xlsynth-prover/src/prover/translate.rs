@@ -387,17 +387,22 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     bitvec: encoded,
                 }
             }
-            NodePayload::ExtNaryAdd { operands, arch: _ } => {
+            NodePayload::ExtNaryAdd { terms, arch: _ } => {
                 let ir::Type::Bits(out_w) = node.ty else {
                     panic!("ext_nary_add result must be bits-typed");
                 };
                 let mut acc = solver.zero(out_w);
-                for operand in operands.iter() {
+                for term in terms.iter() {
                     let value = env
-                        .get(operand)
+                        .get(&term.operand)
                         .expect("ext_nary_add operand must be present");
-                    let resized = solver.fit_width(&value.bitvec, out_w, /* signed= */ false);
-                    acc = solver.add(&acc, &resized);
+                    let resized = solver.fit_width(&value.bitvec, out_w, term.signed);
+                    let term_value = if term.negated {
+                        solver.neg(&resized)
+                    } else {
+                        resized
+                    };
+                    acc = solver.add(&acc, &term_value);
                 }
                 IrTypedBitVec {
                     ir_type: &node.ty,

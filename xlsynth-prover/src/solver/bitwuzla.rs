@@ -1046,7 +1046,15 @@ impl Solver for Bitwuzla {
 
     fn extend(&mut self, bv: &BitVec<Self::Term>, ext: usize, signed: bool) -> BitVec<Self::Term> {
         match bv {
-            BitVec::ZeroWidth => panic!("Cannot extend zero-width bitvector"),
+            BitVec::ZeroWidth => {
+                if ext == 0 {
+                    BitVec::ZeroWidth
+                } else {
+                    // Extending a zero-width value to a positive width yields
+                    // an all-zero bitvector regardless of signedness.
+                    self.numerical(ext, 0)
+                }
+            }
             BitVec::BitVec { width, rep } => {
                 if ext == 0 {
                     return BitVec::BitVec {

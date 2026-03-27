@@ -14,6 +14,7 @@ libfuzzer-sys = { version = "0.4" }
 log = "0.4"
 env_logger = "0.11"
 blake3 = "1"
+rand = "0.8"
 # Pretty diffs for assertions in fuzz targets
 pretty_assertions = "1.4.1"
 # Local crates
@@ -49,5 +50,11 @@ doc = false
 [[bin]]
 name = "fuzz_ir_fn_to_dslx_roundtrip_equiv"
 path = "fuzz_targets/fuzz_ir_fn_to_dslx_roundtrip_equiv.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_ext_nary_add_eval_equiv"
+path = "fuzz_targets/fuzz_ext_nary_add_eval_equiv.rs"
 test = false
 doc = false

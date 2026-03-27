@@ -82,6 +82,29 @@ Primarily tests:
 - Generated IR text remains parseable and executable across the C++ and PIR interpreters
 - Arbitrary generated ops and value shapes behave identically in both interpreters across autocov-selected inputs
 
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ext_nary_add_gatify_equiv.rs
+
+Generates a one-function PIR package whose return value is an `ext_nary_add`
+over zero to five operands with source mix (3/10 literals, 1/10 existing
+parameters, 6/10 newly introduced parameters), `signed` flags, `negated`
+flags, and optional adder architecture. This target restricts all generated
+operand, literal, and parameter widths to 1..=8 bits to avoid zero-width
+gate-to-IR cases while exercising the g8r lowering path. The input package is
+constructed programmatically, then the target gatifies that function, exports
+the original package to desugared XLS IR, converts the
+resulting `GateFn` back to XLS IR, reparses both packages into PIR, and then
+formally proves the two top functions equivalent with an in-process solver
+backend (Bitwuzla or Boolector, depending on enabled features).
+
+Primarily tests:
+
+- `ExtNaryAdd` lowering through g8r preserves semantics for random operand
+  counts, widths, signedness, negation, and architecture choices
+- Export/desugaring of generated `ext_nary_add` packages remains compatible with
+  PIR parsing and in-process formal equivalence
+- Gate-to-IR conversion of the gatified result stays semantically aligned with
+  the exported XLS IR form
+
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_gate_transform_equiv.rs
 
 Applies a randomly selected equivalence-preserving transform to a random `GateFn` and proves equivalence via IR-based checker; panics if a claimed always-equivalent transform breaks equivalence.

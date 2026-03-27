@@ -170,7 +170,9 @@ pub enum PirTransformKind {
     /// Introduce carry-save form for `add(a, b)`:
     /// `add(a, b) ↔ add(xor(a, b), shll(and(a, b), 1))`.
     AddFission,
-    /// Replace `add(a, b)` with `ext_nary_add(a, b, arch=brent_kung)`.
+    /// Replace `add(a, b)` with
+    /// `ext_nary_add(a, b, signed=[false, false], negated=[false, false],
+    /// arch=brent_kung)`.
     AddToExtNaryAdd,
     /// Rewrite an explicit `ext_nary_add` architecture to `ripple_carry`.
     ChangeExtNaryAddToRippleCarry,

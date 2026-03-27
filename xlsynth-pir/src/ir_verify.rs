@@ -70,9 +70,9 @@ pub fn verify_fn_operand_indices_in_bounds(f: &Fn) -> Result<(), String> {
             NodePayload::ExtPrioEncode { arg, lsb_prio: _ } => {
                 check(*arg, &format!("node {} ext_prio_encode.arg", i))?;
             }
-            NodePayload::ExtNaryAdd { operands, arch: _ } => {
-                for r in operands.iter() {
-                    check(*r, &format!("node {} ext_nary_add.operand", i))?;
+            NodePayload::ExtNaryAdd { terms, arch: _ } => {
+                for term in terms.iter() {
+                    check(term.operand, &format!("node {} ext_nary_add.operand", i))?;
                 }
             }
             NodePayload::SignExt { arg, .. } | NodePayload::ZeroExt { arg, .. } => {

@@ -12,7 +12,7 @@ fn ext_nary_add_equivalent_to_desugared_export_form_and_exports_to_upstream() {
     let ir = r#"package test
 
 fn f(a: bits[3] id=1, b: bits[5] id=2, c: bits[9] id=3) -> bits[6] {
-  ret r: bits[6] = ext_nary_add(a, b, c, arch=brent_kung, id=4)
+  ret r: bits[6] = ext_nary_add(a, b, c, signed=[false, false, false], negated=[false, false, false], arch=brent_kung, id=4)
 }
 "#;
 

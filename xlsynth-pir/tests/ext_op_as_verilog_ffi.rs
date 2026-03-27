@@ -140,7 +140,7 @@ fn f(arg: bits[4] id=1) -> bits[3] {
 fn verilogffi_wrapped_ext_nary_add_round_trips_verbatim() {
     let ir_text = r#"package nary_add_wrapped
 
-#[ffi_proto("""code_template: "pir_ext_nary_add {fn} (.op0({op0}), .op1({op1}), .op2({op2}), .out({return})); /* xlsynth_pir_ext=ext_nary_add;out_width=6;operand_widths=3,5,9;arch=brent_kung */"
+#[ffi_proto("""code_template: "pir_ext_nary_add {fn} (.op0({op0}), .op1({op1}), .op2({op2}), .out({return})); /* xlsynth_pir_ext=ext_nary_add;out_width=6;operand_signed=false,false,false;operand_negated=false,false,false;arch=brent_kung */"
 """)]
 fn __pir_ext__ext_nary_add__outw6__ops3_5_9__archbrent_kung(op0: bits[3] id=5, op1: bits[5] id=6, op2: bits[9] id=7) -> bits[6] {
   zero_ext.8: bits[6] = zero_ext(op0, new_bit_count=6, id=8)
@@ -160,6 +160,30 @@ fn f(a: bits[3] id=1, b: bits[5] id=2, c: bits[9] id=3) -> bits[6] {
         ir_text,
         "f",
         "__pir_ext__ext_nary_add__outw6__ops3_5_9__archbrent_kung",
+    );
+}
+
+#[test]
+fn verilogffi_wrapped_ext_nary_add_missing_required_term_attrs_is_rejected() {
+    let ir_text = r#"package nary_add_wrapped_bad_attrs
+
+#[ffi_proto("""code_template: "pir_ext_nary_add {fn} (.op0({op0}), .op1({op1}), .out({return})); /* xlsynth_pir_ext=ext_nary_add;out_width=6;operand_negated=false,false;arch=brent_kung */"
+""")]
+fn __pir_ext__ext_nary_add__outw6__ops3_5__archbrent_kung(op0: bits[3] id=5, op1: bits[5] id=6) -> bits[6] {
+  zero_ext.7: bits[6] = zero_ext(op0, new_bit_count=6, id=7)
+  zero_ext.8: bits[6] = zero_ext(op1, new_bit_count=6, id=8)
+  add.9: bits[6] = add(zero_ext.7, zero_ext.8, id=9)
+  ret identity.10: bits[6] = identity(add.9, id=10)
+}
+
+fn f(a: bits[3] id=1, b: bits[5] id=2) -> bits[6] {
+  ret r: bits[6] = invoke(a, b, to_apply=__pir_ext__ext_nary_add__outw6__ops3_5__archbrent_kung, id=4)
+}
+"#;
+
+    assert_wrapped_text_parse_error_contains(
+        ir_text,
+        "missing operand_signed for ext_nary_add metadata",
     );
 }
 
@@ -211,7 +235,7 @@ fn f(arg: bits[5] id=1) -> bits[3] {
 fn verilogffi_wrapped_ext_nary_add_operand_width_mismatch_is_rejected() {
     let ir_text = r#"package nary_add_wrapped_bad_invoke
 
-#[ffi_proto("""code_template: "pir_ext_nary_add {fn} (.op0({op0}), .op1({op1}), .op2({op2}), .out({return})); /* xlsynth_pir_ext=ext_nary_add;out_width=6;operand_widths=3,5,9;arch=brent_kung */"
+#[ffi_proto("""code_template: "pir_ext_nary_add {fn} (.op0({op0}), .op1({op1}), .op2({op2}), .out({return})); /* xlsynth_pir_ext=ext_nary_add;out_width=6;operand_widths=3,5,9;operand_signed=false,false,false;operand_negated=false,false,false;arch=brent_kung */"
 """)]
 fn __pir_ext__ext_nary_add__outw6__ops3_5_9__archbrent_kung(op0: bits[3] id=5, op1: bits[5] id=6, op2: bits[9] id=7) -> bits[6] {
   literal.8: bits[6] = literal(value=0, id=8)
