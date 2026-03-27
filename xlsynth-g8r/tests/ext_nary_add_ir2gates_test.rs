@@ -442,7 +442,7 @@ fn negated_operand_increases_gate_count() {
 }
 
 #[test]
-fn sixteen_bit_nary_depth_sweep_is_stable() {
+fn sixteen_bit_nary_depth_sweep_test() {
     let mut got = Vec::new();
     for operand_count in 2usize..=8 {
         let ir_text = build_single_stage_ext_nary_add_ir_text(
@@ -462,6 +462,7 @@ fn sixteen_bit_nary_depth_sweep_is_stable() {
         got.push((operand_count, max_depth));
     }
 
+    // Depth should be log-ish plus a fixed number for the reduction.
     #[rustfmt::skip]
     let want: &[(usize, usize)] = &[
         (2, 17),
