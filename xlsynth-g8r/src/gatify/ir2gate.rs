@@ -3566,7 +3566,9 @@ fn gatify_internal(
         let param_ref = ir::NodeRef { index: i + 1 };
         assert!(f.nodes[i + 1].payload == ir::NodePayload::GetParam(param.id));
         log::debug!("Gatifying param {:?}", param);
+        g8_builder.set_current_pir_node_id(Some(f.nodes[i + 1].text_id as u32));
         let gate_ref_vec = g8_builder.add_input(param.name.clone(), param.ty.bit_count());
+        g8_builder.set_current_pir_node_id(None);
         env.add(param_ref, GateOrVec::BitVector(gate_ref_vec));
         // Map ParamId to its NodeRef
         param_id_to_node_ref.insert(param.id, param_ref);
@@ -3580,6 +3582,9 @@ fn gatify_internal(
             node.ty,
             node.payload
         );
+        g8_builder.set_current_pir_node_id(Some(
+            u32::try_from(node.text_id).expect("node id too large for u32"),
+        ));
         gatify_node(
             f,
             node_ref,
@@ -3589,6 +3594,7 @@ fn gatify_internal(
             options,
             &param_id_to_node_ref,
         )?;
+        g8_builder.set_current_pir_node_id(None);
     }
     // Resolve the outputs and place them into the builder.
     let ret_node_ref = match f.ret_node_ref {
@@ -3838,7 +3844,7 @@ pub fn gatify_node_as_fn(
 #[cfg(test)]
 mod tests {
     use crate::aig::AigBitVector;
-    use crate::aig::gate::GateFn;
+    use crate::aig::gate::{AigNode, GateFn};
     use crate::aig::get_summary_stats::{SummaryStats, get_summary_stats};
     use crate::aig_sim::gate_sim;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
@@ -3949,6 +3955,58 @@ fn f(a: bits[8], b: bits[8]) -> bits[8] {
                 "Bit {} negation flags should differ",
                 i
             );
+        }
+    }
+
+    #[test]
+    fn test_gatify_seeds_pir_node_ids_on_inputs_and_lowered_ands() {
+        let ir_text = r#"package sample
+fn f(a: bits[2] id=1, b: bits[2] id=2) -> bits[2] {
+  ret add.3: bits[2] = add(a, b, id=3)
+}
+"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_package = parser.parse_and_validate_package().unwrap();
+        let ir_fn = ir_package.get_top_fn().unwrap();
+
+        let gatify_output = gatify(
+            &ir_fn,
+            GatifyOptions {
+                fold: false,
+                hash: false,
+                check_equivalence: false,
+                adder_mapping: AdderMapping::default(),
+                mul_adder_mapping: None,
+                range_info: None,
+                enable_rewrite_carry_out: false,
+                enable_rewrite_prio_encode: false,
+                array_index_lowering_strategy: Default::default(),
+            },
+        )
+        .unwrap();
+
+        let gate_fn = gatify_output.gate_fn;
+        for input in &gate_fn.inputs {
+            let expected_id = if input.name == "a" { 1 } else { 2 };
+            for bit in input.bit_vector.iter_lsb_to_msb() {
+                assert_eq!(
+                    gate_fn.gates[bit.node.id].get_pir_node_ids(),
+                    &[expected_id],
+                    "input bit {} should carry PIR provenance id {}",
+                    input.name,
+                    expected_id
+                );
+            }
+        }
+
+        for node in &gate_fn.gates {
+            if let AigNode::And2 { .. } = node {
+                assert_eq!(
+                    node.get_pir_node_ids(),
+                    &[3],
+                    "every lowered AND for this simple add should carry the add node text_id"
+                );
+            }
         }
     }
 

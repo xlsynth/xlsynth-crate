@@ -189,7 +189,7 @@ fn generate_internal_combinational_logic(
             gate::AigNode::Input { .. } => {
                 continue;
             }
-            gate::AigNode::Literal(value) => {
+            gate::AigNode::Literal { value, .. } => {
                 let gate_name = format!("G{}", idx);
                 let actual_wire_ref = module.add_wire(&gate_name, bit_type);
                 state
@@ -206,7 +206,9 @@ fn generate_internal_combinational_logic(
                     .internal_wire_assignments
                     .push((lhs_expr, rhs_literal_expr, gate_name));
             }
-            gate::AigNode::And2 { a, b, tags: _tags } => {
+            gate::AigNode::And2 {
+                a, b, tags: _tags, ..
+            } => {
                 let gate_name = format!("G{}", idx);
                 let actual_wire_ref = module.add_wire(&gate_name, bit_type);
                 state

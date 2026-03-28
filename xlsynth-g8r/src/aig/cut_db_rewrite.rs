@@ -16,7 +16,7 @@ use std::time::Instant;
 use blake3::Hasher;
 
 use crate::aig::dce::dce;
-use crate::aig::gate::{AigNode, AigOperand, AigRef, GateFn};
+use crate::aig::gate::{AigNode, AigOperand, AigRef, GateFn, PirNodeIds};
 use crate::aig::get_summary_stats::get_gate_depth;
 use crate::aig::topo::topo_sort_refs;
 use crate::cut_db::fragment::{GateFnFragment, Lit};
@@ -132,7 +132,7 @@ fn compute_cuts(g: &GateFn, max_cuts_per_node: usize) -> Vec<Vec<Cut>> {
             AigNode::Input { .. } => {
                 // Inputs already covered by self-cut.
             }
-            AigNode::Literal(v) => {
+            AigNode::Literal { value: v, .. } => {
                 // Constant cut with no leaves.
                 cuts.insert(Cut {
                     leaves: Vec::new(),
@@ -198,6 +198,7 @@ fn instantiate_fragment(
     gb: &mut GateBuilder,
     frag: &GateFnFragment,
     leaf_ops: &[AigOperand],
+    pir_node_ids: &[u32],
 ) -> AigOperand {
     let mut ops: Vec<AigOperand> = Vec::with_capacity(5 + frag.nodes.len());
     for i in 0..4usize {
@@ -222,13 +223,17 @@ fn instantiate_fragment(
             crate::cut_db::fragment::FragmentNode::And2 { a, b } => {
                 let a_op = op_from_lit(a, &ops);
                 let b_op = op_from_lit(b, &ops);
-                gb.add_and_binary(a_op, b_op)
+                let op = gb.add_and_binary(a_op, b_op);
+                gb.add_pir_node_ids(op.node, pir_node_ids);
+                op
             }
         };
         ops.push(op);
     }
 
-    op_from_lit(frag.output, &ops)
+    let output = op_from_lit(frag.output, &ops);
+    gb.add_pir_node_ids(output.node, pir_node_ids);
+    output
 }
 
 #[derive(Debug, Clone)]
@@ -337,6 +342,16 @@ fn choose_candidate_replacements_for_root(
 /// Rebuilds `g` while replacing `repl.root` with `repl.frag`, then runs DCE.
 fn rebuild_with_replacement(g: &GateFn, repl: &Replacement) -> GateFn {
     let mut gb = GateBuilder::new(g.name.clone(), GateBuilderOptions::opt());
+    let mut replacement_pir_node_ids = PirNodeIds::new();
+    replacement_pir_node_ids.extend(g.gates[repl.root.id].get_pir_node_ids().iter().copied());
+    for leaf in &repl.leaf_ops {
+        for pir_node_id in g.gates[leaf.node.id].get_pir_node_ids() {
+            match replacement_pir_node_ids.binary_search(pir_node_id) {
+                Ok(_) => {}
+                Err(index) => replacement_pir_node_ids.insert(index, *pir_node_id),
+            }
+        }
+    }
 
     let mut orig_to_new: std::collections::HashMap<AigRef, AigOperand> =
         std::collections::HashMap::new();
@@ -348,6 +363,7 @@ fn rebuild_with_replacement(g: &GateFn, repl: &Replacement) -> GateFn {
             // Map to the original input node by looking at the operand in the original
             // GateFn.
             let orig_op = input.bit_vector.get_lsb(i);
+            gb.add_pir_node_ids(op.node, g.gates[orig_op.node.id].get_pir_node_ids());
             orig_to_new.insert(orig_op.node, *op);
         }
     }
@@ -389,7 +405,12 @@ fn rebuild_with_replacement(g: &GateFn, repl: &Replacement) -> GateFn {
                 continue;
             }
 
-            let new_op = instantiate_fragment(&mut gb, &repl.frag, &leaf_new_ops);
+            let new_op = instantiate_fragment(
+                &mut gb,
+                &repl.frag,
+                &leaf_new_ops,
+                replacement_pir_node_ids.as_slice(),
+            );
             orig_to_new.insert(r, new_op);
             processing.remove(&r);
             continue;
@@ -400,8 +421,9 @@ fn rebuild_with_replacement(g: &GateFn, repl: &Replacement) -> GateFn {
                 // Inputs already mapped above.
                 processing.remove(&r);
             }
-            AigNode::Literal(v) => {
+            AigNode::Literal { value: v, .. } => {
                 let op = if *v { gb.get_true() } else { gb.get_false() };
+                gb.add_pir_node_ids(op.node, g.gates[r.id].get_pir_node_ids());
                 orig_to_new.insert(r, op);
                 processing.remove(&r);
             }
@@ -427,6 +449,7 @@ fn rebuild_with_replacement(g: &GateFn, repl: &Replacement) -> GateFn {
                     new_b = new_b.negate();
                 }
                 let new_op = gb.add_and_binary(new_a, new_b);
+                gb.add_pir_node_ids(new_op.node, g.gates[r.id].get_pir_node_ids());
                 orig_to_new.insert(r, new_op);
                 processing.remove(&r);
             }
@@ -658,5 +681,79 @@ mod tests {
             before.deepest_path,
             after.deepest_path
         );
+    }
+
+    #[test]
+    fn test_cut_db_rewrite_preserves_non_empty_provenance() {
+        let and4_tt = TruthTable16(0x8000);
+        let frag = make_balanced_and4_frag();
+        let (canon_tt, xform) = canon_tt16(and4_tt);
+        let canon_frag = frag.apply_npn(xform.inverse());
+        let entry = CanonEntry {
+            canon_tt,
+            pareto: vec![ParetoPoint {
+                tt: canon_tt,
+                ands: 3,
+                depth: 2,
+                frag: canon_frag,
+            }],
+        };
+        let canon_entries = vec![
+            CanonEntry {
+                canon_tt: TruthTable16(0),
+                pareto: Vec::new(),
+            },
+            entry,
+        ];
+        let mut dense = vec![
+            crate::cut_db::loader::DenseInfo {
+                canon_index: 0,
+                xform: crate::cut_db::npn::NpnTransform::identity(),
+            };
+            65536
+        ];
+        dense[and4_tt.0 as usize] = crate::cut_db::loader::DenseInfo {
+            canon_index: 1,
+            xform,
+        };
+        let db = CutDb::from_raw_for_test(canon_entries, dense);
+
+        let mut gb = GateBuilder::new("t".to_string(), GateBuilderOptions::opt());
+        let a = gb.add_input("a".to_string(), 1);
+        let b = gb.add_input("b".to_string(), 1);
+        let c = gb.add_input("c".to_string(), 1);
+        let d = gb.add_input("d".to_string(), 1);
+        gb.add_pir_node_id(a.get_lsb(0).node, 1);
+        gb.add_pir_node_id(b.get_lsb(0).node, 2);
+        gb.add_pir_node_id(c.get_lsb(0).node, 3);
+        gb.add_pir_node_id(d.get_lsb(0).node, 4);
+        gb.set_current_pir_node_id(Some(10));
+        let ab = gb.add_and_binary(*a.get_lsb(0), *b.get_lsb(0));
+        gb.set_current_pir_node_id(Some(11));
+        let abc = gb.add_and_binary(ab, *c.get_lsb(0));
+        gb.set_current_pir_node_id(Some(12));
+        let abcd = gb.add_and_binary(abc, *d.get_lsb(0));
+        gb.set_current_pir_node_id(None);
+        gb.add_output("o".to_string(), crate::aig::AigBitVector::from_bit(abcd));
+        let g = gb.build();
+
+        let rewritten = rewrite_gatefn_with_cut_db(
+            &g,
+            &db,
+            RewriteOptions {
+                max_cuts_per_node: 32,
+                max_iterations: 8,
+            },
+        );
+
+        for node in &rewritten.gates {
+            if let AigNode::And2 { .. } = node {
+                assert!(
+                    !node.get_pir_node_ids().is_empty(),
+                    "rewritten AND node should retain non-empty provenance: {:?}",
+                    node
+                );
+            }
+        }
     }
 }

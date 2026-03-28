@@ -105,6 +105,43 @@ Primarily tests:
 - Gate-to-IR conversion of the gatified result stays semantically aligned with
   the exported XLS IR form
 
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_node_provenance.rs
+
+Builds a random PIR function using the shared `xlsynth_pir::ir_fuzz`
+generator, reparses it into PIR, then gatifies with `fold=false` and
+`hash=false`. For each resulting AIG node, the target checks the initial
+provenance seeding invariant against the original parsed PIR function: the
+builder's dedicated constant-false literal is the only literal node, and its
+provenance (if any) must stay sorted, deduplicated, and tied to original PIR
+nodes. Every lowered `Input` / `And2` must carry a non-empty, sorted,
+deduplicated set of PIR `text_id`s, each of which must correspond to some node
+in the original pre-prep PIR function.
+
+Primarily tests:
+
+- Initial PIR-to-g8r lowering seeds non-empty provenance onto every lowered
+  `Input` / `And2`
+- Seeded provenance ids refer to real original PIR nodes, so prep-for-gatify
+  and initial lowering do not silently shift provenance onto fabricated ids
+
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_node_provenance_with_opts.rs
+
+Builds a random PIR function using the shared `xlsynth_pir::ir_fuzz`
+generator, reparses it into PIR, gatifies with folding and hashing enabled,
+then runs one bounded FRAIG iteration and one bounded cut-db rewrite
+iteration. For each surviving AIG node, the target checks the provenance
+invariant against the original parsed PIR function: every surviving `Input` /
+`And2` must carry a non-empty, sorted, deduplicated set of PIR `text_id`s, and
+every stored id must correspond to some node in the original pre-prep PIR
+function.
+
+Primarily tests:
+
+- PIR-to-g8r provenance survives the optimized default gate pipeline
+  (fold/hash, FRAIG, cut-db rewrite)
+- Surviving provenance ids remain non-empty, sorted, deduplicated, and tied to
+  original PIR nodes rather than fabricated helper ids
+
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_gate_transform_equiv.rs
 
 Applies a randomly selected equivalence-preserving transform to a random `GateFn` and proves equivalence via IR-based checker; panics if a claimed always-equivalent transform breaks equivalence.

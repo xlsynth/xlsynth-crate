@@ -234,7 +234,7 @@ pub fn gate_fn_to_xlsynth_ir(
                     aig_operand, aig_node
                 );
             }
-            (negated, AigNode::Literal(value)) => {
+            (negated, AigNode::Literal { value, .. }) => {
                 let result = fb.literal(&IrValue::make_ubits(1, *value as u64).unwrap(), None);
                 let result = if negated {
                     fb.not(&result, None)

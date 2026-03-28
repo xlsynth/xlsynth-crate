@@ -51,7 +51,7 @@ fn traverse_to_structure(
             next_number += 1;
             result
         }
-        AigNode::Literal(value) => {
+        AigNode::Literal { value, .. } => {
             format!("{}", value)
         }
     };

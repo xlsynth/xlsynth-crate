@@ -55,7 +55,7 @@ fn build_gate_fn<'ctx>(
             continue;
         }
         let expr = match &gate_fn.gates[aig_ref.id] {
-            AigNode::Literal(v) => Bool::from_bool(ctx, *v),
+            AigNode::Literal { value, .. } => Bool::from_bool(ctx, *value),
             AigNode::Input { .. } => input_map
                 .get(&aig_ref)
                 .expect("input Bool not in map")

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::aig::gate::PirNodeIds;
 use crate::aig::{AigOperand, AigRef, GateFn};
 use anyhow::Result;
 use std::fmt::{self, Debug};
@@ -143,4 +144,29 @@ pub trait Transform: Debug + Send + Sync {
     /// When `true`, applying the transform cannot change the functional
     /// behaviour of the circuit, so equivalence checks can be skipped.
     fn always_equivalent(&self) -> bool;
+}
+
+/// Collects the sorted, deduplicated provenance IDs from the given source
+/// nodes.
+pub(crate) fn collect_node_provenance(g: &GateFn, source_refs: &[AigRef]) -> PirNodeIds {
+    let mut pir_node_ids = PirNodeIds::new();
+    for source_ref in source_refs {
+        for pir_node_id in g.gates[source_ref.id].get_pir_node_ids() {
+            match pir_node_ids.binary_search(pir_node_id) {
+                Ok(_) => {}
+                Err(index) => pir_node_ids.insert(index, *pir_node_id),
+            }
+        }
+    }
+    pir_node_ids
+}
+
+/// Unions the provenance of the source nodes onto the destination node.
+pub(crate) fn union_node_provenance_into_node(
+    g: &mut GateFn,
+    dst_ref: AigRef,
+    source_refs: &[AigRef],
+) {
+    let pir_node_ids = collect_node_provenance(g, source_refs);
+    g.gates[dst_ref.id].try_add_pir_node_ids(pir_node_ids.as_slice());
 }

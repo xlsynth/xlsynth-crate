@@ -269,7 +269,10 @@ pub fn load_aiger(src: &str, opts: GateBuilderOptions) -> Result<LoadAigerResult
         let bit_idx = split_base_bit(full_name).map(|(_, b)| b).unwrap_or(0);
         // Update underlying gate node.
         let op = var_to_operand.get(&((idx as u32) + 1)).unwrap();
-        if let Some(AigNode::Input { name: n, lsb_index }) = gb.gates.get_mut(op.node.id) {
+        if let Some(AigNode::Input {
+            name: n, lsb_index, ..
+        }) = gb.gates.get_mut(op.node.id)
+        {
             *n = split_base_bit(full_name)
                 .map(|(base, _)| base)
                 .unwrap_or_else(|| full_name.clone());
