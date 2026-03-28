@@ -4,6 +4,7 @@ use crate::aig::{AigBitVector, AigNode, AigOperand, AigRef, GateFn};
 use crate::transforms::duplicate::duplicate;
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
+    union_node_provenance_into_node,
 };
 use crate::use_count::get_id_to_use_count;
 use anyhow::{Result, anyhow};
@@ -139,6 +140,7 @@ pub fn merge_fanout_primitive(
     if *use_counts.get(&duplicate).unwrap_or(&0) != 1 {
         return Err("duplicate fanout != 1");
     }
+    union_node_provenance_into_node(g, original, &[duplicate]);
     for gate in &mut g.gates {
         if let AigNode::And2 { a, b, .. } = gate {
             if a.node == duplicate {

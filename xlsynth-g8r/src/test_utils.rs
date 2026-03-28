@@ -512,10 +512,12 @@ pub fn setup_invalid_graph_with_cycle() -> TestInvalidGraphWithCycle {
         AigNode::Input {
             name: "a".to_string(),
             lsb_index: 0,
+            pir_node_ids: Default::default(),
         }, // id 0
         AigNode::Input {
             name: "b".to_string(),
             lsb_index: 0,
+            pir_node_ids: Default::default(),
         }, // id 1
         AigNode::And2 {
             a: AigOperand {
@@ -527,6 +529,7 @@ pub fn setup_invalid_graph_with_cycle() -> TestInvalidGraphWithCycle {
                 negated: false,
             },
             tags: None,
+            pir_node_ids: Default::default(),
         }, // id 2
         AigNode::And2 {
             a: AigOperand {
@@ -538,6 +541,7 @@ pub fn setup_invalid_graph_with_cycle() -> TestInvalidGraphWithCycle {
                 negated: false,
             },
             tags: None,
+            pir_node_ids: Default::default(),
         }, // id 3 (cycle)
     ];
     let inputs = vec![

@@ -5,6 +5,7 @@ use crate::aig::topo::reaches_target as node_reaches_target;
 use crate::aig::{AigNode, AigOperand, AigRef, GateFn};
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
+    union_node_provenance_into_node,
 };
 use crate::use_count::get_id_to_use_count;
 use anyhow::{Result, anyhow};
@@ -43,6 +44,15 @@ pub fn rotate_and_right_primitive(g: &mut GateFn, outer: AigRef) -> Result<(), &
     if *use_counts.get(&inner_ref).unwrap_or(&0) != 1 {
         return Err("rotate_and_right_primitive: inner (left op of outer) has fanout > 1");
     }
+    let provenance_sources = [
+        outer,
+        inner_ref,
+        a_op.node,
+        b_op.node,
+        right_op_of_outer.node,
+    ];
+    union_node_provenance_into_node(g, inner_ref, &provenance_sources);
+    union_node_provenance_into_node(g, outer, &provenance_sources);
 
     // Modify inner_ref (was (a&b)) to become (b&c) where c is right_op_of_outer
     if let AigNode::And2 {
@@ -103,6 +113,15 @@ pub fn rotate_and_left_primitive(g: &mut GateFn, outer: AigRef) -> Result<(), &'
     if *use_counts.get(&inner_ref).unwrap_or(&0) != 1 {
         return Err("rotate_and_left_primitive: inner (right op of outer) has fanout > 1");
     }
+    let provenance_sources = [
+        outer,
+        inner_ref,
+        left_op_of_outer.node,
+        b_op.node,
+        c_op.node,
+    ];
+    union_node_provenance_into_node(g, inner_ref, &provenance_sources);
+    union_node_provenance_into_node(g, outer, &provenance_sources);
 
     // Modify inner_ref (was (b&c)) to become (a&b) where a is left_op_of_outer
     if let AigNode::And2 {

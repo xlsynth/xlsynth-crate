@@ -37,7 +37,7 @@ use std::fmt::Write as _; // for write! macro on String // Needed for AigBitVect
 /// constant false and literal 1 is constant true.
 fn operand_to_literal(gf: &gate::GateFn, op: AigOperand) -> u32 {
     match &gf.gates[op.node.id] {
-        AigNode::Literal(val) => {
+        AigNode::Literal { value: val, .. } => {
             let base = if *val { 1 } else { 0 }; // constant true/false
             base ^ (op.negated as u32)
         }

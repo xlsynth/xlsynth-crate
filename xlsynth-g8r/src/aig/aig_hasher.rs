@@ -50,7 +50,7 @@ impl AigHasher {
     fn compute_node_depth(node: &AigNode, get_depth: impl Fn(&AigOperand) -> usize) -> usize {
         match node {
             AigNode::Input { .. } => 0,
-            AigNode::Literal(..) => 0,
+            AigNode::Literal { .. } => 0,
             AigNode::And2 { a, b, .. } => {
                 let a_depth = get_depth(a);
                 let b_depth = get_depth(b);
@@ -95,12 +95,14 @@ impl AigHasher {
                     hasher.update(&hash_a_bytes);
                 }
             }
-            AigNode::Input { name, lsb_index } => {
+            AigNode::Input {
+                name, lsb_index, ..
+            } => {
                 hasher.update(&[1]);
                 hasher.update(name.as_bytes());
                 hasher.update(&lsb_index.to_le_bytes());
             }
-            AigNode::Literal(val) => {
+            AigNode::Literal { value: val, .. } => {
                 return if *val { *TRUE_HASH } else { *FALSE_HASH };
             }
         }
@@ -186,6 +188,7 @@ mod tests {
         nodes.push(AigNode::Input {
             name: "a".to_string(),
             lsb_index: 0,
+            pir_node_ids: Default::default(),
         });
         for i in 1..=depth {
             let left = AigOperand {
@@ -200,6 +203,7 @@ mod tests {
                 a: left,
                 b: right,
                 tags: None,
+                pir_node_ids: Default::default(),
             });
         }
         let mut hasher = AigHasher::new();

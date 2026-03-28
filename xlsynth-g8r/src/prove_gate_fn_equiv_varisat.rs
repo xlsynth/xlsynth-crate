@@ -118,7 +118,7 @@ fn build_sat_clauses(
         let output_lit = aig_ref_to_lit[aig_ref];
         let gate = &gates[aig_ref.id];
         match gate {
-            AigNode::Literal(value) => {
+            AigNode::Literal { value, .. } => {
                 if *value {
                     solver.add_clause(&[output_lit]);
                 } else {
@@ -243,7 +243,7 @@ fn build_gate_fn(
     for g in &cone_gates {
         let out_lit = map[g];
         match &gate_fn.gates[g.id] {
-            AigNode::Literal(v) => {
+            AigNode::Literal { value: v, .. } => {
                 if *v {
                     solver.add_clause(&[out_lit]);
                 } else {

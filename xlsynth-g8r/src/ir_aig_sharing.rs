@@ -598,7 +598,7 @@ fn encode_gate_fn_all_nodes(
         let out = *map.get(&r).expect("lit allocated for node");
         match node {
             AigNode::Input { .. } => {}
-            AigNode::Literal(v) => {
+            AigNode::Literal { value: v, .. } => {
                 if *v {
                     solver.add_clause(&[out]);
                 } else {
@@ -686,7 +686,7 @@ fn eval_gate_fn_all_node_values_positive(
                     values[r.id] = Some(false);
                 }
             }
-            AigNode::Literal(v) => {
+            AigNode::Literal { value: v, .. } => {
                 values[r.id] = Some(*v);
             }
             AigNode::And2 { a, b, .. } => {

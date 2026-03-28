@@ -224,7 +224,13 @@ pub fn parse_gate_fn(text: &str) -> Result<GateFn, ParseError> {
 
     use std::collections::HashMap;
     let mut nodes: HashMap<usize, AigNode> = HashMap::new();
-    nodes.insert(0, AigNode::Literal(false));
+    nodes.insert(
+        0,
+        AigNode::Literal {
+            value: false,
+            pir_node_ids: Default::default(),
+        },
+    );
 
     let mut inputs = Vec::new();
     for (inp_name, bv) in inputs_pairs {
@@ -234,6 +240,7 @@ pub fn parse_gate_fn(text: &str) -> Result<GateFn, ParseError> {
                 AigNode::Input {
                     name: inp_name.clone(),
                     lsb_index: i,
+                    pir_node_ids: Default::default(),
                 },
             );
             p.input_lookup.insert((inp_name.clone(), i), op.node.id);
@@ -276,7 +283,15 @@ pub fn parse_gate_fn(text: &str) -> Result<GateFn, ParseError> {
                     p.drop_or_error(")")?;
                     None
                 };
-                nodes.insert(id, AigNode::And2 { a, b, tags });
+                nodes.insert(
+                    id,
+                    AigNode::And2 {
+                        a,
+                        b,
+                        tags,
+                        pir_node_ids: Default::default(),
+                    },
+                );
                 continue;
             } else if p.try_drop("literal(") {
                 p.drop_ws();
@@ -289,7 +304,13 @@ pub fn parse_gate_fn(text: &str) -> Result<GateFn, ParseError> {
                     value != 0
                 };
                 p.drop_or_error(")")?;
-                nodes.insert(id, AigNode::Literal(lit_val));
+                nodes.insert(
+                    id,
+                    AigNode::Literal {
+                        value: lit_val,
+                        pir_node_ids: Default::default(),
+                    },
+                );
                 continue;
             } else {
                 return Err(p.err("unknown node kind"));

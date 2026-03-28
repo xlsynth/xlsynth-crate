@@ -165,7 +165,7 @@ pub fn extract_cone(start_nodes: &[AigRef], gates: &[AigNode]) -> (Vec<AigRef>, 
             AigNode::Input { .. } => {
                 cone_inputs.insert(current_ref);
             }
-            AigNode::Literal(_) => {
+            AigNode::Literal { .. } => {
                 add_cone_gate(current_ref);
             }
             AigNode::And2 { a, b, .. } => {

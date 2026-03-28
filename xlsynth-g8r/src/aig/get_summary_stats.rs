@@ -56,7 +56,7 @@ pub fn get_gate_depth(gate_fn: &gate::GateFn, live_nodes: &[gate::AigRef]) -> Ga
             &AigNode::Input { .. } => {
                 continue;
             }
-            &AigNode::Literal(_) => {
+            &AigNode::Literal { .. } => {
                 assert!(gate_ref.id < 2);
                 depths.insert(gate_ref, 0);
             }
@@ -77,7 +77,7 @@ pub fn get_gate_depth(gate_fn: &gate::GateFn, live_nodes: &[gate::AigRef]) -> Ga
             continue;
         }
         let depth = match &gate_fn.gates[node_ref.id] {
-            AigNode::Input { .. } | AigNode::Literal(_) => 0,
+            AigNode::Input { .. } | AigNode::Literal { .. } => 0,
             AigNode::And2 { a, b, .. } => {
                 // We expect childrens' depths to be present as topo order ensures
                 // they come earlier.
@@ -191,7 +191,7 @@ pub fn get_aig_stats(gate_fn: &gate::GateFn) -> AigStats {
     let mut fanout_histogram: BTreeMap<usize, usize> = BTreeMap::new();
     for node_ref in live_nodes.iter() {
         // Skip literal nodes (AigRef 0/1).
-        if matches!(gate_fn.gates[node_ref.id], AigNode::Literal(_)) {
+        if matches!(gate_fn.gates[node_ref.id], AigNode::Literal { .. }) {
             continue;
         }
         let fanout = *id_to_use_count

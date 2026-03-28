@@ -29,7 +29,7 @@ fn encode_u32_as_aiger_varint(mut x: u32, out: &mut Vec<u8>) {
 
 fn is_const_literal(gf: &gate::GateFn, op: AigOperand) -> Option<bool> {
     match gf.get(op.node) {
-        AigNode::Literal(v) => Some(*v),
+        AigNode::Literal { value: v, .. } => Some(*v),
         _ => None,
     }
 }

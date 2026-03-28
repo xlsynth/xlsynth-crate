@@ -4,6 +4,7 @@ use crate::aig::gate::{AigNode, AigOperand, AigRef, GateFn};
 use crate::aig::topo;
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
+    union_node_provenance_into_node,
 };
 use crate::use_count::get_id_to_use_count;
 use anyhow::{Result, anyhow};
@@ -142,6 +143,14 @@ fn build_balanced(g: &mut GateFn, nodes: &[AigRef], ops: &[AigOperand]) -> Resul
     debug_assert_eq!(idx, nodes.len());
     topo::debug_assert_no_cycles(&g.gates, "balance_and_tree");
     Ok(())
+}
+
+fn union_chain_provenance(g: &mut GateFn, nodes: &[AigRef], ops: &[AigOperand]) {
+    let mut provenance_sources = nodes.to_vec();
+    provenance_sources.extend(ops.iter().map(|op| op.node));
+    for node_ref in nodes {
+        union_node_provenance_into_node(g, *node_ref, provenance_sources.as_slice());
+    }
 }
 
 fn build_chain(
@@ -337,6 +346,7 @@ impl Transform for BalanceAndTreeTransform {
                         ));
                     }
                     build_balanced(g, &nodes, &ops)?;
+                    union_chain_provenance(g, &nodes, &ops);
                     if let AigNode::And2 { tags, .. } = &mut g.gates[root.id] {
                         let tag = match orient {
                             Orientation::Left => TAG_LEFT,
@@ -433,19 +443,15 @@ impl Transform for UnbalanceAndTreeTransform {
                     ));
                 }
                 build_chain(g, orient, &nodes, &ops)?;
+                union_chain_provenance(g, &nodes, &ops);
                 // Assert strong invariant: UnbalanceAndTree must not create cycles.
                 topo::debug_assert_no_cycles(&g.gates, "unbalance_and_tree");
                 if let AigNode::And2 { tags: Some(ts), .. } = &mut g.gates[root.id] {
                     ts.retain(|t| t != TAG_LEFT && t != TAG_RIGHT);
                     if ts.is_empty() {
-                        g.gates[root.id] = match &g.gates[root.id] {
-                            AigNode::And2 { a, b, .. } => AigNode::And2 {
-                                a: *a,
-                                b: *b,
-                                tags: None,
-                            },
-                            _ => unreachable!(),
-                        };
+                        if let AigNode::And2 { tags, .. } = &mut g.gates[root.id] {
+                            *tags = None;
+                        }
                     }
                 }
                 Ok(())

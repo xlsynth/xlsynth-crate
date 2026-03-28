@@ -267,14 +267,19 @@ mod tests {
         // Manually construct gates for primitive test
         // Nodes: 0: Literal(false), 1: Input(i0), 2: Input(i1), 3: And2(i0, i1)
         let mut gates_vec = vec![
-            AigNode::Literal(false),
+            AigNode::Literal {
+                value: false,
+                pir_node_ids: Default::default(),
+            },
             AigNode::Input {
                 name: "i0".to_string(),
                 lsb_index: 0,
+                pir_node_ids: Default::default(),
             },
             AigNode::Input {
                 name: "i1".to_string(),
                 lsb_index: 0,
+                pir_node_ids: Default::default(),
             },
             AigNode::And2 {
                 a: AigOperand {
@@ -286,6 +291,7 @@ mod tests {
                     negated: false,
                 },
                 tags: None,
+                pir_node_ids: Default::default(),
             },
         ];
         let initial_op = AigOperand {
@@ -339,10 +345,14 @@ mod tests {
     fn test_do_double_negate_on_input_node_fails() {
         // Manually construct: 0: Literal(false), 1: Input(i0)
         let mut gates_vec = vec![
-            AigNode::Literal(false),
+            AigNode::Literal {
+                value: false,
+                pir_node_ids: Default::default(),
+            },
             AigNode::Input {
                 name: "i0".to_string(),
                 lsb_index: 0,
+                pir_node_ids: Default::default(),
             },
         ];
         let op_on_input = AigOperand {
@@ -356,7 +366,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "Operand node ID out of bounds")]
     fn test_do_double_negate_out_of_bounds() {
-        let mut gates_vec = vec![AigNode::Literal(false)]; // Only literal false
+        let mut gates_vec = vec![AigNode::Literal {
+            value: false,
+            pir_node_ids: Default::default(),
+        }]; // Only literal false
         let op_out_of_bounds = AigOperand {
             node: AigRef { id: 100 },
             negated: false,

@@ -120,7 +120,7 @@ pub fn propose_equivalence_classes(
     let all_potential_equivs: Vec<(u64, EquivNode)> = (0..gate_count)
         .filter_map(|node_index| {
             let node = &gate_fn.gates[node_index];
-            if matches!(node, AigNode::Input { .. } | AigNode::Literal(..)) {
+            if matches!(node, AigNode::Input { .. } | AigNode::Literal { .. }) {
                 None // Skip inputs and literals
             } else {
                 let (normal_hash, inverse_hash) = node_hashes[node_index];

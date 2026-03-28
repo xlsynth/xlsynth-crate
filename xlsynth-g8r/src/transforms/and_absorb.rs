@@ -4,6 +4,7 @@ use crate::aig::gate::{AigNode, AigRef, GateFn};
 use crate::aig::topo::{self, reaches_target as node_reaches_target};
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
+    union_node_provenance_into_node,
 };
 use crate::use_count::get_id_to_use_count;
 use anyhow::{Result, anyhow};
@@ -42,6 +43,7 @@ pub fn and_absorb_right_primitive(g: &mut GateFn, outer: AigRef) -> Result<(), &
     if node_reaches_target(&g.gates, inner_b.node, outer) {
         return Err("and_absorb_right_primitive: would create cycle");
     }
+    union_node_provenance_into_node(g, outer, &[inner_ref]);
 
     if let AigNode::And2 { a, b, .. } = &mut g.gates[outer.id] {
         *a = inner_a;
@@ -85,6 +87,7 @@ pub fn and_absorb_left_primitive(g: &mut GateFn, outer: AigRef) -> Result<(), &'
     if node_reaches_target(&g.gates, inner_b.node, outer) {
         return Err("and_absorb_left_primitive: would create cycle");
     }
+    union_node_provenance_into_node(g, outer, &[inner_ref]);
 
     if let AigNode::And2 { a, b, .. } = &mut g.gates[outer.id] {
         *a = inner_a;

@@ -32,7 +32,7 @@ use xlsynth::IrBits;
 use crate::{
     aig::aig_hasher::AigHasher,
     aig::aig_simplify,
-    aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output},
+    aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output, PirNodeIds},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +48,7 @@ pub struct GateBuilder {
     pub outputs: Vec<Output>,
     pub options: GateBuilderOptions,
     pub hasher: Option<AigHasher>,
+    current_pir_node_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,10 +88,31 @@ impl GateBuilderOptions {
 }
 
 impl GateBuilder {
+    fn current_pir_node_ids(&self) -> PirNodeIds {
+        AigNode::with_pir_node_id(self.current_pir_node_id)
+    }
+
+    fn union_pir_node_ids_into_operand(
+        &mut self,
+        operand: AigOperand,
+        pir_node_ids: &[u32],
+    ) -> AigOperand {
+        self.add_pir_node_ids(operand.node, pir_node_ids);
+        operand
+    }
+
+    fn union_current_pir_node_id_into_operand(&mut self, operand: AigOperand) -> AigOperand {
+        let pir_node_ids = self.current_pir_node_ids();
+        self.union_pir_node_ids_into_operand(operand, pir_node_ids.as_slice())
+    }
+
     pub fn new(name: String, options: GateBuilderOptions) -> Self {
         Self {
             name,
-            gates: vec![AigNode::Literal(false)],
+            gates: vec![AigNode::Literal {
+                value: false,
+                pir_node_ids: PirNodeIds::new(),
+            }],
             inputs: Vec::new(),
             outputs: Vec::new(),
             options,
@@ -99,6 +121,7 @@ impl GateBuilder {
             } else {
                 None
             },
+            current_pir_node_id: None,
         }
     }
 
@@ -118,6 +141,18 @@ impl GateBuilder {
     pub fn add_tag(&mut self, aig_ref: AigRef, tag: String) {
         let gate = &mut self.gates[aig_ref.id];
         gate.add_tag(tag)
+    }
+
+    pub fn set_current_pir_node_id(&mut self, pir_node_id: Option<u32>) {
+        self.current_pir_node_id = pir_node_id;
+    }
+
+    pub fn add_pir_node_id(&mut self, aig_ref: AigRef, pir_node_id: u32) {
+        self.gates[aig_ref.id].add_pir_node_id(pir_node_id);
+    }
+
+    pub fn add_pir_node_ids(&mut self, aig_ref: AigRef, pir_node_ids: &[u32]) {
+        self.gates[aig_ref.id].try_add_pir_node_ids(pir_node_ids);
     }
 
     pub fn to_operand(&self, aig_ref: AigRef) -> AigOperand {
@@ -158,6 +193,7 @@ impl GateBuilder {
             self.gates.push(AigNode::Input {
                 name: name.clone(),
                 lsb_index: lsb_i,
+                pir_node_ids: AigNode::with_pir_node_id(self.current_pir_node_id),
             });
             bits.push(gate_ref.into());
         }
@@ -190,24 +226,25 @@ impl GateBuilder {
         if self.options.fold {
             // If either side is known false, the result is false.
             if self.is_known_false(lhs) || self.is_known_false(rhs) {
-                return self.get_false();
+                return self.union_current_pir_node_id_into_operand(self.get_false());
             }
             // If both sides are known true, the result is true.
             if self.is_known_true(lhs) && self.is_known_true(rhs) {
-                return self.get_true();
+                return self.union_current_pir_node_id_into_operand(self.get_true());
             }
             // If one side is known true, the result is the other side.
             if self.is_known_true(lhs) {
-                return rhs;
+                return self.union_current_pir_node_id_into_operand(rhs);
             }
             if self.is_known_true(rhs) {
-                return lhs;
+                return self.union_current_pir_node_id_into_operand(lhs);
             }
         }
         let gate = AigNode::And2 {
             a: lhs,
             b: rhs,
             tags: None,
+            pir_node_ids: AigNode::with_pir_node_id(self.current_pir_node_id),
         };
         let gate_ref = AigRef {
             id: self.gates.len(),
@@ -220,13 +257,15 @@ impl GateBuilder {
         self.gates.push(gate);
         if self.options.fold {
             if let Some(simplified) = aig_simplify::operand_simplify(gate_ref, self) {
-                return simplified;
+                let pir_node_ids = self.gates[gate_ref.id].get_pir_node_ids().to_vec();
+                return self.union_pir_node_ids_into_operand(simplified, &pir_node_ids);
             }
         }
         if let Some(hasher) = &mut self.hasher {
             let existing = hasher.feed_ref(&gate_ref, &self.gates);
             if let Some(existing) = existing {
-                return existing.into();
+                let pir_node_ids = self.gates[gate_ref.id].get_pir_node_ids().to_vec();
+                return self.union_pir_node_ids_into_operand(existing.into(), &pir_node_ids);
             }
         }
         AigOperand {
@@ -285,17 +324,17 @@ impl GateBuilder {
         }
         if self.options.fold {
             if args.iter().any(|arg| self.is_known_false(*arg)) {
-                return self.get_false();
+                return self.union_current_pir_node_id_into_operand(self.get_false());
             }
             if args.iter().all(|arg| self.is_known_true(*arg)) {
-                return self.get_true();
+                return self.union_current_pir_node_id_into_operand(self.get_true());
             }
             if let &[lhs, rhs] = args {
                 if self.is_known_true(lhs) {
-                    return rhs;
+                    return self.union_current_pir_node_id_into_operand(rhs);
                 }
                 if self.is_known_true(rhs) {
-                    return lhs;
+                    return self.union_current_pir_node_id_into_operand(lhs);
                 }
             }
         }
@@ -368,16 +407,16 @@ impl GateBuilder {
     pub fn add_not(&mut self, arg: AigOperand) -> AigOperand {
         if self.options.fold {
             if self.is_known_false(arg) {
-                return self.get_true();
+                return self.union_current_pir_node_id_into_operand(self.get_true());
             }
             if self.is_known_true(arg) {
-                return self.get_false();
+                return self.union_current_pir_node_id_into_operand(self.get_false());
             }
             if arg.negated {
-                return AigOperand {
+                return self.union_current_pir_node_id_into_operand(AigOperand {
                     node: arg.node,
                     negated: false,
-                };
+                });
             }
         }
         AigOperand {
@@ -412,23 +451,23 @@ impl GateBuilder {
         if self.options.fold {
             // both sides known
             if self.is_known_true(lhs) && self.is_known_true(rhs) {
-                return self.get_false();
+                return self.union_current_pir_node_id_into_operand(self.get_false());
             }
             if self.is_known_true(lhs) && self.is_known_false(rhs) {
-                return self.get_true();
+                return self.union_current_pir_node_id_into_operand(self.get_true());
             }
             if self.is_known_false(lhs) && self.is_known_true(rhs) {
-                return self.get_true();
+                return self.union_current_pir_node_id_into_operand(self.get_true());
             }
             if self.is_known_false(lhs) && self.is_known_false(rhs) {
-                return self.get_false();
+                return self.union_current_pir_node_id_into_operand(self.get_false());
             }
             // one side known
             if self.is_known_false(lhs) {
-                return rhs;
+                return self.union_current_pir_node_id_into_operand(rhs);
             }
             if self.is_known_false(rhs) {
-                return lhs;
+                return self.union_current_pir_node_id_into_operand(lhs);
             }
             if self.is_known_true(lhs) {
                 return self.add_not(rhs);
@@ -482,7 +521,7 @@ impl GateBuilder {
             "attempted to reduce an empty list of operands"
         );
         if args.len() == 1 {
-            return args[0];
+            return self.union_current_pir_node_id_into_operand(args[0]);
         }
         let halves = args.split_at(args.len() / 2);
         log::trace!(
@@ -533,16 +572,16 @@ impl GateBuilder {
     pub fn add_or_binary(&mut self, lhs: AigOperand, rhs: AigOperand) -> AigOperand {
         if self.options.fold {
             if self.is_known_true(lhs) || self.is_known_true(rhs) {
-                return self.get_true();
+                return self.union_current_pir_node_id_into_operand(self.get_true());
             }
             if self.is_known_false(lhs) && self.is_known_false(rhs) {
-                return self.get_false();
+                return self.union_current_pir_node_id_into_operand(self.get_false());
             }
             if self.is_known_false(lhs) {
-                return rhs;
+                return self.union_current_pir_node_id_into_operand(rhs);
             }
             if self.is_known_false(rhs) {
-                return lhs;
+                return self.union_current_pir_node_id_into_operand(lhs);
             }
         }
         let not_lhs = self.add_not(lhs);
@@ -564,11 +603,11 @@ impl GateBuilder {
             reduction_kind
         );
         if args.len() == 1 {
-            return args[0];
+            return self.union_current_pir_node_id_into_operand(args[0]);
         }
         if self.options.fold {
             if args.iter().any(|arg| self.is_known_true(*arg)) {
-                return self.get_true();
+                return self.union_current_pir_node_id_into_operand(self.get_true());
             }
             // Drop any args that are known zero.
             let nonzero: Vec<AigOperand> = args
@@ -577,10 +616,10 @@ impl GateBuilder {
                 .map(|arg| *arg)
                 .collect();
             if nonzero.is_empty() {
-                return self.get_false();
+                return self.union_current_pir_node_id_into_operand(self.get_false());
             }
             if nonzero.len() == 1 {
-                return nonzero[0];
+                return self.union_current_pir_node_id_into_operand(nonzero[0]);
             }
             if nonzero.len() < args.len() {
                 return self.add_or_nary(&nonzero, reduction_kind);
@@ -730,13 +769,13 @@ impl GateBuilder {
     ) -> AigOperand {
         if self.options.fold {
             if self.is_known_false(selector) {
-                return on_false;
+                return self.union_current_pir_node_id_into_operand(on_false);
             }
             if self.is_known_true(selector) {
-                return on_true;
+                return self.union_current_pir_node_id_into_operand(on_true);
             }
             if self.is_known_true(on_true) && self.is_known_false(on_false) {
-                return selector;
+                return self.union_current_pir_node_id_into_operand(selector);
             }
             if self.is_known_false(on_true) && self.is_known_true(on_false) {
                 return self.add_not(selector);
@@ -1207,5 +1246,63 @@ mod tests {
   nota_notb[0] = %9
 }";
         assert_eq!(gate_fn.to_string(), expected_str);
+    }
+
+    #[test]
+    fn test_fold_to_existing_operand_unions_current_pir_node_id() {
+        let mut builder = GateBuilder::new("fold_ids".to_string(), GateBuilderOptions::opt());
+        let a = builder.add_input("a".to_string(), 1);
+        let a0 = *a.get_lsb(0);
+
+        builder.set_current_pir_node_id(Some(42));
+        let result = builder.add_and_binary(builder.get_true(), a0);
+        builder.set_current_pir_node_id(None);
+
+        assert_eq!(result, a0);
+        assert_eq!(builder.gates[a0.node.id].get_pir_node_ids(), &[42]);
+    }
+
+    #[test]
+    fn test_operand_simplify_unions_current_pir_node_id() {
+        let mut builder = GateBuilder::new(
+            "operand_simplify_ids".to_string(),
+            GateBuilderOptions::opt(),
+        );
+        let a = builder.add_input("a".to_string(), 1);
+        let b = builder.add_input("b".to_string(), 1);
+        let a0 = *a.get_lsb(0);
+        let b0 = *b.get_lsb(0);
+
+        let a_or_b = builder.add_or_binary(a0, b0);
+        builder.set_current_pir_node_id(Some(99));
+        let simplified = builder.add_and_binary(a_or_b, b0);
+        builder.set_current_pir_node_id(None);
+
+        assert_eq!(simplified, b0);
+        assert_eq!(builder.gates[b0.node.id].get_pir_node_ids(), &[99]);
+    }
+
+    #[test]
+    fn test_hash_dedup_unions_current_pir_node_id() {
+        let mut builder = GateBuilder::new(
+            "hash_ids".to_string(),
+            GateBuilderOptions {
+                fold: false,
+                hash: true,
+            },
+        );
+        let a = builder.add_input("a".to_string(), 1);
+        let b = builder.add_input("b".to_string(), 1);
+        let a0 = *a.get_lsb(0);
+        let b0 = *b.get_lsb(0);
+
+        builder.set_current_pir_node_id(Some(7));
+        let first = builder.add_and_binary(a0, b0);
+        builder.set_current_pir_node_id(Some(8));
+        let second = builder.add_and_binary(b0, a0);
+        builder.set_current_pir_node_id(None);
+
+        assert_eq!(first, second);
+        assert_eq!(builder.gates[first.node.id].get_pir_node_ids(), &[7, 8]);
     }
 }

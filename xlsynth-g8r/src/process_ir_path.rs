@@ -733,10 +733,12 @@ fn format_aig_operand(op: &gate::AigOperand) -> String {
 
 fn format_aig_node(node: &gate::AigNode) -> String {
     match node {
-        gate::AigNode::Input { name, lsb_index } => {
+        gate::AigNode::Input {
+            name, lsb_index, ..
+        } => {
             format!("Input({}[{}])", name, lsb_index)
         }
-        gate::AigNode::Literal(v) => format!("Literal({})", v),
+        gate::AigNode::Literal { value: v, .. } => format!("Literal({})", v),
         gate::AigNode::And2 { a, b, .. } => {
             format!("And2({}, {})", format_aig_operand(a), format_aig_operand(b))
         }

@@ -2,7 +2,8 @@
 
 use crate::aig::gate::{AigNode, AigOperand, AigRef, GateFn};
 use crate::transforms::transform_trait::{
-    Transform, TransformDirection, TransformKind, TransformLocation,
+    Transform, TransformDirection, TransformKind, TransformLocation, collect_node_provenance,
+    union_node_provenance_into_node,
 };
 use anyhow::{Result, anyhow};
 
@@ -22,6 +23,7 @@ pub fn insert_false_and_primitive(g: &mut GateFn, x: AigRef) -> Result<AigRef, &
             negated: true,
         },
         tags: None,
+        pir_node_ids: collect_node_provenance(g, &[x]),
     };
     let new_ref = AigRef { id: g.gates.len() };
     g.gates.push(new_gate);
@@ -41,6 +43,7 @@ pub fn remove_false_and_primitive(g: &mut GateFn, node: AigRef) -> Result<(), &'
     if a.node != b.node || a.negated == b.negated {
         return Err("remove_false_and_primitive: node is not AND(x, !x)");
     }
+    union_node_provenance_into_node(g, AigRef { id: 0 }, &[node]);
     let false_op = AigOperand {
         node: AigRef { id: 0 },
         negated: false,

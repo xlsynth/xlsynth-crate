@@ -144,7 +144,7 @@ pub fn dce_safe(orig_fn: &GateFn) -> GateFn {
                 .filter(|&id| {
                     !matches!(
                         result.gates[id],
-                        AigNode::Input { .. } | AigNode::Literal(_)
+                        AigNode::Input { .. } | AigNode::Literal { .. }
                     )
                 })
                 .collect();

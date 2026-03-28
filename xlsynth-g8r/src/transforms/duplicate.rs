@@ -4,6 +4,7 @@ use crate::aig::gate::{AigBitVector, AigNode, AigRef, GateFn};
 use crate::aig::topo::topo_sort_refs;
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
+    union_node_provenance_into_node,
 };
 use anyhow::{Result, anyhow};
 use rand::seq::SliceRandom;
@@ -19,13 +20,18 @@ fn duplicate_gate_transform_internal(
         return Err("cannot duplicate: AigRef out of bounds");
     }
     match &g.gates[which.id] {
-        AigNode::Literal(_) => return Err("cannot duplicate literal"),
+        AigNode::Literal { .. } => return Err("cannot duplicate literal"),
         AigNode::Input { .. } => return Err("cannot duplicate input"),
         AigNode::And2 { a, b, .. } => {
             let new_gate = AigNode::And2 {
                 a: *a,
                 b: *b,
                 tags: None, // Duplicated gates don't inherit tags by default
+                pir_node_ids: g.gates[which.id]
+                    .get_pir_node_ids()
+                    .iter()
+                    .copied()
+                    .collect(),
             };
             let new_ref = AigRef { id: g.gates.len() };
             g.gates.push(new_gate);
@@ -49,13 +55,18 @@ pub fn duplicate(g: &mut GateFn, which: AigRef) -> Result<AigRef, &'static str> 
         return Err("cannot duplicate: AigRef out of bounds");
     }
     match &g.gates[which.id] {
-        AigNode::Literal(_) => return Err("cannot duplicate literal"),
+        AigNode::Literal { .. } => return Err("cannot duplicate literal"),
         AigNode::Input { .. } => return Err("cannot duplicate input"),
         AigNode::And2 { a, b, .. } => {
             let new_gate = AigNode::And2 {
                 a: *a,
                 b: *b,
                 tags: None,
+                pir_node_ids: g.gates[which.id]
+                    .get_pir_node_ids()
+                    .iter()
+                    .copied()
+                    .collect(),
             };
             let new_ref = AigRef { id: g.gates.len() };
             g.gates.push(new_gate);
@@ -73,7 +84,7 @@ pub fn unduplicate<R: rand::Rng + ?Sized>(g: &mut GateFn, rng: &mut R) -> Option
     for &node_ref in &topo {
         match &g.gates[node_ref.id] {
             AigNode::Input { .. } => continue,
-            AigNode::Literal(val) => {
+            AigNode::Literal { value: val, .. } => {
                 let key = format!("Literal({})", val);
                 buckets.entry(key).or_default().push(node_ref);
             }
@@ -92,6 +103,7 @@ pub fn unduplicate<R: rand::Rng + ?Sized>(g: &mut GateFn, rng: &mut R) -> Option
     let mut pair = bucket.iter().copied().collect::<Vec<_>>();
     pair.shuffle(rng);
     let (keep, kill) = (pair[0], pair[1]);
+    union_node_provenance_into_node(g, keep, &[kill]);
     for node_idx in 0..g.gates.len() {
         if node_idx == kill.id {
             continue;
@@ -288,6 +300,7 @@ impl Transform for UnduplicateGateTransform {
                     }
 
                     if let Some(keep_ref) = potential_keep_ref {
+                        union_node_provenance_into_node(g, keep_ref, &[*potential_kill_ref]);
                         for node_idx_iter in 0..g.gates.len() {
                             if node_idx_iter == potential_kill_ref.id
                                 || node_idx_iter == keep_ref.id
