@@ -3582,7 +3582,9 @@ fn gatify_internal(
             node.ty,
             node.payload
         );
-        g8_builder.set_current_pir_node_id(Some(node.text_id as u32));
+        g8_builder.set_current_pir_node_id(Some(
+            u32::try_from(node.text_id).expect("node id too large for u32"),
+        ));
         gatify_node(
             f,
             node_ref,
