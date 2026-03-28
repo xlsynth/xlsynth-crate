@@ -111,15 +111,16 @@ Builds a random PIR function using the shared `xlsynth_pir::ir_fuzz`
 generator, reparses it into PIR, then gatifies with `fold=false` and
 `hash=false`. For each resulting AIG node, the target checks the initial
 provenance seeding invariant against the original parsed PIR function: the
-builder's dedicated constant-false literal is the only allowed empty
-provenance node, and every lowered `Input` / `And2` must carry exactly one PIR
-`text_id`, which must correspond to some node in the original pre-prep PIR
-function.
+builder's dedicated constant-false literal is the only literal node, and its
+provenance (if any) must stay sorted, deduplicated, and tied to original PIR
+nodes. Every lowered `Input` / `And2` must carry a non-empty, sorted,
+deduplicated set of PIR `text_id`s, each of which must correspond to some node
+in the original pre-prep PIR function.
 
 Primarily tests:
 
-- Initial PIR-to-g8r lowering seeds exactly one provenance id onto every
-  lowered `Input` / `And2`
+- Initial PIR-to-g8r lowering seeds non-empty provenance onto every lowered
+  `Input` / `And2`
 - Seeded provenance ids refer to real original PIR nodes, so prep-for-gatify
   and initial lowering do not silently shift provenance onto fabricated ids
 

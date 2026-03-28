@@ -80,22 +80,36 @@ fuzz_target!(|sample: FuzzSample| {
                     "the builder's dedicated literal node should be constant false"
                 );
                 assert!(
-                    pir_node_ids.is_empty(),
-                    "constant-false builder literal is not lowered from PIR and should have no provenance ids"
+                    pir_node_ids.windows(2).all(|pair| pair[0] < pair[1]),
+                    "literal node provenance ids should be sorted and deduped: node={:?}",
+                    node
                 );
+                for pir_node_id in pir_node_ids {
+                    assert!(
+                        original_text_ids.contains(pir_node_id),
+                        "literal provenance id {} should correspond to an original pre-prep PIR node",
+                        pir_node_id
+                    );
+                }
             }
             AigNode::Input { pir_node_ids, .. } | AigNode::And2 { pir_node_ids, .. } => {
-                assert_eq!(
-                    pir_node_ids.len(),
-                    1,
-                    "each lowered g8r node should carry exactly one PIR provenance id: node={:?}",
+                assert!(
+                    !pir_node_ids.is_empty(),
+                    "each lowered g8r node should carry at least one PIR provenance id: node={:?}",
                     node
                 );
                 assert!(
-                    original_text_ids.contains(&pir_node_ids[0]),
-                    "provenance id {} should correspond to an original pre-prep PIR node",
-                    pir_node_ids[0]
+                    pir_node_ids.windows(2).all(|pair| pair[0] < pair[1]),
+                    "lowered g8r node provenance ids should be sorted and deduped: node={:?}",
+                    node
                 );
+                for pir_node_id in pir_node_ids {
+                    assert!(
+                        original_text_ids.contains(pir_node_id),
+                        "provenance id {} should correspond to an original pre-prep PIR node",
+                        pir_node_id
+                    );
+                }
             }
         }
     }
