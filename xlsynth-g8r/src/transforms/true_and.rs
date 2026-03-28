@@ -2,7 +2,8 @@
 
 use crate::aig::gate::{AigNode, AigOperand, AigRef, GateFn};
 use crate::transforms::transform_trait::{
-    Transform, TransformDirection, TransformKind, TransformLocation,
+    Transform, TransformDirection, TransformKind, TransformLocation, collect_node_provenance,
+    union_node_provenance_into_node,
 };
 use anyhow::{Result, anyhow};
 
@@ -18,7 +19,7 @@ pub fn insert_true_and_primitive(g: &mut GateFn, op: AigOperand) -> AigRef {
         a: op,
         b: true_op,
         tags: None,
-        pir_node_ids: Default::default(),
+        pir_node_ids: collect_node_provenance(g, &[op.node]),
     };
     let new_ref = AigRef { id: g.gates.len() };
     g.gates.push(new_gate);
@@ -44,6 +45,7 @@ pub fn remove_true_and_primitive(g: &mut GateFn, node_ref: AigRef) -> Result<(),
         }
         _ => return Err("remove_true_and_primitive: node is not And2"),
     };
+    union_node_provenance_into_node(g, inner_operand.node, &[node_ref]);
 
     // Rewrite fan-ins of all gates that use `node_ref`
     for gate_idx in 0..g.gates.len() {

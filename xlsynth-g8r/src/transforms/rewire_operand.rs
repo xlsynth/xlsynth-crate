@@ -4,6 +4,7 @@ use crate::aig::topo::reaches_target as node_reaches_target;
 use crate::aig::{AigNode, AigOperand, AigRef, GateFn};
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
+    union_node_provenance_into_node,
 };
 use anyhow::{Result, anyhow};
 use rand::Rng;
@@ -19,7 +20,7 @@ pub fn rewire_operand_primitive(
     if parent.id >= g.gates.len() {
         return Err("Parent ref out of bounds in rewire_operand_primitive");
     }
-    match &mut g.gates[parent.id] {
+    let old = match &mut g.gates[parent.id] {
         AigNode::And2 { a, b, .. } => {
             let old = if is_rhs { *b } else { *a };
             if is_rhs {
@@ -27,10 +28,12 @@ pub fn rewire_operand_primitive(
             } else {
                 *a = *new_op;
             }
-            Ok(old)
+            old
         }
-        _ => Err("Parent is not And2 in rewire_operand_primitive"),
-    }
+        _ => return Err("Parent is not And2 in rewire_operand_primitive"),
+    };
+    union_node_provenance_into_node(g, *parent, &[new_op.node]);
+    Ok(old)
 }
 
 #[derive(Debug)]

@@ -5,6 +5,7 @@ use crate::aig::gate::{AigNode, AigRef, GateFn};
 use crate::transforms::rewire_operand::rewire_operand_primitive;
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
+    union_node_provenance_into_node,
 };
 use anyhow::{Result, anyhow};
 
@@ -94,6 +95,9 @@ impl Transform for MergeEquivLeavesTransform {
         } else {
             *old_op
         };
+        if direction == TransformDirection::Forward {
+            union_node_provenance_into_node(g, target_op.node, &[old_op.node]);
+        }
         rewire_operand_primitive(g, parent, *is_rhs, &target_op)
             .map(|_| ())
             .map_err(anyhow::Error::msg)

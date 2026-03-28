@@ -19,6 +19,9 @@ pub mod toggle_output;
 pub mod transform_trait;
 pub mod true_and;
 
+#[cfg(test)]
+mod provenance_tests;
+
 use crate::transforms::and_absorb::{AndAbsorbLeftTransform, AndAbsorbRightTransform};
 use crate::transforms::false_and::{InsertFalseAndTransform, RemoveFalseAndTransform};
 use crate::transforms::rotate_and::{RotateAndLeftTransform, RotateAndRightTransform};

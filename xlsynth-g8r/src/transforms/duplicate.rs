@@ -4,6 +4,7 @@ use crate::aig::gate::{AigBitVector, AigNode, AigRef, GateFn};
 use crate::aig::topo::topo_sort_refs;
 use crate::transforms::transform_trait::{
     Transform, TransformDirection, TransformKind, TransformLocation,
+    union_node_provenance_into_node,
 };
 use anyhow::{Result, anyhow};
 use rand::seq::SliceRandom;
@@ -102,6 +103,7 @@ pub fn unduplicate<R: rand::Rng + ?Sized>(g: &mut GateFn, rng: &mut R) -> Option
     let mut pair = bucket.iter().copied().collect::<Vec<_>>();
     pair.shuffle(rng);
     let (keep, kill) = (pair[0], pair[1]);
+    union_node_provenance_into_node(g, keep, &[kill]);
     for node_idx in 0..g.gates.len() {
         if node_idx == kill.id {
             continue;
@@ -298,6 +300,7 @@ impl Transform for UnduplicateGateTransform {
                     }
 
                     if let Some(keep_ref) = potential_keep_ref {
+                        union_node_provenance_into_node(g, keep_ref, &[*potential_kill_ref]);
                         for node_idx_iter in 0..g.gates.len() {
                             if node_idx_iter == potential_kill_ref.id
                                 || node_idx_iter == keep_ref.id

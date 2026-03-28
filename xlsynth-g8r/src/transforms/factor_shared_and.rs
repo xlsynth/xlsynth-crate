@@ -3,7 +3,8 @@
 use crate::aig::gate::{AigNode, AigOperand, AigRef, GateFn};
 use crate::aig::topo::{self, reaches_target as node_reaches_target};
 use crate::transforms::transform_trait::{
-    Transform, TransformDirection, TransformKind, TransformLocation,
+    Transform, TransformDirection, TransformKind, TransformLocation, collect_node_provenance,
+    union_node_provenance_into_node,
 };
 use crate::use_count::get_id_to_use_count;
 use anyhow::{Result, anyhow};
@@ -83,6 +84,16 @@ pub fn factor_shared_and_primitive(g: &mut GateFn, outer: AigRef) -> Result<(), 
     {
         return Err("factor_shared_and_primitive: would create cycle");
     }
+    let provenance_sources = [
+        outer,
+        left.node,
+        right.node,
+        shared.node,
+        unique_l.node,
+        unique_r.node,
+    ];
+    union_node_provenance_into_node(g, left.node, &provenance_sources);
+    union_node_provenance_into_node(g, outer, &provenance_sources);
 
     if let AigNode::And2 { a, b, .. } = &mut g.gates[left.node.id] {
         *a = unique_l;
@@ -188,12 +199,25 @@ pub fn unfactor_shared_and_primitive(g: &mut GateFn, outer: AigRef) -> Result<()
         a: common_op,
         b: unique_op,
         tags: None,
-        pir_node_ids: Default::default(),
+        pir_node_ids: collect_node_provenance(
+            g,
+            &[
+                outer,
+                inner_ref,
+                common_op.node,
+                unique_op.node,
+                inner_a.node,
+                inner_b.node,
+            ],
+        ),
     };
     let new_ref = AigRef { id: g.gates.len() };
     // Extra safety: neither operand of the new gate may reference new_ref itself.
     debug_assert!(common_op.node != new_ref && unique_op.node != new_ref);
     g.gates.push(new_gate);
+    let new_sources = [outer, inner_ref, new_ref, common_op.node, unique_op.node];
+    union_node_provenance_into_node(g, inner_ref, &new_sources);
+    union_node_provenance_into_node(g, outer, &new_sources);
 
     if let AigNode::And2 { a, b, .. } = &mut g.gates[inner_ref.id] {
         *a = common_op;
