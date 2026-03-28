@@ -238,6 +238,10 @@ pub fn bulk_substitute(
                 "Input new_input_op out of bounds: {:?}",
                 new_input_op
             );
+            new_builder.add_pir_node_ids(
+                new_input_op.node,
+                orig_fn.gates[orig_input_op.node.id].get_pir_node_ids(),
+            );
             orig_to_new_map.insert(orig_input_op.node, *new_input_op);
         }
     }
@@ -257,6 +261,13 @@ pub fn bulk_substitute(
         if orig_to_new_map.contains_key(&orig_ref) {
             continue;
         }
+        debug_assert!(
+            orig_ref.id < orig_fn.gates.len(),
+            "AigRef out of bounds: {:?} (gates.len() = {})",
+            orig_ref,
+            orig_fn.gates.len()
+        );
+        let orig_node = &orig_fn.gates[orig_ref.id];
         if processing.contains(&orig_ref) {
             panic!("Cycle detected in substitution map at {:?}", orig_ref);
         }
@@ -295,18 +306,12 @@ pub fn bulk_substitute(
                     unreachable!("Substitute node should have been mapped by worklist logic");
                 }
             };
+            new_builder.add_pir_node_ids(final_op.node, orig_node.get_pir_node_ids());
             orig_to_new_map.insert(orig_ref, final_op);
             processing.remove(&orig_ref);
             continue;
         }
         // Otherwise, build the node in the new graph
-        debug_assert!(
-            orig_ref.id < orig_fn.gates.len(),
-            "AigRef out of bounds: {:?} (gates.len() = {})",
-            orig_ref,
-            orig_fn.gates.len()
-        );
-        let orig_node = &orig_fn.gates[orig_ref.id];
         let new_op = match orig_node {
             AigNode::Input { .. } => {
                 // Inputs already handled
@@ -314,11 +319,13 @@ pub fn bulk_substitute(
                 continue;
             }
             AigNode::Literal { value, .. } => {
-                if *value {
+                let op = if *value {
                     new_builder.get_true()
                 } else {
                     new_builder.get_false()
-                }
+                };
+                new_builder.add_pir_node_ids(op.node, orig_node.get_pir_node_ids());
+                op
             }
             AigNode::And2 { a, b, .. } => {
                 if !orig_to_new_map.contains_key(&a.node) {
@@ -357,7 +364,9 @@ pub fn bulk_substitute(
                     "bulk_substitute would create self-loop in 'b' operand for node {}",
                     next_id
                 );
-                new_builder.add_and_binary(new_a, new_b)
+                let new_op = new_builder.add_and_binary(new_a, new_b);
+                new_builder.add_pir_node_ids(new_op.node, orig_node.get_pir_node_ids());
+                new_op
             }
         };
         orig_to_new_map.insert(orig_ref, new_op);
@@ -515,6 +524,42 @@ mod tests {
         } else {
             panic!("Output node was not a Literal as expected");
         }
+    }
+
+    #[test]
+    fn test_replaced_node_provenance_unions_onto_survivor() {
+        let mut gb = GateBuilder::new("bulk_replace_ids".to_string(), GateBuilderOptions::no_opt());
+        let a = gb.add_input("a".to_string(), 1);
+        let b = gb.add_input("b".to_string(), 1);
+        let a0 = *a.get_lsb(0);
+        let b0 = *b.get_lsb(0);
+
+        gb.set_current_pir_node_id(Some(10));
+        let inner0 = gb.add_and_binary(a0, b0);
+        gb.set_current_pir_node_id(Some(11));
+        let inner1 = gb.add_and_binary(a0, b0);
+        gb.set_current_pir_node_id(Some(12));
+        let out = gb.add_or_binary(inner0, inner1);
+        gb.set_current_pir_node_id(None);
+        gb.add_output("o".to_string(), out.into());
+        let original_fn = gb.build();
+
+        let mut substitutions = SubstitutionMap::new();
+        substitutions.add(inner1.node, inner0);
+
+        let replaced_fn = bulk_replace(&original_fn, &substitutions, GateBuilderOptions::no_opt());
+        let and_nodes: Vec<&AigNode> = replaced_fn
+            .gates
+            .iter()
+            .filter(|node| matches!(node, AigNode::And2 { .. }))
+            .collect();
+        assert!(
+            and_nodes
+                .iter()
+                .any(|node| node.get_pir_node_ids() == [10, 11]),
+            "expected surviving AND node to carry both source ids; gates={:?}",
+            replaced_fn.gates
+        );
     }
 
     #[test]

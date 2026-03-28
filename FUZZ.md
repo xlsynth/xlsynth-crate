@@ -121,7 +121,25 @@ Primarily tests:
 - Initial PIR-to-g8r lowering seeds exactly one provenance id onto every
   lowered `Input` / `And2`
 - Seeded provenance ids refer to real original PIR nodes, so prep-for-gatify
-  does not silently shift provenance onto prep-introduced helper nodes
+  and initial lowering do not silently shift provenance onto fabricated ids
+
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_node_provenance_with_opts.rs
+
+Builds a random PIR function using the shared `xlsynth_pir::ir_fuzz`
+generator, reparses it into PIR, gatifies with folding and hashing enabled,
+then runs one bounded FRAIG iteration and one bounded cut-db rewrite
+iteration. For each surviving AIG node, the target checks the provenance
+invariant against the original parsed PIR function: every surviving `Input` /
+`And2` must carry a non-empty, sorted, deduplicated set of PIR `text_id`s, and
+every stored id must correspond to some node in the original pre-prep PIR
+function.
+
+Primarily tests:
+
+- PIR-to-g8r provenance survives the optimized default gate pipeline
+  (fold/hash, FRAIG, cut-db rewrite)
+- Surviving provenance ids remain non-empty, sorted, deduplicated, and tied to
+  original PIR nodes rather than fabricated helper ids
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_gate_transform_equiv.rs
 

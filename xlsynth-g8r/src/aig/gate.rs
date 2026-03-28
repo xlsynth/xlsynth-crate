@@ -77,6 +77,12 @@ pub enum AigNode {
 }
 
 impl AigNode {
+    fn add_pir_node_ids_iter(&mut self, pir_node_ids_to_add: impl IntoIterator<Item = u32>) {
+        for pir_node_id in pir_node_ids_to_add {
+            self.add_pir_node_id(pir_node_id);
+        }
+    }
+
     pub fn get_operands(&self) -> Vec<AigOperand> {
         match self {
             AigNode::Input { .. } => vec![],
@@ -123,9 +129,7 @@ impl AigNode {
     }
 
     pub fn try_add_pir_node_ids(&mut self, pir_node_ids_to_add: &[u32]) {
-        for pir_node_id in pir_node_ids_to_add {
-            self.add_pir_node_id(*pir_node_id);
-        }
+        self.add_pir_node_ids_iter(pir_node_ids_to_add.iter().copied());
     }
 
     pub fn get_pir_node_ids(&self) -> &[u32] {
@@ -141,6 +145,10 @@ impl AigNode {
             Some(pir_node_id) => smallvec![pir_node_id],
             None => PirNodeIds::new(),
         }
+    }
+
+    pub fn union_pir_node_ids_from_node(&mut self, other: &AigNode) {
+        self.add_pir_node_ids_iter(other.get_pir_node_ids().iter().copied());
     }
 
     /// Attempts to add multiple tags to the node.

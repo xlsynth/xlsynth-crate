@@ -5,7 +5,12 @@
 use std::collections::HashSet;
 
 use libfuzzer_sys::fuzz_target;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
+use xlsynth_g8r::aig::cut_db_rewrite::{RewriteOptions, rewrite_gatefn_with_cut_db};
+use xlsynth_g8r::aig::fraig::{IterationBounds, fraig_optimize};
 use xlsynth_g8r::aig::gate::AigNode;
+use xlsynth_g8r::cut_db::loader::CutDb;
 use xlsynth_g8r::gatify::ir2gate::{self, GatifyOptions};
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_pir::ir_fuzz::{FuzzSample, generate_ir_fn};
@@ -21,7 +26,7 @@ fuzz_target!(|sample: FuzzSample| {
         return;
     }
 
-    let mut package = xlsynth::IrPackage::new("fuzz_node_provenance")
+    let mut package = xlsynth::IrPackage::new("fuzz_node_provenance_with_opts")
         .expect("IrPackage::new should not fail for fuzz target setup");
     if let Err(_e) = generate_ir_fn(sample.ops, &mut package, None) {
         // The shared IR generator can intentionally explore edge-case programs
@@ -47,8 +52,8 @@ fuzz_target!(|sample: FuzzSample| {
     let gatify_output = match ir2gate::gatify(
         parsed_fn,
         GatifyOptions {
-            fold: false,
-            hash: false,
+            fold: true,
+            hash: true,
             check_equivalence: false,
             adder_mapping: AdderMapping::default(),
             mul_adder_mapping: None,
@@ -61,16 +66,43 @@ fuzz_target!(|sample: FuzzSample| {
         Ok(output) => output,
         // The generator spans more PIR than the current g8r lowering supports.
         // Unsupported samples are not provenance failures; skip them so the
-        // target focuses on successful initial lowering behavior.
+        // target focuses on successful lowering plus optimization behavior.
         Err(_) => return,
     };
+    let mut rng = StdRng::seed_from_u64(0);
+    let optimized_gate_fn = fraig_optimize(
+        &gatify_output.gate_fn,
+        64,
+        IterationBounds::MaxIterations(1),
+        &mut rng,
+    )
+    .expect("fraig should not fail on successfully lowered GateFn")
+    .0;
+    let optimized_gate_fn = rewrite_gatefn_with_cut_db(
+        &optimized_gate_fn,
+        CutDb::load_default().as_ref(),
+        RewriteOptions {
+            max_cuts_per_node: 32,
+            max_iterations: 1,
+        },
+    );
 
-    for (index, node) in gatify_output.gate_fn.gates.iter().enumerate() {
+    for (index, node) in optimized_gate_fn.gates.iter().enumerate() {
+        let pir_node_ids = node.get_pir_node_ids();
+        assert!(
+            pir_node_ids.windows(2).all(|pair| pair[0] < pair[1]),
+            "provenance ids should remain sorted and deduplicated: node={:?}",
+            node
+        );
+        for pir_node_id in pir_node_ids {
+            assert!(
+                original_text_ids.contains(pir_node_id),
+                "provenance id {} should correspond to an original pre-prep PIR node",
+                pir_node_id
+            );
+        }
         match node {
-            AigNode::Literal {
-                value,
-                pir_node_ids,
-            } => {
+            AigNode::Literal { value, pir_node_ids } => {
                 assert_eq!(
                     index, 0,
                     "only the builder's constant-false literal should appear in gatify output"
@@ -79,22 +111,13 @@ fuzz_target!(|sample: FuzzSample| {
                     !*value,
                     "the builder's dedicated literal node should be constant false"
                 );
-                assert!(
-                    pir_node_ids.is_empty(),
-                    "constant-false builder literal is not lowered from PIR and should have no provenance ids"
-                );
+                let _ = pir_node_ids;
             }
             AigNode::Input { pir_node_ids, .. } | AigNode::And2 { pir_node_ids, .. } => {
-                assert_eq!(
-                    pir_node_ids.len(),
-                    1,
-                    "each lowered g8r node should carry exactly one PIR provenance id: node={:?}",
-                    node
-                );
                 assert!(
-                    original_text_ids.contains(&pir_node_ids[0]),
-                    "provenance id {} should correspond to an original pre-prep PIR node",
-                    pir_node_ids[0]
+                    !pir_node_ids.is_empty(),
+                    "each surviving optimized g8r node should carry non-empty PIR provenance ids: node={:?}",
+                    node
                 );
             }
         }
