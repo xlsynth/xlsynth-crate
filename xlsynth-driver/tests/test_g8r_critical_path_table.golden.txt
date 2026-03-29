@@ -1,0 +1,12 @@
+function: f
+total_aig_nodes: 5
+critical_path_aig_nodes: 3
+critical_path_depth_nodes: 3
+
+|--------------|--------------------------------------------------|-----------|--------------------|
+| pir_node_id  | ir_op                                            | aig_nodes | weighted_aig_nodes |
+|--------------|--------------------------------------------------|-----------|--------------------|
+| 3            | add.3: bits[1] = add(a: bits[1], b: bits[1])     | 2 (66.7%) |        1.5 (50.0%) |
+| 4            | not.4: bits[1] = not(add.3: bits[1])             | 1 (33.3%) |        0.5 (16.7%) |
+| 5            | and.5: bits[1] = and(not.4: bits[1], b: bits[1]) | 1 (33.3%) |        0.5 (16.7%) |
+| unattributed | <no PIR attribution>                             | 1 (33.3%) |        0.5 (16.7%) |

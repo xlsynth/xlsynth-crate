@@ -2,6 +2,7 @@
 
 pub mod aig_hasher;
 pub mod aig_simplify;
+pub mod area_table;
 pub mod bulk_replace;
 pub mod cut_db_rewrite;
 pub mod dce;

@@ -3712,6 +3712,306 @@ fn test_g8r2ir_basic_ir_output() {
 }
 
 #[test]
+fn test_g8r_area_table_reports_weighted_area_by_pir_node() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let mut builder = GateBuilder::new("testmod".to_string(), GateBuilderOptions::no_opt());
+    let a = builder.add_input("a".to_string(), 1);
+    let b = builder.add_input("b".to_string(), 1);
+
+    builder.set_current_pir_node_id(Some(3));
+    let add_like = builder.add_and_binary(*a.get_lsb(0), *b.get_lsb(0));
+
+    builder.set_current_pir_node_id(Some(4));
+    let shared = builder.add_and_binary(*a.get_lsb(0), *a.get_lsb(0));
+    builder.add_pir_node_id(shared.node, 3);
+
+    builder.set_current_pir_node_id(None);
+    let unattributed = builder.add_and_binary(*b.get_lsb(0), *b.get_lsb(0));
+
+    builder.set_current_pir_node_id(Some(99));
+    let missing = builder.add_and_binary(*a.get_lsb(0), *b.get_lsb(0));
+    builder.set_current_pir_node_id(None);
+
+    builder.add_output("o0".to_string(), AigBitVector::from_bit(add_like));
+    builder.add_output("o1".to_string(), AigBitVector::from_bit(shared));
+    builder.add_output("o2".to_string(), AigBitVector::from_bit(unattributed));
+    builder.add_output("o3".to_string(), AigBitVector::from_bit(missing));
+    let gate_fn = builder.build();
+
+    let ir_text = r#"package sample
+top fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  add.3: bits[1] = add(a, b, id=3, pos=[(0,1,2)])
+  ret not.4: bits[1] = not(add.3, id=4, pos=[(0,3,4)])
+}
+"#;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("testmod.g8rbin");
+    let ir_path = temp_dir.path().join("sample.ir");
+    std::fs::write(&g8r_path, bincode::serialize(&gate_fn).unwrap()).unwrap();
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("g8r-area-table")
+        .arg(g8r_path.to_str().unwrap())
+        .arg(ir_path.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "g8r-area-table failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    compare_golden_text(&stdout, "tests/test_g8r_area_table.golden.txt");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("PIR node id 99"),
+        "expected missing-id warning in stderr, got:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("unattributed row"),
+        "expected unattributed-row warning context in stderr, got:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn test_g8r_area_table_can_group_by_opcode() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let mut builder = GateBuilder::new("testmod".to_string(), GateBuilderOptions::no_opt());
+    let a = builder.add_input("a".to_string(), 1);
+    let b = builder.add_input("b".to_string(), 1);
+
+    builder.set_current_pir_node_id(Some(3));
+    let add_like = builder.add_and_binary(*a.get_lsb(0), *b.get_lsb(0));
+
+    builder.set_current_pir_node_id(Some(4));
+    let shared = builder.add_and_binary(*a.get_lsb(0), *a.get_lsb(0));
+    builder.add_pir_node_id(shared.node, 3);
+
+    builder.set_current_pir_node_id(None);
+    let unattributed = builder.add_and_binary(*b.get_lsb(0), *b.get_lsb(0));
+
+    builder.set_current_pir_node_id(Some(99));
+    let missing = builder.add_and_binary(*a.get_lsb(0), *b.get_lsb(0));
+    builder.set_current_pir_node_id(None);
+
+    builder.add_output("o0".to_string(), AigBitVector::from_bit(add_like));
+    builder.add_output("o1".to_string(), AigBitVector::from_bit(shared));
+    builder.add_output("o2".to_string(), AigBitVector::from_bit(unattributed));
+    builder.add_output("o3".to_string(), AigBitVector::from_bit(missing));
+    let gate_fn = builder.build();
+
+    let ir_text = r#"package sample
+top fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  add.3: bits[1] = add(a, b, id=3, pos=[(0,1,2)])
+  ret not.4: bits[1] = not(add.3, id=4, pos=[(0,3,4)])
+}
+"#;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("testmod.g8rbin");
+    let ir_path = temp_dir.path().join("sample.ir");
+    std::fs::write(&g8r_path, bincode::serialize(&gate_fn).unwrap()).unwrap();
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("g8r-area-table")
+        .arg(g8r_path.to_str().unwrap())
+        .arg(ir_path.to_str().unwrap())
+        .arg("--group-by-opcode")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "g8r-area-table --group-by-opcode failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    compare_golden_text(
+        &stdout,
+        "tests/test_g8r_area_table_group_by_opcode.golden.txt",
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("PIR node id 99"),
+        "expected missing-id warning in stderr, got:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("unattributed row"),
+        "expected unattributed-row warning context in stderr, got:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn test_g8r_critical_path_table_reports_only_level_critical_nodes() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let mut builder = GateBuilder::new("testmod".to_string(), GateBuilderOptions::no_opt());
+    let a = builder.add_input("a".to_string(), 1);
+    let b = builder.add_input("b".to_string(), 1);
+
+    builder.set_current_pir_node_id(Some(3));
+    let crit0 = builder.add_and_binary(*a.get_lsb(0), *b.get_lsb(0));
+
+    builder.set_current_pir_node_id(Some(4));
+    let crit1 = builder.add_and_binary(crit0, *a.get_lsb(0));
+    builder.add_pir_node_id(crit1.node, 3);
+
+    builder.set_current_pir_node_id(Some(5));
+    let crit2 = builder.add_and_binary(crit1, *b.get_lsb(0));
+    builder.add_pir_node_id(crit2.node, 99);
+
+    builder.set_current_pir_node_id(Some(6));
+    let non_critical0 = builder.add_and_binary(*a.get_lsb(0), *a.get_lsb(0));
+    let non_critical1 = builder.add_and_binary(non_critical0, *b.get_lsb(0));
+    builder.set_current_pir_node_id(None);
+
+    builder.add_output("o0".to_string(), AigBitVector::from_bit(crit2));
+    builder.add_output("o1".to_string(), AigBitVector::from_bit(non_critical1));
+    let gate_fn = builder.build();
+
+    let ir_text = r#"package sample
+top fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  add.3: bits[1] = add(a, b, id=3)
+  not.4: bits[1] = not(add.3, id=4)
+  and.5: bits[1] = and(not.4, b, id=5)
+  ret xor.6: bits[1] = xor(and.5, a, id=6)
+}
+"#;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("testmod.g8rbin");
+    let ir_path = temp_dir.path().join("sample.ir");
+    std::fs::write(&g8r_path, bincode::serialize(&gate_fn).unwrap()).unwrap();
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("g8r-critical-path-table")
+        .arg(g8r_path.to_str().unwrap())
+        .arg(ir_path.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "g8r-critical-path-table failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    compare_golden_text(&stdout, "tests/test_g8r_critical_path_table.golden.txt");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("PIR node id 99"),
+        "expected missing-id warning in stderr, got:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("unattributed row"),
+        "expected unattributed-row warning context in stderr, got:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn test_g8r_critical_path_table_can_group_by_opcode() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let mut builder = GateBuilder::new("testmod".to_string(), GateBuilderOptions::no_opt());
+    let a = builder.add_input("a".to_string(), 1);
+    let b = builder.add_input("b".to_string(), 1);
+
+    builder.set_current_pir_node_id(Some(3));
+    let crit0 = builder.add_and_binary(*a.get_lsb(0), *b.get_lsb(0));
+
+    builder.set_current_pir_node_id(Some(4));
+    let crit1 = builder.add_and_binary(crit0, *a.get_lsb(0));
+    builder.add_pir_node_id(crit1.node, 3);
+
+    builder.set_current_pir_node_id(Some(5));
+    let crit2 = builder.add_and_binary(crit1, *b.get_lsb(0));
+    builder.add_pir_node_id(crit2.node, 99);
+
+    builder.set_current_pir_node_id(Some(6));
+    let non_critical0 = builder.add_and_binary(*a.get_lsb(0), *a.get_lsb(0));
+    let non_critical1 = builder.add_and_binary(non_critical0, *b.get_lsb(0));
+    builder.set_current_pir_node_id(None);
+
+    builder.add_output("o0".to_string(), AigBitVector::from_bit(crit2));
+    builder.add_output("o1".to_string(), AigBitVector::from_bit(non_critical1));
+    let gate_fn = builder.build();
+
+    let ir_text = r#"package sample
+top fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  add.3: bits[1] = add(a, b, id=3)
+  not.4: bits[1] = not(add.3, id=4)
+  and.5: bits[1] = and(not.4, b, id=5)
+  ret xor.6: bits[1] = xor(and.5, a, id=6)
+}
+"#;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("testmod.g8rbin");
+    let ir_path = temp_dir.path().join("sample.ir");
+    std::fs::write(&g8r_path, bincode::serialize(&gate_fn).unwrap()).unwrap();
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("g8r-critical-path-table")
+        .arg(g8r_path.to_str().unwrap())
+        .arg(ir_path.to_str().unwrap())
+        .arg("--group-by-opcode")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "g8r-critical-path-table --group-by-opcode failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    compare_golden_text(
+        &stdout,
+        "tests/test_g8r_critical_path_table_group_by_opcode.golden.txt",
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("PIR node id 99"),
+        "expected missing-id warning in stderr, got:\n{}",
+        stderr
+    );
+    assert!(
+        stderr.contains("unattributed row"),
+        "expected unattributed-row warning context in stderr, got:\n{}",
+        stderr
+    );
+}
+
+#[test]
 fn test_g8r2v_add_clk_port_behavior() {
     let mut g8_builder = GateBuilder::new("testmod".to_string(), GateBuilderOptions::no_opt());
     let a_val = g8_builder.add_input("a".to_string(), 1);

@@ -358,9 +358,9 @@ while [ $# -gt 0 ]; do
 done
 if [ -n "$out" ]; then
   if [ "${FAKE_SUCCESS:-1}" -eq 1 ]; then
-    printf '{\"success\":true}\n' > "$out"
+    printf '{"success":true}\n' > "$out"
   else
-    printf '{\"success\":false}\n' > "$out"
+    printf '{"success":false}\n' > "$out"
   fi
 fi
 "#;
