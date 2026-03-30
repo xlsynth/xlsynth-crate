@@ -1,0 +1,16 @@
+function: f
+total_aig_nodes: 5
+critical_path_aig_nodes: 3
+critical_path_depth_nodes: 3
+
+Metrics:
+  aig_nodes          : Count of AIG nodes attributed to each row. An AIG node may be attributed to multiple rows.
+  weighted_aig_nodes : Sum of 1/N over attributed critical-path AIG nodes, where N is the number of row attributions on the AIG node.
+
+|--------------|-----------|--------------------|
+| opcode       | aig_nodes | weighted_aig_nodes |
+|--------------|-----------|--------------------|
+| add          | 2 (66.7%) |        1.5 (50.0%) |
+| and          | 1 (33.3%) |        0.5 (16.7%) |
+| not          | 1 (33.3%) |        0.5 (16.7%) |
+| unattributed | 1 (33.3%) |        0.5 (16.7%) |

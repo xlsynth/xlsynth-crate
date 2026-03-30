@@ -27,6 +27,11 @@ pub struct FuzzPlanNode {
     pub keep_running_till_finish: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Eval {
+    pub outcome: Option<bool>,
+}
+
 impl FuzzPlanNode {
     pub fn clamp(mut self, max_nodes: &mut usize, max_depth: usize) -> Option<Self> {
         if *max_nodes == 0 {
@@ -67,6 +72,75 @@ impl FuzzPlanNode {
                 } else {
                     Some(self)
                 }
+            }
+        }
+    }
+}
+
+pub fn decode_fuzz_plan_node(data: &[u8]) -> arbitrary::Result<FuzzPlanNode> {
+    let mut unstructured = arbitrary::Unstructured::new(data);
+    FuzzPlanNode::arbitrary(&mut unstructured)
+}
+
+pub fn eval_fuzz(node: &FuzzPlanNode) -> Eval {
+    match node.kind {
+        FuzzNodeKind::Task => {
+            if let Some(f) = &node.fake {
+                match f.timeout_ms {
+                    Some(_) => Eval { outcome: None },
+                    None => Eval {
+                        outcome: Some(f.success),
+                    },
+                }
+            } else {
+                Eval { outcome: None }
+            }
+        }
+        FuzzNodeKind::GroupAll | FuzzNodeKind::GroupAny | FuzzNodeKind::GroupFirst => {
+            let kids: Vec<Eval> = node.children.iter().map(eval_fuzz).collect();
+            match node.kind {
+                FuzzNodeKind::GroupAll => {
+                    if kids.iter().any(|k| k.outcome == Some(false)) {
+                        Eval {
+                            outcome: Some(false),
+                        }
+                    } else if kids.iter().all(|k| k.outcome == Some(true)) {
+                        Eval {
+                            outcome: Some(true),
+                        }
+                    } else {
+                        Eval { outcome: None }
+                    }
+                }
+                FuzzNodeKind::GroupAny => {
+                    if kids.iter().any(|k| k.outcome == Some(true)) {
+                        Eval {
+                            outcome: Some(true),
+                        }
+                    } else if kids.iter().all(|k| k.outcome == Some(false)) {
+                        Eval {
+                            outcome: Some(false),
+                        }
+                    } else {
+                        Eval { outcome: None }
+                    }
+                }
+                FuzzNodeKind::GroupFirst => {
+                    if kids.iter().any(|k| k.outcome.is_none()) {
+                        Eval { outcome: None }
+                    } else if kids.iter().all(|k| k.outcome == Some(true)) {
+                        Eval {
+                            outcome: Some(true),
+                        }
+                    } else if kids.iter().all(|k| k.outcome == Some(false)) {
+                        Eval {
+                            outcome: Some(false),
+                        }
+                    } else {
+                        Eval { outcome: None }
+                    }
+                }
+                FuzzNodeKind::Task => unreachable!(),
             }
         }
     }
@@ -125,4 +199,28 @@ pub fn build_plan_from_fuzz(root: FuzzPlanNode) -> ProverPlan {
         }
     }
     to_plan(&root)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_plan_from_fuzz, decode_fuzz_plan_node, eval_fuzz};
+    use xlsynth_driver::prover::run_prover_plan;
+
+    #[test]
+    fn crashing_scheduler_artifact_single_success_task_regression() {
+        let bytes = [0x27, 0x27, 0x27, 0x27, 0x32, 0x27, 0x0b, 0x27, 0x27, 0x27, 0x0b];
+        let root = decode_fuzz_plan_node(&bytes).expect("decode");
+        let mut budget = 64usize;
+        let root = root.clamp(&mut budget, 5).expect("clamp");
+        assert_eq!(eval_fuzz(&root), super::Eval { outcome: Some(true) });
+        let plan = build_plan_from_fuzz(root);
+        for cores in 1..=4 {
+            let report = run_prover_plan(plan.clone(), cores).expect("run");
+            assert!(
+                report.success,
+                "single successful fake task should succeed for {cores} cores; report={:#?}",
+                report.plan
+            );
+        }
+    }
 }

@@ -5,7 +5,7 @@ use crate::aig::gate::{self, AigNode};
 use crate::aig::topo::topo_sort_refs;
 use crate::use_count::get_id_to_use_count;
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct SummaryStats {
@@ -37,6 +37,94 @@ pub struct GateDepthStats {
     pub depth_to_count: HashMap<usize, usize>,
     pub deepest_path: Vec<gate::AigRef>,
     pub ref_to_depth: HashMap<gate::AigRef, usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LevelCriticalPathAnds {
+    pub and_nodes: BTreeSet<gate::AigRef>,
+    pub depth_aig_nodes: usize,
+}
+
+/// Returns the live `And2` nodes that lie on at least one max-level path from a
+/// primary input to a primary output.
+pub fn get_level_critical_path_ands(
+    gate_fn: &gate::GateFn,
+    live_nodes: &[gate::AigRef],
+) -> LevelCriticalPathAnds {
+    let depth_stats = get_gate_depth(gate_fn, live_nodes);
+    let Some(max_depth) = gate_fn
+        .outputs
+        .iter()
+        .flat_map(|output| output.bit_vector.iter_lsb_to_msb())
+        .filter_map(|operand| depth_stats.ref_to_depth.get(&operand.node).copied())
+        .max()
+    else {
+        return LevelCriticalPathAnds {
+            and_nodes: BTreeSet::new(),
+            depth_aig_nodes: 0,
+        };
+    };
+
+    if max_depth == 0 {
+        return LevelCriticalPathAnds {
+            and_nodes: BTreeSet::new(),
+            depth_aig_nodes: 0,
+        };
+    }
+
+    let mut critical_and_nodes = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    let mut worklist: Vec<gate::AigRef> = gate_fn
+        .outputs
+        .iter()
+        .flat_map(|output| output.bit_vector.iter_lsb_to_msb())
+        .filter_map(|operand| {
+            depth_stats
+                .ref_to_depth
+                .get(&operand.node)
+                .copied()
+                .filter(|depth| *depth == max_depth)
+                .map(|_| operand.node)
+        })
+        .collect();
+
+    while let Some(node_ref) = worklist.pop() {
+        if !visited.insert(node_ref) {
+            continue;
+        }
+
+        let Some(node_depth) = depth_stats.ref_to_depth.get(&node_ref).copied() else {
+            continue;
+        };
+
+        let AigNode::And2 { a, b, .. } = &gate_fn.gates[node_ref.id] else {
+            continue;
+        };
+        critical_and_nodes.insert(node_ref);
+
+        for child in [a.node, b.node] {
+            let Some(child_depth) = depth_stats.ref_to_depth.get(&child).copied() else {
+                continue;
+            };
+            if child_depth + 1 == node_depth {
+                worklist.push(child);
+            }
+        }
+    }
+
+    LevelCriticalPathAnds {
+        and_nodes: critical_and_nodes,
+        depth_aig_nodes: max_depth,
+    }
+}
+
+/// Returns the live `And2` nodes that lie on at least one max-level path from a
+/// primary input to a primary output.
+pub fn get_level_critical_path_and_nodes(
+    gate_fn: &gate::GateFn,
+    live_nodes: &[gate::AigRef],
+) -> BTreeSet<gate::AigRef> {
+    get_level_critical_path_ands(gate_fn, live_nodes).and_nodes
 }
 
 /// Returns:
@@ -204,5 +292,43 @@ pub fn get_aig_stats(gate_fn: &gate::GateFn) -> AigStats {
         and_nodes,
         max_depth,
         fanout_histogram,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{get_level_critical_path_and_nodes, get_level_critical_path_ands};
+    use crate::aig::gate;
+    use crate::gate_builder::{GateBuilder, GateBuilderOptions};
+    use crate::use_count::get_id_to_use_count;
+
+    #[test]
+    fn test_get_level_critical_path_and_nodes_returns_union_of_deepest_paths() {
+        let mut builder = GateBuilder::new("f".to_string(), GateBuilderOptions::no_opt());
+        let a = builder.add_input("a".to_string(), 1);
+        let b = builder.add_input("b".to_string(), 1);
+
+        let shared = builder.add_and_binary(*a.get_lsb(0), *b.get_lsb(0));
+        let left = builder.add_and_binary(shared, *a.get_lsb(0));
+        let right = builder.add_and_binary(shared, *b.get_lsb(0));
+        let shallow = builder.add_and_binary(*a.get_lsb(0), *a.get_lsb(0));
+
+        builder.add_output("o0".to_string(), left.into());
+        builder.add_output("o1".to_string(), right.into());
+        builder.add_output("o2".to_string(), shallow.into());
+        let gate_fn = builder.build();
+
+        let live_nodes: Vec<gate::AigRef> = get_id_to_use_count(&gate_fn).keys().copied().collect();
+        let got = get_level_critical_path_and_nodes(&gate_fn, &live_nodes);
+        let got_with_depth = get_level_critical_path_ands(&gate_fn, &live_nodes);
+
+        assert_eq!(
+            got.into_iter()
+                .map(|node_ref| node_ref.id)
+                .collect::<Vec<_>>(),
+            vec![shared.node.id, left.node.id, right.node.id]
+        );
+        assert_eq!(got_with_depth.depth_aig_nodes, 2);
+        assert_eq!(got_with_depth.and_nodes.len(), 3);
     }
 }

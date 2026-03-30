@@ -60,6 +60,7 @@ mod g8r2v;
 mod g8r_cli;
 mod g8r_equiv;
 mod g8r_ir_equiv;
+mod g8r_table;
 mod gate_ir_equiv;
 mod gv2aig;
 mod gv2block;
@@ -1737,6 +1738,52 @@ fn main() {
                 )
         )
         .subcommand(
+            clap::Command::new("g8r-area-table")
+                .about("Reports live AIG AND-node area attribution per PIR node id from a .g8rbin with provenance.")
+                .arg(
+                    clap::Arg::new("g8r_input_file")
+                        .help("The input .g8rbin file")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    clap::Arg::new("ir_input_file")
+                        .help("The input XLS IR file")
+                        .required(true)
+                        .index(2),
+                )
+                .arg(
+                    clap::Arg::new("group_by_opcode")
+                        .long("group-by-opcode")
+                        .help("Group the attribution table by PIR opcode instead of PIR node id.")
+                        .action(clap::ArgAction::SetTrue),
+                )
+                .add_ir_top_arg(false),
+        )
+        .subcommand(
+            clap::Command::new("g8r-critical-path-table")
+                .about("Reports PIR attribution for the live AIG AND nodes that lie on at least one max-level input-to-output path.")
+                .arg(
+                    clap::Arg::new("g8r_input_file")
+                        .help("The input .g8rbin file")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    clap::Arg::new("ir_input_file")
+                        .help("The input XLS IR file")
+                        .required(true)
+                        .index(2),
+                )
+                .arg(
+                    clap::Arg::new("group_by_opcode")
+                        .long("group-by-opcode")
+                        .help("Group the attribution table by PIR opcode instead of PIR node id.")
+                        .action(clap::ArgAction::SetTrue),
+                )
+                .add_ir_top_arg(false),
+        )
+        .subcommand(
             clap::Command::new("g8r2ir")
                 .about("Converts a .g8r or .g8rbin GateFn file to an XLS IR package on stdout.")
                 .arg(
@@ -3025,6 +3072,12 @@ fn main() {
         }
         Some(("g8r2ir", subm)) => {
             g8r2ir::handle_g8r2ir(subm, &config);
+        }
+        Some(("g8r-area-table", subm)) => {
+            g8r_table::handle_g8r_area_table(subm, &config);
+        }
+        Some(("g8r-critical-path-table", subm)) => {
+            g8r_table::handle_g8r_critical_path_table(subm, &config);
         }
         Some(("g8r-equiv", subm)) => {
             g8r_equiv::handle_g8r_equiv(subm, &config);

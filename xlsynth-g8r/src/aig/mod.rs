@@ -13,6 +13,7 @@ pub mod get_summary_stats;
 pub mod graph_logical_effort;
 pub mod logical_effort;
 pub mod match_and_rewrite;
+pub mod table;
 pub mod topo;
 
 pub use crate::aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output};
