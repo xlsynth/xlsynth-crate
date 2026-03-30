@@ -21,6 +21,12 @@ const AREA_SUBCOMMAND: &str = "g8r-area-table";
 const CRITICAL_PATH_SUBCOMMAND: &str = "g8r-critical-path-table";
 const MAX_IR_OP_WIDTH: usize = 150;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TableMetric {
+    Area,
+    CriticalPath,
+}
+
 struct DisplayRow {
     group_key: Option<String>,
     group_label: String,
@@ -96,6 +102,7 @@ fn load_selected_ir_fn(path: &Path, top: Option<&str>) -> Result<ir::Fn, String>
 fn render_rows_table(
     function_name: &str,
     total_aig_node_count: usize,
+    table_metric: TableMetric,
     extra_summary_lines: &[(&str, usize)],
     label_header: &str,
     include_ir_text: bool,
@@ -191,11 +198,27 @@ fn render_rows_table(
         format!("function: {}", function_name),
         format!("total_aig_nodes: {}", total_aig_node_count),
     ];
+    summary_lines.push("".to_string());
+    summary_lines.push("Metrics:".to_string());
+    summary_lines.extend(metric_definition_lines(table_metric));
     for (label, value) in extra_summary_lines {
         summary_lines.push(format!("{}: {}", label, value));
     }
 
     format!("{}\n\n{}", summary_lines.join("\n"), rendered_table)
+}
+
+fn metric_definition_lines(table_metric: TableMetric) -> [String; 2] {
+    match table_metric {
+        TableMetric::Area => [
+            "  aig_nodes          : count of AIG nodes attributed to each row. An AIG node may be attributed to multiple rows.".to_string(),
+            "  weighted_aig_nodes : sum of 1/N over attributed AIG nodes, where N is the number of attributions on the AIG node".to_string(),
+        ],
+        TableMetric::CriticalPath => [
+            "  aig_nodes          : count of AIG nodes attributed to each row. An AIG node may be attributed to multiple rows.".to_string(),
+            "  weighted_aig_nodes : sum of 1/N over attributed critical-path AIG nodes, where N is the number of row attributions on the AIG node".to_string(),
+        ],
+    }
 }
 
 fn to_display_rows_for_pir_node_report(report: &AreaTableReport) -> Vec<DisplayRow> {
@@ -281,11 +304,13 @@ fn push_unattributed_display_row(
 
 fn render_pir_node_table(
     report: &AreaTableReport,
+    table_metric: TableMetric,
     extra_summary_lines: &[(&str, usize)],
 ) -> String {
     render_rows_table(
         &report.function_name,
         report.total_aig_node_count,
+        table_metric,
         extra_summary_lines,
         "pir_node_id",
         /* include_ir_text= */ true,
@@ -295,11 +320,13 @@ fn render_pir_node_table(
 
 fn render_opcode_table(
     report: &OpcodeAreaTableReport,
+    table_metric: TableMetric,
     extra_summary_lines: &[(&str, usize)],
 ) -> String {
     render_rows_table(
         &report.function_name,
         report.total_aig_node_count,
+        table_metric,
         extra_summary_lines,
         "opcode",
         /* include_ir_text= */ false,
@@ -408,10 +435,26 @@ fn handle_g8r_attribution_table(
 
     match &report {
         AreaTableOutput::PirNode(report) => {
-            println!("{}", render_pir_node_table(report, &extra_summary_lines))
+            let table_metric = if critical_path_only {
+                TableMetric::CriticalPath
+            } else {
+                TableMetric::Area
+            };
+            println!(
+                "{}",
+                render_pir_node_table(report, table_metric, &extra_summary_lines)
+            )
         }
         AreaTableOutput::Opcode(report) => {
-            println!("{}", render_opcode_table(report, &extra_summary_lines))
+            let table_metric = if critical_path_only {
+                TableMetric::CriticalPath
+            } else {
+                TableMetric::Area
+            };
+            println!(
+                "{}",
+                render_opcode_table(report, table_metric, &extra_summary_lines)
+            )
         }
     }
 }
@@ -420,7 +463,7 @@ fn handle_g8r_attribution_table(
 mod tests {
     use xlsynth_g8r::aig::table::{AreaTableReport, AreaTableRow, UnattributedAreaTableRow};
 
-    use super::{render_pir_node_table, truncate_for_table};
+    use super::{render_pir_node_table, truncate_for_table, TableMetric};
 
     #[test]
     fn test_render_table_right_justifies_integer_area_counts() {
@@ -452,8 +495,10 @@ mod tests {
             missing_pir_node_ids: vec![],
         };
 
-        let rendered = render_pir_node_table(&report, &[]);
-        assert!(rendered.starts_with("function: f\ntotal_aig_nodes: 16\n\n|--------------|"));
+        let rendered = render_pir_node_table(&report, TableMetric::Area, &[]);
+        assert!(rendered.starts_with(
+            "function: f\ntotal_aig_nodes: 16\naig_nodes: unique live AIG And2 nodes attributed to each row\nweighted_aig_nodes: sum of 1/N over attributed live AIG And2 nodes, where N is the number of row attributions on that node\n\n|--------------|"
+        ));
         let foo_line = rendered
             .lines()
             .find(|line| line.contains("foo: bits[8] = add("))
@@ -508,13 +553,14 @@ mod tests {
 
         let rendered = render_pir_node_table(
             &report,
+            TableMetric::CriticalPath,
             &[
                 ("critical_path_aig_nodes", 4),
                 ("critical_path_depth_nodes", 4),
             ],
         );
         assert!(rendered
-            .starts_with("function: f\ntotal_aig_nodes: 16\ncritical_path_aig_nodes: 4\ncritical_path_depth_nodes: 4\n\n|"));
+            .starts_with("function: f\ntotal_aig_nodes: 16\naig_nodes: unique critical-path AIG And2 nodes attributed to each row\nweighted_aig_nodes: sum of 1/N over attributed critical-path AIG And2 nodes, where N is the number of row attributions on that node\ncritical_path_aig_nodes: 4\ncritical_path_depth_nodes: 4\n\n|"));
         assert!(rendered.contains("pir_node_id"));
         assert!(rendered.contains("weighted_aig_nodes"));
         let row_line = rendered

@@ -1,5 +1,7 @@
 function: f
 total_aig_nodes: 5
+aig_nodes: unique critical-path AIG And2 nodes attributed to each row
+weighted_aig_nodes: sum of 1/N over attributed critical-path AIG And2 nodes, where N is the number of row attributions on that node
 critical_path_aig_nodes: 3
 critical_path_depth_nodes: 3
 
