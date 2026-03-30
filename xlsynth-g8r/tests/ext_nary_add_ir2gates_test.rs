@@ -4,6 +4,7 @@ use xlsynth::{IrBits, IrValue};
 use xlsynth_g8r::aig::get_summary_stats::get_aig_stats;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::ir2gates;
+use xlsynth_g8r::prove_gate_fn_equiv_varisat::{Ctx, EquivResult, prove_gate_fn_equiv};
 use xlsynth_pir::ir::{
     ExtNaryAddArchitecture, ExtNaryAddTerm, FileTable, MemberType, Node, NodePayload, Package,
     PackageMember, Param, ParamId, Type,
@@ -141,8 +142,8 @@ top fn f(p0: bits[{width}] id=1, p1: bits[{width}] id=2, p2: bits[{width}] id=3)
     )
 }
 
-fn get_ir_gate_stats(ir_text: &str, fold: bool, hash: bool) -> (usize, usize) {
-    let out = ir2gates::ir2gates_from_ir_text(
+fn lower_ir_to_gates_output(ir_text: &str, fold: bool, hash: bool) -> ir2gates::Ir2GatesOutput {
+    ir2gates::ir2gates_from_ir_text(
         ir_text,
         None,
         ir2gates::Ir2GatesOptions {
@@ -156,9 +157,35 @@ fn get_ir_gate_stats(ir_text: &str, fold: bool, hash: bool) -> (usize, usize) {
             aug_opt: Default::default(),
         },
     )
-    .expect("ir2gates");
+    .expect("ir2gates")
+}
+
+fn get_ir_gate_stats(ir_text: &str, fold: bool, hash: bool) -> (usize, usize) {
+    let out = lower_ir_to_gates_output(ir_text, fold, hash);
     let stats = get_aig_stats(&out.gatify_output.gate_fn);
     (stats.and_nodes, stats.max_depth)
+}
+
+fn assert_lowered_ir_texts_are_equivalent(
+    lhs_ir_text: &str,
+    rhs_ir_text: &str,
+    fold: bool,
+    hash: bool,
+) {
+    let lhs = lower_ir_to_gates_output(lhs_ir_text, fold, hash);
+    let rhs = lower_ir_to_gates_output(rhs_ir_text, fold, hash);
+    let mut ctx = Ctx::new();
+    assert_eq!(
+        prove_gate_fn_equiv(
+            &lhs.gatify_output.gate_fn,
+            &rhs.gatify_output.gate_fn,
+            &mut ctx
+        ),
+        EquivResult::Proved,
+        "expected lowered gate functions to be equivalent:\nleft IR:\n{}\nright IR:\n{}",
+        lhs_ir_text,
+        rhs_ir_text
+    );
 }
 
 #[test]
@@ -438,6 +465,156 @@ fn negated_operand_increases_gate_count() {
         "expected a negated operand to increase And2 gate count; non_negated={} negated={}",
         non_negated_gates,
         negated_gates
+    );
+}
+
+#[test]
+fn multiple_literal_operands_match_single_accumulated_literal_operand() {
+    // Source-level literal contribution:
+    //   sext(bits[4]:0b1101) + zext(bits[3]:0b101) + trunc(bits[10]:0x296)
+    // = bits[8]:0x98.
+    let multiple_literals = build_single_stage_ext_nary_add_ir_text(
+        8,
+        &[
+            OperandSpec {
+                width: 8,
+                kind: OperandKind::Param,
+                signed: false,
+                negated: false,
+            },
+            OperandSpec {
+                width: 4,
+                kind: OperandKind::Literal(0b1101),
+                signed: true,
+                negated: false,
+            },
+            OperandSpec {
+                width: 3,
+                kind: OperandKind::Literal(0b101),
+                signed: false,
+                negated: false,
+            },
+            OperandSpec {
+                width: 10,
+                kind: OperandKind::Literal(0x296),
+                signed: false,
+                negated: false,
+            },
+        ],
+    );
+    let one_accumulated_literal = build_single_stage_ext_nary_add_ir_text(
+        8,
+        &[
+            OperandSpec {
+                width: 8,
+                kind: OperandKind::Param,
+                signed: false,
+                negated: false,
+            },
+            OperandSpec {
+                width: 8,
+                kind: OperandKind::Literal(0x98),
+                signed: false,
+                negated: false,
+            },
+        ],
+    );
+
+    assert_lowered_ir_texts_are_equivalent(
+        &multiple_literals,
+        &one_accumulated_literal,
+        /* fold= */ false,
+        /* hash= */ false,
+    );
+
+    assert_eq!(
+        get_ir_gate_stats(
+            &multiple_literals,
+            /* fold= */ false,
+            /* hash= */ false
+        ),
+        get_ir_gate_stats(
+            &one_accumulated_literal,
+            /* fold= */ false,
+            /* hash= */ false
+        ),
+        "expected multiple literal ext_nary_add operands to emit like one accumulated literal operand",
+    );
+}
+
+#[test]
+fn negated_terms_fold_carry_ins_and_literals_into_one_accumulated_literal_operand() {
+    let mixed_terms = build_single_stage_ext_nary_add_ir_text(
+        8,
+        &[
+            OperandSpec {
+                width: 8,
+                kind: OperandKind::Param,
+                signed: false,
+                negated: true,
+            },
+            OperandSpec {
+                width: 5,
+                kind: OperandKind::Param,
+                signed: true,
+                negated: true,
+            },
+            OperandSpec {
+                width: 4,
+                kind: OperandKind::Literal(0b1011),
+                signed: true,
+                negated: true,
+            },
+            OperandSpec {
+                width: 3,
+                kind: OperandKind::Literal(0b110),
+                signed: false,
+                negated: false,
+            },
+        ],
+    );
+    // Source-level literal contribution:
+    //   -sext(bits[4]:0b1011) + zext(bits[3]:0b110) = bits[8]:11.
+    // The two negated params contribute their +1 carry-ins during lowering.
+    let one_accumulated_literal = build_single_stage_ext_nary_add_ir_text(
+        8,
+        &[
+            OperandSpec {
+                width: 8,
+                kind: OperandKind::Param,
+                signed: false,
+                negated: true,
+            },
+            OperandSpec {
+                width: 5,
+                kind: OperandKind::Param,
+                signed: true,
+                negated: true,
+            },
+            OperandSpec {
+                width: 8,
+                kind: OperandKind::Literal(11),
+                signed: false,
+                negated: false,
+            },
+        ],
+    );
+
+    assert_lowered_ir_texts_are_equivalent(
+        &mixed_terms,
+        &one_accumulated_literal,
+        /* fold= */ false,
+        /* hash= */ false,
+    );
+
+    assert_eq!(
+        get_ir_gate_stats(&mixed_terms, /* fold= */ false, /* hash= */ false),
+        get_ir_gate_stats(
+            &one_accumulated_literal,
+            /* fold= */ false,
+            /* hash= */ false
+        ),
+        "expected negated dynamic carry-ins and literal terms to emit like one accumulated literal operand",
     );
 }
 
