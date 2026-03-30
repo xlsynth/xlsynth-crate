@@ -1,9 +1,11 @@
 function: f
 total_aig_nodes: 5
-aig_nodes: unique critical-path AIG And2 nodes attributed to each row
-weighted_aig_nodes: sum of 1/N over attributed critical-path AIG And2 nodes, where N is the number of row attributions on that node
 critical_path_aig_nodes: 3
 critical_path_depth_nodes: 3
+
+Metrics:
+  aig_nodes          : count of AIG nodes attributed to each row. An AIG node may be attributed to multiple rows.
+  weighted_aig_nodes : sum of 1/N over attributed critical-path AIG nodes, where N is the number of row attributions on the AIG node
 
 |--------------|--------------------------------------------------|-----------|--------------------|
 | pir_node_id  | ir_op                                            | aig_nodes | weighted_aig_nodes |

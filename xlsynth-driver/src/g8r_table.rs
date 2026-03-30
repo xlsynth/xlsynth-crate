@@ -198,12 +198,12 @@ fn render_rows_table(
         format!("function: {}", function_name),
         format!("total_aig_nodes: {}", total_aig_node_count),
     ];
-    summary_lines.push("".to_string());
-    summary_lines.push("Metrics:".to_string());
-    summary_lines.extend(metric_definition_lines(table_metric));
     for (label, value) in extra_summary_lines {
         summary_lines.push(format!("{}: {}", label, value));
     }
+    summary_lines.push("".to_string());
+    summary_lines.push("Metrics:".to_string());
+    summary_lines.extend(metric_definition_lines(table_metric));
 
     format!("{}\n\n{}", summary_lines.join("\n"), rendered_table)
 }
@@ -211,12 +211,12 @@ fn render_rows_table(
 fn metric_definition_lines(table_metric: TableMetric) -> [String; 2] {
     match table_metric {
         TableMetric::Area => [
-            "  aig_nodes          : count of AIG nodes attributed to each row. An AIG node may be attributed to multiple rows.".to_string(),
-            "  weighted_aig_nodes : sum of 1/N over attributed AIG nodes, where N is the number of attributions on the AIG node".to_string(),
+            "  aig_nodes          : Count of AIG nodes attributed to each row. An AIG node may be attributed to multiple rows.".to_string(),
+            "  weighted_aig_nodes : Sum of 1/N over attributed AIG nodes, where N is the number of attributions on the AIG node.".to_string(),
         ],
         TableMetric::CriticalPath => [
-            "  aig_nodes          : count of AIG nodes attributed to each row. An AIG node may be attributed to multiple rows.".to_string(),
-            "  weighted_aig_nodes : sum of 1/N over attributed critical-path AIG nodes, where N is the number of row attributions on the AIG node".to_string(),
+            "  aig_nodes          : Count of AIG nodes attributed to each row. An AIG node may be attributed to multiple rows.".to_string(),
+            "  weighted_aig_nodes : Sum of 1/N over attributed critical-path AIG nodes, where N is the number of row attributions on the AIG node.".to_string(),
         ],
     }
 }
@@ -497,7 +497,14 @@ mod tests {
 
         let rendered = render_pir_node_table(&report, TableMetric::Area, &[]);
         assert!(rendered.starts_with(
-            "function: f\ntotal_aig_nodes: 16\naig_nodes: unique live AIG And2 nodes attributed to each row\nweighted_aig_nodes: sum of 1/N over attributed live AIG And2 nodes, where N is the number of row attributions on that node\n\n|--------------|"
+            r#"function: f
+total_aig_nodes: 16
+
+Metrics:
+  aig_nodes          : count of AIG nodes attributed to each row. An AIG node may be attributed to multiple rows.
+  weighted_aig_nodes : sum of 1/N over attributed AIG nodes, where N is the number of attributions on the AIG node
+
+|--------------|"#
         ));
         let foo_line = rendered
             .lines()
@@ -559,8 +566,18 @@ mod tests {
                 ("critical_path_depth_nodes", 4),
             ],
         );
-        assert!(rendered
-            .starts_with("function: f\ntotal_aig_nodes: 16\naig_nodes: unique critical-path AIG And2 nodes attributed to each row\nweighted_aig_nodes: sum of 1/N over attributed critical-path AIG And2 nodes, where N is the number of row attributions on that node\ncritical_path_aig_nodes: 4\ncritical_path_depth_nodes: 4\n\n|"));
+        assert!(rendered.starts_with(
+            r#"function: f
+total_aig_nodes: 16
+critical_path_aig_nodes: 4
+critical_path_depth_nodes: 4
+
+Metrics:
+  aig_nodes          : count of AIG nodes attributed to each row. An AIG node may be attributed to multiple rows.
+  weighted_aig_nodes : sum of 1/N over attributed critical-path AIG nodes, where N is the number of row attributions on the AIG node
+
+|"#
+        ));
         assert!(rendered.contains("pir_node_id"));
         assert!(rendered.contains("weighted_aig_nodes"));
         let row_line = rendered

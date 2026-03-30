@@ -1,7 +1,9 @@
 function: f
 total_aig_nodes: 4
-aig_nodes: unique live AIG And2 nodes attributed to each row
-weighted_aig_nodes: sum of 1/N over attributed live AIG And2 nodes, where N is the number of row attributions on that node
+
+Metrics:
+  aig_nodes          : count of AIG nodes attributed to each row. An AIG node may be attributed to multiple rows.
+  weighted_aig_nodes : sum of 1/N over attributed AIG nodes, where N is the number of attributions on the AIG node
 
 |--------------|-----------|--------------------|
 | opcode       | aig_nodes | weighted_aig_nodes |
