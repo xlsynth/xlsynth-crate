@@ -1273,6 +1273,43 @@ fn literal_bits_if_bits_node(f: &ir::Fn, node_ref: ir::NodeRef) -> Option<xlsynt
     }
 }
 
+/// Resizes a literal term to the ext_nary_add output width.
+fn resize_literal_bits_for_ext_nary_add(
+    bits: &xlsynth::IrBits,
+    output_width: usize,
+    signed: bool,
+) -> xlsynth::IrBits {
+    match bits.get_bit_count().cmp(&output_width) {
+        std::cmp::Ordering::Less => {
+            let fill_bit = signed && bits.get_bit_count() != 0 && bits.msb();
+            let mut resized_bits = Vec::with_capacity(output_width);
+            for i in 0..bits.get_bit_count() {
+                resized_bits.push(
+                    bits.get_bit(i)
+                        .expect("literal bit index should be in bounds during resize"),
+                );
+            }
+            resized_bits.resize(output_width, fill_bit);
+            xlsynth::IrBits::from_lsb_is_0(&resized_bits)
+        }
+        std::cmp::Ordering::Equal => bits.clone(),
+        std::cmp::Ordering::Greater => bits.width_slice(0, output_width as i64),
+    }
+}
+
+/// Adds one literal contribution into the ext_nary_add constant accumulator.
+fn accumulate_ext_nary_add_literal(
+    literal_sum: &mut xlsynth::IrBits,
+    term_bits: &xlsynth::IrBits,
+    output_width: usize,
+    signed: bool,
+    negated: bool,
+) {
+    let resized = resize_literal_bits_for_ext_nary_add(term_bits, output_width, signed);
+    let contribution = if negated { resized.negate() } else { resized };
+    *literal_sum = literal_sum.add(&contribution);
+}
+
 fn is_all_zeros(bits: &xlsynth::IrBits) -> bool {
     for i in 0..bits.get_bit_count() {
         if bits.get_bit(i).unwrap() {
@@ -2872,32 +2909,39 @@ fn gatify_node(
                     GateOrVec::BitVector(AigBitVector::zeros(output_width)),
                 );
             } else {
-                let mut negated_term_count = 0usize;
-                let mut lowered_terms: Vec<AigBitVector> = terms
-                    .iter()
-                    .map(|term| {
-                        let bits = env
-                            .get_bit_vector(term.operand)
-                            .expect("ext_nary_add operand should be present");
-                        let resized = if term.signed {
-                            gatify_sext_or_truncate(g8_builder, node.text_id, output_width, &bits)
-                        } else {
-                            gatify_zext_or_truncate(output_width, &bits)
-                        };
-                        if term.negated {
-                            negated_term_count = negated_term_count.saturating_add(1);
-                            g8_builder.add_not_vec(&resized)
-                        } else {
-                            resized
-                        }
-                    })
-                    .collect();
-                if negated_term_count != 0 {
-                    lowered_terms.push(usize_as_aig_bits(
-                        negated_term_count,
-                        output_width,
-                        g8_builder,
-                    ));
+                let one_bits = xlsynth::IrBits::make_ubits(output_width, 1)
+                    .expect("bits[output_width]:1 should construct");
+                let mut literal_sum = xlsynth::IrBits::zero(output_width);
+                let mut lowered_terms: Vec<AigBitVector> = Vec::with_capacity(terms.len());
+                for term in terms {
+                    if let Some(literal_bits) = literal_bits_if_bits_node(f, term.operand) {
+                        accumulate_ext_nary_add_literal(
+                            &mut literal_sum,
+                            &literal_bits,
+                            output_width,
+                            term.signed,
+                            term.negated,
+                        );
+                        continue;
+                    }
+
+                    let bits = env
+                        .get_bit_vector(term.operand)
+                        .expect("ext_nary_add operand should be present");
+                    let resized = if term.signed {
+                        gatify_sext_or_truncate(g8_builder, node.text_id, output_width, &bits)
+                    } else {
+                        gatify_zext_or_truncate(output_width, &bits)
+                    };
+                    if term.negated {
+                        lowered_terms.push(g8_builder.add_not_vec(&resized));
+                        literal_sum = literal_sum.add(&one_bits);
+                    } else {
+                        lowered_terms.push(resized);
+                    }
+                }
+                if !literal_sum.is_zero() {
+                    lowered_terms.push(g8_builder.add_literal(&literal_sum));
                 }
                 let selected_adder_mapping = (*arch)
                     .map(AdderMapping::from)
@@ -2907,13 +2951,17 @@ fn gatify_node(
                     AdderMapping::BrentKung => "brent_kung",
                     AdderMapping::KoggeStone => "kogge_stone",
                 };
-                let sum = array_add_with_carry_out(
-                    g8_builder,
-                    &lowered_terms,
-                    None,
-                    selected_adder_mapping,
-                )
-                .sum;
+                let sum = if lowered_terms.is_empty() {
+                    g8_builder.add_literal(&literal_sum)
+                } else {
+                    array_add_with_carry_out(
+                        g8_builder,
+                        &lowered_terms,
+                        None,
+                        selected_adder_mapping,
+                    )
+                    .sum
+                };
                 for (i, gate) in sum.iter_lsb_to_msb().enumerate() {
                     g8_builder.add_tag(
                         gate.node,
