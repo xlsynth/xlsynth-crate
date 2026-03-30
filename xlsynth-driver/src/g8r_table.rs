@@ -501,8 +501,8 @@ mod tests {
 total_aig_nodes: 16
 
 Metrics:
-  aig_nodes          : count of AIG nodes attributed to each row. An AIG node may be attributed to multiple rows.
-  weighted_aig_nodes : sum of 1/N over attributed AIG nodes, where N is the number of attributions on the AIG node
+  aig_nodes          : Count of AIG nodes attributed to each row. An AIG node may be attributed to multiple rows.
+  weighted_aig_nodes : Sum of 1/N over attributed AIG nodes, where N is the number of attributions on the AIG node.
 
 |--------------|"#
         ));
@@ -573,8 +573,8 @@ critical_path_aig_nodes: 4
 critical_path_depth_nodes: 4
 
 Metrics:
-  aig_nodes          : count of AIG nodes attributed to each row. An AIG node may be attributed to multiple rows.
-  weighted_aig_nodes : sum of 1/N over attributed critical-path AIG nodes, where N is the number of row attributions on the AIG node
+  aig_nodes          : Count of AIG nodes attributed to each row. An AIG node may be attributed to multiple rows.
+  weighted_aig_nodes : Sum of 1/N over attributed critical-path AIG nodes, where N is the number of row attributions on the AIG node.
 
 |"#
         ));
