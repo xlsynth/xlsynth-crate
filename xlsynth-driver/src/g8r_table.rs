@@ -6,7 +6,7 @@ use std::path::Path;
 
 use comfy_table::presets::ASCII_MARKDOWN;
 use comfy_table::{CellAlignment, ContentArrangement, Table};
-use xlsynth_g8r::aig::area_table::{
+use xlsynth_g8r::aig::table::{
     build_area_table_report, build_critical_path_area_table_report,
     build_critical_path_opcode_area_table_report, build_opcode_area_table_report, AreaTableReport,
     OpcodeAreaTableReport, UnattributedAreaTableRow,
@@ -19,6 +19,7 @@ use crate::toolchain_config::ToolchainConfig;
 
 const AREA_SUBCOMMAND: &str = "g8r-area-table";
 const CRITICAL_PATH_SUBCOMMAND: &str = "g8r-critical-path-table";
+const MAX_IR_OP_WIDTH: usize = 150;
 
 struct DisplayRow {
     group_key: Option<String>,
@@ -28,6 +29,16 @@ struct DisplayRow {
     raw_percentage: f64,
     weighted_aig_node_count: f64,
     weighted_percentage: f64,
+}
+
+fn truncate_for_table(value: &str, max_width: usize) -> String {
+    let char_count = value.chars().count();
+    if char_count <= max_width {
+        return value.to_string();
+    }
+    assert!(max_width >= 3, "max_width must allow ellipsis");
+    let prefix: String = value.chars().take(max_width - 3).collect();
+    format!("{prefix}...")
 }
 
 fn load_gate_fn(path: &Path, subcommand: &str) -> Result<GateFn, String> {
@@ -150,10 +161,11 @@ fn render_rows_table(
     for row in rows {
         let mut table_row = vec![row.group_label];
         if include_ir_text {
-            table_row.push(
-                row.ir_text
+            table_row.push(truncate_for_table(
+                &row.ir_text
                     .unwrap_or_else(|| "<no PIR attribution>".to_string()),
-            );
+                MAX_IR_OP_WIDTH,
+            ));
         }
         table_row.push(format!(
             "{:>raw_width$} ({:>raw_percentage_width$.1}%)",
@@ -406,9 +418,9 @@ fn handle_g8r_attribution_table(
 
 #[cfg(test)]
 mod tests {
-    use xlsynth_g8r::aig::area_table::{AreaTableReport, AreaTableRow, UnattributedAreaTableRow};
+    use xlsynth_g8r::aig::table::{AreaTableReport, AreaTableRow, UnattributedAreaTableRow};
 
-    use super::render_pir_node_table;
+    use super::{render_pir_node_table, truncate_for_table};
 
     #[test]
     fn test_render_table_right_justifies_integer_area_counts() {
@@ -511,5 +523,13 @@ mod tests {
             .unwrap();
         assert!(row_line.contains("| 3 (75.0%) |"));
         assert!(row_line.contains("2.5 (62.5%)"));
+    }
+
+    #[test]
+    fn test_truncate_for_table_adds_ellipsis_at_150_chars() {
+        let input = "x".repeat(160);
+        let got = truncate_for_table(&input, 150);
+        assert_eq!(got.len(), 150);
+        assert_eq!(got, format!("{}...", "x".repeat(147)));
     }
 }

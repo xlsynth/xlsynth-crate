@@ -644,103 +644,43 @@ impl NodePayload {
             _ => Ok(()),
         }
     }
-    pub fn to_string(
-        &self,
-        f: &Fn,
-        id: usize,
-        pos: Option<Vec<(usize, usize, usize)>>,
-    ) -> Option<String> {
-        let get_name = |node_ref: NodeRef| -> String {
-            let node = f.get_node(node_ref);
-            match node.payload {
-                NodePayload::GetParam(_) => {
-                    node.name.clone().expect("GetParam node should have a name")
-                }
-                _ => {
-                    if let Some(ref name) = node.name {
-                        name.clone()
-                    } else {
-                        format!("{}.{}", node.payload.get_operator(), node.text_id)
-                    }
-                }
-            }
+    fn to_string_components(&self, f: &Fn, opts: &NodeRenderOptions) -> Option<Vec<String>> {
+        let format_operand = |node_ref: NodeRef| -> String { operand_to_string(f, node_ref, opts) };
+        let format_operands = |node_refs: &[NodeRef]| -> Vec<String> {
+            node_refs
+                .iter()
+                .map(|node_ref| format_operand(*node_ref))
+                .collect()
         };
         let result = match self {
-            NodePayload::Tuple(nodes) => {
-                if nodes.is_empty() {
-                    format!("tuple(id={})", id)
-                } else {
-                    format!(
-                        "tuple({}, id={})",
-                        nodes
-                            .iter()
-                            .map(|n| get_name(*n))
-                            .collect::<Vec<String>>()
-                            .join(", "),
-                        id
-                    )
-                }
-            }
-            NodePayload::Array(nodes) => format!(
-                "array({}, id={})",
-                nodes
-                    .iter()
-                    .map(|n| get_name(*n))
-                    .collect::<Vec<String>>()
-                    .join(", "),
-                id
-            ),
+            NodePayload::Tuple(nodes) => format_operands(nodes),
+            NodePayload::Array(nodes) => format_operands(nodes),
             NodePayload::ArraySlice {
                 array,
                 start,
                 width,
-            } => {
-                format!(
-                    "array_slice({}, {}, width={}, id={})",
-                    get_name(*array),
-                    get_name(*start),
-                    width,
-                    id
-                )
-            }
+            } => vec![
+                format_operand(*array),
+                format_operand(*start),
+                format!("width={}", width),
+            ],
             NodePayload::TupleIndex { tuple, index } => {
-                format!(
-                    "tuple_index({}, index={}, id={})",
-                    get_name(*tuple),
-                    index,
-                    id
-                )
+                vec![format_operand(*tuple), format!("index={}", index)]
             }
-            NodePayload::Binop(op, lhs, rhs) => format!(
-                "{}({}, {}, id={})",
-                binop_to_operator(*op),
-                get_name(*lhs),
-                get_name(*rhs),
-                id
-            ),
-            NodePayload::ExtCarryOut { lhs, rhs, c_in } => format!(
-                "ext_carry_out({}, {}, {}, id={})",
-                get_name(*lhs),
-                get_name(*rhs),
-                get_name(*c_in),
-                id
-            ),
-            NodePayload::ExtPrioEncode { arg, lsb_prio } => format!(
-                "ext_prio_encode({}, lsb_prio={}, id={})",
-                get_name(*arg),
-                lsb_prio,
-                id
-            ),
+            NodePayload::Binop(_, lhs, rhs) => vec![format_operand(*lhs), format_operand(*rhs)],
+            NodePayload::ExtCarryOut { lhs, rhs, c_in } => vec![
+                format_operand(*lhs),
+                format_operand(*rhs),
+                format_operand(*c_in),
+            ],
+            NodePayload::ExtPrioEncode { arg, lsb_prio } => {
+                vec![format_operand(*arg), format!("lsb_prio={}", lsb_prio)]
+            }
             NodePayload::ExtNaryAdd { terms, arch } => {
-                let operand_text = terms
+                let mut attrs: Vec<String> = terms
                     .iter()
-                    .map(|term| get_name(term.operand))
-                    .collect::<Vec<String>>()
-                    .join(", ");
-                let mut attrs = Vec::new();
-                if !operand_text.is_empty() {
-                    attrs.push(operand_text);
-                }
+                    .map(|term| format_operand(term.operand))
+                    .collect();
                 attrs.push(format!(
                     "signed=[{}]",
                     terms
@@ -760,302 +700,179 @@ impl NodePayload {
                 if let Some(arch) = arch {
                     attrs.push(format!("arch={}", arch));
                 }
-                attrs.push(format!("id={}", id));
-                format!("ext_nary_add({})", attrs.join(", "))
+                attrs
             }
-            NodePayload::Unop(op, arg) => {
-                format!("{}({}, id={})", unop_to_operator(*op), get_name(*arg), id)
-            }
+            NodePayload::Unop(_, arg) => vec![format_operand(*arg)],
             NodePayload::Literal(value) => {
-                let value_str = value
-                    .to_string_fmt_no_prefix(IrFormatPreference::Default)
-                    .unwrap();
-                format!("literal(value={}, id={})", value_str, id)
+                let value_str = if opts.inline_literals {
+                    value.to_string_fmt(IrFormatPreference::Hex).unwrap()
+                } else {
+                    value
+                        .to_string_fmt_no_prefix(IrFormatPreference::Default)
+                        .unwrap()
+                };
+                vec![format!("value={}", value_str)]
             }
-            NodePayload::SignExt { arg, new_bit_count } => format!(
-                "sign_ext({}, new_bit_count={}, id={})",
-                get_name(*arg),
-                new_bit_count,
-                id
-            ),
-            NodePayload::ZeroExt { arg, new_bit_count } => format!(
-                "zero_ext({}, new_bit_count={}, id={})",
-                get_name(*arg),
-                new_bit_count,
-                id
-            ),
+            NodePayload::SignExt { arg, new_bit_count } => vec![
+                format_operand(*arg),
+                format!("new_bit_count={}", new_bit_count),
+            ],
+            NodePayload::ZeroExt { arg, new_bit_count } => vec![
+                format_operand(*arg),
+                format!("new_bit_count={}", new_bit_count),
+            ],
             NodePayload::ArrayUpdate {
                 array,
                 value,
                 indices,
                 assumed_in_bounds,
             } => {
-                let idx_str = indices
-                    .iter()
-                    .map(|n| get_name(*n))
-                    .collect::<Vec<String>>()
-                    .join(", ");
+                let mut attrs = vec![
+                    format_operand(*array),
+                    format_operand(*value),
+                    format!("indices=[{}]", format_operands(indices).join(", ")),
+                ];
                 if *assumed_in_bounds {
-                    format!(
-                        "array_update({}, {}, indices=[{}], assumed_in_bounds=true, id={})",
-                        get_name(*array),
-                        get_name(*value),
-                        idx_str,
-                        id
-                    )
-                } else {
-                    format!(
-                        "array_update({}, {}, indices=[{}], id={})",
-                        get_name(*array),
-                        get_name(*value),
-                        idx_str,
-                        id
-                    )
+                    attrs.push("assumed_in_bounds=true".to_string());
                 }
+                attrs
             }
             NodePayload::ArrayIndex {
                 array,
                 indices,
                 assumed_in_bounds,
             } => {
-                let idx_str = indices
-                    .iter()
-                    .map(|n| get_name(*n))
-                    .collect::<Vec<String>>()
-                    .join(", ");
+                let mut attrs = vec![
+                    format_operand(*array),
+                    format!("indices=[{}]", format_operands(indices).join(", ")),
+                ];
                 if *assumed_in_bounds {
-                    format!(
-                        "array_index({}, indices=[{}], assumed_in_bounds=true, id={})",
-                        get_name(*array),
-                        idx_str,
-                        id
-                    )
-                } else {
-                    format!(
-                        "array_index({}, indices=[{}], id={})",
-                        get_name(*array),
-                        idx_str,
-                        id
-                    )
+                    attrs.push("assumed_in_bounds=true".to_string());
                 }
+                attrs
             }
-            NodePayload::DynamicBitSlice { arg, start, width } => format!(
-                "dynamic_bit_slice({}, {}, width={}, id={})",
-                get_name(*arg),
-                get_name(*start),
-                width,
-                id
-            ),
-            NodePayload::BitSlice { arg, start, width } => {
-                format!(
-                    "bit_slice({}, start={}, width={}, id={})",
-                    get_name(*arg),
-                    start,
-                    width,
-                    id
-                )
-            }
+            NodePayload::DynamicBitSlice { arg, start, width } => vec![
+                format_operand(*arg),
+                format_operand(*start),
+                format!("width={}", width),
+            ],
+            NodePayload::BitSlice { arg, start, width } => vec![
+                format_operand(*arg),
+                format!("start={}", start),
+                format!("width={}", width),
+            ],
             NodePayload::BitSliceUpdate {
                 arg,
                 start,
                 update_value,
-            } => format!(
-                "bit_slice_update({}, {}, {}, id={})",
-                get_name(*arg),
-                get_name(*start),
-                get_name(*update_value),
-                id
-            ),
+            } => vec![
+                format_operand(*arg),
+                format_operand(*start),
+                format_operand(*update_value),
+            ],
             NodePayload::Assert {
                 token,
                 activate,
                 message,
                 label,
-            } => {
-                format!(
-                    "assert({}, {}, message={:?}, label={:?}, id={})",
-                    get_name(*token),
-                    get_name(*activate),
-                    message,
-                    label,
-                    id
-                )
-            }
+            } => vec![
+                format_operand(*token),
+                format_operand(*activate),
+                format!("message={:?}", message),
+                format!("label={:?}", label),
+            ],
             NodePayload::Trace {
                 token,
                 activated,
                 format,
                 operands,
-            } => {
-                let operands_str = operands
-                    .iter()
-                    .map(|n| get_name(*n))
-                    .collect::<Vec<String>>()
-                    .join(", ");
-                format!(
-                    "trace({}, {}, format={:?}, data_operands=[{}], id={})",
-                    get_name(*token),
-                    get_name(*activated),
-                    format,
-                    operands_str,
-                    id
-                )
-            }
+            } => vec![
+                format_operand(*token),
+                format_operand(*activated),
+                format!("format={:?}", format),
+                format!("data_operands=[{}]", format_operands(operands).join(", ")),
+            ],
             NodePayload::InstantiationInput {
                 instantiation,
                 port_name,
                 arg,
-            } => {
-                format!(
-                    "instantiation_input({}, instantiation={}, port_name={}, id={})",
-                    get_name(*arg),
-                    instantiation,
-                    port_name,
-                    id
-                )
-            }
+            } => vec![
+                format_operand(*arg),
+                format!("instantiation={}", instantiation),
+                format!("port_name={}", port_name),
+            ],
             NodePayload::InstantiationOutput {
                 instantiation,
                 port_name,
-            } => {
-                format!(
-                    "instantiation_output(instantiation={}, port_name={}, id={})",
-                    instantiation, port_name, id
-                )
-            }
-            NodePayload::RegisterRead { register } => {
-                format!("register_read(register={}, id={})", register, id)
-            }
+            } => vec![
+                format!("instantiation={}", instantiation),
+                format!("port_name={}", port_name),
+            ],
+            NodePayload::RegisterRead { register } => vec![format!("register={}", register)],
             NodePayload::RegisterWrite {
                 arg,
                 register,
                 load_enable,
                 reset,
             } => {
-                let mut parts = vec![format!("{}", get_name(*arg))];
-                parts.push(format!("register={}", register));
+                let mut parts = vec![format_operand(*arg), format!("register={}", register)];
                 if let Some(le) = load_enable {
-                    parts.push(format!("load_enable={}", get_name(*le)));
+                    parts.push(format!("load_enable={}", format_operand(*le)));
                 }
                 if let Some(rst) = reset {
-                    parts.push(format!("reset={}", get_name(*rst)));
+                    parts.push(format!("reset={}", format_operand(*rst)));
                 }
-                parts.push(format!("id={}", id));
-                format!("register_write({})", parts.join(", "))
+                parts
             }
-            NodePayload::AfterAll(nodes) => {
-                if nodes.is_empty() {
-                    format!("after_all(id={})", id)
-                } else {
-                    format!(
-                        "after_all({}, id={})",
-                        nodes
-                            .iter()
-                            .map(|n| get_name(*n))
-                            .collect::<Vec<String>>()
-                            .join(", "),
-                        id
-                    )
-                }
-            }
-            NodePayload::Nary(op, nodes) => format!(
-                "{}({}, id={})",
-                nary_op_to_operator(*op),
-                nodes
-                    .iter()
-                    .map(|n| get_name(*n))
-                    .collect::<Vec<String>>()
-                    .join(", "),
-                id
-            ),
+            NodePayload::AfterAll(nodes) => format_operands(nodes),
+            NodePayload::Nary(_, nodes) => format_operands(nodes),
             NodePayload::Invoke { to_apply, operands } => {
-                let operands_str = operands
-                    .iter()
-                    .map(|n| get_name(*n))
-                    .collect::<Vec<String>>()
-                    .join(", ");
-                if operands.is_empty() {
-                    format!("invoke(to_apply={}, id={})", to_apply, id)
-                } else {
-                    format!("invoke({}, to_apply={}, id={})", operands_str, to_apply, id)
-                }
+                let mut parts = format_operands(operands);
+                parts.push(format!("to_apply={}", to_apply));
+                parts
             }
             NodePayload::PrioritySel {
                 selector,
                 cases,
                 default,
             } => {
-                let default_str = if let Some(default) = default {
-                    format!(", default={}", get_name(*default))
-                } else {
-                    "".to_string()
-                };
-                format!(
-                    "priority_sel({}, cases=[{}]{}, id={})",
-                    get_name(*selector),
-                    cases
-                        .iter()
-                        .map(|n| get_name(*n))
-                        .collect::<Vec<String>>()
-                        .join(", "),
-                    default_str,
-                    id
-                )
+                let mut parts = vec![
+                    format_operand(*selector),
+                    format!("cases=[{}]", format_operands(cases).join(", ")),
+                ];
+                if let Some(default) = default {
+                    parts.push(format!("default={}", format_operand(*default)));
+                }
+                parts
             }
-            NodePayload::OneHotSel { selector, cases } => format!(
-                "one_hot_sel({}, cases=[{}], id={})",
-                get_name(*selector),
-                cases
-                    .iter()
-                    .map(|n| get_name(*n))
-                    .collect::<Vec<String>>()
-                    .join(", "),
-                id
-            ),
+            NodePayload::OneHotSel { selector, cases } => vec![
+                format_operand(*selector),
+                format!("cases=[{}]", format_operands(cases).join(", ")),
+            ],
             NodePayload::OneHot { arg, lsb_prio } => {
-                format!(
-                    "one_hot({}, lsb_prio={}, id={})",
-                    get_name(*arg),
-                    lsb_prio,
-                    id
-                )
+                vec![format_operand(*arg), format!("lsb_prio={}", lsb_prio)]
             }
             NodePayload::Sel {
                 selector,
                 cases,
                 default,
             } => {
-                let default_str = if let Some(default) = default {
-                    format!(", default={}", get_name(*default))
-                } else {
-                    "".to_string()
-                };
-                format!(
-                    "sel({}, cases=[{}]{}, id={})",
-                    get_name(*selector),
-                    cases
-                        .iter()
-                        .map(|n| get_name(*n))
-                        .collect::<Vec<String>>()
-                        .join(", "),
-                    default_str,
-                    id
-                )
+                let mut parts = vec![
+                    format_operand(*selector),
+                    format!("cases=[{}]", format_operands(cases).join(", ")),
+                ];
+                if let Some(default) = default {
+                    parts.push(format!("default={}", format_operand(*default)));
+                }
+                parts
             }
             NodePayload::Cover { predicate, label } => {
-                format!(
-                    "cover({}, label={:?}, id={})",
-                    get_name(*predicate),
-                    label,
-                    id
-                )
+                vec![format_operand(*predicate), format!("label={:?}", label)]
             }
             NodePayload::Decode { arg, width } => {
-                format!("decode({}, width={}, id={})", get_name(*arg), width, id)
+                vec![format_operand(*arg), format!("width={}", width)]
             }
-            NodePayload::Encode { arg } => {
-                format!("encode({}, id={})", get_name(*arg), id)
-            }
+            NodePayload::Encode { arg } => vec![format_operand(*arg)],
             NodePayload::CountedFor {
                 init,
                 trip_count,
@@ -1063,27 +880,19 @@ impl NodePayload {
                 body,
                 invariant_args,
             } => {
-                let inv_str = if invariant_args.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        ", invariant_args=[{}]",
-                        invariant_args
-                            .iter()
-                            .map(|n| get_name(*n))
-                            .collect::<Vec<String>>()
-                            .join(", ")
-                    )
-                };
-                format!(
-                    "counted_for({}, trip_count={}, stride={}, body={}{}, id={})",
-                    get_name(*init),
-                    trip_count,
-                    stride,
-                    body,
-                    inv_str,
-                    id
-                )
+                let mut parts = vec![
+                    format_operand(*init),
+                    format!("trip_count={}", trip_count),
+                    format!("stride={}", stride),
+                    format!("body={}", body),
+                ];
+                if !invariant_args.is_empty() {
+                    parts.push(format!(
+                        "invariant_args=[{}]",
+                        format_operands(invariant_args).join(", ")
+                    ));
+                }
+                parts
             }
             NodePayload::GetParam(_) | NodePayload::Nil => return None,
         };
@@ -1107,6 +916,50 @@ pub fn node_textual_id(f: &Fn, nr: NodeRef) -> String {
     }
 }
 
+/// Options for rendering the textual form of an IR node. Not all options are
+/// parsable. These non-parsable options exist for emitting a richer form for
+/// human/AI consumption.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodeRenderOptions {
+    /// Add types to the operands. Example: add(x: bits[8], y: bits[8])
+    /// Not parsable.
+    pub typed_operands: bool,
+    /// Emit literals inline. Example: add(x, my_literal: bits[8]:0x1234)
+    /// Not parsable.
+    pub inline_literals: bool,
+    /// Include node id, i.e. `id=xxxx`.
+    pub include_id: bool,
+    /// Incllude source position, i.e. `pos=xxxx`.
+    pub include_pos: bool,
+}
+
+impl Default for NodeRenderOptions {
+    fn default() -> Self {
+        Self {
+            typed_operands: false,
+            inline_literals: false,
+            include_id: true,
+            include_pos: true,
+        }
+    }
+}
+
+fn operand_to_string(f: &Fn, nr: NodeRef, opts: &NodeRenderOptions) -> String {
+    let node = f.get_node(nr);
+    let name = node_textual_id(f, nr);
+    if opts.inline_literals {
+        if let NodePayload::Literal(value) = &node.payload {
+            let value_text = value.to_string_fmt(IrFormatPreference::Hex).unwrap();
+            return format!("{}: {}", name, value_text);
+        }
+    }
+    if opts.typed_operands {
+        format!("{}: {}", name, node.ty)
+    } else {
+        name
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Node {
     /// All nodes have known ids.
@@ -1121,40 +974,35 @@ pub struct Node {
 
 impl Node {
     pub fn to_string(&self, f: &Fn) -> Option<String> {
-        match self.payload.to_string(f, self.text_id, None) {
-            Some(result) => {
-                let name_str = if let Some(name) = &self.name {
-                    format!("{}", name)
-                } else {
-                    format!("{}.{}", self.payload.get_operator(), self.text_id)
-                };
-                let mut payload_str = result;
-                if let Some(pos_list) = &self.pos {
-                    if !pos_list.is_empty() {
-                        // Format pos as: pos=[(a,b,c), (d,e,f)] with no spaces inside tuples
-                        let items: Vec<String> = pos_list
+        self.to_string_with_options(f, &NodeRenderOptions::default())
+    }
+
+    pub fn to_string_with_options(&self, f: &Fn, opts: &NodeRenderOptions) -> Option<String> {
+        let name_str = if let Some(name) = &self.name {
+            format!("{}", name)
+        } else {
+            format!("{}.{}", self.payload.get_operator(), self.text_id)
+        };
+        let mut components = self.payload.to_string_components(f, opts)?;
+        if opts.include_id {
+            components.push(format!("id={}", self.text_id));
+        }
+        if opts.include_pos {
+            if let Some(pos_list) = &self.pos {
+                if !pos_list.is_empty() {
+                    components.push(format!(
+                        "pos=[{}]",
+                        pos_list
                             .iter()
                             .map(|p| format!("({},{},{})", p.fileno, p.lineno, p.colno))
-                            .collect();
-                        let pos_attr = format!(", pos=[{}]", items.join(", "));
-                        if let Some(idx) = payload_str.rfind(')') {
-                            // Insert before the final ')'
-                            payload_str = format!(
-                                "{}{}{}",
-                                &payload_str[..idx],
-                                pos_attr,
-                                &payload_str[idx..]
-                            );
-                        } else {
-                            // Fallback: append
-                            payload_str.push_str(&pos_attr);
-                        }
-                    }
+                            .collect::<Vec<String>>()
+                            .join(", ")
+                    ));
                 }
-                Some(format!("{}: {} = {}", name_str, self.ty, payload_str))
             }
-            None => None,
         }
+        let payload_str = format!("{}({})", self.payload.get_operator(), components.join(", "));
+        Some(format!("{}: {} = {}", name_str, self.ty, payload_str))
     }
 
     pub fn to_signature_string(&self, f: &Fn) -> String {
@@ -1968,6 +1816,37 @@ mod tests {
         let mut parser = ir_parser::Parser::new(pkg_text);
         let pkg = parser.parse_and_validate_package().unwrap();
         assert_eq!(pkg.to_string(), pkg_text);
+    }
+
+    #[test]
+    fn test_node_to_string_with_options_preserves_default_and_supports_inline_literals() {
+        let ir_text = r#"fn f(x: bits[8] id=1) -> bits[8] {
+  literal.2: bits[8] = literal(value=1, id=2)
+  ret add.3: bits[8] = add(x, literal.2, id=3, pos=[(0,0,0)])
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_fn = parser.parse_fn().unwrap();
+        let add_node = ir_fn.get_node(NodeRef { index: 3 });
+
+        assert_eq!(
+            add_node.to_string(&ir_fn).unwrap(),
+            "add.3: bits[8] = add(x, literal.2, id=3, pos=[(0,0,0)])"
+        );
+
+        assert_eq!(
+            add_node
+                .to_string_with_options(
+                    &ir_fn,
+                    &NodeRenderOptions {
+                        typed_operands: true,
+                        inline_literals: true,
+                        include_id: false,
+                        include_pos: false,
+                    },
+                )
+                .unwrap(),
+            "add.3: bits[8] = add(x: bits[8], literal.2: bits[8]:0x1)"
+        );
     }
 
     #[test]

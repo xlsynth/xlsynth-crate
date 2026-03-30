@@ -3768,7 +3768,7 @@ top fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    compare_golden_text(&stdout, "tests/test_g8r_area_table.golden.txt");
+    compare_golden_text(&stdout, "tests/test_g8r_table.golden.txt");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -3841,10 +3841,7 @@ top fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    compare_golden_text(
-        &stdout,
-        "tests/test_g8r_area_table_group_by_opcode.golden.txt",
-    );
+    compare_golden_text(&stdout, "tests/test_g8r_table_group_by_opcode.golden.txt");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(

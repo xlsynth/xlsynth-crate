@@ -57,10 +57,10 @@ mod flag_defaults;
 mod fn_eval;
 mod g8r2ir;
 mod g8r2v;
-mod g8r_area_table;
 mod g8r_cli;
 mod g8r_equiv;
 mod g8r_ir_equiv;
+mod g8r_table;
 mod gate_ir_equiv;
 mod gv2aig;
 mod gv2block;
@@ -3074,10 +3074,10 @@ fn main() {
             g8r2ir::handle_g8r2ir(subm, &config);
         }
         Some(("g8r-area-table", subm)) => {
-            g8r_area_table::handle_g8r_area_table(subm, &config);
+            g8r_table::handle_g8r_area_table(subm, &config);
         }
         Some(("g8r-critical-path-table", subm)) => {
-            g8r_area_table::handle_g8r_critical_path_table(subm, &config);
+            g8r_table::handle_g8r_critical_path_table(subm, &config);
         }
         Some(("g8r-equiv", subm)) => {
             g8r_equiv::handle_g8r_equiv(subm, &config);
