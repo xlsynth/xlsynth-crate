@@ -19,6 +19,7 @@ use std::io::Write as IoWrite;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Sender;
@@ -35,7 +36,6 @@ use xlsynth_g8r::aig::graph_logical_effort::analyze_graph_logical_effort;
 use xlsynth_g8r::aig_sim::count_toggles;
 use xlsynth_g8r::gatify::ir2gate::{self, GatifyOptions};
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
-use xlsynth_mcmc::Best as SharedBest;
 use xlsynth_mcmc::MIN_TEMPERATURE_RATIO;
 use xlsynth_mcmc::McmcIterationOutput as SharedMcmcIterationOutput;
 use xlsynth_mcmc::McmcOptions as SharedMcmcOptions;
@@ -101,6 +101,108 @@ pub struct Cost {
     /// This is populated for weighted-switching objectives; otherwise it is
     /// `0`.
     pub g8r_weighted_switching_milli: u128,
+}
+
+/// Optional hard caps applied to gate-level cost components during PIR MCMC.
+///
+/// At most one cap may be active in a run.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConstraintLimits {
+    pub max_delay: Option<usize>,
+    pub max_area: Option<usize>,
+}
+
+/// Detailed violation information for an infeasible candidate.
+///
+/// At most one cap is active in any given run, so at most one of these fields
+/// is populated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConstraintViolationScore {
+    pub delay_over: Option<usize>,
+    pub area_over: Option<usize>,
+}
+
+/// Ordered score used for selecting best-so-far states under optional caps.
+///
+/// `violation=None` means the candidate is feasible. Feasible candidates always
+/// beat infeasible ones; among infeasible candidates we minimize raw overage
+/// under the single active cap first, then fall back to the objective only as a
+/// final tiebreak.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchScore {
+    pub objective: u128,
+    pub violation: Option<ConstraintViolationScore>,
+}
+
+impl SearchScore {
+    /// Returns true when the candidate satisfies all active hard caps.
+    pub fn feasible(self) -> bool {
+        self.violation.is_none()
+    }
+}
+
+impl Ord for SearchScore {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self.violation, other.violation) {
+            (None, None) => self.objective.cmp(&other.objective),
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (Some(lhs), Some(rhs)) => lhs
+                .delay_over
+                .cmp(&rhs.delay_over)
+                .then_with(|| lhs.area_over.cmp(&rhs.area_over))
+                .then_with(|| self.objective.cmp(&other.objective)),
+        }
+    }
+}
+
+impl PartialOrd for SearchScore {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Clone)]
+struct BestState {
+    score: SearchScore,
+    value: IrFn,
+}
+
+/// Shared best-so-far PIR function using structured feasibility-first scoring.
+pub struct Best {
+    inner: Mutex<BestState>,
+}
+
+impl Best {
+    pub fn new(initial_score: SearchScore, value: IrFn) -> Self {
+        Self {
+            inner: Mutex::new(BestState {
+                score: initial_score,
+                value,
+            }),
+        }
+    }
+
+    pub fn try_update(&self, new_score: SearchScore, new_value: IrFn) -> bool {
+        let mut guard = self.inner.lock().unwrap();
+        if new_score < guard.score {
+            *guard = BestState {
+                score: new_score,
+                value: new_value,
+            };
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn get(&self) -> IrFn {
+        self.inner.lock().unwrap().value.clone()
+    }
+
+    pub fn score(&self) -> SearchScore {
+        self.inner.lock().unwrap().score
+    }
 }
 
 /// Calculates the cost of a PIR function.
@@ -360,6 +462,106 @@ impl Objective {
     }
 }
 
+pub(crate) fn validate_constraint_configuration(
+    objective: Objective,
+    limits: ConstraintLimits,
+) -> Result<()> {
+    if limits.max_delay.is_some() && limits.max_area.is_some() {
+        return Err(anyhow::anyhow!(
+            "at most one of --max-delay and --max-area may be specified"
+        ));
+    }
+    if !objective.uses_g8r_costing() && (limits.max_delay.is_some() || limits.max_area.is_some()) {
+        return Err(anyhow::anyhow!(
+            "area/delay caps require a g8r-based objective; got {}",
+            objective.value_name()
+        ));
+    }
+    if objective.enforces_non_regressing_depth() && limits.max_area.is_some() {
+        return Err(anyhow::anyhow!(
+            "--max-area is not compatible with objective {} because it already enforces a non-regressing depth cap",
+            objective.value_name()
+        ));
+    }
+    Ok(())
+}
+
+/// Computes the active constraint violation details for the given cost.
+pub fn constraint_violation(
+    c: &Cost,
+    limits: ConstraintLimits,
+) -> Option<ConstraintViolationScore> {
+    let delay_over = limits
+        .max_delay
+        .map(|max_delay| c.g8r_depth.saturating_sub(max_delay))
+        .filter(|over| *over > 0);
+    let area_over = limits
+        .max_area
+        .map(|max_area| c.g8r_nodes.saturating_sub(max_area))
+        .filter(|over| *over > 0);
+
+    if delay_over.is_none() && area_over.is_none() {
+        return None;
+    }
+
+    Some(ConstraintViolationScore {
+        delay_over,
+        area_over,
+    })
+}
+
+/// Computes the ordered search score for best-state tracking and multichain
+/// synchronization under optional area/delay caps.
+pub fn search_score(c: &Cost, objective: Objective, limits: ConstraintLimits) -> SearchScore {
+    SearchScore {
+        objective: objective.metric(c),
+        violation: constraint_violation(c, limits),
+    }
+}
+
+pub(crate) fn effective_constraint_limits(
+    objective: Objective,
+    user_limits: ConstraintLimits,
+    initial_cost: &Cost,
+) -> ConstraintLimits {
+    let limits = ConstraintLimits {
+        max_delay: match (
+            user_limits.max_delay,
+            objective.enforces_non_regressing_depth(),
+        ) {
+            (Some(user_cap), true) => Some(user_cap.min(initial_cost.g8r_depth)),
+            (Some(user_cap), false) => Some(user_cap),
+            (None, true) => Some(initial_cost.g8r_depth),
+            (None, false) => None,
+        },
+        max_area: user_limits.max_area,
+    };
+    debug_assert!(
+        limits.max_delay.is_none() || limits.max_area.is_none(),
+        "effective constraints must keep at most one active cap"
+    );
+    limits
+}
+
+fn repair_energy(v: ConstraintViolationScore) -> u128 {
+    match (v.delay_over, v.area_over) {
+        (Some(over), None) => over as u128,
+        (None, Some(over)) => over as u128,
+        (Some(_), Some(_)) => unreachable!("constraint configuration validation rejects dual caps"),
+        (None, None) => 0,
+    }
+}
+
+pub(crate) fn format_search_score(score: SearchScore) -> String {
+    match score.violation {
+        None => format!("feasible(obj={})", score.objective),
+        Some(v) => format!(
+            "infeasible(obj={}, delay_over={:?}, area_over={:?})",
+            score.objective, v.delay_over, v.area_over,
+        ),
+    }
+}
+
 /// Computes the g8r node count for the given PIR function by:
 ///   1) Wrapping it in a one-function IR package.
 ///   2) Running the XLS optimizer.
@@ -607,7 +809,6 @@ pub fn lower_toggle_stimulus_for_fn(samples: &[IrValue], f: &IrFn) -> Result<Vec
 /// Type aliases specializing the generic MCMC helpers from `xlsynth-mcmc` to
 /// the PIR world.
 pub type McmcStats = SharedMcmcStats<PirTransformKind>;
-pub type Best = SharedBest<IrFn>;
 pub type IterationOutcomeDetails = xlsynth_mcmc::IterationOutcomeDetails<PirTransformKind>;
 pub type McmcIterationOutput = SharedMcmcIterationOutput<IrFn, Cost, PirTransformKind>;
 pub type McmcOptions = SharedMcmcOptions;
@@ -641,6 +842,10 @@ pub struct RunOptions {
     pub initial_temperature: f64,
     /// Objective to optimize.
     pub objective: Objective,
+    /// Optional hard cap on gate depth (`g8r_depth`) for g8r-based objectives.
+    pub max_allowed_depth: Option<usize>,
+    /// Optional hard cap on gate count (`g8r_nodes`) for g8r-based objectives.
+    pub max_allowed_area: Option<usize>,
     /// Parameters used to convert per-node fanout to load weighting when
     /// computing weighted-switching objectives.
     pub weighted_switching_options: count_toggles::WeightedSwitchingOptions,
@@ -750,14 +955,13 @@ struct PirSegmentRunner {
     objective: Objective,
     weighted_switching_options: count_toggles::WeightedSwitchingOptions,
     initial_temperature: f64,
-    max_allowed_depth: Option<usize>,
+    constraints: ConstraintLimits,
     enable_formal_oracle: bool,
     progress_iters: u64,
     checkpoint_iters: u64,
     checkpoint_tx: Option<Sender<CheckpointMsg>>,
     accepted_sample_tx: Option<Sender<AcceptedSampleMsg>>,
-    shared_best: Option<Arc<SharedBest<IrFn>>>,
-    baseline_metric: u128,
+    shared_best: Option<Arc<Best>>,
     trajectory_dir: Option<PathBuf>,
     prepared_toggle_stimulus: Option<Arc<Vec<Vec<IrBits>>>>,
 }
@@ -769,12 +973,13 @@ pub fn mcmc_iteration(
     current_cost: Cost,
     best_fn: &mut IrFn,   // Mutated if new best is found
     best_cost: &mut Cost, // Mutated if new best is found
+    best_score: &mut SearchScore,
     context: &mut PirMcmcContext,
     temp: f64,
     objective: Objective,
     toggle_stimulus: Option<&[Vec<IrBits>]>,
     weighted_switching_options: &count_toggles::WeightedSwitchingOptions,
-    max_allowed_depth: Option<usize>,
+    constraints: ConstraintLimits,
 ) -> McmcIterationOutput {
     let mut iteration_best_updated = false;
 
@@ -925,46 +1130,44 @@ pub fn mcmc_iteration(
                     }
                 };
 
-                if let Some(max_depth) = max_allowed_depth
-                    && new_candidate_cost.g8r_depth > max_depth
-                {
-                    return McmcIterationOutput {
-                        output_state: current_fn,
-                        output_cost: current_cost,
-                        best_updated: false,
-                        outcome: IterationOutcomeDetails::MetropolisReject,
-                        oracle_time_micros,
-                        transform_always_equivalent: chosen_transform.always_equivalent(),
-                        transform: Some(current_transform_kind),
-                    };
-                }
-
+                let current_score = search_score(&current_cost, objective, constraints);
+                let new_score = search_score(&new_candidate_cost, objective, constraints);
                 let curr_metric_u128 = objective.metric(&current_cost);
                 let new_metric_u128 = objective.metric(&new_candidate_cost);
-                let accept = if new_metric_u128 == curr_metric_u128
-                    && new_candidate_cost.pir_nodes > current_cost.pir_nodes
-                {
-                    // Equal objective metric but PIR nodes grew: only accept if
-                    // the temperature still allows it.
-                    metropolis_accept(
-                        current_cost.pir_nodes as f64,
-                        new_candidate_cost.pir_nodes as f64,
+                let accept = match (current_score.violation, new_score.violation) {
+                    (Some(_), None) => true,
+                    (None, Some(_)) => false,
+                    (Some(curr_violation), Some(new_violation)) => metropolis_accept(
+                        repair_energy(curr_violation) as f64,
+                        repair_energy(new_violation) as f64,
                         temp,
                         context.rng,
-                    )
-                } else {
-                    metropolis_accept(
-                        curr_metric_u128 as f64,
-                        new_metric_u128 as f64,
-                        temp,
-                        context.rng,
-                    )
+                    ),
+                    (None, None) => {
+                        if new_metric_u128 == curr_metric_u128
+                            && new_candidate_cost.pir_nodes > current_cost.pir_nodes
+                        {
+                            // Equal objective metric but PIR nodes grew: only accept if
+                            // the temperature still allows it.
+                            metropolis_accept(
+                                current_cost.pir_nodes as f64,
+                                new_candidate_cost.pir_nodes as f64,
+                                temp,
+                                context.rng,
+                            )
+                        } else {
+                            metropolis_accept(
+                                curr_metric_u128 as f64,
+                                new_metric_u128 as f64,
+                                temp,
+                                context.rng,
+                            )
+                        }
+                    }
                 };
 
                 if accept {
-                    let best_metric_u128 = objective.metric(best_cost);
-                    let new_metric_u128 = objective.metric(&new_candidate_cost);
-                    if new_metric_u128 < best_metric_u128 {
+                    if new_score < *best_score {
                         // When storing a new global best, prefer the optimized IR form so
                         // artifacts (and subsequent segments via shared best) are based on
                         // the canonical optimized representation, not the raw exploration
@@ -981,6 +1184,7 @@ pub fn mcmc_iteration(
                             }
                         };
                         *best_cost = new_candidate_cost;
+                        *best_score = new_score;
                         iteration_best_updated = true;
                     }
                     McmcIterationOutput {
@@ -1260,6 +1464,7 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
         })?;
         let mut best_fn = start_state;
         let mut best_cost = current_cost;
+        let mut best_score = search_score(&best_cost, self.objective, self.constraints);
         let mut stats = McmcStats::default();
 
         let seg_start_time = Instant::now();
@@ -1287,12 +1492,13 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
                 current_cost,
                 &mut best_fn,
                 &mut best_cost,
+                &mut best_score,
                 &mut context,
                 temp,
                 self.objective,
                 toggle_stimulus,
                 &self.weighted_switching_options,
-                self.max_allowed_depth,
+                self.constraints,
             );
 
             let mut accepted_digest: Option<[u8; 32]> = None;
@@ -1355,6 +1561,12 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
 
             if let Some(w) = trajectory_writer.as_mut() {
                 let metric_u128 = self.objective.metric(&iteration_output.output_cost);
+                let iter_score = search_score(
+                    &iteration_output.output_cost,
+                    self.objective,
+                    self.constraints,
+                );
+                let iter_violation = iter_score.violation;
                 let rec = json!({
                     "chain_no": params.chain_no,
                     "role": format!("{:?}", params.role),
@@ -1370,6 +1582,9 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
                     "g8r_le_graph_milli": iteration_output.output_cost.g8r_le_graph_milli,
                     "g8r_gate_output_toggles": iteration_output.output_cost.g8r_gate_output_toggles,
                     "g8r_weighted_switching_milli": iteration_output.output_cost.g8r_weighted_switching_milli,
+                    "feasible": iter_score.feasible(),
+                    "delay_over": iter_violation.and_then(|v| v.delay_over),
+                    "area_over": iter_violation.and_then(|v| v.area_over),
                     "oracle_time_micros": iteration_output.oracle_time_micros,
                     "transform": iteration_output.transform.map(|k| format!("{:?}", k)),
                     "transform_always_equivalent": iteration_output.transform_always_equivalent,
@@ -1390,24 +1605,16 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
 
             if iteration_output.best_updated {
                 if let Some(ref shared_best) = self.shared_best {
-                    let before = shared_best.cost.load(Ordering::SeqCst);
-                    let metric_u128 = self.objective.metric(&best_cost);
-                    let _ = shared_best.try_update(metric_u128, best_fn.clone());
-                    let after = shared_best.cost.load(Ordering::SeqCst);
+                    let before = shared_best.score();
+                    let _ = shared_best.try_update(best_score, best_fn.clone());
+                    let after = shared_best.score();
                     if after < before {
-                        let improvement_pct = if self.baseline_metric > 0 {
-                            (self.baseline_metric.saturating_sub(after) as f64) * 100.0
-                                / (self.baseline_metric as f64)
-                        } else {
-                            0.0
-                        };
                         log::info!(
-                            "[pir-mcmc] GLOBAL BEST UPDATE c{:03}:i{:06} | metric {} -> {} | improvement={:+.2}%",
+                            "[pir-mcmc] GLOBAL BEST UPDATE c{:03}:i{:06} | {} -> {}",
                             params.chain_no,
                             global_iter,
-                            before,
-                            after,
-                            improvement_pct,
+                            format_search_score(before),
+                            format_search_score(after),
                         );
                         // Best-effort: if a checkpoint writer is active, trigger an
                         // immediate update so the monotone global best is visible on disk.
@@ -1447,21 +1654,25 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
                     0.0
                 };
                 log::info!(
-                    "PIR MCMC c{:03}:i{:06} | GBestM={} | LBest (pir={}, g8r_n={}, g8r_d={}, m={}) | Cur (pir={}, g8r_n={}, g8r_d={}, m={}) | Temp={:.2e} | Samples/s={:.2}",
+                    "PIR MCMC c{:03}:i{:06} | GBest={} | LBest (pir={}, g8r_n={}, g8r_d={}, score={}) | Cur (pir={}, g8r_n={}, g8r_d={}, score={}) | Temp={:.2e} | Samples/s={:.2}",
                     params.chain_no,
                     global_iter,
                     self.shared_best
                         .as_ref()
-                        .map(|b| b.cost.load(Ordering::SeqCst))
-                        .unwrap_or(u128::MAX),
+                        .map(|b| format_search_score(b.score()))
+                        .unwrap_or_else(|| "none".to_string()),
                     best_cost.pir_nodes,
                     best_cost.g8r_nodes,
                     best_cost.g8r_depth,
-                    self.objective.metric(&best_cost),
+                    format_search_score(best_score),
                     current_cost.pir_nodes,
                     current_cost.g8r_nodes,
                     current_cost.g8r_depth,
-                    self.objective.metric(&current_cost),
+                    format_search_score(search_score(
+                        &current_cost,
+                        self.objective,
+                        self.constraints
+                    )),
                     temp,
                     samples_per_sec,
                 );
@@ -1492,7 +1703,7 @@ pub fn run_pir_mcmc(start_fn: IrFn, options: RunOptions) -> Result<PirMcmcResult
 pub fn run_pir_mcmc_with_shared_best(
     start_fn: IrFn,
     options: RunOptions,
-    shared_best: Option<Arc<SharedBest<IrFn>>>,
+    shared_best: Option<Arc<Best>>,
     checkpoint_tx: Option<Sender<CheckpointMsg>>,
     accepted_sample_tx: Option<Sender<AcceptedSampleMsg>>,
 ) -> Result<PirMcmcResult> {
@@ -1502,6 +1713,13 @@ pub fn run_pir_mcmc_with_shared_best(
             options.objective.value_name()
         ));
     }
+    validate_constraint_configuration(
+        options.objective,
+        ConstraintLimits {
+            max_delay: options.max_allowed_depth,
+            max_area: options.max_allowed_area,
+        },
+    )?;
 
     let prepared_toggle_stimulus = if options.objective.needs_toggle_stimulus() {
         let samples = options.toggle_stimulus.as_ref().ok_or_else(|| {
@@ -1521,29 +1739,32 @@ pub fn run_pir_mcmc_with_shared_best(
         prepared_toggle_stimulus.as_ref().map(|v| v.as_slice()),
         &options.weighted_switching_options,
     )?;
-    let baseline_metric = options.objective.metric(&initial_cost);
+    let effective_constraints = effective_constraint_limits(
+        options.objective,
+        ConstraintLimits {
+            max_delay: options.max_allowed_depth,
+            max_area: options.max_allowed_area,
+        },
+        &initial_cost,
+    );
     let runner = PirSegmentRunner {
         objective: options.objective,
         weighted_switching_options: options.weighted_switching_options,
         initial_temperature: options.initial_temperature,
-        max_allowed_depth: if options.objective.enforces_non_regressing_depth() {
-            Some(initial_cost.g8r_depth)
-        } else {
-            None
-        },
+        constraints: effective_constraints,
         enable_formal_oracle: options.enable_formal_oracle,
         progress_iters: options.progress_iters,
         checkpoint_iters: options.checkpoint_iters,
         checkpoint_tx,
         accepted_sample_tx,
         shared_best,
-        baseline_metric,
         trajectory_dir: options.trajectory_dir.clone(),
         prepared_toggle_stimulus,
     };
 
     let objective = options.objective;
     let threshold = options.initial_temperature as u128;
+    let constraints = effective_constraints;
 
     let (best_fn, best_cost, stats) = run_multichain(
         start_fn,
@@ -1553,11 +1774,23 @@ pub fn run_pir_mcmc_with_shared_best(
         options.chain_strategy,
         options.checkpoint_iters,
         Arc::new(runner),
-        move |c: &Cost| objective.metric(c),
+        move |c: &Cost| search_score(c, objective, constraints),
         |f: &IrFn| f.to_string(),
         move |cur_cost: &Cost, global_best_cost: &Cost| {
-            objective.metric(cur_cost)
-                > objective.metric(global_best_cost).saturating_add(threshold)
+            let cur_score = search_score(cur_cost, objective, constraints);
+            let global_best_score = search_score(global_best_cost, objective, constraints);
+            match (cur_score.violation, global_best_score.violation) {
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (Some(cur_violation), Some(best_violation)) => {
+                    repair_energy(cur_violation)
+                        > repair_energy(best_violation).saturating_add(threshold)
+                }
+                (None, None) => {
+                    objective.metric(cur_cost)
+                        > objective.metric(global_best_cost).saturating_add(threshold)
+                }
+            }
         },
     )?;
 
@@ -1593,6 +1826,8 @@ mod tests {
             seed: 1,
             initial_temperature: 5.0,
             objective: Objective::Nodes,
+            max_allowed_depth: None,
+            max_allowed_area: None,
             weighted_switching_options: WeightedSwitchingOptions::default(),
             enable_formal_oracle: false,
             trajectory_dir: None,
@@ -1771,6 +2006,80 @@ mod tests {
     }
 
     #[test]
+    fn search_score_prefers_feasible_then_lower_violation_then_objective() {
+        let feasible = search_score(
+            &Cost {
+                pir_nodes: 0,
+                g8r_nodes: 10,
+                g8r_depth: 10,
+                g8r_le_graph_milli: 0,
+                g8r_gate_output_toggles: 0,
+                g8r_weighted_switching_milli: 0,
+            },
+            Objective::G8rNodes,
+            ConstraintLimits {
+                max_delay: Some(12),
+                max_area: None,
+            },
+        );
+        let mildly_infeasible = search_score(
+            &Cost {
+                pir_nodes: 0,
+                g8r_nodes: 10,
+                g8r_depth: 13,
+                g8r_le_graph_milli: 0,
+                g8r_gate_output_toggles: 0,
+                g8r_weighted_switching_milli: 0,
+            },
+            Objective::G8rNodes,
+            ConstraintLimits {
+                max_delay: Some(12),
+                max_area: None,
+            },
+        );
+        let badly_infeasible = search_score(
+            &Cost {
+                pir_nodes: 0,
+                g8r_depth: 16,
+                g8r_nodes: 10,
+                g8r_le_graph_milli: 0,
+                g8r_gate_output_toggles: 0,
+                g8r_weighted_switching_milli: 0,
+            },
+            Objective::G8rNodes,
+            ConstraintLimits {
+                max_delay: Some(12),
+                max_area: None,
+            },
+        );
+
+        assert!(feasible < mildly_infeasible);
+        assert!(mildly_infeasible < badly_infeasible);
+    }
+
+    #[test]
+    fn effective_constraint_limits_respects_non_regressing_depth() {
+        let initial = Cost {
+            pir_nodes: 0,
+            g8r_nodes: 10,
+            g8r_depth: 17,
+            g8r_le_graph_milli: 0,
+            g8r_gate_output_toggles: 0,
+            g8r_weighted_switching_milli: 0,
+        };
+        let got = effective_constraint_limits(
+            Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress,
+            ConstraintLimits {
+                max_delay: Some(20),
+                max_area: None,
+            },
+            &initial,
+        );
+        assert_eq!(got.max_delay, Some(17));
+        assert_eq!(got.max_area, None);
+    }
+
+    #[test]
     fn parse_irvals_tuple_lines_accepts_valid_tuples() {
         let text = "(bits[1]:0, bits[1]:1)\n(bits[1]:1, bits[1]:1)\n";
         let got = parse_irvals_tuple_lines(text).unwrap();
@@ -1832,6 +2141,8 @@ mod tests {
             seed: 1,
             initial_temperature: 1.0,
             objective: Objective::G8rNodesTimesDepthTimesToggles,
+            max_allowed_depth: None,
+            max_allowed_area: None,
             weighted_switching_options: WeightedSwitchingOptions::default(),
             enable_formal_oracle: false,
             trajectory_dir: None,
@@ -1848,6 +2159,8 @@ mod tests {
             seed: 1,
             initial_temperature: 1.0,
             objective: Objective::Nodes,
+            max_allowed_depth: None,
+            max_allowed_area: None,
             weighted_switching_options: WeightedSwitchingOptions::default(),
             enable_formal_oracle: false,
             trajectory_dir: None,
@@ -1857,6 +2170,93 @@ mod tests {
             ]),
         };
         assert!(run_pir_mcmc(f, opts_wrong_objective).is_err());
+    }
+
+    #[test]
+    fn run_pir_mcmc_rejects_caps_with_nodes_objective() {
+        let mut parser = ir_parser::Parser::new(
+            r#"fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret and.3: bits[1] = and(a, b, id=3)
+}"#,
+        );
+        let f = parser.parse_fn().unwrap();
+
+        let opts = RunOptions {
+            max_iters: 1,
+            threads: 1,
+            chain_strategy: ChainStrategy::Independent,
+            checkpoint_iters: 1,
+            progress_iters: 0,
+            seed: 1,
+            initial_temperature: 1.0,
+            objective: Objective::Nodes,
+            max_allowed_depth: Some(10),
+            max_allowed_area: None,
+            weighted_switching_options: WeightedSwitchingOptions::default(),
+            enable_formal_oracle: false,
+            trajectory_dir: None,
+            toggle_stimulus: None,
+        };
+        assert!(run_pir_mcmc(f, opts).is_err());
+    }
+
+    #[test]
+    fn run_pir_mcmc_rejects_dual_caps() {
+        let mut parser = ir_parser::Parser::new(
+            r#"fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret and.3: bits[1] = and(a, b, id=3)
+}"#,
+        );
+        let f = parser.parse_fn().unwrap();
+
+        let opts = RunOptions {
+            max_iters: 1,
+            threads: 1,
+            chain_strategy: ChainStrategy::Independent,
+            checkpoint_iters: 1,
+            progress_iters: 0,
+            seed: 1,
+            initial_temperature: 1.0,
+            objective: Objective::G8rNodes,
+            max_allowed_depth: Some(10),
+            max_allowed_area: Some(10),
+            weighted_switching_options: WeightedSwitchingOptions::default(),
+            enable_formal_oracle: false,
+            trajectory_dir: None,
+            toggle_stimulus: None,
+        };
+        assert!(run_pir_mcmc(f, opts).is_err());
+    }
+
+    #[test]
+    fn run_pir_mcmc_rejects_area_cap_with_non_regressing_depth_objective() {
+        let mut parser = ir_parser::Parser::new(
+            r#"fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret and.3: bits[1] = and(a, b, id=3)
+}"#,
+        );
+        let f = parser.parse_fn().unwrap();
+
+        let opts = RunOptions {
+            max_iters: 1,
+            threads: 1,
+            chain_strategy: ChainStrategy::Independent,
+            checkpoint_iters: 1,
+            progress_iters: 0,
+            seed: 1,
+            initial_temperature: 1.0,
+            objective: Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress,
+            max_allowed_depth: None,
+            max_allowed_area: Some(10),
+            weighted_switching_options: WeightedSwitchingOptions::default(),
+            enable_formal_oracle: false,
+            trajectory_dir: None,
+            toggle_stimulus: Some(vec![
+                IrValue::parse_typed("(bits[1]:0, bits[1]:0)").unwrap(),
+                IrValue::parse_typed("(bits[1]:1, bits[1]:1)").unwrap(),
+            ]),
+        };
+        assert!(run_pir_mcmc(f, opts).is_err());
     }
 
     #[test]

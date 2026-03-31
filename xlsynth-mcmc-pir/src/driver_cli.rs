@@ -18,16 +18,16 @@ use xlsynth_g8r::aig::get_summary_stats::SummaryStats;
 use xlsynth_g8r::gatify::ir2gate;
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
-use xlsynth_mcmc::Best;
 use xlsynth_mcmc::multichain::ChainStrategy;
 use xlsynth_pir::ir::{Package, PackageMember};
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_utils::compact_and_toposort_in_place;
 
 use crate::{
-    CheckpointKind, CheckpointMsg, Objective, RunOptions,
-    cost_with_effort_options_and_toggle_stimulus, lower_toggle_stimulus_for_fn,
-    parse_irvals_tuple_file, run_pir_mcmc_with_shared_best,
+    Best, CheckpointKind, CheckpointMsg, ConstraintLimits, Objective, RunOptions,
+    cost_with_effort_options_and_toggle_stimulus, effective_constraint_limits, format_search_score,
+    lower_toggle_stimulus_for_fn, parse_irvals_tuple_file, run_pir_mcmc_with_shared_best,
+    search_score, validate_constraint_configuration,
 };
 
 #[derive(ValueEnum, Debug, Clone, Copy)]
@@ -52,6 +52,8 @@ pub struct PirMcmcCliArgs {
     pub seed: u64,
     pub output: Option<String>,
     pub metric: Objective,
+    pub max_delay: Option<usize>,
+    pub max_area: Option<usize>,
     pub toggle_stimulus: Option<String>,
     pub initial_temperature: f64,
     pub threads: u64,
@@ -111,6 +113,22 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 .help("Metric to optimize.")
                 .value_parser(clap::builder::EnumValueParser::<Objective>::new())
                 .default_value("nodes")
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("max_delay")
+                .long("max-delay")
+                .value_name("LEVELS")
+                .help("Optional hard cap on g8r depth for g8r-based objectives.")
+                .value_parser(clap::value_parser!(usize))
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("max_area")
+                .long("max-area")
+                .value_name("GATES")
+                .help("Optional hard cap on g8r live-node count for g8r-based objectives.")
+                .value_parser(clap::value_parser!(usize))
                 .action(ArgAction::Set),
         )
         .arg(
@@ -213,6 +231,8 @@ pub fn parse_pir_mcmc_args(matches: &ArgMatches) -> PirMcmcCliArgs {
         seed: *matches.get_one::<u64>("seed").unwrap(),
         output: matches.get_one::<String>("output").cloned(),
         metric: *matches.get_one::<Objective>("metric").unwrap(),
+        max_delay: matches.get_one::<usize>("max_delay").copied(),
+        max_area: matches.get_one::<usize>("max_area").copied(),
         toggle_stimulus: matches.get_one::<String>("toggle_stimulus").cloned(),
         initial_temperature: *matches.get_one::<f64>("initial_temperature").unwrap(),
         threads: matches
@@ -323,6 +343,13 @@ where
             cli.metric.value_name()
         ));
     }
+    validate_constraint_configuration(
+        cli.metric,
+        ConstraintLimits {
+            max_delay: cli.max_delay,
+            max_area: cli.max_area,
+        },
+    )?;
     let prepared_toggle_stimulus = toggle_stimulus_values
         .as_ref()
         .map(|samples| lower_toggle_stimulus_for_fn(samples, &top_fn))
@@ -340,26 +367,40 @@ where
         prepared_toggle_stimulus.as_deref(),
         &weighted_switching_options,
     )?;
+    let effective_constraints = effective_constraint_limits(
+        cli.metric,
+        ConstraintLimits {
+            max_delay: cli.max_delay,
+            max_area: cli.max_area,
+        },
+        &initial_cost,
+    );
+    let initial_score = search_score(&initial_cost, cli.metric, effective_constraints);
     if cli.metric.needs_weighted_switching() {
         report(format!(
-            "Successfully loaded top function. Initial stats: pir_nodes={}, g8r_nodes={}, g8r_depth={}, g8r_weighted_switching_milli={}",
+            "Successfully loaded top function. Initial stats: pir_nodes={}, g8r_nodes={}, g8r_depth={}, g8r_weighted_switching_milli={}, score={}",
             initial_cost.pir_nodes,
             initial_cost.g8r_nodes,
             initial_cost.g8r_depth,
-            initial_cost.g8r_weighted_switching_milli
+            initial_cost.g8r_weighted_switching_milli,
+            format_search_score(initial_score),
         ));
     } else if cli.metric.needs_toggle_stimulus() {
         report(format!(
-            "Successfully loaded top function. Initial stats: pir_nodes={}, g8r_nodes={}, g8r_depth={}, g8r_gate_output_toggles={}",
+            "Successfully loaded top function. Initial stats: pir_nodes={}, g8r_nodes={}, g8r_depth={}, g8r_gate_output_toggles={}, score={}",
             initial_cost.pir_nodes,
             initial_cost.g8r_nodes,
             initial_cost.g8r_depth,
-            initial_cost.g8r_gate_output_toggles
+            initial_cost.g8r_gate_output_toggles,
+            format_search_score(initial_score),
         ));
     } else {
         report(format!(
-            "Successfully loaded top function. Initial stats: pir_nodes={}, g8r_nodes={}, g8r_depth={}",
-            initial_cost.pir_nodes, initial_cost.g8r_nodes, initial_cost.g8r_depth
+            "Successfully loaded top function. Initial stats: pir_nodes={}, g8r_nodes={}, g8r_depth={}, score={}",
+            initial_cost.pir_nodes,
+            initial_cost.g8r_nodes,
+            initial_cost.g8r_depth,
+            format_search_score(initial_score),
         ));
     }
 
@@ -396,6 +437,8 @@ where
         seed: cli.seed,
         initial_temperature: cli.initial_temperature,
         objective: cli.metric,
+        max_allowed_depth: cli.max_delay,
+        max_allowed_area: cli.max_area,
         weighted_switching_options,
         enable_formal_oracle: cli.formal_oracle,
         trajectory_dir: Some(output_dir.clone()),
@@ -412,8 +455,7 @@ where
     };
 
     let shared_best = if cli.checkpoint_iters > 0 {
-        let metric_u128 = cli.metric.metric(&initial_cost);
-        Some(Arc::new(Best::new(metric_u128, top_fn.clone())))
+        Some(Arc::new(Best::new(initial_score, top_fn.clone())))
     } else {
         None
     };
@@ -448,7 +490,7 @@ where
         Some(std::thread::spawn(move || {
             // Track last written metric to reduce redundant writes when multiple
             // chains hit the same checkpoint boundary.
-            let mut last_written: Option<u128> = None;
+            let mut last_written: Option<crate::SearchScore> = None;
             // Monotonic snapshot write index (per run) so filenames sort by
             // checkpoint write order across chains.
             let mut write_index: u64 = 0;
@@ -460,11 +502,11 @@ where
                 if msg.kind == CheckpointKind::GlobalBestUpdate {
                     last_best_update_msg = Some(msg);
                 }
-                let cur_metric = best.cost.load(std::sync::atomic::Ordering::SeqCst);
-                if last_written == Some(cur_metric) {
+                let cur_score = best.score();
+                if last_written == Some(cur_score) {
                     continue;
                 }
-                last_written = Some(cur_metric);
+                last_written = Some(cur_score);
 
                 let best_fn = best.get();
                 let mut pkg = (*pkg_template).clone();
@@ -608,6 +650,14 @@ where
         }
     }
 
+    let final_score = search_score(&result.best_cost, cli.metric, effective_constraints);
+    if !final_score.feasible() {
+        report(format!(
+            "No feasible solution found; best result remains infeasible: {}",
+            format_search_score(final_score),
+        ));
+    }
+
     // Replace the top function in the package with the optimized version.
     {
         let top_name = result.best_fn.name.clone();
@@ -653,4 +703,55 @@ where
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", best_stats_path.display(), e))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CliChainStrategy, Objective, PirMcmcCliArgs, run_pir_mcmc_driver};
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn reports_when_best_result_remains_infeasible() {
+        let input_dir = tempdir().unwrap();
+        let output_dir = tempdir().unwrap();
+        let input_path = input_dir.path().join("sample.ir");
+        fs::write(
+            &input_path,
+            r#"package sample
+
+top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret and.3: bits[1] = and(a, b, id=3)
+}
+"#,
+        )
+        .unwrap();
+
+        let cli = PirMcmcCliArgs {
+            input_path: input_path.display().to_string(),
+            iters: 1,
+            seed: 1,
+            output: Some(output_dir.path().display().to_string()),
+            metric: Objective::G8rNodes,
+            max_delay: Some(0),
+            max_area: None,
+            toggle_stimulus: None,
+            initial_temperature: 1.0,
+            threads: 1,
+            checkpoint_iters: 0,
+            progress_iters: 0,
+            formal_oracle: false,
+            switching_beta1: 1.0,
+            switching_beta2: 0.0,
+            switching_primary_output_load: 1.0,
+            chain_strategy: CliChainStrategy::Independent,
+        };
+
+        let mut messages = Vec::new();
+        run_pir_mcmc_driver(cli, |msg| messages.push(msg)).unwrap();
+
+        assert!(messages.iter().any(|msg| {
+            msg.contains("No feasible solution found; best result remains infeasible:")
+        }));
+    }
 }

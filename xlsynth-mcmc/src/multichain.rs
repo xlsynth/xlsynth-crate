@@ -55,14 +55,17 @@ pub trait SegmentRunner<S, C, K>: Send + Sync {
     ) -> Result<SegmentOutcome<S, C, K>, Self::Error>;
 }
 
-fn choose_better<S, C>(
-    objective_metric: impl Fn(&C) -> u128,
+fn choose_better<S, C, M>(
+    selection_key: impl Fn(&C) -> M,
     tiebreak_key: impl Fn(&S) -> String,
     a: (&S, &C),
     b: (&S, &C),
-) -> bool {
-    let a_m = objective_metric(a.1);
-    let b_m = objective_metric(b.1);
+) -> bool
+where
+    M: Ord,
+{
+    let a_m = selection_key(a.1);
+    let b_m = selection_key(b.1);
     if a_m != b_m {
         return a_m < b_m;
     }
@@ -74,7 +77,7 @@ fn choose_better<S, C>(
 /// Determinism: for a fixed `(seed, threads, strategy, checkpoint_iters)` and a
 /// deterministic `SegmentRunner`, the returned `(best_state, best_cost)` is
 /// deterministic.
-pub fn run_multichain<S, C, K, R>(
+pub fn run_multichain<S, C, K, R, M>(
     start_state: S,
     total_iters: u64,
     seed: u64,
@@ -82,7 +85,7 @@ pub fn run_multichain<S, C, K, R>(
     strategy: ChainStrategy,
     checkpoint_iters: u64,
     runner: Arc<R>,
-    objective_metric: impl Fn(&C) -> u128 + Copy + Send + Sync + 'static,
+    selection_key: impl Fn(&C) -> M + Copy + Send + Sync + 'static,
     tiebreak_key: impl Fn(&S) -> String + Copy + Send + Sync + 'static,
     should_jump_to_best: impl Fn(&C, &C) -> bool + Copy + Send + Sync + 'static,
 ) -> Result<(S, C, McmcStats<K>), R::Error>
@@ -91,6 +94,7 @@ where
     C: Send + Copy + 'static,
     K: Send + 'static + std::hash::Hash + Eq,
     R: SegmentRunner<S, C, K> + 'static,
+    M: Ord + Send + 'static,
 {
     let thread_count = threads.max(1);
     let seg_size = checkpoint_iters.max(1);
@@ -129,7 +133,7 @@ where
             let mut best_idx = 0usize;
             for (i, o) in outs.iter().enumerate() {
                 if choose_better(
-                    objective_metric,
+                    selection_key,
                     tiebreak_key,
                     (&o.1.best_state, &o.1.best_cost),
                     (&outs[best_idx].1.best_state, &outs[best_idx].1.best_cost),
@@ -151,7 +155,7 @@ where
                     ChainStrategy::Independent,
                     checkpoint_iters,
                     runner,
-                    objective_metric,
+                    selection_key,
                     tiebreak_key,
                     should_jump_to_best,
                 );
@@ -219,7 +223,7 @@ where
                         }
                         Some(cur_cost) => {
                             if choose_better(
-                                objective_metric,
+                                selection_key,
                                 tiebreak_key,
                                 (&o.best_state, &o.best_cost),
                                 (&local_best_state[chain_no], &cur_cost),
@@ -241,7 +245,7 @@ where
                         }
                         (Some(gs), Some(gc)) => {
                             if choose_better(
-                                objective_metric,
+                                selection_key,
                                 tiebreak_key,
                                 (&local_best_state[chain_no], &c),
                                 (gs, &gc),
@@ -278,7 +282,7 @@ where
             for chain_no in 0..thread_count {
                 let c = local_best_cost[chain_no].expect("best cost must be set");
                 if choose_better(
-                    objective_metric,
+                    selection_key,
                     tiebreak_key,
                     (&local_best_state[chain_no], &c),
                     (
