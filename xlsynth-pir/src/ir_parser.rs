@@ -1443,6 +1443,11 @@ impl Parser {
             if self.peek_is(")") {
                 break;
             }
+            if self.peek_is("pos=") {
+                // `pos=` is generic trailing node metadata handled by `parse_node()`
+                // after the operator-specific parser returns.
+                break;
+            }
 
             if self.peek_is("id=") {
                 *maybe_id = Some(self.parse_id_attribute()?);

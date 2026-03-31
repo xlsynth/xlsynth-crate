@@ -12,6 +12,7 @@ use xlsynth_g8r::aig::table::{
     OpcodeAreaTableReport, UnattributedAreaTableRow,
 };
 use xlsynth_g8r::aig::GateFn;
+use xlsynth_g8r::aig_serdes::gate_parser::parse_gate_fn;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
 
@@ -48,20 +49,30 @@ fn truncate_for_table(value: &str, max_width: usize) -> String {
 }
 
 fn load_gate_fn(path: &Path, subcommand: &str) -> Result<GateFn, String> {
-    if !path.extension().map(|e| e == "g8rbin").unwrap_or(false) {
-        return Err(format!(
-            "{} requires a .g8rbin input because text .g8r files do not preserve PIR provenance",
-            subcommand
-        ));
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("g8rbin") => {
+            let bytes =
+                fs::read(path).map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+            bincode::deserialize(&bytes).map_err(|e| {
+                format!(
+                    "failed to deserialize GateFn from {}: {}",
+                    path.display(),
+                    e
+                )
+            })
+        }
+        Some("g8r") => {
+            let text = fs::read_to_string(path)
+                .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
+            parse_gate_fn(&text)
+                .map_err(|e| format!("failed to parse GateFn from {}: {}", path.display(), e))
+        }
+        _ => Err(format!(
+            "{} requires a .g8r or .g8rbin input, got {}",
+            subcommand,
+            path.display()
+        )),
     }
-    let bytes = fs::read(path).map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
-    bincode::deserialize(&bytes).map_err(|e| {
-        format!(
-            "failed to deserialize GateFn from {}: {}",
-            path.display(),
-            e
-        )
-    })
 }
 
 fn load_selected_ir_fn(path: &Path, top: Option<&str>) -> Result<ir::Fn, String> {
@@ -461,9 +472,13 @@ fn handle_g8r_attribution_table(
 
 #[cfg(test)]
 mod tests {
+    use tempfile::Builder;
     use xlsynth_g8r::aig::table::{AreaTableReport, AreaTableRow, UnattributedAreaTableRow};
+    use xlsynth_g8r::test_utils::setup_simple_graph;
 
-    use super::{render_pir_node_table, truncate_for_table, TableMetric};
+    use super::{
+        load_gate_fn, render_pir_node_table, truncate_for_table, TableMetric, AREA_SUBCOMMAND,
+    };
 
     #[test]
     fn test_render_table_right_justifies_integer_area_counts() {
@@ -594,5 +609,25 @@ Metrics:
         let got = truncate_for_table(&input, 150);
         assert_eq!(got.len(), 150);
         assert_eq!(got, format!("{}...", "x".repeat(147)));
+    }
+
+    #[test]
+    fn test_load_gate_fn_accepts_text_g8r_with_provenance() {
+        let mut g = setup_simple_graph().g;
+        for (idx, node) in g.gates.iter_mut().enumerate() {
+            node.try_add_pir_node_ids(&[u32::try_from(idx + 21).expect("fits in u32")]);
+        }
+        let text = g.to_string();
+
+        let file = Builder::new()
+            .suffix(".g8r")
+            .tempfile()
+            .expect("create temp g8r");
+        std::fs::write(file.path(), text).expect("write g8r text");
+
+        let loaded = load_gate_fn(file.path(), AREA_SUBCOMMAND).expect("load text g8r");
+        for (lhs, rhs) in g.gates.iter().zip(loaded.gates.iter()) {
+            assert_eq!(lhs.get_pir_node_ids(), rhs.get_pir_node_ids());
+        }
     }
 }

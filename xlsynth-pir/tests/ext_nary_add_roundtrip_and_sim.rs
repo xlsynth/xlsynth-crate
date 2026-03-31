@@ -26,6 +26,16 @@ fn get_ext_nary_add_terms(f: &Fn) -> Vec<ExtNaryAddTerm> {
         .expect("expected ext_nary_add node")
 }
 
+fn get_ext_nary_add_pos_len(f: &Fn) -> usize {
+    f.nodes
+        .iter()
+        .find_map(|n| match n.payload {
+            NodePayload::ExtNaryAdd { .. } => Some(n.pos.as_ref().map(|p| p.len()).unwrap_or(0)),
+            _ => None,
+        })
+        .expect("expected ext_nary_add node")
+}
+
 #[test]
 fn ext_nary_add_round_trips_via_text() {
     let ir = r#"package test
@@ -75,6 +85,41 @@ fn f(a: bits[3] id=1, b: bits[5] id=2, c: bits[9] id=3) -> bits[6] {
         .filter(|n| matches!(n.payload, NodePayload::ExtNaryAdd { .. }))
         .count();
     assert_eq!(ext_count2, 1);
+}
+
+#[test]
+fn ext_nary_add_with_pos_round_trips_via_text() {
+    let ir = r#"package test
+
+fn f(a: bits[3] id=1, b: bits[5] id=2, c: bits[9] id=3) -> bits[6] {
+  ret r: bits[6] = ext_nary_add(a, b, c, signed=[false, false, false], negated=[false, false, false], arch=kogge_stone, id=4, pos=[(2,3116,20), (3,363,48), (4,3,16)])
+}
+"#;
+
+    let pkg = {
+        let mut p = Parser::new(ir);
+        p.parse_and_validate_package().expect("parse/validate")
+    };
+    let f = pkg.get_fn("f").expect("fn f present");
+    assert_eq!(get_ext_nary_add_pos_len(f), 3);
+
+    let text = pkg.to_string();
+    assert!(
+        text.contains(
+            "ext_nary_add(a, b, c, signed=[false, false, false], negated=[false, false, false], arch=kogge_stone, id=4, pos=[(2,3116,20), (3,363,48), (4,3,16)])"
+        ),
+        "expected ext_nary_add with pos to appear in emitted text:\n{}",
+        text
+    );
+
+    let reparsed = {
+        let mut p = Parser::new(&text);
+        p.parse_and_validate_package().expect("re-parse/validate")
+    };
+    assert_eq!(
+        get_ext_nary_add_pos_len(reparsed.get_fn("f").expect("fn f present")),
+        3
+    );
 }
 
 #[test]

@@ -91,8 +91,11 @@ use eq_ne_add_literal_shift::EqNeAddLiteralShiftTransform;
 use eq_sel_distribute::EqSelDistributeTransform;
 use eq_zero_or_reduce::EqZeroOrReduceTransform;
 use ext_nary_add_rewrites::{
-    AddToExtNaryAddTransform, BinaryExtNaryAddToAddTransform, ChangeExtNaryAddToBrentKungTransform,
-    ChangeExtNaryAddToKoggeStoneTransform, ChangeExtNaryAddToRippleCarryTransform,
+    AbsorbAddOperandIntoExtNaryAddTransform, AbsorbExtendIntoExtNaryAddTermTransform,
+    AbsorbNegIntoExtNaryAddTermTransform, AddToExtNaryAddTransform, BinaryExtNaryAddToAddTransform,
+    ChangeExtNaryAddToBrentKungTransform, ChangeExtNaryAddToKoggeStoneTransform,
+    ChangeExtNaryAddToRippleCarryTransform, CombineNaryAddsTransform,
+    ExtractAddFromNaryAddTermsTransform, ExtractNegateFromExtNaryAddTermTransform,
 };
 use mask_operand_bit::{MaskOperandHighBitTransform, MaskOperandLowBitTransform};
 use nand_not_and_fold::NandNotAndFoldTransform;
@@ -182,6 +185,19 @@ pub enum PirTransformKind {
     ChangeExtNaryAddToKoggeStone,
     /// Replace a width-preserving 2-input `ext_nary_add` with `add(a, b)`.
     BinaryExtNaryAddToAdd,
+    /// Absorb a `zero_ext(x)` / `sign_ext(x)` operand into a term.
+    AbsorbExtendIntoExtNaryAddTerm,
+    /// Absorb an explicit `neg(x)` operand into a term's `negated` bit.
+    AbsorbNegIntoExtNaryAddTerm,
+    /// Absorb a term operand that is itself an `add(x, y)` into two terms.
+    AbsorbAddOperandIntoExtNaryAdd,
+    /// Extract a term's `negated` bit into an explicit `neg(x)` operand.
+    ExtractNegateFromExtNaryAddTerm,
+    /// Extract two adjacent `ext_nary_add` terms into a width-preserving inner
+    /// `add` after materializing their current term semantics.
+    ExtractAddFromNaryAddTerms,
+    /// Combine a nested `ext_nary_add` operand into the outer `ext_nary_add`.
+    CombineNaryAdds,
     /// Reassociate a fissioned add into its consumer so the carry-propagate
     /// add is pushed later in the chain.
     CsaFuseIntoConsumer,
@@ -359,6 +375,24 @@ impl fmt::Display for PirTransformKind {
                 write!(f, "ChangeExtNaryAddToKoggeStone")
             }
             PirTransformKind::BinaryExtNaryAddToAdd => write!(f, "BinaryExtNaryAddToAdd"),
+            PirTransformKind::AbsorbExtendIntoExtNaryAddTerm => {
+                write!(f, "AbsorbExtendIntoExtNaryAddTerm")
+            }
+            PirTransformKind::AbsorbNegIntoExtNaryAddTerm => {
+                write!(f, "AbsorbNegIntoExtNaryAddTerm")
+            }
+            PirTransformKind::AbsorbAddOperandIntoExtNaryAdd => {
+                write!(f, "AbsorbAddOperandIntoExtNaryAdd")
+            }
+            PirTransformKind::ExtractNegateFromExtNaryAddTerm => {
+                write!(f, "ExtractNegateFromExtNaryAddTerm")
+            }
+            PirTransformKind::ExtractAddFromNaryAddTerms => {
+                write!(f, "ExtractAddFromNaryAddTerms")
+            }
+            PirTransformKind::CombineNaryAdds => {
+                write!(f, "CombineNaryAdds")
+            }
             PirTransformKind::CsaFuseIntoConsumer => write!(f, "CsaFuseIntoConsumer"),
             PirTransformKind::CsaRebalanceTriplet => write!(f, "CsaRebalanceTriplet"),
             PirTransformKind::NotSelDistribute => write!(f, "NotSelDistribute"),
@@ -460,6 +494,12 @@ pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
         Box::new(ChangeExtNaryAddToBrentKungTransform),
         Box::new(ChangeExtNaryAddToKoggeStoneTransform),
         Box::new(BinaryExtNaryAddToAddTransform),
+        Box::new(AbsorbExtendIntoExtNaryAddTermTransform),
+        Box::new(AbsorbNegIntoExtNaryAddTermTransform),
+        Box::new(AbsorbAddOperandIntoExtNaryAddTransform),
+        Box::new(ExtractNegateFromExtNaryAddTermTransform),
+        Box::new(ExtractAddFromNaryAddTermsTransform),
+        Box::new(CombineNaryAddsTransform),
         Box::new(CsaFuseIntoConsumerTransform),
         Box::new(CsaRebalanceTripletTransform),
         Box::new(NotSelDistributeTransform),
