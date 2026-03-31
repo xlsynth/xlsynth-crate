@@ -303,18 +303,28 @@ The output is always written to stdout; redirect to a `.ir` file as needed.
 Reads a `.g8r` or `.g8rbin` `GateFn` plus an XLS IR package and prints a table that attributes live AIG AND-node area back to PIR node ids carried in g8r provenance.
 
 - One row is emitted per PIR node id that appears on at least one live `And2` node and resolves against the selected IR member.
+
 - `--group-by-opcode` switches the table to one row per PIR opcode (`add`, `shrl`, `param`, etc.) instead of one row per PIR node id.
+
 - The output starts with the selected function name and the total number of live AIG `And2` nodes used as the area denominator.
+
 - Rows are sorted by descending `weighted_aig_nodes`.
+
 - `ir_op` uses the corresponding XLS IR line text with `id=...` and `pos=[...]` metadata omitted for readability, and any literal operands are shown inline as typed hex values (for example `MY_CONST: bits[8]:0xab`).
+
 - `aig_nodes` is the number of live `And2` nodes whose provenance includes that PIR node id, printed as `count (pct%)` where `pct` is that row's share of total live AIG area.
+
 - `weighted_aig_nodes` assigns each live `And2` node weight `1/N` per provenance id when that node carries `N` ids, and prints each row as `count (pct%)` using the same total live AIG area denominator.
+
 - In opcode-grouped mode, each live `And2` contributes at most one raw `aig_nodes` count per opcode it references, while `weighted_aig_nodes` still sums all matching `1/N` provenance shares for that opcode.
+
 - If a live `And2` node has no provenance, or references a PIR node id that is not present in the selected IR member, the missing share is accumulated into a final `unattributed` row.
+
 - Missing PIR node ids are also reported as warnings on stderr.
-Positional arguments:
+  Positional arguments:
 
 - `<g8r_input_file>` – input `.g8r` or `.g8rbin` file.
+
 - `<ir_input_file>` – input XLS IR package.
 
 Optional flags:
@@ -335,18 +345,28 @@ xlsynth-driver g8r-area-table my_module.g8r my_module.ir --group-by-opcode
 Reads a `.g8r` or `.g8rbin` `GateFn` plus an XLS IR package and prints the same attribution table shape as `g8r-area-table`, but only for live AIG `And2` nodes that lie on at least one critical path as measured by AIG levels from primary inputs to primary outputs.
 
 - One row is emitted per PIR node id that appears on at least one critical-path `And2` node and resolves against the selected IR member.
+
 - `--group-by-opcode` switches the table to one row per PIR opcode (`add`, `shrl`, `param`, etc.) instead of one row per PIR node id.
+
 - The output starts with the selected function name, the total number of live AIG `And2` nodes, the number of unique live AIG `And2` nodes that lie on at least one critical path, and `critical_path_depth_nodes` for one deepest path measured in AIG `And2` nodes.
+
 - Rows are sorted by descending `weighted_aig_nodes`.
+
 - `ir_op` uses the corresponding XLS IR line text with `id=...` and `pos=[...]` metadata omitted for readability, and any literal operands are shown inline as typed hex values (for example `MY_CONST: bits[8]:0xab`).
+
 - `aig_nodes` is the number of critical-path `And2` nodes whose provenance includes that PIR node id, printed as `count (pct%)` where `pct` is that row's share of `critical_path_aig_nodes`.
+
 - `weighted_aig_nodes` assigns each critical-path `And2` node weight `1/N` per provenance id when that node carries `N` ids, and prints each row as `count (pct%)` using the same `critical_path_aig_nodes` denominator.
+
 - In opcode-grouped mode, each critical-path `And2` contributes at most one raw `aig_nodes` count per opcode it references, while `weighted_aig_nodes` still sums all matching `1/N` provenance shares for that opcode.
+
 - If a critical-path `And2` node has no provenance, or references a PIR node id that is not present in the selected IR member, the missing share is accumulated into a final `unattributed` row.
+
 - Missing PIR node ids are also reported as warnings on stderr.
-Positional arguments:
+  Positional arguments:
 
 - `<g8r_input_file>` – input `.g8r` or `.g8rbin` file.
+
 - `<ir_input_file>` – input XLS IR package.
 
 Optional flags:
