@@ -300,7 +300,7 @@ The output is always written to stdout; redirect to a `.ir` file as needed.
 
 ### `g8r-area-table`: Per-PIR-node live AIG area attribution
 
-Reads a `.g8rbin` `GateFn` plus an XLS IR package and prints a table that attributes live AIG AND-node area back to PIR node ids carried in g8r provenance.
+Reads a `.g8r` or `.g8rbin` `GateFn` plus an XLS IR package and prints a table that attributes live AIG AND-node area back to PIR node ids carried in g8r provenance.
 
 - One row is emitted per PIR node id that appears on at least one live `And2` node and resolves against the selected IR member.
 - `--group-by-opcode` switches the table to one row per PIR opcode (`add`, `shrl`, `param`, etc.) instead of one row per PIR node id.
@@ -312,11 +312,9 @@ Reads a `.g8rbin` `GateFn` plus an XLS IR package and prints a table that attrib
 - In opcode-grouped mode, each live `And2` contributes at most one raw `aig_nodes` count per opcode it references, while `weighted_aig_nodes` still sums all matching `1/N` provenance shares for that opcode.
 - If a live `And2` node has no provenance, or references a PIR node id that is not present in the selected IR member, the missing share is accumulated into a final `unattributed` row.
 - Missing PIR node ids are also reported as warnings on stderr.
-- This subcommand requires `.g8rbin`; the text `.g8r` format does not currently preserve PIR provenance.
-
 Positional arguments:
 
-- `<g8r_input_file>` – input `.g8rbin` file.
+- `<g8r_input_file>` – input `.g8r` or `.g8rbin` file.
 - `<ir_input_file>` – input XLS IR package.
 
 Optional flags:
@@ -327,14 +325,14 @@ Optional flags:
 Example usage:
 
 ```shell
-xlsynth-driver g8r-area-table my_module.g8rbin my_module.ir
+xlsynth-driver g8r-area-table my_module.g8r my_module.ir
 xlsynth-driver g8r-area-table my_module.g8rbin my_module.ir --top=main
-xlsynth-driver g8r-area-table my_module.g8rbin my_module.ir --group-by-opcode
+xlsynth-driver g8r-area-table my_module.g8r my_module.ir --group-by-opcode
 ```
 
 ### `g8r-critical-path-table`: Per-PIR-node attribution for level-critical AIG nodes
 
-Reads a `.g8rbin` `GateFn` plus an XLS IR package and prints the same attribution table shape as `g8r-area-table`, but only for live AIG `And2` nodes that lie on at least one critical path as measured by AIG levels from primary inputs to primary outputs.
+Reads a `.g8r` or `.g8rbin` `GateFn` plus an XLS IR package and prints the same attribution table shape as `g8r-area-table`, but only for live AIG `And2` nodes that lie on at least one critical path as measured by AIG levels from primary inputs to primary outputs.
 
 - One row is emitted per PIR node id that appears on at least one critical-path `And2` node and resolves against the selected IR member.
 - `--group-by-opcode` switches the table to one row per PIR opcode (`add`, `shrl`, `param`, etc.) instead of one row per PIR node id.
@@ -346,11 +344,9 @@ Reads a `.g8rbin` `GateFn` plus an XLS IR package and prints the same attributio
 - In opcode-grouped mode, each critical-path `And2` contributes at most one raw `aig_nodes` count per opcode it references, while `weighted_aig_nodes` still sums all matching `1/N` provenance shares for that opcode.
 - If a critical-path `And2` node has no provenance, or references a PIR node id that is not present in the selected IR member, the missing share is accumulated into a final `unattributed` row.
 - Missing PIR node ids are also reported as warnings on stderr.
-- This subcommand requires `.g8rbin`; the text `.g8r` format does not currently preserve PIR provenance.
-
 Positional arguments:
 
-- `<g8r_input_file>` – input `.g8rbin` file.
+- `<g8r_input_file>` – input `.g8r` or `.g8rbin` file.
 - `<ir_input_file>` – input XLS IR package.
 
 Optional flags:
@@ -361,9 +357,9 @@ Optional flags:
 Example usage:
 
 ```shell
-xlsynth-driver g8r-critical-path-table my_module.g8rbin my_module.ir
+xlsynth-driver g8r-critical-path-table my_module.g8r my_module.ir
 xlsynth-driver g8r-critical-path-table my_module.g8rbin my_module.ir --top=main
-xlsynth-driver g8r-critical-path-table my_module.g8rbin my_module.ir --group-by-opcode
+xlsynth-driver g8r-critical-path-table my_module.g8r my_module.ir --group-by-opcode
 ```
 
 ### `ir-round-trip`

@@ -180,6 +180,26 @@ impl<'a> Parser<'a> {
         Ok(AigBitVector::from_lsb_is_index_0(&ops))
     }
 
+    fn parse_pir_node_ids(&mut self) -> Result<Vec<u32>, ParseError> {
+        self.drop_ws();
+        self.drop_or_error("[")?;
+        let mut ids = Vec::new();
+        if self.try_drop("]") {
+            return Ok(ids);
+        }
+        loop {
+            let id = self.parse_usize()?;
+            let id = u32::try_from(id)
+                .map_err(|_| self.err(&format!("pir_node_id {} does not fit in u32", id)))?;
+            ids.push(id);
+            if self.try_drop("]") {
+                break;
+            }
+            self.drop_or_error(",")?;
+        }
+        Ok(ids)
+    }
+
     fn parse_io_list(&mut self) -> Result<Vec<(String, AigBitVector)>, ParseError> {
         self.drop_ws();
         self.drop_or_error("(")?;
@@ -259,6 +279,14 @@ pub fn parse_gate_fn(text: &str) -> Result<GateFn, ParseError> {
         if p.rest().starts_with('%') {
             p.drop_or_error("%")?;
             let id = p.parse_usize()?;
+            if p.try_drop("provenance=") {
+                let pir_node_ids = p.parse_pir_node_ids()?;
+                let node = nodes.get_mut(&id).ok_or_else(|| {
+                    ParseError::new(format!("unknown node id {} in provenance", id))
+                })?;
+                node.try_add_pir_node_ids(&pir_node_ids);
+                continue;
+            }
             p.drop_or_error("=")?;
             if p.try_drop("and(") {
                 let a = p.parse_operand()?;
@@ -388,5 +416,29 @@ mod tests {
         let text = g.to_string();
         let parsed = GateFn::try_from(text.as_str()).unwrap();
         assert!(structurally_equivalent(&g, &parsed));
+    }
+
+    #[test]
+    fn test_round_trip_preserves_pir_provenance() {
+        let mut g = setup_simple_graph().g;
+        for (idx, node) in g.gates.iter_mut().enumerate() {
+            node.try_add_pir_node_ids(&[u32::try_from(idx + 10).expect("fits in u32")]);
+        }
+        for node in g.gates.iter_mut() {
+            if let AigNode::And2 { .. } = node {
+                node.add_tag("from_test".to_string());
+            }
+        }
+
+        let text = g.to_string();
+        assert!(text.contains("%0 provenance=[10]"));
+        assert!(text.contains("%1 provenance=[11]"));
+        assert!(text.contains("tags=[from_test]"));
+
+        let parsed = GateFn::try_from(text.as_str()).unwrap();
+        assert!(structurally_equivalent(&g, &parsed));
+        for (lhs, rhs) in g.gates.iter().zip(parsed.gates.iter()) {
+            assert_eq!(lhs.get_pir_node_ids(), rhs.get_pir_node_ids());
+        }
     }
 }

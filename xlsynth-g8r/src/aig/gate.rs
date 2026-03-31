@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use smallvec::{SmallVec, smallvec};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use bitvec::vec::BitVec;
 use xlsynth::IrBits;
@@ -509,6 +509,31 @@ impl GateFn {
                     s.push_str(&format!("  %{} = literal({})\n", aig_ref.id, value));
                 }
             }
+        }
+
+        let mut visible_node_ids = BTreeSet::from([0usize]);
+        for input in &self.inputs {
+            for bit in input.bit_vector.iter_lsb_to_msb() {
+                visible_node_ids.insert(bit.node.id);
+            }
+        }
+        for operand in self.post_order_operands(true) {
+            visible_node_ids.insert(operand.node.id);
+        }
+        for node_id in visible_node_ids {
+            let pir_node_ids = self.gates[node_id].get_pir_node_ids();
+            if pir_node_ids.is_empty() {
+                continue;
+            }
+            let pir_node_ids_str = pir_node_ids
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<String>>()
+                .join(", ");
+            s.push_str(&format!(
+                "  %{} provenance=[{}]\n",
+                node_id, pir_node_ids_str
+            ));
         }
 
         for output in &self.outputs {
