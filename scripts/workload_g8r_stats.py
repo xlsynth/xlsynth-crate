@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """
-Generate g8r stats bundle for a selected BF16 workload.
+Generate g8r stats bundle for a selected workload.
 
 Outputs into --out-dir:
 - <workload>.x (DSLX)
@@ -23,6 +23,7 @@ Environment:
 
 Usage:
   python scripts/workload_g8r_stats.py --workload bf16_add --out-dir /tmp/bf16stats
+  python scripts/workload_g8r_stats.py --workload fp32_add --out-dir /tmp/fp32stats
   python scripts/workload_g8r_stats.py --workload bf16_mul --out-dir /tmp/bf16stats
   python scripts/workload_g8r_stats.py --workload clz_10   --out-dir /tmp/clzstats
   python scripts/workload_g8r_stats.py --workload clzt_10  --out-dir /tmp/clztstats
@@ -186,6 +187,17 @@ def _bf16_dslx(op: str) -> str:
     )
 
 
+def _fp32_dslx(op: str) -> str:
+    # Keep formatting minimal and stable.
+    return (
+        "import float32;\n"
+        "\n"
+        "fn main(x: float32::F32, y: float32::F32) -> float32::F32 {\n"
+        f"    float32::{op}(x, y)\n"
+        "}\n"
+    )
+
+
 def _clzt10_dslx() -> str:
     return "import std;\n" "\n" "fn main(x: u10) -> u4 {\n" "    std::clzt(x)\n" "}\n"
 
@@ -263,6 +275,7 @@ def _collect_env() -> Dict[str, Optional[str]]:
 
 KNOWN_WORKLOADS = (
     "bf16_add",
+    "fp32_add",
     "bf16_mul",
     "clz_10",
     "clzt_10",
@@ -273,7 +286,7 @@ KNOWN_WORKLOADS = (
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Generate g8r stats bundle for BF16 workloads."
+        description="Generate g8r stats bundle for selected workloads."
     )
     parser.add_argument(
         "--bin",
@@ -284,7 +297,7 @@ def main() -> int:
         "--workload",
         required=False,
         choices=list(KNOWN_WORKLOADS),
-        help="Workload to generate (bf16_add|bf16_mul|clz_10|clzt_10|abs_diff_8|popcount_32). If omitted, prints a summary table for all.",
+        help="Workload to generate (bf16_add|fp32_add|bf16_mul|clz_10|clzt_10|abs_diff_8|popcount_32). If omitted, prints a summary table for all.",
     )
     parser.add_argument(
         "--out-dir",
@@ -331,6 +344,8 @@ def main() -> int:
                 if wl in ("bf16_add", "bf16_mul"):
                     op = "add" if wl == "bf16_add" else "mul"
                     _write_text(tmp_dslx, _bf16_dslx(op))
+                elif wl == "fp32_add":
+                    _write_text(tmp_dslx, _fp32_dslx("add"))
                 elif wl == "clz_10":
                     _write_text(tmp_dslx, _clz10_dslx())
                 elif wl == "clzt_10":
@@ -471,6 +486,8 @@ def main() -> int:
     if args.workload in ("bf16_add", "bf16_mul"):
         op = "add" if args.workload == "bf16_add" else "mul"
         _write_text(dslx_path, _bf16_dslx(op))
+    elif args.workload == "fp32_add":
+        _write_text(dslx_path, _fp32_dslx("add"))
     elif args.workload == "clz_10":
         _write_text(dslx_path, _clz10_dslx())
     elif args.workload == "clzt_10":
