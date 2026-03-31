@@ -36,7 +36,7 @@ import json
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Tuple
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 
 # Prefer stdlib zoneinfo (Python ≥3.9) for accurate TZ handling; fall back to a fixed offset if unavailable.
 try:
@@ -88,6 +88,7 @@ def _to_los_angeles(iso_dt: str) -> str:
     iso_dt = iso_dt.replace("Z", "+00:00")
     dt = datetime.fromisoformat(iso_dt)
 
+    la_tz: tzinfo
     if ZoneInfo is not None:
         la_tz = ZoneInfo("America/Los_Angeles")
     else:
