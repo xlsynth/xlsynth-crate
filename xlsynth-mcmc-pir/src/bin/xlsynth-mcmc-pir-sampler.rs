@@ -83,6 +83,14 @@ struct CliArgs {
     #[clap(long, value_enum)]
     metric: Objective,
 
+    /// Optional hard cap on g8r depth for g8r-based objectives.
+    #[clap(long, value_parser)]
+    max_delay: Option<usize>,
+
+    /// Optional hard cap on g8r live-node count for g8r-based objectives.
+    #[clap(long, value_parser)]
+    max_area: Option<usize>,
+
     /// Path to .irvals stimulus (one typed tuple per line) required for the
     /// toggle-based metric.
     #[clap(long, value_parser)]
@@ -438,6 +446,8 @@ fn main() -> Result<()> {
         seed: cli.seed,
         initial_temperature: cli.initial_temperature,
         objective: cli.metric,
+        max_allowed_depth: cli.max_delay,
+        max_allowed_area: cli.max_area,
         weighted_switching_options:
             xlsynth_g8r::aig_sim::count_toggles::WeightedSwitchingOptions::default(),
         enable_formal_oracle: cli.formal_oracle,

@@ -596,6 +596,9 @@ This subcommand intentionally shares the same flag surface as
 - Common options:
   - `-o, --output <OUTPUT_DIR>` – artifact directory (temporary directory if omitted).
   - `--metric <nodes|g8r-nodes|g8r-nodes-times-depth|g8r-nodes-times-depth-times-toggles|g8r-le-graph|g8r-le-graph-times-product|g8r-weighted-switching|g8r-nodes-times-weighted-switching-no-depth-regress>` – objective (default: `nodes`).
+  - `--max-delay <LEVELS>` – optional hard cap on `g8r_depth` for g8r-based objectives. When the starting design violates the cap, the search runs in feasibility-first mode until it reaches the feasible region.
+  - `--max-area <GATES>` – optional hard cap on `g8r_nodes` for g8r-based objectives.
+  - At most one of `--max-delay` and `--max-area` may be specified. `--max-area` is also incompatible with `g8r-nodes-times-weighted-switching-no-depth-regress`, because that objective already imposes a depth cap.
   - `--toggle-stimulus <IRVALS_PATH>` – `.irvals` file containing one typed tuple stimulus per line; required for toggle/stimulus-based metrics (`g8r-nodes-times-depth-times-toggles`, `g8r-weighted-switching`, and `g8r-nodes-times-weighted-switching-no-depth-regress`) and invalid with other metrics.
   - `--switching-beta1 <BETA1>` – linear load coefficient for weighted-switching objectives (default: `1.0`).
   - `--switching-beta2 <BETA2>` – quadratic load coefficient for weighted-switching objectives (default: `0.0`).
@@ -639,6 +642,17 @@ xlsynth-driver ir-mcmc-opt my_design.ir \
   --switching-beta1 1.0 \
   --switching-beta2 0.0 \
   --switching-primary-output-load 1.0 \
+  --threads 8 \
+  --output /tmp/pir-mcmc-artifacts
+```
+
+Area minimization under a delay cap example:
+
+```shell
+xlsynth-driver ir-mcmc-opt my_design.ir \
+  --iters 20000 \
+  --metric g8r-nodes \
+  --max-delay 180 \
   --threads 8 \
   --output /tmp/pir-mcmc-artifacts
 ```
