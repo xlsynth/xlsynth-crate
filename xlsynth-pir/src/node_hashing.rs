@@ -111,6 +111,7 @@ fn hash_payload_attributes(f: &Fn, payload: &NodePayload, hasher: &mut blake3::H
         NodePayload::ExtPrioEncode { arg: _, lsb_prio } => {
             update_hash_bool(hasher, *lsb_prio);
         }
+        NodePayload::ExtClz { .. } => {}
         NodePayload::ExtNaryAdd { terms, arch } => {
             update_hash_u64(hasher, terms.len() as u64);
             for term in terms.iter() {

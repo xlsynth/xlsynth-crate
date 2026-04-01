@@ -387,6 +387,16 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     bitvec: encoded,
                 }
             }
+            NodePayload::ExtClz { arg } => {
+                let a = env.get(arg).expect("ext_clz.arg must be present").clone();
+                let reversed = solver.reverse(&a.bitvec);
+                let one_hot = solver.xls_one_hot(&reversed, /* lsb_prio= */ true);
+                let encoded = solver.xls_encode(&one_hot);
+                IrTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec: encoded,
+                }
+            }
             NodePayload::ExtNaryAdd { terms, arch: _ } => {
                 let ir::Type::Bits(out_w) = node.ty else {
                     panic!("ext_nary_add result must be bits-typed");

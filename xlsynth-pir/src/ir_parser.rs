@@ -110,6 +110,9 @@ enum WrappedExtensionSpec {
     ExtCarryOut {
         width: usize,
     },
+    ExtClz {
+        input_width: usize,
+    },
     ExtNaryAdd {
         output_width: usize,
         operand_widths: Vec<usize>,
@@ -214,6 +217,15 @@ fn parse_wrapped_extension_spec_from_attr(
                 operand_negated,
                 arch,
             }))
+        }
+        "ext_clz" => {
+            let input_width = fields
+                .get("width")
+                .copied()
+                .ok_or_else(|| ParseError::new("missing width for ext_clz metadata".to_string()))?
+                .parse::<usize>()
+                .map_err(|e| ParseError::new(format!("invalid ext_clz width: {e}")))?;
+            Ok(Some(WrappedExtensionSpec::ExtClz { input_width }))
         }
         "ext_prio_encode" => {
             let input_width = fields
@@ -345,6 +357,19 @@ fn canonicalize_wrapped_extension_helper_spec(
                 arch,
             })
         }
+        WrappedExtensionSpec::ExtClz { input_width } => {
+            let expected_ret_ty = ir::Type::Bits(ceil_log2(input_width.saturating_add(1)));
+            if f.params.len() != 1
+                || f.params[0].ty != ir::Type::Bits(input_width)
+                || f.ret_ty != expected_ret_ty
+            {
+                return Err(ParseError::new(format!(
+                    "ffi wrapper helper '{}' does not match ext_clz signature for width {}",
+                    f.name, input_width
+                )));
+            }
+            Ok(WrappedExtensionSpec::ExtClz { input_width })
+        }
         WrappedExtensionSpec::ExtPrioEncode {
             input_width,
             lsb_prio,
@@ -421,6 +446,30 @@ fn convert_ffi_invokes_to_extension_ops_in_fn(
                     rhs: operands[1],
                     c_in: operands[2],
                 };
+            }
+            WrappedExtensionSpec::ExtClz { input_width } => {
+                if operands.len() != 1 {
+                    return Err(ParseError::new(format!(
+                        "invoke of wrapped ext_clz helper '{}' expected 1 operand, got {}",
+                        to_apply,
+                        operands.len()
+                    )));
+                }
+                let expected_ty = ir::Type::Bits(ceil_log2(input_width.saturating_add(1)));
+                if f.nodes[idx].ty != expected_ty {
+                    return Err(ParseError::new(format!(
+                        "invoke of wrapped ext_clz helper '{}' had type {}, expected {}",
+                        to_apply, f.nodes[idx].ty, expected_ty
+                    )));
+                }
+                let expected_operand_ty = ir::Type::Bits(input_width);
+                if operand_tys[0] != expected_operand_ty {
+                    return Err(ParseError::new(format!(
+                        "invoke of wrapped ext_clz helper '{}' operand 0 had type {}, expected {}",
+                        to_apply, operand_tys[0], expected_operand_ty
+                    )));
+                }
+                f.nodes[idx].payload = ir::NodePayload::ExtClz { arg: operands[0] };
             }
             WrappedExtensionSpec::ExtNaryAdd {
                 output_width,
@@ -1843,6 +1892,21 @@ impl Parser {
                     },
                     maybe_id.unwrap(),
                 )
+            }
+            "ext_clz" => {
+                let arg = self.parse_node_ref(&node_env, "ext_clz arg")?;
+                if self.peek_is(",") {
+                    self.dropc()?;
+                    let id_attr = self.parse_id_attribute()?;
+                    maybe_id = Some(id_attr);
+                }
+                if maybe_id.is_none() {
+                    return Err(ParseError::new(format!(
+                        "expected id for ext_clz; rest_of_line: {:?}",
+                        self.rest_of_line()
+                    )));
+                }
+                (ir::NodePayload::ExtClz { arg }, maybe_id.unwrap())
             }
             "ext_nary_add" => {
                 let (terms, arch) = self.parse_ext_nary_add_op(&node_env, &mut maybe_id)?;

@@ -137,6 +137,27 @@ fn f(arg: bits[4] id=1) -> bits[3] {
 }
 
 #[test]
+fn verilogffi_wrapped_ext_clz_round_trips_verbatim() {
+    let ir_text = r#"package clz_wrapped
+
+#[ffi_proto("""code_template: "pir_ext_clz {fn} (.arg({arg}), .out({return})); /* xlsynth_pir_ext=ext_clz;width=4 */"
+""")]
+fn __pir_ext__ext_clz__w4(arg: bits[4] id=3) -> bits[3] {
+  reverse.4: bits[4] = reverse(arg, id=4)
+  one_hot.5: bits[5] = one_hot(reverse.4, lsb_prio=true, id=5)
+  encode.6: bits[3] = encode(one_hot.5, id=6)
+  ret identity.7: bits[3] = identity(encode.6, id=7)
+}
+
+fn f(arg: bits[4] id=1) -> bits[3] {
+  ret r: bits[3] = invoke(arg, to_apply=__pir_ext__ext_clz__w4, id=2)
+}
+"#;
+
+    let _pkg = assert_wrapped_text_round_trips_via_pir(ir_text, "f", "__pir_ext__ext_clz__w4");
+}
+
+#[test]
 fn verilogffi_wrapped_ext_nary_add_round_trips_verbatim() {
     let ir_text = r#"package nary_add_wrapped
 

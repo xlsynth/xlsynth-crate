@@ -373,6 +373,33 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
             }
             IrValue::from_bits(&IrBits::from_lsb_is_0(&out))
         }
+        ir::NodePayload::ExtClz { arg } => {
+            let bits: IrBits = env.get(&arg).unwrap().to_bits().unwrap();
+            let n = bits.get_bit_count();
+
+            let mut leading_zero_count = n;
+            for i in 0..n {
+                if bits.get_bit(n - 1 - i).unwrap() {
+                    leading_zero_count = i;
+                    break;
+                }
+            }
+
+            let out_w = ceil_log2(
+                n.checked_add(1)
+                    .expect("ExtClz width overflow in evaluator"),
+            );
+            let mut out: Vec<bool> = vec![false; out_w];
+            for (i, bit) in out.iter_mut().enumerate() {
+                let bit_is_one = if i < usize::BITS as usize {
+                    ((leading_zero_count >> i) & 1) == 1
+                } else {
+                    false
+                };
+                *bit = bit_is_one;
+            }
+            IrValue::from_bits(&IrBits::from_lsb_is_0(&out))
+        }
         ir::NodePayload::ExtNaryAdd { ref terms, arch: _ } => {
             let ir::Type::Bits(out_w) = &n.ty else {
                 panic!("ExtNaryAdd result must be bits-typed");

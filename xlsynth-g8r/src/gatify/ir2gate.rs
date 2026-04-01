@@ -2896,6 +2896,55 @@ fn gatify_node(
             }
             env.add(node_ref, GateOrVec::BitVector(out_bits));
         }
+        ir::NodePayload::ExtClz { arg } => {
+            let arg_bits = env
+                .get_bit_vector(*arg)
+                .expect("ext_clz arg should be present");
+            let in_w = arg_bits.get_bit_count();
+            let expected_out_w = xlsynth_pir::math::ceil_log2(in_w.saturating_add(1));
+            if node.ty.bit_count() != expected_out_w {
+                return Err(format!(
+                    "ExtClz output width mismatch; expected {} got {}",
+                    expected_out_w,
+                    node.ty.bit_count()
+                ));
+            }
+
+            let (any, count_bits) = crate::ir2gate_utils::gatify_clz(g8_builder, &arg_bits)
+                .map_err(|e| format!("ExtClz lowering failed: {e}"))?;
+            let count_w = xlsynth_pir::math::ceil_log2(in_w);
+            if count_bits.get_bit_count() != count_w {
+                return Err(format!(
+                    "ExtClz internal width mismatch; expected {} got {}",
+                    count_w,
+                    count_bits.get_bit_count()
+                ));
+            }
+
+            let mut out: Vec<AigOperand> = Vec::with_capacity(expected_out_w);
+            for bit_i in 0..expected_out_w {
+                let count_bit = if bit_i < count_w {
+                    *count_bits.get_lsb(bit_i)
+                } else {
+                    g8_builder.get_false()
+                };
+                let sentinel_bit = if bit_i < usize::BITS as usize && ((in_w >> bit_i) & 1) == 1 {
+                    g8_builder.get_true()
+                } else {
+                    g8_builder.get_false()
+                };
+                out.push(g8_builder.add_mux2(any, count_bit, sentinel_bit));
+            }
+
+            let out_bits = AigBitVector::from_lsb_is_index_0(&out);
+            for (i, gate) in out_bits.iter_lsb_to_msb().enumerate() {
+                g8_builder.add_tag(
+                    gate.node,
+                    format!("ext_clz_{}_output_bit_{}", node.text_id, i),
+                );
+            }
+            env.add(node_ref, GateOrVec::BitVector(out_bits));
+        }
         ir::NodePayload::ExtNaryAdd { terms, arch } => {
             let ir::Type::Bits(output_width) = node.ty else {
                 return Err("ExtNaryAdd result must be bits-typed".to_string());
