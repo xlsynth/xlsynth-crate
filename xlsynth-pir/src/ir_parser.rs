@@ -1808,12 +1808,21 @@ impl Parser {
             }
             "ext_prio_encode" => {
                 let arg = self.parse_node_ref(&node_env, "ext_prio_encode arg")?;
-                self.drop_or_error(",")?;
-                let lsb_prio = self.parse_bool_attribute("lsb_prio")?;
-                if self.peek_is(",") {
+                let mut lsb_prio: Option<bool> = None;
+                while self.peek_is(",") {
                     self.dropc()?;
-                    let id_attr = self.parse_id_attribute()?;
-                    maybe_id = Some(id_attr);
+                    if self.peek_is("id=") {
+                        let id_attr = self.parse_id_attribute()?;
+                        maybe_id = Some(id_attr);
+                        break;
+                    } else if self.peek_is("lsb_prio=") {
+                        lsb_prio = Some(self.parse_bool_attribute("lsb_prio")?);
+                    } else {
+                        return Err(ParseError::new(format!(
+                            "unexpected ext_prio_encode attribute; rest_of_line: {:?}",
+                            self.rest_of_line()
+                        )));
+                    }
                 }
                 if maybe_id.is_none() {
                     return Err(ParseError::new(format!(
@@ -1821,8 +1830,17 @@ impl Parser {
                         self.rest_of_line()
                     )));
                 }
+                let lsb_prio = lsb_prio.ok_or_else(|| {
+                    ParseError::new(format!(
+                        "expected lsb_prio for ext_prio_encode; rest_of_line: {:?}",
+                        self.rest_of_line()
+                    ))
+                })?;
                 (
-                    ir::NodePayload::ExtPrioEncode { arg, lsb_prio },
+                    ir::NodePayload::ExtPrioEncode {
+                        arg,
+                        lsb_prio,
+                    },
                     maybe_id.unwrap(),
                 )
             }

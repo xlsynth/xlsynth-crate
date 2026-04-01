@@ -455,11 +455,13 @@ fn helper_base_name(key: &FfiWrapKey) -> String {
         FfiWrapKey::ExtPrioEncode {
             input_width,
             lsb_prio,
-        } => format!(
-            "__pir_ext__ext_prio_encode__w{}__lsb{}",
-            input_width,
-            if *lsb_prio { 1 } else { 0 }
-        ),
+        } => {
+            format!(
+                "__pir_ext__ext_prio_encode__w{}__lsb{}",
+                input_width,
+                if *lsb_prio { 1 } else { 0 }
+            )
+        }
     }
 }
 
@@ -532,10 +534,15 @@ fn helper_code_template(key: &FfiWrapKey) -> String {
         FfiWrapKey::ExtPrioEncode {
             input_width,
             lsb_prio,
-        } => format!(
-            "pir_ext_prio_encode {{fn}} (.arg({{arg}}), .out({{return}})); /* xlsynth_pir_ext=ext_prio_encode;width={input_width};lsb_prio={} */",
-            if *lsb_prio { "true" } else { "false" }
-        ),
+        } => {
+            let metadata = format!(
+                "xlsynth_pir_ext=ext_prio_encode;width={input_width};lsb_prio={}",
+                if *lsb_prio { "true" } else { "false" }
+            );
+            format!(
+                "pir_ext_prio_encode {{fn}} (.arg({{arg}}), .out({{return}})); /* {metadata} */"
+            )
+        }
     }
 }
 

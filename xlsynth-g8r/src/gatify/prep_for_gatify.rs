@@ -29,9 +29,9 @@ pub struct PrepForGatifyOptions {
     /// `bit_slice(add(...), start=msb, width=1)` into `ext_carry_out`.
     pub enable_rewrite_carry_out: bool,
 
-    /// When true, rewrite the idiom `encode(one_hot(x))` (for power-of-two `x`
-    /// width) into the extension op `ext_prio_encode(x, lsb_prio=...)` so
-    /// gatification can use a specialized priority-encoder lowering.
+    /// When true, rewrite the idiom `encode(one_hot(x))` into the extension op
+    /// `ext_prio_encode(x, lsb_prio=...)` so gatification can
+    /// use a specialized priority-encoder lowering.
     pub enable_rewrite_prio_encode: bool,
 }
 
@@ -131,10 +131,9 @@ fn combine_or_reduces(f: &mut ir::Fn) {
     }
 }
 
-/// Rewrites `encode(one_hot(x, lsb_prio=...))` into `ext_prio_encode(x,
-/// lsb_prio=...)` when:
-/// - `x` has power-of-two bit width
-/// - the `one_hot` node has a single user (the `encode`)
+/// Rewrites `encode(one_hot(x, lsb_prio=...))` into
+/// `ext_prio_encode(x, lsb_prio=...)` when the `one_hot` node has a single
+/// user (the `encode`).
 ///
 /// This preserves the sentinel behavior of `encode(one_hot(...))` where `x==0`
 /// yields the index `N` (for `x: bits[N]`).
@@ -161,7 +160,7 @@ fn rewrite_encode_one_hot_to_ext_prio_encode(f: &mut ir::Fn) -> usize {
             continue;
         };
         let n = f.nodes[arg.index].ty.bit_count();
-        if n == 0 || !n.is_power_of_two() {
+        if n == 0 {
             continue;
         }
 
