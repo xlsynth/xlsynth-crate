@@ -433,8 +433,7 @@ pub enum NodePayload {
         c_in: NodeRef,
     },
     /// Extension (non-upstream) op: specialized lowering for the idiom
-    /// `encode(one_hot(x, lsb_prio=<...>))` when `x` has a power-of-two bit
-    /// width.
+    /// `encode(one_hot(x, lsb_prio=<...>))`.
     ///
     /// Semantics: equivalent to `encode(one_hot(arg, lsb_prio=...))`.
     ///

@@ -358,7 +358,10 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
             // set, return `n` (for `arg: bits[n]`).
             let idx = found.unwrap_or(n);
 
-            let out_w = ceil_log2(n.saturating_add(1));
+            let out_w = ceil_log2(
+                n.checked_add(1)
+                    .expect("ExtPrioEncode width overflow in evaluator"),
+            );
             let mut out: Vec<bool> = vec![false; out_w];
             for (i, bit) in out.iter_mut().enumerate() {
                 let bit_is_one = if i < usize::BITS as usize {

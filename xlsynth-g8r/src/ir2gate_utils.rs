@@ -816,7 +816,7 @@ pub fn gatify_one_hot_with_nonzero_flag_prefix_strategy(
     AigBitVector::from_lsb_is_index_0(&gates)
 }
 
-/// Builds a priority encoder for a power-of-two input width.
+/// Builds a priority encoder for an arbitrary input width.
 ///
 /// Returns `(any, idx_bits)` where:
 /// - `any` is the OR-reduction of all input bits (true when any bit is set).
@@ -825,31 +825,16 @@ pub fn gatify_one_hot_with_nonzero_flag_prefix_strategy(
 /// - `lsb_prio` selects the lowest set bit when true, or the highest set bit
 ///   when false.
 ///
-/// This is implemented as a recursive mux tree over constant indices. Each node
-/// computes `(any, idx)` for its two halves and uses the higher-level `any`
-/// signal to select between them. The top bit of the index is the half-select,
-/// so no dynamic addition is required.
-///
-/// For LSB-priority, we reverse the input order and then invert the resulting
-/// index bits (masking with `any` to keep the zero case at 0). This keeps the
-/// core tree symmetric for LSB/MSB priority.
+/// Arbitrary widths are padded with trailing zero leaves up to the next power
+/// of two so they can reuse the balanced-tree implementation. This preserves
+/// the original logical indices while avoiding the QoR cliff from an uneven
+/// fallback tree on widths like 15.
 pub fn gatify_prio_encode(
     gb: &mut GateBuilder,
     bits: &AigBitVector,
     lsb_prio: bool,
 ) -> Result<(AigOperand, AigBitVector), String> {
-    let bit_count = bits.get_bit_count();
-    if bit_count == 0 {
-        return Err("gatify_prio_encode requires a non-empty input".to_string());
-    }
-    if !bit_count.is_power_of_two() {
-        return Err(format!(
-            "gatify_prio_encode requires power-of-two input width; got {}",
-            bit_count
-        ));
-    }
-
-    fn prio_encode_recursive(
+    fn prio_encode_recursive_pow2(
         gb: &mut GateBuilder,
         bits: &[AigOperand],
     ) -> (AigOperand, Vec<AigOperand>) {
@@ -859,8 +844,8 @@ pub fn gatify_prio_encode(
 
         let mid = bits.len() / 2;
         let (low_bits, high_bits) = bits.split_at(mid);
-        let (any_low, idx_low) = prio_encode_recursive(gb, low_bits);
-        let (any_high, idx_high) = prio_encode_recursive(gb, high_bits);
+        let (any_low, idx_low) = prio_encode_recursive_pow2(gb, low_bits);
+        let (any_high, idx_high) = prio_encode_recursive_pow2(gb, high_bits);
 
         let any = gb.add_or_binary(any_low, any_high);
         let select_high = any_high;
@@ -875,26 +860,33 @@ pub fn gatify_prio_encode(
         (any, idx)
     }
 
-    let mut ordered_bits: Vec<AigOperand> = bits.iter_lsb_to_msb().copied().collect();
+    let bit_count = bits.get_bit_count();
+    if bit_count == 0 {
+        return Err("gatify_prio_encode requires a non-empty input".to_string());
+    }
+
+    let padded_bit_count = bit_count.next_power_of_two();
+    let mut ordered_bits: Vec<AigOperand> = Vec::with_capacity(padded_bit_count);
+    for bit_index in 0..bit_count {
+        ordered_bits.push(*bits.get_lsb(bit_index));
+    }
+    while ordered_bits.len() < padded_bit_count {
+        ordered_bits.push(gb.get_false());
+    }
     if lsb_prio {
         ordered_bits.reverse();
     }
-    let (any, idx_bits) = prio_encode_recursive(gb, &ordered_bits);
-    let mut idx_vec = idx_bits;
+    let (any, mut idx_bits) = prio_encode_recursive_pow2(gb, &ordered_bits);
     if lsb_prio {
-        // Reverse-index mapping: for power-of-two widths, LSB-priority is the
-        // bitwise-not of the MSB-priority index in reversed order. Mask with
-        // `any` to keep the "no bits set" case at zero.
-        //
-        // This post-processing can make LSB vs MSB costs differ slightly: the
-        // extra NOT+AND layer adds depth on the index bits, and the additional
-        // logic can change which nodes get folded or shared by the AIG builder.
-        for bit in idx_vec.iter_mut() {
+        // Reversing the padded logical input order maps low-priority selection
+        // back to a bitwise-not of the balanced-tree index. Mask with `any` to
+        // preserve the all-zero => zero case.
+        for bit in idx_bits.iter_mut() {
             let inverted = gb.add_not(*bit);
             *bit = gb.add_and_binary(any, inverted);
         }
     }
-    Ok((any, AigBitVector::from_lsb_is_index_0(&idx_vec)))
+    Ok((any, AigBitVector::from_lsb_is_index_0(&idx_bits)))
 }
 
 pub fn gatify_one_hot_with_nonzero_flag_for_area(

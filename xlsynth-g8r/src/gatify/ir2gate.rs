@@ -2861,32 +2861,31 @@ fn gatify_node(
                 ));
             }
 
-            // `prep_for_gatify` currently only rewrites into `ext_prio_encode` for
-            // power-of-two widths so it can be lowered using `gatify_prio_encode`.
-            //
-            // However, `ext_prio_encode` is a parseable PIR op for any `bits[N]`,
-            // and other tooling/passes (or hand-authored PIR) might introduce it
-            // at non-power-of-two widths. Keep the contract tight: return a
-            // clean error (rather than panicking).
-            //
-            // In normal flows this should not error, because the upstream
-            // rewrite only emits `ext_prio_encode` for pow2 widths.
             let (any, idx_bits) = gatify_prio_encode(g8_builder, &arg_bits, *lsb_prio)
                 .map_err(|e| format!("ExtPrioEncode lowering failed: {e}"))?;
-            let sentinel_bit = g8_builder.add_not(any);
-            if idx_bits.get_bit_count().saturating_add(1) != expected_out_w {
+            let idx_w = xlsynth_pir::math::ceil_log2(in_w);
+            if idx_bits.get_bit_count() != idx_w {
                 return Err(format!(
                     "ExtPrioEncode internal width mismatch; expected {} got {}",
-                    expected_out_w,
-                    idx_bits.get_bit_count().saturating_add(1)
+                    idx_w,
+                    idx_bits.get_bit_count()
                 ));
             }
 
             let mut out: Vec<AigOperand> = Vec::with_capacity(expected_out_w);
-            for bit in idx_bits.iter_lsb_to_msb() {
-                out.push(*bit);
+            for bit_i in 0..expected_out_w {
+                let idx_bit = if bit_i < idx_w {
+                    *idx_bits.get_lsb(bit_i)
+                } else {
+                    g8_builder.get_false()
+                };
+                let sentinel_bit = if bit_i < usize::BITS as usize && ((in_w >> bit_i) & 1) == 1 {
+                    g8_builder.get_true()
+                } else {
+                    g8_builder.get_false()
+                };
+                out.push(g8_builder.add_mux2(any, idx_bit, sentinel_bit));
             }
-            out.push(sentinel_bit);
 
             let out_bits = AigBitVector::from_lsb_is_index_0(&out);
             for (i, gate) in out_bits.iter_lsb_to_msb().enumerate() {

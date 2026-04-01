@@ -5,8 +5,10 @@ use xlsynth::IrPackage;
 use xlsynth_g8r::check_equivalence;
 use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify};
 use xlsynth_g8r::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
+use xlsynth_pir::desugar_extensions::desugar_extensions_in_fn;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
+use xlsynth_pir::math::ceil_log2;
 
 fn parse_top_fn(ir_text: &str) -> ir::Fn {
     let mut parser = ir_parser::Parser::new(ir_text);
@@ -54,6 +56,16 @@ fn build_encode_one_hot_with_extra_user_ir_text(bit_count: u32, lsb_prio: bool) 
     package.to_string()
 }
 
+fn build_ext_prio_encode_ir_text(bit_count: u32, lsb_prio: bool) -> String {
+    let out_w = ceil_log2((bit_count as usize).saturating_add(1));
+    format!(
+        "package sample\n\
+top fn ext_prio_encode_{bit_count}b_lsb{lsb_prio}(input: bits[{bit_count}] id=1) -> bits[{out_w}] {{\n\
+  ret ext_prio_encode.2: bits[{out_w}] = ext_prio_encode(input,lsb_prio={lsb_prio},id=2)\n\
+}}\n"
+    )
+}
+
 fn gatify_for_test(pir_fn: &ir::Fn, enable_rewrite_prio_encode: bool) -> xlsynth_g8r::aig::GateFn {
     gatify(
         pir_fn,
@@ -74,8 +86,8 @@ fn gatify_for_test(pir_fn: &ir::Fn, enable_rewrite_prio_encode: bool) -> xlsynth
 }
 
 #[test]
-fn rewrite_triggers_only_for_pow2_width() {
-    for bit_count in 1u32..=10 {
+fn rewrite_triggers_for_all_positive_widths() {
+    for bit_count in 1u32..=16 {
         for lsb_prio in [true, false] {
             let ir_text = build_encode_one_hot_ir_text(bit_count, lsb_prio);
             let pir_fn = parse_top_fn(&ir_text);
@@ -89,19 +101,10 @@ fn rewrite_triggers_only_for_pow2_width() {
                 },
             );
             let prepared_text = prepared.to_string();
-            let should_rewrite = (bit_count as usize).is_power_of_two();
-
-            if should_rewrite {
-                assert!(
-                    prepared_text.contains("ext_prio_encode("),
-                    "expected ext_prio_encode rewrite for bit_count={bit_count} lsb_prio={lsb_prio}; got:\n{prepared_text}"
-                );
-            } else {
-                assert!(
-                    !prepared_text.contains("ext_prio_encode("),
-                    "unexpected ext_prio_encode rewrite for bit_count={bit_count} lsb_prio={lsb_prio}; got:\n{prepared_text}"
-                );
-            }
+            assert!(
+                prepared_text.contains("ext_prio_encode("),
+                "expected ext_prio_encode rewrite for bit_count={bit_count} lsb_prio={lsb_prio}; got:\n{prepared_text}"
+            );
         }
     }
 }
@@ -130,8 +133,8 @@ fn rewrite_does_not_trigger_when_one_hot_has_multiple_users() {
 }
 
 #[test]
-fn gate_graph_equivalence_old_vs_rewrite_pow2_sweep() {
-    for bit_count in [1u32, 2, 4, 8, 16] {
+fn gate_graph_equivalence_old_vs_rewrite_width_sweep() {
+    for bit_count in 1u32..=16 {
         for lsb_prio in [true, false] {
             let ir_text = build_encode_one_hot_ir_text(bit_count, lsb_prio);
             let pir_fn = parse_top_fn(&ir_text);
@@ -141,6 +144,29 @@ fn gate_graph_equivalence_old_vs_rewrite_pow2_sweep() {
 
             check_equivalence::prove_same_gate_fn_via_ir(&gate_old, &gate_new)
                 .expect("expected old vs rewritten prio-encode lowering to be equivalent");
+        }
+    }
+}
+
+#[test]
+fn direct_ext_prio_encode_matches_desugared_semantics_width_sweep() {
+    for bit_count in 1u32..=16 {
+        for lsb_prio in [true, false] {
+            let ir_text = build_ext_prio_encode_ir_text(bit_count, lsb_prio);
+            let pir_fn = parse_top_fn(&ir_text);
+            let mut desugared_fn = pir_fn.clone();
+            desugar_extensions_in_fn(&mut desugared_fn).expect("desugar ext_prio_encode");
+
+            let gate_ext = gatify_for_test(&pir_fn, /* enable_rewrite_prio_encode= */ false);
+            let gate_desugared =
+                gatify_for_test(&desugared_fn, /* enable_rewrite_prio_encode= */ false);
+
+            check_equivalence::prove_same_gate_fn_via_ir(&gate_ext, &gate_desugared)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "expected direct ext_prio_encode lowering to match desugared semantics for bit_count={bit_count} lsb_prio={lsb_prio}: {e}"
+                    )
+                });
         }
     }
 }
