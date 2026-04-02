@@ -445,6 +445,14 @@ pub enum NodePayload {
         arg: NodeRef,
         lsb_prio: bool,
     },
+    /// Extension (non-upstream) op: count the number of leading zeros in a
+    /// bits-typed operand.
+    ///
+    /// Semantics: for `arg: bits[N]`, returns the number of consecutive zeros
+    /// starting at the MSb edge. As with `clz`, an all-zero input returns `N`.
+    ExtClz {
+        arg: NodeRef,
+    },
     /// Extended (non-upstream) op: add zero or more bits operands after
     /// resizing each to the result width.
     ///
@@ -543,6 +551,7 @@ impl NodePayload {
             self,
             NodePayload::ExtCarryOut { .. }
                 | NodePayload::ExtPrioEncode { .. }
+                | NodePayload::ExtClz { .. }
                 | NodePayload::ExtNaryAdd { .. }
         )
     }
@@ -567,6 +576,7 @@ impl NodePayload {
             NodePayload::BitSliceUpdate { .. } => "bit_slice_update",
             NodePayload::ExtCarryOut { .. } => "ext_carry_out",
             NodePayload::ExtPrioEncode { .. } => "ext_prio_encode",
+            NodePayload::ExtClz { .. } => "ext_clz",
             NodePayload::ExtNaryAdd { .. } => "ext_nary_add",
             NodePayload::Assert { .. } => "assert",
             NodePayload::Trace { .. } => "trace",
@@ -640,6 +650,7 @@ impl NodePayload {
                 }
                 Ok(())
             }
+            NodePayload::ExtClz { .. } => Ok(()),
             _ => Ok(()),
         }
     }
@@ -675,6 +686,7 @@ impl NodePayload {
             NodePayload::ExtPrioEncode { arg, lsb_prio } => {
                 vec![format_operand(*arg), format!("lsb_prio={}", lsb_prio)]
             }
+            NodePayload::ExtClz { arg } => vec![format_operand(*arg)],
             NodePayload::ExtNaryAdd { terms, arch } => {
                 let mut attrs: Vec<String> = terms
                     .iter()

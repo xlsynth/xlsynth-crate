@@ -862,7 +862,10 @@ pub fn gatify_prio_encode(
 
     let bit_count = bits.get_bit_count();
     if bit_count == 0 {
-        return Err("gatify_prio_encode requires a non-empty input".to_string());
+        // Zero-width inputs have no asserted bits and no index bits. Return the
+        // canonical empty result so direct extension-op lowering matches the
+        // desugared basis-op path on `bits[0]`.
+        return Ok((gb.get_false(), AigBitVector::zeros(0)));
     }
 
     let padded_bit_count = bit_count.next_power_of_two();
@@ -887,6 +890,34 @@ pub fn gatify_prio_encode(
         }
     }
     Ok((any, AigBitVector::from_lsb_is_index_0(&idx_bits)))
+}
+
+/// Builds a count-leading-zeros encoder for an arbitrary input width.
+///
+/// Returns `(any, count_bits)` where:
+/// - `any` is the OR-reduction of all input bits.
+/// - `count_bits` encodes the number of leading zeros when `any` is true.
+/// - when `any` is false, `count_bits` is all zeros and the caller is expected
+///   to inject the `all-zero => bit_count` sentinel externally.
+///
+/// This reuses the exact same structural kernel as
+/// `gatify_prio_encode(..., lsb_prio=true)`: reverse the bit order at the leaf
+/// wiring boundary, then count from the LSB side of that reversed vector.
+pub fn gatify_clz(
+    gb: &mut GateBuilder,
+    bits: &AigBitVector,
+) -> Result<(AigOperand, AigBitVector), String> {
+    let bit_count = bits.get_bit_count();
+    if bit_count == 0 {
+        // Zero-width CLZ is defined as the unique `bits[0]` value with
+        // `any=false`, matching PIR eval/type deduction and the desugared
+        // reverse->one_hot->encode basis-op lowering.
+        return Ok((gb.get_false(), AigBitVector::zeros(0)));
+    }
+
+    let reversed_lsb_to_msb: Vec<AigOperand> = bits.iter_msb_to_lsb().copied().collect();
+    let reversed_bits = AigBitVector::from_lsb_is_index_0(&reversed_lsb_to_msb);
+    gatify_prio_encode(gb, &reversed_bits, /* lsb_prio= */ true)
 }
 
 pub fn gatify_one_hot_with_nonzero_flag_for_area(

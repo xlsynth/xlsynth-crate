@@ -110,6 +110,9 @@ enum WrappedExtensionSpec {
     ExtCarryOut {
         width: usize,
     },
+    ExtClz {
+        input_width: usize,
+    },
     ExtNaryAdd {
         output_width: usize,
         operand_widths: Vec<usize>,
@@ -158,32 +161,23 @@ fn parse_wrapped_extension_spec_from_attr(
         .ok_or_else(|| ParseError::new("missing xlsynth_pir_ext op kind".to_string()))?;
     match op {
         "ext_carry_out" => {
-            let width = fields
-                .get("width")
-                .copied()
-                .ok_or_else(|| {
-                    ParseError::new("missing width for ext_carry_out metadata".to_string())
-                })?
-                .parse::<usize>()
-                .map_err(|e| ParseError::new(format!("invalid ext_carry_out width: {e}")))?;
+            let width = fields.get("width").copied().ok_or_else(|| {
+                ParseError::new("missing width for ext_carry_out metadata".to_string())
+            })?;
+            let width = parse_wrapped_extension_usize_field(width, "ext_carry_out", "width")?;
             Ok(Some(WrappedExtensionSpec::ExtCarryOut { width }))
         }
         "ext_nary_add" => {
-            let output_width = fields
-                .get("out_width")
-                .copied()
-                .ok_or_else(|| {
-                    ParseError::new("missing out_width for ext_nary_add metadata".to_string())
-                })?
-                .parse::<usize>()
-                .map_err(|e| ParseError::new(format!("invalid ext_nary_add out_width: {e}")))?;
+            let output_width = fields.get("out_width").copied().ok_or_else(|| {
+                ParseError::new("missing out_width for ext_nary_add metadata".to_string())
+            })?;
+            let output_width =
+                parse_wrapped_extension_usize_field(output_width, "ext_nary_add", "out_width")?;
             let operand_widths = match fields.get("operand_widths").copied() {
                 Some(operand_widths_text) if !operand_widths_text.is_empty() => operand_widths_text
                     .split(',')
                     .map(|width| {
-                        width.parse::<usize>().map_err(|e| {
-                            ParseError::new(format!("invalid ext_nary_add operand width: {e}"))
-                        })
+                        parse_wrapped_extension_usize_field(width, "ext_nary_add", "operand width")
                     })
                     .collect::<Result<Vec<_>, _>>()?,
                 Some(_) | None => Vec::new(),
@@ -215,15 +209,20 @@ fn parse_wrapped_extension_spec_from_attr(
                 arch,
             }))
         }
-        "ext_prio_encode" => {
+        "ext_clz" => {
             let input_width = fields
                 .get("width")
                 .copied()
-                .ok_or_else(|| {
-                    ParseError::new("missing width for ext_prio_encode metadata".to_string())
-                })?
-                .parse::<usize>()
-                .map_err(|e| ParseError::new(format!("invalid ext_prio_encode width: {e}")))?;
+                .ok_or_else(|| ParseError::new("missing width for ext_clz metadata".to_string()))?;
+            let input_width = parse_wrapped_extension_usize_field(input_width, "ext_clz", "width")?;
+            Ok(Some(WrappedExtensionSpec::ExtClz { input_width }))
+        }
+        "ext_prio_encode" => {
+            let input_width = fields.get("width").copied().ok_or_else(|| {
+                ParseError::new("missing width for ext_prio_encode metadata".to_string())
+            })?;
+            let input_width =
+                parse_wrapped_extension_usize_field(input_width, "ext_prio_encode", "width")?;
             let lsb_prio =
                 Parser::parse_bool_literal(fields.get("lsb_prio").copied().ok_or_else(|| {
                     ParseError::new("missing lsb_prio for ext_prio_encode metadata".to_string())
@@ -238,6 +237,55 @@ fn parse_wrapped_extension_spec_from_attr(
             other
         ))),
     }
+}
+
+/// Parses extension op metadata width fields emitted by DSLX `extern_verilog`.
+///
+/// Extension ops may be serialized into XLS IR as verilog FFI function
+/// wrappers. The metadata on these functions may include numbers in verilog
+/// format. This function handles such formats.
+fn parse_wrapped_extension_usize_field(
+    text: &str,
+    op_name: &str,
+    field_name: &str,
+) -> Result<usize, ParseError> {
+    if let Ok(value) = text.parse::<usize>() {
+        return Ok(value);
+    }
+
+    let Some((width_text, base_and_digits)) = text.split_once('\'') else {
+        return Err(ParseError::new(format!(
+            "invalid {op_name} {field_name}: {text:?}"
+        )));
+    };
+    let width_text = width_text.strip_suffix('\\').unwrap_or(width_text);
+    let _literal_width = width_text.parse::<usize>().map_err(|e| {
+        ParseError::new(format!("invalid {op_name} {field_name} literal width: {e}"))
+    })?;
+
+    let base_and_digits = base_and_digits
+        .strip_prefix(['s', 'S'])
+        .unwrap_or(base_and_digits);
+    if base_and_digits.is_empty() {
+        return Err(ParseError::new(format!(
+            "invalid {op_name} {field_name}: {text:?}"
+        )));
+    }
+    let (base_char, digits_text) = base_and_digits.split_at(1);
+    let radix = match base_char {
+        "b" | "B" => 2,
+        "o" | "O" => 8,
+        "d" | "D" => 10,
+        "h" | "H" => 16,
+        _ => {
+            return Err(ParseError::new(format!(
+                "invalid {op_name} {field_name} literal base: {text:?}"
+            )));
+        }
+    };
+    let normalized_digits = digits_text.replace('_', "");
+    usize::from_str_radix(&normalized_digits, radix)
+        .map_err(|e| ParseError::new(format!("invalid {op_name} {field_name}: {e}")))
 }
 
 fn parse_bool_list_field(value: &str, field_name: &str) -> Result<Vec<bool>, ParseError> {
@@ -345,6 +393,19 @@ fn canonicalize_wrapped_extension_helper_spec(
                 arch,
             })
         }
+        WrappedExtensionSpec::ExtClz { input_width } => {
+            let expected_ret_ty = ir::Type::Bits(ceil_log2(input_width.saturating_add(1)));
+            if f.params.len() != 1
+                || f.params[0].ty != ir::Type::Bits(input_width)
+                || f.ret_ty != expected_ret_ty
+            {
+                return Err(ParseError::new(format!(
+                    "ffi wrapper helper '{}' does not match ext_clz signature for width {}",
+                    f.name, input_width
+                )));
+            }
+            Ok(WrappedExtensionSpec::ExtClz { input_width })
+        }
         WrappedExtensionSpec::ExtPrioEncode {
             input_width,
             lsb_prio,
@@ -421,6 +482,30 @@ fn convert_ffi_invokes_to_extension_ops_in_fn(
                     rhs: operands[1],
                     c_in: operands[2],
                 };
+            }
+            WrappedExtensionSpec::ExtClz { input_width } => {
+                if operands.len() != 1 {
+                    return Err(ParseError::new(format!(
+                        "invoke of wrapped ext_clz helper '{}' expected 1 operand, got {}",
+                        to_apply,
+                        operands.len()
+                    )));
+                }
+                let expected_ty = ir::Type::Bits(ceil_log2(input_width.saturating_add(1)));
+                if f.nodes[idx].ty != expected_ty {
+                    return Err(ParseError::new(format!(
+                        "invoke of wrapped ext_clz helper '{}' had type {}, expected {}",
+                        to_apply, f.nodes[idx].ty, expected_ty
+                    )));
+                }
+                let expected_operand_ty = ir::Type::Bits(input_width);
+                if operand_tys[0] != expected_operand_ty {
+                    return Err(ParseError::new(format!(
+                        "invoke of wrapped ext_clz helper '{}' operand 0 had type {}, expected {}",
+                        to_apply, operand_tys[0], expected_operand_ty
+                    )));
+                }
+                f.nodes[idx].payload = ir::NodePayload::ExtClz { arg: operands[0] };
             }
             WrappedExtensionSpec::ExtNaryAdd {
                 output_width,
@@ -1843,6 +1928,21 @@ impl Parser {
                     },
                     maybe_id.unwrap(),
                 )
+            }
+            "ext_clz" => {
+                let arg = self.parse_node_ref(&node_env, "ext_clz arg")?;
+                if self.peek_is(",") {
+                    self.dropc()?;
+                    let id_attr = self.parse_id_attribute()?;
+                    maybe_id = Some(id_attr);
+                }
+                if maybe_id.is_none() {
+                    return Err(ParseError::new(format!(
+                        "expected id for ext_clz; rest_of_line: {:?}",
+                        self.rest_of_line()
+                    )));
+                }
+                (ir::NodePayload::ExtClz { arg }, maybe_id.unwrap())
             }
             "ext_nary_add" => {
                 let (terms, arch) = self.parse_ext_nary_add_op(&node_env, &mut maybe_id)?;

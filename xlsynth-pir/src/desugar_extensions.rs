@@ -183,6 +183,21 @@ impl ExtPrioEncodeShape {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ExtClzShape {
+    input_width: usize,
+    output_width: usize,
+}
+
+impl ExtClzShape {
+    fn new(input_width: usize) -> Self {
+        Self {
+            input_width,
+            output_width: ceil_log2(input_width.saturating_add(1)),
+        }
+    }
+}
+
 /// Validates `ext_prio_encode` operands and returns the shared shape info used
 /// by both inline lowering and FFI wrapper synthesis.
 fn analyze_ext_prio_encode(
@@ -192,6 +207,13 @@ fn analyze_ext_prio_encode(
 ) -> Result<ExtPrioEncodeShape, DesugarError> {
     let input_width = expect_bits_width(f, arg, "ext_prio_encode.arg")?;
     Ok(ExtPrioEncodeShape::new(input_width, lsb_prio))
+}
+
+/// Validates `ext_clz` operands and returns the shared shape info used by both
+/// inline lowering and FFI wrapper synthesis.
+fn analyze_ext_clz(f: &Fn, arg: NodeRef) -> Result<ExtClzShape, DesugarError> {
+    let input_width = expect_bits_width(f, arg, "ext_clz.arg")?;
+    Ok(ExtClzShape::new(input_width))
 }
 
 /// Appends the basis-op implementation of `ext_prio_encode` and returns the
@@ -204,6 +226,30 @@ fn append_lowered_ext_prio_encode(f: &mut Fn, arg: NodeRef, shape: ExtPrioEncode
         NodePayload::OneHot {
             arg,
             lsb_prio: shape.lsb_prio,
+        },
+    );
+    push_node(
+        f,
+        Type::Bits(shape.output_width),
+        NodePayload::Encode { arg: one_hot },
+    )
+}
+
+/// Appends the basis-op implementation of `ext_clz` and returns the lowered
+/// encoded-result node.
+fn append_lowered_ext_clz(f: &mut Fn, arg: NodeRef, shape: ExtClzShape) -> NodeRef {
+    let reversed = push_node(
+        f,
+        Type::Bits(shape.input_width),
+        NodePayload::Unop(Unop::Reverse, arg),
+    );
+    let one_hot_width = shape.input_width.saturating_add(1);
+    let one_hot = push_node(
+        f,
+        Type::Bits(one_hot_width),
+        NodePayload::OneHot {
+            arg: reversed,
+            lsb_prio: true,
         },
     );
     push_node(
@@ -397,6 +443,9 @@ enum FfiWrapKey {
     ExtCarryOut {
         width: usize,
     },
+    ExtClz {
+        input_width: usize,
+    },
     ExtNaryAdd {
         output_width: usize,
         operand_widths: Vec<usize>,
@@ -414,6 +463,9 @@ fn helper_base_name(key: &FfiWrapKey) -> String {
     match key {
         FfiWrapKey::ExtCarryOut { width } => {
             format!("__pir_ext__ext_carry_out__w{width}")
+        }
+        FfiWrapKey::ExtClz { input_width } => {
+            format!("__pir_ext__ext_clz__w{input_width}")
         }
         FfiWrapKey::ExtNaryAdd {
             output_width,
@@ -499,6 +551,10 @@ fn helper_code_template(key: &FfiWrapKey) -> String {
         FfiWrapKey::ExtCarryOut { width } => format!(
             "pir_ext_carry_out {{fn}} (.lhs({{lhs}}), .rhs({{rhs}}), .c_in({{c_in}}), .out({{return}})); /* xlsynth_pir_ext=ext_carry_out;width={width} */"
         ),
+        FfiWrapKey::ExtClz { input_width } => {
+            let metadata = format!("xlsynth_pir_ext=ext_clz;width={input_width}");
+            format!("pir_ext_clz {{fn}} (.arg({{arg}}), .out({{return}})); /* {metadata} */")
+        }
         FfiWrapKey::ExtNaryAdd {
             output_width,
             operand_widths,
@@ -659,6 +715,24 @@ fn make_helper_fn(name: String, key: &FfiWrapKey) -> Fn {
             helper.ret_node_ref = Some(ret_node_ref);
             helper
         }
+        FfiWrapKey::ExtClz { input_width } => {
+            let params = vec![Param {
+                name: "arg".to_string(),
+                ty: Type::Bits(*input_width),
+                id: ParamId::new(1),
+            }];
+            let shape = ExtClzShape::new(*input_width);
+            let mut helper =
+                make_helper_with_params(name, params, Type::Bits(shape.output_width), key);
+            let lowered = append_lowered_ext_clz(&mut helper, NodeRef { index: 1 }, shape);
+            let ret_node_ref = push_node(
+                &mut helper,
+                Type::Bits(shape.output_width),
+                NodePayload::Unop(Unop::Identity, lowered),
+            );
+            helper.ret_node_ref = Some(ret_node_ref);
+            helper
+        }
         FfiWrapKey::ExtPrioEncode {
             input_width,
             lsb_prio,
@@ -749,6 +823,26 @@ fn wrap_extensions_in_fn(
                 node.payload = NodePayload::Invoke {
                     to_apply: helper_name,
                     operands: vec![lhs, rhs, c_in],
+                };
+                changed = true;
+            }
+            NodePayload::ExtClz { arg } => {
+                let shape = analyze_ext_clz(f, arg)?;
+                let key = FfiWrapKey::ExtClz {
+                    input_width: shape.input_width,
+                };
+                let helper_name = get_or_create_helper_name(
+                    &key,
+                    helper_names,
+                    helper_fns,
+                    existing_names,
+                    current_max_text_id,
+                );
+                let node = f.get_node_mut(nr);
+                node.ty = Type::Bits(shape.output_width);
+                node.payload = NodePayload::Invoke {
+                    to_apply: helper_name,
+                    operands: vec![arg],
                 };
                 changed = true;
             }
@@ -899,11 +993,35 @@ fn desugar_ext_prio_encode_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
     Ok(changed)
 }
 
+fn desugar_ext_clz_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
+    let mut changed = false;
+
+    let original_len = f.nodes.len();
+    for idx in 0..original_len {
+        let nr = NodeRef { index: idx };
+        let payload = f.get_node(nr).payload.clone();
+        let NodePayload::ExtClz { arg } = payload else {
+            continue;
+        };
+        changed = true;
+
+        let shape = analyze_ext_clz(f, arg)?;
+        let encoded = append_lowered_ext_clz(f, arg, shape);
+
+        let node = f.get_node_mut(nr);
+        node.ty = Type::Bits(shape.output_width);
+        node.payload = NodePayload::Unop(Unop::Identity, encoded);
+    }
+
+    Ok(changed)
+}
+
 /// Desugars extension ops within `f` into upstream-compatible PIR operations.
 ///
 /// This function also normalizes the node list into a valid topological order.
 pub fn desugar_extensions_in_fn(f: &mut Fn) -> Result<(), DesugarError> {
     let _changed = desugar_ext_carry_out_in_fn(f)?
+        | desugar_ext_clz_in_fn(f)?
         | desugar_ext_nary_add_in_fn(f)?
         | desugar_ext_prio_encode_in_fn(f)?;
     compact_and_toposort_in_place(f).map_err(DesugarError::new)?;

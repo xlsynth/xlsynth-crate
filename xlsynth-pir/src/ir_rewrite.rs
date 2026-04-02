@@ -894,6 +894,17 @@ fn build_special_payload(
                 lsb_prio: named_args.require_bool("lsb_prio")?,
             })
         }
+        "ext_clz" => {
+            named_args.require_no_extra(operator, &[])?;
+            if positional_refs.len() != 1 {
+                return Err(MatchRewriteRuleApplyError::InvalidRewriteTemplate(
+                    "ext_clz expects exactly 1 positional operand".to_string(),
+                ));
+            }
+            Ok(NodePayload::ExtClz {
+                arg: positional_refs[0],
+            })
+        }
         "ext_carry_out" => {
             named_args.require_no_extra(operator, &[])?;
             if positional_refs.len() != 3 {
