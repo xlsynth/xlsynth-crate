@@ -862,7 +862,10 @@ pub fn gatify_prio_encode(
 
     let bit_count = bits.get_bit_count();
     if bit_count == 0 {
-        return Err("gatify_prio_encode requires a non-empty input".to_string());
+        // Zero-width inputs have no asserted bits and no index bits. Return the
+        // canonical empty result so direct extension-op lowering matches the
+        // desugared basis-op path on `bits[0]`.
+        return Ok((gb.get_false(), AigBitVector::zeros(0)));
     }
 
     let padded_bit_count = bit_count.next_power_of_two();
@@ -906,7 +909,10 @@ pub fn gatify_clz(
 ) -> Result<(AigOperand, AigBitVector), String> {
     let bit_count = bits.get_bit_count();
     if bit_count == 0 {
-        return Err("gatify_clz requires a non-empty input".to_string());
+        // Zero-width CLZ is defined as the unique `bits[0]` value with
+        // `any=false`, matching PIR eval/type deduction and the desugared
+        // reverse->one_hot->encode basis-op lowering.
+        return Ok((gb.get_false(), AigBitVector::zeros(0)));
     }
 
     let reversed_lsb_to_msb: Vec<AigOperand> = bits.iter_msb_to_lsb().copied().collect();

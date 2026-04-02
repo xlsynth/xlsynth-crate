@@ -150,7 +150,7 @@ fn gate_graph_equivalence_old_vs_rewrite_width_sweep() {
 
 #[test]
 fn direct_ext_prio_encode_matches_desugared_semantics_width_sweep() {
-    for bit_count in 1u32..=16 {
+    for bit_count in 0u32..=16 {
         for lsb_prio in [true, false] {
             let ir_text = build_ext_prio_encode_ir_text(bit_count, lsb_prio);
             let pir_fn = parse_top_fn(&ir_text);
@@ -160,6 +160,18 @@ fn direct_ext_prio_encode_matches_desugared_semantics_width_sweep() {
             let gate_ext = gatify_for_test(&pir_fn, /* enable_rewrite_prio_encode= */ false);
             let gate_desugared =
                 gatify_for_test(&desugared_fn, /* enable_rewrite_prio_encode= */ false);
+            if bit_count == 0 {
+                assert!(
+                    gate_ext.outputs.len() == 1 && gate_ext.outputs[0].get_bit_count() == 0,
+                    "expected zero-width direct ext_prio_encode lowering to produce one zero-width output"
+                );
+                assert!(
+                    gate_desugared.outputs.len() == 1
+                        && gate_desugared.outputs[0].get_bit_count() == 0,
+                    "expected zero-width desugared ext_prio_encode lowering to produce one zero-width output"
+                );
+                continue;
+            }
 
             check_equivalence::prove_same_gate_fn_via_ir(&gate_ext, &gate_desugared)
                 .unwrap_or_else(|e| {

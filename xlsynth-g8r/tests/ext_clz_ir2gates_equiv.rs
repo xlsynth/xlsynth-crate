@@ -44,7 +44,7 @@ fn gatify_for_test(pir_fn: &ir::Fn) -> xlsynth_g8r::aig::GateFn {
 
 #[test]
 fn direct_ext_clz_matches_desugared_semantics_width_sweep() {
-    for bit_count in 1u32..=16 {
+    for bit_count in 0u32..=16 {
         let ir_text = build_ext_clz_ir_text(bit_count);
         let pir_fn = parse_top_fn(&ir_text);
         let mut desugared_fn = pir_fn.clone();
@@ -52,6 +52,17 @@ fn direct_ext_clz_matches_desugared_semantics_width_sweep() {
 
         let gate_ext = gatify_for_test(&pir_fn);
         let gate_desugared = gatify_for_test(&desugared_fn);
+        if bit_count == 0 {
+            assert!(
+                gate_ext.outputs.len() == 1 && gate_ext.outputs[0].get_bit_count() == 0,
+                "expected zero-width direct ext_clz lowering to produce one zero-width output"
+            );
+            assert!(
+                gate_desugared.outputs.len() == 1 && gate_desugared.outputs[0].get_bit_count() == 0,
+                "expected zero-width desugared ext_clz lowering to produce one zero-width output"
+            );
+            continue;
+        }
 
         check_equivalence::prove_same_gate_fn_via_ir(&gate_ext, &gate_desugared).unwrap_or_else(
             |e| {
