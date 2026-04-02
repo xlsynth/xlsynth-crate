@@ -4,11 +4,16 @@
 //! co-recursive loop with the upstream XLS optimizer (`xlsynth::optimize_ir`).
 //!
 //! Design goals:
-//! - **Basis ops only**: rewrites must not introduce PIR extension ops, because
-//!   libxls optimization does not understand them.
+//! - **Preserve extension ops**: libxls does not understand PIR extension ops
+//!   directly, so the sandwich path serializes them as synthetic FFI helper
+//!   invokes and parses those helpers back into extension ops after each libxls
+//!   pass.
+//! - **Basis-op rewrites only**: the PIR rewrite pass itself does not introduce
+//!   extension ops; existing extension ops are treated opaquely.
 //! - **Bounded effort**: intended as a fast front-end; keep rounds small.
 //! - **Deterministic**: stable iteration order and stable outputs.
 
+use crate::desugar_extensions::{self, ExtensionEmitMode};
 use crate::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
 use crate::ir_parser;
 use crate::ir_range_info::IrRangeInfo;
@@ -135,44 +140,29 @@ pub fn run_aug_opt_over_ir_text_with_stats(
         });
     }
 
-    // Basis-only contract: aug-opt does not support PIR extension ops.
-    // Fail fast with a clear error before libxls parsing.
-    verify_no_extension_ops_in_ir_text(ir_text)?;
-
     let top_name = top
         .ok_or_else(|| "aug_opt: top is required".to_string())?
         .to_string();
     match options.mode {
         AugOptMode::Sandwich => {
-            // Start by letting libxls do its normal canonicalization.
-            let mut cur_pkg = xlsynth::IrPackage::parse_ir(ir_text, None)
-                .map_err(|e| format!("aug_opt: xlsynth parse_ir failed: {e}"))?;
-            cur_pkg
-                .set_top_by_name(&top_name)
-                .map_err(|e| format!("aug_opt: set_top_by_name('{top_name}') failed: {e}"))?;
-
-            // One initial opt pass before the co-recursive rounds.
-            cur_pkg = xlsynth::optimize_ir(&cur_pkg, &top_name)
-                .map_err(|e| format!("aug_opt: optimize_ir initial failed: {e}"))?;
+            // One initial libxls opt pass before the co-recursive rounds.
+            let mut cur_text =
+                optimize_ir_text_preserving_extension_ops(ir_text, &top_name, "initial")?;
 
             let mut rewrite_stats = AugOptRewriteStats::default();
             for _round in 0..options.rounds {
-                let cur_text = cur_pkg.to_string();
                 let (lowered_text, rewrites_in_round) =
                     apply_pir_rewrites_to_ir_text(&cur_text, &top_name)?;
                 rewrite_stats.saturating_add_assign(rewrites_in_round);
-
-                let mut next_pkg = xlsynth::IrPackage::parse_ir(&lowered_text, None)
-                    .map_err(|e| format!("aug_opt: xlsynth parse_ir (post-rewrite) failed: {e}"))?;
-                next_pkg
-                    .set_top_by_name(&top_name)
-                    .map_err(|e| format!("aug_opt: set_top_by_name('{top_name}') failed: {e}"))?;
-                cur_pkg = xlsynth::optimize_ir(&next_pkg, &top_name)
-                    .map_err(|e| format!("aug_opt: optimize_ir post-rewrite failed: {e}"))?;
+                cur_text = optimize_ir_text_preserving_extension_ops(
+                    &lowered_text,
+                    &top_name,
+                    "post-rewrite",
+                )?;
             }
 
             Ok(AugOptRunResult {
-                output_text: cur_pkg.to_string(),
+                output_text: cur_text,
                 total_rewrites: rewrite_stats.total(),
                 rewrite_stats,
             })
@@ -231,7 +221,12 @@ fn apply_pir_rewrites_to_ir_text(
         .ok_or_else(|| format!("aug_opt: PIR package missing top fn '{top_name}'"))?
         .clone();
 
-    let mut xls_pkg = xlsynth::IrPackage::parse_ir(ir_text, None)
+    let wrapped_ir_text = desugar_extensions::emit_package_with_extension_mode(
+        &pir_pkg,
+        ExtensionEmitMode::AsFfiFunction,
+    )
+    .map_err(|e| format!("aug_opt: FFI-wrap extensions for analysis failed: {e}"))?;
+    let mut xls_pkg = xlsynth::IrPackage::parse_ir(&wrapped_ir_text, None)
         .map_err(|e| format!("aug_opt: xlsynth parse_ir (analysis) failed: {e}"))?;
     xls_pkg
         .set_top_by_name(top_name)
@@ -264,40 +259,48 @@ fn apply_pir_rewrites_to_ir_text(
         .set_top_fn(top_name)
         .map_err(|e| format!("aug_opt: internal error: set_top_fn('{top_name}') failed: {e}"))?;
 
-    // Verify we did not introduce extension ops (basis-only contract).
-    verify_no_extension_ops_in_package(&pir_pkg)?;
-
     Ok((pir_pkg.to_string(), rewrites_in_round))
 }
 
-fn verify_no_extension_ops_in_ir_text(ir_text: &str) -> Result<(), String> {
+fn optimize_ir_text_preserving_extension_ops(
+    ir_text: &str,
+    top_name: &str,
+    phase: &str,
+) -> Result<String, String> {
     let mut pir_parser = ir_parser::Parser::new(ir_text);
-    let pir_pkg = pir_parser
+    let mut pir_pkg = pir_parser
         .parse_and_validate_package()
         .map_err(|e| format!("aug_opt: PIR parse/validate failed: {e}"))?;
-    verify_no_extension_ops_in_package(&pir_pkg)
-}
+    pir_pkg
+        .get_fn(top_name)
+        .ok_or_else(|| format!("aug_opt: PIR package missing top fn '{top_name}'"))?;
+    pir_pkg
+        .set_top_fn(top_name)
+        .map_err(|e| format!("aug_opt: internal error: set_top_fn('{top_name}') failed: {e}"))?;
 
-fn verify_no_extension_ops_in_package(pkg: &ir::Package) -> Result<(), String> {
-    for member in &pkg.members {
-        match member {
-            ir::PackageMember::Function(f) => verify_no_extension_ops_in_fn(f)?,
-            ir::PackageMember::Block { func, .. } => verify_no_extension_ops_in_fn(func)?,
-        }
-    }
-    Ok(())
-}
+    let wrapped_ir_text = desugar_extensions::emit_package_with_extension_mode(
+        &pir_pkg,
+        ExtensionEmitMode::AsFfiFunction,
+    )
+    .map_err(|e| format!("aug_opt: FFI-wrap extensions before {phase} opt failed: {e}"))?;
 
-fn verify_no_extension_ops_in_fn(f: &ir::Fn) -> Result<(), String> {
-    for node in &f.nodes {
-        if node.payload.is_extension_op() {
-            return Err(format!(
-                "aug_opt: basis-only: found extension op in fn '{}': text_id={} payload={:?}",
-                f.name, node.text_id, node.payload
-            ));
-        }
-    }
-    Ok(())
+    let mut xls_pkg = xlsynth::IrPackage::parse_ir(&wrapped_ir_text, None)
+        .map_err(|e| format!("aug_opt: xlsynth parse_ir ({phase}) failed: {e}"))?;
+    xls_pkg
+        .set_top_by_name(top_name)
+        .map_err(|e| format!("aug_opt: set_top_by_name('{top_name}') failed: {e}"))?;
+    xls_pkg = xlsynth::optimize_ir(&xls_pkg, top_name)
+        .map_err(|e| format!("aug_opt: optimize_ir {phase} failed: {e}"))?;
+
+    let optimized_ir_text = xls_pkg.to_string();
+    let mut optimized_pir_parser = ir_parser::Parser::new(&optimized_ir_text);
+    let mut optimized_pir_pkg = optimized_pir_parser
+        .parse_and_validate_package()
+        .map_err(|e| format!("aug_opt: PIR parse/validate after {phase} opt failed: {e}"))?;
+    optimized_pir_pkg
+        .set_top_fn(top_name)
+        .map_err(|e| format!("aug_opt: internal error: set_top_fn('{top_name}') failed: {e}"))?;
+    Ok(optimized_pir_pkg.to_string())
 }
 
 fn apply_basis_rewrites_to_fn(
@@ -2278,6 +2281,72 @@ fn b(y: bits[1] id=10) -> bits[1] {
             Some((name, ir::MemberType::Function)) => assert_eq!(name, "b"),
             other => panic!("expected top fn 'b', got {:?}", other),
         }
+    }
+
+    #[test]
+    fn aug_opt_sandwich_preserves_existing_extension_ops_via_ffi_wrappers() {
+        let ir_text = r#"package has_ext
+
+top fn main(x: bits[4] id=1) -> bits[3] {
+  ret leading_zeroes: bits[3] = ext_clz(x, id=2)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("main"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::Sandwich,
+            },
+        )
+        .expect("aug opt should preserve ext ops through FFI wrappers");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("main").expect("top fn");
+        let ret_nr = f.ret_node_ref.expect("ret node");
+        let ret_node = f.get_node(ret_nr);
+        assert!(
+            matches!(ret_node.payload, NodePayload::ExtClz { .. }),
+            "expected ext_clz to survive sandwich mode; output:\n{}",
+            out_text
+        );
+
+        exhaustive_ir_text_fn_equivalence_ubits(ir_text, &out_text, "main", &[4]);
+    }
+
+    #[test]
+    fn aug_opt_pir_only_allows_existing_extension_ops() {
+        let ir_text = r#"package has_ext
+
+top fn main(x: bits[4] id=1) -> bits[3] {
+  ret leading_zeroes: bits[3] = ext_clz(x, id=2)
+}
+"#;
+
+        let out_text = run_aug_opt_over_ir_text(
+            ir_text,
+            Some("main"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt pir-only should not reject ext ops");
+
+        let mut p = ir_parser::Parser::new(&out_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("main").expect("top fn");
+        let ret_nr = f.ret_node_ref.expect("ret node");
+        let ret_node = f.get_node(ret_nr);
+        assert!(
+            matches!(ret_node.payload, NodePayload::ExtClz { .. }),
+            "expected ext_clz to pass through pir-only mode; output:\n{}",
+            out_text
+        );
     }
 
     #[test]
