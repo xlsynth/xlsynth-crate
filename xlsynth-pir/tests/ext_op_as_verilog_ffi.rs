@@ -158,6 +158,66 @@ fn f(arg: bits[4] id=1) -> bits[3] {
 }
 
 #[test]
+fn verilogffi_wrapped_ext_clz_accepts_verilog_literal_width_metadata() {
+    let ir_text = r#"package clz_wrapped
+
+#[ffi_proto("""code_template: "pir_ext_clz {fn} (.arg({arg}), .out({return})); /* xlsynth_pir_ext=ext_clz;width=32'h00000004 */"
+""")]
+fn __pir_ext__ext_clz__w4(arg: bits[4] id=3) -> bits[3] {
+  reverse.4: bits[4] = reverse(arg, id=4)
+  one_hot.5: bits[5] = one_hot(reverse.4, lsb_prio=true, id=5)
+  encode.6: bits[3] = encode(one_hot.5, id=6)
+  ret identity.7: bits[3] = identity(encode.6, id=7)
+}
+
+fn f(arg: bits[4] id=1) -> bits[3] {
+  ret r: bits[3] = invoke(arg, to_apply=__pir_ext__ext_clz__w4, id=2)
+}
+"#;
+
+    let pkg = {
+        let mut parser = Parser::new(ir_text);
+        parser.parse_and_validate_package().expect("parse/validate")
+    };
+    assert_eq!(pkg.members.len(), 1, "expected helper to be lifted away");
+    assert!(pkg.get_fn("__pir_ext__ext_clz__w4").is_none());
+    assert!(
+        pkg.to_string().contains("ext_clz(arg, id=2)"),
+        "expected helper invoke to be lifted to ext_clz"
+    );
+}
+
+#[test]
+fn verilogffi_wrapped_ext_clz_accepts_escaped_verilog_literal_width_metadata() {
+    let ir_text = r#"package clz_wrapped
+
+#[ffi_proto("""code_template: "pir_ext_clz {fn} (.arg({arg}), .out({return})); /* xlsynth_pir_ext=ext_clz;width=32\'h00000004 */"
+""")]
+fn __pir_ext__ext_clz__w4(arg: bits[4] id=3) -> bits[3] {
+  reverse.4: bits[4] = reverse(arg, id=4)
+  one_hot.5: bits[5] = one_hot(reverse.4, lsb_prio=true, id=5)
+  encode.6: bits[3] = encode(one_hot.5, id=6)
+  ret identity.7: bits[3] = identity(encode.6, id=7)
+}
+
+fn f(arg: bits[4] id=1) -> bits[3] {
+  ret r: bits[3] = invoke(arg, to_apply=__pir_ext__ext_clz__w4, id=2)
+}
+"#;
+
+    let pkg = {
+        let mut parser = Parser::new(ir_text);
+        parser.parse_and_validate_package().expect("parse/validate")
+    };
+    assert_eq!(pkg.members.len(), 1, "expected helper to be lifted away");
+    assert!(pkg.get_fn("__pir_ext__ext_clz__w4").is_none());
+    assert!(
+        pkg.to_string().contains("ext_clz(arg, id=2)"),
+        "expected helper invoke to be lifted to ext_clz"
+    );
+}
+
+#[test]
 fn verilogffi_wrapped_ext_nary_add_round_trips_verbatim() {
     let ir_text = r#"package nary_add_wrapped
 
