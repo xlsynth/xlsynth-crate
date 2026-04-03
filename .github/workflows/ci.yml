@@ -663,6 +663,23 @@ jobs:
           done
           ldconfig
 
+      - name: Report disk usage before dnf clean (rocky8)
+        run: |
+          python3 scripts/report_disk_usage.py \
+            --label "rocky8: after package/tool installs, before dnf clean" \
+            --workspace-root "${GITHUB_WORKSPACE}"
+
+      - name: Clean dnf caches (rocky8)
+        run: |
+          dnf clean all || true
+          rm -rf /var/cache/dnf
+
+      - name: Report disk usage after dnf clean (rocky8)
+        run: |
+          python3 scripts/report_disk_usage.py \
+            --label "rocky8: after dnf clean" \
+            --workspace-root "${GITHUB_WORKSPACE}"
+
       - name: Download Slang
         run: |
           curl -L -o slang "https://github.com/xlsynth/slang-rs/releases/download/ci/slang-rocky8"
@@ -670,10 +687,23 @@ jobs:
           # Add slang to PATH for subprocess usage
           echo "$(pwd)" >> $GITHUB_PATH
 
+      - name: Report disk usage before cargo build (rocky8)
+        run: |
+          python3 scripts/report_disk_usage.py \
+            --label "rocky8: before cargo build" \
+            --workspace-root "${GITHUB_WORKSPACE}"
+
       - name: Build crate
         run: |
           source $HOME/.cargo/env
           cargo build --features with-bitwuzla-system --workspace -vv
+
+      - name: Report disk usage after cargo build (rocky8)
+        if: ${{ always() }}
+        run: |
+          python3 scripts/report_disk_usage.py \
+            --label "rocky8: after cargo build" \
+            --workspace-root "${GITHUB_WORKSPACE}"
 
       - name: Test crate
         run: |
@@ -684,6 +714,13 @@ jobs:
           export SLANG_PATH=`realpath slang`
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
           cargo test --features with-bitwuzla-system --workspace
+
+      - name: Report disk usage after cargo test (rocky8)
+        if: ${{ always() }}
+        run: |
+          python3 scripts/report_disk_usage.py \
+            --label "rocky8: after cargo test" \
+            --workspace-root "${GITHUB_WORKSPACE}"
 
   # -----------------------------------------------------------
   # 6) AlmaLinux 9 smoke test
