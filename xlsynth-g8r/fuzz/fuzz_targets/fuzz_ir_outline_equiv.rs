@@ -4,6 +4,8 @@
 use libfuzzer_sys::fuzz_target;
 
 use std::collections::{HashMap, HashSet, VecDeque};
+#[cfg(feature = "with-z3-binary-test")]
+use std::sync::OnceLock;
 
 #[cfg(any(feature = "with-bitwuzla-system", feature = "with-bitwuzla-built"))]
 use xlsynth_prover::solver::bitwuzla::{Bitwuzla, BitwuzlaOptions};
@@ -131,6 +133,18 @@ fn permute_vec_deterministic<T: Clone>(v: &mut Vec<T>, seed: u64) {
     }
 }
 
+#[cfg(feature = "with-z3-binary-test")]
+fn z3_binary_available() -> bool {
+    static Z3_BINARY_AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *Z3_BINARY_AVAILABLE.get_or_init(|| {
+        std::process::Command::new("z3")
+            .arg("-version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    })
+}
+
 fuzz_target!(|sample: FuzzSample| {
     let _ = env_logger::builder().is_test(true).try_init();
 
@@ -236,8 +250,11 @@ fuzz_target!(|sample: FuzzSample| {
     log::info!("work_pkg_text:\n{}", work_pkg.to_string());
 
     // Prove equivalence: original function == outlined outer function
-    let lhs = EqProverFn::new(&orig_fn, None);
-    let rhs = EqProverFn::new(&res.outer, None);
+    // The outlined outer invokes `outlined_inner`, so the prover needs package
+    // context on the RHS to resolve the callee. Pass package context on the LHS
+    // too for symmetry and future-proofing if generated samples gain invokes.
+    let lhs = EqProverFn::new(&orig_fn, Some(&orig_pkg));
+    let rhs = EqProverFn::new(&res.outer, Some(&work_pkg));
 
     #[cfg(feature = "has-bitwuzla")]
     {
@@ -308,24 +325,28 @@ fuzz_target!(|sample: FuzzSample| {
 
     #[cfg(feature = "with-z3-binary-test")]
     {
-        let r = prove_ir_fn_equiv::<EasySmtSolver>(
-            &EasySmtConfig::z3(),
-            &lhs,
-            &rhs,
-            AssertionSemantics::Same,
-            None,
-            false,
-        );
-        if let EquivResult::Disproved {
-            lhs_inputs,
-            rhs_inputs,
-            ..
-        } = r
-        {
-            panic!(
-                "Outline equivalence failed (Z3 binary): lhs_inputs={:?} rhs_inputs={:?}",
-                lhs_inputs, rhs_inputs
+        // A missing local `z3` binary is an environment issue, not a sample
+        // failure; skip only this backend in that case.
+        if z3_binary_available() {
+            let r = prove_ir_fn_equiv::<EasySmtSolver>(
+                &EasySmtConfig::z3(),
+                &lhs,
+                &rhs,
+                AssertionSemantics::Same,
+                None,
+                false,
             );
+            if let EquivResult::Disproved {
+                lhs_inputs,
+                rhs_inputs,
+                ..
+            } = r
+            {
+                panic!(
+                    "Outline equivalence failed (Z3 binary): lhs_inputs={:?} rhs_inputs={:?}",
+                    lhs_inputs, rhs_inputs
+                );
+            }
         }
     }
 });

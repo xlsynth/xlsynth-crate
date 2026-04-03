@@ -300,9 +300,7 @@ pub fn outline_with_ordering(
 
     // Build inner params in specified order
     let mut inner_params: Vec<Param> = Vec::new();
-    let mut outer_paramid_to_inner: HashMap<usize, ParamId> = HashMap::new();
     let mut param_index_to_inner_param_id: Vec<ParamId> = Vec::new();
-    let mut param_index_to_source_outer_node: Vec<Option<usize>> = Vec::new();
     let mut used_names: HashSet<String> = HashSet::new();
     let mut next_param_pos: usize = 1;
     for (idx, ps) in ordering.params.iter().enumerate() {
@@ -331,9 +329,7 @@ pub fn outline_with_ordering(
                     ty: ty.clone(),
                     id: inner_id,
                 });
-                outer_paramid_to_inner.insert(id_number, inner_id);
                 param_index_to_inner_param_id.push(inner_id);
-                param_index_to_source_outer_node.push(Some(node.index));
                 if required_param_ids.contains(&id_number) {
                     required_param_ids.remove(&id_number);
                 }
@@ -365,7 +361,6 @@ pub fn outline_with_ordering(
                     id: inner_id,
                 });
                 param_index_to_inner_param_id.push(inner_id);
-                param_index_to_source_outer_node.push(Some(node.index));
                 if required_nonparam_inputs.contains(&node.index) {
                     required_nonparam_inputs.remove(&node.index);
                 }
@@ -384,59 +379,40 @@ pub fn outline_with_ordering(
         required_nonparam_inputs
     );
 
-    // Build inner nodes: create GetParam nodes for any ParamIds that do not already
-    // exist inside the selected set (i.e. when the GetParam node itself is
-    // external), and for all external non-param inputs. Track a map from outer
-    // NodeRef -> inner NodeRef for remapping payload operands.
-    let mut inner_nodes: Vec<Node> = Vec::new();
-    let mut ext_ref_to_inner_ref: HashMap<usize, NodeRef> = HashMap::new();
+    // Build inner nodes in canonical PIR layout:
+    // - node[0] is reserved Nil
+    // - node[1..=params.len()] are GetParam nodes in signature order
+    // Track a map from each source outer node used as an inner parameter to the
+    // canonical inner GetParam node so body cloning and return wiring can reuse it.
+    let mut inner_nodes: Vec<Node> = vec![Node {
+        text_id: 0,
+        name: Some("reserved_zero_node".to_string()),
+        ty: Type::nil(),
+        payload: NodePayload::Nil,
+        pos: None,
+    }];
+    let mut outer_source_to_inner_ref: HashMap<usize, NodeRef> = HashMap::new();
     let mut next_inner_text_id: usize = next_text_id(&outer.nodes);
 
-    // Create synthesized GetParam nodes in inner for any external GetParam inputs.
+    // Create one canonical GetParam node for each inner parameter, preserving the
+    // caller-requested ordering.
     for (pidx, ps) in ordering.params.iter().enumerate() {
         let node = ps.node;
-        if !to_outline_set.contains(&node.index) {
-            if let NodePayload::GetParam(_) = outer.nodes[node.index].payload {
-                let inner_pid = param_index_to_inner_param_id[pidx];
-                let src_node = &outer.nodes[node.index];
-                inner_nodes.push(Node {
-                    text_id: next_inner_text_id,
-                    name: Some(inner_params[pidx].name.clone()),
-                    ty: src_node.ty.clone(),
-                    payload: NodePayload::GetParam(inner_pid),
-                    pos: src_node.pos.clone(),
-                });
-                let new_ref = NodeRef {
-                    index: inner_nodes.len() - 1,
-                };
-                ext_ref_to_inner_ref.insert(node.index, new_ref);
-                next_inner_text_id += 1;
-            }
-        }
-    }
-
-    // Now create GetParam nodes for each external non-param input, in the same
-    // order they were appended to inner_params after the ParamIds.
-    // Compute the ParamIds (and names) assigned to nonparam inputs in order.
-    for (pidx, ps) in ordering.params.iter().enumerate() {
-        let node = ps.node;
-        if !to_outline_set.contains(&node.index) {
-            if !matches!(outer.nodes[node.index].payload, NodePayload::GetParam(_)) {
-                let src_node = &outer.nodes[node.index];
-                inner_nodes.push(Node {
-                    text_id: next_inner_text_id,
-                    name: Some(inner_params[pidx].name.clone()),
-                    ty: src_node.ty.clone(),
-                    payload: NodePayload::GetParam(param_index_to_inner_param_id[pidx]),
-                    pos: src_node.pos.clone(),
-                });
-                let new_ref = NodeRef {
-                    index: inner_nodes.len() - 1,
-                };
-                ext_ref_to_inner_ref.insert(node.index, new_ref);
-                next_inner_text_id += 1;
-            }
-        }
+        let src_node = &outer.nodes[node.index];
+        inner_nodes.push(Node {
+            text_id: next_inner_text_id,
+            name: Some(inner_params[pidx].name.clone()),
+            ty: src_node.ty.clone(),
+            payload: NodePayload::GetParam(param_index_to_inner_param_id[pidx]),
+            pos: src_node.pos.clone(),
+        });
+        outer_source_to_inner_ref.insert(
+            node.index,
+            NodeRef {
+                index: inner_nodes.len() - 1,
+            },
+        );
+        next_inner_text_id += 1;
     }
 
     // Clone outlined nodes into inner, remapping operands:
@@ -448,6 +424,15 @@ pub fn outline_with_ordering(
     let mut outlined_to_inner: HashMap<usize, NodeRef> = HashMap::new();
     for nr in topo_filtered.into_iter() {
         let old = &outer.nodes[nr.index];
+        if matches!(old.payload, NodePayload::GetParam(_)) {
+            // Selected GetParam nodes are already represented by canonical
+            // signature-order params at node[1..].
+            let new_ref = *outer_source_to_inner_ref
+                .get(&nr.index)
+                .expect("inner param ref must exist for selected GetParam");
+            outlined_to_inner.insert(nr.index, new_ref);
+            continue;
+        }
         // Map operands: internal operands map to already-cloned nodes; external
         // operands map to synthesized GetParam nodes (must exist).
         let mapper = |(_, r): (usize, NodeRef)| -> NodeRef {
@@ -457,20 +442,13 @@ pub fn outline_with_ordering(
                     .copied()
                     .unwrap_or_else(|| panic!("missing mapping for internal operand {:?}", r))
             } else {
-                ext_ref_to_inner_ref
+                outer_source_to_inner_ref
                     .get(&r.index)
                     .copied()
                     .unwrap_or_else(|| panic!("missing mapping for external operand {:?}", r))
             }
         };
-        let mut new_payload = remap_payload_with(&old.payload, mapper);
-        // If cloning a GetParam, remap its ParamId to the inner-assigned id.
-        if let NodePayload::GetParam(pid) = old.payload {
-            let new_pid = *outer_paramid_to_inner
-                .get(&pid.get_wrapped_id())
-                .expect("inner param id must exist for cloned get_param");
-            new_payload = NodePayload::GetParam(new_pid);
-        }
+        let new_payload = remap_payload_with(&old.payload, mapper);
         let new_node = Node {
             text_id: old.text_id,
             name: old.name.clone(),
@@ -526,7 +504,7 @@ pub fn outline_with_ordering(
             ret_elem_tys.push(inner_nodes[ir.index].ty.clone());
             ret_elem_refs.push(ir);
         } else {
-            let ir = *ext_ref_to_inner_ref
+            let ir = *outer_source_to_inner_ref
                 .get(&node.index)
                 .expect("inner ref for passthrough source");
             ret_elem_tys.push(inner_nodes[ir.index].ty.clone());
@@ -708,8 +686,12 @@ pub fn outline_with_ordering(
     }
 
     // Clobber outlined nodes' payloads with Nil (except GetParam nodes, which may
-    // be used as invoke operands)
+    // be used as invoke operands, and protected nodes whose values are still
+    // needed to compute invoke operands).
     for &idx in to_outline_set.iter() {
+        if protected.contains(&idx) {
+            continue;
+        }
         if !matches!(outer_nodes[idx].payload, NodePayload::GetParam(_)) {
             outer_nodes[idx].payload = NodePayload::Nil;
         }
@@ -889,6 +871,76 @@ mod tests {
         assert_eq!(res.inner.params[1].name, "b");
         // Equivalence: original vs outlined outer
         assert_equiv_pkg(&f, &res.outer, Some(&res.inner));
+    }
+
+    #[test]
+    fn outline_param_only_region_preserves_inner_layout() {
+        let ir = r#"fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret a: bits[1] = param(name=a, id=1)
+}"#;
+        let (mut pkg, f) = parse_single_fn(ir);
+        let mut to_sel: HashSet<NodeRef> = HashSet::new();
+        to_sel.insert(
+            f.node_refs()
+                .into_iter()
+                .find(|nr| {
+                    matches!(
+                        f.nodes[nr.index].payload,
+                        NodePayload::GetParam(pid) if pid.get_wrapped_id() == 1
+                    )
+                })
+                .expect("found param a node"),
+        );
+
+        let res = outline(&f, &to_sel, "f_out", "f_inner", &mut pkg);
+
+        res.outer.check_pir_layout_invariants().unwrap();
+        res.inner.check_pir_layout_invariants().unwrap();
+        assert!(matches!(res.inner.nodes[0].payload, NodePayload::Nil));
+        assert!(matches!(
+            res.inner.nodes[1].payload,
+            NodePayload::GetParam(pid) if pid.get_wrapped_id() == 1
+        ));
+        assert_eq!(res.inner.ret_node_ref, Some(NodeRef { index: 1 }));
+    }
+
+    #[test]
+    fn outline_preserves_protected_selected_producers_for_invoke_operands() {
+        let ir = r#"fn f(p0: bits[6] id=1) -> bits[6] {
+  one_hot.2: bits[7] = one_hot(p0, lsb_prio=true, id=2)
+  bit_slice.3: bits[1] = bit_slice(one_hot.2, start=6, width=1, id=3)
+  dynamic_bit_slice.4: bits[6] = dynamic_bit_slice(p0, bit_slice.3, width=6, id=4)
+  ret p0: bits[6] = param(name=p0, id=1)
+}"#;
+        let (mut pkg, f) = parse_single_fn(ir);
+        let mut to_sel: HashSet<NodeRef> = HashSet::new();
+        for (i, n) in f.nodes.iter().enumerate() {
+            if matches!(
+                n.payload,
+                NodePayload::OneHot { .. } | NodePayload::DynamicBitSlice { .. }
+            ) {
+                to_sel.insert(NodeRef { index: i });
+            }
+        }
+
+        let res = outline(&f, &to_sel, "f_out", "f_inner", &mut pkg);
+
+        res.outer.check_pir_layout_invariants().unwrap();
+        res.inner.check_pir_layout_invariants().unwrap();
+
+        let bit_slice_arg = res
+            .outer
+            .nodes
+            .iter()
+            .find_map(|n| match n.payload {
+                NodePayload::BitSlice { arg, .. } => Some(arg),
+                _ => None,
+            })
+            .expect("found outer bit_slice");
+        assert!(matches!(
+            res.outer.nodes[bit_slice_arg.index].payload,
+            NodePayload::OneHot { .. }
+        ));
     }
 
     #[test]

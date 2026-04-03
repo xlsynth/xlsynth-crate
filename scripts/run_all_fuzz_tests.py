@@ -208,7 +208,9 @@ def main() -> int:
         futures = [executor.submit(run_cmd_captured, cmd) for _, _, cmd in run_jobs]
         for (fuzz_dir, target, cmd), future in zip(run_jobs, futures):
             print(f"\n--- Running {target} in {fuzz_dir} ---", file=sys.stderr)
-            print("  => " + " ".join(shlex.quote(part) for part in cmd), file=sys.stderr)
+            print(
+                "  => " + " ".join(shlex.quote(part) for part in cmd), file=sys.stderr
+            )
             returncode, output = future.result()
             if output:
                 print(output, end="")
