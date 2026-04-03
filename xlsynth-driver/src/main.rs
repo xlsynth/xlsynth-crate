@@ -16,6 +16,7 @@
 //!
 //! - dslx2pipeline: Converts a DSLX entry point to a SystemVerilog pipeline.
 //! - dslx2ir: Converts a DSLX file to the XLS IR.
+//! - ir-inline: Converts an XLS IR file to an inlined XLS IR file.
 //! - ir2opt: Converts an XLS IR file to an optimized XLS IR file.
 //! - dslx2sv-types: Convert type definitions in a DSLX file to SystemVerilog
 //!   types.
@@ -91,6 +92,7 @@ mod ir_fn_to_dslx;
 mod ir_fn_to_json;
 mod ir_fn_to_z3_smtlib;
 mod ir_ged;
+mod ir_inline;
 mod ir_localized_eco;
 mod ir_mcmc_opt;
 mod ir_op_histo_corpus;
@@ -729,6 +731,33 @@ fn main() {
                 ),
         )
         // ir2opt subcommand requires a top symbol
+        .subcommand(
+            clap::Command::new("ir-inline")
+                .about("Converts IR to call-inlined IR")
+                .arg(
+                    Arg::new("ir_input_file")
+                        .help("The input IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("ir_top")
+                        .long("top")
+                        .value_name("TOP")
+                        .help("The top-level entry point; defaults to the package top or first function")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("unroll")
+                        .long("unroll")
+                        .value_name("BOOL")
+                        .action(ArgAction::Set)
+                        .value_parser(["true", "false"])
+                        .num_args(1)
+                        .default_value("true")
+                        .help("Also unroll counted_for nodes while inlining (default: true)"),
+                ),
+        )
         .subcommand(
             clap::Command::new("ir2opt")
                 .about("Converts IR to optimized IR")
@@ -2968,6 +2997,9 @@ fn main() {
         }
         Some(("ir2opt", subm)) => {
             ir2opt::handle_ir2opt(subm, &config);
+        }
+        Some(("ir-inline", subm)) => {
+            ir_inline::handle_ir_inline(subm, &config);
         }
         Some(("ir-mcmc-opt", subm)) => {
             ir_mcmc_opt::handle_ir_mcmc_opt(subm);

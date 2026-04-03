@@ -140,6 +140,14 @@ When adding or changing flags for an existing `xlsynth-driver` subcommand, updat
 
 When adding or changing the `ir-query` pattern language (new matchers, syntax tweaks, etc.), update the `ir-query` documentation in `xlsynth-driver/README.md` to keep the DSL reference current.
 
+For `xlsynth-driver` subcommands that operate on package-form IR and accept a
+top-selection flag such as `--top`, prefer the following behavior:
+
+- If the package already has a `top` function/member set, use that by default.
+- If the package does not have a `top` set, require an explicit `--top` flag
+  rather than silently picking a function/member.
+- If the user provides `--top`, it should override the package default.
+
 ## Augmented optimizer (`aug-opt`): how to exercise it
 
 There are two primary ways to "play with" the augmented optimizer loop (libxls optimization + small PIR rewrites).
