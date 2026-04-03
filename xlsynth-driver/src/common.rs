@@ -68,6 +68,18 @@ pub fn write_stdout_line(line: &str) {
     }
 }
 
+/// Writes text to stdout while treating broken pipes as a clean exit.
+pub fn write_stdout(text: &str) {
+    let mut out = std::io::stdout().lock();
+    if let Err(e) = write!(out, "{}", text) {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            process::exit(0);
+        }
+        eprintln!("error: failed to write stdout: {e}");
+        process::exit(1);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CodegenFlags {
     pub input_valid_signal: Option<String>,
