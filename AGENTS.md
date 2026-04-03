@@ -144,8 +144,11 @@ For `xlsynth-driver` subcommands that operate on package-form IR and accept a
 top-selection flag such as `--top`, prefer the following behavior:
 
 - If the package already has a `top` function/member set, use that by default.
-- If the package does not have a `top` set, require an explicit `--top` flag
-  rather than silently picking a function/member.
+- If the package does not have a `top` set but there is exactly one suitable
+  function/member for that command, use it by default.
+- If the package does not have a `top` set and there are multiple suitable
+  functions/members, require an explicit `--top` flag rather than silently
+  picking one.
 - If the user provides `--top`, it should override the package default.
 
 ## Augmented optimizer (`aug-opt`): how to exercise it

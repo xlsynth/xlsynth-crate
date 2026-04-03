@@ -589,7 +589,8 @@ function and prints the rewritten IR to **stdout**.
   `opt_main`.
 - Optional flags:
   - `--top <NAME>` – select the entry point explicitly; defaults to the package
-    `top` function when present, otherwise the first function.
+    `top` function when present, or the only function when the package defines
+    exactly one function, and is otherwise required.
   - `--unroll=true|false` – also run loop unrolling so `counted_for` nodes are
     flattened into the top (default: `true`).
 

@@ -62,10 +62,30 @@ fn resolve_top_name(ir_text: &str, top: Option<&str>) -> Result<String, String> 
     let pkg = parser
         .parse_and_validate_package()
         .map_err(|e| format!("ir_inline: PIR parse/validate failed: {e}"))?;
-    let top_fn = pkg
-        .get_top_fn()
-        .ok_or_else(|| "ir_inline: input package has no top function".to_string())?;
-    Ok(top_fn.name.clone())
+    match &pkg.top {
+        Some((name, MemberType::Function)) => Ok(name.clone()),
+        Some((name, MemberType::Block)) => Err(format!(
+            "ir_inline: input package top member '{name}' is a block; pass --top to select a function"
+        )),
+        None => {
+            let function_names = pkg
+                .members
+                .iter()
+                .filter_map(|member| match member {
+                    PackageMember::Function(f) => Some(f.name.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            match function_names.as_slice() {
+                [name] => Ok(name.clone()),
+                [] => Err("ir_inline: input package has no functions".to_string()),
+                _ => Err(
+                    "ir_inline: input package has multiple functions and no explicit top function; pass --top"
+                        .to_string(),
+                ),
+            }
+        }
+    }
 }
 
 fn run_ir_inline_over_ir_text_via_toolchain(
@@ -290,6 +310,35 @@ top fn main(x: bits[8] id=30) -> bits[8] {
         assert_eq!(
             residual_counted_for_targets(&f),
             BTreeSet::from(["body".to_string()])
+        );
+    }
+
+    #[test]
+    fn resolve_top_name_uses_sole_function_when_package_has_no_top() {
+        let ir_text = r#"package p
+
+fn main(x: bits[8] id=1) -> bits[8] {
+  ret not.2: bits[8] = not(x, id=2)
+}"#;
+        assert_eq!(resolve_top_name(ir_text, None).unwrap(), "main");
+    }
+
+    #[test]
+    fn resolve_top_name_requires_explicit_top_when_package_has_multiple_functions_and_no_top() {
+        let ir_text = r#"package p
+
+fn helper(x: bits[8] id=1) -> bits[8] {
+  ret not.2: bits[8] = not(x, id=2)
+}
+
+fn main(x: bits[8] id=10) -> bits[8] {
+  ret add.11: bits[8] = add(x, x, id=11)
+}"#;
+        let err = resolve_top_name(ir_text, None).unwrap_err();
+        assert!(
+            err.contains("multiple functions and no explicit top function"),
+            "err: {}",
+            err
         );
     }
 }

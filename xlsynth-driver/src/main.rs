@@ -744,7 +744,7 @@ fn main() {
                     Arg::new("ir_top")
                         .long("top")
                         .value_name("TOP")
-                        .help("The top-level entry point; defaults to the package top or first function")
+                        .help("The top-level entry point; defaults to the package top function when present, or the only function when unique, and is otherwise required")
                         .action(ArgAction::Set),
                 )
                 .arg(
