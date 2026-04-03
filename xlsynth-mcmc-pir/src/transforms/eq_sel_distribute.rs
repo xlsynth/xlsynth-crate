@@ -102,8 +102,9 @@ impl PirTransform for EqSelDistributeTransform {
         PirTransformKind::EqSelDistribute
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             let node = f.get_node(nr);
             match &node.payload {
@@ -118,7 +119,10 @@ impl PirTransform for EqSelDistributeTransform {
                             && Self::type_of(f, a) == Self::type_of(f, *rhs)
                             && Self::type_of(f, b) == Self::type_of(f, *rhs)
                         {
-                            out.push(TransformLocation::Node(nr));
+                            out.push(TransformCandidate {
+                                location: TransformLocation::Node(nr),
+                                always_equivalent,
+                            });
                             continue;
                         }
                     }
@@ -127,7 +131,10 @@ impl PirTransform for EqSelDistributeTransform {
                             && Self::type_of(f, a) == Self::type_of(f, *lhs)
                             && Self::type_of(f, b) == Self::type_of(f, *lhs)
                         {
-                            out.push(TransformLocation::Node(nr));
+                            out.push(TransformCandidate {
+                                location: TransformLocation::Node(nr),
+                                always_equivalent,
+                            });
                         }
                     }
                 }
@@ -146,7 +153,10 @@ impl PirTransform for EqSelDistributeTransform {
                     if Self::choose_fold_candidate(f, Binop::Eq, cases[0], cases[1]).is_some()
                         || Self::choose_fold_candidate(f, Binop::Ne, cases[0], cases[1]).is_some()
                     {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
                 _ => {}
@@ -295,9 +305,5 @@ impl PirTransform for EqSelDistributeTransform {
                     .to_string(),
             ),
         }
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }

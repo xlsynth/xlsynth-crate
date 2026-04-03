@@ -462,6 +462,14 @@ pub enum TransformLocation {
     },
 }
 
+/// A candidate transform application site plus whether that specific
+/// application is known to preserve semantics.
+#[derive(Debug, Clone)]
+pub struct TransformCandidate {
+    pub location: TransformLocation,
+    pub always_equivalent: bool,
+}
+
 /// Defines a reversible transformation that can be applied to a PIR function.
 pub trait PirTransform: fmt::Debug + Send + Sync {
     /// Returns the specific `PirTransformKind` that this trait object
@@ -470,21 +478,13 @@ pub trait PirTransform: fmt::Debug + Send + Sync {
 
     /// Finds all possible application sites for this transform in the given
     /// function.
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation>;
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate>;
 
     /// Applies the transform to the function at the given candidate site.
     ///
     /// The MCMC loop is expected to pass a clone of the function if rejection
     /// implies reverting to the prior state.
     fn apply(&self, f: &mut IrFn, loc: &TransformLocation) -> Result<(), String>;
-
-    /// Indicates whether this transform is always semantics preserving.
-    ///
-    /// When `true`, applying the transform cannot change the functional
-    /// behaviour of the function, so equivalence checks can be skipped.
-    fn always_equivalent(&self) -> bool {
-        true
-    }
 }
 pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
     vec![

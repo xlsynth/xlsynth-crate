@@ -79,14 +79,18 @@ impl PirTransform for CarrySplitAddTransform {
         PirTransformKind::CarrySplitAdd
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             match &f.get_node(nr).payload {
                 NodePayload::Binop(Binop::Add, _, _) => {
                     if let Some(w) = Self::bits_width(f, nr) {
                         if w >= 2 {
-                            out.push(TransformLocation::Node(nr));
+                            out.push(TransformCandidate {
+                                location: TransformLocation::Node(nr),
+                                always_equivalent,
+                            });
                         }
                     }
                 }
@@ -101,9 +105,15 @@ impl PirTransform for CarrySplitAddTransform {
                         f.get_node(ops[0]).payload,
                         NodePayload::Binop(Binop::Add, _, _)
                     ) {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     } else {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
                 _ => {}
@@ -318,9 +328,5 @@ impl PirTransform for CarrySplitAddTransform {
 
             _ => Err("CarrySplitAddTransform: expected add(..) or concat(..)".to_string()),
         }
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }

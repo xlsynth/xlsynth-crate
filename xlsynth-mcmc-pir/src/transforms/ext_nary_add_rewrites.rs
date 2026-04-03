@@ -279,10 +279,62 @@ fn term_payload_matches_nested_ext_nary_add(
     }
 }
 
+/// Returns whether absorbing a resize op into a term keeps the same value for
+/// all inputs without needing an oracle.
+fn absorb_extend_candidate_is_always_equivalent(
+    f: &IrFn,
+    outer_term: &ExtNaryAddTerm,
+    inner_signed: bool,
+    inner_arg: NodeRef,
+    out_w: usize,
+) -> bool {
+    let Some(inner_resize_w) = bits_width(&f.get_node(outer_term.operand).ty) else {
+        return false;
+    };
+    if inner_resize_w >= out_w {
+        return true;
+    }
+
+    let Some(inner_arg_w) = bits_width(&f.get_node(inner_arg).ty) else {
+        return false;
+    };
+    inner_arg_w == 0
+        || (inner_arg_w <= inner_resize_w
+            && (outer_term.signed == inner_signed
+                || (!inner_signed && inner_resize_w > inner_arg_w)))
+}
+
+fn absorb_neg_candidate_is_always_equivalent(
+    f: &IrFn,
+    term: &ExtNaryAddTerm,
+    out_w: usize,
+) -> bool {
+    bits_width(&f.get_node(term.operand).ty)
+        .is_some_and(|operand_w| operand_w == 0 || operand_w >= out_w)
+}
+
+fn absorb_binop_candidate_is_always_equivalent(
+    f: &IrFn,
+    term: &ExtNaryAddTerm,
+    out_w: usize,
+) -> bool {
+    bits_width(&f.get_node(term.operand).ty)
+        .is_some_and(|operand_w| operand_w == 0 || operand_w >= out_w)
+}
+
+fn combine_nary_add_candidate_is_always_equivalent(
+    f: &IrFn,
+    term: &ExtNaryAddTerm,
+    out_w: usize,
+) -> bool {
+    ext_nary_add_result_width(f, term.operand).is_some_and(|inner_w| inner_w >= out_w)
+}
+
 fn change_ext_nary_add_candidates(
     f: &IrFn,
     target_arch: ExtNaryAddArchitecture,
-) -> Vec<TransformLocation> {
+    always_equivalent: bool,
+) -> Vec<TransformCandidate> {
     f.node_refs()
         .into_iter()
         .filter(|nr| {
@@ -294,7 +346,10 @@ fn change_ext_nary_add_candidates(
                 } if current_arch != target_arch
             )
         })
-        .map(TransformLocation::Node)
+        .map(|nr| TransformCandidate {
+            location: TransformLocation::Node(nr),
+            always_equivalent,
+        })
         .collect()
 }
 
@@ -332,7 +387,8 @@ impl PirTransform for AddToExtNaryAddTransform {
         PirTransformKind::AddToExtNaryAdd
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
         f.node_refs()
             .into_iter()
             .filter(|nr| {
@@ -344,7 +400,10 @@ impl PirTransform for AddToExtNaryAddTransform {
                 };
                 is_bits_w(f, lhs, w) && is_bits_w(f, rhs, w)
             })
-            .map(TransformLocation::Node)
+            .map(|nr| TransformCandidate {
+                location: TransformLocation::Node(nr),
+                always_equivalent,
+            })
             .collect()
     }
 
@@ -394,7 +453,8 @@ impl PirTransform for SubToExtNaryAddTransform {
         PirTransformKind::SubToExtNaryAdd
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
         f.node_refs()
             .into_iter()
             .filter(|nr| {
@@ -406,7 +466,10 @@ impl PirTransform for SubToExtNaryAddTransform {
                 };
                 is_bits_w(f, lhs, w) && is_bits_w(f, rhs, w)
             })
-            .map(TransformLocation::Node)
+            .map(|nr| TransformCandidate {
+                location: TransformLocation::Node(nr),
+                always_equivalent,
+            })
             .collect()
     }
 
@@ -456,8 +519,9 @@ impl PirTransform for ChangeExtNaryAddToRippleCarryTransform {
         PirTransformKind::ChangeExtNaryAddToRippleCarry
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        change_ext_nary_add_candidates(f, ExtNaryAddArchitecture::RippleCarry)
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        change_ext_nary_add_candidates(f, ExtNaryAddArchitecture::RippleCarry, always_equivalent)
     }
 
     fn apply(&self, f: &mut IrFn, loc: &TransformLocation) -> Result<(), String> {
@@ -475,8 +539,9 @@ impl PirTransform for ChangeExtNaryAddToBrentKungTransform {
         PirTransformKind::ChangeExtNaryAddToBrentKung
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        change_ext_nary_add_candidates(f, ExtNaryAddArchitecture::BrentKung)
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        change_ext_nary_add_candidates(f, ExtNaryAddArchitecture::BrentKung, always_equivalent)
     }
 
     fn apply(&self, f: &mut IrFn, loc: &TransformLocation) -> Result<(), String> {
@@ -494,8 +559,9 @@ impl PirTransform for ChangeExtNaryAddToKoggeStoneTransform {
         PirTransformKind::ChangeExtNaryAddToKoggeStone
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        change_ext_nary_add_candidates(f, ExtNaryAddArchitecture::KoggeStone)
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        change_ext_nary_add_candidates(f, ExtNaryAddArchitecture::KoggeStone, always_equivalent)
     }
 
     fn apply(&self, f: &mut IrFn, loc: &TransformLocation) -> Result<(), String> {
@@ -513,11 +579,15 @@ impl PirTransform for BinaryExtNaryAddToAddTransform {
         PirTransformKind::BinaryExtNaryAddToAdd
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
         f.node_refs()
             .into_iter()
             .filter(|nr| binary_ext_nary_add_operands_matching_result(f, *nr).is_some())
-            .map(TransformLocation::Node)
+            .map(|nr| TransformCandidate {
+                location: TransformLocation::Node(nr),
+                always_equivalent,
+            })
             .collect()
     }
 
@@ -546,15 +616,27 @@ impl PirTransform for AbsorbExtendIntoExtNaryAddTermTransform {
         PirTransformKind::AbsorbExtendIntoExtNaryAddTerm
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             let NodePayload::ExtNaryAdd { terms, .. } = &f.get_node(nr).payload else {
                 continue;
             };
+            let Some(out_w) = ext_nary_add_result_width(f, nr) else {
+                continue;
+            };
             for (term_index, term) in terms.iter().enumerate() {
-                if term_payload_matches_resize(f, term).is_some() {
-                    out.push(make_term_location(nr, term_index, term.operand));
+                if let Some((inner_signed, inner_arg)) = term_payload_matches_resize(f, term) {
+                    out.push(TransformCandidate {
+                        location: make_term_location(nr, term_index, term.operand),
+                        always_equivalent: absorb_extend_candidate_is_always_equivalent(
+                            f,
+                            term,
+                            inner_signed,
+                            inner_arg,
+                            out_w,
+                        ),
+                    });
                 }
             }
         }
@@ -577,10 +659,6 @@ impl PirTransform for AbsorbExtendIntoExtNaryAddTermTransform {
         f.get_node_mut(nr).payload = NodePayload::ExtNaryAdd { terms, arch };
         Ok(())
     }
-
-    fn always_equivalent(&self) -> bool {
-        false
-    }
 }
 
 impl PirTransform for AbsorbNegIntoExtNaryAddTermTransform {
@@ -588,15 +666,23 @@ impl PirTransform for AbsorbNegIntoExtNaryAddTermTransform {
         PirTransformKind::AbsorbNegIntoExtNaryAddTerm
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             let NodePayload::ExtNaryAdd { terms, .. } = &f.get_node(nr).payload else {
                 continue;
             };
+            let Some(out_w) = ext_nary_add_result_width(f, nr) else {
+                continue;
+            };
             for (term_index, term) in terms.iter().enumerate() {
                 if term_payload_matches_neg(f, term).is_some() {
-                    out.push(make_term_location(nr, term_index, term.operand));
+                    out.push(TransformCandidate {
+                        location: make_term_location(nr, term_index, term.operand),
+                        always_equivalent: absorb_neg_candidate_is_always_equivalent(
+                            f, term, out_w,
+                        ),
+                    });
                 }
             }
         }
@@ -618,10 +704,6 @@ impl PirTransform for AbsorbNegIntoExtNaryAddTermTransform {
         f.get_node_mut(nr).payload = NodePayload::ExtNaryAdd { terms, arch };
         Ok(())
     }
-
-    fn always_equivalent(&self) -> bool {
-        false
-    }
 }
 
 impl PirTransform for AbsorbAddOperandIntoExtNaryAddTransform {
@@ -629,15 +711,23 @@ impl PirTransform for AbsorbAddOperandIntoExtNaryAddTransform {
         PirTransformKind::AbsorbAddOperandIntoExtNaryAdd
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             let NodePayload::ExtNaryAdd { terms, .. } = &f.get_node(nr).payload else {
                 continue;
             };
+            let Some(out_w) = ext_nary_add_result_width(f, nr) else {
+                continue;
+            };
             for (term_index, term) in terms.iter().enumerate() {
                 if term_payload_matches_add(f, term).is_some() {
-                    out.push(make_term_location(nr, term_index, term.operand));
+                    out.push(TransformCandidate {
+                        location: make_term_location(nr, term_index, term.operand),
+                        always_equivalent: absorb_binop_candidate_is_always_equivalent(
+                            f, term, out_w,
+                        ),
+                    });
                 }
             }
         }
@@ -674,10 +764,6 @@ impl PirTransform for AbsorbAddOperandIntoExtNaryAddTransform {
         f.get_node_mut(nr).payload = NodePayload::ExtNaryAdd { terms, arch };
         Ok(())
     }
-
-    fn always_equivalent(&self) -> bool {
-        false
-    }
 }
 
 impl PirTransform for AbsorbSubOperandIntoExtNaryAddTransform {
@@ -685,15 +771,23 @@ impl PirTransform for AbsorbSubOperandIntoExtNaryAddTransform {
         PirTransformKind::AbsorbSubOperandIntoExtNaryAdd
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             let NodePayload::ExtNaryAdd { terms, .. } = &f.get_node(nr).payload else {
                 continue;
             };
+            let Some(out_w) = ext_nary_add_result_width(f, nr) else {
+                continue;
+            };
             for (term_index, term) in terms.iter().enumerate() {
                 if term_payload_matches_sub(f, term).is_some() {
-                    out.push(make_term_location(nr, term_index, term.operand));
+                    out.push(TransformCandidate {
+                        location: make_term_location(nr, term_index, term.operand),
+                        always_equivalent: absorb_binop_candidate_is_always_equivalent(
+                            f, term, out_w,
+                        ),
+                    });
                 }
             }
         }
@@ -730,10 +824,6 @@ impl PirTransform for AbsorbSubOperandIntoExtNaryAddTransform {
         f.get_node_mut(nr).payload = NodePayload::ExtNaryAdd { terms, arch };
         Ok(())
     }
-
-    fn always_equivalent(&self) -> bool {
-        false
-    }
 }
 
 impl PirTransform for ExtractNegateFromExtNaryAddTermTransform {
@@ -741,15 +831,23 @@ impl PirTransform for ExtractNegateFromExtNaryAddTermTransform {
         PirTransformKind::ExtractNegateFromExtNaryAddTerm
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             let NodePayload::ExtNaryAdd { terms, .. } = &f.get_node(nr).payload else {
                 continue;
             };
+            let Some(out_w) = ext_nary_add_result_width(f, nr) else {
+                continue;
+            };
             for (term_index, term) in terms.iter().enumerate() {
                 if term.negated {
-                    out.push(make_term_location(nr, term_index, term.operand));
+                    out.push(TransformCandidate {
+                        location: make_term_location(nr, term_index, term.operand),
+                        always_equivalent: absorb_neg_candidate_is_always_equivalent(
+                            f, term, out_w,
+                        ),
+                    });
                 }
             }
         }
@@ -776,10 +874,6 @@ impl PirTransform for ExtractNegateFromExtNaryAddTermTransform {
         f.get_node_mut(nr).payload = NodePayload::ExtNaryAdd { terms, arch };
         Ok(())
     }
-
-    fn always_equivalent(&self) -> bool {
-        false
-    }
 }
 
 impl PirTransform for ExtractAddFromNaryAddTermsTransform {
@@ -787,18 +881,18 @@ impl PirTransform for ExtractAddFromNaryAddTermsTransform {
         PirTransformKind::ExtractAddFromNaryAddTerms
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             let NodePayload::ExtNaryAdd { terms, .. } = &f.get_node(nr).payload else {
                 continue;
             };
             for left_index in 0..terms.len().saturating_sub(1) {
-                out.push(make_term_location(
-                    nr,
-                    left_index,
-                    terms[left_index].operand,
-                ));
+                out.push(TransformCandidate {
+                    location: make_term_location(nr, left_index, terms[left_index].operand),
+                    always_equivalent,
+                });
             }
         }
         out
@@ -827,10 +921,6 @@ impl PirTransform for ExtractAddFromNaryAddTermsTransform {
         f.get_node_mut(nr).payload = NodePayload::ExtNaryAdd { terms, arch };
         Ok(())
     }
-
-    fn always_equivalent(&self) -> bool {
-        true
-    }
 }
 
 impl PirTransform for CombineNaryAddsTransform {
@@ -838,15 +928,23 @@ impl PirTransform for CombineNaryAddsTransform {
         PirTransformKind::CombineNaryAdds
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             let NodePayload::ExtNaryAdd { terms, .. } = &f.get_node(nr).payload else {
                 continue;
             };
+            let Some(out_w) = ext_nary_add_result_width(f, nr) else {
+                continue;
+            };
             for (term_index, term) in terms.iter().enumerate() {
                 if term_payload_matches_nested_ext_nary_add(f, term).is_some() {
-                    out.push(make_term_location(nr, term_index, term.operand));
+                    out.push(TransformCandidate {
+                        location: make_term_location(nr, term_index, term.operand),
+                        always_equivalent: combine_nary_add_candidate_is_always_equivalent(
+                            f, term, out_w,
+                        ),
+                    });
                 }
             }
         }
@@ -877,10 +975,6 @@ impl PirTransform for CombineNaryAddsTransform {
         };
         Ok(())
     }
-
-    fn always_equivalent(&self) -> bool {
-        false
-    }
 }
 
 #[cfg(test)]
@@ -900,15 +994,15 @@ mod tests {
     }
 
     fn find_term_candidate(
-        candidates: &[TransformLocation],
+        candidates: &[TransformCandidate],
         node: NodeRef,
         term_index: usize,
-    ) -> TransformLocation {
+    ) -> TransformCandidate {
         candidates
             .iter()
-            .find(|loc| {
+            .find(|candidate| {
                 matches!(
-                    loc,
+                    &candidate.location,
                     TransformLocation::RewireOperand {
                         node: loc_node,
                         operand_slot,
@@ -978,7 +1072,11 @@ mod tests {
 
         let candidates = t.find_candidates(&f);
         assert_eq!(candidates.len(), 1);
-        assert!(matches!(candidates[0], TransformLocation::Node(nr) if nr == sub_ref));
+        assert!(matches!(
+            candidates[0].location,
+            TransformLocation::Node(nr) if nr == sub_ref
+        ));
+        assert!(candidates[0].always_equivalent);
         t.apply(&mut f, &TransformLocation::Node(sub_ref))
             .expect("apply");
 
@@ -993,7 +1091,6 @@ mod tests {
             }
             other => panic!("expected ext_nary_add after rewrite, got {other:?}"),
         }
-        assert!(t.always_equivalent());
     }
 
     #[test]
@@ -1010,7 +1107,10 @@ mod tests {
         let mut t = ChangeExtNaryAddToRippleCarryTransform;
         let candidates = t.find_candidates(&f);
         assert_eq!(candidates.len(), 1);
-        assert!(matches!(candidates[0], TransformLocation::Node(nr) if nr == nary_ref));
+        assert!(matches!(
+            candidates[0].location,
+            TransformLocation::Node(nr) if nr == nary_ref
+        ));
         t.apply(&mut f, &TransformLocation::Node(nary_ref))
             .expect("apply");
 
@@ -1036,7 +1136,10 @@ mod tests {
         let mut t = ChangeExtNaryAddToBrentKungTransform;
         let candidates = t.find_candidates(&f);
         assert_eq!(candidates.len(), 1);
-        assert!(matches!(candidates[0], TransformLocation::Node(nr) if nr == nary_ref));
+        assert!(matches!(
+            candidates[0].location,
+            TransformLocation::Node(nr) if nr == nary_ref
+        ));
         t.apply(&mut f, &TransformLocation::Node(nary_ref))
             .expect("apply");
 
@@ -1062,7 +1165,10 @@ mod tests {
         let mut t = ChangeExtNaryAddToKoggeStoneTransform;
         let candidates = t.find_candidates(&f);
         assert_eq!(candidates.len(), 1);
-        assert!(matches!(candidates[0], TransformLocation::Node(nr) if nr == nary_ref));
+        assert!(matches!(
+            candidates[0].location,
+            TransformLocation::Node(nr) if nr == nary_ref
+        ));
         t.apply(&mut f, &TransformLocation::Node(nary_ref))
             .expect("apply");
 
@@ -1141,8 +1247,9 @@ mod tests {
         });
         let mut t = AbsorbExtendIntoExtNaryAddTermTransform;
         let candidate = find_term_candidate(&t.find_candidates(&f), nary_ref, 0);
+        assert!(candidate.always_equivalent);
 
-        t.apply(&mut f, &candidate).expect("apply");
+        t.apply(&mut f, &candidate.location).expect("apply");
 
         match &f.get_node(nary_ref).payload {
             NodePayload::ExtNaryAdd { terms, .. } => {
@@ -1152,7 +1259,6 @@ mod tests {
             }
             other => panic!("expected ext_nary_add after rewrite, got {other:?}"),
         }
-        assert!(!t.always_equivalent());
     }
 
     #[test]
@@ -1170,8 +1276,9 @@ mod tests {
         });
         let mut t = AbsorbExtendIntoExtNaryAddTermTransform;
         let candidate = find_term_candidate(&t.find_candidates(&f), nary_ref, 0);
+        assert!(candidate.always_equivalent);
 
-        t.apply(&mut f, &candidate).expect("apply");
+        t.apply(&mut f, &candidate.location).expect("apply");
 
         match &f.get_node(nary_ref).payload {
             NodePayload::ExtNaryAdd { terms, .. } => {
@@ -1181,7 +1288,24 @@ mod tests {
             }
             other => panic!("expected ext_nary_add after rewrite, got {other:?}"),
         }
-        assert!(!t.always_equivalent());
+    }
+
+    #[test]
+    fn absorb_extend_into_ext_nary_add_term_marks_signed_mismatch_growth_unsafe() {
+        let ir_text = r#"fn t(a: bits[4] id=1, b: bits[8] id=2) -> bits[8] {
+  sign_ext.3: bits[6] = sign_ext(a, new_bit_count=6, id=3)
+  ret ext_nary_add.4: bits[8] = ext_nary_add(sign_ext.3, b, signed=[false, false], negated=[false, false], arch=brent_kung, id=4)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let f = parser.parse_fn().unwrap();
+        let nary_ref = find_node_ref(&f, |payload| {
+            matches!(payload, NodePayload::ExtNaryAdd { .. })
+        });
+        let mut t = AbsorbExtendIntoExtNaryAddTermTransform;
+
+        let candidate = find_term_candidate(&t.find_candidates(&f), nary_ref, 0);
+
+        assert!(!candidate.always_equivalent);
     }
 
     #[test]
@@ -1198,8 +1322,9 @@ mod tests {
         });
         let mut t = AbsorbNegIntoExtNaryAddTermTransform;
         let candidate = find_term_candidate(&t.find_candidates(&f), nary_ref, 0);
+        assert!(candidate.always_equivalent);
 
-        t.apply(&mut f, &candidate).expect("apply");
+        t.apply(&mut f, &candidate.location).expect("apply");
 
         match &f.get_node(nary_ref).payload {
             NodePayload::ExtNaryAdd { terms, .. } => {
@@ -1208,7 +1333,24 @@ mod tests {
             }
             other => panic!("expected ext_nary_add after rewrite, got {other:?}"),
         }
-        assert!(!t.always_equivalent());
+    }
+
+    #[test]
+    fn absorb_neg_into_ext_nary_add_term_marks_narrow_neg_unsafe() {
+        let ir_text = r#"fn t(a: bits[4] id=1, b: bits[8] id=2) -> bits[8] {
+  neg.3: bits[4] = neg(a, id=3)
+  ret ext_nary_add.4: bits[8] = ext_nary_add(neg.3, b, signed=[true, false], negated=[false, false], arch=brent_kung, id=4)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let f = parser.parse_fn().unwrap();
+        let nary_ref = find_node_ref(&f, |payload| {
+            matches!(payload, NodePayload::ExtNaryAdd { .. })
+        });
+        let mut t = AbsorbNegIntoExtNaryAddTermTransform;
+
+        let candidate = find_term_candidate(&t.find_candidates(&f), nary_ref, 0);
+
+        assert!(!candidate.always_equivalent);
     }
 
     #[test]
@@ -1226,8 +1368,9 @@ mod tests {
         });
         let mut t = AbsorbAddOperandIntoExtNaryAddTransform;
         let candidate = find_term_candidate(&t.find_candidates(&f), nary_ref, 0);
+        assert!(candidate.always_equivalent);
 
-        t.apply(&mut f, &candidate).expect("apply");
+        t.apply(&mut f, &candidate.location).expect("apply");
 
         match &f.get_node(nary_ref).payload {
             NodePayload::ExtNaryAdd { terms, .. } => {
@@ -1239,7 +1382,24 @@ mod tests {
             }
             other => panic!("expected ext_nary_add after rewrite, got {other:?}"),
         }
-        assert!(!t.always_equivalent());
+    }
+
+    #[test]
+    fn absorb_add_operand_into_ext_nary_add_marks_narrow_add_unsafe() {
+        let ir_text = r#"fn t(a: bits[4] id=1, b: bits[4] id=2, c: bits[8] id=3) -> bits[8] {
+  add.4: bits[4] = add(a, b, id=4)
+  ret ext_nary_add.5: bits[8] = ext_nary_add(add.4, c, signed=[false, false], negated=[false, false], arch=brent_kung, id=5)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let f = parser.parse_fn().unwrap();
+        let nary_ref = find_node_ref(&f, |payload| {
+            matches!(payload, NodePayload::ExtNaryAdd { .. })
+        });
+        let mut t = AbsorbAddOperandIntoExtNaryAddTransform;
+
+        let candidate = find_term_candidate(&t.find_candidates(&f), nary_ref, 0);
+
+        assert!(!candidate.always_equivalent);
     }
 
     #[test]
@@ -1259,8 +1419,9 @@ mod tests {
         let candidates = t.find_candidates(&f);
         assert_eq!(candidates.len(), 1);
         let candidate = find_term_candidate(&candidates, nary_ref, 0);
+        assert!(candidate.always_equivalent);
 
-        t.apply(&mut f, &candidate).expect("apply");
+        t.apply(&mut f, &candidate.location).expect("apply");
 
         match &f.get_node(nary_ref).payload {
             NodePayload::ExtNaryAdd { terms, .. } => {
@@ -1273,7 +1434,6 @@ mod tests {
             }
             other => panic!("expected ext_nary_add after rewrite, got {other:?}"),
         }
-        assert!(!t.always_equivalent());
     }
 
     #[test]
@@ -1291,8 +1451,9 @@ mod tests {
         });
         let mut t = AbsorbSubOperandIntoExtNaryAddTransform;
         let candidate = find_term_candidate(&t.find_candidates(&f), nary_ref, 0);
+        assert!(candidate.always_equivalent);
 
-        t.apply(&mut f, &candidate).expect("apply");
+        t.apply(&mut f, &candidate.location).expect("apply");
 
         match &f.get_node(nary_ref).payload {
             NodePayload::ExtNaryAdd { terms, .. } => {
@@ -1304,6 +1465,24 @@ mod tests {
             }
             other => panic!("expected ext_nary_add after rewrite, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn absorb_sub_operand_into_ext_nary_add_marks_narrow_sub_unsafe() {
+        let ir_text = r#"fn t(a: bits[4] id=1, b: bits[4] id=2, c: bits[8] id=3) -> bits[8] {
+  sub.4: bits[4] = sub(a, b, id=4)
+  ret ext_nary_add.5: bits[8] = ext_nary_add(sub.4, c, signed=[false, false], negated=[false, false], arch=brent_kung, id=5)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let f = parser.parse_fn().unwrap();
+        let nary_ref = find_node_ref(&f, |payload| {
+            matches!(payload, NodePayload::ExtNaryAdd { .. })
+        });
+        let mut t = AbsorbSubOperandIntoExtNaryAddTransform;
+
+        let candidate = find_term_candidate(&t.find_candidates(&f), nary_ref, 0);
+
+        assert!(!candidate.always_equivalent);
     }
 
     #[test]
@@ -1319,8 +1498,9 @@ mod tests {
         });
         let mut t = ExtractNegateFromExtNaryAddTermTransform;
         let candidate = find_term_candidate(&t.find_candidates(&f), nary_ref, 0);
+        assert!(candidate.always_equivalent);
 
-        t.apply(&mut f, &candidate).expect("apply");
+        t.apply(&mut f, &candidate.location).expect("apply");
 
         match &f.get_node(nary_ref).payload {
             NodePayload::ExtNaryAdd { terms, .. } => {
@@ -1332,7 +1512,23 @@ mod tests {
             }
             other => panic!("expected ext_nary_add after rewrite, got {other:?}"),
         }
-        assert!(!t.always_equivalent());
+    }
+
+    #[test]
+    fn extract_negate_from_ext_nary_add_term_marks_narrow_term_unsafe() {
+        let ir_text = r#"fn t(a: bits[4] id=1, b: bits[8] id=2) -> bits[8] {
+  ret ext_nary_add.3: bits[8] = ext_nary_add(a, b, signed=[true, false], negated=[true, false], arch=brent_kung, id=3)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let f = parser.parse_fn().unwrap();
+        let nary_ref = find_node_ref(&f, |payload| {
+            matches!(payload, NodePayload::ExtNaryAdd { .. })
+        });
+        let mut t = ExtractNegateFromExtNaryAddTermTransform;
+
+        let candidate = find_term_candidate(&t.find_candidates(&f), nary_ref, 0);
+
+        assert!(!candidate.always_equivalent);
     }
 
     #[test]
@@ -1349,8 +1545,9 @@ mod tests {
         });
         let mut t = ExtractAddFromNaryAddTermsTransform;
         let candidate = find_term_candidate(&t.find_candidates(&f), nary_ref, 0);
+        assert!(candidate.always_equivalent);
 
-        t.apply(&mut f, &candidate).expect("apply");
+        t.apply(&mut f, &candidate.location).expect("apply");
 
         match &f.get_node(nary_ref).payload {
             NodePayload::ExtNaryAdd { terms, arch } => {
@@ -1389,7 +1586,6 @@ mod tests {
             let got_rewritten = expect_success_value(eval_fn(&f, sample));
             assert_eq!(got_original, got_rewritten);
         }
-        assert!(t.always_equivalent());
     }
 
     #[test]
@@ -1414,8 +1610,9 @@ mod tests {
         });
         let mut t = CombineNaryAddsTransform;
         let candidate = find_term_candidate(&t.find_candidates(&f), outer_ref, 0);
+        assert!(candidate.always_equivalent);
 
-        t.apply(&mut f, &candidate).expect("apply");
+        t.apply(&mut f, &candidate.location).expect("apply");
 
         match &f.get_node(outer_ref).payload {
             NodePayload::ExtNaryAdd { terms, arch } => {
@@ -1430,6 +1627,29 @@ mod tests {
             }
             other => panic!("expected ext_nary_add after rewrite, got {other:?}"),
         }
-        assert!(!t.always_equivalent());
+    }
+
+    #[test]
+    fn combine_nary_adds_marks_narrow_inner_nary_add_unsafe() {
+        let ir_text = r#"fn t(a: bits[4] id=1, b: bits[4] id=2, c: bits[8] id=3) -> bits[8] {
+  ext_nary_add.4: bits[4] = ext_nary_add(a, b, signed=[false, false], negated=[false, false], arch=ripple_carry, id=4)
+  ret ext_nary_add.5: bits[8] = ext_nary_add(ext_nary_add.4, c, signed=[false, false], negated=[false, false], arch=brent_kung, id=5)
+}"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let f = parser.parse_fn().unwrap();
+        let outer_ref = find_node_ref(&f, |payload| {
+            matches!(
+                payload,
+                NodePayload::ExtNaryAdd {
+                    arch: Some(ExtNaryAddArchitecture::BrentKung),
+                    ..
+                }
+            )
+        });
+        let mut t = CombineNaryAddsTransform;
+
+        let candidate = find_term_candidate(&t.find_candidates(&f), outer_ref, 0);
+
+        assert!(!candidate.always_equivalent);
     }
 }

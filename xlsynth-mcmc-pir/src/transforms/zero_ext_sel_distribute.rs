@@ -93,8 +93,9 @@ impl PirTransform for ZeroExtSelDistributeTransform {
         PirTransformKind::ZeroExtSelDistribute
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             let node = f.get_node(nr);
             match &node.payload {
@@ -109,7 +110,10 @@ impl PirTransform for ZeroExtSelDistributeTransform {
                         let wout = Self::bits_width(f, nr);
                         if wa.is_some() && wa == wb && wout == Some(*new_bit_count) {
                             if *new_bit_count >= wa.unwrap() {
-                                out.push(TransformLocation::Node(nr));
+                                out.push(TransformCandidate {
+                                    location: TransformLocation::Node(nr),
+                                    always_equivalent,
+                                });
                             }
                         }
                     }
@@ -142,7 +146,10 @@ impl PirTransform for ZeroExtSelDistributeTransform {
                     let wout = Self::bits_width(f, nr);
                     if wa.is_some() && wa == wb && wout == Some(a_n) {
                         if a_n >= wa.unwrap() {
-                            out.push(TransformLocation::Node(nr));
+                            out.push(TransformCandidate {
+                                location: TransformLocation::Node(nr),
+                                always_equivalent,
+                            });
                         }
                     }
                 }

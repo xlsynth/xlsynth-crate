@@ -3,7 +3,7 @@
 use xlsynth::{IrBits, IrValue};
 use xlsynth_pir::ir::{Binop, Fn as IrFn, Node, NodePayload, NodeRef, Type};
 
-use super::{PirTransform, PirTransformKind, TransformLocation};
+use super::{PirTransform, PirTransformKind, TransformCandidate, TransformLocation};
 
 /// A non-always-equivalent transform that replaces a complicated shift-amount
 /// expression with a shallow canonical clamp.
@@ -136,8 +136,9 @@ impl PirTransform for ShiftReclampTransform {
         PirTransformKind::ShiftReclamp
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = false;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             let NodePayload::Binop(op, x, amount) = f.get_node(nr).payload else {
                 continue;
@@ -163,7 +164,10 @@ impl PirTransform for ShiftReclampTransform {
             if Self::is_canonical_shift_clamp(f, amount) {
                 continue;
             }
-            out.push(TransformLocation::Node(nr));
+            out.push(TransformCandidate {
+                location: TransformLocation::Node(nr),
+                always_equivalent,
+            });
         }
         out
     }
@@ -197,9 +201,5 @@ impl PirTransform for ShiftReclampTransform {
         let clamped = Self::mk_sel2(f, Type::Bits(amount_bits), pred, max_lit, amount);
         f.get_node_mut(target_ref).payload = NodePayload::Binop(op, x, clamped);
         Ok(())
-    }
-
-    fn always_equivalent(&self) -> bool {
-        false
     }
 }

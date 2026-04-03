@@ -2,7 +2,7 @@
 
 use xlsynth_pir::ir::{Binop, Fn as IrFn, Node, NodePayload, NodeRef, Type, Unop};
 
-use super::{PirTransform, PirTransformKind, TransformLocation};
+use super::{PirTransform, PirTransformKind, TransformCandidate, TransformLocation};
 
 /// A non-always-equivalent transform that hoists ops across shifts.
 ///
@@ -74,8 +74,9 @@ impl PirTransform for ShiftHoistTransform {
         PirTransformKind::ShiftHoist
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = false;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             let node = f.get_node(nr);
             match &node.payload {
@@ -93,7 +94,10 @@ impl PirTransform for ShiftHoistTransform {
                     if Self::is_bits_type(&f.get_node(x).ty) != Some(w) {
                         continue;
                     }
-                    out.push(TransformLocation::Node(nr));
+                    out.push(TransformCandidate {
+                        location: TransformLocation::Node(nr),
+                        always_equivalent,
+                    });
                 }
                 NodePayload::Binop(_, lhs, rhs) => {
                     let lhs_node = f.get_node(*lhs);
@@ -111,7 +115,10 @@ impl PirTransform for ShiftHoistTransform {
                     {
                         continue;
                     }
-                    out.push(TransformLocation::Node(nr));
+                    out.push(TransformCandidate {
+                        location: TransformLocation::Node(nr),
+                        always_equivalent,
+                    });
                 }
                 payload => {
                     let Some((_, x, _k)) = Self::shift_parts(payload) else {
@@ -123,7 +130,10 @@ impl PirTransform for ShiftHoistTransform {
                     if Self::is_bits_type(&f.get_node(x).ty) != Some(w) {
                         continue;
                     }
-                    out.push(TransformLocation::Node(nr));
+                    out.push(TransformCandidate {
+                        location: TransformLocation::Node(nr),
+                        always_equivalent,
+                    });
                 }
             }
         }
@@ -237,10 +247,6 @@ impl PirTransform for ShiftHoistTransform {
                 _ => Err("ShiftHoistTransform: expected unop or binop target".to_string()),
             }
         }
-    }
-
-    fn always_equivalent(&self) -> bool {
-        false
     }
 }
 

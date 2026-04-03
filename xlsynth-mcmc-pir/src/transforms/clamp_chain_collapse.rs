@@ -2,7 +2,7 @@
 
 use xlsynth_pir::ir::{Binop, Fn as IrFn, NaryOp, Node, NodePayload, NodeRef, Type, Unop};
 
-use super::{PirTransform, PirTransformKind, TransformLocation};
+use super::{PirTransform, PirTransformKind, TransformCandidate, TransformLocation};
 
 /// A non-always-equivalent transform that attempts to collapse a deep
 /// clamp-like selector tree into a single comparison-based clamp.
@@ -112,8 +112,9 @@ impl PirTransform for ClampChainCollapseTransform {
         PirTransformKind::ClampChainCollapse
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = false;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             let NodePayload::Sel {
                 selector,
@@ -153,7 +154,10 @@ impl PirTransform for ClampChainCollapseTransform {
             if !Self::selector_cone_contains_cmp(f, *selector, x, bound, 64) {
                 continue;
             }
-            out.push(TransformLocation::Node(nr));
+            out.push(TransformCandidate {
+                location: TransformLocation::Node(nr),
+                always_equivalent,
+            });
         }
         out
     }
@@ -214,9 +218,5 @@ impl PirTransform for ClampChainCollapseTransform {
             default: None,
         };
         Ok(())
-    }
-
-    fn always_equivalent(&self) -> bool {
-        false
     }
 }

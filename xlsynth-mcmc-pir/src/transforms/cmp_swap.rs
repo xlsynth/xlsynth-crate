@@ -57,8 +57,9 @@ impl PirTransform for CmpSwapTransform {
         PirTransformKind::CmpSwap
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             let NodePayload::Binop(op, lhs, rhs) = f.get_node(nr).payload else {
                 continue;
@@ -75,7 +76,10 @@ impl PirTransform for CmpSwapTransform {
             if Self::is_bits_type(f, rhs) != Some(w) {
                 continue;
             }
-            out.push(TransformLocation::Node(nr));
+            out.push(TransformCandidate {
+                location: TransformLocation::Node(nr),
+                always_equivalent,
+            });
         }
         out
     }
@@ -111,10 +115,6 @@ impl PirTransform for CmpSwapTransform {
             Self::swapped_op(op).ok_or_else(|| "CmpSwapTransform: unsupported op".to_string())?;
         f.get_node_mut(target_ref).payload = NodePayload::Binop(new_op, rhs, lhs);
         Ok(())
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }
 

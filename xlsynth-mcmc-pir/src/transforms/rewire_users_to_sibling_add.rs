@@ -3,7 +3,10 @@
 use xlsynth::{IrBits, IrValue};
 use xlsynth_pir::ir::{Binop, Fn as IrFn, NaryOp, NodePayload, NodeRef, Type};
 
-use super::{PirTransform, PirTransformKind, TransformLocation, compute_users, remap_payload_with};
+use super::{
+    PirTransform, PirTransformKind, TransformCandidate, TransformLocation, compute_users,
+    remap_payload_with,
+};
 
 /// A non-always-equivalent transform that rewires users between sibling adds:
 /// - wide: add(zext(a), zext(b)) (zext via zero_ext or concat(0_k, x))
@@ -164,11 +167,15 @@ impl PirTransform for RewireUsersToSiblingAddTransform {
         PirTransformKind::RewireUsersToSiblingAdd
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = false;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             if Self::find_pair_for_add(f, nr).is_some() {
-                out.push(TransformLocation::Node(nr));
+                out.push(TransformCandidate {
+                    location: TransformLocation::Node(nr),
+                    always_equivalent,
+                });
             }
         }
         out
@@ -227,10 +234,6 @@ impl PirTransform for RewireUsersToSiblingAddTransform {
         }
 
         Ok(())
-    }
-
-    fn always_equivalent(&self) -> bool {
-        false
     }
 }
 

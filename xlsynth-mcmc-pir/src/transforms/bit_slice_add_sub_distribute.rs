@@ -2,7 +2,7 @@
 
 use xlsynth_pir::ir::{Binop, Fn as IrFn, Node, NodePayload, NodeRef, Type};
 
-use super::{PirTransform, PirTransformKind, TransformLocation};
+use super::{PirTransform, PirTransformKind, TransformCandidate, TransformLocation};
 
 /// Distributes low-bit truncation over add/sub (and folds back).
 ///
@@ -71,8 +71,9 @@ impl PirTransform for BitSliceAddSubDistributeTransform {
         PirTransformKind::BitSliceAddSubDistribute
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             let node = f.get_node(nr);
             match &node.payload {
@@ -93,7 +94,10 @@ impl PirTransform for BitSliceAddSubDistributeTransform {
                         continue;
                     };
                     if wl == wr && k <= wl {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
                 NodePayload::Binop(op @ Binop::Add, lhs, rhs)
@@ -132,7 +136,10 @@ impl PirTransform for BitSliceAddSubDistributeTransform {
                         continue;
                     };
                     if wx_src == wy_src && k <= wx_src {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
                 _ => {}
@@ -245,11 +252,11 @@ mod tests {
         let mut f = parser.parse_fn().unwrap();
         let mut t = BitSliceAddSubDistributeTransform;
         let cand = t.find_candidates(&f).pop().expect("candidate");
-        let target = match cand.clone() {
+        let target = match cand.location.clone() {
             TransformLocation::Node(nr) => nr,
             _ => unreachable!(),
         };
-        t.apply(&mut f, &cand).expect("apply");
+        t.apply(&mut f, &cand.location).expect("apply");
         match &f.get_node(target).payload {
             NodePayload::Binop(Binop::Add, _, _) => {}
             other => panic!("unexpected payload: {:?}", other),
@@ -267,11 +274,11 @@ mod tests {
         let mut f = parser.parse_fn().unwrap();
         let mut t = BitSliceAddSubDistributeTransform;
         let cand = t.find_candidates(&f).pop().expect("candidate");
-        let target = match cand.clone() {
+        let target = match cand.location.clone() {
             TransformLocation::Node(nr) => nr,
             _ => unreachable!(),
         };
-        t.apply(&mut f, &cand).expect("apply");
+        t.apply(&mut f, &cand.location).expect("apply");
         match &f.get_node(target).payload {
             NodePayload::BitSlice { start, width, .. } => {
                 assert_eq!(*start, 0);

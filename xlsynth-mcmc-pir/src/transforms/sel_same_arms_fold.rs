@@ -56,8 +56,9 @@ impl PirTransform for SelSameArmsFoldTransform {
         PirTransformKind::SelSameArmsFold
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
 
         for nr in f.node_refs() {
             let node = f.get_node(nr);
@@ -80,7 +81,10 @@ impl PirTransform for SelSameArmsFoldTransform {
                     // Must be able to represent result as identity(bits[w]).
                     let w = Self::bits_width(f, cases[0]);
                     if w.is_some() && w == Self::bits_width(f, nr) {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
 
@@ -111,7 +115,10 @@ impl PirTransform for SelSameArmsFoldTransform {
                         break;
                     }
                     if chosen_p.is_some() && w > 0 {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
             }
@@ -210,9 +217,5 @@ impl PirTransform for SelSameArmsFoldTransform {
                 Ok(())
             }
         }
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }
