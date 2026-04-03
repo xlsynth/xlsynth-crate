@@ -44,12 +44,16 @@ impl PirTransform for AndReduceDeMorganTransform {
         PirTransformKind::AndReduceDeMorgan
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             match &f.get_node(nr).payload {
                 NodePayload::Unop(Unop::AndReduce, _) => {
-                    out.push(TransformLocation::Node(nr));
+                    out.push(TransformCandidate {
+                        location: TransformLocation::Node(nr),
+                        always_equivalent,
+                    });
                 }
                 NodePayload::Unop(Unop::Not, arg) => {
                     let NodePayload::Unop(Unop::OrReduce, inner) = f.get_node(*arg).payload else {
@@ -58,7 +62,10 @@ impl PirTransform for AndReduceDeMorganTransform {
                     let NodePayload::Unop(Unop::Not, _) = f.get_node(inner).payload else {
                         continue;
                     };
-                    out.push(TransformLocation::Node(nr));
+                    out.push(TransformCandidate {
+                        location: TransformLocation::Node(nr),
+                        always_equivalent,
+                    });
                 }
                 _ => {}
             }
@@ -117,9 +124,5 @@ impl PirTransform for AndReduceDeMorganTransform {
                     .to_string(),
             ),
         }
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }

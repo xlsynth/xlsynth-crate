@@ -13,7 +13,8 @@ impl PirTransform for SwapCommutativeBinopOperandsTransform {
         PirTransformKind::SwapCommutativeBinopOperands
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
         f.node_refs()
             .into_iter()
             .filter(|nr| {
@@ -22,7 +23,10 @@ impl PirTransform for SwapCommutativeBinopOperandsTransform {
                     NodePayload::Binop(Binop::Add, _, _)
                 )
             })
-            .map(TransformLocation::Node)
+            .map(|nr| TransformCandidate {
+                location: TransformLocation::Node(nr),
+                always_equivalent,
+            })
             .collect()
     }
 
@@ -46,9 +50,5 @@ impl PirTransform for SwapCommutativeBinopOperandsTransform {
                     .to_string(),
             ),
         }
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }

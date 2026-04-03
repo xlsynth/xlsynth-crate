@@ -44,16 +44,23 @@ impl PirTransform for SubToAddNegTransform {
         PirTransformKind::SubToAddNeg
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             match &f.get_node(nr).payload {
-                NodePayload::Binop(Binop::Sub, _, _) => out.push(TransformLocation::Node(nr)),
+                NodePayload::Binop(Binop::Sub, _, _) => out.push(TransformCandidate {
+                    location: TransformLocation::Node(nr),
+                    always_equivalent,
+                }),
                 NodePayload::Binop(Binop::Add, a, b) => {
                     if matches!(f.get_node(*a).payload, NodePayload::Unop(Unop::Neg, _))
                         || matches!(f.get_node(*b).payload, NodePayload::Unop(Unop::Neg, _))
                     {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
                 _ => {}
@@ -106,9 +113,5 @@ impl PirTransform for SubToAddNegTransform {
 
             _ => Err("SubToAddNegTransform: expected sub(..) or add(..)".to_string()),
         }
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }

@@ -122,8 +122,9 @@ impl PirTransform for SelChainToPrioritySelTransform {
         PirTransformKind::SelChainToPrioritySel
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             // PrioritySelToSelChainTransform wraps the chain in an identity.
             let start_sel = match &f.get_node(nr).payload {
@@ -136,7 +137,10 @@ impl PirTransform for SelChainToPrioritySelTransform {
                 _ => continue,
             };
             if Self::match_sel_chain(f, start_sel).is_some() {
-                out.push(TransformLocation::Node(nr));
+                out.push(TransformCandidate {
+                    location: TransformLocation::Node(nr),
+                    always_equivalent,
+                });
             }
         }
         out
@@ -183,10 +187,6 @@ impl PirTransform for SelChainToPrioritySelTransform {
             default: Some(default),
         };
         Ok(())
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }
 

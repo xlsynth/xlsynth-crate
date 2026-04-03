@@ -53,14 +53,15 @@ impl PirTransform for RewireOperandToSameTypeTransform {
         PirTransformKind::RewireOperandToSameType
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = false;
         let users_map = compute_users(f);
 
         // Deterministic enumeration order:
         //   - node index ascending
         //   - operand slot ascending (as reported by remap_payload_with)
         //   - replacement node index ascending
-        let mut out: Vec<TransformLocation> = Vec::new();
+        let mut out = Vec::<TransformCandidate>::new();
 
         for i in 0..f.nodes.len() {
             if out.len() >= Self::MAX_CANDIDATES {
@@ -106,10 +107,13 @@ impl PirTransform for RewireOperandToSameTypeTransform {
                     if Self::node_type(f, new_operand) != old_ty {
                         continue;
                     }
-                    out.push(TransformLocation::RewireOperand {
-                        node: node_ref,
-                        operand_slot: slot,
-                        new_operand,
+                    out.push(TransformCandidate {
+                        location: TransformLocation::RewireOperand {
+                            node: node_ref,
+                            operand_slot: slot,
+                            new_operand,
+                        },
+                        always_equivalent,
                     });
                 }
             }
@@ -160,9 +164,5 @@ impl PirTransform for RewireOperandToSameTypeTransform {
 
         f.get_node_mut(node_ref).payload = new_payload;
         Ok(())
-    }
-
-    fn always_equivalent(&self) -> bool {
-        false
     }
 }

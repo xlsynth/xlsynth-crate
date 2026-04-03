@@ -26,8 +26,9 @@ impl PirTransform for PrioritySel1ToSelTransform {
         PirTransformKind::PrioritySel1ToSel
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             match &f.get_node(nr).payload {
                 // priority_sel(p, cases=[a], default=b) -> sel(p, cases=[b,a])
@@ -51,7 +52,10 @@ impl PirTransform for PrioritySel1ToSelTransform {
                     let wb = Self::bits_width(f, b);
                     let wout = Self::bits_width(f, nr);
                     if wa.is_some() && wa == wb && wa == wout {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
                 // sel(p, cases=[b,a]) -> priority_sel(p, cases=[a], default=b)
@@ -72,7 +76,10 @@ impl PirTransform for PrioritySel1ToSelTransform {
                     let wb = Self::bits_width(f, b);
                     let wout = Self::bits_width(f, nr);
                     if wa.is_some() && wa == wb && wa == wout {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
                 _ => {}
@@ -172,9 +179,5 @@ impl PirTransform for PrioritySel1ToSelTransform {
                     .to_string(),
             ),
         }
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }

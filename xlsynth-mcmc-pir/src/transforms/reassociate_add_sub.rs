@@ -54,15 +54,19 @@ impl PirTransform for ReassociateAddSubTransform {
         PirTransformKind::ReassociateAddSub
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             match &f.get_node(nr).payload {
                 NodePayload::Binop(Binop::Add, a, b) => {
                     if matches!(f.get_node(*a).payload, NodePayload::Binop(Binop::Add, _, _))
                         || matches!(f.get_node(*b).payload, NodePayload::Binop(Binop::Add, _, _))
                     {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
                 NodePayload::Binop(Binop::Sub, a, b) => {
@@ -70,7 +74,10 @@ impl PirTransform for ReassociateAddSubTransform {
                         || matches!(f.get_node(*b).payload, NodePayload::Binop(Binop::Sub, _, _))
                         || matches!(f.get_node(*b).payload, NodePayload::Binop(Binop::Add, _, _))
                     {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
                 _ => {}
@@ -196,9 +203,5 @@ impl PirTransform for ReassociateAddSubTransform {
         }
 
         Err("ReassociateAddSubTransform: no matching reshape pattern at target".to_string())
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }

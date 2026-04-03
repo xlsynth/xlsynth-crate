@@ -59,8 +59,9 @@ impl PirTransform for SelSwapArmsByNotPredTransform {
         PirTransformKind::SelSwapArmsByNotPred
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             let Some((sel, a, b)) = Self::sel2_parts(&f.get_node(nr).payload) else {
                 continue;
@@ -70,7 +71,10 @@ impl PirTransform for SelSwapArmsByNotPredTransform {
             // - selector == not(p)  => remove not, swap arms
             // - selector == p       => add not, swap arms
             if Self::is_u1_selector(f, sel) {
-                out.push(TransformLocation::Node(nr));
+                out.push(TransformCandidate {
+                    location: TransformLocation::Node(nr),
+                    always_equivalent,
+                });
             }
         }
         out
@@ -123,9 +127,5 @@ impl PirTransform for SelSwapArmsByNotPredTransform {
             default: None,
         };
         Ok(())
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }
