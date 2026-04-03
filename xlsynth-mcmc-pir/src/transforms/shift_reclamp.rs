@@ -136,6 +136,10 @@ impl PirTransform for ShiftReclampTransform {
         PirTransformKind::ShiftReclamp
     }
 
+    fn can_emit_always_equivalent_candidates(&self) -> bool {
+        false
+    }
+
     fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
         let always_equivalent = false;
         let mut out = Vec::<TransformCandidate>::new();
