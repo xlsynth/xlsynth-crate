@@ -7,7 +7,10 @@ use crate::transforms::transform_trait::{
     union_node_provenance_into_node,
 };
 use anyhow::{Result, anyhow};
-use rand::Rng;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
+
+const REWIRE_OPERAND_RNG_SEED: u64 = 0x8e802a26f3f4294d;
 
 /// Primitive: rewires one operand of an `And2` gate to `new_op`.
 /// Returns the previous operand value.
@@ -37,11 +40,15 @@ pub fn rewire_operand_primitive(
 }
 
 #[derive(Debug)]
-pub struct RewireOperandTransform;
+pub struct RewireOperandTransform {
+    rng: StdRng,
+}
 
 impl RewireOperandTransform {
     pub fn new() -> Self {
-        RewireOperandTransform
+        RewireOperandTransform {
+            rng: StdRng::seed_from_u64(REWIRE_OPERAND_RNG_SEED),
+        }
     }
 }
 
@@ -55,16 +62,15 @@ impl Transform for RewireOperandTransform {
         g: &GateFn,
         _direction: TransformDirection,
     ) -> Vec<TransformLocation> {
-        let mut rng = rand::thread_rng();
         let mut cands = Vec::new();
         for (idx, node) in g.gates.iter().enumerate() {
             if let AigNode::And2 { a, b, .. } = node {
                 let parent = AigRef { id: idx };
                 let new_op_lhs = AigOperand {
                     node: AigRef {
-                        id: rng.gen_range(0..g.gates.len()),
+                        id: self.rng.gen_range(0..g.gates.len()),
                     },
-                    negated: rng.r#gen(),
+                    negated: self.rng.r#gen(),
                 };
                 cands.push(TransformLocation::OperandReplacement {
                     parent,
@@ -74,9 +80,9 @@ impl Transform for RewireOperandTransform {
                 });
                 let new_op_rhs = AigOperand {
                     node: AigRef {
-                        id: rng.gen_range(0..g.gates.len()),
+                        id: self.rng.gen_range(0..g.gates.len()),
                     },
-                    negated: rng.r#gen(),
+                    negated: self.rng.r#gen(),
                 };
                 cands.push(TransformLocation::OperandReplacement {
                     parent,

@@ -8,7 +8,7 @@ use crate::transforms::transform_trait::{
 };
 use crate::use_count::get_id_to_use_count;
 use anyhow::{Result, anyhow};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const TAG_LEFT: &str = "balanced_chain_left";
 const TAG_RIGHT: &str = "balanced_chain_right";
@@ -88,7 +88,6 @@ fn collect_chain(
                         return None; // branching
                     }
                     ops_rev.push(a);
-                    nodes.push(cur);
                     cur = b.node;
                     continue;
                 } else {
@@ -103,11 +102,26 @@ fn collect_chain(
     if orient == Some(Orientation::Left) {
         ops.reverse();
     }
-    if nodes.len() >= 2 {
+    if nodes.len() >= 2 && !chain_ops_depend_on_chain_nodes(g, &nodes, &ops) {
         Some((orient.unwrap(), nodes, ops))
     } else {
         None
     }
+}
+
+fn chain_ops_depend_on_chain_nodes(g: &GateFn, nodes: &[AigRef], ops: &[AigOperand]) -> bool {
+    let chain_nodes: HashSet<AigRef> = nodes.iter().copied().collect();
+    for op in ops {
+        if chain_nodes.contains(&op.node) {
+            return true;
+        }
+        for chain_node in nodes {
+            if topo::reaches_target(&g.gates, op.node, *chain_node) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn build_balanced(g: &mut GateFn, nodes: &[AigRef], ops: &[AigOperand]) -> Result<()> {
@@ -286,7 +300,11 @@ fn collect_chain_linear(
     if orient == Orientation::Left {
         ops.reverse();
     }
-    Some((nodes, ops))
+    if chain_ops_depend_on_chain_nodes(g, &nodes, &ops) {
+        None
+    } else {
+        Some((nodes, ops))
+    }
 }
 
 #[derive(Debug)]
@@ -539,6 +557,54 @@ mod tests {
             .apply(&mut g, &c2[0], TransformDirection::Forward)
             .unwrap();
         assert_eq!(g.to_string(), original);
+    }
+
+    #[test]
+    fn test_collect_chain_right_orientation_does_not_duplicate_nodes() {
+        let mut gb = GateBuilder::new("f".to_string(), GateBuilderOptions::no_opt());
+        let i0 = gb.add_input("i0".to_string(), 1).get_lsb(0).clone();
+        let i1 = gb.add_input("i1".to_string(), 1).get_lsb(0).clone();
+        let i2 = gb.add_input("i2".to_string(), 1).get_lsb(0).clone();
+        let i3 = gb.add_input("i3".to_string(), 1).get_lsb(0).clone();
+        let n2 = gb.add_and_binary(i2, i3);
+        let n1 = gb.add_and_binary(i1, n2);
+        let root = gb.add_and_binary(i0, n1);
+        gb.add_output("o".to_string(), root.into());
+        let g = gb.build();
+        let use_counts = get_id_to_use_count(&g);
+
+        let (orient, nodes, ops) =
+            collect_chain(&g, root.node, &use_counts).expect("expected right chain");
+
+        assert_eq!(orient, Orientation::Right);
+        assert_eq!(nodes, vec![root.node, n1.node, n2.node]);
+        assert_eq!(ops, vec![i0, i1, i2, i3]);
+        assert_eq!(nodes.len() + 1, ops.len());
+    }
+
+    #[test]
+    fn test_collect_chain_rejects_leaf_operand_that_is_a_chain_node() {
+        let mut gb = GateBuilder::new("f".to_string(), GateBuilderOptions::no_opt());
+        let i0 = gb.add_input("i0".to_string(), 1).get_lsb(0).clone();
+        let i1 = gb.add_input("i1".to_string(), 1).get_lsb(0).clone();
+        let i2 = gb.add_input("i2".to_string(), 1).get_lsb(0).clone();
+        let n0 = gb.add_and_binary(i0, i1);
+        let n1 = gb.add_and_binary(n0, i2);
+        let dead_root = gb.add_and_binary(
+            n1,
+            AigOperand {
+                node: n0.node,
+                negated: true,
+            },
+        );
+        // Keep `n1` live, but not `dead_root`, so the dead-root sibling edge to
+        // `n0` does not contribute to use-counts and this would otherwise look
+        // like a valid left chain.
+        gb.add_output("o".to_string(), n1.into());
+        let g = gb.build();
+        let use_counts = get_id_to_use_count(&g);
+
+        assert!(collect_chain(&g, dead_root.node, &use_counts).is_none());
     }
 
     #[test]
