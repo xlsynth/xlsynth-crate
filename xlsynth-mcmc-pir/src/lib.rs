@@ -636,6 +636,7 @@ fn compute_g8r_stats_for_pir_fn_impl(
         range_info: None,
         enable_rewrite_carry_out: false,
         enable_rewrite_prio_encode: false,
+        enable_rewrite_nary_add: false,
     };
     let gatify_output = ir2gate::gatify(&top_fn, gatify_options)
         .map_err(|e| anyhow::anyhow!("ir2gate::gatify failed: {}", e))?;
@@ -2014,6 +2015,7 @@ mod tests {
                 range_info: None,
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
+                enable_rewrite_nary_add: false,
             },
         )
         .unwrap();

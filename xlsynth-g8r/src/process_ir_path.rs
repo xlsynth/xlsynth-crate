@@ -138,6 +138,7 @@ pub struct Options {
     pub hash: bool,
     pub enable_rewrite_carry_out: bool,
     pub enable_rewrite_prio_encode: bool,
+    pub enable_rewrite_nary_add: bool,
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
     pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
     pub fraig: bool,
@@ -190,6 +191,7 @@ impl From<&Options> for ir2gates::Ir2GatesOptions {
             check_equivalence: false, // check is done below if requested
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
             enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
+            enable_rewrite_nary_add: options.enable_rewrite_nary_add,
             adder_mapping: options.adder_mapping,
             mul_adder_mapping: options.mul_adder_mapping,
             aug_opt: Default::default(),
@@ -215,6 +217,7 @@ impl From<GatifyOptionsInput<'_>> for ir2gate::GatifyOptions {
             range_info: Some(input.range_info),
             enable_rewrite_carry_out: input.prep_opts.enable_rewrite_carry_out,
             enable_rewrite_prio_encode: input.prep_opts.enable_rewrite_prio_encode,
+            enable_rewrite_nary_add: input.prep_opts.enable_rewrite_nary_add,
             array_index_lowering_strategy: Default::default(),
         }
     }
@@ -228,6 +231,7 @@ pub fn process_ir_path_with_gatefn(
     let prep_opts = PrepForGatifyOptions {
         enable_rewrite_carry_out: options.enable_rewrite_carry_out,
         enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
+        enable_rewrite_nary_add: options.enable_rewrite_nary_add,
         ..PrepForGatifyOptions::all_opts_enabled()
     };
     // Read the file into a string.

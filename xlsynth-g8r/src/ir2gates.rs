@@ -14,6 +14,7 @@ pub struct Ir2GatesOptions {
     pub check_equivalence: bool,
     pub enable_rewrite_carry_out: bool,
     pub enable_rewrite_prio_encode: bool,
+    pub enable_rewrite_nary_add: bool,
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
     pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
     pub aug_opt: AugOptOptions,
@@ -28,6 +29,7 @@ impl Default for Ir2GatesOptions {
             check_equivalence: false,
             enable_rewrite_carry_out: prep_defaults.enable_rewrite_carry_out,
             enable_rewrite_prio_encode: prep_defaults.enable_rewrite_prio_encode,
+            enable_rewrite_nary_add: prep_defaults.enable_rewrite_nary_add,
             adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
             mul_adder_mapping: None,
             aug_opt: AugOptOptions::default(),
@@ -115,6 +117,7 @@ pub fn ir2gates_from_ir_text(
             range_info: Some(range_info.clone()),
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
             enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
+            enable_rewrite_nary_add: options.enable_rewrite_nary_add,
             array_index_lowering_strategy: Default::default(),
         },
     )?;

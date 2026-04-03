@@ -89,6 +89,7 @@ fn gatify_for_test(pir_fn: &ir::Fn, enable_rewrite_prio_encode: bool) -> xlsynth
             range_info: None,
             enable_rewrite_carry_out: false,
             enable_rewrite_prio_encode,
+            enable_rewrite_nary_add: false,
             array_index_lowering_strategy: Default::default(),
         },
     )
@@ -108,6 +109,7 @@ fn rewrite_triggers_for_all_positive_widths() {
                 None,
                 PrepForGatifyOptions {
                     enable_rewrite_prio_encode: true,
+                    enable_rewrite_nary_add: false,
                     ..PrepForGatifyOptions::default()
                 },
             );
@@ -133,6 +135,7 @@ fn rewrite_does_not_trigger_when_one_hot_has_multiple_users() {
             None,
             PrepForGatifyOptions {
                 enable_rewrite_prio_encode: true,
+                enable_rewrite_nary_add: false,
                 ..PrepForGatifyOptions::default()
             },
         );

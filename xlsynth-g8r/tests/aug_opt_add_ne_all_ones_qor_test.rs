@@ -26,6 +26,7 @@ fn stats_for_aug_opt_mode(enable_aug_opt: bool) -> (usize, usize) {
             check_equivalence: true,
             enable_rewrite_carry_out: false,
             enable_rewrite_prio_encode: false,
+            enable_rewrite_nary_add: false,
             adder_mapping: AdderMapping::default(),
             mul_adder_mapping: None,
             aug_opt: AugOptOptions {

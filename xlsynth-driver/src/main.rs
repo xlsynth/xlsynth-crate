@@ -329,7 +329,11 @@ impl AppExt for clap::Command {
             )
             .add_bool_arg(
                 "enable-rewrite-prio-encode",
-                "Enable prio-encode rewrite in prep_for_gatify (introduces ext_prio_encode)",
+                "Enable prio-encode / CLZ rewrites in prep_for_gatify (introduces ext_prio_encode / ext_clz)",
+            )
+            .add_bool_arg(
+                "enable-rewrite-nary-add",
+                "Enable nary-add rewrites in prep_for_gatify (introduces and grows ext_nary_add to a fixed point)",
             )
             .arg(
                 clap::Arg::new("adder_mapping")

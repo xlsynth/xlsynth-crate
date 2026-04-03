@@ -18,7 +18,7 @@
 //! `xlsynth_pir::desugar_extensions`).
 
 use xlsynth::IrValue;
-use xlsynth_pir::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
+use xlsynth_pir::ir::{self, Binop, ExtNaryAddTerm, NaryOp, NodePayload, NodeRef, Type, Unop};
 use xlsynth_pir::ir_range_info::IrRangeInfo;
 use xlsynth_pir::ir_utils;
 use xlsynth_pir::math::ceil_log2;
@@ -31,13 +31,19 @@ pub struct PrepForGatifyOptions {
 
     /// When true, rewrite the idiom `encode(one_hot(x))` into the extension op
     /// `ext_prio_encode(x, lsb_prio=...)` so gatification can
-    /// use a specialized priority-encoder lowering.
+    /// use a specialized priority-encoder lowering. This also recognizes the
+    /// CLZ idiom `encode(one_hot(reverse(x), lsb_prio=true))` and rewrites it
+    /// to `ext_clz(x)`.
     pub enable_rewrite_prio_encode: bool,
 
     /// When true, rewrite small finite-choice shift amounts (e.g. `sel` or
     /// `priority_sel` over literal shifts) into select-like projections of
     /// constant shifts so gatify can avoid a full barrel shifter cone.
     pub enable_rewrite_small_shift_choices: bool,
+
+    /// When true, rewrite width-preserving add/sub trees into `ext_nary_add`
+    /// and greedily absorb/merge nested terms to a fixed point.
+    pub enable_rewrite_nary_add: bool,
 }
 
 impl PrepForGatifyOptions {
@@ -47,6 +53,7 @@ impl PrepForGatifyOptions {
             enable_rewrite_carry_out: true,
             enable_rewrite_prio_encode: true,
             enable_rewrite_small_shift_choices: true,
+            enable_rewrite_nary_add: true,
         }
     }
 
@@ -56,6 +63,7 @@ impl PrepForGatifyOptions {
             enable_rewrite_carry_out: false,
             enable_rewrite_prio_encode: false,
             enable_rewrite_small_shift_choices: false,
+            enable_rewrite_nary_add: false,
         }
     }
 }
@@ -138,13 +146,16 @@ fn combine_or_reduces(f: &mut ir::Fn) {
     }
 }
 
-/// Rewrites `encode(one_hot(x, lsb_prio=...))` into
-/// `ext_prio_encode(x, lsb_prio=...)` when the `one_hot` node has a single
-/// user (the `encode`).
+/// Rewrites `encode(one_hot(...))` idioms into extension ops when the
+/// `one_hot` node has a single user (the `encode`).
 ///
 /// This preserves the sentinel behavior of `encode(one_hot(...))` where `x==0`
 /// yields the index `N` (for `x: bits[N]`).
-fn rewrite_encode_one_hot_to_ext_prio_encode(f: &mut ir::Fn) -> usize {
+///
+/// Recognized forms:
+/// - `encode(one_hot(reverse(x), lsb_prio=true))` -> `ext_clz(x)`
+/// - `encode(one_hot(x, lsb_prio=...))` -> `ext_prio_encode(x, lsb_prio=...)`
+fn rewrite_encode_one_hot_idioms_to_ext_ops(f: &mut ir::Fn) -> usize {
     let use_counts = get_use_counts(f);
     let mut rewrites: usize = 0;
 
@@ -167,9 +178,6 @@ fn rewrite_encode_one_hot_to_ext_prio_encode(f: &mut ir::Fn) -> usize {
             continue;
         };
         let n = f.nodes[arg.index].ty.bit_count();
-        if n == 0 {
-            continue;
-        }
 
         // Ensure the node result type matches the encode(one_hot) idiom shape:
         // one_hot makes width N+1, encode returns ceil_log2(N+1).
@@ -179,17 +187,329 @@ fn rewrite_encode_one_hot_to_ext_prio_encode(f: &mut ir::Fn) -> usize {
         }
 
         let node_ref = ir::NodeRef { index: node_index };
+        let replacement_payload = if lsb_prio {
+            if let NodePayload::Unop(Unop::Reverse, reversed_arg) =
+                f.nodes[arg.index].payload.clone()
+            {
+                NodePayload::ExtClz { arg: reversed_arg }
+            } else {
+                NodePayload::ExtPrioEncode { arg, lsb_prio }
+            }
+        } else {
+            NodePayload::ExtPrioEncode { arg, lsb_prio }
+        };
         ir_utils::replace_node_payload(
             f,
             node_ref,
-            NodePayload::ExtPrioEncode { arg, lsb_prio },
+            replacement_payload,
             Some(Type::Bits(expected_out_w)),
         )
-        .expect("prep_for_gatify: ext_prio_encode payload replacement failed");
+        .expect("prep_for_gatify: encode(one_hot(...)) payload replacement failed");
 
         rewrites += 1;
     }
 
+    rewrites
+}
+
+fn bits_width(ty: &Type) -> Option<usize> {
+    match ty {
+        Type::Bits(w) => Some(*w),
+        _ => None,
+    }
+}
+
+fn is_bits_w(f: &ir::Fn, nr: NodeRef, w: usize) -> bool {
+    matches!(f.get_node(nr).ty, Type::Bits(ow) if ow == w)
+}
+
+fn ext_nary_add_result_width(f: &ir::Fn, nr: NodeRef) -> Option<usize> {
+    let Type::Bits(w) = f.get_node(nr).ty else {
+        return None;
+    };
+    matches!(f.get_node(nr).payload, NodePayload::ExtNaryAdd { .. }).then_some(w)
+}
+
+fn term_operand_width(f: &ir::Fn, term: &ExtNaryAddTerm) -> Option<usize> {
+    bits_width(&f.get_node(term.operand).ty)
+}
+
+fn term_payload_matches_resize(f: &ir::Fn, term: &ExtNaryAddTerm) -> Option<(bool, NodeRef)> {
+    match &f.get_node(term.operand).payload {
+        NodePayload::SignExt { arg, .. } => Some((true, *arg)),
+        NodePayload::ZeroExt { arg, .. } => Some((false, *arg)),
+        NodePayload::Nary(NaryOp::Concat, ops) if ops.len() == 2 => {
+            let hi = ops[0];
+            let lo = ops[1];
+            let NodePayload::Literal(v) = &f.get_node(hi).payload else {
+                return None;
+            };
+            let bits = v.to_bits().ok()?;
+            if !bits.is_zero() {
+                return None;
+            }
+            Some((false, lo))
+        }
+        _ => None,
+    }
+}
+
+fn term_payload_matches_neg(f: &ir::Fn, term: &ExtNaryAddTerm) -> Option<NodeRef> {
+    match f.get_node(term.operand).payload {
+        NodePayload::Unop(Unop::Neg, arg) => Some(arg),
+        _ => None,
+    }
+}
+
+fn term_payload_matches_add(f: &ir::Fn, term: &ExtNaryAddTerm) -> Option<(NodeRef, NodeRef)> {
+    match f.get_node(term.operand).payload {
+        NodePayload::Binop(Binop::Add, lhs, rhs) => Some((lhs, rhs)),
+        _ => None,
+    }
+}
+
+fn term_payload_matches_sub(f: &ir::Fn, term: &ExtNaryAddTerm) -> Option<(NodeRef, NodeRef)> {
+    match f.get_node(term.operand).payload {
+        NodePayload::Binop(Binop::Sub, lhs, rhs) => Some((lhs, rhs)),
+        _ => None,
+    }
+}
+
+fn term_payload_matches_nested_ext_nary_add(
+    f: &ir::Fn,
+    term: &ExtNaryAddTerm,
+) -> Option<Vec<ExtNaryAddTerm>> {
+    match &f.get_node(term.operand).payload {
+        NodePayload::ExtNaryAdd { terms, .. } => Some(terms.clone()),
+        _ => None,
+    }
+}
+
+/// Returns whether absorbing a resize op into an nary-add term preserves value.
+fn absorb_extend_candidate_is_always_equivalent(
+    f: &ir::Fn,
+    outer_term: &ExtNaryAddTerm,
+    inner_signed: bool,
+    inner_arg: NodeRef,
+    out_w: usize,
+) -> bool {
+    let Some(inner_resize_w) = bits_width(&f.get_node(outer_term.operand).ty) else {
+        return false;
+    };
+    if inner_resize_w >= out_w {
+        return true;
+    }
+
+    let Some(inner_arg_w) = bits_width(&f.get_node(inner_arg).ty) else {
+        return false;
+    };
+    inner_arg_w == 0
+        || (inner_arg_w <= inner_resize_w
+            && (outer_term.signed == inner_signed
+                || (!inner_signed && inner_resize_w > inner_arg_w)))
+}
+
+/// Returns whether absorbing an explicit `neg` into term metadata preserves
+/// value.
+fn absorb_neg_candidate_is_always_equivalent(
+    f: &ir::Fn,
+    term: &ExtNaryAddTerm,
+    out_w: usize,
+) -> bool {
+    term_operand_width(f, term).is_some_and(|operand_w| operand_w == 0 || operand_w >= out_w)
+}
+
+/// Returns whether splitting a term-local add/sub into two terms preserves
+/// value.
+fn absorb_binop_candidate_is_always_equivalent(
+    f: &ir::Fn,
+    term: &ExtNaryAddTerm,
+    out_w: usize,
+) -> bool {
+    term_operand_width(f, term).is_some_and(|operand_w| operand_w == 0 || operand_w >= out_w)
+}
+
+/// Returns whether splicing a nested nary-add term into the parent preserves
+/// value.
+fn combine_nary_add_candidate_is_always_equivalent(
+    f: &ir::Fn,
+    term: &ExtNaryAddTerm,
+    out_w: usize,
+) -> bool {
+    ext_nary_add_result_width(f, term.operand).is_some_and(|inner_w| inner_w >= out_w)
+}
+
+/// Rewrites width-preserving `add`/`sub` nodes into `ext_nary_add` in place.
+fn rewrite_add_sub_to_ext_nary_add(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+    for node_index in 0..f.nodes.len() {
+        let (lhs, rhs, rhs_negated) = match f.nodes[node_index].payload.clone() {
+            NodePayload::Binop(Binop::Add, lhs, rhs) => (lhs, rhs, false),
+            NodePayload::Binop(Binop::Sub, lhs, rhs) => (lhs, rhs, true),
+            _ => continue,
+        };
+        let Some(w) = bits_width(&f.nodes[node_index].ty) else {
+            continue;
+        };
+        if !is_bits_w(f, lhs, w) || !is_bits_w(f, rhs, w) {
+            continue;
+        }
+
+        f.nodes[node_index].payload = NodePayload::ExtNaryAdd {
+            terms: vec![
+                ExtNaryAddTerm {
+                    operand: lhs,
+                    signed: false,
+                    negated: false,
+                },
+                ExtNaryAddTerm {
+                    operand: rhs,
+                    signed: false,
+                    negated: rhs_negated,
+                },
+            ],
+            // Defer architecture selection to `GatifyOptions::adder_mapping`.
+            arch: None,
+        };
+        rewrites += 1;
+    }
+    rewrites
+}
+
+fn absorb_nary_add_term_wrappers(f: &ir::Fn, out_w: usize, term: &mut ExtNaryAddTerm) -> bool {
+    if let Some((inner_signed, inner_arg)) = term_payload_matches_resize(f, term) {
+        if absorb_extend_candidate_is_always_equivalent(f, term, inner_signed, inner_arg, out_w) {
+            term.operand = inner_arg;
+            term.signed = inner_signed;
+            return true;
+        }
+    }
+
+    if let Some(arg) = term_payload_matches_neg(f, term) {
+        if absorb_neg_candidate_is_always_equivalent(f, term, out_w) {
+            term.operand = arg;
+            term.negated = !term.negated;
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Applies one greedy scan over each nary-add node's term list.
+fn grow_ext_nary_add_terms_once(
+    f: &ir::Fn,
+    out_w: usize,
+    terms: &mut Vec<ExtNaryAddTerm>,
+) -> usize {
+    let mut rewrites = 0usize;
+    let mut term_index = 0usize;
+    while term_index < terms.len() {
+        if absorb_nary_add_term_wrappers(f, out_w, &mut terms[term_index]) {
+            rewrites += 1;
+            continue;
+        }
+
+        let term = terms[term_index];
+        if let Some((lhs, rhs)) = term_payload_matches_add(f, &term) {
+            if absorb_binop_candidate_is_always_equivalent(f, &term, out_w) {
+                terms.splice(
+                    term_index..term_index + 1,
+                    [
+                        ExtNaryAddTerm {
+                            operand: lhs,
+                            signed: term.signed,
+                            negated: term.negated,
+                        },
+                        ExtNaryAddTerm {
+                            operand: rhs,
+                            signed: term.signed,
+                            negated: term.negated,
+                        },
+                    ],
+                );
+                rewrites += 1;
+                continue;
+            }
+        }
+
+        if let Some((lhs, rhs)) = term_payload_matches_sub(f, &term) {
+            if absorb_binop_candidate_is_always_equivalent(f, &term, out_w) {
+                terms.splice(
+                    term_index..term_index + 1,
+                    [
+                        ExtNaryAddTerm {
+                            operand: lhs,
+                            signed: term.signed,
+                            negated: term.negated,
+                        },
+                        ExtNaryAddTerm {
+                            operand: rhs,
+                            signed: term.signed,
+                            negated: !term.negated,
+                        },
+                    ],
+                );
+                rewrites += 1;
+                continue;
+            }
+        }
+
+        if let Some(nested_terms) = term_payload_matches_nested_ext_nary_add(f, &term) {
+            if combine_nary_add_candidate_is_always_equivalent(f, &term, out_w) {
+                let replacement_terms =
+                    nested_terms.into_iter().map(|nested_term| ExtNaryAddTerm {
+                        operand: nested_term.operand,
+                        signed: nested_term.signed,
+                        negated: nested_term.negated ^ term.negated,
+                    });
+                terms.splice(term_index..term_index + 1, replacement_terms);
+                rewrites += 1;
+                continue;
+            }
+        }
+
+        term_index += 1;
+    }
+    rewrites
+}
+
+/// Greedily absorbs wrappers and nested add/sub trees into `ext_nary_add`.
+fn grow_ext_nary_adds(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+    for node_index in 0..f.nodes.len() {
+        let NodePayload::ExtNaryAdd { terms, arch } = f.nodes[node_index].payload.clone() else {
+            continue;
+        };
+        let Some(out_w) = bits_width(&f.nodes[node_index].ty) else {
+            continue;
+        };
+
+        let mut terms = terms;
+        let node_rewrites = grow_ext_nary_add_terms_once(f, out_w, &mut terms);
+        if node_rewrites == 0 {
+            continue;
+        }
+
+        f.nodes[node_index].payload = NodePayload::ExtNaryAdd { terms, arch };
+        rewrites += node_rewrites;
+    }
+    rewrites
+}
+
+/// Converts add/sub nodes to `ext_nary_add` and maximally grows them to a fixed
+/// point under always-equivalent term rewrites.
+fn rewrite_nary_adds_to_fixed_point(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+    loop {
+        let mut round_rewrites = rewrite_add_sub_to_ext_nary_add(f);
+        round_rewrites += grow_ext_nary_adds(f);
+        if round_rewrites == 0 {
+            break;
+        }
+        rewrites += round_rewrites;
+        mark_dead_nodes_as_nil(f);
+    }
     rewrites
 }
 
@@ -254,11 +574,12 @@ fn is_ubits_literal_0_or_1_of_width(f: &ir::Fn, nr: NodeRef, w: usize) -> Option
     let NodePayload::Literal(v) = &node.payload else {
         return None;
     };
-    let u = v.to_u64().ok()?;
-    match u {
-        0 => Some(false),
-        1 => Some(true),
-        _ => None,
+    if v.bits_equals_u64_value(0) {
+        Some(false)
+    } else if v.bits_equals_u64_value(1) {
+        Some(true)
+    } else {
+        None
     }
 }
 
@@ -963,8 +1284,11 @@ pub fn prep_for_gatify(
     if options.enable_rewrite_carry_out {
         let _rewrites = rewrite_add_slice_carry_out_to_ext_carry_out(&mut cloned, range_info);
     }
+    if options.enable_rewrite_nary_add {
+        let _rewrites = rewrite_nary_adds_to_fixed_point(&mut cloned);
+    }
     if options.enable_rewrite_prio_encode {
-        let _rewrites = rewrite_encode_one_hot_to_ext_prio_encode(&mut cloned);
+        let _rewrites = rewrite_encode_one_hot_idioms_to_ext_ops(&mut cloned);
     }
     mark_dead_nodes_as_nil(&mut cloned);
     cloned
@@ -1099,6 +1423,151 @@ top fn cone(p0: bits[9] id=1, p1: bits[9] id=2) -> bits[1] {
         assert!(
             optimized_text.contains("ext_carry_out(") && !optimized_text.contains("add("),
             "expected carry-out rewrite to introduce ext_carry_out; got:\n{}",
+            optimized_text
+        );
+    }
+
+    #[test]
+    fn nary_add_rewrite_grows_add_sub_tree_to_fixed_point() {
+        let ir_text = r#"package sample
+
+top fn f(a: bits[2] id=1, b: bits[2] id=2, c: bits[2] id=3, d: bits[2] id=4, e: bits[1] id=5) -> bits[2] {
+  zext_e: bits[2] = zero_ext(e, new_bit_count=2, id=6)
+  add_ab: bits[2] = add(a, b, id=7)
+  sub_cd: bits[2] = sub(c, d, id=8)
+  add_abcd: bits[2] = add(add_ab, sub_cd, id=9)
+  neg_e: bits[2] = neg(zext_e, id=10)
+  ret add_all: bits[2] = add(add_abcd, neg_e, id=11)
+}
+"#;
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_top_fn().unwrap();
+
+        let optimized = prep_for_gatify(
+            f,
+            None,
+            PrepForGatifyOptions {
+                enable_rewrite_nary_add: true,
+                ..PrepForGatifyOptions::default()
+            },
+        );
+        let optimized_text = optimized.to_string();
+        let expected = r#"fn f(a: bits[2] id=1, b: bits[2] id=2, c: bits[2] id=3, d: bits[2] id=4, e: bits[1] id=5) -> bits[2] {
+  ret add_all: bits[2] = ext_nary_add(a, b, c, d, e, signed=[false, false, false, false, false], negated=[false, false, false, true, true], id=11)
+}"#;
+        assert_eq!(optimized_text, expected);
+        assert_eq!(
+            prep_for_gatify(
+                &optimized,
+                None,
+                PrepForGatifyOptions {
+                    enable_rewrite_nary_add: true,
+                    ..PrepForGatifyOptions::default()
+                },
+            )
+            .to_string(),
+            expected,
+            "expected nary-add prep to be idempotent at fixed point"
+        );
+
+        for a in 0u64..4 {
+            for b in 0u64..4 {
+                for c in 0u64..4 {
+                    for d in 0u64..4 {
+                        for e in 0u64..2 {
+                            let args = [
+                                IrValue::make_ubits(2, a).unwrap(),
+                                IrValue::make_ubits(2, b).unwrap(),
+                                IrValue::make_ubits(2, c).unwrap(),
+                                IrValue::make_ubits(2, d).unwrap(),
+                                IrValue::make_ubits(1, e).unwrap(),
+                            ];
+                            let got_orig = match eval_fn(f, &args) {
+                                FnEvalResult::Success(s) => s.value,
+                                FnEvalResult::Failure(f) => {
+                                    panic!("unexpected original eval failure: {:?}", f)
+                                }
+                            };
+                            let got_opt = match eval_fn(&optimized, &args) {
+                                FnEvalResult::Success(s) => s.value,
+                                FnEvalResult::Failure(f) => {
+                                    panic!("unexpected optimized eval failure: {:?}", f)
+                                }
+                            };
+                            assert_eq!(
+                                got_orig, got_opt,
+                                "mismatch at a={a} b={b} c={c} d={d} e={e}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nary_add_rewrite_does_not_absorb_unsafe_narrow_term_wrappers() {
+        let ir_text = r#"package sample
+
+top fn f(a: bits[4] id=1, b: bits[8] id=2) -> bits[8] {
+  sext_a: bits[6] = sign_ext(a, new_bit_count=6, id=3)
+  ret sum: bits[8] = ext_nary_add(sext_a, b, signed=[false, false], negated=[false, false], id=4)
+}
+"#;
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_top_fn().unwrap();
+
+        let optimized = prep_for_gatify(
+            f,
+            None,
+            PrepForGatifyOptions {
+                enable_rewrite_nary_add: true,
+                ..PrepForGatifyOptions::default()
+            },
+        );
+        let optimized_text = optimized.to_string();
+        assert!(
+            optimized_text.contains("sext_a: bits[6] = sign_ext(a, new_bit_count=6, id=3)")
+                && optimized_text.contains(
+                    "ret sum: bits[8] = ext_nary_add(sext_a, b, signed=[false, false], negated=[false, false], id=4)",
+                ),
+            "expected unsafe narrow sign_ext term to remain unabsorbed; got:\n{}",
+            optimized_text
+        );
+    }
+
+    #[test]
+    fn nary_add_rewrite_does_not_combine_unsafe_narrow_nested_nary_add() {
+        let ir_text = r#"package sample
+
+top fn f(a: bits[4] id=1, b: bits[4] id=2, c: bits[8] id=3) -> bits[8] {
+  inner: bits[4] = add(a, b, id=4)
+  ret outer: bits[8] = ext_nary_add(inner, c, signed=[false, false], negated=[false, false], id=5)
+}
+"#;
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_top_fn().unwrap();
+
+        let optimized = prep_for_gatify(
+            f,
+            None,
+            PrepForGatifyOptions {
+                enable_rewrite_nary_add: true,
+                ..PrepForGatifyOptions::default()
+            },
+        );
+        let optimized_text = optimized.to_string();
+        assert!(
+            optimized_text.contains(
+                "inner: bits[4] = ext_nary_add(a, b, signed=[false, false], negated=[false, false], id=4)",
+            )
+                && optimized_text.contains(
+                    "ret outer: bits[8] = ext_nary_add(inner, c, signed=[false, false], negated=[false, false], id=5)",
+                ),
+            "expected narrow inner ext_nary_add to remain nested; got:\n{}",
             optimized_text
         );
     }

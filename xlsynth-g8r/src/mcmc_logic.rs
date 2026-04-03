@@ -793,6 +793,7 @@ pub fn load_start<P: AsRef<Path>>(p_generic: P) -> Result<GateFn> {
                     range_info: None,
                     enable_rewrite_carry_out: false,
                     enable_rewrite_prio_encode: false,
+                    enable_rewrite_nary_add: false,
                     array_index_lowering_strategy: Default::default(),
                 };
                 let gatify_output = ir2gate::gatify(top_entity, gatify_options)

@@ -90,6 +90,7 @@ pub(crate) struct G8rCliOptions {
     pub(crate) hash: bool,
     pub(crate) enable_rewrite_carry_out: bool,
     pub(crate) enable_rewrite_prio_encode: bool,
+    pub(crate) enable_rewrite_nary_add: bool,
     pub(crate) adder_mapping: AdderMapping,
     pub(crate) mul_adder_mapping: Option<AdderMapping>,
     pub(crate) fraig: bool,
@@ -116,6 +117,11 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> G8rCliOptions {
         matches,
         "enable-rewrite-prio-encode",
         prep_defaults.enable_rewrite_prio_encode,
+    );
+    let enable_rewrite_nary_add = parse_bool(
+        matches,
+        "enable-rewrite-nary-add",
+        prep_defaults.enable_rewrite_nary_add,
     );
     let (adder_mapping, mul_adder_mapping) = parse_adder_mappings(matches);
     let toggle_sample_count =
@@ -147,6 +153,7 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> G8rCliOptions {
         hash,
         enable_rewrite_carry_out,
         enable_rewrite_prio_encode,
+        enable_rewrite_nary_add,
         adder_mapping,
         mul_adder_mapping,
         fraig,
@@ -175,6 +182,7 @@ pub(crate) fn build_process_ir_path_options_for_cli(
         hash: cli.hash,
         enable_rewrite_carry_out: cli.enable_rewrite_carry_out,
         enable_rewrite_prio_encode: cli.enable_rewrite_prio_encode,
+        enable_rewrite_nary_add: cli.enable_rewrite_nary_add,
         adder_mapping: cli.adder_mapping,
         mul_adder_mapping: cli.mul_adder_mapping,
         fraig: cli.fraig,
