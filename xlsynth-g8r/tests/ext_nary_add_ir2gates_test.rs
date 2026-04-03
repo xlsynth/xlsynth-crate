@@ -463,7 +463,7 @@ fn constant_operand_reduces_gate_count() {
 }
 
 #[test]
-fn negated_operand_increases_gate_count() {
+fn one_negated_operand_uses_same_gate_count_as_non_negated_terms() {
     let non_negated = build_single_stage_ext_nary_add_ir_text(
         16,
         &[
@@ -516,11 +516,10 @@ fn negated_operand_increases_gate_count() {
     let (negated_gates, _) =
         get_ir_gate_stats(&one_negated, /* fold= */ false, /* hash= */ false);
 
-    assert!(
-        negated_gates > non_negated_gates,
-        "expected a negated operand to increase And2 gate count; non_negated={} negated={}",
-        non_negated_gates,
-        negated_gates
+    assert_eq!(
+        non_negated_gates, negated_gates,
+        "expected a single negated operand's +1 contribution to be lowered via carry_in, not an extra CSA operand; non_negated={} negated={}",
+        non_negated_gates, negated_gates
     );
 }
 

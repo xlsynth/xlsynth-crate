@@ -1321,6 +1321,28 @@ fn accumulate_ext_nary_add_literal(
     *literal_sum = literal_sum.add(&contribution);
 }
 
+/// Returns whether `bits` is exactly the unsigned value 1.
+fn is_one(bits: &xlsynth::IrBits) -> bool {
+    if bits.get_bit_count() == 0 {
+        return false;
+    }
+    if !bits
+        .get_bit(0)
+        .expect("literal bit 0 should be in bounds for non-empty bits")
+    {
+        return false;
+    }
+    for i in 1..bits.get_bit_count() {
+        if bits
+            .get_bit(i)
+            .expect("literal bit index should be in bounds during one-check")
+        {
+            return false;
+        }
+    }
+    true
+}
+
 fn is_all_zeros(bits: &xlsynth::IrBits) -> bool {
     for i in 0..bits.get_bit_count() {
         if bits.get_bit(i).unwrap() {
@@ -2999,6 +3021,12 @@ fn gatify_node(
                         lowered_terms.push(resized);
                     }
                 }
+                let carry_in = if is_one(&literal_sum) && !lowered_terms.is_empty() {
+                    literal_sum = xlsynth::IrBits::zero(output_width);
+                    Some(g8_builder.get_true())
+                } else {
+                    None
+                };
                 if !literal_sum.is_zero() {
                     lowered_terms.push(g8_builder.add_literal(&literal_sum));
                 }
@@ -3016,7 +3044,7 @@ fn gatify_node(
                     array_add_with_carry_out(
                         g8_builder,
                         &lowered_terms,
-                        None,
+                        carry_in,
                         selected_adder_mapping,
                     )
                     .sum
