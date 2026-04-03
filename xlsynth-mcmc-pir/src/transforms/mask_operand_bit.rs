@@ -195,6 +195,10 @@ impl PirTransform for MaskOperandHighBitTransform {
         PirTransformKind::MaskOperandHighBit
     }
 
+    fn can_emit_always_equivalent_candidates(&self) -> bool {
+        false
+    }
+
     fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
         let always_equivalent = false;
         find_candidates_for_mask_transform(f, 2000, always_equivalent)
@@ -213,6 +217,10 @@ pub struct MaskOperandLowBitTransform;
 impl PirTransform for MaskOperandLowBitTransform {
     fn kind(&self) -> PirTransformKind {
         PirTransformKind::MaskOperandLowBit
+    }
+
+    fn can_emit_always_equivalent_candidates(&self) -> bool {
+        false
     }
 
     fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {

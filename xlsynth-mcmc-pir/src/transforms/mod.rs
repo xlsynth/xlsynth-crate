@@ -476,6 +476,17 @@ pub trait PirTransform: fmt::Debug + Send + Sync {
     /// represents.
     fn kind(&self) -> PirTransformKind;
 
+    /// Returns whether this transform class can emit at least one
+    /// `always_equivalent=true` candidate, i.e. a candidate that is
+    /// guaranteed to preserve semantics without a proof.
+    ///
+    /// This is a transform-level pruning hint for no-oracle mode only. Mixed
+    /// transforms should return `true` and mark unsafe instances in
+    /// `find_candidates()`.
+    fn can_emit_always_equivalent_candidates(&self) -> bool {
+        true
+    }
+
     /// Finds all possible application sites for this transform in the given
     /// function.
     fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate>;
