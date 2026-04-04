@@ -1430,7 +1430,7 @@ fn gatify_add_const_pow2_minus1(
     k: usize,
 ) -> AigBitVector {
     let bit_count = lhs_bits.get_bit_count();
-    assert!(k > 0 && k < bit_count);
+    assert!(k > 0 && k <= bit_count);
 
     let mut sum = Vec::with_capacity(bit_count);
     // For low bits where rhs_i=1, carry recurrence is c_{i+1} = lhs_i | c_i,
@@ -1454,6 +1454,36 @@ fn gatify_add_const_pow2_minus1(
     }
 
     AigBitVector::from_lsb_is_index_0(&sum)
+}
+
+/// Adds one literal to an already-lowered dynamic sum, preserving the plain-Add
+/// specialization for `(1<<k)-1` constants.
+fn gatify_add_literal_to_dynamic_sum(
+    gb: &mut GateBuilder,
+    sum_bits: &AigBitVector,
+    literal_bits: &xlsynth::IrBits,
+    adder_mapping: AdderMapping,
+) -> AigBitVector {
+    assert_eq!(sum_bits.get_bit_count(), literal_bits.get_bit_count());
+    if let Some(k) = get_pow2_minus1_k(literal_bits) {
+        if k == 0 {
+            return sum_bits.clone();
+        }
+        if k <= sum_bits.get_bit_count() {
+            return gatify_add_const_pow2_minus1(gb, sum_bits, k);
+        }
+    }
+
+    let literal_vec = gb.add_literal(literal_bits);
+    let (_c_out, sum) = gatify_add_with_mapping(
+        adder_mapping,
+        sum_bits,
+        &literal_vec,
+        gb.get_false(),
+        None,
+        gb,
+    );
+    sum
 }
 
 fn get_neg_pow2_k(bits: &xlsynth::IrBits) -> Option<usize> {
@@ -3021,15 +3051,12 @@ fn gatify_node(
                         lowered_terms.push(resized);
                     }
                 }
-                let carry_in = if is_one(&literal_sum) && !lowered_terms.is_empty() {
+                let carry_in = if is_one(&literal_sum) && lowered_terms.len() >= 2 {
                     literal_sum = xlsynth::IrBits::zero(output_width);
                     Some(g8_builder.get_true())
                 } else {
                     None
                 };
-                if !literal_sum.is_zero() {
-                    lowered_terms.push(g8_builder.add_literal(&literal_sum));
-                }
                 let selected_adder_mapping = (*arch)
                     .map(AdderMapping::from)
                     .unwrap_or(options.adder_mapping);
@@ -3040,7 +3067,31 @@ fn gatify_node(
                 };
                 let sum = if lowered_terms.is_empty() {
                     g8_builder.add_literal(&literal_sum)
+                } else if lowered_terms.len() == 1 && carry_in.is_none() {
+                    gatify_add_literal_to_dynamic_sum(
+                        g8_builder,
+                        &lowered_terms[0],
+                        &literal_sum,
+                        selected_adder_mapping,
+                    )
+                } else if get_pow2_minus1_k(&literal_sum).is_some() {
+                    let dynamic_sum = array_add_with_carry_out(
+                        g8_builder,
+                        &lowered_terms,
+                        carry_in,
+                        selected_adder_mapping,
+                    )
+                    .sum;
+                    gatify_add_literal_to_dynamic_sum(
+                        g8_builder,
+                        &dynamic_sum,
+                        &literal_sum,
+                        selected_adder_mapping,
+                    )
                 } else {
+                    if !literal_sum.is_zero() {
+                        lowered_terms.push(g8_builder.add_literal(&literal_sum));
+                    }
                     array_add_with_carry_out(
                         g8_builder,
                         &lowered_terms,
@@ -3273,20 +3324,6 @@ fn gatify_node(
                     assert_eq!(lhs_gate_refs.get_bit_count(), rhs_bits.get_bit_count());
                     let gates = if k == 0 {
                         lhs_gate_refs.clone()
-                    } else if k == lhs_gate_refs.get_bit_count() {
-                        // (2^N - 1) for N-bit values is all ones; adding this is the same
-                        // as subtracting one modulo 2^N.
-                        let ones = g8_builder.add_literal(&rhs_bits);
-                        let add_tag = format!("add_{}", node.text_id);
-                        let (_c_out, gates) = gatify_add_with_mapping(
-                            options.adder_mapping,
-                            &lhs_gate_refs,
-                            &ones,
-                            g8_builder.get_false(),
-                            Some(&add_tag),
-                            g8_builder,
-                        );
-                        gates
                     } else {
                         gatify_add_const_pow2_minus1(g8_builder, &lhs_gate_refs, k)
                     };
