@@ -365,7 +365,24 @@ fn gatify_dense_ext_nary_add_terms(
     };
 
     if lowered_terms.len() == 1 {
-        if let Some(ones_run) = get_single_ones_run(&literal_sum) {
+        if literal_sum.is_zero() {
+            if let Some(carry_in) = carry_in {
+                let zero_bits = AigBitVector::zeros(literal_sum.get_bit_count());
+                return gatify_add_with_mapping(
+                    adder_mapping,
+                    &lowered_terms[0],
+                    &zero_bits,
+                    carry_in,
+                    None,
+                    gb,
+                )
+                .1;
+            }
+            return lowered_terms[0].clone();
+        }
+        if let Some(ones_run) = get_single_ones_run(&literal_sum)
+            && (carry_in.is_some() || ones_run.start == 0 || ones_run.len() != 1)
+        {
             return gatify_add_const_single_ones_run(
                 gb,
                 &lowered_terms[0],
