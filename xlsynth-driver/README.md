@@ -580,6 +580,35 @@ Requires `--top <NAME>` to select the entry point.
 - Optional flags:
   - `--aug-opt=true|false` – enable the augmented optimizer “opt sandwich” (default: `false`).
 
+### `ir-inline`: inline into the selected top function
+
+Runs a small explicit XLS pass pipeline to flatten calls into the selected top
+function and prints the rewritten IR to **stdout**.
+
+- Currently requires `--toolchain` so the driver can invoke the external
+  `opt_main`.
+- Optional flags:
+  - `--top <NAME>` – select the entry point explicitly; defaults to the package
+    `top` function when present, or the only function when the package defines
+    exactly one function, and is otherwise required.
+  - `--unroll=true|false` – also run loop unrolling so `counted_for` nodes are
+    flattened into the top (default: `true`).
+
+With the default `--unroll=true`, the output is intended to be the most useful
+"desugared" form for downstream inspection: explicit `invoke` sites are inlined
+and `counted_for` loops are unrolled. When `--unroll=false`, explicit
+invocations are still inlined, but loop bodies referenced by `counted_for`
+remain as separate reachable helper functions in the emitted package.
+
+Example:
+
+```shell
+xlsynth-driver --toolchain ~/xlsynth-toolchain.toml ir-inline \
+  my_design.ir \
+  --top main \
+  --unroll=true
+```
+
 ### `ir-mcmc-opt`: optimize PIR IR with MCMC
 
 Runs the PIR MCMC optimizer and emits optimization artifacts to an output

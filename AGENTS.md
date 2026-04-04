@@ -54,6 +54,9 @@ under `scripts/` over duplicating shell helpers inline in `.github/workflows`.
 Those CI helper scripts should be compatible with the oldest runner/container in
 the matrix rather than assuming modern tool versions; for example, do not assume
 new `curl` flags or post-3.6 Python syntax are available everywhere.
+In particular, the Rocky 8 CI lane currently installs Python 3.6.x, so CI
+helper scripts under `scripts/` must remain compatible with Python 3.6 unless
+the workflow is updated in the same change.
 
 ## Agent Guidance: xlsynth-g8r and Fuzz Targets
 
@@ -139,6 +142,17 @@ that introduce a command without updating the README are subject to rejection.
 When adding or changing flags for an existing `xlsynth-driver` subcommand, update the corresponding section in `xlsynth-driver/README.md` to document the new/changed flags and their defaults.
 
 When adding or changing the `ir-query` pattern language (new matchers, syntax tweaks, etc.), update the `ir-query` documentation in `xlsynth-driver/README.md` to keep the DSL reference current.
+
+For `xlsynth-driver` subcommands that operate on package-form IR and accept a
+top-selection flag such as `--top`, prefer the following behavior:
+
+- If the package already has a `top` function/member set, use that by default.
+- If the package does not have a `top` set but there is exactly one suitable
+  function/member for that command, use it by default.
+- If the package does not have a `top` set and there are multiple suitable
+  functions/members, require an explicit `--top` flag rather than silently
+  picking one.
+- If the user provides `--top`, it should override the package default.
 
 ## Augmented optimizer (`aug-opt`): how to exercise it
 

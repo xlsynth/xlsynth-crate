@@ -1495,6 +1495,285 @@ top fn my_main(x: bits[32] id=5) -> bits[32] {
     );
 }
 
+#[test]
+fn test_ir_inline_subcommand_default_unroll_true() {
+    let _ = env_logger::try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("ir.ir");
+    std::fs::write(
+        &ir_path,
+        r#"package sample
+
+fn g(x: bits[8] id=10) -> bits[8] {
+  ret add.2: bits[8] = add(x, x, id=2)
+}
+
+fn body(i: bits[8] id=20, acc: bits[8] id=21) -> bits[8] {
+  ret add.4: bits[8] = add(i, acc, id=4)
+}
+
+top fn my_main(x: bits[8] id=30) -> bits[8] {
+  invoke.5: bits[8] = invoke(x, to_apply=g, id=5)
+  ret counted_for.6: bits[8] = counted_for(invoke.5, trip_count=3, stride=1, body=body, id=6)
+}"#,
+    )
+    .unwrap();
+
+    let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
+    std::fs::write(&toolchain_toml, add_tool_path_value("[toolchain]\n")).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_toml.to_str().unwrap())
+        .arg("ir-inline")
+        .arg(ir_path.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-inline should succeed; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("top fn my_main("),
+        "unexpected stdout: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("fn g("),
+        "helper g should have been pruned from default ir-inline output: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("fn body("),
+        "counted_for body should have been pruned from default ir-inline output: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("invoke("),
+        "default ir-inline output should not contain invoke nodes: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("counted_for("),
+        "default ir-inline output should not contain counted_for nodes: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_ir_inline_subcommand_defaults_to_existing_package_top() {
+    let _ = env_logger::try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("ir.ir");
+    std::fs::write(
+        &ir_path,
+        r#"package sample
+
+fn helper(x: bits[8] id=10) -> bits[8] {
+  ret not.2: bits[8] = not(x, id=2)
+}
+
+top fn my_main(x: bits[8] id=20) -> bits[8] {
+  ret invoke.3: bits[8] = invoke(x, to_apply=helper, id=3)
+}"#,
+    )
+    .unwrap();
+
+    let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
+    std::fs::write(&toolchain_toml, add_tool_path_value("[toolchain]\n")).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_toml.to_str().unwrap())
+        .arg("ir-inline")
+        .arg(ir_path.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-inline should default to the package top; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("top fn my_main("),
+        "expected package top to be preserved in output: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("invoke("),
+        "expected helper call to be inlined when using the package top: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_ir_inline_subcommand_uses_only_function_when_package_has_no_explicit_top() {
+    let _ = env_logger::try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("ir.ir");
+    std::fs::write(
+        &ir_path,
+        r#"package sample
+
+fn my_main(x: bits[8] id=10) -> bits[8] {
+  ret not.2: bits[8] = not(x, id=2)
+}"#,
+    )
+    .unwrap();
+
+    let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
+    std::fs::write(&toolchain_toml, add_tool_path_value("[toolchain]\n")).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_toml.to_str().unwrap())
+        .arg("ir-inline")
+        .arg(ir_path.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-inline should use the sole function as top; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("top fn my_main("),
+        "expected sole function to become top in output: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_ir_inline_subcommand_requires_top_when_package_has_multiple_functions_and_no_explicit_top()
+{
+    let _ = env_logger::try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("ir.ir");
+    std::fs::write(
+        &ir_path,
+        r#"package sample
+
+fn helper(x: bits[8] id=10) -> bits[8] {
+  ret not.2: bits[8] = not(x, id=2)
+}
+
+fn my_main(x: bits[8] id=20) -> bits[8] {
+  ret invoke.3: bits[8] = invoke(x, to_apply=helper, id=3)
+}"#,
+    )
+    .unwrap();
+
+    let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
+    std::fs::write(&toolchain_toml, add_tool_path_value("[toolchain]\n")).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_toml.to_str().unwrap())
+        .arg("ir-inline")
+        .arg(ir_path.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "ir-inline should fail without --top when multiple functions are present"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("multiple functions and no explicit top function"),
+        "unexpected stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_ir_inline_subcommand_unroll_false_keeps_counted_for_body() {
+    let _ = env_logger::try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("ir.ir");
+    std::fs::write(
+        &ir_path,
+        r#"package sample
+
+fn g(x: bits[8] id=10) -> bits[8] {
+  ret add.2: bits[8] = add(x, x, id=2)
+}
+
+fn body(i: bits[8] id=20, acc: bits[8] id=21) -> bits[8] {
+  ret add.4: bits[8] = add(i, acc, id=4)
+}
+
+top fn my_main(x: bits[8] id=30) -> bits[8] {
+  invoke.5: bits[8] = invoke(x, to_apply=g, id=5)
+  ret counted_for.6: bits[8] = counted_for(invoke.5, trip_count=3, stride=1, body=body, id=6)
+}"#,
+    )
+    .unwrap();
+
+    let toolchain_toml = temp_dir.path().join("xlsynth-toolchain.toml");
+    std::fs::write(&toolchain_toml, add_tool_path_value("[toolchain]\n")).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("--toolchain")
+        .arg(toolchain_toml.to_str().unwrap())
+        .arg("ir-inline")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("my_main")
+        .arg("--unroll")
+        .arg("false")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-inline --unroll=false should succeed; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("top fn my_main("),
+        "unexpected stdout: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("invoke("),
+        "ir-inline --unroll=false should still inline explicit invokes: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("counted_for("),
+        "ir-inline --unroll=false should preserve counted_for nodes: {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("fn g("),
+        "helper g should have been pruned after invoke inlining: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("fn body("),
+        "counted_for body should remain reachable when --unroll=false: {}",
+        stdout
+    );
+}
+
 #[test_case(true; "with_tool_path")]
 #[test_case(false; "without_tool_path")]
 fn test_dslx2pipeline_with_dslx_path_two_entries(use_tool_path: bool) {
