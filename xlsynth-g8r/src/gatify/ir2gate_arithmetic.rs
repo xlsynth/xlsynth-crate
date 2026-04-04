@@ -114,14 +114,69 @@ fn gatify_add_const_pow2_minus1(
     lhs_bits: &AigBitVector,
     k: usize,
 ) -> AigBitVector {
+    assert!(k > 0 && k <= lhs_bits.get_bit_count());
+    gatify_add_const_single_ones_run(gb, lhs_bits, 0..k, gb.get_false())
+}
+
+/// Recognizes literals with one contiguous run of 1s and zeros elsewhere.
+fn get_single_ones_run(bits: &xlsynth::IrBits) -> Option<Range<usize>> {
+    let bit_count = bits.get_bit_count();
+    let mut run_start = 0usize;
+    while run_start < bit_count
+        && !bits
+            .get_bit(run_start)
+            .expect("literal bit index should be in bounds during run detection")
+    {
+        run_start += 1;
+    }
+
+    let mut run_end = run_start;
+    while run_end < bit_count
+        && bits
+            .get_bit(run_end)
+            .expect("literal bit index should be in bounds during run detection")
+    {
+        run_end += 1;
+    }
+
+    for i in run_end..bit_count {
+        if bits
+            .get_bit(i)
+            .expect("literal bit index should be in bounds during run detection")
+        {
+            return None;
+        }
+    }
+
+    Some(run_start..run_end)
+}
+
+/// Lowers `lhs_bits + literal_run + carry_in` where `literal_run` has one
+/// contiguous run of 1s and zeros elsewhere.
+fn gatify_add_const_single_ones_run(
+    gb: &mut GateBuilder,
+    lhs_bits: &AigBitVector,
+    ones_run: Range<usize>,
+    carry_in: AigOperand,
+) -> AigBitVector {
     let bit_count = lhs_bits.get_bit_count();
-    assert!(k > 0 && k <= bit_count);
+    assert!(ones_run.start <= ones_run.end && ones_run.end <= bit_count);
 
     let mut sum = Vec::with_capacity(bit_count);
-    // For low bits where rhs_i=1, carry recurrence is c_{i+1} = lhs_i | c_i,
-    // and sum_i = !(lhs_i ^ c_i).
-    let mut carry = gb.get_false();
-    for i in 0..k {
+    let mut carry = carry_in;
+
+    // For rhs_i=0, this is an increment-by-carry chain:
+    // sum_i = lhs_i ^ carry and c_{i+1} = lhs_i & carry.
+    for i in 0..ones_run.start {
+        let lhs_i = *lhs_bits.get_lsb(i);
+        let sum_i = gb.add_xor_binary(lhs_i, carry);
+        sum.push(sum_i);
+        carry = gb.add_and_binary(lhs_i, carry);
+    }
+
+    // For rhs_i=1, carry recurrence is c_{i+1} = lhs_i | carry,
+    // and sum_i = !(lhs_i ^ carry).
+    for i in ones_run {
         let lhs_i = *lhs_bits.get_lsb(i);
         let lhs_xor_carry = gb.add_xor_binary(lhs_i, carry);
         let sum_i = gb.add_not(lhs_xor_carry);
@@ -129,9 +184,7 @@ fn gatify_add_const_pow2_minus1(
         carry = gb.add_or_binary(lhs_i, carry);
     }
 
-    // For upper bits where rhs_i=0, this is an increment-by-carry chain:
-    // sum_i = lhs_i ^ carry and c_{i+1} = lhs_i & carry.
-    for i in k..bit_count {
+    for i in sum.len()..bit_count {
         let lhs_i = *lhs_bits.get_lsb(i);
         let sum_i = gb.add_xor_binary(lhs_i, carry);
         sum.push(sum_i);
@@ -311,13 +364,23 @@ fn gatify_dense_ext_nary_add_terms(
         carry_in
     };
 
-    if lowered_terms.len() == 1 && carry_in.is_none() {
-        return gatify_add_literal_to_dynamic_sum(
-            gb,
-            &lowered_terms[0],
-            &literal_sum,
-            adder_mapping,
-        );
+    if lowered_terms.len() == 1 {
+        if let Some(ones_run) = get_single_ones_run(&literal_sum) {
+            return gatify_add_const_single_ones_run(
+                gb,
+                &lowered_terms[0],
+                ones_run,
+                carry_in.unwrap_or_else(|| gb.get_false()),
+            );
+        }
+        if carry_in.is_none() {
+            return gatify_add_literal_to_dynamic_sum(
+                gb,
+                &lowered_terms[0],
+                &literal_sum,
+                adder_mapping,
+            );
+        }
     }
 
     if carry_in.is_none() && get_pow2_minus1_k(&literal_sum).is_some() {

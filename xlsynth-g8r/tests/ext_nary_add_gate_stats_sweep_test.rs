@@ -19,6 +19,13 @@ struct ExtNaryAddPow2Minus1Row {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct ExtNaryAddSingleOnesRunRow {
+    literal_value: u64,
+    live_nodes: usize,
+    deepest_path: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct ExtNaryAddCorrectionCountRow {
     correction_count: usize,
     live_nodes: usize,
@@ -260,6 +267,19 @@ fn gather_ext_nary_add_pow2_minus1_rows() -> Vec<ExtNaryAddPow2Minus1Row> {
     got
 }
 
+fn gather_ext_nary_add_single_ones_run_rows() -> Vec<ExtNaryAddSingleOnesRunRow> {
+    let mut got = Vec::new();
+    for literal_value in [0u64, 0b0001_0000, 0b0001_1100, 0b0011_1100, 0b1111_0000] {
+        let nary_add_stats = get_ir_gate_stats(&build_nary_add_const_ir_text(8, literal_value));
+        got.push(ExtNaryAddSingleOnesRunRow {
+            literal_value,
+            live_nodes: nary_add_stats.0,
+            deepest_path: nary_add_stats.1,
+        });
+    }
+    got
+}
+
 fn gather_ext_nary_add_correction_count_rows(
     build_ir_text: impl Fn(usize) -> String,
 ) -> Vec<ExtNaryAddCorrectionCountRow> {
@@ -329,6 +349,25 @@ fn test_ext_nary_add_pow2_minus1_gate_stats_sweep_w8() {
 }
 
 #[test]
+fn test_ext_nary_add_single_ones_run_gate_stats_w8() {
+    let got = gather_ext_nary_add_single_ones_run_rows();
+
+    // This locks in the one-dense-term shifted-ones-run finalizer for explicit
+    // `ext_nary_add(p0, literal)` with no dynamic carry-in.
+    // eprintln!("{got:#?}");
+    #[rustfmt::skip]
+    let want: &[ExtNaryAddSingleOnesRunRow] = &[
+        ExtNaryAddSingleOnesRunRow { literal_value:   0, live_nodes:  8, deepest_path:  1 },
+        ExtNaryAddSingleOnesRunRow { literal_value:  16, live_nodes: 19, deepest_path:  5 },
+        ExtNaryAddSingleOnesRunRow { literal_value:  28, live_nodes: 27, deepest_path:  7 },
+        ExtNaryAddSingleOnesRunRow { literal_value:  60, live_nodes: 27, deepest_path:  7 },
+        ExtNaryAddSingleOnesRunRow { literal_value: 240, live_nodes: 19, deepest_path:  5 },
+    ];
+
+    assert_eq!(got.as_slice(), want);
+}
+
+#[test]
 fn test_ext_nary_add_unit_inc_gate_stats_sweep_w16_corrections_0_to_4() {
     let got = gather_ext_nary_add_correction_count_rows(|correction_count| {
         build_nary_add_unit_inc_ir_text(16, correction_count)
@@ -361,7 +400,7 @@ fn test_ext_nary_add_unit_dec_gate_stats_sweep_w16_corrections_0_to_4() {
     #[rustfmt::skip]
     let want: &[ExtNaryAddCorrectionCountRow] = &[
         ExtNaryAddCorrectionCountRow { correction_count: 0, live_nodes:  16, deepest_path:  1 },
-        ExtNaryAddCorrectionCountRow { correction_count: 1, live_nodes:  80, deepest_path: 33 },
+        ExtNaryAddCorrectionCountRow { correction_count: 1, live_nodes:  80, deepest_path: 18 },
         ExtNaryAddCorrectionCountRow { correction_count: 2, live_nodes:  88, deepest_path: 34 },
         ExtNaryAddCorrectionCountRow { correction_count: 3, live_nodes: 198, deepest_path: 50 },
         ExtNaryAddCorrectionCountRow { correction_count: 4, live_nodes: 204, deepest_path: 50 },
