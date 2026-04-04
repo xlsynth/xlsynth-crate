@@ -4,8 +4,11 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use rand::prelude::IteratorRandom;
+use rand::rngs::StdRng;
 use rand::Rng;
+use rand::SeedableRng;
 use std::collections::HashMap;
+use std::sync::Once;
 
 use xlsynth_g8r::aig::bulk_replace::{bulk_replace, SubstitutionMap};
 use xlsynth_g8r::aig::dce::dce;
@@ -13,6 +16,8 @@ use xlsynth_g8r::aig::{AigBitVector, AigOperand, AigRef, GateFn, GateBuilder, Ga
 use xlsynth_g8r::aig_sim::gate_sim::{eval, Collect};
 
 use xlsynth_pir::fuzz_utils;
+
+static LOGGER_INIT: Once = Once::new();
 
 #[derive(Debug, Clone, Arbitrary)]
 enum FuzzGateOp {
@@ -278,7 +283,7 @@ fn build_gate_graph(sample: &FuzzGateGraph) -> Option<(GateFn, GateBuilderOption
     }
     // Defensive: Avoid building overly large graphs
     if nodes.len() > 256 {
-        println!("[fuzz] nodes.len() exceeded cap: {}", nodes.len());
+        log::debug!("[fuzz] nodes.len() exceeded cap: {}", nodes.len());
         return None;
     }
     // Add outputs
@@ -291,7 +296,7 @@ fn build_gate_graph(sample: &FuzzGateGraph) -> Option<(GateFn, GateBuilderOption
         return None;
     }
     let graph = builder.build();
-    println!(
+    log::debug!(
         "[fuzz] About to return graph: nodes.len() = {}, outputs = {}",
         graph.gates.len(),
         graph.outputs.len()
@@ -305,12 +310,117 @@ struct FuzzSubstitutions {
     subs: Vec<(u16, u16, bool)>, // (from_idx, to_idx, negated)
 }
 
+fn make_rng(graph: &FuzzGateGraph, substitutions: &FuzzSubstitutions) -> StdRng {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&[graph.num_inputs]);
+    hasher.update(&[graph.input_width]);
+    hasher.update(&[graph.num_ops]);
+    hasher.update(&[graph.num_outputs]);
+    hasher.update(&[graph.chain_depth]);
+    hasher.update(&[u8::from(graph.use_opt)]);
+    hasher.update(
+        &graph
+            .fanout_node
+            .map_or(u16::MAX, |fanout_node| fanout_node)
+            .to_le_bytes(),
+    );
+
+    hasher.update(&(graph.ops.len() as u64).to_le_bytes());
+    for op in &graph.ops {
+        match *op {
+            FuzzGateOp::And {
+                lhs,
+                rhs,
+                lhs_neg,
+                rhs_neg,
+            } => {
+                hasher.update(&[0]);
+                hasher.update(&lhs.to_le_bytes());
+                hasher.update(&rhs.to_le_bytes());
+                hasher.update(&[u8::from(lhs_neg), u8::from(rhs_neg)]);
+            }
+            FuzzGateOp::Or {
+                lhs,
+                rhs,
+                lhs_neg,
+                rhs_neg,
+            } => {
+                hasher.update(&[1]);
+                hasher.update(&lhs.to_le_bytes());
+                hasher.update(&rhs.to_le_bytes());
+                hasher.update(&[u8::from(lhs_neg), u8::from(rhs_neg)]);
+            }
+            FuzzGateOp::Xor {
+                lhs,
+                rhs,
+                lhs_neg,
+                rhs_neg,
+            } => {
+                hasher.update(&[2]);
+                hasher.update(&lhs.to_le_bytes());
+                hasher.update(&rhs.to_le_bytes());
+                hasher.update(&[u8::from(lhs_neg), u8::from(rhs_neg)]);
+            }
+            FuzzGateOp::Xnor {
+                lhs,
+                rhs,
+                lhs_neg,
+                rhs_neg,
+            } => {
+                hasher.update(&[3]);
+                hasher.update(&lhs.to_le_bytes());
+                hasher.update(&rhs.to_le_bytes());
+                hasher.update(&[u8::from(lhs_neg), u8::from(rhs_neg)]);
+            }
+            FuzzGateOp::Mux2 {
+                sel,
+                on_true,
+                on_false,
+                sel_neg,
+                t_neg,
+                f_neg,
+            } => {
+                hasher.update(&[4]);
+                hasher.update(&sel.to_le_bytes());
+                hasher.update(&on_true.to_le_bytes());
+                hasher.update(&on_false.to_le_bytes());
+                hasher.update(&[u8::from(sel_neg), u8::from(t_neg), u8::from(f_neg)]);
+            }
+        }
+    }
+
+    hasher.update(&(graph.constants.len() as u64).to_le_bytes());
+    for value in &graph.constants {
+        hasher.update(&[u8::from(*value)]);
+    }
+
+    hasher.update(&(graph.redundant_pairs.len() as u64).to_le_bytes());
+    for pair in &graph.redundant_pairs {
+        hasher.update(&pair.a.to_le_bytes());
+        hasher.update(&pair.b.to_le_bytes());
+    }
+
+    hasher.update(&(substitutions.subs.len() as u64).to_le_bytes());
+    for (from_idx, to_idx, negated) in &substitutions.subs {
+        hasher.update(&from_idx.to_le_bytes());
+        hasher.update(&to_idx.to_le_bytes());
+        hasher.update(&[u8::from(*negated)]);
+    }
+
+    StdRng::from_seed(*hasher.finalize().as_bytes())
+}
+
 fuzz_target!(|data: (FuzzGateGraph, FuzzSubstitutions)| {
     // Ensure XLSYNTH_TOOLS is set up front for equivalence checking
     if std::env::var("XLSYNTH_TOOLS").is_err() {
         panic!("XLSYNTH_TOOLS environment variable must be set for equivalence checking in this fuzz target");
     }
-    let _ = env_logger::builder().is_test(true).try_init();
+    LOGGER_INIT.call_once(|| {
+        let _ = env_logger::Builder::from_env(env_logger::Env::default())
+            .is_test(true)
+            .try_init();
+    });
+    let mut rng = make_rng(&data.0, &data.1);
     // Clamp the number of operations to avoid excessive graph size and OOM
     const MAX_OPS: u8 = 64;
     const MAX_OUTPUTS: u8 = 16;
@@ -325,8 +435,8 @@ fuzz_target!(|data: (FuzzGateGraph, FuzzSubstitutions)| {
         Some(pair) => pair,
         None => return, // skip degenerate graph
     };
-    println!("[fuzz] FuzzGateGraph: {:?}", data.0);
-    println!(
+    log::debug!("[fuzz] FuzzGateGraph: {:?}", data.0);
+    log::debug!(
         "[fuzz] gate_fn.gates.len() = {}, gate_fn.outputs.len() = {}",
         gate_fn.gates.len(),
         gate_fn.outputs.len()
@@ -350,14 +460,14 @@ fuzz_target!(|data: (FuzzGateGraph, FuzzSubstitutions)| {
 
     // With some probability, generate a long chain substitution map (A->B, B->C,
     // ..., Y->Z)
-    if rand::random::<u8>() % 8 == 0 && node_count > 3 {
+    if rng.r#gen::<u8>() % 8 == 0 && node_count > 3 {
         let max_chain = node_count.min(16);
-        let chain_len = (3..=max_chain).choose(&mut rand::thread_rng()).unwrap_or(3);
+        let chain_len = (3..=max_chain).choose(&mut rng).unwrap_or(3);
         if node_count <= chain_len + 1 {
             // Not enough nodes for a valid chain, fall back to normal
             // substitution logic
         } else {
-            let start = rand::thread_rng().gen_range(1..(node_count - chain_len));
+            let start = rng.gen_range(1..(node_count - chain_len));
             for i in 0..chain_len {
                 let from_idx = start + i;
                 let to_idx = start + i + 1;
@@ -500,9 +610,12 @@ fuzz_target!(|data: (FuzzGateGraph, FuzzSubstitutions)| {
         );
     }
 
-    // 2. Idempotence: running bulk_replace again should yield the same result
-    //    (structurally)
-    let new_fn2 = bulk_replace(&new_fn, &substitutions, opts);
+    // 2. No-op rebuild: the original substitution map is expressed in terms of
+    //    `gate_fn` node IDs, but `bulk_replace` runs DCE and renumbers nodes in
+    //    `new_fn`. Reapplying that stale map would be invalid, so rebuild
+    //    `new_fn` with an empty map instead and check output shape stability.
+    let no_op_substitutions = SubstitutionMap::new();
+    let new_fn2 = bulk_replace(&new_fn, &no_op_substitutions, opts);
     assert_eq!(
         new_fn.outputs.len(),
         new_fn2.outputs.len(),
@@ -531,7 +644,6 @@ fuzz_target!(|data: (FuzzGateGraph, FuzzSubstitutions)| {
         );
     }
     // Optionally, check simulation outputs for a random input vector
-    let mut rng = rand::thread_rng();
     let mut input_vecs = Vec::new();
     for input in &gate_fn.inputs {
         let width = input.get_bit_count();

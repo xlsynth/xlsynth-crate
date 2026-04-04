@@ -4,7 +4,7 @@ use xlsynth::{IrBits, IrValue};
 use xlsynth_pir::ir::{Fn as IrFn, NaryOp, Node, NodePayload, NodeRef, Type};
 use xlsynth_pir::ir_utils::remap_payload_with;
 
-use super::{PirTransform, PirTransformKind, TransformLocation};
+use super::{PirTransform, PirTransformKind, TransformCandidate, TransformLocation};
 
 #[derive(Debug)]
 enum MaskBitPosition {
@@ -154,8 +154,12 @@ fn apply_mask_transform(
     Ok(())
 }
 
-fn find_candidates_for_mask_transform(f: &IrFn, max_candidates: usize) -> Vec<TransformLocation> {
-    let mut out: Vec<TransformLocation> = Vec::new();
+fn find_candidates_for_mask_transform(
+    f: &IrFn,
+    max_candidates: usize,
+    always_equivalent: bool,
+) -> Vec<TransformCandidate> {
+    let mut out = Vec::<TransformCandidate>::new();
     for i in 0..f.nodes.len() {
         if out.len() >= max_candidates {
             break;
@@ -167,10 +171,13 @@ fn find_candidates_for_mask_transform(f: &IrFn, max_candidates: usize) -> Vec<Tr
                 break;
             }
             if matches!(bits_width(f, dep), Some(w) if w >= 2) {
-                out.push(TransformLocation::RewireOperand {
-                    node: node_ref,
-                    operand_slot: slot,
-                    new_operand: dep, // placeholder; ignored by this transform
+                out.push(TransformCandidate {
+                    location: TransformLocation::RewireOperand {
+                        node: node_ref,
+                        operand_slot: slot,
+                        new_operand: dep, // placeholder; ignored by this transform
+                    },
+                    always_equivalent,
                 });
             }
         }
@@ -188,16 +195,17 @@ impl PirTransform for MaskOperandHighBitTransform {
         PirTransformKind::MaskOperandHighBit
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        find_candidates_for_mask_transform(f, 2000)
+    fn can_emit_always_equivalent_candidates(&self) -> bool {
+        false
+    }
+
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = false;
+        find_candidates_for_mask_transform(f, 2000, always_equivalent)
     }
 
     fn apply(&self, f: &mut IrFn, loc: &TransformLocation) -> Result<(), String> {
         apply_mask_transform(f, loc, MaskBitPosition::High, "MaskOperandHighBitTransform")
-    }
-
-    fn always_equivalent(&self) -> bool {
-        false
     }
 }
 
@@ -211,15 +219,16 @@ impl PirTransform for MaskOperandLowBitTransform {
         PirTransformKind::MaskOperandLowBit
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        find_candidates_for_mask_transform(f, 2000)
+    fn can_emit_always_equivalent_candidates(&self) -> bool {
+        false
+    }
+
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = false;
+        find_candidates_for_mask_transform(f, 2000, always_equivalent)
     }
 
     fn apply(&self, f: &mut IrFn, loc: &TransformLocation) -> Result<(), String> {
         apply_mask_transform(f, loc, MaskBitPosition::Low, "MaskOperandLowBitTransform")
-    }
-
-    fn always_equivalent(&self) -> bool {
-        false
     }
 }

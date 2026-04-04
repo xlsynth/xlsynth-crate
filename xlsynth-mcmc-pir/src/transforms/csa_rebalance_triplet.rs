@@ -194,8 +194,9 @@ impl PirTransform for CsaRebalanceTripletTransform {
         PirTransformKind::CsaRebalanceTriplet
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             if matches!(f.get_node(nr).payload, NodePayload::Binop(Binop::Add, _, _)) {
                 // `bits[0]` is permitted in the IR, but this transform materializes a
@@ -205,7 +206,10 @@ impl PirTransform for CsaRebalanceTripletTransform {
                     continue;
                 }
                 if Self::match_add_chain(f, nr).is_some() || Self::match_csa_add(f, nr).is_some() {
-                    out.push(TransformLocation::Node(nr));
+                    out.push(TransformCandidate {
+                        location: TransformLocation::Node(nr),
+                        always_equivalent,
+                    });
                 }
             }
         }

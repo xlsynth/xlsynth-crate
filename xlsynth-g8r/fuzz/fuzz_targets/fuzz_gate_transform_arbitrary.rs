@@ -2,10 +2,13 @@
 
 #![no_main]
 use libfuzzer_sys::fuzz_target;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
-use rand::thread_rng;
 
+#[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]
 use xlsynth_g8r::prove_gate_fn_equiv_common::EquivResult;
+#[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]
 use xlsynth_g8r::prove_gate_fn_equiv_varisat::{
     Ctx as VarisatCtx, prove_gate_fn_equiv as prove_sat,
 };
@@ -15,12 +18,28 @@ use xlsynth_g8r::transforms::{self, transform_trait::TransformDirection};
 use xlsynth_g8r_fuzz::{FuzzGraph, build_graph};
 
 const NUM_STEPS: usize = 32;
+const MAX_TRANSFORM_DRAWS: usize = NUM_STEPS * 32;
+
+fn make_rng(graph: &FuzzGraph) -> StdRng {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&[graph.num_inputs]);
+    hasher.update(&[graph.input_width]);
+    hasher.update(&[graph.num_ops]);
+    hasher.update(&[graph.num_outputs]);
+    hasher.update(&[u8::from(graph.use_opt)]);
+    hasher.update(&(graph.ops.len() as u64).to_le_bytes());
+    for op in &graph.ops {
+        hasher.update(&op.lhs.to_le_bytes());
+        hasher.update(&op.rhs.to_le_bytes());
+        hasher.update(&[u8::from(op.lhs_neg), u8::from(op.rhs_neg)]);
+    }
+    StdRng::from_seed(*hasher.finalize().as_bytes())
+}
 
 fuzz_target!(|graph: FuzzGraph| {
-    // Ensure INFO logging is enabled for visibility inside fuzz runs.
-    let _ = env_logger::builder()
+    // Respect `RUST_LOG` so callers can choose quiet or verbose fuzz runs.
+    let _ = env_logger::Builder::from_env(env_logger::Env::default())
         .is_test(true)
-        .filter_level(log::LevelFilter::Info)
         .try_init();
 
     // Build an initial GateFn from the fuzzed graph description.
@@ -29,6 +48,7 @@ fuzz_target!(|graph: FuzzGraph| {
         return;
     };
 
+    #[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]
     let orig_g = cur_g.clone();
 
     // Prepare the transform set & RNG.
@@ -37,10 +57,14 @@ fuzz_target!(|graph: FuzzGraph| {
         log::info!("No transforms available – skipping input");
         return;
     }
-    let mut rng = thread_rng();
+    let mut rng = make_rng(&graph);
 
     let mut attempts = 0usize;
-    while attempts < NUM_STEPS {
+    for _draw in 0..MAX_TRANSFORM_DRAWS {
+        if attempts >= NUM_STEPS {
+            break;
+        }
+
         // Pick a random transform.
         let t = transforms.iter_mut().choose(&mut rng).unwrap();
         let cand_locs = t.find_candidates(&cur_g, TransformDirection::Forward);

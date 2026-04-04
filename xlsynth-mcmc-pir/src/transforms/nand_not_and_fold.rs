@@ -46,16 +46,23 @@ impl PirTransform for NandNotAndFoldTransform {
         PirTransformKind::NandNotAndFold
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             match &f.get_node(nr).payload {
                 NodePayload::Nary(NaryOp::Nand, ops) if !ops.is_empty() => {
-                    out.push(TransformLocation::Node(nr));
+                    out.push(TransformCandidate {
+                        location: TransformLocation::Node(nr),
+                        always_equivalent,
+                    });
                 }
                 NodePayload::Unop(Unop::Not, arg) => {
                     if matches!(f.get_node(*arg).payload, NodePayload::Nary(NaryOp::And, _)) {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
                 _ => {}
@@ -116,9 +123,5 @@ impl PirTransform for NandNotAndFoldTransform {
             }
             _ => Err("NandNotAndFoldTransform: expected nand(...) or not(and(...))".to_string()),
         }
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }

@@ -63,8 +63,9 @@ impl PirTransform for ConstShllConcatZeroFoldTransform {
         PirTransformKind::ConstShllConcatZeroFold
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             match &f.get_node(nr).payload {
                 // concat(bit_slice(x, 0, w-k), 0_k) -> shll(x, k)
@@ -96,7 +97,10 @@ impl PirTransform for ConstShllConcatZeroFoldTransform {
                     if Self::bits_width(f, arg) != Some(w) {
                         continue;
                     }
-                    out.push(TransformLocation::Node(nr));
+                    out.push(TransformCandidate {
+                        location: TransformLocation::Node(nr),
+                        always_equivalent,
+                    });
                 }
 
                 // shll(x, k) -> concat(bit_slice(x, 0, w-k), 0_k) for constant k
@@ -117,7 +121,10 @@ impl PirTransform for ConstShllConcatZeroFoldTransform {
                     if k_usize == 0 || k_usize >= w {
                         continue;
                     }
-                    out.push(TransformLocation::Node(nr));
+                    out.push(TransformCandidate {
+                        location: TransformLocation::Node(nr),
+                        always_equivalent,
+                    });
                 }
                 _ => {}
             }
@@ -256,9 +263,5 @@ impl PirTransform for ConstShllConcatZeroFoldTransform {
                 "ConstShllConcatZeroFoldTransform: expected concat(...) or shll(...)".to_string(),
             ),
         }
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }

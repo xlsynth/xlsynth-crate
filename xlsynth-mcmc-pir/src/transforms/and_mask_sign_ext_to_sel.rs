@@ -74,8 +74,9 @@ impl PirTransform for AndMaskSignExtToSelTransform {
         PirTransformKind::AndMaskSignExtToSel
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             match &f.get_node(nr).payload {
                 // Expand: and(x, sign_ext(b,w)) (nary)
@@ -92,7 +93,10 @@ impl PirTransform for AndMaskSignExtToSelTransform {
                         }
                     }
                     if found.is_some() {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
                 // Fold: sel(b, cases=[0_w, x])
@@ -117,7 +121,10 @@ impl PirTransform for AndMaskSignExtToSelTransform {
                     if Self::bits_width(f, cases[1]) != Some(w) {
                         continue;
                     }
-                    out.push(TransformLocation::Node(nr));
+                    out.push(TransformCandidate {
+                        location: TransformLocation::Node(nr),
+                        always_equivalent,
+                    });
                 }
                 _ => {}
             }
@@ -222,9 +229,5 @@ impl PirTransform for AndMaskSignExtToSelTransform {
                     .to_string(),
             ),
         }
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }

@@ -165,8 +165,9 @@ impl PirTransform for AddFissionTransform {
         PirTransformKind::AddFission
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             if let NodePayload::Binop(Binop::Add, _, _) = f.get_node(nr).payload {
                 // `bits[0]` is permitted in the IR, but this transform materializes a
@@ -176,7 +177,10 @@ impl PirTransform for AddFissionTransform {
                     continue;
                 }
                 if Self::match_fission_add(f, nr).is_some() || Self::add_has_add_user(f, nr) {
-                    out.push(TransformLocation::Node(nr));
+                    out.push(TransformCandidate {
+                        location: TransformLocation::Node(nr),
+                        always_equivalent,
+                    });
                 }
             }
         }

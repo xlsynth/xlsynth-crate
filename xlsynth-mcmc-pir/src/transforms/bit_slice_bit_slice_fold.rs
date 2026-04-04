@@ -50,16 +50,23 @@ impl PirTransform for BitSliceBitSliceFoldTransform {
         PirTransformKind::BitSliceBitSliceFold
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             match &f.get_node(nr).payload {
                 NodePayload::BitSlice { arg, .. } => {
                     if matches!(f.get_node(*arg).payload, NodePayload::BitSlice { .. }) {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     } else {
                         // allow expansion too
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
                 _ => {}
@@ -133,9 +140,5 @@ impl PirTransform for BitSliceBitSliceFoldTransform {
             width: w2,
         };
         Ok(())
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }

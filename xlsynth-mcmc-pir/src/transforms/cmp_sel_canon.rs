@@ -92,8 +92,9 @@ impl PirTransform for CmpSelCanonTransform {
         PirTransformKind::CmpSelCanon
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             let NodePayload::Sel {
                 selector,
@@ -128,7 +129,10 @@ impl PirTransform for CmpSelCanonTransform {
             if Self::sel_is_min(op, a, b, cases[0], cases[1]).is_none() {
                 continue;
             }
-            out.push(TransformLocation::Node(nr));
+            out.push(TransformCandidate {
+                location: TransformLocation::Node(nr),
+                always_equivalent,
+            });
         }
         out
     }
@@ -182,10 +186,6 @@ impl PirTransform for CmpSelCanonTransform {
             default: None,
         };
         Ok(())
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }
 

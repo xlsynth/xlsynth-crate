@@ -96,8 +96,9 @@ impl PirTransform for BitSliceSelDistributeTransform {
         PirTransformKind::BitSliceSelDistribute
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             let node = f.get_node(nr);
             match &node.payload {
@@ -113,7 +114,10 @@ impl PirTransform for BitSliceSelDistributeTransform {
                         if wa.is_some() && wa == wb && wout == Some(*width) {
                             // Also require slice to be in-bounds to avoid constructing invalid IR.
                             if start.saturating_add(*width) <= wa.unwrap() {
-                                out.push(TransformLocation::Node(nr));
+                                out.push(TransformCandidate {
+                                    location: TransformLocation::Node(nr),
+                                    always_equivalent,
+                                });
                             }
                         }
                     }
@@ -148,7 +152,10 @@ impl PirTransform for BitSliceSelDistributeTransform {
                     let wout = Self::bits_width(f, nr);
                     if wa.is_some() && wa == wb && wout == Some(a_width) {
                         if a_start.saturating_add(a_width) <= wa.unwrap() {
-                            out.push(TransformLocation::Node(nr));
+                            out.push(TransformCandidate {
+                                location: TransformLocation::Node(nr),
+                                always_equivalent,
+                            });
                         }
                     }
                 }
@@ -272,9 +279,5 @@ impl PirTransform for BitSliceSelDistributeTransform {
                     .to_string(),
             ),
         }
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }

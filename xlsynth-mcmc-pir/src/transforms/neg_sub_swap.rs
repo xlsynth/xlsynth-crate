@@ -44,8 +44,9 @@ impl PirTransform for NegSubSwapTransform {
         PirTransformKind::NegSubSwap
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             match &f.get_node(nr).payload {
                 NodePayload::Unop(Unop::Neg, arg) => {
@@ -53,10 +54,16 @@ impl PirTransform for NegSubSwapTransform {
                         f.get_node(*arg).payload,
                         NodePayload::Binop(Binop::Sub, _, _)
                     ) {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
-                NodePayload::Binop(Binop::Sub, _, _) => out.push(TransformLocation::Node(nr)),
+                NodePayload::Binop(Binop::Sub, _, _) => out.push(TransformCandidate {
+                    location: TransformLocation::Node(nr),
+                    always_equivalent,
+                }),
                 _ => {}
             }
         }
@@ -103,9 +110,5 @@ impl PirTransform for NegSubSwapTransform {
 
             _ => Err("NegSubSwapTransform: expected neg(sub(..)) or sub(..)".to_string()),
         }
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }
