@@ -29,11 +29,13 @@ def humanize_kib(kib: int) -> str:
 
 def run_command(argv: List[str]) -> int:
     print("$ {}".format(" ".join(argv)))
+    # Rocky 8 CI still runs Python 3.6, so use `universal_newlines` instead of
+    # the newer `text` keyword here.
     completed = subprocess.run(
         argv,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
+        universal_newlines=True,
         check=False,
     )
     if completed.stdout:
@@ -50,7 +52,7 @@ def du_kib(path: str) -> Tuple[Optional[int], Optional[str]]:
         ["du", "-sk", path],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
+        universal_newlines=True,
         check=False,
     )
     if completed.returncode != 0:
