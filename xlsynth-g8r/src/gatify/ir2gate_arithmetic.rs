@@ -2,14 +2,36 @@
 
 //! Arithmetic lowering helpers for `ir2gate`.
 
-use crate::aig::gate::AigBitVector;
+use crate::aig::gate::{AigBitVector, AigOperand};
 use crate::gate_builder::GateBuilder;
 use crate::gatify::ir2gate::{
     GateEnv, gatify_add_with_mapping, gatify_sext_or_truncate, gatify_zext_or_truncate,
     get_pow2_minus1_k, literal_bits_if_bits_node,
 };
 use crate::ir2gate_utils::{AdderMapping, array_add_with_carry_out};
+use std::ops::Range;
 use xlsynth_pir::ir;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExtNaryAddFillKind {
+    Zero,
+    Sign,
+}
+
+#[derive(Clone, Debug)]
+struct ExtNaryAddTermDimensions {
+    term_bits: AigBitVector,
+    weight_shift: usize,
+    active_range: Range<usize>,
+    fill_kind: ExtNaryAddFillKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ExtNaryAddUnitCorrection {
+    control: AigOperand,
+    weight_shift: usize,
+    is_decrement: bool,
+}
 
 /// Resizes a literal term to the `ExtNaryAdd` output width.
 fn resize_literal_bits_for_ext_nary_add(
@@ -150,6 +172,165 @@ fn gatify_add_literal_to_dynamic_sum(
     sum
 }
 
+fn classify_ext_nary_add_term_dimensions(
+    bits: &AigBitVector,
+    false_bit: AigOperand,
+) -> ExtNaryAddTermDimensions {
+    let bit_count = bits.get_bit_count();
+    let mut weight_shift = 0usize;
+    while weight_shift < bit_count && *bits.get_lsb(weight_shift) == false_bit {
+        weight_shift += 1;
+    }
+    if weight_shift == bit_count {
+        return ExtNaryAddTermDimensions {
+            term_bits: AigBitVector::zeros(0),
+            weight_shift,
+            active_range: weight_shift..weight_shift,
+            fill_kind: ExtNaryAddFillKind::Zero,
+        };
+    }
+
+    let msb = *bits.get_lsb(bit_count - 1);
+    if msb == false_bit {
+        let mut active_end = bit_count;
+        while active_end > weight_shift && *bits.get_lsb(active_end - 1) == false_bit {
+            active_end -= 1;
+        }
+        return ExtNaryAddTermDimensions {
+            term_bits: bits.get_lsb_slice(weight_shift, active_end - weight_shift),
+            weight_shift,
+            active_range: weight_shift..active_end,
+            fill_kind: ExtNaryAddFillKind::Zero,
+        };
+    }
+
+    let mut active_end = bit_count;
+    while active_end > weight_shift + 1 && *bits.get_lsb(active_end - 2) == msb {
+        active_end -= 1;
+    }
+    ExtNaryAddTermDimensions {
+        term_bits: bits.get_lsb_slice(weight_shift, active_end - weight_shift),
+        weight_shift,
+        active_range: weight_shift..active_end,
+        fill_kind: ExtNaryAddFillKind::Sign,
+    }
+}
+
+fn classify_ext_nary_add_unit_correction(
+    dimensions: &ExtNaryAddTermDimensions,
+    negated: bool,
+) -> Option<ExtNaryAddUnitCorrection> {
+    if dimensions.term_bits.get_bit_count() != 1 {
+        return None;
+    }
+    if dimensions.active_range != (dimensions.weight_shift..dimensions.weight_shift + 1) {
+        return None;
+    }
+
+    Some(ExtNaryAddUnitCorrection {
+        control: *dimensions.term_bits.get_lsb(0),
+        weight_shift: dimensions.weight_shift,
+        is_decrement: negated ^ (dimensions.fill_kind == ExtNaryAddFillKind::Sign),
+    })
+}
+
+/// Adds 1 modulo the bit width of `literal_sum`.
+fn increment_literal_sum_by_one(literal_sum: &mut xlsynth::IrBits) {
+    let one_bits = xlsynth::IrBits::make_ubits(literal_sum.get_bit_count(), 1)
+        .expect("bits[output_width]:1 should construct");
+    *literal_sum = literal_sum.add(&one_bits);
+}
+
+/// Subtracts 1 modulo the bit width of `literal_sum`.
+fn decrement_literal_sum_by_one(literal_sum: &mut xlsynth::IrBits) {
+    let one_bits = xlsynth::IrBits::make_ubits(literal_sum.get_bit_count(), 1)
+        .expect("bits[output_width]:1 should construct");
+    *literal_sum = literal_sum.add(&one_bits.negate());
+}
+
+/// Tries to fuse one bit-0 unit correction into the final CPA carry-in.
+fn try_fuse_ext_nary_add_unit_correction_into_carry_in(
+    gb: &mut GateBuilder,
+    unit_correction: ExtNaryAddUnitCorrection,
+    literal_sum: &mut xlsynth::IrBits,
+    carry_in: &mut Option<AigOperand>,
+) -> bool {
+    if unit_correction.weight_shift != 0 || carry_in.is_some() {
+        return false;
+    }
+    if unit_correction.is_decrement {
+        decrement_literal_sum_by_one(literal_sum);
+        *carry_in = Some(gb.add_not(unit_correction.control));
+    } else {
+        *carry_in = Some(unit_correction.control);
+    }
+    true
+}
+
+/// Falls back to the dense representation for a unit correction.
+fn push_ext_nary_add_unit_correction_as_dense_term(
+    gb: &mut GateBuilder,
+    output_width: usize,
+    unit_correction: ExtNaryAddUnitCorrection,
+    lowered_terms: &mut Vec<AigBitVector>,
+    literal_sum: &mut xlsynth::IrBits,
+) {
+    if unit_correction.weight_shift >= output_width {
+        return;
+    }
+    let mut shifted_bits = vec![gb.get_false(); output_width];
+    shifted_bits[unit_correction.weight_shift] = unit_correction.control;
+    let shifted_operand = AigBitVector::from_lsb_is_index_0(&shifted_bits);
+    if unit_correction.is_decrement {
+        lowered_terms.push(gb.add_not_vec(&shifted_operand));
+        increment_literal_sum_by_one(literal_sum);
+    } else {
+        lowered_terms.push(shifted_operand);
+    }
+}
+
+fn gatify_dense_ext_nary_add_terms(
+    gb: &mut GateBuilder,
+    mut lowered_terms: Vec<AigBitVector>,
+    literal_sum: &xlsynth::IrBits,
+    carry_in: Option<AigOperand>,
+    adder_mapping: AdderMapping,
+) -> AigBitVector {
+    if lowered_terms.is_empty() {
+        if carry_in.is_none() {
+            return gb.add_literal(literal_sum);
+        }
+        lowered_terms.push(AigBitVector::zeros(literal_sum.get_bit_count()));
+    }
+
+    let mut literal_sum = literal_sum.clone();
+    let carry_in = if carry_in.is_none() && is_one(&literal_sum) && lowered_terms.len() >= 2 {
+        literal_sum = xlsynth::IrBits::zero(literal_sum.get_bit_count());
+        Some(gb.get_true())
+    } else {
+        carry_in
+    };
+
+    if lowered_terms.len() == 1 && carry_in.is_none() {
+        return gatify_add_literal_to_dynamic_sum(
+            gb,
+            &lowered_terms[0],
+            &literal_sum,
+            adder_mapping,
+        );
+    }
+
+    if carry_in.is_none() && get_pow2_minus1_k(&literal_sum).is_some() {
+        let dynamic_sum = array_add_with_carry_out(gb, &lowered_terms, carry_in, adder_mapping).sum;
+        return gatify_add_literal_to_dynamic_sum(gb, &dynamic_sum, &literal_sum, adder_mapping);
+    }
+
+    if !literal_sum.is_zero() {
+        lowered_terms.push(gb.add_literal(&literal_sum));
+    }
+    array_add_with_carry_out(gb, &lowered_terms, carry_in, adder_mapping).sum
+}
+
 /// Lowers a plain `add` node.
 pub(super) fn gatify_add_binop(
     f: &ir::Fn,
@@ -238,10 +419,10 @@ pub(super) fn gatify_ext_nary_add(
         return AigBitVector::zeros(output_width);
     }
 
-    let one_bits = xlsynth::IrBits::make_ubits(output_width, 1)
-        .expect("bits[output_width]:1 should construct");
     let mut literal_sum = xlsynth::IrBits::zero(output_width);
     let mut lowered_terms: Vec<AigBitVector> = Vec::with_capacity(terms.len());
+    let mut carry_in: Option<AigOperand> = None;
+    let false_bit = g8_builder.get_false();
     for term in terms {
         if let Some(literal_bits) = literal_bits_if_bits_node(f, term.operand) {
             accumulate_ext_nary_add_literal(
@@ -262,19 +443,36 @@ pub(super) fn gatify_ext_nary_add(
         } else {
             gatify_zext_or_truncate(output_width, &bits)
         };
+
+        let dimensions = classify_ext_nary_add_term_dimensions(&resized, false_bit);
+        if let Some(unit_correction) =
+            classify_ext_nary_add_unit_correction(&dimensions, term.negated)
+        {
+            if !try_fuse_ext_nary_add_unit_correction_into_carry_in(
+                g8_builder,
+                unit_correction,
+                &mut literal_sum,
+                &mut carry_in,
+            ) {
+                push_ext_nary_add_unit_correction_as_dense_term(
+                    g8_builder,
+                    output_width,
+                    unit_correction,
+                    &mut lowered_terms,
+                    &mut literal_sum,
+                );
+            }
+            continue;
+        }
+
         if term.negated {
             lowered_terms.push(g8_builder.add_not_vec(&resized));
-            literal_sum = literal_sum.add(&one_bits);
+            increment_literal_sum_by_one(&mut literal_sum);
         } else {
             lowered_terms.push(resized);
         }
     }
-    let carry_in = if is_one(&literal_sum) && lowered_terms.len() >= 2 {
-        literal_sum = xlsynth::IrBits::zero(output_width);
-        Some(g8_builder.get_true())
-    } else {
-        None
-    };
+
     let selected_adder_mapping = arch
         .map(AdderMapping::from)
         .unwrap_or(default_adder_mapping);
@@ -283,31 +481,13 @@ pub(super) fn gatify_ext_nary_add(
         AdderMapping::BrentKung => "brent_kung",
         AdderMapping::KoggeStone => "kogge_stone",
     };
-    let sum = if lowered_terms.is_empty() {
-        g8_builder.add_literal(&literal_sum)
-    } else if lowered_terms.len() == 1 && carry_in.is_none() {
-        gatify_add_literal_to_dynamic_sum(
-            g8_builder,
-            &lowered_terms[0],
-            &literal_sum,
-            selected_adder_mapping,
-        )
-    } else if get_pow2_minus1_k(&literal_sum).is_some() {
-        let dynamic_sum =
-            array_add_with_carry_out(g8_builder, &lowered_terms, carry_in, selected_adder_mapping)
-                .sum;
-        gatify_add_literal_to_dynamic_sum(
-            g8_builder,
-            &dynamic_sum,
-            &literal_sum,
-            selected_adder_mapping,
-        )
-    } else {
-        if !literal_sum.is_zero() {
-            lowered_terms.push(g8_builder.add_literal(&literal_sum));
-        }
-        array_add_with_carry_out(g8_builder, &lowered_terms, carry_in, selected_adder_mapping).sum
-    };
+    let sum = gatify_dense_ext_nary_add_terms(
+        g8_builder,
+        lowered_terms,
+        &literal_sum,
+        carry_in,
+        selected_adder_mapping,
+    );
     for (i, gate) in sum.iter_lsb_to_msb().enumerate() {
         g8_builder.add_tag(
             gate.node,

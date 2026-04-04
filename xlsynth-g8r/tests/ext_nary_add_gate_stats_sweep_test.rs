@@ -18,6 +18,13 @@ struct ExtNaryAddPow2Minus1Row {
     deepest_path: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExtNaryAddCorrectionCountRow {
+    correction_count: usize,
+    live_nodes: usize,
+    deepest_path: usize,
+}
+
 fn build_sub_ir_text(bit_count: usize) -> String {
     format!(
         r#"package test
@@ -61,6 +68,137 @@ top fn f(p0: bits[{bit_count}] id=1) -> bits[{bit_count}] {{
   ret r: bits[{bit_count}] = ext_nary_add(p0, lit, signed=[false, false], negated=[false, false], arch=ripple_carry, id=3)
 }}
 "#
+    )
+}
+
+fn format_bool_attrs(values: &[bool]) -> String {
+    values
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn build_nary_add_unit_inc_ir_text(bit_count: usize, correction_count: usize) -> String {
+    let mut params = vec![format!("x: bits[{bit_count}] id=1")];
+    let mut operands = vec!["x".to_string()];
+    let mut signed = vec![false];
+    let mut negated = vec![false];
+    for i in 0..correction_count {
+        let id = 2 + i;
+        let name = format!("b{i}");
+        params.push(format!("{name}: bits[1] id={id}"));
+        operands.push(name);
+        signed.push(false);
+        negated.push(false);
+    }
+    let ret_id = 2 + correction_count;
+    format!(
+        r#"package test
+
+top fn f({params}) -> bits[{bit_count}] {{
+  ret ext_nary_add.{ret_id}: bits[{bit_count}] = ext_nary_add({operands}, signed=[{signed}], negated=[{negated}], arch=ripple_carry, id={ret_id})
+}}
+"#,
+        params = params.join(", "),
+        operands = operands.join(", "),
+        signed = format_bool_attrs(&signed),
+        negated = format_bool_attrs(&negated),
+    )
+}
+
+fn build_nary_add_unit_dec_ir_text(bit_count: usize, correction_count: usize) -> String {
+    let mut params = vec![format!("x: bits[{bit_count}] id=1")];
+    let mut operands = vec!["x".to_string()];
+    let mut signed = vec![false];
+    let mut negated = vec![false];
+    for i in 0..correction_count {
+        let id = 2 + i;
+        let name = format!("b{i}");
+        params.push(format!("{name}: bits[1] id={id}"));
+        operands.push(name);
+        signed.push(false);
+        negated.push(true);
+    }
+    let ret_id = 2 + correction_count;
+    format!(
+        r#"package test
+
+top fn f({params}) -> bits[{bit_count}] {{
+  ret ext_nary_add.{ret_id}: bits[{bit_count}] = ext_nary_add({operands}, signed=[{signed}], negated=[{negated}], arch=ripple_carry, id={ret_id})
+}}
+"#,
+        params = params.join(", "),
+        operands = operands.join(", "),
+        signed = format_bool_attrs(&signed),
+        negated = format_bool_attrs(&negated),
+    )
+}
+
+fn build_nary_sub_plus_signext_ir_text(bit_count: usize, correction_count: usize) -> String {
+    let mut params = vec![
+        format!("lhs: bits[{bit_count}] id=1"),
+        format!("rhs: bits[{bit_count}] id=2"),
+    ];
+    let mut operands = vec!["lhs".to_string(), "rhs".to_string()];
+    let mut signed = vec![false, false];
+    let mut negated = vec![false, true];
+    for i in 0..correction_count {
+        let id = 3 + i;
+        let name = format!("b{i}");
+        params.push(format!("{name}: bits[1] id={id}"));
+        operands.push(name);
+        signed.push(true);
+        negated.push(false);
+    }
+    let ret_id = 3 + correction_count;
+    format!(
+        r#"package test
+
+top fn f({params}) -> bits[{bit_count}] {{
+  ret ext_nary_add.{ret_id}: bits[{bit_count}] = ext_nary_add({operands}, signed=[{signed}], negated=[{negated}], arch=ripple_carry, id={ret_id})
+}}
+"#,
+        params = params.join(", "),
+        operands = operands.join(", "),
+        signed = format_bool_attrs(&signed),
+        negated = format_bool_attrs(&negated),
+    )
+}
+
+fn build_nary_counter_inc_dec_ir_text(bit_count: usize, correction_count: usize) -> String {
+    let mut params = vec![format!("counter: bits[{bit_count}] id=1")];
+    let mut operands = vec!["counter".to_string()];
+    let mut signed = vec![false];
+    let mut negated = vec![false];
+    for i in 0..correction_count {
+        let id = 2 + i;
+        let name = format!("inc{i}");
+        params.push(format!("{name}: bits[1] id={id}"));
+        operands.push(name);
+        signed.push(false);
+        negated.push(false);
+    }
+    for i in 0..correction_count {
+        let id = 2 + correction_count + i;
+        let name = format!("dec{i}");
+        params.push(format!("{name}: bits[1] id={id}"));
+        operands.push(name);
+        signed.push(false);
+        negated.push(true);
+    }
+    let ret_id = 2 + 2 * correction_count;
+    format!(
+        r#"package test
+
+top fn f({params}) -> bits[{bit_count}] {{
+  ret ext_nary_add.{ret_id}: bits[{bit_count}] = ext_nary_add({operands}, signed=[{signed}], negated=[{negated}], arch=ripple_carry, id={ret_id})
+}}
+"#,
+        params = params.join(", "),
+        operands = operands.join(", "),
+        signed = format_bool_attrs(&signed),
+        negated = format_bool_attrs(&negated),
     )
 }
 
@@ -122,6 +260,21 @@ fn gather_ext_nary_add_pow2_minus1_rows() -> Vec<ExtNaryAddPow2Minus1Row> {
     got
 }
 
+fn gather_ext_nary_add_correction_count_rows(
+    build_ir_text: impl Fn(usize) -> String,
+) -> Vec<ExtNaryAddCorrectionCountRow> {
+    let mut got = Vec::new();
+    for correction_count in 0..=4 {
+        let stats = get_ir_gate_stats(&build_ir_text(correction_count));
+        got.push(ExtNaryAddCorrectionCountRow {
+            correction_count,
+            live_nodes: stats.0,
+            deepest_path: stats.1,
+        });
+    }
+    got
+}
+
 #[test]
 fn test_ext_nary_add_sub_gate_stats_sweep_1_to_16() {
     let got = gather_ext_nary_add_sub_rows();
@@ -170,6 +323,91 @@ fn test_ext_nary_add_pow2_minus1_gate_stats_sweep_w8() {
         ExtNaryAddPow2Minus1Row { literal_value:  63, live_nodes: 35, deepest_path:  9 },
         ExtNaryAddPow2Minus1Row { literal_value: 127, live_nodes: 35, deepest_path:  9 },
         ExtNaryAddPow2Minus1Row { literal_value: 255, live_nodes: 35, deepest_path:  9 },
+    ];
+
+    assert_eq!(got.as_slice(), want);
+}
+
+#[test]
+fn test_ext_nary_add_unit_inc_gate_stats_sweep_w16_corrections_0_to_4() {
+    let got = gather_ext_nary_add_correction_count_rows(|correction_count| {
+        build_nary_add_unit_inc_ir_text(16, correction_count)
+    });
+
+    // This locks in the non-stacked `+bits[1]` lowering shape, where at most
+    // one unit increment becomes a carry-in and the rest join the dense add.
+    // eprintln!("{got:#?}");
+    #[rustfmt::skip]
+    let want: &[ExtNaryAddCorrectionCountRow] = &[
+        ExtNaryAddCorrectionCountRow { correction_count: 0, live_nodes:  16, deepest_path:  1 },
+        ExtNaryAddCorrectionCountRow { correction_count: 1, live_nodes:  80, deepest_path: 18 },
+        ExtNaryAddCorrectionCountRow { correction_count: 2, live_nodes:  88, deepest_path: 20 },
+        ExtNaryAddCorrectionCountRow { correction_count: 3, live_nodes: 100, deepest_path: 24 },
+        ExtNaryAddCorrectionCountRow { correction_count: 4, live_nodes: 116, deepest_path: 28 },
+    ];
+
+    assert_eq!(got.as_slice(), want);
+}
+
+#[test]
+fn test_ext_nary_add_unit_dec_gate_stats_sweep_w16_corrections_0_to_4() {
+    let got = gather_ext_nary_add_correction_count_rows(|correction_count| {
+        build_nary_add_unit_dec_ir_text(16, correction_count)
+    });
+
+    // This locks in the non-stacked `-bits[1]` lowering shape, where only one
+    // decrement can use carry-in fusion and the rest join the dense add.
+    // eprintln!("{got:#?}");
+    #[rustfmt::skip]
+    let want: &[ExtNaryAddCorrectionCountRow] = &[
+        ExtNaryAddCorrectionCountRow { correction_count: 0, live_nodes:  16, deepest_path:  1 },
+        ExtNaryAddCorrectionCountRow { correction_count: 1, live_nodes:  80, deepest_path: 33 },
+        ExtNaryAddCorrectionCountRow { correction_count: 2, live_nodes:  88, deepest_path: 34 },
+        ExtNaryAddCorrectionCountRow { correction_count: 3, live_nodes: 198, deepest_path: 50 },
+        ExtNaryAddCorrectionCountRow { correction_count: 4, live_nodes: 204, deepest_path: 50 },
+    ];
+
+    assert_eq!(got.as_slice(), want);
+}
+
+#[test]
+fn test_ext_nary_add_sub_plus_signext_gate_stats_sweep_w16_corrections_0_to_4() {
+    let got = gather_ext_nary_add_correction_count_rows(|correction_count| {
+        build_nary_sub_plus_signext_ir_text(16, correction_count)
+    });
+
+    // This captures `lhs - rhs + sign_ext(b*)`, where one sign-extended
+    // correction can fuse into the subtract carry-in and the rest fall back to
+    // dense terms.
+    // eprintln!("{got:#?}");
+    #[rustfmt::skip]
+    let want: &[ExtNaryAddCorrectionCountRow] = &[
+        ExtNaryAddCorrectionCountRow { correction_count: 0, live_nodes: 196, deepest_path: 46 },
+        ExtNaryAddCorrectionCountRow { correction_count: 1, live_nodes: 204, deepest_path: 48 },
+        ExtNaryAddCorrectionCountRow { correction_count: 2, live_nodes: 327, deepest_path: 50 },
+        ExtNaryAddCorrectionCountRow { correction_count: 3, live_nodes: 384, deepest_path: 50 },
+        ExtNaryAddCorrectionCountRow { correction_count: 4, live_nodes: 396, deepest_path: 52 },
+    ];
+
+    assert_eq!(got.as_slice(), want);
+}
+
+#[test]
+fn test_ext_nary_add_counter_inc_dec_gate_stats_sweep_w16_corrections_0_to_4() {
+    let got = gather_ext_nary_add_correction_count_rows(|correction_count| {
+        build_nary_counter_inc_dec_ir_text(16, correction_count)
+    });
+
+    // This captures `counter + inc* - dec*`, where one bit-0 correction may be
+    // carried in directly and the rest fall back to dense terms.
+    // eprintln!("{got:#?}");
+    #[rustfmt::skip]
+    let want: &[ExtNaryAddCorrectionCountRow] = &[
+        ExtNaryAddCorrectionCountRow { correction_count: 0, live_nodes:  16, deepest_path:  1 },
+        ExtNaryAddCorrectionCountRow { correction_count: 1, live_nodes: 186, deepest_path: 48 },
+        ExtNaryAddCorrectionCountRow { correction_count: 2, live_nodes: 310, deepest_path: 50 },
+        ExtNaryAddCorrectionCountRow { correction_count: 3, live_nodes: 337, deepest_path: 54 },
+        ExtNaryAddCorrectionCountRow { correction_count: 4, live_nodes: 257, deepest_path: 54 },
     ];
 
     assert_eq!(got.as_slice(), want);
