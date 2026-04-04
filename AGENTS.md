@@ -54,6 +54,9 @@ under `scripts/` over duplicating shell helpers inline in `.github/workflows`.
 Those CI helper scripts should be compatible with the oldest runner/container in
 the matrix rather than assuming modern tool versions; for example, do not assume
 new `curl` flags or post-3.6 Python syntax are available everywhere.
+In particular, the Rocky 8 CI lane currently installs Python 3.6.x, so CI
+helper scripts under `scripts/` must remain compatible with Python 3.6 unless
+the workflow is updated in the same change.
 
 ## Agent Guidance: xlsynth-g8r and Fuzz Targets
 
