@@ -384,9 +384,9 @@ fn test_ext_nary_add_pow2_gate_stats_sweep_w8() {
     #[rustfmt::skip]
     let want: &[ExtNaryAddPow2Row] = &[
         ExtNaryAddPow2Row { literal_value:   1, live_nodes: 37, deepest_path: 7 },
-        ExtNaryAddPow2Row { literal_value:   2, live_nodes: 33, deepest_path: 7 },
+        ExtNaryAddPow2Row { literal_value:   2, live_nodes: 33, deepest_path: 6 },
         ExtNaryAddPow2Row { literal_value:   4, live_nodes: 28, deepest_path: 6 },
-        ExtNaryAddPow2Row { literal_value:   8, live_nodes: 24, deepest_path: 6 },
+        ExtNaryAddPow2Row { literal_value:   8, live_nodes: 24, deepest_path: 5 },
         ExtNaryAddPow2Row { literal_value:  16, live_nodes: 19, deepest_path: 5 },
         ExtNaryAddPow2Row { literal_value:  32, live_nodes: 15, deepest_path: 4 },
         ExtNaryAddPow2Row { literal_value:  64, live_nodes: 11, deepest_path: 3 },

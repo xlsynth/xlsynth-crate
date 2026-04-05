@@ -118,6 +118,35 @@ fn gatify_add_const_pow2_minus1(
     gatify_add_const_single_ones_run(gb, lhs_bits, 0..k, gb.get_false())
 }
 
+/// Lowers `lhs_bits + (1 << one_bit_position)` through `adder_mapping`.
+fn gatify_add_const_pow2_with_mapping(
+    gb: &mut GateBuilder,
+    lhs_bits: &AigBitVector,
+    one_bit_position: usize,
+    adder_mapping: AdderMapping,
+) -> AigBitVector {
+    let bit_count = lhs_bits.get_bit_count();
+    assert!(one_bit_position < bit_count);
+
+    let mut sum_bits = Vec::with_capacity(bit_count);
+    for i in 0..one_bit_position {
+        sum_bits.push(*lhs_bits.get_lsb(i));
+    }
+
+    let upper_lhs_bits = lhs_bits.get_lsb_slice(one_bit_position, bit_count - one_bit_position);
+    let upper_rhs_bits = AigBitVector::zeros(bit_count - one_bit_position);
+    let (_, upper_sum_bits) = gatify_add_with_mapping(
+        adder_mapping,
+        &upper_lhs_bits,
+        &upper_rhs_bits,
+        gb.get_true(),
+        None,
+        gb,
+    );
+    sum_bits.extend(upper_sum_bits.iter_lsb_to_msb().copied());
+    AigBitVector::from_lsb_is_index_0(&sum_bits)
+}
+
 /// Recognizes literals with one contiguous run of 1s and zeros elsewhere.
 fn get_single_ones_run(bits: &xlsynth::IrBits) -> Option<Range<usize>> {
     let bit_count = bits.get_bit_count();
@@ -149,6 +178,24 @@ fn get_single_ones_run(bits: &xlsynth::IrBits) -> Option<Range<usize>> {
     }
 
     Some(run_start..run_end)
+}
+
+/// Returns the one-hot bit position if `bits` is exactly `1 << k`.
+fn get_single_one_bit_position(bits: &xlsynth::IrBits) -> Option<usize> {
+    let mut one_bit_position = None;
+    for i in 0..bits.get_bit_count() {
+        if !bits
+            .get_bit(i)
+            .expect("literal bit index should be in bounds during one-hot detection")
+        {
+            continue;
+        }
+        if one_bit_position.is_some() {
+            return None;
+        }
+        one_bit_position = Some(i);
+    }
+    one_bit_position
 }
 
 /// Lowers `lhs_bits + literal_run + carry_in` where `literal_run` has one
@@ -204,17 +251,8 @@ fn gatify_add_literal_to_dynamic_sum(
     adder_mapping: AdderMapping,
 ) -> AigBitVector {
     assert_eq!(sum_bits.get_bit_count(), literal_bits.get_bit_count());
-    if is_one(literal_bits) {
-        let zero_bits = AigBitVector::zeros(literal_bits.get_bit_count());
-        return gatify_add_with_mapping(
-            adder_mapping,
-            sum_bits,
-            &zero_bits,
-            gb.get_true(),
-            None,
-            gb,
-        )
-        .1;
+    if let Some(one_bit_position) = get_single_one_bit_position(literal_bits) {
+        return gatify_add_const_pow2_with_mapping(gb, sum_bits, one_bit_position, adder_mapping);
     }
     if let Some(k) = get_pow2_minus1_k(literal_bits) {
         if k == 0 {
