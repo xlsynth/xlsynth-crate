@@ -204,6 +204,18 @@ fn gatify_add_literal_to_dynamic_sum(
     adder_mapping: AdderMapping,
 ) -> AigBitVector {
     assert_eq!(sum_bits.get_bit_count(), literal_bits.get_bit_count());
+    if is_one(literal_bits) {
+        let zero_bits = AigBitVector::zeros(literal_bits.get_bit_count());
+        return gatify_add_with_mapping(
+            adder_mapping,
+            sum_bits,
+            &zero_bits,
+            gb.get_true(),
+            None,
+            gb,
+        )
+        .1;
+    }
     if let Some(k) = get_pow2_minus1_k(literal_bits) {
         if k == 0 {
             return sum_bits.clone();
@@ -357,7 +369,7 @@ fn gatify_dense_ext_nary_add_terms(
     }
 
     let mut literal_sum = literal_sum.clone();
-    let carry_in = if carry_in.is_none() && is_one(&literal_sum) && lowered_terms.len() >= 2 {
+    let carry_in = if carry_in.is_none() && is_one(&literal_sum) && !lowered_terms.is_empty() {
         literal_sum = xlsynth::IrBits::zero(literal_sum.get_bit_count());
         Some(gb.get_true())
     } else {
@@ -422,17 +434,15 @@ pub(super) fn gatify_add_binop(
     g8_builder: &mut GateBuilder,
 ) -> AigBitVector {
     if let Some((lhs, rhs_bits)) = normalize_add_literal_rhs(f, a, b) {
-        if let Some(k) = get_pow2_minus1_k(&rhs_bits) {
-            let lhs_gate_refs = env
-                .get_bit_vector(lhs)
-                .expect("add lhs should be present for literal-rhs rewrite");
-            assert_eq!(lhs_gate_refs.get_bit_count(), rhs_bits.get_bit_count());
-            return if k == 0 {
-                lhs_gate_refs
-            } else {
-                gatify_add_const_pow2_minus1(g8_builder, &lhs_gate_refs, k)
-            };
-        }
+        let lhs_gate_refs = env
+            .get_bit_vector(lhs)
+            .expect("add lhs should be present for literal-rhs rewrite");
+        return gatify_add_literal_to_dynamic_sum(
+            g8_builder,
+            &lhs_gate_refs,
+            &rhs_bits,
+            adder_mapping,
+        );
     }
 
     let a_gate_refs = env.get_bit_vector(a).expect("add lhs should be present");

@@ -361,7 +361,7 @@ fn test_ext_nary_add_pow2_minus1_gate_stats_sweep_w8() {
     // eprintln!("{got:#?}");
     #[rustfmt::skip]
     let want: &[ExtNaryAddPow2Minus1Row] = &[
-        ExtNaryAddPow2Minus1Row { literal_value:   1, live_nodes: 35, deepest_path:  9 },
+        ExtNaryAddPow2Minus1Row { literal_value:   1, live_nodes: 37, deepest_path:  7 },
         ExtNaryAddPow2Minus1Row { literal_value:   3, live_nodes: 35, deepest_path:  9 },
         ExtNaryAddPow2Minus1Row { literal_value:   7, live_nodes: 35, deepest_path:  9 },
         ExtNaryAddPow2Minus1Row { literal_value:  15, live_nodes: 35, deepest_path:  9 },
@@ -383,7 +383,7 @@ fn test_ext_nary_add_pow2_gate_stats_sweep_w8() {
     // eprintln!("{got:#?}");
     #[rustfmt::skip]
     let want: &[ExtNaryAddPow2Row] = &[
-        ExtNaryAddPow2Row { literal_value:   1, live_nodes: 35, deepest_path: 9 },
+        ExtNaryAddPow2Row { literal_value:   1, live_nodes: 37, deepest_path: 7 },
         ExtNaryAddPow2Row { literal_value:   2, live_nodes: 33, deepest_path: 7 },
         ExtNaryAddPow2Row { literal_value:   4, live_nodes: 28, deepest_path: 6 },
         ExtNaryAddPow2Row { literal_value:   8, live_nodes: 24, deepest_path: 6 },
