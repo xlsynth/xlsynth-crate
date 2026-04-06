@@ -989,6 +989,41 @@ Example: find all consumers of `encode(one_hot(x))`:
 xlsynth-driver ir-query my_pkg.ir '$users(encode(one_hot(x)))'
 ```
 
+### `ir-rewrite`
+
+Rewrites the first node matching a query expression in a selected function and prints the resulting package IR on **stdout**.
+
+- Positional arguments: `<ir_input_file> <match> <replacement>`
+- Optional:
+  - `--top <NAME>` – function name to rewrite (overrides the package top for target selection).
+  - `--first` – rewrite the first match. This is accepted for forward compatibility and is currently the default behavior.
+  - `--first=<N>` – reserved for future support and currently rejected.
+  - `--must-match` – exit with an error if the match expression finds no rewrite target.
+
+Rewrite expression basics:
+
+- The match side uses the full `ir-query` pattern language documented above.
+- The replacement side uses rewrite-template syntax:
+  - bound placeholders like `x` or `L`
+  - operator calls like `and(x, y)` or `sel(selector=p, cases=[x, x])`
+  - named arguments where the rewritten operator accepts them
+  - rewrite helpers like `$const(value=1, width=$width(x))`
+- Replacement expressions do not accept query-only constructs like `_`, `...`, or `$users(...)`.
+- If no match is found, the input package is emitted unchanged.
+  - Use `--must-match` to make a no-match run fail instead.
+
+Example: collapse a duplicated `sel` into the selected value:
+
+```shell
+xlsynth-driver ir-rewrite my_pkg.ir 'sel(selector=p, cases=[x, x])' 'x'
+```
+
+Example: pass the explicit first-match mode flag:
+
+```shell
+xlsynth-driver ir-rewrite --first my_pkg.ir 'eq(x, literal(L))' 'ne(x, L)'
+```
+
 ### `ir-query-corpus`
 
 Runs `ir-query` over every `.ir` file under a corpus directory (recursive) and prints matches as:
