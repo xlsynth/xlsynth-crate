@@ -7,6 +7,7 @@ use crate::toolchain_config::ToolchainConfig;
 use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::aig_serdes::gate2ir::{
     gate_fn_to_xlsynth_ir, repack_flat_aig_inputs_to_pir_params,
+    repack_flat_aig_outputs_to_pir_return_type,
 };
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
@@ -144,6 +145,7 @@ pub fn handle_aig_ir_equiv(matches: &clap::ArgMatches, config: &Option<Toolchain
         std::process::exit(2)
     });
     let gate_fn = repack_flat_aig_inputs_to_pir_params(&rhs_fn, gate_fn);
+    let gate_fn = repack_flat_aig_outputs_to_pir_return_type(&rhs_fn, gate_fn);
     let rhs_fn_type = rhs_fn.get_type();
     check_gate_fn_matches_function_type(&gate_fn, &rhs_fn_type).unwrap_or_else(|e| {
         eprintln!("{} error: {}", SUBCOMMAND, e);

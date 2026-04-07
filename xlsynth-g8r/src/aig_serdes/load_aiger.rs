@@ -316,7 +316,9 @@ fn split_base_bit(name: &str) -> Option<(String, usize)> {
 mod tests {
     use super::*;
     use crate::aig_serdes::emit_aiger::emit_aiger;
-    use crate::aig_serdes::gate2ir::repack_flat_aig_inputs_to_pir_params;
+    use crate::aig_serdes::gate2ir::{
+        repack_flat_aig_inputs_to_pir_params, repack_flat_aig_outputs_to_pir_return_type,
+    };
     use crate::check_equivalence;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
     use crate::test_utils::{
@@ -343,7 +345,10 @@ mod tests {
             let sample = load_interesting_ir_roundtrip_case(case);
             let aiger = emit_aiger(&sample.gate_fn, true).unwrap();
             let loaded = load_aiger(&aiger, GateBuilderOptions::no_opt()).unwrap();
-            let repacked = repack_flat_aig_inputs_to_pir_params(&sample.g8r_fn, loaded.gate_fn);
+            let repacked = repack_flat_aig_outputs_to_pir_return_type(
+                &sample.g8r_fn,
+                repack_flat_aig_inputs_to_pir_params(&sample.g8r_fn, loaded.gate_fn),
+            );
             check_equivalence::validate_same_fn(&sample.g8r_fn, &repacked)
                 .unwrap_or_else(|e| panic!("AIGER roundtrip failed for {}: {}", case.name, e));
         }

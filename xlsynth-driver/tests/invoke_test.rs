@@ -4041,6 +4041,48 @@ fn test_g8r2ir_basic_ir_output() {
 }
 
 #[test]
+fn test_g8r2ir_preserves_scalar_multi_output_order() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let mut g8_builder = GateBuilder::new("testmod".to_string(), GateBuilderOptions::no_opt());
+    let a_val = g8_builder.add_input("a".to_string(), 1);
+    let b_val = g8_builder.add_input("b".to_string(), 1);
+    g8_builder.add_output("o0".to_string(), AigBitVector::from_bit(*a_val.get_lsb(0)));
+    g8_builder.add_output("o1".to_string(), AigBitVector::from_bit(*b_val.get_lsb(0)));
+    let gate_fn = g8_builder.build();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("testmod_multi_output.g8r");
+    std::fs::write(&g8r_path, gate_fn.to_string()).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("g8r2ir")
+        .arg(g8r_path.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "g8r2ir failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let ir_text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        ir_text.contains("tuple(a, b, id="),
+        "expected scalar outputs to preserve order in tuple(a, b); got:\n{}",
+        ir_text
+    );
+    assert!(
+        !ir_text.contains("tuple(b, a, id="),
+        "scalar multi-output order was reversed unexpectedly:\n{}",
+        ir_text
+    );
+}
+
+#[test]
 fn test_g8r_area_table_reports_weighted_area_by_pir_node() {
     let _ = env_logger::builder().is_test(true).try_init();
 
@@ -9441,6 +9483,55 @@ top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("[g8r-ir-equiv] failure:"),
         "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_g8r_ir_equiv_preserves_scalar_multi_output_order() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let mut builder = GateBuilder::new("main".to_string(), GateBuilderOptions::no_opt());
+    let a = builder.add_input("a".to_string(), 1);
+    let b = builder.add_input("b".to_string(), 1);
+    builder.add_output("o0".to_string(), AigBitVector::from_bit(*a.get_lsb(0)));
+    builder.add_output("o1".to_string(), AigBitVector::from_bit(*b.get_lsb(0)));
+    let lhs_gate = builder.build();
+    let lhs_g8r_path = temp_dir.path().join("lhs_multi_output.g8r");
+    std::fs::write(&lhs_g8r_path, lhs_gate.to_string()).unwrap();
+
+    let rhs_ir = r#"package sample
+
+top fn main(a: bits[1] id=1, b: bits[1] id=2) -> (bits[1], bits[1]) {
+  ret tuple.3: (bits[1], bits[1]) = tuple(a, b, id=3)
+}
+"#;
+    let rhs_ir_path = temp_dir.path().join("rhs_multi_output.ir");
+    std::fs::write(&rhs_ir_path, rhs_ir).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("g8r-ir-equiv")
+        .arg(lhs_g8r_path.to_str().unwrap())
+        .arg(rhs_ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--solver")
+        .arg("toolchain")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "g8r-ir-equiv should preserve scalar multi-output order; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 }

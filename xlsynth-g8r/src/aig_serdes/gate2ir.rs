@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::iter::zip;
 
-use crate::aig::gate::{self, AigBitVector, AigNode, AigOperand, Input};
+use crate::aig::gate::{self, AigBitVector, AigNode, AigOperand, Input, Output};
 use xlsynth;
 use xlsynth::{BValue, FnBuilder, IrType, IrValue, XlsynthError};
 use xlsynth_pir::ir::{self, ArrayTypeData};
@@ -177,32 +177,13 @@ fn make_return_value_from_outputs(
     ret_type: &ir::Type,
     package: &mut xlsynth::IrPackage,
 ) -> BValue {
-    let outputs_are_flattened_scalar_stream =
-        outputs.iter().all(|output| output.get_bit_count() == 1)
-            && outputs.len() == ret_type.bit_count();
-
-    let output_bits_msb_is_0 = if outputs_are_flattened_scalar_stream {
-        // AIGER round-trips flatten outputs into one scalar output per bit in
-        // LSB-first order across the fully flattened return bitstream.
-        let mut flat_output_bits_lsb_is_0 = Vec::with_capacity(outputs.len());
-        for output in outputs {
-            let g = output.bit_vector.get_lsb(0);
+    let mut output_bits_msb_is_0 = Vec::new();
+    for output in outputs {
+        for g in output.bit_vector.iter_msb_to_lsb() {
             let bit = node_env.get(g).unwrap();
-            flat_output_bits_lsb_is_0.push(bit);
+            output_bits_msb_is_0.push(bit);
         }
-        flat_output_bits_lsb_is_0.into_iter().rev().collect()
-    } else {
-        // Preserve the grouped output structure for ordinary multi-output gate
-        // functions that still retain their original top-level output grouping.
-        let mut grouped_output_bits_msb_is_0 = Vec::new();
-        for output in outputs {
-            for g in output.bit_vector.iter_msb_to_lsb() {
-                let bit = node_env.get(g).unwrap();
-                grouped_output_bits_msb_is_0.push(bit);
-            }
-        }
-        grouped_output_bits_msb_is_0
-    };
+    }
 
     // Now unflatten the bit vector according to the return type.
     unflatten(&output_bits_msb_is_0, ret_type, fb, package)
@@ -242,6 +223,35 @@ pub fn repack_flat_aig_inputs_to_pir_params(
         offset += width;
     }
     gate_fn.inputs = new_inputs;
+    gate_fn
+}
+
+/// Rebuilds scalar AIGER-loaded outputs into the flattened PIR return grouping.
+pub fn repack_flat_aig_outputs_to_pir_return_type(
+    pir_fn: &ir::Fn,
+    mut gate_fn: gate::GateFn,
+) -> gate::GateFn {
+    let want_total_bits = pir_fn.ret_ty.bit_count();
+    let gate_total_bits: usize = gate_fn.outputs.iter().map(|o| o.get_bit_count()).sum();
+    let all_one_bit_outputs = gate_fn.outputs.iter().all(|o| o.get_bit_count() == 1);
+
+    if !all_one_bit_outputs
+        || gate_fn.outputs.len() <= 1
+        || gate_fn.outputs.len() != want_total_bits
+        || gate_total_bits != want_total_bits
+    {
+        return gate_fn;
+    }
+
+    let mut flat_ops = Vec::with_capacity(want_total_bits);
+    for output in &gate_fn.outputs {
+        flat_ops.push(*output.bit_vector.get_lsb(0));
+    }
+
+    gate_fn.outputs = vec![Output {
+        name: "output_value".to_string(),
+        bit_vector: AigBitVector::from_lsb_is_index_0(&flat_ops),
+    }];
     gate_fn
 }
 
