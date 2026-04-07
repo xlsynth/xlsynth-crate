@@ -64,7 +64,7 @@ pub struct LoadedInterestingIrRoundtripCase {
     pub gate_fn: GateFn,
 }
 
-const INTERESTING_IR_ROUNDTRIP_CASES: [InterestingIrRoundtripCase; 7] = [
+const INTERESTING_IR_ROUNDTRIP_CASES: [InterestingIrRoundtripCase; 8] = [
     InterestingIrRoundtripCase {
         name: "literal_bits1_no_params",
         ir_text: r#"package sample
@@ -98,6 +98,15 @@ top fn main(x: bits[2] id=1) -> bits[2] {
 
 top fn main(x: bits[4] id=1) -> bits[4] {
   ret identity.2: bits[4] = identity(x, id=2)
+}
+"#,
+    },
+    InterestingIrRoundtripCase {
+        name: "identity_tuple_bits1_bits1",
+        ir_text: r#"package sample
+
+top fn main(x: (bits[1], bits[1]) id=1) -> (bits[1], bits[1]) {
+  ret identity.2: (bits[1], bits[1]) = identity(x, id=2)
 }
 "#,
     },

@@ -174,13 +174,26 @@ fn make_return_value_from_outputs(
     fb: &mut FnBuilder,
     node_env: &mut HashMap<AigOperand, BValue>,
     outputs: &[gate::Output],
-    gate_fn_return_type: &ir::Type,
     ret_type: &ir::Type,
     package: &mut xlsynth::IrPackage,
 ) -> BValue {
-    let output_bits_msb_is_0 = if gate_fn_return_type == ret_type {
-        // Preserve the grouped output structure when the gate function already
-        // matches the requested return type.
+    let outputs_are_flattened_scalar_stream =
+        outputs.iter().all(|output| output.get_bit_count() == 1)
+            && outputs.len() == ret_type.bit_count();
+
+    let output_bits_msb_is_0 = if outputs_are_flattened_scalar_stream {
+        // AIGER round-trips flatten outputs into one scalar output per bit in
+        // LSB-first order across the fully flattened return bitstream.
+        let mut flat_output_bits_lsb_is_0 = Vec::with_capacity(outputs.len());
+        for output in outputs {
+            let g = output.bit_vector.get_lsb(0);
+            let bit = node_env.get(g).unwrap();
+            flat_output_bits_lsb_is_0.push(bit);
+        }
+        flat_output_bits_lsb_is_0.into_iter().rev().collect()
+    } else {
+        // Preserve the grouped output structure for ordinary multi-output gate
+        // functions that still retain their original top-level output grouping.
         let mut grouped_output_bits_msb_is_0 = Vec::new();
         for output in outputs {
             for g in output.bit_vector.iter_msb_to_lsb() {
@@ -189,18 +202,6 @@ fn make_return_value_from_outputs(
             }
         }
         grouped_output_bits_msb_is_0
-    } else {
-        // AIGER round-trips flatten outputs into one scalar output per bit in
-        // LSB-first order. When the caller provides a different return type,
-        // reinterpret the gate outputs as that flat bit stream and repack it.
-        let mut flat_output_bits_lsb_is_0 = Vec::new();
-        for output in outputs {
-            for g in output.bit_vector.iter_lsb_to_msb() {
-                let bit = node_env.get(g).unwrap();
-                flat_output_bits_lsb_is_0.push(bit);
-            }
-        }
-        flat_output_bits_lsb_is_0.into_iter().rev().collect()
     };
 
     // Now unflatten the bit vector according to the return type.
@@ -324,7 +325,6 @@ pub fn gate_fn_to_xlsynth_ir(
         &mut fb,
         &mut node_env,
         &gate_fn.outputs,
-        &gate_fn_type.return_type,
         &function_type.return_type,
         &mut package,
     );
