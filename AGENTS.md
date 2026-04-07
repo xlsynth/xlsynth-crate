@@ -45,6 +45,14 @@ For temporary files or directories in tests, prefer `tempfile` (or an existing
 workspace helper built on it) over ad hoc paths under `std::env::temp_dir()`.
 This avoids parallel-test collisions and makes cleanup automatic.
 
+When working on serialization / deserialization or other roundtrip-heavy code
+paths, prefer using the shared identity/signature corpus in
+`xlsynth-g8r/src/test_utils.rs` (`interesting_ir_roundtrip_cases()`) instead of
+adding only a one-off scalar case. That corpus exists specifically to cover
+multi-bit and aggregate signatures such as `bits[2] -> bits[2]`,
+`bits[4] -> bits[4]`, tuples, and arrays, which are easy to miss if a test only
+uses `bits[1]`.
+
 If network access is unavailable, it is acceptable to exclude the crates.io
 version checks in `xlsynth-test-helpers/tests/version_test.rs` (which require
 crates.io metadata). Document that exclusion in the change notes.

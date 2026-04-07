@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::iter::zip;
 
-use crate::aig::gate::{self, AigNode, AigOperand};
+use crate::aig::gate::{self, AigBitVector, AigNode, AigOperand, Input};
 use xlsynth;
 use xlsynth::{BValue, FnBuilder, IrType, IrValue, XlsynthError};
 use xlsynth_pir::ir::{self, ArrayTypeData};
@@ -205,6 +205,43 @@ fn make_return_value_from_outputs(
 
     // Now unflatten the bit vector according to the return type.
     unflatten(&output_bits_msb_is_0, ret_type, fb, package)
+}
+
+/// Rebuilds scalar AIGER-loaded inputs into the original PIR parameter groups.
+pub fn repack_flat_aig_inputs_to_pir_params(
+    pir_fn: &ir::Fn,
+    mut gate_fn: gate::GateFn,
+) -> gate::GateFn {
+    let want_param_count = pir_fn.params.len();
+    let want_total_bits: usize = pir_fn.params.iter().map(|p| p.ty.bit_count()).sum();
+    let gate_total_bits: usize = gate_fn.inputs.iter().map(|i| i.get_bit_count()).sum();
+
+    let all_one_bit_inputs = gate_fn.inputs.iter().all(|i| i.get_bit_count() == 1);
+    if !all_one_bit_inputs
+        || gate_fn.inputs.len() != want_total_bits
+        || gate_total_bits != want_total_bits
+    {
+        return gate_fn;
+    }
+
+    let mut flat_ops = Vec::with_capacity(want_total_bits);
+    for inp in &gate_fn.inputs {
+        flat_ops.push(*inp.bit_vector.get_lsb(0));
+    }
+
+    let mut new_inputs: Vec<Input> = Vec::with_capacity(want_param_count);
+    let mut offset = 0usize;
+    for p in &pir_fn.params {
+        let width = p.ty.bit_count();
+        let slice = &flat_ops[offset..offset + width];
+        new_inputs.push(Input {
+            name: p.name.clone(),
+            bit_vector: AigBitVector::from_lsb_is_index_0(slice),
+        });
+        offset += width;
+    }
+    gate_fn.inputs = new_inputs;
+    gate_fn
 }
 
 /// Returns an IR package with a single function as the top, which is the given
