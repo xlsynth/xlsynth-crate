@@ -174,17 +174,34 @@ fn make_return_value_from_outputs(
     fb: &mut FnBuilder,
     node_env: &mut HashMap<AigOperand, BValue>,
     outputs: &[gate::Output],
+    gate_fn_return_type: &ir::Type,
     ret_type: &ir::Type,
     package: &mut xlsynth::IrPackage,
 ) -> BValue {
-    // Flatten all the output gates into a single bit vector.
-    let mut output_bits_msb_is_0 = Vec::new();
-    for output in outputs {
-        for g in output.bit_vector.iter_msb_to_lsb() {
-            let bit = node_env.get(g).unwrap();
-            output_bits_msb_is_0.push(bit);
+    let output_bits_msb_is_0 = if gate_fn_return_type == ret_type {
+        // Preserve the grouped output structure when the gate function already
+        // matches the requested return type.
+        let mut grouped_output_bits_msb_is_0 = Vec::new();
+        for output in outputs {
+            for g in output.bit_vector.iter_msb_to_lsb() {
+                let bit = node_env.get(g).unwrap();
+                grouped_output_bits_msb_is_0.push(bit);
+            }
         }
-    }
+        grouped_output_bits_msb_is_0
+    } else {
+        // AIGER round-trips flatten outputs into one scalar output per bit in
+        // LSB-first order. When the caller provides a different return type,
+        // reinterpret the gate outputs as that flat bit stream and repack it.
+        let mut flat_output_bits_lsb_is_0 = Vec::new();
+        for output in outputs {
+            for g in output.bit_vector.iter_lsb_to_msb() {
+                let bit = node_env.get(g).unwrap();
+                flat_output_bits_lsb_is_0.push(bit);
+            }
+        }
+        flat_output_bits_lsb_is_0.into_iter().rev().collect()
+    };
 
     // Now unflatten the bit vector according to the return type.
     unflatten(&output_bits_msb_is_0, ret_type, fb, package)
@@ -198,6 +215,11 @@ pub fn gate_fn_to_xlsynth_ir(
     function_type: &ir::FunctionType,
 ) -> Result<xlsynth::IrPackage, XlsynthError> {
     assert_eq!(gate_fn.inputs.len(), function_type.param_types.len());
+    let gate_fn_type = gate_fn.get_flat_type();
+    assert_eq!(
+        gate_fn_type.return_type.bit_count(),
+        function_type.return_type.bit_count()
+    );
     log::trace!(
         "Converting gate function `{}` to IR:\n{}",
         gate_fn.name,
@@ -265,6 +287,7 @@ pub fn gate_fn_to_xlsynth_ir(
         &mut fb,
         &mut node_env,
         &gate_fn.outputs,
+        &gate_fn_type.return_type,
         &function_type.return_type,
         &mut package,
     );

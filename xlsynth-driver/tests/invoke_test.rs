@@ -9677,6 +9677,64 @@ top fn main() -> bits[1] {
 }
 
 #[test]
+fn test_aig_ir_equiv_roundtrip_from_ir2g8r_multibit_identity_aiger_out() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let ir_text = r#"package sample
+
+top fn main(x: bits[4] id=1) -> bits[4] {
+  ret identity.2: bits[4] = identity(x, id=2)
+}
+"#;
+    let ir_path = temp_dir.path().join("orig.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+    let aiger_path = temp_dir.path().join("orig.aig");
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let ir2g8r = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("ir2g8r")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--aiger-out")
+        .arg(aiger_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        ir2g8r.status.success(),
+        "ir2g8r failed; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&ir2g8r.stdout),
+        String::from_utf8_lossy(&ir2g8r.stderr)
+    );
+
+    let equiv = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("aig-ir-equiv")
+        .arg(aiger_path.to_str().unwrap())
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--solver")
+        .arg("toolchain")
+        .output()
+        .unwrap();
+    assert!(
+        equiv.status.success(),
+        "aig-ir-equiv should succeed for multi-bit ir2g8r roundtrip; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&equiv.stdout),
+        String::from_utf8_lossy(&equiv.stderr)
+    );
+}
+
+#[test]
 #[cfg(feature = "unstable-dslx-specialize")]
 fn test_dslx_specialize_parametric_top_binding() {
     let _ = env_logger::builder().is_test(true).try_init();
