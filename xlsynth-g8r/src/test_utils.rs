@@ -77,13 +77,22 @@ pub struct LoadedInterestingIrOutputOrderingCase {
     pub gate_fn: GateFn,
 }
 
-const INTERESTING_IR_ROUNDTRIP_CASES: [InterestingIrRoundtripCase; 8] = [
+const INTERESTING_IR_ROUNDTRIP_CASES: [InterestingIrRoundtripCase; 9] = [
     InterestingIrRoundtripCase {
         name: "literal_bits1_no_params",
         ir_text: r#"package sample
 
 top fn main() -> bits[1] {
   ret literal.1: bits[1] = literal(value=1, id=1)
+}
+"#,
+    },
+    InterestingIrRoundtripCase {
+        name: "unit_and_bits1_param_identity_bits1",
+        ir_text: r#"package sample
+
+top fn main(x: () id=1, y: bits[1] id=2) -> bits[1] {
+  ret identity.3: bits[1] = identity(y, id=3)
 }
 "#,
     },

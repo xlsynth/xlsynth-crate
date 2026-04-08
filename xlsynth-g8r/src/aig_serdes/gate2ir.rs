@@ -42,12 +42,6 @@ fn validate_schema_port(kind: &str, port: &GateFnInterfacePort) -> Result<(), St
             port.name
         ));
     }
-    if port.ty.bit_count() == 0 {
-        return Err(format!(
-            "{kind} port `{}` has zero width, which is unsupported for AIGER regrouping",
-            port.name
-        ));
-    }
     Ok(())
 }
 
@@ -422,6 +416,12 @@ fn add_param_for_gate_fn_input(
     // then slice out all the bits for the environment.
     let param_bit_count = input.get_bit_count() as u64;
     let ty: IrType = make_xlsynth_type(param_type, package);
+    if param_bit_count == 0 {
+        // Zero-bit parameters still belong in the lifted function signature,
+        // but they contribute no bits to the AIG node environment.
+        let _ = fb.param(input.name.as_str(), &ty);
+        return Ok(());
+    }
     let param = fb.param(input.name.as_str(), &ty);
     let flat_param = flatten(&param, param_type, fb);
     if param_bit_count == 1 {
@@ -732,6 +732,18 @@ top fn do_nand(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
         let schema = GateFnInterfaceSchema::from_function_type(&function_type).unwrap();
         assert!(schema.output_ports.is_empty());
         assert_eq!(schema.return_type.bit_count(), 0);
+    }
+
+    #[test]
+    fn test_schema_from_function_type_allows_zero_width_input_port() {
+        let function_type = ir::FunctionType {
+            param_types: vec![ir::Type::Tuple(vec![]), ir::Type::Bits(1)],
+            return_type: ir::Type::Bits(1),
+        };
+        let schema = GateFnInterfaceSchema::from_function_type(&function_type).unwrap();
+        assert_eq!(schema.input_ports.len(), 2);
+        assert_eq!(schema.input_ports[0].ty.bit_count(), 0);
+        assert_eq!(schema.input_ports[1].ty.bit_count(), 1);
     }
 
     #[test]

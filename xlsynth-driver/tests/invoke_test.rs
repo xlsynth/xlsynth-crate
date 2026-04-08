@@ -4237,6 +4237,59 @@ top fn main(x: bits[2][3] id=1) -> bits[2][3] {
 }
 
 #[test]
+fn test_aig2ir_with_fn_type_accepts_zero_width_top_level_param() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package sample
+
+top fn main(x: () id=1, y: bits[1] id=2) -> bits[1] {
+  ret identity.3: bits[1] = identity(y, id=3)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("unit_param.ir");
+    let aag_path = temp_dir.path().join("unit_param.aag");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let ir2g8r_output = Command::new(command_path)
+        .arg("ir2g8r")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--aiger-out")
+        .arg(aag_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        ir2g8r_output.status.success(),
+        "ir2g8r failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&ir2g8r_output.stdout),
+        String::from_utf8_lossy(&ir2g8r_output.stderr)
+    );
+
+    let output = Command::new(command_path)
+        .arg("aig2ir")
+        .arg(aag_path.to_str().unwrap())
+        .arg("--fn-type")
+        .arg("((), bits[1]) -> bits[1]")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "aig2ir with zero-width param failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let lifted_ir = String::from_utf8_lossy(&output.stdout);
+    assert!(lifted_ir.contains("arg0: ()"));
+    assert!(lifted_ir.contains("arg1: bits[1]"));
+    assert!(lifted_ir.contains("-> bits[1]"));
+}
+
+#[test]
 fn test_aig2ir_reports_fn_type_mismatch() {
     let _ = env_logger::builder().is_test(true).try_init();
 
@@ -5457,6 +5510,69 @@ fn f(x: bits[2][3] id=1) -> bits[2][3] {
         .arg(&args)
         .arg("--fn-type")
         .arg("(bits[2][3]) -> bits[2][3]")
+        .output()
+        .unwrap();
+    assert!(
+        aig_eval_output.status.success(),
+        "aig-eval failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&aig_eval_output.stdout),
+        String::from_utf8_lossy(&aig_eval_output.stderr)
+    );
+
+    assert_eq!(ir_eval_output.stdout, aig_eval_output.stdout);
+}
+
+#[test]
+fn test_aig_eval_matches_ir_fn_eval_with_zero_width_param() {
+    let ir = r#"package test
+
+fn f(x: () id=1, y: bits[1] id=2) -> bits[1] {
+  ret identity.3: bits[1] = identity(y, id=3)
+}
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let ir_path = dir.path().join("unit_param_round_trip.ir");
+    let aag_path = dir.path().join("unit_param_round_trip.aag");
+    std::fs::write(&ir_path, ir).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let ir2g8r_output = Command::new(command_path)
+        .arg("ir2g8r")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("f")
+        .arg("--aiger-out")
+        .arg(aag_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        ir2g8r_output.status.success(),
+        "ir2g8r failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&ir2g8r_output.stdout),
+        String::from_utf8_lossy(&ir2g8r_output.stderr)
+    );
+
+    let args = "((), bits[1]:1)";
+    let ir_eval_output = Command::new(command_path)
+        .arg("ir-fn-eval")
+        .arg(ir_path.to_str().unwrap())
+        .arg("f")
+        .arg(args)
+        .output()
+        .unwrap();
+    assert!(
+        ir_eval_output.status.success(),
+        "ir-fn-eval failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&ir_eval_output.stdout),
+        String::from_utf8_lossy(&ir_eval_output.stderr)
+    );
+
+    let aig_eval_output = Command::new(command_path)
+        .arg("aig-eval")
+        .arg(aag_path.to_str().unwrap())
+        .arg(args)
+        .arg("--fn-type")
+        .arg("((), bits[1]) -> bits[1]")
         .output()
         .unwrap();
     assert!(
