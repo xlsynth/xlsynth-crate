@@ -36,6 +36,7 @@
 //!     --sv_enum_case_naming_policy=unqualified
 //! ```
 
+mod aig2ir;
 mod aig_equiv;
 mod aig_eval;
 mod aig_ir_equiv;
@@ -56,6 +57,7 @@ mod dslx_specialize;
 mod dslx_stitch_pipeline;
 mod flag_defaults;
 mod fn_eval;
+mod fn_type_arg;
 mod g8r2ir;
 mod g8r2v;
 mod g8r_cli;
@@ -1957,6 +1959,23 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new("aig2ir")
+                .about("Converts an AIGER file to an XLS IR package on stdout.")
+                .arg(
+                    clap::Arg::new("aig_input_file")
+                        .help("The input AIGER file (.aag or .aig)")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    clap::Arg::new("fn_type")
+                        .long("fn-type")
+                        .value_name("FN_TYPE")
+                        .help("Optional explicit function type used to regroup the raw AIGER interface before lifting")
+                        .action(clap::ArgAction::Set),
+                ),
+        )
+        .subcommand(
             clap::Command::new("aig-eval")
                 .about("Evaluates an AIGER file with the provided argument tuple")
                 .arg(
@@ -3119,6 +3138,9 @@ fn main() {
         }
         Some(("aig-equiv", subm)) => {
             aig_equiv::handle_aig_equiv(subm, &config);
+        }
+        Some(("aig2ir", subm)) => {
+            aig2ir::handle_aig2ir(subm, &config);
         }
         Some(("aig-eval", subm)) => {
             aig_eval::handle_aig_eval(subm, &config);

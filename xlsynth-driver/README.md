@@ -298,6 +298,39 @@ xlsynth-driver g8r2ir my_module.g8r > my_module.g8r.ir
 
 The output is always written to stdout; redirect to a `.ir` file as needed.
 
+### `aig2ir`: AIGER to XLS IR package
+
+Converts an AIGER file (`.aag` or `.aig`) into an XLS IR *package* and prints
+it on **stdout**.
+
+- By default, raw loaded AIGER stays flat: one `bits[1]` parameter per AIGER
+  input line and a `bits[1]` / tuple-of-bits return matching the raw scalar
+  output lines.
+- `--fn-type <FN_TYPE>` imposes an explicit function signature before lifting.
+  This is the supported way to recover structured params / return values from a
+  flattened AIGER interface.
+- No port regrouping is inferred from `_N` suffixes or other AIGER symbol
+  naming conventions.
+
+Positional arguments:
+
+- `<aig_input_file>` – input `.aag` or `.aig` file.
+
+Optional flags:
+
+- `--fn-type <FN_TYPE>` – explicit signature to impose before lift, e.g.
+  `(bits[8][4]) -> bits[8][4]`.
+
+Example usage:
+
+```shell
+# Raw flat lift.
+xlsynth-driver aig2ir my_module.aag > my_module.aig.ir
+
+# Structured lift via explicit signature.
+xlsynth-driver aig2ir my_module.aag --fn-type '(bits[8][4]) -> bits[8][4]' > my_module.typed.ir
+```
+
 ### `g8r-area-table`: Per-PIR-node live AIG area attribution
 
 Reads a `.g8r` or `.g8rbin` `GateFn` plus an XLS IR package and prints a table that attributes live AIG AND-node area back to PIR node ids carried in g8r provenance.
@@ -1200,8 +1233,9 @@ values and prints the result as an IR typed value.
   - `<AIG_FILE>`
   - `<ARG_TUPLE>` – typed tuple, e.g. `(bits[8]:7, bits[8]:13)`.
 - Optional:
-  - `--fn-type <FN_TYPE>` – superimposed function type used to repack flattened
-    AIG inputs and shape the output value, e.g. `(bits[8], bits[8]) -> bits[8]`.
+  - `--fn-type <FN_TYPE>` – explicit function type used to impose structured
+    params / return values on the raw AIGER bitstream, e.g.
+    `(bits[8], bits[8]) -> bits[8]`.
 
 Examples:
 
@@ -1209,7 +1243,8 @@ Examples:
 # Evaluate with native AIG input/output packing.
 xlsynth-driver aig-eval add.aag '(bits[8]:7, bits[8]:13)'
 
-# Evaluate with an explicit function type (useful when AIGER flattened all inputs to 1-bit ports).
+# Evaluate with an explicit function type (useful when AIGER flattened a
+# structured interface to 1-bit ports / outputs).
 xlsynth-driver aig-eval add.aag '(bits[8]:7, bits[8]:13)'   --fn-type '(bits[8], bits[8]) -> bits[8]'
 ```
 
@@ -1465,6 +1500,9 @@ lifting the AIGER into IR and then running the same IR equivalence flow as
 - Top selection:
   - `--top <NAME>` selects the entry function in `<rhs_ir_file>`.
   - The AIGER side has a natural single entry point and does not use per-side top flags.
+- The RHS IR function signature is the explicit schema used to interpret the
+  raw AIGER bitstream before lift.
+- No AIGER-side regrouping is inferred from symbol names or suffixes.
 - Proving flags (same shape as `ir-equiv`):
   - `--solver <auto|toolchain|bitwuzla|boolector|z3-binary|bitwuzla-binary|boolector-binary>`
   - `--flatten_aggregates=<BOOL>`

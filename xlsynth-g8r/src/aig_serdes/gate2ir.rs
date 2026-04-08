@@ -13,6 +13,287 @@ use xlsynth;
 use xlsynth::{BValue, FnBuilder, IrType, IrValue, XlsynthError};
 use xlsynth_pir::ir::{self, ArrayTypeData};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateFnInterfacePort {
+    pub name: String,
+    pub ty: ir::Type,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateFnInterfaceSchema {
+    pub input_ports: Vec<GateFnInterfacePort>,
+    pub output_ports: Vec<GateFnInterfacePort>,
+    pub return_type: ir::Type,
+}
+
+fn type_contains_token(ty: &ir::Type) -> bool {
+    match ty {
+        ir::Type::Token => true,
+        ir::Type::Bits(_) => false,
+        ir::Type::Tuple(members) => members.iter().any(|member| type_contains_token(member)),
+        ir::Type::Array(ArrayTypeData { element_type, .. }) => type_contains_token(element_type),
+    }
+}
+
+fn validate_schema_port(kind: &str, port: &GateFnInterfacePort) -> Result<(), String> {
+    if type_contains_token(&port.ty) {
+        return Err(format!(
+            "{kind} port `{}` uses token-typed schema, which is unsupported for AIGER regrouping",
+            port.name
+        ));
+    }
+    if port.ty.bit_count() == 0 {
+        return Err(format!(
+            "{kind} port `{}` has zero width, which is unsupported for AIGER regrouping",
+            port.name
+        ));
+    }
+    Ok(())
+}
+
+impl GateFnInterfaceSchema {
+    fn validate(&self) -> Result<(), String> {
+        if type_contains_token(&self.return_type) {
+            return Err(
+                "return type uses token-typed schema, which is unsupported for AIGER regrouping"
+                    .to_string(),
+            );
+        }
+        if self.return_type.bit_count() == 0 {
+            return Err(
+                "return type has zero width, which is unsupported for AIGER regrouping".to_string(),
+            );
+        }
+        for port in &self.input_ports {
+            validate_schema_port("input", port)?;
+        }
+        for port in &self.output_ports {
+            validate_schema_port("output", port)?;
+        }
+        let output_bits: usize = self
+            .output_ports
+            .iter()
+            .map(|port| port.ty.bit_count())
+            .sum();
+        if output_bits != self.return_type.bit_count() {
+            return Err(format!(
+                "output schema width mismatch: output ports total bits[{}] but return type is bits[{}]",
+                output_bits,
+                self.return_type.bit_count()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Builds a schema from an explicit function type using synthesized names.
+    ///
+    /// The parameter list is grouped per declared parameter. The return value
+    /// is represented as a single top-level port carrying the flattened
+    /// return value bitstream.
+    pub fn from_function_type(function_type: &ir::FunctionType) -> Result<Self, String> {
+        let input_ports = function_type
+            .param_types
+            .iter()
+            .enumerate()
+            .map(|(index, ty)| GateFnInterfacePort {
+                name: format!("arg{}", index),
+                ty: ty.clone(),
+            })
+            .collect::<Vec<GateFnInterfacePort>>();
+        let output_ports = vec![GateFnInterfacePort {
+            name: "ret".to_string(),
+            ty: function_type.return_type.clone(),
+        }];
+        let schema = Self {
+            input_ports,
+            output_ports,
+            return_type: function_type.return_type.clone(),
+        };
+        schema.validate()?;
+        Ok(schema)
+    }
+
+    /// Builds a schema from a PIR function, preserving declared parameter
+    /// names while treating the return value as a single flattened top-level
+    /// port.
+    pub fn from_pir_fn(pir_fn: &ir::Fn) -> Result<Self, String> {
+        let input_ports = pir_fn
+            .params
+            .iter()
+            .map(|param| GateFnInterfacePort {
+                name: param.name.clone(),
+                ty: param.ty.clone(),
+            })
+            .collect::<Vec<GateFnInterfacePort>>();
+        let output_ports = vec![GateFnInterfacePort {
+            name: "ret".to_string(),
+            ty: pir_fn.ret_ty.clone(),
+        }];
+        let schema = Self {
+            input_ports,
+            output_ports,
+            return_type: pir_fn.ret_ty.clone(),
+        };
+        schema.validate()?;
+        Ok(schema)
+    }
+
+    /// Builds a schema from the current GateFn interface itself.
+    pub fn from_gate_fn(gate_fn: &gate::GateFn) -> Result<Self, String> {
+        let input_ports = gate_fn
+            .inputs
+            .iter()
+            .map(|input| GateFnInterfacePort {
+                name: input.name.clone(),
+                ty: ir::Type::Bits(input.get_bit_count()),
+            })
+            .collect::<Vec<GateFnInterfacePort>>();
+        let output_ports = gate_fn
+            .outputs
+            .iter()
+            .map(|output| GateFnInterfacePort {
+                name: output.name.clone(),
+                ty: ir::Type::Bits(output.get_bit_count()),
+            })
+            .collect::<Vec<GateFnInterfacePort>>();
+        let schema = Self {
+            input_ports,
+            output_ports,
+            return_type: gate_fn.get_flat_type().return_type,
+        };
+        schema.validate()?;
+        Ok(schema)
+    }
+
+    pub fn function_type(&self) -> ir::FunctionType {
+        ir::FunctionType {
+            param_types: self
+                .input_ports
+                .iter()
+                .map(|port| port.ty.clone())
+                .collect::<Vec<ir::Type>>(),
+            return_type: self.return_type.clone(),
+        }
+    }
+}
+
+fn flatten_gate_port_bit_vectors_lsb_is_0(bit_vectors: &[AigBitVector]) -> Vec<AigOperand> {
+    let total_bits: usize = bit_vectors.iter().map(AigBitVector::get_bit_count).sum();
+    let mut flat = Vec::with_capacity(total_bits);
+    for bit_vector in bit_vectors {
+        for bit in bit_vector.iter_lsb_to_msb() {
+            flat.push(*bit);
+        }
+    }
+    flat
+}
+
+fn repack_inputs_from_flat_schema(
+    flat_inputs_lsb_is_0: &[AigOperand],
+    schema: &GateFnInterfaceSchema,
+) -> Result<Vec<Input>, String> {
+    let expected_bits: usize = schema
+        .input_ports
+        .iter()
+        .map(|port| port.ty.bit_count())
+        .sum::<usize>();
+    if flat_inputs_lsb_is_0.len() != expected_bits {
+        return Err(format!(
+            "input width mismatch: raw interface has bits[{}] but schema expects bits[{}]",
+            flat_inputs_lsb_is_0.len(),
+            expected_bits
+        ));
+    }
+
+    let mut new_inputs = Vec::with_capacity(schema.input_ports.len());
+    let mut offset = 0usize;
+    for port in &schema.input_ports {
+        let width = port.ty.bit_count();
+        let slice = &flat_inputs_lsb_is_0[offset..offset + width];
+        new_inputs.push(Input {
+            name: port.name.clone(),
+            bit_vector: AigBitVector::from_lsb_is_index_0(slice),
+        });
+        offset += width;
+    }
+    Ok(new_inputs)
+}
+
+fn repack_outputs_from_flat_schema(
+    flat_outputs_lsb_is_0: &[AigOperand],
+    schema: &GateFnInterfaceSchema,
+) -> Result<Vec<Output>, String> {
+    let expected_bits: usize = schema
+        .output_ports
+        .iter()
+        .map(|port| port.ty.bit_count())
+        .sum::<usize>();
+    if flat_outputs_lsb_is_0.len() != expected_bits {
+        return Err(format!(
+            "output width mismatch: raw interface has bits[{}] but schema expects bits[{}]",
+            flat_outputs_lsb_is_0.len(),
+            expected_bits
+        ));
+    }
+
+    let mut new_outputs = Vec::with_capacity(schema.output_ports.len());
+    let mut offset = 0usize;
+    for port in &schema.output_ports {
+        let width = port.ty.bit_count();
+        let slice = &flat_outputs_lsb_is_0[offset..offset + width];
+        new_outputs.push(Output {
+            name: port.name.clone(),
+            bit_vector: AigBitVector::from_lsb_is_index_0(slice),
+        });
+        offset += width;
+    }
+    Ok(new_outputs)
+}
+
+/// Rebuilds the GateFn inputs and outputs strictly according to the provided
+/// explicit schema.
+pub fn repack_gate_fn_interface_with_schema(
+    mut gate_fn: gate::GateFn,
+    schema: &GateFnInterfaceSchema,
+) -> Result<gate::GateFn, String> {
+    schema.validate()?;
+    let flat_inputs_lsb_is_0 = flatten_gate_port_bit_vectors_lsb_is_0(
+        &gate_fn
+            .inputs
+            .iter()
+            .map(|i| i.bit_vector.clone())
+            .collect::<Vec<AigBitVector>>(),
+    );
+    gate_fn.inputs = repack_inputs_from_flat_schema(&flat_inputs_lsb_is_0, schema)?;
+
+    let flat_outputs_lsb_is_0 = flatten_gate_port_bit_vectors_lsb_is_0(
+        &gate_fn
+            .outputs
+            .iter()
+            .map(|output| output.bit_vector.clone())
+            .collect::<Vec<AigBitVector>>(),
+    );
+    gate_fn.outputs = repack_outputs_from_flat_schema(&flat_outputs_lsb_is_0, schema)?;
+    Ok(gate_fn)
+}
+
+/// Rebuilds only the GateFn inputs according to the provided explicit schema.
+pub fn repack_gate_fn_inputs_with_schema(
+    mut gate_fn: gate::GateFn,
+    schema: &GateFnInterfaceSchema,
+) -> Result<gate::GateFn, String> {
+    schema.validate()?;
+    let flat_inputs_lsb_is_0 = flatten_gate_port_bit_vectors_lsb_is_0(
+        &gate_fn
+            .inputs
+            .iter()
+            .map(|i| i.bit_vector.clone())
+            .collect::<Vec<AigBitVector>>(),
+    );
+    gate_fn.inputs = repack_inputs_from_flat_schema(&flat_inputs_lsb_is_0, schema)?;
+    Ok(gate_fn)
+}
+
 fn make_xlsynth_type(param_type: &ir::Type, package: &mut xlsynth::IrPackage) -> IrType {
     match param_type {
         ir::Type::Bits(width) => package.get_bits_type(*width as u64),
@@ -191,116 +472,6 @@ fn make_return_value_from_outputs(
 
     // Now unflatten the bit vector according to the return type.
     unflatten(&output_bits_msb_is_0, ret_type, fb, package)
-}
-
-/// Rebuilds scalar AIGER-loaded inputs into the original PIR parameter groups.
-pub fn repack_flat_aig_inputs_to_pir_params(
-    pir_fn: &ir::Fn,
-    mut gate_fn: gate::GateFn,
-) -> gate::GateFn {
-    let want_param_count = pir_fn.params.len();
-    let want_total_bits: usize = pir_fn.params.iter().map(|p| p.ty.bit_count()).sum();
-    let gate_total_bits: usize = gate_fn.inputs.iter().map(|i| i.get_bit_count()).sum();
-
-    let all_one_bit_inputs = gate_fn.inputs.iter().all(|i| i.get_bit_count() == 1);
-    if !all_one_bit_inputs
-        || gate_fn.inputs.len() != want_total_bits
-        || gate_total_bits != want_total_bits
-    {
-        return gate_fn;
-    }
-
-    let mut flat_ops = Vec::with_capacity(want_total_bits);
-    for inp in &gate_fn.inputs {
-        flat_ops.push(*inp.bit_vector.get_lsb(0));
-    }
-
-    let mut new_inputs: Vec<Input> = Vec::with_capacity(want_param_count);
-    let mut offset = 0usize;
-    for p in &pir_fn.params {
-        let width = p.ty.bit_count();
-        let slice = &flat_ops[offset..offset + width];
-        new_inputs.push(Input {
-            name: p.name.clone(),
-            bit_vector: AigBitVector::from_lsb_is_index_0(slice),
-        });
-        offset += width;
-    }
-    gate_fn.inputs = new_inputs;
-    gate_fn
-}
-
-fn split_base_bit(name: &str) -> Option<(String, usize)> {
-    if let Some(pos) = name.rfind('_') {
-        if pos == 0 || pos == name.len() - 1 {
-            return None;
-        }
-        let (base, digits) = name.split_at(pos);
-        if let Ok(idx) = digits[1..].parse::<usize>() {
-            return Some((base.to_string(), idx));
-        }
-    }
-    None
-}
-
-/// Rebuilds scalar AIGER-loaded outputs into original top-level output groups
-/// using the AIGER symbol naming convention (`name_0`, `name_1`, ...).
-pub fn regroup_scalar_aig_outputs_by_name(mut gate_fn: gate::GateFn) -> gate::GateFn {
-    let mut new_outputs = Vec::with_capacity(gate_fn.outputs.len());
-    let mut idx = 0usize;
-
-    while idx < gate_fn.outputs.len() {
-        let output = &gate_fn.outputs[idx];
-        if output.get_bit_count() != 1 {
-            new_outputs.push(output.clone());
-            idx += 1;
-            continue;
-        }
-
-        let Some((base_name, bit_index)) = split_base_bit(&output.name) else {
-            new_outputs.push(output.clone());
-            idx += 1;
-            continue;
-        };
-        if bit_index != 0 {
-            new_outputs.push(output.clone());
-            idx += 1;
-            continue;
-        }
-
-        let mut group_ops = vec![*output.bit_vector.get_lsb(0)];
-        let mut next_idx = idx + 1;
-        while next_idx < gate_fn.outputs.len() {
-            let next_output = &gate_fn.outputs[next_idx];
-            if next_output.get_bit_count() != 1 {
-                break;
-            }
-            match split_base_bit(&next_output.name) {
-                Some((next_base, next_bit_index))
-                    if next_base == base_name && next_bit_index == group_ops.len() =>
-                {
-                    group_ops.push(*next_output.bit_vector.get_lsb(0));
-                    next_idx += 1;
-                }
-                _ => break,
-            }
-        }
-
-        if group_ops.len() == 1 {
-            new_outputs.push(output.clone());
-            idx += 1;
-            continue;
-        }
-
-        new_outputs.push(Output {
-            name: base_name,
-            bit_vector: AigBitVector::from_lsb_is_index_0(&group_ops),
-        });
-        idx = next_idx;
-    }
-
-    gate_fn.outputs = new_outputs;
-    gate_fn
 }
 
 /// Returns an IR package with a single function as the top, which is the given

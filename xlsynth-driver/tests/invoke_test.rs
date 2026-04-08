@@ -8,7 +8,7 @@ use std::io::Read;
 use std::io::Write;
 use std::process::Command;
 use std::process::Stdio;
-use xlsynth::IrBits;
+use xlsynth::{IrBits, IrValue};
 use xlsynth_g8r::aig::{AigBitVector, AigOperand, GateFn};
 use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
 use xlsynth_g8r::aig_serdes::emit_aiger_binary::emit_aiger_binary;
@@ -4144,6 +4144,153 @@ fn test_g8r2ir_preserves_scalar_multi_output_order() {
 }
 
 #[test]
+fn test_aig2ir_preserves_flat_native_scalar_multi_output_order() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let mut g8_builder = GateBuilder::new("testmod".to_string(), GateBuilderOptions::no_opt());
+    let a_val = g8_builder.add_input("a".to_string(), 1);
+    let b_val = g8_builder.add_input("b".to_string(), 1);
+    g8_builder.add_output("o0".to_string(), AigBitVector::from_bit(*a_val.get_lsb(0)));
+    g8_builder.add_output("o1".to_string(), AigBitVector::from_bit(*b_val.get_lsb(0)));
+    let gate_fn = g8_builder.build();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let aag_path = write_aiger_file(&temp_dir, "native_multi_output.aag", &gate_fn);
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("aig2ir")
+        .arg(aag_path.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "aig2ir failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let ir_text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        ir_text.contains("tuple(a, b, id="),
+        "expected flat native outputs to preserve order in tuple(a, b); got:\n{}",
+        ir_text
+    );
+    assert!(
+        !ir_text.contains("tuple(b, a, id="),
+        "native scalar multi-output order was reversed unexpectedly:\n{}",
+        ir_text
+    );
+}
+
+#[test]
+fn test_aig2ir_with_fn_type_lifts_structured_array_signature() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package sample
+
+top fn main(x: bits[2][3] id=1) -> bits[2][3] {
+  ret identity.2: bits[2][3] = identity(x, id=2)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("structured_array.ir");
+    let aag_path = temp_dir.path().join("structured_array.aag");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let ir2g8r_output = Command::new(command_path)
+        .arg("ir2g8r")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--aiger-out")
+        .arg(aag_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        ir2g8r_output.status.success(),
+        "ir2g8r failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&ir2g8r_output.stdout),
+        String::from_utf8_lossy(&ir2g8r_output.stderr)
+    );
+
+    let output = Command::new(command_path)
+        .arg("aig2ir")
+        .arg(aag_path.to_str().unwrap())
+        .arg("--fn-type")
+        .arg("(bits[2][3]) -> bits[2][3]")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "aig2ir with --fn-type failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let lifted_ir = String::from_utf8_lossy(&output.stdout);
+    assert!(lifted_ir.contains("arg0: bits[2][3]"));
+    assert!(lifted_ir.contains("-> bits[2][3]"));
+}
+
+#[test]
+fn test_aig2ir_reports_fn_type_mismatch() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let lhs_gate = two_input_gate_fn("main", |a, b, gb| gb.add_and_binary(a, b));
+    let temp_dir = tempfile::tempdir().unwrap();
+    let lhs_aag = write_aiger_file(&temp_dir, "lhs_sig.aag", &lhs_gate);
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("aig2ir")
+        .arg(lhs_aag.to_str().unwrap())
+        .arg("--fn-type")
+        .arg("(bits[3]) -> bits[1]")
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "expected aig2ir fn-type mismatch to fail; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("mismatch"),
+        "expected mismatch error in stderr, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_aig2ir_accepts_binary_aiger() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let lhs_gate = two_input_gate_fn("main", |a, b, gb| gb.add_and_binary(a, b));
+    let temp_dir = tempfile::tempdir().unwrap();
+    let lhs_aig = write_aiger_binary_file(&temp_dir, "lhs_sig.aig", &lhs_gate);
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("aig2ir")
+        .arg(lhs_aig.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "aig2ir failed on binary AIGER: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("-> bits[1]"));
+}
+
+#[test]
 fn test_g8r_area_table_reports_weighted_area_by_pir_node() {
     let _ = env_logger::builder().is_test(true).try_init();
 
@@ -5220,6 +5367,105 @@ fn f(x: (bits[1], bits[8], bits[7]) id=1) -> (bits[1], bits[8], bits[7]) {
     );
 
     assert_eq!(ir_eval_output.stdout, aig_eval_output.stdout);
+}
+
+#[test]
+fn test_aig_eval_matches_ir_fn_eval_with_array_input_output() {
+    let ir = r#"package test
+
+fn f(x: bits[2][3] id=1) -> bits[2][3] {
+  ret identity.2: bits[2][3] = identity(x, id=2)
+}
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let ir_path = dir.path().join("array_round_trip.ir");
+    let aag_path = dir.path().join("array_round_trip.aag");
+    std::fs::write(&ir_path, ir).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let ir2g8r_output = Command::new(command_path)
+        .arg("ir2g8r")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("f")
+        .arg("--aiger-out")
+        .arg(aag_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        ir2g8r_output.status.success(),
+        "ir2g8r failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&ir2g8r_output.stdout),
+        String::from_utf8_lossy(&ir2g8r_output.stderr)
+    );
+
+    let args = IrValue::make_tuple(&[IrValue::make_array(&[
+        IrValue::make_ubits(2, 0x1).unwrap(),
+        IrValue::make_ubits(2, 0x2).unwrap(),
+        IrValue::make_ubits(2, 0x3).unwrap(),
+    ])
+    .unwrap()])
+    .to_string();
+
+    let ir_eval_output = Command::new(command_path)
+        .arg("ir-fn-eval")
+        .arg(ir_path.to_str().unwrap())
+        .arg("f")
+        .arg(&args)
+        .output()
+        .unwrap();
+    assert!(
+        ir_eval_output.status.success(),
+        "ir-fn-eval failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&ir_eval_output.stdout),
+        String::from_utf8_lossy(&ir_eval_output.stderr)
+    );
+
+    let aig_eval_output = Command::new(command_path)
+        .arg("aig-eval")
+        .arg(aag_path.to_str().unwrap())
+        .arg(&args)
+        .arg("--fn-type")
+        .arg("(bits[2][3]) -> bits[2][3]")
+        .output()
+        .unwrap();
+    assert!(
+        aig_eval_output.status.success(),
+        "aig-eval failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&aig_eval_output.stdout),
+        String::from_utf8_lossy(&aig_eval_output.stderr)
+    );
+
+    assert_eq!(ir_eval_output.stdout, aig_eval_output.stdout);
+}
+
+#[test]
+fn test_aig_eval_reports_fn_type_mismatch() {
+    let lhs_gate = two_input_gate_fn("main", |a, b, gb| gb.add_and_binary(a, b));
+    let dir = tempfile::tempdir().unwrap();
+    let aag_path = write_aiger_file(&dir, "sig_mismatch.aag", &lhs_gate);
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("aig-eval")
+        .arg(aag_path.to_str().unwrap())
+        .arg("(bits[2]:0x3)")
+        .arg("--fn-type")
+        .arg("(bits[3]) -> bits[1]")
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "expected aig-eval fn-type mismatch to fail; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("mismatch"),
+        "expected mismatch error in stderr, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// TODO(cdleary): 2025-06-10 This only works when there is a tool path
@@ -9848,7 +10094,7 @@ top fn main(x: bits[2] id=1) -> bits[1] {
 }
 
 #[test]
-fn test_aig_ir_equiv_preserves_native_scalar_multi_output_order() {
+fn test_aig_ir_equiv_treats_native_scalar_multi_output_as_flat_return_bits() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let temp_dir = tempfile::tempdir().unwrap();
@@ -9887,9 +10133,14 @@ top fn main(a: bits[1] id=1, b: bits[1] id=2) -> (bits[1], bits[1]) {
         .unwrap();
 
     assert!(
-        output.status.success(),
-        "aig-ir-equiv should preserve native scalar multi-output order; stdout: {} stderr: {}",
+        !output.status.success(),
+        "aig-ir-equiv should reject ambiguous native scalar multi-output ordering under fn-type lift; stdout: {} stderr: {}",
         String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("NOT equivalent"),
+        "expected non-equivalence report in stderr, got: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }

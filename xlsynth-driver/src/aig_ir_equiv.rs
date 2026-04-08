@@ -6,7 +6,7 @@ use crate::ir_equiv::{dispatch_ir_equiv, IrEquivRequest, IrModule};
 use crate::toolchain_config::ToolchainConfig;
 use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::aig_serdes::gate2ir::{
-    gate_fn_to_xlsynth_ir, regroup_scalar_aig_outputs_by_name, repack_flat_aig_inputs_to_pir_params,
+    gate_fn_to_xlsynth_ir, repack_gate_fn_interface_with_schema, GateFnInterfaceSchema,
 };
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
@@ -143,9 +143,15 @@ pub fn handle_aig_ir_equiv(matches: &clap::ArgMatches, config: &Option<Toolchain
         eprintln!("{} error: {}", SUBCOMMAND, e);
         std::process::exit(2)
     });
-    let gate_fn = repack_flat_aig_inputs_to_pir_params(&rhs_fn, gate_fn);
-    let gate_fn = regroup_scalar_aig_outputs_by_name(gate_fn);
     let rhs_fn_type = rhs_fn.get_type();
+    let schema = GateFnInterfaceSchema::from_pir_fn(&rhs_fn).unwrap_or_else(|e| {
+        eprintln!("{} error: {}", SUBCOMMAND, e);
+        std::process::exit(2)
+    });
+    let gate_fn = repack_gate_fn_interface_with_schema(gate_fn, &schema).unwrap_or_else(|e| {
+        eprintln!("{} error: {}", SUBCOMMAND, e);
+        std::process::exit(2)
+    });
     check_gate_fn_matches_function_type(&gate_fn, &rhs_fn_type).unwrap_or_else(|e| {
         eprintln!("{} error: {}", SUBCOMMAND, e);
         std::process::exit(2)

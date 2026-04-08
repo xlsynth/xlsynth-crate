@@ -64,7 +64,17 @@ Primarily tests:
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_gate_fn_aiger_roundtrip.rs
 
-Builds a random `GateFn`, emits AIGER, reloads AIGER into a new `GateFn`, and checks structural equivalence.
+Builds a random `GateFn`, emits AIGER, reloads AIGER into a flat raw `GateFn`,
+then explicitly regroups that flat interface using the original `GateFn`
+interface as the schema source. The target checks structural equivalence only
+after that explicit-schema regroup step.
+
+Primarily tests:
+
+- Raw AIGER load preserves the flat bitstream interface semantics
+- Explicit-schema regroup reconstructs the original grouped `GateFn` interface
+- AIGER emission/load stay structurally aligned once the intended interface is
+  imposed explicitly
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ir_eval_interp_equiv.rs
 
