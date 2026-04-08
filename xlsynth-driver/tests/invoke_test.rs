@@ -4291,6 +4291,36 @@ fn test_aig2ir_accepts_binary_aiger() {
 }
 
 #[test]
+fn test_aig2ir_accepts_unit_signature_for_empty_aiger() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let aag_path = temp_dir.path().join("empty.aag");
+    std::fs::write(&aag_path, "aag 0 0 0 0 0\nc\n").unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("aig2ir")
+        .arg(aag_path.to_str().unwrap())
+        .arg("--fn-type")
+        .arg("() -> ()")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "aig2ir failed on empty unit-signature AIGER: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("-> ()"),
+        "expected lifted unit return type in stdout, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
 fn test_g8r_area_table_reports_weighted_area_by_pir_node() {
     let _ = env_logger::builder().is_test(true).try_init();
 
@@ -10044,6 +10074,49 @@ top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
     assert!(
         output.status.success(),
         "aig-ir-equiv failed on binary AIGER: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_aig_ir_equiv_accepts_vacuous_unit_function() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let lhs_aag = temp_dir.path().join("empty.aag");
+    std::fs::write(&lhs_aag, "aag 0 0 0 0 0\nc\n").unwrap();
+
+    let rhs_ir = r#"package sample
+
+top fn main() -> () {
+  ret tuple.1: () = tuple()
+}
+"#;
+    let rhs_ir_path = temp_dir.path().join("rhs_unit.ir");
+    std::fs::write(&rhs_ir_path, rhs_ir).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("aig-ir-equiv")
+        .arg(lhs_aag.to_str().unwrap())
+        .arg(rhs_ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--solver")
+        .arg("toolchain")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "aig-ir-equiv failed on vacuous unit function: stdout: {} stderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

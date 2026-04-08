@@ -24,6 +24,19 @@ pub struct LoadAigerResult {
     pub var_to_operand: HashMap<u32, AigOperand>,
 }
 
+pub(crate) fn finish_loaded_gate_builder(gb: GateBuilder) -> GateFn {
+    if gb.outputs.is_empty() {
+        GateFn {
+            name: gb.name,
+            inputs: gb.inputs,
+            outputs: gb.outputs,
+            gates: gb.gates,
+        }
+    } else {
+        gb.build()
+    }
+}
+
 /// Parses an ASCII-AIGER file from disk.
 pub fn load_aiger_from_path(
     path: &Path,
@@ -283,7 +296,7 @@ pub fn load_aiger(src: &str, opts: GateBuilderOptions) -> Result<LoadAigerResult
         gb.add_output(name, op.into());
     }
 
-    let gate_fn = gb.build();
+    let gate_fn = finish_loaded_gate_builder(gb);
 
     Ok(LoadAigerResult {
         gate_fn,
@@ -294,7 +307,7 @@ pub fn load_aiger(src: &str, opts: GateBuilderOptions) -> Result<LoadAigerResult
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aig::gate::AigNode;
+    use crate::aig::gate::{AigNode, GateFn};
     use crate::aig_serdes::emit_aiger::emit_aiger;
     use crate::aig_serdes::gate2ir::{GateFnInterfaceSchema, repack_gate_fn_interface_with_schema};
     use crate::check_equivalence;
@@ -389,6 +402,13 @@ mod tests {
     }
 
     #[test]
+    fn test_aiger_load_accepts_empty_interface() {
+        let loaded = load_aiger("aag 0 0 0 0 0\nc\n", GateBuilderOptions::no_opt()).unwrap();
+        assert!(loaded.gate_fn.inputs.is_empty());
+        assert!(loaded.gate_fn.outputs.is_empty());
+    }
+
+    #[test]
     fn test_aiger_roundtrip_native_multi_output_via_gatefn_schema() {
         let mut gb = GateBuilder::new("native_multi".to_string(), GateBuilderOptions::no_opt());
         let a = *gb.add_input("a".to_string(), 1).get_lsb(0);
@@ -403,5 +423,26 @@ mod tests {
         let repacked = repack_gate_fn_interface_with_schema(loaded.gate_fn, &schema).unwrap();
 
         assert!(structurally_equivalent(&orig, &repacked));
+    }
+
+    #[test]
+    fn test_aiger_roundtrip_retags_regrouped_multi_bit_input_leaves() {
+        let orig = GateFn::try_from(
+            r#"fn sample(x: bits[2] = [%1, %2]) -> (out: bits[1] = [%3]) {
+  %3 = and(x[0], x[1])
+  out[0] = %3
+}"#,
+        )
+        .unwrap();
+
+        let aiger = emit_aiger(&orig, true).unwrap();
+        let loaded = load_aiger(&aiger, GateBuilderOptions::no_opt()).unwrap();
+        let schema = GateFnInterfaceSchema::from_gate_fn(&orig).unwrap();
+        let repacked = repack_gate_fn_interface_with_schema(loaded.gate_fn, &schema).unwrap();
+        assert!(structurally_equivalent(&orig, &repacked));
+
+        let repacked_text = repacked.to_string();
+        let reparsed = GateFn::try_from(repacked_text.as_str()).unwrap();
+        assert!(structurally_equivalent(&repacked, &reparsed));
     }
 }

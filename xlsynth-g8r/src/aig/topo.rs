@@ -43,11 +43,10 @@ pub fn post_order_operands(
     nodes: &[AigNode],
     discard_inputs: bool,
 ) -> Vec<AigOperand> {
-    // Assert starts is not empty (degenerate case)
-    debug_assert!(
-        !starts.is_empty(),
-        "post_order_operands: starts is empty (no outputs in graph?)"
-    );
+    if starts.is_empty() {
+        // A vacuous interface has an empty transitive fan-in cone.
+        return Vec::new();
+    }
     let mut worklist = VecDeque::new();
     let mut visited = HashSet::new();
     let mut postorder = Vec::new();

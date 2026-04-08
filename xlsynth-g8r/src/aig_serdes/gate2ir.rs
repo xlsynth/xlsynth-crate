@@ -5,7 +5,7 @@
 //! This is useful for getting it "back into" XLS IR form after transforms so we
 //! can test equivalence.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::iter::zip;
 
 use crate::aig::gate::{self, AigBitVector, AigNode, AigOperand, Input, Output};
@@ -59,11 +59,6 @@ impl GateFnInterfaceSchema {
                     .to_string(),
             );
         }
-        if self.return_type.bit_count() == 0 {
-            return Err(
-                "return type has zero width, which is unsupported for AIGER regrouping".to_string(),
-            );
-        }
         for port in &self.input_ports {
             validate_schema_port("input", port)?;
         }
@@ -100,10 +95,14 @@ impl GateFnInterfaceSchema {
                 ty: ty.clone(),
             })
             .collect::<Vec<GateFnInterfacePort>>();
-        let output_ports = vec![GateFnInterfacePort {
-            name: "ret".to_string(),
-            ty: function_type.return_type.clone(),
-        }];
+        let output_ports = if function_type.return_type.bit_count() == 0 {
+            vec![]
+        } else {
+            vec![GateFnInterfacePort {
+                name: "ret".to_string(),
+                ty: function_type.return_type.clone(),
+            }]
+        };
         let schema = Self {
             input_ports,
             output_ports,
@@ -125,10 +124,14 @@ impl GateFnInterfaceSchema {
                 ty: param.ty.clone(),
             })
             .collect::<Vec<GateFnInterfacePort>>();
-        let output_ports = vec![GateFnInterfacePort {
-            name: "ret".to_string(),
-            ty: pir_fn.ret_ty.clone(),
-        }];
+        let output_ports = if pir_fn.ret_ty.bit_count() == 0 {
+            vec![]
+        } else {
+            vec![GateFnInterfacePort {
+                name: "ret".to_string(),
+                ty: pir_fn.ret_ty.clone(),
+            }]
+        };
         let schema = Self {
             input_ports,
             output_ports,
@@ -250,6 +253,55 @@ fn repack_outputs_from_flat_schema(
     Ok(new_outputs)
 }
 
+/// Updates underlying input leaf names and indices to match regrouped inputs.
+fn retag_input_leaves(gate_fn: &mut gate::GateFn) -> Result<(), String> {
+    let mut assignments = Vec::new();
+    for input in &gate_fn.inputs {
+        for (lsb_index, operand) in input.bit_vector.iter_lsb_to_msb().enumerate() {
+            if operand.negated {
+                return Err(format!(
+                    "input `{}` bit {} unexpectedly references a negated operand",
+                    input.name, lsb_index
+                ));
+            }
+            assignments.push((operand.node, input.name.clone(), lsb_index));
+        }
+    }
+
+    let mut seen = HashSet::new();
+    for (node_ref, input_name, lsb_index) in assignments {
+        if !seen.insert(node_ref) {
+            return Err(format!(
+                "input leaf %{} was reused across regrouped inputs; expected unique flat input leaves",
+                node_ref.id
+            ));
+        }
+        let node = gate_fn.gates.get_mut(node_ref.id).ok_or_else(|| {
+            format!(
+                "input `{}` bit {} references missing node %{}",
+                input_name, lsb_index, node_ref.id
+            )
+        })?;
+        match node {
+            AigNode::Input {
+                name,
+                lsb_index: node_lsb_index,
+                ..
+            } => {
+                *name = input_name;
+                *node_lsb_index = lsb_index;
+            }
+            other => {
+                return Err(format!(
+                    "input `{}` bit {} expected input leaf at node %{}, got {:?}",
+                    input_name, lsb_index, node_ref.id, other
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Rebuilds the GateFn inputs and outputs strictly according to the provided
 /// explicit schema.
 pub fn repack_gate_fn_interface_with_schema(
@@ -265,6 +317,7 @@ pub fn repack_gate_fn_interface_with_schema(
             .collect::<Vec<AigBitVector>>(),
     );
     gate_fn.inputs = repack_inputs_from_flat_schema(&flat_inputs_lsb_is_0, schema)?;
+    retag_input_leaves(&mut gate_fn)?;
 
     let flat_outputs_lsb_is_0 = flatten_gate_port_bit_vectors_lsb_is_0(
         &gate_fn
@@ -291,6 +344,7 @@ pub fn repack_gate_fn_inputs_with_schema(
             .collect::<Vec<AigBitVector>>(),
     );
     gate_fn.inputs = repack_inputs_from_flat_schema(&flat_inputs_lsb_is_0, schema)?;
+    retag_input_leaves(&mut gate_fn)?;
     Ok(gate_fn)
 }
 
@@ -568,6 +622,7 @@ pub fn gate_fn_to_xlsynth_ir(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aig::gate::GateFn;
     use crate::gatify::ir2gate::{GatifyOptions, gatify};
     use xlsynth_pir::ir_parser;
 
@@ -666,5 +721,40 @@ top fn do_nand(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
         let gate_fn_as_xls_ir = package.to_string();
         log::trace!("gate_fn_as_xls_ir:\n{}", gate_fn_as_xls_ir);
         assert_eq!(gate_fn_as_xls_ir, input_ir_text);
+    }
+
+    #[test]
+    fn test_schema_from_function_type_allows_unit_return() {
+        let function_type = ir::FunctionType {
+            param_types: vec![],
+            return_type: ir::Type::Tuple(vec![]),
+        };
+        let schema = GateFnInterfaceSchema::from_function_type(&function_type).unwrap();
+        assert!(schema.output_ports.is_empty());
+        assert_eq!(schema.return_type.bit_count(), 0);
+    }
+
+    #[test]
+    fn test_repack_gate_fn_inputs_with_schema_retags_input_leaves() {
+        let gate_fn = GateFn::try_from(
+            r#"fn sample(x_0: bits[1] = [%1], x_1: bits[1] = [%2]) -> (out: bits[1] = [%3]) {
+  %3 = and(x_0[0], x_1[0])
+  out[0] = %3
+}"#,
+        )
+        .unwrap();
+        let schema = GateFnInterfaceSchema::from_function_type(&ir::FunctionType {
+            param_types: vec![ir::Type::Bits(2)],
+            return_type: ir::Type::Bits(1),
+        })
+        .unwrap();
+
+        let repacked = repack_gate_fn_inputs_with_schema(gate_fn, &schema).unwrap();
+        let reparsed = GateFn::try_from(repacked.to_string().as_str()).unwrap();
+
+        assert_eq!(repacked.inputs.len(), 1);
+        assert_eq!(repacked.inputs[0].name, "arg0");
+        assert_eq!(repacked.inputs[0].get_bit_count(), 2);
+        assert_eq!(repacked.to_string(), reparsed.to_string());
     }
 }
