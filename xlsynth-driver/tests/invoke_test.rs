@@ -104,6 +104,67 @@ fn assert_aig_ir_equiv_roundtrip_for_ir_case(
     );
 }
 
+fn run_ir2pipeline_and_simulate_output(ir_text: &str, input_value: &str) -> String {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("sample.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let toolchain_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_path, toolchain_toml_contents).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let pipeline_output = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_path.to_str().unwrap())
+        .arg("ir2pipeline")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--pipeline_stages")
+        .arg("1")
+        .arg("--top")
+        .arg("main")
+        .arg("--delay_model")
+        .arg("unit")
+        .arg("--flop_inputs=false")
+        .arg("--flop_outputs=false")
+        .arg("--use_system_verilog=true")
+        .output()
+        .expect("ir2pipeline invocation should run");
+    assert!(
+        pipeline_output.status.success(),
+        "ir2pipeline failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&pipeline_output.stdout),
+        String::from_utf8_lossy(&pipeline_output.stderr)
+    );
+
+    let pipeline_sv = String::from_utf8(pipeline_output.stdout).unwrap();
+
+    let mut cmd = Command::new(driver);
+    cmd.arg("run-verilog-pipeline")
+        .arg("--latency")
+        .arg("1")
+        .arg("-")
+        .arg(input_value)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().expect("spawn run-verilog-pipeline");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin should be piped")
+        .write_all(pipeline_sv.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "run-verilog-pipeline failed; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
 fn two_input_gate_fn<F>(name: &str, make_output: F) -> GateFn
 where
     F: Fn(AigOperand, AigOperand, &mut GateBuilder) -> AigOperand,
@@ -4800,6 +4861,80 @@ top fn my_main() -> bits[32] {
     } else {
         assert!(!has_asserts, "Did not expect invariant assertions when --add_invariant_assertions=false, but some were found. stdout: {}", stdout);
     }
+}
+
+#[test]
+fn test_ir2pipeline_tuple_outputs_place_last_element_in_lsb_bits() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if should_skip_if_no_slang() {
+        return;
+    }
+
+    let ir_text = r#"package sample
+
+top fn main(a: bits[1] id=1, b: bits[2] id=2) -> (bits[1], bits[2]) {
+  ret tuple.3: (bits[1], bits[2]) = tuple(a, b, id=3)
+}
+"#;
+
+    let stdout = run_ir2pipeline_and_simulate_output(ir_text, "(bits[1]:1, bits[2]:0)");
+    assert!(
+        stdout.contains("out: bits[3]:4"),
+        "expected tuple output to place the last element in the low bits; stdout:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn test_ir2pipeline_array_outputs_place_element_zero_in_lsb_bits() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if should_skip_if_no_slang() {
+        return;
+    }
+
+    let ir_text = r#"package sample
+
+top fn main(a: bits[2] id=1, b: bits[2] id=2, c: bits[2] id=3) -> bits[2][3] {
+  ret array.4: bits[2][3] = array(a, b, c, id=4)
+}
+"#;
+
+    let stdout = run_ir2pipeline_and_simulate_output(ir_text, "(bits[2]:1, bits[2]:0, bits[2]:0)");
+    assert!(
+        stdout.contains("out: bits[6]:1"),
+        "expected array output to place element 0 in the low bits; stdout:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn test_ir2pipeline_nested_array_outputs_place_first_leaf_in_lsb_bits() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if should_skip_if_no_slang() {
+        return;
+    }
+
+    let ir_text = r#"package sample
+
+top fn main(a: bits[1] id=1, b: bits[1] id=2, c: bits[1] id=3, d: bits[1] id=4) -> bits[1][2][2] {
+  array.5: bits[1][2] = array(a, b, id=5)
+  array.6: bits[1][2] = array(c, d, id=6)
+  ret array.7: bits[1][2][2] = array(array.5, array.6, id=7)
+}
+"#;
+
+    let stdout = run_ir2pipeline_and_simulate_output(
+        ir_text,
+        "(bits[1]:1, bits[1]:0, bits[1]:0, bits[1]:0)",
+    );
+    assert!(
+        stdout.contains("out: bits[4]:1"),
+        "expected nested array output to place the first leaf in the low bits; stdout:\n{}",
+        stdout
+    );
 }
 
 #[test]
@@ -9707,6 +9842,53 @@ top fn main(x: bits[2] id=1) -> bits[1] {
     assert!(
         output.status.success(),
         "aig-ir-equiv should succeed after repacking flattened AIGER inputs; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_aig_ir_equiv_preserves_native_scalar_multi_output_order() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let mut builder = GateBuilder::new("main".to_string(), GateBuilderOptions::no_opt());
+    let a = builder.add_input("a".to_string(), 1);
+    let b = builder.add_input("b".to_string(), 1);
+    builder.add_output("o0".to_string(), AigBitVector::from_bit(*a.get_lsb(0)));
+    builder.add_output("o1".to_string(), AigBitVector::from_bit(*b.get_lsb(0)));
+    let lhs_aag = write_aiger_file(&temp_dir, "lhs_native_multi_output.aag", &builder.build());
+
+    let rhs_ir = r#"package sample
+
+top fn main(a: bits[1] id=1, b: bits[1] id=2) -> (bits[1], bits[1]) {
+  ret tuple.3: (bits[1], bits[1]) = tuple(a, b, id=3)
+}
+"#;
+    let rhs_ir_path = temp_dir.path().join("rhs_native_multi_output.ir");
+    std::fs::write(&rhs_ir_path, rhs_ir).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("aig-ir-equiv")
+        .arg(lhs_aag.to_str().unwrap())
+        .arg(rhs_ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--solver")
+        .arg("toolchain")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "aig-ir-equiv should preserve native scalar multi-output order; stdout: {} stderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

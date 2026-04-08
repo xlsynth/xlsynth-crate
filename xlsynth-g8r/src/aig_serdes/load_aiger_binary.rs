@@ -275,7 +275,7 @@ mod tests {
     use super::*;
     use crate::aig_serdes::emit_aiger_binary::emit_aiger_binary;
     use crate::aig_serdes::gate2ir::{
-        repack_flat_aig_inputs_to_pir_params, repack_flat_aig_outputs_to_pir_return_type,
+        regroup_scalar_aig_outputs_by_name, repack_flat_aig_inputs_to_pir_params,
     };
     use crate::check_equivalence;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
@@ -303,8 +303,7 @@ mod tests {
             let sample = load_interesting_ir_roundtrip_case(case);
             let aiger = emit_aiger_binary(&sample.gate_fn, true).unwrap();
             let loaded = load_aiger_binary(&aiger, GateBuilderOptions::no_opt()).unwrap();
-            let repacked = repack_flat_aig_outputs_to_pir_return_type(
-                &sample.g8r_fn,
+            let repacked = regroup_scalar_aig_outputs_by_name(
                 repack_flat_aig_inputs_to_pir_params(&sample.g8r_fn, loaded.gate_fn),
             );
             check_equivalence::validate_same_fn(&sample.g8r_fn, &repacked).unwrap_or_else(|e| {

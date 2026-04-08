@@ -436,7 +436,7 @@ fn gatify_array_index_exact(
     let element_bit_count = array_ty.element_type.bit_count();
     let index_decoded = gatify_decode(gb, array_ty.element_count, index_bits);
     let mut cases = Vec::new();
-    for i in (0..array_ty.element_count).rev() {
+    for i in 0..array_ty.element_count {
         let case_bits = array_bits.get_lsb_slice(i * element_bit_count, element_bit_count);
         cases.push(case_bits);
     }
@@ -459,7 +459,7 @@ fn gatify_array_index_oob_one_hot(
     // An array index selection is effectively a one hot selection of the elements
     // into a single element result.
     let mut cases = Vec::new();
-    for i in (0..array_element_count).rev() {
+    for i in 0..array_element_count {
         let case_bits = array_bits.get_lsb_slice(i * element_bit_count, element_bit_count);
         cases.push(case_bits);
     }
@@ -486,7 +486,7 @@ fn gatify_array_index_near_pow2_mux_tree_if_type_fits(
     }
 
     let mut cases = Vec::with_capacity(array_element_count);
-    for i in (0..array_element_count).rev() {
+    for i in 0..array_element_count {
         let element_bit_count = array_ty.element_type.bit_count();
         let case_bits = array_bits.get_lsb_slice(i * element_bit_count, element_bit_count);
         cases.push(case_bits);
@@ -643,7 +643,7 @@ fn gatify_array_update(
     }
 
     let mut lsb_to_msb = Vec::new();
-    for elem_bits in updated_elems.into_iter().rev() {
+    for elem_bits in updated_elems {
         lsb_to_msb.extend(elem_bits.iter_lsb_to_msb().cloned());
     }
     AigBitVector::from_lsb_is_index_0(&lsb_to_msb)
@@ -2488,8 +2488,8 @@ fn flatten_literal_to_bits(
         ir::Type::Array(array_ty) => {
             let elements = literal.get_elements().unwrap();
             let mut bit_vectors = Vec::new();
-            // Reverse order to match array flattening in node lowering (LSB = last element)
-            for elem in elements.iter().rev() {
+            // Array element 0 occupies the least-significant flat bits.
+            for elem in elements.iter() {
                 let elem_bits = flatten_literal_to_bits(elem, &array_ty.element_type, g8_builder);
                 bit_vectors.push(elem_bits);
             }
@@ -2645,7 +2645,7 @@ fn gatify_node(
             // Arrays are conceptually homogeneous, but in bit flattening, we just
             // concatenate all elements.
             let mut lsb_to_msb = Vec::new();
-            for member in members.iter().rev() {
+            for member in members.iter() {
                 let member_bits = env
                     .get_bit_vector(*member)
                     .expect("array element should be present");
@@ -4729,7 +4729,7 @@ top fn cone(leaf_7: bits[5], leaf_9: bits[33]) -> bits[1] {
         let array_bits = gb.add_input("arr".to_string(), element_width * array_len);
         let index_bits = gb.add_input("idx".to_string(), index_width);
         let mut cases = Vec::with_capacity(array_len);
-        for i in (0..array_len).rev() {
+        for i in 0..array_len {
             let case_bits = array_bits.get_lsb_slice(i * element_width, element_width);
             cases.push(case_bits);
         }

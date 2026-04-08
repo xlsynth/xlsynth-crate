@@ -791,15 +791,14 @@ fn unflatten_ir_value_from_lsb0_bits_at(
             element_type,
             element_count,
         }) => {
-            let mut elems_rev: Vec<IrValue> = Vec::with_capacity(*element_count);
+            let mut elems: Vec<IrValue> = Vec::with_capacity(*element_count);
             for _ in 0..*element_count {
                 let (v, next) =
                     unflatten_ir_value_from_lsb0_bits_at(element_type, flat_bits, offset)?;
                 offset = next;
-                elems_rev.push(v);
+                elems.push(v);
             }
-            elems_rev.reverse();
-            let arr = IrValue::make_array(&elems_rev).map_err(|e| e.to_string())?;
+            let arr = IrValue::make_array(&elems).map_err(|e| e.to_string())?;
             Ok((arr, offset))
         }
     }

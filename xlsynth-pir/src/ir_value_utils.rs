@@ -270,8 +270,9 @@ pub fn ir_bits_from_value_with_type(value: &IrValue, ty: &ir::Type) -> IrBits {
 /// Flattens `value` into LSB-first bits following PIR/Gatify lowering layout.
 ///
 /// This differs from [`ir_bits_from_value_with_type`] for tuples/arrays:
-/// tuple/array tails occupy the least-significant bits, matching the layout
-/// used when lowering PIR params into gate-level inputs.
+/// tuple tails occupy the least-significant bits, while array element 0
+/// occupies the least-significant bits. This matches the layout used by the
+/// current bit-blasted lowering and Verilog codegen.
 pub fn flatten_ir_value_to_lsb0_bits_for_type(
     value: &IrValue,
     ty: &ir::Type,
@@ -318,11 +319,71 @@ pub fn flatten_ir_value_to_lsb0_bits_for_type(
                     got_count, element_count
                 ));
             }
-            for i in (0..*element_count).rev() {
+            for i in 0..*element_count {
                 let elem = value.get_element(i).map_err(|e| e.to_string())?;
                 flatten_ir_value_to_lsb0_bits_for_type(&elem, element_type, out)?;
             }
             Ok(())
+        }
+    }
+}
+
+/// Rebuilds an `IrValue` from an LSB-first flattened bit stream following the
+/// current Verilog / bit-blasted aggregate layout.
+pub fn ir_value_from_lsb0_bits_with_layout(
+    ty: &ir::Type,
+    flat_bits: &[bool],
+) -> Result<IrValue, String> {
+    let (value, used) = ir_value_from_lsb0_bits_with_layout_at(ty, flat_bits, 0)?;
+    if used != flat_bits.len() {
+        return Err(format!(
+            "layout unflatten did not consume all bits: used {} of {}",
+            used,
+            flat_bits.len()
+        ));
+    }
+    Ok(value)
+}
+
+fn ir_value_from_lsb0_bits_with_layout_at(
+    ty: &ir::Type,
+    flat_bits: &[bool],
+    mut offset: usize,
+) -> Result<(IrValue, usize), String> {
+    match ty {
+        ir::Type::Token => Ok((IrValue::make_token(), offset)),
+        ir::Type::Bits(width) => {
+            if offset + width > flat_bits.len() {
+                return Err("not enough bits to rebuild bits value".to_string());
+            }
+            let slice = &flat_bits[offset..offset + width];
+            offset += width;
+            Ok((IrValue::from_bits(&IrBits::from_lsb_is_0(slice)), offset))
+        }
+        ir::Type::Tuple(elem_types) => {
+            let mut elems_rev = Vec::with_capacity(elem_types.len());
+            for elem_ty in elem_types.iter().rev() {
+                let (value, next_offset) =
+                    ir_value_from_lsb0_bits_with_layout_at(elem_ty, flat_bits, offset)?;
+                offset = next_offset;
+                elems_rev.push(value);
+            }
+            elems_rev.reverse();
+            Ok((IrValue::make_tuple(&elems_rev), offset))
+        }
+        ir::Type::Array(ir::ArrayTypeData {
+            element_type,
+            element_count,
+        }) => {
+            let mut elems = Vec::with_capacity(*element_count);
+            for _ in 0..*element_count {
+                let (value, next_offset) =
+                    ir_value_from_lsb0_bits_with_layout_at(element_type, flat_bits, offset)?;
+                offset = next_offset;
+                elems.push(value);
+            }
+            let array = IrValue::make_array(&elems).map_err(|e| e.to_string())?;
+            Ok((array, offset))
         }
     }
 }
@@ -469,6 +530,41 @@ mod tests {
         // Tail-first flattening:
         // bits[3]:101 contributes [1,0,1], then bits[2]:10 contributes [0,1].
         assert_eq!(out, vec![true, false, true, false, true]);
+    }
+
+    #[test]
+    fn test_flatten_ir_value_to_lsb0_bits_for_type_array_head_first() {
+        let ty = ir::Type::new_array(ir::Type::Bits(2), 3);
+        let v = IrValue::make_array(&[
+            IrValue::make_ubits(2, 0b01).unwrap(),
+            IrValue::make_ubits(2, 0b10).unwrap(),
+            IrValue::make_ubits(2, 0b11).unwrap(),
+        ])
+        .unwrap();
+        let mut out = Vec::new();
+        flatten_ir_value_to_lsb0_bits_for_type(&v, &ty, &mut out).unwrap();
+        assert_eq!(out, vec![true, false, false, true, true, true]);
+    }
+
+    #[test]
+    fn test_ir_value_from_lsb0_bits_with_layout_round_trips_tuple_and_array() {
+        let ty = ir::Type::Tuple(vec![
+            Box::new(ir::Type::Bits(1)),
+            Box::new(ir::Type::new_array(ir::Type::Bits(2), 3)),
+        ]);
+        let v = IrValue::make_tuple(&[
+            IrValue::make_ubits(1, 1).unwrap(),
+            IrValue::make_array(&[
+                IrValue::make_ubits(2, 0).unwrap(),
+                IrValue::make_ubits(2, 1).unwrap(),
+                IrValue::make_ubits(2, 2).unwrap(),
+            ])
+            .unwrap(),
+        ]);
+        let mut out = Vec::new();
+        flatten_ir_value_to_lsb0_bits_for_type(&v, &ty, &mut out).unwrap();
+        let rebuilt = ir_value_from_lsb0_bits_with_layout(&ty, &out).unwrap();
+        assert_eq!(rebuilt, v);
     }
 
     #[test]

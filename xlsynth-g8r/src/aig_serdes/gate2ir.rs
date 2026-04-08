@@ -51,7 +51,9 @@ fn flatten(param: &BValue, ty: &ir::Type, fb: &mut FnBuilder) -> BValue {
             element_count,
         }) => {
             let mut elements = Vec::new();
-            for i in 0..*element_count {
+            // `concat()` places its first operand in the highest bits, so reverse
+            // array iteration here to keep element 0 at the least-significant bits.
+            for i in (0..*element_count).rev() {
                 let index = fb.literal(&IrValue::u32(i as u32), None);
                 let element = fb.array_index(param, &index, None);
                 elements.push(flatten(&element, element_type, fb));
@@ -153,13 +155,15 @@ fn unflatten(
             element_type,
             element_count,
         }) => {
-            let mut elements: Vec<BValue> = Vec::new();
+            let mut elements_rev: Vec<BValue> = Vec::new();
             let element_bit_count = element_type.bit_count();
             for i in 0..*element_count {
                 let element_bits =
                     &bits_msb_is_0[i * element_bit_count..(i + 1) * element_bit_count];
-                elements.push(unflatten(element_bits, element_type, fb, package));
+                elements_rev.push(unflatten(element_bits, element_type, fb, package));
             }
+            elements_rev.reverse();
+            let elements = elements_rev;
             let elements_refs = elements.iter().map(|e| e as &BValue).collect::<Vec<_>>();
             fb.array(
                 &make_xlsynth_type(element_type, package),
@@ -226,32 +230,76 @@ pub fn repack_flat_aig_inputs_to_pir_params(
     gate_fn
 }
 
-/// Rebuilds scalar AIGER-loaded outputs into the flattened PIR return grouping.
-pub fn repack_flat_aig_outputs_to_pir_return_type(
-    pir_fn: &ir::Fn,
-    mut gate_fn: gate::GateFn,
-) -> gate::GateFn {
-    let want_total_bits = pir_fn.ret_ty.bit_count();
-    let gate_total_bits: usize = gate_fn.outputs.iter().map(|o| o.get_bit_count()).sum();
-    let all_one_bit_outputs = gate_fn.outputs.iter().all(|o| o.get_bit_count() == 1);
+fn split_base_bit(name: &str) -> Option<(String, usize)> {
+    if let Some(pos) = name.rfind('_') {
+        if pos == 0 || pos == name.len() - 1 {
+            return None;
+        }
+        let (base, digits) = name.split_at(pos);
+        if let Ok(idx) = digits[1..].parse::<usize>() {
+            return Some((base.to_string(), idx));
+        }
+    }
+    None
+}
 
-    if !all_one_bit_outputs
-        || gate_fn.outputs.len() <= 1
-        || gate_fn.outputs.len() != want_total_bits
-        || gate_total_bits != want_total_bits
-    {
-        return gate_fn;
+/// Rebuilds scalar AIGER-loaded outputs into original top-level output groups
+/// using the AIGER symbol naming convention (`name_0`, `name_1`, ...).
+pub fn regroup_scalar_aig_outputs_by_name(mut gate_fn: gate::GateFn) -> gate::GateFn {
+    let mut new_outputs = Vec::with_capacity(gate_fn.outputs.len());
+    let mut idx = 0usize;
+
+    while idx < gate_fn.outputs.len() {
+        let output = &gate_fn.outputs[idx];
+        if output.get_bit_count() != 1 {
+            new_outputs.push(output.clone());
+            idx += 1;
+            continue;
+        }
+
+        let Some((base_name, bit_index)) = split_base_bit(&output.name) else {
+            new_outputs.push(output.clone());
+            idx += 1;
+            continue;
+        };
+        if bit_index != 0 {
+            new_outputs.push(output.clone());
+            idx += 1;
+            continue;
+        }
+
+        let mut group_ops = vec![*output.bit_vector.get_lsb(0)];
+        let mut next_idx = idx + 1;
+        while next_idx < gate_fn.outputs.len() {
+            let next_output = &gate_fn.outputs[next_idx];
+            if next_output.get_bit_count() != 1 {
+                break;
+            }
+            match split_base_bit(&next_output.name) {
+                Some((next_base, next_bit_index))
+                    if next_base == base_name && next_bit_index == group_ops.len() =>
+                {
+                    group_ops.push(*next_output.bit_vector.get_lsb(0));
+                    next_idx += 1;
+                }
+                _ => break,
+            }
+        }
+
+        if group_ops.len() == 1 {
+            new_outputs.push(output.clone());
+            idx += 1;
+            continue;
+        }
+
+        new_outputs.push(Output {
+            name: base_name,
+            bit_vector: AigBitVector::from_lsb_is_index_0(&group_ops),
+        });
+        idx = next_idx;
     }
 
-    let mut flat_ops = Vec::with_capacity(want_total_bits);
-    for output in &gate_fn.outputs {
-        flat_ops.push(*output.bit_vector.get_lsb(0));
-    }
-
-    gate_fn.outputs = vec![Output {
-        name: "output_value".to_string(),
-        bit_vector: AigBitVector::from_lsb_is_index_0(&flat_ops),
-    }];
+    gate_fn.outputs = new_outputs;
     gate_fn
 }
 
