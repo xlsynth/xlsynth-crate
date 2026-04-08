@@ -14,6 +14,7 @@ use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
 use xlsynth_g8r::aig_serdes::emit_aiger_binary::emit_aiger_binary;
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use xlsynth_g8r::test_utils::interesting_ir_roundtrip_cases;
+use xlsynth_pir::ir_parser;
 
 use test_case::test_case;
 
@@ -101,6 +102,91 @@ fn assert_aig_ir_equiv_roundtrip_for_ir_case(
         "aig-ir-equiv should succeed for case {case_name}; stdout: {} stderr: {}",
         String::from_utf8_lossy(&equiv.stdout),
         String::from_utf8_lossy(&equiv.stderr)
+    );
+}
+
+fn function_type_text_for_ir_text(ir_text: &str) -> String {
+    let mut parser = ir_parser::Parser::new(ir_text);
+    let pkg = parser
+        .parse_and_validate_package()
+        .expect("roundtrip test IR should parse");
+    let top = pkg
+        .get_top_fn()
+        .expect("roundtrip test IR should have top fn");
+    let param_types = top
+        .params
+        .iter()
+        .map(|param| param.ty.to_string())
+        .collect::<Vec<String>>()
+        .join(", ");
+    format!("({param_types}) -> {}", top.ret_ty)
+}
+
+fn assert_aig2ir_ir_equiv_roundtrip_for_ir_case(
+    temp_dir: &tempfile::TempDir,
+    toolchain_toml_path: &std::path::Path,
+    case_name: &str,
+    ir_text: &str,
+) {
+    let ir_path = temp_dir.path().join(format!("{case_name}_lift_src.ir"));
+    std::fs::write(&ir_path, ir_text).unwrap();
+    let aiger_path = temp_dir.path().join(format!("{case_name}_lift.aig"));
+    let lifted_ir_path = temp_dir.path().join(format!("{case_name}_lifted.ir"));
+    let fn_type_text = function_type_text_for_ir_text(ir_text);
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let ir2g8r = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("ir2g8r")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--aiger-out")
+        .arg(aiger_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        ir2g8r.status.success(),
+        "ir2g8r failed for case {case_name}; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&ir2g8r.stdout),
+        String::from_utf8_lossy(&ir2g8r.stderr)
+    );
+
+    let aig2ir = Command::new(driver)
+        .arg("aig2ir")
+        .arg(aiger_path.to_str().unwrap())
+        .arg("--fn-type")
+        .arg(&fn_type_text)
+        .output()
+        .unwrap();
+    assert!(
+        aig2ir.status.success(),
+        "aig2ir failed for case {case_name}; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&aig2ir.stdout),
+        String::from_utf8_lossy(&aig2ir.stderr)
+    );
+    std::fs::write(&lifted_ir_path, &aig2ir.stdout).unwrap();
+
+    let ir_equiv = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("ir-equiv")
+        .arg(lifted_ir_path.to_str().unwrap())
+        .arg(ir_path.to_str().unwrap())
+        .arg("--lhs_ir_top")
+        .arg("loaded_aiger")
+        .arg("--rhs_ir_top")
+        .arg("main")
+        .arg("--solver")
+        .arg("toolchain")
+        .output()
+        .unwrap();
+    assert!(
+        ir_equiv.status.success(),
+        "lifted aig2ir IR should be equivalent for case {case_name}; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&ir_equiv.stdout),
+        String::from_utf8_lossy(&ir_equiv.stderr)
     );
 }
 
@@ -10392,6 +10478,25 @@ fn test_aig_ir_equiv_roundtrip_from_ir2g8r_interesting_signatures_aiger_out() {
 
     for case in interesting_ir_roundtrip_cases() {
         assert_aig_ir_equiv_roundtrip_for_ir_case(
+            &temp_dir,
+            &toolchain_toml_path,
+            case.name,
+            case.ir_text,
+        );
+    }
+}
+
+#[test]
+fn test_aig2ir_ir_equiv_roundtrip_from_ir2g8r_interesting_signatures_aiger_out() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    for case in interesting_ir_roundtrip_cases() {
+        assert_aig2ir_ir_equiv_roundtrip_for_ir_case(
             &temp_dir,
             &toolchain_toml_path,
             case.name,
