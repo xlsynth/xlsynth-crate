@@ -4230,7 +4230,7 @@ fn test_g8r2ir_preserves_scalar_multi_output_order() {
 }
 
 #[test]
-fn test_aig2ir_preserves_flat_native_scalar_multi_output_order() {
+fn test_aig2ir_requires_fn_type_and_suggests_naive_type() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let mut g8_builder = GateBuilder::new("testmod".to_string(), GateBuilderOptions::no_opt());
@@ -4251,22 +4251,21 @@ fn test_aig2ir_preserves_flat_native_scalar_multi_output_order() {
         .unwrap();
 
     assert!(
-        output.status.success(),
-        "aig2ir failed:\nstdout: {}\nstderr: {}",
+        !output.status.success(),
+        "expected aig2ir to require --fn-type; stdout: {} stderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-
-    let ir_text = String::from_utf8_lossy(&output.stdout);
     assert!(
-        ir_text.contains("tuple(a, b, id="),
-        "expected flat native outputs to preserve order in tuple(a, b); got:\n{}",
-        ir_text
+        String::from_utf8_lossy(&output.stderr).contains("--fn-type is required"),
+        "expected missing --fn-type message, got: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        !ir_text.contains("tuple(b, a, id="),
-        "native scalar multi-output order was reversed unexpectedly:\n{}",
-        ir_text
+        String::from_utf8_lossy(&output.stderr)
+            .contains("naive type suggestion: `(bits[1], bits[1]) -> (bits[1], bits[1])`"),
+        "expected naive type suggestion in stderr, got: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -4417,12 +4416,14 @@ fn test_aig2ir_accepts_binary_aiger() {
     let output = Command::new(command_path)
         .arg("aig2ir")
         .arg(lhs_aig.to_str().unwrap())
+        .arg("--fn-type")
+        .arg("(bits[1], bits[1]) -> bits[1]")
         .output()
         .unwrap();
 
     assert!(
         output.status.success(),
-        "aig2ir failed on binary AIGER: stdout: {} stderr: {}",
+        "aig2ir failed on binary AIGER with --fn-type: stdout: {} stderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

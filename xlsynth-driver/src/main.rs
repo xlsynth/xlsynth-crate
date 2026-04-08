@@ -1971,7 +1971,7 @@ fn main() {
                     clap::Arg::new("fn_type")
                         .long("fn-type")
                         .value_name("FN_TYPE")
-                        .help("Optional explicit function type used to regroup the raw AIGER interface before lifting")
+                        .help("Required explicit function type used to interpret the raw AIGER interface before lifting")
                         .action(clap::ArgAction::Set),
                 ),
         )

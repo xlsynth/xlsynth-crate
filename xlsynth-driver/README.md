@@ -303,12 +303,10 @@ The output is always written to stdout; redirect to a `.ir` file as needed.
 Converts an AIGER file (`.aag` or `.aig`) into an XLS IR *package* and prints
 it on **stdout**.
 
-- By default, raw loaded AIGER stays flat: one `bits[1]` parameter per AIGER
-  input line and a `bits[1]` / tuple-of-bits return matching the raw scalar
-  output lines.
-- `--fn-type <FN_TYPE>` imposes an explicit function signature before lifting.
-  This is the supported way to recover structured params / return values from a
-  flattened AIGER interface.
+- `--fn-type <FN_TYPE>` is required. It defines how the raw AIGER interface is
+  interpreted before lift.
+- If `--fn-type` is omitted, `aig2ir` errors and prints a parseable naive type
+  suggestion derived from the raw loaded AIGER interface.
 - No port regrouping is inferred from `_N` suffixes or other AIGER symbol
   naming conventions.
 
@@ -316,18 +314,15 @@ Positional arguments:
 
 - `<aig_input_file>` – input `.aag` or `.aig` file.
 
-Optional flags:
+Flags:
 
-- `--fn-type <FN_TYPE>` – explicit signature to impose before lift, e.g.
+- `--fn-type <FN_TYPE>` – required explicit signature to impose before lift,
+  e.g.
   `(bits[8][4]) -> bits[8][4]`.
 
 Example usage:
 
 ```shell
-# Raw flat lift.
-xlsynth-driver aig2ir my_module.aag > my_module.aig.ir
-
-# Structured lift via explicit signature.
 xlsynth-driver aig2ir my_module.aag --fn-type '(bits[8][4]) -> bits[8][4]' > my_module.typed.ir
 ```
 
