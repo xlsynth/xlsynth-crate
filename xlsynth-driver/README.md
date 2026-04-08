@@ -1500,8 +1500,10 @@ lifting the AIGER into IR and then running the same IR equivalence flow as
 - Top selection:
   - `--top <NAME>` selects the entry function in `<rhs_ir_file>`.
   - The AIGER side has a natural single entry point and does not use per-side top flags.
-- The RHS IR function signature is the explicit schema used to interpret the
-  raw AIGER bitstream before lift.
+- The RHS IR function type determines how raw AIGER inputs and outputs are
+  interpreted before lift. See the
+  [bit-blasted contract](../docs/bit_blasted_output_ordering.md#bit-blasted-contract)
+  for the canonical flattening rule.
 - No AIGER-side regrouping is inferred from symbol names or suffixes.
 - Proving flags (same shape as `ir-equiv`):
   - `--solver <auto|toolchain|bitwuzla|boolector|z3-binary|bitwuzla-binary|boolector-binary>`

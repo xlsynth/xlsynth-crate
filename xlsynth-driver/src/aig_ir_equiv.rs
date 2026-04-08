@@ -148,6 +148,9 @@ pub fn handle_aig_ir_equiv(matches: &clap::ArgMatches, config: &Option<Toolchain
         eprintln!("{} error: {}", SUBCOMMAND, e);
         std::process::exit(2)
     });
+    // `aig-ir-equiv` lets the RHS signature determine how raw AIGER inputs and
+    // outputs are interpreted before lift; see
+    // `docs/bit_blasted_output_ordering.md` for the canonical flattening rule.
     let gate_fn = repack_gate_fn_interface_with_schema(gate_fn, &schema).unwrap_or_else(|e| {
         eprintln!("{} error: {}", SUBCOMMAND, e);
         std::process::exit(2)

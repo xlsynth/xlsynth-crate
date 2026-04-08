@@ -10323,7 +10323,7 @@ top fn main(a: bits[1] id=1, b: bits[1] id=2) -> (bits[1], bits[1]) {
 
     assert!(
         !output.status.success(),
-        "aig-ir-equiv should reject ambiguous native scalar multi-output ordering under fn-type lift; stdout: {} stderr: {}",
+        "aig-ir-equiv should interpret native scalar outputs via signature packing; stdout: {} stderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

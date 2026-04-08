@@ -2045,7 +2045,14 @@ fn main() {
         )
         .subcommand(
             clap::Command::new("aig-ir-equiv")
-                .about("Checks if an AIGER and an IR are equivalent by lifting AIGER into IR")
+                .about("Checks if an AIGER and an IR are equivalent via RHS signature packing")
+                .long_about(
+                    r#"Checks if an AIGER and an IR are equivalent by lifting AIGER into IR.
+
+The RHS IR function type determines how raw AIGER inputs and outputs are
+interpreted before lift. See docs/bit_blasted_output_ordering.md, section
+"Bit-Blasted Contract"."#,
+                )
                 .arg(
                     Arg::new("aig_file")
                         .help("The AIGER file (.aag or .aig)")
