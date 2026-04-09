@@ -76,3 +76,72 @@ INV,u2,A,1
 
     assert_eq!(got, want);
 }
+
+#[test]
+fn gv_dump_cone_rejects_preserved_assigns() {
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+
+    let liberty_text = r#"
+cells: {
+  name: "BUF"
+  pins: {
+    name: "A"
+    direction: INPUT
+  }
+  pins: {
+    name: "Y"
+    direction: OUTPUT
+    function: "A"
+  }
+  area: 1.0
+}
+"#;
+
+    let netlist_text = r#"
+module top (a, b, y);
+  input a;
+  input b;
+  output y;
+  wire n;
+  assign n = a & b;
+  BUF u1 (.A(n), .Y(y));
+endmodule
+"#;
+
+    let mut liberty_file = tempfile::NamedTempFile::new().expect("create liberty temp file");
+    std::io::Write::write_all(&mut liberty_file, liberty_text.as_bytes())
+        .expect("write liberty text");
+
+    let mut netlist_file = tempfile::NamedTempFile::new().expect("create netlist temp file");
+    std::io::Write::write_all(&mut netlist_file, netlist_text.as_bytes())
+        .expect("write netlist text");
+
+    let output = Command::new(driver)
+        .arg("gv-dump-cone")
+        .arg(netlist_file.path().as_os_str())
+        .arg("--liberty_proto")
+        .arg(liberty_file.path().as_os_str())
+        .arg("--instance")
+        .arg("u1")
+        .arg("--traverse")
+        .arg("fanin")
+        .arg("--stop-at-levels")
+        .arg("1")
+        .output()
+        .expect("gv-dump-cone invocation should run");
+
+    assert!(
+        !output.status.success(),
+        "gv-dump-cone should reject preserved assigns: status={:?}\nstdout={}\nstderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("does not support preserved continuous assigns"),
+        "unexpected stderr: {}",
+        stderr,
+    );
+}

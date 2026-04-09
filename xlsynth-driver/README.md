@@ -226,6 +226,7 @@ Additional flags:
 - `--module_name <MODULE>`: Optional module name to restrict the search; required when the netlist contains multiple modules.
 - `--start-pins <CSV>`: Optional comma-separated list of starting pins on the instance; defaults to all input pins for `--traverse=fanin` and all output pins for `--traverse=fanout`.
 - `--dff_cells <CSV>`: Comma-separated list of DFF cell names that should be treated as stop boundaries when using `--stop-at-dff` (required if `--stop-at-dff` is selected).
+- `gv-dump-cone` operates on instance-based structural connectivity; modules with preserved continuous `assign` statements are rejected rather than partially ignored.
 
 Output format:
 
