@@ -9,6 +9,7 @@ use xlsynth::XlsynthError;
 use crate::Error;
 use crate::LogicBit;
 use crate::Result;
+use crate::Signedness;
 use crate::Value4;
 use crate::combo_compile::Port;
 use crate::compiled_module::DeclInfo;
@@ -54,16 +55,20 @@ pub fn cycles_from_irvals_file(
     let mut out: Vec<PipelineCycle> = Vec::with_capacity(cycles as usize);
     for cyc in 0..(cycles as usize) {
         if cyc < parsed.len() {
-            out.push(cycle_from_irvalue(
-                &m.combo.input_ports,
-                &m.combo.decls,
-                &parsed[cyc],
-            )?);
+            out.push(pipeline_cycle_from_irvalue(m, &parsed[cyc])?);
         } else {
             out.push(zero_cycle(&m.combo.input_ports, &m.combo.decls)?);
         }
     }
     Ok(out)
+}
+
+/// Converts one XLS typed input value into a single simulation cycle.
+pub fn pipeline_cycle_from_irvalue(
+    m: &CompiledPipelineModule,
+    v: &IrValue,
+) -> Result<PipelineCycle> {
+    cycle_from_irvalue(&m.combo.input_ports, &m.combo.decls, v)
 }
 
 fn cycle_from_irvalue(
@@ -86,7 +91,7 @@ fn cycle_from_irvalue(
         let info = decls
             .get(&p.name)
             .ok_or_else(|| Error::Parse(format!("no decl for input `{}`", p.name)))?;
-        let v4 = irbits_to_value4(bits, info)?;
+        let v4 = irbits_to_value4(bits, info.signedness)?;
         if v4.width != info.width {
             return Err(Error::Parse(format!(
                 "irvals element {idx} width {} does not match input `{}` width {}",
@@ -121,7 +126,8 @@ fn flatten_irvalue_to_bits(v: &IrValue) -> std::result::Result<Vec<IrBits>, Xlsy
     Ok(out)
 }
 
-fn irbits_to_value4(bits: &IrBits, info: &DeclInfo) -> Result<Value4> {
+/// Converts an XLS `IrBits` value into a `Value4` with the given signedness.
+pub fn irbits_to_value4(bits: &IrBits, signedness: Signedness) -> Result<Value4> {
     let width: usize = bits.get_bit_count();
     let width_u32: u32 = width
         .try_into()
@@ -133,5 +139,5 @@ fn irbits_to_value4(bits: &IrBits, info: &DeclInfo) -> Result<Value4> {
             .map_err(|e| Error::Parse(format!("read bit {i}: {e}")))?;
         out_bits.push(if b { LogicBit::One } else { LogicBit::Zero });
     }
-    Ok(Value4::new(width_u32, info.signedness, out_bits))
+    Ok(Value4::new(width_u32, signedness, out_bits))
 }

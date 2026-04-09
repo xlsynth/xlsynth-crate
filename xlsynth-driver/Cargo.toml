@@ -48,6 +48,7 @@ num_cpus = "1.16"
 
 [dev-dependencies]
 xlsynth-test-helpers = { path = "../xlsynth-test-helpers" }
+xlsynth-vastly = { path = "../xlsynth-vastly", version = "0.40.0", features = ["irvals"] }
 test-case = "3.3.1"
 pretty_assertions = "1.4.1"
 

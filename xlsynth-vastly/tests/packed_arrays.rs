@@ -325,6 +325,64 @@ endmodule
 }
 
 #[test]
+fn combo_module_supports_whole_subarray_assignment_into_nested_unpacked_arrays() {
+    let dut = r#"
+module m(
+  input wire a,
+  input wire b,
+  input wire c,
+  input wire d,
+  output wire [3:0] out
+);
+  wire row0[2];
+  wire row1[2];
+  wire table[2][2];
+
+  assign row0[0] = a;
+  assign row0[1] = b;
+  assign row1[0] = c;
+  assign row1[1] = d;
+  assign table[0] = row0;
+  assign table[1] = row1;
+  assign out = {{table[1][1], table[1][0]}, {table[0][1], table[0][0]}};
+endmodule
+"#;
+
+    let m = compile_combo_module(dut).unwrap();
+    let plan = plan_combo_eval(&m).unwrap();
+
+    let outputs0 = eval_combo(
+        &m,
+        &plan,
+        &[
+            ("a".to_string(), vbits(1, Signedness::Unsigned, "1")),
+            ("b".to_string(), vbits(1, Signedness::Unsigned, "0")),
+            ("c".to_string(), vbits(1, Signedness::Unsigned, "0")),
+            ("d".to_string(), vbits(1, Signedness::Unsigned, "0")),
+        ]
+        .into_iter()
+        .collect::<BTreeMap<_, _>>(),
+    )
+    .unwrap();
+    assert_eq!(outputs0["out"].to_bit_string_msb_first(), "0001");
+
+    let outputs1 = eval_combo(
+        &m,
+        &plan,
+        &[
+            ("a".to_string(), vbits(1, Signedness::Unsigned, "1")),
+            ("b".to_string(), vbits(1, Signedness::Unsigned, "0")),
+            ("c".to_string(), vbits(1, Signedness::Unsigned, "1")),
+            ("d".to_string(), vbits(1, Signedness::Unsigned, "1")),
+        ]
+        .into_iter()
+        .collect::<BTreeMap<_, _>>(),
+    )
+    .unwrap();
+    assert_eq!(outputs1["out"].to_bit_string_msb_first(), "1101");
+}
+
+#[test]
 fn combo_module_supports_dynamic_index_on_unpacked_array_of_packed_values() {
     let dut = r#"
 module m(

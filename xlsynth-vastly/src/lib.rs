@@ -78,6 +78,10 @@ pub use crate::fixture_runner::OutputPortHandle;
 pub use crate::fixture_runner::PortBindings;
 #[cfg(feature = "irvals")]
 pub use crate::irvals::cycles_from_irvals_file;
+#[cfg(feature = "irvals")]
+pub use crate::irvals::irbits_to_value4;
+#[cfg(feature = "irvals")]
+pub use crate::irvals::pipeline_cycle_from_irvalue;
 #[cfg(not(feature = "irvals"))]
 pub fn cycles_from_irvals_file(
     _m: &crate::pipeline_compile::CompiledPipelineModule,

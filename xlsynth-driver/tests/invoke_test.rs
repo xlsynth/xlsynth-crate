@@ -15,6 +15,10 @@ use xlsynth_g8r::aig_serdes::emit_aiger_binary::emit_aiger_binary;
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use xlsynth_g8r::test_utils::interesting_ir_roundtrip_cases;
 use xlsynth_pir::ir_parser;
+use xlsynth_vastly::compile_pipeline_module;
+use xlsynth_vastly::pipeline_cycle_from_irvalue;
+use xlsynth_vastly::run_pipeline_and_collect_outputs;
+use xlsynth_vastly::PipelineStimulus;
 
 use test_case::test_case;
 
@@ -224,31 +228,29 @@ fn run_ir2pipeline_and_simulate_output(ir_text: &str, input_value: &str) -> Stri
     );
 
     let pipeline_sv = String::from_utf8(pipeline_output.stdout).unwrap();
-
-    let mut cmd = Command::new(driver);
-    cmd.arg("run-verilog-pipeline")
-        .arg("--latency")
-        .arg("1")
-        .arg("-")
-        .arg(input_value)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let mut child = cmd.spawn().expect("spawn run-verilog-pipeline");
-    child
-        .stdin
-        .as_mut()
-        .expect("stdin should be piped")
-        .write_all(pipeline_sv.as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
-        "run-verilog-pipeline failed; stdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap()
+    let pipeline =
+        compile_pipeline_module(&pipeline_sv).expect("vastly should compile pipeline SV");
+    let input_value = IrValue::parse_typed(input_value).expect("input value should parse");
+    let stimulus = PipelineStimulus {
+        half_period: 5,
+        cycles: vec![pipeline_cycle_from_irvalue(&pipeline, &input_value)
+            .expect("typed XLS input should map to one pipeline cycle")],
+    };
+    let outputs =
+        run_pipeline_and_collect_outputs(&pipeline, &stimulus, &pipeline.initial_state_x())
+            .expect("vastly should simulate pipeline SV");
+    let out_value = outputs
+        .last()
+        .expect("one simulated cycle expected")
+        .get("out")
+        .expect("generated pipeline should have an `out` output");
+    let decimal = out_value.to_decimal_string_if_known().unwrap_or_else(|| {
+        panic!(
+            "expected known output bits, got {}",
+            out_value.to_bit_string_msb_first()
+        )
+    });
+    format!("out: bits[{}]:{}", out_value.width, decimal)
 }
 
 fn two_input_gate_fn<F>(name: &str, make_output: F) -> GateFn
@@ -5195,12 +5197,8 @@ top fn main(a: bits[1] id=1, b: bits[2] id=2) -> (bits[1], bits[2]) {
 }
 "#;
 
-    let stdout = run_ir2pipeline_and_simulate_output(ir_text, "(bits[1]:1, bits[2]:0)");
-    assert!(
-        stdout.contains("out: bits[3]:4"),
-        "expected tuple output to place the last element in the low bits; stdout:\n{}",
-        stdout
-    );
+    let output_line = run_ir2pipeline_and_simulate_output(ir_text, "(bits[1]:1, bits[2]:0)");
+    assert_eq!(output_line, "out: bits[3]:4");
 }
 
 #[test]
@@ -5218,12 +5216,9 @@ top fn main(a: bits[2] id=1, b: bits[2] id=2, c: bits[2] id=3) -> bits[2][3] {
 }
 "#;
 
-    let stdout = run_ir2pipeline_and_simulate_output(ir_text, "(bits[2]:1, bits[2]:0, bits[2]:0)");
-    assert!(
-        stdout.contains("out: bits[6]:1"),
-        "expected array output to place element 0 in the low bits; stdout:\n{}",
-        stdout
-    );
+    let output_line =
+        run_ir2pipeline_and_simulate_output(ir_text, "(bits[2]:1, bits[2]:0, bits[2]:0)");
+    assert_eq!(output_line, "out: bits[6]:1");
 }
 
 #[test]
@@ -5243,15 +5238,11 @@ top fn main(a: bits[1] id=1, b: bits[1] id=2, c: bits[1] id=3, d: bits[1] id=4) 
 }
 "#;
 
-    let stdout = run_ir2pipeline_and_simulate_output(
+    let output_line = run_ir2pipeline_and_simulate_output(
         ir_text,
         "(bits[1]:1, bits[1]:0, bits[1]:0, bits[1]:0)",
     );
-    assert!(
-        stdout.contains("out: bits[4]:1"),
-        "expected nested array output to place the first leaf in the low bits; stdout:\n{}",
-        stdout
-    );
+    assert_eq!(output_line, "out: bits[4]:1");
 }
 
 #[test]
