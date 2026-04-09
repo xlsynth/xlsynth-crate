@@ -11,7 +11,7 @@
 //! manipulating the resulting `GateFn`.
 
 use crate::aig::{AigNode, AigOperand};
-use crate::aig_serdes::load_aiger::LoadAigerResult;
+use crate::aig_serdes::load_aiger::{LoadAigerResult, finish_loaded_gate_builder};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use std::collections::HashMap;
 use std::fs;
@@ -133,7 +133,7 @@ pub fn load_aiger_binary(src: &[u8], opts: GateBuilderOptions) -> Result<LoadAig
         apply_symbol_table("", &mut gb, &var_to_operand, &input_names, &output_literals)?;
     }
 
-    let gate_fn = gb.build();
+    let gate_fn = finish_loaded_gate_builder(gb);
 
     Ok(LoadAigerResult {
         gate_fn,
@@ -225,16 +225,13 @@ fn apply_symbol_table(
             gb.inputs[idx].name = final_name.clone();
         }
         let full_name = &gb.inputs[idx].name;
-        let bit_idx = split_base_bit(full_name).map(|(_, b)| b).unwrap_or(0);
         let op = var_to_operand.get(&((idx as u32) + 1)).unwrap();
         if let Some(AigNode::Input {
             name: n, lsb_index, ..
         }) = gb.gates.get_mut(op.node.id)
         {
-            *n = split_base_bit(full_name)
-                .map(|(base, _)| base)
-                .unwrap_or_else(|| full_name.clone());
-            *lsb_index = bit_idx;
+            *n = full_name.clone();
+            *lsb_index = 0;
         }
     }
 
@@ -257,25 +254,17 @@ fn apply_symbol_table(
     Ok(())
 }
 
-fn split_base_bit(name: &str) -> Option<(String, usize)> {
-    if let Some(pos) = name.rfind('_') {
-        if pos == 0 || pos == name.len() - 1 {
-            return None;
-        }
-        let (base, digits) = name.split_at(pos);
-        if let Ok(idx) = digits[1..].parse::<usize>() {
-            return Some((base.to_string(), idx));
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aig::gate::{AigNode, GateFn};
     use crate::aig_serdes::emit_aiger_binary::emit_aiger_binary;
+    use crate::aig_serdes::gate2ir::{GateFnInterfaceSchema, repack_gate_fn_interface_with_schema};
+    use crate::check_equivalence;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
-    use crate::test_utils::structurally_equivalent;
+    use crate::test_utils::{
+        interesting_ir_roundtrip_cases, load_interesting_ir_roundtrip_case, structurally_equivalent,
+    };
 
     #[test]
     fn test_aiger_binary_roundtrip_simple_and() {
@@ -289,5 +278,123 @@ mod tests {
         let aiger = emit_aiger_binary(&orig, true).unwrap();
         let loaded = load_aiger_binary(&aiger, GateBuilderOptions::no_opt()).unwrap();
         assert!(structurally_equivalent(&orig, &loaded.gate_fn));
+    }
+
+    #[test]
+    fn test_aiger_binary_roundtrip_interesting_signatures() {
+        for case in interesting_ir_roundtrip_cases() {
+            let sample = load_interesting_ir_roundtrip_case(case);
+            let aiger = emit_aiger_binary(&sample.gate_fn, true).unwrap();
+            let loaded = load_aiger_binary(&aiger, GateBuilderOptions::no_opt()).unwrap();
+            let schema = GateFnInterfaceSchema::from_pir_fn(&sample.g8r_fn).unwrap();
+            let repacked = repack_gate_fn_interface_with_schema(loaded.gate_fn, &schema).unwrap();
+            check_equivalence::validate_same_fn(&sample.g8r_fn, &repacked).unwrap_or_else(|e| {
+                panic!("binary AIGER roundtrip failed for {}: {}", case.name, e)
+            });
+        }
+    }
+
+    #[test]
+    fn test_aiger_binary_load_of_structured_ir_gatefn_stays_flat() {
+        for case in interesting_ir_roundtrip_cases() {
+            let sample = load_interesting_ir_roundtrip_case(case);
+            let aiger = emit_aiger_binary(&sample.gate_fn, true).unwrap();
+            let loaded = load_aiger_binary(&aiger, GateBuilderOptions::no_opt()).unwrap();
+            assert!(
+                loaded
+                    .gate_fn
+                    .inputs
+                    .iter()
+                    .all(|input| input.get_bit_count() == 1),
+                "expected raw loaded binary AIGER inputs to stay scalar for {}",
+                case.name
+            );
+            assert!(
+                loaded
+                    .gate_fn
+                    .outputs
+                    .iter()
+                    .all(|output| output.get_bit_count() == 1),
+                "expected raw loaded binary AIGER outputs to stay scalar for {}",
+                case.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_aiger_binary_load_preserves_suffix_names_literally() {
+        let aiger = b"aig 2 2 0 2 0\n2\n4\ni0 arg_0\ni1 arg_1\no0 ret_0\no1 ret_1\nc\n";
+        let loaded = load_aiger_binary(aiger, GateBuilderOptions::no_opt()).unwrap();
+        assert_eq!(loaded.gate_fn.inputs[0].name, "arg_0");
+        assert_eq!(loaded.gate_fn.inputs[1].name, "arg_1");
+        assert_eq!(loaded.gate_fn.outputs[0].name, "ret_0");
+        assert_eq!(loaded.gate_fn.outputs[1].name, "ret_1");
+
+        let input0 = loaded.gate_fn.inputs[0].bit_vector.get_lsb(0).node;
+        let input1 = loaded.gate_fn.inputs[1].bit_vector.get_lsb(0).node;
+        match loaded.gate_fn.get(input0) {
+            AigNode::Input {
+                name, lsb_index, ..
+            } => {
+                assert_eq!(name, "arg_0");
+                assert_eq!(*lsb_index, 0);
+            }
+            other => panic!("expected input node, got {:?}", other),
+        }
+        match loaded.gate_fn.get(input1) {
+            AigNode::Input {
+                name, lsb_index, ..
+            } => {
+                assert_eq!(name, "arg_1");
+                assert_eq!(*lsb_index, 0);
+            }
+            other => panic!("expected input node, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_aiger_binary_load_accepts_empty_interface() {
+        let loaded =
+            load_aiger_binary(b"aig 0 0 0 0 0\nc\n", GateBuilderOptions::no_opt()).unwrap();
+        assert!(loaded.gate_fn.inputs.is_empty());
+        assert!(loaded.gate_fn.outputs.is_empty());
+    }
+
+    #[test]
+    fn test_aiger_binary_roundtrip_native_multi_output_via_gatefn_schema() {
+        let mut gb = GateBuilder::new("native_multi_bin".to_string(), GateBuilderOptions::no_opt());
+        let a = *gb.add_input("a".to_string(), 1).get_lsb(0);
+        let b = *gb.add_input("b".to_string(), 1).get_lsb(0);
+        gb.add_output("o0".to_string(), a.into());
+        gb.add_output("o1".to_string(), b.into());
+        let orig = gb.build();
+
+        let aiger = emit_aiger_binary(&orig, true).unwrap();
+        let loaded = load_aiger_binary(&aiger, GateBuilderOptions::no_opt()).unwrap();
+        let schema = GateFnInterfaceSchema::from_gate_fn(&orig).unwrap();
+        let repacked = repack_gate_fn_interface_with_schema(loaded.gate_fn, &schema).unwrap();
+
+        assert!(structurally_equivalent(&orig, &repacked));
+    }
+
+    #[test]
+    fn test_aiger_binary_roundtrip_retags_regrouped_multi_bit_input_leaves() {
+        let orig = GateFn::try_from(
+            r#"fn sample(x: bits[2] = [%1, %2]) -> (out: bits[1] = [%3]) {
+  %3 = and(x[0], x[1])
+  out[0] = %3
+}"#,
+        )
+        .unwrap();
+
+        let aiger = emit_aiger_binary(&orig, true).unwrap();
+        let loaded = load_aiger_binary(&aiger, GateBuilderOptions::no_opt()).unwrap();
+        let schema = GateFnInterfaceSchema::from_gate_fn(&orig).unwrap();
+        let repacked = repack_gate_fn_interface_with_schema(loaded.gate_fn, &schema).unwrap();
+        assert!(structurally_equivalent(&orig, &repacked));
+
+        let repacked_text = repacked.to_string();
+        let reparsed = GateFn::try_from(repacked_text.as_str()).unwrap();
+        assert!(structurally_equivalent(&repacked, &reparsed));
     }
 }

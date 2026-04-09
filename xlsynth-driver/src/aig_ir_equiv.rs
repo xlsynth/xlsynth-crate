@@ -4,9 +4,10 @@ use std::path::Path;
 
 use crate::ir_equiv::{dispatch_ir_equiv, IrEquivRequest, IrModule};
 use crate::toolchain_config::ToolchainConfig;
-use xlsynth_g8r::aig::gate::{AigBitVector, Input};
 use xlsynth_g8r::aig::GateFn;
-use xlsynth_g8r::aig_serdes::gate2ir::gate_fn_to_xlsynth_ir;
+use xlsynth_g8r::aig_serdes::gate2ir::{
+    gate_fn_to_xlsynth_ir, repack_gate_fn_interface_with_schema, GateFnInterfaceSchema,
+};
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
 use xlsynth_pir::ir;
@@ -46,41 +47,6 @@ fn parse_pir_top_fn(
             .clone()
     };
     Ok((pkg, f))
-}
-
-fn repack_flat_aig_inputs_to_pir_params(pir_fn: &ir::Fn, mut gate_fn: GateFn) -> GateFn {
-    let want_param_count = pir_fn.params.len();
-    let want_total_bits: usize = pir_fn.params.iter().map(|p| p.ty.bit_count()).sum();
-    let gate_total_bits: usize = gate_fn.inputs.iter().map(|i| i.get_bit_count()).sum();
-
-    // The common AIGER form has one scalar input per bit. If widths match,
-    // repack those scalar inputs to the PIR parameter grouping.
-    let all_one_bit_inputs = gate_fn.inputs.iter().all(|i| i.get_bit_count() == 1);
-    if !all_one_bit_inputs
-        || gate_fn.inputs.len() != want_total_bits
-        || gate_total_bits != want_total_bits
-    {
-        return gate_fn;
-    }
-
-    let mut flat_ops = Vec::with_capacity(want_total_bits);
-    for inp in &gate_fn.inputs {
-        flat_ops.push(*inp.bit_vector.get_lsb(0));
-    }
-
-    let mut new_inputs: Vec<Input> = Vec::with_capacity(want_param_count);
-    let mut offset = 0usize;
-    for p in &pir_fn.params {
-        let width = p.ty.bit_count();
-        let slice = &flat_ops[offset..offset + width];
-        new_inputs.push(Input {
-            name: p.name.clone(),
-            bit_vector: AigBitVector::from_lsb_is_index_0(slice),
-        });
-        offset += width;
-    }
-    gate_fn.inputs = new_inputs;
-    gate_fn
 }
 
 fn check_gate_fn_matches_function_type(
@@ -177,8 +143,18 @@ pub fn handle_aig_ir_equiv(matches: &clap::ArgMatches, config: &Option<Toolchain
         eprintln!("{} error: {}", SUBCOMMAND, e);
         std::process::exit(2)
     });
-    let gate_fn = repack_flat_aig_inputs_to_pir_params(&rhs_fn, gate_fn);
     let rhs_fn_type = rhs_fn.get_type();
+    let schema = GateFnInterfaceSchema::from_pir_fn(&rhs_fn).unwrap_or_else(|e| {
+        eprintln!("{} error: {}", SUBCOMMAND, e);
+        std::process::exit(2)
+    });
+    // `aig-ir-equiv` lets the RHS signature determine how raw AIGER inputs and
+    // outputs are interpreted before lift; see
+    // `docs/bit_blasted_output_ordering.md` for the canonical flattening rule.
+    let gate_fn = repack_gate_fn_interface_with_schema(gate_fn, &schema).unwrap_or_else(|e| {
+        eprintln!("{} error: {}", SUBCOMMAND, e);
+        std::process::exit(2)
+    });
     check_gate_fn_matches_function_type(&gate_fn, &rhs_fn_type).unwrap_or_else(|e| {
         eprintln!("{} error: {}", SUBCOMMAND, e);
         std::process::exit(2)

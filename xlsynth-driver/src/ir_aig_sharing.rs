@@ -4,8 +4,8 @@ use std::path::Path;
 
 use clap::ArgMatches;
 use serde::Serialize;
-use xlsynth_g8r::aig::gate::{AigBitVector, Input};
 use xlsynth_g8r::aig::GateFn;
+use xlsynth_g8r::aig_serdes::gate2ir::{repack_gate_fn_inputs_with_schema, GateFnInterfaceSchema};
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
@@ -147,46 +147,6 @@ fn load_aig_gate_fn(path: &Path) -> Result<GateFn, String> {
         .map_err(|e| format!("failed to load {}: {}", path.display(), e))
 }
 
-fn repack_flat_aig_inputs_to_pir_params(
-    pir_fn: &ir::Fn,
-    mut gate_fn: GateFn,
-) -> Result<GateFn, String> {
-    let want_param_count = pir_fn.params.len();
-    let want_total_bits: usize = pir_fn.params.iter().map(|p| p.ty.bit_count()).sum();
-
-    let gate_total_bits: usize = gate_fn.inputs.iter().map(|i| i.get_bit_count()).sum();
-
-    // Only repack the common "AIGER loader created one 1-bit input per bit" case.
-    let all_one_bit_inputs = gate_fn.inputs.iter().all(|i| i.get_bit_count() == 1);
-    if !all_one_bit_inputs
-        || gate_fn.inputs.len() != want_total_bits
-        || gate_total_bits != want_total_bits
-    {
-        return Ok(gate_fn);
-    }
-
-    // Flatten the underlying input operands in AIGER order.
-    let mut flat_ops = Vec::with_capacity(want_total_bits);
-    for inp in &gate_fn.inputs {
-        flat_ops.push(*inp.bit_vector.get_lsb(0));
-    }
-    debug_assert_eq!(flat_ops.len(), want_total_bits);
-
-    let mut new_inputs: Vec<Input> = Vec::with_capacity(want_param_count);
-    let mut offset = 0usize;
-    for p in &pir_fn.params {
-        let w = p.ty.bit_count();
-        let slice = &flat_ops[offset..offset + w];
-        new_inputs.push(Input {
-            name: p.name.clone(),
-            bit_vector: AigBitVector::from_lsb_is_index_0(slice),
-        });
-        offset += w;
-    }
-    gate_fn.inputs = new_inputs;
-    Ok(gate_fn)
-}
-
 fn load_pir_top_fn(ir_path: &Path, top: Option<&str>) -> Result<(ir::Package, ir::Fn), String> {
     let text = std::fs::read_to_string(ir_path)
         .map_err(|e| format!("failed to read {}: {}", ir_path.display(), e))?;
@@ -257,7 +217,14 @@ pub fn handle_ir_aig_sharing(matches: &ArgMatches, _config: &Option<ToolchainCon
             std::process::exit(2);
         }
     };
-    let gate_fn = match repack_flat_aig_inputs_to_pir_params(&pir_fn, gate_fn) {
+    let schema = match GateFnInterfaceSchema::from_pir_fn(&pir_fn) {
+        Ok(schema) => schema,
+        Err(e) => {
+            eprintln!("ir-aig-sharing error: {}", e);
+            std::process::exit(2);
+        }
+    };
+    let gate_fn = match repack_gate_fn_inputs_with_schema(gate_fn, &schema) {
         Ok(g) => g,
         Err(e) => {
             eprintln!("ir-aig-sharing error: {}", e);

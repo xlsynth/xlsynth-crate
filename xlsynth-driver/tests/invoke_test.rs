@@ -8,11 +8,17 @@ use std::io::Read;
 use std::io::Write;
 use std::process::Command;
 use std::process::Stdio;
-use xlsynth::IrBits;
+use xlsynth::{IrBits, IrValue};
 use xlsynth_g8r::aig::{AigBitVector, AigOperand, GateFn};
 use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
 use xlsynth_g8r::aig_serdes::emit_aiger_binary::emit_aiger_binary;
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
+use xlsynth_g8r::test_utils::interesting_ir_roundtrip_cases;
+use xlsynth_pir::ir_parser;
+use xlsynth_vastly::compile_pipeline_module;
+use xlsynth_vastly::pipeline_cycle_from_irvalue;
+use xlsynth_vastly::run_pipeline_and_collect_outputs;
+use xlsynth_vastly::PipelineStimulus;
 
 use test_case::test_case;
 
@@ -52,6 +58,199 @@ fn write_aiger_binary_file(
     let path = temp_dir.path().join(file_name);
     std::fs::write(&path, aiger).expect("failed to write binary aiger file");
     path
+}
+
+fn assert_aig_ir_equiv_roundtrip_for_ir_case(
+    temp_dir: &tempfile::TempDir,
+    toolchain_toml_path: &std::path::Path,
+    case_name: &str,
+    ir_text: &str,
+) {
+    let ir_path = temp_dir.path().join(format!("{case_name}.ir"));
+    std::fs::write(&ir_path, ir_text).unwrap();
+    let aiger_path = temp_dir.path().join(format!("{case_name}.aig"));
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let ir2g8r = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("ir2g8r")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--aiger-out")
+        .arg(aiger_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        ir2g8r.status.success(),
+        "ir2g8r failed for case {case_name}; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&ir2g8r.stdout),
+        String::from_utf8_lossy(&ir2g8r.stderr)
+    );
+
+    let equiv = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("aig-ir-equiv")
+        .arg(aiger_path.to_str().unwrap())
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--solver")
+        .arg("toolchain")
+        .output()
+        .unwrap();
+    assert!(
+        equiv.status.success(),
+        "aig-ir-equiv should succeed for case {case_name}; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&equiv.stdout),
+        String::from_utf8_lossy(&equiv.stderr)
+    );
+}
+
+fn function_type_text_for_ir_text(ir_text: &str) -> String {
+    let mut parser = ir_parser::Parser::new(ir_text);
+    let pkg = parser
+        .parse_and_validate_package()
+        .expect("roundtrip test IR should parse");
+    let top = pkg
+        .get_top_fn()
+        .expect("roundtrip test IR should have top fn");
+    let param_types = top
+        .params
+        .iter()
+        .map(|param| param.ty.to_string())
+        .collect::<Vec<String>>()
+        .join(", ");
+    format!("({param_types}) -> {}", top.ret_ty)
+}
+
+fn assert_aig2ir_ir_equiv_roundtrip_for_ir_case(
+    temp_dir: &tempfile::TempDir,
+    toolchain_toml_path: &std::path::Path,
+    case_name: &str,
+    ir_text: &str,
+) {
+    let ir_path = temp_dir.path().join(format!("{case_name}_lift_src.ir"));
+    std::fs::write(&ir_path, ir_text).unwrap();
+    let aiger_path = temp_dir.path().join(format!("{case_name}_lift.aig"));
+    let lifted_ir_path = temp_dir.path().join(format!("{case_name}_lifted.ir"));
+    let fn_type_text = function_type_text_for_ir_text(ir_text);
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let ir2g8r = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("ir2g8r")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--aiger-out")
+        .arg(aiger_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        ir2g8r.status.success(),
+        "ir2g8r failed for case {case_name}; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&ir2g8r.stdout),
+        String::from_utf8_lossy(&ir2g8r.stderr)
+    );
+
+    let aig2ir = Command::new(driver)
+        .arg("aig2ir")
+        .arg(aiger_path.to_str().unwrap())
+        .arg("--fn-type")
+        .arg(&fn_type_text)
+        .output()
+        .unwrap();
+    assert!(
+        aig2ir.status.success(),
+        "aig2ir failed for case {case_name}; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&aig2ir.stdout),
+        String::from_utf8_lossy(&aig2ir.stderr)
+    );
+    std::fs::write(&lifted_ir_path, &aig2ir.stdout).unwrap();
+
+    let ir_equiv = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("ir-equiv")
+        .arg(lifted_ir_path.to_str().unwrap())
+        .arg(ir_path.to_str().unwrap())
+        .arg("--lhs_ir_top")
+        .arg("loaded_aiger")
+        .arg("--rhs_ir_top")
+        .arg("main")
+        .arg("--solver")
+        .arg("toolchain")
+        .output()
+        .unwrap();
+    assert!(
+        ir_equiv.status.success(),
+        "lifted aig2ir IR should be equivalent for case {case_name}; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&ir_equiv.stdout),
+        String::from_utf8_lossy(&ir_equiv.stderr)
+    );
+}
+
+fn run_ir2pipeline_and_simulate_output(ir_text: &str, input_value: &str) -> String {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("sample.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let toolchain_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_path, toolchain_toml_contents).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let pipeline_output = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_path.to_str().unwrap())
+        .arg("ir2pipeline")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--pipeline_stages")
+        .arg("1")
+        .arg("--top")
+        .arg("main")
+        .arg("--delay_model")
+        .arg("unit")
+        .arg("--flop_inputs=false")
+        .arg("--flop_outputs=false")
+        .arg("--use_system_verilog=true")
+        .output()
+        .expect("ir2pipeline invocation should run");
+    assert!(
+        pipeline_output.status.success(),
+        "ir2pipeline failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&pipeline_output.stdout),
+        String::from_utf8_lossy(&pipeline_output.stderr)
+    );
+
+    let pipeline_sv = String::from_utf8(pipeline_output.stdout).unwrap();
+    let pipeline =
+        compile_pipeline_module(&pipeline_sv).expect("vastly should compile pipeline SV");
+    let input_value = IrValue::parse_typed(input_value).expect("input value should parse");
+    let stimulus = PipelineStimulus {
+        half_period: 5,
+        cycles: vec![pipeline_cycle_from_irvalue(&pipeline, &input_value)
+            .expect("typed XLS input should map to one pipeline cycle")],
+    };
+    let outputs =
+        run_pipeline_and_collect_outputs(&pipeline, &stimulus, &pipeline.initial_state_x())
+            .expect("vastly should simulate pipeline SV");
+    let out_value = outputs
+        .last()
+        .expect("one simulated cycle expected")
+        .get("out")
+        .expect("generated pipeline should have an `out` output");
+    let decimal = out_value.to_decimal_string_if_known().unwrap_or_else(|| {
+        panic!(
+            "expected known output bits, got {}",
+            out_value.to_bit_string_msb_first()
+        )
+    });
+    format!("out: bits[{}]:{}", out_value.width, decimal)
 }
 
 fn two_input_gate_fn<F>(name: &str, make_output: F) -> GateFn
@@ -3991,6 +4190,279 @@ fn test_g8r2ir_basic_ir_output() {
 }
 
 #[test]
+fn test_g8r2ir_preserves_scalar_multi_output_order() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let mut g8_builder = GateBuilder::new("testmod".to_string(), GateBuilderOptions::no_opt());
+    let a_val = g8_builder.add_input("a".to_string(), 1);
+    let b_val = g8_builder.add_input("b".to_string(), 1);
+    g8_builder.add_output("o0".to_string(), AigBitVector::from_bit(*a_val.get_lsb(0)));
+    g8_builder.add_output("o1".to_string(), AigBitVector::from_bit(*b_val.get_lsb(0)));
+    let gate_fn = g8_builder.build();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("testmod_multi_output.g8r");
+    std::fs::write(&g8r_path, gate_fn.to_string()).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("g8r2ir")
+        .arg(g8r_path.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "g8r2ir failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let ir_text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        ir_text.contains("tuple(a, b, id="),
+        "expected scalar outputs to preserve order in tuple(a, b); got:\n{}",
+        ir_text
+    );
+    assert!(
+        !ir_text.contains("tuple(b, a, id="),
+        "scalar multi-output order was reversed unexpectedly:\n{}",
+        ir_text
+    );
+}
+
+#[test]
+fn test_aig2ir_requires_fn_type_and_suggests_naive_type() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let mut g8_builder = GateBuilder::new("testmod".to_string(), GateBuilderOptions::no_opt());
+    let a_val = g8_builder.add_input("a".to_string(), 1);
+    let b_val = g8_builder.add_input("b".to_string(), 1);
+    g8_builder.add_output("o0".to_string(), AigBitVector::from_bit(*a_val.get_lsb(0)));
+    g8_builder.add_output("o1".to_string(), AigBitVector::from_bit(*b_val.get_lsb(0)));
+    let gate_fn = g8_builder.build();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let aag_path = write_aiger_file(&temp_dir, "native_multi_output.aag", &gate_fn);
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("aig2ir")
+        .arg(aag_path.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "expected aig2ir to require --fn-type; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--fn-type is required"),
+        "expected missing --fn-type message, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("naive type suggestion: `(bits[1], bits[1]) -> (bits[1], bits[1])`"),
+        "expected naive type suggestion in stderr, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_aig2ir_with_fn_type_lifts_structured_array_signature() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package sample
+
+top fn main(x: bits[2][3] id=1) -> bits[2][3] {
+  ret identity.2: bits[2][3] = identity(x, id=2)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("structured_array.ir");
+    let aag_path = temp_dir.path().join("structured_array.aag");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let ir2g8r_output = Command::new(command_path)
+        .arg("ir2g8r")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--aiger-out")
+        .arg(aag_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        ir2g8r_output.status.success(),
+        "ir2g8r failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&ir2g8r_output.stdout),
+        String::from_utf8_lossy(&ir2g8r_output.stderr)
+    );
+
+    let output = Command::new(command_path)
+        .arg("aig2ir")
+        .arg(aag_path.to_str().unwrap())
+        .arg("--fn-type")
+        .arg("(bits[2][3]) -> bits[2][3]")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "aig2ir with --fn-type failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let lifted_ir = String::from_utf8_lossy(&output.stdout);
+    assert!(lifted_ir.contains("arg0: bits[2][3]"));
+    assert!(lifted_ir.contains("-> bits[2][3]"));
+}
+
+#[test]
+fn test_aig2ir_with_fn_type_accepts_zero_width_top_level_param() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package sample
+
+top fn main(x: () id=1, y: bits[1] id=2) -> bits[1] {
+  ret identity.3: bits[1] = identity(y, id=3)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("unit_param.ir");
+    let aag_path = temp_dir.path().join("unit_param.aag");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let ir2g8r_output = Command::new(command_path)
+        .arg("ir2g8r")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--aiger-out")
+        .arg(aag_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        ir2g8r_output.status.success(),
+        "ir2g8r failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&ir2g8r_output.stdout),
+        String::from_utf8_lossy(&ir2g8r_output.stderr)
+    );
+
+    let output = Command::new(command_path)
+        .arg("aig2ir")
+        .arg(aag_path.to_str().unwrap())
+        .arg("--fn-type")
+        .arg("((), bits[1]) -> bits[1]")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "aig2ir with zero-width param failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let lifted_ir = String::from_utf8_lossy(&output.stdout);
+    assert!(lifted_ir.contains("arg0: ()"));
+    assert!(lifted_ir.contains("arg1: bits[1]"));
+    assert!(lifted_ir.contains("-> bits[1]"));
+}
+
+#[test]
+fn test_aig2ir_reports_fn_type_mismatch() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let lhs_gate = two_input_gate_fn("main", |a, b, gb| gb.add_and_binary(a, b));
+    let temp_dir = tempfile::tempdir().unwrap();
+    let lhs_aag = write_aiger_file(&temp_dir, "lhs_sig.aag", &lhs_gate);
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("aig2ir")
+        .arg(lhs_aag.to_str().unwrap())
+        .arg("--fn-type")
+        .arg("(bits[3]) -> bits[1]")
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "expected aig2ir fn-type mismatch to fail; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("mismatch"),
+        "expected mismatch error in stderr, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_aig2ir_accepts_binary_aiger() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let lhs_gate = two_input_gate_fn("main", |a, b, gb| gb.add_and_binary(a, b));
+    let temp_dir = tempfile::tempdir().unwrap();
+    let lhs_aig = write_aiger_binary_file(&temp_dir, "lhs_sig.aig", &lhs_gate);
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("aig2ir")
+        .arg(lhs_aig.to_str().unwrap())
+        .arg("--fn-type")
+        .arg("(bits[1], bits[1]) -> bits[1]")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "aig2ir failed on binary AIGER with --fn-type: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("-> bits[1]"));
+}
+
+#[test]
+fn test_aig2ir_accepts_unit_signature_for_empty_aiger() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let aag_path = temp_dir.path().join("empty.aag");
+    std::fs::write(&aag_path, "aag 0 0 0 0 0\nc\n").unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("aig2ir")
+        .arg(aag_path.to_str().unwrap())
+        .arg("--fn-type")
+        .arg("() -> ()")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "aig2ir failed on empty unit-signature AIGER: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("-> ()"),
+        "expected lifted unit return type in stdout, got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[test]
 fn test_g8r_area_table_reports_weighted_area_by_pir_node() {
     let _ = env_logger::builder().is_test(true).try_init();
 
@@ -4711,6 +5183,69 @@ top fn my_main() -> bits[32] {
 }
 
 #[test]
+fn test_ir2pipeline_tuple_outputs_place_last_element_in_lsb_bits() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if should_skip_if_no_slang() {
+        return;
+    }
+
+    let ir_text = r#"package sample
+
+top fn main(a: bits[1] id=1, b: bits[2] id=2) -> (bits[1], bits[2]) {
+  ret tuple.3: (bits[1], bits[2]) = tuple(a, b, id=3)
+}
+"#;
+
+    let output_line = run_ir2pipeline_and_simulate_output(ir_text, "(bits[1]:1, bits[2]:0)");
+    assert_eq!(output_line, "out: bits[3]:4");
+}
+
+#[test]
+fn test_ir2pipeline_array_outputs_place_element_zero_in_lsb_bits() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if should_skip_if_no_slang() {
+        return;
+    }
+
+    let ir_text = r#"package sample
+
+top fn main(a: bits[2] id=1, b: bits[2] id=2, c: bits[2] id=3) -> bits[2][3] {
+  ret array.4: bits[2][3] = array(a, b, c, id=4)
+}
+"#;
+
+    let output_line =
+        run_ir2pipeline_and_simulate_output(ir_text, "(bits[2]:1, bits[2]:0, bits[2]:0)");
+    assert_eq!(output_line, "out: bits[6]:1");
+}
+
+#[test]
+fn test_ir2pipeline_nested_array_outputs_place_first_leaf_in_lsb_bits() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if should_skip_if_no_slang() {
+        return;
+    }
+
+    let ir_text = r#"package sample
+
+top fn main(a: bits[1] id=1, b: bits[1] id=2, c: bits[1] id=3, d: bits[1] id=4) -> bits[1][2][2] {
+  array.5: bits[1][2] = array(a, b, id=5)
+  array.6: bits[1][2] = array(c, d, id=6)
+  ret array.7: bits[1][2][2] = array(array.5, array.6, id=7)
+}
+"#;
+
+    let output_line = run_ir2pipeline_and_simulate_output(
+        ir_text,
+        "(bits[1]:1, bits[1]:0, bits[1]:0, bits[1]:0)",
+    );
+    assert_eq!(output_line, "out: bits[4]:1");
+}
+
+#[test]
 fn test_ir_fn_to_block_smoke() {
     let _ = env_logger::builder().is_test(true).try_init();
 
@@ -4993,6 +5528,168 @@ fn f(x: (bits[1], bits[8], bits[7]) id=1) -> (bits[1], bits[8], bits[7]) {
     );
 
     assert_eq!(ir_eval_output.stdout, aig_eval_output.stdout);
+}
+
+#[test]
+fn test_aig_eval_matches_ir_fn_eval_with_array_input_output() {
+    let ir = r#"package test
+
+fn f(x: bits[2][3] id=1) -> bits[2][3] {
+  ret identity.2: bits[2][3] = identity(x, id=2)
+}
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let ir_path = dir.path().join("array_round_trip.ir");
+    let aag_path = dir.path().join("array_round_trip.aag");
+    std::fs::write(&ir_path, ir).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let ir2g8r_output = Command::new(command_path)
+        .arg("ir2g8r")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("f")
+        .arg("--aiger-out")
+        .arg(aag_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        ir2g8r_output.status.success(),
+        "ir2g8r failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&ir2g8r_output.stdout),
+        String::from_utf8_lossy(&ir2g8r_output.stderr)
+    );
+
+    let args = IrValue::make_tuple(&[IrValue::make_array(&[
+        IrValue::make_ubits(2, 0x1).unwrap(),
+        IrValue::make_ubits(2, 0x2).unwrap(),
+        IrValue::make_ubits(2, 0x3).unwrap(),
+    ])
+    .unwrap()])
+    .to_string();
+
+    let ir_eval_output = Command::new(command_path)
+        .arg("ir-fn-eval")
+        .arg(ir_path.to_str().unwrap())
+        .arg("f")
+        .arg(&args)
+        .output()
+        .unwrap();
+    assert!(
+        ir_eval_output.status.success(),
+        "ir-fn-eval failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&ir_eval_output.stdout),
+        String::from_utf8_lossy(&ir_eval_output.stderr)
+    );
+
+    let aig_eval_output = Command::new(command_path)
+        .arg("aig-eval")
+        .arg(aag_path.to_str().unwrap())
+        .arg(&args)
+        .arg("--fn-type")
+        .arg("(bits[2][3]) -> bits[2][3]")
+        .output()
+        .unwrap();
+    assert!(
+        aig_eval_output.status.success(),
+        "aig-eval failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&aig_eval_output.stdout),
+        String::from_utf8_lossy(&aig_eval_output.stderr)
+    );
+
+    assert_eq!(ir_eval_output.stdout, aig_eval_output.stdout);
+}
+
+#[test]
+fn test_aig_eval_matches_ir_fn_eval_with_zero_width_param() {
+    let ir = r#"package test
+
+fn f(x: () id=1, y: bits[1] id=2) -> bits[1] {
+  ret identity.3: bits[1] = identity(y, id=3)
+}
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let ir_path = dir.path().join("unit_param_round_trip.ir");
+    let aag_path = dir.path().join("unit_param_round_trip.aag");
+    std::fs::write(&ir_path, ir).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let ir2g8r_output = Command::new(command_path)
+        .arg("ir2g8r")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("f")
+        .arg("--aiger-out")
+        .arg(aag_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        ir2g8r_output.status.success(),
+        "ir2g8r failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&ir2g8r_output.stdout),
+        String::from_utf8_lossy(&ir2g8r_output.stderr)
+    );
+
+    let args = "((), bits[1]:1)";
+    let ir_eval_output = Command::new(command_path)
+        .arg("ir-fn-eval")
+        .arg(ir_path.to_str().unwrap())
+        .arg("f")
+        .arg(args)
+        .output()
+        .unwrap();
+    assert!(
+        ir_eval_output.status.success(),
+        "ir-fn-eval failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&ir_eval_output.stdout),
+        String::from_utf8_lossy(&ir_eval_output.stderr)
+    );
+
+    let aig_eval_output = Command::new(command_path)
+        .arg("aig-eval")
+        .arg(aag_path.to_str().unwrap())
+        .arg(args)
+        .arg("--fn-type")
+        .arg("((), bits[1]) -> bits[1]")
+        .output()
+        .unwrap();
+    assert!(
+        aig_eval_output.status.success(),
+        "aig-eval failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&aig_eval_output.stdout),
+        String::from_utf8_lossy(&aig_eval_output.stderr)
+    );
+
+    assert_eq!(ir_eval_output.stdout, aig_eval_output.stdout);
+}
+
+#[test]
+fn test_aig_eval_reports_fn_type_mismatch() {
+    let lhs_gate = two_input_gate_fn("main", |a, b, gb| gb.add_and_binary(a, b));
+    let dir = tempfile::tempdir().unwrap();
+    let aag_path = write_aiger_file(&dir, "sig_mismatch.aag", &lhs_gate);
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("aig-eval")
+        .arg(aag_path.to_str().unwrap())
+        .arg("(bits[2]:0x3)")
+        .arg("--fn-type")
+        .arg("(bits[3]) -> bits[1]")
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "expected aig-eval fn-type mismatch to fail; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("mismatch"),
+        "expected mismatch error in stderr, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// TODO(cdleary): 2025-06-10 This only works when there is a tool path
@@ -9396,6 +10093,55 @@ top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
 }
 
 #[test]
+fn test_g8r_ir_equiv_preserves_scalar_multi_output_order() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let mut builder = GateBuilder::new("main".to_string(), GateBuilderOptions::no_opt());
+    let a = builder.add_input("a".to_string(), 1);
+    let b = builder.add_input("b".to_string(), 1);
+    builder.add_output("o0".to_string(), AigBitVector::from_bit(*a.get_lsb(0)));
+    builder.add_output("o1".to_string(), AigBitVector::from_bit(*b.get_lsb(0)));
+    let lhs_gate = builder.build();
+    let lhs_g8r_path = temp_dir.path().join("lhs_multi_output.g8r");
+    std::fs::write(&lhs_g8r_path, lhs_gate.to_string()).unwrap();
+
+    let rhs_ir = r#"package sample
+
+top fn main(a: bits[1] id=1, b: bits[1] id=2) -> (bits[1], bits[1]) {
+  ret tuple.3: (bits[1], bits[1]) = tuple(a, b, id=3)
+}
+"#;
+    let rhs_ir_path = temp_dir.path().join("rhs_multi_output.ir");
+    std::fs::write(&rhs_ir_path, rhs_ir).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("g8r-ir-equiv")
+        .arg(lhs_g8r_path.to_str().unwrap())
+        .arg(rhs_ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--solver")
+        .arg("toolchain")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "g8r-ir-equiv should preserve scalar multi-output order; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn test_aig_ir_equiv_reports_equivalent_designs() {
     let _ = env_logger::builder().is_test(true).try_init();
 
@@ -9528,6 +10274,49 @@ top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
 }
 
 #[test]
+fn test_aig_ir_equiv_accepts_vacuous_unit_function() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let lhs_aag = temp_dir.path().join("empty.aag");
+    std::fs::write(&lhs_aag, "aag 0 0 0 0 0\nc\n").unwrap();
+
+    let rhs_ir = r#"package sample
+
+top fn main() -> () {
+  ret tuple.1: () = tuple()
+}
+"#;
+    let rhs_ir_path = temp_dir.path().join("rhs_unit.ir");
+    std::fs::write(&rhs_ir_path, rhs_ir).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("aig-ir-equiv")
+        .arg(lhs_aag.to_str().unwrap())
+        .arg(rhs_ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--solver")
+        .arg("toolchain")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "aig-ir-equiv failed on vacuous unit function: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn test_aig_ir_equiv_repacks_flattened_aiger_inputs() {
     let _ = env_logger::builder().is_test(true).try_init();
 
@@ -9567,6 +10356,58 @@ top fn main(x: bits[2] id=1) -> bits[1] {
         output.status.success(),
         "aig-ir-equiv should succeed after repacking flattened AIGER inputs; stdout: {} stderr: {}",
         String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_aig_ir_equiv_treats_native_scalar_multi_output_as_flat_return_bits() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    let mut builder = GateBuilder::new("main".to_string(), GateBuilderOptions::no_opt());
+    let a = builder.add_input("a".to_string(), 1);
+    let b = builder.add_input("b".to_string(), 1);
+    builder.add_output("o0".to_string(), AigBitVector::from_bit(*a.get_lsb(0)));
+    builder.add_output("o1".to_string(), AigBitVector::from_bit(*b.get_lsb(0)));
+    let lhs_aag = write_aiger_file(&temp_dir, "lhs_native_multi_output.aag", &builder.build());
+
+    let rhs_ir = r#"package sample
+
+top fn main(a: bits[1] id=1, b: bits[1] id=2) -> (bits[1], bits[1]) {
+  ret tuple.3: (bits[1], bits[1]) = tuple(a, b, id=3)
+}
+"#;
+    let rhs_ir_path = temp_dir.path().join("rhs_native_multi_output.ir");
+    std::fs::write(&rhs_ir_path, rhs_ir).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("--toolchain")
+        .arg(toolchain_toml_path.to_str().unwrap())
+        .arg("aig-ir-equiv")
+        .arg(lhs_aag.to_str().unwrap())
+        .arg(rhs_ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("main")
+        .arg("--solver")
+        .arg("toolchain")
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "aig-ir-equiv should interpret native scalar outputs via signature packing; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("NOT equivalent"),
+        "expected non-equivalence report in stderr, got: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
@@ -9619,7 +10460,7 @@ top fn main(x: bits[3] id=1) -> bits[1] {
 }
 
 #[test]
-fn test_aig_ir_equiv_roundtrip_from_ir2g8r_aiger_out() {
+fn test_aig_ir_equiv_roundtrip_from_ir2g8r_interesting_signatures_aiger_out() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let temp_dir = tempfile::tempdir().unwrap();
@@ -9627,53 +10468,33 @@ fn test_aig_ir_equiv_roundtrip_from_ir2g8r_aiger_out() {
     let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
     std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
 
-    let ir_text = r#"package sample
-
-top fn main() -> bits[1] {
-  ret literal.1: bits[1] = literal(value=1, id=1)
+    for case in interesting_ir_roundtrip_cases() {
+        assert_aig_ir_equiv_roundtrip_for_ir_case(
+            &temp_dir,
+            &toolchain_toml_path,
+            case.name,
+            case.ir_text,
+        );
+    }
 }
-"#;
-    let ir_path = temp_dir.path().join("orig.ir");
-    std::fs::write(&ir_path, ir_text).unwrap();
-    let aiger_path = temp_dir.path().join("orig.aig");
 
-    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
-    let ir2g8r = Command::new(driver)
-        .arg("--toolchain")
-        .arg(toolchain_toml_path.to_str().unwrap())
-        .arg("ir2g8r")
-        .arg(ir_path.to_str().unwrap())
-        .arg("--top")
-        .arg("main")
-        .arg("--aiger-out")
-        .arg(aiger_path.to_str().unwrap())
-        .output()
-        .unwrap();
-    assert!(
-        ir2g8r.status.success(),
-        "ir2g8r failed; stdout: {} stderr: {}",
-        String::from_utf8_lossy(&ir2g8r.stdout),
-        String::from_utf8_lossy(&ir2g8r.stderr)
-    );
+#[test]
+fn test_aig2ir_ir_equiv_roundtrip_from_ir2g8r_interesting_signatures_aiger_out() {
+    let _ = env_logger::builder().is_test(true).try_init();
 
-    let equiv = Command::new(driver)
-        .arg("--toolchain")
-        .arg(toolchain_toml_path.to_str().unwrap())
-        .arg("aig-ir-equiv")
-        .arg(aiger_path.to_str().unwrap())
-        .arg(ir_path.to_str().unwrap())
-        .arg("--top")
-        .arg("main")
-        .arg("--solver")
-        .arg("toolchain")
-        .output()
-        .unwrap();
-    assert!(
-        equiv.status.success(),
-        "aig-ir-equiv should succeed for ir2g8r roundtrip; stdout: {} stderr: {}",
-        String::from_utf8_lossy(&equiv.stdout),
-        String::from_utf8_lossy(&equiv.stderr)
-    );
+    let temp_dir = tempfile::tempdir().unwrap();
+    let toolchain_toml_path = temp_dir.path().join("xlsynth-toolchain.toml");
+    let toolchain_toml_contents = add_tool_path_value("[toolchain]\n");
+    std::fs::write(&toolchain_toml_path, toolchain_toml_contents).unwrap();
+
+    for case in interesting_ir_roundtrip_cases() {
+        assert_aig2ir_ir_equiv_roundtrip_for_ir_case(
+            &temp_dir,
+            &toolchain_toml_path,
+            case.name,
+            case.ir_text,
+        );
+    }
 }
 
 #[test]

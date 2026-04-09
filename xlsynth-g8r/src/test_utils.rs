@@ -8,7 +8,7 @@ use crate::ir2gate_utils::gatify_add_ripple_carry;
 use half::bf16;
 use std::path::Path;
 use xlsynth::{IrBits, IrFunction, IrPackage, IrValue, mangle_dslx_name};
-use xlsynth_pir::ir::Package as CrateIrPackage;
+use xlsynth_pir::ir::{self, Package as CrateIrPackage};
 use xlsynth_pir::ir_parser;
 
 // BF16 Constants
@@ -50,6 +50,116 @@ pub struct LoadedSample {
     pub gate_fn: GateFn,
     pub mangled_fn_name: String,
 }
+
+#[derive(Debug, Clone, Copy)]
+pub struct InterestingIrRoundtripCase {
+    pub name: &'static str,
+    pub ir_text: &'static str,
+}
+
+pub struct LoadedInterestingIrRoundtripCase {
+    pub case: &'static InterestingIrRoundtripCase,
+    pub g8r_pkg: CrateIrPackage,
+    pub g8r_fn: ir::Fn,
+    pub gate_fn: GateFn,
+}
+
+#[derive(Debug, Clone)]
+pub struct InterestingIrOutputOrderingCase {
+    pub name: &'static str,
+    pub ir_text: String,
+}
+
+pub struct LoadedInterestingIrOutputOrderingCase {
+    pub case: InterestingIrOutputOrderingCase,
+    pub g8r_pkg: CrateIrPackage,
+    pub g8r_fn: ir::Fn,
+    pub gate_fn: GateFn,
+}
+
+const INTERESTING_IR_ROUNDTRIP_CASES: [InterestingIrRoundtripCase; 9] = [
+    InterestingIrRoundtripCase {
+        name: "literal_bits1_no_params",
+        ir_text: r#"package sample
+
+top fn main() -> bits[1] {
+  ret literal.1: bits[1] = literal(value=1, id=1)
+}
+"#,
+    },
+    InterestingIrRoundtripCase {
+        name: "unit_and_bits1_param_identity_bits1",
+        ir_text: r#"package sample
+
+top fn main(x: () id=1, y: bits[1] id=2) -> bits[1] {
+  ret identity.3: bits[1] = identity(y, id=3)
+}
+"#,
+    },
+    InterestingIrRoundtripCase {
+        name: "identity_bits1",
+        ir_text: r#"package sample
+
+top fn main(x: bits[1] id=1) -> bits[1] {
+  ret identity.2: bits[1] = identity(x, id=2)
+}
+"#,
+    },
+    InterestingIrRoundtripCase {
+        name: "identity_bits2",
+        ir_text: r#"package sample
+
+top fn main(x: bits[2] id=1) -> bits[2] {
+  ret identity.2: bits[2] = identity(x, id=2)
+}
+"#,
+    },
+    InterestingIrRoundtripCase {
+        name: "identity_bits4",
+        ir_text: r#"package sample
+
+top fn main(x: bits[4] id=1) -> bits[4] {
+  ret identity.2: bits[4] = identity(x, id=2)
+}
+"#,
+    },
+    InterestingIrRoundtripCase {
+        name: "identity_tuple_bits1_bits1",
+        ir_text: r#"package sample
+
+top fn main(x: (bits[1], bits[1]) id=1) -> (bits[1], bits[1]) {
+  ret identity.2: (bits[1], bits[1]) = identity(x, id=2)
+}
+"#,
+    },
+    InterestingIrRoundtripCase {
+        name: "identity_tuple_bits1_bits2",
+        ir_text: r#"package sample
+
+top fn main(x: (bits[1], bits[2]) id=1) -> (bits[1], bits[2]) {
+  ret identity.2: (bits[1], bits[2]) = identity(x, id=2)
+}
+"#,
+    },
+    InterestingIrRoundtripCase {
+        name: "identity_array3_bits5",
+        ir_text: r#"package sample
+
+top fn main(x: bits[5][3] id=1) -> bits[5][3] {
+  ret identity.2: bits[5][3] = identity(x, id=2)
+}
+"#,
+    },
+    InterestingIrRoundtripCase {
+        name: "identity_array3x5_bits2",
+        ir_text: r#"package sample
+
+top fn main(x: bits[2][5][3] id=1) -> bits[2][5][3] {
+  ret identity.2: bits[2][5][3] = identity(x, id=2)
+}
+"#,
+    },
+];
 
 // BF16 Helper Functions
 pub fn make_bf16(value: bf16) -> IrValue {
@@ -102,6 +212,202 @@ pub enum Opt {
     No,
 }
 
+fn gatify_for_test_ir_fn(g8r_ir_fn: &ir::Fn, opt: Opt) -> GateFn {
+    ir2gate::gatify(
+        g8r_ir_fn,
+        ir2gate::GatifyOptions {
+            fold: opt == Opt::Yes,
+            hash: opt == Opt::Yes,
+            check_equivalence: false,
+            adder_mapping: crate::ir2gate_utils::AdderMapping::RippleCarry,
+            mul_adder_mapping: None,
+            range_info: None,
+            enable_rewrite_carry_out: false,
+            enable_rewrite_prio_encode: false,
+            array_index_lowering_strategy: Default::default(),
+        },
+    )
+    .unwrap()
+    .gate_fn
+}
+
+/// Returns a shared set of structured IR shapes for roundtrip-oriented tests.
+pub fn interesting_ir_roundtrip_cases() -> &'static [InterestingIrRoundtripCase] {
+    &INTERESTING_IR_ROUNDTRIP_CASES
+}
+
+/// Parses and gatifies a shared roundtrip case for reuse across tests.
+pub fn load_interesting_ir_roundtrip_case(
+    case: &'static InterestingIrRoundtripCase,
+) -> LoadedInterestingIrRoundtripCase {
+    let mut parser = ir_parser::Parser::new(case.ir_text);
+    let g8r_pkg = parser
+        .parse_and_validate_package()
+        .unwrap_or_else(|e| panic!("failed to parse case {}: {}", case.name, e));
+    let g8r_fn = g8r_pkg
+        .get_top_fn()
+        .unwrap_or_else(|| panic!("missing top fn in case {}", case.name))
+        .clone();
+    let gate_fn = gatify_for_test_ir_fn(&g8r_fn, Opt::Yes);
+
+    LoadedInterestingIrRoundtripCase {
+        case,
+        g8r_pkg,
+        g8r_fn,
+        gate_fn,
+    }
+}
+
+fn make_output_ordering_3x5_bits2_case() -> InterestingIrOutputOrderingCase {
+    let mut ir_text = String::from("package sample\n\n");
+    ir_text.push_str("top fn main(");
+    let mut next_id = 1usize;
+    for row in 0..3usize {
+        for col in 0..5usize {
+            if row != 0 || col != 0 {
+                ir_text.push_str(", ");
+            }
+            ir_text.push_str(&format!("x{row}{col}: bits[2] id={next_id}"));
+            next_id += 1;
+        }
+    }
+    ir_text.push_str(") -> bits[2][5][3] {\n");
+    let mut row_ids = Vec::new();
+    for row in 0..3usize {
+        row_ids.push(next_id);
+        ir_text.push_str(&format!("  array.{}: bits[2][5] = array(", next_id));
+        for col in 0..5usize {
+            if col != 0 {
+                ir_text.push_str(", ");
+            }
+            ir_text.push_str(&format!("x{row}{col}"));
+        }
+        ir_text.push_str(&format!(", id={next_id})\n"));
+        next_id += 1;
+    }
+    ir_text.push_str(&format!(
+        "  ret array.{}: bits[2][5][3] = array(array.{}, array.{}, array.{}, id={})\n",
+        next_id, row_ids[0], row_ids[1], row_ids[2], next_id
+    ));
+    ir_text.push_str("}\n");
+    InterestingIrOutputOrderingCase {
+        name: "construct_array3x5_bits2",
+        ir_text,
+    }
+}
+
+/// Returns structured-output cases built from scalar leaf inputs so output
+/// ordering remains observable in the flattened result.
+pub fn interesting_ir_output_ordering_cases() -> Vec<InterestingIrOutputOrderingCase> {
+    vec![
+        InterestingIrOutputOrderingCase {
+            name: "identity_bits1_from_scalar",
+            ir_text: r#"package sample
+
+top fn main(x: bits[1] id=1) -> bits[1] {
+  ret identity.2: bits[1] = identity(x, id=2)
+}
+"#
+            .to_string(),
+        },
+        InterestingIrOutputOrderingCase {
+            name: "identity_bits2_from_scalar",
+            ir_text: r#"package sample
+
+top fn main(x: bits[2] id=1) -> bits[2] {
+  ret identity.2: bits[2] = identity(x, id=2)
+}
+"#
+            .to_string(),
+        },
+        InterestingIrOutputOrderingCase {
+            name: "identity_bits4_from_scalar",
+            ir_text: r#"package sample
+
+top fn main(x: bits[4] id=1) -> bits[4] {
+  ret identity.2: bits[4] = identity(x, id=2)
+}
+"#
+            .to_string(),
+        },
+        InterestingIrOutputOrderingCase {
+            name: "construct_tuple_bits1_bits1",
+            ir_text: r#"package sample
+
+top fn main(a: bits[1] id=1, b: bits[1] id=2) -> (bits[1], bits[1]) {
+  ret tuple.3: (bits[1], bits[1]) = tuple(a, b, id=3)
+}
+"#
+            .to_string(),
+        },
+        InterestingIrOutputOrderingCase {
+            name: "construct_tuple_bits1_bits2",
+            ir_text: r#"package sample
+
+top fn main(a: bits[1] id=1, b: bits[2] id=2) -> (bits[1], bits[2]) {
+  ret tuple.3: (bits[1], bits[2]) = tuple(a, b, id=3)
+}
+"#
+            .to_string(),
+        },
+        InterestingIrOutputOrderingCase {
+            name: "construct_tuple_bits2_bits2",
+            ir_text: r#"package sample
+
+top fn main(a: bits[2] id=1, b: bits[2] id=2) -> (bits[2], bits[2]) {
+  ret tuple.3: (bits[2], bits[2]) = tuple(a, b, id=3)
+}
+"#
+            .to_string(),
+        },
+        InterestingIrOutputOrderingCase {
+            name: "construct_array3_bits2",
+            ir_text: r#"package sample
+
+top fn main(a: bits[2] id=1, b: bits[2] id=2, c: bits[2] id=3) -> bits[2][3] {
+  ret array.4: bits[2][3] = array(a, b, c, id=4)
+}
+"#
+            .to_string(),
+        },
+        InterestingIrOutputOrderingCase {
+            name: "construct_array2x2_bits1",
+            ir_text: r#"package sample
+
+top fn main(a: bits[1] id=1, b: bits[1] id=2, c: bits[1] id=3, d: bits[1] id=4) -> bits[1][2][2] {
+  array.5: bits[1][2] = array(a, b, id=5)
+  array.6: bits[1][2] = array(c, d, id=6)
+  ret array.7: bits[1][2][2] = array(array.5, array.6, id=7)
+}
+"#
+            .to_string(),
+        },
+        make_output_ordering_3x5_bits2_case(),
+    ]
+}
+
+/// Parses and gatifies a shared output-ordering case for reuse across tests.
+pub fn load_interesting_ir_output_ordering_case(
+    case: &InterestingIrOutputOrderingCase,
+) -> LoadedInterestingIrOutputOrderingCase {
+    let mut parser = ir_parser::Parser::new(&case.ir_text);
+    let g8r_pkg = parser
+        .parse_and_validate_package()
+        .unwrap_or_else(|e| panic!("failed to parse case {}: {}", case.name, e));
+    let g8r_fn = g8r_pkg
+        .get_top_fn()
+        .unwrap_or_else(|| panic!("missing top fn in case {}", case.name))
+        .clone();
+    let gate_fn = gatify_for_test_ir_fn(&g8r_fn, Opt::Yes);
+
+    LoadedInterestingIrOutputOrderingCase {
+        case: case.clone(),
+        g8r_pkg,
+        g8r_fn,
+        gate_fn,
+    }
+}
+
 pub fn load_bf16_mul_sample(opt: Opt) -> LoadedSample {
     let dslx_text = "import bfloat16;
 
@@ -128,22 +434,7 @@ fn mul_bf16_bf16(x: bfloat16::BF16, y: bfloat16::BF16) -> bfloat16::BF16 {
     let g8r_ir_fn = g8r_ir_package.get_fn(&mangled_name).unwrap();
 
     // Convert the internal IR function to a GateFn
-    let gatify_output = ir2gate::gatify(
-        &g8r_ir_fn,
-        ir2gate::GatifyOptions {
-            fold: if opt == Opt::Yes { true } else { false },
-            hash: if opt == Opt::Yes { true } else { false },
-            check_equivalence: false,
-            adder_mapping: crate::ir2gate_utils::AdderMapping::RippleCarry,
-            mul_adder_mapping: None,
-            range_info: None,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
-            array_index_lowering_strategy: Default::default(),
-        },
-    )
-    .unwrap();
-    let gate_fn = gatify_output.gate_fn;
+    let gate_fn = gatify_for_test_ir_fn(&g8r_ir_fn, opt);
 
     // Get the final IrFunction from the optimized package
     let ir_fn = opt_ir.get_function(&mangled_name).unwrap();
@@ -179,22 +470,7 @@ pub fn load_bf16_add_sample(opt: Opt) -> LoadedSample {
     let g8r_ir_fn = g8r_ir_package.get_fn(&mangled_name).unwrap();
 
     // Convert the internal IR function to a GateFn
-    let gatify_output = ir2gate::gatify(
-        &g8r_ir_fn,
-        ir2gate::GatifyOptions {
-            fold: if opt == Opt::Yes { true } else { false },
-            hash: if opt == Opt::Yes { true } else { false },
-            check_equivalence: false,
-            adder_mapping: crate::ir2gate_utils::AdderMapping::RippleCarry,
-            mul_adder_mapping: None,
-            range_info: None,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
-            array_index_lowering_strategy: Default::default(),
-        },
-    )
-    .unwrap();
-    let gate_fn = gatify_output.gate_fn;
+    let gate_fn = gatify_for_test_ir_fn(&g8r_ir_fn, opt);
 
     // Get the final IrFunction from the optimized package
     let ir_fn = opt_ir.get_function(&mangled_name).unwrap();
