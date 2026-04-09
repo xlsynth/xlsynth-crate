@@ -74,23 +74,22 @@ impl BitDriverTracker {
     fn mark_bit(
         &mut self,
         idx: NetIndex,
-        bit: i64,
+        bit: u32,
         _span: crate::netlist::parse::Span,
         nets: &[Net],
         interner: &StringInterner<StringBackend<SymbolU32>>,
     ) -> Result<(), StructuralAssignValidationError> {
-        let (width, lsb) = net_width_bits(&nets[idx.0]);
-        let offset_i64 = bit - lsb;
-        if offset_i64 < 0 || offset_i64 >= width as i64 {
+        let net = &nets[idx.0];
+        let width = net.width_bits();
+        let Some(offset) = net.bit_offset(bit) else {
             return Err(StructuralAssignValidationError(format!(
                 "bit {} out of range for net '{}' (width {}, lsb {})",
                 bit,
                 net_name(idx, nets, interner),
                 width,
-                lsb
+                net.declared_lsb_number()
             )));
-        }
-        let offset = offset_i64 as usize;
+        };
         let entry = self.ensure_entry(idx, width);
         if entry[offset] {
             return Err(StructuralAssignValidationError(format!(
@@ -110,9 +109,17 @@ impl BitDriverTracker {
         nets: &[Net],
         interner: &StringInterner<StringBackend<SymbolU32>>,
     ) -> Result<(), StructuralAssignValidationError> {
-        let (width, lsb) = net_width_bits(&nets[idx.0]);
+        let net = &nets[idx.0];
+        let width = net.width_bits();
         for offset in 0..width {
-            self.mark_bit(idx, lsb + offset as i64, span, nets, interner)?;
+            let bit_number = net.bit_number(offset).ok_or_else(|| {
+                StructuralAssignValidationError(format!(
+                    "internal error computing bit {} for net '{}'",
+                    offset,
+                    net_name(idx, nets, interner)
+                ))
+            })?;
+            self.mark_bit(idx, bit_number, span, nets, interner)?;
         }
         Ok(())
     }
@@ -126,20 +133,18 @@ impl BitDriverTracker {
     ) -> Result<(), StructuralAssignValidationError> {
         match lhs {
             NetRef::Simple(idx) => self.mark_whole(*idx, span, nets, interner),
-            NetRef::BitSelect(idx, bit) => {
-                self.mark_bit(*idx, i64::from(*bit), span, nets, interner)
-            }
+            NetRef::BitSelect(idx, bit) => self.mark_bit(*idx, *bit, span, nets, interner),
             NetRef::PartSelect(idx, msb, lsb) => {
-                if msb < lsb {
-                    return Err(StructuralAssignValidationError(format!(
-                        "invalid part-select [{}:{}] on net '{}'",
-                        msb,
-                        lsb,
-                        net_name(*idx, nets, interner)
-                    )));
-                }
-                for bit in *lsb..=*msb {
-                    self.mark_bit(*idx, i64::from(bit), span, nets, interner)?;
+                for offset in 0..select_width_bits(*msb, *lsb) {
+                    let bit_number = select_bit_number(*msb, *lsb, offset).ok_or_else(|| {
+                        StructuralAssignValidationError(format!(
+                            "invalid part-select [{}:{}] on net '{}'",
+                            msb,
+                            lsb,
+                            net_name(*idx, nets, interner)
+                        ))
+                    })?;
+                    self.mark_bit(*idx, bit_number, span, nets, interner)?;
                 }
                 Ok(())
             }
@@ -149,6 +154,28 @@ impl BitDriverTracker {
                 ))
             }
         }
+    }
+
+    fn is_bit_driven(
+        &self,
+        idx: NetIndex,
+        bit: u32,
+        nets: &[Net],
+        interner: &StringInterner<StringBackend<SymbolU32>>,
+    ) -> Result<bool, StructuralAssignValidationError> {
+        let net = &nets[idx.0];
+        let Some(offset) = net.bit_offset(bit) else {
+            return Err(StructuralAssignValidationError(format!(
+                "bit {} out of range for net '{}'",
+                bit,
+                net_name(idx, nets, interner)
+            )));
+        };
+        Ok(self
+            .drivers
+            .get(&idx)
+            .and_then(|bits| bits.get(offset))
+            .is_some_and(|bit| *bit))
     }
 
     fn is_netref_driven(
@@ -162,36 +189,18 @@ impl BitDriverTracker {
                 .drivers
                 .get(idx)
                 .is_some_and(|bits| bits.iter().all(|bit| *bit))),
-            NetRef::BitSelect(idx, bit) => {
-                let (width, lsb) = net_width_bits(&nets[idx.0]);
-                let offset_i64 = i64::from(*bit) - lsb;
-                if offset_i64 < 0 || offset_i64 >= width as i64 {
-                    return Err(StructuralAssignValidationError(format!(
-                        "bit {} out of range for net '{}'",
-                        bit,
-                        net_name(*idx, nets, interner)
-                    )));
-                }
-                Ok(self
-                    .drivers
-                    .get(idx)
-                    .and_then(|bits| bits.get(offset_i64 as usize))
-                    .is_some_and(|bit| *bit))
-            }
+            NetRef::BitSelect(idx, bit) => self.is_bit_driven(*idx, *bit, nets, interner),
             NetRef::PartSelect(idx, msb, lsb) => {
-                if msb < lsb {
-                    return Ok(false);
-                }
-                let (width, net_lsb) = net_width_bits(&nets[idx.0]);
-                let Some(bits) = self.drivers.get(idx) else {
-                    return Ok(false);
-                };
-                for bit in *lsb..=*msb {
-                    let offset_i64 = i64::from(bit) - net_lsb;
-                    if offset_i64 < 0 || offset_i64 >= width as i64 {
-                        return Ok(false);
-                    }
-                    if bits.get(offset_i64 as usize).is_none_or(|entry| !*entry) {
+                for offset in 0..select_width_bits(*msb, *lsb) {
+                    let bit_number = select_bit_number(*msb, *lsb, offset).ok_or_else(|| {
+                        StructuralAssignValidationError(format!(
+                            "invalid part-select [{}:{}] on net '{}'",
+                            msb,
+                            lsb,
+                            net_name(*idx, nets, interner)
+                        ))
+                    })?;
+                    if !self.is_bit_driven(*idx, bit_number, nets, interner)? {
                         return Ok(false);
                     }
                 }
@@ -206,11 +215,39 @@ impl BitDriverTracker {
     }
 }
 
-fn net_width_bits(net: &Net) -> (usize, i64) {
-    if let Some((msb, lsb)) = net.width {
-        (((msb as i64 - lsb as i64).abs() as usize) + 1, lsb as i64)
+#[derive(Debug, Clone, Copy)]
+struct NetBitTarget {
+    idx: NetIndex,
+    bit_number: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReferencedNetBit {
+    idx: NetIndex,
+    bit_number: u32,
+    rendered: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingAssignBit {
+    assign_index: usize,
+    rhs_bit_index: usize,
+    target: NetBitTarget,
+}
+
+fn select_width_bits(msb: u32, lsb: u32) -> usize {
+    (u32::abs_diff(msb, lsb) as usize) + 1
+}
+
+fn select_bit_number(msb: u32, lsb: u32, bit_offset: usize) -> Option<u32> {
+    if bit_offset >= select_width_bits(msb, lsb) {
+        return None;
+    }
+    let offset = bit_offset as u32;
+    if msb >= lsb {
+        Some(lsb + offset)
     } else {
-        (1, 0)
+        Some(lsb - offset)
     }
 }
 
@@ -225,63 +262,340 @@ fn net_name(
         .to_string()
 }
 
-fn validate_assign_expr_refs(
+fn render_named_bit(
+    idx: NetIndex,
+    bit_number: u32,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+) -> String {
+    if nets[idx.0].width_bits() == 1 {
+        net_name(idx, nets, interner)
+    } else {
+        format!("{}[{}]", net_name(idx, nets, interner), bit_number)
+    }
+}
+
+fn net_ref_width_bits(
+    net_ref: &NetRef,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+) -> Result<usize, StructuralAssignValidationError> {
+    match net_ref {
+        NetRef::Simple(idx) => Ok(nets[idx.0].width_bits()),
+        NetRef::BitSelect(idx, bit) => {
+            if nets[idx.0].bit_offset(*bit).is_none() {
+                return Err(StructuralAssignValidationError(format!(
+                    "bit {} out of range for net '{}'",
+                    bit,
+                    net_name(*idx, nets, interner)
+                )));
+            }
+            Ok(1)
+        }
+        NetRef::PartSelect(idx, msb, lsb) => {
+            let width = select_width_bits(*msb, *lsb);
+            for offset in 0..width {
+                let bit_number = select_bit_number(*msb, *lsb, offset).ok_or_else(|| {
+                    StructuralAssignValidationError(format!(
+                        "invalid part-select [{}:{}] on net '{}'",
+                        msb,
+                        lsb,
+                        net_name(*idx, nets, interner)
+                    ))
+                })?;
+                if nets[idx.0].bit_offset(bit_number).is_none() {
+                    return Err(StructuralAssignValidationError(format!(
+                        "bit {} out of range for net '{}'",
+                        bit_number,
+                        net_name(*idx, nets, interner)
+                    )));
+                }
+            }
+            Ok(width)
+        }
+        NetRef::Literal(bits) => Ok(bits.get_bit_count()),
+        NetRef::Unconnected => Err(StructuralAssignValidationError(
+            "unconnected net reference is not supported in assign expressions".to_string(),
+        )),
+        NetRef::Concat(_) => Err(StructuralAssignValidationError(
+            "concatenation is not supported in structural assign expressions".to_string(),
+        )),
+    }
+}
+
+fn assign_expr_width_bits(
     expr: &AssignExpr,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+) -> Result<usize, StructuralAssignValidationError> {
+    match expr {
+        AssignExpr::Leaf(net_ref) => net_ref_width_bits(net_ref, nets, interner),
+        AssignExpr::Not(inner) => assign_expr_width_bits(inner, nets, interner),
+        AssignExpr::And(lhs, rhs) | AssignExpr::Or(lhs, rhs) | AssignExpr::Xor(lhs, rhs) => {
+            let lhs_width = assign_expr_width_bits(lhs, nets, interner)?;
+            let rhs_width = assign_expr_width_bits(rhs, nets, interner)?;
+            if lhs_width != rhs_width {
+                let op = match expr {
+                    AssignExpr::And(_, _) => '&',
+                    AssignExpr::Or(_, _) => '|',
+                    AssignExpr::Xor(_, _) => '^',
+                    _ => unreachable!("binary expression matched as non-binary"),
+                };
+                return Err(StructuralAssignValidationError(format!(
+                    "bitwise '{}' width mismatch: lhs {} bits rhs {} bits",
+                    op, lhs_width, rhs_width
+                )));
+            }
+            Ok(lhs_width)
+        }
+    }
+}
+
+fn net_ref_bit_is_driven(
+    net_ref: &NetRef,
+    rhs_bit_index: usize,
+    tracker: &BitDriverTracker,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+) -> Result<bool, StructuralAssignValidationError> {
+    match net_ref {
+        NetRef::Simple(idx) => {
+            let bit_number = nets[idx.0].bit_number(rhs_bit_index).ok_or_else(|| {
+                StructuralAssignValidationError(format!(
+                    "bit {} out of range for net '{}'",
+                    rhs_bit_index,
+                    net_name(*idx, nets, interner)
+                ))
+            })?;
+            tracker.is_bit_driven(*idx, bit_number, nets, interner)
+        }
+        NetRef::BitSelect(idx, bit) => {
+            if rhs_bit_index != 0 {
+                return Err(StructuralAssignValidationError(format!(
+                    "bit-select '{}' cannot be indexed at expression bit {}",
+                    render_named_bit(*idx, *bit, nets, interner),
+                    rhs_bit_index
+                )));
+            }
+            tracker.is_bit_driven(*idx, *bit, nets, interner)
+        }
+        NetRef::PartSelect(idx, msb, lsb) => {
+            let bit_number = select_bit_number(*msb, *lsb, rhs_bit_index).ok_or_else(|| {
+                StructuralAssignValidationError(format!(
+                    "bit {} out of range for part-select '{}'",
+                    rhs_bit_index,
+                    render_net_ref(net_ref, nets, interner)
+                ))
+            })?;
+            tracker.is_bit_driven(*idx, bit_number, nets, interner)
+        }
+        NetRef::Literal(bits) => {
+            if rhs_bit_index >= bits.get_bit_count() {
+                return Err(StructuralAssignValidationError(format!(
+                    "literal bit {} out of range for {}-bit literal",
+                    rhs_bit_index,
+                    bits.get_bit_count()
+                )));
+            }
+            Ok(true)
+        }
+        NetRef::Unconnected => Err(StructuralAssignValidationError(
+            "unconnected net reference is not supported in assign expressions".to_string(),
+        )),
+        NetRef::Concat(_) => Err(StructuralAssignValidationError(
+            "concatenation is not supported in structural assign expressions".to_string(),
+        )),
+    }
+}
+
+fn validate_assign_expr_bit_refs(
+    expr: &AssignExpr,
+    rhs_bit_index: usize,
     tracker: &BitDriverTracker,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
 ) -> Result<bool, StructuralAssignValidationError> {
     match expr {
-        AssignExpr::Leaf(net_ref) => match net_ref {
-            NetRef::Simple(idx) | NetRef::BitSelect(idx, _) | NetRef::PartSelect(idx, _, _) => {
-                let _ = idx;
-                tracker.is_netref_driven(net_ref, nets, interner)
-            }
-            NetRef::Literal(_) => Ok(true),
-            NetRef::Unconnected => Err(StructuralAssignValidationError(
-                "unconnected net reference is not supported in assign expressions".to_string(),
-            )),
-            NetRef::Concat(_) => Err(StructuralAssignValidationError(
-                "concatenation is not supported in assign expressions".to_string(),
-            )),
-        },
-        AssignExpr::Not(inner) => validate_assign_expr_refs(inner, tracker, nets, interner),
-        AssignExpr::And(lhs, rhs) | AssignExpr::Or(lhs, rhs) | AssignExpr::Xor(lhs, rhs) => {
-            Ok(validate_assign_expr_refs(lhs, tracker, nets, interner)?
-                && validate_assign_expr_refs(rhs, tracker, nets, interner)?)
+        AssignExpr::Leaf(net_ref) => {
+            net_ref_bit_is_driven(net_ref, rhs_bit_index, tracker, nets, interner)
         }
+        AssignExpr::Not(inner) => {
+            validate_assign_expr_bit_refs(inner, rhs_bit_index, tracker, nets, interner)
+        }
+        AssignExpr::And(lhs, rhs) | AssignExpr::Or(lhs, rhs) | AssignExpr::Xor(lhs, rhs) => Ok(
+            validate_assign_expr_bit_refs(lhs, rhs_bit_index, tracker, nets, interner)?
+                && validate_assign_expr_bit_refs(rhs, rhs_bit_index, tracker, nets, interner)?,
+        ),
+    }
+}
+
+fn net_ref_unresolved_bits(
+    net_ref: &NetRef,
+    rhs_bit_index: usize,
+    tracker: &BitDriverTracker,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    out: &mut Vec<ReferencedNetBit>,
+) -> Result<(), StructuralAssignValidationError> {
+    match net_ref {
+        NetRef::Simple(idx) => {
+            let bit_number = nets[idx.0].bit_number(rhs_bit_index).ok_or_else(|| {
+                StructuralAssignValidationError(format!(
+                    "bit {} out of range for net '{}'",
+                    rhs_bit_index,
+                    net_name(*idx, nets, interner)
+                ))
+            })?;
+            if !tracker.is_bit_driven(*idx, bit_number, nets, interner)? {
+                out.push(ReferencedNetBit {
+                    idx: *idx,
+                    bit_number,
+                    rendered: render_named_bit(*idx, bit_number, nets, interner),
+                });
+            }
+            Ok(())
+        }
+        NetRef::BitSelect(idx, bit) => {
+            if rhs_bit_index != 0 {
+                return Err(StructuralAssignValidationError(format!(
+                    "bit-select '{}' cannot be indexed at expression bit {}",
+                    render_named_bit(*idx, *bit, nets, interner),
+                    rhs_bit_index
+                )));
+            }
+            if !tracker.is_bit_driven(*idx, *bit, nets, interner)? {
+                out.push(ReferencedNetBit {
+                    idx: *idx,
+                    bit_number: *bit,
+                    rendered: render_named_bit(*idx, *bit, nets, interner),
+                });
+            }
+            Ok(())
+        }
+        NetRef::PartSelect(idx, msb, lsb) => {
+            let bit_number = select_bit_number(*msb, *lsb, rhs_bit_index).ok_or_else(|| {
+                StructuralAssignValidationError(format!(
+                    "bit {} out of range for part-select '{}'",
+                    rhs_bit_index,
+                    render_net_ref(net_ref, nets, interner)
+                ))
+            })?;
+            if !tracker.is_bit_driven(*idx, bit_number, nets, interner)? {
+                out.push(ReferencedNetBit {
+                    idx: *idx,
+                    bit_number,
+                    rendered: render_named_bit(*idx, bit_number, nets, interner),
+                });
+            }
+            Ok(())
+        }
+        NetRef::Literal(bits) => {
+            if rhs_bit_index >= bits.get_bit_count() {
+                return Err(StructuralAssignValidationError(format!(
+                    "literal bit {} out of range for {}-bit literal",
+                    rhs_bit_index,
+                    bits.get_bit_count()
+                )));
+            }
+            Ok(())
+        }
+        NetRef::Unconnected => Err(StructuralAssignValidationError(
+            "unconnected net reference is not supported in assign expressions".to_string(),
+        )),
+        NetRef::Concat(_) => Err(StructuralAssignValidationError(
+            "concatenation is not supported in structural assign expressions".to_string(),
+        )),
     }
 }
 
 fn collect_unresolved_assign_refs(
     expr: &AssignExpr,
+    rhs_bit_index: usize,
     tracker: &BitDriverTracker,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
-    out: &mut Vec<NetRef>,
+    out: &mut Vec<ReferencedNetBit>,
 ) -> Result<(), StructuralAssignValidationError> {
     match expr {
-        AssignExpr::Leaf(net_ref) => match net_ref {
-            NetRef::Simple(_) | NetRef::BitSelect(_, _) | NetRef::PartSelect(_, _, _) => {
-                if !tracker.is_netref_driven(net_ref, nets, interner)? {
-                    out.push(net_ref.clone());
-                }
-                Ok(())
-            }
-            NetRef::Literal(_) => Ok(()),
-            NetRef::Unconnected => Err(StructuralAssignValidationError(
-                "unconnected net reference is not supported in assign expressions".to_string(),
-            )),
-            NetRef::Concat(_) => Err(StructuralAssignValidationError(
-                "concatenation is not supported in assign expressions".to_string(),
-            )),
-        },
+        AssignExpr::Leaf(net_ref) => {
+            net_ref_unresolved_bits(net_ref, rhs_bit_index, tracker, nets, interner, out)
+        }
         AssignExpr::Not(inner) => {
-            collect_unresolved_assign_refs(inner, tracker, nets, interner, out)
+            collect_unresolved_assign_refs(inner, rhs_bit_index, tracker, nets, interner, out)
         }
         AssignExpr::And(lhs, rhs) | AssignExpr::Or(lhs, rhs) | AssignExpr::Xor(lhs, rhs) => {
-            collect_unresolved_assign_refs(lhs, tracker, nets, interner, out)?;
-            collect_unresolved_assign_refs(rhs, tracker, nets, interner, out)
+            collect_unresolved_assign_refs(lhs, rhs_bit_index, tracker, nets, interner, out)?;
+            collect_unresolved_assign_refs(rhs, rhs_bit_index, tracker, nets, interner, out)
+        }
+    }
+}
+
+fn expand_lhs_bits(
+    lhs: &NetRef,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+) -> Result<Vec<NetBitTarget>, StructuralAssignValidationError> {
+    match lhs {
+        NetRef::Simple(idx) => {
+            let net = &nets[idx.0];
+            let mut bits = Vec::with_capacity(net.width_bits());
+            for offset in 0..net.width_bits() {
+                let bit_number = net.bit_number(offset).ok_or_else(|| {
+                    StructuralAssignValidationError(format!(
+                        "internal error computing bit {} for net '{}'",
+                        offset,
+                        net_name(*idx, nets, interner)
+                    ))
+                })?;
+                bits.push(NetBitTarget {
+                    idx: *idx,
+                    bit_number,
+                });
+            }
+            Ok(bits)
+        }
+        NetRef::BitSelect(idx, bit) => {
+            if nets[idx.0].bit_offset(*bit).is_none() {
+                return Err(StructuralAssignValidationError(format!(
+                    "bit {} out of range for net '{}'",
+                    bit,
+                    net_name(*idx, nets, interner)
+                )));
+            }
+            Ok(vec![NetBitTarget {
+                idx: *idx,
+                bit_number: *bit,
+            }])
+        }
+        NetRef::PartSelect(idx, msb, lsb) => {
+            let mut bits = Vec::with_capacity(select_width_bits(*msb, *lsb));
+            for offset in 0..select_width_bits(*msb, *lsb) {
+                let bit_number = select_bit_number(*msb, *lsb, offset).ok_or_else(|| {
+                    StructuralAssignValidationError(format!(
+                        "invalid part-select [{}:{}] on net '{}'",
+                        msb,
+                        lsb,
+                        net_name(*idx, nets, interner)
+                    ))
+                })?;
+                if nets[idx.0].bit_offset(bit_number).is_none() {
+                    return Err(StructuralAssignValidationError(format!(
+                        "bit {} out of range for net '{}'",
+                        bit_number,
+                        net_name(*idx, nets, interner)
+                    )));
+                }
+                bits.push(NetBitTarget {
+                    idx: *idx,
+                    bit_number,
+                });
+            }
+            Ok(bits)
+        }
+        NetRef::Literal(_) | NetRef::Unconnected | NetRef::Concat(_) => {
+            Err(StructuralAssignValidationError(
+                "left-hand side of structural assign must be a net or net select".to_string(),
+            ))
         }
     }
 }
@@ -336,23 +650,53 @@ pub fn validate_structural_assign_module(
                     interner.resolve(port.name).unwrap_or("<unknown>")
                 )));
             };
-            let (width, _) = net_width_bits(&nets[net_idx.0]);
+            let width = nets[net_idx.0].width_bits();
             declared_tracker.seed_external_driver(net_idx, width);
             resolved_tracker.seed_external_driver(net_idx, width);
         }
     }
 
-    for assign in &module.assigns {
+    let mut pending = Vec::new();
+    for (assign_index, assign) in module.assigns.iter().enumerate() {
+        let lhs_bits = expand_lhs_bits(&assign.lhs, nets, interner)?;
+        let rhs_width = assign_expr_width_bits(&assign.rhs, nets, interner)?;
+        if lhs_bits.len() != rhs_width {
+            return Err(StructuralAssignValidationError(format!(
+                "assign to '{}' has lhs width {} but rhs width {}",
+                render_net_ref(&assign.lhs, nets, interner),
+                lhs_bits.len(),
+                rhs_width
+            )));
+        }
         declared_tracker.mark_lhs(&assign.lhs, assign.span, nets, interner)?;
+        for (rhs_bit_index, target) in lhs_bits.into_iter().enumerate() {
+            pending.push(PendingAssignBit {
+                assign_index,
+                rhs_bit_index,
+                target,
+            });
+        }
     }
 
-    let mut pending: Vec<&crate::netlist::parse::NetlistAssign> = module.assigns.iter().collect();
     while !pending.is_empty() {
         let mut next_pending = Vec::new();
         let mut progressed = false;
         for assign in pending {
-            if validate_assign_expr_refs(&assign.rhs, &resolved_tracker, nets, interner)? {
-                resolved_tracker.mark_lhs(&assign.lhs, assign.span, nets, interner)?;
+            let netlist_assign = &module.assigns[assign.assign_index];
+            if validate_assign_expr_bit_refs(
+                &netlist_assign.rhs,
+                assign.rhs_bit_index,
+                &resolved_tracker,
+                nets,
+                interner,
+            )? {
+                resolved_tracker.mark_bit(
+                    assign.target.idx,
+                    assign.target.bit_number,
+                    netlist_assign.span,
+                    nets,
+                    interner,
+                )?;
                 progressed = true;
             } else {
                 next_pending.push(assign);
@@ -362,9 +706,11 @@ pub fn validate_structural_assign_module(
             let mut undeclared_refs = BTreeSet::new();
             let mut cyclic_assigns = Vec::new();
             for assign in &next_pending {
-                let mut missing = Vec::new();
+                let netlist_assign = &module.assigns[assign.assign_index];
+                let mut missing: Vec<ReferencedNetBit> = Vec::new();
                 collect_unresolved_assign_refs(
-                    &assign.rhs,
+                    &netlist_assign.rhs,
+                    assign.rhs_bit_index,
                     &resolved_tracker,
                     nets,
                     interner,
@@ -373,9 +719,14 @@ pub fn validate_structural_assign_module(
                 let mut rendered_missing = BTreeSet::new();
                 let mut assign_has_undeclared = false;
                 for missing_ref in missing {
-                    let rendered = render_net_ref(&missing_ref, nets, interner);
+                    let rendered = missing_ref.rendered.clone();
                     rendered_missing.insert(rendered.clone());
-                    if !declared_tracker.is_netref_driven(&missing_ref, nets, interner)? {
+                    if !declared_tracker.is_bit_driven(
+                        missing_ref.idx,
+                        missing_ref.bit_number,
+                        nets,
+                        interner,
+                    )? {
                         undeclared_refs.insert(rendered);
                         assign_has_undeclared = true;
                     }
@@ -383,7 +734,12 @@ pub fn validate_structural_assign_module(
                 if !assign_has_undeclared && !rendered_missing.is_empty() {
                     cyclic_assigns.push(format!(
                         "{} <- [{}]",
-                        render_net_ref(&assign.lhs, nets, interner),
+                        render_named_bit(
+                            assign.target.idx,
+                            assign.target.bit_number,
+                            nets,
+                            interner,
+                        ),
                         rendered_missing.into_iter().collect::<Vec<_>>().join(", ")
                     ));
                 }
@@ -726,6 +1082,36 @@ endmodule
 "#,
         )
         .expect("disjoint partial bus assembly should validate");
+    }
+
+    #[test]
+    fn validate_structural_assign_module_accepts_acyclic_overlapping_slice_dependencies() {
+        validate(
+            r#"
+module top(a, y);
+  input a;
+  output [3:0] y;
+  assign y[3:1] = y[2:0];
+  assign y[0] = a;
+endmodule
+"#,
+        )
+        .expect("bit-level overlapping slice dependencies should validate");
+    }
+
+    #[test]
+    fn validate_structural_assign_module_accepts_ascending_packed_range_selects() {
+        validate(
+            r#"
+module top(a, y);
+  input [0:3] a;
+  output [0:3] y;
+  assign y[0:2] = a[0:2];
+  assign y[3] = a[3];
+endmodule
+"#,
+        )
+        .expect("ascending packed range selects should validate");
     }
 
     #[test]

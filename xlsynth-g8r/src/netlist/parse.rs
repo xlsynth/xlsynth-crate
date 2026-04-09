@@ -26,6 +26,63 @@ pub struct Net {
     pub width: Option<(u32, u32)>,
 }
 
+impl Net {
+    /// Returns the packed width of this net in bits.
+    pub fn width_bits(&self) -> usize {
+        if let Some((msb, lsb)) = self.width {
+            (u32::abs_diff(msb, lsb) as usize) + 1
+        } else {
+            1
+        }
+    }
+
+    /// Returns the declared numeric index of this net's least-significant bit.
+    pub fn declared_lsb_number(&self) -> u32 {
+        self.width.map(|(_, lsb)| lsb).unwrap_or(0)
+    }
+
+    /// Converts a declared bit number into the lsb-based offset used by
+    /// `AigBitVector` and structural-assign bookkeeping.
+    pub fn bit_offset(&self, bit_number: u32) -> Option<usize> {
+        match self.width {
+            Some((msb, lsb)) => {
+                let min_bit = msb.min(lsb);
+                let max_bit = msb.max(lsb);
+                if bit_number < min_bit || bit_number > max_bit {
+                    None
+                } else {
+                    Some(u32::abs_diff(bit_number, lsb) as usize)
+                }
+            }
+            None => {
+                if bit_number == 0 {
+                    Some(0)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Converts an lsb-based offset back into the declared bit number.
+    pub fn bit_number(&self, bit_offset: usize) -> Option<u32> {
+        if bit_offset >= self.width_bits() {
+            return None;
+        }
+        match self.width {
+            Some((msb, lsb)) => {
+                let offset = bit_offset as u32;
+                if msb >= lsb {
+                    Some(lsb + offset)
+                } else {
+                    Some(lsb - offset)
+                }
+            }
+            None => Some(0),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetlistPort {
     pub direction: PortDirection,

@@ -160,6 +160,40 @@ endmodule
 }
 
 #[test]
+fn gv2aig_without_liberty_supports_acyclic_overlapping_slice_dependencies() {
+    let netlist_text = r#"
+module top(a, y);
+  input a;
+  output [3:0] y;
+  assign y[3:1] = y[2:0];
+  assign y[0] = a;
+endmodule
+"#;
+
+    let (_temp_dir, out_path, output) = run_gv2aig(netlist_text, None);
+    assert_success(&output);
+    load_aiger_auto_from_path(&out_path, GateBuilderOptions::no_opt())
+        .expect("load overlapping-slice structural aiger");
+}
+
+#[test]
+fn gv2aig_without_liberty_supports_ascending_packed_range_selects() {
+    let netlist_text = r#"
+module top(a, y);
+  input [0:3] a;
+  output [0:3] y;
+  assign y[0:2] = a[0:2];
+  assign y[3] = a[3];
+endmodule
+"#;
+
+    let (_temp_dir, out_path, output) = run_gv2aig(netlist_text, None);
+    assert_success(&output);
+    load_aiger_auto_from_path(&out_path, GateBuilderOptions::no_opt())
+        .expect("load ascending-range structural aiger");
+}
+
+#[test]
 fn gv2aig_without_liberty_scopes_port_lookup_to_selected_module() {
     let netlist_text = r#"
 module helper(a, y);
