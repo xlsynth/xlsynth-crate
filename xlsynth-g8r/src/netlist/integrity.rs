@@ -5,6 +5,9 @@
 //! These checks look for simple wiring issues such as inputs that are never
 //! used, outputs that are never driven, and wires that are declared but never
 //! connected.
+//!
+//! See `src/netlist/STRUCTURAL_ASSIGNS.md` for the accepted Liberty-free
+//! structural-assign subset and its sizing rules.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
@@ -342,7 +345,7 @@ fn assign_expr_width_bits(
                     _ => unreachable!("binary expression matched as non-binary"),
                 };
                 return Err(StructuralAssignValidationError(format!(
-                    "bitwise '{}' width mismatch: lhs {} bits rhs {} bits",
+                    "bitwise '{}' width mismatch: lhs {} bits rhs {} bits; Liberty-free structural mode requires exact-width bitwise operands",
                     op, lhs_width, rhs_width
                 )));
             }
@@ -351,9 +354,14 @@ fn assign_expr_width_bits(
     }
 }
 
+fn is_bare_literal_assign_expr(expr: &AssignExpr) -> bool {
+    matches!(expr, AssignExpr::Leaf(NetRef::Literal(_)))
+}
+
 fn net_ref_bit_is_driven(
     net_ref: &NetRef,
     rhs_bit_index: usize,
+    allow_literal_zero_extend: bool,
     tracker: &BitDriverTracker,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
@@ -391,6 +399,9 @@ fn net_ref_bit_is_driven(
         }
         NetRef::Literal(bits) => {
             if rhs_bit_index >= bits.get_bit_count() {
+                if allow_literal_zero_extend {
+                    return Ok(true);
+                }
                 return Err(StructuralAssignValidationError(format!(
                     "literal bit {} out of range for {}-bit literal",
                     rhs_bit_index,
@@ -411,27 +422,52 @@ fn net_ref_bit_is_driven(
 fn validate_assign_expr_bit_refs(
     expr: &AssignExpr,
     rhs_bit_index: usize,
+    allow_literal_zero_extend: bool,
     tracker: &BitDriverTracker,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
 ) -> Result<bool, StructuralAssignValidationError> {
     match expr {
-        AssignExpr::Leaf(net_ref) => {
-            net_ref_bit_is_driven(net_ref, rhs_bit_index, tracker, nets, interner)
-        }
-        AssignExpr::Not(inner) => {
-            validate_assign_expr_bit_refs(inner, rhs_bit_index, tracker, nets, interner)
-        }
-        AssignExpr::And(lhs, rhs) | AssignExpr::Or(lhs, rhs) | AssignExpr::Xor(lhs, rhs) => Ok(
-            validate_assign_expr_bit_refs(lhs, rhs_bit_index, tracker, nets, interner)?
-                && validate_assign_expr_bit_refs(rhs, rhs_bit_index, tracker, nets, interner)?,
+        AssignExpr::Leaf(net_ref) => net_ref_bit_is_driven(
+            net_ref,
+            rhs_bit_index,
+            allow_literal_zero_extend,
+            tracker,
+            nets,
+            interner,
         ),
+        AssignExpr::Not(inner) => validate_assign_expr_bit_refs(
+            inner,
+            rhs_bit_index,
+            allow_literal_zero_extend,
+            tracker,
+            nets,
+            interner,
+        ),
+        AssignExpr::And(lhs, rhs) | AssignExpr::Or(lhs, rhs) | AssignExpr::Xor(lhs, rhs) => {
+            Ok(validate_assign_expr_bit_refs(
+                lhs,
+                rhs_bit_index,
+                allow_literal_zero_extend,
+                tracker,
+                nets,
+                interner,
+            )? && validate_assign_expr_bit_refs(
+                rhs,
+                rhs_bit_index,
+                allow_literal_zero_extend,
+                tracker,
+                nets,
+                interner,
+            )?)
+        }
     }
 }
 
 fn net_ref_unresolved_bits(
     net_ref: &NetRef,
     rhs_bit_index: usize,
+    allow_literal_zero_extend: bool,
     tracker: &BitDriverTracker,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
@@ -491,6 +527,9 @@ fn net_ref_unresolved_bits(
         }
         NetRef::Literal(bits) => {
             if rhs_bit_index >= bits.get_bit_count() {
+                if allow_literal_zero_extend {
+                    return Ok(());
+                }
                 return Err(StructuralAssignValidationError(format!(
                     "literal bit {} out of range for {}-bit literal",
                     rhs_bit_index,
@@ -511,21 +550,50 @@ fn net_ref_unresolved_bits(
 fn collect_unresolved_assign_refs(
     expr: &AssignExpr,
     rhs_bit_index: usize,
+    allow_literal_zero_extend: bool,
     tracker: &BitDriverTracker,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
     out: &mut Vec<ReferencedNetBit>,
 ) -> Result<(), StructuralAssignValidationError> {
     match expr {
-        AssignExpr::Leaf(net_ref) => {
-            net_ref_unresolved_bits(net_ref, rhs_bit_index, tracker, nets, interner, out)
-        }
-        AssignExpr::Not(inner) => {
-            collect_unresolved_assign_refs(inner, rhs_bit_index, tracker, nets, interner, out)
-        }
+        AssignExpr::Leaf(net_ref) => net_ref_unresolved_bits(
+            net_ref,
+            rhs_bit_index,
+            allow_literal_zero_extend,
+            tracker,
+            nets,
+            interner,
+            out,
+        ),
+        AssignExpr::Not(inner) => collect_unresolved_assign_refs(
+            inner,
+            rhs_bit_index,
+            allow_literal_zero_extend,
+            tracker,
+            nets,
+            interner,
+            out,
+        ),
         AssignExpr::And(lhs, rhs) | AssignExpr::Or(lhs, rhs) | AssignExpr::Xor(lhs, rhs) => {
-            collect_unresolved_assign_refs(lhs, rhs_bit_index, tracker, nets, interner, out)?;
-            collect_unresolved_assign_refs(rhs, rhs_bit_index, tracker, nets, interner, out)
+            collect_unresolved_assign_refs(
+                lhs,
+                rhs_bit_index,
+                allow_literal_zero_extend,
+                tracker,
+                nets,
+                interner,
+                out,
+            )?;
+            collect_unresolved_assign_refs(
+                rhs,
+                rhs_bit_index,
+                allow_literal_zero_extend,
+                tracker,
+                nets,
+                interner,
+                out,
+            )
         }
     }
 }
@@ -660,9 +728,10 @@ pub fn validate_structural_assign_module(
     for (assign_index, assign) in module.assigns.iter().enumerate() {
         let lhs_bits = expand_lhs_bits(&assign.lhs, nets, interner)?;
         let rhs_width = assign_expr_width_bits(&assign.rhs, nets, interner)?;
-        if lhs_bits.len() != rhs_width {
+        let allow_literal_zero_extend = is_bare_literal_assign_expr(&assign.rhs);
+        if lhs_bits.len() != rhs_width && !allow_literal_zero_extend {
             return Err(StructuralAssignValidationError(format!(
-                "assign to '{}' has lhs width {} but rhs width {}",
+                "assign to '{}' has lhs width {} but rhs width {}; Liberty-free structural mode requires exact-width assignments except for bare literal tie-offs",
                 render_net_ref(&assign.lhs, nets, interner),
                 lhs_bits.len(),
                 rhs_width
@@ -683,9 +752,11 @@ pub fn validate_structural_assign_module(
         let mut progressed = false;
         for assign in pending {
             let netlist_assign = &module.assigns[assign.assign_index];
+            let allow_literal_zero_extend = is_bare_literal_assign_expr(&netlist_assign.rhs);
             if validate_assign_expr_bit_refs(
                 &netlist_assign.rhs,
                 assign.rhs_bit_index,
+                allow_literal_zero_extend,
                 &resolved_tracker,
                 nets,
                 interner,
@@ -711,6 +782,7 @@ pub fn validate_structural_assign_module(
                 collect_unresolved_assign_refs(
                     &netlist_assign.rhs,
                     assign.rhs_bit_index,
+                    is_bare_literal_assign_expr(&netlist_assign.rhs),
                     &resolved_tracker,
                     nets,
                     interner,
@@ -1085,6 +1157,19 @@ endmodule
     }
 
     #[test]
+    fn validate_structural_assign_module_accepts_bare_literal_tieoff_resize() {
+        validate(
+            r#"
+module top(y);
+  output [3:0] y;
+  assign y = 1'b0;
+endmodule
+"#,
+        )
+        .expect("bare literal tie-off resize should validate");
+    }
+
+    #[test]
     fn validate_structural_assign_module_accepts_acyclic_overlapping_slice_dependencies() {
         validate(
             r#"
@@ -1112,6 +1197,20 @@ endmodule
 "#,
         )
         .expect("ascending packed range selects should validate");
+    }
+
+    #[test]
+    fn validate_structural_assign_module_rejects_mixed_width_bitwise_ops() {
+        expect_validation_error(
+            r#"
+module top(a, y);
+  input [3:0] a;
+  output [3:0] y;
+  assign y = a & 1'b1;
+endmodule
+"#,
+            "exact-width bitwise operands",
+        );
     }
 
     #[test]

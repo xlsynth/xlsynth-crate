@@ -160,6 +160,21 @@ endmodule
 }
 
 #[test]
+fn gv2aig_without_liberty_supports_bare_literal_tieoff_resize() {
+    let netlist_text = r#"
+module top(y);
+  output [3:0] y;
+  assign y = 1'b0;
+endmodule
+"#;
+
+    let (_temp_dir, out_path, output) = run_gv2aig(netlist_text, None);
+    assert_success(&output);
+    load_aiger_auto_from_path(&out_path, GateBuilderOptions::no_opt())
+        .expect("load literal tie-off structural aiger");
+}
+
+#[test]
 fn gv2aig_without_liberty_supports_acyclic_overlapping_slice_dependencies() {
     let netlist_text = r#"
 module top(a, y);
@@ -191,6 +206,30 @@ endmodule
     assert_success(&output);
     load_aiger_auto_from_path(&out_path, GateBuilderOptions::no_opt())
         .expect("load ascending-range structural aiger");
+}
+
+#[test]
+fn gv2aig_without_liberty_rejects_mixed_width_bitwise_ops() {
+    let netlist_text = r#"
+module top(a, y);
+  input [3:0] a;
+  output [3:0] y;
+  assign y = a & 1'b1;
+endmodule
+"#;
+
+    let (_temp_dir, _out_path, output) = run_gv2aig(netlist_text, None);
+    assert!(
+        !output.status.success(),
+        "mixed-width bitwise ops should fail\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("exact-width bitwise operands"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
 }
 
 #[test]

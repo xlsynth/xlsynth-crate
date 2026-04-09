@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Token scanner and parser for gate-level netlists.
+//!
+//! For the Liberty-free structural `assign` subset used by `gv2aig`, see
+//! `src/netlist/STRUCTURAL_ASSIGNS.md`.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -149,6 +152,10 @@ impl NetRef {
     }
 }
 
+/// Expression tree for the narrow structural-assign subset.
+///
+/// The parser preserves syntax here; Liberty-free `gv2aig` later applies the
+/// exact-width structural rules documented in `STRUCTURAL_ASSIGNS.md`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssignExpr {
     Leaf(NetRef),
@@ -173,6 +180,7 @@ impl AssignExpr {
     }
 }
 
+/// Continuous assignment preserved from the parsed netlist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetlistAssign {
     pub lhs: NetRef,

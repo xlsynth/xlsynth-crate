@@ -173,6 +173,8 @@ When `--liberty_proto` is omitted, the accepted Verilog subset is intentionally 
 
 - Only continuous `assign` statements are supported; real cell instances are rejected.
 - Only bitwise `~`, `&`, `|`, and `^` are supported, with parentheses plus simple nets, bit-selects, part-selects, and literals.
+- Bitwise operators use exact-width structural semantics in this mode; we do not apply implicit Verilog operand sizing to `&`, `|`, or `^`.
+- Bare literal tie-offs are the one width-conversion exception: a plain literal RHS such as `assign y = 0;` or `assign y[3:0] = 1'b0;` is zero-extended or truncated to the destination width.
 - Concatenation, ternary operators, logical operators, arithmetic, shifts, procedural blocks, and `inout` ports are rejected.
 - Validation is strict before projection:
   - Each net bit must have a single driver.

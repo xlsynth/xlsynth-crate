@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Project a Liberty-free structural assign netlist into a `GateFn`.
+//!
+//! See `src/netlist/STRUCTURAL_ASSIGNS.md` for the accepted Liberty-free
+//! structural subset and its sizing rules.
 
 use crate::aig::{AigBitVector, AigOperand, GateFn};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
@@ -102,6 +105,7 @@ impl ResolvedNetValues {
         &self,
         net_ref: &NetRef,
         rhs_bit_index: usize,
+        allow_literal_zero_extend: bool,
         nets: &[Net],
         interner: &StringInterner<StringBackend<SymbolU32>>,
         gb: &mut GateBuilder,
@@ -139,13 +143,25 @@ impl ResolvedNetValues {
                 self.resolve_bit(*idx, bit_number, nets, interner)
             }
             NetRef::Literal(bits) => {
-                let bit_value = bits.get_bit(rhs_bit_index).map_err(|_| {
-                    format!(
-                        "literal bit {} out of range for {}-bit literal",
-                        rhs_bit_index,
-                        bits.get_bit_count()
-                    )
-                })?;
+                let bit_value = if rhs_bit_index >= bits.get_bit_count() {
+                    if allow_literal_zero_extend {
+                        false
+                    } else {
+                        return Err(format!(
+                            "literal bit {} out of range for {}-bit literal",
+                            rhs_bit_index,
+                            bits.get_bit_count()
+                        ));
+                    }
+                } else {
+                    bits.get_bit(rhs_bit_index).map_err(|_| {
+                        format!(
+                            "literal bit {} out of range for {}-bit literal",
+                            rhs_bit_index,
+                            bits.get_bit_count()
+                        )
+                    })?
+                };
                 Ok(Some(if bit_value {
                     gb.get_true()
                 } else {
@@ -169,7 +185,8 @@ impl ResolvedNetValues {
         let width = net_ref_width_bits(net_ref, nets, interner)?;
         let mut bits = Vec::with_capacity(width);
         for rhs_bit_index in 0..width {
-            let Some(bit) = self.materialize_ref_bit(net_ref, rhs_bit_index, nets, interner, gb)?
+            let Some(bit) =
+                self.materialize_ref_bit(net_ref, rhs_bit_index, false, nets, interner, gb)?
             else {
                 return Ok(None);
             };
@@ -282,13 +299,17 @@ fn assign_expr_width_bits(
                     _ => unreachable!("binary expression matched as non-binary"),
                 };
                 return Err(format!(
-                    "bitwise '{}' width mismatch: lhs {} bits rhs {} bits",
+                    "bitwise '{}' width mismatch: lhs {} bits rhs {} bits; Liberty-free structural mode requires exact-width bitwise operands",
                     op, lhs_width, rhs_width
                 ));
             }
             Ok(lhs_width)
         }
     }
+}
+
+fn is_bare_literal_assign_expr(expr: &AssignExpr) -> bool {
+    matches!(expr, AssignExpr::Leaf(NetRef::Literal(_)))
 }
 
 fn expand_lhs_bits(
@@ -379,51 +400,112 @@ fn render_net_ref(
 fn eval_assign_expr_bit(
     expr: &AssignExpr,
     rhs_bit_index: usize,
+    allow_literal_zero_extend: bool,
     resolved: &ResolvedNetValues,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
     gb: &mut GateBuilder,
 ) -> Result<Option<AigOperand>, String> {
     match expr {
-        AssignExpr::Leaf(net_ref) => {
-            resolved.materialize_ref_bit(net_ref, rhs_bit_index, nets, interner, gb)
-        }
+        AssignExpr::Leaf(net_ref) => resolved.materialize_ref_bit(
+            net_ref,
+            rhs_bit_index,
+            allow_literal_zero_extend,
+            nets,
+            interner,
+            gb,
+        ),
         AssignExpr::Not(inner) => {
-            let Some(inner) =
-                eval_assign_expr_bit(inner, rhs_bit_index, resolved, nets, interner, gb)?
+            let Some(inner) = eval_assign_expr_bit(
+                inner,
+                rhs_bit_index,
+                allow_literal_zero_extend,
+                resolved,
+                nets,
+                interner,
+                gb,
+            )?
             else {
                 return Ok(None);
             };
             Ok(Some(gb.add_not(inner)))
         }
         AssignExpr::And(lhs, rhs) => {
-            let Some(lhs) = eval_assign_expr_bit(lhs, rhs_bit_index, resolved, nets, interner, gb)?
+            let Some(lhs) = eval_assign_expr_bit(
+                lhs,
+                rhs_bit_index,
+                allow_literal_zero_extend,
+                resolved,
+                nets,
+                interner,
+                gb,
+            )?
             else {
                 return Ok(None);
             };
-            let Some(rhs) = eval_assign_expr_bit(rhs, rhs_bit_index, resolved, nets, interner, gb)?
+            let Some(rhs) = eval_assign_expr_bit(
+                rhs,
+                rhs_bit_index,
+                allow_literal_zero_extend,
+                resolved,
+                nets,
+                interner,
+                gb,
+            )?
             else {
                 return Ok(None);
             };
             Ok(Some(gb.add_and_binary(lhs, rhs)))
         }
         AssignExpr::Or(lhs, rhs) => {
-            let Some(lhs) = eval_assign_expr_bit(lhs, rhs_bit_index, resolved, nets, interner, gb)?
+            let Some(lhs) = eval_assign_expr_bit(
+                lhs,
+                rhs_bit_index,
+                allow_literal_zero_extend,
+                resolved,
+                nets,
+                interner,
+                gb,
+            )?
             else {
                 return Ok(None);
             };
-            let Some(rhs) = eval_assign_expr_bit(rhs, rhs_bit_index, resolved, nets, interner, gb)?
+            let Some(rhs) = eval_assign_expr_bit(
+                rhs,
+                rhs_bit_index,
+                allow_literal_zero_extend,
+                resolved,
+                nets,
+                interner,
+                gb,
+            )?
             else {
                 return Ok(None);
             };
             Ok(Some(gb.add_or_binary(lhs, rhs)))
         }
         AssignExpr::Xor(lhs, rhs) => {
-            let Some(lhs) = eval_assign_expr_bit(lhs, rhs_bit_index, resolved, nets, interner, gb)?
+            let Some(lhs) = eval_assign_expr_bit(
+                lhs,
+                rhs_bit_index,
+                allow_literal_zero_extend,
+                resolved,
+                nets,
+                interner,
+                gb,
+            )?
             else {
                 return Ok(None);
             };
-            let Some(rhs) = eval_assign_expr_bit(rhs, rhs_bit_index, resolved, nets, interner, gb)?
+            let Some(rhs) = eval_assign_expr_bit(
+                rhs,
+                rhs_bit_index,
+                allow_literal_zero_extend,
+                resolved,
+                nets,
+                interner,
+                gb,
+            )?
             else {
                 return Ok(None);
             };
@@ -435,6 +517,7 @@ fn eval_assign_expr_bit(
 fn collect_missing_refs(
     expr: &AssignExpr,
     rhs_bit_index: usize,
+    allow_literal_zero_extend: bool,
     resolved: &ResolvedNetValues,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
@@ -477,12 +560,34 @@ fn collect_missing_refs(
             }
             NetRef::Literal(_) | NetRef::Unconnected | NetRef::Concat(_) => {}
         },
-        AssignExpr::Not(inner) => {
-            collect_missing_refs(inner, rhs_bit_index, resolved, nets, interner, out)
-        }
+        AssignExpr::Not(inner) => collect_missing_refs(
+            inner,
+            rhs_bit_index,
+            allow_literal_zero_extend,
+            resolved,
+            nets,
+            interner,
+            out,
+        ),
         AssignExpr::And(lhs, rhs) | AssignExpr::Or(lhs, rhs) | AssignExpr::Xor(lhs, rhs) => {
-            collect_missing_refs(lhs, rhs_bit_index, resolved, nets, interner, out);
-            collect_missing_refs(rhs, rhs_bit_index, resolved, nets, interner, out);
+            collect_missing_refs(
+                lhs,
+                rhs_bit_index,
+                allow_literal_zero_extend,
+                resolved,
+                nets,
+                interner,
+                out,
+            );
+            collect_missing_refs(
+                rhs,
+                rhs_bit_index,
+                allow_literal_zero_extend,
+                resolved,
+                nets,
+                interner,
+                out,
+            );
         }
     }
 }
@@ -531,9 +636,10 @@ pub fn project_gatefn_from_structural_assigns(
     for (assign_index, assign) in module.assigns.iter().enumerate() {
         let lhs_bits = expand_lhs_bits(&assign.lhs, nets, interner)?;
         let rhs_width = assign_expr_width_bits(&assign.rhs, nets, interner)?;
-        if lhs_bits.len() != rhs_width {
+        let allow_literal_zero_extend = is_bare_literal_assign_expr(&assign.rhs);
+        if lhs_bits.len() != rhs_width && !allow_literal_zero_extend {
             return Err(format!(
-                "assign to '{}' has lhs width {} but rhs width {}",
+                "assign to '{}' has lhs width {} but rhs width {}; Liberty-free structural mode requires exact-width assignments except for bare literal tie-offs",
                 render_net_ref(&assign.lhs, nets, interner),
                 lhs_bits.len(),
                 rhs_width
@@ -553,9 +659,11 @@ pub fn project_gatefn_from_structural_assigns(
         let mut processed_any = false;
         for pending_bit in pending {
             let assign = &module.assigns[pending_bit.assign_index];
+            let allow_literal_zero_extend = is_bare_literal_assign_expr(&assign.rhs);
             let rhs = eval_assign_expr_bit(
                 &assign.rhs,
                 pending_bit.rhs_bit_index,
+                allow_literal_zero_extend,
                 &resolved,
                 nets,
                 interner,
@@ -583,6 +691,7 @@ pub fn project_gatefn_from_structural_assigns(
                 collect_missing_refs(
                     &assign.rhs,
                     pending_bit.rhs_bit_index,
+                    is_bare_literal_assign_expr(&assign.rhs),
                     &resolved,
                     nets,
                     interner,
@@ -700,6 +809,22 @@ endmodule
             Collect::None,
         );
         assert_eq!(sim.outputs, vec![IrBits::make_ubits(4, 0b1111).unwrap()]);
+    }
+
+    #[test]
+    fn project_gatefn_from_structural_assigns_supports_bare_literal_tieoff_resize() {
+        let (module, nets, interner) = parse_single_module(
+            r#"
+module top(y);
+  output [3:0] y;
+  assign y = 1'b0;
+endmodule
+"#,
+        );
+        let gate_fn =
+            project_gatefn_from_structural_assigns(&module, &nets, &interner).expect("project");
+        let sim = gate_sim::eval(&gate_fn, &[], Collect::None);
+        assert_eq!(sim.outputs, vec![IrBits::make_ubits(4, 0).unwrap()]);
     }
 
     #[test]
