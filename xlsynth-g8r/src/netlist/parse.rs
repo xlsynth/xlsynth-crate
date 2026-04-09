@@ -1469,38 +1469,60 @@ impl<R: Read + 'static> Parser<R> {
         err_span: Span,
     ) -> Result<NetIndex, ScanError> {
         if let Some(&idx) = self.net_index_by_name.get(&name) {
-            let existing = &mut self.nets[idx.0];
-            match (existing.width, width) {
-                (None, None) => {}
-                (None, Some(w)) => {
-                    existing.width = Some(w);
-                    self.net_width_span_by_name.insert(name, err_span);
-                }
-                (Some(_), None) => {}
-                (Some(a), Some(b)) => {
-                    if a != b {
-                        debug_assert!(
-                            self.net_width_span_by_name.contains_key(&name),
-                            "Net with known width should carry a width span for diagnostics"
-                        );
-                        let prev_span = self
-                            .net_width_span_by_name
-                            .get(&name)
-                            .copied()
-                            .unwrap_or(err_span);
-                        return Err(ScanError {
-                            message: format!(
-                                "conflicting widths for net '{}': {:?} vs {:?}; previously determined width was {:?} @ {}",
-                                self.interner.resolve(name).unwrap_or("<unknown>"),
-                                a,
-                                b,
-                                a,
-                                prev_span.to_human_string()
-                            ),
-                            span: err_span,
-                        });
+            let implicit_scalar_placeholder =
+                self.implicit_net_by_name.contains(&name) && self.nets[idx.0].width == Some((0, 0));
+            let mut clear_implicit_marker = false;
+            {
+                let existing = &mut self.nets[idx.0];
+                match (existing.width, width) {
+                    (None, None) => {}
+                    (None, Some(w)) => {
+                        existing.width = Some(w);
+                        self.net_width_span_by_name.insert(name, err_span);
+                    }
+                    (Some(_), None) => {
+                        if implicit_scalar_placeholder {
+                            self.net_width_span_by_name.insert(name, err_span);
+                            clear_implicit_marker = true;
+                        }
+                    }
+                    (Some(a), Some(b)) => {
+                        if a != b {
+                            if implicit_scalar_placeholder {
+                                existing.width = Some(b);
+                                self.net_width_span_by_name.insert(name, err_span);
+                                clear_implicit_marker = true;
+                            } else {
+                                debug_assert!(
+                                    self.net_width_span_by_name.contains_key(&name),
+                                    "Net with known width should carry a width span for diagnostics"
+                                );
+                                let prev_span = self
+                                    .net_width_span_by_name
+                                    .get(&name)
+                                    .copied()
+                                    .unwrap_or(err_span);
+                                return Err(ScanError {
+                                    message: format!(
+                                        "conflicting widths for net '{}': {:?} vs {:?}; previously determined width was {:?} @ {}",
+                                        self.interner.resolve(name).unwrap_or("<unknown>"),
+                                        a,
+                                        b,
+                                        a,
+                                        prev_span.to_human_string()
+                                    ),
+                                    span: err_span,
+                                });
+                            }
+                        } else if implicit_scalar_placeholder {
+                            self.net_width_span_by_name.insert(name, err_span);
+                            clear_implicit_marker = true;
+                        }
                     }
                 }
+            }
+            if clear_implicit_marker {
+                self.implicit_net_by_name.remove(&name);
             }
             Ok(idx)
         } else {
@@ -3168,6 +3190,64 @@ endmodule
             .collect();
         assert_eq!(dv_nets.len(), 1);
         assert_eq!(dv_nets[0].width, Some((0, 0)));
+    }
+
+    #[test]
+    fn test_assign_use_before_vector_port_declaration_upgrades_implicit_widths() {
+        let src = r#"
+module m(a, y);
+  assign y[3:0] = a;
+  input [3:0] a;
+  output [3:0] y;
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
+
+        let a_nets: Vec<&Net> = parser
+            .nets
+            .iter()
+            .filter(|n| parser.interner.resolve(n.name).unwrap() == "a")
+            .collect();
+        let y_nets: Vec<&Net> = parser
+            .nets
+            .iter()
+            .filter(|n| parser.interner.resolve(n.name).unwrap() == "y")
+            .collect();
+        assert_eq!(a_nets.len(), 1);
+        assert_eq!(y_nets.len(), 1);
+        assert_eq!(a_nets[0].width, Some((3, 0)));
+        assert_eq!(y_nets[0].width, Some((3, 0)));
+    }
+
+    #[test]
+    fn test_assign_use_before_vector_wire_declaration_upgrades_implicit_widths() {
+        let src = r#"
+module m(y);
+  assign y = tmp;
+  wire [3:0] tmp;
+  output [3:0] y;
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
+
+        let tmp_nets: Vec<&Net> = parser
+            .nets
+            .iter()
+            .filter(|n| parser.interner.resolve(n.name).unwrap() == "tmp")
+            .collect();
+        let y_nets: Vec<&Net> = parser
+            .nets
+            .iter()
+            .filter(|n| parser.interner.resolve(n.name).unwrap() == "y")
+            .collect();
+        assert_eq!(tmp_nets.len(), 1);
+        assert_eq!(y_nets.len(), 1);
+        assert_eq!(tmp_nets[0].width, Some((3, 0)));
+        assert_eq!(y_nets[0].width, Some((3, 0)));
     }
 
     #[test]

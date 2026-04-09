@@ -175,6 +175,22 @@ endmodule
 }
 
 #[test]
+fn gv2aig_without_liberty_supports_declarations_after_assigns() {
+    let netlist_text = r#"
+module top(a, y);
+  assign y[3:0] = a;
+  input [3:0] a;
+  output [3:0] y;
+endmodule
+"#;
+
+    let (_temp_dir, out_path, output) = run_gv2aig(netlist_text, None);
+    assert_success(&output);
+    load_aiger_auto_from_path(&out_path, GateBuilderOptions::no_opt())
+        .expect("load declarations-after-assigns structural aiger");
+}
+
+#[test]
 fn gv2aig_without_liberty_supports_acyclic_overlapping_slice_dependencies() {
     let netlist_text = r#"
 module top(a, y);
