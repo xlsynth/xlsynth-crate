@@ -1605,7 +1605,7 @@ fn main() {
         )
         .subcommand(
             clap::Command::new("gv2aig")
-                .about("Converts a gate-level netlist and Liberty proto to AIGER")
+                .about("Converts a gate-level netlist to AIGER, with or without a Liberty proto")
                 .arg(
                     Arg::new("netlist")
                         .long("netlist")
@@ -1616,8 +1616,7 @@ fn main() {
                 .arg(
                     Arg::new("liberty_proto")
                         .long("liberty_proto")
-                        .help("Input Liberty proto (.proto or .textproto)")
-                        .required(true)
+                        .help("Optional Liberty proto (.proto or .textproto). Omit this for assign-only structural netlists that use only ~, &, |, and ^.")
                         .action(ArgAction::Set),
                 )
                 .arg(

@@ -138,7 +138,12 @@ xlsynth-driver block2fn \
 
 ### `gv2aig`: gate-level netlist to AIGER
 
-Converts a gate-level netlist plus Liberty proto into an AIGER file.
+Converts a gate-level netlist into an AIGER file.
+
+`gv2aig` supports two modes:
+
+- Liberty-backed cell projection: provide `--liberty_proto` for traditional gate-instance netlists whose cell behavior comes from a Liberty proto.
+- Liberty-free structural-assign projection: omit `--liberty_proto` for combinational netlists built from continuous `assign` statements using only bitwise `~`, `&`, `|`, and `^`.
 
 ```shell
 xlsynth-driver gv2aig \
@@ -147,13 +152,35 @@ xlsynth-driver gv2aig \
   --aiger-out ~/my_design_gates.aig
 ```
 
+- Liberty-free structural-assign mode:
+
+```shell
+xlsynth-driver gv2aig \
+  --netlist ~/my_design_structural.v \
+  --aiger-out ~/my_design_structural.aag
+```
+
 - Also prints a one-line summary of AIG stats to stdout (AND-node count, depth, and fanout histogram excluding literals).
 - Output format:
   - Use a `.aig` suffix for **binary** AIGER (`aig`).
   - Use a `.aag` suffix for **ASCII** AIGER (`aag`).
 - Optional flags:
-  - `--module_name <MODULE>` – select module when the netlist contains multiple modules.
+  - `--liberty_proto <LIBERTY_PROTO>` – optional for `gv2aig`. Required for cell-instance netlists; omit it for assign-only structural netlists.
+  - `--module_name <MODULE>` – select the module when the netlist contains multiple modules.
   - `--collapse_sequential <BOOL>` – if true (default), collapse sequential state variables by substituting next_state during projection. If false and a pin function references a sequential state variable (e.g., `IQ`/`IQN`), projection will fail.
+
+When `--liberty_proto` is omitted, the accepted Verilog subset is intentionally narrow:
+
+- Only continuous `assign` statements are supported; real cell instances are rejected.
+- Only bitwise `~`, `&`, `|`, and `^` are supported, with parentheses plus simple nets, bit-selects, part-selects, and literals.
+- Concatenation, ternary operators, logical operators, arithmetic, shifts, procedural blocks, and `inout` ports are rejected.
+- Validation is strict before projection:
+  - Each net bit must have a single driver.
+  - Output bits must be fully driven.
+  - Reads from undriven internal nets are rejected.
+  - Dependency cycles between assigns are rejected.
+
+`gv2ir` and `gv2block` are unchanged in this release and still require Liberty input.
 
 ### `gv-read-stats`: netlist statistics
 

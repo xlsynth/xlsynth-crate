@@ -71,6 +71,11 @@ pub fn convert_gv2ir_paths(
         )));
     }
     let module = &modules[0];
+    if !module.assigns.is_empty() {
+        return Err(anyhow!(
+            "gv2ir does not support preserved continuous assigns"
+        ));
+    }
 
     // Liberty
     let liberty_lib = load_liberty_from_path(liberty_proto_path)?;

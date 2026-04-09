@@ -25,6 +25,11 @@ pub fn convert_gv2block_paths(netlist_path: &Path, liberty_proto_path: &Path) ->
         )));
     }
     let module = &parsed.modules[0];
+    if !module.assigns.is_empty() {
+        return Err(anyhow!(
+            "gv2block does not support preserved continuous assigns"
+        ));
+    }
     let liberty_lib = load_liberty_from_path(liberty_proto_path)?;
     let lib_indexed = IndexedLibrary::new(liberty_lib);
     build_package_from_netlist(module, &parsed, &lib_indexed)

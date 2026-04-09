@@ -577,8 +577,10 @@ mod tests {
 
         let module = NetlistModule {
             name: top,
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![NetIndex(0), NetIndex(1), NetIndex(2)],
+            assigns: vec![],
             instances,
         };
 
@@ -689,8 +691,10 @@ mod tests {
 
         let module = NetlistModule {
             name: top,
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![NetIndex(0), NetIndex(1), NetIndex(2)],
+            assigns: vec![],
             instances,
         };
 
@@ -815,8 +819,10 @@ mod tests {
 
         let module = NetlistModule {
             name: top,
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![NetIndex(0), NetIndex(1)],
+            assigns: vec![],
             instances,
         };
 
@@ -930,8 +936,10 @@ mod tests {
 
         let module = NetlistModule {
             name: top,
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![NetIndex(0), NetIndex(1), NetIndex(2)],
+            assigns: vec![],
             instances,
         };
 

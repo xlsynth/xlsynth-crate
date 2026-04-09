@@ -3,6 +3,7 @@
 //! Convert a gate-level netlist + Liberty proto into a `GateFn` (AIG form).
 
 use crate::aig::GateFn;
+use crate::netlist::assigns_to_gatefn::project_gatefn_from_structural_assigns;
 use crate::netlist::gatefn_from_netlist::{
     GateFnProjectOptions, project_gatefn_from_netlist_and_liberty_with_options,
 };
@@ -27,14 +28,11 @@ impl Default for Gv2AigOptions {
     }
 }
 
-pub fn convert_gv2aig_paths(
-    netlist_path: &Path,
-    liberty_proto_path: &Path,
-    opts: &Gv2AigOptions,
-) -> Result<GateFn> {
-    let parsed = parse_netlist_from_path(netlist_path)?;
-
-    let module = if let Some(ref module_name) = opts.module_name {
+fn select_module<'a>(
+    parsed: &'a crate::netlist::io::ParsedNetlist,
+    module_name: &Option<String>,
+) -> Result<&'a crate::netlist::parse::NetlistModule> {
+    if let Some(module_name) = module_name {
         parsed
             .modules
             .iter()
@@ -62,9 +60,9 @@ pub fn convert_gv2aig_paths(
                     module_name,
                     available.join(", ")
                 ))
-            })?
+            })
     } else if parsed.modules.len() == 1 {
-        &parsed.modules[0]
+        Ok(&parsed.modules[0])
     } else {
         let mut available: Vec<String> = parsed
             .modules
@@ -78,12 +76,32 @@ pub fn convert_gv2aig_paths(
             })
             .collect();
         available.sort();
-        return Err(anyhow!(format!(
+        Err(anyhow!(format!(
             "netlist contains {} modules; specify --module_name; available modules: [{}]",
             parsed.modules.len(),
             available.join(", ")
-        )));
+        )))
+    }
+}
+
+pub fn convert_gv2aig_paths_with_optional_liberty(
+    netlist_path: &Path,
+    liberty_proto_path: Option<&Path>,
+    opts: &Gv2AigOptions,
+) -> Result<GateFn> {
+    let parsed = parse_netlist_from_path(netlist_path)?;
+    let module = select_module(&parsed, &opts.module_name)?;
+
+    let Some(liberty_proto_path) = liberty_proto_path else {
+        return project_gatefn_from_structural_assigns(module, &parsed.nets, &parsed.interner)
+            .map_err(|e| anyhow!(e));
     };
+
+    if !module.assigns.is_empty() {
+        return Err(anyhow!(
+            "Liberty-backed gv2aig does not support preserved continuous assigns; rerun without --liberty_proto only for assign-only structural netlists"
+        ));
+    }
 
     let liberty_lib = load_liberty_from_path(liberty_proto_path)?;
 
@@ -103,4 +121,12 @@ pub fn convert_gv2aig_paths(
     .map_err(|e| anyhow!(e))?;
 
     Ok(gate_fn)
+}
+
+pub fn convert_gv2aig_paths(
+    netlist_path: &Path,
+    liberty_proto_path: &Path,
+    opts: &Gv2AigOptions,
+) -> Result<GateFn> {
+    convert_gv2aig_paths_with_optional_liberty(netlist_path, Some(liberty_proto_path), opts)
 }

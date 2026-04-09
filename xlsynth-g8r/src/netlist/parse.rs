@@ -47,9 +47,22 @@ pub struct NetlistPort {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetlistModule {
     pub name: PortId,
+    /// Range into the file-global `nets` table that belongs to this module.
+    pub net_index_range: std::ops::Range<usize>,
     pub ports: Vec<NetlistPort>,
     pub wires: Vec<NetIndex>,
+    pub assigns: Vec<NetlistAssign>,
     pub instances: Vec<NetlistInstance>,
+}
+
+impl NetlistModule {
+    /// Looks up a net by name within this module's namespace.
+    pub fn find_net_index(&self, net_name: NetId, nets: &[Net]) -> Option<NetIndex> {
+        nets[self.net_index_range.clone()]
+            .iter()
+            .position(|net| net.name == net_name)
+            .map(|offset| NetIndex(self.net_index_range.start + offset))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +90,37 @@ impl NetRef {
             NetRef::Literal(_) | NetRef::Unconnected => {}
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssignExpr {
+    Leaf(NetRef),
+    Not(Box<AssignExpr>),
+    And(Box<AssignExpr>, Box<AssignExpr>),
+    Or(Box<AssignExpr>, Box<AssignExpr>),
+    Xor(Box<AssignExpr>, Box<AssignExpr>),
+}
+
+impl AssignExpr {
+    /// Collect all `NetIndex` values reachable from this assign expression into
+    /// `out`.
+    pub fn collect_net_indices(&self, out: &mut Vec<NetIndex>) {
+        match self {
+            AssignExpr::Leaf(net_ref) => net_ref.collect_net_indices(out),
+            AssignExpr::Not(inner) => inner.collect_net_indices(out),
+            AssignExpr::And(lhs, rhs) | AssignExpr::Or(lhs, rhs) | AssignExpr::Xor(lhs, rhs) => {
+                lhs.collect_net_indices(out);
+                rhs.collect_net_indices(out);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetlistAssign {
+    pub lhs: NetRef,
+    pub rhs: AssignExpr,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +171,10 @@ pub enum TokenPayload {
     Comma,
     Dot,
     Equals,
+    Tilde,
+    Ampersand,
+    Pipe,
+    Caret,
     Comment(String),
     Annotation { key: String, value: AnnotationValue },
     VerilogInt { width: Option<usize>, value: IrBits },
@@ -189,6 +237,10 @@ impl fmt::Display for TokenPayload {
             TokenPayload::Comma => write!(f, ","),
             TokenPayload::Dot => write!(f, "."),
             TokenPayload::Equals => write!(f, "="),
+            TokenPayload::Tilde => write!(f, "~"),
+            TokenPayload::Ampersand => write!(f, "&"),
+            TokenPayload::Pipe => write!(f, "|"),
+            TokenPayload::Caret => write!(f, "^"),
             TokenPayload::Comment(s) => write!(f, "//{}\n", s.replace('\n', " ")),
             TokenPayload::Annotation { key, value } => {
                 write!(f, "(* {} = {} *)", key, value)
@@ -937,6 +989,22 @@ impl<R: Read + 'static> TokenScanner<R> {
                 self.popb();
                 TokenPayload::Equals
             }
+            b'~' => {
+                self.popb();
+                TokenPayload::Tilde
+            }
+            b'&' => {
+                self.popb();
+                TokenPayload::Ampersand
+            }
+            b'|' => {
+                self.popb();
+                TokenPayload::Pipe
+            }
+            b'^' => {
+                self.popb();
+                TokenPayload::Caret
+            }
             b'\n' => {
                 self.popb();
                 return match self.next_token()? {
@@ -1019,8 +1087,7 @@ impl<R: Read + 'static> Parser<R> {
         Self::new_with_options(scanner, /* allow_implicit_nets= */ true)
     }
 
-    fn parse_netref_expr(&mut self) -> Result<NetRef, ScanError> {
-        // Optionally skip comments/annotations at start
+    fn skip_trivia(&mut self) -> Result<(), ScanError> {
         loop {
             let peek = self.scanner.peekt()?;
             match peek {
@@ -1033,25 +1100,139 @@ impl<R: Read + 'static> Parser<R> {
                 None => break,
             }
         }
+        Ok(())
+    }
+
+    fn parse_non_concat_netref_from_token(&mut self, net_tok: Token) -> Result<NetRef, ScanError> {
+        match net_tok.payload {
+            TokenPayload::Identifier(s) => {
+                let net_sym = self.interner.get_or_intern(s);
+                let net_idx = if let Some(&idx) = self.net_index_by_name.get(&net_sym) {
+                    idx
+                } else if let Some(pos) = self.nets[self.current_module_net_start..]
+                    .iter()
+                    .position(|n| n.name == net_sym)
+                {
+                    let idx = NetIndex(self.current_module_net_start + pos);
+                    self.net_index_by_name.insert(net_sym, idx);
+                    idx
+                } else if self.allow_implicit_nets {
+                    let idx = NetIndex(self.nets.len());
+                    self.nets.push(Net {
+                        name: net_sym,
+                        width: Some((0, 0)),
+                    });
+                    self.net_index_by_name.insert(net_sym, idx);
+                    self.net_width_span_by_name.insert(net_sym, net_tok.span);
+                    self.implicit_net_by_name.insert(net_sym);
+                    idx
+                } else {
+                    return Err(ScanError {
+                        message: format!(
+                            "net '{}' not declared as wire",
+                            self.interner.resolve(net_sym).unwrap()
+                        ),
+                        span: net_tok.span,
+                    });
+                };
+
+                self.skip_trivia()?;
+                if let Some(next) = self.scanner.peekt()? {
+                    if matches!(next.payload, TokenPayload::OBrack) {
+                        self.scanner.popt()?; // consume '['
+                        self.skip_trivia()?;
+                        let msb_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
+                            message: "expected msb or index in net reference".to_string(),
+                            span: Span {
+                                start: self.scanner.pos,
+                                limit: self.scanner.pos,
+                            },
+                        })?;
+                        let msb = match msb_tok.payload {
+                            TokenPayload::VerilogInt { value, .. } => {
+                                xlsynth::IrValue::from_bits(&value).to_u32().unwrap()
+                            }
+                            _ => {
+                                return Err(ScanError {
+                                    message: "expected integer for msb/index in net reference"
+                                        .to_string(),
+                                    span: msb_tok.span,
+                                });
+                            }
+                        };
+                        self.skip_trivia()?;
+                        let next2 = self.scanner.popt()?.ok_or_else(|| ScanError {
+                            message: "expected ':' or ']' in net reference".to_string(),
+                            span: Span {
+                                start: self.scanner.pos,
+                                limit: self.scanner.pos,
+                            },
+                        })?;
+                        return match next2.payload {
+                            TokenPayload::Colon => {
+                                self.skip_trivia()?;
+                                let lsb_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
+                                    message: "expected lsb in net reference".to_string(),
+                                    span: Span {
+                                        start: self.scanner.pos,
+                                        limit: self.scanner.pos,
+                                    },
+                                })?;
+                                let lsb = match lsb_tok.payload {
+                                    TokenPayload::VerilogInt { value, .. } => {
+                                        xlsynth::IrValue::from_bits(&value).to_u32().unwrap()
+                                    }
+                                    _ => {
+                                        return Err(ScanError {
+                                            message: "expected integer for lsb in net reference"
+                                                .to_string(),
+                                            span: lsb_tok.span,
+                                        });
+                                    }
+                                };
+                                self.skip_trivia()?;
+                                let cbrack_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
+                                    message: "expected ']' after part-select".to_string(),
+                                    span: Span {
+                                        start: self.scanner.pos,
+                                        limit: self.scanner.pos,
+                                    },
+                                })?;
+                                if !matches!(cbrack_tok.payload, TokenPayload::CBrack) {
+                                    return Err(ScanError {
+                                        message: "expected ']' after part-select".to_string(),
+                                        span: cbrack_tok.span,
+                                    });
+                                }
+                                Ok(NetRef::PartSelect(net_idx, msb, lsb))
+                            }
+                            TokenPayload::CBrack => Ok(NetRef::BitSelect(net_idx, msb)),
+                            _ => Err(ScanError {
+                                message: "expected ':' or ']' in net reference".to_string(),
+                                span: next2.span,
+                            }),
+                        };
+                    }
+                }
+                Ok(NetRef::Simple(net_idx))
+            }
+            TokenPayload::VerilogInt { value, width: _ } => Ok(NetRef::Literal(value)),
+            other => Err(ScanError {
+                message: format!("expected identifier for net name, got {:?}", other),
+                span: net_tok.span,
+            }),
+        }
+    }
+
+    fn parse_netref_expr(&mut self) -> Result<NetRef, ScanError> {
+        self.skip_trivia()?;
         if let Some(tok) = self.scanner.peekt()? {
             if matches!(tok.payload, TokenPayload::OBrace) {
                 // Parse concatenation: { expr (, expr)* }
                 self.scanner.popt()?; // consume '{'
                 let mut elems: Vec<NetRef> = Vec::new();
                 loop {
-                    // Skip comments/annotations between elements
-                    loop {
-                        let peek = self.scanner.peekt()?;
-                        match peek {
-                            Some(tok) => match &tok.payload {
-                                TokenPayload::Comment(_) | TokenPayload::Annotation { .. } => {
-                                    self.scanner.popt()?;
-                                }
-                                _ => break,
-                            },
-                            None => break,
-                        }
-                    }
+                    self.skip_trivia()?;
                     // If next is '}', end of concatenation
                     if let Some(tok2) = self.scanner.peekt()? {
                         if matches!(tok2.payload, TokenPayload::CBrace) {
@@ -1089,7 +1270,6 @@ impl<R: Read + 'static> Parser<R> {
                 return Ok(NetRef::Concat(elems));
             }
         }
-        // Parse identifier or literal
         let net_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
             message: "expected net name".to_string(),
             span: Span {
@@ -1097,130 +1277,118 @@ impl<R: Read + 'static> Parser<R> {
                 limit: self.scanner.pos,
             },
         })?;
-        match net_tok.payload {
-            TokenPayload::Identifier(s) => {
-                let net_sym = self.interner.get_or_intern(s);
-                // Lookup declared net (scoped to the current module).
-                let net_idx = if let Some(&idx) = self.net_index_by_name.get(&net_sym) {
-                    idx
-                } else if let Some(pos) = self.nets[self.current_module_net_start..]
-                    .iter()
-                    .position(|n| n.name == net_sym)
-                {
-                    let idx = NetIndex(self.current_module_net_start + pos);
-                    self.net_index_by_name.insert(net_sym, idx);
-                    idx
-                } else {
-                    if self.allow_implicit_nets {
-                        // Create an implicit 1-bit wire for this net, using a
-                        // width of (0, 0) to reflect a single bit.
-                        let idx = NetIndex(self.nets.len());
-                        self.nets.push(Net {
-                            name: net_sym,
-                            width: Some((0, 0)),
-                        });
-                        self.net_index_by_name.insert(net_sym, idx);
-                        self.net_width_span_by_name.insert(net_sym, net_tok.span);
-                        self.implicit_net_by_name.insert(net_sym);
-                        idx
-                    } else {
+        self.parse_non_concat_netref_from_token(net_tok)
+    }
+
+    fn parse_assign_primary(&mut self) -> Result<AssignExpr, ScanError> {
+        self.skip_trivia()?;
+        if let Some(tok) = self.scanner.peekt()? {
+            match tok.payload {
+                TokenPayload::OParen => {
+                    self.scanner.popt()?;
+                    let expr = self.parse_assign_expr()?;
+                    self.skip_trivia()?;
+                    let cparen = self.scanner.popt()?.ok_or_else(|| ScanError {
+                        message: "expected ')' to close assign expression".to_string(),
+                        span: Span {
+                            start: self.scanner.pos,
+                            limit: self.scanner.pos,
+                        },
+                    })?;
+                    if !matches!(cparen.payload, TokenPayload::CParen) {
                         return Err(ScanError {
-                            message: format!(
-                                "net '{}' not declared as wire",
-                                self.interner.resolve(net_sym).unwrap()
-                            ),
-                            span: net_tok.span,
+                            message: "expected ')' to close assign expression".to_string(),
+                            span: cparen.span,
                         });
                     }
-                };
-                // Optional bit/part select
-                if let Some(next) = self.scanner.peekt()? {
-                    match &next.payload {
-                        TokenPayload::OBrack => {
-                            self.scanner.popt()?; // consume '['
-                            let msb_tok = self.scanner.popt()?.ok_or_else(|| ScanError {
-                                message: "expected msb or index in net reference".to_string(),
-                                span: Span {
-                                    start: self.scanner.pos,
-                                    limit: self.scanner.pos,
-                                },
-                            })?;
-                            let msb = match msb_tok.payload {
-                                TokenPayload::VerilogInt { value, .. } => {
-                                    xlsynth::IrValue::from_bits(&value).to_u32().unwrap()
-                                }
-                                _ => {
-                                    return Err(ScanError {
-                                        message: "expected integer for msb/index in net reference"
-                                            .to_string(),
-                                        span: msb_tok.span,
-                                    });
-                                }
-                            };
-                            let next2 = self.scanner.popt()?.ok_or_else(|| ScanError {
-                                message: "expected ':' or ']' in net reference".to_string(),
-                                span: Span {
-                                    start: self.scanner.pos,
-                                    limit: self.scanner.pos,
-                                },
-                            })?;
-                            return match next2.payload {
-                                TokenPayload::Colon => {
-                                    let lsb_tok =
-                                        self.scanner.popt()?.ok_or_else(|| ScanError {
-                                            message: "expected lsb in net reference".to_string(),
-                                            span: Span {
-                                                start: self.scanner.pos,
-                                                limit: self.scanner.pos,
-                                            },
-                                        })?;
-                                    let lsb = match lsb_tok.payload {
-                                        TokenPayload::VerilogInt { value, .. } => {
-                                            xlsynth::IrValue::from_bits(&value).to_u32().unwrap()
-                                        }
-                                        _ => {
-                                            return Err(ScanError {
-                                                message:
-                                                    "expected integer for lsb in net reference"
-                                                        .to_string(),
-                                                span: lsb_tok.span,
-                                            });
-                                        }
-                                    };
-                                    let cbrack_tok =
-                                        self.scanner.popt()?.ok_or_else(|| ScanError {
-                                            message: "expected ']' after part-select".to_string(),
-                                            span: Span {
-                                                start: self.scanner.pos,
-                                                limit: self.scanner.pos,
-                                            },
-                                        })?;
-                                    if !matches!(cbrack_tok.payload, TokenPayload::CBrack) {
-                                        return Err(ScanError {
-                                            message: "expected ']' after part-select".to_string(),
-                                            span: cbrack_tok.span,
-                                        });
-                                    }
-                                    Ok(NetRef::PartSelect(net_idx, msb, lsb))
-                                }
-                                TokenPayload::CBrack => Ok(NetRef::BitSelect(net_idx, msb)),
-                                _ => Err(ScanError {
-                                    message: "expected ':' or ']' in net reference".to_string(),
-                                    span: next2.span,
-                                }),
-                            };
-                        }
-                        _ => {}
-                    }
+                    return Ok(expr);
                 }
-                Ok(NetRef::Simple(net_idx))
+                TokenPayload::OBrace => {
+                    return Err(ScanError {
+                        message: "concatenation is not supported in assign expressions".to_string(),
+                        span: tok.span,
+                    });
+                }
+                _ => {}
             }
-            TokenPayload::VerilogInt { value, width: _ } => Ok(NetRef::Literal(value)),
-            other => Err(ScanError {
-                message: format!("expected identifier for net name, got {:?}", other),
-                span: net_tok.span,
-            }),
         }
+        let tok = self.scanner.popt()?.ok_or_else(|| ScanError {
+            message: "expected assign expression operand".to_string(),
+            span: Span {
+                start: self.scanner.pos,
+                limit: self.scanner.pos,
+            },
+        })?;
+        Ok(AssignExpr::Leaf(
+            self.parse_non_concat_netref_from_token(tok)?,
+        ))
+    }
+
+    fn parse_assign_unary(&mut self) -> Result<AssignExpr, ScanError> {
+        self.skip_trivia()?;
+        if let Some(tok) = self.scanner.peekt()? {
+            if matches!(tok.payload, TokenPayload::Tilde) {
+                self.scanner.popt()?;
+                let inner = self.parse_assign_unary()?;
+                return Ok(AssignExpr::Not(Box::new(inner)));
+            }
+        }
+        self.parse_assign_primary()
+    }
+
+    fn parse_assign_and(&mut self) -> Result<AssignExpr, ScanError> {
+        let mut lhs = self.parse_assign_unary()?;
+        loop {
+            self.skip_trivia()?;
+            let Some(tok) = self.scanner.peekt()? else {
+                break;
+            };
+            if !matches!(tok.payload, TokenPayload::Ampersand) {
+                break;
+            }
+            self.scanner.popt()?;
+            let rhs = self.parse_assign_unary()?;
+            lhs = AssignExpr::And(Box::new(lhs), Box::new(rhs));
+        }
+        Ok(lhs)
+    }
+
+    fn parse_assign_xor(&mut self) -> Result<AssignExpr, ScanError> {
+        let mut lhs = self.parse_assign_and()?;
+        loop {
+            self.skip_trivia()?;
+            let Some(tok) = self.scanner.peekt()? else {
+                break;
+            };
+            if !matches!(tok.payload, TokenPayload::Caret) {
+                break;
+            }
+            self.scanner.popt()?;
+            let rhs = self.parse_assign_and()?;
+            lhs = AssignExpr::Xor(Box::new(lhs), Box::new(rhs));
+        }
+        Ok(lhs)
+    }
+
+    fn parse_assign_or(&mut self) -> Result<AssignExpr, ScanError> {
+        let mut lhs = self.parse_assign_xor()?;
+        loop {
+            self.skip_trivia()?;
+            let Some(tok) = self.scanner.peekt()? else {
+                break;
+            };
+            if !matches!(tok.payload, TokenPayload::Pipe) {
+                break;
+            }
+            self.scanner.popt()?;
+            let rhs = self.parse_assign_xor()?;
+            lhs = AssignExpr::Or(Box::new(lhs), Box::new(rhs));
+        }
+        Ok(lhs)
+    }
+
+    fn parse_assign_expr(&mut self) -> Result<AssignExpr, ScanError> {
+        self.parse_assign_or()
     }
 
     /// Ensures there is a `Net` with the given `name` present in `self.nets`.
@@ -1281,89 +1449,11 @@ impl<R: Read + 'static> Parser<R> {
         }
     }
 
-    /// Parses optional "[idx]" or "[msb:lsb]" bit/part-select that may follow
-    /// an identifier in an assign statement, for either the LHS or RHS.
-    fn parse_optional_assign_bit_or_part_select(
-        &mut self,
-        side_label: &str,
-    ) -> Result<(), ScanError> {
-        if let Some(next) = self.scanner.peekt()? {
-            if matches!(next.payload, TokenPayload::OBrack) {
-                // consume '['
-                self.scanner.popt()?;
-                // parse msb or idx
-                let t0 = self.scanner.popt()?.ok_or_else(|| ScanError {
-                    message: format!(
-                        "expected index or msb in assign {} bit/part-select",
-                        side_label
-                    ),
-                    span: Span {
-                        start: self.scanner.pos,
-                        limit: self.scanner.pos,
-                    },
-                })?;
-                match t0.payload {
-                    TokenPayload::VerilogInt { .. } => {}
-                    _ => {
-                        return Err(ScanError {
-                            message: format!(
-                                "expected integer in assign {} bit/part-select",
-                                side_label
-                            ),
-                            span: t0.span,
-                        });
-                    }
-                }
-                // Optional : lsb
-                if let Some(peek) = self.scanner.peekt()? {
-                    if matches!(peek.payload, TokenPayload::Colon) {
-                        self.scanner.popt()?; // consume ':'
-                        let t1 = self.scanner.popt()?.ok_or_else(|| ScanError {
-                            message: format!("expected lsb in {} part-select", side_label),
-                            span: Span {
-                                start: self.scanner.pos,
-                                limit: self.scanner.pos,
-                            },
-                        })?;
-                        match t1.payload {
-                            TokenPayload::VerilogInt { .. } => {}
-                            _ => {
-                                return Err(ScanError {
-                                    message: format!(
-                                        "expected integer for lsb in {} part-select",
-                                        side_label
-                                    ),
-                                    span: t1.span,
-                                });
-                            }
-                        }
-                    }
-                }
-                // expect ']'
-                let t_cb = self.scanner.popt()?.ok_or_else(|| ScanError {
-                    message: format!("expected ']' after {} bit/part-select", side_label),
-                    span: Span {
-                        start: self.scanner.pos,
-                        limit: self.scanner.pos,
-                    },
-                })?;
-                if !matches!(t_cb.payload, TokenPayload::CBrack) {
-                    return Err(ScanError {
-                        message: format!("expected ']' after {} bit/part-select", side_label),
-                        span: t_cb.span,
-                    });
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Parses: assign <ident>([msb:lsb]|[idx]) = <literal_or_ident>;
-    /// Only accepts RHS as either a Verilog integer literal or a simple
-    /// identifier; errors otherwise. The assign statement is currently ignored
-    /// semantically and only parsed for basic structural validation.
-    fn parse_assign_literal(&mut self) -> Result<(), ScanError> {
-        // consume 'assign' identifier
+    /// Parses: assign <lhs> = <rhs>;
+    ///
+    /// The supported RHS subset is limited to bitwise `~`, `&`, `|`, and `^`
+    /// over identifiers/literals with optional selects plus parentheses.
+    fn parse_assign(&mut self) -> Result<NetlistAssign, ScanError> {
         let t_assign = self.scanner.popt()?.ok_or_else(|| ScanError {
             message: "expected 'assign'".to_string(),
             span: Span {
@@ -1381,7 +1471,7 @@ impl<R: Read + 'static> Parser<R> {
             }
         }
 
-        // LHS base identifier
+        self.skip_trivia()?;
         let t_name = self.scanner.popt()?.ok_or_else(|| ScanError {
             message: "expected identifier on left-hand side of assign".to_string(),
             span: Span {
@@ -1389,17 +1479,18 @@ impl<R: Read + 'static> Parser<R> {
                 limit: self.scanner.pos,
             },
         })?;
-        if !matches!(t_name.payload, TokenPayload::Identifier(_)) {
+        let lhs = self.parse_non_concat_netref_from_token(t_name)?;
+        if !matches!(
+            lhs,
+            NetRef::Simple(_) | NetRef::BitSelect(_, _) | NetRef::PartSelect(_, _, _)
+        ) {
             return Err(ScanError {
-                message: "expected identifier on left-hand side of assign".to_string(),
-                span: t_name.span,
+                message: "left-hand side of assign must be an identifier or select".to_string(),
+                span: t_assign.span,
             });
         }
 
-        // Optional bit- or part-select on the LHS: [idx] or [msb:lsb]
-        self.parse_optional_assign_bit_or_part_select("LHS")?;
-
-        // expect '='
+        self.skip_trivia()?;
         let t_eq = self.scanner.popt()?.ok_or_else(|| ScanError {
             message: "expected '=' in assign".to_string(),
             span: Span {
@@ -1414,31 +1505,9 @@ impl<R: Read + 'static> Parser<R> {
             });
         }
 
-        // RHS literal or identifier (for simple feed-throughs like "assign out = in;"
-        // or "assign out[0] = in[0];"). We allow an optional bit- or part-select
-        // after an identifier, mirroring the LHS handling.
-        let t_rhs = self.scanner.popt()?.ok_or_else(|| ScanError {
-            message: "expected literal or identifier on right-hand side of assign".to_string(),
-            span: Span {
-                start: self.scanner.pos,
-                limit: self.scanner.pos,
-            },
-        })?;
-        match t_rhs.payload {
-            TokenPayload::VerilogInt { .. } => {}
-            TokenPayload::Identifier(_) => {
-                // Optional bit- or part-select on the RHS identifier: [idx] or [msb:lsb]
-                self.parse_optional_assign_bit_or_part_select("RHS")?;
-            }
-            _ => {
-                return Err(ScanError {
-                    message: "only literal or identifier RHS supported in assign".to_string(),
-                    span: t_rhs.span,
-                });
-            }
-        }
+        let rhs = self.parse_assign_expr()?;
 
-        // expect ';'
+        self.skip_trivia()?;
         let t_semi = self.scanner.popt()?.ok_or_else(|| ScanError {
             message: "expected ';' after assign".to_string(),
             span: Span {
@@ -1452,7 +1521,14 @@ impl<R: Read + 'static> Parser<R> {
                 span: t_semi.span,
             });
         }
-        Ok(())
+        Ok(NetlistAssign {
+            lhs,
+            rhs,
+            span: Span {
+                start: t_assign.span.start,
+                limit: t_semi.span.limit,
+            },
+        })
     }
     pub fn parse_file(&mut self) -> Result<Vec<NetlistModule>, ScanError> {
         log::trace!("parse_file: start");
@@ -1498,6 +1574,7 @@ impl<R: Read + 'static> Parser<R> {
         // `nets` vector so that lookups (and width checks) are scoped
         // per-module instead of across the entire file.
         self.current_module_net_start = self.nets.len();
+        let module_net_start = self.current_module_net_start;
         self.net_index_by_name.clear();
         self.net_width_span_by_name.clear();
         self.implicit_net_by_name.clear();
@@ -1595,6 +1672,7 @@ impl<R: Read + 'static> Parser<R> {
         // Parse body: ports, wires, and instances until 'endmodule'
         let mut ports = Vec::new();
         let mut wires = Vec::new();
+        let mut assigns = Vec::new();
         let mut instances = Vec::new();
         // Enforce uniqueness of instance names within a module: we track the
         // set of already-seen names and reject duplicates.
@@ -1623,7 +1701,7 @@ impl<R: Read + 'static> Parser<R> {
                         break;
                     }
                     TokenPayload::Identifier(s) if s == "assign" => {
-                        self.parse_assign_literal()?;
+                        assigns.push(self.parse_assign()?);
                     }
                     TokenPayload::Identifier(_) => {
                         let instance = self.parse_instance()?;
@@ -1673,8 +1751,10 @@ impl<R: Read + 'static> Parser<R> {
         });
         Ok(NetlistModule {
             name,
+            net_index_range: module_net_start..self.nets.len(),
             ports,
             wires,
+            assigns,
             instances,
         })
     }
@@ -2259,6 +2339,12 @@ endmodule
         let mut parser = Parser::new(TokenScanner::from_str(src));
         let modules = parser.parse_file().expect("parse ok");
         assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].assigns.len(), 1);
+        assert!(matches!(modules[0].assigns[0].lhs, NetRef::BitSelect(_, 1)));
+        assert!(matches!(
+            modules[0].assigns[0].rhs,
+            AssignExpr::Leaf(NetRef::Literal(_))
+        ));
     }
 
     #[test]
@@ -2273,6 +2359,173 @@ endmodule
         let mut parser = Parser::new(TokenScanner::from_str(src));
         let modules = parser.parse_file().expect("parse ok");
         assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].assigns.len(), 1);
+        assert!(matches!(
+            modules[0].assigns[0].lhs,
+            NetRef::PartSelect(_, 7, 4)
+        ));
+    }
+
+    #[test]
+    fn test_parse_module_with_unary_assign_expression() {
+        let src = r#"
+module m(a, y);
+  input a;
+  output y;
+  assign y = ~a;
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].assigns.len(), 1);
+        match &modules[0].assigns[0].rhs {
+            AssignExpr::Not(inner) => {
+                assert!(matches!(
+                    inner.as_ref(),
+                    AssignExpr::Leaf(NetRef::Simple(_))
+                ));
+            }
+            other => panic!("expected unary-not assign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_module_with_operator_precedence_in_assign_expression() {
+        let src = r#"
+module m(a, b, c, d, y);
+  input a;
+  input b;
+  input c;
+  input d;
+  output y;
+  assign y = a | b ^ c & ~d;
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        let rhs = &modules[0].assigns[0].rhs;
+        match rhs {
+            AssignExpr::Or(lhs, rhs) => {
+                assert!(matches!(lhs.as_ref(), AssignExpr::Leaf(NetRef::Simple(_))));
+                match rhs.as_ref() {
+                    AssignExpr::Xor(xor_lhs, xor_rhs) => {
+                        assert!(matches!(
+                            xor_lhs.as_ref(),
+                            AssignExpr::Leaf(NetRef::Simple(_))
+                        ));
+                        match xor_rhs.as_ref() {
+                            AssignExpr::And(and_lhs, and_rhs) => {
+                                assert!(matches!(
+                                    and_lhs.as_ref(),
+                                    AssignExpr::Leaf(NetRef::Simple(_))
+                                ));
+                                match and_rhs.as_ref() {
+                                    AssignExpr::Not(not_inner) => {
+                                        assert!(matches!(
+                                            not_inner.as_ref(),
+                                            AssignExpr::Leaf(NetRef::Simple(_))
+                                        ));
+                                    }
+                                    other => panic!("expected unary-not, got {:?}", other),
+                                }
+                            }
+                            other => panic!("expected and-expression, got {:?}", other),
+                        }
+                    }
+                    other => panic!("expected xor-expression, got {:?}", other),
+                }
+            }
+            other => panic!("expected top-level or-expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_module_with_parenthesized_assign_expression() {
+        let src = r#"
+module m(a, b, c, y);
+  input a;
+  input b;
+  input c;
+  output y;
+  assign y = (a | b) ^ c;
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        let rhs = &modules[0].assigns[0].rhs;
+        match rhs {
+            AssignExpr::Xor(lhs, rhs) => {
+                match lhs.as_ref() {
+                    AssignExpr::Or(or_lhs, or_rhs) => {
+                        assert!(matches!(
+                            or_lhs.as_ref(),
+                            AssignExpr::Leaf(NetRef::Simple(_))
+                        ));
+                        assert!(matches!(
+                            or_rhs.as_ref(),
+                            AssignExpr::Leaf(NetRef::Simple(_))
+                        ));
+                    }
+                    other => panic!("expected parenthesized or-expression, got {:?}", other),
+                }
+                assert!(matches!(rhs.as_ref(), AssignExpr::Leaf(NetRef::Simple(_))));
+            }
+            other => panic!("expected top-level xor-expression, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_module_with_selects_in_assign_expression() {
+        let src = r#"
+module m(a, b, y);
+  input [7:0] a;
+  input [3:0] b;
+  output [3:0] y;
+  assign y[3:0] = a[7:4] & b[3:0];
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("parse ok");
+        assert!(matches!(
+            modules[0].assigns[0].lhs,
+            NetRef::PartSelect(_, 3, 0)
+        ));
+        match &modules[0].assigns[0].rhs {
+            AssignExpr::And(lhs, rhs) => {
+                assert!(matches!(
+                    lhs.as_ref(),
+                    AssignExpr::Leaf(NetRef::PartSelect(_, 7, 4))
+                ));
+                assert!(matches!(
+                    rhs.as_ref(),
+                    AssignExpr::Leaf(NetRef::PartSelect(_, 3, 0))
+                ));
+            }
+            other => panic!(
+                "expected and-expression with part-select leaves, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn test_parse_module_rejects_concat_in_assign_expression() {
+        let src = r#"
+module m(a, b, y);
+  input a;
+  input b;
+  output [1:0] y;
+  assign y = {a, b};
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let err = parser.parse_file().expect_err("concat should be rejected");
+        assert!(
+            err.message.contains("concatenation is not supported"),
+            "unexpected error: {}",
+            err.message
+        );
     }
 
     #[test]
