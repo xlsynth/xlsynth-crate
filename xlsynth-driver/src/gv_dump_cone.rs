@@ -61,6 +61,16 @@ fn stop_condition_from_matches(matches: &ArgMatches) -> Result<StopCondition, St
 
 fn cone_error_to_report_message(err: ConeError) -> (String, Vec<(&'static str, String)>) {
     match err {
+        ConeError::UnsupportedAssigns {
+            module,
+            assign_count,
+        } => (
+            "gv-dump-cone does not support preserved continuous assigns".to_string(),
+            vec![
+                ("module", module),
+                ("assign_count", format!("{}", assign_count)),
+            ],
+        ),
         ConeError::MissingInstance { name } => (
             "start instance not found in module".to_string(),
             vec![("instance", name)],

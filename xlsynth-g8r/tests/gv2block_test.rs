@@ -571,3 +571,25 @@ endmodule
         legalized, legalized
     )));
 }
+
+#[test]
+fn test_gv2block_rejects_preserved_assigns() {
+    let netlist = r#"
+module top (a, y);
+  input a;
+  output y;
+  assign y = a;
+endmodule
+"#;
+    let mut liberty_file = NamedTempFile::new().unwrap();
+    write!(liberty_file, "{}", LIBERTY_TEXTPROTO).unwrap();
+    let mut netlist_file = NamedTempFile::new().unwrap();
+    write!(netlist_file, "{}", netlist).unwrap();
+
+    let err = convert_gv2block_paths_to_string(netlist_file.path(), liberty_file.path())
+        .expect_err("expected preserved assigns to be rejected");
+    assert!(
+        err.to_string()
+            .contains("gv2block does not support preserved continuous assigns")
+    );
+}

@@ -401,8 +401,10 @@ mod tests {
 
         let module = NetlistModule {
             name: interner.get_or_intern("top"),
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![NetIndex(0), NetIndex(1), NetIndex(2)],
+            assigns: vec![],
             instances,
         };
 

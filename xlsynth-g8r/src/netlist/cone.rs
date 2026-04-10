@@ -62,6 +62,9 @@ pub struct ConeVisit {
 /// Error type for cone traversal.
 #[derive(Debug)]
 pub enum ConeError {
+    /// Given when the selected module contains preserved continuous assigns,
+    /// which this instance-connectivity traversal does not model.
+    UnsupportedAssigns { module: String, assign_count: usize },
     /// Given when the user supplies an instance name to start from that is not
     /// present in the module.
     MissingInstance { name: String },
@@ -88,6 +91,14 @@ pub enum ConeError {
 impl std::fmt::Display for ConeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ConeError::UnsupportedAssigns {
+                module,
+                assign_count,
+            } => write!(
+                f,
+                "module '{}' contains {} preserved continuous assign(s); cone traversal only supports instance-based structural netlists",
+                module, assign_count
+            ),
             ConeError::MissingInstance { name } => {
                 write!(f, "start instance '{}' was not found in the module", name)
             }
@@ -149,6 +160,13 @@ impl<'a> ModuleConeContext<'a> {
         dff_cell_names: &HashSet<String>,
         module_port_dirs: Option<&HashMap<PortId, HashMap<PortId, PinDirection>>>,
     ) -> ConeResult<Self> {
+        if !module.assigns.is_empty() {
+            return Err(ConeError::UnsupportedAssigns {
+                module: resolve_to_string(interner, module.name),
+                assign_count: module.assigns.len(),
+            });
+        }
+
         // Precompute dff_types as a set of type-name symbols used by instances.
         let mut dff_types: HashSet<PortId> = HashSet::new();
 
@@ -511,7 +529,7 @@ mod tests {
         Net, NetIndex, NetRef, NetlistInstance, NetlistModule, NetlistPort, PortDirection,
     };
     use pretty_assertions::assert_eq;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn simple_fanout_levels() {
@@ -577,8 +595,10 @@ mod tests {
 
         let module = NetlistModule {
             name: top,
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![NetIndex(0), NetIndex(1), NetIndex(2)],
+            assigns: vec![],
             instances,
         };
 
@@ -689,8 +709,10 @@ mod tests {
 
         let module = NetlistModule {
             name: top,
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![NetIndex(0), NetIndex(1), NetIndex(2)],
+            assigns: vec![],
             instances,
         };
 
@@ -815,8 +837,10 @@ mod tests {
 
         let module = NetlistModule {
             name: top,
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![NetIndex(0), NetIndex(1)],
+            assigns: vec![],
             instances,
         };
 
@@ -930,8 +954,10 @@ mod tests {
 
         let module = NetlistModule {
             name: top,
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![NetIndex(0), NetIndex(1), NetIndex(2)],
+            assigns: vec![],
             instances,
         };
 
@@ -976,5 +1002,111 @@ mod tests {
         // clocking pin).
         let want = "INV,u1,Y,0\nDFF,u_dff,D,1";
         assert_eq!(rendered, want);
+    }
+
+    #[test]
+    fn visit_module_cone_rejects_preserved_assigns() {
+        let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
+        let a = interner.get_or_intern("a");
+        let n = interner.get_or_intern("n");
+        let y = interner.get_or_intern("y");
+        let buf = interner.get_or_intern("BUF");
+        let u1 = interner.get_or_intern("u1");
+        let top = interner.get_or_intern("top");
+
+        let nets = vec![
+            Net {
+                name: a,
+                width: None,
+            },
+            Net {
+                name: n,
+                width: None,
+            },
+            Net {
+                name: y,
+                width: None,
+            },
+        ];
+
+        let ports = vec![
+            NetlistPort {
+                direction: PortDirection::Input,
+                width: None,
+                name: a,
+            },
+            NetlistPort {
+                direction: PortDirection::Output,
+                width: None,
+                name: y,
+            },
+        ];
+
+        let module = NetlistModule {
+            name: top,
+            net_index_range: 0..nets.len(),
+            ports,
+            wires: vec![NetIndex(0), NetIndex(1), NetIndex(2)],
+            assigns: vec![crate::netlist::parse::NetlistAssign {
+                lhs: NetRef::Simple(NetIndex(1)),
+                rhs: crate::netlist::parse::AssignExpr::And(
+                    Box::new(crate::netlist::parse::AssignExpr::Leaf(NetRef::Simple(
+                        NetIndex(0),
+                    ))),
+                    Box::new(crate::netlist::parse::AssignExpr::Leaf(NetRef::Simple(
+                        NetIndex(0),
+                    ))),
+                ),
+                span: crate::netlist::parse::Span {
+                    start: crate::netlist::parse::Pos {
+                        lineno: 1,
+                        colno: 1,
+                    },
+                    limit: crate::netlist::parse::Pos {
+                        lineno: 1,
+                        colno: 15,
+                    },
+                },
+            }],
+            instances: vec![NetlistInstance {
+                type_name: buf,
+                instance_name: u1,
+                connections: vec![
+                    (interner.get_or_intern("A"), NetRef::Simple(NetIndex(1))),
+                    (interner.get_or_intern("Y"), NetRef::Simple(NetIndex(2))),
+                ],
+                inst_lineno: 0,
+                inst_colno: 0,
+            }],
+        };
+
+        let lib: Library = make_test_library();
+        let indexed = IndexedLibrary::new(lib);
+        let dff_cells: HashSet<String> = HashSet::new();
+        let err = visit_module_cone(
+            &module,
+            &nets,
+            &interner,
+            &indexed,
+            &dff_cells,
+            None::<&HashMap<PortId, HashMap<PortId, PinDirection>>>,
+            "u1",
+            None,
+            TraversalDirection::Fanout,
+            StopCondition::Levels(1),
+            |_v: &ConeVisit| Ok(()),
+        )
+        .expect_err("preserved assigns should be rejected");
+
+        match err {
+            ConeError::UnsupportedAssigns {
+                module,
+                assign_count,
+            } => {
+                assert_eq!(module, "top");
+                assert_eq!(assign_count, 1);
+            }
+            other => panic!("unexpected error: {}", other),
+        }
     }
 }

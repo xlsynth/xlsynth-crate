@@ -335,6 +335,12 @@ pub fn project_gatefn_from_netlist_and_liberty_with_options(
     dff_cells_inverted: &std::collections::HashSet<String>,
     options: &GateFnProjectOptions,
 ) -> Result<GateFn, String> {
+    if !module.assigns.is_empty() {
+        return Err(
+            "Liberty-backed netlist projection does not support preserved continuous assigns"
+                .to_string(),
+        );
+    }
     let used_cell_names: HashSet<String> = module
         .instances
         .iter()
@@ -952,8 +958,10 @@ mod tests {
         }];
         let module = NetlistModule {
             name: interner.get_or_intern("top"),
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![],
+            assigns: vec![],
             instances,
         };
         let liberty_lib = crate::liberty_proto::Library {
@@ -1037,8 +1045,10 @@ mod tests {
         }];
         let module = NetlistModule {
             name: interner.get_or_intern("top"),
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![],
+            assigns: vec![],
             instances,
         };
         let liberty_lib = crate::liberty_proto::Library {
@@ -1111,8 +1121,10 @@ mod tests {
         }];
         let module = NetlistModule {
             name: interner.get_or_intern("top"),
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![],
+            assigns: vec![],
             instances,
         };
         let liberty_lib = crate::liberty_proto::Library {
@@ -1210,8 +1222,10 @@ mod tests {
         }];
         let module = NetlistModule {
             name: interner.get_or_intern("top"),
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![],
+            assigns: vec![],
             instances,
         };
         let liberty_lib = crate::liberty_proto::Library {
@@ -1312,8 +1326,10 @@ mod tests {
         }];
         let module = NetlistModule {
             name: interner.get_or_intern("top"),
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![],
+            assigns: vec![],
             instances,
         };
         // Liberty with a DFF cell having pins D (input) and Q (output)
@@ -1415,8 +1431,10 @@ mod tests {
         }];
         let module = NetlistModule {
             name: interner.get_or_intern("top"),
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![],
+            assigns: vec![],
             instances,
         };
         let liberty_lib = crate::liberty_proto::Library {
@@ -1508,8 +1526,10 @@ mod tests {
         }];
         let module = NetlistModule {
             name: interner.get_or_intern("top"),
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![],
+            assigns: vec![],
             instances,
         };
         let liberty_lib = crate::liberty_proto::Library {
@@ -1606,8 +1626,10 @@ mod tests {
         }];
         let module = NetlistModule {
             name: interner.get_or_intern("top"),
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![],
+            assigns: vec![],
             instances,
         };
         let liberty_lib = crate::liberty_proto::Library {
@@ -1697,8 +1719,10 @@ mod tests {
         }];
         let module = NetlistModule {
             name: interner.get_or_intern("top"),
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![],
+            assigns: vec![],
             instances,
         };
         let liberty_lib = crate::liberty_proto::Library {
@@ -1791,8 +1815,10 @@ mod tests {
         }];
         let module = NetlistModule {
             name: interner.get_or_intern("top"),
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![],
+            assigns: vec![],
             instances,
         };
         let liberty_lib = crate::liberty_proto::Library {
@@ -1893,8 +1919,10 @@ mod tests {
         }];
         let module = NetlistModule {
             name: interner.get_or_intern("top"),
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![],
+            assigns: vec![],
             instances,
         };
         let liberty_lib = crate::liberty_proto::Library {
@@ -2022,8 +2050,10 @@ mod tests {
         }];
         let module = NetlistModule {
             name: interner.get_or_intern("top"),
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![],
+            assigns: vec![],
             instances,
         };
         // Include an unsupported sequential cell in the library, but do not instantiate
@@ -2169,8 +2199,10 @@ mod tests {
         }];
         let module = NetlistModule {
             name: interner.get_or_intern("top"),
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![],
+            assigns: vec![],
             instances,
         };
         let liberty_lib = crate::liberty_proto::Library {
@@ -2290,8 +2322,10 @@ mod tests {
         }];
         let module = NetlistModule {
             name: interner.get_or_intern("top"),
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![],
+            assigns: vec![],
             instances,
         };
         let liberty_lib = crate::liberty_proto::Library {
@@ -2404,8 +2438,10 @@ mod tests {
         }];
         let module = NetlistModule {
             name: interner.get_or_intern("top"),
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![],
+            assigns: vec![],
             instances,
         };
         let liberty_lib = crate::liberty_proto::Library {
@@ -2515,8 +2551,10 @@ mod tests {
         }];
         let module = NetlistModule {
             name: interner.get_or_intern("top"),
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![],
+            assigns: vec![],
             instances,
         };
         let liberty_lib = crate::liberty_proto::Library {
@@ -2604,8 +2642,10 @@ mod tests {
         }];
         let module = NetlistModule {
             name: interner.get_or_intern("top"),
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![],
+            assigns: vec![],
             instances,
         };
         let liberty_lib = crate::liberty_proto::Library {
@@ -2700,8 +2740,10 @@ mod tests {
         }];
         let module = NetlistModule {
             name: interner.get_or_intern("top"),
+            net_index_range: 0..nets.len(),
             ports,
             wires: vec![],
+            assigns: vec![],
             instances,
         };
         let liberty_lib = crate::liberty_proto::Library {

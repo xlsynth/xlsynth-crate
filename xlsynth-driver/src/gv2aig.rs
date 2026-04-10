@@ -7,7 +7,7 @@ use xlsynth_g8r::aig::get_summary_stats::get_aig_stats;
 use xlsynth_g8r::aig::get_summary_stats::AigStats;
 use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
 use xlsynth_g8r::aig_serdes::emit_aiger_binary::emit_aiger_binary;
-use xlsynth_g8r::netlist::gv2aig::{convert_gv2aig_paths, Gv2AigOptions};
+use xlsynth_g8r::netlist::gv2aig::{convert_gv2aig_paths_with_optional_liberty, Gv2AigOptions};
 
 fn format_fanout_histogram(stats: &AigStats) -> String {
     let mut s = String::new();
@@ -24,7 +24,7 @@ fn format_fanout_histogram(stats: &AigStats) -> String {
 
 pub fn handle_gv2aig(matches: &clap::ArgMatches) {
     let netlist_path = matches.get_one::<String>("netlist").unwrap();
-    let liberty_proto_path = matches.get_one::<String>("liberty_proto").unwrap();
+    let liberty_proto_path = matches.get_one::<String>("liberty_proto");
     let aiger_out = matches.get_one::<String>("aiger_out").unwrap();
 
     let module_name: Option<String> = matches.get_one::<String>("module_name").cloned();
@@ -39,9 +39,9 @@ pub fn handle_gv2aig(matches: &clap::ArgMatches) {
         collapse_sequential,
     };
 
-    let gate_fn = match convert_gv2aig_paths(
+    let gate_fn = match convert_gv2aig_paths_with_optional_liberty(
         Path::new(netlist_path),
-        Path::new(liberty_proto_path),
+        liberty_proto_path.map(|path| Path::new(path.as_str())),
         &opts,
     ) {
         Ok(g) => g,
