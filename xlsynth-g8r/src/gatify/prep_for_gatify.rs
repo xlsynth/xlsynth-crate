@@ -360,6 +360,18 @@ fn make_constant_shrl_bit_slice_expr(
     )
 }
 
+/// Rewrite a return-only shift consumer driven by a small literal-choice
+/// amount:
+///
+/// `target(shrl(x, sel(p, cases=[k0..kN-1], default=d)))`
+///   →
+/// `sel(p, cases=[target(shrl(x, k0)), .., target(shrl(x, kN-1))],
+///  default=target(shrl(x, d)))`
+///
+/// and likewise for `priority_sel`.
+///
+/// `build_case` constructs the rewritten consumer for one concrete shift
+/// amount.
 fn rewrite_shift_choice_target<FBuild>(
     f: &mut ir::Fn,
     target: NodeRef,
@@ -829,6 +841,13 @@ fn xor_and_operands_match(
     }
 }
 
+/// Rewrite:
+///
+/// `add(xor(a, b), and(a, b))`
+///   →
+/// `or(a, b)`
+///
+/// This is the standard half-adder identity in fixed-width arithmetic.
 fn rewrite_add_xor_and_to_or(f: &mut ir::Fn) -> usize {
     let mut rewrites = 0usize;
     let original_len = f.nodes.len();
@@ -856,6 +875,14 @@ fn rewrite_add_xor_and_to_or(f: &mut ir::Fn) -> usize {
     rewrites
 }
 
+/// Rewrite:
+///
+/// `bit_slice(shrl(x, sel(p, cases=[k0..kN-1], default=d)), start=S, width=W)`
+///   →
+/// `sel(p, cases=[bit_slice(shrl(x, k0), S, W), .., bit_slice(shrl(x, kN-1), S,
+/// W)],  default=bit_slice(shrl(x, d), S, W))`
+///
+/// and likewise for `priority_sel`.
 fn rewrite_small_shift_choice_bit_slices(f: &mut ir::Fn) -> usize {
     let use_counts = get_use_counts(f);
     let mut rewrites = 0usize;
@@ -883,6 +910,13 @@ fn rewrite_small_shift_choice_bit_slices(f: &mut ir::Fn) -> usize {
     rewrites
 }
 
+/// Rewrite:
+///
+/// `shrl(x, sel(p, cases=[k0..kN-1], default=d))`
+///   →
+/// `sel(p, cases=[shrl(x, k0), .., shrl(x, kN-1)], default=shrl(x, d))`
+///
+/// and likewise for `priority_sel`.
 fn rewrite_small_shift_choices(f: &mut ir::Fn) -> usize {
     let use_counts = get_use_counts(f);
     let mut rewrites = 0usize;

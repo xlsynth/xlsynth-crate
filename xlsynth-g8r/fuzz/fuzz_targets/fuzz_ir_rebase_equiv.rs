@@ -3,10 +3,10 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
-use xlsynth_pir::ir_fuzz::{generate_ir_fn, FuzzSampleSameTypedPair};
+use xlsynth_pir::ir_fuzz::{FuzzSampleSameTypedPair, generate_ir_fn};
 use xlsynth_pir::ir_validate::validate_fn;
 use xlsynth_pir::prove_equiv_via_toolchain::{
-    prove_ir_fn_equiv_via_toolchain, ToolchainEquivResult,
+    ToolchainEquivResult, prove_ir_fn_equiv_via_toolchain,
 };
 use xlsynth_pir::simple_rebase::rebase_onto;
 use xlsynth_pir::{ir, ir_parser};

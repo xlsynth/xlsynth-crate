@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use xlsynth_g8r::aig::bulk_replace::{bulk_replace, SubstitutionMap};
 use xlsynth_g8r::aig::dce::dce;
-use xlsynth_g8r::aig::{AigBitVector, AigOperand, AigRef, GateBuilder, GateBuilderOptions, GateFn};
+use xlsynth_g8r::aig::{AigBitVector, AigOperand, AigRef, GateFn, GateBuilder, GateBuilderOptions};
 use xlsynth_g8r::aig_sim::gate_sim::{eval, Collect};
 
 use xlsynth_pir::fuzz_utils;

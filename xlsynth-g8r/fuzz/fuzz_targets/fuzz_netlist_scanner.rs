@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Creates a randomized sequence of token-like payloads, emits a textual
-//! netlist fragment for those payloads, scans the text with `TokenScanner`, and
-//! checks that the resulting token payloads round-trip (shape and values) for
-//! the supported subset.
+//! Creates a randomized sequence of token-like payloads, emits a textual netlist fragment for those
+//! payloads, scans the text with `TokenScanner`, and checks that the resulting token payloads
+//! round-trip (shape and values) for the supported subset.
 
 #![no_main]
 
@@ -14,29 +13,10 @@ use xlsynth::IrValue;
 use xlsynth_g8r::netlist::parse::{AnnotationValue, Keyword, TokenPayload, TokenScanner};
 
 #[derive(Debug, Clone, Arbitrary)]
-enum ArbPunct {
-    OParen,
-    CParen,
-    OBrack,
-    CBrack,
-    OBrace,
-    CBrace,
-    Colon,
-    Semi,
-    Comma,
-    Dot,
-    Equals,
-}
+enum ArbPunct { OParen, CParen, OBrack, CBrack, OBrace, CBrace, Colon, Semi, Comma, Dot, Equals }
 
 #[derive(Debug, Clone, Arbitrary)]
-enum ArbKeyword {
-    Module,
-    Wire,
-    Endmodule,
-    Input,
-    Output,
-    Inout,
-}
+enum ArbKeyword { Module, Wire, Endmodule, Input, Output, Inout }
 
 #[derive(Debug, Clone, Arbitrary)]
 enum ArbPayload {
@@ -62,20 +42,13 @@ fn sanitize_annot_string_ascii(s: &str) -> String {
 fn sanitize_key(s: &str) -> String {
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {
-        if c.is_ascii_alphanumeric()
-            || c == '_'
-            || (i == 0 && (c.is_ascii_alphabetic() || c == '_'))
-        {
+        if c.is_ascii_alphanumeric() || c == '_' || (i == 0 && (c.is_ascii_alphabetic() || c == '_')) {
             out.push(c);
         } else {
             out.push('_');
         }
     }
-    if out.is_empty() {
-        "k".to_string()
-    } else {
-        out
-    }
+    if out.is_empty() { "k".to_string() } else { out }
 }
 
 fn sanitize_identifier(s: &str) -> String {
@@ -127,25 +100,21 @@ fn to_token_payload(a: &ArbPayload) -> TokenPayload {
             ArbPunct::Equals => TokenPayload::Equals,
         },
         ArbPayload::Comment(s) => TokenPayload::Comment(sanitize_comment_ascii(s)),
-        ArbPayload::VerilogIntDec { width, value } => match width {
-            Some(w) => {
-                let w = (*w).max(1).min(32) as usize;
-                let mask: u32 = if w == 32 { u32::MAX } else { (1u32 << w) - 1 };
-                let v_masked = *value & mask;
-                let ir = IrValue::parse_typed(&format!("bits[{}]:{}", w, v_masked)).unwrap();
-                TokenPayload::VerilogInt {
-                    width: Some(w),
-                    value: ir.to_bits().unwrap(),
+        ArbPayload::VerilogIntDec { width, value } => {
+            match width {
+                Some(w) => {
+                    let w = (*w).max(1).min(32) as usize;
+                    let mask: u32 = if w == 32 { u32::MAX } else { (1u32 << w) - 1 };
+                    let v_masked = *value & mask;
+                    let ir = IrValue::parse_typed(&format!("bits[{}]:{}", w, v_masked)).unwrap();
+                    TokenPayload::VerilogInt { width: Some(w), value: ir.to_bits().unwrap() }
+                }
+                None => {
+                    let ir = IrValue::parse_typed(&format!("bits[32]:{}", value)).unwrap();
+                    TokenPayload::VerilogInt { width: None, value: ir.to_bits().unwrap() }
                 }
             }
-            None => {
-                let ir = IrValue::parse_typed(&format!("bits[32]:{}", value)).unwrap();
-                TokenPayload::VerilogInt {
-                    width: None,
-                    value: ir.to_bits().unwrap(),
-                }
-            }
-        },
+        }
         ArbPayload::AnnotationString { key, value } => TokenPayload::Annotation {
             key: sanitize_key(key),
             value: AnnotationValue::String(sanitize_annot_string_ascii(value)),
@@ -161,9 +130,7 @@ fuzz_target!(|data: Vec<ArbPayload>| {
     let tokens: Vec<TokenPayload> = data.iter().map(to_token_payload).collect();
     let mut src = String::new();
     for (i, p) in tokens.iter().enumerate() {
-        if i > 0 {
-            src.push(' ');
-        }
+        if i > 0 { src.push(' '); }
         src.push_str(&p.to_string());
     }
     let lines: Vec<String> = src.lines().map(|s| s.to_string()).collect();
@@ -180,9 +147,7 @@ fuzz_target!(|data: Vec<ArbPayload>| {
         }
     }
 
-    if scanned.len() != tokens.len() {
-        return;
-    }
+    if scanned.len() != tokens.len() { return; }
     for (exp, got) in tokens.iter().zip(scanned.iter()) {
         assert_eq!(exp, got);
     }

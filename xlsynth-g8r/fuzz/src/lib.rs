@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use arbitrary::Arbitrary;
-use xlsynth_g8r::aig::{AigBitVector, GateBuilder, GateBuilderOptions, GateFn};
+use xlsynth_g8r::aig::{AigBitVector, GateFn, GateBuilder, GateBuilderOptions};
 
 #[derive(Debug, Clone, Arbitrary)]
 pub struct FuzzOp {

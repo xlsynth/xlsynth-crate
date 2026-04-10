@@ -2,7 +2,7 @@
 
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use xlsynth_pir::ir_fuzz::{generate_ir_fn, FuzzSample};
+use xlsynth_pir::ir_fuzz::{FuzzSample, generate_ir_fn};
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::structural_similarity::structurally_equivalent_ir;
 
