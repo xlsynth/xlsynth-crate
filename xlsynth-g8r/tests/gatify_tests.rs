@@ -754,6 +754,35 @@ bit_count_test_cases!(test_sdiv_dslx_to_gates, |input_bits: u32, opt: Opt| -> ()
     );
 });
 
+bit_count_test_cases!(
+    test_sdiv_ir_to_gates_zero_divisor_semantics,
+    |input_bits: u32, opt: Opt| -> () {
+        do_test_ir_conversion(
+            &format!(
+                "package sample
+fn do_sdiv(x: bits[{input_bits}], y: bits[{input_bits}]) -> bits[{input_bits}] {{
+    ret result: bits[{input_bits}] = sdiv(x, y, id=3)
+}}",
+            ),
+            opt,
+        );
+    }
+);
+
+#[test]
+fn test_fuzz_regression_signed_div_zero_tuple_passthrough() {
+    let ir_text = "package fuzz_test
+
+fn fuzz_test(p0: bits[7] id=1, p1: bits[6] id=2, p2: bits[2] id=3, p3: bits[1] id=4) -> (bits[2], bits[7], bits[7], bits[7], bits[7]) {
+  sdiv.5: bits[2] = sdiv(p2, p2, id=5)
+  bit_slice_update.6: bits[6] = bit_slice_update(p1, sdiv.5, p1, id=6)
+  ret tuple.7: (bits[2], bits[7], bits[7], bits[7], bits[7]) = tuple(sdiv.5, p0, p0, p0, p0, id=7)
+}
+";
+    do_test_ir_conversion(ir_text, Opt::No);
+    do_test_ir_conversion(ir_text, Opt::Yes);
+}
+
 bit_count_test_cases!(test_smod_dslx_to_gates, |input_bits: u32, opt: Opt| -> () {
     do_test_dslx_conversion(
         input_bits,

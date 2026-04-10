@@ -5,6 +5,7 @@ use std::sync::Arc;
 use xlsynth_g8r::check_equivalence;
 use xlsynth_g8r::gatify::ir2gate;
 use xlsynth_g8r::gatify::prep_for_gatify::PrepForGatifyOptions;
+use xlsynth_pir::desugar_extensions::desugar_extensions_in_fn;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_range_info::IrRangeInfo;
@@ -13,6 +14,17 @@ fn parse_top_fn(ir_text: &str) -> ir::Fn {
     let mut parser = ir_parser::Parser::new(ir_text);
     let pkg = parser.parse_and_validate_package().expect("parse/validate");
     pkg.get_top_fn().expect("top fn").clone()
+}
+
+fn assert_ir_fns_equivalent(orig_fn: &ir::Fn, prepared_fn: &ir::Fn) {
+    let mut orig_desugared = orig_fn.clone();
+    desugar_extensions_in_fn(&mut orig_desugared).expect("desugar original PIR");
+    let mut prepared_desugared = prepared_fn.clone();
+    desugar_extensions_in_fn(&mut prepared_desugared).expect("desugar prepared PIR");
+    let orig_pkg_text = format!("package orig\n\ntop {}", orig_desugared);
+    let prepared_pkg_text = format!("package prepared\n\ntop {}", prepared_desugared);
+    check_equivalence::check_equivalence(&orig_pkg_text, &prepared_pkg_text)
+        .expect("prepared PIR should be equivalent to original PIR");
 }
 
 fn build_range_info(ir_text: &str, top: &str, pir_fn: &ir::Fn) -> Arc<IrRangeInfo> {
@@ -80,6 +92,7 @@ top fn cone(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
         "expected rewrite to ext_carry_out; got:\n{}",
         prepared_text
     );
+    assert_ir_fns_equivalent(&pir_fn, &prepared);
 
     let gatify_output = ir2gate::gatify(
         &pir_fn,
@@ -123,6 +136,7 @@ fn carry_out_rewrite_sweep_up_to_4_bits_only_triggers_for_msb_slice() {
                     prepared_text.contains("ext_carry_out("),
                     "expected ext_carry_out rewrite for w={w} start={start}; got:\n{prepared_text}"
                 );
+                assert_ir_fns_equivalent(&pir_fn, &prepared);
             } else {
                 assert!(
                     !prepared_text.contains("ext_carry_out("),
@@ -182,6 +196,7 @@ top fn cone(a: bits[9] id=1, b: bits[9] id=2) -> bits[1] {
         "unexpected rewrite to ext_carry_out; got:\n{}",
         prepared_text
     );
+    assert_ir_fns_equivalent(&pir_fn, &prepared);
 
     let gatify_output = ir2gate::gatify(
         &pir_fn,
@@ -235,6 +250,7 @@ top fn cone(p0: bits[9] id=1, p1: bits[9] id=2) -> bits[1] {
         "expected rewrite to ext_carry_out with range proof; got:\n{}",
         prepared_text
     );
+    assert_ir_fns_equivalent(&pir_fn, &prepared);
 
     let gatify_output = ir2gate::gatify(
         &pir_fn,

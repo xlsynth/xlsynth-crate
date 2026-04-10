@@ -5,18 +5,18 @@ use libfuzzer_sys::fuzz_target;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use xlsynth_prover::prover::ir_equiv::prove_ir_fn_equiv;
+use xlsynth_prover::prover::types::{AssertionSemantics, EquivResult, ProverFn as EqProverFn};
 #[cfg(any(feature = "with-bitwuzla-system", feature = "with-bitwuzla-built"))]
 use xlsynth_prover::solver::bitwuzla::{Bitwuzla, BitwuzlaOptions};
 #[cfg(any(feature = "with-boolector-system", feature = "with-boolector-built"))]
 use xlsynth_prover::solver::boolector::{Boolector, BoolectorConfig};
 #[cfg(feature = "has-easy-smt")]
 use xlsynth_prover::solver::easy_smt::{EasySmtConfig, EasySmtSolver};
-use xlsynth_prover::prover::ir_equiv::prove_ir_fn_equiv;
-use xlsynth_prover::prover::types::{AssertionSemantics, EquivResult, ProverFn as EqProverFn};
 
 use xlsynth_pir::ir::{Fn as IrFn, NodeRef, PackageMember};
-use xlsynth_pir::ir_fuzz::{FuzzSample, generate_ir_fn};
-use xlsynth_pir::ir_outline::{OutlineOrdering, compute_default_ordering, outline_with_ordering};
+use xlsynth_pir::ir_fuzz::{generate_ir_fn, FuzzSample};
+use xlsynth_pir::ir_outline::{compute_default_ordering, outline_with_ordering, OutlineOrdering};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_utils::operands;
 

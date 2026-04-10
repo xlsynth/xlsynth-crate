@@ -16,6 +16,17 @@ fn parse_top_fn(ir_text: &str) -> ir::Fn {
     pkg.get_top_fn().expect("top fn").clone()
 }
 
+fn assert_ir_fns_equivalent(orig_fn: &ir::Fn, prepared_fn: &ir::Fn) {
+    let mut orig_desugared = orig_fn.clone();
+    desugar_extensions_in_fn(&mut orig_desugared).expect("desugar original PIR");
+    let mut prepared_desugared = prepared_fn.clone();
+    desugar_extensions_in_fn(&mut prepared_desugared).expect("desugar prepared PIR");
+    let orig_pkg_text = format!("package orig\n\ntop {}", orig_desugared);
+    let prepared_pkg_text = format!("package prepared\n\ntop {}", prepared_desugared);
+    check_equivalence::check_equivalence(&orig_pkg_text, &prepared_pkg_text)
+        .expect("prepared PIR should be equivalent to original PIR");
+}
+
 fn build_encode_one_hot_ir_text(bit_count: u32, lsb_prio: bool) -> String {
     let mut package = IrPackage::new("sample").expect("create package");
     let fn_name = match lsb_prio {
@@ -105,6 +116,7 @@ fn rewrite_triggers_for_all_positive_widths() {
                 prepared_text.contains("ext_prio_encode("),
                 "expected ext_prio_encode rewrite for bit_count={bit_count} lsb_prio={lsb_prio}; got:\n{prepared_text}"
             );
+            assert_ir_fns_equivalent(&pir_fn, &prepared);
         }
     }
 }
@@ -129,6 +141,7 @@ fn rewrite_does_not_trigger_when_one_hot_has_multiple_users() {
             !prepared_text.contains("ext_prio_encode("),
             "unexpected ext_prio_encode rewrite when one_hot has multiple users; got:\n{prepared_text}"
         );
+        assert_ir_fns_equivalent(&pir_fn, &prepared);
     }
 }
 

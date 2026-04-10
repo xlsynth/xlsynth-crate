@@ -17,7 +17,11 @@ struct MulConstSample {
 
 fn build_ir_text(sample: &MulConstSample) -> String {
     let width = usize::from(sample.width).clamp(1, 16);
-    let modulus = if width == 16 { 1u64 << 16 } else { 1u64 << width };
+    let modulus = if width == 16 {
+        1u64 << 16
+    } else {
+        1u64 << width
+    };
     let constant = u64::from(sample.constant) % modulus;
     let umul = if sample.literal_on_lhs {
         "umul(c, x, id=3)"
@@ -60,5 +64,4 @@ fuzz_target!(|sample: MulConstSample| {
         },
     )
     .expect("gatify with built-in mul-by-const lowering");
-
 });

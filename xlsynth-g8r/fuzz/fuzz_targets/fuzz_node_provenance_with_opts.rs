@@ -5,15 +5,15 @@
 use std::collections::HashSet;
 
 use libfuzzer_sys::fuzz_target;
-use rand::SeedableRng;
 use rand::rngs::StdRng;
-use xlsynth_g8r::aig::cut_db_rewrite::{RewriteOptions, rewrite_gatefn_with_cut_db};
-use xlsynth_g8r::aig::fraig::{IterationBounds, fraig_optimize};
+use rand::SeedableRng;
+use xlsynth_g8r::aig::cut_db_rewrite::{rewrite_gatefn_with_cut_db, RewriteOptions};
+use xlsynth_g8r::aig::fraig::{fraig_optimize, IterationBounds};
 use xlsynth_g8r::aig::gate::AigNode;
 use xlsynth_g8r::cut_db::loader::CutDb;
 use xlsynth_g8r::gatify::ir2gate::{self, GatifyOptions};
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
-use xlsynth_pir::ir_fuzz::{FuzzSample, generate_ir_fn};
+use xlsynth_pir::ir_fuzz::{generate_ir_fn, FuzzSample};
 use xlsynth_pir::ir_parser;
 
 fuzz_target!(|sample: FuzzSample| {
@@ -102,7 +102,10 @@ fuzz_target!(|sample: FuzzSample| {
             );
         }
         match node {
-            AigNode::Literal { value, pir_node_ids } => {
+            AigNode::Literal {
+                value,
+                pir_node_ids,
+            } => {
                 assert_eq!(
                     index, 0,
                     "only the builder's constant-false literal should appear in gatify output"

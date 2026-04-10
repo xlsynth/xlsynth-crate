@@ -63,8 +63,8 @@ fuzz_target!(|data: &[u8]| {
     let total_rewrites = u64::try_from(aug_result.total_rewrites).unwrap_or(u64::MAX);
     let eq_shll_slice_literal_rewrites =
         u64::try_from(aug_result.rewrite_stats.eq_shll_slice_literal).unwrap_or(u64::MAX);
-    let pow2_rewrites =
-        u64::try_from(aug_result.rewrite_stats.pow2_msb_compare_with_eq_tiebreak).unwrap_or(u64::MAX);
+    let pow2_rewrites = u64::try_from(aug_result.rewrite_stats.pow2_msb_compare_with_eq_tiebreak)
+        .unwrap_or(u64::MAX);
     TOTAL_REWRITES.fetch_add(total_rewrites, Ordering::Relaxed);
     EQ_SHLL_SLICE_LITERAL_REWRITES.fetch_add(eq_shll_slice_literal_rewrites, Ordering::Relaxed);
     POW2_MSB_TIEBREAK_REWRITES.fetch_add(pow2_rewrites, Ordering::Relaxed);
