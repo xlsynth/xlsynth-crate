@@ -3735,6 +3735,7 @@ pub struct GatifyOptions {
     pub range_info: Option<Arc<IrRangeInfo>>,
     pub enable_rewrite_carry_out: bool,
     pub enable_rewrite_prio_encode: bool,
+    pub enable_rewrite_nary_add: bool,
     pub array_index_lowering_strategy: ArrayIndexLoweringStrategy,
 }
 
@@ -3841,6 +3842,7 @@ pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, 
         PrepForGatifyOptions {
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
             enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
+            enable_rewrite_nary_add: options.enable_rewrite_nary_add,
             ..PrepForGatifyOptions::all_opts_enabled()
         },
     );
@@ -3863,6 +3865,7 @@ pub fn gatify_node_as_fn(
         PrepForGatifyOptions {
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
             enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
+            enable_rewrite_nary_add: options.enable_rewrite_nary_add,
             ..PrepForGatifyOptions::all_opts_enabled()
         },
     );
@@ -3994,6 +3997,7 @@ mod tests {
                 range_info: None,
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
+                enable_rewrite_nary_add: false,
                 array_index_lowering_strategy: Default::default(),
             },
         )
@@ -4031,6 +4035,7 @@ fn f(a: bits[8], b: bits[8]) -> bits[8] {
                 range_info: None,
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
+                enable_rewrite_nary_add: false,
                 array_index_lowering_strategy: Default::default(),
             },
         )
@@ -4104,6 +4109,7 @@ fn f(a: bits[2] id=1, b: bits[2] id=2) -> bits[2] {
                 range_info: None,
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
+                enable_rewrite_nary_add: false,
                 array_index_lowering_strategy: Default::default(),
             },
         )
@@ -4159,6 +4165,7 @@ top fn f(start: bits[2], a: bits[8]) -> bits[8][1] {
                 range_info: None,
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
+                enable_rewrite_nary_add: false,
                 array_index_lowering_strategy: Default::default(),
             },
         )
@@ -4199,6 +4206,7 @@ top fn f(start: bits[4], a: bits[8], b: bits[8]) -> bits[8][1] {
                 range_info: None,
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
+                enable_rewrite_nary_add: false,
                 array_index_lowering_strategy: Default::default(),
             },
         )
@@ -4238,6 +4246,7 @@ top fn f(start: bits[4], a: bits[8], b: bits[8]) -> bits[8][1] {
                 range_info: None,
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
+                enable_rewrite_nary_add: false,
                 array_index_lowering_strategy: Default::default(),
             },
         )

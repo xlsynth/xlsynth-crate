@@ -143,6 +143,22 @@ top fn f(p0: bits[{width}] id=1, p1: bits[{width}] id=2, p2: bits[{width}] id=3)
 }
 
 fn lower_ir_to_gates_output(ir_text: &str, fold: bool, hash: bool) -> ir2gates::Ir2GatesOutput {
+    lower_ir_to_gates_output_with_options(
+        ir_text,
+        fold,
+        hash,
+        AdderMapping::RippleCarry,
+        /* enable_rewrite_nary_add= */ false,
+    )
+}
+
+fn lower_ir_to_gates_output_with_options(
+    ir_text: &str,
+    fold: bool,
+    hash: bool,
+    adder_mapping: AdderMapping,
+    enable_rewrite_nary_add: bool,
+) -> ir2gates::Ir2GatesOutput {
     ir2gates::ir2gates_from_ir_text(
         ir_text,
         None,
@@ -152,12 +168,52 @@ fn lower_ir_to_gates_output(ir_text: &str, fold: bool, hash: bool) -> ir2gates::
             check_equivalence: false,
             enable_rewrite_carry_out: false,
             enable_rewrite_prio_encode: false,
-            adder_mapping: AdderMapping::RippleCarry,
+            enable_rewrite_nary_add,
+            adder_mapping,
             mul_adder_mapping: None,
             aug_opt: Default::default(),
         },
     )
     .expect("ir2gates")
+}
+
+#[test]
+fn prep_generated_ext_nary_add_inherits_global_adder_mapping() {
+    let ir_text = r#"package test
+
+fn f(a: bits[32] id=1, b: bits[32] id=2, c: bits[32] id=3) -> bits[32] {
+  add.4: bits[32] = add(a, b, id=4)
+  ret add.5: bits[32] = add(add.4, c, id=5)
+}
+"#;
+
+    let get_gate_count = |adder_mapping| {
+        let out = lower_ir_to_gates_output_with_options(
+            ir_text,
+            /* fold= */ false,
+            /* hash= */ false,
+            adder_mapping,
+            /* enable_rewrite_nary_add= */ true,
+        );
+        get_aig_stats(&out.gatify_output.gate_fn).and_nodes
+    };
+
+    let ripple_carry_gates = get_gate_count(AdderMapping::RippleCarry);
+    let brent_kung_gates = get_gate_count(AdderMapping::BrentKung);
+    let kogge_stone_gates = get_gate_count(AdderMapping::KoggeStone);
+
+    assert!(
+        ripple_carry_gates < brent_kung_gates,
+        "expected prep-generated ext_nary_add to inherit ripple-carry mapping; got ripple_carry={} brent_kung={}",
+        ripple_carry_gates,
+        brent_kung_gates
+    );
+    assert!(
+        brent_kung_gates < kogge_stone_gates,
+        "expected prep-generated ext_nary_add to inherit brent-kung/kogge-stone mapping; got brent_kung={} kogge_stone={}",
+        brent_kung_gates,
+        kogge_stone_gates
+    );
 }
 
 fn get_ir_gate_stats(ir_text: &str, fold: bool, hash: bool) -> (usize, usize) {

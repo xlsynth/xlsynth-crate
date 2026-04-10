@@ -105,6 +105,7 @@ top fn cone(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
             range_info: Some(range_info),
             enable_rewrite_carry_out: true,
             enable_rewrite_prio_encode: false,
+            enable_rewrite_nary_add: false,
             array_index_lowering_strategy: Default::default(),
         },
     )
@@ -156,6 +157,7 @@ fn carry_out_rewrite_sweep_up_to_4_bits_only_triggers_for_msb_slice() {
                     range_info: None,
                     enable_rewrite_carry_out: true,
                     enable_rewrite_prio_encode: false,
+                    enable_rewrite_nary_add: false,
                     array_index_lowering_strategy: Default::default(),
                 },
             )
@@ -209,6 +211,7 @@ top fn cone(a: bits[9] id=1, b: bits[9] id=2) -> bits[1] {
             range_info: None,
             enable_rewrite_carry_out: true,
             enable_rewrite_prio_encode: false,
+            enable_rewrite_nary_add: false,
             array_index_lowering_strategy: Default::default(),
         },
     )
@@ -263,6 +266,7 @@ top fn cone(p0: bits[9] id=1, p1: bits[9] id=2) -> bits[1] {
             range_info: Some(range_info),
             enable_rewrite_carry_out: true,
             enable_rewrite_prio_encode: false,
+            enable_rewrite_nary_add: false,
             array_index_lowering_strategy: Default::default(),
         },
     )

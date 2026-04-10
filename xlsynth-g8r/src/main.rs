@@ -87,6 +87,7 @@ fn main() {
         hash: args.hash,
         enable_rewrite_carry_out: false,
         enable_rewrite_prio_encode: false,
+        enable_rewrite_nary_add: false,
         adder_mapping: AdderMapping::default(),
         mul_adder_mapping: None,
         fraig: args.fraig,

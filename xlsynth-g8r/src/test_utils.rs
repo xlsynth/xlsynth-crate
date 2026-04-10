@@ -224,6 +224,7 @@ fn gatify_for_test_ir_fn(g8r_ir_fn: &ir::Fn, opt: Opt) -> GateFn {
             range_info: None,
             enable_rewrite_carry_out: false,
             enable_rewrite_prio_encode: false,
+            enable_rewrite_nary_add: false,
             array_index_lowering_strategy: Default::default(),
         },
     )

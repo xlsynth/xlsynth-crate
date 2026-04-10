@@ -47,6 +47,7 @@ fn stats_for_ir_text(ir_text: &str, opt: Opt) -> SummaryStats {
             range_info: None,
             enable_rewrite_carry_out: false,
             enable_rewrite_prio_encode: false,
+            enable_rewrite_nary_add: false,
             array_index_lowering_strategy: Default::default(),
         },
     )
