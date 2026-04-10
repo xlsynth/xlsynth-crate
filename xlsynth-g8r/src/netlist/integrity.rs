@@ -41,6 +41,22 @@ pub enum IntegritySummary {
     Findings(Vec<IntegrityFinding>),
 }
 
+fn mark_netref_driven(net_ref: &NetRef, nets: &[Net], driven: &mut HashSet<SymbolU32>) {
+    let mut net_indices = Vec::new();
+    net_ref.collect_net_indices(&mut net_indices);
+    for idx in net_indices {
+        driven.insert(nets[idx.0].name);
+    }
+}
+
+fn mark_assign_expr_used(expr: &AssignExpr, nets: &[Net], used_as_input: &mut HashSet<SymbolU32>) {
+    let mut net_indices = Vec::new();
+    expr.collect_net_indices(&mut net_indices);
+    for idx in net_indices {
+        used_as_input.insert(nets[idx.0].name);
+    }
+}
+
 /// Hard validation failure for Liberty-free structural-assign netlists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuralAssignValidationError(pub String);
@@ -944,6 +960,14 @@ pub fn check_module(
                 NetRef::Unconnected => {}
             }
         }
+    }
+
+    // Preserved continuous assigns are also connectivity edges for advisory
+    // integrity checking, even in callers that do not use the Liberty-free
+    // structural projection path.
+    for assign in &module.assigns {
+        mark_netref_driven(&assign.lhs, nets, &mut driven);
+        mark_assign_expr_used(&assign.rhs, nets, &mut used_as_input);
     }
 
     let mut findings = Vec::new();

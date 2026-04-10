@@ -75,3 +75,37 @@ endmodule"#;
         _ => panic!("expected findings"),
     }
 }
+
+#[test]
+fn test_assign_driven_netlist_is_clean() {
+    let netlist = r#"module top (a, y);
+  assign y = a;
+  input a;
+  output y;
+endmodule"#;
+    let scanner = TokenScanner::with_line_lookup(netlist.as_bytes(), Box::new(|_| None));
+    let mut parser = NetlistParser::new(scanner);
+    let modules = parser.parse_file().unwrap();
+    assert_eq!(modules.len(), 1);
+    let lib = build_simple_lib();
+    let summary = check_module(&modules[0], &parser.nets, &parser.interner, &lib);
+    assert!(matches!(summary, IntegritySummary::Clean));
+}
+
+#[test]
+fn test_assign_chain_marks_internal_wire_driven_and_used() {
+    let netlist = r#"module top (a, y);
+  input a;
+  output y;
+  wire n;
+  assign n = a;
+  assign y = n;
+endmodule"#;
+    let scanner = TokenScanner::with_line_lookup(netlist.as_bytes(), Box::new(|_| None));
+    let mut parser = NetlistParser::new(scanner);
+    let modules = parser.parse_file().unwrap();
+    assert_eq!(modules.len(), 1);
+    let lib = build_simple_lib();
+    let summary = check_module(&modules[0], &parser.nets, &parser.interner, &lib);
+    assert!(matches!(summary, IntegritySummary::Clean));
+}
