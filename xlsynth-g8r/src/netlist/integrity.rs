@@ -41,11 +41,11 @@ pub enum IntegritySummary {
     Findings(Vec<IntegrityFinding>),
 }
 
-fn mark_netref_driven(net_ref: &NetRef, nets: &[Net], driven: &mut HashSet<SymbolU32>) {
+fn mark_netref_used(net_ref: &NetRef, nets: &[Net], used_as_input: &mut HashSet<SymbolU32>) {
     let mut net_indices = Vec::new();
     net_ref.collect_net_indices(&mut net_indices);
     for idx in net_indices {
-        driven.insert(nets[idx.0].name);
+        used_as_input.insert(nets[idx.0].name);
     }
 }
 
@@ -54,6 +54,153 @@ fn mark_assign_expr_used(expr: &AssignExpr, nets: &[Net], used_as_input: &mut Ha
     expr.collect_net_indices(&mut net_indices);
     for idx in net_indices {
         used_as_input.insert(nets[idx.0].name);
+    }
+}
+
+/// Best-effort bit-coverage tracker for advisory integrity checking.
+///
+/// Unlike `BitDriverTracker`, this tracker never errors on duplicate marks.
+/// When given an out-of-range select, it conservatively falls back to marking
+/// the whole net so the advisory checker does not invent spurious "unused"
+/// findings from malformed references.
+struct BitCoverageTracker {
+    covered: HashMap<NetIndex, Vec<bool>>,
+}
+
+impl BitCoverageTracker {
+    fn new() -> Self {
+        Self {
+            covered: HashMap::new(),
+        }
+    }
+
+    fn ensure_entry(&mut self, idx: NetIndex, nets: &[Net]) -> &mut Vec<bool> {
+        self.covered
+            .entry(idx)
+            .or_insert_with(|| vec![false; nets[idx.0].width_bits()])
+    }
+
+    fn mark_bit(&mut self, idx: NetIndex, bit: u32, nets: &[Net]) {
+        let width = nets[idx.0].width_bits();
+        let Some(offset) = nets[idx.0].bit_offset(bit) else {
+            self.mark_whole(idx, nets);
+            return;
+        };
+        let entry = self.ensure_entry(idx, nets);
+        if offset < width {
+            entry[offset] = true;
+        }
+    }
+
+    fn mark_whole(&mut self, idx: NetIndex, nets: &[Net]) {
+        let entry = self.ensure_entry(idx, nets);
+        for bit in entry.iter_mut() {
+            *bit = true;
+        }
+    }
+
+    fn mark_target(&mut self, target: NetBitTarget, nets: &[Net]) {
+        self.mark_bit(target.idx, target.bit_number, nets);
+    }
+
+    fn mark_netref(&mut self, net_ref: &NetRef, nets: &[Net]) {
+        match net_ref {
+            NetRef::Simple(idx) => self.mark_whole(*idx, nets),
+            NetRef::BitSelect(idx, bit) => self.mark_bit(*idx, *bit, nets),
+            NetRef::PartSelect(idx, msb, lsb) => {
+                for offset in 0..select_width_bits(*msb, *lsb) {
+                    let Some(bit_number) = select_bit_number(*msb, *lsb, offset) else {
+                        self.mark_whole(*idx, nets);
+                        return;
+                    };
+                    self.mark_bit(*idx, bit_number, nets);
+                }
+            }
+            NetRef::Concat(elems) => {
+                for elem in elems {
+                    self.mark_netref(elem, nets);
+                }
+            }
+            NetRef::Literal(_) | NetRef::Unconnected => {}
+        }
+    }
+
+    fn is_bit_marked(&self, idx: NetIndex, bit: u32, nets: &[Net]) -> bool {
+        let Some(offset) = nets[idx.0].bit_offset(bit) else {
+            return false;
+        };
+        self.covered
+            .get(&idx)
+            .and_then(|bits| bits.get(offset))
+            .copied()
+            .unwrap_or(false)
+    }
+
+    fn is_all_marked(&self, idx: NetIndex, nets: &[Net]) -> bool {
+        self.covered.get(&idx).is_some_and(|bits| {
+            bits.len() == nets[idx.0].width_bits() && bits.iter().all(|bit| *bit)
+        })
+    }
+}
+
+fn advisory_net_ref_bit_is_driven(
+    net_ref: &NetRef,
+    rhs_bit_index: usize,
+    allow_literal_zero_extend: bool,
+    tracker: &BitCoverageTracker,
+    nets: &[Net],
+) -> bool {
+    match net_ref {
+        NetRef::Simple(idx) => nets[idx.0]
+            .bit_number(rhs_bit_index)
+            .is_some_and(|bit_number| tracker.is_bit_marked(*idx, bit_number, nets)),
+        NetRef::BitSelect(idx, bit) => {
+            rhs_bit_index == 0 && tracker.is_bit_marked(*idx, *bit, nets)
+        }
+        NetRef::PartSelect(idx, msb, lsb) => select_bit_number(*msb, *lsb, rhs_bit_index)
+            .is_some_and(|bit_number| tracker.is_bit_marked(*idx, bit_number, nets)),
+        NetRef::Literal(bits) => rhs_bit_index < bits.get_bit_count() || allow_literal_zero_extend,
+        NetRef::Unconnected | NetRef::Concat(_) => false,
+    }
+}
+
+fn advisory_assign_expr_bit_refs(
+    expr: &AssignExpr,
+    rhs_bit_index: usize,
+    allow_literal_zero_extend: bool,
+    tracker: &BitCoverageTracker,
+    nets: &[Net],
+) -> bool {
+    match expr {
+        AssignExpr::Leaf(net_ref) => advisory_net_ref_bit_is_driven(
+            net_ref,
+            rhs_bit_index,
+            allow_literal_zero_extend,
+            tracker,
+            nets,
+        ),
+        AssignExpr::Not(inner) => advisory_assign_expr_bit_refs(
+            inner,
+            rhs_bit_index,
+            allow_literal_zero_extend,
+            tracker,
+            nets,
+        ),
+        AssignExpr::And(lhs, rhs) | AssignExpr::Or(lhs, rhs) | AssignExpr::Xor(lhs, rhs) => {
+            advisory_assign_expr_bit_refs(
+                lhs,
+                rhs_bit_index,
+                allow_literal_zero_extend,
+                tracker,
+                nets,
+            ) && advisory_assign_expr_bit_refs(
+                rhs,
+                rhs_bit_index,
+                allow_literal_zero_extend,
+                tracker,
+                nets,
+            )
+        }
     }
 }
 
@@ -890,7 +1037,7 @@ pub fn check_module(
     }
 
     let mut used_as_input: HashSet<SymbolU32> = HashSet::new();
-    let mut driven: HashSet<SymbolU32> = HashSet::new();
+    let mut driven_bits = BitCoverageTracker::new();
 
     // Module ports contribute to driving/using sets.
     for NetlistPort {
@@ -899,13 +1046,17 @@ pub fn check_module(
     {
         match direction {
             PortDirection::Input => {
-                driven.insert(*name);
+                if let Some(idx) = module.find_net_index(*name, nets) {
+                    driven_bits.mark_whole(idx, nets);
+                }
             }
             PortDirection::Output => {
                 used_as_input.insert(*name); // environment observes the output
             }
             PortDirection::Inout => {
-                driven.insert(*name);
+                if let Some(idx) = module.find_net_index(*name, nets) {
+                    driven_bits.mark_whole(idx, nets);
+                }
                 used_as_input.insert(*name);
             }
         }
@@ -930,44 +1081,78 @@ pub fn check_module(
                 .and_then(|m| m.get(port_str))
                 .copied()
                 .unwrap_or(PinDirection::Invalid as i32);
-            // For concatenations, conservatively mark each element; otherwise classify
-            // single net.
-            let mut mark = |sym: SymbolU32| {
+            // Classify the connected net reference according to the instance
+            // pin direction. The advisory bit tracker handles selects and
+            // concats directly.
+            let mut mark = |net_ref: &NetRef| {
                 if dir == PinDirection::Output as i32 {
-                    driven.insert(sym);
+                    driven_bits.mark_netref(net_ref, nets);
                 } else if dir == PinDirection::Input as i32 {
-                    used_as_input.insert(sym);
+                    mark_netref_used(net_ref, nets, &mut used_as_input);
                 } else {
-                    driven.insert(sym);
-                    used_as_input.insert(sym);
+                    driven_bits.mark_netref(net_ref, nets);
+                    mark_netref_used(net_ref, nets, &mut used_as_input);
                 }
             };
             match netref {
-                NetRef::Simple(idx) | NetRef::BitSelect(idx, _) | NetRef::PartSelect(idx, _, _) => {
-                    mark(nets[idx.0].name);
-                }
-                NetRef::Concat(elems) => {
-                    for e in elems {
-                        match e {
-                            NetRef::Simple(idx)
-                            | NetRef::BitSelect(idx, _)
-                            | NetRef::PartSelect(idx, _, _) => mark(nets[idx.0].name),
-                            NetRef::Literal(_) | NetRef::Unconnected | NetRef::Concat(_) => {}
-                        }
-                    }
-                }
-                NetRef::Literal(_) => {}
-                NetRef::Unconnected => {}
+                NetRef::Simple(_)
+                | NetRef::BitSelect(_, _)
+                | NetRef::PartSelect(_, _, _)
+                | NetRef::Concat(_) => mark(netref),
+                NetRef::Literal(_) | NetRef::Unconnected => {}
             }
         }
     }
 
-    // Preserved continuous assigns are also connectivity edges for advisory
-    // integrity checking, even in callers that do not use the Liberty-free
-    // structural projection path.
+    let mut pending_assign_bits: Vec<(PendingAssignBit, bool, &AssignExpr)> = Vec::new();
     for assign in &module.assigns {
-        mark_netref_driven(&assign.lhs, nets, &mut driven);
         mark_assign_expr_used(&assign.rhs, nets, &mut used_as_input);
+        let Ok(lhs_bits) = expand_lhs_bits(&assign.lhs, nets, interner) else {
+            continue;
+        };
+        let Ok(rhs_width) = assign_expr_width_bits(&assign.rhs, nets, interner) else {
+            continue;
+        };
+        let allow_literal_zero_extend = is_bare_literal_assign_expr(&assign.rhs);
+        if lhs_bits.len() != rhs_width && !allow_literal_zero_extend {
+            continue;
+        }
+        for (rhs_bit_index, target) in lhs_bits.into_iter().enumerate() {
+            pending_assign_bits.push((
+                PendingAssignBit {
+                    assign_index: 0,
+                    rhs_bit_index,
+                    target,
+                },
+                allow_literal_zero_extend,
+                &assign.rhs,
+            ));
+        }
+    }
+
+    loop {
+        let mut next_pending = Vec::new();
+        let mut progressed = false;
+        for (pending, allow_literal_zero_extend, rhs) in pending_assign_bits {
+            if advisory_assign_expr_bit_refs(
+                rhs,
+                pending.rhs_bit_index,
+                allow_literal_zero_extend,
+                &driven_bits,
+                nets,
+            ) {
+                if !driven_bits.is_bit_marked(pending.target.idx, pending.target.bit_number, nets) {
+                    driven_bits.mark_target(pending.target, nets);
+                    progressed = true;
+                }
+            } else {
+                next_pending.push((pending, allow_literal_zero_extend, rhs));
+            }
+        }
+        if !progressed {
+            break;
+        }
+        pending_assign_bits = next_pending;
     }
 
     let mut findings = Vec::new();
@@ -985,19 +1170,24 @@ pub fn check_module(
 
     // Outputs must be driven.
     for port in &module.ports {
-        if port.direction == PortDirection::Output && !driven.contains(&port.name) {
-            let name = interner
-                .resolve(port.name)
-                .unwrap_or("<unknown>")
-                .to_string();
-            findings.push(IntegrityFinding::UndrivenOutput(name));
+        if port.direction == PortDirection::Output {
+            let fully_driven = module
+                .find_net_index(port.name, nets)
+                .is_some_and(|idx| driven_bits.is_all_marked(idx, nets));
+            if !fully_driven {
+                let name = interner
+                    .resolve(port.name)
+                    .unwrap_or("<unknown>")
+                    .to_string();
+                findings.push(IntegrityFinding::UndrivenOutput(name));
+            }
         }
     }
 
     // Every declared wire should be driven and used.
     for net_idx in &module.wires {
         let sym = nets[net_idx.0].name;
-        if !driven.contains(&sym) {
+        if !driven_bits.is_all_marked(*net_idx, nets) {
             let name = interner.resolve(sym).unwrap_or("<unknown>").to_string();
             findings.push(IntegrityFinding::UndrivenWire(name.clone()));
         }
