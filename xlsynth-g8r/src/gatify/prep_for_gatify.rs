@@ -33,6 +33,11 @@ pub struct PrepForGatifyOptions {
     /// `ext_prio_encode(x, lsb_prio=...)` so gatification can
     /// use a specialized priority-encoder lowering.
     pub enable_rewrite_prio_encode: bool,
+
+    /// When true, rewrite small finite-choice shift amounts (e.g. `sel` or
+    /// `priority_sel` over literal shifts) into select-like projections of
+    /// constant shifts so gatify can avoid a full barrel shifter cone.
+    pub enable_rewrite_small_shift_choices: bool,
 }
 
 impl PrepForGatifyOptions {
@@ -41,6 +46,7 @@ impl PrepForGatifyOptions {
         Self {
             enable_rewrite_carry_out: true,
             enable_rewrite_prio_encode: true,
+            enable_rewrite_small_shift_choices: true,
         }
     }
 
@@ -49,6 +55,7 @@ impl PrepForGatifyOptions {
         Self {
             enable_rewrite_carry_out: false,
             enable_rewrite_prio_encode: false,
+            enable_rewrite_small_shift_choices: false,
         }
     }
 }
@@ -227,6 +234,18 @@ fn get_or_insert_bits1_literal(f: &mut ir::Fn, value: bool) -> NodeRef {
     push_node(f, Type::Bits(1), NodePayload::Literal(lit))
 }
 
+fn get_or_insert_ubits_literal(f: &mut ir::Fn, bit_count: usize, value: u64) -> NodeRef {
+    for (idx, n) in f.nodes.iter().enumerate() {
+        if let NodePayload::Literal(lit) = &n.payload {
+            if n.ty.bit_count() == bit_count && lit.to_u64().ok() == Some(value) {
+                return NodeRef { index: idx };
+            }
+        }
+    }
+    let lit = IrValue::make_ubits(bit_count, value).expect("ubits literal");
+    push_node(f, Type::Bits(bit_count), NodePayload::Literal(lit))
+}
+
 fn is_ubits_literal_0_or_1_of_width(f: &ir::Fn, nr: NodeRef, w: usize) -> Option<bool> {
     let node = f.get_node(nr);
     if node.ty.bit_count() != w {
@@ -240,6 +259,241 @@ fn is_ubits_literal_0_or_1_of_width(f: &ir::Fn, nr: NodeRef, w: usize) -> Option
         0 => Some(false),
         1 => Some(true),
         _ => None,
+    }
+}
+
+fn literal_u64_if_bits_node(f: &ir::Fn, nr: NodeRef) -> Option<u64> {
+    let node = f.get_node(nr);
+    let NodePayload::Literal(value) = &node.payload else {
+        return None;
+    };
+    value.to_u64().ok()
+}
+
+fn literal_shift_amounts(f: &ir::Fn, refs: &[NodeRef]) -> Option<Vec<usize>> {
+    refs.iter()
+        .map(|nr| {
+            let value = literal_u64_if_bits_node(f, *nr)?;
+            usize::try_from(value).ok()
+        })
+        .collect()
+}
+
+fn make_constant_shrl_expr(f: &mut ir::Fn, arg: NodeRef, shift: usize) -> NodeRef {
+    let arg_width = f.get_node(arg).ty.bit_count();
+    if shift == 0 {
+        return arg;
+    }
+    if arg_width == 0 || shift >= arg_width {
+        return get_or_insert_ubits_literal(f, arg_width, 0);
+    }
+
+    let shifted_width = arg_width - shift;
+    let shifted_slice = push_node(
+        f,
+        Type::Bits(shifted_width),
+        NodePayload::BitSlice {
+            arg,
+            start: shift,
+            width: shifted_width,
+        },
+    );
+    let zero_prefix = get_or_insert_ubits_literal(f, shift, 0);
+    push_node(
+        f,
+        Type::Bits(arg_width),
+        NodePayload::Nary(NaryOp::Concat, vec![zero_prefix, shifted_slice]),
+    )
+}
+
+fn make_constant_shrl_bit_slice_expr(
+    f: &mut ir::Fn,
+    arg: NodeRef,
+    shift: usize,
+    start: usize,
+    width: usize,
+) -> NodeRef {
+    let arg_width = f.get_node(arg).ty.bit_count();
+    if width == 0 {
+        return get_or_insert_ubits_literal(f, 0, 0);
+    }
+    let Some(source_start) = start.checked_add(shift) else {
+        return get_or_insert_ubits_literal(f, width, 0);
+    };
+    if source_start >= arg_width {
+        return get_or_insert_ubits_literal(f, width, 0);
+    }
+
+    let valid_width = std::cmp::min(width, arg_width - source_start);
+    if valid_width == 0 {
+        return get_or_insert_ubits_literal(f, width, 0);
+    }
+    if valid_width == width {
+        if source_start == 0 && width == arg_width {
+            return arg;
+        }
+        return push_node(
+            f,
+            Type::Bits(width),
+            NodePayload::BitSlice {
+                arg,
+                start: source_start,
+                width,
+            },
+        );
+    }
+
+    let payload_bits = push_node(
+        f,
+        Type::Bits(valid_width),
+        NodePayload::BitSlice {
+            arg,
+            start: source_start,
+            width: valid_width,
+        },
+    );
+    let zero_prefix = get_or_insert_ubits_literal(f, width - valid_width, 0);
+    push_node(
+        f,
+        Type::Bits(width),
+        NodePayload::Nary(NaryOp::Concat, vec![zero_prefix, payload_bits]),
+    )
+}
+
+/// Rewrite a return-only shift consumer driven by a small literal-choice
+/// amount:
+///
+/// `target(shrl(x, sel(p, cases=[k0..kN-1], default=d)))`
+///   →
+/// `sel(p, cases=[target(shrl(x, k0)), .., target(shrl(x, kN-1))],
+///  default=target(shrl(x, d)))`
+///
+/// and likewise for `priority_sel`.
+///
+/// `build_case` constructs the rewritten consumer for one concrete shift
+/// amount.
+fn rewrite_shift_choice_target<FBuild>(
+    f: &mut ir::Fn,
+    target: NodeRef,
+    use_counts: &[usize],
+    amount: NodeRef,
+    mut build_case: FBuild,
+) -> bool
+where
+    FBuild: FnMut(&mut ir::Fn, usize) -> NodeRef,
+{
+    const MAX_LITERAL_CASES: usize = 4;
+
+    let Some(ret_nr) = f.ret_node_ref else {
+        return false;
+    };
+    let (ret_target, target_to_nil) = if ret_nr == target {
+        if use_counts[target.index] != 1 {
+            return false;
+        }
+        (target, None)
+    } else {
+        match f.get_node(ret_nr).payload.clone() {
+            NodePayload::Unop(Unop::Identity, arg)
+                if arg == target
+                    && use_counts[target.index] == 1
+                    && use_counts[ret_nr.index] == 1 =>
+            {
+                (ret_nr, Some(target))
+            }
+            _ => return false,
+        }
+    };
+
+    let target_ty = f.get_node_ty(target).clone();
+    match f.get_node(amount).payload.clone() {
+        NodePayload::Sel {
+            selector,
+            cases,
+            default,
+        } => {
+            if cases.is_empty() || cases.len() > MAX_LITERAL_CASES {
+                return false;
+            }
+            let Some(case_amounts) = literal_shift_amounts(f, &cases) else {
+                return false;
+            };
+            let default_amount = match default {
+                Some(nr) => {
+                    let Some(amount) =
+                        literal_u64_if_bits_node(f, nr).and_then(|v| usize::try_from(v).ok())
+                    else {
+                        return false;
+                    };
+                    Some(amount)
+                }
+                None => None,
+            };
+
+            let new_cases = case_amounts
+                .into_iter()
+                .map(|amount| build_case(f, amount))
+                .collect();
+            let new_default = default_amount.map(|amount| build_case(f, amount));
+            let replacement = push_node(
+                f,
+                target_ty.clone(),
+                NodePayload::Sel {
+                    selector,
+                    cases: new_cases,
+                    default: new_default,
+                },
+            );
+            ir_utils::replace_node_with_ref(f, ret_target, replacement)
+                .expect("prep_for_gatify: replacing target with select-like shift rewrite failed");
+            if let Some(target_to_nil) = target_to_nil {
+                nil_out_node(f, target_to_nil);
+            }
+            true
+        }
+        NodePayload::PrioritySel {
+            selector,
+            cases,
+            default,
+        } => {
+            if cases.is_empty() || cases.len() > MAX_LITERAL_CASES {
+                return false;
+            }
+            let Some(default_ref) = default else {
+                return false;
+            };
+            let Some(case_amounts) = literal_shift_amounts(f, &cases) else {
+                return false;
+            };
+            let Some(default_amount) =
+                literal_u64_if_bits_node(f, default_ref).and_then(|v| usize::try_from(v).ok())
+            else {
+                return false;
+            };
+
+            let new_cases = case_amounts
+                .into_iter()
+                .map(|amount| build_case(f, amount))
+                .collect();
+            let new_default = Some(build_case(f, default_amount));
+            let replacement = push_node(
+                f,
+                target_ty.clone(),
+                NodePayload::PrioritySel {
+                    selector,
+                    cases: new_cases,
+                    default: new_default,
+                },
+            );
+            ir_utils::replace_node_with_ref(f, ret_target, replacement).expect(
+                "prep_for_gatify: replacing target with priority-select shift rewrite failed",
+            );
+            if let Some(target_to_nil) = target_to_nil {
+                nil_out_node(f, target_to_nil);
+            }
+            true
+        }
+        _ => false,
     }
 }
 
@@ -559,6 +813,133 @@ fn rewrite_add_slice_carry_out_to_ext_carry_out(
     rewrites
 }
 
+fn xor_and_operands_match(
+    f: &ir::Fn,
+    xor_ref: NodeRef,
+    and_ref: NodeRef,
+) -> Option<(NodeRef, NodeRef)> {
+    let NodePayload::Nary(NaryOp::Xor, xor_operands) = f.get_node(xor_ref).payload.clone() else {
+        return None;
+    };
+    if xor_operands.len() != 2 {
+        return None;
+    }
+    let xor_lhs = xor_operands[0];
+    let xor_rhs = xor_operands[1];
+    let NodePayload::Nary(NaryOp::And, and_operands) = f.get_node(and_ref).payload.clone() else {
+        return None;
+    };
+    if and_operands.len() != 2 {
+        return None;
+    }
+    let and_lhs = and_operands[0];
+    let and_rhs = and_operands[1];
+    if (xor_lhs == and_lhs && xor_rhs == and_rhs) || (xor_lhs == and_rhs && xor_rhs == and_lhs) {
+        Some((xor_lhs, xor_rhs))
+    } else {
+        None
+    }
+}
+
+/// Rewrite:
+///
+/// `add(xor(a, b), and(a, b))`
+///   →
+/// `or(a, b)`
+///
+/// This is the standard half-adder identity in fixed-width arithmetic.
+fn rewrite_add_xor_and_to_or(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+    let original_len = f.nodes.len();
+    for node_index in 0..original_len {
+        let payload = f.nodes[node_index].payload.clone();
+        let NodePayload::Binop(Binop::Add, lhs, rhs) = payload else {
+            continue;
+        };
+
+        let operands =
+            xor_and_operands_match(f, lhs, rhs).or_else(|| xor_and_operands_match(f, rhs, lhs));
+        let Some((a, b)) = operands else {
+            continue;
+        };
+
+        ir_utils::replace_node_payload(
+            f,
+            NodeRef { index: node_index },
+            NodePayload::Nary(NaryOp::Or, vec![a, b]),
+            Some(f.get_node_ty(NodeRef { index: node_index }).clone()),
+        )
+        .expect("prep_for_gatify: rewriting add(xor, and) to or failed");
+        rewrites += 1;
+    }
+    rewrites
+}
+
+/// Rewrite:
+///
+/// `bit_slice(shrl(x, sel(p, cases=[k0..kN-1], default=d)), start=S, width=W)`
+///   →
+/// `sel(p, cases=[bit_slice(shrl(x, k0), S, W), .., bit_slice(shrl(x, kN-1), S,
+/// W)],  default=bit_slice(shrl(x, d), S, W))`
+///
+/// and likewise for `priority_sel`.
+fn rewrite_small_shift_choice_bit_slices(f: &mut ir::Fn) -> usize {
+    let use_counts = get_use_counts(f);
+    let mut rewrites = 0usize;
+    let original_len = f.nodes.len();
+    for node_index in 0..original_len {
+        let payload = f.nodes[node_index].payload.clone();
+        let NodePayload::BitSlice { arg, start, width } = payload else {
+            continue;
+        };
+        let NodePayload::Binop(Binop::Shrl, shrl_arg, amount) = f.get_node(arg).payload.clone()
+        else {
+            continue;
+        };
+
+        if rewrite_shift_choice_target(
+            f,
+            NodeRef { index: node_index },
+            &use_counts,
+            amount,
+            |f, shift| make_constant_shrl_bit_slice_expr(f, shrl_arg, shift, start, width),
+        ) {
+            rewrites += 1;
+        }
+    }
+    rewrites
+}
+
+/// Rewrite:
+///
+/// `shrl(x, sel(p, cases=[k0..kN-1], default=d))`
+///   →
+/// `sel(p, cases=[shrl(x, k0), .., shrl(x, kN-1)], default=shrl(x, d))`
+///
+/// and likewise for `priority_sel`.
+fn rewrite_small_shift_choices(f: &mut ir::Fn) -> usize {
+    let use_counts = get_use_counts(f);
+    let mut rewrites = 0usize;
+    let original_len = f.nodes.len();
+    for node_index in 0..original_len {
+        let payload = f.nodes[node_index].payload.clone();
+        let NodePayload::Binop(Binop::Shrl, arg, amount) = payload else {
+            continue;
+        };
+
+        if rewrite_shift_choice_target(
+            f,
+            NodeRef { index: node_index },
+            &use_counts,
+            amount,
+            |f, shift| make_constant_shrl_expr(f, arg, shift),
+        ) {
+            rewrites += 1;
+        }
+    }
+    rewrites
+}
+
 /// Runs lightweight PIR rewrites that make gatification cleaner.
 ///
 /// This pass:
@@ -574,6 +955,11 @@ pub fn prep_for_gatify(
 ) -> ir::Fn {
     let mut cloned = f.clone();
     combine_or_reduces(&mut cloned);
+    let _rewrites = rewrite_add_xor_and_to_or(&mut cloned);
+    if options.enable_rewrite_small_shift_choices {
+        let _rewrites = rewrite_small_shift_choice_bit_slices(&mut cloned);
+        let _rewrites = rewrite_small_shift_choices(&mut cloned);
+    }
     if options.enable_rewrite_carry_out {
         let _rewrites = rewrite_add_slice_carry_out_to_ext_carry_out(&mut cloned, range_info);
     }

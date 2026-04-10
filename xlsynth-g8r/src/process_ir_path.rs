@@ -228,6 +228,7 @@ pub fn process_ir_path_with_gatefn(
     let prep_opts = PrepForGatifyOptions {
         enable_rewrite_carry_out: options.enable_rewrite_carry_out,
         enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
+        ..PrepForGatifyOptions::all_opts_enabled()
     };
     // Read the file into a string.
     let file_content = std::fs::read_to_string(&ir_path)

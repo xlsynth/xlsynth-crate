@@ -938,6 +938,7 @@ fn gatify_div(
     match signedness {
         Signedness::Unsigned => gatify_udiv(lhs_bits, rhs_bits, gb),
         Signedness::Signed => {
+            let bit_count = lhs_bits.get_bit_count();
             let lhs_abs = gatify_abs(lhs_bits, gb);
             let rhs_abs = gatify_abs(rhs_bits, gb);
             let unsigned = gatify_udiv(&lhs_abs, &rhs_abs, gb);
@@ -947,8 +948,18 @@ fn gatify_div(
             let negated = gatify_twos_complement(&unsigned, gb);
             let signed_result = gb.add_mux2_vec(&result_neg, &negated, &unsigned);
             let divisor_zero = gb.add_ez(rhs_bits, ReductionKind::Tree);
-            let ones = gb.replicate(gb.get_true(), lhs_bits.get_bit_count());
-            gb.add_mux2_vec(&divisor_zero, &ones, &signed_result)
+            let mut signed_max_bits = vec![gb.get_true(); bit_count];
+            if let Some(msb) = signed_max_bits.last_mut() {
+                *msb = gb.get_false();
+            }
+            let signed_max = AigBitVector::from_lsb_is_index_0(&signed_max_bits);
+            let mut signed_min_bits = vec![gb.get_false(); bit_count];
+            if let Some(msb) = signed_min_bits.last_mut() {
+                *msb = gb.get_true();
+            }
+            let signed_min = AigBitVector::from_lsb_is_index_0(&signed_min_bits);
+            let zero_div_result = gb.add_mux2_vec(sign_a, &signed_min, &signed_max);
+            gb.add_mux2_vec(&divisor_zero, &zero_div_result, &signed_result)
         }
     }
 }
@@ -3752,6 +3763,64 @@ fn validate_fn_for_gatify(f: &ir::Fn) -> Result<(), String> {
     ir_validate::validate_package(&pkg).map_err(|e| e.to_string())
 }
 
+fn gatify_lower_prepared_fn(
+    f: &ir::Fn,
+    options: &GatifyOptions,
+    orig_ref_by_text_id: Option<&HashMap<usize, ir::NodeRef>>,
+    equiv_fn: &ir::Fn,
+) -> Result<GatifyOutput, String> {
+    let mut g8_builder = GateBuilder::new(
+        f.name.clone(),
+        GateBuilderOptions {
+            fold: options.fold,
+            hash: options.hash,
+        },
+    );
+    let mut env = GateEnv::new();
+    gatify_internal(f, &mut g8_builder, &mut env, options)?;
+    let gate_fn = g8_builder.build();
+    log::debug!(
+        "converted IR function to gate function:\n{}",
+        gate_fn.to_string()
+    );
+
+    let mut lowering_map: IrToGateMap = HashMap::new();
+    for (node_ref, gate_or_vec) in env.ir_to_g8.into_iter() {
+        let bit_vector = match gate_or_vec {
+            GateOrVec::BitVector(bv) => bv,
+            GateOrVec::Gate(gate_ref) => AigBitVector::from_bit(gate_ref),
+        };
+        if let Some(orig_ref_by_text_id) = orig_ref_by_text_id {
+            let prepared_text_id = f.get_node(node_ref).text_id;
+            let Some(orig_node_ref) = orig_ref_by_text_id.get(&prepared_text_id).copied() else {
+                continue;
+            };
+            lowering_map.insert(orig_node_ref, bit_vector);
+        } else {
+            lowering_map.insert(node_ref, bit_vector);
+        }
+    }
+
+    if options.check_equivalence {
+        log::info!("checking equivalence of IR function and gate function...");
+        check_equivalence::validate_same_fn(equiv_fn, &gate_fn)?;
+    }
+    Ok(GatifyOutput {
+        gate_fn,
+        lowering_map,
+    })
+}
+
+/// Lowers an IR function that has already been prepared for gatification.
+///
+/// This skips `prep_for_gatify`; callers are responsible for running any
+/// desired prep rewrites first.
+pub fn gatify_prepared_fn(f: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String> {
+    validate_fn_for_gatify(f)
+        .map_err(|e| format!("PIR validation failed before gatify_prepared_fn: {e}"))?;
+    gatify_lower_prepared_fn(f, &options, None, f)
+}
+
 pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, String> {
     validate_fn_for_gatify(orig_fn)
         .map_err(|e| format!("PIR validation failed before prep_for_gatify: {e}"))?;
@@ -3772,54 +3841,12 @@ pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, 
         PrepForGatifyOptions {
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
             enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
+            ..PrepForGatifyOptions::all_opts_enabled()
         },
     );
     validate_fn_for_gatify(&prepared_fn)
         .map_err(|e| format!("PIR validation failed after prep_for_gatify: {e}"))?;
-
-    let f = &prepared_fn;
-    let mut g8_builder = GateBuilder::new(
-        f.name.clone(),
-        GateBuilderOptions {
-            fold: options.fold,
-            hash: options.hash,
-        },
-    );
-    let mut env = GateEnv::new();
-    gatify_internal(f, &mut g8_builder, &mut env, &options)?;
-    let gate_fn = g8_builder.build();
-    log::debug!(
-        "converted IR function to gate function:\n{}",
-        gate_fn.to_string()
-    );
-
-    // Convert the internal GateEnv map to the public IrToGateMap
-    let mut lowering_map: IrToGateMap = HashMap::new();
-    for (node_ref, gate_or_vec) in env.ir_to_g8.into_iter() {
-        let bit_vector = match gate_or_vec {
-            GateOrVec::BitVector(bv) => bv,
-            GateOrVec::Gate(gate_ref) => AigBitVector::from_bit(gate_ref),
-        };
-        let prepared_text_id = f.get_node(node_ref).text_id;
-        let Some(orig_node_ref) = orig_ref_by_text_id.get(&prepared_text_id).copied() else {
-            // Not a sample failure: many helper nodes (introduced during prep/lowering)
-            // do not exist in the original function, so we don't expose them here.
-            continue;
-        };
-        lowering_map.insert(orig_node_ref, bit_vector);
-    }
-
-    // If we're told we should do so, we check equivalence between the original IR
-    // function and the gate function that we converted it to.
-    if options.check_equivalence {
-        log::info!("checking equivalence of IR function and gate function...");
-        check_equivalence::validate_same_fn(orig_fn, &gate_fn)?;
-    }
-    // Construct and return the GatifyOutput struct
-    Ok(GatifyOutput {
-        gate_fn,
-        lowering_map,
-    })
+    gatify_lower_prepared_fn(&prepared_fn, &options, Some(&orig_ref_by_text_id), orig_fn)
 }
 
 pub fn gatify_node_as_fn(
@@ -3836,6 +3863,7 @@ pub fn gatify_node_as_fn(
         PrepForGatifyOptions {
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
             enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
+            ..PrepForGatifyOptions::all_opts_enabled()
         },
     );
     validate_fn_for_gatify(&prepared_fn)
