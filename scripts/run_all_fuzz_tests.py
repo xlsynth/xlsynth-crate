@@ -33,10 +33,7 @@ DEFAULT_FUZZ_BIN_ARGS: str = "-max_total_time=5"
 DEFAULT_THREADS: int = 4
 
 # Targets which are known to fail.
-SKIP_TARGETS: list[str] = [
-    "fuzz_bulk_replace",
-    "fuzz_ir_outline_equiv"
-]
+SKIP_TARGETS: list[str] = ["fuzz_bulk_replace", "fuzz_ir_outline_equiv"]
 
 
 def find_fuzz_dirs(repo_root: Path) -> list[Path]:
@@ -225,7 +222,8 @@ def main() -> int:
         log_dir = Path(log_dir_text)
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
             futures = [
-                executor.submit(run_cmd_captured, cmd, log_dir) for _, _, cmd in run_jobs
+                executor.submit(run_cmd_captured, cmd, log_dir)
+                for _, _, cmd in run_jobs
             ]
             for (fuzz_dir, target, cmd), future in zip(run_jobs, futures):
                 print(f"\n--- Running {target} in {fuzz_dir} ---", file=sys.stderr)
