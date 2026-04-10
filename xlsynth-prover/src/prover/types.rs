@@ -339,6 +339,7 @@ pub enum EquivResult {
         lhs_output: FnOutput,
         rhs_output: FnOutput,
     },
+    Interrupted,
     ToolchainDisproved(String),
     Error(String),
 }
@@ -366,6 +367,7 @@ impl EquivReport {
                 "lhs_inputs: {:?}, rhs_inputs: {:?}, lhs_output: {:?}, rhs_output: {:?}",
                 lhs_inputs, rhs_inputs, lhs_output, rhs_output
             )),
+            EquivResult::Interrupted => Some("solver interrupted".to_string()),
             EquivResult::ToolchainDisproved(msg) => Some(msg.clone()),
             EquivResult::Error(msg) => Some(msg.clone()),
         }
@@ -411,6 +413,9 @@ pub enum BoolPropertyResult {
         /// counter-example.
         output: FnOutput,
     },
+    /// The underlying solver was interrupted before it could prove or disprove
+    /// the property.
+    Interrupted,
     /// External toolchain reported failure without a structured counterexample.
     ///
     /// This is used by the `ExternalProver` implementation where the

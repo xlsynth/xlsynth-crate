@@ -2,8 +2,12 @@
 
 //! Computes a graph edit distance between two XLS IR functions.
 
+use std::collections::HashSet;
+
 use crate::ir::{Fn, Node, NodePayload};
 use crate::ir::{binop_to_operator, nary_op_to_operator, unop_to_operator};
+use crate::node_hashing::FwdHash;
+use crate::structural_similarity::collect_structural_entries;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum NodeSignature {
@@ -13,6 +17,106 @@ enum NodeSignature {
         operands: Vec<String>,
     },
     Simple(String),
+}
+
+/// Options for ranking candidate functions against a query function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CandidateRankingOptions {
+    /// Maximum number of candidates to keep after the structural-hash prefilter
+    /// and score with edit distance.
+    pub prefilter_limit: usize,
+}
+
+impl Default for CandidateRankingOptions {
+    fn default() -> Self {
+        Self {
+            prefilter_limit: usize::MAX,
+        }
+    }
+}
+
+/// Ranked candidate produced by structural prefiltering followed by edit
+/// distance scoring.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RankedFnCandidate {
+    pub index: usize,
+    pub shared_structural_hashes: usize,
+    pub query_structural_hashes: usize,
+    pub candidate_structural_hashes: usize,
+    pub edit_distance: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StructuralPrefilterCandidate {
+    index: usize,
+    shared_structural_hashes: usize,
+    query_structural_hashes: usize,
+    candidate_structural_hashes: usize,
+}
+
+/// Ranks candidate functions by first applying a cheap structural-hash
+/// prefilter, then computing edit distance for the survivors.
+pub fn rank_fn_candidates_by_similarity(
+    query: &Fn,
+    candidates: &[&Fn],
+    options: CandidateRankingOptions,
+) -> Vec<RankedFnCandidate> {
+    if candidates.is_empty() || options.prefilter_limit == 0 {
+        return Vec::new();
+    }
+
+    let query_hashes: HashSet<FwdHash> = collect_structural_hashes(query);
+    let query_hash_count = query_hashes.len();
+    let prefilter_limit = std::cmp::min(options.prefilter_limit, candidates.len());
+    let mut prefiltered: Vec<StructuralPrefilterCandidate> = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            let candidate_hashes = collect_structural_hashes(candidate);
+            let shared_structural_hashes = candidate_hashes
+                .iter()
+                .filter(|hash| query_hashes.contains(hash))
+                .count();
+            StructuralPrefilterCandidate {
+                index,
+                shared_structural_hashes,
+                query_structural_hashes: query_hash_count,
+                candidate_structural_hashes: candidate_hashes.len(),
+            }
+        })
+        .collect();
+
+    prefiltered.sort_by(|lhs, rhs| {
+        rhs.shared_structural_hashes
+            .cmp(&lhs.shared_structural_hashes)
+            .then_with(|| {
+                lhs.candidate_structural_hashes
+                    .cmp(&rhs.candidate_structural_hashes)
+            })
+            .then_with(|| lhs.index.cmp(&rhs.index))
+    });
+    prefiltered.truncate(prefilter_limit);
+
+    let mut ranked: Vec<RankedFnCandidate> = prefiltered
+        .into_iter()
+        .map(|candidate| RankedFnCandidate {
+            index: candidate.index,
+            shared_structural_hashes: candidate.shared_structural_hashes,
+            query_structural_hashes: candidate.query_structural_hashes,
+            candidate_structural_hashes: candidate.candidate_structural_hashes,
+            edit_distance: compute_edit_distance(query, candidates[candidate.index]),
+        })
+        .collect();
+    ranked.sort_by(|lhs, rhs| {
+        lhs.edit_distance
+            .cmp(&rhs.edit_distance)
+            .then_with(|| {
+                rhs.shared_structural_hashes
+                    .cmp(&lhs.shared_structural_hashes)
+            })
+            .then_with(|| lhs.index.cmp(&rhs.index))
+    });
+    ranked
 }
 
 /// Compute the edit distance between two functions based on their computational
@@ -114,6 +218,11 @@ fn extract_operand_name(node: &Node) -> String {
     } else {
         node.payload.get_operator().to_string()
     }
+}
+
+fn collect_structural_hashes(f: &Fn) -> HashSet<FwdHash> {
+    let (entries, _) = collect_structural_entries(f);
+    entries.into_iter().map(|entry| entry.hash).collect()
 }
 
 #[cfg(test)]
@@ -242,5 +351,85 @@ mod tests {
         let edit_distance = compute_edit_distance(&two_tuple_fn, &singleton_fn);
         // The only difference is the operator in the node ("tuple" vs "identity").
         assert_eq!(edit_distance, 1);
+    }
+
+    #[test]
+    fn test_rank_fn_candidates_by_similarity_prefilters_before_edit_distance() {
+        let query_pkg = parse_ir_from_string(
+            r#"package query_pkg
+            top fn query(x: bits[8], y: bits[8]) -> bits[8] {
+                add.3: bits[8] = add(x, y, id=3)
+                ret sub.4: bits[8] = sub(add.3, y, id=4)
+            }
+            "#,
+        );
+        let exact_pkg = parse_ir_from_string(
+            r#"package exact_pkg
+            top fn exact(x: bits[8], y: bits[8]) -> bits[8] {
+                add.3: bits[8] = add(x, y, id=3)
+                ret sub.4: bits[8] = sub(add.3, y, id=4)
+            }
+            "#,
+        );
+        let close_pkg = parse_ir_from_string(
+            r#"package close_pkg
+            top fn close(x: bits[8], y: bits[8]) -> bits[8] {
+                add.3: bits[8] = add(x, y, id=3)
+                ret sub.4: bits[8] = sub(add.3, x, id=4)
+            }
+            "#,
+        );
+        let far_pkg = parse_ir_from_string(
+            r#"package far_pkg
+            top fn far(x: bits[8], y: bits[8]) -> bits[8] {
+                umul.3: bits[8] = umul(x, y, id=3)
+                ret not.4: bits[8] = not(umul.3, id=4)
+            }
+            "#,
+        );
+
+        let query = query_pkg.get_top_fn().unwrap();
+        let exact = exact_pkg.get_top_fn().unwrap();
+        let close = close_pkg.get_top_fn().unwrap();
+        let far = far_pkg.get_top_fn().unwrap();
+        let ranked = rank_fn_candidates_by_similarity(
+            query,
+            &[far, close, exact],
+            CandidateRankingOptions { prefilter_limit: 2 },
+        );
+
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].index, 2);
+        assert_eq!(ranked[0].edit_distance, 0);
+        assert_eq!(ranked[1].index, 1);
+        assert_eq!(ranked[1].edit_distance, 1);
+    }
+
+    #[test]
+    fn test_rank_fn_candidates_by_similarity_zero_limit() {
+        let query_pkg = parse_ir_from_string(
+            r#"package query_pkg
+            top fn query(x: bits[1]) -> bits[1] {
+                ret identity.2: bits[1] = identity(x, id=2)
+            }
+            "#,
+        );
+        let candidate_pkg = parse_ir_from_string(
+            r#"package candidate_pkg
+            top fn candidate(x: bits[1]) -> bits[1] {
+                ret not.2: bits[1] = not(x, id=2)
+            }
+            "#,
+        );
+        let query = query_pkg.get_top_fn().unwrap();
+        let candidate = candidate_pkg.get_top_fn().unwrap();
+
+        let ranked = rank_fn_candidates_by_similarity(
+            query,
+            &[candidate],
+            CandidateRankingOptions { prefilter_limit: 0 },
+        );
+
+        assert!(ranked.is_empty());
     }
 }

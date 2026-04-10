@@ -317,6 +317,13 @@ pub fn handle_prove_enum_in_bound(matches: &clap::ArgMatches, config: &Option<To
             }
             std::process::exit(1);
         }
+        BoolPropertyResult::Interrupted => {
+            report_cli_error_and_exit(
+                "enum-in-bound proof was interrupted before reaching a conclusion",
+                Some(SUBCOMMAND),
+                Vec::new(),
+            );
+        }
         BoolPropertyResult::Error(msg) => {
             report_cli_error_and_exit(&msg, Some(SUBCOMMAND), Vec::new());
         }
