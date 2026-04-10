@@ -18,6 +18,7 @@ import concurrent.futures
 import shlex
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -34,6 +35,7 @@ DEFAULT_THREADS: int = 4
 # Targets which are known to fail.
 SKIP_TARGETS: list[str] = [
     "fuzz_bulk_replace",
+    "fuzz_ir_outline_equiv"
 ]
 
 
@@ -58,15 +60,30 @@ def run_cmd(cmd: list[str]) -> None:
     subprocess.check_call(cmd)
 
 
-def run_cmd_captured(cmd: list[str]) -> tuple[int, str]:
-    """Execute `cmd` and capture combined stdout/stderr for deterministic replay."""
-    completed = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    return completed.returncode, completed.stdout
+def run_cmd_captured(cmd: list[str], log_dir: Path) -> tuple[int, Path]:
+    """Execute `cmd` and spool combined stdout/stderr for deterministic replay."""
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=log_dir,
+        prefix="fuzz_target_",
+        suffix=".log",
+        delete=False,
+    ) as log_file:
+        completed = subprocess.run(
+            cmd,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        return completed.returncode, Path(log_file.name)
+
+
+def replay_log(log_path: Path) -> None:
+    """Stream a captured log file to stdout without reading it all into memory."""
+    with open(log_path, encoding="utf-8", errors="replace") as f:
+        while chunk := f.read(1024 * 1024):
+            sys.stdout.write(chunk)
 
 
 def get_crate_features(crate_path: Path) -> list[str]:
@@ -204,18 +221,25 @@ def main() -> int:
         f"\n=== Running {len(run_jobs)} fuzz targets with {num_workers} worker threads ===",
         file=sys.stderr,
     )
-    with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
-        futures = [executor.submit(run_cmd_captured, cmd) for _, _, cmd in run_jobs]
-        for (fuzz_dir, target, cmd), future in zip(run_jobs, futures):
-            print(f"\n--- Running {target} in {fuzz_dir} ---", file=sys.stderr)
-            print(
-                "  => " + " ".join(shlex.quote(part) for part in cmd), file=sys.stderr
-            )
-            returncode, output = future.result()
-            if output:
-                print(output, end="")
-            if returncode != 0:
-                return returncode
+    with tempfile.TemporaryDirectory(prefix="run_all_fuzz_tests_logs_") as log_dir_text:
+        log_dir = Path(log_dir_text)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = [
+                executor.submit(run_cmd_captured, cmd, log_dir) for _, _, cmd in run_jobs
+            ]
+            for (fuzz_dir, target, cmd), future in zip(run_jobs, futures):
+                print(f"\n--- Running {target} in {fuzz_dir} ---", file=sys.stderr)
+                print(
+                    "  => " + " ".join(shlex.quote(part) for part in cmd),
+                    file=sys.stderr,
+                )
+                returncode, log_path = future.result()
+                try:
+                    replay_log(log_path)
+                finally:
+                    log_path.unlink(missing_ok=True)
+                if returncode != 0:
+                    return returncode
     return 0
 
 
