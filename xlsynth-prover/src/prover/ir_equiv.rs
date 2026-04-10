@@ -14,7 +14,7 @@ use super::{
     translate::{get_fn_inputs, ir_to_smt, ir_value_to_bv},
     uf::infer_merged_uf_signatures,
 };
-use crate::solver::{BitVec, Response, Solver};
+use crate::solver::{BitVec, Response, Solver, SolverInterruptHandle};
 use regex::Regex;
 use xlsynth_pir::ir;
 pub struct AlignedFnInputs<'a, R> {
@@ -142,12 +142,41 @@ pub fn align_fn_inputs<'a, S: Solver>(
     }
 }
 
-fn check_aligned_fn_equiv_internal<'a, S: Solver>(
+fn interrupt_requested(interrupt: Option<&SolverInterruptHandle>) -> bool {
+    interrupt
+        .map(|interrupt_handle| interrupt_handle.should_interrupt())
+        .unwrap_or(false)
+}
+
+fn non_proved_result_priority(result: &EquivResult) -> u8 {
+    match result {
+        EquivResult::Disproved { .. } => 3,
+        EquivResult::Error(_) => 2,
+        EquivResult::Interrupted => 1,
+        EquivResult::Proved | EquivResult::ToolchainDisproved(_) => 0,
+    }
+}
+
+fn merge_non_proved_result(existing: &mut Option<EquivResult>, candidate: EquivResult) {
+    if matches!(candidate, EquivResult::Proved) {
+        return;
+    }
+    let should_replace = existing
+        .as_ref()
+        .map(|current| non_proved_result_priority(&candidate) > non_proved_result_priority(current))
+        .unwrap_or(true);
+    if should_replace {
+        *existing = Some(candidate);
+    }
+}
+
+fn check_aligned_fn_equiv_internal_with_interrupt<'a, S: Solver>(
     solver: &mut S,
     lhs: &SmtFn<'a, S::Term>,
     rhs: &SmtFn<'a, S::Term>,
     assertion_semantics: AssertionSemantics,
     assert_label_include: Option<&Regex>,
+    interrupt: Option<SolverInterruptHandle>,
 ) -> EquivResult {
     // --------------------------------------------
     // Helper: build a 1-bit "failed" flag for each
@@ -214,7 +243,7 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
 
     solver.assert(&condition).unwrap();
 
-    match solver.check().unwrap() {
+    match solver.check_with_interrupt(interrupt).unwrap() {
         Response::Sat => {
             // Helper to fetch first violated assertion (if any)
             let get_assertion =
@@ -282,7 +311,8 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
             }
         }
         Response::Unsat => EquivResult::Proved,
-        Response::Unknown => panic!("Solver returned unknown result"),
+        Response::Interrupted => EquivResult::Interrupted,
+        Response::Unknown => EquivResult::Error("solver returned unknown result".to_string()),
     }
 }
 
@@ -296,6 +326,29 @@ pub fn prove_ir_fn_equiv<'a, S: Solver>(
     assert_label_include: Option<&Regex>,
     allow_flatten: bool,
 ) -> EquivResult {
+    prove_ir_fn_equiv_with_interrupt::<S>(
+        solver_config,
+        lhs,
+        rhs,
+        assertion_semantics,
+        assert_label_include,
+        allow_flatten,
+        None,
+    )
+}
+
+pub fn prove_ir_fn_equiv_with_interrupt<'a, S: Solver>(
+    solver_config: &S::Config,
+    lhs: &ProverFn<'a>,
+    rhs: &ProverFn<'a>,
+    assertion_semantics: AssertionSemantics,
+    assert_label_include: Option<&Regex>,
+    allow_flatten: bool,
+    interrupt: Option<SolverInterruptHandle>,
+) -> EquivResult {
+    if interrupt_requested(interrupt.as_ref()) {
+        return EquivResult::Interrupted;
+    }
     let uf_signatures: HashMap<String, UfSignature> =
         if lhs.uf_map.is_empty() && rhs.uf_map.is_empty() {
             HashMap::new()
@@ -356,12 +409,16 @@ pub fn prove_ir_fn_equiv<'a, S: Solver>(
     let aligned = align_fn_inputs(&mut solver, &fn_inputs_lhs, &fn_inputs_rhs, allow_flatten);
     let smt_lhs = ir_to_smt(&mut solver, &aligned.lhs, &lhs.uf_map, &uf_registry);
     let smt_rhs = ir_to_smt(&mut solver, &aligned.rhs, &rhs.uf_map, &uf_registry);
-    check_aligned_fn_equiv_internal(
+    if interrupt_requested(interrupt.as_ref()) {
+        return EquivResult::Interrupted;
+    }
+    check_aligned_fn_equiv_internal_with_interrupt(
         &mut solver,
         &smt_lhs,
         &smt_rhs,
         assertion_semantics,
         assert_label_include,
+        interrupt,
     )
 }
 
@@ -407,6 +464,26 @@ pub fn prove_ir_fn_equiv_output_bits_parallel<'a, S: Solver>(
     assert_label_include: Option<&Regex>,
     allow_flatten: bool,
 ) -> EquivResult {
+    prove_ir_fn_equiv_output_bits_parallel_with_interrupt::<S>(
+        solver_config,
+        lhs,
+        rhs,
+        assertion_semantics,
+        assert_label_include,
+        allow_flatten,
+        None,
+    )
+}
+
+pub fn prove_ir_fn_equiv_output_bits_parallel_with_interrupt<'a, S: Solver>(
+    solver_config: &S::Config,
+    lhs: &ProverFn<'a>,
+    rhs: &ProverFn<'a>,
+    assertion_semantics: AssertionSemantics,
+    assert_label_include: Option<&Regex>,
+    allow_flatten: bool,
+    interrupt: Option<SolverInterruptHandle>,
+) -> EquivResult {
     let width = lhs.fn_ref.ret_ty.bit_count();
     assert_eq!(
         width,
@@ -416,18 +493,19 @@ pub fn prove_ir_fn_equiv_output_bits_parallel<'a, S: Solver>(
     if width == 0 {
         // Zero-width values – fall back to the standard equivalence prover because
         // there is no bit to split on.
-        return prove_ir_fn_equiv::<S>(
+        return prove_ir_fn_equiv_with_interrupt::<S>(
             solver_config,
             lhs,
             rhs,
             assertion_semantics,
             assert_label_include,
             allow_flatten,
+            interrupt,
         );
     };
 
-    let found = Arc::new(AtomicBool::new(false));
-    let counterexample: Arc<Mutex<Option<EquivResult>>> = Arc::new(Mutex::new(None));
+    let stop_requested = Arc::new(AtomicBool::new(false));
+    let non_proved_result: Arc<Mutex<Option<EquivResult>>> = Arc::new(Mutex::new(None));
     let next_bit = Arc::new(AtomicUsize::new(0));
 
     let thread_cnt = std::cmp::min(width, num_cpus::get());
@@ -436,13 +514,16 @@ pub fn prove_ir_fn_equiv_output_bits_parallel<'a, S: Solver>(
         for _ in 0..thread_cnt {
             let lhs_cl = lhs.clone();
             let rhs_cl = rhs.clone();
-            let found_cl = found.clone();
-            let cex_cl = counterexample.clone();
+            let stop_requested_cl = stop_requested.clone();
+            let non_proved_result_cl = non_proved_result.clone();
             let next_cl = next_bit.clone();
+            let interrupt_cl = interrupt.clone();
 
             scope.spawn(move || {
                 loop {
-                    if found_cl.load(Ordering::SeqCst) {
+                    if stop_requested_cl.load(Ordering::SeqCst)
+                        || interrupt_requested(interrupt_cl.as_ref())
+                    {
                         break;
                     }
                     let idx = next_cl.fetch_add(1, Ordering::SeqCst);
@@ -458,18 +539,19 @@ pub fn prove_ir_fn_equiv_output_bits_parallel<'a, S: Solver>(
                     let rf = ProverFn::new(&rf_ir, None)
                         .with_fixed_implicit_activation(rhs_cl.fixed_implicit_activation)
                         .with_domains(rhs_cl.domains.clone());
-                    let res = prove_ir_fn_equiv::<S>(
+                    let res = prove_ir_fn_equiv_with_interrupt::<S>(
                         solver_config,
                         &lf,
                         &rf,
-                        assertion_semantics.clone(),
+                        assertion_semantics,
                         assert_label_include,
                         allow_flatten,
+                        interrupt_cl.clone(),
                     );
-                    if let EquivResult::Disproved { .. } = &res {
-                        let mut guard = cex_cl.lock().unwrap();
-                        *guard = Some(res.clone());
-                        found_cl.store(true, Ordering::SeqCst);
+                    if !matches!(res, EquivResult::Proved) {
+                        let mut guard = non_proved_result_cl.lock().unwrap();
+                        merge_non_proved_result(&mut guard, res.clone());
+                        stop_requested_cl.store(true, Ordering::SeqCst);
                         break;
                     }
                 }
@@ -477,11 +559,11 @@ pub fn prove_ir_fn_equiv_output_bits_parallel<'a, S: Solver>(
         }
     });
 
-    let maybe_cex = {
-        let mut guard = counterexample.lock().unwrap();
+    let maybe_non_proved = {
+        let mut guard = non_proved_result.lock().unwrap();
         guard.take()
     };
-    if let Some(res) = maybe_cex {
+    if let Some(res) = maybe_non_proved {
         res
     } else {
         EquivResult::Proved
@@ -501,14 +583,39 @@ pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
     assert_label_include: Option<&Regex>,
     allow_flatten: bool,
 ) -> EquivResult {
+    prove_ir_fn_equiv_split_input_bit_with_interrupt::<S>(
+        solver_config,
+        lhs,
+        rhs,
+        split_input_index,
+        split_input_bit_index,
+        assertion_semantics,
+        assert_label_include,
+        allow_flatten,
+        None,
+    )
+}
+
+pub fn prove_ir_fn_equiv_split_input_bit_with_interrupt<'a, S: Solver>(
+    solver_config: &S::Config,
+    lhs: &ProverFn<'a>,
+    rhs: &ProverFn<'a>,
+    split_input_index: usize,
+    split_input_bit_index: usize,
+    assertion_semantics: AssertionSemantics,
+    assert_label_include: Option<&Regex>,
+    allow_flatten: bool,
+    interrupt: Option<SolverInterruptHandle>,
+) -> EquivResult {
     if lhs.fn_ref.params.is_empty() || rhs.fn_ref.params.is_empty() {
-        return prove_ir_fn_equiv::<S>(
+        return prove_ir_fn_equiv_with_interrupt::<S>(
             solver_config,
             lhs,
             rhs,
             assertion_semantics,
             assert_label_include,
             allow_flatten,
+            interrupt,
         );
     }
 
@@ -526,7 +633,11 @@ pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
         "split_input_bit_index out of bounds"
     );
 
+    let mut non_proved_result: Option<EquivResult> = None;
     for bit_val in 0..=1u64 {
+        if interrupt_requested(interrupt.as_ref()) {
+            return non_proved_result.unwrap_or(EquivResult::Interrupted);
+        }
         let mut solver = S::new(solver_config).unwrap();
         // Build aligned SMT representations first so we can assert the bit-constraint.
         let fn_inputs_lhs = get_fn_inputs(&mut solver, lhs.clone(), Some("lhs"));
@@ -554,16 +665,28 @@ pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
         let eq_bv = solver.eq(&bit_bv, &val_bv);
         solver.assert(&eq_bv).unwrap();
 
-        check_aligned_fn_equiv_internal(
+        let result = check_aligned_fn_equiv_internal_with_interrupt(
             &mut solver,
             &smt_lhs,
             &smt_rhs,
             assertion_semantics,
             assert_label_include,
+            interrupt.clone(),
         );
+        match result {
+            EquivResult::Proved => {}
+            EquivResult::Disproved { .. } | EquivResult::Error(_) | EquivResult::Interrupted => {
+                merge_non_proved_result(&mut non_proved_result, result.clone());
+                return result;
+            }
+            EquivResult::ToolchainDisproved(_) => {
+                merge_non_proved_result(&mut non_proved_result, result.clone());
+                return result;
+            }
+        }
     }
 
-    EquivResult::Proved
+    non_proved_result.unwrap_or(EquivResult::Proved)
 }
 
 #[cfg(test)]

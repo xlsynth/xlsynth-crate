@@ -5,7 +5,10 @@
 use std::{
     ffi::{CStr, CString},
     io,
+    os::raw::c_void,
     sync::Arc,
+    sync::Mutex,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use bitwuzla_sys::{
@@ -44,25 +47,89 @@ use bitwuzla_sys::{
     bitwuzla_mk_const, bitwuzla_mk_fun_sort, bitwuzla_mk_term, bitwuzla_mk_term1,
     bitwuzla_mk_term1_indexed1, bitwuzla_mk_term1_indexed2, bitwuzla_mk_term2, bitwuzla_mk_term3,
     bitwuzla_new, bitwuzla_options_delete, bitwuzla_options_new, bitwuzla_pop, bitwuzla_push,
-    bitwuzla_set_option, bitwuzla_set_option_mode, bitwuzla_term_manager_delete,
-    bitwuzla_term_manager_new, bitwuzla_term_to_string, bitwuzla_term_value_get_str,
+    bitwuzla_set_option, bitwuzla_set_option_mode, bitwuzla_set_termination_callback,
+    bitwuzla_term_manager_delete, bitwuzla_term_manager_new, bitwuzla_term_to_string,
+    bitwuzla_term_value_get_str,
 };
 use xlsynth::IrBits;
 
-use super::{BitVec, Response, Solver, SolverConfig, Uf};
+use super::{BitVec, Response, Solver, SolverConfig, SolverInterruptHandle, Uf};
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_value_utils::ir_value_from_bits_with_type;
+
+struct BitwuzlaTerminationState {
+    current_interrupt: Mutex<Option<SolverInterruptHandle>>,
+    fired: AtomicBool,
+}
+
+impl BitwuzlaTerminationState {
+    fn new() -> Self {
+        Self {
+            current_interrupt: Mutex::new(None),
+            fired: AtomicBool::new(false),
+        }
+    }
+
+    fn set_interrupt(&self, interrupt: Option<SolverInterruptHandle>) {
+        let mut guard = self
+            .current_interrupt
+            .lock()
+            .expect("bitwuzla termination state lock");
+        *guard = interrupt;
+    }
+
+    fn clear_fired(&self) {
+        self.fired.store(false, Ordering::SeqCst);
+    }
+
+    fn fired(&self) -> bool {
+        self.fired.load(Ordering::SeqCst)
+    }
+}
+
+unsafe extern "C" fn bitwuzla_termination_callback(state: *mut c_void) -> i32 {
+    if state.is_null() {
+        return 0;
+    }
+    let termination_state = unsafe { &*(state as *const BitwuzlaTerminationState) };
+    let should_interrupt = match termination_state.current_interrupt.lock() {
+        Ok(guard) => guard
+            .as_ref()
+            .map(|interrupt| interrupt.should_interrupt())
+            .unwrap_or(false),
+        Err(_) => true,
+    };
+    if should_interrupt {
+        termination_state.fired.store(true, Ordering::SeqCst);
+        1
+    } else {
+        0
+    }
+}
 
 struct RawBitwuzla {
     term_manager: *mut bitwuzla_sys::BitwuzlaTermManager,
     raw: *mut bitwuzla_sys::Bitwuzla,
+    termination_state: Box<BitwuzlaTerminationState>,
 }
 
 impl RawBitwuzla {
     pub fn new(options: *const bitwuzla_sys::BitwuzlaOptions) -> Self {
         let term_manager = unsafe { bitwuzla_term_manager_new() };
         let raw = unsafe { bitwuzla_new(term_manager, options) };
-        RawBitwuzla { raw, term_manager }
+        let mut termination_state = Box::new(BitwuzlaTerminationState::new());
+        unsafe {
+            bitwuzla_set_termination_callback(
+                raw,
+                Some(bitwuzla_termination_callback),
+                termination_state.as_mut() as *mut BitwuzlaTerminationState as *mut c_void,
+            );
+        }
+        RawBitwuzla {
+            raw,
+            term_manager,
+            termination_state,
+        }
     }
 }
 
@@ -89,6 +156,40 @@ impl Bitwuzla {
 
     pub fn raw_bitwuzla(&self) -> *mut bitwuzla_sys::Bitwuzla {
         self.bitwuzla.raw
+    }
+
+    fn set_interrupt(&self, interrupt: Option<SolverInterruptHandle>) {
+        self.bitwuzla.termination_state.set_interrupt(interrupt);
+    }
+
+    fn clear_interrupt_state(&self) {
+        self.bitwuzla.termination_state.set_interrupt(None);
+    }
+
+    fn clear_interrupt_fired(&self) {
+        self.bitwuzla.termination_state.clear_fired();
+    }
+
+    fn interrupt_fired(&self) -> bool {
+        self.bitwuzla.termination_state.fired()
+    }
+
+    fn map_check_result(&self, raw_result: u32) -> io::Result<Response> {
+        match raw_result {
+            BITWUZLA_SAT => Ok(Response::Sat),
+            BITWUZLA_UNSAT => Ok(Response::Unsat),
+            BITWUZLA_UNKNOWN => {
+                if self.interrupt_fired() {
+                    Ok(Response::Interrupted)
+                } else {
+                    Ok(Response::Unknown)
+                }
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::Other,
+                "bitwuzla_check_sat failed",
+            )),
+        }
     }
 }
 
@@ -1194,16 +1295,18 @@ impl Solver for Bitwuzla {
     }
 
     fn check(&mut self) -> io::Result<Response> {
+        self.check_with_interrupt(None)
+    }
+
+    fn check_with_interrupt(
+        &mut self,
+        interrupt: Option<SolverInterruptHandle>,
+    ) -> io::Result<Response> {
+        self.clear_interrupt_fired();
+        self.set_interrupt(interrupt);
         let r = unsafe { bitwuzla_check_sat(self.bitwuzla.raw) };
-        match r {
-            BITWUZLA_SAT => Ok(Response::Sat),
-            BITWUZLA_UNSAT => Ok(Response::Unsat),
-            BITWUZLA_UNKNOWN => Ok(Response::Unknown),
-            _ => Err(io::Error::new(
-                io::ErrorKind::Other,
-                "bitwuzla_check_sat failed",
-            )),
-        }
+        self.clear_interrupt_state();
+        self.map_check_result(r)
     }
 
     fn assert(&mut self, bv: &BitVec<Self::Term>) -> io::Result<()> {
@@ -1225,6 +1328,88 @@ impl Solver for Bitwuzla {
 
 #[cfg(test)]
 use crate::test_solver;
+
+#[cfg(test)]
+mod interrupt_tests {
+    use super::{BITWUZLA_UNKNOWN, Bitwuzla, BitwuzlaOptions};
+    use crate::solver::{AtomicSolverInterrupt, Response, Solver};
+    use std::sync::atomic::Ordering;
+
+    fn add_nontrivial_constraint(solver: &mut Bitwuzla) {
+        let x = solver.declare("x", 64).unwrap();
+        let y = solver.declare("y", 64).unwrap();
+        let z = solver.declare("z", 64).unwrap();
+        let xy = solver.mul(&x, &y);
+        let yz = solver.mul(&y, &z);
+        let sum = solver.add(&xy, &yz);
+        let target = solver.numerical(64, 0x1234);
+        let eq = solver.eq(&sum, &target);
+        solver.assert(&eq).unwrap();
+    }
+
+    #[test]
+    fn test_check_with_interrupt_returns_interrupted_when_pretriggered() {
+        let mut solver = Bitwuzla::new(&BitwuzlaOptions::new()).unwrap();
+        add_nontrivial_constraint(&mut solver);
+
+        let interrupt = AtomicSolverInterrupt::new();
+        interrupt.interrupt();
+
+        assert_eq!(
+            solver
+                .check_with_interrupt(Some(interrupt.handle()))
+                .unwrap(),
+            Response::Interrupted
+        );
+    }
+
+    #[test]
+    fn test_check_with_interrupt_preserves_sat_and_unsat_without_interrupt() {
+        let mut sat_solver = Bitwuzla::new(&BitwuzlaOptions::new()).unwrap();
+        let sat_symbol = sat_solver.declare("sat_symbol", 8).unwrap();
+        let sat_value = sat_solver.numerical(8, 7);
+        let sat_eq = sat_solver.eq(&sat_symbol, &sat_value);
+        sat_solver.assert(&sat_eq).unwrap();
+        assert_eq!(
+            sat_solver.check_with_interrupt(None).unwrap(),
+            Response::Sat
+        );
+
+        let mut unsat_solver = Bitwuzla::new(&BitwuzlaOptions::new()).unwrap();
+        let unsat_symbol = unsat_solver.declare("unsat_symbol", 8).unwrap();
+        let seven = unsat_solver.numerical(8, 7);
+        let eight = unsat_solver.numerical(8, 8);
+        let eq_seven = unsat_solver.eq(&unsat_symbol, &seven);
+        let eq_eight = unsat_solver.eq(&unsat_symbol, &eight);
+        unsat_solver.assert(&eq_seven).unwrap();
+        unsat_solver.assert(&eq_eight).unwrap();
+        assert_eq!(
+            unsat_solver.check_with_interrupt(None).unwrap(),
+            Response::Unsat
+        );
+    }
+
+    #[test]
+    fn test_unknown_mapping_only_uses_interrupted_when_callback_fired() {
+        let solver = Bitwuzla::new(&BitwuzlaOptions::new()).unwrap();
+
+        solver.clear_interrupt_fired();
+        assert_eq!(
+            solver.map_check_result(BITWUZLA_UNKNOWN).unwrap(),
+            Response::Unknown
+        );
+
+        solver
+            .bitwuzla
+            .termination_state
+            .fired
+            .store(true, Ordering::SeqCst);
+        assert_eq!(
+            solver.map_check_result(BITWUZLA_UNKNOWN).unwrap(),
+            Response::Interrupted
+        );
+    }
+}
 
 #[cfg(test)]
 test_solver!(

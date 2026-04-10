@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+#![doc = include_str!("../README.md")]
+
 pub mod dslx_equiv;
 pub mod dslx_specializer;
 pub mod dslx_tactics;

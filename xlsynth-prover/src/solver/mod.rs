@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use xlsynth::IrValue;
 
@@ -13,11 +15,53 @@ pub mod boolector;
 #[cfg(feature = "has-easy-smt")]
 pub mod easy_smt;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Response {
     Sat,
     Unsat,
     Unknown,
+    Interrupted,
+}
+
+/// Cooperative interruption hook for long-running solver checks.
+pub trait SolverInterrupt: Send + Sync {
+    fn should_interrupt(&self) -> bool;
+}
+
+pub type SolverInterruptHandle = Arc<dyn SolverInterrupt>;
+
+/// Shared atomic flag that can be passed to interrupt-aware solver checks.
+#[derive(Clone, Default)]
+pub struct AtomicSolverInterrupt {
+    interrupted: Arc<AtomicBool>,
+}
+
+impl AtomicSolverInterrupt {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn interrupt(&self) {
+        self.interrupted.store(true, Ordering::SeqCst);
+    }
+
+    pub fn reset(&self) {
+        self.interrupted.store(false, Ordering::SeqCst);
+    }
+
+    pub fn is_interrupted(&self) -> bool {
+        self.interrupted.load(Ordering::SeqCst)
+    }
+
+    pub fn handle(&self) -> SolverInterruptHandle {
+        Arc::new(self.clone())
+    }
+}
+
+impl SolverInterrupt for AtomicSolverInterrupt {
+    fn should_interrupt(&self) -> bool {
+        self.is_interrupted()
+    }
 }
 
 // Generic helper: left-fold a vector with a binary operator implemented by the
@@ -242,6 +286,13 @@ pub trait Solver: Sized {
     fn push(&mut self) -> io::Result<()>;
     fn pop(&mut self) -> io::Result<()>;
     fn check(&mut self) -> io::Result<Response>;
+    fn check_with_interrupt(
+        &mut self,
+        interrupt: Option<SolverInterruptHandle>,
+    ) -> io::Result<Response> {
+        let _ = interrupt;
+        self.check()
+    }
     fn assert(&mut self, bit_vec: &BitVec<Self::Term>) -> io::Result<()>;
     fn render(&mut self, bit_vec: &BitVec<Self::Term>) -> String;
     fn smax(&mut self, lhs: &BitVec<Self::Term>, rhs: &BitVec<Self::Term>) -> BitVec<Self::Term> {

@@ -272,6 +272,9 @@ impl<'a, S: Solver> CornerProverSession<'a, S> {
         let r = self.solver.check().map_err(|e| e.to_string())?;
         let out = match r {
             Response::Unsat => CornerOrResult::Unsat,
+            Response::Interrupted => CornerOrResult::Unknown {
+                message: "solver interrupted".to_string(),
+            },
             Response::Unknown => CornerOrResult::Unknown {
                 message: "solver returned unknown".to_string(),
             },

@@ -53,6 +53,9 @@ fn ext_carry_out_equivalent_to_desugared_export_form_and_exports_to_upstream() {
         );
         match res {
             EquivResult::Proved => {}
+            EquivResult::Interrupted => {
+                panic!("equivalence unexpectedly interrupted for ext_carry_out desugaring");
+            }
             EquivResult::ToolchainDisproved(msg)
                 if msg.contains("Unknown operation")
                     && msg.contains("ext_carry_out")
