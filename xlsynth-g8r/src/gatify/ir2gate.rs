@@ -6,6 +6,7 @@
 use crate::aig::gate::{AigBitVector, AigOperand, GateFn, Split};
 use crate::check_equivalence;
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
+use crate::gatify::ir2gate_arithmetic::{gatify_add_binop, gatify_ext_nary_add, gatify_sub_binop};
 use crate::gatify::mul_by_const_csd::{SignedDigitSign, decompose_umul_const_terms};
 use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
 use std::collections::HashMap;
@@ -166,7 +167,7 @@ fn maybe_warn_shift_amount_truncatable(
     }
 }
 
-struct GateEnv {
+pub(super) struct GateEnv {
     ir_to_g8: HashMap<ir::NodeRef, GateOrVec>,
 }
 
@@ -177,11 +178,11 @@ impl GateEnv {
         }
     }
 
-    pub fn contains(&self, ir_node_ref: ir::NodeRef) -> bool {
+    fn contains(&self, ir_node_ref: ir::NodeRef) -> bool {
         self.ir_to_g8.contains_key(&ir_node_ref)
     }
 
-    pub fn add(&mut self, ir_node_ref: ir::NodeRef, gate_or_vec: GateOrVec) {
+    fn add(&mut self, ir_node_ref: ir::NodeRef, gate_or_vec: GateOrVec) {
         log::debug!(
             "add; ir_node_ref: {:?}; gate_or_vec: {:?}",
             ir_node_ref,
@@ -195,7 +196,7 @@ impl GateEnv {
         }
     }
 
-    pub fn apply_known_bits_if_any(
+    fn apply_known_bits_if_any(
         &mut self,
         ir_node_ref: ir::NodeRef,
         _f: &ir::Fn,
@@ -267,7 +268,7 @@ impl GateEnv {
         }
     }
 
-    pub fn get_bit_vector(&self, ir_node_ref: ir::NodeRef) -> Result<AigBitVector, String> {
+    pub(super) fn get_bit_vector(&self, ir_node_ref: ir::NodeRef) -> Result<AigBitVector, String> {
         match self.ir_to_g8.get(&ir_node_ref) {
             Some(GateOrVec::BitVector(bv)) => Ok(bv.clone()),
             Some(GateOrVec::Gate(gate_ref)) => Ok(AigBitVector::from_bit(*gate_ref)),
@@ -285,7 +286,7 @@ pub enum Signedness {
     Signed,
 }
 
-fn gatify_add_with_mapping(
+pub(super) fn gatify_add_with_mapping(
     adder_mapping: AdderMapping,
     lhs_bits: &AigBitVector,
     rhs_bits: &AigBitVector,
@@ -728,7 +729,10 @@ fn gatify_zero_ext(new_bit_count: usize, arg_bits: &AigBitVector) -> AigBitVecto
     AigBitVector::concat(zeros, arg_bits.clone())
 }
 
-fn gatify_zext_or_truncate(new_bit_count: usize, arg_bits: &AigBitVector) -> AigBitVector {
+pub(super) fn gatify_zext_or_truncate(
+    new_bit_count: usize,
+    arg_bits: &AigBitVector,
+) -> AigBitVector {
     match arg_bits.get_bit_count().cmp(&new_bit_count) {
         std::cmp::Ordering::Less => gatify_zero_ext(new_bit_count, arg_bits),
         std::cmp::Ordering::Equal => arg_bits.clone(),
@@ -736,7 +740,7 @@ fn gatify_zext_or_truncate(new_bit_count: usize, arg_bits: &AigBitVector) -> Aig
     }
 }
 
-fn gatify_sext_or_truncate(
+pub(super) fn gatify_sext_or_truncate(
     gb: &mut GateBuilder,
     text_id: usize,
     new_bit_count: usize,
@@ -1277,48 +1281,14 @@ pub enum CmpKind {
     Gt,
 }
 
-fn literal_bits_if_bits_node(f: &ir::Fn, node_ref: ir::NodeRef) -> Option<xlsynth::IrBits> {
+pub(super) fn literal_bits_if_bits_node(
+    f: &ir::Fn,
+    node_ref: ir::NodeRef,
+) -> Option<xlsynth::IrBits> {
     match &f.get_node(node_ref).payload {
         ir::NodePayload::Literal(literal) => literal.to_bits().ok(),
         _ => None,
     }
-}
-
-/// Resizes a literal term to the ext_nary_add output width.
-fn resize_literal_bits_for_ext_nary_add(
-    bits: &xlsynth::IrBits,
-    output_width: usize,
-    signed: bool,
-) -> xlsynth::IrBits {
-    match bits.get_bit_count().cmp(&output_width) {
-        std::cmp::Ordering::Less => {
-            let fill_bit = signed && bits.get_bit_count() != 0 && bits.msb();
-            let mut resized_bits = Vec::with_capacity(output_width);
-            for i in 0..bits.get_bit_count() {
-                resized_bits.push(
-                    bits.get_bit(i)
-                        .expect("literal bit index should be in bounds during resize"),
-                );
-            }
-            resized_bits.resize(output_width, fill_bit);
-            xlsynth::IrBits::from_lsb_is_0(&resized_bits)
-        }
-        std::cmp::Ordering::Equal => bits.clone(),
-        std::cmp::Ordering::Greater => bits.width_slice(0, output_width as i64),
-    }
-}
-
-/// Adds one literal contribution into the ext_nary_add constant accumulator.
-fn accumulate_ext_nary_add_literal(
-    literal_sum: &mut xlsynth::IrBits,
-    term_bits: &xlsynth::IrBits,
-    output_width: usize,
-    signed: bool,
-    negated: bool,
-) {
-    let resized = resize_literal_bits_for_ext_nary_add(term_bits, output_width, signed);
-    let contribution = if negated { resized.negate() } else { resized };
-    *literal_sum = literal_sum.add(&contribution);
 }
 
 fn is_all_zeros(bits: &xlsynth::IrBits) -> bool {
@@ -1354,7 +1324,7 @@ fn get_pow2_lsb_index(bits: &xlsynth::IrBits) -> Option<usize> {
     found
 }
 
-fn get_pow2_minus1_k(bits: &xlsynth::IrBits) -> Option<usize> {
+pub(super) fn get_pow2_minus1_k(bits: &xlsynth::IrBits) -> Option<usize> {
     // Recognizes values of the form (1<<k)-1, i.e. k low bits are 1 and the rest
     // are 0. k=0 => 0, k=bit_count => all ones.
     let bit_count = bits.get_bit_count();
@@ -1370,23 +1340,6 @@ fn get_pow2_minus1_k(bits: &xlsynth::IrBits) -> Option<usize> {
     Some(k)
 }
 
-fn normalize_add_literal_rhs(
-    f: &ir::Fn,
-    a: ir::NodeRef,
-    b: ir::NodeRef,
-) -> Option<(ir::NodeRef, xlsynth::IrBits)> {
-    let a_lit = literal_bits_if_bits_node(f, a);
-    let b_lit = literal_bits_if_bits_node(f, b);
-
-    match (a_lit, b_lit) {
-        (None, Some(rhs_bits)) => Some((a, rhs_bits)),
-        (Some(rhs_bits), None) => Some((b, rhs_bits)),
-        // If both are literals, we expect folding to have handled this.
-        (Some(_), Some(_)) => None,
-        (None, None) => None,
-    }
-}
-
 fn normalize_umul_literal_rhs(
     f: &ir::Fn,
     a: ir::NodeRef,
@@ -1400,38 +1353,6 @@ fn normalize_umul_literal_rhs(
         (Some(_), Some(_)) => None,
         (None, None) => None,
     }
-}
-
-fn gatify_add_const_pow2_minus1(
-    gb: &mut GateBuilder,
-    lhs_bits: &AigBitVector,
-    k: usize,
-) -> AigBitVector {
-    let bit_count = lhs_bits.get_bit_count();
-    assert!(k > 0 && k < bit_count);
-
-    let mut sum = Vec::with_capacity(bit_count);
-    // For low bits where rhs_i=1, carry recurrence is c_{i+1} = lhs_i | c_i,
-    // and sum_i = !(lhs_i ^ c_i).
-    let mut carry = gb.get_false();
-    for i in 0..k {
-        let lhs_i = *lhs_bits.get_lsb(i);
-        let lhs_xor_carry = gb.add_xor_binary(lhs_i, carry);
-        let sum_i = gb.add_not(lhs_xor_carry);
-        sum.push(sum_i);
-        carry = gb.add_or_binary(lhs_i, carry);
-    }
-
-    // For upper bits where rhs_i=0, this is an increment-by-carry chain:
-    // sum_i = lhs_i ^ carry and c_{i+1} = lhs_i & carry.
-    for i in k..bit_count {
-        let lhs_i = *lhs_bits.get_lsb(i);
-        let sum_i = gb.add_xor_binary(lhs_i, carry);
-        sum.push(sum_i);
-        carry = gb.add_and_binary(lhs_i, carry);
-    }
-
-    AigBitVector::from_lsb_is_index_0(&sum)
 }
 
 fn get_neg_pow2_k(bits: &xlsynth::IrBits) -> Option<usize> {
@@ -2960,78 +2881,17 @@ fn gatify_node(
             let ir::Type::Bits(output_width) = node.ty else {
                 return Err("ExtNaryAdd result must be bits-typed".to_string());
             };
-            if output_width == 0 {
-                env.add(node_ref, GateOrVec::BitVector(AigBitVector::zeros(0)));
-            } else if terms.is_empty() {
-                env.add(
-                    node_ref,
-                    GateOrVec::BitVector(AigBitVector::zeros(output_width)),
-                );
-            } else {
-                let one_bits = xlsynth::IrBits::make_ubits(output_width, 1)
-                    .expect("bits[output_width]:1 should construct");
-                let mut literal_sum = xlsynth::IrBits::zero(output_width);
-                let mut lowered_terms: Vec<AigBitVector> = Vec::with_capacity(terms.len());
-                for term in terms {
-                    if let Some(literal_bits) = literal_bits_if_bits_node(f, term.operand) {
-                        accumulate_ext_nary_add_literal(
-                            &mut literal_sum,
-                            &literal_bits,
-                            output_width,
-                            term.signed,
-                            term.negated,
-                        );
-                        continue;
-                    }
-
-                    let bits = env
-                        .get_bit_vector(term.operand)
-                        .expect("ext_nary_add operand should be present");
-                    let resized = if term.signed {
-                        gatify_sext_or_truncate(g8_builder, node.text_id, output_width, &bits)
-                    } else {
-                        gatify_zext_or_truncate(output_width, &bits)
-                    };
-                    if term.negated {
-                        lowered_terms.push(g8_builder.add_not_vec(&resized));
-                        literal_sum = literal_sum.add(&one_bits);
-                    } else {
-                        lowered_terms.push(resized);
-                    }
-                }
-                if !literal_sum.is_zero() {
-                    lowered_terms.push(g8_builder.add_literal(&literal_sum));
-                }
-                let selected_adder_mapping = (*arch)
-                    .map(AdderMapping::from)
-                    .unwrap_or(options.adder_mapping);
-                let selected_adder_mapping_name = match selected_adder_mapping {
-                    AdderMapping::RippleCarry => "ripple_carry",
-                    AdderMapping::BrentKung => "brent_kung",
-                    AdderMapping::KoggeStone => "kogge_stone",
-                };
-                let sum = if lowered_terms.is_empty() {
-                    g8_builder.add_literal(&literal_sum)
-                } else {
-                    array_add_with_carry_out(
-                        g8_builder,
-                        &lowered_terms,
-                        None,
-                        selected_adder_mapping,
-                    )
-                    .sum
-                };
-                for (i, gate) in sum.iter_lsb_to_msb().enumerate() {
-                    g8_builder.add_tag(
-                        gate.node,
-                        format!(
-                            "ext_nary_add_{}_{}_output_bit_{}",
-                            node.text_id, selected_adder_mapping_name, i
-                        ),
-                    );
-                }
-                env.add(node_ref, GateOrVec::BitVector(sum));
-            }
+            let gates = gatify_ext_nary_add(
+                f,
+                &env,
+                node.text_id,
+                terms,
+                *arch,
+                output_width,
+                options.adder_mapping,
+                g8_builder,
+            );
+            env.add(node_ref, GateOrVec::BitVector(gates));
         }
 
         // -- binary operations
@@ -3237,84 +3097,27 @@ fn gatify_node(
             env.add(node_ref, GateOrVec::BitVector(gates));
         }
         ir::NodePayload::Binop(ir::Binop::Add, a, b) => {
-            if let Some((lhs, rhs_bits)) = normalize_add_literal_rhs(f, *a, *b) {
-                if let Some(k) = get_pow2_minus1_k(&rhs_bits) {
-                    let lhs_gate_refs = env
-                        .get_bit_vector(lhs)
-                        .expect("add lhs should be present for literal-rhs rewrite");
-                    assert_eq!(lhs_gate_refs.get_bit_count(), rhs_bits.get_bit_count());
-                    let gates = if k == 0 {
-                        lhs_gate_refs.clone()
-                    } else if k == lhs_gate_refs.get_bit_count() {
-                        // (2^N - 1) for N-bit values is all ones; adding this is the same
-                        // as subtracting one modulo 2^N.
-                        let ones = g8_builder.add_literal(&rhs_bits);
-                        let add_tag = format!("add_{}", node.text_id);
-                        let (_c_out, gates) = gatify_add_with_mapping(
-                            options.adder_mapping,
-                            &lhs_gate_refs,
-                            &ones,
-                            g8_builder.get_false(),
-                            Some(&add_tag),
-                            g8_builder,
-                        );
-                        gates
-                    } else {
-                        gatify_add_const_pow2_minus1(g8_builder, &lhs_gate_refs, k)
-                    };
-                    env.add(node_ref, GateOrVec::BitVector(gates));
-                } else {
-                    let a_gate_refs = env.get_bit_vector(*a).expect("add lhs should be present");
-                    let b_gate_refs = env.get_bit_vector(*b).expect("add rhs should be present");
-                    assert_eq!(a_gate_refs.get_bit_count(), b_gate_refs.get_bit_count());
-                    let add_tag = format!("add_{}", node.text_id);
-                    let (_c_out, gates) = gatify_add_with_mapping(
-                        options.adder_mapping,
-                        &a_gate_refs,
-                        &b_gate_refs,
-                        g8_builder.get_false(),
-                        Some(&add_tag),
-                        g8_builder,
-                    );
-                    assert_eq!(gates.get_bit_count(), a_gate_refs.get_bit_count());
-                    env.add(node_ref, GateOrVec::BitVector(gates));
-                }
-            } else {
-                let a_gate_refs = env.get_bit_vector(*a).expect("add lhs should be present");
-                let b_gate_refs = env.get_bit_vector(*b).expect("add rhs should be present");
-                assert_eq!(a_gate_refs.get_bit_count(), b_gate_refs.get_bit_count());
-                let add_tag = format!("add_{}", node.text_id);
-                let (_c_out, gates) = gatify_add_with_mapping(
-                    options.adder_mapping,
-                    &a_gate_refs,
-                    &b_gate_refs,
-                    g8_builder.get_false(),
-                    Some(&add_tag),
-                    g8_builder,
-                );
-                assert_eq!(gates.get_bit_count(), a_gate_refs.get_bit_count());
-                env.add(node_ref, GateOrVec::BitVector(gates));
-            }
-        }
-        ir::NodePayload::Binop(ir::Binop::Sub, a, b) => {
-            let a_gate_refs = env.get_bit_vector(*a).expect("sub lhs should be present");
-            let b_gate_refs = env.get_bit_vector(*b).expect("sub rhs should be present");
-            assert_eq!(a_gate_refs.get_bit_count(), b_gate_refs.get_bit_count());
-            let b_complement = g8_builder.add_not_vec(&b_gate_refs);
-            let sub_tag = format!("sub_{}", node.text_id);
-            let (_c_out, gates) = gatify_add_with_mapping(
+            let gates = gatify_add_binop(
+                f,
+                &env,
+                node.text_id,
+                *a,
+                *b,
                 options.adder_mapping,
-                &a_gate_refs,
-                &b_complement,
-                g8_builder.get_true(),
-                Some(&sub_tag),
                 g8_builder,
             );
-            let output_bit_count = node.ty.bit_count();
-            assert_eq!(gates.get_bit_count(), output_bit_count);
-            for (i, gate) in gates.iter_lsb_to_msb().enumerate() {
-                g8_builder.add_tag(gate.node, format!("sub_{}_output_bit_{}", node.text_id, i));
-            }
+            env.add(node_ref, GateOrVec::BitVector(gates));
+        }
+        ir::NodePayload::Binop(ir::Binop::Sub, a, b) => {
+            let gates = gatify_sub_binop(
+                &env,
+                node.text_id,
+                node.ty.bit_count(),
+                *a,
+                *b,
+                options.adder_mapping,
+                g8_builder,
+            );
             env.add(node_ref, GateOrVec::BitVector(gates));
         }
         ir::NodePayload::BitSlice { arg, start, width } => {

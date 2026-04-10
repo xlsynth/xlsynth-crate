@@ -399,6 +399,7 @@ fn absorb_nary_add_term_wrappers(f: &ir::Fn, out_w: usize, term: &mut ExtNaryAdd
 /// Applies one greedy scan over each nary-add node's term list.
 fn grow_ext_nary_add_terms_once(
     f: &ir::Fn,
+    use_counts: &[usize],
     out_w: usize,
     terms: &mut Vec<ExtNaryAddTerm>,
 ) -> usize {
@@ -411,8 +412,11 @@ fn grow_ext_nary_add_terms_once(
         }
 
         let term = terms[term_index];
+        let operand_use_count = use_counts[term.operand.index];
         if let Some((lhs, rhs)) = term_payload_matches_add(f, &term) {
-            if absorb_binop_candidate_is_always_equivalent(f, &term, out_w) {
+            if operand_use_count == 1
+                && absorb_binop_candidate_is_always_equivalent(f, &term, out_w)
+            {
                 terms.splice(
                     term_index..term_index + 1,
                     [
@@ -434,7 +438,9 @@ fn grow_ext_nary_add_terms_once(
         }
 
         if let Some((lhs, rhs)) = term_payload_matches_sub(f, &term) {
-            if absorb_binop_candidate_is_always_equivalent(f, &term, out_w) {
+            if operand_use_count == 1
+                && absorb_binop_candidate_is_always_equivalent(f, &term, out_w)
+            {
                 terms.splice(
                     term_index..term_index + 1,
                     [
@@ -456,7 +462,9 @@ fn grow_ext_nary_add_terms_once(
         }
 
         if let Some(nested_terms) = term_payload_matches_nested_ext_nary_add(f, &term) {
-            if combine_nary_add_candidate_is_always_equivalent(f, &term, out_w) {
+            if operand_use_count == 1
+                && combine_nary_add_candidate_is_always_equivalent(f, &term, out_w)
+            {
                 let replacement_terms =
                     nested_terms.into_iter().map(|nested_term| ExtNaryAddTerm {
                         operand: nested_term.operand,
@@ -476,6 +484,7 @@ fn grow_ext_nary_add_terms_once(
 
 /// Greedily absorbs wrappers and nested add/sub trees into `ext_nary_add`.
 fn grow_ext_nary_adds(f: &mut ir::Fn) -> usize {
+    let use_counts = get_use_counts(f);
     let mut rewrites = 0usize;
     for node_index in 0..f.nodes.len() {
         let NodePayload::ExtNaryAdd { terms, arch } = f.nodes[node_index].payload.clone() else {
@@ -486,7 +495,7 @@ fn grow_ext_nary_adds(f: &mut ir::Fn) -> usize {
         };
 
         let mut terms = terms;
-        let node_rewrites = grow_ext_nary_add_terms_once(f, out_w, &mut terms);
+        let node_rewrites = grow_ext_nary_add_terms_once(f, &use_counts, out_w, &mut terms);
         if node_rewrites == 0 {
             continue;
         }
@@ -1568,6 +1577,41 @@ top fn f(a: bits[4] id=1, b: bits[4] id=2, c: bits[8] id=3) -> bits[8] {
                     "ret outer: bits[8] = ext_nary_add(inner, c, signed=[false, false], negated=[false, false], id=5)",
                 ),
             "expected narrow inner ext_nary_add to remain nested; got:\n{}",
+            optimized_text
+        );
+    }
+
+    #[test]
+    fn nary_add_rewrite_does_not_absorb_shared_nested_add_terms() {
+        let ir_text = r#"package sample
+
+top fn f(a: bits[8] id=1, b: bits[8] id=2, c: bits[8] id=3) -> (bits[8], bits[8]) {
+  inner: bits[8] = add(a, b, id=4)
+  outer: bits[8] = add(inner, c, id=5)
+  ret pair: (bits[8], bits[8]) = tuple(inner, outer, id=6)
+}
+"#;
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_top_fn().unwrap();
+
+        let optimized = prep_for_gatify(
+            f,
+            None,
+            PrepForGatifyOptions {
+                enable_rewrite_nary_add: true,
+                ..PrepForGatifyOptions::default()
+            },
+        );
+        let optimized_text = optimized.to_string();
+        assert!(
+            optimized_text.contains(
+                "inner: bits[8] = ext_nary_add(a, b, signed=[false, false], negated=[false, false], id=4)",
+            )
+                && optimized_text.contains(
+                    "outer: bits[8] = ext_nary_add(inner, c, signed=[false, false], negated=[false, false], id=5)",
+                ),
+            "expected shared inner add to remain a nested operand instead of being duplicated; got:\n{}",
             optimized_text
         );
     }
