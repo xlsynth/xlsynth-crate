@@ -14,9 +14,11 @@ Usage:
 """
 
 import argparse
+import concurrent.futures
 import shlex
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -28,14 +30,10 @@ DEFAULT_FEATURES: list[str] = [
 ]
 DEFAULT_FUZZ_RUN_ARGS: str = ""
 DEFAULT_FUZZ_BIN_ARGS: str = "-max_total_time=5"
+DEFAULT_THREADS: int = 4
 
 # Targets which are known to fail.
-SKIP_TARGETS: list[str] = [
-    "fuzz_bulk_replace",
-    "fuzz_gate_transform_arbitrary",
-    "fuzz_ir_opt_equiv",
-    "fuzz_ir_outline_equiv",
-]
+SKIP_TARGETS: list[str] = ["fuzz_bulk_replace", "fuzz_ir_outline_equiv"]
 
 
 def find_fuzz_dirs(repo_root: Path) -> list[Path]:
@@ -57,6 +55,32 @@ def run_cmd(cmd: list[str]) -> None:
     """
     print("  => " + " ".join(shlex.quote(part) for part in cmd), file=sys.stderr)
     subprocess.check_call(cmd)
+
+
+def run_cmd_captured(cmd: list[str], log_dir: Path) -> tuple[int, Path]:
+    """Execute `cmd` and spool combined stdout/stderr for deterministic replay."""
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=log_dir,
+        prefix="fuzz_target_",
+        suffix=".log",
+        delete=False,
+    ) as log_file:
+        completed = subprocess.run(
+            cmd,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        return completed.returncode, Path(log_file.name)
+
+
+def replay_log(log_path: Path) -> None:
+    """Stream a captured log file to stdout without reading it all into memory."""
+    with open(log_path, encoding="utf-8", errors="replace") as f:
+        while chunk := f.read(1024 * 1024):
+            sys.stdout.write(chunk)
 
 
 def get_crate_features(crate_path: Path) -> list[str]:
@@ -92,7 +116,16 @@ def main() -> int:
         default="none",
         help='Sanitizer to enable via RUSTFLAGS, e.g. "address", "thread", or "none".',
     )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=DEFAULT_THREADS,
+        help=f"Maximum number of fuzz targets to run in parallel. Defaults to {DEFAULT_THREADS}.",
+    )
     args = parser.parse_args()
+    num_workers = args.threads
+    if num_workers <= 0:
+        parser.error("--threads must be positive")
     sanitizer_args = ["--sanitizer", args.sanitizer]
 
     # scripts/ is one level below the repo root.
@@ -149,8 +182,8 @@ def main() -> int:
                 *fuzz_run_args_list,
             ]
         )
+    run_jobs: list[tuple[Path, str, list[str]]] = []
     for fuzz_dir, targets in fuzz_targets:
-        print(f"\n=== Running fuzz targets in {fuzz_dir} ===", file=sys.stderr)
         features = get_crate_features(fuzz_dir)
         supported_features = [f for f in features if f in args.features]
         features_args = (
@@ -161,22 +194,50 @@ def main() -> int:
                 print(f"Skipping {target} in {fuzz_dir}.", file=sys.stderr)
                 continue
 
-            print(f"\n--- Running {target} in {fuzz_dir} ---", file=sys.stderr)
-            run_cmd(
-                [
-                    "cargo",
-                    "fuzz",
-                    "run",
-                    "--fuzz-dir",
-                    fuzz_dir.as_posix(),
-                    *sanitizer_args,
-                    *features_args,
-                    *fuzz_run_args_list,
+            run_jobs.append(
+                (
+                    fuzz_dir,
                     target,
-                    "--",
-                    *fuzz_bin_args_list,
-                ]
+                    [
+                        "cargo",
+                        "fuzz",
+                        "run",
+                        "--fuzz-dir",
+                        fuzz_dir.as_posix(),
+                        *sanitizer_args,
+                        *features_args,
+                        *fuzz_run_args_list,
+                        target,
+                        "--",
+                        *fuzz_bin_args_list,
+                    ],
+                )
             )
+
+    print(
+        f"\n=== Running {len(run_jobs)} fuzz targets with {num_workers} worker threads ===",
+        file=sys.stderr,
+    )
+    with tempfile.TemporaryDirectory(prefix="run_all_fuzz_tests_logs_") as log_dir_text:
+        log_dir = Path(log_dir_text)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = [
+                executor.submit(run_cmd_captured, cmd, log_dir)
+                for _, _, cmd in run_jobs
+            ]
+            for (fuzz_dir, target, cmd), future in zip(run_jobs, futures):
+                print(f"\n--- Running {target} in {fuzz_dir} ---", file=sys.stderr)
+                print(
+                    "  => " + " ".join(shlex.quote(part) for part in cmd),
+                    file=sys.stderr,
+                )
+                returncode, log_path = future.result()
+                try:
+                    replay_log(log_path)
+                finally:
+                    log_path.unlink(missing_ok=True)
+                if returncode != 0:
+                    return returncode
     return 0
 
 

@@ -43,8 +43,9 @@ impl PirTransform for NotEqNeFlipTransform {
         PirTransformKind::NotEqNeFlip
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             match &f.get_node(nr).payload {
                 NodePayload::Unop(Unop::Not, arg) => {
@@ -52,11 +53,17 @@ impl PirTransform for NotEqNeFlipTransform {
                         f.get_node(*arg).payload,
                         NodePayload::Binop(Binop::Eq, _, _) | NodePayload::Binop(Binop::Ne, _, _)
                     ) {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
                 NodePayload::Binop(Binop::Eq, _, _) | NodePayload::Binop(Binop::Ne, _, _) => {
-                    out.push(TransformLocation::Node(nr));
+                    out.push(TransformCandidate {
+                        location: TransformLocation::Node(nr),
+                        always_equivalent,
+                    });
                 }
                 _ => {}
             }
@@ -114,9 +121,5 @@ impl PirTransform for NotEqNeFlipTransform {
             }
             _ => Err("NotEqNeFlipTransform: expected not(eq/ne(..)) or eq/ne(..)".to_string()),
         }
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }

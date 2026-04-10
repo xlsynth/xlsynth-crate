@@ -15,7 +15,8 @@ impl PirTransform for CloneMultiUserNodeTransform {
         PirTransformKind::CloneMultiUserNode
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
         let users_map = compute_users(f);
         users_map
             .iter()
@@ -27,7 +28,10 @@ impl PirTransform for CloneMultiUserNodeTransform {
                 match &node.payload {
                     NodePayload::GetParam(_) => None,
                     NodePayload::Nil => None,
-                    _ if users.len() > 1 => Some(TransformLocation::Node(*nr)),
+                    _ if users.len() > 1 => Some(TransformCandidate {
+                        location: TransformLocation::Node(*nr),
+                        always_equivalent,
+                    }),
                     _ => None,
                 }
             })
@@ -99,9 +103,5 @@ impl PirTransform for CloneMultiUserNodeTransform {
         }
 
         Ok(())
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }

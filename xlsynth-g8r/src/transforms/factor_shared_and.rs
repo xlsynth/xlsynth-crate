@@ -79,8 +79,12 @@ pub fn factor_shared_and_primitive(g: &mut GateFn, outer: AigRef) -> Result<(), 
         _ => return Err("factor_shared_and_primitive: no single shared operand"),
     };
 
-    if node_reaches_target(&g.gates, unique_l.node, outer)
-        || node_reaches_target(&g.gates, unique_r.node, outer)
+    if shared.node == outer
+        || unique_l.node == left.node
+        || unique_r.node == left.node
+        || node_reaches_target(&g.gates, shared.node, outer)
+        || node_reaches_target(&g.gates, unique_l.node, left.node)
+        || node_reaches_target(&g.gates, unique_r.node, left.node)
     {
         return Err("factor_shared_and_primitive: would create cycle");
     }
@@ -355,9 +359,21 @@ fn can_factor_without_cycle(g: &GateFn, outer: AigRef) -> bool {
         ll_b
     };
 
-    // After factoring we will create a new edge shared -> outer
-    // This is safe unless shared already (transitively) reaches outer.
-    if node_reaches_target(&g.gates, shared.node, outer) {
+    let (_unique_l, unique_r) = if ll_a == shared {
+        (ll_b, if rl_a == shared { rl_b } else { rl_a })
+    } else {
+        (ll_a, if rl_a == shared { rl_b } else { rl_a })
+    };
+
+    // After factoring, `outer` will gain an edge to `shared`, and `left.node`
+    // will gain an edge to `unique_r`. Reject if either edge would point back
+    // into the producer cone, including the degenerate direct self-loop case
+    // on `left.node`.
+    if shared.node == outer
+        || unique_r.node == left.node
+        || node_reaches_target(&g.gates, shared.node, outer)
+        || node_reaches_target(&g.gates, unique_r.node, left.node)
+    {
         return false;
     }
 
@@ -588,5 +604,28 @@ mod tests {
         let mut f = FactorSharedAndTransform::new();
         let c = f.find_candidates(&g, TransformDirection::Forward);
         assert!(c.is_empty());
+    }
+
+    #[test]
+    fn factor_shared_and_rejects_dead_outer_when_unique_rhs_is_left_child() {
+        let mut gb = GateBuilder::new("f".to_string(), GateBuilderOptions::no_opt());
+        let a = gb.add_input("a".to_string(), 1).get_lsb(0).clone();
+        let b = gb.add_input("b".to_string(), 1).get_lsb(0).clone();
+        let left = gb.add_and_binary(a.clone(), b);
+        let right = gb.add_and_binary(a, left);
+        let dead_outer = gb.add_and_binary(left, right);
+        gb.add_output("o".to_string(), right.into());
+        let mut g = gb.build();
+
+        let mut t = FactorSharedAndTransform::new();
+        assert!(
+            t.find_candidates(&g, TransformDirection::Forward)
+                .is_empty(),
+            "dead outer with a back-edge to left child should not be a candidate"
+        );
+        assert_eq!(
+            factor_shared_and_primitive(&mut g, dead_outer.node),
+            Err("factor_shared_and_primitive: would create cycle")
+        );
     }
 }

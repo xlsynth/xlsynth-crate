@@ -110,8 +110,9 @@ impl PirTransform for SmulSignExtU1ToSelNegTransform {
         PirTransformKind::SmulSignExtU1ToSelNeg
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             match &f.get_node(nr).payload {
                 // Expand: smul(x, sign_ext(b,w)) (either operand).
@@ -131,7 +132,10 @@ impl PirTransform for SmulSignExtU1ToSelNegTransform {
                         }
                     }
                     if ok {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
 
@@ -165,7 +169,10 @@ impl PirTransform for SmulSignExtU1ToSelNegTransform {
                     if Self::bits_width(f, x) != Some(w) {
                         continue;
                     }
-                    out.push(TransformLocation::Node(nr));
+                    out.push(TransformCandidate {
+                        location: TransformLocation::Node(nr),
+                        always_equivalent,
+                    });
                 }
 
                 _ => {}
@@ -273,9 +280,5 @@ impl PirTransform for SmulSignExtU1ToSelNegTransform {
 
             _ => Err("SmulSignExtU1ToSelNegTransform: expected smul(..) or sel(..)".to_string()),
         }
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }

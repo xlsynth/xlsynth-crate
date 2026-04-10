@@ -68,8 +68,9 @@ impl PirTransform for EqZeroOrReduceTransform {
         PirTransformKind::EqZeroOrReduce
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             match &f.get_node(nr).payload {
                 NodePayload::Binop(Binop::Eq, lhs, rhs) => {
@@ -82,7 +83,10 @@ impl PirTransform for EqZeroOrReduceTransform {
                     if Self::is_zero_literal_node(f, *lhs, w)
                         || Self::is_zero_literal_node(f, *rhs, w)
                     {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
                 NodePayload::Unop(Unop::Not, arg) => {
@@ -90,7 +94,10 @@ impl PirTransform for EqZeroOrReduceTransform {
                         f.get_node(*arg).payload,
                         NodePayload::Unop(Unop::OrReduce, _)
                     ) {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
                 _ => {}
@@ -153,9 +160,5 @@ impl PirTransform for EqZeroOrReduceTransform {
             }
             _ => Err("EqZeroOrReduceTransform: expected eq(x,0) or not(or_reduce(x))".to_string()),
         }
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }

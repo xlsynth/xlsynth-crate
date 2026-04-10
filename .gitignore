@@ -8,6 +8,8 @@ xlsynth-g8r/fuzz/artifacts/
 xlsynth-pir/fuzz/Cargo.lock
 xlsynth-pir/fuzz/corpus/
 xlsynth-pir/fuzz/artifacts/
+xlsynth-mcmc-pir/fuzz/corpus/
+xlsynth-mcmc-pir/fuzz/artifacts/
 __pycache__
 .pytest_cache
 .ruff_cache

@@ -46,16 +46,23 @@ impl PirTransform for NorNotOrFoldTransform {
         PirTransformKind::NorNotOrFold
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             match &f.get_node(nr).payload {
                 NodePayload::Nary(NaryOp::Nor, ops) if !ops.is_empty() => {
-                    out.push(TransformLocation::Node(nr));
+                    out.push(TransformCandidate {
+                        location: TransformLocation::Node(nr),
+                        always_equivalent,
+                    });
                 }
                 NodePayload::Unop(Unop::Not, arg) => {
                     if matches!(f.get_node(*arg).payload, NodePayload::Nary(NaryOp::Or, _)) {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
                 _ => {}
@@ -115,9 +122,5 @@ impl PirTransform for NorNotOrFoldTransform {
             }
             _ => Err("NorNotOrFoldTransform: expected nor(...) or not(or(...))".to_string()),
         }
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }

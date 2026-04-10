@@ -2,7 +2,7 @@
 
 use xlsynth_pir::ir::{Fn as IrFn, NaryOp, Node, NodePayload, NodeRef, Type};
 
-use super::{PirTransform, PirTransformKind, TransformLocation};
+use super::{PirTransform, PirTransformKind, TransformCandidate, TransformLocation};
 
 /// Hoists a single 2-case sel operand through concat and folds the narrow
 /// reverse form back.
@@ -62,8 +62,9 @@ impl PirTransform for ConcatSelHoistTransform {
         PirTransformKind::ConcatSelHoist
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             match &f.get_node(nr).payload {
                 NodePayload::Nary(NaryOp::Concat, ops) => {
@@ -92,7 +93,10 @@ impl PirTransform for ConcatSelHoistTransform {
                     {
                         continue;
                     }
-                    out.push(TransformLocation::Node(nr));
+                    out.push(TransformCandidate {
+                        location: TransformLocation::Node(nr),
+                        always_equivalent,
+                    });
                 }
                 NodePayload::Sel {
                     selector,
@@ -121,7 +125,10 @@ impl PirTransform for ConcatSelHoistTransform {
                     let diff_positions: Vec<usize> =
                         (0..ops0.len()).filter(|i| ops0[*i] != ops1[*i]).collect();
                     if diff_positions.len() == 1 {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
                 _ => {}
@@ -241,11 +248,11 @@ mod tests {
         let mut f = parser.parse_fn().unwrap();
         let mut t = ConcatSelHoistTransform;
         let cand = t.find_candidates(&f).pop().expect("candidate");
-        let target = match cand.clone() {
+        let target = match cand.location.clone() {
             TransformLocation::Node(nr) => nr,
             _ => unreachable!(),
         };
-        t.apply(&mut f, &cand).expect("apply");
+        t.apply(&mut f, &cand.location).expect("apply");
         assert!(matches!(
             f.get_node(target).payload,
             NodePayload::Sel { .. }
@@ -263,11 +270,11 @@ mod tests {
         let mut f = parser.parse_fn().unwrap();
         let mut t = ConcatSelHoistTransform;
         let cand = t.find_candidates(&f).pop().expect("candidate");
-        let target = match cand.clone() {
+        let target = match cand.location.clone() {
             TransformLocation::Node(nr) => nr,
             _ => unreachable!(),
         };
-        t.apply(&mut f, &cand).expect("apply");
+        t.apply(&mut f, &cand.location).expect("apply");
         assert!(matches!(
             f.get_node(target).payload,
             NodePayload::Nary(NaryOp::Concat, _)

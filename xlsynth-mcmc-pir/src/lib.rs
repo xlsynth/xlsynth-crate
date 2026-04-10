@@ -1001,15 +1001,18 @@ pub fn mcmc_iteration(
     let chosen_transform = &mut context.all_transforms[chosen_transform_idx];
     let current_transform_kind = chosen_transform.kind();
 
-    let candidate_locations = chosen_transform.find_candidates(&current_fn);
+    let mut candidates = chosen_transform.find_candidates(&current_fn);
+    if !context.enable_formal_oracle {
+        candidates.retain(|c| c.always_equivalent);
+    }
 
     log::trace!(
         "Found {} PIR candidates for {:?}",
-        candidate_locations.len(),
+        candidates.len(),
         current_transform_kind,
     );
 
-    if candidate_locations.is_empty() {
+    if candidates.is_empty() {
         return McmcIterationOutput {
             output_state: current_fn,
             output_cost: current_cost,
@@ -1021,22 +1024,46 @@ pub fn mcmc_iteration(
         };
     }
 
-    let chosen_location = candidate_locations.choose(context.rng).unwrap();
+    let chosen_candidate = candidates.choose(context.rng).unwrap();
 
-    log::trace!("Chosen PIR location: {:?}", chosen_location);
+    log::trace!("Chosen PIR candidate: {:?}", chosen_candidate);
 
     let mut candidate_fn = current_fn.clone();
 
     log::trace!(
         "Applying PIR transform {:?} at {:?}",
         current_transform_kind,
-        chosen_location
+        chosen_candidate.location
     );
 
-    match chosen_transform.apply(&mut candidate_fn, chosen_location) {
+    match chosen_transform.apply(&mut candidate_fn, &chosen_candidate.location) {
         Ok(()) => {
+            // Transform implementations may emit acyclic def-after-use graphs.
+            // Canonicalize centrally here so the oracle and cost paths see the
+            // same normalized IR without each transform paying a local
+            // topo-sort/compaction cost.
+            if let Err(e) = compact_and_toposort_in_place(&mut candidate_fn) {
+                log::debug!(
+                    "[pir-mcmc] compact/toposort failed for '{}' after {:?} at {:?}: {}; \
+                     rejecting candidate",
+                    candidate_fn.name,
+                    current_transform_kind,
+                    chosen_candidate.location,
+                    e
+                );
+                return McmcIterationOutput {
+                    output_state: current_fn,
+                    output_cost: current_cost,
+                    best_updated: false,
+                    outcome: IterationOutcomeDetails::CandidateFailure,
+                    oracle_time_micros: 0,
+                    transform_always_equivalent: chosen_candidate.always_equivalent,
+                    transform: Some(current_transform_kind),
+                };
+            }
+
             log::trace!("PIR transform applied successfully; determining cost...");
-            let (is_equiv, oracle_time_micros) = if chosen_transform.always_equivalent() {
+            let (is_equiv, oracle_time_micros) = if chosen_candidate.always_equivalent {
                 // Always-equivalent transforms can skip equivalence checks.
                 (true, 0u128)
             } else {
@@ -1066,7 +1093,7 @@ pub fn mcmc_iteration(
                     best_updated: false,
                     outcome: IterationOutcomeDetails::OracleFailure,
                     oracle_time_micros,
-                    transform_always_equivalent: chosen_transform.always_equivalent(),
+                    transform_always_equivalent: chosen_candidate.always_equivalent,
                     transform: Some(current_transform_kind),
                 }
             } else {
@@ -1124,7 +1151,7 @@ pub fn mcmc_iteration(
                             best_updated: false,
                             outcome: IterationOutcomeDetails::SimFailure,
                             oracle_time_micros: sim_micros,
-                            transform_always_equivalent: chosen_transform.always_equivalent(),
+                            transform_always_equivalent: chosen_candidate.always_equivalent,
                             transform: Some(current_transform_kind),
                         };
                     }
@@ -1195,7 +1222,7 @@ pub fn mcmc_iteration(
                             kind: current_transform_kind,
                         },
                         oracle_time_micros,
-                        transform_always_equivalent: chosen_transform.always_equivalent(),
+                        transform_always_equivalent: chosen_candidate.always_equivalent,
                         transform: Some(current_transform_kind),
                     }
                 } else {
@@ -1205,7 +1232,7 @@ pub fn mcmc_iteration(
                         best_updated: false,
                         outcome: IterationOutcomeDetails::MetropolisReject,
                         oracle_time_micros,
-                        transform_always_equivalent: chosen_transform.always_equivalent(),
+                        transform_always_equivalent: chosen_candidate.always_equivalent,
                         transform: Some(current_transform_kind),
                     }
                 }
@@ -1223,7 +1250,7 @@ pub fn mcmc_iteration(
                 best_updated: false,
                 outcome: IterationOutcomeDetails::ApplyFailure,
                 oracle_time_micros: 0,
-                transform_always_equivalent: true,
+                transform_always_equivalent: chosen_candidate.always_equivalent,
                 transform: Some(current_transform_kind),
             }
         }
@@ -1404,6 +1431,14 @@ fn pir_equiv_oracle<R: Rng>(
     }
 }
 
+fn get_pir_transforms_for_run(enable_formal_oracle: bool) -> Vec<Box<dyn PirTransform>> {
+    let mut all_transforms = get_all_pir_transforms();
+    if !enable_formal_oracle {
+        all_transforms.retain(|t| t.can_emit_always_equivalent_candidates());
+    }
+    all_transforms
+}
+
 impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
     type Error = anyhow::Error;
 
@@ -1429,13 +1464,7 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
             };
 
         let mut iteration_rng = Pcg64Mcg::seed_from_u64(params.seed);
-        let mut all_transforms = get_all_pir_transforms();
-        if !self.enable_formal_oracle {
-            // Safety-by-default: non-always-equivalent transforms are only enabled when a
-            // formal equivalence oracle is enabled. This prevents accidentally accepting
-            // incorrect rewrites due to sampling-only equivalence.
-            all_transforms.retain(|t| t.always_equivalent());
-        }
+        let all_transforms = get_pir_transforms_for_run(self.enable_formal_oracle);
         let weights = build_transform_weights(&all_transforms);
 
         let mut context = PirMcmcContext {
@@ -1803,6 +1832,8 @@ pub fn run_pir_mcmc_with_shared_best(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use count_toggles::WeightedSwitchingOptions;
     use xlsynth_pir::ir::{ExtNaryAddArchitecture, NodePayload};
@@ -1923,6 +1954,30 @@ mod tests {
             "expected optimized PIR to reconstruct brent_kung ext_nary_add:\n{}",
             optimized
         );
+    }
+
+    #[test]
+    fn get_pir_transforms_for_run_prunes_unsafe_only_classes_without_formal_oracle() {
+        let no_oracle_kinds: HashSet<PirTransformKind> =
+            get_pir_transforms_for_run(/* enable_formal_oracle= */ false)
+                .into_iter()
+                .map(|t| t.kind())
+                .collect();
+        let oracle_kinds: HashSet<PirTransformKind> =
+            get_pir_transforms_for_run(/* enable_formal_oracle= */ true)
+                .into_iter()
+                .map(|t| t.kind())
+                .collect();
+
+        assert!(!no_oracle_kinds.contains(&PirTransformKind::ShiftHoist));
+        assert!(!no_oracle_kinds.contains(&PirTransformKind::MaskOperandHighBit));
+        assert!(!no_oracle_kinds.contains(&PirTransformKind::RewireOperandToSameType));
+        assert!(no_oracle_kinds.contains(&PirTransformKind::AbsorbAddOperandIntoExtNaryAdd));
+        assert!(no_oracle_kinds.contains(&PirTransformKind::AddToExtNaryAdd));
+
+        assert!(oracle_kinds.contains(&PirTransformKind::ShiftHoist));
+        assert!(oracle_kinds.contains(&PirTransformKind::MaskOperandHighBit));
+        assert!(oracle_kinds.contains(&PirTransformKind::RewireOperandToSameType));
     }
 
     #[test]

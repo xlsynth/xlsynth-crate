@@ -189,8 +189,9 @@ impl PirTransform for CsaFuseIntoConsumerTransform {
         PirTransformKind::CsaFuseIntoConsumer
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             if !matches!(f.get_node(nr).payload, NodePayload::Binop(Binop::Add, _, _)) {
                 continue;
@@ -226,7 +227,10 @@ impl PirTransform for CsaFuseIntoConsumerTransform {
                 }
             }
             if matches {
-                out.push(TransformLocation::Node(nr));
+                out.push(TransformCandidate {
+                    location: TransformLocation::Node(nr),
+                    always_equivalent,
+                });
             }
         }
         out

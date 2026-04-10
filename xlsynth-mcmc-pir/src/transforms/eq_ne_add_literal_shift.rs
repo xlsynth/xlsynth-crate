@@ -171,8 +171,9 @@ impl PirTransform for EqNeAddLiteralShiftTransform {
         PirTransformKind::EqNeAddLiteralShift
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             let node = f.get_node(nr);
             match node.payload {
@@ -182,7 +183,10 @@ impl PirTransform for EqNeAddLiteralShiftTransform {
                     if Self::add_with_literal_parts(f, lhs).is_some()
                         || Self::add_with_literal_parts(f, rhs).is_some()
                     {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                         continue;
                     }
                     // Fold direction:
@@ -190,7 +194,10 @@ impl PirTransform for EqNeAddLiteralShiftTransform {
                     if Self::sub_with_literal_parts(f, lhs).is_some()
                         || Self::sub_with_literal_parts(f, rhs).is_some()
                     {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
                 _ => {}
@@ -220,9 +227,5 @@ impl PirTransform for EqNeAddLiteralShiftTransform {
                     .to_string(),
             ),
         }
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }

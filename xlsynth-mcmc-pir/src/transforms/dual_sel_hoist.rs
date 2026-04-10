@@ -2,7 +2,7 @@
 
 use xlsynth_pir::ir::{Binop, Fn as IrFn, Node, NodePayload, NodeRef, Type};
 
-use super::{PirTransform, PirTransformKind, TransformLocation};
+use super::{PirTransform, PirTransformKind, TransformCandidate, TransformLocation};
 
 /// Hoists/folds a binary op through two 2-case sels sharing the same selector.
 ///
@@ -64,8 +64,9 @@ impl PirTransform for DualSelHoistTransform {
         PirTransformKind::DualSelHoist
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             let node = f.get_node(nr);
             match &node.payload {
@@ -109,7 +110,10 @@ impl PirTransform for DualSelHoistTransform {
                     {
                         continue;
                     }
-                    out.push(TransformLocation::Node(nr));
+                    out.push(TransformCandidate {
+                        location: TransformLocation::Node(nr),
+                        always_equivalent,
+                    });
                 }
                 NodePayload::Sel {
                     selector,
@@ -142,7 +146,10 @@ impl PirTransform for DualSelHoistTransform {
                     {
                         continue;
                     }
-                    out.push(TransformLocation::Node(nr));
+                    out.push(TransformCandidate {
+                        location: TransformLocation::Node(nr),
+                        always_equivalent,
+                    });
                 }
                 _ => {}
             }
@@ -241,11 +248,11 @@ mod tests {
         let mut f = parser.parse_fn().unwrap();
         let mut t = DualSelHoistTransform;
         let cand = t.find_candidates(&f).pop().expect("candidate");
-        let target = match cand.clone() {
+        let target = match cand.location.clone() {
             TransformLocation::Node(nr) => nr,
             _ => unreachable!(),
         };
-        t.apply(&mut f, &cand).expect("apply");
+        t.apply(&mut f, &cand.location).expect("apply");
         assert!(matches!(
             f.get_node(target).payload,
             NodePayload::Sel { .. }
@@ -263,11 +270,11 @@ mod tests {
         let mut f = parser.parse_fn().unwrap();
         let mut t = DualSelHoistTransform;
         let cand = t.find_candidates(&f).pop().expect("candidate");
-        let target = match cand.clone() {
+        let target = match cand.location.clone() {
             TransformLocation::Node(nr) => nr,
             _ => unreachable!(),
         };
-        t.apply(&mut f, &cand).expect("apply");
+        t.apply(&mut f, &cand.location).expect("apply");
         assert!(matches!(
             f.get_node(target).payload,
             NodePayload::Binop(Binop::Add, _, _)

@@ -67,15 +67,19 @@ impl PirTransform for BitSliceConcatDistributeTransform {
         PirTransformKind::BitSliceConcatDistribute
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             if let NodePayload::BitSlice { arg, .. } = &f.get_node(nr).payload {
                 if matches!(
                     f.get_node(*arg).payload,
                     NodePayload::Nary(NaryOp::Concat, _)
                 ) {
-                    out.push(TransformLocation::Node(nr));
+                    out.push(TransformCandidate {
+                        location: TransformLocation::Node(nr),
+                        always_equivalent,
+                    });
                 }
             }
         }
@@ -152,9 +156,5 @@ impl PirTransform for BitSliceConcatDistributeTransform {
         let cat = Self::mk_concat_node(f, width, bs_a, bs_b);
         f.get_node_mut(target_ref).payload = NodePayload::Unop(Unop::Identity, cat);
         Ok(())
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }

@@ -121,8 +121,9 @@ impl PirTransform for SubSignExtU1ToAddZeroExtU1Transform {
         PirTransformKind::SubSignExtU1ToAddZeroExtU1
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             match &f.get_node(nr).payload {
                 // Expand: sub(x, sign_ext(b,w)) (sign_ext on RHS only).
@@ -135,7 +136,10 @@ impl PirTransform for SubSignExtU1ToAddZeroExtU1Transform {
                         continue;
                     }
                     if Self::sign_ext_u1_parts(f, *sext).is_some() {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
 
@@ -157,7 +161,10 @@ impl PirTransform for SubSignExtU1ToAddZeroExtU1Transform {
                         }
                     }
                     if ok {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
                 _ => {}
@@ -240,9 +247,5 @@ impl PirTransform for SubSignExtU1ToAddZeroExtU1Transform {
                 Err("SubSignExtU1ToAddZeroExtU1Transform: expected sub(..) or add(..)".to_string())
             }
         }
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }

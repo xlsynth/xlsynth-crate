@@ -2,7 +2,7 @@
 
 use xlsynth_pir::ir::{Binop, Fn as IrFn, NaryOp, Node, NodePayload, NodeRef, Type, Unop};
 
-use super::{PirTransform, PirTransformKind, TransformLocation};
+use super::{PirTransform, PirTransformKind, TransformCandidate, TransformLocation};
 
 /// A non-always-equivalent transform that hoists unary/binary ops over n-ary
 /// ops.
@@ -82,8 +82,13 @@ impl PirTransform for NaryHoistTransform {
         PirTransformKind::NaryHoist
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn can_emit_always_equivalent_candidates(&self) -> bool {
+        false
+    }
+
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = false;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             let node = f.get_node(nr);
             match &node.payload {
@@ -102,7 +107,10 @@ impl PirTransform for NaryHoistTransform {
                         .iter()
                         .all(|op| Self::bits_width(&f.get_node(*op).ty) == Some(w))
                     {
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
                 NodePayload::Binop(_, lhs, rhs) => {
@@ -138,7 +146,10 @@ impl PirTransform for NaryHoistTransform {
                             continue;
                         }
                     }
-                    out.push(TransformLocation::Node(nr));
+                    out.push(TransformCandidate {
+                        location: TransformLocation::Node(nr),
+                        always_equivalent,
+                    });
                 }
                 _ => {}
             }
@@ -247,10 +258,6 @@ impl PirTransform for NaryHoistTransform {
             }
             _ => Err("NaryHoistTransform: expected unop or binop target".to_string()),
         }
-    }
-
-    fn always_equivalent(&self) -> bool {
-        false
     }
 }
 

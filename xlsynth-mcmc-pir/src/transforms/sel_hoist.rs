@@ -2,7 +2,7 @@
 
 use xlsynth_pir::ir::{Binop, Fn as IrFn, Node, NodePayload, NodeRef, Type, Unop};
 
-use super::{PirTransform, PirTransformKind, TransformLocation};
+use super::{PirTransform, PirTransformKind, TransformCandidate, TransformLocation};
 
 /// A semantics-preserving transform that hoists unary/binary ops over `sel`.
 ///
@@ -80,8 +80,9 @@ impl PirTransform for SelHoistTransform {
         PirTransformKind::SelHoist
     }
 
-    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformLocation> {
-        let mut out: Vec<TransformLocation> = Vec::new();
+    fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
+        let always_equivalent = true;
+        let mut out = Vec::<TransformCandidate>::new();
         for nr in f.node_refs() {
             let node = f.get_node(nr);
             match &node.payload {
@@ -99,7 +100,10 @@ impl PirTransform for SelHoistTransform {
                     if !Self::sel_cases_match_type(f, cases, default, &sel_node.ty) {
                         continue;
                     }
-                    out.push(TransformLocation::Node(nr));
+                    out.push(TransformCandidate {
+                        location: TransformLocation::Node(nr),
+                        always_equivalent,
+                    });
                 }
                 NodePayload::Binop(_, lhs, rhs) => {
                     if !Self::is_bits_type(&node.ty) {
@@ -122,7 +126,10 @@ impl PirTransform for SelHoistTransform {
                         if !Self::sel_cases_match_type(f, cases, default, &lhs_node.ty) {
                             continue;
                         }
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     } else {
                         let NodePayload::Sel { cases, default, .. } = &rhs_node.payload else {
                             continue;
@@ -133,7 +140,10 @@ impl PirTransform for SelHoistTransform {
                         if !Self::sel_cases_match_type(f, cases, default, &rhs_node.ty) {
                             continue;
                         }
-                        out.push(TransformLocation::Node(nr));
+                        out.push(TransformCandidate {
+                            location: TransformLocation::Node(nr),
+                            always_equivalent,
+                        });
                     }
                 }
                 _ => {}
@@ -266,10 +276,6 @@ impl PirTransform for SelHoistTransform {
             }
             _ => Err("SelHoistTransform: expected unop or binop target".to_string()),
         }
-    }
-
-    fn always_equivalent(&self) -> bool {
-        true
     }
 }
 
