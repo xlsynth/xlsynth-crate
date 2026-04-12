@@ -14,6 +14,7 @@ use xlsynth_prover::prover::SolverChoice;
 
 static RUN_COUNT: AtomicU64 = AtomicU64::new(0);
 static TOTAL_REWRITES: AtomicU64 = AtomicU64::new(0);
+static NEG_SELECT_DENEGATE_REWRITES: AtomicU64 = AtomicU64::new(0);
 static EQ_SHLL_SLICE_LITERAL_REWRITES: AtomicU64 = AtomicU64::new(0);
 static POW2_MSB_TIEBREAK_REWRITES: AtomicU64 = AtomicU64::new(0);
 
@@ -61,18 +62,22 @@ fuzz_target!(|data: &[u8]| {
     };
 
     let total_rewrites = u64::try_from(aug_result.total_rewrites).unwrap_or(u64::MAX);
+    let neg_select_denegate_rewrites =
+        u64::try_from(aug_result.rewrite_stats.neg_select_denegate).unwrap_or(u64::MAX);
     let eq_shll_slice_literal_rewrites =
         u64::try_from(aug_result.rewrite_stats.eq_shll_slice_literal).unwrap_or(u64::MAX);
     let pow2_rewrites =
         u64::try_from(aug_result.rewrite_stats.pow2_msb_compare_with_eq_tiebreak).unwrap_or(u64::MAX);
     TOTAL_REWRITES.fetch_add(total_rewrites, Ordering::Relaxed);
+    NEG_SELECT_DENEGATE_REWRITES.fetch_add(neg_select_denegate_rewrites, Ordering::Relaxed);
     EQ_SHLL_SLICE_LITERAL_REWRITES.fetch_add(eq_shll_slice_literal_rewrites, Ordering::Relaxed);
     POW2_MSB_TIEBREAK_REWRITES.fetch_add(pow2_rewrites, Ordering::Relaxed);
     if run_idx % 1000 == 0 {
         log::info!(
-            "fuzz_aug_opt_equiv: runs={} total_rewrites={} eq_shll_slice_literal_rewrites={} pow2_msb_tiebreak_rewrites={}",
+            "fuzz_aug_opt_equiv: runs={} total_rewrites={} neg_select_denegate_rewrites={} eq_shll_slice_literal_rewrites={} pow2_msb_tiebreak_rewrites={}",
             run_idx,
             TOTAL_REWRITES.load(Ordering::Relaxed),
+            NEG_SELECT_DENEGATE_REWRITES.load(Ordering::Relaxed),
             EQ_SHLL_SLICE_LITERAL_REWRITES.load(Ordering::Relaxed),
             POW2_MSB_TIEBREAK_REWRITES.load(Ordering::Relaxed)
         );

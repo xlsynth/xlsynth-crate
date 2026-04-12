@@ -40,6 +40,7 @@ pub struct AugOptOptions {
 pub struct AugOptRewriteStats {
     pub guarded_sel_ne1_nor: usize,
     pub lsb_of_shll: usize,
+    pub neg_select_denegate: usize,
     pub eq_shll_slice_literal: usize,
     pub pow2_msb_compare_with_eq_tiebreak: usize,
     pub eq_priority_sel_to_selector_predicate: usize,
@@ -54,6 +55,7 @@ impl AugOptRewriteStats {
     pub fn total(&self) -> usize {
         self.guarded_sel_ne1_nor
             .saturating_add(self.lsb_of_shll)
+            .saturating_add(self.neg_select_denegate)
             .saturating_add(self.eq_shll_slice_literal)
             .saturating_add(self.pow2_msb_compare_with_eq_tiebreak)
             .saturating_add(self.eq_priority_sel_to_selector_predicate)
@@ -69,6 +71,9 @@ impl AugOptRewriteStats {
             .guarded_sel_ne1_nor
             .saturating_add(other.guarded_sel_ne1_nor);
         self.lsb_of_shll = self.lsb_of_shll.saturating_add(other.lsb_of_shll);
+        self.neg_select_denegate = self
+            .neg_select_denegate
+            .saturating_add(other.neg_select_denegate);
         self.eq_shll_slice_literal = self
             .eq_shll_slice_literal
             .saturating_add(other.eq_shll_slice_literal);
@@ -311,6 +316,7 @@ fn apply_basis_rewrites_to_fn(
     let mut stats = AugOptRewriteStats::default();
     stats.guarded_sel_ne1_nor = rewrite_guarded_sel_ne_literal1_nor(&mut cloned);
     stats.lsb_of_shll = rewrite_lsb_of_shll_via_shift_is_zero(&mut cloned);
+    stats.neg_select_denegate = rewrite_neg_select_denegate(&mut cloned);
     stats.eq_shll_slice_literal = rewrite_eq_shll_slice_literal_to_shift_terms(&mut cloned);
     stats.pow2_msb_compare_with_eq_tiebreak =
         rewrite_pow2_msb_compare_with_eq_tiebreak(&mut cloned);
@@ -360,6 +366,19 @@ fn push_ubits_literal(f: &mut ir::Fn, w: usize, v: u64) -> NodeRef {
     let ty = Type::Bits(w);
     let lit = IrValue::make_ubits(w, v).expect("ubits literal construction should succeed");
     push_node(f, ty, NodePayload::Literal(lit))
+}
+
+fn push_negated_bits_literal(f: &mut ir::Fn, lit_nr: NodeRef) -> Option<NodeRef> {
+    let NodePayload::Literal(value) = f.get_node(lit_nr).payload.clone() else {
+        return None;
+    };
+    let bits = value.to_bits().ok()?;
+    let negated = bits.negate();
+    Some(push_node(
+        f,
+        Type::Bits(negated.get_bit_count()),
+        NodePayload::Literal(IrValue::from_bits(&negated)),
+    ))
 }
 
 fn is_ubits_literal_1_of_width(f: &ir::Fn, nr: NodeRef, w: usize) -> bool {
@@ -1291,6 +1310,85 @@ fn push_select_like(
     push_node(f, result_ty, payload)
 }
 
+fn denegate_select_value_ref(f: &mut ir::Fn, nr: NodeRef) -> Option<NodeRef> {
+    match f.get_node(nr).payload.clone() {
+        NodePayload::Unop(Unop::Neg, arg) if f.get_node_ty(arg) == f.get_node_ty(nr) => Some(arg),
+        NodePayload::Literal(_) => push_negated_bits_literal(f, nr),
+        _ => None,
+    }
+}
+
+/// Rewrite:
+///
+/// `neg(sel(s, cases=[neg(a0), ..., neg(aN-1)], default=neg(d)))`
+///   →
+/// `sel(s, cases=[a0, ..., aN-1], default=d)`
+///
+/// `neg(sel(s, cases=[..., literal(K), ...], default=...))`
+///   →
+/// `sel(s, cases=[..., literal(-K), ...], default=...)`
+///
+/// and likewise for `priority_sel`.
+///
+/// Profitability guard:
+/// - every selected value must already be `neg(x)` or a literal
+///
+/// This keeps the rewrite as a cancellation/constant-folding step: it removes
+/// the outer dynamic negation without replicating negation into arbitrary arms.
+fn rewrite_neg_select_denegate(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+    let original_len = f.nodes.len();
+
+    for neg_index in 0..original_len {
+        let NodePayload::Unop(Unop::Neg, arg) = f.nodes[neg_index].payload.clone() else {
+            continue;
+        };
+        let Some(sel) = as_select_like(f, arg) else {
+            continue;
+        };
+
+        let mut denegated_cases = Vec::with_capacity(sel.cases.len());
+        let mut all_denegatable = true;
+        for case in sel.cases {
+            let Some(denegated) = denegate_select_value_ref(f, case) else {
+                all_denegatable = false;
+                break;
+            };
+            denegated_cases.push(denegated);
+        }
+        if !all_denegatable {
+            continue;
+        }
+
+        let denegated_default = match sel.default {
+            Some(default) => {
+                let Some(denegated) = denegate_select_value_ref(f, default) else {
+                    continue;
+                };
+                Some(denegated)
+            }
+            None => None,
+        };
+
+        f.nodes[neg_index].payload = match sel.kind {
+            SelectLikeKind::Sel => NodePayload::Sel {
+                selector: sel.selector,
+                cases: denegated_cases,
+                default: denegated_default,
+            },
+            SelectLikeKind::PrioritySel => NodePayload::PrioritySel {
+                selector: sel.selector,
+                cases: denegated_cases,
+                default: denegated_default,
+            },
+        };
+        f.nodes[neg_index].ty = f.get_node_ty(arg).clone();
+        rewrites += 1;
+    }
+
+    rewrites
+}
+
 // Bound recursive umod distribution so selector-heavy inputs do not cause
 // multiplicative IR growth before downstream folding/strength reduction.
 const UMOD_DISTRIBUTION_MAX_COMBINATIONS: usize = 32;
@@ -1957,6 +2055,20 @@ mod tests {
         }
     }
 
+    fn find_node_by_text_id(f: &ir::Fn, text_id: usize) -> &ir::Node {
+        f.nodes
+            .iter()
+            .find(|n| n.text_id == text_id)
+            .unwrap_or_else(|| panic!("missing node with text_id={text_id}"))
+    }
+
+    fn literal_value_u64(f: &ir::Fn, nr: NodeRef) -> u64 {
+        match &f.get_node(nr).payload {
+            NodePayload::Literal(v) => v.to_u64().expect("expected ubits literal"),
+            other => panic!("expected literal node, got {:?}", other),
+        }
+    }
+
     #[test]
     fn aug_opt_rewrites_guarded_sel_ne1_nor_and_opt_dces_sel() {
         let ir_text = r#"package bool_cone
@@ -2027,6 +2139,160 @@ top fn f(x: bits[8] id=1, s: bits[4] id=2) -> bits[1] {
             &[8, 4],
             /* random_samples= */ 2000,
         );
+    }
+
+    #[test]
+    fn aug_opt_rewrites_neg_priority_sel_by_canceling_negated_arm_and_default() {
+        let ir_text = r#"package neg_prio_sel
+
+top fn cone(leaf_25: bits[7] id=1, leaf_44: bits[1] id=2) -> bits[7] {
+  literal.3: bits[1] = literal(value=0, id=3)
+  concat.4: bits[8] = concat(literal.3, leaf_25, id=4)
+  neg.5: bits[8] = neg(concat.4, id=5)
+  literal.6: bits[8] = literal(value=246, id=6)
+  priority_sel.7: bits[8] = priority_sel(leaf_44, cases=[neg.5], default=literal.6, id=7)
+  neg.8: bits[8] = neg(priority_sel.7, id=8)
+  bit_slice.9: bits[6] = bit_slice(neg.8, start=1, width=6, id=9)
+  literal.10: bits[1] = literal(value=1, id=10)
+  ret concat.11: bits[7] = concat(bit_slice.9, literal.10, id=11)
+}
+"#;
+
+        let out = run_aug_opt_over_ir_text_with_stats(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt");
+        assert_eq!(out.rewrite_stats.neg_select_denegate, 1);
+
+        let mut p = ir_parser::Parser::new(&out.output_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+
+        let rewritten = find_node_by_text_id(f, 8);
+        match rewritten.payload.clone() {
+            NodePayload::PrioritySel {
+                selector,
+                cases,
+                default,
+            } => {
+                assert_eq!(f.get_node(selector).text_id, 2);
+                assert_eq!(cases.len(), 1, "expected one priority_sel case");
+                assert_eq!(f.get_node(cases[0]).text_id, 4);
+                let default = default.expect("priority_sel should keep default");
+                assert_eq!(literal_value_u64(f, default), 10);
+            }
+            other => panic!(
+                "expected neg.8 to become priority_sel(..); got {:?}\noutput:\n{}",
+                other, out.output_text
+            ),
+        }
+
+        exhaustive_ir_text_fn_equivalence_ubits(ir_text, &out.output_text, "cone", &[7, 1]);
+    }
+
+    #[test]
+    fn aug_opt_rewrites_neg_sel_by_canceling_negated_arm_and_negating_literal_case() {
+        let ir_text = r#"package neg_sel
+
+top fn cone(leaf_35: bits[7] id=1, leaf_50: bits[1] id=2) -> bits[6] {
+  literal.3: bits[1] = literal(value=0, id=3)
+  concat.4: bits[8] = concat(literal.3, leaf_35, id=4)
+  literal.5: bits[8] = literal(value=246, id=5)
+  neg.6: bits[8] = neg(concat.4, id=6)
+  sel.7: bits[8] = sel(leaf_50, cases=[literal.5, neg.6], id=7)
+  neg.8: bits[8] = neg(sel.7, id=8)
+  ret bit_slice.9: bits[6] = bit_slice(neg.8, start=1, width=6, id=9)
+}
+"#;
+
+        let out = run_aug_opt_over_ir_text_with_stats(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt");
+        assert_eq!(out.rewrite_stats.neg_select_denegate, 1);
+
+        let mut p = ir_parser::Parser::new(&out.output_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+
+        let rewritten = find_node_by_text_id(f, 8);
+        match rewritten.payload.clone() {
+            NodePayload::Sel {
+                selector,
+                cases,
+                default,
+            } => {
+                assert_eq!(f.get_node(selector).text_id, 2);
+                assert_eq!(cases.len(), 2, "expected 2-case sel");
+                assert_eq!(literal_value_u64(f, cases[0]), 10);
+                assert_eq!(f.get_node(cases[1]).text_id, 4);
+                assert!(default.is_none(), "plain sel should not grow a default");
+            }
+            other => panic!(
+                "expected neg.8 to become sel(..); got {:?}\noutput:\n{}",
+                other, out.output_text
+            ),
+        }
+
+        exhaustive_ir_text_fn_equivalence_ubits(ir_text, &out.output_text, "cone", &[7, 1]);
+    }
+
+    #[test]
+    fn aug_opt_skips_neg_sel_rewrite_when_any_arm_is_not_denegatable() {
+        let ir_text = r#"package neg_sel_skip
+
+top fn cone(x: bits[7] id=1, s: bits[1] id=2, y: bits[7] id=3) -> bits[6] {
+  literal.4: bits[1] = literal(value=0, id=4)
+  concat.5: bits[8] = concat(literal.4, x, id=5)
+  literal.6: bits[1] = literal(value=0, id=6)
+  concat.7: bits[8] = concat(literal.6, y, id=7)
+  neg.8: bits[8] = neg(concat.7, id=8)
+  sel.9: bits[8] = sel(s, cases=[concat.5, neg.8], id=9)
+  neg.10: bits[8] = neg(sel.9, id=10)
+  ret bit_slice.11: bits[6] = bit_slice(neg.10, start=1, width=6, id=11)
+}
+"#;
+
+        let out = run_aug_opt_over_ir_text_with_stats(
+            ir_text,
+            Some("cone"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt");
+        assert_eq!(out.rewrite_stats.neg_select_denegate, 0);
+
+        let mut p = ir_parser::Parser::new(&out.output_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("cone").expect("top fn");
+
+        let skipped = find_node_by_text_id(f, 10);
+        match skipped.payload {
+            NodePayload::Unop(Unop::Neg, arg) => {
+                assert_eq!(f.get_node(arg).text_id, 9);
+            }
+            _ => panic!(
+                "expected neg.10 to remain a neg(sel(..)); output:\n{}",
+                out.output_text
+            ),
+        }
+
+        exhaustive_ir_text_fn_equivalence_ubits(ir_text, &out.output_text, "cone", &[7, 1, 7]);
     }
 
     #[test]
