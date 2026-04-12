@@ -20,6 +20,26 @@ pub struct PipelineConfig<'a> {
     pub reset_active_low: bool,
 }
 
+pub(crate) fn stage_instance_name(stage_index: usize) -> String {
+    format!("stage_{stage_index}")
+}
+
+pub(crate) fn stage_output_wire_name(stage_index: usize) -> String {
+    format!("stage_{stage_index}_out_comb")
+}
+
+pub(crate) fn flop_reg_name(pipe_stage_number: u32, name: &str) -> String {
+    format!("p{pipe_stage_number}_{name}")
+}
+
+pub(crate) fn slice_wire_name(pipe_stage_number: u32, dest_name: &str) -> String {
+    format!("p{pipe_stage_number}_{dest_name}_comb")
+}
+
+pub(crate) fn valid_reg_name(pipe_stage_number: u32) -> String {
+    format!("p{pipe_stage_number}_valid")
+}
+
 struct NetBundle {
     name_to_ref: HashMap<String, (LogicRef, VastDataType)>,
     valid_signal: Option<LogicRef>,
@@ -88,7 +108,7 @@ fn make_flop_layer(
 
     for (name, (logic_ref, data_type)) in &entries {
         let reg = outer_module
-            .add_reg(&format!("p{next_pipe_stage_number}_{}", name), &data_type)
+            .add_reg(&flop_reg_name(next_pipe_stage_number, name), &data_type)
             .unwrap();
         new_name_to_ref.insert(name.clone(), (reg.clone(), data_type.clone()));
         assign_info.push((reg, logic_ref.clone(), IsValidReg::No));
@@ -97,7 +117,7 @@ fn make_flop_layer(
     // Handle valid signal register declaration (if any) before always.
     let flopped_valid_signal = if let Some(ref valid_signal) = current_inputs.valid_signal {
         let reg = outer_module
-            .add_reg(&format!("p{next_pipe_stage_number}_valid"), &bit_type)
+            .add_reg(&valid_reg_name(next_pipe_stage_number), &bit_type)
             .unwrap();
         assign_info.push((reg.clone(), valid_signal.clone(), IsValidReg::Yes));
         Some(reg)
@@ -263,7 +283,7 @@ pub fn build_pipeline(
             "Stage module must have exactly one output port"
         );
         let stage_output_port = &stage_module.output_ports()[0];
-        let stage_output_name = format!("stage_{}_out_comb", i);
+        let stage_output_name = stage_output_wire_name(i);
         let stage_output_width = stage_output_port.width();
         let stage_output_type = file.make_bit_vector_type(stage_output_width, false);
         let stage_output_wire = outer_module.add_wire(&stage_output_name, &stage_output_type);
@@ -351,7 +371,7 @@ pub fn build_pipeline(
         // Instantiate the combinational stage module.
         let instantiation = file.make_instantiation(
             &stage_module.name(),
-            &format!("stage_{i}"),
+            &stage_instance_name(i),
             &[],
             &[],
             &stage_port_name_refs,
@@ -372,7 +392,7 @@ pub fn build_pipeline(
             let mut name_to_ref = HashMap::new();
             for (dest_name, start, limit) in dest_ports {
                 let vast_type = file.make_bit_vector_type(limit - start, false);
-                let wire_name = format!("p{}_{}_comb", next_pipe_stage_number, dest_name);
+                let wire_name = slice_wire_name(next_pipe_stage_number, &dest_name);
                 let wire = outer_module.add_wire(&wire_name, &vast_type);
                 let slice_expr = file
                     .make_slice(&stage_output_wire.to_indexable_expr(), limit - 1, start)

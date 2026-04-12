@@ -30,6 +30,24 @@ Primarily tests:
 - PIR aug-opt rewrites preserve semantics when they apply
 - End-to-end compatibility of PIR lowering and toolchain equivalence checks
 
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_dslx_stitch_pipeline_names.rs
+
+Generates small two-stage DSLX stitch-pipeline samples with parameter names
+drawn from wrapper/control names, generated internal-name patterns,
+SystemVerilog keywords, and random legal identifiers. Unsafe samples must fail
+through the controlled stitch-pipeline name validator; accepted samples are then
+compiled and simulated with `xlsynth-vastly` using a single-module form that
+mirrors the fixed two-stage wrapper shape, because the `xlsynth-vastly` pipeline
+compiler currently operates on a single module.
+
+Primarily tests:
+
+- DSLX-derived names that would collide with wrapper/control/output/internal
+  names are rejected before codegen
+- SystemVerilog keywords do not leak into emitted stage or wrapper interfaces
+- Accepted names preserve the arithmetic behavior of the stitched two-stage
+  pipeline under reset/valid simulation
+
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_mul_by_const_csd_equiv.rs
 
 Builds small `umul(x, literal)` PIR functions (with the literal on either side),

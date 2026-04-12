@@ -18,6 +18,9 @@ use common::{PipelineCfg, Port, StageInfo};
 mod build_pipeline;
 use build_pipeline::{PipelineConfig as BuildPipelineConfig, build_pipeline as build_wrapper};
 
+mod names;
+use names::{collect_stage_name_infos, validate_stitch_pipeline_names};
+
 use crate::verilog_version::VerilogVersion;
 
 // Insert StitchPipelineOptions struct and Default implementation
@@ -82,27 +85,37 @@ fn build_ports_from_ir(
     func: &xlsynth::ir_package::IrFunction,
     fty: &xlsynth::ir_package::IrFunctionType,
 ) -> Result<(Vec<Port>, u32), xlsynth::XlsynthError> {
-    // 1. Clock
-    let mut ports = vec![Port {
-        name: "clk".to_string(),
-        is_input: true,
-        width: 1,
-    }];
+    let mut ports = Vec::new();
 
-    // 2. Formal parameters (flattened widths)
+    // Formal parameters (flattened widths). Combinational stage modules do not
+    // have synthetic clock ports, so every input here comes directly from the
+    // selected DSLX function.
     for i in 0..fty.param_count() {
         let name = func.param_name(i)?;
         let ty = fty.param_type(i)?;
+        let width = ty.get_flat_bit_count() as u32;
+        if width == 0 {
+            return Err(xlsynth::XlsynthError(format!(
+                "stage parameter `{}` has zero-width type `{}`; stitch-pipeline cannot emit it as a Verilog port",
+                name, ty
+            )));
+        }
         ports.push(Port {
             name,
             is_input: true,
-            width: ty.get_flat_bit_count() as u32,
+            width,
         });
     }
 
-    // 3. Return value -> `out` port
+    // Return value -> `out` port.
     let ret_ty = fty.return_type();
     let ret_width = ret_ty.get_flat_bit_count() as u32;
+    if ret_width == 0 {
+        return Err(xlsynth::XlsynthError(format!(
+            "stage return type `{}` is zero-width; stitch-pipeline cannot emit it as Verilog output port `out`",
+            ret_ty
+        )));
+    }
     ports.push(Port {
         name: "out".into(),
         is_input: false,
@@ -191,6 +204,35 @@ fn verify_stage_signatures(
     Ok(())
 }
 
+/// Reject stage interfaces that cannot be represented as Verilog ports.
+fn verify_stage_port_widths(
+    ir: &xlsynth::ir_package::IrPackage,
+    stages: &[(String, String)],
+) -> Result<(), xlsynth::XlsynthError> {
+    for (stage_name, stage_mangled) in stages {
+        let func = ir.get_function(stage_mangled)?;
+        let fty = func.get_type()?;
+        for i in 0..fty.param_count() {
+            let param_name = func.param_name(i)?;
+            let param_ty = fty.param_type(i)?;
+            if param_ty.get_flat_bit_count() == 0 {
+                return Err(xlsynth::XlsynthError(format!(
+                    "stage parameter `{}.{}` has zero-width type `{}`; stitch-pipeline cannot emit it as a Verilog port",
+                    stage_name, param_name, param_ty
+                )));
+            }
+        }
+        let ret_ty = fty.return_type();
+        if ret_ty.get_flat_bit_count() == 0 {
+            return Err(xlsynth::XlsynthError(format!(
+                "stage `{}` has zero-width return type `{}`; stitch-pipeline cannot emit it as Verilog output port `out`",
+                stage_name, ret_ty
+            )));
+        }
+    }
+    Ok(())
+}
+
 // Run XLS optimise + schedule + codegen for a stage without inserting any
 // flops so the resulting module is purely combinational.
 fn make_stage_info_comb(
@@ -230,10 +272,7 @@ use_system_verilog: {sv}"#,
 
     let func = cfg.ir.get_function(stage_mangled)?;
     let fty = func.get_type()?;
-    let (mut ports, output_width) = build_ports_from_ir(&func, &fty)?;
-    // Combinational modules do not have a clock port, so drop it from
-    // the discovered port list to simplify downstream handling.
-    ports.retain(|p| p.name != "clk");
+    let (ports, output_width) = build_ports_from_ir(&func, &fty)?;
 
     Ok(StageInfo {
         sv_text,
@@ -370,6 +409,12 @@ pub fn stitch_pipeline<'a>(
     top: &str,
     opts: &StitchPipelineOptions<'a>,
 ) -> Result<String, xlsynth::XlsynthError> {
+    if opts.output_valid_signal.is_some() && opts.input_valid_signal.is_none() {
+        return Err(xlsynth::XlsynthError(
+            "output_valid_signal requires input_valid_signal in dslx-stitch-pipeline".to_string(),
+        ));
+    }
+
     // Extract option fields for backwards-compat ease.
     let verilog_version = opts.verilog_version;
     let explicit_stages = opts.explicit_stages.as_ref().map(|v| v.as_slice());
@@ -418,6 +463,9 @@ pub fn stitch_pipeline<'a>(
 
     let stages = discover_stage_names(&ir, path, top, explicit_stages)?;
     verify_stage_signatures(&ir, &stages)?;
+    verify_stage_port_widths(&ir, &stages)?;
+    let (stage_name_infos, stage_signatures) = collect_stage_name_infos(&ir, &stages)?;
+    validate_stitch_pipeline_names(&stage_name_infos, &stage_signatures, opts)?;
 
     // For each stage run codegen immediately so we can parse its port list.
     let mut stage_infos = Vec::with_capacity(stages.len());
@@ -487,6 +535,48 @@ mod tests {
     use env_logger;
     use xlsynth::ir_value::IrBits;
     use xlsynth_test_helpers::{self, compare_golden_sv};
+
+    fn default_test_options(output_module_name: &str) -> StitchPipelineOptions<'_> {
+        StitchPipelineOptions {
+            verilog_version: VerilogVersion::SystemVerilog,
+            explicit_stages: None,
+            stdlib_path: None,
+            search_paths: Vec::new(),
+            flop_inputs: true,
+            flop_outputs: true,
+            input_valid_signal: None,
+            output_valid_signal: None,
+            reset_signal: None,
+            reset_active_low: false,
+            add_invariant_assertions: true,
+            array_index_bounds_checking: true,
+            output_module_name,
+        }
+    }
+
+    fn expect_stitch_name_error(
+        dslx: &str,
+        top: &str,
+        opts: StitchPipelineOptions<'_>,
+        expected_substrings: &[&str],
+    ) {
+        let result = stitch_pipeline(dslx, Path::new("test.x"), top, &opts);
+        assert!(result.is_err(), "expected stitch pipeline to fail");
+        let err = result.unwrap_err().0;
+        assert!(
+            err.contains("name validation failed"),
+            "expected name-validation error, got: {}",
+            err
+        );
+        for expected in expected_substrings {
+            assert!(
+                err.contains(expected),
+                "expected error to contain `{}`, got: {}",
+                expected,
+                err
+            );
+        }
+    }
 
     #[test]
     fn test_stitch_pipeline_tuple() {
@@ -720,5 +810,191 @@ fn foo_cycle1(a: u64, b: u32) -> u64 { a + b as u64 }"#;
         assert!(result.is_err());
         let err = result.unwrap_err().0;
         assert!(err.contains("does not match"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn test_stitch_pipeline_rejects_unit_stage_output() {
+        let dslx = r#"fn foo_cycle0(x: u32) -> () { () }
+fn foo_cycle1() -> u32 { u32:1 }"#;
+        let result = stitch_pipeline(
+            dslx,
+            Path::new("test.x"),
+            "foo",
+            &default_test_options("foo"),
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().0;
+        assert!(
+            err.contains("stage `foo_cycle0` has zero-width return type `()`")
+                && err.contains("Verilog output port `out`"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_stitch_pipeline_rejects_output_valid_without_input_valid() {
+        let mut opts = default_test_options("foo");
+        opts.output_valid_signal = Some("output_valid");
+        let result = stitch_pipeline(
+            "fn foo_cycle0(x: u32) -> u32 { x }\nfn foo_cycle1(x: u32) -> u32 { x }",
+            Path::new("test.x"),
+            "foo",
+            &opts,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err().0;
+        assert!(
+            err.contains("output_valid_signal requires input_valid_signal"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_stitch_pipeline_rejects_first_stage_clk_param() {
+        expect_stitch_name_error(
+            "fn foo_cycle0(clk: u32) -> u32 { clk }\nfn foo_cycle1(x: u32) -> u32 { x }",
+            "foo",
+            default_test_options("foo"),
+            &[
+                "stage parameter `foo_cycle0.clk`",
+                "reserved wrapper/control port `clk`",
+            ],
+        );
+    }
+
+    #[test]
+    fn test_stitch_pipeline_allows_later_stage_clk_param() {
+        let result = stitch_pipeline(
+            "fn foo_cycle0(x: u32) -> u32 { x }\nfn foo_cycle1(clk: u32) -> u32 { clk }",
+            Path::new("test.x"),
+            "foo",
+            &default_test_options("foo"),
+        )
+        .unwrap();
+        assert!(result.contains(".clk(p1_clk)"), "unexpected SV: {}", result);
+    }
+
+    #[test]
+    fn test_stitch_pipeline_rejects_reset_name_param() {
+        let mut opts = default_test_options("foo");
+        opts.reset_signal = Some("rst");
+        expect_stitch_name_error(
+            "fn foo_cycle0(rst: u32) -> u32 { rst }\nfn foo_cycle1(x: u32) -> u32 { x }",
+            "foo",
+            opts,
+            &[
+                "stage parameter `foo_cycle0.rst`",
+                "reserved wrapper/control port `rst`",
+            ],
+        );
+    }
+
+    #[test]
+    fn test_stitch_pipeline_rejects_input_valid_name_param() {
+        let mut opts = default_test_options("foo");
+        opts.input_valid_signal = Some("input_valid");
+        expect_stitch_name_error(
+            "fn foo_cycle0(input_valid: u32) -> u32 { input_valid }\nfn foo_cycle1(x: u32) -> u32 { x }",
+            "foo",
+            opts,
+            &[
+                "stage parameter `foo_cycle0.input_valid`",
+                "reserved wrapper/control port `input_valid`",
+            ],
+        );
+    }
+
+    #[test]
+    fn test_stitch_pipeline_rejects_output_valid_name_param() {
+        let mut opts = default_test_options("foo");
+        opts.input_valid_signal = Some("input_valid");
+        opts.output_valid_signal = Some("output_valid");
+        expect_stitch_name_error(
+            "fn foo_cycle0(output_valid: u32) -> u32 { output_valid }\nfn foo_cycle1(x: u32) -> u32 { x }",
+            "foo",
+            opts,
+            &[
+                "stage parameter `foo_cycle0.output_valid`",
+                "reserved wrapper/control port `output_valid`",
+            ],
+        );
+    }
+
+    #[test]
+    fn test_stitch_pipeline_rejects_out_name_param() {
+        let stages = vec![
+            names::StageNameInfo {
+                stage_name: "foo_cycle0".to_string(),
+                params: vec!["out".to_string()],
+            },
+            names::StageNameInfo {
+                stage_name: "foo_cycle1".to_string(),
+                params: vec!["x".to_string()],
+            },
+        ];
+        let signatures = vec![
+            names::StageSignature {
+                output_port_name: "out".to_string(),
+            },
+            names::StageSignature {
+                output_port_name: "out".to_string(),
+            },
+        ];
+        let opts = default_test_options("foo");
+        let err = names::validate_stitch_pipeline_names(&stages, &signatures, &opts)
+            .unwrap_err()
+            .0;
+        assert!(
+            err.contains("stage parameter `foo_cycle0.out`")
+                && err.contains("reserved wrapper/output port `out`"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_stitch_pipeline_rejects_keyword_param() {
+        expect_stitch_name_error(
+            "fn foo_cycle0(input: u32) -> u32 { input }\nfn foo_cycle1(x: u32) -> u32 { x }",
+            "foo",
+            default_test_options("foo"),
+            &[
+                "stage parameter `foo_cycle0.input`",
+                "SystemVerilog keyword",
+            ],
+        );
+    }
+
+    #[test]
+    fn test_stitch_pipeline_rejects_system_verilog_keyword_in_verilog_mode() {
+        let mut opts = default_test_options("foo");
+        opts.verilog_version = VerilogVersion::Verilog;
+        expect_stitch_name_error(
+            "fn foo_cycle0(logic: u32) -> u32 { logic }\nfn foo_cycle1(x: u32) -> u32 { x }",
+            "foo",
+            opts,
+            &[
+                "stage parameter `foo_cycle0.logic`",
+                "SystemVerilog keyword",
+            ],
+        );
+    }
+
+    #[test]
+    fn test_stitch_pipeline_rejects_generated_valid_name_collision() {
+        let mut opts = default_test_options("foo");
+        opts.input_valid_signal = Some("input_valid");
+        expect_stitch_name_error(
+            "fn foo_cycle0(valid: u32) -> u32 { valid }\nfn foo_cycle1(x: u32) -> u32 { x }",
+            "foo",
+            opts,
+            &[
+                "`p0_valid` cannot be emitted as-is",
+                "generated valid flop register",
+                "generated data flop register for `valid`",
+            ],
+        );
     }
 }
