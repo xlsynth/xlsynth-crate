@@ -20,6 +20,7 @@ xlsynth-pir = { path = "../../xlsynth-pir" }
 xlsynth-autocov = { path = "../../xlsynth-autocov" }
 xlsynth-g8r = { path = "../../xlsynth-g8r" }
 xlsynth-prover = { path = "../../xlsynth-prover" }
+xlsynth-vastly = { path = "../../xlsynth-vastly", package = "xlsynth-vastly" }
 
 [lib]
 name = "xlsynth_g8r_fuzz"
@@ -143,6 +144,12 @@ doc = false
 [[bin]]
 name = "fuzz_node_provenance_with_opts"
 path = "fuzz_targets/fuzz_node_provenance_with_opts.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_dslx_stitch_pipeline_names"
+path = "fuzz_targets/fuzz_dslx_stitch_pipeline_names.rs"
 test = false
 doc = false
 

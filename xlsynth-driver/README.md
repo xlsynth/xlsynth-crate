@@ -2069,6 +2069,13 @@ Additional semantics:
   be provided explicitly via `--stages`). A DSLX function named exactly
   `<NAME>` is **ignored** by this command – only the `_cycleN` stage functions
   participate in stitching. When `--stages` is supplied, `--dslx_top` must not be present; use `--output_module_name` to set the wrapper name.
+- Names emitted into the stitched wrapper use a conservative identifier policy:
+  selected stage function names, selected stage parameter names,
+  `--output_module_name`, and the reset/input-valid/output-valid signal names
+  must match `[A-Za-z_][A-Za-z0-9_]*` and must not be Verilog/SystemVerilog
+  keywords. This is intentionally the simple intersection of DSLX and
+  Verilog/SystemVerilog identifiers, so names containing `$` are rejected even
+  though `$` can be legal after the first character in Verilog identifiers.
 
 Examples:
 

@@ -5832,6 +5832,143 @@ fn foo_cycle1(a: u64, b: u32) -> u64 { a + b as u64 }"#;
     );
 }
 
+fn run_dslx_stitch_pipeline_error_case_with_args(
+    dslx: &str,
+    extra_args: &[&str],
+) -> std::process::Output {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("foo.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let mut command = Command::new(command_path);
+    command
+        .arg("dslx-stitch-pipeline")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("foo");
+    for arg in extra_args {
+        command.arg(arg);
+    }
+    command.output().unwrap()
+}
+
+fn run_dslx_stitch_pipeline_error_case(dslx: &str) -> std::process::Output {
+    run_dslx_stitch_pipeline_error_case_with_args(dslx, &[])
+}
+
+#[test]
+fn test_dslx_stitch_pipeline_clk_param_reports_name_validation_error() {
+    let output = run_dslx_stitch_pipeline_error_case(
+        "fn foo_cycle0(clk: u32) -> u32 { clk }\nfn foo_cycle1(x: u32) -> u32 { x }",
+    );
+    assert!(
+        !output.status.success(),
+        "command should fail, stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("stitch error") && stderr.contains("name validation failed"),
+        "unexpected stderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("stage parameter `foo_cycle0.clk`")
+            && stderr.contains("reserved wrapper/control port `clk`"),
+        "unexpected stderr: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("panicked") && !stderr.contains("INTERNAL: XLS_RET_CHECK"),
+        "stderr should not expose panic/internal XLS text: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_dslx_stitch_pipeline_keyword_param_reports_name_validation_error() {
+    let output = run_dslx_stitch_pipeline_error_case(
+        "fn foo_cycle0(input: u32) -> u32 { input }\nfn foo_cycle1(x: u32) -> u32 { x }",
+    );
+    assert!(
+        !output.status.success(),
+        "command should fail, stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("stitch error") && stderr.contains("name validation failed"),
+        "unexpected stderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("stage parameter `foo_cycle0.input`")
+            && stderr.contains("SystemVerilog keyword"),
+        "unexpected stderr: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("panicked") && !stderr.contains("INTERNAL: XLS_RET_CHECK"),
+        "stderr should not expose panic/internal XLS text: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_dslx_stitch_pipeline_unit_stage_output_reports_clear_error() {
+    let output = run_dslx_stitch_pipeline_error_case(
+        "fn foo_cycle0(x: u32) -> () { () }\nfn foo_cycle1() -> u32 { u32:1 }",
+    );
+    assert!(
+        !output.status.success(),
+        "command should fail, stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("stitch error")
+            && stderr.contains("stage `foo_cycle0` has zero-width return type `()`"),
+        "unexpected stderr: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("panicked") && !stderr.contains("INTERNAL: XLS_RET_CHECK"),
+        "stderr should not expose panic/internal XLS text: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_dslx_stitch_pipeline_output_valid_without_input_valid_reports_clear_error() {
+    let output = run_dslx_stitch_pipeline_error_case_with_args(
+        "fn foo_cycle0(x: u32) -> u32 { x }\nfn foo_cycle1(x: u32) -> u32 { x }",
+        &["--output_valid_signal=output_valid"],
+    );
+    assert!(
+        !output.status.success(),
+        "command should fail, stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("stitch error")
+            && stderr.contains("output_valid_signal requires input_valid_signal"),
+        "unexpected stderr: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("panicked") && !stderr.contains("INTERNAL: XLS_RET_CHECK"),
+        "stderr should not expose panic/internal XLS text: {}",
+        stderr
+    );
+}
+
 #[test]
 fn test_dslx_stitch_pipeline_parametric_stage_error() {
     let _ = env_logger::builder().is_test(true).try_init();
