@@ -138,7 +138,7 @@ fn flattened_simulation_sv(a: &str, b: &str, c: &str, d: &str) -> String {
   reg [7:0] p0_{a};
   reg [7:0] p0_{b};
   reg p0_valid;
-  always @ (posedge clk) begin
+  always_ff @ (posedge clk) begin
     p0_{a} <= input_valid ? {a} : p0_{a};
     p0_{b} <= input_valid ? {b} : p0_{b};
     p0_valid <= rst ? 1'b0 : input_valid;
@@ -152,7 +152,7 @@ fn flattened_simulation_sv(a: &str, b: &str, c: &str, d: &str) -> String {
   reg [7:0] p1_{c};
   reg [7:0] p1_{d};
   reg p1_valid;
-  always @ (posedge clk) begin
+  always_ff @ (posedge clk) begin
     p1_{c} <= p0_valid ? p1_{c}_comb : p1_{c};
     p1_{d} <= p0_valid ? p1_{d}_comb : p1_{d};
     p1_valid <= rst ? 1'b0 : p0_valid;
@@ -161,7 +161,7 @@ fn flattened_simulation_sv(a: &str, b: &str, c: &str, d: &str) -> String {
   assign stage_1_out_comb = p1_{c} - p1_{d};
   reg [7:0] p2_out;
   reg p2_valid;
-  always @ (posedge clk) begin
+  always_ff @ (posedge clk) begin
     p2_out <= p1_valid ? stage_1_out_comb : p2_out;
     p2_valid <= rst ? 1'b0 : p1_valid;
   end
