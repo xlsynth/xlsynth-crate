@@ -654,5 +654,7 @@ fn is_simple_identifier_start(c: char) -> bool {
 }
 
 fn is_simple_identifier_body(c: char) -> bool {
+    // This intentionally excludes `$`: stitch-pipeline keeps emitted names in
+    // the simple DSLX/Verilog/SystemVerilog identifier intersection.
     c.is_ascii_alphanumeric() || c == '_'
 }
