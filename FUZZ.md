@@ -38,7 +38,9 @@ SystemVerilog keywords, and random legal identifiers. Unsafe samples must fail
 through the controlled stitch-pipeline name validator; accepted samples are then
 compiled and simulated with `xlsynth-vastly` using a single-module form that
 mirrors the fixed two-stage wrapper shape, because the `xlsynth-vastly` pipeline
-compiler currently operates on a single module.
+compiler currently operates on a single module. The arithmetic check is
+intentionally non-commutative so swapped stage bindings produce a different
+observed output.
 
 Primarily tests:
 

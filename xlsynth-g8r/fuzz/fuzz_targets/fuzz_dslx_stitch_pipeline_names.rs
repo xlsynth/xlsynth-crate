@@ -68,8 +68,8 @@ fuzz_target!(|sample: NameSample| {
     }
 
     let dslx = format!(
-        r#"fn foo_cycle0({a}: u8, {b}: u8) -> (u8, u8) {{ ({a}, {b}) }}
-fn foo_cycle1({c}: u8, {d}: u8) -> u8 {{ {c} + {d} }}"#
+        r#"fn foo_cycle0({a}: u8, {b}: u8) -> (u8, u8) {{ ({b}, {a}) }}
+fn foo_cycle1({c}: u8, {d}: u8) -> u8 {{ {c} - {d} }}"#
     );
     let opts = StitchPipelineOptions {
         verilog_version: VerilogVersion::SystemVerilog,
@@ -122,7 +122,8 @@ fn is_dslx_frontend_error(message: &str) -> bool {
         || message.contains("syntax")
 }
 
-/// Builds the single-module form that `xlsynth-vastly` can simulate for this sample shape.
+/// Builds the single-module form that `xlsynth-vastly` can simulate for this
+/// sample shape.
 fn flattened_simulation_sv(a: &str, b: &str, c: &str, d: &str) -> String {
     format!(
         r#"module foo(
@@ -143,7 +144,7 @@ fn flattened_simulation_sv(a: &str, b: &str, c: &str, d: &str) -> String {
     p0_valid <= rst ? 1'b0 : input_valid;
   end
   wire [15:0] stage_0_out_comb;
-  assign stage_0_out_comb = {{p0_{a}, p0_{b}}};
+  assign stage_0_out_comb = {{p0_{b}, p0_{a}}};
   wire [7:0] p1_{c}_comb;
   assign p1_{c}_comb = stage_0_out_comb[7:0];
   wire [7:0] p1_{d}_comb;
@@ -157,7 +158,7 @@ fn flattened_simulation_sv(a: &str, b: &str, c: &str, d: &str) -> String {
     p1_valid <= rst ? 1'b0 : p0_valid;
   end
   wire [7:0] stage_1_out_comb;
-  assign stage_1_out_comb = p1_{c} + p1_{d};
+  assign stage_1_out_comb = p1_{c} - p1_{d};
   reg [7:0] p2_out;
   reg p2_valid;
   always @ (posedge clk) begin
@@ -203,13 +204,13 @@ fn simulate_and_check(sv: &str, a: &str, b: &str) -> Result<(), String> {
         .map_err(|err| format!("run_pipeline_and_collect_outputs: {err:?}"))?;
 
     let retired = retired_outputs(&outputs)?;
-    if retired != vec![Value4::from_u64(8, Signedness::Unsigned, 7)] {
+    if retired != vec![Value4::from_u64(8, Signedness::Unsigned, 255)] {
         let got = retired
             .iter()
             .map(Value4::to_bit_string_msb_first)
             .collect::<Vec<_>>()
             .join(", ");
-        return Err(format!("expected retired output 00000111, got [{got}]"));
+        return Err(format!("expected retired output 11111111, got [{got}]"));
     }
     Ok(())
 }
