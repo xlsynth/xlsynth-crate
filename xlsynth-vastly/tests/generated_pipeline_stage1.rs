@@ -60,13 +60,14 @@ fn codegen_pipeline(
     ir_text: &str,
     module_name: &str,
     pipeline_stages: u32,
+    use_system_verilog: bool,
 ) -> Result<String, xlsynth::XlsynthError> {
     let package = xlsynth::IrPackage::parse_ir(ir_text, None)?;
     let sched_proto = format!("delay_model: \"unit\"\npipeline_stages: {pipeline_stages}");
     let codegen_proto = format!(
         "register_merge_strategy: STRATEGY_IDENTITY_ONLY\n\
 generator: GENERATOR_KIND_PIPELINE\n\
-use_system_verilog: true\n\
+use_system_verilog: {use_system_verilog}\n\
 module_name: \"{module_name}\"\n\
 input_valid_signal: \"input_valid\"\n\
 output_valid_signal: \"output_valid\"\n\
@@ -146,7 +147,7 @@ fn retired_outputs(
 #[test]
 fn generated_stage1_pipeline_retires_combo_values_after_reset() {
     let ir_text = canonical_ir(SIMPLE_ADD_IR);
-    let src = codegen_pipeline(&ir_text, "generated_stage1", 1).unwrap();
+    let src = codegen_pipeline(&ir_text, "generated_stage1", 1, true).unwrap();
     let m = compile_pipeline_module(&src).unwrap();
     let payload = vec![
         vbits(8, "00000001"),
@@ -154,6 +155,30 @@ fn generated_stage1_pipeline_retires_combo_values_after_reset() {
         vbits(8, "00000011"),
     ];
     let stimulus = build_stimulus("x", &payload, 1);
+    let retired = retired_outputs(&m, &stimulus);
+
+    assert_eq!(retired, vec!["00000010", "00000011", "00000100"]);
+}
+
+#[test]
+fn generated_plain_verilog_stage2_pipeline_retires_combo_values_after_reset() {
+    let ir_text = canonical_ir(SIMPLE_ADD_IR);
+    let src = codegen_pipeline(&ir_text, "generated_stage2_v", 2, false).unwrap();
+    assert!(
+        src.contains("always @"),
+        "expected plain Verilog always block:\n{src}"
+    );
+    assert!(
+        !src.contains("always_ff"),
+        "plain Verilog codegen should not emit always_ff:\n{src}"
+    );
+    let m = compile_pipeline_module(&src).unwrap();
+    let payload = vec![
+        vbits(8, "00000001"),
+        vbits(8, "00000010"),
+        vbits(8, "00000011"),
+    ];
+    let stimulus = build_stimulus("x", &payload, 2);
     let retired = retired_outputs(&m, &stimulus);
 
     assert_eq!(retired, vec!["00000010", "00000011", "00000100"]);
@@ -168,8 +193,8 @@ fn generated_stage2_pipeline_retires_same_values_as_stage1() {
         vbits(8, "00000011"),
     ];
 
-    let src1 = codegen_pipeline(&ir_text, "generated_stage1", 1).unwrap();
-    let src2 = codegen_pipeline(&ir_text, "generated_stage2", 2).unwrap();
+    let src1 = codegen_pipeline(&ir_text, "generated_stage1", 1, true).unwrap();
+    let src2 = codegen_pipeline(&ir_text, "generated_stage2", 2, true).unwrap();
     let m1 = compile_pipeline_module(&src1).unwrap();
     let m2 = compile_pipeline_module(&src2).unwrap();
 
@@ -233,9 +258,61 @@ endmodule
 }
 
 #[test]
+fn plain_verilog_always_posedge_pipeline_retires_expected_values() {
+    let dut = r#"
+module m(
+  input wire clk,
+  input wire rst,
+  input wire input_valid,
+  input wire [7:0] x,
+  output wire output_valid,
+  output wire [7:0] out
+);
+  reg s0_valid;
+  reg [7:0] s0_x;
+  reg s1_valid;
+  reg [7:0] s1_out;
+
+  always @ (posedge clk) begin
+    if (rst) begin
+      s0_valid <= 1'b0;
+      s0_x <= 8'h00;
+    end else begin
+      s0_valid <= input_valid;
+      s0_x <= input_valid ? x : s0_x;
+    end
+  end
+
+  always @ (posedge clk) begin
+    if (rst) begin
+      s1_valid <= 1'b0;
+      s1_out <= 8'h00;
+    end else begin
+      s1_valid <= s0_valid;
+      s1_out <= s0_valid ? (s0_x + 8'h01) : s1_out;
+    end
+  end
+
+  assign output_valid = s1_valid;
+  assign out = s1_out;
+endmodule
+"#;
+    let m = compile_pipeline_module(dut).unwrap();
+    assert_eq!(m.seqs.len(), 2);
+
+    let payload = vec![
+        vbits(8, "00000001"),
+        vbits(8, "00000010"),
+        vbits(8, "00000011"),
+    ];
+    let retired = retired_outputs(&m, &build_stimulus("x", &payload, 2));
+    assert_eq!(retired, vec!["00000010", "00000011", "00000100"]);
+}
+
+#[test]
 fn finding_run26_stage1_pipeline_mul_helper_matches_ir() {
     let ir_text = canonical_ir(PIPELINE_MUL_BSU_IR);
-    let src = codegen_pipeline(&ir_text, "finding_run26_pipe1", 1).unwrap();
+    let src = codegen_pipeline(&ir_text, "finding_run26_pipe1", 1, true).unwrap();
     let m = compile_pipeline_module(&src).unwrap();
     let retired = retired_outputs(&m, &build_stimulus("p0", &[vbits(5, "01011")], 1));
 

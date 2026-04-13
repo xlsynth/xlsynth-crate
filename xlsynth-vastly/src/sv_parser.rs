@@ -656,9 +656,9 @@ impl<'a> Parser<'a> {
                     end_span,
                 })
             }
-            TokKind::KwAlwaysFf => {
+            TokKind::KwAlways | TokKind::KwAlwaysFf => {
                 let stmt_start = self.toks[self.idx].start;
-                let af = self.parse_always_ff()?;
+                let af = self.parse_always_posedge()?;
                 let stmt_end = self.toks[self.idx - 1].end;
                 Ok(ModuleItem::AlwaysFf {
                     always_ff: af,
@@ -1386,8 +1386,16 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_always_ff(&mut self) -> Result<AlwaysFf> {
-        self.expect(TokKind::KwAlwaysFf)?;
+    fn parse_always_posedge(&mut self) -> Result<AlwaysFf> {
+        // The internal AlwaysFf representation is also used for plain Verilog
+        // `always @(posedge clk)` blocks after parsing the restricted event
+        // control.
+        match self.cur() {
+            TokKind::KwAlways | TokKind::KwAlwaysFf => self.bump(),
+            _ => {
+                return Err(Error::Parse("expected `always` or `always_ff`".to_string()));
+            }
+        }
         self.expect(TokKind::At)?;
         self.expect(TokKind::LParen)?;
         self.expect(TokKind::KwPosedge)?;
