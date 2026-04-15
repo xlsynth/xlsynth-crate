@@ -3537,8 +3537,9 @@ fn gatify_node(
             // -----------------------------------------------------------------
             let mask_not = g8_builder.add_not_vec(&mask);
             let cleared = g8_builder.add_and_vec(&arg_bits, &mask_not);
-            let inserted = g8_builder.add_and_vec(&update_shifted, &mask);
-            let result_bits = g8_builder.add_or_vec(&cleared, &inserted);
+            // `update_shifted` was zero-extended before shifting, so it is already
+            // zero outside the write window selected by `mask`.
+            let result_bits = g8_builder.add_or_vec(&cleared, &update_shifted);
 
             env.add(node_ref, GateOrVec::BitVector(result_bits));
         }
@@ -3873,7 +3874,7 @@ mod tests {
     use crate::aig_sim::gate_sim;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
     use crate::gatify::ir2gate::{GatifyOptions, gatify};
-    use crate::ir2gate_utils::AdderMapping;
+    use crate::ir2gate_utils::{AdderMapping, Direction, gatify_barrel_shifter};
     use xlsynth::{IrBits, IrValue};
     use xlsynth_pir::ir;
     use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
@@ -4038,6 +4039,276 @@ fn f(a: bits[2] id=1, b: bits[2] id=2) -> bits[2] {
                 );
             }
         }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct BitSliceUpdateQorRow {
+        arg_width: usize,
+        update_width: usize,
+        old_and_nodes: usize,
+        old_depth: usize,
+        public_and_nodes: usize,
+        public_depth: usize,
+    }
+
+    fn build_bit_slice_update_ir_text(
+        arg_width: usize,
+        start_width: usize,
+        update_width: usize,
+    ) -> String {
+        format!(
+            r#"package sample
+
+top fn main(x: bits[{arg_width}], start: bits[{start_width}], update: bits[{update_width}]) -> bits[{arg_width}] {{
+  ret y: bits[{arg_width}] = bit_slice_update(x, start, update, id=4)
+}}
+"#
+        )
+    }
+
+    fn bit_mask(width: usize) -> u64 {
+        if width == 64 {
+            u64::MAX
+        } else {
+            (1u64 << width) - 1
+        }
+    }
+
+    fn bit_slice_update_sample_bits(width: usize) -> Vec<IrValue> {
+        let all_ones = bit_mask(width);
+        let alternating = 0xaaaa_aaaa_aaaa_aaaau64 & all_ones;
+        let mut values = vec![0, all_ones, alternating];
+        for bit_index in [0, width / 2, width - 1] {
+            values.push(1u64 << bit_index);
+        }
+        values.sort_unstable();
+        values.dedup();
+        values
+            .into_iter()
+            .map(|value| IrValue::make_ubits(width, value).unwrap())
+            .collect()
+    }
+
+    fn gatify_bit_slice_update_old_insert_and(
+        gb: &mut GateBuilder,
+        arg_bits: &AigBitVector,
+        start_bits: &AigBitVector,
+        update_bits: &AigBitVector,
+    ) -> AigBitVector {
+        let arg_width = arg_bits.get_bit_count();
+        let update_width = update_bits.get_bit_count();
+        let effective_update_width = std::cmp::min(update_width, arg_width);
+
+        let ones_effective = gb.replicate(gb.get_true(), effective_update_width);
+        let zeros_high_count = arg_width - effective_update_width;
+        let ones_ext = if zeros_high_count == 0 {
+            ones_effective.clone()
+        } else {
+            let zeros = AigBitVector::zeros(zeros_high_count);
+            AigBitVector::concat(zeros, ones_effective)
+        };
+        let mask = gatify_barrel_shifter(
+            &ones_ext,
+            start_bits,
+            Direction::Left,
+            "bit_slice_update_old_mask",
+            gb,
+        );
+
+        let update_trim = if update_width > effective_update_width {
+            update_bits.get_lsb_slice(0, effective_update_width)
+        } else {
+            update_bits.clone()
+        };
+        let update_ext = if zeros_high_count == 0 {
+            update_trim.clone()
+        } else {
+            let zeros = AigBitVector::zeros(zeros_high_count);
+            AigBitVector::concat(zeros, update_trim)
+        };
+        let update_shifted = gatify_barrel_shifter(
+            &update_ext,
+            start_bits,
+            Direction::Left,
+            "bit_slice_update_old_value",
+            gb,
+        );
+
+        let mask_not = gb.add_not_vec(&mask);
+        let cleared = gb.add_and_vec(arg_bits, &mask_not);
+        let inserted = gb.add_and_vec(&update_shifted, &mask);
+        gb.add_or_vec(&cleared, &inserted)
+    }
+
+    fn get_bit_slice_update_old_stats(
+        arg_width: usize,
+        start_width: usize,
+        update_width: usize,
+    ) -> AigStats {
+        let mut gb = GateBuilder::new(
+            format!("bit_slice_update_old_w{arg_width}_u{update_width}"),
+            GateBuilderOptions::opt(),
+        );
+        let arg_bits = gb.add_input("x".to_string(), arg_width);
+        let start_bits = gb.add_input("start".to_string(), start_width);
+        let update_bits = gb.add_input("update".to_string(), update_width);
+        let result =
+            gatify_bit_slice_update_old_insert_and(&mut gb, &arg_bits, &start_bits, &update_bits);
+        gb.add_output("result".to_string(), result);
+        get_aig_stats(&gb.build())
+    }
+
+    fn validate_bit_slice_update_public_simulation(
+        ir_fn: &ir::Fn,
+        gate_fn: &GateFn,
+        arg_width: usize,
+        start_width: usize,
+        update_width: usize,
+    ) {
+        let x_samples = bit_slice_update_sample_bits(arg_width);
+        let update_samples = bit_slice_update_sample_bits(update_width);
+        let start_count = 1usize << start_width;
+
+        for x_value in &x_samples {
+            for update_value in &update_samples {
+                for start in 0..start_count {
+                    let start_value = IrValue::make_ubits(start_width, start as u64).unwrap();
+                    let want = match eval_fn(
+                        ir_fn,
+                        &[x_value.clone(), start_value.clone(), update_value.clone()],
+                    ) {
+                        FnEvalResult::Success(success) => success.value.to_bits().unwrap(),
+                        FnEvalResult::Failure(failure) => {
+                            panic!(
+                                "bit_slice_update source IR failed during simulation: {failure:?}"
+                            )
+                        }
+                    };
+                    let sim = gate_sim::eval(
+                        gate_fn,
+                        &[
+                            x_value.to_bits().unwrap(),
+                            start_value.to_bits().unwrap(),
+                            update_value.to_bits().unwrap(),
+                        ],
+                        gate_sim::Collect::None,
+                    );
+                    let got = sim.outputs[0].clone();
+                    assert_eq!(
+                        got, want,
+                        "bit_slice_update simulation mismatch for arg_width={arg_width} \
+                         update_width={update_width} start={start} x={x_value} \
+                         update={update_value}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn get_bit_slice_update_public_stats_and_validate(
+        arg_width: usize,
+        start_width: usize,
+        update_width: usize,
+    ) -> AigStats {
+        let ir_text = build_bit_slice_update_ir_text(arg_width, start_width, update_width);
+        let mut parser = ir_parser::Parser::new(&ir_text);
+        let ir_package = parser.parse_and_validate_package().expect("parse package");
+        let ir_fn = ir_package.get_top_fn().expect("top fn");
+        let gatify_output = gatify(
+            ir_fn,
+            GatifyOptions {
+                fold: true,
+                hash: true,
+                check_equivalence: false,
+                adder_mapping: AdderMapping::BrentKung,
+                mul_adder_mapping: None,
+                range_info: None,
+                enable_rewrite_carry_out: false,
+                enable_rewrite_prio_encode: false,
+                enable_rewrite_nary_add: false,
+                array_index_lowering_strategy: Default::default(),
+            },
+        )
+        .expect("gatify bit_slice_update");
+        validate_bit_slice_update_public_simulation(
+            ir_fn,
+            &gatify_output.gate_fn,
+            arg_width,
+            start_width,
+            update_width,
+        );
+        get_aig_stats(&gatify_output.gate_fn)
+    }
+
+    fn gather_bit_slice_update_qor_rows() -> Vec<BitSliceUpdateQorRow> {
+        let mut got = Vec::new();
+        for (arg_width, update_widths) in [
+            (8usize, &[1usize, 2, 3, 5, 8][..]),
+            (16usize, &[1usize, 2, 3, 5, 8, 16][..]),
+            (32usize, &[1usize, 2, 3, 5, 8, 16][..]),
+        ] {
+            let start_width = (arg_width - 1).ilog2() as usize + 1;
+            for update_width in update_widths {
+                let old = get_bit_slice_update_old_stats(arg_width, start_width, *update_width);
+                let public = get_bit_slice_update_public_stats_and_validate(
+                    arg_width,
+                    start_width,
+                    *update_width,
+                );
+                got.push(BitSliceUpdateQorRow {
+                    arg_width,
+                    update_width: *update_width,
+                    old_and_nodes: old.and_nodes,
+                    old_depth: old.max_depth,
+                    public_and_nodes: public.and_nodes,
+                    public_depth: public.max_depth,
+                });
+            }
+        }
+        got
+    }
+
+    #[test]
+    fn test_bit_slice_update_qor_and_equivalence_sweep() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        let got = gather_bit_slice_update_qor_rows();
+
+        for row in &got {
+            assert!(
+                row.public_and_nodes < row.old_and_nodes,
+                "expected bit_slice_update lowering to reduce AND nodes: {:?}",
+                row
+            );
+            assert!(
+                row.public_depth <= row.old_depth,
+                "expected bit_slice_update lowering not to increase depth: {:?}",
+                row
+            );
+        }
+
+        #[rustfmt::skip]
+        let want: &[BitSliceUpdateQorRow] = &[
+            BitSliceUpdateQorRow { arg_width: 8, update_width: 1, old_and_nodes: 50, old_depth: 5, public_and_nodes: 42, public_depth: 4 },
+            BitSliceUpdateQorRow { arg_width: 8, update_width: 2, old_and_nodes: 64, old_depth: 6, public_and_nodes: 56, public_depth: 5 },
+            BitSliceUpdateQorRow { arg_width: 8, update_width: 3, old_and_nodes: 75, old_depth: 7, public_and_nodes: 67, public_depth: 6 },
+            BitSliceUpdateQorRow { arg_width: 8, update_width: 5, old_and_nodes: 95, old_depth: 8, public_and_nodes: 87, public_depth: 7 },
+            BitSliceUpdateQorRow { arg_width: 8, update_width: 8, old_and_nodes: 101, old_depth: 8, public_and_nodes: 93, public_depth: 7 },
+            BitSliceUpdateQorRow { arg_width: 16, update_width: 1, old_and_nodes: 106, old_depth: 6, public_and_nodes: 90, public_depth: 5 },
+            BitSliceUpdateQorRow { arg_width: 16, update_width: 2, old_and_nodes: 126, old_depth: 7, public_and_nodes: 110, public_depth: 6 },
+            BitSliceUpdateQorRow { arg_width: 16, update_width: 3, old_and_nodes: 143, old_depth: 8, public_and_nodes: 127, public_depth: 7 },
+            BitSliceUpdateQorRow { arg_width: 16, update_width: 5, old_and_nodes: 174, old_depth: 9, public_and_nodes: 158, public_depth: 8 },
+            BitSliceUpdateQorRow { arg_width: 16, update_width: 8, old_and_nodes: 216, old_depth: 10, public_and_nodes: 200, public_depth: 9 },
+            BitSliceUpdateQorRow { arg_width: 16, update_width: 16, old_and_nodes: 253, old_depth: 10, public_and_nodes: 237, public_depth: 9 },
+            BitSliceUpdateQorRow { arg_width: 32, update_width: 1, old_and_nodes: 218, old_depth: 7, public_and_nodes: 186, public_depth: 6 },
+            BitSliceUpdateQorRow { arg_width: 32, update_width: 2, old_and_nodes: 244, old_depth: 8, public_and_nodes: 212, public_depth: 7 },
+            BitSliceUpdateQorRow { arg_width: 32, update_width: 3, old_and_nodes: 267, old_depth: 9, public_and_nodes: 235, public_depth: 8 },
+            BitSliceUpdateQorRow { arg_width: 32, update_width: 5, old_and_nodes: 310, old_depth: 10, public_and_nodes: 278, public_depth: 9 },
+            BitSliceUpdateQorRow { arg_width: 32, update_width: 8, old_and_nodes: 370, old_depth: 11, public_and_nodes: 338, public_depth: 10 },
+            BitSliceUpdateQorRow { arg_width: 32, update_width: 16, old_and_nodes: 506, old_depth: 12, public_and_nodes: 474, public_depth: 11 },
+        ];
+
+        assert_eq!(got.as_slice(), want);
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
