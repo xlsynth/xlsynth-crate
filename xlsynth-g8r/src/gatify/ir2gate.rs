@@ -19,8 +19,8 @@ use xlsynth_pir::ir_validate;
 use crate::ir2gate_utils::{
     AdderMapping, Direction, array_add_with_carry_out, gatify_add_brent_kung,
     gatify_add_kogge_stone, gatify_add_ripple_carry, gatify_barrel_shifter,
-    gatify_indexed_select_mux_tree_pad_last_if_type_fits, gatify_one_hot, gatify_one_hot_select,
-    gatify_one_hot_with_nonzero_flag, gatify_prio_encode,
+    gatify_indexed_select_mux_tree_exact, gatify_indexed_select_mux_tree_pad_last_if_type_fits,
+    gatify_one_hot, gatify_one_hot_select, gatify_one_hot_with_nonzero_flag, gatify_prio_encode,
 };
 
 use crate::gate_builder::ReductionKind;
@@ -522,6 +522,100 @@ fn gatify_array_index_near_pow2_mux_tree_if_profitable(
 }
 
 fn gatify_array_slice(
+    gb: &mut GateBuilder,
+    array_ty: &ir::ArrayTypeData,
+    array_bits: &AigBitVector,
+    start_bits: &AigBitVector,
+    assumed_start_in_bounds: bool,
+    width: usize,
+    text_id: usize,
+    mul_adder_mapping: AdderMapping,
+) -> AigBitVector {
+    if let Some(result) =
+        gatify_array_slice_element_mux_if_profitable(gb, array_ty, array_bits, start_bits, width)
+    {
+        return result;
+    }
+
+    gatify_array_slice_bit_shift(
+        gb,
+        array_ty,
+        array_bits,
+        start_bits,
+        assumed_start_in_bounds,
+        width,
+        text_id,
+        mul_adder_mapping,
+    )
+}
+
+/// Builds the flat output bits for one concrete `array_slice` start value.
+fn gatify_array_slice_window_case(
+    array_bits: &AigBitVector,
+    n_elems: usize,
+    e_bits: usize,
+    start: usize,
+    width: usize,
+) -> AigBitVector {
+    debug_assert!(n_elems > 0);
+    let last_idx = n_elems - 1;
+    let last_elem = array_bits.get_lsb_slice(last_idx * e_bits, e_bits);
+    let mut pad = AigBitVector::zeros(0);
+    if width > 0 {
+        for _ in 0..(width - 1) {
+            pad = AigBitVector::concat(last_elem.clone(), pad);
+        }
+    }
+    let extended = AigBitVector::concat(pad, array_bits.clone());
+    let clamped_start = start.min(last_idx);
+    extended.get_lsb_slice(clamped_start * e_bits, width * e_bits)
+}
+
+/// Lowers small awkward-width `array_slice`s as an exact mux over element
+/// windows.
+fn gatify_array_slice_element_mux_if_profitable(
+    gb: &mut GateBuilder,
+    array_ty: &ir::ArrayTypeData,
+    array_bits: &AigBitVector,
+    start_bits: &AigBitVector,
+    width: usize,
+) -> Option<AigBitVector> {
+    const MAX_CASE_COUNT: usize = 64;
+    const MAX_SLICE_WIDTH: usize = 4;
+    const MAX_OUTPUT_BITS: usize = 256;
+
+    let e_bits = array_ty.element_type.bit_count();
+    let n_elems = array_ty.element_count;
+    let start_w = start_bits.get_bit_count();
+    let output_bits = width.checked_mul(e_bits)?;
+
+    if n_elems == 0 {
+        return None;
+    }
+    if output_bits == 0 {
+        return Some(AigBitVector::zeros(0));
+    }
+
+    let case_count = 1usize.checked_shl(start_w as u32)?;
+    if case_count > MAX_CASE_COUNT || width > MAX_SLICE_WIDTH || output_bits > MAX_OUTPUT_BITS {
+        return None;
+    }
+
+    // The bit-shift lowering must synthesize `start * e_bits`; this is especially
+    // expensive when `e_bits` is not a power of two. Single-bit elements also
+    // consistently benefit from selecting element windows directly.
+    if e_bits != 1 && e_bits.is_power_of_two() {
+        return None;
+    }
+
+    let cases: Vec<AigBitVector> = (0..case_count)
+        .map(|start| gatify_array_slice_window_case(array_bits, n_elems, e_bits, start, width))
+        .collect();
+    gatify_indexed_select_mux_tree_exact(gb, start_bits, &cases).ok()
+}
+
+/// Lowers `array_slice` by scaling the start index and shifting the flat array.
+fn gatify_array_slice_bit_shift(
     gb: &mut GateBuilder,
     array_ty: &ir::ArrayTypeData,
     array_bits: &AigBitVector,
@@ -3775,13 +3869,16 @@ pub fn gatify_node_as_fn(
 mod tests {
     use crate::aig::AigBitVector;
     use crate::aig::gate::{AigNode, GateFn};
-    use crate::aig::get_summary_stats::{SummaryStats, get_summary_stats};
+    use crate::aig::get_summary_stats::{AigStats, SummaryStats, get_aig_stats, get_summary_stats};
     use crate::aig_sim::gate_sim;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
     use crate::gatify::ir2gate::{GatifyOptions, gatify};
     use crate::ir2gate_utils::AdderMapping;
+    use xlsynth::{IrBits, IrValue};
     use xlsynth_pir::ir;
+    use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
     use xlsynth_pir::ir_parser;
+    use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;
 
     #[test]
     fn test_gatify_array_literal_flattening() {
@@ -3941,6 +4038,362 @@ fn f(a: bits[2] id=1, b: bits[2] id=2) -> bits[2] {
                 );
             }
         }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct ArraySliceQorRow {
+        array_len: usize,
+        element_width: usize,
+        slice_width: usize,
+        old_and_nodes: usize,
+        old_depth: usize,
+        elem_mux_and_nodes: usize,
+        elem_mux_depth: usize,
+        public_and_nodes: usize,
+        public_depth: usize,
+    }
+
+    fn build_array_slice_ir_text(
+        array_len: usize,
+        element_width: usize,
+        start_width: usize,
+        slice_width: usize,
+    ) -> String {
+        let return_width = element_width * slice_width;
+        let mut text = format!(
+            r#"package sample
+
+top fn main(array: bits[{element_width}][{array_len}], start: bits[{start_width}]) -> bits[{return_width}] {{
+  y: bits[{element_width}][{slice_width}] = array_slice(array, start, width={slice_width}, id=3)
+"#
+        );
+        for i in 0..slice_width {
+            text.push_str(&format!(
+                "  idx{i}: bits[32] = literal(value={i}, id={})\n",
+                10 + i
+            ));
+            text.push_str(&format!(
+                "  elem{i}: bits[{element_width}] = array_index(y, indices=[idx{i}], id={})\n",
+                20 + i
+            ));
+        }
+        if slice_width == 1 {
+            text.push_str(&format!(
+                "  ret out: bits[{return_width}] = array_index(y, indices=[idx0], id=100)\n"
+            ));
+        } else {
+            let operands = (0..slice_width)
+                .rev()
+                .map(|i| format!("elem{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            text.push_str(&format!(
+                "  ret out: bits[{return_width}] = concat({operands}, id=100)\n"
+            ));
+        }
+        text.push_str("}\n");
+        text
+    }
+
+    fn make_array_slice_sample_array(
+        array_len: usize,
+        element_width: usize,
+        elements: &[u64],
+    ) -> IrValue {
+        assert_eq!(elements.len(), array_len);
+        let values = elements
+            .iter()
+            .map(|value| IrValue::make_ubits(element_width, *value).unwrap())
+            .collect::<Vec<_>>();
+        IrValue::make_array(&values).unwrap()
+    }
+
+    fn array_slice_sample_arrays(array_len: usize, element_width: usize) -> Vec<IrValue> {
+        let all_ones = if element_width == 64 {
+            u64::MAX
+        } else {
+            (1u64 << element_width) - 1
+        };
+        let high_bit = 1u64 << (element_width - 1);
+        let mut samples = Vec::new();
+        samples.push(make_array_slice_sample_array(
+            array_len,
+            element_width,
+            &vec![0; array_len],
+        ));
+        samples.push(make_array_slice_sample_array(
+            array_len,
+            element_width,
+            &vec![all_ones; array_len],
+        ));
+
+        for index in 0..array_len {
+            for value in [1, high_bit, all_ones] {
+                let mut elements = vec![0; array_len];
+                elements[index] = value;
+                samples.push(make_array_slice_sample_array(
+                    array_len,
+                    element_width,
+                    &elements,
+                ));
+            }
+        }
+
+        let alternating = (0..array_len)
+            .map(|i| if i % 2 == 0 { 0 } else { all_ones })
+            .collect::<Vec<_>>();
+        samples.push(make_array_slice_sample_array(
+            array_len,
+            element_width,
+            &alternating,
+        ));
+
+        samples
+    }
+
+    fn validate_array_slice_public_simulation(
+        ir_fn: &ir::Fn,
+        gate_fn: &GateFn,
+        array_len: usize,
+        element_width: usize,
+        start_width: usize,
+    ) {
+        let array_ty = ir::Type::Array(ir::ArrayTypeData {
+            element_type: Box::new(ir::Type::Bits(element_width)),
+            element_count: array_len,
+        });
+        let start_count = 1usize << start_width;
+        for array_value in array_slice_sample_arrays(array_len, element_width) {
+            let mut array_bits = Vec::new();
+            flatten_ir_value_to_lsb0_bits_for_type(&array_value, &array_ty, &mut array_bits)
+                .unwrap();
+            let gate_array = IrBits::from_lsb_is_0(&array_bits);
+            for start in 0..start_count {
+                let start_value = IrValue::make_ubits(start_width, start as u64).unwrap();
+                let want = match eval_fn(ir_fn, &[array_value.clone(), start_value.clone()]) {
+                    FnEvalResult::Success(success) => success.value.to_bits().unwrap(),
+                    FnEvalResult::Failure(failure) => {
+                        panic!("array_slice source IR failed during simulation: {failure:?}")
+                    }
+                };
+                let gate_start = start_value.to_bits().unwrap();
+                let sim = gate_sim::eval(
+                    gate_fn,
+                    &[gate_array.clone(), gate_start],
+                    gate_sim::Collect::None,
+                );
+                let got = sim.outputs[0].clone();
+                assert_eq!(
+                    got, want,
+                    "array_slice simulation mismatch for array_len={array_len} element_width={element_width} start={start} array={array_value}"
+                );
+            }
+        }
+    }
+
+    fn get_array_slice_bit_shift_stats(
+        array_len: usize,
+        element_width: usize,
+        start_width: usize,
+        slice_width: usize,
+    ) -> AigStats {
+        let array_ty = ir::ArrayTypeData {
+            element_type: Box::new(ir::Type::Bits(element_width)),
+            element_count: array_len,
+        };
+        let mut gb = GateBuilder::new(
+            format!("array_slice_bit_shift_n{array_len}_w{element_width}_s{slice_width}"),
+            GateBuilderOptions::opt(),
+        );
+        let array_bits = gb.add_input("array".to_string(), array_len * element_width);
+        let start_bits = gb.add_input("start".to_string(), start_width);
+        let result = super::gatify_array_slice_bit_shift(
+            &mut gb,
+            &array_ty,
+            &array_bits,
+            &start_bits,
+            false,
+            slice_width,
+            0,
+            AdderMapping::BrentKung,
+        );
+        gb.add_output("result".to_string(), result);
+        get_aig_stats(&gb.build())
+    }
+
+    fn get_array_slice_element_mux_stats(
+        array_len: usize,
+        element_width: usize,
+        start_width: usize,
+        slice_width: usize,
+    ) -> AigStats {
+        let array_ty = ir::ArrayTypeData {
+            element_type: Box::new(ir::Type::Bits(element_width)),
+            element_count: array_len,
+        };
+        let mut gb = GateBuilder::new(
+            format!("array_slice_elem_mux_n{array_len}_w{element_width}_s{slice_width}"),
+            GateBuilderOptions::opt(),
+        );
+        let array_bits = gb.add_input("array".to_string(), array_len * element_width);
+        let start_bits = gb.add_input("start".to_string(), start_width);
+        let result = super::gatify_array_slice_element_mux_if_profitable(
+            &mut gb,
+            &array_ty,
+            &array_bits,
+            &start_bits,
+            slice_width,
+        )
+        .expect("array-slice element mux should apply for characterization case");
+        gb.add_output("result".to_string(), result);
+        get_aig_stats(&gb.build())
+    }
+
+    fn get_array_slice_public_stats_and_validate(
+        array_len: usize,
+        element_width: usize,
+        start_width: usize,
+        slice_width: usize,
+    ) -> AigStats {
+        let ir_text = build_array_slice_ir_text(array_len, element_width, start_width, slice_width);
+        let mut parser = ir_parser::Parser::new(&ir_text);
+        let ir_package = parser.parse_and_validate_package().expect("parse package");
+        let ir_fn = ir_package.get_top_fn().expect("top fn");
+        let gatify_output = gatify(
+            ir_fn,
+            GatifyOptions {
+                fold: true,
+                hash: true,
+                check_equivalence: false,
+                adder_mapping: AdderMapping::BrentKung,
+                mul_adder_mapping: None,
+                range_info: None,
+                enable_rewrite_carry_out: false,
+                enable_rewrite_prio_encode: false,
+                enable_rewrite_nary_add: false,
+                array_index_lowering_strategy: Default::default(),
+            },
+        )
+        .expect("gatify array_slice");
+        validate_array_slice_public_simulation(
+            ir_fn,
+            &gatify_output.gate_fn,
+            array_len,
+            element_width,
+            start_width,
+        );
+        get_aig_stats(&gatify_output.gate_fn)
+    }
+
+    fn gather_array_slice_qor_rows() -> Vec<ArraySliceQorRow> {
+        let mut got = Vec::new();
+        for array_len in [5usize, 8, 16] {
+            let start_width = (array_len - 1).ilog2() as usize + 1;
+            for element_width in [1usize, 3, 5] {
+                for slice_width in 1usize..=4 {
+                    let old = get_array_slice_bit_shift_stats(
+                        array_len,
+                        element_width,
+                        start_width,
+                        slice_width,
+                    );
+                    let elem_mux = get_array_slice_element_mux_stats(
+                        array_len,
+                        element_width,
+                        start_width,
+                        slice_width,
+                    );
+                    let public = get_array_slice_public_stats_and_validate(
+                        array_len,
+                        element_width,
+                        start_width,
+                        slice_width,
+                    );
+                    got.push(ArraySliceQorRow {
+                        array_len,
+                        element_width,
+                        slice_width,
+                        old_and_nodes: old.and_nodes,
+                        old_depth: old.max_depth,
+                        elem_mux_and_nodes: elem_mux.and_nodes,
+                        elem_mux_depth: elem_mux.max_depth,
+                        public_and_nodes: public.and_nodes,
+                        public_depth: public.max_depth,
+                    });
+                }
+            }
+        }
+        got
+    }
+
+    #[test]
+    fn test_array_slice_element_mux_qor_and_equivalence_sweep() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        let got = gather_array_slice_qor_rows();
+
+        for row in &got {
+            assert!(
+                row.elem_mux_and_nodes < row.old_and_nodes,
+                "expected element-mux lowering to reduce AND nodes: {:?}",
+                row
+            );
+            assert!(
+                row.elem_mux_depth < row.old_depth,
+                "expected element-mux lowering to reduce depth: {:?}",
+                row
+            );
+            assert_eq!(
+                (row.public_and_nodes, row.public_depth),
+                (row.elem_mux_and_nodes, row.elem_mux_depth),
+                "expected public array_slice lowering to use element-mux strategy: {:?}",
+                row
+            );
+        }
+
+        #[rustfmt::skip]
+        let want: &[ArraySliceQorRow] = &[
+            ArraySliceQorRow { array_len: 5, element_width: 1, slice_width: 1, old_and_nodes: 21, old_depth: 10, elem_mux_and_nodes: 18, elem_mux_depth: 6, public_and_nodes: 18, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 1, slice_width: 2, old_and_nodes: 35, old_depth: 10, elem_mux_and_nodes: 28, elem_mux_depth: 6, public_and_nodes: 28, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 1, slice_width: 3, old_and_nodes: 43, old_depth: 10, elem_mux_and_nodes: 32, elem_mux_depth: 6, public_and_nodes: 32, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 1, slice_width: 4, old_and_nodes: 49, old_depth: 10, elem_mux_and_nodes: 36, elem_mux_depth: 6, public_and_nodes: 36, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 3, slice_width: 1, old_and_nodes: 135, old_depth: 14, elem_mux_and_nodes: 54, elem_mux_depth: 6, public_and_nodes: 54, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 3, slice_width: 2, old_and_nodes: 188, old_depth: 15, elem_mux_and_nodes: 84, elem_mux_depth: 6, public_and_nodes: 84, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 3, slice_width: 3, old_and_nodes: 220, old_depth: 15, elem_mux_and_nodes: 96, elem_mux_depth: 6, public_and_nodes: 96, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 3, slice_width: 4, old_and_nodes: 240, old_depth: 15, elem_mux_and_nodes: 108, elem_mux_depth: 6, public_and_nodes: 108, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 5, slice_width: 1, old_and_nodes: 251, old_depth: 15, elem_mux_and_nodes: 90, elem_mux_depth: 6, public_and_nodes: 90, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 5, slice_width: 2, old_and_nodes: 339, old_depth: 15, elem_mux_and_nodes: 140, elem_mux_depth: 6, public_and_nodes: 140, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 5, slice_width: 3, old_and_nodes: 397, old_depth: 16, elem_mux_and_nodes: 160, elem_mux_depth: 6, public_and_nodes: 160, public_depth: 6 },
+            ArraySliceQorRow { array_len: 5, element_width: 5, slice_width: 4, old_and_nodes: 441, old_depth: 16, elem_mux_and_nodes: 180, elem_mux_depth: 6, public_and_nodes: 180, public_depth: 6 },
+
+            ArraySliceQorRow { array_len: 8, element_width: 1, slice_width: 1, old_and_nodes: 34, old_depth: 13, elem_mux_and_nodes: 21, elem_mux_depth: 6, public_and_nodes: 21, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 1, slice_width: 2, old_and_nodes: 54, old_depth: 13, elem_mux_and_nodes: 41, elem_mux_depth: 6, public_and_nodes: 41, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 1, slice_width: 3, old_and_nodes: 62, old_depth: 13, elem_mux_and_nodes: 49, elem_mux_depth: 6, public_and_nodes: 49, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 1, slice_width: 4, old_and_nodes: 70, old_depth: 13, elem_mux_and_nodes: 57, elem_mux_depth: 6, public_and_nodes: 57, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 1, old_and_nodes: 206, old_depth: 17, elem_mux_and_nodes: 63, elem_mux_depth: 6, public_and_nodes: 63, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 2, old_and_nodes: 285, old_depth: 17, elem_mux_and_nodes: 123, elem_mux_depth: 6, public_and_nodes: 123, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 3, old_and_nodes: 331, old_depth: 17, elem_mux_and_nodes: 147, elem_mux_depth: 6, public_and_nodes: 147, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 4, old_and_nodes: 357, old_depth: 17, elem_mux_and_nodes: 171, elem_mux_depth: 6, public_and_nodes: 171, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 1, old_and_nodes: 402, old_depth: 19, elem_mux_and_nodes: 105, elem_mux_depth: 6, public_and_nodes: 105, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 2, old_and_nodes: 538, old_depth: 19, elem_mux_and_nodes: 205, elem_mux_depth: 6, public_and_nodes: 205, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 3, old_and_nodes: 620, old_depth: 19, elem_mux_and_nodes: 245, elem_mux_depth: 6, public_and_nodes: 245, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 4, old_and_nodes: 677, old_depth: 19, elem_mux_and_nodes: 285, elem_mux_depth: 6, public_and_nodes: 285, public_depth: 6 },
+
+            ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 1, old_and_nodes: 64, old_depth: 16, elem_mux_and_nodes: 45, elem_mux_depth: 8, public_and_nodes: 45, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 2, old_and_nodes: 108, old_depth: 16, elem_mux_and_nodes: 89, elem_mux_depth: 8, public_and_nodes: 89, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 3, old_and_nodes: 128, old_depth: 16, elem_mux_and_nodes: 109, elem_mux_depth: 8, public_and_nodes: 109, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 4, old_and_nodes: 148, old_depth: 16, elem_mux_and_nodes: 129, elem_mux_depth: 8, public_and_nodes: 129, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 1, old_and_nodes: 407, old_depth: 21, elem_mux_and_nodes: 135, elem_mux_depth: 8, public_and_nodes: 135, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 2, old_and_nodes: 561, old_depth: 21, elem_mux_and_nodes: 267, elem_mux_depth: 8, public_and_nodes: 267, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 3, old_and_nodes: 655, old_depth: 21, elem_mux_and_nodes: 327, elem_mux_depth: 8, public_and_nodes: 327, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 4, old_and_nodes: 713, old_depth: 21, elem_mux_and_nodes: 387, elem_mux_depth: 8, public_and_nodes: 387, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 1, old_and_nodes: 809, old_depth: 22, elem_mux_and_nodes: 225, elem_mux_depth: 8, public_and_nodes: 225, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 2, old_and_nodes: 1070, old_depth: 22, elem_mux_and_nodes: 445, elem_mux_depth: 8, public_and_nodes: 445, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 3, old_and_nodes: 1230, old_depth: 22, elem_mux_and_nodes: 545, elem_mux_depth: 8, public_and_nodes: 545, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 4, old_and_nodes: 1330, old_depth: 22, elem_mux_and_nodes: 645, elem_mux_depth: 8, public_and_nodes: 645, public_depth: 8 },
+        ];
+
+        assert_eq!(got.as_slice(), want);
     }
 
     #[test]
