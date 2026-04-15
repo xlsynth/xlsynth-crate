@@ -7,17 +7,30 @@
 
 use crate::{
     dslx,
-    dslx_bridge::{BridgeBuilder, StructMemberData},
+    dslx_bridge::{BridgeBuilder, FunctionParamData, StructMemberData},
     IrValue, XlsynthError,
 };
 
 pub struct RustBridgeBuilder {
     lines: Vec<String>,
+    target_function_name: Option<String>,
 }
 
 impl RustBridgeBuilder {
     pub fn new() -> Self {
-        Self { lines: vec![] }
+        Self {
+            lines: vec![],
+            target_function_name: None,
+        }
+    }
+
+    /// Creates a builder that emits Rust aliases for one DSLX function
+    /// signature.
+    pub fn with_function_signature_aliases(function_name: impl Into<String>) -> Self {
+        Self {
+            lines: vec![],
+            target_function_name: Some(function_name.into()),
+        }
     }
 
     pub fn build(&self) -> String {
@@ -45,6 +58,61 @@ impl RustBridgeBuilder {
                 ty.to_string()?
             )))
         }
+    }
+
+    fn convert_type_annotation_or_type(
+        type_annotation: Option<&dslx::TypeAnnotation>,
+        concrete_type: Option<&dslx::Type>,
+    ) -> Result<String, XlsynthError> {
+        if let Some(type_ref_type_annotation) =
+            type_annotation.and_then(|annotation| annotation.to_type_ref_type_annotation())
+        {
+            let type_definition = type_ref_type_annotation
+                .get_type_ref()
+                .get_type_definition();
+            if let Some(type_alias) = type_definition.to_type_alias() {
+                Ok(type_alias.get_identifier())
+            } else if let Some(colon_ref) = type_definition.to_colon_ref() {
+                let attr = colon_ref.get_attr();
+                let rust_path = if let Some(import) = colon_ref.resolve_import_subject() {
+                    let subject = import.get_subject();
+                    if let Some(module_name) = subject.last() {
+                        format!("super::{module_name}::{attr}")
+                    } else {
+                        attr
+                    }
+                } else {
+                    attr
+                };
+                Ok(rust_path)
+            } else if let Some(concrete_type) = concrete_type {
+                Self::convert_type(concrete_type)
+            } else {
+                Err(XlsynthError(
+                    "DSLX type annotation did not resolve to a Rust type".to_string(),
+                ))
+            }
+        } else if let Some(concrete_type) = concrete_type {
+            Self::convert_type(concrete_type)
+        } else {
+            Err(XlsynthError(
+                "DSLX type annotation did not resolve to a Rust type".to_string(),
+            ))
+        }
+    }
+
+    fn upper_camel_identifier(name: &str) -> String {
+        name.split('_')
+            .filter(|part| !part.is_empty())
+            .map(|part| {
+                let mut chars = part.chars();
+                if let Some(first) = chars.next() {
+                    first.to_ascii_uppercase().to_string() + chars.as_str()
+                } else {
+                    String::new()
+                }
+            })
+            .collect::<String>()
     }
 }
 
@@ -124,7 +192,10 @@ impl BridgeBuilder for RustBridgeBuilder {
     ) -> Result<(), XlsynthError> {
         self.lines.push(format!("pub struct {dslx_name} {{"));
         for member in members {
-            let rust_ty = Self::convert_type(&member.concrete_type)?;
+            let rust_ty = Self::convert_type_annotation_or_type(
+                Some(&member.type_annotation),
+                Some(&member.concrete_type),
+            )?;
             self.lines
                 .push(format!("    pub {}: {},", member.name, rust_ty));
         }
@@ -135,10 +206,11 @@ impl BridgeBuilder for RustBridgeBuilder {
     fn add_alias(
         &mut self,
         dslx_name: &str,
-        _type_annotation: &dslx::TypeAnnotation,
+        type_annotation: &dslx::TypeAnnotation,
         bits_type: &dslx::Type,
     ) -> Result<(), XlsynthError> {
-        let rust_ty = Self::convert_type(bits_type)?;
+        let rust_ty =
+            Self::convert_type_annotation_or_type(Some(type_annotation), Some(bits_type))?;
         self.lines
             .push(format!("pub type {dslx_name} = {rust_ty};\n"));
         Ok(())
@@ -151,6 +223,42 @@ impl BridgeBuilder for RustBridgeBuilder {
         _ty: &dslx::Type,
         _ir_value: &IrValue,
     ) -> Result<(), XlsynthError> {
+        Ok(())
+    }
+
+    fn add_function_signature(
+        &mut self,
+        dslx_name: &str,
+        params: &[FunctionParamData],
+        return_type_annotation: Option<&dslx::TypeAnnotation>,
+        return_type: Option<&dslx::Type>,
+    ) -> Result<(), XlsynthError> {
+        if self.target_function_name.as_deref() == Some(dslx_name) {
+            let function_prefix = Self::upper_camel_identifier(dslx_name);
+            self.lines
+                .push(format!("// Rust aliases for DSLX function `{dslx_name}`."));
+            for param in params {
+                let alias_name = format!(
+                    "{function_prefix}{}",
+                    Self::upper_camel_identifier(&param.name)
+                );
+                let rust_ty = Self::convert_type_annotation_or_type(
+                    Some(&param.type_annotation),
+                    param.concrete_type.as_ref(),
+                )?;
+                self.lines
+                    .push(format!("pub type {alias_name} = {rust_ty};"));
+            }
+            if let Some(return_type) = return_type {
+                let rust_ty = Self::convert_type_annotation_or_type(
+                    return_type_annotation,
+                    Some(return_type),
+                )?;
+                self.lines
+                    .push(format!("pub type {function_prefix}Return = {rust_ty};"));
+            }
+            self.lines.push("".to_string());
+        }
         Ok(())
     }
 }
@@ -358,6 +466,43 @@ pub type MyType = IrUBits<8>;
     }
 
     #[test]
+    fn test_convert_leaf_module_function_signature_aliases() {
+        let dslx = r#"
+        struct Cfg {
+            a: u32,
+        }
+        type Samples = u8[4];
+        pub fn top(cfg: Cfg, samples: Samples) -> Cfg {
+            cfg
+        }
+        "#;
+        let mut import_data = dslx::ImportData::default();
+        let path = std::path::PathBuf::from_str("/memfile/my_module.x").unwrap();
+        let mut builder = RustBridgeBuilder::with_function_signature_aliases("top");
+        convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
+        assert_eq!(
+            builder.build(),
+            r#"pub mod my_module {
+#![allow(dead_code)]
+#![allow(unused_imports)]
+use xlsynth::{IrValue, IrUBits, IrSBits};
+
+pub struct Cfg {
+    pub a: IrUBits<32>,
+}
+
+pub type Samples = [IrUBits<8>; 4];
+
+// Rust aliases for DSLX function `top`.
+pub type TopCfg = Cfg;
+pub type TopSamples = Samples;
+pub type TopReturn = Cfg;
+
+} // pub mod my_module"#
+        );
+    }
+
+    #[test]
     fn test_struct_with_extern_type_ref_member() {
         let imported_dslx = "pub struct MyImportedStruct { a: u8 }";
         let importer_dslx = "import imported; struct MyStruct { a: imported::MyImportedStruct }";
@@ -380,7 +525,7 @@ pub type MyType = IrUBits<8>;
 use xlsynth::{IrValue, IrUBits, IrSBits};
 
 pub struct MyStruct {
-    pub a: MyImportedStruct,
+    pub a: super::imported::MyImportedStruct,
 }
 
 } // pub mod importer"

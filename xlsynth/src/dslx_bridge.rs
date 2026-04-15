@@ -22,6 +22,13 @@ pub struct StructMemberData {
     pub concrete_type: dslx::Type,
 }
 
+/// Type information for one DSLX function parameter.
+pub struct FunctionParamData {
+    pub name: String,
+    pub type_annotation: dslx::TypeAnnotation,
+    pub concrete_type: Option<dslx::Type>,
+}
+
 /// Abstract interface for building bridge code; i.e. interop to or from DSLX
 /// with another language like Rust or SystemVerilog.
 pub trait BridgeBuilder {
@@ -68,6 +75,21 @@ pub trait BridgeBuilder {
         ty: &dslx::Type,
         ir_value: &IrValue,
     ) -> Result<(), XlsynthError>;
+
+    /// Invoked when a DSLX function signature is available to the bridge.
+    ///
+    /// Builders can use this to emit declarations for callable boundary types.
+    /// The default is intentionally a no-op so existing builders only consume
+    /// type definitions unless they opt into signature-aware output.
+    fn add_function_signature(
+        &mut self,
+        _dslx_name: &str,
+        _params: &[FunctionParamData],
+        _return_type_annotation: Option<&dslx::TypeAnnotation>,
+        _return_type: Option<&dslx::Type>,
+    ) -> Result<(), XlsynthError> {
+        Ok(())
+    }
 }
 
 fn enum_as_tups(enum_def: &dslx::EnumDef, type_info: &dslx::TypeInfo) -> Vec<(String, IrValue)> {
@@ -147,6 +169,35 @@ fn convert_constant(
     builder.add_constant(&constant_def.get_name(), constant_def, &ty, &ir_value)
 }
 
+fn convert_function(
+    function: &dslx::Function,
+    type_info: &dslx::TypeInfo,
+    builder: &mut dyn BridgeBuilder,
+) -> Result<(), XlsynthError> {
+    let params = (0..function.get_param_count())
+        .map(|idx| {
+            let param = function.get_param(idx);
+            let type_annotation = param.get_type_annotation();
+            let concrete_type = type_info.get_type_for_type_annotation(&type_annotation);
+            FunctionParamData {
+                name: param.get_name(),
+                type_annotation,
+                concrete_type,
+            }
+        })
+        .collect::<Vec<_>>();
+    let return_type_annotation = function.get_return_type();
+    let return_type = return_type_annotation
+        .as_ref()
+        .and_then(|type_annotation| type_info.get_type_for_type_annotation(type_annotation));
+    builder.add_function_signature(
+        &function.get_identifier(),
+        &params,
+        return_type_annotation.as_ref(),
+        return_type.as_ref(),
+    )
+}
+
 pub fn convert_imported_module(
     typechecked_module: &dslx::TypecheckedModule,
     builder: &mut dyn BridgeBuilder,
@@ -175,9 +226,8 @@ pub fn convert_imported_module(
             dslx::MatchableModuleMember::ConstantDef(constant_def) => {
                 convert_constant(&constant_def, &type_info, builder)?
             }
-            dslx::MatchableModuleMember::Function(_function) => {
-                // Functions are not converted by the bridge.
-                continue;
+            dslx::MatchableModuleMember::Function(function) => {
+                convert_function(&function, &type_info, builder)?
             }
             dslx::MatchableModuleMember::Quickcheck(_) => {
                 // Quickchecks are currently not converted by the bridge.
