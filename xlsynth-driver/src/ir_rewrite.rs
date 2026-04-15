@@ -7,10 +7,8 @@ use clap::ArgMatches;
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_rewrite::{
     apply_rule_to_package, MatchPattern, MatchRewritePackageError, MatchRewriteRule,
-    RewriteApplyMode, RewriteTemplate,
+    RewriteApplyMode, RewriteTarget, RewriteTemplate,
 };
-
-const BARE_FIRST_SENTINEL: &str = "__bare_first__";
 
 fn extract_error_byte_offset(msg: &str) -> Option<usize> {
     let (_prefix, suffix) = msg.rsplit_once(" at byte ")?;
@@ -41,19 +39,6 @@ pub fn handle_ir_rewrite(matches: &ArgMatches, _config: &Option<ToolchainConfig>
         .get_one::<String>("replacement")
         .expect("replacement is required");
 
-    if let Some(first_value) = matches.get_one::<String>("first") {
-        if first_value != BARE_FIRST_SENTINEL {
-            report_cli_error_and_exit(
-                &format!(
-                    "--first={} is reserved for future support; only bare --first is currently supported",
-                    first_value
-                ),
-                Some("ir-rewrite"),
-                vec![],
-            );
-        }
-    }
-
     let match_pattern = MatchPattern::parse(match_text).unwrap_or_else(|e| {
         report_cli_error_and_exit(
             &format_parse_error("match pattern", match_text, &e.to_string()),
@@ -75,6 +60,18 @@ pub fn handle_ir_rewrite(matches: &ArgMatches, _config: &Option<ToolchainConfig>
             vec![],
         )
     });
+    let mode = if let Some(target_text) = matches.get_one::<String>("target") {
+        let target = target_text.parse::<RewriteTarget>().unwrap_or_else(|e| {
+            report_cli_error_and_exit(
+                &format!("Invalid rewrite target: {e}"),
+                Some("ir-rewrite"),
+                vec![("target", target_text.as_str())],
+            )
+        });
+        RewriteApplyMode::Target(target)
+    } else {
+        RewriteApplyMode::AllMatchesSinglePass
+    };
 
     let file_content = std::fs::read_to_string(input_file).unwrap_or_else(|e| {
         report_cli_error_and_exit(
@@ -93,15 +90,15 @@ pub fn handle_ir_rewrite(matches: &ArgMatches, _config: &Option<ToolchainConfig>
     });
 
     let target_fn_name = matches.get_one::<String>("ir_top").map(String::as_str);
-    let outcome = apply_rule_to_package(&pkg, &rule, target_fn_name, RewriteApplyMode::FirstMatch)
-        .unwrap_or_else(|e| match e {
+    let outcome =
+        apply_rule_to_package(&pkg, &rule, target_fn_name, mode).unwrap_or_else(|e| match e {
             MatchRewritePackageError::Apply(err) => {
                 report_cli_error_and_exit(&err.to_string(), Some("ir-rewrite"), vec![])
             }
             other => report_cli_error_and_exit(&other.to_string(), Some("ir-rewrite"), vec![]),
         });
 
-    if matches.get_flag("must-match") && !outcome.rewrote() {
+    if !matches.contains_id("target") && matches.get_flag("must-match") && !outcome.rewrote() {
         report_cli_error_and_exit("No matches found", Some("ir-rewrite"), vec![]);
     }
 

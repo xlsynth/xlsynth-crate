@@ -1120,7 +1120,7 @@ fn main() {
         )
         .subcommand(
             clap::Command::new("ir-rewrite")
-                .about("Rewrites the first IR node matching a query expression in a function")
+                .about("Rewrites all IR nodes matching a query expression in a function")
                 .arg(
                     Arg::new("ir_input_file")
                         .help("The input IR file")
@@ -1135,19 +1135,15 @@ fn main() {
                 )
                 .arg(
                     Arg::new("replacement")
-                        .help("The rewrite template to substitute for the first match")
+                        .help("The rewrite template to substitute for matches")
                         .required(true)
                         .index(3),
                 )
                 .arg(
-                    Arg::new("first")
-                        .long("first")
-                        .help("Rewrite the first match; --first=<N> is reserved for future support")
-                        .value_name("N")
-                        .action(ArgAction::Set)
-                        .num_args(0..=1)
-                        .require_equals(true)
-                        .default_missing_value("__bare_first__"),
+                    Arg::new("target")
+                        .long("target")
+                        .help("Exact rewrite target as NODE_ID or NODE_ID:OPERAND (zero-based operand slot)")
+                        .value_name("NODE_ID[:OPERAND]"),
                 )
                 .arg(
                     Arg::new("ir_top")
