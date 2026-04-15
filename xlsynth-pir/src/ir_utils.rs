@@ -802,6 +802,64 @@ pub fn replace_node_with_ref(
     Ok(())
 }
 
+/// Replaces exactly one operand slot of `target` with `replacement`.
+///
+/// This leaves all other users of the original operand untouched and does not
+/// compact/toposort; callers should run compaction after batching edits.
+pub fn replace_operand_with_ref(
+    f: &mut Fn,
+    target: NodeRef,
+    operand_slot: usize,
+    replacement: NodeRef,
+) -> Result<(), String> {
+    if target.index >= f.nodes.len() {
+        return Err(format!(
+            "replace_operand_with_ref: target index {} out of bounds (len={})",
+            target.index,
+            f.nodes.len()
+        ));
+    }
+    if replacement.index >= f.nodes.len() {
+        return Err(format!(
+            "replace_operand_with_ref: replacement index {} out of bounds (len={})",
+            replacement.index,
+            f.nodes.len()
+        ));
+    }
+
+    let target_payload = f.get_node(target).payload.clone();
+    let operand_refs = operands(&target_payload);
+    let Some(old_operand) = operand_refs.get(operand_slot).copied() else {
+        return Err(format!(
+            "replace_operand_with_ref: operand slot {} out of bounds (operand count={})",
+            operand_slot,
+            operand_refs.len()
+        ));
+    };
+
+    let old_operand_ty = f.get_node_ty(old_operand);
+    let replacement_ty = f.get_node_ty(replacement);
+    if old_operand_ty != replacement_ty {
+        return Err(format!(
+            "replace_operand_with_ref: type mismatch (target operand {} vs replacement {})",
+            old_operand_ty, replacement_ty
+        ));
+    }
+
+    let new_payload = remap_payload_with(&target_payload, |(slot, nr)| {
+        if slot == operand_slot {
+            replacement
+        } else {
+            nr
+        }
+    });
+    new_payload
+        .validate(f)
+        .map_err(|e| format!("replace_operand_with_ref: {e}"))?;
+    f.nodes[target.index].payload = new_payload;
+    Ok(())
+}
+
 pub fn remap_payload_with<FMap>(payload: &NodePayload, mut map: FMap) -> NodePayload
 where
     // Map function takes the operand slot and the existing operand and returns the new operand.

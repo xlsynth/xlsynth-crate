@@ -3,12 +3,13 @@
 //! Lightweight library support for matching and rewriting PIR functions.
 
 use crate::dce;
-use crate::ir::{self, NodePayload, NodeRef, Type};
+use crate::ir::{self, MemberType, NodePayload, NodeRef, Type};
 use crate::ir_deduce;
 use crate::ir_query;
 use crate::ir_utils;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
+use std::str::FromStr;
 use xlsynth::IrValue;
 
 #[derive(Debug, Clone)]
@@ -36,14 +37,30 @@ pub struct MatchRewriteRule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RewriteApplyMode {
+    AllMatchesSinglePass,
     FirstMatch,
+    Target(RewriteTarget),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RewriteTarget {
+    Node { text_id: usize },
+    Operand { node_text_id: usize, operand: usize },
 }
 
 #[derive(Debug, Clone)]
 pub struct MatchRewriteOutcome {
     rewritten_fn: ir::Fn,
-    rewrote: bool,
-    matched_root: Option<ir::NodeRef>,
+    rewrite_count: usize,
+    matched_roots: Vec<ir::NodeRef>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MatchRewritePackageOutcome {
+    rewritten_package: ir::Package,
+    rewrite_count: usize,
+    matched_roots: Vec<ir::NodeRef>,
+    target_fn_name: String,
 }
 
 impl MatchRewriteOutcome {
@@ -56,11 +73,95 @@ impl MatchRewriteOutcome {
     }
 
     pub fn rewrote(&self) -> bool {
-        self.rewrote
+        self.rewrite_count > 0
+    }
+
+    pub fn rewrite_count(&self) -> usize {
+        self.rewrite_count
+    }
+
+    pub fn matched_roots(&self) -> &[ir::NodeRef] {
+        &self.matched_roots
     }
 
     pub fn matched_root(&self) -> Option<ir::NodeRef> {
-        self.matched_root
+        self.matched_roots.first().copied()
+    }
+}
+
+impl MatchRewritePackageOutcome {
+    pub fn rewritten_package(&self) -> &ir::Package {
+        &self.rewritten_package
+    }
+
+    pub fn into_rewritten_package(self) -> ir::Package {
+        self.rewritten_package
+    }
+
+    pub fn rewrote(&self) -> bool {
+        self.rewrite_count > 0
+    }
+
+    pub fn rewrite_count(&self) -> usize {
+        self.rewrite_count
+    }
+
+    pub fn matched_roots(&self) -> &[ir::NodeRef] {
+        &self.matched_roots
+    }
+
+    pub fn matched_root(&self) -> Option<ir::NodeRef> {
+        self.matched_roots.first().copied()
+    }
+
+    pub fn target_fn_name(&self) -> &str {
+        &self.target_fn_name
+    }
+}
+
+impl FromStr for RewriteTarget {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        if s.is_empty() {
+            return Err("target must be non-empty".to_string());
+        }
+        if s.matches(':').count() > 1 {
+            return Err("target must have form NODE_ID or NODE_ID:OPERAND".to_string());
+        }
+
+        let parse_nonzero_text_id = |text: &str| -> Result<usize, String> {
+            let id = text
+                .parse::<usize>()
+                .map_err(|_| format!("target node id '{}' is not a non-negative integer", text))?;
+            if id == 0 {
+                return Err("target text_id must be > 0".to_string());
+            }
+            Ok(id)
+        };
+
+        match s.split_once(':') {
+            Some((id_text, operand_text)) => {
+                if id_text.is_empty() || operand_text.is_empty() {
+                    return Err("target must have form NODE_ID or NODE_ID:OPERAND".to_string());
+                }
+                let node_text_id = parse_nonzero_text_id(id_text)?;
+                let operand = operand_text.parse::<usize>().map_err(|_| {
+                    format!(
+                        "target operand '{}' is not a non-negative integer",
+                        operand_text
+                    )
+                })?;
+                Ok(RewriteTarget::Operand {
+                    node_text_id,
+                    operand,
+                })
+            }
+            None => Ok(RewriteTarget::Node {
+                text_id: parse_nonzero_text_id(s)?,
+            }),
+        }
     }
 }
 
@@ -96,6 +197,14 @@ pub enum MatchRewriteRuleApplyError {
     Validation(String),
     Toposort(String),
     LiteralConstruction(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MatchRewritePackageError {
+    TargetFunctionNotFound { name: String },
+    TargetIsBlock { name: String },
+    NoTargetFunction,
+    Apply(MatchRewriteRuleApplyError),
 }
 
 impl fmt::Display for MatchPatternParseError {
@@ -167,10 +276,90 @@ impl fmt::Display for MatchRewriteRuleApplyError {
     }
 }
 
+impl fmt::Display for MatchRewritePackageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MatchRewritePackageError::TargetFunctionNotFound { name } => {
+                write!(f, "target function '{}' not found", name)
+            }
+            MatchRewritePackageError::TargetIsBlock { name } => {
+                write!(f, "target '{}' is a block, not a function", name)
+            }
+            MatchRewritePackageError::NoTargetFunction => {
+                write!(f, "package has no target function (top may be a block)")
+            }
+            MatchRewritePackageError::Apply(err) => write!(f, "{}", err),
+        }
+    }
+}
+
 impl std::error::Error for MatchPatternParseError {}
 impl std::error::Error for RewriteTemplateParseError {}
 impl std::error::Error for MatchRewriteRuleBuildError {}
 impl std::error::Error for MatchRewriteRuleApplyError {}
+impl std::error::Error for MatchRewritePackageError {}
+
+fn resolve_target_fn_name(
+    pkg: &ir::Package,
+    target_fn_name: Option<&str>,
+) -> Result<String, MatchRewritePackageError> {
+    if let Some(target_fn_name) = target_fn_name {
+        if pkg.get_fn(target_fn_name).is_some() {
+            return Ok(target_fn_name.to_string());
+        }
+        if pkg.get_block(target_fn_name).is_some() {
+            return Err(MatchRewritePackageError::TargetIsBlock {
+                name: target_fn_name.to_string(),
+            });
+        }
+        return Err(MatchRewritePackageError::TargetFunctionNotFound {
+            name: target_fn_name.to_string(),
+        });
+    }
+
+    match &pkg.top {
+        Some((name, MemberType::Block)) => {
+            Err(MatchRewritePackageError::TargetIsBlock { name: name.clone() })
+        }
+        _ => pkg
+            .get_top_fn()
+            .map(|f| f.name.clone())
+            .ok_or(MatchRewritePackageError::NoTargetFunction),
+    }
+}
+
+/// Applies a match/rewrite rule to a selected function in a PIR package.
+pub fn apply_rule_to_package(
+    pkg: &ir::Package,
+    rule: &MatchRewriteRule,
+    target_fn_name: Option<&str>,
+    mode: RewriteApplyMode,
+) -> Result<MatchRewritePackageOutcome, MatchRewritePackageError> {
+    let target_fn_name = resolve_target_fn_name(pkg, target_fn_name)?;
+    let target_fn = pkg
+        .get_fn(&target_fn_name)
+        .expect("resolved target function should exist");
+    let outcome = rule
+        .apply_to_fn(target_fn, mode)
+        .map_err(MatchRewritePackageError::Apply)?;
+
+    let rewrite_count = outcome.rewrite_count();
+    let matched_roots = outcome.matched_roots().to_vec();
+    let rewritten_fn = outcome.into_rewritten_fn();
+
+    let mut rewritten_package = pkg.clone();
+    let target_fn = rewritten_package
+        .get_fn_mut(&target_fn_name)
+        .expect("resolved target function should exist in cloned package");
+    *target_fn = rewritten_fn;
+
+    Ok(MatchRewritePackageOutcome {
+        rewritten_package,
+        rewrite_count,
+        matched_roots,
+        target_fn_name,
+    })
+}
 
 impl MatchPattern {
     pub fn parse(text: &str) -> Result<Self, MatchPatternParseError> {
@@ -273,8 +462,96 @@ impl MatchRewriteRule {
         mode: RewriteApplyMode,
     ) -> Result<MatchRewriteOutcome, MatchRewriteRuleApplyError> {
         match mode {
+            RewriteApplyMode::AllMatchesSinglePass => self.apply_all_matches_single_pass(f),
             RewriteApplyMode::FirstMatch => self.apply_first_match(f),
+            RewriteApplyMode::Target(target) => self.apply_target(f, target),
         }
+    }
+
+    /// Applies the rewrite to every match selected from one original graph
+    /// pass.
+    fn apply_all_matches_single_pass(
+        &self,
+        f: &ir::Fn,
+    ) -> Result<MatchRewriteOutcome, MatchRewriteRuleApplyError> {
+        let mut rewritten = f.clone();
+        let ret_reachable = compute_ret_reachable(&rewritten);
+        let users = ir_utils::compute_users(&rewritten);
+        let mut selected: Vec<RootMatch> = Vec::new();
+
+        for node_ref in ir_utils::get_topological(&rewritten) {
+            if !is_rewriteable_root(&rewritten, node_ref, &ret_reachable) {
+                continue;
+            }
+            let Some(bindings) =
+                unique_bindings_at_root(&self.match_pattern.query, &rewritten, &users, node_ref)?
+            else {
+                continue;
+            };
+            selected.push(RootMatch {
+                root: node_ref,
+                bindings,
+            });
+        }
+
+        if selected.is_empty() {
+            return Ok(MatchRewriteOutcome {
+                rewritten_fn: rewritten,
+                rewrite_count: 0,
+                matched_roots: Vec::new(),
+            });
+        }
+
+        let mut replacements: HashMap<usize, NodeRef> = HashMap::new();
+        for selected_match in &selected {
+            let replacement = materialize_replacement_as_ref(
+                &mut rewritten,
+                selected_match.root,
+                &self.rewrite_template.expr,
+                &selected_match.bindings,
+            )?;
+            replacements.insert(selected_match.root.index, replacement);
+        }
+
+        let mut final_replacements: HashMap<usize, NodeRef> = HashMap::new();
+        for selected_match in &selected {
+            let final_replacement = resolve_final_replacement(
+                &rewritten,
+                selected_match.root,
+                &replacements,
+                &mut final_replacements,
+            )?;
+            final_replacements.insert(selected_match.root.index, final_replacement);
+        }
+
+        for selected_match in &selected {
+            let replacement = final_replacements
+                .get(&selected_match.root.index)
+                .copied()
+                .expect("final replacement should be present for selected root");
+            ir_utils::replace_node_with_ref(&mut rewritten, selected_match.root, replacement)
+                .map_err(MatchRewriteRuleApplyError::Validation)?;
+        }
+
+        let old_to_new = ir_utils::compact_and_toposort_with_mapping_in_place(&mut rewritten)
+            .map_err(MatchRewriteRuleApplyError::Toposort)?;
+        let replacement_order: Vec<NodeRef> = selected
+            .iter()
+            .map(|selected_match| {
+                final_replacements
+                    .get(&selected_match.root.index)
+                    .copied()
+                    .expect("final replacement should be present for selected root")
+            })
+            .collect();
+        let matched_roots =
+            remap_matched_roots_after_compaction(&old_to_new, replacement_order.iter().copied())?;
+
+        Ok(MatchRewriteOutcome {
+            rewritten_fn: rewritten,
+            rewrite_count: selected.len(),
+            matched_roots,
+        })
     }
 
     fn apply_first_match(
@@ -282,43 +559,19 @@ impl MatchRewriteRule {
         f: &ir::Fn,
     ) -> Result<MatchRewriteOutcome, MatchRewriteRuleApplyError> {
         let mut rewritten = f.clone();
-        let mut ret_reachable = vec![true; rewritten.nodes.len()];
-        for dead_node in dce::get_dead_nodes(&rewritten) {
-            ret_reachable[dead_node.index] = false;
-        }
+        let ret_reachable = compute_ret_reachable(&rewritten);
         let users = ir_utils::compute_users(&rewritten);
         for node_ref in rewritten.node_refs() {
-            if !ret_reachable[node_ref.index] {
-                continue;
-            }
-            if matches!(
-                rewritten.get_node(node_ref).payload,
-                NodePayload::Nil | NodePayload::GetParam(_)
-            ) {
+            if !is_rewriteable_root(&rewritten, node_ref, &ret_reachable) {
                 continue;
             }
 
-            let raw_bindings = ir_query::find_root_query_bindings(
-                &self.match_pattern.query,
-                &rewritten,
-                &users,
-                node_ref,
-            );
-            let unique_bindings = dedup_query_bindings(raw_bindings);
-            if unique_bindings.is_empty() {
+            let Some(bindings) =
+                unique_bindings_at_root(&self.match_pattern.query, &rewritten, &users, node_ref)?
+            else {
                 continue;
-            }
-            if unique_bindings.len() > 1 {
-                return Err(MatchRewriteRuleApplyError::AmbiguousMatch {
-                    root: node_ref,
-                    match_count: unique_bindings.len(),
-                });
-            }
+            };
 
-            let bindings = unique_bindings
-                .into_iter()
-                .next()
-                .expect("expected one binding");
             let rewritten_root = apply_rule_at_root(
                 &mut rewritten,
                 node_ref,
@@ -339,17 +592,324 @@ impl MatchRewriteRule {
                 })?;
             return Ok(MatchRewriteOutcome {
                 rewritten_fn: rewritten,
-                rewrote: true,
-                matched_root: Some(matched_root),
+                rewrite_count: 1,
+                matched_roots: vec![matched_root],
             });
         }
 
         Ok(MatchRewriteOutcome {
             rewritten_fn: rewritten,
-            rewrote: false,
-            matched_root: None,
+            rewrite_count: 0,
+            matched_roots: Vec::new(),
         })
     }
+
+    fn apply_target(
+        &self,
+        f: &ir::Fn,
+        target: RewriteTarget,
+    ) -> Result<MatchRewriteOutcome, MatchRewriteRuleApplyError> {
+        let mut rewritten = f.clone();
+        let ret_reachable = compute_ret_reachable(&rewritten);
+        match target {
+            RewriteTarget::Node { text_id } => {
+                let root_ref = resolve_target_node(&rewritten, text_id)?;
+                ensure_target_rewriteable(&rewritten, root_ref, text_id, &ret_reachable)?;
+                let users = ir_utils::compute_users(&rewritten);
+                let bindings = unique_bindings_at_root(
+                    &self.match_pattern.query,
+                    &rewritten,
+                    &users,
+                    root_ref,
+                )?
+                .ok_or_else(|| {
+                    MatchRewriteRuleApplyError::Validation(format!(
+                        "target node text_id={} does not match the rewrite pattern",
+                        text_id
+                    ))
+                })?;
+                let rewritten_root = apply_rule_at_root(
+                    &mut rewritten,
+                    root_ref,
+                    &self.rewrite_template.expr,
+                    &bindings,
+                )?;
+                let old_to_new =
+                    ir_utils::compact_and_toposort_with_mapping_in_place(&mut rewritten)
+                        .map_err(MatchRewriteRuleApplyError::Toposort)?;
+                let matched_root = old_to_new
+                    .get(rewritten_root.index)
+                    .copied()
+                    .flatten()
+                    .ok_or_else(|| {
+                        MatchRewriteRuleApplyError::Toposort(format!(
+                            "rewritten root {} was removed during compaction",
+                            rewritten_root.index
+                        ))
+                    })?;
+                Ok(MatchRewriteOutcome {
+                    rewritten_fn: rewritten,
+                    rewrite_count: 1,
+                    matched_roots: vec![matched_root],
+                })
+            }
+            RewriteTarget::Operand {
+                node_text_id,
+                operand,
+            } => {
+                let consumer_ref = resolve_target_node(&rewritten, node_text_id)?;
+                ensure_target_rewriteable(&rewritten, consumer_ref, node_text_id, &ret_reachable)?;
+                let operands = ir_utils::operands(&rewritten.get_node(consumer_ref).payload);
+                let Some(root_ref) = operands.get(operand).copied() else {
+                    return Err(MatchRewriteRuleApplyError::Validation(format!(
+                        "target node text_id={} operand {} is out of bounds (operand count={})",
+                        node_text_id,
+                        operand,
+                        operands.len()
+                    )));
+                };
+                let users = ir_utils::compute_users(&rewritten);
+                let bindings = unique_bindings_at_root(
+                    &self.match_pattern.query,
+                    &rewritten,
+                    &users,
+                    root_ref,
+                )?
+                .ok_or_else(|| {
+                    MatchRewriteRuleApplyError::Validation(format!(
+                        "target node text_id={} operand {} does not match the rewrite pattern",
+                        node_text_id, operand
+                    ))
+                })?;
+                let replacement = materialize_replacement_as_ref(
+                    &mut rewritten,
+                    root_ref,
+                    &self.rewrite_template.expr,
+                    &bindings,
+                )?;
+                ir_utils::replace_operand_with_ref(
+                    &mut rewritten,
+                    consumer_ref,
+                    operand,
+                    replacement,
+                )
+                .map_err(MatchRewriteRuleApplyError::Validation)?;
+                let old_to_new =
+                    ir_utils::compact_and_toposort_with_mapping_in_place(&mut rewritten)
+                        .map_err(MatchRewriteRuleApplyError::Toposort)?;
+                let matched_root = old_to_new
+                    .get(replacement.index)
+                    .copied()
+                    .flatten()
+                    .ok_or_else(|| {
+                        MatchRewriteRuleApplyError::Toposort(format!(
+                            "rewritten operand replacement {} was removed during compaction",
+                            replacement.index
+                        ))
+                    })?;
+                Ok(MatchRewriteOutcome {
+                    rewritten_fn: rewritten,
+                    rewrite_count: 1,
+                    matched_roots: vec![matched_root],
+                })
+            }
+        }
+    }
+}
+
+struct RootMatch {
+    root: NodeRef,
+    bindings: ir_query::QueryBindings,
+}
+
+fn compute_ret_reachable(f: &ir::Fn) -> Vec<bool> {
+    let mut ret_reachable = vec![true; f.nodes.len()];
+    for dead_node in dce::get_dead_nodes(f) {
+        ret_reachable[dead_node.index] = false;
+    }
+    ret_reachable
+}
+
+fn is_rewriteable_root(f: &ir::Fn, node_ref: NodeRef, ret_reachable: &[bool]) -> bool {
+    if !ret_reachable.get(node_ref.index).copied().unwrap_or(false) {
+        return false;
+    }
+    !matches!(
+        f.get_node(node_ref).payload,
+        NodePayload::Nil | NodePayload::GetParam(_)
+    )
+}
+
+fn unique_bindings_at_root(
+    query: &ir_query::QueryExpr,
+    f: &ir::Fn,
+    users: &HashMap<NodeRef, HashSet<NodeRef>>,
+    node_ref: NodeRef,
+) -> Result<Option<ir_query::QueryBindings>, MatchRewriteRuleApplyError> {
+    let raw_bindings = ir_query::find_root_query_bindings(query, f, users, node_ref);
+    let unique_bindings = dedup_query_bindings(raw_bindings);
+    if unique_bindings.is_empty() {
+        return Ok(None);
+    }
+    if unique_bindings.len() > 1 {
+        return Err(MatchRewriteRuleApplyError::AmbiguousMatch {
+            root: node_ref,
+            match_count: unique_bindings.len(),
+        });
+    }
+    Ok(unique_bindings.into_iter().next())
+}
+
+fn resolve_target_node(f: &ir::Fn, text_id: usize) -> Result<NodeRef, MatchRewriteRuleApplyError> {
+    if text_id == 0 {
+        return Err(MatchRewriteRuleApplyError::Validation(
+            "target text_id must be > 0".to_string(),
+        ));
+    }
+    let matches: Vec<NodeRef> = f
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, node)| (node.text_id == text_id).then_some(NodeRef { index }))
+        .collect();
+    match matches.as_slice() {
+        [node_ref] => Ok(*node_ref),
+        [] => Err(MatchRewriteRuleApplyError::Validation(format!(
+            "target node text_id={} not found in function '{}'",
+            text_id, f.name
+        ))),
+        _ => Err(MatchRewriteRuleApplyError::Validation(format!(
+            "multiple nodes with target node text_id={} found in function '{}'",
+            text_id, f.name
+        ))),
+    }
+}
+
+fn ensure_target_rewriteable(
+    f: &ir::Fn,
+    node_ref: NodeRef,
+    text_id: usize,
+    ret_reachable: &[bool],
+) -> Result<(), MatchRewriteRuleApplyError> {
+    if matches!(
+        f.get_node(node_ref).payload,
+        NodePayload::Nil | NodePayload::GetParam(_)
+    ) {
+        return Err(MatchRewriteRuleApplyError::Validation(format!(
+            "target node text_id={} is not rewriteable",
+            text_id
+        )));
+    }
+    if !ret_reachable.get(node_ref.index).copied().unwrap_or(false) {
+        return Err(MatchRewriteRuleApplyError::Validation(format!(
+            "target node text_id={} is not reachable from the function return",
+            text_id
+        )));
+    }
+    Ok(())
+}
+
+fn materialize_replacement_as_ref(
+    f: &mut ir::Fn,
+    root_ref: NodeRef,
+    expr: &TemplateExpr,
+    bindings: &ir_query::QueryBindings,
+) -> Result<NodeRef, MatchRewriteRuleApplyError> {
+    let mut state = MaterializeState::new(f, root_ref, bindings);
+    let root_ty = state.original_root.ty.clone();
+    let replacement = match expr {
+        TemplateExpr::Placeholder(name) => match bindings.get(name) {
+            Some(ir_query::Binding::Node(node_ref)) => *node_ref,
+            Some(ir_query::Binding::LiteralValue { value, ty }) => {
+                ensure_rewrite_preserves_root_type(&root_ty, ty)?;
+                push_node(state.f, ty.clone(), NodePayload::Literal(value.clone()))?
+            }
+            None => {
+                return Err(MatchRewriteRuleApplyError::InvalidRewriteTemplate(format!(
+                    "unknown placeholder '{}'",
+                    name
+                )));
+            }
+        },
+        TemplateExpr::Const(helper) => {
+            let (payload, ty) = build_const_payload(&state, helper)?;
+            ensure_rewrite_preserves_root_type(&root_ty, &ty)?;
+            push_node(state.f, ty, payload)?
+        }
+        TemplateExpr::OperatorCall(call) => {
+            let (payload, ty) = build_operator_payload(&mut state, call)?;
+            ensure_rewrite_preserves_root_type(&root_ty, &ty)?;
+            push_node(state.f, ty, payload)?
+        }
+    };
+    ensure_rewrite_preserves_root_type(&root_ty, state.f.get_node_ty(replacement))?;
+    Ok(replacement)
+}
+
+fn resolve_final_replacement(
+    f: &ir::Fn,
+    root: NodeRef,
+    replacements: &HashMap<usize, NodeRef>,
+    memo: &mut HashMap<usize, NodeRef>,
+) -> Result<NodeRef, MatchRewriteRuleApplyError> {
+    fn go(
+        f: &ir::Fn,
+        start: NodeRef,
+        current: NodeRef,
+        replacements: &HashMap<usize, NodeRef>,
+        memo: &mut HashMap<usize, NodeRef>,
+        stack: &mut Vec<usize>,
+    ) -> Result<NodeRef, MatchRewriteRuleApplyError> {
+        if current == start && !stack.is_empty() {
+            return Err(MatchRewriteRuleApplyError::Validation(format!(
+                "bulk rewrite replacement cycle involving text_id={}",
+                f.get_node(start).text_id
+            )));
+        }
+        let Some(next) = replacements.get(&current.index).copied() else {
+            return Ok(current);
+        };
+        if current == next {
+            return Ok(current);
+        }
+        if let Some(memoized) = memo.get(&current.index) {
+            return Ok(*memoized);
+        }
+        if stack.contains(&current.index) {
+            return Err(MatchRewriteRuleApplyError::Validation(format!(
+                "bulk rewrite replacement cycle involving text_id={}",
+                f.get_node(current).text_id
+            )));
+        }
+        stack.push(current.index);
+        let resolved = go(f, start, next, replacements, memo, stack)?;
+        stack.pop();
+        memo.insert(current.index, resolved);
+        Ok(resolved)
+    }
+
+    go(f, root, root, replacements, memo, &mut Vec::new())
+}
+
+fn remap_matched_roots_after_compaction(
+    old_to_new: &[Option<NodeRef>],
+    roots: impl IntoIterator<Item = NodeRef>,
+) -> Result<Vec<NodeRef>, MatchRewriteRuleApplyError> {
+    let mut out = Vec::new();
+    for root in roots {
+        let mapped = old_to_new
+            .get(root.index)
+            .copied()
+            .flatten()
+            .ok_or_else(|| {
+                MatchRewriteRuleApplyError::Toposort(format!(
+                    "rewritten root {} was removed during compaction",
+                    root.index
+                ))
+            })?;
+        out.push(mapped);
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1619,9 +2179,42 @@ mod tests {
         parser.parse_fn().expect("function should parse")
     }
 
+    fn parse_package(text: &str) -> ir::Package {
+        let mut parser = ir_parser::Parser::new(text);
+        parser
+            .parse_and_validate_package()
+            .expect("package should parse")
+    }
+
     fn normalized_fn_text(text: &str) -> String {
         let f = parse_fn(text);
         f.to_string()
+    }
+
+    #[test]
+    fn rewrite_target_parse_accepts_node_and_operand_forms() {
+        assert_eq!(
+            "42".parse::<RewriteTarget>().unwrap(),
+            RewriteTarget::Node { text_id: 42 }
+        );
+        assert_eq!(
+            "42:1".parse::<RewriteTarget>().unwrap(),
+            RewriteTarget::Operand {
+                node_text_id: 42,
+                operand: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn rewrite_target_parse_rejects_malformed_forms() {
+        for text in ["", "0", "42:", "42:1:2", "42:-1", "bad"] {
+            assert!(
+                text.parse::<RewriteTarget>().is_err(),
+                "expected target {:?} to be rejected",
+                text
+            );
+        }
     }
 
     #[test]
@@ -1723,6 +2316,209 @@ mod tests {
                 name: "z".to_string()
             }
         );
+    }
+
+    #[test]
+    fn apply_all_matches_single_pass_rewrites_multiple_independent_matches() {
+        let ir_text = r#"fn t(p: bits[1] id=1, x: bits[8] id=2, y: bits[8] id=3) -> (bits[8], bits[8]) {
+  sx: bits[8] = sel(p, cases=[x, x], id=10)
+  sy: bits[8] = sel(p, cases=[y, y], id=11)
+  ret tuple.12: (bits[8], bits[8]) = tuple(sx, sy, id=12)
+}"#;
+        let rule = MatchRewriteRule::from_strings("sel(selector=p, cases=[v, v])", "v").unwrap();
+        let outcome = rule
+            .apply_to_fn(&parse_fn(ir_text), RewriteApplyMode::AllMatchesSinglePass)
+            .unwrap();
+        assert_eq!(outcome.rewrite_count(), 2);
+        assert_eq!(
+            outcome.rewritten_fn().to_string(),
+            normalized_fn_text(
+                r#"fn t(p: bits[1] id=1, x: bits[8] id=2, y: bits[8] id=3) -> (bits[8], bits[8]) {
+  ret tuple.12: (bits[8], bits[8]) = tuple(x, y, id=12)
+}"#
+            )
+        );
+    }
+
+    #[test]
+    fn apply_all_matches_single_pass_rewrites_overlapping_matches_in_topological_order() {
+        let ir_text = r#"fn t(x: bits[8] id=1) -> bits[8] {
+  a: bits[8] = add(x, x, id=10)
+  ret b: bits[8] = add(a, a, id=11)
+}"#;
+        let rule = MatchRewriteRule::from_strings("add(v, v)", "v").unwrap();
+        let outcome = rule
+            .apply_to_fn(&parse_fn(ir_text), RewriteApplyMode::AllMatchesSinglePass)
+            .unwrap();
+        assert_eq!(outcome.rewrite_count(), 2);
+        assert_eq!(
+            outcome.rewritten_fn().to_string(),
+            normalized_fn_text(
+                r#"fn t(x: bits[8] id=1) -> bits[8] {
+  ret x: bits[8] = param(name=x, id=1)
+}"#
+            )
+        );
+    }
+
+    #[test]
+    fn apply_all_matches_single_pass_does_not_rewrite_created_helper_nodes() {
+        let ir_text = r#"fn t() -> bits[1] {
+  ret literal.1: bits[1] = literal(value=0, id=1)
+}"#;
+        let rule =
+            MatchRewriteRule::from_strings("literal(0)", "not($const(value=0, width=1))").unwrap();
+        let outcome = rule
+            .apply_to_fn(&parse_fn(ir_text), RewriteApplyMode::AllMatchesSinglePass)
+            .unwrap();
+        assert_eq!(outcome.rewrite_count(), 1);
+        let out = outcome.rewritten_fn().to_string();
+        assert!(out.contains("literal(value=0"));
+        assert!(out.contains("ret not."));
+        assert!(!out.contains("not(not("));
+    }
+
+    #[test]
+    fn apply_all_matches_single_pass_no_match_returns_unchanged_function() {
+        let input = parse_fn(
+            r#"fn t(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  ret add.10: bits[8] = add(x, y, id=10)
+}"#,
+        );
+        let rule = MatchRewriteRule::from_strings("sub(x, y)", "x").unwrap();
+        let outcome = rule
+            .apply_to_fn(&input, RewriteApplyMode::AllMatchesSinglePass)
+            .unwrap();
+        assert_eq!(outcome.rewrite_count(), 0);
+        assert_eq!(outcome.rewritten_fn().to_string(), input.to_string());
+    }
+
+    #[test]
+    fn apply_all_matches_single_pass_preserves_ambiguous_binding_error() {
+        let ir_text = r#"fn t(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
+  ret and.10: bits[8] = and(a, b, id=10)
+}"#;
+        let rule = MatchRewriteRule::from_strings("and(x)", "x").unwrap();
+        let err = rule
+            .apply_to_fn(&parse_fn(ir_text), RewriteApplyMode::AllMatchesSinglePass)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            MatchRewriteRuleApplyError::AmbiguousMatch {
+                root: NodeRef { index: 3 },
+                match_count: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn apply_target_node_rewrites_requested_node() {
+        let ir_text = r#"fn t(p: bits[1] id=1, x: bits[8] id=2, y: bits[8] id=3) -> (bits[8], bits[8]) {
+  sx: bits[8] = sel(p, cases=[x, x], id=10)
+  sy: bits[8] = sel(p, cases=[y, y], id=11)
+  ret tuple.12: (bits[8], bits[8]) = tuple(sx, sy, id=12)
+}"#;
+        let rule = MatchRewriteRule::from_strings("sel(selector=p, cases=[v, v])", "v").unwrap();
+        let outcome = rule
+            .apply_to_fn(
+                &parse_fn(ir_text),
+                RewriteApplyMode::Target(RewriteTarget::Node { text_id: 11 }),
+            )
+            .unwrap();
+        assert_eq!(outcome.rewrite_count(), 1);
+        let out = outcome.rewritten_fn().to_string();
+        assert!(out.contains("sx: bits[8] = sel(p, cases=[x, x], id=10)"));
+        assert!(out.contains("tuple(sx, y, id=12)"));
+    }
+
+    #[test]
+    fn apply_target_node_reports_missing_mismatch_and_unreachable() {
+        let ir_text = r#"fn t(x: bits[8] id=1) -> bits[8] {
+  dead: bits[8] = add(x, x, id=10)
+  ret identity.11: bits[8] = identity(x, id=11)
+}"#;
+        let f = parse_fn(ir_text);
+        let rule = MatchRewriteRule::from_strings("identity(x)", "x").unwrap();
+        let missing = rule
+            .apply_to_fn(
+                &f,
+                RewriteApplyMode::Target(RewriteTarget::Node { text_id: 99 }),
+            )
+            .unwrap_err();
+        assert!(missing.to_string().contains("text_id=99 not found"));
+
+        let mismatch_rule = MatchRewriteRule::from_strings("add(x, x)", "x").unwrap();
+        let mismatch = mismatch_rule
+            .apply_to_fn(
+                &f,
+                RewriteApplyMode::Target(RewriteTarget::Node { text_id: 11 }),
+            )
+            .unwrap_err();
+        assert!(mismatch.to_string().contains("does not match"));
+
+        let unreachable = mismatch_rule
+            .apply_to_fn(
+                &f,
+                RewriteApplyMode::Target(RewriteTarget::Node { text_id: 10 }),
+            )
+            .unwrap_err();
+        assert!(unreachable.to_string().contains("not reachable"));
+    }
+
+    #[test]
+    fn apply_target_operand_rewrites_only_requested_edge() {
+        let ir_text = r#"fn t(x: bits[8] id=1) -> (bits[8], bits[8]) {
+  zero: bits[8] = literal(value=0, id=10)
+  add.20: bits[8] = add(x, zero, id=20)
+  sub.21: bits[8] = sub(x, zero, id=21)
+  ret tuple.22: (bits[8], bits[8]) = tuple(add.20, sub.21, id=22)
+}"#;
+        let rule =
+            MatchRewriteRule::from_strings("literal(0)", "$const(value=1, width=8)").unwrap();
+        let outcome = rule
+            .apply_to_fn(
+                &parse_fn(ir_text),
+                RewriteApplyMode::Target(RewriteTarget::Operand {
+                    node_text_id: 20,
+                    operand: 1,
+                }),
+            )
+            .unwrap();
+        assert_eq!(outcome.rewrite_count(), 1);
+        let out = outcome.rewritten_fn().to_string();
+        assert!(out.contains("add.20: bits[8] = add(x, literal."));
+        assert!(out.contains("sub.21: bits[8] = sub(x, zero, id=21)"));
+    }
+
+    #[test]
+    fn apply_target_operand_reports_out_of_bounds_and_mismatch() {
+        let ir_text = r#"fn t(x: bits[8] id=1) -> bits[8] {
+  zero: bits[8] = literal(value=0, id=10)
+  ret add.20: bits[8] = add(x, zero, id=20)
+}"#;
+        let f = parse_fn(ir_text);
+        let rule =
+            MatchRewriteRule::from_strings("literal(0)", "$const(value=1, width=8)").unwrap();
+        let oob = rule
+            .apply_to_fn(
+                &f,
+                RewriteApplyMode::Target(RewriteTarget::Operand {
+                    node_text_id: 20,
+                    operand: 2,
+                }),
+            )
+            .unwrap_err();
+        assert!(oob.to_string().contains("operand 2 is out of bounds"));
+        let mismatch = rule
+            .apply_to_fn(
+                &f,
+                RewriteApplyMode::Target(RewriteTarget::Operand {
+                    node_text_id: 20,
+                    operand: 0,
+                }),
+            )
+            .unwrap_err();
+        assert!(mismatch.to_string().contains("operand 0 does not match"));
     }
 
     #[test]
@@ -1886,6 +2682,52 @@ mod tests {
         assert!(!outcome.rewrote());
         assert_eq!(outcome.matched_root(), None);
         assert_eq!(outcome.rewritten_fn().to_string(), input.to_string());
+    }
+
+    #[test]
+    fn apply_rule_to_package_rewrites_selected_top_function() {
+        let pkg = parse_package(
+            r#"package test
+
+top fn main(p: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  ret sel.10: bits[8] = sel(p, cases=[x, x], id=10)
+}"#,
+        );
+        let rule = MatchRewriteRule::from_strings("sel(selector=p, cases=[x, x])", "x").unwrap();
+        let outcome =
+            apply_rule_to_package(&pkg, &rule, None, RewriteApplyMode::FirstMatch).unwrap();
+        assert!(outcome.rewrote());
+        assert_eq!(outcome.target_fn_name(), "main");
+        assert_eq!(
+            outcome.rewritten_package().to_string(),
+            r#"package test
+
+top fn main(p: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  ret x: bits[8] = param(name=x, id=2)
+}
+"#
+        );
+    }
+
+    #[test]
+    fn apply_rule_to_package_reports_block_target() {
+        let pkg = parse_package(
+            r#"package test
+
+top block blk(x: bits[8], out: bits[8]) {
+  x: bits[8] = input_port(name=x, id=1)
+  out: () = output_port(x, name=out, id=2)
+}"#,
+        );
+        let rule = MatchRewriteRule::from_strings("identity(x)", "x").unwrap();
+        let err =
+            apply_rule_to_package(&pkg, &rule, None, RewriteApplyMode::FirstMatch).unwrap_err();
+        assert_eq!(
+            err,
+            MatchRewritePackageError::TargetIsBlock {
+                name: "blk".to_string()
+            }
+        );
     }
 
     #[test]

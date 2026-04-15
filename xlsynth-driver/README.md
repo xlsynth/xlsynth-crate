@@ -1048,6 +1048,47 @@ Example: find all consumers of `encode(one_hot(x))`:
 xlsynth-driver ir-query my_pkg.ir '$users(encode(one_hot(x)))'
 ```
 
+### `ir-rewrite`
+
+Rewrites all nodes matching a query expression in a selected function using a single snapshot-based pass, then prints the resulting package IR on **stdout**.
+
+- Positional arguments: `<ir_input_file> <match> <replacement>`
+- Optional:
+  - `--top <NAME>` – function name to rewrite (overrides the package top for target selection).
+  - `--target <NODE_ID[:OPERAND]>` – rewrite exactly one target instead of all matches. `NODE_ID` is a numeric PIR `id=` / `text_id`; optional `OPERAND` is a zero-based operand slot using the same ordering as the IR operand list.
+  - `--must-match` – exit with an error if the match expression finds no rewrite target.
+
+Rewrite expression basics:
+
+- The match side uses the full `ir-query` pattern language documented above.
+- The replacement side uses rewrite-template syntax:
+  - bound placeholders like `x` or `L`
+  - operator calls like `and(x, y)` or `sel(selector=p, cases=[x, x])`
+  - named arguments where the rewritten operator accepts them
+  - rewrite helpers like `$const(value=1, width=$width(x))`
+- Replacement expressions do not accept query-only constructs like `_`, `...`, or `$users(...)`.
+- If no match is found, the input package is emitted unchanged.
+  - Use `--must-match` to make a no-match run fail instead.
+- With `--target`, the selected node or operand must match the pattern; target mismatch is an error.
+
+Example: collapse all duplicated `sel` nodes into the selected value:
+
+```shell
+xlsynth-driver ir-rewrite my_pkg.ir 'sel(selector=p, cases=[x, x])' 'x'
+```
+
+Example: rewrite exactly node `id=42`:
+
+```shell
+xlsynth-driver ir-rewrite my_pkg.ir 'sel(selector=p, cases=[x, x])' 'x' --target 42
+```
+
+Example: rewrite only operand slot 1 of node `id=42`:
+
+```shell
+xlsynth-driver ir-rewrite my_pkg.ir 'literal(0)' '$const(value=1, width=8)' --target 42:1
+```
+
 ### `ir-query-corpus`
 
 Runs `ir-query` over every `.ir` file under a corpus directory (recursive) and prints matches as:

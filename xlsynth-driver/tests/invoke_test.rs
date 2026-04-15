@@ -10878,6 +10878,595 @@ fn main(x: bits[4] id=1) -> bits[5] {
     );
 }
 
+#[test]
+fn test_ir_rewrite_rewrites_all_matches_in_single_pass_and_prints_package() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package test
+
+top fn main(p: bits[1] id=1, x: bits[8] id=2, y: bits[8] id=3) -> (bits[8], bits[8]) {
+  sx: bits[8] = sel(p, cases=[x, x], id=10)
+  sy: bits[8] = sel(p, cases=[y, y], id=11)
+  ret tuple.12: (bits[8], bits[8]) = tuple(sx, sy, id=12)
+}
+"#;
+    let expected = r#"package test
+
+top fn main(p: bits[1] id=1, x: bits[8] id=2, y: bits[8] id=3) -> (bits[8], bits[8]) {
+  ret tuple.12: (bits[8], bits[8]) = tuple(x, y, id=12)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("test.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-rewrite")
+        .arg(ir_path.to_str().unwrap())
+        .arg("sel(selector=p, cases=[v, v])")
+        .arg("v")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-rewrite failed (status={});\nstdout:{}\nstderr:{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
+fn test_ir_rewrite_all_matches_does_not_rewrite_new_helper_nodes() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package test
+
+top fn main() -> bits[1] {
+  ret literal.1: bits[1] = literal(value=0, id=1)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("test.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-rewrite")
+        .arg(ir_path.to_str().unwrap())
+        .arg("literal(0)")
+        .arg("not($const(value=0, width=1))")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-rewrite failed (status={});\nstdout:{}\nstderr:{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("literal(value=0"),
+        "expected helper zero literal to remain in output: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("ret not."),
+        "expected root to be rewritten to not(...): {}",
+        stdout
+    );
+    assert!(
+        !stdout.contains("not(not("),
+        "new helper nodes should not be rewritten in same pass: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_ir_rewrite_target_node_rewrites_exact_node() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package test
+
+top fn main(p: bits[1] id=1, x: bits[8] id=2, y: bits[8] id=3) -> (bits[8], bits[8]) {
+  sx: bits[8] = sel(p, cases=[x, x], id=10)
+  sy: bits[8] = sel(p, cases=[y, y], id=11)
+  ret tuple.12: (bits[8], bits[8]) = tuple(sx, sy, id=12)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("test.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-rewrite")
+        .arg(ir_path.to_str().unwrap())
+        .arg("sel(selector=p, cases=[v, v])")
+        .arg("v")
+        .arg("--target")
+        .arg("11")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-rewrite --target failed (status={});\nstdout:{}\nstderr:{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("sx: bits[8] = sel(p, cases=[x, x], id=10)"),
+        "earlier matching node should remain: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("tuple(sx, y, id=12)"),
+        "target node should be replaced in tuple operand: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_ir_rewrite_target_operand_rewrites_exact_slot() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package test
+
+top fn main(x: bits[8] id=1) -> bits[8] {
+  zero: bits[8] = literal(value=0, id=10)
+  ret add.20: bits[8] = add(x, zero, id=20)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("test.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-rewrite")
+        .arg(ir_path.to_str().unwrap())
+        .arg("literal(0)")
+        .arg("$const(value=1, width=8)")
+        .arg("--target")
+        .arg("20:1")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-rewrite --target operand failed (status={});\nstdout:{}\nstderr:{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("literal(value=1"),
+        "expected replacement literal: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("ret add.20: bits[8] = add(x, literal."),
+        "expected only add operand slot to be rewritten: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_ir_rewrite_target_operand_preserves_other_users() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package test
+
+top fn main(x: bits[8] id=1) -> (bits[8], bits[8]) {
+  zero: bits[8] = literal(value=0, id=10)
+  add.20: bits[8] = add(x, zero, id=20)
+  sub.21: bits[8] = sub(x, zero, id=21)
+  ret tuple.22: (bits[8], bits[8]) = tuple(add.20, sub.21, id=22)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("test.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-rewrite")
+        .arg(ir_path.to_str().unwrap())
+        .arg("literal(0)")
+        .arg("$const(value=1, width=8)")
+        .arg("--target")
+        .arg("20:1")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-rewrite --target operand failed (status={});\nstdout:{}\nstderr:{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("add.20: bits[8] = add(x, literal."),
+        "expected targeted add operand rewrite: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("sub.21: bits[8] = sub(x, zero, id=21)"),
+        "non-target user should still reference original zero: {}",
+        stdout
+    );
+}
+
+#[test]
+fn test_ir_rewrite_malformed_target_reports_error_before_ir_io() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-rewrite")
+        .arg("this_file_should_not_be_read.ir")
+        .arg("literal(0)")
+        .arg("$const(value=1, width=1)")
+        .arg("--target=bad")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "expected ir-rewrite to fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Invalid rewrite target"),
+        "unexpected stderr: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("Failed to read"),
+        "expected target parse rejection before IR I/O: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_ir_rewrite_target_missing_node_fails_with_no_stdout() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package test
+
+top fn main(x: bits[8] id=1) -> bits[8] {
+  ret identity.2: bits[8] = identity(x, id=2)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("test.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-rewrite")
+        .arg(ir_path.to_str().unwrap())
+        .arg("identity(x)")
+        .arg("x")
+        .arg("--target")
+        .arg("99")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "expected ir-rewrite to fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("target node text_id=99 not found"),
+        "unexpected stderr: {}",
+        stderr
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+}
+
+#[test]
+fn test_ir_rewrite_target_node_mismatch_fails_with_no_stdout() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package test
+
+top fn main(x: bits[8] id=1) -> bits[8] {
+  ret identity.2: bits[8] = identity(x, id=2)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("test.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-rewrite")
+        .arg(ir_path.to_str().unwrap())
+        .arg("add(x, y)")
+        .arg("x")
+        .arg("--target")
+        .arg("2")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "expected ir-rewrite to fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("target node text_id=2 does not match"),
+        "unexpected stderr: {}",
+        stderr
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+}
+
+#[test]
+fn test_ir_rewrite_target_operand_out_of_bounds_fails_with_no_stdout() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package test
+
+top fn main(x: bits[8] id=1) -> bits[8] {
+  zero: bits[8] = literal(value=0, id=10)
+  ret add.20: bits[8] = add(x, zero, id=20)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("test.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-rewrite")
+        .arg(ir_path.to_str().unwrap())
+        .arg("literal(0)")
+        .arg("$const(value=1, width=8)")
+        .arg("--target")
+        .arg("20:2")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "expected ir-rewrite to fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("operand 2 is out of bounds"),
+        "unexpected stderr: {}",
+        stderr
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+}
+
+#[test]
+fn test_ir_rewrite_target_operand_mismatch_fails_with_no_stdout() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package test
+
+top fn main(x: bits[8] id=1) -> bits[8] {
+  zero: bits[8] = literal(value=0, id=10)
+  ret add.20: bits[8] = add(x, zero, id=20)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("test.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-rewrite")
+        .arg(ir_path.to_str().unwrap())
+        .arg("literal(0)")
+        .arg("$const(value=1, width=8)")
+        .arg("--target")
+        .arg("20:0")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "expected ir-rewrite to fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("operand 0 does not match"),
+        "unexpected stderr: {}",
+        stderr
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+}
+
+#[test]
+fn test_ir_rewrite_malformed_match_reports_error() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-rewrite")
+        .arg("this_file_should_not_be_read.ir")
+        .arg("one_hot(x, lsb_prio=maybe)")
+        .arg("x")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "expected ir-rewrite to fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Failed to parse match pattern:"),
+        "unexpected stderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("lsb_prio expects boolean literal or '_'"),
+        "unexpected stderr: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("Failed to read"),
+        "expected parse rejection before IR I/O: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_ir_rewrite_malformed_replacement_reports_error() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-rewrite")
+        .arg("this_file_should_not_be_read.ir")
+        .arg("and(x, y)")
+        .arg("and(_, x)")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "expected ir-rewrite to fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Failed to parse replacement:"),
+        "unexpected stderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("wildcard '_'"),
+        "unexpected stderr: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains("Failed to read"),
+        "expected parse rejection before IR I/O: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_ir_rewrite_top_overrides_package_top_without_changing_output_top() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package test
+
+top fn main(p: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  ret identity.20: bits[8] = identity(x, id=20)
+}
+
+fn helper(p: bits[1] id=3, x: bits[8] id=4) -> bits[8] {
+  ret sel.10: bits[8] = sel(p, cases=[x, x], id=10)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("test.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-rewrite")
+        .arg("--top")
+        .arg("helper")
+        .arg(ir_path.to_str().unwrap())
+        .arg("sel(selector=p, cases=[x, x])")
+        .arg("x")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-rewrite --top failed (status={});\nstdout:{}\nstderr:{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("top fn main"),
+        "expected package top to remain main:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains(
+            "fn helper(p: bits[1] id=3, x: bits[8] id=4) -> bits[8] {\n  ret x: bits[8] = param(name=x, id=4)\n}"
+        ),
+        "expected helper rewrite in stdout:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn test_ir_rewrite_no_match_prints_unchanged_package() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package test
+
+top fn main(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  ret add.10: bits[8] = add(x, y, id=10)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("test.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-rewrite")
+        .arg(ir_path.to_str().unwrap())
+        .arg("sub(x, y)")
+        .arg("x")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-rewrite failed (status={});\nstdout:{}\nstderr:{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), ir_text);
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
+fn test_ir_rewrite_must_match_fails_when_no_matches_found() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package test
+
+top fn main(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  ret add.10: bits[8] = add(x, y, id=10)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("test.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-rewrite")
+        .arg("--must-match")
+        .arg(ir_path.to_str().unwrap())
+        .arg("sub(x, y)")
+        .arg("x")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "expected ir-rewrite to fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("No matches found"),
+        "unexpected stderr: {}",
+        stderr
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "",
+        "expected no stdout on must-match failure"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn test_ir_query_corpus_follows_symlinked_ir_files() {
@@ -11094,6 +11683,33 @@ fn main(x: bits[4] id=1) -> bits[5] {
 
     let (status, stderr) = run_with_broken_stdout(command);
     assert!(status.success(), "ir-query status: {}", status);
+    assert_eq!(stderr, "", "unexpected stderr: {}", stderr);
+}
+
+#[test]
+fn test_ir_rewrite_exits_cleanly_on_broken_pipe() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package test
+
+top fn main(p: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  ret sel.10: bits[8] = sel(p, cases=[x, x], id=10)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("test.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let mut command = Command::new(driver);
+    command
+        .arg("ir-rewrite")
+        .arg(ir_path.to_str().unwrap())
+        .arg("sel(selector=p, cases=[x, x])")
+        .arg("x");
+
+    let (status, stderr) = run_with_broken_stdout(command);
+    assert!(status.success(), "ir-rewrite status: {}", status);
     assert_eq!(stderr, "", "unexpected stderr: {}", stderr);
 }
 

@@ -100,6 +100,7 @@ mod ir_mcmc_opt;
 mod ir_op_histo_corpus;
 mod ir_query;
 mod ir_query_corpus;
+mod ir_rewrite;
 mod ir_round_trip;
 mod ir_strip_pos_data;
 mod ir_structural_similarity;
@@ -1153,6 +1154,45 @@ fn main() {
                     Arg::new("ir_top")
                         .long("top")
                         .help("Top-level function name (overrides package top)"),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("ir-rewrite")
+                .about("Rewrites all IR nodes matching a query expression in a function")
+                .arg(
+                    Arg::new("ir_input_file")
+                        .help("The input IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("match")
+                        .help("The IR query expression to match")
+                        .required(true)
+                        .index(2),
+                )
+                .arg(
+                    Arg::new("replacement")
+                        .help("The rewrite template to substitute for matches")
+                        .required(true)
+                        .index(3),
+                )
+                .arg(
+                    Arg::new("target")
+                        .long("target")
+                        .help("Exact rewrite target as NODE_ID or NODE_ID:OPERAND (zero-based operand slot)")
+                        .value_name("NODE_ID[:OPERAND]"),
+                )
+                .arg(
+                    Arg::new("ir_top")
+                        .long("top")
+                        .help("Function name to rewrite (overrides package top)"),
+                )
+                .arg(
+                    Arg::new("must-match")
+                        .long("must-match")
+                        .help("Exit with an error if no matches are found")
+                        .action(ArgAction::SetTrue),
                 ),
         )
         .subcommand(
@@ -3080,6 +3120,9 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("ir-query", subm)) => {
             ir_query::handle_ir_query(subm, &config);
+        }
+        Some(("ir-rewrite", subm)) => {
+            ir_rewrite::handle_ir_rewrite(subm, &config);
         }
         Some(("ir-query-corpus", subm)) => {
             ir_query_corpus::handle_ir_query_corpus(subm, &config);
