@@ -121,12 +121,21 @@ vim -Nu NONE -n -es testdata/feature_zoo.x \
 For a stronger batch check, run the syntax/HTML smoke test:
 
 ```bash
-vim -Nu NONE -n -es -S test_syntax_html.vim
+./test.sh
 ```
 
-That test probes Vim syntax groups directly and also runs Vim's built-in HTML
-converter to verify that representative tokens are emitted with the expected
-highlight classes. To keep the generated HTML for manual inspection:
+That script always probes Vim syntax groups directly and runs Vim's built-in
+HTML converter to verify that representative tokens are emitted with the
+expected highlight classes. If `TYPECHECK_MAIN` and `DSLX_STDLIB_PATH` are set,
+it also typechecks the sample DSLX fixtures:
+
+```bash
+TYPECHECK_MAIN=/path/to/typecheck_main \
+DSLX_STDLIB_PATH=/path/to/xls/dslx/stdlib \
+./test.sh
+```
+
+To keep the generated HTML for manual inspection:
 
 ```bash
 vim -Nu NONE -n -es \
