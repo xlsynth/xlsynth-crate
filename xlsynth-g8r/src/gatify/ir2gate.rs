@@ -2409,7 +2409,44 @@ fn gatify_decode(
     AigBitVector::from_lsb_is_index_0(&outputs)
 }
 
-// Refactored gatify_shra function
+/// Emits a staged arithmetic-right barrel shifter with sign fill.
+fn gatify_arithmetic_right_barrel_shifter(
+    arg_bits: &AigBitVector,
+    amount_bits: &AigBitVector,
+    tag_prefix: &str,
+    gb: &mut GateBuilder,
+) -> AigBitVector {
+    let bit_count = arg_bits.get_bit_count();
+    assert!(bit_count > 0, "shra requires non-zero-width operands");
+
+    let sign = *arg_bits.get_msb(0);
+    let mut current: Vec<AigOperand> = arg_bits.iter_lsb_to_msb().cloned().collect();
+    for stage in 0..amount_bits.get_bit_count() {
+        let shift = 1usize << stage;
+        let control = amount_bits.get_lsb(stage);
+        let mut next_stage = Vec::with_capacity(bit_count);
+        for j in 0..bit_count {
+            let candidate = if j + shift < bit_count {
+                current[j + shift]
+            } else {
+                sign
+            };
+            next_stage.push(gb.add_mux2(*control, candidate, current[j]));
+        }
+        current = next_stage;
+    }
+
+    for gate in current.iter() {
+        gb.add_tag(
+            gate.node,
+            format!("{tag_prefix}_arithmetic_right_barrel_shifter_{bit_count}_count_output"),
+        );
+    }
+
+    AigBitVector::from_lsb_is_index_0(&current)
+}
+
+/// Emits an arithmetic right shift.
 fn gatify_shra(
     gb: &mut GateBuilder,
     arg_bits: &AigBitVector,
@@ -2449,48 +2486,48 @@ fn gatify_shra(
         let k = std::cmp::min(required_k, amount_w);
         let Split {
             msbs: amt_hi,
-            lsbs: amt_lo,
+            lsbs: _,
         } = amount_bits.get_lsb_partition(k);
 
         // `oob_hi` is true when any higher (beyond `k`) shift amount bit is set.
-        let oob_hi = if amt_hi.get_bit_count() == 0 {
+        let oob = if amt_hi.get_bit_count() == 0 {
             gb.get_false()
         } else {
             gb.add_nez(&amt_hi, ReductionKind::Tree)
         };
 
-        // For non-power-of-two widths, `k=ceil_log2(w)` may allow values in `amt_lo`
-        // that are >= w (e.g. w=6,k=3 allows 6 and 7). Detect those as out-of-bounds.
-        // For power-of-two widths, `amt_lo` is always < w when `amt_hi` is zero.
-        let oob_lo = if k == 0 || w.is_power_of_two() || k != required_k {
-            gb.get_false()
-        } else {
-            let w_bits = xlsynth::IrBits::make_ubits(k, w as u64)
-                .expect("w must fit in k bits for non-power-of-two widths");
-            try_gatify_ucmp_literal_rhs_threshold(gb, ir::Binop::Uge, &amt_lo, &w_bits)
-                .expect("Uge threshold compare should be supported")
-        };
-
-        (k, gb.add_or_binary(oob_hi, oob_lo))
+        (k, oob)
     };
 
     // Sign bit (MSB) of the input.
     let sign = *arg_bits.get_msb(0);
 
-    // Construct arg_ext: concat(replicate(sign, w), arg) => 2w bits.
-    let sign_ext = gb.replicate(sign, w);
-    let arg_ext = AigBitVector::concat(sign_ext, arg_bits.clone());
-
-    // Barrel shift the extended value by the low `k_for_shift` amount bits.
     let amt_lo = amount_bits.get_lsb_slice(0, k_for_shift);
-    let shifted = gatify_barrel_shifter(
-        &arg_ext,
-        &amt_lo,
-        Direction::Right,
-        &format!("shra_ext_{}", text_id),
-        gb,
-    );
-    let arith = shifted.get_lsb_slice(0, w);
+    let arith = if !w.is_power_of_two() && k_for_shift == required_k {
+        // Low shift amounts in [w, next_power_of_two(w)) naturally produce all sign
+        // bits through the staged sign-fill shifter, so only high amount bits need a
+        // separate out-of-bounds mux.
+        gatify_arithmetic_right_barrel_shifter(
+            arg_bits,
+            &amt_lo,
+            &format!("shra_ext_{}", text_id),
+            gb,
+        )
+    } else {
+        // For power-of-two widths or too-narrow amount fields, the former
+        // sign-extend-then-logical-shift shape remains slightly smaller after AIG
+        // folding because there is no low-field saturation case to remove.
+        let sign_ext = gb.replicate(sign, w);
+        let arg_ext = AigBitVector::concat(sign_ext, arg_bits.clone());
+        let shifted = gatify_barrel_shifter(
+            &arg_ext,
+            &amt_lo,
+            Direction::Right,
+            &format!("shra_ext_{}", text_id),
+            gb,
+        );
+        shifted.get_lsb_slice(0, w)
+    };
 
     // Saturating/oob rule: shift >= w => all sign bits.
     if gb.is_known_false(oob) {
@@ -3869,10 +3906,10 @@ pub fn gatify_node_as_fn(
 #[cfg(test)]
 mod tests {
     use crate::aig::AigBitVector;
-    use crate::aig::gate::{AigNode, GateFn};
+    use crate::aig::gate::{AigNode, GateFn, Split};
     use crate::aig::get_summary_stats::{AigStats, SummaryStats, get_aig_stats, get_summary_stats};
     use crate::aig_sim::gate_sim;
-    use crate::gate_builder::{GateBuilder, GateBuilderOptions};
+    use crate::gate_builder::{GateBuilder, GateBuilderOptions, ReductionKind};
     use crate::gatify::ir2gate::{GatifyOptions, gatify};
     use crate::ir2gate_utils::{AdderMapping, Direction, gatify_barrel_shifter};
     use xlsynth::{IrBits, IrValue};
@@ -4039,6 +4076,257 @@ fn f(a: bits[2] id=1, b: bits[2] id=2) -> bits[2] {
                 );
             }
         }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct ShraQorRow {
+        width: usize,
+        amount_width: usize,
+        old_and_nodes: usize,
+        old_depth: usize,
+        public_and_nodes: usize,
+        public_depth: usize,
+    }
+
+    fn build_shra_ir_text(width: usize, amount_width: usize) -> String {
+        format!(
+            r#"package sample
+
+top fn main(x: bits[{width}], amt: bits[{amount_width}]) -> bits[{width}] {{
+  ret y: bits[{width}] = shra(x, amt, id=3)
+}}
+"#
+        )
+    }
+
+    fn gatify_shra_old_sign_ext_shift(
+        gb: &mut GateBuilder,
+        arg_bits: &AigBitVector,
+        amount_bits: &AigBitVector,
+    ) -> AigBitVector {
+        let w = arg_bits.get_bit_count();
+        assert!(w > 0);
+
+        let required_k = if w <= 1 {
+            0
+        } else {
+            xlsynth_pir::math::ceil_log2(w)
+        };
+        let amount_w = amount_bits.get_bit_count();
+        let k = std::cmp::min(required_k, amount_w);
+        let Split {
+            msbs: amt_hi,
+            lsbs: amt_lo,
+        } = amount_bits.get_lsb_partition(k);
+
+        let oob_hi = if amt_hi.get_bit_count() == 0 {
+            gb.get_false()
+        } else {
+            gb.add_nez(&amt_hi, ReductionKind::Tree)
+        };
+        let oob_lo = if k == 0 || w.is_power_of_two() || k != required_k {
+            gb.get_false()
+        } else {
+            let w_bits =
+                IrBits::make_ubits(k, w as u64).expect("width must fit in shra low amount bits");
+            super::try_gatify_ucmp_literal_rhs_threshold(gb, ir::Binop::Uge, &amt_lo, &w_bits)
+                .expect("Uge threshold compare should be supported")
+        };
+        let oob = gb.add_or_binary(oob_hi, oob_lo);
+
+        let sign = *arg_bits.get_msb(0);
+        let sign_ext = gb.replicate(sign, w);
+        let arg_ext = AigBitVector::concat(sign_ext, arg_bits.clone());
+        let shifted =
+            gatify_barrel_shifter(&arg_ext, &amt_lo, Direction::Right, "shra_old_ext", gb);
+        let arith = shifted.get_lsb_slice(0, w);
+
+        if gb.is_known_false(oob) {
+            arith
+        } else {
+            let all_sign = gb.replicate(sign, w);
+            gb.add_mux2_vec(&oob, &all_sign, &arith)
+        }
+    }
+
+    fn get_shra_old_stats(width: usize, amount_width: usize) -> AigStats {
+        let mut gb = GateBuilder::new(
+            format!("shra_old_w{width}_amt{amount_width}"),
+            GateBuilderOptions::opt(),
+        );
+        let arg_bits = gb.add_input("x".to_string(), width);
+        let amount_bits = gb.add_input("amt".to_string(), amount_width);
+        let result = gatify_shra_old_sign_ext_shift(&mut gb, &arg_bits, &amount_bits);
+        gb.add_output("result".to_string(), result);
+        get_aig_stats(&gb.build())
+    }
+
+    fn shra_sample_bits(width: usize) -> Vec<IrValue> {
+        let all_ones = bit_mask(width);
+        let sign_bit = 1u64 << (width - 1);
+        let max_positive = sign_bit - 1;
+        let alternating = 0xaaaa_aaaa_aaaa_aaaau64 & all_ones;
+        let mut values = vec![
+            0,
+            1,
+            all_ones,
+            sign_bit,
+            sign_bit | 1,
+            max_positive,
+            alternating,
+        ];
+        values.sort_unstable();
+        values.dedup();
+        values
+            .into_iter()
+            .map(|value| IrValue::make_ubits(width, value).unwrap())
+            .collect()
+    }
+
+    fn validate_shra_public_simulation(
+        ir_fn: &ir::Fn,
+        gate_fn: &GateFn,
+        width: usize,
+        amount_width: usize,
+    ) {
+        let x_samples = shra_sample_bits(width);
+        let amount_count = 1usize << amount_width;
+        for x_value in &x_samples {
+            for amount in 0..amount_count {
+                let amount_value = IrValue::make_ubits(amount_width, amount as u64).unwrap();
+                let want = match eval_fn(ir_fn, &[x_value.clone(), amount_value.clone()]) {
+                    FnEvalResult::Success(success) => success.value.to_bits().unwrap(),
+                    FnEvalResult::Failure(failure) => {
+                        panic!("shra source IR failed during simulation: {failure:?}")
+                    }
+                };
+                let sim = gate_sim::eval(
+                    gate_fn,
+                    &[x_value.to_bits().unwrap(), amount_value.to_bits().unwrap()],
+                    gate_sim::Collect::None,
+                );
+                let got = sim.outputs[0].clone();
+                assert_eq!(
+                    got, want,
+                    "shra simulation mismatch for width={width} amount_width={amount_width} \
+                     amount={amount} x={x_value}"
+                );
+            }
+        }
+    }
+
+    fn get_shra_public_stats_and_validate(width: usize, amount_width: usize) -> AigStats {
+        let ir_text = build_shra_ir_text(width, amount_width);
+        let mut parser = ir_parser::Parser::new(&ir_text);
+        let ir_package = parser.parse_and_validate_package().expect("parse package");
+        let ir_fn = ir_package.get_top_fn().expect("top fn");
+        let gatify_output = gatify(
+            ir_fn,
+            GatifyOptions {
+                fold: true,
+                hash: true,
+                check_equivalence: false,
+                adder_mapping: AdderMapping::BrentKung,
+                mul_adder_mapping: None,
+                range_info: None,
+                enable_rewrite_carry_out: false,
+                enable_rewrite_prio_encode: false,
+                enable_rewrite_nary_add: false,
+                array_index_lowering_strategy: Default::default(),
+            },
+        )
+        .expect("gatify shra");
+        validate_shra_public_simulation(ir_fn, &gatify_output.gate_fn, width, amount_width);
+        get_aig_stats(&gatify_output.gate_fn)
+    }
+
+    fn gather_shra_qor_rows() -> Vec<ShraQorRow> {
+        let mut got = Vec::new();
+        for (width, amount_widths) in [
+            (3usize, &[2usize, 3, 4][..]),
+            (4usize, &[2usize, 3, 4][..]),
+            (5usize, &[2usize, 3, 4, 5][..]),
+            (6usize, &[2usize, 3, 4][..]),
+            (7usize, &[2usize, 3, 4][..]),
+            (8usize, &[3usize, 4][..]),
+            (9usize, &[3usize, 4, 5][..]),
+            (16usize, &[4usize, 5][..]),
+            (32usize, &[5usize, 6][..]),
+        ] {
+            for amount_width in amount_widths {
+                let old = get_shra_old_stats(width, *amount_width);
+                let public = get_shra_public_stats_and_validate(width, *amount_width);
+                got.push(ShraQorRow {
+                    width,
+                    amount_width: *amount_width,
+                    old_and_nodes: old.and_nodes,
+                    old_depth: old.max_depth,
+                    public_and_nodes: public.and_nodes,
+                    public_depth: public.max_depth,
+                });
+            }
+        }
+        got
+    }
+
+    #[test]
+    fn test_shra_arithmetic_barrel_qor_and_equivalence_sweep() {
+        let _ = env_logger::builder().is_test(true).try_init();
+
+        let got = gather_shra_qor_rows();
+
+        for row in &got {
+            assert!(
+                row.public_and_nodes <= row.old_and_nodes,
+                "expected shra lowering not to increase AND nodes: {:?}",
+                row
+            );
+            assert!(
+                row.public_depth <= row.old_depth,
+                "expected shra lowering not to increase depth: {:?}",
+                row
+            );
+            if !row.width.is_power_of_two()
+                && row.amount_width >= xlsynth_pir::math::ceil_log2(row.width)
+            {
+                assert!(
+                    row.public_and_nodes < row.old_and_nodes || row.public_depth < row.old_depth,
+                    "expected non-power-of-two shra row to improve: {:?}",
+                    row
+                );
+            }
+        }
+
+        #[rustfmt::skip]
+        let want: &[ShraQorRow] = &[
+            ShraQorRow { width: 3, amount_width: 2, old_and_nodes: 23, old_depth: 6, public_and_nodes: 16, public_depth: 4 },
+            ShraQorRow { width: 3, amount_width: 3, old_and_nodes: 24, old_depth: 6, public_and_nodes: 23, public_depth: 6 },
+            ShraQorRow { width: 3, amount_width: 4, old_and_nodes: 25, old_depth: 6, public_and_nodes: 24, public_depth: 6 },
+            ShraQorRow { width: 4, amount_width: 2, old_and_nodes: 21, old_depth: 4, public_and_nodes: 21, public_depth: 4 },
+            ShraQorRow { width: 4, amount_width: 3, old_and_nodes: 30, old_depth: 6, public_and_nodes: 30, public_depth: 6 },
+            ShraQorRow { width: 4, amount_width: 4, old_and_nodes: 31, old_depth: 6, public_and_nodes: 31, public_depth: 6 },
+            ShraQorRow { width: 5, amount_width: 2, old_and_nodes: 27, old_depth: 4, public_and_nodes: 27, public_depth: 4 },
+            ShraQorRow { width: 5, amount_width: 3, old_and_nodes: 57, old_depth: 8, public_and_nodes: 40, public_depth: 6 },
+            ShraQorRow { width: 5, amount_width: 4, old_and_nodes: 58, old_depth: 8, public_and_nodes: 51, public_depth: 8 },
+            ShraQorRow { width: 5, amount_width: 5, old_and_nodes: 59, old_depth: 8, public_and_nodes: 52, public_depth: 8 },
+            ShraQorRow { width: 6, amount_width: 2, old_and_nodes: 33, old_depth: 4, public_and_nodes: 33, public_depth: 4 },
+            ShraQorRow { width: 6, amount_width: 3, old_and_nodes: 67, old_depth: 8, public_and_nodes: 49, public_depth: 6 },
+            ShraQorRow { width: 6, amount_width: 4, old_and_nodes: 68, old_depth: 8, public_and_nodes: 62, public_depth: 8 },
+            ShraQorRow { width: 7, amount_width: 2, old_and_nodes: 39, old_depth: 4, public_and_nodes: 39, public_depth: 4 },
+            ShraQorRow { width: 7, amount_width: 3, old_and_nodes: 73, old_depth: 8, public_and_nodes: 58, public_depth: 6 },
+            ShraQorRow { width: 7, amount_width: 4, old_and_nodes: 74, old_depth: 8, public_and_nodes: 73, public_depth: 8 },
+            ShraQorRow { width: 8, amount_width: 3, old_and_nodes: 65, old_depth: 6, public_and_nodes: 65, public_depth: 6 },
+            ShraQorRow { width: 8, amount_width: 4, old_and_nodes: 82, old_depth: 8, public_and_nodes: 82, public_depth: 8 },
+            ShraQorRow { width: 9, amount_width: 3, old_and_nodes: 74, old_depth: 6, public_and_nodes: 74, public_depth: 6 },
+            ShraQorRow { width: 9, amount_width: 4, old_and_nodes: 135, old_depth: 10, public_and_nodes: 96, public_depth: 8 },
+            ShraQorRow { width: 9, amount_width: 5, old_and_nodes: 136, old_depth: 10, public_and_nodes: 115, public_depth: 10 },
+            ShraQorRow { width: 16, amount_width: 4, old_and_nodes: 177, old_depth: 8, public_and_nodes: 177, public_depth: 8 },
+            ShraQorRow { width: 16, amount_width: 5, old_and_nodes: 210, old_depth: 10, public_and_nodes: 210, public_depth: 10 },
+            ShraQorRow { width: 32, amount_width: 5, old_and_nodes: 449, old_depth: 10, public_and_nodes: 449, public_depth: 10 },
+            ShraQorRow { width: 32, amount_width: 6, old_and_nodes: 514, old_depth: 12, public_and_nodes: 514, public_depth: 12 },
+        ];
+
+        assert_eq!(got.as_slice(), want);
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
