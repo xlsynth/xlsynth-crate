@@ -1194,15 +1194,56 @@ pub fn gatify_ule_via_adder(
     gb.add_or_binary(is_lt, is_eq)
 }
 
-/// This is the generalization of unsigned comparisons via bit tests.
+/// Returns `(cmp, eq)` for `lhs_bits[start..start+len]` vs the same RHS range.
 ///
-/// The basic premise is that all comparisons care about:
-/// * Whether prior bits are all the same
-/// * Then do some test on the next bit in that scenario, given the two
-///   operands.
-/// * Those all get or'd together to form the final result.
-/// * And maybe the final result also wants to know if the whole vector was
-///   equal.
+/// `cmp` is true when the most-significant differing bit in the range satisfies
+/// `handle_bit(lhs_bit, rhs_bit)`. For unsigned less-than, `handle_bit` is
+/// `!lhs_bit & rhs_bit`; for greater-than, it is `lhs_bit & !rhs_bit`.
+fn gatify_ucmp_and_eq_range_via_bit_tests<F>(
+    gb: &mut GateBuilder,
+    lhs_bits: &AigBitVector,
+    rhs_bits: &AigBitVector,
+    start: usize,
+    len: usize,
+    handle_bit: &F,
+) -> (AigOperand, AigOperand)
+where
+    F: Fn(&mut GateBuilder, AigOperand, AigOperand) -> AigOperand,
+{
+    debug_assert!(len > 0);
+    debug_assert!(start + len <= lhs_bits.get_bit_count());
+    debug_assert!(start + len <= rhs_bits.get_bit_count());
+
+    if len == 1 {
+        let lhs_bit = *lhs_bits.get_lsb(start);
+        let rhs_bit = *rhs_bits.get_lsb(start);
+        let cmp = handle_bit(gb, lhs_bit, rhs_bit);
+        let eq = gb.add_xnor(lhs_bit, rhs_bit);
+        return (cmp, eq);
+    }
+
+    let low_len = len / 2;
+    let high_len = len - low_len;
+    let (low_cmp, low_eq) =
+        gatify_ucmp_and_eq_range_via_bit_tests(gb, lhs_bits, rhs_bits, start, low_len, handle_bit);
+    let (high_cmp, high_eq) = gatify_ucmp_and_eq_range_via_bit_tests(
+        gb,
+        lhs_bits,
+        rhs_bits,
+        start + low_len,
+        high_len,
+        handle_bit,
+    );
+
+    // Compare the more-significant half first. The less-significant half only
+    // matters when the high halves are equal.
+    let high_eq_and_low_cmp = gb.add_and_binary(high_eq, low_cmp);
+    let cmp = gb.add_or_binary(high_cmp, high_eq_and_low_cmp);
+    let eq = gb.add_and_binary(high_eq, low_eq);
+    (cmp, eq)
+}
+
+/// This is the generalization of unsigned comparisons via bit tests.
 pub fn gatify_ucmp_via_bit_tests<F>(
     gb: &mut GateBuilder,
     _text_id: usize,
@@ -1216,28 +1257,19 @@ where
 {
     assert_eq!(lhs_bits.get_bit_count(), rhs_bits.get_bit_count());
     let input_bit_count = lhs_bits.get_bit_count();
-    let eq_bits = gb.add_xnor_vec(lhs_bits, rhs_bits);
-    let mut bit_tests = Vec::new();
-    for msb_i in 0..input_bit_count {
-        let eq_bits_slice = eq_bits.get_msbs(msb_i);
-        let prior_bits_equal = if eq_bits_slice.is_empty() {
-            assert_eq!(msb_i, 0);
-            gb.get_true()
-        } else {
-            gb.add_and_reduce(&eq_bits_slice, ReductionKind::Tree)
-        };
-        let lhs_bit = lhs_bits.get_msb(msb_i);
-        let rhs_bit = rhs_bits.get_msb(msb_i);
-        let this_bit_test = handle_bit(gb, *lhs_bit, *rhs_bit);
-        let bit = gb.add_and_binary(this_bit_test, prior_bits_equal);
-        bit_tests.push(bit);
-    }
-    let result = gb.add_or_nary(&bit_tests, ReductionKind::Tree);
+    assert!(input_bit_count > 0, "ucmp requires non-zero-width operands");
+    let (cmp, eq) = gatify_ucmp_and_eq_range_via_bit_tests(
+        gb,
+        lhs_bits,
+        rhs_bits,
+        0,
+        input_bit_count,
+        handle_bit,
+    );
     if or_eq {
-        let eq_bits = gb.add_and_reduce(&eq_bits, ReductionKind::Tree);
-        gb.add_or_binary(result, eq_bits)
+        gb.add_or_binary(cmp, eq)
     } else {
-        result
+        cmp
     }
 }
 
@@ -1269,34 +1301,18 @@ fn gatify_ult_and_eq_via_bit_tests(
 ) -> (AigOperand, AigOperand) {
     assert_eq!(lhs_bits.get_bit_count(), rhs_bits.get_bit_count());
     let input_bit_count = lhs_bits.get_bit_count();
-    assert!(input_bit_count > 0);
-
-    // Compute the XNOR bits once so both lt and eq can share them.
-    let eq_bits = gb.add_xnor_vec(lhs_bits, rhs_bits);
-    let eq = gb.add_and_reduce(&eq_bits, ReductionKind::Tree);
-
-    let mut bit_tests = Vec::new();
-    for msb_i in 0..input_bit_count {
-        let eq_bits_slice = eq_bits.get_msbs(msb_i);
-        let prior_bits_equal = if eq_bits_slice.is_empty() {
-            assert_eq!(msb_i, 0);
-            gb.get_true()
-        } else {
-            gb.add_and_reduce(&eq_bits_slice, ReductionKind::Tree)
-        };
-        let lhs_bit = lhs_bits.get_msb(msb_i);
-        let rhs_bit = rhs_bits.get_msb(msb_i);
-
-        // rhs larger at this bit: (!lhs_bit) & rhs_bit.
-        let lhs_bit_unset = gb.add_not(*lhs_bit);
-        let rhs_bit_set = *rhs_bit;
-        let rhs_larger_this_bit = gb.add_and_binary(lhs_bit_unset, rhs_bit_set);
-
-        let bit = gb.add_and_binary(rhs_larger_this_bit, prior_bits_equal);
-        bit_tests.push(bit);
-    }
-    let lt = gb.add_or_nary(&bit_tests, ReductionKind::Tree);
-    (lt, eq)
+    assert!(input_bit_count > 0, "ucmp requires non-zero-width operands");
+    gatify_ucmp_and_eq_range_via_bit_tests(
+        gb,
+        lhs_bits,
+        rhs_bits,
+        0,
+        input_bit_count,
+        &|gb: &mut GateBuilder, lhs_bit, rhs_bit| {
+            let lhs_bit_unset = gb.add_not(lhs_bit);
+            gb.add_and_binary(lhs_bit_unset, rhs_bit)
+        },
+    )
 }
 
 /// This lowers a unsigned `lhs <= rhs` operator by testing bits in sequence (in
@@ -3905,9 +3921,9 @@ pub fn gatify_node_as_fn(
 
 #[cfg(test)]
 mod tests {
-    use crate::aig::AigBitVector;
     use crate::aig::gate::{AigNode, GateFn, Split};
     use crate::aig::get_summary_stats::{AigStats, SummaryStats, get_aig_stats, get_summary_stats};
+    use crate::aig::{AigBitVector, AigOperand};
     use crate::aig_sim::gate_sim;
     use crate::gate_builder::{GateBuilder, GateBuilderOptions, ReductionKind};
     use crate::gatify::ir2gate::{GatifyOptions, gatify};
@@ -4076,6 +4092,416 @@ fn f(a: bits[2] id=1, b: bits[2] id=2) -> bits[2] {
                 );
             }
         }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum CmpLowering {
+        OldRepeatedPrefix,
+        Public,
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct CmpQorRow {
+        binop: ir::Binop,
+        width: usize,
+        old_and_nodes: usize,
+        old_depth: usize,
+        public_and_nodes: usize,
+        public_depth: usize,
+    }
+
+    fn gatify_ucmp_via_repeated_prefix_bit_tests_old<F>(
+        gb: &mut GateBuilder,
+        lhs_bits: &AigBitVector,
+        rhs_bits: &AigBitVector,
+        or_eq: bool,
+        handle_bit: &F,
+    ) -> AigOperand
+    where
+        F: Fn(&mut GateBuilder, AigOperand, AigOperand) -> AigOperand,
+    {
+        assert_eq!(lhs_bits.get_bit_count(), rhs_bits.get_bit_count());
+        let input_bit_count = lhs_bits.get_bit_count();
+        assert!(input_bit_count > 0, "ucmp requires non-zero-width operands");
+        let eq_bits = gb.add_xnor_vec(lhs_bits, rhs_bits);
+        let mut bit_tests = Vec::new();
+
+        for msb_i in 0..input_bit_count {
+            let eq_bits_slice = eq_bits.get_msbs(msb_i);
+            let prior_bits_equal = if eq_bits_slice.is_empty() {
+                gb.get_true()
+            } else {
+                gb.add_and_reduce(&eq_bits_slice, ReductionKind::Tree)
+            };
+            let lhs_bit = *lhs_bits.get_msb(msb_i);
+            let rhs_bit = *rhs_bits.get_msb(msb_i);
+            let bit_test = handle_bit(gb, lhs_bit, rhs_bit);
+            bit_tests.push(gb.add_and_binary(prior_bits_equal, bit_test));
+        }
+
+        let cmp = gb.add_or_nary(&bit_tests, ReductionKind::Tree);
+        if or_eq {
+            let eq = gb.add_and_reduce(&eq_bits, ReductionKind::Tree);
+            gb.add_or_binary(cmp, eq)
+        } else {
+            cmp
+        }
+    }
+
+    fn gatify_ult_and_eq_via_repeated_prefix_bit_tests_old(
+        gb: &mut GateBuilder,
+        lhs_bits: &AigBitVector,
+        rhs_bits: &AigBitVector,
+    ) -> (AigOperand, AigOperand) {
+        let ult = gatify_ucmp_via_repeated_prefix_bit_tests_old(
+            gb,
+            lhs_bits,
+            rhs_bits,
+            false,
+            &|gb: &mut GateBuilder, lhs_bit, rhs_bit| {
+                let lhs_bit_unset = gb.add_not(lhs_bit);
+                gb.add_and_binary(lhs_bit_unset, rhs_bit)
+            },
+        );
+        let eq = gb.add_eq_vec(lhs_bits, rhs_bits, ReductionKind::Tree);
+        (ult, eq)
+    }
+
+    fn gatify_scmp_via_repeated_prefix_bit_tests_old(
+        gb: &mut GateBuilder,
+        lhs_bits: &AigBitVector,
+        rhs_bits: &AigBitVector,
+        cmp_kind: super::CmpKind,
+        or_eq: bool,
+    ) -> AigOperand {
+        assert_eq!(lhs_bits.get_bit_count(), rhs_bits.get_bit_count());
+        assert!(lhs_bits.get_bit_count() > 0);
+        let bit_count = lhs_bits.get_bit_count();
+        if bit_count == 1 {
+            let a = *lhs_bits.get_lsb(0);
+            let b = *rhs_bits.get_lsb(0);
+            return match cmp_kind {
+                super::CmpKind::Lt => {
+                    let b_complement = gb.add_not(b);
+                    let slt = gb.add_and_binary(a, b_complement);
+                    if or_eq {
+                        let eq = gb.add_eq_vec(lhs_bits, rhs_bits, ReductionKind::Tree);
+                        gb.add_or_binary(slt, eq)
+                    } else {
+                        slt
+                    }
+                }
+                super::CmpKind::Gt => {
+                    let a_complement = gb.add_not(a);
+                    let sgt = gb.add_and_binary(a_complement, b);
+                    if or_eq {
+                        let eq = gb.add_eq_vec(lhs_bits, rhs_bits, ReductionKind::Tree);
+                        gb.add_or_binary(sgt, eq)
+                    } else {
+                        sgt
+                    }
+                }
+            };
+        }
+
+        let a_msb = lhs_bits.get_msb(0);
+        let b_msb = rhs_bits.get_msb(0);
+        let sign_diff = gb.add_xor_binary(*a_msb, *b_msb);
+
+        let (ult, eq) = gatify_ult_and_eq_via_repeated_prefix_bit_tests_old(gb, lhs_bits, rhs_bits);
+        let term1 = gb.add_and_binary(sign_diff, *a_msb);
+        let not_sign_diff = gb.add_not(sign_diff);
+        let term2 = gb.add_and_binary(not_sign_diff, ult);
+        let lt = gb.add_or_binary(term1, term2);
+        match cmp_kind {
+            super::CmpKind::Lt => {
+                if or_eq {
+                    gb.add_or_binary(lt, eq)
+                } else {
+                    lt
+                }
+            }
+            super::CmpKind::Gt => {
+                let lt_or_eq = gb.add_or_binary(lt, eq);
+                let gt = gb.add_not(lt_or_eq);
+                if or_eq { gb.add_or_binary(gt, eq) } else { gt }
+            }
+        }
+    }
+
+    fn gatify_cmp_for_qor_test(
+        gb: &mut GateBuilder,
+        lhs_bits: &AigBitVector,
+        rhs_bits: &AigBitVector,
+        binop: ir::Binop,
+        lowering: CmpLowering,
+    ) -> AigOperand {
+        match lowering {
+            CmpLowering::Public => match binop {
+                ir::Binop::Ult => super::gatify_ult_via_bit_tests(gb, 0, lhs_bits, rhs_bits),
+                ir::Binop::Ule => super::gatify_ule_via_bit_tests(gb, 0, lhs_bits, rhs_bits),
+                ir::Binop::Ugt => super::gatify_ugt_via_bit_tests(gb, 0, lhs_bits, rhs_bits),
+                ir::Binop::Uge => super::gatify_uge_via_bit_tests(gb, 0, lhs_bits, rhs_bits),
+                ir::Binop::Slt => super::gatify_scmp_via_bit_tests(
+                    gb,
+                    0,
+                    lhs_bits,
+                    rhs_bits,
+                    super::CmpKind::Lt,
+                    false,
+                ),
+                ir::Binop::Sle => super::gatify_scmp_via_bit_tests(
+                    gb,
+                    0,
+                    lhs_bits,
+                    rhs_bits,
+                    super::CmpKind::Lt,
+                    true,
+                ),
+                ir::Binop::Sgt => super::gatify_scmp_via_bit_tests(
+                    gb,
+                    0,
+                    lhs_bits,
+                    rhs_bits,
+                    super::CmpKind::Gt,
+                    false,
+                ),
+                ir::Binop::Sge => super::gatify_scmp_via_bit_tests(
+                    gb,
+                    0,
+                    lhs_bits,
+                    rhs_bits,
+                    super::CmpKind::Gt,
+                    true,
+                ),
+                other => panic!("unexpected cmp binop in QoR test: {other:?}"),
+            },
+            CmpLowering::OldRepeatedPrefix => match binop {
+                ir::Binop::Ult => gatify_ucmp_via_repeated_prefix_bit_tests_old(
+                    gb,
+                    lhs_bits,
+                    rhs_bits,
+                    false,
+                    &|gb: &mut GateBuilder, lhs_bit, rhs_bit| {
+                        let lhs_bit_unset = gb.add_not(lhs_bit);
+                        gb.add_and_binary(lhs_bit_unset, rhs_bit)
+                    },
+                ),
+                ir::Binop::Ule => gatify_ucmp_via_repeated_prefix_bit_tests_old(
+                    gb,
+                    lhs_bits,
+                    rhs_bits,
+                    true,
+                    &|gb: &mut GateBuilder, lhs_bit, rhs_bit| {
+                        let lhs_bit_unset = gb.add_not(lhs_bit);
+                        gb.add_and_binary(lhs_bit_unset, rhs_bit)
+                    },
+                ),
+                ir::Binop::Ugt => gatify_ucmp_via_repeated_prefix_bit_tests_old(
+                    gb,
+                    lhs_bits,
+                    rhs_bits,
+                    false,
+                    &|gb: &mut GateBuilder, lhs_bit, rhs_bit| {
+                        let rhs_bit_unset = gb.add_not(rhs_bit);
+                        gb.add_and_binary(lhs_bit, rhs_bit_unset)
+                    },
+                ),
+                ir::Binop::Uge => gatify_ucmp_via_repeated_prefix_bit_tests_old(
+                    gb,
+                    lhs_bits,
+                    rhs_bits,
+                    true,
+                    &|gb: &mut GateBuilder, lhs_bit, rhs_bit| {
+                        let rhs_bit_unset = gb.add_not(rhs_bit);
+                        gb.add_and_binary(lhs_bit, rhs_bit_unset)
+                    },
+                ),
+                ir::Binop::Slt => gatify_scmp_via_repeated_prefix_bit_tests_old(
+                    gb,
+                    lhs_bits,
+                    rhs_bits,
+                    super::CmpKind::Lt,
+                    false,
+                ),
+                ir::Binop::Sle => gatify_scmp_via_repeated_prefix_bit_tests_old(
+                    gb,
+                    lhs_bits,
+                    rhs_bits,
+                    super::CmpKind::Lt,
+                    true,
+                ),
+                ir::Binop::Sgt => gatify_scmp_via_repeated_prefix_bit_tests_old(
+                    gb,
+                    lhs_bits,
+                    rhs_bits,
+                    super::CmpKind::Gt,
+                    false,
+                ),
+                ir::Binop::Sge => gatify_scmp_via_repeated_prefix_bit_tests_old(
+                    gb,
+                    lhs_bits,
+                    rhs_bits,
+                    super::CmpKind::Gt,
+                    true,
+                ),
+                other => panic!("unexpected cmp binop in QoR test: {other:?}"),
+            },
+        }
+    }
+
+    fn build_cmp_gate_fn_for_qor_test(
+        width: usize,
+        binop: ir::Binop,
+        lowering: CmpLowering,
+    ) -> GateFn {
+        let mut gb = GateBuilder::new(
+            format!("cmp_{lowering:?}_{binop:?}_{width}b"),
+            GateBuilderOptions::opt(),
+        );
+        let lhs_bits = gb.add_input("lhs".to_string(), width);
+        let rhs_bits = gb.add_input("rhs".to_string(), width);
+        let result = gatify_cmp_for_qor_test(&mut gb, &lhs_bits, &rhs_bits, binop, lowering);
+        gb.add_output("result".to_string(), AigBitVector::from_bit(result));
+        gb.build()
+    }
+
+    fn get_cmp_qor_test_stats(width: usize, binop: ir::Binop, lowering: CmpLowering) -> AigStats {
+        get_aig_stats(&build_cmp_gate_fn_for_qor_test(width, binop, lowering))
+    }
+
+    fn validate_cmp_old_vs_public_simulation(width: usize, binop: ir::Binop) {
+        let old_gate_fn =
+            build_cmp_gate_fn_for_qor_test(width, binop, CmpLowering::OldRepeatedPrefix);
+        let public_gate_fn = build_cmp_gate_fn_for_qor_test(width, binop, CmpLowering::Public);
+        let value_count = 1usize << width;
+        for lhs in 0..value_count {
+            for rhs in 0..value_count {
+                let lhs_bits = IrBits::make_ubits(width, lhs as u64).unwrap();
+                let rhs_bits = IrBits::make_ubits(width, rhs as u64).unwrap();
+                let old = gate_sim::eval(
+                    &old_gate_fn,
+                    &[lhs_bits.clone(), rhs_bits.clone()],
+                    gate_sim::Collect::None,
+                );
+                let public = gate_sim::eval(
+                    &public_gate_fn,
+                    &[lhs_bits, rhs_bits],
+                    gate_sim::Collect::None,
+                );
+                assert_eq!(
+                    public.outputs, old.outputs,
+                    "cmp mismatch for binop={binop:?} width={width} lhs={lhs} rhs={rhs}"
+                );
+            }
+        }
+    }
+
+    fn gather_cmp_qor_rows() -> Vec<CmpQorRow> {
+        let mut got = Vec::new();
+        for binop in [
+            ir::Binop::Ult,
+            ir::Binop::Ule,
+            ir::Binop::Ugt,
+            ir::Binop::Uge,
+            ir::Binop::Slt,
+            ir::Binop::Sle,
+            ir::Binop::Sgt,
+            ir::Binop::Sge,
+        ] {
+            for width in [3usize, 4, 5, 8, 16, 32] {
+                if width <= 5 {
+                    validate_cmp_old_vs_public_simulation(width, binop);
+                }
+                let old = get_cmp_qor_test_stats(width, binop, CmpLowering::OldRepeatedPrefix);
+                let public = get_cmp_qor_test_stats(width, binop, CmpLowering::Public);
+                got.push(CmpQorRow {
+                    binop,
+                    width,
+                    old_and_nodes: old.and_nodes,
+                    old_depth: old.max_depth,
+                    public_and_nodes: public.and_nodes,
+                    public_depth: public.max_depth,
+                });
+            }
+        }
+        got
+    }
+
+    #[test]
+    fn test_cmp_recursive_bit_tree_qor_and_equivalence_sweep() {
+        let got = gather_cmp_qor_rows();
+
+        for row in &got {
+            assert!(
+                row.public_and_nodes <= row.old_and_nodes,
+                "expected recursive cmp lowering not to increase AND nodes: {:?}",
+                row
+            );
+            assert!(
+                row.public_depth <= row.old_depth,
+                "expected recursive cmp lowering not to increase depth: {:?}",
+                row
+            );
+            assert!(
+                row.public_and_nodes < row.old_and_nodes || row.public_depth < row.old_depth,
+                "expected recursive cmp lowering to improve this row: {:?}",
+                row
+            );
+        }
+
+        #[rustfmt::skip]
+        let want: &[CmpQorRow] = &[
+            CmpQorRow { binop: ir::Binop::Ult, width: 3, old_and_nodes: 12, old_depth: 6, public_and_nodes: 12, public_depth: 5 },
+            CmpQorRow { binop: ir::Binop::Ult, width: 4, old_and_nodes: 18, old_depth: 7, public_and_nodes: 17, public_depth: 6 },
+            CmpQorRow { binop: ir::Binop::Ult, width: 5, old_and_nodes: 25, old_depth: 8, public_and_nodes: 23, public_depth: 6 },
+            CmpQorRow { binop: ir::Binop::Ult, width: 8, old_and_nodes: 47, old_depth: 9, public_and_nodes: 40, public_depth: 8 },
+            CmpQorRow { binop: ir::Binop::Ult, width: 16, old_and_nodes: 120, old_depth: 11, public_and_nodes: 87, public_depth: 10 },
+            CmpQorRow { binop: ir::Binop::Ult, width: 32, old_and_nodes: 299, old_depth: 13, public_and_nodes: 182, public_depth: 12 },
+            CmpQorRow { binop: ir::Binop::Ule, width: 3, old_and_nodes: 16, old_depth: 7, public_and_nodes: 16, public_depth: 6 },
+            CmpQorRow { binop: ir::Binop::Ule, width: 4, old_and_nodes: 23, old_depth: 8, public_and_nodes: 22, public_depth: 7 },
+            CmpQorRow { binop: ir::Binop::Ule, width: 5, old_and_nodes: 30, old_depth: 9, public_and_nodes: 28, public_depth: 7 },
+            CmpQorRow { binop: ir::Binop::Ule, width: 8, old_and_nodes: 53, old_depth: 10, public_and_nodes: 46, public_depth: 9 },
+            CmpQorRow { binop: ir::Binop::Ule, width: 16, old_and_nodes: 127, old_depth: 12, public_and_nodes: 94, public_depth: 11 },
+            CmpQorRow { binop: ir::Binop::Ule, width: 32, old_and_nodes: 307, old_depth: 14, public_and_nodes: 190, public_depth: 13 },
+            CmpQorRow { binop: ir::Binop::Ugt, width: 3, old_and_nodes: 12, old_depth: 6, public_and_nodes: 12, public_depth: 5 },
+            CmpQorRow { binop: ir::Binop::Ugt, width: 4, old_and_nodes: 18, old_depth: 7, public_and_nodes: 17, public_depth: 6 },
+            CmpQorRow { binop: ir::Binop::Ugt, width: 5, old_and_nodes: 25, old_depth: 8, public_and_nodes: 23, public_depth: 6 },
+            CmpQorRow { binop: ir::Binop::Ugt, width: 8, old_and_nodes: 47, old_depth: 9, public_and_nodes: 40, public_depth: 8 },
+            CmpQorRow { binop: ir::Binop::Ugt, width: 16, old_and_nodes: 120, old_depth: 11, public_and_nodes: 87, public_depth: 10 },
+            CmpQorRow { binop: ir::Binop::Ugt, width: 32, old_and_nodes: 299, old_depth: 13, public_and_nodes: 182, public_depth: 12 },
+            CmpQorRow { binop: ir::Binop::Uge, width: 3, old_and_nodes: 16, old_depth: 7, public_and_nodes: 16, public_depth: 6 },
+            CmpQorRow { binop: ir::Binop::Uge, width: 4, old_and_nodes: 23, old_depth: 8, public_and_nodes: 22, public_depth: 7 },
+            CmpQorRow { binop: ir::Binop::Uge, width: 5, old_and_nodes: 30, old_depth: 9, public_and_nodes: 28, public_depth: 7 },
+            CmpQorRow { binop: ir::Binop::Uge, width: 8, old_and_nodes: 53, old_depth: 10, public_and_nodes: 46, public_depth: 9 },
+            CmpQorRow { binop: ir::Binop::Uge, width: 16, old_and_nodes: 127, old_depth: 12, public_and_nodes: 94, public_depth: 11 },
+            CmpQorRow { binop: ir::Binop::Uge, width: 32, old_and_nodes: 307, old_depth: 14, public_and_nodes: 190, public_depth: 13 },
+            CmpQorRow { binop: ir::Binop::Slt, width: 3, old_and_nodes: 15, old_depth: 8, public_and_nodes: 15, public_depth: 7 },
+            CmpQorRow { binop: ir::Binop::Slt, width: 4, old_and_nodes: 21, old_depth: 9, public_and_nodes: 20, public_depth: 8 },
+            CmpQorRow { binop: ir::Binop::Slt, width: 5, old_and_nodes: 28, old_depth: 10, public_and_nodes: 26, public_depth: 8 },
+            CmpQorRow { binop: ir::Binop::Slt, width: 8, old_and_nodes: 50, old_depth: 11, public_and_nodes: 43, public_depth: 10 },
+            CmpQorRow { binop: ir::Binop::Slt, width: 16, old_and_nodes: 123, old_depth: 13, public_and_nodes: 90, public_depth: 12 },
+            CmpQorRow { binop: ir::Binop::Slt, width: 32, old_and_nodes: 302, old_depth: 15, public_and_nodes: 185, public_depth: 14 },
+            CmpQorRow { binop: ir::Binop::Sle, width: 3, old_and_nodes: 19, old_depth: 9, public_and_nodes: 19, public_depth: 8 },
+            CmpQorRow { binop: ir::Binop::Sle, width: 4, old_and_nodes: 26, old_depth: 10, public_and_nodes: 25, public_depth: 9 },
+            CmpQorRow { binop: ir::Binop::Sle, width: 5, old_and_nodes: 33, old_depth: 11, public_and_nodes: 31, public_depth: 9 },
+            CmpQorRow { binop: ir::Binop::Sle, width: 8, old_and_nodes: 56, old_depth: 12, public_and_nodes: 49, public_depth: 11 },
+            CmpQorRow { binop: ir::Binop::Sle, width: 16, old_and_nodes: 130, old_depth: 14, public_and_nodes: 97, public_depth: 13 },
+            CmpQorRow { binop: ir::Binop::Sle, width: 32, old_and_nodes: 310, old_depth: 16, public_and_nodes: 193, public_depth: 15 },
+            CmpQorRow { binop: ir::Binop::Sgt, width: 3, old_and_nodes: 19, old_depth: 9, public_and_nodes: 19, public_depth: 8 },
+            CmpQorRow { binop: ir::Binop::Sgt, width: 4, old_and_nodes: 26, old_depth: 10, public_and_nodes: 25, public_depth: 9 },
+            CmpQorRow { binop: ir::Binop::Sgt, width: 5, old_and_nodes: 33, old_depth: 11, public_and_nodes: 31, public_depth: 9 },
+            CmpQorRow { binop: ir::Binop::Sgt, width: 8, old_and_nodes: 56, old_depth: 12, public_and_nodes: 49, public_depth: 11 },
+            CmpQorRow { binop: ir::Binop::Sgt, width: 16, old_and_nodes: 130, old_depth: 14, public_and_nodes: 97, public_depth: 13 },
+            CmpQorRow { binop: ir::Binop::Sgt, width: 32, old_and_nodes: 310, old_depth: 16, public_and_nodes: 193, public_depth: 15 },
+            CmpQorRow { binop: ir::Binop::Sge, width: 3, old_and_nodes: 20, old_depth: 10, public_and_nodes: 20, public_depth: 9 },
+            CmpQorRow { binop: ir::Binop::Sge, width: 4, old_and_nodes: 27, old_depth: 11, public_and_nodes: 26, public_depth: 10 },
+            CmpQorRow { binop: ir::Binop::Sge, width: 5, old_and_nodes: 34, old_depth: 12, public_and_nodes: 32, public_depth: 10 },
+            CmpQorRow { binop: ir::Binop::Sge, width: 8, old_and_nodes: 57, old_depth: 13, public_and_nodes: 50, public_depth: 12 },
+            CmpQorRow { binop: ir::Binop::Sge, width: 16, old_and_nodes: 131, old_depth: 15, public_and_nodes: 98, public_depth: 14 },
+            CmpQorRow { binop: ir::Binop::Sge, width: 32, old_and_nodes: 311, old_depth: 17, public_and_nodes: 194, public_depth: 16 },
+        ];
+        assert_eq!(got.as_slice(), want);
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4925,31 +5351,31 @@ top fn main(array: bits[{element_width}][{array_len}], start: bits[{start_width}
             ArraySliceQorRow { array_len: 5, element_width: 5, slice_width: 3, old_and_nodes: 397, old_depth: 16, elem_mux_and_nodes: 160, elem_mux_depth: 6, public_and_nodes: 160, public_depth: 6 },
             ArraySliceQorRow { array_len: 5, element_width: 5, slice_width: 4, old_and_nodes: 441, old_depth: 16, elem_mux_and_nodes: 180, elem_mux_depth: 6, public_and_nodes: 180, public_depth: 6 },
 
-            ArraySliceQorRow { array_len: 8, element_width: 1, slice_width: 1, old_and_nodes: 34, old_depth: 13, elem_mux_and_nodes: 21, elem_mux_depth: 6, public_and_nodes: 21, public_depth: 6 },
-            ArraySliceQorRow { array_len: 8, element_width: 1, slice_width: 2, old_and_nodes: 54, old_depth: 13, elem_mux_and_nodes: 41, elem_mux_depth: 6, public_and_nodes: 41, public_depth: 6 },
-            ArraySliceQorRow { array_len: 8, element_width: 1, slice_width: 3, old_and_nodes: 62, old_depth: 13, elem_mux_and_nodes: 49, elem_mux_depth: 6, public_and_nodes: 49, public_depth: 6 },
-            ArraySliceQorRow { array_len: 8, element_width: 1, slice_width: 4, old_and_nodes: 70, old_depth: 13, elem_mux_and_nodes: 57, elem_mux_depth: 6, public_and_nodes: 57, public_depth: 6 },
-            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 1, old_and_nodes: 206, old_depth: 17, elem_mux_and_nodes: 63, elem_mux_depth: 6, public_and_nodes: 63, public_depth: 6 },
-            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 2, old_and_nodes: 285, old_depth: 17, elem_mux_and_nodes: 123, elem_mux_depth: 6, public_and_nodes: 123, public_depth: 6 },
-            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 3, old_and_nodes: 331, old_depth: 17, elem_mux_and_nodes: 147, elem_mux_depth: 6, public_and_nodes: 147, public_depth: 6 },
-            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 4, old_and_nodes: 357, old_depth: 17, elem_mux_and_nodes: 171, elem_mux_depth: 6, public_and_nodes: 171, public_depth: 6 },
-            ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 1, old_and_nodes: 402, old_depth: 19, elem_mux_and_nodes: 105, elem_mux_depth: 6, public_and_nodes: 105, public_depth: 6 },
-            ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 2, old_and_nodes: 538, old_depth: 19, elem_mux_and_nodes: 205, elem_mux_depth: 6, public_and_nodes: 205, public_depth: 6 },
-            ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 3, old_and_nodes: 620, old_depth: 19, elem_mux_and_nodes: 245, elem_mux_depth: 6, public_and_nodes: 245, public_depth: 6 },
-            ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 4, old_and_nodes: 677, old_depth: 19, elem_mux_and_nodes: 285, elem_mux_depth: 6, public_and_nodes: 285, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 1, slice_width: 1, old_and_nodes: 34, old_depth: 12, elem_mux_and_nodes: 21, elem_mux_depth: 6, public_and_nodes: 21, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 1, slice_width: 2, old_and_nodes: 54, old_depth: 12, elem_mux_and_nodes: 41, elem_mux_depth: 6, public_and_nodes: 41, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 1, slice_width: 3, old_and_nodes: 62, old_depth: 12, elem_mux_and_nodes: 49, elem_mux_depth: 6, public_and_nodes: 49, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 1, slice_width: 4, old_and_nodes: 70, old_depth: 12, elem_mux_and_nodes: 57, elem_mux_depth: 6, public_and_nodes: 57, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 1, old_and_nodes: 206, old_depth: 16, elem_mux_and_nodes: 63, elem_mux_depth: 6, public_and_nodes: 63, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 2, old_and_nodes: 285, old_depth: 16, elem_mux_and_nodes: 123, elem_mux_depth: 6, public_and_nodes: 123, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 3, old_and_nodes: 331, old_depth: 16, elem_mux_and_nodes: 147, elem_mux_depth: 6, public_and_nodes: 147, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 3, slice_width: 4, old_and_nodes: 357, old_depth: 16, elem_mux_and_nodes: 171, elem_mux_depth: 6, public_and_nodes: 171, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 1, old_and_nodes: 402, old_depth: 18, elem_mux_and_nodes: 105, elem_mux_depth: 6, public_and_nodes: 105, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 2, old_and_nodes: 538, old_depth: 18, elem_mux_and_nodes: 205, elem_mux_depth: 6, public_and_nodes: 205, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 3, old_and_nodes: 620, old_depth: 18, elem_mux_and_nodes: 245, elem_mux_depth: 6, public_and_nodes: 245, public_depth: 6 },
+            ArraySliceQorRow { array_len: 8, element_width: 5, slice_width: 4, old_and_nodes: 677, old_depth: 18, elem_mux_and_nodes: 285, elem_mux_depth: 6, public_and_nodes: 285, public_depth: 6 },
 
-            ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 1, old_and_nodes: 64, old_depth: 16, elem_mux_and_nodes: 45, elem_mux_depth: 8, public_and_nodes: 45, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 2, old_and_nodes: 108, old_depth: 16, elem_mux_and_nodes: 89, elem_mux_depth: 8, public_and_nodes: 89, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 3, old_and_nodes: 128, old_depth: 16, elem_mux_and_nodes: 109, elem_mux_depth: 8, public_and_nodes: 109, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 4, old_and_nodes: 148, old_depth: 16, elem_mux_and_nodes: 129, elem_mux_depth: 8, public_and_nodes: 129, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 1, old_and_nodes: 407, old_depth: 21, elem_mux_and_nodes: 135, elem_mux_depth: 8, public_and_nodes: 135, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 2, old_and_nodes: 561, old_depth: 21, elem_mux_and_nodes: 267, elem_mux_depth: 8, public_and_nodes: 267, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 3, old_and_nodes: 655, old_depth: 21, elem_mux_and_nodes: 327, elem_mux_depth: 8, public_and_nodes: 327, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 4, old_and_nodes: 713, old_depth: 21, elem_mux_and_nodes: 387, elem_mux_depth: 8, public_and_nodes: 387, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 1, old_and_nodes: 809, old_depth: 22, elem_mux_and_nodes: 225, elem_mux_depth: 8, public_and_nodes: 225, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 2, old_and_nodes: 1070, old_depth: 22, elem_mux_and_nodes: 445, elem_mux_depth: 8, public_and_nodes: 445, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 3, old_and_nodes: 1230, old_depth: 22, elem_mux_and_nodes: 545, elem_mux_depth: 8, public_and_nodes: 545, public_depth: 8 },
-            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 4, old_and_nodes: 1330, old_depth: 22, elem_mux_and_nodes: 645, elem_mux_depth: 8, public_and_nodes: 645, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 1, old_and_nodes: 63, old_depth: 15, elem_mux_and_nodes: 45, elem_mux_depth: 8, public_and_nodes: 45, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 2, old_and_nodes: 107, old_depth: 15, elem_mux_and_nodes: 89, elem_mux_depth: 8, public_and_nodes: 89, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 3, old_and_nodes: 127, old_depth: 15, elem_mux_and_nodes: 109, elem_mux_depth: 8, public_and_nodes: 109, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 1, slice_width: 4, old_and_nodes: 147, old_depth: 15, elem_mux_and_nodes: 129, elem_mux_depth: 8, public_and_nodes: 129, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 1, old_and_nodes: 406, old_depth: 20, elem_mux_and_nodes: 135, elem_mux_depth: 8, public_and_nodes: 135, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 2, old_and_nodes: 560, old_depth: 20, elem_mux_and_nodes: 267, elem_mux_depth: 8, public_and_nodes: 267, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 3, old_and_nodes: 654, old_depth: 20, elem_mux_and_nodes: 327, elem_mux_depth: 8, public_and_nodes: 327, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 3, slice_width: 4, old_and_nodes: 712, old_depth: 20, elem_mux_and_nodes: 387, elem_mux_depth: 8, public_and_nodes: 387, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 1, old_and_nodes: 808, old_depth: 21, elem_mux_and_nodes: 225, elem_mux_depth: 8, public_and_nodes: 225, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 2, old_and_nodes: 1069, old_depth: 21, elem_mux_and_nodes: 445, elem_mux_depth: 8, public_and_nodes: 445, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 3, old_and_nodes: 1229, old_depth: 21, elem_mux_and_nodes: 545, elem_mux_depth: 8, public_and_nodes: 545, public_depth: 8 },
+            ArraySliceQorRow { array_len: 16, element_width: 5, slice_width: 4, old_and_nodes: 1329, old_depth: 21, elem_mux_and_nodes: 645, elem_mux_depth: 8, public_and_nodes: 645, public_depth: 8 },
         ];
 
         assert_eq!(got.as_slice(), want);
@@ -5706,8 +6132,8 @@ top fn cone(leaf_7: bits[5], leaf_9: bits[33]) -> bits[1] {
 
         assert_eq!(oob_27.live_nodes, 155);
         assert_eq!(oob_27.deepest_path, 15);
-        assert_eq!(padded_27.live_nodes, 168);
-        assert_eq!(padded_27.deepest_path, 19);
+        assert_eq!(padded_27.live_nodes, 166);
+        assert_eq!(padded_27.deepest_path, 17);
         assert_eq!(public_27.live_nodes, 118);
         assert_eq!(public_27.deepest_path, 11);
         assert_eq!(exact_32.live_nodes, 148);

@@ -35,7 +35,7 @@ top fn main(a0: bits[8] id=1, a1: bits[8] id=2, a2: bits[8] id=3, a3: bits[8] id
     )
     .unwrap();
     let got = get_summary_stats(&out.gatify_output.gate_fn);
-    assert_eq!(got.live_nodes, 1468);
+    assert_eq!(got.live_nodes, 1292);
 
     // Compare against a baseline that explicitly disables range_info.
     let mut pir_parser = ir_parser::Parser::new(ir_text);
@@ -58,7 +58,7 @@ top fn main(a0: bits[8] id=1, a1: bits[8] id=2, a2: bits[8] id=3, a3: bits[8] id
     )
     .unwrap();
     let base_stats = get_summary_stats(&base.gate_fn);
-    assert_eq!(base_stats.live_nodes, 1573);
+    assert_eq!(base_stats.live_nodes, 1397);
 }
 
 #[test]
@@ -92,8 +92,8 @@ top fn f(x: bits[32] id=1, y: bits[7] id=2, z: bits[32] id=3) -> bits[1] {
     let got = get_summary_stats(&out.gatify_output.gate_fn);
     // This is a "microbenchmark sweep" style test: lock in the expected gate
     // count + depth so we can notice regressions and improvements.
-    assert_eq!(got.live_nodes, 2397);
-    assert_eq!(got.deepest_path, 50);
+    assert_eq!(got.live_nodes, 2280);
+    assert_eq!(got.deepest_path, 45);
 }
 
 #[test]
