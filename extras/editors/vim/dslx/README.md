@@ -56,10 +56,10 @@ For quick local testing, add this directory to Vim's runtime path:
 set runtimepath+=/path/to/xlsynth-crate/extras/editors/vim/dslx
 ```
 
-The filetype detector uses `setfiletype`, so it will not override a filetype
-that another plugin has already assigned. DSLX commonly uses the `.x` suffix,
-but that suffix is ambiguous in the wider editor ecosystem; adjust
-`ftdetect/dslx.vim` locally if another `.x` language should win.
+The filetype detector assigns `filetype=dslx` for both `*.x` and `*.dslx`. This
+is intentional: Vim otherwise treats `*.x` as `rpcgen` in a default setup. The
+`.x` suffix is ambiguous in the wider editor ecosystem; adjust
+`ftdetect/dslx.vim` locally if another `.x` language should win in your setup.
 
 ## Source Of Truth
 
@@ -116,4 +116,21 @@ vim -Nu NONE -n -es testdata/feature_zoo.x \
   -c 'set syntax=dslx' \
   -c 'syntax list dslxKeyword' \
   -c 'qa!'
+```
+
+For a stronger batch check, run the syntax/HTML smoke test:
+
+```bash
+vim -Nu NONE -n -es -S test_syntax_html.vim
+```
+
+That test probes Vim syntax groups directly and also runs Vim's built-in HTML
+converter to verify that representative tokens are emitted with the expected
+highlight classes. To keep the generated HTML for manual inspection:
+
+```bash
+vim -Nu NONE -n -es \
+  -c 'let g:dslx_syntax_html_output="/tmp/dslx_feature_zoo.html"' \
+  -c 'let g:dslx_syntax_keep_html=1' \
+  -S test_syntax_html.vim
 ```

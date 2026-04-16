@@ -2,5 +2,5 @@
 
 augroup dslx_ftdetect
   autocmd!
-  autocmd BufRead,BufNewFile *.x,*.dslx setfiletype dslx
+  autocmd BufRead,BufNewFile *.x,*.dslx set filetype=dslx
 augroup END
