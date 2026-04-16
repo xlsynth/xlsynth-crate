@@ -111,12 +111,12 @@ fn test_add_const_pow2m1_gate_stats_sweep_1_to_8() {
     let want: &[AddPow2Minus1Row] = &[
         AddPow2Minus1Row { bit_count: 1, live_nodes_baseline: 5, deepest_path_baseline: 3, live_nodes_pow2m1: 1, deepest_path_pow2m1: 1 },
         AddPow2Minus1Row { bit_count: 2, live_nodes_baseline: 14, deepest_path_baseline: 5, live_nodes_pow2m1: 5, deepest_path_pow2m1: 3 },
-        AddPow2Minus1Row { bit_count: 3, live_nodes_baseline: 27, deepest_path_baseline: 7, live_nodes_pow2m1: 10, deepest_path_pow2m1: 4 },
-        AddPow2Minus1Row { bit_count: 4, live_nodes_baseline: 40, deepest_path_baseline: 10, live_nodes_pow2m1: 15, deepest_path_pow2m1: 5 },
-        AddPow2Minus1Row { bit_count: 5, live_nodes_baseline: 53, deepest_path_baseline: 13, live_nodes_pow2m1: 20, deepest_path_pow2m1: 6 },
-        AddPow2Minus1Row { bit_count: 6, live_nodes_baseline: 66, deepest_path_baseline: 16, live_nodes_pow2m1: 25, deepest_path_pow2m1: 7 },
-        AddPow2Minus1Row { bit_count: 7, live_nodes_baseline: 79, deepest_path_baseline: 19, live_nodes_pow2m1: 30, deepest_path_pow2m1: 8 },
-        AddPow2Minus1Row { bit_count: 8, live_nodes_baseline: 92, deepest_path_baseline: 22, live_nodes_pow2m1: 35, deepest_path_pow2m1: 9 },
+        AddPow2Minus1Row { bit_count: 3, live_nodes_baseline: 25, deepest_path_baseline: 7, live_nodes_pow2m1: 10, deepest_path_pow2m1: 4 },
+        AddPow2Minus1Row { bit_count: 4, live_nodes_baseline: 36, deepest_path_baseline: 9, live_nodes_pow2m1: 15, deepest_path_pow2m1: 5 },
+        AddPow2Minus1Row { bit_count: 5, live_nodes_baseline: 47, deepest_path_baseline: 11, live_nodes_pow2m1: 20, deepest_path_pow2m1: 6 },
+        AddPow2Minus1Row { bit_count: 6, live_nodes_baseline: 58, deepest_path_baseline: 13, live_nodes_pow2m1: 25, deepest_path_pow2m1: 7 },
+        AddPow2Minus1Row { bit_count: 7, live_nodes_baseline: 69, deepest_path_baseline: 15, live_nodes_pow2m1: 30, deepest_path_pow2m1: 8 },
+        AddPow2Minus1Row { bit_count: 8, live_nodes_baseline: 80, deepest_path_baseline: 17, live_nodes_pow2m1: 35, deepest_path_pow2m1: 9 },
     ];
 
     assert_eq!(got.as_slice(), want);

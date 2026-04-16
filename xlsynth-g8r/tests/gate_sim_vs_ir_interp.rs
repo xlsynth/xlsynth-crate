@@ -104,7 +104,7 @@ fn test_bf16_mul_g8r_stats() {
     log::info!("getting id to use count");
     let id_to_use_count: HashMap<AigRef, usize> = get_id_to_use_count(gate_fn);
     let live_node_count = id_to_use_count.len();
-    assert_within!(live_node_count as isize, 1153 as isize, 20 as isize);
+    assert_within!(live_node_count as isize, 1125 as isize, 20 as isize);
 
     log::info!("getting gate depth");
     let live_nodes: Vec<AigRef> = id_to_use_count.keys().cloned().collect();
