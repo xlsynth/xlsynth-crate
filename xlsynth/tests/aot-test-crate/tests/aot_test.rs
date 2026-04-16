@@ -119,7 +119,7 @@ fn generated_runner_supports_varied_bit_widths_including_wide_values() {
     };
 
     let output = runner.run(&input).expect("run should succeed");
-    assert_eq!(output.field0, true);
+    assert!(output.field0);
     assert_eq!(output.field1, 0x55);
     assert_eq!(output.field2, 0xAB);
     assert_eq!(output.field3, 0x1234);

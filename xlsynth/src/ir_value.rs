@@ -96,6 +96,30 @@ impl IrBits {
         xls_bits_make_sbits(bit_count, value)
     }
 
+    /// Builds an `IrBits` value from little-endian payload bytes.
+    ///
+    /// The input must contain exactly the number of bytes required by
+    /// `bit_count`, and any unused high bits in the final byte must be zero.
+    pub fn from_le_bytes(bit_count: usize, bytes: &[u8]) -> Result<Self, XlsynthError> {
+        let expected_byte_count = bit_count.div_ceil(8);
+        if bytes.len() != expected_byte_count {
+            return Err(XlsynthError(format!(
+                "Expected {expected_byte_count} bytes for bits[{bit_count}], got {}",
+                bytes.len()
+            )));
+        }
+        let bit_remainder = bit_count % 8;
+        if bit_remainder != 0 && (bytes[expected_byte_count - 1] >> bit_remainder) != 0 {
+            return Err(XlsynthError(format!(
+                "High bits are set outside bits[{bit_count}] in final byte"
+            )));
+        }
+        let bits = (0..bit_count)
+            .map(|index| ((bytes[index / 8] >> (index % 8)) & 1) != 0)
+            .collect::<Vec<_>>();
+        Ok(Self::from_lsb_is_0(&bits))
+    }
+
     pub fn zero(bit_count: usize) -> Self {
         Self::make_ubits(bit_count, 0).expect("zero literal must construct")
     }
@@ -723,8 +747,8 @@ impl Clone for IrValue {
 /// Typed wrapper around an `IrBits` value that has a particular
 /// compile-time-known bit width and whose type notes the value
 /// should be treated as unsigned.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IrUBits<const BIT_COUNT: usize> {
-    #[allow(dead_code)]
     wrapped: IrBits,
 }
 
@@ -741,13 +765,38 @@ impl<const BIT_COUNT: usize> IrUBits<BIT_COUNT> {
         }
         Ok(Self { wrapped })
     }
+
+    /// Creates an unsigned typed bits value from a `u64`.
+    pub fn from_u64(value: u64) -> Result<Self, XlsynthError> {
+        Self::new(IrBits::make_ubits(BIT_COUNT, value)?)
+    }
+
+    /// Creates an unsigned typed bits value from little-endian payload bytes.
+    pub fn from_le_bytes(bytes: &[u8]) -> Result<Self, XlsynthError> {
+        Self::new(IrBits::from_le_bytes(BIT_COUNT, bytes)?)
+    }
+
+    /// Converts this value to a `u64` when the bit width fits.
+    pub fn to_u64(&self) -> Result<u64, XlsynthError> {
+        self.wrapped.to_u64()
+    }
+
+    /// Returns little-endian payload bytes for this value.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, XlsynthError> {
+        self.wrapped.to_bytes()
+    }
+
+    /// Borrows the underlying arbitrary-width bits value.
+    pub fn as_bits(&self) -> &IrBits {
+        &self.wrapped
+    }
 }
 
 /// Typed wrapper around an `IrBits` value that has a particular
 /// compile-time-known bit width and whose type notes the value
 /// should be treated as signed.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IrSBits<const BIT_COUNT: usize> {
-    #[allow(dead_code)]
     wrapped: IrBits,
 }
 
@@ -763,6 +812,31 @@ impl<const BIT_COUNT: usize> IrSBits<BIT_COUNT> {
             )));
         }
         Ok(Self { wrapped })
+    }
+
+    /// Creates a signed typed bits value from an `i64`.
+    pub fn from_i64(value: i64) -> Result<Self, XlsynthError> {
+        Self::new(IrBits::make_sbits(BIT_COUNT, value)?)
+    }
+
+    /// Creates a signed typed bits value from little-endian payload bytes.
+    pub fn from_le_bytes(bytes: &[u8]) -> Result<Self, XlsynthError> {
+        Self::new(IrBits::from_le_bytes(BIT_COUNT, bytes)?)
+    }
+
+    /// Converts this value to an `i64` when the bit width fits.
+    pub fn to_i64(&self) -> Result<i64, XlsynthError> {
+        self.wrapped.to_i64()
+    }
+
+    /// Returns little-endian payload bytes for this value.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, XlsynthError> {
+        self.wrapped.to_bytes()
+    }
+
+    /// Borrows the underlying arbitrary-width bits value.
+    pub fn as_bits(&self) -> &IrBits {
+        &self.wrapped
     }
 }
 

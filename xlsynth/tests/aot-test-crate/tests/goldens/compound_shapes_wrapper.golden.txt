@@ -111,6 +111,7 @@ const OUTPUT0_LAYOUT: &[xlsynth::aot_entrypoint_metadata::AotElementLayout] = &[
     },
 ];
 
+#[allow(clippy::deref_addrof, clippy::explicit_auto_deref, clippy::identity_op)]
 fn encode_input_0(_value: &Input0, dst: &mut [u8]) {
     debug_assert_eq!(dst.len(), 6);
     dst.fill(0);
@@ -129,6 +130,7 @@ fn encode_input_0(_value: &Input0, dst: &mut [u8]) {
     debug_assert_eq!(INPUT0_LAYOUT.len(), 3);
 }
 
+#[allow(clippy::deref_addrof, clippy::explicit_auto_deref, clippy::identity_op)]
 fn encode_input_1(_value: &Input1, dst: &mut [u8]) {
     debug_assert_eq!(dst.len(), 4);
     dst.fill(0);
@@ -147,6 +149,7 @@ fn encode_input_1(_value: &Input1, dst: &mut [u8]) {
     debug_assert_eq!(INPUT1_LAYOUT.len(), 3);
 }
 
+#[allow(clippy::identity_op, clippy::let_and_return)]
 fn decode_output_0(src: &[u8]) -> Output {
     debug_assert_eq!(src.len(), 10);
     let output: Output = Output {
