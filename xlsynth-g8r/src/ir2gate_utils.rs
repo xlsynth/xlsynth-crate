@@ -118,28 +118,23 @@ pub fn gatify_add_ripple_carry(
     assert_eq!(lhs.get_bit_count(), rhs.get_bit_count());
     let mut gates = Vec::new();
     for i in 0..lhs.get_bit_count() {
-        // The truth table for a adder bit is:
-        //
-        //  a b c | sum cout
-        // --------
-        //  0 0 0 | 0   0
-        //  0 0 1 | 1   0
-        //  0 1 0 | 1   0
-        //  0 1 1 | 0   1
-        //  1 0 0 | 1   0
-        //  1 0 1 | 0   1
-        //  1 1 0 | 0   1
-        //  1 1 1 | 1   1
-        //
-        // sum = a ^ b ^ c_in
-        // cout = (a & b) | (b & c_in) | (a & c_in)
         let lhs_i = lhs.get_lsb(i);
         let rhs_i = rhs.get_lsb(i);
-        let sum = g8_builder.add_xor_nary(&[*lhs_i, *rhs_i, c_in], ReductionKind::Linear);
-        let c_out_0 = g8_builder.add_and_binary(*lhs_i, *rhs_i);
-        let c_out_1 = g8_builder.add_and_binary(*rhs_i, c_in);
-        let c_out_2 = g8_builder.add_and_binary(*lhs_i, c_in);
-        let cout = g8_builder.add_or_nary(&[c_out_0, c_out_1, c_out_2], ReductionKind::Linear);
+        let propagate = g8_builder.add_xor_binary(*lhs_i, *rhs_i);
+        let (sum, cout) = if g8_builder.options.fold && g8_builder.is_known_false(c_in) {
+            let carry = g8_builder.add_and_binary(*lhs_i, *rhs_i);
+            (propagate, carry)
+        } else if g8_builder.options.fold && g8_builder.is_known_true(c_in) {
+            let sum = g8_builder.add_not(propagate);
+            let carry = g8_builder.add_or_binary(*lhs_i, *rhs_i);
+            (sum, carry)
+        } else {
+            let generate = g8_builder.add_and_binary(*lhs_i, *rhs_i);
+            let sum = g8_builder.add_xor_binary(propagate, c_in);
+            let propagated_carry = g8_builder.add_and_binary(propagate, c_in);
+            let carry = g8_builder.add_or_binary(generate, propagated_carry);
+            (sum, carry)
+        };
         if let Some(tag_prefix) = tag_prefix {
             g8_builder.add_tag(
                 cout.node,

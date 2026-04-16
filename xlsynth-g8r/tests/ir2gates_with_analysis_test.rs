@@ -35,7 +35,7 @@ top fn main(a0: bits[8] id=1, a1: bits[8] id=2, a2: bits[8] id=3, a3: bits[8] id
     )
     .unwrap();
     let got = get_summary_stats(&out.gatify_output.gate_fn);
-    assert_eq!(got.live_nodes, 1292);
+    assert_eq!(got.live_nodes, 1204);
 
     // Compare against a baseline that explicitly disables range_info.
     let mut pir_parser = ir_parser::Parser::new(ir_text);
@@ -58,7 +58,7 @@ top fn main(a0: bits[8] id=1, a1: bits[8] id=2, a2: bits[8] id=3, a3: bits[8] id
     )
     .unwrap();
     let base_stats = get_summary_stats(&base.gate_fn);
-    assert_eq!(base_stats.live_nodes, 1397);
+    assert_eq!(base_stats.live_nodes, 1299);
 }
 
 #[test]
