@@ -94,9 +94,9 @@ fn test_shra_gate_stats_sweep_w1_to_w8_amt1_to_amt4() {
         ShraRow { width: 2, amount_width: 4, live_nodes: 18, deepest_path: 5 },
 
         ShraRow { width: 3, amount_width: 1, live_nodes: 12, deepest_path: 3 },
-        ShraRow { width: 3, amount_width: 2, live_nodes: 28, deepest_path: 7 },
-        ShraRow { width: 3, amount_width: 3, live_nodes: 30, deepest_path: 7 },
-        ShraRow { width: 3, amount_width: 4, live_nodes: 32, deepest_path: 7 },
+        ShraRow { width: 3, amount_width: 2, live_nodes: 21, deepest_path: 5 },
+        ShraRow { width: 3, amount_width: 3, live_nodes: 29, deepest_path: 7 },
+        ShraRow { width: 3, amount_width: 4, live_nodes: 31, deepest_path: 7 },
 
         ShraRow { width: 4, amount_width: 1, live_nodes: 16, deepest_path: 3 },
         ShraRow { width: 4, amount_width: 2, live_nodes: 27, deepest_path: 5 },
@@ -105,18 +105,18 @@ fn test_shra_gate_stats_sweep_w1_to_w8_amt1_to_amt4() {
 
         ShraRow { width: 5, amount_width: 1, live_nodes: 20, deepest_path: 3 },
         ShraRow { width: 5, amount_width: 2, live_nodes: 34, deepest_path: 5 },
-        ShraRow { width: 5, amount_width: 3, live_nodes: 65, deepest_path: 9 },
-        ShraRow { width: 5, amount_width: 4, live_nodes: 67, deepest_path: 9 },
+        ShraRow { width: 5, amount_width: 3, live_nodes: 48, deepest_path: 7 },
+        ShraRow { width: 5, amount_width: 4, live_nodes: 60, deepest_path: 9 },
 
         ShraRow { width: 6, amount_width: 1, live_nodes: 24, deepest_path: 3 },
         ShraRow { width: 6, amount_width: 2, live_nodes: 41, deepest_path: 5 },
-        ShraRow { width: 6, amount_width: 3, live_nodes: 76, deepest_path: 9 },
-        ShraRow { width: 6, amount_width: 4, live_nodes: 78, deepest_path: 9 },
+        ShraRow { width: 6, amount_width: 3, live_nodes: 58, deepest_path: 7 },
+        ShraRow { width: 6, amount_width: 4, live_nodes: 72, deepest_path: 9 },
 
         ShraRow { width: 7, amount_width: 1, live_nodes: 28, deepest_path: 3 },
         ShraRow { width: 7, amount_width: 2, live_nodes: 48, deepest_path: 5 },
-        ShraRow { width: 7, amount_width: 3, live_nodes: 83, deepest_path: 9 },
-        ShraRow { width: 7, amount_width: 4, live_nodes: 85, deepest_path: 9 },
+        ShraRow { width: 7, amount_width: 3, live_nodes: 68, deepest_path: 7 },
+        ShraRow { width: 7, amount_width: 4, live_nodes: 84, deepest_path: 9 },
 
         ShraRow { width: 8, amount_width: 1, live_nodes: 32, deepest_path: 3 },
         ShraRow { width: 8, amount_width: 2, live_nodes: 55, deepest_path: 5 },
