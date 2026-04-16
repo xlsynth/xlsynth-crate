@@ -20,6 +20,14 @@ pub mod wide_sizes_aot {
     include!(env!("XLSYNTH_AOT_WIDE_SIZES_RS"));
 }
 
+pub mod large_array_tuple_aot {
+    include!(env!("XLSYNTH_AOT_LARGE_ARRAY_TUPLE_RS"));
+}
+
+pub mod wide_bits_tuple_aot {
+    include!(env!("XLSYNTH_AOT_WIDE_BITS_TUPLE_RS"));
+}
+
 pub mod trace_assert_aot {
     include!(env!("XLSYNTH_AOT_TRACE_ASSERT_RS"));
 }

@@ -17,3 +17,6 @@ xlsynth = { path = "../.." }
 
 [build-dependencies]
 xlsynth = { path = "../.." }
+
+[dev-dependencies]
+xlsynth-test-helpers = { path = "../../../xlsynth-test-helpers" }

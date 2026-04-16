@@ -422,7 +422,7 @@ fn render_type_declarations(
     output_type: &ResolvedType,
 ) -> String {
     let mut out = String::new();
-    out.push_str("#[derive(Debug, Clone, PartialEq, Eq, Default)]\n");
+    out.push_str("#[derive(Debug, Clone, PartialEq, Eq)]\n");
     out.push_str("pub struct Token {}\n\n");
 
     for bit_count in &resolver.bit_widths {
@@ -441,7 +441,7 @@ fn render_type_declarations(
     }
 
     for tuple in &resolver.tuple_defs {
-        out.push_str("#[derive(Debug, Clone, PartialEq, Eq, Default)]\n");
+        out.push_str("#[derive(Debug, Clone, PartialEq, Eq)]\n");
         if tuple.field_types.is_empty() {
             out.push_str(&format!("pub struct {} {{}}\n\n", tuple.name));
             continue;
@@ -621,97 +621,73 @@ fn emit_pack_statements(
     }
 }
 
-fn emit_unpack_statements(
+fn render_decode_expr(
     ty: &ResolvedType,
-    value_expr: &str,
     layout_name: &str,
     src_name: &str,
     leaf_index_expr: &str,
-    lines: &mut Vec<String>,
     next_loop_index: &mut usize,
-) {
+) -> String {
     match ty {
         ResolvedType::Bits { bit_count } => {
             if *bit_count <= 64 {
                 if *bit_count == 1 {
-                    push_line(lines, "let mut dst_bytes = [0u8; 1];");
-                    push_line(
-                        lines,
-                        format!(
-                            "xlsynth::aot_runner::read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], &mut dst_bytes);"
-                        ),
-                    );
-                    push_line(
-                        lines,
-                        "assert!(dst_bytes[0] <= 1, \"AOT decode overflow: value does not fit in 1 bit\");",
-                    );
-                    push_line(lines, format!("{value_expr} = dst_bytes[0] != 0;"));
+                    format!(
+                        "{{ let mut dst_bytes = [0u8; 1]; \
+                        xlsynth::aot_runner::read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], &mut dst_bytes); \
+                        assert!(dst_bytes[0] <= 1, \"AOT decode overflow: value does not fit in 1 bit\"); \
+                        dst_bytes[0] != 0 }}"
+                    )
                 } else {
                     let native_type = scalar_bits_rust_type(*bit_count);
                     let storage_bytes = scalar_bits_storage_bytes(*bit_count);
                     let native_width = scalar_bits_native_width(*bit_count);
-                    push_line(
-                        lines,
-                        format!("let mut dst_bytes = [0u8; {storage_bytes}];"),
-                    );
-                    push_line(
-                        lines,
-                        format!(
-                            "xlsynth::aot_runner::read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], &mut dst_bytes);"
-                        ),
-                    );
-                    push_line(
-                        lines,
-                        format!("let decoded = {native_type}::from_ne_bytes(dst_bytes);"),
+                    let mut expr = format!(
+                        "{{ let mut dst_bytes = [0u8; {storage_bytes}]; \
+                        xlsynth::aot_runner::read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], &mut dst_bytes); \
+                        let decoded = {native_type}::from_ne_bytes(dst_bytes); "
                     );
                     if *bit_count == 0 {
-                        push_line(
-                            lines,
-                            "assert!(decoded == 0, \"AOT decode overflow: value does not fit in 0 bits\");",
+                        expr.push_str(
+                            "assert!(decoded == 0, \"AOT decode overflow: value does not fit in 0 bits\"); ",
                         );
                     } else if *bit_count < native_width {
-                        push_line(
-                            lines,
-                            format!(
-                                "assert!((decoded >> {bit_count}) == 0, \"AOT decode overflow: value does not fit in {bit_count} bits\");"
-                            ),
-                        );
+                        expr.push_str(&format!(
+                            "assert!((decoded >> {bit_count}) == 0, \"AOT decode overflow: value does not fit in {bit_count} bits\"); "
+                        ));
                     }
-                    push_line(lines, format!("{value_expr} = decoded;"));
+                    expr.push_str("decoded }");
+                    expr
                 }
             } else {
-                push_line(
-                    lines,
-                    format!("let dst_bytes: &mut [u8] = &mut ({value_expr});"),
-                );
-                push_line(
-                    lines,
-                    format!(
-                        "xlsynth::aot_runner::read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], dst_bytes);"
-                    ),
+                let byte_count = bit_count.div_ceil(8);
+                let mut expr = format!(
+                    "{{ let mut dst_bytes = [0u8; {byte_count}]; \
+                    xlsynth::aot_runner::read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], &mut dst_bytes); "
                 );
                 let bit_remainder = bit_count % 8;
                 if bit_remainder != 0 {
                     let last_byte_index = bit_count.div_ceil(8) - 1;
-                    push_line(
-                        lines,
-                        format!(
-                            "assert!((dst_bytes[{last_byte_index}] >> {bit_remainder}) == 0, \"AOT decode overflow: value does not fit in {bit_count} bits\");"
-                        ),
-                    );
+                    expr.push_str(&format!(
+                        "assert!((dst_bytes[{last_byte_index}] >> {bit_remainder}) == 0, \"AOT decode overflow: value does not fit in {bit_count} bits\"); "
+                    ));
                 }
+                expr.push_str("dst_bytes }");
+                expr
             }
         }
         ResolvedType::Token => {
-            push_line(lines, "let mut dst_bytes = [0u8; 0];");
-            push_line(
-                lines,
-                format!(
-                    "xlsynth::aot_runner::read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], &mut dst_bytes);"
-                ),
-            );
+            format!(
+                "{{ let mut dst_bytes = [0u8; 0]; \
+                xlsynth::aot_runner::read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], &mut dst_bytes); \
+                Token {{}} }}"
+            )
         }
-        ResolvedType::Tuple { fields, .. } => {
+        ResolvedType::Tuple { name, fields } => {
+            if fields.is_empty() {
+                return format!("{name} {{}}");
+            }
+            let mut field_entries = Vec::with_capacity(fields.len());
             let mut offset = 0usize;
             for (index, field) in fields.iter().enumerate() {
                 let field_leaf_base = if offset == 0 {
@@ -719,41 +695,39 @@ fn emit_unpack_statements(
                 } else {
                     format!("{leaf_index_expr} + {offset}")
                 };
-                emit_unpack_statements(
-                    field,
-                    &format!("({value_expr}).field{index}"),
-                    layout_name,
-                    src_name,
-                    &field_leaf_base,
-                    lines,
-                    next_loop_index,
-                );
+                field_entries.push(format!(
+                    "field{index}: {}",
+                    render_decode_expr(
+                        field,
+                        layout_name,
+                        src_name,
+                        &field_leaf_base,
+                        next_loop_index
+                    )
+                ));
                 offset = offset.saturating_add(leaf_count(field));
             }
+            format!("{name} {{ {} }}", field_entries.join(", "))
         }
-        ResolvedType::Array { size, element } => {
+        ResolvedType::Array { size: _, element } => {
             let element_leaves = leaf_count(element);
-            if *size == 0 || element_leaves == 0 {
-                return;
-            }
             let loop_name = format!("index_{}", *next_loop_index);
             *next_loop_index += 1;
-            push_line(lines, format!("for {loop_name} in 0..{size} {{"));
-            let element_leaf_base = if element_leaves == 1 {
+            let element_leaf_base = if element_leaves == 0 {
+                leaf_index_expr.to_string()
+            } else if element_leaves == 1 {
                 format!("{leaf_index_expr} + {loop_name}")
             } else {
                 format!("{leaf_index_expr} + {loop_name} * {element_leaves}")
             };
-            emit_unpack_statements(
+            let element_expr = render_decode_expr(
                 element,
-                &format!("({value_expr})[{loop_name}]"),
                 layout_name,
                 src_name,
                 &element_leaf_base,
-                lines,
                 next_loop_index,
             );
-            push_line(lines, "}");
+            format!("std::array::from_fn(|{loop_name}| {{ {element_expr} }})")
         }
     }
 }
@@ -807,29 +781,20 @@ fn render_encode_function(index: usize, ty: &ResolvedType, expected_size: usize)
 fn render_decode_function(ty: &ResolvedType, expected_size: usize) -> String {
     let layout_name = "OUTPUT0_LAYOUT";
     let mut lines = Vec::new();
-    push_line(
-        &mut lines,
-        "fn decode_output_0(src: &[u8], _value: &mut Output) {",
-    );
+    push_line(&mut lines, "fn decode_output_0(src: &[u8]) -> Output {");
     push_line(
         &mut lines,
         format!("debug_assert_eq!(src.len(), {expected_size});"),
     );
     let mut loop_index = 0usize;
-    emit_unpack_statements(
-        ty,
-        "(*_value)",
-        layout_name,
-        "src",
-        "0usize",
-        &mut lines,
-        &mut loop_index,
-    );
+    let decode_expr = render_decode_expr(ty, layout_name, "src", "0usize", &mut loop_index);
+    push_line(&mut lines, format!("let output: Output = {decode_expr};"));
     let expected_leaves = leaf_count(ty);
     push_line(
         &mut lines,
         format!("debug_assert_eq!({layout_name}.len(), {expected_leaves});"),
     );
+    push_line(&mut lines, "output");
     push_line(&mut lines, "}");
     lines.join("\n")
 }
@@ -979,13 +944,11 @@ fn render_generated_module(
         ));
     }
     run_body.push_str("        self.inner.run()?;\n");
-    run_body.push_str("        let mut output: Output = Default::default();\n");
-    run_body.push_str("        decode_output_0(self.inner.output(0), &mut output);\n");
+    run_body.push_str("        let output = decode_output_0(self.inner.output(0));\n");
     run_body.push_str("        Ok(output)\n");
 
     run_with_events_body.push_str("        self.inner.run_with_events(|inner| {\n");
-    run_with_events_body.push_str("            let mut output: Output = Default::default();\n");
-    run_with_events_body.push_str("            decode_output_0(inner.output(0), &mut output);\n");
+    run_with_events_body.push_str("            let output = decode_output_0(inner.output(0));\n");
     run_with_events_body.push_str("            output\n");
     run_with_events_body.push_str("        })\n");
 
@@ -1068,6 +1031,7 @@ fn emit_link_archive(base_name: &str, object_file: &Path) -> AotResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aot_entrypoint_metadata::AotType;
 
     #[test]
     fn sanitize_identifier_rewrites_non_ident_chars() {
@@ -1079,5 +1043,45 @@ mod tests {
     #[test]
     fn sanitize_value_identifier_handles_keywords() {
         assert_eq!(sanitize_value_identifier("type", "arg"), "type_");
+    }
+
+    #[test]
+    fn render_type_declarations_do_not_emit_default_impls() {
+        let mut resolver = TypeResolver::default();
+        let input_ty = resolver.lower_type(
+            &AotType::Tuple {
+                elements: vec![
+                    AotType::Bits { bit_count: 8 },
+                    AotType::Array {
+                        size: 128,
+                        element: Box::new(AotType::Bits { bit_count: 16 }),
+                    },
+                    AotType::Bits { bit_count: 257 },
+                ],
+            },
+            "Input0",
+        );
+        let output_ty = resolver.lower_type(&AotType::Tuple { elements: vec![] }, "Output");
+
+        let declarations = render_type_declarations(&resolver, &[input_ty], &output_ty);
+
+        assert!(
+            declarations.contains("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct Input0 {")
+        );
+        assert!(
+            declarations.contains("pub field1: [Bits16; 128],"),
+            "declarations should preserve large array field types: {}",
+            declarations
+        );
+        assert!(
+            declarations.contains("pub type Bits257 = [u8; 33];"),
+            "declarations should preserve wide bits byte-array aliases: {}",
+            declarations
+        );
+        assert!(
+            !declarations.contains("Default"),
+            "generated declarations should not reference Default: {}",
+            declarations
+        );
     }
 }
