@@ -902,12 +902,12 @@ fn test_gatify_ule() {
     let want = &[
         (1, SummaryStats { live_nodes: 6, deepest_path: 4, fanout_histogram: btreemap!{0 => 1, 1 => 2, 2 => 1, 3 => 2} }),
         (2, SummaryStats { live_nodes: 14, deepest_path: 6, fanout_histogram: btreemap!{0 => 2, 1 => 6, 2 => 3, 3 => 4} }),
-        (3, SummaryStats { live_nodes: 22, deepest_path: 8, fanout_histogram: btreemap!{0 => 4, 1 => 9, 2 => 5, 3 => 7} }),
-        (4, SummaryStats { live_nodes: 31, deepest_path: 9, fanout_histogram: btreemap!{0 => 6, 1 => 14, 2 => 5, 3 => 10, 4 => 1} }),
-        (5, SummaryStats { live_nodes: 40, deepest_path: 10, fanout_histogram: btreemap!{0 => 9, 1 => 18, 2 => 7, 3 => 11, 4 => 2, 5 => 1} }),
-        (6, SummaryStats { live_nodes: 49, deepest_path: 11, fanout_histogram: btreemap!{0 => 13, 1 => 22, 2 => 8, 3 => 14, 4 => 1, 5 => 2, 6 => 1} }),
-        (7, SummaryStats { live_nodes: 59, deepest_path: 11, fanout_histogram: btreemap!{0 => 17, 1 => 26, 2 => 11, 3 => 16, 4 => 1, 5 => 1, 6 => 2, 7 => 1} }),
-        (8, SummaryStats { live_nodes: 69, deepest_path: 11, fanout_histogram: btreemap!{0 => 22, 1 => 31, 2 => 11, 3 => 20, 4 => 1, 5 => 1, 6 => 1, 7 => 2, 8 => 1} }),
+        (3, SummaryStats { live_nodes: 22, deepest_path: 7, fanout_histogram: btreemap!{0 => 3, 1 => 10, 2 => 5, 3 => 6} }),
+        (4, SummaryStats { live_nodes: 30, deepest_path: 8, fanout_histogram: btreemap!{0 => 4, 1 => 14, 2 => 7, 3 => 8} }),
+        (5, SummaryStats { live_nodes: 38, deepest_path: 8, fanout_histogram: btreemap!{0 => 5, 1 => 18, 2 => 9, 3 => 10} }),
+        (6, SummaryStats { live_nodes: 46, deepest_path: 9, fanout_histogram: btreemap!{0 => 6, 1 => 22, 2 => 11, 3 => 12} }),
+        (7, SummaryStats { live_nodes: 54, deepest_path: 9, fanout_histogram: btreemap!{0 => 7, 1 => 26, 2 => 13, 3 => 14} }),
+        (8, SummaryStats { live_nodes: 62, deepest_path: 10, fanout_histogram: btreemap!{0 => 8, 1 => 30, 2 => 15, 3 => 16} }),
     ];
     for &(bits, ref expected) in want {
         let got = stats.get(&bits).unwrap();
