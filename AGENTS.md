@@ -53,6 +53,13 @@ multi-bit and aggregate signatures such as `bits[2] -> bits[2]`,
 `bits[4] -> bits[4]`, tuples, and arrays, which are easy to miss if a test only
 uses `bits[1]`.
 
+When adding characterization / QoR / equivalence sweeps that compare alternate
+lowerings, name each preserved lowering by the structure or algorithm it emits
+(for example, `RepeatedPrefix` or `RecursiveExplicitOrEq`) rather than by
+chronology or API status (for example, `Old`, `Previous`, `Current`, or
+`Public`). These reference implementations often outlive the change that
+introduced them, so functional names keep later investigations understandable.
+
 If network access is unavailable, it is acceptable to exclude the crates.io
 version checks in `xlsynth-test-helpers/tests/version_test.rs` (which require
 crates.io metadata). Document that exclusion in the change notes.
