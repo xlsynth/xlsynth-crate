@@ -259,6 +259,9 @@ pub fn relevant_in_pkg(
                         detail: RelevanceDetail::DisprovedEquivalent { equiv: other },
                     })
                 }
+                EquivResult::Interrupted => {
+                    Err("equivalence check interrupted before reaching a conclusion".to_string())
+                }
                 EquivResult::Error(msg) => Err(msg),
             }
         }

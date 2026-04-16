@@ -22,7 +22,7 @@ use self::types::{
     AssertionSemantics, BoolPropertyResult, EquivParallelism, EquivResult, ProverFn,
     QuickCheckAssertionSemantics, QuickCheckRunResult,
 };
-use crate::solver::SolverConfig;
+use crate::solver::{SolverConfig, SolverInterruptHandle};
 use std::str::FromStr;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -98,13 +98,14 @@ pub trait Prover {
     fn prove_ir_fn_equiv(self: &Self, lhs: &ir::Fn, rhs: &ir::Fn) -> EquivResult {
         let lhs_fn = ProverFn::new(lhs, None);
         let rhs_fn = ProverFn::new(rhs, None);
-        self.prove_ir_equiv(
+        self.prove_ir_equiv_with_interrupt(
             &lhs_fn,
             &rhs_fn,
             EquivParallelism::SingleThreaded,
             AssertionSemantics::Same,
             None,
             false,
+            None,
         )
     }
     fn prove_ir_pkg_text_equiv(
@@ -122,6 +123,27 @@ pub trait Prover {
         assert_label_filter: Option<&str>,
         allow_flatten: bool,
     ) -> EquivResult;
+
+    fn prove_ir_equiv_with_interrupt<'a>(
+        self: &Self,
+        lhs: &ProverFn<'a>,
+        rhs: &ProverFn<'a>,
+        strategy: EquivParallelism,
+        assertion_semantics: AssertionSemantics,
+        assert_label_filter: Option<&str>,
+        allow_flatten: bool,
+        interrupt: Option<SolverInterruptHandle>,
+    ) -> EquivResult {
+        let _ = interrupt;
+        self.prove_ir_equiv(
+            lhs,
+            rhs,
+            strategy,
+            assertion_semantics,
+            assert_label_filter,
+            allow_flatten,
+        )
+    }
 
     fn prove_ir_fn_quickcheck<'a>(self: &Self, ir_fn: &ProverFn<'a>) -> BoolPropertyResult {
         self.prove_ir_quickcheck(ir_fn, QuickCheckAssertionSemantics::Never, None)
@@ -195,6 +217,27 @@ impl<S: SolverConfig> Prover for S {
         assert_label_filter: Option<&str>,
         allow_flatten: bool,
     ) -> EquivResult {
+        self.prove_ir_equiv_with_interrupt(
+            lhs,
+            rhs,
+            strategy,
+            assertion_semantics,
+            assert_label_filter,
+            allow_flatten,
+            None,
+        )
+    }
+
+    fn prove_ir_equiv_with_interrupt<'a>(
+        self: &Self,
+        lhs: &ProverFn<'a>,
+        rhs: &ProverFn<'a>,
+        strategy: EquivParallelism,
+        assertion_semantics: AssertionSemantics,
+        assert_label_filter: Option<&str>,
+        allow_flatten: bool,
+        interrupt: Option<SolverInterruptHandle>,
+    ) -> EquivResult {
         if strategy != EquivParallelism::SingleThreaded
             && (!lhs.uf_map.is_empty() || !rhs.uf_map.is_empty())
         {
@@ -210,26 +253,30 @@ impl<S: SolverConfig> Prover for S {
         }
         let assert_label_regex = build_assert_label_regex(assert_label_filter);
         match strategy {
-            EquivParallelism::SingleThreaded => ir_equiv::prove_ir_fn_equiv::<S::Solver>(
-                self,
-                lhs,
-                rhs,
-                assertion_semantics,
-                assert_label_regex.as_ref(),
-                allow_flatten,
-            ),
-            EquivParallelism::OutputBits => {
-                ir_equiv::prove_ir_fn_equiv_output_bits_parallel::<S::Solver>(
+            EquivParallelism::SingleThreaded => {
+                ir_equiv::prove_ir_fn_equiv_with_interrupt::<S::Solver>(
                     self,
                     lhs,
                     rhs,
                     assertion_semantics,
                     assert_label_regex.as_ref(),
                     allow_flatten,
+                    interrupt,
+                )
+            }
+            EquivParallelism::OutputBits => {
+                ir_equiv::prove_ir_fn_equiv_output_bits_parallel_with_interrupt::<S::Solver>(
+                    self,
+                    lhs,
+                    rhs,
+                    assertion_semantics,
+                    assert_label_regex.as_ref(),
+                    allow_flatten,
+                    interrupt,
                 )
             }
             EquivParallelism::InputBitSplit => {
-                ir_equiv::prove_ir_fn_equiv_split_input_bit::<S::Solver>(
+                ir_equiv::prove_ir_fn_equiv_split_input_bit_with_interrupt::<S::Solver>(
                     self,
                     lhs,
                     rhs,
@@ -238,6 +285,7 @@ impl<S: SolverConfig> Prover for S {
                     assertion_semantics,
                     assert_label_regex.as_ref(),
                     allow_flatten,
+                    interrupt,
                 )
             }
         }

@@ -194,6 +194,9 @@ fuzz_target!(|data: &[u8]| {
         } => panic!(
             "gatify equivalence disproved for generated ext_nary_add IR:\n{ir_text}\nexported:\n{exported_ir_text}\ngate:\n{gate_ir_text}\nlhs_inputs={lhs_inputs:?}\nrhs_inputs={rhs_inputs:?}\nlhs_output={lhs_output:?}\nrhs_output={rhs_output:?}"
         ),
+        EquivResult::Interrupted => panic!(
+            "in-process formal equivalence was interrupted unexpectedly for generated ext_nary_add IR:\n{ir_text}"
+        ),
         EquivResult::ToolchainDisproved(msg) | EquivResult::Error(msg) => panic!(
             "in-process formal equivalence failed for generated ext_nary_add IR:\n{ir_text}\nmessage: {msg}"
         ),
