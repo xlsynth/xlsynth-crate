@@ -14,6 +14,8 @@ fn check_spdx_identifier(file_path: &Path) -> bool {
         || filename == "requirements.txt"
     {
         "#"
+    } else if filename.ends_with(".vim") {
+        "\""
     } else {
         "//"
     };
@@ -166,6 +168,20 @@ fn test_finds_rust_file_missing_spdx_in_tempdir() {
     let missing_spdx_files = find_missing_spdx_files(temp_dir_path);
     assert_eq!(missing_spdx_files.len(), 1);
     assert!(missing_spdx_files.contains(&missing_spdx_file));
+}
+
+#[test]
+fn test_accepts_vimscript_spdx_comment() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let vim_file = temp_dir.path().join("syntax.vim");
+    fs::write(vim_file.clone(), "\" SPDX-License-Identifier: Apache-2.0\n").unwrap();
+
+    let missing_spdx_files = find_missing_spdx_files(temp_dir.path());
+    assert!(
+        missing_spdx_files.is_empty(),
+        "unexpected missing SPDX files: {:?}",
+        missing_spdx_files
+    );
 }
 
 #[test]
