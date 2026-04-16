@@ -80,6 +80,20 @@ top fn wide_sizes(input: (bits[1], bits[7], bits[8], bits[16], bits[32], bits[64
 }
 "#;
 
+    let large_array_tuple_ir = r#"package aot_tests
+
+top fn large_array_tuple(input: (bits[8], bits[16][128])) -> (bits[8], bits[16][128]) {
+  ret out: (bits[8], bits[16][128]) = identity(input)
+}
+"#;
+
+    let wide_bits_tuple_ir = r#"package aot_tests
+
+top fn wide_bits_tuple(input: (bits[8], bits[257])) -> (bits[8], bits[257]) {
+  ret out: (bits[8], bits[257]) = identity(input)
+}
+"#;
+
     let trace_assert_ir = r#"package aot_tests
 
 top fn trace_assert_pair(tok: token, pair: (bits[8], bits[8])) -> (bits[8], bits[8]) {
@@ -125,6 +139,18 @@ top fn trace_assert_pair(tok: token, pair: (bits[8], bits[8])) -> (bits[8], bits
             top: "wide_sizes",
             env_var: "XLSYNTH_AOT_WIDE_SIZES_RS",
             ir_text: wide_sizes_ir,
+        },
+        AotCase {
+            name: "large_array_tuple",
+            top: "large_array_tuple",
+            env_var: "XLSYNTH_AOT_LARGE_ARRAY_TUPLE_RS",
+            ir_text: large_array_tuple_ir,
+        },
+        AotCase {
+            name: "wide_bits_tuple",
+            top: "wide_bits_tuple",
+            env_var: "XLSYNTH_AOT_WIDE_BITS_TUPLE_RS",
+            ir_text: wide_bits_tuple_ir,
         },
         AotCase {
             name: "trace_assert",

@@ -416,6 +416,25 @@ fn is_named_tuple(ty: &ResolvedType, name: &str) -> bool {
     matches!(ty, ResolvedType::Tuple { name: ty_name, .. } if ty_name == name)
 }
 
+fn render_default_expr(ty: &ResolvedType) -> String {
+    match ty {
+        ResolvedType::Bits { bit_count } => {
+            if *bit_count <= 64 {
+                "Default::default()".to_string()
+            } else {
+                let byte_count = bit_count.div_ceil(8);
+                format!("[0; {byte_count}]")
+            }
+        }
+        ResolvedType::Tuple { name, .. } => format!("{name}::default()"),
+        ResolvedType::Array { element, .. } => {
+            let element_default = render_default_expr(element);
+            format!("std::array::from_fn(|_| {element_default})")
+        }
+        ResolvedType::Token => "Token::default()".to_string(),
+    }
+}
+
 fn render_type_declarations(
     resolver: &TypeResolver,
     input_types: &[ResolvedType],
@@ -441,9 +460,13 @@ fn render_type_declarations(
     }
 
     for tuple in &resolver.tuple_defs {
-        out.push_str("#[derive(Debug, Clone, PartialEq, Eq, Default)]\n");
+        out.push_str("#[derive(Debug, Clone, PartialEq, Eq)]\n");
         if tuple.field_types.is_empty() {
             out.push_str(&format!("pub struct {} {{}}\n\n", tuple.name));
+            out.push_str(&format!(
+                "impl Default for {} {{\n    fn default() -> Self {{\n        Self {{}}\n    }}\n}}\n\n",
+                tuple.name
+            ));
             continue;
         }
         out.push_str(&format!("pub struct {} {{\n", tuple.name));
@@ -453,6 +476,18 @@ fn render_type_declarations(
                 rust_type_name(field_ty)
             ));
         }
+        out.push_str("}\n\n");
+        out.push_str(&format!("impl Default for {} {{\n", tuple.name));
+        out.push_str("    fn default() -> Self {\n");
+        out.push_str("        Self {\n");
+        for (index, field_ty) in tuple.field_types.iter().enumerate() {
+            out.push_str(&format!(
+                "            field{index}: {},\n",
+                render_default_expr(field_ty)
+            ));
+        }
+        out.push_str("        }\n");
+        out.push_str("    }\n");
         out.push_str("}\n\n");
     }
 
@@ -1068,6 +1103,7 @@ fn emit_link_archive(base_name: &str, object_file: &Path) -> AotResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aot_entrypoint_metadata::AotType;
 
     #[test]
     fn sanitize_identifier_rewrites_non_ident_chars() {
@@ -1079,5 +1115,47 @@ mod tests {
     #[test]
     fn sanitize_value_identifier_handles_keywords() {
         assert_eq!(sanitize_value_identifier("type", "arg"), "type_");
+    }
+
+    #[test]
+    fn render_type_declarations_emits_manual_default_impls() {
+        let mut resolver = TypeResolver::default();
+        let input_ty = resolver.lower_type(
+            &AotType::Tuple {
+                elements: vec![
+                    AotType::Bits { bit_count: 8 },
+                    AotType::Array {
+                        size: 128,
+                        element: Box::new(AotType::Bits { bit_count: 16 }),
+                    },
+                    AotType::Bits { bit_count: 257 },
+                ],
+            },
+            "Input0",
+        );
+        let output_ty = resolver.lower_type(&AotType::Tuple { elements: vec![] }, "Output");
+
+        let declarations = render_type_declarations(&resolver, &[input_ty], &output_ty);
+
+        assert!(
+            declarations.contains("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct Input0 {")
+        );
+        assert!(
+            declarations.contains("field1: std::array::from_fn(|_| Default::default()),"),
+            "declarations should use from_fn for large arrays: {}",
+            declarations
+        );
+        assert!(
+            declarations.contains("field2: [0; 33],"),
+            "declarations should zero-initialize wide bits arrays: {}",
+            declarations
+        );
+        assert!(
+            declarations.contains(
+                "impl Default for Output {\n    fn default() -> Self {\n        Self {}\n    }\n}"
+            ),
+            "declarations should emit a manual Default impl for empty structs: {}",
+            declarations
+        );
     }
 }

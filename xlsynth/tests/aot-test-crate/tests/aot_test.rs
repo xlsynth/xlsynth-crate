@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use xlsynth_aot_test_crate::{
-    add_inputs_aot, add_one_aot, compound_shapes_aot, empty_tuple_aot, trace_assert_aot,
-    wide_sizes_aot,
+    add_inputs_aot, add_one_aot, compound_shapes_aot, empty_tuple_aot, large_array_tuple_aot,
+    trace_assert_aot, wide_bits_tuple_aot, wide_sizes_aot,
 };
 
 #[test]
@@ -96,6 +96,38 @@ fn generated_runner_supports_varied_bit_widths_including_wide_values() {
             [0x78, 0x56, 0x34, 0x12, 0xEF, 0xCD, 0xAB, 0x90, 0x00]
         ]
     );
+}
+
+#[test]
+fn generated_runner_supports_manual_default_for_large_array_tuple_structs() {
+    let mut runner = large_array_tuple_aot::new_runner().expect("runner creation should succeed");
+    let mut input = large_array_tuple_aot::Input0::default();
+    input.field0 = 0x5A;
+    input.field1[0] = 0x1234;
+    input.field1[127] = 0xABCD;
+
+    let output = runner.run(&input).expect("run should succeed");
+    assert_eq!(output.field0, 0x5A);
+    assert_eq!(output.field1[0], 0x1234);
+    assert_eq!(output.field1[127], 0xABCD);
+    assert!(output.field1[1..127].iter().all(|value| *value == 0));
+}
+
+#[test]
+fn generated_runner_supports_manual_default_for_wide_bits_tuple_structs() {
+    let mut runner = wide_bits_tuple_aot::new_runner().expect("runner creation should succeed");
+    let mut input = wide_bits_tuple_aot::Input0::default();
+    let mut expected_wide_bits = [0u8; 33];
+    expected_wide_bits[0] = 0x5A;
+    expected_wide_bits[32] = 0x01;
+
+    input.field0 = 0xC3;
+    input.field1 = expected_wide_bits;
+
+    let output = runner.run(&input).expect("run should succeed");
+    assert_eq!(output.field0, 0xC3);
+    assert_eq!(output.field1, expected_wide_bits);
+    assert!(output.field1[1..32].iter().all(|value| *value == 0));
 }
 
 #[test]
