@@ -1,9 +1,60 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fs;
+use std::path::Path;
+
 use xlsynth_aot_test_crate::{
-    add_inputs_aot, add_one_aot, compound_shapes_aot, empty_tuple_aot, trace_assert_aot,
-    wide_sizes_aot,
+    add_inputs_aot, add_one_aot, compound_shapes_aot, empty_tuple_aot, large_array_tuple_aot,
+    trace_assert_aot, wide_bits_tuple_aot, wide_sizes_aot,
 };
+use xlsynth_test_helpers::compare_golden_text;
+
+fn generated_wrapper_golden_cases() -> [(&'static str, &'static str); 8] {
+    [
+        (
+            env!("XLSYNTH_AOT_ADD_ONE_RS"),
+            "tests/goldens/add_one_wrapper.golden.txt",
+        ),
+        (
+            env!("XLSYNTH_AOT_ADD_INPUTS_RS"),
+            "tests/goldens/add_inputs_wrapper.golden.txt",
+        ),
+        (
+            env!("XLSYNTH_AOT_COMPOUND_SHAPES_RS"),
+            "tests/goldens/compound_shapes_wrapper.golden.txt",
+        ),
+        (
+            env!("XLSYNTH_AOT_EMPTY_TUPLE_RS"),
+            "tests/goldens/empty_tuple_wrapper.golden.txt",
+        ),
+        (
+            env!("XLSYNTH_AOT_WIDE_SIZES_RS"),
+            "tests/goldens/wide_sizes_wrapper.golden.txt",
+        ),
+        (
+            env!("XLSYNTH_AOT_LARGE_ARRAY_TUPLE_RS"),
+            "tests/goldens/large_array_tuple_wrapper.golden.txt",
+        ),
+        (
+            env!("XLSYNTH_AOT_WIDE_BITS_TUPLE_RS"),
+            "tests/goldens/wide_bits_tuple_wrapper.golden.txt",
+        ),
+        (
+            env!("XLSYNTH_AOT_TRACE_ASSERT_RS"),
+            "tests/goldens/trace_assert_wrapper.golden.txt",
+        ),
+    ]
+}
+
+#[test]
+fn generated_wrappers_match_golden_references() {
+    fs::create_dir_all(Path::new("tests/goldens")).expect("goldens directory should exist");
+
+    for (generated_path, golden_path) in generated_wrapper_golden_cases() {
+        let generated = fs::read_to_string(generated_path).expect("generated wrapper should exist");
+        compare_golden_text(&generated, golden_path);
+    }
+}
 
 #[test]
 fn add_one_generated_runner_executes() {
@@ -96,6 +147,41 @@ fn generated_runner_supports_varied_bit_widths_including_wide_values() {
             [0x78, 0x56, 0x34, 0x12, 0xEF, 0xCD, 0xAB, 0x90, 0x00]
         ]
     );
+}
+
+#[test]
+fn generated_runner_supports_large_array_tuple_structs() {
+    let mut runner = large_array_tuple_aot::new_runner().expect("runner creation should succeed");
+    let mut field1 = [0u16; 128];
+    field1[0] = 0x1234;
+    field1[127] = 0xABCD;
+    let input = large_array_tuple_aot::Input0 {
+        field0: 0x5A,
+        field1,
+    };
+
+    let output = runner.run(&input).expect("run should succeed");
+    assert_eq!(output.field0, 0x5A);
+    assert_eq!(output.field1[0], 0x1234);
+    assert_eq!(output.field1[127], 0xABCD);
+    assert!(output.field1[1..127].iter().all(|value| *value == 0));
+}
+
+#[test]
+fn generated_runner_supports_wide_bits_tuple_structs() {
+    let mut runner = wide_bits_tuple_aot::new_runner().expect("runner creation should succeed");
+    let mut expected_wide_bits = [0u8; 33];
+    expected_wide_bits[0] = 0x5A;
+    expected_wide_bits[32] = 0x01;
+    let input = wide_bits_tuple_aot::Input0 {
+        field0: 0xC3,
+        field1: expected_wide_bits,
+    };
+
+    let output = runner.run(&input).expect("run should succeed");
+    assert_eq!(output.field0, 0xC3);
+    assert_eq!(output.field1, expected_wide_bits);
+    assert!(output.field1[1..32].iter().all(|value| *value == 0));
 }
 
 #[test]
