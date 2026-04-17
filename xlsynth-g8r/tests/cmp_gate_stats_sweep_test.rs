@@ -287,7 +287,7 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
         CmpRow { cmp: "ult", rhs: "pow2m1_8", live_nodes: 15, deepest_path: 4 },
 
         // ule
-        CmpRow { cmp: "ule", rhs: "param", live_nodes: 62, deepest_path: 10 },
+        CmpRow { cmp: "ule", rhs: "param", live_nodes: 56, deepest_path: 9 },
         CmpRow { cmp: "ule", rhs: "0", live_nodes: 15, deepest_path: 4 },
         CmpRow { cmp: "ule", rhs: "1", live_nodes: 13, deepest_path: 4 },
         CmpRow { cmp: "ule", rhs: "all_ones", live_nodes: 1, deepest_path: 1 },
@@ -331,7 +331,7 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
         CmpRow { cmp: "ugt", rhs: "pow2m1_8", live_nodes: 1, deepest_path: 1 },
 
         // uge
-        CmpRow { cmp: "uge", rhs: "param", live_nodes: 62, deepest_path: 10 },
+        CmpRow { cmp: "uge", rhs: "param", live_nodes: 56, deepest_path: 9 },
         CmpRow { cmp: "uge", rhs: "0", live_nodes: 1, deepest_path: 1 },
         CmpRow { cmp: "uge", rhs: "1", live_nodes: 15, deepest_path: 4 },
         CmpRow { cmp: "uge", rhs: "all_ones", live_nodes: 15, deepest_path: 4 },
@@ -353,7 +353,7 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
         CmpRow { cmp: "uge", rhs: "pow2m1_8", live_nodes: 15, deepest_path: 4 },
 
         // slt
-        CmpRow { cmp: "slt", rhs: "param", live_nodes: 59, deepest_path: 11 },
+        CmpRow { cmp: "slt", rhs: "param", live_nodes: 57, deepest_path: 10 },
         CmpRow { cmp: "slt", rhs: "0", live_nodes: 1, deepest_path: 1 },
         CmpRow { cmp: "slt", rhs: "1", live_nodes: 16, deepest_path: 5 },
         CmpRow { cmp: "slt", rhs: "all_ones", live_nodes: 16, deepest_path: 5 },
@@ -375,7 +375,7 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
         CmpRow { cmp: "slt", rhs: "pow2m1_8", live_nodes: 16, deepest_path: 5 },
 
         // sle
-        CmpRow { cmp: "sle", rhs: "param", live_nodes: 65, deepest_path: 12 },
+        CmpRow { cmp: "sle", rhs: "param", live_nodes: 57, deepest_path: 10 },
         CmpRow { cmp: "sle", rhs: "0", live_nodes: 16, deepest_path: 5 },
         CmpRow { cmp: "sle", rhs: "1", live_nodes: 14, deepest_path: 5 },
         CmpRow { cmp: "sle", rhs: "all_ones", live_nodes: 1, deepest_path: 1 },
@@ -397,7 +397,7 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
         CmpRow { cmp: "sle", rhs: "pow2m1_8", live_nodes: 1, deepest_path: 1 },
 
         // sgt
-        CmpRow { cmp: "sgt", rhs: "param", live_nodes: 65, deepest_path: 12 },
+        CmpRow { cmp: "sgt", rhs: "param", live_nodes: 57, deepest_path: 10 },
         CmpRow { cmp: "sgt", rhs: "0", live_nodes: 16, deepest_path: 5 },
         CmpRow { cmp: "sgt", rhs: "1", live_nodes: 14, deepest_path: 5 },
         CmpRow { cmp: "sgt", rhs: "all_ones", live_nodes: 1, deepest_path: 1 },
@@ -419,7 +419,7 @@ fn test_cmp_gate_stats_sweep_8b_all_rhs_specs() {
         CmpRow { cmp: "sgt", rhs: "pow2m1_8", live_nodes: 1, deepest_path: 1 },
 
         // sge
-        CmpRow { cmp: "sge", rhs: "param", live_nodes: 66, deepest_path: 13 },
+        CmpRow { cmp: "sge", rhs: "param", live_nodes: 57, deepest_path: 10 },
         CmpRow { cmp: "sge", rhs: "0", live_nodes: 1, deepest_path: 1 },
         CmpRow { cmp: "sge", rhs: "1", live_nodes: 16, deepest_path: 5 },
         CmpRow { cmp: "sge", rhs: "all_ones", live_nodes: 16, deepest_path: 5 },

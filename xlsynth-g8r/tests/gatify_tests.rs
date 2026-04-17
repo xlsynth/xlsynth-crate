@@ -892,22 +892,23 @@ fn test_gatify_ule() {
     sorted_stats.sort_by_key(|(bits, _)| *bits);
     for (bits, stat) in sorted_stats {
         log::info!(
-            "({}, SummaryStats {{ live_nodes: {}, deepest_path: {} }})",
+            "({}, SummaryStats {{ live_nodes: {}, deepest_path: {}, fanout_histogram: {:?} }})",
             bits,
             stat.live_nodes,
-            stat.deepest_path
+            stat.deepest_path,
+            stat.fanout_histogram
         );
     }
     #[rustfmt::skip]
     let want = &[
-        (1, SummaryStats { live_nodes: 6, deepest_path: 4, fanout_histogram: btreemap!{0 => 1, 1 => 2, 2 => 1, 3 => 2} }),
-        (2, SummaryStats { live_nodes: 14, deepest_path: 6, fanout_histogram: btreemap!{0 => 2, 1 => 6, 2 => 3, 3 => 4} }),
-        (3, SummaryStats { live_nodes: 22, deepest_path: 7, fanout_histogram: btreemap!{0 => 3, 1 => 10, 2 => 5, 3 => 6} }),
-        (4, SummaryStats { live_nodes: 30, deepest_path: 8, fanout_histogram: btreemap!{0 => 4, 1 => 14, 2 => 7, 3 => 8} }),
-        (5, SummaryStats { live_nodes: 38, deepest_path: 8, fanout_histogram: btreemap!{0 => 5, 1 => 18, 2 => 9, 3 => 10} }),
-        (6, SummaryStats { live_nodes: 46, deepest_path: 9, fanout_histogram: btreemap!{0 => 6, 1 => 22, 2 => 11, 3 => 12} }),
-        (7, SummaryStats { live_nodes: 54, deepest_path: 9, fanout_histogram: btreemap!{0 => 7, 1 => 26, 2 => 13, 3 => 14} }),
-        (8, SummaryStats { live_nodes: 62, deepest_path: 10, fanout_histogram: btreemap!{0 => 8, 1 => 30, 2 => 15, 3 => 16} }),
+        (1, SummaryStats { live_nodes: 3, deepest_path: 2, fanout_histogram: btreemap!{0 => 2, 1 => 1, 3 => 2} }),
+        (2, SummaryStats { live_nodes: 10, deepest_path: 5, fanout_histogram: btreemap!{0 => 3, 1 => 4, 2 => 3, 3 => 4} }),
+        (3, SummaryStats { live_nodes: 18, deepest_path: 6, fanout_histogram: btreemap!{0 => 4, 1 => 8, 2 => 5, 3 => 6} }),
+        (4, SummaryStats { live_nodes: 25, deepest_path: 7, fanout_histogram: btreemap!{0 => 5, 1 => 12, 2 => 7, 3 => 8} }),
+        (5, SummaryStats { live_nodes: 33, deepest_path: 7, fanout_histogram: btreemap!{0 => 6, 1 => 16, 2 => 9, 3 => 10} }),
+        (6, SummaryStats { live_nodes: 41, deepest_path: 8, fanout_histogram: btreemap!{0 => 7, 1 => 20, 2 => 11, 3 => 12} }),
+        (7, SummaryStats { live_nodes: 49, deepest_path: 8, fanout_histogram: btreemap!{0 => 8, 1 => 24, 2 => 13, 3 => 14} }),
+        (8, SummaryStats { live_nodes: 56, deepest_path: 9, fanout_histogram: btreemap!{0 => 9, 1 => 28, 2 => 15, 3 => 16} }),
     ];
     for &(bits, ref expected) in want {
         let got = stats.get(&bits).unwrap();
