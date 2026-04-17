@@ -305,8 +305,18 @@ jobs:
       - name: Install Python for resolve
         run: |
           export DEBIAN_FRONTEND=noninteractive
-          apt-get update
-          apt-get install -y --no-install-recommends python3 python3-pip
+          retry_apt_get() {
+            for attempt in 1 2 3 4 5; do
+              if apt-get -o Acquire::Retries=3 "$@"; then
+                return 0
+              fi
+              echo "apt-get $* failed on attempt ${attempt}/5"
+              sleep $((attempt * 10))
+            done
+            return 1
+          }
+          retry_apt_get -o APT::Update::Error-Mode=any update
+          retry_apt_get install -y --no-install-recommends python3 python3-pip
 
       - name: Resolve XLS release tag
         id: resolve-xls-tag-2004
@@ -323,8 +333,18 @@ jobs:
       - name: Install dependencies for Python scripts and downloads
         run: |
           export DEBIAN_FRONTEND=noninteractive
-          apt-get update
-          apt-get install -y --no-install-recommends python3 python3-pip curl wget unzip git sudo build-essential pkg-config libssl-dev cmake libz3-dev zlib1g-dev
+          retry_apt_get() {
+            for attempt in 1 2 3 4 5; do
+              if apt-get -o Acquire::Retries=3 "$@"; then
+                return 0
+              fi
+              echo "apt-get $* failed on attempt ${attempt}/5"
+              sleep $((attempt * 10))
+            done
+            return 1
+          }
+          retry_apt_get -o APT::Update::Error-Mode=any update
+          retry_apt_get install -y --no-install-recommends python3 python3-pip curl wget unzip git sudo build-essential pkg-config libssl-dev cmake libz3-dev zlib1g-dev
           pip3 install -r requirements.txt
 
       - name: Set up Rust
