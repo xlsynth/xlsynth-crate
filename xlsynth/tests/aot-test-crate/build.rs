@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::aot_builder::{emit_aot_module_from_ir_text, AotBuildSpec};
+use std::path::PathBuf;
+
+use xlsynth::aot_builder::{
+    emit_aot_module_from_ir_text, emit_pretty_aot_module_from_dslx_file, AotBuildSpec,
+    PrettyAotBuildSpec,
+};
+use xlsynth::DslxConvertOptions;
 
 fn main() {
     struct AotCase {
@@ -173,6 +179,60 @@ top fn trace_assert_pair(tok: token, pair: (bits[8], bits[8])) -> (bits[8], bits
             output.rust_file.display()
         );
     }
+
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let pretty_dslx_path = manifest_dir.join("src/pretty_types.x");
+    let pretty_output = emit_pretty_aot_module_from_dslx_file(&PrettyAotBuildSpec {
+        name: "pretty_route",
+        dslx_path: &pretty_dslx_path,
+        top: "pretty_route",
+        dslx_options: DslxConvertOptions::default(),
+        bridge_paths: vec![],
+    })
+    .unwrap_or_else(|err| panic!("pretty AOT compile should succeed: {}", err));
+    println!(
+        "cargo:rustc-env=XLSYNTH_AOT_PRETTY_ROUTE_RS={}",
+        pretty_output.rust_file.display()
+    );
+
+    let self_alias_dslx_path = manifest_dir.join("src/self_alias_route.x");
+    let self_alias_output = emit_pretty_aot_module_from_dslx_file(&PrettyAotBuildSpec {
+        name: "self_alias_route",
+        dslx_path: &self_alias_dslx_path,
+        top: "route",
+        dslx_options: DslxConvertOptions::default(),
+        bridge_paths: vec![],
+    })
+    .unwrap_or_else(|err| panic!("self-alias pretty AOT compile should succeed: {}", err));
+    println!(
+        "cargo:rustc-env=XLSYNTH_AOT_SELF_ALIAS_ROUTE_RS={}",
+        self_alias_output.rust_file.display()
+    );
+
+    let dup_root = manifest_dir.join("src/dup");
+    let dup_route_path = dup_root.join("route.x");
+    let dup_foo_packet_path = dup_root.join("foo/packet.x");
+    let dup_bar_packet_path = dup_root.join("bar/packet.x");
+    let dup_output = emit_pretty_aot_module_from_dslx_file(&PrettyAotBuildSpec {
+        name: "duplicate_packet_route",
+        dslx_path: &dup_route_path,
+        top: "route",
+        dslx_options: DslxConvertOptions {
+            additional_search_paths: vec![dup_root.as_path()],
+            ..DslxConvertOptions::default()
+        },
+        bridge_paths: vec![dup_foo_packet_path.as_path(), dup_bar_packet_path.as_path()],
+    })
+    .unwrap_or_else(|err| {
+        panic!(
+            "duplicate-packet pretty AOT compile should succeed: {}",
+            err
+        )
+    });
+    println!(
+        "cargo:rustc-env=XLSYNTH_AOT_DUPLICATE_PACKET_ROUTE_RS={}",
+        dup_output.rust_file.display()
+    );
 
     println!("cargo:rerun-if-changed=build.rs");
 }
