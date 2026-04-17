@@ -793,6 +793,12 @@ fn gatify_mul(
             gatify_umul(lhs_bits, rhs_bits, output_bit_count, mul_adder_mapping, gb)
         }
         Signedness::Signed => {
+            if let Some(result) =
+                gatify_smul_widening(lhs_bits, rhs_bits, output_bit_count, mul_adder_mapping, gb)
+            {
+                return result;
+            }
+
             // Pre-sign-extend operands to the final output width.
             let lhs_ext = if lhs_bits.get_bit_count() < output_bit_count {
                 gatify_sign_ext(gb, 0, output_bit_count, lhs_bits)
@@ -807,6 +813,96 @@ fn gatify_mul(
             gatify_umul(&lhs_ext, &rhs_ext, output_bit_count, mul_adder_mapping, gb)
         }
     }
+}
+
+/// Lowers same-width widening signed multiply without materializing sign
+/// extension.
+fn gatify_smul_widening(
+    lhs_bits: &AigBitVector,
+    rhs_bits: &AigBitVector,
+    output_bit_count: usize,
+    mul_adder_mapping: AdderMapping,
+    gb: &mut GateBuilder,
+) -> Option<AigBitVector> {
+    let input_bit_count = lhs_bits.get_bit_count();
+    if input_bit_count == 0
+        || rhs_bits.get_bit_count() != input_bit_count
+        || output_bit_count <= input_bit_count
+        || output_bit_count > 2 * input_bit_count
+    {
+        return None;
+    }
+
+    let operands =
+        gatify_smul_baugh_wooley_partial_products(lhs_bits, rhs_bits, output_bit_count, gb);
+    Some(array_add_with_carry_out(gb, &operands, None, mul_adder_mapping).sum)
+}
+
+/// Adds `2^bit_index` to a little-endian bit vector modulo its width.
+fn add_power_of_two_mod(bits: &mut [bool], bit_index: usize) {
+    let mut i = bit_index;
+    while i < bits.len() {
+        bits[i] = !bits[i];
+        if bits[i] {
+            break;
+        }
+        i += 1;
+    }
+}
+
+/// Returns the two's-complement negation of a little-endian bit vector.
+fn twos_complement_mod(bits: &[bool]) -> Vec<bool> {
+    let mut result: Vec<bool> = bits.iter().map(|bit| !*bit).collect();
+    add_power_of_two_mod(&mut result, 0);
+    result
+}
+
+/// Builds Baugh-Wooley partial-product rows for same-width signed multiply.
+fn gatify_smul_baugh_wooley_partial_products(
+    lhs_bits: &AigBitVector,
+    rhs_bits: &AigBitVector,
+    output_bit_count: usize,
+    gb: &mut GateBuilder,
+) -> Vec<AigBitVector> {
+    assert_eq!(lhs_bits.get_bit_count(), rhs_bits.get_bit_count());
+    let input_bit_count = lhs_bits.get_bit_count();
+    assert!(input_bit_count > 0);
+
+    // Two's-complement multiplication has negative partial products whenever
+    // exactly one operand bit is a sign bit. Baugh-Wooley complements those
+    // negative partial products and adds a fixed correction constant, so all
+    // dynamic rows can be accumulated in the same unsigned multi-operand adder.
+    let mut correction_constant = vec![false; output_bit_count];
+    let mut partial_products = Vec::new();
+    for j in 0..input_bit_count {
+        let mut row = vec![gb.get_false(); output_bit_count];
+        let mut row_has_dynamic_bit = false;
+        for i in 0..input_bit_count {
+            let output_index = i + j;
+            if output_index >= output_bit_count {
+                continue;
+            }
+            let pp = gb.add_and_binary(*lhs_bits.get_lsb(i), *rhs_bits.get_lsb(j));
+            let lhs_is_sign = i + 1 == input_bit_count;
+            let rhs_is_sign = j + 1 == input_bit_count;
+            row[output_index] = if lhs_is_sign ^ rhs_is_sign {
+                add_power_of_two_mod(&mut correction_constant, output_index);
+                gb.add_not(pp)
+            } else {
+                pp
+            };
+            row_has_dynamic_bit = true;
+        }
+        if row_has_dynamic_bit {
+            partial_products.push(AigBitVector::from_lsb_is_index_0(&row));
+        }
+    }
+
+    if correction_constant.iter().any(|bit| *bit) {
+        let correction = twos_complement_mod(&correction_constant);
+        partial_products.push(gb.add_literal(&xlsynth::IrBits::from_lsb_is_0(&correction)));
+    }
+    partial_products
 }
 
 fn gatify_concat(args: &[AigBitVector]) -> AigBitVector {
@@ -881,6 +977,20 @@ fn gatify_umul(
         (rhs_bits, lhs_bits)
     };
 
+    let partial_products =
+        gatify_umul_partial_products(multiplicand_bits, multiplier_bits, output_bit_count, gb);
+
+    // Sum all partial products using the requested adder mapping.
+    array_add_with_carry_out(gb, &partial_products, None, mul_adder_mapping).sum
+}
+
+/// Builds shifted partial-product rows for unsigned multiplication.
+fn gatify_umul_partial_products(
+    multiplicand_bits: &AigBitVector,
+    multiplier_bits: &AigBitVector,
+    output_bit_count: usize,
+    gb: &mut GateBuilder,
+) -> Vec<AigBitVector> {
     let mut partial_products = Vec::new();
 
     // For each bit in the multiplier, generate a scaled partial product.
@@ -906,8 +1016,7 @@ fn gatify_umul(
         partial_products.push(AigBitVector::from_lsb_is_index_0(&shifted));
     }
 
-    // Sum all partial products using ripple-carry addition
-    array_add_with_carry_out(gb, &partial_products, None, mul_adder_mapping).sum
+    partial_products
 }
 
 fn shll_const_and_resize(
