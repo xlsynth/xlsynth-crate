@@ -373,3 +373,36 @@ fn gate_graph_equivalence_old_vs_mask_low_rewrite() {
             .expect("expected old vs rewritten mask-low lowering to be equivalent");
     }
 }
+
+#[test]
+fn gate_graph_equivalence_shifted_all_ones_rewrite_sweep() {
+    for (source_width, count_width, start, width) in [
+        (1usize, 0usize, 0usize, 1usize),
+        (1, 3, 0, 1),
+        (2, 1, 0, 2),
+        (3, 2, 0, 3),
+        (3, 5, 1, 2),
+        (5, 3, 0, 5),
+        (5, 5, 2, 3),
+        (7, 3, 0, 7),
+        (8, 4, 0, 8),
+        (9, 4, 3, 4),
+        (12, 8, 3, 8),
+        (16, 5, 4, 8),
+        (17, 7, 8, 9),
+        (31, 6, 15, 16),
+        (32, 8, 8, 16),
+        (64, 8, 16, 32),
+    ] {
+        let ir_text =
+            build_sliced_shifted_all_ones_ir_text(source_width, count_width, start, width);
+        let pir_fn = parse_top_fn(&ir_text);
+        let gate_old = gatify_for_test(&pir_fn, /* enable_rewrite_mask_low= */ false);
+        let gate_new = gatify_for_test(&pir_fn, /* enable_rewrite_mask_low= */ true);
+        check_equivalence::prove_same_gate_fn_via_ir(&gate_old, &gate_new).unwrap_or_else(|e| {
+            panic!(
+                "expected shifted-all-ones rewrite to be equivalent for source_width={source_width} count_width={count_width} start={start} width={width}: {e}"
+            )
+        });
+    }
+}
