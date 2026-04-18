@@ -136,6 +136,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "fuzz_prep_for_gatify_mask_low"
+path = "fuzz_targets/fuzz_prep_for_gatify_mask_low.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "fuzz_node_provenance"
 path = "fuzz_targets/fuzz_node_provenance.rs"
 test = false

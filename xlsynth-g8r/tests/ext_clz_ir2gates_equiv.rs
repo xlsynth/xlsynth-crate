@@ -50,6 +50,7 @@ fn gatify_for_test(pir_fn: &ir::Fn, enable_rewrite_prio_encode: bool) -> xlsynth
             enable_rewrite_carry_out: false,
             enable_rewrite_prio_encode,
             enable_rewrite_nary_add: false,
+            enable_rewrite_mask_low: false,
             array_index_lowering_strategy: Default::default(),
         },
     )
@@ -102,6 +103,7 @@ fn prep_rewrites_encode_one_hot_reverse_to_ext_clz() {
             PrepForGatifyOptions {
                 enable_rewrite_prio_encode: true,
                 enable_rewrite_nary_add: false,
+                enable_rewrite_mask_low: false,
                 ..PrepForGatifyOptions::default()
             },
         );

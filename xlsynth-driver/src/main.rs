@@ -336,6 +336,10 @@ impl AppExt for clap::Command {
                 "enable-rewrite-nary-add",
                 "Enable nary-add rewrites in prep_for_gatify (introduces and grows ext_nary_add to a fixed point)",
             )
+            .add_bool_arg(
+                "enable-rewrite-mask-low",
+                "Enable mask-low rewrite in prep_for_gatify (introduces ext_mask_low)",
+            )
             .arg(
                 clap::Arg::new("adder_mapping")
                     .long("adder-mapping")

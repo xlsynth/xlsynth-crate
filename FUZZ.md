@@ -135,6 +135,24 @@ Primarily tests:
 - Gate-to-IR conversion of the gatified result stays semantically aligned with
   the exported XLS IR form
 
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_prep_for_gatify_mask_low.rs
+
+Builds small PIR functions containing either recognized mask-low idioms or
+near-miss variants, runs `prep_for_gatify` with only the mask-low rewrite
+enabled, and exhaustively evaluates all count values for the bounded generated
+count width before and after prep. The target also checks that only the exact
+`sub(shll(bits[N]:1, count), bits[N]:1)` and
+`add(shll(bits[N]:1, count), bits[N]:all_ones)` forms are rewritten to
+`ext_mask_low`.
+
+Primarily tests:
+
+- The prep-for-gatify mask-low rewrite preserves semantics for generated output
+  widths, count widths, and count values
+- Matching and near-miss idiom detection stays precise as rewrite guards evolve
+- `ext_mask_low` evaluation remains aligned with the shift/sub basis expression
+  introduced by the rewrite
+
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_node_provenance.rs
 
 Builds a random PIR function using the shared `xlsynth_pir::ir_fuzz`

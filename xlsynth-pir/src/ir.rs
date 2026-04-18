@@ -453,6 +453,14 @@ pub enum NodePayload {
     ExtClz {
         arg: NodeRef,
     },
+    /// Extension (non-upstream) op: build a low-bit mask from a dynamic count.
+    ///
+    /// Semantics: for result type `bits[N]`, returns `(bits[N]:1 << count) -
+    /// bits[N]:1`, with the `bits[0]` case returning the unique zero-width
+    /// value. Counts greater than or equal to `N` saturate to all ones.
+    ExtMaskLow {
+        count: NodeRef,
+    },
     /// Extended (non-upstream) op: add zero or more bits operands after
     /// resizing each to the result width.
     ///
@@ -552,6 +560,7 @@ impl NodePayload {
             NodePayload::ExtCarryOut { .. }
                 | NodePayload::ExtPrioEncode { .. }
                 | NodePayload::ExtClz { .. }
+                | NodePayload::ExtMaskLow { .. }
                 | NodePayload::ExtNaryAdd { .. }
         )
     }
@@ -577,6 +586,7 @@ impl NodePayload {
             NodePayload::ExtCarryOut { .. } => "ext_carry_out",
             NodePayload::ExtPrioEncode { .. } => "ext_prio_encode",
             NodePayload::ExtClz { .. } => "ext_clz",
+            NodePayload::ExtMaskLow { .. } => "ext_mask_low",
             NodePayload::ExtNaryAdd { .. } => "ext_nary_add",
             NodePayload::Assert { .. } => "assert",
             NodePayload::Trace { .. } => "trace",
@@ -651,6 +661,12 @@ impl NodePayload {
                 Ok(())
             }
             NodePayload::ExtClz { .. } => Ok(()),
+            NodePayload::ExtMaskLow { count } => {
+                if !matches!(f.get_node_ty(*count), Type::Bits(_)) {
+                    return Err("ext_mask_low count must be bits-typed".to_string());
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -687,6 +703,7 @@ impl NodePayload {
                 vec![format_operand(*arg), format!("lsb_prio={}", lsb_prio)]
             }
             NodePayload::ExtClz { arg } => vec![format_operand(*arg)],
+            NodePayload::ExtMaskLow { count } => vec![format_operand(*count)],
             NodePayload::ExtNaryAdd { terms, arch } => {
                 let mut attrs: Vec<String> = terms
                     .iter()

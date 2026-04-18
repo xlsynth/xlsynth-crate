@@ -397,6 +397,26 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     bitvec: encoded,
                 }
             }
+            NodePayload::ExtMaskLow { count } => {
+                let c = env
+                    .get(count)
+                    .expect("ext_mask_low.count must be present")
+                    .clone();
+                let ir::Type::Bits(out_w) = node.ty else {
+                    panic!("ext_mask_low result must be bits-typed");
+                };
+                let bitvec = if out_w == 0 {
+                    solver.zero_width()
+                } else {
+                    let one = solver.one(out_w);
+                    let shifted = solver.xls_shll(&one, &c.bitvec);
+                    solver.sub(&shifted, &one)
+                };
+                IrTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec,
+                }
+            }
             NodePayload::ExtNaryAdd { terms, arch: _ } => {
                 let ir::Type::Bits(out_w) = node.ty else {
                     panic!("ext_nary_add result must be bits-typed");

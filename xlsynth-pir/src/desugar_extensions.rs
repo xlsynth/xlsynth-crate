@@ -216,6 +216,35 @@ fn analyze_ext_clz(f: &Fn, arg: NodeRef) -> Result<ExtClzShape, DesugarError> {
     Ok(ExtClzShape::new(input_width))
 }
 
+#[derive(Clone, Copy)]
+struct ExtMaskLowShape {
+    output_width: usize,
+    count_width: usize,
+}
+
+/// Validates `ext_mask_low` shape and returns the widths needed by both inline
+/// lowering and FFI wrapper synthesis.
+fn analyze_ext_mask_low(
+    f: &Fn,
+    result: NodeRef,
+    count: NodeRef,
+) -> Result<ExtMaskLowShape, DesugarError> {
+    let output_width = match f.get_node(result).ty {
+        Type::Bits(width) => width,
+        ref ty => {
+            return Err(DesugarError::new(format!(
+                "ext_mask_low: result type must be bits, got {}",
+                ty
+            )));
+        }
+    };
+    let count_width = expect_bits_width(f, count, "ext_mask_low.count")?;
+    Ok(ExtMaskLowShape {
+        output_width,
+        count_width,
+    })
+}
+
 /// Appends the basis-op implementation of `ext_prio_encode` and returns the
 /// lowered encoded-result node.
 fn append_lowered_ext_prio_encode(f: &mut Fn, arg: NodeRef, shape: ExtPrioEncodeShape) -> NodeRef {
@@ -277,6 +306,33 @@ fn make_zero_bits_literal(f: &mut Fn, width: usize) -> NodeRef {
         f,
         Type::Bits(width),
         NodePayload::Literal(IrValue::make_ubits(width, 0).expect("zero bits literal")),
+    )
+}
+
+fn make_ubits_literal(f: &mut Fn, width: usize, value: u64) -> NodeRef {
+    push_node(
+        f,
+        Type::Bits(width),
+        NodePayload::Literal(IrValue::make_ubits(width, value).expect("bits literal")),
+    )
+}
+
+/// Appends the basis-op implementation of `ext_mask_low` and returns the
+/// lowered mask node.
+fn append_lowered_ext_mask_low(f: &mut Fn, count: NodeRef, shape: ExtMaskLowShape) -> NodeRef {
+    if shape.output_width == 0 {
+        return make_zero_bits_literal(f, 0);
+    }
+    let one = make_ubits_literal(f, shape.output_width, 1);
+    let shifted = push_node(
+        f,
+        Type::Bits(shape.output_width),
+        NodePayload::Binop(Binop::Shll, one, count),
+    );
+    push_node(
+        f,
+        Type::Bits(shape.output_width),
+        NodePayload::Binop(Binop::Sub, shifted, one),
     )
 }
 
@@ -446,6 +502,10 @@ enum FfiWrapKey {
     ExtClz {
         input_width: usize,
     },
+    ExtMaskLow {
+        output_width: usize,
+        count_width: usize,
+    },
     ExtNaryAdd {
         output_width: usize,
         operand_widths: Vec<usize>,
@@ -466,6 +526,12 @@ fn helper_base_name(key: &FfiWrapKey) -> String {
         }
         FfiWrapKey::ExtClz { input_width } => {
             format!("__pir_ext__ext_clz__w{input_width}")
+        }
+        FfiWrapKey::ExtMaskLow {
+            output_width,
+            count_width,
+        } => {
+            format!("__pir_ext__ext_mask_low__outw{output_width}__countw{count_width}")
         }
         FfiWrapKey::ExtNaryAdd {
             output_width,
@@ -554,6 +620,17 @@ fn helper_code_template(key: &FfiWrapKey) -> String {
         FfiWrapKey::ExtClz { input_width } => {
             let metadata = format!("xlsynth_pir_ext=ext_clz;width={input_width}");
             format!("pir_ext_clz {{fn}} (.arg({{arg}}), .out({{return}})); /* {metadata} */")
+        }
+        FfiWrapKey::ExtMaskLow {
+            output_width,
+            count_width,
+        } => {
+            let metadata = format!(
+                "xlsynth_pir_ext=ext_mask_low;out_width={output_width};count_width={count_width}"
+            );
+            format!(
+                "pir_ext_mask_low {{fn}} (.count({{count}}), .out({{return}})); /* {metadata} */"
+            )
         }
         FfiWrapKey::ExtNaryAdd {
             output_width,
@@ -733,6 +810,29 @@ fn make_helper_fn(name: String, key: &FfiWrapKey) -> Fn {
             helper.ret_node_ref = Some(ret_node_ref);
             helper
         }
+        FfiWrapKey::ExtMaskLow {
+            output_width,
+            count_width,
+        } => {
+            let params = vec![Param {
+                name: "count".to_string(),
+                ty: Type::Bits(*count_width),
+                id: ParamId::new(1),
+            }];
+            let shape = ExtMaskLowShape {
+                output_width: *output_width,
+                count_width: *count_width,
+            };
+            let mut helper = make_helper_with_params(name, params, Type::Bits(*output_width), key);
+            let lowered = append_lowered_ext_mask_low(&mut helper, NodeRef { index: 1 }, shape);
+            let ret_node_ref = push_node(
+                &mut helper,
+                Type::Bits(*output_width),
+                NodePayload::Unop(Unop::Identity, lowered),
+            );
+            helper.ret_node_ref = Some(ret_node_ref);
+            helper
+        }
         FfiWrapKey::ExtPrioEncode {
             input_width,
             lsb_prio,
@@ -843,6 +943,27 @@ fn wrap_extensions_in_fn(
                 node.payload = NodePayload::Invoke {
                     to_apply: helper_name,
                     operands: vec![arg],
+                };
+                changed = true;
+            }
+            NodePayload::ExtMaskLow { count } => {
+                let shape = analyze_ext_mask_low(f, nr, count)?;
+                let key = FfiWrapKey::ExtMaskLow {
+                    output_width: shape.output_width,
+                    count_width: shape.count_width,
+                };
+                let helper_name = get_or_create_helper_name(
+                    &key,
+                    helper_names,
+                    helper_fns,
+                    existing_names,
+                    current_max_text_id,
+                );
+                let node = f.get_node_mut(nr);
+                node.ty = Type::Bits(shape.output_width);
+                node.payload = NodePayload::Invoke {
+                    to_apply: helper_name,
+                    operands: vec![count],
                 };
                 changed = true;
             }
@@ -1016,12 +1137,36 @@ fn desugar_ext_clz_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
     Ok(changed)
 }
 
+fn desugar_ext_mask_low_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
+    let mut changed = false;
+
+    let original_len = f.nodes.len();
+    for idx in 0..original_len {
+        let nr = NodeRef { index: idx };
+        let payload = f.get_node(nr).payload.clone();
+        let NodePayload::ExtMaskLow { count } = payload else {
+            continue;
+        };
+        changed = true;
+
+        let shape = analyze_ext_mask_low(f, nr, count)?;
+        let lowered = append_lowered_ext_mask_low(f, count, shape);
+
+        let node = f.get_node_mut(nr);
+        node.ty = Type::Bits(shape.output_width);
+        node.payload = NodePayload::Unop(Unop::Identity, lowered);
+    }
+
+    Ok(changed)
+}
+
 /// Desugars extension ops within `f` into upstream-compatible PIR operations.
 ///
 /// This function also normalizes the node list into a valid topological order.
 pub fn desugar_extensions_in_fn(f: &mut Fn) -> Result<(), DesugarError> {
     let _changed = desugar_ext_carry_out_in_fn(f)?
         | desugar_ext_clz_in_fn(f)?
+        | desugar_ext_mask_low_in_fn(f)?
         | desugar_ext_nary_add_in_fn(f)?
         | desugar_ext_prio_encode_in_fn(f)?;
     compact_and_toposort_in_place(f).map_err(DesugarError::new)?;

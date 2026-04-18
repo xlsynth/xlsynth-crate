@@ -265,6 +265,7 @@ pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
         ExtCarryOut { lhs, rhs, c_in } => vec![*lhs, *rhs, *c_in],
         ExtPrioEncode { arg, lsb_prio: _ } => vec![*arg],
         ExtClz { arg } => vec![*arg],
+        ExtMaskLow { count } => vec![*count],
         ExtNaryAdd { terms, arch: _ } => terms.iter().map(|term| term.operand).collect(),
         Assert {
             token,
@@ -964,6 +965,9 @@ where
         },
         NodePayload::ExtClz { arg } => NodePayload::ExtClz {
             arg: map((0, *arg)),
+        },
+        NodePayload::ExtMaskLow { count } => NodePayload::ExtMaskLow {
+            count: map((0, *count)),
         },
         NodePayload::ExtNaryAdd { terms, arch } => NodePayload::ExtNaryAdd {
             terms: terms

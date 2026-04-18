@@ -169,6 +169,7 @@ fn lower_ir_to_gates_output_with_options(
             enable_rewrite_carry_out: false,
             enable_rewrite_prio_encode: false,
             enable_rewrite_nary_add,
+            enable_rewrite_mask_low: false,
             adder_mapping,
             mul_adder_mapping: None,
             aug_opt: Default::default(),

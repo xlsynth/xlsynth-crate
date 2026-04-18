@@ -73,6 +73,9 @@ pub fn verify_fn_operand_indices_in_bounds(f: &Fn) -> Result<(), String> {
             NodePayload::ExtClz { arg } => {
                 check(*arg, &format!("node {} ext_clz.arg", i))?;
             }
+            NodePayload::ExtMaskLow { count } => {
+                check(*count, &format!("node {} ext_mask_low.count", i))?;
+            }
             NodePayload::ExtNaryAdd { terms, arch: _ } => {
                 for term in terms.iter() {
                     check(term.operand, &format!("node {} ext_nary_add.operand", i))?;

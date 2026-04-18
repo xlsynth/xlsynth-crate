@@ -412,6 +412,15 @@ where
                 _ => Err(DeduceError::ExpectedBits("ext_clz.arg")),
             }
         }
+        NodePayload::ExtMaskLow { .. } => {
+            let count_ty = operand_types
+                .get(0)
+                .ok_or(DeduceError::MissingOperand("ext_mask_low.count"))?;
+            match count_ty {
+                Type::Bits(_) => Ok(None),
+                _ => Err(DeduceError::ExpectedBits("ext_mask_low.count")),
+            }
+        }
         NodePayload::ExtNaryAdd { .. } => {
             for operand_ty in operand_types.iter() {
                 if !matches!(operand_ty, Type::Bits(_)) {

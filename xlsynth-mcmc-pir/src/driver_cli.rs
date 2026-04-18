@@ -299,6 +299,7 @@ fn gatify_ir_text_to_g8r_text_and_stats(ir_text: &str) -> Result<(String, Summar
         enable_rewrite_carry_out: false,
         enable_rewrite_prio_encode: false,
         enable_rewrite_nary_add: false,
+        enable_rewrite_mask_low: false,
     };
     let gatify_output = ir2gate::gatify(top_fn, gatify_options)
         .map_err(|e| anyhow::anyhow!("ir2gate::gatify failed: {}", e))?;

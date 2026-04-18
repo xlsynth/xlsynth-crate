@@ -34,6 +34,7 @@ top fn add_{n}_bits(a: bits[{n}] id=1, b: bits[{n}] id=2) -> bits[{n}] {{
             enable_rewrite_carry_out: false,
             enable_rewrite_prio_encode: false,
             enable_rewrite_nary_add: false,
+            enable_rewrite_mask_low: false,
             array_index_lowering_strategy: Default::default(),
         },
     )

@@ -139,6 +139,14 @@ pub enum ValidationError {
         node_index: usize,
         actual: Type,
     },
+    /// `ext_mask_low` requires a bits-typed count operand.
+    ExtMaskLowCountTypeMismatch { func: String, node_index: usize },
+    /// `ext_mask_low` requires a bits-typed result.
+    ExtMaskLowResultTypeMismatch {
+        func: String,
+        node_index: usize,
+        actual: Type,
+    },
     /// Two parameters share the same name within a function.
     DuplicateParamName { func: String, param_name: String },
     /// A parameter declared in the function signature has no corresponding
@@ -418,6 +426,24 @@ impl std::fmt::Display for ValidationError {
                 write!(
                     f,
                     "function '{}' node {} ext_nary_add requires bits result type, got {}",
+                    func, node_index, actual
+                )
+            }
+            ValidationError::ExtMaskLowCountTypeMismatch { func, node_index } => {
+                write!(
+                    f,
+                    "function '{}' node {} ext_mask_low requires bits count operand",
+                    func, node_index
+                )
+            }
+            ValidationError::ExtMaskLowResultTypeMismatch {
+                func,
+                node_index,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "function '{}' node {} ext_mask_low requires bits result type, got {}",
                     func, node_index, actual
                 )
             }
@@ -993,6 +1019,22 @@ where
                         node_index: i,
                     });
                 }
+            }
+        }
+
+        if let NodePayload::ExtMaskLow { count } = &node.payload {
+            if !matches!(node.ty, Type::Bits(_)) {
+                return Err(ValidationError::ExtMaskLowResultTypeMismatch {
+                    func: f.name.clone(),
+                    node_index: i,
+                    actual: node.ty.clone(),
+                });
+            }
+            if !matches!(f.get_node(*count).ty, Type::Bits(_)) {
+                return Err(ValidationError::ExtMaskLowCountTypeMismatch {
+                    func: f.name.clone(),
+                    node_index: i,
+                });
             }
         }
 
