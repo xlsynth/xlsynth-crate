@@ -43,6 +43,27 @@ top fn shift_sub_mask_low_{output_width}b(count: bits[{count_width}] id=1) -> bi
     )
 }
 
+fn build_shifted_all_ones_slice_ir_text(
+    source_width: usize,
+    count_width: usize,
+    start: usize,
+    width: usize,
+) -> String {
+    let all_ones = if source_width == 0 {
+        0
+    } else {
+        (1u128 << source_width) - 1
+    };
+    format!(
+        "package sample\n\
+top fn shifted_all_ones_slice_{source_width}b_s{start}_w{width}(count: bits[{count_width}] id=1) -> bits[{width}] {{\n\
+  all_ones: bits[{source_width}] = literal(value={all_ones}, id=2)\n\
+  sh: bits[{source_width}] = shll(all_ones, count, id=3)\n\
+  ret slice: bits[{width}] = bit_slice(sh, start={start}, width={width}, id=4)\n\
+}}\n"
+    )
+}
+
 fn stats_for_ext_mask_low(output_width: usize) -> SummaryStats {
     let pir_fn = parse_top_fn(&build_ext_mask_low_ir_text(output_width));
     let gate_fn = gatify(
@@ -140,4 +161,44 @@ fn ir2gates_shift_sub_mask_low_qor_improves_with_mask_low_rewrite() {
             "expected enable_rewrite_mask_low=true to reduce live_nodes for output_width={output_width}; off={nodes_off} on={nodes_on} (depth off={depth_off} on={depth_on})"
         );
     }
+}
+
+#[test]
+fn ir2gates_shifted_all_ones_slice_qor_improves_with_mask_low_rewrite() {
+    for (source_width, count_width, start, width) in [
+        (8usize, 6usize, 0usize, 8usize),
+        (12usize, 8usize, 3usize, 8usize),
+        (16usize, 7usize, 4usize, 8usize),
+        (32usize, 8usize, 8usize, 16usize),
+    ] {
+        let ir_text = build_shifted_all_ones_slice_ir_text(source_width, count_width, start, width);
+        let (nodes_off, depth_off) = stats_for_ir_text_via_ir2gates(&ir_text, false);
+        let (nodes_on, depth_on) = stats_for_ir_text_via_ir2gates(&ir_text, true);
+
+        assert!(
+            nodes_on < nodes_off,
+            "expected shifted all-ones mask rewrite to reduce live_nodes for source_width={source_width} count_width={count_width} start={start} width={width}; off={nodes_off} on={nodes_on} (depth off={depth_off} on={depth_on})"
+        );
+        assert!(
+            depth_on <= depth_off,
+            "expected shifted all-ones mask rewrite not to increase depth for source_width={source_width} count_width={count_width} start={start} width={width}; off={depth_off} on={depth_on} (nodes off={nodes_off} on={nodes_on})"
+        );
+    }
+}
+
+#[test]
+fn ir2gates_bf16_sticky_mask_shape_qor_regression() {
+    let ir_text = build_shifted_all_ones_slice_ir_text(12, 8, 3, 8);
+    let (nodes_off, depth_off) = stats_for_ir_text_via_ir2gates(&ir_text, false);
+    let (nodes_on, depth_on) = stats_for_ir_text_via_ir2gates(&ir_text, true);
+
+    assert!(
+        nodes_on < nodes_off,
+        "expected bf16 sticky-mask rewrite to reduce live_nodes; off={nodes_off} on={nodes_on} (depth off={depth_off} on={depth_on})"
+    );
+    assert!(
+        depth_on < depth_off,
+        "expected bf16 sticky-mask rewrite to reduce depth; off={depth_off} on={depth_on} (nodes off={nodes_off} on={nodes_on})"
+    );
+    assert_eq!((nodes_on, depth_on), (34, 5));
 }

@@ -9,7 +9,24 @@ use xlsynth_prover::prover::types::{AssertionSemantics, EquivParallelism, EquivR
 
 #[test]
 fn ext_mask_low_equivalent_to_desugared_export_form_and_exports_to_upstream() {
-    for (output_width, count_width) in [(0usize, 0usize), (1, 1), (3, 2), (8, 4), (9, 6), (16, 5)] {
+    // This proves the prover's direct `ext_mask_low` encoding against the
+    // normal-XLS-IR basis expression produced by extension desugaring. Each row
+    // keeps `count` symbolic; the sweep covers the width parameters.
+    for (output_width, count_width) in [
+        (0usize, 0usize),
+        (1, 0),
+        (1, 1),
+        (2, 1),
+        (3, 2),
+        (5, 3),
+        (8, 4),
+        (9, 6),
+        (12, 8),
+        (16, 5),
+        (17, 7),
+        (32, 8),
+        (64, 8),
+    ] {
         let ir = format!(
             "package test\n\nfn f(count: bits[{count_width}] id=1) -> bits[{output_width}] {{\n  ret r: bits[{output_width}] = ext_mask_low(count, id=2)\n}}\n"
         );

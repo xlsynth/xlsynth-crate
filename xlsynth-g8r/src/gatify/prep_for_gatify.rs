@@ -45,8 +45,9 @@ pub struct PrepForGatifyOptions {
     /// and greedily absorb/merge nested terms to a fixed point.
     pub enable_rewrite_nary_add: bool,
 
-    /// When true, rewrite `(bits[N]:1 << count) - bits[N]:1` style low-mask
-    /// idioms into `ext_mask_low`.
+    /// When true, rewrite low-mask idioms into `ext_mask_low`, including
+    /// `(bits[N]:1 << count) - bits[N]:1` and
+    /// `bits[N]:all_ones << count`.
     pub enable_rewrite_mask_low: bool,
 }
 
@@ -1261,7 +1262,7 @@ fn mask_low_count_for_shift_minus_one(
 /// Recognized forms:
 /// - `sub(shll(bits[N]:1, count), bits[N]:1)`
 /// - `add(shll(bits[N]:1, count), bits[N]:all_ones)`
-fn rewrite_mask_low_idioms_to_ext_mask_low(f: &mut ir::Fn) -> usize {
+fn rewrite_shift_minus_one_idioms_to_ext_mask_low(f: &mut ir::Fn) -> usize {
     let mut rewrites = 0usize;
     let original_len = f.nodes.len();
     for node_index in 0..original_len {
@@ -1298,6 +1299,60 @@ fn rewrite_mask_low_idioms_to_ext_mask_low(f: &mut ir::Fn) -> usize {
             Some(Type::Bits(output_width)),
         )
         .expect("prep_for_gatify: rewriting mask-low idiom to ext_mask_low failed");
+        rewrites += 1;
+    }
+    rewrites
+}
+
+/// Rewrites `shll(bits[N]:all_ones, count)` into `not(ext_mask_low(count))`.
+///
+/// The all-ones literal must be single-use so we can reuse that literal node
+/// for `ext_mask_low(count)` and keep the existing shift node as the `not`.
+/// This preserves textual/SSA ordering without reindexing and catches the
+/// common `bit_slice(shll(all_ones, count), ...)` sticky-mask shape.
+fn rewrite_shifted_all_ones_to_not_ext_mask_low(f: &mut ir::Fn) -> usize {
+    let use_counts = get_use_counts(f);
+    let mut rewrites = 0usize;
+    let original_len = f.nodes.len();
+    for node_index in 0..original_len {
+        let Some(output_width) = bits_width(&f.nodes[node_index].ty) else {
+            continue;
+        };
+        let payload = f.nodes[node_index].payload.clone();
+        let NodePayload::Binop(Binop::Shll, lhs, count) = payload else {
+            continue;
+        };
+        if !is_ubits_literal_all_ones_of_width(f, lhs, output_width) {
+            continue;
+        }
+        if !matches!(f.get_node(count).ty, Type::Bits(_)) {
+            continue;
+        }
+        if use_counts[lhs.index] != 1 {
+            continue;
+        }
+        if count.index >= lhs.index {
+            continue;
+        }
+
+        // This node no longer has the old literal's semantics, so give it a
+        // fresh text id to avoid applying stale known-bits range info.
+        f.nodes[lhs.index].text_id = next_text_id(f);
+        f.nodes[lhs.index].name = None;
+        ir_utils::replace_node_payload(
+            f,
+            lhs,
+            NodePayload::ExtMaskLow { count },
+            Some(Type::Bits(output_width)),
+        )
+        .expect("prep_for_gatify: rewriting all-ones literal to ext_mask_low failed");
+        ir_utils::replace_node_payload(
+            f,
+            NodeRef { index: node_index },
+            NodePayload::Unop(Unop::Not, lhs),
+            Some(Type::Bits(output_width)),
+        )
+        .expect("prep_for_gatify: rewriting shifted all-ones mask to not failed");
         rewrites += 1;
     }
     rewrites
@@ -1392,7 +1447,8 @@ pub fn prep_for_gatify(
         let _rewrites = rewrite_add_slice_carry_out_to_ext_carry_out(&mut cloned, range_info);
     }
     if options.enable_rewrite_mask_low {
-        let _rewrites = rewrite_mask_low_idioms_to_ext_mask_low(&mut cloned);
+        let mut _rewrites = rewrite_shift_minus_one_idioms_to_ext_mask_low(&mut cloned);
+        _rewrites += rewrite_shifted_all_ones_to_not_ext_mask_low(&mut cloned);
     }
     if options.enable_rewrite_nary_add {
         let _rewrites = rewrite_nary_adds_to_fixed_point(&mut cloned);
