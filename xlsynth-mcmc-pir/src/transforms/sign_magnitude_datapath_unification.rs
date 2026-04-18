@@ -109,30 +109,26 @@ impl SignMagnitudeDatapathUnificationTransform {
         left: NodeRef,
         right: NodeRef,
         depth: usize,
-    ) -> Result<NodeRef, String> {
+    ) -> Result<Option<NodeRef>, String> {
         if left == right {
-            return Ok(left);
-        }
-        if depth > 16 {
-            return Ok(Self::mk_sel2(
-                f,
-                selector,
-                f.get_node(left).ty.clone(),
-                left,
-                right,
-            ));
+            return Ok(Some(left));
         }
         let ty = f.get_node(left).ty.clone();
         if f.get_node(right).ty != ty {
-            return Ok(Self::mk_sel2(f, selector, ty, left, right));
+            return Ok(None);
+        }
+        if depth > 16 {
+            return Ok(Some(Self::mk_sel2(f, selector, ty, left, right)));
         }
         match (
             f.get_node(left).payload.clone(),
             f.get_node(right).payload.clone(),
         ) {
             (NodePayload::Unop(op_l, arg_l), NodePayload::Unop(op_r, arg_r)) if op_l == op_r => {
-                let arg = Self::unify_pair(f, selector, arg_l, arg_r, depth + 1)?;
-                Ok(mu::mk_unop(f, op_l, ty, arg))
+                let Some(arg) = Self::unify_pair(f, selector, arg_l, arg_r, depth + 1)? else {
+                    return Ok(Some(Self::mk_sel2(f, selector, ty, left, right)));
+                };
+                Ok(Some(mu::mk_unop(f, op_l, ty, arg)))
             }
             (
                 NodePayload::Binop(Binop::Add, a_l, b_l),
@@ -141,8 +137,10 @@ impl SignMagnitudeDatapathUnificationTransform {
                 let Type::Bits(width) = ty else {
                     unreachable!();
                 };
-                Ok(SelectedAddSubUnificationTransform::build_unified_add_sub(
-                    f, selector, a_l, b_l, width,
+                Ok(Some(
+                    SelectedAddSubUnificationTransform::build_unified_add_sub(
+                        f, selector, a_l, b_l, width,
+                    ),
                 ))
             }
             (
@@ -153,27 +151,36 @@ impl SignMagnitudeDatapathUnificationTransform {
                     unreachable!();
                 };
                 let pred_sub = mu::mk_unop(f, Unop::Not, Type::Bits(1), selector);
-                Ok(SelectedAddSubUnificationTransform::build_unified_add_sub(
-                    f, pred_sub, a_l, b_l, width,
+                Ok(Some(
+                    SelectedAddSubUnificationTransform::build_unified_add_sub(
+                        f, pred_sub, a_l, b_l, width,
+                    ),
                 ))
             }
             (NodePayload::Binop(op_l, a_l, b_l), NodePayload::Binop(op_r, a_r, b_r))
                 if op_l == op_r =>
             {
-                let a = Self::unify_pair(f, selector, a_l, a_r, depth + 1)?;
-                let b = Self::unify_pair(f, selector, b_l, b_r, depth + 1)?;
-                Ok(mu::mk_binop(f, op_l, ty, a, b))
+                let Some(a) = Self::unify_pair(f, selector, a_l, a_r, depth + 1)? else {
+                    return Ok(Some(Self::mk_sel2(f, selector, ty, left, right)));
+                };
+                let Some(b) = Self::unify_pair(f, selector, b_l, b_r, depth + 1)? else {
+                    return Ok(Some(Self::mk_sel2(f, selector, ty, left, right)));
+                };
+                Ok(Some(mu::mk_binop(f, op_l, ty, a, b)))
             }
             (NodePayload::Nary(op_l, ops_l), NodePayload::Nary(op_r, ops_r))
                 if op_l == op_r && ops_l.len() == ops_r.len() =>
             {
                 let mut ops = Vec::with_capacity(ops_l.len());
                 for (l, r) in ops_l.into_iter().zip(ops_r.into_iter()) {
-                    ops.push(Self::unify_pair(f, selector, l, r, depth + 1)?);
+                    let Some(op) = Self::unify_pair(f, selector, l, r, depth + 1)? else {
+                        return Ok(Some(Self::mk_sel2(f, selector, ty, left, right)));
+                    };
+                    ops.push(op);
                 }
-                Ok(mu::push_node(f, ty, NodePayload::Nary(op_l, ops)))
+                Ok(Some(mu::push_node(f, ty, NodePayload::Nary(op_l, ops))))
             }
-            _ => Ok(Self::mk_sel2(f, selector, ty, left, right)),
+            _ => Ok(Some(Self::mk_sel2(f, selector, ty, left, right))),
         }
     }
 }
@@ -247,7 +254,9 @@ impl PirTransform for SignMagnitudeDatapathUnificationTransform {
         if Self::cone_size(f, &cases, MAX_SIGN_MAG_CONE_NODES).is_none() {
             return Err("SignMagnitudeDatapathUnificationTransform: cone too large".to_string());
         }
-        let unified = Self::unify_pair(f, selector, cases[0], cases[1], 0)?;
+        let unified = Self::unify_pair(f, selector, cases[0], cases[1], 0)?.ok_or_else(|| {
+            "SignMagnitudeDatapathUnificationTransform: case types differ".to_string()
+        })?;
         f.get_node_mut(target).payload = NodePayload::Unop(Unop::Identity, unified);
         Ok(())
     }
@@ -278,5 +287,27 @@ mod tests {
             f.get_node(target).payload,
             NodePayload::Unop(Unop::Identity, _)
         ));
+    }
+
+    #[test]
+    fn falls_back_to_parent_sel_when_child_types_differ() {
+        let ir_text = r#"fn t(p: bits[1] id=1, x: bits[8] id=2, a: bits[2] id=3, b: bits[3] id=4, y: bits[8] id=5) -> bits[8] {
+  add.6: bits[8] = add(x, y, id=6)
+  l: bits[8] = shll(add.6, a, id=7)
+  sub.8: bits[8] = sub(x, y, id=8)
+  r: bits[8] = shll(sub.8, b, id=9)
+  ret out: bits[8] = sel(p, cases=[l, r], id=10)
+}"#;
+        let mut f = ir_parser::Parser::new(ir_text).parse_fn().unwrap();
+        let target = f.ret_node_ref.unwrap();
+        let t = SignMagnitudeDatapathUnificationTransform;
+        t.apply(&mut f, &TransformLocation::Node(target)).unwrap();
+        let NodePayload::Unop(Unop::Identity, unified) = f.get_node(target).payload else {
+            panic!("expected identity replacement");
+        };
+        let NodePayload::Sel { cases, .. } = &f.get_node(unified).payload else {
+            panic!("expected fallback select over parent shll nodes");
+        };
+        assert_eq!(f.get_node(cases[0]).ty, f.get_node(cases[1]).ty);
     }
 }

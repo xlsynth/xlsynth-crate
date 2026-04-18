@@ -102,7 +102,7 @@ impl PirTransform for BoundedDynamicShiftToStaticCandidatesTransform {
                     let Some(max_amount) = Self::amount_bound(f, amount) else {
                         continue;
                     };
-                    if max_amount + 1 > MAX_STATIC_SHIFT_CASES {
+                    if max_amount >= MAX_STATIC_SHIFT_CASES {
                         continue;
                     }
                     if mu::bits_width(f, *arg) == Some(x_width)
@@ -150,7 +150,7 @@ impl PirTransform for BoundedDynamicShiftToStaticCandidatesTransform {
                 let max_amount = Self::amount_bound(f, amount).ok_or_else(|| {
                     "BoundedDynamicShiftToStaticCandidatesTransform: amount not bounded".to_string()
                 })?;
-                if max_amount + 1 > MAX_STATIC_SHIFT_CASES
+                if max_amount >= MAX_STATIC_SHIFT_CASES
                     || !Self::slices_in_bounds(x_width, start, width, max_amount)
                 {
                     return Err("BoundedDynamicShiftToStaticCandidatesTransform: shift expansion out of bounds".to_string());
@@ -227,5 +227,19 @@ mod tests {
             BoundedDynamicShiftToStaticCandidatesTransform::static_candidate_parts(&f, target)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn rejects_huge_clamp_bound_without_overflowing_case_count() {
+        let ir_text = r#"fn t(x: bits[128] id=1, amount: bits[64] id=2) -> bits[8] {
+  max: bits[64] = literal(value=18446744073709551615, id=3)
+  pred: bits[1] = ult(amount, max, id=4)
+  clamped: bits[64] = sel(pred, cases=[max, amount], id=5)
+  sh: bits[128] = shrl(x, clamped, id=6)
+  ret out: bits[8] = bit_slice(sh, start=0, width=8, id=7)
+}"#;
+        let f = ir_parser::Parser::new(ir_text).parse_fn().unwrap();
+        let mut t = BoundedDynamicShiftToStaticCandidatesTransform;
+        assert!(t.find_candidates(&f).is_empty());
     }
 }
