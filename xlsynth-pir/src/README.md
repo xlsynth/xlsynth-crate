@@ -36,3 +36,8 @@ understand `NodeRef` indices can work without a special case.
 
 For more detail, consult the tests referenced above—they are a concise,
 executable reference for the invariants described here.
+
+## Extension ops
+
+PIR extension op syntax, semantics, desugaring, FFI-wrapper metadata and
+lowering references are documented in [../docs/extensions.md](../docs/extensions.md).
