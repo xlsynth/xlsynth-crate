@@ -406,7 +406,7 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     panic!("ext_mask_low result must be bits-typed");
                 };
                 let bitvec = if out_w == 0 {
-                    solver.zero(0)
+                    solver.zero_width()
                 } else {
                     let one = solver.one(out_w);
                     let shifted = solver.xls_shll(&one, &c.bitvec);
