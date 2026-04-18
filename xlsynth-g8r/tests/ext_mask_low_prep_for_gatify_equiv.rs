@@ -194,6 +194,15 @@ top fn wrong_one(count: bits[4] id=1) -> bits[8] {
 "#,
         r#"package sample
 
+top fn wrong_one_1b(count: bits[1] id=1) -> bits[1] {
+  zero: bits[1] = literal(value=0, id=2)
+  one: bits[1] = literal(value=1, id=3)
+  sh: bits[1] = shll(zero, count, id=4)
+  ret mask: bits[1] = sub(sh, one, id=5)
+}
+"#,
+        r#"package sample
+
 top fn wrong_shift(count: bits[4] id=1) -> bits[8] {
   one: bits[8] = literal(value=1, id=2)
   sh: bits[8] = shrl(one, count, id=3)

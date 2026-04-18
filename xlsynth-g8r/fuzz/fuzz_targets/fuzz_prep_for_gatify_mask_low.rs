@@ -117,20 +117,25 @@ top fn f(count: bits[{count_width}] id=1) -> bits[{output_width}] {{
             ),
             true,
         ),
-        MaskLowVariant::WrongShiftLhsLiteral => (
-            format!(
-                "package sample
+        MaskLowVariant::WrongShiftLhsLiteral => {
+            // For bits[1], zero is the only representable literal value that is
+            // not the required literal one.
+            let bad_lhs = if output_width == 1 { 0 } else { 2 };
+            (
+                format!(
+                    "package sample
 
 top fn f(count: bits[{count_width}] id=1) -> bits[{output_width}] {{
-  two: bits[{output_width}] = literal(value=2, id=2)
+  bad_lhs: bits[{output_width}] = literal(value={bad_lhs}, id=2)
   one: bits[{output_width}] = literal(value=1, id=3)
-  sh: bits[{output_width}] = shll(two, count, id=4)
+  sh: bits[{output_width}] = shll(bad_lhs, count, id=4)
   ret mask: bits[{output_width}] = sub(sh, one, id=5)
 }}
 "
-            ),
-            false,
-        ),
+                ),
+                false,
+            )
+        }
         MaskLowVariant::WrongSubRhsLiteral => {
             let bad_rhs = if output_width == 1 { 0 } else { 2 };
             (
