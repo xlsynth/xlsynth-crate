@@ -15,11 +15,14 @@ use xlsynth_pir::ir_utils::{compute_users, remap_payload_with};
 
 mod add_fission;
 mod add_sign_ext_u1_to_sub_zero_ext_u1;
+mod adjacent_threshold_compare;
+mod and_mask_neg_zext_to_sel;
 mod and_mask_sign_ext_to_sel;
 mod and_reduce_demorgan;
 mod bit_slice_add_sub_distribute;
 mod bit_slice_bit_slice_fold;
 mod bit_slice_concat_distribute;
+mod bit_slice_one_bit_shift_sel;
 mod bit_slice_sel_distribute;
 mod carry_split_add;
 mod clamp_chain_collapse;
@@ -47,6 +50,7 @@ mod nor_not_or_fold;
 mod not_eq_ne_flip;
 mod not_not_cancel;
 mod not_sel_distribute;
+mod one_bit_carry_count;
 mod or_mask_sign_ext_to_sel;
 mod priority_sel_1_to_sel;
 mod priority_sel_to_sel_chain;
@@ -71,11 +75,14 @@ mod zero_ext_sel_distribute;
 
 use add_fission::AddFissionTransform;
 use add_sign_ext_u1_to_sub_zero_ext_u1::AddSignExtU1ToSubZeroExtU1Transform;
+use adjacent_threshold_compare::AdjacentThresholdCompareTransform;
+use and_mask_neg_zext_to_sel::AndMaskNegZextToSelTransform;
 use and_mask_sign_ext_to_sel::AndMaskSignExtToSelTransform;
 use and_reduce_demorgan::AndReduceDeMorganTransform;
 use bit_slice_add_sub_distribute::BitSliceAddSubDistributeTransform;
 use bit_slice_bit_slice_fold::BitSliceBitSliceFoldTransform;
 use bit_slice_concat_distribute::BitSliceConcatDistributeTransform;
+use bit_slice_one_bit_shift_sel::BitSliceOneBitShiftSelTransform;
 use bit_slice_sel_distribute::BitSliceSelDistributeTransform;
 use carry_split_add::CarrySplitAddTransform;
 use clamp_chain_collapse::ClampChainCollapseTransform;
@@ -110,6 +117,7 @@ use nor_not_or_fold::NorNotOrFoldTransform;
 use not_eq_ne_flip::NotEqNeFlipTransform;
 use not_not_cancel::NotNotCancelTransform;
 use not_sel_distribute::NotSelDistributeTransform;
+use one_bit_carry_count::OneBitCarryCountTransform;
 use or_mask_sign_ext_to_sel::OrMaskSignExtToSelTransform;
 use priority_sel_1_to_sel::PrioritySel1ToSelTransform;
 use priority_sel_to_sel_chain::PrioritySelToSelChainTransform;
@@ -156,6 +164,9 @@ pub enum PirTransformKind {
     /// Canonicalize `sel` over comparisons selecting between the compared
     /// operands.
     CmpSelCanon,
+    /// Convert compares against `k + zero_ext(p)` to/from a select between
+    /// compares against adjacent thresholds.
+    AdjacentThresholdCompare,
     /// Fold a narrow add from a matching wider add on zero-extended operands.
     NarrowAddFromWideAddFold,
     /// Normalize subtraction via add+negation (two's complement) and reverse:
@@ -171,6 +182,9 @@ pub enum PirTransformKind {
     /// explicit carry. This is a structure-changing move intended to affect
     /// depth/product.
     CarrySplitAdd,
+    /// Count two one-bit values as an explicit carry/sum concat and reverse:
+    /// `add(zero_ext(a,2), zero_ext(b,2)) ↔ concat(and(a,b), xor(a,b))`
+    OneBitCarryCount,
     /// Introduce carry-save form for `add(a, b)`:
     /// `add(a, b) ↔ add(xor(a, b), shll(and(a, b), 1))`.
     AddFission,
@@ -224,6 +238,11 @@ pub enum PirTransformKind {
     /// `bit_slice(sel(p, cases=[a, b]), start=s, width=w)
     ///    ↔ sel(p, cases=[bit_slice(a,s,w), bit_slice(b,s,w)])`
     BitSliceSelDistribute,
+    /// Convert a one-bit logical shift before a static slice to/from a select
+    /// over adjacent static slices:
+    /// `bit_slice(shrl(x,p),s,w) ↔ sel(p,[bit_slice(x,s,w),
+    /// bit_slice(x,s+1,w)])`
+    BitSliceOneBitShiftSel,
     /// Distribute sign_ext over select (and reverse folding form):
     /// `sign_ext(sel(p, cases=[a, b]), new_bit_count=n)
     ///    ↔ sel(p, cases=[sign_ext(a,n), sign_ext(b,n)])`
@@ -238,6 +257,9 @@ pub enum PirTransformKind {
     /// Treat `sign_ext(b)` (b:bits[1]) as an all-ones/zeros mask and convert
     /// to/from sel: `and(x, sign_ext(b,w)) ↔ sel(b, cases=[0_w, x])`
     AndMaskSignExtToSel,
+    /// Treat `-zero_ext(b)` (b:bits[1]) as an all-ones/zeros mask and convert
+    /// to/from sel: `and(x, sub(0_w, zero_ext(b,w))) ↔ sel(b, cases=[0_w, x])`
+    AndMaskNegZextToSel,
     /// Rewire users between sibling wide/narrow adds via adapters.
     RewireUsersToSiblingAdd,
     /// `xor(x, sign_ext(b,w))` is a conditional invert; convert to/from sel:
@@ -365,11 +387,13 @@ impl fmt::Display for PirTransformKind {
             PirTransformKind::EqNeAddLiteralShift => write!(f, "EqNeAddLiteralShift"),
             PirTransformKind::CmpSwap => write!(f, "CmpSwap"),
             PirTransformKind::CmpSelCanon => write!(f, "CmpSelCanon"),
+            PirTransformKind::AdjacentThresholdCompare => write!(f, "AdjacentThresholdCompare"),
             PirTransformKind::NarrowAddFromWideAddFold => write!(f, "NarrowAddFromWideAddFold"),
             PirTransformKind::SubToAddNeg => write!(f, "SubToAddNeg"),
             PirTransformKind::NegSubSwap => write!(f, "NegSubSwap"),
             PirTransformKind::ReassociateAddSub => write!(f, "ReassociateAddSub"),
             PirTransformKind::CarrySplitAdd => write!(f, "CarrySplitAdd"),
+            PirTransformKind::OneBitCarryCount => write!(f, "OneBitCarryCount"),
             PirTransformKind::AddFission => write!(f, "AddFission"),
             PirTransformKind::AddToExtNaryAdd => write!(f, "AddToExtNaryAdd"),
             PirTransformKind::SubToExtNaryAdd => write!(f, "SubToExtNaryAdd"),
@@ -410,10 +434,12 @@ impl fmt::Display for PirTransformKind {
             PirTransformKind::NegSelDistribute => write!(f, "NegSelDistribute"),
             PirTransformKind::BitSliceAddSubDistribute => write!(f, "BitSliceAddSubDistribute"),
             PirTransformKind::BitSliceSelDistribute => write!(f, "BitSliceSelDistribute"),
+            PirTransformKind::BitSliceOneBitShiftSel => write!(f, "BitSliceOneBitShiftSel"),
             PirTransformKind::SignExtSelDistribute => write!(f, "SignExtSelDistribute"),
             PirTransformKind::ZeroExtSelDistribute => write!(f, "ZeroExtSelDistribute"),
             PirTransformKind::PrioritySel1ToSel => write!(f, "PrioritySel1ToSel"),
             PirTransformKind::AndMaskSignExtToSel => write!(f, "AndMaskSignExtToSel"),
+            PirTransformKind::AndMaskNegZextToSel => write!(f, "AndMaskNegZextToSel"),
             PirTransformKind::RewireUsersToSiblingAdd => write!(f, "RewireUsersToSiblingAdd"),
             PirTransformKind::XorMaskSignExtToSelNot => write!(f, "XorMaskSignExtToSelNot"),
             PirTransformKind::OrMaskSignExtToSel => write!(f, "OrMaskSignExtToSel"),
@@ -505,11 +531,13 @@ pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
         Box::new(EqNeAddLiteralShiftTransform),
         Box::new(CmpSwapTransform),
         Box::new(CmpSelCanonTransform),
+        Box::new(AdjacentThresholdCompareTransform),
         Box::new(NarrowAddFromWideAddFoldTransform),
         Box::new(SubToAddNegTransform),
         Box::new(NegSubSwapTransform),
         Box::new(ReassociateAddSubTransform),
         Box::new(CarrySplitAddTransform),
+        Box::new(OneBitCarryCountTransform),
         Box::new(AddFissionTransform),
         Box::new(AddToExtNaryAddTransform),
         Box::new(SubToExtNaryAddTransform),
@@ -530,10 +558,12 @@ pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
         Box::new(NegSelDistributeTransform),
         Box::new(BitSliceAddSubDistributeTransform),
         Box::new(BitSliceSelDistributeTransform),
+        Box::new(BitSliceOneBitShiftSelTransform),
         Box::new(SignExtSelDistributeTransform),
         Box::new(ZeroExtSelDistributeTransform),
         Box::new(PrioritySel1ToSelTransform),
         Box::new(AndMaskSignExtToSelTransform),
+        Box::new(AndMaskNegZextToSelTransform),
         Box::new(RewireUsersToSiblingAddTransform),
         Box::new(XorMaskSignExtToSelNotTransform),
         Box::new(OrMaskSignExtToSelTransform),
@@ -581,6 +611,28 @@ pub fn build_transform_weights<T: AsRef<[Box<dyn PirTransform>]>>(transforms: T)
 mod tests {
     use super::*;
     use xlsynth_pir::ir_parser;
+
+    #[test]
+    fn new_local_bf16_transforms_are_registered_and_displayed() {
+        let kinds: HashSet<PirTransformKind> =
+            get_all_pir_transforms().iter().map(|t| t.kind()).collect();
+
+        for (kind, name) in [
+            (PirTransformKind::AndMaskNegZextToSel, "AndMaskNegZextToSel"),
+            (
+                PirTransformKind::AdjacentThresholdCompare,
+                "AdjacentThresholdCompare",
+            ),
+            (
+                PirTransformKind::BitSliceOneBitShiftSel,
+                "BitSliceOneBitShiftSel",
+            ),
+            (PirTransformKind::OneBitCarryCount, "OneBitCarryCount"),
+        ] {
+            assert!(kinds.contains(&kind), "{name} should be registered");
+            assert_eq!(kind.to_string(), name);
+        }
+    }
 
     #[test]
     fn eq_sel_distribute_expands_eq_of_sel() {
