@@ -49,6 +49,7 @@ mod dslx2pipeline_eco;
 mod dslx2sv_types;
 mod dslx_equiv;
 mod dslx_fn_eval;
+mod dslx_fn_prove_assertions;
 mod dslx_g8r_stats;
 mod dslx_list_fns;
 mod dslx_show;
@@ -588,6 +589,58 @@ fn main() {
                             "When using --eval_mode=pir-interp, dump all intermediate PIR node values to stdout",
                         )
                         .action(ArgAction::SetTrue),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("dslx-fn-prove-assertions")
+                .about("Prove that assertions reachable from a DSLX function cannot fail")
+                .add_dslx_input_args(true)
+                .arg(
+                    clap::Arg::new("solver")
+                        .long("solver")
+                        .value_name("SOLVER")
+                        .help("Select solver backend")
+                        .value_parser([
+                            "auto",
+                            #[cfg(feature = "has-easy-smt")]
+                            "z3-binary",
+                            #[cfg(feature = "has-easy-smt")]
+                            "bitwuzla-binary",
+                            #[cfg(feature = "has-easy-smt")]
+                            "boolector-binary",
+                            #[cfg(feature = "has-bitwuzla")]
+                            "bitwuzla",
+                            #[cfg(feature = "has-boolector")]
+                            "boolector",
+                            "toolchain",
+                        ])
+                        .default_value("auto")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("assert_label_filter")
+                        .long("assert-label-filter")
+                        .value_name("REGEX")
+                        .help("Include only assertions whose label matches this regex (use `|` to combine labels)")
+                        .action(clap::ArgAction::Set),
+                )
+                .add_bool_arg(
+                    "assume-enum-in-bound",
+                    "Constrain enum-typed top parameters to declared enum values (default true)",
+                )
+                .arg(
+                    clap::Arg::new("uf")
+                        .long("uf")
+                        .value_name("func_name:uf_name")
+                        .help("Treat DSLX function as uninterpreted: format <func_name>:<uf_name> (repeatable). Assertions inside mapped functions are ignored.")
+                        .action(clap::ArgAction::Append),
+                )
+                .arg(
+                    clap::Arg::new("output_json")
+                        .long("output_json")
+                        .value_name("PATH")
+                        .help("Write the JSON result to PATH")
+                        .action(clap::ArgAction::Set),
                 ),
         )
         .subcommand(
@@ -3085,6 +3138,9 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("dslx-fn-eval", subm)) => {
             dslx_fn_eval::handle_dslx_fn_eval(subm, &config);
+        }
+        Some(("dslx-fn-prove-assertions", subm)) => {
+            dslx_fn_prove_assertions::handle_dslx_fn_prove_assertions(subm, &config);
         }
         Some(("dslx-show", subm)) => {
             dslx_show::handle_dslx_show(subm, &config);

@@ -8,7 +8,7 @@
 //!
 //! JSON DSL overview
 //! - A single task is an object with a `kind` discriminator (`ir-equiv`,
-//!   `dslx-equiv`, `prove-quickcheck`).
+//!   `dslx-equiv`, `prove-quickcheck`, `dslx-fn-prove-assertions`).
 //! - Tasks can be composed into groups with `kind` = `all` | `any` | `first`
 //!   and a `tasks` array.
 //!
@@ -127,6 +127,21 @@ pub struct ProveQuickcheckConfig {
     /// Include only assertions whose label matches this regex.
     pub assert_label_filter: Option<String>,
     pub json: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct DslxFnProveAssertionsConfig {
+    pub dslx_input_file: PathBuf,
+    pub dslx_top: String,
+    pub dslx_path: Option<Vec<PathBuf>>,
+    pub dslx_stdlib_path: Option<PathBuf>,
+    pub solver: Option<SolverChoice>,
+    /// Include only assertions whose label matches this regex.
+    pub assert_label_filter: Option<String>,
+    pub assume_enum_in_bound: Option<bool>,
+    /// Treat DSLX function as uninterpreted function (repeated), entries
+    /// "func_name:uf_name".
+    pub uf: Option<Vec<String>>,
 }
 
 pub trait ToDriverCommand {
@@ -305,6 +320,46 @@ impl ToDriverCommand for ProveQuickcheckConfig {
     }
 }
 
+impl ToDriverCommand for DslxFnProveAssertionsConfig {
+    fn to_command(&self) -> Command {
+        let exe = resolve_driver_exe();
+        let mut cmd = Command::new(exe);
+        cmd.arg("dslx-fn-prove-assertions");
+        add_flag(
+            &mut cmd,
+            "dslx_input_file",
+            &self.dslx_input_file.display().to_string(),
+        );
+        add_flag(&mut cmd, "dslx_top", &self.dslx_top);
+        if let Some(paths) = &self.dslx_path {
+            if !paths.is_empty() {
+                let joined = paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(";");
+                add_flag(&mut cmd, "dslx_path", &joined);
+            }
+        }
+        if let Some(stdlib) = &self.dslx_stdlib_path {
+            add_flag(&mut cmd, "dslx_stdlib_path", &stdlib.display().to_string());
+        }
+        if let Some(solver) = &self.solver {
+            add_flag(&mut cmd, "solver", &solver.to_string());
+        }
+        if let Some(pat) = &self.assert_label_filter {
+            add_flag(&mut cmd, "assert-label-filter", pat);
+        }
+        add_bool(&mut cmd, "assume-enum-in-bound", self.assume_enum_in_bound);
+        if let Some(list) = &self.uf {
+            for entry in list {
+                add_flag(&mut cmd, "uf", entry);
+            }
+        }
+        cmd
+    }
+}
+
 // -------------------------------
 // Fake task definition (available for fuzzing, tests, and local use)
 // -------------------------------
@@ -398,6 +453,11 @@ pub enum ProverTask {
         #[serde(flatten)]
         config: ProveQuickcheckConfig,
     },
+    #[serde(rename = "dslx-fn-prove-assertions")]
+    DslxFnProveAssertions {
+        #[serde(flatten)]
+        config: DslxFnProveAssertionsConfig,
+    },
     #[cfg(feature = "enable-fake-task")]
     #[serde(rename = "fake")]
     Fake {
@@ -415,6 +475,7 @@ impl ToDriverCommand for ProverTask {
             ProverTask::IrEquiv { config, .. } => config.to_command(),
             ProverTask::DslxEquiv { config, .. } => config.to_command(),
             ProverTask::ProveQuickcheck { config, .. } => config.to_command(),
+            ProverTask::DslxFnProveAssertions { config, .. } => config.to_command(),
             #[cfg(feature = "enable-fake-task")]
             ProverTask::Fake { config, .. } => config.to_command(),
         }
@@ -600,6 +661,43 @@ mod tests {
     }
 
     #[test]
+    fn test_dslx_fn_prove_assertions_to_command_args() {
+        let cfg = DslxFnProveAssertionsConfig {
+            dslx_input_file: "assertions.x".into(),
+            dslx_top: "main".into(),
+            dslx_path: Some(vec!["a".into(), "b".into()]),
+            dslx_stdlib_path: Some("stdlib".into()),
+            solver: Some(SolverChoice::Auto),
+            assert_label_filter: Some("red|blue".into()),
+            assume_enum_in_bound: Some(false),
+            uf: Some(vec!["helper:F".into()]),
+        };
+        let got = args_of(cfg.to_command());
+        assert_eq!(
+            got,
+            vec![
+                "dslx-fn-prove-assertions",
+                "--dslx_input_file",
+                "assertions.x",
+                "--dslx_top",
+                "main",
+                "--dslx_path",
+                "a;b",
+                "--dslx_stdlib_path",
+                "stdlib",
+                "--solver",
+                "auto",
+                "--assert-label-filter",
+                "red|blue",
+                "--assume-enum-in-bound",
+                "false",
+                "--uf",
+                "helper:F",
+            ]
+        );
+    }
+
+    #[test]
     fn test_serde_ir_equiv_parse() {
         let json = r#"{
             "lhs_ir_file": "lhs.ir",
@@ -645,10 +743,16 @@ mod tests {
             "assertion_semantics": "assume",
             "solver": "toolchain",
             "json": true
+          },
+          {
+            "kind": "dslx-fn-prove-assertions",
+            "dslx_input_file": "assertions.x",
+            "dslx_top": "main",
+            "solver": "auto"
           }
         ]"#;
         let tasks: Vec<ProverTask> = serde_json::from_str(json).unwrap();
-        assert_eq!(tasks.len(), 3);
+        assert_eq!(tasks.len(), 4);
         // Smoke test command arg heads
         let head: Vec<String> = args_of(tasks[0].to_command());
         assert_eq!(head[0], "ir-equiv");
@@ -656,6 +760,8 @@ mod tests {
         assert_eq!(head[0], "dslx-equiv");
         let head: Vec<String> = args_of(tasks[2].to_command());
         assert_eq!(head[0], "prove-quickcheck");
+        let head: Vec<String> = args_of(tasks[3].to_command());
+        assert_eq!(head[0], "dslx-fn-prove-assertions");
     }
 
     // -----------------------
@@ -669,7 +775,8 @@ mod tests {
           "tasks": [
             { "kind": "ir-equiv", "lhs_ir_file": "lhs.ir", "rhs_ir_file": "rhs.ir" },
             { "kind": "dslx-equiv", "lhs_dslx_file": "lhs.x", "rhs_dslx_file": "rhs.x", "dslx_top": "foo" },
-            { "kind": "prove-quickcheck", "dslx_input_file": "qc.x" }
+            { "kind": "prove-quickcheck", "dslx_input_file": "qc.x" },
+            { "kind": "dslx-fn-prove-assertions", "dslx_input_file": "assertions.x", "dslx_top": "main" }
           ]
         }"#;
         let plan: ProverPlan = serde_json::from_str(json).unwrap();
@@ -679,9 +786,17 @@ mod tests {
                 tasks,
                 keep_running_till_finish,
             } => {
-                assert_eq!(tasks.len(), 3);
+                assert_eq!(tasks.len(), 4);
                 let heads: Vec<String> = tasks.iter().map(head_of).collect();
-                assert_eq!(heads, vec!["ir-equiv", "dslx-equiv", "prove-quickcheck"]);
+                assert_eq!(
+                    heads,
+                    vec![
+                        "ir-equiv",
+                        "dslx-equiv",
+                        "prove-quickcheck",
+                        "dslx-fn-prove-assertions"
+                    ]
+                );
                 assert!(!keep_running_till_finish);
             }
             _ => panic!("expected ProverPlan::Group(All)"),

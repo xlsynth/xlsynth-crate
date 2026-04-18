@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod dslx_assertions;
 pub mod dslx_equiv;
 pub mod dslx_specializer;
 pub mod dslx_tactics;

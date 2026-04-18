@@ -1846,6 +1846,51 @@ root
 - JSON vs JSONL – JSONL is one object per line (no trailing commas).
 - Inline `Text` fragments – ensure names in code match `func_name`.
 
+### `dslx-fn-prove-assertions`
+
+Proves that every selected DSLX `assert!` reachable from a selected function
+cannot fail for any valid top-level input.
+
+```shell
+xlsynth-driver dslx-fn-prove-assertions \
+  --dslx_input_file sample.x \
+  --dslx_top main
+```
+
+- Inputs: `--dslx_input_file <FILE>` and `--dslx_top <FUNC>` select the DSLX module and entry point.
+- Backend: `--solver <...>` selects the SMT backend. `auto` chooses only supported in-process SMT backends and errors when none are available. `toolchain` mode is not currently supported for this command because the flow proves an IR-level wrapper with fixed implicit activation.
+- Assertion filter: `--assert-label-filter <REGEX>` includes only assertions whose label matches the regex.
+- Enum inputs: `--assume-enum-in-bound <BOOL>` defaults to `true`, constraining enum-typed top parameters to declared enum members instead of all lowered bit patterns.
+- UF mapping: repeat `--uf <func_name:uf_name>` to treat helper functions as uninterpreted. Assertions inside UF-mapped functions are ignored during proving.
+- Output: `--output_json <PATH>` writes a structured proof result.
+
+On success the command exits `0` and prints that all selected assertions were
+proved. On failure it exits nonzero and reports one solver-found counterexample,
+including concrete top inputs and the violated assertion label/message when
+available.
+
+JSON output has the form:
+
+```json
+{
+  "success": false,
+  "time_micros": 1234,
+  "counterexample": {
+    "inputs": [
+      { "name": "x", "value": "bits[32]:11" }
+    ],
+    "output": {
+      "value": "bits[1]:1",
+      "assertion_label": "x_lt_10",
+      "assertion_message": "x_lt_10"
+    }
+  },
+  "error_str": null
+}
+```
+
+For successful proofs, `counterexample` is `null`.
+
 ### `prove-quickcheck`
 
 Proves that DSLX `#[quickcheck]` functions always return true.
@@ -1912,7 +1957,7 @@ The driver exposes a small, composable JSON DSL for describing prover tasks, use
 
 Top-level forms:
 
-- Task: an object with `kind` ∈ {`ir-equiv`, `dslx-equiv`, `prove-quickcheck`} and fields below.
+- Task: an object with `kind` ∈ {`ir-equiv`, `dslx-equiv`, `prove-quickcheck`, `dslx-fn-prove-assertions`} and fields below.
 - Group: an object with `kind` ∈ {`all`, `any`, `first`} and `tasks` = array of the same top-level forms (recursive).
 
 Example: single task
@@ -1943,7 +1988,8 @@ Example: group composition
   "tasks": [
     { "kind": "ir-equiv", "lhs_ir_file": "lhs.ir", "rhs_ir_file": "rhs.ir" },
     { "kind": "dslx-equiv", "lhs_dslx_file": "lhs.x", "rhs_dslx_file": "rhs.x", "dslx_top": "foo" },
-    { "kind": "prove-quickcheck", "dslx_input_file": "qc.x" }
+    { "kind": "prove-quickcheck", "dslx_input_file": "qc.x" },
+    { "kind": "dslx-fn-prove-assertions", "dslx_input_file": "assertions.x", "dslx_top": "main" }
   ]
 }
 ```
@@ -1991,7 +2037,8 @@ Tree structure example
       "keep_running_till_finish": false,
       "tasks": [
         { "kind": "dslx-equiv", "lhs_dslx_file": "lhs.x", "rhs_dslx_file": "rhs.x", "dslx_top": "foo" },
-        { "kind": "prove-quickcheck", "dslx_input_file": "qc.x", "test_filter": ".*prop" }
+        { "kind": "prove-quickcheck", "dslx_input_file": "qc.x", "test_filter": ".*prop" },
+        { "kind": "dslx-fn-prove-assertions", "dslx_input_file": "assertions.x", "dslx_top": "main" }
       ]
     }
   ]
@@ -2005,7 +2052,8 @@ first
 ├─ ir-equiv(lhs.ir, rhs.ir)
 └─ any
    ├─ dslx-equiv(lhs.x, rhs.x)
-   └─ prove-quickcheck(qc.x)
+   ├─ prove-quickcheck(qc.x)
+   └─ dslx-fn-prove-assertions(assertions.x)
 ```
 
 Schema details
@@ -2065,6 +2113,18 @@ Schema details
     - `uf`: array of strings, each "`<func_name>:<uf_name>`". Functions sharing the same `uf_name` are assumed equivalent; assertions inside them are ignored.
     - `assert_label_filter`: string (regex)
     - `json`: bool
+    - `timeout_ms`: integer (milliseconds) — optional per-task timeout
+
+- `kind: "dslx-fn-prove-assertions"` (DslxFnProveAssertionsConfig)
+
+  - Required: `dslx_input_file` (path), `dslx_top` (string)
+  - Optional:
+    - `dslx_path`: array of paths (joined with `;`)
+    - `dslx_stdlib_path`: path
+    - `solver`: same values as above, except `toolchain` is rejected by this command. `auto` requires an available in-process SMT backend for this task.
+    - `assert_label_filter`: string (regex)
+    - `assume_enum_in_bound`: bool
+    - `uf`: array of strings, each "`<func_name>:<uf_name>`". Functions sharing the same `uf_name` are assumed equivalent; assertions inside them are ignored.
     - `timeout_ms`: integer (milliseconds) — optional per-task timeout
 
 Mapping to CLI

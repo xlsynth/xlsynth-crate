@@ -233,4 +233,9 @@ When building or running tools in an offline environment (e.g., Codex Web, remot
 - Ensure pre-fetched XLS artifacts are available via environment variables:
   - `XLS_DSO_PATH`: directory/path to the XLS dynamic library used for linking and rpath.
   - `DSLX_STDLIB_PATH`: path to the DSLX stdlib directory (ending in `.../xls/dslx/stdlib/`).
+- Do not conflate the Rust crate version (`crate:vX.Y.Z`) with the XLS DSO/tools
+  release tag (`dso:vA.B.C`). They are distinct version axes related by the
+  compatibility map; CI and scripts that need the DSO/tools tag should resolve
+  it through `scripts/get_required_libxls_dso_and_tools_release_tag.py` (or the
+  underlying compatibility data), not derive it from the crate version.
 - Our `xlsynth-sys/build.rs` will error early under `CARGO_NET_OFFLINE=1` if downloads would be required and these variables are not provided.
