@@ -72,6 +72,10 @@ pub(super) fn mk_decode(f: &mut IrFn, arg: NodeRef, width: usize) -> NodeRef {
     push_node(f, Type::Bits(width), NodePayload::Decode { arg, width })
 }
 
+pub(super) fn mk_ext_mask_low(f: &mut IrFn, count: NodeRef, width: usize) -> NodeRef {
+    push_node(f, Type::Bits(width), NodePayload::ExtMaskLow { count })
+}
+
 #[allow(dead_code)]
 pub(super) fn mk_one_hot_sel(
     f: &mut IrFn,
@@ -111,17 +115,71 @@ pub(super) fn mk_literal_ubits(f: &mut IrFn, width: usize, value: u64) -> NodeRe
     )
 }
 
+pub(super) fn mk_literal_usize(f: &mut IrFn, width: usize, value: usize) -> NodeRef {
+    let bits = (0..width)
+        .map(|i| {
+            if i < usize::BITS as usize {
+                ((value >> i) & 1) != 0
+            } else {
+                false
+            }
+        })
+        .collect::<Vec<_>>();
+    push_node(
+        f,
+        Type::Bits(width),
+        NodePayload::Literal(IrValue::from_bits(&IrBits::from_lsb_is_0(&bits))),
+    )
+}
+
+pub(super) fn mk_literal_all_ones(f: &mut IrFn, width: usize) -> NodeRef {
+    push_node(
+        f,
+        Type::Bits(width),
+        NodePayload::Literal(IrValue::from_bits(&IrBits::from_lsb_is_0(&vec![
+            true;
+            width
+        ]))),
+    )
+}
+
+pub(super) fn is_literal_one(f: &IrFn, r: NodeRef, width: usize) -> bool {
+    if !is_bits_w(f, r, width) {
+        return false;
+    }
+    let NodePayload::Literal(value) = &f.get_node(r).payload else {
+        return false;
+    };
+    value.bits_equals_u64_value(1)
+}
+
+pub(super) fn is_literal_all_ones(f: &IrFn, r: NodeRef, width: usize) -> bool {
+    if !is_bits_w(f, r, width) {
+        return false;
+    }
+    let NodePayload::Literal(value) = &f.get_node(r).payload else {
+        return false;
+    };
+    let Ok(bits) = value.to_bits() else {
+        return false;
+    };
+    bits.get_bit_count() == width && (0..width).all(|i| bits.get_bit(i).unwrap_or(false))
+}
+
 pub(super) fn literal_usize(f: &IrFn, r: NodeRef) -> Option<usize> {
     let NodePayload::Literal(v) = &f.get_node(r).payload else {
         return None;
     };
     let bits = v.to_bits().ok()?;
-    if bits.get_bit_count() > usize::BITS as usize {
-        return None;
-    }
     let mut value = 0usize;
     for i in 0..bits.get_bit_count() {
-        if bits.get_bit(i).ok()? {
+        if !bits.get_bit(i).ok()? {
+            continue;
+        }
+        if i >= usize::BITS as usize {
+            return None;
+        }
+        {
             value |= 1usize.checked_shl(i as u32)?;
         }
     }

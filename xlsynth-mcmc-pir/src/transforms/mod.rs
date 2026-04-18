@@ -31,6 +31,7 @@ mod clamp_chain_collapse;
 mod clone_multi_user_node;
 mod cmp_sel_canon;
 mod cmp_swap;
+mod compare_ramp_to_mask_low;
 mod concat_sel_hoist;
 mod const_shll_concat_zero_fold;
 mod csa_fuse_into_consumer;
@@ -69,7 +70,9 @@ mod sel_swap_arms_by_not_pred;
 mod selected_add_sub_unification;
 mod shift_clamp;
 mod shift_hoist;
+mod shift_one_minus_one_to_mask_low;
 mod shift_reclamp;
+mod shifted_all_ones_to_not_mask_low;
 mod sign_ext_sel_distribute;
 mod sign_magnitude_datapath_unification;
 mod smul_sign_ext_u1_to_sel_neg;
@@ -98,6 +101,7 @@ use clamp_chain_collapse::ClampChainCollapseTransform;
 use clone_multi_user_node::CloneMultiUserNodeTransform;
 use cmp_sel_canon::CmpSelCanonTransform;
 use cmp_swap::CmpSwapTransform;
+use compare_ramp_to_mask_low::CompareRampToMaskLowTransform;
 use concat_sel_hoist::ConcatSelHoistTransform;
 use const_shll_concat_zero_fold::ConstShllConcatZeroFoldTransform;
 use csa_fuse_into_consumer::CsaFuseIntoConsumerTransform;
@@ -142,7 +146,9 @@ use sel_swap_arms_by_not_pred::SelSwapArmsByNotPredTransform;
 use selected_add_sub_unification::SelectedAddSubUnificationTransform;
 use shift_clamp::ShiftClampTransform;
 use shift_hoist::ShiftHoistTransform;
+use shift_one_minus_one_to_mask_low::ShiftOneMinusOneToMaskLowTransform;
 use shift_reclamp::ShiftReclampTransform;
+use shifted_all_ones_to_not_mask_low::ShiftedAllOnesToNotMaskLowTransform;
 use sign_ext_sel_distribute::SignExtSelDistributeTransform;
 use sign_magnitude_datapath_unification::SignMagnitudeDatapathUnificationTransform;
 use smul_sign_ext_u1_to_sel_neg::SmulSignExtU1ToSelNegTransform;
@@ -274,6 +280,14 @@ pub enum PirTransformKind {
     /// Oracle-backed recursive sharing for sign/magnitude-style two-arm
     /// arithmetic datapaths.
     SignMagnitudeDatapathUnification,
+    /// Convert `(bits[N]:1 << count) - bits[N]:1` low-mask idioms to/from
+    /// `ext_mask_low(count)`.
+    ShiftOneMinusOneToMaskLow,
+    /// Convert `bits[N]:all_ones << count` to/from `not(ext_mask_low(count))`.
+    ShiftedAllOnesToNotMaskLow,
+    /// Convert exact `count > bit_index` mask ramps to/from
+    /// `ext_mask_low(count)`.
+    CompareRampToMaskLow,
     /// Distribute sign_ext over select (and reverse folding form):
     /// `sign_ext(sel(p, cases=[a, b]), new_bit_count=n)
     ///    ↔ sel(p, cases=[sign_ext(a,n), sign_ext(b,n)])`
@@ -480,6 +494,13 @@ impl fmt::Display for PirTransformKind {
             PirTransformKind::SignMagnitudeDatapathUnification => {
                 write!(f, "SignMagnitudeDatapathUnification")
             }
+            PirTransformKind::ShiftOneMinusOneToMaskLow => {
+                write!(f, "ShiftOneMinusOneToMaskLow")
+            }
+            PirTransformKind::ShiftedAllOnesToNotMaskLow => {
+                write!(f, "ShiftedAllOnesToNotMaskLow")
+            }
+            PirTransformKind::CompareRampToMaskLow => write!(f, "CompareRampToMaskLow"),
             PirTransformKind::SignExtSelDistribute => write!(f, "SignExtSelDistribute"),
             PirTransformKind::ZeroExtSelDistribute => write!(f, "ZeroExtSelDistribute"),
             PirTransformKind::PrioritySel1ToSel => write!(f, "PrioritySel1ToSel"),
@@ -610,6 +631,9 @@ pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
         Box::new(BoundedNormalizationToCandidateSelectTransform),
         Box::new(SelectedAddSubUnificationTransform),
         Box::new(SignMagnitudeDatapathUnificationTransform),
+        Box::new(ShiftOneMinusOneToMaskLowTransform),
+        Box::new(ShiftedAllOnesToNotMaskLowTransform),
+        Box::new(CompareRampToMaskLowTransform),
         Box::new(SignExtSelDistributeTransform),
         Box::new(ZeroExtSelDistributeTransform),
         Box::new(PrioritySel1ToSelTransform),
@@ -698,6 +722,18 @@ mod tests {
             (
                 PirTransformKind::SignMagnitudeDatapathUnification,
                 "SignMagnitudeDatapathUnification",
+            ),
+            (
+                PirTransformKind::ShiftOneMinusOneToMaskLow,
+                "ShiftOneMinusOneToMaskLow",
+            ),
+            (
+                PirTransformKind::ShiftedAllOnesToNotMaskLow,
+                "ShiftedAllOnesToNotMaskLow",
+            ),
+            (
+                PirTransformKind::CompareRampToMaskLow,
+                "CompareRampToMaskLow",
             ),
             (PirTransformKind::OneBitCarryCount, "OneBitCarryCount"),
         ] {
