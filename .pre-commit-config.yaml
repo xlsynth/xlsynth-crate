@@ -78,7 +78,7 @@ repos:
       - id: fuzz-build-xlsynth-vastly
         name: fuzz build (xlsynth-vastly)
         description: Ensure xlsynth-vastly fuzz targets compile.
-        entry: env CARGO_NET_OFFLINE=true cargo fuzz build --fuzz-dir xlsynth-vastly/fuzz --sanitizer none
+        entry: cargo fuzz build --fuzz-dir xlsynth-vastly/fuzz --sanitizer none
         language: system
         pass_filenames: false
 
