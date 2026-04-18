@@ -64,7 +64,7 @@ impl BoundedDynamicShiftToStaticCandidatesTransform {
             return None;
         }
         let max_amount = cases.len() - 1;
-        if Self::amount_bound(f, amount)? < max_amount {
+        if Self::amount_bound(f, amount)? != max_amount {
             return None;
         }
         let (x, start, slice_width) = mu::bit_slice_parts(f, cases[0])?;
@@ -209,5 +209,23 @@ mod tests {
             f.get_node(target).payload,
             NodePayload::BitSlice { .. }
         ));
+    }
+
+    #[test]
+    fn rejects_static_candidates_when_decode_does_not_cover_amount_bound() {
+        let ir_text = r#"fn t(x: bits[8] id=1, amount: bits[4] id=2) -> bits[4] {
+  decode.3: bits[4] = decode(amount, width=4, id=3)
+  s0: bits[4] = bit_slice(x, start=0, width=4, id=4)
+  s1: bits[4] = bit_slice(x, start=1, width=4, id=5)
+  s2: bits[4] = bit_slice(x, start=2, width=4, id=6)
+  s3: bits[4] = bit_slice(x, start=3, width=4, id=7)
+  ret out: bits[4] = one_hot_sel(decode.3, cases=[s0, s1, s2, s3], id=8)
+}"#;
+        let f = ir_parser::Parser::new(ir_text).parse_fn().unwrap();
+        let target = f.ret_node_ref.unwrap();
+        assert!(
+            BoundedDynamicShiftToStaticCandidatesTransform::static_candidate_parts(&f, target)
+                .is_none()
+        );
     }
 }
