@@ -67,13 +67,7 @@ fn dslx_fn_prove_assertions_auto_uses_supported_solver_or_reports_missing() {
     }
 }
 
-#[cfg_attr(feature = "has-boolector", test_case::test_case("boolector"; "boolector"))]
-#[cfg_attr(feature = "has-bitwuzla", test_case::test_case("bitwuzla"; "bitwuzla"))]
-#[cfg_attr(feature = "with-z3-binary-test", test_case::test_case("z3-binary"; "z3_binary"))]
-#[cfg_attr(feature = "with-bitwuzla-binary-test", test_case::test_case("bitwuzla-binary"; "bitwuzla_binary"))]
-#[cfg_attr(feature = "with-boolector-binary-test", test_case::test_case("boolector-binary"; "boolector_binary"))]
-#[allow(dead_code)]
-fn dslx_fn_prove_assertions_success(solver: &str) {
+fn check_dslx_fn_prove_assertions_success(solver: &str) {
     let dslx = r#"fn main(x: u32) -> u32 { assert!(x == x, "self_eq"); x }"#;
     let output = run_driver(dslx, "main", solver, &[]);
     assert!(
@@ -89,13 +83,7 @@ fn dslx_fn_prove_assertions_success(solver: &str) {
     );
 }
 
-#[cfg_attr(feature = "has-boolector", test_case::test_case("boolector"; "boolector"))]
-#[cfg_attr(feature = "has-bitwuzla", test_case::test_case("bitwuzla"; "bitwuzla"))]
-#[cfg_attr(feature = "with-z3-binary-test", test_case::test_case("z3-binary"; "z3_binary"))]
-#[cfg_attr(feature = "with-bitwuzla-binary-test", test_case::test_case("bitwuzla-binary"; "bitwuzla_binary"))]
-#[cfg_attr(feature = "with-boolector-binary-test", test_case::test_case("boolector-binary"; "boolector_binary"))]
-#[allow(dead_code)]
-fn dslx_fn_prove_assertions_counterexample_json(solver: &str) {
+fn check_dslx_fn_prove_assertions_counterexample_json(solver: &str) {
     let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
     let temp_dir = tempfile::tempdir().unwrap();
     let dslx_path = temp_dir.path().join("sample.x");
@@ -136,13 +124,7 @@ fn dslx_fn_prove_assertions_counterexample_json(solver: &str) {
     assert_eq!(inputs[0]["name"].as_str(), Some("x"));
 }
 
-#[cfg_attr(feature = "has-boolector", test_case::test_case("boolector"; "boolector"))]
-#[cfg_attr(feature = "has-bitwuzla", test_case::test_case("bitwuzla"; "bitwuzla"))]
-#[cfg_attr(feature = "with-z3-binary-test", test_case::test_case("z3-binary"; "z3_binary"))]
-#[cfg_attr(feature = "with-bitwuzla-binary-test", test_case::test_case("bitwuzla-binary"; "bitwuzla_binary"))]
-#[cfg_attr(feature = "with-boolector-binary-test", test_case::test_case("boolector-binary"; "boolector_binary"))]
-#[allow(dead_code)]
-fn dslx_fn_prove_assertions_keeps_user_double_underscore_inputs(solver: &str) {
+fn check_dslx_fn_prove_assertions_keeps_user_double_underscore_inputs(solver: &str) {
     let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
     let temp_dir = tempfile::tempdir().unwrap();
     let dslx_path = temp_dir.path().join("sample.x");
@@ -181,13 +163,7 @@ fn dslx_fn_prove_assertions_keeps_user_double_underscore_inputs(solver: &str) {
     );
 }
 
-#[cfg_attr(feature = "has-boolector", test_case::test_case("boolector"; "boolector"))]
-#[cfg_attr(feature = "has-bitwuzla", test_case::test_case("bitwuzla"; "bitwuzla"))]
-#[cfg_attr(feature = "with-z3-binary-test", test_case::test_case("z3-binary"; "z3_binary"))]
-#[cfg_attr(feature = "with-bitwuzla-binary-test", test_case::test_case("bitwuzla-binary"; "bitwuzla_binary"))]
-#[cfg_attr(feature = "with-boolector-binary-test", test_case::test_case("boolector-binary"; "boolector_binary"))]
-#[allow(dead_code)]
-fn dslx_fn_prove_assertions_label_filter(solver: &str) {
+fn check_dslx_fn_prove_assertions_label_filter(solver: &str) {
     let dslx = r#"
 fn main(x: u1) -> u1 {
   assert!(x == u1:1, "red");
@@ -207,13 +183,7 @@ fn main(x: u1) -> u1 {
     );
 }
 
-#[cfg_attr(feature = "has-boolector", test_case::test_case("boolector"; "boolector"))]
-#[cfg_attr(feature = "has-bitwuzla", test_case::test_case("bitwuzla"; "bitwuzla"))]
-#[cfg_attr(feature = "with-z3-binary-test", test_case::test_case("z3-binary"; "z3_binary"))]
-#[cfg_attr(feature = "with-bitwuzla-binary-test", test_case::test_case("bitwuzla-binary"; "bitwuzla_binary"))]
-#[cfg_attr(feature = "with-boolector-binary-test", test_case::test_case("boolector-binary"; "boolector_binary"))]
-#[allow(dead_code)]
-fn dslx_fn_prove_assertions_helper_and_uf(solver: &str) {
+fn check_dslx_fn_prove_assertions_helper_and_uf(solver: &str) {
     let dslx = r#"
 fn helper(x: u1) -> u1 { assert!(x == u1:1, "helper_ok"); x }
 fn main(x: u1) -> u1 { helper(x) }
@@ -235,13 +205,7 @@ fn main(x: u1) -> u1 { helper(x) }
     );
 }
 
-#[cfg_attr(feature = "has-boolector", test_case::test_case("boolector"; "boolector"))]
-#[cfg_attr(feature = "has-bitwuzla", test_case::test_case("bitwuzla"; "bitwuzla"))]
-#[cfg_attr(feature = "with-z3-binary-test", test_case::test_case("z3-binary"; "z3_binary"))]
-#[cfg_attr(feature = "with-bitwuzla-binary-test", test_case::test_case("bitwuzla-binary"; "bitwuzla_binary"))]
-#[cfg_attr(feature = "with-boolector-binary-test", test_case::test_case("boolector-binary"; "boolector_binary"))]
-#[allow(dead_code)]
-fn dslx_fn_prove_assertions_enum_domains(solver: &str) {
+fn check_dslx_fn_prove_assertions_enum_domains(solver: &str) {
     let dslx = r#"
 enum E : u2 {
   A = 0,
@@ -272,4 +236,19 @@ fn main(e: E) -> u2 {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[cfg_attr(feature = "has-boolector", test_case::test_case("boolector"; "boolector"))]
+#[cfg_attr(feature = "has-bitwuzla", test_case::test_case("bitwuzla"; "bitwuzla"))]
+#[cfg_attr(feature = "with-z3-binary-test", test_case::test_case("z3-binary"; "z3_binary"))]
+#[cfg_attr(feature = "with-bitwuzla-binary-test", test_case::test_case("bitwuzla-binary"; "bitwuzla_binary"))]
+#[cfg_attr(feature = "with-boolector-binary-test", test_case::test_case("boolector-binary"; "boolector_binary"))]
+#[allow(dead_code)]
+fn dslx_fn_prove_assertions_solver_behaviors(solver: &str) {
+    check_dslx_fn_prove_assertions_success(solver);
+    check_dslx_fn_prove_assertions_counterexample_json(solver);
+    check_dslx_fn_prove_assertions_keeps_user_double_underscore_inputs(solver);
+    check_dslx_fn_prove_assertions_label_filter(solver);
+    check_dslx_fn_prove_assertions_helper_and_uf(solver);
+    check_dslx_fn_prove_assertions_enum_domains(solver);
 }
