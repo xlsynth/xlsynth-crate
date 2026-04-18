@@ -34,7 +34,7 @@ repos:
       - id: benches-compile-xlsynth-g8r
         name: benches compile (xlsynth-g8r)
         description: Ensure xlsynth-g8r benchmark targets compile (no-run).
-        entry: cargo bench -p xlsynth-g8r --no-run
+        entry: cargo bench --locked -p xlsynth-g8r --no-run
         language: system
         pass_filenames: false
 
