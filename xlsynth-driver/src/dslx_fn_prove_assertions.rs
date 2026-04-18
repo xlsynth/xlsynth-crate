@@ -13,6 +13,7 @@ use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConfig};
 
 const SUBCOMMAND: &str = "dslx-fn-prove-assertions";
+const IMPLICIT_TOKEN_RUNTIME_PARAM_COUNT: usize = 2;
 
 #[derive(Debug, Serialize)]
 struct SerializedInput {
@@ -52,14 +53,12 @@ fn collect_additional_search_paths(dslx_path: Option<&str>) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-fn is_implicit_runtime_input(input: &FnInput) -> bool {
-    input.name.starts_with("__")
-}
-
 fn serialize_inputs(inputs: &[FnInput]) -> Vec<SerializedInput> {
     inputs
         .iter()
-        .filter(|input| !is_implicit_runtime_input(input))
+        // The synthetic property function always uses the standard
+        // implicit-token ABI: param 0 is token, param 1 is activation.
+        .skip(IMPLICIT_TOKEN_RUNTIME_PARAM_COUNT)
         .map(|input| SerializedInput {
             name: input.name.clone(),
             value: format!("{:?}", input.value),

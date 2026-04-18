@@ -2,7 +2,12 @@
 
 use std::process::Command;
 
-fn run_driver(dslx: &str, top: &str, solver: &str, extra_args: &[&str]) -> std::process::Output {
+fn run_driver_with_solver(
+    dslx: &str,
+    top: &str,
+    solver: Option<&str>,
+    extra_args: &[&str],
+) -> std::process::Output {
     let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
     let temp_dir = tempfile::tempdir().unwrap();
     let dslx_path = temp_dir.path().join("sample.x");
@@ -14,13 +19,18 @@ fn run_driver(dslx: &str, top: &str, solver: &str, extra_args: &[&str]) -> std::
         .arg("--dslx_input_file")
         .arg(dslx_path.to_str().unwrap())
         .arg("--dslx_top")
-        .arg(top)
-        .arg("--solver")
-        .arg(solver);
+        .arg(top);
+    if let Some(solver) = solver {
+        command.arg("--solver").arg(solver);
+    }
     for arg in extra_args {
         command.arg(arg);
     }
     command.output().unwrap()
+}
+
+fn run_driver(dslx: &str, top: &str, solver: &str, extra_args: &[&str]) -> std::process::Output {
+    run_driver_with_solver(dslx, top, Some(solver), extra_args)
 }
 
 #[test]
@@ -34,6 +44,27 @@ fn dslx_fn_prove_assertions_rejects_toolchain_solver() {
         "stderr: {}",
         stderr
     );
+}
+
+#[test]
+fn dslx_fn_prove_assertions_auto_uses_supported_solver_or_reports_missing() {
+    let dslx = r#"fn main(x: u1) -> u1 { assert!(x == x, "self_eq"); x }"#;
+    let output = run_driver_with_solver(dslx, "main", None, &[]);
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("All selected assertions proved"),
+            "stdout: {}",
+            stdout
+        );
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("No supported in-process SMT backend"),
+            "stderr: {}",
+            stderr
+        );
+    }
 }
 
 #[cfg_attr(feature = "has-boolector", test_case::test_case("boolector"; "boolector"))]
@@ -103,6 +134,51 @@ fn dslx_fn_prove_assertions_counterexample_json(solver: &str) {
     let inputs = json["counterexample"]["inputs"].as_array().unwrap();
     assert_eq!(inputs.len(), 1);
     assert_eq!(inputs[0]["name"].as_str(), Some("x"));
+}
+
+#[cfg_attr(feature = "has-boolector", test_case::test_case("boolector"; "boolector"))]
+#[cfg_attr(feature = "has-bitwuzla", test_case::test_case("bitwuzla"; "bitwuzla"))]
+#[cfg_attr(feature = "with-z3-binary-test", test_case::test_case("z3-binary"; "z3_binary"))]
+#[cfg_attr(feature = "with-bitwuzla-binary-test", test_case::test_case("bitwuzla-binary"; "bitwuzla_binary"))]
+#[cfg_attr(feature = "with-boolector-binary-test", test_case::test_case("boolector-binary"; "boolector_binary"))]
+#[allow(dead_code)]
+fn dslx_fn_prove_assertions_keeps_user_double_underscore_inputs(solver: &str) {
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("sample.x");
+    let json_path = temp_dir.path().join("assertions.json");
+    let dslx = r#"fn main(__x: u1) -> u1 { assert!(__x == u1:1, "needs_one"); __x }"#;
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let output = Command::new(driver)
+        .arg("dslx-fn-prove-assertions")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("main")
+        .arg("--solver")
+        .arg(solver)
+        .arg("--output_json")
+        .arg(json_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "expected assertion proof to fail; stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&json_path).unwrap()).unwrap();
+    let inputs = json["counterexample"]["inputs"].as_array().unwrap();
+    assert!(
+        inputs
+            .iter()
+            .any(|input| input["name"].as_str() == Some("__x")),
+        "inputs: {}",
+        serde_json::to_string_pretty(inputs).unwrap()
+    );
 }
 
 #[cfg_attr(feature = "has-boolector", test_case::test_case("boolector"; "boolector"))]

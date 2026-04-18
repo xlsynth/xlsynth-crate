@@ -1858,7 +1858,7 @@ xlsynth-driver dslx-fn-prove-assertions \
 ```
 
 - Inputs: `--dslx_input_file <FILE>` and `--dslx_top <FUNC>` select the DSLX module and entry point.
-- Backend: `--solver <...>` selects the SMT backend. `toolchain` mode is not currently supported for this command because the flow proves an IR-level wrapper with fixed implicit activation.
+- Backend: `--solver <...>` selects the SMT backend. `auto` chooses only supported in-process SMT backends and errors when none are available. `toolchain` mode is not currently supported for this command because the flow proves an IR-level wrapper with fixed implicit activation.
 - Assertion filter: `--assert-label-filter <REGEX>` includes only assertions whose label matches the regex.
 - Enum inputs: `--assume-enum-in-bound <BOOL>` defaults to `true`, constraining enum-typed top parameters to declared enum members instead of all lowered bit patterns.
 - UF mapping: repeat `--uf <func_name:uf_name>` to treat helper functions as uninterpreted. Assertions inside UF-mapped functions are ignored during proving.
@@ -2121,7 +2121,7 @@ Schema details
   - Optional:
     - `dslx_path`: array of paths (joined with `;`)
     - `dslx_stdlib_path`: path
-    - `solver`: same values as above, except `toolchain` is rejected by this command
+    - `solver`: same values as above, except `toolchain` is rejected by this command. `auto` requires an available in-process SMT backend for this task.
     - `assert_label_filter`: string (regex)
     - `assume_enum_in_bound`: bool
     - `uf`: array of strings, each "`<func_name>:<uf_name>`". Functions sharing the same `uf_name` are assumed equivalent; assertions inside them are ignored.
