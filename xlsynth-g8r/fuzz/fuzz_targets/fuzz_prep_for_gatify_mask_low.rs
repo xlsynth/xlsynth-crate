@@ -175,6 +175,11 @@ top fn f(count: bits[{count_width}] id=1) -> bits[{output_width}] {{
         }
         MaskLowVariant::WrongSubRhsLiteral => {
             let bad_rhs = if output_width == 1 { 0 } else { 2 };
+            // With one-bit values, `bits[1]:1` is both the low-mask shift
+            // input and an all-ones mask, so the nested shifted-all-ones rewrite
+            // is expected even though the surrounding subtract idiom is a
+            // near-miss.
+            let has_valid_shifted_all_ones = output_width == 1;
             (
                 format!(
                     "package sample
@@ -187,11 +192,15 @@ top fn f(count: bits[{count_width}] id=1) -> bits[{output_width}] {{
 }}
 "
                 ),
-                false,
+                has_valid_shifted_all_ones,
             )
         }
         MaskLowVariant::WrongAddAllOnesLiteral => {
             let bad_all_ones = all_ones.saturating_sub(1);
+            // With one-bit values, `bits[1]:1` is both the low-mask shift
+            // input and an all-ones mask, so the nested shifted-all-ones rewrite
+            // is expected even though the surrounding add idiom is a near-miss.
+            let has_valid_shifted_all_ones = output_width == 1;
             (
                 format!(
                     "package sample
@@ -204,7 +213,7 @@ top fn f(count: bits[{count_width}] id=1) -> bits[{output_width}] {{
 }}
 "
                 ),
-                false,
+                has_valid_shifted_all_ones,
             )
         }
         MaskLowVariant::WrongShiftDirection => (
@@ -247,6 +256,10 @@ top fn f(count: bits[{count_width}] id=1) -> bits[{output_width}] {{
         ),
         MaskLowVariant::MismatchedConsumerWidth => {
             let ret_width = output_width + 1;
+            // With one-bit values, the inner `shll(bits[1]:1, count)` is still
+            // a valid shifted-all-ones idiom even though the wider consumer
+            // prevents the shift-minus-one idiom from matching.
+            let has_valid_shifted_all_ones = output_width == 1;
             (
                 format!(
                     "package sample
@@ -260,7 +273,7 @@ top fn f(count: bits[{count_width}] id=1) -> bits[{ret_width}] {{
 }}
 "
                 ),
-                false,
+                has_valid_shifted_all_ones,
             )
         }
     }
