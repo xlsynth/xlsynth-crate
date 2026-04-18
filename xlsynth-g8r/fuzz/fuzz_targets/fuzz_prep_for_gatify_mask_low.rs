@@ -21,23 +21,31 @@ enum MaskLowVariant {
     ValidSub,
     ValidAddRhs,
     ValidAddLhs,
+    ValidShiftedAllOnes,
+    ValidSlicedShiftedAllOnes,
     WrongShiftLhsLiteral,
     WrongSubRhsLiteral,
     WrongAddAllOnesLiteral,
     WrongShiftDirection,
+    WrongShiftedAllOnesDirection,
+    SharedShiftedAllOnesLiteral,
     MismatchedConsumerWidth,
 }
 
 impl MaskLowVariant {
     fn from_byte(raw: u8) -> Self {
-        match raw % 8 {
+        match raw % 12 {
             0 => MaskLowVariant::ValidSub,
             1 => MaskLowVariant::ValidAddRhs,
             2 => MaskLowVariant::ValidAddLhs,
-            3 => MaskLowVariant::WrongShiftLhsLiteral,
-            4 => MaskLowVariant::WrongSubRhsLiteral,
-            5 => MaskLowVariant::WrongAddAllOnesLiteral,
-            6 => MaskLowVariant::WrongShiftDirection,
+            3 => MaskLowVariant::ValidShiftedAllOnes,
+            4 => MaskLowVariant::ValidSlicedShiftedAllOnes,
+            5 => MaskLowVariant::WrongShiftLhsLiteral,
+            6 => MaskLowVariant::WrongSubRhsLiteral,
+            7 => MaskLowVariant::WrongAddAllOnesLiteral,
+            8 => MaskLowVariant::WrongShiftDirection,
+            9 => MaskLowVariant::WrongShiftedAllOnesDirection,
+            10 => MaskLowVariant::SharedShiftedAllOnesLiteral,
             _ => MaskLowVariant::MismatchedConsumerWidth,
         }
     }
@@ -117,6 +125,35 @@ top fn f(count: bits[{count_width}] id=1) -> bits[{output_width}] {{
             ),
             true,
         ),
+        MaskLowVariant::ValidShiftedAllOnes => (
+            format!(
+                "package sample
+
+top fn f(count: bits[{count_width}] id=1) -> bits[{output_width}] {{
+  all_ones: bits[{output_width}] = literal(value={all_ones}, id=2)
+  ret mask: bits[{output_width}] = shll(all_ones, count, id=3)
+}}
+"
+            ),
+            true,
+        ),
+        MaskLowVariant::ValidSlicedShiftedAllOnes => {
+            let source_width = output_width.saturating_add(4);
+            let source_all_ones = all_ones_value(source_width);
+            (
+                format!(
+                    "package sample
+
+top fn f(count: bits[{count_width}] id=1) -> bits[{output_width}] {{
+  all_ones: bits[{source_width}] = literal(value={source_all_ones}, id=2)
+  sh: bits[{source_width}] = shll(all_ones, count, id=3)
+  ret mask: bits[{output_width}] = bit_slice(sh, start=3, width={output_width}, id=4)
+}}
+"
+                ),
+                true,
+            )
+        }
         MaskLowVariant::WrongShiftLhsLiteral => {
             // For bits[1], zero is the only representable literal value that is
             // not the required literal one.
@@ -178,6 +215,31 @@ top fn f(count: bits[{count_width}] id=1) -> bits[{output_width}] {{
   one: bits[{output_width}] = literal(value=1, id=2)
   sh: bits[{output_width}] = shrl(one, count, id=3)
   ret mask: bits[{output_width}] = sub(sh, one, id=4)
+}}
+"
+            ),
+            false,
+        ),
+        MaskLowVariant::WrongShiftedAllOnesDirection => (
+            format!(
+                "package sample
+
+top fn f(count: bits[{count_width}] id=1) -> bits[{output_width}] {{
+  all_ones: bits[{output_width}] = literal(value={all_ones}, id=2)
+  ret mask: bits[{output_width}] = shrl(all_ones, count, id=3)
+}}
+"
+            ),
+            false,
+        ),
+        MaskLowVariant::SharedShiftedAllOnesLiteral => (
+            format!(
+                "package sample
+
+top fn f(count: bits[{count_width}] id=1) -> bits[{output_width}] {{
+  all_ones: bits[{output_width}] = literal(value={all_ones}, id=2)
+  sh: bits[{output_width}] = shll(all_ones, count, id=3)
+  ret mask: bits[{output_width}] = and(sh, all_ones, id=4)
 }}
 "
             ),
