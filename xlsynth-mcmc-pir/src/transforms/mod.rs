@@ -24,6 +24,8 @@ mod bit_slice_bit_slice_fold;
 mod bit_slice_concat_distribute;
 mod bit_slice_one_bit_shift_sel;
 mod bit_slice_sel_distribute;
+mod bounded_dynamic_shift_to_static_candidates;
+mod bounded_normalization_to_candidate_select;
 mod carry_split_add;
 mod clamp_chain_collapse;
 mod clone_multi_user_node;
@@ -38,6 +40,7 @@ mod eq_ne_add_literal_shift;
 mod eq_sel_distribute;
 mod eq_zero_or_reduce;
 mod ext_nary_add_rewrites;
+mod macro_utils;
 mod mask_operand_bit;
 mod nand_not_and_fold;
 mod narrow_add_from_wide_add_fold;
@@ -51,8 +54,10 @@ mod not_eq_ne_flip;
 mod not_not_cancel;
 mod not_sel_distribute;
 mod one_bit_carry_count;
+mod one_hot_sel_to_masked_or;
 mod or_mask_sign_ext_to_sel;
 mod priority_sel_1_to_sel;
+mod priority_sel_to_masked_candidates;
 mod priority_sel_to_sel_chain;
 mod reassociate_add_sub;
 mod rewire_operand_to_same_type;
@@ -61,10 +66,12 @@ mod sel_chain_to_priority_sel;
 mod sel_hoist;
 mod sel_same_arms_fold;
 mod sel_swap_arms_by_not_pred;
+mod selected_add_sub_unification;
 mod shift_clamp;
 mod shift_hoist;
 mod shift_reclamp;
 mod sign_ext_sel_distribute;
+mod sign_magnitude_datapath_unification;
 mod smul_sign_ext_u1_to_sel_neg;
 mod sub_sign_ext_u1_to_add_zero_ext_u1;
 mod sub_to_add_neg;
@@ -84,6 +91,8 @@ use bit_slice_bit_slice_fold::BitSliceBitSliceFoldTransform;
 use bit_slice_concat_distribute::BitSliceConcatDistributeTransform;
 use bit_slice_one_bit_shift_sel::BitSliceOneBitShiftSelTransform;
 use bit_slice_sel_distribute::BitSliceSelDistributeTransform;
+use bounded_dynamic_shift_to_static_candidates::BoundedDynamicShiftToStaticCandidatesTransform;
+use bounded_normalization_to_candidate_select::BoundedNormalizationToCandidateSelectTransform;
 use carry_split_add::CarrySplitAddTransform;
 use clamp_chain_collapse::ClampChainCollapseTransform;
 use clone_multi_user_node::CloneMultiUserNodeTransform;
@@ -118,8 +127,10 @@ use not_eq_ne_flip::NotEqNeFlipTransform;
 use not_not_cancel::NotNotCancelTransform;
 use not_sel_distribute::NotSelDistributeTransform;
 use one_bit_carry_count::OneBitCarryCountTransform;
+use one_hot_sel_to_masked_or::OneHotSelToMaskedOrTransform;
 use or_mask_sign_ext_to_sel::OrMaskSignExtToSelTransform;
 use priority_sel_1_to_sel::PrioritySel1ToSelTransform;
+use priority_sel_to_masked_candidates::PrioritySelToMaskedCandidatesTransform;
 use priority_sel_to_sel_chain::PrioritySelToSelChainTransform;
 use reassociate_add_sub::ReassociateAddSubTransform;
 use rewire_operand_to_same_type::RewireOperandToSameTypeTransform;
@@ -128,10 +139,12 @@ use sel_chain_to_priority_sel::SelChainToPrioritySelTransform;
 use sel_hoist::SelHoistTransform;
 use sel_same_arms_fold::SelSameArmsFoldTransform;
 use sel_swap_arms_by_not_pred::SelSwapArmsByNotPredTransform;
+use selected_add_sub_unification::SelectedAddSubUnificationTransform;
 use shift_clamp::ShiftClampTransform;
 use shift_hoist::ShiftHoistTransform;
 use shift_reclamp::ShiftReclampTransform;
 use sign_ext_sel_distribute::SignExtSelDistributeTransform;
+use sign_magnitude_datapath_unification::SignMagnitudeDatapathUnificationTransform;
 use smul_sign_ext_u1_to_sel_neg::SmulSignExtU1ToSelNegTransform;
 use sub_sign_ext_u1_to_add_zero_ext_u1::SubSignExtU1ToAddZeroExtU1Transform;
 use sub_to_add_neg::SubToAddNegTransform;
@@ -243,6 +256,24 @@ pub enum PirTransformKind {
     /// `bit_slice(shrl(x,p),s,w) ↔ sel(p,[bit_slice(x,s,w),
     /// bit_slice(x,s+1,w)])`
     BitSliceOneBitShiftSel,
+    /// Convert a one-hot select to explicit masked candidates and reverse:
+    /// `one_hot_sel(sel, cases) ↔ or(and(case_i, mask(sel[i])))`.
+    OneHotSelToMaskedOr,
+    /// Convert a priority select to explicit mutually-exclusive masked
+    /// candidates and reverse.
+    PrioritySelToMaskedCandidates,
+    /// Convert bounded dynamic shift slices to static-slice candidate selects
+    /// and reverse.
+    BoundedDynamicShiftToStaticCandidates,
+    /// Convert CLZ-driven normalization shifts to static candidate selects and
+    /// reverse.
+    BoundedNormalizationToCandidateSelect,
+    /// Share a selected add/sub datapath:
+    /// `sel(p, [add(a,b), sub(a,b)]) ↔ add(add(a, xor(b, mask(p))), zext(p))`.
+    SelectedAddSubUnification,
+    /// Oracle-backed recursive sharing for sign/magnitude-style two-arm
+    /// arithmetic datapaths.
+    SignMagnitudeDatapathUnification,
     /// Distribute sign_ext over select (and reverse folding form):
     /// `sign_ext(sel(p, cases=[a, b]), new_bit_count=n)
     ///    ↔ sel(p, cases=[sign_ext(a,n), sign_ext(b,n)])`
@@ -435,6 +466,20 @@ impl fmt::Display for PirTransformKind {
             PirTransformKind::BitSliceAddSubDistribute => write!(f, "BitSliceAddSubDistribute"),
             PirTransformKind::BitSliceSelDistribute => write!(f, "BitSliceSelDistribute"),
             PirTransformKind::BitSliceOneBitShiftSel => write!(f, "BitSliceOneBitShiftSel"),
+            PirTransformKind::OneHotSelToMaskedOr => write!(f, "OneHotSelToMaskedOr"),
+            PirTransformKind::PrioritySelToMaskedCandidates => {
+                write!(f, "PrioritySelToMaskedCandidates")
+            }
+            PirTransformKind::BoundedDynamicShiftToStaticCandidates => {
+                write!(f, "BoundedDynamicShiftToStaticCandidates")
+            }
+            PirTransformKind::BoundedNormalizationToCandidateSelect => {
+                write!(f, "BoundedNormalizationToCandidateSelect")
+            }
+            PirTransformKind::SelectedAddSubUnification => write!(f, "SelectedAddSubUnification"),
+            PirTransformKind::SignMagnitudeDatapathUnification => {
+                write!(f, "SignMagnitudeDatapathUnification")
+            }
             PirTransformKind::SignExtSelDistribute => write!(f, "SignExtSelDistribute"),
             PirTransformKind::ZeroExtSelDistribute => write!(f, "ZeroExtSelDistribute"),
             PirTransformKind::PrioritySel1ToSel => write!(f, "PrioritySel1ToSel"),
@@ -559,6 +604,12 @@ pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
         Box::new(BitSliceAddSubDistributeTransform),
         Box::new(BitSliceSelDistributeTransform),
         Box::new(BitSliceOneBitShiftSelTransform),
+        Box::new(OneHotSelToMaskedOrTransform),
+        Box::new(PrioritySelToMaskedCandidatesTransform),
+        Box::new(BoundedDynamicShiftToStaticCandidatesTransform),
+        Box::new(BoundedNormalizationToCandidateSelectTransform),
+        Box::new(SelectedAddSubUnificationTransform),
+        Box::new(SignMagnitudeDatapathUnificationTransform),
         Box::new(SignExtSelDistributeTransform),
         Box::new(ZeroExtSelDistributeTransform),
         Box::new(PrioritySel1ToSelTransform),
@@ -626,6 +677,27 @@ mod tests {
             (
                 PirTransformKind::BitSliceOneBitShiftSel,
                 "BitSliceOneBitShiftSel",
+            ),
+            (PirTransformKind::OneHotSelToMaskedOr, "OneHotSelToMaskedOr"),
+            (
+                PirTransformKind::PrioritySelToMaskedCandidates,
+                "PrioritySelToMaskedCandidates",
+            ),
+            (
+                PirTransformKind::BoundedDynamicShiftToStaticCandidates,
+                "BoundedDynamicShiftToStaticCandidates",
+            ),
+            (
+                PirTransformKind::BoundedNormalizationToCandidateSelect,
+                "BoundedNormalizationToCandidateSelect",
+            ),
+            (
+                PirTransformKind::SelectedAddSubUnification,
+                "SelectedAddSubUnification",
+            ),
+            (
+                PirTransformKind::SignMagnitudeDatapathUnification,
+                "SignMagnitudeDatapathUnification",
             ),
             (PirTransformKind::OneBitCarryCount, "OneBitCarryCount"),
         ] {
