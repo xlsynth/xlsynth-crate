@@ -223,9 +223,10 @@ jobs:
       - name: Install Icarus Verilog (prebuilt for rocky8)
         run: |
           mkdir -p artifacts
-          curl -L -o artifacts/iverilog-rocky8 "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/iverilog-rocky8"
-          curl -L -o artifacts/vvp-rocky8 "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/vvp-rocky8"
-          curl -L -o artifacts/ivl-rocky8.tar.gz "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/ivl-rocky8.tar.gz"
+          BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f"
+          python3 scripts/download_and_verify_shared_lib.py elf artifacts/iverilog-rocky8 "${BASE_URL}/iverilog-rocky8" --sha256-url "${BASE_URL}/iverilog-rocky8.sha256"
+          python3 scripts/download_and_verify_shared_lib.py elf artifacts/vvp-rocky8 "${BASE_URL}/vvp-rocky8" --sha256-url "${BASE_URL}/vvp-rocky8.sha256"
+          python3 scripts/download_and_verify_shared_lib.py tar-gz artifacts/ivl-rocky8.tar.gz "${BASE_URL}/ivl-rocky8.tar.gz" --sha256-url "${BASE_URL}/ivl-rocky8.tar.gz.sha256"
           sudo mkdir -p /usr/local/bin /usr/local/lib
           sudo cp artifacts/iverilog-rocky8 /usr/local/bin/iverilog
           sudo cp artifacts/vvp-rocky8 /usr/local/bin/vvp
@@ -395,9 +396,10 @@ jobs:
       - name: Install Icarus Verilog (prebuilt for rocky8)
         run: |
           mkdir -p artifacts
-          curl -L -o artifacts/iverilog-rocky8 "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/iverilog-rocky8"
-          curl -L -o artifacts/vvp-rocky8 "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/vvp-rocky8"
-          curl -L -o artifacts/ivl-rocky8.tar.gz "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/ivl-rocky8.tar.gz"
+          BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f"
+          python3 scripts/download_and_verify_shared_lib.py elf artifacts/iverilog-rocky8 "${BASE_URL}/iverilog-rocky8" --sha256-url "${BASE_URL}/iverilog-rocky8.sha256"
+          python3 scripts/download_and_verify_shared_lib.py elf artifacts/vvp-rocky8 "${BASE_URL}/vvp-rocky8" --sha256-url "${BASE_URL}/vvp-rocky8.sha256"
+          python3 scripts/download_and_verify_shared_lib.py tar-gz artifacts/ivl-rocky8.tar.gz "${BASE_URL}/ivl-rocky8.tar.gz" --sha256-url "${BASE_URL}/ivl-rocky8.tar.gz.sha256"
           sudo mkdir -p /usr/local/bin /usr/local/lib
           sudo cp artifacts/iverilog-rocky8 /usr/local/bin/iverilog
           sudo cp artifacts/vvp-rocky8 /usr/local/bin/vvp
@@ -634,9 +636,10 @@ jobs:
       - name: Install Icarus Verilog (prebuilt for rocky8)
         run: |
           mkdir -p artifacts
-          curl -L -o artifacts/iverilog-rocky8 "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/iverilog-rocky8"
-          curl -L -o artifacts/vvp-rocky8 "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/vvp-rocky8"
-          curl -L -o artifacts/ivl-rocky8.tar.gz "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/ivl-rocky8.tar.gz"
+          BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f"
+          python3 scripts/download_and_verify_shared_lib.py elf artifacts/iverilog-rocky8 "${BASE_URL}/iverilog-rocky8" --sha256-url "${BASE_URL}/iverilog-rocky8.sha256"
+          python3 scripts/download_and_verify_shared_lib.py elf artifacts/vvp-rocky8 "${BASE_URL}/vvp-rocky8" --sha256-url "${BASE_URL}/vvp-rocky8.sha256"
+          python3 scripts/download_and_verify_shared_lib.py tar-gz artifacts/ivl-rocky8.tar.gz "${BASE_URL}/ivl-rocky8.tar.gz" --sha256-url "${BASE_URL}/ivl-rocky8.tar.gz.sha256"
           install -m 0755 artifacts/iverilog-rocky8 /usr/bin/iverilog
           install -m 0755 artifacts/vvp-rocky8 /usr/bin/vvp
           mkdir -p /usr/local/lib
@@ -865,9 +868,10 @@ jobs:
       - name: Install Icarus Verilog (prebuilt for rocky8)
         run: |
           mkdir -p artifacts
-          curl -L -o artifacts/iverilog-rocky8 "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/iverilog-rocky8"
-          curl -L -o artifacts/vvp-rocky8 "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/vvp-rocky8"
-          curl -L -o artifacts/ivl-rocky8.tar.gz "https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f/ivl-rocky8.tar.gz"
+          BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/iverilog-binaries-ea26587b5ef485f2ca82a3e4364e58ec3307240f"
+          python3 scripts/download_and_verify_shared_lib.py elf artifacts/iverilog-rocky8 "${BASE_URL}/iverilog-rocky8" --sha256-url "${BASE_URL}/iverilog-rocky8.sha256"
+          python3 scripts/download_and_verify_shared_lib.py elf artifacts/vvp-rocky8 "${BASE_URL}/vvp-rocky8" --sha256-url "${BASE_URL}/vvp-rocky8.sha256"
+          python3 scripts/download_and_verify_shared_lib.py tar-gz artifacts/ivl-rocky8.tar.gz "${BASE_URL}/ivl-rocky8.tar.gz" --sha256-url "${BASE_URL}/ivl-rocky8.tar.gz.sha256"
           sudo mkdir -p /usr/local/bin /usr/local/lib
           sudo cp artifacts/iverilog-rocky8 /usr/local/bin/iverilog
           sudo cp artifacts/vvp-rocky8 /usr/local/bin/vvp
