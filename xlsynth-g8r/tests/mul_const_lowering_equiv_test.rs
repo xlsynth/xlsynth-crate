@@ -142,6 +142,7 @@ fn prove_case(width: usize, case: &ConstantCase, literal_side: LiteralSide) {
             enable_rewrite_carry_out: false,
             enable_rewrite_prio_encode: false,
             enable_rewrite_nary_add: false,
+            enable_rewrite_mask_low: false,
             array_index_lowering_strategy: Default::default(),
         },
     )

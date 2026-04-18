@@ -400,6 +400,16 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
             }
             IrValue::from_bits(&IrBits::from_lsb_is_0(&out))
         }
+        ir::NodePayload::ExtMaskLow { count } => {
+            let out_w = match n.ty {
+                ir::Type::Bits(width) => width,
+                ref ty => panic!("ExtMaskLow result must be bits-typed, got {ty}"),
+            };
+            let count_bits: IrBits = env.get(&count).unwrap().to_bits().unwrap();
+            let count_value = ir_bits_to_usize(&count_bits).unwrap_or(usize::MAX);
+            let out: Vec<bool> = (0..out_w).map(|i| count_value > i).collect();
+            IrValue::from_bits(&IrBits::from_lsb_is_0(&out))
+        }
         ir::NodePayload::ExtNaryAdd { ref terms, arch: _ } => {
             let ir::Type::Bits(out_w) = &n.ty else {
                 panic!("ExtNaryAdd result must be bits-typed");

@@ -44,6 +44,10 @@ pub struct PrepForGatifyOptions {
     /// When true, rewrite width-preserving add/sub trees into `ext_nary_add`
     /// and greedily absorb/merge nested terms to a fixed point.
     pub enable_rewrite_nary_add: bool,
+
+    /// When true, rewrite `(bits[N]:1 << count) - bits[N]:1` style low-mask
+    /// idioms into `ext_mask_low`.
+    pub enable_rewrite_mask_low: bool,
 }
 
 impl PrepForGatifyOptions {
@@ -54,6 +58,7 @@ impl PrepForGatifyOptions {
             enable_rewrite_prio_encode: true,
             enable_rewrite_small_shift_choices: true,
             enable_rewrite_nary_add: true,
+            enable_rewrite_mask_low: true,
         }
     }
 
@@ -64,6 +69,7 @@ impl PrepForGatifyOptions {
             enable_rewrite_prio_encode: false,
             enable_rewrite_small_shift_choices: false,
             enable_rewrite_nary_add: false,
+            enable_rewrite_mask_low: false,
         }
     }
 }
@@ -590,6 +596,31 @@ fn is_ubits_literal_0_or_1_of_width(f: &ir::Fn, nr: NodeRef, w: usize) -> Option
     } else {
         None
     }
+}
+
+fn is_ubits_literal_one_of_width(f: &ir::Fn, nr: NodeRef, w: usize) -> bool {
+    let node = f.get_node(nr);
+    if node.ty.bit_count() != w {
+        return false;
+    }
+    let NodePayload::Literal(v) = &node.payload else {
+        return false;
+    };
+    v.bits_equals_u64_value(1)
+}
+
+fn is_ubits_literal_all_ones_of_width(f: &ir::Fn, nr: NodeRef, w: usize) -> bool {
+    let node = f.get_node(nr);
+    if node.ty.bit_count() != w {
+        return false;
+    }
+    let NodePayload::Literal(v) = &node.payload else {
+        return false;
+    };
+    let Ok(bits) = v.to_bits() else {
+        return false;
+    };
+    bits.get_bit_count() == w && (0..w).all(|i| bits.get_bit(i).unwrap_or(false))
 }
 
 fn literal_u64_if_bits_node(f: &ir::Fn, nr: NodeRef) -> Option<u64> {
@@ -1205,6 +1236,73 @@ fn rewrite_add_xor_and_to_or(f: &mut ir::Fn) -> usize {
     rewrites
 }
 
+fn mask_low_count_for_shift_minus_one(
+    f: &ir::Fn,
+    shift_ref: NodeRef,
+    output_width: usize,
+) -> Option<NodeRef> {
+    if !is_bits_w(f, shift_ref, output_width) {
+        return None;
+    }
+    let NodePayload::Binop(Binop::Shll, one, count) = f.get_node(shift_ref).payload.clone() else {
+        return None;
+    };
+    if !is_ubits_literal_one_of_width(f, one, output_width) {
+        return None;
+    }
+    if !matches!(f.get_node(count).ty, Type::Bits(_)) {
+        return None;
+    }
+    Some(count)
+}
+
+/// Rewrites low-mask idioms into `ext_mask_low(count)`.
+///
+/// Recognized forms:
+/// - `sub(shll(bits[N]:1, count), bits[N]:1)`
+/// - `add(shll(bits[N]:1, count), bits[N]:all_ones)`
+fn rewrite_mask_low_idioms_to_ext_mask_low(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+    let original_len = f.nodes.len();
+    for node_index in 0..original_len {
+        let Some(output_width) = bits_width(&f.nodes[node_index].ty) else {
+            continue;
+        };
+        let payload = f.nodes[node_index].payload.clone();
+        let count = match payload {
+            NodePayload::Binop(Binop::Sub, lhs, rhs)
+                if is_ubits_literal_one_of_width(f, rhs, output_width) =>
+            {
+                mask_low_count_for_shift_minus_one(f, lhs, output_width)
+            }
+            NodePayload::Binop(Binop::Add, lhs, rhs)
+                if is_ubits_literal_all_ones_of_width(f, rhs, output_width) =>
+            {
+                mask_low_count_for_shift_minus_one(f, lhs, output_width)
+            }
+            NodePayload::Binop(Binop::Add, lhs, rhs)
+                if is_ubits_literal_all_ones_of_width(f, lhs, output_width) =>
+            {
+                mask_low_count_for_shift_minus_one(f, rhs, output_width)
+            }
+            _ => None,
+        };
+        let Some(count) = count else {
+            continue;
+        };
+
+        ir_utils::replace_node_payload(
+            f,
+            NodeRef { index: node_index },
+            NodePayload::ExtMaskLow { count },
+            Some(Type::Bits(output_width)),
+        )
+        .expect("prep_for_gatify: rewriting mask-low idiom to ext_mask_low failed");
+        rewrites += 1;
+    }
+    rewrites
+}
+
 /// Rewrite:
 ///
 /// `bit_slice(shrl(x, sel(p, cases=[k0..kN-1], default=d)), start=S, width=W)`
@@ -1292,6 +1390,9 @@ pub fn prep_for_gatify(
     }
     if options.enable_rewrite_carry_out {
         let _rewrites = rewrite_add_slice_carry_out_to_ext_carry_out(&mut cloned, range_info);
+    }
+    if options.enable_rewrite_mask_low {
+        let _rewrites = rewrite_mask_low_idioms_to_ext_mask_low(&mut cloned);
     }
     if options.enable_rewrite_nary_add {
         let _rewrites = rewrite_nary_adds_to_fixed_point(&mut cloned);

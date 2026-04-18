@@ -75,6 +75,7 @@ pub fn collect_structural_entries(f: &Fn) -> (Vec<StructuralEntry<FwdHash>>, Vec
             | NodePayload::Encode { arg: tuple }
             | NodePayload::ExtPrioEncode { arg: tuple, .. }
             | NodePayload::ExtClz { arg: tuple }
+            | NodePayload::ExtMaskLow { count: tuple }
             | NodePayload::OneHot { arg: tuple, .. }
             | NodePayload::BitSlice { arg: tuple, .. } => {
                 child_hashes.push(hashes[tuple.index]);

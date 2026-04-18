@@ -249,6 +249,7 @@ Converts an XLS IR file to an `xlsynth_g8r::GateFn` (i.e. a gate-level netlist i
   - `--enable-rewrite-carry-out=<BOOL>` – when `true`, enable a carry-out idiom rewrite during `prep_for_gatify` (introduces `ext_carry_out`). Default `true`.
   - `--enable-rewrite-prio-encode=<BOOL>` – when `true`, enable prio-encode and CLZ idiom rewrites during `prep_for_gatify` (introduces `ext_prio_encode` / `ext_clz`). Default `true`.
   - `--enable-rewrite-nary-add=<BOOL>` – when `true`, rewrite width-preserving add/sub trees into `ext_nary_add` and greedily absorb/merge nested terms to a fixed point during `prep_for_gatify`. Default `true`.
+  - `--enable-rewrite-mask-low=<BOOL>` – when `true`, rewrite dynamic low-mask idioms into `ext_mask_low` during `prep_for_gatify`. Default `true`.
   - `--top <TOP>` – override the top-level entry point (required if the IR package has no `top fn`).
 
 Example:
@@ -1232,6 +1233,7 @@ Supported flags include the common gate-optimization controls:
 - `--enable-rewrite-carry-out=<BOOL>` – when `true`, enable a carry-out idiom rewrite during `prep_for_gatify` (introduces `ext_carry_out`). Default `true`.
 - `--enable-rewrite-prio-encode=<BOOL>` – when `true`, enable prio-encode and CLZ idiom rewrites during `prep_for_gatify` (introduces `ext_prio_encode` / `ext_clz`). Default `true`.
 - `--enable-rewrite-nary-add=<BOOL>` – when `true`, rewrite width-preserving add/sub trees into `ext_nary_add` and greedily absorb/merge nested terms to a fixed point during `prep_for_gatify`. Default `true`.
+- `--enable-rewrite-mask-low=<BOOL>` – when `true`, rewrite dynamic low-mask idioms into `ext_mask_low` during `prep_for_gatify`. Default `true`.
 - `--prepared-ir-out=<PATH>` – write the residual PIR (after `prep_for_gatify`) to `PATH`.
 - `--adder-mapping=<ripple-carry|brent-kung|kogge-stone>` – choose the adder
   topology.

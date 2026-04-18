@@ -1465,6 +1465,17 @@ fn build_special_payload(
                 arg: positional_refs[0],
             })
         }
+        "ext_mask_low" => {
+            named_args.require_no_extra(operator, &[])?;
+            if positional_refs.len() != 1 {
+                return Err(MatchRewriteRuleApplyError::InvalidRewriteTemplate(
+                    "ext_mask_low expects exactly 1 positional operand".to_string(),
+                ));
+            }
+            Ok(NodePayload::ExtMaskLow {
+                count: positional_refs[0],
+            })
+        }
         "ext_carry_out" => {
             named_args.require_no_extra(operator, &[])?;
             if positional_refs.len() != 3 {

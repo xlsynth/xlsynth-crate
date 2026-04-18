@@ -347,6 +347,7 @@ pub fn confirm_or_deny_candidate_equivalence(
         enable_rewrite_carry_out: false,
         enable_rewrite_prio_encode: false,
         enable_rewrite_nary_add: false,
+        enable_rewrite_mask_low: false,
         array_index_lowering_strategy: Default::default(),
     };
     let proofs =

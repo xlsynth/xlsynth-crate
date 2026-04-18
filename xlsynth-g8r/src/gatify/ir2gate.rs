@@ -20,7 +20,8 @@ use crate::ir2gate_utils::{
     AdderMapping, Direction, array_add_with_carry_out, gatify_add_brent_kung,
     gatify_add_kogge_stone, gatify_add_ripple_carry, gatify_barrel_shifter,
     gatify_indexed_select_mux_tree_exact, gatify_indexed_select_mux_tree_pad_last_if_type_fits,
-    gatify_one_hot, gatify_one_hot_select, gatify_one_hot_with_nonzero_flag, gatify_prio_encode,
+    gatify_mask_low, gatify_one_hot, gatify_one_hot_select, gatify_one_hot_with_nonzero_flag,
+    gatify_prio_encode,
 };
 
 use crate::gate_builder::ReductionKind;
@@ -3111,6 +3112,22 @@ fn gatify_node(
             }
             env.add(node_ref, GateOrVec::BitVector(out_bits));
         }
+        ir::NodePayload::ExtMaskLow { count } => {
+            let ir::Type::Bits(output_width) = node.ty else {
+                return Err("ExtMaskLow result must be bits-typed".to_string());
+            };
+            let count_bits = env
+                .get_bit_vector(*count)
+                .expect("ext_mask_low count should be present");
+            let out_bits = gatify_mask_low(g8_builder, &count_bits, output_width);
+            for (i, gate) in out_bits.iter_lsb_to_msb().enumerate() {
+                g8_builder.add_tag(
+                    gate.node,
+                    format!("ext_mask_low_{}_output_bit_{}", node.text_id, i),
+                );
+            }
+            env.add(node_ref, GateOrVec::BitVector(out_bits));
+        }
         ir::NodePayload::ExtNaryAdd { terms, arch } => {
             let ir::Type::Bits(output_width) = node.ty else {
                 return Err("ExtNaryAdd result must be bits-typed".to_string());
@@ -3774,6 +3791,7 @@ pub struct GatifyOptions {
     pub enable_rewrite_carry_out: bool,
     pub enable_rewrite_prio_encode: bool,
     pub enable_rewrite_nary_add: bool,
+    pub enable_rewrite_mask_low: bool,
     pub array_index_lowering_strategy: ArrayIndexLoweringStrategy,
 }
 
@@ -3881,6 +3899,7 @@ pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, 
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
             enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
             enable_rewrite_nary_add: options.enable_rewrite_nary_add,
+            enable_rewrite_mask_low: options.enable_rewrite_mask_low,
             ..PrepForGatifyOptions::all_opts_enabled()
         },
     );
@@ -3904,6 +3923,7 @@ pub fn gatify_node_as_fn(
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
             enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
             enable_rewrite_nary_add: options.enable_rewrite_nary_add,
+            enable_rewrite_mask_low: options.enable_rewrite_mask_low,
             ..PrepForGatifyOptions::all_opts_enabled()
         },
     );
@@ -4040,6 +4060,7 @@ mod tests {
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
                 enable_rewrite_nary_add: false,
+                enable_rewrite_mask_low: false,
                 array_index_lowering_strategy: Default::default(),
             },
         )
@@ -4078,6 +4099,7 @@ fn f(a: bits[8], b: bits[8]) -> bits[8] {
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
                 enable_rewrite_nary_add: false,
+                enable_rewrite_mask_low: false,
                 array_index_lowering_strategy: Default::default(),
             },
         )
@@ -4152,6 +4174,7 @@ fn f(a: bits[2] id=1, b: bits[2] id=2) -> bits[2] {
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
                 enable_rewrite_nary_add: false,
+                enable_rewrite_mask_low: false,
                 array_index_lowering_strategy: Default::default(),
             },
         )
@@ -5091,6 +5114,7 @@ top fn main(x: bits[{width}], amt: bits[{amount_width}]) -> bits[{width}] {{
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
                 enable_rewrite_nary_add: false,
+                enable_rewrite_mask_low: false,
                 array_index_lowering_strategy: Default::default(),
             },
         )
@@ -5373,6 +5397,7 @@ top fn main(x: bits[{arg_width}], start: bits[{start_width}], update: bits[{upda
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
                 enable_rewrite_nary_add: false,
+                enable_rewrite_mask_low: false,
                 array_index_lowering_strategy: Default::default(),
             },
         )
@@ -5689,6 +5714,7 @@ top fn main(array: bits[{element_width}][{array_len}], start: bits[{start_width}
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
                 enable_rewrite_nary_add: false,
+                enable_rewrite_mask_low: false,
                 array_index_lowering_strategy: Default::default(),
             },
         )
@@ -5840,6 +5866,7 @@ top fn f(start: bits[2], a: bits[8]) -> bits[8][1] {
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
                 enable_rewrite_nary_add: false,
+                enable_rewrite_mask_low: false,
                 array_index_lowering_strategy: Default::default(),
             },
         )
@@ -5881,6 +5908,7 @@ top fn f(start: bits[4], a: bits[8], b: bits[8]) -> bits[8][1] {
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
                 enable_rewrite_nary_add: false,
+                enable_rewrite_mask_low: false,
                 array_index_lowering_strategy: Default::default(),
             },
         )
@@ -5921,6 +5949,7 @@ top fn f(start: bits[4], a: bits[8], b: bits[8]) -> bits[8][1] {
                 enable_rewrite_carry_out: false,
                 enable_rewrite_prio_encode: false,
                 enable_rewrite_nary_add: false,
+                enable_rewrite_mask_low: false,
                 array_index_lowering_strategy: Default::default(),
             },
         )

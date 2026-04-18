@@ -113,6 +113,10 @@ enum WrappedExtensionSpec {
     ExtClz {
         input_width: usize,
     },
+    ExtMaskLow {
+        output_width: usize,
+        count_width: usize,
+    },
     ExtNaryAdd {
         output_width: usize,
         operand_widths: Vec<usize>,
@@ -216,6 +220,22 @@ fn parse_wrapped_extension_spec_from_attr(
                 .ok_or_else(|| ParseError::new("missing width for ext_clz metadata".to_string()))?;
             let input_width = parse_wrapped_extension_usize_field(input_width, "ext_clz", "width")?;
             Ok(Some(WrappedExtensionSpec::ExtClz { input_width }))
+        }
+        "ext_mask_low" => {
+            let output_width = fields.get("out_width").copied().ok_or_else(|| {
+                ParseError::new("missing out_width for ext_mask_low metadata".to_string())
+            })?;
+            let output_width =
+                parse_wrapped_extension_usize_field(output_width, "ext_mask_low", "out_width")?;
+            let count_width = fields.get("count_width").copied().ok_or_else(|| {
+                ParseError::new("missing count_width for ext_mask_low metadata".to_string())
+            })?;
+            let count_width =
+                parse_wrapped_extension_usize_field(count_width, "ext_mask_low", "count_width")?;
+            Ok(Some(WrappedExtensionSpec::ExtMaskLow {
+                output_width,
+                count_width,
+            }))
         }
         "ext_prio_encode" => {
             let input_width = fields.get("width").copied().ok_or_else(|| {
@@ -406,6 +426,24 @@ fn canonicalize_wrapped_extension_helper_spec(
             }
             Ok(WrappedExtensionSpec::ExtClz { input_width })
         }
+        WrappedExtensionSpec::ExtMaskLow {
+            output_width,
+            count_width,
+        } => {
+            if f.params.len() != 1
+                || f.params[0].ty != ir::Type::Bits(count_width)
+                || f.ret_ty != ir::Type::Bits(output_width)
+            {
+                return Err(ParseError::new(format!(
+                    "ffi wrapper helper '{}' does not match ext_mask_low signature for output width {} and count width {}",
+                    f.name, output_width, count_width
+                )));
+            }
+            Ok(WrappedExtensionSpec::ExtMaskLow {
+                output_width,
+                count_width,
+            })
+        }
         WrappedExtensionSpec::ExtPrioEncode {
             input_width,
             lsb_prio,
@@ -506,6 +544,33 @@ fn convert_ffi_invokes_to_extension_ops_in_fn(
                     )));
                 }
                 f.nodes[idx].payload = ir::NodePayload::ExtClz { arg: operands[0] };
+            }
+            WrappedExtensionSpec::ExtMaskLow {
+                output_width,
+                count_width,
+            } => {
+                if operands.len() != 1 {
+                    return Err(ParseError::new(format!(
+                        "invoke of wrapped ext_mask_low helper '{}' expected 1 operand, got {}",
+                        to_apply,
+                        operands.len()
+                    )));
+                }
+                let expected_ty = ir::Type::Bits(output_width);
+                if f.nodes[idx].ty != expected_ty {
+                    return Err(ParseError::new(format!(
+                        "invoke of wrapped ext_mask_low helper '{}' had type {}, expected {}",
+                        to_apply, f.nodes[idx].ty, expected_ty
+                    )));
+                }
+                let expected_operand_ty = ir::Type::Bits(count_width);
+                if operand_tys[0] != expected_operand_ty {
+                    return Err(ParseError::new(format!(
+                        "invoke of wrapped ext_mask_low helper '{}' operand 0 had type {}, expected {}",
+                        to_apply, operand_tys[0], expected_operand_ty
+                    )));
+                }
+                f.nodes[idx].payload = ir::NodePayload::ExtMaskLow { count: operands[0] };
             }
             WrappedExtensionSpec::ExtNaryAdd {
                 output_width,
@@ -1943,6 +2008,24 @@ impl Parser {
                     )));
                 }
                 (ir::NodePayload::ExtClz { arg }, maybe_id.unwrap())
+            }
+            "ext_mask_low" => {
+                let count = self.parse_node_ref(&node_env, "ext_mask_low count")?;
+                if self.peek_is(",") {
+                    self.dropc()?;
+                    let id_attr = self.parse_id_attribute()?;
+                    maybe_id = Some(id_attr);
+                }
+                if maybe_id.is_none() {
+                    return Err(ParseError::new(format!(
+                        "expected id for ext_mask_low; rest_of_line: {:?}",
+                        self.rest_of_line()
+                    )));
+                }
+                (
+                    ir::NodePayload::ExtMaskLow { count },
+                    maybe_id.unwrap(),
+                )
             }
             "ext_nary_add" => {
                 let (terms, arch) = self.parse_ext_nary_add_op(&node_env, &mut maybe_id)?;

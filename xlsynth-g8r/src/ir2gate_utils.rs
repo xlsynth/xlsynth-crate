@@ -544,6 +544,65 @@ pub fn gatify_barrel_shifter(
     }
 }
 
+/// Builds a dynamic low-bit mask: output bit `i` is true iff `count > i`.
+pub fn gatify_mask_low(
+    gb: &mut GateBuilder,
+    count_bits: &AigBitVector,
+    output_width: usize,
+) -> AigBitVector {
+    fn recurse_pow2(
+        gb: &mut GateBuilder,
+        count_bits: &[AigOperand],
+        size: usize,
+    ) -> Vec<AigOperand> {
+        if size == 1 {
+            return vec![gb.get_false()];
+        }
+
+        let half = size / 2;
+        let lo = recurse_pow2(gb, &count_bits[..count_bits.len() - 1], half);
+        let sel = count_bits[count_bits.len() - 1];
+        let mut out = Vec::with_capacity(size);
+        for bit in lo.iter() {
+            out.push(gb.add_or_binary(*bit, sel));
+        }
+        for bit in lo.iter() {
+            out.push(gb.add_and_binary(*bit, sel));
+        }
+        out
+    }
+
+    if output_width == 0 {
+        return AigBitVector::zeros(0);
+    }
+
+    let padded_width = output_width.next_power_of_two();
+    let local_count_width = padded_width.trailing_zeros() as usize;
+    let mut local_count = Vec::with_capacity(local_count_width);
+    for i in 0..local_count_width {
+        local_count.push(if i < count_bits.get_bit_count() {
+            *count_bits.get_lsb(i)
+        } else {
+            gb.get_false()
+        });
+    }
+
+    let mut padded = recurse_pow2(gb, &local_count, padded_width);
+    if count_bits.get_bit_count() > local_count_width {
+        let high_bits = count_bits.get_lsb_slice(
+            local_count_width,
+            count_bits.get_bit_count() - local_count_width,
+        );
+        let overflow = gb.add_or_reduce(&high_bits, ReductionKind::Tree);
+        for bit in padded.iter_mut() {
+            *bit = gb.add_or_binary(*bit, overflow);
+        }
+    }
+
+    padded.truncate(output_width);
+    AigBitVector::from_lsb_is_index_0(&padded)
+}
+
 /// Emits a one-hot-select gate pattern into the gate builder.
 ///
 /// `selector_bits` should have one bit for every case, N bits total.
