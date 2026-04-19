@@ -19,6 +19,8 @@
 
 use xlsynth::IrValue;
 use xlsynth_pir::ir::{self, Binop, ExtNaryAddTerm, NaryOp, NodePayload, NodeRef, Type, Unop};
+use xlsynth_pir::ir_match;
+use xlsynth_pir::ir_match::MatchCtx;
 use xlsynth_pir::ir_range_info::IrRangeInfo;
 use xlsynth_pir::ir_utils;
 use xlsynth_pir::math::ceil_log2;
@@ -41,8 +43,9 @@ pub struct PrepForGatifyOptions {
     /// constant shifts so gatify can avoid a full barrel shifter cone.
     pub enable_rewrite_small_shift_choices: bool,
 
-    /// When true, rewrite width-preserving add/sub trees into `ext_nary_add`
-    /// and greedily absorb/merge nested terms to a fixed point.
+    /// When true, rewrite width-preserving add/sub trees and explicit gated
+    /// increment/decrement helper networks into `ext_nary_add`, then greedily
+    /// absorb/merge nested terms to a fixed point.
     pub enable_rewrite_nary_add: bool,
 
     /// When true, rewrite low-mask idioms into `ext_mask_low`, including
@@ -292,6 +295,223 @@ fn term_payload_matches_nested_ext_nary_add(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GatedIncDecMatch {
+    base: NodeRef,
+    control: NodeRef,
+    is_decrement: bool,
+}
+
+fn output_bit_refs_lsb_first(f: &ir::Fn, nr: NodeRef) -> Option<Vec<NodeRef>> {
+    let width = bits_width(&f.get_node(nr).ty)?;
+    match &f.get_node(nr).payload {
+        NodePayload::Unop(Unop::Identity, arg) => output_bit_refs_lsb_first(f, *arg),
+        NodePayload::Unop(Unop::Reverse, arg) => {
+            let mut bits = output_bit_refs_lsb_first(f, *arg)?;
+            bits.reverse();
+            (bits.len() == width).then_some(bits)
+        }
+        NodePayload::Nary(NaryOp::Concat, operands) => {
+            let mut bits = Vec::with_capacity(width);
+            for operand in operands.iter().rev() {
+                bits.extend(output_bit_refs_lsb_first(f, *operand)?);
+            }
+            (bits.len() == width).then_some(bits)
+        }
+        NodePayload::ZeroExt { arg, new_bit_count }
+        | NodePayload::SignExt { arg, new_bit_count } => {
+            if *new_bit_count != width {
+                return None;
+            }
+            let bits = output_bit_refs_lsb_first(f, *arg)?;
+            (bits.len() == width).then_some(bits)
+        }
+        _ => (width == 1).then_some(vec![nr]),
+    }
+}
+
+fn base_from_lsb_bit_candidate(f: &ir::Fn, bit: NodeRef, output_width: usize) -> Option<NodeRef> {
+    if output_width == 1 && bits_width(&f.get_node(bit).ty) == Some(1) {
+        return Some(bit);
+    }
+    let NodePayload::BitSlice { arg, start, width } = &f.get_node(bit).payload else {
+        return None;
+    };
+    if *start == 0 && *width == 1 && bits_width(&f.get_node(*arg).ty) == Some(output_width) {
+        Some(*arg)
+    } else {
+        None
+    }
+}
+
+fn base_bit_pattern(base: NodeRef, bit_index: usize, base_width: usize) -> ir_match::PatternExpr {
+    if base_width == 1 && bit_index == 0 {
+        ir_match::exact(base)
+    } else {
+        ir_match::bit_slice(ir_match::exact(base), bit_index, 1)
+    }
+}
+
+fn carry_pattern(
+    base: NodeRef,
+    control: NodeRef,
+    bit_index: usize,
+    base_width: usize,
+    is_decrement: bool,
+) -> ir_match::PatternExpr {
+    let mut factors = Vec::with_capacity(bit_index + 1);
+    factors.push(ir_match::exact(control));
+    for i in 0..bit_index {
+        let bit = base_bit_pattern(base, i, base_width);
+        if is_decrement {
+            factors.push(ir_match::not(bit));
+        } else {
+            factors.push(bit);
+        }
+    }
+    ir_match::commutative(NaryOp::And, factors)
+}
+
+fn sum_bit_pattern(
+    base: NodeRef,
+    control: NodeRef,
+    bit_index: usize,
+    base_width: usize,
+    is_decrement: bool,
+) -> ir_match::PatternExpr {
+    let base_bit = base_bit_pattern(base, bit_index, base_width);
+    let correction = if bit_index == 0 {
+        ir_match::exact(control)
+    } else {
+        carry_pattern(base, control, bit_index, base_width, is_decrement)
+    };
+    ir_match::commutative(NaryOp::Xor, vec![base_bit, correction])
+}
+
+fn matches_gated_inc_dec_from_parts(
+    ctx: &MatchCtx,
+    bits: &[NodeRef],
+    base: NodeRef,
+    control: NodeRef,
+    is_decrement: bool,
+) -> bool {
+    let Some(base_width) = ctx.bits_width(base) else {
+        return false;
+    };
+    if base_width != bits.len() || ctx.bits_width(control) != Some(1) {
+        return false;
+    }
+    bits.iter().enumerate().all(|(bit_index, bit)| {
+        ctx.matches(
+            *bit,
+            sum_bit_pattern(base, control, bit_index, base_width, is_decrement),
+        )
+        .is_some()
+    })
+}
+
+fn match_gated_inc_dec(f: &ir::Fn, nr: NodeRef) -> Option<GatedIncDecMatch> {
+    let output_width = bits_width(&f.get_node(nr).ty)?;
+    if output_width == 0 {
+        return None;
+    }
+    let bits = output_bit_refs_lsb_first(f, nr)?;
+    if bits.len() != output_width {
+        return None;
+    }
+
+    let ctx = MatchCtx::new(f);
+    let bit0_operands = ctx.flattened_nary_operands(bits[0], NaryOp::Xor)?;
+    if bit0_operands.len() != 2 {
+        return None;
+    }
+
+    for (base_bit, control) in [
+        (bit0_operands[0], bit0_operands[1]),
+        (bit0_operands[1], bit0_operands[0]),
+    ] {
+        let Some(base) = base_from_lsb_bit_candidate(f, base_bit, output_width) else {
+            continue;
+        };
+        if !matches_gated_inc_dec_from_parts(
+            &ctx, &bits, base, control, /* is_decrement= */ false,
+        ) {
+            continue;
+        }
+        return Some(GatedIncDecMatch {
+            base,
+            control,
+            is_decrement: false,
+        });
+    }
+
+    for (base_bit, control) in [
+        (bit0_operands[0], bit0_operands[1]),
+        (bit0_operands[1], bit0_operands[0]),
+    ] {
+        let Some(base) = base_from_lsb_bit_candidate(f, base_bit, output_width) else {
+            continue;
+        };
+        if !matches_gated_inc_dec_from_parts(
+            &ctx, &bits, base, control, /* is_decrement= */ true,
+        ) {
+            continue;
+        }
+        return Some(GatedIncDecMatch {
+            base,
+            control,
+            is_decrement: true,
+        });
+    }
+
+    None
+}
+
+/// Rewrites explicit Boolean gated increment/decrement networks to
+/// `ext_nary_add`.
+fn rewrite_gated_inc_dec_to_ext_nary_add(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+    let original_len = f.nodes.len();
+    for node_index in (0..original_len).rev() {
+        let node_ref = NodeRef { index: node_index };
+        if matches!(
+            &f.get_node(node_ref).payload,
+            NodePayload::Nil | NodePayload::ExtNaryAdd { .. }
+        ) {
+            continue;
+        }
+        if bits_width(&f.get_node(node_ref).ty) == Some(1) && f.ret_node_ref != Some(node_ref) {
+            continue;
+        }
+        let Some(matched) = match_gated_inc_dec(f, node_ref) else {
+            continue;
+        };
+        ir_utils::replace_node_payload(
+            f,
+            node_ref,
+            NodePayload::ExtNaryAdd {
+                terms: vec![
+                    ExtNaryAddTerm {
+                        operand: matched.base,
+                        signed: false,
+                        negated: false,
+                    },
+                    ExtNaryAddTerm {
+                        operand: matched.control,
+                        signed: false,
+                        negated: matched.is_decrement,
+                    },
+                ],
+                arch: None,
+            },
+            None,
+        )
+        .expect("prep_for_gatify: rewriting gated inc/dec to ext_nary_add failed");
+        rewrites += 1;
+    }
+    rewrites
+}
+
 /// Returns whether absorbing a resize op into an nary-add term preserves value.
 fn absorb_extend_candidate_is_always_equivalent(
     f: &ir::Fn,
@@ -518,7 +738,8 @@ fn grow_ext_nary_adds(f: &mut ir::Fn) -> usize {
 fn rewrite_nary_adds_to_fixed_point(f: &mut ir::Fn) -> usize {
     let mut rewrites = 0usize;
     loop {
-        let mut round_rewrites = rewrite_add_sub_to_ext_nary_add(f);
+        let mut round_rewrites = rewrite_gated_inc_dec_to_ext_nary_add(f);
+        round_rewrites += rewrite_add_sub_to_ext_nary_add(f);
         round_rewrites += grow_ext_nary_adds(f);
         if round_rewrites == 0 {
             break;
@@ -1467,6 +1688,225 @@ mod tests {
     use xlsynth_pir::ir_parser::Parser;
     use xlsynth_pir::ir_range_info::IrRangeInfo;
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum GatedIncDecKind {
+        Increment,
+        Decrement,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum CarryShape {
+        Flat,
+        FlatSwapped,
+        PrefixLeft,
+        PrefixRight,
+    }
+
+    fn parse_test_fn(ir_text: &str) -> ir::Fn {
+        let mut parser = Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        pkg.get_top_fn().unwrap().clone()
+    }
+
+    fn prep_nary_add_only(f: &ir::Fn) -> ir::Fn {
+        prep_for_gatify(
+            f,
+            None,
+            PrepForGatifyOptions {
+                enable_rewrite_nary_add: true,
+                ..PrepForGatifyOptions::default()
+            },
+        )
+    }
+
+    fn gated_inc_dec_factor_name(
+        kind: GatedIncDecKind,
+        x_bits: &[String],
+        not_bits: &[String],
+        index: usize,
+    ) -> String {
+        match kind {
+            GatedIncDecKind::Increment => x_bits[index].clone(),
+            GatedIncDecKind::Decrement => not_bits[index].clone(),
+        }
+    }
+
+    fn gated_inc_dec_ir(width: usize, kind: GatedIncDecKind, shape: CarryShape) -> String {
+        assert!(width > 0);
+        let mut ir_text = format!(
+            "package sample\n\ntop fn f(x: bits[{width}] id=1, en: bits[1] id=2) -> bits[{width}] {{\n"
+        );
+        let mut next_id = 3usize;
+
+        let mut x_bits = Vec::with_capacity(width);
+        if width == 1 {
+            x_bits.push("x".to_string());
+        } else {
+            for i in 0..width {
+                let name = format!("x{i}");
+                ir_text.push_str(&format!(
+                    "  {name}: bits[1] = bit_slice(x, start={i}, width=1, id={next_id})\n"
+                ));
+                next_id += 1;
+                x_bits.push(name);
+            }
+        }
+
+        let mut not_bits = Vec::with_capacity(width);
+        if kind == GatedIncDecKind::Decrement {
+            for (i, x_bit) in x_bits.iter().enumerate() {
+                let name = format!("nx{i}");
+                ir_text.push_str(&format!("  {name}: bits[1] = not({x_bit}, id={next_id})\n"));
+                next_id += 1;
+                not_bits.push(name);
+            }
+        }
+
+        let (y0_lhs, y0_rhs) = if shape == CarryShape::FlatSwapped {
+            ("en".to_string(), x_bits[0].clone())
+        } else {
+            (x_bits[0].clone(), "en".to_string())
+        };
+        if width == 1 {
+            ir_text.push_str(&format!(
+                "  ret y0: bits[1] = xor({y0_lhs}, {y0_rhs}, id={next_id})\n}}\n"
+            ));
+            return ir_text;
+        }
+        ir_text.push_str(&format!(
+            "  y0: bits[1] = xor({y0_lhs}, {y0_rhs}, id={next_id})\n"
+        ));
+        next_id += 1;
+
+        let mut previous_carry: Option<String> = None;
+        for i in 1..width {
+            let carry_name = format!("c{i}");
+            match shape {
+                CarryShape::Flat | CarryShape::FlatSwapped => {
+                    let mut factors = vec!["en".to_string()];
+                    for j in 0..i {
+                        factors.push(gated_inc_dec_factor_name(kind, &x_bits, &not_bits, j));
+                    }
+                    if shape == CarryShape::FlatSwapped {
+                        factors.reverse();
+                    }
+                    ir_text.push_str(&format!(
+                        "  {carry_name}: bits[1] = and({}, id={next_id})\n",
+                        factors.join(", ")
+                    ));
+                }
+                CarryShape::PrefixLeft | CarryShape::PrefixRight => {
+                    let factor = gated_inc_dec_factor_name(kind, &x_bits, &not_bits, i - 1);
+                    let lhs = previous_carry.clone().unwrap_or_else(|| "en".to_string());
+                    let rhs = factor;
+                    let operands = if shape == CarryShape::PrefixRight {
+                        vec![rhs, lhs]
+                    } else {
+                        vec![lhs, rhs]
+                    };
+                    ir_text.push_str(&format!(
+                        "  {carry_name}: bits[1] = and({}, id={next_id})\n",
+                        operands.join(", ")
+                    ));
+                }
+            }
+            next_id += 1;
+            previous_carry = Some(carry_name.clone());
+
+            let (sum_lhs, sum_rhs) = if matches!(shape, CarryShape::FlatSwapped) {
+                (carry_name.clone(), x_bits[i].clone())
+            } else {
+                (x_bits[i].clone(), carry_name.clone())
+            };
+            ir_text.push_str(&format!(
+                "  y{i}: bits[1] = xor({sum_lhs}, {sum_rhs}, id={next_id})\n"
+            ));
+            next_id += 1;
+        }
+
+        let outputs = (0..width)
+            .rev()
+            .map(|i| format!("y{i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        ir_text.push_str(&format!(
+            "  ret out: bits[{width}] = concat({outputs}, id={next_id})\n}}\n"
+        ));
+        ir_text
+    }
+
+    fn assert_gated_inc_dec_recovered(optimized: &ir::Fn, kind: GatedIncDecKind) {
+        let optimized_text = optimized.to_string();
+        let negated = match kind {
+            GatedIncDecKind::Increment => "negated=[false, false]",
+            GatedIncDecKind::Decrement => "negated=[false, true]",
+        };
+        assert!(
+            optimized_text.contains(&format!(
+                "ext_nary_add(x, en, signed=[false, false], {negated}"
+            )),
+            "expected gated {kind:?} to recover to ext_nary_add; got:\n{optimized_text}"
+        );
+    }
+
+    fn assert_exhaustive_x_en_equiv(orig: &ir::Fn, optimized: &ir::Fn, width: usize) {
+        for x in 0u64..(1u64 << width) {
+            for en in 0u64..2 {
+                let args = [
+                    IrValue::make_ubits(width, x).unwrap(),
+                    IrValue::make_ubits(1, en).unwrap(),
+                ];
+                let got_orig = match eval_fn(orig, &args) {
+                    FnEvalResult::Success(s) => s.value,
+                    FnEvalResult::Failure(f) => panic!("unexpected original eval failure: {:?}", f),
+                };
+                let got_opt = match eval_fn(optimized, &args) {
+                    FnEvalResult::Success(s) => s.value,
+                    FnEvalResult::Failure(f) => {
+                        panic!("unexpected optimized eval failure: {:?}", f)
+                    }
+                };
+                assert_eq!(got_orig, got_opt, "mismatch at width={width} x={x} en={en}");
+            }
+        }
+    }
+
+    fn near_miss_increment_ir() -> &'static str {
+        r#"package sample
+
+top fn f(x: bits[3] id=1, en: bits[1] id=2) -> bits[3] {
+  x0: bits[1] = bit_slice(x, start=0, width=1, id=3)
+  x1: bits[1] = bit_slice(x, start=1, width=1, id=4)
+  x2: bits[1] = bit_slice(x, start=2, width=1, id=5)
+  y0: bits[1] = xor(x0, en, id=6)
+  c1: bits[1] = and(en, x0, id=7)
+  y1: bits[1] = xor(x1, c1, id=8)
+  c2: bits[1] = and(en, x0, x0, id=9)
+  y2: bits[1] = xor(x2, c2, id=10)
+  ret out: bits[3] = concat(y2, y1, y0, id=11)
+}
+"#
+    }
+
+    fn wrong_decrement_polarity_ir() -> &'static str {
+        r#"package sample
+
+top fn f(x: bits[3] id=1, en: bits[1] id=2) -> bits[3] {
+  x0: bits[1] = bit_slice(x, start=0, width=1, id=3)
+  x1: bits[1] = bit_slice(x, start=1, width=1, id=4)
+  x2: bits[1] = bit_slice(x, start=2, width=1, id=5)
+  nx0: bits[1] = not(x0, id=6)
+  nx1: bits[1] = not(x1, id=7)
+  y0: bits[1] = xor(x0, en, id=8)
+  c1: bits[1] = and(en, x0, id=9)
+  y1: bits[1] = xor(x1, c1, id=10)
+  c2: bits[1] = and(en, nx0, nx1, id=11)
+  y2: bits[1] = xor(x2, c2, id=12)
+  ret out: bits[3] = concat(y2, y1, y0, id=13)
+}
+"#
+    }
+
     #[test]
     fn or_reduces_with_single_use_are_combined() {
         let ir_text = "package sample
@@ -1591,6 +2031,103 @@ top fn cone(p0: bits[9] id=1, p1: bits[9] id=2) -> bits[1] {
             "expected carry-out rewrite to introduce ext_carry_out; got:\n{}",
             optimized_text
         );
+    }
+
+    #[test]
+    fn gated_ripple_increment_recovers_to_ext_nary_add() {
+        let ir_text = gated_inc_dec_ir(4, GatedIncDecKind::Increment, CarryShape::Flat);
+        let f = parse_test_fn(&ir_text);
+        let optimized = prep_nary_add_only(&f);
+
+        assert_gated_inc_dec_recovered(&optimized, GatedIncDecKind::Increment);
+        assert_exhaustive_x_en_equiv(&f, &optimized, 4);
+    }
+
+    #[test]
+    fn gated_prefix_increment_recovers_to_ext_nary_add() {
+        let ir_text = gated_inc_dec_ir(5, GatedIncDecKind::Increment, CarryShape::PrefixLeft);
+        let f = parse_test_fn(&ir_text);
+        let optimized = prep_nary_add_only(&f);
+
+        assert_gated_inc_dec_recovered(&optimized, GatedIncDecKind::Increment);
+        assert_exhaustive_x_en_equiv(&f, &optimized, 5);
+    }
+
+    #[test]
+    fn gated_increment_with_swapped_xor_and_and_operands_recovers() {
+        let ir_text = gated_inc_dec_ir(4, GatedIncDecKind::Increment, CarryShape::FlatSwapped);
+        let f = parse_test_fn(&ir_text);
+        let optimized = prep_nary_add_only(&f);
+
+        assert_gated_inc_dec_recovered(&optimized, GatedIncDecKind::Increment);
+        assert_exhaustive_x_en_equiv(&f, &optimized, 4);
+    }
+
+    #[test]
+    fn gated_increment_with_nested_reassociated_carry_ands_recovers() {
+        let ir_text = gated_inc_dec_ir(4, GatedIncDecKind::Increment, CarryShape::PrefixRight);
+        let f = parse_test_fn(&ir_text);
+        let optimized = prep_nary_add_only(&f);
+
+        assert_gated_inc_dec_recovered(&optimized, GatedIncDecKind::Increment);
+        assert_exhaustive_x_en_equiv(&f, &optimized, 4);
+    }
+
+    #[test]
+    fn gated_ripple_decrement_recovers_to_ext_nary_add() {
+        let ir_text = gated_inc_dec_ir(4, GatedIncDecKind::Decrement, CarryShape::Flat);
+        let f = parse_test_fn(&ir_text);
+        let optimized = prep_nary_add_only(&f);
+
+        assert_gated_inc_dec_recovered(&optimized, GatedIncDecKind::Decrement);
+        assert_exhaustive_x_en_equiv(&f, &optimized, 4);
+    }
+
+    #[test]
+    fn gated_increment_near_miss_carry_factor_does_not_rewrite() {
+        let f = parse_test_fn(near_miss_increment_ir());
+        let optimized = prep_nary_add_only(&f);
+        let optimized_text = optimized.to_string();
+
+        assert!(
+            !optimized_text.contains("ext_nary_add("),
+            "near-miss increment should not recover; got:\n{optimized_text}"
+        );
+        assert_exhaustive_x_en_equiv(&f, &optimized, 3);
+    }
+
+    #[test]
+    fn gated_decrement_wrong_polarity_does_not_rewrite() {
+        let f = parse_test_fn(wrong_decrement_polarity_ir());
+        let optimized = prep_nary_add_only(&f);
+        let optimized_text = optimized.to_string();
+
+        assert!(
+            !optimized_text.contains("ext_nary_add("),
+            "wrong-polarity decrement should not recover; got:\n{optimized_text}"
+        );
+        assert_exhaustive_x_en_equiv(&f, &optimized, 3);
+    }
+
+    #[test]
+    fn gated_inc_dec_recovery_is_exhaustively_equivalent_for_widths_one_through_five() {
+        for width in 1..=5 {
+            for kind in [GatedIncDecKind::Increment, GatedIncDecKind::Decrement] {
+                let ir_text = gated_inc_dec_ir(width, kind, CarryShape::PrefixRight);
+                let f = parse_test_fn(&ir_text);
+                let optimized = prep_nary_add_only(&f);
+                let optimized_text = optimized.to_string();
+
+                assert!(
+                    optimized_text.contains("ext_nary_add("),
+                    "expected width={width} {kind:?} helper to recover; got:\n{optimized_text}"
+                );
+                if width > 1 {
+                    assert_gated_inc_dec_recovered(&optimized, kind);
+                }
+                assert_exhaustive_x_en_equiv(&f, &optimized, width);
+            }
+        }
     }
 
     #[test]
