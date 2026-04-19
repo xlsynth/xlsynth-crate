@@ -14,10 +14,10 @@ struct AffineShiftQorRow {
     amount_width: usize,
     k: usize,
     consumer: &'static str,
-    old_and_nodes: usize,
-    old_depth: usize,
-    new_and_nodes: usize,
-    new_depth: usize,
+    dynamic_shift_and_nodes: usize,
+    dynamic_shift_depth: usize,
+    affine_select_and_nodes: usize,
+    affine_select_depth: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -106,25 +106,25 @@ fn row_for_case(case: AffineShiftQorCase) -> AffineShiftQorRow {
         "expected affine shift rewrite for {case:?}; got:\n{prepared_text}"
     );
 
-    let gate_old = gatify_gate_fn(&pir_fn);
-    let gate_new = gatify_gate_fn(&prepared);
-    check_equivalence::prove_same_gate_fn_via_ir(&gate_old, &gate_new)
+    let gate_dynamic_shift = gatify_gate_fn(&pir_fn);
+    let gate_affine_select = gatify_gate_fn(&prepared);
+    check_equivalence::prove_same_gate_fn_via_ir(&gate_dynamic_shift, &gate_affine_select)
         .unwrap_or_else(|e| panic!("gate equivalence failed for {case:?}: {e}"));
-    check_equivalence::validate_same_fn(&pir_fn, &gate_new)
+    check_equivalence::validate_same_fn(&pir_fn, &gate_affine_select)
         .unwrap_or_else(|e| panic!("rewritten gate validation failed for {case:?}: {e}"));
 
-    let old = get_aig_stats(&gate_old);
-    let new = get_aig_stats(&gate_new);
+    let dynamic_shift = get_aig_stats(&gate_dynamic_shift);
+    let affine_select = get_aig_stats(&gate_affine_select);
     AffineShiftQorRow {
         op: case.op,
         source_width: case.source_width,
         amount_width: case.amount_width,
         k: case.k,
         consumer: case.consumer,
-        old_and_nodes: old.and_nodes,
-        old_depth: old.max_depth,
-        new_and_nodes: new.and_nodes,
-        new_depth: new.max_depth,
+        dynamic_shift_and_nodes: dynamic_shift.and_nodes,
+        dynamic_shift_depth: dynamic_shift.max_depth,
+        affine_select_and_nodes: affine_select.and_nodes,
+        affine_select_depth: affine_select.max_depth,
     }
 }
 
@@ -169,20 +169,20 @@ fn affine_shift_qor_characterization_covers_all_shift_ops() {
 
     for row in &got {
         assert!(
-            row.new_and_nodes < row.old_and_nodes,
+            row.affine_select_and_nodes < row.dynamic_shift_and_nodes,
             "expected affine shift rewrite to reduce AND nodes: {row:?}"
         );
         assert!(
-            row.new_depth <= row.old_depth,
+            row.affine_select_depth <= row.dynamic_shift_depth,
             "expected affine shift rewrite not to increase depth: {row:?}"
         );
     }
 
     #[rustfmt::skip]
     let want: &[AffineShiftQorRow] = &[
-        AffineShiftQorRow { op: "shrl", source_width: 12, amount_width: 4, k: 3, consumer: "low_bitslice", old_and_nodes: 86, old_depth: 6, new_and_nodes: 21, new_depth: 2 },
-        AffineShiftQorRow { op: "shll", source_width: 12, amount_width: 4, k: 3, consumer: "low_mid_bitslice", old_and_nodes: 65, old_depth: 6, new_and_nodes: 16, new_depth: 2 },
-        AffineShiftQorRow { op: "shra", source_width: 12, amount_width: 4, k: 3, consumer: "sign_fill_bitslice", old_and_nodes: 56, old_depth: 6, new_and_nodes: 11, new_depth: 2 },
+        AffineShiftQorRow { op: "shrl", source_width: 12, amount_width: 4, k: 3, consumer: "low_bitslice", dynamic_shift_and_nodes: 86, dynamic_shift_depth: 6, affine_select_and_nodes: 21, affine_select_depth: 2 },
+        AffineShiftQorRow { op: "shll", source_width: 12, amount_width: 4, k: 3, consumer: "low_mid_bitslice", dynamic_shift_and_nodes: 65, dynamic_shift_depth: 6, affine_select_and_nodes: 16, affine_select_depth: 2 },
+        AffineShiftQorRow { op: "shra", source_width: 12, amount_width: 4, k: 3, consumer: "sign_fill_bitslice", dynamic_shift_and_nodes: 56, dynamic_shift_depth: 6, affine_select_and_nodes: 11, affine_select_depth: 2 },
     ];
     assert_eq!(got, want);
 }
