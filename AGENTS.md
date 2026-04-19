@@ -138,6 +138,16 @@ In general, when representing IR values with arbitrary bit widths, prefer `xlsyn
 
 **Process guard**: in transform/matcher code, do not use `IrValue::to_u64()` / `IrBits::to_u64()` to recognize literals. Use width-agnostic helpers (`IrBits::equals_u64_value()` or `IrValue::bits_equals_u64_value()`), so patterns keep matching for widths > 64.
 
+When writing PIR rewrites or recognizers (for example in `prep_for_gatify` or
+`aug_opt`), prefer the `xlsynth_pir::ir_match` combinators over open-coded
+operand-position checks when matching structural patterns. Rewrites should not
+depend on a fragile syntax spelling such as `xor(a, b)` but not `xor(b, a)`, or
+`and(en, x0, x1)` but not `and(x1, and(en, x0))`, unless the order or nesting is
+semantically meaningful for that specific transform. Use the combinators for
+commutative matching, repeated binding consistency, and same-op associative
+flattening so QoR/canonicalization does not change because an equivalent helper
+was written with operands swapped or reassociated.
+
 When using C-style inline comments to document a named argument style in function calls, prefer:
 
 ```text

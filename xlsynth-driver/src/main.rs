@@ -335,7 +335,7 @@ impl AppExt for clap::Command {
             )
             .add_bool_arg(
                 "enable-rewrite-nary-add",
-                "Enable nary-add rewrites in prep_for_gatify (introduces and grows ext_nary_add to a fixed point)",
+                "Enable nary-add rewrites in prep_for_gatify (recovers gated inc/dec helpers and grows ext_nary_add to a fixed point)",
             )
             .add_bool_arg(
                 "enable-rewrite-mask-low",
