@@ -64,6 +64,7 @@ pub struct AugOptRewriteStats {
     pub ne_shrl_slice_known_one_shift_nonzero: usize,
     pub predicate_hoist_across_select: usize,
     pub umod_distribute_across_select: usize,
+    pub selected_opposite_subtracts: usize,
 }
 
 impl AugOptRewriteStats {
@@ -78,6 +79,7 @@ impl AugOptRewriteStats {
             .saturating_add(self.ne_shrl_slice_known_one_shift_nonzero)
             .saturating_add(self.predicate_hoist_across_select)
             .saturating_add(self.umod_distribute_across_select)
+            .saturating_add(self.selected_opposite_subtracts)
     }
 
     fn saturating_add_assign(&mut self, other: AugOptRewriteStats) {
@@ -109,6 +111,9 @@ impl AugOptRewriteStats {
         self.umod_distribute_across_select = self
             .umod_distribute_across_select
             .saturating_add(other.umod_distribute_across_select);
+        self.selected_opposite_subtracts = self
+            .selected_opposite_subtracts
+            .saturating_add(other.selected_opposite_subtracts);
     }
 }
 
@@ -345,6 +350,7 @@ fn apply_basis_rewrites_to_fn(
     // Hoist predicate reductions/comparisons across sel/priority_sel first so
     // downstream rewrites can see through the selector.
     stats.predicate_hoist_across_select = rewrite_predicate_hoist_across_select(&mut cloned);
+    stats.selected_opposite_subtracts = rewrite_selected_opposite_subtracts(&mut cloned);
     stats.ne_shrl_slice_known_one_shift_nonzero =
         rewrite_ne_shrl_slice_known_one_shift_nonzero(&mut cloned, range_info);
     let total_rewrites = stats.total().saturating_add(affine_shift_amount);
@@ -1935,6 +1941,107 @@ fn rewrite_predicate_hoist_across_select(f: &mut ir::Fn) -> usize {
     rewrites
 }
 
+fn selected_opposite_subtract_width_allowed(width: usize) -> bool {
+    width >= 3
+}
+
+/// Factor selected opposite subtracts into selected operands:
+///
+/// `sel(p, cases=[sub(b, a), sub(a, b)])`
+///   →
+/// `sub(sel(p, cases=[b, a]), sel(p, cases=[a, b]))`
+///
+/// This is guarded by bit width because the extra selects are not area
+/// profitable for one- and two-bit values in current g8r lowerings.
+fn rewrite_selected_opposite_subtracts(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+    let original_len = f.nodes.len();
+    let users = ir_utils::compute_users(f);
+
+    for idx in 0..original_len {
+        let sel_nr = NodeRef { index: idx };
+        let NodePayload::Sel {
+            selector,
+            cases,
+            default: None,
+        } = f.nodes[idx].payload.clone()
+        else {
+            continue;
+        };
+        if f.get_node_ty(selector) != &Type::Bits(1) || cases.len() != 2 {
+            continue;
+        }
+        let Type::Bits(width) = f.nodes[idx].ty.clone() else {
+            continue;
+        };
+        if !selected_opposite_subtract_width_allowed(width) {
+            continue;
+        }
+
+        let [sub_ba_nr, sub_ab_nr] = cases.as_slice() else {
+            continue;
+        };
+        if sub_ba_nr == sub_ab_nr {
+            continue;
+        }
+        let NodePayload::Binop(Binop::Sub, b, a) = f.get_node(*sub_ba_nr).payload.clone() else {
+            continue;
+        };
+        let NodePayload::Binop(Binop::Sub, a_again, b_again) =
+            f.get_node(*sub_ab_nr).payload.clone()
+        else {
+            continue;
+        };
+        if a != a_again || b != b_again {
+            continue;
+        }
+        if f.get_node_ty(a) != &Type::Bits(width) || f.get_node_ty(b) != &Type::Bits(width) {
+            continue;
+        }
+        if users
+            .get(&sel_nr)
+            .is_none_or(|sel_users| sel_users.is_empty())
+            && f.ret_node_ref != Some(sel_nr)
+        {
+            continue;
+        }
+        if users
+            .get(sub_ba_nr)
+            .is_none_or(|sub_users| sub_users.len() != 1 || !sub_users.contains(&sel_nr))
+            || users
+                .get(sub_ab_nr)
+                .is_none_or(|sub_users| sub_users.len() != 1 || !sub_users.contains(&sel_nr))
+        {
+            continue;
+        }
+
+        let result_ty = Type::Bits(width);
+        let lhs_sel = push_node(
+            f,
+            result_ty.clone(),
+            NodePayload::Sel {
+                selector,
+                cases: vec![b, a],
+                default: None,
+            },
+        );
+        let rhs_sel = push_node(
+            f,
+            result_ty.clone(),
+            NodePayload::Sel {
+                selector,
+                cases: vec![a, b],
+                default: None,
+            },
+        );
+        f.nodes[idx].payload = NodePayload::Binop(Binop::Sub, lhs_sel, rhs_sel);
+        f.nodes[idx].ty = result_ty;
+        rewrites += 1;
+    }
+
+    rewrites
+}
+
 fn known_one_positions(range_info: &IrRangeInfo, text_id: usize) -> Vec<usize> {
     let Some(info) = range_info.get(text_id) else {
         return Vec::new();
@@ -2384,6 +2491,244 @@ mod tests {
                 FnEvalResult::Failure(e) => panic!("unexpected eval failure (rhs): {:?}", e),
             };
             assert_eq!(got0, got1, "mismatch on args={args:?}");
+        }
+    }
+
+    fn selected_opposite_subtracts_ir(width: usize) -> String {
+        format!(
+            r#"package selected_sub_qor
+
+top fn selected_sub_qor(p: bits[1] id=1, a: bits[{width}] id=2, b: bits[{width}] id=3) -> bits[{width}] {{
+  ba: bits[{width}] = sub(b, a, id=4)
+  ab: bits[{width}] = sub(a, b, id=5)
+  ret out: bits[{width}] = sel(p, cases=[ba, ab], id=6)
+}}
+"#
+        )
+    }
+
+    fn run_selected_sub_aug_opt(ir_text: &str) -> AugOptRunResult {
+        run_aug_opt_over_ir_text_with_stats(
+            ir_text,
+            Some("selected_sub_qor"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt")
+    }
+
+    fn assert_sel_cases_text_ids(
+        f: &ir::Fn,
+        nr: NodeRef,
+        selector_text_id: usize,
+        case_text_ids: [usize; 2],
+    ) {
+        let node = resolve_identity(f, nr);
+        let NodePayload::Sel {
+            selector,
+            cases,
+            default,
+        } = &node.payload
+        else {
+            panic!("expected sel node; got {:?}", node.payload);
+        };
+        assert_eq!(*default, None);
+        assert_eq!(f.get_node(*selector).text_id, selector_text_id);
+        assert_eq!(cases.len(), 2);
+        assert_eq!(f.get_node(cases[0]).text_id, case_text_ids[0]);
+        assert_eq!(f.get_node(cases[1]).text_id, case_text_ids[1]);
+    }
+
+    #[test]
+    fn aug_opt_selected_opposite_subtracts_width_sweep_exhaustive_equiv() {
+        for width in 1..=8usize {
+            let ir_text = selected_opposite_subtracts_ir(width);
+            let out = run_selected_sub_aug_opt(&ir_text);
+            let expected_rewrites = usize::from(width >= 3);
+            assert_eq!(
+                out.rewrite_stats.selected_opposite_subtracts, expected_rewrites,
+                "unexpected rewrite count for width {width}; output:\n{}",
+                out.output_text
+            );
+            exhaustive_ir_text_fn_equivalence_ubits(
+                &ir_text,
+                &out.output_text,
+                "selected_sub_qor",
+                &[1, width, width],
+            );
+        }
+    }
+
+    #[test]
+    fn aug_opt_rewrites_selected_opposite_subtracts_structure() {
+        let ir_text = selected_opposite_subtracts_ir(8);
+        let out = run_selected_sub_aug_opt(&ir_text);
+        assert_eq!(out.rewrite_stats.selected_opposite_subtracts, 1);
+
+        let mut p = ir_parser::Parser::new(&out.output_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        let f = pkg.get_fn("selected_sub_qor").expect("top fn");
+        let ret_nr = f.ret_node_ref.expect("ret node");
+        let ret_node = resolve_identity(f, ret_nr);
+        let NodePayload::Binop(Binop::Sub, lhs, rhs) = ret_node.payload else {
+            panic!(
+                "expected ret to be sub(..); got {:?}\noutput:\n{}",
+                ret_node.payload, out.output_text
+            );
+        };
+        assert_sel_cases_text_ids(f, lhs, /* selector_text_id= */ 1, [3, 2]);
+        assert_sel_cases_text_ids(f, rhs, /* selector_text_id= */ 1, [2, 3]);
+    }
+
+    #[test]
+    fn aug_opt_selected_opposite_subtracts_negative_shapes() {
+        // XLS rejects a useless default on a bits[1] selector with two cases,
+        // so build this graph directly to isolate the `default: Some(_)` guard.
+        let mut default_f = ir::Fn {
+            name: "selected_sub_qor".to_string(),
+            params: vec![
+                ir::Param {
+                    name: "p".to_string(),
+                    ty: Type::Bits(1),
+                    id: ir::ParamId::new(1),
+                },
+                ir::Param {
+                    name: "a".to_string(),
+                    ty: Type::Bits(8),
+                    id: ir::ParamId::new(2),
+                },
+                ir::Param {
+                    name: "b".to_string(),
+                    ty: Type::Bits(8),
+                    id: ir::ParamId::new(3),
+                },
+            ],
+            ret_ty: Type::Bits(8),
+            nodes: vec![
+                ir::Node {
+                    text_id: 0,
+                    name: None,
+                    ty: Type::nil(),
+                    payload: NodePayload::Nil,
+                    pos: None,
+                },
+                ir::Node {
+                    text_id: 1,
+                    name: Some("p".to_string()),
+                    ty: Type::Bits(1),
+                    payload: NodePayload::GetParam(ir::ParamId::new(1)),
+                    pos: None,
+                },
+                ir::Node {
+                    text_id: 2,
+                    name: Some("a".to_string()),
+                    ty: Type::Bits(8),
+                    payload: NodePayload::GetParam(ir::ParamId::new(2)),
+                    pos: None,
+                },
+                ir::Node {
+                    text_id: 3,
+                    name: Some("b".to_string()),
+                    ty: Type::Bits(8),
+                    payload: NodePayload::GetParam(ir::ParamId::new(3)),
+                    pos: None,
+                },
+                ir::Node {
+                    text_id: 4,
+                    name: Some("ba".to_string()),
+                    ty: Type::Bits(8),
+                    payload: NodePayload::Binop(
+                        Binop::Sub,
+                        NodeRef { index: 3 },
+                        NodeRef { index: 2 },
+                    ),
+                    pos: None,
+                },
+                ir::Node {
+                    text_id: 5,
+                    name: Some("ab".to_string()),
+                    ty: Type::Bits(8),
+                    payload: NodePayload::Binop(
+                        Binop::Sub,
+                        NodeRef { index: 2 },
+                        NodeRef { index: 3 },
+                    ),
+                    pos: None,
+                },
+                ir::Node {
+                    text_id: 6,
+                    name: Some("out".to_string()),
+                    ty: Type::Bits(8),
+                    payload: NodePayload::Sel {
+                        selector: NodeRef { index: 1 },
+                        cases: vec![NodeRef { index: 4 }, NodeRef { index: 5 }],
+                        default: Some(NodeRef { index: 2 }),
+                    },
+                    pos: None,
+                },
+            ],
+            ret_node_ref: Some(NodeRef { index: 6 }),
+            outer_attrs: Vec::new(),
+            inner_attrs: Vec::new(),
+        };
+        assert_eq!(rewrite_selected_opposite_subtracts(&mut default_f), 0);
+        assert!(matches!(
+            default_f.nodes[6].payload,
+            NodePayload::Sel {
+                default: Some(_),
+                ..
+            }
+        ));
+
+        let default_ir = r#"package selected_sub_qor
+
+top fn selected_sub_qor(p: bits[2] id=1, a: bits[8] id=2, b: bits[8] id=3) -> bits[8] {
+  ba: bits[8] = sub(b, a, id=4)
+  ab: bits[8] = sub(a, b, id=5)
+  ret out: bits[8] = sel(p, cases=[ba, ab], default=a, id=6)
+}
+"#;
+        let wide_selector_ir = r#"package selected_sub_qor
+
+top fn selected_sub_qor(p: bits[2] id=1, a: bits[8] id=2, b: bits[8] id=3) -> bits[8] {
+  ba: bits[8] = sub(b, a, id=4)
+  ab: bits[8] = sub(a, b, id=5)
+  ret out: bits[8] = sel(p, cases=[ba, ab, a, b], id=6)
+}
+"#;
+        let non_opposite_ir = r#"package selected_sub_qor
+
+top fn selected_sub_qor(p: bits[1] id=1, a: bits[8] id=2, b: bits[8] id=3, c: bits[8] id=4) -> bits[8] {
+  ba: bits[8] = sub(b, a, id=5)
+  ac: bits[8] = sub(a, c, id=6)
+  ret out: bits[8] = sel(p, cases=[ba, ac], id=7)
+}
+"#;
+        let multi_user_ir = r#"package selected_sub_qor
+
+top fn selected_sub_qor(p: bits[1] id=1, a: bits[8] id=2, b: bits[8] id=3) -> bits[8] {
+  ba: bits[8] = sub(b, a, id=4)
+  ab: bits[8] = sub(a, b, id=5)
+  selected: bits[8] = sel(p, cases=[ba, ab], id=6)
+  ret out: bits[8] = add(selected, ba, id=7)
+}
+"#;
+
+        for (name, ir_text) in [
+            ("default", default_ir),
+            ("wide_selector", wide_selector_ir),
+            ("non_opposite", non_opposite_ir),
+            ("multi_user", multi_user_ir),
+        ] {
+            let out = run_selected_sub_aug_opt(ir_text);
+            assert_eq!(
+                out.rewrite_stats.selected_opposite_subtracts, 0,
+                "unexpected rewrite for {name}; output:\n{}",
+                out.output_text
+            );
         }
     }
 

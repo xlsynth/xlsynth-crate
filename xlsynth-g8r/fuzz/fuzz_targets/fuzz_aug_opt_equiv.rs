@@ -16,6 +16,7 @@ static RUN_COUNT: AtomicU64 = AtomicU64::new(0);
 static TOTAL_REWRITES: AtomicU64 = AtomicU64::new(0);
 static EQ_SHLL_SLICE_LITERAL_REWRITES: AtomicU64 = AtomicU64::new(0);
 static POW2_MSB_TIEBREAK_REWRITES: AtomicU64 = AtomicU64::new(0);
+static SELECTED_OPPOSITE_SUBTRACT_REWRITES: AtomicU64 = AtomicU64::new(0);
 
 fuzz_target!(|data: &[u8]| {
     let mut u = Unstructured::new(data);
@@ -65,16 +66,21 @@ fuzz_target!(|data: &[u8]| {
         u64::try_from(aug_result.rewrite_stats.eq_shll_slice_literal).unwrap_or(u64::MAX);
     let pow2_rewrites =
         u64::try_from(aug_result.rewrite_stats.pow2_msb_compare_with_eq_tiebreak).unwrap_or(u64::MAX);
+    let selected_opposite_subtract_rewrites =
+        u64::try_from(aug_result.rewrite_stats.selected_opposite_subtracts).unwrap_or(u64::MAX);
     TOTAL_REWRITES.fetch_add(total_rewrites, Ordering::Relaxed);
     EQ_SHLL_SLICE_LITERAL_REWRITES.fetch_add(eq_shll_slice_literal_rewrites, Ordering::Relaxed);
     POW2_MSB_TIEBREAK_REWRITES.fetch_add(pow2_rewrites, Ordering::Relaxed);
+    SELECTED_OPPOSITE_SUBTRACT_REWRITES
+        .fetch_add(selected_opposite_subtract_rewrites, Ordering::Relaxed);
     if run_idx % 1000 == 0 {
         log::info!(
-            "fuzz_aug_opt_equiv: runs={} total_rewrites={} eq_shll_slice_literal_rewrites={} pow2_msb_tiebreak_rewrites={}",
+            "fuzz_aug_opt_equiv: runs={} total_rewrites={} eq_shll_slice_literal_rewrites={} pow2_msb_tiebreak_rewrites={} selected_opposite_subtract_rewrites={}",
             run_idx,
             TOTAL_REWRITES.load(Ordering::Relaxed),
             EQ_SHLL_SLICE_LITERAL_REWRITES.load(Ordering::Relaxed),
-            POW2_MSB_TIEBREAK_REWRITES.load(Ordering::Relaxed)
+            POW2_MSB_TIEBREAK_REWRITES.load(Ordering::Relaxed),
+            SELECTED_OPPOSITE_SUBTRACT_REWRITES.load(Ordering::Relaxed)
         );
     }
 
