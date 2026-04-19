@@ -12,12 +12,28 @@
 //!   extension ops; existing extension ops are treated opaquely.
 //! - **Bounded effort**: intended as a fast front-end; keep rounds small.
 //! - **Deterministic**: stable iteration order and stable outputs.
+//!
+//! One recurring pattern this pass normalizes is an "affine shift amount":
+//! a dynamic shift whose amount is `K + flag`, where `flag` is a single bit
+//! zero-extended into the amount type. In other words, interpreting the amount
+//! as an unsigned integer, it is the affine expression `K + 1*flag`, so the
+//! shift amount is exactly one of two constants: `K` or `K + 1`; when the
+//! fixed-width add wraps, the `flag=1` case is `0`. The canonical form is:
+//!
+//! `shift(x, add(zext(flag), K))`
+//!   →
+//! `sel(flag, cases=[shift(x, K), shift(x, (K + 1) mod 2^amount_w)])`
+//!
+//! This is useful beyond gate lowering because it exposes a small finite choice
+//! to the regular optimizer instead of hiding it inside a general dynamic shift
+//! cone.
 
 use crate::desugar_extensions::{self, ExtensionEmitMode};
 use crate::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
 use crate::ir_parser;
 use crate::ir_range_info::IrRangeInfo;
 use crate::ir_utils;
+use crate::ir_value_utils::ir_bits_to_usize;
 use xlsynth::IrValue;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,10 +166,12 @@ pub fn run_aug_opt_over_ir_text_with_stats(
                 optimize_ir_text_preserving_extension_ops(ir_text, &top_name, "initial")?;
 
             let mut rewrite_stats = AugOptRewriteStats::default();
+            let mut total_rewrites = 0usize;
             for _round in 0..options.rounds {
-                let (lowered_text, rewrites_in_round) =
+                let (lowered_text, rewrites_in_round, total_in_round) =
                     apply_pir_rewrites_to_ir_text(&cur_text, &top_name)?;
                 rewrite_stats.saturating_add_assign(rewrites_in_round);
+                total_rewrites = total_rewrites.saturating_add(total_in_round);
                 cur_text = optimize_ir_text_preserving_extension_ops(
                     &lowered_text,
                     &top_name,
@@ -163,13 +181,14 @@ pub fn run_aug_opt_over_ir_text_with_stats(
 
             Ok(AugOptRunResult {
                 output_text: cur_text,
-                total_rewrites: rewrite_stats.total(),
+                total_rewrites,
                 rewrite_stats,
             })
         }
         AugOptMode::PirOnly => {
             let mut cur_text = ir_text.to_string();
             let mut rewrite_stats = AugOptRewriteStats::default();
+            let mut total_rewrites = 0usize;
 
             // Even with zero rounds, we still want to validate the requested top
             // and ensure the emitted text marks it as top.
@@ -192,14 +211,15 @@ pub fn run_aug_opt_over_ir_text_with_stats(
             }
 
             for _round in 0..options.rounds {
-                let (next_text, rewrites_in_round) =
+                let (next_text, rewrites_in_round, total_in_round) =
                     apply_pir_rewrites_to_ir_text(&cur_text, &top_name)?;
                 rewrite_stats.saturating_add_assign(rewrites_in_round);
+                total_rewrites = total_rewrites.saturating_add(total_in_round);
                 cur_text = next_text;
             }
             Ok(AugOptRunResult {
                 output_text: cur_text,
-                total_rewrites: rewrite_stats.total(),
+                total_rewrites,
                 rewrite_stats,
             })
         }
@@ -209,7 +229,7 @@ pub fn run_aug_opt_over_ir_text_with_stats(
 fn apply_pir_rewrites_to_ir_text(
     ir_text: &str,
     top_name: &str,
-) -> Result<(String, AugOptRewriteStats), String> {
+) -> Result<(String, AugOptRewriteStats, usize), String> {
     // Parse with PIR, apply basis-only rewrites to the top function.
     let mut pir_parser = ir_parser::Parser::new(ir_text);
     let mut pir_pkg = pir_parser
@@ -237,7 +257,7 @@ fn apply_pir_rewrites_to_ir_text(
     let range_info = IrRangeInfo::build_from_analysis(&analysis, &top_fn)
         .map_err(|e| format!("aug_opt: building IrRangeInfo failed: {e}"))?;
 
-    let (rewritten_top, rewrites_in_round) =
+    let (rewritten_top, rewrites_in_round, total_in_round) =
         apply_basis_rewrites_to_fn(&top_fn, Some(range_info.as_ref()));
 
     // Swap the rewritten top back into the PIR package.
@@ -259,7 +279,7 @@ fn apply_pir_rewrites_to_ir_text(
         .set_top_fn(top_name)
         .map_err(|e| format!("aug_opt: internal error: set_top_fn('{top_name}') failed: {e}"))?;
 
-    Ok((pir_pkg.to_string(), rewrites_in_round))
+    Ok((pir_pkg.to_string(), rewrites_in_round, total_in_round))
 }
 
 fn optimize_ir_text_preserving_extension_ops(
@@ -306,10 +326,11 @@ fn optimize_ir_text_preserving_extension_ops(
 fn apply_basis_rewrites_to_fn(
     f: &ir::Fn,
     range_info: Option<&IrRangeInfo>,
-) -> (ir::Fn, AugOptRewriteStats) {
+) -> (ir::Fn, AugOptRewriteStats, usize) {
     let mut cloned = f.clone();
     let mut stats = AugOptRewriteStats::default();
     stats.guarded_sel_ne1_nor = rewrite_guarded_sel_ne_literal1_nor(&mut cloned);
+    let affine_shift_amount = rewrite_affine_shift_amounts(&mut cloned);
     stats.lsb_of_shll = rewrite_lsb_of_shll_via_shift_is_zero(&mut cloned);
     stats.eq_shll_slice_literal = rewrite_eq_shll_slice_literal_to_shift_terms(&mut cloned);
     stats.pow2_msb_compare_with_eq_tiebreak =
@@ -326,12 +347,13 @@ fn apply_basis_rewrites_to_fn(
     stats.predicate_hoist_across_select = rewrite_predicate_hoist_across_select(&mut cloned);
     stats.ne_shrl_slice_known_one_shift_nonzero =
         rewrite_ne_shrl_slice_known_one_shift_nonzero(&mut cloned, range_info);
+    let total_rewrites = stats.total().saturating_add(affine_shift_amount);
     // Ensure textual IR is defs-before-uses by reordering body nodes into a
     // topological order (while preserving PIR layout invariants). This makes
     // it safe for rewrites to append new nodes.
     ir_utils::compact_and_toposort_in_place(&mut cloned)
         .expect("aug_opt: compact_and_toposort_in_place failed");
-    (cloned, stats)
+    (cloned, stats, total_rewrites)
 }
 
 fn next_text_id(f: &ir::Fn) -> usize {
@@ -470,6 +492,414 @@ fn host_usize_value_fits_in_bits_width(value: usize, width: usize) -> bool {
         .map(|limit| value < limit)
         // When width exceeds host usize bit-width, any usize value fits.
         .unwrap_or(true)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShiftKind {
+    Shll,
+    Shrl,
+    Shra,
+}
+
+fn shift_kind_from_binop(binop: Binop) -> Option<ShiftKind> {
+    match binop {
+        Binop::Shll => Some(ShiftKind::Shll),
+        Binop::Shrl => Some(ShiftKind::Shrl),
+        Binop::Shra => Some(ShiftKind::Shra),
+        _ => None,
+    }
+}
+
+fn is_bits_w(f: &ir::Fn, nr: NodeRef, w: usize) -> bool {
+    f.get_node_ty(nr) == &Type::Bits(w)
+}
+
+fn push_zero_bits_literal(f: &mut ir::Fn, width: usize) -> NodeRef {
+    push_ubits_literal(f, width, 0)
+}
+
+fn literal_usize_if_bits_node(f: &ir::Fn, nr: NodeRef) -> Option<usize> {
+    let NodePayload::Literal(value) = &f.get_node(nr).payload else {
+        return None;
+    };
+    let bits = value.to_bits().ok()?;
+    ir_bits_to_usize(&bits)
+}
+
+fn zero_literal_node(f: &ir::Fn, nr: NodeRef) -> bool {
+    let NodePayload::Literal(v) = &f.get_node(nr).payload else {
+        return false;
+    };
+    let Ok(bits) = v.to_bits() else {
+        return false;
+    };
+    bits.is_zero()
+}
+
+fn make_concat_or_single(f: &mut ir::Fn, ty: Type, operands: Vec<NodeRef>) -> NodeRef {
+    match operands.as_slice() {
+        [] => push_zero_bits_literal(f, 0),
+        [only] => *only,
+        _ => push_node(f, ty, NodePayload::Nary(NaryOp::Concat, operands)),
+    }
+}
+
+fn make_constant_shra_fill_expr(f: &mut ir::Fn, arg: NodeRef, width: usize) -> NodeRef {
+    let arg_width = f.get_node_ty(arg).bit_count();
+    if width == 0 {
+        return push_zero_bits_literal(f, 0);
+    }
+    if arg_width == 0 {
+        return push_zero_bits_literal(f, width);
+    }
+    let sign = push_node(
+        f,
+        Type::Bits(1),
+        NodePayload::BitSlice {
+            arg,
+            start: arg_width - 1,
+            width: 1,
+        },
+    );
+    if width == 1 {
+        return sign;
+    }
+    push_node(
+        f,
+        Type::Bits(width),
+        NodePayload::SignExt {
+            arg: sign,
+            new_bit_count: width,
+        },
+    )
+}
+
+fn make_constant_shift_expr(
+    f: &mut ir::Fn,
+    kind: ShiftKind,
+    arg: NodeRef,
+    shift: usize,
+) -> NodeRef {
+    let arg_width = f.get_node_ty(arg).bit_count();
+    if shift == 0 {
+        return arg;
+    }
+    if arg_width == 0 {
+        return push_zero_bits_literal(f, 0);
+    }
+
+    match kind {
+        ShiftKind::Shrl => {
+            if shift >= arg_width {
+                return push_zero_bits_literal(f, arg_width);
+            }
+            let shifted_width = arg_width - shift;
+            let shifted_slice = push_node(
+                f,
+                Type::Bits(shifted_width),
+                NodePayload::BitSlice {
+                    arg,
+                    start: shift,
+                    width: shifted_width,
+                },
+            );
+            let zero_prefix = push_zero_bits_literal(f, shift);
+            make_concat_or_single(f, Type::Bits(arg_width), vec![zero_prefix, shifted_slice])
+        }
+        ShiftKind::Shll => {
+            if shift >= arg_width {
+                return push_zero_bits_literal(f, arg_width);
+            }
+            let shifted_width = arg_width - shift;
+            let shifted_slice = push_node(
+                f,
+                Type::Bits(shifted_width),
+                NodePayload::BitSlice {
+                    arg,
+                    start: 0,
+                    width: shifted_width,
+                },
+            );
+            let zero_suffix = push_zero_bits_literal(f, shift);
+            make_concat_or_single(f, Type::Bits(arg_width), vec![shifted_slice, zero_suffix])
+        }
+        ShiftKind::Shra => {
+            if shift >= arg_width {
+                return make_constant_shra_fill_expr(f, arg, arg_width);
+            }
+            let shifted_width = arg_width - shift;
+            let shifted_slice = push_node(
+                f,
+                Type::Bits(shifted_width),
+                NodePayload::BitSlice {
+                    arg,
+                    start: shift,
+                    width: shifted_width,
+                },
+            );
+            let sign_prefix = make_constant_shra_fill_expr(f, arg, shift);
+            make_concat_or_single(f, Type::Bits(arg_width), vec![sign_prefix, shifted_slice])
+        }
+    }
+}
+
+fn make_constant_shift_bit_slice_expr(
+    f: &mut ir::Fn,
+    kind: ShiftKind,
+    arg: NodeRef,
+    shift: usize,
+    start: usize,
+    width: usize,
+) -> NodeRef {
+    let arg_width = f.get_node_ty(arg).bit_count();
+    if width == 0 {
+        return push_zero_bits_literal(f, 0);
+    }
+
+    match kind {
+        ShiftKind::Shrl => {
+            let Some(source_start) = start.checked_add(shift) else {
+                return push_zero_bits_literal(f, width);
+            };
+            if source_start >= arg_width {
+                return push_zero_bits_literal(f, width);
+            }
+            let valid_width = std::cmp::min(width, arg_width - source_start);
+            if valid_width == width {
+                if source_start == 0 && width == arg_width {
+                    return arg;
+                }
+                return push_node(
+                    f,
+                    Type::Bits(width),
+                    NodePayload::BitSlice {
+                        arg,
+                        start: source_start,
+                        width,
+                    },
+                );
+            }
+
+            let payload_bits = push_node(
+                f,
+                Type::Bits(valid_width),
+                NodePayload::BitSlice {
+                    arg,
+                    start: source_start,
+                    width: valid_width,
+                },
+            );
+            let zero_prefix = push_zero_bits_literal(f, width - valid_width);
+            make_concat_or_single(f, Type::Bits(width), vec![zero_prefix, payload_bits])
+        }
+        ShiftKind::Shll => {
+            let slice_end = start.saturating_add(width);
+            let source_start = start.saturating_sub(shift);
+            let source_end = slice_end.saturating_sub(shift).min(arg_width);
+            let low_zero_width = shift.saturating_sub(start).min(width);
+            if source_end <= source_start {
+                return push_zero_bits_literal(f, width);
+            }
+            let payload_width = source_end - source_start;
+            let high_zero_width = width - low_zero_width - payload_width;
+            let payload_bits = if source_start == 0 && payload_width == arg_width {
+                arg
+            } else {
+                push_node(
+                    f,
+                    Type::Bits(payload_width),
+                    NodePayload::BitSlice {
+                        arg,
+                        start: source_start,
+                        width: payload_width,
+                    },
+                )
+            };
+
+            let mut parts = Vec::new();
+            if high_zero_width != 0 {
+                parts.push(push_zero_bits_literal(f, high_zero_width));
+            }
+            parts.push(payload_bits);
+            if low_zero_width != 0 {
+                parts.push(push_zero_bits_literal(f, low_zero_width));
+            }
+            make_concat_or_single(f, Type::Bits(width), parts)
+        }
+        ShiftKind::Shra => {
+            let Some(source_start) = start.checked_add(shift) else {
+                return make_constant_shra_fill_expr(f, arg, width);
+            };
+            if source_start >= arg_width {
+                return make_constant_shra_fill_expr(f, arg, width);
+            }
+            let payload_width = std::cmp::min(width, arg_width - source_start);
+            if payload_width == width {
+                if source_start == 0 && width == arg_width {
+                    return arg;
+                }
+                return push_node(
+                    f,
+                    Type::Bits(width),
+                    NodePayload::BitSlice {
+                        arg,
+                        start: source_start,
+                        width,
+                    },
+                );
+            }
+
+            let payload_bits = push_node(
+                f,
+                Type::Bits(payload_width),
+                NodePayload::BitSlice {
+                    arg,
+                    start: source_start,
+                    width: payload_width,
+                },
+            );
+            let sign_prefix = make_constant_shra_fill_expr(f, arg, width - payload_width);
+            make_concat_or_single(f, Type::Bits(width), vec![sign_prefix, payload_bits])
+        }
+    }
+}
+
+fn one_bit_affine_flag(f: &ir::Fn, nr: NodeRef, amount_width: usize) -> Option<NodeRef> {
+    if amount_width == 1 && is_bits_w(f, nr, 1) {
+        return Some(nr);
+    }
+    match f.get_node(nr).payload.clone() {
+        NodePayload::ZeroExt { arg, new_bit_count }
+            if new_bit_count == amount_width && is_bits_w(f, arg, 1) =>
+        {
+            Some(arg)
+        }
+        NodePayload::Nary(NaryOp::Concat, operands) => {
+            let (&flag, high_operands) = operands.split_last()?;
+            if !is_bits_w(f, flag, 1) {
+                return None;
+            }
+            let total_width: usize = operands
+                .iter()
+                .map(|op| f.get_node_ty(*op).bit_count())
+                .sum();
+            if total_width != amount_width {
+                return None;
+            }
+            high_operands
+                .iter()
+                .all(|op| zero_literal_node(f, *op))
+                .then_some(flag)
+        }
+        _ => None,
+    }
+}
+
+fn increment_mod_bits_width(value: usize, width: usize) -> Option<usize> {
+    let Some(incremented) = value.checked_add(1) else {
+        return (width == usize::BITS as usize).then_some(0);
+    };
+    if host_usize_value_fits_in_bits_width(incremented, width) {
+        Some(incremented)
+    } else {
+        Some(0)
+    }
+}
+
+fn one_bit_affine_shift_amount(f: &ir::Fn, amount: NodeRef) -> Option<(NodeRef, usize, usize)> {
+    let Type::Bits(amount_width) = f.get_node_ty(amount) else {
+        return None;
+    };
+    let NodePayload::Binop(Binop::Add, lhs, rhs) = f.get_node(amount).payload.clone() else {
+        return None;
+    };
+    if !is_bits_w(f, lhs, *amount_width) || !is_bits_w(f, rhs, *amount_width) {
+        return None;
+    }
+    for (maybe_flag_ext, maybe_k) in [(lhs, rhs), (rhs, lhs)] {
+        let Some(flag) = one_bit_affine_flag(f, maybe_flag_ext, *amount_width) else {
+            continue;
+        };
+        let Some(k) = literal_usize_if_bits_node(f, maybe_k) else {
+            continue;
+        };
+        let Some(k_when_flag_one) = increment_mod_bits_width(k, *amount_width) else {
+            continue;
+        };
+        return Some((flag, k, k_when_flag_one));
+    }
+    None
+}
+
+/// Rewrite one-bit affine shift amounts into explicit finite choices:
+///
+/// `shift(x, add(zext(flag), k))`
+///   →
+/// `sel(flag, cases=[shift(x, k), shift(x, (k + 1) mod 2^amount_w)])`
+///
+/// This is a basis-op rewrite: it exposes the actual two-valued behavior of the
+/// amount expression and lets downstream optimization avoid full dynamic shift
+/// cones. "Affine" here means the unsigned natural-number amount is `k +
+/// 1*flag` before fixed-width truncation; if `k + 1` wraps in the amount type,
+/// the `flag=1` shift amount is `0`.
+fn rewrite_affine_shift_amounts(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+    let original_len = f.nodes.len();
+
+    for node_index in 0..original_len {
+        let NodePayload::BitSlice { arg, start, width } = f.nodes[node_index].payload.clone()
+        else {
+            continue;
+        };
+        let NodePayload::Binop(binop, shift_arg, amount) = f.get_node(arg).payload.clone() else {
+            continue;
+        };
+        let Some(kind) = shift_kind_from_binop(binop) else {
+            continue;
+        };
+        let Some((flag, k, k_when_flag_one)) = one_bit_affine_shift_amount(f, amount) else {
+            continue;
+        };
+        let case_k = make_constant_shift_bit_slice_expr(f, kind, shift_arg, k, start, width);
+        let case_flag_one =
+            make_constant_shift_bit_slice_expr(f, kind, shift_arg, k_when_flag_one, start, width);
+        f.nodes[node_index].payload = NodePayload::Sel {
+            selector: flag,
+            cases: vec![case_k, case_flag_one],
+            default: None,
+        };
+        f.nodes[node_index].ty = Type::Bits(width);
+        rewrites += 1;
+    }
+
+    let users = ir_utils::compute_users(f);
+    for node_index in 0..original_len {
+        let nr = NodeRef { index: node_index };
+        if f.ret_node_ref != Some(nr) && users.get(&nr).is_none_or(|users| users.is_empty()) {
+            continue;
+        }
+        let NodePayload::Binop(binop, arg, amount) = f.nodes[node_index].payload.clone() else {
+            continue;
+        };
+        let Some(kind) = shift_kind_from_binop(binop) else {
+            continue;
+        };
+        let Some((flag, k, k_when_flag_one)) = one_bit_affine_shift_amount(f, amount) else {
+            continue;
+        };
+        let case_k = make_constant_shift_expr(f, kind, arg, k);
+        let case_flag_one = make_constant_shift_expr(f, kind, arg, k_when_flag_one);
+        let ty = f.nodes[node_index].ty.clone();
+        f.nodes[node_index].payload = NodePayload::Sel {
+            selector: flag,
+            cases: vec![case_k, case_flag_one],
+            default: None,
+        };
+        f.nodes[node_index].ty = ty;
+        rewrites += 1;
+    }
+
+    rewrites
 }
 
 /// Rewrite a constant compare over a left-shifted slice into explicit
