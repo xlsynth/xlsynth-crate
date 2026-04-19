@@ -287,6 +287,11 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     ir::Binop::Shll => solver.xls_shll(&l.bitvec, &r.bitvec),
                     ir::Binop::Shrl => solver.xls_shrl(&l.bitvec, &r.bitvec),
                     ir::Binop::Shra => solver.xls_shra(&l.bitvec, &r.bitvec),
+                    ir::Binop::ArrayConcat => {
+                        // Arrays are flattened with element 0 in the low bits, so the
+                        // right operand occupies the high bits of the concatenated array.
+                        solver.concat(&r.bitvec, &l.bitvec)
+                    }
                     ir::Binop::Eq => solver.eq(&l.bitvec, &r.bitvec),
                     ir::Binop::Ne => solver.ne(&l.bitvec, &r.bitvec),
                     ir::Binop::Uge => solver.uge(&l.bitvec, &r.bitvec),
@@ -307,6 +312,10 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     ir::Binop::Udiv => solver.xls_udiv(&l.bitvec, &r.bitvec),
                     ir::Binop::Umod => solver.xls_umod(&l.bitvec, &r.bitvec),
                     ir::Binop::Smod => solver.xls_smod(&l.bitvec, &r.bitvec),
+                    ir::Binop::Gate => {
+                        let zero = solver.zero(result_width);
+                        solver.ite(&l.bitvec, &r.bitvec, &zero)
+                    }
                     _ => panic!("Unsupported binop: {:?}", op),
                 };
                 IrTypedBitVec {
