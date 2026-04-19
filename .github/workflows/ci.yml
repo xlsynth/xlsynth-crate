@@ -92,6 +92,9 @@ jobs:
           echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> $GITHUB_ENV
           echo "SCCACHE_CACHE_SIZE=2G" >> $GITHUB_ENV
 
+      - name: Fetch Cargo dependencies for offline pre-commit hooks
+        run: cargo fetch --locked
+
       - name: Set up Python + pre-commit
         run: |
           cd ${GITHUB_WORKSPACE}
