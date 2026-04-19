@@ -92,6 +92,9 @@ jobs:
           echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> $GITHUB_ENV
           echo "SCCACHE_CACHE_SIZE=2G" >> $GITHUB_ENV
 
+      - name: Fetch Cargo dependencies for offline pre-commit hooks
+        run: cargo fetch
+
       - name: Set up Python + pre-commit
         run: |
           cd ${GITHUB_WORKSPACE}
@@ -401,6 +404,9 @@ jobs:
         run: |
           cargo install cargo-fuzz
 
+      - name: Fetch Cargo dependencies for offline pre-commit hooks
+        run: cargo fetch
+
       - name: Run pre-commit checks
         env:
           SKIP: no-commit-to-branch
@@ -614,6 +620,9 @@ jobs:
       - name: Install cargo-fuzz
         run: |
           cargo install cargo-fuzz
+
+      - name: Fetch Cargo dependencies for offline pre-commit hooks
+        run: cargo fetch
 
       - name: Run pre-commit
         env:

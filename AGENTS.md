@@ -79,6 +79,14 @@ If you are modifying code in the `xlsynth-g8r` crate, you **must** ensure that a
 
 All fuzz targets must be documented in `FUZZ.md` with a short paragraph describing the essential property under test and the main failure modes being surfaced.
 
+Do not bias a generic fuzz target by injecting a directed, hand-crafted case for
+a specific transform or bug pattern into its normal input path. Generic fuzzing
+targets should continue to find behavior through their generic input generation
+mechanisms, so coverage remains unbiased and representative of the subsystem
+being fuzzed. Put directed/stimulus-specific coverage in focused tests,
+metamorphic/property tests, or a separately named target whose purpose is
+explicitly documented, not inside an existing generic fuzz target.
+
 ### Fuzz Target Early-Return Documentation
 
 When a fuzz target chooses to early-return on an error (instead of panicking), include a brief comment explaining why the error is not considered a sample failure. Examples: degenerate inputs, known unsupported generator outputs, or infrastructure issues that are not properties of the fuzz sample. This makes intent clear and prevents future regressions from reclassifying benign cases as failures.
