@@ -12,6 +12,7 @@ use crate::solver::{BitVec, Solver};
 use xlsynth_pir::{
     ir::{self, NaryOp, NodePayload, NodeRef, Unop},
     ir_utils::get_topological,
+    ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type,
 };
 
 pub fn ir_value_to_bv<'a, S: Solver>(
@@ -19,36 +20,9 @@ pub fn ir_value_to_bv<'a, S: Solver>(
     ir_value: &IrValue,
     ir_type: &'a ir::Type,
 ) -> IrTypedBitVec<'a, S::Term> {
-    fn gather_bits(v: &IrValue, ty: &ir::Type, bits: &mut Vec<bool>) {
-        match ty {
-            ir::Type::Bits(width) => {
-                let b = v.to_bits().expect("Expected bits literal");
-                assert_eq!(b.get_bit_count(), *width);
-                for i in 0..*width {
-                    bits.push(b.get_bit(i).unwrap()); // LSB first
-                }
-            }
-            ir::Type::Array(arr) => {
-                let elems = v.get_elements().expect("Array literal elements");
-                assert_eq!(elems.len(), arr.element_count);
-                for elem in elems.iter() {
-                    gather_bits(elem, &arr.element_type, bits);
-                }
-            }
-            ir::Type::Tuple(members) => {
-                let elems = v.get_elements().expect("Tuple literal elements");
-                assert_eq!(elems.len(), members.len());
-                for (elem, elem_ty) in elems.iter().rev().zip(members.iter().rev()) {
-                    gather_bits(elem, elem_ty, bits);
-                }
-            }
-            ir::Type::Token => {
-                // Tokens are zero-width; nothing to gather.
-            }
-        }
-    }
     let mut bits_vec: Vec<bool> = Vec::new();
-    gather_bits(ir_value, ir_type, &mut bits_vec);
+    flatten_ir_value_to_lsb0_bits_for_type(ir_value, ir_type, &mut bits_vec)
+        .expect("IR value must conform to its PIR type");
     let width = bits_vec.len();
     if width == 0 {
         return IrTypedBitVec {

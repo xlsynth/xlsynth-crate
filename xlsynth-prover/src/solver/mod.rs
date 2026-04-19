@@ -1107,9 +1107,9 @@ macro_rules! test_solver {
                     Box::new(ir::Type::Bits(5))
                 ]),
                 IrValue::make_tuple(&[
-                    IrValue::make_ubits(2, 0b11).unwrap(),
+                    IrValue::make_ubits(2, 0b01).unwrap(),
                     IrValue::make_ubits(1, 0b0).unwrap(),
-                    IrValue::make_ubits(5, 0b01010).unwrap(),
+                    IrValue::make_ubits(5, 0b10011).unwrap(),
                 ])
             );
 
@@ -1124,9 +1124,9 @@ macro_rules! test_solver {
                     Box::new(ir::Type::Bits(5))
                 ]),
                 xlsynth::IrValue::make_tuple(&[
-                    xlsynth::IrValue::make_ubits(2, 0b11).unwrap(),
+                    xlsynth::IrValue::make_ubits(2, 0b01).unwrap(),
                     xlsynth::IrValue::make_ubits(1, 0b0).unwrap(),
-                    xlsynth::IrValue::make_ubits(5, 0b01010).unwrap(),
+                    xlsynth::IrValue::make_ubits(5, 0b10011).unwrap(),
                 ])
             );
 

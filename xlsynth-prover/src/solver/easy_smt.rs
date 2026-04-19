@@ -12,8 +12,7 @@ use std::{
 use easy_smt::{Context, ContextBuilder, SExpr};
 
 use super::{BitVec, Response, Solver, SolverConfig, Uf};
-use xlsynth::IrBits;
-use xlsynth_pir::{ir, ir_value_utils::ir_value_from_bits_with_type};
+use xlsynth_pir::{ir, ir_value_utils::ir_value_from_lsb0_bits_with_layout};
 
 #[derive(Debug, Clone)]
 pub struct SolverFn {
@@ -458,10 +457,8 @@ impl Solver for EasySmtSolver {
                     }
                 };
                 let bits: Vec<bool> = bitstr.chars().rev().map(|c| c == '1').collect();
-                Ok(ir_value_from_bits_with_type(
-                    &IrBits::from_lsb_is_0(&bits),
-                    ty,
-                ))
+                ir_value_from_lsb0_bits_with_layout(ty, &bits)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
             }
             BitVec::ZeroWidth => {
                 if matches!(ty, ir::Type::Token) {

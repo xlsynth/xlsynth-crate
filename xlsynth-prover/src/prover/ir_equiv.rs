@@ -576,7 +576,7 @@ pub mod test_utils {
     use super::{align_fn_inputs, get_fn_inputs, ir_to_smt, ir_value_to_bv, prove_ir_fn_equiv};
     use crate::prover::types::{AssertionSemantics, EquivResult, FnInputs, ParamDomains, ProverFn};
     use crate::solver::{BitVec, Solver, test_utils::assert_solver_eq};
-    use xlsynth_pir::{ir, ir_parser};
+    use xlsynth_pir::{ir, ir_eval, ir_parser};
 
     pub fn test_invoke_basic<S: Solver>(solver_config: &S::Config) {
         // Package with a callee that doubles its input and two wrappers:
@@ -1115,6 +1115,50 @@ pub mod test_utils {
         assert_eq!(bv.ir_type, ir_type);
         let expected_value = expected(&mut solver);
         crate::solver::test_utils::assert_solver_eq(&mut solver, &bv.bitvec, &expected_value);
+    }
+
+    pub fn assert_disproved_counterexample_replays(
+        lhs_fn: &ir::Fn,
+        rhs_fn: &ir::Fn,
+        result: &EquivResult,
+    ) {
+        let EquivResult::Disproved {
+            lhs_inputs,
+            rhs_inputs,
+            lhs_output,
+            rhs_output,
+        } = result
+        else {
+            panic!("Expected Disproved result, got {:?}", result);
+        };
+
+        assert!(
+            lhs_output.assertion_violation.is_none(),
+            "replay helper is only for assertion-free counterexamples"
+        );
+        assert!(
+            rhs_output.assertion_violation.is_none(),
+            "replay helper is only for assertion-free counterexamples"
+        );
+
+        let lhs_args: Vec<IrValue> = lhs_inputs.iter().map(|i| i.value.clone()).collect();
+        let rhs_args: Vec<IrValue> = rhs_inputs.iter().map(|i| i.value.clone()).collect();
+
+        let lhs_replayed = match ir_eval::eval_fn(lhs_fn, &lhs_args) {
+            ir_eval::FnEvalResult::Success(success) => success.value,
+            ir_eval::FnEvalResult::Failure(failure) => {
+                panic!("LHS replay unexpectedly failed assertions: {:?}", failure)
+            }
+        };
+        let rhs_replayed = match ir_eval::eval_fn(rhs_fn, &rhs_args) {
+            ir_eval::FnEvalResult::Success(success) => success.value,
+            ir_eval::FnEvalResult::Failure(failure) => {
+                panic!("RHS replay unexpectedly failed assertions: {:?}", failure)
+            }
+        };
+
+        assert_eq!(lhs_replayed, lhs_output.value);
+        assert_eq!(rhs_replayed, rhs_output.value);
     }
 
     fn assert_ir_fn_equiv_base_with_implicit_token_policy<S: Solver>(
@@ -2432,6 +2476,73 @@ pub mod test_utils {
         }
     }
 
+    pub fn test_tuple_output_counterexample_replays<S: Solver>(solver_config: &S::Config) {
+        let lhs_ir = r#"fn lhs() -> (bits[1], bits[8], bits[7]) {
+                one: bits[1] = literal(value=1, id=1)
+                mid: bits[8] = literal(value=64, id=2)
+                tail: bits[7] = literal(value=64, id=3)
+                ret result: (bits[1], bits[8], bits[7]) = tuple(one, mid, tail, id=4)
+            }"#;
+        let rhs_ir = r#"fn rhs() -> (bits[1], bits[8], bits[7]) {
+                one: bits[1] = literal(value=1, id=1)
+                mid: bits[8] = literal(value=64, id=2)
+                tail: bits[7] = literal(value=0, id=3)
+                ret result: (bits[1], bits[8], bits[7]) = tuple(one, mid, tail, id=4)
+            }"#;
+        let mut parser = ir_parser::Parser::new(lhs_ir);
+        let lhs_fn_ir = parser.parse_fn().unwrap();
+        let mut parser = ir_parser::Parser::new(rhs_ir);
+        let rhs_fn_ir = parser.parse_fn().unwrap();
+
+        let res = super::prove_ir_fn_equiv::<S>(
+            solver_config,
+            &ProverFn::new(&lhs_fn_ir, None),
+            &ProverFn::new(&rhs_fn_ir, None),
+            AssertionSemantics::Same,
+            None,
+            false,
+        );
+
+        assert_disproved_counterexample_replays(&lhs_fn_ir, &rhs_fn_ir, &res);
+    }
+
+    pub fn test_tuple_input_counterexample_replays<S: Solver>(solver_config: &S::Config) {
+        let lhs_ir = r#"fn lhs(a: (bits[1], bits[8], bits[7])) -> bits[8] {
+                ret tuple_index.1: bits[8] = tuple_index(a, index=1, id=1)
+            }"#;
+        let rhs_ir = r#"fn rhs(a: (bits[1], bits[8], bits[7])) -> bits[8] {
+                ret literal.1: bits[8] = literal(value=0, id=1)
+            }"#;
+        let mut parser = ir_parser::Parser::new(lhs_ir);
+        let lhs_fn_ir = parser.parse_fn().unwrap();
+        let mut parser = ir_parser::Parser::new(rhs_ir);
+        let rhs_fn_ir = parser.parse_fn().unwrap();
+
+        let domain_value = IrValue::make_tuple(&[
+            IrValue::make_ubits(1, 1).unwrap(),
+            IrValue::make_ubits(8, 64).unwrap(),
+            IrValue::make_ubits(7, 64).unwrap(),
+        ]);
+        let mut lhs_domains = ParamDomains::new();
+        lhs_domains.insert("a".to_string(), vec![domain_value.clone()]);
+        let mut rhs_domains = ParamDomains::new();
+        rhs_domains.insert("a".to_string(), vec![domain_value]);
+
+        let lhs_pf = ProverFn::new(&lhs_fn_ir, None).with_domains(Some(lhs_domains));
+        let rhs_pf = ProverFn::new(&rhs_fn_ir, None).with_domains(Some(rhs_domains));
+
+        let res = super::prove_ir_fn_equiv::<S>(
+            solver_config,
+            &lhs_pf,
+            &rhs_pf,
+            AssertionSemantics::Same,
+            None,
+            false,
+        );
+
+        assert_disproved_counterexample_replays(&lhs_fn_ir, &rhs_fn_ir, &res);
+    }
+
     // New: shared test that exercises prove_ir_fn_equiv.
     pub fn test_param_domains_equiv<S: Solver>(solver_config: &S::Config) {
         let lhs_ir = r#"
@@ -3108,6 +3219,16 @@ macro_rules! test_with_solver {
             #[test]
             fn test_counterexample_input_order() {
                 test_utils::test_counterexample_input_order::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn tuple_output_counterexample_replays() {
+                test_utils::test_tuple_output_counterexample_replays::<$solver_type>(
+                    $solver_config,
+                );
+            }
+            #[test]
+            fn tuple_input_counterexample_replays() {
+                test_utils::test_tuple_input_counterexample_replays::<$solver_type>($solver_config);
             }
             #[test]
             fn test_uf_basic_equiv() {
