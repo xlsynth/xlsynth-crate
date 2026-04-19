@@ -52,6 +52,7 @@ enum ConsumerKind {
     LowSlice,
     MiddleSlice,
     HighSlice,
+    ZeroWidthSlice,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -183,6 +184,7 @@ fn consumer_start_width(consumer: ConsumerKind, source_width: usize) -> (usize, 
             (start, width)
         }
         ConsumerKind::HighSlice => (source_width - 1, 1),
+        ConsumerKind::ZeroWidthSlice => (0, 0),
     }
 }
 
@@ -271,7 +273,8 @@ fn build_affine_shift_ir(case: &AffineShiftCase) -> String {
         ConsumerKind::FullSlice
         | ConsumerKind::LowSlice
         | ConsumerKind::MiddleSlice
-        | ConsumerKind::HighSlice => {
+        | ConsumerKind::HighSlice
+        | ConsumerKind::ZeroWidthSlice => {
             lines.push(format!(
                 "  shifted: bits[{source_width}] = {op}(x, amount, id={next_id})"
             ));
@@ -438,6 +441,19 @@ fn affine_shift_rewrite_handles_wraparound_amount() {
         consumer: ConsumerKind::WholeShift,
     };
     assert_rewrites_and_proves(&case, true);
+}
+
+#[test]
+fn affine_shift_rewrite_handles_zero_width_bit_slice() {
+    let case = AffineShiftCase {
+        op: ShiftOp::Shra,
+        source_width: 8,
+        amount_width: 4,
+        k: 3,
+        ext_kind: FlagExtKind::SingleZeroConcat,
+        consumer: ConsumerKind::ZeroWidthSlice,
+    };
+    assert_rewrites_and_proves(&case, false);
 }
 
 #[test]
