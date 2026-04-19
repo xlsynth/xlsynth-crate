@@ -624,7 +624,8 @@ pub fn project_gatefn_from_netlist_and_liberty_with_options(
             let pin_dir = *pin_directions.get(port_name).unwrap_or(&0); // 1=OUTPUT, 2=INPUT
             match netref {
                 crate::netlist::parse::NetRef::Simple(net_idx)
-                | crate::netlist::parse::NetRef::BitSelect(net_idx, _) => {
+                | crate::netlist::parse::NetRef::BitSelect(net_idx, _)
+                | crate::netlist::parse::NetRef::PartSelect(net_idx, _, _) => {
                     if pin_dir == 1 {
                         driven.insert(nets[net_idx.0].name);
                     } else if pin_dir == 2 {
@@ -1747,6 +1748,41 @@ mod tests {
             &gate_fn,
             &[false, false, true, false]
         ));
+    }
+
+    #[test]
+    fn test_liberty_projection_preflight_counts_partselect_output_driver() {
+        let mut nl = NetlistFixture::new();
+        let a = nl.input("a", None);
+        let ctrl = nl.input("ctrl", None);
+        let other = nl.input("other", None);
+        let bus = nl.output("bus", Some((3, 0)));
+        let y = nl.output("y", None);
+
+        nl.inst(
+            "BUF",
+            "drive_bus_bit_3",
+            vec![("A", simple_ref(a)), ("Y", part_ref(bus, 3, 3))],
+        );
+        nl.inst(
+            "AO21",
+            "use_bus_bit_3",
+            vec![
+                ("A1", bit_ref(bus, 3)),
+                ("A2", simple_ref(ctrl)),
+                ("B", simple_ref(other)),
+                ("Y", simple_ref(y)),
+            ],
+        );
+        let gate_fn = nl
+            .project_plain()
+            .expect("part-select output should count as a bus driver during preflight");
+
+        let inputs = bool_ir(&[true, true, false]);
+        let bus_bits = eval_output_by_name(&gate_fn, inputs.clone(), "bus");
+        let y_bits = eval_output_by_name(&gate_fn, inputs, "y");
+        assert_bits(&bus_bits, &[false, false, false, true]);
+        assert_bits(&y_bits, &[true]);
     }
 
     #[test]
