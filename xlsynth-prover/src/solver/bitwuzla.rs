@@ -8,6 +8,7 @@ use std::{
     sync::Arc,
 };
 
+use super::{BitVec, Response, Solver, SolverConfig, Uf};
 use bitwuzla_sys::{
     BITWUZLA_KIND_APPLY, BITWUZLA_KIND_BV_ADD, BITWUZLA_KIND_BV_AND, BITWUZLA_KIND_BV_ASHR,
     BITWUZLA_KIND_BV_CONCAT, BITWUZLA_KIND_BV_EXTRACT, BITWUZLA_KIND_BV_MUL, BITWUZLA_KIND_BV_NAND,
@@ -47,11 +48,8 @@ use bitwuzla_sys::{
     bitwuzla_set_option, bitwuzla_set_option_mode, bitwuzla_term_manager_delete,
     bitwuzla_term_manager_new, bitwuzla_term_to_string, bitwuzla_term_value_get_str,
 };
-use xlsynth::IrBits;
-
-use super::{BitVec, Response, Solver, SolverConfig, Uf};
 use xlsynth_pir::ir;
-use xlsynth_pir::ir_value_utils::ir_value_from_bits_with_type;
+use xlsynth_pir::ir_value_utils::ir_value_from_lsb0_bits_with_layout;
 
 struct RawBitwuzla {
     term_manager: *mut bitwuzla_sys::BitwuzlaTermManager,
@@ -858,10 +856,8 @@ impl Solver for Bitwuzla {
                     .to_str()
                     .unwrap();
                 let bits: Vec<bool> = bitstr.chars().rev().map(|c| c == '1').collect();
-                Ok(ir_value_from_bits_with_type(
-                    &IrBits::from_lsb_is_0(&bits),
-                    ty,
-                ))
+                ir_value_from_lsb0_bits_with_layout(ty, &bits)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
             },
             BitVec::ZeroWidth => {
                 if matches!(ty, ir::Type::Token) {
