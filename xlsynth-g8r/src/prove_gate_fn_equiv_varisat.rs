@@ -12,6 +12,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::aig::gate::{AigNode, AigRef, GateFn};
+use crate::aig::get_summary_stats::get_gate_depth;
 use crate::aig::topo::extract_cone;
 use crate::propose_equiv::EquivNode;
 pub use crate::prove_gate_fn_equiv_common::EquivResult;
@@ -175,6 +176,80 @@ fn add_miters(
         miters.push(xor_miter);
     }
     miters
+}
+
+fn model_value_for_equiv_node(
+    model_set: &HashSet<varisat::Lit>,
+    aig_ref_to_lit: &HashMap<AigRef, varisat::Lit>,
+    equiv_node: EquivNode,
+) -> bool {
+    let base_value = model_set.contains(&aig_ref_to_lit[&equiv_node.aig_ref()]);
+    if equiv_node.is_inverted() {
+        !base_value
+    } else {
+        base_value
+    }
+}
+
+fn split_bucket_by_model_set(
+    nodes: &[EquivNode],
+    model_set: &HashSet<varisat::Lit>,
+    aig_ref_to_lit: &HashMap<AigRef, varisat::Lit>,
+) -> Vec<Vec<EquivNode>> {
+    let mut false_values = Vec::new();
+    let mut true_values = Vec::new();
+
+    for &node in nodes {
+        if model_value_for_equiv_node(model_set, aig_ref_to_lit, node) {
+            true_values.push(node);
+        } else {
+            false_values.push(node);
+        }
+    }
+
+    if false_values.is_empty() || true_values.is_empty() {
+        return vec![nodes.to_vec()];
+    }
+
+    [false_values, true_values]
+        .into_iter()
+        .filter(|bucket| bucket.len() > 1)
+        .collect()
+}
+
+fn presplit_by_counterexample_models(
+    nodes: Vec<EquivNode>,
+    counterexample_models: &[HashSet<varisat::Lit>],
+    aig_ref_to_lit: &HashMap<AigRef, varisat::Lit>,
+) -> Vec<Vec<EquivNode>> {
+    let mut buckets = vec![nodes];
+    for model_set in counterexample_models {
+        buckets = buckets
+            .into_iter()
+            .flat_map(|bucket| split_bucket_by_model_set(&bucket, model_set, aig_ref_to_lit))
+            .collect();
+        if buckets.is_empty() {
+            break;
+        }
+    }
+    buckets
+}
+
+fn equiv_node_depth_key(
+    ref_to_depth: &HashMap<AigRef, usize>,
+    equiv_node: EquivNode,
+) -> (usize, bool, usize) {
+    let aig_ref = equiv_node.aig_ref();
+    (ref_to_depth[&aig_ref], equiv_node.is_inverted(), aig_ref.id)
+}
+
+fn sorted_equiv_class(
+    equiv_class: &[EquivNode],
+    ref_to_depth: &HashMap<AigRef, usize>,
+) -> Vec<EquivNode> {
+    let mut nodes = equiv_class.to_vec();
+    nodes.sort_unstable_by_key(|node| equiv_node_depth_key(ref_to_depth, *node));
+    nodes
 }
 
 fn solver_model_to_cex(
@@ -365,53 +440,86 @@ pub fn validate_equivalence_classes(
         proven_equiv_sets: Vec::new(),
         cex_inputs: Vec::new(),
     };
+    let all_nodes: Vec<AigRef> = gate_fn
+        .gates
+        .iter()
+        .enumerate()
+        .map(|(id, _)| AigRef { id })
+        .collect();
+    let depth_stats = get_gate_depth(gate_fn, &all_nodes);
+    let mut sorted_equiv_classes: Vec<Vec<EquivNode>> = equiv_classes
+        .iter()
+        .map(|equiv_class| sorted_equiv_class(equiv_class, &depth_stats.ref_to_depth))
+        .collect();
+    sorted_equiv_classes.sort_unstable_by_key(|equiv_class| {
+        let representative = equiv_class[0];
+        (
+            equiv_node_depth_key(&depth_stats.ref_to_depth, representative),
+            equiv_class.len(),
+        )
+    });
+    let mut counterexample_models: Vec<HashSet<varisat::Lit>> = Vec::new();
 
     // Now iterate through the equivalence classes -- for each equivalence class
     // we'll advance a miter that checks whether the next value in the
     // equivalence class is equivalent to the previous value(s) which are
     // determined to be equivalent. By using multiple miters I'm suspecting we can
-    // potentially find counterexamples faster.
-    for equiv_class in equiv_classes {
-        let mut known_equiv = vec![equiv_class[0]];
-        for &candidate in &equiv_class[1..] {
-            // Create a miter between this candidate and all known equivalent values.
-            let miters = add_miters(&mut solver, &aig_ref_to_lit, &known_equiv, candidate);
+    // potentially find counterexamples faster. Before spending SAT work on a
+    // class, split it by counterexamples found in earlier classes. A new
+    // counterexample still stops the current original class, preserving the old
+    // per-class proof budget.
+    for equiv_class in sorted_equiv_classes {
+        let buckets =
+            presplit_by_counterexample_models(equiv_class, &counterexample_models, &aig_ref_to_lit);
+        let mut stop_class_after_new_counterexample = false;
+        for bucket in buckets {
+            let mut known_equiv = vec![bucket[0]];
+            for &candidate in &bucket[1..] {
+                // Create a miter between this candidate and all known equivalent values.
+                let miters = add_miters(&mut solver, &aig_ref_to_lit, &known_equiv, candidate);
 
-            // Assume the miters outputs are true, which is stating "the candidate is
-            // unequal to the known_equiv values".
-            solver.assume(&miters);
-            let solve_result = solver.solve();
-            match solve_result {
-                Ok(false) => {
-                    // No counterexample found, expand the known equivalent set.
-                    known_equiv.push(candidate);
-                }
-                Ok(true) => {
-                    // Counterexample found, extract it from the model.
-                    let model = solver.model();
-                    assert!(
-                        model.is_some(),
-                        "counterexample found, should be able to extract model"
-                    );
-                    let model_unwrapped = model.unwrap();
-                    let cex = solver_model_to_cex(
-                        &model_unwrapped,
-                        &all_primary_inputs,
-                        &aig_ref_to_lit,
-                        gate_fn,
-                    );
-                    validation_result.cex_inputs.push(cex);
-                    break;
-                }
-                Err(e) => {
-                    return Err(ValidationError::SolverError(e));
+                // Assume the miters outputs are true, which is stating "the candidate is
+                // unequal to the known_equiv values".
+                solver.assume(&miters);
+                let solve_result = solver.solve();
+                match solve_result {
+                    Ok(false) => {
+                        // No counterexample found, expand the known equivalent set.
+                        known_equiv.push(candidate);
+                    }
+                    Ok(true) => {
+                        // Counterexample found, extract it from the model.
+                        let model = solver.model();
+                        assert!(
+                            model.is_some(),
+                            "counterexample found, should be able to extract model"
+                        );
+                        let model_unwrapped = model.unwrap();
+                        let model_set: HashSet<varisat::Lit> =
+                            model_unwrapped.iter().cloned().collect();
+                        let cex = solver_model_to_cex(
+                            &model_unwrapped,
+                            &all_primary_inputs,
+                            &aig_ref_to_lit,
+                            gate_fn,
+                        );
+                        validation_result.cex_inputs.push(cex);
+                        counterexample_models.push(model_set);
+                        stop_class_after_new_counterexample = true;
+                        break;
+                    }
+                    Err(e) => {
+                        return Err(ValidationError::SolverError(e));
+                    }
                 }
             }
-        }
-        if known_equiv.len() > 1 {
-            validation_result
-                .proven_equiv_sets
-                .push(known_equiv.to_vec());
+
+            if known_equiv.len() > 1 {
+                validation_result.proven_equiv_sets.push(known_equiv);
+            }
+            if stop_class_after_new_counterexample {
+                break;
+            }
         }
     }
 
@@ -492,6 +600,31 @@ mod tests {
             validation_result.cex_inputs.len(),
             1,
             "Should find exactly one counterexample"
+        );
+    }
+
+    #[test]
+    fn test_validate_reuses_counterexample_for_later_class() {
+        let setup = setup_partially_equiv_graph();
+
+        let proposed_class = &[
+            EquivNode::Normal(setup.c.node),
+            EquivNode::Normal(setup.a.node),
+            EquivNode::Normal(setup.b.node),
+        ];
+
+        let validation_result =
+            validate_equivalence_classes(&setup.g, &[proposed_class, proposed_class]).unwrap();
+
+        assert_eq!(
+            validation_result.proven_equiv_sets.len(),
+            2,
+            "Both duplicate classes should still prove the a == b pair"
+        );
+        assert_eq!(
+            validation_result.cex_inputs.len(),
+            1,
+            "The second class should be split by the first class's counterexample"
         );
     }
 }
