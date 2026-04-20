@@ -320,8 +320,26 @@ AIGER artifact as Verilog/SystemVerilog without lifting it through XLS IR.
 The generated module name must be provided explicitly with `--module-name`
 because AIGER does not carry a module name. The emitted ports use the raw loaded
 AIGER interface: scalar AIGER inputs and outputs, with AIGER symbol-table names
-preserved when present. No port regrouping, `--fn-type` interpretation, IR
-lifting, ABC execution, or optimization is performed by this command.
+preserved when present. No port regrouping, IR lifting, ABC execution, or
+optimization is performed by default.
+
+`--fn-type <FN_TYPE>` opts into a typed packed-port interpretation of the raw
+AIGER bitstream. The same function-type parser used by `aig2ir` and `aig-eval`
+is used here, but `aig2v` initially supports only top-level `bits[N]`
+parameters and either a `bits[M]` return value or a top-level tuple of
+`bits[M]` return elements, with all widths greater than zero. In this mode the
+generated ports are synthetic because the function-type syntax does not carry
+parameter names: inputs are named `arg0`, `arg1`, ..., a bits return is named
+`output_value`, and tuple return elements are named `output_value_0`,
+`output_value_1`, ... by tuple element index. The raw AIGER input and output
+bit totals are checked against the signature before emission.
+
+Typed packed-port emission still produces a single module named by
+`--module-name`; it does not emit a wrapper or instantiate an inner module.
+Internal AIG nodes remain scalar wires, while top-level packed ports are
+connected with bit-select assigns such as `arg0[0]`, `output_value[0]`, or
+`output_value_0[0]`. This shape is directly consumable by `xlsynth-vastly`'s
+`compile_pipeline_module` when the emitted subset is otherwise supported.
 
 Positional arguments:
 
@@ -330,6 +348,10 @@ Positional arguments:
 Flags:
 
 - `--module-name <NAME>` – required name of the generated module.
+- `--fn-type <FN_TYPE>` – optional bits-oriented function type used to emit
+  packed synthetic ports (`arg0`, `arg1`, ..., `output_value`, or
+  `output_value_0`, `output_value_1`, ... for tuple returns) and validate raw
+  AIGER interface widths.
 - `--add-clk-port <NAME>` – add a clock port with this name; required when
   `--flop-inputs` or `--flop-outputs` is used.
 - `--flop-inputs` – add a layer of flops for all inputs.
@@ -345,6 +367,7 @@ Example with clocked input/output flops:
 xlsynth-driver aig2v postabc.aig \
   --module-name add_bf16 \
   --add-clk-port clk \
+  --fn-type '(bits[16], bits[16]) -> bits[16]' \
   --flop-inputs \
   --flop-outputs > add_bf16.sv
 ```

@@ -209,8 +209,8 @@ fn dslx2pipeline_eco(
     if codegen_flags.flop_inputs == Some(true) || codegen_flags.flop_outputs == Some(true) {
         if *pipeline_spec == PipelineSpec::Stages(1) {
             eprintln!(
-            "`dslx2pipeline_eco` only works with combinational blocks (single-stage, no IO flops)"
-        );
+                "`dslx2pipeline_eco` only works with combinational blocks (single-stage, no IO flops)"
+            );
             std::process::exit(1);
         }
     }

@@ -101,7 +101,9 @@ fn dslx2pipeline(
         println!("{}", sv);
     } else {
         if type_inference_v2 == Some(true) {
-            eprintln!("error: --type_inference_v2 is only supported when using --toolchain (external tool path)");
+            eprintln!(
+                "error: --type_inference_v2 is only supported when using --toolchain (external tool path)"
+            );
             std::process::exit(1);
         }
         log::info!("dslx2pipeline using runtime APIs");

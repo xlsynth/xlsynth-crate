@@ -3,7 +3,7 @@
 //! Tests for invoking the xlsynth-driver CLI and its subcommands as a
 //! subprocess.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::io::Write;
 use std::process::Command;
@@ -18,7 +18,10 @@ use xlsynth_pir::ir_parser;
 use xlsynth_vastly::compile_pipeline_module;
 use xlsynth_vastly::pipeline_cycle_from_irvalue;
 use xlsynth_vastly::run_pipeline_and_collect_outputs;
+use xlsynth_vastly::PipelineCycle;
 use xlsynth_vastly::PipelineStimulus;
+use xlsynth_vastly::Signedness;
+use xlsynth_vastly::Value4;
 
 use test_case::test_case;
 
@@ -58,6 +61,31 @@ fn write_aiger_binary_file(
     let path = temp_dir.path().join(file_name);
     std::fs::write(&path, aiger).expect("failed to write binary aiger file");
     path
+}
+
+fn ir_bits_to_msb_string(bits: &IrBits) -> String {
+    (0..bits.get_bit_count())
+        .rev()
+        .map(|bit_index| {
+            if bits.get_bit(bit_index).unwrap() {
+                '1'
+            } else {
+                '0'
+            }
+        })
+        .collect::<String>()
+}
+
+fn assert_value4_matches_ir_bits(actual: &Value4, expected_bits: &IrBits) {
+    assert!(
+        actual.is_all_known_01(),
+        "expected known output bits, got {}",
+        actual.to_bit_string_msb_first()
+    );
+    assert_eq!(
+        actual.to_bit_string_msb_first(),
+        ir_bits_to_msb_string(expected_bits)
+    );
 }
 
 fn assert_aig_ir_equiv_roundtrip_for_ir_case(
@@ -4922,6 +4950,458 @@ fn test_aig2v_requires_module_name() {
 }
 
 #[test]
+fn test_aig2v_fn_type_emits_packed_ports() {
+    let mut g8_builder = GateBuilder::new("typed_xor".to_string(), GateBuilderOptions::no_opt());
+    let lhs = g8_builder.add_input("a".to_string(), 16);
+    let rhs = g8_builder.add_input("b".to_string(), 16);
+    let output = g8_builder.add_xor_vec(&lhs, &rhs);
+    g8_builder.add_output("y".to_string(), output);
+    let gate_fn = g8_builder.build();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let aag_path = write_aiger_file(&temp_dir, "typed_xor.aag", &gate_fn);
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("aig2v")
+        .arg(aag_path.to_str().unwrap())
+        .arg("--module-name")
+        .arg("typed_xor")
+        .arg("--fn-type")
+        .arg("(bits[16], bits[16]) -> bits[16]")
+        .arg("--use-system-verilog")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let netlist = String::from_utf8_lossy(&output.stdout);
+    assert!(netlist.contains("input wire [15:0] arg0"));
+    assert!(netlist.contains("input wire [15:0] arg1"));
+    assert!(netlist.contains("output wire [15:0] output_value"));
+    assert!(netlist.contains("assign output_value[0] = "));
+    assert!(netlist.contains("arg0[0]"));
+    assert!(netlist.contains("arg1[0]"));
+    assert!(!netlist.contains("arg0_0"));
+    assert!(!netlist.contains("arg1_0"));
+    assert!(!netlist.contains("output_value_0"));
+}
+
+#[test]
+fn test_aig2v_fn_type_reports_input_width_mismatch() {
+    let mut g8_builder =
+        GateBuilder::new("typed_bad_input".to_string(), GateBuilderOptions::no_opt());
+    let lhs = g8_builder.add_input("a".to_string(), 8);
+    let rhs = g8_builder.add_input("b".to_string(), 8);
+    let output = g8_builder.add_xor_vec(&lhs, &rhs);
+    g8_builder.add_output("y".to_string(), output);
+    let gate_fn = g8_builder.build();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let aag_path = write_aiger_file(&temp_dir, "typed_bad_input.aag", &gate_fn);
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("aig2v")
+        .arg(aag_path.to_str().unwrap())
+        .arg("--module-name")
+        .arg("typed_bad_input")
+        .arg("--fn-type")
+        .arg("(bits[16], bits[16]) -> bits[8]")
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "expected width mismatch to fail; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("input width mismatch"),
+        "expected input width mismatch, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_aig2v_fn_type_reports_output_width_mismatch() {
+    let mut g8_builder =
+        GateBuilder::new("typed_bad_output".to_string(), GateBuilderOptions::no_opt());
+    let lhs = g8_builder.add_input("a".to_string(), 8);
+    let rhs = g8_builder.add_input("b".to_string(), 8);
+    let output = g8_builder.add_xor_vec(&lhs, &rhs);
+    g8_builder.add_output("y".to_string(), output);
+    let gate_fn = g8_builder.build();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let aag_path = write_aiger_file(&temp_dir, "typed_bad_output.aag", &gate_fn);
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("aig2v")
+        .arg(aag_path.to_str().unwrap())
+        .arg("--module-name")
+        .arg("typed_bad_output")
+        .arg("--fn-type")
+        .arg("(bits[8], bits[8]) -> bits[16]")
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "expected width mismatch to fail; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("output width mismatch"),
+        "expected output width mismatch, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_aig2v_fn_type_rejects_non_bits_types() {
+    let mut g8_builder = GateBuilder::new("typed_array".to_string(), GateBuilderOptions::no_opt());
+    let lhs = g8_builder.add_input("a".to_string(), 16);
+    g8_builder.add_output("y".to_string(), lhs);
+    let gate_fn = g8_builder.build();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let aag_path = write_aiger_file(&temp_dir, "typed_array.aag", &gate_fn);
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("aig2v")
+        .arg(aag_path.to_str().unwrap())
+        .arg("--module-name")
+        .arg("typed_array")
+        .arg("--fn-type")
+        .arg("(bits[8][2]) -> bits[16]")
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "expected non-bits type to fail; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("only top-level bits[N] parameters"),
+        "expected unsupported type message, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_aig2v_fn_type_rejects_non_bits_return_type() {
+    let mut g8_builder = GateBuilder::new(
+        "typed_array_return".to_string(),
+        GateBuilderOptions::no_opt(),
+    );
+    let lhs = g8_builder.add_input("a".to_string(), 16);
+    g8_builder.add_output("y".to_string(), lhs);
+    let gate_fn = g8_builder.build();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let aag_path = write_aiger_file(&temp_dir, "typed_array_return.aag", &gate_fn);
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("aig2v")
+        .arg(aag_path.to_str().unwrap())
+        .arg("--module-name")
+        .arg("typed_array_return")
+        .arg("--fn-type")
+        .arg("(bits[16]) -> bits[8][2]")
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "expected non-bits return type to fail; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("bits[M] or top-level tuple of bits[M] return"),
+        "expected unsupported return type message, got: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_aig2v_fn_type_tuple_return_simulates_against_aig_eval_and_ir_fn_eval() {
+    let ir = r#"package test
+
+fn f(a: bits[2] id=1, b: bits[3] id=2) -> (bits[3], bits[2]) {
+  a_ext: bits[3] = zero_ext(a, new_bit_count=3, id=3)
+  b_low: bits[2] = bit_slice(b, start=0, width=2, id=4)
+  sum: bits[3] = add(a_ext, b, id=5)
+  xored: bits[2] = xor(a, b_low, id=6)
+  ret tuple.7: (bits[3], bits[2]) = tuple(sum, xored, id=7)
+}
+"#;
+    let fn_type = "(bits[2], bits[3]) -> (bits[3], bits[2])";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("tuple_word.ir");
+    let aag_path = temp_dir.path().join("tuple_word.aag");
+    std::fs::write(&ir_path, ir).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let ir2g8r_output = Command::new(command_path)
+        .arg("ir2g8r")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("f")
+        .arg("--aiger-out")
+        .arg(aag_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        ir2g8r_output.status.success(),
+        "ir2g8r failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&ir2g8r_output.stdout),
+        String::from_utf8_lossy(&ir2g8r_output.stderr)
+    );
+
+    let sv_output = Command::new(command_path)
+        .arg("aig2v")
+        .arg(aag_path.to_str().unwrap())
+        .arg("--module-name")
+        .arg("tuple_word")
+        .arg("--fn-type")
+        .arg(fn_type)
+        .arg("--add-clk-port")
+        .arg("clk")
+        .arg("--flop-outputs")
+        .arg("--use-system-verilog")
+        .output()
+        .unwrap();
+    assert!(
+        sv_output.status.success(),
+        "aig2v failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&sv_output.stdout),
+        String::from_utf8_lossy(&sv_output.stderr)
+    );
+    let sv = String::from_utf8(sv_output.stdout).unwrap();
+    assert_eq!(
+        sv.matches("module tuple_word(").count(),
+        1,
+        "expected exactly one top-level module declaration:\n{sv}"
+    );
+    assert!(sv.contains("input wire [1:0] arg0"));
+    assert!(sv.contains("input wire [2:0] arg1"));
+    assert!(sv.contains("output wire [2:0] output_value_0"));
+    assert!(sv.contains("output wire [1:0] output_value_1"));
+    assert!(sv.contains("wire [2:0] output_value_0_comb"));
+    assert!(sv.contains("wire [1:0] output_value_1_comb"));
+    assert!(sv.contains("reg [2:0] p0_output_value_0"));
+    assert!(sv.contains("reg [1:0] p0_output_value_1"));
+    assert!(sv.contains("assign output_value_0_comb[0] = "));
+    assert!(sv.contains("assign output_value_1_comb[0] = "));
+    assert!(sv.contains("assign output_value_0 = p0_output_value_0"));
+    assert!(sv.contains("assign output_value_1 = p0_output_value_1"));
+    let module =
+        compile_pipeline_module(&sv).expect("vastly should compile tuple-return aig2v output");
+
+    let input_vectors = [(0u64, 0u64), (1, 4), (2, 5), (3, 7)];
+    let cycles = input_vectors
+        .iter()
+        .map(|(a_value, b_value)| {
+            let mut inputs = BTreeMap::new();
+            inputs.insert(
+                "arg0".to_string(),
+                Value4::from_u64(2, Signedness::Unsigned, *a_value),
+            );
+            inputs.insert(
+                "arg1".to_string(),
+                Value4::from_u64(3, Signedness::Unsigned, *b_value),
+            );
+            PipelineCycle { inputs }
+        })
+        .collect::<Vec<PipelineCycle>>();
+    let stimulus = PipelineStimulus {
+        half_period: 5,
+        cycles,
+    };
+    let outputs = run_pipeline_and_collect_outputs(&module, &stimulus, &module.initial_state_x())
+        .expect("vastly should simulate tuple-return aig2v output");
+
+    for ((a_value, b_value), cycle_outputs) in input_vectors.iter().zip(outputs.iter()) {
+        let args = format!("(bits[2]:0x{a_value:x}, bits[3]:0x{b_value:x})");
+        let ir_eval_output = Command::new(command_path)
+            .arg("ir-fn-eval")
+            .arg(ir_path.to_str().unwrap())
+            .arg("f")
+            .arg(&args)
+            .output()
+            .unwrap();
+        assert!(
+            ir_eval_output.status.success(),
+            "ir-fn-eval failed: stdout: {} stderr: {}",
+            String::from_utf8_lossy(&ir_eval_output.stdout),
+            String::from_utf8_lossy(&ir_eval_output.stderr)
+        );
+
+        let aig_eval_output = Command::new(command_path)
+            .arg("aig-eval")
+            .arg(aag_path.to_str().unwrap())
+            .arg(&args)
+            .arg("--fn-type")
+            .arg(fn_type)
+            .output()
+            .unwrap();
+        assert!(
+            aig_eval_output.status.success(),
+            "aig-eval failed: stdout: {} stderr: {}",
+            String::from_utf8_lossy(&aig_eval_output.stdout),
+            String::from_utf8_lossy(&aig_eval_output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&aig_eval_output.stdout),
+            String::from_utf8_lossy(&ir_eval_output.stdout),
+            "aig-eval and ir-fn-eval should agree for args {args}"
+        );
+
+        let expected_value =
+            IrValue::parse_typed(String::from_utf8_lossy(&ir_eval_output.stdout).trim())
+                .expect("ir-fn-eval output should parse as an IrValue");
+        let expected_elements = expected_value
+            .get_elements()
+            .expect("tuple-return eval output should have elements");
+        assert_eq!(expected_elements.len(), 2);
+        let expected_output_0_bits = expected_elements[0]
+            .to_bits()
+            .expect("first tuple element should be bits");
+        let expected_output_1_bits = expected_elements[1]
+            .to_bits()
+            .expect("second tuple element should be bits");
+
+        assert_value4_matches_ir_bits(
+            cycle_outputs
+                .get("output_value_0")
+                .expect("first tuple output should be present"),
+            &expected_output_0_bits,
+        );
+        assert_value4_matches_ir_bits(
+            cycle_outputs
+                .get("output_value_1")
+                .expect("second tuple output should be present"),
+            &expected_output_1_bits,
+        );
+    }
+}
+
+#[test]
+fn test_aig2v_fn_type_flop_outputs_simulates_with_vastly_like_aig_eval() {
+    let mut g8_builder =
+        GateBuilder::new("typed_xor_sim".to_string(), GateBuilderOptions::no_opt());
+    let lhs = g8_builder.add_input("a".to_string(), 16);
+    let rhs = g8_builder.add_input("b".to_string(), 16);
+    let output = g8_builder.add_xor_vec(&lhs, &rhs);
+    g8_builder.add_output("y".to_string(), output);
+    let gate_fn = g8_builder.build();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let aag_path = write_aiger_file(&temp_dir, "typed_xor_sim.aag", &gate_fn);
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let sv_output = Command::new(command_path)
+        .arg("aig2v")
+        .arg(aag_path.to_str().unwrap())
+        .arg("--module-name")
+        .arg("typed_xor_sim")
+        .arg("--fn-type")
+        .arg("(bits[16], bits[16]) -> bits[16]")
+        .arg("--add-clk-port")
+        .arg("clk")
+        .arg("--flop-outputs")
+        .arg("--use-system-verilog")
+        .output()
+        .unwrap();
+    assert!(
+        sv_output.status.success(),
+        "aig2v failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&sv_output.stdout),
+        String::from_utf8_lossy(&sv_output.stderr)
+    );
+    let sv = String::from_utf8(sv_output.stdout).unwrap();
+    assert_eq!(
+        sv.matches("module typed_xor_sim(").count(),
+        1,
+        "expected exactly one top-level module declaration:\n{sv}"
+    );
+    let module = compile_pipeline_module(&sv).expect("vastly should compile typed aig2v output");
+
+    let input_vectors = [
+        (0x0000u64, 0xffffu64),
+        (0x1234u64, 0x00ffu64),
+        (0xabcd, 0x2222),
+    ];
+    let cycles = input_vectors
+        .iter()
+        .map(|(lhs_value, rhs_value)| {
+            let mut inputs = BTreeMap::new();
+            inputs.insert(
+                "arg0".to_string(),
+                Value4::from_u64(16, Signedness::Unsigned, *lhs_value),
+            );
+            inputs.insert(
+                "arg1".to_string(),
+                Value4::from_u64(16, Signedness::Unsigned, *rhs_value),
+            );
+            PipelineCycle { inputs }
+        })
+        .collect::<Vec<PipelineCycle>>();
+    let stimulus = PipelineStimulus {
+        half_period: 5,
+        cycles,
+    };
+    let outputs = run_pipeline_and_collect_outputs(&module, &stimulus, &module.initial_state_x())
+        .expect("vastly should simulate typed aig2v output");
+
+    for ((lhs_value, rhs_value), cycle_outputs) in input_vectors.iter().zip(outputs.iter()) {
+        let eval_output = Command::new(command_path)
+            .arg("aig-eval")
+            .arg(aag_path.to_str().unwrap())
+            .arg(format!(
+                "(bits[16]:0x{lhs_value:04x}, bits[16]:0x{rhs_value:04x})"
+            ))
+            .arg("--fn-type")
+            .arg("(bits[16], bits[16]) -> bits[16]")
+            .output()
+            .unwrap();
+        assert!(
+            eval_output.status.success(),
+            "aig-eval failed: stdout: {} stderr: {}",
+            String::from_utf8_lossy(&eval_output.stdout),
+            String::from_utf8_lossy(&eval_output.stderr)
+        );
+        let expected_value =
+            IrValue::parse_typed(String::from_utf8_lossy(&eval_output.stdout).trim())
+                .expect("aig-eval output should parse as an IrValue");
+        let expected_bits = expected_value
+            .to_bits()
+            .expect("typed aig-eval output should be bits");
+        let actual = cycle_outputs
+            .get("output_value")
+            .expect("typed packed output should be present");
+        assert_value4_matches_ir_bits(actual, &expected_bits);
+    }
+}
+
+#[test]
 fn test_g8r2v_add_clk_port_behavior() {
     let mut g8_builder = GateBuilder::new("testmod".to_string(), GateBuilderOptions::no_opt());
     let a_val = g8_builder.add_input("a".to_string(), 1);
@@ -5338,9 +5818,17 @@ top fn my_main() -> bits[32] {
 
     let has_asserts = stdout.to_lowercase().contains("assert");
     if add_inv {
-        assert!(has_asserts, "Expected invariant assertions to be present when --add_invariant_assertions=true, but none were found. stdout: {}", stdout);
+        assert!(
+            has_asserts,
+            "Expected invariant assertions to be present when --add_invariant_assertions=true, but none were found. stdout: {}",
+            stdout
+        );
     } else {
-        assert!(!has_asserts, "Did not expect invariant assertions when --add_invariant_assertions=false, but some were found. stdout: {}", stdout);
+        assert!(
+            !has_asserts,
+            "Did not expect invariant assertions when --add_invariant_assertions=false, but some were found. stdout: {}",
+            stdout
+        );
     }
 }
 
@@ -8034,9 +8522,17 @@ fn f_cycle1(x: u6) -> u6 {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let has_asserts = stdout.to_lowercase().contains("assert");
     if add_inv {
-        assert!(has_asserts, "Expected invariant assertions in generated Verilog when add_invariant_assertions=true, but none were found. stdout: {}", stdout);
+        assert!(
+            has_asserts,
+            "Expected invariant assertions in generated Verilog when add_invariant_assertions=true, but none were found. stdout: {}",
+            stdout
+        );
     } else {
-        assert!(!has_asserts, "Did not expect invariant assertions when add_invariant_assertions=false, but some were found. stdout: {}", stdout);
+        assert!(
+            !has_asserts,
+            "Did not expect invariant assertions when add_invariant_assertions=false, but some were found. stdout: {}",
+            stdout
+        );
     }
 }
 
