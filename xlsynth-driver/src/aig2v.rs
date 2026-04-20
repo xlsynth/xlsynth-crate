@@ -29,8 +29,44 @@ fn require_nonzero_bits_type(kind: &str, ty: &ir::Type) -> Result<(), String> {
         )),
         ir::Type::Bits(_) => Ok(()),
         _ => Err(format!(
-            "aig2v --fn-type currently supports only top-level bits[N] parameters and a bits[M] return; {kind} has type {ty}"
+            "aig2v --fn-type currently supports only top-level bits[N] parameters and a bits[M] or top-level tuple of bits[M] return; {kind} has type {ty}"
         )),
+    }
+}
+
+fn output_ports_from_supported_return_type(
+    return_type: &ir::Type,
+) -> Result<Vec<GateFnInterfacePort>, String> {
+    match return_type {
+        ir::Type::Bits(_) => {
+            require_nonzero_bits_type("return value", return_type)?;
+            Ok(vec![GateFnInterfacePort {
+                name: "output_value".to_string(),
+                ty: return_type.clone(),
+            }])
+        }
+        ir::Type::Tuple(elements) => {
+            if elements.is_empty() {
+                return Err(
+                    "aig2v --fn-type return value has zero width; packed Verilog ports require bits[N] with N > 0"
+                        .to_string(),
+                );
+            }
+
+            let mut output_ports = Vec::with_capacity(elements.len());
+            for (index, element_type) in elements.iter().enumerate().rev() {
+                require_nonzero_bits_type(&format!("return tuple element {index}"), element_type)?;
+                output_ports.push(GateFnInterfacePort {
+                    name: format!("output_value_{index}"),
+                    ty: (**element_type).clone(),
+                });
+            }
+            Ok(output_ports)
+        }
+        _ => {
+            require_nonzero_bits_type("return value", return_type)?;
+            unreachable!("non-bits return types are rejected above")
+        }
     }
 }
 
@@ -40,7 +76,7 @@ fn schema_from_supported_function_type(
     for (index, param_type) in function_type.param_types.iter().enumerate() {
         require_nonzero_bits_type(&format!("parameter {index}"), param_type)?;
     }
-    require_nonzero_bits_type("return value", &function_type.return_type)?;
+    let output_ports = output_ports_from_supported_return_type(&function_type.return_type)?;
 
     Ok(GateFnInterfaceSchema {
         input_ports: function_type
@@ -52,10 +88,7 @@ fn schema_from_supported_function_type(
                 ty: ty.clone(),
             })
             .collect::<Vec<GateFnInterfacePort>>(),
-        output_ports: vec![GateFnInterfacePort {
-            name: "output_value".to_string(),
-            ty: function_type.return_type.clone(),
-        }],
+        output_ports,
         return_type: function_type.return_type.clone(),
     })
 }

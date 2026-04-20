@@ -203,7 +203,16 @@ fn generate_module_ports_and_registers(
     }
 
     // Add all the outputs to the module.
-    for (output_index, output_spec) in config.gate_fn.outputs.iter().enumerate() {
+    let mut output_specs = config
+        .gate_fn
+        .outputs
+        .iter()
+        .enumerate()
+        .collect::<Vec<(usize, &gate::Output)>>();
+    if config.port_style == NetlistPortStyle::PackedBits {
+        output_specs.sort_by(|(_, lhs), (_, rhs)| lhs.name.cmp(&rhs.name));
+    }
+    for (output_index, output_spec) in output_specs {
         let bit_count = output_spec.bit_vector.get_bit_count();
         match config.port_style {
             NetlistPortStyle::ScalarBits => {
