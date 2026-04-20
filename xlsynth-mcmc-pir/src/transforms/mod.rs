@@ -32,6 +32,7 @@ mod clone_multi_user_node;
 mod cmp_sel_canon;
 mod cmp_swap;
 mod compare_ramp_to_mask_low;
+mod concat_compare_split_merge;
 mod concat_sel_hoist;
 mod const_shll_concat_zero_fold;
 mod csa_fuse_into_consumer;
@@ -41,6 +42,7 @@ mod eq_ne_add_literal_shift;
 mod eq_sel_distribute;
 mod eq_zero_or_reduce;
 mod ext_nary_add_rewrites;
+mod guarded_predicate_rewire;
 mod macro_utils;
 mod mask_operand_bit;
 mod nand_not_and_fold;
@@ -61,6 +63,8 @@ mod priority_sel_1_to_sel;
 mod priority_sel_to_masked_candidates;
 mod priority_sel_to_sel_chain;
 mod reassociate_add_sub;
+mod reduce_concat_split_merge;
+mod reduce_sel_distribute;
 mod rewire_operand_to_same_type;
 mod rewire_users_to_sibling_add;
 mod sel_chain_to_priority_sel;
@@ -102,6 +106,7 @@ use clone_multi_user_node::CloneMultiUserNodeTransform;
 use cmp_sel_canon::CmpSelCanonTransform;
 use cmp_swap::CmpSwapTransform;
 use compare_ramp_to_mask_low::CompareRampToMaskLowTransform;
+use concat_compare_split_merge::ConcatCompareSplitMergeTransform;
 use concat_sel_hoist::ConcatSelHoistTransform;
 use const_shll_concat_zero_fold::ConstShllConcatZeroFoldTransform;
 use csa_fuse_into_consumer::CsaFuseIntoConsumerTransform;
@@ -118,6 +123,7 @@ use ext_nary_add_rewrites::{
     CombineNaryAddsTransform, ExtractAddFromNaryAddTermsTransform,
     ExtractNegateFromExtNaryAddTermTransform, SubToExtNaryAddTransform,
 };
+use guarded_predicate_rewire::GuardedPredicateRewireTransform;
 use mask_operand_bit::{MaskOperandHighBitTransform, MaskOperandLowBitTransform};
 use nand_not_and_fold::NandNotAndFoldTransform;
 use narrow_add_from_wide_add_fold::NarrowAddFromWideAddFoldTransform;
@@ -137,6 +143,8 @@ use priority_sel_1_to_sel::PrioritySel1ToSelTransform;
 use priority_sel_to_masked_candidates::PrioritySelToMaskedCandidatesTransform;
 use priority_sel_to_sel_chain::PrioritySelToSelChainTransform;
 use reassociate_add_sub::ReassociateAddSubTransform;
+use reduce_concat_split_merge::ReduceConcatSplitMergeTransform;
+use reduce_sel_distribute::ReduceSelDistributeTransform;
 use rewire_operand_to_same_type::RewireOperandToSameTypeTransform;
 use rewire_users_to_sibling_add::RewireUsersToSiblingAddTransform;
 use sel_chain_to_priority_sel::SelChainToPrioritySelTransform;
@@ -347,6 +355,15 @@ pub enum PirTransformKind {
     DualSelHoist,
     /// Hoist a single 2-case sel operand through concat and fold back.
     ConcatSelHoist,
+    /// Split/fold two-field concat comparisons:
+    /// `cmp(concat(a_hi,a_lo), concat(b_hi,b_lo)) ↔ fieldwise predicate`.
+    ConcatCompareSplitMerge,
+    /// Distribute reductions over 2-case selects and fold back:
+    /// `reduce(sel(p, cases=[a,b])) ↔ sel(p, cases=[reduce(a), reduce(b)])`
+    ReduceSelDistribute,
+    /// Split/fold reductions over 2-operand concat:
+    /// `reduce(concat(a,b)) ↔ op(reduce(a), reduce(b))`
+    ReduceConcatSplitMerge,
     /// Hoist unary/binary ops over `nary`.
     NaryHoist,
     /// Cancel double NOT:
@@ -419,6 +436,23 @@ pub enum PirTransformKind {
     /// Collapse deep clamp-like selector cones into a single compare-based
     /// clamp.
     ClampChainCollapse,
+    /// Oracle-backed one-bit rewiring inside guarded predicate cones.
+    GuardedPredicateRewire,
+}
+
+impl PirTransformKind {
+    /// Returns an abstract mechanism label for reporting transform samples.
+    pub fn mechanism_hint(self) -> &'static str {
+        match self {
+            PirTransformKind::ConcatCompareSplitMerge => "predicate-boundary",
+            PirTransformKind::ReduceSelDistribute | PirTransformKind::ReduceConcatSplitMerge => {
+                "sticky-reduction-boundary"
+            }
+            PirTransformKind::GuardedPredicateRewire => "guard-implied-formula",
+            PirTransformKind::SignMagnitudeDatapathUnification => "branch-localization",
+            _ => "structural-rewrite",
+        }
+    }
 }
 
 impl fmt::Display for PirTransformKind {
@@ -518,6 +552,9 @@ impl fmt::Display for PirTransformKind {
             PirTransformKind::SelHoist => write!(f, "SelHoist"),
             PirTransformKind::DualSelHoist => write!(f, "DualSelHoist"),
             PirTransformKind::ConcatSelHoist => write!(f, "ConcatSelHoist"),
+            PirTransformKind::ConcatCompareSplitMerge => write!(f, "ConcatCompareSplitMerge"),
+            PirTransformKind::ReduceSelDistribute => write!(f, "ReduceSelDistribute"),
+            PirTransformKind::ReduceConcatSplitMerge => write!(f, "ReduceConcatSplitMerge"),
             PirTransformKind::NaryHoist => write!(f, "NaryHoist"),
             PirTransformKind::NotNotCancel => write!(f, "NotNotCancel"),
             PirTransformKind::NegNegCancel => write!(f, "NegNegCancel"),
@@ -539,6 +576,7 @@ impl fmt::Display for PirTransformKind {
             PirTransformKind::ShiftReclamp => write!(f, "ShiftReclamp"),
             PirTransformKind::ShiftHoist => write!(f, "ShiftHoist"),
             PirTransformKind::ClampChainCollapse => write!(f, "ClampChainCollapse"),
+            PirTransformKind::GuardedPredicateRewire => write!(f, "GuardedPredicateRewire"),
         }
     }
 }
@@ -651,6 +689,9 @@ pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
         Box::new(SelHoistTransform),
         Box::new(DualSelHoistTransform),
         Box::new(ConcatSelHoistTransform),
+        Box::new(ConcatCompareSplitMergeTransform),
+        Box::new(ReduceSelDistributeTransform),
+        Box::new(ReduceConcatSplitMergeTransform),
         Box::new(NaryHoistTransform),
         Box::new(NotNotCancelTransform),
         Box::new(NegNegCancelTransform),
@@ -672,6 +713,7 @@ pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
         Box::new(ShiftReclampTransform),
         Box::new(ShiftHoistTransform),
         Box::new(ClampChainCollapseTransform),
+        Box::new(GuardedPredicateRewireTransform),
     ]
 }
 
@@ -736,10 +778,47 @@ mod tests {
                 "CompareRampToMaskLow",
             ),
             (PirTransformKind::OneBitCarryCount, "OneBitCarryCount"),
+            (
+                PirTransformKind::ConcatCompareSplitMerge,
+                "ConcatCompareSplitMerge",
+            ),
+            (PirTransformKind::ReduceSelDistribute, "ReduceSelDistribute"),
+            (
+                PirTransformKind::ReduceConcatSplitMerge,
+                "ReduceConcatSplitMerge",
+            ),
+            (
+                PirTransformKind::GuardedPredicateRewire,
+                "GuardedPredicateRewire",
+            ),
         ] {
             assert!(kinds.contains(&kind), "{name} should be registered");
             assert_eq!(kind.to_string(), name);
         }
+    }
+
+    #[test]
+    fn new_mechanism_hints_are_reported() {
+        assert_eq!(
+            PirTransformKind::ConcatCompareSplitMerge.mechanism_hint(),
+            "predicate-boundary"
+        );
+        assert_eq!(
+            PirTransformKind::ReduceSelDistribute.mechanism_hint(),
+            "sticky-reduction-boundary"
+        );
+        assert_eq!(
+            PirTransformKind::ReduceConcatSplitMerge.mechanism_hint(),
+            "sticky-reduction-boundary"
+        );
+        assert_eq!(
+            PirTransformKind::GuardedPredicateRewire.mechanism_hint(),
+            "guard-implied-formula"
+        );
+        assert_eq!(
+            PirTransformKind::SelHoist.mechanism_hint(),
+            "structural-rewrite"
+        );
     }
 
     #[test]

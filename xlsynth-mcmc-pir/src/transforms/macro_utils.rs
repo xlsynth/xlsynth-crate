@@ -98,6 +98,28 @@ pub(super) fn mk_nary_and(f: &mut IrFn, ty: Type, operands: Vec<NodeRef>) -> Nod
     push_node(f, ty, NodePayload::Nary(NaryOp::And, operands))
 }
 
+pub(super) fn mk_nary(f: &mut IrFn, op: NaryOp, ty: Type, operands: Vec<NodeRef>) -> NodeRef {
+    push_node(f, ty, NodePayload::Nary(op, operands))
+}
+
+pub(super) fn mk_sel2(
+    f: &mut IrFn,
+    selector: NodeRef,
+    ty: Type,
+    case0: NodeRef,
+    case1: NodeRef,
+) -> NodeRef {
+    push_node(
+        f,
+        ty,
+        NodePayload::Sel {
+            selector,
+            cases: vec![case0, case1],
+            default: None,
+        },
+    )
+}
+
 #[allow(dead_code)]
 pub(super) fn mk_nary_or_or_identity(f: &mut IrFn, ty: Type, operands: Vec<NodeRef>) -> NodeRef {
     if operands.len() == 1 {
@@ -166,6 +188,42 @@ pub(super) fn is_literal_all_ones(f: &IrFn, r: NodeRef, width: usize) -> bool {
     bits.get_bit_count() == width && (0..width).all(|i| bits.get_bit(i).unwrap_or(false))
 }
 
+#[allow(dead_code)]
+pub(super) fn is_zero_literal(f: &IrFn, r: NodeRef, width: usize) -> bool {
+    if !is_bits_w(f, r, width) {
+        return false;
+    }
+    let NodePayload::Literal(value) = &f.get_node(r).payload else {
+        return false;
+    };
+    let Ok(bits) = value.to_bits() else {
+        return false;
+    };
+    bits.get_bit_count() == width && (0..width).all(|i| !bits.get_bit(i).unwrap_or(false))
+}
+
+#[allow(dead_code)]
+pub(super) fn bits_literal_low_mask_width(f: &IrFn, r: NodeRef) -> Option<usize> {
+    let NodePayload::Literal(value) = &f.get_node(r).payload else {
+        return None;
+    };
+    let bits = value.to_bits().ok()?;
+    let width = bits.get_bit_count();
+    if bits_width(f, r) != Some(width) {
+        return None;
+    }
+    let mut low_mask_width = 0usize;
+    while low_mask_width < width && bits.get_bit(low_mask_width).ok()? {
+        low_mask_width += 1;
+    }
+    for i in low_mask_width..width {
+        if bits.get_bit(i).ok()? {
+            return None;
+        }
+    }
+    Some(low_mask_width)
+}
+
 pub(super) fn literal_usize(f: &IrFn, r: NodeRef) -> Option<usize> {
     let NodePayload::Literal(v) = &f.get_node(r).payload else {
         return None;
@@ -202,6 +260,33 @@ pub(super) fn bit_slice_parts(f: &IrFn, r: NodeRef) -> Option<(NodeRef, usize, u
         return None;
     };
     Some((arg, start, width))
+}
+
+pub(super) fn concat2_parts(f: &IrFn, r: NodeRef) -> Option<(NodeRef, NodeRef)> {
+    let NodePayload::Nary(NaryOp::Concat, ops) = &f.get_node(r).payload else {
+        return None;
+    };
+    if ops.len() == 2 {
+        Some((ops[0], ops[1]))
+    } else {
+        None
+    }
+}
+
+pub(super) fn sel2_parts(f: &IrFn, r: NodeRef) -> Option<(NodeRef, NodeRef, NodeRef)> {
+    let NodePayload::Sel {
+        selector,
+        cases,
+        default,
+    } = &f.get_node(r).payload
+    else {
+        return None;
+    };
+    if cases.len() == 2 && default.is_none() {
+        Some((*selector, cases[0], cases[1]))
+    } else {
+        None
+    }
 }
 
 pub(super) fn selector_bit(f: &IrFn, r: NodeRef) -> Option<(NodeRef, usize)> {

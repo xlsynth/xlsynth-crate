@@ -1618,6 +1618,7 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
                     "area_over": iter_violation.and_then(|v| v.area_over),
                     "oracle_time_micros": iteration_output.oracle_time_micros,
                     "transform": iteration_output.transform.map(|k| format!("{:?}", k)),
+                    "transform_mechanism": iteration_output.transform.map(|k| k.mechanism_hint()),
                     "transform_always_equivalent": iteration_output.transform_always_equivalent,
                     "accepted_digest": accepted_digest.map(|d| hash_to_hex(&d)),
                     "accepted_sample_sent": accepted_sample_sent,
@@ -1974,12 +1975,15 @@ mod tests {
         assert!(!no_oracle_kinds.contains(&PirTransformKind::ShiftHoist));
         assert!(!no_oracle_kinds.contains(&PirTransformKind::MaskOperandHighBit));
         assert!(!no_oracle_kinds.contains(&PirTransformKind::RewireOperandToSameType));
+        assert!(!no_oracle_kinds.contains(&PirTransformKind::GuardedPredicateRewire));
         assert!(no_oracle_kinds.contains(&PirTransformKind::AbsorbAddOperandIntoExtNaryAdd));
         assert!(no_oracle_kinds.contains(&PirTransformKind::AddToExtNaryAdd));
+        assert!(no_oracle_kinds.contains(&PirTransformKind::ReduceSelDistribute));
 
         assert!(oracle_kinds.contains(&PirTransformKind::ShiftHoist));
         assert!(oracle_kinds.contains(&PirTransformKind::MaskOperandHighBit));
         assert!(oracle_kinds.contains(&PirTransformKind::RewireOperandToSameType));
+        assert!(oracle_kinds.contains(&PirTransformKind::GuardedPredicateRewire));
     }
 
     #[test]
@@ -2413,6 +2417,43 @@ mod tests {
         assert!(
             s.contains(&u128::MAX.to_string()),
             "expected full u128 JSON number in serialized output"
+        );
+    }
+
+    #[test]
+    fn trajectory_json_emits_transform_mechanism() {
+        let mut parser = ir_parser::Parser::new(
+            r#"fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret and.3: bits[1] = and(a, b, id=3)
+}"#,
+        );
+        let f = parser.parse_fn().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let opts = RunOptions {
+            max_iters: 1,
+            threads: 1,
+            chain_strategy: ChainStrategy::Independent,
+            checkpoint_iters: 100,
+            progress_iters: 0,
+            seed: 1,
+            initial_temperature: 1.0,
+            objective: Objective::Nodes,
+            max_allowed_depth: None,
+            max_allowed_area: None,
+            weighted_switching_options: WeightedSwitchingOptions::default(),
+            enable_formal_oracle: false,
+            trajectory_dir: Some(temp_dir.path().to_path_buf()),
+            toggle_stimulus: None,
+        };
+
+        let _ = run_pir_mcmc(f, opts).unwrap();
+        let path = temp_dir.path().join("trajectory.c000.jsonl");
+        let text = std::fs::read_to_string(path).unwrap();
+        let first_line = text.lines().next().expect("trajectory line");
+        let value: serde_json::Value = serde_json::from_str(first_line).unwrap();
+        assert!(
+            value.get("transform_mechanism").is_some(),
+            "expected transform_mechanism in trajectory JSON: {first_line}"
         );
     }
 }
