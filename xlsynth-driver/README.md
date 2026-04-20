@@ -311,6 +311,51 @@ xlsynth-driver g8r2v my_module.g8r \
   --module-name=my_module_g8r > my_module.ugv
 ```
 
+### `aig2v`: AIGER to gate-level netlist
+
+Converts a combinational AIGER file (`.aag` or `.aig`) to a gate-level
+Verilog-like netlist on **stdout**. This is useful for materializing a post-ABC
+AIGER artifact as Verilog/SystemVerilog without lifting it through XLS IR.
+
+The generated module name must be provided explicitly with `--module-name`
+because AIGER does not carry a module name. The emitted ports use the raw loaded
+AIGER interface: scalar AIGER inputs and outputs, with AIGER symbol-table names
+preserved when present. No port regrouping, `--fn-type` interpretation, IR
+lifting, ABC execution, or optimization is performed by this command.
+
+Positional arguments:
+
+- `<aig_input_file>` – input AIGER file (`.aag` or `.aig`).
+
+Flags:
+
+- `--module-name <NAME>` – required name of the generated module.
+- `--add-clk-port <NAME>` – add a clock port with this name; required when
+  `--flop-inputs` or `--flop-outputs` is used.
+- `--flop-inputs` – add a layer of flops for all inputs.
+- `--flop-outputs` – add a layer of flops for all outputs.
+- `--use-system-verilog` – emit SystemVerilog instead of Verilog.
+
+Note: AIGER latch support is not implemented in the underlying loader, so
+sequential AIGER files with latches are rejected.
+
+Example with clocked input/output flops:
+
+```shell
+xlsynth-driver aig2v postabc.aig \
+  --module-name add_bf16 \
+  --add-clk-port clk \
+  --flop-inputs \
+  --flop-outputs > add_bf16.sv
+```
+
+Combinational example:
+
+```shell
+xlsynth-driver aig2v postabc.aig \
+  --module-name add_bf16 > add_bf16_comb.v
+```
+
 ### `g8r2ir`: GateFn to XLS IR package
 
 Converts a `.g8r` (text) or `.g8rbin` (bincode) file containing a gate-level `GateFn` into an XLS IR *package* and prints it on **stdout**.
