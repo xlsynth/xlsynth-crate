@@ -37,6 +37,7 @@
 //! ```
 
 mod aig2ir;
+mod aig2v;
 mod aig_equiv;
 mod aig_eval;
 mod aig_ir_equiv;
@@ -1869,6 +1870,48 @@ fn main() {
                 )
         )
         .subcommand(
+            clap::Command::new("aig2v")
+                .about("Converts an AIGER file to a gate-level netlist on stdout, optionally adding a clocked wrapper.")
+                .arg(
+                    clap::Arg::new("aig_input_file")
+                        .help("The input AIGER file (.aag or .aig)")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    clap::Arg::new("module-name")
+                        .long("module-name")
+                        .value_name("MODULE_NAME")
+                        .help("Name of the generated module")
+                        .required(true),
+                )
+                .arg(
+                    clap::Arg::new("add-clk-port")
+                        .long("add-clk-port")
+                        .value_name("NAME")
+                        .help("Name for the clock port. Mandatory if --flop-inputs or --flop-outputs is used. If specified without flopping, adds a clock port with this name.")
+                        .required(false),
+                )
+                .arg(
+                    clap::Arg::new("flop-inputs")
+                        .long("flop-inputs")
+                        .help("Add a layer of flops for all inputs.")
+                        .action(clap::ArgAction::SetTrue),
+                )
+                .arg(
+                    clap::Arg::new("flop-outputs")
+                        .long("flop-outputs")
+                        .help("Add a layer of flops for all outputs.")
+                        .action(clap::ArgAction::SetTrue),
+                )
+                .arg(
+                    clap::Arg::new("use-system-verilog")
+                        .long("use-system-verilog")
+                        .help("Emit SystemVerilog instead of Verilog.")
+                        .action(clap::ArgAction::SetTrue),
+                )
+        )
+        .subcommand(
             clap::Command::new("g8r-area-table")
                 .about("Reports live AIG AND-node area attribution per PIR node id from a .g8rbin with provenance.")
                 .arg(
@@ -3232,6 +3275,11 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         Some(("g8r2v", subm)) => {
             if let Err(e) = g8r2v::handle_g8r2v(subm) {
                 report_cli_error::report_cli_error_and_exit(&e, None, vec![]);
+            }
+        }
+        Some(("aig2v", subm)) => {
+            if let Err(e) = aig2v::handle_aig2v(subm) {
+                report_cli_error::report_cli_error_and_exit(&e, Some("aig2v"), vec![]);
             }
         }
         Some(("g8r2ir", subm)) => {

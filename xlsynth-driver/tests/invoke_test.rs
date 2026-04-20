@@ -4760,6 +4760,168 @@ top fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
 }
 
 #[test]
+fn test_aig2v_ascii_comb_module_name() {
+    let mut g8_builder = GateBuilder::new("source_name".to_string(), GateBuilderOptions::no_opt());
+    let a_val = g8_builder.add_input("a".to_string(), 1);
+    let y_val = g8_builder.add_and_binary(*a_val.get_lsb(0), *a_val.get_lsb(0));
+    g8_builder.add_output("y".to_string(), AigBitVector::from_bit(y_val));
+    let gate_fn = g8_builder.build();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let aag_path = write_aiger_file(&temp_dir, "source_name.aag", &gate_fn);
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("aig2v")
+        .arg(aag_path.to_str().unwrap())
+        .arg("--module-name")
+        .arg("newmod")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let netlist = String::from_utf8_lossy(&output.stdout);
+
+    let expected_netlist = "module newmod(\n  input wire a,\n  output wire y\n);\n  wire G0;\n  wire G2;\n  assign G0 = 1'b0;\n  assign G2 = a & a;\n  assign y = G2;\nendmodule\n\n";
+    assert_eq!(netlist, expected_netlist);
+}
+
+#[test]
+fn test_aig2v_preserves_duplicate_output_literals() {
+    let mut g8_builder = GateBuilder::new("dup_outputs".to_string(), GateBuilderOptions::no_opt());
+    let a_val = g8_builder.add_input("a".to_string(), 1);
+    let a_bit = *a_val.get_lsb(0);
+    g8_builder.add_output("y0".to_string(), AigBitVector::from_bit(a_bit));
+    g8_builder.add_output("y1".to_string(), AigBitVector::from_bit(a_bit));
+    let gate_fn = g8_builder.build();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let aag_path = write_aiger_file(&temp_dir, "dup_outputs.aag", &gate_fn);
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("aig2v")
+        .arg(aag_path.to_str().unwrap())
+        .arg("--module-name")
+        .arg("dup_outputs")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let netlist = String::from_utf8_lossy(&output.stdout);
+
+    let expected_netlist = "module dup_outputs(\n  input wire a,\n  output wire y0,\n  output wire y1\n);\n  wire G0;\n  assign G0 = 1'b0;\n  assign y0 = a;\n  assign y1 = a;\nendmodule\n\n";
+    assert_eq!(netlist, expected_netlist);
+}
+
+#[test]
+fn test_aig2v_binary_flop_inputs_outputs() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let mut g8_builder = GateBuilder::new("source_inv".to_string(), GateBuilderOptions::no_opt());
+    let i_val = g8_builder.add_input("i".to_string(), 1);
+    let o_val = g8_builder.add_not(*i_val.get_lsb(0));
+    g8_builder.add_output("o".to_string(), AigBitVector::from_bit(o_val));
+    let gate_fn = g8_builder.build();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let aig_path = write_aiger_binary_file(&temp_dir, "source_inv.aig", &gate_fn);
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("aig2v")
+        .arg(aig_path.to_str().unwrap())
+        .arg("--module-name")
+        .arg("my_flop_inv")
+        .arg("--add-clk-port")
+        .arg("clk")
+        .arg("--flop-inputs")
+        .arg("--flop-outputs")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let netlist = String::from_utf8_lossy(&output.stdout);
+
+    let expected_output = "module my_flop_inv(\n  input wire clk,\n  input wire i,\n  output wire o\n);\n  reg p0_i;\n  wire o_comb;\n  reg p0_o;\n  wire G0;\n  assign G0 = 1'b0;\n  assign o_comb = ~p0_i;\n  always_ff @ (posedge clk) begin\n    p0_i <= i;\n    p0_o <= o_comb;\n  end\n  assign o = p0_o;\nendmodule\n\n";
+    assert_eq!(netlist, expected_output);
+}
+
+#[test]
+fn test_aig2v_flop_requires_clk_port_error() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let mut g8_builder = GateBuilder::new("dummy".to_string(), GateBuilderOptions::no_opt());
+    let i_val = g8_builder.add_input("i".to_string(), 1);
+    g8_builder.add_output("o".to_string(), AigBitVector::from_bit(*i_val.get_lsb(0)));
+    let gate_fn = g8_builder.build();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let aag_path = write_aiger_file(&temp_dir, "dummy.aag", &gate_fn);
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("aig2v")
+        .arg(aag_path.to_str().unwrap())
+        .arg("--module-name")
+        .arg("dummy")
+        .arg("--flop-inputs")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "Command should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "--add-clk-port <NAME> is required when --flop-inputs or --flop-outputs is used."
+        ),
+        "Stderr should contain the specific error message. Stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn test_aig2v_requires_module_name() {
+    let mut g8_builder = GateBuilder::new("dummy".to_string(), GateBuilderOptions::no_opt());
+    let i_val = g8_builder.add_input("i".to_string(), 1);
+    g8_builder.add_output("o".to_string(), AigBitVector::from_bit(*i_val.get_lsb(0)));
+    let gate_fn = g8_builder.build();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let aag_path = write_aiger_file(&temp_dir, "dummy.aag", &gate_fn);
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("aig2v")
+        .arg(aag_path.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "Command should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--module-name"),
+        "Stderr should mention --module-name. Stderr: {}",
+        stderr
+    );
+}
+
+#[test]
 fn test_g8r2v_add_clk_port_behavior() {
     let mut g8_builder = GateBuilder::new("testmod".to_string(), GateBuilderOptions::no_opt());
     let a_val = g8_builder.add_input("a".to_string(), 1);

@@ -49,9 +49,10 @@ struct NetlistEmitState {
     // Maps an AIG reference (typically an internal gate or flopped input) to its VAST logic
     // representation (wire/reg).
     gate_ref_to_vast_logic: BTreeMap<gate::AigRef, vast::LogicRef>,
-    // Maps an AIG operand driving an output to its VAST logic representation (output port or _comb
-    // wire).
-    output_bit_to_combinational_target_ref: BTreeMap<gate::AigOperand, vast::LogicRef>,
+    // Maps each logical output bit occurrence to its VAST logic representation (output port or
+    // _comb wire). This is keyed by output position, not driver operand, because valid AIGER can
+    // expose the same literal through multiple output ports.
+    output_bit_to_combinational_target_ref: BTreeMap<(usize, usize), vast::LogicRef>,
     // Collects procedural assignments for always_ff blocks (e.g., p0_input <= input_port,
     // p0_output_reg <= o_comb_wire).
     procedural_assignments: Vec<ProceduralAssignment>,
@@ -133,9 +134,9 @@ fn generate_module_ports_and_registers(
     }
 
     // Add all the outputs to the module.
-    for output_spec in config.gate_fn.outputs.iter() {
+    for (output_index, output_spec) in config.gate_fn.outputs.iter().enumerate() {
         let bit_count = output_spec.bit_vector.get_bit_count();
-        for (i, aig_bit_ref) in output_spec.bit_vector.iter_lsb_to_msb().enumerate() {
+        for (i, _aig_bit_ref) in output_spec.bit_vector.iter_lsb_to_msb().enumerate() {
             let base_name = if bit_count == 1 {
                 output_spec.name.clone()
             } else {
@@ -150,7 +151,7 @@ fn generate_module_ports_and_registers(
                 let comb_wire_ref = module.add_wire(&comb_wire_name, bit_type);
                 state
                     .output_bit_to_combinational_target_ref
-                    .insert(*aig_bit_ref, comb_wire_ref);
+                    .insert((output_index, i), comb_wire_ref);
 
                 let reg_name = format!("p0_{}", base_name);
                 let output_reg_ref = module.add_reg(reg_name.as_str(), bit_type).unwrap();
@@ -169,7 +170,7 @@ fn generate_module_ports_and_registers(
             } else {
                 state
                     .output_bit_to_combinational_target_ref
-                    .insert(*aig_bit_ref, output_port_ref.clone());
+                    .insert((output_index, i), output_port_ref.clone());
             }
         }
     }
@@ -264,7 +265,7 @@ fn connect_combinational_logic_to_outputs(
     state: &mut NetlistEmitState,
     file: &mut vast::VastFile,
 ) {
-    for output_spec in config.gate_fn.outputs.iter() {
+    for (output_index, output_spec) in config.gate_fn.outputs.iter().enumerate() {
         let bit_count = output_spec.bit_vector.get_bit_count();
         for (i, output_aig_bit_ref) in output_spec.bit_vector.iter_lsb_to_msb().enumerate() {
             let base_name = if bit_count == 1 {
@@ -284,11 +285,11 @@ fn connect_combinational_logic_to_outputs(
             };
 
             let combinational_target_ref = state.output_bit_to_combinational_target_ref
-                .get(output_aig_bit_ref)
+                .get(&(output_index, i))
                 .unwrap_or_else(|| {
                     panic!(
-                        "Missing combinational target for output bit: {:?}. Ensure output_bit_to_combinational_target_ref is populated correctly for it.",
-                        output_aig_bit_ref
+                        "Missing combinational target for output bit: ({}, {}). Ensure output_bit_to_combinational_target_ref is populated correctly for it.",
+                        output_index, i
                     )
                 });
 
@@ -392,9 +393,9 @@ pub fn emit_netlist_with_version(
         state.procedural_assignments.iter().cloned().collect();
 
     if config.flop_outputs {
-        for output_spec in config.gate_fn.outputs.iter() {
+        for (output_index, output_spec) in config.gate_fn.outputs.iter().enumerate() {
             let bit_count = output_spec.bit_vector.get_bit_count();
-            for (i, aig_bit_ref_output_driver) in
+            for (i, _aig_bit_ref_output_driver) in
                 output_spec.bit_vector.iter_lsb_to_msb().enumerate()
             {
                 let base_output_name = if bit_count == 1 {
@@ -409,7 +410,7 @@ pub fn emit_netlist_with_version(
                 {
                     if let Some(comb_wire_logic_ref) = state
                         .output_bit_to_combinational_target_ref
-                        .get(aig_bit_ref_output_driver)
+                        .get(&(output_index, i))
                     {
                         resolved_procedural_assignments.push(ProceduralAssignment {
                             sort_key: reg_name.clone(),
@@ -418,8 +419,8 @@ pub fn emit_netlist_with_version(
                         });
                     } else {
                         panic!(
-                            "Could not find combinational target LogicRef for AigOperand {:?} (driving output for reg {}) to create procedural assignment.",
-                            aig_bit_ref_output_driver, reg_name
+                            "Could not find combinational target LogicRef for output bit ({}, {}) driving output reg {} to create procedural assignment.",
+                            output_index, i, reg_name
                         );
                     }
                 }
