@@ -21,7 +21,9 @@ fn ir2opt(
             .and_then(|c| c.tool_path.as_deref())
             .is_some()
         {
-            eprintln!("error: ir2opt: --aug-opt=true is not supported with --toolchain (external tool path) yet");
+            eprintln!(
+                "error: ir2opt: --aug-opt=true is not supported with --toolchain (external tool path) yet"
+            );
             std::process::exit(2);
         }
         let input_text = std::fs::read_to_string(input_file).unwrap();

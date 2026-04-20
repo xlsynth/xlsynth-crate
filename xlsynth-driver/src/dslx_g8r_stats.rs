@@ -31,7 +31,9 @@ pub fn handle_dslx_g8r_stats(matches: &ArgMatches, config: &Option<ToolchainConf
     let type_inference_v2 = resolve_type_inference_v2(matches, config);
 
     if type_inference_v2 == Some(true) && tool_path.is_none() {
-        eprintln!("error: --type_inference_v2 is only supported when using --toolchain (external tool path)");
+        eprintln!(
+            "error: --type_inference_v2 is only supported when using --toolchain (external tool path)"
+        );
         std::process::exit(1);
     }
 
@@ -53,7 +55,9 @@ pub fn handle_dslx_g8r_stats(matches: &ArgMatches, config: &Option<ToolchainConf
         output
     } else {
         if type_inference_v2 == Some(true) {
-            eprintln!("error: --type_inference_v2 is only supported when using --toolchain (external tool path)");
+            eprintln!(
+                "error: --type_inference_v2 is only supported when using --toolchain (external tool path)"
+            );
             std::process::exit(1);
         }
         let dslx_contents = std::fs::read_to_string(input_path).expect("failed to read DSLX input");

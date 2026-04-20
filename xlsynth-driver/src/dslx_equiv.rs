@@ -55,7 +55,9 @@ pub fn handle_dslx_equiv(matches: &clap::ArgMatches, config: &Option<ToolchainCo
     }
 
     if lhs_top.is_none() || rhs_top.is_none() {
-        eprintln!("Error: a top function must be specified via --dslx_top or both --lhs_dslx_top/--rhs_dslx_top");
+        eprintln!(
+            "Error: a top function must be specified via --dslx_top or both --lhs_dslx_top/--rhs_dslx_top"
+        );
         std::process::exit(1);
     }
 

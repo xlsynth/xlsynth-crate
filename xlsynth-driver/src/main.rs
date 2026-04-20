@@ -1886,6 +1886,13 @@ fn main() {
                         .required(true),
                 )
                 .arg(
+                    clap::Arg::new("fn_type")
+                        .long("fn-type")
+                        .value_name("FN_TYPE")
+                        .help("Optional explicit bits-only function type used to emit packed ports, e.g. '(bits[16], bits[16]) -> bits[16]'")
+                        .required(false),
+                )
+                .arg(
                     clap::Arg::new("add-clk-port")
                         .long("add-clk-port")
                         .value_name("NAME")

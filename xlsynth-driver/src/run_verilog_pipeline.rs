@@ -44,7 +44,7 @@ fn parse_verilog_top_module(verilog: &str) -> anyhow::Result<(String, Vec<PortIn
     let slang_path = find_and_verify_executable(
         "slang",
         "Please ensure slang is installed and available in PATH. \
-         You can download it from https://github.com/xlsynth/slang-rs/releases or install it via your package manager."
+         You can download it from https://github.com/xlsynth/slang-rs/releases or install it via your package manager.",
     )?;
     log::debug!("Found slang at: {:?}", slang_path);
 
@@ -174,7 +174,7 @@ fn compile_and_run(work_dir: &Path, sources: &[PathBuf]) -> anyhow::Result<Strin
     // Locate and verify iverilog.
     let iverilog_path = find_and_verify_executable(
         "iverilog",
-        "Please install iverilog. On Ubuntu/Debian: 'sudo apt-get install iverilog', on macOS: 'brew install icarus-verilog'"
+        "Please install iverilog. On Ubuntu/Debian: 'sudo apt-get install iverilog', on macOS: 'brew install icarus-verilog'",
     )?;
     let vvp_out = work_dir.join("sim.vvp");
     // Build.
@@ -286,7 +286,9 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
     let waves_path = matches.get_one::<String>("waves");
 
     if output_valid_signal.is_none() && latency_opt.is_none() {
-        eprintln!("run-verilog-pipeline: --latency must be provided when --output_valid_signal is not used");
+        eprintln!(
+            "run-verilog-pipeline: --latency must be provided when --output_valid_signal is not used"
+        );
         std::process::exit(1);
     }
     let latency: usize = if let Some(latency_str) = latency_opt {
@@ -360,7 +362,9 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
                         "Failed to parse input XLS IR value '{}': {}",
                         input_value_str, e
                     );
-                    eprintln!("Expected an XLS IR value like 'bits[32]:5' or 'tuple(bits[8]:1, bits[16]:2)'.");
+                    eprintln!(
+                        "Expected an XLS IR value like 'bits[32]:5' or 'tuple(bits[8]:1, bits[16]:2)'."
+                    );
                     eprintln!("Usage: xlsynth-driver run-verilog-pipeline <SV_PATH> [INPUT_VALUE]");
                     std::process::exit(1);
                 }
@@ -431,7 +435,8 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
             Err(_) => {
                 eprintln!(
                     "With {} data input ports the <INPUT_VALUE> argument must be a tuple of equal arity; got non-tuple value {}",
-                    data_inputs.len(), input_value.to_string()
+                    data_inputs.len(),
+                    input_value.to_string()
                 );
                 std::process::exit(1);
             }

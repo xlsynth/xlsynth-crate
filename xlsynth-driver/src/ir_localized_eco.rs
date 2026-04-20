@@ -327,7 +327,7 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
             "  Starting equivalence proof using toolchain at {}: patched='{}' top='{}' vs new='{}' top='{}'",
             tool_path,
             patched_ir_path.display(),
-            lhs_top.unwrap_or("") ,
+            lhs_top.unwrap_or(""),
             new_path.display(),
             rhs_top.unwrap_or("")
         );
@@ -474,7 +474,10 @@ fn handle_ir_localized_eco_blocks_in_packages(
         let msg = format!(
             "output arity mismatch: old block had output ports {:?}; function outputs are {:?} ({}).",
             old_ports.output_names,
-            applied_out_types.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
+            applied_out_types
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>(),
             applied_out_types.len()
         );
         report_cli_error_and_exit(&msg, Some("ir-localized-eco"), vec![]);
@@ -862,7 +865,10 @@ fn sanity_check_interpret(
             }
             valid_done += 1;
         }
-        println!("  Sanity check: random valid samples: {}/{} (attempts: {}, skipped due to assertions: {})", valid_done, random_samples, attempts, skipped_due_to_asserts);
+        println!(
+            "  Sanity check: random valid samples: {}/{} (attempts: {}, skipped due to assertions: {})",
+            valid_done, random_samples, attempts, skipped_due_to_asserts
+        );
     }
     println!("  Sanity check: zeros/ones compared successfully");
     Ok(())
