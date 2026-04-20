@@ -119,6 +119,26 @@ fn packed_bit_expr(
     )
 }
 
+fn synthetic_output_value_index(name: &str) -> Option<usize> {
+    let suffix = name.strip_prefix("output_value_")?;
+    if suffix.is_empty() {
+        return None;
+    }
+    suffix.parse::<usize>().ok()
+}
+
+fn compare_packed_output_port_order(lhs: &gate::Output, rhs: &gate::Output) -> std::cmp::Ordering {
+    match (
+        synthetic_output_value_index(&lhs.name),
+        synthetic_output_value_index(&rhs.name),
+    ) {
+        (Some(lhs_index), Some(rhs_index)) => lhs_index
+            .cmp(&rhs_index)
+            .then_with(|| lhs.name.cmp(&rhs.name)),
+        _ => lhs.name.cmp(&rhs.name),
+    }
+}
+
 fn generate_module_ports_and_registers(
     config: &NetlistEmitConfig,
     state: &mut NetlistEmitState,
@@ -210,7 +230,7 @@ fn generate_module_ports_and_registers(
         .enumerate()
         .collect::<Vec<(usize, &gate::Output)>>();
     if config.port_style == NetlistPortStyle::PackedBits {
-        output_specs.sort_by(|(_, lhs), (_, rhs)| lhs.name.cmp(&rhs.name));
+        output_specs.sort_by(|(_, lhs), (_, rhs)| compare_packed_output_port_order(lhs, rhs));
     }
     for (output_index, output_spec) in output_specs {
         let bit_count = output_spec.bit_vector.get_bit_count();
@@ -726,6 +746,49 @@ endmodule
 endmodule
 "#;
         assert_eq!(netlist, expected.to_string());
+    }
+
+    #[test]
+    fn test_emit_packed_tuple_outputs_use_numeric_port_order() {
+        let mut g8_builder = GateBuilder::new(
+            "packed_tuple_order".to_string(),
+            GateBuilderOptions::no_opt(),
+        );
+        let arg0 = g8_builder.add_input("arg0".to_string(), 1);
+        let output_bit = *arg0.get_lsb(0);
+
+        for index in (0..11).rev() {
+            g8_builder.add_output(
+                format!("output_value_{index}"),
+                gate::AigBitVector::from_bit(output_bit),
+            );
+        }
+
+        let netlist = emit_netlist_with_version_and_port_style(
+            "packed_tuple_order",
+            &g8_builder.build(),
+            false,
+            false,
+            VerilogVersion::SystemVerilog,
+            None,
+            NetlistPortStyle::PackedBits,
+        )
+        .unwrap();
+
+        let module_header = netlist.split(");\n").next().expect("module header");
+        let output_ports = module_header
+            .lines()
+            .filter_map(|line| {
+                line.trim()
+                    .strip_prefix("output wire ")
+                    .map(|name| name.trim_end_matches(',').to_string())
+            })
+            .collect::<Vec<String>>();
+        let expected_ports = (0..11)
+            .map(|index| format!("output_value_{index}"))
+            .collect::<Vec<String>>();
+
+        assert_eq!(output_ports, expected_ports, "netlist:\n{netlist}");
     }
 
     #[test]
