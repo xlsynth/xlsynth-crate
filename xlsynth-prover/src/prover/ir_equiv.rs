@@ -1309,6 +1309,55 @@ pub mod test_utils {
         );
     }
 
+    pub fn test_array_concat_literal_order<S: Solver>(solver_config: &S::Config) {
+        assert_ir_fn_equiv::<S>(
+            solver_config,
+            r#"fn f() -> bits[4][5] {
+                lhs: bits[4][2] = literal(value=[1, 2], id=1)
+                rhs: bits[4][3] = literal(value=[3, 4, 5], id=2)
+                ret joined: bits[4][5] = array_concat(lhs, rhs, id=3)
+            }"#,
+            r#"fn g() -> bits[4][5] {
+                ret expected: bits[4][5] = literal(value=[1, 2, 3, 4, 5], id=1)
+            }"#,
+            false,
+        );
+    }
+
+    pub fn test_array_concat_index_order<S: Solver>(solver_config: &S::Config) {
+        assert_ir_fn_equiv::<S>(
+            solver_config,
+            r#"fn f(lhs: bits[8][2] id=1, rhs: bits[8][3] id=2) -> (bits[8], bits[8], bits[8], bits[8], bits[8]) {
+                joined: bits[8][5] = array_concat(lhs, rhs, id=3)
+                i0: bits[3] = literal(value=0, id=4)
+                i1: bits[3] = literal(value=1, id=5)
+                i2: bits[3] = literal(value=2, id=6)
+                i3: bits[3] = literal(value=3, id=7)
+                i4: bits[3] = literal(value=4, id=8)
+                e0: bits[8] = array_index(joined, indices=[i0], assumed_in_bounds=true, id=9)
+                e1: bits[8] = array_index(joined, indices=[i1], assumed_in_bounds=true, id=10)
+                e2: bits[8] = array_index(joined, indices=[i2], assumed_in_bounds=true, id=11)
+                e3: bits[8] = array_index(joined, indices=[i3], assumed_in_bounds=true, id=12)
+                e4: bits[8] = array_index(joined, indices=[i4], assumed_in_bounds=true, id=13)
+                ret out: (bits[8], bits[8], bits[8], bits[8], bits[8]) = tuple(e0, e1, e2, e3, e4, id=14)
+            }"#,
+            r#"fn g(lhs: bits[8][2] id=1, rhs: bits[8][3] id=2) -> (bits[8], bits[8], bits[8], bits[8], bits[8]) {
+                li0: bits[2] = literal(value=0, id=3)
+                li1: bits[2] = literal(value=1, id=4)
+                ri0: bits[2] = literal(value=0, id=5)
+                ri1: bits[2] = literal(value=1, id=6)
+                ri2: bits[2] = literal(value=2, id=7)
+                e0: bits[8] = array_index(lhs, indices=[li0], assumed_in_bounds=true, id=8)
+                e1: bits[8] = array_index(lhs, indices=[li1], assumed_in_bounds=true, id=9)
+                e2: bits[8] = array_index(rhs, indices=[ri0], assumed_in_bounds=true, id=10)
+                e3: bits[8] = array_index(rhs, indices=[ri1], assumed_in_bounds=true, id=11)
+                e4: bits[8] = array_index(rhs, indices=[ri2], assumed_in_bounds=true, id=12)
+                ret out: (bits[8], bits[8], bits[8], bits[8], bits[8]) = tuple(e0, e1, e2, e3, e4, id=13)
+            }"#,
+            false,
+        );
+    }
+
     /// array_slice(input, start, width=3) on bits[8][4]
     pub fn test_ir_array_slice_basic<S: Solver>(solver_config: &S::Config) {
         assert_smt_fn_eq::<S>(
@@ -1353,6 +1402,38 @@ pub mod test_utils {
                 let tmp = solver.ite(&eq2, &r_cross, &rr);
                 solver.ite(&le1, &r_in, &tmp)
             },
+        );
+    }
+
+    pub fn test_gate_bits_equiv_sel<S: Solver>(solver_config: &S::Config) {
+        assert_ir_fn_equiv::<S>(
+            solver_config,
+            r#"fn f(p: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+                ret g: bits[8] = gate(p, x, id=3)
+            }"#,
+            r#"fn g(p: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+                zero: bits[8] = literal(value=0, id=3)
+                ret s: bits[8] = sel(p, cases=[zero, x], id=4)
+            }"#,
+            false,
+        );
+    }
+
+    pub fn test_gate_tuple_equiv_manual_zero_tuple<S: Solver>(solver_config: &S::Config) {
+        assert_ir_fn_equiv::<S>(
+            solver_config,
+            r#"fn f(p: bits[1] id=1, x: bits[8] id=2, y: bits[4] id=3) -> (bits[8], bits[4]) {
+                value: (bits[8], bits[4]) = tuple(x, y, id=4)
+                ret g: (bits[8], bits[4]) = gate(p, value, id=5)
+            }"#,
+            r#"fn g(p: bits[1] id=1, x: bits[8] id=2, y: bits[4] id=3) -> (bits[8], bits[4]) {
+                value: (bits[8], bits[4]) = tuple(x, y, id=4)
+                zero8: bits[8] = literal(value=0, id=5)
+                zero4: bits[4] = literal(value=0, id=6)
+                zero_value: (bits[8], bits[4]) = tuple(zero8, zero4, id=7)
+                ret s: (bits[8], bits[4]) = sel(p, cases=[zero_value, value], id=8)
+            }"#,
+            false,
         );
     }
 
@@ -2601,6 +2682,7 @@ pub mod test_utils {
         feature = "with-bitwuzla-binary-test",
         feature = "with-boolector-binary-test",
         feature = "with-z3-binary-test",
+        feature = "with-bitwuzla-system",
         feature = "with-bitwuzla-built"
     )
 ))]
@@ -2666,8 +2748,24 @@ macro_rules! test_with_solver {
                 test_utils::test_ir_array::<$solver_type>($solver_config);
             }
             #[test]
+            fn test_array_concat_literal_order() {
+                test_utils::test_array_concat_literal_order::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_array_concat_index_order() {
+                test_utils::test_array_concat_index_order::<$solver_type>($solver_config);
+            }
+            #[test]
             fn test_ir_array_slice_basic() {
                 test_utils::test_ir_array_slice_basic::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_gate_bits_equiv_sel() {
+                test_utils::test_gate_bits_equiv_sel::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_gate_tuple_equiv_manual_zero_tuple() {
+                test_utils::test_gate_tuple_equiv_manual_zero_tuple::<$solver_type>($solver_config);
             }
             #[test]
             fn test_ir_value_tuple() {
@@ -3278,6 +3376,14 @@ test_with_solver!(
 #[cfg(feature = "with-bitwuzla-built")]
 test_with_solver!(
     bitwuzla_built_tests,
+    crate::solver::bitwuzla::Bitwuzla,
+    &crate::solver::bitwuzla::BitwuzlaOptions::new()
+);
+
+#[cfg(test)]
+#[cfg(feature = "with-bitwuzla-system")]
+test_with_solver!(
+    bitwuzla_system_tests,
     crate::solver::bitwuzla::Bitwuzla,
     &crate::solver::bitwuzla::BitwuzlaOptions::new()
 );

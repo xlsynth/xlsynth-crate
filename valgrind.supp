@@ -220,4 +220,5 @@
    fun:mi_process_init
    fun:_mi_auto_process_init
    fun:mi_process_attach
+   ...
 }

@@ -3167,6 +3167,23 @@ fn gatify_node(
             g8_builder.add_tag(gate.node, format!("ne_{}", node.text_id));
             env.add(node_ref, GateOrVec::Gate(gate));
         }
+        ir::NodePayload::Binop(ir::Binop::ArrayConcat, a, b) => {
+            let a_bits = env
+                .get_bit_vector(*a)
+                .expect("array_concat lhs should be present");
+            let b_bits = env
+                .get_bit_vector(*b)
+                .expect("array_concat rhs should be present");
+            let bits = AigBitVector::concat(b_bits, a_bits);
+            assert_eq!(bits.get_bit_count(), node.ty.bit_count());
+            for (i, bit) in bits.iter_lsb_to_msb().enumerate() {
+                g8_builder.add_tag(
+                    bit.node,
+                    format!("array_concat_{}_output_bit_{}", node.text_id, i),
+                );
+            }
+            env.add(node_ref, GateOrVec::BitVector(bits));
+        }
         ir::NodePayload::Binop(
             binop @ (ir::Binop::Ult | ir::Binop::Ule | ir::Binop::Ugt | ir::Binop::Uge),
             a,
@@ -4042,6 +4059,12 @@ mod tests {
     use xlsynth_pir::ir_parser;
     use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;
 
+    fn ir_value_to_gate_bits(value: &IrValue, ty: &ir::Type) -> IrBits {
+        let mut bits = Vec::new();
+        flatten_ir_value_to_lsb0_bits_for_type(value, ty, &mut bits).unwrap();
+        IrBits::from_lsb_is_0(&bits)
+    }
+
     #[test]
     fn test_gatify_array_literal_flattening() {
         let ir_text = "fn f() -> bits[8][5] {\n  ret literal.1: bits[8][5] = literal(value=[1, 2, 3, 4, 5], id=1)\n}";
@@ -4072,6 +4095,90 @@ mod tests {
             output_vec.get_bit_count(),
             40,
             "Expected 40 bits for bits[8][5] array literal"
+        );
+    }
+
+    #[test]
+    fn test_gatify_array_concat_preserves_index_order() {
+        let gate_fn = gatify_ir_text(
+            r#"package sample
+
+top fn f(lhs: bits[4][2] id=1, rhs: bits[4][3] id=2) -> bits[4][5] {
+  ret joined: bits[4][5] = array_concat(lhs, rhs, id=3)
+}
+"#,
+        );
+        let lhs_ty = ir::Type::new_array(ir::Type::Bits(4), 2);
+        let rhs_ty = ir::Type::new_array(ir::Type::Bits(4), 3);
+        let out_ty = ir::Type::new_array(ir::Type::Bits(4), 5);
+        let lhs_value = IrValue::make_array(&[
+            IrValue::make_ubits(4, 1).unwrap(),
+            IrValue::make_ubits(4, 2).unwrap(),
+        ])
+        .unwrap();
+        let rhs_value = IrValue::make_array(&[
+            IrValue::make_ubits(4, 3).unwrap(),
+            IrValue::make_ubits(4, 4).unwrap(),
+            IrValue::make_ubits(4, 5).unwrap(),
+        ])
+        .unwrap();
+        let want = ir_value_to_gate_bits(
+            &IrValue::make_array(&[
+                IrValue::make_ubits(4, 1).unwrap(),
+                IrValue::make_ubits(4, 2).unwrap(),
+                IrValue::make_ubits(4, 3).unwrap(),
+                IrValue::make_ubits(4, 4).unwrap(),
+                IrValue::make_ubits(4, 5).unwrap(),
+            ])
+            .unwrap(),
+            &out_ty,
+        );
+        let got = gate_sim::eval(
+            &gate_fn,
+            &[
+                ir_value_to_gate_bits(&lhs_value, &lhs_ty),
+                ir_value_to_gate_bits(&rhs_value, &rhs_ty),
+            ],
+            gate_sim::Collect::None,
+        )
+        .outputs[0]
+            .clone();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn test_gatify_gate_is_unsupported() {
+        let ir_text = r#"package sample
+
+top fn f(p: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  ret gated: bits[8] = gate(p, x, id=3)
+}
+"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_package = parser.parse_and_validate_package().unwrap();
+        let ir_fn = ir_package.get_top_fn().unwrap();
+        let err = match gatify(
+            &ir_fn,
+            GatifyOptions {
+                fold: true,
+                hash: true,
+                check_equivalence: false,
+                adder_mapping: AdderMapping::default(),
+                mul_adder_mapping: None,
+                range_info: None,
+                enable_rewrite_carry_out: false,
+                enable_rewrite_prio_encode: false,
+                enable_rewrite_nary_add: false,
+                enable_rewrite_mask_low: false,
+                array_index_lowering_strategy: Default::default(),
+            },
+        ) {
+            Ok(_) => panic!("expected gate op to remain unsupported by gatify"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("Binop(Gate"),
+            "expected gate op to remain unsupported by gatify; got: {err}"
         );
     }
 
