@@ -914,21 +914,6 @@ fn gatify_concat(args: &[AigBitVector]) -> AigBitVector {
     AigBitVector::from_lsb_is_index_0(&bits)
 }
 
-fn gatify_gate(
-    gb: &mut GateBuilder,
-    predicate_bits: &AigBitVector,
-    value_bits: &AigBitVector,
-) -> AigBitVector {
-    assert_eq!(
-        predicate_bits.get_bit_count(),
-        1,
-        "gate predicate must be bits[1]"
-    );
-    let predicate = *predicate_bits.get_lsb(0);
-    let mask = gb.replicate(predicate, value_bits.get_bit_count());
-    gb.add_and_vec(&mask, value_bits)
-}
-
 fn gatify_zero_ext(new_bit_count: usize, arg_bits: &AigBitVector) -> AigBitVector {
     let zero_count = new_bit_count - arg_bits.get_bit_count();
     let zeros = AigBitVector::zeros(zero_count);
@@ -3199,20 +3184,6 @@ fn gatify_node(
             }
             env.add(node_ref, GateOrVec::BitVector(bits));
         }
-        ir::NodePayload::Binop(ir::Binop::Gate, predicate, value) => {
-            let predicate_bits = env
-                .get_bit_vector(*predicate)
-                .expect("gate predicate should be present");
-            let value_bits = env
-                .get_bit_vector(*value)
-                .expect("gate value should be present");
-            let bits = gatify_gate(g8_builder, &predicate_bits, &value_bits);
-            assert_eq!(bits.get_bit_count(), node.ty.bit_count());
-            for (i, bit) in bits.iter_lsb_to_msb().enumerate() {
-                g8_builder.add_tag(bit.node, format!("gate_{}_output_bit_{}", node.text_id, i));
-            }
-            env.add(node_ref, GateOrVec::BitVector(bits));
-        }
         ir::NodePayload::Binop(
             binop @ (ir::Binop::Ult | ir::Binop::Ule | ir::Binop::Ugt | ir::Binop::Uge),
             a,
@@ -4176,77 +4147,39 @@ top fn f(lhs: bits[4][2] id=1, rhs: bits[4][3] id=2) -> bits[4][5] {
     }
 
     #[test]
-    fn test_gatify_gate_bits_masks_value() {
-        let gate_fn = gatify_ir_text(
-            r#"package sample
+    fn test_gatify_gate_is_unsupported() {
+        let ir_text = r#"package sample
 
 top fn f(p: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
   ret gated: bits[8] = gate(p, x, id=3)
 }
-"#,
+"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_package = parser.parse_and_validate_package().unwrap();
+        let ir_fn = ir_package.get_top_fn().unwrap();
+        let err = match gatify(
+            &ir_fn,
+            GatifyOptions {
+                fold: true,
+                hash: true,
+                check_equivalence: false,
+                adder_mapping: AdderMapping::default(),
+                mul_adder_mapping: None,
+                range_info: None,
+                enable_rewrite_carry_out: false,
+                enable_rewrite_prio_encode: false,
+                enable_rewrite_nary_add: false,
+                enable_rewrite_mask_low: false,
+                array_index_lowering_strategy: Default::default(),
+            },
+        ) {
+            Ok(_) => panic!("expected gate op to remain unsupported by gatify"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("Binop(Gate"),
+            "expected gate op to remain unsupported by gatify; got: {err}"
         );
-        let x = IrBits::make_ubits(8, 0xa5).unwrap();
-        let got_false = gate_sim::eval(
-            &gate_fn,
-            &[IrBits::make_ubits(1, 0).unwrap(), x.clone()],
-            gate_sim::Collect::None,
-        )
-        .outputs[0]
-            .clone();
-        let got_true = gate_sim::eval(
-            &gate_fn,
-            &[IrBits::make_ubits(1, 1).unwrap(), x.clone()],
-            gate_sim::Collect::None,
-        )
-        .outputs[0]
-            .clone();
-        assert_eq!(got_false, IrBits::make_ubits(8, 0).unwrap());
-        assert_eq!(got_true, x);
-    }
-
-    #[test]
-    fn test_gatify_gate_tuple_masks_flattened_value() {
-        let gate_fn = gatify_ir_text(
-            r#"package sample
-
-top fn f(p: bits[1] id=1, x: bits[8] id=2, y: bits[4] id=3) -> (bits[8], bits[4]) {
-  value: (bits[8], bits[4]) = tuple(x, y, id=4)
-  ret gated: (bits[8], bits[4]) = gate(p, value, id=5)
-}
-"#,
-        );
-        let tuple_ty = ir::Type::Tuple(vec![
-            Box::new(ir::Type::Bits(8)),
-            Box::new(ir::Type::Bits(4)),
-        ]);
-        let x = IrValue::make_ubits(8, 0xab).unwrap();
-        let y = IrValue::make_ubits(4, 0xc).unwrap();
-        let want_true =
-            ir_value_to_gate_bits(&IrValue::make_tuple(&[x.clone(), y.clone()]), &tuple_ty);
-        let got_false = gate_sim::eval(
-            &gate_fn,
-            &[
-                IrBits::make_ubits(1, 0).unwrap(),
-                x.to_bits().unwrap(),
-                y.to_bits().unwrap(),
-            ],
-            gate_sim::Collect::None,
-        )
-        .outputs[0]
-            .clone();
-        let got_true = gate_sim::eval(
-            &gate_fn,
-            &[
-                IrBits::make_ubits(1, 1).unwrap(),
-                x.to_bits().unwrap(),
-                y.to_bits().unwrap(),
-            ],
-            gate_sim::Collect::None,
-        )
-        .outputs[0]
-            .clone();
-        assert_eq!(got_false, IrBits::make_ubits(12, 0).unwrap());
-        assert_eq!(got_true, want_true);
     }
 
     #[test]
