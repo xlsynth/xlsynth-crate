@@ -4792,6 +4792,39 @@ fn test_aig2v_ascii_comb_module_name() {
 }
 
 #[test]
+fn test_aig2v_preserves_duplicate_output_literals() {
+    let mut g8_builder = GateBuilder::new("dup_outputs".to_string(), GateBuilderOptions::no_opt());
+    let a_val = g8_builder.add_input("a".to_string(), 1);
+    let a_bit = *a_val.get_lsb(0);
+    g8_builder.add_output("y0".to_string(), AigBitVector::from_bit(a_bit));
+    g8_builder.add_output("y1".to_string(), AigBitVector::from_bit(a_bit));
+    let gate_fn = g8_builder.build();
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let aag_path = write_aiger_file(&temp_dir, "dup_outputs.aag", &gate_fn);
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("aig2v")
+        .arg(aag_path.to_str().unwrap())
+        .arg("--module-name")
+        .arg("dup_outputs")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let netlist = String::from_utf8_lossy(&output.stdout);
+
+    let expected_netlist = "module dup_outputs(\n  input wire a,\n  output wire y0,\n  output wire y1\n);\n  wire G0;\n  assign G0 = 1'b0;\n  assign y0 = a;\n  assign y1 = a;\nendmodule\n\n";
+    assert_eq!(netlist, expected_netlist);
+}
+
+#[test]
 fn test_aig2v_binary_flop_inputs_outputs() {
     let _ = env_logger::builder().is_test(true).try_init();
 
