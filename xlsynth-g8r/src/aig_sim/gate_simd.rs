@@ -28,6 +28,11 @@ impl Vec256 {
     }
 
     #[inline]
+    pub const fn from_words(words: [u64; 4]) -> Self {
+        Self(u64x4::from_array(words))
+    }
+
+    #[inline]
     pub const fn splat(bit: bool) -> Self {
         Self(u64x4::from_array(if bit { [u64::MAX; 4] } else { [0; 4] }))
     }
@@ -79,16 +84,12 @@ pub struct GateSimdResult {
     pub outputs: Vec<Vec256>,
 }
 
-/// Evaluates `gate_fn` on a *batch* of 256 input samples supplied in SIMD
-/// form.
+/// Evaluates `gate_fn` and returns every node's 256-wide value.
 ///
-/// The caller must flatten all input bits (across all declared inputs and their
-/// constituent bit-vectors) into the `inputs` slice in the same order that
-/// `gate_fn.inputs` enumerates them **from LSb→MSb**.
-///
-/// Panics if the batch size is not exactly 256 or if the number of supplied
-/// input vectors does not match the total input bit-count.
-pub fn eval(gate_fn: &GateFn, inputs: &[Vec256]) -> GateSimdResult {
+/// The returned vector is indexed by `AigRef::id`. Nodes outside the output
+/// cone are left at zero, matching the scalar simulator's `Collect::All`
+/// behavior for unvisited nodes.
+pub fn eval_all_node_values(gate_fn: &GateFn, inputs: &[Vec256]) -> Vec<Vec256> {
     // Sanity-check that the batch size is 256 – this is a *fixed* requirement
     // for this interpreter variant.
     debug_assert_eq!(core::mem::size_of::<Vec256>(), 32);
@@ -127,6 +128,21 @@ pub fn eval(gate_fn: &GateFn, inputs: &[Vec256]) -> GateSimdResult {
             }
         }
     }
+
+    env
+}
+
+/// Evaluates `gate_fn` on a *batch* of 256 input samples supplied in SIMD
+/// form.
+///
+/// The caller must flatten all input bits (across all declared inputs and their
+/// constituent bit-vectors) into the `inputs` slice in the same order that
+/// `gate_fn.inputs` enumerates them **from LSb→MSb**.
+///
+/// Panics if the batch size is not exactly 256 or if the number of supplied
+/// input vectors does not match the total input bit-count.
+pub fn eval(gate_fn: &GateFn, inputs: &[Vec256]) -> GateSimdResult {
+    let env = eval_all_node_values(gate_fn, inputs);
 
     // Collect outputs.
     let mut outputs: Vec<Vec256> = Vec::new();
