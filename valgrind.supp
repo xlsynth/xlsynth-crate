@@ -208,3 +208,16 @@
    fun:*test*console*run_tests_console*
    ...
 }
+{
+   mimalloc_transparent_huge_page_probe
+   Memcheck:Cond
+   fun:_mi_strnlen
+   fun:_mi_strnstr
+   fun:unix_detect_thp
+   fun:_mi_prim_mem_init
+   fun:_mi_os_init
+   fun:mi_process_init_once
+   fun:mi_process_init
+   fun:_mi_auto_process_init
+   fun:mi_process_attach
+}
