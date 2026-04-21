@@ -231,6 +231,10 @@ Recognized prep-for-gatify idioms:
 ```text
 sub(shll(bits[N]:1, count), bits[N]:1)
 add(shll(bits[N]:1, count), bits[N]:all_ones)
+not(shll(bits[N]:all_ones, count))
+shll(shrl(bits[N]:all_ones, count), count)
+shrl(bits[N]:all_ones, count)
+concat(0..., ext_mask_low(count)) when count is proven <= low mask width
 ```
 
 Relevant tests:

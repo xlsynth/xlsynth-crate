@@ -15,7 +15,7 @@
 //! brittle to express as text queries, such as comparing an `and` operand
 //! multiset independent of operand order and nesting.
 
-use crate::ir::{self, NaryOp, NodePayload, NodeRef, Type, Unop};
+use crate::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
 use std::collections::HashMap;
 
 /// Match-time value bound to a placeholder.
@@ -187,10 +187,22 @@ impl<'a> MatchCtx<'a> {
             commutative(op, vec![lhs.into_pattern(), rhs.into_pattern()]),
         )
     }
+
+    /// Matches a two-operand commutative binary operator in either operand
+    /// order.
+    pub fn commutative_binop_pair<L: IntoPattern, R: IntoPattern>(
+        &self,
+        node: NodeRef,
+        op: Binop,
+        lhs: L,
+        rhs: R,
+    ) -> Option<Bindings> {
+        self.matches(node, commutative_binop(op, lhs, rhs))
+    }
 }
 
 /// Programmatic node pattern.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PatternExpr {
     Any(&'static str),
     Exact(NodeRef),
@@ -198,6 +210,16 @@ pub enum PatternExpr {
         arg: Box<PatternExpr>,
         start: usize,
         width: usize,
+    },
+    Binop {
+        op: Binop,
+        lhs: Box<PatternExpr>,
+        rhs: Box<PatternExpr>,
+    },
+    CommutativeBinop {
+        op: Binop,
+        lhs: Box<PatternExpr>,
+        rhs: Box<PatternExpr>,
     },
     Not(Box<PatternExpr>),
     Commutative {
@@ -247,6 +269,36 @@ impl Pattern for PatternExpr {
                 }
                 arg.match_node(ctx, *node_arg, bindings)
             }
+            PatternExpr::Binop { op, lhs, rhs } => {
+                let NodePayload::Binop(node_op, node_lhs, node_rhs) = &ctx.f.get_node(node).payload
+                else {
+                    return None;
+                };
+                if *node_op != *op {
+                    return None;
+                }
+                let bindings = lhs.match_node(ctx, *node_lhs, bindings)?;
+                rhs.match_node(ctx, *node_rhs, &bindings)
+            }
+            PatternExpr::CommutativeBinop { op, lhs, rhs } => {
+                if !binop_is_commutative(*op) {
+                    return None;
+                }
+                let NodePayload::Binop(node_op, node_lhs, node_rhs) = &ctx.f.get_node(node).payload
+                else {
+                    return None;
+                };
+                if *node_op != *op {
+                    return None;
+                }
+                if let Some(lhs_first) = lhs.match_node(ctx, *node_lhs, bindings) {
+                    if let Some(result) = rhs.match_node(ctx, *node_rhs, &lhs_first) {
+                        return Some(result);
+                    }
+                }
+                let rhs_first = rhs.match_node(ctx, *node_lhs, bindings)?;
+                lhs.match_node(ctx, *node_rhs, &rhs_first)
+            }
             PatternExpr::Not(arg) => {
                 let NodePayload::Unop(Unop::Not, node_arg) = &ctx.f.get_node(node).payload else {
                     return None;
@@ -283,6 +335,24 @@ pub fn bit_slice<P: IntoPattern>(arg: P, start: usize, width: usize) -> PatternE
     }
 }
 
+/// Matches an exact-order binary op.
+pub fn binop<L: IntoPattern, R: IntoPattern>(op: Binop, lhs: L, rhs: R) -> PatternExpr {
+    PatternExpr::Binop {
+        op,
+        lhs: Box::new(lhs.into_pattern()),
+        rhs: Box::new(rhs.into_pattern()),
+    }
+}
+
+/// Matches a commutative binary op independent of operand order.
+pub fn commutative_binop<L: IntoPattern, R: IntoPattern>(op: Binop, lhs: L, rhs: R) -> PatternExpr {
+    PatternExpr::CommutativeBinop {
+        op,
+        lhs: Box::new(lhs.into_pattern()),
+        rhs: Box::new(rhs.into_pattern()),
+    }
+}
+
 /// Matches a unary `not`.
 pub fn not<P: IntoPattern>(arg: P) -> PatternExpr {
     PatternExpr::Not(Box::new(arg.into_pattern()))
@@ -302,6 +372,13 @@ fn nary_op_is_associative(op: NaryOp) -> bool {
 
 fn nary_op_is_commutative(op: NaryOp) -> bool {
     matches!(op, NaryOp::And | NaryOp::Or | NaryOp::Xor)
+}
+
+fn binop_is_commutative(op: Binop) -> bool {
+    matches!(
+        op,
+        Binop::Add | Binop::Eq | Binop::Ne | Binop::Umul | Binop::Smul
+    )
 }
 
 fn match_commutative_args(
@@ -465,6 +542,105 @@ top fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
         let bindings = ctx.matches(aa, pattern()).expect("aa should match");
         assert_eq!(bindings.get_node("x"), Some(node_by_name(&f, "a")));
         assert!(ctx.matches(ab, pattern()).is_none());
+    }
+
+    #[test]
+    fn ir_match_commutative_binop_matches_both_operand_orders() {
+        let f = parse_top_fn(
+            r#"package sample
+
+top fn f(a: bits[4] id=1, b: bits[4] id=2) -> bits[4] {
+  ab: bits[4] = add(a, b, id=3)
+  ret ba: bits[4] = add(b, a, id=4)
+}
+"#,
+        );
+        let a = node_by_name(&f, "a");
+        let b = node_by_name(&f, "b");
+        let ab = node_by_name(&f, "ab");
+        let ba = node_by_name(&f, "ba");
+        let ctx = MatchCtx::new(&f);
+
+        assert!(
+            ctx.commutative_binop_pair(ab, Binop::Add, exact(a), exact(b))
+                .is_some()
+        );
+        assert!(
+            ctx.commutative_binop_pair(ba, Binop::Add, exact(a), exact(b))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn ir_match_exact_binop_preserves_operand_order() {
+        let f = parse_top_fn(
+            r#"package sample
+
+top fn f(a: bits[4] id=1, b: bits[4] id=2) -> bits[4] {
+  ab: bits[4] = shll(a, b, id=3)
+  ret ba: bits[4] = shll(b, a, id=4)
+}
+"#,
+        );
+        let a = node_by_name(&f, "a");
+        let b = node_by_name(&f, "b");
+        let ab = node_by_name(&f, "ab");
+        let ba = node_by_name(&f, "ba");
+        let ctx = MatchCtx::new(&f);
+        let pattern = || binop(Binop::Shll, exact(a), exact(b));
+
+        assert!(ctx.matches(ab, pattern()).is_some());
+        assert!(ctx.matches(ba, pattern()).is_none());
+    }
+
+    #[test]
+    fn ir_match_repeated_binop_bindings_must_be_consistent() {
+        let f = parse_top_fn(
+            r#"package sample
+
+top fn f(ones: bits[4] id=1, count0: bits[4] id=2, count1: bits[4] id=3) -> bits[4] {
+  shr: bits[4] = shrl(ones, count0, id=4)
+  same: bits[4] = shll(shr, count0, id=5)
+  ret different: bits[4] = shll(shr, count1, id=6)
+}
+"#,
+        );
+        let ones = node_by_name(&f, "ones");
+        let same = node_by_name(&f, "same");
+        let different = node_by_name(&f, "different");
+        let ctx = MatchCtx::new(&f);
+        let pattern = || {
+            binop(
+                Binop::Shll,
+                binop(Binop::Shrl, exact(ones), any("count")),
+                any("count"),
+            )
+        };
+
+        let bindings = ctx.matches(same, pattern()).expect("same should match");
+        assert_eq!(bindings.get_node("count"), Some(node_by_name(&f, "count0")));
+        assert!(ctx.matches(different, pattern()).is_none());
+    }
+
+    #[test]
+    fn ir_match_repeated_commutative_binop_bindings_must_be_consistent() {
+        let f = parse_top_fn(
+            r#"package sample
+
+top fn f(count0: bits[4] id=1, count1: bits[4] id=2) -> bits[4] {
+  same: bits[4] = add(count0, count0, id=3)
+  ret different: bits[4] = add(count0, count1, id=4)
+}
+"#,
+        );
+        let same = node_by_name(&f, "same");
+        let different = node_by_name(&f, "different");
+        let ctx = MatchCtx::new(&f);
+        let pattern = || commutative_binop(Binop::Add, any("count"), any("count"));
+
+        let bindings = ctx.matches(same, pattern()).expect("same should match");
+        assert_eq!(bindings.get_node("count"), Some(node_by_name(&f, "count0")));
+        assert!(ctx.matches(different, pattern()).is_none());
     }
 
     #[test]
