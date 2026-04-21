@@ -49,30 +49,26 @@ enum MaskLowVariant {
 
 impl MaskLowVariant {
     fn from_byte(raw: u8) -> Self {
-        match raw % 17 {
-            0 => MaskLowVariant::ValidSub,
-            1 => MaskLowVariant::ValidAddRhs,
-            2 => MaskLowVariant::ValidAddLhs,
-            3 => MaskLowVariant::ValidShiftedAllOnes,
-            4 => MaskLowVariant::ValidSlicedShiftedAllOnes,
-            5 => MaskLowVariant::ValidNotShiftedAllOnes,
-            6 => MaskLowVariant::ValidShiftedShrlAllOnes,
-            7 => MaskLowVariant::ValidShrlAllOnes,
-            8 => MaskLowVariant::ValidZeroConcatLowMask,
-            9 => MaskLowVariant::WrongShiftLhsLiteral,
-            10 => MaskLowVariant::WrongSubRhsLiteral,
-            11 => MaskLowVariant::WrongAddAllOnesLiteral,
-            12 => MaskLowVariant::WrongShiftDirection,
-            13 => MaskLowVariant::SharedShiftedAllOnesLiteral,
-            14 => MaskLowVariant::MismatchedShiftedShrlCounts,
-            15 => MaskLowVariant::MismatchedConsumerWidth,
-            _ => {
-                if raw & 0x80 == 0 {
-                    MaskLowVariant::NonzeroConcatPrefix
-                } else {
-                    MaskLowVariant::UnboundedConcatCount
-                }
-            }
+        match raw % 18 {
+            0 => Self::ValidSub,
+            1 => Self::ValidAddRhs,
+            2 => Self::ValidAddLhs,
+            3 => Self::ValidShiftedAllOnes,
+            4 => Self::ValidSlicedShiftedAllOnes,
+            5 => Self::ValidNotShiftedAllOnes,
+            6 => Self::ValidShiftedShrlAllOnes,
+            7 => Self::ValidShrlAllOnes,
+            8 => Self::ValidZeroConcatLowMask,
+            9 => Self::WrongShiftLhsLiteral,
+            10 => Self::WrongSubRhsLiteral,
+            11 => Self::WrongAddAllOnesLiteral,
+            12 => Self::WrongShiftDirection,
+            13 => Self::SharedShiftedAllOnesLiteral,
+            14 => Self::MismatchedShiftedShrlCounts,
+            15 => Self::MismatchedConsumerWidth,
+            16 => Self::NonzeroConcatPrefix,
+            17 => Self::UnboundedConcatCount,
+            _ => unreachable!("raw % 18 must be in 0..18"),
         }
     }
 }
