@@ -84,8 +84,79 @@ top fn f(count: bits[{count_width}] id=1) -> bits[{width}] {{
     )
 }
 
+fn build_not_shifted_all_ones_ir_text(output_width: usize, count_width: usize) -> String {
+    let all_ones = all_ones_value(output_width);
+    format!(
+        "package sample
+
+top fn f(count: bits[{count_width}] id=1) -> bits[{output_width}] {{
+  all_ones: bits[{output_width}] = literal(value={all_ones}, id=2)
+  high: bits[{output_width}] = shll(all_ones, count, id=3)
+  ret low: bits[{output_width}] = not(high, id=4)
+}}
+"
+    )
+}
+
+fn build_shifted_shrl_all_ones_ir_text(output_width: usize, count_width: usize) -> String {
+    let all_ones = all_ones_value(output_width);
+    format!(
+        "package sample
+
+top fn f(count: bits[{count_width}] id=1) -> bits[{output_width}] {{
+  all_ones: bits[{output_width}] = literal(value={all_ones}, id=2)
+  low_from_top: bits[{output_width}] = shrl(all_ones, count, id=3)
+  ret high: bits[{output_width}] = shll(low_from_top, count, id=4)
+}}
+"
+    )
+}
+
+fn build_shrl_all_ones_ir_text(output_width: usize, count_width: usize) -> String {
+    let all_ones = all_ones_value(output_width);
+    format!(
+        "package sample
+
+top fn f(count: bits[{count_width}] id=1) -> bits[{output_width}] {{
+  all_ones: bits[{output_width}] = literal(value={all_ones}, id=2)
+  ret low_from_top: bits[{output_width}] = shrl(all_ones, count, id=3)
+}}
+"
+    )
+}
+
+fn build_zero_concat_not_shifted_all_ones_ir_text(
+    prefix_width: usize,
+    low_width: usize,
+    count_width: usize,
+) -> String {
+    let all_ones = all_ones_value(low_width);
+    format!(
+        "package sample
+
+top fn f(count: bits[{count_width}] id=1) -> bits[{}] {{
+  zero: bits[{prefix_width}] = literal(value=0, id=2)
+  all_ones: bits[{low_width}] = literal(value={all_ones}, id=3)
+  high: bits[{low_width}] = shll(all_ones, count, id=4)
+  low: bits[{low_width}] = not(high, id=5)
+  ret out: bits[{}] = concat(zero, low, id=6)
+}}
+",
+        prefix_width + low_width,
+        prefix_width + low_width
+    )
+}
+
 fn all_ones_value(width: usize) -> u128 {
     if width == 0 { 0 } else { (1u128 << width) - 1 }
+}
+
+fn bounded_count_width_for_width(width: usize) -> usize {
+    let mut count_width = ceil_log2(width.saturating_add(1));
+    if count_width > 0 && ((1usize << count_width) - 1) > width {
+        count_width -= 1;
+    }
+    count_width
 }
 
 fn build_mask_low_idiom_ir_text(output_width: usize, count_width: usize, op_kind: &str) -> String {
@@ -211,6 +282,55 @@ fn prep_rewrites_bf16_sticky_mask_shape_to_not_ext_mask_low() {
 }
 
 #[test]
+fn prep_rewrites_not_shifted_all_ones_to_ext_mask_low() {
+    let pir_fn = parse_top_fn(&build_not_shifted_all_ones_ir_text(8, 4));
+    let prepared = prep_with_mask_low(&pir_fn);
+    let prepared_text = prepared.to_string();
+    assert!(
+        prepared_text.contains("ext_mask_low(count") && !prepared_text.contains("not("),
+        "expected direct ext_mask_low rewrite; got:\n{prepared_text}"
+    );
+    assert_ir_fns_equivalent(&pir_fn, &prepared);
+}
+
+#[test]
+fn prep_rewrites_shifted_shrl_all_ones_to_not_ext_mask_low() {
+    let pir_fn = parse_top_fn(&build_shifted_shrl_all_ones_ir_text(8, 4));
+    let prepared = prep_with_mask_low(&pir_fn);
+    let prepared_text = prepared.to_string();
+    assert!(
+        prepared_text.contains("ext_mask_low(count") && prepared_text.contains("not("),
+        "expected not(ext_mask_low) rewrite; got:\n{prepared_text}"
+    );
+    assert_ir_fns_equivalent(&pir_fn, &prepared);
+}
+
+#[test]
+fn prep_rewrites_return_shrl_all_ones_to_ext_mask_low() {
+    let pir_fn = parse_top_fn(&build_shrl_all_ones_ir_text(8, 4));
+    let prepared = prep_with_mask_low(&pir_fn);
+    let prepared_text = prepared.to_string();
+    assert!(
+        prepared_text.contains("ext_mask_low(") && !prepared_text.contains("shrl("),
+        "expected shrl(all_ones, count) to become ext_mask_low over remaining count; got:\n{prepared_text}"
+    );
+    assert_ir_fns_equivalent(&pir_fn, &prepared);
+}
+
+#[test]
+fn prep_rewrites_zero_concat_low_mask_to_wide_ext_mask_low() {
+    let pir_fn = parse_top_fn(&build_zero_concat_not_shifted_all_ones_ir_text(4, 8, 3));
+    let prepared = prep_with_mask_low(&pir_fn);
+    let prepared_text = prepared.to_string();
+    assert!(
+        prepared_text.contains("bits[12] = ext_mask_low(count")
+            && !prepared_text.contains("concat("),
+        "expected zero-extended low mask to become wide ext_mask_low; got:\n{prepared_text}"
+    );
+    assert_ir_fns_equivalent(&pir_fn, &prepared);
+}
+
+#[test]
 fn prep_rewrites_mask_low_idioms_across_width_sweep() {
     for output_width in 1usize..=16 {
         let natural_count_width = ceil_log2(output_width.saturating_add(1));
@@ -285,6 +405,77 @@ fn prep_rewrites_shifted_all_ones_across_width_sweep() {
 }
 
 #[test]
+fn prep_rewrites_additional_mask_low_families_across_width_sweep() {
+    for output_width in 1usize..=16 {
+        let natural_count_width = ceil_log2(output_width.saturating_add(1));
+        for count_width in [0usize, natural_count_width, natural_count_width + 2] {
+            let max_count = if count_width == 0 {
+                0
+            } else {
+                (1u64 << count_width) - 1
+            };
+            for (family, ir_text) in [
+                (
+                    "not_shifted_all_ones",
+                    build_not_shifted_all_ones_ir_text(output_width, count_width),
+                ),
+                (
+                    "shifted_shrl_all_ones",
+                    build_shifted_shrl_all_ones_ir_text(output_width, count_width),
+                ),
+                (
+                    "shrl_all_ones",
+                    build_shrl_all_ones_ir_text(output_width, count_width),
+                ),
+            ] {
+                let pir_fn = parse_top_fn(&ir_text);
+                let prepared = prep_with_mask_low(&pir_fn);
+                let prepared_text = prepared.to_string();
+                assert!(
+                    prepared_text.contains("ext_mask_low("),
+                    "expected ext_mask_low rewrite for output_width={output_width} count_width={count_width} family={family}; got:\n{prepared_text}"
+                );
+                for count in 0..=max_count {
+                    assert_eq!(
+                        eval_success(&prepared, count_width, count),
+                        eval_success(&pir_fn, count_width, count),
+                        "prepared mismatch for output_width={output_width} count_width={count_width} family={family} count={count}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn prep_rewrites_zero_concat_low_mask_across_width_sweep() {
+    for low_width in 1usize..=16 {
+        let count_width = bounded_count_width_for_width(low_width);
+        let max_count = (1u64 << count_width) - 1;
+        for prefix_width in [1usize, 3usize] {
+            let pir_fn = parse_top_fn(&build_zero_concat_not_shifted_all_ones_ir_text(
+                prefix_width,
+                low_width,
+                count_width,
+            ));
+            let prepared = prep_with_mask_low(&pir_fn);
+            let prepared_text = prepared.to_string();
+            assert!(
+                prepared_text.contains("ext_mask_low(") && !prepared_text.contains("concat("),
+                "expected zero concat low mask rewrite for prefix_width={prefix_width} low_width={low_width} count_width={count_width}; got:\n{prepared_text}"
+            );
+            for count in 0..=max_count {
+                assert_eq!(
+                    eval_success(&prepared, count_width, count),
+                    eval_success(&pir_fn, count_width, count),
+                    "prepared mismatch for prefix_width={prefix_width} low_width={low_width} count_width={count_width} count={count}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn prep_does_not_rewrite_wrong_literals_or_shift_direction_or_mismatched_widths() {
     for ir_text in [
         r#"package sample
@@ -315,13 +506,6 @@ top fn wrong_shift(count: bits[4] id=1) -> bits[8] {
 "#,
         r#"package sample
 
-top fn shifted_all_ones_wrong_shift_direction(count: bits[4] id=1) -> bits[8] {
-  all_ones: bits[8] = literal(value=255, id=2)
-  ret sh: bits[8] = shrl(all_ones, count, id=3)
-}
-"#,
-        r#"package sample
-
 top fn mismatched_width(count: bits[4] id=1) -> bits[9] {
   one8: bits[8] = literal(value=1, id=2)
   one9: bits[9] = literal(value=1, id=3)
@@ -337,6 +521,72 @@ top fn mismatched_width(count: bits[4] id=1) -> bits[9] {
         assert!(
             !prepared_text.contains("ext_mask_low("),
             "unexpected ext_mask_low rewrite; got:\n{prepared_text}"
+        );
+    }
+}
+
+#[test]
+fn prep_does_not_rewrite_additional_mask_low_near_misses() {
+    for (case_name, ir_text, forbidden) in [
+        (
+            "shifted_shrl_mismatched_counts",
+            r#"package sample
+
+top fn shifted_shrl_mismatched_counts(count0: bits[4] id=1, count1: bits[4] id=2) -> bits[8] {
+  all_ones: bits[8] = literal(value=255, id=3)
+  low_from_top: bits[8] = shrl(all_ones, count0, id=4)
+  ret high: bits[8] = shll(low_from_top, count1, id=5)
+}
+"#,
+            "ext_mask_low(",
+        ),
+        (
+            "embedded_shrl_all_ones",
+            r#"package sample
+
+top fn embedded_shrl_all_ones(count: bits[4] id=1) -> bits[8] {
+  all_ones: bits[8] = literal(value=255, id=2)
+  low_from_top: bits[8] = shrl(all_ones, count, id=3)
+  ret out: bits[8] = and(low_from_top, all_ones, id=4)
+}
+"#,
+            "ext_mask_low(",
+        ),
+        (
+            "nonzero_concat_prefix",
+            r#"package sample
+
+top fn nonzero_concat_prefix(count: bits[3] id=1) -> bits[12] {
+  prefix: bits[4] = literal(value=1, id=2)
+  all_ones: bits[8] = literal(value=255, id=3)
+  high: bits[8] = shll(all_ones, count, id=4)
+  low: bits[8] = not(high, id=5)
+  ret out: bits[12] = concat(prefix, low, id=6)
+}
+"#,
+            "ret out: bits[12] = ext_mask_low",
+        ),
+        (
+            "unbounded_concat_count",
+            r#"package sample
+
+top fn unbounded_concat_count(count: bits[4] id=1) -> bits[12] {
+  prefix: bits[4] = literal(value=0, id=2)
+  all_ones: bits[8] = literal(value=255, id=3)
+  high: bits[8] = shll(all_ones, count, id=4)
+  low: bits[8] = not(high, id=5)
+  ret out: bits[12] = concat(prefix, low, id=6)
+}
+"#,
+            "ret out: bits[12] = ext_mask_low",
+        ),
+    ] {
+        let pir_fn = parse_top_fn(ir_text);
+        let prepared = prep_with_mask_low(&pir_fn);
+        let prepared_text = prepared.to_string();
+        assert!(
+            !prepared_text.contains(forbidden),
+            "unexpected rewrite for {case_name}; got:\n{prepared_text}"
         );
     }
 }
@@ -365,6 +615,10 @@ fn gate_graph_equivalence_old_vs_mask_low_rewrite() {
         build_add_mask_low_ir_text(),
         build_shifted_all_ones_ir_text(8, 4),
         build_sliced_shifted_all_ones_ir_text(12, 8, 3, 8),
+        build_not_shifted_all_ones_ir_text(8, 4),
+        build_shifted_shrl_all_ones_ir_text(8, 4),
+        build_shrl_all_ones_ir_text(8, 4),
+        build_zero_concat_not_shifted_all_ones_ir_text(4, 8, 3),
     ] {
         let pir_fn = parse_top_fn(&ir_text);
         let gate_old = gatify_for_test(&pir_fn, /* enable_rewrite_mask_low= */ false);

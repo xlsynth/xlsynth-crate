@@ -140,10 +140,12 @@ Primarily tests:
 Builds small PIR functions containing either recognized mask-low idioms or
 near-miss variants, runs `prep_for_gatify` with only the mask-low rewrite
 enabled, and exhaustively evaluates all count values for the bounded generated
-count width before and after prep. The target also checks that only the exact
-`sub(shll(bits[N]:1, count), bits[N]:1)`,
-`add(shll(bits[N]:1, count), bits[N]:all_ones)`, and single-use
-`shll(bits[N]:all_ones, count)` forms are rewritten through `ext_mask_low`.
+count width before and after prep. The target also checks that only recognized
+low-mask and high-mask forms are rewritten through `ext_mask_low`: shift-minus
+one, add-all-ones, shifted all-ones, complement high-mask forms,
+shifted-right all-ones masks, same-count `shll(shrl(all_ones, count), count)`
+high masks, and zero-prefixed low masks where prep can prove the count does not
+reach the prefixed bits.
 
 Primarily tests:
 

@@ -64,6 +64,65 @@ top fn shifted_all_ones_slice_{source_width}b_s{start}_w{width}(count: bits[{cou
     )
 }
 
+fn all_ones_value(width: usize) -> u128 {
+    if width == 0 { 0 } else { (1u128 << width) - 1 }
+}
+
+fn build_not_shifted_all_ones_ir_text(output_width: usize, count_width: usize) -> String {
+    let all_ones = all_ones_value(output_width);
+    format!(
+        "package sample\n\
+top fn not_shifted_all_ones_{output_width}b(count: bits[{count_width}] id=1) -> bits[{output_width}] {{\n\
+  all_ones: bits[{output_width}] = literal(value={all_ones}, id=2)\n\
+  high: bits[{output_width}] = shll(all_ones, count, id=3)\n\
+  ret low: bits[{output_width}] = not(high, id=4)\n\
+}}\n"
+    )
+}
+
+fn build_shifted_shrl_all_ones_ir_text(output_width: usize, count_width: usize) -> String {
+    let all_ones = all_ones_value(output_width);
+    format!(
+        "package sample\n\
+top fn shifted_shrl_all_ones_{output_width}b(count: bits[{count_width}] id=1) -> bits[{output_width}] {{\n\
+  all_ones: bits[{output_width}] = literal(value={all_ones}, id=2)\n\
+  low_from_top: bits[{output_width}] = shrl(all_ones, count, id=3)\n\
+  ret high: bits[{output_width}] = shll(low_from_top, count, id=4)\n\
+}}\n"
+    )
+}
+
+fn build_shrl_all_ones_ir_text(output_width: usize, count_width: usize) -> String {
+    let all_ones = all_ones_value(output_width);
+    format!(
+        "package sample\n\
+top fn shrl_all_ones_{output_width}b(count: bits[{count_width}] id=1) -> bits[{output_width}] {{\n\
+  all_ones: bits[{output_width}] = literal(value={all_ones}, id=2)\n\
+  ret low_from_top: bits[{output_width}] = shrl(all_ones, count, id=3)\n\
+}}\n"
+    )
+}
+
+fn build_zero_concat_not_shifted_all_ones_ir_text(
+    prefix_width: usize,
+    low_width: usize,
+    count_width: usize,
+) -> String {
+    let all_ones = all_ones_value(low_width);
+    format!(
+        "package sample\n\
+top fn zero_concat_low_mask_{low_width}b(count: bits[{count_width}] id=1) -> bits[{}] {{\n\
+  zero: bits[{prefix_width}] = literal(value=0, id=2)\n\
+  all_ones: bits[{low_width}] = literal(value={all_ones}, id=3)\n\
+  high: bits[{low_width}] = shll(all_ones, count, id=4)\n\
+  low: bits[{low_width}] = not(high, id=5)\n\
+  ret out: bits[{}] = concat(zero, low, id=6)\n\
+}}\n",
+        prefix_width + low_width,
+        prefix_width + low_width
+    )
+}
+
 fn stats_for_ext_mask_low(output_width: usize) -> SummaryStats {
     let pir_fn = parse_top_fn(&build_ext_mask_low_ir_text(output_width));
     let gate_fn = gatify(
@@ -182,6 +241,37 @@ fn ir2gates_shifted_all_ones_slice_qor_improves_with_mask_low_rewrite() {
         assert!(
             depth_on <= depth_off,
             "expected shifted all-ones mask rewrite not to increase depth for source_width={source_width} count_width={count_width} start={start} width={width}; off={depth_off} on={depth_on} (nodes off={nodes_off} on={nodes_on})"
+        );
+    }
+}
+
+#[test]
+fn ir2gates_additional_mask_low_families_qor_improve_with_mask_low_rewrite() {
+    for (case_name, ir_text) in [
+        (
+            "not_shifted_all_ones",
+            build_not_shifted_all_ones_ir_text(16, 5),
+        ),
+        (
+            "shifted_shrl_all_ones",
+            build_shifted_shrl_all_ones_ir_text(16, 5),
+        ),
+        ("shrl_all_ones", build_shrl_all_ones_ir_text(16, 5)),
+        (
+            "zero_concat_low_mask",
+            build_zero_concat_not_shifted_all_ones_ir_text(4, 8, 3),
+        ),
+    ] {
+        let (nodes_off, depth_off) = stats_for_ir_text_via_ir2gates(&ir_text, false);
+        let (nodes_on, depth_on) = stats_for_ir_text_via_ir2gates(&ir_text, true);
+
+        assert!(
+            nodes_on < nodes_off,
+            "expected {case_name} rewrite to reduce live_nodes; off={nodes_off} on={nodes_on} (depth off={depth_off} on={depth_on})"
+        );
+        assert!(
+            depth_on <= depth_off,
+            "expected {case_name} rewrite not to increase depth; off={depth_off} on={depth_on} (nodes off={nodes_off} on={nodes_on})"
         );
     }
 }
