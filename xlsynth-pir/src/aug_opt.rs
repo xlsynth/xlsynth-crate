@@ -65,6 +65,7 @@ pub struct AugOptRewriteStats {
     pub predicate_hoist_across_select: usize,
     pub umod_distribute_across_select: usize,
     pub selected_opposite_subtracts: usize,
+    pub mask_to_sel_for_xls_opt: usize,
 }
 
 impl AugOptRewriteStats {
@@ -80,6 +81,7 @@ impl AugOptRewriteStats {
             .saturating_add(self.predicate_hoist_across_select)
             .saturating_add(self.umod_distribute_across_select)
             .saturating_add(self.selected_opposite_subtracts)
+            .saturating_add(self.mask_to_sel_for_xls_opt)
     }
 
     fn saturating_add_assign(&mut self, other: AugOptRewriteStats) {
@@ -114,6 +116,9 @@ impl AugOptRewriteStats {
         self.selected_opposite_subtracts = self
             .selected_opposite_subtracts
             .saturating_add(other.selected_opposite_subtracts);
+        self.mask_to_sel_for_xls_opt = self
+            .mask_to_sel_for_xls_opt
+            .saturating_add(other.mask_to_sel_for_xls_opt);
     }
 }
 
@@ -175,10 +180,17 @@ pub fn run_aug_opt_over_ir_text_with_stats(
             for _round in 0..options.rounds {
                 let (lowered_text, rewrites_in_round, total_in_round) =
                     apply_pir_rewrites_to_ir_text(&cur_text, &top_name)?;
+                let (sel_text, mask_to_sel_count) =
+                    canonicalize_masks_to_sel_for_xls_opt_in_ir_text(&lowered_text, &top_name)?;
                 rewrite_stats.saturating_add_assign(rewrites_in_round);
-                total_rewrites = total_rewrites.saturating_add(total_in_round);
+                rewrite_stats.mask_to_sel_for_xls_opt = rewrite_stats
+                    .mask_to_sel_for_xls_opt
+                    .saturating_add(mask_to_sel_count);
+                total_rewrites = total_rewrites
+                    .saturating_add(total_in_round)
+                    .saturating_add(mask_to_sel_count);
                 cur_text = optimize_ir_text_preserving_extension_ops(
-                    &lowered_text,
+                    &sel_text,
                     &top_name,
                     "post-rewrite",
                 )?;
@@ -287,6 +299,44 @@ fn apply_pir_rewrites_to_ir_text(
     Ok((pir_pkg.to_string(), rewrites_in_round, total_in_round))
 }
 
+fn canonicalize_masks_to_sel_for_xls_opt_in_ir_text(
+    ir_text: &str,
+    top_name: &str,
+) -> Result<(String, usize), String> {
+    let mut pir_parser = ir_parser::Parser::new(ir_text);
+    let mut pir_pkg = pir_parser.parse_and_validate_package().map_err(|e| {
+        format!("aug_opt: PIR parse/validate failed before mask-to-sel canonicalization: {e}")
+    })?;
+
+    let mut rewritten_top = pir_pkg
+        .get_fn(top_name)
+        .ok_or_else(|| format!("aug_opt: PIR package missing top fn '{top_name}'"))?
+        .clone();
+
+    let rewrite_count = canonicalize_exact_masks_to_sel_for_xls_opt(&mut rewritten_top);
+    ir_utils::compact_and_toposort_in_place(&mut rewritten_top).map_err(|e| {
+        format!("aug_opt: compact/toposort after mask-to-sel canonicalization failed: {e}")
+    })?;
+
+    for member in pir_pkg.members.iter_mut() {
+        match member {
+            ir::PackageMember::Function(f) if f.name == top_name => {
+                *f = rewritten_top.clone();
+            }
+            ir::PackageMember::Block { func, .. } if func.name == top_name => {
+                *func = rewritten_top.clone();
+            }
+            _ => {}
+        }
+    }
+
+    pir_pkg
+        .set_top_fn(top_name)
+        .map_err(|e| format!("aug_opt: internal error: set_top_fn('{top_name}') failed: {e}"))?;
+
+    Ok((pir_pkg.to_string(), rewrite_count))
+}
+
 fn optimize_ir_text_preserving_extension_ops(
     ir_text: &str,
     top_name: &str,
@@ -388,6 +438,170 @@ fn push_ubits_literal(f: &mut ir::Fn, w: usize, v: u64) -> NodeRef {
     let ty = Type::Bits(w);
     let lit = IrValue::make_ubits(w, v).expect("ubits literal construction should succeed");
     push_node(f, ty, NodePayload::Literal(lit))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExactMaskPolarity {
+    NonzeroWhenPredicateZero,
+    NonzeroWhenPredicateOne,
+}
+
+/// Returns whether `root` has `needle` in its transitive operand cone.
+fn node_transitively_depends_on(f: &ir::Fn, root: NodeRef, needle: NodeRef) -> bool {
+    if root.index >= f.nodes.len() || needle.index >= f.nodes.len() {
+        return false;
+    }
+    if root == needle {
+        return true;
+    }
+
+    let mut visited = vec![false; f.nodes.len()];
+    let mut stack = vec![root];
+    while let Some(current) = stack.pop() {
+        if current.index >= f.nodes.len() || visited[current.index] {
+            continue;
+        }
+        visited[current.index] = true;
+
+        for operand in ir_utils::operands(&f.get_node(current).payload) {
+            if operand == needle {
+                return true;
+            }
+            if operand.index < f.nodes.len() && !visited[operand.index] {
+                stack.push(operand);
+            }
+        }
+    }
+
+    false
+}
+
+fn not_of_bits1(f: &ir::Fn, nr: NodeRef) -> Option<NodeRef> {
+    if f.get_node_ty(nr) != &Type::Bits(1) {
+        return None;
+    }
+    let NodePayload::Unop(Unop::Not, arg) = f.get_node(nr).payload.clone() else {
+        return None;
+    };
+    if f.get_node_ty(arg) == &Type::Bits(1) {
+        Some(arg)
+    } else {
+        None
+    }
+}
+
+fn exact_mask_predicate_for_xls_opt(
+    f: &ir::Fn,
+    nr: NodeRef,
+    width: usize,
+) -> Option<(NodeRef, ExactMaskPolarity)> {
+    if width == 0 || f.get_node_ty(nr) != &Type::Bits(width) {
+        return None;
+    }
+
+    if width == 1 {
+        if let Some(predicate) = not_of_bits1(f, nr) {
+            return Some((predicate, ExactMaskPolarity::NonzeroWhenPredicateZero));
+        }
+        return Some((nr, ExactMaskPolarity::NonzeroWhenPredicateOne));
+    }
+
+    let NodePayload::SignExt { arg, new_bit_count } = f.get_node(nr).payload.clone() else {
+        return None;
+    };
+    if new_bit_count != width {
+        return None;
+    }
+
+    if let Some(predicate) = not_of_bits1(f, arg) {
+        return Some((predicate, ExactMaskPolarity::NonzeroWhenPredicateZero));
+    }
+    if f.get_node_ty(arg) == &Type::Bits(1) {
+        Some((arg, ExactMaskPolarity::NonzeroWhenPredicateOne))
+    } else {
+        None
+    }
+}
+
+fn and_feeds_another_and(f: &ir::Fn, and_ref: NodeRef, original_len: usize) -> bool {
+    f.nodes
+        .iter()
+        .take(original_len)
+        .enumerate()
+        .any(|(idx, node)| {
+            idx != and_ref.index
+                && matches!(
+                    &node.payload,
+                    NodePayload::Nary(NaryOp::And, operands) if operands.contains(&and_ref)
+                )
+        })
+}
+
+/// Canonicalize exact AND mask forms back to `sel` just before XLS opt.
+fn canonicalize_exact_masks_to_sel_for_xls_opt(f: &mut ir::Fn) -> usize {
+    let original_len = f.nodes.len();
+    let mut rewrites = 0usize;
+
+    for node_index in 0..original_len {
+        let width = match &f.nodes[node_index].ty {
+            Type::Bits(width) => *width,
+            _ => continue,
+        };
+        if width == 0 {
+            continue;
+        }
+
+        let NodePayload::Nary(NaryOp::And, operands) = f.nodes[node_index].payload.clone() else {
+            continue;
+        };
+        if operands.len() != 2 {
+            continue;
+        }
+
+        let and_ref = NodeRef { index: node_index };
+        if and_feeds_another_and(f, and_ref, original_len) {
+            continue;
+        }
+
+        let candidates = [(operands[0], operands[1]), (operands[1], operands[0])];
+        let mut matched: Option<(NodeRef, NodeRef, ExactMaskPolarity)> = None;
+        for (maybe_mask, value) in candidates {
+            if f.get_node_ty(value) != &Type::Bits(width) {
+                continue;
+            }
+
+            let Some((predicate, polarity)) =
+                exact_mask_predicate_for_xls_opt(f, maybe_mask, width)
+            else {
+                continue;
+            };
+            if !node_transitively_depends_on(f, value, predicate) {
+                continue;
+            }
+
+            matched = Some((predicate, value, polarity));
+            break;
+        }
+
+        let Some((predicate, value, polarity)) = matched else {
+            continue;
+        };
+
+        let zero = push_ubits_literal(f, width, 0);
+        let cases = match polarity {
+            ExactMaskPolarity::NonzeroWhenPredicateZero => vec![value, zero],
+            ExactMaskPolarity::NonzeroWhenPredicateOne => vec![zero, value],
+        };
+        f.nodes[node_index].payload = NodePayload::Sel {
+            selector: predicate,
+            cases,
+            default: None,
+        };
+        f.nodes[node_index].ty = Type::Bits(width);
+        rewrites += 1;
+    }
+
+    rewrites
 }
 
 fn is_ubits_literal_1_of_width(f: &ir::Fn, nr: NodeRef, w: usize) -> bool {
@@ -2540,6 +2754,379 @@ top fn selected_sub_qor(p: bits[1] id=1, a: bits[{width}] id=2, b: bits[{width}]
         assert_eq!(cases.len(), 2);
         assert_eq!(f.get_node(cases[0]).text_id, case_text_ids[0]);
         assert_eq!(f.get_node(cases[1]).text_id, case_text_ids[1]);
+    }
+
+    fn parse_fn_clone(ir_text: &str, fn_name: &str) -> ir::Fn {
+        let mut p = ir_parser::Parser::new(ir_text);
+        let pkg = p.parse_and_validate_package().expect("parse/validate");
+        pkg.get_fn(fn_name).expect("top fn").clone()
+    }
+
+    fn node_ref_by_name(f: &ir::Fn, name: &str) -> NodeRef {
+        f.nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, node)| {
+                if node.name.as_deref() == Some(name) {
+                    Some(NodeRef { index })
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| panic!("missing node named {name}"))
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum ExpectedSelCase<'a> {
+        Node(&'a str),
+        ZeroBits(usize),
+    }
+
+    fn assert_zero_literal(f: &ir::Fn, nr: NodeRef, width: usize) {
+        let node = f.get_node(nr);
+        let NodePayload::Literal(value) = &node.payload else {
+            panic!("expected zero literal; got {:?}", node.payload);
+        };
+        let bits = value.to_bits().expect("bits literal");
+        assert_eq!(bits.get_bit_count(), width);
+        for bit_index in 0..width {
+            assert!(
+                !bits.get_bit(bit_index).unwrap_or(true),
+                "expected literal zero; got {:?}",
+                value
+            );
+        }
+    }
+
+    fn assert_expected_sel_case(f: &ir::Fn, actual: NodeRef, expected: ExpectedSelCase) {
+        match expected {
+            ExpectedSelCase::Node(name) => {
+                assert_eq!(actual, node_ref_by_name(f, name));
+            }
+            ExpectedSelCase::ZeroBits(width) => {
+                assert_zero_literal(f, actual, width);
+            }
+        }
+    }
+
+    fn assert_named_sel(
+        f: &ir::Fn,
+        sel_name: &str,
+        selector_name: &str,
+        case0: ExpectedSelCase,
+        case1: ExpectedSelCase,
+    ) {
+        let sel_ref = node_ref_by_name(f, sel_name);
+        let NodePayload::Sel {
+            selector,
+            cases,
+            default,
+        } = &f.get_node(sel_ref).payload
+        else {
+            panic!(
+                "expected node {sel_name} to be sel; got {:?}",
+                f.get_node(sel_ref).payload
+            );
+        };
+        assert_eq!(*selector, node_ref_by_name(f, selector_name));
+        assert_eq!(*default, None);
+        assert_eq!(cases.len(), 2);
+        assert_expected_sel_case(f, cases[0], case0);
+        assert_expected_sel_case(f, cases[1], case1);
+    }
+
+    fn is_not_of(f: &ir::Fn, nr: NodeRef, arg: NodeRef) -> bool {
+        matches!(
+            f.get_node(nr).payload.clone(),
+            NodePayload::Unop(Unop::Not, inner) if inner == arg
+        )
+    }
+
+    fn is_sign_ext_of(f: &ir::Fn, nr: NodeRef, arg: NodeRef, width: usize) -> bool {
+        matches!(
+            f.get_node(nr).payload.clone(),
+            NodePayload::SignExt {
+                arg: sign_ext_arg,
+                new_bit_count,
+            } if sign_ext_arg == arg && new_bit_count == width
+        )
+    }
+
+    fn is_sign_ext_not_of(f: &ir::Fn, nr: NodeRef, arg: NodeRef, width: usize) -> bool {
+        let NodePayload::SignExt {
+            arg: not_ref,
+            new_bit_count,
+        } = f.get_node(nr).payload.clone()
+        else {
+            return false;
+        };
+        new_bit_count == width && is_not_of(f, not_ref, arg)
+    }
+
+    fn has_and_of_x_and_sign_ext_not_kill(f: &ir::Fn) -> bool {
+        let x = node_ref_by_name(f, "x");
+        let kill = node_ref_by_name(f, "kill");
+        f.nodes.iter().any(|node| {
+            let NodePayload::Nary(NaryOp::And, operands) = &node.payload else {
+                return false;
+            };
+            operands.len() == 2
+                && ((operands[0] == x && is_sign_ext_not_of(f, operands[1], kill, 8))
+                    || (operands[1] == x && is_sign_ext_not_of(f, operands[0], kill, 8)))
+        })
+    }
+
+    fn has_add_of_x_and_sign_ext_kill(f: &ir::Fn) -> bool {
+        let x = node_ref_by_name(f, "x");
+        let kill = node_ref_by_name(f, "kill");
+        f.nodes.iter().any(|node| {
+            let NodePayload::Binop(Binop::Add, lhs, rhs) = node.payload.clone() else {
+                return false;
+            };
+            (lhs == x && is_sign_ext_of(f, rhs, kill, 8))
+                || (rhs == x && is_sign_ext_of(f, lhs, kill, 8))
+        })
+    }
+
+    #[test]
+    fn aug_opt_canonicalizes_exact_wide_not_mask_to_sel_for_xls_opt() {
+        let ir_text = r#"package mask_to_sel_not
+
+top fn f(kill: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  kill8: bits[8] = sign_ext(kill, new_bit_count=8, id=3)
+  value: bits[8] = add(x, kill8, id=4)
+  nkill: bits[1] = not(kill, id=5)
+  mask: bits[8] = sign_ext(nkill, new_bit_count=8, id=6)
+  ret out: bits[8] = and(mask, value, id=7)
+}
+"#;
+        let mut f = parse_fn_clone(ir_text, "f");
+        assert_eq!(canonicalize_exact_masks_to_sel_for_xls_opt(&mut f), 1);
+        assert_named_sel(
+            &f,
+            "out",
+            "kill",
+            ExpectedSelCase::Node("value"),
+            ExpectedSelCase::ZeroBits(8),
+        );
+    }
+
+    #[test]
+    fn aug_opt_canonicalizes_exact_wide_positive_mask_to_sel_for_xls_opt() {
+        let ir_text = r#"package mask_to_sel_positive
+
+top fn f(kill: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  kill8: bits[8] = sign_ext(kill, new_bit_count=8, id=3)
+  value: bits[8] = add(x, kill8, id=4)
+  mask: bits[8] = sign_ext(kill, new_bit_count=8, id=5)
+  ret out: bits[8] = and(value, mask, id=6)
+}
+"#;
+        let mut f = parse_fn_clone(ir_text, "f");
+        assert_eq!(canonicalize_exact_masks_to_sel_for_xls_opt(&mut f), 1);
+        assert_named_sel(
+            &f,
+            "out",
+            "kill",
+            ExpectedSelCase::ZeroBits(8),
+            ExpectedSelCase::Node("value"),
+        );
+    }
+
+    #[test]
+    fn aug_opt_canonicalizes_one_bit_masks_to_sel_for_xls_opt() {
+        let not_mask_ir = r#"package mask_to_sel_one_bit_not
+
+top fn f(kill: bits[1] id=1, value1: bits[1] id=2) -> bits[1] {
+  value: bits[1] = xor(value1, kill, id=3)
+  nkill: bits[1] = not(kill, id=4)
+  ret out: bits[1] = and(nkill, value, id=5)
+}
+"#;
+        let mut not_mask_f = parse_fn_clone(not_mask_ir, "f");
+        assert_eq!(
+            canonicalize_exact_masks_to_sel_for_xls_opt(&mut not_mask_f),
+            1
+        );
+        assert_named_sel(
+            &not_mask_f,
+            "out",
+            "kill",
+            ExpectedSelCase::Node("value"),
+            ExpectedSelCase::ZeroBits(1),
+        );
+
+        let positive_mask_ir = r#"package mask_to_sel_one_bit_positive
+
+top fn f(kill: bits[1] id=1, value1: bits[1] id=2) -> bits[1] {
+  value: bits[1] = xor(value1, kill, id=3)
+  ret out: bits[1] = and(kill, value, id=4)
+}
+"#;
+        let mut positive_mask_f = parse_fn_clone(positive_mask_ir, "f");
+        assert_eq!(
+            canonicalize_exact_masks_to_sel_for_xls_opt(&mut positive_mask_f),
+            1
+        );
+        assert_named_sel(
+            &positive_mask_f,
+            "out",
+            "kill",
+            ExpectedSelCase::ZeroBits(1),
+            ExpectedSelCase::Node("value"),
+        );
+    }
+
+    #[test]
+    fn aug_opt_mask_to_sel_rejects_value_independent_of_predicate() {
+        let ir_text = r#"package mask_to_sel_independent_value
+
+top fn f(kill: bits[1] id=1, x: bits[8] id=2, y: bits[8] id=3) -> bits[8] {
+  value: bits[8] = add(x, y, id=4)
+  nkill: bits[1] = not(kill, id=5)
+  mask: bits[8] = sign_ext(nkill, new_bit_count=8, id=6)
+  ret out: bits[8] = and(mask, value, id=7)
+}
+"#;
+        let mut f = parse_fn_clone(ir_text, "f");
+        assert_eq!(canonicalize_exact_masks_to_sel_for_xls_opt(&mut f), 0);
+        assert!(matches!(
+            f.get_node(node_ref_by_name(&f, "out")).payload,
+            NodePayload::Nary(NaryOp::And, _)
+        ));
+    }
+
+    #[test]
+    fn aug_opt_mask_to_sel_rejects_non_exact_and_shapes() {
+        let three_input_ir = r#"package mask_to_sel_three_input_and
+
+top fn f(kill: bits[1] id=1, x: bits[8] id=2, other: bits[8] id=3) -> bits[8] {
+  kill8: bits[8] = sign_ext(kill, new_bit_count=8, id=4)
+  value: bits[8] = add(x, kill8, id=5)
+  nkill: bits[1] = not(kill, id=6)
+  mask: bits[8] = sign_ext(nkill, new_bit_count=8, id=7)
+  ret out: bits[8] = and(mask, value, other, id=8)
+}
+"#;
+        let mut three_input_f = parse_fn_clone(three_input_ir, "f");
+        assert_eq!(
+            canonicalize_exact_masks_to_sel_for_xls_opt(&mut three_input_f),
+            0
+        );
+
+        let nested_ir = r#"package mask_to_sel_nested_and
+
+top fn f(kill: bits[1] id=1, x: bits[8] id=2, other: bits[8] id=3) -> bits[8] {
+  kill8: bits[8] = sign_ext(kill, new_bit_count=8, id=4)
+  value: bits[8] = add(x, kill8, id=5)
+  nkill: bits[1] = not(kill, id=6)
+  mask: bits[8] = sign_ext(nkill, new_bit_count=8, id=7)
+  partial: bits[8] = and(mask, value, id=8)
+  ret out: bits[8] = and(partial, other, id=9)
+}
+"#;
+        let mut nested_f = parse_fn_clone(nested_ir, "f");
+        assert_eq!(
+            canonicalize_exact_masks_to_sel_for_xls_opt(&mut nested_f),
+            0
+        );
+    }
+
+    #[test]
+    fn aug_opt_sandwich_mask_to_sel_before_post_opt_characterization() {
+        let ir_text = r#"package composite_aug_and_mask
+
+top fn f(kill: bits[1] id=1, x: bits[8] id=2, y: bits[8] id=3, z: bits[8] id=4) -> bits[9] {
+  nkill: bits[1] = not(kill, id=5)
+  mask: bits[8] = sign_ext(nkill, new_bit_count=8, id=6)
+  kill8: bits[8] = sign_ext(kill, new_bit_count=8, id=7)
+  value: bits[8] = add(x, kill8, id=8)
+  masked: bits[8] = and(mask, value, id=9)
+
+  selv: bits[8] = sel(kill, cases=[y, z], id=10)
+  one8: bits[8] = literal(value=1, id=11)
+  ne1: bits[1] = ne(selv, one8, id=12)
+  pred: bits[1] = nor(kill, ne1, id=13)
+
+  ret out: bits[9] = concat(masked, pred, id=14)
+}
+"#;
+        let out = run_aug_opt_over_ir_text_with_stats(
+            ir_text,
+            Some("f"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::Sandwich,
+            },
+        )
+        .expect("aug opt sandwich");
+
+        assert_eq!(out.rewrite_stats.guarded_sel_ne1_nor, 1);
+        assert!(
+            out.rewrite_stats.mask_to_sel_for_xls_opt >= 1,
+            "expected mask-to-sel rewrite; output:\n{}",
+            out.output_text
+        );
+        assert!(out.rewrote());
+
+        let f = parse_fn_clone(&out.output_text, "f");
+        assert!(
+            has_and_of_x_and_sign_ext_not_kill(&f),
+            "expected final live cone to include and(x, sign_ext(not(kill)));\n{}",
+            out.output_text
+        );
+        assert!(
+            !has_add_of_x_and_sign_ext_kill(&f),
+            "expected final live cone to remove add(x, sign_ext(kill));\n{}",
+            out.output_text
+        );
+
+        quickcheck_ir_text_fn_equivalence_ubits_le64(
+            ir_text,
+            &out.output_text,
+            "f",
+            &[1, 8, 8, 8],
+            /* random_samples= */ 2000,
+        );
+    }
+
+    #[test]
+    fn aug_opt_pir_only_does_not_canonicalize_mask_to_sel_for_xls_opt() {
+        let ir_text = r#"package pir_only_mask_to_sel
+
+top fn f(kill: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  kill8: bits[8] = sign_ext(kill, new_bit_count=8, id=3)
+  value: bits[8] = add(x, kill8, id=4)
+  nkill: bits[1] = not(kill, id=5)
+  mask: bits[8] = sign_ext(nkill, new_bit_count=8, id=6)
+  ret out: bits[8] = and(mask, value, id=7)
+}
+"#;
+        let out = run_aug_opt_over_ir_text_with_stats(
+            ir_text,
+            Some("f"),
+            AugOptOptions {
+                enable: true,
+                rounds: 1,
+                mode: AugOptMode::PirOnly,
+            },
+        )
+        .expect("aug opt pir-only");
+
+        assert_eq!(out.rewrite_stats.mask_to_sel_for_xls_opt, 0);
+        let f = parse_fn_clone(&out.output_text, "f");
+        assert!(
+            f.nodes
+                .iter()
+                .all(|node| !matches!(node.payload, NodePayload::Sel { .. })),
+            "pir-only should not introduce mask-to-sel canonicalization;\n{}",
+            out.output_text
+        );
+        assert!(matches!(
+            f.get_node(node_ref_by_name(&f, "out")).payload,
+            NodePayload::Nary(NaryOp::And, _)
+        ));
     }
 
     #[test]
