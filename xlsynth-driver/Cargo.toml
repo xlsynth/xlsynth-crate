@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth-driver"
-version = "0.41.0"
+version = "0.42.0"
 edition = "2021"
 
 authors = ["Christopher D. Leary <cdleary@gmail.com>"]
@@ -14,12 +14,12 @@ homepage = "https://github.com/xlsynth/xlsynth-crate"
 workspace = true
 
 [dependencies]
-xlsynth = { path = "../xlsynth", version = "0.41.0", features = ["clap"] }
-xlsynth-g8r = { path = "../xlsynth-g8r", version = "0.41.0" }
-xlsynth-pir = { path = "../xlsynth-pir", version = "0.41.0" }
-xlsynth-mcmc-pir = { path = "../xlsynth-mcmc-pir", version = "0.41.0" }
-xlsynth-autocov = { path = "../xlsynth-autocov", version = "0.41.0" }
-xlsynth-prover = { path = "../xlsynth-prover", version = "0.41.0" }
+xlsynth = { path = "../xlsynth", version = "0.42.0", features = ["clap"] }
+xlsynth-g8r = { path = "../xlsynth-g8r", version = "0.42.0" }
+xlsynth-pir = { path = "../xlsynth-pir", version = "0.42.0" }
+xlsynth-mcmc-pir = { path = "../xlsynth-mcmc-pir", version = "0.42.0" }
+xlsynth-autocov = { path = "../xlsynth-autocov", version = "0.42.0" }
+xlsynth-prover = { path = "../xlsynth-prover", version = "0.42.0" }
 clap = "4.5.21"
 tempfile = "3.20"
 toml = "0.8.19"
@@ -48,7 +48,7 @@ num_cpus = "1.16"
 
 [dev-dependencies]
 xlsynth-test-helpers = { path = "../xlsynth-test-helpers" }
-xlsynth-vastly = { path = "../xlsynth-vastly", version = "0.41.0", features = ["irvals"] }
+xlsynth-vastly = { path = "../xlsynth-vastly", version = "0.42.0", features = ["irvals"] }
 test-case = "3.3.1"
 pretty_assertions = "1.4.1"
 
