@@ -53,17 +53,6 @@ pub trait BridgeBuilder {
     /// stops conversion before any members from the module are visited.
     fn start_module(&mut self, module_name: &str) -> Result<(), XlsynthError>;
 
-    /// Starts a module and also provides its DSLX text when a builder needs
-    /// source-level annotations that are not exposed through the current AST
-    /// wrapper API.
-    fn start_module_with_text(
-        &mut self,
-        module_name: &str,
-        _module_text: &str,
-    ) -> Result<(), XlsynthError> {
-        self.start_module(module_name)
-    }
-
     /// Finishes collecting declarations for one DSLX module.
     ///
     /// Implementations commonly use this to close language-specific namespace
@@ -95,15 +84,15 @@ pub trait BridgeBuilder {
         members: &[StructMemberData],
     ) -> Result<(), XlsynthError>;
 
-    /// Adds a struct definition while also providing the struct's DSLX text.
+    /// Adds a DSLX struct definition with access to the owning type context.
     ///
-    /// Builders should prefer the structured member annotations in
-    /// `StructMemberData`; the text is for nested annotation shapes that are
-    /// not yet exposed by the DSLX Rust wrappers.
-    fn add_struct_def_with_text(
+    /// Builders that need to evaluate parametric annotation expressions should
+    /// override this method; the default preserves the legacy shape-only
+    /// callback.
+    fn add_struct_def_typed(
         &mut self,
         dslx_name: &str,
-        _struct_text: &str,
+        _type_info: &dslx::TypeInfo,
         members: &[StructMemberData],
     ) -> Result<(), XlsynthError> {
         self.add_struct_def(dslx_name, members)
@@ -125,14 +114,15 @@ pub trait BridgeBuilder {
         ty: &dslx::Type,
     ) -> Result<(), XlsynthError>;
 
-    /// Adds a type alias while also providing the alias's DSLX text.
+    /// Adds a DSLX type alias with access to the owning type context.
     ///
-    /// The default delegates to `add_alias`; builders that need nested source
-    /// annotations can parse `_alias_text`.
-    fn add_alias_with_text(
+    /// Builders that need to evaluate parametric annotation expressions should
+    /// override this method; the default preserves the legacy shape-only
+    /// callback.
+    fn add_alias_typed(
         &mut self,
         dslx_name: &str,
-        _alias_text: &str,
+        _type_info: &dslx::TypeInfo,
         type_annotation: &dslx::TypeAnnotation,
         ty: &dslx::Type,
     ) -> Result<(), XlsynthError> {
@@ -165,12 +155,11 @@ pub trait BridgeBuilder {
         Ok(())
     }
 
-    /// Adds function signature metadata while also providing the function's
-    /// DSLX text.
-    fn add_function_signature_with_text(
+    /// Adds function signature metadata with access to the owning type context.
+    fn add_function_signature_typed(
         &mut self,
         dslx_name: &str,
-        _function_text: &str,
+        _type_info: &dslx::TypeInfo,
         params: &[FunctionParamData],
         return_type_annotation: Option<&dslx::TypeAnnotation>,
         return_type: Option<&dslx::Type>,
@@ -216,6 +205,11 @@ fn convert_struct(
     builder: &mut dyn BridgeBuilder,
 ) -> Result<(), XlsynthError> {
     let struct_name = struct_def.get_identifier();
+    if struct_def.is_parametric() {
+        // Concrete instantiations are emitted when aliases, struct members, or
+        // function signatures refer to a fully bound parametric type.
+        return Ok(());
+    }
     let mut members = vec![];
     for i in 0..struct_def.get_member_count() {
         let member = struct_def.get_member(i);
@@ -228,7 +222,7 @@ fn convert_struct(
             concrete_type: member_type,
         });
     }
-    builder.add_struct_def_with_text(&struct_name, &struct_def.to_text(), &members)
+    builder.add_struct_def_typed(&struct_name, type_info, &members)
 }
 
 fn convert_type_alias(
@@ -241,12 +235,7 @@ fn convert_type_alias(
     let alias_type = type_info
         .get_type_for_type_annotation(&type_annotation)
         .expect("alias type should be present");
-    builder.add_alias_with_text(
-        &alias_name,
-        &type_alias.to_text(),
-        &type_annotation,
-        &alias_type,
-    )
+    builder.add_alias_typed(&alias_name, type_info, &type_annotation, &alias_type)
 }
 
 fn convert_constant(
@@ -282,9 +271,9 @@ fn convert_function(
     let return_type = return_type_annotation
         .as_ref()
         .and_then(|annotation| type_info.get_type_for_type_annotation(annotation));
-    builder.add_function_signature_with_text(
+    builder.add_function_signature_typed(
         &function.get_identifier(),
-        &function.to_text(),
+        type_info,
         &params,
         return_type_annotation.as_ref(),
         return_type.as_ref(),
@@ -309,7 +298,7 @@ pub fn convert_imported_module(
     let module = typechecked_module.get_module();
     let type_info = typechecked_module.get_type_info();
     let module_name = module.get_name();
-    builder.start_module_with_text(&module_name, &module.to_text())?;
+    builder.start_module(&module_name)?;
 
     for i in 0..module.get_member_count() {
         let member = module.get_member(i);

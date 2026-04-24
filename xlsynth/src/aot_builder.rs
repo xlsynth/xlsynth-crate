@@ -1144,6 +1144,12 @@ struct TypedDslxStructDefContext {
     def: dslx::StructDef,
 }
 
+/// A DSLX type alias definition handle kept for recursive alias expansion.
+struct TypedDslxAliasDefContext {
+    name: String,
+    def: dslx::TypeAlias,
+}
+
 /// Type and name information collected for one typechecked DSLX module.
 ///
 /// The type context is the authoritative place to resolve struct members and
@@ -1159,6 +1165,8 @@ struct TypedDslxModuleContext {
     struct_names: BTreeSet<String>,
     /// Struct definitions declared by this module.
     struct_defs: Vec<TypedDslxStructDefContext>,
+    /// Type aliases declared by this module.
+    type_alias_defs: Vec<TypedDslxAliasDefContext>,
     /// Enum names declared by this module.
     enum_names: BTreeSet<String>,
 }
@@ -1180,6 +1188,12 @@ struct TypedDslxTypeContext {
 struct TypedDslxTypecheckedModules {
     bridge_modules: Vec<dslx::TypecheckedModule>,
     top_module: dslx::TypecheckedModule,
+}
+
+/// A type annotation paired with the module context that owns it.
+struct ResolvedDslxTypeAnnotation<'a> {
+    type_info: &'a dslx::TypeInfo,
+    annotation: dslx::TypeAnnotation,
 }
 
 /// A non-empty DSLX import subject such as `foo` or `foo.bar`.
@@ -1428,6 +1442,7 @@ fn collect_module_context(typechecked_module: &dslx::TypecheckedModule) -> Typed
     let module = typechecked_module.get_module();
     let mut struct_names = BTreeSet::new();
     let mut struct_defs = Vec::new();
+    let mut type_alias_defs = Vec::new();
     let mut enum_names = BTreeSet::new();
     for index in 0..module.get_member_count() {
         if let Some(member) = module.get_member(index).to_matchable() {
@@ -1436,6 +1451,12 @@ fn collect_module_context(typechecked_module: &dslx::TypecheckedModule) -> Typed
                     let name = struct_def.get_identifier();
                     struct_names.insert(name.clone());
                     struct_defs.push(TypedDslxStructDefContext { def: struct_def });
+                }
+                dslx::MatchableModuleMember::TypeAlias(type_alias) => {
+                    type_alias_defs.push(TypedDslxAliasDefContext {
+                        name: type_alias.get_identifier(),
+                        def: type_alias,
+                    });
                 }
                 dslx::MatchableModuleMember::EnumDef(enum_def) => {
                     enum_names.insert(enum_def.get_identifier());
@@ -1452,6 +1473,7 @@ fn collect_module_context(typechecked_module: &dslx::TypecheckedModule) -> Typed
         type_info: typechecked_module.get_type_info(),
         struct_names,
         struct_defs,
+        type_alias_defs,
         enum_names,
     }
 }
@@ -1471,6 +1493,109 @@ impl TypedDslxTypeContext {
             .map(collect_module_context)
             .collect();
         Self { modules }
+    }
+
+    /// Finds a type alias by module and DSLX alias identifier.
+    fn type_alias_in_module<'a>(
+        &'a self,
+        module_name: &str,
+        alias_name: &str,
+    ) -> Option<(&'a TypedDslxModuleContext, &'a dslx::TypeAlias)> {
+        self.modules
+            .iter()
+            .find(|module| module.dslx_name == module_name)
+            .and_then(|module| {
+                module
+                    .type_alias_defs
+                    .iter()
+                    .find(|alias| alias.name == alias_name)
+                    .map(|alias| (module, &alias.def))
+            })
+    }
+
+    /// Finds the module context that produced a `TypeInfo` object.
+    fn module_for_type_info<'a>(
+        &'a self,
+        type_info: &dslx::TypeInfo,
+    ) -> Option<&'a TypedDslxModuleContext> {
+        self.modules
+            .iter()
+            .find(|module| module.type_info.is_same_type_context(type_info))
+    }
+
+    /// Resolves one type-reference annotation to the RHS annotation of a DSLX
+    /// type alias, when the reference names an alias rather than a concrete
+    /// type.
+    fn type_alias_rhs_for_annotation<'a>(
+        &'a self,
+        current_type_info: &'a dslx::TypeInfo,
+        type_annotation: &dslx::TypeAnnotation,
+    ) -> AotResult<Option<ResolvedDslxTypeAnnotation<'a>>> {
+        let Some(type_ref_annotation) = type_annotation.to_type_ref_type_annotation() else {
+            return Ok(None);
+        };
+        let type_definition = type_ref_annotation.get_type_ref().get_type_definition();
+        if let Some(colon_ref) = type_definition.to_colon_ref() {
+            let alias_name = colon_ref.get_attr();
+            let Some(import) = colon_ref.resolve_import_subject() else {
+                return Ok(None);
+            };
+            let module_name = import.get_subject().join(".");
+            let Some((module, type_alias)) = self.type_alias_in_module(&module_name, &alias_name)
+            else {
+                return Ok(None);
+            };
+            return Ok(Some(ResolvedDslxTypeAnnotation {
+                type_info: &module.type_info,
+                annotation: type_alias.get_type_annotation(),
+            }));
+        }
+        let Some(type_alias) = type_definition.to_type_alias() else {
+            return Ok(None);
+        };
+        let alias_name = type_alias.get_identifier();
+        if let Some(module) = self.module_for_type_info(current_type_info) {
+            if let Some(alias) = module
+                .type_alias_defs
+                .iter()
+                .find(|alias| alias.name == alias_name)
+            {
+                return Ok(Some(ResolvedDslxTypeAnnotation {
+                    type_info: &module.type_info,
+                    annotation: alias.def.get_type_annotation(),
+                }));
+            }
+        }
+        Ok(Some(ResolvedDslxTypeAnnotation {
+            type_info: current_type_info,
+            annotation: type_alias.get_type_annotation(),
+        }))
+    }
+
+    /// Expands type aliases until the annotation names a non-alias type.
+    fn expand_type_alias_rhs_annotation<'a>(
+        &'a self,
+        current_type_info: &'a dslx::TypeInfo,
+        type_annotation: &dslx::TypeAnnotation,
+        depth: usize,
+    ) -> AotResult<Option<ResolvedDslxTypeAnnotation<'a>>> {
+        const MAX_ALIAS_EXPANSION_DEPTH: usize = 32;
+        if depth >= MAX_ALIAS_EXPANSION_DEPTH {
+            return Err(XlsynthError(format!(
+                "AOT typed DSLX type lowering exceeded alias expansion depth of {MAX_ALIAS_EXPANSION_DEPTH}"
+            )));
+        }
+        let Some(resolved) =
+            self.type_alias_rhs_for_annotation(current_type_info, type_annotation)?
+        else {
+            return Ok(None);
+        };
+        let next = self.expand_type_alias_rhs_annotation(
+            resolved.type_info,
+            &resolved.annotation,
+            depth + 1,
+        )?;
+        Ok(next.or(Some(resolved)))
     }
 
     /// Finds the module that owns a DSLX struct definition.
@@ -1735,13 +1860,15 @@ impl TypedDslxTypeContext {
         type_annotation: Option<&dslx::TypeAnnotation>,
         ty: &dslx::Type,
     ) -> AotResult<String> {
-        if let Some(rust_type) = type_annotation.and_then(|annotation| {
-            RustBridgeBuilder::rust_type_ref_name_from_dslx_module(local_module_name, annotation)
-        }) {
-            Ok(rust_type)
-        } else {
-            self.rust_type_for_concrete_type(local_module_name, current_type_info, ty)
+        if type_annotation.is_some() {
+            return RustBridgeBuilder::rust_type_name_from_dslx_module(
+                local_module_name,
+                current_type_info,
+                type_annotation,
+                ty,
+            );
         }
+        self.rust_type_for_concrete_type(local_module_name, current_type_info, ty)
     }
 }
 
@@ -1755,6 +1882,7 @@ fn lower_typed_dslx_type(
     context: &TypedDslxTypeContext,
     local_module_name: &str,
     current_type_info: &dslx::TypeInfo,
+    type_annotation: Option<&dslx::TypeAnnotation>,
     ty: &dslx::Type,
     rust_type: String,
 ) -> AotResult<TypedDslxType> {
@@ -1807,11 +1935,27 @@ fn lower_typed_dslx_type(
     } else if ty.is_struct() {
         let struct_def = ty.get_struct_def()?;
         let struct_type_info = context.type_info_for_struct(current_type_info, &struct_def)?;
-        let fields = (0..struct_def.get_member_count())
+        let definition_member_count = struct_def.get_member_count();
+        let concrete_member_count = if struct_def.is_parametric() {
+            ty.get_struct_member_count()
+        } else {
+            definition_member_count
+        };
+        if concrete_member_count != definition_member_count {
+            return Err(XlsynthError(format!(
+                "AOT typed DSLX type lowering found {definition_member_count} definition member(s) but {concrete_member_count} concrete member type(s) for struct `{}`",
+                struct_def.get_identifier()
+            )));
+        }
+        let fields = (0..concrete_member_count)
             .map(|index| {
                 let member = struct_def.get_member(index);
                 let field_annotation = member.get_type();
-                let field_type = struct_type_info.get_type_for_struct_member(&member);
+                let field_type = if struct_def.is_parametric() {
+                    ty.get_struct_member_type(index)
+                } else {
+                    struct_type_info.get_type_for_struct_member(&member)
+                };
                 let field_type_info = context.type_context_for_resolved_type(
                     struct_type_info,
                     Some(&field_annotation),
@@ -1829,6 +1973,7 @@ fn lower_typed_dslx_type(
                         context,
                         local_module_name,
                         field_type_info,
+                        Some(&field_annotation),
                         &field_type,
                         rust_type,
                     )?,
@@ -1838,15 +1983,42 @@ fn lower_typed_dslx_type(
         Ok(TypedDslxType::Struct { rust_type, fields })
     } else if ty.is_array() {
         let element = ty.get_array_element_type();
-        let element_rust_type =
-            context.rust_type_for_concrete_type(local_module_name, current_type_info, &element)?;
+        let expanded_annotation = type_annotation
+            .map(|annotation| {
+                context.expand_type_alias_rhs_annotation(current_type_info, annotation, 0)
+            })
+            .transpose()?
+            .flatten();
+        let effective_type_info = expanded_annotation
+            .as_ref()
+            .map(|annotation| annotation.type_info)
+            .unwrap_or(current_type_info);
+        let effective_annotation = expanded_annotation
+            .as_ref()
+            .map(|annotation| &annotation.annotation)
+            .or(type_annotation);
+        let element_annotation = effective_annotation
+            .and_then(|annotation| annotation.to_array_type_annotation())
+            .map(|annotation| annotation.get_element_type());
+        let element_type_info = context.type_context_for_resolved_type(
+            effective_type_info,
+            element_annotation.as_ref(),
+            &element,
+        )?;
+        let element_rust_type = context.rust_type_path_for_resolved_type(
+            local_module_name,
+            element_type_info,
+            element_annotation.as_ref(),
+            &element,
+        )?;
         Ok(TypedDslxType::Array {
             rust_type,
             size: ty.get_array_size(),
             element: Box::new(lower_typed_dslx_type(
                 context,
                 local_module_name,
-                current_type_info,
+                element_type_info,
+                element_annotation.as_ref(),
                 &element,
                 element_rust_type,
             )?),
@@ -1926,6 +2098,7 @@ fn build_typed_dslx_function_signature(
                     context,
                     &module_name,
                     param_type_info,
+                    Some(&annotation),
                     &concrete_type,
                     rust_type,
                 )?,
@@ -1960,6 +2133,7 @@ fn build_typed_dslx_function_signature(
         context,
         &module_name,
         return_type_info,
+        Some(&return_annotation),
         &return_type,
         return_rust_type.clone(),
     )?;

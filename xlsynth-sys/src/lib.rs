@@ -286,6 +286,11 @@ pub struct CDslxTypeAnnotation {
 }
 
 #[repr(C)]
+pub struct CDslxArrayTypeAnnotation {
+    _private: [u8; 0], // Ensures the struct cannot be instantiated
+}
+
+#[repr(C)]
 pub struct CDslxTypeRefTypeAnnotation {
     _private: [u8; 0], // Ensures the struct cannot be instantiated
 }
@@ -1427,6 +1432,7 @@ unsafe extern "C" {
     pub fn xls_dslx_module_member_get_function(
         member: *const CDslxModuleMember,
     ) -> *mut CDslxFunction;
+    pub fn xls_dslx_module_member_get_import(member: *const CDslxModuleMember) -> *mut CDslxImport;
     pub fn xls_dslx_module_member_get_quickcheck(
         member: *const CDslxModuleMember,
     ) -> *mut CDslxQuickcheck;
@@ -1581,6 +1587,15 @@ unsafe extern "C" {
     pub fn xls_dslx_type_annotation_get_type_ref_type_annotation(
         type_annotation: *const CDslxTypeAnnotation,
     ) -> *mut CDslxTypeRefTypeAnnotation;
+    pub fn xls_dslx_type_annotation_get_array_type_annotation(
+        type_annotation: *const CDslxTypeAnnotation,
+    ) -> *mut CDslxArrayTypeAnnotation;
+
+    // -- ArrayTypeAnnotation
+
+    pub fn xls_dslx_array_type_annotation_get_element_type(
+        array_type_annotation: *const CDslxArrayTypeAnnotation,
+    ) -> *mut CDslxTypeAnnotation;
 
     // -- TypeRef
 
@@ -1616,6 +1631,13 @@ unsafe extern "C" {
     pub fn xls_dslx_type_ref_type_annotation_get_type_ref(
         type_ref_type_annotation: *const CDslxTypeRefTypeAnnotation,
     ) -> *mut CDslxTypeRef;
+    pub fn xls_dslx_type_ref_type_annotation_get_parametric_count(
+        type_ref_type_annotation: *const CDslxTypeRefTypeAnnotation,
+    ) -> i64;
+    pub fn xls_dslx_type_ref_type_annotation_get_parametric_expr(
+        type_ref_type_annotation: *const CDslxTypeRefTypeAnnotation,
+        index: i64,
+    ) -> *mut CDslxExpr;
 
     // -- StructDef
 
@@ -1624,6 +1646,14 @@ unsafe extern "C" {
     ) -> *mut std::os::raw::c_char;
 
     pub fn xls_dslx_struct_def_is_parametric(struct_def: *const CDslxStructDef) -> bool;
+
+    pub fn xls_dslx_struct_def_get_parametric_binding_count(
+        struct_def: *const CDslxStructDef,
+    ) -> i64;
+    pub fn xls_dslx_struct_def_get_parametric_binding(
+        struct_def: *const CDslxStructDef,
+        index: i64,
+    ) -> *mut CDslxParametricBinding;
 
     pub fn xls_dslx_struct_def_get_member_count(struct_def: *const CDslxStructDef) -> i64;
 
@@ -1809,6 +1839,9 @@ unsafe extern "C" {
     pub fn xls_dslx_type_get_enum_def(ty: *const CDslxType) -> *mut CDslxEnumDef;
 
     pub fn xls_dslx_type_get_struct_def(ty: *const CDslxType) -> *mut CDslxStructDef;
+    pub fn xls_dslx_type_struct_get_member_count(ty: *const CDslxType) -> i64;
+    pub fn xls_dslx_type_struct_get_member_type(ty: *const CDslxType, index: i64)
+        -> *mut CDslxType;
 
     pub fn xls_dslx_type_array_get_element_type(ty: *const CDslxType) -> *mut CDslxType;
     pub fn xls_dslx_type_array_get_size(ty: *const CDslxType) -> *mut CDslxTypeDim;

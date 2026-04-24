@@ -1,9 +1,9 @@
 module foo_cycle0(
   output wire [63:0] out
 );
-  wire [63:0] literal_8 = {32'h0000_002a, 32'h0000_0040};
+  wire [63:0] literal_15 = {32'h0000_002a, 32'h0000_0040};
 
-  assign out = literal_8;
+  assign out = literal_15;
 endmodule
 
 module foo_cycle1(
@@ -11,9 +11,9 @@ module foo_cycle1(
   input wire [31:0] y,
   output wire [31:0] out
 );
-  wire [31:0] add_9;
-  assign add_9 = x + y;
-  assign out = add_9;
+  wire [31:0] add_18;
+  assign add_18 = x + y;
+  assign out = add_18;
 endmodule
 module foo(
   input wire clk,

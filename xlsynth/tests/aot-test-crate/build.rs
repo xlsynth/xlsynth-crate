@@ -212,6 +212,68 @@ top fn trace_assert_pair(tok: token, pair: (bits[8], bits[8])) -> (bits[8], bits
         self_alias_output.rust_file.display()
     );
 
+    let parametric_box_dslx_path = manifest_dir.join("src/parametric_box.x");
+    let parametric_box_output = emit_typed_dslx_aot_module_from_file(&TypedDslxAotBuildSpec {
+        name: "parametric_box",
+        dslx_path: &parametric_box_dslx_path,
+        top: "echo_box",
+        dslx_options: DslxConvertOptions::default(),
+        type_module_paths: vec![],
+    })
+    .unwrap_or_else(|err| panic!("parametric box AOT compile should succeed: {}", err));
+    println!(
+        "cargo:rustc-env=XLSYNTH_AOT_PARAMETRIC_BOX_RS={}",
+        parametric_box_output.rust_file.display()
+    );
+
+    let parametric_src_dir = manifest_dir.join("src");
+    let parametric_lib_dslx_path = parametric_src_dir.join("parametric_lib.x");
+    let parametric_cases = [
+        (
+            "parametric_shapes",
+            "src/parametric_shapes.x",
+            "exercise_parametric_shapes",
+            "XLSYNTH_AOT_PARAMETRIC_SHAPES_RS",
+            Vec::new(),
+        ),
+        (
+            "parametric_arrays",
+            "src/parametric_arrays.x",
+            "exercise_parametric_arrays",
+            "XLSYNTH_AOT_PARAMETRIC_ARRAYS_RS",
+            Vec::new(),
+        ),
+        (
+            "parametric_values",
+            "src/parametric_values.x",
+            "exercise_parametric_values",
+            "XLSYNTH_AOT_PARAMETRIC_VALUES_RS",
+            Vec::new(),
+        ),
+        (
+            "parametric_imports",
+            "src/parametric_imports.x",
+            "exercise_parametric_imports",
+            "XLSYNTH_AOT_PARAMETRIC_IMPORTS_RS",
+            vec![parametric_lib_dslx_path.as_path()],
+        ),
+    ];
+    for (name, path, top, env_var, type_module_paths) in parametric_cases {
+        let dslx_path = manifest_dir.join(path);
+        let output = emit_typed_dslx_aot_module_from_file(&TypedDslxAotBuildSpec {
+            name,
+            dslx_path: &dslx_path,
+            top,
+            dslx_options: DslxConvertOptions {
+                additional_search_paths: vec![parametric_src_dir.as_path()],
+                ..DslxConvertOptions::default()
+            },
+            type_module_paths,
+        })
+        .unwrap_or_else(|err| panic!("{} typed DSLX AOT compile should succeed: {}", name, err));
+        println!("cargo:rustc-env={}={}", env_var, output.rust_file.display());
+    }
+
     let dup_root = manifest_dir.join("src/dup");
     let dup_frobber_path = dup_root.join("frobber.x");
     let dup_foo_widget_path = dup_root.join("foo/widget.x");

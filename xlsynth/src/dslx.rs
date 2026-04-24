@@ -24,6 +24,8 @@ pub enum TypeDefinitionKind {
     StructDef = 1,
     EnumDef = 2,
     ColonRef = 3,
+    ProcDef = 4,
+    UseTreeEntry = 5,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -41,7 +43,11 @@ pub enum ModuleMemberKind {
     Import = 10,
     ConstAssert = 11,
     Impl = 12,
-    VerbatimNode = 13,
+    Trait = 13,
+    VerbatimNode = 14,
+    Use = 15,
+    ProcAlias = 16,
+    FuzzTestFunction = 17,
 }
 
 impl From<sys::DslxModuleMemberKind> for ModuleMemberKind {
@@ -60,7 +66,11 @@ impl From<sys::DslxModuleMemberKind> for ModuleMemberKind {
             10 => ModuleMemberKind::Import,
             11 => ModuleMemberKind::ConstAssert,
             12 => ModuleMemberKind::Impl,
-            13 => ModuleMemberKind::VerbatimNode,
+            13 => ModuleMemberKind::Trait,
+            14 => ModuleMemberKind::VerbatimNode,
+            15 => ModuleMemberKind::Use,
+            16 => ModuleMemberKind::ProcAlias,
+            17 => ModuleMemberKind::FuzzTestFunction,
             _ => panic!("Unknown module member kind: {}", kind),
         };
         assert_eq!(result as i32, kind);
@@ -692,6 +702,18 @@ impl ModuleMember {
         ModuleMemberKind::from(kind)
     }
 
+    pub fn to_import(&self) -> Option<Import> {
+        let ptr = unsafe { sys::xls_dslx_module_member_get_import(self.ptr) };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(Import {
+                parent: self.parent.clone(),
+                ptr,
+            })
+        }
+    }
+
     pub fn to_matchable(&self) -> Option<MatchableModuleMember> {
         let kind = unsafe { sys::xls_dslx_module_member_get_kind(self.ptr) };
         match ModuleMemberKind::from(kind) {
@@ -843,6 +865,8 @@ impl Module {
             1 => TypeDefinitionKind::StructDef,
             2 => TypeDefinitionKind::EnumDef,
             3 => TypeDefinitionKind::ColonRef,
+            4 => TypeDefinitionKind::ProcDef,
+            5 => TypeDefinitionKind::UseTreeEntry,
             _ => panic!("Unknown type definition kind: {}", kind),
         }
     }
@@ -1018,6 +1042,48 @@ impl TypeRefTypeAnnotation {
             ptr: unsafe { sys::xls_dslx_type_ref_type_annotation_get_type_ref(self.ptr) },
         }
     }
+
+    pub fn get_parametric_count(&self) -> usize {
+        unsafe { sys::xls_dslx_type_ref_type_annotation_get_parametric_count(self.ptr) as usize }
+    }
+
+    pub fn get_parametric_expr(&self, index: usize) -> Option<Expr> {
+        if index >= self.get_parametric_count() {
+            return None;
+        }
+        let ptr = unsafe {
+            sys::xls_dslx_type_ref_type_annotation_get_parametric_expr(self.ptr, index as i64)
+        };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(Expr {
+                parent: self.parent.clone(),
+                ptr,
+            })
+        }
+    }
+}
+
+// -- ArrayTypeAnnotation (note in C++ this is a subtype of `TypeAnnotation`)
+
+pub struct ArrayTypeAnnotation {
+    parent: Rc<TypecheckedModulePtr>,
+    ptr: *mut sys::CDslxArrayTypeAnnotation,
+}
+
+impl ArrayTypeAnnotation {
+    pub fn get_element_type(&self) -> TypeAnnotation {
+        let ptr = unsafe { sys::xls_dslx_array_type_annotation_get_element_type(self.ptr) };
+        assert!(
+            !ptr.is_null(),
+            "xls_dslx_array_type_annotation_get_element_type returned null pointer"
+        );
+        TypeAnnotation {
+            parent: self.parent.clone(),
+            ptr,
+        }
+    }
 }
 
 // -- TypeAnnotation
@@ -1035,6 +1101,17 @@ impl TypeAnnotation {
             return None;
         }
         Some(TypeRefTypeAnnotation {
+            parent: self.parent.clone(),
+            ptr: casted,
+        })
+    }
+
+    pub fn to_array_type_annotation(&self) -> Option<ArrayTypeAnnotation> {
+        let casted = unsafe { sys::xls_dslx_type_annotation_get_array_type_annotation(self.ptr) };
+        if casted.is_null() {
+            return None;
+        }
+        Some(ArrayTypeAnnotation {
             parent: self.parent.clone(),
             ptr: casted,
         })
@@ -1189,6 +1266,33 @@ impl StructDef {
 
     pub fn is_parametric(&self) -> bool {
         unsafe { sys::xls_dslx_struct_def_is_parametric(self.ptr) }
+    }
+
+    pub fn get_parametric_binding_count(&self) -> usize {
+        unsafe { sys::xls_dslx_struct_def_get_parametric_binding_count(self.ptr) as usize }
+    }
+
+    pub fn get_parametric_binding(&self, idx: usize) -> ParametricBinding {
+        if idx >= self.get_parametric_binding_count() {
+            panic!("Failed to get struct parametric binding at index {}", idx);
+        }
+        let ptr = unsafe { sys::xls_dslx_struct_def_get_parametric_binding(self.ptr, idx as i64) };
+        if ptr.is_null() {
+            panic!(
+                "xls_dslx_struct_def_get_parametric_binding returned null for index {}",
+                idx
+            );
+        }
+        ParametricBinding {
+            parent: self.parent.clone(),
+            ptr,
+        }
+    }
+
+    pub fn parametric_bindings(&self) -> Vec<ParametricBinding> {
+        (0..self.get_parametric_binding_count())
+            .map(|idx| self.get_parametric_binding(idx))
+            .collect()
     }
 
     pub fn get_member_count(&self) -> usize {
@@ -1969,6 +2073,15 @@ pub struct TypeInfo {
     ptr: *mut sys::CDslxTypeInfo,
 }
 
+impl Clone for TypeInfo {
+    fn clone(&self) -> Self {
+        Self {
+            parent: self.parent.clone(),
+            ptr: self.ptr,
+        }
+    }
+}
+
 pub struct FunctionCallGraph {
     parent: Rc<TypecheckedModulePtr>,
     ptr: *mut sys::CDslxCallGraph,
@@ -2526,6 +2639,28 @@ impl Type {
             parent: self.parent.clone(),
             ptr,
         })
+    }
+
+    pub fn get_struct_member_count(&self) -> usize {
+        assert!(self.is_struct());
+        let count = unsafe { sys::xls_dslx_type_struct_get_member_count(self.ptr) };
+        assert!(count >= 0);
+        count as usize
+    }
+
+    pub fn get_struct_member_type(&self, index: usize) -> Type {
+        assert!(self.is_struct());
+        assert!(index < self.get_struct_member_count());
+        let ptr = unsafe { sys::xls_dslx_type_struct_get_member_type(self.ptr, index as i64) };
+        assert!(
+            !ptr.is_null(),
+            "xls_dslx_type_struct_get_member_type returned null for index {}",
+            index
+        );
+        Type {
+            parent: self.parent.clone(),
+            ptr,
+        }
     }
 
     pub fn is_array(&self) -> bool {

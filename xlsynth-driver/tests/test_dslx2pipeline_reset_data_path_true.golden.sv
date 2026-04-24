@@ -7,45 +7,39 @@ module __my_module__main(
   output wire [31:0] out
 );
   // ===== Pipe stage 0:
-  wire p0_not_18_comb;
-  wire p0_load_en_comb;
-  assign p0_not_18_comb = ~rst_n;
-  assign p0_load_en_comb = input_valid | p0_not_18_comb;
 
   // Registers for pipe stage 0:
-  reg p0_valid;
-  reg [31:0] p0_x;
+  reg input_valid__input_flop;
+  reg [31:0] x__input_flop;
   always @ (posedge clk) begin
     if (!rst_n) begin
-      p0_valid <= 1'h0;
-      p0_x <= 32'h0000_0000;
+      input_valid__input_flop <= 1'h0;
+      x__input_flop <= 32'h0000_0000;
     end else begin
-      p0_valid <= input_valid;
-      p0_x <= p0_load_en_comb ? x : p0_x;
+      input_valid__input_flop <= input_valid;
+      x__input_flop <= input_valid ? x : x__input_flop;
     end
   end
 
   // ===== Pipe stage 1:
-  wire [31:0] p1_literal_5_comb;
-  wire [31:0] p1_add_9_comb;
-  wire p1_load_en_comb;
-  assign p1_literal_5_comb = 32'h0000_0001;
-  assign p1_add_9_comb = p0_x + p1_literal_5_comb;
-  assign p1_load_en_comb = p0_valid | p0_not_18_comb;
+  wire [31:0] p1_literal_27_comb;
+  wire [31:0] p1_add_33_comb;
+  assign p1_literal_27_comb = 32'h0000_0001;
+  assign p1_add_33_comb = x__input_flop + p1_literal_27_comb;
 
   // Registers for pipe stage 1:
-  reg p1_valid;
-  reg [31:0] p1_add_9;
+  reg output_valid__output_flop;
+  reg [31:0] out__output_flop;
   always @ (posedge clk) begin
     if (!rst_n) begin
-      p1_valid <= 1'h0;
-      p1_add_9 <= 32'h0000_0000;
+      output_valid__output_flop <= 1'h0;
+      out__output_flop <= 32'h0000_0000;
     end else begin
-      p1_valid <= p0_valid;
-      p1_add_9 <= p1_load_en_comb ? p1_add_9_comb : p1_add_9;
+      output_valid__output_flop <= input_valid__input_flop;
+      out__output_flop <= input_valid__input_flop ? p1_add_33_comb : out__output_flop;
     end
   end
-  assign output_valid = p1_valid;
-  assign out = p1_add_9;
+  assign output_valid = output_valid__output_flop;
+  assign out = out__output_flop;
 endmodule
 

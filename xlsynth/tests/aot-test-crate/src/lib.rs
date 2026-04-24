@@ -48,6 +48,31 @@ pub mod self_alias_widget_aot {
     include!(env!("XLSYNTH_AOT_SELF_ALIAS_WIDGET_RS"));
 }
 
+/// Generated typed DSLX AOT wrapper for concrete parametric structs.
+pub mod parametric_box_aot {
+    include!(env!("XLSYNTH_AOT_PARAMETRIC_BOX_RS"));
+}
+
+/// Generated typed DSLX AOT wrapper for parametric shape examples.
+pub mod parametric_shapes_aot {
+    include!(env!("XLSYNTH_AOT_PARAMETRIC_SHAPES_RS"));
+}
+
+/// Generated typed DSLX AOT wrapper for parametric array examples.
+pub mod parametric_arrays_aot {
+    include!(env!("XLSYNTH_AOT_PARAMETRIC_ARRAYS_RS"));
+}
+
+/// Generated typed DSLX AOT wrapper for parametric value examples.
+pub mod parametric_values_aot {
+    include!(env!("XLSYNTH_AOT_PARAMETRIC_VALUES_RS"));
+}
+
+/// Generated typed DSLX AOT wrapper for imported parametric examples.
+pub mod parametric_imports_aot {
+    include!(env!("XLSYNTH_AOT_PARAMETRIC_IMPORTS_RS"));
+}
+
 /// Generated typed DSLX AOT wrapper for duplicate imported type names.
 pub mod duplicate_widget_aot {
     include!(env!("XLSYNTH_AOT_DUPLICATE_WIDGET_RS"));
@@ -138,6 +163,161 @@ mod tests {
         assert!(source.contains(") -> Result<WidgetHandle, xlsynth::XlsynthError>"));
         assert!(!source.contains("pub type WidgetHandle"));
         Ok(())
+    }
+
+    // Verifies: concrete DSLX parametric structs get generated Rust names
+    // suffixed by evaluated parameter values.
+    // Catches: regressions that emit unspecialized `Box` or field type `bits[N]`.
+    #[test]
+    fn parametric_box_aot_uses_concrete_generated_struct() -> Result<(), XlsynthError> {
+        use super::parametric_box_aot::parametric_box::{new_runner, Box8};
+
+        let input = Box8 { value: ub(42) };
+        let mut runner = new_runner()?;
+        let result: Box8 = runner.run(&input)?;
+        assert_eq!(result.value.to_u64()?, 42);
+
+        let source = std::fs::read_to_string(env!("XLSYNTH_AOT_PARAMETRIC_BOX_RS")).unwrap();
+        assert!(source.contains("pub struct Box__N_8"));
+        assert!(source.contains("pub type Box8 = Box__N_8;"));
+        assert!(source.contains("x: &Box8"));
+        assert!(source.contains(") -> Result<Box8, xlsynth::XlsynthError>"));
+        Ok(())
+    }
+
+    // Verifies: generated AOT wrappers execute concrete parametric aliases with
+    // distinct parameter values.
+    // Catches: regressions in concrete struct naming or per-field lowering.
+    #[test]
+    fn parametric_shapes_aot_executes_concrete_aliases() -> Result<(), XlsynthError> {
+        use super::parametric_shapes_aot::parametric_shapes::{new_runner, Box16, Box8, Matrix2x3};
+
+        let box8 = Box8 { value: ub(8) };
+        let box16 = Box16 { value: ub(16) };
+        let matrix = Matrix2x3 {
+            rows: [[ub(1), ub(2), ub(3)], [ub(4), ub(5), ub(6)]],
+        };
+
+        let mut runner = new_runner()?;
+        let result = runner.run(&box8, &box16, &matrix)?;
+
+        assert_eq!(result.box8.value.to_u64()?, 8);
+        assert_eq!(result.box16.value.to_u64()?, 16);
+        assert_eq!(result.matrix.rows[0][2].to_u64()?, 3);
+        assert_eq!(result.matrix.rows[1][1].to_u64()?, 5);
+        Ok(())
+    }
+
+    // Verifies: aliases to arrays of concrete parametric structs execute end to
+    // end through the typed AOT wrapper.
+    // Catches: recursive decode regressions that construct unspecialized `Box`.
+    #[test]
+    fn parametric_arrays_aot_executes_alias_to_parametric_array() -> Result<(), XlsynthError> {
+        use super::parametric_arrays_aot::parametric_arrays::{
+            new_runner, ArrayBox4, Box8Array4, Box__N_16, Box__N_8, OuterBox,
+        };
+
+        let array_box = ArrayBox4 {
+            items: [ub(10), ub(11), ub(12), ub(13)],
+        };
+        let box_array: Box8Array4 = [
+            Box__N_8 { value: ub(20) },
+            Box__N_8 { value: ub(21) },
+            Box__N_8 { value: ub(22) },
+            Box__N_8 { value: ub(23) },
+        ];
+        let outer = OuterBox {
+            inner: Box__N_8 { value: ub(30) },
+            wider: Box__N_16 { value: ub(300) },
+        };
+
+        let mut runner = new_runner()?;
+        let result = runner.run(&array_box, &box_array, &outer)?;
+
+        assert_eq!(result.array_box.items[3].to_u64()?, 13);
+        assert_eq!(result.box_array[2].value.to_u64()?, 22);
+        assert_eq!(result.outer.inner.value.to_u64()?, 30);
+        assert_eq!(result.outer.wider.value.to_u64()?, 300);
+        Ok(())
+    }
+
+    // Verifies: parametric values from expressions, signed literals, and wide
+    // literals all execute after suffix generation.
+    // Catches: concrete-name support that compiles but fails AOT conversion.
+    #[test]
+    fn parametric_values_aot_executes_value_kinds() -> Result<(), XlsynthError> {
+        use super::parametric_values_aot::parametric_values::{
+            new_runner, ExprBox8, HugeTag, NegativeTag,
+        };
+
+        let expr_box = ExprBox8 { value: ub(77) };
+        let negative = NegativeTag { payload: ub(88) };
+        let huge = HugeTag { payload: ub(99) };
+
+        let mut runner = new_runner()?;
+        let result = runner.run(&expr_box, &negative, &huge)?;
+
+        assert_eq!(result.expr_box.value.to_u64()?, 77);
+        assert_eq!(result.negative.payload.to_u64()?, 88);
+        assert_eq!(result.huge.payload.to_u64()?, 99);
+        Ok(())
+    }
+
+    // Verifies: imported concrete aliases execute while direct imported
+    // parametric instantiations remain unsupported.
+    // Catches: imported alias encode/decode regressions.
+    #[test]
+    fn parametric_imports_aot_executes_imported_aliases() -> Result<(), XlsynthError> {
+        use super::parametric_imports_aot::{parametric_imports, parametric_lib};
+        use parametric_imports::{Box__N_8, LocalMode, Mixed__N_4};
+
+        let mixed = Mixed__N_4 {
+            mode: LocalMode::Busy,
+            remote: parametric_lib::RemotePlain { id: ub(40) },
+            nested: [[ub(1), ub(2), ub(3), ub(4)], [ub(5), ub(6), ub(7), ub(8)]],
+            boxes: [Box__N_8 { value: ub(50) }, Box__N_8 { value: ub(51) }],
+        };
+        let imported_alias = parametric_lib::RemoteBox__N_8 { value: ub(60) };
+
+        let mut runner = parametric_imports::new_runner()?;
+        let result = runner.run(&mixed, &imported_alias)?;
+
+        assert_eq!(result.mixed.mode, LocalMode::Busy);
+        assert_eq!(result.mixed.remote.id.to_u64()?, 40);
+        assert_eq!(result.mixed.nested[1][2].to_u64()?, 7);
+        assert_eq!(result.mixed.boxes[1].value.to_u64()?, 51);
+        assert_eq!(result.imported_alias.value.to_u64()?, 60);
+        Ok(())
+    }
+
+    // Verifies: small golden wrappers capture varied concrete parametric type
+    // spellings used in public function signatures.
+    // Catches: regressions in suffix generation, arrays, and imported paths.
+    #[test]
+    fn parametric_generated_sources_have_interesting_type_names() {
+        let shapes = std::fs::read_to_string(env!("XLSYNTH_AOT_PARAMETRIC_SHAPES_RS")).unwrap();
+        assert!(shapes.contains("pub struct Box__N_8"));
+        assert!(shapes.contains("pub struct Box__N_16"));
+        assert!(shapes.contains("pub struct Matrix__R_2__C_3"));
+        assert!(shapes.contains("box8: &Box8"));
+
+        let arrays = std::fs::read_to_string(env!("XLSYNTH_AOT_PARAMETRIC_ARRAYS_RS")).unwrap();
+        assert!(arrays.contains("pub struct ArrayBox__N_4"));
+        assert!(arrays.contains("pub type Box8Array4 = [Box__N_8; 4];"));
+        assert!(arrays.contains("box_array: &Box8Array4"));
+        assert!(arrays.contains("pub inner: Box__N_8"));
+        assert!(arrays.contains("pub wider: Box__N_16"));
+
+        let values = std::fs::read_to_string(env!("XLSYNTH_AOT_PARAMETRIC_VALUES_RS")).unwrap();
+        assert!(values.contains("pub struct ExprBox__N_8"));
+        assert!(values.contains("pub struct SignedTag__S_m3"));
+        assert!(values.contains("pub struct WideTag__W_18446744073709551616"));
+
+        let imports = std::fs::read_to_string(env!("XLSYNTH_AOT_PARAMETRIC_IMPORTS_RS")).unwrap();
+        assert!(imports.contains("pub struct Mixed__N_4"));
+        assert!(imports.contains("pub remote: super::parametric_lib::RemotePlain"));
+        assert!(imports.contains("pub boxes: [Box__N_8; 2]"));
+        assert!(imports.contains("imported_alias: &ImportedAlias"));
     }
 
     // Verifies: duplicate imported type names use canonical nested paths.

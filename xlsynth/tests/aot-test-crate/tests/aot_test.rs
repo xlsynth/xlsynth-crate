@@ -9,7 +9,7 @@ use xlsynth_aot_test_crate::{
 };
 use xlsynth_test_helpers::compare_golden_text;
 
-fn generated_wrapper_golden_cases() -> [(&'static str, &'static str); 11] {
+fn generated_wrapper_golden_cases() -> [(&'static str, &'static str); 16] {
     [
         (
             env!("XLSYNTH_AOT_ADD_ONE_RS"),
@@ -50,6 +50,26 @@ fn generated_wrapper_golden_cases() -> [(&'static str, &'static str); 11] {
         (
             env!("XLSYNTH_AOT_SELF_ALIAS_WIDGET_RS"),
             "tests/goldens/self_alias_widget_wrapper.rs",
+        ),
+        (
+            env!("XLSYNTH_AOT_PARAMETRIC_BOX_RS"),
+            "tests/goldens/parametric_box_wrapper.rs",
+        ),
+        (
+            env!("XLSYNTH_AOT_PARAMETRIC_SHAPES_RS"),
+            "tests/goldens/parametric_shapes_wrapper.rs",
+        ),
+        (
+            env!("XLSYNTH_AOT_PARAMETRIC_ARRAYS_RS"),
+            "tests/goldens/parametric_arrays_wrapper.rs",
+        ),
+        (
+            env!("XLSYNTH_AOT_PARAMETRIC_VALUES_RS"),
+            "tests/goldens/parametric_values_wrapper.rs",
+        ),
+        (
+            env!("XLSYNTH_AOT_PARAMETRIC_IMPORTS_RS"),
+            "tests/goldens/parametric_imports_wrapper.rs",
         ),
         (
             env!("XLSYNTH_AOT_DUPLICATE_WIDGET_RS"),

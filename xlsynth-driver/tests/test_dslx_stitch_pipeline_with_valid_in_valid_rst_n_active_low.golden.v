@@ -2,28 +2,28 @@ module foo_cycle0(
   input wire [31:0] x,
   output wire [31:0] out
 );
-  wire [31:0] literal_5;
-  wire [31:0] add_6;
-  assign literal_5 = 32'h0000_0001;
-  assign add_6 = x + literal_5;
-  assign out = add_6;
+  wire [31:0] literal_11;
+  wire [31:0] add_14;
+  assign literal_11 = 32'h0000_0001;
+  assign add_14 = x + literal_11;
+  assign out = add_14;
 endmodule
 
 module foo_cycle1(
   input wire [31:0] y,
   output wire [31:0] out
 );
-  wire [30:0] bit_slice_17;
-  wire [30:0] literal_18;
-  wire [30:0] add_19;
-  wire bit_slice_20;
-  wire [31:0] concat_21;
-  assign bit_slice_17 = y[31:1];
-  assign literal_18 = 31'h0000_0001;
-  assign add_19 = bit_slice_17 + literal_18;
-  assign bit_slice_20 = y[0];
-  assign concat_21 = {add_19, bit_slice_20};
-  assign out = concat_21;
+  wire [30:0] bit_slice_23;
+  wire [30:0] literal_24;
+  wire [30:0] add_25;
+  wire bit_slice_26;
+  wire [31:0] concat_29;
+  assign bit_slice_23 = y[31:1];
+  assign literal_24 = 31'h0000_0001;
+  assign add_25 = bit_slice_23 + literal_24;
+  assign bit_slice_26 = y[0];
+  assign concat_29 = {add_25, bit_slice_26};
+  assign out = concat_29;
 endmodule
 module foo(
   input wire clk,

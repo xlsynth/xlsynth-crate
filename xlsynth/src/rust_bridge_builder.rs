@@ -5,15 +5,14 @@
 //! This helps us e.g. call DSLX functions from Rust code, i.e. it enables
 //! Rust->DSLX FFI interop.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     dslx,
-    dslx_bridge::{BridgeBuilder, StructMemberData},
+    dslx_bridge::{BridgeBuilder, FunctionParamData, StructMemberData},
+    ir_value::IrFormatPreference,
     IrValue, XlsynthError,
 };
-
-mod annotation_spelling_fallback;
 
 /// Emits Rust source that mirrors DSLX public type declarations.
 ///
@@ -26,7 +25,7 @@ pub struct RustBridgeBuilder {
     lines: Vec<String>,
     module_path: Vec<String>,
     runner_items: Option<String>,
-    import_aliases: BTreeMap<String, String>,
+    emitted_parametric_structs: BTreeSet<String>,
 }
 
 /// Rust items generated for one DSLX module, before parent modules are
@@ -108,7 +107,7 @@ impl RustBridgeBuilder {
             lines: vec![],
             module_path: vec![],
             runner_items: None,
-            import_aliases: BTreeMap::new(),
+            emitted_parametric_structs: BTreeSet::new(),
         }
     }
 
@@ -153,77 +152,51 @@ impl RustBridgeBuilder {
         type_annotation: Option<&dslx::TypeAnnotation>,
         ty: &dslx::Type,
     ) -> Result<String, XlsynthError> {
-        Self::convert_type_with_annotation(&[], type_annotation, ty)
+        Self::convert_type_with_annotation(&[], None, type_annotation, ty)
     }
 
-    /// Resolves a DSLX type-reference annotation into a Rust path from a
-    /// module.
-    ///
-    /// This is narrower than `rust_type_name`: it only succeeds for annotations
-    /// that name an alias or imported type reference. Use it when the caller
-    /// needs to preserve a source-level qualified type instead of falling back
-    /// to the concrete structural type.
-    pub(crate) fn rust_type_ref_name_from_dslx_module(
+    pub(crate) fn rust_type_name_from_dslx_module(
         current_module_name: &str,
-        type_annotation: &dslx::TypeAnnotation,
-    ) -> Option<String> {
+        type_info: &dslx::TypeInfo,
+        type_annotation: Option<&dslx::TypeAnnotation>,
+        ty: &dslx::Type,
+    ) -> Result<String, XlsynthError> {
         let module_path = rust_module_path_from_dslx_module_name(current_module_name);
-        Self::convert_type_ref_annotation(&module_path, type_annotation)
+        Self::convert_type_with_annotation(&module_path, Some(type_info), type_annotation, ty)
     }
 
     fn convert_type_with_annotation(
         current_module_path: &[String],
+        type_info: Option<&dslx::TypeInfo>,
         type_annotation: Option<&dslx::TypeAnnotation>,
-        ty: &dslx::Type,
-    ) -> Result<String, XlsynthError> {
-        Self::convert_type_with_annotation_and_text(
-            current_module_path,
-            type_annotation,
-            None,
-            &BTreeMap::new(),
-            ty,
-        )
-    }
-
-    /// Converts a DSLX type while preserving source-spelled type references.
-    ///
-    /// The typed annotation is preferred when it directly identifies an alias
-    /// or imported DSLX type. Source text is consulted only for nested
-    /// annotations the current FFI cannot walk, such as array elements.
-    fn convert_type_with_annotation_and_text(
-        current_module_path: &[String],
-        type_annotation: Option<&dslx::TypeAnnotation>,
-        annotation_text: Option<&str>,
-        import_aliases: &BTreeMap<String, String>,
         ty: &dslx::Type,
     ) -> Result<String, XlsynthError> {
         if let Some(type_annotation) = type_annotation {
-            if let Some(rust_ty) =
-                Self::convert_type_ref_annotation(current_module_path, type_annotation)
-            {
-                return Ok(rust_ty);
+            if let Some(array_annotation) = type_annotation.to_array_type_annotation() {
+                if ty.is_array() {
+                    let element_annotation = array_annotation.get_element_type();
+                    let element_ty = ty.get_array_element_type();
+                    let rust_ty = Self::convert_type_with_annotation(
+                        current_module_path,
+                        type_info,
+                        Some(&element_annotation),
+                        &element_ty,
+                    )?;
+                    return Ok(format!("[{rust_ty}; {}]", ty.get_array_size()));
+                }
+            }
+            if let Some(type_ref_annotation) = type_annotation.to_type_ref_type_annotation() {
+                if let Some(rust_ty) = Self::convert_type_ref_annotation(
+                    current_module_path,
+                    type_info,
+                    &type_ref_annotation,
+                    ty,
+                )? {
+                    return Ok(rust_ty);
+                }
             }
         }
-        // TODO(xlsynth-ffi): Remove this source-spelling fallback once the DSLX
-        // AST/type-annotation bindings expose enough structure to recursively
-        // recover imported type references from nested annotations. The typed
-        // path above handles a direct `TypeRefTypeAnnotation`, but it cannot
-        // currently inspect `ArrayTypeAnnotation` and then continue into the
-        // element annotation. This branch exists only to preserve the source
-        // spelling for cases such as `imported::Widget[2]` and
-        // `alias::Widget` while the FFI is missing those nested annotation
-        // accessors. Resolving this TODO should delete this branch and the
-        // private `annotation_spelling_fallback` module below, leaving no ad
-        // hoc parsing introduced by this PR.
-        if let Some(rust_ty) = annotation_text.and_then(|text| {
-            annotation_spelling_fallback::rust_type_ref_from_annotation_text(
-                current_module_path,
-                text,
-                import_aliases,
-            )
-        }) {
-            Ok(rust_ty)
-        } else if let Some((is_signed, bit_count)) = ty.is_bits_like() {
+        if let Some((is_signed, bit_count)) = ty.is_bits_like() {
             let signed_str = if is_signed { "S" } else { "U" };
             Ok(format!("Ir{signed_str}Bits<{bit_count}>"))
         } else if ty.is_enum() {
@@ -235,18 +208,10 @@ impl RustBridgeBuilder {
         } else if ty.is_array() {
             let array_ty = ty.get_array_element_type();
             let array_size = ty.get_array_size();
-            // TODO(xlsynth-ffi): Use the array type annotation's typed element
-            // annotation here instead of slicing the source spelling. The FFI
-            // should expose the DSLX `ArrayTypeAnnotation` node and an accessor
-            // for its element `TypeAnnotation`, so this recursive call can pass
-            // `Some(&element_type_annotation)` and no text fallback is needed.
-            let element_annotation_text =
-                annotation_text.and_then(annotation_spelling_fallback::array_element_annotation);
-            let rust_ty = Self::convert_type_with_annotation_and_text(
+            let rust_ty = Self::convert_type_with_annotation(
                 current_module_path,
+                type_info,
                 None,
-                element_annotation_text,
-                import_aliases,
                 &array_ty,
             )?;
             Ok(format!("[{rust_ty}; {array_size}]"))
@@ -264,30 +229,207 @@ impl RustBridgeBuilder {
     /// concrete structural conversion.
     fn convert_type_ref_annotation(
         current_module_path: &[String],
-        type_annotation: &dslx::TypeAnnotation,
-    ) -> Option<String> {
-        let type_ref = type_annotation
-            .to_type_ref_type_annotation()?
-            .get_type_ref();
+        type_info: Option<&dslx::TypeInfo>,
+        type_ref_annotation: &dslx::TypeRefTypeAnnotation,
+        ty: &dslx::Type,
+    ) -> Result<Option<String>, XlsynthError> {
+        let type_ref = type_ref_annotation.get_type_ref();
         let type_definition = type_ref.get_type_definition();
+        let suffix = Self::parametric_type_suffix(type_info, type_ref_annotation, ty)?;
         if let Some(colon_ref) = type_definition.to_colon_ref() {
-            let attr = colon_ref.get_attr();
+            let attr = format!("{}{}", colon_ref.get_attr(), suffix);
             if let Some(import) = colon_ref.resolve_import_subject() {
                 let module_path = rust_module_path_from_import(&import);
-                Some(rust_type_path_between_module_paths(
+                Ok(Some(rust_type_path_between_module_paths(
                     current_module_path,
                     &module_path,
                     &attr,
-                ))
+                )))
             } else {
-                Some(attr)
+                Ok(Some(attr))
             }
         } else {
-            type_definition
+            Ok(type_definition
                 .to_type_alias()
                 .map(|alias| alias.get_identifier())
+                .or_else(|| {
+                    if ty.is_struct() {
+                        ty.get_struct_def()
+                            .ok()
+                            .map(|struct_def| format!("{}{}", struct_def.get_identifier(), suffix))
+                    } else if ty.is_enum() {
+                        ty.get_enum_def()
+                            .ok()
+                            .map(|enum_def| enum_def.get_identifier())
+                    } else {
+                        None
+                    }
+                }))
         }
     }
+
+    fn parametric_type_suffix(
+        type_info: Option<&dslx::TypeInfo>,
+        type_ref_annotation: &dslx::TypeRefTypeAnnotation,
+        ty: &dslx::Type,
+    ) -> Result<String, XlsynthError> {
+        let parametric_count = type_ref_annotation.get_parametric_count();
+        if parametric_count == 0 {
+            return Ok(String::new());
+        }
+        let type_info = type_info.ok_or_else(|| {
+            XlsynthError(
+                "DSLX Rust bridge cannot name parametric type without a TypeInfo context"
+                    .to_string(),
+            )
+        })?;
+        if !ty.is_struct() {
+            return Err(XlsynthError(format!(
+                "DSLX Rust bridge only supports parametric struct type references, got `{}`",
+                ty.to_string()?
+            )));
+        }
+        let struct_def = ty.get_struct_def()?;
+        let binding_count = struct_def.get_parametric_binding_count();
+        if binding_count != parametric_count {
+            return Err(XlsynthError(format!(
+                "DSLX Rust bridge parametric mismatch for `{}`: struct has {binding_count} binding(s), annotation has {parametric_count} argument(s)",
+                struct_def.get_identifier()
+            )));
+        }
+        let mut parts = Vec::with_capacity(parametric_count);
+        for index in 0..parametric_count {
+            let binding = struct_def.get_parametric_binding(index);
+            let expr = type_ref_annotation.get_parametric_expr(index).ok_or_else(|| {
+                XlsynthError(format!(
+                    "DSLX Rust bridge does not support type-valued parametric argument {index} for `{}`",
+                    struct_def.get_identifier()
+                ))
+            })?;
+            let is_signed = typed_literal_text_is_signed(&expr.to_text());
+            let value = const_parametric_expr_value(type_info, &expr)?;
+            parts.push(format!(
+                "{}_{}",
+                sanitize_type_parametric_segment(&binding.get_identifier()),
+                rust_type_parametric_value_suffix(&value, is_signed)?
+            ));
+        }
+        Ok(format!("__{}", parts.join("__")))
+    }
+
+    fn emit_concrete_parametric_types_for_type(
+        &mut self,
+        type_info: &dslx::TypeInfo,
+        type_annotation: Option<&dslx::TypeAnnotation>,
+        ty: &dslx::Type,
+    ) -> Result<(), XlsynthError> {
+        if let Some(type_annotation) = type_annotation {
+            if let Some(array_annotation) = type_annotation.to_array_type_annotation() {
+                if ty.is_array() {
+                    let element_annotation = array_annotation.get_element_type();
+                    let element_ty = ty.get_array_element_type();
+                    self.emit_concrete_parametric_types_for_type(
+                        type_info,
+                        Some(&element_annotation),
+                        &element_ty,
+                    )?;
+                    return Ok(());
+                }
+            }
+            if let Some(type_ref_annotation) = type_annotation.to_type_ref_type_annotation() {
+                self.emit_concrete_parametric_struct_for_type_ref(
+                    type_info,
+                    &type_ref_annotation,
+                    ty,
+                )?;
+            }
+        }
+        if ty.is_array() {
+            let element_ty = ty.get_array_element_type();
+            self.emit_concrete_parametric_types_for_type(type_info, None, &element_ty)?;
+        }
+        Ok(())
+    }
+
+    fn emit_concrete_parametric_struct_for_type_ref(
+        &mut self,
+        type_info: &dslx::TypeInfo,
+        type_ref_annotation: &dslx::TypeRefTypeAnnotation,
+        ty: &dslx::Type,
+    ) -> Result<(), XlsynthError> {
+        if type_ref_annotation.get_parametric_count() == 0 {
+            return Ok(());
+        }
+        let Some(rust_ty) = Self::convert_type_ref_annotation(
+            &self.module_path,
+            Some(type_info),
+            type_ref_annotation,
+            ty,
+        )?
+        else {
+            return Ok(());
+        };
+        if rust_ty.contains("::") {
+            return Err(XlsynthError(format!(
+                "DSLX Rust bridge does not support direct imported parametric struct instantiation `{rust_ty}`; define and use a concrete type alias in the imported module"
+            )));
+        }
+        if !self.emitted_parametric_structs.insert(rust_ty.clone()) {
+            return Ok(());
+        }
+        let struct_def = ty.get_struct_def()?;
+        let concrete_member_count = ty.get_struct_member_count();
+        let definition_member_count = struct_def.get_member_count();
+        if concrete_member_count != definition_member_count {
+            return Err(XlsynthError(format!(
+                "DSLX Rust bridge parametric struct `{}` has {definition_member_count} definition member(s) but {concrete_member_count} concrete member type(s)",
+                struct_def.get_identifier()
+            )));
+        }
+        let mut field_lines = Vec::with_capacity(concrete_member_count);
+        for index in 0..concrete_member_count {
+            let member = struct_def.get_member(index);
+            let field_annotation = member.get_type();
+            let field_ty = ty.get_struct_member_type(index);
+            self.emit_concrete_parametric_types_for_type(
+                type_info,
+                Some(&field_annotation),
+                &field_ty,
+            )?;
+            let field_rust_ty = Self::convert_type_with_annotation(
+                &self.module_path,
+                Some(type_info),
+                Some(&field_annotation),
+                &field_ty,
+            )?;
+            field_lines.push(format!("    pub {}: {},", member.get_name(), field_rust_ty));
+        }
+        self.lines
+            .push("#[allow(non_camel_case_types)]".to_string());
+        self.lines
+            .push("#[derive(Debug, Clone, PartialEq, Eq)]".to_string());
+        self.lines.push(format!("pub struct {rust_ty} {{"));
+        self.lines.extend(field_lines);
+        self.lines.push("}\n".to_string());
+        Ok(())
+    }
+}
+
+fn const_parametric_expr_value(
+    type_info: &dslx::TypeInfo,
+    expr: &dslx::Expr,
+) -> Result<IrValue, XlsynthError> {
+    if let Ok(value) =
+        dslx::InterpValue::from_string(&expr.to_text()).and_then(|value| value.convert_to_ir())
+    {
+        return Ok(value);
+    }
+    type_info.get_const_expr(expr)?.convert_to_ir()
+}
+
+fn typed_literal_text_is_signed(text: &str) -> bool {
+    let text = text.trim();
+    text.starts_with('s') || text.starts_with("-")
 }
 
 impl Default for RustBridgeBuilder {
@@ -299,33 +441,13 @@ impl Default for RustBridgeBuilder {
 impl BridgeBuilder for RustBridgeBuilder {
     fn start_module(&mut self, module_name: &str) -> Result<(), XlsynthError> {
         self.module_path = rust_module_path_from_dslx_module_name(module_name);
-        self.import_aliases = BTreeMap::new();
+        self.emitted_parametric_structs.clear();
         self.lines = vec![
             // We allow e.g. enum variants to be unused in consumer code.
             "#![allow(dead_code)]".to_string(),
             "#![allow(unused_imports)]".to_string(),
             "use xlsynth::{IrValue, IrUBits, IrSBits};\n".to_string(),
         ];
-        Ok(())
-    }
-
-    fn start_module_with_text(
-        &mut self,
-        module_name: &str,
-        module_text: &str,
-    ) -> Result<(), XlsynthError> {
-        self.start_module(module_name)?;
-        // TODO(xlsynth-ffi): Replace this import-alias source scan with typed
-        // DSLX module import accessors. The FFI should expose each import
-        // statement's subject and optional alias from the parsed module, so the
-        // bridge can build `alias -> canonical module path` without splitting
-        // module text on semicolons or recognizing `import ... as ...` by hand.
-        // Once that exists, remove this fallback and the entire
-        // `annotation_spelling_fallback` module.
-        self.import_aliases = annotation_spelling_fallback::import_aliases_from_module_text(
-            module_text,
-            sanitize_module_segment,
-        );
         Ok(())
     }
 
@@ -390,34 +512,44 @@ impl BridgeBuilder for RustBridgeBuilder {
         dslx_name: &str,
         members: &[StructMemberData],
     ) -> Result<(), XlsynthError> {
-        self.add_struct_def_with_text(dslx_name, "", members)
-    }
-
-    fn add_struct_def_with_text(
-        &mut self,
-        dslx_name: &str,
-        struct_text: &str,
-        members: &[StructMemberData],
-    ) -> Result<(), XlsynthError> {
-        // TODO(xlsynth-ffi): Stop extracting struct member annotations from
-        // `StructDef::to_text()`. `StructMember::get_type()` already exposes
-        // the immediate member annotation, but nested source-qualified
-        // references are not fully walkable through the current Rust bindings.
-        // The FFI should expose the annotation node variants needed by
-        // `convert_type_with_annotation_and_text` below, especially array
-        // annotations and their element annotations. After that, this map and
-        // all source-text member parsing should be deleted.
-        let member_annotations =
-            annotation_spelling_fallback::struct_member_annotations_from_text(struct_text);
         self.lines
             .push("#[derive(Debug, Clone, PartialEq, Eq)]".to_string());
         self.lines.push(format!("pub struct {dslx_name} {{"));
         for member in members {
-            let rust_ty = Self::convert_type_with_annotation_and_text(
+            let rust_ty = Self::convert_type_with_annotation(
                 &self.module_path,
+                None,
                 Some(&member.type_annotation),
-                member_annotations.get(&member.name).map(String::as_str),
-                &self.import_aliases,
+                &member.concrete_type,
+            )?;
+            self.lines
+                .push(format!("    pub {}: {},", member.name, rust_ty));
+        }
+        self.lines.push("}\n".to_string());
+        Ok(())
+    }
+
+    fn add_struct_def_typed(
+        &mut self,
+        dslx_name: &str,
+        type_info: &dslx::TypeInfo,
+        members: &[StructMemberData],
+    ) -> Result<(), XlsynthError> {
+        for member in members {
+            self.emit_concrete_parametric_types_for_type(
+                type_info,
+                Some(&member.type_annotation),
+                &member.concrete_type,
+            )?;
+        }
+        self.lines
+            .push("#[derive(Debug, Clone, PartialEq, Eq)]".to_string());
+        self.lines.push(format!("pub struct {dslx_name} {{"));
+        for member in members {
+            let rust_ty = Self::convert_type_with_annotation(
+                &self.module_path,
+                Some(type_info),
+                Some(&member.type_annotation),
                 &member.concrete_type,
             )?;
             self.lines
@@ -433,31 +565,64 @@ impl BridgeBuilder for RustBridgeBuilder {
         type_annotation: &dslx::TypeAnnotation,
         concrete_type: &dslx::Type,
     ) -> Result<(), XlsynthError> {
-        self.add_alias_with_text(dslx_name, "", type_annotation, concrete_type)
-    }
-
-    fn add_alias_with_text(
-        &mut self,
-        dslx_name: &str,
-        alias_text: &str,
-        type_annotation: &dslx::TypeAnnotation,
-        concrete_type: &dslx::Type,
-    ) -> Result<(), XlsynthError> {
-        let rust_ty = Self::convert_type_with_annotation_and_text(
+        let rust_ty = Self::convert_type_with_annotation(
             &self.module_path,
+            None,
             Some(type_annotation),
-            // TODO(xlsynth-ffi): Use the existing typed alias annotation plus
-            // nested annotation FFI accessors instead of re-reading the
-            // right-hand side from `TypeAlias::to_text()`. The replacement
-            // should recurse through the `TypeAnnotation` tree directly and
-            // should make this text fallback unnecessary for aliases to arrays
-            // of imported DSLX types.
-            annotation_spelling_fallback::type_alias_annotation_from_text(alias_text),
-            &self.import_aliases,
             concrete_type,
         )?;
         self.lines
             .push(format!("pub type {dslx_name} = {rust_ty};\n"));
+        Ok(())
+    }
+
+    fn add_alias_typed(
+        &mut self,
+        dslx_name: &str,
+        type_info: &dslx::TypeInfo,
+        type_annotation: &dslx::TypeAnnotation,
+        concrete_type: &dslx::Type,
+    ) -> Result<(), XlsynthError> {
+        self.emit_concrete_parametric_types_for_type(
+            type_info,
+            Some(type_annotation),
+            concrete_type,
+        )?;
+        let rust_ty = Self::convert_type_with_annotation(
+            &self.module_path,
+            Some(type_info),
+            Some(type_annotation),
+            concrete_type,
+        )?;
+        self.lines
+            .push(format!("pub type {dslx_name} = {rust_ty};\n"));
+        Ok(())
+    }
+
+    fn add_function_signature_typed(
+        &mut self,
+        _dslx_name: &str,
+        type_info: &dslx::TypeInfo,
+        params: &[FunctionParamData],
+        return_type_annotation: Option<&dslx::TypeAnnotation>,
+        return_type: Option<&dslx::Type>,
+    ) -> Result<(), XlsynthError> {
+        for param in params {
+            if let Some(concrete_type) = &param.concrete_type {
+                self.emit_concrete_parametric_types_for_type(
+                    type_info,
+                    Some(&param.type_annotation),
+                    concrete_type,
+                )?;
+            }
+        }
+        if let Some(return_type) = return_type {
+            self.emit_concrete_parametric_types_for_type(
+                type_info,
+                return_type_annotation,
+                return_type,
+            )?;
+        }
         Ok(())
     }
 
@@ -537,6 +702,63 @@ fn sanitize_module_segment(segment: &str) -> String {
             }
         })
         .collect()
+}
+
+fn sanitize_type_parametric_segment(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    for (index, ch) in segment.chars().enumerate() {
+        let valid = ch == '_' || ch.is_ascii_alphanumeric();
+        let ch = if valid { ch } else { '_' };
+        if index == 0 && ch.is_ascii_digit() {
+            out.push('_');
+        }
+        out.push(ch);
+    }
+    if out.is_empty() {
+        "P".to_string()
+    } else {
+        out
+    }
+}
+
+fn rust_type_parametric_value_suffix(
+    value: &IrValue,
+    is_signed: bool,
+) -> Result<String, XlsynthError> {
+    let format = if is_signed {
+        IrFormatPreference::SignedDecimal
+    } else {
+        IrFormatPreference::UnsignedDecimal
+    };
+    let value = value.to_string_fmt_no_prefix(format)?;
+    Ok(sanitize_type_parametric_value_segment(&value))
+}
+
+fn sanitize_type_parametric_value_segment(value: &str) -> String {
+    let value = value.trim();
+    if let Some(value) = value.strip_prefix('-') {
+        format!("m{}", sanitize_type_parametric_value_atom(value))
+    } else {
+        sanitize_type_parametric_value_atom(value)
+    }
+}
+
+fn sanitize_type_parametric_value_atom(value: &str) -> String {
+    let out = value
+        .chars()
+        .map(|ch| {
+            if ch == '_' || ch.is_ascii_alphanumeric() {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if out.is_empty() {
+        "P".to_string()
+    } else {
+        out
+    }
 }
 
 #[cfg(test)]
@@ -930,5 +1152,105 @@ pub struct MyStruct {
 
 }"
         );
+    }
+
+    // Verifies: parametric struct aliases emit concrete Rust structs with
+    // suffixes based on evaluated parameter values.
+    // Catches: accidental fallback to unspecialized field annotations.
+    #[test]
+    fn test_parametric_struct_alias_emits_concrete_struct() {
+        let dslx = r#"
+        struct Box<N: u32> {
+            value: bits[N],
+        }
+        type Box8 = Box<u32:8>;
+        "#;
+        let mut import_data = dslx::ImportData::default();
+        let path = std::path::PathBuf::from_str("/memfile/my_module.x").unwrap();
+        let mut builder = RustBridgeBuilder::new();
+        convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
+        assert_eq!(
+            builder.build(),
+            r#"pub mod my_module {
+#![allow(dead_code)]
+#![allow(unused_imports)]
+use xlsynth::{IrValue, IrUBits, IrSBits};
+
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Box__N_8 {
+    pub value: IrUBits<8>,
+}
+
+pub type Box8 = Box__N_8;
+
+}"#
+        );
+    }
+
+    // Verifies: direct parametric struct references in function signatures
+    // still emit the concrete Rust struct even without a DSLX alias.
+    // Catches: missing lazy emission from signature-only references.
+    #[test]
+    fn test_parametric_struct_function_signature_emits_concrete_struct() {
+        let dslx = r#"
+        struct Box<N: u32> {
+            value: bits[N],
+        }
+        pub fn echo_box(x: Box<u32:8>) -> Box<u32:8> {
+            x
+        }
+        "#;
+        let mut import_data = dslx::ImportData::default();
+        let path = std::path::PathBuf::from_str("/memfile/my_module.x").unwrap();
+        let mut builder = RustBridgeBuilder::new();
+        convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
+        assert_eq!(
+            builder.build(),
+            r#"pub mod my_module {
+#![allow(dead_code)]
+#![allow(unused_imports)]
+use xlsynth::{IrValue, IrUBits, IrSBits};
+
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Box__N_8 {
+    pub value: IrUBits<8>,
+}
+
+}"#
+        );
+    }
+
+    // Verifies: direct imported parametric instantiations fail before emitting
+    // Rust that references a concrete type the imported module may not emit.
+    #[test]
+    fn test_direct_imported_parametric_struct_reference_errors() {
+        let imported_dslx = r#"
+        pub struct RemoteBox<N: u32> {
+            value: bits[N],
+        }
+        "#;
+        let importer_dslx = r#"
+        import imported;
+        pub fn echo_box(x: imported::RemoteBox<u32:8>) -> imported::RemoteBox<u32:8> {
+            x
+        }
+        "#;
+
+        let mut import_data = dslx::ImportData::default();
+        let _imported_typechecked =
+            dslx::parse_and_typecheck(imported_dslx, "imported.x", "imported", &mut import_data)
+                .unwrap();
+        let importer_typechecked =
+            dslx::parse_and_typecheck(importer_dslx, "importer.x", "importer", &mut import_data)
+                .unwrap();
+
+        let mut builder = RustBridgeBuilder::new();
+        let error = convert_imported_module(&importer_typechecked, &mut builder).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("direct imported parametric struct instantiation"));
+        assert!(error.to_string().contains("concrete type alias"));
     }
 }
