@@ -24,6 +24,7 @@ mod bit_slice_bit_slice_fold;
 mod bit_slice_concat_distribute;
 mod bit_slice_one_bit_shift_sel;
 mod bit_slice_sel_distribute;
+mod bool_sel_to_sum_of_products;
 mod bounded_dynamic_shift_to_static_candidates;
 mod bounded_normalization_to_candidate_select;
 mod carry_split_add;
@@ -31,6 +32,7 @@ mod clamp_chain_collapse;
 mod clone_multi_user_node;
 mod cmp_sel_canon;
 mod cmp_swap;
+mod compare_driven_sign_pick_canon;
 mod compare_ramp_to_mask_low;
 mod concat_compare_split_merge;
 mod concat_sel_hoist;
@@ -43,6 +45,7 @@ mod eq_sel_distribute;
 mod eq_zero_or_reduce;
 mod ext_nary_add_rewrites;
 mod guarded_predicate_rewire;
+mod increment_carry_predicate_canon;
 mod macro_utils;
 mod mask_operand_bit;
 mod nand_not_and_fold;
@@ -71,6 +74,7 @@ mod sel_chain_to_priority_sel;
 mod sel_hoist;
 mod sel_same_arms_fold;
 mod sel_swap_arms_by_not_pred;
+mod sel_zero_to_and_mask;
 mod selected_add_sub_unification;
 mod shift_clamp;
 mod shift_hoist;
@@ -79,8 +83,10 @@ mod shift_reclamp;
 mod shifted_all_ones_to_not_mask_low;
 mod sign_ext_sel_distribute;
 mod sign_magnitude_datapath_unification;
+mod signbit_sub_compare;
 mod smul_sign_ext_u1_to_sel_neg;
 mod sub_sign_ext_u1_to_add_zero_ext_u1;
+mod sub_signbit_to_unsigned_compare;
 mod sub_to_add_neg;
 mod swap_commutative_binop_operands;
 mod umul_sign_ext_u1_to_sel_neg;
@@ -98,6 +104,7 @@ use bit_slice_bit_slice_fold::BitSliceBitSliceFoldTransform;
 use bit_slice_concat_distribute::BitSliceConcatDistributeTransform;
 use bit_slice_one_bit_shift_sel::BitSliceOneBitShiftSelTransform;
 use bit_slice_sel_distribute::BitSliceSelDistributeTransform;
+use bool_sel_to_sum_of_products::BoolSelToSumOfProductsTransform;
 use bounded_dynamic_shift_to_static_candidates::BoundedDynamicShiftToStaticCandidatesTransform;
 use bounded_normalization_to_candidate_select::BoundedNormalizationToCandidateSelectTransform;
 use carry_split_add::CarrySplitAddTransform;
@@ -105,6 +112,7 @@ use clamp_chain_collapse::ClampChainCollapseTransform;
 use clone_multi_user_node::CloneMultiUserNodeTransform;
 use cmp_sel_canon::CmpSelCanonTransform;
 use cmp_swap::CmpSwapTransform;
+use compare_driven_sign_pick_canon::CompareDrivenSignPickCanonTransform;
 use compare_ramp_to_mask_low::CompareRampToMaskLowTransform;
 use concat_compare_split_merge::ConcatCompareSplitMergeTransform;
 use concat_sel_hoist::ConcatSelHoistTransform;
@@ -124,6 +132,7 @@ use ext_nary_add_rewrites::{
     ExtractNegateFromExtNaryAddTermTransform, SubToExtNaryAddTransform,
 };
 use guarded_predicate_rewire::GuardedPredicateRewireTransform;
+use increment_carry_predicate_canon::IncrementCarryPredicateCanonTransform;
 use mask_operand_bit::{MaskOperandHighBitTransform, MaskOperandLowBitTransform};
 use nand_not_and_fold::NandNotAndFoldTransform;
 use narrow_add_from_wide_add_fold::NarrowAddFromWideAddFoldTransform;
@@ -151,6 +160,7 @@ use sel_chain_to_priority_sel::SelChainToPrioritySelTransform;
 use sel_hoist::SelHoistTransform;
 use sel_same_arms_fold::SelSameArmsFoldTransform;
 use sel_swap_arms_by_not_pred::SelSwapArmsByNotPredTransform;
+use sel_zero_to_and_mask::SelZeroToAndMaskTransform;
 use selected_add_sub_unification::SelectedAddSubUnificationTransform;
 use shift_clamp::ShiftClampTransform;
 use shift_hoist::ShiftHoistTransform;
@@ -161,6 +171,7 @@ use sign_ext_sel_distribute::SignExtSelDistributeTransform;
 use sign_magnitude_datapath_unification::SignMagnitudeDatapathUnificationTransform;
 use smul_sign_ext_u1_to_sel_neg::SmulSignExtU1ToSelNegTransform;
 use sub_sign_ext_u1_to_add_zero_ext_u1::SubSignExtU1ToAddZeroExtU1Transform;
+use sub_signbit_to_unsigned_compare::SubSignbitToUnsignedCompareTransform;
 use sub_to_add_neg::SubToAddNegTransform;
 use swap_commutative_binop_operands::SwapCommutativeBinopOperandsTransform;
 use umul_sign_ext_u1_to_sel_neg::UmulSignExtU1ToSelNegTransform;
@@ -285,6 +296,16 @@ pub enum PirTransformKind {
     /// Share a selected add/sub datapath:
     /// `sel(p, [add(a,b), sub(a,b)]) ↔ add(add(a, xor(b, mask(p))), zext(p))`.
     SelectedAddSubUnification,
+    /// Rewrite a signbit-only subtraction predicate to an unsigned compare.
+    SubSignbitToUnsignedCompare,
+    /// Rewrite 2-case zero-arm selects to/from explicit mask gating.
+    SelZeroToAndMask,
+    /// Rewrite 1-bit selects to/from boolean sum-of-products form.
+    BoolSelToSumOfProducts,
+    /// Rewrite increment-carry predicates to/from add-and-zero-test form.
+    IncrementCarryPredicateCanon,
+    /// Rewrite signbit-sub-driven sign picks to direct compare-driven selects.
+    CompareDrivenSignPickCanon,
     /// Oracle-backed recursive sharing for sign/magnitude-style two-arm
     /// arithmetic datapaths.
     SignMagnitudeDatapathUnification,
@@ -556,6 +577,17 @@ impl fmt::Display for PirTransformKind {
             PirTransformKind::ReduceSelDistribute => write!(f, "ReduceSelDistribute"),
             PirTransformKind::ReduceConcatSplitMerge => write!(f, "ReduceConcatSplitMerge"),
             PirTransformKind::NaryHoist => write!(f, "NaryHoist"),
+            PirTransformKind::SubSignbitToUnsignedCompare => {
+                write!(f, "SubSignbitToUnsignedCompare")
+            }
+            PirTransformKind::SelZeroToAndMask => write!(f, "SelZeroToAndMask"),
+            PirTransformKind::BoolSelToSumOfProducts => write!(f, "BoolSelToSumOfProducts"),
+            PirTransformKind::IncrementCarryPredicateCanon => {
+                write!(f, "IncrementCarryPredicateCanon")
+            }
+            PirTransformKind::CompareDrivenSignPickCanon => {
+                write!(f, "CompareDrivenSignPickCanon")
+            }
             PirTransformKind::NotNotCancel => write!(f, "NotNotCancel"),
             PirTransformKind::NegNegCancel => write!(f, "NegNegCancel"),
             PirTransformKind::NotEqNeFlip => write!(f, "NotEqNeFlip"),
@@ -668,6 +700,11 @@ pub fn get_all_pir_transforms() -> Vec<Box<dyn PirTransform>> {
         Box::new(BoundedDynamicShiftToStaticCandidatesTransform),
         Box::new(BoundedNormalizationToCandidateSelectTransform),
         Box::new(SelectedAddSubUnificationTransform),
+        Box::new(SubSignbitToUnsignedCompareTransform),
+        Box::new(SelZeroToAndMaskTransform),
+        Box::new(BoolSelToSumOfProductsTransform),
+        Box::new(IncrementCarryPredicateCanonTransform),
+        Box::new(CompareDrivenSignPickCanonTransform),
         Box::new(SignMagnitudeDatapathUnificationTransform),
         Box::new(ShiftOneMinusOneToMaskLowTransform),
         Box::new(ShiftedAllOnesToNotMaskLowTransform),
@@ -760,6 +797,23 @@ mod tests {
             (
                 PirTransformKind::SelectedAddSubUnification,
                 "SelectedAddSubUnification",
+            ),
+            (
+                PirTransformKind::SubSignbitToUnsignedCompare,
+                "SubSignbitToUnsignedCompare",
+            ),
+            (PirTransformKind::SelZeroToAndMask, "SelZeroToAndMask"),
+            (
+                PirTransformKind::BoolSelToSumOfProducts,
+                "BoolSelToSumOfProducts",
+            ),
+            (
+                PirTransformKind::IncrementCarryPredicateCanon,
+                "IncrementCarryPredicateCanon",
+            ),
+            (
+                PirTransformKind::CompareDrivenSignPickCanon,
+                "CompareDrivenSignPickCanon",
             ),
             (
                 PirTransformKind::SignMagnitudeDatapathUnification,
