@@ -21,6 +21,7 @@ pub struct Output {}
 
 const OUTPUT0_LAYOUT: &[xlsynth::aot_entrypoint_metadata::AotElementLayout] = &[];
 
+#[allow(clippy::identity_op, clippy::let_and_return)]
 fn decode_output_0(src: &[u8]) -> Output {
     debug_assert_eq!(src.len(), 0);
     let output: Output = Output {};

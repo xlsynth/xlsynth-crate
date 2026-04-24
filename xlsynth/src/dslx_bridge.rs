@@ -17,20 +17,54 @@ use crate::{dslx, IrValue, XlsynthError};
 /// reference, in which case the bridge builder may want to take different
 /// actions.
 pub struct StructMemberData {
+    /// Member identifier as written in the DSLX struct definition.
     pub name: String,
+    /// Source annotation attached to the member.
     pub type_annotation: dslx::TypeAnnotation,
+    /// Concrete DSLX type resolved by typechecking the annotation.
     pub concrete_type: dslx::Type,
+}
+
+/// Signature data for one DSLX function parameter.
+///
+/// Builders can use the source annotation to preserve semantic names such as
+/// type aliases or imported module paths while using the concrete type to
+/// validate the lowered ABI shape.
+pub struct FunctionParamData {
+    /// Parameter identifier as written in the DSLX function signature.
+    pub name: String,
+    /// Source annotation attached to the parameter.
+    pub type_annotation: dslx::TypeAnnotation,
+    /// Concrete DSLX type when the current `TypeInfo` can resolve it.
+    ///
+    /// Some callable metadata can be present before every annotation has a
+    /// concrete type exposed through the Rust wrapper API; builders that only
+    /// need source-level type names should use `type_annotation` instead of
+    /// requiring this value.
+    pub concrete_type: Option<dslx::Type>,
 }
 
 /// Abstract interface for building bridge code; i.e. interop to or from DSLX
 /// with another language like Rust or SystemVerilog.
 pub trait BridgeBuilder {
+    /// Starts collecting declarations for one DSLX module.
+    ///
+    /// Implementations should reset module-local state here. Returning an error
+    /// stops conversion before any members from the module are visited.
     fn start_module(&mut self, module_name: &str) -> Result<(), XlsynthError>;
 
+    /// Finishes collecting declarations for one DSLX module.
+    ///
+    /// Implementations commonly use this to close language-specific namespace
+    /// state or append generated epilogues.
     fn end_module(&mut self, module_name: &str) -> Result<(), XlsynthError>;
 
+    /// Adds a DSLX enum definition to the current bridge module.
+    ///
     /// `is_signed` indicates whether the bits type underlying the enum is
-    /// signed.
+    /// signed, and `underlying_bit_count` gives its width. The `members` values
+    /// are already evaluated constant values, so builders do not need their own
+    /// constexpr interpreter.
     fn add_enum_def(
         &mut self,
         dslx_name: &str,
@@ -39,11 +73,30 @@ pub trait BridgeBuilder {
         members: &[(String, IrValue)],
     ) -> Result<(), XlsynthError>;
 
+    /// Adds a DSLX struct definition to the current bridge module.
+    ///
+    /// Builders receive both each member's source annotation and resolved
+    /// concrete type so they can choose between semantic names and structural
+    /// fallback types.
     fn add_struct_def(
         &mut self,
         dslx_name: &str,
         members: &[StructMemberData],
     ) -> Result<(), XlsynthError>;
+
+    /// Adds a DSLX struct definition with access to the owning type context.
+    ///
+    /// Builders that need to evaluate parametric annotation expressions should
+    /// override this method; the default preserves the legacy shape-only
+    /// callback.
+    fn add_struct_def_typed(
+        &mut self,
+        dslx_name: &str,
+        _type_info: &dslx::TypeInfo,
+        members: &[StructMemberData],
+    ) -> Result<(), XlsynthError> {
+        self.add_struct_def(dslx_name, members)
+    }
 
     /// Invoked when there is a type alias to emit for this module.
     ///
@@ -61,6 +114,25 @@ pub trait BridgeBuilder {
         ty: &dslx::Type,
     ) -> Result<(), XlsynthError>;
 
+    /// Adds a DSLX type alias with access to the owning type context.
+    ///
+    /// Builders that need to evaluate parametric annotation expressions should
+    /// override this method; the default preserves the legacy shape-only
+    /// callback.
+    fn add_alias_typed(
+        &mut self,
+        dslx_name: &str,
+        _type_info: &dslx::TypeInfo,
+        type_annotation: &dslx::TypeAnnotation,
+        ty: &dslx::Type,
+    ) -> Result<(), XlsynthError> {
+        self.add_alias(dslx_name, type_annotation, ty)
+    }
+
+    /// Adds a DSLX constant definition to the current bridge module.
+    ///
+    /// The constant expression has already been evaluated to an `IrValue`.
+    /// Builders that do not expose constants can implement this as a no-op.
     fn add_constant(
         &mut self,
         name: &str,
@@ -68,6 +140,32 @@ pub trait BridgeBuilder {
         ty: &dslx::Type,
         ir_value: &IrValue,
     ) -> Result<(), XlsynthError>;
+
+    /// Invoked for function signatures when a builder wants callable metadata.
+    ///
+    /// The default is intentionally a no-op so existing bridge emitters that
+    /// only care about types keep ignoring functions.
+    fn add_function_signature(
+        &mut self,
+        _dslx_name: &str,
+        _params: &[FunctionParamData],
+        _return_type_annotation: Option<&dslx::TypeAnnotation>,
+        _return_type: Option<&dslx::Type>,
+    ) -> Result<(), XlsynthError> {
+        Ok(())
+    }
+
+    /// Adds function signature metadata with access to the owning type context.
+    fn add_function_signature_typed(
+        &mut self,
+        dslx_name: &str,
+        _type_info: &dslx::TypeInfo,
+        params: &[FunctionParamData],
+        return_type_annotation: Option<&dslx::TypeAnnotation>,
+        return_type: Option<&dslx::Type>,
+    ) -> Result<(), XlsynthError> {
+        self.add_function_signature(dslx_name, params, return_type_annotation, return_type)
+    }
 }
 
 fn enum_as_tups(enum_def: &dslx::EnumDef, type_info: &dslx::TypeInfo) -> Vec<(String, IrValue)> {
@@ -107,6 +205,11 @@ fn convert_struct(
     builder: &mut dyn BridgeBuilder,
 ) -> Result<(), XlsynthError> {
     let struct_name = struct_def.get_identifier();
+    if struct_def.is_parametric() {
+        // Concrete instantiations are emitted when aliases, struct members, or
+        // function signatures refer to a fully bound parametric type.
+        return Ok(());
+    }
     let mut members = vec![];
     for i in 0..struct_def.get_member_count() {
         let member = struct_def.get_member(i);
@@ -119,7 +222,7 @@ fn convert_struct(
             concrete_type: member_type,
         });
     }
-    builder.add_struct_def(&struct_name, &members)
+    builder.add_struct_def_typed(&struct_name, type_info, &members)
 }
 
 fn convert_type_alias(
@@ -132,7 +235,7 @@ fn convert_type_alias(
     let alias_type = type_info
         .get_type_for_type_annotation(&type_annotation)
         .expect("alias type should be present");
-    builder.add_alias(&alias_name, &type_annotation, &alias_type)
+    builder.add_alias_typed(&alias_name, type_info, &type_annotation, &alias_type)
 }
 
 fn convert_constant(
@@ -147,6 +250,47 @@ fn convert_constant(
     builder.add_constant(&constant_def.get_name(), constant_def, &ty, &ir_value)
 }
 
+fn convert_function(
+    function: &dslx::Function,
+    type_info: &dslx::TypeInfo,
+    builder: &mut dyn BridgeBuilder,
+) -> Result<(), XlsynthError> {
+    let params = (0..function.get_param_count())
+        .map(|index| {
+            let param = function.get_param(index);
+            let type_annotation = param.get_type_annotation();
+            let concrete_type = type_info.get_type_for_type_annotation(&type_annotation);
+            FunctionParamData {
+                name: param.get_name(),
+                type_annotation,
+                concrete_type,
+            }
+        })
+        .collect::<Vec<_>>();
+    let return_type_annotation = function.get_return_type();
+    let return_type = return_type_annotation
+        .as_ref()
+        .and_then(|annotation| type_info.get_type_for_type_annotation(annotation));
+    builder.add_function_signature_typed(
+        &function.get_identifier(),
+        type_info,
+        &params,
+        return_type_annotation.as_ref(),
+        return_type.as_ref(),
+    )
+}
+
+/// Converts one typechecked DSLX module through a bridge builder.
+///
+/// The converter walks module members in source order and dispatches every
+/// bridgeable enum, struct, alias, constant, and function signature. Quickcheck
+/// definitions are skipped because they are test declarations, not bridgeable
+/// interface items.
+///
+/// # Errors
+///
+/// Returns an error if the builder rejects any emitted item or if constant
+/// evaluation fails while preparing a bridge callback.
 pub fn convert_imported_module(
     typechecked_module: &dslx::TypecheckedModule,
     builder: &mut dyn BridgeBuilder,
@@ -175,9 +319,8 @@ pub fn convert_imported_module(
             dslx::MatchableModuleMember::ConstantDef(constant_def) => {
                 convert_constant(&constant_def, &type_info, builder)?
             }
-            dslx::MatchableModuleMember::Function(_function) => {
-                // Functions are not converted by the bridge.
-                continue;
+            dslx::MatchableModuleMember::Function(function) => {
+                convert_function(&function, &type_info, builder)?
             }
             dslx::MatchableModuleMember::Quickcheck(_) => {
                 // Quickchecks are currently not converted by the bridge.
@@ -190,6 +333,15 @@ pub fn convert_imported_module(
     Ok(())
 }
 
+/// Parses, typechecks, and converts one standalone DSLX module.
+///
+/// This is the convenience entry point for callers that have source text and a
+/// filesystem path but not an existing `TypecheckedModule`. Imports are
+/// resolved through the provided `ImportData`.
+///
+/// # Errors
+///
+/// Returns an error if parsing, typechecking, or bridge emission fails.
 pub fn convert_leaf_module(
     import_data: &mut dslx::ImportData,
     dslx_program: &str,
