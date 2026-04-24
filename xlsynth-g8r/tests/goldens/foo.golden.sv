@@ -11,11 +11,11 @@ module foo_cycle1(
 );
   wire [31:0] s_a;
   wire [31:0] s_b;
-  wire [31:0] add_9;
+  wire [31:0] add_17;
   assign s_a = s[63:32];
   assign s_b = s[31:0];
-  assign add_9 = s_a + s_b;
-  assign out = add_9;
+  assign add_17 = s_a + s_b;
+  assign out = add_17;
 endmodule
 module foo(
   input wire clk,
