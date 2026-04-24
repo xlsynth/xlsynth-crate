@@ -44,6 +44,8 @@ fn arith_and_logic_ops() -> Result<(), XlsynthError> {
     Ok(())
 }
 
+// Verifies: conversions expose little-endian bytes alongside shifts and slices.
+// Catches: byte-order regressions in `IrBits::to_le_bytes`.
 #[test]
 fn conversions_shifts_and_slices() -> Result<(), XlsynthError> {
     let bits = IrBits::make_sbits(8, -2)?;
@@ -52,11 +54,11 @@ fn conversions_shifts_and_slices() -> Result<(), XlsynthError> {
     assert!(!bits.get_bit(0)?);
     assert!(bits.get_bit(1)?);
 
-    let bytes = bits.to_bytes()?;
+    let bytes = bits.to_le_bytes()?;
     assert_eq!(bytes, vec![0xFE]);
 
     let wide = IrBits::make_ubits(16, 0xABCD)?;
-    assert_eq!(wide.to_bytes()?, vec![0xCD, 0xAB]);
+    assert_eq!(wide.to_le_bytes()?, vec![0xCD, 0xAB]);
 
     let shll = bits.shll(2);
     assert_eq!(shll.to_u64()?, (0xFEu64 << 2) & 0xFF);

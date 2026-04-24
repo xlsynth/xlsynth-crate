@@ -1169,6 +1169,17 @@ impl StructDef {
     pub fn to_text(&self) -> String {
         unsafe { crate::c_str_to_rust(sys::xls_dslx_struct_def_to_string(self.ptr)) }
     }
+
+    /// Returns whether two wrappers point at the same DSLX struct definition.
+    ///
+    /// Use this when a type carries a `StructDef` and the caller needs the
+    /// exact defining declaration, not just another struct with the same name.
+    /// This is an identity check, not a semantic equality comparison between
+    /// independently parsed definitions.
+    pub fn is_same_definition(&self, other: &StructDef) -> bool {
+        self.ptr == other.ptr
+    }
+
     pub fn get_identifier(&self) -> String {
         unsafe {
             let c_str = sys::xls_dslx_struct_def_get_identifier(self.ptr);
@@ -2169,6 +2180,16 @@ impl InvocationData {
 }
 
 impl TypeInfo {
+    /// Returns whether two wrappers refer to the same DSLX typechecking
+    /// context.
+    ///
+    /// This is an identity check for resolving owner modules during bridge
+    /// generation; it is not a semantic comparison between two independent
+    /// type environments.
+    pub(crate) fn is_same_type_context(&self, other: &Self) -> bool {
+        self.ptr == other.ptr
+    }
+
     pub fn get_const_expr(&self, expr: &Expr) -> Result<InterpValue, XlsynthError> {
         let mut error_out = std::ptr::null_mut();
         let mut result_out = std::ptr::null_mut();

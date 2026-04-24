@@ -96,6 +96,36 @@ impl IrBits {
         xls_bits_make_sbits(bit_count, value)
     }
 
+    /// Builds an `IrBits` value from little-endian payload bytes.
+    ///
+    /// The input must contain exactly the number of bytes required by
+    /// `bit_count`, and any unused high bits in the final byte must be zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the byte count does not match `bit_count`, when
+    /// unused high bits are set, or when the underlying XLS value construction
+    /// fails.
+    pub fn from_le_bytes(bit_count: usize, bytes: &[u8]) -> Result<Self, XlsynthError> {
+        let expected_byte_count = bit_count.div_ceil(8);
+        if bytes.len() != expected_byte_count {
+            return Err(XlsynthError(format!(
+                "Expected {expected_byte_count} bytes for bits[{bit_count}], got {}",
+                bytes.len()
+            )));
+        }
+        let bit_remainder = bit_count % 8;
+        if bit_remainder != 0 && (bytes[expected_byte_count - 1] >> bit_remainder) != 0 {
+            return Err(XlsynthError(format!(
+                "High bits are set outside bits[{bit_count}] in final byte"
+            )));
+        }
+        let bits = (0..bit_count)
+            .map(|index| ((bytes[index / 8] >> (index % 8)) & 1) != 0)
+            .collect::<Vec<_>>();
+        Ok(Self::from_lsb_is_0(&bits))
+    }
+
     pub fn zero(bit_count: usize) -> Self {
         Self::make_ubits(bit_count, 0).expect("zero literal must construct")
     }
@@ -179,16 +209,32 @@ impl IrBits {
         xls_bits_to_int64(self.ptr)
     }
 
-    pub fn to_bytes(&self) -> Result<Vec<u8>, XlsynthError> {
+    /// Returns little-endian payload bytes for this value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying XLS conversion fails.
+    pub fn to_le_bytes(&self) -> Result<Vec<u8>, XlsynthError> {
         xls_bits_to_bytes(self.ptr)
+    }
+
+    /// Returns little-endian payload bytes for this value.
+    ///
+    /// This is the legacy spelling of [`IrBits::to_le_bytes`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying XLS conversion fails.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, XlsynthError> {
+        self.to_le_bytes()
     }
 
     pub fn is_zero(&self) -> bool {
         if self.get_bit_count() == 0 {
             return true;
         }
-        self.to_bytes()
-            .expect("to_bytes should succeed for IrBits")
+        self.to_le_bytes()
+            .expect("to_le_bytes should succeed for IrBits")
             .iter()
             .all(|b| *b == 0)
     }
@@ -723,14 +769,20 @@ impl Clone for IrValue {
 /// Typed wrapper around an `IrBits` value that has a particular
 /// compile-time-known bit width and whose type notes the value
 /// should be treated as unsigned.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IrUBits<const BIT_COUNT: usize> {
-    #[allow(dead_code)]
     wrapped: IrBits,
 }
 
 impl<const BIT_COUNT: usize> IrUBits<BIT_COUNT> {
+    /// Indicates that this typed bits wrapper uses unsigned integer semantics.
     pub const SIGNEDNESS: bool = false;
 
+    /// Wraps arbitrary-width bits after checking the compile-time bit width.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `wrapped` does not have exactly `BIT_COUNT` bits.
     pub fn new(wrapped: IrBits) -> Result<Self, XlsynthError> {
         if wrapped.get_bit_count() != BIT_COUNT {
             return Err(XlsynthError(format!(
@@ -741,19 +793,66 @@ impl<const BIT_COUNT: usize> IrUBits<BIT_COUNT> {
         }
         Ok(Self { wrapped })
     }
+
+    /// Creates an unsigned typed bits value from a `u64`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` cannot be represented in `BIT_COUNT` bits.
+    pub fn from_u64(value: u64) -> Result<Self, XlsynthError> {
+        Self::new(IrBits::make_ubits(BIT_COUNT, value)?)
+    }
+
+    /// Creates an unsigned typed bits value from little-endian payload bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the byte payload is not canonical for `BIT_COUNT`.
+    pub fn from_le_bytes(bytes: &[u8]) -> Result<Self, XlsynthError> {
+        Self::new(IrBits::from_le_bytes(BIT_COUNT, bytes)?)
+    }
+
+    /// Converts this value to a `u64` when the bit width fits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `BIT_COUNT` is wider than `u64`.
+    pub fn to_u64(&self) -> Result<u64, XlsynthError> {
+        self.wrapped.to_u64()
+    }
+
+    /// Returns little-endian payload bytes for this value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying XLS conversion fails.
+    pub fn to_le_bytes(&self) -> Result<Vec<u8>, XlsynthError> {
+        self.wrapped.to_le_bytes()
+    }
+
+    /// Borrows the underlying arbitrary-width bits value.
+    pub fn as_bits(&self) -> &IrBits {
+        &self.wrapped
+    }
 }
 
 /// Typed wrapper around an `IrBits` value that has a particular
 /// compile-time-known bit width and whose type notes the value
 /// should be treated as signed.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IrSBits<const BIT_COUNT: usize> {
-    #[allow(dead_code)]
     wrapped: IrBits,
 }
 
 impl<const BIT_COUNT: usize> IrSBits<BIT_COUNT> {
+    /// Indicates that this typed bits wrapper uses signed integer semantics.
     pub const SIGNEDNESS: bool = true;
 
+    /// Wraps arbitrary-width bits after checking the compile-time bit width.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `wrapped` does not have exactly `BIT_COUNT` bits.
     pub fn new(wrapped: IrBits) -> Result<Self, XlsynthError> {
         if wrapped.get_bit_count() != BIT_COUNT {
             return Err(XlsynthError(format!(
@@ -763,6 +862,47 @@ impl<const BIT_COUNT: usize> IrSBits<BIT_COUNT> {
             )));
         }
         Ok(Self { wrapped })
+    }
+
+    /// Creates a signed typed bits value from an `i64`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` cannot be represented in `BIT_COUNT` bits.
+    pub fn from_i64(value: i64) -> Result<Self, XlsynthError> {
+        Self::new(IrBits::make_sbits(BIT_COUNT, value)?)
+    }
+
+    /// Creates a signed typed bits value from little-endian payload bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the byte payload is not canonical for `BIT_COUNT`.
+    pub fn from_le_bytes(bytes: &[u8]) -> Result<Self, XlsynthError> {
+        Self::new(IrBits::from_le_bytes(BIT_COUNT, bytes)?)
+    }
+
+    /// Converts this value to an `i64` when the bit width fits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `BIT_COUNT` is wider than `i64`.
+    pub fn to_i64(&self) -> Result<i64, XlsynthError> {
+        self.wrapped.to_i64()
+    }
+
+    /// Returns little-endian payload bytes for this value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying XLS conversion fails.
+    pub fn to_le_bytes(&self) -> Result<Vec<u8>, XlsynthError> {
+        self.wrapped.to_le_bytes()
+    }
+
+    /// Borrows the underlying arbitrary-width bits value.
+    pub fn as_bits(&self) -> &IrBits {
+        &self.wrapped
     }
 }
 
@@ -1075,10 +1215,12 @@ mod tests {
         assert_eq!(bits.to_i64().unwrap(), -5);
     }
 
+    // Verifies: `IrBits` byte conversion exposes little-endian payload order.
+    // Catches: accidental reintroduction of ambiguous `to_bytes` semantics.
     #[test]
-    fn test_ir_bits_to_bytes() {
+    fn test_ir_bits_to_le_bytes() {
         let bits = IrBits::u32(0x12345678);
-        assert_eq!(bits.to_bytes().unwrap(), vec![0x78, 0x56, 0x34, 0x12]);
+        assert_eq!(bits.to_le_bytes().unwrap(), vec![0x78, 0x56, 0x34, 0x12]);
     }
 
     #[test]

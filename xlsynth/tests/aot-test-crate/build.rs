@@ -1,8 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::aot_builder::{emit_aot_module_from_ir_text, AotBuildSpec};
+use std::path::PathBuf;
+
+use xlsynth::aot_builder::{
+    emit_aot_module_from_ir_text, emit_typed_dslx_aot_module_from_file, AotBuildSpec,
+    TypedDslxAotBuildSpec,
+};
+use xlsynth::DslxConvertOptions;
 
 fn main() {
+    // Describes one IR-only AOT wrapper generated for integration tests.
     struct AotCase {
         name: &'static str,
         top: &'static str,
@@ -173,6 +180,62 @@ top fn trace_assert_pair(tok: token, pair: (bits[8], bits[8])) -> (bits[8], bits
             output.rust_file.display()
         );
     }
+
+    // Typed DSLX cases exercise public signatures that use generated bridge
+    // types instead of structural wrapper aliases.
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let widget_dslx_path = manifest_dir.join("src/widget_types.x");
+    let widget_output = emit_typed_dslx_aot_module_from_file(&TypedDslxAotBuildSpec {
+        name: "widget_frob",
+        dslx_path: &widget_dslx_path,
+        top: "frob_widget",
+        dslx_options: DslxConvertOptions::default(),
+        type_module_paths: vec![],
+    })
+    .unwrap_or_else(|err| panic!("widget-frob typed DSLX AOT compile should succeed: {}", err));
+    println!(
+        "cargo:rustc-env=XLSYNTH_AOT_WIDGET_FROB_RS={}",
+        widget_output.rust_file.display()
+    );
+
+    let self_alias_dslx_path = manifest_dir.join("src/self_alias_widget.x");
+    let self_alias_output = emit_typed_dslx_aot_module_from_file(&TypedDslxAotBuildSpec {
+        name: "self_alias_widget",
+        dslx_path: &self_alias_dslx_path,
+        top: "echo_widget",
+        dslx_options: DslxConvertOptions::default(),
+        type_module_paths: vec![],
+    })
+    .unwrap_or_else(|err| panic!("self-alias widget AOT compile should succeed: {}", err));
+    println!(
+        "cargo:rustc-env=XLSYNTH_AOT_SELF_ALIAS_WIDGET_RS={}",
+        self_alias_output.rust_file.display()
+    );
+
+    let dup_root = manifest_dir.join("src/dup");
+    let dup_frobber_path = dup_root.join("frobber.x");
+    let dup_foo_widget_path = dup_root.join("foo/widget.x");
+    let dup_bar_widget_path = dup_root.join("bar/widget.x");
+    let dup_output = emit_typed_dslx_aot_module_from_file(&TypedDslxAotBuildSpec {
+        name: "duplicate_widget",
+        dslx_path: &dup_frobber_path,
+        top: "frob_widget",
+        dslx_options: DslxConvertOptions {
+            additional_search_paths: vec![dup_root.as_path()],
+            ..DslxConvertOptions::default()
+        },
+        type_module_paths: vec![dup_foo_widget_path.as_path(), dup_bar_widget_path.as_path()],
+    })
+    .unwrap_or_else(|err| {
+        panic!(
+            "duplicate-widget typed DSLX AOT compile should succeed: {}",
+            err
+        )
+    });
+    println!(
+        "cargo:rustc-env=XLSYNTH_AOT_DUPLICATE_WIDGET_RS={}",
+        dup_output.rust_file.display()
+    );
 
     println!("cargo:rerun-if-changed=build.rs");
 }
