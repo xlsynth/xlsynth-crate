@@ -9,7 +9,7 @@ use xlsynth_aot_test_crate::{
 };
 use xlsynth_test_helpers::compare_golden_text;
 
-fn generated_wrapper_golden_cases() -> [(&'static str, &'static str); 8] {
+fn generated_wrapper_golden_cases() -> [(&'static str, &'static str); 16] {
     [
         (
             env!("XLSYNTH_AOT_ADD_ONE_RS"),
@@ -43,9 +43,43 @@ fn generated_wrapper_golden_cases() -> [(&'static str, &'static str); 8] {
             env!("XLSYNTH_AOT_TRACE_ASSERT_RS"),
             "tests/goldens/trace_assert_wrapper.golden.txt",
         ),
+        (
+            env!("XLSYNTH_AOT_WIDGET_FROB_RS"),
+            "tests/goldens/widget_frob_wrapper.rs",
+        ),
+        (
+            env!("XLSYNTH_AOT_SELF_ALIAS_WIDGET_RS"),
+            "tests/goldens/self_alias_widget_wrapper.rs",
+        ),
+        (
+            env!("XLSYNTH_AOT_PARAMETRIC_BOX_RS"),
+            "tests/goldens/parametric_box_wrapper.rs",
+        ),
+        (
+            env!("XLSYNTH_AOT_PARAMETRIC_SHAPES_RS"),
+            "tests/goldens/parametric_shapes_wrapper.rs",
+        ),
+        (
+            env!("XLSYNTH_AOT_PARAMETRIC_ARRAYS_RS"),
+            "tests/goldens/parametric_arrays_wrapper.rs",
+        ),
+        (
+            env!("XLSYNTH_AOT_PARAMETRIC_VALUES_RS"),
+            "tests/goldens/parametric_values_wrapper.rs",
+        ),
+        (
+            env!("XLSYNTH_AOT_PARAMETRIC_IMPORTS_RS"),
+            "tests/goldens/parametric_imports_wrapper.rs",
+        ),
+        (
+            env!("XLSYNTH_AOT_DUPLICATE_WIDGET_RS"),
+            "tests/goldens/duplicate_widget_wrapper.rs",
+        ),
     ]
 }
 
+// Verifies: generated AOT wrapper source matches checked-in goldens.
+// Catches: unreviewed generated source drift in AOT wrapper emission.
 #[test]
 fn generated_wrappers_match_golden_references() {
     fs::create_dir_all(Path::new("tests/goldens")).expect("goldens directory should exist");
@@ -56,6 +90,8 @@ fn generated_wrappers_match_golden_references() {
     }
 }
 
+// Verifies: a scalar IR-only generated runner links and executes.
+// Catches: regressions in basic AOT runner construction or scalar ABI calls.
 #[test]
 fn add_one_generated_runner_executes() {
     let mut runner = add_one_aot::new_runner().expect("runner creation should succeed");
@@ -63,6 +99,8 @@ fn add_one_generated_runner_executes() {
     assert_eq!(output, 42);
 }
 
+// Verifies: generated entrypoints coexist in one test crate.
+// Catches: symbol or artifact naming collisions between wrappers.
 #[test]
 fn multiple_generated_entrypoints_can_link_and_run() {
     let mut runner = add_inputs_aot::new_runner().expect("runner creation should succeed");
@@ -70,6 +108,8 @@ fn multiple_generated_entrypoints_can_link_and_run() {
     assert_eq!(output, 30);
 }
 
+// Verifies: generated runners round-trip tuple and array aggregate shapes.
+// Catches: ABI packing regressions for nested tuple and array fields.
 #[test]
 fn generated_runner_supports_compound_shapes() {
     let mut runner = compound_shapes_aot::new_runner().expect("runner creation should succeed");
@@ -89,6 +129,8 @@ fn generated_runner_supports_compound_shapes() {
     assert_eq!(output.field2, [17, 19]);
 }
 
+// Verifies: generated runners support zero-argument empty-tuple outputs.
+// Catches: ABI edge cases for empty input and output layouts.
 #[test]
 fn generated_runner_supports_empty_tuple() {
     let mut runner = empty_tuple_aot::new_runner().expect("runner creation should succeed");
@@ -96,6 +138,8 @@ fn generated_runner_supports_empty_tuple() {
     assert_eq!(output, empty_tuple_aot::Output {});
 }
 
+// Verifies: generated runners handle scalar, wide, and array-backed bits.
+// Catches: ABI packing regressions for non-byte-aligned wide values.
 #[test]
 fn generated_runner_supports_varied_bit_widths_including_wide_values() {
     let mut runner = wide_sizes_aot::new_runner().expect("runner creation should succeed");
@@ -119,7 +163,7 @@ fn generated_runner_supports_varied_bit_widths_including_wide_values() {
     };
 
     let output = runner.run(&input).expect("run should succeed");
-    assert_eq!(output.field0, true);
+    assert!(output.field0);
     assert_eq!(output.field1, 0x55);
     assert_eq!(output.field2, 0xAB);
     assert_eq!(output.field3, 0x1234);
@@ -149,6 +193,8 @@ fn generated_runner_supports_varied_bit_widths_including_wide_values() {
     );
 }
 
+// Verifies: generated runners preserve large fixed array fields.
+// Catches: ABI traversal regressions that truncate or mis-index arrays.
 #[test]
 fn generated_runner_supports_large_array_tuple_structs() {
     let mut runner = large_array_tuple_aot::new_runner().expect("runner creation should succeed");
@@ -167,6 +213,8 @@ fn generated_runner_supports_large_array_tuple_structs() {
     assert!(output.field1[1..127].iter().all(|value| *value == 0));
 }
 
+// Verifies: generated runners support bit values wider than scalar integers.
+// Catches: byte packing regressions for wide bits tuple fields.
 #[test]
 fn generated_runner_supports_wide_bits_tuple_structs() {
     let mut runner = wide_bits_tuple_aot::new_runner().expect("runner creation should succeed");
@@ -184,6 +232,8 @@ fn generated_runner_supports_wide_bits_tuple_structs() {
     assert!(output.field1[1..32].iter().all(|value| *value == 0));
 }
 
+// Verifies: generated runners surface trace messages and assertion messages.
+// Catches: event plumbing regressions between AOT execution and runner APIs.
 #[test]
 fn generated_runner_run_with_events_surfaces_trace_and_assert_messages() {
     let mut runner = trace_assert_aot::new_runner().expect("runner creation should succeed");

@@ -2175,7 +2175,7 @@ impl AutocovEngine {
         let mut h = Hasher::new();
         h.update(b"xlsynth-autocov:candidate-bits");
         h.update(&(bits.get_bit_count() as u64).to_le_bytes());
-        h.update(&bits.to_bytes().unwrap());
+        h.update(&bits.to_le_bytes().unwrap());
         *h.finalize().as_bytes()
     }
 
