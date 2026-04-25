@@ -409,6 +409,25 @@ mod tests {
         },
     };
 
+    fn assert_dense_topological_order(gate_fn: &GateFn) {
+        for (node_index, node) in gate_fn.gates.iter().enumerate() {
+            if let AigNode::And2 { a, b, .. } = node {
+                assert!(
+                    a.node.id < node_index,
+                    "node %{} depends on later/equal operand %{}",
+                    node_index,
+                    a.node.id
+                );
+                assert!(
+                    b.node.id < node_index,
+                    "node %{} depends on later/equal operand %{}",
+                    node_index,
+                    b.node.id
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_replace_redundant_node_equivalence() {
         let _ = env_logger::builder().is_test(true).try_init();
@@ -438,6 +457,23 @@ mod tests {
         let original_stats: SummaryStats = get_summary_stats(original_fn);
         assert_eq!(original_stats.live_nodes, 7);
         assert_eq!(stats.live_nodes, 6);
+    }
+
+    #[test]
+    fn test_bulk_replace_result_is_dense_topological() {
+        let test_data = setup_graph_with_more_redundancies();
+        let mut substitutions = SubstitutionMap::new();
+        substitutions.add(
+            test_data.inner1.node,
+            AigOperand::from(test_data.inner0.node),
+        );
+        substitutions.add(
+            test_data.inner2.node,
+            AigOperand::from(test_data.inner0.node),
+        );
+
+        let replaced_fn = bulk_replace(&test_data.g, &substitutions, GateBuilderOptions::no_opt());
+        assert_dense_topological_order(&replaced_fn);
     }
 
     #[test]

@@ -142,40 +142,36 @@ fn build_sat_clauses(
     aig_ref_to_lit
 }
 
-fn add_miters(
+fn add_miter(
     solver: &mut impl varisat::ExtendFormula,
     aig_ref_to_lit: &HashMap<AigRef, varisat::Lit>,
-    known_equiv: &[EquivNode],
+    lhs_node: EquivNode,
     candidate: EquivNode,
-) -> Vec<varisat::Lit> {
-    let mut miters: Vec<varisat::Lit> = Vec::with_capacity(known_equiv.len());
-    for lhs_node in known_equiv {
-        let xor_miter = solver.new_lit();
+) -> varisat::Lit {
+    let xor_miter = solver.new_lit();
 
-        // Get SAT literals for the underlying AIG nodes
-        let a_lit = aig_ref_to_lit[&lhs_node.aig_ref()];
-        let b_lit = aig_ref_to_lit[&candidate.aig_ref()];
+    // Get SAT literals for the underlying AIG nodes.
+    let a_lit = aig_ref_to_lit[&lhs_node.aig_ref()];
+    let b_lit = aig_ref_to_lit[&candidate.aig_ref()];
 
-        // Check if the relationship is inverted (Normal vs Inverted)
-        match (lhs_node, candidate) {
-            (EquivNode::Normal(_), EquivNode::Normal(_))
-            | (EquivNode::Inverted(_), EquivNode::Inverted(_)) => {
-                // Same type: Check for equivalence (a XOR b == 0)
-                // Miter output is true if they are different.
-                add_tseitsin_xor(solver, a_lit, b_lit, xor_miter);
-            }
-            (EquivNode::Normal(_), EquivNode::Inverted(_))
-            | (EquivNode::Inverted(_), EquivNode::Normal(_)) => {
-                // Different type: Check for inverse equivalence (a XNOR b == 0, or a XOR !b ==
-                // 0) Miter output is true if they are different (i.e., not
-                // inverses). We compute a XOR (NOT b) for the miter.
-                add_tseitsin_xor(solver, a_lit, !b_lit, xor_miter);
-            }
+    // Check if the relationship is inverted (Normal vs Inverted).
+    match (lhs_node, candidate) {
+        (EquivNode::Normal(_), EquivNode::Normal(_))
+        | (EquivNode::Inverted(_), EquivNode::Inverted(_)) => {
+            // Same type: Check for equivalence (a XOR b == 0). Miter output is
+            // true if they are different.
+            add_tseitsin_xor(solver, a_lit, b_lit, xor_miter);
         }
-
-        miters.push(xor_miter);
+        (EquivNode::Normal(_), EquivNode::Inverted(_))
+        | (EquivNode::Inverted(_), EquivNode::Normal(_)) => {
+            // Different type: Check for inverse equivalence (a XNOR b == 0, or
+            // a XOR !b == 0). Miter output is true if they are different (i.e.,
+            // not inverses). We compute a XOR (NOT b) for the miter.
+            add_tseitsin_xor(solver, a_lit, !b_lit, xor_miter);
+        }
     }
-    miters
+
+    xor_miter
 }
 
 fn model_value_for_equiv_node(
@@ -461,13 +457,13 @@ pub fn validate_equivalence_classes(
     let mut counterexample_models: Vec<HashSet<varisat::Lit>> = Vec::new();
 
     // Now iterate through the equivalence classes -- for each equivalence class
-    // we'll advance a miter that checks whether the next value in the
-    // equivalence class is equivalent to the previous value(s) which are
-    // determined to be equivalent. By using multiple miters I'm suspecting we can
-    // potentially find counterexamples faster. Before spending SAT work on a
-    // class, split it by counterexamples found in earlier classes. A new
-    // counterexample still stops the current original class, preserving the old
-    // per-class proof budget.
+    // we'll advance a representative and check each next value against it.
+    // Values already in `known_equiv` have been proven equivalent to the
+    // representative, so a representative-only check is sufficient by
+    // transitivity and avoids adding redundant miter clauses as the bucket
+    // grows. Before spending SAT work on a class, split it by counterexamples
+    // found in earlier classes. A new counterexample still stops the current
+    // original class, preserving the old per-class proof budget.
     for equiv_class in sorted_equiv_classes {
         let buckets =
             presplit_by_counterexample_models(equiv_class, &counterexample_models, &aig_ref_to_lit);
@@ -475,12 +471,13 @@ pub fn validate_equivalence_classes(
         for bucket in buckets {
             let mut known_equiv = vec![bucket[0]];
             for &candidate in &bucket[1..] {
-                // Create a miter between this candidate and all known equivalent values.
-                let miters = add_miters(&mut solver, &aig_ref_to_lit, &known_equiv, candidate);
+                // Create a miter between this candidate and the class representative.
+                let representative = known_equiv[0];
+                let miter = add_miter(&mut solver, &aig_ref_to_lit, representative, candidate);
 
-                // Assume the miters outputs are true, which is stating "the candidate is
-                // unequal to the known_equiv values".
-                solver.assume(&miters);
+                // Assume the miter output is true, which asks for a counterexample where
+                // the candidate is unequal to the representative.
+                solver.assume(&[miter]);
                 let solve_result = solver.solve();
                 match solve_result {
                     Ok(false) => {
