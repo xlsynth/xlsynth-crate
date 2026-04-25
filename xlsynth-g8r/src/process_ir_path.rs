@@ -9,6 +9,7 @@ use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 
 use crate::aig::cut_db_rewrite;
+use crate::aig::dce;
 use crate::aig::fanout::fanout_histogram;
 use crate::aig::find_structures;
 use crate::aig::fraig;
@@ -427,6 +428,16 @@ pub fn process_ir_path_with_gatefn(
             }
         }
     }
+
+    let pre_dce_gate_count = gate_fn.gates.len();
+    gate_fn = dce::dce(&gate_fn);
+    log::info!(
+        "pre-fraig dce: gate count {} -> {}",
+        pre_dce_gate_count,
+        gate_fn.gates.len()
+    );
+    gate_fn.check_invariants_with_debug_assert();
+
     // Prepare to capture fraig statistics if enabled
     let mut fraig_did_converge: Option<DidConverge> = None;
     let mut fraig_iteration_stats: Option<Vec<FraigIterationStat>> = None;
@@ -444,13 +455,13 @@ pub fn process_ir_path_with_gatefn(
         let sim_samples = match options.fraig_sim_samples {
             Some(n) => n,
             None => {
-                let gate_count = gate_fn.gates.len();
-                let scaled = (gate_count as f64 / 8.0).ceil() as usize;
+                let live_node_count = get_id_to_use_count(&gate_fn).len().max(1);
+                let scaled = (live_node_count as f64 / 8.0).ceil() as usize;
                 // Round the scaled value to the nearest 256, it must be more than zero.
                 let result = round_up_to_nearest_multiple(scaled, 256);
                 log::info!(
-                    "fraig sim samples; gate count: {}, scaled: {}, result: {}",
-                    gate_count,
+                    "fraig sim samples; live node count: {}, scaled: {}, result: {}",
+                    live_node_count,
                     scaled,
                     result
                 );

@@ -5,7 +5,6 @@
 use crate::aig::{AigNode, AigRef, GateFn};
 use crate::aig_sim::gate_simd::{self, Vec256};
 use xlsynth::IrBits;
-use xlsynth_pir::fuzz_utils::arbitrary_irbits;
 
 use rand::Rng;
 use std::cmp::min;
@@ -113,57 +112,74 @@ impl Ord for EquivNode {
     }
 }
 
-fn gen_random_inputs(gate_fn: &GateFn, rng: &mut impl Rng) -> Vec<IrBits> {
+fn input_widths(gate_fn: &GateFn) -> Vec<usize> {
     gate_fn
         .inputs
         .iter()
-        .map(|input| arbitrary_irbits(rng, input.bit_vector.get_bit_count()))
+        .map(|input| input.get_bit_count())
         .collect()
 }
 
-fn total_input_bits(gate_fn: &GateFn) -> usize {
-    gate_fn.inputs.iter().map(|i| i.get_bit_count()).sum()
+fn total_input_bits(input_widths: &[usize]) -> usize {
+    input_widths.iter().sum()
 }
 
-fn set_lane_inputs(
-    gate_fn: &GateFn,
+#[inline]
+fn byte_bit(bytes: &[u8], bit_idx: usize) -> bool {
+    ((bytes[bit_idx / 8] >> (bit_idx % 8)) & 1) != 0
+}
+
+fn set_lane_counterexample_inputs(
+    input_widths: &[usize],
     lane: usize,
     inputs: &[IrBits],
     words_per_input_bit: &mut [[u64; 4]],
 ) {
     assert!(lane < SIMD_LANES);
-    assert_eq!(inputs.len(), gate_fn.inputs.len());
+    assert_eq!(inputs.len(), input_widths.len());
     let limb = lane / 64;
     let bit_mask = 1u64 << (lane % 64);
     let mut bit_cursor = 0;
-    for (input_value, input) in inputs.iter().zip(gate_fn.inputs.iter()) {
-        for bit_idx in 0..input.bit_vector.get_bit_count() {
-            if input_value.get_bit(bit_idx).unwrap() {
+    for (input_value, &input_width) in inputs.iter().zip(input_widths.iter()) {
+        let bytes = input_value.to_le_bytes().unwrap();
+        for bit_idx in 0..input_width {
+            if byte_bit(&bytes, bit_idx) {
                 words_per_input_bit[bit_cursor + bit_idx][limb] |= bit_mask;
             }
         }
-        bit_cursor += input.bit_vector.get_bit_count();
+        bit_cursor += input_width;
     }
 }
 
-fn random_simd_inputs(gate_fn: &GateFn, lane_count: usize, rng: &mut impl Rng) -> Vec<Vec256> {
+fn random_simd_inputs(
+    input_widths: &[usize],
+    lane_count: usize,
+    rng: &mut impl Rng,
+) -> Vec<Vec256> {
     assert!(lane_count <= SIMD_LANES);
-    let mut words_per_input_bit = vec![[0u64; 4]; total_input_bits(gate_fn)];
-    for lane in 0..lane_count {
-        let inputs = gen_random_inputs(gate_fn, rng);
-        set_lane_inputs(gate_fn, lane, &inputs, &mut words_per_input_bit);
+    let valid_lane_mask = lane_mask(lane_count);
+    let mut result = Vec::with_capacity(total_input_bits(input_widths));
+    for &input_width in input_widths {
+        for _ in 0..input_width {
+            result.push(Vec256::from_words([
+                rng.r#gen::<u64>() & valid_lane_mask[0],
+                rng.r#gen::<u64>() & valid_lane_mask[1],
+                rng.r#gen::<u64>() & valid_lane_mask[2],
+                rng.r#gen::<u64>() & valid_lane_mask[3],
+            ]));
+        }
     }
-    words_per_input_bit
-        .into_iter()
-        .map(Vec256::from_words)
-        .collect()
+    result
 }
 
-fn counterexample_simd_inputs(gate_fn: &GateFn, counterexamples: &[&Vec<IrBits>]) -> Vec<Vec256> {
+fn counterexample_simd_inputs(
+    input_widths: &[usize],
+    counterexamples: &[&Vec<IrBits>],
+) -> Vec<Vec256> {
     assert!(counterexamples.len() <= SIMD_LANES);
-    let mut words_per_input_bit = vec![[0u64; 4]; total_input_bits(gate_fn)];
+    let mut words_per_input_bit = vec![[0u64; 4]; total_input_bits(input_widths)];
     for (lane, inputs) in counterexamples.iter().enumerate() {
-        set_lane_inputs(gate_fn, lane, inputs, &mut words_per_input_bit);
+        set_lane_counterexample_inputs(input_widths, lane, inputs, &mut words_per_input_bit);
     }
     words_per_input_bit
         .into_iter()
@@ -247,6 +263,7 @@ pub fn propose_equivalence_classes(
 ) -> HashMap<SimulationSignature, Vec<EquivNode>> {
     let gate_count = gate_fn.gates.len();
     let live_nodes = output_reachable_nodes(gate_fn);
+    let input_widths = input_widths(gate_fn);
     let candidate_node_indices: Vec<usize> = gate_fn
         .gates
         .iter()
@@ -271,7 +288,7 @@ pub fn propose_equivalence_classes(
     let mut remaining_random_samples = input_sample_count;
     while remaining_random_samples > 0 {
         let lane_count = min(remaining_random_samples, SIMD_LANES);
-        let inputs = random_simd_inputs(gate_fn, lane_count, rng);
+        let inputs = random_simd_inputs(&input_widths, lane_count, rng);
         update_signatures(
             gate_fn,
             &live_nodes,
@@ -290,7 +307,7 @@ pub fn propose_equivalence_classes(
     // Now do it for all explicitly-provided counterexamples.
     let counterexample_refs: Vec<&Vec<IrBits>> = counterexamples.iter().collect();
     for batch in counterexample_refs.chunks(SIMD_LANES) {
-        let inputs = counterexample_simd_inputs(gate_fn, batch);
+        let inputs = counterexample_simd_inputs(&input_widths, batch);
         update_signatures(
             gate_fn,
             &live_nodes,
@@ -462,13 +479,8 @@ mod tests {
     }
 
     #[test]
-    fn test_propose_equiv_simd_hash_matches_scalar_multiple_batches() {
+    fn test_propose_equiv_counterexample_hash_matches_scalar() {
         let graph = setup_graph_with_redundancies();
-        let input_sample_count = 513;
-        let mut seeded_rng = rand::rngs::StdRng::seed_from_u64(7);
-        let input_samples = (0..input_sample_count)
-            .map(|_| gen_random_inputs(&graph.g, &mut seeded_rng))
-            .collect::<Vec<_>>();
         let counterexample_samples = vec![
             vec![
                 IrBits::bool(false),
@@ -478,20 +490,13 @@ mod tests {
             vec![IrBits::bool(true), IrBits::bool(false), IrBits::bool(true)],
             vec![IrBits::bool(true), IrBits::bool(true), IrBits::bool(false)],
         ];
-        let scalar_classes = propose_equivalence_classes_scalar_for_test(
-            &graph.g,
-            &input_samples,
-            &counterexample_samples,
-        );
+        let scalar_classes =
+            propose_equivalence_classes_scalar_for_test(&graph.g, &[], &counterexample_samples);
 
         let counterexamples = counterexample_samples.into_iter().collect::<HashSet<_>>();
         let mut simd_rng = rand::rngs::StdRng::seed_from_u64(7);
-        let simd_classes = propose_equivalence_classes(
-            &graph.g,
-            input_sample_count,
-            &mut simd_rng,
-            &counterexamples,
-        );
+        let simd_classes =
+            propose_equivalence_classes(&graph.g, 0, &mut simd_rng, &counterexamples);
 
         assert_eq!(
             sorted_classes(&simd_classes),

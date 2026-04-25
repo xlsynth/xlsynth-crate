@@ -60,6 +60,11 @@ fn conversions_shifts_and_slices() -> Result<(), XlsynthError> {
     let wide = IrBits::make_ubits(16, 0xABCD)?;
     assert_eq!(wide.to_le_bytes()?, vec![0xCD, 0xAB]);
 
+    let from_bytes = IrBits::from_le_bytes(12, &[0xCD, 0x0A])?;
+    assert_eq!(from_bytes.get_bit_count(), 12);
+    assert_eq!(from_bytes.to_le_bytes()?, vec![0xCD, 0x0A]);
+    assert!(IrBits::from_le_bytes(12, &[0xCD, 0xFA]).is_err());
+
     let shll = bits.shll(2);
     assert_eq!(shll.to_u64()?, (0xFEu64 << 2) & 0xFF);
 
