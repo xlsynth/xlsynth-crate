@@ -10,7 +10,7 @@
 //! depth-only (we accept only rewrites that reduce the global depth). Area/AND
 //! recovery is intentionally left to other passes.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Instant;
 
 use blake3::Hasher;
@@ -30,9 +30,18 @@ pub struct RewriteOptions {
     pub max_cuts_per_node: usize,
     /// Maximum number of outer rewrite iterations to run.
     ///
-    /// If set to `0`, the pass runs **to convergence** (until no improving
-    /// rewrite exists under the acceptance criterion).
+    /// An iteration is one global recompute round. If set to `0`, the pass runs
+    /// **to convergence** (until no improving rewrite exists under the
+    /// acceptance criterion).
     pub max_iterations: usize,
+    /// Maximum cheap candidate depth evaluations per global recompute round.
+    ///
+    /// If set to `0`, candidate evaluation is unbounded.
+    pub max_candidate_evals_per_round: usize,
+    /// Maximum accepted replacements per global recompute round.
+    ///
+    /// If set to `0`, accepted replacements are unbounded.
+    pub max_rewrites_per_round: usize,
 }
 
 impl Default for RewriteOptions {
@@ -47,6 +56,8 @@ impl Default for RewriteOptions {
             // Callers that need a hard time/effort bound (e.g. fuzz targets) can
             // set `max_iterations` to a small positive value.
             max_iterations: 0,
+            max_candidate_evals_per_round: 4096,
+            max_rewrites_per_round: 64,
         }
     }
 }
@@ -278,7 +289,7 @@ fn lit_to_bytes(lit: Lit) -> [u8; 9] {
 fn choose_candidate_replacements_for_root(
     root: AigRef,
     cuts_by_node: &[Vec<Cut>],
-    depth_map: &std::collections::HashMap<AigRef, usize>,
+    depths: &[usize],
     db: &CutDb,
 ) -> Vec<Replacement> {
     let mut cands: Vec<Replacement> = Vec::new();
@@ -299,7 +310,7 @@ fn choose_candidate_replacements_for_root(
             let input_depths = frag.input_depths();
             let mut new_depth_at_root: usize = 0;
             for (i, leaf) in cut.leaves.iter().enumerate() {
-                let leaf_depth = *depth_map.get(&leaf.node).unwrap_or(&0);
+                let leaf_depth = depths[leaf.node.id];
                 let cand = leaf_depth + (input_depths[i] as usize);
                 new_depth_at_root = core::cmp::max(new_depth_at_root, cand);
             }
@@ -339,9 +350,321 @@ fn choose_candidate_replacements_for_root(
     cands
 }
 
-/// Rebuilds `g` while replacing `repl.root` with `repl.frag`, then runs DCE.
-fn rebuild_with_replacement(g: &GateFn, repl: &Replacement) -> GateFn {
-    let mut gb = GateBuilder::new(g.name.clone(), GateBuilderOptions::opt());
+#[derive(Debug, Clone)]
+enum DepthFormula {
+    Original,
+    Replacement {
+        leaves: Vec<AigOperand>,
+        input_depths: [u16; 4],
+    },
+}
+
+#[derive(Debug)]
+struct DepthChange {
+    node: AigRef,
+    old_depth: usize,
+    new_depth: usize,
+}
+
+#[derive(Debug)]
+struct FormulaChange {
+    root: AigRef,
+    old_formula: DepthFormula,
+    old_deps: Vec<AigRef>,
+    new_deps: Vec<AigRef>,
+}
+
+struct VirtualDepthState<'a> {
+    g: &'a GateFn,
+    formulas: Vec<DepthFormula>,
+    fanouts: Vec<Vec<AigRef>>,
+    output_use_counts: Vec<usize>,
+    output_depth_counts: BTreeMap<usize, usize>,
+    depths: Vec<usize>,
+}
+
+fn push_unique(xs: &mut Vec<AigRef>, x: AigRef) {
+    if !xs.contains(&x) {
+        xs.push(x);
+    }
+}
+
+impl<'a> VirtualDepthState<'a> {
+    fn new(
+        g: &'a GateFn,
+        depth_map: &std::collections::HashMap<AigRef, usize>,
+    ) -> VirtualDepthState<'a> {
+        let mut fanouts: Vec<Vec<AigRef>> = vec![Vec::new(); g.gates.len()];
+        for (id, node) in g.gates.iter().enumerate() {
+            if let AigNode::And2 { a, b, .. } = node {
+                let parent = AigRef { id };
+                push_unique(&mut fanouts[a.node.id], parent);
+                push_unique(&mut fanouts[b.node.id], parent);
+            }
+        }
+
+        let mut depths = vec![0usize; g.gates.len()];
+        for (node, depth) in depth_map {
+            depths[node.id] = *depth;
+        }
+
+        let mut output_use_counts = vec![0usize; g.gates.len()];
+        let mut output_depth_counts = BTreeMap::new();
+        for output in &g.outputs {
+            for op in output.bit_vector.iter_lsb_to_msb() {
+                output_use_counts[op.node.id] += 1;
+                *output_depth_counts.entry(depths[op.node.id]).or_insert(0) += 1;
+            }
+        }
+
+        Self {
+            g,
+            formulas: vec![DepthFormula::Original; g.gates.len()],
+            fanouts,
+            output_use_counts,
+            output_depth_counts,
+            depths,
+        }
+    }
+
+    fn global_depth(&self) -> usize {
+        self.output_depth_counts
+            .keys()
+            .next_back()
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn deps_for_formula(&self, node: AigRef, formula: &DepthFormula) -> Vec<AigRef> {
+        match formula {
+            DepthFormula::Original => match &self.g.gates[node.id] {
+                AigNode::And2 { a, b, .. } => {
+                    let mut deps = Vec::with_capacity(2);
+                    push_unique(&mut deps, a.node);
+                    push_unique(&mut deps, b.node);
+                    deps
+                }
+                AigNode::Input { .. } | AigNode::Literal { .. } => Vec::new(),
+            },
+            DepthFormula::Replacement { leaves, .. } => {
+                let mut deps = Vec::with_capacity(leaves.len());
+                for leaf in leaves {
+                    push_unique(&mut deps, leaf.node);
+                }
+                deps
+            }
+        }
+    }
+
+    fn replacement_depth(&self, cand: &Replacement) -> usize {
+        let input_depths = cand.frag.input_depths();
+        let mut depth = 0usize;
+        for (i, leaf) in cand.leaf_ops.iter().enumerate() {
+            let cand_depth = self.depths[leaf.node.id] + input_depths[i] as usize;
+            depth = depth.max(cand_depth);
+        }
+        depth
+    }
+
+    fn recompute_depth(&self, node: AigRef) -> usize {
+        match &self.formulas[node.id] {
+            DepthFormula::Original => match &self.g.gates[node.id] {
+                AigNode::Input { .. } | AigNode::Literal { .. } => 0,
+                AigNode::And2 { a, b, .. } => {
+                    1 + self.depths[a.node.id].max(self.depths[b.node.id])
+                }
+            },
+            DepthFormula::Replacement {
+                leaves,
+                input_depths,
+            } => {
+                let mut depth = 0usize;
+                for (i, leaf) in leaves.iter().enumerate() {
+                    let cand_depth = self.depths[leaf.node.id] + input_depths[i] as usize;
+                    depth = depth.max(cand_depth);
+                }
+                depth
+            }
+        }
+    }
+
+    fn record_depth_change(
+        &mut self,
+        node: AigRef,
+        new_depth: usize,
+        changes: &mut Vec<DepthChange>,
+    ) {
+        let old_depth = self.depths[node.id];
+        if new_depth == old_depth {
+            return;
+        }
+        let output_uses = self.output_use_counts[node.id];
+        if output_uses != 0 {
+            let old_count = self
+                .output_depth_counts
+                .get_mut(&old_depth)
+                .expect("old output depth count should exist");
+            *old_count -= output_uses;
+            if *old_count == 0 {
+                self.output_depth_counts.remove(&old_depth);
+            }
+            *self.output_depth_counts.entry(new_depth).or_insert(0) += output_uses;
+        }
+        self.depths[node.id] = new_depth;
+        changes.push(DepthChange {
+            node,
+            old_depth,
+            new_depth,
+        });
+    }
+
+    fn propagate_from(&mut self, root: AigRef, new_depth: usize, changes: &mut Vec<DepthChange>) {
+        let mut worklist = VecDeque::new();
+        self.record_depth_change(root, new_depth, changes);
+        worklist.extend(self.fanouts[root.id].iter().copied());
+
+        while let Some(node) = worklist.pop_front() {
+            let recomputed = self.recompute_depth(node);
+            if recomputed == self.depths[node.id] {
+                continue;
+            }
+            self.record_depth_change(node, recomputed, changes);
+            worklist.extend(self.fanouts[node.id].iter().copied());
+        }
+    }
+
+    fn apply_formula_change(
+        &mut self,
+        cand: &Replacement,
+        new_root_depth: usize,
+        changes: &mut Vec<DepthChange>,
+    ) -> FormulaChange {
+        let root = cand.root;
+        let old_formula = self.formulas[root.id].clone();
+        let old_deps = self.deps_for_formula(root, &old_formula);
+        for dep in &old_deps {
+            self.fanouts[dep.id].retain(|fanout| *fanout != root);
+        }
+
+        let new_formula = DepthFormula::Replacement {
+            leaves: cand.leaf_ops.clone(),
+            input_depths: cand.frag.input_depths(),
+        };
+        let new_deps = self.deps_for_formula(root, &new_formula);
+        for dep in &new_deps {
+            push_unique(&mut self.fanouts[dep.id], root);
+        }
+        self.formulas[root.id] = new_formula;
+
+        self.propagate_from(root, new_root_depth, changes);
+        FormulaChange {
+            root,
+            old_formula,
+            old_deps,
+            new_deps,
+        }
+    }
+
+    fn rollback_formula_change(&mut self, formula_change: FormulaChange) {
+        for dep in &formula_change.new_deps {
+            self.fanouts[dep.id].retain(|fanout| *fanout != formula_change.root);
+        }
+        for dep in &formula_change.old_deps {
+            push_unique(&mut self.fanouts[dep.id], formula_change.root);
+        }
+        self.formulas[formula_change.root.id] = formula_change.old_formula;
+    }
+
+    fn rollback_depth_changes(&mut self, changes: Vec<DepthChange>) {
+        for change in changes.into_iter().rev() {
+            let output_uses = self.output_use_counts[change.node.id];
+            if output_uses != 0 {
+                let new_count = self
+                    .output_depth_counts
+                    .get_mut(&change.new_depth)
+                    .expect("new output depth count should exist");
+                *new_count -= output_uses;
+                if *new_count == 0 {
+                    self.output_depth_counts.remove(&change.new_depth);
+                }
+                *self
+                    .output_depth_counts
+                    .entry(change.old_depth)
+                    .or_insert(0) += output_uses;
+            }
+            self.depths[change.node.id] = change.old_depth;
+        }
+    }
+
+    fn try_accept_replacement(&mut self, cand: &Replacement) -> bool {
+        if !matches!(self.formulas[cand.root.id], DepthFormula::Original) {
+            return false;
+        }
+        let old_global_depth = self.global_depth();
+        let old_root_depth = self.depths[cand.root.id];
+        let new_root_depth = self.replacement_depth(cand);
+        if new_root_depth >= old_root_depth {
+            return false;
+        }
+
+        let mut changes = Vec::new();
+        let formula_change = self.apply_formula_change(cand, new_root_depth, &mut changes);
+        if self.global_depth() < old_global_depth {
+            true
+        } else {
+            self.rollback_depth_changes(changes);
+            self.rollback_formula_change(formula_change);
+            false
+        }
+    }
+}
+
+fn collect_critical_roots(g: &GateFn, depths: &[usize], global_depth: usize) -> Vec<AigRef> {
+    if global_depth == 0 {
+        return Vec::new();
+    }
+
+    let mut roots = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    let mut worklist: Vec<AigRef> = g
+        .outputs
+        .iter()
+        .flat_map(|output| output.bit_vector.iter_lsb_to_msb())
+        .filter_map(|op| {
+            if depths[op.node.id] == global_depth {
+                Some(op.node)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    while let Some(node) = worklist.pop() {
+        if !visited.insert(node) {
+            continue;
+        }
+        let AigNode::And2 { a, b, .. } = &g.gates[node.id] else {
+            continue;
+        };
+        roots.insert(node);
+        let node_depth = depths[node.id];
+        for child in [a.node, b.node] {
+            if depths[child.id] + 1 == node_depth {
+                worklist.push(child);
+            }
+        }
+    }
+
+    let mut roots: Vec<AigRef> = roots.into_iter().collect();
+    roots.sort_by(|a, b| {
+        depths[b.id]
+            .cmp(&depths[a.id])
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    roots
+}
+
+fn replacement_pir_node_ids(g: &GateFn, repl: &Replacement) -> PirNodeIds {
     let mut replacement_pir_node_ids = PirNodeIds::new();
     replacement_pir_node_ids.extend(g.gates[repl.root.id].get_pir_node_ids().iter().copied());
     for leaf in &repl.leaf_ops {
@@ -352,6 +675,16 @@ fn rebuild_with_replacement(g: &GateFn, repl: &Replacement) -> GateFn {
             }
         }
     }
+    replacement_pir_node_ids
+}
+
+/// Rebuilds `g` while replacing each requested root, then runs DCE.
+fn rebuild_with_replacements(g: &GateFn, replacements: &[Replacement]) -> GateFn {
+    let mut gb = GateBuilder::new(g.name.clone(), GateBuilderOptions::opt());
+    let replacements_by_root: BTreeMap<AigRef, &Replacement> = replacements
+        .iter()
+        .map(|replacement| (replacement.root, replacement))
+        .collect();
 
     let mut orig_to_new: std::collections::HashMap<AigRef, AigOperand> =
         std::collections::HashMap::new();
@@ -386,7 +719,7 @@ fn rebuild_with_replacement(g: &GateFn, repl: &Replacement) -> GateFn {
             continue;
         }
 
-        if r == repl.root {
+        if let Some(repl) = replacements_by_root.get(&r).copied() {
             // Ensure leaf nodes are built first.
             let mut all_ready = true;
             let mut leaf_new_ops: Vec<AigOperand> = Vec::with_capacity(repl.leaf_ops.len());
@@ -405,6 +738,7 @@ fn rebuild_with_replacement(g: &GateFn, repl: &Replacement) -> GateFn {
                 continue;
             }
 
+            let replacement_pir_node_ids = replacement_pir_node_ids(g, repl);
             let new_op = instantiate_fragment(
                 &mut gb,
                 &repl.frag,
@@ -479,14 +813,10 @@ fn rebuild_with_replacement(g: &GateFn, repl: &Replacement) -> GateFn {
 pub fn rewrite_gatefn_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions) -> GateFn {
     let mut cur = g.clone();
 
-    // Depth-only mode: iterate the critical path and accept only depth-improving
-    // rewrites. We intentionally do not do any off-critical-path "area recovery"
-    // in this pass (that can be handled by other cleanup passes).
+    // Depth-only mode: in each global recompute round, cheaply evaluate many
+    // critical-path candidates in a virtual depth model. Accepted replacements
+    // are materialized together in one rebuild/DCE at the end of the round.
     let mut iter: usize = 0;
-    // Deterministic per-iteration effort cap for the depth phase. On large graphs,
-    // exhaustively scanning the critical path can dominate runtime when no further
-    // depth improvement exists (or is hard to find).
-    let max_depth_phase_rebuilds_per_iter: usize = 128;
     loop {
         if opts.max_iterations != 0 && iter >= opts.max_iterations {
             log::info!(
@@ -508,7 +838,7 @@ pub fn rewrite_gatefn_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions) 
         let cur_global_depth = depth_stats.deepest_path.len();
 
         log::info!(
-            "cut-db rewrite iter: live_nodes={} global_depth={}",
+            "cut-db rewrite round: live_nodes={} global_depth={}",
             live_nodes.len(),
             cur_global_depth
         );
@@ -516,60 +846,91 @@ pub fn rewrite_gatefn_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions) 
         let t2 = Instant::now();
         let cuts_by_node = compute_cuts(&cur, opts.max_cuts_per_node);
         let t_cuts_ms = t2.elapsed().as_millis();
-        let depth_map = depth_stats.ref_to_depth;
-        let critical_path = depth_stats.deepest_path;
+        let mut virtual_state = VirtualDepthState::new(&cur, &depth_stats.ref_to_depth);
+        let crit_roots =
+            collect_critical_roots(&cur, &virtual_state.depths, virtual_state.global_depth());
 
-        let mut applied = false;
+        let mut accepted_replacements: Vec<Replacement> = Vec::new();
         let mut candidates_considered: usize = 0;
-        let mut rebuilds_tried: usize = 0;
+        let mut candidate_evals: usize = 0;
 
-        let mut crit_roots: Vec<AigRef> = critical_path;
-        crit_roots.sort_by(|a, b| {
-            let da = *depth_map.get(a).unwrap_or(&0);
-            let dbb = *depth_map.get(b).unwrap_or(&0);
-            dbb.cmp(&da).then_with(|| a.id.cmp(&b.id))
-        });
         let t_phase = Instant::now();
-        'crit: for root in crit_roots {
+        'crit: for root in crit_roots.iter().copied() {
             if !matches!(cur.gates[root.id], AigNode::And2 { .. }) {
                 continue;
             }
-            let cands = choose_candidate_replacements_for_root(root, &cuts_by_node, &depth_map, db);
+            let cands = choose_candidate_replacements_for_root(
+                root,
+                &cuts_by_node,
+                &virtual_state.depths,
+                db,
+            );
             candidates_considered += cands.len();
             for cand in cands {
-                if rebuilds_tried >= max_depth_phase_rebuilds_per_iter {
+                if opts.max_candidate_evals_per_round != 0
+                    && candidate_evals >= opts.max_candidate_evals_per_round
+                {
                     break 'crit;
                 }
-                rebuilds_tried += 1;
-                let new_g = rebuild_with_replacement(&cur, &cand);
-                let new_id_to_use_count = get_id_to_use_count(&new_g);
-                let new_live: Vec<AigRef> = new_id_to_use_count.keys().cloned().collect();
-                let new_depth_stats = get_gate_depth(&new_g, &new_live);
-                let new_global_depth = new_depth_stats.deepest_path.len();
-                if new_global_depth < cur_global_depth {
-                    cur = new_g;
-                    applied = true;
-                    break 'crit;
+                candidate_evals += 1;
+                if virtual_state.try_accept_replacement(&cand) {
+                    accepted_replacements.push(cand);
+                    if opts.max_rewrites_per_round != 0
+                        && accepted_replacements.len() >= opts.max_rewrites_per_round
+                    {
+                        break 'crit;
+                    }
                 }
             }
         }
         let t_phase_ms = t_phase.elapsed().as_millis();
+
+        let mut rebuild_ms = 0;
+        let mut after_global_depth = cur_global_depth;
+        if !accepted_replacements.is_empty() {
+            let t_rebuild = Instant::now();
+            let new_g = rebuild_with_replacements(&cur, &accepted_replacements);
+            rebuild_ms = t_rebuild.elapsed().as_millis();
+            let new_id_to_use_count = get_id_to_use_count(&new_g);
+            let new_live: Vec<AigRef> = new_id_to_use_count.keys().cloned().collect();
+            let new_depth_stats = get_gate_depth(&new_g, &new_live);
+            after_global_depth = new_depth_stats.deepest_path.len();
+            if after_global_depth < cur_global_depth {
+                cur = new_g;
+            } else {
+                log::info!(
+                    "cut-db rewrite: discarded non-improving replacement batch; before_depth={} after_depth={} replacements={}",
+                    cur_global_depth,
+                    after_global_depth,
+                    accepted_replacements.len()
+                );
+                break;
+            }
+        }
+
         log::debug!(
-            "cut-db rewrite iter timings: use_count_ms={} depth_ms={} cuts_ms={} phase_ms={} cands_considered={} rebuilds_tried={} iter_elapsed_ms={}",
+            "cut-db rewrite round timings: use_count_ms={} depth_ms={} cuts_ms={} phase_ms={} rebuild_ms={} critical_roots={} cands_considered={} candidate_evals={} accepted={} before_depth={} after_depth={} round_elapsed_ms={}",
             t_use_count_ms,
             t_depth_ms,
             t_cuts_ms,
             t_phase_ms,
+            rebuild_ms,
+            crit_roots.len(),
             candidates_considered,
-            rebuilds_tried,
+            candidate_evals,
+            accepted_replacements.len(),
+            cur_global_depth,
+            after_global_depth,
             t_iter0.elapsed().as_millis()
         );
 
-        if !applied {
-            if rebuilds_tried >= max_depth_phase_rebuilds_per_iter {
+        if accepted_replacements.is_empty() {
+            if opts.max_candidate_evals_per_round != 0
+                && candidate_evals >= opts.max_candidate_evals_per_round
+            {
                 log::info!(
-                    "cut-db rewrite: hit per-iter rebuild cap ({}); stopping",
-                    max_depth_phase_rebuilds_per_iter
+                    "cut-db rewrite: hit per-round candidate eval cap ({}); stopping",
+                    opts.max_candidate_evals_per_round
                 );
             } else {
                 log::info!("cut-db rewrite: no depth-improving candidate found; stopping");
@@ -671,6 +1032,7 @@ mod tests {
             RewriteOptions {
                 max_cuts_per_node: 32,
                 max_iterations: 8,
+                ..RewriteOptions::default()
             },
         );
         let after = get_summary_stats(&rewritten);
@@ -743,6 +1105,7 @@ mod tests {
             RewriteOptions {
                 max_cuts_per_node: 32,
                 max_iterations: 8,
+                ..RewriteOptions::default()
             },
         );
 

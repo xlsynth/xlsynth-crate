@@ -362,6 +362,7 @@ impl AppExt for clap::Command {
                     .action(clap::ArgAction::Set),
             )
             .add_bool_arg("fraig", "Run fraig optimization")
+            .add_bool_arg("cut-db", "Run cut-db rewrite optimization")
             .arg(
                 clap::Arg::new("fraig_max_iterations")
                     .long("fraig-max-iterations")
@@ -1482,6 +1483,13 @@ fn main() {
                         .long("prepared-ir-out")
                         .value_name("PATH")
                         .help("Write the residual PIR after prep_for_gatify to PATH")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("pre_cut_db_g8rbin_out")
+                        .long("pre-cut-db-g8rbin-out")
+                        .value_name("PATH")
+                        .help("Write the post-FRAIG, pre-cut-db GateFn as a .g8rbin file")
                         .action(clap::ArgAction::Set),
                 )
                 .add_g8r_lowering_flags()

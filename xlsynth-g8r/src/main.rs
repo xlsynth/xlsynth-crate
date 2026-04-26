@@ -5,7 +5,8 @@ use std::fs;
 use clap::Parser;
 use prost::Message;
 use xlsynth_g8r::cut_db_cli_defaults::{
-    CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI, CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
+    CUT_DB_REWRITE_MAX_CANDIDATE_EVALS_PER_ROUND_CLI, CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
+    CUT_DB_REWRITE_MAX_ITERATIONS_CLI, CUT_DB_REWRITE_MAX_REWRITES_PER_ROUND_CLI,
 };
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::process_ir_path::{Options, process_ir_path_for_cli};
@@ -34,6 +35,11 @@ struct Args {
 
     #[arg(long)]
     fraig_sim_samples: Option<usize>,
+
+    /// Whether to run the cut-db rewrite optimization.
+    #[arg(long, default_value_t = true)]
+    #[arg(action = clap::ArgAction::Set)]
+    cut_db: bool,
 
     /// Whether to check equivalence between the IR and the gate function.
     #[arg(long, default_value_t = true)]
@@ -72,6 +78,11 @@ struct Args {
     #[arg(action = clap::ArgAction::Set)]
     result_proto: Option<String>,
 
+    /// Write the post-FRAIG, pre-cut-db GateFn as a .g8rbin file.
+    #[arg(long)]
+    #[arg(action = clap::ArgAction::Set)]
+    pre_cut_db_g8rbin_out: Option<String>,
+
     /// The path to the XLS IR file.
     input: String,
 }
@@ -79,7 +90,11 @@ struct Args {
 fn main() {
     let _ = env_logger::builder().try_init();
     let args = Args::parse();
-    let cut_db = Some(xlsynth_g8r::cut_db::loader::CutDb::load_default());
+    let cut_db = if args.cut_db {
+        Some(xlsynth_g8r::cut_db::loader::CutDb::load_default())
+    } else {
+        None
+    };
 
     let options = Options {
         check_equivalence: args.check_equivalence,
@@ -105,7 +120,11 @@ fn main() {
         fraig_sim_samples: args.fraig_sim_samples,
         cut_db,
         cut_db_rewrite_max_iterations: CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
+        cut_db_rewrite_max_candidate_evals_per_round:
+            CUT_DB_REWRITE_MAX_CANDIDATE_EVALS_PER_ROUND_CLI,
+        cut_db_rewrite_max_rewrites_per_round: CUT_DB_REWRITE_MAX_REWRITES_PER_ROUND_CLI,
         cut_db_rewrite_max_cuts_per_node: CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
+        pre_cut_db_gate_fn_out: args.pre_cut_db_g8rbin_out.map(std::path::PathBuf::from),
         prepared_ir_out: None,
     };
     let input_path = std::path::Path::new(&args.input);

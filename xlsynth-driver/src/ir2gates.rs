@@ -30,9 +30,10 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
     };
     let output_json = matches.get_one::<String>("output_json");
     let prepared_ir_out = matches.get_one::<String>("prepared_ir_out");
+    let pre_cut_db_g8rbin_out = matches.get_one::<String>("pre_cut_db_g8rbin_out");
 
     let input_path = std::path::Path::new(input_file);
-    let options = crate::g8r_cli::build_process_ir_path_options_for_cli(
+    let mut options = crate::g8r_cli::build_process_ir_path_options_for_cli(
         matches,
         quiet,
         /* emit_netlist= */ false,
@@ -40,6 +41,7 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
         ir_top,
         prepared_ir_out.map(|s| std::path::Path::new(s)),
     );
+    options.pre_cut_db_gate_fn_out = pre_cut_db_g8rbin_out.map(|s| std::path::PathBuf::from(s));
     let stats = process_ir_path::process_ir_path_for_cli(input_path, &options);
     if quiet {
         serde_json::to_writer(std::io::stdout(), &stats).unwrap();

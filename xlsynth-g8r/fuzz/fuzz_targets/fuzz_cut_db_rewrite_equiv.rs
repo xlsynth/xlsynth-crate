@@ -41,6 +41,7 @@ fuzz_target!(|graph: FuzzGraph| {
         RewriteOptions {
             max_cuts_per_node: 32,
             max_iterations: 2,
+            ..RewriteOptions::default()
         },
     );
 

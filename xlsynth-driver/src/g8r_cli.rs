@@ -3,7 +3,8 @@
 use clap::ArgMatches;
 use xlsynth_g8r::cut_db::loader::CutDb;
 use xlsynth_g8r::cut_db_cli_defaults::{
-    CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI, CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
+    CUT_DB_REWRITE_MAX_CANDIDATE_EVALS_PER_ROUND_CLI, CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
+    CUT_DB_REWRITE_MAX_ITERATIONS_CLI, CUT_DB_REWRITE_MAX_REWRITES_PER_ROUND_CLI,
 };
 use xlsynth_g8r::gatify::prep_for_gatify::PrepForGatifyOptions;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
@@ -102,6 +103,7 @@ pub(crate) struct G8rCliOptions {
     pub(crate) graph_logical_effort_beta2: f64,
     pub(crate) fraig_max_iterations: Option<usize>,
     pub(crate) fraig_sim_samples: Option<usize>,
+    pub(crate) cut_db: bool,
 }
 
 pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> G8rCliOptions {
@@ -153,6 +155,7 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> G8rCliOptions {
         parse_optional_usize_or_exit(matches, "fraig_max_iterations", "--fraig-max-iterations");
     let fraig_sim_samples =
         parse_optional_usize_or_exit(matches, "fraig_sim_samples", "--fraig-sim-samples");
+    let cut_db = parse_bool(matches, "cut-db", /* default= */ true);
 
     G8rCliOptions {
         fold,
@@ -171,6 +174,7 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> G8rCliOptions {
         graph_logical_effort_beta2,
         fraig_max_iterations,
         fraig_sim_samples,
+        cut_db,
     }
 }
 
@@ -205,9 +209,17 @@ pub(crate) fn build_process_ir_path_options_for_cli(
         compute_graph_logical_effort: cli.compute_graph_logical_effort,
         graph_logical_effort_beta1: cli.graph_logical_effort_beta1,
         graph_logical_effort_beta2: cli.graph_logical_effort_beta2,
-        cut_db: Some(CutDb::load_default()),
+        cut_db: if cli.cut_db {
+            Some(CutDb::load_default())
+        } else {
+            None
+        },
         cut_db_rewrite_max_iterations: CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
+        cut_db_rewrite_max_candidate_evals_per_round:
+            CUT_DB_REWRITE_MAX_CANDIDATE_EVALS_PER_ROUND_CLI,
+        cut_db_rewrite_max_rewrites_per_round: CUT_DB_REWRITE_MAX_REWRITES_PER_ROUND_CLI,
         cut_db_rewrite_max_cuts_per_node: CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
+        pre_cut_db_gate_fn_out: None,
         prepared_ir_out: prepared_ir_out.map(|p| p.to_path_buf()),
     }
 }

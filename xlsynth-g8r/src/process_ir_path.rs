@@ -173,12 +173,23 @@ pub struct Options {
     pub cut_db: Option<std::sync::Arc<crate::cut_db::loader::CutDb>>,
 
     /// Deterministic bound on cut-db rewrite effort. If set to `0`, the pass
-    /// runs to convergence.
+    /// runs to convergence. This bounds global recompute rounds.
     pub cut_db_rewrite_max_iterations: usize,
+
+    /// Maximum cheap candidate depth evaluations per cut-db global recompute
+    /// round. If set to `0`, candidate evaluation is unbounded.
+    pub cut_db_rewrite_max_candidate_evals_per_round: usize,
+
+    /// Maximum accepted cut-db replacements per global recompute round. If set
+    /// to `0`, accepted replacements are unbounded.
+    pub cut_db_rewrite_max_rewrites_per_round: usize,
 
     /// Maximum number of cuts kept per node during cut enumeration. If set to
     /// `0`, cut enumeration is unbounded (not recommended for CLI use).
     pub cut_db_rewrite_max_cuts_per_node: usize,
+
+    /// Optional path to write the post-FRAIG, pre-cut-db `GateFn` as bincode.
+    pub pre_cut_db_gate_fn_out: Option<std::path::PathBuf>,
 
     /// Optional path to write the residual PIR after `prep_for_gatify` (and
     /// extension lowering) for the top function.
@@ -485,6 +496,23 @@ pub fn process_ir_path_with_gatefn(
         fraig_iteration_stats = Some(iteration_stats);
     }
 
+    if let Some(out_path) = options.pre_cut_db_gate_fn_out.as_ref() {
+        let bytes = bincode::serialize(&gate_fn).unwrap_or_else(|e| {
+            panic!(
+                "Failed to serialize pre-cut-db GateFn for {}: {}",
+                out_path.display(),
+                e
+            )
+        });
+        std::fs::write(out_path, bytes).unwrap_or_else(|e| {
+            panic!(
+                "Failed to write pre-cut-db GateFn output {}: {}",
+                out_path.display(),
+                e
+            )
+        });
+    }
+
     if let Some(db) = options.cut_db.as_ref() {
         log::info!("cut-db rewrite enabled");
         gate_fn = cut_db_rewrite::rewrite_gatefn_with_cut_db(
@@ -493,6 +521,8 @@ pub fn process_ir_path_with_gatefn(
             cut_db_rewrite::RewriteOptions {
                 max_cuts_per_node: options.cut_db_rewrite_max_cuts_per_node,
                 max_iterations: options.cut_db_rewrite_max_iterations,
+                max_candidate_evals_per_round: options.cut_db_rewrite_max_candidate_evals_per_round,
+                max_rewrites_per_round: options.cut_db_rewrite_max_rewrites_per_round,
             },
         );
     }
