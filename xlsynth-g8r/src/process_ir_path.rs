@@ -30,6 +30,8 @@ use xlsynth_pir::ir;
 use xlsynth_pir::ir_range_info::IrRangeInfo;
 use xlsynth_pir::ir_utils;
 
+pub const DEFAULT_MAX_FRAIG_SIM_SAMPLES: usize = 8 * 1024;
+
 #[derive(Debug, serde::Serialize)]
 pub struct Ir2GatesSummaryStats {
     pub live_nodes: usize,
@@ -154,10 +156,11 @@ pub struct Options {
     /// If not set, we fraig to convergence.
     pub fraig_max_iterations: Option<usize>,
 
-    /// If not set, we scale the gate count down by some policy (e.g. divide
-    /// down by 128 and then round to the nearest 256) and use that many
-    /// samples.
-    pub fraig_sim_samples: Option<usize>,
+    /// Maximum random simulation samples used for FRAIG candidate discovery.
+    ///
+    /// The base sample count is scaled from the live node count and rounded up
+    /// to a SIMD batch boundary, then capped by this value when present.
+    pub max_fraig_sim_samples: Option<usize>,
 
     /// SAT backend used to validate proposed FRAIG equivalence classes.
     pub fraig_validation_backend: ValidationBackend,
@@ -193,9 +196,6 @@ pub struct Options {
     /// Maximum number of cuts kept per node during cut enumeration. If set to
     /// `0`, cut enumeration is unbounded (not recommended for CLI use).
     pub cut_db_rewrite_max_cuts_per_node: usize,
-
-    /// Optional path to write the post-FRAIG, pre-cut-db `GateFn` as bincode.
-    pub pre_cut_db_gate_fn_out: Option<std::path::PathBuf>,
 
     /// Optional path to write the residual PIR after `prep_for_gatify` (and
     /// extension lowering) for the top function.
@@ -469,22 +469,21 @@ pub fn process_ir_path_with_gatefn(
         } else {
             IterationBounds::ToConvergence
         };
-        let sim_samples = match options.fraig_sim_samples {
-            Some(n) => n,
-            None => {
-                let live_node_count = get_id_to_use_count(&gate_fn).len().max(1);
-                let scaled = (live_node_count as f64 / 8.0).ceil() as usize;
-                // Round the scaled value to the nearest 256, it must be more than zero.
-                let result = round_up_to_nearest_multiple(scaled, 256);
-                log::info!(
-                    "fraig sim samples; live node count: {}, scaled: {}, result: {}",
-                    live_node_count,
-                    scaled,
-                    result
-                );
-                result
-            }
-        };
+        let live_node_count = get_id_to_use_count(&gate_fn).len().max(1);
+        let scaled = (live_node_count as f64 / 8.0).ceil() as usize;
+        // Round the scaled value to the nearest 256, it must be more than zero.
+        let uncapped = round_up_to_nearest_multiple(scaled, 256);
+        let sim_samples = options
+            .max_fraig_sim_samples
+            .map_or(uncapped, |max_samples| uncapped.min(max_samples));
+        log::info!(
+            "fraig sim samples; live node count: {}, scaled: {}, uncapped: {}, max: {:?}, result: {}",
+            live_node_count,
+            scaled,
+            uncapped,
+            options.max_fraig_sim_samples,
+            sim_samples
+        );
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(0);
         let fraig_result: Result<_, _> = fraig::fraig_optimize_with_backend(
             &gate_fn,
@@ -505,23 +504,6 @@ pub fn process_ir_path_with_gatefn(
         // Capture fraig results for JSON
         fraig_did_converge = Some(did_converge);
         fraig_iteration_stats = Some(iteration_stats);
-    }
-
-    if let Some(out_path) = options.pre_cut_db_gate_fn_out.as_ref() {
-        let bytes = bincode::serialize(&gate_fn).unwrap_or_else(|e| {
-            panic!(
-                "Failed to serialize pre-cut-db GateFn for {}: {}",
-                out_path.display(),
-                e
-            )
-        });
-        std::fs::write(out_path, bytes).unwrap_or_else(|e| {
-            panic!(
-                "Failed to write pre-cut-db GateFn output {}: {}",
-                out_path.display(),
-                e
-            )
-        });
     }
 
     if let Some(db) = options.cut_db.as_ref() {

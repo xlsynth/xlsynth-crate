@@ -8,7 +8,8 @@ use std::sync::OnceLock;
 use xlsynth_g8r::aig::cut_db_rewrite::{RewriteOptions, rewrite_gatefn_with_cut_db};
 use xlsynth_g8r::cut_db::loader::CutDb;
 use xlsynth_g8r::cut_db_cli_defaults::{
-    CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI, CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
+    CUT_DB_REWRITE_MAX_CANDIDATE_EVALS_PER_ROUND_CLI, CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
+    CUT_DB_REWRITE_MAX_ITERATIONS_CLI, CUT_DB_REWRITE_MAX_REWRITES_PER_ROUND_CLI,
 };
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::ir2gates;
@@ -58,6 +59,8 @@ fn run_ir2gates_like_flow_for_umul(width: usize) {
         RewriteOptions {
             max_cuts_per_node: CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
             max_iterations: CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
+            max_candidate_evals_per_round: CUT_DB_REWRITE_MAX_CANDIDATE_EVALS_PER_ROUND_CLI,
+            max_rewrites_per_round: CUT_DB_REWRITE_MAX_REWRITES_PER_ROUND_CLI,
         },
     );
 }

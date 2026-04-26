@@ -15,7 +15,7 @@
 //! for now.
 
 use rand::Rng;
-use std::{collections::HashSet, env, error::Error};
+use std::{collections::HashSet, error::Error};
 use xlsynth::IrBits;
 
 use crate::aig::bulk_replace::{SubstitutionMap, bulk_replace};
@@ -30,7 +30,9 @@ use crate::{
     },
 };
 
-const FRAIG_CLASS_BATCH_SIZE_ENV: &str = "XLSYNTH_G8R_FRAIG_CLASS_BATCH_SIZE";
+/// Number of proposed equivalence classes validated before applying
+/// replacements and re-proposing.
+const FRAIG_CLASS_BATCH_SIZE: usize = 256;
 
 pub enum IterationBounds {
     MaxIterations(usize),
@@ -79,34 +81,6 @@ impl Into<crate::result_proto::FraigIterationStat> for FraigIterationStat {
             counterexample_count: self.counterexample_count as u64,
             proposed_equiv_classes: self.proposed_equiv_classes as u64,
             replacements_count: self.replacements_count as u64,
-        }
-    }
-}
-
-/// Returns the opt-in validation batch size for FRAIG candidate classes.
-fn fraig_class_batch_size_from_env() -> Option<usize> {
-    match env::var(FRAIG_CLASS_BATCH_SIZE_ENV) {
-        Ok(value) => match value.parse::<usize>() {
-            Ok(0) => None,
-            Ok(parsed) => Some(parsed),
-            Err(e) => {
-                log::warn!(
-                    "ignoring invalid {}={:?}: {}",
-                    FRAIG_CLASS_BATCH_SIZE_ENV,
-                    value,
-                    e
-                );
-                None
-            }
-        },
-        Err(env::VarError::NotPresent) => None,
-        Err(env::VarError::NotUnicode(value)) => {
-            log::warn!(
-                "ignoring non-unicode {}={:?}",
-                FRAIG_CLASS_BATCH_SIZE_ENV,
-                value
-            );
-            None
         }
     }
 }
@@ -278,9 +252,7 @@ pub fn fraig_optimize_with_backend(
             .collect();
         let stats = get_gate_depth(&current_fn, &live_nodes);
         let sorted_equiv_classes = sort_equiv_classes_by_depth(&equiv_classes, &stats);
-        let batch_size = fraig_class_batch_size_from_env()
-            .unwrap_or(sorted_equiv_classes.len().max(1))
-            .min(sorted_equiv_classes.len().max(1));
+        let batch_size = FRAIG_CLASS_BATCH_SIZE.min(sorted_equiv_classes.len().max(1));
         let is_batched = batch_size < sorted_equiv_classes.len();
         let mut applied_replacements = false;
         let mut restarted_after_counterexample = false;

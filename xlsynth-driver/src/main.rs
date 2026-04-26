@@ -362,7 +362,6 @@ impl AppExt for clap::Command {
                     .action(clap::ArgAction::Set),
             )
             .add_bool_arg("fraig", "Run fraig optimization")
-            .add_bool_arg("cut-db", "Run cut-db rewrite optimization")
             .arg(
                 clap::Arg::new("fraig_max_iterations")
                     .long("fraig-max-iterations")
@@ -371,10 +370,12 @@ impl AppExt for clap::Command {
                     .action(clap::ArgAction::Set),
             )
             .arg(
-                clap::Arg::new("fraig_sim_samples")
-                    .long("fraig-sim-samples")
+                clap::Arg::new("max_fraig_sim_samples")
+                    .long("max-fraig-sim-samples")
+                    .alias("fraig-sim-samples")
+                    .default_value("8192")
                     .value_name("N")
-                    .help("Number of samples to use for fraig optimization")
+                    .help("Maximum number of random simulation samples to use for FRAIG candidate discovery")
                     .action(clap::ArgAction::Set),
             )
             .arg(
@@ -1492,13 +1493,6 @@ fn main() {
                         .long("prepared-ir-out")
                         .value_name("PATH")
                         .help("Write the residual PIR after prep_for_gatify to PATH")
-                        .action(clap::ArgAction::Set),
-                )
-                .arg(
-                    clap::Arg::new("pre_cut_db_g8rbin_out")
-                        .long("pre-cut-db-g8rbin-out")
-                        .value_name("PATH")
-                        .help("Write the post-FRAIG, pre-cut-db GateFn as a .g8rbin file")
                         .action(clap::ArgAction::Set),
                 )
                 .add_g8r_lowering_flags()
