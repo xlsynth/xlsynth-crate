@@ -287,10 +287,14 @@ fn build_sat_clauses<S: IncrementalSat>(
         aig_ref_to_lit.insert(*aig_ref, lit);
     }
 
-    // Create literals for all inputs to the cone.
-    for input in cone_inputs {
+    // Create literals for all inputs to the cone in deterministic order. SAT
+    // model choices feed FRAIG counterexamples, so literal numbering should
+    // not depend on HashSet iteration order.
+    let mut sorted_cone_inputs: Vec<AigRef> = cone_inputs.iter().copied().collect();
+    sorted_cone_inputs.sort_unstable_by_key(|input| input.id);
+    for input in sorted_cone_inputs {
         let lit = solver.sat_new_lit();
-        aig_ref_to_lit.insert(*input, lit);
+        aig_ref_to_lit.insert(input, lit);
     }
 
     // For each gate add correpsonding structural clauses.
@@ -592,6 +596,19 @@ pub fn validate_equivalence_classes(
     )
 }
 
+/// Validates classes whose members and class order have already been
+/// depth-sorted.
+pub fn validate_equivalence_classes_presorted(
+    gate_fn: &GateFn,
+    equiv_classes: &[&[EquivNode]],
+) -> Result<ValidationResult, ValidationError> {
+    validate_equivalence_classes_presorted_with_backend(
+        gate_fn,
+        equiv_classes,
+        ValidationBackend::from_env()?,
+    )
+}
+
 pub fn validate_equivalence_classes_with_backend(
     gate_fn: &GateFn,
     equiv_classes: &[&[EquivNode]],
@@ -600,11 +617,48 @@ pub fn validate_equivalence_classes_with_backend(
     match backend {
         ValidationBackend::Varisat => {
             let mut solver = varisat::Solver::new();
-            validate_equivalence_classes_with_solver(gate_fn, equiv_classes, &mut solver)
+            validate_equivalence_classes_with_solver(
+                gate_fn,
+                equiv_classes,
+                &mut solver,
+                /* classes_are_depth_sorted= */ false,
+            )
         }
         ValidationBackend::Cadical => {
             let mut solver = CadicalSat::new()?;
-            validate_equivalence_classes_with_solver(gate_fn, equiv_classes, &mut solver)
+            validate_equivalence_classes_with_solver(
+                gate_fn,
+                equiv_classes,
+                &mut solver,
+                /* classes_are_depth_sorted= */ false,
+            )
+        }
+    }
+}
+
+fn validate_equivalence_classes_presorted_with_backend(
+    gate_fn: &GateFn,
+    equiv_classes: &[&[EquivNode]],
+    backend: ValidationBackend,
+) -> Result<ValidationResult, ValidationError> {
+    match backend {
+        ValidationBackend::Varisat => {
+            let mut solver = varisat::Solver::new();
+            validate_equivalence_classes_with_solver(
+                gate_fn,
+                equiv_classes,
+                &mut solver,
+                /* classes_are_depth_sorted= */ true,
+            )
+        }
+        ValidationBackend::Cadical => {
+            let mut solver = CadicalSat::new()?;
+            validate_equivalence_classes_with_solver(
+                gate_fn,
+                equiv_classes,
+                &mut solver,
+                /* classes_are_depth_sorted= */ true,
+            )
         }
     }
 }
@@ -613,6 +667,7 @@ fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
     gate_fn: &GateFn,
     equiv_classes: &[&[EquivNode]],
     solver: &mut S,
+    classes_are_depth_sorted: bool,
 ) -> Result<ValidationResult, ValidationError> {
     // Extract the combined cone for all of the references we're trying to determine
     // equivalence for.
@@ -640,24 +695,32 @@ fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
         proven_equiv_sets: Vec::new(),
         cex_inputs: Vec::new(),
     };
-    let all_nodes: Vec<AigRef> = gate_fn
-        .gates
-        .iter()
-        .enumerate()
-        .map(|(id, _)| AigRef { id })
-        .collect();
-    let depth_stats = get_gate_depth(gate_fn, &all_nodes);
-    let mut sorted_equiv_classes: Vec<Vec<EquivNode>> = equiv_classes
-        .iter()
-        .map(|equiv_class| sorted_equiv_class(equiv_class, &depth_stats.ref_to_depth))
-        .collect();
-    sorted_equiv_classes.sort_unstable_by_key(|equiv_class| {
-        let representative = equiv_class[0];
-        (
-            equiv_node_depth_key(&depth_stats.ref_to_depth, representative),
-            equiv_class.len(),
-        )
-    });
+    let sorted_equiv_classes: Vec<Vec<EquivNode>> = if classes_are_depth_sorted {
+        equiv_classes
+            .iter()
+            .map(|equiv_class| equiv_class.to_vec())
+            .collect()
+    } else {
+        let all_nodes: Vec<AigRef> = gate_fn
+            .gates
+            .iter()
+            .enumerate()
+            .map(|(id, _)| AigRef { id })
+            .collect();
+        let depth_stats = get_gate_depth(gate_fn, &all_nodes);
+        let mut sorted_equiv_classes: Vec<Vec<EquivNode>> = equiv_classes
+            .iter()
+            .map(|equiv_class| sorted_equiv_class(equiv_class, &depth_stats.ref_to_depth))
+            .collect();
+        sorted_equiv_classes.sort_unstable_by_key(|equiv_class| {
+            let representative = equiv_class[0];
+            (
+                equiv_node_depth_key(&depth_stats.ref_to_depth, representative),
+                equiv_class.len(),
+            )
+        });
+        sorted_equiv_classes
+    };
     let mut counterexample_models: Vec<S::Model> = Vec::new();
 
     // Now iterate through the equivalence classes -- for each equivalence class
