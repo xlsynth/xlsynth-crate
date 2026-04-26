@@ -21,6 +21,10 @@ Try to keep the workspace crate dependency graph **acyclic**, even in `dev-depen
 
 - Prefer placing cross-crate integration / equivalence tests in a crate that already depends on both sides (often `xlsynth-prover`), rather than adding a `dev-dependency` from a lower-level crate back “up” the stack.
 - This keeps build times and feature selection more predictable and avoids subtle CI-only cycles.
+- Prefer avoiding new Cargo feature flags when a normal dependency or small
+  refactor is reasonable. Each feature flag creates another build
+  configuration, which increases the combinatorial testing burden and makes CI
+  coverage harder to reason about.
 
 ## `pre-commit`
 

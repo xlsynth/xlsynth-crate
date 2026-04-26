@@ -538,7 +538,7 @@ pub fn outline_with_ordering(
     let (inner_ret_ref, inner_ret_ty) = if ret_elem_refs.len() == 1 {
         (Some(ret_elem_refs[0]), ret_elem_tys.remove(0))
     } else {
-        let tuple_ty = Type::Tuple(ret_elem_tys.into_iter().map(|t| Box::new(t)).collect());
+        let tuple_ty = Type::Tuple(ret_elem_tys.into_iter().map(Box::new).collect());
         let tuple_node = Node {
             text_id: next_inner_text_id,
             name: None,

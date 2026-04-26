@@ -1,0 +1,25 @@
+[package]
+name = "xlsynth-dslx-routines"
+version = "0.42.0"
+edition = "2024"
+authors = ["Christopher D. Leary <cdleary@gmail.com>"]
+description = "Reusable DSLX routine implementations and QoR tests"
+license = "Apache-2.0"
+repository = "https://github.com/xlsynth/xlsynth-crate"
+documentation = "https://docs.rs/xlsynth"
+homepage = "https://github.com/xlsynth/xlsynth-crate"
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+name = "xlsynth_dslx_routines"
+path = "src/lib.rs"
+
+[dev-dependencies]
+xlsynth = { path = "../xlsynth", version = "0.42.0" }
+xlsynth-g8r = { path = "../xlsynth-g8r", version = "0.42.0" }
+xlsynth-test-helpers = { path = "../xlsynth-test-helpers", version = "0.42.0" }
+env_logger = "0.11"
+pretty_assertions = "1.4.1"
