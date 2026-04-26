@@ -3250,12 +3250,7 @@ impl Parser {
         }
 
         // Multiple outputs: build a tuple node and return it.
-        let ret_ty = ir::Type::Tuple(
-            ret_types_in_order
-                .into_iter()
-                .map(|t| Box::new(t))
-                .collect(),
-        );
+        let ret_ty = ir::Type::Tuple(ret_types_in_order.into_iter().map(Box::new).collect());
         let next_id = nodes.iter().map(|n| n.text_id).max().unwrap_or(0) + 1;
         let tuple_node = ir::Node {
             text_id: next_id,

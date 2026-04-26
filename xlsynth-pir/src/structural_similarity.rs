@@ -1147,7 +1147,7 @@ fn build_inner_with_union_user_slots(
     let (ret_ref_opt, ret_ty) = if ret_elems.len() == 1 {
         (Some(ret_elems[0]), ret_tys.remove(0))
     } else {
-        let tuple_ty = Type::Tuple(ret_tys.into_iter().map(|t| Box::new(t)).collect());
+        let tuple_ty = Type::Tuple(ret_tys.into_iter().map(Box::new).collect());
         let tuple_node = Node {
             text_id: next_text_id,
             name: None,
