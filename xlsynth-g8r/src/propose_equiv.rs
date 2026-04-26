@@ -8,7 +8,7 @@ use xlsynth::IrBits;
 
 use rand::Rng;
 use std::cmp::min;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 const SIMD_LANES: usize = 256;
 const SIGNATURE_INIT_STATE: [u64; 2] = [0x7266_6169_672f_7369, 0x6d75_6c61_7469_6f6e];
@@ -259,7 +259,7 @@ pub fn propose_equivalence_classes(
     gate_fn: &GateFn,
     input_sample_count: usize,
     rng: &mut impl Rng,
-    counterexamples: &HashSet<Vec<IrBits>>,
+    counterexamples: &[Vec<IrBits>],
 ) -> HashMap<SimulationSignature, Vec<EquivNode>> {
     let gate_count = gate_fn.gates.len();
     let live_nodes = output_reachable_nodes(gate_fn);
@@ -422,7 +422,7 @@ mod tests {
         let _ = env_logger::builder().is_test(true).try_init();
         let graph = setup_simple_graph();
         let mut seeded_rng = rand::rngs::StdRng::seed_from_u64(0);
-        let counterexamples = HashSet::new();
+        let counterexamples = Vec::new();
         let equiv_classes =
             propose_equivalence_classes(&graph.g, 4096, &mut seeded_rng, &counterexamples);
         // There are no redundancies in this graph, so we should not find any
@@ -435,7 +435,7 @@ mod tests {
         let _ = env_logger::builder().is_test(true).try_init();
         let graph = setup_graph_with_redundancies();
         let mut seeded_rng = rand::rngs::StdRng::seed_from_u64(0);
-        let counterexamples = HashSet::new();
+        let counterexamples = Vec::new();
         let equiv_classes =
             propose_equivalence_classes(&graph.g, 4096, &mut seeded_rng, &counterexamples);
         log::info!("equiv_classes: {:?}", equiv_classes);
@@ -493,7 +493,7 @@ mod tests {
         let scalar_classes =
             propose_equivalence_classes_scalar_for_test(&graph.g, &[], &counterexample_samples);
 
-        let counterexamples = counterexample_samples.into_iter().collect::<HashSet<_>>();
+        let counterexamples = counterexample_samples;
         let mut simd_rng = rand::rngs::StdRng::seed_from_u64(7);
         let simd_classes =
             propose_equivalence_classes(&graph.g, 0, &mut simd_rng, &counterexamples);

@@ -800,8 +800,6 @@ fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use rand::SeedableRng;
 
     use crate::{
@@ -829,7 +827,7 @@ mod tests {
     fn test_validate_equiv_graph_with_redundancies() {
         let setup = setup_graph_with_redundancies();
         let mut seeded_rng = rand::rngs::StdRng::seed_from_u64(0);
-        let counterexamples = HashSet::new();
+        let counterexamples = Vec::new();
         let equiv_classes =
             propose_equivalence_classes(&setup.g, 16, &mut seeded_rng, &counterexamples);
         let classes: Vec<&[EquivNode]> = equiv_classes
@@ -845,7 +843,7 @@ mod tests {
     fn test_cadical_matches_varisat_on_redundant_graph() {
         let setup = setup_graph_with_redundancies();
         let mut seeded_rng = rand::rngs::StdRng::seed_from_u64(0);
-        let counterexamples = HashSet::new();
+        let counterexamples = Vec::new();
         let equiv_classes =
             propose_equivalence_classes(&setup.g, 16, &mut seeded_rng, &counterexamples);
         let classes: Vec<&[EquivNode]> = equiv_classes

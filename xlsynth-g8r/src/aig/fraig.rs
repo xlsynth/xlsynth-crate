@@ -217,7 +217,8 @@ pub fn fraig_optimize_with_backend(
 ) -> Result<(GateFn, DidConverge, Vec<FraigIterationStat>), Box<dyn Error>> {
     let mut iteration_count = 0;
     let mut current_fn = f.clone();
-    let mut counterexamples: HashSet<Vec<IrBits>> = HashSet::new();
+    let mut counterexample_seen: HashSet<Vec<IrBits>> = HashSet::new();
+    let mut counterexamples: Vec<Vec<IrBits>> = Vec::new();
     // Initialize iteration stats collection
     let mut iteration_stats: Vec<FraigIterationStat> = Vec::new();
     loop {
@@ -276,7 +277,8 @@ pub fn fraig_optimize_with_backend(
 
             let mut new_counterexample_count = 0usize;
             for cex in validation_result.cex_inputs {
-                if counterexamples.insert(cex) {
+                if counterexample_seen.insert(cex.clone()) {
+                    counterexamples.push(cex);
                     new_counterexample_count += 1;
                 }
             }
