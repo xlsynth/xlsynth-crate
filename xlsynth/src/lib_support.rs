@@ -265,6 +265,27 @@ pub(crate) fn xls_bits_make_sbits(bit_count: usize, value: i64) -> Result<IrBits
     Ok(IrBits { ptr: result })
 }
 
+pub(crate) fn xls_bits_make_bits_from_bytes(
+    bit_count: usize,
+    bytes: &[u8],
+) -> Result<IrBits, XlsynthError> {
+    unsafe {
+        let mut error_out: *mut std::os::raw::c_char = std::ptr::null_mut();
+        let mut bits_out: *mut CIrBits = std::ptr::null_mut();
+        let success = xlsynth_sys::xls_bits_make_bits_from_bytes(
+            bit_count,
+            bytes.as_ptr(),
+            bytes.len(),
+            &mut error_out,
+            &mut bits_out,
+        );
+        if !success {
+            return Err(XlsynthError(c_str_to_rust(error_out)));
+        }
+        Ok(IrBits { ptr: bits_out })
+    }
+}
+
 pub(crate) fn xls_value_get_bits(p: *const CIrValue) -> Result<IrBits, XlsynthError> {
     let mut result: *mut CIrBits = std::ptr::null_mut();
     xls_ffi_call!(xlsynth_sys::xls_value_get_bits, p; result)?;

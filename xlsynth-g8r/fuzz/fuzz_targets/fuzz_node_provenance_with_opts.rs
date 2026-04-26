@@ -86,6 +86,7 @@ fuzz_target!(|sample: FuzzSample| {
         RewriteOptions {
             max_cuts_per_node: 32,
             max_iterations: 1,
+            ..RewriteOptions::default()
         },
     );
 

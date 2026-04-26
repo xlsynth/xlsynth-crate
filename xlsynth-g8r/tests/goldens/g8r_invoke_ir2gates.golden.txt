@@ -5,11 +5,11 @@
      1 :: priority_sel(bits[1], bits[1], bits[1]) -> bits[1]
 == Fraig convergence: Yes(0)
 == Deepest path (3):
-     6 :: And2(~Ref(4), ~Ref(5))
+     6 :: And2(~Ref(5), ~Ref(4))
           tags: priority_sel_4_output_bit_0
           source: bar.x:3:1 foo.x:2:1
           uses: 1
-     4 :: And2(~Ref(1), Ref(3))
+     5 :: And2(~Ref(1), Ref(3))
           uses: 1
      1 :: Input(sel[0])
           uses: 2

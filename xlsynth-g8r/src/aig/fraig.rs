@@ -19,13 +19,20 @@ use std::{collections::HashSet, error::Error};
 use xlsynth::IrBits;
 
 use crate::aig::bulk_replace::{SubstitutionMap, bulk_replace};
-use crate::aig::get_summary_stats::get_gate_depth;
+use crate::aig::get_summary_stats::{GateDepthStats, get_gate_depth};
 use crate::aig::{AigOperand, AigRef, GateFn};
 use crate::{
-    gate_builder::GateBuilderOptions, propose_equiv::EquivNode,
+    gate_builder::GateBuilderOptions,
+    propose_equiv::EquivNode,
     propose_equiv::propose_equivalence_classes,
-    prove_gate_fn_equiv_varisat::validate_equivalence_classes,
+    prove_gate_fn_equiv_varisat::{
+        ValidationBackend, validate_equivalence_classes_presorted_with_backend,
+    },
 };
+
+/// Number of proposed equivalence classes validated before applying
+/// replacements and re-proposing.
+const FRAIG_CLASS_BATCH_SIZE: usize = 256;
 
 pub enum IterationBounds {
     MaxIterations(usize),
@@ -78,15 +85,140 @@ impl Into<crate::result_proto::FraigIterationStat> for FraigIterationStat {
     }
 }
 
+/// Orders equivalence classes by the shallowest candidate node in each class.
+fn sort_equiv_classes_by_depth(
+    equiv_classes: &std::collections::HashMap<
+        crate::propose_equiv::SimulationSignature,
+        Vec<EquivNode>,
+    >,
+    stats: &GateDepthStats,
+) -> Vec<Vec<EquivNode>> {
+    let mut sorted_classes: Vec<Vec<EquivNode>> = equiv_classes
+        .values()
+        .map(|nodes| {
+            let mut sorted_nodes = nodes.clone();
+            sorted_nodes.sort_unstable_by_key(|equiv_node| {
+                let node_ref = equiv_node.aig_ref();
+                (
+                    stats.ref_to_depth[&node_ref],
+                    equiv_node.is_inverted(),
+                    node_ref.id,
+                )
+            });
+            sorted_nodes
+        })
+        .collect();
+
+    sorted_classes.sort_unstable_by_key(|equiv_class| {
+        let representative = equiv_class[0];
+        let node_ref = representative.aig_ref();
+        (
+            stats.ref_to_depth[&node_ref],
+            equiv_class.len(),
+            representative.is_inverted(),
+            node_ref.id,
+        )
+    });
+    sorted_classes
+}
+
+/// Builds substitutions from SAT-proven equivalence sets.
+fn build_replacements_from_proven_sets(
+    stats: &GateDepthStats,
+    proven_equiv_sets: Vec<Vec<EquivNode>>,
+) -> SubstitutionMap {
+    // Mapping from nodes to be replaced to the (potentially negated) operand
+    // that should replace them.
+    let mut replacements = SubstitutionMap::new();
+    for proven_equiv_set in proven_equiv_sets {
+        log::debug!("fraig_optimize: proven_equiv_set: {:?}", proven_equiv_set);
+        // Determine the minimum-depth node in the proven_equiv_set, using node ID as
+        // tiebreaker
+        let min_depth_node = proven_equiv_set
+            .iter()
+            .filter(|equiv_node| {
+                // Any node that is being substituted cannot win as the target in an equivalence
+                // class.
+                //
+                // The main reason this is necessary is because we consider both values and
+                // their negations, so when two nodes have the same depth we see both:
+                // - (normal_a, negated_b)
+                // - (negated_a, normal_b)
+                //
+                // And in this case we need to make sure we don't make a chain, so we'll replace
+                // negated_b with normal_a for the first pair and see that b is already being
+                // replaced for the second set.
+                let node_ref = equiv_node.aig_ref();
+                let is_replaced = replacements.contains_key(&node_ref);
+                !is_replaced
+            })
+            .min_by_key(|equiv_node| {
+                let node_ref = equiv_node.aig_ref();
+                let is_inverted = equiv_node.is_inverted();
+                (stats.ref_to_depth[&node_ref], is_inverted, node_ref.id)
+            });
+        let Some(min_depth_node) = min_depth_node else {
+            continue;
+        };
+        for equiv_node in proven_equiv_set.iter() {
+            // if this is the "minimum depth" one in the equivalence class, we don't replace
+            // it with anything
+            if equiv_node == min_depth_node {
+                continue;
+            }
+            // Determine if the substitution (the min depth node) needs negation
+            let dst_operand = match (equiv_node, min_depth_node) {
+                // Same polarity: substitute directly
+                (EquivNode::Normal(_), EquivNode::Normal(rep_ref))
+                | (EquivNode::Inverted(_), EquivNode::Inverted(rep_ref)) => {
+                    AigOperand::from(rep_ref)
+                }
+                // Different polarity: substitute with negation
+                (EquivNode::Normal(_), EquivNode::Inverted(rep_ref))
+                | (EquivNode::Inverted(_), EquivNode::Normal(rep_ref)) => {
+                    AigOperand::from(rep_ref).negate()
+                }
+            };
+
+            log::debug!(
+                "fraig_optimize: adding substitution: {:?} -> {:?}",
+                equiv_node.aig_ref(),
+                dst_operand
+            );
+            replacements.add(equiv_node.aig_ref(), dst_operand);
+        }
+    }
+    replacements
+}
+
+/// Runs FRAIG using the default validation backend.
 pub fn fraig_optimize(
     f: &GateFn,
     input_sample_count: usize,
     iteration_bounds: IterationBounds,
     rng: &mut impl Rng,
 ) -> Result<(GateFn, DidConverge, Vec<FraigIterationStat>), Box<dyn Error>> {
+    fraig_optimize_with_backend(
+        f,
+        input_sample_count,
+        iteration_bounds,
+        ValidationBackend::default(),
+        rng,
+    )
+}
+
+/// Runs FRAIG using an explicit SAT backend for equivalence validation.
+pub fn fraig_optimize_with_backend(
+    f: &GateFn,
+    input_sample_count: usize,
+    iteration_bounds: IterationBounds,
+    validation_backend: ValidationBackend,
+    rng: &mut impl Rng,
+) -> Result<(GateFn, DidConverge, Vec<FraigIterationStat>), Box<dyn Error>> {
     let mut iteration_count = 0;
     let mut current_fn = f.clone();
-    let mut counterexamples: HashSet<Vec<IrBits>> = HashSet::new();
+    let mut counterexample_seen: HashSet<Vec<IrBits>> = HashSet::new();
+    let mut counterexamples: Vec<Vec<IrBits>> = Vec::new();
     // Initialize iteration stats collection
     let mut iteration_stats: Vec<FraigIterationStat> = Vec::new();
     loop {
@@ -113,25 +245,83 @@ pub fn fraig_optimize(
             equiv_classes.len()
         );
 
-        let mut equiv_classes_vec: Vec<&[EquivNode]> =
-            equiv_classes.values().map(|v| v.as_slice()).collect();
+        let live_nodes: Vec<AigRef> = current_fn
+            .gates
+            .iter()
+            .enumerate()
+            .map(|(i, _)| AigRef { id: i })
+            .collect();
+        let stats = get_gate_depth(&current_fn, &live_nodes);
+        let sorted_equiv_classes = sort_equiv_classes_by_depth(&equiv_classes, &stats);
+        let batch_size = FRAIG_CLASS_BATCH_SIZE.min(sorted_equiv_classes.len().max(1));
+        let is_batched = batch_size < sorted_equiv_classes.len();
+        let mut applied_replacements = false;
+        let mut restarted_after_counterexample = false;
 
-        // Sort the slices deterministically to ensure validate_equiv gets them in a
-        // stable order. We sort by the canonical representative node within each class
-        // slice.
-        equiv_classes_vec.sort_unstable_by_key(|slice| {
-            // Find the representative node (first after sorting the slice)
-            // Cloning is necessary as sort needs mutable access
-            let mut sorted_slice = slice.to_vec();
-            sorted_slice.sort_unstable();
-            // The key is (is_inverted, node_id) of the representative
-            let rep_node = sorted_slice[0];
-            (rep_node.is_inverted(), rep_node.aig_ref().id)
-        });
+        for (batch_index, batch) in sorted_equiv_classes.chunks(batch_size).enumerate() {
+            if is_batched {
+                log::info!(
+                    "fraig_optimize: validating class batch {} classes [{}..{}) of {}",
+                    batch_index,
+                    batch_index * batch_size,
+                    batch_index * batch_size + batch.len(),
+                    sorted_equiv_classes.len()
+                );
+            }
+            let equiv_classes_vec: Vec<&[EquivNode]> = batch.iter().map(|v| v.as_slice()).collect();
+            let validation_result = validate_equivalence_classes_presorted_with_backend(
+                &current_fn,
+                &equiv_classes_vec,
+                validation_backend,
+            )?;
 
-        let validation_result = validate_equivalence_classes(&current_fn, &equiv_classes_vec)?;
+            let mut new_counterexample_count = 0usize;
+            for cex in validation_result.cex_inputs {
+                if counterexample_seen.insert(cex.clone()) {
+                    counterexamples.push(cex);
+                    new_counterexample_count += 1;
+                }
+            }
 
-        if validation_result.proven_equiv_sets.is_empty() {
+            let replacements =
+                build_replacements_from_proven_sets(&stats, validation_result.proven_equiv_sets);
+
+            if replacements.len() == 0 {
+                if is_batched && new_counterexample_count > 0 {
+                    log::info!(
+                        "fraig_optimize: class batch {} found {} new counterexamples and no replacements; reproposing",
+                        batch_index,
+                        new_counterexample_count
+                    );
+                    iteration_stats.push(FraigIterationStat {
+                        gate_count: current_fn.gates.len(),
+                        counterexample_count: counterexamples.len(),
+                        proposed_equiv_classes: equiv_classes.len(),
+                        replacements_count: 0,
+                    });
+                    restarted_after_counterexample = true;
+                    break;
+                }
+                continue;
+            }
+
+            // Record stats for this iteration before replacements
+            iteration_stats.push(FraigIterationStat {
+                gate_count: current_fn.gates.len(),
+                counterexample_count: counterexamples.len(),
+                proposed_equiv_classes: equiv_classes.len(),
+                replacements_count: replacements.len(),
+            });
+
+            // We get the updated function by bulk replacing nodes with their lower-depth
+            // equivalents here.
+            let new_fn = bulk_replace(&current_fn, &replacements, GateBuilderOptions::opt());
+            current_fn = new_fn;
+            applied_replacements = true;
+            break;
+        }
+
+        if !applied_replacements && !restarted_after_counterexample {
             // Converged -- no proven equivalences found.
             // Record stats for this iteration with zero replacements
             iteration_stats.push(FraigIterationStat {
@@ -146,92 +336,6 @@ pub fn fraig_optimize(
                 iteration_stats,
             ));
         }
-        // Accumulate counterexamples for next iteration
-        for cex in validation_result.cex_inputs {
-            counterexamples.insert(cex);
-        }
-        let live_nodes: Vec<AigRef> = current_fn
-            .gates
-            .iter()
-            .enumerate()
-            .map(|(i, _)| AigRef { id: i })
-            .collect();
-        let stats = get_gate_depth(&current_fn, &live_nodes);
-
-        // Mapping from nodes to be replaced to the (potentially negated) operand
-        // that should replace them.
-        let mut replacements = SubstitutionMap::new();
-        for proven_equiv_set in validation_result.proven_equiv_sets {
-            log::debug!("fraig_optimize: proven_equiv_set: {:?}", proven_equiv_set);
-            // Determine the minimum-depth node in the proven_equiv_set, using node ID as
-            // tiebreaker
-            let min_depth_node = proven_equiv_set
-                .iter()
-                .filter(|equiv_node| {
-                    // Any node that is being substituted cannot win as the target in an equivalence
-                    // class.
-                    //
-                    // The main reason this is necessary is because we consider both values and
-                    // their negations, so when two nodes have the same depth we see both:
-                    // - (normal_a, negated_b)
-                    // - (negated_a, normal_b)
-                    //
-                    // And in this case we need to make sure we don't make a chain, so we'll replace
-                    // negated_b with normal_a for the first pair and see that b is already being
-                    // replaced for the second set.
-                    let node_ref = equiv_node.aig_ref();
-                    let is_replaced = replacements.contains_key(&node_ref);
-                    !is_replaced
-                })
-                .min_by_key(|equiv_node| {
-                    let node_ref = equiv_node.aig_ref();
-                    let is_inverted = equiv_node.is_inverted();
-                    (stats.ref_to_depth[&node_ref], is_inverted, node_ref.id)
-                });
-            let Some(min_depth_node) = min_depth_node else {
-                continue;
-            };
-            for equiv_node in proven_equiv_set.iter() {
-                // if this is the "minimum depth" one in the equivalence class, we don't replace
-                // it with anything
-                if equiv_node == min_depth_node {
-                    continue;
-                }
-                // Determine if the substitution (the min depth node) needs negation
-                let dst_operand = match (equiv_node, min_depth_node) {
-                    // Same polarity: substitute directly
-                    (EquivNode::Normal(_), EquivNode::Normal(rep_ref))
-                    | (EquivNode::Inverted(_), EquivNode::Inverted(rep_ref)) => {
-                        AigOperand::from(rep_ref)
-                    }
-                    // Different polarity: substitute with negation
-                    (EquivNode::Normal(_), EquivNode::Inverted(rep_ref))
-                    | (EquivNode::Inverted(_), EquivNode::Normal(rep_ref)) => {
-                        AigOperand::from(rep_ref).negate()
-                    }
-                };
-
-                log::debug!(
-                    "fraig_optimize: adding substitution: {:?} -> {:?}",
-                    equiv_node.aig_ref(),
-                    dst_operand
-                );
-                replacements.add(equiv_node.aig_ref(), dst_operand);
-            }
-        }
-
-        // Record stats for this iteration before replacements
-        iteration_stats.push(FraigIterationStat {
-            gate_count: current_fn.gates.len(),
-            counterexample_count: counterexamples.len(),
-            proposed_equiv_classes: equiv_classes.len(),
-            replacements_count: replacements.len(),
-        });
-
-        // We get the updated function by bulk replacing nodes with their lower-depth
-        // equivalents here.
-        let new_fn = bulk_replace(&current_fn, &replacements, GateBuilderOptions::opt());
-        current_fn = new_fn;
 
         iteration_count += 1;
     }

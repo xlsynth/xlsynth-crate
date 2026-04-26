@@ -370,10 +370,21 @@ impl AppExt for clap::Command {
                     .action(clap::ArgAction::Set),
             )
             .arg(
-                clap::Arg::new("fraig_sim_samples")
-                    .long("fraig-sim-samples")
+                clap::Arg::new("max_fraig_sim_samples")
+                    .long("max-fraig-sim-samples")
+                    .alias("fraig-sim-samples")
+                    .default_value("8192")
                     .value_name("N")
-                    .help("Number of samples to use for fraig optimization")
+                    .help("Maximum number of random simulation samples to use for FRAIG candidate discovery")
+                    .action(clap::ArgAction::Set),
+            )
+            .arg(
+                clap::Arg::new("fraig_validation_backend")
+                    .long("fraig-validation-backend")
+                    .value_name("BACKEND")
+                    .help("SAT backend for validating FRAIG equivalence classes (default: cadical)")
+                    .value_parser(["cadical", "varisat"])
+                    .default_value("cadical")
                     .action(clap::ArgAction::Set),
             )
             .add_bool_arg(

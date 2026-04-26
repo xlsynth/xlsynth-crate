@@ -84,25 +84,22 @@ pub struct GateSimdResult {
     pub outputs: Vec<Vec256>,
 }
 
-/// Evaluates `gate_fn` and returns every node's 256-wide value.
-///
-/// The returned vector is indexed by `AigRef::id`. Nodes outside the output
-/// cone are left at zero, matching the scalar simulator's `Collect::All`
-/// behavior for unvisited nodes.
-pub fn eval_all_node_values(gate_fn: &GateFn, inputs: &[Vec256]) -> Vec<Vec256> {
+fn check_simd_input_shape(gate_fn: &GateFn, inputs: &[Vec256]) -> usize {
     // Sanity-check that the batch size is 256 – this is a *fixed* requirement
     // for this interpreter variant.
     debug_assert_eq!(core::mem::size_of::<Vec256>(), 32);
 
-    // Seed non-negated input values.
     let total_input_bits: usize = gate_fn.inputs.iter().map(|i| i.get_bit_count()).sum();
     assert_eq!(
         inputs.len(),
         total_input_bits,
         "input vector length mismatch"
     );
+    total_input_bits
+}
 
-    let mut env: Vec<Vec256> = vec![Vec256::zero(); gate_fn.gates.len()];
+fn seed_input_values(gate_fn: &GateFn, inputs: &[Vec256], env: &mut [Vec256]) {
+    let total_input_bits = check_simd_input_shape(gate_fn, inputs);
     let mut next_input_index = 0;
     for input in &gate_fn.inputs {
         for bit in input.bit_vector.iter_lsb_to_msb() {
@@ -111,6 +108,51 @@ pub fn eval_all_node_values(gate_fn: &GateFn, inputs: &[Vec256]) -> Vec<Vec256> 
         }
     }
     assert_eq!(next_input_index, total_input_bits);
+}
+
+fn debug_assert_dense_topological_order(gate_fn: &GateFn, live_nodes: &[bool]) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    for (node_index, node) in gate_fn.gates.iter().enumerate() {
+        if !live_nodes[node_index] {
+            continue;
+        }
+        if let AigNode::And2 { a, b, .. } = node {
+            debug_assert!(
+                live_nodes[a.node.id],
+                "live AND node %{} depends on non-live operand %{}",
+                node_index, a.node.id
+            );
+            debug_assert!(
+                live_nodes[b.node.id],
+                "live AND node %{} depends on non-live operand %{}",
+                node_index, b.node.id
+            );
+            debug_assert!(
+                a.node.id < node_index,
+                "dense SIMD evaluation requires topological gate order: node %{} depends on later/equal operand %{}",
+                node_index,
+                a.node.id
+            );
+            debug_assert!(
+                b.node.id < node_index,
+                "dense SIMD evaluation requires topological gate order: node %{} depends on later/equal operand %{}",
+                node_index,
+                b.node.id
+            );
+        }
+    }
+}
+
+/// Evaluates `gate_fn` and returns every node's 256-wide value.
+///
+/// The returned vector is indexed by `AigRef::id`. Nodes outside the output
+/// cone are left at zero, matching the scalar simulator's `Collect::All`
+/// behavior for unvisited nodes.
+pub fn eval_all_node_values(gate_fn: &GateFn, inputs: &[Vec256]) -> Vec<Vec256> {
+    let mut env: Vec<Vec256> = vec![Vec256::zero(); gate_fn.gates.len()];
+    seed_input_values(gate_fn, inputs, &mut env);
 
     // Evaluate gates in topological order.
     for aig_ref in gate_fn.post_order_refs() {
@@ -130,6 +172,53 @@ pub fn eval_all_node_values(gate_fn: &GateFn, inputs: &[Vec256]) -> Vec<Vec256> 
     }
 
     env
+}
+
+/// Evaluates output-reachable nodes in dense node-id order into `env`.
+///
+/// This variant is for hot loops that repeatedly simulate the same graph. The
+/// caller owns `env`, so its allocation is reused across batches. Entries for
+/// non-live nodes are intentionally left unspecified; callers must only read
+/// nodes whose `live_nodes` bit is set.
+///
+/// The graph's dense `gates` order must be topological: every live `And2`
+/// operand must have a smaller node id than the gate that uses it. This is the
+/// order produced by `GateBuilder` and by `dce_safe` after `bulk_replace`.
+pub fn eval_live_node_values_dense_into(
+    gate_fn: &GateFn,
+    inputs: &[Vec256],
+    live_nodes: &[bool],
+    env: &mut Vec<Vec256>,
+) {
+    assert_eq!(
+        live_nodes.len(),
+        gate_fn.gates.len(),
+        "live node mask length mismatch"
+    );
+    if env.len() != gate_fn.gates.len() {
+        env.resize(gate_fn.gates.len(), Vec256::zero());
+    }
+    seed_input_values(gate_fn, inputs, env.as_mut_slice());
+    debug_assert_dense_topological_order(gate_fn, live_nodes);
+
+    for (node_index, node) in gate_fn.gates.iter().enumerate() {
+        if !live_nodes[node_index] {
+            continue;
+        }
+        match node {
+            AigNode::Input { .. } => {
+                // Already seeded above.
+            }
+            AigNode::Literal { value, .. } => {
+                env[node_index] = Vec256::splat(*value);
+            }
+            AigNode::And2 { a, b, .. } => {
+                let a_val = env[a.node.id].apply_neg(a.negated);
+                let b_val = env[b.node.id].apply_neg(b.negated);
+                env[node_index] = a_val & b_val;
+            }
+        }
+    }
 }
 
 /// Evaluates `gate_fn` on a *batch* of 256 input samples supplied in SIMD
@@ -279,5 +368,46 @@ mod tests {
             eval_correctness_distance(&gfn_a, &simd_inputs, &target_outputs),
             expected_distance
         );
+    }
+
+    #[test]
+    fn test_dense_eval_reuses_env_for_live_nodes() {
+        let mut gb = GateBuilder::new("dense_eval".to_string(), GateBuilderOptions::no_opt());
+        let input_a: crate::aig::AigOperand = gb.add_input("a".to_string(), 1).try_into().unwrap();
+        let input_b: crate::aig::AigOperand = gb.add_input("b".to_string(), 1).try_into().unwrap();
+        let input_c: crate::aig::AigOperand = gb.add_input("c".to_string(), 1).try_into().unwrap();
+        let live_and = gb.add_and_binary(input_a, input_b);
+        let _dead_and = gb.add_and_binary(input_b, input_c);
+        gb.add_output("out".to_string(), live_and.into());
+        let gate_fn = gb.build();
+
+        let mut rng = StdRng::seed_from_u64(456);
+        let mut a_samples = [false; 256];
+        let mut b_samples = [false; 256];
+        let mut c_samples = [false; 256];
+        for i in 0..256 {
+            a_samples[i] = rng.r#gen();
+            b_samples[i] = rng.r#gen();
+            c_samples[i] = rng.r#gen();
+        }
+        let simd_inputs = vec![pack(&a_samples), pack(&b_samples), pack(&c_samples)];
+
+        let all_values = eval_all_node_values(&gate_fn, &simd_inputs);
+        let mut live_nodes = vec![false; gate_fn.gates.len()];
+        live_nodes[input_a.node.id] = true;
+        live_nodes[input_b.node.id] = true;
+        live_nodes[live_and.node.id] = true;
+
+        let mut dense_values = Vec::new();
+        eval_live_node_values_dense_into(&gate_fn, &simd_inputs, &live_nodes, &mut dense_values);
+        let reused_ptr = dense_values.as_ptr();
+        for (node_index, is_live) in live_nodes.iter().copied().enumerate() {
+            if is_live {
+                assert_eq!(dense_values[node_index], all_values[node_index]);
+            }
+        }
+
+        eval_live_node_values_dense_into(&gate_fn, &simd_inputs, &live_nodes, &mut dense_values);
+        assert_eq!(dense_values.as_ptr(), reused_ptr);
     }
 }

@@ -5,58 +5,66 @@
 use crate::aig::{AigNode, AigRef, GateFn};
 use crate::aig_sim::gate_simd::{self, Vec256};
 use xlsynth::IrBits;
-use xlsynth_pir::fuzz_utils::arbitrary_irbits;
 
 use rand::Rng;
 use std::cmp::min;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 const SIMD_LANES: usize = 256;
-// Domain-separation labels for the BLAKE3 simulation signature hash chain.
-const SIGNATURE_INIT_DOMAIN: &[u8] = b"xlsynth-g8r/fraig/simulation-signature/v1/init";
-const SIGNATURE_UPDATE_DOMAIN: &[u8] = b"xlsynth-g8r/fraig/simulation-signature/v1/update";
-const SIGNATURE_FINAL_DOMAIN: &[u8] = b"xlsynth-g8r/fraig/simulation-signature/v1/final";
+const SIGNATURE_INIT_STATE: [u64; 2] = [0x7266_6169_672f_7369, 0x6d75_6c61_7469_6f6e];
+const SIGNATURE_UPDATE_TAG: u64 = 0x1d8e_4e27_c47d_124f;
+const SIGNATURE_FINAL_TAG: u64 = 0x9c6d_62a8_7f5b_2d31;
+const SIGNATURE_WORD_TAGS: [u64; 4] = [
+    0x243f_6a88_85a3_08d3,
+    0x1319_8a2e_0370_7344,
+    0xa409_3822_299f_31d0,
+    0x082e_fa98_ec4e_6c89,
+];
 
-/// A streaming 256-bit simulation signature for one node.
+/// A streaming 128-bit simulation signature for one node.
 ///
 /// SAT validation is still the authority, so a hash collision can only create
-/// extra candidates that are later rejected. Keeping only the BLAKE3 digest
+/// extra candidates that are later rejected. Keeping only a compact fingerprint
 /// avoids materializing the old samples-by-nodes history matrix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct SimulationSignature([u8; 32]);
+pub struct SimulationSignature([u64; 2]);
 
 impl SimulationSignature {
     #[inline]
     fn new() -> Self {
-        Self(*blake3::hash(SIGNATURE_INIT_DOMAIN).as_bytes())
+        Self(SIGNATURE_INIT_STATE)
     }
 
     #[inline]
-    fn words_to_le_bytes(words: [u64; 4]) -> [u8; 32] {
-        let mut bytes = [0u8; 32];
-        for (i, word) in words.into_iter().enumerate() {
-            bytes[i * 8..(i + 1) * 8].copy_from_slice(&word.to_le_bytes());
-        }
-        bytes
+    fn splitmix64(mut x: u64) -> u64 {
+        x = x.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        x ^ (x >> 31)
     }
 
     #[inline]
     fn update_words(&mut self, words: [u64; 4], batch_index: u64) {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(SIGNATURE_UPDATE_DOMAIN);
-        hasher.update(&self.0);
-        hasher.update(&batch_index.to_le_bytes());
-        hasher.update(&Self::words_to_le_bytes(words));
-        self.0 = *hasher.finalize().as_bytes();
+        let mut state = self.0;
+        let batch_mix = Self::splitmix64(batch_index ^ SIGNATURE_UPDATE_TAG);
+        state[0] = Self::splitmix64(state[0] ^ batch_mix);
+        state[1] = Self::splitmix64(state[1] ^ batch_mix.rotate_left(31));
+        for (i, word) in words.into_iter().enumerate() {
+            let tag = SIGNATURE_WORD_TAGS[i];
+            state[0] = Self::splitmix64(state[0] ^ word ^ tag);
+            state[1] =
+                Self::splitmix64(state[1] ^ word.rotate_left(32) ^ tag.rotate_left(17) ^ state[0]);
+        }
+        self.0 = state;
     }
 
     #[inline]
     fn finalize(mut self, total_samples: usize) -> Self {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(SIGNATURE_FINAL_DOMAIN);
-        hasher.update(&self.0);
-        hasher.update(&total_samples.to_le_bytes());
-        self.0 = *hasher.finalize().as_bytes();
+        let samples = total_samples as u64;
+        self.0[0] = Self::splitmix64(self.0[0] ^ SIGNATURE_FINAL_TAG ^ samples);
+        self.0[1] = Self::splitmix64(
+            self.0[1] ^ SIGNATURE_FINAL_TAG.rotate_left(29) ^ samples.rotate_left(17) ^ self.0[0],
+        );
         self
     }
 }
@@ -104,57 +112,74 @@ impl Ord for EquivNode {
     }
 }
 
-fn gen_random_inputs(gate_fn: &GateFn, rng: &mut impl Rng) -> Vec<IrBits> {
+fn input_widths(gate_fn: &GateFn) -> Vec<usize> {
     gate_fn
         .inputs
         .iter()
-        .map(|input| arbitrary_irbits(rng, input.bit_vector.get_bit_count()))
+        .map(|input| input.get_bit_count())
         .collect()
 }
 
-fn total_input_bits(gate_fn: &GateFn) -> usize {
-    gate_fn.inputs.iter().map(|i| i.get_bit_count()).sum()
+fn total_input_bits(input_widths: &[usize]) -> usize {
+    input_widths.iter().sum()
 }
 
-fn set_lane_inputs(
-    gate_fn: &GateFn,
+#[inline]
+fn byte_bit(bytes: &[u8], bit_idx: usize) -> bool {
+    ((bytes[bit_idx / 8] >> (bit_idx % 8)) & 1) != 0
+}
+
+fn set_lane_counterexample_inputs(
+    input_widths: &[usize],
     lane: usize,
     inputs: &[IrBits],
     words_per_input_bit: &mut [[u64; 4]],
 ) {
     assert!(lane < SIMD_LANES);
-    assert_eq!(inputs.len(), gate_fn.inputs.len());
+    assert_eq!(inputs.len(), input_widths.len());
     let limb = lane / 64;
     let bit_mask = 1u64 << (lane % 64);
     let mut bit_cursor = 0;
-    for (input_value, input) in inputs.iter().zip(gate_fn.inputs.iter()) {
-        for bit_idx in 0..input.bit_vector.get_bit_count() {
-            if input_value.get_bit(bit_idx).unwrap() {
+    for (input_value, &input_width) in inputs.iter().zip(input_widths.iter()) {
+        let bytes = input_value.to_le_bytes().unwrap();
+        for bit_idx in 0..input_width {
+            if byte_bit(&bytes, bit_idx) {
                 words_per_input_bit[bit_cursor + bit_idx][limb] |= bit_mask;
             }
         }
-        bit_cursor += input.bit_vector.get_bit_count();
+        bit_cursor += input_width;
     }
 }
 
-fn random_simd_inputs(gate_fn: &GateFn, lane_count: usize, rng: &mut impl Rng) -> Vec<Vec256> {
+fn random_simd_inputs(
+    input_widths: &[usize],
+    lane_count: usize,
+    rng: &mut impl Rng,
+) -> Vec<Vec256> {
     assert!(lane_count <= SIMD_LANES);
-    let mut words_per_input_bit = vec![[0u64; 4]; total_input_bits(gate_fn)];
-    for lane in 0..lane_count {
-        let inputs = gen_random_inputs(gate_fn, rng);
-        set_lane_inputs(gate_fn, lane, &inputs, &mut words_per_input_bit);
+    let valid_lane_mask = lane_mask(lane_count);
+    let mut result = Vec::with_capacity(total_input_bits(input_widths));
+    for &input_width in input_widths {
+        for _ in 0..input_width {
+            result.push(Vec256::from_words([
+                rng.r#gen::<u64>() & valid_lane_mask[0],
+                rng.r#gen::<u64>() & valid_lane_mask[1],
+                rng.r#gen::<u64>() & valid_lane_mask[2],
+                rng.r#gen::<u64>() & valid_lane_mask[3],
+            ]));
+        }
     }
-    words_per_input_bit
-        .into_iter()
-        .map(Vec256::from_words)
-        .collect()
+    result
 }
 
-fn counterexample_simd_inputs(gate_fn: &GateFn, counterexamples: &[&Vec<IrBits>]) -> Vec<Vec256> {
+fn counterexample_simd_inputs(
+    input_widths: &[usize],
+    counterexamples: &[&Vec<IrBits>],
+) -> Vec<Vec256> {
     assert!(counterexamples.len() <= SIMD_LANES);
-    let mut words_per_input_bit = vec![[0u64; 4]; total_input_bits(gate_fn)];
+    let mut words_per_input_bit = vec![[0u64; 4]; total_input_bits(input_widths)];
     for (lane, inputs) in counterexamples.iter().enumerate() {
-        set_lane_inputs(gate_fn, lane, inputs, &mut words_per_input_bit);
+        set_lane_counterexample_inputs(input_widths, lane, inputs, &mut words_per_input_bit);
     }
     words_per_input_bit
         .into_iter()
@@ -186,16 +211,39 @@ fn masked_words(value: Vec256, mask: [u64; 4], inverted: bool) -> [u64; 4] {
     ]
 }
 
+fn output_reachable_nodes(gate_fn: &GateFn) -> Vec<bool> {
+    let mut live_nodes = vec![false; gate_fn.gates.len()];
+    let mut stack = Vec::new();
+    for output in &gate_fn.outputs {
+        for bit in output.bit_vector.iter_lsb_to_msb() {
+            stack.push(bit.node);
+        }
+    }
+    while let Some(node_ref) = stack.pop() {
+        if live_nodes[node_ref.id] {
+            continue;
+        }
+        live_nodes[node_ref.id] = true;
+        if let AigNode::And2 { a, b, .. } = &gate_fn.gates[node_ref.id] {
+            stack.push(a.node);
+            stack.push(b.node);
+        }
+    }
+    live_nodes
+}
+
 fn update_signatures(
     gate_fn: &GateFn,
+    live_nodes: &[bool],
     candidate_node_indices: &[usize],
     normal_signatures: &mut [SimulationSignature],
     inverse_signatures: &mut [SimulationSignature],
     inputs: &[Vec256],
     valid_lanes: usize,
     batch_index: u64,
+    node_values: &mut Vec<Vec256>,
 ) {
-    let node_values = gate_simd::eval_all_node_values(gate_fn, inputs);
+    gate_simd::eval_live_node_values_dense_into(gate_fn, inputs, live_nodes, node_values);
     let mask = lane_mask(valid_lanes);
     for &node_index in candidate_node_indices {
         let value = node_values[node_index];
@@ -211,15 +259,19 @@ pub fn propose_equivalence_classes(
     gate_fn: &GateFn,
     input_sample_count: usize,
     rng: &mut impl Rng,
-    counterexamples: &HashSet<Vec<IrBits>>,
+    counterexamples: &[Vec<IrBits>],
 ) -> HashMap<SimulationSignature, Vec<EquivNode>> {
     let gate_count = gate_fn.gates.len();
+    let live_nodes = output_reachable_nodes(gate_fn);
+    let input_widths = input_widths(gate_fn);
     let candidate_node_indices: Vec<usize> = gate_fn
         .gates
         .iter()
         .enumerate()
         .filter_map(|(node_index, node)| {
-            if matches!(node, AigNode::Input { .. } | AigNode::Literal { .. }) {
+            if !live_nodes[node_index]
+                || matches!(node, AigNode::Input { .. } | AigNode::Literal { .. })
+            {
                 None
             } else {
                 Some(node_index)
@@ -228,6 +280,7 @@ pub fn propose_equivalence_classes(
         .collect();
     let mut normal_signatures = vec![SimulationSignature::new(); gate_count];
     let mut inverse_signatures = vec![SimulationSignature::new(); gate_count];
+    let mut node_values = Vec::with_capacity(gate_count);
     let mut batch_index = 0u64;
 
     // Push `input_sample_count` random samples through the gate function in
@@ -235,15 +288,17 @@ pub fn propose_equivalence_classes(
     let mut remaining_random_samples = input_sample_count;
     while remaining_random_samples > 0 {
         let lane_count = min(remaining_random_samples, SIMD_LANES);
-        let inputs = random_simd_inputs(gate_fn, lane_count, rng);
+        let inputs = random_simd_inputs(&input_widths, lane_count, rng);
         update_signatures(
             gate_fn,
+            &live_nodes,
             &candidate_node_indices,
             &mut normal_signatures,
             &mut inverse_signatures,
             &inputs,
             lane_count,
             batch_index,
+            &mut node_values,
         );
         batch_index += 1;
         remaining_random_samples -= lane_count;
@@ -252,15 +307,17 @@ pub fn propose_equivalence_classes(
     // Now do it for all explicitly-provided counterexamples.
     let counterexample_refs: Vec<&Vec<IrBits>> = counterexamples.iter().collect();
     for batch in counterexample_refs.chunks(SIMD_LANES) {
-        let inputs = counterexample_simd_inputs(gate_fn, batch);
+        let inputs = counterexample_simd_inputs(&input_widths, batch);
         update_signatures(
             gate_fn,
+            &live_nodes,
             &candidate_node_indices,
             &mut normal_signatures,
             &mut inverse_signatures,
             &inputs,
             batch.len(),
             batch_index,
+            &mut node_values,
         );
         batch_index += 1;
     }
@@ -365,7 +422,7 @@ mod tests {
         let _ = env_logger::builder().is_test(true).try_init();
         let graph = setup_simple_graph();
         let mut seeded_rng = rand::rngs::StdRng::seed_from_u64(0);
-        let counterexamples = HashSet::new();
+        let counterexamples = Vec::new();
         let equiv_classes =
             propose_equivalence_classes(&graph.g, 4096, &mut seeded_rng, &counterexamples);
         // There are no redundancies in this graph, so we should not find any
@@ -378,7 +435,7 @@ mod tests {
         let _ = env_logger::builder().is_test(true).try_init();
         let graph = setup_graph_with_redundancies();
         let mut seeded_rng = rand::rngs::StdRng::seed_from_u64(0);
-        let counterexamples = HashSet::new();
+        let counterexamples = Vec::new();
         let equiv_classes =
             propose_equivalence_classes(&graph.g, 4096, &mut seeded_rng, &counterexamples);
         log::info!("equiv_classes: {:?}", equiv_classes);
@@ -422,13 +479,8 @@ mod tests {
     }
 
     #[test]
-    fn test_propose_equiv_simd_hash_matches_scalar_multiple_batches() {
+    fn test_propose_equiv_counterexample_hash_matches_scalar() {
         let graph = setup_graph_with_redundancies();
-        let input_sample_count = 513;
-        let mut seeded_rng = rand::rngs::StdRng::seed_from_u64(7);
-        let input_samples = (0..input_sample_count)
-            .map(|_| gen_random_inputs(&graph.g, &mut seeded_rng))
-            .collect::<Vec<_>>();
         let counterexample_samples = vec![
             vec![
                 IrBits::bool(false),
@@ -438,20 +490,13 @@ mod tests {
             vec![IrBits::bool(true), IrBits::bool(false), IrBits::bool(true)],
             vec![IrBits::bool(true), IrBits::bool(true), IrBits::bool(false)],
         ];
-        let scalar_classes = propose_equivalence_classes_scalar_for_test(
-            &graph.g,
-            &input_samples,
-            &counterexample_samples,
-        );
+        let scalar_classes =
+            propose_equivalence_classes_scalar_for_test(&graph.g, &[], &counterexample_samples);
 
-        let counterexamples = counterexample_samples.into_iter().collect::<HashSet<_>>();
+        let counterexamples = counterexample_samples;
         let mut simd_rng = rand::rngs::StdRng::seed_from_u64(7);
-        let simd_classes = propose_equivalence_classes(
-            &graph.g,
-            input_sample_count,
-            &mut simd_rng,
-            &counterexamples,
-        );
+        let simd_classes =
+            propose_equivalence_classes(&graph.g, 0, &mut simd_rng, &counterexamples);
 
         assert_eq!(
             sorted_classes(&simd_classes),

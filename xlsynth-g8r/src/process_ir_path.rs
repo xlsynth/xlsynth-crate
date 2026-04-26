@@ -9,6 +9,7 @@ use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 
 use crate::aig::cut_db_rewrite;
+use crate::aig::dce;
 use crate::aig::fanout::fanout_histogram;
 use crate::aig::find_structures;
 use crate::aig::fraig;
@@ -23,10 +24,13 @@ use crate::aig_sim::count_toggles;
 use crate::check_equivalence;
 use crate::gatify::ir2gate;
 use crate::ir2gates;
+use crate::prove_gate_fn_equiv_varisat::ValidationBackend;
 use crate::use_count::get_id_to_use_count;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_range_info::IrRangeInfo;
 use xlsynth_pir::ir_utils;
+
+pub const DEFAULT_MAX_FRAIG_SIM_SAMPLES: usize = 8 * 1024;
 
 #[derive(Debug, serde::Serialize)]
 pub struct Ir2GatesSummaryStats {
@@ -152,10 +156,14 @@ pub struct Options {
     /// If not set, we fraig to convergence.
     pub fraig_max_iterations: Option<usize>,
 
-    /// If not set, we scale the gate count down by some policy (e.g. divide
-    /// down by 128 and then round to the nearest 256) and use that many
-    /// samples.
-    pub fraig_sim_samples: Option<usize>,
+    /// Maximum random simulation samples used for FRAIG candidate discovery.
+    ///
+    /// The base sample count is scaled from the live node count and rounded up
+    /// to a SIMD batch boundary, then capped by this value when present.
+    pub max_fraig_sim_samples: Option<usize>,
+
+    /// SAT backend used to validate proposed FRAIG equivalence classes.
+    pub fraig_validation_backend: ValidationBackend,
 
     pub quiet: bool,
     pub emit_netlist: bool,
@@ -171,9 +179,19 @@ pub struct Options {
     /// Optional 4-input cut database used to rewrite the `GateFn`.
     pub cut_db: Option<std::sync::Arc<crate::cut_db::loader::CutDb>>,
 
-    /// Deterministic bound on cut-db rewrite effort. If set to `0`, the pass
-    /// runs to convergence.
+    /// Deterministic bound on cut-db rewrite effort. If set to `0`, the outer
+    /// loop runs until no improving rewrite is found or another configured cap
+    /// prevents progress. This bounds global recompute rounds.
     pub cut_db_rewrite_max_iterations: usize,
+
+    /// Maximum cheap candidate depth evaluations per cut-db global recompute
+    /// round. If set to `0`, candidate evaluation is unbounded.
+    pub cut_db_rewrite_max_candidate_evals_per_round: usize,
+
+    /// Maximum accepted cut-db replacements per global recompute round. This
+    /// is a speed/QoR batching policy; if set to `0`, accepted replacements are
+    /// unbounded.
+    pub cut_db_rewrite_max_rewrites_per_round: usize,
 
     /// Maximum number of cuts kept per node during cut enumeration. If set to
     /// `0`, cut enumeration is unbounded (not recommended for CLI use).
@@ -427,6 +445,16 @@ pub fn process_ir_path_with_gatefn(
             }
         }
     }
+
+    let pre_dce_gate_count = gate_fn.gates.len();
+    gate_fn = dce::dce(&gate_fn);
+    log::info!(
+        "pre-fraig dce: gate count {} -> {}",
+        pre_dce_gate_count,
+        gate_fn.gates.len()
+    );
+    gate_fn.check_invariants_with_debug_assert();
+
     // Prepare to capture fraig statistics if enabled
     let mut fraig_did_converge: Option<DidConverge> = None;
     let mut fraig_iteration_stats: Option<Vec<FraigIterationStat>> = None;
@@ -441,25 +469,29 @@ pub fn process_ir_path_with_gatefn(
         } else {
             IterationBounds::ToConvergence
         };
-        let sim_samples = match options.fraig_sim_samples {
-            Some(n) => n,
-            None => {
-                let gate_count = gate_fn.gates.len();
-                let scaled = (gate_count as f64 / 8.0).ceil() as usize;
-                // Round the scaled value to the nearest 256, it must be more than zero.
-                let result = round_up_to_nearest_multiple(scaled, 256);
-                log::info!(
-                    "fraig sim samples; gate count: {}, scaled: {}, result: {}",
-                    gate_count,
-                    scaled,
-                    result
-                );
-                result
-            }
-        };
+        let live_node_count = get_id_to_use_count(&gate_fn).len().max(1);
+        let scaled = (live_node_count as f64 / 8.0).ceil() as usize;
+        // Round the scaled value to the nearest 256, it must be more than zero.
+        let uncapped = round_up_to_nearest_multiple(scaled, 256);
+        let sim_samples = options
+            .max_fraig_sim_samples
+            .map_or(uncapped, |max_samples| uncapped.min(max_samples));
+        log::info!(
+            "fraig sim samples; live node count: {}, scaled: {}, uncapped: {}, max: {:?}, result: {}",
+            live_node_count,
+            scaled,
+            uncapped,
+            options.max_fraig_sim_samples,
+            sim_samples
+        );
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(0);
-        let fraig_result: Result<_, _> =
-            fraig::fraig_optimize(&gate_fn, sim_samples, iteration_bounds, &mut rng);
+        let fraig_result: Result<_, _> = fraig::fraig_optimize_with_backend(
+            &gate_fn,
+            sim_samples,
+            iteration_bounds,
+            options.fraig_validation_backend,
+            &mut rng,
+        );
         if !fraig_result.is_ok() {
             eprintln!("Fraig optimization failed");
             std::process::exit(1);
@@ -482,6 +514,8 @@ pub fn process_ir_path_with_gatefn(
             cut_db_rewrite::RewriteOptions {
                 max_cuts_per_node: options.cut_db_rewrite_max_cuts_per_node,
                 max_iterations: options.cut_db_rewrite_max_iterations,
+                max_candidate_evals_per_round: options.cut_db_rewrite_max_candidate_evals_per_round,
+                max_rewrites_per_round: options.cut_db_rewrite_max_rewrites_per_round,
             },
         );
     }

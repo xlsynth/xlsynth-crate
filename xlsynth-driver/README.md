@@ -1318,7 +1318,11 @@ Supported flags include the common gate-optimization controls:
   `TupleIndex`, `Array`, `Concat`, `Invoke`, `Cover`, `CountedFor`, `BitSlice`,
   `ZeroExt`, and `SignExt`.
 - `--fraig-max-iterations=<N>` – maximum FRAIG iterations.
-- `--fraig-sim-samples=<N>` – number of random samples for FRAIG.
+- `--max-fraig-sim-samples=<N>` – maximum number of random simulation samples
+  used for FRAIG candidate discovery. The uncapped count is scaled from the
+  live node count and rounded to a SIMD batch boundary; default `8192`.
+- `--fraig-validation-backend=<cadical|varisat>` – SAT backend for validating
+  FRAIG equivalence classes (default `cadical`).
 - `--toggle-sample-count=<N>` – if non-zero, generate `N` random samples and
   report toggle statistics.
 - `--toggle-seed=<SEED>` – seed for toggle sampling (default `0`).

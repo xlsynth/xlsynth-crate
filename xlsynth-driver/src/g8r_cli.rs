@@ -3,11 +3,14 @@
 use clap::ArgMatches;
 use xlsynth_g8r::cut_db::loader::CutDb;
 use xlsynth_g8r::cut_db_cli_defaults::{
-    CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI, CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
+    CUT_DB_REWRITE_MAX_CANDIDATE_EVALS_PER_ROUND_CLI, CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
+    CUT_DB_REWRITE_MAX_ITERATIONS_CLI, CUT_DB_REWRITE_MAX_REWRITES_PER_ROUND_CLI,
 };
 use xlsynth_g8r::gatify::prep_for_gatify::PrepForGatifyOptions;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::process_ir_path;
+use xlsynth_g8r::process_ir_path::DEFAULT_MAX_FRAIG_SIM_SAMPLES;
+use xlsynth_g8r::prove_gate_fn_equiv_varisat::ValidationBackend;
 
 fn parse_adder_mapping(value: Option<&str>) -> AdderMapping {
     match value {
@@ -58,6 +61,24 @@ fn parse_usize_default(matches: &ArgMatches, name: &str, default: usize) -> usiz
         .unwrap_or(default)
 }
 
+fn parse_usize_or_exit(
+    matches: &ArgMatches,
+    name: &str,
+    flag_name_for_error: &str,
+    default: usize,
+) -> usize {
+    let Some(value) = matches.get_one::<String>(name) else {
+        return default;
+    };
+    match value.parse::<usize>() {
+        Ok(n) => n,
+        Err(_) => {
+            eprintln!("Invalid {flag_name_for_error}: {value:?}");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn parse_u64_default(matches: &ArgMatches, name: &str, default: u64) -> u64 {
     matches
         .get_one::<String>(name)
@@ -85,6 +106,20 @@ fn parse_optional_usize_or_exit(
     }
 }
 
+fn parse_validation_backend_or_exit(matches: &ArgMatches) -> ValidationBackend {
+    let value = matches
+        .get_one::<String>("fraig_validation_backend")
+        .map(|s| s.as_str())
+        .unwrap_or(ValidationBackend::default().as_str());
+    match ValidationBackend::parse(value) {
+        Ok(backend) => backend,
+        Err(_) => {
+            eprintln!("Invalid --fraig-validation-backend: {:?}", value);
+            std::process::exit(1);
+        }
+    }
+}
+
 pub(crate) struct G8rCliOptions {
     pub(crate) fold: bool,
     pub(crate) hash: bool,
@@ -101,7 +136,8 @@ pub(crate) struct G8rCliOptions {
     pub(crate) graph_logical_effort_beta1: f64,
     pub(crate) graph_logical_effort_beta2: f64,
     pub(crate) fraig_max_iterations: Option<usize>,
-    pub(crate) fraig_sim_samples: Option<usize>,
+    pub(crate) max_fraig_sim_samples: usize,
+    pub(crate) fraig_validation_backend: ValidationBackend,
 }
 
 pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> G8rCliOptions {
@@ -151,8 +187,13 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> G8rCliOptions {
     );
     let fraig_max_iterations =
         parse_optional_usize_or_exit(matches, "fraig_max_iterations", "--fraig-max-iterations");
-    let fraig_sim_samples =
-        parse_optional_usize_or_exit(matches, "fraig_sim_samples", "--fraig-sim-samples");
+    let max_fraig_sim_samples = parse_usize_or_exit(
+        matches,
+        "max_fraig_sim_samples",
+        "--max-fraig-sim-samples",
+        DEFAULT_MAX_FRAIG_SIM_SAMPLES,
+    );
+    let fraig_validation_backend = parse_validation_backend_or_exit(matches);
 
     G8rCliOptions {
         fold,
@@ -170,7 +211,8 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> G8rCliOptions {
         graph_logical_effort_beta1,
         graph_logical_effort_beta2,
         fraig_max_iterations,
-        fraig_sim_samples,
+        max_fraig_sim_samples,
+        fraig_validation_backend,
     }
 }
 
@@ -197,7 +239,8 @@ pub(crate) fn build_process_ir_path_options_for_cli(
         emit_independent_op_stats,
         ir_top: ir_top.map(|s| s.to_string()),
         fraig_max_iterations: cli.fraig_max_iterations,
-        fraig_sim_samples: cli.fraig_sim_samples,
+        max_fraig_sim_samples: Some(cli.max_fraig_sim_samples),
+        fraig_validation_backend: cli.fraig_validation_backend,
         quiet,
         emit_netlist,
         toggle_sample_count: cli.toggle_sample_count,
@@ -207,6 +250,9 @@ pub(crate) fn build_process_ir_path_options_for_cli(
         graph_logical_effort_beta2: cli.graph_logical_effort_beta2,
         cut_db: Some(CutDb::load_default()),
         cut_db_rewrite_max_iterations: CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
+        cut_db_rewrite_max_candidate_evals_per_round:
+            CUT_DB_REWRITE_MAX_CANDIDATE_EVALS_PER_ROUND_CLI,
+        cut_db_rewrite_max_rewrites_per_round: CUT_DB_REWRITE_MAX_REWRITES_PER_ROUND_CLI,
         cut_db_rewrite_max_cuts_per_node: CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
         prepared_ir_out: prepared_ir_out.map(|p| p.to_path_buf()),
     }

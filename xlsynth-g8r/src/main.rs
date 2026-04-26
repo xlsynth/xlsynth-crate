@@ -5,10 +5,14 @@ use std::fs;
 use clap::Parser;
 use prost::Message;
 use xlsynth_g8r::cut_db_cli_defaults::{
-    CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI, CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
+    CUT_DB_REWRITE_MAX_CANDIDATE_EVALS_PER_ROUND_CLI, CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
+    CUT_DB_REWRITE_MAX_ITERATIONS_CLI, CUT_DB_REWRITE_MAX_REWRITES_PER_ROUND_CLI,
 };
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
-use xlsynth_g8r::process_ir_path::{Options, process_ir_path_for_cli};
+use xlsynth_g8r::process_ir_path::{
+    DEFAULT_MAX_FRAIG_SIM_SAMPLES, Options, process_ir_path_for_cli,
+};
+use xlsynth_g8r::prove_gate_fn_equiv_varisat::ValidationBackend;
 use xlsynth_g8r::result_proto;
 
 /// Simple program to parse an XLS IR file and emit a Verilog netlist.
@@ -32,8 +36,16 @@ struct Args {
     #[arg(long)]
     fraig_max_iterations: Option<usize>,
 
-    #[arg(long)]
-    fraig_sim_samples: Option<usize>,
+    #[arg(
+        long = "max-fraig-sim-samples",
+        alias = "fraig-sim-samples",
+        default_value_t = DEFAULT_MAX_FRAIG_SIM_SAMPLES
+    )]
+    max_fraig_sim_samples: usize,
+
+    /// SAT backend for validating FRAIG equivalence classes.
+    #[arg(long, default_value = "cadical", value_parser = ["cadical", "varisat"])]
+    fraig_validation_backend: String,
 
     /// Whether to check equivalence between the IR and the gate function.
     #[arg(long, default_value_t = true)]
@@ -79,6 +91,8 @@ struct Args {
 fn main() {
     let _ = env_logger::builder().try_init();
     let args = Args::parse();
+    let fraig_validation_backend = ValidationBackend::parse(&args.fraig_validation_backend)
+        .expect("validated by clap value_parser");
     let cut_db = Some(xlsynth_g8r::cut_db::loader::CutDb::load_default());
 
     let options = Options {
@@ -102,9 +116,13 @@ fn main() {
         graph_logical_effort_beta1: args.graph_logical_effort_beta1,
         graph_logical_effort_beta2: args.graph_logical_effort_beta2,
         fraig_max_iterations: args.fraig_max_iterations,
-        fraig_sim_samples: args.fraig_sim_samples,
+        max_fraig_sim_samples: Some(args.max_fraig_sim_samples),
+        fraig_validation_backend,
         cut_db,
         cut_db_rewrite_max_iterations: CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
+        cut_db_rewrite_max_candidate_evals_per_round:
+            CUT_DB_REWRITE_MAX_CANDIDATE_EVALS_PER_ROUND_CLI,
+        cut_db_rewrite_max_rewrites_per_round: CUT_DB_REWRITE_MAX_REWRITES_PER_ROUND_CLI,
         cut_db_rewrite_max_cuts_per_node: CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
         prepared_ir_out: None,
     };

@@ -4,8 +4,8 @@ use xlsynth_sys::{CIrBits, CIrValue};
 
 use crate::{
     lib_support::{
-        xls_bits_make_sbits, xls_bits_make_ubits, xls_bits_to_bytes, xls_bits_to_debug_str,
-        xls_bits_to_int64, xls_bits_to_string, xls_bits_to_uint64,
+        xls_bits_make_bits_from_bytes, xls_bits_make_sbits, xls_bits_make_ubits, xls_bits_to_bytes,
+        xls_bits_to_debug_str, xls_bits_to_int64, xls_bits_to_string, xls_bits_to_uint64,
         xls_format_preference_from_string, xls_value_eq, xls_value_free, xls_value_get_bits,
         xls_value_get_element, xls_value_get_element_count, xls_value_make_array,
         xls_value_make_sbits, xls_value_make_token, xls_value_make_tuple, xls_value_make_ubits,
@@ -120,10 +120,7 @@ impl IrBits {
                 "High bits are set outside bits[{bit_count}] in final byte"
             )));
         }
-        let bits = (0..bit_count)
-            .map(|index| ((bytes[index / 8] >> (index % 8)) & 1) != 0)
-            .collect::<Vec<_>>();
-        Ok(Self::from_lsb_is_0(&bits))
+        xls_bits_make_bits_from_bytes(bit_count, bytes)
     }
 
     pub fn zero(bit_count: usize) -> Self {
