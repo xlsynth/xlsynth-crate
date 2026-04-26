@@ -24,10 +24,11 @@ use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_utils::compact_and_toposort_in_place;
 
 use crate::{
-    Best, CheckpointKind, CheckpointMsg, ConstraintLimits, Objective, RunOptions,
-    cost_with_effort_options_and_toggle_stimulus, effective_constraint_limits, format_search_score,
-    lower_toggle_stimulus_for_fn, parse_irvals_tuple_file, run_pir_mcmc_with_shared_best,
-    search_score, validate_constraint_configuration,
+    Best, CheckpointKind, CheckpointMsg, ConstraintLimits, ExtensionCostingMode, Objective,
+    RunOptions, cost_with_effort_options_toggle_stimulus_and_extension_mode,
+    effective_constraint_limits, format_search_score, lower_toggle_stimulus_for_fn,
+    parse_irvals_tuple_file, run_pir_mcmc_with_shared_best, search_score,
+    validate_constraint_configuration,
 };
 
 #[derive(ValueEnum, Debug, Clone, Copy)]
@@ -52,6 +53,7 @@ pub struct PirMcmcCliArgs {
     pub seed: u64,
     pub output: Option<String>,
     pub metric: Objective,
+    pub extension_costing_mode: ExtensionCostingMode,
     pub max_delay: Option<usize>,
     pub max_area: Option<usize>,
     pub toggle_stimulus: Option<String>,
@@ -113,6 +115,17 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 .help("Metric to optimize.")
                 .value_parser(clap::builder::EnumValueParser::<Objective>::new())
                 .default_value("nodes")
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("extension_costing_mode")
+                .long("extension-costing-mode")
+                .value_name("MODE")
+                .help(
+                    "How PIR extension ops are projected before XLS optimization/g8r costing.",
+                )
+                .value_parser(clap::builder::EnumValueParser::<ExtensionCostingMode>::new())
+                .default_value("preserve")
                 .action(ArgAction::Set),
         )
         .arg(
@@ -231,6 +244,9 @@ pub fn parse_pir_mcmc_args(matches: &ArgMatches) -> PirMcmcCliArgs {
         seed: *matches.get_one::<u64>("seed").unwrap(),
         output: matches.get_one::<String>("output").cloned(),
         metric: *matches.get_one::<Objective>("metric").unwrap(),
+        extension_costing_mode: *matches
+            .get_one::<ExtensionCostingMode>("extension_costing_mode")
+            .unwrap(),
         max_delay: matches.get_one::<usize>("max_delay").copied(),
         max_area: matches.get_one::<usize>("max_area").copied(),
         toggle_stimulus: matches.get_one::<String>("toggle_stimulus").cloned(),
@@ -253,12 +269,20 @@ pub fn parse_pir_mcmc_args(matches: &ArgMatches) -> PirMcmcCliArgs {
     }
 }
 
-fn optimize_ir_text(ir_text: &str, top: &str) -> Result<String> {
+fn optimize_ir_text(
+    ir_text: &str,
+    top: &str,
+    extension_costing_mode: ExtensionCostingMode,
+) -> Result<String> {
     let mut p = xlsynth_pir::ir_parser::Parser::new(ir_text);
     let pir_pkg = p
         .parse_and_validate_package()
         .map_err(|e| anyhow::anyhow!("PIR parse_and_validate_package failed: {:?}", e))?;
-    let optimized_pir_pkg = super::optimize_pir_package_via_xls(&pir_pkg, top)?;
+    let optimized_pir_pkg = super::optimize_pir_package_via_xls_with_extension_mode(
+        &pir_pkg,
+        top,
+        extension_costing_mode,
+    )?;
     Ok(optimized_pir_pkg.to_string())
 }
 
@@ -313,6 +337,10 @@ where
     F: FnMut(String),
 {
     report(format!("PIR MCMC Driver started with args: {:?}", cli));
+    report(format!(
+        "PIR MCMC extension costing mode: {}",
+        cli.extension_costing_mode.value_name()
+    ));
 
     // Parse IR package.
     let input_path = PathBuf::from(&cli.input_path);
@@ -363,11 +391,12 @@ where
             beta2: cli.switching_beta2,
             primary_output_load: cli.switching_primary_output_load,
         };
-    let initial_cost = cost_with_effort_options_and_toggle_stimulus(
+    let initial_cost = cost_with_effort_options_toggle_stimulus_and_extension_mode(
         &top_fn,
         cli.metric,
         prepared_toggle_stimulus.as_deref(),
         &weighted_switching_options,
+        cli.extension_costing_mode,
     )?;
     let effective_constraints = effective_constraint_limits(
         cli.metric,
@@ -429,6 +458,7 @@ where
     };
 
     let output_ir_path = output_dir.join(output_ir_filename);
+    let extension_costing_mode = cli.extension_costing_mode;
 
     let opts = RunOptions {
         max_iters: cli.iters,
@@ -442,6 +472,7 @@ where
         max_allowed_depth: cli.max_delay,
         max_allowed_area: cli.max_area,
         weighted_switching_options,
+        extension_costing_mode,
         enable_formal_oracle: cli.formal_oracle,
         trajectory_dir: Some(output_dir.clone()),
         toggle_stimulus: toggle_stimulus_values,
@@ -469,7 +500,7 @@ where
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", orig_ir_path.display(), e))?;
 
     let orig_top_name = top_fn.name.clone();
-    let orig_opt_ir_text = optimize_ir_text(&orig_ir_text, &orig_top_name)?;
+    let orig_opt_ir_text = optimize_ir_text(&orig_ir_text, &orig_top_name, extension_costing_mode)?;
     let orig_opt_ir_path = output_dir.join("orig.opt.ir");
     std::fs::write(&orig_opt_ir_path, orig_opt_ir_text.as_bytes())
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", orig_opt_ir_path.display(), e))?;
@@ -487,6 +518,7 @@ where
     let pkg_template = Arc::new(pkg.clone());
     let output_dir_for_thread = output_dir.clone();
     let orig_top_name_for_thread = orig_top_name.clone();
+    let extension_costing_mode_for_thread = extension_costing_mode;
 
     let writer_handle = if let (Some(best), Some(rx)) = (shared_best.clone(), checkpoint_rx) {
         Some(std::thread::spawn(move || {
@@ -526,11 +558,14 @@ where
                 let best_ir_path = output_dir_for_thread.join("best.ir");
                 let _ = std::fs::write(&best_ir_path, best_ir_text.as_bytes());
 
-                let best_opt_ir_text =
-                    match optimize_ir_text(&best_ir_text, &orig_top_name_for_thread) {
-                        Ok(s) => s,
-                        Err(_) => continue,
-                    };
+                let best_opt_ir_text = match optimize_ir_text(
+                    &best_ir_text,
+                    &orig_top_name_for_thread,
+                    extension_costing_mode_for_thread,
+                ) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
                 let best_opt_ir_path = output_dir_for_thread.join("best.opt.ir");
                 let _ = std::fs::write(&best_opt_ir_path, best_opt_ir_text.as_bytes());
 
@@ -689,7 +724,7 @@ where
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", best_ir_path.display(), e))?;
 
     let best_top_name = orig_top_name;
-    let best_opt_ir_text = optimize_ir_text(&best_ir_text, &best_top_name)?;
+    let best_opt_ir_text = optimize_ir_text(&best_ir_text, &best_top_name, extension_costing_mode)?;
     let best_opt_ir_path = output_dir.join("best.opt.ir");
     std::fs::write(&best_opt_ir_path, best_opt_ir_text.as_bytes())
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", best_opt_ir_path.display(), e))?;
@@ -709,7 +744,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{CliChainStrategy, Objective, PirMcmcCliArgs, run_pir_mcmc_driver};
+    use super::{
+        CliChainStrategy, ExtensionCostingMode, Objective, PirMcmcCliArgs, run_pir_mcmc_driver,
+    };
     use std::fs;
     use tempfile::tempdir;
 
@@ -735,6 +772,7 @@ top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
             seed: 1,
             output: Some(output_dir.path().display().to_string()),
             metric: Objective::G8rNodes,
+            extension_costing_mode: ExtensionCostingMode::Preserve,
             max_delay: Some(0),
             max_area: None,
             toggle_stimulus: None,
