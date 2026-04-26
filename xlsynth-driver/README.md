@@ -1319,6 +1319,8 @@ Supported flags include the common gate-optimization controls:
   `ZeroExt`, and `SignExt`.
 - `--fraig-max-iterations=<N>` – maximum FRAIG iterations.
 - `--fraig-sim-samples=<N>` – number of random samples for FRAIG.
+- `--fraig-validation-backend=<cadical|varisat>` – SAT backend for validating
+  FRAIG equivalence classes (default `cadical`).
 - `--toggle-sample-count=<N>` – if non-zero, generate `N` random samples and
   report toggle statistics.
 - `--toggle-seed=<SEED>` – seed for toggle sampling (default `0`).

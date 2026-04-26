@@ -24,6 +24,7 @@ use crate::aig_sim::count_toggles;
 use crate::check_equivalence;
 use crate::gatify::ir2gate;
 use crate::ir2gates;
+use crate::prove_gate_fn_equiv_varisat::ValidationBackend;
 use crate::use_count::get_id_to_use_count;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_range_info::IrRangeInfo;
@@ -158,6 +159,9 @@ pub struct Options {
     /// samples.
     pub fraig_sim_samples: Option<usize>,
 
+    /// SAT backend used to validate proposed FRAIG equivalence classes.
+    pub fraig_validation_backend: ValidationBackend,
+
     pub quiet: bool,
     pub emit_netlist: bool,
     /// If > 0, generate this many random input samples and print toggle stats.
@@ -172,16 +176,18 @@ pub struct Options {
     /// Optional 4-input cut database used to rewrite the `GateFn`.
     pub cut_db: Option<std::sync::Arc<crate::cut_db::loader::CutDb>>,
 
-    /// Deterministic bound on cut-db rewrite effort. If set to `0`, the pass
-    /// runs to convergence. This bounds global recompute rounds.
+    /// Deterministic bound on cut-db rewrite effort. If set to `0`, the outer
+    /// loop runs until no improving rewrite is found or another configured cap
+    /// prevents progress. This bounds global recompute rounds.
     pub cut_db_rewrite_max_iterations: usize,
 
     /// Maximum cheap candidate depth evaluations per cut-db global recompute
     /// round. If set to `0`, candidate evaluation is unbounded.
     pub cut_db_rewrite_max_candidate_evals_per_round: usize,
 
-    /// Maximum accepted cut-db replacements per global recompute round. If set
-    /// to `0`, accepted replacements are unbounded.
+    /// Maximum accepted cut-db replacements per global recompute round. This
+    /// is a speed/QoR batching policy; if set to `0`, accepted replacements are
+    /// unbounded.
     pub cut_db_rewrite_max_rewrites_per_round: usize,
 
     /// Maximum number of cuts kept per node during cut enumeration. If set to
@@ -480,8 +486,13 @@ pub fn process_ir_path_with_gatefn(
             }
         };
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(0);
-        let fraig_result: Result<_, _> =
-            fraig::fraig_optimize(&gate_fn, sim_samples, iteration_bounds, &mut rng);
+        let fraig_result: Result<_, _> = fraig::fraig_optimize_with_backend(
+            &gate_fn,
+            sim_samples,
+            iteration_bounds,
+            options.fraig_validation_backend,
+            &mut rng,
+        );
         if !fraig_result.is_ok() {
             eprintln!("Fraig optimization failed");
             std::process::exit(1);

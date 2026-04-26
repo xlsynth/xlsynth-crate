@@ -13,6 +13,10 @@ pub const CUT_DB_REWRITE_MAX_ITERATIONS_CLI: usize = 4;
 pub const CUT_DB_REWRITE_MAX_CANDIDATE_EVALS_PER_ROUND_CLI: usize = 4096;
 
 /// Default max accepted cut-db rewrites per global recompute round.
+///
+/// This is intentionally a batching policy, not just a safety limit: accepted
+/// replacements share one rebuild/DCE, while the next round recomputes global
+/// depth and cut state before choosing the next batch.
 pub const CUT_DB_REWRITE_MAX_REWRITES_PER_ROUND_CLI: usize = 64;
 
 /// Default max cuts retained per node during cut enumeration in CLI

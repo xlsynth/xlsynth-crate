@@ -6,9 +6,8 @@
 //! all equivalent or a counterexample that demonstrates a case in which they
 //! are not equivalent.
 //!
-//! The default backend is Varisat because it supports incrementality via
-//! assume/solve and add_clause. CaDiCaL is also available for profiling and
-//! benchmarking the validation path.
+//! The default backend is CaDiCaL. Varisat remains available for comparison and
+//! fallback testing.
 
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -80,19 +79,40 @@ impl ValidationBackend {
     fn from_env() -> Result<Self, ValidationError> {
         match env::var(VALIDATION_BACKEND_ENV) {
             Ok(value) => Self::parse(&value),
-            Err(env::VarError::NotPresent) => Ok(Self::Varisat),
+            Err(env::VarError::NotPresent) => Ok(Self::default()),
             Err(env::VarError::NotUnicode(value)) => Err(ValidationError::UnknownBackend(
                 value.to_string_lossy().to_string(),
             )),
         }
     }
 
-    fn parse(value: &str) -> Result<Self, ValidationError> {
+    /// Parses a user-facing backend name.
+    pub fn parse(value: &str) -> Result<Self, ValidationError> {
         match value {
             "varisat" | "Varisat" | "VARISAT" => Ok(Self::Varisat),
             "cadical" | "CaDiCaL" | "CADICAL" => Ok(Self::Cadical),
             other => Err(ValidationError::UnknownBackend(other.to_string())),
         }
+    }
+
+    /// Returns the canonical lower-case backend name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Varisat => "varisat",
+            Self::Cadical => "cadical",
+        }
+    }
+}
+
+impl Default for ValidationBackend {
+    fn default() -> Self {
+        Self::Cadical
+    }
+}
+
+impl std::fmt::Display for ValidationBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -636,7 +656,7 @@ pub fn validate_equivalence_classes_with_backend(
     }
 }
 
-fn validate_equivalence_classes_presorted_with_backend(
+pub fn validate_equivalence_classes_presorted_with_backend(
     gate_fn: &GateFn,
     equiv_classes: &[&[EquivNode]],
     backend: ValidationBackend,

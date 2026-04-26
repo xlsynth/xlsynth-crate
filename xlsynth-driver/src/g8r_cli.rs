@@ -9,6 +9,7 @@ use xlsynth_g8r::cut_db_cli_defaults::{
 use xlsynth_g8r::gatify::prep_for_gatify::PrepForGatifyOptions;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::process_ir_path;
+use xlsynth_g8r::prove_gate_fn_equiv_varisat::ValidationBackend;
 
 fn parse_adder_mapping(value: Option<&str>) -> AdderMapping {
     match value {
@@ -86,6 +87,20 @@ fn parse_optional_usize_or_exit(
     }
 }
 
+fn parse_validation_backend_or_exit(matches: &ArgMatches) -> ValidationBackend {
+    let value = matches
+        .get_one::<String>("fraig_validation_backend")
+        .map(|s| s.as_str())
+        .unwrap_or(ValidationBackend::default().as_str());
+    match ValidationBackend::parse(value) {
+        Ok(backend) => backend,
+        Err(_) => {
+            eprintln!("Invalid --fraig-validation-backend: {:?}", value);
+            std::process::exit(1);
+        }
+    }
+}
+
 pub(crate) struct G8rCliOptions {
     pub(crate) fold: bool,
     pub(crate) hash: bool,
@@ -103,6 +118,7 @@ pub(crate) struct G8rCliOptions {
     pub(crate) graph_logical_effort_beta2: f64,
     pub(crate) fraig_max_iterations: Option<usize>,
     pub(crate) fraig_sim_samples: Option<usize>,
+    pub(crate) fraig_validation_backend: ValidationBackend,
     pub(crate) cut_db: bool,
 }
 
@@ -155,6 +171,7 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> G8rCliOptions {
         parse_optional_usize_or_exit(matches, "fraig_max_iterations", "--fraig-max-iterations");
     let fraig_sim_samples =
         parse_optional_usize_or_exit(matches, "fraig_sim_samples", "--fraig-sim-samples");
+    let fraig_validation_backend = parse_validation_backend_or_exit(matches);
     let cut_db = parse_bool(matches, "cut-db", /* default= */ true);
 
     G8rCliOptions {
@@ -174,6 +191,7 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> G8rCliOptions {
         graph_logical_effort_beta2,
         fraig_max_iterations,
         fraig_sim_samples,
+        fraig_validation_backend,
         cut_db,
     }
 }
@@ -202,6 +220,7 @@ pub(crate) fn build_process_ir_path_options_for_cli(
         ir_top: ir_top.map(|s| s.to_string()),
         fraig_max_iterations: cli.fraig_max_iterations,
         fraig_sim_samples: cli.fraig_sim_samples,
+        fraig_validation_backend: cli.fraig_validation_backend,
         quiet,
         emit_netlist,
         toggle_sample_count: cli.toggle_sample_count,

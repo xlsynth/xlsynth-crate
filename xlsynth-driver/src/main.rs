@@ -377,6 +377,15 @@ impl AppExt for clap::Command {
                     .help("Number of samples to use for fraig optimization")
                     .action(clap::ArgAction::Set),
             )
+            .arg(
+                clap::Arg::new("fraig_validation_backend")
+                    .long("fraig-validation-backend")
+                    .value_name("BACKEND")
+                    .help("SAT backend for validating FRAIG equivalence classes (default: cadical)")
+                    .value_parser(["cadical", "varisat"])
+                    .default_value("cadical")
+                    .action(clap::ArgAction::Set),
+            )
             .add_bool_arg(
                 "compute_graph_logical_effort",
                 "Compute the graph logical effort worst case delay",

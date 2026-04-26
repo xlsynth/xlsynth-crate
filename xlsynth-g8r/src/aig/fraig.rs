@@ -22,9 +22,12 @@ use crate::aig::bulk_replace::{SubstitutionMap, bulk_replace};
 use crate::aig::get_summary_stats::{GateDepthStats, get_gate_depth};
 use crate::aig::{AigOperand, AigRef, GateFn};
 use crate::{
-    gate_builder::GateBuilderOptions, propose_equiv::EquivNode,
+    gate_builder::GateBuilderOptions,
+    propose_equiv::EquivNode,
     propose_equiv::propose_equivalence_classes,
-    prove_gate_fn_equiv_varisat::validate_equivalence_classes_presorted,
+    prove_gate_fn_equiv_varisat::{
+        ValidationBackend, validate_equivalence_classes_presorted_with_backend,
+    },
 };
 
 const FRAIG_CLASS_BATCH_SIZE_ENV: &str = "XLSYNTH_G8R_FRAIG_CLASS_BATCH_SIZE";
@@ -214,10 +217,28 @@ fn build_replacements_from_proven_sets(
     replacements
 }
 
+/// Runs FRAIG using the default validation backend.
 pub fn fraig_optimize(
     f: &GateFn,
     input_sample_count: usize,
     iteration_bounds: IterationBounds,
+    rng: &mut impl Rng,
+) -> Result<(GateFn, DidConverge, Vec<FraigIterationStat>), Box<dyn Error>> {
+    fraig_optimize_with_backend(
+        f,
+        input_sample_count,
+        iteration_bounds,
+        ValidationBackend::default(),
+        rng,
+    )
+}
+
+/// Runs FRAIG using an explicit SAT backend for equivalence validation.
+pub fn fraig_optimize_with_backend(
+    f: &GateFn,
+    input_sample_count: usize,
+    iteration_bounds: IterationBounds,
+    validation_backend: ValidationBackend,
     rng: &mut impl Rng,
 ) -> Result<(GateFn, DidConverge, Vec<FraigIterationStat>), Box<dyn Error>> {
     let mut iteration_count = 0;
@@ -275,8 +296,11 @@ pub fn fraig_optimize(
                 );
             }
             let equiv_classes_vec: Vec<&[EquivNode]> = batch.iter().map(|v| v.as_slice()).collect();
-            let validation_result =
-                validate_equivalence_classes_presorted(&current_fn, &equiv_classes_vec)?;
+            let validation_result = validate_equivalence_classes_presorted_with_backend(
+                &current_fn,
+                &equiv_classes_vec,
+                validation_backend,
+            )?;
 
             let mut new_counterexample_count = 0usize;
             for cex in validation_result.cex_inputs {

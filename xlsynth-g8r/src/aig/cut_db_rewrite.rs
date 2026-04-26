@@ -27,12 +27,18 @@ use crate::use_count::get_id_to_use_count;
 
 #[derive(Debug, Clone, Copy)]
 pub struct RewriteOptions {
+    /// Maximum number of cuts retained at each node during enumeration.
+    ///
+    /// This bounds local search breadth. If set to `0`, no per-node cut limit
+    /// is applied, which can be expensive on large graphs.
     pub max_cuts_per_node: usize,
     /// Maximum number of outer rewrite iterations to run.
     ///
-    /// An iteration is one global recompute round. If set to `0`, the pass runs
-    /// **to convergence** (until no improving rewrite exists under the
-    /// acceptance criterion).
+    /// An iteration is one global recompute round: compute use counts/depths,
+    /// enumerate cuts, accept a batch of virtual depth-improving replacements,
+    /// then materialize the batch with one rebuild/DCE. If set to `0`, this
+    /// outer loop is unbounded and stops only when no improving rewrite is
+    /// found or another configured cap prevents further progress.
     pub max_iterations: usize,
     /// Maximum cheap candidate depth evaluations per global recompute round.
     ///
@@ -40,7 +46,10 @@ pub struct RewriteOptions {
     pub max_candidate_evals_per_round: usize,
     /// Maximum accepted replacements per global recompute round.
     ///
-    /// If set to `0`, accepted replacements are unbounded.
+    /// Accepted replacements are validated in the virtual depth model, then
+    /// materialized together. Larger batches amortize rebuild/DCE work; smaller
+    /// batches recompute global state more often and can take a different QoR
+    /// trajectory. If set to `0`, accepted replacements are unbounded.
     pub max_rewrites_per_round: usize,
 }
 
@@ -427,7 +436,7 @@ impl<'a> VirtualDepthState<'a> {
         }
     }
 
-    fn global_depth(&self) -> usize {
+    fn max_output_node_depth(&self) -> usize {
         self.output_depth_counts
             .keys()
             .next_back()
@@ -600,7 +609,7 @@ impl<'a> VirtualDepthState<'a> {
         if !matches!(self.formulas[cand.root.id], DepthFormula::Original) {
             return false;
         }
-        let old_global_depth = self.global_depth();
+        let old_output_node_depth = self.max_output_node_depth();
         let old_root_depth = self.depths[cand.root.id];
         let new_root_depth = self.replacement_depth(cand);
         if new_root_depth >= old_root_depth {
@@ -609,7 +618,7 @@ impl<'a> VirtualDepthState<'a> {
 
         let mut changes = Vec::new();
         let formula_change = self.apply_formula_change(cand, new_root_depth, &mut changes);
-        if self.global_depth() < old_global_depth {
+        if self.max_output_node_depth() < old_output_node_depth {
             true
         } else {
             self.rollback_depth_changes(changes);
@@ -619,8 +628,26 @@ impl<'a> VirtualDepthState<'a> {
     }
 }
 
-fn collect_critical_roots(g: &GateFn, depths: &[usize], global_depth: usize) -> Vec<AigRef> {
-    if global_depth == 0 {
+fn max_output_node_depth_from_depths(g: &GateFn, depths: &[usize]) -> usize {
+    g.outputs
+        .iter()
+        .flat_map(|output| output.bit_vector.iter_lsb_to_msb())
+        .map(|op| depths[op.node.id])
+        .max()
+        .unwrap_or(0)
+}
+
+/// Collects AND nodes on paths that reach the maximum output node depth.
+///
+/// `max_output_node_depth` is measured in AIG edges from an input/literal to an
+/// output operand node. It is therefore one less than `deepest_path.len()` for
+/// a non-empty path.
+fn collect_critical_roots(
+    g: &GateFn,
+    depths: &[usize],
+    max_output_node_depth: usize,
+) -> Vec<AigRef> {
+    if max_output_node_depth == 0 {
         return Vec::new();
     }
 
@@ -631,7 +658,7 @@ fn collect_critical_roots(g: &GateFn, depths: &[usize], global_depth: usize) -> 
         .iter()
         .flat_map(|output| output.bit_vector.iter_lsb_to_msb())
         .filter_map(|op| {
-            if depths[op.node.id] == global_depth {
+            if depths[op.node.id] == max_output_node_depth {
                 Some(op.node)
             } else {
                 None
@@ -835,20 +862,35 @@ pub fn rewrite_gatefn_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions) 
         let t1 = Instant::now();
         let depth_stats = get_gate_depth(&cur, &live_nodes);
         let t_depth_ms = t1.elapsed().as_millis();
-        let cur_global_depth = depth_stats.deepest_path.len();
+        let cur_path_len = depth_stats.deepest_path.len();
+        let mut virtual_state = VirtualDepthState::new(&cur, &depth_stats.ref_to_depth);
+        let cur_output_node_depth = virtual_state.max_output_node_depth();
+        debug_assert_eq!(
+            cur_path_len.saturating_sub(1),
+            cur_output_node_depth,
+            "summary deepest_path length and per-node depths should use adjacent units"
+        );
+        debug_assert_eq!(
+            cur_output_node_depth,
+            max_output_node_depth_from_depths(&cur, &virtual_state.depths),
+            "virtual depth state should agree with dense output-depth scan"
+        );
 
         log::info!(
-            "cut-db rewrite round: live_nodes={} global_depth={}",
+            "cut-db rewrite round: live_nodes={} path_len={} output_node_depth={}",
             live_nodes.len(),
-            cur_global_depth
+            cur_path_len,
+            cur_output_node_depth
         );
 
         let t2 = Instant::now();
         let cuts_by_node = compute_cuts(&cur, opts.max_cuts_per_node);
         let t_cuts_ms = t2.elapsed().as_millis();
-        let mut virtual_state = VirtualDepthState::new(&cur, &depth_stats.ref_to_depth);
-        let crit_roots =
-            collect_critical_roots(&cur, &virtual_state.depths, virtual_state.global_depth());
+        let crit_roots = collect_critical_roots(
+            &cur,
+            &virtual_state.depths,
+            virtual_state.max_output_node_depth(),
+        );
 
         let mut accepted_replacements: Vec<Replacement> = Vec::new();
         let mut candidates_considered: usize = 0;
@@ -886,7 +928,7 @@ pub fn rewrite_gatefn_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions) 
         let t_phase_ms = t_phase.elapsed().as_millis();
 
         let mut rebuild_ms = 0;
-        let mut after_global_depth = cur_global_depth;
+        let mut after_path_len = cur_path_len;
         if !accepted_replacements.is_empty() {
             let t_rebuild = Instant::now();
             let new_g = rebuild_with_replacements(&cur, &accepted_replacements);
@@ -894,14 +936,14 @@ pub fn rewrite_gatefn_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions) 
             let new_id_to_use_count = get_id_to_use_count(&new_g);
             let new_live: Vec<AigRef> = new_id_to_use_count.keys().cloned().collect();
             let new_depth_stats = get_gate_depth(&new_g, &new_live);
-            after_global_depth = new_depth_stats.deepest_path.len();
-            if after_global_depth < cur_global_depth {
+            after_path_len = new_depth_stats.deepest_path.len();
+            if after_path_len < cur_path_len {
                 cur = new_g;
             } else {
                 log::info!(
-                    "cut-db rewrite: discarded non-improving replacement batch; before_depth={} after_depth={} replacements={}",
-                    cur_global_depth,
-                    after_global_depth,
+                    "cut-db rewrite: discarded non-improving replacement batch; before_path_len={} after_path_len={} replacements={}",
+                    cur_path_len,
+                    after_path_len,
                     accepted_replacements.len()
                 );
                 break;
@@ -909,7 +951,7 @@ pub fn rewrite_gatefn_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions) 
         }
 
         log::debug!(
-            "cut-db rewrite round timings: use_count_ms={} depth_ms={} cuts_ms={} phase_ms={} rebuild_ms={} critical_roots={} cands_considered={} candidate_evals={} accepted={} before_depth={} after_depth={} round_elapsed_ms={}",
+            "cut-db rewrite round timings: use_count_ms={} depth_ms={} cuts_ms={} phase_ms={} rebuild_ms={} critical_roots={} cands_considered={} candidate_evals={} accepted={} before_path_len={} after_path_len={} round_elapsed_ms={}",
             t_use_count_ms,
             t_depth_ms,
             t_cuts_ms,
@@ -919,8 +961,8 @@ pub fn rewrite_gatefn_with_cut_db(g: &GateFn, db: &CutDb, opts: RewriteOptions) 
             candidates_considered,
             candidate_evals,
             accepted_replacements.len(),
-            cur_global_depth,
-            after_global_depth,
+            cur_path_len,
+            after_path_len,
             t_iter0.elapsed().as_millis()
         );
 
@@ -973,7 +1015,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cut_db_rewrite_does_not_increase_global_depth() {
+    fn test_cut_db_rewrite_reduces_unbalanced_and4_depth() {
         // Function: a & b & c & d. Truth table is 1 only at assignment 0b1111 => bit
         // 15.
         let and4_tt = TruthTable16(0x8000);
@@ -1025,6 +1067,19 @@ mod tests {
         gb.add_output("o".to_string(), crate::aig::AigBitVector::from_bit(abcd));
         let g = gb.build();
 
+        let live_nodes: Vec<AigRef> = (0..g.gates.len()).map(|id| AigRef { id }).collect();
+        let depth_stats = get_gate_depth(&g, &live_nodes);
+        let depths: Vec<usize> = (0..g.gates.len())
+            .map(|id| depth_stats.ref_to_depth[&AigRef { id }])
+            .collect();
+        let output_node_depth = max_output_node_depth_from_depths(&g, &depths);
+        assert_eq!(depth_stats.deepest_path.len(), output_node_depth + 1);
+        let critical_roots = collect_critical_roots(&g, &depths, output_node_depth);
+        assert!(
+            critical_roots.contains(&abcd.node),
+            "output AND should be on the critical path roots"
+        );
+
         let before = get_summary_stats(&g);
         let rewritten = rewrite_gatefn_with_cut_db(
             &g,
@@ -1038,8 +1093,8 @@ mod tests {
         let after = get_summary_stats(&rewritten);
 
         assert!(
-            after.deepest_path <= before.deepest_path,
-            "global depth should not increase: before={} after={}",
+            after.deepest_path < before.deepest_path,
+            "global path length should decrease: before={} after={}",
             before.deepest_path,
             after.deepest_path
         );

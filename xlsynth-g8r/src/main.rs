@@ -10,6 +10,7 @@ use xlsynth_g8r::cut_db_cli_defaults::{
 };
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::process_ir_path::{Options, process_ir_path_for_cli};
+use xlsynth_g8r::prove_gate_fn_equiv_varisat::ValidationBackend;
 use xlsynth_g8r::result_proto;
 
 /// Simple program to parse an XLS IR file and emit a Verilog netlist.
@@ -35,6 +36,10 @@ struct Args {
 
     #[arg(long)]
     fraig_sim_samples: Option<usize>,
+
+    /// SAT backend for validating FRAIG equivalence classes.
+    #[arg(long, default_value = "cadical", value_parser = ["cadical", "varisat"])]
+    fraig_validation_backend: String,
 
     /// Whether to run the cut-db rewrite optimization.
     #[arg(long, default_value_t = true)]
@@ -90,6 +95,8 @@ struct Args {
 fn main() {
     let _ = env_logger::builder().try_init();
     let args = Args::parse();
+    let fraig_validation_backend = ValidationBackend::parse(&args.fraig_validation_backend)
+        .expect("validated by clap value_parser");
     let cut_db = if args.cut_db {
         Some(xlsynth_g8r::cut_db::loader::CutDb::load_default())
     } else {
@@ -118,6 +125,7 @@ fn main() {
         graph_logical_effort_beta2: args.graph_logical_effort_beta2,
         fraig_max_iterations: args.fraig_max_iterations,
         fraig_sim_samples: args.fraig_sim_samples,
+        fraig_validation_backend,
         cut_db,
         cut_db_rewrite_max_iterations: CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
         cut_db_rewrite_max_candidate_evals_per_round:
