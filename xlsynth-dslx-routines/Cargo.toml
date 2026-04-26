@@ -8,6 +8,7 @@ license = "Apache-2.0"
 repository = "https://github.com/xlsynth/xlsynth-crate"
 documentation = "https://docs.rs/xlsynth"
 homepage = "https://github.com/xlsynth/xlsynth-crate"
+publish = false
 
 [lints]
 workspace = true
