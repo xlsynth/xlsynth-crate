@@ -10,6 +10,8 @@ import re
 import subprocess
 import sys
 
+from sleep_until_version_seen import check_crate_version
+
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ORDER_PATH = os.path.join(REPO_ROOT, "publish_order.toml")
@@ -53,6 +55,12 @@ def publish_crates(version):
     for crate_name in load_publish_order():
         package = packages[crate_name]
         package_dir = crate_dir(package)
+        if check_crate_version(crate_name, version):
+            print(
+                "{} {} is already on crates.io; skipping.".format(crate_name, version),
+                flush=True,
+            )
+            continue
         print("Publishing {}...".format(crate_name), flush=True)
         subprocess.check_call(
             ["cargo", "publish", "--token", cargo_registry_token],
