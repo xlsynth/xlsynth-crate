@@ -375,7 +375,7 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
             let zero_value = if data_inputs.len() == 1 {
                 // Single input: create a zero bits value
                 let port = data_inputs[0];
-                match IrValue::parse_typed(&format!("bits[{}]:0", port.width)) {
+                match IrValue::make_ubits(port.width, 0) {
                     Ok(v) => v,
                     Err(e) => {
                         eprintln!(
@@ -389,7 +389,7 @@ pub fn handle_run_verilog_pipeline(matches: &ArgMatches) {
                 // Multiple inputs: create a zero tuple
                 let mut zero_elements = Vec::new();
                 for port in &data_inputs {
-                    match IrValue::parse_typed(&format!("bits[{}]:0", port.width)) {
+                    match IrValue::make_ubits(port.width, 0) {
                         Ok(v) => zero_elements.push(v),
                         Err(e) => {
                             eprintln!(

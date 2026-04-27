@@ -11,7 +11,7 @@ use crate::toolchain_config::ToolchainConfig;
 use rand::Rng;
 use rand::SeedableRng;
 use std::path::Path;
-use xlsynth::IrValue;
+use xlsynth::{IrBits, IrValue};
 use xlsynth_g8r::check_equivalence;
 use xlsynth_pir::ir::Type;
 use xlsynth_pir::ir::{self as ir_mod, BlockMetadata, MemberType, PackageMember};
@@ -661,96 +661,67 @@ fn compute_package_text_diffs(
     (text_diff_chars, rtl_diff_chars)
 }
 
-fn type_zero_value_text(ty: &Type) -> String {
+fn type_zero_value(ty: &Type) -> IrValue {
     match ty {
-        Type::Bits(w) => format!("bits[{}]:0", w),
+        Type::Bits(w) => IrValue::from_bits(&IrBits::zero(*w)),
         Type::Tuple(elems) => {
-            let parts: Vec<String> = elems.iter().map(|t| type_zero_value_text(t)).collect();
-            format!("({})", parts.join(", "))
+            let elements: Vec<IrValue> = elems.iter().map(|t| type_zero_value(t)).collect();
+            IrValue::make_tuple(&elements)
         }
         Type::Array(arr) => {
-            let part = type_zero_value_text(&arr.element_type);
-            let parts = std::iter::repeat(part)
-                .take(arr.element_count)
-                .collect::<Vec<_>>();
-            format!("[{}]", parts.join(", "))
-        }
-        Type::Token => "()".to_string(),
-    }
-}
-
-fn ones_hex_for_width(width: usize) -> String {
-    if width == 0 {
-        return "0x0".to_string();
-    }
-    let full = width / 4;
-    let rem = width % 4;
-    let mut s = String::from("0x");
-    if rem > 0 {
-        let mask = (1u8 << rem) - 1;
-        s.push_str(&format!("{:x}", mask));
-    }
-    if full > 0 {
-        s.push_str(&"f".repeat(full));
-    }
-    s
-}
-
-fn type_ones_value_text(ty: &Type) -> String {
-    match ty {
-        Type::Bits(w) => format!("bits[{}]:{}", w, ones_hex_for_width(*w)),
-        Type::Tuple(elems) => {
-            let parts: Vec<String> = elems.iter().map(|t| type_ones_value_text(t)).collect();
-            format!("({})", parts.join(", "))
-        }
-        Type::Array(arr) => {
-            let part = type_ones_value_text(&arr.element_type);
-            let parts = std::iter::repeat(part)
-                .take(arr.element_count)
-                .collect::<Vec<_>>();
-            format!("[{}]", parts.join(", "))
-        }
-        Type::Token => "()".to_string(),
-    }
-}
-
-fn rnd_hex_for_width(rng: &mut rand::rngs::StdRng, width: usize) -> String {
-    if width == 0 {
-        return "0x0".to_string();
-    }
-    let full = width / 4;
-    let rem = width % 4;
-    let mut s = String::from("0x");
-    if rem > 0 {
-        let max = (1u8 << rem) - 1;
-        let val: u8 = rng.gen_range(0..=max);
-        s.push_str(&format!("{:x}", val));
-    }
-    for _ in 0..full {
-        let v: u8 = rng.gen_range(0..=15);
-        s.push_str(&format!("{:x}", v));
-    }
-    s
-}
-
-fn type_random_value_text(ty: &Type, rng: &mut rand::rngs::StdRng) -> String {
-    match ty {
-        Type::Bits(w) => format!("bits[{}]:{}", w, rnd_hex_for_width(rng, *w)),
-        Type::Tuple(elems) => {
-            let parts: Vec<String> = elems
-                .iter()
-                .map(|t| type_random_value_text(t, rng))
+            let elements: Vec<IrValue> = (0..arr.element_count)
+                .map(|_| type_zero_value(&arr.element_type))
                 .collect();
-            format!("({})", parts.join(", "))
+            IrValue::make_array(&elements).expect("zero array elements must share a type")
+        }
+        Type::Token => IrValue::make_token(),
+    }
+}
+
+fn type_ones_value(ty: &Type) -> IrValue {
+    match ty {
+        Type::Bits(w) => IrValue::from_bits(&IrBits::all_ones(*w)),
+        Type::Tuple(elems) => {
+            let elements: Vec<IrValue> = elems.iter().map(|t| type_ones_value(t)).collect();
+            IrValue::make_tuple(&elements)
         }
         Type::Array(arr) => {
-            let part = type_random_value_text(&arr.element_type, rng);
-            let parts = (0..arr.element_count)
-                .map(|_| part.clone())
-                .collect::<Vec<_>>();
-            format!("[{}]", parts.join(", "))
+            let elements: Vec<IrValue> = (0..arr.element_count)
+                .map(|_| type_ones_value(&arr.element_type))
+                .collect();
+            IrValue::make_array(&elements).expect("ones array elements must share a type")
         }
-        Type::Token => "()".to_string(),
+        Type::Token => IrValue::make_token(),
+    }
+}
+
+fn random_bits_for_width(rng: &mut rand::rngs::StdRng, width: usize) -> IrBits {
+    if width == 0 {
+        return IrBits::zero(0);
+    }
+    let mut bytes = vec![0u8; width.div_ceil(8)];
+    rng.fill(&mut bytes[..]);
+    let bit_remainder = width % 8;
+    if bit_remainder != 0 {
+        let mask = (1u8 << bit_remainder) - 1;
+        *bytes.last_mut().unwrap() &= mask;
+    }
+    IrBits::from_le_bytes(width, &bytes).expect("random bits must fit requested width")
+}
+
+fn type_random_value(ty: &Type, rng: &mut rand::rngs::StdRng) -> IrValue {
+    match ty {
+        Type::Bits(w) => IrValue::from_bits(&random_bits_for_width(rng, *w)),
+        Type::Tuple(elems) => {
+            let elements: Vec<IrValue> = elems.iter().map(|t| type_random_value(t, rng)).collect();
+            IrValue::make_tuple(&elements)
+        }
+        Type::Array(arr) => {
+            let element = type_random_value(&arr.element_type, rng);
+            let elements: Vec<IrValue> = (0..arr.element_count).map(|_| element.clone()).collect();
+            IrValue::make_array(&elements).expect("random array elements must share a type")
+        }
+        Type::Token => IrValue::make_token(),
     }
 }
 
@@ -758,20 +729,23 @@ fn has_token_param(f: &ir::Fn) -> bool {
     f.params.iter().any(|p| matches!(p.ty, Type::Token))
 }
 
-fn build_args_text(f: &ir::Fn, mode: &str, mut rng: Option<&mut rand::rngs::StdRng>) -> String {
-    let parts: Vec<String> = f
+fn build_zero_args_value(f: &ir::Fn) -> IrValue {
+    let elements: Vec<IrValue> = f.params.iter().map(|p| type_zero_value(&p.ty)).collect();
+    IrValue::make_tuple(&elements)
+}
+
+fn build_ones_args_value(f: &ir::Fn) -> IrValue {
+    let elements: Vec<IrValue> = f.params.iter().map(|p| type_ones_value(&p.ty)).collect();
+    IrValue::make_tuple(&elements)
+}
+
+fn build_random_args_value(f: &ir::Fn, rng: &mut rand::rngs::StdRng) -> IrValue {
+    let elements: Vec<IrValue> = f
         .params
         .iter()
-        .map(|p| match mode {
-            "zeros" => type_zero_value_text(&p.ty),
-            "ones" => type_ones_value_text(&p.ty),
-            _ => {
-                let mut_ref = rng.as_deref_mut().unwrap();
-                type_random_value_text(&p.ty, mut_ref)
-            }
-        })
+        .map(|p| type_random_value(&p.ty, rng))
         .collect();
-    format!("({})", parts.join(", "))
+    IrValue::make_tuple(&elements)
 }
 
 fn sanity_check_interpret(
@@ -796,12 +770,8 @@ fn sanity_check_interpret(
         .get_function(top_name)
         .map_err(|e| format!("get new top failed: {}", e))?;
 
-    let zeros_text = build_args_text(new_fn, "zeros", None);
-    let ones_text = build_args_text(new_fn, "ones", None);
-    let zeros_tuple = xlsynth::IrValue::parse_typed(&zeros_text)
-        .map_err(|e| format!("parse zeros args failed: {}", e))?;
-    let ones_tuple = xlsynth::IrValue::parse_typed(&ones_text)
-        .map_err(|e| format!("parse ones args failed: {}", e))?;
+    let zeros_tuple = build_zero_args_value(new_fn);
+    let ones_tuple = build_ones_args_value(new_fn);
     let zeros_args = zeros_tuple
         .get_elements()
         .map_err(|e| format!("decompose zeros tuple failed: {}", e))?;
@@ -843,9 +813,8 @@ fn sanity_check_interpret(
         let max_attempts: usize = random_samples * 10 + 10;
         while valid_done < random_samples && attempts < max_attempts {
             attempts += 1;
-            let arg_text = build_args_text(new_fn, "random", Some(&mut rng));
-            let arg_tuple = xlsynth::IrValue::parse_typed(&arg_text)
-                .map_err(|e| format!("parse random args failed: {}", e))?;
+            let arg_tuple = build_random_args_value(new_fn, &mut rng);
+            let arg_text = arg_tuple.to_string();
             let args = arg_tuple
                 .get_elements()
                 .map_err(|e| format!("decompose random tuple failed: {}", e))?;

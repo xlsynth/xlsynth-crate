@@ -620,20 +620,11 @@ fn ir_value_is_all_ones(value: &IrValue, bit_count: usize) -> Result<bool, Strin
 }
 
 fn ir_value_zero(bit_count: usize) -> Result<IrValue, String> {
-    if bit_count == 0 {
-        return Ok(IrValue::make_ubits(0, 0).expect("bits[0] should be valid"));
-    }
-    IrValue::parse_typed(&format!("bits[{bit_count}]:0"))
-        .map_err(|e| format!("block2fn: zero literal failed: {e}"))
+    IrValue::make_ubits(bit_count, 0).map_err(|e| format!("block2fn: zero literal failed: {e}"))
 }
 
 fn ir_value_ones(bit_count: usize) -> Result<IrValue, String> {
-    if bit_count == 0 {
-        return Ok(IrValue::make_ubits(0, 0).expect("bits[0] should be valid"));
-    }
-    let ones = "1".repeat(bit_count);
-    IrValue::parse_typed(&format!("bits[{bit_count}]:0b{ones}"))
-        .map_err(|e| format!("block2fn: ones literal failed: {e}"))
+    Ok(IrValue::from_bits(&IrBits::all_ones(bit_count)))
 }
 
 #[cfg(test)]
