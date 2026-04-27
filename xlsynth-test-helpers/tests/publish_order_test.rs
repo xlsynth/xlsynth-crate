@@ -57,19 +57,15 @@ fn publish_order_is_topological_for_publish_time_dependencies() {
         .map(|package| (package.name.clone(), package))
         .collect::<BTreeMap<_, _>>();
 
-    for crate_name in &publish_order {
-        let package = workspace_packages.get(crate_name).unwrap_or_else(|| {
-            panic!(
-                "publish_order.toml names unknown workspace crate `{}`",
-                crate_name
-            )
-        });
-        assert_ne!(
-            package.publish,
-            Some(vec![]),
-            "publish_order.toml includes non-publishable crate `{crate_name}`"
-        );
-    }
+    let publishable_workspace_crates = workspace_packages
+        .iter()
+        .filter(|(_, package)| package.publish != Some(vec![]))
+        .map(|(crate_name, _)| crate_name.clone())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        publish_names, publishable_workspace_crates,
+        "publish_order.toml must list every publishable workspace crate, and omitted workspace crates must set `publish = false`"
+    );
 
     let positions = publish_order
         .iter()

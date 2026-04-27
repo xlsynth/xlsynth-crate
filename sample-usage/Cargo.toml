@@ -2,6 +2,7 @@
 name = "sample-usage"
 version = "0.43.0"
 edition = "2021"
+publish = false
 
 [lints]
 workspace = true
