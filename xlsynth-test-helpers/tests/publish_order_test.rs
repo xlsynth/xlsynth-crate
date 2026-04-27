@@ -22,6 +22,10 @@ fn publish_time_dependencies(package: &Package, publish_names: &BTreeSet<String>
         .iter()
         .filter(|dependency| publish_names.contains(&dependency.name))
         .filter(|dependency| dependency.path.is_some())
+        // Cargo allows local dev-dependency cycles, and path-only dev-dependencies
+        // without a registry version are omitted from the packaged manifest. Those
+        // edges matter for local workspace policy, but not for crates.io publish
+        // order.
         .filter(|dependency| dependency.req.to_string() != "*")
         .filter(|dependency| {
             matches!(
