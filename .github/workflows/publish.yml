@@ -12,6 +12,9 @@ on:
 jobs:
   publish:
     runs-on: macos-latest
+    outputs:
+      version_no_v: ${{ steps.version_vars.outputs.version_no_v }}
+      patch: ${{ steps.version_vars.outputs.patch }}
 
     steps:
       - name: Check out code
@@ -97,25 +100,60 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
         run: python3 scripts/publish_crates.py "${{ steps.version_vars.outputs.version_no_v }}"
 
+  post-publish:
+    needs: publish
+    if: ${{ needs.publish.outputs.patch == '0' }}
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v3
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up post-publish version variables
+        id: post_publish_vars
+        run: |
+          RELEASED_VERSION="${{ needs.publish.outputs.version_no_v }}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$RELEASED_VERSION"
+          NEXT_MINOR=$((MINOR+1))
+          NEXT_VERSION="${MAJOR}.${NEXT_MINOR}.0"
+          echo "released_version=$RELEASED_VERSION" >> "$GITHUB_OUTPUT"
+          echo "next_version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check current repository version
+        id: repo_version_state
+        run: |
+          RELEASED_VERSION="${{ steps.post_publish_vars.outputs.released_version }}"
+          NEXT_VERSION="${{ steps.post_publish_vars.outputs.next_version }}"
+          if python3 scripts/check_version_is.py "$NEXT_VERSION"; then
+            echo "state=already_bumped" >> "$GITHUB_OUTPUT"
+          elif python3 scripts/check_version_is.py "$RELEASED_VERSION"; then
+            echo "state=needs_bump" >> "$GITHUB_OUTPUT"
+          else
+            echo "Repository version is neither released version $RELEASED_VERSION nor expected next version $NEXT_VERSION." >&2
+            exit 1
+          fi
+
       - name: Bump version numbers (minor bump for mainline release)
-        if: ${{ success() && steps.version_vars.outputs.patch == '0' }}
+        if: ${{ steps.repo_version_state.outputs.state == 'needs_bump' }}
         run: |
           cargo clean
           python scripts/bump_version_numbers.py bump-minor
           cargo generate-lockfile
 
       - name: Validate post-bump version equals expected next minor
-        if: ${{ success() && steps.version_vars.outputs.patch == '0' }}
+        if: ${{ steps.repo_version_state.outputs.state == 'needs_bump' }}
         run: |
-          VERSION_NO_V="${{ steps.version_vars.outputs.version_no_v }}"
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION_NO_V"
-          NEXT_MINOR=$((MINOR+1))
-          EXPECTED_NEXT="${MAJOR}.${NEXT_MINOR}.0"
-          echo "Expecting post-bump version: $EXPECTED_NEXT"
-          python3 scripts/check_version_is.py "$EXPECTED_NEXT"
+          NEXT_VERSION="${{ steps.post_publish_vars.outputs.next_version }}"
+          echo "Expecting post-bump version: $NEXT_VERSION"
+          python3 scripts/check_version_is.py "$NEXT_VERSION"
 
       - name: Commit bumped version numbers
-        if: ${{ success() && steps.version_vars.outputs.patch == '0' }}
+        if: ${{ steps.repo_version_state.outputs.state == 'needs_bump' }}
+        env:
+          MY_PAT: ${{ secrets.MY_PAT }}
         run: |
           git config user.name "github-actions"
           git config user.email "xlsynth-github-actions@xlsynth.org"
@@ -124,13 +162,17 @@ jobs:
           git push "https://${GITHUB_ACTOR}:${MY_PAT}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
 
       - name: Update version compatibility docs
-        if: ${{ success() && steps.version_vars.outputs.patch == '0' }}
         run: |
           python3 scripts/gen_version_compat.py
 
       - name: Commit version metadata update
-        if: ${{ success() && steps.version_vars.outputs.patch == '0' }}
+        env:
+          MY_PAT: ${{ secrets.MY_PAT }}
         run: |
+          if git diff --quiet -- docs/version_metadata.md generated_version_compat.json; then
+            echo "Version metadata is already up to date."
+            exit 0
+          fi
           git config user.name "github-actions"
           git config user.email "xlsynth-github-actions@xlsynth.org"
           git add docs/version_metadata.md generated_version_compat.json
