@@ -527,7 +527,15 @@ jobs:
       - name: Note Xcode version
         run: xcodebuild -version
 
-      - name: Download xlsynth binaries
+      - name: Cache xlsynth tools and DSO (macOS)
+        id: cache-xlsynth-tools-macos
+        uses: actions/cache@v3
+        with:
+          path: xlsynth_tools
+          key: ${{ runner.os }}-xls-tools-${{ steps.resolve-xls-tag-macos.outputs.tag }}-arm64-with-dso
+
+      - name: Download xlsynth binaries and DSO
+        if: steps.cache-xlsynth-tools-macos.outputs.cache-hit != 'true'
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
         run: |
@@ -535,7 +543,16 @@ jobs:
           pip3 install --break-system-packages -r requirements.txt
           TAG='${{ steps.resolve-xls-tag-macos.outputs.tag }}'
           echo "Resolved XLS release tag: ${TAG}"
-          python3 scripts/download_release.py -p arm64 -o xlsynth_tools -v ${TAG}
+          python3 scripts/download_release.py -p arm64 -o xlsynth_tools -v ${TAG} -d
+
+      - name: Configure xlsynth artifact environment
+        run: |
+          XLSYNTH_TOOLS="$(realpath xlsynth_tools)"
+          test -f "${XLSYNTH_TOOLS}/libxls-arm64.dylib"
+          test -d "${XLSYNTH_TOOLS}/xls/dslx/stdlib"
+          echo "XLSYNTH_TOOLS=${XLSYNTH_TOOLS}" >> "$GITHUB_ENV"
+          echo "XLS_DSO_PATH=${XLSYNTH_TOOLS}/libxls-arm64.dylib" >> "$GITHUB_ENV"
+          echo "DSLX_STDLIB_PATH=${XLSYNTH_TOOLS}/xls/dslx/stdlib" >> "$GITHUB_ENV"
 
       - name: Download Bitwuzla shared library (macOS arm64)
         run: |
