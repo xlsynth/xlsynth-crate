@@ -103,6 +103,35 @@ pub struct Cost {
     pub g8r_weighted_switching_milli: u128,
 }
 
+/// How PIR extension ops are projected before XLS optimization and g8r costing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum ExtensionCostingMode {
+    /// Preserve extension ops through XLS optimization using FFI wrappers, then
+    /// reconstruct extension ops when reparsing the optimized IR.
+    #[value(name = "preserve")]
+    Preserve,
+    /// Desugar extension ops to ordinary XLS IR before optimization, so costs
+    /// and best artifacts are grounded in standard non-extension IR.
+    #[value(name = "desugar")]
+    Desugar,
+}
+
+impl ExtensionCostingMode {
+    pub fn value_name(self) -> &'static str {
+        match self {
+            ExtensionCostingMode::Preserve => "preserve",
+            ExtensionCostingMode::Desugar => "desugar",
+        }
+    }
+
+    fn extension_emit_mode(self) -> ExtensionEmitMode {
+        match self {
+            ExtensionCostingMode::Preserve => ExtensionEmitMode::AsFfiFunction,
+            ExtensionCostingMode::Desugar => ExtensionEmitMode::Desugared,
+        }
+    }
+}
+
 /// Optional hard caps applied to gate-level cost components during PIR MCMC.
 ///
 /// At most one cap may be active in a run.
@@ -241,6 +270,24 @@ pub fn cost_with_effort_options_and_toggle_stimulus(
     toggle_stimulus: Option<&[Vec<IrBits>]>,
     weighted_switching_options: &count_toggles::WeightedSwitchingOptions,
 ) -> Result<Cost> {
+    cost_with_effort_options_toggle_stimulus_and_extension_mode(
+        f,
+        objective,
+        toggle_stimulus,
+        weighted_switching_options,
+        ExtensionCostingMode::Preserve,
+    )
+}
+
+/// Calculates cost with explicit load-weighting and extension projection
+/// options.
+pub fn cost_with_effort_options_toggle_stimulus_and_extension_mode(
+    f: &IrFn,
+    objective: Objective,
+    toggle_stimulus: Option<&[Vec<IrBits>]>,
+    weighted_switching_options: &count_toggles::WeightedSwitchingOptions,
+    extension_costing_mode: ExtensionCostingMode,
+) -> Result<Cost> {
     let pir_nodes = f.nodes.len();
 
     if objective.needs_toggle_stimulus() && toggle_stimulus.is_none() {
@@ -273,6 +320,7 @@ pub fn cost_with_effort_options_and_toggle_stimulus(
             objective.needs_weighted_switching(),
             toggle_stimulus,
             weighted_switching_options,
+            extension_costing_mode,
         )?
     } else {
         (pir_nodes, pir_nodes, 0, 0, 0u128)
@@ -308,12 +356,17 @@ fn validate_weighted_switching_options(
     Ok(())
 }
 
-/// Optimizes a PIR package by wrapping extension ops in stable FFI helpers for
-/// the XLS-facing round-trip, then reconstructing the extensions on reparse.
-fn optimize_pir_package_via_xls(pkg: &PirPackage, top: &str) -> Result<PirPackage> {
-    let wrapped_ir_text =
-        desugar_extensions::emit_package_with_extension_mode(pkg, ExtensionEmitMode::AsFfiFunction)
-            .map_err(|e| anyhow::anyhow!("emit_package_with_extension_mode failed: {}", e))?;
+/// Optimizes a PIR package through XLS using the selected extension projection.
+pub(crate) fn optimize_pir_package_via_xls_with_extension_mode(
+    pkg: &PirPackage,
+    top: &str,
+    extension_costing_mode: ExtensionCostingMode,
+) -> Result<PirPackage> {
+    let wrapped_ir_text = desugar_extensions::emit_package_with_extension_mode(
+        pkg,
+        extension_costing_mode.extension_emit_mode(),
+    )
+    .map_err(|e| anyhow::anyhow!("emit_package_with_extension_mode failed: {}", e))?;
 
     let ir_pkg = IrPackage::parse_ir(&wrapped_ir_text, None)
         .map_err(|e| anyhow::anyhow!("IrPackage::parse_ir failed: {:?}", e))?;
@@ -327,13 +380,12 @@ fn optimize_pir_package_via_xls(pkg: &PirPackage, top: &str) -> Result<PirPackag
         .map_err(|e| anyhow::anyhow!("PIR parse_and_validate_package failed: {:?}", e))
 }
 
-/// Produces the XLS-optimized PIR function for `f`.
-///
-/// This uses the same PIR → FFI-wrapped XLS text → XLS optimize → PIR parsing
-/// pipeline used by g8r-costing. We prefer storing "best" candidates in this
-/// optimized form so emitted artifacts (`best.ir`) reflect the canonical
-/// optimized IR rather than an intermediate exploration state.
-fn optimize_pir_fn_via_xls(f: &IrFn) -> Result<IrFn> {
+/// Produces the XLS-optimized PIR function for `f` using the selected extension
+/// projection mode.
+pub(crate) fn optimize_pir_fn_via_xls_with_extension_mode(
+    f: &IrFn,
+    extension_costing_mode: ExtensionCostingMode,
+) -> Result<IrFn> {
     // The pipeline assumes the IR is a DAG and that textual IR references only
     // previously-defined names. MCMC exploration can transiently violate that;
     // callers can choose how to handle errors.
@@ -351,7 +403,11 @@ fn optimize_pir_fn_via_xls(f: &IrFn) -> Result<IrFn> {
         .set_top_fn(&f.name)
         .map_err(|e| anyhow::anyhow!("set_top_fn failed: {}", e))?;
 
-    let pir_pkg = optimize_pir_package_via_xls(&pir_pkg, &f.name)?;
+    let pir_pkg = optimize_pir_package_via_xls_with_extension_mode(
+        &pir_pkg,
+        &f.name,
+        extension_costing_mode,
+    )?;
     let top_fn = pir_pkg
         .get_top_fn()
         .ok_or_else(|| anyhow::anyhow!("No top function found in optimized PIR package"))?;
@@ -574,6 +630,7 @@ fn compute_g8r_stats_for_pir_fn(
     compute_weighted_switching: bool,
     toggle_stimulus: Option<&[Vec<IrBits>]>,
     weighted_switching_options: &count_toggles::WeightedSwitchingOptions,
+    extension_costing_mode: ExtensionCostingMode,
 ) -> Result<(usize, usize, usize, usize, u128)> {
     // The PIR → text → XLS → optimize → PIR → gatify pipeline assumes a DAG.
     // Random rewiring transforms can (transiently) create cycles; if that happens
@@ -589,6 +646,7 @@ fn compute_g8r_stats_for_pir_fn(
             compute_weighted_switching,
             toggle_stimulus,
             weighted_switching_options,
+            extension_costing_mode,
         )
     }));
     match result {
@@ -621,9 +679,10 @@ fn compute_g8r_stats_for_pir_fn_impl(
     compute_weighted_switching: bool,
     toggle_stimulus: Option<&[Vec<IrBits>]>,
     weighted_switching_options: &count_toggles::WeightedSwitchingOptions,
+    extension_costing_mode: ExtensionCostingMode,
 ) -> Result<(usize, usize, usize, usize, u128)> {
     // 1-3) Optimize the PIR function via the XLS pipeline.
-    let top_fn = optimize_pir_fn_via_xls(f)?;
+    let top_fn = optimize_pir_fn_via_xls_with_extension_mode(f, extension_costing_mode)?;
 
     // 4) Gatify and measure live gate count.
     let gatify_options = GatifyOptions {
@@ -844,6 +903,8 @@ pub struct RunOptions {
     pub initial_temperature: f64,
     /// Objective to optimize.
     pub objective: Objective,
+    /// How extension ops are projected before XLS optimization and g8r costing.
+    pub extension_costing_mode: ExtensionCostingMode,
     /// Optional hard cap on gate depth (`g8r_depth`) for g8r-based objectives.
     pub max_allowed_depth: Option<usize>,
     /// Optional hard cap on gate count (`g8r_nodes`) for g8r-based objectives.
@@ -955,6 +1016,7 @@ fn hash_to_hex(bytes: &[u8; 32]) -> String {
 
 struct PirSegmentRunner {
     objective: Objective,
+    extension_costing_mode: ExtensionCostingMode,
     weighted_switching_options: count_toggles::WeightedSwitchingOptions,
     initial_temperature: f64,
     constraints: ConstraintLimits,
@@ -979,6 +1041,7 @@ pub fn mcmc_iteration(
     context: &mut PirMcmcContext,
     temp: f64,
     objective: Objective,
+    extension_costing_mode: ExtensionCostingMode,
     toggle_stimulus: Option<&[Vec<IrBits>]>,
     weighted_switching_options: &count_toggles::WeightedSwitchingOptions,
     constraints: ConstraintLimits,
@@ -1100,64 +1163,68 @@ pub fn mcmc_iteration(
                 }
             } else {
                 let cost_start = Instant::now();
-                let new_candidate_cost = match cost_with_effort_options_and_toggle_stimulus(
-                    &candidate_fn,
-                    objective,
-                    toggle_stimulus,
-                    weighted_switching_options,
-                ) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        let sim_micros = cost_start.elapsed().as_micros();
-                        let msg = e.to_string();
-                        let is_invalid_bit_slice = msg.contains("Expected operand 0 of bit_slice")
-                            || msg.contains("invalid bit_slice");
+                let new_candidate_cost =
+                    match cost_with_effort_options_toggle_stimulus_and_extension_mode(
+                        &candidate_fn,
+                        objective,
+                        toggle_stimulus,
+                        weighted_switching_options,
+                        extension_costing_mode,
+                    ) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            let sim_micros = cost_start.elapsed().as_micros();
+                            let msg = e.to_string();
+                            let is_invalid_bit_slice = msg
+                                .contains("Expected operand 0 of bit_slice")
+                                || msg.contains("invalid bit_slice");
 
-                        if is_invalid_bit_slice {
-                            // Not a sample failure: we sometimes propose structurally invalid
-                            // candidates (e.g. bit_slice bounds violations) while exploring.
-                            // These are rejected.
-                            //
-                            // Still, keep this loud for a bit to catch regressions in transforms.
-                            let n = INVALID_BIT_SLICE_WARN_COUNT
-                                .fetch_add(1, Ordering::Relaxed)
-                                .saturating_add(1);
-                            if n <= INVALID_BIT_SLICE_WARN_LIMIT {
-                                log::warn!(
-                                    "[pir-mcmc] cost evaluation failed for '{}' under {:?}: {}; rejecting candidate (invalid bit_slice; warning {}/{})",
-                                    candidate_fn.name,
-                                    objective,
-                                    e,
-                                    n,
-                                    INVALID_BIT_SLICE_WARN_LIMIT
-                                );
+                            if is_invalid_bit_slice {
+                                // Not a sample failure: we sometimes propose structurally invalid
+                                // candidates (e.g. bit_slice bounds violations) while exploring.
+                                // These are rejected.
+                                //
+                                // Still, keep this loud for a bit to catch regressions in
+                                // transforms.
+                                let n = INVALID_BIT_SLICE_WARN_COUNT
+                                    .fetch_add(1, Ordering::Relaxed)
+                                    .saturating_add(1);
+                                if n <= INVALID_BIT_SLICE_WARN_LIMIT {
+                                    log::warn!(
+                                        "[pir-mcmc] cost evaluation failed for '{}' under {:?}: {}; rejecting candidate (invalid bit_slice; warning {}/{})",
+                                        candidate_fn.name,
+                                        objective,
+                                        e,
+                                        n,
+                                        INVALID_BIT_SLICE_WARN_LIMIT
+                                    );
+                                } else {
+                                    log::debug!(
+                                        "[pir-mcmc] cost evaluation failed for '{}' under {:?}: {}; rejecting candidate (invalid bit_slice; further occurrences silenced to debug)",
+                                        candidate_fn.name,
+                                        objective,
+                                        e
+                                    );
+                                }
                             } else {
-                                log::debug!(
-                                    "[pir-mcmc] cost evaluation failed for '{}' under {:?}: {}; rejecting candidate (invalid bit_slice; further occurrences silenced to debug)",
+                                log::warn!(
+                                    "[pir-mcmc] cost evaluation failed for '{}' under {:?}: {}; rejecting candidate",
                                     candidate_fn.name,
                                     objective,
                                     e
                                 );
                             }
-                        } else {
-                            log::warn!(
-                                "[pir-mcmc] cost evaluation failed for '{}' under {:?}: {}; rejecting candidate",
-                                candidate_fn.name,
-                                objective,
-                                e
-                            );
+                            return McmcIterationOutput {
+                                output_state: current_fn,
+                                output_cost: current_cost,
+                                best_updated: false,
+                                outcome: IterationOutcomeDetails::SimFailure,
+                                oracle_time_micros: sim_micros,
+                                transform_always_equivalent: chosen_candidate.always_equivalent,
+                                transform: Some(current_transform_kind),
+                            };
                         }
-                        return McmcIterationOutput {
-                            output_state: current_fn,
-                            output_cost: current_cost,
-                            best_updated: false,
-                            outcome: IterationOutcomeDetails::SimFailure,
-                            oracle_time_micros: sim_micros,
-                            transform_always_equivalent: chosen_candidate.always_equivalent,
-                            transform: Some(current_transform_kind),
-                        };
-                    }
-                };
+                    };
 
                 let current_score = search_score(&current_cost, objective, constraints);
                 let new_score = search_score(&new_candidate_cost, objective, constraints);
@@ -1201,7 +1268,10 @@ pub fn mcmc_iteration(
                         // artifacts (and subsequent segments via shared best) are based on
                         // the canonical optimized representation, not the raw exploration
                         // state.
-                        *best_fn = match optimize_pir_fn_via_xls(&candidate_fn) {
+                        *best_fn = match optimize_pir_fn_via_xls_with_extension_mode(
+                            &candidate_fn,
+                            extension_costing_mode,
+                        ) {
                             Ok(opt) => opt,
                             Err(e) => {
                                 log::warn!(
@@ -1479,11 +1549,12 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
         let toggle_stimulus = self.prepared_toggle_stimulus.as_ref().map(|v| v.as_slice());
 
         let mut current_fn = start_state.clone();
-        let mut current_cost = cost_with_effort_options_and_toggle_stimulus(
+        let mut current_cost = cost_with_effort_options_toggle_stimulus_and_extension_mode(
             &current_fn,
             self.objective,
             toggle_stimulus,
             &self.weighted_switching_options,
+            self.extension_costing_mode,
         )
         .map_err(|e| {
             anyhow::anyhow!(
@@ -1527,6 +1598,7 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
                 &mut context,
                 temp,
                 self.objective,
+                self.extension_costing_mode,
                 toggle_stimulus,
                 &self.weighted_switching_options,
                 self.constraints,
@@ -1538,7 +1610,10 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
             if let IterationOutcomeDetails::Accepted { .. } = iteration_output.outcome {
                 if let Some(ref tx) = self.accepted_sample_tx {
                     match canonicalize_fn_for_sample(&iteration_output.output_state) {
-                        Ok(canon) => match optimize_pir_fn_via_xls(&canon) {
+                        Ok(canon) => match optimize_pir_fn_via_xls_with_extension_mode(
+                            &canon,
+                            self.extension_costing_mode,
+                        ) {
                             Ok(mut opt) => {
                                 let _ = compact_and_toposort_in_place(&mut opt);
                                 match compute_fn_structural_digest(&opt) {
@@ -1606,6 +1681,7 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
                     "outcome": iteration_outcome_tag(&iteration_output.outcome),
                     "best_updated": iteration_output.best_updated,
                     "objective": format!("{:?}", self.objective),
+                    "extension_costing_mode": self.extension_costing_mode.value_name(),
                     "metric": metric_u128,
                     "pir_nodes": iteration_output.output_cost.pir_nodes,
                     "g8r_nodes": iteration_output.output_cost.g8r_nodes,
@@ -1765,11 +1841,12 @@ pub fn run_pir_mcmc_with_shared_best(
         None
     };
 
-    let initial_cost = cost_with_effort_options_and_toggle_stimulus(
+    let initial_cost = cost_with_effort_options_toggle_stimulus_and_extension_mode(
         &start_fn,
         options.objective,
         prepared_toggle_stimulus.as_ref().map(|v| v.as_slice()),
         &options.weighted_switching_options,
+        options.extension_costing_mode,
     )?;
     let effective_constraints = effective_constraint_limits(
         options.objective,
@@ -1781,6 +1858,7 @@ pub fn run_pir_mcmc_with_shared_best(
     );
     let runner = PirSegmentRunner {
         objective: options.objective,
+        extension_costing_mode: options.extension_costing_mode,
         weighted_switching_options: options.weighted_switching_options,
         initial_temperature: options.initial_temperature,
         constraints: effective_constraints,
@@ -1860,6 +1938,7 @@ mod tests {
             seed: 1,
             initial_temperature: 5.0,
             objective: Objective::Nodes,
+            extension_costing_mode: ExtensionCostingMode::Preserve,
             max_allowed_depth: None,
             max_allowed_area: None,
             weighted_switching_options: WeightedSwitchingOptions::default(),
@@ -1938,7 +2017,9 @@ mod tests {
         );
         let f = parser.parse_fn().unwrap();
 
-        let optimized = optimize_pir_fn_via_xls(&f).unwrap();
+        let optimized =
+            optimize_pir_fn_via_xls_with_extension_mode(&f, ExtensionCostingMode::Preserve)
+                .unwrap();
         let ext_nodes = optimized
             .nodes
             .iter()
@@ -1957,6 +2038,44 @@ mod tests {
             "expected optimized PIR to reconstruct brent_kung ext_nary_add:\n{}",
             optimized
         );
+    }
+
+    #[test]
+    fn optimize_pir_fn_via_xls_can_desugar_ext_nary_add_to_standard_ir() {
+        let mut parser = ir_parser::Parser::new(
+            r#"fn f(a: bits[8] id=1, b: bits[8] id=2, c: bits[8] id=3) -> bits[8] {
+  ret sum: bits[8] = ext_nary_add(a, b, c, signed=[false, false, false], negated=[false, false, false], arch=brent_kung, id=4)
+}"#,
+        );
+        let f = parser.parse_fn().unwrap();
+
+        let optimized =
+            optimize_pir_fn_via_xls_with_extension_mode(&f, ExtensionCostingMode::Desugar).unwrap();
+        let ext_nodes = optimized
+            .nodes
+            .iter()
+            .filter(|node| matches!(&node.payload, NodePayload::ExtNaryAdd { .. }))
+            .count();
+        assert_eq!(
+            ext_nodes, 0,
+            "expected desugared optimized PIR to contain no ext_nary_add nodes:\n{}",
+            optimized
+        );
+        assert!(
+            !optimized.to_string().contains("ext_nary_add"),
+            "expected desugared optimized PIR text to contain no extension op spelling:\n{}",
+            optimized
+        );
+
+        let cost = cost_with_effort_options_toggle_stimulus_and_extension_mode(
+            &f,
+            Objective::G8rNodes,
+            None,
+            &WeightedSwitchingOptions::default(),
+            ExtensionCostingMode::Desugar,
+        )
+        .unwrap();
+        assert!(cost.g8r_nodes > 0);
     }
 
     #[test]
@@ -1995,7 +2114,9 @@ mod tests {
         );
         let f = parser.parse_fn().unwrap();
 
-        let optimized = optimize_pir_fn_via_xls(&f).unwrap();
+        let optimized =
+            optimize_pir_fn_via_xls_with_extension_mode(&f, ExtensionCostingMode::Preserve)
+                .unwrap();
         let ext_text_id = optimized
             .nodes
             .iter()
@@ -2204,6 +2325,7 @@ mod tests {
             seed: 1,
             initial_temperature: 1.0,
             objective: Objective::G8rNodesTimesDepthTimesToggles,
+            extension_costing_mode: ExtensionCostingMode::Preserve,
             max_allowed_depth: None,
             max_allowed_area: None,
             weighted_switching_options: WeightedSwitchingOptions::default(),
@@ -2222,6 +2344,7 @@ mod tests {
             seed: 1,
             initial_temperature: 1.0,
             objective: Objective::Nodes,
+            extension_costing_mode: ExtensionCostingMode::Preserve,
             max_allowed_depth: None,
             max_allowed_area: None,
             weighted_switching_options: WeightedSwitchingOptions::default(),
@@ -2253,6 +2376,7 @@ mod tests {
             seed: 1,
             initial_temperature: 1.0,
             objective: Objective::Nodes,
+            extension_costing_mode: ExtensionCostingMode::Preserve,
             max_allowed_depth: Some(10),
             max_allowed_area: None,
             weighted_switching_options: WeightedSwitchingOptions::default(),
@@ -2281,6 +2405,7 @@ mod tests {
             seed: 1,
             initial_temperature: 1.0,
             objective: Objective::G8rNodes,
+            extension_costing_mode: ExtensionCostingMode::Preserve,
             max_allowed_depth: Some(10),
             max_allowed_area: Some(10),
             weighted_switching_options: WeightedSwitchingOptions::default(),
@@ -2309,6 +2434,7 @@ mod tests {
             seed: 1,
             initial_temperature: 1.0,
             objective: Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress,
+            extension_costing_mode: ExtensionCostingMode::Preserve,
             max_allowed_depth: None,
             max_allowed_area: Some(10),
             weighted_switching_options: WeightedSwitchingOptions::default(),
@@ -2438,6 +2564,7 @@ mod tests {
             seed: 1,
             initial_temperature: 1.0,
             objective: Objective::Nodes,
+            extension_costing_mode: ExtensionCostingMode::Preserve,
             max_allowed_depth: None,
             max_allowed_area: None,
             weighted_switching_options: WeightedSwitchingOptions::default(),

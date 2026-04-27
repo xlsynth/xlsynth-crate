@@ -35,6 +35,7 @@ use tempfile::Builder;
 use serde_json::json;
 use xlsynth_mcmc::multichain::ChainStrategy;
 use xlsynth_mcmc_pir::AcceptedSampleMsg;
+use xlsynth_mcmc_pir::ExtensionCostingMode;
 use xlsynth_mcmc_pir::Objective;
 use xlsynth_mcmc_pir::RunOptions;
 use xlsynth_mcmc_pir::parse_irvals_tuple_file;
@@ -446,6 +447,7 @@ fn main() -> Result<()> {
         seed: cli.seed,
         initial_temperature: cli.initial_temperature,
         objective: cli.metric,
+        extension_costing_mode: ExtensionCostingMode::Preserve,
         max_allowed_depth: cli.max_delay,
         max_allowed_area: cli.max_area,
         weighted_switching_options:
