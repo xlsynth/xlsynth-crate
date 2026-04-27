@@ -4,8 +4,8 @@
 
 use crate::ir;
 use crate::ir_utils;
+use crate::ir_utils::Users;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use xlsynth::IrBits;
 use xlsynth::IrValue;
 
@@ -342,7 +342,7 @@ pub(crate) type QueryBindings = HashMap<String, Binding>;
 pub(crate) fn find_root_query_bindings(
     query: &QueryExpr,
     f: &ir::Fn,
-    users: &HashMap<ir::NodeRef, HashSet<ir::NodeRef>>,
+    users: &Users,
     node_ref: ir::NodeRef,
 ) -> Vec<QueryBindings> {
     let bindings = HashMap::new();
@@ -354,7 +354,7 @@ pub(crate) fn find_root_query_bindings(
 fn match_solutions(
     expr: &QueryExpr,
     f: &ir::Fn,
-    users: &HashMap<ir::NodeRef, HashSet<ir::NodeRef>>,
+    users: &Users,
     node_ref: ir::NodeRef,
     bindings: &Bindings,
 ) -> Vec<Bindings> {
@@ -753,7 +753,7 @@ fn match_args_solutions(
     args: &[QueryExpr],
     operands: &[ir::NodeRef],
     f: &ir::Fn,
-    users: &HashMap<ir::NodeRef, HashSet<ir::NodeRef>>,
+    users: &Users,
     bindings: &Bindings,
 ) -> Vec<Bindings> {
     if args.is_empty() {
@@ -790,7 +790,7 @@ fn match_args_with_ellipsis_solutions(
     pattern: &[QueryExpr],
     operands: &[ir::NodeRef],
     f: &ir::Fn,
-    users: &HashMap<ir::NodeRef, HashSet<ir::NodeRef>>,
+    users: &Users,
     bindings: &Bindings,
 ) -> Vec<Bindings> {
     fn non_ellipsis_count(p: &[QueryExpr]) -> usize {
@@ -803,7 +803,7 @@ fn match_args_with_ellipsis_solutions(
         pattern: &[QueryExpr],
         operands: &[ir::NodeRef],
         f: &ir::Fn,
-        users: &HashMap<ir::NodeRef, HashSet<ir::NodeRef>>,
+        users: &Users,
         pi: usize,
         oi: usize,
         bindings: &Bindings,
@@ -906,7 +906,7 @@ fn match_named_args_solutions(
     named_args: &[NamedArg],
     payload: &ir::NodePayload,
     f: &ir::Fn,
-    users: &HashMap<ir::NodeRef, HashSet<ir::NodeRef>>,
+    users: &Users,
     node_ref: ir::NodeRef,
     bindings: &Bindings,
 ) -> Vec<Bindings> {
@@ -1022,7 +1022,7 @@ fn match_select_named_arg(
     cases: &[ir::NodeRef],
     default: &Option<ir::NodeRef>,
     f: &ir::Fn,
-    users: &HashMap<ir::NodeRef, HashSet<ir::NodeRef>>,
+    users: &Users,
     bindings: &Bindings,
 ) -> Vec<Bindings> {
     match arg.name.as_str() {

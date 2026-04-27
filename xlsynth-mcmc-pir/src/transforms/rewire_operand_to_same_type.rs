@@ -26,10 +26,7 @@ impl RewireOperandToSameTypeTransform {
         f.get_node(nr).ty.clone()
     }
 
-    fn compute_fanout_cone(
-        users_map: &std::collections::HashMap<NodeRef, HashSet<NodeRef>>,
-        root: NodeRef,
-    ) -> HashSet<NodeRef> {
+    fn compute_fanout_cone(users_map: &Users, root: NodeRef) -> HashSet<NodeRef> {
         let mut visited: HashSet<NodeRef> = HashSet::new();
         let mut work: VecDeque<NodeRef> = VecDeque::new();
         visited.insert(root);

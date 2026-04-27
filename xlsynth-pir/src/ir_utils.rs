@@ -3,7 +3,8 @@
 //! Utility functions for working with / on XLS IR.
 
 use crate::ir::{self, Fn, Node, NodePayload, NodeRef, Package, PackageMember, Type};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use smallvec::SmallVec;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrivialFnBody {
@@ -685,31 +686,66 @@ pub fn compact_and_toposort_with_mapping_in_place(
     Ok(old_to_new_refs)
 }
 
+pub type UserList = SmallVec<[NodeRef; 2]>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Users {
+    users: Vec<UserList>,
+}
+
+impl Users {
+    /// Returns the user list for `nr`, or `None` when `nr` is out of bounds.
+    pub fn get(&self, nr: &NodeRef) -> Option<&[NodeRef]> {
+        self.users.get(nr.index).map(|v| v.as_slice())
+    }
+
+    /// Returns the number of node entries in this users map.
+    pub fn len(&self) -> usize {
+        self.users.len()
+    }
+
+    /// Returns true when there are no node entries.
+    pub fn is_empty(&self) -> bool {
+        self.users.is_empty()
+    }
+
+    /// Iterates over all node refs and their direct users in node-index order.
+    pub fn iter(&self) -> impl Iterator<Item = (NodeRef, &[NodeRef])> {
+        self.users
+            .iter()
+            .enumerate()
+            .map(|(index, users)| (NodeRef { index }, users.as_slice()))
+    }
+}
+
 /// Computes the immediate users of each node in the function.
 ///
-/// Returns a mapping from each `NodeRef` to the set of `NodeRef`s that
-/// directly use it as an operand. Nodes with no users will map to an empty set.
-pub fn compute_users(f: &Fn) -> HashMap<NodeRef, HashSet<NodeRef>> {
+/// Returns dense indexed user lists for each `NodeRef`.
+///
+/// Each list is sorted and deduplicated, so a node that references the same
+/// operand multiple times is still recorded as one direct user of that operand.
+/// Nodes with no users map to an empty list.
+pub fn compute_users(f: &Fn) -> Users {
     let n = f.nodes.len();
-    let mut users: HashMap<NodeRef, HashSet<NodeRef>> = HashMap::with_capacity(n);
-
-    // Initialize all keys so even unreachable / sink nodes appear with empty sets.
-    for i in 0..n {
-        users.insert(NodeRef { index: i }, HashSet::new());
-    }
+    let mut users: Vec<UserList> = (0..n).map(|_| UserList::new()).collect();
 
     // For each node, add it as a user of each of its operands.
     for (i, node) in f.nodes.iter().enumerate() {
         let this_ref = NodeRef { index: i };
         for dep in operands(&node.payload) {
             users
-                .get_mut(&dep)
+                .get_mut(dep.index)
                 .expect("operand NodeRef must exist in users map")
-                .insert(this_ref);
+                .push(this_ref);
         }
     }
 
-    users
+    for user_list in &mut users {
+        user_list.sort_by_key(|nr| nr.index);
+        user_list.dedup();
+    }
+
+    Users { users }
 }
 
 /// Replaces the payload (and optionally the type) of `target` in `f`.
@@ -1885,5 +1921,31 @@ mod users_tests {
         assert!(users.get(&b).unwrap().contains(&and));
         assert!(users.get(&and).unwrap().contains(&ret));
         assert!(users.get(&ret).unwrap().is_empty());
+    }
+
+    #[test]
+    fn users_deduplicates_repeated_operand_uses() {
+        let f = parse_fn(
+            r#"fn f(x: bits[1] id=1) -> bits[1] {
+  ret add.2: bits[1] = add(x, x, id=2)
+}"#,
+        );
+        let users = compute_users(&f);
+
+        let mut x_ref: Option<NodeRef> = None;
+        let mut add_ref: Option<NodeRef> = None;
+        for (i, node) in f.nodes.iter().enumerate() {
+            match &node.payload {
+                NodePayload::GetParam(_) => x_ref = Some(NodeRef { index: i }),
+                NodePayload::Binop(_, lhs, rhs) if lhs == rhs => {
+                    add_ref = Some(NodeRef { index: i })
+                }
+                _ => {}
+            }
+        }
+
+        let x = x_ref.expect("expected param node");
+        let add = add_ref.expect("expected repeated-operand add");
+        assert_eq!(users.get(&x).unwrap(), &[add]);
     }
 }

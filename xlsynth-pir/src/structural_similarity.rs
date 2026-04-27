@@ -9,7 +9,7 @@ use std::collections::HashSet;
 
 use crate::ir::{Fn, Node, NodePayload, NodeRef, Param, ParamId, Type, node_textual_id};
 use crate::ir_utils::{
-    compute_users, get_topological, is_valid_identifier_name, operands, remap_payload_with,
+    Users, compute_users, get_topological, is_valid_identifier_name, operands, remap_payload_with,
     sanitize_text_id_to_identifier_name,
 };
 use crate::node_hashing::{
@@ -847,7 +847,7 @@ pub fn compute_dual_difference_regions(lhs: &Fn, rhs: &Fn) -> (HashSet<NodeRef>,
 fn compute_region_boundary_nodes(
     f: &Fn,
     region: &HashSet<NodeRef>,
-    users_map: &HashMap<NodeRef, HashSet<NodeRef>>,
+    users_map: &Users,
 ) -> Vec<NodeRef> {
     let mut boundary: Vec<NodeRef> = Vec::new();
     for nr in region.iter() {

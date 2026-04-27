@@ -22,10 +22,7 @@ impl GuardedPredicateRewireTransform {
         pairs
     }
 
-    fn compute_fanout_cone(
-        users_map: &std::collections::HashMap<NodeRef, HashSet<NodeRef>>,
-        root: NodeRef,
-    ) -> HashSet<NodeRef> {
+    fn compute_fanout_cone(users_map: &Users, root: NodeRef) -> HashSet<NodeRef> {
         let mut visited = HashSet::new();
         let mut work = VecDeque::new();
         visited.insert(root);
@@ -189,7 +186,7 @@ impl GuardedPredicateRewireTransform {
 
     fn append_arm_candidates(
         f: &IrFn,
-        users_map: &std::collections::HashMap<NodeRef, HashSet<NodeRef>>,
+        users_map: &Users,
         arm_root: NodeRef,
         arm_guard: Option<NodeRef>,
         guard_base: NodeRef,

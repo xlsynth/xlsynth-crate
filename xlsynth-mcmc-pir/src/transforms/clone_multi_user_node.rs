@@ -24,12 +24,12 @@ impl PirTransform for CloneMultiUserNodeTransform {
                 // Do not clone parameter nodes; they are expected to always
                 // have names, and cloning them can violate invariants used by
                 // pretty-printing and other utilities.
-                let node = f.get_node(*nr);
+                let node = f.get_node(nr);
                 match &node.payload {
                     NodePayload::GetParam(_) => None,
                     NodePayload::Nil => None,
                     _ if users.len() > 1 => Some(TransformCandidate {
-                        location: TransformLocation::Node(*nr),
+                        location: TransformLocation::Node(nr),
                         always_equivalent,
                     }),
                     _ => None,
