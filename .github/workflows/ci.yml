@@ -550,6 +550,7 @@ jobs:
           XLSYNTH_TOOLS="$(realpath xlsynth_tools)"
           test -f "${XLSYNTH_TOOLS}/libxls-arm64.dylib"
           test -d "${XLSYNTH_TOOLS}/xls/dslx/stdlib"
+          install_name_tool -id "${XLSYNTH_TOOLS}/libxls-arm64.dylib" "${XLSYNTH_TOOLS}/libxls-arm64.dylib"
           echo "XLSYNTH_TOOLS=${XLSYNTH_TOOLS}" >> "$GITHUB_ENV"
           echo "XLS_DSO_PATH=${XLSYNTH_TOOLS}/libxls-arm64.dylib" >> "$GITHUB_ENV"
           echo "DSLX_STDLIB_PATH=${XLSYNTH_TOOLS}/xls/dslx/stdlib" >> "$GITHUB_ENV"
