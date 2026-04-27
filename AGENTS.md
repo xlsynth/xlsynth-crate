@@ -135,6 +135,10 @@ For non-trivial functions, prefer a one-line Rustdoc comment (`/// ...`) over no
 comment at all. A short summary helps readers understand both the local code and
 how it fits into the surrounding codebase.
 
+Prefer small named structs over larger tuples when returning multiple related
+values. Field names make call sites self-describing and avoid positional
+confusion as helpers evolve.
+
 Avoid `use` statements inside local function scopes; place all imports at the
 module level (or at the top of a `mod tests` section) for clarity.
 
