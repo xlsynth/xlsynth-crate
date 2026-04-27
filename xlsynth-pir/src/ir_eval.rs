@@ -10,12 +10,96 @@ use crate::corners::{
 };
 use crate::ir;
 use crate::ir::NodePayload as P;
-use crate::ir_utils::get_topological;
+use crate::ir_utils::{get_topological, operands};
 use crate::ir_value_utils::{
     deep_or_ir_values_for_type, ir_bits_to_usize, ir_bits_to_usize_in_range, zero_ir_value_for_type,
 };
 use crate::math::ceil_log2;
 use xlsynth::{IrBits, IrValue};
+
+pub(crate) trait EvalEnv {
+    fn get(&self, key: &ir::NodeRef) -> Option<&IrValue>;
+}
+
+impl EvalEnv for HashMap<ir::NodeRef, IrValue> {
+    fn get(&self, key: &ir::NodeRef) -> Option<&IrValue> {
+        HashMap::get(self, key)
+    }
+}
+
+struct DenseEvalEnv {
+    values: Vec<Option<IrValue>>,
+}
+
+impl DenseEvalEnv {
+    fn new(node_count: usize) -> Self {
+        Self {
+            values: vec![None; node_count],
+        }
+    }
+
+    fn insert(&mut self, nr: ir::NodeRef, value: IrValue) {
+        let slot = self
+            .values
+            .get_mut(nr.index)
+            .expect("node ref must be in evaluator env bounds");
+        debug_assert!(slot.is_none(), "node value should only be assigned once");
+        *slot = Some(value);
+    }
+}
+
+impl EvalEnv for DenseEvalEnv {
+    fn get(&self, key: &ir::NodeRef) -> Option<&IrValue> {
+        self.values.get(key.index).and_then(Option::as_ref)
+    }
+}
+
+enum EvalOrder {
+    NodeIndex(std::ops::Range<usize>),
+    Topological(std::vec::IntoIter<ir::NodeRef>),
+}
+
+impl Iterator for EvalOrder {
+    type Item = ir::NodeRef;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            EvalOrder::NodeIndex(range) => range.next().map(|index| ir::NodeRef { index }),
+            EvalOrder::Topological(order) => order.next(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum EvalOrderPolicy {
+    Checked,
+    AssumeNodeIndexTopological,
+}
+
+fn is_node_index_topological(f: &ir::Fn) -> bool {
+    let node_count = f.nodes.len();
+    for (index, node) in f.nodes.iter().enumerate() {
+        for dep in operands(&node.payload) {
+            if dep.index >= node_count || dep.index >= index {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn eval_order(f: &ir::Fn, order_policy: EvalOrderPolicy) -> EvalOrder {
+    match order_policy {
+        EvalOrderPolicy::AssumeNodeIndexTopological => EvalOrder::NodeIndex(0..f.nodes.len()),
+        EvalOrderPolicy::Checked => {
+            if is_node_index_topological(f) {
+                EvalOrder::NodeIndex(0..f.nodes.len())
+            } else {
+                EvalOrder::Topological(get_topological(f).into_iter())
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 enum ShiftKind {
@@ -156,7 +240,7 @@ fn eval_bit_slice_update_bits(arg_bits: &IrBits, start_bits: &IrBits, upd_bits: 
     IrBits::from_lsb_is_0(&out)
 }
 
-fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
+fn eval_pure<E: EvalEnv + ?Sized>(n: &ir::Node, env: &E) -> IrValue {
     log::trace!("eval_pure: {:?}", n);
     match n.payload {
         ir::NodePayload::Literal(ref ir_value) => ir_value.clone(),
@@ -843,9 +927,9 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
     }
 }
 
-pub(crate) fn eval_pure_if_supported(
+pub(crate) fn eval_pure_if_supported<E: EvalEnv + ?Sized>(
     n: &ir::Node,
-    env: &HashMap<ir::NodeRef, IrValue>,
+    env: &E,
 ) -> Option<IrValue> {
     match n.payload {
         ir::NodePayload::Nil
@@ -1040,7 +1124,7 @@ fn observe_corner_like_node(
     f: &ir::Fn,
     nr: ir::NodeRef,
     node: &ir::Node,
-    env: &HashMap<ir::NodeRef, IrValue>,
+    env: &impl EvalEnv,
     observer: &mut dyn EvalObserver,
 ) {
     match &node.payload {
@@ -1228,7 +1312,7 @@ fn observe_corner_like_node(
 fn observe_select_like_node(
     nr: ir::NodeRef,
     node: &ir::Node,
-    env: &HashMap<ir::NodeRef, IrValue>,
+    env: &impl EvalEnv,
     observer: &mut dyn EvalObserver,
 ) {
     match &node.payload {
@@ -1365,11 +1449,11 @@ pub fn eval_fn_with_observer(
     observer: Option<&mut dyn EvalObserver>,
 ) -> FnEvalResult {
     let observer = observer.map(|o| o as *mut (dyn EvalObserver + '_));
-    eval_fn_impl(None, f, args, observer)
+    eval_fn_impl(None, f, args, observer, EvalOrderPolicy::Checked)
 }
 
 pub fn eval_fn_in_package(pkg: &ir::Package, f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
-    eval_fn_impl(Some(pkg), f, args, None)
+    eval_fn_impl(Some(pkg), f, args, None, EvalOrderPolicy::Checked)
 }
 
 pub fn eval_fn_in_package_with_observer(
@@ -1379,7 +1463,23 @@ pub fn eval_fn_in_package_with_observer(
     observer: Option<&mut dyn EvalObserver>,
 ) -> FnEvalResult {
     let observer = observer.map(|o| o as *mut (dyn EvalObserver + '_));
-    eval_fn_impl(Some(pkg), f, args, observer)
+    eval_fn_impl(Some(pkg), f, args, observer, EvalOrderPolicy::Checked)
+}
+
+/// Evaluates a function whose node vector is already in dependency-before-user
+/// order.
+///
+/// This skips the per-call node-order check used by `eval_fn`. It will panic on
+/// def-after-use functions; callers should only use it after a successful
+/// `compact_and_toposort_in_place` or equivalent normalization.
+pub fn eval_fn_assuming_node_index_topological(f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
+    eval_fn_impl(
+        None,
+        f,
+        args,
+        None,
+        EvalOrderPolicy::AssumeNodeIndexTopological,
+    )
 }
 
 fn eval_fn_impl<'a>(
@@ -1387,6 +1487,7 @@ fn eval_fn_impl<'a>(
     f: &ir::Fn,
     args: &[IrValue],
     observer: Option<*mut (dyn EvalObserver + 'a)>,
+    order_policy: EvalOrderPolicy,
 ) -> FnEvalResult {
     debug_assert!(
         f.check_pir_layout_invariants().is_ok(),
@@ -1399,17 +1500,23 @@ fn eval_fn_impl<'a>(
         "argument count must match params"
     );
 
-    // Map ParamId -> argument value.
-    let mut param_map: HashMap<ir::ParamId, IrValue> = HashMap::new();
+    // Map ParamId -> argument value. Param IDs are one-based, so keep index 0
+    // unused.
+    let max_param_id = f
+        .params
+        .iter()
+        .map(|p| p.id.get_wrapped_id())
+        .max()
+        .unwrap_or(0);
+    let mut param_map: Vec<Option<IrValue>> = vec![None; max_param_id + 1];
     for (i, p) in f.params.iter().enumerate() {
-        // ParamIds start at 1, but we map by the ParamId key directly.
-        param_map.insert(p.id, args[i].clone());
+        param_map[p.id.get_wrapped_id()] = Some(args[i].clone());
     }
 
-    let mut env: HashMap<ir::NodeRef, IrValue> = HashMap::with_capacity(f.nodes.len());
+    let mut env = DenseEvalEnv::new(f.nodes.len());
     let mut trace_messages: Vec<TraceMessage> = Vec::new();
     let mut assertion_failures: Vec<AssertionFailure> = Vec::new();
-    for nr in get_topological(f) {
+    for nr in eval_order(f, order_policy) {
         let node = f.get_node(nr);
         let value: IrValue = match &node.payload {
             P::Nil => {
@@ -1418,7 +1525,11 @@ fn eval_fn_impl<'a>(
             }
             P::GetParam(param_id) => {
                 // Must exist by construction.
-                param_map.get(param_id).expect("param not found").clone()
+                param_map
+                    .get(param_id.get_wrapped_id())
+                    .and_then(Option::as_ref)
+                    .expect("param not found")
+                    .clone()
             }
             P::Assert {
                 token,
@@ -1526,7 +1637,8 @@ fn eval_fn_impl<'a>(
                     })
                     .collect();
 
-                let callee_result = eval_fn_impl(Some(pkg), callee, &callee_args, observer);
+                let callee_result =
+                    eval_fn_impl(Some(pkg), callee, &callee_args, observer, order_policy);
                 match callee_result {
                     FnEvalResult::Success(success) => {
                         trace_messages.extend(success.trace_messages);
@@ -2059,6 +2171,65 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
 }}
 "#
         )
+    }
+
+    #[test]
+    fn eval_fn_falls_back_to_topological_sort_for_def_after_use_nodes() {
+        let bits8 = ir::Type::Bits(8);
+        let param_id = ir::ParamId::new(1);
+        let f = ir::Fn {
+            name: "f".to_string(),
+            params: vec![ir::Param {
+                name: "x".to_string(),
+                ty: bits8.clone(),
+                id: param_id,
+            }],
+            ret_ty: bits8.clone(),
+            nodes: vec![
+                ir::Node {
+                    text_id: 0,
+                    name: Some("reserved_zero_node".to_string()),
+                    ty: ir::Type::nil(),
+                    payload: ir::NodePayload::Nil,
+                    pos: None,
+                },
+                ir::Node {
+                    text_id: 1,
+                    name: Some("x".to_string()),
+                    ty: bits8.clone(),
+                    payload: ir::NodePayload::GetParam(param_id),
+                    pos: None,
+                },
+                ir::Node {
+                    text_id: 3,
+                    name: Some("sum".to_string()),
+                    ty: bits8.clone(),
+                    payload: ir::NodePayload::Binop(
+                        ir::Binop::Add,
+                        ir::NodeRef { index: 1 },
+                        ir::NodeRef { index: 3 },
+                    ),
+                    pos: None,
+                },
+                ir::Node {
+                    text_id: 2,
+                    name: Some("seven".to_string()),
+                    ty: bits8,
+                    payload: ir::NodePayload::Literal(IrValue::make_ubits(8, 7).unwrap()),
+                    pos: None,
+                },
+            ],
+            ret_node_ref: Some(ir::NodeRef { index: 2 }),
+            outer_attrs: Vec::new(),
+            inner_attrs: Vec::new(),
+        };
+
+        assert!(!is_node_index_topological(&f));
+        let got = match eval_fn(&f, &[IrValue::make_ubits(8, 5).unwrap()]) {
+            FnEvalResult::Success(success) => success.value,
+            other => panic!("expected success, got {:?}", other),
+        };
+        assert_eq!(got, IrValue::make_ubits(8, 12).unwrap());
     }
 
     fn divmod_cases_for_width(width: usize) -> Vec<Vec<IrValue>> {
