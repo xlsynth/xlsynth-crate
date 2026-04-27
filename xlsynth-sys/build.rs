@@ -333,7 +333,9 @@ fn high_integrity_download_gz_and_decompress_with_retries(
         checksum_url_uncompressed,
         checksum_path.display()
     );
-    download_file(&checksum_url_uncompressed, &checksum_path)?;
+    // This URL is already the checksum payload; using the artifact-level retry
+    // helper would incorrectly look for a companion `.sha256.sha256` file.
+    download_file_with_retries(&checksum_url_uncompressed, &checksum_path, max_attempts)?;
 
     let want_checksum_str = std::fs::read_to_string(&checksum_path)?;
     let want_checksum_str = want_checksum_str.split_whitespace().next().unwrap();
@@ -376,6 +378,33 @@ fn download_file(url: &str, dest: &std::path::Path) -> Result<(), Box<dyn std::e
         println!("cargo:error=failed to download file with ureq (will try curl): {e}");
         download_file_with_curl(url, dest)
     })
+}
+
+/// Downloads one file with exponential-backoff retries.
+fn download_file_with_retries(
+    url: &str,
+    dest: &std::path::Path,
+    max_attempts: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut attempts = 0;
+    let mut delay = 2;
+    while attempts < max_attempts {
+        attempts += 1;
+        match download_file(url, dest) {
+            Ok(()) => return Ok(()),
+            Err(e) => println!("cargo:error=failed to download file on attempt {attempts}: {e}"),
+        }
+        if attempts < max_attempts {
+            std::thread::sleep(std::time::Duration::from_secs(delay));
+            delay *= 2;
+        }
+    }
+    Err(format!(
+        "Failed to download file {} after {} attempts",
+        dest.display(),
+        max_attempts
+    )
+    .into())
 }
 
 /// Download a file from a URL using ureq.
