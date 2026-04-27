@@ -1,0 +1,112 @@
+# SPDX-License-Identifier: Apache-2.0
+
+name: Recover crates.io publish
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Cargo crate version to recover"
+        required: true
+        type: string
+
+jobs:
+  publish-missing:
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Check version numbers
+        run: python scripts/bump_version_numbers.py check
+
+      - name: Validate version matches input
+        run: python3 scripts/check_version_is.py "${{ inputs.version }}"
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Install Python dependencies for polling script
+        run: python3 -m pip install --break-system-packages requests
+
+      - name: Publish missing crates in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          crate_exists() {
+            python3 -c 'import sys; from scripts.sleep_until_version_seen import check_crate_version; sys.exit(0 if check_crate_version(sys.argv[1], sys.argv[2]) else 1)' "$1" "$VERSION"
+          }
+
+          publish_if_missing() {
+            local crate_name="$1"
+            local crate_dir="$2"
+            if crate_exists "$crate_name"; then
+              echo "${crate_name} ${VERSION} is already on crates.io; skipping."
+              return
+            fi
+            echo "Publishing ${crate_name} ${VERSION}..."
+            (cd "$crate_dir" && cargo publish --token "$CARGO_REGISTRY_TOKEN")
+            python3 scripts/sleep_until_version_seen.py "$crate_name" "$VERSION"
+          }
+
+          publish_if_missing xlsynth-sys xlsynth-sys
+          publish_if_missing xlsynth xlsynth
+          publish_if_missing xlsynth-vastly xlsynth-vastly
+          publish_if_missing xlsynth-pir xlsynth-pir
+          publish_if_missing xlsynth-mcmc xlsynth-mcmc
+          publish_if_missing xlsynth-prover xlsynth-prover
+          publish_if_missing xlsynth-test-helpers xlsynth-test-helpers
+          publish_if_missing xlsynth-g8r xlsynth-g8r
+          publish_if_missing xlsynth-estimator xlsynth-estimator
+          publish_if_missing xlsynth-mcmc-pir xlsynth-mcmc-pir
+          publish_if_missing xlsynth-autocov xlsynth-autocov
+          publish_if_missing xlsynth-driver xlsynth-driver
+
+      - name: Bump version numbers
+        run: |
+          cargo clean
+          python scripts/bump_version_numbers.py bump-minor
+          cargo generate-lockfile
+
+      - name: Validate post-bump version equals expected next minor
+        run: |
+          VERSION="${{ inputs.version }}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+          NEXT_MINOR=$((MINOR+1))
+          EXPECTED_NEXT="${MAJOR}.${NEXT_MINOR}.0"
+          echo "Expecting post-bump version: $EXPECTED_NEXT"
+          python3 scripts/check_version_is.py "$EXPECTED_NEXT"
+
+      - name: Commit bumped version numbers
+        env:
+          MY_PAT: ${{ secrets.MY_PAT }}
+        run: |
+          git config user.name "github-actions"
+          git config user.email "xlsynth-github-actions@xlsynth.org"
+          git add $(find . -type f -name "Cargo.toml")
+          git commit -m "Bump version numbers after successful publish"
+          git push "https://${GITHUB_ACTOR}:${MY_PAT}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
+
+      - name: Update version compatibility docs
+        run: |
+          python3 scripts/gen_version_compat.py
+
+      - name: Commit version metadata update
+        env:
+          MY_PAT: ${{ secrets.MY_PAT }}
+        run: |
+          git config user.name "github-actions"
+          git config user.email "xlsynth-github-actions@xlsynth.org"
+          git add docs/version_metadata.md generated_version_compat.json
+          git commit -m "Update version metadata after successful publish"
+          git push "https://${GITHUB_ACTOR}:${MY_PAT}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
