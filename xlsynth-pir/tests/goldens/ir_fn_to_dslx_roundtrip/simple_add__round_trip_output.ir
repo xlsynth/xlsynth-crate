@@ -1,0 +1,3 @@
+fn __ir_fn_to_dslx_roundtrip_test__f(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  ret add_3: bits[8] = add(x, y, id=3)
+}

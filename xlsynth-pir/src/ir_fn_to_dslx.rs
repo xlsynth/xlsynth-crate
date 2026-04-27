@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Converts an XLS IR function into DSLX.
+//!
+//! Design principle: when a supported IR construct has more than one possible
+//! DSLX spelling, prefer the spelling that round-trips back to the same
+//! ordinary IR through `dslx2ir --opt=false`. This keeps the translation useful
+//! for structural/QoR workflows, not just semantic equivalence.
 
 use std::collections::{HashMap, HashSet};
 
@@ -745,6 +750,25 @@ fn lower_node_payload(
                     selector_w
                 )));
             }
+            if selector_w == 1 {
+                let zero_case = node_name(node_names, *cases.first().unwrap())?;
+                let one_case = cases
+                    .get(1)
+                    .copied()
+                    .or(default.as_ref().copied())
+                    .ok_or_else(|| {
+                        IrFnToDslxError::Internal(
+                            "1-bit sel should have a case for selector value 1".to_string(),
+                        )
+                    })?;
+                let one_case = node_name(node_names, one_case)?;
+                // DSLX `if` on `uN[1]` lowers back to ordinary IR `sel`,
+                // whereas `match` lowers through `priority_sel`.
+                return Ok(format!(
+                    "if {} {{ {} }} else {{ {} }}",
+                    selector_name, one_case, zero_case
+                ));
+            }
             // With a default arm, selector values outside [0, 2^selector_width)
             // are impossible; extra case entries are therefore unreachable.
             let emitted_case_count = if default.is_some() {
@@ -864,7 +888,123 @@ fn is_dslx_sized_type_keyword(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
     use super::*;
+    use xlsynth::DslxConvertOptions;
+
+    const ROUNDTRIP_GOLDEN_DIR: &str = "tests/goldens/ir_fn_to_dslx_roundtrip";
+    const ROUNDTRIP_INPUT_SUFFIX: &str = "__input.ir";
+
+    /// Captures the text artifacts from an IR->DSLX->IR package roundtrip.
+    struct RoundtripPackage {
+        dslx_text: String,
+        roundtrip_ir_text: String,
+    }
+
+    /// Captures the parsed top function and text artifacts from a roundtrip.
+    struct RoundtripTopFn {
+        dslx_text: String,
+        roundtrip_fn_text: String,
+    }
+
+    /// Names the golden files that make up one roundtrip fixture.
+    struct RoundtripGoldenCase {
+        name: String,
+        input_ir_path: PathBuf,
+        dslx_output_path: PathBuf,
+        round_trip_output_ir_path: PathBuf,
+    }
+
+    /// Converts IR to DSLX and immediately lowers that DSLX back to
+    /// unoptimized IR.
+    ///
+    /// The ideal for these tests is that roundtripped IR stays as close to the
+    /// original IR as the DSLX frontend permits, not merely that it remains
+    /// semantically equivalent.
+    fn roundtrip_ir_package_via_dslx_no_opt(ir_text: &str) -> RoundtripPackage {
+        let translated = convert_ir_package_fn_to_dslx(ir_text, None).unwrap();
+        let roundtrip = xlsynth::convert_dslx_to_ir_text(
+            &translated.dslx_text,
+            Path::new("ir_fn_to_dslx_roundtrip_test.x"),
+            &DslxConvertOptions::default(),
+        )
+        .unwrap();
+        RoundtripPackage {
+            dslx_text: translated.dslx_text,
+            roundtrip_ir_text: roundtrip.ir,
+        }
+    }
+
+    /// Parses package-form IR text and returns the selected top function.
+    fn parse_top_fn(ir_text: &str) -> ir::Fn {
+        let mut parser = crate::ir_parser::Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        pkg.get_top_fn().unwrap().clone()
+    }
+
+    /// Runs the IR->DSLX->IR no-opt roundtrip and parses the roundtripped top.
+    fn roundtrip_top_fn_via_dslx_no_opt(ir_text: &str) -> RoundtripTopFn {
+        let roundtrip_package = roundtrip_ir_package_via_dslx_no_opt(ir_text);
+        let roundtrip_fn = parse_top_fn(&roundtrip_package.roundtrip_ir_text);
+        let roundtrip_fn_text = strip_pos_attrs(&roundtrip_fn.to_string());
+        RoundtripTopFn {
+            dslx_text: roundtrip_package.dslx_text,
+            roundtrip_fn_text,
+        }
+    }
+
+    /// Finds all IR->DSLX->IR no-opt golden cases in stable order.
+    fn collect_roundtrip_golden_cases() -> Vec<RoundtripGoldenCase> {
+        let golden_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(ROUNDTRIP_GOLDEN_DIR);
+        let mut cases = Vec::new();
+        for entry in fs::read_dir(&golden_dir).unwrap() {
+            let path = entry.unwrap().path();
+            let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let Some(name) = file_name.strip_suffix(ROUNDTRIP_INPUT_SUFFIX) else {
+                continue;
+            };
+            let name = name.to_string();
+            cases.push(RoundtripGoldenCase {
+                name: name.clone(),
+                input_ir_path: path,
+                dslx_output_path: golden_dir.join(format!("{}__dslx_output.x", &name)),
+                round_trip_output_ir_path: golden_dir
+                    .join(format!("{}__round_trip_output.ir", &name)),
+            });
+        }
+        cases.sort_by(|lhs, rhs| lhs.name.cmp(&rhs.name));
+        cases
+    }
+
+    /// Reads a golden text file as UTF-8.
+    fn read_golden_text(path: &Path) -> String {
+        fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {:?}: {}", path, e))
+    }
+
+    /// Removes source position attributes that are not relevant to IR shape.
+    fn strip_pos_attrs(text: &str) -> String {
+        text.lines()
+            .map(strip_pos_attrs_from_line)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Removes all `pos=[...]` attributes from one IR line.
+    fn strip_pos_attrs_from_line(line: &str) -> String {
+        let mut line = line.to_string();
+        while let Some(start) = line.find(", pos=[") {
+            let end = line[start..]
+                .find(']')
+                .map(|offset| start + offset + 1)
+                .expect("pos attribute should have closing bracket");
+            line.replace_range(start..end, "");
+        }
+        line
+    }
 
     #[test]
     fn test_sanitize_dslx_reserved_words() {
@@ -903,23 +1043,30 @@ top fn proc(bits: bits[8] id=1, token: bits[8] id=2) -> bits[8] {
     }
 
     #[test]
-    fn test_convert_sel_with_default_ignores_unreachable_extra_cases() {
-        let ir_text = r#"package sample
-
-top fn f(s: bits[1] id=1, a: bits[8] id=2, b: bits[8] id=3, c: bits[8] id=4, d: bits[8] id=5) -> bits[8] {
-  s: bits[1] = param(name=s, id=1)
-  a: bits[8] = param(name=a, id=2)
-  b: bits[8] = param(name=b, id=3)
-  c: bits[8] = param(name=c, id=4)
-  d: bits[8] = param(name=d, id=5)
-  ret out: bits[8] = sel(s, cases=[a, b, c], default=d, id=6)
-}
-"#;
-        let result = convert_ir_package_fn_to_dslx(ir_text, None).unwrap();
-        assert!(result.dslx_text.contains("uN[1]:0 => a"));
-        assert!(result.dslx_text.contains("uN[1]:1 => b"));
-        assert!(result.dslx_text.contains("_ => d"));
-        assert!(!result.dslx_text.contains("uN[1]:2 =>"));
+    fn test_roundtrip_golden_cases_via_dslx_no_opt() {
+        let cases = collect_roundtrip_golden_cases();
+        assert!(
+            !cases.is_empty(),
+            "expected at least one roundtrip golden case in {}",
+            ROUNDTRIP_GOLDEN_DIR
+        );
+        for case in cases {
+            let ir_text = read_golden_text(&case.input_ir_path);
+            let expected_dslx_text = read_golden_text(&case.dslx_output_path);
+            let expected_roundtrip_fn_text = read_golden_text(&case.round_trip_output_ir_path);
+            let roundtrip = roundtrip_top_fn_via_dslx_no_opt(&ir_text);
+            assert_eq!(
+                roundtrip.dslx_text, expected_dslx_text,
+                "{} DSLX output differed",
+                case.name
+            );
+            assert_eq!(
+                format!("{}\n", roundtrip.roundtrip_fn_text),
+                expected_roundtrip_fn_text,
+                "{} roundtrip IR output differed",
+                case.name
+            );
+        }
     }
 
     #[test]

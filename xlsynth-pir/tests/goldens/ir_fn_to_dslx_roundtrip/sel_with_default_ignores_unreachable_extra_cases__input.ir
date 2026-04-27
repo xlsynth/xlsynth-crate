@@ -1,0 +1,7 @@
+package sample
+
+top fn f(s: bits[1] id=1, a: bits[8] id=2, b: bits[8] id=3) -> bits[8] {
+  c: bits[8] = literal(value=7, id=4)
+  d: bits[8] = literal(value=9, id=5)
+  ret out: bits[8] = sel(s, cases=[a, b, c], default=d, id=6)
+}
