@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
+
+crates = [
+    "xlsynth-sys",
+    "xlsynth",
+    "xlsynth-vastly",
+    "xlsynth-pir",
+    "xlsynth-mcmc",
+    "xlsynth-prover",
+    "xlsynth-test-helpers",
+    "xlsynth-g8r",
+    "xlsynth-estimator",
+    "xlsynth-mcmc-pir",
+    "xlsynth-autocov",
+    "xlsynth-driver",
+]
