@@ -95,12 +95,7 @@ jobs:
       - name: Publish crates in dependency order
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-        run: |
-          while read -r crate_name crate_dir; do
-            echo "Publishing ${crate_name}..."
-            (cd "$crate_dir" && cargo publish --token "$CARGO_REGISTRY_TOKEN")
-            python3 scripts/sleep_until_version_seen.py "$crate_name" "${{ steps.version_vars.outputs.version_no_v }}"
-          done < <(python3 scripts/print_publish_order.py)
+        run: python3 scripts/publish_crates.py "${{ steps.version_vars.outputs.version_no_v }}"
 
       - name: Bump version numbers (minor bump for mainline release)
         if: ${{ success() && steps.version_vars.outputs.patch == '0' }}
