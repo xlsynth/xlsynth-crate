@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Converts an XLS IR function into DSLX.
+//!
+//! Design principle: when a supported IR construct has more than one possible
+//! DSLX spelling, prefer the spelling that round-trips back to the same
+//! ordinary IR through `dslx2ir --opt=false`. This keeps the translation useful
+//! for structural/QoR workflows, not just semantic equivalence.
 
 use std::collections::{HashMap, HashSet};
 
@@ -745,6 +750,25 @@ fn lower_node_payload(
                     selector_w
                 )));
             }
+            if selector_w == 1 {
+                let zero_case = node_name(node_names, *cases.first().unwrap())?;
+                let one_case = cases
+                    .get(1)
+                    .copied()
+                    .or(default.as_ref().copied())
+                    .ok_or_else(|| {
+                        IrFnToDslxError::Internal(
+                            "1-bit sel should have a case for selector value 1".to_string(),
+                        )
+                    })?;
+                let one_case = node_name(node_names, one_case)?;
+                // DSLX `if` on `uN[1]` lowers back to ordinary IR `sel`,
+                // whereas `match` lowers through `priority_sel`.
+                return Ok(format!(
+                    "if {} {{ {} }} else {{ {} }}",
+                    selector_name, one_case, zero_case
+                ));
+            }
             // With a default arm, selector values outside [0, 2^selector_width)
             // are impossible; extra case entries are therefore unreachable.
             let emitted_case_count = if default.is_some() {
@@ -864,7 +888,56 @@ fn is_dslx_sized_type_keyword(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
+    use crate::node_hashing::compute_function_structural_hash;
+    use xlsynth::DslxConvertOptions;
+
+    fn roundtrip_ir_package_via_dslx_no_opt(ir_text: &str) -> (String, String) {
+        let translated = convert_ir_package_fn_to_dslx(ir_text, None).unwrap();
+        let roundtrip = xlsynth::convert_dslx_to_ir_text(
+            &translated.dslx_text,
+            Path::new("ir_fn_to_dslx_roundtrip_test.x"),
+            &DslxConvertOptions::default(),
+        )
+        .unwrap();
+        (translated.dslx_text, roundtrip.ir)
+    }
+
+    fn parse_top_fn(ir_text: &str) -> ir::Fn {
+        let mut parser = crate::ir_parser::Parser::new(ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        pkg.get_top_fn().unwrap().clone()
+    }
+
+    fn roundtrip_top_fn_via_dslx_no_opt(ir_text: &str) -> (String, ir::Fn) {
+        let (dslx_text, roundtrip_ir) = roundtrip_ir_package_via_dslx_no_opt(ir_text);
+        (dslx_text, parse_top_fn(&roundtrip_ir))
+    }
+
+    fn assert_roundtrip_top_fn_structurally_matches_target(
+        ir_text: &str,
+        target_ir_text: &str,
+    ) -> String {
+        let (dslx_text, roundtrip_fn) = roundtrip_top_fn_via_dslx_no_opt(ir_text);
+        let target_fn = parse_top_fn(target_ir_text);
+        assert_eq!(
+            compute_function_structural_hash(&roundtrip_fn),
+            compute_function_structural_hash(&target_fn)
+        );
+        dslx_text
+    }
+
+    fn assert_roundtrip_top_fn_structurally_matches_input(ir_text: &str) -> String {
+        assert_roundtrip_top_fn_structurally_matches_target(ir_text, ir_text)
+    }
+
+    fn line_containing<'a>(text: &'a str, pattern: &str) -> &'a str {
+        text.lines()
+            .find(|line| line.contains(pattern))
+            .unwrap_or_else(|| panic!("expected line containing {:?} in:\n{}", pattern, text))
+    }
 
     #[test]
     fn test_sanitize_dslx_reserved_words() {
@@ -906,20 +979,114 @@ top fn proc(bits: bits[8] id=1, token: bits[8] id=2) -> bits[8] {
     fn test_convert_sel_with_default_ignores_unreachable_extra_cases() {
         let ir_text = r#"package sample
 
-top fn f(s: bits[1] id=1, a: bits[8] id=2, b: bits[8] id=3, c: bits[8] id=4, d: bits[8] id=5) -> bits[8] {
+top fn f(s: bits[1] id=1, a: bits[8] id=2, b: bits[8] id=3) -> bits[8] {
   s: bits[1] = param(name=s, id=1)
   a: bits[8] = param(name=a, id=2)
   b: bits[8] = param(name=b, id=3)
-  c: bits[8] = param(name=c, id=4)
-  d: bits[8] = param(name=d, id=5)
+  c: bits[8] = literal(value=7, id=4)
+  d: bits[8] = literal(value=9, id=5)
   ret out: bits[8] = sel(s, cases=[a, b, c], default=d, id=6)
 }
 "#;
         let result = convert_ir_package_fn_to_dslx(ir_text, None).unwrap();
-        assert!(result.dslx_text.contains("uN[1]:0 => a"));
-        assert!(result.dslx_text.contains("uN[1]:1 => b"));
-        assert!(result.dslx_text.contains("_ => d"));
+        let out_line = line_containing(&result.dslx_text, "if s { b } else { a }");
+        assert!(result.dslx_text.contains("if s { b } else { a }"));
+        assert!(
+            result
+                .dslx_text
+                .contains("fn f(s: uN[1], a: uN[8], b: uN[8]) -> uN[8]")
+        );
+        assert!(!result.dslx_text.contains("match"));
+        assert!(!result.dslx_text.contains("_ =>"));
         assert!(!result.dslx_text.contains("uN[1]:2 =>"));
+        assert!(!out_line.contains("c"));
+        assert!(!out_line.contains("d"));
+    }
+
+    #[test]
+    fn test_roundtrip_binary_sel_without_default_preserves_sel_under_no_opt() {
+        let ir_text = r#"package sample
+
+top fn f(s: bits[1] id=1, a: bits[8] id=2, b: bits[8] id=3) -> bits[8] {
+  s: bits[1] = param(name=s, id=1)
+  a: bits[8] = param(name=a, id=2)
+  b: bits[8] = param(name=b, id=3)
+  ret sel_4: bits[8] = sel(s, cases=[a, b], id=4)
+}
+"#;
+        let dslx_text = assert_roundtrip_top_fn_structurally_matches_input(ir_text);
+
+        assert!(dslx_text.contains("if s { b } else { a }"));
+    }
+
+    #[test]
+    fn test_roundtrip_simple_add_preserves_body_under_no_opt() {
+        let ir_text = r#"package sample
+
+top fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
+  x: bits[8] = param(name=x, id=1)
+  y: bits[8] = param(name=y, id=2)
+  ret add_3: bits[8] = add(x, y, id=3)
+}
+"#;
+        let dslx_text = assert_roundtrip_top_fn_structurally_matches_input(ir_text);
+
+        assert!(dslx_text.contains("x + y"));
+    }
+
+    #[test]
+    fn test_roundtrip_binary_sel_with_default_lowers_to_explicit_cases_under_no_opt() {
+        let ir_text = r#"package sample
+
+top fn f(s: bits[1] id=1, a: bits[8] id=2, d: bits[8] id=3) -> bits[8] {
+  s: bits[1] = param(name=s, id=1)
+  a: bits[8] = param(name=a, id=2)
+  d: bits[8] = param(name=d, id=3)
+  ret out_v: bits[8] = sel(s, cases=[a], default=d, id=4)
+}
+"#;
+        let target_ir_text = r#"package sample
+
+top fn f(s: bits[1] id=1, a: bits[8] id=2, d: bits[8] id=3) -> bits[8] {
+  s: bits[1] = param(name=s, id=1)
+  a: bits[8] = param(name=a, id=2)
+  d: bits[8] = param(name=d, id=3)
+  ret out_v: bits[8] = sel(s, cases=[a, d], id=4)
+}
+"#;
+        let dslx_text =
+            assert_roundtrip_top_fn_structurally_matches_target(ir_text, target_ir_text);
+
+        assert!(dslx_text.contains("if s { d } else { a }"));
+    }
+
+    #[test]
+    fn test_roundtrip_binary_sel_with_reachable_cases_lowers_to_reachable_cases_under_no_opt() {
+        let ir_text = r#"package sample
+
+top fn f(s: bits[1] id=1, a: bits[8] id=2, b: bits[8] id=3) -> bits[8] {
+  s: bits[1] = param(name=s, id=1)
+  a: bits[8] = param(name=a, id=2)
+  b: bits[8] = param(name=b, id=3)
+  c: bits[8] = literal(value=7, id=4)
+  d: bits[8] = literal(value=9, id=5)
+  ret out_v: bits[8] = sel(s, cases=[a, b, c], default=d, id=6)
+}
+"#;
+        let target_ir_text = r#"package sample
+
+top fn f(s: bits[1] id=1, a: bits[8] id=2, b: bits[8] id=3) -> bits[8] {
+  s: bits[1] = param(name=s, id=1)
+  a: bits[8] = param(name=a, id=2)
+  b: bits[8] = param(name=b, id=3)
+  ret out_v: bits[8] = sel(s, cases=[a, b], id=6)
+}
+"#;
+        let dslx_text =
+            assert_roundtrip_top_fn_structurally_matches_target(ir_text, target_ir_text);
+
+        assert!(dslx_text.contains("if s { b } else { a }"));
+        assert!(dslx_text.contains("fn f(s: uN[1], a: uN[8], b: uN[8]) -> uN[8]"));
     }
 
     #[test]
