@@ -373,14 +373,15 @@ fn simplify_and_const_prop(f: &mut ir::Fn) -> Result<(), String> {
             if !deps.iter().all(|nr| const_nodes.contains_key(&nr.index)) {
                 continue;
             }
-            let mut env: HashMap<ir::NodeRef, IrValue> = HashMap::with_capacity(deps.len());
-            for nr in deps.iter().copied() {
-                let Some(value) = const_nodes.get(&nr.index) else {
-                    continue;
-                };
-                env.insert(nr, value.clone());
-            }
-            if let Some(value) = eval_pure_if_supported(node, &env) {
+            let operand_values: Vec<&IrValue> = deps
+                .iter()
+                .map(|nr| {
+                    const_nodes
+                        .get(&nr.index)
+                        .expect("dependency value must be available")
+                })
+                .collect();
+            if let Some(value) = eval_pure_if_supported(node, &operand_values) {
                 newly_constant.push((idx, value));
             }
         }
