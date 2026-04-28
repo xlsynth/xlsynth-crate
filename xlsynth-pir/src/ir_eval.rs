@@ -14,6 +14,7 @@ use crate::ir_value_utils::{
 };
 use crate::math::ceil_log2;
 use smallvec::SmallVec;
+use std::collections::HashMap;
 use xlsynth::{IrBits, IrValue};
 
 struct DenseEvalEnv {
@@ -1609,17 +1610,15 @@ fn eval_fn_impl<'a>(
         "argument count must match params"
     );
 
-    // Map ParamId -> argument value. Param IDs are one-based, so keep index 0
-    // unused.
-    let max_param_id = f
-        .params
-        .iter()
-        .map(|p| p.id.get_wrapped_id())
-        .max()
-        .unwrap_or(0);
-    let mut param_map: Vec<Option<IrValue>> = vec![None; max_param_id + 1];
+    // Map sparse textual ParamId values to dense argument indices. ParamIds come
+    // from IR text `id=` attributes, so they are not guaranteed to be small or
+    // contiguous even though PIR parameter NodeRefs are dense.
+    let mut param_index_by_id: HashMap<ir::ParamId, usize> = HashMap::with_capacity(f.params.len());
     for (i, p) in f.params.iter().enumerate() {
-        param_map[p.id.get_wrapped_id()] = Some(args[i].clone());
+        assert!(
+            param_index_by_id.insert(p.id, i).is_none(),
+            "duplicate ParamId in function params"
+        );
     }
 
     let mut env = DenseEvalEnv::new(f.nodes.len());
@@ -1634,11 +1633,8 @@ fn eval_fn_impl<'a>(
             }
             P::GetParam(param_id) => {
                 // Must exist by construction.
-                param_map
-                    .get(param_id.get_wrapped_id())
-                    .and_then(Option::as_ref)
-                    .expect("param not found")
-                    .clone()
+                let arg_index = *param_index_by_id.get(param_id).expect("param not found");
+                args[arg_index].clone()
             }
             P::Assert {
                 token,
@@ -2290,6 +2286,30 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
 }}
 "#
         )
+    }
+
+    #[test]
+    fn eval_fn_uses_sparse_param_ids() {
+        let max_param_id = usize::MAX;
+        let ir_text = format!(
+            r#"package test
+
+fn f(x: bits[8] id={max_param_id}) -> bits[8] {{
+  ret identity.1: bits[8] = identity(x, id=1)
+}}
+"#
+        );
+        let mut parser = Parser::new(&ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap();
+        let args = vec![IrValue::make_ubits(8, 0xab).unwrap()];
+        let got = eval_fn_in_package(&pkg, f, &args);
+        match got {
+            FnEvalResult::Success(success) => {
+                assert_eq!(success.value, args[0]);
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
     }
 
     #[test]
