@@ -875,12 +875,95 @@ pub type IterationOutcomeDetails = xlsynth_mcmc::IterationOutcomeDetails<PirTran
 pub type McmcIterationOutput = SharedMcmcIterationOutput<IrFn, Cost, PirTransformKind>;
 pub type McmcOptions = SharedMcmcOptions;
 
+/// Cached oracle inputs and expected baseline `eval_fn` results.
+///
+/// MCMC oracle checks compare many candidate functions against the same
+/// accepted baseline. This cache stores the deterministic/random sample
+/// arguments and the baseline return value for each sample so candidates only
+/// need to evaluate their rewritten graph.
+#[derive(Default)]
+pub struct EvalFnBaselineResults {
+    samples: Vec<Vec<IrValue>>,
+    expected_values: Vec<Result<IrValue, ()>>,
+    random_samples: usize,
+    param_types: Vec<PirType>,
+}
+
+impl EvalFnBaselineResults {
+    fn clear(&mut self) {
+        self.samples.clear();
+        self.expected_values.clear();
+        self.random_samples = 0;
+        self.param_types.clear();
+    }
+
+    fn matches_signature(&self, baseline: &IrFn, random_samples: usize) -> bool {
+        self.random_samples == random_samples
+            && self.param_types.len() == baseline.params.len()
+            && self
+                .param_types
+                .iter()
+                .zip(baseline.params.iter())
+                .all(|(cached_ty, param)| cached_ty == &param.ty)
+    }
+
+    fn populate_from_baseline<R: Rng>(
+        &mut self,
+        baseline: &IrFn,
+        rng: &mut R,
+        random_samples: usize,
+    ) -> Result<()> {
+        self.clear();
+        self.random_samples = random_samples;
+        self.param_types = baseline.params.iter().map(|p| p.ty.clone()).collect();
+
+        // Deterministic corner cases first: all-zeros and all-ones.
+        self.samples.push(make_oracle_args(
+            &baseline.params,
+            "all-zeros",
+            make_all_zeros_value,
+        )?);
+        self.samples.push(make_oracle_args(
+            &baseline.params,
+            "all-ones",
+            make_all_ones_value,
+        )?);
+
+        for _ in 0..random_samples {
+            self.samples
+                .push(make_oracle_args(&baseline.params, "random", |ty| {
+                    arbitrary_value_for_type(rng, ty)
+                })?);
+        }
+
+        self.expected_values = self
+            .samples
+            .iter()
+            .map(|args| eval_fn_safe(baseline, args))
+            .collect();
+        Ok(())
+    }
+
+    fn ensure_populated<R: Rng>(
+        &mut self,
+        baseline_if_empty: &IrFn,
+        rng: &mut R,
+        random_samples: usize,
+    ) -> Result<()> {
+        if !self.matches_signature(baseline_if_empty, random_samples) || self.samples.is_empty() {
+            self.populate_from_baseline(baseline_if_empty, rng, random_samples)?;
+        }
+        Ok(())
+    }
+}
+
 /// Context for a PIR MCMC iteration, holding shared resources.
 pub struct PirMcmcContext<'a> {
     pub rng: &'a mut Pcg64Mcg,
     pub all_transforms: Vec<Box<dyn PirTransform>>,
     pub weights: Vec<f64>,
     pub enable_formal_oracle: bool,
+    pub oracle_baseline_cache: EvalFnBaselineResults,
 }
 
 /// Options controlling a PIR MCMC run.
@@ -1147,6 +1230,7 @@ pub fn mcmc_iteration(
                     context.rng,
                     DEFAULT_ORACLE_RANDOM_SAMPLES,
                     context.enable_formal_oracle,
+                    &mut context.oracle_baseline_cache,
                 );
                 let micros = oracle_start.elapsed().as_micros();
                 (ok, micros)
@@ -1458,21 +1542,15 @@ fn eval_fn_safe(f: &IrFn, args: &[IrValue]) -> Result<IrValue, ()> {
     }
 }
 
-fn make_oracle_args<F>(params: &[PirParam], label: &str, mut make_value: F) -> Option<Vec<IrValue>>
+fn make_oracle_args<F>(params: &[PirParam], label: &str, mut make_value: F) -> Result<Vec<IrValue>>
 where
     F: FnMut(&PirType) -> Result<IrValue>,
 {
-    match params.iter().map(|p| make_value(&p.ty)).collect() {
-        Ok(args) => Some(args),
-        Err(e) => {
-            log::debug!(
-                "[pir-mcmc] failed to construct {} oracle sample args: {}; rejecting candidate",
-                label,
-                e
-            );
-            None
-        }
-    }
+    params
+        .iter()
+        .map(|p| make_value(&p.ty))
+        .collect::<Result<Vec<_>>>()
+        .map_err(|e| anyhow::anyhow!("failed to construct {} oracle sample args: {}", label, e))
 }
 
 fn pir_equiv_oracle<R: Rng>(
@@ -1481,6 +1559,7 @@ fn pir_equiv_oracle<R: Rng>(
     rng: &mut R,
     random_samples: usize,
     enable_formal_oracle: bool,
+    baseline_cache: &mut EvalFnBaselineResults,
 ) -> bool {
     if lhs.params.len() != rhs.params.len() || lhs.ret_ty != rhs.ret_ty {
         return false;
@@ -1491,45 +1570,30 @@ fn pir_equiv_oracle<R: Rng>(
         }
     }
 
-    // Deterministic corner cases first: all-zeros and all-ones.
-    let zeros_args = match make_oracle_args(&lhs.params, "all-zeros", make_all_zeros_value) {
-        Some(args) => args,
-        None => return false,
-    };
-    let ones_args = match make_oracle_args(&lhs.params, "all-ones", make_all_ones_value) {
-        Some(args) => args,
-        None => return false,
-    };
-    for args in [&zeros_args, &ones_args] {
-        let l = eval_fn_safe(lhs, args);
-        let r = eval_fn_safe(rhs, args);
-        match (l, r) {
-            (Ok(lv), Ok(rv)) => {
-                if lv != rv {
-                    return false;
-                }
-            }
-            _ => return false,
-        }
+    // The accepted-state invariant says each current `lhs` is equivalent to the
+    // initial baseline. Populate this once for the first oracle check in a
+    // chain/segment, then keep comparing candidates to those expected return
+    // values instead of re-evaluating `lhs`.
+    if let Err(e) = baseline_cache.ensure_populated(lhs, rng, random_samples) {
+        log::debug!(
+            "[pir-mcmc] failed to populate oracle baseline cache: {}; rejecting candidate",
+            e
+        );
+        return false;
     }
-
-    // Randomized sampling.
-    for _ in 0..random_samples {
-        let args = match make_oracle_args(&lhs.params, "random", |ty| {
-            arbitrary_value_for_type(rng, ty)
-        }) {
-            Some(args) => args,
-            None => return false,
+    for (args, expected_value) in baseline_cache
+        .samples
+        .iter()
+        .zip(baseline_cache.expected_values.iter())
+    {
+        let Ok(expected_value) = expected_value else {
+            return false;
         };
-        let l = eval_fn_safe(lhs, &args);
-        let r = eval_fn_safe(rhs, &args);
-        match (l, r) {
-            (Ok(lv), Ok(rv)) => {
-                if lv != rv {
-                    return false;
-                }
-            }
-            _ => return false,
+        let Ok(rhs_value) = eval_fn_safe(rhs, args) else {
+            return false;
+        };
+        if expected_value != &rhs_value {
+            return false;
         }
     }
 
@@ -1595,6 +1659,7 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
             all_transforms,
             weights,
             enable_formal_oracle: self.enable_formal_oracle,
+            oracle_baseline_cache: EvalFnBaselineResults::default(),
         };
 
         let toggle_stimulus = self.prepared_toggle_stimulus.as_ref().map(|v| v.as_slice());
@@ -2052,12 +2117,14 @@ mod tests {
         );
 
         let mut rng = Pcg64Mcg::seed_from_u64(1);
+        let mut baseline_cache = EvalFnBaselineResults::default();
         assert!(!pir_equiv_oracle(
             &orig_fn,
             &rewired_fn,
             &mut rng,
             4,
             /* enable_formal_oracle= */ false,
+            &mut baseline_cache,
         ));
     }
 
@@ -2072,9 +2139,15 @@ mod tests {
         let rhs = parser2.parse_fn().unwrap();
 
         let mut rng = Pcg64Mcg::seed_from_u64(1);
+        let mut baseline_cache = EvalFnBaselineResults::default();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             pir_equiv_oracle(
-                &lhs, &rhs, &mut rng, 4, /* enable_formal_oracle= */ false,
+                &lhs,
+                &rhs,
+                &mut rng,
+                4,
+                /* enable_formal_oracle= */ false,
+                &mut baseline_cache,
             )
         }));
 
