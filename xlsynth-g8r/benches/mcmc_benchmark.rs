@@ -114,7 +114,8 @@ fn benchmark_mcmc_iteration(c: &mut Criterion) {
                     false,
                     &simd_inputs,
                     &baseline_outputs,
-                );
+                )
+                .expect("MCMC iteration should not hit a formal backend error");
             },
             criterion::BatchSize::SmallInput,
         );

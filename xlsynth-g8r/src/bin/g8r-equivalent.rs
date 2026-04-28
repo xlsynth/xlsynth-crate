@@ -66,7 +66,13 @@ fn main() {
     };
 
     // Checker 1: SAT/Z3 oracle (fast path)
-    let sat_equiv = oracle_equiv_sat(&lhs, &rhs);
+    let sat_equiv = match oracle_equiv_sat(&lhs, &rhs) {
+        Ok(equiv) => equiv,
+        Err(e) => {
+            eprintln!("SAT/Z3 oracle error: {}", e);
+            exit(2);
+        }
+    };
     println!("SAT/Z3 oracle: {}", sat_equiv);
 
     // Checker 2: IR-based equivalence.
