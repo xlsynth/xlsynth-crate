@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
-
 use crate::corners::bucket_xor_popcount;
 use crate::corners::{
     AddCornerTag, ArrayIndexCornerTag, CompareDistanceCornerTag, CornerEvent, CornerKind,
@@ -10,12 +8,248 @@ use crate::corners::{
 };
 use crate::ir;
 use crate::ir::NodePayload as P;
-use crate::ir_utils::get_topological;
+use crate::ir_utils::{get_topological, operands};
 use crate::ir_value_utils::{
     deep_or_ir_values_for_type, ir_bits_to_usize, ir_bits_to_usize_in_range, zero_ir_value_for_type,
 };
 use crate::math::ceil_log2;
+use smallvec::SmallVec;
+use std::collections::HashMap;
 use xlsynth::{IrBits, IrValue};
+
+struct DenseEvalEnv {
+    values: Vec<Option<IrValue>>,
+}
+
+impl DenseEvalEnv {
+    fn new(node_count: usize) -> Self {
+        Self {
+            values: vec![None; node_count],
+        }
+    }
+
+    fn insert(&mut self, nr: ir::NodeRef, value: IrValue) {
+        let slot = self
+            .values
+            .get_mut(nr.index)
+            .expect("node ref must be in evaluator env bounds");
+        debug_assert!(slot.is_none(), "node value should only be assigned once");
+        *slot = Some(value);
+    }
+
+    fn get(&self, key: &ir::NodeRef) -> Option<&IrValue> {
+        self.values.get(key.index).and_then(Option::as_ref)
+    }
+}
+
+type OperandValues<'a> = SmallVec<[&'a IrValue; 8]>;
+
+fn append_operand_values<'a>(
+    payload: &ir::NodePayload,
+    env: &'a DenseEvalEnv,
+    values: &mut OperandValues<'a>,
+) {
+    use ir::NodePayload::*;
+
+    let mut push = |nr: &ir::NodeRef| {
+        values.push(env.get(nr).expect("operand must be evaluated"));
+    };
+
+    match payload {
+        Nil | GetParam(_) | Literal(_) | InstantiationOutput { .. } | RegisterRead { .. } => {}
+        Tuple(elems) | Array(elems) | AfterAll(elems) | Nary(_, elems) => {
+            for elem in elems {
+                push(elem);
+            }
+        }
+        ArraySlice { array, start, .. } => {
+            push(array);
+            push(start);
+        }
+        TupleIndex { tuple, .. } => push(tuple),
+        Binop(_, lhs, rhs) => {
+            push(lhs);
+            push(rhs);
+        }
+        Unop(_, arg)
+        | SignExt { arg, .. }
+        | ZeroExt { arg, .. }
+        | BitSlice { arg, .. }
+        | ExtPrioEncode { arg, .. }
+        | ExtClz { arg }
+        | OneHot { arg, .. }
+        | Decode { arg, .. }
+        | Encode { arg, .. }
+        | InstantiationInput { arg, .. }
+        | Cover { predicate: arg, .. } => push(arg),
+        ArrayUpdate {
+            array,
+            value,
+            indices,
+            ..
+        } => {
+            push(array);
+            push(value);
+            for index in indices {
+                push(index);
+            }
+        }
+        ArrayIndex { array, indices, .. } => {
+            push(array);
+            for index in indices {
+                push(index);
+            }
+        }
+        DynamicBitSlice { arg, start, .. } => {
+            push(arg);
+            push(start);
+        }
+        BitSliceUpdate {
+            arg,
+            start,
+            update_value,
+        } => {
+            push(arg);
+            push(start);
+            push(update_value);
+        }
+        ExtCarryOut { lhs, rhs, c_in } => {
+            push(lhs);
+            push(rhs);
+            push(c_in);
+        }
+        ExtMaskLow { count } => push(count),
+        ExtNaryAdd { terms, .. } => {
+            for term in terms {
+                push(&term.operand);
+            }
+        }
+        Assert {
+            token, activate, ..
+        } => {
+            push(token);
+            push(activate);
+        }
+        RegisterWrite {
+            arg,
+            load_enable,
+            reset,
+            ..
+        } => {
+            push(arg);
+            if let Some(load_enable) = load_enable {
+                push(load_enable);
+            }
+            if let Some(reset) = reset {
+                push(reset);
+            }
+        }
+        Trace {
+            token,
+            activated,
+            operands,
+            ..
+        } => {
+            push(token);
+            push(activated);
+            for operand in operands {
+                push(operand);
+            }
+        }
+        Invoke { operands, .. } => {
+            for operand in operands {
+                push(operand);
+            }
+        }
+        PrioritySel {
+            selector,
+            cases,
+            default,
+        }
+        | Sel {
+            selector,
+            cases,
+            default,
+        } => {
+            push(selector);
+            for case in cases {
+                push(case);
+            }
+            if let Some(default) = default {
+                push(default);
+            }
+        }
+        OneHotSel { selector, cases } => {
+            push(selector);
+            for case in cases {
+                push(case);
+            }
+        }
+        CountedFor {
+            init,
+            invariant_args,
+            ..
+        } => {
+            push(init);
+            for arg in invariant_args {
+                push(arg);
+            }
+        }
+    }
+}
+
+fn eval_pure_from_env(n: &ir::Node, env: &DenseEvalEnv) -> IrValue {
+    let mut operand_values: OperandValues<'_> = SmallVec::new();
+    append_operand_values(&n.payload, env, &mut operand_values);
+    eval_pure(n, &operand_values)
+}
+
+enum EvalOrder {
+    NodeIndex(std::ops::Range<usize>),
+    Topological(std::vec::IntoIter<ir::NodeRef>),
+}
+
+impl Iterator for EvalOrder {
+    type Item = ir::NodeRef;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            EvalOrder::NodeIndex(range) => range.next().map(|index| ir::NodeRef { index }),
+            EvalOrder::Topological(order) => order.next(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum EvalOrderPolicy {
+    Checked,
+    AssumeNodeIndexTopological,
+}
+
+fn is_node_index_topological(f: &ir::Fn) -> bool {
+    let node_count = f.nodes.len();
+    for (index, node) in f.nodes.iter().enumerate() {
+        for dep in operands(&node.payload) {
+            if dep.index >= node_count || dep.index >= index {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn eval_order(f: &ir::Fn, order_policy: EvalOrderPolicy) -> EvalOrder {
+    match order_policy {
+        EvalOrderPolicy::AssumeNodeIndexTopological => EvalOrder::NodeIndex(0..f.nodes.len()),
+        EvalOrderPolicy::Checked => {
+            if is_node_index_topological(f) {
+                EvalOrder::NodeIndex(0..f.nodes.len())
+            } else {
+                EvalOrder::Topological(get_topological(f).into_iter())
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 enum ShiftKind {
@@ -156,13 +390,13 @@ fn eval_bit_slice_update_bits(arg_bits: &IrBits, start_bits: &IrBits, upd_bits: 
     IrBits::from_lsb_is_0(&out)
 }
 
-fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
+fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
     log::trace!("eval_pure: {:?}", n);
     match n.payload {
         ir::NodePayload::Literal(ref ir_value) => ir_value.clone(),
-        ir::NodePayload::Binop(binop, ref lhs, ref rhs) => {
-            let lhs_value: &IrValue = env.get(lhs).unwrap();
-            let rhs_value: &IrValue = env.get(rhs).unwrap();
+        ir::NodePayload::Binop(binop, _, _) => {
+            let lhs_value = operand_values[0];
+            let rhs_value = operand_values[1];
             match binop {
                 ir::Binop::Eq => IrValue::bool(lhs_value == rhs_value),
                 ir::Binop::Ne => IrValue::bool(lhs_value != rhs_value),
@@ -296,18 +530,16 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                 _ => panic!("Unsupported binop: {:?}", binop),
             }
         }
-        ir::NodePayload::ExtCarryOut { lhs, rhs, c_in } => {
-            let lhs_bits: IrBits = env.get(&lhs).unwrap().to_bits().unwrap();
-            let rhs_bits: IrBits = env.get(&rhs).unwrap().to_bits().unwrap();
+        ir::NodePayload::ExtCarryOut { .. } => {
+            let lhs_bits: IrBits = operand_values[0].to_bits().unwrap();
+            let rhs_bits: IrBits = operand_values[1].to_bits().unwrap();
             let w = lhs_bits.get_bit_count();
             assert_eq!(
                 w,
                 rhs_bits.get_bit_count(),
                 "ExtCarryOut: lhs/rhs width mismatch"
             );
-            let c_in_bool = env
-                .get(&c_in)
-                .unwrap()
+            let c_in_bool = operand_values[2]
                 .to_bool()
                 .expect("ExtCarryOut c_in must be bits[1]");
 
@@ -333,8 +565,8 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
             let sum_w1_ci = sum_w1.add(&c_in_w1);
             IrValue::bool(sum_w1_ci.get_bit(w).unwrap())
         }
-        ir::NodePayload::ExtPrioEncode { arg, lsb_prio } => {
-            let bits: IrBits = env.get(&arg).unwrap().to_bits().unwrap();
+        ir::NodePayload::ExtPrioEncode { lsb_prio, .. } => {
+            let bits: IrBits = operand_values[0].to_bits().unwrap();
             let n = bits.get_bit_count();
 
             let mut found: Option<usize> = None;
@@ -373,8 +605,8 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
             }
             IrValue::from_bits(&IrBits::from_lsb_is_0(&out))
         }
-        ir::NodePayload::ExtClz { arg } => {
-            let bits: IrBits = env.get(&arg).unwrap().to_bits().unwrap();
+        ir::NodePayload::ExtClz { .. } => {
+            let bits: IrBits = operand_values[0].to_bits().unwrap();
             let n = bits.get_bit_count();
 
             let mut leading_zero_count = n;
@@ -400,12 +632,12 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
             }
             IrValue::from_bits(&IrBits::from_lsb_is_0(&out))
         }
-        ir::NodePayload::ExtMaskLow { count } => {
+        ir::NodePayload::ExtMaskLow { .. } => {
             let out_w = match n.ty {
                 ir::Type::Bits(width) => width,
                 ref ty => panic!("ExtMaskLow result must be bits-typed, got {ty}"),
             };
-            let count_bits: IrBits = env.get(&count).unwrap().to_bits().unwrap();
+            let count_bits: IrBits = operand_values[0].to_bits().unwrap();
             let count_value = ir_bits_to_usize(&count_bits).unwrap_or(usize::MAX);
             let out: Vec<bool> = (0..out_w).map(|i| count_value > i).collect();
             IrValue::from_bits(&IrBits::from_lsb_is_0(&out))
@@ -415,8 +647,8 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                 panic!("ExtNaryAdd result must be bits-typed");
             };
             let mut acc = IrBits::make_ubits(*out_w, 0).expect("ext_nary_add zero must construct");
-            for term in terms.iter() {
-                let operand_bits: IrBits = env.get(&term.operand).unwrap().to_bits().unwrap();
+            for (term, operand_value) in terms.iter().zip(operand_values.iter()) {
+                let operand_bits: IrBits = operand_value.to_bits().unwrap();
                 let resized = if term.signed {
                     eval_sign_resize_bits(&operand_bits, *out_w)
                 } else {
@@ -431,8 +663,8 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
             }
             IrValue::from_bits(&acc)
         }
-        ir::NodePayload::Unop(unop, ref operand) => {
-            let operand_value: &IrValue = env.get(operand).unwrap();
+        ir::NodePayload::Unop(unop, _) => {
+            let operand_value = operand_values[0];
             match unop {
                 ir::Unop::Neg => {
                     let operand_bits = operand_value.to_bits().unwrap();
@@ -490,31 +722,21 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                 }
             }
         }
-        ir::NodePayload::Tuple(ref elements) => {
-            let values: Vec<IrValue> = elements
-                .iter()
-                .map(|e| env.get(e).unwrap().clone())
-                .collect();
+        ir::NodePayload::Tuple(_) => {
+            let values: Vec<IrValue> = operand_values.iter().map(|v| (*v).clone()).collect();
             IrValue::make_tuple(&values)
         }
-        ir::NodePayload::TupleIndex { tuple, index } => {
-            let tuple_value: &IrValue = env.get(&tuple).unwrap();
+        ir::NodePayload::TupleIndex { index, .. } => {
+            let tuple_value = operand_values[0];
             tuple_value.get_element(index).unwrap()
         }
-        ir::NodePayload::Array(ref elements) => {
-            let values: Vec<IrValue> = elements
-                .iter()
-                .map(|e| env.get(e).unwrap().clone())
-                .collect();
+        ir::NodePayload::Array(_) => {
+            let values: Vec<IrValue> = operand_values.iter().map(|v| (*v).clone()).collect();
             IrValue::make_array(&values).unwrap()
         }
-        ir::NodePayload::ArraySlice {
-            array,
-            start,
-            width,
-        } => {
-            let arr = env.get(&array).unwrap().clone();
-            let start_bits = env.get(&start).unwrap().to_bits().unwrap();
+        ir::NodePayload::ArraySlice { width, .. } => {
+            let arr = operand_values[0].clone();
+            let start_bits = operand_values[1].to_bits().unwrap();
             let start_u = ir_bits_to_usize(&start_bits);
             let len = arr.get_element_count().unwrap();
             assert!(len > 0, "ArraySlice: empty array not supported");
@@ -530,10 +752,9 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
             IrValue::make_array(&out_elems).unwrap()
         }
         ir::NodePayload::ArrayUpdate {
-            array,
-            value,
             ref indices,
             assumed_in_bounds: _,
+            ..
         } => {
             // Recursively updates the array `base` at the multi-index `idxs`
             // with `new_value`, returning a freshly constructed value.
@@ -555,29 +776,30 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                 IrValue::make_array(&elems).unwrap()
             }
 
-            let base = env.get(&array).unwrap().clone();
-            let new_value = env.get(&value).unwrap().clone();
+            let base = operand_values[0].clone();
+            let new_value = operand_values[1].clone();
             let idxs: Vec<usize> = indices
                 .iter()
-                .map(|r| {
-                    let bits = env.get(r).unwrap().to_bits().unwrap();
+                .zip(operand_values[2..].iter())
+                .map(|(_r, value)| {
+                    let bits = value.to_bits().unwrap();
                     ir_bits_to_usize(&bits).unwrap_or(usize::MAX)
                 })
                 .collect();
             update_at_indices(&base, &idxs, &new_value)
         }
         ir::NodePayload::ArrayIndex {
-            array,
             ref indices,
             assumed_in_bounds: _,
+            ..
         } => {
             // XLS semantics: out-of-bounds indices are clamped to the maximum in-bounds
             // index for the respective dimension. Note: this helper does not
             // surface `assumed_in_bounds` errors (those are handled in
             // `eval_fn_with_observer`, which can return Failure).
-            let mut value = env.get(&array).unwrap().clone();
-            for idx_ref in indices {
-                let idx_bits = env.get(idx_ref).unwrap().to_bits().unwrap();
+            let mut value = operand_values[0].clone();
+            for (_idx_ref, idx_value) in indices.iter().zip(operand_values[1..].iter()) {
+                let idx_bits = idx_value.to_bits().unwrap();
                 let idx = ir_bits_to_usize(&idx_bits).unwrap_or(usize::MAX);
                 let count = value.get_element_count().unwrap();
                 assert!(count > 0, "ArrayIndex: empty array not supported");
@@ -586,22 +808,19 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
             }
             value
         }
-        ir::NodePayload::DynamicBitSlice {
-            ref arg,
-            ref start,
-            width,
-        } => {
-            let arg_bits: IrBits = env.get(arg).unwrap().to_bits().unwrap();
-            let start_bits: IrBits = env.get(start).unwrap().to_bits().unwrap();
+        ir::NodePayload::DynamicBitSlice { width, .. } => {
+            let arg_bits: IrBits = operand_values[0].to_bits().unwrap();
+            let start_bits: IrBits = operand_values[1].to_bits().unwrap();
             let start_u = ir_bits_to_usize(&start_bits);
             IrValue::from_bits(&eval_zero_filled_bit_slice(&arg_bits, start_u, width))
         }
-        ir::NodePayload::ZeroExt { arg, new_bit_count } => {
-            let arg_bits: IrBits = env.get(&arg).unwrap().to_bits().unwrap();
+        ir::NodePayload::ZeroExt { new_bit_count, .. } => {
+            let arg_value = operand_values[0];
+            let arg_bits: IrBits = arg_value.to_bits().unwrap();
             let old_w = arg_bits.get_bit_count();
             let new_w = new_bit_count;
             if new_w == old_w {
-                env.get(&arg).unwrap().clone()
+                arg_value.clone()
             } else if new_w < old_w {
                 let sliced = arg_bits.width_slice(0, new_w as i64);
                 IrValue::from_bits(&sliced)
@@ -617,12 +836,13 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                 IrValue::from_bits(&out_bits)
             }
         }
-        ir::NodePayload::SignExt { arg, new_bit_count } => {
-            let arg_bits: IrBits = env.get(&arg).unwrap().to_bits().unwrap();
+        ir::NodePayload::SignExt { new_bit_count, .. } => {
+            let arg_value = operand_values[0];
+            let arg_bits: IrBits = arg_value.to_bits().unwrap();
             let old_w = arg_bits.get_bit_count();
             let new_w = new_bit_count;
             if new_w == old_w {
-                env.get(&arg).unwrap().clone()
+                arg_value.clone()
             } else if new_w < old_w {
                 let sliced = arg_bits.width_slice(0, new_w as i64);
                 IrValue::from_bits(&sliced)
@@ -643,12 +863,8 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                 IrValue::from_bits(&out_bits)
             }
         }
-        ir::NodePayload::BitSlice {
-            ref arg,
-            start,
-            width,
-        } => {
-            let arg_bits: IrBits = env.get(arg).unwrap().to_bits().unwrap();
+        ir::NodePayload::BitSlice { start, width, .. } => {
+            let arg_bits: IrBits = operand_values[0].to_bits().unwrap();
             let bit_count = arg_bits.get_bit_count();
             assert!(
                 start + width <= bit_count,
@@ -660,43 +876,43 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
             let r = arg_bits.width_slice(start as i64, width as i64);
             IrValue::from_bits(&r)
         }
-        ir::NodePayload::Nary(op, ref operands) => {
-            let mut iter = operands.iter();
-            let first = env.get(iter.next().unwrap()).unwrap();
+        ir::NodePayload::Nary(op, _) => {
+            let mut iter = operand_values.iter();
+            let first = iter.next().unwrap();
             let mut acc = first.to_bits().unwrap();
             match op {
                 ir::NaryOp::And => {
-                    for operand in iter {
-                        let bits = env.get(operand).unwrap().to_bits().unwrap();
+                    for operand_value in iter {
+                        let bits = operand_value.to_bits().unwrap();
                         acc = acc.and(&bits);
                     }
                     IrValue::from_bits(&acc)
                 }
                 ir::NaryOp::Or => {
-                    for operand in iter {
-                        let bits = env.get(operand).unwrap().to_bits().unwrap();
+                    for operand_value in iter {
+                        let bits = operand_value.to_bits().unwrap();
                         acc = acc.or(&bits);
                     }
                     IrValue::from_bits(&acc)
                 }
                 ir::NaryOp::Xor => {
-                    for operand in iter {
-                        let bits = env.get(operand).unwrap().to_bits().unwrap();
+                    for operand_value in iter {
+                        let bits = operand_value.to_bits().unwrap();
                         acc = acc.xor(&bits);
                     }
                     IrValue::from_bits(&acc)
                 }
                 ir::NaryOp::Nand => {
-                    for operand in iter {
-                        let bits = env.get(operand).unwrap().to_bits().unwrap();
+                    for operand_value in iter {
+                        let bits = operand_value.to_bits().unwrap();
                         acc = acc.and(&bits);
                     }
                     let r = acc.not();
                     IrValue::from_bits(&r)
                 }
                 ir::NaryOp::Nor => {
-                    for operand in iter {
-                        let bits = env.get(operand).unwrap().to_bits().unwrap();
+                    for operand_value in iter {
+                        let bits = operand_value.to_bits().unwrap();
                         acc = acc.or(&bits);
                     }
                     let r = acc.not();
@@ -709,8 +925,8 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                     // Our `IrBits` is indexed with LSB at bit 0, so we build the output bits
                     // vector by appending operands in reverse order.
                     let mut out: Vec<bool> = Vec::new();
-                    for operand in operands.iter().rev() {
-                        let bits: IrBits = env.get(operand).unwrap().to_bits().unwrap();
+                    for operand_value in operand_values.iter().rev() {
+                        let bits: IrBits = operand_value.to_bits().unwrap();
                         for i in 0..bits.get_bit_count() {
                             out.push(bits.get_bit(i).unwrap());
                         }
@@ -721,39 +937,31 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
             }
         }
         ir::NodePayload::PrioritySel {
-            selector,
-            ref cases,
-            default,
+            ref cases, default, ..
         } => {
             // We require a default arm for PrioritySel to be well-defined.
-            let default_ref = default.expect("PrioritySel requires a default value");
-            let mut result: IrValue = env
-                .get(&default_ref)
-                .expect("default must be evaluated")
-                .clone();
+            default.expect("PrioritySel requires a default value");
+            let mut result: IrValue = operand_values[1 + cases.len()].clone();
 
-            let sel_bits: IrBits = env
-                .get(&selector)
-                .expect("PrioritySel selector must be evaluated")
+            let sel_bits: IrBits = operand_values[0]
                 .to_bits()
                 .expect("PrioritySel selector must be bits");
             let sel_w = sel_bits.get_bit_count();
 
             // Highest index has lowest priority; index 0 has highest priority.
-            for (idx, case_ref) in cases.iter().enumerate().rev() {
+            for (idx, _case_ref) in cases.iter().enumerate().rev() {
                 if idx < sel_w {
                     let bit_set = sel_bits.get_bit(idx).expect("selector bit in range");
                     if bit_set {
-                        let case_v: IrValue =
-                            env.get(case_ref).expect("case must be evaluated").clone();
+                        let case_v: IrValue = operand_values[1 + idx].clone();
                         result = case_v;
                     }
                 }
             }
             result
         }
-        ir::NodePayload::OneHot { arg, lsb_prio } => {
-            let arg_bits: IrBits = env.get(&arg).unwrap().to_bits().unwrap();
+        ir::NodePayload::OneHot { lsb_prio, .. } => {
+            let arg_bits: IrBits = operand_values[0].to_bits().unwrap();
             let w = arg_bits.get_bit_count();
             assert!(w > 0, "OneHot: width must be > 0");
             let mut prior_clear = true;
@@ -774,14 +982,10 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
             let out_bits = IrBits::from_lsb_is_0(&outs);
             IrValue::from_bits(&out_bits)
         }
-        ir::NodePayload::BitSliceUpdate {
-            arg,
-            start,
-            update_value,
-        } => {
-            let arg_bits: IrBits = env.get(&arg).unwrap().to_bits().unwrap();
-            let upd_bits: IrBits = env.get(&update_value).unwrap().to_bits().unwrap();
-            let start_bits: IrBits = env.get(&start).unwrap().to_bits().unwrap();
+        ir::NodePayload::BitSliceUpdate { .. } => {
+            let arg_bits: IrBits = operand_values[0].to_bits().unwrap();
+            let start_bits: IrBits = operand_values[1].to_bits().unwrap();
+            let upd_bits: IrBits = operand_values[2].to_bits().unwrap();
             IrValue::from_bits(&eval_bit_slice_update_bits(
                 &arg_bits,
                 &start_bits,
@@ -789,21 +993,19 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
             ))
         }
         ir::NodePayload::Sel {
-            selector,
-            ref cases,
-            default,
+            ref cases, default, ..
         } => {
             assert!(!cases.is_empty(), "Sel must have at least one case");
-            let sel_bits: IrBits = env.get(&selector).unwrap().to_bits().unwrap();
+            let sel_bits: IrBits = operand_values[0].to_bits().unwrap();
             let sel_w = sel_bits.get_bit_count();
             // Default result
-            let mut result: IrValue = if let Some(dref) = default {
-                env.get(&dref).unwrap().clone()
+            let mut result: IrValue = if default.is_some() {
+                operand_values[1 + cases.len()].clone()
             } else {
-                env.get(cases.last().unwrap()).unwrap().clone()
+                operand_values[cases.len()].clone()
             };
             // Iterate cases in reverse and select when selector == index.
-            for (i, case_ref) in cases.iter().enumerate().rev() {
+            for (i, _case_ref) in cases.iter().enumerate().rev() {
                 // Build index bits of selector width and compare.
                 let idx_bits = if sel_w == 0 {
                     IrBits::make_ubits(0, 0).unwrap()
@@ -811,29 +1013,24 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
                     IrBits::make_ubits(sel_w, i as u64).unwrap()
                 };
                 if sel_bits.equals(&idx_bits) {
-                    result = env.get(case_ref).unwrap().clone();
+                    result = operand_values[1 + i].clone();
                 }
             }
             result
         }
-        ir::NodePayload::OneHotSel {
-            selector,
-            ref cases,
-        } => {
+        ir::NodePayload::OneHotSel { ref cases, .. } => {
             assert!(!cases.is_empty(), "OneHotSel must have at least one case");
-            let sel_bits: IrBits = env.get(&selector).unwrap().to_bits().unwrap();
+            let sel_bits: IrBits = operand_values[0].to_bits().unwrap();
             let sel_w = sel_bits.get_bit_count();
             let mut acc = zero_ir_value_for_type(&n.ty);
-            for (i, case_ref) in cases.iter().enumerate() {
+            for (i, _case_ref) in cases.iter().enumerate() {
                 let bit_set = if i < sel_w {
                     sel_bits.get_bit(i).unwrap()
                 } else {
                     false
                 };
                 if bit_set {
-                    let case_value = env
-                        .get(case_ref)
-                        .expect("one_hot_sel case must be evaluated");
+                    let case_value = operand_values[1 + i];
                     acc = deep_or_ir_values_for_type(&n.ty, &acc, case_value);
                 }
             }
@@ -843,10 +1040,7 @@ fn eval_pure(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
     }
 }
 
-pub(crate) fn eval_pure_if_supported(
-    n: &ir::Node,
-    env: &HashMap<ir::NodeRef, IrValue>,
-) -> Option<IrValue> {
+pub(crate) fn eval_pure_if_supported(n: &ir::Node, operand_values: &[&IrValue]) -> Option<IrValue> {
     match n.payload {
         ir::NodePayload::Nil
         | ir::NodePayload::GetParam(_)
@@ -860,7 +1054,7 @@ pub(crate) fn eval_pure_if_supported(
         | ir::NodePayload::Invoke { .. }
         | ir::NodePayload::Cover { .. }
         | ir::NodePayload::CountedFor { .. } => None,
-        _ => Some(eval_pure(n, env)),
+        _ => Some(eval_pure(n, operand_values)),
     }
 }
 
@@ -1040,7 +1234,7 @@ fn observe_corner_like_node(
     f: &ir::Fn,
     nr: ir::NodeRef,
     node: &ir::Node,
-    env: &HashMap<ir::NodeRef, IrValue>,
+    env: &DenseEvalEnv,
     observer: &mut dyn EvalObserver,
 ) {
     match &node.payload {
@@ -1228,7 +1422,7 @@ fn observe_corner_like_node(
 fn observe_select_like_node(
     nr: ir::NodeRef,
     node: &ir::Node,
-    env: &HashMap<ir::NodeRef, IrValue>,
+    env: &DenseEvalEnv,
     observer: &mut dyn EvalObserver,
 ) {
     match &node.payload {
@@ -1365,11 +1559,11 @@ pub fn eval_fn_with_observer(
     observer: Option<&mut dyn EvalObserver>,
 ) -> FnEvalResult {
     let observer = observer.map(|o| o as *mut (dyn EvalObserver + '_));
-    eval_fn_impl(None, f, args, observer)
+    eval_fn_impl(None, f, args, observer, EvalOrderPolicy::Checked)
 }
 
 pub fn eval_fn_in_package(pkg: &ir::Package, f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
-    eval_fn_impl(Some(pkg), f, args, None)
+    eval_fn_impl(Some(pkg), f, args, None, EvalOrderPolicy::Checked)
 }
 
 pub fn eval_fn_in_package_with_observer(
@@ -1379,7 +1573,23 @@ pub fn eval_fn_in_package_with_observer(
     observer: Option<&mut dyn EvalObserver>,
 ) -> FnEvalResult {
     let observer = observer.map(|o| o as *mut (dyn EvalObserver + '_));
-    eval_fn_impl(Some(pkg), f, args, observer)
+    eval_fn_impl(Some(pkg), f, args, observer, EvalOrderPolicy::Checked)
+}
+
+/// Evaluates a function whose node vector is already in dependency-before-user
+/// order.
+///
+/// This skips the per-call node-order check used by `eval_fn`. It will panic on
+/// def-after-use functions; callers should only use it after a successful
+/// `compact_and_toposort_in_place` or equivalent normalization.
+pub fn eval_fn_assuming_node_index_topological(f: &ir::Fn, args: &[IrValue]) -> FnEvalResult {
+    eval_fn_impl(
+        None,
+        f,
+        args,
+        None,
+        EvalOrderPolicy::AssumeNodeIndexTopological,
+    )
 }
 
 fn eval_fn_impl<'a>(
@@ -1387,6 +1597,7 @@ fn eval_fn_impl<'a>(
     f: &ir::Fn,
     args: &[IrValue],
     observer: Option<*mut (dyn EvalObserver + 'a)>,
+    order_policy: EvalOrderPolicy,
 ) -> FnEvalResult {
     debug_assert!(
         f.check_pir_layout_invariants().is_ok(),
@@ -1399,17 +1610,21 @@ fn eval_fn_impl<'a>(
         "argument count must match params"
     );
 
-    // Map ParamId -> argument value.
-    let mut param_map: HashMap<ir::ParamId, IrValue> = HashMap::new();
+    // Map sparse textual ParamId values to dense argument indices. ParamIds come
+    // from IR text `id=` attributes, so they are not guaranteed to be small or
+    // contiguous even though PIR parameter NodeRefs are dense.
+    let mut param_index_by_id: HashMap<ir::ParamId, usize> = HashMap::with_capacity(f.params.len());
     for (i, p) in f.params.iter().enumerate() {
-        // ParamIds start at 1, but we map by the ParamId key directly.
-        param_map.insert(p.id, args[i].clone());
+        assert!(
+            param_index_by_id.insert(p.id, i).is_none(),
+            "duplicate ParamId in function params"
+        );
     }
 
-    let mut env: HashMap<ir::NodeRef, IrValue> = HashMap::with_capacity(f.nodes.len());
+    let mut env = DenseEvalEnv::new(f.nodes.len());
     let mut trace_messages: Vec<TraceMessage> = Vec::new();
     let mut assertion_failures: Vec<AssertionFailure> = Vec::new();
-    for nr in get_topological(f) {
+    for nr in eval_order(f, order_policy) {
         let node = f.get_node(nr);
         let value: IrValue = match &node.payload {
             P::Nil => {
@@ -1418,7 +1633,8 @@ fn eval_fn_impl<'a>(
             }
             P::GetParam(param_id) => {
                 // Must exist by construction.
-                param_map.get(param_id).expect("param not found").clone()
+                let arg_index = *param_index_by_id.get(param_id).expect("param not found");
+                args[arg_index].clone()
             }
             P::Assert {
                 token,
@@ -1526,7 +1742,8 @@ fn eval_fn_impl<'a>(
                     })
                     .collect();
 
-                let callee_result = eval_fn_impl(Some(pkg), callee, &callee_args, observer);
+                let callee_result =
+                    eval_fn_impl(Some(pkg), callee, &callee_args, observer, order_policy);
                 match callee_result {
                     FnEvalResult::Success(success) => {
                         trace_messages.extend(success.trace_messages);
@@ -1819,7 +2036,7 @@ fn eval_fn_impl<'a>(
                         observe_corner_like_node(f, nr, node, &env, &mut *observer);
                     }
                 }
-                eval_pure(node, &env)
+                eval_pure_from_env(node, &env)
             }
         };
         // Coerce only for specific nodes where a wider internal computation is
@@ -1913,6 +2130,16 @@ mod tests {
     use super::*;
     use crate::ir_parser::Parser;
     use maplit::hashmap;
+    use std::collections::HashMap;
+
+    fn eval_pure_with_env(n: &ir::Node, env: &HashMap<ir::NodeRef, IrValue>) -> IrValue {
+        let deps = operands(&n.payload);
+        let operand_values: Vec<&IrValue> = deps
+            .iter()
+            .map(|nr| env.get(nr).expect("test env must contain operand"))
+            .collect();
+        eval_pure(n, &operand_values)
+    }
 
     struct RecordingObserver {
         events: Vec<SelectEvent>,
@@ -2061,6 +2288,89 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
         )
     }
 
+    #[test]
+    fn eval_fn_uses_sparse_param_ids() {
+        let max_param_id = usize::MAX;
+        let ir_text = format!(
+            r#"package test
+
+fn f(x: bits[8] id={max_param_id}) -> bits[8] {{
+  ret identity.1: bits[8] = identity(x, id=1)
+}}
+"#
+        );
+        let mut parser = Parser::new(&ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap();
+        let args = vec![IrValue::make_ubits(8, 0xab).unwrap()];
+        let got = eval_fn_in_package(&pkg, f, &args);
+        match got {
+            FnEvalResult::Success(success) => {
+                assert_eq!(success.value, args[0]);
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn eval_fn_falls_back_to_topological_sort_for_def_after_use_nodes() {
+        let bits8 = ir::Type::Bits(8);
+        let param_id = ir::ParamId::new(1);
+        let f = ir::Fn {
+            name: "f".to_string(),
+            params: vec![ir::Param {
+                name: "x".to_string(),
+                ty: bits8.clone(),
+                id: param_id,
+            }],
+            ret_ty: bits8.clone(),
+            nodes: vec![
+                ir::Node {
+                    text_id: 0,
+                    name: Some("reserved_zero_node".to_string()),
+                    ty: ir::Type::nil(),
+                    payload: ir::NodePayload::Nil,
+                    pos: None,
+                },
+                ir::Node {
+                    text_id: 1,
+                    name: Some("x".to_string()),
+                    ty: bits8.clone(),
+                    payload: ir::NodePayload::GetParam(param_id),
+                    pos: None,
+                },
+                ir::Node {
+                    text_id: 3,
+                    name: Some("sum".to_string()),
+                    ty: bits8.clone(),
+                    payload: ir::NodePayload::Binop(
+                        ir::Binop::Add,
+                        ir::NodeRef { index: 1 },
+                        ir::NodeRef { index: 3 },
+                    ),
+                    pos: None,
+                },
+                ir::Node {
+                    text_id: 2,
+                    name: Some("seven".to_string()),
+                    ty: bits8,
+                    payload: ir::NodePayload::Literal(IrValue::make_ubits(8, 7).unwrap()),
+                    pos: None,
+                },
+            ],
+            ret_node_ref: Some(ir::NodeRef { index: 2 }),
+            outer_attrs: Vec::new(),
+            inner_attrs: Vec::new(),
+        };
+
+        assert!(!is_node_index_topological(&f));
+        let got = match eval_fn(&f, &[IrValue::make_ubits(8, 5).unwrap()]) {
+            FnEvalResult::Success(success) => success.value,
+            other => panic!("expected success, got {:?}", other),
+        };
+        assert_eq!(got, IrValue::make_ubits(8, 12).unwrap());
+    }
+
     fn divmod_cases_for_width(width: usize) -> Vec<Vec<IrValue>> {
         if width <= 6 {
             let value_count = 1usize << width;
@@ -2168,7 +2478,7 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             payload: ir::NodePayload::Literal(ir_value.clone()),
             pos: None,
         };
-        let v: IrValue = eval_pure(&n, &env);
+        let v: IrValue = eval_pure_with_env(&n, &env);
         assert_eq!(v, ir_value);
     }
 
@@ -2189,7 +2499,7 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             ),
             pos: None,
         };
-        let v: IrValue = eval_pure(&n, &env);
+        let v: IrValue = eval_pure_with_env(&n, &env);
         assert_eq!(v, IrValue::make_ubits(32, 3).unwrap());
     }
 
@@ -2205,7 +2515,7 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             payload: ir::NodePayload::Unop(ir::Unop::Not, ir::NodeRef { index: 1 }),
             pos: None,
         };
-        let v: IrValue = eval_pure(&n, &env);
+        let v: IrValue = eval_pure_with_env(&n, &env);
         assert_eq!(v, IrValue::make_ubits(4, 0b1010).unwrap());
     }
 
@@ -2221,7 +2531,7 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             payload: ir::NodePayload::Unop(ir::Unop::Reverse, ir::NodeRef { index: 1 }),
             pos: None,
         };
-        let v: IrValue = eval_pure(&n, &env);
+        let v: IrValue = eval_pure_with_env(&n, &env);
         assert_eq!(v, IrValue::make_ubits(4, 0b1010).unwrap());
     }
 
@@ -2244,7 +2554,7 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             ),
             pos: None,
         };
-        let v: IrValue = eval_pure(&n, &env);
+        let v: IrValue = eval_pure_with_env(&n, &env);
         assert_eq!(v, IrValue::make_ubits(72, 0x12).unwrap());
     }
 
@@ -2267,7 +2577,7 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             ),
             pos: None,
         };
-        let v: IrValue = eval_pure(&n, &env);
+        let v: IrValue = eval_pure_with_env(&n, &env);
         assert_eq!(v, IrValue::make_ubits(72, 0).unwrap());
     }
 
@@ -2290,7 +2600,7 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             ),
             pos: None,
         };
-        let v: IrValue = eval_pure(&n, &env);
+        let v: IrValue = eval_pure_with_env(&n, &env);
         assert_eq!(v, IrValue::all_ones_bits(72));
     }
 
@@ -2313,7 +2623,7 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             ),
             pos: None,
         };
-        let v: IrValue = eval_pure(&n, &env);
+        let v: IrValue = eval_pure_with_env(&n, &env);
         assert_eq!(v, IrValue::signed_max_bits(72));
     }
 
@@ -2336,7 +2646,7 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             ),
             pos: None,
         };
-        let v: IrValue = eval_pure(&n, &env);
+        let v: IrValue = eval_pure_with_env(&n, &env);
         assert_eq!(v, IrValue::signed_min_bits(72));
     }
 
@@ -2359,7 +2669,7 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             ),
             pos: None,
         };
-        let v: IrValue = eval_pure(&n, &env);
+        let v: IrValue = eval_pure_with_env(&n, &env);
         assert_eq!(v, IrValue::make_sbits(72, -2).unwrap());
     }
 
@@ -2388,7 +2698,7 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             ),
             pos: None,
         };
-        let v: IrValue = eval_pure(&n, &env);
+        let v: IrValue = eval_pure_with_env(&n, &env);
         assert_eq!(v, IrValue::bool(true));
     }
 
@@ -2417,7 +2727,7 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             ),
             pos: None,
         };
-        let v: IrValue = eval_pure(&n, &env);
+        let v: IrValue = eval_pure_with_env(&n, &env);
         assert_eq!(v, IrValue::bool(true));
     }
 
@@ -2440,7 +2750,7 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             ]),
             pos: None,
         };
-        let v: IrValue = eval_pure(&n, &env);
+        let v: IrValue = eval_pure_with_env(&n, &env);
         assert_eq!(
             v,
             IrValue::make_tuple(&[
@@ -2473,7 +2783,7 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             },
             pos: None,
         };
-        let v: IrValue = eval_pure(&n, &env);
+        let v: IrValue = eval_pure_with_env(&n, &env);
         assert_eq!(v, IrValue::make_ubits(8, 1).unwrap());
     }
 
@@ -2493,7 +2803,7 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             },
             pos: None,
         };
-        let v: IrValue = eval_pure(&n, &env);
+        let v: IrValue = eval_pure_with_env(&n, &env);
         assert_eq!(v, IrValue::make_ubits(4, 0b1111).unwrap());
     }
 
@@ -2514,7 +2824,7 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             },
             pos: None,
         };
-        let v: IrValue = eval_pure(&n, &env);
+        let v: IrValue = eval_pure_with_env(&n, &env);
         assert_eq!(v, IrValue::make_ubits(4, 0b1111).unwrap());
     }
 
@@ -2534,7 +2844,7 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             ),
             pos: None,
         };
-        let v: IrValue = eval_pure(&n, &env);
+        let v: IrValue = eval_pure_with_env(&n, &env);
         assert_eq!(v, IrValue::make_ubits(4, 0b1111).unwrap());
     }
 
@@ -2555,7 +2865,7 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             ),
             pos: None,
         };
-        let v: IrValue = eval_pure(&n, &env);
+        let v: IrValue = eval_pure_with_env(&n, &env);
         assert_eq!(v, IrValue::make_ubits(4, 0b1001).unwrap());
     }
 
@@ -2579,7 +2889,7 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             },
             pos: None,
         };
-        let v: IrValue = eval_pure(&n, &env);
+        let v: IrValue = eval_pure_with_env(&n, &env);
         assert_eq!(v, IrValue::make_ubits(8, 3).unwrap());
     }
 
@@ -2599,7 +2909,7 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             },
             pos: None,
         };
-        let v: IrValue = eval_pure(&n, &env);
+        let v: IrValue = eval_pure_with_env(&n, &env);
         assert_eq!(v, IrValue::make_ubits(4, 0b0010).unwrap());
     }
 
@@ -2622,7 +2932,7 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             },
             pos: None,
         };
-        let v: IrValue = eval_pure(&n, &env);
+        let v: IrValue = eval_pure_with_env(&n, &env);
         assert_eq!(v, IrValue::make_ubits(4, 0b0110).unwrap());
     }
 
@@ -2641,7 +2951,7 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             pos: None,
         };
         assert_eq!(
-            eval_pure(&n_ze, &env_ze),
+            eval_pure_with_env(&n_ze, &env_ze),
             IrValue::make_ubits(4, 0b0011).unwrap()
         );
 
@@ -2658,7 +2968,7 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             pos: None,
         };
         assert_eq!(
-            eval_pure(&n_se, &env_se),
+            eval_pure_with_env(&n_se, &env_se),
             IrValue::make_ubits(4, 0b1110).unwrap()
         );
     }
@@ -2683,7 +2993,10 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             },
             pos: None,
         };
-        assert_eq!(eval_pure(&n, &env), IrValue::make_ubits(8, 5).unwrap());
+        assert_eq!(
+            eval_pure_with_env(&n, &env),
+            IrValue::make_ubits(8, 5).unwrap()
+        );
     }
 
     #[test]
@@ -2709,7 +3022,10 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             },
             pos: None,
         };
-        assert_eq!(eval_pure(&n, &env), IrValue::make_ubits(8, 0x05).unwrap());
+        assert_eq!(
+            eval_pure_with_env(&n, &env),
+            IrValue::make_ubits(8, 0x05).unwrap()
+        );
 
         // Multiple bits set (0b101) => OR of case0 | case2 => 0x03 | 0x0A = 0x0B
         let env2 = hashmap!(
@@ -2718,7 +3034,10 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             ir::NodeRef { index: 2 } => IrValue::make_ubits(8, 0x05).unwrap(),
             ir::NodeRef { index: 3 } => IrValue::make_ubits(8, 0x0A).unwrap(),
         );
-        assert_eq!(eval_pure(&n, &env2), IrValue::make_ubits(8, 0x0B).unwrap());
+        assert_eq!(
+            eval_pure_with_env(&n, &env2),
+            IrValue::make_ubits(8, 0x0B).unwrap()
+        );
     }
 
     #[test]
@@ -2752,7 +3071,7 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
             IrValue::make_ubits(4, 0x5).unwrap(),
             IrValue::make_ubits(4, 0xA).unwrap(),
         ]);
-        assert_eq!(eval_pure(&n, &env), expected);
+        assert_eq!(eval_pure_with_env(&n, &env), expected);
     }
 
     #[test]
@@ -3225,7 +3544,7 @@ fn f(a: bits[5][4] id=1, v: bits[5] id=2, i: bits[80] id=3) -> bits[5][4] {
             },
             pos: None,
         };
-        let _ = eval_pure(&n, &env);
+        let _ = eval_pure_with_env(&n, &env);
     }
 
     #[test]
@@ -3246,7 +3565,7 @@ fn f(a: bits[5][4] id=1, v: bits[5] id=2, i: bits[80] id=3) -> bits[5][4] {
             },
             pos: None,
         };
-        let got = eval_pure(&n, &env);
+        let got = eval_pure_with_env(&n, &env);
         assert_eq!(got, IrValue::make_ubits(1, 0).unwrap());
     }
 
@@ -3624,7 +3943,7 @@ fn f(x: bits[3] id=1) -> bits[1] {
             },
             pos: None,
         };
-        let v: IrValue = eval_pure(&n, &env);
+        let v: IrValue = eval_pure_with_env(&n, &env);
         assert_eq!(v, new_arr);
     }
 
@@ -3654,7 +3973,7 @@ fn f(x: bits[3] id=1) -> bits[1] {
             },
             pos: None,
         };
-        let v: IrValue = eval_pure(&n, &env);
+        let v: IrValue = eval_pure_with_env(&n, &env);
         let expected = IrValue::make_array(&[
             IrValue::make_ubits(8, 0).unwrap(),
             IrValue::make_ubits(8, 99).unwrap(),
@@ -3696,7 +4015,7 @@ fn f(x: bits[3] id=1) -> bits[1] {
             },
             pos: None,
         };
-        let v: IrValue = eval_pure(&n, &env);
+        let v: IrValue = eval_pure_with_env(&n, &env);
         let expected = IrValue::make_array(&[
             IrValue::make_array(&[
                 IrValue::make_ubits(8, 0).unwrap(),

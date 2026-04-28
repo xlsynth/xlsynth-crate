@@ -51,7 +51,7 @@ use xlsynth_pir::ir::Package as PirPackage;
 use xlsynth_pir::ir::PackageMember as PirPackageMember;
 use xlsynth_pir::ir::Param as PirParam;
 use xlsynth_pir::ir::Type as PirType;
-use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
+use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_assuming_node_index_topological};
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_utils::compact_and_toposort_in_place;
 use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;
@@ -1444,7 +1444,13 @@ fn eval_fn_safe(f: &IrFn, args: &[IrValue]) -> Result<IrValue, ()> {
     // invariants; rewiring transforms may temporarily violate those (cycles,
     // missing package context for invoke, etc.). We treat any such failure as a
     // rejection signal for the candidate, not a crash.
-    let result = catch_unwind(AssertUnwindSafe(|| eval_fn(f, args)));
+    //
+    // The MCMC state is compacted/toposorted at initialization and after each
+    // successful candidate application, so the oracle can skip the evaluator's
+    // per-call node-order check.
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        eval_fn_assuming_node_index_topological(f, args)
+    }));
     match result {
         Ok(FnEvalResult::Success(s)) => Ok(s.value),
         Ok(FnEvalResult::Failure(_f)) => Err(()),
@@ -1854,7 +1860,7 @@ pub fn run_pir_mcmc(start_fn: IrFn, options: RunOptions) -> Result<PirMcmcResult
 }
 
 pub fn run_pir_mcmc_with_shared_best(
-    start_fn: IrFn,
+    mut start_fn: IrFn,
     options: RunOptions,
     shared_best: Option<Arc<Best>>,
     checkpoint_tx: Option<Sender<CheckpointMsg>>,
@@ -1873,6 +1879,8 @@ pub fn run_pir_mcmc_with_shared_best(
             max_area: options.max_allowed_area,
         },
     )?;
+    compact_and_toposort_in_place(&mut start_fn)
+        .map_err(|e| anyhow::anyhow!("compact_and_toposort_in_place failed: {}", e))?;
 
     let prepared_toggle_stimulus = if options.objective.needs_toggle_stimulus() {
         let samples = options.toggle_stimulus.as_ref().ok_or_else(|| {
