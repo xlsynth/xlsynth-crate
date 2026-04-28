@@ -1,0 +1,7 @@
+package sample
+
+top fn f(x: bits[8] id=1, i: bits[3] id=2) -> bits[4] {
+  static_slice: bits[2] = bit_slice(x, start=2, width=2, id=3)
+  dynamic_slice: bits[2] = dynamic_bit_slice(x, i, width=2, id=4)
+  ret out: bits[4] = concat(static_slice, dynamic_slice, id=5)
+}

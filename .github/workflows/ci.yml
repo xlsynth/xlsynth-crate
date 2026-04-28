@@ -504,6 +504,12 @@ jobs:
         run: cargo build --features with-z3-system,with-bitwuzla-system --workspace -vv
 
       - name: Test crate
+        env:
+          # This job links many large xlsynth-g8r integration-test binaries
+          # against libxls/z3/bitwuzla. On GitHub's ubuntu:20.04 container this
+          # can exhaust linker resources and crash ld with SIGBUS when Cargo
+          # links several test binaries at once.
+          CARGO_BUILD_JOBS: 1
         run: |
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
           cargo test --features with-z3-system,with-bitwuzla-system --workspace

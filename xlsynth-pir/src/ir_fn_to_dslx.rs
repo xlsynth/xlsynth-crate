@@ -648,7 +648,13 @@ fn lower_node_payload(
         }
         NodePayload::BitSlice { arg, start, width } => {
             let arg_name = node_name(node_names, *arg)?;
-            Ok(format!("{}[{}+:uN[{}]]", arg_name, start, width))
+            let limit = start.checked_add(*width).ok_or_else(|| {
+                IrFnToDslxError::UnsupportedNode(format!(
+                    "bit_slice start {} plus width {} overflows usize",
+                    start, width
+                ))
+            })?;
+            Ok(format!("{}[{}:{}]", arg_name, start, limit))
         }
         NodePayload::DynamicBitSlice { arg, start, width } => {
             let arg_name = node_name(node_names, *arg)?;
@@ -1083,6 +1089,25 @@ top fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
         assert!(result.dslx_text.contains("fn f("));
         assert!(result.dslx_text.contains("let add_3"));
         assert!(result.dslx_text.contains("x + y"));
+    }
+
+    #[test]
+    fn test_static_bit_slice_overflow_is_reported() {
+        let ir_text = format!(
+            r#"package sample
+
+top fn f(x: bits[8] id=1) -> bits[1] {{
+  x: bits[8] = param(name=x, id=1)
+  ret slice: bits[1] = bit_slice(x, start={}, width=1, id=2)
+}}
+"#,
+            usize::MAX
+        );
+        let err = convert_ir_package_fn_to_dslx(&ir_text, None).unwrap_err();
+        assert!(
+            matches!(&err, IrFnToDslxError::UnsupportedNode(msg) if msg.contains("overflows usize")),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
