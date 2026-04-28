@@ -7,7 +7,8 @@ use crate::ir::{self, MemberType, NodePayload, NodeRef, Type};
 use crate::ir_deduce;
 use crate::ir_query;
 use crate::ir_utils;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use crate::ir_utils::Users;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::str::FromStr;
 use xlsynth::IrValue;
@@ -743,7 +744,7 @@ fn is_rewriteable_root(f: &ir::Fn, node_ref: NodeRef, ret_reachable: &[bool]) ->
 fn unique_bindings_at_root(
     query: &ir_query::QueryExpr,
     f: &ir::Fn,
-    users: &HashMap<NodeRef, HashSet<NodeRef>>,
+    users: &Users,
     node_ref: NodeRef,
 ) -> Result<Option<ir_query::QueryBindings>, MatchRewriteRuleApplyError> {
     let raw_bindings = ir_query::find_root_query_bindings(query, f, users, node_ref);

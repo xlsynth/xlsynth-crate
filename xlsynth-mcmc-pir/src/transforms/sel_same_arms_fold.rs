@@ -32,8 +32,7 @@ impl SelSameArmsFoldTransform {
         }
     }
 
-    fn compute_fanout_cone(f: &IrFn, root: NodeRef) -> HashSet<NodeRef> {
-        let users_map = compute_users(f);
+    fn compute_fanout_cone(users_map: &Users, root: NodeRef) -> HashSet<NodeRef> {
         let mut visited: HashSet<NodeRef> = HashSet::new();
         let mut work: VecDeque<NodeRef> = VecDeque::new();
         visited.insert(root);
@@ -59,6 +58,7 @@ impl PirTransform for SelSameArmsFoldTransform {
     fn find_candidates(&mut self, f: &IrFn) -> Vec<TransformCandidate> {
         let always_equivalent = true;
         let mut out = Vec::<TransformCandidate>::new();
+        let users_map = compute_users(f);
 
         for nr in f.node_refs() {
             let node = f.get_node(nr);
@@ -98,7 +98,7 @@ impl PirTransform for SelSameArmsFoldTransform {
                         continue;
                     };
 
-                    let fanout_cone = Self::compute_fanout_cone(f, nr);
+                    let fanout_cone = Self::compute_fanout_cone(&users_map, nr);
                     let mut chosen_p: Option<NodeRef> = None;
                     for cand in f.node_refs() {
                         if cand == nr {
@@ -178,7 +178,8 @@ impl PirTransform for SelSameArmsFoldTransform {
                     return Err("SelSameArmsFoldTransform: only supports bits[w] nodes".to_string());
                 };
 
-                let fanout_cone = Self::compute_fanout_cone(f, target_ref);
+                let users_map = compute_users(f);
+                let fanout_cone = Self::compute_fanout_cone(&users_map, target_ref);
                 let mut chosen_p: Option<NodeRef> = None;
                 for cand in f.node_refs() {
                     if cand == target_ref {

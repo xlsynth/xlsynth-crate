@@ -11,7 +11,7 @@ use xlsynth::{IrBits, IrValue};
 #[allow(unused_imports)]
 use xlsynth_pir::ir::{Binop, Fn as IrFn, NaryOp, Node, NodePayload, NodeRef, Type, Unop};
 #[allow(unused_imports)]
-use xlsynth_pir::ir_utils::{compute_users, remap_payload_with};
+use xlsynth_pir::ir_utils::{Users, compute_users, remap_payload_with};
 
 mod add_fission;
 mod add_sign_ext_u1_to_sub_zero_ext_u1;
