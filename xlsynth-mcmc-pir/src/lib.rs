@@ -49,6 +49,7 @@ use xlsynth_pir::ir::FileTable as PirFileTable;
 use xlsynth_pir::ir::Fn as IrFn;
 use xlsynth_pir::ir::Package as PirPackage;
 use xlsynth_pir::ir::PackageMember as PirPackageMember;
+use xlsynth_pir::ir::Param as PirParam;
 use xlsynth_pir::ir::Type as PirType;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
 use xlsynth_pir::ir_parser;
@@ -1329,83 +1330,111 @@ pub fn mcmc_iteration(
     }
 }
 
-fn make_all_zeros_value(ty: &PirType) -> IrValue {
+fn make_all_zeros_value(ty: &PirType) -> Result<IrValue> {
     match ty {
-        PirType::Token => IrValue::make_token(),
+        PirType::Token => Ok(IrValue::make_token()),
         PirType::Bits(width) => {
             if *width == 0 {
-                IrValue::from_bits(&IrBits::make_ubits(0, 0).unwrap())
+                Ok(IrValue::from_bits(&IrBits::make_ubits(0, 0).unwrap()))
             } else {
-                IrValue::from_bits(&IrBits::make_ubits(*width, 0).unwrap())
+                Ok(IrValue::from_bits(&IrBits::make_ubits(*width, 0).unwrap()))
             }
         }
         PirType::Tuple(elem_types) => {
-            let elems: Vec<IrValue> = elem_types.iter().map(|t| make_all_zeros_value(t)).collect();
-            IrValue::make_tuple(&elems)
+            let elems: Result<Vec<IrValue>> =
+                elem_types.iter().map(|t| make_all_zeros_value(t)).collect();
+            Ok(IrValue::make_tuple(&elems?))
         }
         PirType::Array(arr) => {
+            if arr.element_count == 0 {
+                return Err(anyhow::anyhow!(
+                    "cannot construct all-zeros oracle sample for zero-length array type {}",
+                    ty
+                ));
+            }
             let mut elems: Vec<IrValue> = Vec::with_capacity(arr.element_count);
             for _ in 0..arr.element_count {
-                elems.push(make_all_zeros_value(&arr.element_type));
+                elems.push(make_all_zeros_value(&arr.element_type)?);
             }
-            IrValue::make_array(&elems).expect("array elements must be same-typed")
+            IrValue::make_array(&elems).map_err(|e| {
+                anyhow::anyhow!("failed to construct all-zeros array oracle sample: {}", e)
+            })
         }
     }
 }
 
-fn make_all_ones_value(ty: &PirType) -> IrValue {
+fn make_all_ones_value(ty: &PirType) -> Result<IrValue> {
     match ty {
-        PirType::Token => IrValue::make_token(),
+        PirType::Token => Ok(IrValue::make_token()),
         PirType::Bits(width) => {
             if *width == 0 {
-                IrValue::from_bits(&IrBits::make_ubits(0, 0).unwrap())
+                Ok(IrValue::from_bits(&IrBits::make_ubits(0, 0).unwrap()))
             } else if *width <= 64 {
                 let mask = if *width == 64 {
                     u64::MAX
                 } else {
                     (1u64 << *width) - 1
                 };
-                IrValue::from_bits(&IrBits::make_ubits(*width, mask).unwrap())
+                Ok(IrValue::from_bits(
+                    &IrBits::make_ubits(*width, mask).unwrap(),
+                ))
             } else {
-                // Build bits by parsing a typed value string via IrBits helper.
+                // Build the bit vector directly to avoid fixed-width integer limits.
                 let ones: Vec<bool> = vec![true; *width];
-                IrValue::from_bits(&IrBits::from_lsb_is_0(&ones))
+                Ok(IrValue::from_bits(&IrBits::from_lsb_is_0(&ones)))
             }
         }
         PirType::Tuple(elem_types) => {
-            let elems: Vec<IrValue> = elem_types.iter().map(|t| make_all_ones_value(t)).collect();
-            IrValue::make_tuple(&elems)
+            let elems: Result<Vec<IrValue>> =
+                elem_types.iter().map(|t| make_all_ones_value(t)).collect();
+            Ok(IrValue::make_tuple(&elems?))
         }
         PirType::Array(arr) => {
+            if arr.element_count == 0 {
+                return Err(anyhow::anyhow!(
+                    "cannot construct all-ones oracle sample for zero-length array type {}",
+                    ty
+                ));
+            }
             let mut elems: Vec<IrValue> = Vec::with_capacity(arr.element_count);
             for _ in 0..arr.element_count {
-                elems.push(make_all_ones_value(&arr.element_type));
+                elems.push(make_all_ones_value(&arr.element_type)?);
             }
-            IrValue::make_array(&elems).expect("array elements must be same-typed")
+            IrValue::make_array(&elems).map_err(|e| {
+                anyhow::anyhow!("failed to construct all-ones array oracle sample: {}", e)
+            })
         }
     }
 }
 
-fn arbitrary_value_for_type<R: Rng>(rng: &mut R, ty: &PirType) -> IrValue {
+fn arbitrary_value_for_type<R: Rng>(rng: &mut R, ty: &PirType) -> Result<IrValue> {
     match ty {
-        PirType::Token => IrValue::make_token(),
+        PirType::Token => Ok(IrValue::make_token()),
         PirType::Bits(width) => {
             let bits = arbitrary_irbits(rng, *width);
-            IrValue::from_bits(&bits)
+            Ok(IrValue::from_bits(&bits))
         }
         PirType::Tuple(elem_types) => {
-            let elems: Vec<IrValue> = elem_types
+            let elems: Result<Vec<IrValue>> = elem_types
                 .iter()
                 .map(|t| arbitrary_value_for_type(rng, t))
                 .collect();
-            IrValue::make_tuple(&elems)
+            Ok(IrValue::make_tuple(&elems?))
         }
         PirType::Array(arr) => {
+            if arr.element_count == 0 {
+                return Err(anyhow::anyhow!(
+                    "cannot construct random oracle sample for zero-length array type {}",
+                    ty
+                ));
+            }
             let mut elems: Vec<IrValue> = Vec::with_capacity(arr.element_count);
             for _ in 0..arr.element_count {
-                elems.push(arbitrary_value_for_type(rng, &arr.element_type));
+                elems.push(arbitrary_value_for_type(rng, &arr.element_type)?);
             }
-            IrValue::make_array(&elems).expect("array elements must be same-typed")
+            IrValue::make_array(&elems).map_err(|e| {
+                anyhow::anyhow!("failed to construct random array oracle sample: {}", e)
+            })
         }
     }
 }
@@ -1420,6 +1449,23 @@ fn eval_fn_safe(f: &IrFn, args: &[IrValue]) -> Result<IrValue, ()> {
         Ok(FnEvalResult::Success(s)) => Ok(s.value),
         Ok(FnEvalResult::Failure(_f)) => Err(()),
         Err(_panic) => Err(()),
+    }
+}
+
+fn make_oracle_args<F>(params: &[PirParam], label: &str, mut make_value: F) -> Option<Vec<IrValue>>
+where
+    F: FnMut(&PirType) -> Result<IrValue>,
+{
+    match params.iter().map(|p| make_value(&p.ty)).collect() {
+        Ok(args) => Some(args),
+        Err(e) => {
+            log::debug!(
+                "[pir-mcmc] failed to construct {} oracle sample args: {}; rejecting candidate",
+                label,
+                e
+            );
+            None
+        }
     }
 }
 
@@ -1440,16 +1486,14 @@ fn pir_equiv_oracle<R: Rng>(
     }
 
     // Deterministic corner cases first: all-zeros and all-ones.
-    let zeros_args: Vec<IrValue> = lhs
-        .params
-        .iter()
-        .map(|p| make_all_zeros_value(&p.ty))
-        .collect();
-    let ones_args: Vec<IrValue> = lhs
-        .params
-        .iter()
-        .map(|p| make_all_ones_value(&p.ty))
-        .collect();
+    let zeros_args = match make_oracle_args(&lhs.params, "all-zeros", make_all_zeros_value) {
+        Some(args) => args,
+        None => return false,
+    };
+    let ones_args = match make_oracle_args(&lhs.params, "all-ones", make_all_ones_value) {
+        Some(args) => args,
+        None => return false,
+    };
     for args in [&zeros_args, &ones_args] {
         let l = eval_fn_safe(lhs, args);
         let r = eval_fn_safe(rhs, args);
@@ -1465,11 +1509,12 @@ fn pir_equiv_oracle<R: Rng>(
 
     // Randomized sampling.
     for _ in 0..random_samples {
-        let args: Vec<IrValue> = lhs
-            .params
-            .iter()
-            .map(|p| arbitrary_value_for_type(rng, &p.ty))
-            .collect();
+        let args = match make_oracle_args(&lhs.params, "random", |ty| {
+            arbitrary_value_for_type(rng, ty)
+        }) {
+            Some(args) => args,
+            None => return false,
+        };
         let l = eval_fn_safe(lhs, &args);
         let r = eval_fn_safe(rhs, &args);
         match (l, r) {
@@ -2006,6 +2051,27 @@ mod tests {
             4,
             /* enable_formal_oracle= */ false,
         ));
+    }
+
+    #[test]
+    fn pir_equiv_oracle_rejects_zero_length_array_params_without_panic() {
+        let ir_text = r#"fn zero_len(a: bits[8][0] id=10) -> bits[1] {
+  ret literal.20: bits[1] = literal(value=0, id=20)
+}"#;
+        let mut parser1 = ir_parser::Parser::new(ir_text);
+        let lhs = parser1.parse_fn().unwrap();
+        let mut parser2 = ir_parser::Parser::new(ir_text);
+        let rhs = parser2.parse_fn().unwrap();
+
+        let mut rng = Pcg64Mcg::seed_from_u64(1);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pir_equiv_oracle(
+                &lhs, &rhs, &mut rng, 4, /* enable_formal_oracle= */ false,
+            )
+        }));
+
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
     }
 
     #[test]
