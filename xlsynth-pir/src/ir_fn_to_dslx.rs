@@ -648,7 +648,7 @@ fn lower_node_payload(
         }
         NodePayload::BitSlice { arg, start, width } => {
             let arg_name = node_name(node_names, *arg)?;
-            Ok(format!("{}[{}+:uN[{}]]", arg_name, start, width))
+            Ok(format!("{}[{}:{}]", arg_name, start, start + width))
         }
         NodePayload::DynamicBitSlice { arg, start, width } => {
             let arg_name = node_name(node_names, *arg)?;

@@ -49,6 +49,11 @@ For temporary files or directories in tests, prefer `tempfile` (or an existing
 workspace helper built on it) over ad hoc paths under `std::env::temp_dir()`.
 This avoids parallel-test collisions and makes cleanup automatic.
 
+When testing deterministic text output, prefer golden-file tests over substring
+or `contains`-oriented assertions. Golden files make intentional output changes
+reviewable and catch unexpected changes in surrounding structure, ordering, and
+formatting that substring checks often miss.
+
 When working on serialization / deserialization or other roundtrip-heavy code
 paths, prefer using the shared identity/signature corpus in
 `xlsynth-g8r/src/test_utils.rs` (`interesting_ir_roundtrip_cases()`) instead of
