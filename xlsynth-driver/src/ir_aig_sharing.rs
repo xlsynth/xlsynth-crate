@@ -11,9 +11,10 @@ use xlsynth_g8r::gate_builder::GateBuilderOptions;
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::ir_aig_sharing::{
-    get_equivalences, prove_equivalence_candidates_varisat_streaming, CandidateProofResult,
+    get_equivalences, prove_equivalence_candidates_with_backend_streaming, CandidateProofResult,
     IrAigCandidateRhs, IrAigSharingOptions,
 };
+use xlsynth_g8r::prove_gate_fn_equiv_common::GateFormalBackend;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_utils::is_structural_payload;
@@ -54,6 +55,7 @@ struct JsonOptions {
     seed: u64,
     exclude_structural_pir_nodes: bool,
     max_proofs: usize,
+    gate_formal_backend: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -193,6 +195,10 @@ pub fn handle_ir_aig_sharing(matches: &ArgMatches, _config: &Option<ToolchainCon
         .get_one::<String>("max_proofs")
         .map(|s| s.parse::<usize>().unwrap_or(0))
         .unwrap_or(0);
+    let gate_formal_backend = matches
+        .get_one::<String>("gate_formal_backend")
+        .map(|s| GateFormalBackend::parse(s).expect("validated by clap value_parser"))
+        .unwrap_or_default();
     let print_limit = matches
         .get_one::<String>("print")
         .map(|s| s.parse::<usize>().unwrap_or(0))
@@ -361,11 +367,12 @@ pub fn handle_ir_aig_sharing(matches: &ArgMatches, _config: &Option<ToolchainCon
         *current_any_proved = false;
     };
 
-    let proofs = match prove_equivalence_candidates_varisat_streaming(
+    let proofs = match prove_equivalence_candidates_with_backend_streaming(
         &pir_fn,
         &gate_fn,
         &candidates,
         &gatify_opts,
+        gate_formal_backend,
         |p| {
             // Proof stats.
             match &p.result {
@@ -521,6 +528,7 @@ pub fn handle_ir_aig_sharing(matches: &ArgMatches, _config: &Option<ToolchainCon
                 seed: sample_seed,
                 exclude_structural_pir_nodes: exclude_structural,
                 max_proofs,
+                gate_formal_backend: gate_formal_backend.as_str().to_string(),
             },
             stats: JsonStats {
                 candidates: proofs.len(),

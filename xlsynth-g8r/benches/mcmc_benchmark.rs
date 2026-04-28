@@ -11,6 +11,7 @@ use xlsynth_g8r::mcmc_logic::{
     McmcContext, McmcIterationOutput, Objective, build_transform_weights, cost, load_start,
     mcmc_iteration,
 };
+use xlsynth_g8r::prove_gate_fn_equiv_common::GateFormalBackend;
 use xlsynth_g8r::transforms::get_all_transforms;
 use xlsynth_pir::fuzz_utils;
 
@@ -100,6 +101,7 @@ fn benchmark_mcmc_iteration(c: &mut Criterion) {
                     rng: &mut rng,
                     all_transforms,
                     weights,
+                    gate_formal_backend: GateFormalBackend::default(),
                 };
                 let _result: McmcIterationOutput = mcmc_iteration(
                     current_gfn,

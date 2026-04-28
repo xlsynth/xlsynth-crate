@@ -13,6 +13,7 @@
 //! A later step can use a solver to confirm or refute each candidate.
 
 use std::collections::HashMap;
+use std::ops::Not;
 
 use rand_xoshiro::Xoshiro256PlusPlus;
 use rand_xoshiro::rand_core::RngCore;
@@ -26,11 +27,14 @@ use xlsynth_pir::ir_eval;
 use xlsynth_pir::ir_utils::is_structural_payload;
 use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;
 
-use crate::aig::gate::{AigNode, AigOperand, AigRef, GateFn};
+use crate::aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Output, PirNodeIds};
 use crate::aig::topo::topo_sort_refs;
 use crate::gatify::ir2gate::{GatifyOptions, gatify};
 use crate::ir2gate_utils::AdderMapping;
-use varisat::ExtendFormula;
+use crate::prove_gate_fn_equiv_common::{EquivResult, GateFormalBackend};
+use crate::prove_gate_fn_equiv_sat::{
+    CadicalSat, IncrementalSat, SatModel, SatSolveResult, prove_gate_fn_equiv_with_backend,
+};
 use varisat::Solver;
 
 #[derive(Debug, Clone)]
@@ -379,26 +383,107 @@ pub fn prove_equivalence_candidates_varisat(
     )
 }
 
-/// Streaming variant of `prove_equivalence_candidates_varisat`.
-///
-/// Calls `on_proof` as each candidate is proved/disproved/skipped, in the same
-/// order as `candidates`.
-pub fn prove_equivalence_candidates_varisat_streaming<F>(
+/// Proves (or disproves) equivalence for all candidates using CaDiCaL.
+pub fn prove_equivalence_candidates_cadical(
     pir_fn: &ir::Fn,
     gate_fn: &GateFn,
     candidates: &[IrAigEquivalenceCandidate],
     gatify_options: &GatifyOptions,
+) -> Result<Vec<CandidateProof>, String> {
+    prove_equivalence_candidates_cadical_streaming(
+        pir_fn,
+        gate_fn,
+        candidates,
+        gatify_options,
+        |_p| {},
+    )
+}
+
+/// Proves candidates using the selected backend.
+pub fn prove_equivalence_candidates_with_backend_streaming<F>(
+    pir_fn: &ir::Fn,
+    gate_fn: &GateFn,
+    candidates: &[IrAigEquivalenceCandidate],
+    gatify_options: &GatifyOptions,
+    backend: GateFormalBackend,
+    on_proof: F,
+) -> Result<Vec<CandidateProof>, String>
+where
+    F: FnMut(&CandidateProof),
+{
+    match backend {
+        GateFormalBackend::Varisat => prove_equivalence_candidates_varisat_streaming(
+            pir_fn,
+            gate_fn,
+            candidates,
+            gatify_options,
+            on_proof,
+        ),
+        GateFormalBackend::Cadical => prove_equivalence_candidates_cadical_streaming(
+            pir_fn,
+            gate_fn,
+            candidates,
+            gatify_options,
+            on_proof,
+        ),
+        GateFormalBackend::Z3 | GateFormalBackend::Ir => {
+            prove_equivalence_candidates_pairwise_streaming(
+                pir_fn,
+                gate_fn,
+                candidates,
+                gatify_options,
+                backend,
+                on_proof,
+            )
+        }
+    }
+}
+
+fn gate_fn_with_single_output(gate_fn: &GateFn, operand: AigOperand, output_name: &str) -> GateFn {
+    let mut out = gate_fn.clone();
+    out.outputs = vec![Output {
+        name: output_name.to_string(),
+        bit_vector: AigBitVector::from_bit(operand),
+    }];
+    out
+}
+
+fn gate_fn_with_rhs_output(gate_fn: &GateFn, rhs: IrAigCandidateRhs) -> GateFn {
+    match rhs {
+        IrAigCandidateRhs::AigOperand(op) => gate_fn_with_single_output(gate_fn, op, "gate"),
+        IrAigCandidateRhs::Const(value) => {
+            let mut out = gate_fn.clone();
+            let literal_ref = AigRef {
+                id: out.gates.len(),
+            };
+            out.gates.push(AigNode::Literal {
+                value,
+                pir_node_ids: PirNodeIds::new(),
+            });
+            out.outputs = vec![Output {
+                name: "gate".to_string(),
+                bit_vector: AigBitVector::from_bit(AigOperand::from(literal_ref)),
+            }];
+            out
+        }
+    }
+}
+
+fn prove_equivalence_candidates_pairwise_streaming<F>(
+    pir_fn: &ir::Fn,
+    gate_fn: &GateFn,
+    candidates: &[IrAigEquivalenceCandidate],
+    gatify_options: &GatifyOptions,
+    backend: GateFormalBackend,
     mut on_proof: F,
 ) -> Result<Vec<CandidateProof>, String>
 where
     F: FnMut(&CandidateProof),
 {
-    // Gatify PIR once to get a GateFn and a per-node lowering map.
     let gatify_output = gatify(pir_fn, gatify_options.clone())?;
     let pir_gate_fn = gatify_output.gate_fn;
     let lowering_map = gatify_output.lowering_map;
 
-    // Ensure input shapes match so a single shared input vector drives both.
     if pir_gate_fn.inputs.len() != gate_fn.inputs.len() {
         return Err(format!(
             "gate input arity mismatch: pir_gate_fn has {} inputs but gate_fn has {}",
@@ -422,26 +507,168 @@ where
         }
     }
 
+    let mut results = Vec::with_capacity(candidates.len());
+    for cand in candidates {
+        let Some(pir_bv) = lowering_map.get(&cand.pir_node_ref) else {
+            let proof = CandidateProof {
+                candidate: cand.clone(),
+                result: CandidateProofResult::Skipped {
+                    reason: format!(
+                        "missing lowering_map entry for pir_node_text_id={}",
+                        cand.pir_node_text_id
+                    ),
+                },
+            };
+            on_proof(&proof);
+            results.push(proof);
+            continue;
+        };
+        if cand.bit_index >= pir_bv.get_bit_count() {
+            let proof = CandidateProof {
+                candidate: cand.clone(),
+                result: CandidateProofResult::Skipped {
+                    reason: format!(
+                        "bit_index {} out of range for pir node bits[{}] (node_text_id={})",
+                        cand.bit_index,
+                        pir_bv.get_bit_count(),
+                        cand.pir_node_text_id
+                    ),
+                },
+            };
+            on_proof(&proof);
+            results.push(proof);
+            continue;
+        }
+
+        let pir_op: AigOperand = *pir_bv.get_lsb(cand.bit_index);
+        let pir_single = gate_fn_with_single_output(&pir_gate_fn, pir_op, "pir");
+        let gate_single = gate_fn_with_rhs_output(gate_fn, cand.rhs);
+        let result = match prove_gate_fn_equiv_with_backend(&pir_single, &gate_single, backend)
+            .map_err(|e| format!("{} proof error: {}", backend.as_str(), e))?
+        {
+            EquivResult::Proved => CandidateProofResult::Proved,
+            EquivResult::Disproved(counterexample_inputs) => CandidateProofResult::Disproved {
+                counterexample_inputs,
+            },
+        };
+        let proof = CandidateProof {
+            candidate: cand.clone(),
+            result,
+        };
+        on_proof(&proof);
+        results.push(proof);
+    }
+
+    Ok(results)
+}
+
+/// Streaming variant of `prove_equivalence_candidates_varisat`.
+///
+/// Calls `on_proof` as each candidate is proved/disproved/skipped, in the same
+/// order as `candidates`.
+pub fn prove_equivalence_candidates_varisat_streaming<F>(
+    pir_fn: &ir::Fn,
+    gate_fn: &GateFn,
+    candidates: &[IrAigEquivalenceCandidate],
+    gatify_options: &GatifyOptions,
+    on_proof: F,
+) -> Result<Vec<CandidateProof>, String>
+where
+    F: FnMut(&CandidateProof),
+{
     let mut solver = Solver::new();
+    prove_equivalence_candidates_incremental_sat_streaming(
+        pir_fn,
+        gate_fn,
+        candidates,
+        gatify_options,
+        &mut solver,
+        "varisat",
+        on_proof,
+    )
+}
+
+/// Streaming variant of `prove_equivalence_candidates_cadical`.
+pub fn prove_equivalence_candidates_cadical_streaming<F>(
+    pir_fn: &ir::Fn,
+    gate_fn: &GateFn,
+    candidates: &[IrAigEquivalenceCandidate],
+    gatify_options: &GatifyOptions,
+    on_proof: F,
+) -> Result<Vec<CandidateProof>, String>
+where
+    F: FnMut(&CandidateProof),
+{
+    let mut solver = CadicalSat::new().map_err(|e| format!("cadical setup error: {e}"))?;
+    prove_equivalence_candidates_incremental_sat_streaming(
+        pir_fn,
+        gate_fn,
+        candidates,
+        gatify_options,
+        &mut solver,
+        "cadical",
+        on_proof,
+    )
+}
+
+fn prove_equivalence_candidates_incremental_sat_streaming<S, F>(
+    pir_fn: &ir::Fn,
+    gate_fn: &GateFn,
+    candidates: &[IrAigEquivalenceCandidate],
+    gatify_options: &GatifyOptions,
+    solver: &mut S,
+    solver_name: &'static str,
+    mut on_proof: F,
+) -> Result<Vec<CandidateProof>, String>
+where
+    S: IncrementalSat,
+    F: FnMut(&CandidateProof),
+{
+    let gatify_output = gatify(pir_fn, gatify_options.clone())?;
+    let pir_gate_fn = gatify_output.gate_fn;
+    let lowering_map = gatify_output.lowering_map;
+
+    if pir_gate_fn.inputs.len() != gate_fn.inputs.len() {
+        return Err(format!(
+            "gate input arity mismatch: pir_gate_fn has {} inputs but gate_fn has {}",
+            pir_gate_fn.inputs.len(),
+            gate_fn.inputs.len()
+        ));
+    }
+    for (i, (a, b)) in pir_gate_fn
+        .inputs
+        .iter()
+        .zip(gate_fn.inputs.iter())
+        .enumerate()
+    {
+        if a.get_bit_count() != b.get_bit_count() {
+            return Err(format!(
+                "gate input width mismatch at input {}: pir_gate_fn bits[{}] vs gate_fn bits[{}]",
+                i,
+                a.get_bit_count(),
+                b.get_bit_count()
+            ));
+        }
+    }
 
     // Dedicated constant literals (so we can prove "PIR bit is constant 0/1").
-    let const_true = solver.new_lit();
-    solver.add_clause(&[const_true]);
-    let const_false = solver.new_lit();
-    solver.add_clause(&[!const_false]);
+    let const_true = solver.sat_new_lit();
+    solver.sat_add_clause(&[const_true]);
+    let const_false = solver.sat_new_lit();
+    solver.sat_add_clause(&[!const_false]);
 
     // Shared input literals: [input_port][bit_index_lsb0]
-    let mut input_lits: Vec<Vec<varisat::Lit>> = Vec::with_capacity(gate_fn.inputs.len());
+    let mut input_lits: Vec<Vec<S::Lit>> = Vec::with_capacity(gate_fn.inputs.len());
     for inp in gate_fn.inputs.iter() {
-        let mut bits: Vec<varisat::Lit> = Vec::with_capacity(inp.get_bit_count());
+        let mut bits: Vec<S::Lit> = Vec::with_capacity(inp.get_bit_count());
         for _ in 0..inp.get_bit_count() {
-            bits.push(solver.new_lit());
+            bits.push(solver.sat_new_lit());
         }
         input_lits.push(bits);
     }
 
-    let pir_lits = encode_gate_fn_all_nodes(&mut solver, &pir_gate_fn, &input_lits)?;
-    let gate_lits = encode_gate_fn_all_nodes(&mut solver, gate_fn, &input_lits)?;
+    let pir_lits = encode_gate_fn_all_nodes(solver, &pir_gate_fn, &input_lits)?;
+    let gate_lits = encode_gate_fn_all_nodes(solver, gate_fn, &input_lits)?;
 
     // GateFn primary input refs for counterexample reconstruction.
     let gate_primary_inputs: Vec<AigRef> = gate_fn
@@ -493,41 +720,34 @@ where
         };
 
         // Ask the solver for a counterexample: (pir != gate).
-        let diff = solver.new_lit();
-        add_tseitsin_xor(&mut solver, pir_lit, gate_lit, diff);
-        solver.assume(&[diff]);
-        let sat = solver
-            .solve()
-            .map_err(|e| format!("varisat solve error: {e:?}"))?;
-        if !sat {
-            let proof = CandidateProof {
-                candidate: cand.clone(),
-                result: CandidateProofResult::Proved,
-            };
-            on_proof(&proof);
-            results.push(proof);
-            continue;
-        }
+        let diff = solver.sat_new_lit();
+        add_tseitsin_xor(solver, pir_lit, gate_lit, diff);
+        let result = match solver
+            .sat_solve_assuming(&[diff])
+            .map_err(|e| format!("{solver_name} solve error: {e}"))?
+        {
+            SatSolveResult::Unsat => CandidateProofResult::Proved,
+            SatSolveResult::Sat => {
+                let model = solver
+                    .sat_model()
+                    .map_err(|e| format!("{solver_name} model error: {e}"))?;
 
-        let model = solver
-            .model()
-            .ok_or_else(|| "expected model when SAT".to_string())?;
-        let model_set: std::collections::HashSet<varisat::Lit> = model.iter().cloned().collect();
+                let mut input_assignment: HashMap<AigRef, bool> = HashMap::new();
+                for aig_ref in &gate_primary_inputs {
+                    let lit = gate_lits.get(aig_ref).ok_or_else(|| {
+                        format!("missing lit for gate primary input {:?}", aig_ref)
+                    })?;
+                    input_assignment.insert(*aig_ref, model.lit_value(*lit));
+                }
 
-        let mut input_assignment: HashMap<AigRef, bool> = HashMap::new();
-        for aig_ref in &gate_primary_inputs {
-            let lit = gate_lits
-                .get(aig_ref)
-                .ok_or_else(|| format!("missing lit for gate primary input {:?}", aig_ref))?;
-            input_assignment.insert(*aig_ref, model_set.contains(lit));
-        }
-
-        let cex_inputs: Vec<IrBits> = gate_fn.map_to_inputs(input_assignment);
+                CandidateProofResult::Disproved {
+                    counterexample_inputs: gate_fn.map_to_inputs(input_assignment),
+                }
+            }
+        };
         let proof = CandidateProof {
             candidate: cand.clone(),
-            result: CandidateProofResult::Disproved {
-                counterexample_inputs: cex_inputs,
-            },
+            result,
         };
         on_proof(&proof);
         results.push(proof);
@@ -545,11 +765,11 @@ fn is_all_same_bool(bits: &[bool]) -> Option<bool> {
     }
 }
 
-fn encode_gate_fn_all_nodes(
-    solver: &mut Solver,
+fn encode_gate_fn_all_nodes<S: IncrementalSat>(
+    solver: &mut S,
     gate_fn: &GateFn,
-    input_lits: &[Vec<varisat::Lit>],
-) -> Result<HashMap<AigRef, varisat::Lit>, String> {
+    input_lits: &[Vec<S::Lit>],
+) -> Result<HashMap<AigRef, S::Lit>, String> {
     if gate_fn.inputs.len() != input_lits.len() {
         return Err(format!(
             "input_lits arity mismatch: got {} expected {}",
@@ -558,7 +778,7 @@ fn encode_gate_fn_all_nodes(
         ));
     }
 
-    let mut map: HashMap<AigRef, varisat::Lit> = HashMap::new();
+    let mut map: HashMap<AigRef, S::Lit> = HashMap::new();
 
     // Seed primary inputs using the shared literals (one per input bit).
     for (i, inp) in gate_fn.inputs.iter().enumerate() {
@@ -591,7 +811,10 @@ fn encode_gate_fn_all_nodes(
             }
             continue;
         }
-        map.entry(r).or_insert_with(|| solver.new_lit());
+        if !map.contains_key(&r) {
+            let lit = solver.sat_new_lit();
+            map.insert(r, lit);
+        }
     }
 
     // Add structural clauses for all nodes.
@@ -602,9 +825,9 @@ fn encode_gate_fn_all_nodes(
             AigNode::Input { .. } => {}
             AigNode::Literal { value: v, .. } => {
                 if *v {
-                    solver.add_clause(&[out]);
+                    solver.sat_add_clause(&[out]);
                 } else {
-                    solver.add_clause(&[!out]);
+                    solver.sat_add_clause(&[!out]);
                 }
             }
             AigNode::And2 { a, b, .. } => {
@@ -618,37 +841,27 @@ fn encode_gate_fn_all_nodes(
     Ok(map)
 }
 
-fn lit_for_operand(
-    map: &HashMap<AigRef, varisat::Lit>,
-    op: AigOperand,
-) -> Result<varisat::Lit, String> {
+fn lit_for_operand<Lit>(map: &HashMap<AigRef, Lit>, op: AigOperand) -> Result<Lit, String>
+where
+    Lit: Copy + Not<Output = Lit>,
+{
     let base = *map
         .get(&op.node)
         .ok_or_else(|| format!("missing lit for AigRef id={}", op.node.id))?;
     Ok(if op.negated { !base } else { base })
 }
 
-fn add_tseitsin_and(
-    solver: &mut impl ExtendFormula,
-    a: varisat::Lit,
-    b: varisat::Lit,
-    output: varisat::Lit,
-) {
-    solver.add_clause(&[!a, !b, output]);
-    solver.add_clause(&[a, !output]);
-    solver.add_clause(&[b, !output]);
+fn add_tseitsin_and<S: IncrementalSat>(solver: &mut S, a: S::Lit, b: S::Lit, output: S::Lit) {
+    solver.sat_add_clause(&[!a, !b, output]);
+    solver.sat_add_clause(&[a, !output]);
+    solver.sat_add_clause(&[b, !output]);
 }
 
-fn add_tseitsin_xor(
-    solver: &mut impl ExtendFormula,
-    a: varisat::Lit,
-    b: varisat::Lit,
-    output: varisat::Lit,
-) {
-    solver.add_clause(&[!a, !b, !output]);
-    solver.add_clause(&[a, b, !output]);
-    solver.add_clause(&[a, !b, output]);
-    solver.add_clause(&[!a, b, output]);
+fn add_tseitsin_xor<S: IncrementalSat>(solver: &mut S, a: S::Lit, b: S::Lit, output: S::Lit) {
+    solver.sat_add_clause(&[!a, !b, !output]);
+    solver.sat_add_clause(&[a, b, !output]);
+    solver.sat_add_clause(&[a, !b, output]);
+    solver.sat_add_clause(&[!a, b, output]);
 }
 
 fn eval_gate_fn_all_node_values_positive(

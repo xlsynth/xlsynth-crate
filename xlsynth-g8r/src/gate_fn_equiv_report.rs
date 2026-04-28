@@ -2,7 +2,7 @@
 
 use crate::aig::GateFn;
 use crate::check_equivalence::{self, IrCheckResult};
-use crate::prove_gate_fn_equiv_varisat::{self, EquivResult};
+use crate::prove_gate_fn_equiv_sat::{self, EquivResult};
 #[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]
 use crate::prove_gate_fn_equiv_z3;
 use serde::{Deserialize, Serialize};
@@ -51,8 +51,8 @@ pub fn prove_gate_fn_equiv_report(lhs: &GateFn, rhs: &GateFn) -> EquivReport {
     results.insert("ir".to_string(), ir_checker);
 
     let varisat = {
-        let mut ctx = prove_gate_fn_equiv_varisat::Ctx::new();
-        match prove_gate_fn_equiv_varisat::prove_gate_fn_equiv(lhs, rhs, &mut ctx) {
+        let mut ctx = prove_gate_fn_equiv_sat::Ctx::new();
+        match prove_gate_fn_equiv_sat::prove_gate_fn_equiv(lhs, rhs, &mut ctx) {
             EquivResult::Proved => EngineResult::Equiv,
             EquivResult::Disproved(cex) => EngineResult::NotEquiv(Some(format!("{:?}", cex))),
         }

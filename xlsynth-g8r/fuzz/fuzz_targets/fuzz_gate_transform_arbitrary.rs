@@ -9,7 +9,7 @@ use rand::seq::IteratorRandom;
 #[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]
 use xlsynth_g8r::prove_gate_fn_equiv_common::EquivResult;
 #[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]
-use xlsynth_g8r::prove_gate_fn_equiv_varisat::{
+use xlsynth_g8r::prove_gate_fn_equiv_sat::{
     Ctx as VarisatCtx, prove_gate_fn_equiv as prove_sat,
 };
 #[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]

@@ -3,7 +3,7 @@
 //! Gate-level equivalence checking using the Z3 SMT solver.
 //!
 //! This implementation mirrors the SAT‐based checker in
-//! `prove_gate_fn_equiv_varisat.rs`, but uses the Z3 SMT solver instead of
+//! `prove_gate_fn_equiv_sat.rs`, but uses the Z3 SMT solver instead of
 //! Varisat.  By sharing the same public interface we can swap solvers by
 //! choosing the appropriate module at the call-site.
 

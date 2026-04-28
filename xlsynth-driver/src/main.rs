@@ -379,11 +379,11 @@ impl AppExt for clap::Command {
                     .action(clap::ArgAction::Set),
             )
             .arg(
-                clap::Arg::new("fraig_validation_backend")
-                    .long("fraig-validation-backend")
+                clap::Arg::new("gate_formal_backend")
+                    .long("gate-formal-backend")
                     .value_name("BACKEND")
-                    .help("SAT backend for validating FRAIG equivalence classes (default: cadical)")
-                    .value_parser(["cadical", "varisat"])
+                    .help("Formal backend for gate-level proof steps (default: cadical)")
+                    .value_parser(["cadical", "varisat", "z3", "ir"])
                     .default_value("cadical")
                     .action(clap::ArgAction::Set),
             )
@@ -2384,6 +2384,15 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                         .long("max-proofs")
                         .value_name("N")
                         .help("Limit number of candidates to prove (0 = no limit)")
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("gate_formal_backend")
+                        .long("gate-formal-backend")
+                        .value_name("BACKEND")
+                        .help("Formal backend for gate-level proof steps (default: cadical)")
+                        .value_parser(["cadical", "varisat", "z3", "ir"])
+                        .default_value("cadical")
                         .action(clap::ArgAction::Set),
                 )
                 .arg(

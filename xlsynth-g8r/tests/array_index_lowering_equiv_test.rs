@@ -3,7 +3,7 @@
 use xlsynth_g8r::check_equivalence;
 use xlsynth_g8r::gatify::ir2gate::{ArrayIndexLoweringStrategy, GatifyOptions, gatify};
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
-use xlsynth_g8r::prove_gate_fn_equiv_varisat::{Ctx, EquivResult, prove_gate_fn_equiv};
+use xlsynth_g8r::prove_gate_fn_equiv_sat::{Ctx, EquivResult, prove_gate_fn_equiv};
 use xlsynth_pir::ir_parser;
 
 fn build_direct_array_index_ir_text(

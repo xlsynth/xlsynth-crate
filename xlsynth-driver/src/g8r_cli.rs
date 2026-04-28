@@ -10,7 +10,7 @@ use xlsynth_g8r::gatify::prep_for_gatify::PrepForGatifyOptions;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::process_ir_path;
 use xlsynth_g8r::process_ir_path::DEFAULT_MAX_FRAIG_SIM_SAMPLES;
-use xlsynth_g8r::prove_gate_fn_equiv_varisat::ValidationBackend;
+use xlsynth_g8r::prove_gate_fn_equiv_common::GateFormalBackend;
 
 fn parse_adder_mapping(value: Option<&str>) -> AdderMapping {
     match value {
@@ -106,15 +106,15 @@ fn parse_optional_usize_or_exit(
     }
 }
 
-fn parse_validation_backend_or_exit(matches: &ArgMatches) -> ValidationBackend {
+fn parse_gate_formal_backend_or_exit(matches: &ArgMatches) -> GateFormalBackend {
     let value = matches
-        .get_one::<String>("fraig_validation_backend")
+        .get_one::<String>("gate_formal_backend")
         .map(|s| s.as_str())
-        .unwrap_or(ValidationBackend::default().as_str());
-    match ValidationBackend::parse(value) {
+        .unwrap_or(GateFormalBackend::default().as_str());
+    match GateFormalBackend::parse(value) {
         Ok(backend) => backend,
         Err(_) => {
-            eprintln!("Invalid --fraig-validation-backend: {:?}", value);
+            eprintln!("Invalid --gate-formal-backend: {:?}", value);
             std::process::exit(1);
         }
     }
@@ -137,7 +137,7 @@ pub(crate) struct G8rCliOptions {
     pub(crate) graph_logical_effort_beta2: f64,
     pub(crate) fraig_max_iterations: Option<usize>,
     pub(crate) max_fraig_sim_samples: usize,
-    pub(crate) fraig_validation_backend: ValidationBackend,
+    pub(crate) gate_formal_backend: GateFormalBackend,
 }
 
 pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> G8rCliOptions {
@@ -193,7 +193,7 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> G8rCliOptions {
         "--max-fraig-sim-samples",
         DEFAULT_MAX_FRAIG_SIM_SAMPLES,
     );
-    let fraig_validation_backend = parse_validation_backend_or_exit(matches);
+    let gate_formal_backend = parse_gate_formal_backend_or_exit(matches);
 
     G8rCliOptions {
         fold,
@@ -212,7 +212,7 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> G8rCliOptions {
         graph_logical_effort_beta2,
         fraig_max_iterations,
         max_fraig_sim_samples,
-        fraig_validation_backend,
+        gate_formal_backend,
     }
 }
 
@@ -240,7 +240,7 @@ pub(crate) fn build_process_ir_path_options_for_cli(
         ir_top: ir_top.map(|s| s.to_string()),
         fraig_max_iterations: cli.fraig_max_iterations,
         max_fraig_sim_samples: Some(cli.max_fraig_sim_samples),
-        fraig_validation_backend: cli.fraig_validation_backend,
+        gate_formal_backend: cli.gate_formal_backend,
         quiet,
         emit_netlist,
         toggle_sample_count: cli.toggle_sample_count,

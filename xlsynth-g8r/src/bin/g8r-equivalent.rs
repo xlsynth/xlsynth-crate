@@ -16,7 +16,7 @@ use clap::Parser;
 
 use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::mcmc_logic::oracle_equiv_sat;
-use xlsynth_g8r::prove_gate_fn_equiv_varisat::{self, EquivResult};
+use xlsynth_g8r::prove_gate_fn_equiv_sat::{self, EquivResult};
 
 /// Simple CLI to compare two GateFns.
 #[derive(Parser, Debug)]
@@ -81,9 +81,9 @@ fn main() {
 
     // Checker 3: Varisat-based SAT prover (structural)
     let varisat_equiv = {
-        let mut ctx = prove_gate_fn_equiv_varisat::Ctx::new();
+        let mut ctx = prove_gate_fn_equiv_sat::Ctx::new();
         matches!(
-            prove_gate_fn_equiv_varisat::prove_gate_fn_equiv(&lhs, &rhs, &mut ctx),
+            prove_gate_fn_equiv_sat::prove_gate_fn_equiv(&lhs, &rhs, &mut ctx),
             EquivResult::Proved
         )
     };
