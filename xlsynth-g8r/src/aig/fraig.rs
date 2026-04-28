@@ -22,12 +22,9 @@ use crate::aig::bulk_replace::{SubstitutionMap, bulk_replace};
 use crate::aig::get_summary_stats::{GateDepthStats, get_gate_depth};
 use crate::aig::{AigOperand, AigRef, GateFn};
 use crate::{
-    gate_builder::GateBuilderOptions,
-    propose_equiv::EquivNode,
-    propose_equiv::propose_equivalence_classes,
-    prove_gate_fn_equiv_varisat::{
-        ValidationBackend, validate_equivalence_classes_presorted_with_backend,
-    },
+    gate_builder::GateBuilderOptions, propose_equiv::EquivNode,
+    propose_equiv::propose_equivalence_classes, prove_gate_fn_equiv_common::GateFormalBackend,
+    prove_gate_fn_equiv_sat::validate_equivalence_classes_presorted_with_backend,
 };
 
 /// Number of proposed equivalence classes validated before applying
@@ -202,17 +199,17 @@ pub fn fraig_optimize(
         f,
         input_sample_count,
         iteration_bounds,
-        ValidationBackend::default(),
+        GateFormalBackend::Cadical,
         rng,
     )
 }
 
-/// Runs FRAIG using an explicit SAT backend for equivalence validation.
+/// Runs FRAIG using an explicit formal backend for equivalence validation.
 pub fn fraig_optimize_with_backend(
     f: &GateFn,
     input_sample_count: usize,
     iteration_bounds: IterationBounds,
-    validation_backend: ValidationBackend,
+    validation_backend: GateFormalBackend,
     rng: &mut impl Rng,
 ) -> Result<(GateFn, DidConverge, Vec<FraigIterationStat>), Box<dyn Error>> {
     let mut iteration_count = 0;

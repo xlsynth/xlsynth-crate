@@ -4,7 +4,7 @@ use xlsynth::{IrBits, IrValue};
 use xlsynth_g8r::aig::get_summary_stats::get_aig_stats;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::ir2gates;
-use xlsynth_g8r::prove_gate_fn_equiv_varisat::{Ctx, EquivResult, prove_gate_fn_equiv};
+use xlsynth_g8r::prove_gate_fn_equiv_sat::{Ctx, EquivResult, prove_gate_fn_equiv};
 use xlsynth_pir::ir::{
     ExtNaryAddArchitecture, ExtNaryAddTerm, FileTable, MemberType, Node, NodePayload, Package,
     PackageMember, Param, ParamId, Type,

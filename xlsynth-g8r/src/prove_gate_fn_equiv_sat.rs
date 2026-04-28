@@ -1,23 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Validates equivalence classes proposed by `propose_equiv`.
+//! SAT-backed gate-function equivalence and equivalence-class validation.
 //!
 //! For a given equivalence class we will either get confirmation that they are
 //! all equivalent or a counterexample that demonstrates a case in which they
 //! are not equivalent.
 //!
 //! The default backend is CaDiCaL. Varisat remains available for comparison and
-//! fallback testing.
+//! context-reuse testing; Z3 and IR backends are dispatched through the common
+//! gate-formal backend API where supported.
 
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::ops::Not;
 
-use crate::aig::gate::{AigNode, AigRef, GateFn};
+use crate::aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Output};
 use crate::aig::get_summary_stats::get_gate_depth;
 use crate::aig::topo::extract_cone;
 use crate::propose_equiv::EquivNode;
-pub use crate::prove_gate_fn_equiv_common::EquivResult;
+pub use crate::prove_gate_fn_equiv_common::{EquivResult, GateFormalBackend};
 use varisat::ExtendFormula;
 use xlsynth::IrBits;
 
@@ -55,7 +56,11 @@ pub enum ValidationError {
     CadicalConfigError(String),
     CadicalSolveInterrupted,
     ModelUnavailable,
-    UnknownBackend(String),
+    UnsupportedBackend {
+        backend: GateFormalBackend,
+        operation: &'static str,
+    },
+    IrEquivalenceError(String),
 }
 
 impl std::fmt::Display for ValidationError {
@@ -66,67 +71,29 @@ impl std::fmt::Display for ValidationError {
 
 impl std::error::Error for ValidationError {}
 
-pub const VALIDATION_BACKEND_ENV: &str = "XLSYNTH_G8R_VALIDATION_BACKEND";
 pub const CADICAL_CONFIG_ENV: &str = "XLSYNTH_G8R_CADICAL_CONFIG";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ValidationBackend {
-    Varisat,
-    Cadical,
-}
-
-impl ValidationBackend {
-    fn from_env() -> Result<Self, ValidationError> {
-        match env::var(VALIDATION_BACKEND_ENV) {
-            Ok(value) => Self::parse(&value),
-            Err(env::VarError::NotPresent) => Ok(Self::default()),
-            Err(env::VarError::NotUnicode(value)) => Err(ValidationError::UnknownBackend(
-                value.to_string_lossy().to_string(),
-            )),
-        }
-    }
-
-    /// Parses a user-facing backend name.
-    pub fn parse(value: &str) -> Result<Self, ValidationError> {
-        match value {
-            "varisat" | "Varisat" | "VARISAT" => Ok(Self::Varisat),
-            "cadical" | "CaDiCaL" | "CADICAL" => Ok(Self::Cadical),
-            other => Err(ValidationError::UnknownBackend(other.to_string())),
-        }
-    }
-
-    /// Returns the canonical lower-case backend name.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Varisat => "varisat",
-            Self::Cadical => "cadical",
-        }
-    }
-}
-
-impl Default for ValidationBackend {
-    fn default() -> Self {
-        Self::Cadical
-    }
-}
-
-impl std::fmt::Display for ValidationBackend {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
+fn resolve_equivalence_class_backend(
+    backend: GateFormalBackend,
+) -> Result<GateFormalBackend, ValidationError> {
+    match backend {
+        GateFormalBackend::Cadical => Ok(GateFormalBackend::Cadical),
+        GateFormalBackend::Varisat => Ok(GateFormalBackend::Varisat),
+        GateFormalBackend::Z3 | GateFormalBackend::Ir => Ok(backend),
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SatSolveResult {
+pub(crate) enum SatSolveResult {
     Sat,
     Unsat,
 }
 
-trait SatModel<Lit: Copy> {
+pub(crate) trait SatModel<Lit: Copy> {
     fn lit_value(&self, lit: Lit) -> bool;
 }
 
-trait IncrementalSat {
+pub(crate) trait IncrementalSat {
     type Lit: Copy + Eq + std::hash::Hash + Not<Output = Self::Lit>;
     type Model: SatModel<Self::Lit> + Clone;
 
@@ -140,7 +107,7 @@ trait IncrementalSat {
 }
 
 #[derive(Clone)]
-struct VarisatModel {
+pub(crate) struct VarisatModel {
     true_lits: HashSet<varisat::Lit>,
 }
 
@@ -187,7 +154,7 @@ impl<'a> IncrementalSat for varisat::Solver<'a> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct CadicalLit(i32);
+pub(crate) struct CadicalLit(i32);
 
 impl Not for CadicalLit {
     type Output = Self;
@@ -197,13 +164,13 @@ impl Not for CadicalLit {
     }
 }
 
-struct CadicalSat {
+pub(crate) struct CadicalSat {
     solver: cadical::Solver,
     next_var: i32,
 }
 
 impl CadicalSat {
-    fn new() -> Result<Self, ValidationError> {
+    pub(crate) fn new() -> Result<Self, ValidationError> {
         let solver = match env::var(CADICAL_CONFIG_ENV) {
             Ok(config) => cadical::Solver::with_config(&config)
                 .map_err(|e| ValidationError::CadicalConfigError(format!("{config}: {e}")))?,
@@ -222,7 +189,7 @@ impl CadicalSat {
 }
 
 #[derive(Clone)]
-struct CadicalModel {
+pub(crate) struct CadicalModel {
     values: Vec<bool>,
 }
 
@@ -550,8 +517,11 @@ fn build_gate_fn<S: IncrementalSat>(
     (map, outputs)
 }
 
-/// Checks equivalence of two gate functions using a SAT solver.
-pub fn prove_gate_fn_equiv<'a>(a: &GateFn, b: &GateFn, ctx: &mut Ctx<'a>) -> EquivResult {
+fn prove_gate_fn_equiv_with_solver<S: IncrementalSat>(
+    a: &GateFn,
+    b: &GateFn,
+    solver: &mut S,
+) -> Result<EquivResult, ValidationError> {
     assert_eq!(a.inputs.len(), b.inputs.len());
     assert_eq!(a.outputs.len(), b.outputs.len());
 
@@ -560,60 +530,102 @@ pub fn prove_gate_fn_equiv<'a>(a: &GateFn, b: &GateFn, ctx: &mut Ctx<'a>) -> Equ
         assert_eq!(ia.get_bit_count(), ib.get_bit_count());
         let mut lits = Vec::new();
         for _ in 0..ia.get_bit_count() {
-            lits.push(ctx.solver.new_lit());
+            lits.push(solver.sat_new_lit());
         }
         input_lits.push(lits);
     }
 
-    let (_map_a, outputs_a) = build_gate_fn(&mut ctx.solver, a, &input_lits);
-    let (_map_b, outputs_b) = build_gate_fn(&mut ctx.solver, b, &input_lits);
+    let (_map_a, outputs_a) = build_gate_fn(solver, a, &input_lits);
+    let (_map_b, outputs_b) = build_gate_fn(solver, b, &input_lits);
 
     // Build XOR miters for each corresponding output bit.
     let mut miters = Vec::new();
     for (la, lb) in outputs_a.iter().zip(outputs_b.iter()) {
-        let m = ctx.solver.new_lit();
-        add_tseitsin_xor(&mut ctx.solver, *la, *lb, m);
+        let m = solver.sat_new_lit();
+        add_tseitsin_xor(solver, *la, *lb, m);
         miters.push(m);
     }
 
     // Fresh literal that stands for "outputs differ in *some* bit".
-    let diff = ctx.solver.new_lit();
+    let diff = solver.sat_new_lit();
     // diff -> OR(miters)  === (!diff OR m1 OR m2 ...)
     let mut clause = Vec::with_capacity(miters.len() + 1);
     clause.push(!diff);
     clause.extend(miters.iter().cloned());
-    ctx.solver.add_clause(&clause);
+    solver.sat_add_clause(&clause);
 
     // Ask the solver to find an assignment where outputs differ.
-    ctx.solver.assume(&[diff]);
-    match ctx.solver.solve() {
-        Ok(false) => EquivResult::Proved, // UNSAT ⇒ no way for outputs to differ.
-        Ok(true) => {
-            let model = ctx.solver.model().expect("model available when SAT");
-            let model_set: HashSet<varisat::Lit> = model.iter().cloned().collect();
+    match solver.sat_solve_assuming(&[diff])? {
+        SatSolveResult::Unsat => Ok(EquivResult::Proved), // UNSAT => no way for outputs to differ.
+        SatSolveResult::Sat => {
+            let model = solver.sat_model()?;
             let mut map = HashMap::new();
             for (i, inp) in a.inputs.iter().enumerate() {
                 for (j, op) in inp.bit_vector.iter_lsb_to_msb().enumerate() {
                     let lit = input_lits[i][j];
-                    map.insert(op.node, model_set.contains(&lit));
+                    map.insert(op.node, model.lit_value(lit));
                 }
             }
             let cex = a.map_to_inputs(map);
-            EquivResult::Disproved(cex)
+            Ok(EquivResult::Disproved(cex))
         }
-        Err(e) => panic!("Solver error: {:?}", e),
     }
+}
+
+/// Checks equivalence of two gate functions using a selected backend.
+pub fn prove_gate_fn_equiv_with_backend(
+    a: &GateFn,
+    b: &GateFn,
+    backend: GateFormalBackend,
+) -> Result<EquivResult, ValidationError> {
+    match backend {
+        GateFormalBackend::Cadical => {
+            let mut solver = CadicalSat::new()?;
+            prove_gate_fn_equiv_with_solver(a, b, &mut solver)
+        }
+        GateFormalBackend::Varisat => {
+            let mut solver = varisat::Solver::new();
+            prove_gate_fn_equiv_with_solver(a, b, &mut solver)
+        }
+        GateFormalBackend::Z3 => {
+            #[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]
+            {
+                let mut ctx = crate::prove_gate_fn_equiv_z3::Ctx::new();
+                Ok(crate::prove_gate_fn_equiv_z3::prove_gate_fn_equiv(
+                    a, b, &mut ctx,
+                ))
+            }
+
+            #[cfg(not(any(feature = "with-z3-system", feature = "with-z3-built")))]
+            {
+                Err(ValidationError::UnsupportedBackend {
+                    backend,
+                    operation: "pairwise gate function equivalence",
+                })
+            }
+        }
+        GateFormalBackend::Ir => {
+            use crate::check_equivalence::{IrCheckResult, prove_same_gate_fn_via_ir_status};
+
+            match prove_same_gate_fn_via_ir_status(a, b) {
+                IrCheckResult::Equivalent => Ok(EquivResult::Proved),
+                IrCheckResult::NotEquivalent => Ok(EquivResult::Disproved(Vec::new())),
+                other => Err(ValidationError::IrEquivalenceError(format!("{other:?}"))),
+            }
+        }
+    }
+}
+
+/// Checks equivalence of two gate functions using a Varisat context.
+pub fn prove_gate_fn_equiv<'a>(a: &GateFn, b: &GateFn, ctx: &mut Ctx<'a>) -> EquivResult {
+    prove_gate_fn_equiv_with_solver(a, b, &mut ctx.solver).expect("solver error")
 }
 
 pub fn validate_equivalence_classes(
     gate_fn: &GateFn,
     equiv_classes: &[&[EquivNode]],
 ) -> Result<ValidationResult, ValidationError> {
-    validate_equivalence_classes_with_backend(
-        gate_fn,
-        equiv_classes,
-        ValidationBackend::from_env()?,
-    )
+    validate_equivalence_classes_with_backend(gate_fn, equiv_classes, GateFormalBackend::default())
 }
 
 /// Validates classes whose members and class order have already been
@@ -625,17 +637,17 @@ pub fn validate_equivalence_classes_presorted(
     validate_equivalence_classes_presorted_with_backend(
         gate_fn,
         equiv_classes,
-        ValidationBackend::from_env()?,
+        GateFormalBackend::default(),
     )
 }
 
 pub fn validate_equivalence_classes_with_backend(
     gate_fn: &GateFn,
     equiv_classes: &[&[EquivNode]],
-    backend: ValidationBackend,
+    backend: GateFormalBackend,
 ) -> Result<ValidationResult, ValidationError> {
-    match backend {
-        ValidationBackend::Varisat => {
+    match resolve_equivalence_class_backend(backend)? {
+        GateFormalBackend::Varisat => {
             let mut solver = varisat::Solver::new();
             validate_equivalence_classes_with_solver(
                 gate_fn,
@@ -644,12 +656,20 @@ pub fn validate_equivalence_classes_with_backend(
                 /* classes_are_depth_sorted= */ false,
             )
         }
-        ValidationBackend::Cadical => {
+        GateFormalBackend::Cadical => {
             let mut solver = CadicalSat::new()?;
             validate_equivalence_classes_with_solver(
                 gate_fn,
                 equiv_classes,
                 &mut solver,
+                /* classes_are_depth_sorted= */ false,
+            )
+        }
+        GateFormalBackend::Z3 | GateFormalBackend::Ir => {
+            validate_equivalence_classes_pairwise_with_backend(
+                gate_fn,
+                equiv_classes,
+                backend,
                 /* classes_are_depth_sorted= */ false,
             )
         }
@@ -659,10 +679,10 @@ pub fn validate_equivalence_classes_with_backend(
 pub fn validate_equivalence_classes_presorted_with_backend(
     gate_fn: &GateFn,
     equiv_classes: &[&[EquivNode]],
-    backend: ValidationBackend,
+    backend: GateFormalBackend,
 ) -> Result<ValidationResult, ValidationError> {
-    match backend {
-        ValidationBackend::Varisat => {
+    match resolve_equivalence_class_backend(backend)? {
+        GateFormalBackend::Varisat => {
             let mut solver = varisat::Solver::new();
             validate_equivalence_classes_with_solver(
                 gate_fn,
@@ -671,7 +691,7 @@ pub fn validate_equivalence_classes_presorted_with_backend(
                 /* classes_are_depth_sorted= */ true,
             )
         }
-        ValidationBackend::Cadical => {
+        GateFormalBackend::Cadical => {
             let mut solver = CadicalSat::new()?;
             validate_equivalence_classes_with_solver(
                 gate_fn,
@@ -680,7 +700,94 @@ pub fn validate_equivalence_classes_presorted_with_backend(
                 /* classes_are_depth_sorted= */ true,
             )
         }
+        GateFormalBackend::Z3 | GateFormalBackend::Ir => {
+            validate_equivalence_classes_pairwise_with_backend(
+                gate_fn,
+                equiv_classes,
+                backend,
+                /* classes_are_depth_sorted= */ true,
+            )
+        }
     }
+}
+
+fn gate_fn_with_single_output(
+    gate_fn: &GateFn,
+    equiv_node: EquivNode,
+    output_name: &str,
+) -> GateFn {
+    let mut operand = AigOperand::from(equiv_node.aig_ref());
+    if equiv_node.is_inverted() {
+        operand = operand.negate();
+    }
+    let mut out = gate_fn.clone();
+    out.outputs = vec![Output {
+        name: output_name.to_string(),
+        bit_vector: AigBitVector::from_bit(operand),
+    }];
+    out
+}
+
+fn validate_equivalence_classes_pairwise_with_backend(
+    gate_fn: &GateFn,
+    equiv_classes: &[&[EquivNode]],
+    backend: GateFormalBackend,
+    classes_are_depth_sorted: bool,
+) -> Result<ValidationResult, ValidationError> {
+    let sorted_equiv_classes: Vec<Vec<EquivNode>> = if classes_are_depth_sorted {
+        equiv_classes
+            .iter()
+            .map(|equiv_class| equiv_class.to_vec())
+            .collect()
+    } else {
+        let all_nodes: Vec<AigRef> = gate_fn
+            .gates
+            .iter()
+            .enumerate()
+            .map(|(id, _)| AigRef { id })
+            .collect();
+        let depth_stats = get_gate_depth(gate_fn, &all_nodes);
+        let mut sorted_equiv_classes: Vec<Vec<EquivNode>> = equiv_classes
+            .iter()
+            .map(|equiv_class| sorted_equiv_class(equiv_class, &depth_stats.ref_to_depth))
+            .collect();
+        sorted_equiv_classes.sort_unstable_by_key(|equiv_class| {
+            let representative = equiv_class[0];
+            (
+                equiv_node_depth_key(&depth_stats.ref_to_depth, representative),
+                equiv_class.len(),
+            )
+        });
+        sorted_equiv_classes
+    };
+
+    let mut validation_result = ValidationResult {
+        proven_equiv_sets: Vec::new(),
+        cex_inputs: Vec::new(),
+    };
+    for equiv_class in sorted_equiv_classes {
+        let mut known_equiv = vec![equiv_class[0]];
+        for &candidate in &equiv_class[1..] {
+            let representative = known_equiv[0];
+            let representative_fn =
+                gate_fn_with_single_output(gate_fn, representative, "representative");
+            let candidate_fn = gate_fn_with_single_output(gate_fn, candidate, "candidate");
+            match prove_gate_fn_equiv_with_backend(&representative_fn, &candidate_fn, backend)? {
+                EquivResult::Proved => known_equiv.push(candidate),
+                EquivResult::Disproved(cex) => {
+                    if !cex.is_empty() {
+                        validation_result.cex_inputs.push(cex);
+                    }
+                    break;
+                }
+            }
+        }
+
+        if known_equiv.len() > 1 {
+            validation_result.proven_equiv_sets.push(known_equiv);
+        }
+    }
+    Ok(validation_result)
 }
 
 fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
@@ -808,7 +915,7 @@ mod tests {
     };
 
     use super::{
-        ValidationBackend, ValidationResult, validate_equivalence_classes,
+        GateFormalBackend, ValidationResult, validate_equivalence_classes,
         validate_equivalence_classes_with_backend,
     };
     #[allow(unused_imports)]
@@ -854,13 +961,13 @@ mod tests {
         let varisat = validate_equivalence_classes_with_backend(
             &setup.g,
             &classes,
-            ValidationBackend::Varisat,
+            GateFormalBackend::Varisat,
         )
         .unwrap();
         let cadical = validate_equivalence_classes_with_backend(
             &setup.g,
             &classes,
-            ValidationBackend::Cadical,
+            GateFormalBackend::Cadical,
         )
         .unwrap();
 
@@ -929,13 +1036,13 @@ mod tests {
         let varisat = validate_equivalence_classes_with_backend(
             &setup.g,
             &[proposed_class],
-            ValidationBackend::Varisat,
+            GateFormalBackend::Varisat,
         )
         .unwrap();
         let cadical = validate_equivalence_classes_with_backend(
             &setup.g,
             &[proposed_class],
-            ValidationBackend::Cadical,
+            GateFormalBackend::Cadical,
         )
         .unwrap();
 

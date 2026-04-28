@@ -15,6 +15,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  # Reduce the size of Cargo artifacts while preserving debug_asserts, etc, that
+  # would not be included in a release build.
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
 jobs:
   # -----------------------------------------------------------
   # 1) Lint-check / pre-commit gate on Ubuntu

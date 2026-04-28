@@ -24,7 +24,7 @@ use crate::aig_sim::count_toggles;
 use crate::check_equivalence;
 use crate::gatify::ir2gate;
 use crate::ir2gates;
-use crate::prove_gate_fn_equiv_varisat::ValidationBackend;
+use crate::prove_gate_fn_equiv_common::GateFormalBackend;
 use crate::use_count::get_id_to_use_count;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_range_info::IrRangeInfo;
@@ -162,8 +162,8 @@ pub struct Options {
     /// to a SIMD batch boundary, then capped by this value when present.
     pub max_fraig_sim_samples: Option<usize>,
 
-    /// SAT backend used to validate proposed FRAIG equivalence classes.
-    pub fraig_validation_backend: ValidationBackend,
+    /// Gate-level formal backend used for proof steps.
+    pub gate_formal_backend: GateFormalBackend,
 
     pub quiet: bool,
     pub emit_netlist: bool,
@@ -489,7 +489,7 @@ pub fn process_ir_path_with_gatefn(
             &gate_fn,
             sim_samples,
             iteration_bounds,
-            options.fraig_validation_backend,
+            options.gate_formal_backend,
             &mut rng,
         );
         if !fraig_result.is_ok() {

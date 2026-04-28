@@ -16,9 +16,10 @@ use tempfile::Builder;
 use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::aig::get_summary_stats::SummaryStats;
 
-use xlsynth_g8r::aig::fraig::{IterationBounds, fraig_optimize};
+use xlsynth_g8r::aig::fraig::{IterationBounds, fraig_optimize_with_backend};
 use xlsynth_g8r::aig::get_summary_stats;
 use xlsynth_g8r::mcmc_logic::{Best, McmcOptions, Objective, cost, load_start, mcmc};
+use xlsynth_g8r::prove_gate_fn_equiv_common::GateFormalBackend;
 
 use std::time::{Duration, Instant};
 
@@ -120,6 +121,10 @@ struct CliArgs {
     /// Strategy for running multiple MCMC chains
     #[clap(long, value_enum, default_value_t = ChainStrategy::Independent)]
     chain_strategy: ChainStrategy,
+
+    /// Formal backend for gate-level proof steps.
+    #[clap(long, default_value = GateFormalBackend::DEFAULT_CLI_VALUE, value_parser = GateFormalBackend::CLI_VALUES)]
+    gate_formal_backend: String,
 }
 
 fn run_chain_segment(
@@ -149,6 +154,7 @@ fn run_chain_segment(
         Some(best),
         Some(chain_no),
         options,
+        GateFormalBackend::parse(&cfg.gate_formal_backend).expect("validated by clap value_parser"),
     )
 }
 
@@ -186,10 +192,12 @@ fn run_chain(
     };
     let fraig_gfn = {
         let mut rng_f = Pcg64Mcg::seed_from_u64(seed);
-        match fraig_optimize(
+        match fraig_optimize_with_backend(
             &gfn,
             64, // sample count
             IterationBounds::MaxIterations(1),
+            GateFormalBackend::parse(&cfg.gate_formal_backend)
+                .expect("validated by clap value_parser"),
             &mut rng_f,
         ) {
             Ok((g, _conv, _stats)) => g,
@@ -280,10 +288,12 @@ fn run_explore_exploit(
                         };
                         let fraig_gfn = {
                             let mut rng_f = Pcg64Mcg::seed_from_u64(seed ^ iter_offset);
-                            match fraig_optimize(
+                            match fraig_optimize_with_backend(
                                 &local_gfn,
                                 64, // sample count
                                 IterationBounds::MaxIterations(1),
+                                GateFormalBackend::parse(&cfg_cl.gate_formal_backend)
+                                    .expect("validated by clap value_parser"),
                                 &mut rng_f,
                             ) {
                                 Ok((g, _conv, _stats)) => g,

@@ -1323,8 +1323,9 @@ Supported flags include the common gate-optimization controls:
 - `--max-fraig-sim-samples=<N>` – maximum number of random simulation samples
   used for FRAIG candidate discovery. The uncapped count is scaled from the
   live node count and rounded to a SIMD batch boundary; default `8192`.
-- `--fraig-validation-backend=<cadical|varisat>` – SAT backend for validating
-  FRAIG equivalence classes (default `cadical`).
+- `--gate-formal-backend=<cadical|varisat|z3|ir>` – formal backend for
+  gate-level proof steps (default `cadical`). For FRAIG validation, `z3` and
+  `ir` use a slower pairwise validation path.
 - `--toggle-sample-count=<N>` – if non-zero, generate `N` random samples and
   report toggle statistics.
 - `--toggle-seed=<SEED>` – seed for toggle sampling (default `0`).
@@ -1682,12 +1683,14 @@ an existing internal AIG node, so downstream passes can potentially reuse logic.
 The flow is:
 
 - Simulate PIR and AIG over random inputs to propose candidate correspondences.
-- Use Varisat to prove or refute each candidate in bulk (incremental SAT).
+- Use the selected gate formal backend to prove or refute each candidate.
+  `cadical` and `varisat` use the bulk incremental SAT path; `z3` and `ir` use
+  a pairwise proof path.
 
 Example:
 
 ```shell
-xlsynth-driver ir-aig-sharing my_design.ir my_design.aig --samples 256 --seed 0 --max-proofs 200 --print-mappings 0 --output-json report.json
+xlsynth-driver ir-aig-sharing my_design.ir my_design.aig --samples 256 --seed 0 --max-proofs 200 --gate-formal-backend cadical --print-mappings 0 --output-json report.json
 ```
 
 ### `dslx-equiv`

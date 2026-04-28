@@ -139,8 +139,8 @@ TEST_BINARY_CONFIGS: Dict[str, TestBinaryConfig] = {
             # Newly observed >300s cases
             "ir2gate_utils::tests::test_gatify_add_kogge_stone_1_to_16",
             "ir2gate_utils::tests::test_gatify_add_brent_kung_1_to_16",
-            "prove_gate_fn_equiv_varisat::tests::test_validate_equiv_bf16_mul",
-            "prove_gate_fn_equiv_varisat::tests::test_validate_equiv_bf16_add",
+            "prove_gate_fn_equiv_sat::tests::test_validate_equiv_bf16_mul",
+            "prove_gate_fn_equiv_sat::tests::test_validate_equiv_bf16_add",
         ],
         "shard_test_cases": True,
     },

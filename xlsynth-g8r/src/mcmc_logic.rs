@@ -23,14 +23,8 @@ use crate::aig::gate::GateFn;
 use crate::aig::{dce, get_summary_stats};
 use crate::aig_sim::gate_simd::{self, Vec256};
 use crate::gatify::ir2gate::{self, GatifyOptions};
-
-#[cfg(not(any(feature = "with-z3-system", feature = "with-z3-built")))]
-use crate::check_equivalence::prove_same_gate_fn_via_ir;
-
-#[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]
-use crate::prove_gate_fn_equiv_common::EquivResult;
-#[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]
-use crate::prove_gate_fn_equiv_z3::{self, prove_gate_fn_equiv as prove_gate_fn_equiv_z3};
+use crate::prove_gate_fn_equiv_common::{EquivResult, GateFormalBackend};
+use crate::prove_gate_fn_equiv_sat::{ValidationError, prove_gate_fn_equiv_with_backend};
 
 use crate::test_utils::{
     Opt as SampleOpt, load_bf16_add_sample, load_bf16_mul_sample, make_ripple_carry_adder,
@@ -64,22 +58,21 @@ pub fn cost(g: &GateFn) -> Cost {
     }
 }
 
-/// Checks equivalence of two `GateFn`s using the external IR-based checker.
-pub fn oracle_equiv_sat(lhs: &GateFn, rhs: &GateFn) -> bool {
-    #[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]
-    {
-        let mut ctx = prove_gate_fn_equiv_z3::Ctx::new();
-        return matches!(
-            prove_gate_fn_equiv_z3(lhs, rhs, &mut ctx),
-            EquivResult::Proved
-        );
+/// Checks equivalence of two `GateFn`s using the selected formal backend.
+pub fn oracle_equiv_sat_with_backend(
+    lhs: &GateFn,
+    rhs: &GateFn,
+    backend: GateFormalBackend,
+) -> std::result::Result<bool, ValidationError> {
+    match prove_gate_fn_equiv_with_backend(lhs, rhs, backend)? {
+        EquivResult::Proved => Ok(true),
+        EquivResult::Disproved(_) => Ok(false),
     }
+}
 
-    // If we don't have Z3 we do via IR equivalence.
-    #[cfg(not(any(feature = "with-z3-system", feature = "with-z3-built")))]
-    {
-        return prove_same_gate_fn_via_ir(lhs, rhs).is_ok();
-    }
+/// Checks equivalence of two `GateFn`s using the default backend.
+pub fn oracle_equiv_sat(lhs: &GateFn, rhs: &GateFn) -> std::result::Result<bool, ValidationError> {
+    oracle_equiv_sat_with_backend(lhs, rhs, GateFormalBackend::Cadical)
 }
 
 /// Type aliases specializing the generic MCMC helpers from `xlsynth-mcmc` to
@@ -95,6 +88,7 @@ pub struct McmcContext<'a> {
     pub rng: &'a mut Pcg64Mcg,
     pub all_transforms: Vec<Box<dyn crate::transforms::transform_trait::Transform>>,
     pub weights: Vec<f64>,
+    pub gate_formal_backend: GateFormalBackend,
 }
 
 /// Objective used to evaluate cost improvements.
@@ -129,12 +123,12 @@ pub fn mcmc_iteration(
     paranoid: bool,
     simd_inputs: &[Vec256],
     baseline_outputs: &Vec<Vec256>,
-) -> McmcIterationOutput {
+) -> std::result::Result<McmcIterationOutput, ValidationError> {
     let mut iteration_best_gfn_updated = false;
 
     if context.all_transforms.is_empty() {
         // No transforms available to apply
-        return McmcIterationOutput {
+        return Ok(McmcIterationOutput {
             output_state: current_gfn,
             output_cost: current_cost,
             best_updated: false,
@@ -143,7 +137,7 @@ pub fn mcmc_iteration(
             oracle_time_micros: 0,
             transform_always_equivalent: true,
             transform: None,
-        };
+        });
     }
 
     let dist = WeightedIndex::new(&context.weights).expect("non-empty weights");
@@ -167,7 +161,7 @@ pub fn mcmc_iteration(
     );
 
     if candidate_locations.is_empty() {
-        return McmcIterationOutput {
+        return Ok(McmcIterationOutput {
             output_state: current_gfn,
             output_cost: current_cost,
             best_updated: false,
@@ -175,7 +169,7 @@ pub fn mcmc_iteration(
             oracle_time_micros: 0,
             transform_always_equivalent: true,
             transform: Some(current_transform_kind),
-        };
+        });
     }
 
     let chosen_location = candidate_locations.choose(context.rng).unwrap();
@@ -204,7 +198,7 @@ pub fn mcmc_iteration(
                 let sim_equiv = *baseline_outputs == candidate_out;
                 let sim_time_micros = sim_start.elapsed().as_micros();
                 if !sim_equiv {
-                    return McmcIterationOutput {
+                    return Ok(McmcIterationOutput {
                         output_state: current_gfn,
                         output_cost: current_cost,
                         best_updated: false,
@@ -212,10 +206,14 @@ pub fn mcmc_iteration(
                         oracle_time_micros: sim_time_micros,
                         transform_always_equivalent: chosen_transform.always_equivalent(),
                         transform: Some(current_transform_kind),
-                    };
+                    });
                 }
                 oracle_time_micros = sim_time_micros;
-                let sat_res = oracle_equiv_sat(&current_gfn, &candidate_gfn);
+                let sat_res = oracle_equiv_sat_with_backend(
+                    &current_gfn,
+                    &candidate_gfn,
+                    context.gate_formal_backend,
+                )?;
                 if paranoid {
                     let external_res = crate::check_equivalence::prove_same_gate_fn_via_ir(
                         &current_gfn,
@@ -234,7 +232,7 @@ pub fn mcmc_iteration(
             log::trace!("is_equiv: {:?}", is_equiv);
 
             if !is_equiv {
-                McmcIterationOutput {
+                Ok(McmcIterationOutput {
                     output_state: current_gfn,
                     output_cost: current_cost,
                     best_updated: false,
@@ -242,7 +240,7 @@ pub fn mcmc_iteration(
                     oracle_time_micros,
                     transform_always_equivalent: chosen_transform.always_equivalent(),
                     transform: Some(current_transform_kind),
-                }
+                })
             } else {
                 // Apply DCE to remove any dead nodes, reducing memory footprint.
                 let candidate_gfn_dce = dce::dce(&candidate_gfn);
@@ -259,7 +257,7 @@ pub fn mcmc_iteration(
                         *best_cost = new_candidate_cost;
                         iteration_best_gfn_updated = true;
                     }
-                    McmcIterationOutput {
+                    Ok(McmcIterationOutput {
                         output_state: candidate_gfn_dce,
                         output_cost: new_candidate_cost,
                         best_updated: iteration_best_gfn_updated,
@@ -269,9 +267,9 @@ pub fn mcmc_iteration(
                         oracle_time_micros,
                         transform_always_equivalent: chosen_transform.always_equivalent(),
                         transform: Some(current_transform_kind),
-                    }
+                    })
                 } else {
-                    McmcIterationOutput {
+                    Ok(McmcIterationOutput {
                         output_state: current_gfn,
                         output_cost: current_cost,
                         best_updated: false,
@@ -279,7 +277,7 @@ pub fn mcmc_iteration(
                         oracle_time_micros,
                         transform_always_equivalent: chosen_transform.always_equivalent(),
                         transform: Some(current_transform_kind),
-                    }
+                    })
                 }
             }
         }
@@ -289,7 +287,7 @@ pub fn mcmc_iteration(
                 current_transform_kind,
                 e
             );
-            McmcIterationOutput {
+            Ok(McmcIterationOutput {
                 output_state: current_gfn,
                 output_cost: current_cost,
                 best_updated: false,
@@ -297,7 +295,7 @@ pub fn mcmc_iteration(
                 oracle_time_micros: 0,
                 transform_always_equivalent: true,
                 transform: Some(current_transform_kind),
-            }
+            })
         }
     }
 }
@@ -318,6 +316,7 @@ pub fn mcmc(
     shared_best: Option<Arc<Best>>,
     chain_no: Option<usize>,
     options: McmcOptions,
+    gate_formal_backend: GateFormalBackend,
 ) -> Result<GateFn> {
     println!("Ticker Legend: F=ApplyFail, O=OracleFail, M=MetropolisReject, CF=CandidateFail");
     let mut iteration_rng = Pcg64Mcg::seed_from_u64(seed);
@@ -378,6 +377,7 @@ pub fn mcmc(
         rng: &mut iteration_rng,
         all_transforms: all_available_transforms,
         weights,
+        gate_formal_backend,
     };
 
     let start_time = Instant::now();
@@ -487,7 +487,7 @@ pub fn mcmc(
             paranoid,
             &simd_inputs,
             &baseline_outputs,
-        );
+        )?;
         log::trace!(
             "MCMC iteration completed: {:?}",
             options.start_iteration + iterations_count
@@ -652,6 +652,7 @@ pub fn mcmc(
                         &best_gfn,
                         global_iter,
                         "Iter checkpoint",
+                        gate_formal_backend,
                     )?;
                 }
             }
@@ -674,6 +675,7 @@ pub fn mcmc(
             &best_gfn,
             options.start_iteration + iterations_count,
             "Final checkpoint",
+            gate_formal_backend,
         )?;
         if progress_interval > 0 {
             let elapsed_secs = start_time.elapsed().as_secs_f64();
@@ -845,9 +847,10 @@ fn write_checkpoint(
     best_gfn: &GateFn,
     iter: u64,
     context: &str,
+    gate_formal_backend: GateFormalBackend,
 ) -> Result<()> {
     // Cross-check equivalence
-    let equiv_ok_sat = oracle_equiv_sat(original_gfn, best_gfn);
+    let equiv_ok_sat = oracle_equiv_sat_with_backend(original_gfn, best_gfn, gate_formal_backend)?;
     use crate::check_equivalence::{IrCheckResult, prove_same_gate_fn_via_ir_status};
 
     let ir_status = prove_same_gate_fn_via_ir_status(original_gfn, best_gfn);
@@ -974,4 +977,22 @@ struct ProgressEntry {
     proposed_samples_per_sec: f64,
     accepted_samples_per_sec: f64,
     temperature: f64,
+}
+
+#[cfg(all(test, not(any(feature = "with-z3-system", feature = "with-z3-built"))))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oracle_equiv_sat_propagates_backend_errors() {
+        let g = make_ripple_carry_adder(1);
+        let err = oracle_equiv_sat_with_backend(&g, &g, GateFormalBackend::Z3).unwrap_err();
+        assert!(matches!(
+            err,
+            ValidationError::UnsupportedBackend {
+                backend: GateFormalBackend::Z3,
+                ..
+            }
+        ));
+    }
 }
