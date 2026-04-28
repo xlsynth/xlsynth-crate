@@ -875,15 +875,21 @@ pub type IterationOutcomeDetails = xlsynth_mcmc::IterationOutcomeDetails<PirTran
 pub type McmcIterationOutput = SharedMcmcIterationOutput<IrFn, Cost, PirTransformKind>;
 pub type McmcOptions = SharedMcmcOptions;
 
+/// Cached oracle inputs and expected baseline `eval_fn` results.
+///
+/// MCMC oracle checks compare many candidate functions against the same
+/// accepted baseline. This cache stores the deterministic/random sample
+/// arguments and the baseline return value for each sample so candidates only
+/// need to evaluate their rewritten graph.
 #[derive(Default)]
-pub struct OracleBaselineCache {
+pub struct EvalFnBaselineResults {
     samples: Vec<Vec<IrValue>>,
     expected_values: Vec<Result<IrValue, ()>>,
     random_samples: usize,
     param_types: Vec<PirType>,
 }
 
-impl OracleBaselineCache {
+impl EvalFnBaselineResults {
     fn clear(&mut self) {
         self.samples.clear();
         self.expected_values.clear();
@@ -957,7 +963,7 @@ pub struct PirMcmcContext<'a> {
     pub all_transforms: Vec<Box<dyn PirTransform>>,
     pub weights: Vec<f64>,
     pub enable_formal_oracle: bool,
-    pub oracle_baseline_cache: OracleBaselineCache,
+    pub oracle_baseline_cache: EvalFnBaselineResults,
 }
 
 /// Options controlling a PIR MCMC run.
@@ -1553,7 +1559,7 @@ fn pir_equiv_oracle<R: Rng>(
     rng: &mut R,
     random_samples: usize,
     enable_formal_oracle: bool,
-    baseline_cache: &mut OracleBaselineCache,
+    baseline_cache: &mut EvalFnBaselineResults,
 ) -> bool {
     if lhs.params.len() != rhs.params.len() || lhs.ret_ty != rhs.ret_ty {
         return false;
@@ -1653,7 +1659,7 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
             all_transforms,
             weights,
             enable_formal_oracle: self.enable_formal_oracle,
-            oracle_baseline_cache: OracleBaselineCache::default(),
+            oracle_baseline_cache: EvalFnBaselineResults::default(),
         };
 
         let toggle_stimulus = self.prepared_toggle_stimulus.as_ref().map(|v| v.as_slice());
@@ -2111,7 +2117,7 @@ mod tests {
         );
 
         let mut rng = Pcg64Mcg::seed_from_u64(1);
-        let mut baseline_cache = OracleBaselineCache::default();
+        let mut baseline_cache = EvalFnBaselineResults::default();
         assert!(!pir_equiv_oracle(
             &orig_fn,
             &rewired_fn,
@@ -2133,7 +2139,7 @@ mod tests {
         let rhs = parser2.parse_fn().unwrap();
 
         let mut rng = Pcg64Mcg::seed_from_u64(1);
-        let mut baseline_cache = OracleBaselineCache::default();
+        let mut baseline_cache = EvalFnBaselineResults::default();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             pir_equiv_oracle(
                 &lhs,
