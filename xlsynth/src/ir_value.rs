@@ -24,6 +24,23 @@ impl IrBits {
         Self { ptr }
     }
 
+    fn from_lsb_ordered_bools(bit_count: usize, bits: impl IntoIterator<Item = bool>) -> Self {
+        if bit_count == 0 {
+            return IrBits::make_ubits(0, 0).unwrap();
+        }
+        let mut bytes = vec![0u8; bit_count.div_ceil(8)];
+        let mut seen = 0usize;
+        for (i, bit) in bits.into_iter().enumerate() {
+            debug_assert!(i < bit_count);
+            if bit {
+                bytes[i / 8] |= 1u8 << (i % 8);
+            }
+            seen = i + 1;
+        }
+        debug_assert_eq!(seen, bit_count);
+        IrBits::from_le_bytes(bit_count, &bytes).unwrap()
+    }
+
     fn apply_binary_op(
         &self,
         rhs: &IrBits,
@@ -65,27 +82,13 @@ impl IrBits {
     /// assert_eq!(ir_bits.get_bit(3).unwrap(), false); // MSB
     /// ```
     pub fn from_lsb_is_0(bits: &[bool]) -> Self {
-        if bits.is_empty() {
-            return IrBits::make_ubits(0, 0).unwrap();
-        }
-        let mut s: String = format!("bits[{}]:0b", bits.len());
-        for b in bits.iter().rev() {
-            s.push(if *b { '1' } else { '0' });
-        }
-        IrValue::parse_typed(&s).unwrap().to_bits().unwrap()
+        Self::from_lsb_ordered_bools(bits.len(), bits.iter().copied())
     }
 
     /// Turns a boolean slice into an IR `Bits` value under the assumption that
     /// index 0 in the slice is the most significant bit (MSb).
     pub fn from_msb_is_0(bits: &[bool]) -> Self {
-        if bits.is_empty() {
-            return IrBits::make_ubits(0, 0).unwrap();
-        }
-        let mut s: String = format!("bits[{}]:0b", bits.len());
-        for b in bits {
-            s.push(if *b { '1' } else { '0' });
-        }
-        IrValue::parse_typed(&s).unwrap().to_bits().unwrap()
+        Self::from_lsb_ordered_bools(bits.len(), bits.iter().rev().copied())
     }
 
     pub fn make_ubits(bit_count: usize, value: u64) -> Result<Self, XlsynthError> {
@@ -128,7 +131,16 @@ impl IrBits {
     }
 
     pub fn all_ones(bit_count: usize) -> Self {
-        Self::from_lsb_is_0(&vec![true; bit_count])
+        if bit_count == 0 {
+            return Self::zero(0);
+        }
+        let mut bytes = vec![0xffu8; bit_count.div_ceil(8)];
+        let bit_remainder = bit_count % 8;
+        if bit_remainder != 0 {
+            let mask = (1u8 << bit_remainder) - 1;
+            *bytes.last_mut().unwrap() &= mask;
+        }
+        Self::from_le_bytes(bit_count, &bytes).unwrap()
     }
 
     pub fn signed_max_value(bit_count: usize) -> Self {
@@ -916,6 +928,20 @@ impl std::hash::Hash for IrBits {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_ir_bits_from_bool_slices() {
+        let lsb = IrBits::from_lsb_is_0(&[true, false, true, false]);
+        assert_eq!(lsb.get_bit_count(), 4);
+        assert_eq!(lsb.to_u64().unwrap(), 0b0101);
+
+        let msb = IrBits::from_msb_is_0(&[true, false, true, false]);
+        assert_eq!(msb.get_bit_count(), 4);
+        assert_eq!(msb.to_u64().unwrap(), 0b1010);
+
+        let ones = IrBits::all_ones(9);
+        assert_eq!(ones.to_le_bytes().unwrap(), vec![0xff, 0x01]);
+    }
 
     #[test]
     fn test_ir_value_eq() {

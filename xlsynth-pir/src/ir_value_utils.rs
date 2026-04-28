@@ -5,25 +5,13 @@ use bitvec::vec::BitVec;
 use xlsynth::{IrValue, ir_value::IrBits};
 
 pub fn ir_bits_from_bitvec_lsb_is_0(bv: &BitVec) -> IrBits {
-    if bv.is_empty() {
-        return IrBits::make_ubits(0, 0).unwrap();
-    }
-    let mut s: String = format!("bits[{}]:0b", bv.len());
-    for b in bv.iter().rev() {
-        s.push(if *b { '1' } else { '0' });
-    }
-    IrValue::parse_typed(&s).unwrap().to_bits().unwrap()
+    let bits: Vec<bool> = bv.iter().map(|b| *b).collect();
+    IrBits::from_lsb_is_0(&bits)
 }
 
 pub fn ir_bits_from_bitvec_msb_is_0(bv: &BitVec) -> IrBits {
-    if bv.is_empty() {
-        return IrBits::make_ubits(0, 0).unwrap();
-    }
-    let mut s: String = format!("bits[{}]:0b", bv.len());
-    for b in bv.iter() {
-        s.push(if *b { '1' } else { '0' });
-    }
-    IrValue::parse_typed(&s).unwrap().to_bits().unwrap()
+    let bits: Vec<bool> = bv.iter().map(|b| *b).collect();
+    IrBits::from_msb_is_0(&bits)
 }
 
 pub fn ir_value_from_bits_with_type(bits: &IrBits, ty: &ir::Type) -> IrValue {
