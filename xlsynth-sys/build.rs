@@ -732,6 +732,19 @@ fn emit_link_directives_for_managed_dso(
     }
 }
 
+/// Returns Cargo's profile-level `deps` directory for this build script.
+///
+/// Cargo sets `OUT_DIR` to:
+///
+/// ```text
+/// target/<profile>/build/<pkg-hash>/out
+/// ```
+///
+/// When Cargo runs host binaries it just built, including downstream `build.rs`
+/// executables, it includes `target/<profile>/deps` in
+/// `LD_LIBRARY_PATH`/`DYLD_FALLBACK_LIBRARY_PATH`. `OUT_DIR` itself is not in
+/// that loader path, so a DSO that only lives in `OUT_DIR` can link
+/// successfully but fail when a dependent build script starts.
 fn cargo_profile_deps_dir(out_dir: &Path) -> Option<PathBuf> {
     let build_script_dir = out_dir.parent()?;
     let build_dir = build_script_dir.parent()?;
@@ -741,6 +754,16 @@ fn cargo_profile_deps_dir(out_dir: &Path) -> Option<PathBuf> {
     Some(build_dir.parent()?.join("deps"))
 }
 
+/// Stages a managed XLS DSO into Cargo's profile-level `deps` directory.
+///
+/// `cargo:rustc-link-search` is enough for rustc to find `libxls` at link
+/// time. It does not make `OUT_DIR` visible to the dynamic loader when Cargo
+/// later runs a downstream build script linked to `xlsynth-sys`.
+///
+/// `cargo:rustc-link-arg=-Wl,-rpath,...` helps binaries built directly from
+/// this package, but Cargo does not propagate that rpath into dependent
+/// build-script executables. Staging the managed DSO into Cargo's `deps`
+/// directory uses the loader path Cargo already provides for host binaries.
 fn stage_managed_dso_for_cargo_runtime(out_dir: &Path, dso_filename: &str) {
     let Some(deps_dir) = cargo_profile_deps_dir(out_dir) else {
         println!(
@@ -760,6 +783,7 @@ fn stage_managed_dso_for_cargo_runtime(out_dir: &Path, dso_filename: &str) {
 
     let dso_path = out_dir.join(dso_filename);
     let staged_dso_path = deps_dir.join(dso_filename);
+    // Use symlink_metadata so stale broken symlinks are cleaned up too.
     if std::fs::symlink_metadata(&staged_dso_path).is_ok() {
         std::fs::remove_file(&staged_dso_path).unwrap_or_else(|error| {
             panic!(
@@ -771,6 +795,9 @@ fn stage_managed_dso_for_cargo_runtime(out_dir: &Path, dso_filename: &str) {
     }
 
     #[cfg(unix)]
+    // Keep a single downloaded DSO in OUT_DIR and place only a lightweight
+    // directory entry in deps. This also preserves the generated XLS_DSO_PATH
+    // contract, which continues to point at OUT_DIR for managed artifacts.
     std::os::unix::fs::symlink(&dso_path, &staged_dso_path).unwrap_or_else(|error| {
         panic!(
             "failed to symlink XLS DSO from {} to {}: {}",
