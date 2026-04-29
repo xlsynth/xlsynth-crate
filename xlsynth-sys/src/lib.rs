@@ -760,6 +760,47 @@ unsafe extern "C" {
         intervals_out: *mut *mut CIrIntervalSet,
     ) -> bool;
 
+    pub fn xls_ir_analysis_at_most_one_bit_true(
+        a: *const CIrAnalysis,
+        node_id: i64,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut bool,
+    ) -> bool;
+
+    pub fn xls_ir_analysis_at_least_one_bit_true(
+        a: *const CIrAnalysis,
+        node_id: i64,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut bool,
+    ) -> bool;
+
+    pub fn xls_ir_analysis_exactly_one_bit_true(
+        a: *const CIrAnalysis,
+        node_id: i64,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut bool,
+    ) -> bool;
+
+    pub fn xls_ir_analysis_known_not_equals(
+        a: *const CIrAnalysis,
+        lhs_node_id: i64,
+        lhs_bit_index: i64,
+        rhs_node_id: i64,
+        rhs_bit_index: i64,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut bool,
+    ) -> bool;
+
+    pub fn xls_ir_analysis_implies(
+        a: *const CIrAnalysis,
+        lhs_node_id: i64,
+        lhs_bit_index: i64,
+        rhs_node_id: i64,
+        rhs_bit_index: i64,
+        error_out: *mut *mut std::os::raw::c_char,
+        result_out: *mut bool,
+    ) -> bool;
+
     pub fn xls_interval_set_get_interval_count(s: *const CIrIntervalSet) -> i64;
 
     pub fn xls_interval_set_get_interval_bounds(

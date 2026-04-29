@@ -4,8 +4,11 @@ use std::sync::{Arc, RwLock};
 
 use crate::ir_package::IrPackagePtr;
 use crate::lib_support::{
-    xls_interval_set_get_interval_bounds, xls_ir_analysis_create_from_package_with_options,
-    xls_ir_analysis_get_intervals_for_node_id, xls_ir_analysis_get_known_bits_for_node_id,
+    xls_interval_set_get_interval_bounds, xls_ir_analysis_at_least_one_bit_true,
+    xls_ir_analysis_at_most_one_bit_true, xls_ir_analysis_create_from_package_with_options,
+    xls_ir_analysis_exactly_one_bit_true, xls_ir_analysis_get_intervals_for_node_id,
+    xls_ir_analysis_get_known_bits_for_node_id, xls_ir_analysis_implies,
+    xls_ir_analysis_known_not_equals,
 };
 use crate::xlsynth_error::XlsynthError;
 use crate::IrBits;
@@ -124,5 +127,54 @@ impl IrAnalysis {
         let _guard = self.package.read().unwrap();
         let intervals_ptr = xls_ir_analysis_get_intervals_for_node_id(self.ptr, node_id)?;
         Ok(IntervalSet { ptr: intervals_ptr })
+    }
+
+    pub fn at_most_one_bit_true(&self, node_id: i64) -> Result<bool, XlsynthError> {
+        let _guard = self.package.read().unwrap();
+        xls_ir_analysis_at_most_one_bit_true(self.ptr, node_id)
+    }
+
+    pub fn at_least_one_bit_true(&self, node_id: i64) -> Result<bool, XlsynthError> {
+        let _guard = self.package.read().unwrap();
+        xls_ir_analysis_at_least_one_bit_true(self.ptr, node_id)
+    }
+
+    pub fn exactly_one_bit_true(&self, node_id: i64) -> Result<bool, XlsynthError> {
+        let _guard = self.package.read().unwrap();
+        xls_ir_analysis_exactly_one_bit_true(self.ptr, node_id)
+    }
+
+    pub fn known_not_equals(
+        &self,
+        lhs_node_id: i64,
+        lhs_bit_index: i64,
+        rhs_node_id: i64,
+        rhs_bit_index: i64,
+    ) -> Result<bool, XlsynthError> {
+        let _guard = self.package.read().unwrap();
+        xls_ir_analysis_known_not_equals(
+            self.ptr,
+            lhs_node_id,
+            lhs_bit_index,
+            rhs_node_id,
+            rhs_bit_index,
+        )
+    }
+
+    pub fn implies(
+        &self,
+        lhs_node_id: i64,
+        lhs_bit_index: i64,
+        rhs_node_id: i64,
+        rhs_bit_index: i64,
+    ) -> Result<bool, XlsynthError> {
+        let _guard = self.package.read().unwrap();
+        xls_ir_analysis_implies(
+            self.ptr,
+            lhs_node_id,
+            lhs_bit_index,
+            rhs_node_id,
+            rhs_bit_index,
+        )
     }
 }
