@@ -433,6 +433,88 @@ pub(crate) fn xls_ir_analysis_get_intervals_for_node_id(
     Ok(intervals_out)
 }
 
+pub(crate) fn xls_ir_analysis_at_most_one_bit_true(
+    a: *const CIrAnalysis,
+    node_id: i64,
+) -> Result<bool, XlsynthError> {
+    let mut result_out = false;
+    xls_ffi_call!(
+        xlsynth_sys::xls_ir_analysis_at_most_one_bit_true,
+        a,
+        node_id;
+        result_out
+    )?;
+    Ok(result_out)
+}
+
+pub(crate) fn xls_ir_analysis_at_least_one_bit_true(
+    a: *const CIrAnalysis,
+    node_id: i64,
+) -> Result<bool, XlsynthError> {
+    let mut result_out = false;
+    xls_ffi_call!(
+        xlsynth_sys::xls_ir_analysis_at_least_one_bit_true,
+        a,
+        node_id;
+        result_out
+    )?;
+    Ok(result_out)
+}
+
+pub(crate) fn xls_ir_analysis_exactly_one_bit_true(
+    a: *const CIrAnalysis,
+    node_id: i64,
+) -> Result<bool, XlsynthError> {
+    let mut result_out = false;
+    xls_ffi_call!(
+        xlsynth_sys::xls_ir_analysis_exactly_one_bit_true,
+        a,
+        node_id;
+        result_out
+    )?;
+    Ok(result_out)
+}
+
+pub(crate) fn xls_ir_analysis_known_not_equals(
+    a: *const CIrAnalysis,
+    lhs_node_id: i64,
+    lhs_bit_index: i64,
+    rhs_node_id: i64,
+    rhs_bit_index: i64,
+) -> Result<bool, XlsynthError> {
+    let mut result_out = false;
+    xls_ffi_call!(
+        xlsynth_sys::xls_ir_analysis_known_not_equals,
+        a,
+        lhs_node_id,
+        lhs_bit_index,
+        rhs_node_id,
+        rhs_bit_index;
+        result_out
+    )?;
+    Ok(result_out)
+}
+
+pub(crate) fn xls_ir_analysis_implies(
+    a: *const CIrAnalysis,
+    lhs_node_id: i64,
+    lhs_bit_index: i64,
+    rhs_node_id: i64,
+    rhs_bit_index: i64,
+) -> Result<bool, XlsynthError> {
+    let mut result_out = false;
+    xls_ffi_call!(
+        xlsynth_sys::xls_ir_analysis_implies,
+        a,
+        lhs_node_id,
+        lhs_bit_index,
+        rhs_node_id,
+        rhs_bit_index;
+        result_out
+    )?;
+    Ok(result_out)
+}
+
 pub(crate) fn xls_interval_set_get_interval_bounds(
     s: *const CIrIntervalSet,
     i: i64,
