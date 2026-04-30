@@ -12171,6 +12171,117 @@ fn main(x: bits[4] id=1) -> bits[5] {
 }
 
 #[test]
+fn test_ir_op_histo_prints_single_file_histogram() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir = r#"package test
+
+top fn main(x: bits[1] id=1, y: bits[1] id=2, z: bits[1] id=3) -> bits[1] {
+  n: bits[1] = and(x, y, id=4)
+  ret out: bits[1] = or(n, z, id=5)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("input.ir");
+    std::fs::write(&ir_path, ir).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-op-histo")
+        .arg(ir_path.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-op-histo failed (status={});\nstdout:{}\nstderr:{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let expected = "{and(bits[1], bits[1]) -> bits[1]: 1, or(bits[1], bits[1]) -> bits[1]: 1}\n";
+    assert_eq!(stdout, expected, "unexpected stdout: {}", stdout);
+}
+
+#[test]
+fn test_ir_op_histo_include_types_false_prints_operator_names() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir = r#"package test
+
+top fn main(x: bits[2] id=1, y: bits[2] id=2, z: bits[2] id=3) -> bits[2] {
+  n: bits[2] = and(x, y, id=4)
+  ret out: bits[2] = or(n, z, id=5)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("input.ir");
+    std::fs::write(&ir_path, ir).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-op-histo")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--include-types=false")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-op-histo failed (status={});\nstdout:{}\nstderr:{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let expected = "{and: 1, or: 1}\n";
+    assert_eq!(stdout, expected, "unexpected stdout: {}", stdout);
+}
+
+#[test]
+fn test_ir_op_histo_top_overrides_package_top() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir = r#"package test
+
+top fn main(x: bits[1] id=1, y: bits[1] id=2) -> bits[1] {
+  ret out: bits[1] = and(x, y, id=3)
+}
+
+fn alternate(x: bits[2] id=4, y: bits[2] id=5) -> bits[2] {
+  ret out: bits[2] = or(x, y, id=6)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("input.ir");
+    std::fs::write(&ir_path, ir).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-op-histo")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("alternate")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-op-histo failed (status={});\nstdout:{}\nstderr:{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let expected = "{or(bits[2], bits[2]) -> bits[2]: 1}\n";
+    assert_eq!(stdout, expected, "unexpected stdout: {}", stdout);
+}
+
+#[test]
 fn test_ir_op_histo_corpus_streams_per_file_and_total() {
     let _ = env_logger::builder().is_test(true).try_init();
 
