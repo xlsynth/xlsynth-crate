@@ -1180,6 +1180,35 @@ Example:
 xlsynth-driver ir-query-corpus /tmpfs/my_design_k3_cones 'and(a, nor(a, _))' --max-matches 20
 ```
 
+### `ir-op-histo`
+
+Computes an operation histogram for one package-form IR file and prints a
+single histogram line.
+
+- Positional arguments: `<ir_file>`
+- Optional:
+  - `--top <NAME>` – function name to treat as top (overrides the package top).
+  - `--include-types=true|false` – include operand/result types in histogram keys (defaults to `true`).
+
+Output format:
+
+- `{op_or_signature: count, ...}`
+
+When `--include-types=true`, keys are operation signatures, e.g.
+`and(bits[1], bits[1]) -> bits[1]`.
+
+Notes:
+
+- Histogram keys are printed in sorted order.
+- Histograms exclude bookkeeping-only nodes (`nil` and `get_param`), matching
+  `ir-op-histo-corpus`.
+
+Example:
+
+```shell
+xlsynth-driver ir-op-histo ./input.ir --top main
+```
+
 ### `ir-op-histo-corpus`
 
 Scans every `.ir` file under a corpus directory (recursive), prints a per-file

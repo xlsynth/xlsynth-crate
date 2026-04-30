@@ -99,7 +99,7 @@ mod ir_ged;
 mod ir_inline;
 mod ir_localized_eco;
 mod ir_mcmc_opt;
-mod ir_op_histo_corpus;
+mod ir_op_histo;
 mod ir_query;
 mod ir_query_corpus;
 mod ir_rewrite;
@@ -1310,6 +1310,25 @@ fn main() {
                         .value_name("N")
                         .help("Stop after emitting N matches (default: unlimited)")
                         .action(ArgAction::Set),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("ir-op-histo")
+                .about("Computes an operation histogram for one IR file")
+                .arg(
+                    Arg::new("ir_input_file")
+                        .help("The input IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("ir_top")
+                        .long("top")
+                        .help("Top-level function name (overrides package top)"),
+                )
+                .add_bool_arg(
+                    "include-types",
+                    "Include operand/result types in histogram keys (true by default)",
                 ),
         )
         .subcommand(
@@ -3258,7 +3277,10 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
             ir_query_corpus::handle_ir_query_corpus(subm, &config);
         }
         Some(("ir-op-histo-corpus", subm)) => {
-            ir_op_histo_corpus::handle_ir_op_histo_corpus(subm, &config);
+            ir_op_histo::handle_ir_op_histo_corpus(subm, &config);
+        }
+        Some(("ir-op-histo", subm)) => {
+            ir_op_histo::handle_ir_op_histo(subm, &config);
         }
         Some(("ir-round-trip", subm)) => {
             ir_round_trip::handle_ir_round_trip(subm);
