@@ -62,6 +62,55 @@ pub struct TypedDslxAotBuildSpec<'a> {
     pub type_module_paths: Vec<&'a Path>,
 }
 
+/// Collects several typed DSLX AOT entrypoints into one generated Rust package.
+///
+/// Package builds emit the participating DSLX modules once and place one
+/// runner module per entrypoint beneath the DSLX module that owns the selected
+/// top function. That keeps the public Rust types nominally shared across
+/// runners instead of minting one copy per generated wrapper file.
+pub struct TypedDslxAotPackageBuilder<'a> {
+    /// Base name used for the generated shared Rust source file.
+    name: &'a str,
+    /// Entrypoints to compile into the package.
+    specs: Vec<TypedDslxAotBuildSpec<'a>>,
+}
+
+/// Paths and metadata for one AOT entrypoint inside a shared typed DSLX
+/// package.
+#[derive(Debug, Clone)]
+pub struct GeneratedTypedDslxAotEntrypoint {
+    /// Build spec name after validation and filename sanitization.
+    pub name: String,
+    /// Object file containing the compiled AOT entrypoint.
+    pub object_file: PathBuf,
+    /// Serialized entrypoint metadata consumed by the generated descriptor.
+    pub entrypoints_proto_file: PathBuf,
+    /// Parsed AOT metadata for the selected entrypoint.
+    pub metadata: AotEntrypointMetadata,
+}
+
+/// Paths and metadata for a generated shared typed DSLX AOT package.
+#[derive(Debug, Clone)]
+pub struct GeneratedTypedDslxAotPackage {
+    /// Package name after validation and filename sanitization.
+    pub name: String,
+    /// Generated Rust source file that callers include once from build output.
+    pub rust_file: PathBuf,
+    /// Compiled AOT artifacts for each requested package entrypoint.
+    pub entrypoints: Vec<GeneratedTypedDslxAotEntrypoint>,
+}
+
+struct TypedDslxCompiledEntrypoint<'a> {
+    spec: &'a TypedDslxAotBuildSpec<'a>,
+    base_name: String,
+    dslx_text: String,
+    proto_file_name: String,
+    object_file: PathBuf,
+    proto_file: PathBuf,
+    metadata: AotEntrypointMetadata,
+    signature: AotFunctionSignature,
+}
+
 /// Paths and metadata for emitted AOT wrapper artifacts in a build output
 /// directory.
 ///
@@ -114,16 +163,41 @@ pub fn emit_typed_dslx_aot_module_from_file(
     emit_typed_dslx_aot_module_from_file_with_out_dir(spec, Path::new(&out_dir))
 }
 
-/// Emits typed DSLX AOT artifacts into an explicit output directory.
-///
-/// This compiles the DSLX top function, emits bridge definitions for selected
-/// DSLX modules, validates those semantic types against AOT metadata, and
-/// writes a generated Rust module that encodes/decodes typed DSLX values
-/// directly.
-pub fn emit_typed_dslx_aot_module_from_file_with_out_dir(
-    spec: &TypedDslxAotBuildSpec<'_>,
+impl<'a> TypedDslxAotPackageBuilder<'a> {
+    /// Creates an empty package builder.
+    pub fn new(name: &'a str) -> Self {
+        Self {
+            name,
+            specs: Vec::new(),
+        }
+    }
+
+    /// Appends one typed DSLX AOT entrypoint to the package.
+    pub fn add_entrypoint(mut self, spec: TypedDslxAotBuildSpec<'a>) -> Self {
+        self.specs.push(spec);
+        self
+    }
+
+    /// Emits the package into Cargo's `OUT_DIR`.
+    pub fn build(&self) -> AotResult<GeneratedTypedDslxAotPackage> {
+        let out_dir = std::env::var("OUT_DIR").map_err(|e| {
+            XlsynthError(format!(
+                "AOT build environment error: OUT_DIR was not set while emitting typed DSLX AOT package: {e}"
+            ))
+        })?;
+        self.build_with_out_dir(Path::new(&out_dir))
+    }
+
+    /// Emits the package into an explicit output directory.
+    pub fn build_with_out_dir(&self, out_dir: &Path) -> AotResult<GeneratedTypedDslxAotPackage> {
+        emit_typed_dslx_aot_package_with_out_dir(self, out_dir)
+    }
+}
+
+fn compile_typed_dslx_entrypoint_artifacts<'a>(
+    spec: &'a TypedDslxAotBuildSpec<'a>,
     out_dir: &Path,
-) -> AotResult<GeneratedAotModule> {
+) -> AotResult<TypedDslxCompiledEntrypoint<'a>> {
     if spec.name.is_empty() {
         return Err(XlsynthError(
             "AOT invalid argument: typed DSLX build spec name must not be empty".to_string(),
@@ -160,18 +234,15 @@ pub fn emit_typed_dslx_aot_module_from_file_with_out_dir(
     let AotCompiled {
         object_code,
         entrypoints_proto,
-        metadata: selected_metadata,
+        metadata,
     } = compile;
     let signature = get_entrypoint_function_signature(&entrypoints_proto)
         .map_err(|e| XlsynthError(format!("AOT metadata parse failed: {}", e.0)))?;
 
     let object_file = out_dir.join(format!("{base_name}.aot.o"));
     let proto_file = out_dir.join(format!("{base_name}.entrypoints.pb"));
-    let rust_file = out_dir.join(format!("{base_name}_typed_dslx_aot_wrapper.rs"));
-
     write_file(&object_file, &object_code)?;
     write_file(&proto_file, &entrypoints_proto)?;
-
     let proto_file_name = proto_file
         .file_name()
         .and_then(|f| f.to_str())
@@ -180,27 +251,51 @@ pub fn emit_typed_dslx_aot_module_from_file_with_out_dir(
                 "AOT build environment error: failed to derive UTF-8 file name from proto path {}",
                 proto_file.display()
             ))
-        })?;
+        })?
+        .to_string();
+    emit_link_archive(&base_name, &object_file)?;
 
+    Ok(TypedDslxCompiledEntrypoint {
+        spec,
+        base_name,
+        dslx_text,
+        proto_file_name,
+        object_file,
+        proto_file,
+        metadata,
+        signature,
+    })
+}
+
+/// Emits typed DSLX AOT artifacts into an explicit output directory.
+///
+/// This compiles the DSLX top function, emits bridge definitions for selected
+/// DSLX modules, validates those semantic types against AOT metadata, and
+/// writes a generated Rust module that encodes/decodes typed DSLX values
+/// directly.
+pub fn emit_typed_dslx_aot_module_from_file_with_out_dir(
+    spec: &TypedDslxAotBuildSpec<'_>,
+    out_dir: &Path,
+) -> AotResult<GeneratedAotModule> {
+    let compiled = compile_typed_dslx_entrypoint_artifacts(spec, out_dir)?;
+    let rust_file = out_dir.join(format!("{}_typed_dslx_aot_wrapper.rs", compiled.base_name));
     let generated = render_typed_dslx_generated_module(
         spec,
-        &dslx_text,
-        &base_name,
-        proto_file_name,
-        &selected_metadata,
-        &signature,
+        &compiled.dslx_text,
+        &compiled.base_name,
+        &compiled.proto_file_name,
+        &compiled.metadata,
+        &compiled.signature,
     )?;
     write_file(&rust_file, generated.as_bytes())?;
     run_rustfmt_best_effort(&rust_file);
 
-    emit_link_archive(&base_name, &object_file)?;
-
     Ok(GeneratedAotModule {
-        name: base_name,
+        name: compiled.base_name,
         rust_file,
-        object_file,
-        entrypoints_proto_file: proto_file,
-        metadata: selected_metadata,
+        object_file: compiled.object_file,
+        entrypoints_proto_file: compiled.proto_file,
+        metadata: compiled.metadata,
     })
 }
 
@@ -1213,6 +1308,15 @@ struct TypedDslxTypecheckedModules {
     top_module: dslx::TypecheckedModule,
 }
 
+struct TypedDslxPackageModule {
+    canonical_path: PathBuf,
+    typechecked: dslx::TypecheckedModule,
+}
+
+struct TypedDslxPackageTypecheckedModules {
+    modules: Vec<TypedDslxPackageModule>,
+}
+
 /// A type annotation paired with the module context that owns it.
 struct ResolvedDslxTypeAnnotation<'a> {
     type_info: &'a dslx::TypeInfo,
@@ -1467,6 +1571,90 @@ fn typecheck_typed_dslx_modules(
     })
 }
 
+fn ensure_package_specs_compatible(specs: &[TypedDslxAotBuildSpec<'_>]) -> AotResult<()> {
+    let Some(first) = specs.first() else {
+        return Err(XlsynthError(
+            "AOT invalid argument: typed DSLX package must contain at least one entrypoint"
+                .to_string(),
+        ));
+    };
+    for spec in specs.iter().skip(1) {
+        if spec.dslx_options != first.dslx_options {
+            return Err(XlsynthError(
+                "AOT invalid argument: typed DSLX package entrypoints must use identical DSLX conversion options"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn typecheck_typed_dslx_package_modules(
+    specs: &[TypedDslxAotBuildSpec<'_>],
+) -> AotResult<TypedDslxPackageTypecheckedModules> {
+    ensure_package_specs_compatible(specs)?;
+    let first = &specs[0];
+    let mut import_data = dslx::ImportData::new(
+        first.dslx_options.dslx_stdlib_path,
+        &first.dslx_options.additional_search_paths,
+    );
+    let mut seen_paths = BTreeSet::new();
+    let mut modules = Vec::new();
+
+    for path in specs.iter().flat_map(|spec| spec.type_module_paths.iter()) {
+        let canonical_path = std::fs::canonicalize(path).map_err(|e| {
+            XlsynthError(format!(
+                "AOT I/O failed while resolving DSLX package module {}: {e}",
+                path.display()
+            ))
+        })?;
+        if seen_paths.insert(canonical_path.clone()) {
+            let dslx_text = std::fs::read_to_string(&canonical_path).map_err(|e| {
+                XlsynthError(format!(
+                    "AOT I/O failed for DSLX package module {}: {e}",
+                    canonical_path.display()
+                ))
+            })?;
+            let module_name = dslx_module_name_from_import_path(
+                &canonical_path,
+                &first.dslx_options.additional_search_paths,
+            )?;
+            modules.push(TypedDslxPackageModule {
+                canonical_path,
+                typechecked: parse_dslx_text_as_module(
+                    &dslx_text,
+                    path,
+                    &module_name,
+                    &mut import_data,
+                )?,
+            });
+        }
+    }
+
+    for spec in specs {
+        let canonical_path = std::fs::canonicalize(spec.dslx_path).map_err(|e| {
+            XlsynthError(format!(
+                "AOT I/O failed while resolving DSLX package top {}: {e}",
+                spec.dslx_path.display()
+            ))
+        })?;
+        if seen_paths.insert(canonical_path.clone()) {
+            let dslx_text = std::fs::read_to_string(&canonical_path).map_err(|e| {
+                XlsynthError(format!(
+                    "AOT I/O failed for DSLX package top {}: {e}",
+                    canonical_path.display()
+                ))
+            })?;
+            modules.push(TypedDslxPackageModule {
+                canonical_path,
+                typechecked: parse_dslx_file(&dslx_text, spec.dslx_path, &mut import_data)?,
+            });
+        }
+    }
+
+    Ok(TypedDslxPackageTypecheckedModules { modules })
+}
+
 /// Collects the module-local type definitions needed for typed AOT lowering.
 ///
 /// The result deliberately records struct definitions, not only names, because
@@ -1520,13 +1708,20 @@ impl TypedDslxTypeContext {
     /// from `type_module_paths` while still allowing return and parameter types
     /// declared in the top file.
     fn new(typechecked: &TypedDslxTypecheckedModules) -> Self {
-        let modules = typechecked
-            .bridge_modules
-            .iter()
-            .chain(std::iter::once(&typechecked.top_module))
-            .map(collect_module_context)
-            .collect();
-        Self { modules }
+        Self::from_modules(
+            typechecked
+                .bridge_modules
+                .iter()
+                .chain(std::iter::once(&typechecked.top_module)),
+        )
+    }
+
+    /// Builds lookup state from an arbitrary ordered set of typechecked
+    /// modules.
+    fn from_modules<'a>(modules: impl IntoIterator<Item = &'a dslx::TypecheckedModule>) -> Self {
+        Self {
+            modules: modules.into_iter().map(collect_module_context).collect(),
+        }
     }
 
     /// Finds a type alias by module and DSLX alias identifier.
@@ -2137,12 +2332,21 @@ fn collect_typed_concrete_parametric_structs(
     context: &TypedDslxTypeContext,
     typechecked: &TypedDslxTypecheckedModules,
 ) -> AotResult<Vec<TypedConcreteParametricStruct>> {
+    collect_typed_concrete_parametric_structs_from_modules(
+        context,
+        typechecked
+            .bridge_modules
+            .iter()
+            .chain(std::iter::once(&typechecked.top_module)),
+    )
+}
+
+fn collect_typed_concrete_parametric_structs_from_modules<'a>(
+    context: &TypedDslxTypeContext,
+    modules: impl IntoIterator<Item = &'a dslx::TypecheckedModule>,
+) -> AotResult<Vec<TypedConcreteParametricStruct>> {
     let mut collector = TypedConcreteParametricStructCollector::new(context);
-    for module in typechecked
-        .bridge_modules
-        .iter()
-        .chain(std::iter::once(&typechecked.top_module))
-    {
+    for module in modules {
         convert_imported_module(module, &mut collector)?;
     }
     Ok(collector.into_structs())
@@ -2358,8 +2562,8 @@ fn build_typed_dslx_function_signature(
     context: &TypedDslxTypeContext,
     top_module: &dslx::TypecheckedModule,
     top: &str,
+    rust_module_name: &str,
 ) -> AotResult<TypedAotFunctionSignature> {
-    let module_name = top_module.get_module().get_name();
     let type_info = top_module.get_type_info();
     let function = find_dslx_function(top_module, top)?;
     let params = (0..function.get_param_count())
@@ -2380,7 +2584,7 @@ fn build_typed_dslx_function_signature(
                 &concrete_type,
             )?;
             let rust_type = context.rust_type_path_for_resolved_type(
-                &module_name,
+                rust_module_name,
                 param_type_info,
                 Some(&annotation),
                 &concrete_type,
@@ -2390,7 +2594,7 @@ fn build_typed_dslx_function_signature(
                 rust_type: rust_type.clone(),
                 ty: lower_typed_dslx_type(
                     context,
-                    &module_name,
+                    rust_module_name,
                     param_type_info,
                     Some(&annotation),
                     &concrete_type,
@@ -2418,14 +2622,14 @@ fn build_typed_dslx_function_signature(
         &return_type,
     )?;
     let return_rust_type = context.rust_type_path_for_resolved_type(
-        &module_name,
+        rust_module_name,
         return_type_info,
         Some(&return_annotation),
         &return_type,
     )?;
     let typed_dslx_return_type = lower_typed_dslx_type(
         context,
-        &module_name,
+        rust_module_name,
         return_type_info,
         Some(&return_annotation),
         &return_type,
@@ -3124,8 +3328,13 @@ fn render_typed_dslx_generated_module(
 ) -> AotResult<String> {
     let typechecked = typecheck_typed_dslx_modules(spec, top_dslx_text)?;
     let context = TypedDslxTypeContext::new(&typechecked);
-    let typed_signature =
-        build_typed_dslx_function_signature(&context, &typechecked.top_module, spec.top)?;
+    let top_module_name = typechecked.top_module.get_module().get_name();
+    let typed_signature = build_typed_dslx_function_signature(
+        &context,
+        &typechecked.top_module,
+        spec.top,
+        &top_module_name,
+    )?;
     let runner_epilogue = render_typed_dslx_runner_epilogue(
         base_name,
         proto_file_name,
@@ -3160,7 +3369,6 @@ fn render_typed_dslx_generated_module(
         modules.push(builder.module_fragment());
     }
 
-    let top_module_name = typechecked.top_module.get_module().get_name();
     let mut top_builder = RustBridgeBuilder::new()
         .with_leading_items(
             leading_items_by_module
@@ -3182,6 +3390,134 @@ fn render_typed_dslx_generated_module(
         spec.name,
         render_rust_module_fragments(modules)
     ))
+}
+
+fn emit_typed_dslx_aot_package_with_out_dir(
+    builder: &TypedDslxAotPackageBuilder<'_>,
+    out_dir: &Path,
+) -> AotResult<GeneratedTypedDslxAotPackage> {
+    if builder.name.is_empty() {
+        return Err(XlsynthError(
+            "AOT invalid argument: typed DSLX package name must not be empty".to_string(),
+        ));
+    }
+    ensure_package_specs_compatible(&builder.specs)?;
+
+    let package_name = sanitize_identifier(builder.name);
+    let mut seen_entrypoint_names = BTreeSet::new();
+    let mut compiled = Vec::with_capacity(builder.specs.len());
+    for spec in &builder.specs {
+        let entrypoint = compile_typed_dslx_entrypoint_artifacts(spec, out_dir)?;
+        if !seen_entrypoint_names.insert(entrypoint.base_name.clone()) {
+            return Err(XlsynthError(format!(
+                "AOT invalid argument: typed DSLX package contains duplicate entrypoint name `{}`",
+                entrypoint.base_name
+            )));
+        }
+        compiled.push(entrypoint);
+    }
+
+    let typechecked = typecheck_typed_dslx_package_modules(&builder.specs)?;
+    let context = TypedDslxTypeContext::from_modules(
+        typechecked.modules.iter().map(|module| &module.typechecked),
+    );
+    let concrete_parametric_structs = collect_typed_concrete_parametric_structs_from_modules(
+        &context,
+        typechecked.modules.iter().map(|module| &module.typechecked),
+    )?;
+    let mut leading_items_by_module =
+        concrete_parametric_structs
+            .into_iter()
+            .fold(BTreeMap::new(), |mut items, item| {
+                items
+                    .entry(item.defining_module_name.clone())
+                    .or_insert_with(Vec::new)
+                    .push(render_typed_concrete_parametric_struct(&item));
+                items
+            });
+
+    let mut modules = Vec::with_capacity(typechecked.modules.len() + compiled.len());
+    for module in &typechecked.modules {
+        let module_name = module.typechecked.get_module().get_name();
+        let mut builder = RustBridgeBuilder::new()
+            .with_leading_items(
+                leading_items_by_module
+                    .remove(&module_name)
+                    .unwrap_or_default(),
+            )
+            .with_deferred_parametric_struct_emission();
+        convert_imported_module(&module.typechecked, &mut builder)?;
+        modules.push(builder.module_fragment());
+    }
+    if let Some((module_name, _)) = leading_items_by_module.into_iter().next() {
+        return Err(XlsynthError(format!(
+            "AOT typed DSLX specialization collection requires package module `{module_name}` to be emitted"
+        )));
+    }
+
+    for entrypoint in &compiled {
+        let canonical_top_path = std::fs::canonicalize(entrypoint.spec.dslx_path).map_err(|e| {
+            XlsynthError(format!(
+                "AOT I/O failed while resolving DSLX package top {}: {e}",
+                entrypoint.spec.dslx_path.display()
+            ))
+        })?;
+        let top_module = typechecked
+            .modules
+            .iter()
+            .find(|module| module.canonical_path == canonical_top_path)
+            .map(|module| &module.typechecked)
+            .ok_or_else(|| {
+                XlsynthError(format!(
+                    "AOT typed DSLX package could not find top module for {}",
+                    entrypoint.spec.dslx_path.display()
+                ))
+            })?;
+        let top_module_name = top_module.get_module().get_name();
+        let runner_module_name = format!("{top_module_name}.aot_{}", entrypoint.base_name);
+        let typed_signature = build_typed_dslx_function_signature(
+            &context,
+            top_module,
+            entrypoint.spec.top,
+            &runner_module_name,
+        )?;
+        let runner_epilogue = render_typed_dslx_runner_epilogue(
+            &entrypoint.base_name,
+            &entrypoint.proto_file_name,
+            &entrypoint.metadata,
+            &entrypoint.signature,
+            &typed_signature,
+        )?;
+        let mut runner_builder = RustBridgeBuilder::new()
+            .with_leading_items(["use super::*;".to_string()])
+            .with_runner_items(runner_epilogue);
+        runner_builder.start_module(&runner_module_name)?;
+        runner_builder.end_module(&runner_module_name)?;
+        modules.push(runner_builder.module_fragment());
+    }
+
+    let rust_file = out_dir.join(format!("{package_name}_typed_dslx_aot_package.rs"));
+    let generated = format!(
+        "// SPDX-License-Identifier: Apache-2.0\n// Generated by xlsynth::aot_builder from typed DSLX AOT package {:?}.\n\n{}\n",
+        builder.name,
+        render_rust_module_fragments(modules)
+    );
+    write_file(&rust_file, generated.as_bytes())?;
+    run_rustfmt_best_effort(&rust_file);
+
+    Ok(GeneratedTypedDslxAotPackage {
+        name: package_name,
+        rust_file,
+        entrypoints: compiled
+            .into_iter()
+            .map(|entrypoint| GeneratedTypedDslxAotEntrypoint {
+                name: entrypoint.base_name,
+                object_file: entrypoint.object_file,
+                entrypoints_proto_file: entrypoint.proto_file,
+                metadata: entrypoint.metadata,
+            })
+            .collect(),
+    })
 }
 
 /// Renders the generated Rust wrapper source for one compiled AOT entrypoint.
@@ -3499,7 +3835,7 @@ mod tests {
         let context = TypedDslxTypeContext::new(&typechecked);
 
         let typed_signature =
-            build_typed_dslx_function_signature(&context, &typechecked.top_module, "frob")
+            build_typed_dslx_function_signature(&context, &typechecked.top_module, "frob", "top")
                 .expect("duplicate struct names should resolve by defining module");
 
         assert_eq!(typed_signature.params.len(), 1);

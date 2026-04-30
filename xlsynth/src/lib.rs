@@ -54,7 +54,7 @@ pub fn dslx_path_to_module_name(path: &std::path::Path) -> Result<&str, XlsynthE
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default, Eq, PartialEq)]
 pub struct DslxConvertOptions<'a> {
     pub dslx_stdlib_path: Option<&'a std::path::Path>,
     pub additional_search_paths: Vec<&'a std::path::Path>,

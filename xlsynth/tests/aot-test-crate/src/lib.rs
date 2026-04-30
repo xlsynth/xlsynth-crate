@@ -78,6 +78,11 @@ pub mod duplicate_widget_aot {
     include!(env!("XLSYNTH_AOT_DUPLICATE_WIDGET_RS"));
 }
 
+/// Generated typed DSLX AOT package for shared public widget types.
+pub mod shared_widget_package_aot {
+    include!(env!("XLSYNTH_AOT_SHARED_WIDGET_PACKAGE_RS"));
+}
+
 #[cfg(test)]
 mod tests {
     use xlsynth::{IrSBits, IrUBits, XlsynthError};
@@ -349,6 +354,25 @@ mod tests {
         assert!(source.contains("pub mod bar"));
         assert!(source.contains("widget: &super::foo::widget::Widget"));
         assert!(source.contains(") -> Result<super::bar::widget::Widget, xlsynth::XlsynthError>"));
+        Ok(())
+    }
+
+    // Verifies: package-generated runners share one nominal Rust type universe.
+    // Catches: per-wrapper duplicate bridge types that require adapter rebuilds.
+    #[test]
+    fn package_builder_shares_nominal_types_across_runners() -> Result<(), XlsynthError> {
+        use super::shared_widget_package_aot::{
+            shared_widget_bump::aot_bump_widget, shared_widget_echo::aot_echo_widget,
+            shared_widget_types::Widget,
+        };
+
+        let input = Widget { widget_id: ub(7) };
+        let mut echo_runner = aot_echo_widget::new_runner()?;
+        let echoed = echo_runner.run(&input)?;
+        let mut bump_runner = aot_bump_widget::new_runner()?;
+        let bumped = bump_runner.run(&echoed)?;
+
+        assert_eq!(bumped.widget_id.to_u64()?, 8);
         Ok(())
     }
 }

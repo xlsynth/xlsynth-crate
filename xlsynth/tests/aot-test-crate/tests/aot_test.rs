@@ -9,7 +9,7 @@ use xlsynth_aot_test_crate::{
 };
 use xlsynth_test_helpers::compare_golden_text;
 
-fn generated_wrapper_golden_cases() -> [(&'static str, &'static str); 16] {
+fn generated_wrapper_golden_cases() -> [(&'static str, &'static str); 17] {
     [
         (
             env!("XLSYNTH_AOT_ADD_ONE_RS"),
@@ -74,6 +74,10 @@ fn generated_wrapper_golden_cases() -> [(&'static str, &'static str); 16] {
         (
             env!("XLSYNTH_AOT_DUPLICATE_WIDGET_RS"),
             "tests/goldens/duplicate_widget_wrapper.rs",
+        ),
+        (
+            env!("XLSYNTH_AOT_SHARED_WIDGET_PACKAGE_RS"),
+            "tests/goldens/shared_widget_package.rs",
         ),
     ]
 }
