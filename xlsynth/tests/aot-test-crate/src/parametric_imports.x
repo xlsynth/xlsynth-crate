@@ -16,22 +16,25 @@ struct Mixed<N: u32> {
     remote: parametric_lib::RemotePlain,
     nested: u8[N][2],
     boxes: Box<u32:8>[2],
+    remote_boxes: parametric_lib::RemoteBox<u32:8>[2],
 }
 
 type Mixed4 = Mixed<u32:4>;
-type ImportedAlias = parametric_lib::RemoteBox8;
 
 struct ParametricImportsResult {
     mixed: Mixed4,
-    imported_alias: ImportedAlias,
+    imported_direct: parametric_lib::RemoteBox<u32:8>,
+    imported_pair: parametric_lib::RemotePair<u32:8, u32:23>,
 }
 
 pub fn exercise_parametric_imports(
     mixed: Mixed4,
-    imported_alias: ImportedAlias,
+    imported_direct: parametric_lib::RemoteBox<u32:8>,
+    imported_pair: parametric_lib::RemotePair<u32:8, u32:23>,
 ) -> ParametricImportsResult {
     ParametricImportsResult {
         mixed,
-        imported_alias,
+        imported_direct,
+        imported_pair,
     }
 }

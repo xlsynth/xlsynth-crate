@@ -12,21 +12,21 @@ pub mod parametric_arrays {
         pub items: [IrUBits<8>; 4],
     }
 
-    pub type ArrayBox4 = ArrayBox__N_4;
-
     #[allow(non_camel_case_types)]
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct Box__N_8 {
         pub value: IrUBits<8>,
     }
 
-    pub type Box8Array4 = [Box__N_8; 4];
-
     #[allow(non_camel_case_types)]
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct Box__N_16 {
         pub value: IrUBits<16>,
     }
+
+    pub type ArrayBox4 = ArrayBox__N_4;
+
+    pub type Box8Array4 = [Box__N_8; 4];
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct OuterBox {

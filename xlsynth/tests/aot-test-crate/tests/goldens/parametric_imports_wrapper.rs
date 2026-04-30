@@ -6,6 +6,22 @@ pub mod parametric_imports {
     #![allow(unused_imports)]
     use xlsynth::{IrSBits, IrUBits, IrValue};
 
+    #[allow(non_camel_case_types)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Mixed__N_4 {
+        pub mode: LocalMode,
+        pub remote: super::parametric_lib::RemotePlain,
+        pub nested: [[IrUBits<8>; 4]; 2],
+        pub boxes: [Box__N_8; 2],
+        pub remote_boxes: [super::parametric_lib::RemoteBox__N_8; 2],
+    }
+
+    #[allow(non_camel_case_types)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Box__N_8 {
+        pub value: IrUBits<8>,
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum LocalMode {
         Idle = 0,
@@ -21,29 +37,13 @@ pub mod parametric_imports {
         }
     }
 
-    #[allow(non_camel_case_types)]
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct Box__N_8 {
-        pub value: IrUBits<8>,
-    }
-
-    #[allow(non_camel_case_types)]
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct Mixed__N_4 {
-        pub mode: LocalMode,
-        pub remote: super::parametric_lib::RemotePlain,
-        pub nested: [[IrUBits<8>; 4]; 2],
-        pub boxes: [Box__N_8; 2],
-    }
-
     pub type Mixed4 = Mixed__N_4;
-
-    pub type ImportedAlias = super::parametric_lib::RemoteBox8;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct ParametricImportsResult {
         pub mixed: Mixed4,
-        pub imported_alias: ImportedAlias,
+        pub imported_direct: super::parametric_lib::RemoteBox__N_8,
+        pub imported_pair: super::parametric_lib::RemotePair__A_8__B_23,
     }
 
     unsafe extern "C" {
@@ -52,9 +52,9 @@ pub mod parametric_imports {
     }
 
     const ENTRYPOINTS_PROTO: &[u8] = include_bytes!("parametric_imports.entrypoints.pb");
-    const INPUT_BUFFER_SIZES: &[usize] = &[12, 1];
-    const INPUT_BUFFER_ALIGNMENTS: &[usize] = &[8, 8];
-    const OUTPUT_BUFFER_SIZES: &[usize] = &[13];
+    const INPUT_BUFFER_SIZES: &[usize] = &[14, 1, 8];
+    const INPUT_BUFFER_ALIGNMENTS: &[usize] = &[8, 8, 8];
+    const OUTPUT_BUFFER_SIZES: &[usize] = &[24];
     const OUTPUT_BUFFER_ALIGNMENTS: &[usize] = &[8];
 
     const INPUT0_LAYOUT: &[xlsynth::aot_entrypoint_metadata::AotElementLayout] = &[
@@ -118,6 +118,16 @@ pub mod parametric_imports {
             data_size: 1,
             padded_size: 1,
         },
+        xlsynth::aot_entrypoint_metadata::AotElementLayout {
+            offset: 12,
+            data_size: 1,
+            padded_size: 1,
+        },
+        xlsynth::aot_entrypoint_metadata::AotElementLayout {
+            offset: 13,
+            data_size: 1,
+            padded_size: 1,
+        },
     ];
     const INPUT1_LAYOUT: &[xlsynth::aot_entrypoint_metadata::AotElementLayout] =
         &[xlsynth::aot_entrypoint_metadata::AotElementLayout {
@@ -125,6 +135,18 @@ pub mod parametric_imports {
             data_size: 1,
             padded_size: 1,
         }];
+    const INPUT2_LAYOUT: &[xlsynth::aot_entrypoint_metadata::AotElementLayout] = &[
+        xlsynth::aot_entrypoint_metadata::AotElementLayout {
+            offset: 0,
+            data_size: 1,
+            padded_size: 1,
+        },
+        xlsynth::aot_entrypoint_metadata::AotElementLayout {
+            offset: 4,
+            data_size: 3,
+            padded_size: 4,
+        },
+    ];
     const OUTPUT0_LAYOUT: &[xlsynth::aot_entrypoint_metadata::AotElementLayout] = &[
         xlsynth::aot_entrypoint_metadata::AotElementLayout {
             offset: 0,
@@ -191,11 +213,31 @@ pub mod parametric_imports {
             data_size: 1,
             padded_size: 1,
         },
+        xlsynth::aot_entrypoint_metadata::AotElementLayout {
+            offset: 13,
+            data_size: 1,
+            padded_size: 1,
+        },
+        xlsynth::aot_entrypoint_metadata::AotElementLayout {
+            offset: 14,
+            data_size: 1,
+            padded_size: 1,
+        },
+        xlsynth::aot_entrypoint_metadata::AotElementLayout {
+            offset: 16,
+            data_size: 1,
+            padded_size: 1,
+        },
+        xlsynth::aot_entrypoint_metadata::AotElementLayout {
+            offset: 20,
+            data_size: 3,
+            padded_size: 4,
+        },
     ];
 
     #[allow(clippy::deref_addrof, clippy::explicit_auto_deref, clippy::identity_op)]
     fn encode_input_0(_value: &Mixed4, dst: &mut [u8]) -> Result<(), xlsynth::XlsynthError> {
-        debug_assert_eq!(dst.len(), 12);
+        debug_assert_eq!(dst.len(), 14);
         dst.fill(0);
         let encoded_value: u64 = match (*_value).mode {
             LocalMode::Idle => 0,
@@ -224,12 +266,23 @@ pub mod parametric_imports {
                 &encoded_bytes,
             );
         }
-        debug_assert_eq!(INPUT0_LAYOUT.len(), 12);
+        for index_3 in 0..2 {
+            let encoded_bytes = ((((*_value).remote_boxes)[index_3]).value).to_le_bytes()?;
+            xlsynth::aot_runner::write_leaf_element(
+                dst,
+                &INPUT0_LAYOUT[0usize + 12 + index_3],
+                &encoded_bytes,
+            );
+        }
+        debug_assert_eq!(INPUT0_LAYOUT.len(), 14);
         Ok(())
     }
 
     #[allow(clippy::deref_addrof, clippy::explicit_auto_deref, clippy::identity_op)]
-    fn encode_input_1(_value: &ImportedAlias, dst: &mut [u8]) -> Result<(), xlsynth::XlsynthError> {
+    fn encode_input_1(
+        _value: &super::parametric_lib::RemoteBox__N_8,
+        dst: &mut [u8],
+    ) -> Result<(), xlsynth::XlsynthError> {
         debug_assert_eq!(dst.len(), 1);
         dst.fill(0);
         let encoded_bytes = ((*_value).value).to_le_bytes()?;
@@ -239,8 +292,23 @@ pub mod parametric_imports {
     }
 
     #[allow(clippy::deref_addrof, clippy::explicit_auto_deref, clippy::identity_op)]
+    fn encode_input_2(
+        _value: &super::parametric_lib::RemotePair__A_8__B_23,
+        dst: &mut [u8],
+    ) -> Result<(), xlsynth::XlsynthError> {
+        debug_assert_eq!(dst.len(), 8);
+        dst.fill(0);
+        let encoded_bytes = ((*_value).left).to_le_bytes()?;
+        xlsynth::aot_runner::write_leaf_element(dst, &INPUT2_LAYOUT[0usize], &encoded_bytes);
+        let encoded_bytes = ((*_value).right).to_le_bytes()?;
+        xlsynth::aot_runner::write_leaf_element(dst, &INPUT2_LAYOUT[0usize + 1], &encoded_bytes);
+        debug_assert_eq!(INPUT2_LAYOUT.len(), 2);
+        Ok(())
+    }
+
+    #[allow(clippy::deref_addrof, clippy::explicit_auto_deref, clippy::identity_op)]
     fn decode_output_0(src: &[u8]) -> Result<ParametricImportsResult, xlsynth::XlsynthError> {
-        debug_assert_eq!(src.len(), 13);
+        debug_assert_eq!(src.len(), 24);
         let mut decoded_bytes_0 = vec![0u8; 1];
         xlsynth::aot_runner::read_leaf_element(src, &OUTPUT0_LAYOUT[0usize], &mut decoded_bytes_0);
         let decoded_bits_1 = xlsynth::IrUBits::<2>::from_le_bytes(&decoded_bytes_0)?;
@@ -323,28 +391,72 @@ pub mod parametric_imports {
                     )))
                 }
             };
-        let decoded_value_18 = Mixed4 {
+        let mut decoded_items_19 = Vec::with_capacity(2);
+        for index_3 in 0..2 {
+            let mut decoded_bytes_20 = vec![0u8; 1];
+            xlsynth::aot_runner::read_leaf_element(
+                src,
+                &OUTPUT0_LAYOUT[0usize + 12 + index_3],
+                &mut decoded_bytes_20,
+            );
+            let decoded_value_21 = xlsynth::IrUBits::<8>::from_le_bytes(&decoded_bytes_20)?;
+            let decoded_value_22 = super::parametric_lib::RemoteBox__N_8 {
+                value: decoded_value_21,
+            };
+            decoded_items_19.push(decoded_value_22);
+        }
+        let decoded_value_18: [super::parametric_lib::RemoteBox__N_8; 2] =
+            match std::convert::TryInto::try_into(decoded_items_19) {
+                Ok(value) => value,
+                Err(values) => {
+                    return Err(xlsynth::XlsynthError(format!(
+                        "AOT decode internal error: expected 2 array elements, got {}",
+                        values.len()
+                    )))
+                }
+            };
+        let decoded_value_23 = Mixed4 {
             mode: decoded_value_3,
             remote: decoded_value_6,
             nested: decoded_value_7,
             boxes: decoded_value_13,
+            remote_boxes: decoded_value_18,
         };
-        let mut decoded_bytes_19 = vec![0u8; 1];
+        let mut decoded_bytes_24 = vec![0u8; 1];
         xlsynth::aot_runner::read_leaf_element(
             src,
-            &OUTPUT0_LAYOUT[0usize + 12],
-            &mut decoded_bytes_19,
+            &OUTPUT0_LAYOUT[0usize + 14],
+            &mut decoded_bytes_24,
         );
-        let decoded_value_20 = xlsynth::IrUBits::<8>::from_le_bytes(&decoded_bytes_19)?;
-        let decoded_value_21 = ImportedAlias {
-            value: decoded_value_20,
+        let decoded_value_25 = xlsynth::IrUBits::<8>::from_le_bytes(&decoded_bytes_24)?;
+        let decoded_value_26 = super::parametric_lib::RemoteBox__N_8 {
+            value: decoded_value_25,
         };
-        let decoded_value_22 = ParametricImportsResult {
-            mixed: decoded_value_18,
-            imported_alias: decoded_value_21,
+        let mut decoded_bytes_27 = vec![0u8; 1];
+        xlsynth::aot_runner::read_leaf_element(
+            src,
+            &OUTPUT0_LAYOUT[0usize + 15],
+            &mut decoded_bytes_27,
+        );
+        let decoded_value_28 = xlsynth::IrUBits::<8>::from_le_bytes(&decoded_bytes_27)?;
+        let mut decoded_bytes_29 = vec![0u8; 3];
+        xlsynth::aot_runner::read_leaf_element(
+            src,
+            &OUTPUT0_LAYOUT[0usize + 15 + 1],
+            &mut decoded_bytes_29,
+        );
+        let decoded_value_30 = xlsynth::IrUBits::<23>::from_le_bytes(&decoded_bytes_29)?;
+        let decoded_value_31 = super::parametric_lib::RemotePair__A_8__B_23 {
+            left: decoded_value_28,
+            right: decoded_value_30,
         };
-        debug_assert_eq!(OUTPUT0_LAYOUT.len(), 13);
-        Ok(decoded_value_22)
+        let decoded_value_32 = ParametricImportsResult {
+            mixed: decoded_value_23,
+            imported_direct: decoded_value_26,
+            imported_pair: decoded_value_31,
+        };
+        debug_assert_eq!(OUTPUT0_LAYOUT.len(), 17);
+        Ok(decoded_value_32)
     }
 
     pub fn descriptor() -> xlsynth::AotEntrypointDescriptor<'static> {
@@ -395,10 +507,12 @@ pub mod parametric_imports {
         pub fn run_with_events(
             &mut self,
             mixed: &Mixed4,
-            imported_alias: &ImportedAlias,
+            imported_direct: &super::parametric_lib::RemoteBox__N_8,
+            imported_pair: &super::parametric_lib::RemotePair__A_8__B_23,
         ) -> Result<xlsynth::AotRunResult<ParametricImportsResult>, xlsynth::XlsynthError> {
             encode_input_0(mixed, self.inner.input_mut(0))?;
-            encode_input_1(imported_alias, self.inner.input_mut(1))?;
+            encode_input_1(imported_direct, self.inner.input_mut(1))?;
+            encode_input_2(imported_pair, self.inner.input_mut(2))?;
             let result = self
                 .inner
                 .run_with_events(|inner| decode_output_0(inner.output(0)))?;
@@ -418,10 +532,12 @@ pub mod parametric_imports {
         pub fn run(
             &mut self,
             mixed: &Mixed4,
-            imported_alias: &ImportedAlias,
+            imported_direct: &super::parametric_lib::RemoteBox__N_8,
+            imported_pair: &super::parametric_lib::RemotePair__A_8__B_23,
         ) -> Result<ParametricImportsResult, xlsynth::XlsynthError> {
             encode_input_0(mixed, self.inner.input_mut(0))?;
-            encode_input_1(imported_alias, self.inner.input_mut(1))?;
+            encode_input_1(imported_direct, self.inner.input_mut(1))?;
+            encode_input_2(imported_pair, self.inner.input_mut(2))?;
             self.inner.run()?;
             decode_output_0(self.inner.output(0))
         }
@@ -437,15 +553,22 @@ pub mod parametric_lib {
     #![allow(unused_imports)]
     use xlsynth::{IrSBits, IrUBits, IrValue};
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct RemotePlain {
-        pub id: IrUBits<8>,
-    }
-
     #[allow(non_camel_case_types)]
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct RemoteBox__N_8 {
         pub value: IrUBits<8>,
+    }
+
+    #[allow(non_camel_case_types)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct RemotePair__A_8__B_23 {
+        pub left: IrUBits<8>,
+        pub right: IrUBits<23>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct RemotePlain {
+        pub id: IrUBits<8>,
     }
 
     pub type RemoteBox8 = RemoteBox__N_8;
