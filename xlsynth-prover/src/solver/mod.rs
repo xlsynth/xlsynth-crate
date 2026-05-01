@@ -155,6 +155,9 @@ pub trait Solver: Sized {
         start: usize,
         width: usize,
     ) -> BitVec<Self::Term> {
+        if width == 0 {
+            return BitVec::ZeroWidth;
+        }
         self.extract(bit_vec, (start + width - 1) as i32, start as i32)
     }
     fn not(&mut self, bit_vec: &BitVec<Self::Term>) -> BitVec<Self::Term>;
@@ -804,6 +807,12 @@ pub mod test_utils {
         );
     }
 
+    pub fn test_slice_zero_width<S: Solver>(solver: &mut S) {
+        let b = solver.numerical(16, 0x89ab);
+        let c = solver.slice(&b, 0, 0);
+        assert!(matches!(c, BitVec::ZeroWidth));
+    }
+
     pub fn assert_solver_eq<S: Solver>(
         solver: &mut S,
         lhs: &BitVec<S::Term>,
@@ -1152,6 +1161,12 @@ macro_rules! test_solver {
             fn test_slice() {
                 let mut solver = $solver;
                 test_utils::test_slice(&mut solver);
+            }
+
+            #[test]
+            fn test_slice_zero_width() {
+                let mut solver = $solver;
+                test_utils::test_slice_zero_width(&mut solver);
             }
 
             // New tests for declare_fresh symbol generation behavior

@@ -21,11 +21,11 @@ pub fn default_xlsynth_tools_path() -> PathBuf {
     path
 }
 
-/// Proves every DSLX quickcheck in `path` with the external XLS toolchain.
+/// Proves every DSLX quickcheck in `path` with the selected prover backend.
 pub fn assert_dslx_quickchecks_prove(path: &Path, additional_search_paths: &[&Path]) {
     let tool_path = default_xlsynth_tools_path();
     let stdlib_path = tool_path.join("xls/dslx/stdlib");
-    let prover = prover_for_choice(SolverChoice::Toolchain, Some(&tool_path));
+    let prover = prover_for_choice(SolverChoice::Auto, Some(&tool_path));
     let results = prover.prove_dslx_quickcheck(
         path,
         Some(&stdlib_path),
