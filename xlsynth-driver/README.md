@@ -1070,6 +1070,7 @@ Query expression basics:
   - String literals are supported in named args (e.g., `name="foo"`).
   - `name="foo"` is a universal named-arg matcher that checks the node's name.
   - `lsb_prio` accepts only `true`, `false`, or `_` and is rejected otherwise.
+  - Numeric attributes such as `start`, `width`, `new_bit_count`, and `index` can be captured with `$num(name)` for reuse by rewrite rules; use `_` when the value should match but remain unbound.
 
 Example:
 
@@ -1137,6 +1138,7 @@ Rewrite expression basics:
   - operator calls like `and(x, y)` or `sel(selector=p, cases=[x, x])`
   - named arguments where the rewritten operator accepts them
   - rewrite helpers like `$const(value=1, width=$width(x))`
+  - captured numeric attributes via `$num(name)`, including arithmetic such as `start=$num(s1)+$num(s2)`
 - Replacement expressions do not accept query-only constructs like `_`, `...`, or `$users(...)`.
 - If no match is found, the input package is emitted unchanged.
   - Use `--must-match` to make a no-match run fail instead.
@@ -1158,6 +1160,14 @@ Example: rewrite only operand slot 1 of node `id=42`:
 
 ```shell
 xlsynth-driver ir-rewrite my_pkg.ir 'literal(0)' '$const(value=1, width=8)' --target 42:1
+```
+
+Example: fold nested static slices while preserving the captured numeric attrs:
+
+```shell
+xlsynth-driver ir-rewrite my_pkg.ir \
+  'bit_slice(bit_slice(x, start=$num(s1), width=$num(w1)), start=$num(s2), width=$num(w2))' \
+  'bit_slice(x, start=$num(s1)+$num(s2), width=$num(w2))'
 ```
 
 ### `ir-query-corpus`

@@ -19,6 +19,7 @@ pub struct MatchPattern {
     query: ir_query::QueryExpr,
     node_binders: BTreeSet<String>,
     literal_binders: BTreeSet<String>,
+    numeric_binders: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -27,6 +28,7 @@ pub struct RewriteTemplate {
     expr: TemplateExpr,
     placeholder_refs: BTreeSet<String>,
     width_refs: BTreeSet<String>,
+    numeric_refs: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -183,6 +185,7 @@ pub enum MatchRewriteRuleBuildError {
     MixedBindingKind { name: String },
     UnboundRewritePlaceholder { name: String },
     WidthRequiresNodeBinding { name: String },
+    NumRequiresNumericBinding { name: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,7 +239,7 @@ impl fmt::Display for MatchRewriteRuleBuildError {
             MatchRewriteRuleBuildError::MixedBindingKind { name } => {
                 write!(
                     f,
-                    "match pattern binder '{}' is used as both a node binder and a literal-value binder",
+                    "match pattern binder '{}' is reused across multiple binding kinds",
                     name
                 )
             }
@@ -251,6 +254,13 @@ impl fmt::Display for MatchRewriteRuleBuildError {
                 write!(
                     f,
                     "$width({}) requires a node binder from the match pattern",
+                    name
+                )
+            }
+            MatchRewriteRuleBuildError::NumRequiresNumericBinding { name } => {
+                write!(
+                    f,
+                    "$num({}) requires a numeric binder from the match pattern",
                     name
                 )
             }
@@ -367,12 +377,20 @@ impl MatchPattern {
         let query = ir_query::parse_query(text).map_err(MatchPatternParseError::ParseError)?;
         let mut node_binders = BTreeSet::new();
         let mut literal_binders = BTreeSet::new();
-        collect_match_binders(&query, &mut node_binders, &mut literal_binders, false);
+        let mut numeric_binders = BTreeSet::new();
+        collect_match_binders(
+            &query,
+            &mut node_binders,
+            &mut literal_binders,
+            &mut numeric_binders,
+            false,
+        );
         Ok(Self {
             text: text.to_string(),
             query,
             node_binders,
             literal_binders,
+            numeric_binders,
         })
     }
 
@@ -395,12 +413,19 @@ impl RewriteTemplate {
         }
         let mut placeholder_refs = BTreeSet::new();
         let mut width_refs = BTreeSet::new();
-        collect_rewrite_refs(&expr, &mut placeholder_refs, &mut width_refs);
+        let mut numeric_refs = BTreeSet::new();
+        collect_rewrite_refs(
+            &expr,
+            &mut placeholder_refs,
+            &mut width_refs,
+            &mut numeric_refs,
+        );
         Ok(Self {
             text: text.to_string(),
             expr,
             placeholder_refs,
             width_refs,
+            numeric_refs,
         })
     }
 
@@ -414,11 +439,21 @@ impl MatchRewriteRule {
         match_pattern: MatchPattern,
         rewrite_template: RewriteTemplate,
     ) -> Result<Self, MatchRewriteRuleBuildError> {
-        if let Some(name) = match_pattern
+        let mixed_binding = match_pattern
             .node_binders
             .intersection(&match_pattern.literal_binders)
-            .next()
-        {
+            .chain(
+                match_pattern
+                    .node_binders
+                    .intersection(&match_pattern.numeric_binders),
+            )
+            .chain(
+                match_pattern
+                    .literal_binders
+                    .intersection(&match_pattern.numeric_binders),
+            )
+            .next();
+        if let Some(name) = mixed_binding {
             return Err(MatchRewriteRuleBuildError::MixedBindingKind { name: name.clone() });
         }
 
@@ -435,6 +470,14 @@ impl MatchRewriteRule {
         for name in &rewrite_template.width_refs {
             if !match_pattern.node_binders.contains(name) {
                 return Err(MatchRewriteRuleBuildError::WidthRequiresNodeBinding {
+                    name: name.clone(),
+                });
+            }
+        }
+
+        for name in &rewrite_template.numeric_refs {
+            if !match_pattern.numeric_binders.contains(name) {
+                return Err(MatchRewriteRuleBuildError::NumRequiresNumericBinding {
                     name: name.clone(),
                 });
             }
@@ -825,6 +868,12 @@ fn materialize_replacement_as_ref(
                 ensure_rewrite_preserves_root_type(&root_ty, ty)?;
                 push_node(state.f, ty.clone(), NodePayload::Literal(value.clone()))?
             }
+            Some(ir_query::Binding::NumericValue(_)) => {
+                return Err(MatchRewriteRuleApplyError::InvalidRewriteTemplate(format!(
+                    "numeric binding '{}' cannot be materialized as a node",
+                    name
+                )));
+            }
             None => {
                 return Err(MatchRewriteRuleApplyError::InvalidRewriteTemplate(format!(
                     "unknown placeholder '{}'",
@@ -952,6 +1001,7 @@ enum TemplateNamedArgValue {
 enum TemplateNumericExpr {
     Number(u64),
     Width(String),
+    Num(String),
     Add(Box<TemplateNumericExpr>, Box<TemplateNumericExpr>),
     Sub(Box<TemplateNumericExpr>, Box<TemplateNumericExpr>),
 }
@@ -960,6 +1010,7 @@ fn collect_match_binders(
     expr: &ir_query::QueryExpr,
     node_binders: &mut BTreeSet<String>,
     literal_binders: &mut BTreeSet<String>,
+    numeric_binders: &mut BTreeSet<String>,
     literal_context: bool,
 ) {
     match expr {
@@ -976,16 +1027,37 @@ fn collect_match_binders(
         ir_query::QueryExpr::Matcher(matcher) => {
             let literal_matcher = matches!(matcher.kind, ir_query::MatcherKind::Literal { .. });
             for arg in &matcher.args {
-                collect_match_binders(arg, node_binders, literal_binders, literal_matcher);
+                collect_match_binders(
+                    arg,
+                    node_binders,
+                    literal_binders,
+                    numeric_binders,
+                    literal_matcher,
+                );
             }
             for named_arg in &matcher.named_args {
                 match &named_arg.value {
+                    ir_query::NamedArgValue::Numeric(pattern) => {
+                        collect_match_numeric_binders(pattern, numeric_binders);
+                    }
                     ir_query::NamedArgValue::Expr(expr) => {
-                        collect_match_binders(expr, node_binders, literal_binders, false);
+                        collect_match_binders(
+                            expr,
+                            node_binders,
+                            literal_binders,
+                            numeric_binders,
+                            false,
+                        );
                     }
                     ir_query::NamedArgValue::ExprList(exprs) => {
                         for expr in exprs {
-                            collect_match_binders(expr, node_binders, literal_binders, false);
+                            collect_match_binders(
+                                expr,
+                                node_binders,
+                                literal_binders,
+                                numeric_binders,
+                                false,
+                            );
                         }
                     }
                     ir_query::NamedArgValue::Bool(_)
@@ -995,9 +1067,22 @@ fn collect_match_binders(
                 }
             }
         }
-        ir_query::QueryExpr::Number(_)
-        | ir_query::QueryExpr::Numeric(_)
-        | ir_query::QueryExpr::Ellipsis => {}
+        ir_query::QueryExpr::Numeric(_) => {}
+        ir_query::QueryExpr::Number(_) | ir_query::QueryExpr::Ellipsis => {}
+    }
+}
+
+fn collect_match_numeric_binders(
+    pattern: &ir_query::NumericPattern,
+    numeric_binders: &mut BTreeSet<String>,
+) {
+    match pattern {
+        ir_query::NumericPattern::Capture(name) => {
+            numeric_binders.insert(name.clone());
+        }
+        ir_query::NumericPattern::Any
+        | ir_query::NumericPattern::Exact(_)
+        | ir_query::NumericPattern::Expr(_) => {}
     }
 }
 
@@ -1005,31 +1090,32 @@ fn collect_rewrite_refs(
     expr: &TemplateExpr,
     placeholder_refs: &mut BTreeSet<String>,
     width_refs: &mut BTreeSet<String>,
+    numeric_refs: &mut BTreeSet<String>,
 ) {
     match expr {
         TemplateExpr::Placeholder(name) => {
             placeholder_refs.insert(name.clone());
         }
         TemplateExpr::Const(helper) => {
-            collect_numeric_refs(&helper.value, width_refs);
-            collect_numeric_refs(&helper.width, width_refs);
+            collect_numeric_refs(&helper.value, width_refs, numeric_refs);
+            collect_numeric_refs(&helper.width, width_refs, numeric_refs);
         }
         TemplateExpr::OperatorCall(call) => {
             for arg in &call.args {
-                collect_rewrite_refs(arg, placeholder_refs, width_refs);
+                collect_rewrite_refs(arg, placeholder_refs, width_refs, numeric_refs);
             }
             for named_arg in &call.named_args {
                 match &named_arg.value {
                     TemplateNamedArgValue::Expr(expr) => {
-                        collect_rewrite_refs(expr, placeholder_refs, width_refs);
+                        collect_rewrite_refs(expr, placeholder_refs, width_refs, numeric_refs);
                     }
                     TemplateNamedArgValue::ExprList(exprs) => {
                         for expr in exprs {
-                            collect_rewrite_refs(expr, placeholder_refs, width_refs);
+                            collect_rewrite_refs(expr, placeholder_refs, width_refs, numeric_refs);
                         }
                     }
                     TemplateNamedArgValue::Numeric(expr) => {
-                        collect_numeric_refs(expr, width_refs);
+                        collect_numeric_refs(expr, width_refs, numeric_refs);
                     }
                     TemplateNamedArgValue::Bool(_) | TemplateNamedArgValue::String(_) => {}
                 }
@@ -1038,15 +1124,22 @@ fn collect_rewrite_refs(
     }
 }
 
-fn collect_numeric_refs(expr: &TemplateNumericExpr, refs: &mut BTreeSet<String>) {
+fn collect_numeric_refs(
+    expr: &TemplateNumericExpr,
+    width_refs: &mut BTreeSet<String>,
+    numeric_refs: &mut BTreeSet<String>,
+) {
     match expr {
         TemplateNumericExpr::Number(_) => {}
         TemplateNumericExpr::Width(name) => {
-            refs.insert(name.clone());
+            width_refs.insert(name.clone());
+        }
+        TemplateNumericExpr::Num(name) => {
+            numeric_refs.insert(name.clone());
         }
         TemplateNumericExpr::Add(lhs, rhs) | TemplateNumericExpr::Sub(lhs, rhs) => {
-            collect_numeric_refs(lhs, refs);
-            collect_numeric_refs(rhs, refs);
+            collect_numeric_refs(lhs, width_refs, numeric_refs);
+            collect_numeric_refs(rhs, width_refs, numeric_refs);
         }
     }
 }
@@ -1077,6 +1170,7 @@ fn canonical_binding_value(binding: &ir_query::Binding) -> String {
     match binding {
         ir_query::Binding::Node(node_ref) => format!("node:{}", node_ref.index),
         ir_query::Binding::LiteralValue { value, ty } => canonical_literal_binding_key(value, ty),
+        ir_query::Binding::NumericValue(value) => format!("num:{}", value),
     }
 }
 
@@ -1151,6 +1245,12 @@ fn apply_rule_at_root(
                 .map_err(MatchRewriteRuleApplyError::Validation)?;
                 Ok(root_ref)
             }
+            Some(ir_query::Binding::NumericValue(_)) => {
+                Err(MatchRewriteRuleApplyError::InvalidRewriteTemplate(format!(
+                    "numeric binding '{}' cannot be materialized as a node",
+                    name
+                )))
+            }
             None => Err(MatchRewriteRuleApplyError::InvalidRewriteTemplate(format!(
                 "unknown placeholder '{}'",
                 name
@@ -1206,6 +1306,12 @@ fn materialize_expr(
                 let node_ref = push_node(state.f, ty.clone(), NodePayload::Literal(value.clone()))?;
                 state.literal_cache.insert(name.clone(), node_ref);
                 Ok(node_ref)
+            }
+            Some(ir_query::Binding::NumericValue(_)) => {
+                Err(MatchRewriteRuleApplyError::InvalidRewriteTemplate(format!(
+                    "numeric binding '{}' cannot be materialized as a node",
+                    name
+                )))
             }
             None => Err(MatchRewriteRuleApplyError::InvalidRewriteTemplate(format!(
                 "unknown placeholder '{}'",
@@ -1672,12 +1778,24 @@ fn eval_numeric_expr(
                 Some(ir_query::Binding::Node(node_ref)) => {
                     Ok(i128::try_from(state.f.get_node_ty(*node_ref).bit_count()).unwrap())
                 }
-                Some(ir_query::Binding::LiteralValue { .. }) => {
+                Some(ir_query::Binding::LiteralValue { .. })
+                | Some(ir_query::Binding::NumericValue(_)) => {
                     Err(MatchRewriteRuleApplyError::NumericEvaluation(format!(
                         "$width({}) requires a node binding",
                         name
                     )))
                 }
+                None => Err(MatchRewriteRuleApplyError::NumericEvaluation(format!(
+                    "unknown numeric placeholder '{}'",
+                    name
+                ))),
+            },
+            TemplateNumericExpr::Num(name) => match state.bindings.get(name) {
+                Some(ir_query::Binding::NumericValue(value)) => Ok(i128::try_from(*value).unwrap()),
+                Some(_) => Err(MatchRewriteRuleApplyError::NumericEvaluation(format!(
+                    "$num({}) requires a numeric binding",
+                    name
+                ))),
                 None => Err(MatchRewriteRuleApplyError::NumericEvaluation(format!(
                     "unknown numeric placeholder '{}'",
                     name
@@ -1941,7 +2059,9 @@ impl<'a> RewriteTemplateParser<'a> {
             }
             Some(b'(') => TemplateNamedArgValue::Numeric(self.parse_numeric_expr()?),
             Some(b'$') => match self.peek_dollar_ident() {
-                Some("width") => TemplateNamedArgValue::Numeric(self.parse_numeric_expr()?),
+                Some("width") | Some("num") => {
+                    TemplateNamedArgValue::Numeric(self.parse_numeric_expr()?)
+                }
                 Some("const") => TemplateNamedArgValue::Expr(self.parse_expr()?),
                 Some(other) => {
                     return Err(self.error(&format!(
@@ -2022,13 +2142,26 @@ impl<'a> RewriteTemplateParser<'a> {
             Some(b'$') => {
                 self.bump();
                 let ident = self.parse_ident("numeric expression")?;
-                if ident != "width" {
-                    return Err(self.error(&format!("unknown numeric helper ${}", ident)));
+                match ident.as_str() {
+                    "width" => {
+                        self.expect('(')?;
+                        let name = self.parse_ident("placeholder")?;
+                        self.expect(')')?;
+                        Ok(TemplateNumericExpr::Width(name))
+                    }
+                    "num" => {
+                        self.expect('(')?;
+                        let name = self.parse_ident("numeric binding")?;
+                        if name == "_" {
+                            return Err(self.error(
+                                "$num(_) is not supported because '_' does not create a binding",
+                            ));
+                        }
+                        self.expect(')')?;
+                        Ok(TemplateNumericExpr::Num(name))
+                    }
+                    _ => Err(self.error(&format!("unknown numeric helper ${}", ident))),
                 }
-                self.expect('(')?;
-                let name = self.parse_ident("placeholder")?;
-                self.expect(')')?;
-                Ok(TemplateNumericExpr::Width(name))
             }
             Some(c) if c.is_ascii_digit() => {
                 Ok(TemplateNumericExpr::Number(self.parse_u64("number")?))
@@ -2253,6 +2386,31 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_template_parse_accepts_numeric_binding_exprs() {
+        let template =
+            RewriteTemplate::parse("bit_slice(x, start=$num(s1)+$num(s2), width=$num(w))").unwrap();
+        assert_eq!(
+            template.text,
+            "bit_slice(x, start=$num(s1)+$num(s2), width=$num(w))"
+        );
+        assert!(template.placeholder_refs.contains("x"));
+        assert_eq!(
+            template.numeric_refs,
+            BTreeSet::from(["s1".to_string(), "s2".to_string(), "w".to_string()])
+        );
+    }
+
+    #[test]
+    fn rewrite_template_parse_rejects_wildcard_numeric_binding() {
+        let err = RewriteTemplate::parse("bit_slice(x, start=$num(_), width=1)").unwrap_err();
+        assert!(
+            err.to_string().contains("$num(_) is not supported"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
     fn rewrite_template_parse_preserves_utf8_string_literals() {
         let template =
             RewriteTemplate::parse(r#"assert(tok, pred, message="µ\n", label="µ")"#).unwrap();
@@ -2315,6 +2473,32 @@ mod tests {
             err,
             MatchRewriteRuleBuildError::MixedBindingKind {
                 name: "x".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn match_rewrite_rule_new_rejects_numeric_binding_kind_reuse() {
+        let pattern = MatchPattern::parse("bit_slice(x, start=$num(x), width=1)").unwrap();
+        let template = RewriteTemplate::parse("x").unwrap();
+        let err = MatchRewriteRule::new(pattern, template).unwrap_err();
+        assert_eq!(
+            err,
+            MatchRewriteRuleBuildError::MixedBindingKind {
+                name: "x".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn match_rewrite_rule_new_rejects_unbound_numeric_placeholder() {
+        let pattern = MatchPattern::parse("bit_slice(x, start=0, width=1)").unwrap();
+        let template = RewriteTemplate::parse("bit_slice(x, start=$num(s), width=1)").unwrap();
+        let err = MatchRewriteRule::new(pattern, template).unwrap_err();
+        assert_eq!(
+            err,
+            MatchRewriteRuleBuildError::NumRequiresNumericBinding {
+                name: "s".to_string()
             }
         );
     }
@@ -2603,6 +2787,76 @@ mod tests {
         assert!(
             out_text.contains("literal(value=1"),
             "expected one literal in output:\n{}",
+            out_text
+        );
+    }
+
+    #[test]
+    fn apply_rewrite_supports_numeric_binding_arithmetic() {
+        let ir_text = r#"fn t(x: bits[8] id=1) -> bits[2] {
+  inner: bits[5] = bit_slice(x, start=1, width=5, id=2)
+  ret outer: bits[2] = bit_slice(inner, start=2, width=2, id=3)
+}"#;
+        let rule = MatchRewriteRule::from_strings(
+            "bit_slice(bit_slice(x, start=$num(s1), width=$num(w1)), start=$num(s2), width=$num(w2))",
+            "bit_slice(x, start=$num(s1)+$num(s2), width=$num(w2))",
+        )
+        .unwrap();
+        let outcome = rule
+            .apply_to_fn(&parse_fn(ir_text), RewriteApplyMode::FirstMatch)
+            .unwrap();
+        let out_text = outcome.rewritten_fn().to_string();
+        assert!(
+            out_text.contains("bit_slice(x, start=3, width=2"),
+            "expected folded slice in output:\n{}",
+            out_text
+        );
+    }
+
+    #[test]
+    fn apply_rewrite_reuses_numeric_bindings_for_bit_slice_distribution() {
+        let ir_text = r#"fn t(p: bits[1] id=1, a: bits[8] id=2, b: bits[8] id=3) -> bits[3] {
+  s: bits[8] = sel(p, cases=[a, b], id=4)
+  ret out: bits[3] = bit_slice(s, start=2, width=3, id=5)
+}"#;
+        let rule = MatchRewriteRule::from_strings(
+            "bit_slice(sel(selector=p, cases=[a, b]), start=$num(s), width=$num(w))",
+            "sel(selector=p, cases=[bit_slice(a, start=$num(s), width=$num(w)), bit_slice(b, start=$num(s), width=$num(w))])",
+        )
+        .unwrap();
+        let outcome = rule
+            .apply_to_fn(&parse_fn(ir_text), RewriteApplyMode::FirstMatch)
+            .unwrap();
+        let out_text = outcome.rewritten_fn().to_string();
+        assert!(
+            out_text.contains("sel(")
+                && out_text.matches("bit_slice(").count() == 2
+                && out_text.matches("start=2, width=3").count() == 2,
+            "expected distributed bit_slices in output:\n{}",
+            out_text
+        );
+    }
+
+    #[test]
+    fn apply_rewrite_reuses_numeric_bindings_for_ext_distribution() {
+        let ir_text = r#"fn t(p: bits[1] id=1, a: bits[4] id=2, b: bits[4] id=3) -> bits[8] {
+  s: bits[4] = sel(p, cases=[a, b], id=4)
+  ret out: bits[8] = sign_ext(s, new_bit_count=8, id=5)
+}"#;
+        let rule = MatchRewriteRule::from_strings(
+            "sign_ext(sel(selector=p, cases=[a, b]), new_bit_count=$num(n))",
+            "sel(selector=p, cases=[sign_ext(a, new_bit_count=$num(n)), sign_ext(b, new_bit_count=$num(n))])",
+        )
+        .unwrap();
+        let outcome = rule
+            .apply_to_fn(&parse_fn(ir_text), RewriteApplyMode::FirstMatch)
+            .unwrap();
+        let out_text = outcome.rewritten_fn().to_string();
+        assert!(
+            out_text.contains("sel(")
+                && out_text.matches("sign_ext(").count() == 2
+                && out_text.matches("new_bit_count=8").count() == 2,
+            "expected distributed sign_exts in output:\n{}",
             out_text
         );
     }

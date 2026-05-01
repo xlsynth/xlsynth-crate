@@ -82,6 +82,7 @@ pub enum NamedArgValue {
     Number(usize),
     Any,
     String(String),
+    Numeric(NumericPattern),
     Expr(QueryExpr),
     ExprList(Vec<QueryExpr>),
 }
@@ -92,6 +93,14 @@ pub enum NumericExpr {
     Width(PlaceholderExpr),
     Add(Box<NumericExpr>, Box<NumericExpr>),
     Sub(Box<NumericExpr>, Box<NumericExpr>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NumericPattern {
+    Any,
+    Exact(usize),
+    Expr(NumericExpr),
+    Capture(String),
 }
 
 impl MatcherKind {
@@ -172,6 +181,7 @@ fn validate_ellipsis_placement(expr: &QueryExpr) -> Result<(), String> {
                         | NamedArgValue::Bool(_)
                         | NamedArgValue::Number(_)
                         | NamedArgValue::String(_) => {}
+                        NamedArgValue::Numeric(_) => {}
                         NamedArgValue::Expr(e) => walk(e, /* ellipsis_allowed_here= */ false)?,
                         NamedArgValue::ExprList(es) => {
                             let allow_in_list = na.name.as_str() == "cases";
@@ -235,6 +245,23 @@ fn validate_width_matcher_placement(expr: &QueryExpr) -> Result<(), String> {
         }
     }
 
+    fn validate_numeric_pattern(pattern: &NumericPattern) -> Result<(), String> {
+        match pattern {
+            NumericPattern::Any | NumericPattern::Exact(_) => Ok(()),
+            NumericPattern::Expr(expr) => validate_numeric_expr(expr),
+            NumericPattern::Capture(name) => {
+                if name == "_" {
+                    Err(
+                        "$num(_) is not supported because '_' does not create a binding"
+                            .to_string(),
+                    )
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
     fn walk(expr: &QueryExpr, width_allowed_here: bool) -> Result<(), String> {
         match expr {
             QueryExpr::Ellipsis | QueryExpr::Placeholder(_) | QueryExpr::Number(_) => Ok(()),
@@ -288,8 +315,9 @@ fn validate_width_matcher_placement(expr: &QueryExpr) -> Result<(), String> {
                         | NamedArgValue::Bool(_)
                         | NamedArgValue::Number(_)
                         | NamedArgValue::String(_) => {}
+                        NamedArgValue::Numeric(pattern) => validate_numeric_pattern(pattern)?,
                         NamedArgValue::Expr(e) => {
-                            let allow = na.name.as_str() == "start" || na.name.as_str() == "width";
+                            let allow = is_numeric_named_arg_name(na.name.as_str());
                             walk(e, /* width_allowed_here= */ allow)?;
                         }
                         NamedArgValue::ExprList(es) => {
@@ -332,6 +360,7 @@ pub fn matches_node(f: &ir::Fn, query: &QueryExpr, node_ref: ir::NodeRef) -> boo
 pub(crate) enum Binding {
     Node(ir::NodeRef),
     LiteralValue { value: IrValue, ty: ir::Type },
+    NumericValue(usize),
 }
 
 type Bindings = HashMap<String, Binding>;
@@ -709,45 +738,6 @@ fn eval_numeric_expr(expr: &NumericExpr, f: &ir::Fn, bindings: &Bindings) -> Opt
     usize::try_from(value).ok()
 }
 
-fn eval_query_numeric_expr(expr: &QueryExpr, f: &ir::Fn, bindings: &Bindings) -> Option<usize> {
-    match expr {
-        QueryExpr::Number(number) => usize::try_from(*number).ok(),
-        QueryExpr::Numeric(expr) => eval_numeric_expr(expr, f, bindings),
-        QueryExpr::Matcher(matcher) if matches!(matcher.kind, MatcherKind::Width) => {
-            eval_width_expr(matcher, f, bindings)
-        }
-        _ => None,
-    }
-}
-
-fn eval_width_expr(matcher: &MatcherExpr, f: &ir::Fn, bindings: &Bindings) -> Option<usize> {
-    if matcher.args.len() != 1 {
-        return None;
-    }
-    match &matcher.args[0] {
-        QueryExpr::Placeholder(placeholder) => {
-            if placeholder.name == "_" {
-                return None;
-            }
-            match bindings.get(&placeholder.name) {
-                Some(Binding::Node(nr)) => {
-                    if let Some(ty) = &placeholder.ty {
-                        if f.get_node_ty(*nr) != ty {
-                            None
-                        } else {
-                            Some(f.get_node_ty(*nr).bit_count())
-                        }
-                    } else {
-                        Some(f.get_node_ty(*nr).bit_count())
-                    }
-                }
-                _ => None,
-            }
-        }
-        _ => None,
-    }
-}
-
 /// Matches the query arguments against a node's operands.
 fn match_args_solutions(
     args: &[QueryExpr],
@@ -936,6 +926,11 @@ fn match_named_args_solutions(
                 next.extend(matched);
                 continue;
             }
+            if let Some(actual) = numeric_named_arg_value(payload, arg.name.as_str()) {
+                matched = match_numeric_named_arg(&arg.value, actual, f, b);
+                next.extend(matched);
+                continue;
+            }
             match payload {
                 ir::NodePayload::RegisterRead { register }
                 | ir::NodePayload::RegisterWrite { register, .. }
@@ -949,28 +944,6 @@ fn match_named_args_solutions(
                             }
                         }
                         _ => {}
-                    }
-                }
-                ir::NodePayload::BitSlice { start, width, .. } => {
-                    let actual: usize = match arg.name.as_str() {
-                        "width" => *width,
-                        "start" => *start,
-                        _ => continue,
-                    };
-
-                    let expected: Option<usize> = match &arg.value {
-                        NamedArgValue::Any => None,
-                        NamedArgValue::Number(v) => Some(*v),
-                        NamedArgValue::Expr(expr) => eval_query_numeric_expr(expr, f, b),
-                        _ => None,
-                    };
-
-                    if let Some(v) = expected {
-                        if v == actual {
-                            matched.push(b.clone());
-                        }
-                    } else if matches!(arg.value, NamedArgValue::Any) {
-                        matched.push(b.clone());
                     }
                 }
                 ir::NodePayload::OneHot { lsb_prio, .. } => {
@@ -1014,6 +987,66 @@ fn match_named_args_solutions(
         partials = next;
     }
     partials
+}
+
+fn match_numeric_named_arg(
+    value: &NamedArgValue,
+    actual: usize,
+    f: &ir::Fn,
+    bindings: &Bindings,
+) -> Vec<Bindings> {
+    match value {
+        NamedArgValue::Numeric(NumericPattern::Any) => vec![bindings.clone()],
+        NamedArgValue::Numeric(NumericPattern::Exact(expected)) => {
+            if *expected == actual {
+                vec![bindings.clone()]
+            } else {
+                vec![]
+            }
+        }
+        NamedArgValue::Numeric(NumericPattern::Capture(name)) => match bindings.get(name) {
+            Some(Binding::NumericValue(existing)) if *existing == actual => {
+                vec![bindings.clone()]
+            }
+            Some(_) => vec![],
+            None => {
+                let mut out = bindings.clone();
+                out.insert(name.clone(), Binding::NumericValue(actual));
+                vec![out]
+            }
+        },
+        NamedArgValue::Numeric(NumericPattern::Expr(expr)) => {
+            if eval_numeric_expr(expr, f, bindings) == Some(actual) {
+                vec![bindings.clone()]
+            } else {
+                vec![]
+            }
+        }
+        NamedArgValue::Any
+        | NamedArgValue::Bool(_)
+        | NamedArgValue::Number(_)
+        | NamedArgValue::String(_)
+        | NamedArgValue::Expr(_)
+        | NamedArgValue::ExprList(_) => vec![],
+    }
+}
+
+fn numeric_named_arg_value(payload: &ir::NodePayload, name: &str) -> Option<usize> {
+    match (payload, name) {
+        (ir::NodePayload::BitSlice { start, .. }, "start") => Some(*start),
+        (ir::NodePayload::BitSlice { width, .. }, "width") => Some(*width),
+        (ir::NodePayload::DynamicBitSlice { width, .. }, "width") => Some(*width),
+        (ir::NodePayload::ArraySlice { width, .. }, "width") => Some(*width),
+        (ir::NodePayload::TupleIndex { index, .. }, "index") => Some(*index),
+        (ir::NodePayload::SignExt { new_bit_count, .. }, "new_bit_count") => Some(*new_bit_count),
+        (ir::NodePayload::ZeroExt { new_bit_count, .. }, "new_bit_count") => Some(*new_bit_count),
+        (ir::NodePayload::Decode { width, .. }, "width") => Some(*width),
+        _ => None,
+    }
+}
+
+fn is_numeric_named_arg_name(name: &str) -> bool {
+    matches!(name, "start" | "width" | "new_bit_count" | "index")
 }
 
 fn match_select_named_arg(
@@ -1174,6 +1207,40 @@ mod tests {
         assert_eq!(
             err,
             "$width(_) is not supported because '_' does not create a binding"
+        );
+    }
+
+    #[test]
+    fn parse_accepts_numeric_bindings_for_supported_named_args() {
+        for query in [
+            "bit_slice(x, start=$num(s), width=$num(w))",
+            "dynamic_bit_slice(x, s, width=$num(w))",
+            "array_slice(a, s, width=$num(w))",
+            "tuple_index(t, index=$num(i))",
+            "sign_ext(x, new_bit_count=$num(n))",
+            "zero_ext(x, new_bit_count=$num(n))",
+            "decode(x, width=$num(w))",
+        ] {
+            parse_query(query).unwrap_or_else(|err| panic!("query should parse: {query}: {err}"));
+        }
+    }
+
+    #[test]
+    fn parse_rejects_wildcard_inside_num_matcher() {
+        let err = parse_query("bit_slice(x, start=$num(_), width=1)").unwrap_err();
+        assert!(
+            err.contains("$num(_) is not supported"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn parse_rejects_numeric_binding_arithmetic_in_match_patterns() {
+        let err = parse_query("bit_slice(x, start=$num(s)+1, width=1)").unwrap_err();
+        assert_eq!(
+            err,
+            "$num(...) is only valid as a standalone numeric named-arg binding"
         );
     }
 
@@ -1646,6 +1713,155 @@ fn main(t: bits[8] id=1) -> bits[1] {
         assert_eq!(matches.len(), 1);
         let node_id = ir::node_textual_id(f, matches[0]);
         assert_eq!(node_id, "slice");
+    }
+
+    #[test]
+    fn find_matches_repeated_numeric_binding() {
+        let pkg_text = r#"package test
+
+fn main(x: bits[8] id=1) -> (bits[2], bits[2]) {
+  inner_same: bits[5] = bit_slice(x, start=2, width=5, id=2)
+  same: bits[2] = bit_slice(inner_same, start=2, width=2, id=3)
+  inner_diff: bits[5] = bit_slice(x, start=1, width=5, id=4)
+  diff: bits[2] = bit_slice(inner_diff, start=2, width=2, id=5)
+  ret out: (bits[2], bits[2]) = tuple(same, diff, id=6)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+
+        let query =
+            parse_query("bit_slice(bit_slice(x, start=$num(s), width=_), start=$num(s), width=_)")
+                .unwrap();
+        let matches = find_matching_nodes(f, &query);
+        assert_eq!(matches.len(), 1);
+        let node_id = ir::node_textual_id(f, matches[0]);
+        assert_eq!(node_id, "same");
+    }
+
+    #[test]
+    fn find_matches_numeric_bindings_for_all_supported_attr_families() {
+        let pkg_text = r#"package test
+
+fn main(
+  x: bits[8] id=1,
+  start: bits[3] id=2,
+  arr: bits[4][4] id=3,
+  tup: (bits[2], bits[3]) id=4,
+  x4: bits[4] id=5,
+  x2: bits[2] id=6
+) -> (bits[3], bits[4][2], bits[3], bits[8], bits[8], bits[4]) {
+  dyn: bits[3] = dynamic_bit_slice(x, start, width=3, id=7)
+  arr_slice: bits[4][2] = array_slice(arr, start, width=2, id=8)
+  idx: bits[3] = tuple_index(tup, index=1, id=9)
+  sx: bits[8] = sign_ext(x4, new_bit_count=8, id=10)
+  zx: bits[8] = zero_ext(x4, new_bit_count=8, id=11)
+  dec: bits[4] = decode(x2, width=4, id=12)
+  ret out: (bits[3], bits[4][2], bits[3], bits[8], bits[8], bits[4]) =
+    tuple(dyn, arr_slice, idx, sx, zx, dec, id=13)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+
+        for (query_text, expected_id) in [
+            ("dynamic_bit_slice(_, _, width=$num(w))", "dyn"),
+            ("array_slice(_, _, width=$num(w))", "arr_slice"),
+            ("tuple_index(_, index=$num(i))", "idx"),
+            ("sign_ext(_, new_bit_count=$num(n))", "sx"),
+            ("zero_ext(_, new_bit_count=$num(n))", "zx"),
+            ("decode(_, width=$num(w))", "dec"),
+        ] {
+            let query = parse_query(query_text).unwrap();
+            let matches = find_matching_nodes(f, &query);
+            assert_eq!(matches.len(), 1, "query should match once: {query_text}");
+            assert_eq!(ir::node_textual_id(f, matches[0]), expected_id);
+        }
+    }
+
+    #[test]
+    fn numeric_named_arg_value_supports_all_rewrite_numeric_attrs() {
+        let r0 = ir::NodeRef { index: 0 };
+        assert_eq!(
+            numeric_named_arg_value(
+                &ir::NodePayload::BitSlice {
+                    arg: r0,
+                    start: 3,
+                    width: 5,
+                },
+                "start",
+            ),
+            Some(3)
+        );
+        assert_eq!(
+            numeric_named_arg_value(
+                &ir::NodePayload::BitSlice {
+                    arg: r0,
+                    start: 3,
+                    width: 5,
+                },
+                "width",
+            ),
+            Some(5)
+        );
+        assert_eq!(
+            numeric_named_arg_value(
+                &ir::NodePayload::DynamicBitSlice {
+                    arg: r0,
+                    start: r0,
+                    width: 7,
+                },
+                "width",
+            ),
+            Some(7)
+        );
+        assert_eq!(
+            numeric_named_arg_value(
+                &ir::NodePayload::ArraySlice {
+                    array: r0,
+                    start: r0,
+                    width: 2,
+                },
+                "width",
+            ),
+            Some(2)
+        );
+        assert_eq!(
+            numeric_named_arg_value(
+                &ir::NodePayload::TupleIndex {
+                    tuple: r0,
+                    index: 1,
+                },
+                "index",
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            numeric_named_arg_value(
+                &ir::NodePayload::SignExt {
+                    arg: r0,
+                    new_bit_count: 9,
+                },
+                "new_bit_count",
+            ),
+            Some(9)
+        );
+        assert_eq!(
+            numeric_named_arg_value(
+                &ir::NodePayload::ZeroExt {
+                    arg: r0,
+                    new_bit_count: 10,
+                },
+                "new_bit_count",
+            ),
+            Some(10)
+        );
+        assert_eq!(
+            numeric_named_arg_value(&ir::NodePayload::Decode { arg: r0, width: 4 }, "width",),
+            Some(4)
+        );
     }
 
     #[test]
