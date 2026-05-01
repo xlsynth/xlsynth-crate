@@ -2,6 +2,8 @@
 
 use sha2::Digest;
 use std::io::BufRead;
+#[cfg(unix)]
+use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -732,6 +734,128 @@ fn emit_link_directives_for_managed_dso(
     }
 }
 
+/// Returns Cargo's profile-level `deps` directory for this build script.
+///
+/// Cargo sets `OUT_DIR` to:
+///
+/// ```text
+/// target/<profile>/build/<pkg-hash>/out
+/// ```
+///
+/// When Cargo runs host binaries it just built, including downstream `build.rs`
+/// executables, it includes `target/<profile>/deps` in
+/// `LD_LIBRARY_PATH`/`DYLD_FALLBACK_LIBRARY_PATH`. `OUT_DIR` itself is not in
+/// that loader path, so a DSO that only lives in `OUT_DIR` can link
+/// successfully but fail when a dependent build script starts.
+fn cargo_profile_deps_dir(out_dir: &Path) -> Option<PathBuf> {
+    let build_script_dir = out_dir.parent()?;
+    let build_dir = build_script_dir.parent()?;
+    if build_dir.file_name()? != "build" {
+        return None;
+    }
+    Some(build_dir.parent()?.join("deps"))
+}
+
+/// Stages a managed XLS DSO into Cargo's profile-level `deps` directory.
+///
+/// `cargo:rustc-link-search` is enough for rustc to find `libxls` at link
+/// time. It does not make `OUT_DIR` visible to the dynamic loader when Cargo
+/// later runs a downstream build script linked to `xlsynth-sys`.
+///
+/// `cargo:rustc-link-arg=-Wl,-rpath,...` helps binaries built directly from
+/// this package, but Cargo does not propagate that rpath into dependent
+/// build-script executables. Staging the managed DSO into Cargo's `deps`
+/// directory uses the loader path Cargo already provides for host binaries.
+fn stage_managed_dso_for_cargo_runtime(out_dir: &Path, dso_filename: &str) {
+    let Some(deps_dir) = cargo_profile_deps_dir(out_dir) else {
+        println!(
+            "cargo:warning=Could not infer Cargo deps directory from OUT_DIR={}",
+            out_dir.display()
+        );
+        return;
+    };
+    if let Err(error) = std::fs::create_dir_all(&deps_dir) {
+        println!(
+            "cargo:warning=Could not create Cargo deps directory {} for XLS DSO: {}",
+            deps_dir.display(),
+            error
+        );
+        return;
+    }
+
+    let dso_path = out_dir.join(dso_filename);
+    let staged_dso_path = deps_dir.join(dso_filename);
+    #[cfg(unix)]
+    {
+        // Keep a single downloaded DSO in OUT_DIR and place only a lightweight
+        // directory entry in deps. This also preserves the generated
+        // XLS_DSO_PATH contract, which continues to point at OUT_DIR for
+        // managed artifacts.
+        //
+        // Multiple Cargo units can run this build script concurrently while
+        // sharing the same profile-level deps directory. Create a unique
+        // temporary symlink and atomically rename it into place so the staged
+        // DSO path is never transiently missing for another Cargo-run host
+        // executable.
+        let temp_staged_dso_path =
+            deps_dir.join(format!(".{dso_filename}.{}.tmp", std::process::id()));
+
+        match std::fs::remove_file(&temp_staged_dso_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                panic!(
+                    "failed to remove stale temporary XLS DSO symlink {}: {}",
+                    temp_staged_dso_path.display(),
+                    error
+                )
+            }
+        }
+
+        std::os::unix::fs::symlink(&dso_path, &temp_staged_dso_path).unwrap_or_else(|error| {
+            panic!(
+                "failed to create temporary XLS DSO symlink from {} to {}: {}",
+                dso_path.display(),
+                temp_staged_dso_path.display(),
+                error
+            )
+        });
+
+        std::fs::rename(&temp_staged_dso_path, &staged_dso_path).unwrap_or_else(|error| {
+            let _ = std::fs::remove_file(&temp_staged_dso_path);
+            panic!(
+                "failed to atomically stage XLS DSO symlink from {} to {}: {}",
+                temp_staged_dso_path.display(),
+                staged_dso_path.display(),
+                error
+            )
+        });
+    }
+
+    #[cfg(not(unix))]
+    {
+        // Use symlink_metadata so stale broken symlinks are cleaned up too.
+        if std::fs::symlink_metadata(&staged_dso_path).is_ok() {
+            std::fs::remove_file(&staged_dso_path).unwrap_or_else(|error| {
+                panic!(
+                    "failed to remove stale staged XLS DSO {}: {}",
+                    staged_dso_path.display(),
+                    error
+                )
+            });
+        }
+
+        std::fs::copy(&dso_path, &staged_dso_path).unwrap_or_else(|error| {
+            panic!(
+                "failed to copy XLS DSO from {} to {}: {}",
+                dso_path.display(),
+                staged_dso_path.display(),
+                error
+            )
+        });
+    }
+}
+
 /// Downloads the dynamic shared object for XLS from the release page if it does
 /// not already exist.
 fn download_dso_if_dne(url_base: &str, out_dir: &Path) -> DsoInfo {
@@ -998,6 +1122,7 @@ fn main() {
         );
 
         let dso_name_str = dso_info.get_dso_name();
+        stage_managed_dso_for_cargo_runtime(&out_dir, &dso_info.get_dso_filename());
         emit_link_directives_for_managed_dso(&out_dir, &dso_name_str, true, link_directive_mode);
         write_artifact_paths_rs(
             &out_dir,
@@ -1012,9 +1137,11 @@ fn main() {
 
     let dso_info = download_dso_if_dne(&url_base, &out_dir);
 
-    // Ensure the DSO is copied to the correct location
+    // The downloaded DSO lives in OUT_DIR, which is not in the system loader
+    // path when Cargo runs downstream build scripts linked against xlsynth-sys.
     let dso_name_str = dso_info.get_dso_name();
-    emit_link_directives_for_managed_dso(&out_dir, &dso_name_str, false, link_directive_mode);
+    stage_managed_dso_for_cargo_runtime(&out_dir, &dso_info.get_dso_filename());
+    emit_link_directives_for_managed_dso(&out_dir, &dso_name_str, true, link_directive_mode);
 
     // This is exposed as `xlsynth_sys::XLS_DSO_PATH` from Rust via the
     // generated `artifact_paths.rs` include in `xlsynth-sys/src/lib.rs`.

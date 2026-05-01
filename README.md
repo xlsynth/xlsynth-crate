@@ -63,15 +63,17 @@ cargo run -p xlsynth-driver -- ir2gates /tmp/add.ir
 ## Installing In Custom Environments
 
 By default the crate attempts to download the shared library and DSLX standard library that it needs
-for out-of-the-box operation. However, this can also be specified manually at build time with the
-following environment variables:
+for out-of-the-box operation, and stages the downloaded shared library where Cargo-run binaries can
+find it. However, this can also be specified manually at build time with the following environment
+variables:
 
 ```shell
 cargo clean
 export XLS_DSO_PATH=$HOME/opt/xlsynth/lib/libxls-v0.0.173-ubuntu2004.so
 export DSLX_STDLIB_PATH=$HOME/opt/xlsynth/latest/xls/dslx/stdlib/
 cargo build -vv -p xlsynth-sys |& grep "Using XLS_DSO_PATH"
-# Ensure host binaries (including Cargo build scripts) can locate the DSO at build/test time.
+# For manually supplied DSOs, ensure host binaries (including Cargo build scripts) can locate the
+# DSO at build/test time.
 export LD_LIBRARY_PATH="$(dirname "$XLS_DSO_PATH")":$LD_LIBRARY_PATH
 cargo test --workspace
 ```
