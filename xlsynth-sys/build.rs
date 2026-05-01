@@ -2,6 +2,8 @@
 
 use sha2::Digest;
 use std::io::BufRead;
+#[cfg(unix)]
+use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -783,29 +785,64 @@ fn stage_managed_dso_for_cargo_runtime(out_dir: &Path, dso_filename: &str) {
 
     let dso_path = out_dir.join(dso_filename);
     let staged_dso_path = deps_dir.join(dso_filename);
-    // Use symlink_metadata so stale broken symlinks are cleaned up too.
-    if std::fs::symlink_metadata(&staged_dso_path).is_ok() {
-        std::fs::remove_file(&staged_dso_path).unwrap_or_else(|error| {
-            panic!(
-                "failed to remove stale staged XLS DSO {}: {}",
-                staged_dso_path.display(),
-                error
-            )
-        });
-    }
-
     #[cfg(unix)]
-    // Keep a single downloaded DSO in OUT_DIR and place only a lightweight
-    // directory entry in deps. This also preserves the generated XLS_DSO_PATH
-    // contract, which continues to point at OUT_DIR for managed artifacts.
-    std::os::unix::fs::symlink(&dso_path, &staged_dso_path).unwrap_or_else(|error| {
+    {
+        // Keep a single downloaded DSO in OUT_DIR and place only a lightweight
+        // directory entry in deps. This also preserves the generated
+        // XLS_DSO_PATH contract, which continues to point at OUT_DIR for
+        // managed artifacts.
+        //
+        // Multiple Cargo units can run this build script concurrently while
+        // sharing the same profile-level deps directory. Make staging
+        // idempotent so a concurrent creator or remover does not turn into a
+        // flaky build failure.
+        for _ in 0..2 {
+            // Use symlink_metadata so stale broken symlinks are cleaned up too.
+            match std::fs::symlink_metadata(&staged_dso_path) {
+                Ok(_) => match std::fs::remove_file(&staged_dso_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == ErrorKind::NotFound => {}
+                    Err(error) => {
+                        panic!(
+                            "failed to remove stale staged XLS DSO {}: {}",
+                            staged_dso_path.display(),
+                            error
+                        )
+                    }
+                },
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => {
+                    panic!(
+                        "failed to inspect staged XLS DSO {}: {}",
+                        staged_dso_path.display(),
+                        error
+                    )
+                }
+            }
+
+            match std::os::unix::fs::symlink(&dso_path, &staged_dso_path) {
+                Ok(()) => return,
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                    if std::fs::symlink_metadata(&staged_dso_path).is_ok() {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    panic!(
+                        "failed to symlink XLS DSO from {} to {}: {}",
+                        dso_path.display(),
+                        staged_dso_path.display(),
+                        error
+                    )
+                }
+            }
+        }
+
         panic!(
-            "failed to symlink XLS DSO from {} to {}: {}",
-            dso_path.display(),
-            staged_dso_path.display(),
-            error
-        )
-    });
+            "failed to stage XLS DSO at {} after concurrent updates",
+            staged_dso_path.display()
+        );
+    }
 
     #[cfg(not(unix))]
     std::fs::copy(&dso_path, &staged_dso_path).unwrap_or_else(|error| {
