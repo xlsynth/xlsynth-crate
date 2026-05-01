@@ -129,6 +129,74 @@ fn top({params}) -> {return_type} {{
     )
 }
 
+/// Generates a wrapper that imports and calls a canonical multiply routine.
+fn mul_wrapper_source(width: u32, routine: &str, group: Option<u32>) -> String {
+    let invocation = match group {
+        Some(group) => format!("mul_variants::{routine}<u32:{width}, u32:{group}>(x, y)"),
+        None => format!("mul_variants::{routine}(x, y)"),
+    };
+    format!(
+        r#"import mul_variants;
+
+const N: u32 = u32:{width};
+
+fn top(x: uN[N], y: uN[N]) -> uN[N] {{
+  {invocation}
+}}
+"#
+    )
+}
+
+/// Generates a wrapper around one sequential add-state update.
+fn add_seq_step_wrapper_source(width: u32) -> String {
+    format!(
+        r#"import add_seq_variants;
+
+const N: u32 = u32:{width};
+
+fn top(
+  remaining_x: uN[N],
+  remaining_y: uN[N],
+  sum: uN[N],
+  bit_mask: uN[N],
+  carry: u1,
+) -> (uN[N], uN[N], uN[N], uN[N], u1) {{
+  let next = add_seq_variants::add_step(add_seq_variants::AddSeqState {{
+    remaining_x,
+    remaining_y,
+    sum,
+    bit_mask,
+    carry,
+  }});
+  (next.remaining_x, next.remaining_y, next.sum, next.bit_mask, next.carry)
+}}
+"#
+    )
+}
+
+/// Generates a wrapper around one sequential multiply-state update.
+fn mul_seq_step_wrapper_source(width: u32) -> String {
+    format!(
+        r#"import mul_seq_variants;
+
+const N: u32 = u32:{width};
+
+fn top(
+  multiplicand: uN[N],
+  multiplier: uN[N],
+  product: uN[N],
+) -> (uN[N], uN[N], uN[N]) {{
+  let next = mul_seq_variants::mul_step(mul_seq_variants::MulSeqState {{
+    multiplicand,
+    multiplier,
+    product,
+  }});
+  (next.multiplicand, next.multiplier, next.product)
+}}
+"#
+    )
+}
+
 /// Computes QoR rows for the selected CLZ routines and tunings.
 fn gather_clz_qor_rows() -> Vec<QorRow> {
     let mut rows = Vec::new();
@@ -272,6 +340,71 @@ fn gather_add_qor_rows() -> Vec<QorRow> {
     rows
 }
 
+/// Computes QoR rows for the selected multiply routines and tunings.
+fn gather_mul_qor_rows() -> Vec<QorRow> {
+    let mut rows = Vec::new();
+    for width in [8u32, 16, 32] {
+        let cases = [
+            (
+                "shift_add",
+                mul_wrapper_source(width, "mul_shift_add", None),
+            ),
+            (
+                "shift_add_ripple",
+                mul_wrapper_source(width, "mul_shift_add_ripple", None),
+            ),
+            (
+                "shift_add_prefix",
+                mul_wrapper_source(width, "mul_shift_add_prefix", None),
+            ),
+            (
+                "shift_add_carry_select_default",
+                mul_wrapper_source(width, "mul_shift_add_carry_select", None),
+            ),
+            (
+                "shift_add_carry_select_tuned",
+                match width {
+                    8 => mul_wrapper_source(width, "mul_shift_add_carry_select", Some(2)),
+                    16 => mul_wrapper_source(width, "mul_shift_add_carry_select", Some(4)),
+                    32 => mul_wrapper_source(width, "mul_shift_add_carry_select", Some(8)),
+                    _ => unreachable!(),
+                },
+            ),
+        ];
+        for (variant, source) in cases {
+            let stats = gate_stats_for_wrapper("mul_qor.x", &source, "top");
+            rows.push(QorRow {
+                width,
+                variant,
+                live_nodes: stats.live_nodes,
+                deepest_path: stats.deepest_path,
+            });
+        }
+    }
+    rows
+}
+
+/// Computes QoR rows for one step of the selected sequential routines.
+fn gather_seq_step_qor_rows() -> Vec<QorRow> {
+    let mut rows = Vec::new();
+    for width in [8u32, 16, 32] {
+        let cases = [
+            ("add_step", add_seq_step_wrapper_source(width)),
+            ("mul_step", mul_seq_step_wrapper_source(width)),
+        ];
+        for (variant, source) in cases {
+            let stats = gate_stats_for_wrapper("seq_step_qor.x", &source, "top");
+            rows.push(QorRow {
+                width,
+                variant,
+                live_nodes: stats.live_nodes,
+                deepest_path: stats.deepest_path,
+            });
+        }
+    }
+    rows
+}
+
 #[test]
 fn clz_variants_g8r_qor_snapshot() {
     let _ = env_logger::builder().is_test(true).try_init();
@@ -324,6 +457,47 @@ fn add_variants_g8r_qor_snapshot() {
         QorRow { width: 32, variant: "carry_select_with_carry_default", live_nodes: 737, deepest_path: 27 },
         QorRow { width: 32, variant: "carry_select_tuned", live_nodes: 673, deepest_path: 29 },
         QorRow { width: 32, variant: "carry_select_with_carry_tuned", live_nodes: 785, deepest_path: 31 },
+    ];
+    assert_eq!(got.as_slice(), want);
+}
+
+#[test]
+fn mul_variants_g8r_qor_snapshot() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let got = gather_mul_qor_rows();
+    #[rustfmt::skip]
+    let want: &[QorRow] = &[
+        QorRow { width: 8, variant: "shift_add", live_nodes: 262, deepest_path: 24 },
+        QorRow { width: 8, variant: "shift_add_ripple", live_nodes: 276, deepest_path: 40 },
+        QorRow { width: 8, variant: "shift_add_prefix", live_nodes: 284, deepest_path: 38 },
+        QorRow { width: 8, variant: "shift_add_carry_select_default", live_nodes: 369, deepest_path: 36 },
+        QorRow { width: 8, variant: "shift_add_carry_select_tuned", live_nodes: 356, deepest_path: 37 },
+        QorRow { width: 16, variant: "shift_add", live_nodes: 1268, deepest_path: 43 },
+        QorRow { width: 16, variant: "shift_add_ripple", live_nodes: 1308, deepest_path: 98 },
+        QorRow { width: 16, variant: "shift_add_prefix", live_nodes: 1564, deepest_path: 103 },
+        QorRow { width: 16, variant: "shift_add_carry_select_default", live_nodes: 2056, deepest_path: 97 },
+        QorRow { width: 16, variant: "shift_add_carry_select_tuned", live_nodes: 2056, deepest_path: 97 },
+        QorRow { width: 32, variant: "shift_add", live_nodes: 5698, deepest_path: 67 },
+        QorRow { width: 32, variant: "shift_add_ripple", live_nodes: 5676, deepest_path: 212 },
+        QorRow { width: 32, variant: "shift_add_prefix", live_nodes: 8029, deepest_path: 236 },
+        QorRow { width: 32, variant: "shift_add_carry_select_default", live_nodes: 9650, deepest_path: 224 },
+        QorRow { width: 32, variant: "shift_add_carry_select_tuned", live_nodes: 9640, deepest_path: 226 },
+    ];
+    assert_eq!(got.as_slice(), want);
+}
+
+#[test]
+fn seq_variants_g8r_step_qor_snapshot() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let got = gather_seq_step_qor_rows();
+    #[rustfmt::skip]
+    let want: &[QorRow] = &[
+        QorRow { width: 8, variant: "add_step", live_nodes: 61, deepest_path: 7 },
+        QorRow { width: 8, variant: "mul_step", live_nodes: 103, deepest_path: 14 },
+        QorRow { width: 16, variant: "add_step", live_nodes: 109, deepest_path: 7 },
+        QorRow { width: 16, variant: "mul_step", live_nodes: 225, deepest_path: 18 },
+        QorRow { width: 32, variant: "add_step", live_nodes: 205, deepest_path: 7 },
+        QorRow { width: 32, variant: "mul_step", live_nodes: 475, deepest_path: 22 },
     ];
     assert_eq!(got.as_slice(), want);
 }
