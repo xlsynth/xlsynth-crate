@@ -655,6 +655,16 @@ where
                 result.best_cost.g8r_le_graph_milli,
             ));
         }
+        Objective::G8rLeGraphTimesNodes => {
+            let metric = (result.best_cost.g8r_le_graph_milli as u128)
+                .saturating_mul(result.best_cost.g8r_nodes as u128);
+            report(format!(
+                "PIR MCMC finished. Best stats: g8r_le_graph={:.3}, g8r_nodes={}, metric={}",
+                (result.best_cost.g8r_le_graph_milli as f64) / 1000.0,
+                result.best_cost.g8r_nodes,
+                metric,
+            ));
+        }
         Objective::G8rLeGraphTimesProduct => {
             let product = (result.best_cost.g8r_nodes as u128)
                 .saturating_mul(result.best_cost.g8r_depth as u128);

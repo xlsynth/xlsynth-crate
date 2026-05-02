@@ -752,7 +752,7 @@ This subcommand intentionally shares the same flag surface as
   - `-n, --iters <ITERS>` – MCMC iterations.
 - Common options:
   - `-o, --output <OUTPUT_DIR>` – artifact directory (temporary directory if omitted).
-  - `--metric <nodes|g8r-nodes|g8r-nodes-times-depth|g8r-nodes-times-depth-times-toggles|g8r-le-graph|g8r-le-graph-times-product|g8r-weighted-switching|g8r-nodes-times-weighted-switching-no-depth-regress>` – objective (default: `nodes`).
+  - `--metric <nodes|g8r-nodes|g8r-nodes-times-depth|g8r-nodes-times-depth-times-toggles|g8r-le-graph|g8r-le-graph-times-nodes|g8r-le-graph-times-product|g8r-weighted-switching|g8r-nodes-times-weighted-switching-no-depth-regress>` – objective (default: `nodes`).
   - `--extension-costing-mode <preserve|desugar>` – controls how PIR extension ops are projected before XLS optimization and g8r costing (default: `preserve`). Use `desugar` when the run should score and record best artifacts through standard non-extension XLS IR, which is more source-grounded for DSLX follow-up.
   - `--max-delay <LEVELS>` – optional hard cap on `g8r_depth` for g8r-based objectives. When the starting design violates the cap, the search runs in feasibility-first mode until it reaches the feasible region.
   - `--max-area <GATES>` – optional hard cap on `g8r_nodes` for g8r-based objectives.

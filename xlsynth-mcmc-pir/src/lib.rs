@@ -89,7 +89,8 @@ pub struct Cost {
     pub g8r_depth: usize,
     /// Graph logical-effort worst-case delay, scaled by 1e3 and rounded.
     ///
-    /// This is populated when objective=`g8r-le-graph`; otherwise it is `0`.
+    /// This is populated for graph-logical-effort objectives; otherwise it is
+    /// `0`.
     pub g8r_le_graph_milli: usize,
     /// Number of interior AIG gate output toggles across a provided input
     /// stimulus sequence.
@@ -429,6 +430,8 @@ pub enum Objective {
         alias = "g8r-graph-logical-effort"
     )]
     G8rLeGraph,
+    #[value(name = "g8r-le-graph-times-nodes")]
+    G8rLeGraphTimesNodes,
     #[value(name = "g8r-le-graph-times-product")]
     G8rLeGraphTimesProduct,
     #[value(name = "g8r-weighted-switching")]
@@ -445,6 +448,7 @@ impl Objective {
                 | Objective::G8rNodesTimesDepth
                 | Objective::G8rNodesTimesDepthTimesToggles
                 | Objective::G8rLeGraph
+                | Objective::G8rLeGraphTimesNodes
                 | Objective::G8rLeGraphTimesProduct
                 | Objective::G8rWeightedSwitching
                 | Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress
@@ -454,7 +458,9 @@ impl Objective {
     pub fn needs_graph_logical_effort(self) -> bool {
         matches!(
             self,
-            Objective::G8rLeGraph | Objective::G8rLeGraphTimesProduct
+            Objective::G8rLeGraph
+                | Objective::G8rLeGraphTimesNodes
+                | Objective::G8rLeGraphTimesProduct
         )
     }
 
@@ -488,6 +494,7 @@ impl Objective {
             Objective::G8rNodesTimesDepth => "g8r-nodes-times-depth",
             Objective::G8rNodesTimesDepthTimesToggles => "g8r-nodes-times-depth-times-toggles",
             Objective::G8rLeGraph => "g8r-le-graph",
+            Objective::G8rLeGraphTimesNodes => "g8r-le-graph-times-nodes",
             Objective::G8rLeGraphTimesProduct => "g8r-le-graph-times-product",
             Objective::G8rWeightedSwitching => "g8r-weighted-switching",
             Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress => {
@@ -507,6 +514,9 @@ impl Objective {
                 .saturating_mul(c.g8r_depth as u128)
                 .saturating_mul(c.g8r_gate_output_toggles as u128),
             Objective::G8rLeGraph => c.g8r_le_graph_milli as u128,
+            Objective::G8rLeGraphTimesNodes => {
+                (c.g8r_le_graph_milli as u128).saturating_mul(c.g8r_nodes as u128)
+            }
             Objective::G8rLeGraphTimesProduct => {
                 let product = (c.g8r_nodes as u128).saturating_mul(c.g8r_depth as u128);
                 (c.g8r_le_graph_milli as u128).saturating_mul(product)
@@ -2318,6 +2328,43 @@ mod tests {
             Objective::G8rNodesTimesDepthTimesToggles.metric(&c),
             u128::MAX
         );
+    }
+
+    #[test]
+    fn objective_metric_graph_logical_effort_times_nodes_multiplies_nodes() {
+        let c = Cost {
+            pir_nodes: 0,
+            g8r_nodes: 7,
+            g8r_depth: 11,
+            g8r_le_graph_milli: 13,
+            g8r_gate_output_toggles: 0,
+            g8r_weighted_switching_milli: 0,
+        };
+        assert_eq!(Objective::G8rLeGraphTimesNodes.metric(&c), 91);
+    }
+
+    #[test]
+    fn objective_metric_graph_logical_effort_times_nodes_handles_large_values() {
+        let c = Cost {
+            pir_nodes: 0,
+            g8r_nodes: usize::MAX,
+            g8r_depth: 0,
+            g8r_le_graph_milli: usize::MAX,
+            g8r_gate_output_toggles: 0,
+            g8r_weighted_switching_milli: 0,
+        };
+        assert_eq!(
+            Objective::G8rLeGraphTimesNodes.metric(&c),
+            (usize::MAX as u128) * (usize::MAX as u128)
+        );
+    }
+
+    #[test]
+    fn graph_logical_effort_times_nodes_uses_graph_effort_without_toggles() {
+        let objective = Objective::G8rLeGraphTimesNodes;
+        assert!(objective.uses_g8r_costing());
+        assert!(objective.needs_graph_logical_effort());
+        assert!(!objective.needs_toggle_stimulus());
     }
 
     #[test]
