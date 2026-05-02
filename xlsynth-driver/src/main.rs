@@ -90,6 +90,7 @@ mod ir_fn_eval;
 mod ir_fn_mffcs;
 mod ir_fn_node_count;
 mod ir_fn_node_count_corpus;
+mod ir_fn_rm_asserts;
 mod ir_fn_structural_hash;
 mod ir_fn_to_block;
 mod ir_fn_to_dslx;
@@ -2691,6 +2692,17 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                 ),
         )
         .subcommand(
+            clap::Command::new("ir-fn-rm-asserts")
+                .about("Removes assert operations from one IR function and DCEs the result")
+                .arg(
+                    clap::Arg::new("ir_input_file")
+                        .help("The input IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .add_ir_top_arg(false),
+        )
+        .subcommand(
             clap::Command::new("ir-strip-pos-data")
                 .about("Reads an .ir file and emits the same IR with all position data removed (file table and pos= attributes)")
                 .arg(
@@ -3405,6 +3417,9 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("ir-fn-mffcs", subm)) => {
             ir_fn_mffcs::handle_ir_fn_mffcs(subm, &config);
+        }
+        Some(("ir-fn-rm-asserts", subm)) => {
+            ir_fn_rm_asserts::handle_ir_fn_rm_asserts(subm, &config);
         }
         Some(("prove-quickcheck", subm)) => {
             prove_quickcheck::handle_prove_quickcheck(subm, &config);

@@ -1032,6 +1032,29 @@ xlsynth-driver ir-fn-mffcs my_design.opt.ir \
   --emit_pos_data=false
 ```
 
+### `ir-fn-rm-asserts`
+
+Removes every `assert` operation from one selected IR function, bypasses each
+assert token result to its incoming token, then runs full function DCE. Other
+side-effecting operations such as `trace` and `cover` are left unchanged.
+
+- Positional arguments: `<ir_input_file>`
+- Optional:
+  - `--top <NAME>` - function name to rewrite.
+    - Without `--top`, the package top function is used when present.
+    - If the package has no top and exactly one function, that function is used.
+    - If the package top is a block, or the package has multiple functions and no
+      top function, pass `--top` explicitly.
+
+Output is the full rewritten package IR on **stdout**. The package's existing
+top marker is preserved even when rewriting a non-top helper function.
+
+Example:
+
+```shell
+xlsynth-driver ir-fn-rm-asserts my_pkg.ir --top main > my_pkg.noassert.ir
+```
+
 ### `ir-query`
 
 Matches a query expression against the top function of an IR package and prints each matching node on **stdout**.

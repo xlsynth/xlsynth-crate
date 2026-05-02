@@ -148,9 +148,16 @@ pub fn parse_query(input: &str) -> Result<QueryExpr, String> {
     if !parser.is_done() {
         return Err(parser.error_at("unexpected trailing input"));
     }
-    validate_ellipsis_placement(&expr)?;
-    validate_width_matcher_placement(&expr)?;
+    validate_query(&expr)?;
     Ok(expr)
+}
+
+/// Validates that a query AST uses only supported matcher placements and value
+/// representations.
+pub fn validate_query(expr: &QueryExpr) -> Result<(), String> {
+    validate_ellipsis_placement(expr)?;
+    validate_width_matcher_placement(expr)?;
+    Ok(())
 }
 
 fn validate_ellipsis_placement(expr: &QueryExpr) -> Result<(), String> {
@@ -310,15 +317,30 @@ fn validate_width_matcher_placement(expr: &QueryExpr) -> Result<(), String> {
 
                 // Allow width only in the numeric named args where we know how to interpret it.
                 for na in &m.named_args {
+                    if is_numeric_named_arg_name(na.name.as_str()) {
+                        let NamedArgValue::Numeric(pattern) = &na.value else {
+                            return Err(format!(
+                                "numeric named arg '{}' must use a numeric pattern",
+                                na.name
+                            ));
+                        };
+                        validate_numeric_pattern(pattern)?;
+                        continue;
+                    }
+
                     match &na.value {
                         NamedArgValue::Any
                         | NamedArgValue::Bool(_)
                         | NamedArgValue::Number(_)
                         | NamedArgValue::String(_) => {}
-                        NamedArgValue::Numeric(pattern) => validate_numeric_pattern(pattern)?,
+                        NamedArgValue::Numeric(_) => {
+                            return Err(format!(
+                                "numeric pattern is only valid for numeric named arg '{}'",
+                                na.name
+                            ));
+                        }
                         NamedArgValue::Expr(e) => {
-                            let allow = is_numeric_named_arg_name(na.name.as_str());
-                            walk(e, /* width_allowed_here= */ allow)?;
+                            walk(e, /* width_allowed_here= */ false)?;
                         }
                         NamedArgValue::ExprList(es) => {
                             for e in es {
@@ -336,6 +358,7 @@ fn validate_width_matcher_placement(expr: &QueryExpr) -> Result<(), String> {
 
 /// Finds all node references in `f` that satisfy the query expression.
 pub fn find_matching_nodes(f: &ir::Fn, query: &QueryExpr) -> Vec<ir::NodeRef> {
+    validate_query(query).expect("invalid query AST");
     let users = ir_utils::compute_users(f);
     let mut matches = Vec::new();
     for (index, _node) in f.nodes.iter().enumerate() {
@@ -351,6 +374,7 @@ pub fn find_matching_nodes(f: &ir::Fn, query: &QueryExpr) -> Vec<ir::NodeRef> {
 /// Returns true if `query` matches the given node. This is expensive: O(n) with
 /// the number of nodes in the function.
 pub fn matches_node(f: &ir::Fn, query: &QueryExpr, node_ref: ir::NodeRef) -> bool {
+    validate_query(query).expect("invalid query AST");
     let users = ir_utils::compute_users(f);
     let bindings = HashMap::new();
     !match_solutions(query, f, &users, node_ref, &bindings).is_empty()
@@ -374,6 +398,7 @@ pub(crate) fn find_root_query_bindings(
     users: &Users,
     node_ref: ir::NodeRef,
 ) -> Vec<QueryBindings> {
+    validate_query(query).expect("invalid query AST");
     let bindings = HashMap::new();
     match_solutions(query, f, users, node_ref, &bindings)
 }
@@ -1241,6 +1266,27 @@ mod tests {
         assert_eq!(
             err,
             "$num(...) is only valid as a standalone numeric named-arg binding"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_direct_ast_non_numeric_value_for_numeric_named_arg() {
+        let query = QueryExpr::Matcher(MatcherExpr {
+            kind: MatcherKind::OpName("bit_slice".to_string()),
+            user_count: None,
+            args: vec![QueryExpr::Placeholder(PlaceholderExpr {
+                name: "_".to_string(),
+                ty: None,
+            })],
+            named_args: vec![NamedArg {
+                name: "width".to_string(),
+                value: NamedArgValue::Number(1),
+            }],
+        });
+
+        assert_eq!(
+            validate_query(&query).unwrap_err(),
+            "numeric named arg 'width' must use a numeric pattern"
         );
     }
 
