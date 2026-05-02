@@ -3905,6 +3905,136 @@ top fn main() -> bits[32] {\n  ret literal.1: bits[32] = literal(value=1, id=1)\
     assert_eq!(got, want);
 }
 
+#[test]
+fn test_ir_fn_rm_asserts_subcommand() {
+    let _ = env_logger::try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("with_asserts.ir");
+    std::fs::write(
+        &ir_path,
+        r#"package rm_asserts
+
+top fn main(t: token id=1, x: bits[1] id=2) -> token {
+  one: bits[1] = literal(value=1, id=3)
+  pred: bits[1] = and(x, one, id=4)
+  assert.5: token = assert(t, pred, message="m0", label="L0", id=5)
+  ret assert.6: token = assert(assert.5, pred, message="m1", label="L1", id=6)
+  dead_unrelated: bits[1] = not(x, id=7)
+}
+"#,
+    )
+    .unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("ir-fn-rm-asserts")
+        .arg(ir_path.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-fn-rm-asserts failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    compare_golden_text(&stdout, "tests/test_ir_fn_rm_asserts_basic.golden.ir");
+}
+
+#[test]
+fn test_ir_fn_rm_asserts_subcommand_rewrites_explicit_non_top_function() {
+    let _ = env_logger::try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("with_helper_asserts.ir");
+    std::fs::write(
+        &ir_path,
+        r#"package rm_asserts
+
+top fn main(t: token id=1, x: bits[1] id=2) -> token {
+  ret assert.3: token = assert(t, x, message="main", label="M", id=3)
+}
+
+fn helper(t: token id=10, x: bits[1] id=11) -> token {
+  ret assert.12: token = assert(t, x, message="helper", label="H", id=12)
+}
+"#,
+    )
+    .unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("ir-fn-rm-asserts")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--top")
+        .arg("helper")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-fn-rm-asserts --top failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("top fn main("),
+        "expected package top to remain main:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("ret assert.3: token = assert("),
+        "expected main's assert to remain:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains(
+            "fn helper(t: token id=10, x: bits[1] id=11) -> token {\n  ret t: token = param(name=t, id=10)\n}"
+        ),
+        "expected helper asserts to be removed:\n{}",
+        stdout
+    );
+}
+
+#[test]
+fn test_ir_fn_rm_asserts_subcommand_requires_top_when_package_has_multiple_functions_and_no_top() {
+    let _ = env_logger::try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("multiple_functions.ir");
+    std::fs::write(
+        &ir_path,
+        r#"package rm_asserts
+
+fn a(t: token id=1) -> token {
+  ret t: token = param(name=t, id=1)
+}
+
+fn b(t: token id=2) -> token {
+  ret t: token = param(name=t, id=2)
+}
+"#,
+    )
+    .unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("ir-fn-rm-asserts")
+        .arg(ir_path.to_str().unwrap())
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "ir-fn-rm-asserts should fail without --top"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("multiple functions and no explicit top function"),
+        "unexpected stderr: {}",
+        stderr
+    );
+}
+
 macro_rules! test_irequiv_subcommand_solver_base {
     ($solver:ident, $feature:expr, $choice:expr) => {
         paste::paste! {

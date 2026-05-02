@@ -1,0 +1,5 @@
+package rm_asserts
+
+top fn main(t: token id=1, x: bits[1] id=2) -> token {
+  ret t: token = param(name=t, id=1)
+}
