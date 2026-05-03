@@ -1978,7 +1978,7 @@ fn win_percent_vs_origin_for_metric(origin_metric: u128, metric: u128) -> f64 {
     if origin_metric == 0 {
         return 0.0;
     }
-    origin_metric.saturating_sub(metric) as f64 / origin_metric as f64
+    100.0 * origin_metric.saturating_sub(metric) as f64 / origin_metric as f64
 }
 
 fn objective_supports_budget_frontier_search(objective: Objective) -> bool {
@@ -2057,6 +2057,9 @@ fn frontier_budgets(options: PirMcmcBudgetFrontierOptions) -> Result<Vec<usize>>
             Some(next) => budget = next,
             None => break,
         }
+    }
+    if budgets.last().copied() != Some(options.max_rewrites) {
+        budgets.push(options.max_rewrites);
     }
     Ok(budgets)
 }
@@ -3567,6 +3570,14 @@ mod tests {
                 PirMcmcBudgetFrontierOptions::DEFAULT_PROPOSAL_ATTEMPTS_PER_REWRITE,
         };
         assert_eq!(frontier_budgets(opts).unwrap(), vec![4, 8, 12, 16]);
+        assert_eq!(
+            frontier_budgets(PirMcmcBudgetFrontierOptions {
+                max_rewrites: 10,
+                ..opts
+            })
+            .unwrap(),
+            vec![4, 8, 10]
+        );
         assert!(
             frontier_budgets(PirMcmcBudgetFrontierOptions {
                 budget_step: 0,
@@ -3588,6 +3599,13 @@ mod tests {
                 ..opts
             })
             .is_err()
+        );
+    }
+
+    #[test]
+    fn win_percent_vs_origin_reports_percentage_points() {
+        assert!(
+            (win_percent_vs_origin_for_metric(1205, 1173) - 2.655_601_659_751_037).abs() < 1e-12
         );
     }
 
