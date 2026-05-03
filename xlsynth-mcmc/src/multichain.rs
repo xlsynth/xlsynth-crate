@@ -100,6 +100,22 @@ where
     let thread_count = threads.max(1);
     let seg_size = checkpoint_iters.max(1);
 
+    if total_iters == 0 && strategy != ChainStrategy::Independent {
+        return run_multichain(
+            start_state,
+            total_iters,
+            seed,
+            thread_count,
+            ChainStrategy::Independent,
+            checkpoint_iters,
+            runner,
+            selection_key,
+            tiebreak_key,
+            should_jump_to_best,
+            jump_to_best_state,
+        );
+    }
+
     match strategy {
         ChainStrategy::Independent => {
             let mut handles = Vec::with_capacity(thread_count);
@@ -299,5 +315,51 @@ where
 
             Ok((gb, gbc, std::mem::take(&mut local_stats[best_chain])))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct ZeroIterRunner;
+
+    impl SegmentRunner<u64, u64, ()> for ZeroIterRunner {
+        type Error = ();
+
+        fn run_segment(
+            &self,
+            start_state: u64,
+            _params: SegmentRunParams,
+        ) -> Result<SegmentOutcome<u64, u64, ()>, Self::Error> {
+            Ok(SegmentOutcome {
+                end_state: start_state,
+                end_cost: start_state,
+                best_state: start_state,
+                best_cost: start_state,
+                stats: McmcStats::default(),
+            })
+        }
+    }
+
+    #[test]
+    fn explore_exploit_zero_iters_returns_the_start_state() {
+        let (best_state, best_cost, _) = run_multichain(
+            7u64,
+            0,
+            1,
+            2,
+            ChainStrategy::ExploreExploit,
+            10,
+            Arc::new(ZeroIterRunner),
+            |cost: &u64| *cost,
+            |state: &u64| state.to_string(),
+            |_, _| false,
+            |state: &u64, _, _| *state,
+        )
+        .unwrap();
+
+        assert_eq!(best_state, 7);
+        assert_eq!(best_cost, 7);
     }
 }
