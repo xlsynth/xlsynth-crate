@@ -153,6 +153,25 @@ impl G8rEvaluationMode {
             G8rEvaluationMode::ExternalPostprocess { program } => Some(program.as_str()),
         }
     }
+
+    /// Rewrites external postprocessor paths into durable absolute paths.
+    pub fn canonicalized_for_persistence(&self) -> Result<Self> {
+        match self {
+            G8rEvaluationMode::Builtin => Ok(Self::Builtin),
+            G8rEvaluationMode::ExternalPostprocess { program } => {
+                let path = std::fs::canonicalize(program).map_err(|e| {
+                    anyhow::anyhow!(
+                        "failed to canonicalize g8r postprocess program '{}': {}",
+                        program,
+                        e
+                    )
+                })?;
+                Ok(Self::ExternalPostprocess {
+                    program: path.display().to_string(),
+                })
+            }
+        }
+    }
 }
 
 /// How PIR extension ops are projected before XLS optimization and g8r costing.
@@ -2778,8 +2797,8 @@ fn load_artifact_state_fn(
 }
 
 impl PersistedRunOptions {
-    fn from_run_options(options: &RunOptions) -> Self {
-        Self {
+    fn from_run_options(options: &RunOptions) -> Result<Self> {
+        Ok(Self {
             max_iters: options.max_iters,
             threads: options.threads,
             chain_strategy: chain_strategy_value_name(options.chain_strategy).to_string(),
@@ -2789,14 +2808,16 @@ impl PersistedRunOptions {
             initial_temperature: options.initial_temperature,
             objective: options.objective.value_name().to_string(),
             extension_costing_mode: options.extension_costing_mode.value_name().to_string(),
-            g8r_evaluation_mode: options.g8r_evaluation_mode.clone(),
+            g8r_evaluation_mode: options
+                .g8r_evaluation_mode
+                .canonicalized_for_persistence()?,
             max_allowed_depth: options.max_allowed_depth,
             max_allowed_area: options.max_allowed_area,
             switching_beta1: options.weighted_switching_options.beta1,
             switching_beta2: options.weighted_switching_options.beta2,
             switching_primary_output_load: options.weighted_switching_options.primary_output_load,
             enable_formal_oracle: options.enable_formal_oracle,
-        }
+        })
     }
 
     fn into_run_options(self) -> Result<RunOptions> {
@@ -2914,7 +2935,7 @@ pub fn write_pir_mcmc_artifact_dir(
     let manifest = PersistedPirMcmcArtifactManifest {
         schema_version: PIR_MCMC_ARTIFACT_SCHEMA_VERSION,
         top_fn_name,
-        run_options: PersistedRunOptions::from_run_options(&artifact.run_options),
+        run_options: PersistedRunOptions::from_run_options(&artifact.run_options)?,
         origin: PersistedArtifactState {
             file: origin_file,
             cost: artifact.origin_cost,
@@ -4865,6 +4886,45 @@ top fn f(x: bits[8] id=1) -> bits[8] {
         let manifest2 =
             fs::read_to_string(artifact_dir2.join(PIR_MCMC_ARTIFACT_MANIFEST_FILE)).unwrap();
         assert_eq!(manifest1, manifest2);
+    }
+
+    #[test]
+    fn durable_artifact_manifest_canonicalizes_relative_postprocessor_path() {
+        let pkg = parse_pkg(
+            r#"package sample
+
+top fn f(x: bits[8] id=1) -> bits[8] {
+  dead: bits[8] = identity(x, id=2)
+  ret live: bits[8] = identity(x, id=3)
+}
+"#,
+        );
+        let f = pkg.get_fn("f").unwrap().clone();
+        let cwd = std::env::current_dir().unwrap();
+        let hook_dir = tempfile::tempdir_in(&cwd).unwrap();
+        let hook = hook_dir.path().join("identity.sh");
+        fs::write(&hook, "#!/bin/sh\n").unwrap();
+        let relative_hook = hook.strip_prefix(&cwd).unwrap().display().to_string();
+        let mut artifact = run_pir_mcmc_with_artifact_using_transforms(
+            f,
+            test_run_options(Objective::Nodes),
+            vec![Box::new(RemoveDeadNodeTestTransform)],
+        )
+        .unwrap()
+        .artifact;
+        artifact.run_options.g8r_evaluation_mode = G8rEvaluationMode::ExternalPostprocess {
+            program: relative_hook,
+        };
+        let run_dir = tempdir().unwrap();
+        let artifact_dir = write_pir_mcmc_artifact_dir(&artifact, &pkg, run_dir.path()).unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(artifact_dir.join(PIR_MCMC_ARTIFACT_MANIFEST_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            manifest["run_options"]["g8r_evaluation_mode"]["program"],
+            std::fs::canonicalize(&hook).unwrap().display().to_string()
+        );
     }
 
     #[test]

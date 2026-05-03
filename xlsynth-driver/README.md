@@ -855,6 +855,8 @@ directory and emits minimized witness artifacts to a separate directory.
   - `--seed <SEED>` - optional frontier RNG seed override; defaults to the source artifact seed.
   - `--witness-kind-boost <BOOST>` - extra proposal weight per occurrence of a transform kind in the long witness (default: `4.0`).
   - `--proposal-attempts-per-rewrite <N>` - proposal-attempt cap per accepted rewrite in each rollout (default: `64`).
+- External-postprocessor artifacts:
+  - `--allow-artifact-postprocess-program` - opt in to executing the external g8r postprocessor path recorded in `winning-lineage/manifest.json`. Required when minimizing a run produced with `--g8r-postprocess-program`.
 
 Prefix example:
 

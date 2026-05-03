@@ -86,6 +86,7 @@ pub struct PirMcmcMinimizeCliArgs {
     pub seed: Option<u64>,
     pub witness_kind_boost: f64,
     pub proposal_attempts_per_rewrite: usize,
+    pub allow_artifact_postprocess_program: bool,
     pub output: String,
 }
 
@@ -380,6 +381,14 @@ pub fn add_pir_mcmc_minimize_args(command: Command) -> Command {
                 .action(ArgAction::Set),
         )
         .arg(
+            Arg::new("allow_artifact_postprocess_program")
+                .long("allow-artifact-postprocess-program")
+                .help(
+                    "Allow execution of an external g8r postprocessor path persisted in the artifact manifest.",
+                )
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
             Arg::new("output")
                 .short('o')
                 .long("output")
@@ -402,6 +411,7 @@ pub fn parse_pir_mcmc_minimize_args(matches: &ArgMatches) -> PirMcmcMinimizeCliA
         proposal_attempts_per_rewrite: *matches
             .get_one::<usize>("proposal_attempts_per_rewrite")
             .unwrap(),
+        allow_artifact_postprocess_program: matches.get_flag("allow_artifact_postprocess_program"),
         output: matches.get_one::<String>("output").unwrap().to_string(),
     }
 }
@@ -612,7 +622,9 @@ where
         cli.extension_costing_mode.value_name()
     ));
     let g8r_evaluation_mode = match cli.g8r_postprocess_program.clone() {
-        Some(program) => G8rEvaluationMode::ExternalPostprocess { program },
+        Some(program) => {
+            G8rEvaluationMode::ExternalPostprocess { program }.canonicalized_for_persistence()?
+        }
         None => G8rEvaluationMode::Builtin,
     };
 
@@ -1200,6 +1212,18 @@ where
 {
     let run_dir = PathBuf::from(&cli.run_dir);
     let loaded = read_pir_mcmc_artifact_dir(&run_dir)?;
+    if let Some(program) = loaded
+        .artifact
+        .run_options
+        .g8r_evaluation_mode
+        .external_postprocess_program()
+        && !cli.allow_artifact_postprocess_program
+    {
+        return Err(anyhow::anyhow!(
+            "artifact requests external g8r postprocessor '{}'; rerun with --allow-artifact-postprocess-program to execute it",
+            program
+        ));
+    }
     let frontier_mode = match (cli.budget_step, cli.max_actions, cli.rollouts_per_budget) {
         (Some(budget_step), Some(max_actions), Some(rollouts_per_budget)) => {
             Some((budget_step, max_actions, rollouts_per_budget))
@@ -1722,6 +1746,7 @@ top fn main(x: bits[1] id=1) -> bits[1] {
             witness_kind_boost: PirMcmcBudgetFrontierOptions::DEFAULT_WITNESS_KIND_BOOST,
             proposal_attempts_per_rewrite:
                 PirMcmcBudgetFrontierOptions::DEFAULT_PROPOSAL_ATTEMPTS_PER_REWRITE,
+            allow_artifact_postprocess_program: false,
             output: output_dir.path().display().to_string(),
         };
         let mut messages = Vec::new();
@@ -1747,10 +1772,14 @@ top fn main(x: bits[1] id=1) -> bits[1] {
         let run_dir = tempdir().unwrap();
         let output_dir = tempdir().unwrap();
         let hook_dir = tempdir().unwrap();
+        let marker = hook_dir.path().join("invoked");
         let hook = write_executable_script(
             hook_dir.path(),
             "identity.sh",
-            "#!/bin/sh\ncp \"$1\" \"$3\"\n",
+            &format!(
+                "#!/bin/sh\nprintf invoked > \"{}\"\ncp \"$1\" \"$3\"\n",
+                marker.display()
+            ),
         );
         let (pkg, mut artifact) = minimize_test_artifact();
         artifact.run_options.g8r_evaluation_mode = G8rEvaluationMode::ExternalPostprocess {
@@ -1768,12 +1797,29 @@ top fn main(x: bits[1] id=1) -> bits[1] {
             witness_kind_boost: PirMcmcBudgetFrontierOptions::DEFAULT_WITNESS_KIND_BOOST,
             proposal_attempts_per_rewrite:
                 PirMcmcBudgetFrontierOptions::DEFAULT_PROPOSAL_ATTEMPTS_PER_REWRITE,
+            allow_artifact_postprocess_program: false,
             output: output_dir.path().display().to_string(),
         };
-        run_pir_mcmc_minimize_driver(cli, |_| {}).unwrap();
+        let err = run_pir_mcmc_minimize_driver(cli.clone(), |_| {}).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("--allow-artifact-postprocess-program"),
+            "unexpected error: {err}"
+        );
+        assert!(!marker.exists());
+
+        run_pir_mcmc_minimize_driver(
+            PirMcmcMinimizeCliArgs {
+                allow_artifact_postprocess_program: true,
+                ..cli
+            },
+            |_| {},
+        )
+        .unwrap();
 
         assert!(output_dir.path().join("witness.post.aig").exists());
         assert!(output_dir.path().join("witness.post.stats.json").exists());
+        assert!(marker.exists());
     }
 
     #[test]
@@ -1791,6 +1837,7 @@ top fn main(x: bits[1] id=1) -> bits[1] {
                 witness_kind_boost: PirMcmcBudgetFrontierOptions::DEFAULT_WITNESS_KIND_BOOST,
                 proposal_attempts_per_rewrite:
                     PirMcmcBudgetFrontierOptions::DEFAULT_PROPOSAL_ATTEMPTS_PER_REWRITE,
+                allow_artifact_postprocess_program: false,
                 output: output_dir.path().display().to_string(),
             },
             |_| {},
@@ -1812,6 +1859,7 @@ top fn main(x: bits[1] id=1) -> bits[1] {
                 witness_kind_boost: PirMcmcBudgetFrontierOptions::DEFAULT_WITNESS_KIND_BOOST,
                 proposal_attempts_per_rewrite:
                     PirMcmcBudgetFrontierOptions::DEFAULT_PROPOSAL_ATTEMPTS_PER_REWRITE,
+                allow_artifact_postprocess_program: false,
                 output: output_dir.path().display().to_string(),
             },
             |_| {},
@@ -1836,6 +1884,7 @@ top fn main(x: bits[1] id=1) -> bits[1] {
             seed: Some(1),
             witness_kind_boost: 4.0,
             proposal_attempts_per_rewrite: 1,
+            allow_artifact_postprocess_program: false,
             output: output_dir.path().display().to_string(),
         };
         let mut messages = Vec::new();
@@ -1871,6 +1920,7 @@ top fn main(x: bits[1] id=1) -> bits[1] {
                 seed: None,
                 witness_kind_boost: 4.0,
                 proposal_attempts_per_rewrite: 1,
+                allow_artifact_postprocess_program: false,
                 output: output_dir.path().display().to_string(),
             },
             |_| {},
@@ -1888,6 +1938,7 @@ top fn main(x: bits[1] id=1) -> bits[1] {
                 seed: None,
                 witness_kind_boost: 4.0,
                 proposal_attempts_per_rewrite: 1,
+                allow_artifact_postprocess_program: false,
                 output: output_dir.path().display().to_string(),
             },
             |_| {},
