@@ -6,6 +6,7 @@ use std::fmt;
 #[allow(unused_imports)]
 use std::mem;
 
+use serde::{Deserialize, Serialize};
 #[allow(unused_imports)]
 use xlsynth::{IrBits, IrValue};
 #[allow(unused_imports)]
@@ -179,7 +180,7 @@ use xor_mask_sign_ext_to_sel_not::XorMaskSignExtToSelNotTransform;
 use zero_ext_sel_distribute::ZeroExtSelDistributeTransform;
 
 /// Kinds of PIR transforms used in PIR MCMC.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub enum PirTransformKind {
     /// Swap the operands of a commutative binary operator (currently `add`).
     SwapCommutativeBinopOperands,

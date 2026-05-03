@@ -99,6 +99,7 @@ mod ir_fn_to_z3_smtlib;
 mod ir_ged;
 mod ir_inline;
 mod ir_localized_eco;
+mod ir_mcmc_minimize;
 mod ir_mcmc_opt;
 mod ir_op_histo;
 mod ir_query;
@@ -867,6 +868,12 @@ fn main() {
             xlsynth_mcmc_pir::driver_cli::add_pir_mcmc_args(
                 clap::Command::new("ir-mcmc-opt")
                     .about("Optimizes PIR IR with MCMC and emits best artifacts"),
+            ),
+        )
+        .subcommand(
+            xlsynth_mcmc_pir::driver_cli::add_pir_mcmc_minimize_args(
+                clap::Command::new("ir-mcmc-minimize")
+                    .about("Minimizes a stored PIR MCMC winning lineage to an earlier prefix"),
             ),
         )
         // ir2pipeline subcommand
@@ -3230,6 +3237,9 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("ir-mcmc-opt", subm)) => {
             ir_mcmc_opt::handle_ir_mcmc_opt(subm);
+        }
+        Some(("ir-mcmc-minimize", subm)) => {
+            ir_mcmc_minimize::handle_ir_mcmc_minimize(subm);
         }
         Some(("ir2pipeline", subm)) => {
             ir2pipeline::handle_ir2pipeline(subm, &config);
