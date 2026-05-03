@@ -314,6 +314,12 @@ impl SampleWriter {
             "g8r_depth": msg.cost.g8r_depth,
             "g8r_le_graph_milli": msg.cost.g8r_le_graph_milli,
             "g8r_gate_output_toggles": msg.cost.g8r_gate_output_toggles,
+            "g8r_weighted_switching_milli": msg.cost.g8r_weighted_switching_milli,
+            "g8r_post_and_nodes": msg.cost.g8r_post_and_nodes,
+            "g8r_post_depth": msg.cost.g8r_post_depth,
+            "g8r_post_le_graph_milli": msg.cost.g8r_post_le_graph_milli,
+            "g8r_post_gate_output_toggles": msg.cost.g8r_post_gate_output_toggles,
+            "g8r_post_weighted_switching_milli": msg.cost.g8r_post_weighted_switching_milli,
         });
         let mut mf = std::fs::OpenOptions::new()
             .create(true)
@@ -448,6 +454,7 @@ fn main() -> Result<()> {
         initial_temperature: cli.initial_temperature,
         objective: cli.metric,
         extension_costing_mode: ExtensionCostingMode::Preserve,
+        g8r_evaluation_mode: xlsynth_mcmc_pir::G8rEvaluationMode::Builtin,
         max_allowed_depth: cli.max_delay,
         max_allowed_area: cli.max_area,
         weighted_switching_options:

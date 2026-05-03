@@ -754,12 +754,13 @@ This subcommand intentionally shares the same flag surface as
   - `-n, --iters <ITERS>` – MCMC iterations.
 - Common options:
   - `-o, --output <OUTPUT_DIR>` – artifact directory (temporary directory if omitted).
-  - `--metric <nodes|g8r-nodes|g8r-nodes-times-depth|g8r-nodes-times-depth-times-toggles|g8r-le-graph|g8r-le-graph-times-nodes|g8r-le-graph-times-product|g8r-weighted-switching|g8r-nodes-times-weighted-switching-no-depth-regress>` – objective (default: `nodes`).
+  - `--metric <nodes|g8r-nodes|g8r-nodes-times-depth|g8r-nodes-times-depth-times-toggles|g8r-le-graph|g8r-le-graph-times-nodes|g8r-le-graph-times-product|g8r-weighted-switching|g8r-nodes-times-weighted-switching-no-depth-regress|g8r-post-and-nodes|g8r-post-and-nodes-times-depth|g8r-post-and-nodes-times-depth-times-toggles|g8r-post-le-graph|g8r-post-le-graph-times-and-nodes|g8r-post-le-graph-times-product|g8r-post-weighted-switching|g8r-post-and-nodes-times-weighted-switching-no-depth-regress>` – objective (default: `nodes`).
   - `--extension-costing-mode <preserve|desugar>` – controls how PIR extension ops are projected before XLS optimization and g8r costing (default: `preserve`). Use `desugar` when the run should score and record best artifacts through standard non-extension XLS IR, which is more source-grounded for DSLX follow-up.
-  - `--max-delay <LEVELS>` – optional hard cap on `g8r_depth` for g8r-based objectives. When the starting design violates the cap, the search runs in feasibility-first mode until it reaches the feasible region.
-  - `--max-area <GATES>` – optional hard cap on `g8r_nodes` for g8r-based objectives.
-  - At most one of `--max-delay` and `--max-area` may be specified. `--max-area` is also incompatible with `g8r-nodes-times-weighted-switching-no-depth-regress`, because that objective already imposes a depth cap.
-  - `--toggle-stimulus <IRVALS_PATH>` – `.irvals` file containing one typed tuple stimulus per line; required for toggle/stimulus-based metrics (`g8r-nodes-times-depth-times-toggles`, `g8r-weighted-switching`, and `g8r-nodes-times-weighted-switching-no-depth-regress`) and invalid with other metrics.
+  - `--g8r-postprocess-program <PATH>` – external postprocessor for the `g8r-post-*` metric family. It is invoked as `<PATH> <input.aig> --output-path <output.aig>`, where the input is binary AIGER and the output may be ASCII or binary AIGER. Diagnostics should go to stderr.
+  - `--max-delay <LEVELS>` – optional hard cap on gate depth for gate-based objectives. It applies to raw `g8r_depth` for `g8r-*` metrics and postprocessed depth for `g8r-post-*` metrics. When the starting design violates the cap, the search runs in feasibility-first mode until it reaches the feasible region.
+  - `--max-area <GATES>` – optional hard cap on gate count for gate-based objectives. It applies to raw `g8r_nodes` for `g8r-*` metrics and postprocessed AND-node count for `g8r-post-*` metrics.
+  - At most one of `--max-delay` and `--max-area` may be specified. `--max-area` is also incompatible with `g8r-nodes-times-weighted-switching-no-depth-regress` and `g8r-post-and-nodes-times-weighted-switching-no-depth-regress`, because those objectives already impose a depth cap.
+  - `--toggle-stimulus <IRVALS_PATH>` – `.irvals` file containing one typed tuple stimulus per line; required for toggle/stimulus-based metrics (`g8r-nodes-times-depth-times-toggles`, `g8r-weighted-switching`, `g8r-nodes-times-weighted-switching-no-depth-regress`, `g8r-post-and-nodes-times-depth-times-toggles`, `g8r-post-weighted-switching`, and `g8r-post-and-nodes-times-weighted-switching-no-depth-regress`) and invalid with other metrics.
   - `--switching-beta1 <BETA1>` – linear load coefficient for weighted-switching objectives (default: `1.0`).
   - `--switching-beta2 <BETA2>` – quadratic load coefficient for weighted-switching objectives (default: `0.0`).
   - `--switching-primary-output-load <LOAD>` – additional load per primary-output use for weighted-switching objectives (default: `1.0`).
@@ -781,6 +782,21 @@ xlsynth-driver ir-mcmc-opt my_design.ir \
   --threads 8 \
   --output /tmp/pir-mcmc-artifacts
 ```
+
+Postprocessed-g8r example:
+
+```shell
+xlsynth-driver ir-mcmc-opt my_design.ir \
+  --iters 20000 \
+  --metric g8r-post-and-nodes-times-depth \
+  --g8r-postprocess-program ./g8r-abc \
+  --threads 8 \
+  --output /tmp/pir-mcmc-artifacts
+```
+
+When `--g8r-postprocess-program` is set, the artifact directory also includes
+postprocessed AIGER snapshots and stats such as `orig.post.aig`,
+`orig.post.stats.json`, `best.post.aig`, and `best.post.stats.json`.
 
 Toggle-aware objective example:
 
