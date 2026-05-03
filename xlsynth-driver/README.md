@@ -742,8 +742,8 @@ xlsynth-driver --toolchain ~/xlsynth-toolchain.toml ir-inline \
 Runs the PIR MCMC optimizer and emits optimization artifacts to an output
 directory (`best.ir`, `best.opt.ir`, `best.g8r`, `best.stats.json`,
 `orig.ir`, `orig.opt.ir`, `orig.g8r`, `orig.stats.json`,
-`trajectory.cNNN.jsonl`). Supported single-chain unconstrained runs also emit
-a minimizable raw winning-lineage artifact under `winning-lineage/`
+`trajectory.cNNN.jsonl`). Supported unconstrained runs also emit
+a minimizable raw winning-provenance artifact under `winning-lineage/`
 (`manifest.json` plus inspectable raw state packages in `states/`).
 
 This subcommand intentionally shares the same flag surface as
@@ -818,13 +818,13 @@ xlsynth-driver ir-mcmc-opt my_design.ir \
   --output /tmp/pir-mcmc-artifacts
 ```
 
-Only newly recorded single-chain unconstrained runs can be minimized in v1.
-Multichain runs, explicit area/delay caps, and objectives with implicit
-feasibility caps still run normally, but do not emit `winning-lineage/`.
+Only newly recorded unconstrained runs can be minimized. Explicit area/delay
+caps and objectives with implicit feasibility caps still run normally, but do
+not emit `winning-lineage/`.
 
-### `ir-mcmc-minimize`: minimize a stored PIR MCMC winning lineage
+### `ir-mcmc-minimize`: minimize stored PIR MCMC winning provenance
 
-Loads the `winning-lineage/` artifact from a previous `ir-mcmc-opt` output
+Loads the `winning-lineage/` provenance artifact from a previous `ir-mcmc-opt` output
 directory and emits minimized witness artifacts to a separate directory.
 
 - Required:
@@ -833,8 +833,8 @@ directory and emits minimized witness artifacts to a separate directory.
 - Prefix mode:
   - `--retain-win-fraction <FRACTION>` - select the earliest historical prefix that retains the requested fraction of the discovered objective win, in `[0, 1]`.
 - Guided frontier mode:
-  - `--budget-step <N>` - accepted-rewrite spacing for requested budgets.
-  - `--max-rewrites <N>` - largest requested accepted-rewrite budget.
+  - `--budget-step <N>` - provenance-action spacing for requested budgets.
+  - `--max-actions <N>` - largest requested provenance-action budget.
   - `--rollouts-per-budget <N>` - guided short rollouts attempted per requested budget.
   - `--seed <SEED>` - optional frontier RNG seed override; defaults to the source artifact seed.
   - `--witness-kind-boost <BOOST>` - extra proposal weight per occurrence of a transform kind in the long witness (default: `4.0`).
@@ -853,7 +853,7 @@ Guided frontier example:
 ```shell
 xlsynth-driver ir-mcmc-minimize /tmp/pir-mcmc-artifacts \
   --budget-step 4 \
-  --max-rewrites 16 \
+  --max-actions 16 \
   --rollouts-per-budget 256 \
   --output /tmp/pir-mcmc-frontier
 ```

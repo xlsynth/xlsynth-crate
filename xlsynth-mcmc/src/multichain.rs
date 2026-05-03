@@ -88,6 +88,7 @@ pub fn run_multichain<S, C, K, R, M>(
     selection_key: impl Fn(&C) -> M + Copy + Send + Sync + 'static,
     tiebreak_key: impl Fn(&S) -> String + Copy + Send + Sync + 'static,
     should_jump_to_best: impl Fn(&C, &C) -> bool + Copy + Send + Sync + 'static,
+    jump_to_best_state: impl Fn(&S, usize, u64) -> S + Copy + Send + Sync + 'static,
 ) -> Result<(S, C, McmcStats<K>), R::Error>
 where
     S: Send + Clone + 'static,
@@ -158,6 +159,7 @@ where
                     selection_key,
                     tiebreak_key,
                     should_jump_to_best,
+                    jump_to_best_state,
                 );
             }
 
@@ -267,7 +269,8 @@ where
                 for chain_no in 1..thread_count {
                     let cur_cost = local_best_cost[chain_no].expect("best cost must be set");
                     if should_jump_to_best(&cur_cost, &gbc) {
-                        local_state[chain_no] = gb.clone();
+                        local_state[chain_no] =
+                            jump_to_best_state(&gb, chain_no, iter_offset + seg);
                     }
                 }
 

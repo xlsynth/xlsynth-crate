@@ -76,7 +76,7 @@ pub struct PirMcmcMinimizeCliArgs {
     pub run_dir: String,
     pub retained_win_fraction: Option<f64>,
     pub budget_step: Option<usize>,
-    pub max_rewrites: Option<usize>,
+    pub max_actions: Option<usize>,
     pub rollouts_per_budget: Option<usize>,
     pub seed: Option<u64>,
     pub witness_kind_boost: f64,
@@ -285,12 +285,12 @@ pub fn parse_pir_mcmc_args(matches: &ArgMatches) -> PirMcmcCliArgs {
     }
 }
 
-/// Adds arguments for reducing a stored winning lineage to an earlier prefix.
+/// Adds arguments for reducing stored winning provenance to an earlier prefix.
 pub fn add_pir_mcmc_minimize_args(command: Command) -> Command {
     command
         .arg(
             Arg::new("run_dir")
-                .help("MCMC output directory containing winning-lineage artifacts.")
+                .help("MCMC output directory containing winning-provenance artifacts.")
                 .required(true)
                 .index(1)
                 .action(ArgAction::Set),
@@ -300,7 +300,7 @@ pub fn add_pir_mcmc_minimize_args(command: Command) -> Command {
                 .long("retain-win-fraction")
                 .value_name("FRACTION")
                 .help("Fraction of the discovered objective win to retain.")
-                .conflicts_with_all(["budget_step", "max_rewrites", "rollouts_per_budget"])
+                .conflicts_with_all(["budget_step", "max_actions", "rollouts_per_budget"])
                 .value_parser(clap::value_parser!(f64))
                 .action(ArgAction::Set),
         )
@@ -308,17 +308,17 @@ pub fn add_pir_mcmc_minimize_args(command: Command) -> Command {
             Arg::new("budget_step")
                 .long("budget-step")
                 .value_name("N")
-                .help("Accepted-rewrite spacing for frontier budgets.")
-                .requires_all(["max_rewrites", "rollouts_per_budget"])
+                .help("Provenance-action spacing for frontier budgets.")
+                .requires_all(["max_actions", "rollouts_per_budget"])
                 .conflicts_with("retained_win_fraction")
                 .value_parser(clap::value_parser!(usize))
                 .action(ArgAction::Set),
         )
         .arg(
-            Arg::new("max_rewrites")
-                .long("max-rewrites")
+            Arg::new("max_actions")
+                .long("max-actions")
                 .value_name("N")
-                .help("Largest accepted-rewrite budget to evaluate in frontier mode.")
+                .help("Largest provenance-action budget to evaluate in frontier mode.")
                 .requires_all(["budget_step", "rollouts_per_budget"])
                 .conflicts_with("retained_win_fraction")
                 .value_parser(clap::value_parser!(usize))
@@ -329,7 +329,7 @@ pub fn add_pir_mcmc_minimize_args(command: Command) -> Command {
                 .long("rollouts-per-budget")
                 .value_name("N")
                 .help("Independent guided short rollouts per frontier budget.")
-                .requires_all(["budget_step", "max_rewrites"])
+                .requires_all(["budget_step", "max_actions"])
                 .conflicts_with("retained_win_fraction")
                 .value_parser(clap::value_parser!(usize))
                 .action(ArgAction::Set),
@@ -346,7 +346,9 @@ pub fn add_pir_mcmc_minimize_args(command: Command) -> Command {
             Arg::new("witness_kind_boost")
                 .long("witness-kind-boost")
                 .value_name("BOOST")
-                .help("Extra proposal weight per winning-lineage occurrence of a transform kind.")
+                .help(
+                    "Extra proposal weight per winning-provenance occurrence of a transform kind.",
+                )
                 .default_value("4.0")
                 .value_parser(clap::value_parser!(f64))
                 .action(ArgAction::Set),
@@ -376,7 +378,7 @@ pub fn parse_pir_mcmc_minimize_args(matches: &ArgMatches) -> PirMcmcMinimizeCliA
         run_dir: matches.get_one::<String>("run_dir").unwrap().to_string(),
         retained_win_fraction: matches.get_one::<f64>("retained_win_fraction").copied(),
         budget_step: matches.get_one::<usize>("budget_step").copied(),
-        max_rewrites: matches.get_one::<usize>("max_rewrites").copied(),
+        max_actions: matches.get_one::<usize>("max_actions").copied(),
         rollouts_per_budget: matches.get_one::<usize>("rollouts_per_budget").copied(),
         seed: matches.get_one::<u64>("seed").copied(),
         witness_kind_boost: *matches.get_one::<f64>("witness_kind_boost").unwrap(),
@@ -502,7 +504,7 @@ fn write_witness_artifacts(
 
 fn budget_witness_json(witness: &PirMcmcBudgetWitness) -> serde_json::Value {
     serde_json::json!({
-        "accepted_rewrite_count": witness.accepted_rewrite_count,
+        "provenance_action_count": witness.provenance_action_count,
         "metric": witness.metric,
         "absolute_win": witness.absolute_win,
         "win_percent_vs_origin": witness.win_percent_vs_origin,
@@ -805,7 +807,7 @@ where
         }
         Err(e) => {
             report(format!(
-                "No minimizable winning-lineage artifact emitted for this run: {}",
+                "No minimizable winning-provenance artifact emitted for this run: {}",
                 e
             ));
             (
@@ -963,7 +965,7 @@ where
     if let Some(artifact) = recorded_artifact.as_ref() {
         let artifact_dir = write_pir_mcmc_artifact_dir(artifact, &pkg, &output_dir)?;
         report(format!(
-            "Wrote minimizable winning-lineage artifact to {}",
+            "Wrote minimizable winning-provenance artifact to {}",
             artifact_dir.display()
         ));
     }
@@ -971,7 +973,7 @@ where
     Ok(())
 }
 
-/// Loads a stored winning lineage, minimizes it to an earlier prefix, and
+/// Loads stored winning provenance, minimizes it to an earlier prefix, and
 /// emits package-level artifacts for the selected witness.
 pub fn run_pir_mcmc_minimize_driver<F>(cli: PirMcmcMinimizeCliArgs, mut report: F) -> Result<()>
 where
@@ -979,14 +981,14 @@ where
 {
     let run_dir = PathBuf::from(&cli.run_dir);
     let loaded = read_pir_mcmc_artifact_dir(&run_dir)?;
-    let frontier_mode = match (cli.budget_step, cli.max_rewrites, cli.rollouts_per_budget) {
-        (Some(budget_step), Some(max_rewrites), Some(rollouts_per_budget)) => {
-            Some((budget_step, max_rewrites, rollouts_per_budget))
+    let frontier_mode = match (cli.budget_step, cli.max_actions, cli.rollouts_per_budget) {
+        (Some(budget_step), Some(max_actions), Some(rollouts_per_budget)) => {
+            Some((budget_step, max_actions, rollouts_per_budget))
         }
         (None, None, None) => None,
         _ => {
             return Err(anyhow::anyhow!(
-                "frontier mode requires --budget-step, --max-rewrites, and --rollouts-per-budget together"
+                "frontier mode requires --budget-step, --max-actions, and --rollouts-per-budget together"
             ));
         }
     };
@@ -999,7 +1001,7 @@ where
     let output_dir = PathBuf::from(&cli.output);
     let extension_costing_mode = loaded.artifact.run_options.extension_costing_mode;
 
-    if let Some((budget_step, max_rewrites, rollouts_per_budget)) = frontier_mode {
+    if let Some((budget_step, max_actions, rollouts_per_budget)) = frontier_mode {
         std::fs::create_dir_all(&output_dir).map_err(|e| {
             anyhow::anyhow!(
                 "Failed to create minimization output directory {}: {}",
@@ -1011,7 +1013,7 @@ where
             &loaded.artifact,
             PirMcmcBudgetFrontierOptions {
                 budget_step,
-                max_rewrites,
+                max_actions,
                 rollouts_per_budget,
                 seed: cli.seed.unwrap_or(loaded.artifact.run_options.seed),
                 witness_kind_boost: cli.witness_kind_boost,
@@ -1021,7 +1023,7 @@ where
 
         let mut point_summaries = Vec::with_capacity(frontier.points.len());
         for point in frontier.points.iter() {
-            let point_dir = output_dir.join(format!("budget-{:04}", point.rewrite_budget));
+            let point_dir = output_dir.join(format!("budget-{:04}", point.action_budget));
             write_witness_artifacts(
                 &point_dir,
                 &loaded.package_template,
@@ -1030,7 +1032,7 @@ where
                 extension_costing_mode,
             )?;
             point_summaries.push(serde_json::json!({
-                "rewrite_budget": point.rewrite_budget,
+                "action_budget": point.action_budget,
                 "guided": budget_witness_json(&point.guided),
                 "prefix_baseline": budget_witness_json(&point.prefix_baseline),
                 "artifact_dir": point_dir
@@ -1043,10 +1045,10 @@ where
             "mode": "budget_frontier",
             "origin_metric": frontier.origin_metric,
             "winner_metric": frontier.winner_metric,
-            "original_winning_lineage_len": frontier.original_winning_lineage_len,
+            "original_winning_provenance_len": frontier.original_winning_provenance_len,
             "search": {
                 "budget_step": budget_step,
-                "max_rewrites": max_rewrites,
+                "max_actions": max_actions,
                 "rollouts_per_budget": rollouts_per_budget,
                 "seed": cli.seed.unwrap_or(loaded.artifact.run_options.seed),
                 "witness_kind_boost": cli.witness_kind_boost,
@@ -1060,21 +1062,21 @@ where
         std::fs::write(&summary_path, summary_json.as_bytes())
             .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", summary_path.display(), e))?;
         report(format!(
-            "PIR MCMC guided frontier searched {} budgets from {} to {} rewrites",
+            "PIR MCMC guided frontier searched {} budgets from {} to {} provenance actions",
             frontier.points.len(),
             budget_step,
-            max_rewrites
+            max_actions
         ));
         for point in frontier.points.iter() {
             report(format!(
-                "budget <= {:>4}: guided metric={} retained={:.6} rewrites={} | prefix metric={} retained={:.6} rewrites={}",
-                point.rewrite_budget,
+                "budget <= {:>4}: guided metric={} retained={:.6} actions={} | prefix metric={} retained={:.6} actions={}",
+                point.action_budget,
                 point.guided.metric,
                 point.guided.retained_win_fraction,
-                point.guided.accepted_rewrite_count,
+                point.guided.provenance_action_count,
                 point.prefix_baseline.metric,
                 point.prefix_baseline.retained_win_fraction,
-                point.prefix_baseline.accepted_rewrite_count,
+                point.prefix_baseline.provenance_action_count,
             ));
         }
         report(format!(
@@ -1103,8 +1105,8 @@ where
         "mode": "retain_win_fraction",
         "requested_retained_win_fraction": minimized.requested_retained_win_fraction,
         "actual_retained_win_fraction": minimized.actual_retained_win_fraction,
-        "accepted_rewrite_count": minimized.accepted_rewrite_count,
-        "original_winning_lineage_len": minimized.original_winning_lineage_len,
+        "provenance_action_count": minimized.provenance_action_count,
+        "original_winning_provenance_len": minimized.original_winning_provenance_len,
         "origin_metric": minimized.origin_metric,
         "winner_metric": minimized.winner_metric,
         "witness_metric": minimized.witness_metric,
@@ -1124,8 +1126,8 @@ where
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", summary_path.display(), e))?;
 
     report(format!(
-        "PIR MCMC prefix minimization selected {} rewrites from a {}-rewrite winning lineage",
-        minimized.accepted_rewrite_count, minimized.original_winning_lineage_len
+        "PIR MCMC prefix minimization selected {} provenance actions from a {}-action winning provenance",
+        minimized.provenance_action_count, minimized.original_winning_provenance_len
     ));
     report(format!(
         "Retained win fraction: requested={:.6}, actual={:.6}; metrics origin={} winner={} witness={}",
@@ -1149,7 +1151,7 @@ mod tests {
         run_pir_mcmc_driver, run_pir_mcmc_minimize_driver,
     };
     use crate::{
-        AcceptedLineageStep, Cost, PirMcmcArtifact, PirMcmcBudgetFrontierOptions, RunOptions,
+        Cost, PirMcmcArtifact, PirMcmcBudgetFrontierOptions, PirMcmcProvenanceAction, RunOptions,
         transforms::PirTransformKind, write_pir_mcmc_artifact_dir,
     };
     use std::fs;
@@ -1228,16 +1230,18 @@ top fn main(x: bits[8] id=1) -> bits[8] {
             },
             raw_winner_fn: step2_fn.clone(),
             raw_winner_cost: cost_with_pir_nodes(3),
-            winning_lineage: vec![
-                AcceptedLineageStep {
-                    accepted_rewrite_index: 1,
+            winning_provenance: vec![
+                PirMcmcProvenanceAction::AcceptedRewrite {
+                    action_index: 1,
+                    chain_no: 0,
                     global_iter: 1,
                     transform_kind: PirTransformKind::NotNotCancel,
                     state: step1_fn,
                     cost: cost_with_pir_nodes(4),
                 },
-                AcceptedLineageStep {
-                    accepted_rewrite_index: 2,
+                PirMcmcProvenanceAction::AcceptedRewrite {
+                    action_index: 2,
+                    chain_no: 0,
                     global_iter: 2,
                     transform_kind: PirTransformKind::NegNegCancel,
                     state: step2_fn,
@@ -1275,7 +1279,7 @@ top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
             max_area: None,
             toggle_stimulus: None,
             initial_temperature: 1.0,
-            threads: 1,
+            threads: 2,
             checkpoint_iters: 0,
             progress_iters: 0,
             formal_oracle: false,
@@ -1314,13 +1318,13 @@ top fn main(x: bits[1] id=1) -> bits[1] {
             iters: 0,
             seed: 1,
             output: Some(output_dir.path().display().to_string()),
-            metric: Objective::Nodes,
+            metric: Objective::G8rNodes,
             extension_costing_mode: ExtensionCostingMode::Preserve,
             max_delay: None,
             max_area: None,
             toggle_stimulus: None,
             initial_temperature: 1.0,
-            threads: 1,
+            threads: 2,
             checkpoint_iters: 0,
             progress_iters: 0,
             formal_oracle: false,
@@ -1342,7 +1346,7 @@ top fn main(x: bits[1] id=1) -> bits[1] {
         assert!(
             messages
                 .iter()
-                .any(|msg| msg.contains("Wrote minimizable winning-lineage artifact"))
+                .any(|msg| msg.contains("Wrote minimizable winning-provenance artifact"))
         );
     }
 
@@ -1367,9 +1371,9 @@ top fn main(x: bits[1] id=1) -> bits[1] {
             iters: 0,
             seed: 1,
             output: Some(output_dir.path().display().to_string()),
-            metric: Objective::Nodes,
+            metric: Objective::G8rNodes,
             extension_costing_mode: ExtensionCostingMode::Preserve,
-            max_delay: None,
+            max_delay: Some(1),
             max_area: None,
             toggle_stimulus: None,
             initial_temperature: 1.0,
@@ -1388,7 +1392,7 @@ top fn main(x: bits[1] id=1) -> bits[1] {
         assert!(
             messages
                 .iter()
-                .any(|msg| msg.contains("No minimizable winning-lineage artifact emitted"))
+                .any(|msg| msg.contains("No minimizable winning-provenance artifact emitted"))
         );
         assert!(!output_dir.path().join("winning-lineage").exists());
     }
@@ -1404,7 +1408,7 @@ top fn main(x: bits[1] id=1) -> bits[1] {
             run_dir: run_dir.path().display().to_string(),
             retained_win_fraction: Some(0.5),
             budget_step: None,
-            max_rewrites: None,
+            max_actions: None,
             rollouts_per_budget: None,
             seed: None,
             witness_kind_boost: PirMcmcBudgetFrontierOptions::DEFAULT_WITNESS_KIND_BOOST,
@@ -1421,12 +1425,12 @@ top fn main(x: bits[1] id=1) -> bits[1] {
         assert!(output_dir.path().join("witness.stats.json").exists());
         let summary_text = fs::read_to_string(output_dir.path().join("summary.json")).unwrap();
         let summary: serde_json::Value = serde_json::from_str(&summary_text).unwrap();
-        assert_eq!(summary["accepted_rewrite_count"], 1);
+        assert_eq!(summary["provenance_action_count"], 1);
         assert_eq!(summary["witness_metric"], 4);
         assert!(
             messages
                 .iter()
-                .any(|msg| msg.contains("selected 1 rewrites from a 2-rewrite"))
+                .any(|msg| msg.contains("selected 1 provenance actions from a 2-action"))
         );
     }
 
@@ -1439,7 +1443,7 @@ top fn main(x: bits[1] id=1) -> bits[1] {
                 run_dir: missing_run_dir.path().display().to_string(),
                 retained_win_fraction: Some(0.5),
                 budget_step: None,
-                max_rewrites: None,
+                max_actions: None,
                 rollouts_per_budget: None,
                 seed: None,
                 witness_kind_boost: PirMcmcBudgetFrontierOptions::DEFAULT_WITNESS_KIND_BOOST,
@@ -1460,7 +1464,7 @@ top fn main(x: bits[1] id=1) -> bits[1] {
                 run_dir: run_dir.path().display().to_string(),
                 retained_win_fraction: Some(1.1),
                 budget_step: None,
-                max_rewrites: None,
+                max_actions: None,
                 rollouts_per_budget: None,
                 seed: None,
                 witness_kind_boost: PirMcmcBudgetFrontierOptions::DEFAULT_WITNESS_KIND_BOOST,
@@ -1485,7 +1489,7 @@ top fn main(x: bits[1] id=1) -> bits[1] {
             run_dir: run_dir.path().display().to_string(),
             retained_win_fraction: None,
             budget_step: Some(1),
-            max_rewrites: Some(2),
+            max_actions: Some(2),
             rollouts_per_budget: Some(1),
             seed: Some(1),
             witness_kind_boost: 4.0,
@@ -1520,7 +1524,7 @@ top fn main(x: bits[1] id=1) -> bits[1] {
                 run_dir: run_dir.path().display().to_string(),
                 retained_win_fraction: Some(0.5),
                 budget_step: Some(1),
-                max_rewrites: Some(2),
+                max_actions: Some(2),
                 rollouts_per_budget: Some(1),
                 seed: None,
                 witness_kind_boost: 4.0,
@@ -1537,7 +1541,7 @@ top fn main(x: bits[1] id=1) -> bits[1] {
                 run_dir: run_dir.path().display().to_string(),
                 retained_win_fraction: None,
                 budget_step: None,
-                max_rewrites: None,
+                max_actions: None,
                 rollouts_per_budget: None,
                 seed: None,
                 witness_kind_boost: 4.0,
