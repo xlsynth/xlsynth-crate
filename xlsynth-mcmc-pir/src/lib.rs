@@ -14,7 +14,9 @@ use rand::distributions::Distribution;
 use rand::distributions::WeightedIndex;
 use rand::prelude::SliceRandom;
 use rand_pcg::Pcg64Mcg;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::io::Write as IoWrite;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -77,7 +79,7 @@ use xlsynth_prover::prover::prove_ir_fn_equiv;
 use xlsynth_prover::prover::types::EquivResult;
 
 /// Simple cost model for PIR MCMC.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Cost {
     /// Number of PIR nodes in the function.
     pub pir_nodes: usize,
@@ -123,6 +125,17 @@ impl ExtensionCostingMode {
         match self {
             ExtensionCostingMode::Preserve => "preserve",
             ExtensionCostingMode::Desugar => "desugar",
+        }
+    }
+
+    fn from_value_name(value: &str) -> Result<Self> {
+        match value {
+            "preserve" => Ok(ExtensionCostingMode::Preserve),
+            "desugar" => Ok(ExtensionCostingMode::Desugar),
+            _ => Err(anyhow::anyhow!(
+                "unknown extension costing mode in artifact: {}",
+                value
+            )),
         }
     }
 
@@ -500,6 +513,23 @@ impl Objective {
             Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress => {
                 "g8r-nodes-times-weighted-switching-no-depth-regress"
             }
+        }
+    }
+
+    fn from_value_name(value: &str) -> Result<Self> {
+        match value {
+            "nodes" => Ok(Objective::Nodes),
+            "g8r-nodes" => Ok(Objective::G8rNodes),
+            "g8r-nodes-times-depth" => Ok(Objective::G8rNodesTimesDepth),
+            "g8r-nodes-times-depth-times-toggles" => Ok(Objective::G8rNodesTimesDepthTimesToggles),
+            "g8r-le-graph" => Ok(Objective::G8rLeGraph),
+            "g8r-le-graph-times-nodes" => Ok(Objective::G8rLeGraphTimesNodes),
+            "g8r-le-graph-times-product" => Ok(Objective::G8rLeGraphTimesProduct),
+            "g8r-weighted-switching" => Ok(Objective::G8rWeightedSwitching),
+            "g8r-nodes-times-weighted-switching-no-depth-regress" => {
+                Ok(Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress)
+            }
+            _ => Err(anyhow::anyhow!("unknown objective in artifact: {}", value)),
         }
     }
 
@@ -1052,6 +1082,180 @@ pub struct PirMcmcResult {
     pub stats: McmcStats,
 }
 
+/// One accepted rewrite on the exact lineage that led to an MCMC winner.
+#[derive(Clone, Debug)]
+pub struct AcceptedLineageStep {
+    /// One-based count of accepted rewrites from the origin to this state.
+    pub accepted_rewrite_index: usize,
+    /// One-based global MCMC iteration that accepted this rewrite.
+    pub global_iter: u64,
+    /// Transform accepted at this step.
+    pub transform_kind: PirTransformKind,
+    /// Raw accepted PIR state after the rewrite.
+    pub state: IrFn,
+    /// Cost of `state` under the run's objective semantics.
+    pub cost: Cost,
+}
+
+/// In-memory single-chain artifact for minimizing a discovered MCMC witness.
+#[derive(Clone, Debug)]
+pub struct PirMcmcArtifact {
+    /// Canonicalized function used as the exact rollout origin.
+    pub origin_fn: IrFn,
+    /// Cost of `origin_fn`.
+    pub origin_cost: Cost,
+    /// Options used to produce this artifact.
+    pub run_options: RunOptions,
+    /// Raw accepted state that produced the final strict best update.
+    pub raw_winner_fn: IrFn,
+    /// Cost of `raw_winner_fn`.
+    pub raw_winner_cost: Cost,
+    /// Exact accepted rewrite sequence from `origin_fn` to `raw_winner_fn`.
+    pub winning_lineage: Vec<AcceptedLineageStep>,
+}
+
+/// Options for reducing a winning lineage to an earliest useful prefix.
+#[derive(Clone, Copy, Debug)]
+pub struct PirMcmcPrefixMinimizeOptions {
+    /// Fraction of the discovered objective improvement that must be retained.
+    pub retained_win_fraction: f64,
+}
+
+/// Result of reducing a winning lineage to an earliest useful prefix.
+#[derive(Clone, Debug)]
+pub struct PirMcmcPrefixMinimizeResult {
+    /// Earliest lineage-prefix state satisfying the requested retained win.
+    pub witness_fn: IrFn,
+    /// Cost of `witness_fn`.
+    pub witness_cost: Cost,
+    /// Number of accepted rewrites needed to reach `witness_fn`.
+    pub accepted_rewrite_count: usize,
+    /// Number of accepted rewrites in the original winning lineage.
+    pub original_winning_lineage_len: usize,
+    /// Fraction requested by the caller.
+    pub requested_retained_win_fraction: f64,
+    /// Fraction actually retained by the selected witness.
+    pub actual_retained_win_fraction: f64,
+    /// Origin objective metric.
+    pub origin_metric: u128,
+    /// Final winner objective metric.
+    pub winner_metric: u128,
+    /// Selected witness objective metric.
+    pub witness_metric: u128,
+}
+
+/// Options for witness-guided short-witness frontier search.
+#[derive(Clone, Copy, Debug)]
+pub struct PirMcmcBudgetFrontierOptions {
+    /// Requested budget spacing; budgets are `step, 2*step, ... <= max`.
+    pub budget_step: usize,
+    /// Largest accepted-rewrite budget to evaluate.
+    pub max_rewrites: usize,
+    /// Number of independent short rollouts attempted per requested budget.
+    pub rollouts_per_budget: usize,
+    /// Search seed. Use the source artifact's seed by default.
+    pub seed: u64,
+    /// Extra proposal weight per winning-lineage occurrence of a transform
+    /// kind.
+    pub witness_kind_boost: f64,
+    /// Proposal-attempt cap per accepted rewrite in each rollout.
+    pub proposal_attempts_per_rewrite: usize,
+}
+
+impl PirMcmcBudgetFrontierOptions {
+    pub const DEFAULT_WITNESS_KIND_BOOST: f64 = 4.0;
+    pub const DEFAULT_PROPOSAL_ATTEMPTS_PER_REWRITE: usize = 64;
+}
+
+/// One witness on a frontier, either searched or historical-prefix baseline.
+#[derive(Clone, Debug)]
+pub struct PirMcmcBudgetWitness {
+    pub witness_fn: IrFn,
+    pub witness_cost: Cost,
+    pub accepted_rewrite_count: usize,
+    pub metric: u128,
+    pub absolute_win: u128,
+    pub win_percent_vs_origin: f64,
+    pub retained_win_fraction: f64,
+}
+
+/// One requested short-witness budget point.
+#[derive(Clone, Debug)]
+pub struct PirMcmcBudgetFrontierPoint {
+    pub rewrite_budget: usize,
+    pub guided: PirMcmcBudgetWitness,
+    pub prefix_baseline: PirMcmcBudgetWitness,
+}
+
+/// Result of witness-guided short-witness frontier search.
+#[derive(Clone, Debug)]
+pub struct PirMcmcBudgetFrontierResult {
+    pub origin_metric: u128,
+    pub winner_metric: u128,
+    pub original_winning_lineage_len: usize,
+    pub points: Vec<PirMcmcBudgetFrontierPoint>,
+}
+
+struct PirMcmcArtifactRunOutput {
+    result: PirMcmcResult,
+    artifact: PirMcmcArtifact,
+}
+
+const PIR_MCMC_ARTIFACT_DIR_NAME: &str = "winning-lineage";
+const PIR_MCMC_ARTIFACT_MANIFEST_FILE: &str = "manifest.json";
+const PIR_MCMC_ARTIFACT_STATES_DIR_NAME: &str = "states";
+const PIR_MCMC_ARTIFACT_SCHEMA_VERSION: u32 = 1;
+
+/// Durable PIR MCMC artifact loaded from a run directory.
+pub struct LoadedPirMcmcArtifact {
+    pub artifact: PirMcmcArtifact,
+    pub package_template: PirPackage,
+    pub top_fn_name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedPirMcmcArtifactManifest {
+    schema_version: u32,
+    top_fn_name: String,
+    run_options: PersistedRunOptions,
+    origin: PersistedArtifactState,
+    raw_winner: PersistedArtifactState,
+    winning_lineage: Vec<PersistedAcceptedLineageStep>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedRunOptions {
+    max_iters: u64,
+    threads: u64,
+    chain_strategy: String,
+    checkpoint_iters: u64,
+    progress_iters: u64,
+    seed: u64,
+    initial_temperature: f64,
+    objective: String,
+    extension_costing_mode: String,
+    max_allowed_depth: Option<usize>,
+    max_allowed_area: Option<usize>,
+    switching_beta1: f64,
+    switching_beta2: f64,
+    switching_primary_output_load: f64,
+    enable_formal_oracle: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedArtifactState {
+    file: String,
+    cost: Cost,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedAcceptedLineageStep {
+    accepted_rewrite_index: usize,
+    global_iter: u64,
+    transform_kind: PirTransformKind,
+    state: PersistedArtifactState,
+}
+
 /// Message sent from the PIR MCMC engine to an optional accepted-sample writer.
 ///
 /// This is used by the `xlsynth-mcmc-pir-sampler` binary to build a
@@ -1106,6 +1310,37 @@ fn hash_to_hex(bytes: &[u8; 32]) -> String {
         s.push_str(&format!("{:02x}", b));
     }
     s
+}
+
+#[derive(Default)]
+struct WinningLineageTracker {
+    current_lineage: Vec<AcceptedLineageStep>,
+    winning_lineage: Vec<AcceptedLineageStep>,
+}
+
+impl WinningLineageTracker {
+    /// Records one accepted rewrite and snapshots the full path when it
+    /// improves the best-so-far result.
+    fn record_accepted_step(
+        &mut self,
+        global_iter: u64,
+        transform_kind: PirTransformKind,
+        state: IrFn,
+        cost: Cost,
+        best_updated: bool,
+    ) {
+        let accepted_rewrite_index = self.current_lineage.len() + 1;
+        self.current_lineage.push(AcceptedLineageStep {
+            accepted_rewrite_index,
+            global_iter,
+            transform_kind,
+            state,
+            cost,
+        });
+        if best_updated {
+            self.winning_lineage = self.current_lineage.clone();
+        }
+    }
 }
 
 struct PirSegmentRunner {
@@ -1636,6 +1871,526 @@ fn get_pir_transforms_for_run(enable_formal_oracle: bool) -> Vec<Box<dyn PirTran
     all_transforms
 }
 
+struct PreparedRun {
+    start_fn: IrFn,
+    prepared_toggle_stimulus: Option<Arc<Vec<Vec<IrBits>>>>,
+    initial_cost: Cost,
+    effective_constraints: ConstraintLimits,
+}
+
+/// Validates a run and computes the canonicalized origin artifacts shared by
+/// ordinary MCMC runs and lineage-producing runs.
+fn prepare_run_start(mut start_fn: IrFn, options: &RunOptions) -> Result<PreparedRun> {
+    if !options.objective.needs_toggle_stimulus() && options.toggle_stimulus.is_some() {
+        return Err(anyhow::anyhow!(
+            "toggle stimulus is not valid with objective {}",
+            options.objective.value_name()
+        ));
+    }
+    validate_constraint_configuration(
+        options.objective,
+        ConstraintLimits {
+            max_delay: options.max_allowed_depth,
+            max_area: options.max_allowed_area,
+        },
+    )?;
+    compact_and_toposort_in_place(&mut start_fn)
+        .map_err(|e| anyhow::anyhow!("compact_and_toposort_in_place failed: {}", e))?;
+
+    let prepared_toggle_stimulus = if options.objective.needs_toggle_stimulus() {
+        let samples = options.toggle_stimulus.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "objective {} requires toggle stimulus",
+                options.objective.value_name()
+            )
+        })?;
+        Some(Arc::new(lower_toggle_stimulus_for_fn(samples, &start_fn)?))
+    } else {
+        None
+    };
+
+    let initial_cost = cost_with_effort_options_toggle_stimulus_and_extension_mode(
+        &start_fn,
+        options.objective,
+        prepared_toggle_stimulus.as_ref().map(|v| v.as_slice()),
+        &options.weighted_switching_options,
+        options.extension_costing_mode,
+    )?;
+    let effective_constraints = effective_constraint_limits(
+        options.objective,
+        ConstraintLimits {
+            max_delay: options.max_allowed_depth,
+            max_area: options.max_allowed_area,
+        },
+        &initial_cost,
+    );
+
+    Ok(PreparedRun {
+        start_fn,
+        prepared_toggle_stimulus,
+        initial_cost,
+        effective_constraints,
+    })
+}
+
+/// Validates whether a run shape can produce a v1 winning-lineage artifact.
+pub fn validate_pir_mcmc_artifact_run_options(options: &RunOptions) -> Result<()> {
+    if options.threads != 1 {
+        return Err(anyhow::anyhow!(
+            "run_pir_mcmc_with_artifact currently supports only single-chain runs; got threads={}",
+            options.threads
+        ));
+    }
+    if options.chain_strategy != ChainStrategy::Independent {
+        return Err(anyhow::anyhow!(
+            "run_pir_mcmc_with_artifact currently supports only chain_strategy=Independent"
+        ));
+    }
+    if options.max_allowed_depth.is_some() || options.max_allowed_area.is_some() {
+        return Err(anyhow::anyhow!(
+            "run_pir_mcmc_with_artifact currently supports only unconstrained runs"
+        ));
+    }
+    if options.objective.enforces_non_regressing_depth() {
+        return Err(anyhow::anyhow!(
+            "run_pir_mcmc_with_artifact does not yet support objectives with implicit feasibility caps; got {}",
+            options.objective.value_name()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_prefix_minimization_artifact(artifact: &PirMcmcArtifact) -> Result<()> {
+    validate_pir_mcmc_artifact_run_options(&artifact.run_options)?;
+    Ok(())
+}
+
+fn retained_win_fraction_for_metric(origin_metric: u128, winner_metric: u128, metric: u128) -> f64 {
+    let total_win = origin_metric.saturating_sub(winner_metric);
+    if total_win == 0 {
+        return 0.0;
+    }
+    let retained_win = origin_metric.saturating_sub(metric);
+    retained_win as f64 / total_win as f64
+}
+
+fn win_percent_vs_origin_for_metric(origin_metric: u128, metric: u128) -> f64 {
+    if origin_metric == 0 {
+        return 0.0;
+    }
+    100.0 * origin_metric.saturating_sub(metric) as f64 / origin_metric as f64
+}
+
+fn objective_supports_budget_frontier_search(objective: Objective) -> bool {
+    !objective.needs_toggle_stimulus()
+        && !matches!(
+            objective,
+            Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress
+        )
+}
+
+fn make_budget_witness(
+    witness_fn: IrFn,
+    witness_cost: Cost,
+    accepted_rewrite_count: usize,
+    objective: Objective,
+    origin_metric: u128,
+    winner_metric: u128,
+) -> PirMcmcBudgetWitness {
+    let metric = objective.metric(&witness_cost);
+    PirMcmcBudgetWitness {
+        witness_fn,
+        witness_cost,
+        accepted_rewrite_count,
+        metric,
+        absolute_win: origin_metric.saturating_sub(metric),
+        win_percent_vs_origin: win_percent_vs_origin_for_metric(origin_metric, metric),
+        retained_win_fraction: retained_win_fraction_for_metric(
+            origin_metric,
+            winner_metric,
+            metric,
+        ),
+    }
+}
+
+fn better_budget_witness(
+    candidate: &PirMcmcBudgetWitness,
+    incumbent: &PirMcmcBudgetWitness,
+) -> bool {
+    candidate.metric < incumbent.metric
+        || (candidate.metric == incumbent.metric
+            && candidate.accepted_rewrite_count < incumbent.accepted_rewrite_count)
+}
+
+fn frontier_budgets(options: PirMcmcBudgetFrontierOptions) -> Result<Vec<usize>> {
+    if options.budget_step == 0 {
+        return Err(anyhow::anyhow!("budget_step must be > 0"));
+    }
+    if options.max_rewrites == 0 {
+        return Err(anyhow::anyhow!("max_rewrites must be > 0"));
+    }
+    if options.budget_step > options.max_rewrites {
+        return Err(anyhow::anyhow!(
+            "budget_step must be <= max_rewrites; got step={} max={}",
+            options.budget_step,
+            options.max_rewrites
+        ));
+    }
+    if options.rollouts_per_budget == 0 {
+        return Err(anyhow::anyhow!("rollouts_per_budget must be > 0"));
+    }
+    if options.proposal_attempts_per_rewrite == 0 {
+        return Err(anyhow::anyhow!("proposal_attempts_per_rewrite must be > 0"));
+    }
+    if !options.witness_kind_boost.is_finite() || options.witness_kind_boost < 0.0 {
+        return Err(anyhow::anyhow!(
+            "witness_kind_boost must be finite and >= 0; got {}",
+            options.witness_kind_boost
+        ));
+    }
+
+    let mut budgets = Vec::new();
+    let mut budget = options.budget_step;
+    while budget <= options.max_rewrites {
+        budgets.push(budget);
+        match budget.checked_add(options.budget_step) {
+            Some(next) => budget = next,
+            None => break,
+        }
+    }
+    if budgets.last().copied() != Some(options.max_rewrites) {
+        budgets.push(options.max_rewrites);
+    }
+    Ok(budgets)
+}
+
+fn build_witness_guided_transform_weights(
+    transforms: &[Box<dyn PirTransform>],
+    artifact: &PirMcmcArtifact,
+    witness_kind_boost: f64,
+) -> Vec<f64> {
+    let mut counts = BTreeMap::<PirTransformKind, usize>::new();
+    for step in artifact.winning_lineage.iter() {
+        *counts.entry(step.transform_kind).or_insert(0) += 1;
+    }
+    transforms
+        .iter()
+        .map(|transform| {
+            1.0 + witness_kind_boost * counts.get(&transform.kind()).copied().unwrap_or(0) as f64
+        })
+        .collect()
+}
+
+fn prefix_baseline_for_budget(
+    artifact: &PirMcmcArtifact,
+    rewrite_budget: usize,
+    origin_metric: u128,
+    winner_metric: u128,
+) -> PirMcmcBudgetWitness {
+    let objective = artifact.run_options.objective;
+    let mut best = make_budget_witness(
+        artifact.origin_fn.clone(),
+        artifact.origin_cost,
+        0,
+        objective,
+        origin_metric,
+        winner_metric,
+    );
+    for step in artifact
+        .winning_lineage
+        .iter()
+        .take_while(|step| step.accepted_rewrite_index <= rewrite_budget)
+    {
+        let candidate = make_budget_witness(
+            step.state.clone(),
+            step.cost,
+            step.accepted_rewrite_index,
+            objective,
+            origin_metric,
+            winner_metric,
+        );
+        if better_budget_witness(&candidate, &best) {
+            best = candidate;
+        }
+    }
+    best
+}
+
+fn chain_strategy_value_name(strategy: ChainStrategy) -> &'static str {
+    match strategy {
+        ChainStrategy::Independent => "independent",
+        ChainStrategy::ExploreExploit => "explore-exploit",
+    }
+}
+
+fn chain_strategy_from_value_name(value: &str) -> Result<ChainStrategy> {
+    match value {
+        "independent" => Ok(ChainStrategy::Independent),
+        "explore-exploit" => Ok(ChainStrategy::ExploreExploit),
+        _ => Err(anyhow::anyhow!(
+            "unknown chain strategy in artifact: {}",
+            value
+        )),
+    }
+}
+
+fn emit_pkg_text_toposorted(pkg: &PirPackage) -> Result<String> {
+    let mut pkg = pkg.clone();
+    for member in pkg.members.iter_mut() {
+        match member {
+            PirPackageMember::Function(f) => {
+                compact_and_toposort_in_place(f)
+                    .map_err(|e| anyhow::anyhow!("compact_and_toposort_in_place failed: {}", e))?;
+            }
+            PirPackageMember::Block { func, .. } => {
+                compact_and_toposort_in_place(func)
+                    .map_err(|e| anyhow::anyhow!("compact_and_toposort_in_place failed: {}", e))?;
+            }
+        }
+    }
+    Ok(pkg.to_string())
+}
+
+fn package_with_replaced_fn(
+    package_template: &PirPackage,
+    top_fn_name: &str,
+    replacement: &IrFn,
+) -> Result<PirPackage> {
+    let mut pkg = package_template.clone();
+    let top_mut = pkg.get_fn_mut(top_fn_name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "top function '{}' not found in artifact package template",
+            top_fn_name
+        )
+    })?;
+    *top_mut = replacement.clone();
+    Ok(pkg)
+}
+
+fn write_artifact_state_package(
+    artifact_dir: &Path,
+    package_template: &PirPackage,
+    top_fn_name: &str,
+    relative_file: &str,
+    state_fn: &IrFn,
+) -> Result<()> {
+    let pkg = package_with_replaced_fn(package_template, top_fn_name, state_fn)?;
+    let text = emit_pkg_text_toposorted(&pkg)?;
+    let path = artifact_dir.join(relative_file);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to create artifact state directory {}: {}",
+                parent.display(),
+                e
+            )
+        })?;
+    }
+    std::fs::write(&path, text.as_bytes())
+        .map_err(|e| anyhow::anyhow!("failed to write {}: {}", path.display(), e))
+}
+
+fn load_artifact_state_fn(
+    artifact_dir: &Path,
+    relative_file: &str,
+    top_fn_name: &str,
+) -> Result<(PirPackage, IrFn)> {
+    let path = artifact_dir.join(relative_file);
+    let pkg = ir_parser::parse_and_validate_path_to_package(&path).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to parse artifact state package {}: {:?}",
+            path.display(),
+            e
+        )
+    })?;
+    let state_fn = pkg.get_fn(top_fn_name).cloned().ok_or_else(|| {
+        anyhow::anyhow!(
+            "artifact state package {} does not contain top function '{}'",
+            path.display(),
+            top_fn_name
+        )
+    })?;
+    Ok((pkg, state_fn))
+}
+
+impl PersistedRunOptions {
+    fn from_run_options(options: &RunOptions) -> Self {
+        Self {
+            max_iters: options.max_iters,
+            threads: options.threads,
+            chain_strategy: chain_strategy_value_name(options.chain_strategy).to_string(),
+            checkpoint_iters: options.checkpoint_iters,
+            progress_iters: options.progress_iters,
+            seed: options.seed,
+            initial_temperature: options.initial_temperature,
+            objective: options.objective.value_name().to_string(),
+            extension_costing_mode: options.extension_costing_mode.value_name().to_string(),
+            max_allowed_depth: options.max_allowed_depth,
+            max_allowed_area: options.max_allowed_area,
+            switching_beta1: options.weighted_switching_options.beta1,
+            switching_beta2: options.weighted_switching_options.beta2,
+            switching_primary_output_load: options.weighted_switching_options.primary_output_load,
+            enable_formal_oracle: options.enable_formal_oracle,
+        }
+    }
+
+    fn into_run_options(self) -> Result<RunOptions> {
+        Ok(RunOptions {
+            max_iters: self.max_iters,
+            threads: self.threads,
+            chain_strategy: chain_strategy_from_value_name(&self.chain_strategy)?,
+            checkpoint_iters: self.checkpoint_iters,
+            progress_iters: self.progress_iters,
+            seed: self.seed,
+            initial_temperature: self.initial_temperature,
+            objective: Objective::from_value_name(&self.objective)?,
+            extension_costing_mode: ExtensionCostingMode::from_value_name(
+                &self.extension_costing_mode,
+            )?,
+            max_allowed_depth: self.max_allowed_depth,
+            max_allowed_area: self.max_allowed_area,
+            weighted_switching_options: count_toggles::WeightedSwitchingOptions {
+                beta1: self.switching_beta1,
+                beta2: self.switching_beta2,
+                primary_output_load: self.switching_primary_output_load,
+            },
+            enable_formal_oracle: self.enable_formal_oracle,
+            trajectory_dir: None,
+            toggle_stimulus: None,
+        })
+    }
+}
+
+/// Writes a durable winning-lineage artifact under `run_dir/winning-lineage`.
+pub fn write_pir_mcmc_artifact_dir(
+    artifact: &PirMcmcArtifact,
+    package_template: &PirPackage,
+    run_dir: &Path,
+) -> Result<PathBuf> {
+    validate_prefix_minimization_artifact(artifact)?;
+    let artifact_dir = run_dir.join(PIR_MCMC_ARTIFACT_DIR_NAME);
+    std::fs::create_dir_all(&artifact_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to create artifact directory {}: {}",
+            artifact_dir.display(),
+            e
+        )
+    })?;
+
+    let top_fn_name = artifact.origin_fn.name.clone();
+    let origin_file = format!("{}/origin.ir", PIR_MCMC_ARTIFACT_STATES_DIR_NAME);
+    let raw_winner_file = format!("{}/raw-winner.ir", PIR_MCMC_ARTIFACT_STATES_DIR_NAME);
+    write_artifact_state_package(
+        &artifact_dir,
+        package_template,
+        &top_fn_name,
+        &origin_file,
+        &artifact.origin_fn,
+    )?;
+    write_artifact_state_package(
+        &artifact_dir,
+        package_template,
+        &top_fn_name,
+        &raw_winner_file,
+        &artifact.raw_winner_fn,
+    )?;
+
+    let mut winning_lineage = Vec::with_capacity(artifact.winning_lineage.len());
+    for step in artifact.winning_lineage.iter() {
+        let state_file = format!(
+            "{}/step-{:06}.ir",
+            PIR_MCMC_ARTIFACT_STATES_DIR_NAME, step.accepted_rewrite_index
+        );
+        write_artifact_state_package(
+            &artifact_dir,
+            package_template,
+            &top_fn_name,
+            &state_file,
+            &step.state,
+        )?;
+        winning_lineage.push(PersistedAcceptedLineageStep {
+            accepted_rewrite_index: step.accepted_rewrite_index,
+            global_iter: step.global_iter,
+            transform_kind: step.transform_kind,
+            state: PersistedArtifactState {
+                file: state_file,
+                cost: step.cost,
+            },
+        });
+    }
+
+    let manifest = PersistedPirMcmcArtifactManifest {
+        schema_version: PIR_MCMC_ARTIFACT_SCHEMA_VERSION,
+        top_fn_name,
+        run_options: PersistedRunOptions::from_run_options(&artifact.run_options),
+        origin: PersistedArtifactState {
+            file: origin_file,
+            cost: artifact.origin_cost,
+        },
+        raw_winner: PersistedArtifactState {
+            file: raw_winner_file,
+            cost: artifact.raw_winner_cost,
+        },
+        winning_lineage,
+    };
+    let manifest_json = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| anyhow::anyhow!("failed to serialize artifact manifest: {}", e))?;
+    let manifest_path = artifact_dir.join(PIR_MCMC_ARTIFACT_MANIFEST_FILE);
+    std::fs::write(&manifest_path, manifest_json.as_bytes())
+        .map_err(|e| anyhow::anyhow!("failed to write {}: {}", manifest_path.display(), e))?;
+    Ok(artifact_dir)
+}
+
+/// Loads a durable winning-lineage artifact from `run_dir/winning-lineage`.
+pub fn read_pir_mcmc_artifact_dir(run_dir: &Path) -> Result<LoadedPirMcmcArtifact> {
+    let artifact_dir = run_dir.join(PIR_MCMC_ARTIFACT_DIR_NAME);
+    let manifest_path = artifact_dir.join(PIR_MCMC_ARTIFACT_MANIFEST_FILE);
+    let manifest_text = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| anyhow::anyhow!("failed to read {}: {}", manifest_path.display(), e))?;
+    let manifest: PersistedPirMcmcArtifactManifest = serde_json::from_str(&manifest_text)
+        .map_err(|e| anyhow::anyhow!("failed to parse {}: {}", manifest_path.display(), e))?;
+    if manifest.schema_version != PIR_MCMC_ARTIFACT_SCHEMA_VERSION {
+        return Err(anyhow::anyhow!(
+            "unsupported PIR MCMC artifact schema version {}; expected {}",
+            manifest.schema_version,
+            PIR_MCMC_ARTIFACT_SCHEMA_VERSION
+        ));
+    }
+
+    let top_fn_name = manifest.top_fn_name.clone();
+    let (package_template, origin_fn) =
+        load_artifact_state_fn(&artifact_dir, &manifest.origin.file, &top_fn_name)?;
+    let (_, raw_winner_fn) =
+        load_artifact_state_fn(&artifact_dir, &manifest.raw_winner.file, &top_fn_name)?;
+
+    let mut winning_lineage = Vec::with_capacity(manifest.winning_lineage.len());
+    for step in manifest.winning_lineage.into_iter() {
+        let (_, state) = load_artifact_state_fn(&artifact_dir, &step.state.file, &top_fn_name)?;
+        winning_lineage.push(AcceptedLineageStep {
+            accepted_rewrite_index: step.accepted_rewrite_index,
+            global_iter: step.global_iter,
+            transform_kind: step.transform_kind,
+            state,
+            cost: step.state.cost,
+        });
+    }
+
+    let artifact = PirMcmcArtifact {
+        origin_fn,
+        origin_cost: manifest.origin.cost,
+        run_options: manifest.run_options.into_run_options()?,
+        raw_winner_fn,
+        raw_winner_cost: manifest.raw_winner.cost,
+        winning_lineage,
+    };
+    validate_prefix_minimization_artifact(&artifact)?;
+    Ok(LoadedPirMcmcArtifact {
+        artifact,
+        package_template,
+        top_fn_name,
+    })
+}
+
 impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
     type Error = anyhow::Error;
 
@@ -1934,62 +2689,543 @@ pub fn run_pir_mcmc(start_fn: IrFn, options: RunOptions) -> Result<PirMcmcResult
     run_pir_mcmc_with_shared_best(start_fn, options, None, None, None)
 }
 
+/// Runs a single-chain MCMC search while retaining the exact accepted lineage
+/// that led to the final raw winning state.
+pub fn run_pir_mcmc_with_artifact(start_fn: IrFn, options: RunOptions) -> Result<PirMcmcArtifact> {
+    validate_pir_mcmc_artifact_run_options(&options)?;
+    let all_transforms = get_pir_transforms_for_run(options.enable_formal_oracle);
+    Ok(run_pir_mcmc_with_artifact_using_transforms(start_fn, options, all_transforms)?.artifact)
+}
+
+fn run_pir_mcmc_with_artifact_using_transforms(
+    start_fn: IrFn,
+    options: RunOptions,
+    all_transforms: Vec<Box<dyn PirTransform>>,
+) -> Result<PirMcmcArtifactRunOutput> {
+    run_pir_mcmc_with_artifact_using_transforms_and_observers(
+        start_fn,
+        options,
+        all_transforms,
+        None,
+        None,
+    )
+}
+
+fn run_pir_mcmc_with_artifact_and_observers(
+    start_fn: IrFn,
+    options: RunOptions,
+    shared_best: Option<Arc<Best>>,
+    checkpoint_tx: Option<Sender<CheckpointMsg>>,
+) -> Result<PirMcmcArtifactRunOutput> {
+    validate_pir_mcmc_artifact_run_options(&options)?;
+    let all_transforms = get_pir_transforms_for_run(options.enable_formal_oracle);
+    run_pir_mcmc_with_artifact_using_transforms_and_observers(
+        start_fn,
+        options,
+        all_transforms,
+        shared_best,
+        checkpoint_tx,
+    )
+}
+
+fn run_pir_mcmc_with_artifact_using_transforms_and_observers(
+    start_fn: IrFn,
+    options: RunOptions,
+    all_transforms: Vec<Box<dyn PirTransform>>,
+    shared_best: Option<Arc<Best>>,
+    checkpoint_tx: Option<Sender<CheckpointMsg>>,
+) -> Result<PirMcmcArtifactRunOutput> {
+    let prepared = prepare_run_start(start_fn, &options)?;
+
+    let mut trajectory_writer: Option<std::io::BufWriter<std::fs::File>> =
+        if let Some(dir) = &options.trajectory_dir {
+            std::fs::create_dir_all(dir).map_err(|e| {
+                anyhow::anyhow!("failed to create trajectory dir {}: {}", dir.display(), e)
+            })?;
+            let path = dir.join("trajectory.c000.jsonl");
+            let f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|e| anyhow::anyhow!("failed to open {}: {}", path.display(), e))?;
+            Some(std::io::BufWriter::new(f))
+        } else {
+            None
+        };
+
+    let toggle_stimulus = prepared
+        .prepared_toggle_stimulus
+        .as_ref()
+        .map(|v| v.as_slice());
+    let weights = build_transform_weights(&all_transforms);
+    let mut iteration_rng = Pcg64Mcg::seed_from_u64(options.seed);
+    let mut context = PirMcmcContext {
+        rng: &mut iteration_rng,
+        all_transforms,
+        weights,
+        enable_formal_oracle: options.enable_formal_oracle,
+        oracle_baseline_cache: EvalFnBaselineResults::default(),
+    };
+
+    let origin_fn = prepared.start_fn.clone();
+    let origin_cost = prepared.initial_cost;
+    let mut current_fn = prepared.start_fn.clone();
+    let mut current_cost = prepared.initial_cost;
+    // `mcmc_iteration()` maintains the existing public optimized-best
+    // behavior. The lineage artifact tracks the raw accepted winner separately.
+    let mut best_fn_for_iteration = prepared.start_fn.clone();
+    let mut best_cost_for_iteration = prepared.initial_cost;
+    let mut best_score = search_score(
+        &best_cost_for_iteration,
+        options.objective,
+        prepared.effective_constraints,
+    );
+    let mut raw_winner_fn = prepared.start_fn;
+    let mut raw_winner_cost = prepared.initial_cost;
+    let mut lineage = WinningLineageTracker::default();
+    let mut stats = McmcStats::default();
+    let run_start_time = Instant::now();
+
+    let mut global_iter = 0u64;
+    while global_iter < options.max_iters {
+        global_iter += 1;
+        let progress_ratio = if options.max_iters > 0 {
+            (global_iter as f64) / (options.max_iters as f64)
+        } else {
+            0.0
+        };
+        let temp = options.initial_temperature
+            * (1.0 - progress_ratio.min(1.0)).max(MIN_TEMPERATURE_RATIO);
+
+        let iteration_output = mcmc_iteration(
+            current_fn,
+            current_cost,
+            &mut best_fn_for_iteration,
+            &mut best_cost_for_iteration,
+            &mut best_score,
+            &mut context,
+            temp,
+            options.objective,
+            options.extension_costing_mode,
+            toggle_stimulus,
+            &options.weighted_switching_options,
+            prepared.effective_constraints,
+        );
+
+        if let IterationOutcomeDetails::Accepted { kind } = &iteration_output.outcome {
+            lineage.record_accepted_step(
+                global_iter,
+                *kind,
+                iteration_output.output_state.clone(),
+                iteration_output.output_cost,
+                iteration_output.best_updated,
+            );
+        }
+
+        if let Some(w) = trajectory_writer.as_mut() {
+            let metric_u128 = options.objective.metric(&iteration_output.output_cost);
+            let iter_score = search_score(
+                &iteration_output.output_cost,
+                options.objective,
+                prepared.effective_constraints,
+            );
+            let iter_violation = iter_score.violation;
+            let rec = json!({
+                "chain_no": 0,
+                "role": format!("{:?}", ChainRole::Exploit),
+                "global_iter": global_iter,
+                "temp": temp,
+                "outcome": iteration_outcome_tag(&iteration_output.outcome),
+                "best_updated": iteration_output.best_updated,
+                "objective": format!("{:?}", options.objective),
+                "extension_costing_mode": options.extension_costing_mode.value_name(),
+                "metric": metric_u128,
+                "pir_nodes": iteration_output.output_cost.pir_nodes,
+                "g8r_nodes": iteration_output.output_cost.g8r_nodes,
+                "g8r_depth": iteration_output.output_cost.g8r_depth,
+                "g8r_le_graph_milli": iteration_output.output_cost.g8r_le_graph_milli,
+                "g8r_gate_output_toggles": iteration_output.output_cost.g8r_gate_output_toggles,
+                "g8r_weighted_switching_milli": iteration_output.output_cost.g8r_weighted_switching_milli,
+                "feasible": iter_score.feasible(),
+                "delay_over": iter_violation.and_then(|v| v.delay_over),
+                "area_over": iter_violation.and_then(|v| v.area_over),
+                "oracle_time_micros": iteration_output.oracle_time_micros,
+                "transform": iteration_output.transform.map(|k| format!("{:?}", k)),
+                "transform_mechanism": iteration_output.transform.map(|k| k.mechanism_hint()),
+                "transform_always_equivalent": iteration_output.transform_always_equivalent,
+                "accepted_digest": Option::<String>::None,
+                "accepted_sample_sent": false,
+            });
+            writeln!(w, "{}", rec.to_string())?;
+            if global_iter % 1000 == 0 {
+                w.flush()?;
+            }
+        }
+
+        current_fn = iteration_output.output_state.clone();
+        current_cost = iteration_output.output_cost;
+        if iteration_output.best_updated {
+            raw_winner_fn = current_fn.clone();
+            raw_winner_cost = current_cost;
+            if let Some(ref shared_best) = shared_best {
+                let before = shared_best.score();
+                let _ = shared_best.try_update(best_score, best_fn_for_iteration.clone());
+                let after = shared_best.score();
+                if after < before {
+                    log::info!(
+                        "[pir-mcmc] GLOBAL BEST UPDATE c000:i{:06} | {} -> {}",
+                        global_iter,
+                        format_search_score(before),
+                        format_search_score(after),
+                    );
+                    if let Some(ref tx) = checkpoint_tx {
+                        let _ = tx.send(CheckpointMsg {
+                            chain_no: 0,
+                            global_iter,
+                            kind: CheckpointKind::GlobalBestUpdate,
+                        });
+                    }
+                }
+            }
+        }
+
+        if options.checkpoint_iters > 0 && global_iter % options.checkpoint_iters == 0 {
+            if let Some(ref tx) = checkpoint_tx {
+                let _ = tx.send(CheckpointMsg {
+                    chain_no: 0,
+                    global_iter,
+                    kind: CheckpointKind::Periodic,
+                });
+            }
+        }
+
+        stats.update_for_iteration(&iteration_output, /* paranoid= */ false, global_iter);
+
+        if options.progress_iters > 0
+            && (global_iter % options.progress_iters == 0 || global_iter == options.max_iters)
+        {
+            let elapsed_secs = run_start_time.elapsed().as_secs_f64();
+            let samples_per_sec = if elapsed_secs > 0.0 {
+                global_iter as f64 / elapsed_secs
+            } else {
+                0.0
+            };
+            log::info!(
+                "PIR MCMC c000:i{:06} | GBest={} | LBest (pir={}, g8r_n={}, g8r_d={}, score={}) | Cur (pir={}, g8r_n={}, g8r_d={}, score={}) | Temp={:.2e} | Samples/s={:.2}",
+                global_iter,
+                shared_best
+                    .as_ref()
+                    .map(|b| format_search_score(b.score()))
+                    .unwrap_or_else(|| "none".to_string()),
+                best_cost_for_iteration.pir_nodes,
+                best_cost_for_iteration.g8r_nodes,
+                best_cost_for_iteration.g8r_depth,
+                format_search_score(best_score),
+                current_cost.pir_nodes,
+                current_cost.g8r_nodes,
+                current_cost.g8r_depth,
+                format_search_score(search_score(
+                    &current_cost,
+                    options.objective,
+                    prepared.effective_constraints
+                )),
+                temp,
+                samples_per_sec,
+            );
+        }
+    }
+
+    if let Some(mut w) = trajectory_writer {
+        w.flush()?;
+    }
+
+    Ok(PirMcmcArtifactRunOutput {
+        result: PirMcmcResult {
+            best_fn: best_fn_for_iteration,
+            best_cost: best_cost_for_iteration,
+            stats,
+        },
+        artifact: PirMcmcArtifact {
+            origin_fn,
+            origin_cost,
+            run_options: options,
+            raw_winner_fn,
+            raw_winner_cost,
+            winning_lineage: lineage.winning_lineage,
+        },
+    })
+}
+
+/// Selects the earliest accepted winning-lineage prefix that retains the
+/// requested fraction of the discovered objective improvement.
+pub fn minimize_winning_prefix(
+    artifact: &PirMcmcArtifact,
+    options: PirMcmcPrefixMinimizeOptions,
+) -> Result<PirMcmcPrefixMinimizeResult> {
+    validate_prefix_minimization_artifact(artifact)?;
+    if !options.retained_win_fraction.is_finite()
+        || !(0.0..=1.0).contains(&options.retained_win_fraction)
+    {
+        return Err(anyhow::anyhow!(
+            "retained_win_fraction must be finite and in [0, 1]; got {}",
+            options.retained_win_fraction
+        ));
+    }
+
+    let objective = artifact.run_options.objective;
+    let origin_metric = objective.metric(&artifact.origin_cost);
+    let winner_metric = objective.metric(&artifact.raw_winner_cost);
+    if winner_metric >= origin_metric {
+        return Err(anyhow::anyhow!(
+            "artifact does not contain a positive objective win: origin_metric={}, winner_metric={}",
+            origin_metric,
+            winner_metric
+        ));
+    }
+
+    if options.retained_win_fraction == 0.0 {
+        return Ok(PirMcmcPrefixMinimizeResult {
+            witness_fn: artifact.origin_fn.clone(),
+            witness_cost: artifact.origin_cost,
+            accepted_rewrite_count: 0,
+            original_winning_lineage_len: artifact.winning_lineage.len(),
+            requested_retained_win_fraction: options.retained_win_fraction,
+            actual_retained_win_fraction: 0.0,
+            origin_metric,
+            winner_metric,
+            witness_metric: origin_metric,
+        });
+    }
+
+    for step in artifact.winning_lineage.iter() {
+        let witness_metric = objective.metric(&step.cost);
+        let actual_retained_win_fraction =
+            retained_win_fraction_for_metric(origin_metric, winner_metric, witness_metric);
+        if actual_retained_win_fraction >= options.retained_win_fraction {
+            return Ok(PirMcmcPrefixMinimizeResult {
+                witness_fn: step.state.clone(),
+                witness_cost: step.cost,
+                accepted_rewrite_count: step.accepted_rewrite_index,
+                original_winning_lineage_len: artifact.winning_lineage.len(),
+                requested_retained_win_fraction: options.retained_win_fraction,
+                actual_retained_win_fraction,
+                origin_metric,
+                winner_metric,
+                witness_metric,
+            });
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "winning lineage did not contain a prefix retaining requested win fraction {}",
+        options.retained_win_fraction
+    ))
+}
+
+struct GuidedRolloutResult {
+    best_witness: PirMcmcBudgetWitness,
+}
+
+fn run_witness_guided_rollout(
+    artifact: &PirMcmcArtifact,
+    rewrite_budget: usize,
+    rollout_seed: u64,
+    weights: Vec<f64>,
+    proposal_attempts_per_rewrite: usize,
+    transforms: Vec<Box<dyn PirTransform>>,
+    origin_metric: u128,
+    winner_metric: u128,
+) -> Result<GuidedRolloutResult> {
+    let objective = artifact.run_options.objective;
+    let mut iteration_rng = Pcg64Mcg::seed_from_u64(rollout_seed);
+    let mut context = PirMcmcContext {
+        rng: &mut iteration_rng,
+        all_transforms: transforms,
+        weights,
+        enable_formal_oracle: artifact.run_options.enable_formal_oracle,
+        oracle_baseline_cache: EvalFnBaselineResults::default(),
+    };
+    let mut current_fn = artifact.origin_fn.clone();
+    let mut current_cost = artifact.origin_cost;
+    let mut best_fn_for_iteration = artifact.origin_fn.clone();
+    let mut best_cost_for_iteration = artifact.origin_cost;
+    let mut best_score = search_score(
+        &best_cost_for_iteration,
+        objective,
+        ConstraintLimits::default(),
+    );
+    let mut best_witness = make_budget_witness(
+        artifact.origin_fn.clone(),
+        artifact.origin_cost,
+        0,
+        objective,
+        origin_metric,
+        winner_metric,
+    );
+    let max_proposals = rewrite_budget.saturating_mul(proposal_attempts_per_rewrite);
+    let mut accepted_rewrites = 0usize;
+    let mut proposal_attempts = 0usize;
+
+    while accepted_rewrites < rewrite_budget && proposal_attempts < max_proposals {
+        proposal_attempts += 1;
+        let progress_ratio = accepted_rewrites as f64 / rewrite_budget.max(1) as f64;
+        let temp = artifact.run_options.initial_temperature
+            * (1.0 - progress_ratio.min(1.0)).max(MIN_TEMPERATURE_RATIO);
+        let iteration_output = mcmc_iteration(
+            current_fn,
+            current_cost,
+            &mut best_fn_for_iteration,
+            &mut best_cost_for_iteration,
+            &mut best_score,
+            &mut context,
+            temp,
+            objective,
+            artifact.run_options.extension_costing_mode,
+            None,
+            &artifact.run_options.weighted_switching_options,
+            ConstraintLimits::default(),
+        );
+        current_fn = iteration_output.output_state.clone();
+        current_cost = iteration_output.output_cost;
+        if matches!(
+            iteration_output.outcome,
+            IterationOutcomeDetails::Accepted { .. }
+        ) {
+            accepted_rewrites += 1;
+            let candidate = make_budget_witness(
+                current_fn.clone(),
+                current_cost,
+                accepted_rewrites,
+                objective,
+                origin_metric,
+                winner_metric,
+            );
+            if better_budget_witness(&candidate, &best_witness) {
+                best_witness = candidate;
+            }
+        }
+    }
+
+    Ok(GuidedRolloutResult { best_witness })
+}
+
+/// Searches for best-found short witnesses at a schedule of accepted-rewrite
+/// budgets, using the long witness to bias transform proposals.
+pub fn search_winning_budget_frontier(
+    artifact: &PirMcmcArtifact,
+    options: PirMcmcBudgetFrontierOptions,
+) -> Result<PirMcmcBudgetFrontierResult> {
+    search_winning_budget_frontier_with_rollout(
+        artifact,
+        options,
+        |rewrite_budget, _rollout_idx, rollout_seed, origin_metric, winner_metric| {
+            let transforms = get_pir_transforms_for_run(artifact.run_options.enable_formal_oracle);
+            let weights = build_witness_guided_transform_weights(
+                &transforms,
+                artifact,
+                options.witness_kind_boost,
+            );
+            let rollout = run_witness_guided_rollout(
+                artifact,
+                rewrite_budget,
+                rollout_seed,
+                weights,
+                options.proposal_attempts_per_rewrite,
+                transforms,
+                origin_metric,
+                winner_metric,
+            )?;
+            Ok(rollout.best_witness)
+        },
+    )
+}
+
+fn search_winning_budget_frontier_with_rollout<F>(
+    artifact: &PirMcmcArtifact,
+    options: PirMcmcBudgetFrontierOptions,
+    mut run_rollout: F,
+) -> Result<PirMcmcBudgetFrontierResult>
+where
+    F: FnMut(usize, usize, u64, u128, u128) -> Result<PirMcmcBudgetWitness>,
+{
+    validate_prefix_minimization_artifact(artifact)?;
+    if !objective_supports_budget_frontier_search(artifact.run_options.objective) {
+        return Err(anyhow::anyhow!(
+            "budget frontier search currently supports only objectives that can be recomputed without stored toggle stimulus; got {}",
+            artifact.run_options.objective.value_name()
+        ));
+    }
+    let budgets = frontier_budgets(options)?;
+    let objective = artifact.run_options.objective;
+    let origin_metric = objective.metric(&artifact.origin_cost);
+    let winner_metric = objective.metric(&artifact.raw_winner_cost);
+    if winner_metric >= origin_metric {
+        return Err(anyhow::anyhow!(
+            "artifact does not contain a positive objective win: origin_metric={}, winner_metric={}",
+            origin_metric,
+            winner_metric
+        ));
+    }
+
+    let mut carried_guided = make_budget_witness(
+        artifact.origin_fn.clone(),
+        artifact.origin_cost,
+        0,
+        objective,
+        origin_metric,
+        winner_metric,
+    );
+    let mut points = Vec::with_capacity(budgets.len());
+    for rewrite_budget in budgets {
+        let prefix_baseline =
+            prefix_baseline_for_budget(artifact, rewrite_budget, origin_metric, winner_metric);
+        let mut best_for_budget = carried_guided.clone();
+        for rollout_idx in 0..options.rollouts_per_budget {
+            let rollout_seed = options
+                .seed
+                .wrapping_add((rewrite_budget as u64).wrapping_mul(1_000_003))
+                .wrapping_add(rollout_idx as u64);
+            let rollout_witness = run_rollout(
+                rewrite_budget,
+                rollout_idx,
+                rollout_seed,
+                origin_metric,
+                winner_metric,
+            )?;
+            if better_budget_witness(&rollout_witness, &best_for_budget) {
+                best_for_budget = rollout_witness;
+            }
+        }
+        carried_guided = best_for_budget.clone();
+        points.push(PirMcmcBudgetFrontierPoint {
+            rewrite_budget,
+            guided: best_for_budget,
+            prefix_baseline,
+        });
+    }
+
+    Ok(PirMcmcBudgetFrontierResult {
+        origin_metric,
+        winner_metric,
+        original_winning_lineage_len: artifact.winning_lineage.len(),
+        points,
+    })
+}
+
 pub fn run_pir_mcmc_with_shared_best(
-    mut start_fn: IrFn,
+    start_fn: IrFn,
     options: RunOptions,
     shared_best: Option<Arc<Best>>,
     checkpoint_tx: Option<Sender<CheckpointMsg>>,
     accepted_sample_tx: Option<Sender<AcceptedSampleMsg>>,
 ) -> Result<PirMcmcResult> {
-    if !options.objective.needs_toggle_stimulus() && options.toggle_stimulus.is_some() {
-        return Err(anyhow::anyhow!(
-            "toggle stimulus is not valid with objective {}",
-            options.objective.value_name()
-        ));
-    }
-    validate_constraint_configuration(
-        options.objective,
-        ConstraintLimits {
-            max_delay: options.max_allowed_depth,
-            max_area: options.max_allowed_area,
-        },
-    )?;
-    compact_and_toposort_in_place(&mut start_fn)
-        .map_err(|e| anyhow::anyhow!("compact_and_toposort_in_place failed: {}", e))?;
-
-    let prepared_toggle_stimulus = if options.objective.needs_toggle_stimulus() {
-        let samples = options.toggle_stimulus.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "objective {} requires toggle stimulus",
-                options.objective.value_name()
-            )
-        })?;
-        Some(Arc::new(lower_toggle_stimulus_for_fn(samples, &start_fn)?))
-    } else {
-        None
-    };
-
-    let initial_cost = cost_with_effort_options_toggle_stimulus_and_extension_mode(
-        &start_fn,
-        options.objective,
-        prepared_toggle_stimulus.as_ref().map(|v| v.as_slice()),
-        &options.weighted_switching_options,
-        options.extension_costing_mode,
-    )?;
-    let effective_constraints = effective_constraint_limits(
-        options.objective,
-        ConstraintLimits {
-            max_delay: options.max_allowed_depth,
-            max_area: options.max_allowed_area,
-        },
-        &initial_cost,
-    );
+    let prepared = prepare_run_start(start_fn, &options)?;
     let runner = PirSegmentRunner {
         objective: options.objective,
         extension_costing_mode: options.extension_costing_mode,
         weighted_switching_options: options.weighted_switching_options,
         initial_temperature: options.initial_temperature,
-        constraints: effective_constraints,
+        constraints: prepared.effective_constraints,
         enable_formal_oracle: options.enable_formal_oracle,
         progress_iters: options.progress_iters,
         checkpoint_iters: options.checkpoint_iters,
@@ -1997,15 +3233,15 @@ pub fn run_pir_mcmc_with_shared_best(
         accepted_sample_tx,
         shared_best,
         trajectory_dir: options.trajectory_dir.clone(),
-        prepared_toggle_stimulus,
+        prepared_toggle_stimulus: prepared.prepared_toggle_stimulus,
     };
 
     let objective = options.objective;
     let threshold = options.initial_temperature as u128;
-    let constraints = effective_constraints;
+    let constraints = prepared.effective_constraints;
 
     let (best_fn, best_cost, stats) = run_multichain(
-        start_fn,
+        prepared.start_fn,
         options.max_iters,
         options.seed,
         options.threads.max(1) as usize,
@@ -2042,12 +3278,140 @@ pub fn run_pir_mcmc_with_shared_best(
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::fs;
 
     use super::*;
     use count_toggles::WeightedSwitchingOptions;
+    use tempfile::tempdir;
     use xlsynth_pir::ir::{ExtNaryAddArchitecture, NodePayload};
     use xlsynth_pir::ir_parser;
     use xlsynth_pir::ir_utils::remap_payload_with;
+
+    fn parse_fn(ir_text: &str) -> IrFn {
+        let mut parser = ir_parser::Parser::new(ir_text);
+        parser.parse_fn().unwrap()
+    }
+
+    fn parse_pkg(ir_text: &str) -> PirPackage {
+        let mut parser = ir_parser::Parser::new(ir_text);
+        parser.parse_and_validate_package().unwrap()
+    }
+
+    fn test_run_options(objective: Objective) -> RunOptions {
+        RunOptions {
+            max_iters: 1,
+            threads: 1,
+            chain_strategy: ChainStrategy::Independent,
+            checkpoint_iters: 100,
+            progress_iters: 0,
+            seed: 1,
+            initial_temperature: 1.0,
+            objective,
+            extension_costing_mode: ExtensionCostingMode::Preserve,
+            max_allowed_depth: None,
+            max_allowed_area: None,
+            weighted_switching_options: WeightedSwitchingOptions::default(),
+            enable_formal_oracle: false,
+            trajectory_dir: None,
+            toggle_stimulus: None,
+        }
+    }
+
+    fn cost_with_pir_nodes(pir_nodes: usize) -> Cost {
+        Cost {
+            pir_nodes,
+            g8r_nodes: pir_nodes,
+            g8r_depth: pir_nodes,
+            g8r_le_graph_milli: 0,
+            g8r_gate_output_toggles: 0,
+            g8r_weighted_switching_milli: 0,
+        }
+    }
+
+    fn renamed_state(base: &IrFn, name: &str) -> IrFn {
+        let mut f = base.clone();
+        f.name = name.to_string();
+        f
+    }
+
+    fn manual_prefix_artifact() -> PirMcmcArtifact {
+        let origin = parse_fn(
+            r#"fn origin(x: bits[8] id=1) -> bits[8] {
+  ret identity.2: bits[8] = identity(x, id=2)
+}"#,
+        );
+        let step1_state = renamed_state(&origin, "step1");
+        let step2_state = renamed_state(&origin, "step2");
+        let step3_state = renamed_state(&origin, "step3");
+        PirMcmcArtifact {
+            origin_fn: origin.clone(),
+            origin_cost: cost_with_pir_nodes(100),
+            run_options: test_run_options(Objective::Nodes),
+            raw_winner_fn: step3_state.clone(),
+            raw_winner_cost: cost_with_pir_nodes(50),
+            winning_lineage: vec![
+                AcceptedLineageStep {
+                    accepted_rewrite_index: 1,
+                    global_iter: 2,
+                    transform_kind: PirTransformKind::NotNotCancel,
+                    state: step1_state,
+                    cost: cost_with_pir_nodes(90),
+                },
+                AcceptedLineageStep {
+                    accepted_rewrite_index: 2,
+                    global_iter: 4,
+                    transform_kind: PirTransformKind::NegNegCancel,
+                    state: step2_state,
+                    cost: cost_with_pir_nodes(70),
+                },
+                AcceptedLineageStep {
+                    accepted_rewrite_index: 3,
+                    global_iter: 7,
+                    transform_kind: PirTransformKind::SelSameArmsFold,
+                    state: step3_state,
+                    cost: cost_with_pir_nodes(50),
+                },
+            ],
+        }
+    }
+
+    #[derive(Debug)]
+    struct RemoveDeadNodeTestTransform;
+
+    impl PirTransform for RemoveDeadNodeTestTransform {
+        fn kind(&self) -> PirTransformKind {
+            PirTransformKind::NotNotCancel
+        }
+
+        fn find_candidates(&mut self, f: &IrFn) -> Vec<crate::transforms::TransformCandidate> {
+            f.node_refs()
+                .into_iter()
+                .filter(|nr| {
+                    f.get_node(*nr)
+                        .name
+                        .as_deref()
+                        .map(|name| name.starts_with("dead"))
+                        .unwrap_or(false)
+                })
+                .map(|nr| crate::transforms::TransformCandidate {
+                    location: crate::transforms::TransformLocation::Node(nr),
+                    always_equivalent: true,
+                })
+                .collect()
+        }
+
+        fn apply(
+            &self,
+            f: &mut IrFn,
+            loc: &crate::transforms::TransformLocation,
+        ) -> Result<(), String> {
+            let crate::transforms::TransformLocation::Node(nr) = loc else {
+                return Err("RemoveDeadNodeTestTransform expects a node location".to_string());
+            };
+            f.get_node_mut(*nr).payload = NodePayload::Nil;
+            Ok(())
+        }
+    }
 
     #[test]
     fn pir_mcmc_runs_and_is_deterministic_on_simple_add() {
@@ -2084,6 +3448,557 @@ mod tests {
         // Determinism: for fixed seed and options, we should get the same best
         // function text.
         assert_eq!(res1.best_fn.to_string(), res2.best_fn.to_string());
+    }
+
+    #[test]
+    fn winning_lineage_tracker_preserves_non_best_detours_before_later_win() {
+        let origin = parse_fn(
+            r#"fn origin(x: bits[8] id=1) -> bits[8] {
+  ret identity.2: bits[8] = identity(x, id=2)
+}"#,
+        );
+        let mut tracker = WinningLineageTracker::default();
+        tracker.record_accepted_step(
+            1,
+            PirTransformKind::NotNotCancel,
+            renamed_state(&origin, "best1"),
+            cost_with_pir_nodes(90),
+            true,
+        );
+        tracker.record_accepted_step(
+            2,
+            PirTransformKind::NegNegCancel,
+            renamed_state(&origin, "detour"),
+            cost_with_pir_nodes(95),
+            false,
+        );
+        tracker.record_accepted_step(
+            3,
+            PirTransformKind::SelSameArmsFold,
+            renamed_state(&origin, "best2"),
+            cost_with_pir_nodes(80),
+            true,
+        );
+
+        assert_eq!(tracker.winning_lineage.len(), 3);
+        assert_eq!(tracker.winning_lineage[0].state.name, "best1");
+        assert_eq!(tracker.winning_lineage[1].state.name, "detour");
+        assert_eq!(tracker.winning_lineage[2].state.name, "best2");
+        assert_eq!(tracker.winning_lineage[2].accepted_rewrite_index, 3);
+    }
+
+    #[test]
+    fn prefix_minimization_selects_earliest_prefix_meeting_requested_win() {
+        let artifact = manual_prefix_artifact();
+
+        let retain_all = minimize_winning_prefix(
+            &artifact,
+            PirMcmcPrefixMinimizeOptions {
+                retained_win_fraction: 1.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(retain_all.accepted_rewrite_count, 3);
+        assert_eq!(retain_all.witness_metric, 50);
+
+        let retain_most = minimize_winning_prefix(
+            &artifact,
+            PirMcmcPrefixMinimizeOptions {
+                retained_win_fraction: 0.6,
+            },
+        )
+        .unwrap();
+        assert_eq!(retain_most.accepted_rewrite_count, 2);
+        assert_eq!(retain_most.witness_fn.name, "step2");
+        assert_eq!(retain_most.witness_metric, 70);
+        assert_eq!(retain_most.original_winning_lineage_len, 3);
+        assert!((retain_most.actual_retained_win_fraction - 0.6).abs() < 1e-12);
+
+        let retain_none = minimize_winning_prefix(
+            &artifact,
+            PirMcmcPrefixMinimizeOptions {
+                retained_win_fraction: 0.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(retain_none.accepted_rewrite_count, 0);
+        assert_eq!(retain_none.witness_fn.name, "origin");
+        assert_eq!(retain_none.witness_metric, 100);
+    }
+
+    #[test]
+    fn prefix_minimization_rejects_invalid_fraction_and_non_winning_artifacts() {
+        let artifact = manual_prefix_artifact();
+        for retained_win_fraction in [f64::NAN, -0.1, 1.1] {
+            let err = minimize_winning_prefix(
+                &artifact,
+                PirMcmcPrefixMinimizeOptions {
+                    retained_win_fraction,
+                },
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string().contains("retained_win_fraction"),
+                "unexpected error: {err}"
+            );
+        }
+
+        let mut no_win = artifact.clone();
+        no_win.raw_winner_cost = no_win.origin_cost;
+        let err = minimize_winning_prefix(
+            &no_win,
+            PirMcmcPrefixMinimizeOptions {
+                retained_win_fraction: 0.5,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("positive objective win"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn frontier_schedule_validates_step_and_max() {
+        let opts = PirMcmcBudgetFrontierOptions {
+            budget_step: 4,
+            max_rewrites: 16,
+            rollouts_per_budget: 1,
+            seed: 1,
+            witness_kind_boost: PirMcmcBudgetFrontierOptions::DEFAULT_WITNESS_KIND_BOOST,
+            proposal_attempts_per_rewrite:
+                PirMcmcBudgetFrontierOptions::DEFAULT_PROPOSAL_ATTEMPTS_PER_REWRITE,
+        };
+        assert_eq!(frontier_budgets(opts).unwrap(), vec![4, 8, 12, 16]);
+        assert_eq!(
+            frontier_budgets(PirMcmcBudgetFrontierOptions {
+                max_rewrites: 10,
+                ..opts
+            })
+            .unwrap(),
+            vec![4, 8, 10]
+        );
+        assert!(
+            frontier_budgets(PirMcmcBudgetFrontierOptions {
+                budget_step: 0,
+                ..opts
+            })
+            .is_err()
+        );
+        assert!(
+            frontier_budgets(PirMcmcBudgetFrontierOptions {
+                max_rewrites: 0,
+                ..opts
+            })
+            .is_err()
+        );
+        assert!(
+            frontier_budgets(PirMcmcBudgetFrontierOptions {
+                budget_step: 8,
+                max_rewrites: 4,
+                ..opts
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn win_percent_vs_origin_reports_percentage_points() {
+        assert!(
+            (win_percent_vs_origin_for_metric(1205, 1173) - 2.655_601_659_751_037).abs() < 1e-12
+        );
+    }
+
+    #[test]
+    fn witness_guided_weights_favor_lineage_kinds_without_excluding_others() {
+        #[derive(Debug)]
+        struct KindOnlyTransform(PirTransformKind);
+        impl PirTransform for KindOnlyTransform {
+            fn kind(&self) -> PirTransformKind {
+                self.0
+            }
+
+            fn find_candidates(&mut self, _f: &IrFn) -> Vec<crate::transforms::TransformCandidate> {
+                Vec::new()
+            }
+
+            fn apply(
+                &self,
+                _f: &mut IrFn,
+                _loc: &crate::transforms::TransformLocation,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+        }
+
+        let artifact = manual_prefix_artifact();
+        let transforms: Vec<Box<dyn PirTransform>> = vec![
+            Box::new(KindOnlyTransform(PirTransformKind::NotNotCancel)),
+            Box::new(KindOnlyTransform(PirTransformKind::CmpSwap)),
+        ];
+        let weights = build_witness_guided_transform_weights(&transforms, &artifact, 4.0);
+        assert_eq!(weights, vec![5.0, 1.0]);
+    }
+
+    #[test]
+    fn frontier_reports_prefix_baseline_and_carries_guided_points_forward() {
+        let artifact = manual_prefix_artifact();
+        let opts = PirMcmcBudgetFrontierOptions {
+            budget_step: 1,
+            max_rewrites: 3,
+            rollouts_per_budget: 1,
+            seed: 7,
+            witness_kind_boost: PirMcmcBudgetFrontierOptions::DEFAULT_WITNESS_KIND_BOOST,
+            proposal_attempts_per_rewrite:
+                PirMcmcBudgetFrontierOptions::DEFAULT_PROPOSAL_ATTEMPTS_PER_REWRITE,
+        };
+        let result = search_winning_budget_frontier_with_rollout(
+            &artifact,
+            opts,
+            |budget, _, _, origin_metric, winner_metric| {
+                let (state_name, cost) = match budget {
+                    1 => ("guided1", cost_with_pir_nodes(95)),
+                    2 => ("guided2", cost_with_pir_nodes(80)),
+                    3 => ("guided3", cost_with_pir_nodes(85)),
+                    _ => unreachable!(),
+                };
+                Ok(make_budget_witness(
+                    renamed_state(&artifact.origin_fn, state_name),
+                    cost,
+                    budget,
+                    Objective::Nodes,
+                    origin_metric,
+                    winner_metric,
+                ))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.points.len(), 3);
+        assert_eq!(result.points[0].prefix_baseline.metric, 90);
+        assert_eq!(result.points[1].prefix_baseline.metric, 70);
+        assert_eq!(result.points[2].prefix_baseline.metric, 50);
+        assert_eq!(result.points[0].guided.metric, 95);
+        assert_eq!(result.points[1].guided.metric, 80);
+        assert_eq!(
+            result.points[2].guided.metric, 80,
+            "worse later searches must carry forward the prior frontier point"
+        );
+    }
+
+    #[test]
+    fn frontier_uses_origin_fallback_when_rollouts_do_not_improve() {
+        let artifact = manual_prefix_artifact();
+        let opts = PirMcmcBudgetFrontierOptions {
+            budget_step: 2,
+            max_rewrites: 4,
+            rollouts_per_budget: 1,
+            seed: 1,
+            witness_kind_boost: PirMcmcBudgetFrontierOptions::DEFAULT_WITNESS_KIND_BOOST,
+            proposal_attempts_per_rewrite:
+                PirMcmcBudgetFrontierOptions::DEFAULT_PROPOSAL_ATTEMPTS_PER_REWRITE,
+        };
+        let result = search_winning_budget_frontier_with_rollout(
+            &artifact,
+            opts,
+            |budget, _, _, origin_metric, winner_metric| {
+                Ok(make_budget_witness(
+                    renamed_state(&artifact.origin_fn, &format!("noop{budget}")),
+                    artifact.origin_cost,
+                    budget,
+                    Objective::Nodes,
+                    origin_metric,
+                    winner_metric,
+                ))
+            },
+        )
+        .unwrap();
+        assert_eq!(result.points[0].guided.accepted_rewrite_count, 0);
+        assert_eq!(result.points[0].guided.metric, 100);
+        assert_eq!(result.points[1].guided.accepted_rewrite_count, 0);
+        assert_eq!(result.points[1].guided.metric, 100);
+    }
+
+    #[test]
+    fn frontier_rejects_no_win_and_toggle_objectives() {
+        let opts = PirMcmcBudgetFrontierOptions {
+            budget_step: 1,
+            max_rewrites: 1,
+            rollouts_per_budget: 1,
+            seed: 1,
+            witness_kind_boost: PirMcmcBudgetFrontierOptions::DEFAULT_WITNESS_KIND_BOOST,
+            proposal_attempts_per_rewrite:
+                PirMcmcBudgetFrontierOptions::DEFAULT_PROPOSAL_ATTEMPTS_PER_REWRITE,
+        };
+        let mut no_win = manual_prefix_artifact();
+        no_win.raw_winner_cost = no_win.origin_cost;
+        assert!(search_winning_budget_frontier(&no_win, opts).is_err());
+
+        let mut toggle_artifact = manual_prefix_artifact();
+        toggle_artifact.run_options.objective = Objective::G8rNodesTimesDepthTimesToggles;
+        toggle_artifact.raw_winner_cost.g8r_gate_output_toggles = 1;
+        assert!(search_winning_budget_frontier(&toggle_artifact, opts).is_err());
+    }
+
+    #[test]
+    fn artifact_api_rejects_unsupported_run_shapes() {
+        let f = parse_fn(
+            r#"fn f(x: bits[1] id=1) -> bits[1] {
+  ret identity.2: bits[1] = identity(x, id=2)
+}"#,
+        );
+
+        let mut multichain = test_run_options(Objective::Nodes);
+        multichain.threads = 2;
+        assert!(run_pir_mcmc_with_artifact(f.clone(), multichain).is_err());
+
+        let mut constrained = test_run_options(Objective::G8rNodes);
+        constrained.max_allowed_depth = Some(4);
+        assert!(run_pir_mcmc_with_artifact(f.clone(), constrained).is_err());
+
+        let mut implicit_constraint =
+            test_run_options(Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress);
+        implicit_constraint.toggle_stimulus = Some(vec![
+            IrValue::parse_typed("(bits[1]:0)").unwrap(),
+            IrValue::parse_typed("(bits[1]:1)").unwrap(),
+        ]);
+        assert!(run_pir_mcmc_with_artifact(f, implicit_constraint).is_err());
+    }
+
+    #[test]
+    fn artifact_run_is_deterministic_and_captures_raw_winning_lineage() {
+        let f = parse_fn(
+            r#"fn f(x: bits[8] id=1) -> bits[8] {
+  dead: bits[8] = identity(x, id=2)
+  ret live: bits[8] = identity(x, id=3)
+}"#,
+        );
+        let mut opts = test_run_options(Objective::Nodes);
+        opts.max_iters = 1;
+        opts.seed = 7;
+        let transforms1: Vec<Box<dyn PirTransform>> = vec![Box::new(RemoveDeadNodeTestTransform)];
+        let transforms2: Vec<Box<dyn PirTransform>> = vec![Box::new(RemoveDeadNodeTestTransform)];
+
+        let artifact1 =
+            run_pir_mcmc_with_artifact_using_transforms(f.clone(), opts.clone(), transforms1)
+                .unwrap()
+                .artifact;
+        let artifact2 = run_pir_mcmc_with_artifact_using_transforms(f, opts, transforms2)
+            .unwrap()
+            .artifact;
+
+        assert!(
+            artifact1.raw_winner_cost.pir_nodes < artifact1.origin_cost.pir_nodes,
+            "expected a real node-count win in the deterministic fixture"
+        );
+        assert_eq!(
+            artifact1.origin_fn.to_string(),
+            artifact2.origin_fn.to_string()
+        );
+        assert_eq!(artifact1.origin_cost, artifact2.origin_cost);
+        assert_eq!(artifact1.raw_winner_cost, artifact2.raw_winner_cost);
+        assert_eq!(
+            artifact1.raw_winner_fn.to_string(),
+            artifact2.raw_winner_fn.to_string()
+        );
+        assert_eq!(
+            artifact1.winning_lineage.len(),
+            artifact2.winning_lineage.len()
+        );
+        assert!(
+            !artifact1.winning_lineage.is_empty(),
+            "expected a non-empty winning lineage"
+        );
+        let last1 = artifact1.winning_lineage.last().unwrap();
+        let last2 = artifact2.winning_lineage.last().unwrap();
+        assert_eq!(last1.cost, artifact1.raw_winner_cost);
+        assert_eq!(last1.state.to_string(), artifact1.raw_winner_fn.to_string());
+        assert_eq!(last1.cost, last2.cost);
+        assert_eq!(last1.state.to_string(), last2.state.to_string());
+        assert_eq!(last1.transform_kind, last2.transform_kind);
+    }
+
+    #[test]
+    fn artifact_lineage_can_be_minimized_end_to_end() {
+        let f = parse_fn(
+            r#"fn f(x: bits[8] id=1) -> bits[8] {
+  dead_a: bits[8] = identity(x, id=2)
+  dead_b: bits[8] = identity(x, id=3)
+  ret live: bits[8] = identity(x, id=4)
+}"#,
+        );
+        let mut opts = test_run_options(Objective::Nodes);
+        opts.max_iters = 2;
+        let transforms: Vec<Box<dyn PirTransform>> = vec![Box::new(RemoveDeadNodeTestTransform)];
+
+        let artifact = run_pir_mcmc_with_artifact_using_transforms(f, opts, transforms)
+            .unwrap()
+            .artifact;
+        assert_eq!(artifact.origin_cost.pir_nodes, 5);
+        assert_eq!(artifact.raw_winner_cost.pir_nodes, 3);
+        assert_eq!(artifact.winning_lineage.len(), 2);
+
+        let minimized = minimize_winning_prefix(
+            &artifact,
+            PirMcmcPrefixMinimizeOptions {
+                retained_win_fraction: 0.5,
+            },
+        )
+        .unwrap();
+        assert_eq!(minimized.accepted_rewrite_count, 1);
+        assert_eq!(minimized.original_winning_lineage_len, 2);
+        assert_eq!(minimized.origin_metric, 5);
+        assert_eq!(minimized.winner_metric, 3);
+        assert_eq!(minimized.witness_metric, 4);
+        assert!((minimized.actual_retained_win_fraction - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn durable_artifact_round_trips_and_minimizes_identically() {
+        let pkg = parse_pkg(
+            r#"package sample
+
+top fn f(x: bits[8] id=1) -> bits[8] {
+  dead_a: bits[8] = identity(x, id=2)
+  dead_b: bits[8] = identity(x, id=3)
+  ret live: bits[8] = identity(x, id=4)
+}
+"#,
+        );
+        let f = pkg.get_fn("f").unwrap().clone();
+        let mut opts = test_run_options(Objective::Nodes);
+        opts.max_iters = 2;
+        let transforms: Vec<Box<dyn PirTransform>> = vec![Box::new(RemoveDeadNodeTestTransform)];
+        let artifact = run_pir_mcmc_with_artifact_using_transforms(f, opts, transforms)
+            .unwrap()
+            .artifact;
+        let before = minimize_winning_prefix(
+            &artifact,
+            PirMcmcPrefixMinimizeOptions {
+                retained_win_fraction: 0.5,
+            },
+        )
+        .unwrap();
+
+        let run_dir = tempdir().unwrap();
+        write_pir_mcmc_artifact_dir(&artifact, &pkg, run_dir.path()).unwrap();
+        let loaded = read_pir_mcmc_artifact_dir(run_dir.path()).unwrap();
+        let after = minimize_winning_prefix(
+            &loaded.artifact,
+            PirMcmcPrefixMinimizeOptions {
+                retained_win_fraction: 0.5,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(loaded.top_fn_name, "f");
+        assert_eq!(loaded.artifact.origin_cost, artifact.origin_cost);
+        assert_eq!(
+            loaded.artifact.origin_fn.to_string(),
+            artifact.origin_fn.to_string()
+        );
+        assert_eq!(
+            loaded.artifact.raw_winner_fn.to_string(),
+            artifact.raw_winner_fn.to_string()
+        );
+        assert_eq!(
+            loaded.artifact.winning_lineage.len(),
+            artifact.winning_lineage.len()
+        );
+        assert_eq!(
+            loaded.artifact.winning_lineage[0].transform_kind,
+            artifact.winning_lineage[0].transform_kind
+        );
+        assert_eq!(after.accepted_rewrite_count, before.accepted_rewrite_count);
+        assert_eq!(after.witness_metric, before.witness_metric);
+        assert_eq!(after.witness_fn.to_string(), before.witness_fn.to_string());
+    }
+
+    #[test]
+    fn durable_artifact_manifest_is_deterministic_for_fixed_run() {
+        let pkg = parse_pkg(
+            r#"package sample
+
+top fn f(x: bits[8] id=1) -> bits[8] {
+  dead_a: bits[8] = identity(x, id=2)
+  dead_b: bits[8] = identity(x, id=3)
+  ret live: bits[8] = identity(x, id=4)
+}
+"#,
+        );
+        let f = pkg.get_fn("f").unwrap().clone();
+        let mut opts = test_run_options(Objective::Nodes);
+        opts.max_iters = 2;
+        let artifact1 = run_pir_mcmc_with_artifact_using_transforms(
+            f.clone(),
+            opts.clone(),
+            vec![Box::new(RemoveDeadNodeTestTransform)],
+        )
+        .unwrap()
+        .artifact;
+        let artifact2 = run_pir_mcmc_with_artifact_using_transforms(
+            f,
+            opts,
+            vec![Box::new(RemoveDeadNodeTestTransform)],
+        )
+        .unwrap()
+        .artifact;
+
+        let run_dir1 = tempdir().unwrap();
+        let run_dir2 = tempdir().unwrap();
+        let artifact_dir1 = write_pir_mcmc_artifact_dir(&artifact1, &pkg, run_dir1.path()).unwrap();
+        let artifact_dir2 = write_pir_mcmc_artifact_dir(&artifact2, &pkg, run_dir2.path()).unwrap();
+        let manifest1 =
+            fs::read_to_string(artifact_dir1.join(PIR_MCMC_ARTIFACT_MANIFEST_FILE)).unwrap();
+        let manifest2 =
+            fs::read_to_string(artifact_dir2.join(PIR_MCMC_ARTIFACT_MANIFEST_FILE)).unwrap();
+        assert_eq!(manifest1, manifest2);
+    }
+
+    #[test]
+    fn durable_artifact_rejects_malformed_or_incomplete_manifests() {
+        let malformed_dir = tempdir().unwrap();
+        let malformed_artifact_dir = malformed_dir.path().join(PIR_MCMC_ARTIFACT_DIR_NAME);
+        fs::create_dir_all(&malformed_artifact_dir).unwrap();
+        fs::write(
+            malformed_artifact_dir.join(PIR_MCMC_ARTIFACT_MANIFEST_FILE),
+            "{not json",
+        )
+        .unwrap();
+        assert!(read_pir_mcmc_artifact_dir(malformed_dir.path()).is_err());
+
+        let incomplete_dir = tempdir().unwrap();
+        let incomplete_artifact_dir = incomplete_dir.path().join(PIR_MCMC_ARTIFACT_DIR_NAME);
+        fs::create_dir_all(&incomplete_artifact_dir).unwrap();
+        fs::write(
+            incomplete_artifact_dir.join(PIR_MCMC_ARTIFACT_MANIFEST_FILE),
+            r#"{
+  "schema_version": 1,
+  "top_fn_name": "f",
+  "run_options": {
+    "max_iters": 1,
+    "threads": 1,
+    "chain_strategy": "independent",
+    "checkpoint_iters": 1,
+    "progress_iters": 0,
+    "seed": 1,
+    "initial_temperature": 1.0,
+    "objective": "nodes",
+    "extension_costing_mode": "preserve",
+    "max_allowed_depth": null,
+    "max_allowed_area": null,
+    "switching_beta1": 1.0,
+    "switching_beta2": 0.0,
+    "switching_primary_output_load": 1.0,
+    "enable_formal_oracle": false
+  },
+  "origin": {"file": "states/origin.ir", "cost": {"pir_nodes": 2, "g8r_nodes": 2, "g8r_depth": 2, "g8r_le_graph_milli": 0, "g8r_gate_output_toggles": 0, "g8r_weighted_switching_milli": 0}},
+  "raw_winner": {"file": "states/raw-winner.ir", "cost": {"pir_nodes": 1, "g8r_nodes": 1, "g8r_depth": 1, "g8r_le_graph_milli": 0, "g8r_gate_output_toggles": 0, "g8r_weighted_switching_milli": 0}},
+  "winning_lineage": []
+}"#,
+        )
+        .unwrap();
+        assert!(read_pir_mcmc_artifact_dir(incomplete_dir.path()).is_err());
     }
 
     #[test]

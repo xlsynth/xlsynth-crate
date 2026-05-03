@@ -25,10 +25,13 @@ use xlsynth_pir::ir_utils::compact_and_toposort_in_place;
 
 use crate::{
     Best, CheckpointKind, CheckpointMsg, ConstraintLimits, ExtensionCostingMode, Objective,
-    RunOptions, cost_with_effort_options_toggle_stimulus_and_extension_mode,
-    effective_constraint_limits, format_search_score, lower_toggle_stimulus_for_fn,
-    parse_irvals_tuple_file, run_pir_mcmc_with_shared_best, search_score,
-    validate_constraint_configuration,
+    PirMcmcBudgetFrontierOptions, PirMcmcBudgetWitness, PirMcmcPrefixMinimizeOptions, RunOptions,
+    cost_with_effort_options_toggle_stimulus_and_extension_mode, effective_constraint_limits,
+    format_search_score, lower_toggle_stimulus_for_fn, minimize_winning_prefix,
+    parse_irvals_tuple_file, read_pir_mcmc_artifact_dir, run_pir_mcmc_with_artifact_and_observers,
+    run_pir_mcmc_with_shared_best, search_score, search_winning_budget_frontier,
+    validate_constraint_configuration, validate_pir_mcmc_artifact_run_options,
+    write_pir_mcmc_artifact_dir,
 };
 
 #[derive(ValueEnum, Debug, Clone, Copy)]
@@ -66,6 +69,19 @@ pub struct PirMcmcCliArgs {
     pub switching_beta2: f64,
     pub switching_primary_output_load: f64,
     chain_strategy: CliChainStrategy,
+}
+
+#[derive(Debug, Clone)]
+pub struct PirMcmcMinimizeCliArgs {
+    pub run_dir: String,
+    pub retained_win_fraction: Option<f64>,
+    pub budget_step: Option<usize>,
+    pub max_rewrites: Option<usize>,
+    pub rollouts_per_budget: Option<usize>,
+    pub seed: Option<u64>,
+    pub witness_kind_boost: f64,
+    pub proposal_attempts_per_rewrite: usize,
+    pub output: String,
 }
 
 /// Adds the PIR MCMC arguments to the given command.
@@ -269,6 +285,108 @@ pub fn parse_pir_mcmc_args(matches: &ArgMatches) -> PirMcmcCliArgs {
     }
 }
 
+/// Adds arguments for reducing a stored winning lineage to an earlier prefix.
+pub fn add_pir_mcmc_minimize_args(command: Command) -> Command {
+    command
+        .arg(
+            Arg::new("run_dir")
+                .help("MCMC output directory containing winning-lineage artifacts.")
+                .required(true)
+                .index(1)
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("retained_win_fraction")
+                .long("retain-win-fraction")
+                .value_name("FRACTION")
+                .help("Fraction of the discovered objective win to retain.")
+                .conflicts_with_all(["budget_step", "max_rewrites", "rollouts_per_budget"])
+                .value_parser(clap::value_parser!(f64))
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("budget_step")
+                .long("budget-step")
+                .value_name("N")
+                .help("Accepted-rewrite spacing for frontier budgets.")
+                .requires_all(["max_rewrites", "rollouts_per_budget"])
+                .conflicts_with("retained_win_fraction")
+                .value_parser(clap::value_parser!(usize))
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("max_rewrites")
+                .long("max-rewrites")
+                .value_name("N")
+                .help("Largest accepted-rewrite budget to evaluate in frontier mode.")
+                .requires_all(["budget_step", "rollouts_per_budget"])
+                .conflicts_with("retained_win_fraction")
+                .value_parser(clap::value_parser!(usize))
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("rollouts_per_budget")
+                .long("rollouts-per-budget")
+                .value_name("N")
+                .help("Independent guided short rollouts per frontier budget.")
+                .requires_all(["budget_step", "max_rewrites"])
+                .conflicts_with("retained_win_fraction")
+                .value_parser(clap::value_parser!(usize))
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("seed")
+                .long("seed")
+                .value_name("SEED")
+                .help("Optional frontier search seed override (defaults to artifact seed).")
+                .value_parser(clap::value_parser!(u64))
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("witness_kind_boost")
+                .long("witness-kind-boost")
+                .value_name("BOOST")
+                .help("Extra proposal weight per winning-lineage occurrence of a transform kind.")
+                .default_value("4.0")
+                .value_parser(clap::value_parser!(f64))
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("proposal_attempts_per_rewrite")
+                .long("proposal-attempts-per-rewrite")
+                .value_name("N")
+                .help("Proposal-attempt cap per accepted rewrite in each frontier rollout.")
+                .default_value("64")
+                .value_parser(clap::value_parser!(usize))
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("output")
+                .short('o')
+                .long("output")
+                .value_name("OUTPUT_DIR")
+                .help("Directory to write minimized witness artifacts.")
+                .required(true)
+                .action(ArgAction::Set),
+        )
+}
+
+pub fn parse_pir_mcmc_minimize_args(matches: &ArgMatches) -> PirMcmcMinimizeCliArgs {
+    PirMcmcMinimizeCliArgs {
+        run_dir: matches.get_one::<String>("run_dir").unwrap().to_string(),
+        retained_win_fraction: matches.get_one::<f64>("retained_win_fraction").copied(),
+        budget_step: matches.get_one::<usize>("budget_step").copied(),
+        max_rewrites: matches.get_one::<usize>("max_rewrites").copied(),
+        rollouts_per_budget: matches.get_one::<usize>("rollouts_per_budget").copied(),
+        seed: matches.get_one::<u64>("seed").copied(),
+        witness_kind_boost: *matches.get_one::<f64>("witness_kind_boost").unwrap(),
+        proposal_attempts_per_rewrite: *matches
+            .get_one::<usize>("proposal_attempts_per_rewrite")
+            .unwrap(),
+        output: matches.get_one::<String>("output").unwrap().to_string(),
+    }
+}
+
 fn optimize_ir_text(
     ir_text: &str,
     top: &str,
@@ -330,6 +448,74 @@ fn gatify_ir_text_to_g8r_text_and_stats(ir_text: &str) -> Result<(String, Summar
     let gate_fn = gatify_output.gate_fn;
     let stats = get_summary_stats::get_summary_stats(&gate_fn);
     Ok((gate_fn.to_string(), stats))
+}
+
+fn write_witness_artifacts(
+    output_dir: &PathBuf,
+    package_template: &Package,
+    top_fn_name: &str,
+    witness_fn: &xlsynth_pir::ir::Fn,
+    extension_costing_mode: ExtensionCostingMode,
+) -> Result<()> {
+    std::fs::create_dir_all(output_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to create minimization output directory {}: {}",
+            output_dir.display(),
+            e
+        )
+    })?;
+
+    let mut witness_pkg = package_template.clone();
+    let witness_top = witness_pkg.get_fn_mut(top_fn_name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Top function '{}' not found in artifact package template",
+            top_fn_name
+        )
+    })?;
+    *witness_top = witness_fn.clone();
+
+    let witness_ir_text = emit_pkg_text_toposorted(&witness_pkg)?;
+    let witness_ir_path = output_dir.join("witness.ir");
+    std::fs::write(&witness_ir_path, witness_ir_text.as_bytes())
+        .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", witness_ir_path.display(), e))?;
+
+    let witness_opt_ir_text =
+        optimize_ir_text(&witness_ir_text, top_fn_name, extension_costing_mode)?;
+    let witness_opt_ir_path = output_dir.join("witness.opt.ir");
+    std::fs::write(&witness_opt_ir_path, witness_opt_ir_text.as_bytes()).map_err(|e| {
+        anyhow::anyhow!("Failed to write {}: {:?}", witness_opt_ir_path.display(), e)
+    })?;
+
+    let (witness_g8r_text, witness_stats) =
+        gatify_ir_text_to_g8r_text_and_stats(&witness_opt_ir_text)?;
+    let witness_g8r_path = output_dir.join("witness.g8r");
+    std::fs::write(&witness_g8r_path, witness_g8r_text.as_bytes())
+        .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", witness_g8r_path.display(), e))?;
+    let witness_stats_path = output_dir.join("witness.stats.json");
+    let witness_stats_json =
+        serde_json::to_string_pretty(&witness_stats).expect("serialize SummaryStats");
+    std::fs::write(&witness_stats_path, witness_stats_json.as_bytes()).map_err(|e| {
+        anyhow::anyhow!("Failed to write {}: {:?}", witness_stats_path.display(), e)
+    })?;
+    Ok(())
+}
+
+fn budget_witness_json(witness: &PirMcmcBudgetWitness) -> serde_json::Value {
+    serde_json::json!({
+        "accepted_rewrite_count": witness.accepted_rewrite_count,
+        "metric": witness.metric,
+        "absolute_win": witness.absolute_win,
+        "win_percent_vs_origin": witness.win_percent_vs_origin,
+        "retained_win_fraction": witness.retained_win_fraction,
+        "cost": {
+            "pir_nodes": witness.witness_cost.pir_nodes,
+            "g8r_nodes": witness.witness_cost.g8r_nodes,
+            "g8r_depth": witness.witness_cost.g8r_depth,
+            "g8r_le_graph_milli": witness.witness_cost.g8r_le_graph_milli,
+            "g8r_gate_output_toggles": witness.witness_cost.g8r_gate_output_toggles,
+            "g8r_weighted_switching_milli": witness.witness_cost.g8r_weighted_switching_milli,
+        },
+    })
 }
 
 pub fn run_pir_mcmc_driver<F>(cli: PirMcmcCliArgs, mut report: F) -> Result<()>
@@ -607,8 +793,33 @@ where
         None
     };
 
-    let result =
-        run_pir_mcmc_with_shared_best(top_fn, opts, shared_best.clone(), checkpoint_tx, None)?;
+    let (result, recorded_artifact) = match validate_pir_mcmc_artifact_run_options(&opts) {
+        Ok(()) => {
+            let run_output = run_pir_mcmc_with_artifact_and_observers(
+                top_fn,
+                opts,
+                shared_best.clone(),
+                checkpoint_tx,
+            )?;
+            (run_output.result, Some(run_output.artifact))
+        }
+        Err(e) => {
+            report(format!(
+                "No minimizable winning-lineage artifact emitted for this run: {}",
+                e
+            ));
+            (
+                run_pir_mcmc_with_shared_best(
+                    top_fn,
+                    opts,
+                    shared_best.clone(),
+                    checkpoint_tx,
+                    None,
+                )?,
+                None,
+            )
+        }
+    };
 
     // Stop checkpoint writer cleanly before final artifact emission.
     if let Some(h) = writer_handle {
@@ -749,16 +960,293 @@ where
     std::fs::write(&best_stats_path, best_stats_json.as_bytes())
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", best_stats_path.display(), e))?;
 
+    if let Some(artifact) = recorded_artifact.as_ref() {
+        let artifact_dir = write_pir_mcmc_artifact_dir(artifact, &pkg, &output_dir)?;
+        report(format!(
+            "Wrote minimizable winning-lineage artifact to {}",
+            artifact_dir.display()
+        ));
+    }
+
+    Ok(())
+}
+
+/// Loads a stored winning lineage, minimizes it to an earlier prefix, and
+/// emits package-level artifacts for the selected witness.
+pub fn run_pir_mcmc_minimize_driver<F>(cli: PirMcmcMinimizeCliArgs, mut report: F) -> Result<()>
+where
+    F: FnMut(String),
+{
+    let run_dir = PathBuf::from(&cli.run_dir);
+    let loaded = read_pir_mcmc_artifact_dir(&run_dir)?;
+    let frontier_mode = match (cli.budget_step, cli.max_rewrites, cli.rollouts_per_budget) {
+        (Some(budget_step), Some(max_rewrites), Some(rollouts_per_budget)) => {
+            Some((budget_step, max_rewrites, rollouts_per_budget))
+        }
+        (None, None, None) => None,
+        _ => {
+            return Err(anyhow::anyhow!(
+                "frontier mode requires --budget-step, --max-rewrites, and --rollouts-per-budget together"
+            ));
+        }
+    };
+    if cli.retained_win_fraction.is_some() == frontier_mode.is_some() {
+        return Err(anyhow::anyhow!(
+            "choose exactly one minimization mode: --retain-win-fraction or frontier budget flags"
+        ));
+    }
+
+    let output_dir = PathBuf::from(&cli.output);
+    let extension_costing_mode = loaded.artifact.run_options.extension_costing_mode;
+
+    if let Some((budget_step, max_rewrites, rollouts_per_budget)) = frontier_mode {
+        std::fs::create_dir_all(&output_dir).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to create minimization output directory {}: {}",
+                output_dir.display(),
+                e
+            )
+        })?;
+        let frontier = search_winning_budget_frontier(
+            &loaded.artifact,
+            PirMcmcBudgetFrontierOptions {
+                budget_step,
+                max_rewrites,
+                rollouts_per_budget,
+                seed: cli.seed.unwrap_or(loaded.artifact.run_options.seed),
+                witness_kind_boost: cli.witness_kind_boost,
+                proposal_attempts_per_rewrite: cli.proposal_attempts_per_rewrite,
+            },
+        )?;
+
+        let mut point_summaries = Vec::with_capacity(frontier.points.len());
+        for point in frontier.points.iter() {
+            let point_dir = output_dir.join(format!("budget-{:04}", point.rewrite_budget));
+            write_witness_artifacts(
+                &point_dir,
+                &loaded.package_template,
+                &loaded.top_fn_name,
+                &point.guided.witness_fn,
+                extension_costing_mode,
+            )?;
+            point_summaries.push(serde_json::json!({
+                "rewrite_budget": point.rewrite_budget,
+                "guided": budget_witness_json(&point.guided),
+                "prefix_baseline": budget_witness_json(&point.prefix_baseline),
+                "artifact_dir": point_dir
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+            }));
+        }
+        let summary = serde_json::json!({
+            "mode": "budget_frontier",
+            "origin_metric": frontier.origin_metric,
+            "winner_metric": frontier.winner_metric,
+            "original_winning_lineage_len": frontier.original_winning_lineage_len,
+            "search": {
+                "budget_step": budget_step,
+                "max_rewrites": max_rewrites,
+                "rollouts_per_budget": rollouts_per_budget,
+                "seed": cli.seed.unwrap_or(loaded.artifact.run_options.seed),
+                "witness_kind_boost": cli.witness_kind_boost,
+                "proposal_attempts_per_rewrite": cli.proposal_attempts_per_rewrite,
+            },
+            "points": point_summaries,
+        });
+        let summary_path = output_dir.join("summary.json");
+        let summary_json =
+            serde_json::to_string_pretty(&summary).expect("serialize frontier summary");
+        std::fs::write(&summary_path, summary_json.as_bytes())
+            .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", summary_path.display(), e))?;
+        report(format!(
+            "PIR MCMC guided frontier searched {} budgets from {} to {} rewrites",
+            frontier.points.len(),
+            budget_step,
+            max_rewrites
+        ));
+        for point in frontier.points.iter() {
+            report(format!(
+                "budget <= {:>4}: guided metric={} retained={:.6} rewrites={} | prefix metric={} retained={:.6} rewrites={}",
+                point.rewrite_budget,
+                point.guided.metric,
+                point.guided.retained_win_fraction,
+                point.guided.accepted_rewrite_count,
+                point.prefix_baseline.metric,
+                point.prefix_baseline.retained_win_fraction,
+                point.prefix_baseline.accepted_rewrite_count,
+            ));
+        }
+        report(format!(
+            "Wrote frontier witness artifacts to {}",
+            output_dir.display()
+        ));
+        return Ok(());
+    }
+
+    let minimized = minimize_winning_prefix(
+        &loaded.artifact,
+        PirMcmcPrefixMinimizeOptions {
+            retained_win_fraction: cli.retained_win_fraction.unwrap(),
+        },
+    )?;
+
+    write_witness_artifacts(
+        &output_dir,
+        &loaded.package_template,
+        &loaded.top_fn_name,
+        &minimized.witness_fn,
+        extension_costing_mode,
+    )?;
+
+    let summary = serde_json::json!({
+        "mode": "retain_win_fraction",
+        "requested_retained_win_fraction": minimized.requested_retained_win_fraction,
+        "actual_retained_win_fraction": minimized.actual_retained_win_fraction,
+        "accepted_rewrite_count": minimized.accepted_rewrite_count,
+        "original_winning_lineage_len": minimized.original_winning_lineage_len,
+        "origin_metric": minimized.origin_metric,
+        "winner_metric": minimized.winner_metric,
+        "witness_metric": minimized.witness_metric,
+        "witness_cost": {
+            "pir_nodes": minimized.witness_cost.pir_nodes,
+            "g8r_nodes": minimized.witness_cost.g8r_nodes,
+            "g8r_depth": minimized.witness_cost.g8r_depth,
+            "g8r_le_graph_milli": minimized.witness_cost.g8r_le_graph_milli,
+            "g8r_gate_output_toggles": minimized.witness_cost.g8r_gate_output_toggles,
+            "g8r_weighted_switching_milli": minimized.witness_cost.g8r_weighted_switching_milli,
+        },
+    });
+    let summary_path = output_dir.join("summary.json");
+    let summary_json =
+        serde_json::to_string_pretty(&summary).expect("serialize minimization summary");
+    std::fs::write(&summary_path, summary_json.as_bytes())
+        .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", summary_path.display(), e))?;
+
+    report(format!(
+        "PIR MCMC prefix minimization selected {} rewrites from a {}-rewrite winning lineage",
+        minimized.accepted_rewrite_count, minimized.original_winning_lineage_len
+    ));
+    report(format!(
+        "Retained win fraction: requested={:.6}, actual={:.6}; metrics origin={} winner={} witness={}",
+        minimized.requested_retained_win_fraction,
+        minimized.actual_retained_win_fraction,
+        minimized.origin_metric,
+        minimized.winner_metric,
+        minimized.witness_metric,
+    ));
+    report(format!(
+        "Wrote minimized witness artifacts to {}",
+        output_dir.display()
+    ));
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        CliChainStrategy, ExtensionCostingMode, Objective, PirMcmcCliArgs, run_pir_mcmc_driver,
+        CliChainStrategy, ExtensionCostingMode, Objective, PirMcmcCliArgs, PirMcmcMinimizeCliArgs,
+        run_pir_mcmc_driver, run_pir_mcmc_minimize_driver,
+    };
+    use crate::{
+        AcceptedLineageStep, Cost, PirMcmcArtifact, PirMcmcBudgetFrontierOptions, RunOptions,
+        transforms::PirTransformKind, write_pir_mcmc_artifact_dir,
     };
     use std::fs;
     use tempfile::tempdir;
+    use xlsynth_g8r::aig_sim::count_toggles::WeightedSwitchingOptions;
+    use xlsynth_mcmc::multichain::ChainStrategy;
+    use xlsynth_pir::ir::Package;
+    use xlsynth_pir::ir_parser;
+
+    fn parse_pkg(ir_text: &str) -> Package {
+        let mut parser = ir_parser::Parser::new(ir_text);
+        parser.parse_and_validate_package().unwrap()
+    }
+
+    fn cost_with_pir_nodes(pir_nodes: usize) -> Cost {
+        Cost {
+            pir_nodes,
+            g8r_nodes: pir_nodes,
+            g8r_depth: pir_nodes,
+            g8r_le_graph_milli: 0,
+            g8r_gate_output_toggles: 0,
+            g8r_weighted_switching_milli: 0,
+        }
+    }
+
+    fn minimize_test_artifact() -> (Package, PirMcmcArtifact) {
+        let origin_pkg = parse_pkg(
+            r#"package sample
+
+top fn main(x: bits[8] id=1) -> bits[8] {
+  dead_a: bits[8] = identity(x, id=2)
+  dead_b: bits[8] = identity(x, id=3)
+  ret live: bits[8] = identity(x, id=4)
+}
+"#,
+        );
+        let step1_pkg = parse_pkg(
+            r#"package sample
+
+top fn main(x: bits[8] id=1) -> bits[8] {
+  dead_b: bits[8] = identity(x, id=3)
+  ret live: bits[8] = identity(x, id=4)
+}
+"#,
+        );
+        let step2_pkg = parse_pkg(
+            r#"package sample
+
+top fn main(x: bits[8] id=1) -> bits[8] {
+  ret live: bits[8] = identity(x, id=4)
+}
+"#,
+        );
+        let origin_fn = origin_pkg.get_fn("main").unwrap().clone();
+        let step1_fn = step1_pkg.get_fn("main").unwrap().clone();
+        let step2_fn = step2_pkg.get_fn("main").unwrap().clone();
+        let artifact = PirMcmcArtifact {
+            origin_fn,
+            origin_cost: cost_with_pir_nodes(5),
+            run_options: RunOptions {
+                max_iters: 2,
+                threads: 1,
+                chain_strategy: ChainStrategy::Independent,
+                checkpoint_iters: 0,
+                progress_iters: 0,
+                seed: 1,
+                initial_temperature: 1.0,
+                objective: Objective::Nodes,
+                extension_costing_mode: ExtensionCostingMode::Preserve,
+                max_allowed_depth: None,
+                max_allowed_area: None,
+                weighted_switching_options: WeightedSwitchingOptions::default(),
+                enable_formal_oracle: false,
+                trajectory_dir: None,
+                toggle_stimulus: None,
+            },
+            raw_winner_fn: step2_fn.clone(),
+            raw_winner_cost: cost_with_pir_nodes(3),
+            winning_lineage: vec![
+                AcceptedLineageStep {
+                    accepted_rewrite_index: 1,
+                    global_iter: 1,
+                    transform_kind: PirTransformKind::NotNotCancel,
+                    state: step1_fn,
+                    cost: cost_with_pir_nodes(4),
+                },
+                AcceptedLineageStep {
+                    accepted_rewrite_index: 2,
+                    global_iter: 2,
+                    transform_kind: PirTransformKind::NegNegCancel,
+                    state: step2_fn,
+                    cost: cost_with_pir_nodes(3),
+                },
+            ],
+        };
+        (origin_pkg, artifact)
+    }
 
     #[test]
     fn reports_when_best_result_remains_infeasible() {
@@ -803,5 +1291,262 @@ top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
         assert!(messages.iter().any(|msg| {
             msg.contains("No feasible solution found; best result remains infeasible:")
         }));
+    }
+
+    #[test]
+    fn supported_run_emits_minimizable_artifact_directory() {
+        let input_dir = tempdir().unwrap();
+        let output_dir = tempdir().unwrap();
+        let input_path = input_dir.path().join("sample.ir");
+        fs::write(
+            &input_path,
+            r#"package sample
+
+top fn main(x: bits[1] id=1) -> bits[1] {
+  ret identity.2: bits[1] = identity(x, id=2)
+}
+"#,
+        )
+        .unwrap();
+
+        let cli = PirMcmcCliArgs {
+            input_path: input_path.display().to_string(),
+            iters: 0,
+            seed: 1,
+            output: Some(output_dir.path().display().to_string()),
+            metric: Objective::Nodes,
+            extension_costing_mode: ExtensionCostingMode::Preserve,
+            max_delay: None,
+            max_area: None,
+            toggle_stimulus: None,
+            initial_temperature: 1.0,
+            threads: 1,
+            checkpoint_iters: 0,
+            progress_iters: 0,
+            formal_oracle: false,
+            switching_beta1: 1.0,
+            switching_beta2: 0.0,
+            switching_primary_output_load: 1.0,
+            chain_strategy: CliChainStrategy::Independent,
+        };
+
+        let mut messages = Vec::new();
+        run_pir_mcmc_driver(cli, |msg| messages.push(msg)).unwrap();
+        assert!(
+            output_dir
+                .path()
+                .join("winning-lineage")
+                .join("manifest.json")
+                .exists()
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|msg| msg.contains("Wrote minimizable winning-lineage artifact"))
+        );
+    }
+
+    #[test]
+    fn unsupported_run_reports_artifact_skip() {
+        let input_dir = tempdir().unwrap();
+        let output_dir = tempdir().unwrap();
+        let input_path = input_dir.path().join("sample.ir");
+        fs::write(
+            &input_path,
+            r#"package sample
+
+top fn main(x: bits[1] id=1) -> bits[1] {
+  ret identity.2: bits[1] = identity(x, id=2)
+}
+"#,
+        )
+        .unwrap();
+
+        let cli = PirMcmcCliArgs {
+            input_path: input_path.display().to_string(),
+            iters: 0,
+            seed: 1,
+            output: Some(output_dir.path().display().to_string()),
+            metric: Objective::Nodes,
+            extension_costing_mode: ExtensionCostingMode::Preserve,
+            max_delay: None,
+            max_area: None,
+            toggle_stimulus: None,
+            initial_temperature: 1.0,
+            threads: 2,
+            checkpoint_iters: 0,
+            progress_iters: 0,
+            formal_oracle: false,
+            switching_beta1: 1.0,
+            switching_beta2: 0.0,
+            switching_primary_output_load: 1.0,
+            chain_strategy: CliChainStrategy::Independent,
+        };
+
+        let mut messages = Vec::new();
+        run_pir_mcmc_driver(cli, |msg| messages.push(msg)).unwrap();
+        assert!(
+            messages
+                .iter()
+                .any(|msg| msg.contains("No minimizable winning-lineage artifact emitted"))
+        );
+        assert!(!output_dir.path().join("winning-lineage").exists());
+    }
+
+    #[test]
+    fn minimize_driver_writes_witness_outputs_and_summary() {
+        let run_dir = tempdir().unwrap();
+        let output_dir = tempdir().unwrap();
+        let (pkg, artifact) = minimize_test_artifact();
+        write_pir_mcmc_artifact_dir(&artifact, &pkg, run_dir.path()).unwrap();
+
+        let cli = PirMcmcMinimizeCliArgs {
+            run_dir: run_dir.path().display().to_string(),
+            retained_win_fraction: Some(0.5),
+            budget_step: None,
+            max_rewrites: None,
+            rollouts_per_budget: None,
+            seed: None,
+            witness_kind_boost: PirMcmcBudgetFrontierOptions::DEFAULT_WITNESS_KIND_BOOST,
+            proposal_attempts_per_rewrite:
+                PirMcmcBudgetFrontierOptions::DEFAULT_PROPOSAL_ATTEMPTS_PER_REWRITE,
+            output: output_dir.path().display().to_string(),
+        };
+        let mut messages = Vec::new();
+        run_pir_mcmc_minimize_driver(cli, |msg| messages.push(msg)).unwrap();
+
+        assert!(output_dir.path().join("witness.ir").exists());
+        assert!(output_dir.path().join("witness.opt.ir").exists());
+        assert!(output_dir.path().join("witness.g8r").exists());
+        assert!(output_dir.path().join("witness.stats.json").exists());
+        let summary_text = fs::read_to_string(output_dir.path().join("summary.json")).unwrap();
+        let summary: serde_json::Value = serde_json::from_str(&summary_text).unwrap();
+        assert_eq!(summary["accepted_rewrite_count"], 1);
+        assert_eq!(summary["witness_metric"], 4);
+        assert!(
+            messages
+                .iter()
+                .any(|msg| msg.contains("selected 1 rewrites from a 2-rewrite"))
+        );
+    }
+
+    #[test]
+    fn minimize_driver_rejects_invalid_fraction_and_missing_artifact() {
+        let missing_run_dir = tempdir().unwrap();
+        let output_dir = tempdir().unwrap();
+        let err = run_pir_mcmc_minimize_driver(
+            PirMcmcMinimizeCliArgs {
+                run_dir: missing_run_dir.path().display().to_string(),
+                retained_win_fraction: Some(0.5),
+                budget_step: None,
+                max_rewrites: None,
+                rollouts_per_budget: None,
+                seed: None,
+                witness_kind_boost: PirMcmcBudgetFrontierOptions::DEFAULT_WITNESS_KIND_BOOST,
+                proposal_attempts_per_rewrite:
+                    PirMcmcBudgetFrontierOptions::DEFAULT_PROPOSAL_ATTEMPTS_PER_REWRITE,
+                output: output_dir.path().display().to_string(),
+            },
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("manifest.json"));
+
+        let run_dir = tempdir().unwrap();
+        let (pkg, artifact) = minimize_test_artifact();
+        write_pir_mcmc_artifact_dir(&artifact, &pkg, run_dir.path()).unwrap();
+        let err = run_pir_mcmc_minimize_driver(
+            PirMcmcMinimizeCliArgs {
+                run_dir: run_dir.path().display().to_string(),
+                retained_win_fraction: Some(1.1),
+                budget_step: None,
+                max_rewrites: None,
+                rollouts_per_budget: None,
+                seed: None,
+                witness_kind_boost: PirMcmcBudgetFrontierOptions::DEFAULT_WITNESS_KIND_BOOST,
+                proposal_attempts_per_rewrite:
+                    PirMcmcBudgetFrontierOptions::DEFAULT_PROPOSAL_ATTEMPTS_PER_REWRITE,
+                output: output_dir.path().display().to_string(),
+            },
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("retained_win_fraction"));
+    }
+
+    #[test]
+    fn minimize_driver_frontier_writes_budget_subtrees_and_summary() {
+        let run_dir = tempdir().unwrap();
+        let output_dir = tempdir().unwrap();
+        let (pkg, artifact) = minimize_test_artifact();
+        write_pir_mcmc_artifact_dir(&artifact, &pkg, run_dir.path()).unwrap();
+
+        let cli = PirMcmcMinimizeCliArgs {
+            run_dir: run_dir.path().display().to_string(),
+            retained_win_fraction: None,
+            budget_step: Some(1),
+            max_rewrites: Some(2),
+            rollouts_per_budget: Some(1),
+            seed: Some(1),
+            witness_kind_boost: 4.0,
+            proposal_attempts_per_rewrite: 1,
+            output: output_dir.path().display().to_string(),
+        };
+        let mut messages = Vec::new();
+        run_pir_mcmc_minimize_driver(cli, |msg| messages.push(msg)).unwrap();
+
+        assert!(output_dir.path().join("budget-0001/witness.ir").exists());
+        assert!(output_dir.path().join("budget-0002/witness.ir").exists());
+        let summary_text = fs::read_to_string(output_dir.path().join("summary.json")).unwrap();
+        let summary: serde_json::Value = serde_json::from_str(&summary_text).unwrap();
+        assert_eq!(summary["mode"], "budget_frontier");
+        assert_eq!(summary["points"].as_array().unwrap().len(), 2);
+        assert!(
+            messages
+                .iter()
+                .any(|msg| msg.contains("guided frontier searched 2 budgets"))
+        );
+    }
+
+    #[test]
+    fn minimize_driver_rejects_mixed_or_missing_modes() {
+        let run_dir = tempdir().unwrap();
+        let output_dir = tempdir().unwrap();
+        let (pkg, artifact) = minimize_test_artifact();
+        write_pir_mcmc_artifact_dir(&artifact, &pkg, run_dir.path()).unwrap();
+
+        let err = run_pir_mcmc_minimize_driver(
+            PirMcmcMinimizeCliArgs {
+                run_dir: run_dir.path().display().to_string(),
+                retained_win_fraction: Some(0.5),
+                budget_step: Some(1),
+                max_rewrites: Some(2),
+                rollouts_per_budget: Some(1),
+                seed: None,
+                witness_kind_boost: 4.0,
+                proposal_attempts_per_rewrite: 1,
+                output: output_dir.path().display().to_string(),
+            },
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("exactly one minimization mode"));
+
+        let err = run_pir_mcmc_minimize_driver(
+            PirMcmcMinimizeCliArgs {
+                run_dir: run_dir.path().display().to_string(),
+                retained_win_fraction: None,
+                budget_step: None,
+                max_rewrites: None,
+                rollouts_per_budget: None,
+                seed: None,
+                witness_kind_boost: 4.0,
+                proposal_attempts_per_rewrite: 1,
+                output: output_dir.path().display().to_string(),
+            },
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("exactly one minimization mode"));
     }
 }

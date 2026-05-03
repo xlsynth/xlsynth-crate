@@ -742,7 +742,9 @@ xlsynth-driver --toolchain ~/xlsynth-toolchain.toml ir-inline \
 Runs the PIR MCMC optimizer and emits optimization artifacts to an output
 directory (`best.ir`, `best.opt.ir`, `best.g8r`, `best.stats.json`,
 `orig.ir`, `orig.opt.ir`, `orig.g8r`, `orig.stats.json`,
-`trajectory.cNNN.jsonl`).
+`trajectory.cNNN.jsonl`). Supported single-chain unconstrained runs also emit
+a minimizable raw winning-lineage artifact under `winning-lineage/`
+(`manifest.json` plus inspectable raw state packages in `states/`).
 
 This subcommand intentionally shares the same flag surface as
 `pir-mcmc-driver` from the `xlsynth-mcmc-pir` crate.
@@ -815,6 +817,53 @@ xlsynth-driver ir-mcmc-opt my_design.ir \
   --threads 8 \
   --output /tmp/pir-mcmc-artifacts
 ```
+
+Only newly recorded single-chain unconstrained runs can be minimized in v1.
+Multichain runs, explicit area/delay caps, and objectives with implicit
+feasibility caps still run normally, but do not emit `winning-lineage/`.
+
+### `ir-mcmc-minimize`: minimize a stored PIR MCMC winning lineage
+
+Loads the `winning-lineage/` artifact from a previous `ir-mcmc-opt` output
+directory and emits minimized witness artifacts to a separate directory.
+
+- Required:
+  - `<run_dir>` - prior `ir-mcmc-opt` output directory containing `winning-lineage/`.
+  - `-o, --output <OUTPUT_DIR>` - directory for minimized witness artifacts.
+- Prefix mode:
+  - `--retain-win-fraction <FRACTION>` - select the earliest historical prefix that retains the requested fraction of the discovered objective win, in `[0, 1]`.
+- Guided frontier mode:
+  - `--budget-step <N>` - accepted-rewrite spacing for requested budgets.
+  - `--max-rewrites <N>` - largest requested accepted-rewrite budget.
+  - `--rollouts-per-budget <N>` - guided short rollouts attempted per requested budget.
+  - `--seed <SEED>` - optional frontier RNG seed override; defaults to the source artifact seed.
+  - `--witness-kind-boost <BOOST>` - extra proposal weight per occurrence of a transform kind in the long witness (default: `4.0`).
+  - `--proposal-attempts-per-rewrite <N>` - proposal-attempt cap per accepted rewrite in each rollout (default: `64`).
+
+Prefix example:
+
+```shell
+xlsynth-driver ir-mcmc-minimize /tmp/pir-mcmc-artifacts \
+  --retain-win-fraction 0.8 \
+  --output /tmp/pir-mcmc-minimized
+```
+
+Guided frontier example:
+
+```shell
+xlsynth-driver ir-mcmc-minimize /tmp/pir-mcmc-artifacts \
+  --budget-step 4 \
+  --max-rewrites 16 \
+  --rollouts-per-budget 256 \
+  --output /tmp/pir-mcmc-frontier
+```
+
+Prefix mode writes `witness.ir`, `witness.opt.ir`, `witness.g8r`,
+`witness.stats.json`, and `summary.json`. Guided frontier mode writes one
+`budget-NNNN/` witness subtree per requested budget plus a top-level
+`summary.json` comparing the guided result against the historical-prefix
+baseline at each budget. Frontier search currently supports only objectives that
+can be recomputed from the durable artifact without external stimulus.
 
 ### `ir2pipeline`: IR to pipelined Verilog
 
