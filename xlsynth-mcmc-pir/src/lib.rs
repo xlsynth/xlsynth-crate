@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 use std::io::Write as IoWrite;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
@@ -33,9 +34,16 @@ use xlsynth::IrBits;
 use xlsynth::IrPackage;
 use xlsynth::IrValue;
 use xlsynth_g8r::aig::get_summary_stats;
+use xlsynth_g8r::aig::get_summary_stats::AigStats;
 use xlsynth_g8r::aig::graph_logical_effort::GraphLogicalEffortOptions;
 use xlsynth_g8r::aig::graph_logical_effort::analyze_graph_logical_effort;
+use xlsynth_g8r::aig_serdes::emit_aiger_binary::emit_aiger_binary;
+use xlsynth_g8r::aig_serdes::gate2ir::{
+    GateFnInterfaceSchema, repack_gate_fn_interface_with_schema,
+};
+use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::aig_sim::count_toggles;
+use xlsynth_g8r::gate_builder::GateBuilderOptions;
 use xlsynth_g8r::gatify::ir2gate::{self, GatifyOptions};
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_mcmc::MIN_TEMPERATURE_RATIO;
@@ -105,6 +113,65 @@ pub struct Cost {
     /// This is populated for weighted-switching objectives; otherwise it is
     /// `0`.
     pub g8r_weighted_switching_milli: u128,
+    /// Number of live AND nodes after running the configured external g8r
+    /// postprocessor over the gatified graph.
+    pub g8r_post_and_nodes: usize,
+    /// Maximum AND depth after running the configured external g8r
+    /// postprocessor over the gatified graph.
+    pub g8r_post_depth: usize,
+    /// Graph logical-effort worst-case delay after g8r postprocessing, scaled
+    /// by 1e3 and rounded.
+    pub g8r_post_le_graph_milli: usize,
+    /// Number of interior AIG gate-output toggles after g8r postprocessing.
+    pub g8r_post_gate_output_toggles: usize,
+    /// Load-weighted switching activity after g8r postprocessing, scaled by
+    /// 1e3.
+    pub g8r_post_weighted_switching_milli: u128,
+}
+
+/// How PIR MCMC obtains gate-level cost data.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum G8rEvaluationMode {
+    /// Use the in-process optimized-PIR-to-g8r path only.
+    Builtin,
+    /// Emit binary AIGER to an external postprocessor and score the returned
+    /// AIGER graph for `g8r-post-*` objectives.
+    ExternalPostprocess { program: String },
+}
+
+impl Default for G8rEvaluationMode {
+    fn default() -> Self {
+        Self::Builtin
+    }
+}
+
+impl G8rEvaluationMode {
+    pub(crate) fn external_postprocess_program(&self) -> Option<&str> {
+        match self {
+            G8rEvaluationMode::Builtin => None,
+            G8rEvaluationMode::ExternalPostprocess { program } => Some(program.as_str()),
+        }
+    }
+
+    /// Rewrites external postprocessor paths into durable absolute paths.
+    pub fn canonicalized_for_persistence(&self) -> Result<Self> {
+        match self {
+            G8rEvaluationMode::Builtin => Ok(Self::Builtin),
+            G8rEvaluationMode::ExternalPostprocess { program } => {
+                let path = std::fs::canonicalize(program).map_err(|e| {
+                    anyhow::anyhow!(
+                        "failed to canonicalize g8r postprocess program '{}': {}",
+                        program,
+                        e
+                    )
+                })?;
+                Ok(Self::ExternalPostprocess {
+                    program: path.display().to_string(),
+                })
+            }
+        }
+    }
 }
 
 /// How PIR extension ops are projected before XLS optimization and g8r costing.
@@ -303,6 +370,26 @@ pub fn cost_with_effort_options_toggle_stimulus_and_extension_mode(
     weighted_switching_options: &count_toggles::WeightedSwitchingOptions,
     extension_costing_mode: ExtensionCostingMode,
 ) -> Result<Cost> {
+    cost_with_effort_options_toggle_stimulus_extension_mode_and_evaluator(
+        f,
+        objective,
+        toggle_stimulus,
+        weighted_switching_options,
+        extension_costing_mode,
+        &G8rEvaluationMode::Builtin,
+    )
+}
+
+/// Calculates cost with explicit load-weighting, extension projection, and
+/// gate-level evaluator configuration.
+pub fn cost_with_effort_options_toggle_stimulus_extension_mode_and_evaluator(
+    f: &IrFn,
+    objective: Objective,
+    toggle_stimulus: Option<&[Vec<IrBits>]>,
+    weighted_switching_options: &count_toggles::WeightedSwitchingOptions,
+    extension_costing_mode: ExtensionCostingMode,
+    g8r_evaluation_mode: &G8rEvaluationMode,
+) -> Result<Cost> {
     let pir_nodes = f.nodes.len();
 
     if objective.needs_toggle_stimulus() && toggle_stimulus.is_none() {
@@ -320,14 +407,16 @@ pub fn cost_with_effort_options_toggle_stimulus_and_extension_mode(
     if objective.needs_weighted_switching() {
         validate_weighted_switching_options(weighted_switching_options)?;
     }
+    if objective.uses_postprocessed_costing()
+        && g8r_evaluation_mode.external_postprocess_program().is_none()
+    {
+        return Err(anyhow::anyhow!(
+            "objective {} requires an external g8r postprocessor",
+            objective.value_name()
+        ));
+    }
 
-    let (
-        g8r_nodes,
-        g8r_depth,
-        g8r_le_graph_milli,
-        g8r_gate_output_toggles,
-        g8r_weighted_switching_milli,
-    ) = if objective.uses_g8r_costing() {
+    let gate_stats = if objective.uses_gate_costing() {
         compute_g8r_stats_for_pir_fn(
             f,
             objective.needs_graph_logical_effort(),
@@ -336,18 +425,35 @@ pub fn cost_with_effort_options_toggle_stimulus_and_extension_mode(
             toggle_stimulus,
             weighted_switching_options,
             extension_costing_mode,
+            g8r_evaluation_mode,
+            objective.uses_postprocessed_costing(),
         )?
     } else {
-        (pir_nodes, pir_nodes, 0, 0, 0u128)
+        GateCostStats {
+            raw: RawG8rStats {
+                nodes: pir_nodes,
+                depth: pir_nodes,
+                le_graph_milli: 0,
+                gate_output_toggles: 0,
+                weighted_switching_milli: 0,
+            },
+            post: None,
+        }
     };
+    let post = gate_stats.post.unwrap_or_default();
 
     Ok(Cost {
         pir_nodes,
-        g8r_nodes,
-        g8r_depth,
-        g8r_le_graph_milli,
-        g8r_gate_output_toggles,
-        g8r_weighted_switching_milli,
+        g8r_nodes: gate_stats.raw.nodes,
+        g8r_depth: gate_stats.raw.depth,
+        g8r_le_graph_milli: gate_stats.raw.le_graph_milli,
+        g8r_gate_output_toggles: gate_stats.raw.gate_output_toggles,
+        g8r_weighted_switching_milli: gate_stats.raw.weighted_switching_milli,
+        g8r_post_and_nodes: post.and_nodes,
+        g8r_post_depth: post.depth,
+        g8r_post_le_graph_milli: post.le_graph_milli,
+        g8r_post_gate_output_toggles: post.gate_output_toggles,
+        g8r_post_weighted_switching_milli: post.weighted_switching_milli,
     })
 }
 
@@ -451,6 +557,22 @@ pub enum Objective {
     G8rWeightedSwitching,
     #[value(name = "g8r-nodes-times-weighted-switching-no-depth-regress")]
     G8rNodesTimesWeightedSwitchingNoDepthRegress,
+    #[value(name = "g8r-post-and-nodes")]
+    G8rPostAndNodes,
+    #[value(name = "g8r-post-and-nodes-times-depth")]
+    G8rPostAndNodesTimesDepth,
+    #[value(name = "g8r-post-and-nodes-times-depth-times-toggles")]
+    G8rPostAndNodesTimesDepthTimesToggles,
+    #[value(name = "g8r-post-le-graph")]
+    G8rPostLeGraph,
+    #[value(name = "g8r-post-le-graph-times-and-nodes")]
+    G8rPostLeGraphTimesAndNodes,
+    #[value(name = "g8r-post-le-graph-times-product")]
+    G8rPostLeGraphTimesProduct,
+    #[value(name = "g8r-post-weighted-switching")]
+    G8rPostWeightedSwitching,
+    #[value(name = "g8r-post-and-nodes-times-weighted-switching-no-depth-regress")]
+    G8rPostAndNodesTimesWeightedSwitchingNoDepthRegress,
 }
 
 impl Objective {
@@ -468,12 +590,33 @@ impl Objective {
         )
     }
 
+    pub fn uses_postprocessed_costing(self) -> bool {
+        matches!(
+            self,
+            Objective::G8rPostAndNodes
+                | Objective::G8rPostAndNodesTimesDepth
+                | Objective::G8rPostAndNodesTimesDepthTimesToggles
+                | Objective::G8rPostLeGraph
+                | Objective::G8rPostLeGraphTimesAndNodes
+                | Objective::G8rPostLeGraphTimesProduct
+                | Objective::G8rPostWeightedSwitching
+                | Objective::G8rPostAndNodesTimesWeightedSwitchingNoDepthRegress
+        )
+    }
+
+    pub fn uses_gate_costing(self) -> bool {
+        self.uses_g8r_costing() || self.uses_postprocessed_costing()
+    }
+
     pub fn needs_graph_logical_effort(self) -> bool {
         matches!(
             self,
             Objective::G8rLeGraph
                 | Objective::G8rLeGraphTimesNodes
                 | Objective::G8rLeGraphTimesProduct
+                | Objective::G8rPostLeGraph
+                | Objective::G8rPostLeGraphTimesAndNodes
+                | Objective::G8rPostLeGraphTimesProduct
         )
     }
 
@@ -482,7 +625,11 @@ impl Objective {
     }
 
     pub fn needs_gate_output_toggles(self) -> bool {
-        matches!(self, Objective::G8rNodesTimesDepthTimesToggles)
+        matches!(
+            self,
+            Objective::G8rNodesTimesDepthTimesToggles
+                | Objective::G8rPostAndNodesTimesDepthTimesToggles
+        )
     }
 
     pub fn needs_weighted_switching(self) -> bool {
@@ -490,6 +637,8 @@ impl Objective {
             self,
             Objective::G8rWeightedSwitching
                 | Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress
+                | Objective::G8rPostWeightedSwitching
+                | Objective::G8rPostAndNodesTimesWeightedSwitchingNoDepthRegress
         )
     }
 
@@ -497,6 +646,7 @@ impl Objective {
         matches!(
             self,
             Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress
+                | Objective::G8rPostAndNodesTimesWeightedSwitchingNoDepthRegress
         )
     }
 
@@ -513,6 +663,18 @@ impl Objective {
             Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress => {
                 "g8r-nodes-times-weighted-switching-no-depth-regress"
             }
+            Objective::G8rPostAndNodes => "g8r-post-and-nodes",
+            Objective::G8rPostAndNodesTimesDepth => "g8r-post-and-nodes-times-depth",
+            Objective::G8rPostAndNodesTimesDepthTimesToggles => {
+                "g8r-post-and-nodes-times-depth-times-toggles"
+            }
+            Objective::G8rPostLeGraph => "g8r-post-le-graph",
+            Objective::G8rPostLeGraphTimesAndNodes => "g8r-post-le-graph-times-and-nodes",
+            Objective::G8rPostLeGraphTimesProduct => "g8r-post-le-graph-times-product",
+            Objective::G8rPostWeightedSwitching => "g8r-post-weighted-switching",
+            Objective::G8rPostAndNodesTimesWeightedSwitchingNoDepthRegress => {
+                "g8r-post-and-nodes-times-weighted-switching-no-depth-regress"
+            }
         }
     }
 
@@ -528,6 +690,18 @@ impl Objective {
             "g8r-weighted-switching" => Ok(Objective::G8rWeightedSwitching),
             "g8r-nodes-times-weighted-switching-no-depth-regress" => {
                 Ok(Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress)
+            }
+            "g8r-post-and-nodes" => Ok(Objective::G8rPostAndNodes),
+            "g8r-post-and-nodes-times-depth" => Ok(Objective::G8rPostAndNodesTimesDepth),
+            "g8r-post-and-nodes-times-depth-times-toggles" => {
+                Ok(Objective::G8rPostAndNodesTimesDepthTimesToggles)
+            }
+            "g8r-post-le-graph" => Ok(Objective::G8rPostLeGraph),
+            "g8r-post-le-graph-times-and-nodes" => Ok(Objective::G8rPostLeGraphTimesAndNodes),
+            "g8r-post-le-graph-times-product" => Ok(Objective::G8rPostLeGraphTimesProduct),
+            "g8r-post-weighted-switching" => Ok(Objective::G8rPostWeightedSwitching),
+            "g8r-post-and-nodes-times-weighted-switching-no-depth-regress" => {
+                Ok(Objective::G8rPostAndNodesTimesWeightedSwitchingNoDepthRegress)
             }
             _ => Err(anyhow::anyhow!("unknown objective in artifact: {}", value)),
         }
@@ -555,6 +729,42 @@ impl Objective {
             Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress => {
                 (c.g8r_nodes as u128).saturating_mul(c.g8r_weighted_switching_milli)
             }
+            Objective::G8rPostAndNodes => c.g8r_post_and_nodes as u128,
+            Objective::G8rPostAndNodesTimesDepth => {
+                (c.g8r_post_and_nodes as u128).saturating_mul(c.g8r_post_depth as u128)
+            }
+            Objective::G8rPostAndNodesTimesDepthTimesToggles => (c.g8r_post_and_nodes as u128)
+                .saturating_mul(c.g8r_post_depth as u128)
+                .saturating_mul(c.g8r_post_gate_output_toggles as u128),
+            Objective::G8rPostLeGraph => c.g8r_post_le_graph_milli as u128,
+            Objective::G8rPostLeGraphTimesAndNodes => {
+                (c.g8r_post_le_graph_milli as u128).saturating_mul(c.g8r_post_and_nodes as u128)
+            }
+            Objective::G8rPostLeGraphTimesProduct => {
+                let product =
+                    (c.g8r_post_and_nodes as u128).saturating_mul(c.g8r_post_depth as u128);
+                (c.g8r_post_le_graph_milli as u128).saturating_mul(product)
+            }
+            Objective::G8rPostWeightedSwitching => c.g8r_post_weighted_switching_milli,
+            Objective::G8rPostAndNodesTimesWeightedSwitchingNoDepthRegress => {
+                (c.g8r_post_and_nodes as u128).saturating_mul(c.g8r_post_weighted_switching_milli)
+            }
+        }
+    }
+
+    fn area_for_constraints(self, c: &Cost) -> usize {
+        if self.uses_postprocessed_costing() {
+            c.g8r_post_and_nodes
+        } else {
+            c.g8r_nodes
+        }
+    }
+
+    fn depth_for_constraints(self, c: &Cost) -> usize {
+        if self.uses_postprocessed_costing() {
+            c.g8r_post_depth
+        } else {
+            c.g8r_depth
         }
     }
 }
@@ -568,9 +778,9 @@ pub(crate) fn validate_constraint_configuration(
             "at most one of --max-delay and --max-area may be specified"
         ));
     }
-    if !objective.uses_g8r_costing() && (limits.max_delay.is_some() || limits.max_area.is_some()) {
+    if !objective.uses_gate_costing() && (limits.max_delay.is_some() || limits.max_area.is_some()) {
         return Err(anyhow::anyhow!(
-            "area/delay caps require a g8r-based objective; got {}",
+            "area/delay caps require a gate-based objective; got {}",
             objective.value_name()
         ));
     }
@@ -586,15 +796,16 @@ pub(crate) fn validate_constraint_configuration(
 /// Computes the active constraint violation details for the given cost.
 pub fn constraint_violation(
     c: &Cost,
+    objective: Objective,
     limits: ConstraintLimits,
 ) -> Option<ConstraintViolationScore> {
     let delay_over = limits
         .max_delay
-        .map(|max_delay| c.g8r_depth.saturating_sub(max_delay))
+        .map(|max_delay| objective.depth_for_constraints(c).saturating_sub(max_delay))
         .filter(|over| *over > 0);
     let area_over = limits
         .max_area
-        .map(|max_area| c.g8r_nodes.saturating_sub(max_area))
+        .map(|max_area| objective.area_for_constraints(c).saturating_sub(max_area))
         .filter(|over| *over > 0);
 
     if delay_over.is_none() && area_over.is_none() {
@@ -612,7 +823,7 @@ pub fn constraint_violation(
 pub fn search_score(c: &Cost, objective: Objective, limits: ConstraintLimits) -> SearchScore {
     SearchScore {
         objective: objective.metric(c),
-        violation: constraint_violation(c, limits),
+        violation: constraint_violation(c, objective, limits),
     }
 }
 
@@ -626,9 +837,11 @@ pub(crate) fn effective_constraint_limits(
             user_limits.max_delay,
             objective.enforces_non_regressing_depth(),
         ) {
-            (Some(user_cap), true) => Some(user_cap.min(initial_cost.g8r_depth)),
+            (Some(user_cap), true) => {
+                Some(user_cap.min(objective.depth_for_constraints(initial_cost)))
+            }
             (Some(user_cap), false) => Some(user_cap),
-            (None, true) => Some(initial_cost.g8r_depth),
+            (None, true) => Some(objective.depth_for_constraints(initial_cost)),
             (None, false) => None,
         },
         max_area: user_limits.max_area,
@@ -659,11 +872,38 @@ pub(crate) fn format_search_score(score: SearchScore) -> String {
     }
 }
 
-/// Computes the g8r node count for the given PIR function by:
-///   1) Wrapping it in a one-function IR package.
-///   2) Running the XLS optimizer.
-///   3) Parsing the optimized IR back into PIR.
-///   4) Gatifying the top function into a `GateFn` and counting live nodes.
+#[derive(Clone, Copy, Debug)]
+struct RawG8rStats {
+    nodes: usize,
+    depth: usize,
+    le_graph_milli: usize,
+    gate_output_toggles: usize,
+    weighted_switching_milli: u128,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct G8rPostStats {
+    and_nodes: usize,
+    depth: usize,
+    le_graph_milli: usize,
+    gate_output_toggles: usize,
+    weighted_switching_milli: u128,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GateCostStats {
+    raw: RawG8rStats,
+    post: Option<G8rPostStats>,
+}
+
+/// Postprocessed AIG payload plus summary stats suitable for durable artifacts.
+pub(crate) struct PostprocessedAigArtifact {
+    pub bytes: Vec<u8>,
+    pub stats: AigStats,
+}
+
+/// Computes gate-level cost data for a PIR function by optimizing it, gatifying
+/// it, and optionally running the configured external postprocessor.
 fn compute_g8r_stats_for_pir_fn(
     f: &IrFn,
     compute_graph_logical_effort: bool,
@@ -672,7 +912,9 @@ fn compute_g8r_stats_for_pir_fn(
     toggle_stimulus: Option<&[Vec<IrBits>]>,
     weighted_switching_options: &count_toggles::WeightedSwitchingOptions,
     extension_costing_mode: ExtensionCostingMode,
-) -> Result<(usize, usize, usize, usize, u128)> {
+    g8r_evaluation_mode: &G8rEvaluationMode,
+    compute_postprocessed_stats: bool,
+) -> Result<GateCostStats> {
     // The PIR → text → XLS → optimize → PIR → gatify pipeline assumes a DAG.
     // Random rewiring transforms can (transiently) create cycles; if that happens
     // we treat it as a candidate failure and fall back to PIR node count.
@@ -688,6 +930,8 @@ fn compute_g8r_stats_for_pir_fn(
             toggle_stimulus,
             weighted_switching_options,
             extension_costing_mode,
+            g8r_evaluation_mode,
+            compute_postprocessed_stats,
         )
     }));
     match result {
@@ -721,7 +965,9 @@ fn compute_g8r_stats_for_pir_fn_impl(
     toggle_stimulus: Option<&[Vec<IrBits>]>,
     weighted_switching_options: &count_toggles::WeightedSwitchingOptions,
     extension_costing_mode: ExtensionCostingMode,
-) -> Result<(usize, usize, usize, usize, u128)> {
+    g8r_evaluation_mode: &G8rEvaluationMode,
+    compute_postprocessed_stats: bool,
+) -> Result<GateCostStats> {
     // 1-3) Optimize the PIR function via the XLS pipeline.
     let top_fn = optimize_pir_fn_via_xls_with_extension_mode(f, extension_costing_mode)?;
 
@@ -812,13 +1058,231 @@ fn compute_g8r_stats_for_pir_fn_impl(
     } else {
         (0, 0u128)
     };
-    Ok((
-        stats.live_nodes,
-        stats.deepest_path,
-        g8r_le_graph_milli,
-        g8r_gate_output_toggles,
-        g8r_weighted_switching_milli,
-    ))
+    let post = if compute_postprocessed_stats {
+        let schema = GateFnInterfaceSchema::from_pir_fn(&top_fn)
+            .map_err(|e| anyhow::anyhow!("failed to derive gate interface schema: {}", e))?;
+        let post_gate_fn =
+            postprocess_gate_fn_with_external_program(&gate_fn, &schema, g8r_evaluation_mode)?
+                .gate_fn;
+        Some(compute_post_stats_for_gate_fn(
+            &post_gate_fn,
+            compute_graph_logical_effort,
+            compute_gate_output_toggles,
+            compute_weighted_switching,
+            toggle_stimulus,
+            weighted_switching_options,
+        )?)
+    } else {
+        None
+    };
+
+    Ok(GateCostStats {
+        raw: RawG8rStats {
+            nodes: stats.live_nodes,
+            depth: stats.deepest_path,
+            le_graph_milli: g8r_le_graph_milli,
+            gate_output_toggles: g8r_gate_output_toggles,
+            weighted_switching_milli: g8r_weighted_switching_milli,
+        },
+        post,
+    })
+}
+
+struct LoadedPostprocessedGateFn {
+    gate_fn: xlsynth_g8r::aig::gate::GateFn,
+    output_bytes: Vec<u8>,
+}
+
+/// Runs the configured external postprocessor and loads the returned AIGER as a
+/// `GateFn` with the original interface shape restored.
+fn postprocess_gate_fn_with_external_program(
+    gate_fn: &xlsynth_g8r::aig::gate::GateFn,
+    schema: &GateFnInterfaceSchema,
+    g8r_evaluation_mode: &G8rEvaluationMode,
+) -> Result<LoadedPostprocessedGateFn> {
+    let program = g8r_evaluation_mode
+        .external_postprocess_program()
+        .ok_or_else(|| {
+            anyhow::anyhow!("g8r postprocessing requested without an external postprocessor")
+        })?;
+    let temp_dir = tempfile::Builder::new()
+        .prefix("pir_mcmc_g8r_postprocess_")
+        .tempdir()
+        .map_err(|e| anyhow::anyhow!("failed to create g8r postprocess tempdir: {}", e))?;
+    let input_path = temp_dir.path().join("input.aig");
+    let output_path = temp_dir.path().join("output.aig");
+    let input_bytes = emit_aiger_binary(gate_fn, true)
+        .map_err(|e| anyhow::anyhow!("emit AIGER failed: {}", e))?;
+    std::fs::write(&input_path, input_bytes).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to write g8r postprocess input {}: {}",
+            input_path.display(),
+            e
+        )
+    })?;
+
+    let output = Command::new(program)
+        .arg(&input_path)
+        .arg("--output-path")
+        .arg(&output_path)
+        .output()
+        .map_err(|e| anyhow::anyhow!("failed to run g8r postprocessor '{}': {}", program, e))?;
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "g8r postprocessor '{}' failed with status {}: {}",
+            program,
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    if !output_path.exists() {
+        return Err(anyhow::anyhow!(
+            "g8r postprocessor '{}' did not create {}",
+            program,
+            output_path.display()
+        ));
+    }
+    let output_bytes = std::fs::read(&output_path).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to read g8r postprocess output {}: {}",
+            output_path.display(),
+            e
+        )
+    })?;
+    let loaded =
+        load_aiger_auto_from_path(&output_path, GateBuilderOptions::no_opt()).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to load g8r postprocess output {}: {}",
+                output_path.display(),
+                e
+            )
+        })?;
+    let gate_fn = repack_gate_fn_interface_with_schema(loaded.gate_fn, schema)
+        .map_err(|e| anyhow::anyhow!("failed to repack postprocessed AIGER interface: {}", e))?;
+    Ok(LoadedPostprocessedGateFn {
+        gate_fn,
+        output_bytes,
+    })
+}
+
+/// Runs the external postprocessor for a gate function and returns durable
+/// bytes plus structural stats for artifact emission.
+pub(crate) fn postprocess_gate_fn_for_artifact(
+    gate_fn: &xlsynth_g8r::aig::gate::GateFn,
+    schema: &GateFnInterfaceSchema,
+    g8r_evaluation_mode: &G8rEvaluationMode,
+) -> Result<PostprocessedAigArtifact> {
+    let loaded = postprocess_gate_fn_with_external_program(gate_fn, schema, g8r_evaluation_mode)?;
+    let stats = get_summary_stats::get_aig_stats(&loaded.gate_fn);
+    Ok(PostprocessedAigArtifact {
+        bytes: loaded.output_bytes,
+        stats,
+    })
+}
+
+/// Computes postprocessed AIG stats from a loaded gate function.
+fn compute_post_stats_for_gate_fn(
+    gate_fn: &xlsynth_g8r::aig::gate::GateFn,
+    compute_graph_logical_effort: bool,
+    compute_gate_output_toggles: bool,
+    compute_weighted_switching: bool,
+    toggle_stimulus: Option<&[Vec<IrBits>]>,
+    weighted_switching_options: &count_toggles::WeightedSwitchingOptions,
+) -> Result<G8rPostStats> {
+    let stats = get_summary_stats::get_aig_stats(gate_fn);
+    let le_graph_milli = if compute_graph_logical_effort {
+        let graph_le = analyze_graph_logical_effort(
+            gate_fn,
+            &GraphLogicalEffortOptions {
+                beta1: 1.0,
+                beta2: 0.0,
+            },
+        );
+        graph_le_delay_to_milli(graph_le.delay)
+    } else {
+        0
+    };
+    let (gate_output_toggles, weighted_switching_milli) = compute_toggle_stats_for_gate_fn(
+        gate_fn,
+        compute_gate_output_toggles,
+        compute_weighted_switching,
+        toggle_stimulus,
+        weighted_switching_options,
+    )?;
+    Ok(G8rPostStats {
+        and_nodes: stats.and_nodes,
+        depth: stats.max_depth,
+        le_graph_milli,
+        gate_output_toggles,
+        weighted_switching_milli,
+    })
+}
+
+fn compute_toggle_stats_for_gate_fn(
+    gate_fn: &xlsynth_g8r::aig::gate::GateFn,
+    compute_gate_output_toggles: bool,
+    compute_weighted_switching: bool,
+    toggle_stimulus: Option<&[Vec<IrBits>]>,
+    weighted_switching_options: &count_toggles::WeightedSwitchingOptions,
+) -> Result<(usize, u128)> {
+    if !compute_gate_output_toggles && !compute_weighted_switching {
+        return Ok((0, 0));
+    }
+    let batch = validate_toggle_stimulus_for_gate_fn(gate_fn, toggle_stimulus)?;
+    let mut gate_output_toggles = 0usize;
+    let mut weighted_switching_milli = 0u128;
+    if compute_weighted_switching {
+        let weighted_stats =
+            count_toggles::count_weighted_switching(gate_fn, batch, weighted_switching_options);
+        weighted_switching_milli = weighted_stats.weighted_switching_milli;
+        if compute_gate_output_toggles {
+            gate_output_toggles = weighted_stats.gate_output_toggles;
+        }
+    }
+    if compute_gate_output_toggles && !compute_weighted_switching {
+        gate_output_toggles = count_toggles::count_toggles(gate_fn, batch).gate_output_toggles;
+    }
+    Ok((gate_output_toggles, weighted_switching_milli))
+}
+
+fn validate_toggle_stimulus_for_gate_fn<'a>(
+    gate_fn: &xlsynth_g8r::aig::gate::GateFn,
+    toggle_stimulus: Option<&'a [Vec<IrBits>]>,
+) -> Result<&'a [Vec<IrBits>]> {
+    let batch = toggle_stimulus.ok_or_else(|| {
+        anyhow::anyhow!("toggle-based objective requires prepared toggle stimulus")
+    })?;
+    if batch.len() < 2 {
+        return Err(anyhow::anyhow!(
+            "toggle stimulus must contain at least two samples; got {}",
+            batch.len()
+        ));
+    }
+    let expected_input_count = gate_fn.inputs.len();
+    for (sample_idx, sample) in batch.iter().enumerate() {
+        if sample.len() != expected_input_count {
+            return Err(anyhow::anyhow!(
+                "toggle sample {} has {} inputs, expected {}",
+                sample_idx + 1,
+                sample.len(),
+                expected_input_count
+            ));
+        }
+        for (input_idx, (bits, gate_input)) in sample.iter().zip(gate_fn.inputs.iter()).enumerate()
+        {
+            let expected_width = gate_input.get_bit_count();
+            if bits.get_bit_count() != expected_width {
+                return Err(anyhow::anyhow!(
+                    "toggle sample {} input {} has width {}, expected {}",
+                    sample_idx + 1,
+                    input_idx,
+                    bits.get_bit_count(),
+                    expected_width
+                ));
+            }
+        }
+    }
+    Ok(batch)
 }
 
 /// Parses `.irvals`-style stimulus text where each line is one typed tuple
@@ -1029,6 +1493,8 @@ pub struct RunOptions {
     pub objective: Objective,
     /// How extension ops are projected before XLS optimization and g8r costing.
     pub extension_costing_mode: ExtensionCostingMode,
+    /// How gate-level costs are obtained for `g8r-post-*` objectives.
+    pub g8r_evaluation_mode: G8rEvaluationMode,
     /// Optional hard cap on gate depth (`g8r_depth`) for g8r-based objectives.
     pub max_allowed_depth: Option<usize>,
     /// Optional hard cap on gate count (`g8r_nodes`) for g8r-based objectives.
@@ -1251,7 +1717,7 @@ struct PirMcmcArtifactRunOutput {
 const PIR_MCMC_ARTIFACT_DIR_NAME: &str = "winning-lineage";
 const PIR_MCMC_ARTIFACT_MANIFEST_FILE: &str = "manifest.json";
 const PIR_MCMC_ARTIFACT_STATES_DIR_NAME: &str = "states";
-const PIR_MCMC_ARTIFACT_SCHEMA_VERSION: u32 = 2;
+const PIR_MCMC_ARTIFACT_SCHEMA_VERSION: u32 = 3;
 
 /// Durable PIR MCMC artifact loaded from a run directory.
 pub struct LoadedPirMcmcArtifact {
@@ -1281,6 +1747,7 @@ struct PersistedRunOptions {
     initial_temperature: f64,
     objective: String,
     extension_costing_mode: String,
+    g8r_evaluation_mode: G8rEvaluationMode,
     max_allowed_depth: Option<usize>,
     max_allowed_area: Option<usize>,
     switching_beta1: f64,
@@ -1407,6 +1874,7 @@ impl ProvenancedChainState {
 struct PirSegmentRunner {
     objective: Objective,
     extension_costing_mode: ExtensionCostingMode,
+    g8r_evaluation_mode: G8rEvaluationMode,
     weighted_switching_options: count_toggles::WeightedSwitchingOptions,
     initial_temperature: f64,
     constraints: ConstraintLimits,
@@ -1425,6 +1893,7 @@ type PirTransformFactory = Arc<dyn Fn() -> Vec<Box<dyn PirTransform>> + Send + S
 struct PirArtifactSegmentRunner {
     objective: Objective,
     extension_costing_mode: ExtensionCostingMode,
+    g8r_evaluation_mode: G8rEvaluationMode,
     weighted_switching_options: count_toggles::WeightedSwitchingOptions,
     initial_temperature: f64,
     constraints: ConstraintLimits,
@@ -1450,6 +1919,7 @@ pub fn mcmc_iteration(
     temp: f64,
     objective: Objective,
     extension_costing_mode: ExtensionCostingMode,
+    g8r_evaluation_mode: &G8rEvaluationMode,
     toggle_stimulus: Option<&[Vec<IrBits>]>,
     weighted_switching_options: &count_toggles::WeightedSwitchingOptions,
     constraints: ConstraintLimits,
@@ -1573,12 +2043,13 @@ pub fn mcmc_iteration(
             } else {
                 let cost_start = Instant::now();
                 let new_candidate_cost =
-                    match cost_with_effort_options_toggle_stimulus_and_extension_mode(
+                    match cost_with_effort_options_toggle_stimulus_extension_mode_and_evaluator(
                         &candidate_fn,
                         objective,
                         toggle_stimulus,
                         weighted_switching_options,
                         extension_costing_mode,
+                        g8r_evaluation_mode,
                     ) {
                         Ok(c) => c,
                         Err(e) => {
@@ -1966,6 +2437,17 @@ fn prepare_run_start(mut start_fn: IrFn, options: &RunOptions) -> Result<Prepare
             options.objective.value_name()
         ));
     }
+    if options.objective.uses_postprocessed_costing()
+        && options
+            .g8r_evaluation_mode
+            .external_postprocess_program()
+            .is_none()
+    {
+        return Err(anyhow::anyhow!(
+            "objective {} requires --g8r-postprocess-program",
+            options.objective.value_name()
+        ));
+    }
     validate_constraint_configuration(
         options.objective,
         ConstraintLimits {
@@ -1988,12 +2470,13 @@ fn prepare_run_start(mut start_fn: IrFn, options: &RunOptions) -> Result<Prepare
         None
     };
 
-    let initial_cost = cost_with_effort_options_toggle_stimulus_and_extension_mode(
+    let initial_cost = cost_with_effort_options_toggle_stimulus_extension_mode_and_evaluator(
         &start_fn,
         options.objective,
         prepared_toggle_stimulus.as_ref().map(|v| v.as_slice()),
         &options.weighted_switching_options,
         options.extension_costing_mode,
+        &options.g8r_evaluation_mode,
     )?;
     let effective_constraints = effective_constraint_limits(
         options.objective,
@@ -2083,6 +2566,7 @@ fn objective_supports_budget_frontier_search(objective: Objective) -> bool {
         && !matches!(
             objective,
             Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress
+                | Objective::G8rPostAndNodesTimesWeightedSwitchingNoDepthRegress
         )
 }
 
@@ -2313,8 +2797,8 @@ fn load_artifact_state_fn(
 }
 
 impl PersistedRunOptions {
-    fn from_run_options(options: &RunOptions) -> Self {
-        Self {
+    fn from_run_options(options: &RunOptions) -> Result<Self> {
+        Ok(Self {
             max_iters: options.max_iters,
             threads: options.threads,
             chain_strategy: chain_strategy_value_name(options.chain_strategy).to_string(),
@@ -2324,13 +2808,16 @@ impl PersistedRunOptions {
             initial_temperature: options.initial_temperature,
             objective: options.objective.value_name().to_string(),
             extension_costing_mode: options.extension_costing_mode.value_name().to_string(),
+            g8r_evaluation_mode: options
+                .g8r_evaluation_mode
+                .canonicalized_for_persistence()?,
             max_allowed_depth: options.max_allowed_depth,
             max_allowed_area: options.max_allowed_area,
             switching_beta1: options.weighted_switching_options.beta1,
             switching_beta2: options.weighted_switching_options.beta2,
             switching_primary_output_load: options.weighted_switching_options.primary_output_load,
             enable_formal_oracle: options.enable_formal_oracle,
-        }
+        })
     }
 
     fn into_run_options(self) -> Result<RunOptions> {
@@ -2346,6 +2833,7 @@ impl PersistedRunOptions {
             extension_costing_mode: ExtensionCostingMode::from_value_name(
                 &self.extension_costing_mode,
             )?,
+            g8r_evaluation_mode: self.g8r_evaluation_mode,
             max_allowed_depth: self.max_allowed_depth,
             max_allowed_area: self.max_allowed_area,
             weighted_switching_options: count_toggles::WeightedSwitchingOptions {
@@ -2447,7 +2935,7 @@ pub fn write_pir_mcmc_artifact_dir(
     let manifest = PersistedPirMcmcArtifactManifest {
         schema_version: PIR_MCMC_ARTIFACT_SCHEMA_VERSION,
         top_fn_name,
-        run_options: PersistedRunOptions::from_run_options(&artifact.run_options),
+        run_options: PersistedRunOptions::from_run_options(&artifact.run_options)?,
         origin: PersistedArtifactState {
             file: origin_file,
             cost: artifact.origin_cost,
@@ -2592,21 +3080,23 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
         let toggle_stimulus = self.prepared_toggle_stimulus.as_ref().map(|v| v.as_slice());
 
         let mut current_fn = start_state.clone();
-        let mut current_cost = cost_with_effort_options_toggle_stimulus_and_extension_mode(
-            &current_fn,
-            self.objective,
-            toggle_stimulus,
-            &self.weighted_switching_options,
-            self.extension_costing_mode,
-        )
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "failed to evaluate initial cost for '{}' under {:?}: {}",
-                current_fn.name,
+        let mut current_cost =
+            cost_with_effort_options_toggle_stimulus_extension_mode_and_evaluator(
+                &current_fn,
                 self.objective,
-                e
+                toggle_stimulus,
+                &self.weighted_switching_options,
+                self.extension_costing_mode,
+                &self.g8r_evaluation_mode,
             )
-        })?;
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to evaluate initial cost for '{}' under {:?}: {}",
+                    current_fn.name,
+                    self.objective,
+                    e
+                )
+            })?;
         let mut best_fn = start_state;
         let mut best_cost = current_cost;
         let mut best_score = search_score(&best_cost, self.objective, self.constraints);
@@ -2642,6 +3132,7 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
                 temp,
                 self.objective,
                 self.extension_costing_mode,
+                &self.g8r_evaluation_mode,
                 toggle_stimulus,
                 &self.weighted_switching_options,
                 self.constraints,
@@ -2732,6 +3223,11 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
                     "g8r_le_graph_milli": iteration_output.output_cost.g8r_le_graph_milli,
                     "g8r_gate_output_toggles": iteration_output.output_cost.g8r_gate_output_toggles,
                     "g8r_weighted_switching_milli": iteration_output.output_cost.g8r_weighted_switching_milli,
+                    "g8r_post_and_nodes": iteration_output.output_cost.g8r_post_and_nodes,
+                    "g8r_post_depth": iteration_output.output_cost.g8r_post_depth,
+                    "g8r_post_le_graph_milli": iteration_output.output_cost.g8r_post_le_graph_milli,
+                    "g8r_post_gate_output_toggles": iteration_output.output_cost.g8r_post_gate_output_toggles,
+                    "g8r_post_weighted_switching_milli": iteration_output.output_cost.g8r_post_weighted_switching_milli,
                     "feasible": iter_score.feasible(),
                     "delay_over": iter_violation.and_then(|v| v.delay_over),
                     "area_over": iter_violation.and_then(|v| v.area_over),
@@ -2882,21 +3378,23 @@ impl SegmentRunner<ProvenancedChainState, Cost, PirTransformKind> for PirArtifac
         let toggle_stimulus = self.prepared_toggle_stimulus.as_ref().map(|v| v.as_slice());
         let mut current_fn = start_state.search_fn.clone();
         let mut current_provenance = start_state.search_provenance.clone();
-        let mut current_cost = cost_with_effort_options_toggle_stimulus_and_extension_mode(
-            &current_fn,
-            self.objective,
-            toggle_stimulus,
-            &self.weighted_switching_options,
-            self.extension_costing_mode,
-        )
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "failed to evaluate initial cost for '{}' under {:?}: {}",
-                current_fn.name,
+        let mut current_cost =
+            cost_with_effort_options_toggle_stimulus_extension_mode_and_evaluator(
+                &current_fn,
                 self.objective,
-                e
+                toggle_stimulus,
+                &self.weighted_switching_options,
+                self.extension_costing_mode,
+                &self.g8r_evaluation_mode,
             )
-        })?;
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to evaluate initial cost for '{}' under {:?}: {}",
+                    current_fn.name,
+                    self.objective,
+                    e
+                )
+            })?;
         if let Some((chain_no, global_iter)) = start_state.pending_handoff {
             current_provenance.push(PirMcmcProvenanceAction::XlsOptimizedHandoff {
                 action_index: current_provenance.len() + 1,
@@ -2957,6 +3455,7 @@ impl SegmentRunner<ProvenancedChainState, Cost, PirTransformKind> for PirArtifac
                 temp,
                 self.objective,
                 self.extension_costing_mode,
+                &self.g8r_evaluation_mode,
                 toggle_stimulus,
                 &self.weighted_switching_options,
                 self.constraints,
@@ -2997,6 +3496,11 @@ impl SegmentRunner<ProvenancedChainState, Cost, PirTransformKind> for PirArtifac
                     "g8r_le_graph_milli": iteration_output.output_cost.g8r_le_graph_milli,
                     "g8r_gate_output_toggles": iteration_output.output_cost.g8r_gate_output_toggles,
                     "g8r_weighted_switching_milli": iteration_output.output_cost.g8r_weighted_switching_milli,
+                    "g8r_post_and_nodes": iteration_output.output_cost.g8r_post_and_nodes,
+                    "g8r_post_depth": iteration_output.output_cost.g8r_post_depth,
+                    "g8r_post_le_graph_milli": iteration_output.output_cost.g8r_post_le_graph_milli,
+                    "g8r_post_gate_output_toggles": iteration_output.output_cost.g8r_post_gate_output_toggles,
+                    "g8r_post_weighted_switching_milli": iteration_output.output_cost.g8r_post_weighted_switching_milli,
                     "feasible": iter_score.feasible(),
                     "delay_over": iter_violation.and_then(|v| v.delay_over),
                     "area_over": iter_violation.and_then(|v| v.area_over),
@@ -3205,6 +3709,7 @@ fn run_pir_mcmc_with_artifact_using_transform_factory_and_observers(
     let runner = PirArtifactSegmentRunner {
         objective: options.objective,
         extension_costing_mode: options.extension_costing_mode,
+        g8r_evaluation_mode: options.g8r_evaluation_mode.clone(),
         weighted_switching_options: options.weighted_switching_options,
         initial_temperature: options.initial_temperature,
         constraints: prepared.effective_constraints,
@@ -3393,6 +3898,7 @@ fn run_witness_guided_rollout(
             temp,
             objective,
             artifact.run_options.extension_costing_mode,
+            &artifact.run_options.g8r_evaluation_mode,
             None,
             &artifact.run_options.weighted_switching_options,
             ConstraintLimits::default(),
@@ -3535,6 +4041,7 @@ pub fn run_pir_mcmc_with_shared_best(
     let runner = PirSegmentRunner {
         objective: options.objective,
         extension_costing_mode: options.extension_costing_mode,
+        g8r_evaluation_mode: options.g8r_evaluation_mode.clone(),
         weighted_switching_options: options.weighted_switching_options,
         initial_temperature: options.initial_temperature,
         constraints: prepared.effective_constraints,
@@ -3592,6 +4099,7 @@ pub fn run_pir_mcmc_with_shared_best(
 mod tests {
     use std::collections::HashSet;
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
 
     use super::*;
     use count_toggles::WeightedSwitchingOptions;
@@ -3610,6 +4118,15 @@ mod tests {
         parser.parse_and_validate_package().unwrap()
     }
 
+    fn write_executable_script(dir: &Path, name: &str, body: &str) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, body).unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
+
     fn test_run_options(objective: Objective) -> RunOptions {
         RunOptions {
             max_iters: 1,
@@ -3621,6 +4138,7 @@ mod tests {
             initial_temperature: 1.0,
             objective,
             extension_costing_mode: ExtensionCostingMode::Preserve,
+            g8r_evaluation_mode: G8rEvaluationMode::Builtin,
             max_allowed_depth: None,
             max_allowed_area: None,
             weighted_switching_options: WeightedSwitchingOptions::default(),
@@ -3638,6 +4156,11 @@ mod tests {
             g8r_le_graph_milli: 0,
             g8r_gate_output_toggles: 0,
             g8r_weighted_switching_milli: 0,
+            g8r_post_and_nodes: 0,
+            g8r_post_depth: 0,
+            g8r_post_le_graph_milli: 0,
+            g8r_post_gate_output_toggles: 0,
+            g8r_post_weighted_switching_milli: 0,
         }
     }
 
@@ -3747,6 +4270,7 @@ mod tests {
             initial_temperature: 5.0,
             objective: Objective::Nodes,
             extension_costing_mode: ExtensionCostingMode::Preserve,
+            g8r_evaluation_mode: G8rEvaluationMode::Builtin,
             max_allowed_depth: None,
             max_allowed_area: None,
             weighted_switching_options: WeightedSwitchingOptions::default(),
@@ -4116,6 +4640,7 @@ mod tests {
         let runner = PirArtifactSegmentRunner {
             objective: Objective::Nodes,
             extension_costing_mode: ExtensionCostingMode::Preserve,
+            g8r_evaluation_mode: G8rEvaluationMode::Builtin,
             weighted_switching_options: WeightedSwitchingOptions::default(),
             initial_temperature: 1.0,
             constraints: ConstraintLimits::default(),
@@ -4307,6 +4832,10 @@ top fn f(x: bits[8] id=1) -> bits[8] {
             artifact.winning_provenance.len()
         );
         assert_eq!(
+            loaded.artifact.run_options.g8r_evaluation_mode,
+            artifact.run_options.g8r_evaluation_mode
+        );
+        assert_eq!(
             loaded.artifact.winning_provenance[0].transform_kind(),
             artifact.winning_provenance[0].transform_kind()
         );
@@ -4357,6 +4886,45 @@ top fn f(x: bits[8] id=1) -> bits[8] {
         let manifest2 =
             fs::read_to_string(artifact_dir2.join(PIR_MCMC_ARTIFACT_MANIFEST_FILE)).unwrap();
         assert_eq!(manifest1, manifest2);
+    }
+
+    #[test]
+    fn durable_artifact_manifest_canonicalizes_relative_postprocessor_path() {
+        let pkg = parse_pkg(
+            r#"package sample
+
+top fn f(x: bits[8] id=1) -> bits[8] {
+  dead: bits[8] = identity(x, id=2)
+  ret live: bits[8] = identity(x, id=3)
+}
+"#,
+        );
+        let f = pkg.get_fn("f").unwrap().clone();
+        let cwd = std::env::current_dir().unwrap();
+        let hook_dir = tempfile::tempdir_in(&cwd).unwrap();
+        let hook = hook_dir.path().join("identity.sh");
+        fs::write(&hook, "#!/bin/sh\n").unwrap();
+        let relative_hook = hook.strip_prefix(&cwd).unwrap().display().to_string();
+        let mut artifact = run_pir_mcmc_with_artifact_using_transforms(
+            f,
+            test_run_options(Objective::Nodes),
+            vec![Box::new(RemoveDeadNodeTestTransform)],
+        )
+        .unwrap()
+        .artifact;
+        artifact.run_options.g8r_evaluation_mode = G8rEvaluationMode::ExternalPostprocess {
+            program: relative_hook,
+        };
+        let run_dir = tempdir().unwrap();
+        let artifact_dir = write_pir_mcmc_artifact_dir(&artifact, &pkg, run_dir.path()).unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(artifact_dir.join(PIR_MCMC_ARTIFACT_MANIFEST_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            manifest["run_options"]["g8r_evaluation_mode"]["program"],
+            std::fs::canonicalize(&hook).unwrap().display().to_string()
+        );
     }
 
     #[test]
@@ -4688,6 +5256,11 @@ top fn f(x: bits[8] id=1) -> bits[8] {
             g8r_le_graph_milli: 0,
             g8r_gate_output_toggles: 2,
             g8r_weighted_switching_milli: 0,
+            g8r_post_and_nodes: 0,
+            g8r_post_depth: 0,
+            g8r_post_le_graph_milli: 0,
+            g8r_post_gate_output_toggles: 0,
+            g8r_post_weighted_switching_milli: 0,
         };
         assert_eq!(
             Objective::G8rNodesTimesDepthTimesToggles.metric(&c),
@@ -4704,6 +5277,11 @@ top fn f(x: bits[8] id=1) -> bits[8] {
             g8r_le_graph_milli: 13,
             g8r_gate_output_toggles: 0,
             g8r_weighted_switching_milli: 0,
+            g8r_post_and_nodes: 0,
+            g8r_post_depth: 0,
+            g8r_post_le_graph_milli: 0,
+            g8r_post_gate_output_toggles: 0,
+            g8r_post_weighted_switching_milli: 0,
         };
         assert_eq!(Objective::G8rLeGraphTimesNodes.metric(&c), 91);
     }
@@ -4717,6 +5295,11 @@ top fn f(x: bits[8] id=1) -> bits[8] {
             g8r_le_graph_milli: usize::MAX,
             g8r_gate_output_toggles: 0,
             g8r_weighted_switching_milli: 0,
+            g8r_post_and_nodes: 0,
+            g8r_post_depth: 0,
+            g8r_post_le_graph_milli: 0,
+            g8r_post_gate_output_toggles: 0,
+            g8r_post_weighted_switching_milli: 0,
         };
         assert_eq!(
             Objective::G8rLeGraphTimesNodes.metric(&c),
@@ -4741,11 +5324,62 @@ top fn f(x: bits[8] id=1) -> bits[8] {
             g8r_le_graph_milli: 0,
             g8r_gate_output_toggles: 0,
             g8r_weighted_switching_milli: u128::MAX,
+            g8r_post_and_nodes: 0,
+            g8r_post_depth: 0,
+            g8r_post_le_graph_milli: 0,
+            g8r_post_gate_output_toggles: 0,
+            g8r_post_weighted_switching_milli: 0,
         };
         assert_eq!(
             Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress.metric(&c),
             u128::MAX
         );
+    }
+
+    #[test]
+    fn g8r_post_objectives_use_postprocessed_cost_fields() {
+        let c = Cost {
+            pir_nodes: 1,
+            g8r_nodes: 2,
+            g8r_depth: 3,
+            g8r_le_graph_milli: 5,
+            g8r_gate_output_toggles: 7,
+            g8r_weighted_switching_milli: 11,
+            g8r_post_and_nodes: 13,
+            g8r_post_depth: 17,
+            g8r_post_le_graph_milli: 19,
+            g8r_post_gate_output_toggles: 23,
+            g8r_post_weighted_switching_milli: 29,
+        };
+        assert_eq!(Objective::G8rPostAndNodes.metric(&c), 13);
+        assert_eq!(Objective::G8rPostAndNodesTimesDepth.metric(&c), 221);
+        assert_eq!(
+            Objective::G8rPostAndNodesTimesDepthTimesToggles.metric(&c),
+            5083
+        );
+        assert_eq!(Objective::G8rPostLeGraph.metric(&c), 19);
+        assert_eq!(Objective::G8rPostLeGraphTimesAndNodes.metric(&c), 247);
+        assert_eq!(Objective::G8rPostLeGraphTimesProduct.metric(&c), 4199);
+        assert_eq!(Objective::G8rPostWeightedSwitching.metric(&c), 29);
+        assert_eq!(
+            Objective::G8rPostAndNodesTimesWeightedSwitchingNoDepthRegress.metric(&c),
+            377
+        );
+        for objective in [
+            Objective::G8rPostAndNodes,
+            Objective::G8rPostAndNodesTimesDepth,
+            Objective::G8rPostAndNodesTimesDepthTimesToggles,
+            Objective::G8rPostLeGraph,
+            Objective::G8rPostLeGraphTimesAndNodes,
+            Objective::G8rPostLeGraphTimesProduct,
+            Objective::G8rPostWeightedSwitching,
+            Objective::G8rPostAndNodesTimesWeightedSwitchingNoDepthRegress,
+        ] {
+            assert_eq!(
+                Objective::from_value_name(objective.value_name()).unwrap(),
+                objective
+            );
+        }
     }
 
     #[test]
@@ -4758,6 +5392,11 @@ top fn f(x: bits[8] id=1) -> bits[8] {
                 g8r_le_graph_milli: 0,
                 g8r_gate_output_toggles: 0,
                 g8r_weighted_switching_milli: 0,
+                g8r_post_and_nodes: 0,
+                g8r_post_depth: 0,
+                g8r_post_le_graph_milli: 0,
+                g8r_post_gate_output_toggles: 0,
+                g8r_post_weighted_switching_milli: 0,
             },
             Objective::G8rNodes,
             ConstraintLimits {
@@ -4773,6 +5412,11 @@ top fn f(x: bits[8] id=1) -> bits[8] {
                 g8r_le_graph_milli: 0,
                 g8r_gate_output_toggles: 0,
                 g8r_weighted_switching_milli: 0,
+                g8r_post_and_nodes: 0,
+                g8r_post_depth: 0,
+                g8r_post_le_graph_milli: 0,
+                g8r_post_gate_output_toggles: 0,
+                g8r_post_weighted_switching_milli: 0,
             },
             Objective::G8rNodes,
             ConstraintLimits {
@@ -4788,6 +5432,11 @@ top fn f(x: bits[8] id=1) -> bits[8] {
                 g8r_le_graph_milli: 0,
                 g8r_gate_output_toggles: 0,
                 g8r_weighted_switching_milli: 0,
+                g8r_post_and_nodes: 0,
+                g8r_post_depth: 0,
+                g8r_post_le_graph_milli: 0,
+                g8r_post_gate_output_toggles: 0,
+                g8r_post_weighted_switching_milli: 0,
             },
             Objective::G8rNodes,
             ConstraintLimits {
@@ -4809,6 +5458,11 @@ top fn f(x: bits[8] id=1) -> bits[8] {
             g8r_le_graph_milli: 0,
             g8r_gate_output_toggles: 0,
             g8r_weighted_switching_milli: 0,
+            g8r_post_and_nodes: 0,
+            g8r_post_depth: 0,
+            g8r_post_le_graph_milli: 0,
+            g8r_post_gate_output_toggles: 0,
+            g8r_post_weighted_switching_milli: 0,
         };
         let got = effective_constraint_limits(
             Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress,
@@ -4820,6 +5474,201 @@ top fn f(x: bits[8] id=1) -> bits[8] {
         );
         assert_eq!(got.max_delay, Some(17));
         assert_eq!(got.max_area, None);
+    }
+
+    #[test]
+    fn postprocessed_constraints_use_post_area_and_depth() {
+        let c = Cost {
+            pir_nodes: 0,
+            g8r_nodes: 1,
+            g8r_depth: 1,
+            g8r_le_graph_milli: 0,
+            g8r_gate_output_toggles: 0,
+            g8r_weighted_switching_milli: 0,
+            g8r_post_and_nodes: 11,
+            g8r_post_depth: 17,
+            g8r_post_le_graph_milli: 0,
+            g8r_post_gate_output_toggles: 0,
+            g8r_post_weighted_switching_milli: 0,
+        };
+        let score = search_score(
+            &c,
+            Objective::G8rPostAndNodes,
+            ConstraintLimits {
+                max_delay: Some(12),
+                max_area: None,
+            },
+        );
+        assert_eq!(
+            score.violation,
+            Some(ConstraintViolationScore {
+                delay_over: Some(5),
+                area_over: None,
+            })
+        );
+        let got = effective_constraint_limits(
+            Objective::G8rPostAndNodesTimesWeightedSwitchingNoDepthRegress,
+            ConstraintLimits {
+                max_delay: Some(20),
+                max_area: None,
+            },
+            &c,
+        );
+        assert_eq!(got.max_delay, Some(17));
+    }
+
+    #[test]
+    fn g8r_post_costing_requires_external_postprocessor() {
+        let f = parse_fn(
+            r#"fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret and.3: bits[1] = and(a, b, id=3)
+}"#,
+        );
+        let err = cost_with_effort_options_toggle_stimulus_extension_mode_and_evaluator(
+            &f,
+            Objective::G8rPostAndNodes,
+            None,
+            &WeightedSwitchingOptions::default(),
+            ExtensionCostingMode::Preserve,
+            &G8rEvaluationMode::Builtin,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("requires an external g8r postprocessor"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn external_postprocessor_identity_populates_post_stats() {
+        let temp = tempdir().unwrap();
+        let hook =
+            write_executable_script(temp.path(), "identity.sh", "#!/bin/sh\ncp \"$1\" \"$3\"\n");
+        let f = parse_fn(
+            r#"fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret and.3: bits[1] = and(a, b, id=3)
+}"#,
+        );
+        let c = cost_with_effort_options_toggle_stimulus_extension_mode_and_evaluator(
+            &f,
+            Objective::G8rPostAndNodes,
+            None,
+            &WeightedSwitchingOptions::default(),
+            ExtensionCostingMode::Preserve,
+            &G8rEvaluationMode::ExternalPostprocess {
+                program: hook.display().to_string(),
+            },
+        )
+        .unwrap();
+        assert!(c.g8r_post_and_nodes > 0);
+        assert!(c.g8r_post_depth > 0);
+    }
+
+    #[test]
+    fn external_postprocessor_repacked_interface_supports_toggle_metrics() {
+        let temp = tempdir().unwrap();
+        let hook =
+            write_executable_script(temp.path(), "identity.sh", "#!/bin/sh\ncp \"$1\" \"$3\"\n");
+        let f = parse_fn(
+            r#"fn f(a: bits[2] id=1, b: bits[2] id=2) -> bits[2] {
+  ret and.3: bits[2] = and(a, b, id=3)
+}"#,
+        );
+        let samples = vec![
+            IrValue::parse_typed("(bits[2]:0b00, bits[2]:0b11)").unwrap(),
+            IrValue::parse_typed("(bits[2]:0b11, bits[2]:0b11)").unwrap(),
+            IrValue::parse_typed("(bits[2]:0b01, bits[2]:0b11)").unwrap(),
+        ];
+        let toggle_stimulus = lower_toggle_stimulus_for_fn(&samples, &f).unwrap();
+        let post_mode = G8rEvaluationMode::ExternalPostprocess {
+            program: hook.display().to_string(),
+        };
+        let raw_toggles = cost_with_effort_options_toggle_stimulus_extension_mode_and_evaluator(
+            &f,
+            Objective::G8rNodesTimesDepthTimesToggles,
+            Some(&toggle_stimulus),
+            &WeightedSwitchingOptions::default(),
+            ExtensionCostingMode::Preserve,
+            &G8rEvaluationMode::Builtin,
+        )
+        .unwrap();
+        let post_toggles = cost_with_effort_options_toggle_stimulus_extension_mode_and_evaluator(
+            &f,
+            Objective::G8rPostAndNodesTimesDepthTimesToggles,
+            Some(&toggle_stimulus),
+            &WeightedSwitchingOptions::default(),
+            ExtensionCostingMode::Preserve,
+            &post_mode,
+        )
+        .unwrap();
+        assert!(post_toggles.g8r_post_gate_output_toggles > 0);
+        assert_eq!(
+            post_toggles.g8r_post_gate_output_toggles,
+            raw_toggles.g8r_gate_output_toggles
+        );
+
+        let raw_weighted = cost_with_effort_options_toggle_stimulus_extension_mode_and_evaluator(
+            &f,
+            Objective::G8rWeightedSwitching,
+            Some(&toggle_stimulus),
+            &WeightedSwitchingOptions::default(),
+            ExtensionCostingMode::Preserve,
+            &G8rEvaluationMode::Builtin,
+        )
+        .unwrap();
+        let post_weighted = cost_with_effort_options_toggle_stimulus_extension_mode_and_evaluator(
+            &f,
+            Objective::G8rPostWeightedSwitching,
+            Some(&toggle_stimulus),
+            &WeightedSwitchingOptions::default(),
+            ExtensionCostingMode::Preserve,
+            &post_mode,
+        )
+        .unwrap();
+        assert!(post_weighted.g8r_post_weighted_switching_milli > 0);
+        assert_eq!(
+            post_weighted.g8r_post_weighted_switching_milli,
+            raw_weighted.g8r_weighted_switching_milli
+        );
+    }
+
+    #[test]
+    fn external_postprocessor_reports_failures() {
+        let temp = tempdir().unwrap();
+        let fail = write_executable_script(
+            temp.path(),
+            "fail.sh",
+            "#!/bin/sh\necho broken >&2\nexit 7\n",
+        );
+        let missing = write_executable_script(temp.path(), "missing.sh", "#!/bin/sh\nexit 0\n");
+        let malformed = write_executable_script(
+            temp.path(),
+            "malformed.sh",
+            "#!/bin/sh\nprintf nope > \"$3\"\n",
+        );
+        let f = parse_fn(
+            r#"fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret and.3: bits[1] = and(a, b, id=3)
+}"#,
+        );
+        let err = |program: &Path| {
+            cost_with_effort_options_toggle_stimulus_extension_mode_and_evaluator(
+                &f,
+                Objective::G8rPostAndNodes,
+                None,
+                &WeightedSwitchingOptions::default(),
+                ExtensionCostingMode::Preserve,
+                &G8rEvaluationMode::ExternalPostprocess {
+                    program: program.display().to_string(),
+                },
+            )
+            .unwrap_err()
+            .to_string()
+        };
+        assert!(err(&fail).contains("broken"));
+        assert!(err(&missing).contains("did not create"));
+        assert!(err(&malformed).contains("failed to load"));
     }
 
     #[test]
@@ -4885,6 +5734,7 @@ top fn f(x: bits[8] id=1) -> bits[8] {
             initial_temperature: 1.0,
             objective: Objective::G8rNodesTimesDepthTimesToggles,
             extension_costing_mode: ExtensionCostingMode::Preserve,
+            g8r_evaluation_mode: G8rEvaluationMode::Builtin,
             max_allowed_depth: None,
             max_allowed_area: None,
             weighted_switching_options: WeightedSwitchingOptions::default(),
@@ -4904,6 +5754,7 @@ top fn f(x: bits[8] id=1) -> bits[8] {
             initial_temperature: 1.0,
             objective: Objective::Nodes,
             extension_costing_mode: ExtensionCostingMode::Preserve,
+            g8r_evaluation_mode: G8rEvaluationMode::Builtin,
             max_allowed_depth: None,
             max_allowed_area: None,
             weighted_switching_options: WeightedSwitchingOptions::default(),
@@ -4936,6 +5787,7 @@ top fn f(x: bits[8] id=1) -> bits[8] {
             initial_temperature: 1.0,
             objective: Objective::Nodes,
             extension_costing_mode: ExtensionCostingMode::Preserve,
+            g8r_evaluation_mode: G8rEvaluationMode::Builtin,
             max_allowed_depth: Some(10),
             max_allowed_area: None,
             weighted_switching_options: WeightedSwitchingOptions::default(),
@@ -4965,6 +5817,7 @@ top fn f(x: bits[8] id=1) -> bits[8] {
             initial_temperature: 1.0,
             objective: Objective::G8rNodes,
             extension_costing_mode: ExtensionCostingMode::Preserve,
+            g8r_evaluation_mode: G8rEvaluationMode::Builtin,
             max_allowed_depth: Some(10),
             max_allowed_area: Some(10),
             weighted_switching_options: WeightedSwitchingOptions::default(),
@@ -4994,6 +5847,7 @@ top fn f(x: bits[8] id=1) -> bits[8] {
             initial_temperature: 1.0,
             objective: Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress,
             extension_costing_mode: ExtensionCostingMode::Preserve,
+            g8r_evaluation_mode: G8rEvaluationMode::Builtin,
             max_allowed_depth: None,
             max_allowed_area: Some(10),
             weighted_switching_options: WeightedSwitchingOptions::default(),
@@ -5124,6 +5978,7 @@ top fn f(x: bits[8] id=1) -> bits[8] {
             initial_temperature: 1.0,
             objective: Objective::Nodes,
             extension_costing_mode: ExtensionCostingMode::Preserve,
+            g8r_evaluation_mode: G8rEvaluationMode::Builtin,
             max_allowed_depth: None,
             max_allowed_area: None,
             weighted_switching_options: WeightedSwitchingOptions::default(),

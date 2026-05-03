@@ -81,7 +81,7 @@ struct CliArgs {
     output: Option<String>,
 
     /// Metric to optimize (used by the MCMC acceptance criterion).
-    #[clap(long, value_enum)]
+    #[clap(long, value_parser = parse_sampler_objective)]
     metric: Objective,
 
     /// Optional hard cap on g8r depth for g8r-based objectives.
@@ -165,6 +165,18 @@ fn parse_hex_32(s: &str) -> Option<[u8; 32]> {
         out[i] = b;
     }
     Some(out)
+}
+
+/// Parses only the objective families supported by the sampler binary.
+fn parse_sampler_objective(value: &str) -> std::result::Result<Objective, String> {
+    let objective = Objective::from_str(value, true)?;
+    if objective.uses_postprocessed_costing() {
+        return Err(format!(
+            "postprocessed objective '{}' is not supported by xlsynth-mcmc-pir-sampler",
+            value
+        ));
+    }
+    Ok(objective)
 }
 
 fn resolve_output_dir(output: &Option<String>) -> Result<(PathBuf, Option<tempfile::TempDir>)> {
@@ -314,6 +326,12 @@ impl SampleWriter {
             "g8r_depth": msg.cost.g8r_depth,
             "g8r_le_graph_milli": msg.cost.g8r_le_graph_milli,
             "g8r_gate_output_toggles": msg.cost.g8r_gate_output_toggles,
+            "g8r_weighted_switching_milli": msg.cost.g8r_weighted_switching_milli,
+            "g8r_post_and_nodes": msg.cost.g8r_post_and_nodes,
+            "g8r_post_depth": msg.cost.g8r_post_depth,
+            "g8r_post_le_graph_milli": msg.cost.g8r_post_le_graph_milli,
+            "g8r_post_gate_output_toggles": msg.cost.g8r_post_gate_output_toggles,
+            "g8r_post_weighted_switching_milli": msg.cost.g8r_post_weighted_switching_milli,
         });
         let mut mf = std::fs::OpenOptions::new()
             .create(true)
@@ -448,6 +466,7 @@ fn main() -> Result<()> {
         initial_temperature: cli.initial_temperature,
         objective: cli.metric,
         extension_costing_mode: ExtensionCostingMode::Preserve,
+        g8r_evaluation_mode: xlsynth_mcmc_pir::G8rEvaluationMode::Builtin,
         max_allowed_depth: cli.max_delay,
         max_allowed_area: cli.max_area,
         weighted_switching_options:
@@ -475,4 +494,46 @@ fn main() -> Result<()> {
         .expect("sample writer thread panicked")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_postprocessed_objectives() {
+        for objective in [
+            Objective::G8rPostAndNodes,
+            Objective::G8rPostAndNodesTimesDepth,
+            Objective::G8rPostAndNodesTimesDepthTimesToggles,
+            Objective::G8rPostLeGraph,
+            Objective::G8rPostLeGraphTimesAndNodes,
+            Objective::G8rPostLeGraphTimesProduct,
+            Objective::G8rPostWeightedSwitching,
+            Objective::G8rPostAndNodesTimesWeightedSwitchingNoDepthRegress,
+        ] {
+            let err = parse_sampler_objective(objective.value_name()).unwrap_err();
+            assert!(err.contains("not supported"), "unexpected error: {err}");
+        }
+    }
+
+    #[test]
+    fn accepts_existing_non_postprocessed_objectives() {
+        for objective in [
+            Objective::Nodes,
+            Objective::G8rNodes,
+            Objective::G8rNodesTimesDepth,
+            Objective::G8rNodesTimesDepthTimesToggles,
+            Objective::G8rLeGraph,
+            Objective::G8rLeGraphTimesNodes,
+            Objective::G8rLeGraphTimesProduct,
+            Objective::G8rWeightedSwitching,
+            Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress,
+        ] {
+            assert_eq!(
+                parse_sampler_objective(objective.value_name()).unwrap(),
+                objective
+            );
+        }
+    }
 }

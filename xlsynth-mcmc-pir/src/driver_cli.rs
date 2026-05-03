@@ -13,8 +13,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc;
 use tempfile::Builder;
+use xlsynth_g8r::aig::gate::GateFn;
 use xlsynth_g8r::aig::get_summary_stats;
+use xlsynth_g8r::aig::get_summary_stats::AigStats;
 use xlsynth_g8r::aig::get_summary_stats::SummaryStats;
+use xlsynth_g8r::aig_serdes::gate2ir::GateFnInterfaceSchema;
 use xlsynth_g8r::gatify::ir2gate;
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
@@ -24,11 +27,12 @@ use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_utils::compact_and_toposort_in_place;
 
 use crate::{
-    Best, CheckpointKind, CheckpointMsg, ConstraintLimits, ExtensionCostingMode, Objective,
-    PirMcmcBudgetFrontierOptions, PirMcmcBudgetWitness, PirMcmcPrefixMinimizeOptions, RunOptions,
-    cost_with_effort_options_toggle_stimulus_and_extension_mode, effective_constraint_limits,
-    format_search_score, lower_toggle_stimulus_for_fn, minimize_winning_prefix,
-    parse_irvals_tuple_file, read_pir_mcmc_artifact_dir, run_pir_mcmc_with_artifact_and_observers,
+    Best, CheckpointKind, CheckpointMsg, ConstraintLimits, ExtensionCostingMode, G8rEvaluationMode,
+    Objective, PirMcmcBudgetFrontierOptions, PirMcmcBudgetWitness, PirMcmcPrefixMinimizeOptions,
+    RunOptions, cost_with_effort_options_toggle_stimulus_extension_mode_and_evaluator,
+    effective_constraint_limits, format_search_score, lower_toggle_stimulus_for_fn,
+    minimize_winning_prefix, parse_irvals_tuple_file, postprocess_gate_fn_for_artifact,
+    read_pir_mcmc_artifact_dir, run_pir_mcmc_with_artifact_and_observers,
     run_pir_mcmc_with_shared_best, search_score, search_winning_budget_frontier,
     validate_constraint_configuration, validate_pir_mcmc_artifact_run_options,
     write_pir_mcmc_artifact_dir,
@@ -57,6 +61,7 @@ pub struct PirMcmcCliArgs {
     pub output: Option<String>,
     pub metric: Objective,
     pub extension_costing_mode: ExtensionCostingMode,
+    pub g8r_postprocess_program: Option<String>,
     pub max_delay: Option<usize>,
     pub max_area: Option<usize>,
     pub toggle_stimulus: Option<String>,
@@ -81,6 +86,7 @@ pub struct PirMcmcMinimizeCliArgs {
     pub seed: Option<u64>,
     pub witness_kind_boost: f64,
     pub proposal_attempts_per_rewrite: usize,
+    pub allow_artifact_postprocess_program: bool,
     pub output: String,
 }
 
@@ -142,6 +148,15 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 )
                 .value_parser(clap::builder::EnumValueParser::<ExtensionCostingMode>::new())
                 .default_value("preserve")
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("g8r_postprocess_program")
+                .long("g8r-postprocess-program")
+                .value_name("PATH")
+                .help(
+                    "External postprocessor invoked as: <program> <input.aig> --output-path <output.aig>.",
+                )
                 .action(ArgAction::Set),
         )
         .arg(
@@ -263,6 +278,9 @@ pub fn parse_pir_mcmc_args(matches: &ArgMatches) -> PirMcmcCliArgs {
         extension_costing_mode: *matches
             .get_one::<ExtensionCostingMode>("extension_costing_mode")
             .unwrap(),
+        g8r_postprocess_program: matches
+            .get_one::<String>("g8r_postprocess_program")
+            .cloned(),
         max_delay: matches.get_one::<usize>("max_delay").copied(),
         max_area: matches.get_one::<usize>("max_area").copied(),
         toggle_stimulus: matches.get_one::<String>("toggle_stimulus").cloned(),
@@ -363,6 +381,14 @@ pub fn add_pir_mcmc_minimize_args(command: Command) -> Command {
                 .action(ArgAction::Set),
         )
         .arg(
+            Arg::new("allow_artifact_postprocess_program")
+                .long("allow-artifact-postprocess-program")
+                .help(
+                    "Allow execution of an external g8r postprocessor path persisted in the artifact manifest.",
+                )
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
             Arg::new("output")
                 .short('o')
                 .long("output")
@@ -385,6 +411,7 @@ pub fn parse_pir_mcmc_minimize_args(matches: &ArgMatches) -> PirMcmcMinimizeCliA
         proposal_attempts_per_rewrite: *matches
             .get_one::<usize>("proposal_attempts_per_rewrite")
             .unwrap(),
+        allow_artifact_postprocess_program: matches.get_flag("allow_artifact_postprocess_program"),
         output: matches.get_one::<String>("output").unwrap().to_string(),
     }
 }
@@ -423,7 +450,31 @@ fn emit_pkg_text_toposorted(pkg: &Package) -> Result<String> {
     Ok(pkg.to_string())
 }
 
-fn gatify_ir_text_to_g8r_text_and_stats(ir_text: &str) -> Result<(String, SummaryStats)> {
+struct GatifiedArtifacts {
+    g8r_text: String,
+    raw_stats: SummaryStats,
+    gate_fn: GateFn,
+    schema: GateFnInterfaceSchema,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct PostprocessStatsOutput {
+    and_nodes: usize,
+    depth: usize,
+    fanout_histogram: std::collections::BTreeMap<usize, usize>,
+}
+
+impl From<&AigStats> for PostprocessStatsOutput {
+    fn from(value: &AigStats) -> Self {
+        Self {
+            and_nodes: value.and_nodes,
+            depth: value.max_depth,
+            fanout_histogram: value.fanout_histogram.clone(),
+        }
+    }
+}
+
+fn gatify_ir_text_to_artifacts(ir_text: &str) -> Result<GatifiedArtifacts> {
     let mut parser = ir_parser::Parser::new(ir_text);
     let pir_pkg = parser
         .parse_and_validate_package()
@@ -448,8 +499,37 @@ fn gatify_ir_text_to_g8r_text_and_stats(ir_text: &str) -> Result<(String, Summar
     let gatify_output = ir2gate::gatify(top_fn, gatify_options)
         .map_err(|e| anyhow::anyhow!("ir2gate::gatify failed: {}", e))?;
     let gate_fn = gatify_output.gate_fn;
-    let stats = get_summary_stats::get_summary_stats(&gate_fn);
-    Ok((gate_fn.to_string(), stats))
+    let raw_stats = get_summary_stats::get_summary_stats(&gate_fn);
+    let schema = GateFnInterfaceSchema::from_pir_fn(top_fn)
+        .map_err(|e| anyhow::anyhow!("failed to derive gate interface schema: {}", e))?;
+    Ok(GatifiedArtifacts {
+        g8r_text: gate_fn.to_string(),
+        raw_stats,
+        gate_fn,
+        schema,
+    })
+}
+
+fn maybe_write_postprocess_artifacts(
+    output_dir: &PathBuf,
+    stem: &str,
+    gate_fn: &GateFn,
+    schema: &GateFnInterfaceSchema,
+    g8r_evaluation_mode: &G8rEvaluationMode,
+) -> Result<()> {
+    if g8r_evaluation_mode.external_postprocess_program().is_none() {
+        return Ok(());
+    }
+    let post = postprocess_gate_fn_for_artifact(gate_fn, schema, g8r_evaluation_mode)?;
+    let post_aig_path = output_dir.join(format!("{stem}.post.aig"));
+    std::fs::write(&post_aig_path, &post.bytes)
+        .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", post_aig_path.display(), e))?;
+    let post_stats_path = output_dir.join(format!("{stem}.post.stats.json"));
+    let post_stats_json = serde_json::to_string_pretty(&PostprocessStatsOutput::from(&post.stats))
+        .expect("serialize postprocess AIG stats");
+    std::fs::write(&post_stats_path, post_stats_json.as_bytes())
+        .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", post_stats_path.display(), e))?;
+    Ok(())
 }
 
 fn write_witness_artifacts(
@@ -458,6 +538,7 @@ fn write_witness_artifacts(
     top_fn_name: &str,
     witness_fn: &xlsynth_pir::ir::Fn,
     extension_costing_mode: ExtensionCostingMode,
+    g8r_evaluation_mode: &G8rEvaluationMode,
 ) -> Result<()> {
     std::fs::create_dir_all(output_dir).map_err(|e| {
         anyhow::anyhow!(
@@ -488,17 +569,23 @@ fn write_witness_artifacts(
         anyhow::anyhow!("Failed to write {}: {:?}", witness_opt_ir_path.display(), e)
     })?;
 
-    let (witness_g8r_text, witness_stats) =
-        gatify_ir_text_to_g8r_text_and_stats(&witness_opt_ir_text)?;
+    let witness_artifacts = gatify_ir_text_to_artifacts(&witness_opt_ir_text)?;
     let witness_g8r_path = output_dir.join("witness.g8r");
-    std::fs::write(&witness_g8r_path, witness_g8r_text.as_bytes())
+    std::fs::write(&witness_g8r_path, witness_artifacts.g8r_text.as_bytes())
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", witness_g8r_path.display(), e))?;
     let witness_stats_path = output_dir.join("witness.stats.json");
     let witness_stats_json =
-        serde_json::to_string_pretty(&witness_stats).expect("serialize SummaryStats");
+        serde_json::to_string_pretty(&witness_artifacts.raw_stats).expect("serialize SummaryStats");
     std::fs::write(&witness_stats_path, witness_stats_json.as_bytes()).map_err(|e| {
         anyhow::anyhow!("Failed to write {}: {:?}", witness_stats_path.display(), e)
     })?;
+    maybe_write_postprocess_artifacts(
+        output_dir,
+        "witness",
+        &witness_artifacts.gate_fn,
+        &witness_artifacts.schema,
+        g8r_evaluation_mode,
+    )?;
     Ok(())
 }
 
@@ -516,6 +603,11 @@ fn budget_witness_json(witness: &PirMcmcBudgetWitness) -> serde_json::Value {
             "g8r_le_graph_milli": witness.witness_cost.g8r_le_graph_milli,
             "g8r_gate_output_toggles": witness.witness_cost.g8r_gate_output_toggles,
             "g8r_weighted_switching_milli": witness.witness_cost.g8r_weighted_switching_milli,
+            "g8r_post_and_nodes": witness.witness_cost.g8r_post_and_nodes,
+            "g8r_post_depth": witness.witness_cost.g8r_post_depth,
+            "g8r_post_le_graph_milli": witness.witness_cost.g8r_post_le_graph_milli,
+            "g8r_post_gate_output_toggles": witness.witness_cost.g8r_post_gate_output_toggles,
+            "g8r_post_weighted_switching_milli": witness.witness_cost.g8r_post_weighted_switching_milli,
         },
     })
 }
@@ -529,6 +621,12 @@ where
         "PIR MCMC extension costing mode: {}",
         cli.extension_costing_mode.value_name()
     ));
+    let g8r_evaluation_mode = match cli.g8r_postprocess_program.clone() {
+        Some(program) => {
+            G8rEvaluationMode::ExternalPostprocess { program }.canonicalized_for_persistence()?
+        }
+        None => G8rEvaluationMode::Builtin,
+    };
 
     // Parse IR package.
     let input_path = PathBuf::from(&cli.input_path);
@@ -579,12 +677,13 @@ where
             beta2: cli.switching_beta2,
             primary_output_load: cli.switching_primary_output_load,
         };
-    let initial_cost = cost_with_effort_options_toggle_stimulus_and_extension_mode(
+    let initial_cost = cost_with_effort_options_toggle_stimulus_extension_mode_and_evaluator(
         &top_fn,
         cli.metric,
         prepared_toggle_stimulus.as_deref(),
         &weighted_switching_options,
         cli.extension_costing_mode,
+        &g8r_evaluation_mode,
     )?;
     let effective_constraints = effective_constraint_limits(
         cli.metric,
@@ -595,7 +694,33 @@ where
         &initial_cost,
     );
     let initial_score = search_score(&initial_cost, cli.metric, effective_constraints);
-    if cli.metric.needs_weighted_switching() {
+    if cli.metric.uses_postprocessed_costing() && cli.metric.needs_weighted_switching() {
+        report(format!(
+            "Successfully loaded top function. Initial stats: pir_nodes={}, g8r_post_and_nodes={}, g8r_post_depth={}, g8r_post_weighted_switching_milli={}, score={}",
+            initial_cost.pir_nodes,
+            initial_cost.g8r_post_and_nodes,
+            initial_cost.g8r_post_depth,
+            initial_cost.g8r_post_weighted_switching_milli,
+            format_search_score(initial_score),
+        ));
+    } else if cli.metric.uses_postprocessed_costing() && cli.metric.needs_toggle_stimulus() {
+        report(format!(
+            "Successfully loaded top function. Initial stats: pir_nodes={}, g8r_post_and_nodes={}, g8r_post_depth={}, g8r_post_gate_output_toggles={}, score={}",
+            initial_cost.pir_nodes,
+            initial_cost.g8r_post_and_nodes,
+            initial_cost.g8r_post_depth,
+            initial_cost.g8r_post_gate_output_toggles,
+            format_search_score(initial_score),
+        ));
+    } else if cli.metric.uses_postprocessed_costing() {
+        report(format!(
+            "Successfully loaded top function. Initial stats: pir_nodes={}, g8r_post_and_nodes={}, g8r_post_depth={}, score={}",
+            initial_cost.pir_nodes,
+            initial_cost.g8r_post_and_nodes,
+            initial_cost.g8r_post_depth,
+            format_search_score(initial_score),
+        ));
+    } else if cli.metric.needs_weighted_switching() {
         report(format!(
             "Successfully loaded top function. Initial stats: pir_nodes={}, g8r_nodes={}, g8r_depth={}, g8r_weighted_switching_milli={}, score={}",
             initial_cost.pir_nodes,
@@ -661,6 +786,7 @@ where
         max_allowed_area: cli.max_area,
         weighted_switching_options,
         extension_costing_mode,
+        g8r_evaluation_mode: g8r_evaluation_mode.clone(),
         enable_formal_oracle: cli.formal_oracle,
         trajectory_dir: Some(output_dir.clone()),
         toggle_stimulus: toggle_stimulus_values,
@@ -693,20 +819,28 @@ where
     std::fs::write(&orig_opt_ir_path, orig_opt_ir_text.as_bytes())
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", orig_opt_ir_path.display(), e))?;
 
-    let (orig_g8r_text, orig_stats) = gatify_ir_text_to_g8r_text_and_stats(&orig_opt_ir_text)?;
+    let orig_artifacts = gatify_ir_text_to_artifacts(&orig_opt_ir_text)?;
     let orig_g8r_path = output_dir.join("orig.g8r");
-    std::fs::write(&orig_g8r_path, orig_g8r_text.as_bytes())
+    std::fs::write(&orig_g8r_path, orig_artifacts.g8r_text.as_bytes())
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", orig_g8r_path.display(), e))?;
     let orig_stats_path = output_dir.join("orig.stats.json");
     let orig_stats_json =
-        serde_json::to_string_pretty(&orig_stats).expect("serialize SummaryStats");
+        serde_json::to_string_pretty(&orig_artifacts.raw_stats).expect("serialize SummaryStats");
     std::fs::write(&orig_stats_path, orig_stats_json.as_bytes())
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", orig_stats_path.display(), e))?;
+    maybe_write_postprocess_artifacts(
+        &output_dir,
+        "orig",
+        &orig_artifacts.gate_fn,
+        &orig_artifacts.schema,
+        &g8r_evaluation_mode,
+    )?;
 
     let pkg_template = Arc::new(pkg.clone());
     let output_dir_for_thread = output_dir.clone();
     let orig_top_name_for_thread = orig_top_name.clone();
     let extension_costing_mode_for_thread = extension_costing_mode;
+    let g8r_evaluation_mode_for_thread = g8r_evaluation_mode.clone();
 
     let writer_handle = if let (Some(best), Some(rx)) = (shared_best.clone(), checkpoint_rx) {
         Some(std::thread::spawn(move || {
@@ -771,16 +905,15 @@ where
                 ));
                 let _ = std::fs::write(&best_opt_ir_snapshot_path, best_opt_ir_text.as_bytes());
 
-                let (best_g8r_text, best_stats) =
-                    match gatify_ir_text_to_g8r_text_and_stats(&best_opt_ir_text) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
+                let best_artifacts = match gatify_ir_text_to_artifacts(&best_opt_ir_text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
                 let best_g8r_path = output_dir_for_thread.join("best.g8r");
-                let _ = std::fs::write(&best_g8r_path, best_g8r_text.as_bytes());
+                let _ = std::fs::write(&best_g8r_path, best_artifacts.g8r_text.as_bytes());
 
                 let best_stats_path = output_dir_for_thread.join("best.stats.json");
-                if let Ok(stats_json) = serde_json::to_string_pretty(&best_stats) {
+                if let Ok(stats_json) = serde_json::to_string_pretty(&best_artifacts.raw_stats) {
                     let _ = std::fs::write(&best_stats_path, stats_json.as_bytes());
 
                     let best_stats_snapshot_path = output_dir_for_thread.join(format!(
@@ -789,6 +922,24 @@ where
                     ));
                     let _ = std::fs::write(&best_stats_snapshot_path, stats_json.as_bytes());
                 }
+                let _ = maybe_write_postprocess_artifacts(
+                    &output_dir_for_thread,
+                    "best",
+                    &best_artifacts.gate_fn,
+                    &best_artifacts.schema,
+                    &g8r_evaluation_mode_for_thread,
+                );
+                let snapshot_stem = format!(
+                    "best.w{:06}.c{:03}-i{:06}",
+                    write_index, snapshot_msg.chain_no, snapshot_msg.global_iter
+                );
+                let _ = maybe_write_postprocess_artifacts(
+                    &output_dir_for_thread,
+                    &snapshot_stem,
+                    &best_artifacts.gate_fn,
+                    &best_artifacts.schema,
+                    &g8r_evaluation_mode_for_thread,
+                );
             }
         }))
     } else {
@@ -908,6 +1059,79 @@ where
                 metric,
             ));
         }
+        Objective::G8rPostAndNodes => {
+            report(format!(
+                "PIR MCMC finished. Best stats: g8r_post_and_nodes={}",
+                result.best_cost.g8r_post_and_nodes
+            ));
+        }
+        Objective::G8rPostAndNodesTimesDepth => {
+            let product = (result.best_cost.g8r_post_and_nodes as u128)
+                .saturating_mul(result.best_cost.g8r_post_depth as u128);
+            report(format!(
+                "PIR MCMC finished. Best stats: g8r_post_and_nodes={}, g8r_post_depth={}, product={}",
+                result.best_cost.g8r_post_and_nodes, result.best_cost.g8r_post_depth, product,
+            ));
+        }
+        Objective::G8rPostAndNodesTimesDepthTimesToggles => {
+            let nd = (result.best_cost.g8r_post_and_nodes as u128)
+                .saturating_mul(result.best_cost.g8r_post_depth as u128);
+            let metric = nd.saturating_mul(result.best_cost.g8r_post_gate_output_toggles as u128);
+            report(format!(
+                "PIR MCMC finished. Best stats: g8r_post_and_nodes={}, g8r_post_depth={}, g8r_post_gate_output_toggles={}, metric={}",
+                result.best_cost.g8r_post_and_nodes,
+                result.best_cost.g8r_post_depth,
+                result.best_cost.g8r_post_gate_output_toggles,
+                metric,
+            ));
+        }
+        Objective::G8rPostLeGraph => {
+            report(format!(
+                "PIR MCMC finished. Best stats: g8r_post_le_graph={:.3} (metric_milli={})",
+                (result.best_cost.g8r_post_le_graph_milli as f64) / 1000.0,
+                result.best_cost.g8r_post_le_graph_milli,
+            ));
+        }
+        Objective::G8rPostLeGraphTimesAndNodes => {
+            let metric = (result.best_cost.g8r_post_le_graph_milli as u128)
+                .saturating_mul(result.best_cost.g8r_post_and_nodes as u128);
+            report(format!(
+                "PIR MCMC finished. Best stats: g8r_post_le_graph={:.3}, g8r_post_and_nodes={}, metric={}",
+                (result.best_cost.g8r_post_le_graph_milli as f64) / 1000.0,
+                result.best_cost.g8r_post_and_nodes,
+                metric,
+            ));
+        }
+        Objective::G8rPostLeGraphTimesProduct => {
+            let product = (result.best_cost.g8r_post_and_nodes as u128)
+                .saturating_mul(result.best_cost.g8r_post_depth as u128);
+            let metric = (result.best_cost.g8r_post_le_graph_milli as u128).saturating_mul(product);
+            report(format!(
+                "PIR MCMC finished. Best stats: g8r_post_le_graph={:.3}, g8r_post_and_nodes={}, g8r_post_depth={}, product={}, metric={}",
+                (result.best_cost.g8r_post_le_graph_milli as f64) / 1000.0,
+                result.best_cost.g8r_post_and_nodes,
+                result.best_cost.g8r_post_depth,
+                product,
+                metric,
+            ));
+        }
+        Objective::G8rPostWeightedSwitching => {
+            report(format!(
+                "PIR MCMC finished. Best stats: g8r_post_weighted_switching_milli={}",
+                result.best_cost.g8r_post_weighted_switching_milli,
+            ));
+        }
+        Objective::G8rPostAndNodesTimesWeightedSwitchingNoDepthRegress => {
+            let metric = (result.best_cost.g8r_post_and_nodes as u128)
+                .saturating_mul(result.best_cost.g8r_post_weighted_switching_milli);
+            report(format!(
+                "PIR MCMC finished. Best stats: g8r_post_and_nodes={}, g8r_post_depth={} (non-regressing), g8r_post_weighted_switching_milli={}, metric={}",
+                result.best_cost.g8r_post_and_nodes,
+                result.best_cost.g8r_post_depth,
+                result.best_cost.g8r_post_weighted_switching_milli,
+                metric,
+            ));
+        }
     }
 
     let final_score = search_score(&result.best_cost, cli.metric, effective_constraints);
@@ -952,15 +1176,22 @@ where
     std::fs::write(&best_opt_ir_path, best_opt_ir_text.as_bytes())
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", best_opt_ir_path.display(), e))?;
 
-    let (best_g8r_text, best_stats) = gatify_ir_text_to_g8r_text_and_stats(&best_opt_ir_text)?;
+    let best_artifacts = gatify_ir_text_to_artifacts(&best_opt_ir_text)?;
     let best_g8r_path = output_dir.join("best.g8r");
-    std::fs::write(&best_g8r_path, best_g8r_text.as_bytes())
+    std::fs::write(&best_g8r_path, best_artifacts.g8r_text.as_bytes())
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", best_g8r_path.display(), e))?;
     let best_stats_path = output_dir.join("best.stats.json");
     let best_stats_json =
-        serde_json::to_string_pretty(&best_stats).expect("serialize SummaryStats");
+        serde_json::to_string_pretty(&best_artifacts.raw_stats).expect("serialize SummaryStats");
     std::fs::write(&best_stats_path, best_stats_json.as_bytes())
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", best_stats_path.display(), e))?;
+    maybe_write_postprocess_artifacts(
+        &output_dir,
+        "best",
+        &best_artifacts.gate_fn,
+        &best_artifacts.schema,
+        &g8r_evaluation_mode,
+    )?;
 
     if let Some(artifact) = recorded_artifact.as_ref() {
         let artifact_dir = write_pir_mcmc_artifact_dir(artifact, &pkg, &output_dir)?;
@@ -981,6 +1212,18 @@ where
 {
     let run_dir = PathBuf::from(&cli.run_dir);
     let loaded = read_pir_mcmc_artifact_dir(&run_dir)?;
+    if let Some(program) = loaded
+        .artifact
+        .run_options
+        .g8r_evaluation_mode
+        .external_postprocess_program()
+        && !cli.allow_artifact_postprocess_program
+    {
+        return Err(anyhow::anyhow!(
+            "artifact requests external g8r postprocessor '{}'; rerun with --allow-artifact-postprocess-program to execute it",
+            program
+        ));
+    }
     let frontier_mode = match (cli.budget_step, cli.max_actions, cli.rollouts_per_budget) {
         (Some(budget_step), Some(max_actions), Some(rollouts_per_budget)) => {
             Some((budget_step, max_actions, rollouts_per_budget))
@@ -1000,6 +1243,7 @@ where
 
     let output_dir = PathBuf::from(&cli.output);
     let extension_costing_mode = loaded.artifact.run_options.extension_costing_mode;
+    let g8r_evaluation_mode = &loaded.artifact.run_options.g8r_evaluation_mode;
 
     if let Some((budget_step, max_actions, rollouts_per_budget)) = frontier_mode {
         std::fs::create_dir_all(&output_dir).map_err(|e| {
@@ -1030,6 +1274,7 @@ where
                 &loaded.top_fn_name,
                 &point.guided.witness_fn,
                 extension_costing_mode,
+                g8r_evaluation_mode,
             )?;
             point_summaries.push(serde_json::json!({
                 "action_budget": point.action_budget,
@@ -1099,6 +1344,7 @@ where
         &loaded.top_fn_name,
         &minimized.witness_fn,
         extension_costing_mode,
+        g8r_evaluation_mode,
     )?;
 
     let summary = serde_json::json!({
@@ -1117,6 +1363,11 @@ where
             "g8r_le_graph_milli": minimized.witness_cost.g8r_le_graph_milli,
             "g8r_gate_output_toggles": minimized.witness_cost.g8r_gate_output_toggles,
             "g8r_weighted_switching_milli": minimized.witness_cost.g8r_weighted_switching_milli,
+            "g8r_post_and_nodes": minimized.witness_cost.g8r_post_and_nodes,
+            "g8r_post_depth": minimized.witness_cost.g8r_post_depth,
+            "g8r_post_le_graph_milli": minimized.witness_cost.g8r_post_le_graph_milli,
+            "g8r_post_gate_output_toggles": minimized.witness_cost.g8r_post_gate_output_toggles,
+            "g8r_post_weighted_switching_milli": minimized.witness_cost.g8r_post_weighted_switching_milli,
         },
     });
     let summary_path = output_dir.join("summary.json");
@@ -1151,10 +1402,12 @@ mod tests {
         run_pir_mcmc_driver, run_pir_mcmc_minimize_driver,
     };
     use crate::{
-        Cost, PirMcmcArtifact, PirMcmcBudgetFrontierOptions, PirMcmcProvenanceAction, RunOptions,
-        transforms::PirTransformKind, write_pir_mcmc_artifact_dir,
+        Cost, G8rEvaluationMode, PirMcmcArtifact, PirMcmcBudgetFrontierOptions,
+        PirMcmcProvenanceAction, RunOptions, transforms::PirTransformKind,
+        write_pir_mcmc_artifact_dir,
     };
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
     use xlsynth_g8r::aig_sim::count_toggles::WeightedSwitchingOptions;
     use xlsynth_mcmc::multichain::ChainStrategy;
@@ -1166,6 +1419,19 @@ mod tests {
         parser.parse_and_validate_package().unwrap()
     }
 
+    fn write_executable_script(
+        dir: &std::path::Path,
+        name: &str,
+        body: &str,
+    ) -> std::path::PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, body).unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
+
     fn cost_with_pir_nodes(pir_nodes: usize) -> Cost {
         Cost {
             pir_nodes,
@@ -1174,6 +1440,11 @@ mod tests {
             g8r_le_graph_milli: 0,
             g8r_gate_output_toggles: 0,
             g8r_weighted_switching_milli: 0,
+            g8r_post_and_nodes: 0,
+            g8r_post_depth: 0,
+            g8r_post_le_graph_milli: 0,
+            g8r_post_gate_output_toggles: 0,
+            g8r_post_weighted_switching_milli: 0,
         }
     }
 
@@ -1221,6 +1492,7 @@ top fn main(x: bits[8] id=1) -> bits[8] {
                 initial_temperature: 1.0,
                 objective: Objective::Nodes,
                 extension_costing_mode: ExtensionCostingMode::Preserve,
+                g8r_evaluation_mode: G8rEvaluationMode::Builtin,
                 max_allowed_depth: None,
                 max_allowed_area: None,
                 weighted_switching_options: WeightedSwitchingOptions::default(),
@@ -1275,6 +1547,7 @@ top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
             output: Some(output_dir.path().display().to_string()),
             metric: Objective::G8rNodes,
             extension_costing_mode: ExtensionCostingMode::Preserve,
+            g8r_postprocess_program: None,
             max_delay: Some(0),
             max_area: None,
             toggle_stimulus: None,
@@ -1320,6 +1593,7 @@ top fn main(x: bits[1] id=1) -> bits[1] {
             output: Some(output_dir.path().display().to_string()),
             metric: Objective::G8rNodes,
             extension_costing_mode: ExtensionCostingMode::Preserve,
+            g8r_postprocess_program: None,
             max_delay: None,
             max_area: None,
             toggle_stimulus: None,
@@ -1351,6 +1625,63 @@ top fn main(x: bits[1] id=1) -> bits[1] {
     }
 
     #[test]
+    fn postprocessed_run_emits_post_artifacts_and_lineage() {
+        let input_dir = tempdir().unwrap();
+        let output_dir = tempdir().unwrap();
+        let hook_dir = tempdir().unwrap();
+        let hook = write_executable_script(
+            hook_dir.path(),
+            "identity.sh",
+            "#!/bin/sh\ncp \"$1\" \"$3\"\n",
+        );
+        let input_path = input_dir.path().join("sample.ir");
+        fs::write(
+            &input_path,
+            r#"package sample
+
+top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret and.3: bits[1] = and(a, b, id=3)
+}
+"#,
+        )
+        .unwrap();
+
+        let cli = PirMcmcCliArgs {
+            input_path: input_path.display().to_string(),
+            iters: 0,
+            seed: 1,
+            output: Some(output_dir.path().display().to_string()),
+            metric: Objective::G8rPostAndNodes,
+            extension_costing_mode: ExtensionCostingMode::Preserve,
+            g8r_postprocess_program: Some(hook.display().to_string()),
+            max_delay: None,
+            max_area: None,
+            toggle_stimulus: None,
+            initial_temperature: 1.0,
+            threads: 1,
+            checkpoint_iters: 0,
+            progress_iters: 0,
+            formal_oracle: false,
+            switching_beta1: 1.0,
+            switching_beta2: 0.0,
+            switching_primary_output_load: 1.0,
+            chain_strategy: CliChainStrategy::Independent,
+        };
+
+        run_pir_mcmc_driver(cli, |_| {}).unwrap();
+        assert!(output_dir.path().join("orig.post.aig").exists());
+        assert!(output_dir.path().join("orig.post.stats.json").exists());
+        assert!(output_dir.path().join("best.post.aig").exists());
+        assert!(output_dir.path().join("best.post.stats.json").exists());
+        assert!(
+            output_dir
+                .path()
+                .join("winning-lineage/manifest.json")
+                .exists()
+        );
+    }
+
+    #[test]
     fn unsupported_run_reports_artifact_skip() {
         let input_dir = tempdir().unwrap();
         let output_dir = tempdir().unwrap();
@@ -1373,6 +1704,7 @@ top fn main(x: bits[1] id=1) -> bits[1] {
             output: Some(output_dir.path().display().to_string()),
             metric: Objective::G8rNodes,
             extension_costing_mode: ExtensionCostingMode::Preserve,
+            g8r_postprocess_program: None,
             max_delay: Some(1),
             max_area: None,
             toggle_stimulus: None,
@@ -1414,6 +1746,7 @@ top fn main(x: bits[1] id=1) -> bits[1] {
             witness_kind_boost: PirMcmcBudgetFrontierOptions::DEFAULT_WITNESS_KIND_BOOST,
             proposal_attempts_per_rewrite:
                 PirMcmcBudgetFrontierOptions::DEFAULT_PROPOSAL_ATTEMPTS_PER_REWRITE,
+            allow_artifact_postprocess_program: false,
             output: output_dir.path().display().to_string(),
         };
         let mut messages = Vec::new();
@@ -1435,6 +1768,61 @@ top fn main(x: bits[1] id=1) -> bits[1] {
     }
 
     #[test]
+    fn minimize_driver_replays_persisted_postprocessor() {
+        let run_dir = tempdir().unwrap();
+        let output_dir = tempdir().unwrap();
+        let hook_dir = tempdir().unwrap();
+        let marker = hook_dir.path().join("invoked");
+        let hook = write_executable_script(
+            hook_dir.path(),
+            "identity.sh",
+            &format!(
+                "#!/bin/sh\nprintf invoked > \"{}\"\ncp \"$1\" \"$3\"\n",
+                marker.display()
+            ),
+        );
+        let (pkg, mut artifact) = minimize_test_artifact();
+        artifact.run_options.g8r_evaluation_mode = G8rEvaluationMode::ExternalPostprocess {
+            program: hook.display().to_string(),
+        };
+        write_pir_mcmc_artifact_dir(&artifact, &pkg, run_dir.path()).unwrap();
+
+        let cli = PirMcmcMinimizeCliArgs {
+            run_dir: run_dir.path().display().to_string(),
+            retained_win_fraction: Some(0.5),
+            budget_step: None,
+            max_actions: None,
+            rollouts_per_budget: None,
+            seed: None,
+            witness_kind_boost: PirMcmcBudgetFrontierOptions::DEFAULT_WITNESS_KIND_BOOST,
+            proposal_attempts_per_rewrite:
+                PirMcmcBudgetFrontierOptions::DEFAULT_PROPOSAL_ATTEMPTS_PER_REWRITE,
+            allow_artifact_postprocess_program: false,
+            output: output_dir.path().display().to_string(),
+        };
+        let err = run_pir_mcmc_minimize_driver(cli.clone(), |_| {}).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("--allow-artifact-postprocess-program"),
+            "unexpected error: {err}"
+        );
+        assert!(!marker.exists());
+
+        run_pir_mcmc_minimize_driver(
+            PirMcmcMinimizeCliArgs {
+                allow_artifact_postprocess_program: true,
+                ..cli
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        assert!(output_dir.path().join("witness.post.aig").exists());
+        assert!(output_dir.path().join("witness.post.stats.json").exists());
+        assert!(marker.exists());
+    }
+
+    #[test]
     fn minimize_driver_rejects_invalid_fraction_and_missing_artifact() {
         let missing_run_dir = tempdir().unwrap();
         let output_dir = tempdir().unwrap();
@@ -1449,6 +1837,7 @@ top fn main(x: bits[1] id=1) -> bits[1] {
                 witness_kind_boost: PirMcmcBudgetFrontierOptions::DEFAULT_WITNESS_KIND_BOOST,
                 proposal_attempts_per_rewrite:
                     PirMcmcBudgetFrontierOptions::DEFAULT_PROPOSAL_ATTEMPTS_PER_REWRITE,
+                allow_artifact_postprocess_program: false,
                 output: output_dir.path().display().to_string(),
             },
             |_| {},
@@ -1470,6 +1859,7 @@ top fn main(x: bits[1] id=1) -> bits[1] {
                 witness_kind_boost: PirMcmcBudgetFrontierOptions::DEFAULT_WITNESS_KIND_BOOST,
                 proposal_attempts_per_rewrite:
                     PirMcmcBudgetFrontierOptions::DEFAULT_PROPOSAL_ATTEMPTS_PER_REWRITE,
+                allow_artifact_postprocess_program: false,
                 output: output_dir.path().display().to_string(),
             },
             |_| {},
@@ -1494,6 +1884,7 @@ top fn main(x: bits[1] id=1) -> bits[1] {
             seed: Some(1),
             witness_kind_boost: 4.0,
             proposal_attempts_per_rewrite: 1,
+            allow_artifact_postprocess_program: false,
             output: output_dir.path().display().to_string(),
         };
         let mut messages = Vec::new();
@@ -1529,6 +1920,7 @@ top fn main(x: bits[1] id=1) -> bits[1] {
                 seed: None,
                 witness_kind_boost: 4.0,
                 proposal_attempts_per_rewrite: 1,
+                allow_artifact_postprocess_program: false,
                 output: output_dir.path().display().to_string(),
             },
             |_| {},
@@ -1546,6 +1938,7 @@ top fn main(x: bits[1] id=1) -> bits[1] {
                 seed: None,
                 witness_kind_boost: 4.0,
                 proposal_attempts_per_rewrite: 1,
+                allow_artifact_postprocess_program: false,
                 output: output_dir.path().display().to_string(),
             },
             |_| {},
