@@ -1044,6 +1044,101 @@ fn split_related_pin_names(related_pin: &str) -> impl Iterator<Item = &str> {
     related_pin.split_whitespace()
 }
 
+/// Validates that one cell output pin is fully usable by the limited-scope STA
+/// engine for the requested related input pins.
+pub fn validate_output_pin_for_basic_sta(
+    library: &crate::liberty_proto::Library,
+    cell_name: &str,
+    pin: &Pin,
+    required_related_pins: &[String],
+) -> Result<()> {
+    if pin.direction != PinDirection::Output as i32 {
+        return Err(anyhow!(
+            "cell '{}' pin '{}' is not an output pin",
+            cell_name,
+            pin.name
+        ));
+    }
+    if pin.timing_arcs.is_empty() {
+        return Err(anyhow!(
+            "cell '{}' output pin '{}' has no timing arcs",
+            cell_name,
+            pin.name
+        ));
+    }
+    if let Some(unsupported_arc) = pin
+        .timing_arcs
+        .iter()
+        .find(|arc| !StaTimingType::from_raw(arc.timing_type.as_str()).is_combinational())
+    {
+        return Err(anyhow!(
+            "cell '{}' output pin '{}' has unsupported timing type '{}'",
+            cell_name,
+            pin.name,
+            unsupported_arc.timing_type
+        ));
+    }
+    if let Some(conditional_arc) = pin.timing_arcs.iter().find(|arc| !arc.when.is_empty()) {
+        return Err(anyhow!(
+            "cell '{}' output pin '{}' has conditional arc for related pin '{}' with when='{}'",
+            cell_name,
+            pin.name,
+            conditional_arc.related_pin,
+            conditional_arc.when
+        ));
+    }
+
+    let combinational_arcs: Vec<&TimingArc> = pin.timing_arcs.iter().collect();
+    let mut validated_tables = HashSet::new();
+    validate_timing_tables_once(
+        library,
+        cell_name,
+        pin.name.as_str(),
+        combinational_arcs.as_slice(),
+        &mut validated_tables,
+    )?;
+
+    for arc in &combinational_arcs {
+        let timing_type = StaTimingType::from_raw(arc.timing_type.as_str());
+        let context = format!(
+            "cell '{}' output pin '{}' related_pin '{}'",
+            cell_name, pin.name, arc.related_pin
+        );
+        if timing_type.produces_rise() {
+            find_unique_table(arc, StaTimingTableKind::CellRise, context.as_str())?;
+            find_unique_table(arc, StaTimingTableKind::RiseTransition, context.as_str())?;
+        }
+        if timing_type.produces_fall() {
+            find_unique_table(arc, StaTimingTableKind::CellFall, context.as_str())?;
+            find_unique_table(arc, StaTimingTableKind::FallTransition, context.as_str())?;
+        }
+    }
+
+    for required_pin in required_related_pins {
+        let mut has_rise = false;
+        let mut has_fall = false;
+        for arc in &combinational_arcs {
+            if !split_related_pin_names(arc.related_pin.as_str())
+                .any(|related_pin| related_pin == required_pin)
+            {
+                continue;
+            }
+            let timing_type = StaTimingType::from_raw(arc.timing_type.as_str());
+            has_rise |= timing_type.produces_rise();
+            has_fall |= timing_type.produces_fall();
+        }
+        if !has_rise || !has_fall {
+            return Err(anyhow!(
+                "cell '{}' output pin '{}' lacks complete rise/fall combinational timing coverage for functional input '{}'",
+                cell_name,
+                pin.name,
+                required_pin
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn net_width_is_multibit(width: Option<(u32, u32)>) -> bool {
     matches!(width, Some((msb, lsb)) if msb != lsb)
 }

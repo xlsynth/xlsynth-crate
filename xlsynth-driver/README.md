@@ -205,6 +205,33 @@ When `--liberty_proto` is omitted, the accepted Verilog subset is intentionally 
 
 `gv2ir` and `gv2block` are unchanged in this release and still require Liberty input.
 
+### `aig-tech-map`: AIGER to structural gate netlist
+
+Structurally maps an input AIGER graph to a cell-instance netlist using a simple decomposition:
+
+- each `And2` becomes `NAND2` followed by `INV`
+- negated operands and output negations are materialized with explicit `INV` instances
+
+The command requires a **timing-enabled** Liberty proto and auto-selects suitable `INV` and `NAND2` cells from that library.
+The mapping-mode design is described in
+[`xlsynth-g8r/docs/tech_mapper_design.md`](../xlsynth-g8r/docs/tech_mapper_design.md).
+
+```shell
+xlsynth-driver aig-tech-map my_design.aag \
+  --liberty_proto ~/timing-enabled.liberty.proto \
+  --netlist_out my_design.mapped.gv
+```
+
+Key flags:
+
+- `--liberty_proto <PATH>`: timing-enabled Liberty proto (`.proto` or `.textproto`). Required.
+- `--netlist_out <PATH>`: output mapped netlist path; use `-` for stdout. Required.
+- `--module_name <MODULE>`: optional override for emitted module name.
+- `--cell_policy <small-normal-vt|max-speed>`: auto-selection policy for INV/NAND2 cells (default: `small-normal-vt`).
+  `small-normal-vt` prefers VT class `0` and canonical/x1 cells for a stable baseline;
+  `max-speed` prefers the highest available VT class and then the highest
+  available drive strength.
+
 ### `gv-sta`: gate-level max-arrival STA
 
 Runs basic combinational max-arrival STA over a parsed gate-level netlist using Liberty timing arcs/tables.
