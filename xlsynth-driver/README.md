@@ -184,6 +184,30 @@ When `--liberty_proto` is omitted, the accepted Verilog subset is intentionally 
 
 `gv2ir` and `gv2block` are unchanged in this release and still require Liberty input.
 
+### `gv-sta`: gate-level max-arrival STA
+
+Runs basic combinational max-arrival STA over a parsed gate-level netlist using Liberty timing arcs/tables.
+
+```shell
+xlsynth-driver gv-sta \
+  --netlist my_design.mapped.gv \
+  --liberty_proto ~/timing-enabled.liberty.proto \
+  --primary_input_transition 0.01 \
+  --module_output_load 0.0
+```
+
+Key flags:
+
+- `--netlist <PATH>`: gate-level netlist (`.gv`, `.v`, or `.gv.gz`). Required.
+- `--liberty_proto <PATH>`: timing-enabled Liberty proto (`.proto` or `.textproto`). Required.
+- `--module_name <MODULE>`: optional module selection when netlist has multiple modules.
+- `--primary_input_transition <VALUE>`: source transition for PIs/undriven nets (default: `0.01`).
+- `--module_output_load <VALUE>`: extra load capacitance added at module outputs (default: `0.0`).
+- `--json_out <PATH>`: optional JSON summary output path.
+- Debug tracing: set `XLSYNTH_G8R_STA_TRACE=1` and enable the
+  `xlsynth_g8r::netlist::sta_trace` log target to emit per-arc timing-candidate
+  diagnostics.
+
 ### `gv-read-stats`: netlist statistics
 
 Reads a gate-level netlist (optionally gzipped) and prints summary statistics such as

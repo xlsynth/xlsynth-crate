@@ -73,6 +73,7 @@ mod gv2ir;
 mod gv_dump_cone;
 mod gv_instance_csv;
 mod gv_read_stats;
+mod gv_sta;
 mod ir2combo;
 mod ir2delayinfo;
 mod ir2gates;
@@ -1785,6 +1786,56 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new("gv-sta")
+                .about("Runs basic combinational max-arrival STA on a gate-level netlist")
+                .arg(
+                    Arg::new("netlist")
+                        .long("netlist")
+                        .help("Input gate-level netlist (.gv, .v, or .gv.gz)")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("liberty_proto")
+                        .long("liberty_proto")
+                        .help("Timing-enabled Liberty proto (.proto or .textproto)")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("module_name")
+                        .long("module_name")
+                        .value_name("MODULE")
+                        .help("Optional module name to select when netlist contains multiple modules")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("primary_input_transition")
+                        .long("primary_input_transition")
+                        .value_name("VALUE")
+                        .default_value("0.01")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("Transition applied at primary inputs and undriven nets")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("module_output_load")
+                        .long("module_output_load")
+                        .value_name("VALUE")
+                        .default_value("0.0")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("Additional load capacitance added to module outputs")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("json_out")
+                        .long("json_out")
+                        .value_name("PATH")
+                        .help("Optional path to write a JSON STA summary")
+                        .action(ArgAction::Set),
+                ),
+        )
+        .subcommand(
             clap::Command::new("gv-read-stats")
                 .about("Reads a gate-level netlist and prints summary statistics")
                 .arg(
@@ -3336,6 +3387,9 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("gv2aig", subm)) => {
             gv2aig::handle_gv2aig(subm);
+        }
+        Some(("gv-sta", subm)) => {
+            gv_sta::handle_gv_sta(subm);
         }
         Some(("gv-read-stats", subm)) => {
             gv_read_stats::handle_gv_read_stats(subm);
