@@ -754,6 +754,129 @@ impl StaTimingType {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StaTimingSense {
+    Unspecified,
+    PositiveUnate,
+    NegativeUnate,
+    NonUnate,
+    Other,
+}
+
+impl StaTimingSense {
+    fn from_raw(raw: &str) -> Self {
+        match raw {
+            "" => Self::Unspecified,
+            "positive_unate" => Self::PositiveUnate,
+            "negative_unate" => Self::NegativeUnate,
+            "non_unate" => Self::NonUnate,
+            _ => Self::Other,
+        }
+    }
+
+    fn may_use_either_input_edge(self) -> bool {
+        matches!(self, Self::Unspecified | Self::NonUnate)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StaTimingTableKind {
+    CellRise,
+    CellFall,
+    RiseTransition,
+    FallTransition,
+}
+
+impl StaTimingTableKind {
+    fn as_raw(self) -> &'static str {
+        match self {
+            Self::CellRise => "cell_rise",
+            Self::CellFall => "cell_fall",
+            Self::RiseTransition => "rise_transition",
+            Self::FallTransition => "fall_transition",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LibertyTableKind {
+    CellRise,
+    CellFall,
+    RiseTransition,
+    FallTransition,
+    RisePower,
+    FallPower,
+    Other,
+}
+
+impl LibertyTableKind {
+    fn from_raw(raw: &str) -> Self {
+        match raw {
+            "cell_rise" => Self::CellRise,
+            "cell_fall" => Self::CellFall,
+            "rise_transition" => Self::RiseTransition,
+            "fall_transition" => Self::FallTransition,
+            "rise_power" => Self::RisePower,
+            "fall_power" => Self::FallPower,
+            _ => Self::Other,
+        }
+    }
+
+    fn template_kind(self) -> Option<LuTableTemplateKind> {
+        match self {
+            Self::CellRise | Self::CellFall | Self::RiseTransition | Self::FallTransition => {
+                Some(LuTableTemplateKind::Timing)
+            }
+            Self::RisePower | Self::FallPower => Some(LuTableTemplateKind::Power),
+            Self::Other => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LuTableTemplateKind {
+    Timing,
+    Power,
+    Other,
+}
+
+impl LuTableTemplateKind {
+    fn from_raw(raw: &str) -> Self {
+        match raw {
+            "lu_table_template" => Self::Timing,
+            "power_lut_template" => Self::Power,
+            _ => Self::Other,
+        }
+    }
+
+    fn as_raw(self) -> &'static str {
+        match self {
+            Self::Timing => "lu_table_template",
+            Self::Power => "power_lut_template",
+            Self::Other => "<unsupported>",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AxisVariable {
+    Unspecified,
+    InputTransition,
+    OutputLoad,
+    Other,
+}
+
+impl AxisVariable {
+    fn from_raw(raw: &str) -> Self {
+        match raw.trim() {
+            "" => Self::Unspecified,
+            "input_net_transition" | "input_transition_time" => Self::InputTransition,
+            "total_output_net_capacitance" => Self::OutputLoad,
+            _ => Self::Other,
+        }
+    }
+}
+
 fn split_related_pin_names(related_pin: &str) -> impl Iterator<Item = &str> {
     related_pin.split_whitespace()
 }
@@ -793,8 +916,8 @@ fn evaluate_arc_set(
     context: &str,
 ) -> Result<SignalTimingSet> {
     let timing_type = StaTimingType::from_raw(arc.timing_type.as_str());
-    let sense = arc.timing_sense.as_str();
-    let all_inputs = if sense == "" || sense == "non_unate" {
+    let timing_sense = StaTimingSense::from_raw(arc.timing_sense.as_str());
+    let all_inputs = if timing_sense.may_use_either_input_edge() {
         let mut combined = input_timing.rise.clone();
         combined.extend_from(&input_timing.fall);
         Some(combined)
@@ -802,12 +925,12 @@ fn evaluate_arc_set(
         None
     };
     let source_edges = |output_edge_is_rise: bool| -> Result<&EdgeTimingSet> {
-        match (sense, output_edge_is_rise) {
-            ("positive_unate", true) => Ok(&input_timing.rise),
-            ("positive_unate", false) => Ok(&input_timing.fall),
-            ("negative_unate", true) => Ok(&input_timing.fall),
-            ("negative_unate", false) => Ok(&input_timing.rise),
-            ("" | "non_unate", _) => Ok(all_inputs
+        match (timing_sense, output_edge_is_rise) {
+            (StaTimingSense::PositiveUnate, true) => Ok(&input_timing.rise),
+            (StaTimingSense::PositiveUnate, false) => Ok(&input_timing.fall),
+            (StaTimingSense::NegativeUnate, true) => Ok(&input_timing.fall),
+            (StaTimingSense::NegativeUnate, false) => Ok(&input_timing.rise),
+            (StaTimingSense::Unspecified | StaTimingSense::NonUnate, _) => Ok(all_inputs
                 .as_ref()
                 .expect("non-unate input set should be built")),
             _ => Err(anyhow!(
@@ -819,8 +942,8 @@ fn evaluate_arc_set(
 
     let mut output = SignalTimingSet::default();
     if timing_type.produces_rise() {
-        let cell_rise = find_unique_table(arc, "cell_rise", context)?;
-        let rise_transition = find_unique_table(arc, "rise_transition", context)?;
+        let cell_rise = find_unique_table(arc, StaTimingTableKind::CellRise, context)?;
+        let rise_transition = find_unique_table(arc, StaTimingTableKind::RiseTransition, context)?;
         output.rise = evaluate_output_edge_set(
             library,
             cell_rise,
@@ -828,13 +951,13 @@ fn evaluate_arc_set(
             source_edges(true)?,
             output_load.rise,
             context,
-            "cell_rise",
-            "rise_transition",
+            StaTimingTableKind::CellRise,
+            StaTimingTableKind::RiseTransition,
         )?;
     }
     if timing_type.produces_fall() {
-        let cell_fall = find_unique_table(arc, "cell_fall", context)?;
-        let fall_transition = find_unique_table(arc, "fall_transition", context)?;
+        let cell_fall = find_unique_table(arc, StaTimingTableKind::CellFall, context)?;
+        let fall_transition = find_unique_table(arc, StaTimingTableKind::FallTransition, context)?;
         output.fall = evaluate_output_edge_set(
             library,
             cell_fall,
@@ -842,8 +965,8 @@ fn evaluate_arc_set(
             source_edges(false)?,
             output_load.fall,
             context,
-            "cell_fall",
-            "fall_transition",
+            StaTimingTableKind::CellFall,
+            StaTimingTableKind::FallTransition,
         )?;
     }
     Ok(output)
@@ -856,8 +979,8 @@ fn evaluate_output_edge_set(
     source_edges: &EdgeTimingSet,
     output_load: f64,
     context: &str,
-    delay_kind: &str,
-    slew_kind: &str,
+    delay_kind: StaTimingTableKind,
+    slew_kind: StaTimingTableKind,
 ) -> Result<EdgeTimingSet> {
     let mut outputs = EdgeTimingSet::default();
 
@@ -867,14 +990,14 @@ fn evaluate_output_edge_set(
             delay_table,
             source_edge.transition,
             output_load,
-            &format!("{context} {delay_kind}"),
+            &format!("{context} {}", delay_kind.as_raw()),
         )?;
         let transition = evaluate_table(
             library,
             slew_table,
             source_edge.transition,
             output_load,
-            &format!("{context} {slew_kind}"),
+            &format!("{context} {}", slew_kind.as_raw()),
         )?;
         outputs.insert(EdgeTiming {
             arrival: source_edge.arrival + delay,
@@ -885,8 +1008,8 @@ fn evaluate_output_edge_set(
     if outputs.values.is_empty() {
         return Err(anyhow!(
             "{context}: no source edge candidates for '{}'/'{}' evaluation",
-            delay_kind,
-            slew_kind
+            delay_kind.as_raw(),
+            slew_kind.as_raw()
         ));
     }
 
@@ -927,26 +1050,31 @@ fn choose_worse_edge_timing_by_arrival(lhs: EdgeTiming, rhs: EdgeTiming) -> Edge
     }
 }
 
-fn find_unique_table<'a>(arc: &'a TimingArc, kind: &str, context: &str) -> Result<&'a TimingTable> {
-    let mut matches = arc.tables.iter().filter(|table| table.kind == kind);
+fn find_unique_table<'a>(
+    arc: &'a TimingArc,
+    kind: StaTimingTableKind,
+    context: &str,
+) -> Result<&'a TimingTable> {
+    let mut matches = arc
+        .tables
+        .iter()
+        .filter(|table| table.kind == kind.as_raw());
     let first = matches
         .next()
-        .ok_or_else(|| anyhow!("{context}: missing '{kind}' timing table"))?;
+        .ok_or_else(|| anyhow!("{context}: missing '{}' timing table", kind.as_raw()))?;
     if matches.next().is_some() {
         return Err(anyhow!(
             "{context}: multiple '{}' timing tables are unsupported in basic STA",
-            kind
+            kind.as_raw()
         ));
     }
     Ok(first)
 }
 
-fn expected_template_kind_for_timing_table(table: &TimingTable) -> &'static str {
-    if table.kind.contains("power") {
-        "power_lut_template"
-    } else {
-        "lu_table_template"
-    }
+fn expected_template_kind_for_timing_table(table: &TimingTable) -> Result<LuTableTemplateKind> {
+    LibertyTableKind::from_raw(table.kind.as_str())
+        .template_kind()
+        .ok_or_else(|| anyhow!("unsupported Liberty table kind '{}'", table.kind))
 }
 
 fn evaluate_table(
@@ -975,13 +1103,15 @@ fn evaluate_table(
                 library.lu_table_templates.len()
             )
         })?;
-        let expected_kind = expected_template_kind_for_timing_table(table);
-        if tmpl.kind != expected_kind {
+        let expected_kind = expected_template_kind_for_timing_table(table)
+            .map_err(|e| anyhow!("{context}: {e}"))?;
+        let actual_kind = LuTableTemplateKind::from_raw(tmpl.kind.as_str());
+        if actual_kind != expected_kind {
             return Err(anyhow!(
                 "{context}: template_id {} kind mismatch; got '{}' expected '{}'",
                 table.template_id,
                 tmpl.kind,
-                expected_kind
+                expected_kind.as_raw()
             ));
         }
         Some(tmpl)
@@ -1093,27 +1223,22 @@ fn axis_query_value(
     output_load: f64,
     context: &str,
 ) -> Result<f64> {
-    let lowered = variable_name.trim().to_ascii_lowercase();
-    if lowered.is_empty() {
-        return match axis_idx {
+    match AxisVariable::from_raw(variable_name) {
+        AxisVariable::Unspecified => match axis_idx {
             0 => Ok(input_transition),
             1 => Ok(output_load),
             _ => Err(anyhow!(
                 "{context}: missing variable name for axis {}; cannot infer query value",
                 axis_idx + 1
             )),
-        };
+        },
+        AxisVariable::InputTransition => Ok(input_transition),
+        AxisVariable::OutputLoad => Ok(output_load),
+        AxisVariable::Other => Err(anyhow!(
+            "{context}: unsupported axis variable '{}' for basic STA",
+            variable_name
+        )),
     }
-    if lowered.contains("transition") {
-        return Ok(input_transition);
-    }
-    if lowered.contains("capacitance") {
-        return Ok(output_load);
-    }
-    Err(anyhow!(
-        "{context}: unsupported axis variable '{}' for basic STA",
-        variable_name
-    ))
 }
 
 fn is_non_decreasing(values: &[f64]) -> bool {
@@ -1234,6 +1359,45 @@ mod tests {
             dimensions: vec![],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn axis_query_value_accepts_only_explicit_supported_variable_names() {
+        assert_eq!(
+            axis_query_value("input_net_transition", 0, 0.2, 0.7, "axis").unwrap(),
+            0.2
+        );
+        assert_eq!(
+            axis_query_value("input_transition_time", 0, 0.2, 0.7, "axis").unwrap(),
+            0.2
+        );
+        assert_eq!(
+            axis_query_value("total_output_net_capacitance", 1, 0.2, 0.7, "axis").unwrap(),
+            0.7
+        );
+        assert!(
+            axis_query_value("made_up_transition", 0, 0.2, 0.7, "axis")
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported axis variable")
+        );
+        assert!(
+            axis_query_value("made_up_capacitance", 1, 0.2, 0.7, "axis")
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported axis variable")
+        );
+    }
+
+    #[test]
+    fn template_kind_lookup_rejects_unknown_power_named_table_kinds() {
+        let table = scalar_table("made_up_power", 1.0);
+        assert!(
+            expected_template_kind_for_timing_table(&table)
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported Liberty table kind")
+        );
     }
 
     fn assert_close(lhs: f64, rhs: f64) {
