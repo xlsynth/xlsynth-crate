@@ -335,6 +335,15 @@ fn analyze_combinational_max_arrival_proto(
         let mut pin_nets: HashMap<String, Vec<NetIndex>> = HashMap::new();
         for (port_sym, netref) in &inst.connections {
             let pin_name = resolve_symbol(interner, *port_sym, "pin name")?;
+            if pin_nets.contains_key(pin_name.as_str()) {
+                return Err(anyhow!(
+                    "instance '{}' of '{}' connects pin '{}' more than once; duplicate pin bindings are unsupported in basic STA",
+                    resolve_symbol(interner, inst.instance_name, "instance name")
+                        .unwrap_or_else(|_| "<unknown>".to_string()),
+                    cell_name,
+                    pin_name
+                ));
+            }
             let pin = lib.pin(cell_idx, pin_name.as_str()).ok_or_else(|| {
                 anyhow!(
                     "instance '{}' of '{}' references unknown pin '{}'",
@@ -404,10 +413,47 @@ fn analyze_combinational_max_arrival_proto(
         instance_timing_related_input_pins.push(timing_related_input_pins);
     }
 
+    let mut module_output_nets: Vec<NetIndex> = Vec::new();
+    let mut has_module_output = vec![false; nets.len()];
+    let mut is_module_input = vec![false; nets.len()];
+    for port in &module.ports {
+        let port_name = resolve_symbol(interner, port.name, "port name")
+            .unwrap_or_else(|_| "<unknown>".to_string());
+        match port.direction {
+            PortDirection::Input => {
+                if let Some(net_idx) = module.find_net_index(port.name, nets) {
+                    is_module_input[net_idx.0] = true;
+                }
+            }
+            PortDirection::Output => {
+                if let Some(net_idx) = module.find_net_index(port.name, nets)
+                    && !has_module_output[net_idx.0]
+                {
+                    has_module_output[net_idx.0] = true;
+                    module_output_nets.push(net_idx);
+                }
+            }
+            PortDirection::Inout => {
+                return Err(anyhow!(
+                    "module port '{}' is inout; basic STA only supports input and output ports",
+                    port_name
+                ));
+            }
+        }
+    }
+    module_output_nets.sort_by_key(|n| n.0);
+
     let mut successors: Vec<Vec<usize>> = vec![Vec::new(); instance_count];
     let mut indegree: Vec<usize> = vec![0; instance_count];
     let mut seen_edges: HashSet<(usize, usize)> = HashSet::new();
     for (net_idx, drivers) in net_drivers.iter().enumerate() {
+        if is_module_input[net_idx] && !drivers.is_empty() {
+            let net_name = net_name_for_index(nets, interner, NetIndex(net_idx));
+            return Err(anyhow!(
+                "module input net '{}' also has an instance driver; basic STA does not support multiply driven primary inputs",
+                net_name
+            ));
+        }
         if drivers.len() > 1 {
             let net_name = net_name_for_index(nets, interner, NetIndex(net_idx));
             return Err(anyhow!(
@@ -432,29 +478,6 @@ fn analyze_combinational_max_arrival_proto(
             }
         }
     }
-
-    let mut module_output_nets: Vec<NetIndex> = Vec::new();
-    let mut has_module_output = vec![false; nets.len()];
-    let mut is_module_input = vec![false; nets.len()];
-    for port in &module.ports {
-        if let Some(net_idx) = module.find_net_index(port.name, nets) {
-            match port.direction {
-                PortDirection::Input => is_module_input[net_idx.0] = true,
-                PortDirection::Output => {
-                    if !has_module_output[net_idx.0] {
-                        has_module_output[net_idx.0] = true;
-                        module_output_nets.push(net_idx);
-                    }
-                }
-                PortDirection::Inout => {
-                    // Basic STA currently treats only explicit inputs as
-                    // sources and explicit outputs as
-                    // reporting endpoints.
-                }
-            }
-        }
-    }
-    module_output_nets.sort_by_key(|n| n.0);
 
     let mut net_load_capacitance = vec![EdgeLoadCapacitance::default(); nets.len()];
     for (net_idx, loads) in net_loads.iter().enumerate() {
@@ -1665,6 +1688,79 @@ endmodule
                 .to_string()
                 .contains("requires timing-related input pin 'B' to be connected")
         );
+    }
+
+    #[test]
+    fn sta_rejects_primary_inputs_with_instance_drivers() {
+        let src = r#"
+module top (a, y);
+  input a;
+  output y;
+  wire a;
+  wire y;
+  INV u0 (.A(y), .Y(a));
+  INV u1 (.A(a), .Y(y));
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let error = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &scalar_inv_library(),
+            StaOptions::default(),
+        )
+        .expect_err("primary inputs with instance drivers should be rejected");
+        assert!(error.to_string().contains("also has an instance driver"));
+    }
+
+    #[test]
+    fn sta_rejects_duplicate_instance_pin_bindings() {
+        let src = r#"
+module top (a, b, y);
+  input a;
+  input b;
+  output y;
+  wire a;
+  wire b;
+  wire y;
+  INV u0 (.A(a), .A(b), .Y(y));
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let error = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &scalar_inv_library(),
+            StaOptions::default(),
+        )
+        .expect_err("duplicate instance pin bindings should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("connects pin 'A' more than once")
+        );
+    }
+
+    #[test]
+    fn sta_rejects_inout_ports() {
+        let src = r#"
+module top (io);
+  inout io;
+  wire io;
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let error = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &scalar_inv_library(),
+            StaOptions::default(),
+        )
+        .expect_err("inout ports should be rejected");
+        assert!(error.to_string().contains("is inout"));
     }
 
     #[test]
