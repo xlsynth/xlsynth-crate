@@ -689,7 +689,7 @@ struct PostprocessStatsOutput {
     and_nodes: usize,
     depth: usize,
     fanout_histogram: std::collections::BTreeMap<usize, usize>,
-    graph_logical_effort_worst_case_delay: f64,
+    graph_logical_effort_worst_case_delay: Option<f64>,
 }
 
 impl PostprocessStatsOutput {
@@ -1945,6 +1945,62 @@ top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
                 .join("winning-lineage/manifest.json")
                 .exists()
         );
+    }
+
+    #[test]
+    fn postprocessed_run_omits_graph_le_when_disabled() {
+        let input_dir = tempdir().unwrap();
+        let output_dir = tempdir().unwrap();
+        let hook_dir = tempdir().unwrap();
+        let hook = write_executable_script(
+            hook_dir.path(),
+            "identity.sh",
+            "#!/bin/sh\ncp \"$1\" \"$3\"\n",
+        );
+        let input_path = input_dir.path().join("sample.ir");
+        fs::write(
+            &input_path,
+            r#"package sample
+
+top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret and.3: bits[1] = and(a, b, id=3)
+}
+"#,
+        )
+        .unwrap();
+        let cli = PirMcmcCliArgs {
+            input_path: input_path.display().to_string(),
+            top: None,
+            iters: 0,
+            seed: 1,
+            output: Some(output_dir.path().display().to_string()),
+            metric: Objective::G8rPostAndNodes,
+            extension_costing_mode: ExtensionCostingMode::Preserve,
+            g8r_postprocess_program: Some(hook.display().to_string()),
+            canonical_g8r_options: CanonicalG8rOptions {
+                compute_graph_logical_effort: false,
+                ..CanonicalG8rOptions::default()
+            },
+            max_delay: None,
+            max_area: None,
+            toggle_stimulus: None,
+            initial_temperature: 1.0,
+            threads: 1,
+            checkpoint_iters: 0,
+            progress_iters: 0,
+            formal_oracle: false,
+            switching_beta1: 1.0,
+            switching_beta2: 0.0,
+            switching_primary_output_load: 1.0,
+            chain_strategy: CliChainStrategy::Independent,
+        };
+
+        run_pir_mcmc_driver(cli, |_| {}).unwrap();
+        let stats: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(output_dir.path().join("orig.post.stats.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(stats["graph_logical_effort_worst_case_delay"].is_null());
     }
 
     #[test]

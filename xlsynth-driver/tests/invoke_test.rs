@@ -198,6 +198,58 @@ fn test_ir_mcmc_opt_verify_origin_alignment_keeps_graph_metric_enabled() {
     );
 }
 
+#[test]
+fn test_ir_mcmc_opt_verify_origin_alignment_rejects_toggle_metrics() {
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let temp_dir = tempfile::tempdir().unwrap();
+    let input_path = temp_dir.path().join("sample.ir");
+    let output_dir = temp_dir.path().join("out");
+    let postprocess_path = temp_dir.path().join("identity.sh");
+    std::fs::write(
+        &input_path,
+        r#"package sample
+
+top fn main(x: bits[1] id=1) -> bits[1] {
+  ret identity.2: bits[1] = identity(x, id=2)
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(&postprocess_path, "#!/bin/sh\ncp \"$1\" \"$3\"\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&postprocess_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&postprocess_path, permissions).unwrap();
+    }
+    let output = Command::new(command_path)
+        .arg("ir-mcmc-opt")
+        .arg(&input_path)
+        .arg("--iters")
+        .arg("0")
+        .arg("--metric")
+        .arg("g8r-post-weighted-switching")
+        .arg("--g8r-postprocess-program")
+        .arg(&postprocess_path)
+        .arg("--threads")
+        .arg("1")
+        .arg("--checkpoint-iters")
+        .arg("0")
+        .arg("--progress-iters")
+        .arg("0")
+        .arg("--formal-oracle")
+        .arg("false")
+        .arg("--output")
+        .arg(&output_dir)
+        .arg("--verify-origin-alignment")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("does not support toggle-dependent objective g8r-post-weighted-switching"));
+}
+
 fn assert_value4_matches_ir_bits(actual: &Value4, expected_bits: &IrBits) {
     assert!(
         actual.is_all_known_01(),

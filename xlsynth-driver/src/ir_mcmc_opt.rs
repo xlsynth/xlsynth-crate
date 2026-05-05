@@ -405,6 +405,16 @@ fn verify_origin_alignment(
 pub fn handle_ir_mcmc_opt(matches: &ArgMatches) {
     let should_verify_origin_alignment = matches.get_flag("verify_origin_alignment");
     let mut cli = xlsynth_mcmc_pir::driver_cli::parse_pir_mcmc_args(matches);
+    if should_verify_origin_alignment && cli.metric.needs_toggle_stimulus() {
+        report_cli_error_and_exit(
+            &format!(
+                "--verify-origin-alignment does not support toggle-dependent objective {}",
+                cli.metric.value_name()
+            ),
+            Some("ir-mcmc-opt"),
+            vec![],
+        );
+    }
     if should_verify_origin_alignment && cli.output.is_none() {
         match tempfile::Builder::new()
             .prefix("pir_mcmc_alignment_output_")

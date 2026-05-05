@@ -937,7 +937,7 @@ pub fn canonical_g8r_scoring_input_for_pir_fn(
 pub(crate) struct PostprocessedAigArtifact {
     pub bytes: Vec<u8>,
     pub stats: AigStats,
-    pub graph_logical_effort_worst_case_delay: f64,
+    pub graph_logical_effort_worst_case_delay: Option<f64>,
 }
 
 /// Computes gate-level cost data for a PIR function by optimizing it, gatifying
@@ -1207,14 +1207,17 @@ pub(crate) fn postprocess_gate_fn_for_artifact(
 ) -> Result<PostprocessedAigArtifact> {
     let loaded = postprocess_gate_fn_with_external_program(gate_fn, schema, g8r_evaluation_mode)?;
     let stats = get_summary_stats::get_aig_stats(&loaded.gate_fn);
-    let graph_logical_effort_worst_case_delay = analyze_graph_logical_effort(
-        &loaded.gate_fn,
-        &GraphLogicalEffortOptions {
-            beta1: canonical_g8r_options.graph_logical_effort_beta1,
-            beta2: canonical_g8r_options.graph_logical_effort_beta2,
-        },
-    )
-    .delay;
+    let graph_logical_effort_worst_case_delay =
+        canonical_g8r_options.compute_graph_logical_effort.then(|| {
+            analyze_graph_logical_effort(
+                &loaded.gate_fn,
+                &GraphLogicalEffortOptions {
+                    beta1: canonical_g8r_options.graph_logical_effort_beta1,
+                    beta2: canonical_g8r_options.graph_logical_effort_beta2,
+                },
+            )
+            .delay
+        });
     Ok(PostprocessedAigArtifact {
         bytes: loaded.output_bytes,
         stats,
