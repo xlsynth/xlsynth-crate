@@ -9,8 +9,8 @@
 //! - Assumes fixed transition at primary-input sources.
 //! - Uses summed input-pin capacitance on each net plus a fixed module-output
 //!   load to query timing tables.
-//! - Treats source nets as externally launched; it does not model sequential
-//!   launch/capture timing such as clock-to-Q or setup checks.
+//! - Treats primary-input sources as externally launched; it does not model
+//!   sequential launch/capture timing such as clock-to-Q or setup checks.
 //! - Rejects sequential output pins and conditional (`when`) timing arcs rather
 //!   than approximating unsupported timing semantics in this limited-scope
 //!   pass.
@@ -20,8 +20,9 @@
 //!    loads for each net.
 //! 2. Build a combinational dependency graph between instances and compute the
 //!    edge-specific capacitive load on each net.
-//! 3. Seed primary inputs and undriven nets with zero arrival and the
-//!    configured source transition.
+//! 3. Seed primary inputs with zero arrival and the configured source
+//!    transition; reject undriven non-input nets that feed logic or module
+//!    outputs.
 //! 4. Visit instances in topological order. For each output timing arc:
 //!    - choose the relevant input edge candidates from the arc sense
 //!      (`positive_unate`, `negative_unate`, or `non_unate`);
@@ -434,14 +435,22 @@ fn analyze_combinational_max_arrival_proto(
 
     let mut module_output_nets: Vec<NetIndex> = Vec::new();
     let mut has_module_output = vec![false; nets.len()];
+    let mut is_module_input = vec![false; nets.len()];
     for port in &module.ports {
-        if port.direction != PortDirection::Output {
-            continue;
-        }
         if let Some(net_idx) = module.find_net_index(port.name, nets) {
-            if !has_module_output[net_idx.0] {
-                has_module_output[net_idx.0] = true;
-                module_output_nets.push(net_idx);
+            match port.direction {
+                PortDirection::Input => is_module_input[net_idx.0] = true,
+                PortDirection::Output => {
+                    if !has_module_output[net_idx.0] {
+                        has_module_output[net_idx.0] = true;
+                        module_output_nets.push(net_idx);
+                    }
+                }
+                PortDirection::Inout => {
+                    // Basic STA currently treats only explicit inputs as
+                    // sources and explicit outputs as
+                    // reporting endpoints.
+                }
             }
         }
     }
@@ -484,16 +493,18 @@ fn analyze_combinational_max_arrival_proto(
     let mut net_timing_sets: Vec<Option<SignalTimingSet>> = vec![None; nets.len()];
 
     for (net_idx, drivers) in net_drivers.iter().enumerate() {
-        if drivers.is_empty() {
-            net_timing_sets[net_idx] = Some(source_timing_set.clone());
-        }
-    }
-    for port in &module.ports {
-        if port.direction != PortDirection::Input {
+        if !drivers.is_empty() {
             continue;
         }
-        if let Some(net_idx) = module.find_net_index(port.name, nets) {
-            net_timing_sets[net_idx.0] = Some(source_timing_set.clone());
+        if is_module_input[net_idx] {
+            net_timing_sets[net_idx] = Some(source_timing_set.clone());
+            continue;
+        }
+        if !net_loads[net_idx].is_empty() || has_module_output[net_idx] {
+            return Err(anyhow!(
+                "net '{}' is undriven and is not a module input; basic STA does not support floating source nets",
+                net_name_for_index(nets, interner, NetIndex(net_idx))
+            ));
         }
     }
 
@@ -558,9 +569,25 @@ fn analyze_combinational_max_arrival_proto(
 
                 for arc in &combinational_arcs {
                     for related_pin_name in split_related_pin_names(arc.related_pin.as_str()) {
-                        let Some(related_nets) = inst_pin_map.get(related_pin_name) else {
-                            continue;
-                        };
+                        let related_nets =
+                            inst_pin_map.get(related_pin_name).ok_or_else(|| {
+                                anyhow!(
+                                    "instance '{}' output pin '{}.{}' requires timing-related input pin '{}' to be connected",
+                                    instance_name,
+                                    cell_name,
+                                    pin.name,
+                                    related_pin_name
+                                )
+                            })?;
+                        if related_nets.is_empty() {
+                            return Err(anyhow!(
+                                "instance '{}' output pin '{}.{}' has unconnected timing-related input pin '{}'",
+                                instance_name,
+                                cell_name,
+                                pin.name,
+                                related_pin_name
+                            ));
+                        }
                         for related_net in related_nets {
                             let input_timing_set = net_timing_sets[related_net.0].as_ref().ok_or_else(|| {
                             anyhow!(
@@ -1538,6 +1565,106 @@ endmodule
         )
         .expect("implicit scalar wire should be accepted");
         assert_close(report.worst_output_arrival, 5.0);
+    }
+
+    #[test]
+    fn sta_rejects_floating_internal_source_nets() {
+        let src = r#"
+module top (y);
+  output y;
+  wire y;
+  wire floating_internal;
+  INV u0 (.A(floating_internal), .Y(y));
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let error = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &scalar_inv_library(),
+            StaOptions::default(),
+        )
+        .expect_err("floating internal source nets should be rejected");
+        assert!(error.to_string().contains("undriven"));
+    }
+
+    #[test]
+    fn sta_rejects_missing_timing_related_input_pins() {
+        let src = r#"
+module top (a, y);
+  input a;
+  output y;
+  wire a;
+  wire y;
+  NAND2 u0 (.A(a), .Y(y));
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let lib = crate::liberty_proto::Library {
+            cells: vec![Cell {
+                name: "NAND2".to_string(),
+                pins: vec![
+                    Pin {
+                        direction: PinDirection::Input as i32,
+                        name: "A".to_string(),
+                        ..Default::default()
+                    },
+                    Pin {
+                        direction: PinDirection::Input as i32,
+                        name: "B".to_string(),
+                        ..Default::default()
+                    },
+                    Pin {
+                        direction: PinDirection::Output as i32,
+                        name: "Y".to_string(),
+                        timing_arcs: vec![
+                            TimingArc {
+                                related_pin: "A".to_string(),
+                                timing_sense: "negative_unate".to_string(),
+                                timing_type: "combinational".to_string(),
+                                tables: vec![
+                                    scalar_table("cell_rise", 2.0),
+                                    scalar_table("cell_fall", 3.0),
+                                    scalar_table("rise_transition", 0.2),
+                                    scalar_table("fall_transition", 0.3),
+                                ],
+                                ..Default::default()
+                            },
+                            TimingArc {
+                                related_pin: "B".to_string(),
+                                timing_sense: "negative_unate".to_string(),
+                                timing_type: "combinational".to_string(),
+                                tables: vec![
+                                    scalar_table("cell_rise", 2.0),
+                                    scalar_table("cell_fall", 3.0),
+                                    scalar_table("rise_transition", 0.2),
+                                    scalar_table("fall_transition", 0.3),
+                                ],
+                                ..Default::default()
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let error = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &lib,
+            StaOptions::default(),
+        )
+        .expect_err("missing timing-related input pins should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("requires timing-related input pin 'B' to be connected")
+        );
     }
 
     #[test]
