@@ -233,22 +233,33 @@ struct StaLibraryIndex<'a> {
 }
 
 impl<'a> StaLibraryIndex<'a> {
-    fn new(library: &'a crate::liberty_proto::Library) -> Self {
+    fn new(library: &'a crate::liberty_proto::Library) -> Result<Self> {
         let mut cell_by_name = HashMap::new();
         let mut pin_by_cell = Vec::with_capacity(library.cells.len());
         for (cell_idx, cell) in library.cells.iter().enumerate() {
-            cell_by_name.insert(cell.name.clone(), cell_idx);
+            if cell_by_name.insert(cell.name.clone(), cell_idx).is_some() {
+                return Err(anyhow!(
+                    "library defines cell '{}' more than once; duplicate cell names are unsupported in basic STA",
+                    cell.name
+                ));
+            }
             let mut pin_map = HashMap::new();
             for (pin_idx, pin) in cell.pins.iter().enumerate() {
-                pin_map.insert(pin.name.clone(), pin_idx);
+                if pin_map.insert(pin.name.clone(), pin_idx).is_some() {
+                    return Err(anyhow!(
+                        "library cell '{}' defines pin '{}' more than once; duplicate pin names are unsupported in basic STA",
+                        cell.name,
+                        pin.name
+                    ));
+                }
             }
             pin_by_cell.push(pin_map);
         }
-        Self {
+        Ok(Self {
             library,
             cell_by_name,
             pin_by_cell,
-        }
+        })
     }
 
     fn cell_index(&self, cell_name: &str) -> Option<usize> {
@@ -321,7 +332,7 @@ fn analyze_combinational_max_arrival_proto(
         ));
     }
 
-    let lib = StaLibraryIndex::new(library);
+    let lib = StaLibraryIndex::new(library)?;
     let instance_count = module.instances.len();
 
     let mut instance_cell_indices: Vec<usize> = Vec::with_capacity(instance_count);
@@ -377,6 +388,17 @@ fn analyze_combinational_max_arrival_proto(
                     pin_name
                 )
             })?;
+            if pin.direction == PinDirection::Output as i32
+                && matches!(netref, NetRef::Literal(_) | NetRef::Unconnected)
+            {
+                return Err(anyhow!(
+                    "instance '{}' output pin '{}.{}' uses unsupported literal or unconnected binding",
+                    resolve_symbol(interner, inst.instance_name, "instance name")
+                        .unwrap_or_else(|_| "<unknown>".to_string()),
+                    cell_name,
+                    pin_name
+                ));
+            }
             let uses_vector_connectivity = match netref {
                 NetRef::Simple(net_idx) => nets
                     .get(net_idx.0)
@@ -1081,6 +1103,11 @@ fn evaluate_output_edge_set(
             source_edge.transition,
             output_load,
             &format!("{context} {}", slew_kind.as_raw()),
+        )?;
+        validate_non_negative_finite(
+            transition,
+            &format!("{} result", slew_kind.as_raw()),
+            context,
         )?;
         outputs.insert(EdgeTiming {
             arrival: source_edge.arrival + delay,
@@ -1957,6 +1984,31 @@ endmodule
             error
                 .to_string()
                 .contains("connects pin 'A' more than once")
+        );
+    }
+
+    #[test]
+    fn sta_rejects_output_pins_bound_to_literals() {
+        let src = r#"
+module top (a);
+  input a;
+  wire a;
+  INV u0 (.A(a), .Y(1'b0));
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let error = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &scalar_inv_library(),
+            StaOptions::default(),
+        )
+        .expect_err("literal output pin bindings should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("uses unsupported literal or unconnected binding")
         );
     }
 
@@ -3394,6 +3446,86 @@ endmodule
             error
                 .to_string()
                 .contains("axis 1 is not strictly increasing")
+        );
+    }
+
+    #[test]
+    fn evaluate_output_edge_set_rejects_negative_transition_results() {
+        let input_timing = EdgeTimingSet::from_single(EdgeTiming {
+            arrival: 0.0,
+            transition: 0.1,
+        });
+        let delay_table = scalar_table("cell_rise", 1.0);
+        let slew_table = scalar_table("rise_transition", -0.1);
+
+        let error = evaluate_output_edge_set(
+            &crate::liberty_proto::Library::default(),
+            &delay_table,
+            &slew_table,
+            &input_timing,
+            0.0,
+            "negative_transition",
+            StaTimingTableKind::CellRise,
+            StaTimingTableKind::RiseTransition,
+        )
+        .expect_err("negative transition outputs should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("rise_transition result must be non-negative")
+        );
+    }
+
+    #[test]
+    fn sta_rejects_duplicate_library_cells_and_pins() {
+        let duplicate_cells = crate::liberty_proto::Library {
+            cells: vec![
+                Cell {
+                    name: "INV".to_string(),
+                    ..Default::default()
+                },
+                Cell {
+                    name: "INV".to_string(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let cell_error = match StaLibraryIndex::new(&duplicate_cells) {
+            Ok(_) => panic!("duplicate cells should fail"),
+            Err(error) => error,
+        };
+        assert!(
+            cell_error
+                .to_string()
+                .contains("defines cell 'INV' more than once")
+        );
+
+        let duplicate_pins = crate::liberty_proto::Library {
+            cells: vec![Cell {
+                name: "INV".to_string(),
+                pins: vec![
+                    Pin {
+                        name: "A".to_string(),
+                        ..Default::default()
+                    },
+                    Pin {
+                        name: "A".to_string(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let pin_error = match StaLibraryIndex::new(&duplicate_pins) {
+            Ok(_) => panic!("duplicate pins should fail"),
+            Err(error) => error,
+        };
+        assert!(
+            pin_error
+                .to_string()
+                .contains("defines pin 'A' more than once")
         );
     }
 }
