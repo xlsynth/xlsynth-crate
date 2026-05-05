@@ -1159,8 +1159,17 @@ fn evaluate_output_edge_set(
             &format!("{} result", slew_kind.as_raw()),
             context,
         )?;
+        let arrival = source_edge.arrival + delay;
+        if !arrival.is_finite() {
+            return Err(anyhow!(
+                "{context}: propagated arrival must be finite; got {} + {} = {}",
+                source_edge.arrival,
+                delay,
+                arrival
+            ));
+        }
         outputs.insert(EdgeTiming {
-            arrival: source_edge.arrival + delay,
+            arrival,
             transition,
         });
     }
@@ -3850,6 +3859,33 @@ endmodule
             error
                 .to_string()
                 .contains("rise_transition result must be non-negative")
+        );
+    }
+
+    #[test]
+    fn evaluate_output_edge_set_rejects_non_finite_arrival_results() {
+        let input_timing = EdgeTimingSet::from_single(EdgeTiming {
+            arrival: f64::MAX,
+            transition: 0.1,
+        });
+        let delay_table = scalar_table("cell_rise", f64::MAX);
+        let slew_table = scalar_table("rise_transition", 0.1);
+
+        let error = evaluate_output_edge_set(
+            &crate::liberty_proto::Library::default(),
+            &delay_table,
+            &slew_table,
+            &input_timing,
+            0.0,
+            "overflow_arrival",
+            StaTimingTableKind::CellRise,
+            StaTimingTableKind::RiseTransition,
+        )
+        .expect_err("overflowed arrival outputs should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("propagated arrival must be finite")
         );
     }
 
