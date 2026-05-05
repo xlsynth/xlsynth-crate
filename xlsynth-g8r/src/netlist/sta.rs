@@ -199,7 +199,7 @@ fn format_optional_edge_timing(edge: Option<EdgeTiming>) -> String {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StaOptions {
-    /// Transition applied to source nets (primary inputs and un-driven nets).
+    /// Transition applied to primary-input source nets.
     pub primary_input_transition: f64,
     /// Extra load added to nets attached to module outputs.
     pub module_output_load: f64,
@@ -294,6 +294,18 @@ fn analyze_combinational_max_arrival_proto(
         return Err(anyhow!(
             "module contains {} continuous assign statement(s); basic STA only supports structural netlists without assigns",
             module.assigns.len()
+        ));
+    }
+    if !options.primary_input_transition.is_finite() {
+        return Err(anyhow!(
+            "primary_input_transition must be finite; got {}",
+            options.primary_input_transition
+        ));
+    }
+    if !options.module_output_load.is_finite() {
+        return Err(anyhow!(
+            "module_output_load must be finite; got {}",
+            options.module_output_load
         ));
     }
 
@@ -1134,13 +1146,20 @@ fn evaluate_table(
     output_load: f64,
     context: &str,
 ) -> Result<f64> {
+    if !input_transition.is_finite() {
+        return Err(anyhow!(
+            "{context}: input transition query must be finite; got {}",
+            input_transition
+        ));
+    }
+    if !output_load.is_finite() {
+        return Err(anyhow!(
+            "{context}: output load query must be finite; got {}",
+            output_load
+        ));
+    }
     let array = TimingTableArrayView::from_timing_table(table)
         .map_err(|e| anyhow!("{context}: invalid timing table payload: {e}"))?;
-    if array.rank() == 0 {
-        return array
-            .get(&[])
-            .ok_or_else(|| anyhow!("{context}: scalar timing table had no value"));
-    }
 
     let template: Option<&LuTableTemplate> = if table.template_id == 0 {
         None
@@ -1185,6 +1204,12 @@ fn evaluate_table(
 
     let all_axes = [axis_1, axis_2, axis_3];
     let all_variables = [variable_1, variable_2, variable_3];
+    validate_effective_axes(table, all_axes, context)?;
+    if rank == 0 {
+        return array
+            .get(&[])
+            .ok_or_else(|| anyhow!("{context}: scalar timing table had no value"));
+    }
     let mut bounds: Vec<(usize, usize, f64)> = Vec::with_capacity(rank);
 
     for axis_idx in 0..rank {
@@ -1256,6 +1281,59 @@ fn evaluate_table(
         result += weight * value;
     }
     Ok(result)
+}
+
+fn axis_rank(index_1: &[f64], index_2: &[f64], index_3: &[f64]) -> usize {
+    if !index_3.is_empty() {
+        3
+    } else if !index_2.is_empty() {
+        2
+    } else if !index_1.is_empty() {
+        1
+    } else {
+        0
+    }
+}
+
+fn axes_are_contiguous(index_1: &[f64], index_2: &[f64], index_3: &[f64]) -> bool {
+    if !index_3.is_empty() && (index_1.is_empty() || index_2.is_empty()) {
+        return false;
+    }
+    if !index_2.is_empty() && index_1.is_empty() {
+        return false;
+    }
+    true
+}
+
+fn validate_effective_axes(table: &TimingTable, axes: [&[f64]; 3], context: &str) -> Result<()> {
+    if !axes_are_contiguous(axes[0], axes[1], axes[2]) {
+        return Err(anyhow!(
+            "{context}: timing table has non-contiguous effective axes (index_1={}, index_2={}, index_3={})",
+            axes[0].len(),
+            axes[1].len(),
+            axes[2].len()
+        ));
+    }
+    let expected_rank = axis_rank(axes[0], axes[1], axes[2]);
+    if table.dimensions.len() != expected_rank {
+        return Err(anyhow!(
+            "{context}: timing table dimension rank {} does not match effective axis rank {}",
+            table.dimensions.len(),
+            expected_rank
+        ));
+    }
+    for (axis_idx, axis) in axes.iter().take(expected_rank).enumerate() {
+        let dimension = table.dimensions[axis_idx] as usize;
+        if dimension != axis.len() {
+            return Err(anyhow!(
+                "{context}: timing table axis {} dimension {} does not match effective axis length {}",
+                axis_idx + 1,
+                dimension,
+                axis.len()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn effective_axis<'a>(table_axis: &'a [f64], template_axis: Option<&'a [f64]>) -> &'a [f64] {
@@ -1517,6 +1595,53 @@ endmodule
         )
         .expect_err("continuous assigns should be rejected");
         assert!(error.to_string().contains("continuous assign"));
+    }
+
+    #[test]
+    fn sta_rejects_non_finite_options() {
+        let src = r#"
+module top (a, y);
+  input a;
+  output y;
+  wire a;
+  wire y;
+  INV u0 (.A(a), .Y(y));
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let transition_error = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &scalar_inv_library(),
+            StaOptions {
+                primary_input_transition: f64::NAN,
+                module_output_load: 0.0,
+            },
+        )
+        .expect_err("NaN primary-input transition should be rejected");
+        assert!(
+            transition_error
+                .to_string()
+                .contains("primary_input_transition must be finite")
+        );
+
+        let load_error = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &scalar_inv_library(),
+            StaOptions {
+                primary_input_transition: 0.01,
+                module_output_load: f64::INFINITY,
+            },
+        )
+        .expect_err("infinite module-output load should be rejected");
+        assert!(
+            load_error
+                .to_string()
+                .contains("module_output_load must be finite")
+        );
     }
 
     #[test]
@@ -3034,5 +3159,57 @@ endmodule
             (extrapolated - 4.704_690_972_222_221).abs() <= 2e-6,
             "expected 4.704690972222221 ~= {extrapolated}"
         );
+    }
+
+    #[test]
+    fn evaluate_table_rejects_axis_dimension_mismatch() {
+        let lib = crate::liberty_proto::Library {
+            lu_table_templates: vec![LuTableTemplate {
+                kind: "lu_table_template".to_string(),
+                name: "tmpl_bad_extent".to_string(),
+                variable_1: "input_net_transition".to_string(),
+                index_1: vec![0.0, 1.0],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let table = TimingTable {
+            kind: "cell_rise".to_string(),
+            template_id: 1,
+            dimensions: vec![3],
+            values: vec![1.0, 2.0, 3.0],
+            ..Default::default()
+        };
+
+        let error = evaluate_table(&lib, &table, 0.5, 0.0, "bad_extent")
+            .expect_err("axis extent mismatch should be rejected");
+        assert!(error.to_string().contains("axis 1 dimension 3"));
+    }
+
+    #[test]
+    fn evaluate_table_rejects_axis_rank_mismatch() {
+        let lib = crate::liberty_proto::Library {
+            lu_table_templates: vec![LuTableTemplate {
+                kind: "lu_table_template".to_string(),
+                name: "tmpl_bad_rank".to_string(),
+                variable_1: "input_net_transition".to_string(),
+                variable_2: "total_output_net_capacitance".to_string(),
+                index_1: vec![0.0, 1.0],
+                index_2: vec![0.0, 1.0],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let table = TimingTable {
+            kind: "cell_rise".to_string(),
+            template_id: 1,
+            dimensions: vec![2],
+            values: vec![1.0, 2.0],
+            ..Default::default()
+        };
+
+        let error = evaluate_table(&lib, &table, 0.5, 0.5, "bad_rank")
+            .expect_err("axis rank mismatch should be rejected");
+        assert!(error.to_string().contains("dimension rank 1"));
     }
 }
