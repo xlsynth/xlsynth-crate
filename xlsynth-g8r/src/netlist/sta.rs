@@ -357,15 +357,38 @@ fn analyze_combinational_max_arrival_proto(
         })?;
         instance_cell_indices.push(cell_idx);
         instance_cell_names.push(cell_name.clone());
-        let timing_related_input_pins = lib.library.cells[cell_idx]
+        let mut timing_related_input_pins = HashSet::new();
+        for output_pin in lib.library.cells[cell_idx]
             .pins
             .iter()
             .filter(|pin| pin.direction == PinDirection::Output as i32)
-            .flat_map(|pin| pin.timing_arcs.iter())
-            .filter(|arc| StaTimingType::from_raw(arc.timing_type.as_str()).is_combinational())
-            .flat_map(|arc| split_related_pin_names(arc.related_pin.as_str()))
-            .map(ToString::to_string)
-            .collect();
+        {
+            for arc in output_pin
+                .timing_arcs
+                .iter()
+                .filter(|arc| StaTimingType::from_raw(arc.timing_type.as_str()).is_combinational())
+            {
+                for related_pin_name in split_related_pin_names(arc.related_pin.as_str()) {
+                    let related_pin = lib.pin(cell_idx, related_pin_name).ok_or_else(|| {
+                        anyhow!(
+                            "cell '{}' output pin '{}' has timing arc with unknown related pin '{}'",
+                            cell_name,
+                            output_pin.name,
+                            related_pin_name
+                        )
+                    })?;
+                    if related_pin.direction != PinDirection::Input as i32 {
+                        return Err(anyhow!(
+                            "cell '{}' output pin '{}' has unsupported non-input related pin '{}'; basic STA only supports input-related combinational arcs",
+                            cell_name,
+                            output_pin.name,
+                            related_pin_name
+                        ));
+                    }
+                    timing_related_input_pins.insert(related_pin_name.to_string());
+                }
+            }
+        }
 
         let mut pin_nets: HashMap<String, Vec<NetIndex>> = HashMap::new();
         for (port_sym, netref) in &inst.connections {
@@ -1931,6 +1954,84 @@ endmodule
             error
                 .to_string()
                 .contains("requires timing-related input pin 'B' to be connected")
+        );
+    }
+
+    #[test]
+    fn sta_rejects_non_input_related_pins() {
+        let src = r#"
+module top (a, y0, y1);
+  input a;
+  output y0;
+  output y1;
+  wire a;
+  wire y0;
+  wire y1;
+  DUALOUT u0 (.A(a), .Y0(y0), .Y1(y1));
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let lib = crate::liberty_proto::Library {
+            cells: vec![Cell {
+                name: "DUALOUT".to_string(),
+                pins: vec![
+                    Pin {
+                        direction: PinDirection::Input as i32,
+                        name: "A".to_string(),
+                        ..Default::default()
+                    },
+                    Pin {
+                        direction: PinDirection::Output as i32,
+                        name: "Y0".to_string(),
+                        timing_arcs: vec![TimingArc {
+                            related_pin: "A".to_string(),
+                            timing_sense: "positive_unate".to_string(),
+                            timing_type: "combinational".to_string(),
+                            tables: vec![
+                                scalar_table("cell_rise", 1.0),
+                                scalar_table("cell_fall", 1.0),
+                                scalar_table("rise_transition", 0.1),
+                                scalar_table("fall_transition", 0.1),
+                            ],
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                    Pin {
+                        direction: PinDirection::Output as i32,
+                        name: "Y1".to_string(),
+                        timing_arcs: vec![TimingArc {
+                            related_pin: "Y0".to_string(),
+                            timing_sense: "positive_unate".to_string(),
+                            timing_type: "combinational".to_string(),
+                            tables: vec![
+                                scalar_table("cell_rise", 1.0),
+                                scalar_table("cell_fall", 1.0),
+                                scalar_table("rise_transition", 0.1),
+                                scalar_table("fall_transition", 0.1),
+                            ],
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let error = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &lib,
+            StaOptions::default(),
+        )
+        .expect_err("non-input related pins should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported non-input related pin 'Y0'")
         );
     }
 
