@@ -1247,9 +1247,9 @@ fn evaluate_table(
                 value
             ));
         }
-        if !is_non_decreasing(axis) {
+        if !is_strictly_increasing(axis) {
             return Err(anyhow!(
-                "{context}: axis {} is not sorted non-decreasing",
+                "{context}: axis {} is not strictly increasing",
                 axis_idx + 1
             ));
         }
@@ -1414,10 +1414,10 @@ fn axis_query_value(
     }
 }
 
-fn is_non_decreasing(values: &[f64]) -> bool {
+fn is_strictly_increasing(values: &[f64]) -> bool {
     values
         .windows(2)
-        .all(|w| w.first().copied().unwrap_or(0.0) <= w.get(1).copied().unwrap_or(0.0))
+        .all(|w| w.first().copied().unwrap_or(0.0) < w.get(1).copied().unwrap_or(0.0))
 }
 
 fn bracket_axis(axis: &[f64], query: f64) -> (usize, usize, f64) {
@@ -3365,6 +3365,35 @@ endmodule
             value_error
                 .to_string()
                 .contains("timing table contains non-finite value")
+        );
+    }
+
+    #[test]
+    fn evaluate_table_rejects_duplicate_axis_points() {
+        let lib = crate::liberty_proto::Library {
+            lu_table_templates: vec![LuTableTemplate {
+                kind: "lu_table_template".to_string(),
+                name: "tmpl_duplicate_axis".to_string(),
+                variable_1: "input_net_transition".to_string(),
+                index_1: vec![0.0, 0.0, 1.0],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let table = TimingTable {
+            kind: "cell_rise".to_string(),
+            template_id: 1,
+            dimensions: vec![3],
+            values: vec![1.0, 2.0, 3.0],
+            ..Default::default()
+        };
+
+        let error = evaluate_table(&lib, &table, 0.5, 0.0, "duplicate_axis")
+            .expect_err("duplicate axis points should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("axis 1 is not strictly increasing")
         );
     }
 }
