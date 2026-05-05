@@ -254,27 +254,6 @@ impl<'a> StaLibraryIndex<'a> {
                         pin.name
                     ));
                 }
-                for arc in &pin.timing_arcs {
-                    for table in &arc.tables {
-                        if !matches!(
-                            LibertyTableKind::from_raw(table.kind.as_str()),
-                            LibertyTableKind::CellRise
-                                | LibertyTableKind::CellFall
-                                | LibertyTableKind::RiseTransition
-                                | LibertyTableKind::FallTransition
-                        ) {
-                            continue;
-                        }
-                        validate_timing_table_payload(
-                            library,
-                            table,
-                            &format!(
-                                "cell '{}' pin '{}' related_pin '{}' table '{}'",
-                                cell.name, pin.name, arc.related_pin, table.kind
-                            ),
-                        )?;
-                    }
-                }
             }
             pin_by_cell.push(pin_map);
         }
@@ -642,6 +621,7 @@ fn analyze_combinational_max_arrival_proto(
     }
 
     let mut queue = VecDeque::new();
+    let mut validated_timing_tables: HashSet<*const TimingTable> = HashSet::new();
     for (idx, deg) in indegree.iter().enumerate() {
         if *deg == 0 {
             queue.push_back(idx);
@@ -687,6 +667,13 @@ fn analyze_combinational_max_arrival_proto(
                 .iter()
                 .filter(|arc| StaTimingType::from_raw(arc.timing_type.as_str()).is_combinational())
                 .collect();
+            validate_timing_tables_once(
+                lib.library,
+                cell_name,
+                pin.name.as_str(),
+                combinational_arcs.as_slice(),
+                &mut validated_timing_tables,
+            )?;
             if combinational_arcs.is_empty() {
                 return Err(anyhow!(
                     "basic STA only supports combinational output pins; instance '{}' output pin '{}.{}' has no combinational timing arcs",
@@ -1366,6 +1353,41 @@ fn validate_timing_table_payload(
         }
     }
     validate_monotone_timing_table(&array, table.dimensions.as_slice(), context)
+}
+
+/// Validates each queried delay/slew table at most once during an STA run.
+fn validate_timing_tables_once(
+    library: &crate::liberty_proto::Library,
+    cell_name: &str,
+    pin_name: &str,
+    arcs: &[&TimingArc],
+    validated_tables: &mut HashSet<*const TimingTable>,
+) -> Result<()> {
+    for arc in arcs {
+        for table in &arc.tables {
+            if !matches!(
+                LibertyTableKind::from_raw(table.kind.as_str()),
+                LibertyTableKind::CellRise
+                    | LibertyTableKind::CellFall
+                    | LibertyTableKind::RiseTransition
+                    | LibertyTableKind::FallTransition
+            ) {
+                continue;
+            }
+            if !validated_tables.insert(table as *const TimingTable) {
+                continue;
+            }
+            validate_timing_table_payload(
+                library,
+                table,
+                &format!(
+                    "cell '{}' pin '{}' related_pin '{}' table '{}'",
+                    cell_name, pin_name, arc.related_pin, table.kind
+                ),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn evaluate_table(
@@ -3988,5 +4010,45 @@ endmodule
                 .to_string()
                 .contains("defines pin 'A' more than once")
         );
+    }
+
+    #[test]
+    fn sta_ignores_invalid_timing_tables_on_unused_cells() {
+        let src = r#"
+module top (a, y);
+  input a;
+  output y;
+  wire a;
+  wire y;
+  INV u0 (.A(a), .Y(y));
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let mut lib = scalar_inv_library();
+        lib.cells.push(Cell {
+            name: "UNUSED".to_string(),
+            pins: vec![Pin {
+                direction: PinDirection::Output as i32,
+                name: "Y".to_string(),
+                timing_arcs: vec![TimingArc {
+                    related_pin: "A".to_string(),
+                    timing_sense: "positive_unate".to_string(),
+                    timing_type: "combinational".to_string(),
+                    tables: vec![scalar_table("cell_rise", f64::NAN)],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &lib,
+            StaOptions::default(),
+        )
+        .expect("unused malformed tables should not poison an analyzable module");
     }
 }
