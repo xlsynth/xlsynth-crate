@@ -15,7 +15,9 @@ use std::sync::mpsc;
 use tempfile::Builder;
 use xlsynth_g8r::aig::gate::GateFn;
 use xlsynth_g8r::aig_serdes::gate2ir::GateFnInterfaceSchema;
-use xlsynth_g8r::process_ir_path::{CanonicalG8rOptions, canonical_ir_text_to_g8r_artifacts};
+use xlsynth_g8r::process_ir_path::{
+    CanonicalG8rOptions, canonical_ir_text_to_g8r_lowering_artifacts,
+};
 use xlsynth_mcmc::multichain::ChainStrategy;
 use xlsynth_pir::ir::{Package, PackageMember};
 use xlsynth_pir::ir_parser;
@@ -714,9 +716,12 @@ fn gatify_ir_text_to_artifacts(
     let top_fn = pir_pkg
         .get_top_fn()
         .ok_or_else(|| anyhow::anyhow!("No top function found in PIR package"))?;
-    let artifacts =
-        canonical_ir_text_to_g8r_artifacts(ir_text, Some(&top_fn.name), canonical_g8r_options)
-            .map_err(|e| anyhow::anyhow!("canonical g8r lowering failed: {}", e))?;
+    let artifacts = canonical_ir_text_to_g8r_lowering_artifacts(
+        ir_text,
+        Some(&top_fn.name),
+        canonical_g8r_options,
+    )
+    .map_err(|e| anyhow::anyhow!("canonical g8r lowering failed: {}", e))?;
     let gate_fn = artifacts.gate_fn;
     let raw_stats = artifacts.stats;
     let schema = GateFnInterfaceSchema::from_pir_fn(top_fn)
@@ -736,6 +741,7 @@ fn maybe_write_postprocess_artifacts(
     schema: &GateFnInterfaceSchema,
     g8r_evaluation_mode: &G8rEvaluationMode,
     canonical_g8r_options: &CanonicalG8rOptions,
+    compute_graph_logical_effort: bool,
 ) -> Result<()> {
     if g8r_evaluation_mode.external_postprocess_program().is_none() {
         return Ok(());
@@ -745,6 +751,7 @@ fn maybe_write_postprocess_artifacts(
         schema,
         g8r_evaluation_mode,
         canonical_g8r_options,
+        compute_graph_logical_effort,
     )?;
     let post_aig_path = output_dir.join(format!("{stem}.post.aig"));
     std::fs::write(&post_aig_path, &post.bytes)
@@ -766,6 +773,7 @@ fn write_witness_artifacts(
     extension_costing_mode: ExtensionCostingMode,
     g8r_evaluation_mode: &G8rEvaluationMode,
     canonical_g8r_options: &CanonicalG8rOptions,
+    compute_graph_logical_effort: bool,
 ) -> Result<()> {
     std::fs::create_dir_all(output_dir).map_err(|e| {
         anyhow::anyhow!(
@@ -814,6 +822,7 @@ fn write_witness_artifacts(
         &witness_artifacts.schema,
         g8r_evaluation_mode,
         canonical_g8r_options,
+        compute_graph_logical_effort,
     )?;
     Ok(())
 }
@@ -910,6 +919,9 @@ where
             beta2: cli.switching_beta2,
             primary_output_load: cli.switching_primary_output_load,
         };
+    let compute_artifact_graph_logical_effort =
+        cli.canonical_g8r_options.compute_graph_logical_effort
+            || cli.metric.needs_graph_logical_effort();
     let initial_cost =
         cost_with_effort_options_toggle_stimulus_extension_mode_evaluator_and_g8r_options(
             &top_fn,
@@ -1072,6 +1084,7 @@ where
         &orig_artifacts.schema,
         &g8r_evaluation_mode,
         &cli.canonical_g8r_options,
+        compute_artifact_graph_logical_effort,
     )?;
 
     let pkg_template = Arc::new(pkg.clone());
@@ -1080,6 +1093,7 @@ where
     let extension_costing_mode_for_thread = extension_costing_mode;
     let g8r_evaluation_mode_for_thread = g8r_evaluation_mode.clone();
     let canonical_g8r_options_for_thread = cli.canonical_g8r_options.clone();
+    let compute_artifact_graph_logical_effort_for_thread = compute_artifact_graph_logical_effort;
 
     let writer_handle = if let (Some(best), Some(rx)) = (shared_best.clone(), checkpoint_rx) {
         Some(std::thread::spawn(move || {
@@ -1171,6 +1185,7 @@ where
                     &best_artifacts.schema,
                     &g8r_evaluation_mode_for_thread,
                     &canonical_g8r_options_for_thread,
+                    compute_artifact_graph_logical_effort_for_thread,
                 );
                 let snapshot_stem = format!(
                     "best.w{:06}.c{:03}-i{:06}",
@@ -1183,6 +1198,7 @@ where
                     &best_artifacts.schema,
                     &g8r_evaluation_mode_for_thread,
                     &canonical_g8r_options_for_thread,
+                    compute_artifact_graph_logical_effort_for_thread,
                 );
             }
         }))
@@ -1437,6 +1453,7 @@ where
         &best_artifacts.schema,
         &g8r_evaluation_mode,
         &cli.canonical_g8r_options,
+        compute_artifact_graph_logical_effort,
     )?;
 
     if let Some(artifact) = recorded_artifact.as_ref() {
@@ -1491,6 +1508,12 @@ where
     let extension_costing_mode = loaded.artifact.run_options.extension_costing_mode;
     let g8r_evaluation_mode = &loaded.artifact.run_options.g8r_evaluation_mode;
     let canonical_g8r_options = &loaded.artifact.run_options.canonical_g8r_options;
+    let compute_artifact_graph_logical_effort = canonical_g8r_options.compute_graph_logical_effort
+        || loaded
+            .artifact
+            .run_options
+            .objective
+            .needs_graph_logical_effort();
 
     if let Some((budget_step, max_actions, rollouts_per_budget)) = frontier_mode {
         std::fs::create_dir_all(&output_dir).map_err(|e| {
@@ -1523,6 +1546,7 @@ where
                 extension_costing_mode,
                 g8r_evaluation_mode,
                 canonical_g8r_options,
+                compute_artifact_graph_logical_effort,
             )?;
             point_summaries.push(serde_json::json!({
                 "action_budget": point.action_budget,
@@ -1594,6 +1618,7 @@ where
         extension_costing_mode,
         g8r_evaluation_mode,
         canonical_g8r_options,
+        compute_artifact_graph_logical_effort,
     )?;
 
     let summary = serde_json::json!({
@@ -2001,6 +2026,62 @@ top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
         )
         .unwrap();
         assert!(stats["graph_logical_effort_worst_case_delay"].is_null());
+    }
+
+    #[test]
+    fn postprocessed_run_keeps_graph_le_when_objective_requires_it() {
+        let input_dir = tempdir().unwrap();
+        let output_dir = tempdir().unwrap();
+        let hook_dir = tempdir().unwrap();
+        let hook = write_executable_script(
+            hook_dir.path(),
+            "identity.sh",
+            "#!/bin/sh\ncp \"$1\" \"$3\"\n",
+        );
+        let input_path = input_dir.path().join("sample.ir");
+        fs::write(
+            &input_path,
+            r#"package sample
+
+top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret and.3: bits[1] = and(a, b, id=3)
+}
+"#,
+        )
+        .unwrap();
+        let cli = PirMcmcCliArgs {
+            input_path: input_path.display().to_string(),
+            top: None,
+            iters: 0,
+            seed: 1,
+            output: Some(output_dir.path().display().to_string()),
+            metric: Objective::G8rPostLeGraph,
+            extension_costing_mode: ExtensionCostingMode::Preserve,
+            g8r_postprocess_program: Some(hook.display().to_string()),
+            canonical_g8r_options: CanonicalG8rOptions {
+                compute_graph_logical_effort: false,
+                ..CanonicalG8rOptions::default()
+            },
+            max_delay: None,
+            max_area: None,
+            toggle_stimulus: None,
+            initial_temperature: 1.0,
+            threads: 1,
+            checkpoint_iters: 0,
+            progress_iters: 0,
+            formal_oracle: false,
+            switching_beta1: 1.0,
+            switching_beta2: 0.0,
+            switching_primary_output_load: 1.0,
+            chain_strategy: CliChainStrategy::Independent,
+        };
+
+        run_pir_mcmc_driver(cli, |_| {}).unwrap();
+        let stats: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(output_dir.path().join("orig.post.stats.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(stats["graph_logical_effort_worst_case_delay"].is_number());
     }
 
     #[test]

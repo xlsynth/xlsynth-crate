@@ -298,10 +298,15 @@ impl CanonicalG8rOptions {
 }
 
 /// Canonical gate/AIG artifacts emitted from the public g8r lowering path.
-pub struct CanonicalG8rArtifacts {
+pub struct CanonicalG8rLoweringArtifacts {
     pub gate_fn: crate::aig::GateFn,
-    pub binary_aiger: Vec<u8>,
     pub stats: Ir2GatesSummaryStats,
+}
+
+/// Canonical gate/AIG artifacts emitted from the public g8r lowering path.
+pub struct CanonicalG8rArtifacts {
+    pub lowering: CanonicalG8rLoweringArtifacts,
+    pub binary_aiger: Vec<u8>,
 }
 
 impl From<&Options> for ir2gates::Ir2GatesOptions {
@@ -829,6 +834,20 @@ pub fn process_ir_text_with_gatefn(
     Ok((gate_fn, summary_stats))
 }
 
+/// Processes IR text through the same lowering path used by `ir2g8r`.
+pub fn canonical_ir_text_to_g8r_lowering_artifacts(
+    ir_text: &str,
+    ir_top: Option<&str>,
+    lowering_options: &CanonicalG8rOptions,
+) -> Result<CanonicalG8rLoweringArtifacts, String> {
+    let options = lowering_options.to_process_ir_path_options(
+        ir_top, /* quiet= */ true, /* emit_netlist= */ false,
+        /* emit_independent_op_stats= */ false, /* prepared_ir_out= */ None,
+    );
+    let (gate_fn, stats) = process_ir_text_with_gatefn(ir_text, &options)?;
+    Ok(CanonicalG8rLoweringArtifacts { gate_fn, stats })
+}
+
 /// Processes IR text and emits the same binary AIGER used by `ir2g8r
 /// --aiger-out`.
 pub fn canonical_ir_text_to_g8r_artifacts(
@@ -836,17 +855,12 @@ pub fn canonical_ir_text_to_g8r_artifacts(
     ir_top: Option<&str>,
     lowering_options: &CanonicalG8rOptions,
 ) -> Result<CanonicalG8rArtifacts, String> {
-    let options = lowering_options.to_process_ir_path_options(
-        ir_top, /* quiet= */ true, /* emit_netlist= */ false,
-        /* emit_independent_op_stats= */ false, /* prepared_ir_out= */ None,
-    );
-    let (gate_fn, stats) = process_ir_text_with_gatefn(ir_text, &options)?;
-    let binary_aiger =
-        emit_aiger_binary(&gate_fn, true).map_err(|e| format!("emit binary AIGER failed: {e}"))?;
+    let lowering = canonical_ir_text_to_g8r_lowering_artifacts(ir_text, ir_top, lowering_options)?;
+    let binary_aiger = emit_aiger_binary(&lowering.gate_fn, true)
+        .map_err(|e| format!("emit binary AIGER failed: {e}"))?;
     Ok(CanonicalG8rArtifacts {
-        gate_fn,
+        lowering,
         binary_aiger,
-        stats,
     })
 }
 

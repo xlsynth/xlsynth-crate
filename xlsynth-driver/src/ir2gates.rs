@@ -69,8 +69,8 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
             eprintln!("Error encountered lowering IR to gates: {}", err);
             std::process::exit(1);
         });
-    let gate_fn = artifacts.gate_fn;
-    let stats = artifacts.stats;
+    let gate_fn = artifacts.lowering.gate_fn;
+    let stats = artifacts.lowering.stats;
     // Always print the GateFn to stdout
     println!("{}", gate_fn.to_string());
     // If --bin-out is given, write the GateFn as bincode

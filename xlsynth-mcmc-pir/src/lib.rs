@@ -44,7 +44,9 @@ use xlsynth_g8r::aig_serdes::gate2ir::{
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::aig_sim::count_toggles;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
-use xlsynth_g8r::process_ir_path::{CanonicalG8rOptions, canonical_ir_text_to_g8r_artifacts};
+use xlsynth_g8r::process_ir_path::{
+    CanonicalG8rOptions, canonical_ir_text_to_g8r_lowering_artifacts,
+};
 use xlsynth_mcmc::MIN_TEMPERATURE_RATIO;
 use xlsynth_mcmc::McmcIterationOutput as SharedMcmcIterationOutput;
 use xlsynth_mcmc::McmcOptions as SharedMcmcOptions;
@@ -1012,7 +1014,7 @@ fn compute_g8r_stats_for_pir_fn_impl(
     // 1-4) Materialize the exact package text used for canonical lowering.
     let scoring_input = canonical_g8r_scoring_input_for_pir_fn(f, extension_costing_mode)?;
     let top_fn = scoring_input.top_fn;
-    let artifacts = canonical_ir_text_to_g8r_artifacts(
+    let artifacts = canonical_ir_text_to_g8r_lowering_artifacts(
         &scoring_input.ir_text,
         Some(&top_fn.name),
         canonical_g8r_options,
@@ -1204,20 +1206,20 @@ pub(crate) fn postprocess_gate_fn_for_artifact(
     schema: &GateFnInterfaceSchema,
     g8r_evaluation_mode: &G8rEvaluationMode,
     canonical_g8r_options: &CanonicalG8rOptions,
+    compute_graph_logical_effort: bool,
 ) -> Result<PostprocessedAigArtifact> {
     let loaded = postprocess_gate_fn_with_external_program(gate_fn, schema, g8r_evaluation_mode)?;
     let stats = get_summary_stats::get_aig_stats(&loaded.gate_fn);
-    let graph_logical_effort_worst_case_delay =
-        canonical_g8r_options.compute_graph_logical_effort.then(|| {
-            analyze_graph_logical_effort(
-                &loaded.gate_fn,
-                &GraphLogicalEffortOptions {
-                    beta1: canonical_g8r_options.graph_logical_effort_beta1,
-                    beta2: canonical_g8r_options.graph_logical_effort_beta2,
-                },
-            )
-            .delay
-        });
+    let graph_logical_effort_worst_case_delay = compute_graph_logical_effort.then(|| {
+        analyze_graph_logical_effort(
+            &loaded.gate_fn,
+            &GraphLogicalEffortOptions {
+                beta1: canonical_g8r_options.graph_logical_effort_beta1,
+                beta2: canonical_g8r_options.graph_logical_effort_beta2,
+            },
+        )
+        .delay
+    });
     Ok(PostprocessedAigArtifact {
         bytes: loaded.output_bytes,
         stats,
