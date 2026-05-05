@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use clap::ArgMatches;
 use serde::{Deserialize, Serialize};
@@ -292,7 +292,7 @@ fn verify_origin_alignment(
     ];
     ir2g8r_args.extend(canonical_g8r_flag_args(&external_g8r_options));
     let mut ir2g8r_cmd = Command::new(&exe);
-    ir2g8r_cmd.args(&ir2g8r_args[1..]);
+    ir2g8r_cmd.args(&ir2g8r_args[1..]).stdout(Stdio::null());
     run_checked(&mut ir2g8r_cmd, "ir2g8r alignment command")?;
 
     let raw_stats_json: RawStatsJson = read_json(&raw_stats)?;
