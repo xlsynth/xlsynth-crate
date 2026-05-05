@@ -935,6 +935,17 @@ pub fn canonical_g8r_scoring_input_for_pir_fn(
     Ok(CanonicalG8rScoringInput { top_fn, ir_text })
 }
 
+/// Returns the canonical lowering knobs used inside gate-cost scoring.
+fn canonical_g8r_scoring_lowering_options(
+    canonical_g8r_options: &CanonicalG8rOptions,
+) -> CanonicalG8rOptions {
+    let mut scoring_g8r_options = canonical_g8r_options.clone();
+    // Gate-cost scoring computes graph LE separately only when the objective
+    // needs it, so the summary-stats lowering pass should not duplicate it.
+    scoring_g8r_options.compute_graph_logical_effort = false;
+    scoring_g8r_options
+}
+
 /// Postprocessed AIG payload plus summary stats suitable for durable artifacts.
 pub(crate) struct PostprocessedAigArtifact {
     pub bytes: Vec<u8>,
@@ -1014,10 +1025,11 @@ fn compute_g8r_stats_for_pir_fn_impl(
     // 1-4) Materialize the exact package text used for canonical lowering.
     let scoring_input = canonical_g8r_scoring_input_for_pir_fn(f, extension_costing_mode)?;
     let top_fn = scoring_input.top_fn;
+    let scoring_g8r_options = canonical_g8r_scoring_lowering_options(canonical_g8r_options);
     let artifacts = canonical_ir_text_to_g8r_lowering_artifacts(
         &scoring_input.ir_text,
         Some(&top_fn.name),
-        canonical_g8r_options,
+        &scoring_g8r_options,
     )
     .map_err(|e| anyhow::anyhow!("canonical g8r lowering failed: {}", e))?;
     let gate_fn = artifacts.gate_fn;
@@ -5218,6 +5230,20 @@ top fn f(x: bits[8] id=1) -> bits[8] {
 
         assert_eq!(reparsed_top.to_string(), scoring_input.top_fn.to_string());
         assert!(!scoring_input.ir_text.contains("dead:"));
+    }
+
+    #[test]
+    fn canonical_g8r_scoring_lowering_options_skip_summary_graph_le() {
+        let source = CanonicalG8rOptions {
+            compute_graph_logical_effort: true,
+            graph_logical_effort_beta1: 2.0,
+            ..CanonicalG8rOptions::default()
+        };
+
+        let scoring = canonical_g8r_scoring_lowering_options(&source);
+
+        assert!(!scoring.compute_graph_logical_effort);
+        assert_eq!(scoring.graph_logical_effort_beta1, 2.0);
     }
 
     #[test]
