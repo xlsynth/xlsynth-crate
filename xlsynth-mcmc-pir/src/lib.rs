@@ -44,8 +44,7 @@ use xlsynth_g8r::aig_serdes::gate2ir::{
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::aig_sim::count_toggles;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
-use xlsynth_g8r::gatify::ir2gate::{self, GatifyOptions};
-use xlsynth_g8r::ir2gate_utils::AdderMapping;
+use xlsynth_g8r::process_ir_path::{CanonicalG8rOptions, canonical_ir_text_to_g8r_artifacts};
 use xlsynth_mcmc::MIN_TEMPERATURE_RATIO;
 use xlsynth_mcmc::McmcIterationOutput as SharedMcmcIterationOutput;
 use xlsynth_mcmc::McmcOptions as SharedMcmcOptions;
@@ -390,6 +389,27 @@ pub fn cost_with_effort_options_toggle_stimulus_extension_mode_and_evaluator(
     extension_costing_mode: ExtensionCostingMode,
     g8r_evaluation_mode: &G8rEvaluationMode,
 ) -> Result<Cost> {
+    cost_with_effort_options_toggle_stimulus_extension_mode_evaluator_and_g8r_options(
+        f,
+        objective,
+        toggle_stimulus,
+        weighted_switching_options,
+        extension_costing_mode,
+        g8r_evaluation_mode,
+        &CanonicalG8rOptions::default(),
+    )
+}
+
+/// Calculates cost with explicit evaluator and canonical g8r lowering options.
+pub fn cost_with_effort_options_toggle_stimulus_extension_mode_evaluator_and_g8r_options(
+    f: &IrFn,
+    objective: Objective,
+    toggle_stimulus: Option<&[Vec<IrBits>]>,
+    weighted_switching_options: &count_toggles::WeightedSwitchingOptions,
+    extension_costing_mode: ExtensionCostingMode,
+    g8r_evaluation_mode: &G8rEvaluationMode,
+    canonical_g8r_options: &CanonicalG8rOptions,
+) -> Result<Cost> {
     let pir_nodes = f.nodes.len();
 
     if objective.needs_toggle_stimulus() && toggle_stimulus.is_none() {
@@ -426,6 +446,7 @@ pub fn cost_with_effort_options_toggle_stimulus_extension_mode_and_evaluator(
             weighted_switching_options,
             extension_costing_mode,
             g8r_evaluation_mode,
+            canonical_g8r_options,
             objective.uses_postprocessed_costing(),
         )?
     } else {
@@ -900,6 +921,7 @@ struct GateCostStats {
 pub(crate) struct PostprocessedAigArtifact {
     pub bytes: Vec<u8>,
     pub stats: AigStats,
+    pub graph_logical_effort_worst_case_delay: f64,
 }
 
 /// Computes gate-level cost data for a PIR function by optimizing it, gatifying
@@ -913,6 +935,7 @@ fn compute_g8r_stats_for_pir_fn(
     weighted_switching_options: &count_toggles::WeightedSwitchingOptions,
     extension_costing_mode: ExtensionCostingMode,
     g8r_evaluation_mode: &G8rEvaluationMode,
+    canonical_g8r_options: &CanonicalG8rOptions,
     compute_postprocessed_stats: bool,
 ) -> Result<GateCostStats> {
     // The PIR → text → XLS → optimize → PIR → gatify pipeline assumes a DAG.
@@ -931,6 +954,7 @@ fn compute_g8r_stats_for_pir_fn(
             weighted_switching_options,
             extension_costing_mode,
             g8r_evaluation_mode,
+            canonical_g8r_options,
             compute_postprocessed_stats,
         )
     }));
@@ -966,35 +990,25 @@ fn compute_g8r_stats_for_pir_fn_impl(
     weighted_switching_options: &count_toggles::WeightedSwitchingOptions,
     extension_costing_mode: ExtensionCostingMode,
     g8r_evaluation_mode: &G8rEvaluationMode,
+    canonical_g8r_options: &CanonicalG8rOptions,
     compute_postprocessed_stats: bool,
 ) -> Result<GateCostStats> {
     // 1-3) Optimize the PIR function via the XLS pipeline.
     let top_fn = optimize_pir_fn_via_xls_with_extension_mode(f, extension_costing_mode)?;
 
-    // 4) Gatify and measure live gate count.
-    let gatify_options = GatifyOptions {
-        fold: true,
-        hash: true,
-        check_equivalence: false,
-        adder_mapping: AdderMapping::default(),
-        array_index_lowering_strategy: Default::default(),
-        mul_adder_mapping: None,
-        range_info: None,
-        enable_rewrite_carry_out: false,
-        enable_rewrite_prio_encode: false,
-        enable_rewrite_nary_add: false,
-        enable_rewrite_mask_low: false,
-    };
-    let gatify_output = ir2gate::gatify(&top_fn, gatify_options)
-        .map_err(|e| anyhow::anyhow!("ir2gate::gatify failed: {}", e))?;
-    let gate_fn = gatify_output.gate_fn;
-    let stats = get_summary_stats::get_summary_stats(&gate_fn);
+    // 4) Lower through the same canonical gate/AIG path used by `ir2g8r`.
+    let ir_text = format!("package pir_mcmc\n\ntop {}", top_fn);
+    let artifacts =
+        canonical_ir_text_to_g8r_artifacts(&ir_text, Some(&top_fn.name), canonical_g8r_options)
+            .map_err(|e| anyhow::anyhow!("canonical g8r lowering failed: {}", e))?;
+    let gate_fn = artifacts.gate_fn;
+    let stats = artifacts.stats;
     let g8r_le_graph_milli = if compute_graph_logical_effort {
         let graph_le = analyze_graph_logical_effort(
             &gate_fn,
             &GraphLogicalEffortOptions {
-                beta1: 1.0,
-                beta2: 0.0,
+                beta1: canonical_g8r_options.graph_logical_effort_beta1,
+                beta2: canonical_g8r_options.graph_logical_effort_beta2,
             },
         );
         graph_le_delay_to_milli(graph_le.delay)
@@ -1071,6 +1085,7 @@ fn compute_g8r_stats_for_pir_fn_impl(
             compute_weighted_switching,
             toggle_stimulus,
             weighted_switching_options,
+            canonical_g8r_options,
         )?)
     } else {
         None
@@ -1171,12 +1186,22 @@ pub(crate) fn postprocess_gate_fn_for_artifact(
     gate_fn: &xlsynth_g8r::aig::gate::GateFn,
     schema: &GateFnInterfaceSchema,
     g8r_evaluation_mode: &G8rEvaluationMode,
+    canonical_g8r_options: &CanonicalG8rOptions,
 ) -> Result<PostprocessedAigArtifact> {
     let loaded = postprocess_gate_fn_with_external_program(gate_fn, schema, g8r_evaluation_mode)?;
     let stats = get_summary_stats::get_aig_stats(&loaded.gate_fn);
+    let graph_logical_effort_worst_case_delay = analyze_graph_logical_effort(
+        &loaded.gate_fn,
+        &GraphLogicalEffortOptions {
+            beta1: canonical_g8r_options.graph_logical_effort_beta1,
+            beta2: canonical_g8r_options.graph_logical_effort_beta2,
+        },
+    )
+    .delay;
     Ok(PostprocessedAigArtifact {
         bytes: loaded.output_bytes,
         stats,
+        graph_logical_effort_worst_case_delay,
     })
 }
 
@@ -1188,14 +1213,15 @@ fn compute_post_stats_for_gate_fn(
     compute_weighted_switching: bool,
     toggle_stimulus: Option<&[Vec<IrBits>]>,
     weighted_switching_options: &count_toggles::WeightedSwitchingOptions,
+    canonical_g8r_options: &CanonicalG8rOptions,
 ) -> Result<G8rPostStats> {
     let stats = get_summary_stats::get_aig_stats(gate_fn);
     let le_graph_milli = if compute_graph_logical_effort {
         let graph_le = analyze_graph_logical_effort(
             gate_fn,
             &GraphLogicalEffortOptions {
-                beta1: 1.0,
-                beta2: 0.0,
+                beta1: canonical_g8r_options.graph_logical_effort_beta1,
+                beta2: canonical_g8r_options.graph_logical_effort_beta2,
             },
         );
         graph_le_delay_to_milli(graph_le.delay)
@@ -1495,6 +1521,8 @@ pub struct RunOptions {
     pub extension_costing_mode: ExtensionCostingMode,
     /// How gate-level costs are obtained for `g8r-post-*` objectives.
     pub g8r_evaluation_mode: G8rEvaluationMode,
+    /// Canonical g8r lowering knobs shared with `ir2g8r`.
+    pub canonical_g8r_options: CanonicalG8rOptions,
     /// Optional hard cap on gate depth (`g8r_depth`) for g8r-based objectives.
     pub max_allowed_depth: Option<usize>,
     /// Optional hard cap on gate count (`g8r_nodes`) for g8r-based objectives.
@@ -1717,7 +1745,7 @@ struct PirMcmcArtifactRunOutput {
 const PIR_MCMC_ARTIFACT_DIR_NAME: &str = "winning-lineage";
 const PIR_MCMC_ARTIFACT_MANIFEST_FILE: &str = "manifest.json";
 const PIR_MCMC_ARTIFACT_STATES_DIR_NAME: &str = "states";
-const PIR_MCMC_ARTIFACT_SCHEMA_VERSION: u32 = 3;
+const PIR_MCMC_ARTIFACT_SCHEMA_VERSION: u32 = 4;
 
 /// Durable PIR MCMC artifact loaded from a run directory.
 pub struct LoadedPirMcmcArtifact {
@@ -1748,6 +1776,7 @@ struct PersistedRunOptions {
     objective: String,
     extension_costing_mode: String,
     g8r_evaluation_mode: G8rEvaluationMode,
+    canonical_g8r_options: CanonicalG8rOptions,
     max_allowed_depth: Option<usize>,
     max_allowed_area: Option<usize>,
     switching_beta1: f64,
@@ -1875,6 +1904,7 @@ struct PirSegmentRunner {
     objective: Objective,
     extension_costing_mode: ExtensionCostingMode,
     g8r_evaluation_mode: G8rEvaluationMode,
+    canonical_g8r_options: CanonicalG8rOptions,
     weighted_switching_options: count_toggles::WeightedSwitchingOptions,
     initial_temperature: f64,
     constraints: ConstraintLimits,
@@ -1894,6 +1924,7 @@ struct PirArtifactSegmentRunner {
     objective: Objective,
     extension_costing_mode: ExtensionCostingMode,
     g8r_evaluation_mode: G8rEvaluationMode,
+    canonical_g8r_options: CanonicalG8rOptions,
     weighted_switching_options: count_toggles::WeightedSwitchingOptions,
     initial_temperature: f64,
     constraints: ConstraintLimits,
@@ -1920,6 +1951,7 @@ pub fn mcmc_iteration(
     objective: Objective,
     extension_costing_mode: ExtensionCostingMode,
     g8r_evaluation_mode: &G8rEvaluationMode,
+    canonical_g8r_options: &CanonicalG8rOptions,
     toggle_stimulus: Option<&[Vec<IrBits>]>,
     weighted_switching_options: &count_toggles::WeightedSwitchingOptions,
     constraints: ConstraintLimits,
@@ -2043,13 +2075,14 @@ pub fn mcmc_iteration(
             } else {
                 let cost_start = Instant::now();
                 let new_candidate_cost =
-                    match cost_with_effort_options_toggle_stimulus_extension_mode_and_evaluator(
+                    match cost_with_effort_options_toggle_stimulus_extension_mode_evaluator_and_g8r_options(
                         &candidate_fn,
                         objective,
                         toggle_stimulus,
                         weighted_switching_options,
                         extension_costing_mode,
                         g8r_evaluation_mode,
+                        canonical_g8r_options,
                     ) {
                         Ok(c) => c,
                         Err(e) => {
@@ -2470,14 +2503,16 @@ fn prepare_run_start(mut start_fn: IrFn, options: &RunOptions) -> Result<Prepare
         None
     };
 
-    let initial_cost = cost_with_effort_options_toggle_stimulus_extension_mode_and_evaluator(
-        &start_fn,
-        options.objective,
-        prepared_toggle_stimulus.as_ref().map(|v| v.as_slice()),
-        &options.weighted_switching_options,
-        options.extension_costing_mode,
-        &options.g8r_evaluation_mode,
-    )?;
+    let initial_cost =
+        cost_with_effort_options_toggle_stimulus_extension_mode_evaluator_and_g8r_options(
+            &start_fn,
+            options.objective,
+            prepared_toggle_stimulus.as_ref().map(|v| v.as_slice()),
+            &options.weighted_switching_options,
+            options.extension_costing_mode,
+            &options.g8r_evaluation_mode,
+            &options.canonical_g8r_options,
+        )?;
     let effective_constraints = effective_constraint_limits(
         options.objective,
         ConstraintLimits {
@@ -2811,6 +2846,7 @@ impl PersistedRunOptions {
             g8r_evaluation_mode: options
                 .g8r_evaluation_mode
                 .canonicalized_for_persistence()?,
+            canonical_g8r_options: options.canonical_g8r_options.clone(),
             max_allowed_depth: options.max_allowed_depth,
             max_allowed_area: options.max_allowed_area,
             switching_beta1: options.weighted_switching_options.beta1,
@@ -2834,6 +2870,7 @@ impl PersistedRunOptions {
                 &self.extension_costing_mode,
             )?,
             g8r_evaluation_mode: self.g8r_evaluation_mode,
+            canonical_g8r_options: self.canonical_g8r_options,
             max_allowed_depth: self.max_allowed_depth,
             max_allowed_area: self.max_allowed_area,
             weighted_switching_options: count_toggles::WeightedSwitchingOptions {
@@ -3081,13 +3118,14 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
 
         let mut current_fn = start_state.clone();
         let mut current_cost =
-            cost_with_effort_options_toggle_stimulus_extension_mode_and_evaluator(
+            cost_with_effort_options_toggle_stimulus_extension_mode_evaluator_and_g8r_options(
                 &current_fn,
                 self.objective,
                 toggle_stimulus,
                 &self.weighted_switching_options,
                 self.extension_costing_mode,
                 &self.g8r_evaluation_mode,
+                &self.canonical_g8r_options,
             )
             .map_err(|e| {
                 anyhow::anyhow!(
@@ -3133,6 +3171,7 @@ impl SegmentRunner<IrFn, Cost, PirTransformKind> for PirSegmentRunner {
                 self.objective,
                 self.extension_costing_mode,
                 &self.g8r_evaluation_mode,
+                &self.canonical_g8r_options,
                 toggle_stimulus,
                 &self.weighted_switching_options,
                 self.constraints,
@@ -3379,13 +3418,14 @@ impl SegmentRunner<ProvenancedChainState, Cost, PirTransformKind> for PirArtifac
         let mut current_fn = start_state.search_fn.clone();
         let mut current_provenance = start_state.search_provenance.clone();
         let mut current_cost =
-            cost_with_effort_options_toggle_stimulus_extension_mode_and_evaluator(
+            cost_with_effort_options_toggle_stimulus_extension_mode_evaluator_and_g8r_options(
                 &current_fn,
                 self.objective,
                 toggle_stimulus,
                 &self.weighted_switching_options,
                 self.extension_costing_mode,
                 &self.g8r_evaluation_mode,
+                &self.canonical_g8r_options,
             )
             .map_err(|e| {
                 anyhow::anyhow!(
@@ -3456,6 +3496,7 @@ impl SegmentRunner<ProvenancedChainState, Cost, PirTransformKind> for PirArtifac
                 self.objective,
                 self.extension_costing_mode,
                 &self.g8r_evaluation_mode,
+                &self.canonical_g8r_options,
                 toggle_stimulus,
                 &self.weighted_switching_options,
                 self.constraints,
@@ -3710,6 +3751,7 @@ fn run_pir_mcmc_with_artifact_using_transform_factory_and_observers(
         objective: options.objective,
         extension_costing_mode: options.extension_costing_mode,
         g8r_evaluation_mode: options.g8r_evaluation_mode.clone(),
+        canonical_g8r_options: options.canonical_g8r_options.clone(),
         weighted_switching_options: options.weighted_switching_options,
         initial_temperature: options.initial_temperature,
         constraints: prepared.effective_constraints,
@@ -3899,6 +3941,7 @@ fn run_witness_guided_rollout(
             objective,
             artifact.run_options.extension_costing_mode,
             &artifact.run_options.g8r_evaluation_mode,
+            &artifact.run_options.canonical_g8r_options,
             None,
             &artifact.run_options.weighted_switching_options,
             ConstraintLimits::default(),
@@ -4042,6 +4085,7 @@ pub fn run_pir_mcmc_with_shared_best(
         objective: options.objective,
         extension_costing_mode: options.extension_costing_mode,
         g8r_evaluation_mode: options.g8r_evaluation_mode.clone(),
+        canonical_g8r_options: options.canonical_g8r_options.clone(),
         weighted_switching_options: options.weighted_switching_options,
         initial_temperature: options.initial_temperature,
         constraints: prepared.effective_constraints,
@@ -4104,6 +4148,8 @@ mod tests {
     use super::*;
     use count_toggles::WeightedSwitchingOptions;
     use tempfile::tempdir;
+    use xlsynth_g8r::gatify::ir2gate::{self, GatifyOptions};
+    use xlsynth_g8r::ir2gate_utils::AdderMapping;
     use xlsynth_pir::ir::{ExtNaryAddArchitecture, NodePayload};
     use xlsynth_pir::ir_parser;
     use xlsynth_pir::ir_utils::remap_payload_with;
@@ -4139,6 +4185,7 @@ mod tests {
             objective,
             extension_costing_mode: ExtensionCostingMode::Preserve,
             g8r_evaluation_mode: G8rEvaluationMode::Builtin,
+            canonical_g8r_options: CanonicalG8rOptions::default(),
             max_allowed_depth: None,
             max_allowed_area: None,
             weighted_switching_options: WeightedSwitchingOptions::default(),
@@ -4271,6 +4318,7 @@ mod tests {
             objective: Objective::Nodes,
             extension_costing_mode: ExtensionCostingMode::Preserve,
             g8r_evaluation_mode: G8rEvaluationMode::Builtin,
+            canonical_g8r_options: CanonicalG8rOptions::default(),
             max_allowed_depth: None,
             max_allowed_area: None,
             weighted_switching_options: WeightedSwitchingOptions::default(),
@@ -4641,6 +4689,7 @@ mod tests {
             objective: Objective::Nodes,
             extension_costing_mode: ExtensionCostingMode::Preserve,
             g8r_evaluation_mode: G8rEvaluationMode::Builtin,
+            canonical_g8r_options: CanonicalG8rOptions::default(),
             weighted_switching_options: WeightedSwitchingOptions::default(),
             initial_temperature: 1.0,
             constraints: ConstraintLimits::default(),
@@ -5735,6 +5784,7 @@ top fn f(x: bits[8] id=1) -> bits[8] {
             objective: Objective::G8rNodesTimesDepthTimesToggles,
             extension_costing_mode: ExtensionCostingMode::Preserve,
             g8r_evaluation_mode: G8rEvaluationMode::Builtin,
+            canonical_g8r_options: CanonicalG8rOptions::default(),
             max_allowed_depth: None,
             max_allowed_area: None,
             weighted_switching_options: WeightedSwitchingOptions::default(),
@@ -5755,6 +5805,7 @@ top fn f(x: bits[8] id=1) -> bits[8] {
             objective: Objective::Nodes,
             extension_costing_mode: ExtensionCostingMode::Preserve,
             g8r_evaluation_mode: G8rEvaluationMode::Builtin,
+            canonical_g8r_options: CanonicalG8rOptions::default(),
             max_allowed_depth: None,
             max_allowed_area: None,
             weighted_switching_options: WeightedSwitchingOptions::default(),
@@ -5788,6 +5839,7 @@ top fn f(x: bits[8] id=1) -> bits[8] {
             objective: Objective::Nodes,
             extension_costing_mode: ExtensionCostingMode::Preserve,
             g8r_evaluation_mode: G8rEvaluationMode::Builtin,
+            canonical_g8r_options: CanonicalG8rOptions::default(),
             max_allowed_depth: Some(10),
             max_allowed_area: None,
             weighted_switching_options: WeightedSwitchingOptions::default(),
@@ -5818,6 +5870,7 @@ top fn f(x: bits[8] id=1) -> bits[8] {
             objective: Objective::G8rNodes,
             extension_costing_mode: ExtensionCostingMode::Preserve,
             g8r_evaluation_mode: G8rEvaluationMode::Builtin,
+            canonical_g8r_options: CanonicalG8rOptions::default(),
             max_allowed_depth: Some(10),
             max_allowed_area: Some(10),
             weighted_switching_options: WeightedSwitchingOptions::default(),
@@ -5848,6 +5901,7 @@ top fn f(x: bits[8] id=1) -> bits[8] {
             objective: Objective::G8rNodesTimesWeightedSwitchingNoDepthRegress,
             extension_costing_mode: ExtensionCostingMode::Preserve,
             g8r_evaluation_mode: G8rEvaluationMode::Builtin,
+            canonical_g8r_options: CanonicalG8rOptions::default(),
             max_allowed_depth: None,
             max_allowed_area: Some(10),
             weighted_switching_options: WeightedSwitchingOptions::default(),
@@ -5979,6 +6033,7 @@ top fn f(x: bits[8] id=1) -> bits[8] {
             objective: Objective::Nodes,
             extension_costing_mode: ExtensionCostingMode::Preserve,
             g8r_evaluation_mode: G8rEvaluationMode::Builtin,
+            canonical_g8r_options: CanonicalG8rOptions::default(),
             max_allowed_depth: None,
             max_allowed_area: None,
             weighted_switching_options: WeightedSwitchingOptions::default(),

@@ -76,6 +76,88 @@ fn ir_bits_to_msb_string(bits: &IrBits) -> String {
         .collect::<String>()
 }
 
+#[test]
+fn test_ir_mcmc_opt_verify_origin_alignment_matches_canonical_flow() {
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let temp_dir = tempfile::tempdir().unwrap();
+    let input_path = temp_dir.path().join("sample.ir");
+    let output_dir = temp_dir.path().join("out");
+    let postprocess_path = temp_dir.path().join("identity.sh");
+    std::fs::write(
+        &input_path,
+        r#"package sample
+
+fn helper(x: bits[2] id=1) -> bits[2] {
+  ret identity.2: bits[2] = identity(x, id=2)
+}
+
+fn main(count: bits[2] id=3) -> bits[2] {
+  one: bits[2] = literal(value=1, id=4)
+  sh: bits[2] = shll(one, count, id=5)
+  ret mask: bits[2] = sub(sh, one, id=6)
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(&postprocess_path, "#!/bin/sh\ncp \"$1\" \"$3\"\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&postprocess_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&postprocess_path, permissions).unwrap();
+    }
+
+    let output = Command::new(command_path)
+        .arg("ir-mcmc-opt")
+        .arg(&input_path)
+        .arg("--top")
+        .arg("main")
+        .arg("--iters")
+        .arg("0")
+        .arg("--metric")
+        .arg("g8r-post-and-nodes-times-depth")
+        .arg("--g8r-postprocess-program")
+        .arg(&postprocess_path)
+        .arg("--threads")
+        .arg("1")
+        .arg("--checkpoint-iters")
+        .arg("0")
+        .arg("--progress-iters")
+        .arg("0")
+        .arg("--formal-oracle")
+        .arg("false")
+        .arg("--output")
+        .arg(&output_dir)
+        .arg("--verify-origin-alignment")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "ir-mcmc-opt failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let alignment_dir = output_dir.join("origin-alignment");
+    assert!(alignment_dir.join("raw.aig").exists());
+    assert!(alignment_dir.join("raw.stats.json").exists());
+    assert!(alignment_dir.join("post.aig").exists());
+    assert!(alignment_dir.join("post.stats.json").exists());
+    assert!(alignment_dir.join("commands.json").exists());
+    let comparison: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(alignment_dir.join("comparison.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(comparison["raw_nodes_match"], true);
+    assert_eq!(comparison["raw_depth_match"], true);
+    assert_eq!(comparison["raw_graph_logical_effort_milli_match"], true);
+    assert_eq!(comparison["post_and_nodes_match"], true);
+    assert_eq!(comparison["post_depth_match"], true);
+    assert_eq!(comparison["post_graph_logical_effort_milli_match"], true);
+    assert_eq!(comparison["objective_score_match"], true);
+}
+
 fn assert_value4_matches_ir_bits(actual: &Value4, expected_bits: &IrBits) {
     assert!(
         actual.is_all_known_01(),

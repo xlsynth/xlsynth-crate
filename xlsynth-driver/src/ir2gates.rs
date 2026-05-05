@@ -8,9 +8,9 @@ use crate::toolchain_config::ToolchainConfig;
 use std::fs::File;
 use std::io::Write;
 use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
-use xlsynth_g8r::aig_serdes::emit_aiger_binary::emit_aiger_binary;
 use xlsynth_g8r::aig_serdes::emit_netlist;
 use xlsynth_g8r::process_ir_path;
+use xlsynth_g8r::process_ir_path::canonical_ir_text_to_g8r_artifacts;
 
 pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
     let input_file = matches.get_one::<String>("ir_input_file").unwrap();
@@ -61,11 +61,16 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
     let stats_out = matches.get_one::<String>("stats_out");
     let netlist_out = matches.get_one::<String>("netlist_out");
     let input_path = std::path::Path::new(input_file);
-    let options = crate::g8r_cli::build_process_ir_path_options_for_cli(
-        matches, /* quiet= */ true, /* emit_netlist= */ false,
-        /* emit_independent_op_stats= */ false, ir_top, /* prepared_ir_out= */ None,
-    );
-    let (gate_fn, stats) = process_ir_path::process_ir_path_with_gatefn(input_path, &options);
+    let ir_text = std::fs::read_to_string(input_path)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {}", input_path.display(), e));
+    let lowering_options = crate::g8r_cli::parse_g8r_cli_options(matches);
+    let artifacts = canonical_ir_text_to_g8r_artifacts(&ir_text, ir_top, &lowering_options)
+        .unwrap_or_else(|err| {
+            eprintln!("Error encountered lowering IR to gates: {}", err);
+            std::process::exit(1);
+        });
+    let gate_fn = artifacts.gate_fn;
+    let stats = artifacts.stats;
     // Always print the GateFn to stdout
     println!("{}", gate_fn.to_string());
     // If --bin-out is given, write the GateFn as bincode
@@ -82,15 +87,9 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
             .map(|s| s.eq_ignore_ascii_case("aig"))
             .unwrap_or(false);
         if is_binary_aig {
-            let bytes = match emit_aiger_binary(&gate_fn, true) {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    eprintln!("Failed to emit binary AIGER: {}", e);
-                    std::process::exit(1);
-                }
-            };
             let mut f = File::create(aiger_path).expect("Failed to create aiger_out file");
-            f.write_all(&bytes).expect("Failed to write aiger_out file");
+            f.write_all(&artifacts.binary_aiger)
+                .expect("Failed to write aiger_out file");
         } else {
             let aiger = match emit_aiger(&gate_fn, true) {
                 Ok(aiger) => aiger,

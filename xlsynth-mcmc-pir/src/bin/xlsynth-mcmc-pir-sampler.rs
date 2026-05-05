@@ -467,6 +467,7 @@ fn main() -> Result<()> {
         objective: cli.metric,
         extension_costing_mode: ExtensionCostingMode::Preserve,
         g8r_evaluation_mode: xlsynth_mcmc_pir::G8rEvaluationMode::Builtin,
+        canonical_g8r_options: xlsynth_g8r::process_ir_path::CanonicalG8rOptions::default(),
         max_allowed_depth: cli.max_delay,
         max_allowed_area: cli.max_area,
         weighted_switching_options:

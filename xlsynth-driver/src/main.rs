@@ -869,6 +869,12 @@ fn main() {
             xlsynth_mcmc_pir::driver_cli::add_pir_mcmc_args(
                 clap::Command::new("ir-mcmc-opt")
                     .about("Optimizes PIR IR with MCMC and emits best artifacts"),
+            )
+            .arg(
+                clap::Arg::new("verify_origin_alignment")
+                    .long("verify-origin-alignment")
+                    .help("Verify origin g8r metrics against the external ir2g8r -> postprocess -> aig-stats flow")
+                    .action(clap::ArgAction::SetTrue),
             ),
         )
         .subcommand(

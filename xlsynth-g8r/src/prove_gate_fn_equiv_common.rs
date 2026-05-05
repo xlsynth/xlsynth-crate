@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use serde::{Deserialize, Serialize};
 use xlsynth::IrBits;
 
 /// User-facing gate-level formal proof backend selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum GateFormalBackend {
     Cadical,
     Varisat,

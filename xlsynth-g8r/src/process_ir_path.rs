@@ -19,6 +19,7 @@ use crate::aig::get_summary_stats::get_gate_depth;
 use crate::aig::graph_logical_effort::{self, analyze_graph_logical_effort};
 use crate::aig::logical_effort;
 use crate::aig::logical_effort::compute_logical_effort_min_delay;
+use crate::aig_serdes::emit_aiger_binary::emit_aiger_binary;
 use crate::aig_serdes::emit_netlist;
 use crate::aig_sim::count_toggles;
 use crate::check_equivalence;
@@ -202,6 +203,107 @@ pub struct Options {
     pub prepared_ir_out: Option<std::path::PathBuf>,
 }
 
+/// Canonical lowering knobs shared by the public g8r CLIs and in-process users.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CanonicalG8rOptions {
+    pub fold: bool,
+    pub hash: bool,
+    pub enable_rewrite_carry_out: bool,
+    pub enable_rewrite_prio_encode: bool,
+    pub enable_rewrite_nary_add: bool,
+    pub enable_rewrite_mask_low: bool,
+    pub adder_mapping: crate::ir2gate_utils::AdderMapping,
+    pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
+    pub fraig: bool,
+    pub fraig_max_iterations: Option<usize>,
+    pub max_fraig_sim_samples: usize,
+    pub gate_formal_backend: GateFormalBackend,
+    pub compute_graph_logical_effort: bool,
+    pub graph_logical_effort_beta1: f64,
+    pub graph_logical_effort_beta2: f64,
+    pub toggle_sample_count: usize,
+    pub toggle_sample_seed: u64,
+}
+
+impl Default for CanonicalG8rOptions {
+    fn default() -> Self {
+        let prep_defaults = PrepForGatifyOptions::all_opts_enabled();
+        Self {
+            fold: true,
+            hash: true,
+            enable_rewrite_carry_out: prep_defaults.enable_rewrite_carry_out,
+            enable_rewrite_prio_encode: prep_defaults.enable_rewrite_prio_encode,
+            enable_rewrite_nary_add: prep_defaults.enable_rewrite_nary_add,
+            enable_rewrite_mask_low: prep_defaults.enable_rewrite_mask_low,
+            adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
+            mul_adder_mapping: None,
+            fraig: true,
+            fraig_max_iterations: None,
+            max_fraig_sim_samples: DEFAULT_MAX_FRAIG_SIM_SAMPLES,
+            gate_formal_backend: GateFormalBackend::default(),
+            compute_graph_logical_effort: true,
+            graph_logical_effort_beta1: 1.0,
+            graph_logical_effort_beta2: 0.0,
+            toggle_sample_count: 0,
+            toggle_sample_seed: 0,
+        }
+    }
+}
+
+impl CanonicalG8rOptions {
+    /// Expands canonical lowering knobs into the concrete process options.
+    pub fn to_process_ir_path_options(
+        &self,
+        ir_top: Option<&str>,
+        quiet: bool,
+        emit_netlist: bool,
+        emit_independent_op_stats: bool,
+        prepared_ir_out: Option<&std::path::Path>,
+    ) -> Options {
+        Options {
+            check_equivalence: false,
+            fold: self.fold,
+            hash: self.hash,
+            enable_rewrite_carry_out: self.enable_rewrite_carry_out,
+            enable_rewrite_prio_encode: self.enable_rewrite_prio_encode,
+            enable_rewrite_nary_add: self.enable_rewrite_nary_add,
+            enable_rewrite_mask_low: self.enable_rewrite_mask_low,
+            adder_mapping: self.adder_mapping,
+            mul_adder_mapping: self.mul_adder_mapping,
+            fraig: self.fraig,
+            emit_independent_op_stats,
+            ir_top: ir_top.map(|s| s.to_string()),
+            fraig_max_iterations: self.fraig_max_iterations,
+            max_fraig_sim_samples: Some(self.max_fraig_sim_samples),
+            gate_formal_backend: self.gate_formal_backend,
+            quiet,
+            emit_netlist,
+            toggle_sample_count: self.toggle_sample_count,
+            toggle_sample_seed: self.toggle_sample_seed,
+            compute_graph_logical_effort: self.compute_graph_logical_effort,
+            graph_logical_effort_beta1: self.graph_logical_effort_beta1,
+            graph_logical_effort_beta2: self.graph_logical_effort_beta2,
+            cut_db: Some(crate::cut_db::loader::CutDb::load_default()),
+            cut_db_rewrite_max_iterations:
+                crate::cut_db_cli_defaults::CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
+            cut_db_rewrite_max_candidate_evals_per_round:
+                crate::cut_db_cli_defaults::CUT_DB_REWRITE_MAX_CANDIDATE_EVALS_PER_ROUND_CLI,
+            cut_db_rewrite_max_rewrites_per_round:
+                crate::cut_db_cli_defaults::CUT_DB_REWRITE_MAX_REWRITES_PER_ROUND_CLI,
+            cut_db_rewrite_max_cuts_per_node:
+                crate::cut_db_cli_defaults::CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
+            prepared_ir_out: prepared_ir_out.map(|p| p.to_path_buf()),
+        }
+    }
+}
+
+/// Canonical gate/AIG artifacts emitted from the public g8r lowering path.
+pub struct CanonicalG8rArtifacts {
+    pub gate_fn: crate::aig::GateFn,
+    pub binary_aiger: Vec<u8>,
+    pub stats: Ir2GatesSummaryStats,
+}
+
 impl From<&Options> for ir2gates::Ir2GatesOptions {
     fn from(options: &Options) -> Self {
         Self {
@@ -244,11 +346,11 @@ impl From<GatifyOptionsInput<'_>> for ir2gate::GatifyOptions {
     }
 }
 
-/// Command line entry point (e.g. it exits the process on error).
-pub fn process_ir_path_with_gatefn(
-    ir_path: &std::path::Path,
+/// Processes IR text through the canonical g8r lowering path.
+pub fn process_ir_text_with_gatefn(
+    ir_text: &str,
     options: &Options,
-) -> (crate::aig::GateFn, Ir2GatesSummaryStats) {
+) -> Result<(crate::aig::GateFn, Ir2GatesSummaryStats), String> {
     let prep_opts = PrepForGatifyOptions {
         enable_rewrite_carry_out: options.enable_rewrite_carry_out,
         enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
@@ -256,16 +358,9 @@ pub fn process_ir_path_with_gatefn(
         enable_rewrite_mask_low: options.enable_rewrite_mask_low,
         ..PrepForGatifyOptions::all_opts_enabled()
     };
-    // Read the file into a string.
-    let file_content = std::fs::read_to_string(&ir_path)
-        .unwrap_or_else(|err| panic!("Failed to read {}: {}", ir_path.display(), err));
     let ir2gates_options = ir2gates::Ir2GatesOptions::from(options);
     let ir2gates_output =
-        ir2gates::ir2gates_from_ir_text(&file_content, options.ir_top.as_deref(), ir2gates_options)
-            .unwrap_or_else(|err| {
-                eprintln!("Error encountered lowering IR to gates: {}", err);
-                std::process::exit(1);
-            });
+        ir2gates::ir2gates_from_ir_text(ir_text, options.ir_top.as_deref(), ir2gates_options)?;
 
     let ir2gates::Ir2GatesOutput {
         pir_package: ir_package,
@@ -285,11 +380,10 @@ pub fn process_ir_path_with_gatefn(
         let external_refs = ir_utils::external_function_references(&prepared_fn);
         if !external_refs.is_empty() {
             let refs = external_refs.into_iter().collect::<Vec<_>>().join(", ");
-            eprintln!(
+            return Err(format!(
                 "Refusing to emit --prepared-ir-out with external function references from top `{}`: {}",
                 prepared_fn.name, refs
-            );
-            std::process::exit(1);
+            ));
         }
         let prepared_member = ir_package
             .members
@@ -314,22 +408,21 @@ pub fn process_ir_path_with_gatefn(
             top: ir_package.top.clone(),
         };
         let prepared_text = prepared_pkg.to_string();
-        let mut file = std::fs::File::create(out_path).unwrap_or_else(|e| {
-            panic!(
+        let mut file = std::fs::File::create(out_path).map_err(|e| {
+            format!(
                 "Failed to create prepared IR output {}: {}",
                 out_path.display(),
                 e
             )
-        });
+        })?;
         use std::io::Write;
-        file.write_all(prepared_text.as_bytes())
-            .unwrap_or_else(|e| {
-                panic!(
-                    "Failed to write prepared IR output {}: {}",
-                    out_path.display(),
-                    e
-                )
-            });
+        file.write_all(prepared_text.as_bytes()).map_err(|e| {
+            format!(
+                "Failed to write prepared IR output {}: {}",
+                out_path.display(),
+                e
+            )
+        })?;
     }
 
     if !options.quiet {
@@ -492,11 +585,8 @@ pub fn process_ir_path_with_gatefn(
             options.gate_formal_backend,
             &mut rng,
         );
-        if !fraig_result.is_ok() {
-            eprintln!("Fraig optimization failed");
-            std::process::exit(1);
-        }
-        let (optimized_fn, did_converge, iteration_stats) = fraig_result.unwrap();
+        let (optimized_fn, did_converge, iteration_stats) =
+            fraig_result.map_err(|e| format!("Fraig optimization failed: {e}"))?;
         if !options.quiet {
             println!("== Fraig convergence: {:?}", did_converge);
         }
@@ -533,14 +623,8 @@ pub fn process_ir_path_with_gatefn(
     }
 
     if options.emit_netlist {
-        let netlist =
-            match emit_netlist::emit_netlist(&ir_top.name, &gate_fn, false, false, false, None) {
-                Ok(netlist) => netlist,
-                Err(e) => {
-                    eprintln!("Failed to emit netlist: {}", e);
-                    std::process::exit(1);
-                }
-            };
+        let netlist = emit_netlist::emit_netlist(&ir_top.name, &gate_fn, false, false, false, None)
+            .map_err(|e| format!("Failed to emit netlist: {}", e))?;
         println!("{}", netlist);
     }
 
@@ -610,7 +694,7 @@ pub fn process_ir_path_with_gatefn(
     };
 
     if options.quiet {
-        return (gate_fn, summary_stats);
+        return Ok((gate_fn, summary_stats));
     }
 
     println!("== Deepest path ({}):", depth_stats.deepest_path.len());
@@ -742,7 +826,41 @@ pub fn process_ir_path_with_gatefn(
         println!("  Primary output toggles: {}", stats.primary_output_toggles);
     }
 
-    (gate_fn, summary_stats)
+    Ok((gate_fn, summary_stats))
+}
+
+/// Processes IR text and emits the same binary AIGER used by `ir2g8r
+/// --aiger-out`.
+pub fn canonical_ir_text_to_g8r_artifacts(
+    ir_text: &str,
+    ir_top: Option<&str>,
+    lowering_options: &CanonicalG8rOptions,
+) -> Result<CanonicalG8rArtifacts, String> {
+    let options = lowering_options.to_process_ir_path_options(
+        ir_top, /* quiet= */ true, /* emit_netlist= */ false,
+        /* emit_independent_op_stats= */ false, /* prepared_ir_out= */ None,
+    );
+    let (gate_fn, stats) = process_ir_text_with_gatefn(ir_text, &options)?;
+    let binary_aiger =
+        emit_aiger_binary(&gate_fn, true).map_err(|e| format!("emit binary AIGER failed: {e}"))?;
+    Ok(CanonicalG8rArtifacts {
+        gate_fn,
+        binary_aiger,
+        stats,
+    })
+}
+
+/// Command line entry point (e.g. it exits the process on error).
+pub fn process_ir_path_with_gatefn(
+    ir_path: &std::path::Path,
+    options: &Options,
+) -> (crate::aig::GateFn, Ir2GatesSummaryStats) {
+    let file_content = std::fs::read_to_string(ir_path)
+        .unwrap_or_else(|err| panic!("Failed to read {}: {}", ir_path.display(), err));
+    process_ir_text_with_gatefn(&file_content, options).unwrap_or_else(|err| {
+        eprintln!("Error encountered lowering IR to gates: {}", err);
+        std::process::exit(1);
+    })
 }
 
 /// Command line entry point (e.g. it exits the process on error).
