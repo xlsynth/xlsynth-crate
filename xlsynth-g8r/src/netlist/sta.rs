@@ -339,7 +339,6 @@ fn analyze_combinational_max_arrival_proto(
     let mut instance_cell_names: Vec<String> = Vec::with_capacity(instance_count);
     let mut instance_pin_nets: Vec<HashMap<String, Vec<NetIndex>>> =
         Vec::with_capacity(instance_count);
-    let mut instance_literal_input_pins: Vec<HashSet<String>> = Vec::with_capacity(instance_count);
     let mut instance_timing_related_input_pins: Vec<HashSet<String>> =
         Vec::with_capacity(instance_count);
 
@@ -392,7 +391,6 @@ fn analyze_combinational_max_arrival_proto(
         }
 
         let mut pin_nets: HashMap<String, Vec<NetIndex>> = HashMap::new();
-        let mut literal_input_pins = HashSet::new();
         for (port_sym, netref) in &inst.connections {
             let pin_name = resolve_symbol(interner, *port_sym, "pin name")?;
             if pin_nets.contains_key(pin_name.as_str()) {
@@ -441,11 +439,20 @@ fn analyze_combinational_max_arrival_proto(
                     pin_name
                 ));
             }
+            if pin.direction == PinDirection::Input as i32
+                && timing_related_input_pins.contains(pin_name.as_str())
+                && matches!(netref, NetRef::Literal(_))
+            {
+                return Err(anyhow!(
+                    "instance '{}' timing-related input pin '{}.{}' uses a literal binding; basic STA does not model constant-tied timing inputs",
+                    resolve_symbol(interner, inst.instance_name, "instance name")
+                        .unwrap_or_else(|_| "<unknown>".to_string()),
+                    cell_name,
+                    pin_name
+                ));
+            }
             let mut connected_nets = Vec::new();
             netref.collect_net_indices(&mut connected_nets);
-            if pin.direction == PinDirection::Input as i32 && matches!(netref, NetRef::Literal(_)) {
-                literal_input_pins.insert(pin_name.clone());
-            }
             for net_idx in &connected_nets {
                 if net_idx.0 >= nets.len() {
                     return Err(anyhow!(
@@ -484,7 +491,6 @@ fn analyze_combinational_max_arrival_proto(
             pin_nets.insert(pin_name, connected_nets);
         }
         instance_pin_nets.push(pin_nets);
-        instance_literal_input_pins.push(literal_input_pins);
         instance_timing_related_input_pins.push(timing_related_input_pins);
     }
 
@@ -626,7 +632,6 @@ fn analyze_combinational_max_arrival_proto(
         let cell_idx = instance_cell_indices[inst_idx];
         let cell_name = &instance_cell_names[inst_idx];
         let inst_pin_map = &instance_pin_nets[inst_idx];
-        let literal_input_pins = &instance_literal_input_pins[inst_idx];
         let instance = &module.instances[inst_idx];
         let instance_name = resolve_symbol(interner, instance.instance_name, "instance name")
             .unwrap_or_else(|_| "<unknown>".to_string());
@@ -640,6 +645,19 @@ fn analyze_combinational_max_arrival_proto(
             };
             if output_nets.is_empty() {
                 continue;
+            }
+            if let Some(unsupported_arc) = pin
+                .timing_arcs
+                .iter()
+                .find(|arc| !StaTimingType::from_raw(arc.timing_type.as_str()).is_combinational())
+            {
+                return Err(anyhow!(
+                    "basic STA only supports combinational output pins; instance '{}' output pin '{}.{}' has unsupported timing type '{}'",
+                    instance_name,
+                    cell_name,
+                    pin.name,
+                    unsupported_arc.timing_type
+                ));
             }
             let combinational_arcs: Vec<&TimingArc> = pin
                 .timing_arcs
@@ -685,24 +703,6 @@ fn analyze_combinational_max_arrival_proto(
                                 )
                             })?;
                         if related_nets.is_empty() {
-                            if literal_input_pins.contains(related_pin_name) {
-                                let context = format!(
-                                    "{}.{} (instance '{}') related_pin '{}'",
-                                    cell_name, pin.name, instance_name, related_pin_name
-                                );
-                                let candidate = evaluate_arc_set(
-                                    lib.library,
-                                    arc,
-                                    &source_timing_set,
-                                    output_load,
-                                    &context,
-                                )?;
-                                accumulated = Some(match accumulated {
-                                    Some(prev) => prev.merge(&candidate),
-                                    None => candidate,
-                                });
-                                continue;
-                            }
                             return Err(anyhow!(
                                 "instance '{}' output pin '{}.{}' has unconnected timing-related input pin '{}'",
                                 instance_name,
@@ -1983,7 +1983,7 @@ endmodule
     }
 
     #[test]
-    fn sta_accepts_literal_tied_timing_inputs_as_sources() {
+    fn sta_rejects_literal_tied_timing_inputs() {
         let src = r#"
 module top (a, y);
   input a;
@@ -2045,15 +2045,19 @@ endmodule
             ..Default::default()
         };
 
-        let report = analyze_combinational_max_arrival_proto(
+        let error = analyze_combinational_max_arrival_proto(
             &module,
             &nets,
             &interner,
             &lib,
             StaOptions::default(),
         )
-        .expect("literal-tied timing inputs should be valid sources");
-        assert_close(report.worst_output_arrival, 5.0);
+        .expect_err("literal-tied timing inputs should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("does not model constant-tied timing inputs")
+        );
     }
 
     #[test]
@@ -2619,6 +2623,86 @@ endmodule
             error
                 .to_string()
                 .contains("does not support conditional timing arcs")
+        );
+    }
+
+    #[test]
+    fn sta_rejects_mixed_output_timing_types() {
+        let src = r#"
+module top (a, clk, y);
+  input a;
+  input clk;
+  output y;
+  wire a;
+  wire clk;
+  wire y;
+  MIXED u0 (.A(a), .CLK(clk), .Y(y));
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let lib = crate::liberty_proto::Library {
+            cells: vec![Cell {
+                name: "MIXED".to_string(),
+                pins: vec![
+                    Pin {
+                        direction: PinDirection::Input as i32,
+                        name: "A".to_string(),
+                        ..Default::default()
+                    },
+                    Pin {
+                        direction: PinDirection::Input as i32,
+                        name: "CLK".to_string(),
+                        ..Default::default()
+                    },
+                    Pin {
+                        direction: PinDirection::Output as i32,
+                        name: "Y".to_string(),
+                        timing_arcs: vec![
+                            TimingArc {
+                                related_pin: "A".to_string(),
+                                timing_sense: "positive_unate".to_string(),
+                                timing_type: "combinational".to_string(),
+                                tables: vec![
+                                    scalar_table("cell_rise", 2.0),
+                                    scalar_table("cell_fall", 3.0),
+                                    scalar_table("rise_transition", 0.2),
+                                    scalar_table("fall_transition", 0.3),
+                                ],
+                                ..Default::default()
+                            },
+                            TimingArc {
+                                related_pin: "CLK".to_string(),
+                                timing_sense: "positive_unate".to_string(),
+                                timing_type: "rising_edge".to_string(),
+                                tables: vec![
+                                    scalar_table("cell_rise", 4.0),
+                                    scalar_table("cell_fall", 5.0),
+                                    scalar_table("rise_transition", 0.4),
+                                    scalar_table("fall_transition", 0.5),
+                                ],
+                                ..Default::default()
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let error = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &lib,
+            StaOptions::default(),
+        )
+        .expect_err("mixed output timing types should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("has unsupported timing type 'rising_edge'")
         );
     }
 
