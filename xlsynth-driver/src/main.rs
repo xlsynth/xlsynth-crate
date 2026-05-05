@@ -1815,7 +1815,7 @@ fn main() {
                         .value_name("VALUE")
                         .default_value("0.01")
                         .value_parser(clap::value_parser!(f64))
-                        .help("Transition applied at primary inputs and undriven nets")
+                        .help("Transition applied at primary inputs")
                         .action(ArgAction::Set),
                 )
                 .arg(

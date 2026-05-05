@@ -14,6 +14,8 @@
 //! - Rejects sequential output pins and conditional (`when`) timing arcs rather
 //!   than approximating unsupported timing semantics in this limited-scope
 //!   pass.
+//! - Rejects non-monotone timing tables because later frontier reduction relies
+//!   on larger transition/load queries not producing smaller delay/slew values.
 //!
 //! At a high level, the analysis is:
 //! 1. Index each instance's cell/pin connectivity, recording one driver and all
@@ -1299,6 +1301,7 @@ fn evaluate_table(
     let all_axes = [axis_1, axis_2, axis_3];
     let all_variables = [variable_1, variable_2, variable_3];
     validate_effective_axes(table, all_axes, context)?;
+    validate_monotone_timing_table(&array, table.dimensions.as_slice(), context)?;
     if rank == 0 {
         return array
             .get(&[])
@@ -1453,6 +1456,67 @@ fn validate_effective_axes(table: &TimingTable, axes: [&[f64]; 3], context: &str
             ));
         }
     }
+    Ok(())
+}
+
+/// Rejects tables that decrease along any axis; envelope reduction requires
+/// monotone queries.
+fn validate_monotone_timing_table(
+    array: &TimingTableArrayView<'_>,
+    dimensions: &[u32],
+    context: &str,
+) -> Result<()> {
+    if dimensions.is_empty() {
+        return Ok(());
+    }
+
+    let mut indices = vec![0usize; dimensions.len()];
+    loop {
+        let current = array.get(indices.as_slice()).ok_or_else(|| {
+            anyhow!(
+                "{context}: could not index timing table at {:?} while checking monotonicity",
+                indices
+            )
+        })?;
+
+        for (axis_idx, dimension) in dimensions.iter().copied().enumerate() {
+            if indices[axis_idx] + 1 >= dimension as usize {
+                continue;
+            }
+            let mut next_indices = indices.clone();
+            next_indices[axis_idx] += 1;
+            let next = array.get(next_indices.as_slice()).ok_or_else(|| {
+                anyhow!(
+                    "{context}: could not index timing table at {:?} while checking monotonicity",
+                    next_indices
+                )
+            })?;
+            if next < current {
+                return Err(anyhow!(
+                    "{context}: timing table decreases along axis {} between {:?}={} and {:?}={}; basic STA requires monotone timing tables",
+                    axis_idx + 1,
+                    indices,
+                    current,
+                    next_indices,
+                    next
+                ));
+            }
+        }
+
+        let mut axis_idx = dimensions.len();
+        while axis_idx > 0 {
+            axis_idx -= 1;
+            indices[axis_idx] += 1;
+            if indices[axis_idx] < dimensions[axis_idx] as usize {
+                break;
+            }
+            indices[axis_idx] = 0;
+        }
+        if axis_idx == 0 && indices[0] == 0 {
+            break;
+        }
+    }
+
     Ok(())
 }
 
@@ -3730,6 +3794,35 @@ endmodule
             error
                 .to_string()
                 .contains("axis 1 is not strictly increasing")
+        );
+    }
+
+    #[test]
+    fn evaluate_table_rejects_non_monotone_values() {
+        let lib = crate::liberty_proto::Library {
+            lu_table_templates: vec![LuTableTemplate {
+                kind: "lu_table_template".to_string(),
+                name: "tmpl_non_monotone".to_string(),
+                variable_1: "input_net_transition".to_string(),
+                index_1: vec![0.0, 1.0],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let table = TimingTable {
+            kind: "cell_rise".to_string(),
+            template_id: 1,
+            dimensions: vec![2],
+            values: vec![2.0, 1.0],
+            ..Default::default()
+        };
+
+        let error = evaluate_table(&lib, &table, 0.5, 0.0, "non_monotone")
+            .expect_err("non-monotone values should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("basic STA requires monotone timing tables")
         );
     }
 
