@@ -770,8 +770,7 @@ directory (`best.ir`, `best.opt.ir`, `best.g8r`, `best.stats.json`,
 a minimizable raw winning-provenance artifact under `winning-lineage/`
 (`manifest.json` plus inspectable raw state packages in `states/`).
 
-This subcommand intentionally shares the same flag surface as
-`pir-mcmc-driver` from the `xlsynth-mcmc-pir` crate.
+This subcommand is the user-facing CLI for PIR MCMC optimization.
 
 - Required:
   - `<input_path>` – input PIR `.ir` file.

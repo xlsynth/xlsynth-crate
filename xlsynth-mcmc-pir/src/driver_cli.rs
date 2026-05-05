@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared CLI wiring for PIR MCMC optimization entry points.
-//!
-//! Both `pir-mcmc-driver` and `xlsynth-driver ir-mcmc-opt` use this module so
-//! their flag surface and behavior stay in sync.
+//! Shared CLI wiring for the `xlsynth-driver ir-mcmc-opt` entry point.
 
 use anyhow::Result;
 use clap::{Arg, ArgAction, ArgMatches, Command, ValueEnum};
@@ -708,6 +705,7 @@ impl PostprocessStatsOutput {
 fn gatify_ir_text_to_artifacts(
     ir_text: &str,
     canonical_g8r_options: &CanonicalG8rOptions,
+    compute_graph_logical_effort: bool,
 ) -> Result<GatifiedArtifacts> {
     let mut parser = ir_parser::Parser::new(ir_text);
     let pir_pkg = parser
@@ -716,10 +714,12 @@ fn gatify_ir_text_to_artifacts(
     let top_fn = pir_pkg
         .get_top_fn()
         .ok_or_else(|| anyhow::anyhow!("No top function found in PIR package"))?;
+    let mut artifact_g8r_options = canonical_g8r_options.clone();
+    artifact_g8r_options.compute_graph_logical_effort = compute_graph_logical_effort;
     let artifacts = canonical_ir_text_to_g8r_lowering_artifacts(
         ir_text,
         Some(&top_fn.name),
-        canonical_g8r_options,
+        &artifact_g8r_options,
     )
     .map_err(|e| anyhow::anyhow!("canonical g8r lowering failed: {}", e))?;
     let gate_fn = artifacts.gate_fn;
@@ -804,8 +804,11 @@ fn write_witness_artifacts(
         anyhow::anyhow!("Failed to write {}: {:?}", witness_opt_ir_path.display(), e)
     })?;
 
-    let witness_artifacts =
-        gatify_ir_text_to_artifacts(&witness_opt_ir_text, canonical_g8r_options)?;
+    let witness_artifacts = gatify_ir_text_to_artifacts(
+        &witness_opt_ir_text,
+        canonical_g8r_options,
+        compute_graph_logical_effort,
+    )?;
     let witness_g8r_path = output_dir.join("witness.g8r");
     std::fs::write(&witness_g8r_path, witness_artifacts.g8r_text.as_bytes())
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", witness_g8r_path.display(), e))?;
@@ -1067,8 +1070,11 @@ where
     std::fs::write(&orig_opt_ir_path, orig_opt_ir_text.as_bytes())
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", orig_opt_ir_path.display(), e))?;
 
-    let orig_artifacts =
-        gatify_ir_text_to_artifacts(&orig_opt_ir_text, &cli.canonical_g8r_options)?;
+    let orig_artifacts = gatify_ir_text_to_artifacts(
+        &orig_opt_ir_text,
+        &cli.canonical_g8r_options,
+        compute_artifact_graph_logical_effort,
+    )?;
     let orig_g8r_path = output_dir.join("orig.g8r");
     std::fs::write(&orig_g8r_path, orig_artifacts.g8r_text.as_bytes())
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", orig_g8r_path.display(), e))?;
@@ -1161,6 +1167,7 @@ where
                 let best_artifacts = match gatify_ir_text_to_artifacts(
                     &best_opt_ir_text,
                     &canonical_g8r_options_for_thread,
+                    compute_artifact_graph_logical_effort_for_thread,
                 ) {
                     Ok(v) => v,
                     Err(_) => continue,
@@ -1436,8 +1443,11 @@ where
     std::fs::write(&best_opt_ir_path, best_opt_ir_text.as_bytes())
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", best_opt_ir_path.display(), e))?;
 
-    let best_artifacts =
-        gatify_ir_text_to_artifacts(&best_opt_ir_text, &cli.canonical_g8r_options)?;
+    let best_artifacts = gatify_ir_text_to_artifacts(
+        &best_opt_ir_text,
+        &cli.canonical_g8r_options,
+        compute_artifact_graph_logical_effort,
+    )?;
     let best_g8r_path = output_dir.join("best.g8r");
     std::fs::write(&best_g8r_path, best_artifacts.g8r_text.as_bytes())
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", best_g8r_path.display(), e))?;
@@ -2079,6 +2089,56 @@ top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
         run_pir_mcmc_driver(cli, |_| {}).unwrap();
         let stats: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(output_dir.path().join("orig.post.stats.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(stats["graph_logical_effort_worst_case_delay"].is_number());
+    }
+
+    #[test]
+    fn raw_run_keeps_graph_le_when_objective_requires_it() {
+        let input_dir = tempdir().unwrap();
+        let output_dir = tempdir().unwrap();
+        let input_path = input_dir.path().join("sample.ir");
+        fs::write(
+            &input_path,
+            r#"package sample
+
+top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret and.3: bits[1] = and(a, b, id=3)
+}
+"#,
+        )
+        .unwrap();
+        let cli = PirMcmcCliArgs {
+            input_path: input_path.display().to_string(),
+            top: None,
+            iters: 0,
+            seed: 1,
+            output: Some(output_dir.path().display().to_string()),
+            metric: Objective::G8rLeGraph,
+            extension_costing_mode: ExtensionCostingMode::Preserve,
+            g8r_postprocess_program: None,
+            canonical_g8r_options: CanonicalG8rOptions {
+                compute_graph_logical_effort: false,
+                ..CanonicalG8rOptions::default()
+            },
+            max_delay: None,
+            max_area: None,
+            toggle_stimulus: None,
+            initial_temperature: 1.0,
+            threads: 1,
+            checkpoint_iters: 0,
+            progress_iters: 0,
+            formal_oracle: false,
+            switching_beta1: 1.0,
+            switching_beta2: 0.0,
+            switching_primary_output_load: 1.0,
+            chain_strategy: CliChainStrategy::Independent,
+        };
+
+        run_pir_mcmc_driver(cli, |_| {}).unwrap();
+        let stats: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(output_dir.path().join("orig.stats.json")).unwrap(),
         )
         .unwrap();
         assert!(stats["graph_logical_effort_worst_case_delay"].is_number());

@@ -1571,7 +1571,7 @@ pub struct RunOptions {
 
 /// Message sent from the PIR MCMC engine to an optional checkpoint writer.
 ///
-/// This is used by the `pir-mcmc-driver` binary to keep on-disk best artifacts
+/// This is used by CLI checkpoint writers to keep on-disk best artifacts
 /// up-to-date during long runs and (optionally) to snapshot the improvement
 /// trajectory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
