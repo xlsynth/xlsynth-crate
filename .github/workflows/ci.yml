@@ -345,6 +345,10 @@ jobs:
     needs: [lint-check-ubuntu]
     runs-on: ubuntu-latest
     container: ubuntu:20.04
+    env:
+      # The primary focal mirrors can be very slow from this container lane.
+      # Start on the Azure mirror instead of waiting for failed apt attempts.
+      CI_APT_FALLBACK_ATTEMPT: 1
 
     steps:
       - name: Check out code
