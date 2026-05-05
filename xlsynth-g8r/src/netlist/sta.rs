@@ -302,9 +302,21 @@ fn analyze_combinational_max_arrival_proto(
             options.primary_input_transition
         ));
     }
+    if options.primary_input_transition < 0.0 {
+        return Err(anyhow!(
+            "primary_input_transition must be non-negative; got {}",
+            options.primary_input_transition
+        ));
+    }
     if !options.module_output_load.is_finite() {
         return Err(anyhow!(
             "module_output_load must be finite; got {}",
+            options.module_output_load
+        ));
+    }
+    if options.module_output_load < 0.0 {
+        return Err(anyhow!(
+            "module_output_load must be non-negative; got {}",
             options.module_output_load
         ));
     }
@@ -503,7 +515,13 @@ fn analyze_combinational_max_arrival_proto(
                     load.pin_name
                 )
             })?;
-            let pin_cap = effective_input_capacitance_by_edge(pin);
+            let pin_cap = effective_input_capacitance_by_edge(
+                pin,
+                &format!(
+                    "load pin '{}.{}'",
+                    instance_cell_names[load.inst_idx], load.pin_name
+                ),
+            )?;
             cap.rise += pin_cap.rise;
             cap.fall += pin_cap.fall;
         }
@@ -755,10 +773,10 @@ fn analyze_combinational_max_arrival_proto(
         worst_output_arrival: worst_output_arrival.unwrap_or(0.0),
     })
 }
-fn effective_input_capacitance_by_edge(pin: &Pin) -> EdgeLoadCapacitance {
+fn effective_input_capacitance_by_edge(pin: &Pin, context: &str) -> Result<EdgeLoadCapacitance> {
     // max_capacitance is a design-rule limit, not nominal pin capacitance.
     // Prefer edge-specific capacitance when provided; fall back to nominal.
-    EdgeLoadCapacitance {
+    let capacitance = EdgeLoadCapacitance {
         rise: pin
             .rise_capacitance
             .or(pin.capacitance)
@@ -769,7 +787,10 @@ fn effective_input_capacitance_by_edge(pin: &Pin) -> EdgeLoadCapacitance {
             .or(pin.capacitance)
             .or(pin.rise_capacitance)
             .unwrap_or(0.0),
-    }
+    };
+    validate_non_negative_finite(capacitance.rise, "rise capacitance", context)?;
+    validate_non_negative_finite(capacitance.fall, "fall capacitance", context)?;
+    Ok(capacitance)
 }
 
 #[cfg(test)]
@@ -1146,20 +1167,18 @@ fn evaluate_table(
     output_load: f64,
     context: &str,
 ) -> Result<f64> {
-    if !input_transition.is_finite() {
-        return Err(anyhow!(
-            "{context}: input transition query must be finite; got {}",
-            input_transition
-        ));
-    }
-    if !output_load.is_finite() {
-        return Err(anyhow!(
-            "{context}: output load query must be finite; got {}",
-            output_load
-        ));
-    }
+    validate_non_negative_finite(input_transition, "input transition query", context)?;
+    validate_non_negative_finite(output_load, "output load query", context)?;
     let array = TimingTableArrayView::from_timing_table(table)
         .map_err(|e| anyhow!("{context}: invalid timing table payload: {e}"))?;
+    for value in &table.values {
+        if !value.is_finite() {
+            return Err(anyhow!(
+                "{context}: timing table contains non-finite value {}",
+                value
+            ));
+        }
+    }
 
     let template: Option<&LuTableTemplate> = if table.template_id == 0 {
         None
@@ -1221,6 +1240,13 @@ fn evaluate_table(
                 axis_idx + 1
             ));
         }
+        if let Some(value) = axis.iter().copied().find(|value| !value.is_finite()) {
+            return Err(anyhow!(
+                "{context}: axis {} contains non-finite value {}",
+                axis_idx + 1,
+                value
+            ));
+        }
         if !is_non_decreasing(axis) {
             return Err(anyhow!(
                 "{context}: axis {} is not sorted non-decreasing",
@@ -1280,7 +1306,26 @@ fn evaluate_table(
             .ok_or_else(|| anyhow!("{context}: could not index timing table at {:?}", indices))?;
         result += weight * value;
     }
+    if !result.is_finite() {
+        return Err(anyhow!(
+            "{context}: timing table evaluation produced non-finite result {}",
+            result
+        ));
+    }
     Ok(result)
+}
+
+fn validate_non_negative_finite(value: f64, what: &str, context: &str) -> Result<()> {
+    if !value.is_finite() {
+        return Err(anyhow!("{context}: {what} must be finite; got {}", value));
+    }
+    if value < 0.0 {
+        return Err(anyhow!(
+            "{context}: {what} must be non-negative; got {}",
+            value
+        ));
+    }
+    Ok(())
 }
 
 fn axis_rank(index_1: &[f64], index_2: &[f64], index_3: &[f64]) -> usize {
@@ -1641,6 +1686,53 @@ endmodule
             load_error
                 .to_string()
                 .contains("module_output_load must be finite")
+        );
+    }
+
+    #[test]
+    fn sta_rejects_negative_options() {
+        let src = r#"
+module top (a, y);
+  input a;
+  output y;
+  wire a;
+  wire y;
+  INV u0 (.A(a), .Y(y));
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let transition_error = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &scalar_inv_library(),
+            StaOptions {
+                primary_input_transition: -0.1,
+                module_output_load: 0.0,
+            },
+        )
+        .expect_err("negative primary-input transition should be rejected");
+        assert!(
+            transition_error
+                .to_string()
+                .contains("primary_input_transition must be non-negative")
+        );
+
+        let load_error = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &scalar_inv_library(),
+            StaOptions {
+                primary_input_transition: 0.01,
+                module_output_load: -0.1,
+            },
+        )
+        .expect_err("negative module-output load should be rejected");
+        assert!(
+            load_error
+                .to_string()
+                .contains("module_output_load must be non-negative")
         );
     }
 
@@ -2302,6 +2394,22 @@ endmodule
             ..Default::default()
         };
         assert_close(effective_input_capacitance(&only_max), 0.0);
+    }
+
+    #[test]
+    fn effective_input_capacitance_by_edge_rejects_negative_values() {
+        let negative = Pin {
+            rise_capacitance: Some(-0.1),
+            fall_capacitance: Some(0.2),
+            ..Default::default()
+        };
+        let error = effective_input_capacitance_by_edge(&negative, "pin")
+            .expect_err("negative capacitance should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("rise capacitance must be non-negative")
+        );
     }
 
     #[test]
@@ -3211,5 +3319,52 @@ endmodule
         let error = evaluate_table(&lib, &table, 0.5, 0.5, "bad_rank")
             .expect_err("axis rank mismatch should be rejected");
         assert!(error.to_string().contains("dimension rank 1"));
+    }
+
+    #[test]
+    fn evaluate_table_rejects_non_finite_axes_and_values() {
+        let lib = crate::liberty_proto::Library {
+            lu_table_templates: vec![LuTableTemplate {
+                kind: "lu_table_template".to_string(),
+                name: "tmpl_non_finite_axis".to_string(),
+                variable_1: "input_net_transition".to_string(),
+                index_1: vec![0.0, f64::INFINITY],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let axis_table = TimingTable {
+            kind: "cell_rise".to_string(),
+            template_id: 1,
+            dimensions: vec![2],
+            values: vec![1.0, 2.0],
+            ..Default::default()
+        };
+        let axis_error = evaluate_table(&lib, &axis_table, 0.5, 0.0, "bad_axis")
+            .expect_err("non-finite axes should be rejected");
+        assert!(
+            axis_error
+                .to_string()
+                .contains("axis 1 contains non-finite")
+        );
+
+        let value_table = TimingTable {
+            kind: "cell_rise".to_string(),
+            values: vec![f64::NAN],
+            ..Default::default()
+        };
+        let value_error = evaluate_table(
+            &crate::liberty_proto::Library::default(),
+            &value_table,
+            0.0,
+            0.0,
+            "bad_value",
+        )
+        .expect_err("non-finite table values should be rejected");
+        assert!(
+            value_error
+                .to_string()
+                .contains("timing table contains non-finite value")
+        );
     }
 }
