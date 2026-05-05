@@ -326,7 +326,7 @@ fn analyze_combinational_max_arrival_proto(
             .iter()
             .filter(|pin| pin.direction == PinDirection::Output as i32)
             .flat_map(|pin| pin.timing_arcs.iter())
-            .filter(|arc| is_combinational_timing_type(arc.timing_type.as_str()))
+            .filter(|arc| StaTimingType::from_raw(arc.timing_type.as_str()).is_combinational())
             .flat_map(|arc| split_related_pin_names(arc.related_pin.as_str()))
             .map(ToString::to_string)
             .collect();
@@ -528,7 +528,7 @@ fn analyze_combinational_max_arrival_proto(
             let combinational_arcs: Vec<&TimingArc> = pin
                 .timing_arcs
                 .iter()
-                .filter(|arc| is_combinational_timing_type(arc.timing_type.as_str()))
+                .filter(|arc| StaTimingType::from_raw(arc.timing_type.as_str()).is_combinational())
                 .collect();
             if combinational_arcs.is_empty() {
                 return Err(anyhow!(
@@ -723,11 +723,35 @@ fn effective_input_capacitance(pin: &Pin) -> f64 {
         .fold(0.0, f64::max)
 }
 
-fn is_combinational_timing_type(timing_type: &str) -> bool {
-    timing_type.is_empty()
-        || timing_type == "combinational"
-        || timing_type == "combinational_rise"
-        || timing_type == "combinational_fall"
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StaTimingType {
+    Combinational,
+    CombinationalRise,
+    CombinationalFall,
+    Other,
+}
+
+impl StaTimingType {
+    fn from_raw(raw: &str) -> Self {
+        match raw {
+            "" | "combinational" => Self::Combinational,
+            "combinational_rise" => Self::CombinationalRise,
+            "combinational_fall" => Self::CombinationalFall,
+            _ => Self::Other,
+        }
+    }
+
+    fn is_combinational(self) -> bool {
+        !matches!(self, Self::Other)
+    }
+
+    fn produces_rise(self) -> bool {
+        !matches!(self, Self::CombinationalFall)
+    }
+
+    fn produces_fall(self) -> bool {
+        !matches!(self, Self::CombinationalRise)
+    }
 }
 
 fn split_related_pin_names(related_pin: &str) -> impl Iterator<Item = &str> {
@@ -768,6 +792,7 @@ fn evaluate_arc_set(
     output_load: EdgeLoadCapacitance,
     context: &str,
 ) -> Result<SignalTimingSet> {
+    let timing_type = StaTimingType::from_raw(arc.timing_type.as_str());
     let sense = arc.timing_sense.as_str();
     let all_inputs = if sense == "" || sense == "non_unate" {
         let mut combined = input_timing.rise.clone();
@@ -793,7 +818,7 @@ fn evaluate_arc_set(
     };
 
     let mut output = SignalTimingSet::default();
-    if arc.timing_type != "combinational_fall" {
+    if timing_type.produces_rise() {
         let cell_rise = find_unique_table(arc, "cell_rise", context)?;
         let rise_transition = find_unique_table(arc, "rise_transition", context)?;
         output.rise = evaluate_output_edge_set(
@@ -807,7 +832,7 @@ fn evaluate_arc_set(
             "rise_transition",
         )?;
     }
-    if arc.timing_type != "combinational_rise" {
+    if timing_type.produces_fall() {
         let cell_fall = find_unique_table(arc, "cell_fall", context)?;
         let fall_transition = find_unique_table(arc, "fall_transition", context)?;
         output.fall = evaluate_output_edge_set(
