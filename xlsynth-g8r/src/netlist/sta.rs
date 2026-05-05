@@ -254,6 +254,27 @@ impl<'a> StaLibraryIndex<'a> {
                         pin.name
                     ));
                 }
+                for arc in &pin.timing_arcs {
+                    for table in &arc.tables {
+                        if !matches!(
+                            LibertyTableKind::from_raw(table.kind.as_str()),
+                            LibertyTableKind::CellRise
+                                | LibertyTableKind::CellFall
+                                | LibertyTableKind::RiseTransition
+                                | LibertyTableKind::FallTransition
+                        ) {
+                            continue;
+                        }
+                        validate_timing_table_payload(
+                            library,
+                            table,
+                            &format!(
+                                "cell '{}' pin '{}' related_pin '{}' table '{}'",
+                                cell.name, pin.name, arc.related_pin, table.kind
+                            ),
+                        )?;
+                    }
+                }
             }
             pin_by_cell.push(pin_map);
         }
@@ -1246,26 +1267,18 @@ fn expected_template_kind_for_timing_table(table: &TimingTable) -> Result<LuTabl
         .ok_or_else(|| anyhow!("unsupported Liberty table kind '{}'", table.kind))
 }
 
-fn evaluate_table(
-    library: &crate::liberty_proto::Library,
-    table: &TimingTable,
-    input_transition: f64,
-    output_load: f64,
-    context: &str,
-) -> Result<f64> {
-    validate_non_negative_finite(input_transition, "input transition query", context)?;
-    validate_non_negative_finite(output_load, "output load query", context)?;
-    let array = TimingTableArrayView::from_timing_table(table)
-        .map_err(|e| anyhow!("{context}: invalid timing table payload: {e}"))?;
-    for value in &table.values {
-        if !value.is_finite() {
-            return Err(anyhow!(
-                "{context}: timing table contains non-finite value {}",
-                value
-            ));
-        }
-    }
+struct TimingTableLayout<'a> {
+    axes: [&'a [f64]; 3],
+    variables: [&'a str; 3],
+}
 
+/// Resolves template-backed table axes and variables without evaluating a
+/// query.
+fn timing_table_layout<'a>(
+    library: &'a crate::liberty_proto::Library,
+    table: &'a TimingTable,
+    context: &str,
+) -> Result<TimingTableLayout<'a>> {
     let template: Option<&LuTableTemplate> = if table.template_id == 0 {
         None
     } else {
@@ -1291,39 +1304,50 @@ fn evaluate_table(
         Some(tmpl)
     };
 
-    let axis_1 = effective_axis(&table.index_1, template.map(|t| t.index_1.as_slice()));
-    let axis_2 = effective_axis(&table.index_2, template.map(|t| t.index_2.as_slice()));
-    let axis_3 = effective_axis(&table.index_3, template.map(|t| t.index_3.as_slice()));
+    Ok(TimingTableLayout {
+        axes: [
+            effective_axis(&table.index_1, template.map(|t| t.index_1.as_slice())),
+            effective_axis(&table.index_2, template.map(|t| t.index_2.as_slice())),
+            effective_axis(&table.index_3, template.map(|t| t.index_3.as_slice())),
+        ],
+        variables: [
+            template.map(|t| t.variable_1.as_str()).unwrap_or(""),
+            template.map(|t| t.variable_2.as_str()).unwrap_or(""),
+            template.map(|t| t.variable_3.as_str()).unwrap_or(""),
+        ],
+    })
+}
 
-    let variable_1 = template.map(|t| t.variable_1.as_str()).unwrap_or("");
-    let variable_2 = template.map(|t| t.variable_2.as_str()).unwrap_or("");
-    let variable_3 = template.map(|t| t.variable_3.as_str()).unwrap_or("");
-
-    let rank = array.rank();
-    if rank > 3 {
+/// Validates query-invariant timing-table properties once before STA
+/// propagation.
+fn validate_timing_table_payload(
+    library: &crate::liberty_proto::Library,
+    table: &TimingTable,
+    context: &str,
+) -> Result<()> {
+    let array = TimingTableArrayView::from_timing_table(table)
+        .map_err(|e| anyhow!("{context}: invalid timing table payload: {e}"))?;
+    for value in &table.values {
+        if !value.is_finite() {
+            return Err(anyhow!(
+                "{context}: timing table contains non-finite value {}",
+                value
+            ));
+        }
+    }
+    if array.rank() > 3 {
         return Err(anyhow!(
             "{context}: rank-{} timing table is unsupported in basic STA",
-            rank
+            array.rank()
         ));
     }
-
-    let all_axes = [axis_1, axis_2, axis_3];
-    let all_variables = [variable_1, variable_2, variable_3];
-    validate_effective_axes(table, all_axes, context)?;
-    validate_monotone_timing_table(&array, table.dimensions.as_slice(), context)?;
-    if rank == 0 {
-        return array
-            .get(&[])
-            .ok_or_else(|| anyhow!("{context}: scalar timing table had no value"));
-    }
-    let mut bounds: Vec<(usize, usize, f64)> = Vec::with_capacity(rank);
-
-    for axis_idx in 0..rank {
-        let axis = all_axes[axis_idx];
+    let layout = timing_table_layout(library, table, context)?;
+    validate_effective_axes(table, layout.axes, context)?;
+    for (axis_idx, axis) in layout.axes.iter().take(array.rank()).enumerate() {
         if axis.is_empty() {
             return Err(anyhow!(
                 "{context}: missing axis data for rank-{} table on axis {}",
-                rank,
+                array.rank(),
                 axis_idx + 1
             ));
         }
@@ -1340,8 +1364,34 @@ fn evaluate_table(
                 axis_idx + 1
             ));
         }
+    }
+    validate_monotone_timing_table(&array, table.dimensions.as_slice(), context)
+}
+
+fn evaluate_table(
+    library: &crate::liberty_proto::Library,
+    table: &TimingTable,
+    input_transition: f64,
+    output_load: f64,
+    context: &str,
+) -> Result<f64> {
+    validate_non_negative_finite(input_transition, "input transition query", context)?;
+    validate_non_negative_finite(output_load, "output load query", context)?;
+    let array = TimingTableArrayView::from_timing_table(table)
+        .map_err(|e| anyhow!("{context}: invalid timing table payload: {e}"))?;
+    let layout = timing_table_layout(library, table, context)?;
+    let rank = array.rank();
+    if rank == 0 {
+        return array
+            .get(&[])
+            .ok_or_else(|| anyhow!("{context}: scalar timing table had no value"));
+    }
+    let mut bounds: Vec<(usize, usize, f64)> = Vec::with_capacity(rank);
+
+    for axis_idx in 0..rank {
+        let axis = layout.axes[axis_idx];
         let query = axis_query_value(
-            all_variables[axis_idx],
+            layout.variables[axis_idx],
             axis_idx,
             input_transition,
             output_load,
@@ -1355,7 +1405,7 @@ fn evaluate_table(
                     "table_query_out_of_range context='{}' axis={} var='{}' query={:.6} axis_lo={:.6} axis_hi={:.6}",
                     context,
                     axis_idx + 1,
-                    all_variables[axis_idx],
+                    layout.variables[axis_idx],
                     query,
                     axis_lo,
                     axis_hi,
@@ -3698,7 +3748,7 @@ endmodule
             ..Default::default()
         };
 
-        let error = evaluate_table(&lib, &table, 0.5, 0.0, "bad_extent")
+        let error = validate_timing_table_payload(&lib, &table, "bad_extent")
             .expect_err("axis extent mismatch should be rejected");
         assert!(error.to_string().contains("axis 1 dimension 3"));
     }
@@ -3725,7 +3775,7 @@ endmodule
             ..Default::default()
         };
 
-        let error = evaluate_table(&lib, &table, 0.5, 0.5, "bad_rank")
+        let error = validate_timing_table_payload(&lib, &table, "bad_rank")
             .expect_err("axis rank mismatch should be rejected");
         assert!(error.to_string().contains("dimension rank 1"));
     }
@@ -3749,7 +3799,7 @@ endmodule
             values: vec![1.0, 2.0],
             ..Default::default()
         };
-        let axis_error = evaluate_table(&lib, &axis_table, 0.5, 0.0, "bad_axis")
+        let axis_error = validate_timing_table_payload(&lib, &axis_table, "bad_axis")
             .expect_err("non-finite axes should be rejected");
         assert!(
             axis_error
@@ -3762,11 +3812,9 @@ endmodule
             values: vec![f64::NAN],
             ..Default::default()
         };
-        let value_error = evaluate_table(
+        let value_error = validate_timing_table_payload(
             &crate::liberty_proto::Library::default(),
             &value_table,
-            0.0,
-            0.0,
             "bad_value",
         )
         .expect_err("non-finite table values should be rejected");
@@ -3797,7 +3845,7 @@ endmodule
             ..Default::default()
         };
 
-        let error = evaluate_table(&lib, &table, 0.5, 0.0, "duplicate_axis")
+        let error = validate_timing_table_payload(&lib, &table, "duplicate_axis")
             .expect_err("duplicate axis points should be rejected");
         assert!(
             error
@@ -3826,7 +3874,7 @@ endmodule
             ..Default::default()
         };
 
-        let error = evaluate_table(&lib, &table, 0.5, 0.0, "non_monotone")
+        let error = validate_timing_table_payload(&lib, &table, "non_monotone")
             .expect_err("non-monotone values should be rejected");
         assert!(
             error
