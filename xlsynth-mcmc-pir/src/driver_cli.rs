@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared CLI wiring for PIR MCMC optimization entry points.
-//!
-//! Both `pir-mcmc-driver` and `xlsynth-driver ir-mcmc-opt` use this module so
-//! their flag surface and behavior stay in sync.
+//! Shared CLI wiring for the `xlsynth-driver ir-mcmc-opt` entry point.
 
 use anyhow::Result;
 use clap::{Arg, ArgAction, ArgMatches, Command, ValueEnum};
@@ -14,13 +11,10 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use tempfile::Builder;
 use xlsynth_g8r::aig::gate::GateFn;
-use xlsynth_g8r::aig::get_summary_stats;
-use xlsynth_g8r::aig::get_summary_stats::AigStats;
-use xlsynth_g8r::aig::get_summary_stats::SummaryStats;
 use xlsynth_g8r::aig_serdes::gate2ir::GateFnInterfaceSchema;
-use xlsynth_g8r::gatify::ir2gate;
-use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
-use xlsynth_g8r::ir2gate_utils::AdderMapping;
+use xlsynth_g8r::process_ir_path::{
+    CanonicalG8rOptions, canonical_ir_text_to_g8r_lowering_artifacts,
+};
 use xlsynth_mcmc::multichain::ChainStrategy;
 use xlsynth_pir::ir::{Package, PackageMember};
 use xlsynth_pir::ir_parser;
@@ -29,7 +23,7 @@ use xlsynth_pir::ir_utils::compact_and_toposort_in_place;
 use crate::{
     Best, CheckpointKind, CheckpointMsg, ConstraintLimits, ExtensionCostingMode, G8rEvaluationMode,
     Objective, PirMcmcBudgetFrontierOptions, PirMcmcBudgetWitness, PirMcmcPrefixMinimizeOptions,
-    RunOptions, cost_with_effort_options_toggle_stimulus_extension_mode_and_evaluator,
+    RunOptions, cost_with_effort_options_toggle_stimulus_extension_mode_evaluator_and_g8r_options,
     effective_constraint_limits, format_search_score, lower_toggle_stimulus_for_fn,
     minimize_winning_prefix, parse_irvals_tuple_file, postprocess_gate_fn_for_artifact,
     read_pir_mcmc_artifact_dir, run_pir_mcmc_with_artifact_and_observers,
@@ -56,12 +50,14 @@ impl From<CliChainStrategy> for ChainStrategy {
 #[derive(Debug, Clone)]
 pub struct PirMcmcCliArgs {
     pub input_path: String,
+    pub top: Option<String>,
     pub iters: u64,
     pub seed: u64,
     pub output: Option<String>,
     pub metric: Objective,
     pub extension_costing_mode: ExtensionCostingMode,
     pub g8r_postprocess_program: Option<String>,
+    pub canonical_g8r_options: CanonicalG8rOptions,
     pub max_delay: Option<usize>,
     pub max_area: Option<usize>,
     pub toggle_stimulus: Option<String>,
@@ -98,6 +94,13 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 .help("Input IR file (.ir) to optimize.")
                 .required(true)
                 .index(1)
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("top")
+                .long("top")
+                .value_name("TOP")
+                .help("The top-level entry point to use for the IR.")
                 .action(ArgAction::Set),
         )
         .arg(
@@ -157,6 +160,143 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 .help(
                     "External postprocessor invoked as: <program> <input.aig> --output-path <output.aig>.",
                 )
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("fold")
+                .long("fold")
+                .value_name("BOOL")
+                .help("Fold the gate representation.")
+                .value_parser(["true", "false"])
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("hash")
+                .long("hash")
+                .value_name("BOOL")
+                .help("Hash the gate representation.")
+                .value_parser(["true", "false"])
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("enable_rewrite_carry_out")
+                .long("enable-rewrite-carry-out")
+                .value_name("BOOL")
+                .help("Enable carry-out rewrite in prep_for_gatify.")
+                .value_parser(["true", "false"])
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("enable_rewrite_prio_encode")
+                .long("enable-rewrite-prio-encode")
+                .value_name("BOOL")
+                .help("Enable prio-encode / CLZ rewrites in prep_for_gatify.")
+                .value_parser(["true", "false"])
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("enable_rewrite_nary_add")
+                .long("enable-rewrite-nary-add")
+                .value_name("BOOL")
+                .help("Enable nary-add rewrites in prep_for_gatify.")
+                .value_parser(["true", "false"])
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("enable_rewrite_mask_low")
+                .long("enable-rewrite-mask-low")
+                .value_name("BOOL")
+                .help("Enable mask-low rewrite in prep_for_gatify.")
+                .value_parser(["true", "false"])
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("adder_mapping")
+                .long("adder-mapping")
+                .value_name("ADDER_MAPPING")
+                .help("The adder mapping strategy to use.")
+                .value_parser(["ripple-carry", "brent-kung", "kogge-stone"])
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("mul_adder_mapping")
+                .long("mul-adder-mapping")
+                .value_name("ADDER_MAPPING")
+                .help("Optional override for the adder mapping used inside multipliers.")
+                .value_parser(["ripple-carry", "brent-kung", "kogge-stone"])
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("fraig")
+                .long("fraig")
+                .value_name("BOOL")
+                .help("Run fraig optimization.")
+                .value_parser(["true", "false"])
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("fraig_max_iterations")
+                .long("fraig-max-iterations")
+                .value_name("N")
+                .help("Maximum number of iterations for fraig optimization.")
+                .value_parser(clap::value_parser!(usize))
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("max_fraig_sim_samples")
+                .long("max-fraig-sim-samples")
+                .alias("fraig-sim-samples")
+                .value_name("N")
+                .help("Maximum number of random simulation samples for FRAIG candidate discovery.")
+                .value_parser(clap::value_parser!(usize))
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("gate_formal_backend")
+                .long("gate-formal-backend")
+                .value_name("BACKEND")
+                .help("Formal backend for gate-level proof steps.")
+                .value_parser(["cadical", "varisat", "z3", "ir"])
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("compute_graph_logical_effort")
+                .long("compute-graph-logical-effort")
+                .value_name("BOOL")
+                .help("Compute graph logical effort statistics.")
+                .value_parser(["true", "false"])
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("graph_logical_effort_beta1")
+                .long("graph-logical-effort-beta1")
+                .value_name("BETA1")
+                .help("Beta1 value for graph logical effort computation.")
+                .value_parser(clap::value_parser!(f64))
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("graph_logical_effort_beta2")
+                .long("graph-logical-effort-beta2")
+                .value_name("BETA2")
+                .help("Beta2 value for graph logical effort computation.")
+                .value_parser(clap::value_parser!(f64))
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("toggle_sample_count")
+                .long("toggle-sample-count")
+                .value_name("N")
+                .help("If > 0, generate N random input samples for artifact stats.")
+                .value_parser(clap::value_parser!(usize))
+                .action(ArgAction::Set),
+        )
+        .arg(
+            Arg::new("toggle_sample_seed")
+                .long("toggle-seed")
+                .value_name("SEED")
+                .help("Seed for random artifact toggle sampling.")
+                .value_parser(clap::value_parser!(u64))
                 .action(ArgAction::Set),
         )
         .arg(
@@ -269,8 +409,10 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
 }
 
 pub fn parse_pir_mcmc_args(matches: &ArgMatches) -> PirMcmcCliArgs {
+    let canonical_g8r_options = parse_canonical_g8r_options(matches);
     PirMcmcCliArgs {
         input_path: matches.get_one::<String>("input_path").unwrap().to_string(),
+        top: matches.get_one::<String>("top").cloned(),
         iters: *matches.get_one::<u64>("iters").unwrap(),
         seed: *matches.get_one::<u64>("seed").unwrap(),
         output: matches.get_one::<String>("output").cloned(),
@@ -281,6 +423,7 @@ pub fn parse_pir_mcmc_args(matches: &ArgMatches) -> PirMcmcCliArgs {
         g8r_postprocess_program: matches
             .get_one::<String>("g8r_postprocess_program")
             .cloned(),
+        canonical_g8r_options,
         max_delay: matches.get_one::<usize>("max_delay").copied(),
         max_area: matches.get_one::<usize>("max_area").copied(),
         toggle_stimulus: matches.get_one::<String>("toggle_stimulus").cloned(),
@@ -300,6 +443,89 @@ pub fn parse_pir_mcmc_args(matches: &ArgMatches) -> PirMcmcCliArgs {
         chain_strategy: *matches
             .get_one::<CliChainStrategy>("chain_strategy")
             .unwrap(),
+    }
+}
+
+fn parse_cli_bool(matches: &ArgMatches, name: &str, default: bool) -> bool {
+    match matches.get_one::<String>(name).map(|s| s.as_str()) {
+        Some("true") => true,
+        Some("false") => false,
+        _ => default,
+    }
+}
+
+fn parse_adder_mapping(value: Option<&String>) -> xlsynth_g8r::ir2gate_utils::AdderMapping {
+    match value.map(|s| s.as_str()) {
+        Some("ripple-carry") => xlsynth_g8r::ir2gate_utils::AdderMapping::RippleCarry,
+        Some("brent-kung") => xlsynth_g8r::ir2gate_utils::AdderMapping::BrentKung,
+        Some("kogge-stone") => xlsynth_g8r::ir2gate_utils::AdderMapping::KoggeStone,
+        _ => xlsynth_g8r::ir2gate_utils::AdderMapping::default(),
+    }
+}
+
+fn parse_canonical_g8r_options(matches: &ArgMatches) -> CanonicalG8rOptions {
+    let defaults = CanonicalG8rOptions::default();
+    CanonicalG8rOptions {
+        fold: parse_cli_bool(matches, "fold", defaults.fold),
+        hash: parse_cli_bool(matches, "hash", defaults.hash),
+        enable_rewrite_carry_out: parse_cli_bool(
+            matches,
+            "enable_rewrite_carry_out",
+            defaults.enable_rewrite_carry_out,
+        ),
+        enable_rewrite_prio_encode: parse_cli_bool(
+            matches,
+            "enable_rewrite_prio_encode",
+            defaults.enable_rewrite_prio_encode,
+        ),
+        enable_rewrite_nary_add: parse_cli_bool(
+            matches,
+            "enable_rewrite_nary_add",
+            defaults.enable_rewrite_nary_add,
+        ),
+        enable_rewrite_mask_low: parse_cli_bool(
+            matches,
+            "enable_rewrite_mask_low",
+            defaults.enable_rewrite_mask_low,
+        ),
+        adder_mapping: parse_adder_mapping(matches.get_one::<String>("adder_mapping")),
+        mul_adder_mapping: matches
+            .get_one::<String>("mul_adder_mapping")
+            .map(|v| parse_adder_mapping(Some(v))),
+        fraig: parse_cli_bool(matches, "fraig", defaults.fraig),
+        fraig_max_iterations: matches.get_one::<usize>("fraig_max_iterations").copied(),
+        max_fraig_sim_samples: matches
+            .get_one::<usize>("max_fraig_sim_samples")
+            .copied()
+            .unwrap_or(defaults.max_fraig_sim_samples),
+        gate_formal_backend: matches
+            .get_one::<String>("gate_formal_backend")
+            .map(|v| {
+                xlsynth_g8r::prove_gate_fn_equiv_common::GateFormalBackend::parse(v)
+                    .expect("clap validates gate_formal_backend")
+            })
+            .unwrap_or(defaults.gate_formal_backend),
+        compute_graph_logical_effort: parse_cli_bool(
+            matches,
+            "compute_graph_logical_effort",
+            defaults.compute_graph_logical_effort,
+        ),
+        graph_logical_effort_beta1: matches
+            .get_one::<f64>("graph_logical_effort_beta1")
+            .copied()
+            .unwrap_or(defaults.graph_logical_effort_beta1),
+        graph_logical_effort_beta2: matches
+            .get_one::<f64>("graph_logical_effort_beta2")
+            .copied()
+            .unwrap_or(defaults.graph_logical_effort_beta2),
+        toggle_sample_count: matches
+            .get_one::<usize>("toggle_sample_count")
+            .copied()
+            .unwrap_or(defaults.toggle_sample_count),
+        toggle_sample_seed: matches
+            .get_one::<u64>("toggle_sample_seed")
+            .copied()
+            .unwrap_or(defaults.toggle_sample_seed),
     }
 }
 
@@ -452,8 +678,8 @@ fn emit_pkg_text_toposorted(pkg: &Package) -> Result<String> {
 
 struct GatifiedArtifacts {
     g8r_text: String,
-    raw_stats: SummaryStats,
-    gate_fn: GateFn,
+    raw_stats: xlsynth_g8r::process_ir_path::Ir2GatesSummaryStats,
+    gate_fn: xlsynth_g8r::aig::gate::GateFn,
     schema: GateFnInterfaceSchema,
 }
 
@@ -462,19 +688,25 @@ struct PostprocessStatsOutput {
     and_nodes: usize,
     depth: usize,
     fanout_histogram: std::collections::BTreeMap<usize, usize>,
+    graph_logical_effort_worst_case_delay: Option<f64>,
 }
 
-impl From<&AigStats> for PostprocessStatsOutput {
-    fn from(value: &AigStats) -> Self {
+impl PostprocessStatsOutput {
+    fn from_artifact(post: &crate::PostprocessedAigArtifact) -> Self {
         Self {
-            and_nodes: value.and_nodes,
-            depth: value.max_depth,
-            fanout_histogram: value.fanout_histogram.clone(),
+            and_nodes: post.stats.and_nodes,
+            depth: post.stats.max_depth,
+            fanout_histogram: post.stats.fanout_histogram.clone(),
+            graph_logical_effort_worst_case_delay: post.graph_logical_effort_worst_case_delay,
         }
     }
 }
 
-fn gatify_ir_text_to_artifacts(ir_text: &str) -> Result<GatifiedArtifacts> {
+fn gatify_ir_text_to_artifacts(
+    ir_text: &str,
+    canonical_g8r_options: &CanonicalG8rOptions,
+    compute_graph_logical_effort: bool,
+) -> Result<GatifiedArtifacts> {
     let mut parser = ir_parser::Parser::new(ir_text);
     let pir_pkg = parser
         .parse_and_validate_package()
@@ -482,24 +714,16 @@ fn gatify_ir_text_to_artifacts(ir_text: &str) -> Result<GatifiedArtifacts> {
     let top_fn = pir_pkg
         .get_top_fn()
         .ok_or_else(|| anyhow::anyhow!("No top function found in PIR package"))?;
-
-    let gatify_options = GatifyOptions {
-        fold: true,
-        hash: true,
-        check_equivalence: false,
-        adder_mapping: AdderMapping::default(),
-        array_index_lowering_strategy: Default::default(),
-        mul_adder_mapping: None,
-        range_info: None,
-        enable_rewrite_carry_out: false,
-        enable_rewrite_prio_encode: false,
-        enable_rewrite_nary_add: false,
-        enable_rewrite_mask_low: false,
-    };
-    let gatify_output = ir2gate::gatify(top_fn, gatify_options)
-        .map_err(|e| anyhow::anyhow!("ir2gate::gatify failed: {}", e))?;
-    let gate_fn = gatify_output.gate_fn;
-    let raw_stats = get_summary_stats::get_summary_stats(&gate_fn);
+    let mut artifact_g8r_options = canonical_g8r_options.clone();
+    artifact_g8r_options.compute_graph_logical_effort = compute_graph_logical_effort;
+    let artifacts = canonical_ir_text_to_g8r_lowering_artifacts(
+        ir_text,
+        Some(&top_fn.name),
+        &artifact_g8r_options,
+    )
+    .map_err(|e| anyhow::anyhow!("canonical g8r lowering failed: {}", e))?;
+    let gate_fn = artifacts.gate_fn;
+    let raw_stats = artifacts.stats;
     let schema = GateFnInterfaceSchema::from_pir_fn(top_fn)
         .map_err(|e| anyhow::anyhow!("failed to derive gate interface schema: {}", e))?;
     Ok(GatifiedArtifacts {
@@ -516,17 +740,26 @@ fn maybe_write_postprocess_artifacts(
     gate_fn: &GateFn,
     schema: &GateFnInterfaceSchema,
     g8r_evaluation_mode: &G8rEvaluationMode,
+    canonical_g8r_options: &CanonicalG8rOptions,
+    compute_graph_logical_effort: bool,
 ) -> Result<()> {
     if g8r_evaluation_mode.external_postprocess_program().is_none() {
         return Ok(());
     }
-    let post = postprocess_gate_fn_for_artifact(gate_fn, schema, g8r_evaluation_mode)?;
+    let post = postprocess_gate_fn_for_artifact(
+        gate_fn,
+        schema,
+        g8r_evaluation_mode,
+        canonical_g8r_options,
+        compute_graph_logical_effort,
+    )?;
     let post_aig_path = output_dir.join(format!("{stem}.post.aig"));
     std::fs::write(&post_aig_path, &post.bytes)
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", post_aig_path.display(), e))?;
     let post_stats_path = output_dir.join(format!("{stem}.post.stats.json"));
-    let post_stats_json = serde_json::to_string_pretty(&PostprocessStatsOutput::from(&post.stats))
-        .expect("serialize postprocess AIG stats");
+    let post_stats_json =
+        serde_json::to_string_pretty(&PostprocessStatsOutput::from_artifact(&post))
+            .expect("serialize postprocess AIG stats");
     std::fs::write(&post_stats_path, post_stats_json.as_bytes())
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", post_stats_path.display(), e))?;
     Ok(())
@@ -539,6 +772,8 @@ fn write_witness_artifacts(
     witness_fn: &xlsynth_pir::ir::Fn,
     extension_costing_mode: ExtensionCostingMode,
     g8r_evaluation_mode: &G8rEvaluationMode,
+    canonical_g8r_options: &CanonicalG8rOptions,
+    compute_graph_logical_effort: bool,
 ) -> Result<()> {
     std::fs::create_dir_all(output_dir).map_err(|e| {
         anyhow::anyhow!(
@@ -569,7 +804,11 @@ fn write_witness_artifacts(
         anyhow::anyhow!("Failed to write {}: {:?}", witness_opt_ir_path.display(), e)
     })?;
 
-    let witness_artifacts = gatify_ir_text_to_artifacts(&witness_opt_ir_text)?;
+    let witness_artifacts = gatify_ir_text_to_artifacts(
+        &witness_opt_ir_text,
+        canonical_g8r_options,
+        compute_graph_logical_effort,
+    )?;
     let witness_g8r_path = output_dir.join("witness.g8r");
     std::fs::write(&witness_g8r_path, witness_artifacts.g8r_text.as_bytes())
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", witness_g8r_path.display(), e))?;
@@ -585,6 +824,8 @@ fn write_witness_artifacts(
         &witness_artifacts.gate_fn,
         &witness_artifacts.schema,
         g8r_evaluation_mode,
+        canonical_g8r_options,
+        compute_graph_logical_effort,
     )?;
     Ok(())
 }
@@ -637,6 +878,10 @@ where
             e
         )
     })?;
+    if let Some(top) = cli.top.as_deref() {
+        pkg.set_top_fn(top)
+            .map_err(|e| anyhow::anyhow!("Failed to set top function '{}': {}", top, e))?;
+    }
 
     let top_fn = pkg
         .get_top_fn()
@@ -677,14 +922,19 @@ where
             beta2: cli.switching_beta2,
             primary_output_load: cli.switching_primary_output_load,
         };
-    let initial_cost = cost_with_effort_options_toggle_stimulus_extension_mode_and_evaluator(
-        &top_fn,
-        cli.metric,
-        prepared_toggle_stimulus.as_deref(),
-        &weighted_switching_options,
-        cli.extension_costing_mode,
-        &g8r_evaluation_mode,
-    )?;
+    let compute_artifact_graph_logical_effort =
+        cli.canonical_g8r_options.compute_graph_logical_effort
+            || cli.metric.needs_graph_logical_effort();
+    let initial_cost =
+        cost_with_effort_options_toggle_stimulus_extension_mode_evaluator_and_g8r_options(
+            &top_fn,
+            cli.metric,
+            prepared_toggle_stimulus.as_deref(),
+            &weighted_switching_options,
+            cli.extension_costing_mode,
+            &g8r_evaluation_mode,
+            &cli.canonical_g8r_options,
+        )?;
     let effective_constraints = effective_constraint_limits(
         cli.metric,
         ConstraintLimits {
@@ -787,6 +1037,7 @@ where
         weighted_switching_options,
         extension_costing_mode,
         g8r_evaluation_mode: g8r_evaluation_mode.clone(),
+        canonical_g8r_options: cli.canonical_g8r_options.clone(),
         enable_formal_oracle: cli.formal_oracle,
         trajectory_dir: Some(output_dir.clone()),
         toggle_stimulus: toggle_stimulus_values,
@@ -819,7 +1070,11 @@ where
     std::fs::write(&orig_opt_ir_path, orig_opt_ir_text.as_bytes())
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", orig_opt_ir_path.display(), e))?;
 
-    let orig_artifacts = gatify_ir_text_to_artifacts(&orig_opt_ir_text)?;
+    let orig_artifacts = gatify_ir_text_to_artifacts(
+        &orig_opt_ir_text,
+        &cli.canonical_g8r_options,
+        compute_artifact_graph_logical_effort,
+    )?;
     let orig_g8r_path = output_dir.join("orig.g8r");
     std::fs::write(&orig_g8r_path, orig_artifacts.g8r_text.as_bytes())
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", orig_g8r_path.display(), e))?;
@@ -834,6 +1089,8 @@ where
         &orig_artifacts.gate_fn,
         &orig_artifacts.schema,
         &g8r_evaluation_mode,
+        &cli.canonical_g8r_options,
+        compute_artifact_graph_logical_effort,
     )?;
 
     let pkg_template = Arc::new(pkg.clone());
@@ -841,6 +1098,8 @@ where
     let orig_top_name_for_thread = orig_top_name.clone();
     let extension_costing_mode_for_thread = extension_costing_mode;
     let g8r_evaluation_mode_for_thread = g8r_evaluation_mode.clone();
+    let canonical_g8r_options_for_thread = cli.canonical_g8r_options.clone();
+    let compute_artifact_graph_logical_effort_for_thread = compute_artifact_graph_logical_effort;
 
     let writer_handle = if let (Some(best), Some(rx)) = (shared_best.clone(), checkpoint_rx) {
         Some(std::thread::spawn(move || {
@@ -905,7 +1164,11 @@ where
                 ));
                 let _ = std::fs::write(&best_opt_ir_snapshot_path, best_opt_ir_text.as_bytes());
 
-                let best_artifacts = match gatify_ir_text_to_artifacts(&best_opt_ir_text) {
+                let best_artifacts = match gatify_ir_text_to_artifacts(
+                    &best_opt_ir_text,
+                    &canonical_g8r_options_for_thread,
+                    compute_artifact_graph_logical_effort_for_thread,
+                ) {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
@@ -928,6 +1191,8 @@ where
                     &best_artifacts.gate_fn,
                     &best_artifacts.schema,
                     &g8r_evaluation_mode_for_thread,
+                    &canonical_g8r_options_for_thread,
+                    compute_artifact_graph_logical_effort_for_thread,
                 );
                 let snapshot_stem = format!(
                     "best.w{:06}.c{:03}-i{:06}",
@@ -939,6 +1204,8 @@ where
                     &best_artifacts.gate_fn,
                     &best_artifacts.schema,
                     &g8r_evaluation_mode_for_thread,
+                    &canonical_g8r_options_for_thread,
+                    compute_artifact_graph_logical_effort_for_thread,
                 );
             }
         }))
@@ -1176,7 +1443,11 @@ where
     std::fs::write(&best_opt_ir_path, best_opt_ir_text.as_bytes())
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", best_opt_ir_path.display(), e))?;
 
-    let best_artifacts = gatify_ir_text_to_artifacts(&best_opt_ir_text)?;
+    let best_artifacts = gatify_ir_text_to_artifacts(
+        &best_opt_ir_text,
+        &cli.canonical_g8r_options,
+        compute_artifact_graph_logical_effort,
+    )?;
     let best_g8r_path = output_dir.join("best.g8r");
     std::fs::write(&best_g8r_path, best_artifacts.g8r_text.as_bytes())
         .map_err(|e| anyhow::anyhow!("Failed to write {}: {:?}", best_g8r_path.display(), e))?;
@@ -1191,6 +1462,8 @@ where
         &best_artifacts.gate_fn,
         &best_artifacts.schema,
         &g8r_evaluation_mode,
+        &cli.canonical_g8r_options,
+        compute_artifact_graph_logical_effort,
     )?;
 
     if let Some(artifact) = recorded_artifact.as_ref() {
@@ -1244,6 +1517,13 @@ where
     let output_dir = PathBuf::from(&cli.output);
     let extension_costing_mode = loaded.artifact.run_options.extension_costing_mode;
     let g8r_evaluation_mode = &loaded.artifact.run_options.g8r_evaluation_mode;
+    let canonical_g8r_options = &loaded.artifact.run_options.canonical_g8r_options;
+    let compute_artifact_graph_logical_effort = canonical_g8r_options.compute_graph_logical_effort
+        || loaded
+            .artifact
+            .run_options
+            .objective
+            .needs_graph_logical_effort();
 
     if let Some((budget_step, max_actions, rollouts_per_budget)) = frontier_mode {
         std::fs::create_dir_all(&output_dir).map_err(|e| {
@@ -1275,6 +1555,8 @@ where
                 &point.guided.witness_fn,
                 extension_costing_mode,
                 g8r_evaluation_mode,
+                canonical_g8r_options,
+                compute_artifact_graph_logical_effort,
             )?;
             point_summaries.push(serde_json::json!({
                 "action_budget": point.action_budget,
@@ -1345,6 +1627,8 @@ where
         &minimized.witness_fn,
         extension_costing_mode,
         g8r_evaluation_mode,
+        canonical_g8r_options,
+        compute_artifact_graph_logical_effort,
     )?;
 
     let summary = serde_json::json!({
@@ -1410,7 +1694,17 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
     use xlsynth_g8r::aig_sim::count_toggles::WeightedSwitchingOptions;
+    use xlsynth_g8r::process_ir_path::CanonicalG8rOptions;
     use xlsynth_mcmc::multichain::ChainStrategy;
+
+    #[test]
+    fn parser_uses_canonical_g8r_defaults() {
+        let matches = super::add_pir_mcmc_args(clap::Command::new("test"))
+            .try_get_matches_from(["test", "sample.ir", "--iters", "0"])
+            .unwrap();
+        let cli = super::parse_pir_mcmc_args(&matches);
+        assert_eq!(cli.canonical_g8r_options, CanonicalG8rOptions::default());
+    }
     use xlsynth_pir::ir::Package;
     use xlsynth_pir::ir_parser;
 
@@ -1493,6 +1787,7 @@ top fn main(x: bits[8] id=1) -> bits[8] {
                 objective: Objective::Nodes,
                 extension_costing_mode: ExtensionCostingMode::Preserve,
                 g8r_evaluation_mode: G8rEvaluationMode::Builtin,
+                canonical_g8r_options: CanonicalG8rOptions::default(),
                 max_allowed_depth: None,
                 max_allowed_area: None,
                 weighted_switching_options: WeightedSwitchingOptions::default(),
@@ -1542,12 +1837,14 @@ top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
 
         let cli = PirMcmcCliArgs {
             input_path: input_path.display().to_string(),
+            top: None,
             iters: 1,
             seed: 1,
             output: Some(output_dir.path().display().to_string()),
             metric: Objective::G8rNodes,
             extension_costing_mode: ExtensionCostingMode::Preserve,
             g8r_postprocess_program: None,
+            canonical_g8r_options: CanonicalG8rOptions::default(),
             max_delay: Some(0),
             max_area: None,
             toggle_stimulus: None,
@@ -1588,12 +1885,14 @@ top fn main(x: bits[1] id=1) -> bits[1] {
 
         let cli = PirMcmcCliArgs {
             input_path: input_path.display().to_string(),
+            top: None,
             iters: 0,
             seed: 1,
             output: Some(output_dir.path().display().to_string()),
             metric: Objective::G8rNodes,
             extension_costing_mode: ExtensionCostingMode::Preserve,
             g8r_postprocess_program: None,
+            canonical_g8r_options: CanonicalG8rOptions::default(),
             max_delay: None,
             max_area: None,
             toggle_stimulus: None,
@@ -1648,12 +1947,14 @@ top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
 
         let cli = PirMcmcCliArgs {
             input_path: input_path.display().to_string(),
+            top: None,
             iters: 0,
             seed: 1,
             output: Some(output_dir.path().display().to_string()),
             metric: Objective::G8rPostAndNodes,
             extension_costing_mode: ExtensionCostingMode::Preserve,
             g8r_postprocess_program: Some(hook.display().to_string()),
+            canonical_g8r_options: CanonicalG8rOptions::default(),
             max_delay: None,
             max_area: None,
             toggle_stimulus: None,
@@ -1682,6 +1983,168 @@ top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
     }
 
     #[test]
+    fn postprocessed_run_omits_graph_le_when_disabled() {
+        let input_dir = tempdir().unwrap();
+        let output_dir = tempdir().unwrap();
+        let hook_dir = tempdir().unwrap();
+        let hook = write_executable_script(
+            hook_dir.path(),
+            "identity.sh",
+            "#!/bin/sh\ncp \"$1\" \"$3\"\n",
+        );
+        let input_path = input_dir.path().join("sample.ir");
+        fs::write(
+            &input_path,
+            r#"package sample
+
+top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret and.3: bits[1] = and(a, b, id=3)
+}
+"#,
+        )
+        .unwrap();
+        let cli = PirMcmcCliArgs {
+            input_path: input_path.display().to_string(),
+            top: None,
+            iters: 0,
+            seed: 1,
+            output: Some(output_dir.path().display().to_string()),
+            metric: Objective::G8rPostAndNodes,
+            extension_costing_mode: ExtensionCostingMode::Preserve,
+            g8r_postprocess_program: Some(hook.display().to_string()),
+            canonical_g8r_options: CanonicalG8rOptions {
+                compute_graph_logical_effort: false,
+                ..CanonicalG8rOptions::default()
+            },
+            max_delay: None,
+            max_area: None,
+            toggle_stimulus: None,
+            initial_temperature: 1.0,
+            threads: 1,
+            checkpoint_iters: 0,
+            progress_iters: 0,
+            formal_oracle: false,
+            switching_beta1: 1.0,
+            switching_beta2: 0.0,
+            switching_primary_output_load: 1.0,
+            chain_strategy: CliChainStrategy::Independent,
+        };
+
+        run_pir_mcmc_driver(cli, |_| {}).unwrap();
+        let stats: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(output_dir.path().join("orig.post.stats.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(stats["graph_logical_effort_worst_case_delay"].is_null());
+    }
+
+    #[test]
+    fn postprocessed_run_keeps_graph_le_when_objective_requires_it() {
+        let input_dir = tempdir().unwrap();
+        let output_dir = tempdir().unwrap();
+        let hook_dir = tempdir().unwrap();
+        let hook = write_executable_script(
+            hook_dir.path(),
+            "identity.sh",
+            "#!/bin/sh\ncp \"$1\" \"$3\"\n",
+        );
+        let input_path = input_dir.path().join("sample.ir");
+        fs::write(
+            &input_path,
+            r#"package sample
+
+top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret and.3: bits[1] = and(a, b, id=3)
+}
+"#,
+        )
+        .unwrap();
+        let cli = PirMcmcCliArgs {
+            input_path: input_path.display().to_string(),
+            top: None,
+            iters: 0,
+            seed: 1,
+            output: Some(output_dir.path().display().to_string()),
+            metric: Objective::G8rPostLeGraph,
+            extension_costing_mode: ExtensionCostingMode::Preserve,
+            g8r_postprocess_program: Some(hook.display().to_string()),
+            canonical_g8r_options: CanonicalG8rOptions {
+                compute_graph_logical_effort: false,
+                ..CanonicalG8rOptions::default()
+            },
+            max_delay: None,
+            max_area: None,
+            toggle_stimulus: None,
+            initial_temperature: 1.0,
+            threads: 1,
+            checkpoint_iters: 0,
+            progress_iters: 0,
+            formal_oracle: false,
+            switching_beta1: 1.0,
+            switching_beta2: 0.0,
+            switching_primary_output_load: 1.0,
+            chain_strategy: CliChainStrategy::Independent,
+        };
+
+        run_pir_mcmc_driver(cli, |_| {}).unwrap();
+        let stats: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(output_dir.path().join("orig.post.stats.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(stats["graph_logical_effort_worst_case_delay"].is_number());
+    }
+
+    #[test]
+    fn raw_run_keeps_graph_le_when_objective_requires_it() {
+        let input_dir = tempdir().unwrap();
+        let output_dir = tempdir().unwrap();
+        let input_path = input_dir.path().join("sample.ir");
+        fs::write(
+            &input_path,
+            r#"package sample
+
+top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  ret and.3: bits[1] = and(a, b, id=3)
+}
+"#,
+        )
+        .unwrap();
+        let cli = PirMcmcCliArgs {
+            input_path: input_path.display().to_string(),
+            top: None,
+            iters: 0,
+            seed: 1,
+            output: Some(output_dir.path().display().to_string()),
+            metric: Objective::G8rLeGraph,
+            extension_costing_mode: ExtensionCostingMode::Preserve,
+            g8r_postprocess_program: None,
+            canonical_g8r_options: CanonicalG8rOptions {
+                compute_graph_logical_effort: false,
+                ..CanonicalG8rOptions::default()
+            },
+            max_delay: None,
+            max_area: None,
+            toggle_stimulus: None,
+            initial_temperature: 1.0,
+            threads: 1,
+            checkpoint_iters: 0,
+            progress_iters: 0,
+            formal_oracle: false,
+            switching_beta1: 1.0,
+            switching_beta2: 0.0,
+            switching_primary_output_load: 1.0,
+            chain_strategy: CliChainStrategy::Independent,
+        };
+
+        run_pir_mcmc_driver(cli, |_| {}).unwrap();
+        let stats: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(output_dir.path().join("orig.stats.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(stats["graph_logical_effort_worst_case_delay"].is_number());
+    }
+
+    #[test]
     fn unsupported_run_reports_artifact_skip() {
         let input_dir = tempdir().unwrap();
         let output_dir = tempdir().unwrap();
@@ -1699,12 +2162,14 @@ top fn main(x: bits[1] id=1) -> bits[1] {
 
         let cli = PirMcmcCliArgs {
             input_path: input_path.display().to_string(),
+            top: None,
             iters: 0,
             seed: 1,
             output: Some(output_dir.path().display().to_string()),
             metric: Objective::G8rNodes,
             extension_costing_mode: ExtensionCostingMode::Preserve,
             g8r_postprocess_program: None,
+            canonical_g8r_options: CanonicalG8rOptions::default(),
             max_delay: Some(1),
             max_area: None,
             toggle_stimulus: None,

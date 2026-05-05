@@ -6,6 +6,8 @@
 //! * gatify_add_ripple_carry: instantiates a ripple-carry adder
 //! * gatify_barrel_shifter: instantiates a barrel shifter (logarithmic stages)
 
+use serde::{Deserialize, Serialize};
+
 use crate::aig::gate::{self, AigBitVector, AigOperand};
 use crate::gate_builder::GateBuilder;
 use crate::gate_builder::ReductionKind;
@@ -14,7 +16,8 @@ use crate::prefix_scan_utils::{prefix_scan_exclusive, prefix_scan_inclusive};
 pub use crate::prefix_scan_utils::PrefixScanStrategy;
 
 /// Selects the adder implementation to use when lowering addition operations.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum AdderMapping {
     RippleCarry,
     BrentKung,
