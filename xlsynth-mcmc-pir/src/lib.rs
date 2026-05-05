@@ -917,6 +917,22 @@ struct GateCostStats {
     post: Option<G8rPostStats>,
 }
 
+/// Canonical IR package text plus selected top used for gate-level scoring.
+pub struct CanonicalG8rScoringInput {
+    pub top_fn: IrFn,
+    pub ir_text: String,
+}
+
+/// Materializes the exact IR package that MCMC gate-level scoring lowers.
+pub fn canonical_g8r_scoring_input_for_pir_fn(
+    f: &IrFn,
+    extension_costing_mode: ExtensionCostingMode,
+) -> Result<CanonicalG8rScoringInput> {
+    let top_fn = optimize_pir_fn_via_xls_with_extension_mode(f, extension_costing_mode)?;
+    let ir_text = format!("package pir_mcmc\n\ntop {}", top_fn);
+    Ok(CanonicalG8rScoringInput { top_fn, ir_text })
+}
+
 /// Postprocessed AIG payload plus summary stats suitable for durable artifacts.
 pub(crate) struct PostprocessedAigArtifact {
     pub bytes: Vec<u8>,
@@ -993,14 +1009,15 @@ fn compute_g8r_stats_for_pir_fn_impl(
     canonical_g8r_options: &CanonicalG8rOptions,
     compute_postprocessed_stats: bool,
 ) -> Result<GateCostStats> {
-    // 1-3) Optimize the PIR function via the XLS pipeline.
-    let top_fn = optimize_pir_fn_via_xls_with_extension_mode(f, extension_costing_mode)?;
-
-    // 4) Lower through the same canonical gate/AIG path used by `ir2g8r`.
-    let ir_text = format!("package pir_mcmc\n\ntop {}", top_fn);
-    let artifacts =
-        canonical_ir_text_to_g8r_artifacts(&ir_text, Some(&top_fn.name), canonical_g8r_options)
-            .map_err(|e| anyhow::anyhow!("canonical g8r lowering failed: {}", e))?;
+    // 1-4) Materialize the exact package text used for canonical lowering.
+    let scoring_input = canonical_g8r_scoring_input_for_pir_fn(f, extension_costing_mode)?;
+    let top_fn = scoring_input.top_fn;
+    let artifacts = canonical_ir_text_to_g8r_artifacts(
+        &scoring_input.ir_text,
+        Some(&top_fn.name),
+        canonical_g8r_options,
+    )
+    .map_err(|e| anyhow::anyhow!("canonical g8r lowering failed: {}", e))?;
     let gate_fn = artifacts.gate_fn;
     let stats = artifacts.stats;
     let g8r_le_graph_milli = if compute_graph_logical_effort {
@@ -5177,6 +5194,25 @@ top fn f(x: bits[8] id=1) -> bits[8] {
             "expected optimized PIR to reconstruct brent_kung ext_nary_add:\n{}",
             optimized
         );
+    }
+
+    #[test]
+    fn canonical_g8r_scoring_input_materializes_the_optimized_top() {
+        let f = parse_fn(
+            r#"fn f(x: bits[8] id=1) -> bits[8] {
+  dead: bits[8] = identity(x, id=2)
+  ret live: bits[8] = identity(x, id=3)
+}"#,
+        );
+
+        let scoring_input =
+            canonical_g8r_scoring_input_for_pir_fn(&f, ExtensionCostingMode::Preserve).unwrap();
+        let mut parser = ir_parser::Parser::new(&scoring_input.ir_text);
+        let pkg = parser.parse_and_validate_package().unwrap();
+        let reparsed_top = pkg.get_top_fn().unwrap();
+
+        assert_eq!(reparsed_top.to_string(), scoring_input.top_fn.to_string());
+        assert!(!scoring_input.ir_text.contains("dead:"));
     }
 
     #[test]

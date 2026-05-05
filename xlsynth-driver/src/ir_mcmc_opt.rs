@@ -7,6 +7,7 @@ use clap::ArgMatches;
 use serde::{Deserialize, Serialize};
 use xlsynth_g8r::process_ir_path::CanonicalG8rOptions;
 use xlsynth_mcmc_pir::{
+    canonical_g8r_scoring_input_for_pir_fn,
     cost_with_effort_options_toggle_stimulus_extension_mode_evaluator_and_g8r_options,
     lower_toggle_stimulus_for_fn, parse_irvals_tuple_file, Cost, G8rEvaluationMode, Objective,
 };
@@ -141,6 +142,26 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     std::fs::write(path, text).map_err(|e| format!("failed to write {}: {e}", path.display()))
 }
 
+fn compute_cost(
+    top_fn: &xlsynth_pir::ir::Fn,
+    objective: Objective,
+    toggle_stimulus: Option<&[Vec<xlsynth::IrBits>]>,
+    weighted_switching_options: &xlsynth_g8r::aig_sim::count_toggles::WeightedSwitchingOptions,
+    cli: &xlsynth_mcmc_pir::driver_cli::PirMcmcCliArgs,
+    g8r_evaluation_mode: &G8rEvaluationMode,
+) -> Result<Cost, String> {
+    cost_with_effort_options_toggle_stimulus_extension_mode_evaluator_and_g8r_options(
+        top_fn,
+        objective,
+        toggle_stimulus,
+        weighted_switching_options,
+        cli.extension_costing_mode,
+        g8r_evaluation_mode,
+        &cli.canonical_g8r_options,
+    )
+    .map_err(|e| e.to_string())
+}
+
 fn verify_origin_alignment(
     cli: &xlsynth_mcmc_pir::driver_cli::PirMcmcCliArgs,
 ) -> Result<(), String> {
@@ -162,7 +183,6 @@ fn verify_origin_alignment(
         .get_top_fn()
         .cloned()
         .ok_or_else(|| "No top function found in PIR package".to_string())?;
-    let top_name = top_fn.name.clone();
 
     let toggle_stimulus_values = cli
         .toggle_stimulus
@@ -187,64 +207,90 @@ fn verify_origin_alignment(
             .map_err(|e| e.to_string())?,
         None => G8rEvaluationMode::Builtin,
     };
-    let mut mcmc_origin_cost =
-        cost_with_effort_options_toggle_stimulus_extension_mode_evaluator_and_g8r_options(
+    let mut mcmc_origin_cost = compute_cost(
+        &top_fn,
+        cli.metric,
+        prepared_toggle_stimulus.as_deref(),
+        &weighted_switching_options,
+        cli,
+        &g8r_evaluation_mode,
+    )?;
+    let verify_graph_logical_effort = cli.canonical_g8r_options.compute_graph_logical_effort
+        || cli.metric.needs_graph_logical_effort();
+    let raw_structural_cost = compute_cost(
+        &top_fn,
+        Objective::G8rNodesTimesDepth,
+        None,
+        &weighted_switching_options,
+        cli,
+        &g8r_evaluation_mode,
+    )?;
+    mcmc_origin_cost.g8r_nodes = raw_structural_cost.g8r_nodes;
+    mcmc_origin_cost.g8r_depth = raw_structural_cost.g8r_depth;
+    if verify_graph_logical_effort {
+        let raw_graph_cost = compute_cost(
             &top_fn,
-            cli.metric,
-            prepared_toggle_stimulus.as_deref(),
+            Objective::G8rLeGraph,
+            None,
             &weighted_switching_options,
-            cli.extension_costing_mode,
+            cli,
             &g8r_evaluation_mode,
-            &cli.canonical_g8r_options,
-        )
-        .map_err(|e| e.to_string())?;
-    if !cli.metric.needs_graph_logical_effort() {
-        let raw_graph_cost =
-            cost_with_effort_options_toggle_stimulus_extension_mode_evaluator_and_g8r_options(
+        )?;
+        mcmc_origin_cost.g8r_le_graph_milli = raw_graph_cost.g8r_le_graph_milli;
+    } else {
+        mcmc_origin_cost.g8r_le_graph_milli = 0;
+    }
+    if matches!(
+        g8r_evaluation_mode,
+        G8rEvaluationMode::ExternalPostprocess { .. }
+    ) {
+        let post_structural_cost = compute_cost(
+            &top_fn,
+            Objective::G8rPostAndNodesTimesDepth,
+            None,
+            &weighted_switching_options,
+            cli,
+            &g8r_evaluation_mode,
+        )?;
+        mcmc_origin_cost.g8r_post_and_nodes = post_structural_cost.g8r_post_and_nodes;
+        mcmc_origin_cost.g8r_post_depth = post_structural_cost.g8r_post_depth;
+        if verify_graph_logical_effort {
+            let post_graph_cost = compute_cost(
                 &top_fn,
-                Objective::G8rLeGraph,
+                Objective::G8rPostLeGraph,
                 None,
                 &weighted_switching_options,
-                cli.extension_costing_mode,
+                cli,
                 &g8r_evaluation_mode,
-                &cli.canonical_g8r_options,
-            )
-            .map_err(|e| e.to_string())?;
-        mcmc_origin_cost.g8r_le_graph_milli = raw_graph_cost.g8r_le_graph_milli;
-        if matches!(
-            g8r_evaluation_mode,
-            G8rEvaluationMode::ExternalPostprocess { .. }
-        ) {
-            let post_graph_cost =
-                cost_with_effort_options_toggle_stimulus_extension_mode_evaluator_and_g8r_options(
-                    &top_fn,
-                    Objective::G8rPostLeGraph,
-                    None,
-                    &weighted_switching_options,
-                    cli.extension_costing_mode,
-                    &g8r_evaluation_mode,
-                    &cli.canonical_g8r_options,
-                )
-                .map_err(|e| e.to_string())?;
+            )?;
             mcmc_origin_cost.g8r_post_le_graph_milli = post_graph_cost.g8r_post_le_graph_milli;
+        } else {
+            mcmc_origin_cost.g8r_post_le_graph_milli = 0;
         }
     }
 
+    let scoring_input = canonical_g8r_scoring_input_for_pir_fn(&top_fn, cli.extension_costing_mode)
+        .map_err(|e| e.to_string())?;
+    let scored_ir = alignment_dir.join("scored.ir");
+    std::fs::write(&scored_ir, scoring_input.ir_text)
+        .map_err(|e| format!("failed to write {}: {e}", scored_ir.display()))?;
     let raw_aig = alignment_dir.join("raw.aig");
     let raw_stats = alignment_dir.join("raw.stats.json");
     let exe = std::env::current_exe().map_err(|e| format!("failed to resolve current exe: {e}"))?;
+    let mut external_g8r_options = cli.canonical_g8r_options.clone();
+    external_g8r_options.compute_graph_logical_effort = verify_graph_logical_effort;
     let mut ir2g8r_args = vec![
         exe.display().to_string(),
         "ir2g8r".to_string(),
-        cli.input_path.clone(),
+        scored_ir.display().to_string(),
         "--top".to_string(),
-        top_name,
+        scoring_input.top_fn.name,
         "--aiger-out".to_string(),
         raw_aig.display().to_string(),
         "--stats-out".to_string(),
         raw_stats.display().to_string(),
     ];
-    ir2g8r_args.extend(canonical_g8r_flag_args(&cli.canonical_g8r_options));
+    ir2g8r_args.extend(canonical_g8r_flag_args(&external_g8r_options));
     let mut ir2g8r_cmd = Command::new(&exe);
     ir2g8r_cmd.args(&ir2g8r_args[1..]);
     run_checked(&mut ir2g8r_cmd, "ir2g8r alignment command")?;
@@ -277,7 +323,7 @@ fn verify_origin_alignment(
             exe.display().to_string(),
             "aig-stats".to_string(),
             "--compute-graph-logical-effort".to_string(),
-            "true".to_string(),
+            bool_arg(verify_graph_logical_effort),
             "--graph-logical-effort-beta1".to_string(),
             cli.canonical_g8r_options
                 .graph_logical_effort_beta1

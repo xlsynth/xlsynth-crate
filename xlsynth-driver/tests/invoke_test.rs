@@ -76,8 +76,7 @@ fn ir_bits_to_msb_string(bits: &IrBits) -> String {
         .collect::<String>()
 }
 
-#[test]
-fn test_ir_mcmc_opt_verify_origin_alignment_matches_canonical_flow() {
+fn run_ir_mcmc_opt_verify_origin_alignment(metric: &str, extra_args: &[&str]) -> serde_json::Value {
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let temp_dir = tempfile::tempdir().unwrap();
     let input_path = temp_dir.path().join("sample.ir");
@@ -108,7 +107,8 @@ fn main(count: bits[2] id=3) -> bits[2] {
         std::fs::set_permissions(&postprocess_path, permissions).unwrap();
     }
 
-    let output = Command::new(command_path)
+    let mut command = Command::new(command_path);
+    command
         .arg("ir-mcmc-opt")
         .arg(&input_path)
         .arg("--top")
@@ -116,7 +116,7 @@ fn main(count: bits[2] id=3) -> bits[2] {
         .arg("--iters")
         .arg("0")
         .arg("--metric")
-        .arg("g8r-post-and-nodes-times-depth")
+        .arg(metric)
         .arg("--g8r-postprocess-program")
         .arg(&postprocess_path)
         .arg("--threads")
@@ -129,9 +129,9 @@ fn main(count: bits[2] id=3) -> bits[2] {
         .arg("false")
         .arg("--output")
         .arg(&output_dir)
-        .arg("--verify-origin-alignment")
-        .output()
-        .unwrap();
+        .arg("--verify-origin-alignment");
+    command.args(extra_args);
+    let output = command.output().unwrap();
     assert!(
         output.status.success(),
         "ir-mcmc-opt failed: stdout={} stderr={}",
@@ -140,6 +140,7 @@ fn main(count: bits[2] id=3) -> bits[2] {
     );
 
     let alignment_dir = output_dir.join("origin-alignment");
+    assert!(alignment_dir.join("scored.ir").exists());
     assert!(alignment_dir.join("raw.aig").exists());
     assert!(alignment_dir.join("raw.stats.json").exists());
     assert!(alignment_dir.join("post.aig").exists());
@@ -156,6 +157,45 @@ fn main(count: bits[2] id=3) -> bits[2] {
     assert_eq!(comparison["post_depth_match"], true);
     assert_eq!(comparison["post_graph_logical_effort_milli_match"], true);
     assert_eq!(comparison["objective_score_match"], true);
+    comparison
+}
+
+#[test]
+fn test_ir_mcmc_opt_verify_origin_alignment_matches_canonical_flow() {
+    run_ir_mcmc_opt_verify_origin_alignment("g8r-post-and-nodes-times-depth", &[]);
+}
+
+#[test]
+fn test_ir_mcmc_opt_verify_origin_alignment_populates_non_metric_fields() {
+    run_ir_mcmc_opt_verify_origin_alignment("nodes", &[]);
+}
+
+#[test]
+fn test_ir_mcmc_opt_verify_origin_alignment_respects_graph_le_flag() {
+    let comparison = run_ir_mcmc_opt_verify_origin_alignment(
+        "g8r-post-and-nodes-times-depth",
+        &["--compute-graph-logical-effort", "false"],
+    );
+    assert_eq!(comparison["mcmc_origin_cost"]["g8r_le_graph_milli"], 0);
+    assert_eq!(comparison["external_origin_cost"]["g8r_le_graph_milli"], 0);
+    assert_eq!(comparison["mcmc_origin_cost"]["g8r_post_le_graph_milli"], 0);
+    assert_eq!(
+        comparison["external_origin_cost"]["g8r_post_le_graph_milli"],
+        0
+    );
+}
+
+#[test]
+fn test_ir_mcmc_opt_verify_origin_alignment_keeps_graph_metric_enabled() {
+    let comparison = run_ir_mcmc_opt_verify_origin_alignment(
+        "g8r-post-le-graph",
+        &["--compute-graph-logical-effort", "false"],
+    );
+    assert_ne!(comparison["mcmc_origin_cost"]["g8r_post_le_graph_milli"], 0);
+    assert_eq!(
+        comparison["mcmc_origin_cost"]["g8r_post_le_graph_milli"],
+        comparison["external_origin_cost"]["g8r_post_le_graph_milli"],
+    );
 }
 
 fn assert_value4_matches_ir_bits(actual: &Value4, expected_bits: &IrBits) {
