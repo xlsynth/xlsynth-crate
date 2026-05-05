@@ -10,6 +10,7 @@ use crate::liberty_proto::{
     SequentialKind, TimingArc, TimingTable,
 };
 use flate2::bufread::GzDecoder;
+use regex::Regex;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -198,6 +199,114 @@ fn parse_library_units(block: &Block) -> LibraryUnits {
         }
     }
     units
+}
+
+/// Returns the library-level default VT group when declared in the source.
+fn parse_default_threshold_voltage_group(block: &Block) -> Option<String> {
+    for member in &block.members {
+        let BlockMember::BlockAttr(attr) = member else {
+            continue;
+        };
+        if attr.attr_name == "default_threshold_voltage_group" {
+            return Some(value_to_attr_string(&attr.value));
+        }
+    }
+    None
+}
+
+/// Assigns stable 1-based IDs to repeated VT-group strings.
+#[derive(Default)]
+struct ThresholdVoltageGroupInterner {
+    names: Vec<String>,
+    ids_by_name: HashMap<String, u32>,
+}
+
+/// Regex-based VT classification rule for libraries lacking native metadata.
+#[derive(Clone, Debug)]
+pub struct ThresholdVoltageGroupRule {
+    pub name: String,
+    pub cell_name_regex: String,
+}
+
+#[derive(Clone)]
+struct CompiledThresholdVoltageGroupRule {
+    name: String,
+    cell_name_regex: Regex,
+}
+
+fn compile_threshold_voltage_group_rules(
+    rules: &[ThresholdVoltageGroupRule],
+) -> Result<Vec<CompiledThresholdVoltageGroupRule>, String> {
+    let mut names = HashSet::new();
+    let mut compiled = Vec::with_capacity(rules.len());
+    for rule in rules {
+        if rule.name.is_empty() {
+            return Err("threshold-voltage group rule has empty name".to_string());
+        }
+        if !names.insert(rule.name.clone()) {
+            return Err(format!(
+                "duplicate threshold-voltage group rule name '{}'",
+                rule.name
+            ));
+        }
+        let cell_name_regex = Regex::new(&rule.cell_name_regex).map_err(|e| {
+            format!(
+                "invalid threshold-voltage group regex for '{}': {}",
+                rule.name, e
+            )
+        })?;
+        compiled.push(CompiledThresholdVoltageGroupRule {
+            name: rule.name.clone(),
+            cell_name_regex,
+        });
+    }
+    Ok(compiled)
+}
+
+fn apply_threshold_voltage_group_rules(
+    cells: &mut [Cell],
+    rules: &[CompiledThresholdVoltageGroupRule],
+    interner: &mut ThresholdVoltageGroupInterner,
+) -> Result<(), String> {
+    if rules.is_empty() {
+        return Ok(());
+    }
+
+    for cell in cells {
+        let matches: Vec<&CompiledThresholdVoltageGroupRule> = rules
+            .iter()
+            .filter(|rule| rule.cell_name_regex.is_match(&cell.name))
+            .collect();
+        match matches.as_slice() {
+            [rule] => cell.threshold_voltage_group_id = interner.intern(rule.name.clone()),
+            [] => {
+                return Err(format!(
+                    "Cell '{}' has no threshold-voltage group from native Liberty metadata or supplied regex rules",
+                    cell.name
+                ));
+            }
+            _ => {
+                let names: Vec<&str> = matches.iter().map(|rule| rule.name.as_str()).collect();
+                return Err(format!(
+                    "Cell '{}' matches multiple threshold-voltage group regex rules: {:?}",
+                    cell.name, names
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+impl ThresholdVoltageGroupInterner {
+    fn intern(&mut self, name: String) -> u32 {
+        if let Some(id) = self.ids_by_name.get(&name) {
+            return *id;
+        }
+        let id = self.names.len() as u32 + 1;
+        self.names.push(name.clone());
+        self.ids_by_name.insert(name, id);
+        id
+    }
 }
 
 fn library_units_is_populated(units: &LibraryUnits) -> bool {
@@ -685,7 +794,10 @@ fn extract_sequential_blocks(
     sequential
 }
 
-fn block_to_proto_cells(block: &Block) -> Vec<Cell> {
+fn block_to_proto_cells(
+    block: &Block,
+    threshold_voltage_group_interner: &mut ThresholdVoltageGroupInterner,
+) -> Vec<Cell> {
     let mut cells = Vec::new();
     for member in &block.members {
         let BlockMember::SubBlock(cell_block) = member else {
@@ -700,6 +812,7 @@ fn block_to_proto_cells(block: &Block) -> Vec<Cell> {
             .and_then(qualifier_to_string)
             .unwrap_or_default();
         let mut area = 0.0;
+        let mut threshold_voltage_group_id = 0;
         let mut clocking_pins: HashSet<String> = HashSet::new();
         let sequential = extract_sequential_blocks(cell_block);
 
@@ -709,6 +822,9 @@ fn block_to_proto_cells(block: &Block) -> Vec<Cell> {
             if let BlockMember::BlockAttr(attr) = cell_member {
                 if attr.attr_name == "area" {
                     area = value_to_f64(&attr.value);
+                } else if attr.attr_name == "threshold_voltage_group" {
+                    threshold_voltage_group_id =
+                        threshold_voltage_group_interner.intern(value_to_attr_string(&attr.value));
                 }
             }
         }
@@ -868,6 +984,7 @@ fn block_to_proto_cells(block: &Block) -> Vec<Cell> {
             name,
             sequential,
             clock_gate,
+            threshold_voltage_group_id,
         });
     }
     cells.sort_by(|a, b| a.name.cmp(&b.name));
@@ -902,6 +1019,15 @@ fn axes_are_contiguous(index_1: &[f64], index_2: &[f64], index_3: &[f64]) -> boo
 }
 
 pub fn validate_library_consistency(library: &Library) -> Result<(), String> {
+    if library.default_threshold_voltage_group_id as usize > library.threshold_voltage_groups.len()
+    {
+        return Err(format!(
+            "default_threshold_voltage_group_id={} is out of range for {} threshold_voltage_groups",
+            library.default_threshold_voltage_group_id,
+            library.threshold_voltage_groups.len()
+        ));
+    }
+
     for (template_idx, tmpl) in library.lu_table_templates.iter().enumerate() {
         if !axes_are_contiguous(&tmpl.index_1, &tmpl.index_2, &tmpl.index_3) {
             return Err(format!(
@@ -917,6 +1043,14 @@ pub fn validate_library_consistency(library: &Library) -> Result<(), String> {
     }
 
     for cell in &library.cells {
+        if cell.threshold_voltage_group_id as usize > library.threshold_voltage_groups.len() {
+            return Err(format!(
+                "Cell '{}' threshold_voltage_group_id={} is out of range for {} threshold_voltage_groups",
+                cell.name,
+                cell.threshold_voltage_group_id,
+                library.threshold_voltage_groups.len()
+            ));
+        }
         let mut pin_direction_by_name: HashMap<String, i32> = HashMap::new();
         for pin in &cell.pins {
             if pin_direction_by_name
@@ -1057,7 +1191,10 @@ pub fn validate_library_consistency(library: &Library) -> Result<(), String> {
 fn parse_liberty_files_to_proto_impl<P: AsRef<Path>>(
     paths: &[P],
     validate_timing: bool,
+    threshold_voltage_group_rules: &[ThresholdVoltageGroupRule],
 ) -> Result<Library, String> {
+    let compiled_threshold_voltage_group_rules =
+        compile_threshold_voltage_group_rules(threshold_voltage_group_rules)?;
     let mut libraries = Vec::new();
     for path in paths {
         log::info!("Parsing Liberty file: {}", path.as_ref().display());
@@ -1095,13 +1232,48 @@ fn parse_liberty_files_to_proto_impl<P: AsRef<Path>>(
     let mut all_cells = Vec::new();
     let mut all_table_templates = Vec::new();
     let mut units: Option<LibraryUnits> = None;
+    let mut default_threshold_voltage_group: Option<String> = None;
+    let mut saw_library_with_default_threshold_voltage_group = false;
+    let mut saw_no_default_library_with_implicit_threshold_voltage_group = false;
+    let mut threshold_voltage_group_interner = ThresholdVoltageGroupInterner::default();
     for lib in &libraries {
+        let parsed_default_threshold_voltage_group = parse_default_threshold_voltage_group(lib);
+        if parsed_default_threshold_voltage_group.is_some() {
+            saw_library_with_default_threshold_voltage_group = true;
+        }
         let mut per_library = Library {
-            cells: block_to_proto_cells(lib),
+            cells: block_to_proto_cells(lib, &mut threshold_voltage_group_interner),
             units: None,
             // Field name is historical; this stores all parsed template kinds.
             lu_table_templates: parse_table_templates(lib),
+            threshold_voltage_groups: vec![],
+            default_threshold_voltage_group_id: 0,
         };
+        if parsed_default_threshold_voltage_group.is_none()
+            && per_library
+                .cells
+                .iter()
+                .any(|cell| cell.threshold_voltage_group_id == 0)
+        {
+            saw_no_default_library_with_implicit_threshold_voltage_group = true;
+        }
+        if !compiled_threshold_voltage_group_rules.is_empty()
+            && (parsed_default_threshold_voltage_group.is_some()
+                || per_library
+                    .cells
+                    .iter()
+                    .any(|cell| cell.threshold_voltage_group_id != 0))
+        {
+            return Err(
+                "cannot combine supplied threshold-voltage regex rules with native Liberty threshold-voltage metadata"
+                    .to_string(),
+            );
+        }
+        apply_threshold_voltage_group_rules(
+            &mut per_library.cells,
+            &compiled_threshold_voltage_group_rules,
+            &mut threshold_voltage_group_interner,
+        )?;
         canonicalize_timing_table_references(&mut per_library);
 
         let template_id_offset = all_table_templates.len() as u32;
@@ -1110,27 +1282,52 @@ fn parse_liberty_files_to_proto_impl<P: AsRef<Path>>(
         all_table_templates.extend(per_library.lu_table_templates);
 
         let parsed_units = parse_library_units(lib);
-        if !library_units_is_populated(&parsed_units) {
-            continue;
-        }
-        if let Some(existing) = &mut units {
-            let conflicts = merge_library_units(existing, &parsed_units);
-            if !conflicts.is_empty() {
-                return Err(format!(
-                    "Multiple Liberty libraries provided conflicting unit declarations in fields {:?}; existing merged units: {:?}, incoming units: {:?}",
-                    conflicts, existing, parsed_units
-                ));
+        if library_units_is_populated(&parsed_units) {
+            if let Some(existing) = &mut units {
+                let conflicts = merge_library_units(existing, &parsed_units);
+                if !conflicts.is_empty() {
+                    return Err(format!(
+                        "Multiple Liberty libraries provided conflicting unit declarations in fields {:?}; existing merged units: {:?}, incoming units: {:?}",
+                        conflicts, existing, parsed_units
+                    ));
+                }
+            } else {
+                units = Some(parsed_units);
             }
-        } else {
-            units = Some(parsed_units);
+        }
+
+        if let Some(incoming) = parsed_default_threshold_voltage_group {
+            match &default_threshold_voltage_group {
+                Some(existing) if existing != &incoming => {
+                    return Err(format!(
+                        "Multiple Liberty libraries provided conflicting default_threshold_voltage_group declarations; existing merged value: {:?}, incoming value: {:?}",
+                        existing, incoming
+                    ));
+                }
+                Some(_) => {}
+                None => default_threshold_voltage_group = Some(incoming),
+            }
         }
     }
+    if saw_library_with_default_threshold_voltage_group
+        && saw_no_default_library_with_implicit_threshold_voltage_group
+    {
+        return Err(
+            "Multiple Liberty libraries mixed presence of default_threshold_voltage_group; flattening would widen one input's default to cells from inputs without a default or explicit threshold_voltage_group"
+                .to_string(),
+        );
+    }
     log::info!("Flattened {} cells", all_cells.len());
+    let default_threshold_voltage_group_id = default_threshold_voltage_group
+        .map(|name| threshold_voltage_group_interner.intern(name))
+        .unwrap_or(0);
     let library = Library {
         cells: all_cells,
         units,
         // Field name is historical; it stores all parsed Liberty template kinds.
         lu_table_templates: all_table_templates,
+        threshold_voltage_groups: threshold_voltage_group_interner.names,
+        default_threshold_voltage_group_id,
     };
     if validate_timing {
         validate_library_consistency(&library)?;
@@ -1139,7 +1336,20 @@ fn parse_liberty_files_to_proto_impl<P: AsRef<Path>>(
 }
 
 pub fn parse_liberty_files_to_proto<P: AsRef<Path>>(paths: &[P]) -> Result<Library, String> {
-    parse_liberty_files_to_proto_impl(paths, /* validate_timing= */ true)
+    parse_liberty_files_to_proto_with_vt_rules(paths, &[])
+}
+
+/// Parses Liberty files and fills missing VT-group metadata with explicit regex
+/// rules.
+pub fn parse_liberty_files_to_proto_with_vt_rules<P: AsRef<Path>>(
+    paths: &[P],
+    threshold_voltage_group_rules: &[ThresholdVoltageGroupRule],
+) -> Result<Library, String> {
+    parse_liberty_files_to_proto_impl(
+        paths,
+        /* validate_timing= */ true,
+        threshold_voltage_group_rules,
+    )
 }
 
 /// Parses Liberty files and skips timing payload validation.
@@ -1149,7 +1359,7 @@ pub fn parse_liberty_files_to_proto<P: AsRef<Path>>(paths: &[P]) -> Result<Libra
 pub fn parse_liberty_files_to_proto_without_timing_validation<P: AsRef<Path>>(
     paths: &[P],
 ) -> Result<Library, String> {
-    parse_liberty_files_to_proto_impl(paths, /* validate_timing= */ false)
+    parse_liberty_files_to_proto_impl(paths, /* validate_timing= */ false, &[])
 }
 
 #[cfg(test)]
@@ -1365,6 +1575,302 @@ mod tests {
         let err = parse_liberty_files_to_proto(&[tmp1.path(), tmp2.path()]).unwrap_err();
         assert!(err.contains("conflicting unit declarations"));
         assert!(err.contains("time_unit"));
+    }
+
+    #[test]
+    fn test_threshold_voltage_groups_are_captured() {
+        let liberty_text = r#"
+        library (my_library) {
+            default_threshold_voltage_group : "RVT";
+            cell (INV) {
+                area: 1.0;
+                pin (A) {
+                    direction: input;
+                }
+                pin (Y) {
+                    direction: output;
+                    function: "!A";
+                }
+            }
+            cell (INV_LVT) {
+                threshold_voltage_group : "LVT";
+                area: 1.0;
+                pin (A) {
+                    direction: input;
+                }
+                pin (Y) {
+                    direction: output;
+                    function: "!A";
+                }
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+
+        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        assert_eq!(lib.threshold_voltage_groups, vec!["LVT", "RVT"]);
+        assert_eq!(lib.default_threshold_voltage_group_id, 2);
+        let inv = lib.cells.iter().find(|cell| cell.name == "INV").unwrap();
+        assert_eq!(inv.threshold_voltage_group_id, 0);
+        let inv_lvt = lib
+            .cells
+            .iter()
+            .find(|cell| cell.name == "INV_LVT")
+            .unwrap();
+        assert_eq!(inv_lvt.threshold_voltage_group_id, 1);
+    }
+
+    #[test]
+    fn test_threshold_voltage_group_defaults_merge_when_equal() {
+        let lib1 = r#"
+        library (lib_one) {
+            default_threshold_voltage_group : "RVT";
+        }
+        "#;
+        let lib2 = r#"
+        library (lib_two) {
+            default_threshold_voltage_group : "RVT";
+        }
+        "#;
+        let mut tmp1 = NamedTempFile::new().unwrap();
+        write!(tmp1, "{}", lib1).unwrap();
+        let mut tmp2 = NamedTempFile::new().unwrap();
+        write!(tmp2, "{}", lib2).unwrap();
+
+        let lib = parse_liberty_files_to_proto(&[tmp1.path(), tmp2.path()]).unwrap();
+        assert_eq!(lib.threshold_voltage_groups, vec!["RVT"]);
+        assert_eq!(lib.default_threshold_voltage_group_id, 1);
+    }
+
+    #[test]
+    fn test_threshold_voltage_group_defaults_error_on_conflict() {
+        let lib1 = r#"
+        library (lib_one) {
+            default_threshold_voltage_group : "RVT";
+        }
+        "#;
+        let lib2 = r#"
+        library (lib_two) {
+            default_threshold_voltage_group : "LVT";
+        }
+        "#;
+        let mut tmp1 = NamedTempFile::new().unwrap();
+        write!(tmp1, "{}", lib1).unwrap();
+        let mut tmp2 = NamedTempFile::new().unwrap();
+        write!(tmp2, "{}", lib2).unwrap();
+
+        let err = parse_liberty_files_to_proto(&[tmp1.path(), tmp2.path()]).unwrap_err();
+        assert!(err.contains("conflicting default_threshold_voltage_group"));
+    }
+
+    #[test]
+    fn test_threshold_voltage_group_defaults_error_on_mixed_presence() {
+        let lib1 = r#"
+        library (lib_one) {
+            default_threshold_voltage_group : "RVT";
+        }
+        "#;
+        let lib2 = r#"
+        library (lib_two) {
+            cell (INV) {
+                area: 1.0;
+            }
+        }
+        "#;
+        let mut tmp1 = NamedTempFile::new().unwrap();
+        write!(tmp1, "{}", lib1).unwrap();
+        let mut tmp2 = NamedTempFile::new().unwrap();
+        write!(tmp2, "{}", lib2).unwrap();
+
+        let err = parse_liberty_files_to_proto(&[tmp1.path(), tmp2.path()]).unwrap_err();
+        assert!(err.contains("mixed presence of default_threshold_voltage_group"));
+    }
+
+    #[test]
+    fn test_threshold_voltage_group_defaults_allow_mixed_presence_when_fully_explicit() {
+        let lib1 = r#"
+        library (lib_one) {
+            default_threshold_voltage_group : "RVT";
+            cell (BUF) {
+                area: 1.0;
+            }
+        }
+        "#;
+        let lib2 = r#"
+        library (lib_two) {
+            cell (INV_LVT) {
+                area: 1.0;
+                threshold_voltage_group : "LVT";
+            }
+        }
+        "#;
+        let mut tmp1 = NamedTempFile::new().unwrap();
+        write!(tmp1, "{}", lib1).unwrap();
+        let mut tmp2 = NamedTempFile::new().unwrap();
+        write!(tmp2, "{}", lib2).unwrap();
+
+        let lib = parse_liberty_files_to_proto(&[tmp1.path(), tmp2.path()]).unwrap();
+        assert_eq!(lib.threshold_voltage_groups, vec!["LVT", "RVT"]);
+        assert_eq!(lib.default_threshold_voltage_group_id, 2);
+        let buf = lib.cells.iter().find(|cell| cell.name == "BUF").unwrap();
+        assert_eq!(buf.threshold_voltage_group_id, 0);
+        let inv_lvt = lib
+            .cells
+            .iter()
+            .find(|cell| cell.name == "INV_LVT")
+            .unwrap();
+        assert_eq!(inv_lvt.threshold_voltage_group_id, 1);
+    }
+
+    #[test]
+    fn test_threshold_voltage_group_rules_fill_missing_cells() {
+        let liberty_text = r#"
+        library (my_library) {
+            cell (INV_R) {
+                area: 1.0;
+            }
+            cell (INV_L) {
+                area: 1.0;
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+
+        let rules = vec![
+            ThresholdVoltageGroupRule {
+                name: "RVT".to_string(),
+                cell_name_regex: r"_R$".to_string(),
+            },
+            ThresholdVoltageGroupRule {
+                name: "LVT".to_string(),
+                cell_name_regex: r"_L$".to_string(),
+            },
+        ];
+        let lib = parse_liberty_files_to_proto_with_vt_rules(&[tmp.path()], &rules).unwrap();
+        assert_eq!(lib.threshold_voltage_groups, vec!["LVT", "RVT"]);
+        let inv_l = lib.cells.iter().find(|cell| cell.name == "INV_L").unwrap();
+        assert_eq!(inv_l.threshold_voltage_group_id, 1);
+        let inv_r = lib.cells.iter().find(|cell| cell.name == "INV_R").unwrap();
+        assert_eq!(inv_r.threshold_voltage_group_id, 2);
+    }
+
+    #[test]
+    fn test_threshold_voltage_group_rules_reject_native_cell_metadata() {
+        let liberty_text = r#"
+        library (my_library) {
+            cell (INV_NATIVE) {
+                threshold_voltage_group : "native";
+                area: 1.0;
+            }
+            cell (INV_R) {
+                area: 1.0;
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+
+        let rules = vec![ThresholdVoltageGroupRule {
+            name: "RVT".to_string(),
+            cell_name_regex: r"_R$".to_string(),
+        }];
+        let err = parse_liberty_files_to_proto_with_vt_rules(&[tmp.path()], &rules).unwrap_err();
+        assert!(err.contains("cannot combine supplied threshold-voltage regex rules"));
+    }
+
+    #[test]
+    fn test_threshold_voltage_group_rules_reject_native_default() {
+        let liberty_text = r#"
+        library (my_library) {
+            default_threshold_voltage_group : "native";
+            cell (INV_X) {
+                area: 1.0;
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+
+        let rules = vec![ThresholdVoltageGroupRule {
+            name: "RVT".to_string(),
+            cell_name_regex: r"_R$".to_string(),
+        }];
+        let err = parse_liberty_files_to_proto_with_vt_rules(&[tmp.path()], &rules).unwrap_err();
+        assert!(err.contains("cannot combine supplied threshold-voltage regex rules"));
+    }
+
+    #[test]
+    fn test_threshold_voltage_group_rules_error_on_unmatched_cell() {
+        let liberty_text = r#"
+        library (my_library) {
+            cell (INV_X) {
+                area: 1.0;
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+
+        let rules = vec![ThresholdVoltageGroupRule {
+            name: "RVT".to_string(),
+            cell_name_regex: r"_R$".to_string(),
+        }];
+        let err = parse_liberty_files_to_proto_with_vt_rules(&[tmp.path()], &rules).unwrap_err();
+        assert!(err.contains("has no threshold-voltage group"));
+    }
+
+    #[test]
+    fn test_threshold_voltage_group_rules_error_on_ambiguous_cell() {
+        let liberty_text = r#"
+        library (my_library) {
+            cell (INV_R) {
+                area: 1.0;
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+
+        let rules = vec![
+            ThresholdVoltageGroupRule {
+                name: "RVT".to_string(),
+                cell_name_regex: r"_R$".to_string(),
+            },
+            ThresholdVoltageGroupRule {
+                name: "ALSO_RVT".to_string(),
+                cell_name_regex: r"INV_".to_string(),
+            },
+        ];
+        let err = parse_liberty_files_to_proto_with_vt_rules(&[tmp.path()], &rules).unwrap_err();
+        assert!(err.contains("matches multiple threshold-voltage group regex rules"));
+    }
+
+    #[test]
+    fn test_threshold_voltage_group_rules_error_on_duplicate_group_name() {
+        let liberty_text = r#"
+        library (my_library) {
+            cell (INV_R) {
+                area: 1.0;
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+
+        let rules = vec![
+            ThresholdVoltageGroupRule {
+                name: "RVT".to_string(),
+                cell_name_regex: r"_R$".to_string(),
+            },
+            ThresholdVoltageGroupRule {
+                name: "RVT".to_string(),
+                cell_name_regex: r"INV_".to_string(),
+            },
+        ];
+        let err = parse_liberty_files_to_proto_with_vt_rules(&[tmp.path()], &rules).unwrap_err();
+        assert!(err.contains("duplicate threshold-voltage group rule name"));
     }
 
     #[test]

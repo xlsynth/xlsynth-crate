@@ -233,6 +233,10 @@ struct LibraryNoTimingPayload {
     units: Option<LibraryUnitsNoTimingPayload>,
     #[prost(message, repeated, tag = "3")]
     lu_table_templates: Vec<LuTableTemplateNoTimingPayload>,
+    #[prost(string, repeated, tag = "4")]
+    threshold_voltage_groups: Vec<String>,
+    #[prost(uint32, tag = "5")]
+    default_threshold_voltage_group_id: u32,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -247,6 +251,8 @@ struct CellNoTimingPayload {
     sequential: Vec<SequentialNoTimingPayload>,
     #[prost(message, optional, tag = "5")]
     clock_gate: Option<ClockGateNoTimingPayload>,
+    #[prost(uint32, tag = "6")]
+    threshold_voltage_group_id: u32,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -345,6 +351,8 @@ impl From<LibraryNoTimingPayload> for liberty_proto::Library {
                 .into_iter()
                 .map(Into::into)
                 .collect(),
+            threshold_voltage_groups: value.threshold_voltage_groups,
+            default_threshold_voltage_group_id: value.default_threshold_voltage_group_id,
         }
     }
 }
@@ -357,6 +365,7 @@ impl From<CellNoTimingPayload> for liberty_proto::Cell {
             area: value.area,
             sequential: value.sequential.into_iter().map(Into::into).collect(),
             clock_gate: value.clock_gate.map(Into::into),
+            threshold_voltage_group_id: value.threshold_voltage_group_id,
         }
     }
 }
@@ -517,6 +526,7 @@ mod tests {
         liberty_proto::Library {
             cells: vec![liberty_proto::Cell {
                 name: "NAND2".to_string(),
+                threshold_voltage_group_id: 2,
                 pins: vec![liberty_proto::Pin {
                     direction: liberty_proto::PinDirection::Output as i32,
                     function: "!(A*B)".to_string(),
@@ -544,6 +554,8 @@ mod tests {
                 index_1: vec![0.1],
                 ..Default::default()
             }],
+            threshold_voltage_groups: vec!["RVT".to_string(), "LVT".to_string()],
+            default_threshold_voltage_group_id: 1,
             ..Default::default()
         }
     }
@@ -628,6 +640,9 @@ mod tests {
         assert_eq!(loaded.cells.len(), 1);
         assert_eq!(loaded.cells[0].pins.len(), 1);
         assert!(loaded.cells[0].pins[0].timing_arcs.is_empty());
+        assert_eq!(loaded.threshold_voltage_groups, vec!["RVT", "LVT"]);
+        assert_eq!(loaded.default_threshold_voltage_group_id, 1);
+        assert_eq!(loaded.cells[0].threshold_voltage_group_id, 2);
     }
 
     #[test]

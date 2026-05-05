@@ -15,6 +15,13 @@
 
 This separation makes functionality testable without a CLI, keeps dependencies focused, and avoids duplication across binaries.
 
+## Portable paths in repo content
+
+- Do not put machine-specific absolute paths in checked-in code or documentation
+  unless the path itself is the subject being documented.
+- Prefer portable placeholders such as `/path/to/...`, repository-relative paths,
+  or environment variables in examples intended for general use.
+
 ## Keep the crate graph a DAG (including for tests)
 
 Try to keep the workspace crate dependency graph **acyclic**, even in `dev-dependencies`.
@@ -127,6 +134,15 @@ To run only this check locally, you can execute:
 ```bash
 cargo test -p xlsynth-test-helpers check_all_rust_files_for_spdx
 ```
+
+## Generated protobuf descriptors
+
+When changing protobuf sources that feed checked-in descriptor sets, update the
+corresponding descriptor binary in the same change. In particular, edits to
+`xlsynth-g8r/proto/liberty.proto` or `xlsynth-g8r/proto/result.proto` require
+regenerating `xlsynth-g8r/proto/liberty.bin` with the expected `protoc` version;
+the descriptor includes source metadata, so comment-only proto changes can also
+require regeneration.
 
 ## Deterministic Output
 

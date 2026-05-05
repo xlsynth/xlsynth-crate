@@ -65,6 +65,25 @@ xlsynth-driver lib2proto \
   ~/src/asap7/asap7sc7p5t_28/LIB/NLDM/*TT*.lib
 ```
 
+When Liberty files omit native `threshold_voltage_group` metadata, use repeated
+`--vt-group <NAME:REGEX>` rules to classify cell names. Regex rules and native
+Liberty VT metadata are mutually exclusive; if any rules are supplied, every
+cell must match exactly one rule.
+
+Example for the extracted ASAP7 standard-cell TT Liberty files (intentionally
+excluding SRAM libraries):
+
+```shell
+xlsynth-driver lib2proto \
+  --output /tmp/asap7.proto \
+  --vt-group 'RVT:_R$' \
+  --vt-group 'LVT:_L$' \
+  --vt-group 'SLVT:_SL$' \
+  /path/to/asap7/LIB/NLDM/TT/*_RVT_TT_*.lib \
+  /path/to/asap7/LIB/NLDM/TT/*_LVT_TT_*.lib \
+  /path/to/asap7/LIB/NLDM/TT/*_SLVT_TT_*.lib
+```
+
 ### `lib-query`: query Liberty AST blocks
 
 Runs a rough XPath-like query over Liberty AST blocks and prints matching paths/blocks.
