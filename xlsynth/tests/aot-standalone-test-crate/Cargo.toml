@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "xlsynth-aot-test-crate"
+name = "xlsynth-aot-standalone-test-crate"
 version = "0.42.0"
 edition = "2018"
 authors = ["Christopher D. Leary <cdleary@gmail.com>", "Mark Heffernan <meheff@gmail.com>"]
-description = "Integration tests for xlsynth build.rs AOT workflow"
+description = "Runtime-dependency smoke tests for standalone xlsynth AOT artifacts"
 license = "Apache-2.0"
 repository = "https://github.com/xlsynth/xlsynth-crate"
 
@@ -17,6 +17,3 @@ xlsynth-aot-runtime = { path = "../../../xlsynth-aot-runtime" }
 
 [build-dependencies]
 xlsynth = { path = "../.." }
-
-[dev-dependencies]
-xlsynth-test-helpers = { path = "../../../xlsynth-test-helpers" }

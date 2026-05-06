@@ -10,7 +10,6 @@
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::aot_entrypoint_metadata::{
     get_entrypoint_function_signature, AotEntrypointMetadata, AotFunctionSignature, AotType,
@@ -20,12 +19,17 @@ use crate::aot_lib::{AotCompiled, AotResult};
 use crate::dslx_bridge::convert_imported_module;
 use crate::rust_bridge_builder::{
     render_rust_module_fragments, rust_type_path_between_dslx_modules, RustBridgeBuilder,
+    RustModuleFragment,
 };
 use crate::xlsynth_error::XlsynthError;
 use crate::{
     convert_dslx_to_ir_text, dslx, dslx_path_to_module_name,
     mangle_dslx_name_with_calling_convention, DslxCallingConvention, DslxConvertOptions,
 };
+
+/// ABI version emitted into standalone runtime artifacts and checked by the
+/// linked standalone runtime before first use.
+const STANDALONE_AOT_ABI_VERSION: u32 = xlsynth_aot_runtime::SUPPORTED_ARTIFACT_ABI_VERSION;
 
 #[derive(Debug, Clone)]
 /// Inputs required to compile one XLS IR function into generated AOT wrapper
@@ -65,8 +69,9 @@ pub struct TypedDslxAotBuildSpec<'a> {
 /// Paths and metadata for emitted AOT wrapper artifacts in a build output
 /// directory.
 ///
-/// The generated Rust wrapper includes typed encode/decode helpers and a thin
-/// `Runner` wrapper over `xlsynth::AotRunner`.
+/// The generated Rust wrapper includes typed encode/decode helpers and links
+/// against `xlsynth-aot-runtime` so the compiled object can execute without a
+/// runtime dependency on the `xlsynth` crate.
 #[derive(Debug, Clone)]
 pub struct GeneratedAotModule {
     /// Build spec name after validation and filename sanitization.
@@ -81,9 +86,167 @@ pub struct GeneratedAotModule {
     pub metadata: AotEntrypointMetadata,
 }
 
+/// Runtime callbacks that a standalone artifact may require after the selected
+/// top function's direct-call closure has been traversed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AotRuntimeFeatures {
+    has_asserts: bool,
+    has_traces: bool,
+    has_covers: bool,
+}
+
 /// Compiles IR text into raw AOT object code and parsed entrypoint metadata.
 pub fn compile_ir_to_aot(ir_text: &str, top: &str) -> AotResult<AotCompiled> {
     AotCompiled::compile_ir(ir_text, top)
+}
+
+/// Compiles one IR function through a generated standalone wrapper entrypoint.
+///
+/// The wrapper gives emitted objects a deterministic artifact-scoped exported
+/// symbol without mutating the caller's original function names. Standalone
+/// generation currently follows the direct-call closure only; callback-bearing
+/// nodes such as `trace` and `cover` are rejected before compilation because
+/// their runtime callbacks are not part of the first standalone ABI.
+fn compile_ir_to_standalone_aot(
+    ir_text: &str,
+    top: &str,
+    base_name: &str,
+) -> AotResult<(AotCompiled, AotRuntimeFeatures)> {
+    let runtime_features = classify_reachable_runtime_features(ir_text, top)?;
+    if runtime_features.has_traces {
+        return Err(XlsynthError(
+            "AOT standalone runtime does not support `trace` nodes".to_string(),
+        ));
+    } else if runtime_features.has_covers {
+        return Err(XlsynthError(
+            "AOT standalone runtime does not support `cover` nodes".to_string(),
+        ));
+    }
+
+    let wrapper_name = format!("__xlsynth_standalone_{base_name}");
+    let wrapped_ir = append_standalone_wrapper_ir(ir_text, top, &wrapper_name)?;
+    let compiled = AotCompiled::compile_ir(&wrapped_ir, &wrapper_name)?;
+    Ok((compiled, runtime_features))
+}
+
+/// Classifies runtime features reachable from one selected top function.
+///
+/// The traversal assumes canonical XLS IR text and follows only direct function
+/// references that the standalone generator knows how to preserve.
+fn classify_reachable_runtime_features(ir_text: &str, top: &str) -> AotResult<AotRuntimeFeatures> {
+    let package = crate::ir_package::IrPackage::parse_ir(ir_text, Some("standalone_aot.ir"))
+        .map_err(|e| XlsynthError(format!("AOT runtime feature parse failed: {}", e.0)))?;
+    let mut pending = vec![top.to_string()];
+    let mut visited = HashSet::new();
+    let mut runtime_features = AotRuntimeFeatures {
+        has_asserts: false,
+        has_traces: false,
+        has_covers: false,
+    };
+
+    while let Some(function_name) = pending.pop() {
+        if visited.insert(function_name.clone()) {
+            let function = package.get_function(&function_name).map_err(|e| {
+                XlsynthError(format!(
+                    "AOT runtime feature function lookup failed for `{function_name}`: {}",
+                    e.0
+                ))
+            })?;
+            let function_ir = function.to_ir_string().map_err(|e| {
+                XlsynthError(format!(
+                    "AOT runtime feature IR formatting failed for `{function_name}`: {}",
+                    e.0
+                ))
+            })?;
+            runtime_features.merge(classify_runtime_features_in_function(&function_ir));
+            pending.extend(referenced_function_names(&function_ir));
+        }
+    }
+
+    Ok(runtime_features)
+}
+
+impl AotRuntimeFeatures {
+    /// Merges runtime features discovered in another reachable function.
+    fn merge(&mut self, other: Self) {
+        self.has_asserts |= other.has_asserts;
+        self.has_traces |= other.has_traces;
+        self.has_covers |= other.has_covers;
+    }
+}
+
+/// Classifies the runtime features used by one canonical XLS IR function.
+fn classify_runtime_features_in_function(function_ir: &str) -> AotRuntimeFeatures {
+    AotRuntimeFeatures {
+        has_asserts: function_ir.lines().any(|line| line.contains(" = assert(")),
+        has_traces: function_ir.lines().any(|line| line.contains(" = trace(")),
+        has_covers: function_ir.lines().any(|line| line.contains(" = cover(")),
+    }
+}
+
+/// Returns direct function references carried by canonical XLS IR node attrs.
+///
+/// The standalone generator intentionally recognizes only the direct-call
+/// attributes it can preserve today, so adding another call-bearing node shape
+/// requires extending this list as part of that feature work.
+fn referenced_function_names(function_ir: &str) -> Vec<String> {
+    function_ir
+        .lines()
+        .flat_map(|line| {
+            ["to_apply=", "body="]
+                .iter()
+                .copied()
+                .filter_map(move |attribute| function_attr_value(line, attribute))
+        })
+        .collect()
+}
+
+/// Extracts one unquoted canonical XLS IR function-reference attribute value.
+fn function_attr_value(line: &str, attribute: &str) -> Option<String> {
+    line.split_once(attribute)
+        .map(|(_, suffix)| {
+            suffix
+                .chars()
+                .take_while(|ch| !matches!(ch, ',' | ')' | ' ' | '\t'))
+                .collect::<String>()
+        })
+        .filter(|value| !value.is_empty())
+}
+
+/// Appends an artifact-scoped forwarding wrapper around the requested top.
+///
+/// Keeping the caller's original top untouched prevents generated artifact
+/// naming from leaking back into source IR while still giving each emitted
+/// object a stable exported entrypoint symbol.
+fn append_standalone_wrapper_ir(ir_text: &str, top: &str, wrapper_name: &str) -> AotResult<String> {
+    let package = crate::ir_package::IrPackage::parse_ir(ir_text, Some("standalone_aot.ir"))
+        .map_err(|e| XlsynthError(format!("AOT standalone wrapper parse failed: {}", e.0)))?;
+    let function = package
+        .get_function(top)
+        .map_err(|e| XlsynthError(format!("AOT standalone wrapper top lookup failed: {}", e.0)))?;
+    let function_type = function.get_type()?;
+    let params = (0..function_type.param_count())
+        .map(|index| {
+            Ok(format!(
+                "{}: {}",
+                function.param_name(index)?,
+                function_type.param_type(index)?
+            ))
+        })
+        .collect::<AotResult<Vec<_>>>()?;
+    let param_names = (0..function_type.param_count())
+        .map(|index| function.param_name(index))
+        .collect::<AotResult<Vec<_>>>()?;
+    let invoke_args = if param_names.is_empty() {
+        format!("to_apply={top}")
+    } else {
+        format!("{}, to_apply={top}", param_names.join(", "))
+    };
+    let return_type = function_type.return_type();
+    Ok(format!(
+        "{ir_text}\nfn {wrapper_name}({params}) -> {return_type} {{\n  ret __xlsynth_standalone_out: {return_type} = invoke({invoke_args})\n}}\n",
+        params = params.join(", "),
+    ))
 }
 
 /// Emits AOT artifacts into Cargo's `OUT_DIR`.
@@ -155,8 +318,8 @@ pub fn emit_typed_dslx_aot_module_from_file_with_out_dir(
     };
     let aot_top =
         mangle_dslx_name_with_calling_convention(dslx_module_name, spec.top, calling_convention)?;
-    let compile = compile_ir_to_aot(&ir_text, &aot_top)?;
     let base_name = sanitize_identifier(spec.name);
+    let (compile, runtime_features) = compile_ir_to_standalone_aot(&ir_text, &aot_top, &base_name)?;
     let AotCompiled {
         object_code,
         entrypoints_proto,
@@ -189,9 +352,9 @@ pub fn emit_typed_dslx_aot_module_from_file_with_out_dir(
         proto_file_name,
         &selected_metadata,
         &signature,
+        runtime_features,
     )?;
     write_file(&rust_file, generated.as_bytes())?;
-    run_rustfmt_best_effort(&rust_file);
 
     emit_link_archive(&base_name, &object_file)?;
 
@@ -224,8 +387,9 @@ pub fn emit_aot_module_from_ir_text_with_out_dir(
         ));
     }
 
-    let compile = compile_ir_to_aot(spec.ir_text, spec.top)?;
     let base_name = sanitize_identifier(spec.name);
+    let (compile, runtime_features) =
+        compile_ir_to_standalone_aot(spec.ir_text, spec.top, &base_name)?;
     let AotCompiled {
         object_code,
         entrypoints_proto,
@@ -258,9 +422,9 @@ pub fn emit_aot_module_from_ir_text_with_out_dir(
         &signature,
         spec.name,
         spec.top,
+        runtime_features,
     )?;
     write_file(&rust_file, generated.as_bytes())?;
-    run_rustfmt_best_effort(&rust_file);
 
     emit_link_archive(&base_name, &object_file)?;
 
@@ -296,10 +460,6 @@ pub fn emit_aot_module_from_ir_file(
 fn write_file(path: &Path, contents: &[u8]) -> AotResult<()> {
     std::fs::write(path, contents)
         .map_err(|e| XlsynthError(format!("AOT I/O failed for {}: {e}", path.display())))
-}
-
-fn run_rustfmt_best_effort(path: &Path) {
-    let _ = Command::new("rustfmt").arg(path).status();
 }
 
 fn sanitize_identifier(name: &str) -> String {
@@ -633,11 +793,11 @@ fn render_layout_constants(prefix: &str, layouts: &[AotTypeLayout]) -> String {
     let mut out = String::new();
     for (index, layout) in layouts.iter().enumerate() {
         out.push_str(&format!(
-            "const {prefix}{index}_LAYOUT: &[xlsynth::aot_entrypoint_metadata::AotElementLayout] = &[\n"
+            "const {prefix}{index}_LAYOUT: &[AotElementLayout] = &[\n"
         ));
         for element in &layout.elements {
             out.push_str(&format!(
-                "    xlsynth::aot_entrypoint_metadata::AotElementLayout {{ offset: {}, data_size: {}, padded_size: {} }},\n",
+                "    AotElementLayout {{ offset: {}, data_size: {}, padded_size: {} }},\n",
                 element.offset, element.data_size, element.padded_size
             ));
         }
@@ -670,7 +830,7 @@ fn emit_pack_statements(
                     push_line(
                         lines,
                         format!(
-                            "xlsynth::aot_runner::write_leaf_element({dst_name}, &{layout_name}[{leaf_index_expr}], &[encoded_bit]);"
+                            "write_leaf_element({dst_name}, &{layout_name}[{leaf_index_expr}], &[encoded_bit]);"
                         ),
                     );
                 } else {
@@ -693,7 +853,7 @@ fn emit_pack_statements(
                     push_line(
                         lines,
                         format!(
-                            "xlsynth::aot_runner::write_leaf_element({dst_name}, &{layout_name}[{leaf_index_expr}], &({value_expr}).to_ne_bytes());"
+                            "write_leaf_element({dst_name}, &{layout_name}[{leaf_index_expr}], &({value_expr}).to_ne_bytes());"
                         ),
                     );
                 }
@@ -711,7 +871,7 @@ fn emit_pack_statements(
                 push_line(
                     lines,
                     format!(
-                        "xlsynth::aot_runner::write_leaf_element({dst_name}, &{layout_name}[{leaf_index_expr}], &({value_expr}));"
+                        "write_leaf_element({dst_name}, &{layout_name}[{leaf_index_expr}], &({value_expr}));"
                     ),
                 );
             }
@@ -719,9 +879,7 @@ fn emit_pack_statements(
         ResolvedType::Token => {
             push_line(
                 lines,
-                format!(
-                    "xlsynth::aot_runner::write_leaf_element({dst_name}, &{layout_name}[{leaf_index_expr}], &[]);"
-                ),
+                format!("write_leaf_element({dst_name}, &{layout_name}[{leaf_index_expr}], &[]);"),
             );
         }
         ResolvedType::Tuple { fields, .. } => {
@@ -784,7 +942,7 @@ fn render_decode_expr(
                 if *bit_count == 1 {
                     format!(
                         "{{ let mut dst_bytes = [0u8; 1]; \
-                        xlsynth::aot_runner::read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], &mut dst_bytes); \
+                        read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], &mut dst_bytes); \
                         assert!(dst_bytes[0] <= 1, \"AOT decode overflow: value does not fit in 1 bit\"); \
                         dst_bytes[0] != 0 }}"
                     )
@@ -794,7 +952,7 @@ fn render_decode_expr(
                     let native_width = scalar_bits_native_width(*bit_count);
                     let mut expr = format!(
                         "{{ let mut dst_bytes = [0u8; {storage_bytes}]; \
-                        xlsynth::aot_runner::read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], &mut dst_bytes); \
+                        read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], &mut dst_bytes); \
                         let decoded = {native_type}::from_ne_bytes(dst_bytes); "
                     );
                     if *bit_count == 0 {
@@ -813,7 +971,7 @@ fn render_decode_expr(
                 let byte_count = bit_count.div_ceil(8);
                 let mut expr = format!(
                     "{{ let mut dst_bytes = [0u8; {byte_count}]; \
-                    xlsynth::aot_runner::read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], &mut dst_bytes); "
+                    read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], &mut dst_bytes); "
                 );
                 let bit_remainder = bit_count % 8;
                 if bit_remainder != 0 {
@@ -829,7 +987,7 @@ fn render_decode_expr(
         ResolvedType::Token => {
             format!(
                 "{{ let mut dst_bytes = [0u8; 0]; \
-                xlsynth::aot_runner::read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], &mut dst_bytes); \
+                read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], &mut dst_bytes); \
                 Token {{}} }}"
             )
         }
@@ -1067,7 +1225,7 @@ struct TypedDslxField {
 /// structs, or fixed arrays are rejected during lowering.
 #[derive(Debug, Clone)]
 enum TypedDslxType {
-    /// A DSLX bits-like type represented by `IrUBits<N>` or `IrSBits<N>`.
+    /// A DSLX bits-like type represented by `UBits<N>` or `SBits<N>`.
     Bits {
         /// Rust bridge type path used in generated signatures and helpers.
         rust_type: String,
@@ -1802,7 +1960,7 @@ impl TypedDslxTypeContext {
     ) -> AotResult<String> {
         if let Some((is_signed, bit_count)) = ty.is_bits_like() {
             let signed_str = if is_signed { "S" } else { "U" };
-            Ok(format!("Ir{signed_str}Bits<{bit_count}>"))
+            Ok(format!("{signed_str}Bits<{bit_count}>"))
         } else if ty.is_enum() {
             let enum_def = ty.get_enum_def()?;
             let enum_name = enum_def.get_identifier();
@@ -1861,7 +2019,7 @@ impl TypedDslxTypeContext {
         ty: &dslx::Type,
     ) -> AotResult<String> {
         if type_annotation.is_some() {
-            return RustBridgeBuilder::rust_type_name_from_dslx_module(
+            return RustBridgeBuilder::standalone_rust_type_name_from_dslx_module(
                 local_module_name,
                 current_type_info,
                 type_annotation,
@@ -2277,7 +2435,7 @@ fn emit_typed_dslx_pack_statements(
             push_line(
                 lines,
                 format!(
-                    "xlsynth::aot_runner::write_leaf_element({dst_name}, &{layout_name}[{leaf_index_expr}], &encoded_bytes);"
+                    "write_leaf_element({dst_name}, &{layout_name}[{leaf_index_expr}], &encoded_bytes);"
                 ),
             );
         }
@@ -2299,19 +2457,19 @@ fn emit_typed_dslx_pack_statements(
                 );
             }
             push_line(lines, "};");
-            let ir_bits_wrapper_name = if *is_signed { "IrSBits" } else { "IrUBits" };
+            let ir_bits_wrapper_name = if *is_signed { "SBits" } else { "UBits" };
             let constructor = if *is_signed { "from_i64" } else { "from_u64" };
             push_line(
                 lines,
                 format!(
-                    "let encoded_bits = xlsynth::{ir_bits_wrapper_name}::<{bit_count}>::{constructor}(encoded_value)?;"
+                    "let encoded_bits = {ir_bits_wrapper_name}::<{bit_count}>::{constructor}(encoded_value)?;"
                 ),
             );
             push_line(lines, "let encoded_bytes = encoded_bits.to_le_bytes()?;");
             push_line(
                 lines,
                 format!(
-                    "xlsynth::aot_runner::write_leaf_element({dst_name}, &{layout_name}[{leaf_index_expr}], &encoded_bytes);"
+                    "write_leaf_element({dst_name}, &{layout_name}[{leaf_index_expr}], &encoded_bytes);"
                 ),
             );
         }
@@ -2380,7 +2538,7 @@ fn render_typed_dslx_encode_function(
     push_line(
         &mut lines,
         format!(
-            "fn encode_input_{index}(_value: &{}, dst: &mut [u8]) -> Result<(), xlsynth::XlsynthError> {{",
+            "fn encode_input_{index}(_value: &{}, dst: &mut [u8]) -> Result<(), AotError> {{",
             typed_dslx_rust_type_name(ty)
         ),
     );
@@ -2449,14 +2607,14 @@ fn emit_typed_dslx_decode_statements(
             push_line(
                 lines,
                 format!(
-                    "xlsynth::aot_runner::read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], &mut {bytes_name});"
+                    "read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], &mut {bytes_name});"
                 ),
             );
-            let ir_bits_wrapper_name = if *is_signed { "IrSBits" } else { "IrUBits" };
+            let ir_bits_wrapper_name = if *is_signed { "SBits" } else { "UBits" };
             push_line(
                 lines,
                 format!(
-                    "let {value_name} = xlsynth::{ir_bits_wrapper_name}::<{bit_count}>::from_le_bytes(&{bytes_name})?;"
+                    "let {value_name} = {ir_bits_wrapper_name}::<{bit_count}>::from_le_bytes(&{bytes_name})?;"
                 ),
             );
             value_name
@@ -2479,15 +2637,15 @@ fn emit_typed_dslx_decode_statements(
             push_line(
                 lines,
                 format!(
-                    "xlsynth::aot_runner::read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], &mut {bytes_name});"
+                    "read_leaf_element({src_name}, &{layout_name}[{leaf_index_expr}], &mut {bytes_name});"
                 ),
             );
-            let ir_bits_wrapper_name = if *is_signed { "IrSBits" } else { "IrUBits" };
+            let ir_bits_wrapper_name = if *is_signed { "SBits" } else { "UBits" };
             let scalar_method = if *is_signed { "to_i64" } else { "to_u64" };
             push_line(
                 lines,
                 format!(
-                    "let {bits_name} = xlsynth::{ir_bits_wrapper_name}::<{bit_count}>::from_le_bytes(&{bytes_name})?;"
+                    "let {bits_name} = {ir_bits_wrapper_name}::<{bit_count}>::from_le_bytes(&{bytes_name})?;"
                 ),
             );
             push_line(
@@ -2504,7 +2662,7 @@ fn emit_typed_dslx_decode_statements(
             push_line(
                 lines,
                 format!(
-                    "    value => return Err(xlsynth::XlsynthError(format!(\"AOT decode invalid enum value {{value}} for {rust_type}\"))),"
+                    "    value => return Err(AotError(format!(\"AOT decode invalid enum value {{value}} for {rust_type}\"))),"
                 ),
             );
             push_line(lines, "};");
@@ -2587,7 +2745,7 @@ fn emit_typed_dslx_decode_statements(
             push_line(
                 lines,
                 format!(
-                    "    Err(values) => return Err(xlsynth::XlsynthError(format!(\"AOT decode internal error: expected {size} array elements, got {{}}\", values.len()))),"
+                    "    Err(values) => return Err(AotError(format!(\"AOT decode internal error: expected {size} array elements, got {{}}\", values.len()))),"
                 ),
             );
             push_line(lines, "};");
@@ -2611,7 +2769,7 @@ fn render_typed_dslx_decode_function(ty: &TypedDslxType, expected_size: usize) -
     push_line(
         &mut lines,
         format!(
-            "fn decode_output_0(src: &[u8]) -> Result<{}, xlsynth::XlsynthError> {{",
+            "fn decode_output_0(src: &[u8]) -> Result<{}, AotError> {{",
             typed_dslx_rust_type_name(ty)
         ),
     );
@@ -2663,6 +2821,18 @@ fn make_unique_typed_dslx_argument_names(params: &[TypedDslxParam]) -> Vec<Strin
         .collect()
 }
 
+/// Renders the runtime imports shared by generated standalone wrappers.
+fn render_standalone_runtime_imports() -> &'static str {
+    r#"pub use xlsynth_aot_runtime::{
+    AotArtifactMetadata, AotError, AotRunResult, SBits, UBits,
+};
+#[allow(unused_imports)]
+use xlsynth_aot_runtime::{
+    read_leaf_element, write_leaf_element, AotElementLayout, AotRunnerLayout, StandaloneRunner,
+};
+"#
+}
+
 /// Renders the generated runner items inserted into the top DSLX bridge module.
 ///
 /// The epilogue owns the linked symbol declaration, descriptor, typed
@@ -2671,10 +2841,11 @@ fn make_unique_typed_dslx_argument_names(params: &[TypedDslxParam]) -> Vec<Strin
 /// reexports.
 fn render_typed_dslx_runner_epilogue(
     base_name: &str,
-    proto_file_name: &str,
+    _proto_file_name: &str,
     metadata: &AotEntrypointMetadata,
     signature: &AotFunctionSignature,
     typed_signature: &TypedAotFunctionSignature,
+    runtime_features: AotRuntimeFeatures,
 ) -> AotResult<String> {
     validate_signature_and_layouts(metadata, signature)?;
     validate_typed_dslx_function_matches_aot(typed_signature, signature)?;
@@ -2729,67 +2900,69 @@ fn render_typed_dslx_runner_epilogue(
     fn {symbol_ident}();\n\
 }}\n\
 \n\
-const ENTRYPOINTS_PROTO: &[u8] = include_bytes!(\"{proto_file_name}\");\n\
 const INPUT_BUFFER_SIZES: &[usize] = {input_sizes};\n\
 const INPUT_BUFFER_ALIGNMENTS: &[usize] = {input_alignments};\n\
 const OUTPUT_BUFFER_SIZES: &[usize] = {output_sizes};\n\
 const OUTPUT_BUFFER_ALIGNMENTS: &[usize] = {output_alignments};\n\
+const RUNNER_LAYOUT: AotRunnerLayout = AotRunnerLayout {{\n\
+    input_buffer_sizes: INPUT_BUFFER_SIZES,\n\
+    input_buffer_alignments: INPUT_BUFFER_ALIGNMENTS,\n\
+    output_buffer_sizes: OUTPUT_BUFFER_SIZES,\n\
+    output_buffer_alignments: OUTPUT_BUFFER_ALIGNMENTS,\n\
+    temp_buffer_size: {temp_size},\n\
+    temp_buffer_alignment: {temp_align},\n\
+}};\n\
+/// Runtime-visible metadata for the generated standalone artifact.\n\
+pub const ARTIFACT_METADATA: AotArtifactMetadata = AotArtifactMetadata {{\n\
+    abi_version: {abi_version},\n\
+    entrypoint_symbol: {link_symbol_literal},\n\
+    has_asserts: {has_asserts},\n\
+    has_traces: {has_traces},\n\
+}};\n\
 \n\
 {input_layout_constants}\
 {output_layout_constants}\
 \n\
 {helper_functions}\n\
 \n\
-pub fn descriptor() -> xlsynth::AotEntrypointDescriptor<'static> {{\n\
-    unsafe {{\n\
-        xlsynth::AotEntrypointDescriptor::from_raw_parts_unchecked(\n\
-            ENTRYPOINTS_PROTO,\n\
-            {symbol_ident} as *const () as usize,\n\
-            xlsynth::AotEntrypointMetadata {{\n\
-                symbol: {link_symbol_literal}.to_string(),\n\
-                input_buffer_sizes: INPUT_BUFFER_SIZES.to_vec(),\n\
-                input_buffer_alignments: INPUT_BUFFER_ALIGNMENTS.to_vec(),\n\
-                output_buffer_sizes: OUTPUT_BUFFER_SIZES.to_vec(),\n\
-                output_buffer_alignments: OUTPUT_BUFFER_ALIGNMENTS.to_vec(),\n\
-                temp_buffer_size: {temp_size},\n\
-                temp_buffer_alignment: {temp_align},\n\
-            }},\n\
-        )\n\
-    }}\n\
-}}\n\
-\n\
 /// Reusable runner for the generated typed DSLX AOT entrypoint.\n\
 ///\n\
-/// A runner caches the ABI buffers owned by `xlsynth::AotRunner`; create one\n\
-/// runner per concurrent caller instead of sharing it across threads.\n\
+/// A runner caches the standalone ABI buffers; create one runner per\n\
+/// concurrent caller instead of sharing it across threads.\n\
 pub struct Runner {{\n\
-    inner: xlsynth::AotRunner<'static>,\n\
+    inner: StandaloneRunner,\n\
 }}\n\
 \n\
 impl Runner {{\n\
+    /// Creates a reusable runner for the generated typed DSLX entrypoint.\n\
+    ///\n\
     /// # Errors\n\
     ///\n\
-    /// Returns an error if the descriptor metadata cannot initialize an AOT\n\
-    /// runner.\n\
-    pub fn new() -> Result<Self, xlsynth::XlsynthError> {{\n\
+    /// Returns an error if the standalone artifact metadata cannot initialize\n\
+    /// an AOT runner.\n\
+    pub fn new() -> Result<Self, AotError> {{\n\
         Ok(Self {{\n\
-            inner: xlsynth::AotRunner::new(descriptor())?,\n\
+            inner: unsafe {{ StandaloneRunner::new(\n\
+                &ARTIFACT_METADATA,\n\
+                {symbol_ident} as *const (),\n\
+                &RUNNER_LAYOUT,\n\
+            )? }},\n\
         }})\n\
     }}\n\
 \n\
-    /// Runs the entrypoint and returns the output together with trace/assert events.\n\
+    /// Runs the entrypoint and returns the output together with assertion\n\
+    /// events.\n\
     ///\n\
     /// # Errors\n\
     ///\n\
     /// Returns an error if input packing, AOT execution, or output decoding\n\
     /// fails.\n\
-    pub fn run_with_events({run_signature}) -> Result<xlsynth::AotRunResult<{return_type}>, xlsynth::XlsynthError> {{\n\
+    pub fn run_with_events({run_signature}) -> Result<AotRunResult<{return_type}>, AotError> {{\n\
 {encode_body}\
-        let result = self.inner.run_with_events(|inner| decode_output_0(inner.output(0)))?;\n\
-        Ok(xlsynth::AotRunResult {{\n\
-            output: result.output?,\n\
-            trace_messages: result.trace_messages,\n\
-            assert_messages: result.assert_messages,\n\
+        self.inner.run_raw();\n\
+        Ok(AotRunResult {{\n\
+            output: decode_output_0(self.inner.output(0))?,\n\
+            assert_messages: self.inner.assert_messages().to_vec(),\n\
         }})\n\
     }}\n\
 \n\
@@ -2797,19 +2970,26 @@ impl Runner {{\n\
     ///\n\
     /// # Errors\n\
     ///\n\
-    /// Returns an error if input packing, AOT execution, or output decoding\n\
-    /// fails.\n\
-    pub fn run({run_signature}) -> Result<{return_type}, xlsynth::XlsynthError> {{\n\
+    /// Returns an error if input packing, AOT execution, output decoding, or\n\
+    /// an XLS assertion fails.\n\
+    pub fn run({run_signature}) -> Result<{return_type}, AotError> {{\n\
 {encode_body}\
-        self.inner.run()?;\n\
+        self.inner.run_raw();\n\
+        if let Some(first_assertion) = self.inner.assert_messages().first() {{\n\
+            return Err(AotError(format!(\"XLS assertion failed: {{first_assertion}}\")));\n\
+        }}\n\
         decode_output_0(self.inner.output(0))\n\
     }}\n\
 }}\n\
 \n\
-pub fn new_runner() -> Result<Runner, xlsynth::XlsynthError> {{\n\
+/// Creates a reusable runner for the generated typed DSLX entrypoint.\n\
+pub fn new_runner() -> Result<Runner, AotError> {{\n\
     Runner::new()\n\
 }}\n",
         return_type = typed_signature.return_rust_type.as_str(),
+        abi_version = STANDALONE_AOT_ABI_VERSION,
+        has_asserts = runtime_features.has_asserts,
+        has_traces = runtime_features.has_traces,
         temp_size = metadata.temp_buffer_size,
         temp_align = metadata.temp_buffer_alignment,
     ))
@@ -2827,6 +3007,7 @@ fn render_typed_dslx_generated_module(
     proto_file_name: &str,
     metadata: &AotEntrypointMetadata,
     signature: &AotFunctionSignature,
+    runtime_features: AotRuntimeFeatures,
 ) -> AotResult<String> {
     let typechecked = typecheck_typed_dslx_modules(spec, top_dslx_text)?;
     let context = TypedDslxTypeContext::new(&typechecked);
@@ -2838,34 +3019,45 @@ fn render_typed_dslx_generated_module(
         metadata,
         signature,
         &typed_signature,
+        runtime_features,
     )?;
 
-    let mut modules = Vec::with_capacity(spec.type_module_paths.len() + 1);
+    let mut modules = Vec::with_capacity(spec.type_module_paths.len() + 2);
+    modules.push(RustModuleFragment {
+        path: vec![],
+        body: render_standalone_runtime_imports().to_string(),
+    });
     for bridge_module in &typechecked.bridge_modules {
-        let mut builder = RustBridgeBuilder::new();
+        let mut builder = RustBridgeBuilder::standalone();
         convert_imported_module(bridge_module, &mut builder)?;
         modules.push(builder.module_fragment());
     }
 
-    let mut top_builder = RustBridgeBuilder::new().with_runner_items(runner_epilogue);
+    let mut top_builder = RustBridgeBuilder::standalone().with_runner_items(runner_epilogue);
     convert_imported_module(&typechecked.top_module, &mut top_builder)?;
     modules.push(top_builder.module_fragment());
 
-    Ok(format!(
-        "// SPDX-License-Identifier: Apache-2.0\n// Generated by xlsynth::aot_builder from DSLX build spec {:?}.\n\n{}\n",
-        spec.name,
-        render_rust_module_fragments(modules)
-    ))
+    render_canonical_generated_source(
+        &format!(
+            "// SPDX-License-Identifier: Apache-2.0\n// Generated by xlsynth::aot_builder from DSLX build spec {:?}.",
+            spec.name
+        ),
+        &render_rust_module_fragments(modules),
+    )
 }
 
 /// Renders the generated Rust wrapper source for one compiled AOT entrypoint.
+///
+/// The IR-only form exposes structural Rust wrapper types derived from ABI
+/// metadata plus the same linked runtime crate used by typed DSLX output.
 fn render_generated_module(
     base_name: &str,
-    proto_file_name: &str,
+    _proto_file_name: &str,
     metadata: &AotEntrypointMetadata,
     signature: &AotFunctionSignature,
     source_name: &str,
     top: &str,
+    runtime_features: AotRuntimeFeatures,
 ) -> AotResult<String> {
     validate_signature_and_layouts(metadata, signature)?;
 
@@ -2875,6 +3067,7 @@ fn render_generated_module(
     let input_alignments = format_usize_array(&metadata.input_buffer_alignments);
     let output_sizes = format_usize_array(&metadata.output_buffer_sizes);
     let output_alignments = format_usize_array(&metadata.output_buffer_alignments);
+    let runtime_imports = render_standalone_runtime_imports();
 
     let mut resolver = TypeResolver::default();
     let input_types = signature
@@ -2916,91 +3109,132 @@ fn render_generated_module(
         format!("&mut self, {run_params}")
     };
 
-    let mut run_body = String::new();
-    let mut run_with_events_body = String::new();
+    let mut encode_body = String::new();
     for (index, name) in arg_names.iter().enumerate() {
-        run_body.push_str(&format!(
-            "        encode_input_{index}({name}, self.inner.input_mut({index}));\n"
-        ));
-        run_with_events_body.push_str(&format!(
+        encode_body.push_str(&format!(
             "        encode_input_{index}({name}, self.inner.input_mut({index}));\n"
         ));
     }
-    run_body.push_str("        self.inner.run()?;\n");
-    run_body.push_str("        let output = decode_output_0(self.inner.output(0));\n");
-    run_body.push_str("        Ok(output)\n");
 
-    run_with_events_body.push_str("        self.inner.run_with_events(|inner| {\n");
-    run_with_events_body.push_str("            let output = decode_output_0(inner.output(0));\n");
-    run_with_events_body.push_str("            output\n");
-    run_with_events_body.push_str("        })\n");
-
-    Ok(format!(
-        "// SPDX-License-Identifier: Apache-2.0\n\
-// Generated by xlsynth::aot_builder from build spec {source_name:?} (top={top:?}, function={function_name:?}).\n\
-\n\
+    render_canonical_generated_source(
+        &format!(
+            "// SPDX-License-Identifier: Apache-2.0\n\
+// Generated by xlsynth::aot_builder from build spec {source_name:?}.\n\
+// top={top:?}\n\
+// function={function_name:?}",
+            function_name = signature.function_name,
+        ),
+        &format!(
+            "{runtime_imports}\
 unsafe extern \"C\" {{\n\
     #[link_name = {link_symbol_literal}]\n\
     fn {symbol_ident}();\n\
 }}\n\
 \n\
-const ENTRYPOINTS_PROTO: &[u8] = include_bytes!(\"{proto_file_name}\");\n\
 const INPUT_BUFFER_SIZES: &[usize] = {input_sizes};\n\
 const INPUT_BUFFER_ALIGNMENTS: &[usize] = {input_alignments};\n\
 const OUTPUT_BUFFER_SIZES: &[usize] = {output_sizes};\n\
 const OUTPUT_BUFFER_ALIGNMENTS: &[usize] = {output_alignments};\n\
-\n\
+const RUNNER_LAYOUT: AotRunnerLayout = AotRunnerLayout {{\n\
+    input_buffer_sizes: INPUT_BUFFER_SIZES,\n\
+    input_buffer_alignments: INPUT_BUFFER_ALIGNMENTS,\n\
+    output_buffer_sizes: OUTPUT_BUFFER_SIZES,\n\
+    output_buffer_alignments: OUTPUT_BUFFER_ALIGNMENTS,\n\
+    temp_buffer_size: {temp_size},\n\
+    temp_buffer_alignment: {temp_align},\n\
+}};\n\
+/// Runtime-visible metadata for the generated standalone artifact.\n\
+pub const ARTIFACT_METADATA: AotArtifactMetadata = AotArtifactMetadata {{\n\
+    abi_version: {abi_version},\n\
+    entrypoint_symbol: {link_symbol_literal},\n\
+    has_asserts: {has_asserts},\n\
+    has_traces: {has_traces},\n\
+}};\n\
 {type_declarations}\
 {input_layout_constants}\
 {output_layout_constants}\
 \n\
 {helper_functions}\n\
 \n\
-pub fn descriptor() -> xlsynth::AotEntrypointDescriptor<'static> {{\n\
-    unsafe {{\n\
-        xlsynth::AotEntrypointDescriptor::from_raw_parts_unchecked(\n\
-            ENTRYPOINTS_PROTO,\n\
-            {symbol_ident} as *const () as usize,\n\
-            xlsynth::AotEntrypointMetadata {{\n\
-                symbol: {link_symbol_literal}.to_string(),\n\
-                input_buffer_sizes: INPUT_BUFFER_SIZES.to_vec(),\n\
-                input_buffer_alignments: INPUT_BUFFER_ALIGNMENTS.to_vec(),\n\
-                output_buffer_sizes: OUTPUT_BUFFER_SIZES.to_vec(),\n\
-                output_buffer_alignments: OUTPUT_BUFFER_ALIGNMENTS.to_vec(),\n\
-                temp_buffer_size: {temp_size},\n\
-                temp_buffer_alignment: {temp_align},\n\
-            }},\n\
-        )\n\
-    }}\n\
-}}\n\
-\n\
+/// Reusable runner for the generated standalone AOT entrypoint.\n\
+///\n\
+/// A runner caches the standalone ABI buffers; create one runner per\n\
+/// concurrent caller instead of sharing it across threads.\n\
 pub struct Runner {{\n\
-    inner: xlsynth::AotRunner<'static>,\n\
+    inner: StandaloneRunner,\n\
 }}\n\
 \n\
 impl Runner {{\n\
-    pub fn new() -> Result<Self, xlsynth::XlsynthError> {{\n\
+    /// Creates a reusable runner for the generated standalone entrypoint.\n\
+    ///\n\
+    /// # Errors\n\
+    ///\n\
+    /// Returns an error if the standalone artifact metadata cannot initialize\n\
+    /// the ABI buffers required by the generated entrypoint.\n\
+    pub fn new() -> Result<Self, AotError> {{\n\
         Ok(Self {{\n\
-            inner: xlsynth::AotRunner::new(descriptor())?,\n\
+            inner: unsafe {{ StandaloneRunner::new(\n\
+                &ARTIFACT_METADATA,\n\
+                {symbol_ident} as *const (),\n\
+                &RUNNER_LAYOUT,\n\
+            )? }},\n\
         }})\n\
     }}\n\
 \n\
-    pub fn run_with_events({run_signature}) -> Result<xlsynth::AotRunResult<Output>, xlsynth::XlsynthError> {{\n\
-{run_with_events_body}\
+    /// Runs the entrypoint and returns the output together with assertion\n\
+    /// events.\n\
+    ///\n\
+    /// # Errors\n\
+    ///\n\
+    /// Returns an error if standalone ABI buffer initialization or output\n\
+    /// decoding fails.\n\
+    pub fn run_with_events({run_signature}) -> Result<AotRunResult<Output>, AotError> {{\n\
+{encode_body}\
+        self.inner.run_raw();\n\
+        Ok(AotRunResult {{\n\
+            output: decode_output_0(self.inner.output(0)),\n\
+            assert_messages: self.inner.assert_messages().to_vec(),\n\
+        }})\n\
     }}\n\
 \n\
-    pub fn run({run_signature}) -> Result<Output, xlsynth::XlsynthError> {{\n\
-{run_body}\
+    /// Runs the entrypoint and returns only the decoded output value.\n\
+    ///\n\
+    /// # Errors\n\
+    ///\n\
+    /// Returns an error if output decoding fails or an XLS assertion fires.\n\
+    pub fn run({run_signature}) -> Result<Output, AotError> {{\n\
+{encode_body}\
+        self.inner.run_raw();\n\
+        if let Some(first_assertion) = self.inner.assert_messages().first() {{\n\
+            return Err(AotError(format!(\"XLS assertion failed: {{first_assertion}}\")));\n\
+        }}\n\
+        Ok(decode_output_0(self.inner.output(0)))\n\
     }}\n\
 }}\n\
 \n\
-pub fn new_runner() -> Result<Runner, xlsynth::XlsynthError> {{\n\
+/// Creates a reusable runner for the generated standalone entrypoint.\n\
+pub fn new_runner() -> Result<Runner, AotError> {{\n\
     Runner::new()\n\
 }}\n",
-        function_name = signature.function_name,
-        temp_size = metadata.temp_buffer_size,
-        temp_align = metadata.temp_buffer_alignment,
-    ))
+            abi_version = STANDALONE_AOT_ABI_VERSION,
+            has_asserts = runtime_features.has_asserts,
+            has_traces = runtime_features.has_traces,
+            temp_size = metadata.temp_buffer_size,
+            temp_align = metadata.temp_buffer_alignment,
+        ),
+    )
+}
+
+/// Canonicalizes generated wrapper source without consulting host `rustfmt`.
+///
+/// These wrappers are shipped runtime artifacts, so their bytes must stay
+/// generator-owned. Ambient `rustfmt` has varied across our macOS and Ubuntu
+/// builders before, which changed generated documentation layout for the same
+/// logical artifact.
+fn render_canonical_generated_source(header: &str, body: &str) -> AotResult<String> {
+    let parsed = syn::parse_file(body)
+        .map_err(|err| XlsynthError(format!("AOT generated Rust parse failed: {err}")))?;
+    Ok(format!("{header}\n\n{}", prettyplease::unparse(&parsed)))
 }
 
 fn emit_link_archive(base_name: &str, object_file: &Path) -> AotResult<()> {
@@ -3026,6 +3260,96 @@ mod tests {
     #[test]
     fn sanitize_value_identifier_handles_keywords() {
         assert_eq!(sanitize_value_identifier("type", "arg"), "type_");
+    }
+
+    // Verifies: first-landing standalone artifacts reject trace-bearing IR.
+    // Catches: silently emitting artifacts whose runtime callbacks are unsupported.
+    #[test]
+    fn standalone_aot_rejects_trace_nodes() {
+        let ir_text = r#"package trace_pkg
+
+top fn traced(tok: token, x: bits[8]) -> bits[8] {
+  always_on: bits[1] = literal(value=1)
+  traced_tok: token = trace(tok, always_on, format="x: {}", data_operands=[x])
+  ret out: bits[8] = identity(x)
+}
+"#;
+
+        let error = compile_ir_to_standalone_aot(ir_text, "traced", "traced").unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("AOT standalone runtime does not support `trace` nodes"));
+    }
+
+    // Verifies: unsupported ops in dead package members do not reject a pure
+    // selected top. Catches: package-wide classification that ignores the
+    // artifact entrypoint boundary.
+    #[test]
+    fn standalone_aot_ignores_unreachable_trace_nodes() {
+        let ir_text = r#"package mixed_pkg
+
+fn traced(tok: token, x: bits[8]) -> bits[8] {
+  always_on: bits[1] = literal(value=1)
+  traced_tok: token = trace(tok, always_on, format="x: {}", data_operands=[x])
+  ret out: bits[8] = identity(x)
+}
+
+top fn pure(x: bits[8]) -> bits[8] {
+  ret out: bits[8] = identity(x)
+}
+"#;
+
+        compile_ir_to_standalone_aot(ir_text, "pure", "pure").unwrap();
+    }
+
+    // Verifies: unsupported ops in reachable callees still reject the selected
+    // top. Catches: top-only scans that ignore direct-call closure members.
+    #[test]
+    fn standalone_aot_rejects_trace_nodes_in_reachable_helpers() {
+        let ir_text = r#"package traced_helper_pkg
+
+fn traced(tok: token, x: bits[8]) -> bits[8] {
+  always_on: bits[1] = literal(value=1)
+  traced_tok: token = trace(tok, always_on, format="x: {}", data_operands=[x])
+  ret out: bits[8] = identity(x)
+}
+
+top fn calls_traced(tok: token, x: bits[8]) -> bits[8] {
+  ret out: bits[8] = invoke(tok, x, to_apply=traced)
+}
+"#;
+
+        let error =
+            compile_ir_to_standalone_aot(ir_text, "calls_traced", "calls_traced").unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("AOT standalone runtime does not support `trace` nodes"));
+    }
+
+    // Verifies: first-landing standalone artifacts reject unsupported cover-bearing
+    // IR. Catches: generated wrappers that would otherwise accept IR and abort
+    // through an unsupported runtime callback at execution time.
+    #[test]
+    fn standalone_aot_rejects_cover_nodes() {
+        let ir_text = r#"package cover_pkg
+
+top fn covered(x: bits[1]) -> bits[1] {
+  cover.1: () = cover(x, label="x_is_one")
+  ret out: bits[1] = identity(x)
+}
+"#;
+
+        let error = compile_ir_to_standalone_aot(ir_text, "covered", "covered").unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("AOT standalone runtime does not support `cover` nodes"),
+            "unexpected error: {}",
+            error
+        );
     }
 
     #[test]

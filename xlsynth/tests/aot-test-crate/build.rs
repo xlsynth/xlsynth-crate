@@ -101,17 +101,15 @@ top fn wide_bits_tuple(input: (bits[8], bits[257])) -> (bits[8], bits[257]) {
 }
 "#;
 
-    let trace_assert_ir = r#"package aot_tests
+    let assert_pair_ir = r#"package aot_tests
 
-top fn trace_assert_pair(tok: token, pair: (bits[8], bits[8])) -> (bits[8], bits[8]) {
+top fn assert_pair(tok: token, pair: (bits[8], bits[8])) -> (bits[8], bits[8]) {
   a: bits[8] = tuple_index(pair, index=0)
   b: bits[8] = tuple_index(pair, index=1)
   sum: bits[8] = add(a, b)
   min_sum: bits[8] = literal(value=5)
   ok: bits[1] = uge(sum, min_sum)
-  always_on: bits[1] = literal(value=1)
   asserted: token = assert(tok, ok, message="sum must be >= 5")
-  traced: token = trace(asserted, always_on, format="sum: {}", data_operands=[sum])
   ret out: (bits[8], bits[8]) = tuple(sum, b)
 }
 "#;
@@ -160,10 +158,10 @@ top fn trace_assert_pair(tok: token, pair: (bits[8], bits[8])) -> (bits[8], bits
             ir_text: wide_bits_tuple_ir,
         },
         AotCase {
-            name: "trace_assert",
-            top: "trace_assert_pair",
-            env_var: "XLSYNTH_AOT_TRACE_ASSERT_RS",
-            ir_text: trace_assert_ir,
+            name: "assert_pair",
+            top: "assert_pair",
+            env_var: "XLSYNTH_AOT_ASSERT_PAIR_RS",
+            ir_text: assert_pair_ir,
         },
     ];
 

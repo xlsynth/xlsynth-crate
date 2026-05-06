@@ -4,8 +4,8 @@ use std::fs;
 use std::path::Path;
 
 use xlsynth_aot_test_crate::{
-    add_inputs_aot, add_one_aot, compound_shapes_aot, empty_tuple_aot, large_array_tuple_aot,
-    trace_assert_aot, wide_bits_tuple_aot, wide_sizes_aot,
+    add_inputs_aot, add_one_aot, assert_pair_aot, compound_shapes_aot, empty_tuple_aot,
+    large_array_tuple_aot, wide_bits_tuple_aot, wide_sizes_aot,
 };
 use xlsynth_test_helpers::compare_golden_text;
 
@@ -40,8 +40,8 @@ fn generated_wrapper_golden_cases() -> [(&'static str, &'static str); 16] {
             "tests/goldens/wide_bits_tuple_wrapper.golden.txt",
         ),
         (
-            env!("XLSYNTH_AOT_TRACE_ASSERT_RS"),
-            "tests/goldens/trace_assert_wrapper.golden.txt",
+            env!("XLSYNTH_AOT_ASSERT_PAIR_RS"),
+            "tests/goldens/assert_pair_wrapper.golden.txt",
         ),
         (
             env!("XLSYNTH_AOT_WIDGET_FROB_RS"),
@@ -88,6 +88,25 @@ fn generated_wrappers_match_golden_references() {
         let generated = fs::read_to_string(generated_path).expect("generated wrapper should exist");
         compare_golden_text(&generated, golden_path);
     }
+}
+
+// Verifies: generated wrappers keep the detailed runtime failure contracts in
+// their public docs.
+// Catches: attempts to make generated output formatter-stable by weakening the
+// shipped documentation.
+#[test]
+fn generated_wrappers_preserve_detailed_error_docs() {
+    let ir_only_wrapper =
+        fs::read_to_string(env!("XLSYNTH_AOT_ADD_ONE_RS")).expect("IR wrapper should exist");
+    assert!(ir_only_wrapper
+        .contains("Returns an error if the standalone artifact metadata cannot initialize"));
+    assert!(ir_only_wrapper.contains("the ABI buffers required by the generated entrypoint."));
+
+    let typed_wrapper =
+        fs::read_to_string(env!("XLSYNTH_AOT_WIDGET_FROB_RS")).expect("typed wrapper should exist");
+    assert!(typed_wrapper
+        .contains("Returns an error if input packing, AOT execution, output decoding, or"));
+    assert!(typed_wrapper.contains("an XLS assertion fails."));
 }
 
 // Verifies: a scalar IR-only generated runner links and executes.
@@ -232,14 +251,14 @@ fn generated_runner_supports_wide_bits_tuple_structs() {
     assert!(output.field1[1..32].iter().all(|value| *value == 0));
 }
 
-// Verifies: generated runners surface trace messages and assertion messages.
+// Verifies: generated runners preserve standalone assertion reporting.
 // Catches: event plumbing regressions between AOT execution and runner APIs.
 #[test]
-fn generated_runner_run_with_events_surfaces_trace_and_assert_messages() {
-    let mut runner = trace_assert_aot::new_runner().expect("runner creation should succeed");
-    let token = trace_assert_aot::Token {};
+fn generated_runner_run_with_events_surfaces_assert_messages() {
+    let mut runner = assert_pair_aot::new_runner().expect("runner creation should succeed");
+    let token = assert_pair_aot::Token {};
 
-    let ok_input = trace_assert_aot::Input1 {
+    let ok_input = assert_pair_aot::Input1 {
         field0: 2,
         field1: 3,
     };
@@ -248,15 +267,13 @@ fn generated_runner_run_with_events_surfaces_trace_and_assert_messages() {
         .expect("run with events should succeed");
     assert_eq!(ok_result.output.field0, 5);
     assert_eq!(ok_result.output.field1, 3);
-    assert_eq!(ok_result.trace_messages.len(), 1);
     assert_eq!(ok_result.assert_messages.len(), 0);
-    assert_eq!(ok_result.trace_messages[0].message, "sum: 5");
 
     let ok_output = runner.run(&token, &ok_input).expect("run should succeed");
     assert_eq!(ok_output.field0, 5);
     assert_eq!(ok_output.field1, 3);
 
-    let bad_input = trace_assert_aot::Input1 {
+    let bad_input = assert_pair_aot::Input1 {
         field0: 2,
         field1: 2,
     };
@@ -265,9 +282,7 @@ fn generated_runner_run_with_events_surfaces_trace_and_assert_messages() {
         .expect("run with events should succeed");
     assert_eq!(bad_result.output.field0, 4);
     assert_eq!(bad_result.output.field1, 2);
-    assert_eq!(bad_result.trace_messages.len(), 1);
     assert_eq!(bad_result.assert_messages.len(), 1);
-    assert_eq!(bad_result.trace_messages[0].message, "sum: 4");
     assert_eq!(bad_result.assert_messages[0], "sum must be >= 5");
 
     let run_err = runner
