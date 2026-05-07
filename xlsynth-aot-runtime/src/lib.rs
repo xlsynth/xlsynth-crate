@@ -5,6 +5,8 @@
 //! encode/decode logic. This crate owns the reusable ABI support that those
 //! wrappers statically link into final consumer binaries.
 
+use std::convert::TryFrom;
+
 /// ABI version understood by the standalone runtime support.
 pub const SUPPORTED_ARTIFACT_ABI_VERSION: u32 = 1;
 
@@ -343,15 +345,34 @@ unsafe extern "C" fn record_assertion(
 unsafe extern "C" fn allocate_buffer(
     _context: *mut StandaloneInstanceContext,
     byte_size: i64,
-    _alignment: i64,
+    alignment: i64,
 ) -> *mut std::ffi::c_void {
     unsafe extern "C" {
         fn malloc(size: usize) -> *mut std::ffi::c_void;
+        fn posix_memalign(memptr: *mut *mut std::ffi::c_void, alignment: usize, size: usize)
+            -> i32;
     }
-    if byte_size <= 0 {
+
+    let byte_size = usize::try_from(byte_size).ok();
+    let alignment = usize::try_from(alignment).ok();
+    if byte_size.is_none_or(|byte_size| byte_size == 0)
+        || alignment.is_none_or(|alignment| !alignment.is_power_of_two())
+    {
         std::ptr::null_mut()
     } else {
-        unsafe { malloc(byte_size as usize) }
+        let byte_size = byte_size.unwrap();
+        let alignment = alignment.unwrap();
+        if alignment <= std::mem::align_of::<usize>() {
+            unsafe { malloc(byte_size) }
+        } else {
+            let mut buffer = std::ptr::null_mut();
+            let status = unsafe { posix_memalign(&mut buffer, alignment, byte_size) };
+            if status == 0 {
+                buffer
+            } else {
+                std::ptr::null_mut()
+            }
+        }
     }
 }
 
