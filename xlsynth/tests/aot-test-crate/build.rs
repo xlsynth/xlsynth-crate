@@ -336,5 +336,42 @@ top fn trace_assert_pair(tok: token, pair: (bits[8], bits[8])) -> (bits[8], bits
         shared_package_output.rust_file.display()
     );
 
+    let namespaced_widget_root = manifest_dir.join("src/package_namespaces");
+    let namespaced_widget_types_dslx_path = namespaced_widget_root.join("types/widget.x");
+    let namespaced_widget_echo_dslx_path = namespaced_widget_root.join("foo/widget.x");
+    let namespaced_widget_bump_dslx_path = namespaced_widget_root.join("bar/widget.x");
+    let namespaced_package_output = TypedDslxAotPackageBuilder::new("namespaced_widget_package")
+        .add_entrypoint(TypedDslxAotBuildSpec {
+            name: "namespaced_echo_widget",
+            dslx_path: &namespaced_widget_echo_dslx_path,
+            top: "echo_widget",
+            dslx_options: DslxConvertOptions {
+                additional_search_paths: vec![namespaced_widget_root.as_path()],
+                ..DslxConvertOptions::default()
+            },
+            type_module_paths: vec![namespaced_widget_types_dslx_path.as_path()],
+        })
+        .add_entrypoint(TypedDslxAotBuildSpec {
+            name: "namespaced_bump_widget",
+            dslx_path: &namespaced_widget_bump_dslx_path,
+            top: "bump_widget",
+            dslx_options: DslxConvertOptions {
+                additional_search_paths: vec![namespaced_widget_root.as_path()],
+                ..DslxConvertOptions::default()
+            },
+            type_module_paths: vec![namespaced_widget_types_dslx_path.as_path()],
+        })
+        .build()
+        .unwrap_or_else(|err| {
+            panic!(
+                "namespaced-widget typed DSLX AOT package compile should succeed: {}",
+                err
+            )
+        });
+    println!(
+        "cargo:rustc-env=XLSYNTH_AOT_NAMESPACED_WIDGET_PACKAGE_RS={}",
+        namespaced_package_output.rust_file.display()
+    );
+
     println!("cargo:rerun-if-changed=build.rs");
 }

@@ -3869,42 +3869,72 @@ mod tests {
         );
     }
 
-    // Verifies: package bridge modules keep search-root-relative names before
-    // canonical dedupe. Catches: nested relative imports collapsing to
+    // Verifies: package bridge-module naming stays aligned with the existing
+    // single-entry path for both relative and absolute search roots. Catches:
+    // package-only canonicalization that collapses nested relative imports to
     // file-stem-only module names.
     #[test]
-    fn typed_dslx_package_modules_keep_relative_import_names() {
+    fn typed_dslx_package_modules_match_single_entry_bridge_names_across_root_forms() {
         let (_tmpdir, relative_root) =
             make_relative_test_root("xlsynth_aot_builder_package_relative_imports");
-        let source_root = relative_root.join("src");
-        let bridge_path = source_root.join("foo/widget.x");
-        let top_path = source_root.join("top.x");
-        std::fs::create_dir_all(bridge_path.parent().unwrap()).unwrap();
-        std::fs::write(&bridge_path, "pub struct Widget { value: u8 }").unwrap();
-        std::fs::write(&top_path, "pub fn echo(x: u8) -> u8 { x }").unwrap();
+        let relative_source_root = relative_root.join("src");
+        let relative_bridge_path = relative_source_root.join("foo/widget.x");
+        let relative_top_path = relative_source_root.join("top.x");
+        std::fs::create_dir_all(relative_bridge_path.parent().unwrap()).unwrap();
+        std::fs::write(&relative_bridge_path, "pub struct Widget { value: u8 }").unwrap();
+        std::fs::write(&relative_top_path, "pub fn echo(x: u8) -> u8 { x }").unwrap();
 
-        let dslx_options = DslxConvertOptions {
-            additional_search_paths: vec![source_root.as_path()],
-            ..Default::default()
-        };
-        let spec = TypedDslxAotBuildSpec {
-            name: "relative_import_package",
-            dslx_path: &top_path,
-            top: "echo",
-            dslx_options,
-            type_module_paths: vec![bridge_path.as_path()],
-        };
+        let absolute_source_root = std::fs::canonicalize(&relative_source_root).unwrap();
+        let absolute_bridge_path = std::fs::canonicalize(&relative_bridge_path).unwrap();
+        let absolute_top_path = std::fs::canonicalize(&relative_top_path).unwrap();
 
-        let typechecked = typecheck_typed_dslx_package_modules(&[spec]).unwrap();
+        for (source_root, bridge_path, top_path) in [
+            (
+                relative_source_root.as_path(),
+                relative_bridge_path.as_path(),
+                relative_top_path.as_path(),
+            ),
+            (
+                absolute_source_root.as_path(),
+                absolute_bridge_path.as_path(),
+                absolute_top_path.as_path(),
+            ),
+        ] {
+            let dslx_options = DslxConvertOptions {
+                additional_search_paths: vec![source_root],
+                ..Default::default()
+            };
+            let spec = TypedDslxAotBuildSpec {
+                name: "bridge_name_parity",
+                dslx_path: top_path,
+                top: "echo",
+                dslx_options,
+                type_module_paths: vec![bridge_path],
+            };
+            let top_dslx_text = std::fs::read_to_string(top_path).unwrap();
+            let single_entry = typecheck_typed_dslx_modules(&spec, &top_dslx_text).unwrap();
+            let package = typecheck_typed_dslx_package_modules(&[spec]).unwrap();
 
-        assert_eq!(
-            typechecked
-                .modules
-                .iter()
-                .map(|module| module.typechecked.get_module().get_name())
-                .collect::<Vec<_>>(),
-            vec!["foo.widget", "top"]
-        );
+            assert_eq!(
+                single_entry
+                    .bridge_modules
+                    .iter()
+                    .map(|module| module.get_module().get_name())
+                    .chain(std::iter::once(
+                        single_entry.top_module.get_module().get_name()
+                    ))
+                    .collect::<Vec<_>>(),
+                vec!["foo.widget", "top"]
+            );
+            assert_eq!(
+                package
+                    .modules
+                    .iter()
+                    .map(|module| module.typechecked.get_module().get_name())
+                    .collect::<Vec<_>>(),
+                vec!["foo.widget", "top"]
+            );
+        }
     }
 
     // Verifies: package top modules keep search-root-relative names too.
