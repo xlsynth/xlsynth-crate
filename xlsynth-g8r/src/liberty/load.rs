@@ -237,6 +237,8 @@ struct LibraryNoTimingPayload {
     threshold_voltage_groups: Vec<String>,
     #[prost(uint32, tag = "5")]
     default_threshold_voltage_group_id: u32,
+    #[prost(sint32, repeated, tag = "6")]
+    threshold_voltage_group_class_indices: Vec<i32>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -353,6 +355,7 @@ impl From<LibraryNoTimingPayload> for liberty_proto::Library {
                 .collect(),
             threshold_voltage_groups: value.threshold_voltage_groups,
             default_threshold_voltage_group_id: value.default_threshold_voltage_group_id,
+            threshold_voltage_group_class_indices: value.threshold_voltage_group_class_indices,
         }
     }
 }
@@ -556,6 +559,7 @@ mod tests {
             }],
             threshold_voltage_groups: vec!["RVT".to_string(), "LVT".to_string()],
             default_threshold_voltage_group_id: 1,
+            threshold_voltage_group_class_indices: vec![0, 1],
             ..Default::default()
         }
     }
@@ -642,6 +646,7 @@ mod tests {
         assert!(loaded.cells[0].pins[0].timing_arcs.is_empty());
         assert_eq!(loaded.threshold_voltage_groups, vec!["RVT", "LVT"]);
         assert_eq!(loaded.default_threshold_voltage_group_id, 1);
+        assert_eq!(loaded.threshold_voltage_group_class_indices, vec![0, 1]);
         assert_eq!(loaded.cells[0].threshold_voltage_group_id, 2);
     }
 

@@ -66,9 +66,11 @@ xlsynth-driver lib2proto \
 ```
 
 When Liberty files omit native `threshold_voltage_group` metadata, use repeated
-`--vt-group <NAME:REGEX>` rules to classify cell names. Regex rules and native
-Liberty VT metadata are mutually exclusive; if any rules are supplied, every
-cell must match exactly one rule.
+`--vt-group <NAME:CLASS_INDEX:REGEX>` rules to classify cell names and define
+relative VT speed classes. Class `0` is nominal; larger values are faster and
+smaller values are slower. Regex rules and native Liberty VT metadata are
+mutually exclusive; if any rules are supplied, every cell must match exactly one
+rule.
 
 Example for the extracted ASAP7 standard-cell TT Liberty files (intentionally
 excluding SRAM libraries):
@@ -76,9 +78,9 @@ excluding SRAM libraries):
 ```shell
 xlsynth-driver lib2proto \
   --output /tmp/asap7.proto \
-  --vt-group 'RVT:_R$' \
-  --vt-group 'LVT:_L$' \
-  --vt-group 'SLVT:_SL$' \
+  --vt-group 'RVT:0:_R$' \
+  --vt-group 'LVT:1:_L$' \
+  --vt-group 'SLVT:2:_SL$' \
   /path/to/asap7/LIB/NLDM/TT/*_RVT_TT_*.lib \
   /path/to/asap7/LIB/NLDM/TT/*_LVT_TT_*.lib \
   /path/to/asap7/LIB/NLDM/TT/*_SLVT_TT_*.lib

@@ -10,8 +10,24 @@ use xlsynth_g8r::liberty::liberty_to_proto::{
 };
 
 fn parse_vt_group_rule(raw: &str) -> Result<ThresholdVoltageGroupRule, String> {
-    let Some((name, cell_name_regex)) = raw.split_once(':') else {
-        return Err(format!("invalid --vt-group '{}'; expected NAME:REGEX", raw));
+    let mut parts = raw.splitn(3, ':');
+    let Some(name) = parts.next() else {
+        return Err(format!(
+            "invalid --vt-group '{}'; expected NAME:CLASS_INDEX:REGEX",
+            raw
+        ));
+    };
+    let Some(class_index) = parts.next() else {
+        return Err(format!(
+            "invalid --vt-group '{}'; expected NAME:CLASS_INDEX:REGEX",
+            raw
+        ));
+    };
+    let Some(cell_name_regex) = parts.next() else {
+        return Err(format!(
+            "invalid --vt-group '{}'; expected NAME:CLASS_INDEX:REGEX",
+            raw
+        ));
     };
     if name.is_empty() {
         return Err(format!(
@@ -25,8 +41,15 @@ fn parse_vt_group_rule(raw: &str) -> Result<ThresholdVoltageGroupRule, String> {
             raw
         ));
     }
+    let class_index = class_index.parse::<i32>().map_err(|e| {
+        format!(
+            "invalid --vt-group '{}'; VT class index must be a signed integer: {}",
+            raw, e
+        )
+    })?;
     Ok(ThresholdVoltageGroupRule {
         name: name.to_string(),
+        class_index,
         cell_name_regex: cell_name_regex.to_string(),
     })
 }

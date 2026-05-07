@@ -1646,7 +1646,7 @@ fn main() {
                 .arg(
                     Arg::new("vt_group")
                         .long("vt-group")
-                        .help("Fill missing Liberty VT groups with NAME:REGEX cell-name rules; may be repeated")
+                        .help("Fill missing Liberty VT groups with NAME:CLASS_INDEX:REGEX cell-name rules; may be repeated")
                         .action(ArgAction::Append),
                 ),
         )

@@ -214,10 +214,12 @@ fn parse_default_threshold_voltage_group(block: &Block) -> Option<String> {
     None
 }
 
-/// Assigns stable 1-based IDs to repeated VT-group strings.
+/// Assigns stable 1-based IDs to repeated VT-group strings and optional
+/// classes.
 #[derive(Default)]
 struct ThresholdVoltageGroupInterner {
     names: Vec<String>,
+    class_indices: Vec<Option<i32>>,
     ids_by_name: HashMap<String, u32>,
 }
 
@@ -225,12 +227,14 @@ struct ThresholdVoltageGroupInterner {
 #[derive(Clone, Debug)]
 pub struct ThresholdVoltageGroupRule {
     pub name: String,
+    pub class_index: i32,
     pub cell_name_regex: String,
 }
 
 #[derive(Clone)]
 struct CompiledThresholdVoltageGroupRule {
     name: String,
+    class_index: i32,
     cell_name_regex: Regex,
 }
 
@@ -257,6 +261,7 @@ fn compile_threshold_voltage_group_rules(
         })?;
         compiled.push(CompiledThresholdVoltageGroupRule {
             name: rule.name.clone(),
+            class_index: rule.class_index,
             cell_name_regex,
         });
     }
@@ -278,7 +283,10 @@ fn apply_threshold_voltage_group_rules(
             .filter(|rule| rule.cell_name_regex.is_match(&cell.name))
             .collect();
         match matches.as_slice() {
-            [rule] => cell.threshold_voltage_group_id = interner.intern(rule.name.clone()),
+            [rule] => {
+                cell.threshold_voltage_group_id =
+                    interner.intern(rule.name.clone(), Some(rule.class_index))?
+            }
             [] => {
                 return Err(format!(
                     "Cell '{}' has no threshold-voltage group from native Liberty metadata or supplied regex rules",
@@ -298,14 +306,36 @@ fn apply_threshold_voltage_group_rules(
 }
 
 impl ThresholdVoltageGroupInterner {
-    fn intern(&mut self, name: String) -> u32 {
+    fn intern(&mut self, name: String, class_index: Option<i32>) -> Result<u32, String> {
         if let Some(id) = self.ids_by_name.get(&name) {
-            return *id;
+            let existing = self.class_indices[*id as usize - 1];
+            match (existing, class_index) {
+                (Some(existing), Some(incoming)) if existing != incoming => {
+                    return Err(format!(
+                        "threshold-voltage group '{}' has conflicting class indices {} and {}",
+                        name, existing, incoming
+                    ));
+                }
+                (None, Some(incoming)) => self.class_indices[*id as usize - 1] = Some(incoming),
+                _ => {}
+            }
+            return Ok(*id);
         }
         let id = self.names.len() as u32 + 1;
         self.names.push(name.clone());
+        self.class_indices.push(class_index);
         self.ids_by_name.insert(name, id);
-        id
+        Ok(id)
+    }
+
+    fn class_indices_proto(&self) -> Vec<i32> {
+        if self.class_indices.iter().all(Option::is_none) {
+            return vec![];
+        }
+        self.class_indices
+            .iter()
+            .map(|value| value.unwrap_or(0))
+            .collect()
     }
 }
 
@@ -797,7 +827,7 @@ fn extract_sequential_blocks(
 fn block_to_proto_cells(
     block: &Block,
     threshold_voltage_group_interner: &mut ThresholdVoltageGroupInterner,
-) -> Vec<Cell> {
+) -> Result<Vec<Cell>, String> {
     let mut cells = Vec::new();
     for member in &block.members {
         let BlockMember::SubBlock(cell_block) = member else {
@@ -823,8 +853,8 @@ fn block_to_proto_cells(
                 if attr.attr_name == "area" {
                     area = value_to_f64(&attr.value);
                 } else if attr.attr_name == "threshold_voltage_group" {
-                    threshold_voltage_group_id =
-                        threshold_voltage_group_interner.intern(value_to_attr_string(&attr.value));
+                    threshold_voltage_group_id = threshold_voltage_group_interner
+                        .intern(value_to_attr_string(&attr.value), None)?;
                 }
             }
         }
@@ -988,7 +1018,7 @@ fn block_to_proto_cells(
         });
     }
     cells.sort_by(|a, b| a.name.cmp(&b.name));
-    cells
+    Ok(cells)
 }
 
 fn apply_template_id_offset(cells: &mut [Cell], offset: u32) {
@@ -1019,6 +1049,16 @@ fn axes_are_contiguous(index_1: &[f64], index_2: &[f64], index_3: &[f64]) -> boo
 }
 
 pub fn validate_library_consistency(library: &Library) -> Result<(), String> {
+    if !library.threshold_voltage_group_class_indices.is_empty()
+        && library.threshold_voltage_group_class_indices.len()
+            != library.threshold_voltage_groups.len()
+    {
+        return Err(format!(
+            "threshold_voltage_group_class_indices has {} entries for {} threshold_voltage_groups",
+            library.threshold_voltage_group_class_indices.len(),
+            library.threshold_voltage_groups.len()
+        ));
+    }
     if library.default_threshold_voltage_group_id as usize > library.threshold_voltage_groups.len()
     {
         return Err(format!(
@@ -1242,12 +1282,13 @@ fn parse_liberty_files_to_proto_impl<P: AsRef<Path>>(
             saw_library_with_default_threshold_voltage_group = true;
         }
         let mut per_library = Library {
-            cells: block_to_proto_cells(lib, &mut threshold_voltage_group_interner),
+            cells: block_to_proto_cells(lib, &mut threshold_voltage_group_interner)?,
             units: None,
             // Field name is historical; this stores all parsed template kinds.
             lu_table_templates: parse_table_templates(lib),
             threshold_voltage_groups: vec![],
             default_threshold_voltage_group_id: 0,
+            threshold_voltage_group_class_indices: vec![],
         };
         if parsed_default_threshold_voltage_group.is_none()
             && per_library
@@ -1319,8 +1360,11 @@ fn parse_liberty_files_to_proto_impl<P: AsRef<Path>>(
     }
     log::info!("Flattened {} cells", all_cells.len());
     let default_threshold_voltage_group_id = default_threshold_voltage_group
-        .map(|name| threshold_voltage_group_interner.intern(name))
+        .map(|name| threshold_voltage_group_interner.intern(name, None))
+        .transpose()?
         .unwrap_or(0);
+    let threshold_voltage_group_class_indices =
+        threshold_voltage_group_interner.class_indices_proto();
     let library = Library {
         cells: all_cells,
         units,
@@ -1328,6 +1372,7 @@ fn parse_liberty_files_to_proto_impl<P: AsRef<Path>>(
         lu_table_templates: all_table_templates,
         threshold_voltage_groups: threshold_voltage_group_interner.names,
         default_threshold_voltage_group_id,
+        threshold_voltage_group_class_indices,
     };
     if validate_timing {
         validate_library_consistency(&library)?;
@@ -1741,15 +1786,18 @@ mod tests {
         let rules = vec![
             ThresholdVoltageGroupRule {
                 name: "RVT".to_string(),
+                class_index: 0,
                 cell_name_regex: r"_R$".to_string(),
             },
             ThresholdVoltageGroupRule {
                 name: "LVT".to_string(),
+                class_index: 1,
                 cell_name_regex: r"_L$".to_string(),
             },
         ];
         let lib = parse_liberty_files_to_proto_with_vt_rules(&[tmp.path()], &rules).unwrap();
         assert_eq!(lib.threshold_voltage_groups, vec!["LVT", "RVT"]);
+        assert_eq!(lib.threshold_voltage_group_class_indices, vec![1, 0]);
         let inv_l = lib.cells.iter().find(|cell| cell.name == "INV_L").unwrap();
         assert_eq!(inv_l.threshold_voltage_group_id, 1);
         let inv_r = lib.cells.iter().find(|cell| cell.name == "INV_R").unwrap();
@@ -1774,6 +1822,7 @@ mod tests {
 
         let rules = vec![ThresholdVoltageGroupRule {
             name: "RVT".to_string(),
+            class_index: 0,
             cell_name_regex: r"_R$".to_string(),
         }];
         let err = parse_liberty_files_to_proto_with_vt_rules(&[tmp.path()], &rules).unwrap_err();
@@ -1795,6 +1844,7 @@ mod tests {
 
         let rules = vec![ThresholdVoltageGroupRule {
             name: "RVT".to_string(),
+            class_index: 0,
             cell_name_regex: r"_R$".to_string(),
         }];
         let err = parse_liberty_files_to_proto_with_vt_rules(&[tmp.path()], &rules).unwrap_err();
@@ -1815,6 +1865,7 @@ mod tests {
 
         let rules = vec![ThresholdVoltageGroupRule {
             name: "RVT".to_string(),
+            class_index: 0,
             cell_name_regex: r"_R$".to_string(),
         }];
         let err = parse_liberty_files_to_proto_with_vt_rules(&[tmp.path()], &rules).unwrap_err();
@@ -1836,10 +1887,12 @@ mod tests {
         let rules = vec![
             ThresholdVoltageGroupRule {
                 name: "RVT".to_string(),
+                class_index: 0,
                 cell_name_regex: r"_R$".to_string(),
             },
             ThresholdVoltageGroupRule {
                 name: "ALSO_RVT".to_string(),
+                class_index: 1,
                 cell_name_regex: r"INV_".to_string(),
             },
         ];
@@ -1862,15 +1915,28 @@ mod tests {
         let rules = vec![
             ThresholdVoltageGroupRule {
                 name: "RVT".to_string(),
+                class_index: 0,
                 cell_name_regex: r"_R$".to_string(),
             },
             ThresholdVoltageGroupRule {
                 name: "RVT".to_string(),
+                class_index: 1,
                 cell_name_regex: r"INV_".to_string(),
             },
         ];
         let err = parse_liberty_files_to_proto_with_vt_rules(&[tmp.path()], &rules).unwrap_err();
         assert!(err.contains("duplicate threshold-voltage group rule name"));
+    }
+
+    #[test]
+    fn test_validate_library_consistency_rejects_partial_vt_class_indices() {
+        let lib = Library {
+            threshold_voltage_groups: vec!["RVT".to_string(), "LVT".to_string()],
+            threshold_voltage_group_class_indices: vec![0],
+            ..Default::default()
+        };
+        let err = validate_library_consistency(&lib).unwrap_err();
+        assert!(err.contains("threshold_voltage_group_class_indices has 1 entries"));
     }
 
     #[test]
