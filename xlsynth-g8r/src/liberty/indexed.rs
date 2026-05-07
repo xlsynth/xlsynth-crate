@@ -377,6 +377,7 @@ mod tests {
                 area: 1.0,
                 sequential: vec![],
                 clock_gate: None,
+                threshold_voltage_group_id: 0,
             }],
             units: None,
             lu_table_templates: vec![LuTableTemplate {
@@ -389,6 +390,8 @@ mod tests {
                 index_2: vec![0.1, 0.2],
                 index_3: vec![],
             }],
+            threshold_voltage_groups: vec![],
+            default_threshold_voltage_group_id: 0,
         };
         let indexed = IndexedLibrary::new(lib);
 
@@ -451,6 +454,8 @@ mod tests {
                     index_3: vec![],
                 },
             ],
+            threshold_voltage_groups: vec![],
+            default_threshold_voltage_group_id: 0,
         };
         let indexed = IndexedLibrary::new(lib);
 
@@ -505,6 +510,8 @@ mod tests {
                     index_3: vec![],
                 },
             ],
+            threshold_voltage_groups: vec![],
+            default_threshold_voltage_group_id: 0,
         };
         let indexed = IndexedLibrary::new(lib);
         assert!(
@@ -554,9 +561,12 @@ mod tests {
                 area: 1.0,
                 sequential: vec![],
                 clock_gate: None,
+                threshold_voltage_group_id: 0,
             }],
             units: None,
             lu_table_templates: vec![],
+            threshold_voltage_groups: vec![],
+            default_threshold_voltage_group_id: 0,
         };
         let indexed = IndexedLibrary::new(lib);
 
@@ -629,9 +639,12 @@ mod tests {
                 area: 1.0,
                 sequential: vec![],
                 clock_gate: None,
+                threshold_voltage_group_id: 0,
             }],
             units: None,
             lu_table_templates: vec![],
+            threshold_voltage_groups: vec![],
+            default_threshold_voltage_group_id: 0,
         };
         let indexed = IndexedLibrary::new(lib);
 

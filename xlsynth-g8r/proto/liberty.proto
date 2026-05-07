@@ -23,6 +23,11 @@ message Library {
   repeated Cell cells = 1;
   LibraryUnits units = 2;
   repeated LuTableTemplate lu_table_templates = 3;
+  // Interned native Liberty threshold-voltage group names.
+  repeated string threshold_voltage_groups = 4;
+  // Nonzero IDs are 1-based references into threshold_voltage_groups:
+  // ID 1 refers to threshold_voltage_groups[0]. ID 0 means "unset".
+  uint32 default_threshold_voltage_group_id = 5;
 }
 
 message Cell {
@@ -31,6 +36,9 @@ message Cell {
   double area = 3;
   repeated Sequential sequential = 4;
   ClockGate clock_gate = 5;
+  // Nonzero IDs are 1-based references into Library.threshold_voltage_groups:
+  // ID 1 refers to Library.threshold_voltage_groups[0]. ID 0 means "unset".
+  uint32 threshold_voltage_group_id = 6;
 }
 
 enum PinDirection {
