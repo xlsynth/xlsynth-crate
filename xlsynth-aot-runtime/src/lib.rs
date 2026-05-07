@@ -524,3 +524,76 @@ impl StandaloneRunner {
         &self.events.assert_messages
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        allocate_buffer, deallocate_buffer, AotArtifactMetadata, AotRunnerLayout, StandaloneEvents,
+        StandaloneInstanceContext, StandaloneRunner,
+    };
+
+    type AllocateBuffer =
+        unsafe extern "C" fn(*mut StandaloneInstanceContext, i64, i64) -> *mut std::ffi::c_void;
+    type DeallocateBuffer =
+        unsafe extern "C" fn(*mut StandaloneInstanceContext, *mut std::ffi::c_void);
+
+    unsafe extern "C" fn heap_scratch_entrypoint(
+        _inputs: *const *const u8,
+        _outputs: *const *mut u8,
+        _temp_buffer: *mut std::ffi::c_void,
+        _events: *mut StandaloneEvents,
+        context: *mut StandaloneInstanceContext,
+        _continuation: *mut std::ffi::c_void,
+        _instance: i64,
+    ) -> i64 {
+        let allocate =
+            unsafe { std::mem::transmute::<*const (), AllocateBuffer>((*context).vtable[9]) };
+        let deallocate =
+            unsafe { std::mem::transmute::<*const (), DeallocateBuffer>((*context).vtable[10]) };
+        let buffer = unsafe { allocate(context, 3, 64) };
+        assert!(!buffer.is_null());
+        assert_eq!(buffer as usize % 64, 0);
+        unsafe { deallocate(context, buffer) };
+        0
+    }
+
+    #[test]
+    fn allocate_buffer_honors_overaligned_requests() {
+        let buffer = unsafe { allocate_buffer(std::ptr::null_mut(), 3, 64) };
+        assert!(!buffer.is_null());
+        assert_eq!(buffer as usize % 64, 0);
+        unsafe { deallocate_buffer(std::ptr::null_mut(), buffer) }
+    }
+
+    #[test]
+    fn allocate_buffer_rejects_invalid_requests() {
+        let zero_sized = unsafe { allocate_buffer(std::ptr::null_mut(), 0, 8) };
+        let non_power_of_two = unsafe { allocate_buffer(std::ptr::null_mut(), 3, 24) };
+        assert!(zero_sized.is_null());
+        assert!(non_power_of_two.is_null());
+    }
+
+    #[test]
+    fn standalone_runner_wires_heap_scratch_callbacks() {
+        let metadata = AotArtifactMetadata {
+            abi_version: super::SUPPORTED_ARTIFACT_ABI_VERSION,
+            entrypoint_symbol: "heap_scratch_entrypoint",
+            has_asserts: false,
+            has_traces: false,
+        };
+        let layout = AotRunnerLayout {
+            input_buffer_sizes: &[],
+            input_buffer_alignments: &[],
+            output_buffer_sizes: &[],
+            output_buffer_alignments: &[],
+            temp_buffer_size: 0,
+            temp_buffer_alignment: 1,
+        };
+        let mut runner = unsafe {
+            StandaloneRunner::new(&metadata, heap_scratch_entrypoint as *const (), &layout)
+        }
+        .expect("runner creation should succeed");
+
+        runner.run_raw();
+    }
+}

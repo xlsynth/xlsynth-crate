@@ -19,4 +19,5 @@ xlsynth-aot-runtime = { path = "../../../xlsynth-aot-runtime" }
 xlsynth = { path = "../.." }
 
 [dev-dependencies]
+xlsynth = { path = "../.." }
 xlsynth-test-helpers = { path = "../../../xlsynth-test-helpers" }

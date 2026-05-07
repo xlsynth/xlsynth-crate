@@ -38,6 +38,10 @@ pub mod assert_pair_aot {
     include!(env!("XLSYNTH_AOT_ASSERT_PAIR_RS"));
 }
 
+pub mod wide_counted_for_aot {
+    include!(env!("XLSYNTH_AOT_WIDE_COUNTED_FOR_RS"));
+}
+
 /// Generated typed DSLX AOT wrapper for the widget/frob fixture.
 pub mod widget_frob_aot {
     include!(env!("XLSYNTH_AOT_WIDGET_FROB_RS"));
