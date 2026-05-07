@@ -263,11 +263,11 @@ mod tests {
         Ok(())
     }
 
-    // Verifies: imported concrete aliases execute while direct imported
-    // parametric instantiations remain unsupported.
-    // Catches: imported alias encode/decode regressions.
+    // Verifies: direct imported concrete parametric instantiations execute and
+    // owner-module emission handles nested arrays plus multi-parameter shapes.
+    // Catches: regressions back to alias-only imported parametric support.
     #[test]
-    fn parametric_imports_aot_executes_imported_aliases() -> Result<(), XlsynthError> {
+    fn parametric_imports_aot_executes_direct_imports() -> Result<(), XlsynthError> {
         use super::parametric_imports_aot::{parametric_imports, parametric_lib};
         use parametric_imports::{Box__N_8, LocalMode, Mixed__N_4};
 
@@ -276,17 +276,28 @@ mod tests {
             remote: parametric_lib::RemotePlain { id: ub(40) },
             nested: [[ub(1), ub(2), ub(3), ub(4)], [ub(5), ub(6), ub(7), ub(8)]],
             boxes: [Box__N_8 { value: ub(50) }, Box__N_8 { value: ub(51) }],
+            remote_boxes: [
+                parametric_lib::RemoteBox__N_8 { value: ub(52) },
+                parametric_lib::RemoteBox__N_8 { value: ub(53) },
+            ],
         };
-        let imported_alias = parametric_lib::RemoteBox__N_8 { value: ub(60) };
+        let imported_direct = parametric_lib::RemoteBox__N_8 { value: ub(60) };
+        let imported_pair = parametric_lib::RemotePair__A_8__B_23 {
+            left: ub(61),
+            right: ub(62),
+        };
 
         let mut runner = parametric_imports::new_runner()?;
-        let result = runner.run(&mixed, &imported_alias)?;
+        let result = runner.run(&mixed, &imported_direct, &imported_pair)?;
 
         assert_eq!(result.mixed.mode, LocalMode::Busy);
         assert_eq!(result.mixed.remote.id.to_u64()?, 40);
         assert_eq!(result.mixed.nested[1][2].to_u64()?, 7);
         assert_eq!(result.mixed.boxes[1].value.to_u64()?, 51);
-        assert_eq!(result.imported_alias.value.to_u64()?, 60);
+        assert_eq!(result.mixed.remote_boxes[1].value.to_u64()?, 53);
+        assert_eq!(result.imported_direct.value.to_u64()?, 60);
+        assert_eq!(result.imported_pair.left.to_u64()?, 61);
+        assert_eq!(result.imported_pair.right.to_u64()?, 62);
         Ok(())
     }
 
@@ -317,7 +328,9 @@ mod tests {
         assert!(imports.contains("pub struct Mixed__N_4"));
         assert!(imports.contains("pub remote: super::parametric_lib::RemotePlain"));
         assert!(imports.contains("pub boxes: [Box__N_8; 2]"));
-        assert!(imports.contains("imported_alias: &ImportedAlias"));
+        assert!(imports.contains("pub remote_boxes: [super::parametric_lib::RemoteBox__N_8; 2]"));
+        assert!(imports.contains("imported_direct: &super::parametric_lib::RemoteBox__N_8"));
+        assert!(imports.contains("imported_pair: &super::parametric_lib::RemotePair__A_8__B_23"));
     }
 
     // Verifies: duplicate imported type names use canonical nested paths.

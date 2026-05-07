@@ -12,21 +12,21 @@ pub mod parametric_values {
         pub value: IrUBits<8>,
     }
 
-    pub type ExprBox8 = ExprBox__N_8;
-
     #[allow(non_camel_case_types)]
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct SignedTag__S_m3 {
         pub payload: IrUBits<8>,
     }
 
-    pub type NegativeTag = SignedTag__S_m3;
-
     #[allow(non_camel_case_types)]
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct WideTag__W_18446744073709551616 {
         pub payload: IrUBits<8>,
     }
+
+    pub type ExprBox8 = ExprBox__N_8;
+
+    pub type NegativeTag = SignedTag__S_m3;
 
     pub type HugeTag = WideTag__W_18446744073709551616;
 
