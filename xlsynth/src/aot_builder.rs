@@ -8,7 +8,7 @@
 //! ABI metadata, and emits a `Runner` that packs and unpacks bridge values
 //! directly.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -17,7 +17,7 @@ use crate::aot_entrypoint_metadata::{
     AotTypeLayout,
 };
 use crate::aot_lib::{AotCompiled, AotResult};
-use crate::dslx_bridge::convert_imported_module;
+use crate::dslx_bridge::{convert_imported_module, BridgeBuilder};
 use crate::rust_bridge_builder::{
     render_rust_module_fragments, rust_type_path_between_dslx_modules, RustBridgeBuilder,
 };
@@ -1120,6 +1120,29 @@ struct TypedDslxParam {
     ty: TypedDslxType,
 }
 
+/// One concrete parametric struct definition that typed AOT must materialize.
+///
+/// Rust bridge generation normally emits concrete parametric structs when the
+/// defining module itself references them. Typed AOT needs a package-level view
+/// so direct imported instantiations can still be emitted in the defining
+/// module even when only another module mentions them.
+struct TypedConcreteParametricStruct {
+    /// Exact DSLX struct declaration being specialized.
+    ///
+    /// Definition identity matters because sibling imports may both declare a
+    /// parametric struct with the same DSLX identifier.
+    struct_def: dslx::StructDef,
+    /// Canonical DSLX module name that owns the original struct declaration.
+    defining_module_name: String,
+    /// Concrete Rust struct identifier to emit inside the defining module.
+    ///
+    /// The suffix is derived from the fully bound parametric values, so it is
+    /// also the concrete-value portion of this specialization's key.
+    rust_name: String,
+    /// Concrete fields rendered relative to the defining module.
+    fields: Vec<TypedDslxField>,
+}
+
 /// The typed DSLX view of one AOT entrypoint signature.
 ///
 /// This is the semantic counterpart to `AotFunctionSignature`: it preserves
@@ -1194,6 +1217,21 @@ struct TypedDslxTypecheckedModules {
 struct ResolvedDslxTypeAnnotation<'a> {
     type_info: &'a dslx::TypeInfo,
     annotation: dslx::TypeAnnotation,
+}
+
+impl TypedDslxType {
+    /// Returns the Rust type spelling already selected for generated source.
+    ///
+    /// Field rendering needs the public Rust spelling, while the enum variant
+    /// still carries the recursive semantic shape used for ABI validation.
+    fn rust_type(&self) -> &str {
+        match self {
+            TypedDslxType::Bits { rust_type, .. }
+            | TypedDslxType::Enum { rust_type, .. }
+            | TypedDslxType::Struct { rust_type, .. }
+            | TypedDslxType::Array { rust_type, .. } => rust_type,
+        }
+    }
 }
 
 /// A non-empty DSLX import subject such as `foo` or `foo.bar`.
@@ -1870,6 +1908,300 @@ impl TypedDslxTypeContext {
         }
         self.rust_type_for_concrete_type(local_module_name, current_type_info, ty)
     }
+}
+
+/// Discovers concrete parametric structs that must be emitted outside their use
+/// site.
+///
+/// Bridge generation normally sees only the module currently being rendered.
+/// This collector walks the full typed-AOT module set first so an owner module
+/// can later emit the concrete Rust struct required by a direct imported use in
+/// another module. Collected entries are deduplicated by semantic definition
+/// identity plus concrete Rust name; same-named declarations in sibling modules
+/// must remain separate.
+struct TypedConcreteParametricStructCollector<'a> {
+    context: &'a TypedDslxTypeContext,
+    current_module_name: String,
+    structs: Vec<TypedConcreteParametricStruct>,
+}
+
+impl<'a> TypedConcreteParametricStructCollector<'a> {
+    /// Creates an empty collector for one typed-AOT wrapper build.
+    fn new(context: &'a TypedDslxTypeContext) -> Self {
+        Self {
+            context,
+            current_module_name: String::new(),
+            structs: Vec::new(),
+        }
+    }
+
+    /// Walks one resolved DSLX type and records reachable concrete struct
+    /// specializations.
+    ///
+    /// `current_type_info` must describe the module that wrote the annotation
+    /// so caller-local parametric expressions are evaluated in the caller's
+    /// context. When recursion enters struct fields, the walk switches to the
+    /// defining module context for field inspection while still emitting the
+    /// eventual concrete item in the owner's Rust module.
+    fn collect_type(
+        &mut self,
+        current_module_name: &str,
+        current_type_info: &dslx::TypeInfo,
+        type_annotation: Option<&dslx::TypeAnnotation>,
+        ty: &dslx::Type,
+    ) -> AotResult<()> {
+        if let Some(type_annotation) = type_annotation {
+            if let Some(array_annotation) = type_annotation.to_array_type_annotation() {
+                if ty.is_array() {
+                    let element_annotation = array_annotation.get_element_type();
+                    let element_ty = ty.get_array_element_type();
+                    self.collect_type(
+                        current_module_name,
+                        current_type_info,
+                        Some(&element_annotation),
+                        &element_ty,
+                    )?;
+                    return Ok(());
+                }
+            }
+            if let Some(type_ref_annotation) = type_annotation.to_type_ref_type_annotation() {
+                if type_ref_annotation.get_parametric_count() > 0 && ty.is_struct() {
+                    let struct_def = ty.get_struct_def()?;
+                    let Some(defining_module) = self
+                        .context
+                        .defining_module_for_struct(Some(current_type_info), &struct_def)?
+                    else {
+                        return Err(XlsynthError(format!(
+                            "AOT typed DSLX specialization collection could not find defining module for struct `{}`",
+                            struct_def.get_identifier()
+                        )));
+                    };
+                    let rust_name = RustBridgeBuilder::rust_type_name_from_dslx_module(
+                        &defining_module.dslx_name,
+                        current_type_info,
+                        Some(type_annotation),
+                        ty,
+                    )?;
+                    let lowered = lower_typed_dslx_type(
+                        self.context,
+                        &defining_module.dslx_name,
+                        &defining_module.type_info,
+                        Some(type_annotation),
+                        ty,
+                        rust_name.clone(),
+                    )?;
+                    let TypedDslxType::Struct { fields, .. } = lowered else {
+                        unreachable!("parametric structs lower to struct types");
+                    };
+                    let already_collected = self.structs.iter().any(|existing| {
+                        existing.defining_module_name == defining_module.dslx_name
+                            && existing.struct_def.is_same_definition(&struct_def)
+                            && existing.rust_name == rust_name
+                    });
+                    if !already_collected {
+                        self.structs.push(TypedConcreteParametricStruct {
+                            struct_def,
+                            defining_module_name: defining_module.dslx_name.clone(),
+                            rust_name,
+                            fields,
+                        });
+                    }
+                }
+            }
+        }
+
+        if ty.is_struct() {
+            let struct_def = ty.get_struct_def()?;
+            let struct_type_info = self
+                .context
+                .type_info_for_struct(current_type_info, &struct_def)?;
+            let struct_module_name = self
+                .context
+                .defining_module_for_struct(Some(current_type_info), &struct_def)?
+                .map(|module| module.dslx_name.as_str())
+                .unwrap_or(current_module_name);
+            let member_count = struct_def.get_member_count();
+            for index in 0..member_count {
+                let member = struct_def.get_member(index);
+                let field_annotation = member.get_type();
+                let field_ty = if struct_def.is_parametric() {
+                    ty.get_struct_member_type(index)
+                } else {
+                    struct_type_info.get_type_for_struct_member(&member)
+                };
+                let field_type_info = self.context.type_context_for_resolved_type(
+                    struct_type_info,
+                    Some(&field_annotation),
+                    &field_ty,
+                )?;
+                self.collect_type(
+                    struct_module_name,
+                    field_type_info,
+                    Some(&field_annotation),
+                    &field_ty,
+                )?;
+            }
+        } else if ty.is_array() {
+            let element_ty = ty.get_array_element_type();
+            self.collect_type(current_module_name, current_type_info, None, &element_ty)?;
+        }
+        Ok(())
+    }
+
+    /// Returns collected specializations in deterministic discovery order.
+    fn into_structs(self) -> Vec<TypedConcreteParametricStruct> {
+        self.structs
+    }
+}
+
+/// Feeds the specialization collector from the typed bridge callbacks.
+///
+/// Untyped bridge callbacks and non-type-bearing members are intentionally
+/// ignored: only typed structs, aliases, and function signatures can expose the
+/// concrete imported instantiations this prepass must materialize.
+impl BridgeBuilder for TypedConcreteParametricStructCollector<'_> {
+    fn start_module(&mut self, module_name: &str) -> Result<(), XlsynthError> {
+        self.current_module_name = module_name.to_string();
+        Ok(())
+    }
+
+    fn end_module(&mut self, _module_name: &str) -> Result<(), XlsynthError> {
+        Ok(())
+    }
+
+    fn add_enum_def(
+        &mut self,
+        _dslx_name: &str,
+        _is_signed: bool,
+        _underlying_bit_count: usize,
+        _members: &[(String, crate::IrValue)],
+    ) -> Result<(), XlsynthError> {
+        Ok(())
+    }
+
+    fn add_struct_def(
+        &mut self,
+        _dslx_name: &str,
+        _members: &[crate::dslx_bridge::StructMemberData],
+    ) -> Result<(), XlsynthError> {
+        Ok(())
+    }
+
+    fn add_struct_def_typed(
+        &mut self,
+        _dslx_name: &str,
+        type_info: &dslx::TypeInfo,
+        members: &[crate::dslx_bridge::StructMemberData],
+    ) -> Result<(), XlsynthError> {
+        let module_name = self.current_module_name.clone();
+        for member in members {
+            self.collect_type(
+                &module_name,
+                type_info,
+                Some(&member.type_annotation),
+                &member.concrete_type,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn add_alias(
+        &mut self,
+        _dslx_name: &str,
+        _type_annotation: &dslx::TypeAnnotation,
+        _ty: &dslx::Type,
+    ) -> Result<(), XlsynthError> {
+        Ok(())
+    }
+
+    fn add_alias_typed(
+        &mut self,
+        _dslx_name: &str,
+        type_info: &dslx::TypeInfo,
+        type_annotation: &dslx::TypeAnnotation,
+        ty: &dslx::Type,
+    ) -> Result<(), XlsynthError> {
+        let module_name = self.current_module_name.clone();
+        self.collect_type(&module_name, type_info, Some(type_annotation), ty)
+    }
+
+    fn add_constant(
+        &mut self,
+        _name: &str,
+        _constant_def: &dslx::ConstantDef,
+        _ty: &dslx::Type,
+        _ir_value: &crate::IrValue,
+    ) -> Result<(), XlsynthError> {
+        Ok(())
+    }
+
+    fn add_function_signature_typed(
+        &mut self,
+        _dslx_name: &str,
+        type_info: &dslx::TypeInfo,
+        params: &[crate::dslx_bridge::FunctionParamData],
+        return_type_annotation: Option<&dslx::TypeAnnotation>,
+        return_type: Option<&dslx::Type>,
+    ) -> Result<(), XlsynthError> {
+        let module_name = self.current_module_name.clone();
+        for param in params {
+            if let Some(concrete_type) = &param.concrete_type {
+                self.collect_type(
+                    &module_name,
+                    type_info,
+                    Some(&param.type_annotation),
+                    concrete_type,
+                )?;
+            }
+        }
+        if let (Some(type_annotation), Some(ty)) = (return_type_annotation, return_type) {
+            self.collect_type(&module_name, type_info, Some(type_annotation), ty)?;
+        }
+        Ok(())
+    }
+}
+
+/// Collects every concrete parametric struct needed by one generated wrapper.
+///
+/// The traversal must cover both explicitly emitted bridge modules and the top
+/// module before any module is rendered; otherwise an imported use can refer to
+/// a concrete Rust struct that its defining module never emits.
+fn collect_typed_concrete_parametric_structs(
+    context: &TypedDslxTypeContext,
+    typechecked: &TypedDslxTypecheckedModules,
+) -> AotResult<Vec<TypedConcreteParametricStruct>> {
+    let mut collector = TypedConcreteParametricStructCollector::new(context);
+    for module in typechecked
+        .bridge_modules
+        .iter()
+        .chain(std::iter::once(&typechecked.top_module))
+    {
+        convert_imported_module(module, &mut collector)?;
+    }
+    Ok(collector.into_structs())
+}
+
+/// Renders one already-collected concrete parametric struct definition.
+///
+/// Fields are already lowered relative to the defining module, so this routine
+/// only serializes the owner-local Rust item that will be inserted ahead of the
+/// normal bridge output.
+fn render_typed_concrete_parametric_struct(
+    concrete_struct: &TypedConcreteParametricStruct,
+) -> String {
+    let mut lines = vec![
+        "#[allow(non_camel_case_types)]".to_string(),
+        "#[derive(Debug, Clone, PartialEq, Eq)]".to_string(),
+        format!("pub struct {} {{", concrete_struct.rust_name),
+    ];
+    lines.extend(
+        concrete_struct
+            .fields
+            .iter()
+            .map(|field| format!("    pub {}: {},", field.name, field.ty.rust_type())),
+    );
+    lines.push("}\n".to_string());
+    lines.join("\n")
 }
 
 /// Lowers one DSLX type into the semantic model used by typed AOT generation.
@@ -2820,6 +3152,9 @@ pub fn new_runner() -> Result<Runner, xlsynth::XlsynthError> {{\n\
 /// Bridge modules are rendered first, then the top module is rendered with the
 /// AOT runner epilogue appended. The generated tree is one include-able Rust
 /// source file for build scripts to place under Cargo's output directory.
+/// Direct imported parametric structs are collected before rendering so their
+/// concrete Rust definitions can be injected once into the owning module rather
+/// than being rediscovered independently by each use site.
 fn render_typed_dslx_generated_module(
     spec: &TypedDslxAotBuildSpec<'_>,
     top_dslx_text: &str,
@@ -2839,17 +3174,49 @@ fn render_typed_dslx_generated_module(
         signature,
         &typed_signature,
     )?;
+    let concrete_parametric_structs =
+        collect_typed_concrete_parametric_structs(&context, &typechecked)?;
+    let mut leading_items_by_module =
+        concrete_parametric_structs
+            .into_iter()
+            .fold(BTreeMap::new(), |mut items, item| {
+                items
+                    .entry(item.defining_module_name.clone())
+                    .or_insert_with(Vec::new)
+                    .push(render_typed_concrete_parametric_struct(&item));
+                items
+            });
 
     let mut modules = Vec::with_capacity(spec.type_module_paths.len() + 1);
     for bridge_module in &typechecked.bridge_modules {
-        let mut builder = RustBridgeBuilder::new();
+        let module_name = bridge_module.get_module().get_name();
+        let mut builder = RustBridgeBuilder::new()
+            .with_leading_items(
+                leading_items_by_module
+                    .remove(&module_name)
+                    .unwrap_or_default(),
+            )
+            .with_deferred_parametric_struct_emission();
         convert_imported_module(bridge_module, &mut builder)?;
         modules.push(builder.module_fragment());
     }
 
-    let mut top_builder = RustBridgeBuilder::new().with_runner_items(runner_epilogue);
+    let top_module_name = typechecked.top_module.get_module().get_name();
+    let mut top_builder = RustBridgeBuilder::new()
+        .with_leading_items(
+            leading_items_by_module
+                .remove(&top_module_name)
+                .unwrap_or_default(),
+        )
+        .with_deferred_parametric_struct_emission()
+        .with_runner_items(runner_epilogue);
     convert_imported_module(&typechecked.top_module, &mut top_builder)?;
     modules.push(top_builder.module_fragment());
+    if let Some((module_name, _)) = leading_items_by_module.into_iter().next() {
+        return Err(XlsynthError(format!(
+            "AOT typed DSLX specialization collection requires bridge module `{module_name}` to be emitted"
+        )));
+    }
 
     Ok(format!(
         "// SPDX-License-Identifier: Apache-2.0\n// Generated by xlsynth::aot_builder from DSLX build spec {:?}.\n\n{}\n",
@@ -3179,5 +3546,96 @@ mod tests {
         assert_eq!(typed_signature.params.len(), 1);
         assert_eq!(typed_dslx_leaf_count(&typed_signature.params[0].ty), 1);
         assert_eq!(typed_dslx_leaf_count(&typed_signature.return_type), 1);
+    }
+
+    // Verifies: concrete specializations remain distinct when sibling imports
+    // declare same-named parametric structs with the same bound values.
+    // Catches: dedupe keyed only by generated Rust name.
+    #[test]
+    fn concrete_parametric_struct_collection_uses_struct_definition_identity_when_names_collide() {
+        let tmpdir = xlsynth_test_helpers::make_test_tmpdir(
+            "xlsynth_aot_builder_duplicate_parametric_struct_names",
+        );
+        let a_path = tmpdir.path().join("a.x");
+        let b_path = tmpdir.path().join("b.x");
+        let top_path = tmpdir.path().join("top.x");
+        std::fs::write(&a_path, "pub struct Widget<N: u32> { value: bits[N] }").unwrap();
+        std::fs::write(&b_path, "pub struct Widget<N: u32> { value: bits[N] }").unwrap();
+        std::fs::write(
+            &top_path,
+            "import a; import b; pub fn frob(lhs: a::Widget<u32:8>, rhs: b::Widget<u32:8>) -> (a::Widget<u32:8>, b::Widget<u32:8>) { (lhs, rhs) }",
+        )
+        .unwrap();
+
+        let dslx_options = DslxConvertOptions {
+            additional_search_paths: vec![tmpdir.path()],
+            ..Default::default()
+        };
+        let spec = TypedDslxAotBuildSpec {
+            name: "duplicate_parametric_struct_names",
+            dslx_path: &top_path,
+            top: "frob",
+            dslx_options,
+            type_module_paths: vec![&a_path, &b_path],
+        };
+        let top_dslx_text = std::fs::read_to_string(&top_path).unwrap();
+        let typechecked = typecheck_typed_dslx_modules(&spec, &top_dslx_text).unwrap();
+        let context = TypedDslxTypeContext::new(&typechecked);
+
+        let structs = collect_typed_concrete_parametric_structs(&context, &typechecked)
+            .expect("same-named imported parametric structs should remain distinct");
+
+        assert_eq!(structs.len(), 2);
+        assert_eq!(
+            structs
+                .iter()
+                .map(|item| (item.defining_module_name.as_str(), item.rust_name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("a", "Widget__N_8"), ("b", "Widget__N_8")]
+        );
+    }
+
+    // Verifies: imported concrete specializations evaluate caller-written
+    // parametric arguments in the importing module.
+    // Catches: resolving caller-local const expressions in the defining module.
+    #[test]
+    fn concrete_parametric_struct_collection_uses_caller_type_info_for_imported_arguments() {
+        let tmpdir = xlsynth_test_helpers::make_test_tmpdir(
+            "xlsynth_aot_builder_imported_parametric_argument_context",
+        );
+        let imported_path = tmpdir.path().join("imported.x");
+        let top_path = tmpdir.path().join("top.x");
+        std::fs::write(
+            &imported_path,
+            "pub struct Widget<N: u32> { value: bits[N] }",
+        )
+        .unwrap();
+        std::fs::write(
+            &top_path,
+            "import imported; const WIDTH = u32:4 + u32:4; pub fn frob(widget: imported::Widget<WIDTH>) -> imported::Widget<WIDTH> { widget }",
+        )
+        .unwrap();
+
+        let dslx_options = DslxConvertOptions {
+            additional_search_paths: vec![tmpdir.path()],
+            ..Default::default()
+        };
+        let spec = TypedDslxAotBuildSpec {
+            name: "imported_parametric_argument_context",
+            dslx_path: &top_path,
+            top: "frob",
+            dslx_options,
+            type_module_paths: vec![&imported_path],
+        };
+        let top_dslx_text = std::fs::read_to_string(&top_path).unwrap();
+        let typechecked = typecheck_typed_dslx_modules(&spec, &top_dslx_text).unwrap();
+        let context = TypedDslxTypeContext::new(&typechecked);
+
+        let structs = collect_typed_concrete_parametric_structs(&context, &typechecked)
+            .expect("caller-owned parametric arguments should resolve");
+
+        assert_eq!(structs.len(), 1);
+        assert_eq!(structs[0].defining_module_name, "imported");
+        assert_eq!(structs[0].rust_name, "Widget__N_8");
     }
 }

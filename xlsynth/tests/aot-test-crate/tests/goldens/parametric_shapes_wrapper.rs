@@ -12,21 +12,21 @@ pub mod parametric_shapes {
         pub value: IrUBits<8>,
     }
 
-    pub type Box8 = Box__N_8;
-
     #[allow(non_camel_case_types)]
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct Box__N_16 {
         pub value: IrUBits<16>,
     }
 
-    pub type Box16 = Box__N_16;
-
     #[allow(non_camel_case_types)]
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct Matrix__R_2__C_3 {
         pub rows: [[IrUBits<8>; 3]; 2],
     }
+
+    pub type Box8 = Box__N_8;
+
+    pub type Box16 = Box__N_16;
 
     pub type Matrix2x3 = Matrix__R_2__C_3;
 

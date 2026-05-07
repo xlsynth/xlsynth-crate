@@ -25,7 +25,9 @@ pub struct RustBridgeBuilder {
     lines: Vec<String>,
     module_path: Vec<String>,
     runner_items: Option<String>,
+    leading_items: Vec<String>,
     emitted_parametric_structs: BTreeSet<String>,
+    defer_parametric_struct_emission: bool,
 }
 
 /// Rust items generated for one DSLX module, before parent modules are
@@ -107,7 +109,9 @@ impl RustBridgeBuilder {
             lines: vec![],
             module_path: vec![],
             runner_items: None,
+            leading_items: vec![],
             emitted_parametric_structs: BTreeSet::new(),
+            defer_parametric_struct_emission: false,
         }
     }
 
@@ -117,6 +121,30 @@ impl RustBridgeBuilder {
     /// definitions for the top function.
     pub(crate) fn with_runner_items(mut self, runner_items: impl Into<String>) -> Self {
         self.runner_items = Some(runner_items.into());
+        self
+    }
+
+    /// Adds generated items immediately after the module preamble.
+    ///
+    /// Typed AOT uses this hook for owner-module items discovered before normal
+    /// bridge rendering. Callers should pass items that are already valid in
+    /// the target module's namespace; inserting cross-module paths here
+    /// would make generated code depend on the wrong ownership context.
+    pub(crate) fn with_leading_items(
+        mut self,
+        leading_items: impl IntoIterator<Item = String>,
+    ) -> Self {
+        self.leading_items = leading_items.into_iter().collect();
+        self
+    }
+
+    /// Defers concrete parametric struct definitions to a package-level pass.
+    ///
+    /// Typed DSLX AOT generation uses this when it renders several modules
+    /// together and has already collected the concrete specializations that
+    /// should be emitted in their defining modules.
+    pub(crate) fn with_deferred_parametric_struct_emission(mut self) -> Self {
+        self.defer_parametric_struct_emission = true;
         self
     }
 
@@ -360,6 +388,9 @@ impl RustBridgeBuilder {
         if type_ref_annotation.get_parametric_count() == 0 {
             return Ok(());
         }
+        if self.defer_parametric_struct_emission {
+            return Ok(());
+        }
         let Some(rust_ty) = Self::convert_type_ref_annotation(
             &self.module_path,
             Some(type_info),
@@ -448,6 +479,7 @@ impl BridgeBuilder for RustBridgeBuilder {
             "#![allow(unused_imports)]".to_string(),
             "use xlsynth::{IrValue, IrUBits, IrSBits};\n".to_string(),
         ];
+        self.lines.extend(self.leading_items.clone());
         Ok(())
     }
 
