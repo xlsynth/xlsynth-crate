@@ -28,6 +28,10 @@ message Library {
   // Nonzero IDs are 1-based references into threshold_voltage_groups:
   // ID 1 refers to threshold_voltage_groups[0]. ID 0 means "unset".
   uint32 default_threshold_voltage_group_id = 5;
+  // Optional VT speed classes parallel to threshold_voltage_groups. When
+  // populated, element i gives the speed class for threshold_voltage_groups[i]:
+  // 0 is nominal, larger values are faster, and smaller values are slower.
+  repeated sint32 threshold_voltage_group_class_indices = 6;
 }
 
 message Cell {
