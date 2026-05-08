@@ -82,6 +82,8 @@ fn is_nand2_formula(term: &Term, input_pin_names: &[String]) -> bool {
     let [a, b] = input_pin_names else {
         return false;
     };
+    // Liberty libraries may spell NAND2 either directly or in equivalent SOP
+    // form, so accept both exact two-input AST shapes after parsing.
     let expected_ab = Term::Negate(Box::new(Term::And(
         Box::new(Term::Input(a.clone())),
         Box::new(Term::Input(b.clone())),
@@ -90,7 +92,18 @@ fn is_nand2_formula(term: &Term, input_pin_names: &[String]) -> bool {
         Box::new(Term::Input(b.clone())),
         Box::new(Term::Input(a.clone())),
     )));
-    *term == expected_ab || *term == expected_ba
+    let expected_demorgan_ab = Term::Or(
+        Box::new(Term::Negate(Box::new(Term::Input(a.clone())))),
+        Box::new(Term::Negate(Box::new(Term::Input(b.clone())))),
+    );
+    let expected_demorgan_ba = Term::Or(
+        Box::new(Term::Negate(Box::new(Term::Input(b.clone())))),
+        Box::new(Term::Negate(Box::new(Term::Input(a.clone())))),
+    );
+    *term == expected_ab
+        || *term == expected_ba
+        || *term == expected_demorgan_ab
+        || *term == expected_demorgan_ba
 }
 
 fn cell_binding_if_shape_matches(
@@ -740,6 +753,27 @@ mod tests {
 
         assert!(select_inv_cell(&lib, CellPolicy::SmallNormalVt).is_err());
         assert!(select_nand2_cell(&lib, CellPolicy::SmallNormalVt).is_err());
+    }
+
+    #[test]
+    fn select_accepts_demorgan_nand2_formula() {
+        let lib = xlsynth_g8r::liberty_proto::Library {
+            cells: vec![Cell {
+                name: "NAND2".to_string(),
+                pins: vec![
+                    make_pin("A", PinDirection::Input, ""),
+                    make_pin("B", PinDirection::Input, ""),
+                    make_timed_output_pin("Y", "(!A)+(!B)", &["A", "B"]),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            select_nand2_cell_name(&lib, CellPolicy::SmallNormalVt).unwrap(),
+            "NAND2"
+        );
     }
 
     #[test]

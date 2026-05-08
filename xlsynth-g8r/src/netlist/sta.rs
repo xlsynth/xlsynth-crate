@@ -14,8 +14,10 @@
 //! - Rejects sequential output pins and conditional (`when`) timing arcs rather
 //!   than approximating unsupported timing semantics in this limited-scope
 //!   pass.
-//! - Rejects non-monotone timing tables because later frontier reduction relies
-//!   on larger transition/load queries not producing smaller delay/slew values.
+//! - Rejects timing tables with meaningful non-monotonicity because later
+//!   frontier reduction relies on larger transition/load queries not producing
+//!   smaller delay/slew values. Tiny decreases within the
+//!   characterization-noise tolerance are treated as effectively equal.
 //!
 //! At a high level, the analysis is:
 //! 1. Index each instance's cell/pin connectivity, recording one driver and all
@@ -50,6 +52,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
+
+const MONOTONICITY_REL_TOLERANCE: f64 = 5.0e-4;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EdgeTiming {
@@ -1635,8 +1639,9 @@ fn validate_effective_axes(table: &TimingTable, axes: [&[f64]; 3], context: &str
     Ok(())
 }
 
-/// Rejects tables that decrease along any axis; envelope reduction requires
-/// monotone queries.
+/// Rejects tables that meaningfully decrease along any axis; envelope reduction
+/// requires monotone queries, while real Liberty data can contain tiny
+/// characterization-noise decreases.
 fn validate_monotone_timing_table(
     array: &TimingTableArrayView<'_>,
     dimensions: &[u32],
@@ -1667,14 +1672,17 @@ fn validate_monotone_timing_table(
                     next_indices
                 )
             })?;
-            if next < current {
+            let scale = current.abs().max(next.abs());
+            let tolerance = MONOTONICITY_REL_TOLERANCE * scale;
+            if next + tolerance < current {
                 return Err(anyhow!(
-                    "{context}: timing table decreases along axis {} between {:?}={} and {:?}={}; basic STA requires monotone timing tables",
+                    "{context}: timing table decreases along axis {} between {:?}={} and {:?}={}; basic STA requires monotone timing tables up to relative tolerance {}",
                     axis_idx + 1,
                     indices,
                     current,
                     next_indices,
-                    next
+                    next,
+                    MONOTONICITY_REL_TOLERANCE
                 ));
             }
         }
@@ -3998,6 +4006,30 @@ endmodule
                 .to_string()
                 .contains("basic STA requires monotone timing tables")
         );
+    }
+
+    #[test]
+    fn evaluate_table_accepts_tiny_non_monotone_noise() {
+        let lib = crate::liberty_proto::Library {
+            lu_table_templates: vec![LuTableTemplate {
+                kind: "lu_table_template".to_string(),
+                name: "tmpl_characterization_noise".to_string(),
+                variable_1: "input_net_transition".to_string(),
+                index_1: vec![0.0, 1.0],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let table = TimingTable {
+            kind: "cell_rise".to_string(),
+            template_id: 1,
+            dimensions: vec![2],
+            values: vec![40.0822, 40.0809],
+            ..Default::default()
+        };
+
+        validate_timing_table_payload(&lib, &table, "characterization_noise")
+            .expect("tiny non-monotone characterization noise should be tolerated");
     }
 
     #[test]
