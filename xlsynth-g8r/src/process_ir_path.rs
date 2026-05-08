@@ -181,18 +181,9 @@ pub struct Options {
     pub cut_db: Option<std::sync::Arc<crate::cut_db::loader::CutDb>>,
 
     /// Deterministic bound on cut-db rewrite effort. If set to `0`, the outer
-    /// loop runs until no improving rewrite is found or another configured cap
-    /// prevents progress. This bounds global recompute rounds.
+    /// loop runs until no improving rewrite is found. This bounds global
+    /// recompute rounds.
     pub cut_db_rewrite_max_iterations: usize,
-
-    /// Maximum cheap candidate depth evaluations per cut-db global recompute
-    /// round. If set to `0`, candidate evaluation is unbounded.
-    pub cut_db_rewrite_max_candidate_evals_per_round: usize,
-
-    /// Maximum accepted cut-db replacements per global recompute round. This
-    /// is a speed/QoR batching policy; if set to `0`, accepted replacements are
-    /// unbounded.
-    pub cut_db_rewrite_max_rewrites_per_round: usize,
 
     /// Maximum number of cuts kept per node during cut enumeration. If set to
     /// `0`, cut enumeration is unbounded (not recommended for CLI use).
@@ -286,10 +277,6 @@ impl CanonicalG8rOptions {
             cut_db: Some(crate::cut_db::loader::CutDb::load_default()),
             cut_db_rewrite_max_iterations:
                 crate::cut_db_cli_defaults::CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
-            cut_db_rewrite_max_candidate_evals_per_round:
-                crate::cut_db_cli_defaults::CUT_DB_REWRITE_MAX_CANDIDATE_EVALS_PER_ROUND_CLI,
-            cut_db_rewrite_max_rewrites_per_round:
-                crate::cut_db_cli_defaults::CUT_DB_REWRITE_MAX_REWRITES_PER_ROUND_CLI,
             cut_db_rewrite_max_cuts_per_node:
                 crate::cut_db_cli_defaults::CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
             prepared_ir_out: prepared_ir_out.map(|p| p.to_path_buf()),
@@ -609,8 +596,8 @@ pub fn process_ir_text_with_gatefn(
             cut_db_rewrite::RewriteOptions {
                 max_cuts_per_node: options.cut_db_rewrite_max_cuts_per_node,
                 max_iterations: options.cut_db_rewrite_max_iterations,
-                max_candidate_evals_per_round: options.cut_db_rewrite_max_candidate_evals_per_round,
-                max_rewrites_per_round: options.cut_db_rewrite_max_rewrites_per_round,
+                verify_area_costing: false,
+                verify_delay_costing: false,
             },
         );
     }

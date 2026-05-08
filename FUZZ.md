@@ -212,12 +212,62 @@ Primarily tests:
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_cut_db_rewrite_equiv.rs
 
-Builds a random `GateFn`, runs the cut-db rewrite pass (`rewrite_gatefn_with_cut_db`) using the vendored 4-input cut database, and proves the rewritten graph is SAT-equivalent (Varisat) to the original. Panics on any semantic mismatch.
+Builds a random `GateFn`, runs the cut-db rewrite pass (`rewrite_gatefn_with_cut_db`) using the vendored 4-input cut database, checks area-cost deltas and delay-gating decisions for accepted rewrites against independently DCE-cleaned graph copies, and proves the rewritten graph is SAT-equivalent (Varisat) to the original. Panics on any semantic mismatch or cost-accounting inconsistency.
 
 Primarily tests:
 
 - Cut-db rewrite pass preserves semantics on arbitrary AIGs
 - Stability of cut enumeration + replacement instantiation under random graphs
+- Area rewrite live-node cost accounting matches cleaned graph deltas
+- Depth rewrite critical-path reduction and area rewrite no-regression checks
+  match cleaned graph depths
+
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_dynamic_structural_hash.rs
+
+Builds a random `GateFn`, wraps it in the dynamic structural hash edit state,
+then applies a bounded sequence of random `add_and`, fanin/output edge moves,
+and delete-node attempts. After every operation, it rebuilds fanouts,
+output-use counts, and local strash buckets from scratch and asserts that the
+incrementally maintained state is identical.
+
+Primarily tests:
+
+- Dynamic local-strash updates stay coherent across node addition, edge
+  rewiring, replacement cascades, and inactive-node/MFFC deletion
+- Illegal random edits such as cycle-creating moves or deleting still-used nodes
+  leave the edit state unchanged and coherent
+
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_dynamic_depth.rs
+
+Builds a random `GateFn`, wraps it in the dynamic forward/backward depth edit
+state, then applies a bounded sequence of random `add_and`, fanin/output edge
+moves, replacement attempts, and delete-node attempts. After every operation,
+it rebuilds forward and backward depths from scratch and asserts that the
+maintained state is identical.
+
+Primarily tests:
+
+- Dynamic depth bookkeeping stays coherent across node addition, edge rewiring,
+  replacement, and inactive-node/MFFC deletion
+- Illegal random edits such as cycle-creating moves or deleting still-used nodes
+  leave the edit state unchanged and coherent
+
+### xlsynth-g8r/fuzz/fuzz_targets/fuzz_dynamic_depth_cut_replacement.rs
+
+Builds a random `GateFn`, chooses random live AND roots, expands random cuts
+toward inputs, builds random replacement AND fragments from the cut leaves using
+the dynamic structural hash, and replaces the cut root with the fragment output.
+After each cut-style replacement, it updates `DynamicDepthState` only from the
+touched cut nodes and replacement nodes, then compares forward and backward
+depths against a full recomputation.
+
+Primarily tests:
+
+- Incremental dynamic-depth updates stay coherent for cutdb-like replacements
+  that add strashed fragment nodes, rewire root fanouts, and delete dangling
+  MFFC nodes
+- The dirty-node contract for replacement cuts covers cut leaves, old root
+  fanouts, replacement fragment nodes, and reused strash representatives
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_bulk_replace.rs
 
