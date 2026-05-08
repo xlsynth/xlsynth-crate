@@ -189,6 +189,13 @@ pub struct Options {
     /// `0`, cut enumeration is unbounded (not recommended for CLI use).
     pub cut_db_rewrite_max_cuts_per_node: usize,
 
+    /// Whether to run large-cone cut-db rewrite phases after the 4-input
+    /// phases.
+    pub cut_db_enable_large_cone_rewrite: bool,
+
+    /// Cut-db QoR policy: delay, balanced, or area.
+    pub cut_db_rewrite_mode: cut_db_rewrite::CutDbRewriteMode,
+
     /// Optional path to write the residual PIR after `prep_for_gatify` (and
     /// extension lowering) for the top function.
     pub prepared_ir_out: Option<std::path::PathBuf>,
@@ -212,6 +219,8 @@ pub struct CanonicalG8rOptions {
     pub compute_graph_logical_effort: bool,
     pub graph_logical_effort_beta1: f64,
     pub graph_logical_effort_beta2: f64,
+    pub cut_db_enable_large_cone_rewrite: bool,
+    pub cut_db_rewrite_mode: cut_db_rewrite::CutDbRewriteMode,
     pub toggle_sample_count: usize,
     pub toggle_sample_seed: u64,
 }
@@ -235,6 +244,8 @@ impl Default for CanonicalG8rOptions {
             compute_graph_logical_effort: true,
             graph_logical_effort_beta1: 1.0,
             graph_logical_effort_beta2: 0.0,
+            cut_db_enable_large_cone_rewrite: true,
+            cut_db_rewrite_mode: cut_db_rewrite::CutDbRewriteMode::default(),
             toggle_sample_count: 0,
             toggle_sample_seed: 0,
         }
@@ -279,6 +290,8 @@ impl CanonicalG8rOptions {
                 crate::cut_db_cli_defaults::CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
             cut_db_rewrite_max_cuts_per_node:
                 crate::cut_db_cli_defaults::CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
+            cut_db_enable_large_cone_rewrite: self.cut_db_enable_large_cone_rewrite,
+            cut_db_rewrite_mode: self.cut_db_rewrite_mode,
             prepared_ir_out: prepared_ir_out.map(|p| p.to_path_buf()),
         }
     }
@@ -598,6 +611,8 @@ pub fn process_ir_text_with_gatefn(
                 max_iterations: options.cut_db_rewrite_max_iterations,
                 verify_area_costing: false,
                 verify_delay_costing: false,
+                enable_large_cone_rewrite: options.cut_db_enable_large_cone_rewrite,
+                mode: options.cut_db_rewrite_mode,
             },
         );
     }

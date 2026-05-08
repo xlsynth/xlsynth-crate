@@ -4,14 +4,15 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::aig::cut_db_rewrite::{
-    Replacement, ReplacementImpl, apply_replacement_to_dynamic_hash,
-    cleanup_dangling_new_dynamic_hash_nodes,
-};
-use crate::aig::dynamic_depth::DynamicDepthState;
 use crate::aig::dynamic_structural_hash::DynamicStructuralHash;
 use crate::aig::gate::{AigNode, AigOperand, AigRef};
 use crate::cut_db::fragment::{FragmentNode, GateFnFragment, Lit};
+
+use super::large_cone::{FactoredExpr, FactoredExprNode, SopReplacement};
+use super::{
+    Replacement, ReplacementImpl, apply_replacement_to_dynamic_hash,
+    cleanup_dangling_new_dynamic_hash_nodes,
+};
 
 /// Summary of a replacement that was materialized into the dynamic AIG.
 #[derive(Debug, Clone, Copy)]
@@ -57,28 +58,6 @@ pub(super) fn gate_count_diff_for_replacement(
         after_live_ands,
         live_and_delta: before_live_ands as isize - after_live_ands as isize,
     }))
-}
-
-/// Returns the exact global output depth after applying one replacement.
-///
-/// This uses the same virtual replacement model as area costing, so depth-mode
-/// candidate checks do not need to clone and trial-mutate the whole dynamic
-/// AIG.
-pub(super) fn output_depth_after_replacement(
-    state: &DynamicStructuralHash,
-    depth_state: &DynamicDepthState,
-    replacement: &Replacement,
-) -> Result<Option<usize>, String> {
-    if !state.is_live(replacement.root) {
-        return Ok(None);
-    }
-    let mut overlay = VirtualCostOverlay::new(state);
-    let replacement_op = overlay.instantiate_replacement(replacement)?;
-    overlay.replace_node_with_operand(replacement.root, replacement_op)?;
-    overlay.cleanup_dangling_virtual_nodes()?;
-    overlay
-        .max_output_depth(depth_state.forward_depths())
-        .map(Some)
 }
 
 /// Applies a replacement to the real dynamic hash state.
@@ -152,6 +131,7 @@ impl<'a> VirtualCostOverlay<'a> {
             ReplacementImpl::Fragment { frag, .. } => {
                 self.instantiate_fragment(frag, &replacement.leaf_ops)
             }
+            ReplacementImpl::Sop(sop) => self.instantiate_sop(sop, &replacement.leaf_ops),
         }
     }
 
@@ -182,6 +162,43 @@ impl<'a> VirtualCostOverlay<'a> {
         }
 
         Ok(Self::op_from_lit(frag.output, &ops))
+    }
+
+    fn instantiate_sop(
+        &mut self,
+        sop: &SopReplacement,
+        leaf_ops: &[AigOperand],
+    ) -> Result<AigOperand, String> {
+        let mut output = self.instantiate_factored_expr(&sop.factored, leaf_ops)?;
+        if sop.output_negated {
+            output = output.negate();
+        }
+        Ok(output)
+    }
+
+    fn instantiate_factored_expr(
+        &mut self,
+        expr: &FactoredExpr,
+        leaf_ops: &[AigOperand],
+    ) -> Result<AigOperand, String> {
+        let mut ops = Vec::with_capacity(expr.nodes().len());
+        for node in expr.nodes().iter().copied() {
+            let op = match node {
+                FactoredExprNode::Const(false) => Self::false_op(),
+                FactoredExprNode::Const(true) => Self::true_op(),
+                FactoredExprNode::Lit { var, negated } => {
+                    let mut op = leaf_ops[var];
+                    if negated {
+                        op = op.negate();
+                    }
+                    op
+                }
+                FactoredExprNode::And { lhs, rhs } => self.add_and(ops[lhs.0], ops[rhs.0])?,
+                FactoredExprNode::Or { lhs, rhs } => self.add_or_binary(ops[lhs.0], ops[rhs.0])?,
+            };
+            ops.push(op);
+        }
+        Ok(ops[expr.root().0])
     }
 
     fn replace_node_with_operand(
@@ -267,168 +284,6 @@ impl<'a> VirtualCostOverlay<'a> {
         self.state.live_and_count() + live_virtual_ands - deleted_real_ands
     }
 
-    fn max_output_depth(&self, base_forward_depths: &[usize]) -> Result<usize, String> {
-        let affected = self.affected_forward_cone()?;
-        let mut memo = BTreeMap::new();
-        let mut max_depth = 0usize;
-        for output in &self.state.gate_fn().outputs {
-            for op in output.bit_vector.iter_lsb_to_msb() {
-                let op = self.current_output_operand(*op);
-                self.validate_operand(op)?;
-                let depth =
-                    self.forward_depth(op.node, base_forward_depths, &affected, &mut memo)?;
-                max_depth = max_depth.max(depth);
-            }
-        }
-        Ok(max_depth)
-    }
-
-    fn affected_forward_cone(&self) -> Result<BTreeSet<AigRef>, String> {
-        let mut affected = BTreeSet::new();
-        let mut queue = VecDeque::new();
-        for node in self
-            .virtual_children
-            .keys()
-            .chain(self.rewritten_children.keys())
-            .chain(self.deleted.iter())
-            .copied()
-        {
-            if affected.insert(node) {
-                queue.push_back(node);
-            }
-        }
-        for (old, replacement) in &self.output_replacements {
-            if affected.insert(*old) {
-                queue.push_back(*old);
-            }
-            if affected.insert(replacement.node) {
-                queue.push_back(replacement.node);
-            }
-        }
-
-        while let Some(node) = queue.pop_front() {
-            for fanout in self.current_fanout_nodes(node)? {
-                if affected.insert(fanout) {
-                    queue.push_back(fanout);
-                }
-            }
-        }
-        Ok(affected)
-    }
-
-    fn current_fanout_nodes(&self, node: AigRef) -> Result<Vec<AigRef>, String> {
-        let mut fanouts = BTreeSet::new();
-        if node.id < self.base_len {
-            for fanout in self.state.fanout_nodes(node) {
-                if !self.is_live_node(fanout) {
-                    continue;
-                }
-                let (a, b) = self.current_and_operands(fanout)?;
-                if a.node == node || b.node == node {
-                    fanouts.insert(fanout);
-                }
-            }
-        }
-        for (fanout, (a, b)) in self
-            .rewritten_children
-            .iter()
-            .chain(self.virtual_children.iter())
-        {
-            if self.is_live_node(*fanout) && (a.node == node || b.node == node) {
-                fanouts.insert(*fanout);
-            }
-        }
-        Ok(fanouts.into_iter().collect())
-    }
-
-    fn forward_depth(
-        &self,
-        node: AigRef,
-        base_forward_depths: &[usize],
-        affected: &BTreeSet<AigRef>,
-        memo: &mut BTreeMap<AigRef, usize>,
-    ) -> Result<usize, String> {
-        let mut marks = BTreeMap::new();
-        let mut stack = vec![(node, false)];
-
-        while let Some((current, exit)) = stack.pop() {
-            if memo.contains_key(&current) {
-                continue;
-            }
-            self.validate_node_index(current)?;
-            if !self.is_live_node(current) {
-                return Err(format!(
-                    "cannot compute depth for inactive node {:?}",
-                    current
-                ));
-            }
-            if self.can_use_base_forward_depth(current, affected) {
-                let depth = base_forward_depths
-                    .get(current.id)
-                    .copied()
-                    .ok_or_else(|| format!("node {:?} has no base forward depth", current))?;
-                memo.insert(current, depth);
-                continue;
-            }
-
-            if exit {
-                let depth = if current.id < self.base_len
-                    && !matches!(self.state.gate_fn().gates[current.id], AigNode::And2 { .. })
-                {
-                    0
-                } else {
-                    let (a, b) = self.current_and_operands(current)?;
-                    let a_depth = memo
-                        .get(&a.node)
-                        .copied()
-                        .ok_or_else(|| format!("missing forward depth for {:?}", a.node))?;
-                    let b_depth = memo
-                        .get(&b.node)
-                        .copied()
-                        .ok_or_else(|| format!("missing forward depth for {:?}", b.node))?;
-                    a_depth
-                        .max(b_depth)
-                        .checked_add(1)
-                        .ok_or_else(|| format!("forward depth overflow at {:?}", current))?
-                };
-                marks.insert(current, 2u8);
-                memo.insert(current, depth);
-                continue;
-            }
-
-            match marks.get(&current).copied() {
-                Some(1) => return Err(format!("cycle detected at {:?}", current)),
-                Some(2) => continue,
-                _ => {}
-            }
-            marks.insert(current, 1u8);
-            stack.push((current, true));
-
-            if current.id < self.base_len
-                && !matches!(self.state.gate_fn().gates[current.id], AigNode::And2 { .. })
-            {
-                continue;
-            }
-            let (a, b) = self.current_and_operands(current)?;
-            if !memo.contains_key(&b.node) {
-                stack.push((b.node, false));
-            }
-            if !memo.contains_key(&a.node) {
-                stack.push((a.node, false));
-            }
-        }
-
-        memo.get(&node)
-            .copied()
-            .ok_or_else(|| format!("missing forward depth for {:?}", node))
-    }
-
-    fn can_use_base_forward_depth(&self, node: AigRef, affected: &BTreeSet<AigRef>) -> bool {
-        node.id < self.base_len
-            && !affected.contains(&node)
-            && !self.rewritten_children.contains_key(&node)
-    }
-
     fn add_and(&mut self, lhs: AigOperand, rhs: AigOperand) -> Result<AigOperand, String> {
         self.validate_operand(lhs)?;
         self.validate_operand(rhs)?;
@@ -452,6 +307,22 @@ impl<'a> VirtualCostOverlay<'a> {
         self.increment_use(lhs.node)?;
         self.increment_use(rhs.node)?;
         Ok(op)
+    }
+
+    fn add_or_binary(&mut self, lhs: AigOperand, rhs: AigOperand) -> Result<AigOperand, String> {
+        if Self::is_true(lhs) || Self::is_true(rhs) {
+            return Ok(Self::true_op());
+        }
+        if Self::is_false(lhs) && Self::is_false(rhs) {
+            return Ok(Self::false_op());
+        }
+        if Self::is_false(lhs) {
+            return Ok(rhs);
+        }
+        if Self::is_false(rhs) {
+            return Ok(lhs);
+        }
+        Ok(self.add_and(lhs.negate(), rhs.negate())?.negate())
     }
 
     fn lookup_existing_and(&self, key: AndKey, exclude: Option<AigRef>) -> Option<AigOperand> {
@@ -753,6 +624,18 @@ impl<'a> VirtualCostOverlay<'a> {
         }
     }
 
+    fn true_op() -> AigOperand {
+        Self::false_op().negate()
+    }
+
+    fn is_false(op: AigOperand) -> bool {
+        op.node.id == 0 && !op.negated
+    }
+
+    fn is_true(op: AigOperand) -> bool {
+        op.node.id == 0 && op.negated
+    }
+
     fn op_from_lit(lit: Lit, ops: &[AigOperand]) -> AigOperand {
         let mut op = ops[lit.id as usize];
         if lit.negated {
@@ -763,17 +646,6 @@ impl<'a> VirtualCostOverlay<'a> {
 
     fn replace_operand_node(op: AigOperand, old: AigRef, replacement: AigOperand) -> AigOperand {
         if op.node == old {
-            AigOperand {
-                node: replacement.node,
-                negated: op.negated ^ replacement.negated,
-            }
-        } else {
-            op
-        }
-    }
-
-    fn current_output_operand(&self, op: AigOperand) -> AigOperand {
-        if let Some(replacement) = self.output_replacements.get(&op.node).copied() {
             AigOperand {
                 node: replacement.node,
                 negated: op.negated ^ replacement.negated,

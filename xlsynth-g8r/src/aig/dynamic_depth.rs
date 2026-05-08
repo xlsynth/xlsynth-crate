@@ -56,6 +56,22 @@ impl DynamicDepthState {
         state: &DynamicStructuralHash,
         changed_nodes: &[AigRef],
     ) -> Result<(), String> {
+        self.refresh_from_changed_nodes_collecting_affected(state, changed_nodes)
+            .map(|_| ())
+    }
+
+    /// Incrementally refreshes depths and returns nodes whose critical-path
+    /// membership may have changed.
+    ///
+    /// The result includes the caller's seed nodes and nodes whose forward or
+    /// backward depths changed during propagation. If the graph's maximum
+    /// output depth changes, callers should rebuild any max-depth-derived state
+    /// globally instead of relying only on this affected set.
+    pub fn refresh_from_changed_nodes_collecting_affected(
+        &mut self,
+        state: &DynamicStructuralHash,
+        changed_nodes: &[AigRef],
+    ) -> Result<Vec<AigRef>, String> {
         let node_count = state.gate_fn().gates.len();
         self.forward_depths.resize(node_count, 0);
         self.backward_depths.resize(node_count, usize::MAX);
@@ -63,6 +79,7 @@ impl DynamicDepthState {
 
         let mut forward_queue = VecDeque::new();
         let mut backward_queue = VecDeque::new();
+        let mut affected_nodes = Vec::new();
         let queue_epoch = self.next_queue_epoch();
 
         for node in changed_nodes.iter().copied() {
@@ -72,6 +89,7 @@ impl DynamicDepthState {
                     node, node_count
                 ));
             }
+            affected_nodes.push(node);
             enqueue_node(
                 node,
                 &mut forward_queue,
@@ -94,6 +112,7 @@ impl DynamicDepthState {
                 continue;
             }
             self.forward_depths[node.id] = new_depth;
+            affected_nodes.push(node);
             for fanout in state.fanout_nodes(node) {
                 enqueue_node(
                     fanout,
@@ -122,6 +141,7 @@ impl DynamicDepthState {
                 continue;
             }
             self.backward_depths[node.id] = new_depth;
+            affected_nodes.push(node);
             for fanin in node_fanins(state.gate_fn(), node) {
                 enqueue_node(
                     fanin,
@@ -132,7 +152,9 @@ impl DynamicDepthState {
             }
         }
 
-        Ok(())
+        affected_nodes.sort_unstable_by_key(|node| node.id);
+        affected_nodes.dedup();
+        Ok(affected_nodes)
     }
 
     /// Returns the current maximum forward depth among output operands.

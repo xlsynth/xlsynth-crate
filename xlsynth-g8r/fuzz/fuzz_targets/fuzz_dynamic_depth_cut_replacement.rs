@@ -186,7 +186,7 @@ fuzz_target!(|sample: CutReplacementSample| {
         }
 
         let mut dirty_nodes = BTreeSet::new();
-        dirty_nodes.extend(cut_nodes);
+        dirty_nodes.extend(cut_nodes.iter().copied());
         for fanout in hash.fanout_nodes(root) {
             dirty_nodes.insert(fanout);
         }
@@ -204,7 +204,8 @@ fuzz_target!(|sample: CutReplacementSample| {
             }
             let lhs = maybe_negate(operands[op.lhs as usize % operands.len()], op.lhs_neg);
             let rhs = maybe_negate(operands[op.rhs as usize % operands.len()], op.rhs_neg);
-            let Ok(result) = hash.add_and(lhs, rhs) else {
+            let Ok(result) = hash.add_and_with_pir_node_ids_excluding(lhs, rhs, &[], &cut_nodes)
+            else {
                 break;
             };
             dirty_nodes.insert(result.node);

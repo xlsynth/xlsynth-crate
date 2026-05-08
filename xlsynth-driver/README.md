@@ -322,6 +322,8 @@ Converts an XLS IR file to an `xlsynth_g8r::GateFn` (i.e. a gate-level netlist i
   - `--enable-rewrite-prio-encode=<BOOL>` – when `true`, enable prio-encode and CLZ idiom rewrites during `prep_for_gatify` (introduces `ext_prio_encode` / `ext_clz`). Default `true`.
   - `--enable-rewrite-nary-add=<BOOL>` – when `true`, rewrite width-preserving add/sub trees and explicit gated increment/decrement helper networks into `ext_nary_add`, then greedily absorb/merge nested terms to a fixed point during `prep_for_gatify`. Default `true`.
   - `--enable-rewrite-mask-low=<BOOL>` – when `true`, rewrite dynamic low-mask idioms into `ext_mask_low` during `prep_for_gatify`. Default `true`.
+  - `--cut-db-enable-large-cone-rewrite=<BOOL>` – when `true`, run the large-cone cut-db rewrite phases after the 4-input cut-db phases. Default `true`.
+  - `--cut-db-rewrite-mode=<delay|balanced|area>` – choose the cut-db optimization policy. `delay` runs delay-focused phases before area recovery and allows the delay phases to expand area; area phases preserve delay. `balanced` skips delay phases and preserves delay during area recovery. `area` skips delay phases and allows area recovery to increase delay. Default `delay`.
   - `--top <TOP>` – override the top-level entry point (required if the IR package has no `top fn`).
 
 Example:
@@ -1510,6 +1512,8 @@ Supported flags include the common gate-optimization controls:
 - `--enable-rewrite-prio-encode=<BOOL>` – when `true`, enable prio-encode and CLZ idiom rewrites during `prep_for_gatify` (introduces `ext_prio_encode` / `ext_clz`). Default `true`.
 - `--enable-rewrite-nary-add=<BOOL>` – when `true`, rewrite width-preserving add/sub trees and explicit gated increment/decrement helper networks into `ext_nary_add`, then greedily absorb/merge nested terms to a fixed point during `prep_for_gatify`. Default `true`.
 - `--enable-rewrite-mask-low=<BOOL>` – when `true`, rewrite dynamic low-mask idioms into `ext_mask_low` during `prep_for_gatify`. Default `true`.
+- `--cut-db-enable-large-cone-rewrite=<BOOL>` – when `true`, run the large-cone cut-db rewrite phases after the 4-input cut-db phases. Default `true`.
+- `--cut-db-rewrite-mode=<delay|balanced|area>` – choose the cut-db optimization policy. `delay` runs delay-focused phases before area recovery and allows the delay phases to expand area; area phases preserve delay. `balanced` skips delay phases and preserves delay during area recovery. `area` skips delay phases and allows area recovery to increase delay. Default `delay`.
 - `--prepared-ir-out=<PATH>` – write the residual PIR (after `prep_for_gatify`) to `PATH`.
 - `--adder-mapping=<ripple-carry|brent-kung|kogge-stone>` – choose the adder
   topology.

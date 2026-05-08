@@ -129,6 +129,7 @@ use once_cell::sync::Lazy;
 use report_cli_error::report_cli_error_and_exit;
 use serde::Deserialize;
 use xlsynth::sv_bridge_builder::{SvEnumCaseNamingPolicy, SvStructFieldOrderingPolicy};
+use xlsynth_g8r::aig::cut_db_rewrite::CutDbRewriteMode;
 use xlsynth_prover::prover::types::AssertionSemantics;
 use xlsynth_prover::prover::types::QuickCheckAssertionSemantics;
 
@@ -409,6 +410,23 @@ impl AppExt for clap::Command {
                     .value_name("BETA2")
                     .help("Beta2 value for graph logical effort computation (default 0.0)")
                     .default_value("0.0")
+                    .action(clap::ArgAction::Set),
+            )
+            .add_bool_arg(
+                "cut-db-enable-large-cone-rewrite",
+                "Run large-cone cut-db rewrite phases after the 4-input cut-db phases",
+            )
+            .arg(
+                clap::Arg::new("cut_db_rewrite_mode")
+                    .long("cut-db-rewrite-mode")
+                    .value_name("MODE")
+                    .help(
+                        "Cut-db rewrite mode: delay, balanced, or area (default delay)",
+                    )
+                    .default_value(CutDbRewriteMode::DEFAULT_CLI_VALUE)
+                    .value_parser(clap::builder::PossibleValuesParser::new(
+                        CutDbRewriteMode::CLI_VALUES,
+                    ))
                     .action(clap::ArgAction::Set),
             )
             .arg(

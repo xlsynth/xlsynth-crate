@@ -304,6 +304,48 @@ impl DynamicStructuralHash {
         })
     }
 
+    /// Adds `lhs & rhs`, ignoring local-strash representatives in `excluded`.
+    ///
+    /// This is useful while building a replacement cone for a node that will be
+    /// rewritten: the replacement must not accidentally reuse that old root as
+    /// an intermediate node, because doing so can create a cycle when the root
+    /// is replaced by the new cone.
+    pub fn add_and_with_pir_node_ids_excluding(
+        &mut self,
+        lhs: AigOperand,
+        rhs: AigOperand,
+        pir_node_ids: &[u32],
+        excluded: &BTreeSet<AigRef>,
+    ) -> Result<AigOperand, String> {
+        self.validate_operand(lhs)?;
+        self.validate_operand(rhs)?;
+        if let Some(existing) = self.lookup_and_excluding(lhs, rhs, excluded) {
+            return self.union_pir_node_ids_into_operand(existing, pir_node_ids);
+        }
+
+        let node = AigRef {
+            id: self.g.gates.len(),
+        };
+        self.g.gates.push(AigNode::And2 {
+            a: lhs,
+            b: rhs,
+            tags: None,
+            pir_node_ids: Default::default(),
+        });
+        self.live.push(true);
+        self.fanouts.push(FanoutBucket::default());
+        self.output_uses.push(0);
+        self.use_counts.push(0);
+        self.live_and_count += 1;
+        self.add_fanin_links(node, lhs, rhs);
+        self.insert_index_node(node)?;
+        self.add_pir_node_ids(node, pir_node_ids)?;
+        Ok(AigOperand {
+            node,
+            negated: false,
+        })
+    }
+
     /// Unions provenance IDs into an active node.
     pub fn add_pir_node_ids(&mut self, node: AigRef, pir_node_ids: &[u32]) -> Result<(), String> {
         self.validate_live_node(node)?;
@@ -1009,6 +1051,26 @@ mod tests {
         assert_eq!(state.lookup_and_excluding(a, b, &excluded).unwrap(), ab);
         excluded.insert(ab.node);
         assert!(state.lookup_and_excluding(a, b, &excluded).is_none());
+        state.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn add_and_excluding_creates_duplicate_when_existing_is_excluded() {
+        let (g, a, b, _c, ab) = simple_graph();
+        let mut state = DynamicStructuralHash::new(g).unwrap();
+        let live_ands_before = state.live_and_count();
+        let excluded = BTreeSet::from([ab.node]);
+
+        let duplicate = state
+            .add_and_with_pir_node_ids_excluding(a, b, &[], &excluded)
+            .unwrap();
+
+        assert_ne!(duplicate.node, ab.node);
+        assert_eq!(state.live_and_count(), live_ands_before + 1);
+        assert_eq!(
+            state.lookup_and_excluding(a, b, &excluded).unwrap(),
+            duplicate
+        );
         state.check_invariants().unwrap();
     }
 
