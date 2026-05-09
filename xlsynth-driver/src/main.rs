@@ -42,6 +42,7 @@ mod aig_equiv;
 mod aig_eval;
 mod aig_ir_equiv;
 mod aig_stats;
+mod aig_tech_map;
 mod block2fn;
 mod common;
 mod dslx2ir;
@@ -1798,6 +1799,48 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new("aig-tech-map")
+                .about("Structurally maps an AIGER file to a gate-level netlist using INV/NAND2 cells")
+                .arg(
+                    clap::Arg::new("aig_input_file")
+                        .help("Input AIGER file (.aag or .aig)")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("liberty_proto")
+                        .long("liberty_proto")
+                        .help("Timing-enabled Liberty proto (.proto or .textproto); used to auto-select mapping cells")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("netlist_out")
+                        .long("netlist_out")
+                        .help("Path to write mapped netlist text (use '-' for stdout)")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("module_name")
+                        .long("module_name")
+                        .value_name("MODULE")
+                        .help("Override mapped module name")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("cell_policy")
+                        .long("cell_policy")
+                        .value_name("POLICY")
+                        .default_value("small-normal-vt")
+                        .value_parser(["small-normal-vt", "max-speed"])
+                        .help(
+                            "Auto-selection policy for INV/NAND2 cells: small-normal-vt or max-speed",
+                        )
+                        .action(ArgAction::Set),
+                ),
+        )
+        .subcommand(
             clap::Command::new("gv-sta")
                 .about("Runs basic combinational max-arrival STA on a gate-level netlist")
                 .arg(
@@ -3399,6 +3442,9 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("gv2aig", subm)) => {
             gv2aig::handle_gv2aig(subm);
+        }
+        Some(("aig-tech-map", subm)) => {
+            aig_tech_map::handle_aig_tech_map(subm);
         }
         Some(("gv-sta", subm)) => {
             gv_sta::handle_gv_sta(subm);

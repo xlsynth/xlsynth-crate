@@ -730,8 +730,10 @@ impl<R: Read + 'static> TokenScanner<R> {
 
     fn pop_identifier(&mut self, start: Pos) -> Token {
         let mut ident = String::new();
+        let mut escaped = false;
         // Check if it's an escaped identifier
         if self.peekb() == Some(b'\\') {
+            escaped = true;
             // Escaped identifier: leading backslash, terminated by whitespace.
             self.popb(); // Consume the backslash character.
             while let Some(b) = self.peekb() {
@@ -786,16 +788,17 @@ impl<R: Read + 'static> TokenScanner<R> {
             }
         }
         let limit = self.pos;
-        if let Some(kw) = Keyword::from_str(&ident) {
-            Token {
-                payload: TokenPayload::Keyword(kw),
-                span: Span { start, limit },
+        if !escaped {
+            if let Some(kw) = Keyword::from_str(&ident) {
+                return Token {
+                    payload: TokenPayload::Keyword(kw),
+                    span: Span { start, limit },
+                };
             }
-        } else {
-            Token {
-                payload: TokenPayload::Identifier(ident),
-                span: Span { start, limit },
-            }
+        }
+        Token {
+            payload: TokenPayload::Identifier(ident),
+            span: Span { start, limit },
         }
     }
 
@@ -3087,6 +3090,17 @@ wire [255:0] a;"#;
         let mut scanner = TokenScanner::from_str(input);
         let t1 = scanner.popt().expect("no scan error").unwrap();
         assert!(matches!(t1.payload, TokenPayload::Identifier(ref s) if s == "!@#$%^&*()-+="));
+        let t2 = scanner.popt().expect("no scan error").unwrap();
+        assert!(matches!(t2.payload, TokenPayload::Semi));
+        assert!(scanner.popt().expect("no scan error").is_none());
+    }
+
+    #[test]
+    fn test_token_scanner_escaped_identifier_named_like_keyword() {
+        let input = "\\module ;";
+        let mut scanner = TokenScanner::from_str(input);
+        let t1 = scanner.popt().expect("no scan error").unwrap();
+        assert!(matches!(t1.payload, TokenPayload::Identifier(ref s) if s == "module"));
         let t2 = scanner.popt().expect("no scan error").unwrap();
         assert!(matches!(t2.payload, TokenPayload::Semi));
         assert!(scanner.popt().expect("no scan error").is_none());

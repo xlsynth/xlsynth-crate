@@ -205,6 +205,33 @@ When `--liberty_proto` is omitted, the accepted Verilog subset is intentionally 
 
 `gv2ir` and `gv2block` are unchanged in this release and still require Liberty input.
 
+### `aig-tech-map`: AIGER to structural gate netlist
+
+Structurally maps an input AIGER graph to a cell-instance netlist using a simple decomposition:
+
+- each `And2` becomes `NAND2` followed by `INV`
+- negated operands and output negations are materialized with explicit `INV` instances
+
+The command requires a **timing-enabled** Liberty proto and auto-selects suitable `INV` and `NAND2` cells from that library.
+The mapping-mode design is described in
+[`xlsynth-g8r/docs/tech_mapper_design.md`](../xlsynth-g8r/docs/tech_mapper_design.md).
+
+```shell
+xlsynth-driver aig-tech-map my_design.aag \
+  --liberty_proto ~/timing-enabled.liberty.proto \
+  --netlist_out my_design.mapped.gv
+```
+
+Key flags:
+
+- `--liberty_proto <PATH>`: timing-enabled Liberty proto (`.proto` or `.textproto`). Required.
+- `--netlist_out <PATH>`: output mapped netlist path; use `-` for stdout. Required.
+- `--module_name <MODULE>`: optional override for emitted module name.
+- `--cell_policy <small-normal-vt|max-speed>`: auto-selection policy for INV/NAND2 cells (default: `small-normal-vt`).
+  `small-normal-vt` prefers VT class `0` and canonical/x1 cells for a stable baseline;
+  `max-speed` prefers the highest available VT class and then the highest
+  available drive strength.
+
 ### `gv-sta`: gate-level max-arrival STA
 
 Runs basic combinational max-arrival STA over a parsed gate-level netlist using Liberty timing arcs/tables.
@@ -285,7 +312,7 @@ Converts an XLS IR file to an `xlsynth_g8r::GateFn` (i.e. a gate-level netlist i
 - By default the pretty-printed GateFn is sent to **stdout**.
 - Additional artifacts can be emitted with flags:
   - `--bin-out <PATH>` – write the GateFn as a binary **.g8rbin** file (bincode-encoded).
-  - `--aiger-out <PATH>` – write the GateFn as AIGER for ingestion by tools like ABC:
+  - `--aiger-out <PATH>` – write the GateFn as AIGER:
     - use a `.aag` suffix for ASCII AIGER (`aag`)
     - use a `.aig` suffix for binary AIGER (`aig`)
   - `--stats-out <PATH>` – write a JSON summary of structural statistics.
@@ -359,14 +386,14 @@ xlsynth-driver g8r2v my_module.g8r \
 ### `aig2v`: AIGER to gate-level netlist
 
 Converts a combinational AIGER file (`.aag` or `.aig`) to a gate-level
-Verilog-like netlist on **stdout**. This is useful for materializing a post-ABC
-AIGER artifact as Verilog/SystemVerilog without lifting it through XLS IR.
+Verilog-like netlist on **stdout**. This is useful for materializing an AIGER
+artifact as Verilog/SystemVerilog without lifting it through XLS IR.
 
 The generated module name must be provided explicitly with `--module-name`
 because AIGER does not carry a module name. The emitted ports use the raw loaded
 AIGER interface: scalar AIGER inputs and outputs, with AIGER symbol-table names
-preserved when present. No port regrouping, IR lifting, ABC execution, or
-optimization is performed by default.
+preserved when present. No port regrouping, IR lifting, or optimization is
+performed by default.
 
 `--fn-type <FN_TYPE>` opts into a typed packed-port interpretation of the raw
 AIGER bitstream. The same function-type parser used by `aig2ir` and `aig-eval`
@@ -406,10 +433,13 @@ Flags:
 Note: AIGER latch support is not implemented in the underlying loader, so
 sequential AIGER files with latches are rejected.
 
+AIGER artifacts may come from other tools, such as ABC, before being passed to
+`aig2v`; this command only consumes the AIGER file it is given.
+
 Example with clocked input/output flops:
 
 ```shell
-xlsynth-driver aig2v postabc.aig \
+xlsynth-driver aig2v design.aig \
   --module-name add_bf16 \
   --add-clk-port clk \
   --fn-type '(bits[16], bits[16]) -> bits[16]' \
@@ -420,7 +450,7 @@ xlsynth-driver aig2v postabc.aig \
 Combinational example:
 
 ```shell
-xlsynth-driver aig2v postabc.aig \
+xlsynth-driver aig2v design.aig \
   --module-name add_bf16 > add_bf16_comb.v
 ```
 
