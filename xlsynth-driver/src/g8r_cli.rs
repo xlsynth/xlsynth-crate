@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use clap::ArgMatches;
+use xlsynth_g8r::aig::cut_db_rewrite::CutDbRewriteMode;
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::process_ir_path;
 use xlsynth_g8r::process_ir_path::{CanonicalG8rOptions, DEFAULT_MAX_FRAIG_SIM_SAMPLES};
@@ -114,6 +115,20 @@ fn parse_gate_formal_backend_or_exit(matches: &ArgMatches) -> GateFormalBackend 
     }
 }
 
+fn parse_cut_db_rewrite_mode_or_exit(matches: &ArgMatches) -> CutDbRewriteMode {
+    let value = matches
+        .get_one::<String>("cut_db_rewrite_mode")
+        .map(|s| s.as_str())
+        .unwrap_or(CutDbRewriteMode::DEFAULT_CLI_VALUE);
+    match CutDbRewriteMode::parse(value) {
+        Some(mode) => mode,
+        None => {
+            eprintln!("Invalid --cut-db-rewrite-mode: {:?}", value);
+            std::process::exit(1);
+        }
+    }
+}
+
 pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> CanonicalG8rOptions {
     let defaults = CanonicalG8rOptions::default();
     let fold = parse_bool(matches, "fold", defaults.fold);
@@ -159,6 +174,12 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> CanonicalG8rOptions
         "graph_logical_effort_beta2",
         defaults.graph_logical_effort_beta2,
     );
+    let cut_db_enable_large_cone_rewrite = parse_bool(
+        matches,
+        "cut-db-enable-large-cone-rewrite",
+        defaults.cut_db_enable_large_cone_rewrite,
+    );
+    let cut_db_rewrite_mode = parse_cut_db_rewrite_mode_or_exit(matches);
     let fraig_max_iterations =
         parse_optional_usize_or_exit(matches, "fraig_max_iterations", "--fraig-max-iterations");
     let max_fraig_sim_samples = parse_usize_or_exit(
@@ -184,6 +205,8 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> CanonicalG8rOptions
         compute_graph_logical_effort,
         graph_logical_effort_beta1,
         graph_logical_effort_beta2,
+        cut_db_enable_large_cone_rewrite,
+        cut_db_rewrite_mode,
         fraig_max_iterations,
         max_fraig_sim_samples,
         gate_formal_backend,

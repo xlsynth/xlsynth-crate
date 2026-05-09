@@ -159,6 +159,24 @@ path = "fuzz_targets/fuzz_dslx_stitch_pipeline_names.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "fuzz_dynamic_structural_hash"
+path = "fuzz_targets/fuzz_dynamic_structural_hash.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_dynamic_depth"
+path = "fuzz_targets/fuzz_dynamic_depth.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_dynamic_depth_cut_replacement"
+path = "fuzz_targets/fuzz_dynamic_depth_cut_replacement.rs"
+test = false
+doc = false
+
 [features]
 # No default optional features; required solver integrations are always enabled via dependency specification above.
 default = []

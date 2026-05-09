@@ -5,6 +5,8 @@ pub mod aig_simplify;
 pub mod bulk_replace;
 pub mod cut_db_rewrite;
 pub mod dce;
+pub mod dynamic_depth;
+pub mod dynamic_structural_hash;
 pub mod fanout;
 pub mod find_structures;
 pub mod fraig;

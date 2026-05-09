@@ -1,0 +1,344 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Benchmarks for the dynamic depth state used by cut-db rewrites.
+
+use std::time::Duration;
+
+use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use rand::{Rng, SeedableRng};
+use rand_pcg::Pcg64Mcg;
+use xlsynth_g8r::aig::dynamic_depth::DynamicDepthState;
+use xlsynth_g8r::aig::dynamic_structural_hash::DynamicStructuralHash;
+use xlsynth_g8r::aig::{AigBitVector, AigOperand, AigRef, GateFn};
+use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
+
+#[derive(Clone)]
+struct RandomGraphWorkload {
+    gate_fn: GateFn,
+    depth_queries: Vec<AigRef>,
+    fanout_queries: Vec<AigRef>,
+}
+
+#[derive(Clone)]
+struct EditGadget {
+    c: AigOperand,
+    d: AigOperand,
+    e: AigOperand,
+    g: AigOperand,
+    ab: AigOperand,
+    cd: AigOperand,
+    root: AigOperand,
+    root_duplicate: AigOperand,
+    move_node: AigOperand,
+    output_new: AigOperand,
+    output_bit_index: usize,
+}
+
+#[derive(Clone)]
+struct CutdbLikeWorkload {
+    gate_fn: GateFn,
+    gadgets: Vec<EditGadget>,
+}
+
+fn maybe_negate(rng: &mut Pcg64Mcg, operand: AigOperand) -> AigOperand {
+    if rng.gen_bool(0.2) {
+        operand.negate()
+    } else {
+        operand
+    }
+}
+
+fn choose_biased_operand(
+    rng: &mut Pcg64Mcg,
+    operands: &[AigOperand],
+    recent_window: usize,
+) -> AigOperand {
+    let recent = operands.len().min(recent_window);
+    let index = if recent != 0 && rng.gen_bool(0.75) {
+        operands.len() - recent + rng.gen_range(0..recent)
+    } else {
+        rng.gen_range(0..operands.len())
+    };
+    maybe_negate(rng, operands[index])
+}
+
+fn build_random_graph_workload(input_count: usize, and_count: usize) -> RandomGraphWorkload {
+    let mut rng = Pcg64Mcg::seed_from_u64(0xd3b7_5eED_d15c_a11d);
+    let mut builder = GateBuilder::new(
+        format!("dynamic_depth_random_{and_count}"),
+        GateBuilderOptions::no_opt(),
+    );
+
+    let inputs = builder.add_input("in".to_string(), input_count);
+    let mut operands = inputs
+        .iter_lsb_to_msb()
+        .copied()
+        .collect::<Vec<AigOperand>>();
+    let mut and_nodes = Vec::<AigRef>::with_capacity(and_count);
+
+    for _ in 0..and_count {
+        let lhs = choose_biased_operand(&mut rng, &operands, 256);
+        let rhs = choose_biased_operand(&mut rng, &operands, 256);
+        let result = builder.add_and_binary(lhs, rhs);
+        and_nodes.push(result.node);
+        operands.push(result);
+    }
+
+    let output_bits = (0..512)
+        .map(|_| choose_biased_operand(&mut rng, &operands, 2048))
+        .collect::<Vec<_>>();
+    builder.add_output(
+        "out".to_string(),
+        AigBitVector::from_lsb_is_index_0(&output_bits),
+    );
+    let gate_fn = builder.build();
+
+    let depth_queries = and_nodes
+        .iter()
+        .step_by((and_nodes.len() / 2048).max(1))
+        .copied()
+        .take(2048)
+        .collect::<Vec<_>>();
+    let fanout_queries = depth_queries.clone();
+
+    RandomGraphWorkload {
+        gate_fn,
+        depth_queries,
+        fanout_queries,
+    }
+}
+
+fn build_cutdb_like_workload(gadget_count: usize) -> CutdbLikeWorkload {
+    let mut rng = Pcg64Mcg::seed_from_u64(0xd3b7_db17_5a57_eD17);
+    let mut builder = GateBuilder::new(
+        format!("dynamic_depth_cutdb_like_{gadget_count}"),
+        GateBuilderOptions::no_opt(),
+    );
+    let inputs = builder.add_input("in".to_string(), 512);
+    let input_operands = inputs
+        .iter_lsb_to_msb()
+        .copied()
+        .collect::<Vec<AigOperand>>();
+    let mut output_bits = Vec::with_capacity(gadget_count);
+    let mut gadgets = Vec::with_capacity(gadget_count);
+
+    for output_bit_index in 0..gadget_count {
+        let choose_input = |rng: &mut Pcg64Mcg| {
+            let index = rng.gen_range(0..input_operands.len());
+            maybe_negate(rng, input_operands[index])
+        };
+        let a = choose_input(&mut rng);
+        let b = choose_input(&mut rng);
+        let c = choose_input(&mut rng);
+        let d = choose_input(&mut rng);
+        let e = choose_input(&mut rng);
+        let f = choose_input(&mut rng);
+        let g = choose_input(&mut rng);
+
+        let ab = builder.add_and_binary(a, b);
+        let cd = builder.add_and_binary(c, d);
+        let root = builder.add_and_binary(ab, cd);
+        let root_duplicate = builder.add_and_binary(cd, ab);
+        let _user = builder.add_and_binary(root, e);
+        let _user_duplicate = builder.add_and_binary(root_duplicate, e);
+        let move_node = builder.add_and_binary(a, f);
+        let _move_target_duplicate = builder.add_and_binary(a, g);
+        let output_old = builder.add_and_binary(b, f);
+        let output_new = builder.add_and_binary(b, g);
+
+        output_bits.push(output_old);
+        gadgets.push(EditGadget {
+            c,
+            d,
+            e,
+            g,
+            ab,
+            cd,
+            root,
+            root_duplicate,
+            move_node,
+            output_new,
+            output_bit_index,
+        });
+    }
+
+    builder.add_output(
+        "out".to_string(),
+        AigBitVector::from_lsb_is_index_0(&output_bits),
+    );
+
+    let gate_fn = builder.build();
+    CutdbLikeWorkload { gate_fn, gadgets }
+}
+
+fn depth_queries(
+    hash: &DynamicStructuralHash,
+    state: &DynamicDepthState,
+    queries: &[AigRef],
+) -> usize {
+    queries
+        .iter()
+        .map(|node| {
+            state.forward_depth(hash, *node).unwrap_or(0)
+                + state.backward_depth(hash, *node).unwrap_or(usize::MAX / 4)
+        })
+        .sum::<usize>()
+}
+
+fn fanout_queries(hash: &DynamicStructuralHash, queries: &[AigRef]) -> usize {
+    queries
+        .iter()
+        .map(|node| hash.fanout_count(*node))
+        .sum::<usize>()
+}
+
+fn refresh_after_edit(
+    hash: &DynamicStructuralHash,
+    state: &mut DynamicDepthState,
+    refresh_each_edit: bool,
+) {
+    if refresh_each_edit {
+        state.refresh_depths(hash).unwrap();
+    }
+}
+
+fn run_cutdb_like_trace(
+    hash: &mut DynamicStructuralHash,
+    state: &mut DynamicDepthState,
+    gadgets: &[EditGadget],
+    refresh_each_edit: bool,
+) {
+    for gadget in gadgets {
+        black_box(state.forward_depth(hash, gadget.root.node));
+        black_box(state.backward_depth(hash, gadget.root.node));
+        black_box(state.forward_depth(hash, gadget.ab.node));
+        black_box(state.backward_depth(hash, gadget.cd.node));
+        black_box(hash.add_and(gadget.d, gadget.c).unwrap());
+        refresh_after_edit(hash, state, refresh_each_edit);
+        black_box(hash.add_and(gadget.ab.negate(), gadget.e).unwrap());
+        refresh_after_edit(hash, state, refresh_each_edit);
+        black_box(hash.add_and(gadget.c.negate(), gadget.g).unwrap());
+        refresh_after_edit(hash, state, refresh_each_edit);
+        hash.move_fanin_edge(gadget.move_node.node, 1, gadget.g)
+            .unwrap();
+        refresh_after_edit(hash, state, refresh_each_edit);
+        hash.move_output_edge(0, gadget.output_bit_index, gadget.output_new)
+            .unwrap();
+        refresh_after_edit(hash, state, refresh_each_edit);
+        hash.replace_node_with_operand(gadget.root.node, gadget.root_duplicate)
+            .unwrap();
+        refresh_after_edit(hash, state, refresh_each_edit);
+        black_box(state.max_output_node_depth(hash).unwrap());
+    }
+    if !refresh_each_edit {
+        state.refresh_depths(hash).unwrap();
+    }
+    black_box(hash.live_and_count());
+}
+
+fn run_cutdb_like_trace_batched(
+    hash: &mut DynamicStructuralHash,
+    state: &mut DynamicDepthState,
+    gadgets: &[EditGadget],
+) {
+    run_cutdb_like_trace(hash, state, gadgets, /* refresh_each_edit= */ false);
+    black_box(state.max_output_node_depth(hash).unwrap());
+}
+
+fn dynamic_depth_large_random_graph_benchmark(c: &mut Criterion) {
+    let mut group = c.benchmark_group("dynamic_depth_large_random_graph");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(5));
+
+    for (input_count, and_count) in [(256usize, 10_000usize), (512, 100_000)] {
+        let workload = build_random_graph_workload(input_count, and_count);
+        group.bench_with_input(
+            BenchmarkId::new("build_index", and_count),
+            &workload,
+            |b, w| {
+                b.iter_batched(
+                    || w.gate_fn.clone(),
+                    |gate_fn| {
+                        let hash = DynamicStructuralHash::new(black_box(gate_fn)).unwrap();
+                        let state = DynamicDepthState::new(&hash).unwrap();
+                        black_box(state.max_output_node_depth(&hash).unwrap());
+                    },
+                    BatchSize::LargeInput,
+                );
+            },
+        );
+
+        let hash = DynamicStructuralHash::new(workload.gate_fn.clone()).unwrap();
+        let state = DynamicDepthState::new(&hash).unwrap();
+        group.bench_with_input(
+            BenchmarkId::new("depth_queries", and_count),
+            &workload,
+            |b, w| {
+                b.iter(|| black_box(depth_queries(&hash, &state, &w.depth_queries)));
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("fanout_count", and_count),
+            &workload,
+            |b, w| {
+                b.iter(|| black_box(fanout_queries(&hash, &w.fanout_queries)));
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn dynamic_depth_cutdb_like_edit_benchmark(c: &mut Criterion) {
+    let mut group = c.benchmark_group("dynamic_depth_cutdb_like_edits");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(5));
+
+    for gadget_count in [100usize, 1_000] {
+        let workload = build_cutdb_like_workload(gadget_count);
+        group.bench_with_input(
+            BenchmarkId::new("edit_trace_unbatched", gadget_count),
+            &workload,
+            |b, w| {
+                b.iter_batched(
+                    || {
+                        let hash = DynamicStructuralHash::new(w.gate_fn.clone()).unwrap();
+                        let depth = DynamicDepthState::new(&hash).unwrap();
+                        (hash, depth)
+                    },
+                    |(mut hash, mut depth)| {
+                        run_cutdb_like_trace(
+                            &mut hash, &mut depth, &w.gadgets, /* refresh_each_edit= */ true,
+                        )
+                    },
+                    BatchSize::LargeInput,
+                );
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("edit_trace_batched", gadget_count),
+            &workload,
+            |b, w| {
+                b.iter_batched(
+                    || {
+                        let hash = DynamicStructuralHash::new(w.gate_fn.clone()).unwrap();
+                        let depth = DynamicDepthState::new(&hash).unwrap();
+                        (hash, depth)
+                    },
+                    |(mut hash, mut depth)| {
+                        run_cutdb_like_trace_batched(&mut hash, &mut depth, &w.gadgets)
+                    },
+                    BatchSize::LargeInput,
+                );
+            },
+        );
+    }
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    dynamic_depth_large_random_graph_benchmark,
+    dynamic_depth_cutdb_like_edit_benchmark
+);
+criterion_main!(benches);

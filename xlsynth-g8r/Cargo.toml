@@ -117,3 +117,11 @@ harness = false
 [[bench]]
 name = "ir2gates_mul_width_bench"
 harness = false
+
+[[bench]]
+name = "dynamic_structural_hash_bench"
+harness = false
+
+[[bench]]
+name = "dynamic_depth_bench"
+harness = false

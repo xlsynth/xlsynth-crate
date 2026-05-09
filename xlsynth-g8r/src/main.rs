@@ -4,9 +4,9 @@ use std::fs;
 
 use clap::Parser;
 use prost::Message;
+use xlsynth_g8r::aig::cut_db_rewrite::CutDbRewriteMode;
 use xlsynth_g8r::cut_db_cli_defaults::{
-    CUT_DB_REWRITE_MAX_CANDIDATE_EVALS_PER_ROUND_CLI, CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
-    CUT_DB_REWRITE_MAX_ITERATIONS_CLI, CUT_DB_REWRITE_MAX_REWRITES_PER_ROUND_CLI,
+    CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI, CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
 };
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::process_ir_path::{
@@ -80,6 +80,14 @@ struct Args {
     #[arg(action = clap::ArgAction::Set)]
     graph_logical_effort_beta2: f64,
 
+    /// Cut-db rewrite mode: delay, balanced, or area.
+    #[arg(
+        long = "cut-db-rewrite-mode",
+        default_value = CutDbRewriteMode::DEFAULT_CLI_VALUE,
+        value_parser = clap::builder::PossibleValuesParser::new(CutDbRewriteMode::CLI_VALUES)
+    )]
+    cut_db_rewrite_mode: String,
+
     #[arg(long)]
     #[arg(action = clap::ArgAction::Set)]
     result_proto: Option<String>,
@@ -93,6 +101,8 @@ fn main() {
     let args = Args::parse();
     let gate_formal_backend = GateFormalBackend::parse(&args.gate_formal_backend)
         .expect("validated by clap value_parser");
+    let cut_db_rewrite_mode =
+        CutDbRewriteMode::parse(&args.cut_db_rewrite_mode).expect("validated by clap value_parser");
     let cut_db = Some(xlsynth_g8r::cut_db::loader::CutDb::load_default());
 
     let options = Options {
@@ -120,10 +130,9 @@ fn main() {
         gate_formal_backend,
         cut_db,
         cut_db_rewrite_max_iterations: CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
-        cut_db_rewrite_max_candidate_evals_per_round:
-            CUT_DB_REWRITE_MAX_CANDIDATE_EVALS_PER_ROUND_CLI,
-        cut_db_rewrite_max_rewrites_per_round: CUT_DB_REWRITE_MAX_REWRITES_PER_ROUND_CLI,
         cut_db_rewrite_max_cuts_per_node: CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI,
+        cut_db_enable_large_cone_rewrite: true,
+        cut_db_rewrite_mode,
         prepared_ir_out: None,
     };
     let input_path = std::path::Path::new(&args.input);
