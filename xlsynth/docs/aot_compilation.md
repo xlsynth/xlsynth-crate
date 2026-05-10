@@ -38,11 +38,13 @@ The `xlsynth` AOT framework consists of the following pieces:
   the XLS code and create the generated Rust code at build time.
 - Add `xlsynth-aot-runtime` as a normal dependency of the crate that includes
   the generated wrapper source.
-- Provide the XLS-owned standalone runtime archive to the build through
-  `XLSYNTH_ARTIFACT_CONFIG` or `XLS_AOT_RUNTIME_PATH`. Bazel consumers normally
-  receive `XLSYNTH_ARTIFACT_CONFIG` from the selected `rules_xlsynth` runtime
-  bundle; direct Cargo consumers can point `XLS_AOT_RUNTIME_PATH` at the
-  same-version `libxls_aot_runtime.a` release artifact.
+- Provide the XLS-owned standalone runtime archive and its producer-owned link
+  config to the build through `XLSYNTH_ARTIFACT_CONFIG` or the paired
+  `XLS_AOT_RUNTIME_PATH` / `XLS_AOT_RUNTIME_LINK_CONFIG_PATH` environment
+  variables. Bazel consumers normally receive `XLSYNTH_ARTIFACT_CONFIG` from
+  the selected `rules_xlsynth` runtime bundle; direct Cargo consumers can point
+  the paired variables at the same-version `libxls_aot_runtime.a` and
+  `libxls_aot_runtime_link.toml` release artifacts.
 - Add `mod`s in the project code (e.g. `lib.rs`) that pull in the generated Rust
   code via `include!`.
 - Call the exported API to create the AOT object and invoke its `run` method.
