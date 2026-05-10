@@ -223,9 +223,7 @@ def ensure_versioned_dso_alias(output_dir: str, version: str, platform: str) -> 
     if os.path.lexists(versioned_path):
         try:
             if os.path.samefile(versioned_path, unversioned_path):
-                print(
-                    f"DSO compatibility alias already exists: {versioned_filename}"
-                )
+                print(f"DSO compatibility alias already exists: {versioned_filename}")
                 return
         except FileNotFoundError:
             pass
