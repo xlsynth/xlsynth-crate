@@ -428,6 +428,87 @@ fn gatify_array_index(
     gatify_array_index_oob_one_hot(gb, array_ty, array_bits, index_bits)
 }
 
+fn aig_bit_vectors_equal(lhs: &AigBitVector, rhs: &AigBitVector) -> bool {
+    lhs.get_bit_count() == rhs.get_bit_count()
+        && lhs
+            .iter_lsb_to_msb()
+            .zip(rhs.iter_lsb_to_msb())
+            .all(|(lhs_bit, rhs_bit)| lhs_bit == rhs_bit)
+}
+
+fn aig_bit_vector_is_zero(gb: &GateBuilder, bits: &AigBitVector) -> bool {
+    bits.iter_lsb_to_msb().all(|bit| gb.is_known_false(*bit))
+}
+
+struct RepeatedArrayIndexCaseGroup {
+    payload: AigBitVector,
+    selectors: Vec<AigOperand>,
+}
+
+/// Lowers repeated array-index payloads by OR-ing their decode predicates
+/// before masking the shared payload.
+fn gatify_grouped_array_index_if_profitable(
+    gb: &mut GateBuilder,
+    selector_bits: &AigBitVector,
+    cases: &[AigBitVector],
+) -> Option<AigBitVector> {
+    const MIN_CASES: usize = 16;
+    const MIN_REDUCTION_FACTOR: usize = 2;
+
+    if cases.is_empty()
+        || cases.len() < MIN_CASES
+        || selector_bits.get_bit_count() != cases.len()
+        || cases[0].get_bit_count() < 2
+    {
+        return None;
+    }
+
+    let output_bit_count = cases[0].get_bit_count();
+    let mut groups: Vec<RepeatedArrayIndexCaseGroup> = Vec::new();
+    for (case_index, case_bits) in cases.iter().enumerate() {
+        assert_eq!(
+            case_bits.get_bit_count(),
+            output_bit_count,
+            "all array index cases must have the same bit count"
+        );
+        let selector = *selector_bits.get_lsb(case_index);
+        if let Some(group) = groups
+            .iter_mut()
+            .find(|group| aig_bit_vectors_equal(&group.payload, case_bits))
+        {
+            group.selectors.push(selector);
+        } else {
+            groups.push(RepeatedArrayIndexCaseGroup {
+                payload: case_bits.clone(),
+                selectors: vec![selector],
+            });
+        }
+    }
+
+    if groups.len().saturating_mul(MIN_REDUCTION_FACTOR) > cases.len() {
+        return None;
+    }
+
+    let mut masked_groups = Vec::new();
+    for group in groups {
+        if aig_bit_vector_is_zero(gb, &group.payload) {
+            continue;
+        }
+        let group_selected = gb.add_or_nary(&group.selectors, ReductionKind::Tree);
+        if gb.is_known_false(group_selected) {
+            continue;
+        }
+        let mask = gb.replicate(group_selected, output_bit_count);
+        masked_groups.push(gb.add_and_vec(&mask, &group.payload));
+    }
+
+    if masked_groups.is_empty() {
+        Some(AigBitVector::zeros(output_bit_count))
+    } else {
+        Some(gb.add_or_vec_nary(&masked_groups, ReductionKind::Tree))
+    }
+}
+
 /// Lowers an in-bounds array index with an exact one-hot selection.
 fn gatify_array_index_exact(
     gb: &mut GateBuilder,
@@ -441,6 +522,9 @@ fn gatify_array_index_exact(
     for i in 0..array_ty.element_count {
         let case_bits = array_bits.get_lsb_slice(i * element_bit_count, element_bit_count);
         cases.push(case_bits);
+    }
+    if let Some(grouped) = gatify_grouped_array_index_if_profitable(gb, &index_decoded, &cases) {
+        return grouped;
     }
     gatify_one_hot_select(gb, &index_decoded, &cases)
 }
@@ -466,6 +550,9 @@ fn gatify_array_index_oob_one_hot(
         cases.push(case_bits);
     }
     cases.push(cases.last().unwrap().clone());
+    if let Some(grouped) = gatify_grouped_array_index_if_profitable(gb, &one_hot_selector, &cases) {
+        return grouped;
+    }
     gatify_one_hot_select(gb, &one_hot_selector, &cases)
 }
 
@@ -6496,6 +6583,74 @@ top fn cone(leaf_7: bits[5], leaf_9: bits[33]) -> bits[1] {
         get_summary_stats(&gb.build())
     }
 
+    fn repeated_literal_array_bits(
+        gb: &mut GateBuilder,
+        array_len: usize,
+        element_width: usize,
+        distinct_values: usize,
+    ) -> AigBitVector {
+        assert!(distinct_values > 0);
+        let mut bits = Vec::with_capacity(array_len * element_width);
+        for i in 0..array_len {
+            let value_bits = gb.add_literal(
+                &xlsynth::IrBits::make_ubits(element_width, (i % distinct_values) as u64).unwrap(),
+            );
+            bits.extend(value_bits.iter_lsb_to_msb().copied());
+        }
+        AigBitVector::from_lsb_is_index_0(&bits)
+    }
+
+    fn get_repeated_literal_array_index_exact_stats(
+        array_len: usize,
+        element_width: usize,
+        index_width: usize,
+        distinct_values: usize,
+    ) -> SummaryStats {
+        let array_ty = ir::ArrayTypeData {
+            element_type: Box::new(ir::Type::Bits(element_width)),
+            element_count: array_len,
+        };
+
+        let mut gb = GateBuilder::new(
+            format!(
+                "array_index_repeated_literal_n{}_w{}",
+                array_len, element_width
+            ),
+            GateBuilderOptions::opt(),
+        );
+        let array_bits =
+            repeated_literal_array_bits(&mut gb, array_len, element_width, distinct_values);
+        let index_bits = gb.add_input("idx".to_string(), index_width);
+        let result = super::gatify_array_index_exact(&mut gb, &array_ty, &array_bits, &index_bits);
+        gb.add_output("result".to_string(), result);
+        get_summary_stats(&gb.build())
+    }
+
+    fn get_repeated_literal_array_index_one_hot_stats(
+        array_len: usize,
+        element_width: usize,
+        index_width: usize,
+        distinct_values: usize,
+    ) -> SummaryStats {
+        let mut gb = GateBuilder::new(
+            format!(
+                "array_index_repeated_literal_one_hot_n{}_w{}",
+                array_len, element_width
+            ),
+            GateBuilderOptions::opt(),
+        );
+        let array_bits =
+            repeated_literal_array_bits(&mut gb, array_len, element_width, distinct_values);
+        let index_bits = gb.add_input("idx".to_string(), index_width);
+        let selector = super::gatify_decode(&mut gb, array_len, &index_bits);
+        let cases = (0..array_len)
+            .map(|i| array_bits.get_lsb_slice(i * element_width, element_width))
+            .collect::<Vec<_>>();
+        let result = crate::ir2gate_utils::gatify_one_hot_select(&mut gb, &selector, &cases);
+        gb.add_output("result".to_string(), result);
+        get_summary_stats(&gb.build())
+    }
+
     fn get_1b_array_index_near_pow2_padded_stats(
         array_len: usize,
         index_width: usize,
@@ -6719,6 +6874,25 @@ top fn cone(leaf_7: bits[5], leaf_9: bits[33]) -> bits[1] {
             "expected naive padded near-pow2 clamping to reduce depth after optimized compares in g8r: {:?} vs {:?}",
             padded_27,
             oob_27
+        );
+    }
+
+    #[test]
+    fn test_repeated_literal_array_index_groups_cases() {
+        let grouped = get_repeated_literal_array_index_exact_stats(
+            /* array_len= */ 32, /* element_width= */ 8, /* index_width= */ 5,
+            /* distinct_values= */ 4,
+        );
+        let one_hot = get_repeated_literal_array_index_one_hot_stats(
+            /* array_len= */ 32, /* element_width= */ 8, /* index_width= */ 5,
+            /* distinct_values= */ 4,
+        );
+
+        assert!(
+            grouped.live_nodes < one_hot.live_nodes,
+            "expected repeated literal grouping to reduce live nodes: grouped={:?} one_hot={:?}",
+            grouped,
+            one_hot
         );
     }
 
