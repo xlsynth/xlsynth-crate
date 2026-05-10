@@ -63,6 +63,7 @@ fuzz_target!(|sample: FuzzSample| {
             enable_rewrite_nary_add: false,
             enable_rewrite_mask_low: false,
             array_index_lowering_strategy: Default::default(),
+            unsafe_gatify_gate_operation: false,
         },
     ) {
         Ok(output) => output,

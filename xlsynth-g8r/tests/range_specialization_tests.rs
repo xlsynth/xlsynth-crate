@@ -50,6 +50,7 @@ top fn main(a0: bits[8] id=1, a1: bits[8] id=2, a2: bits[8] id=3, a3: bits[8] id
             enable_rewrite_nary_add: false,
             enable_rewrite_mask_low: false,
             array_index_lowering_strategy: Default::default(),
+            unsafe_gatify_gate_operation: false,
         },
     )
     .unwrap();
@@ -69,6 +70,7 @@ top fn main(a0: bits[8] id=1, a1: bits[8] id=2, a2: bits[8] id=3, a3: bits[8] id
             enable_rewrite_nary_add: false,
             enable_rewrite_mask_low: false,
             array_index_lowering_strategy: Default::default(),
+            unsafe_gatify_gate_operation: false,
         },
     )
     .unwrap();

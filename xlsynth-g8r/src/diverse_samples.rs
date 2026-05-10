@@ -282,6 +282,7 @@ pub fn select_ir_diverse_samples_with_options(
                     enable_rewrite_mask_low: false,
                     adder_mapping: AdderMapping::default(),
                     mul_adder_mapping: None,
+                    unsafe_gatify_gate_operation: false,
                     aug_opt: Default::default(),
                 },
             ) {

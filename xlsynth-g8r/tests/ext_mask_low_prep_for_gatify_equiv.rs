@@ -211,6 +211,7 @@ fn gatify_for_test(pir_fn: &ir::Fn, enable_rewrite_mask_low: bool) -> xlsynth_g8
             enable_rewrite_nary_add: false,
             enable_rewrite_mask_low,
             array_index_lowering_strategy: Default::default(),
+            unsafe_gatify_gate_operation: false,
         },
     )
     .expect("gatify")

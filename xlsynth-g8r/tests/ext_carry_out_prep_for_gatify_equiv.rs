@@ -108,6 +108,7 @@ top fn cone(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
             enable_rewrite_nary_add: false,
             enable_rewrite_mask_low: false,
             array_index_lowering_strategy: Default::default(),
+            unsafe_gatify_gate_operation: false,
         },
     )
     .expect("gatify");
@@ -161,6 +162,7 @@ fn carry_out_rewrite_sweep_up_to_4_bits_only_triggers_for_msb_slice() {
                     enable_rewrite_nary_add: false,
                     enable_rewrite_mask_low: false,
                     array_index_lowering_strategy: Default::default(),
+                    unsafe_gatify_gate_operation: false,
                 },
             )
             .expect("gatify");
@@ -216,6 +218,7 @@ top fn cone(a: bits[9] id=1, b: bits[9] id=2) -> bits[1] {
             enable_rewrite_nary_add: false,
             enable_rewrite_mask_low: false,
             array_index_lowering_strategy: Default::default(),
+            unsafe_gatify_gate_operation: false,
         },
     )
     .expect("gatify");
@@ -272,6 +275,7 @@ top fn cone(p0: bits[9] id=1, p1: bits[9] id=2) -> bits[1] {
             enable_rewrite_nary_add: false,
             enable_rewrite_mask_low: false,
             array_index_lowering_strategy: Default::default(),
+            unsafe_gatify_gate_operation: false,
         },
     )
     .expect("gatify");

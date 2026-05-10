@@ -139,6 +139,7 @@ fn stats_for_ext_mask_low(output_width: usize) -> SummaryStats {
             enable_rewrite_nary_add: false,
             enable_rewrite_mask_low: false,
             array_index_lowering_strategy: Default::default(),
+            unsafe_gatify_gate_operation: false,
         },
     )
     .expect("gatify")
@@ -160,6 +161,7 @@ fn stats_for_ir_text_via_ir2gates(ir_text: &str, enable_rewrite_mask_low: bool) 
             enable_rewrite_mask_low,
             adder_mapping: AdderMapping::default(),
             mul_adder_mapping: None,
+            unsafe_gatify_gate_operation: false,
             aug_opt: Default::default(),
         },
     )

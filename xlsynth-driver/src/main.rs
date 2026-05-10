@@ -348,6 +348,10 @@ impl AppExt for clap::Command {
                 "enable-rewrite-mask-low",
                 "Enable mask-low rewrite in prep_for_gatify (introduces ext_mask_low)",
             )
+            .add_bool_arg(
+                "unsafe-gatify-gate-operation",
+                "Opt into lowering XLS gate operations by masking the value with the predicate",
+            )
             .arg(
                 clap::Arg::new("adder_mapping")
                     .long("adder-mapping")

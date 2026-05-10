@@ -52,6 +52,11 @@ struct Args {
     #[arg(action = clap::ArgAction::Set)]
     check_equivalence: bool,
 
+    /// Whether to opt into lowering XLS gate ops.
+    #[arg(long = "unsafe-gatify-gate-operation", default_value_t = false)]
+    #[arg(action = clap::ArgAction::Set)]
+    unsafe_gatify_gate_operation: bool,
+
     /// Whether to emit the netlist.
     #[arg(long, default_value_t = false)]
     #[arg(action = clap::ArgAction::Set)]
@@ -115,6 +120,7 @@ fn main() {
         enable_rewrite_mask_low: false,
         adder_mapping: AdderMapping::default(),
         mul_adder_mapping: None,
+        unsafe_gatify_gate_operation: args.unsafe_gatify_gate_operation,
         fraig: args.fraig,
         emit_independent_op_stats: false,
         ir_top: None,

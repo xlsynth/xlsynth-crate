@@ -51,6 +51,7 @@ top fn main(x: bits[8] id=1) -> bits[8] {
             enable_rewrite_nary_add: false,
             enable_rewrite_mask_low: false,
             array_index_lowering_strategy: Default::default(),
+            unsafe_gatify_gate_operation: false,
         },
     )
     .unwrap();
@@ -69,6 +70,7 @@ top fn main(x: bits[8] id=1) -> bits[8] {
             enable_rewrite_nary_add: false,
             enable_rewrite_mask_low: false,
             array_index_lowering_strategy: Default::default(),
+            unsafe_gatify_gate_operation: false,
         },
     )
     .unwrap();

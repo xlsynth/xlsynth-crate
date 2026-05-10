@@ -109,6 +109,7 @@ fn gatify_with_nary_rewrite(pir_fn: &ir::Fn) -> (GateFn, SummaryStats) {
             enable_rewrite_nary_add: true,
             enable_rewrite_mask_low: false,
             array_index_lowering_strategy: Default::default(),
+            unsafe_gatify_gate_operation: false,
         },
     )
     .expect("gatify");
