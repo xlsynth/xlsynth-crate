@@ -3,13 +3,22 @@
 use std::fs;
 use std::path::Path;
 
+use xlsynth::aot_entrypoint_metadata::get_entrypoint_metadata;
+use xlsynth::{AotEntrypointDescriptor, AotRunner};
 use xlsynth_aot_test_crate::{
-    add_inputs_aot, add_one_aot, compound_shapes_aot, empty_tuple_aot, large_array_tuple_aot,
-    trace_assert_aot, wide_bits_tuple_aot, wide_sizes_aot,
+    add_inputs_aot, add_one_aot, assert_pair_aot, compound_shapes_aot, empty_tuple_aot,
+    large_array_tuple_aot, wide_bits_tuple_aot, wide_counted_for_aot, wide_sizes_aot,
 };
 use xlsynth_test_helpers::compare_golden_text;
 
-fn generated_wrapper_golden_cases() -> [(&'static str, &'static str); 18] {
+unsafe extern "C" {
+    #[link_name = "__xlsynth_standalone_add_one"]
+    fn standalone_add_one_symbol();
+    #[link_name = "__xlsynth_standalone_assert_pair"]
+    fn standalone_assert_pair_symbol();
+}
+
+fn generated_wrapper_golden_cases() -> [(&'static str, &'static str); 19] {
     [
         (
             env!("XLSYNTH_AOT_ADD_ONE_RS"),
@@ -40,8 +49,12 @@ fn generated_wrapper_golden_cases() -> [(&'static str, &'static str); 18] {
             "tests/goldens/wide_bits_tuple_wrapper.golden.txt",
         ),
         (
-            env!("XLSYNTH_AOT_TRACE_ASSERT_RS"),
-            "tests/goldens/trace_assert_wrapper.golden.txt",
+            env!("XLSYNTH_AOT_ASSERT_PAIR_RS"),
+            "tests/goldens/assert_pair_wrapper.golden.txt",
+        ),
+        (
+            env!("XLSYNTH_AOT_WIDE_COUNTED_FOR_RS"),
+            "tests/goldens/wide_counted_for_wrapper.golden.txt",
         ),
         (
             env!("XLSYNTH_AOT_WIDGET_FROB_RS"),
@@ -98,6 +111,25 @@ fn generated_wrappers_match_golden_references() {
     }
 }
 
+// Verifies: generated wrappers keep the detailed runtime failure contracts in
+// their public docs.
+// Catches: attempts to make generated output formatter-stable by weakening the
+// shipped documentation.
+#[test]
+fn generated_wrappers_preserve_detailed_error_docs() {
+    let ir_only_wrapper =
+        fs::read_to_string(env!("XLSYNTH_AOT_ADD_ONE_RS")).expect("IR wrapper should exist");
+    assert!(ir_only_wrapper
+        .contains("Returns an error if the standalone artifact metadata cannot initialize"));
+    assert!(ir_only_wrapper.contains("the ABI buffers required by the generated entrypoint."));
+
+    let typed_wrapper =
+        fs::read_to_string(env!("XLSYNTH_AOT_WIDGET_FROB_RS")).expect("typed wrapper should exist");
+    assert!(typed_wrapper
+        .contains("Returns an error if input packing, AOT execution, output decoding, or"));
+    assert!(typed_wrapper.contains("an XLS assertion fails."));
+}
+
 // Verifies: a scalar IR-only generated runner links and executes.
 // Catches: regressions in basic AOT runner construction or scalar ABI calls.
 #[test]
@@ -114,6 +146,26 @@ fn multiple_generated_entrypoints_can_link_and_run() {
     let mut runner = add_inputs_aot::new_runner().expect("runner creation should succeed");
     let output = runner.run(&10, &20).expect("run should succeed");
     assert_eq!(output, 30);
+}
+
+// Verifies: standalone artifact metadata names the callback surface each
+// generated fixture needs.
+// Catches: generator drift that silently drops assertion support or claims
+// unsupported trace support.
+#[test]
+fn generated_artifact_metadata_tracks_supported_callback_surface() {
+    fn callback_surface(metadata: &xlsynth_aot_runtime::AotArtifactMetadata) -> (bool, bool) {
+        (metadata.has_asserts, metadata.has_traces)
+    }
+
+    assert_eq!(
+        callback_surface(&add_one_aot::ARTIFACT_METADATA),
+        (false, false)
+    );
+    assert_eq!(
+        callback_surface(&assert_pair_aot::ARTIFACT_METADATA),
+        (true, false)
+    );
 }
 
 // Verifies: generated runners round-trip tuple and array aggregate shapes.
@@ -240,14 +292,34 @@ fn generated_runner_supports_wide_bits_tuple_structs() {
     assert!(output.field1[1..32].iter().all(|value| *value == 0));
 }
 
-// Verifies: generated runners surface trace messages and assertion messages.
+// Verifies: generated artifacts execute loop-carried state larger than the
+// LLVM JIT's 512-byte stack-allocation cutoff.
+// Catches: regressions in the standalone heap-scratch callback path that are
+// invisible to the smaller direct-call fixtures.
+#[test]
+fn generated_runner_supports_wide_counted_for_heap_scratch() {
+    let mut runner = wide_counted_for_aot::new_runner().expect("runner creation should succeed");
+    let mut field1 = [0u8; 1024];
+    field1[0] = 0x5A;
+    field1[1023] = 0xA5;
+    let input = wide_counted_for_aot::Input0 {
+        field0: 0x3C,
+        field1,
+    };
+
+    let output = runner.run(&input).expect("run should succeed");
+    assert_eq!(output.field0, input.field0);
+    assert_eq!(output.field1, input.field1);
+}
+
+// Verifies: generated runners preserve standalone assertion reporting.
 // Catches: event plumbing regressions between AOT execution and runner APIs.
 #[test]
-fn generated_runner_run_with_events_surfaces_trace_and_assert_messages() {
-    let mut runner = trace_assert_aot::new_runner().expect("runner creation should succeed");
-    let token = trace_assert_aot::Token {};
+fn generated_runner_run_with_events_surfaces_assert_messages() {
+    let mut runner = assert_pair_aot::new_runner().expect("runner creation should succeed");
+    let token = assert_pair_aot::Token {};
 
-    let ok_input = trace_assert_aot::Input1 {
+    let ok_input = assert_pair_aot::Input1 {
         field0: 2,
         field1: 3,
     };
@@ -256,15 +328,13 @@ fn generated_runner_run_with_events_surfaces_trace_and_assert_messages() {
         .expect("run with events should succeed");
     assert_eq!(ok_result.output.field0, 5);
     assert_eq!(ok_result.output.field1, 3);
-    assert_eq!(ok_result.trace_messages.len(), 1);
     assert_eq!(ok_result.assert_messages.len(), 0);
-    assert_eq!(ok_result.trace_messages[0].message, "sum: 5");
 
     let ok_output = runner.run(&token, &ok_input).expect("run should succeed");
     assert_eq!(ok_output.field0, 5);
     assert_eq!(ok_output.field1, 3);
 
-    let bad_input = trace_assert_aot::Input1 {
+    let bad_input = assert_pair_aot::Input1 {
         field0: 2,
         field1: 2,
     };
@@ -273,9 +343,7 @@ fn generated_runner_run_with_events_surfaces_trace_and_assert_messages() {
         .expect("run with events should succeed");
     assert_eq!(bad_result.output.field0, 4);
     assert_eq!(bad_result.output.field1, 2);
-    assert_eq!(bad_result.trace_messages.len(), 1);
     assert_eq!(bad_result.assert_messages.len(), 1);
-    assert_eq!(bad_result.trace_messages[0].message, "sum: 4");
     assert_eq!(bad_result.assert_messages[0], "sum must be >= 5");
 
     let run_err = runner
@@ -283,4 +351,80 @@ fn generated_runner_run_with_events_surfaces_trace_and_assert_messages() {
         .expect_err("run should fail on assert");
     assert!(run_err.to_string().contains("XLS assertion failed"));
     assert!(run_err.to_string().contains("sum must be >= 5"));
+}
+
+fn direct_runtime_runner(
+    proto: &'static [u8],
+    function_ptr: *const (),
+) -> Result<AotRunner<'static>, Box<dyn std::error::Error>> {
+    let metadata = get_entrypoint_metadata(proto)?;
+    let descriptor = unsafe {
+        AotEntrypointDescriptor::from_raw_parts_unchecked(proto, function_ptr as usize, metadata)
+    };
+    Ok(AotRunner::new(descriptor)?)
+}
+
+// Verifies: direct-call standalone wrappers preserve the direct runtime ABI
+// result for the same linked artifact.
+// Catches: standalone/direct-runtime execution drift that packaging-only tests
+// cannot observe.
+#[test]
+fn standalone_and_direct_runtime_runners_match_for_direct_calls(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut standalone = add_one_aot::new_runner()?;
+    let standalone_output = standalone.run(&41)?;
+
+    let mut direct_runtime = direct_runtime_runner(
+        include_bytes!(env!("XLSYNTH_AOT_ADD_ONE_PROTO")),
+        standalone_add_one_symbol as *const (),
+    )?;
+    direct_runtime.copy_input_from(0, &[41]);
+    direct_runtime.run()?;
+    let mut direct_runtime_output = [0u8; 1];
+    direct_runtime.copy_output_to(0, &mut direct_runtime_output);
+
+    assert_eq!(standalone_output, direct_runtime_output[0]);
+    Ok(())
+}
+
+// Verifies: standalone assertion capture preserves the direct runtime ABI
+// result and event stream for the same linked artifact.
+// Catches: callback or assertion-surface drift that direct-call-only parity
+// tests miss.
+#[test]
+fn standalone_and_direct_runtime_runners_match_for_assertions(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let token = assert_pair_aot::Token {};
+    let pair = assert_pair_aot::Input1 {
+        field0: 2,
+        field1: 2,
+    };
+    let mut standalone = assert_pair_aot::new_runner()?;
+    let standalone_result = standalone.run_with_events(&token, &pair)?;
+
+    let mut direct_runtime = direct_runtime_runner(
+        include_bytes!(env!("XLSYNTH_AOT_ASSERT_PAIR_PROTO")),
+        standalone_assert_pair_symbol as *const (),
+    )?;
+    direct_runtime.copy_input_from(0, &[]);
+    direct_runtime.copy_input_from(1, &[2, 2]);
+    let direct_runtime_result = direct_runtime.run_with_events(|runner| {
+        let mut output = [0u8; 2];
+        runner.copy_output_to(0, &mut output);
+        output
+    })?;
+
+    assert_eq!(
+        [
+            standalone_result.output.field0,
+            standalone_result.output.field1
+        ],
+        direct_runtime_result.output
+    );
+    assert_eq!(
+        standalone_result.assert_messages,
+        direct_runtime_result.assert_messages
+    );
+    assert!(direct_runtime_result.trace_messages.is_empty());
+    Ok(())
 }
