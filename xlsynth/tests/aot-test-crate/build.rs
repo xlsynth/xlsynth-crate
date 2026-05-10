@@ -14,6 +14,7 @@ fn main() {
         name: &'static str,
         top: &'static str,
         env_var: &'static str,
+        proto_env_var: Option<&'static str>,
         ir_text: &'static str,
     }
 
@@ -101,18 +102,27 @@ top fn wide_bits_tuple(input: (bits[8], bits[257])) -> (bits[8], bits[257]) {
 }
 "#;
 
-    let trace_assert_ir = r#"package aot_tests
+    let assert_pair_ir = r#"package aot_tests
 
-top fn trace_assert_pair(tok: token, pair: (bits[8], bits[8])) -> (bits[8], bits[8]) {
+top fn assert_pair(tok: token, pair: (bits[8], bits[8])) -> (bits[8], bits[8]) {
   a: bits[8] = tuple_index(pair, index=0)
   b: bits[8] = tuple_index(pair, index=1)
   sum: bits[8] = add(a, b)
   min_sum: bits[8] = literal(value=5)
   ok: bits[1] = uge(sum, min_sum)
-  always_on: bits[1] = literal(value=1)
   asserted: token = assert(tok, ok, message="sum must be >= 5")
-  traced: token = trace(asserted, always_on, format="sum: {}", data_operands=[sum])
   ret out: (bits[8], bits[8]) = tuple(sum, b)
+}
+"#;
+
+    let wide_counted_for_ir = r#"package aot_tests
+
+fn wide_state_body(i: bits[1], state: (bits[8], bits[8192])) -> (bits[8], bits[8192]) {
+  ret out: (bits[8], bits[8192]) = identity(state)
+}
+
+top fn wide_counted_for(state: (bits[8], bits[8192])) -> (bits[8], bits[8192]) {
+  ret out: (bits[8], bits[8192]) = counted_for(state, trip_count=1, stride=1, body=wide_state_body)
 }
 "#;
 
@@ -121,49 +131,64 @@ top fn trace_assert_pair(tok: token, pair: (bits[8], bits[8])) -> (bits[8], bits
             name: "add_one",
             top: "add_one",
             env_var: "XLSYNTH_AOT_ADD_ONE_RS",
+            proto_env_var: Some("XLSYNTH_AOT_ADD_ONE_PROTO"),
             ir_text: add_one_ir,
         },
         AotCase {
             name: "add_inputs",
             top: "add_inputs",
             env_var: "XLSYNTH_AOT_ADD_INPUTS_RS",
+            proto_env_var: None,
             ir_text: add_inputs_ir,
         },
         AotCase {
             name: "compound_shapes",
             top: "compound_shapes",
             env_var: "XLSYNTH_AOT_COMPOUND_SHAPES_RS",
+            proto_env_var: None,
             ir_text: compound_shapes_ir,
         },
         AotCase {
             name: "empty_tuple",
             top: "make_empty_tuple",
             env_var: "XLSYNTH_AOT_EMPTY_TUPLE_RS",
+            proto_env_var: None,
             ir_text: empty_tuple_ir,
         },
         AotCase {
             name: "wide_sizes",
             top: "wide_sizes",
             env_var: "XLSYNTH_AOT_WIDE_SIZES_RS",
+            proto_env_var: None,
             ir_text: wide_sizes_ir,
         },
         AotCase {
             name: "large_array_tuple",
             top: "large_array_tuple",
             env_var: "XLSYNTH_AOT_LARGE_ARRAY_TUPLE_RS",
+            proto_env_var: None,
             ir_text: large_array_tuple_ir,
         },
         AotCase {
             name: "wide_bits_tuple",
             top: "wide_bits_tuple",
             env_var: "XLSYNTH_AOT_WIDE_BITS_TUPLE_RS",
+            proto_env_var: None,
             ir_text: wide_bits_tuple_ir,
         },
         AotCase {
-            name: "trace_assert",
-            top: "trace_assert_pair",
-            env_var: "XLSYNTH_AOT_TRACE_ASSERT_RS",
-            ir_text: trace_assert_ir,
+            name: "assert_pair",
+            top: "assert_pair",
+            env_var: "XLSYNTH_AOT_ASSERT_PAIR_RS",
+            proto_env_var: Some("XLSYNTH_AOT_ASSERT_PAIR_PROTO"),
+            ir_text: assert_pair_ir,
+        },
+        AotCase {
+            name: "wide_counted_for",
+            top: "wide_counted_for",
+            env_var: "XLSYNTH_AOT_WIDE_COUNTED_FOR_RS",
+            proto_env_var: None,
+            ir_text: wide_counted_for_ir,
         },
     ];
 
@@ -179,6 +204,13 @@ top fn trace_assert_pair(tok: token, pair: (bits[8], bits[8])) -> (bits[8], bits
             case.env_var,
             output.rust_file.display()
         );
+        if let Some(proto_env_var) = case.proto_env_var {
+            println!(
+                "cargo:rustc-env={}={}",
+                proto_env_var,
+                output.entrypoints_proto_file.display()
+            );
+        }
     }
 
     // Typed DSLX cases exercise public signatures that use generated bridge

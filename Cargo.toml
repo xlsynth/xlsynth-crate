@@ -1,6 +1,8 @@
 [workspace]
 members = [
     "xlsynth",
+    "xlsynth-aot-runtime",
+    "xlsynth/tests/aot-standalone-test-crate",
     "xlsynth/tests/aot-test-crate",
     "xlsynth-sys",
     "xlsynth-mcmc",
