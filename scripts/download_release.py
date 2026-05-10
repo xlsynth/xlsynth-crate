@@ -201,6 +201,48 @@ def high_integrity_download(
         )
 
 
+def ensure_versioned_dso_alias(output_dir: str, version: str, platform: str) -> None:
+    """Creates the versioned DSO filename expected by linked binaries.
+
+    Release assets are named like `libxls-ubuntu2004.so`, but binaries may
+    record a versioned SONAME such as `libxls-v0.45.0-ubuntu2004.so`. Keep the
+    downloaded artifact name stable and add a platform-suffixed compatibility
+    symlink next to it.
+    """
+    lib_suffix = SUPPORTED_PLATFORMS[platform]
+    unversioned_filename = f"libxls-{platform}{lib_suffix}"
+    versioned_filename = f"libxls-{version}-{platform}{lib_suffix}"
+    unversioned_path = os.path.join(output_dir, unversioned_filename)
+    versioned_path = os.path.join(output_dir, versioned_filename)
+
+    if not os.path.exists(unversioned_path):
+        raise FileNotFoundError(
+            f"Cannot create DSO alias; missing downloaded DSO: {unversioned_path}"
+        )
+
+    if os.path.lexists(versioned_path):
+        try:
+            if os.path.samefile(versioned_path, unversioned_path):
+                print(
+                    f"DSO compatibility alias already exists: {versioned_filename}"
+                )
+                return
+        except FileNotFoundError:
+            pass
+
+        if os.path.islink(versioned_path):
+            os.remove(versioned_path)
+        else:
+            raise FileExistsError(
+                f"Cannot create DSO alias; {versioned_path} already exists and does not point to {unversioned_path}"
+            )
+
+    os.symlink(unversioned_filename, versioned_path)
+    print(
+        f"Created DSO compatibility alias: {versioned_filename} -> {unversioned_filename}"
+    )
+
+
 def main():
     parser = OptionParser()
     parser.add_option(
@@ -295,6 +337,9 @@ def main():
             is_binary,
             options.platform,
         )
+
+    if options.dso:
+        ensure_versioned_dso_alias(output_dir, version, options.platform)
 
     # Download and extract dslx_stdlib.tar.gz
     stdlib_filename = "dslx_stdlib.tar.gz"
