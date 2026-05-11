@@ -449,9 +449,12 @@ pub enum NodePayload {
     /// bits-typed operand.
     ///
     /// Semantics: for `arg: bits[N]`, returns the number of consecutive zeros
-    /// starting at the MSb edge. As with `clz`, an all-zero input returns `N`.
+    /// starting at the MSb edge, plus `offset`, as `bits[new_bit_count]`. As
+    /// with `clz`, an all-zero input contributes the count `N`.
     ExtClz {
         arg: NodeRef,
+        offset: usize,
+        new_bit_count: usize,
     },
     /// Extension (non-upstream) op: build a low-bit mask from a dynamic count.
     ///
@@ -660,7 +663,16 @@ impl NodePayload {
                 }
                 Ok(())
             }
-            NodePayload::ExtClz { .. } => Ok(()),
+            NodePayload::ExtClz {
+                arg,
+                new_bit_count: _,
+                ..
+            } => {
+                if !matches!(f.get_node_ty(*arg), Type::Bits(_)) {
+                    return Err("ext_clz arg must be bits-typed".to_string());
+                }
+                Ok(())
+            }
             NodePayload::ExtMaskLow { count } => {
                 if !matches!(f.get_node_ty(*count), Type::Bits(_)) {
                     return Err("ext_mask_low count must be bits-typed".to_string());
@@ -702,7 +714,15 @@ impl NodePayload {
             NodePayload::ExtPrioEncode { arg, lsb_prio } => {
                 vec![format_operand(*arg), format!("lsb_prio={}", lsb_prio)]
             }
-            NodePayload::ExtClz { arg } => vec![format_operand(*arg)],
+            NodePayload::ExtClz {
+                arg,
+                offset,
+                new_bit_count,
+            } => vec![
+                format_operand(*arg),
+                format!("offset={}", offset),
+                format!("new_bit_count={}", new_bit_count),
+            ],
             NodePayload::ExtMaskLow { count } => vec![format_operand(*count)],
             NodePayload::ExtNaryAdd { terms, arch } => {
                 let mut attrs: Vec<String> = terms
@@ -1050,6 +1070,13 @@ impl Node {
             NodePayload::SignExt { new_bit_count, .. }
             | NodePayload::ZeroExt { new_bit_count, .. } => {
                 format!(", new_bit_count={}", new_bit_count)
+            }
+            NodePayload::ExtClz {
+                offset,
+                new_bit_count,
+                ..
+            } => {
+                format!(", offset={}, new_bit_count={}", offset, new_bit_count)
             }
             _ => "".to_string(),
         };

@@ -112,6 +112,8 @@ enum WrappedExtensionSpec {
     },
     ExtClz {
         input_width: usize,
+        output_width: usize,
+        offset: usize,
     },
     ExtMaskLow {
         output_width: usize,
@@ -219,7 +221,20 @@ fn parse_wrapped_extension_spec_from_attr(
                 .copied()
                 .ok_or_else(|| ParseError::new("missing width for ext_clz metadata".to_string()))?;
             let input_width = parse_wrapped_extension_usize_field(input_width, "ext_clz", "width")?;
-            Ok(Some(WrappedExtensionSpec::ExtClz { input_width }))
+            let output_width = fields.get("out_width").copied().ok_or_else(|| {
+                ParseError::new("missing out_width for ext_clz metadata".to_string())
+            })?;
+            let output_width =
+                parse_wrapped_extension_usize_field(output_width, "ext_clz", "out_width")?;
+            let offset = fields.get("offset").copied().ok_or_else(|| {
+                ParseError::new("missing offset for ext_clz metadata".to_string())
+            })?;
+            let offset = parse_wrapped_extension_usize_field(offset, "ext_clz", "offset")?;
+            Ok(Some(WrappedExtensionSpec::ExtClz {
+                input_width,
+                output_width,
+                offset,
+            }))
         }
         "ext_mask_low" => {
             let output_width = fields.get("out_width").copied().ok_or_else(|| {
@@ -413,18 +428,26 @@ fn canonicalize_wrapped_extension_helper_spec(
                 arch,
             })
         }
-        WrappedExtensionSpec::ExtClz { input_width } => {
-            let expected_ret_ty = ir::Type::Bits(ceil_log2(input_width.saturating_add(1)));
+        WrappedExtensionSpec::ExtClz {
+            input_width,
+            output_width,
+            offset,
+        } => {
+            let expected_ret_ty = ir::Type::Bits(output_width);
             if f.params.len() != 1
                 || f.params[0].ty != ir::Type::Bits(input_width)
                 || f.ret_ty != expected_ret_ty
             {
                 return Err(ParseError::new(format!(
-                    "ffi wrapper helper '{}' does not match ext_clz signature for width {}",
-                    f.name, input_width
+                    "ffi wrapper helper '{}' does not match ext_clz signature for width {}, out_width {}, offset {}",
+                    f.name, input_width, output_width, offset
                 )));
             }
-            Ok(WrappedExtensionSpec::ExtClz { input_width })
+            Ok(WrappedExtensionSpec::ExtClz {
+                input_width,
+                output_width,
+                offset,
+            })
         }
         WrappedExtensionSpec::ExtMaskLow {
             output_width,
@@ -521,7 +544,11 @@ fn convert_ffi_invokes_to_extension_ops_in_fn(
                     c_in: operands[2],
                 };
             }
-            WrappedExtensionSpec::ExtClz { input_width } => {
+            WrappedExtensionSpec::ExtClz {
+                input_width,
+                output_width,
+                offset,
+            } => {
                 if operands.len() != 1 {
                     return Err(ParseError::new(format!(
                         "invoke of wrapped ext_clz helper '{}' expected 1 operand, got {}",
@@ -529,7 +556,7 @@ fn convert_ffi_invokes_to_extension_ops_in_fn(
                         operands.len()
                     )));
                 }
-                let expected_ty = ir::Type::Bits(ceil_log2(input_width.saturating_add(1)));
+                let expected_ty = ir::Type::Bits(output_width);
                 if f.nodes[idx].ty != expected_ty {
                     return Err(ParseError::new(format!(
                         "invoke of wrapped ext_clz helper '{}' had type {}, expected {}",
@@ -543,7 +570,11 @@ fn convert_ffi_invokes_to_extension_ops_in_fn(
                         to_apply, operand_tys[0], expected_operand_ty
                     )));
                 }
-                f.nodes[idx].payload = ir::NodePayload::ExtClz { arg: operands[0] };
+                f.nodes[idx].payload = ir::NodePayload::ExtClz {
+                    arg: operands[0],
+                    offset,
+                    new_bit_count: output_width,
+                };
             }
             WrappedExtensionSpec::ExtMaskLow {
                 output_width,
@@ -1996,10 +2027,19 @@ impl Parser {
             }
             "ext_clz" => {
                 let arg = self.parse_node_ref(&node_env, "ext_clz arg")?;
+                let mut offset: Option<usize> = None;
+                let mut new_bit_count: Option<usize> = None;
                 if self.peek_is(",") {
                     self.dropc()?;
-                    let id_attr = self.parse_id_attribute()?;
-                    maybe_id = Some(id_attr);
+                    offset = Some(self.parse_usize_attribute("offset")?);
+                }
+                if self.peek_is(",") {
+                    self.dropc()?;
+                    new_bit_count = Some(self.parse_usize_attribute("new_bit_count")?);
+                }
+                if self.peek_is(",") {
+                    self.dropc()?;
+                    maybe_id = Some(self.parse_id_attribute()?);
                 }
                 if maybe_id.is_none() {
                     return Err(ParseError::new(format!(
@@ -2007,7 +2047,26 @@ impl Parser {
                         self.rest_of_line()
                     )));
                 }
-                (ir::NodePayload::ExtClz { arg }, maybe_id.unwrap())
+                let offset = offset.ok_or_else(|| {
+                    ParseError::new(format!(
+                        "expected offset for ext_clz; rest_of_line: {:?}",
+                        self.rest_of_line()
+                    ))
+                })?;
+                let new_bit_count = new_bit_count.ok_or_else(|| {
+                    ParseError::new(format!(
+                        "expected new_bit_count for ext_clz; rest_of_line: {:?}",
+                        self.rest_of_line()
+                    ))
+                })?;
+                (
+                    ir::NodePayload::ExtClz {
+                        arg,
+                        offset,
+                        new_bit_count,
+                    },
+                    maybe_id.unwrap(),
+                )
             }
             "ext_mask_low" => {
                 let count = self.parse_node_ref(&node_env, "ext_mask_low count")?;

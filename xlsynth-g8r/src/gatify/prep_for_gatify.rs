@@ -23,6 +23,7 @@ use xlsynth_pir::ir_match;
 use xlsynth_pir::ir_match::MatchCtx;
 use xlsynth_pir::ir_range_info::IrRangeInfo;
 use xlsynth_pir::ir_utils;
+use xlsynth_pir::ir_value_utils::ir_bits_to_usize;
 use xlsynth_pir::math::ceil_log2;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -201,7 +202,11 @@ fn rewrite_encode_one_hot_idioms_to_ext_ops(f: &mut ir::Fn) -> usize {
             if let NodePayload::Unop(Unop::Reverse, reversed_arg) =
                 f.nodes[arg.index].payload.clone()
             {
-                NodePayload::ExtClz { arg: reversed_arg }
+                NodePayload::ExtClz {
+                    arg: reversed_arg,
+                    offset: 0,
+                    new_bit_count: expected_out_w,
+                }
             } else {
                 NodePayload::ExtPrioEncode { arg, lsb_prio }
             }
@@ -227,6 +232,110 @@ fn bits_width(ty: &Type) -> Option<usize> {
         Type::Bits(w) => Some(*w),
         _ => None,
     }
+}
+
+fn literal_usize_value(f: &ir::Fn, nr: NodeRef) -> Option<usize> {
+    let NodePayload::Literal(value) = &f.get_node(nr).payload else {
+        return None;
+    };
+    let bits = value.to_bits().ok()?;
+    ir_bits_to_usize(&bits)
+}
+
+fn ext_clz_for_adjustment(
+    f: &ir::Fn,
+    nr: NodeRef,
+    output_width: usize,
+) -> Option<(NodeRef, usize)> {
+    match f.get_node(nr).payload {
+        NodePayload::ExtClz {
+            arg,
+            offset,
+            new_bit_count,
+        } if new_bit_count == output_width => Some((arg, offset)),
+        _ => None,
+    }
+}
+
+fn clz_plus_const_from_binop(
+    f: &ir::Fn,
+    lhs: NodeRef,
+    rhs: NodeRef,
+    output_width: usize,
+) -> Option<(NodeRef, usize)> {
+    match (
+        ext_clz_for_adjustment(f, lhs, output_width),
+        literal_usize_value(f, lhs),
+        ext_clz_for_adjustment(f, rhs, output_width),
+        literal_usize_value(f, rhs),
+    ) {
+        (Some((arg, offset)), None, None, Some(addend))
+        | (None, Some(addend), Some((arg, offset)), None) => {
+            Some((arg, offset.checked_add(addend)?))
+        }
+        _ => None,
+    }
+}
+
+fn clz_plus_const_from_ext_nary_add(
+    f: &ir::Fn,
+    terms: &[ExtNaryAddTerm],
+    output_width: usize,
+) -> Option<(NodeRef, usize)> {
+    if terms.len() != 2 || terms.iter().any(|term| term.signed || term.negated) {
+        return None;
+    }
+
+    let lhs = &terms[0];
+    let rhs = &terms[1];
+    match (
+        ext_clz_for_adjustment(f, lhs.operand, output_width),
+        literal_usize_value(f, lhs.operand),
+        ext_clz_for_adjustment(f, rhs.operand, output_width),
+        literal_usize_value(f, rhs.operand),
+    ) {
+        (Some((arg, offset)), None, None, Some(addend))
+        | (None, Some(addend), Some((arg, offset)), None) => {
+            Some((arg, offset.checked_add(addend)?))
+        }
+        _ => None,
+    }
+}
+
+/// Folds local unsigned `clz + C` arithmetic into the existing `ext_clz` op.
+fn rewrite_clz_plus_constant_to_ext_clz(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+    let original_len = f.nodes.len();
+    for node_index in 0..original_len {
+        let node_ref = NodeRef { index: node_index };
+        let output_width = f.nodes[node_index].ty.bit_count();
+        let payload = f.nodes[node_index].payload.clone();
+        let Some((arg, offset)) = (match payload {
+            NodePayload::Binop(Binop::Add, lhs, rhs) => {
+                clz_plus_const_from_binop(f, lhs, rhs, output_width)
+            }
+            NodePayload::ExtNaryAdd { terms, arch: _ } => {
+                clz_plus_const_from_ext_nary_add(f, &terms, output_width)
+            }
+            _ => None,
+        }) else {
+            continue;
+        };
+
+        ir_utils::replace_node_payload(
+            f,
+            node_ref,
+            NodePayload::ExtClz {
+                arg,
+                offset,
+                new_bit_count: output_width,
+            },
+            Some(Type::Bits(output_width)),
+        )
+        .expect("prep_for_gatify: ext_clz payload replacement failed");
+        rewrites += 1;
+    }
+    rewrites
 }
 
 fn bits_width_of(f: &ir::Fn, nr: NodeRef) -> usize {
@@ -2084,6 +2193,7 @@ pub fn prep_for_gatify(
     }
     if options.enable_rewrite_prio_encode {
         let _rewrites = rewrite_encode_one_hot_idioms_to_ext_ops(&mut cloned);
+        let _rewrites = rewrite_clz_plus_constant_to_ext_clz(&mut cloned);
     }
     mark_dead_nodes_as_nil(&mut cloned);
     cloned

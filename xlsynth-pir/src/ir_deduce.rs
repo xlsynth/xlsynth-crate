@@ -403,12 +403,12 @@ where
                 _ => Err(DeduceError::ExpectedBits("ext_prio_encode.arg")),
             }
         }
-        NodePayload::ExtClz { .. } => {
+        NodePayload::ExtClz { new_bit_count, .. } => {
             let arg_ty = operand_types
                 .get(0)
                 .ok_or(DeduceError::MissingOperand("ext_clz.arg"))?;
             match arg_ty {
-                Type::Bits(n) => Ok(Some(Type::Bits(ceil_log2(n.saturating_add(1))))),
+                Type::Bits(_) => Ok(Some(Type::Bits(*new_bit_count))),
                 _ => Err(DeduceError::ExpectedBits("ext_clz.arg")),
             }
         }

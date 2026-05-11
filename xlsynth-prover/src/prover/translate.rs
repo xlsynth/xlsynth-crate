@@ -370,14 +370,29 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     bitvec: encoded,
                 }
             }
-            NodePayload::ExtClz { arg } => {
+            NodePayload::ExtClz { arg, offset, .. } => {
                 let a = env.get(arg).expect("ext_clz.arg must be present").clone();
                 let reversed = solver.reverse(&a.bitvec);
                 let one_hot = solver.xls_one_hot(&reversed, /* lsb_prio= */ true);
                 let encoded = solver.xls_encode(&one_hot);
+                let out_w = node.ty.bit_count();
+                let adjusted_width = encoded.get_width();
+                let resized = if out_w == 0 {
+                    BitVec::ZeroWidth
+                } else if adjusted_width <= out_w {
+                    solver.zero_extend_to(&encoded, out_w)
+                } else {
+                    solver.slice(&encoded, 0, out_w)
+                };
+                let bitvec = if *offset == 0 || out_w == 0 {
+                    resized
+                } else {
+                    let offset_bv = solver.numerical_u128(out_w, *offset as u128);
+                    solver.add(&resized, &offset_bv)
+                };
                 IrTypedBitVec {
                     ir_type: &node.ty,
-                    bitvec: encoded,
+                    bitvec,
                 }
             }
             NodePayload::ExtMaskLow { count } => {

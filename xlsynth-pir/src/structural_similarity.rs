@@ -74,7 +74,7 @@ pub fn collect_structural_entries(f: &Fn) -> (Vec<StructuralEntry<FwdHash>>, Vec
             | NodePayload::Decode { arg: tuple, .. }
             | NodePayload::Encode { arg: tuple }
             | NodePayload::ExtPrioEncode { arg: tuple, .. }
-            | NodePayload::ExtClz { arg: tuple }
+            | NodePayload::ExtClz { arg: tuple, .. }
             | NodePayload::ExtMaskLow { count: tuple }
             | NodePayload::OneHot { arg: tuple, .. }
             | NodePayload::BitSlice { arg: tuple, .. } => {

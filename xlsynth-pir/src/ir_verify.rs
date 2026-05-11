@@ -70,7 +70,7 @@ pub fn verify_fn_operand_indices_in_bounds(f: &Fn) -> Result<(), String> {
             NodePayload::ExtPrioEncode { arg, lsb_prio: _ } => {
                 check(*arg, &format!("node {} ext_prio_encode.arg", i))?;
             }
-            NodePayload::ExtClz { arg } => {
+            NodePayload::ExtClz { arg, .. } => {
                 check(*arg, &format!("node {} ext_clz.arg", i))?;
             }
             NodePayload::ExtMaskLow { count } => {

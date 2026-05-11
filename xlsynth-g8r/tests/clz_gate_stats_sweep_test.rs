@@ -24,7 +24,7 @@ fn build_ext_clz_ir_text(bit_count: u32) -> String {
     format!(
         "package sample\n\
 top fn ext_clz_{bit_count}b(input: bits[{bit_count}] id=1) -> bits[{out_w}] {{\n\
-  ret ext_clz.2: bits[{out_w}] = ext_clz(input, id=2)\n\
+  ret ext_clz.2: bits[{out_w}] = ext_clz(input, offset=0, new_bit_count={out_w}, id=2)\n\
 }}\n"
     )
 }

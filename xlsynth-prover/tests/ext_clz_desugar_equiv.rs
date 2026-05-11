@@ -12,7 +12,7 @@ fn ext_clz_equivalent_to_desugared_export_form_and_exports_to_upstream() {
     for w in 1u64..=16u64 {
         let out_w = xlsynth_pir::math::ceil_log2((w as usize).saturating_add(1));
         let ir = format!(
-            "package test\n\nfn f(arg: bits[{w}] id=1) -> bits[{out_w}] {{\n  ret r: bits[{out_w}] = ext_clz(arg, id=2)\n}}\n"
+            "package test\n\nfn f(arg: bits[{w}] id=1) -> bits[{out_w}] {{\n  ret r: bits[{out_w}] = ext_clz(arg, offset=0, new_bit_count={out_w}, id=2)\n}}\n"
         );
         let pkg = {
             let mut p = Parser::new(&ir);

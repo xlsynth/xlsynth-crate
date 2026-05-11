@@ -3650,7 +3650,7 @@ fn b(y: bits[1] id=10) -> bits[1] {
         let ir_text = r#"package has_ext
 
 top fn main(x: bits[4] id=1) -> bits[3] {
-  ret leading_zeroes: bits[3] = ext_clz(x, id=2)
+  ret leading_zeroes: bits[3] = ext_clz(x, offset=0, new_bit_count=3, id=2)
 }
 "#;
 
@@ -3684,7 +3684,7 @@ top fn main(x: bits[4] id=1) -> bits[3] {
         let ir_text = r#"package has_ext
 
 top fn main(x: bits[4] id=1) -> bits[3] {
-  ret leading_zeroes: bits[3] = ext_clz(x, id=2)
+  ret leading_zeroes: bits[3] = ext_clz(x, offset=0, new_bit_count=3, id=2)
 }
 "#;
 

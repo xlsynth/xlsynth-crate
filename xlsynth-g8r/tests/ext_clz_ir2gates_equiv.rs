@@ -14,12 +14,26 @@ fn parse_top_fn(ir_text: &str) -> ir::Fn {
     pkg.get_top_fn().expect("top fn").clone()
 }
 
-fn build_ext_clz_ir_text(bit_count: u32) -> String {
-    let out_w = ceil_log2((bit_count as usize).saturating_add(1));
+fn build_ext_clz_ir_text_with_offset(bit_count: u32, out_w: usize, offset: usize) -> String {
     format!(
         "package sample\n\
 top fn ext_clz_{bit_count}b(input: bits[{bit_count}] id=1) -> bits[{out_w}] {{\n\
-  ret ext_clz.2: bits[{out_w}] = ext_clz(input, id=2)\n\
+  ret ext_clz.2: bits[{out_w}] = ext_clz(input, offset={offset}, new_bit_count={out_w}, id=2)\n\
+}}\n"
+    )
+}
+
+fn build_encode_one_hot_reverse_plus_one_ir_text(bit_count: u32) -> String {
+    let out_w = ceil_log2((bit_count as usize).saturating_add(1));
+    let one_hot_w = bit_count.saturating_add(1);
+    format!(
+        "package sample\n\
+top fn clz_plus_one_via_encode_one_hot_reverse_{bit_count}b(input: bits[{bit_count}] id=1) -> bits[{out_w}] {{\n\
+  reverse.2: bits[{bit_count}] = reverse(input, id=2)\n\
+  one_hot.3: bits[{one_hot_w}] = one_hot(reverse.2, lsb_prio=true, id=3)\n\
+  encode.4: bits[{out_w}] = encode(one_hot.3, id=4)\n\
+  literal.5: bits[{out_w}] = literal(value=1, id=5)\n\
+  ret add.6: bits[{out_w}] = add(encode.4, literal.5, id=6)\n\
 }}\n"
     )
 }
@@ -62,33 +76,42 @@ fn gatify_for_test(pir_fn: &ir::Fn, enable_rewrite_prio_encode: bool) -> xlsynth
 #[test]
 fn direct_ext_clz_matches_desugared_semantics_width_sweep() {
     for bit_count in 0u32..=16 {
-        let ir_text = build_ext_clz_ir_text(bit_count);
-        let pir_fn = parse_top_fn(&ir_text);
-        let mut desugared_fn = pir_fn.clone();
-        desugar_extensions_in_fn(&mut desugared_fn).expect("desugar ext_clz");
+        let out_w = ceil_log2((bit_count as usize).saturating_add(1));
+        let cases = if bit_count == 0 {
+            vec![(0usize, out_w)]
+        } else {
+            vec![(0usize, out_w), (1usize, out_w.saturating_add(1))]
+        };
+        for (offset, out_w) in cases {
+            let ir_text = build_ext_clz_ir_text_with_offset(bit_count, out_w, offset);
+            let pir_fn = parse_top_fn(&ir_text);
+            let mut desugared_fn = pir_fn.clone();
+            desugar_extensions_in_fn(&mut desugared_fn).expect("desugar ext_clz");
 
-        let gate_ext = gatify_for_test(&pir_fn, /* enable_rewrite_prio_encode= */ false);
-        let gate_desugared =
-            gatify_for_test(&desugared_fn, /* enable_rewrite_prio_encode= */ false);
-        if bit_count == 0 {
-            assert!(
-                gate_ext.outputs.len() == 1 && gate_ext.outputs[0].get_bit_count() == 0,
-                "expected zero-width direct ext_clz lowering to produce one zero-width output"
-            );
-            assert!(
-                gate_desugared.outputs.len() == 1 && gate_desugared.outputs[0].get_bit_count() == 0,
-                "expected zero-width desugared ext_clz lowering to produce one zero-width output"
-            );
-            continue;
-        }
+            let gate_ext = gatify_for_test(&pir_fn, /* enable_rewrite_prio_encode= */ false);
+            let gate_desugared =
+                gatify_for_test(&desugared_fn, /* enable_rewrite_prio_encode= */ false);
+            if bit_count == 0 {
+                assert!(
+                    gate_ext.outputs.len() == 1 && gate_ext.outputs[0].get_bit_count() == 0,
+                    "expected zero-width direct ext_clz lowering to produce one zero-width output"
+                );
+                assert!(
+                    gate_desugared.outputs.len() == 1
+                        && gate_desugared.outputs[0].get_bit_count() == 0,
+                    "expected zero-width desugared ext_clz lowering to produce one zero-width output"
+                );
+                continue;
+            }
 
-        check_equivalence::prove_same_gate_fn_via_ir(&gate_ext, &gate_desugared).unwrap_or_else(
+            check_equivalence::prove_same_gate_fn_via_ir(&gate_ext, &gate_desugared).unwrap_or_else(
             |e| {
                 panic!(
-                    "expected direct ext_clz lowering to match desugared semantics for bit_count={bit_count}: {e}"
+                    "expected direct ext_clz lowering to match desugared semantics for bit_count={bit_count} offset={offset}: {e}"
                 )
             },
         );
+        }
     }
 }
 
@@ -114,8 +137,44 @@ fn prep_rewrites_encode_one_hot_reverse_to_ext_clz() {
             "expected ext_clz rewrite for bit_count={bit_count}; got:\n{prepared_text}"
         );
         assert!(
+            prepared_text.contains("offset=0"),
+            "expected ext_clz rewrite with explicit offset for bit_count={bit_count}; got:\n{prepared_text}"
+        );
+        assert!(
             !prepared_text.contains("ext_prio_encode("),
             "expected CLZ-specific rewrite to win over generic ext_prio_encode for bit_count={bit_count}; got:\n{prepared_text}"
+        );
+    }
+}
+
+#[test]
+fn prep_rewrites_clz_plus_constant_to_ext_clz_offset() {
+    for bit_count in 1u32..=16 {
+        let ir_text = build_encode_one_hot_reverse_plus_one_ir_text(bit_count);
+        let pir_fn = parse_top_fn(&ir_text);
+
+        let prepared = prep_for_gatify(
+            &pir_fn,
+            None,
+            PrepForGatifyOptions {
+                enable_rewrite_prio_encode: true,
+                enable_rewrite_nary_add: true,
+                enable_rewrite_mask_low: false,
+                ..PrepForGatifyOptions::default()
+            },
+        );
+        let prepared_text = prepared.to_string();
+        assert!(
+            prepared_text.contains("ext_clz("),
+            "expected ext_clz rewrite for bit_count={bit_count}; got:\n{prepared_text}"
+        );
+        assert!(
+            prepared_text.contains("offset=1"),
+            "expected clz-plus-constant to fold into ext_clz offset for bit_count={bit_count}; got:\n{prepared_text}"
+        );
+        assert!(
+            !prepared_text.contains("ext_nary_add("),
+            "expected clz-plus-constant ext_nary_add to be folded for bit_count={bit_count}; got:\n{prepared_text}"
         );
     }
 }

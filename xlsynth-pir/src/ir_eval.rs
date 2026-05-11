@@ -76,7 +76,7 @@ fn append_operand_values<'a>(
         | ZeroExt { arg, .. }
         | BitSlice { arg, .. }
         | ExtPrioEncode { arg, .. }
-        | ExtClz { arg }
+        | ExtClz { arg, .. }
         | OneHot { arg, .. }
         | Decode { arg, .. }
         | Encode { arg, .. }
@@ -605,7 +605,11 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
             }
             IrValue::from_bits(&IrBits::from_lsb_is_0(&out))
         }
-        ir::NodePayload::ExtClz { .. } => {
+        ir::NodePayload::ExtClz {
+            offset,
+            new_bit_count,
+            ..
+        } => {
             let bits: IrBits = operand_values[0].to_bits().unwrap();
             let n = bits.get_bit_count();
 
@@ -617,20 +621,17 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
                 }
             }
 
-            let out_w = ceil_log2(
-                n.checked_add(1)
-                    .expect("ExtClz width overflow in evaluator"),
-            );
-            let mut out: Vec<bool> = vec![false; out_w];
-            for (i, bit) in out.iter_mut().enumerate() {
-                let bit_is_one = if i < usize::BITS as usize {
-                    ((leading_zero_count >> i) & 1) == 1
-                } else {
-                    false
-                };
-                *bit = bit_is_one;
+            let mut clz_bits = vec![false; new_bit_count];
+            let mut offset_bits = vec![false; new_bit_count];
+            for i in 0..new_bit_count {
+                if i < usize::BITS as usize {
+                    clz_bits[i] = ((leading_zero_count >> i) & 1) == 1;
+                    offset_bits[i] = ((offset >> i) & 1) == 1;
+                }
             }
-            IrValue::from_bits(&IrBits::from_lsb_is_0(&out))
+            let adjusted =
+                IrBits::from_lsb_is_0(&clz_bits).add(&IrBits::from_lsb_is_0(&offset_bits));
+            IrValue::from_bits(&adjusted)
         }
         ir::NodePayload::ExtMaskLow { .. } => {
             let out_w = match n.ty {
