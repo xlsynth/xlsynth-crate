@@ -23,6 +23,14 @@ pub struct AotEntrypointMetadata {
     pub temp_buffer_alignment: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Runtime callbacks that XLS says a standalone AOT artifact may need.
+pub enum AotRuntimeFeature {
+    Assertions,
+    Traces,
+    Covers,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// A simplified Rust representation of an XLS type from AOT metadata.
 ///
@@ -110,6 +118,23 @@ struct AotEntrypointProto {
 
     #[prost(message, optional, tag = "23")]
     function_metadata: Option<FunctionMetadataProto>,
+
+    #[prost(message, optional, tag = "26")]
+    standalone_runtime_feature_requirements: Option<AotRuntimeFeatureRequirementsProto>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct AotRuntimeFeatureRequirementsProto {
+    #[prost(enumeration = "AotRuntimeFeatureProto", repeated, tag = "1")]
+    required_feature: Vec<i32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+enum AotRuntimeFeatureProto {
+    Invalid = 0,
+    Assertions = 1,
+    Traces = 2,
+    Covers = 3,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
@@ -234,6 +259,18 @@ pub fn get_entrypoint_function_signature(
     parse_entrypoint_function_signature(&entrypoint)
 }
 
+/// Decodes the XLS-authored standalone runtime features for one AOT entrypoint.
+///
+/// Presence of the requirements envelope is part of the protocol: consumers
+/// that need standalone-runtime policy must be able to distinguish "producer
+/// reported no required features" from "producer predates this metadata".
+pub fn get_entrypoint_runtime_features(
+    entrypoints_proto: &[u8],
+) -> Result<Vec<AotRuntimeFeature>, XlsynthError> {
+    let entrypoint = decode_single_entrypoint(entrypoints_proto)?;
+    parse_runtime_features(&entrypoint)
+}
+
 fn decode_single_entrypoint(entrypoints_proto: &[u8]) -> Result<AotEntrypointProto, XlsynthError> {
     let decoded = AotPackageEntrypointsProto::decode(entrypoints_proto)
         .map_err(|e| XlsynthError(format!("Failed decoding AOT entrypoints proto: {e}")))?;
@@ -287,6 +324,41 @@ fn parse_entrypoint_metadata(
         .unwrap_or(1)
         .max(1),
     })
+}
+
+fn parse_runtime_features(
+    entrypoint: &AotEntrypointProto,
+) -> Result<Vec<AotRuntimeFeature>, XlsynthError> {
+    let requirements = entrypoint
+        .standalone_runtime_feature_requirements
+        .as_ref()
+        .ok_or_else(|| {
+            XlsynthError(
+                "AOT producer metadata is missing standalone_runtime_feature_requirements; upgrade to an XLS producer that emits standalone runtime feature authority"
+                    .to_string(),
+            )
+        })?;
+
+    let mut runtime_features = Vec::with_capacity(requirements.required_feature.len());
+    for raw_feature in &requirements.required_feature {
+        let feature = AotRuntimeFeatureProto::try_from(*raw_feature).map_err(|_| {
+            XlsynthError(format!(
+                "Entrypoint metadata had unknown standalone runtime feature value: {raw_feature}"
+            ))
+        })?;
+        let feature = match feature {
+            AotRuntimeFeatureProto::Invalid => {
+                return Err(XlsynthError(
+                    "Entrypoint metadata had INVALID standalone runtime feature".to_string(),
+                ));
+            }
+            AotRuntimeFeatureProto::Assertions => AotRuntimeFeature::Assertions,
+            AotRuntimeFeatureProto::Traces => AotRuntimeFeature::Traces,
+            AotRuntimeFeatureProto::Covers => AotRuntimeFeature::Covers,
+        };
+        runtime_features.push(feature);
+    }
+    Ok(runtime_features)
 }
 
 fn parse_entrypoint_function_signature(
@@ -541,6 +613,12 @@ mod tests {
 
     use super::*;
 
+    fn empty_runtime_feature_requirements() -> Option<AotRuntimeFeatureRequirementsProto> {
+        Some(AotRuntimeFeatureRequirementsProto {
+            required_feature: Vec::new(),
+        })
+    }
+
     #[test]
     fn get_entrypoint_metadata_rejects_empty_proto() {
         let encoded = AotPackageEntrypointsProto {
@@ -571,6 +649,7 @@ mod tests {
                 inputs_layout: None,
                 outputs_layout: None,
                 function_metadata: None,
+                standalone_runtime_feature_requirements: empty_runtime_feature_requirements(),
             }],
         }
         .encode_to_vec();
@@ -583,6 +662,92 @@ mod tests {
         assert_eq!(metadata.output_buffer_alignments, vec![8]);
         assert_eq!(metadata.temp_buffer_size, 16);
         assert_eq!(metadata.temp_buffer_alignment, 8);
+    }
+
+    #[test]
+    fn get_entrypoint_runtime_features_rejects_missing_requirements_envelope() {
+        let encoded = AotPackageEntrypointsProto {
+            entrypoint: vec![AotEntrypointProto {
+                function_symbol: Some("foo".to_string()),
+                input_buffer_sizes: vec![1],
+                input_buffer_alignments: vec![1],
+                output_buffer_sizes: vec![1],
+                output_buffer_alignments: vec![1],
+                temp_buffer_size: Some(0),
+                temp_buffer_alignment: Some(1),
+                inputs_layout: None,
+                outputs_layout: None,
+                function_metadata: None,
+                standalone_runtime_feature_requirements: None,
+            }],
+        }
+        .encode_to_vec();
+
+        let err = get_entrypoint_runtime_features(&encoded).unwrap_err();
+        assert!(
+            err.to_string().contains("upgrade to an XLS producer"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn get_entrypoint_runtime_features_accepts_present_empty_requirements() {
+        let encoded = AotPackageEntrypointsProto {
+            entrypoint: vec![AotEntrypointProto {
+                function_symbol: Some("foo".to_string()),
+                input_buffer_sizes: vec![1],
+                input_buffer_alignments: vec![1],
+                output_buffer_sizes: vec![1],
+                output_buffer_alignments: vec![1],
+                temp_buffer_size: Some(0),
+                temp_buffer_alignment: Some(1),
+                inputs_layout: None,
+                outputs_layout: None,
+                function_metadata: None,
+                standalone_runtime_feature_requirements: empty_runtime_feature_requirements(),
+            }],
+        }
+        .encode_to_vec();
+
+        let runtime_features = get_entrypoint_runtime_features(&encoded).unwrap();
+        assert!(runtime_features.is_empty());
+    }
+
+    #[test]
+    fn get_entrypoint_runtime_features_parses_requirements() {
+        let encoded = AotPackageEntrypointsProto {
+            entrypoint: vec![AotEntrypointProto {
+                function_symbol: Some("foo".to_string()),
+                input_buffer_sizes: vec![1],
+                input_buffer_alignments: vec![1],
+                output_buffer_sizes: vec![1],
+                output_buffer_alignments: vec![1],
+                temp_buffer_size: Some(0),
+                temp_buffer_alignment: Some(1),
+                inputs_layout: None,
+                outputs_layout: None,
+                function_metadata: None,
+                standalone_runtime_feature_requirements: Some(AotRuntimeFeatureRequirementsProto {
+                    required_feature: vec![
+                        AotRuntimeFeatureProto::Assertions as i32,
+                        AotRuntimeFeatureProto::Traces as i32,
+                        AotRuntimeFeatureProto::Covers as i32,
+                    ],
+                }),
+            }],
+        }
+        .encode_to_vec();
+
+        let runtime_features = get_entrypoint_runtime_features(&encoded).unwrap();
+        assert_eq!(
+            runtime_features,
+            vec![
+                AotRuntimeFeature::Assertions,
+                AotRuntimeFeature::Traces,
+                AotRuntimeFeature::Covers,
+            ]
+        );
     }
 
     #[test]
@@ -599,6 +764,7 @@ mod tests {
                 inputs_layout: None,
                 outputs_layout: None,
                 function_metadata: None,
+                standalone_runtime_feature_requirements: empty_runtime_feature_requirements(),
             }],
         }
         .encode_to_vec();
@@ -625,6 +791,7 @@ mod tests {
                 inputs_layout: None,
                 outputs_layout: None,
                 function_metadata: None,
+                standalone_runtime_feature_requirements: empty_runtime_feature_requirements(),
             }],
         }
         .encode_to_vec();
@@ -652,6 +819,7 @@ mod tests {
                     inputs_layout: None,
                     outputs_layout: None,
                     function_metadata: None,
+                    standalone_runtime_feature_requirements: empty_runtime_feature_requirements(),
                 },
                 AotEntrypointProto {
                     function_symbol: Some("bar".to_string()),
@@ -664,6 +832,7 @@ mod tests {
                     inputs_layout: None,
                     outputs_layout: None,
                     function_metadata: None,
+                    standalone_runtime_feature_requirements: empty_runtime_feature_requirements(),
                 },
             ],
         }
@@ -714,6 +883,7 @@ mod tests {
                         sv_result_type: None,
                     }),
                 }),
+                standalone_runtime_feature_requirements: None,
             }],
         }
         .encode_to_vec();
@@ -756,6 +926,7 @@ mod tests {
                         sv_result_type: None,
                     }),
                 }),
+                standalone_runtime_feature_requirements: None,
             }],
         }
         .encode_to_vec();
