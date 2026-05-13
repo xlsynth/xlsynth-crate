@@ -118,6 +118,7 @@ fuzz_target!(|sample: FuzzSample| {
             enable_rewrite_nary_add: false,
             enable_rewrite_mask_low: false,
             array_index_lowering_strategy: Default::default(),
+            unsafe_gatify_gate_operation: false,
         },
     );
     let gate_fn_no_fold = gate_fn_no_fold.expect("unfolded gatify should succeed");
@@ -140,6 +141,7 @@ fuzz_target!(|sample: FuzzSample| {
             enable_rewrite_nary_add: false,
             enable_rewrite_mask_low: false,
             array_index_lowering_strategy: Default::default(),
+            unsafe_gatify_gate_operation: false,
         },
     );
     let gate_fn_fold = gate_fn_fold.expect("folded gatify should succeed");

@@ -211,6 +211,14 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 .action(ArgAction::Set),
         )
         .arg(
+            Arg::new("unsafe_gatify_gate_operation")
+                .long("unsafe-gatify-gate-operation")
+                .value_name("BOOL")
+                .help("Opt into lowering XLS gate operations by masking the value with the predicate.")
+                .value_parser(["true", "false"])
+                .action(ArgAction::Set),
+        )
+        .arg(
             Arg::new("adder_mapping")
                 .long("adder-mapping")
                 .value_name("ADDER_MAPPING")
@@ -487,6 +495,11 @@ fn parse_canonical_g8r_options(matches: &ArgMatches) -> CanonicalG8rOptions {
             matches,
             "enable_rewrite_mask_low",
             defaults.enable_rewrite_mask_low,
+        ),
+        unsafe_gatify_gate_operation: parse_cli_bool(
+            matches,
+            "unsafe_gatify_gate_operation",
+            defaults.unsafe_gatify_gate_operation,
         ),
         adder_mapping: parse_adder_mapping(matches.get_one::<String>("adder_mapping")),
         mul_adder_mapping: matches

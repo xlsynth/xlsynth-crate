@@ -43,6 +43,7 @@ fn stats_for_ir_text_via_ir2gates(
             enable_rewrite_mask_low: false,
             adder_mapping: AdderMapping::default(),
             mul_adder_mapping: None,
+            unsafe_gatify_gate_operation: false,
             aug_opt: Default::default(),
         },
     )

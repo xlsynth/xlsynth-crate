@@ -137,6 +137,7 @@ fuzz_target!(|data: &[u8]| {
             enable_rewrite_nary_add: false,
             enable_rewrite_mask_low: false,
             array_index_lowering_strategy: Default::default(),
+            unsafe_gatify_gate_operation: false,
         },
     )
     .expect("gatify should succeed for generated ext_nary_add IR");

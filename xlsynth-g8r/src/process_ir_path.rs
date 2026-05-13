@@ -147,6 +147,9 @@ pub struct Options {
     pub enable_rewrite_mask_low: bool,
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
     pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
+    /// Opt into lowering XLS `gate` operations by masking the value with the
+    /// predicate.
+    pub unsafe_gatify_gate_operation: bool,
     pub fraig: bool,
     pub emit_independent_op_stats: bool,
     /// Optional override for the top-level entry point in the IR package.
@@ -212,6 +215,7 @@ pub struct CanonicalG8rOptions {
     pub enable_rewrite_mask_low: bool,
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
     pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
+    pub unsafe_gatify_gate_operation: bool,
     pub fraig: bool,
     pub fraig_max_iterations: Option<usize>,
     pub max_fraig_sim_samples: usize,
@@ -237,6 +241,7 @@ impl Default for CanonicalG8rOptions {
             enable_rewrite_mask_low: prep_defaults.enable_rewrite_mask_low,
             adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
             mul_adder_mapping: None,
+            unsafe_gatify_gate_operation: false,
             fraig: true,
             fraig_max_iterations: None,
             max_fraig_sim_samples: DEFAULT_MAX_FRAIG_SIM_SAMPLES,
@@ -272,6 +277,7 @@ impl CanonicalG8rOptions {
             enable_rewrite_mask_low: self.enable_rewrite_mask_low,
             adder_mapping: self.adder_mapping,
             mul_adder_mapping: self.mul_adder_mapping,
+            unsafe_gatify_gate_operation: self.unsafe_gatify_gate_operation,
             fraig: self.fraig,
             emit_independent_op_stats,
             ir_top: ir_top.map(|s| s.to_string()),
@@ -321,6 +327,7 @@ impl From<&Options> for ir2gates::Ir2GatesOptions {
             enable_rewrite_mask_low: options.enable_rewrite_mask_low,
             adder_mapping: options.adder_mapping,
             mul_adder_mapping: options.mul_adder_mapping,
+            unsafe_gatify_gate_operation: options.unsafe_gatify_gate_operation,
             aug_opt: Default::default(),
             ..Self::default()
         }
@@ -347,6 +354,7 @@ impl From<GatifyOptionsInput<'_>> for ir2gate::GatifyOptions {
             enable_rewrite_nary_add: input.prep_opts.enable_rewrite_nary_add,
             enable_rewrite_mask_low: input.prep_opts.enable_rewrite_mask_low,
             array_index_lowering_strategy: Default::default(),
+            unsafe_gatify_gate_operation: input.options.unsafe_gatify_gate_operation,
         }
     }
 }

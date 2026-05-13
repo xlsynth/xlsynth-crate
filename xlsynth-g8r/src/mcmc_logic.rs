@@ -798,6 +798,7 @@ pub fn load_start<P: AsRef<Path>>(p_generic: P) -> Result<GateFn> {
                     enable_rewrite_nary_add: false,
                     enable_rewrite_mask_low: false,
                     array_index_lowering_strategy: Default::default(),
+                    unsafe_gatify_gate_operation: false,
                 };
                 let gatify_output = ir2gate::gatify(top_entity, gatify_options)
                     .map_err(|e| anyhow::anyhow!("Failed to gatify IR from '{}': {}", p_str, e))?;

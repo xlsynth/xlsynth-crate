@@ -428,6 +428,87 @@ fn gatify_array_index(
     gatify_array_index_oob_one_hot(gb, array_ty, array_bits, index_bits)
 }
 
+fn aig_bit_vectors_equal(lhs: &AigBitVector, rhs: &AigBitVector) -> bool {
+    lhs.get_bit_count() == rhs.get_bit_count()
+        && lhs
+            .iter_lsb_to_msb()
+            .zip(rhs.iter_lsb_to_msb())
+            .all(|(lhs_bit, rhs_bit)| lhs_bit == rhs_bit)
+}
+
+fn aig_bit_vector_is_zero(gb: &GateBuilder, bits: &AigBitVector) -> bool {
+    bits.iter_lsb_to_msb().all(|bit| gb.is_known_false(*bit))
+}
+
+struct RepeatedArrayIndexCaseGroup {
+    payload: AigBitVector,
+    selectors: Vec<AigOperand>,
+}
+
+/// Lowers repeated array-index payloads by OR-ing their decode predicates
+/// before masking the shared payload.
+fn gatify_grouped_array_index_if_profitable(
+    gb: &mut GateBuilder,
+    selector_bits: &AigBitVector,
+    cases: &[AigBitVector],
+) -> Option<AigBitVector> {
+    const MIN_CASES: usize = 16;
+    const MIN_REDUCTION_FACTOR: usize = 2;
+
+    if cases.is_empty()
+        || cases.len() < MIN_CASES
+        || selector_bits.get_bit_count() != cases.len()
+        || cases[0].get_bit_count() < 2
+    {
+        return None;
+    }
+
+    let output_bit_count = cases[0].get_bit_count();
+    let mut groups: Vec<RepeatedArrayIndexCaseGroup> = Vec::new();
+    for (case_index, case_bits) in cases.iter().enumerate() {
+        assert_eq!(
+            case_bits.get_bit_count(),
+            output_bit_count,
+            "all array index cases must have the same bit count"
+        );
+        let selector = *selector_bits.get_lsb(case_index);
+        if let Some(group) = groups
+            .iter_mut()
+            .find(|group| aig_bit_vectors_equal(&group.payload, case_bits))
+        {
+            group.selectors.push(selector);
+        } else {
+            groups.push(RepeatedArrayIndexCaseGroup {
+                payload: case_bits.clone(),
+                selectors: vec![selector],
+            });
+        }
+    }
+
+    if groups.len().saturating_mul(MIN_REDUCTION_FACTOR) > cases.len() {
+        return None;
+    }
+
+    let mut masked_groups = Vec::new();
+    for group in groups {
+        if aig_bit_vector_is_zero(gb, &group.payload) {
+            continue;
+        }
+        let group_selected = gb.add_or_nary(&group.selectors, ReductionKind::Tree);
+        if gb.is_known_false(group_selected) {
+            continue;
+        }
+        let mask = gb.replicate(group_selected, output_bit_count);
+        masked_groups.push(gb.add_and_vec(&mask, &group.payload));
+    }
+
+    if masked_groups.is_empty() {
+        Some(AigBitVector::zeros(output_bit_count))
+    } else {
+        Some(gb.add_or_vec_nary(&masked_groups, ReductionKind::Tree))
+    }
+}
+
 /// Lowers an in-bounds array index with an exact one-hot selection.
 fn gatify_array_index_exact(
     gb: &mut GateBuilder,
@@ -441,6 +522,9 @@ fn gatify_array_index_exact(
     for i in 0..array_ty.element_count {
         let case_bits = array_bits.get_lsb_slice(i * element_bit_count, element_bit_count);
         cases.push(case_bits);
+    }
+    if let Some(grouped) = gatify_grouped_array_index_if_profitable(gb, &index_decoded, &cases) {
+        return grouped;
     }
     gatify_one_hot_select(gb, &index_decoded, &cases)
 }
@@ -466,6 +550,9 @@ fn gatify_array_index_oob_one_hot(
         cases.push(case_bits);
     }
     cases.push(cases.last().unwrap().clone());
+    if let Some(grouped) = gatify_grouped_array_index_if_profitable(gb, &one_hot_selector, &cases) {
+        return grouped;
+    }
     gatify_one_hot_select(gb, &one_hot_selector, &cases)
 }
 
@@ -3376,6 +3463,40 @@ fn gatify_node(
             );
             env.add(node_ref, GateOrVec::BitVector(gates));
         }
+        ir::NodePayload::Binop(ir::Binop::Gate, predicate, value) => {
+            if !options.unsafe_gatify_gate_operation {
+                return Err(format!(
+                    "Unsupported node payload {:?}; pass --unsafe-gatify-gate-operation=true to lower XLS gate ops",
+                    payload
+                ));
+            }
+            let predicate_bits = env
+                .get_bit_vector(*predicate)
+                .expect("gate predicate should be present");
+            if predicate_bits.get_bit_count() != 1 {
+                return Err(format!(
+                    "gate predicate must be bits[1], got {} flattened bits",
+                    predicate_bits.get_bit_count()
+                ));
+            }
+            let value_bits = env
+                .get_bit_vector(*value)
+                .expect("gate value should be present");
+            if value_bits.get_bit_count() != node.ty.bit_count() {
+                return Err(format!(
+                    "gate value/output flattened width mismatch: value has {} bits, output has {} bits",
+                    value_bits.get_bit_count(),
+                    node.ty.bit_count()
+                ));
+            }
+            let predicate_bit = *predicate_bits.get_lsb(0);
+            let mask = g8_builder.replicate(predicate_bit, value_bits.get_bit_count());
+            let gated_bits = g8_builder.add_and_vec(&value_bits, &mask);
+            for (i, gate) in gated_bits.iter_lsb_to_msb().enumerate() {
+                g8_builder.add_tag(gate.node, format!("gate_{}_output_bit_{}", node.text_id, i));
+            }
+            env.add(node_ref, GateOrVec::BitVector(gated_bits));
+        }
         ir::NodePayload::Binop(ir::Binop::Sub, a, b) => {
             let gates = gatify_sub_binop(
                 &env,
@@ -3810,6 +3931,7 @@ pub struct GatifyOptions {
     pub enable_rewrite_nary_add: bool,
     pub enable_rewrite_mask_low: bool,
     pub array_index_lowering_strategy: ArrayIndexLoweringStrategy,
+    pub unsafe_gatify_gate_operation: bool,
 }
 
 // Type alias for the lowering map
@@ -4085,6 +4207,7 @@ mod tests {
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
                 array_index_lowering_strategy: Default::default(),
+                unsafe_gatify_gate_operation: false,
             },
         )
         .unwrap();
@@ -4171,6 +4294,7 @@ top fn f(p: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
                 array_index_lowering_strategy: Default::default(),
+                unsafe_gatify_gate_operation: false,
             },
         ) {
             Ok(_) => panic!("expected gate op to remain unsupported by gatify"),
@@ -4208,6 +4332,7 @@ fn f(a: bits[8], b: bits[8]) -> bits[8] {
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
                 array_index_lowering_strategy: Default::default(),
+                unsafe_gatify_gate_operation: false,
             },
         )
         .unwrap();
@@ -4283,6 +4408,7 @@ fn f(a: bits[2] id=1, b: bits[2] id=2) -> bits[2] {
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
                 array_index_lowering_strategy: Default::default(),
+                unsafe_gatify_gate_operation: false,
             },
         )
         .unwrap();
@@ -5223,6 +5349,7 @@ top fn main(x: bits[{width}], amt: bits[{amount_width}]) -> bits[{width}] {{
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
                 array_index_lowering_strategy: Default::default(),
+                unsafe_gatify_gate_operation: false,
             },
         )
         .expect("gatify shra");
@@ -5506,6 +5633,7 @@ top fn main(x: bits[{arg_width}], start: bits[{start_width}], update: bits[{upda
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
                 array_index_lowering_strategy: Default::default(),
+                unsafe_gatify_gate_operation: false,
             },
         )
         .expect("gatify bit_slice_update");
@@ -5823,6 +5951,7 @@ top fn main(array: bits[{element_width}][{array_len}], start: bits[{start_width}
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
                 array_index_lowering_strategy: Default::default(),
+                unsafe_gatify_gate_operation: false,
             },
         )
         .expect("gatify array_slice");
@@ -5975,6 +6104,7 @@ top fn f(start: bits[2], a: bits[8]) -> bits[8][1] {
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
                 array_index_lowering_strategy: Default::default(),
+                unsafe_gatify_gate_operation: false,
             },
         )
         .expect("gatify array_slice with narrow start should not panic");
@@ -6017,6 +6147,7 @@ top fn f(start: bits[4], a: bits[8], b: bits[8]) -> bits[8][1] {
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
                 array_index_lowering_strategy: Default::default(),
+                unsafe_gatify_gate_operation: false,
             },
         )
         .expect("gatify array_slice with wide start should succeed");
@@ -6058,10 +6189,122 @@ top fn f(start: bits[4], a: bits[8], b: bits[8]) -> bits[8][1] {
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
                 array_index_lowering_strategy: Default::default(),
+                unsafe_gatify_gate_operation: false,
             },
         )
         .unwrap()
         .gate_fn
+    }
+
+    fn gatify_ir_text_with_gate_opt_in(ir_text: &str) -> Result<GateFn, String> {
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_package = parser.parse_and_validate_package().unwrap();
+        let ir_fn = ir_package.get_top_fn().unwrap();
+        gatify(
+            ir_fn,
+            GatifyOptions {
+                fold: true,
+                hash: true,
+                check_equivalence: false,
+                adder_mapping: AdderMapping::default(),
+                mul_adder_mapping: None,
+                range_info: None,
+                enable_rewrite_carry_out: false,
+                enable_rewrite_prio_encode: false,
+                enable_rewrite_nary_add: false,
+                enable_rewrite_mask_low: false,
+                array_index_lowering_strategy: Default::default(),
+                unsafe_gatify_gate_operation: true,
+            },
+        )
+        .map(|output| output.gate_fn)
+    }
+
+    #[test]
+    fn test_gate_operation_requires_opt_in() {
+        let ir_text = r#"package sample
+
+top fn f(pred: bits[1] id=1, x: bits[3] id=2) -> bits[3] {
+  ret gated: bits[3] = gate(pred, x, id=3)
+}
+"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_package = parser.parse_and_validate_package().unwrap();
+        let ir_fn = ir_package.get_top_fn().unwrap();
+        let err = gatify(
+            ir_fn,
+            GatifyOptions {
+                fold: true,
+                hash: true,
+                check_equivalence: false,
+                adder_mapping: AdderMapping::default(),
+                mul_adder_mapping: None,
+                range_info: None,
+                enable_rewrite_carry_out: false,
+                enable_rewrite_prio_encode: false,
+                enable_rewrite_nary_add: false,
+                enable_rewrite_mask_low: false,
+                array_index_lowering_strategy: Default::default(),
+                unsafe_gatify_gate_operation: false,
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("--unsafe-gatify-gate-operation=true"));
+    }
+
+    #[test]
+    fn test_gate_operation_masks_bits_when_enabled() {
+        let ir_text = r#"package sample
+
+top fn f(pred: bits[1] id=1, x: bits[3] id=2) -> bits[3] {
+  ret gated: bits[3] = gate(pred, x, id=3)
+}
+"#;
+        let gate_fn = gatify_ir_text_with_gate_opt_in(ir_text).unwrap();
+        let eval = |pred: u64, x: u64| {
+            gate_sim::eval(
+                &gate_fn,
+                &[
+                    IrBits::make_ubits(1, pred).unwrap(),
+                    IrBits::make_ubits(3, x).unwrap(),
+                ],
+                gate_sim::Collect::None,
+            )
+            .outputs[0]
+                .clone()
+        };
+        assert_eq!(eval(0, 0b101), IrBits::make_ubits(3, 0).unwrap());
+        assert_eq!(eval(1, 0b101), IrBits::make_ubits(3, 0b101).unwrap());
+    }
+
+    #[test]
+    fn test_gate_operation_masks_flattened_tuple_when_enabled() {
+        let ir_text = r#"package sample
+
+top fn f(pred: bits[1] id=1, x: bits[2] id=2, y: bits[3] id=3) -> (bits[2], bits[3]) {
+  t: (bits[2], bits[3]) = tuple(x, y, id=4)
+  ret gated: (bits[2], bits[3]) = gate(pred, t, id=5)
+}
+"#;
+        let gate_fn = gatify_ir_text_with_gate_opt_in(ir_text).unwrap();
+        let eval = |pred: u64, x: u64, y: u64| {
+            gate_sim::eval(
+                &gate_fn,
+                &[
+                    IrBits::make_ubits(1, pred).unwrap(),
+                    IrBits::make_ubits(2, x).unwrap(),
+                    IrBits::make_ubits(3, y).unwrap(),
+                ],
+                gate_sim::Collect::None,
+            )
+            .outputs[0]
+                .clone()
+        };
+        assert_eq!(eval(0, 0b10, 0b101), IrBits::make_ubits(5, 0).unwrap());
+        assert_eq!(
+            eval(1, 0b10, 0b101),
+            IrBits::make_ubits(5, 0b10101).unwrap()
+        );
     }
 
     fn gate_eval_1bit(gate_fn: &GateFn, lhs: u64, lhs_width: usize) -> bool {
@@ -6496,6 +6739,74 @@ top fn cone(leaf_7: bits[5], leaf_9: bits[33]) -> bits[1] {
         get_summary_stats(&gb.build())
     }
 
+    fn repeated_literal_array_bits(
+        gb: &mut GateBuilder,
+        array_len: usize,
+        element_width: usize,
+        distinct_values: usize,
+    ) -> AigBitVector {
+        assert!(distinct_values > 0);
+        let mut bits = Vec::with_capacity(array_len * element_width);
+        for i in 0..array_len {
+            let value_bits = gb.add_literal(
+                &xlsynth::IrBits::make_ubits(element_width, (i % distinct_values) as u64).unwrap(),
+            );
+            bits.extend(value_bits.iter_lsb_to_msb().copied());
+        }
+        AigBitVector::from_lsb_is_index_0(&bits)
+    }
+
+    fn get_repeated_literal_array_index_exact_stats(
+        array_len: usize,
+        element_width: usize,
+        index_width: usize,
+        distinct_values: usize,
+    ) -> SummaryStats {
+        let array_ty = ir::ArrayTypeData {
+            element_type: Box::new(ir::Type::Bits(element_width)),
+            element_count: array_len,
+        };
+
+        let mut gb = GateBuilder::new(
+            format!(
+                "array_index_repeated_literal_n{}_w{}",
+                array_len, element_width
+            ),
+            GateBuilderOptions::opt(),
+        );
+        let array_bits =
+            repeated_literal_array_bits(&mut gb, array_len, element_width, distinct_values);
+        let index_bits = gb.add_input("idx".to_string(), index_width);
+        let result = super::gatify_array_index_exact(&mut gb, &array_ty, &array_bits, &index_bits);
+        gb.add_output("result".to_string(), result);
+        get_summary_stats(&gb.build())
+    }
+
+    fn get_repeated_literal_array_index_one_hot_stats(
+        array_len: usize,
+        element_width: usize,
+        index_width: usize,
+        distinct_values: usize,
+    ) -> SummaryStats {
+        let mut gb = GateBuilder::new(
+            format!(
+                "array_index_repeated_literal_one_hot_n{}_w{}",
+                array_len, element_width
+            ),
+            GateBuilderOptions::opt(),
+        );
+        let array_bits =
+            repeated_literal_array_bits(&mut gb, array_len, element_width, distinct_values);
+        let index_bits = gb.add_input("idx".to_string(), index_width);
+        let selector = super::gatify_decode(&mut gb, array_len, &index_bits);
+        let cases = (0..array_len)
+            .map(|i| array_bits.get_lsb_slice(i * element_width, element_width))
+            .collect::<Vec<_>>();
+        let result = crate::ir2gate_utils::gatify_one_hot_select(&mut gb, &selector, &cases);
+        gb.add_output("result".to_string(), result);
+        get_summary_stats(&gb.build())
+    }
+
     fn get_1b_array_index_near_pow2_padded_stats(
         array_len: usize,
         index_width: usize,
@@ -6719,6 +7030,25 @@ top fn cone(leaf_7: bits[5], leaf_9: bits[33]) -> bits[1] {
             "expected naive padded near-pow2 clamping to reduce depth after optimized compares in g8r: {:?} vs {:?}",
             padded_27,
             oob_27
+        );
+    }
+
+    #[test]
+    fn test_repeated_literal_array_index_groups_cases() {
+        let grouped = get_repeated_literal_array_index_exact_stats(
+            /* array_len= */ 32, /* element_width= */ 8, /* index_width= */ 5,
+            /* distinct_values= */ 4,
+        );
+        let one_hot = get_repeated_literal_array_index_one_hot_stats(
+            /* array_len= */ 32, /* element_width= */ 8, /* index_width= */ 5,
+            /* distinct_values= */ 4,
+        );
+
+        assert!(
+            grouped.live_nodes < one_hot.live_nodes,
+            "expected repeated literal grouping to reduce live nodes: grouped={:?} one_hot={:?}",
+            grouped,
+            one_hot
         );
     }
 

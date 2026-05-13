@@ -35,6 +35,7 @@ fn gatify_bf16_mul_benchmark(c: &mut Criterion) {
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
                 array_index_lowering_strategy: Default::default(),
+                unsafe_gatify_gate_operation: false,
             };
             ir2gate::gatify(black_box(&ir_fn), gatify_options).unwrap();
         })
@@ -58,6 +59,7 @@ fn gatify_bf16_mul_benchmark(c: &mut Criterion) {
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
                 array_index_lowering_strategy: Default::default(),
+                unsafe_gatify_gate_operation: false,
             };
             ir2gate::gatify(black_box(&ir_fn), gatify_options).unwrap();
         })
@@ -81,6 +83,7 @@ fn gatify_bf16_mul_benchmark(c: &mut Criterion) {
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
                 array_index_lowering_strategy: Default::default(),
+                unsafe_gatify_gate_operation: false,
             };
             ir2gate::gatify(black_box(&ir_fn), gatify_options).unwrap();
         })
@@ -113,6 +116,7 @@ fn gatify_bf16_add_benchmark(c: &mut Criterion) {
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
                 array_index_lowering_strategy: Default::default(),
+                unsafe_gatify_gate_operation: false,
             };
             ir2gate::gatify(black_box(&ir_fn), gatify_options).unwrap();
         })
@@ -136,6 +140,7 @@ fn gatify_bf16_add_benchmark(c: &mut Criterion) {
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
                 array_index_lowering_strategy: Default::default(),
+                unsafe_gatify_gate_operation: false,
             };
             ir2gate::gatify(black_box(&ir_fn), gatify_options).unwrap();
         })
@@ -159,6 +164,7 @@ fn gatify_bf16_add_benchmark(c: &mut Criterion) {
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
                 array_index_lowering_strategy: Default::default(),
+                unsafe_gatify_gate_operation: false,
             };
             ir2gate::gatify(black_box(&ir_fn), gatify_options).unwrap();
         })

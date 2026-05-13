@@ -353,6 +353,7 @@ pub fn confirm_or_deny_candidate_equivalence(
         enable_rewrite_nary_add: false,
         enable_rewrite_mask_low: false,
         array_index_lowering_strategy: Default::default(),
+        unsafe_gatify_gate_operation: false,
     };
     let proofs =
         prove_equivalence_candidates_varisat(pir_fn, gate_fn, &[candidate.clone()], &opts)?;

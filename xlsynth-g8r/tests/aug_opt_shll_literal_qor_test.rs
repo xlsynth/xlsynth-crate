@@ -32,6 +32,7 @@ fn stats_for_aug_opt_mode(enable_aug_opt: bool) -> (usize, usize) {
             enable_rewrite_mask_low: false,
             adder_mapping: AdderMapping::default(),
             mul_adder_mapping: None,
+            unsafe_gatify_gate_operation: false,
             aug_opt: AugOptOptions {
                 enable: enable_aug_opt,
                 rounds: 1,

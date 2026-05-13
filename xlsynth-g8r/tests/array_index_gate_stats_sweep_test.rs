@@ -49,6 +49,7 @@ fn stats_for_ir_text_with_strategy(
             enable_rewrite_nary_add: false,
             enable_rewrite_mask_low: false,
             array_index_lowering_strategy: strategy,
+            unsafe_gatify_gate_operation: false,
         },
     )
     .expect("gatify");
