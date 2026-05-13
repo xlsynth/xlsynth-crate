@@ -1645,6 +1645,32 @@ xlsynth-driver ir-fn-autocov my_design.opt.ir \
   --threads 32
 ```
 
+### `ir-fn-generate-inputs`
+
+Generates typed argument tuples for an IR function and prints one newline-delimited `.irvals` entry per line.
+
+- Positional arguments:
+  - `<ir_input_file>` - input IR package path.
+- Optional flags:
+  - `--top <NAME>` - function to analyze. Uses the package top when present; if there is no package top, a single function is selected automatically and multiple functions require `--top`.
+  - `--count <COUNT>` - number of tuples to generate (default `1`).
+  - `--seed <SEED>` - PRNG seed (default `0`).
+  - `--float-param <PARAM=FORMAT:DISTRIBUTION>` - override one top-level float-shaped parameter with a floating-point distribution. Supported formats are `fp8` (`(bits[1], bits[4], bits[3])`), `bf16` (`(bits[1], bits[8], bits[7])`), `fp32` (`(bits[1], bits[8], bits[23])`), and `fp64` (`(bits[1], bits[11], bits[52])`). The initial distribution is `gaussian(mean=...,stddev=...)`.
+
+Without `--float-param`, every non-token input bit is sampled uniformly.
+
+Example:
+
+```shell
+xlsynth-driver ir-fn-generate-inputs my_design.opt.ir \
+  --top my_main \
+  --count 1000 \
+  --seed 0 \
+  --float-param 'x=fp32:gaussian(mean=3.2,stddev=3.0)' \
+  --float-param 'y=bf16:gaussian(mean=0.0,stddev=1.0)' \
+  > my_design.inputs.irvals
+```
+
 ### `dslx-fn-eval`
 
 Evaluates a DSLX function for each input tuple in a `.irvals` file and prints one output per line (XLS IR typed values).

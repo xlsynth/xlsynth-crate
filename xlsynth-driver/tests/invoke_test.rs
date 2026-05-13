@@ -4117,6 +4117,45 @@ top fn main(t: token id=1, x: bits[1] id=2) -> token {
 }
 
 #[test]
+fn test_ir_fn_generate_inputs_subcommand() {
+    let _ = env_logger::try_init();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("generate_inputs.ir");
+    std::fs::write(
+        &ir_path,
+        r#"package generate_inputs
+
+top fn main(x: bits[8] id=1, y: (bits[1], bits[8], bits[23]) id=2) -> bits[8] {
+  ret identity.3: bits[8] = identity(x, id=3)
+}
+"#,
+    )
+    .unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("ir-fn-generate-inputs")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--count")
+        .arg("1")
+        .arg("--seed")
+        .arg("0")
+        .arg("--float-param")
+        .arg("y=fp32:gaussian(mean=1.0,stddev=0.0)")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-fn-generate-inputs failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    compare_golden_text(&stdout, "tests/test_ir_fn_generate_inputs.golden.txt");
+}
+
+#[test]
 fn test_ir_fn_rm_asserts_subcommand_rewrites_explicit_non_top_function() {
     let _ = env_logger::try_init();
     let temp_dir = tempfile::tempdir().unwrap();
