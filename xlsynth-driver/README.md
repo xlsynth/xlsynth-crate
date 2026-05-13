@@ -1581,16 +1581,23 @@ xlsynth-driver ir-fn-eval my_mod.ir add '(bits[32]:1, bits[32]:2)'
 
 ### `aig-eval`
 
-Evaluates an AIGER file (`.aag` or `.aig`) with a tuple of typed IR argument
-values and prints the result as an IR typed value.
+Evaluates an AIGER file (`.aag` or `.aig`) with one typed IR argument tuple or
+an ordered `.irvals` stimulus file and prints one IR typed result per input
+sample.
 
 - Required:
   - `<AIG_FILE>`
-  - `<ARG_TUPLE>` – typed tuple, e.g. `(bits[8]:7, bits[8]:13)`.
+  - Exactly one of:
+    - `<ARG_TUPLE>` – typed tuple, e.g. `(bits[8]:7, bits[8]:13)`.
+    - `--input-irvals <IRVALS_PATH>` – `.irvals` file containing one typed tuple
+      per line.
 - Optional:
   - `--fn-type <FN_TYPE>` – explicit function type used to impose structured
     params / return values on the raw AIGER bitstream, e.g.
     `(bits[8], bits[8]) -> bits[8]`.
+  - `--toggle-output-json <PATH>` – with `--input-irvals`, write ordered
+    stimulus toggle activity JSON including aggregate toggle counts plus
+    output-reachable per-node toggle counts and rates.
 
 Examples:
 
@@ -1601,6 +1608,11 @@ xlsynth-driver aig-eval add.aag '(bits[8]:7, bits[8]:13)'
 # Evaluate with an explicit function type (useful when AIGER flattened a
 # structured interface to 1-bit ports / outputs).
 xlsynth-driver aig-eval add.aag '(bits[8]:7, bits[8]:13)'   --fn-type '(bits[8], bits[8]) -> bits[8]'
+
+# Evaluate ordered stimulus and write toggle activity.
+xlsynth-driver aig-eval add.aag \
+  --input-irvals add.irvals \
+  --toggle-output-json add.toggles.json
 ```
 
 ### `ir-fn-autocov`

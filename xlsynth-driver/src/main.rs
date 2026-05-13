@@ -2289,7 +2289,7 @@ fn main() {
         )
         .subcommand(
             clap::Command::new("aig-eval")
-                .about("Evaluates an AIGER file with the provided argument tuple")
+                .about("Evaluates an AIGER file with one tuple or tuples from an .irvals file")
                 .arg(
                     clap::Arg::new("aig_file")
                         .help("The AIGER file (.aag or .aig)")
@@ -2299,8 +2299,22 @@ fn main() {
                 .arg(
                     clap::Arg::new("arg_tuple")
                         .help("Tuple of typed IR values for the function arguments")
-                        .required(true)
                         .index(2),
+                )
+                .arg(
+                    clap::Arg::new("input_irvals")
+                        .long("input-irvals")
+                        .value_name("IRVALS_PATH")
+                        .help("Path to an .irvals file with one typed IR tuple value per line")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("toggle_output_json")
+                        .long("toggle-output-json")
+                        .value_name("PATH")
+                        .help("Write ordered-stimulus toggle activity JSON; requires --input-irvals")
+                        .requires("input_irvals")
+                        .action(ArgAction::Set),
                 )
                 .arg(
                     clap::Arg::new("fn_type")
@@ -2308,6 +2322,12 @@ fn main() {
                         .value_name("FN_TYPE")
                         .help("Optional superimposed function type, e.g. '(bits[32], bits[32]) -> bits[32]'")
                         .action(clap::ArgAction::Set),
+                )
+                .group(
+                    clap::ArgGroup::new("aig_eval_input")
+                        .args(["arg_tuple", "input_irvals"])
+                        .required(true)
+                        .multiple(false),
                 ),
         )
         .subcommand(

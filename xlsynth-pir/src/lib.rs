@@ -39,6 +39,7 @@ pub mod ir_validate;
 pub mod ir_value_utils;
 pub mod ir_verify;
 pub mod ir_verify_parity;
+pub mod irvals;
 pub mod localized_eco2;
 pub mod matching_ged;
 pub mod math;

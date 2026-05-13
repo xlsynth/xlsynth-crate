@@ -6421,6 +6421,111 @@ fn f(a: bits[1] id=1, b: bits[1] id=2, c: bits[1] id=3) -> bits[1] {
 
     assert_eq!(ir_eval_output.stdout, aig_eval_output.stdout);
 }
+
+#[test]
+fn test_aig_eval_input_irvals_writes_toggle_activity_json() {
+    let gate_fn = two_input_gate_fn("main", |a, b, gb| gb.add_and_binary(a, b));
+    let dir = tempfile::tempdir().unwrap();
+    let aag_path = write_aiger_file(&dir, "and.aag", &gate_fn);
+    let irvals_path = dir.path().join("and.irvals");
+    let toggle_json_path = dir.path().join("and.toggles.json");
+    std::fs::write(
+        &irvals_path,
+        "(bits[1]:0, bits[1]:0)\n(bits[1]:1, bits[1]:1)\n(bits[1]:1, bits[1]:0)\n",
+    )
+    .unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("aig-eval")
+        .arg(aag_path.to_str().unwrap())
+        .arg("--input-irvals")
+        .arg(irvals_path.to_str().unwrap())
+        .arg("--toggle-output-json")
+        .arg(toggle_json_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "aig-eval failed: stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "bits[1]:0\nbits[1]:1\nbits[1]:0\n"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(&toggle_json_path).unwrap(),
+        r#"{
+  "sample_count": 3,
+  "transition_count": 2,
+  "aggregate": {
+    "gate_output_toggles": 2,
+    "gate_input_toggles": 3,
+    "primary_input_toggles": 3,
+    "primary_output_toggles": 2
+  },
+  "nodes": [
+    {
+      "node_id": 1,
+      "node_kind": "input",
+      "toggle_count": 1,
+      "toggle_rate": 0.5
+    },
+    {
+      "node_id": 2,
+      "node_kind": "input",
+      "toggle_count": 2,
+      "toggle_rate": 1.0
+    },
+    {
+      "node_id": 3,
+      "node_kind": "and2",
+      "toggle_count": 2,
+      "toggle_rate": 1.0
+    }
+  ]
+}
+"#
+    );
+}
+
+#[test]
+fn test_aig_eval_toggle_output_json_requires_two_input_irvals_samples() {
+    let gate_fn = two_input_gate_fn("main", |a, b, gb| gb.add_and_binary(a, b));
+    let dir = tempfile::tempdir().unwrap();
+    let aag_path = write_aiger_file(&dir, "and.aag", &gate_fn);
+    let irvals_path = dir.path().join("and.irvals");
+    let toggle_json_path = dir.path().join("and.toggles.json");
+    std::fs::write(&irvals_path, "(bits[1]:0, bits[1]:0)\n").unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(command_path)
+        .arg("aig-eval")
+        .arg(aag_path.to_str().unwrap())
+        .arg("--input-irvals")
+        .arg(irvals_path.to_str().unwrap())
+        .arg("--toggle-output-json")
+        .arg(toggle_json_path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "expected aig-eval to reject one-sample toggle output; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("requires at least two"),
+        "expected toggle sample count error, got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!toggle_json_path.exists());
+}
+
 #[test]
 fn test_aig_eval_matches_ir_fn_eval_with_tuple_input_output() {
     let ir = r#"package test
