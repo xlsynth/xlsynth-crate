@@ -20,6 +20,7 @@ default = []
 clap = ["dep:clap"]
 
 [dependencies]
+xlsynth-aot-runtime = {path = "../xlsynth-aot-runtime", version = "0.48.0"}
 xlsynth-sys = {path = "../xlsynth-sys", version = "0.48.0"}
 cargo_metadata = "0.18"
 thiserror = "1"
@@ -31,6 +32,8 @@ toml = "0.8"
 libc = "0.2"
 prost = "0.12.6"
 cc = "1"
+prettyplease = "0.2"
+syn = { version = "2", features = ["full", "parsing"] }
 
 [dev-dependencies]
 env_logger = "0.11"
