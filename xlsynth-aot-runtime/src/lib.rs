@@ -410,15 +410,7 @@ impl StandaloneRunner {
         let temp_buffer =
             AlignedBuffer::new(layout.temp_buffer_size, layout.temp_buffer_alignment)?;
 
-        let required_features = if artifact_metadata.has_asserts {
-            FEATURE_ASSERTIONS
-        } else {
-            0
-        } | if artifact_metadata.has_traces {
-            FEATURE_TRACES
-        } else {
-            0
-        };
+        let required_features = required_runtime_feature_bits(artifact_metadata);
         let mut runtime = std::ptr::null_mut();
         let create_status = unsafe {
             xls_standalone_aot_runtime_create(
@@ -497,6 +489,20 @@ impl Drop for StandaloneRunner {
     }
 }
 
+fn required_runtime_feature_bits(artifact_metadata: &AotArtifactMetadata) -> u32 {
+    let assertion_features = if artifact_metadata.has_asserts {
+        FEATURE_ASSERTIONS
+    } else {
+        0
+    };
+    let trace_features = if artifact_metadata.has_traces {
+        FEATURE_TRACES
+    } else {
+        0
+    };
+    assertion_features | trace_features
+}
+
 fn describe_runtime_status(status: u32) -> String {
     match status {
         STATUS_OK => "runtime returned success without an object".to_string(),
@@ -504,5 +510,39 @@ fn describe_runtime_status(status: u32) -> String {
         STATUS_UNSUPPORTED_FEATURE => "unsupported runtime feature".to_string(),
         STATUS_ALLOCATION_FAILED => "allocation failed".to_string(),
         other => format!("unknown status {other}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn artifact_metadata(has_asserts: bool, has_traces: bool) -> AotArtifactMetadata {
+        AotArtifactMetadata {
+            abi_version: SUPPORTED_ARTIFACT_ABI_VERSION,
+            entrypoint_symbol: "entrypoint",
+            has_asserts,
+            has_traces,
+        }
+    }
+
+    #[test]
+    fn required_runtime_feature_bits_follow_generated_artifact_metadata() {
+        assert_eq!(
+            required_runtime_feature_bits(&artifact_metadata(false, false)),
+            0
+        );
+        assert_eq!(
+            required_runtime_feature_bits(&artifact_metadata(true, false)),
+            FEATURE_ASSERTIONS
+        );
+        assert_eq!(
+            required_runtime_feature_bits(&artifact_metadata(false, true)),
+            FEATURE_TRACES
+        );
+        assert_eq!(
+            required_runtime_feature_bits(&artifact_metadata(true, true)),
+            FEATURE_ASSERTIONS | FEATURE_TRACES
+        );
     }
 }
