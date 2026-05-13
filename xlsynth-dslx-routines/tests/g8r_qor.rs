@@ -74,6 +74,7 @@ fn gate_stats_for_wrapper(module_name: &str, source: &str, top: &str) -> Summary
             adder_mapping: AdderMapping::default(),
             mul_adder_mapping: None,
             aug_opt: Default::default(),
+            unsafe_gatify_gate_operation: false,
         },
     )
     .expect("g8r should lower wrapper IR");
