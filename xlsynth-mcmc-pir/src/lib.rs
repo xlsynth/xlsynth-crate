@@ -77,6 +77,14 @@ use crate::transforms::{
 
 const DEFAULT_ORACLE_RANDOM_SAMPLES: usize = 32;
 
+pub fn parse_irvals_tuple_lines(irvals_text: &str) -> Result<Vec<IrValue>> {
+    xlsynth_pir::irvals::parse_irvals_tuple_lines(irvals_text).map_err(anyhow::Error::msg)
+}
+
+pub fn parse_irvals_tuple_file(path: &Path) -> Result<Vec<IrValue>> {
+    xlsynth_pir::irvals::parse_irvals_tuple_file(path).map_err(anyhow::Error::msg)
+}
+
 // We want invalid-IR candidates (esp. bit_slice bounds) to be visible, since
 // they often indicate a bug in a transform. But they can also happen frequently
 // during exploration, which can drown out more important warnings. So: warn a
@@ -1318,62 +1326,9 @@ fn validate_toggle_stimulus_for_gate_fn<'a>(
             batch.len()
         ));
     }
-    let expected_input_count = gate_fn.inputs.len();
-    for (sample_idx, sample) in batch.iter().enumerate() {
-        if sample.len() != expected_input_count {
-            return Err(anyhow::anyhow!(
-                "toggle sample {} has {} inputs, expected {}",
-                sample_idx + 1,
-                sample.len(),
-                expected_input_count
-            ));
-        }
-        for (input_idx, (bits, gate_input)) in sample.iter().zip(gate_fn.inputs.iter()).enumerate()
-        {
-            let expected_width = gate_input.get_bit_count();
-            if bits.get_bit_count() != expected_width {
-                return Err(anyhow::anyhow!(
-                    "toggle sample {} input {} has width {}, expected {}",
-                    sample_idx + 1,
-                    input_idx,
-                    bits.get_bit_count(),
-                    expected_width
-                ));
-            }
-        }
-    }
+    xlsynth_g8r::aig_sim::gate_simd::validate_ordered_batch_inputs(gate_fn, batch)
+        .map_err(anyhow::Error::msg)?;
     Ok(batch)
-}
-
-/// Parses `.irvals`-style stimulus text where each line is one typed tuple
-/// value.
-pub fn parse_irvals_tuple_lines(irvals_text: &str) -> Result<Vec<IrValue>> {
-    let mut values = Vec::new();
-    for (lineno, line) in irvals_text.lines().enumerate() {
-        let line_no = lineno + 1;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            return Err(anyhow::anyhow!(
-                "empty line {} in stimulus file is not allowed",
-                line_no
-            ));
-        }
-        let tuple_val = IrValue::parse_typed(trimmed).map_err(|e| {
-            anyhow::anyhow!("failed to parse stimulus tuple at line {}: {}", line_no, e)
-        })?;
-        tuple_val.get_elements().map_err(|e| {
-            anyhow::anyhow!("stimulus line {} is not a tuple value: {}", line_no, e)
-        })?;
-        values.push(tuple_val);
-    }
-    Ok(values)
-}
-
-/// Reads and parses a `.irvals` stimulus file.
-pub fn parse_irvals_tuple_file(path: &Path) -> Result<Vec<IrValue>> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("failed to read {}: {}", path.display(), e))?;
-    parse_irvals_tuple_lines(&text)
 }
 
 /// Validates tuple-valued stimulus samples against `f`'s parameter signature

@@ -12,6 +12,7 @@
 use crate::aig::gate::{AigNode, GateFn};
 use core::simd::u64x4;
 use std::ops::{BitAnd, Not};
+use xlsynth::IrBits;
 
 /// A fixed-width boolean vector with 256 lanes.
 ///
@@ -60,6 +61,23 @@ impl Vec256 {
     pub fn to_array(self) -> [u64; 4] {
         self.0.to_array()
     }
+
+    /// Returns the boolean value stored in `lane`.
+    #[inline]
+    pub fn get_lane(self, lane: usize) -> bool {
+        assert!(lane < 256, "Vec256 lane out of bounds: {lane}");
+        let words = self.to_array();
+        ((words[lane / 64] >> (lane % 64)) & 1) != 0
+    }
+
+    /// Returns the number of set lanes in this packed boolean vector.
+    #[inline]
+    pub fn popcount(self) -> usize {
+        self.to_array()
+            .into_iter()
+            .map(|word| word.count_ones() as usize)
+            .sum()
+    }
 }
 
 impl Not for Vec256 {
@@ -84,6 +102,42 @@ pub struct GateSimdResult {
     pub outputs: Vec<Vec256>,
 }
 
+/// Validates one ordered batch of GateFn input vectors.
+///
+/// Each sample must provide one `IrBits` value per declared GateFn input port,
+/// with a width matching that port.
+pub fn validate_ordered_batch_inputs(
+    gate_fn: &GateFn,
+    batch_inputs: &[Vec<IrBits>],
+) -> Result<(), String> {
+    let expected_input_count = gate_fn.inputs.len();
+    for (sample_index, sample) in batch_inputs.iter().enumerate() {
+        if sample.len() != expected_input_count {
+            return Err(format!(
+                "sample {} has {} inputs, expected {}",
+                sample_index + 1,
+                sample.len(),
+                expected_input_count
+            ));
+        }
+        for (input_index, (bits, gate_input)) in
+            sample.iter().zip(gate_fn.inputs.iter()).enumerate()
+        {
+            let expected_width = gate_input.get_bit_count();
+            if bits.get_bit_count() != expected_width {
+                return Err(format!(
+                    "sample {} input {} has width {}, expected {}",
+                    sample_index + 1,
+                    input_index,
+                    bits.get_bit_count(),
+                    expected_width
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn check_simd_input_shape(gate_fn: &GateFn, inputs: &[Vec256]) -> usize {
     // Sanity-check that the batch size is 256 – this is a *fixed* requirement
     // for this interpreter variant.
@@ -96,6 +150,44 @@ fn check_simd_input_shape(gate_fn: &GateFn, inputs: &[Vec256]) -> usize {
         "input vector length mismatch"
     );
     total_input_bits
+}
+
+pub(crate) fn pack_ordered_input_chunk(
+    gate_fn: &GateFn,
+    batch_inputs: &[Vec<IrBits>],
+    chunk_start: usize,
+    chunk_len: usize,
+) -> Vec<Vec256> {
+    assert!(
+        (1..=256).contains(&chunk_len),
+        "chunk length must be in 1..=256; got {chunk_len}"
+    );
+    assert!(
+        chunk_start + chunk_len <= batch_inputs.len(),
+        "input chunk exceeds ordered batch: start {chunk_start}, len {chunk_len}, batch len {}",
+        batch_inputs.len()
+    );
+    let total_input_bits: usize = gate_fn
+        .inputs
+        .iter()
+        .map(|input| input.get_bit_count())
+        .sum();
+    let mut packed_inputs = Vec::with_capacity(total_input_bits);
+    for (input_index, gate_input) in gate_fn.inputs.iter().enumerate() {
+        for bit_index in 0..gate_input.get_bit_count() {
+            let mut words = [0u64; 4];
+            for lane in 0..chunk_len {
+                let bit = batch_inputs[chunk_start + lane][input_index]
+                    .get_bit(bit_index)
+                    .unwrap();
+                if bit {
+                    words[lane / 64] |= 1u64 << (lane % 64);
+                }
+            }
+            packed_inputs.push(Vec256::from_words(words));
+        }
+    }
+    packed_inputs
 }
 
 fn seed_input_values(gate_fn: &GateFn, inputs: &[Vec256], env: &mut [Vec256]) {
@@ -245,6 +337,58 @@ pub fn eval(gate_fn: &GateFn, inputs: &[Vec256]) -> GateSimdResult {
     GateSimdResult { outputs }
 }
 
+fn unpack_output_chunk(
+    gate_fn: &GateFn,
+    flat_outputs: &[Vec256],
+    chunk_len: usize,
+) -> Vec<Vec<IrBits>> {
+    let expected_output_bits: usize = gate_fn
+        .outputs
+        .iter()
+        .map(|output| output.get_bit_count())
+        .sum();
+    assert_eq!(
+        flat_outputs.len(),
+        expected_output_bits,
+        "SIMD output vector length mismatch"
+    );
+    let mut chunk_outputs = Vec::with_capacity(chunk_len);
+    for lane in 0..chunk_len {
+        let mut sample_outputs = Vec::with_capacity(gate_fn.outputs.len());
+        let mut flat_output_index = 0usize;
+        for output in &gate_fn.outputs {
+            let output_width = output.get_bit_count();
+            let bits_lsb_first = (0..output_width)
+                .map(|bit_index| flat_outputs[flat_output_index + bit_index].get_lane(lane))
+                .collect::<Vec<bool>>();
+            sample_outputs.push(IrBits::from_lsb_is_0(&bits_lsb_first));
+            flat_output_index += output_width;
+        }
+        chunk_outputs.push(sample_outputs);
+    }
+    chunk_outputs
+}
+
+/// Evaluates an ordered GateFn input batch with the 256-lane SIMD evaluator.
+///
+/// Samples are chunked internally when the batch is larger than 256 entries.
+/// The returned outer vector is sample-major and preserves the input order.
+pub fn eval_ordered_batch(
+    gate_fn: &GateFn,
+    batch_inputs: &[Vec<IrBits>],
+) -> Result<Vec<Vec<IrBits>>, String> {
+    validate_ordered_batch_inputs(gate_fn, batch_inputs)?;
+    let mut batch_outputs = Vec::with_capacity(batch_inputs.len());
+    for (chunk_index, chunk) in batch_inputs.chunks(256).enumerate() {
+        let chunk_start = chunk_index * 256;
+        let packed_inputs =
+            pack_ordered_input_chunk(gate_fn, batch_inputs, chunk_start, chunk.len());
+        let flat_outputs = eval(gate_fn, &packed_inputs).outputs;
+        batch_outputs.extend(unpack_output_chunk(gate_fn, &flat_outputs, chunk.len()));
+    }
+    Ok(batch_outputs)
+}
+
 /// Evaluates `gate_fn` on `inputs` and returns the total Hamming distance
 /// between the produced outputs and `target_outputs`.
 ///
@@ -272,9 +416,13 @@ pub fn eval_correctness_distance(
     for (got, want) in result.outputs.iter().zip(target_outputs.iter()) {
         let got_words = got.to_array();
         let want_words = want.to_array();
-        for (a, b) in got_words.iter().zip(want_words.iter()) {
-            distance += (a ^ b).count_ones() as usize;
-        }
+        distance += Vec256::from_words([
+            got_words[0] ^ want_words[0],
+            got_words[1] ^ want_words[1],
+            got_words[2] ^ want_words[2],
+            got_words[3] ^ want_words[3],
+        ])
+        .popcount();
     }
 
     distance
@@ -283,6 +431,8 @@ pub fn eval_correctness_distance(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aig::gate::AigBitVector;
+    use crate::aig_sim::gate_sim::{self, Collect};
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
     use rand::{Rng, SeedableRng, rngs::StdRng};
 
@@ -409,5 +559,36 @@ mod tests {
 
         eval_live_node_values_dense_into(&gate_fn, &simd_inputs, &live_nodes, &mut dense_values);
         assert_eq!(dense_values.as_ptr(), reused_ptr);
+    }
+
+    #[test]
+    fn test_eval_ordered_batch_matches_scalar_across_chunks() {
+        let mut gb = GateBuilder::new("simd_batch".to_string(), GateBuilderOptions::opt());
+        let input_a = gb.add_input("a".to_string(), 3);
+        let input_b = gb.add_input("b".to_string(), 2);
+        let xor_a = gb.add_xor_vec(&input_a, &input_a);
+        let and_low = gb.add_and_binary(*input_a.get_lsb(0), *input_b.get_lsb(0));
+        let out1 = gb.add_or_binary(*input_a.get_lsb(1), *input_b.get_lsb(1));
+        gb.add_output("out0".to_string(), xor_a);
+        gb.add_output(
+            "out1".to_string(),
+            AigBitVector::from_lsb_is_index_0(&[and_low, out1]),
+        );
+        let gate_fn = gb.build();
+        let batch_inputs = (0..513)
+            .map(|sample_index| {
+                vec![
+                    IrBits::make_ubits(3, (sample_index % 8) as u64).unwrap(),
+                    IrBits::make_ubits(2, ((sample_index / 3) % 4) as u64).unwrap(),
+                ]
+            })
+            .collect::<Vec<Vec<IrBits>>>();
+
+        let simd_outputs = eval_ordered_batch(&gate_fn, &batch_inputs).unwrap();
+        let scalar_outputs = batch_inputs
+            .iter()
+            .map(|sample| gate_sim::eval(&gate_fn, sample, Collect::None).outputs)
+            .collect::<Vec<Vec<IrBits>>>();
+        assert_eq!(simd_outputs, scalar_outputs);
     }
 }

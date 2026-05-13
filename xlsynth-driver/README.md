@@ -1581,16 +1581,23 @@ xlsynth-driver ir-fn-eval my_mod.ir add '(bits[32]:1, bits[32]:2)'
 
 ### `aig-eval`
 
-Evaluates an AIGER file (`.aag` or `.aig`) with a tuple of typed IR argument
-values and prints the result as an IR typed value.
+Evaluates an AIGER file (`.aag` or `.aig`) with one typed IR argument tuple or
+an ordered `.irvals` stimulus file and prints one IR typed result per input
+sample.
 
 - Required:
   - `<AIG_FILE>`
-  - `<ARG_TUPLE>` – typed tuple, e.g. `(bits[8]:7, bits[8]:13)`.
+  - Exactly one of:
+    - `<ARG_TUPLE>` – typed tuple, e.g. `(bits[8]:7, bits[8]:13)`.
+    - `--input-irvals <IRVALS_PATH>` – `.irvals` file containing one typed tuple
+      per line.
 - Optional:
   - `--fn-type <FN_TYPE>` – explicit function type used to impose structured
     params / return values on the raw AIGER bitstream, e.g.
     `(bits[8], bits[8]) -> bits[8]`.
+  - `--toggle-output-json <PATH>` – with `--input-irvals`, write ordered
+    stimulus toggle activity JSON including aggregate toggle counts plus
+    output-reachable per-node toggle counts and rates.
 
 Examples:
 
@@ -1601,6 +1608,11 @@ xlsynth-driver aig-eval add.aag '(bits[8]:7, bits[8]:13)'
 # Evaluate with an explicit function type (useful when AIGER flattened a
 # structured interface to 1-bit ports / outputs).
 xlsynth-driver aig-eval add.aag '(bits[8]:7, bits[8]:13)'   --fn-type '(bits[8], bits[8]) -> bits[8]'
+
+# Evaluate ordered stimulus and write toggle activity.
+xlsynth-driver aig-eval add.aag \
+  --input-irvals add.irvals \
+  --toggle-output-json add.toggles.json
 ```
 
 ### `ir-fn-autocov`
@@ -1631,6 +1643,32 @@ xlsynth-driver ir-fn-autocov my_design.opt.ir \
   --max-corpus-len 1000 \
   --max-iters 20000 \
   --threads 32
+```
+
+### `ir-fn-generate-inputs`
+
+Generates typed argument tuples for an IR function and prints one newline-delimited `.irvals` entry per line.
+
+- Positional arguments:
+  - `<ir_input_file>` - input IR package path.
+- Optional flags:
+  - `--top <NAME>` - function to analyze. Uses the package top when present; if there is no package top, a single function is selected automatically and multiple functions require `--top`.
+  - `--count <COUNT>` - number of tuples to generate (default `1`).
+  - `--seed <SEED>` - PRNG seed (default `0`).
+  - `--float-param <PARAM=FORMAT:DISTRIBUTION>` - override one top-level float-shaped parameter with a floating-point distribution. Supported formats are `fp8` (`(bits[1], bits[4], bits[3])`), `bf16` (`(bits[1], bits[8], bits[7])`), `fp32` (`(bits[1], bits[8], bits[23])`), and `fp64` (`(bits[1], bits[11], bits[52])`). The initial distribution is `gaussian(mean=...,stddev=...)`.
+
+Without `--float-param`, every non-token input bit is sampled uniformly.
+
+Example:
+
+```shell
+xlsynth-driver ir-fn-generate-inputs my_design.opt.ir \
+  --top my_main \
+  --count 1000 \
+  --seed 0 \
+  --float-param 'x=fp32:gaussian(mean=3.2,stddev=3.0)' \
+  --float-param 'y=bf16:gaussian(mean=0.0,stddev=1.0)' \
+  > my_design.inputs.irvals
 ```
 
 ### `dslx-fn-eval`

@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::aig::{AigNode, GateFn};
-use crate::aig_sim::gate_sim::{Collect, eval};
-use bitvec::vec::BitVec;
+use crate::aig_sim::gate_simd::{self, Vec256};
 use serde::Serialize;
 use xlsynth::IrBits;
 
@@ -70,16 +69,38 @@ pub struct WeightedSwitchingStats {
     pub weighted_switching_milli: u128,
 }
 
-fn collect_all_values(gate_fn: &GateFn, batch_inputs: &[Vec<IrBits>]) -> Vec<BitVec> {
-    let mut all_values_vec: Vec<BitVec> = Vec::with_capacity(batch_inputs.len());
-    for input_vec in batch_inputs {
-        let result = eval(gate_fn, input_vec, Collect::AllWithInputs);
-        let all_values = result
-            .all_values
-            .expect("Collect::AllWithInputs should produce all_values");
-        all_values_vec.push(all_values);
-    }
-    all_values_vec
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToggleNodeKind {
+    Input,
+    Literal,
+    And2,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct NodeToggleStats {
+    /// Stable AIG node id within the `GateFn`.
+    pub node_id: usize,
+    pub node_kind: ToggleNodeKind,
+    /// Number of observed sample-to-sample transitions for this node.
+    pub toggle_count: usize,
+    /// Fraction of ordered stimulus transitions on which this node toggled.
+    pub toggle_rate: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ToggleActivityStats {
+    pub sample_count: usize,
+    pub transition_count: usize,
+    pub aggregate: ToggleStats,
+    /// Output-reachable AIG nodes in stable node-id order.
+    pub nodes: Vec<NodeToggleStats>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiveNodeToggleCounts {
+    live_nodes: Vec<bool>,
+    per_node_toggles: Vec<usize>,
 }
 
 fn collect_and2_indices(gate_fn: &GateFn) -> Vec<usize> {
@@ -95,6 +116,183 @@ fn collect_and2_indices(gate_fn: &GateFn) -> Vec<usize> {
             }
         })
         .collect()
+}
+
+fn collect_and2_input_uses(gate_fn: &GateFn) -> Vec<usize> {
+    let mut use_counts = vec![0usize; gate_fn.gates.len()];
+    for gate in &gate_fn.gates {
+        for operand in gate.get_operands() {
+            use_counts[operand.node.id] += 1;
+        }
+    }
+    use_counts
+}
+
+fn collect_primary_output_uses(gate_fn: &GateFn) -> Vec<usize> {
+    let mut use_counts = vec![0usize; gate_fn.gates.len()];
+    for output in &gate_fn.outputs {
+        for operand in output.bit_vector.iter_lsb_to_msb() {
+            use_counts[operand.node.id] += 1;
+        }
+    }
+    use_counts
+}
+
+fn collect_output_reachable_nodes(gate_fn: &GateFn) -> Vec<bool> {
+    let mut live_nodes = vec![false; gate_fn.gates.len()];
+    for operand in gate_fn.post_order_operands(/* discard_inputs= */ false) {
+        live_nodes[operand.node.id] = true;
+    }
+    live_nodes
+}
+
+fn node_kind(node: &AigNode) -> ToggleNodeKind {
+    match node {
+        AigNode::Input { .. } => ToggleNodeKind::Input,
+        AigNode::Literal { .. } => ToggleNodeKind::Literal,
+        AigNode::And2 { .. } => ToggleNodeKind::And2,
+    }
+}
+
+fn count_low_bits_set(words: [u64; 4], bit_count: usize) -> usize {
+    assert!(
+        bit_count <= 256,
+        "bit_count must be <= 256; got {bit_count}"
+    );
+    let mut remaining = bit_count;
+    let mut masked_words = [0u64; 4];
+    for (word_index, word) in words.into_iter().enumerate() {
+        if remaining == 0 {
+            break;
+        }
+        let bits_here = remaining.min(64);
+        let mask = if bits_here == 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits_here) - 1
+        };
+        masked_words[word_index] = word & mask;
+        remaining -= bits_here;
+    }
+    Vec256::from_words(masked_words).popcount()
+}
+
+/// Counts sample-to-sample transitions within one packed 256-lane trace.
+fn count_adjacent_toggles(value: Vec256, valid_samples: usize) -> usize {
+    assert!(
+        (1..=256).contains(&valid_samples),
+        "valid sample count must be in 1..=256; got {valid_samples}"
+    );
+    let transition_count = valid_samples - 1;
+    if transition_count == 0 {
+        return 0;
+    }
+    let words = value.to_array();
+    let adjacent_diffs = [
+        words[0] ^ ((words[0] >> 1) | (words[1] << 63)),
+        words[1] ^ ((words[1] >> 1) | (words[2] << 63)),
+        words[2] ^ ((words[2] >> 1) | (words[3] << 63)),
+        words[3] ^ (words[3] >> 1),
+    ];
+    count_low_bits_set(adjacent_diffs, transition_count)
+}
+
+fn validate_toggle_batch_inputs(
+    gate_fn: &GateFn,
+    batch_inputs: &[Vec<IrBits>],
+) -> Result<(), String> {
+    if batch_inputs.len() < 2 {
+        return Err(format!(
+            "toggle stimulus must contain at least two samples; got {}",
+            batch_inputs.len()
+        ));
+    }
+    gate_simd::validate_ordered_batch_inputs(gate_fn, batch_inputs)
+        .map_err(|e| format!("invalid toggle stimulus: {e}"))
+}
+
+fn count_primary_input_toggles(batch_inputs: &[Vec<IrBits>]) -> usize {
+    let mut primary_input_toggles = 0;
+    for pair in batch_inputs.windows(2) {
+        let (prev, next) = (&pair[0], &pair[1]);
+        assert_eq!(prev.len(), next.len());
+        for (prev_bits, next_bits) in prev.iter().zip(next.iter()) {
+            assert_eq!(prev_bits.get_bit_count(), next_bits.get_bit_count());
+            for i in 0..prev_bits.get_bit_count() {
+                let a = prev_bits.get_bit(i).unwrap();
+                let b = next_bits.get_bit(i).unwrap();
+                if a != b {
+                    primary_input_toggles += 1;
+                }
+            }
+        }
+    }
+    primary_input_toggles
+}
+
+/// Counts output-reachable node transitions across an ordered stimulus batch.
+fn count_live_node_toggles_simd(
+    gate_fn: &GateFn,
+    batch_inputs: &[Vec<IrBits>],
+) -> Result<LiveNodeToggleCounts, String> {
+    validate_toggle_batch_inputs(gate_fn, batch_inputs)?;
+    let live_nodes = collect_output_reachable_nodes(gate_fn);
+    let mut per_node_toggles = vec![0usize; gate_fn.gates.len()];
+    let mut previous_chunk_last_values = vec![false; gate_fn.gates.len()];
+    let mut has_previous_chunk = false;
+
+    for (chunk_index, chunk) in batch_inputs.chunks(256).enumerate() {
+        let chunk_start = chunk_index * 256;
+        let packed_inputs =
+            gate_simd::pack_ordered_input_chunk(gate_fn, batch_inputs, chunk_start, chunk.len());
+        let all_values = gate_simd::eval_all_node_values(gate_fn, &packed_inputs);
+
+        for (node_index, &is_live) in live_nodes.iter().enumerate() {
+            if !is_live {
+                continue;
+            }
+            let value = all_values[node_index];
+            if has_previous_chunk && previous_chunk_last_values[node_index] != value.get_lane(0) {
+                per_node_toggles[node_index] += 1;
+            }
+            per_node_toggles[node_index] += count_adjacent_toggles(value, chunk.len());
+            previous_chunk_last_values[node_index] = value.get_lane(chunk.len() - 1);
+        }
+        has_previous_chunk = true;
+    }
+
+    Ok(LiveNodeToggleCounts {
+        live_nodes,
+        per_node_toggles,
+    })
+}
+
+fn aggregate_toggle_stats(
+    gate_fn: &GateFn,
+    batch_inputs: &[Vec<IrBits>],
+    per_node_toggles: &[usize],
+) -> ToggleStats {
+    let and2_indices = collect_and2_indices(gate_fn);
+    let gate_output_toggles = and2_indices.iter().map(|&idx| per_node_toggles[idx]).sum();
+    let and2_input_uses = collect_and2_input_uses(gate_fn);
+    let gate_input_toggles = per_node_toggles
+        .iter()
+        .zip(and2_input_uses.iter())
+        .map(|(&toggles, &uses)| toggles * uses)
+        .sum();
+    let primary_input_toggles = count_primary_input_toggles(batch_inputs);
+    let primary_output_uses = collect_primary_output_uses(gate_fn);
+    let primary_output_toggles = per_node_toggles
+        .iter()
+        .zip(primary_output_uses.iter())
+        .map(|(&toggles, &uses)| toggles * uses)
+        .sum();
+    ToggleStats {
+        gate_output_toggles,
+        gate_input_toggles,
+        primary_input_toggles,
+        primary_output_toggles,
+    }
 }
 
 fn f64_to_u128_round_saturating(v: f64) -> u128 {
@@ -137,25 +335,14 @@ pub fn count_weighted_switching(
     batch_inputs: &[Vec<IrBits>],
     options: &WeightedSwitchingOptions,
 ) -> WeightedSwitchingStats {
-    assert!(
-        batch_inputs.len() >= 2,
-        "Need at least two input vectors to count toggles"
-    );
-
-    let all_values_vec = collect_all_values(gate_fn, batch_inputs);
+    let live_node_toggles =
+        count_live_node_toggles_simd(gate_fn, batch_inputs).unwrap_or_else(|e| panic!("{e}"));
+    let per_node_output_toggles = &live_node_toggles.per_node_toggles;
     let and2_indices = collect_and2_indices(gate_fn);
-
-    let mut per_node_output_toggles = vec![0usize; gate_fn.gates.len()];
-    let mut gate_output_toggles = 0usize;
-    for pair in all_values_vec.windows(2) {
-        let (prev, next) = (&pair[0], &pair[1]);
-        for &idx in &and2_indices {
-            if prev[idx] != next[idx] {
-                per_node_output_toggles[idx] += 1;
-                gate_output_toggles += 1;
-            }
-        }
-    }
+    let gate_output_toggles = and2_indices
+        .iter()
+        .map(|&idx| per_node_output_toggles[idx])
+        .sum();
 
     let mut internal_fanout = vec![0usize; gate_fn.gates.len()];
     for gate in gate_fn.gates.iter() {
@@ -164,12 +351,7 @@ pub fn count_weighted_switching(
             internal_fanout[b.node.id] += 1;
         }
     }
-    let mut primary_output_uses = vec![0usize; gate_fn.gates.len()];
-    for output in gate_fn.outputs.iter() {
-        for operand in output.bit_vector.iter_lsb_to_msb() {
-            primary_output_uses[operand.node.id] += 1;
-        }
-    }
+    let primary_output_uses = collect_primary_output_uses(gate_fn);
 
     let mut weighted_switching_milli: u128 = 0;
     for &idx in &and2_indices {
@@ -207,92 +389,47 @@ pub fn count_weighted_switching(
 /// ToggleStats: gate_output_toggles, gate_input_toggles, primary_input_toggles,
 /// primary_output_toggles
 pub fn count_toggles(gate_fn: &GateFn, batch_inputs: &[Vec<IrBits>]) -> ToggleStats {
-    assert!(
-        batch_inputs.len() >= 2,
-        "Need at least two input vectors to count toggles"
-    );
     // Debug: print first 3 input vectors
     for (i, input_vec) in batch_inputs.iter().take(3).enumerate() {
         log::debug!("batch_inputs[{}]: {:?}", i, input_vec);
     }
-    let all_values_vec = collect_all_values(gate_fn, batch_inputs);
+    let live_node_toggles =
+        count_live_node_toggles_simd(gate_fn, batch_inputs).unwrap_or_else(|e| panic!("{e}"));
+    aggregate_toggle_stats(gate_fn, batch_inputs, &live_node_toggles.per_node_toggles)
+}
 
-    // For each consecutive pair, count toggles at all gate outputs (AND2 nodes
-    // only)
-    let and2_indices = collect_and2_indices(gate_fn);
-    let mut gate_output_toggles = 0;
-    for pair in all_values_vec.windows(2) {
-        let (prev, next) = (&pair[0], &pair[1]);
-        for &idx in &and2_indices {
-            if prev[idx] != next[idx] {
-                gate_output_toggles += 1;
-            }
-        }
-    }
-    // For each consecutive pair, count toggles at all gate inputs
-    let mut gate_input_toggles = 0;
-    // For each gate in the circuit
-    for (gate_idx, gate) in gate_fn.gates.iter().enumerate() {
-        // For each input operand to the gate
-        for operand in gate.get_operands() {
-            // For the first 3 transitions, print the values
-            for (trans_idx, pair) in all_values_vec.windows(2).enumerate() {
-                let (prev, next) = (&pair[0], &pair[1]);
-                let prev_val = prev[operand.node.id] ^ operand.negated;
-                let next_val = next[operand.node.id] ^ operand.negated;
-                if trans_idx < 3 {
-                    log::debug!(
-                        "Gate {} operand {}: prev={} next={} (toggle={})",
-                        gate_idx,
-                        operand.node.id,
-                        prev_val,
-                        next_val,
-                        prev_val != next_val
-                    );
-                }
-                if prev_val != next_val {
-                    gate_input_toggles += 1;
-                }
-            }
-        }
-    }
-    // Count bit toggles in the raw batch input vectors (primary inputs)
-    let mut primary_input_toggles = 0;
-    for pair in batch_inputs.windows(2) {
-        let (prev, next) = (&pair[0], &pair[1]);
-        assert_eq!(prev.len(), next.len());
-        for (prev_bits, next_bits) in prev.iter().zip(next.iter()) {
-            assert_eq!(prev_bits.get_bit_count(), next_bits.get_bit_count());
-            for i in 0..prev_bits.get_bit_count() {
-                let a = prev_bits.get_bit(i).unwrap();
-                let b = next_bits.get_bit(i).unwrap();
-                if a != b {
-                    primary_input_toggles += 1;
-                }
-            }
-        }
-    }
-    // Count toggles at the circuit's output pins only
-    let mut primary_output_toggles = 0;
-    // For each output bit in the circuit
-    let output_bit_indices: Vec<usize> = gate_fn
-        .outputs
+/// Counts ordered-stimulus toggle activity for output-reachable AIG nodes.
+pub fn count_toggle_activity(
+    gate_fn: &GateFn,
+    batch_inputs: &[Vec<IrBits>],
+) -> ToggleActivityStats {
+    let live_node_toggles =
+        count_live_node_toggles_simd(gate_fn, batch_inputs).unwrap_or_else(|e| panic!("{e}"));
+    let transition_count = batch_inputs.len() - 1;
+    let nodes = gate_fn
+        .gates
         .iter()
-        .flat_map(|output| output.bit_vector.iter_lsb_to_msb().map(|bit| bit.node.id))
-        .collect();
-    for pair in all_values_vec.windows(2) {
-        let (prev, next) = (&pair[0], &pair[1]);
-        for &idx in &output_bit_indices {
-            if prev[idx] != next[idx] {
-                primary_output_toggles += 1;
+        .enumerate()
+        .filter(|(node_index, _)| live_node_toggles.live_nodes[*node_index])
+        .map(|(node_id, node)| {
+            let toggle_count = live_node_toggles.per_node_toggles[node_id];
+            NodeToggleStats {
+                node_id,
+                node_kind: node_kind(node),
+                toggle_count,
+                toggle_rate: toggle_count as f64 / transition_count as f64,
             }
-        }
-    }
-    ToggleStats {
-        gate_output_toggles,
-        gate_input_toggles,
-        primary_input_toggles,
-        primary_output_toggles,
+        })
+        .collect();
+    ToggleActivityStats {
+        sample_count: batch_inputs.len(),
+        transition_count,
+        aggregate: aggregate_toggle_stats(
+            gate_fn,
+            batch_inputs,
+            &live_node_toggles.per_node_toggles,
+        ),
+        nodes,
     }
 }
 
@@ -301,9 +438,101 @@ mod tests {
     use super::*;
     use crate::{
         aig::gate::AigBitVector,
+        aig_sim::gate_sim::{self, Collect},
         gate_builder::{GateBuilder, GateBuilderOptions},
     };
+    use bitvec::vec::BitVec;
+    use rand::{Rng, SeedableRng};
+    use rand_xoshiro::Xoshiro256PlusPlus;
     use xlsynth::IrBits;
+
+    fn scalar_collect_all_values(gate_fn: &GateFn, batch_inputs: &[Vec<IrBits>]) -> Vec<BitVec> {
+        batch_inputs
+            .iter()
+            .map(|input_vec| {
+                gate_sim::eval(gate_fn, input_vec, Collect::AllWithInputs)
+                    .all_values
+                    .expect("Collect::AllWithInputs should produce all_values")
+            })
+            .collect()
+    }
+
+    fn scalar_count_node_toggles(gate_fn: &GateFn, batch_inputs: &[Vec<IrBits>]) -> Vec<usize> {
+        let all_values = scalar_collect_all_values(gate_fn, batch_inputs);
+        let mut per_node_toggles = vec![0usize; gate_fn.gates.len()];
+        for pair in all_values.windows(2) {
+            let (prev, next) = (&pair[0], &pair[1]);
+            for node_index in 0..gate_fn.gates.len() {
+                if prev[node_index] != next[node_index] {
+                    per_node_toggles[node_index] += 1;
+                }
+            }
+        }
+        per_node_toggles
+    }
+
+    fn scalar_count_toggles(gate_fn: &GateFn, batch_inputs: &[Vec<IrBits>]) -> ToggleStats {
+        let per_node_toggles = scalar_count_node_toggles(gate_fn, batch_inputs);
+        let gate_output_toggles = collect_and2_indices(gate_fn)
+            .iter()
+            .map(|&idx| per_node_toggles[idx])
+            .sum();
+        let and2_input_uses = collect_and2_input_uses(gate_fn);
+        let gate_input_toggles = per_node_toggles
+            .iter()
+            .zip(and2_input_uses.iter())
+            .map(|(&toggles, &uses)| toggles * uses)
+            .sum();
+        let primary_output_uses = collect_primary_output_uses(gate_fn);
+        let primary_output_toggles = per_node_toggles
+            .iter()
+            .zip(primary_output_uses.iter())
+            .map(|(&toggles, &uses)| toggles * uses)
+            .sum();
+        ToggleStats {
+            gate_output_toggles,
+            gate_input_toggles,
+            primary_input_toggles: count_primary_input_toggles(batch_inputs),
+            primary_output_toggles,
+        }
+    }
+
+    fn scalar_count_weighted_switching(
+        gate_fn: &GateFn,
+        batch_inputs: &[Vec<IrBits>],
+        options: &WeightedSwitchingOptions,
+    ) -> WeightedSwitchingStats {
+        let per_node_output_toggles = scalar_count_node_toggles(gate_fn, batch_inputs);
+        let gate_output_toggles = collect_and2_indices(gate_fn)
+            .iter()
+            .map(|&idx| per_node_output_toggles[idx])
+            .sum();
+        let mut internal_fanout = vec![0usize; gate_fn.gates.len()];
+        for gate in &gate_fn.gates {
+            if let AigNode::And2 { a, b, .. } = gate {
+                internal_fanout[a.node.id] += 1;
+                internal_fanout[b.node.id] += 1;
+            }
+        }
+        let primary_output_uses = collect_primary_output_uses(gate_fn);
+        let mut weighted_switching_milli = 0u128;
+        for idx in collect_and2_indices(gate_fn) {
+            let toggles = per_node_output_toggles[idx] as u128;
+            if toggles == 0 {
+                continue;
+            }
+            let effective_load = (internal_fanout[idx] as f64)
+                + options.primary_output_load * (primary_output_uses[idx] as f64);
+            let weight = options.beta1 * effective_load + options.beta2 * effective_load.powi(2);
+            let weight_milli = f64_to_u128_round_saturating(weight * 1000.0);
+            weighted_switching_milli =
+                weighted_switching_milli.saturating_add(toggles.saturating_mul(weight_milli));
+        }
+        WeightedSwitchingStats {
+            gate_output_toggles,
+            weighted_switching_milli,
+        }
+    }
 
     #[test]
     fn test_count_toggles_simple_and() {
@@ -475,6 +704,117 @@ mod tests {
         assert_eq!(
             defaults.gate_output_toggles, toggle_stats.gate_output_toggles,
             "weighted switching should report the same raw interior gate-output toggles"
+        );
+    }
+
+    #[test]
+    fn test_count_toggles_counts_simd_chunk_boundary_transition() {
+        let mut gb = GateBuilder::new("chunk_boundary".to_string(), GateBuilderOptions::no_opt());
+        let input = gb.add_input("in".to_string(), 1);
+        let true_op = gb.get_true();
+        let passthrough = gb.add_and_binary(*input.get_lsb(0), true_op);
+        gb.add_output("out".to_string(), AigBitVector::from_bit(passthrough));
+        let gate_fn = gb.build();
+
+        let mut batch_inputs = vec![vec![IrBits::make_ubits(1, 0).unwrap()]; 256];
+        batch_inputs.push(vec![IrBits::make_ubits(1, 1).unwrap()]);
+
+        assert_eq!(
+            count_toggles(&gate_fn, &batch_inputs),
+            ToggleStats {
+                gate_output_toggles: 1,
+                gate_input_toggles: 1,
+                primary_input_toggles: 1,
+                primary_output_toggles: 1,
+            }
+        );
+        assert_eq!(
+            count_weighted_switching(
+                &gate_fn,
+                &batch_inputs,
+                &WeightedSwitchingOptions::default(),
+            ),
+            WeightedSwitchingStats {
+                gate_output_toggles: 1,
+                weighted_switching_milli: 1000,
+            }
+        );
+        assert_eq!(
+            count_toggle_activity(&gate_fn, &batch_inputs),
+            ToggleActivityStats {
+                sample_count: 257,
+                transition_count: 256,
+                aggregate: ToggleStats {
+                    gate_output_toggles: 1,
+                    gate_input_toggles: 1,
+                    primary_input_toggles: 1,
+                    primary_output_toggles: 1,
+                },
+                nodes: vec![
+                    NodeToggleStats {
+                        node_id: 0,
+                        node_kind: ToggleNodeKind::Literal,
+                        toggle_count: 0,
+                        toggle_rate: 0.0,
+                    },
+                    NodeToggleStats {
+                        node_id: 1,
+                        node_kind: ToggleNodeKind::Input,
+                        toggle_count: 1,
+                        toggle_rate: 1.0 / 256.0,
+                    },
+                    NodeToggleStats {
+                        node_id: 2,
+                        node_kind: ToggleNodeKind::And2,
+                        toggle_count: 1,
+                        toggle_rate: 1.0 / 256.0,
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn test_simd_toggle_metrics_match_scalar_reference_across_chunks() {
+        let mut gb = GateBuilder::new(
+            "simd_toggle_equivalence".to_string(),
+            GateBuilderOptions::no_opt(),
+        );
+        let a = gb.add_input("a".to_string(), 3);
+        let b = gb.add_input("b".to_string(), 2);
+        let live0 = gb.add_and_binary(*a.get_lsb(0), *b.get_lsb(0));
+        let not_b1 = gb.add_not(*b.get_lsb(1));
+        let live1 = gb.add_and_binary(*a.get_lsb(1), not_b1);
+        let out = gb.add_and_binary(live0, live1);
+        let _dead = gb.add_and_binary(*a.get_lsb(0), *a.get_lsb(2));
+        gb.add_output(
+            "out".to_string(),
+            AigBitVector::from_lsb_is_index_0(&[out, *a.get_lsb(0)]),
+        );
+        let gate_fn = gb.build();
+
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(42);
+        let batch_inputs: Vec<Vec<IrBits>> = (0..513)
+            .map(|_| {
+                vec![
+                    IrBits::make_ubits(3, rng.r#gen_range(0u64..8u64)).unwrap(),
+                    IrBits::make_ubits(2, rng.r#gen_range(0u64..4u64)).unwrap(),
+                ]
+            })
+            .collect();
+        let options = WeightedSwitchingOptions {
+            beta1: 1.5,
+            beta2: 0.25,
+            primary_output_load: 2.0,
+        };
+
+        assert_eq!(
+            count_toggles(&gate_fn, &batch_inputs),
+            scalar_count_toggles(&gate_fn, &batch_inputs)
+        );
+        assert_eq!(
+            count_weighted_switching(&gate_fn, &batch_inputs, &options),
+            scalar_count_weighted_switching(&gate_fn, &batch_inputs, &options)
         );
     }
 

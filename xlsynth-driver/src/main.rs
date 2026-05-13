@@ -89,6 +89,7 @@ mod ir_equiv_blocks;
 mod ir_fn_autocov;
 mod ir_fn_cone_extract;
 mod ir_fn_eval;
+mod ir_fn_generate_inputs;
 mod ir_fn_mffcs;
 mod ir_fn_node_count;
 mod ir_fn_node_count_corpus;
@@ -2289,7 +2290,7 @@ fn main() {
         )
         .subcommand(
             clap::Command::new("aig-eval")
-                .about("Evaluates an AIGER file with the provided argument tuple")
+                .about("Evaluates an AIGER file with one tuple or tuples from an .irvals file")
                 .arg(
                     clap::Arg::new("aig_file")
                         .help("The AIGER file (.aag or .aig)")
@@ -2299,8 +2300,22 @@ fn main() {
                 .arg(
                     clap::Arg::new("arg_tuple")
                         .help("Tuple of typed IR values for the function arguments")
-                        .required(true)
                         .index(2),
+                )
+                .arg(
+                    clap::Arg::new("input_irvals")
+                        .long("input-irvals")
+                        .value_name("IRVALS_PATH")
+                        .help("Path to an .irvals file with one typed IR tuple value per line")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("toggle_output_json")
+                        .long("toggle-output-json")
+                        .value_name("PATH")
+                        .help("Write ordered-stimulus toggle activity JSON; requires --input-irvals")
+                        .requires("input_irvals")
+                        .action(ArgAction::Set),
                 )
                 .arg(
                     clap::Arg::new("fn_type")
@@ -2308,6 +2323,12 @@ fn main() {
                         .value_name("FN_TYPE")
                         .help("Optional superimposed function type, e.g. '(bits[32], bits[32]) -> bits[32]'")
                         .action(clap::ArgAction::Set),
+                )
+                .group(
+                    clap::ArgGroup::new("aig_eval_input")
+                        .args(["arg_tuple", "input_irvals"])
+                        .required(true)
+                        .multiple(false),
                 ),
         )
         .subcommand(
@@ -2656,6 +2677,45 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                         .default_value("true")
                         .num_args(1)
                         .action(clap::ArgAction::Set),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("ir-fn-generate-inputs")
+                .about("Generates typed input tuples for an IR function")
+                .arg(
+                    clap::Arg::new("ir_input_file")
+                        .help("The input IR file")
+                        .required(true)
+                        .index(1),
+                )
+                .add_ir_top_arg(false)
+                .arg(
+                    clap::Arg::new("count")
+                        .long("count")
+                        .value_name("COUNT")
+                        .help("Number of input tuples to generate")
+                        .value_parser(clap::value_parser!(usize))
+                        .default_value("1")
+                        .num_args(1)
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("seed")
+                        .long("seed")
+                        .value_name("SEED")
+                        .help("PRNG seed")
+                        .value_parser(clap::value_parser!(u64))
+                        .default_value("0")
+                        .num_args(1)
+                        .action(clap::ArgAction::Set),
+                )
+                .arg(
+                    clap::Arg::new("float_param")
+                        .long("float-param")
+                        .value_name("PARAM=FORMAT:DISTRIBUTION")
+                        .help("Override one top-level float parameter with a distribution, e.g. x=fp32:gaussian(mean=3.2,stddev=3.0)")
+                        .num_args(1)
+                        .action(clap::ArgAction::Append),
                 ),
         )
         .subcommand(
@@ -3533,6 +3593,9 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("ir-fn-autocov", subm)) => {
             ir_fn_autocov::handle_ir_fn_autocov(subm, &config);
+        }
+        Some(("ir-fn-generate-inputs", subm)) => {
+            ir_fn_generate_inputs::handle_ir_fn_generate_inputs(subm, &config);
         }
         Some(("ir-fn-eval", subm)) => {
             ir_fn_eval::handle_ir_fn_eval(subm, &config);
