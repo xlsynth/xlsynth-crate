@@ -21,7 +21,8 @@ pub struct LibraryWithTimingData {
 }
 
 impl Library {
-    fn from_proto(mut proto: liberty_proto::Library) -> Self {
+    /// Wraps a Liberty proto after dropping timing payloads.
+    pub fn from_proto(mut proto: liberty_proto::Library) -> Self {
         strip_timing_data(&mut proto);
         Self { proto }
     }
@@ -36,7 +37,8 @@ impl Library {
 }
 
 impl LibraryWithTimingData {
-    fn from_proto(proto: liberty_proto::Library) -> Self {
+    /// Wraps a Liberty proto while preserving timing payloads.
+    pub fn from_proto(proto: liberty_proto::Library) -> Self {
         Self { proto }
     }
 

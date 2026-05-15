@@ -833,7 +833,7 @@ mod tests {
             .find(|pin| pin.name == "Y")
             .expect("output pin")
             .timing_arcs[0]
-            .when = "EN".to_string();
+            .timing_type = "rising_edge".to_string();
         let lib = xlsynth_g8r::liberty_proto::Library {
             cells: vec![invalid_fast, make_nand2_cell("NAND2x1_nominal", 1)],
             threshold_voltage_groups: vec!["nominal".to_string(), "fast".to_string()],
