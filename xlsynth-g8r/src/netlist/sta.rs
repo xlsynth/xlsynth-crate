@@ -5,7 +5,8 @@
 //! This module implements a limited-scope, combinational max-arrival analysis:
 //! - Uses Liberty combinational timing arcs (`cell_rise`, `cell_fall`,
 //!   `rise_transition`, `fall_transition`).
-//! - Propagates rise/fall arrival and transition values net-by-net.
+//! - Propagates rise/fall arrival and transition values bit-by-bit, then
+//!   aggregates report timing back to parsed nets.
 //! - Assumes fixed transition at primary-input sources.
 //! - Uses summed input-pin capacitance on each net plus a fixed module-output
 //!   load to query timing tables.
@@ -19,10 +20,9 @@
 //!   frontier reduction relies on larger transition/load queries not producing
 //!   smaller delay/slew values. Small decreases within the
 //!   characterization-noise tolerance are treated as effectively equal.
-//! - Accepts scalar bare-literal and scalar alias continuous assigns as
-//!   zero-delay sources so mapped netlists emitted by tools such as ABC can
-//!   preserve constant outputs and wire aliases without needing synthetic
-//!   cells.
+//! - Accepts literal, alias, slice, and concat continuous assigns as zero-delay
+//!   bit sources so mapped netlists emitted by tools such as Yosys/ABC can
+//!   preserve constants and wire aliases without needing synthetic cells.
 //!
 //! At a high level, the analysis is:
 //! 1. Index each instance's cell/pin connectivity, recording one driver and all
@@ -51,6 +51,7 @@ use crate::liberty::LibraryWithTimingData;
 use crate::liberty::cell_formula::parse_formula;
 use crate::liberty::timing_table::TimingTableArrayView;
 use crate::liberty_proto::{LuTableTemplate, Pin, PinDirection, TimingArc, TimingTable};
+use crate::netlist::bit_ref;
 use crate::netlist::parse::{AssignExpr, Net, NetIndex, NetRef, NetlistModule, PortDirection};
 use anyhow::{Result, anyhow};
 use std::cmp::Ordering;
@@ -298,15 +299,93 @@ struct NetEndpoint {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ScalarAssignSource {
+enum BitAssignSource {
     Literal(bool),
-    Alias(NetIndex),
+    Alias(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResolvedTimingSource {
     Literal(bool),
-    Net(NetIndex),
+    Bit(usize),
+}
+
+#[derive(Clone, Debug)]
+struct UnsupportedAssignSource {
+    lhs_bits: Vec<usize>,
+    rendered_lhs: String,
+}
+
+#[derive(Clone, Debug)]
+struct AssignSourceAnalysis {
+    bit_sources: Vec<Option<BitAssignSource>>,
+    unsupported_sources: Vec<UnsupportedAssignSource>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PinBitSource {
+    Bit(usize),
+    Literal(bool),
+}
+
+struct StaBitIndex {
+    bits: Vec<bit_ref::NetBit>,
+    index_by_bit: HashMap<bit_ref::NetBit, usize>,
+    bits_by_net: Vec<Vec<usize>>,
+}
+
+impl StaBitIndex {
+    fn build(nets: &[Net]) -> Result<Self> {
+        let mut bits = Vec::new();
+        let mut index_by_bit = HashMap::new();
+        let mut bits_by_net = vec![Vec::new(); nets.len()];
+        for (net_raw_idx, net) in nets.iter().enumerate() {
+            let net_idx = NetIndex(net_raw_idx);
+            for offset in 0..net.width_bits() {
+                let bit_number = net.bit_number(offset).ok_or_else(|| {
+                    anyhow!(
+                        "internal error computing bit {} for net index {}",
+                        offset,
+                        net_raw_idx
+                    )
+                })?;
+                let bit = bit_ref::NetBit {
+                    net: net_idx,
+                    bit_number,
+                };
+                let bit_idx = bits.len();
+                bits.push(bit);
+                index_by_bit.insert(bit, bit_idx);
+                bits_by_net[net_raw_idx].push(bit_idx);
+            }
+        }
+        Ok(Self {
+            bits,
+            index_by_bit,
+            bits_by_net,
+        })
+    }
+
+    fn bit_index(&self, bit: bit_ref::NetBit) -> Result<usize> {
+        self.index_by_bit.get(&bit).copied().ok_or_else(|| {
+            anyhow!(
+                "net bit NetIndex({})[{}] is not present in STA bit index",
+                bit.net.0,
+                bit.bit_number
+            )
+        })
+    }
+
+    fn bit_ref_to_source(&self, bit_ref: bit_ref::NetBitRef) -> Result<PinBitSource> {
+        match bit_ref {
+            bit_ref::NetBitRef::Net(bit) => Ok(PinBitSource::Bit(self.bit_index(bit)?)),
+            bit_ref::NetBitRef::Literal(value) => Ok(PinBitSource::Literal(value)),
+        }
+    }
+
+    fn net_bits(&self, net: NetIndex) -> &[usize] {
+        &self.bits_by_net[net.0]
+    }
 }
 
 pub fn analyze_combinational_max_arrival(
@@ -353,20 +432,24 @@ fn analyze_combinational_max_arrival_proto(
 
     let lib = StaLibraryIndex::new(library)?;
     let instance_count = module.instances.len();
-    let assign_sources = scalar_assign_sources(module, nets, interner)?;
-    let assign_known_values = assign_known_values(assign_sources.as_slice(), nets, interner)?;
+    let bit_index = StaBitIndex::build(nets)?;
+    let bit_count = bit_index.bits.len();
+    let assign_analysis = analyze_assign_sources(module, nets, interner, &bit_index)?;
+    let assign_sources = assign_analysis.bit_sources;
+    let assign_known_values =
+        assign_known_values(assign_sources.as_slice(), &bit_index, nets, interner)?;
 
     let mut instance_cell_indices: Vec<usize> = Vec::with_capacity(instance_count);
     let mut instance_cell_names: Vec<String> = Vec::with_capacity(instance_count);
-    let mut instance_pin_nets: Vec<HashMap<String, Vec<NetIndex>>> =
+    let mut instance_pin_sources: Vec<HashMap<String, Vec<PinBitSource>>> =
         Vec::with_capacity(instance_count);
     let mut instance_known_pin_values: Vec<HashMap<String, bool>> =
         Vec::with_capacity(instance_count);
     let mut instance_timing_related_input_pins: Vec<HashSet<String>> =
         Vec::with_capacity(instance_count);
 
-    let mut net_drivers: Vec<Vec<NetEndpoint>> = vec![Vec::new(); nets.len()];
-    let mut net_loads: Vec<Vec<NetEndpoint>> = vec![Vec::new(); nets.len()];
+    let mut bit_drivers: Vec<Vec<NetEndpoint>> = vec![Vec::new(); bit_count];
+    let mut bit_loads: Vec<Vec<NetEndpoint>> = vec![Vec::new(); bit_count];
 
     for (inst_idx, inst) in module.instances.iter().enumerate() {
         let cell_name = resolve_symbol(interner, inst.type_name, "cell type")?;
@@ -413,11 +496,11 @@ fn analyze_combinational_max_arrival_proto(
             }
         }
 
-        let mut pin_nets: HashMap<String, Vec<NetIndex>> = HashMap::new();
+        let mut pin_sources: HashMap<String, Vec<PinBitSource>> = HashMap::new();
         let mut known_pin_values = HashMap::new();
         for (port_sym, netref) in &inst.connections {
             let pin_name = resolve_symbol(interner, *port_sym, "pin name")?;
-            if pin_nets.contains_key(pin_name.as_str()) {
+            if pin_sources.contains_key(pin_name.as_str()) {
                 return Err(anyhow!(
                     "instance '{}' of '{}' connects pin '{}' more than once; duplicate pin bindings are unsupported in basic STA",
                     resolve_symbol(interner, inst.instance_name, "instance name")
@@ -435,8 +518,23 @@ fn analyze_combinational_max_arrival_proto(
                     pin_name
                 )
             })?;
+            let bit_refs = bit_ref::net_ref_lsb_bit_refs(netref, nets, interner)?;
+            let pin_bit_sources: Vec<PinBitSource> = bit_refs
+                .into_iter()
+                .map(|bit_ref| bit_index.bit_ref_to_source(bit_ref))
+                .collect::<Result<Vec<_>>>()?;
+            if pin_bit_sources.len() > 1 {
+                return Err(anyhow!(
+                    "instance '{}' pin '{}.{}' connects {} bits; basic STA requires scalar cell pin connections after bit expansion",
+                    resolve_symbol(interner, inst.instance_name, "instance name")
+                        .unwrap_or_else(|_| "<unknown>".to_string()),
+                    cell_name,
+                    pin_name,
+                    pin_bit_sources.len()
+                ));
+            }
             if pin.direction == PinDirection::Output as i32
-                && matches!(netref, NetRef::Literal(_) | NetRef::Unconnected)
+                && !matches!(pin_bit_sources.as_slice(), [PinBitSource::Bit(_)])
             {
                 return Err(anyhow!(
                     "instance '{}' output pin '{}.{}' uses unsupported literal or unconnected binding",
@@ -446,63 +544,24 @@ fn analyze_combinational_max_arrival_proto(
                     pin_name
                 ));
             }
-            let uses_vector_connectivity = match netref {
-                NetRef::Simple(net_idx) => nets
-                    .get(net_idx.0)
-                    .map(|net| net_width_is_multibit(net.width))
-                    .unwrap_or(false),
-                NetRef::BitSelect(_, _) | NetRef::PartSelect(_, _, _) | NetRef::Concat(_) => true,
-                NetRef::Literal(_) | NetRef::Unconnected => false,
-            };
-            if uses_vector_connectivity {
-                return Err(anyhow!(
-                    "instance '{}' pin '{}.{}' uses vector connectivity; basic STA currently requires scalar net connections",
-                    resolve_symbol(interner, inst.instance_name, "instance name")
-                        .unwrap_or_else(|_| "<unknown>".to_string()),
-                    cell_name,
-                    pin_name
-                ));
-            }
-            if pin.direction == PinDirection::Input as i32
-                && timing_related_input_pins.contains(pin_name.as_str())
-                && matches!(netref, NetRef::Literal(_))
-            {
-                return Err(anyhow!(
-                    "instance '{}' timing-related input pin '{}.{}' uses a literal binding; basic STA does not model constant-tied timing inputs",
-                    resolve_symbol(interner, inst.instance_name, "instance name")
-                        .unwrap_or_else(|_| "<unknown>".to_string()),
-                    cell_name,
-                    pin_name
-                ));
-            }
-            let mut connected_nets = Vec::new();
-            netref.collect_net_indices(&mut connected_nets);
-            if let Some(value) = scalar_literal_netref_value(netref) {
-                known_pin_values.insert(pin_name.clone(), value);
-            }
-            for net_idx in &connected_nets {
-                if net_idx.0 >= nets.len() {
-                    return Err(anyhow!(
-                        "instance '{}' pin '{}' references out-of-range net index {}",
-                        resolve_symbol(interner, inst.instance_name, "instance name")
-                            .unwrap_or_else(|_| "<unknown>".to_string()),
-                        pin_name,
-                        net_idx.0
-                    ));
-                }
+            for source in &pin_bit_sources {
                 match pin.direction {
-                    d if d == PinDirection::Output as i32 => {
-                        net_drivers[net_idx.0].push(NetEndpoint {
+                    d if d == PinDirection::Output as i32 => match source {
+                        PinBitSource::Bit(bit_idx) => bit_drivers[*bit_idx].push(NetEndpoint {
                             inst_idx,
                             pin_name: pin_name.clone(),
-                        });
-                    }
-                    d if d == PinDirection::Input as i32 => {
-                        net_loads[net_idx.0].push(NetEndpoint {
+                        }),
+                        PinBitSource::Literal(_) => unreachable!(),
+                    },
+                    d if d == PinDirection::Input as i32 => match source {
+                        PinBitSource::Bit(bit_idx) => bit_loads[*bit_idx].push(NetEndpoint {
                             inst_idx,
                             pin_name: pin_name.clone(),
-                        });
-                    }
+                        }),
+                        PinBitSource::Literal(value) => {
+                            known_pin_values.insert(pin_name.clone(), *value);
+                        }
+                    },
                     _ => {
                         return Err(anyhow!(
                             "instance '{}' pin '{}.{}' has unsupported direction value {}",
@@ -515,36 +574,40 @@ fn analyze_combinational_max_arrival_proto(
                     }
                 }
             }
-            if let Some(net_idx) = connected_nets.first()
-                && let Some(value) = assign_known_values[net_idx.0]
+            if let [PinBitSource::Bit(bit_idx)] = pin_bit_sources.as_slice()
+                && let Some(value) = assign_known_values[*bit_idx]
             {
                 known_pin_values.insert(pin_name.clone(), value);
             }
-            pin_nets.insert(pin_name, connected_nets);
+            pin_sources.insert(pin_name, pin_bit_sources);
         }
-        instance_pin_nets.push(pin_nets);
+        instance_pin_sources.push(pin_sources);
         instance_known_pin_values.push(known_pin_values);
         instance_timing_related_input_pins.push(timing_related_input_pins);
     }
 
-    let mut module_output_nets: Vec<NetIndex> = Vec::new();
-    let mut has_module_output = vec![false; nets.len()];
-    let mut is_module_input = vec![false; nets.len()];
+    let mut module_output_bits: Vec<usize> = Vec::new();
+    let mut has_module_output = vec![false; bit_count];
+    let mut is_module_input = vec![false; bit_count];
     for port in &module.ports {
         let port_name = resolve_symbol(interner, port.name, "port name")
             .unwrap_or_else(|_| "<unknown>".to_string());
         match port.direction {
             PortDirection::Input => {
                 if let Some(net_idx) = module.find_net_index(port.name, nets) {
-                    is_module_input[net_idx.0] = true;
+                    for bit_idx in bit_index.net_bits(net_idx) {
+                        is_module_input[*bit_idx] = true;
+                    }
                 }
             }
             PortDirection::Output => {
-                if let Some(net_idx) = module.find_net_index(port.name, nets)
-                    && !has_module_output[net_idx.0]
-                {
-                    has_module_output[net_idx.0] = true;
-                    module_output_nets.push(net_idx);
+                if let Some(net_idx) = module.find_net_index(port.name, nets) {
+                    for bit_idx in bit_index.net_bits(net_idx) {
+                        if !has_module_output[*bit_idx] {
+                            has_module_output[*bit_idx] = true;
+                            module_output_bits.push(*bit_idx);
+                        }
+                    }
                 }
             }
             PortDirection::Inout => {
@@ -555,37 +618,52 @@ fn analyze_combinational_max_arrival_proto(
             }
         }
     }
-    module_output_nets.sort_by_key(|n| n.0);
+    module_output_bits.sort_unstable();
+
+    reject_live_unsupported_assigns(
+        assign_analysis.unsupported_sources.as_slice(),
+        assign_sources.as_slice(),
+        bit_loads.as_slice(),
+        has_module_output.as_slice(),
+        &bit_index,
+        nets,
+        interner,
+    )?;
 
     let mut successors: Vec<Vec<usize>> = vec![Vec::new(); instance_count];
     let mut indegree: Vec<usize> = vec![0; instance_count];
     let mut seen_edges: HashSet<(usize, usize)> = HashSet::new();
-    for (net_idx, drivers) in net_drivers.iter().enumerate() {
-        let has_assign_source = assign_sources[net_idx].is_some();
-        if is_module_input[net_idx] && (!drivers.is_empty() || has_assign_source) {
-            let net_name = net_name_for_index(nets, interner, NetIndex(net_idx));
+    for (bit_idx, drivers) in bit_drivers.iter().enumerate() {
+        let has_assign_source = assign_sources[bit_idx].is_some();
+        if is_module_input[bit_idx] && (!drivers.is_empty() || has_assign_source) {
+            let bit_name = bit_ref::render_net_bit(bit_index.bits[bit_idx], nets, interner);
             return Err(anyhow!(
-                "module input net '{}' also has an internal driver; basic STA does not support multiply driven primary inputs",
-                net_name
+                "module input bit '{}' also has an internal driver; basic STA does not support multiply driven primary inputs",
+                bit_name
             ));
         }
         if drivers.len() > 1 || (!drivers.is_empty() && has_assign_source) {
-            let net_name = net_name_for_index(nets, interner, NetIndex(net_idx));
+            let bit_name = bit_ref::render_net_bit(bit_index.bits[bit_idx], nets, interner);
             return Err(anyhow!(
-                "net '{}' has {} drivers; wired multi-driver nets are unsupported in basic STA",
-                net_name,
+                "net bit '{}' has {} drivers; wired multi-driver nets are unsupported in basic STA",
+                bit_name,
                 drivers.len() + usize::from(has_assign_source)
             ));
         }
     }
 
-    for (net_idx, loads) in net_loads.iter().enumerate() {
-        let ResolvedTimingSource::Net(source_net_idx) =
-            resolve_timing_source(assign_sources.as_slice(), NetIndex(net_idx), nets, interner)?
+    for (bit_idx, loads) in bit_loads.iter().enumerate() {
+        let ResolvedTimingSource::Bit(source_bit_idx) = resolve_timing_source(
+            assign_sources.as_slice(),
+            bit_idx,
+            &bit_index,
+            nets,
+            interner,
+        )?
         else {
             continue;
         };
-        let Some(driver) = net_drivers[source_net_idx.0].first() else {
+        let Some(driver) = bit_drivers[source_bit_idx].first() else {
             continue;
         };
         for load in loads {
@@ -602,10 +680,15 @@ fn analyze_combinational_max_arrival_proto(
         }
     }
 
-    let mut net_load_capacitance = vec![EdgeLoadCapacitance::default(); nets.len()];
-    for (net_idx, loads) in net_loads.iter().enumerate() {
-        let ResolvedTimingSource::Net(load_source_net_idx) =
-            resolve_timing_source(assign_sources.as_slice(), NetIndex(net_idx), nets, interner)?
+    let mut bit_load_capacitance = vec![EdgeLoadCapacitance::default(); bit_count];
+    for (bit_idx, loads) in bit_loads.iter().enumerate() {
+        let ResolvedTimingSource::Bit(load_source_bit_idx) = resolve_timing_source(
+            assign_sources.as_slice(),
+            bit_idx,
+            &bit_index,
+            nets,
+            interner,
+        )?
         else {
             continue;
         };
@@ -629,12 +712,12 @@ fn analyze_combinational_max_arrival_proto(
             cap.rise += pin_cap.rise;
             cap.fall += pin_cap.fall;
         }
-        if has_module_output[net_idx] {
+        if has_module_output[bit_idx] {
             cap.rise += options.module_output_load;
             cap.fall += options.module_output_load;
         }
-        net_load_capacitance[load_source_net_idx.0].rise += cap.rise;
-        net_load_capacitance[load_source_net_idx.0].fall += cap.fall;
+        bit_load_capacitance[load_source_bit_idx].rise += cap.rise;
+        bit_load_capacitance[load_source_bit_idx].fall += cap.fall;
     }
 
     let source_timing = SignalTiming {
@@ -658,36 +741,34 @@ fn analyze_combinational_max_arrival_proto(
             transition: 0.0,
         },
     });
-    let mut net_timing_sets: Vec<Option<SignalTimingSet>> = vec![None; nets.len()];
+    let mut bit_timing_sets: Vec<Option<SignalTimingSet>> = vec![None; bit_count];
 
-    for (net_idx, drivers) in net_drivers.iter().enumerate() {
+    for (bit_idx, drivers) in bit_drivers.iter().enumerate() {
         if !drivers.is_empty() {
             continue;
         }
-        if matches!(
-            assign_sources[net_idx],
-            Some(ScalarAssignSource::Literal(_))
-        ) {
-            net_timing_sets[net_idx] = Some(literal_source_timing_set.clone());
+        if matches!(assign_sources[bit_idx], Some(BitAssignSource::Literal(_))) {
+            bit_timing_sets[bit_idx] = Some(literal_source_timing_set.clone());
             continue;
         }
-        if matches!(assign_sources[net_idx], Some(ScalarAssignSource::Alias(_))) {
+        if matches!(assign_sources[bit_idx], Some(BitAssignSource::Alias(_))) {
             continue;
         }
-        if is_module_input[net_idx] {
-            net_timing_sets[net_idx] = Some(source_timing_set.clone());
+        if is_module_input[bit_idx] {
+            bit_timing_sets[bit_idx] = Some(source_timing_set.clone());
             continue;
         }
-        if !net_loads[net_idx].is_empty() || has_module_output[net_idx] {
+        if !bit_loads[bit_idx].is_empty() || has_module_output[bit_idx] {
             return Err(anyhow!(
-                "net '{}' is undriven and is not a module input; basic STA does not support floating source nets",
-                net_name_for_index(nets, interner, NetIndex(net_idx))
+                "net bit '{}' is undriven and is not a module input; basic STA does not support floating source nets",
+                bit_ref::render_net_bit(bit_index.bits[bit_idx], nets, interner)
             ));
         }
     }
     propagate_alias_timings(
         assign_sources.as_slice(),
-        &mut net_timing_sets,
+        &mut bit_timing_sets,
+        &bit_index,
         nets,
         interner,
     )?;
@@ -707,7 +788,7 @@ fn analyze_combinational_max_arrival_proto(
 
         let cell_idx = instance_cell_indices[inst_idx];
         let cell_name = &instance_cell_names[inst_idx];
-        let inst_pin_map = &instance_pin_nets[inst_idx];
+        let inst_pin_map = &instance_pin_sources[inst_idx];
         let known_pin_values = &instance_known_pin_values[inst_idx];
         let instance = &module.instances[inst_idx];
         let instance_name = resolve_symbol(interner, instance.instance_name, "instance name")
@@ -717,10 +798,10 @@ fn analyze_combinational_max_arrival_proto(
             if pin.direction != PinDirection::Output as i32 {
                 continue;
             }
-            let Some(output_nets) = inst_pin_map.get(pin.name.as_str()) else {
+            let Some(output_sources) = inst_pin_map.get(pin.name.as_str()) else {
                 continue;
             };
-            if output_nets.is_empty() {
+            if output_sources.is_empty() {
                 continue;
             }
             if let Some(unsupported_arc) = pin
@@ -756,9 +837,13 @@ fn analyze_combinational_max_arrival_proto(
                     pin.name
                 ));
             }
-            for output_net in output_nets {
-                let output_load = net_load_capacitance[output_net.0];
-                let output_net_name = net_name_for_index(nets, interner, *output_net);
+            for output_source in output_sources {
+                let PinBitSource::Bit(output_bit_idx) = *output_source else {
+                    continue;
+                };
+                let output_load = bit_load_capacitance[output_bit_idx];
+                let output_net_name =
+                    bit_ref::render_net_bit(bit_index.bits[output_bit_idx], nets, interner);
                 let mut accumulated: Option<SignalTimingSet> = None;
 
                 for arc in &combinational_arcs {
@@ -776,7 +861,7 @@ fn analyze_combinational_max_arrival_proto(
                         continue;
                     }
                     for related_pin_name in split_related_pin_names(arc.related_pin.as_str()) {
-                        let related_nets =
+                        let related_sources =
                             inst_pin_map.get(related_pin_name).ok_or_else(|| {
                                 anyhow!(
                                     "instance '{}' output pin '{}.{}' requires timing-related input pin '{}' to be connected",
@@ -786,7 +871,7 @@ fn analyze_combinational_max_arrival_proto(
                                     related_pin_name
                                 )
                             })?;
-                        if related_nets.is_empty() {
+                        if related_sources.is_empty() {
                             return Err(anyhow!(
                                 "instance '{}' output pin '{}.{}' has unconnected timing-related input pin '{}'",
                                 instance_name,
@@ -795,17 +880,38 @@ fn analyze_combinational_max_arrival_proto(
                                 related_pin_name
                             ));
                         }
-                        for related_net in related_nets {
-                            let input_timing_set = net_timing_sets[related_net.0].as_ref().ok_or_else(|| {
-                            anyhow!(
-                                "missing source timing for net '{}' feeding '{}.{}' (related pin '{}')",
-                                net_name_for_index(nets, interner, *related_net),
-                                cell_name,
-                                pin.name,
-                                related_pin_name
-                            )
-                        })?;
-                            let related_net_name = net_name_for_index(nets, interner, *related_net);
+                        for related_source in related_sources {
+                            let (input_timing_set, related_net_name) = match related_source {
+                                PinBitSource::Bit(related_bit_idx) => {
+                                    let timing = bit_timing_sets[*related_bit_idx]
+                                        .as_ref()
+                                        .ok_or_else(|| {
+                                            anyhow!(
+                                                "missing source timing for net bit '{}' feeding '{}.{}' (related pin '{}')",
+                                                bit_ref::render_net_bit(
+                                                    bit_index.bits[*related_bit_idx],
+                                                    nets,
+                                                    interner
+                                                ),
+                                                cell_name,
+                                                pin.name,
+                                                related_pin_name
+                                            )
+                                        })?;
+                                    (
+                                        timing,
+                                        bit_ref::render_net_bit(
+                                            bit_index.bits[*related_bit_idx],
+                                            nets,
+                                            interner,
+                                        ),
+                                    )
+                                }
+                                PinBitSource::Literal(value) => (
+                                    &literal_source_timing_set,
+                                    if *value { "1'b1" } else { "1'b0" }.to_string(),
+                                ),
+                            };
                             let context = format!(
                                 "{}.{} (instance '{}') related_pin '{}'",
                                 cell_name, pin.name, instance_name, related_pin_name
@@ -872,8 +978,8 @@ fn analyze_combinational_max_arrival_proto(
                     )
                 });
 
-                net_timing_sets[output_net.0] =
-                    Some(match net_timing_sets[output_net.0].as_ref() {
+                bit_timing_sets[output_bit_idx] =
+                    Some(match bit_timing_sets[output_bit_idx].as_ref() {
                         Some(prev) => prev.clone().merge(&out_timing_set),
                         None => out_timing_set,
                     });
@@ -889,7 +995,8 @@ fn analyze_combinational_max_arrival_proto(
         }
         propagate_alias_timings(
             assign_sources.as_slice(),
-            &mut net_timing_sets,
+            &mut bit_timing_sets,
+            &bit_index,
             nets,
             interner,
         )?;
@@ -905,17 +1012,17 @@ fn analyze_combinational_max_arrival_proto(
 
     let mut worst_output_arrival: Option<f64> = None;
     let mut cell_levels = 0usize;
-    for net_idx in &module_output_nets {
-        let timing_set = net_timing_sets[net_idx.0].as_ref().ok_or_else(|| {
+    for bit_idx in &module_output_bits {
+        let timing_set = bit_timing_sets[*bit_idx].as_ref().ok_or_else(|| {
             anyhow!(
-                "missing timing result for module output net '{}'",
-                net_name_for_index(nets, interner, *net_idx)
+                "missing timing result for module output net bit '{}'",
+                bit_ref::render_net_bit(bit_index.bits[*bit_idx], nets, interner)
             )
         })?;
         let output_arrival = timing_set.worst_arrival().ok_or_else(|| {
             anyhow!(
-                "missing edge timing candidates for module output net '{}'",
-                net_name_for_index(nets, interner, *net_idx)
+                "missing edge timing candidates for module output net bit '{}'",
+                bit_ref::render_net_bit(bit_index.bits[*bit_idx], nets, interner)
             )
         })?;
         worst_output_arrival = Some(
@@ -923,19 +1030,21 @@ fn analyze_combinational_max_arrival_proto(
                 .map(|current| current.max(output_arrival))
                 .unwrap_or(output_arrival),
         );
-        if let ResolvedTimingSource::Net(source_net_idx) =
-            resolve_timing_source(assign_sources.as_slice(), *net_idx, nets, interner)?
-        {
-            if let Some(driver) = net_drivers[source_net_idx.0].first() {
+        if let ResolvedTimingSource::Bit(source_bit_idx) = resolve_timing_source(
+            assign_sources.as_slice(),
+            *bit_idx,
+            &bit_index,
+            nets,
+            interner,
+        )? {
+            if let Some(driver) = bit_drivers[source_bit_idx].first() {
                 cell_levels = cell_levels.max(instance_levels[driver.inst_idx]);
             }
         }
     }
 
-    let net_timing: Vec<Option<SignalTiming>> = net_timing_sets
-        .into_iter()
-        .map(|timing_set| timing_set.and_then(|set| set.as_report_signal_timing()))
-        .collect();
+    let net_timing =
+        aggregate_bit_timing_by_net(bit_timing_sets.as_slice(), &bit_index, nets.len());
 
     Ok(StaReport {
         net_timing,
@@ -1219,181 +1328,210 @@ pub fn validate_output_pin_for_basic_sta(
     Ok(())
 }
 
-fn net_width_is_multibit(width: Option<(u32, u32)>) -> bool {
-    matches!(width, Some((msb, lsb)) if msb != lsb)
-}
-
-/// Returns scalar nets driven by supported zero-delay continuous assigns.
-fn scalar_assign_sources(
+/// Classifies continuous assigns into live-STA-supported bit sources and
+/// unsupported sources that may still be harmless if they are unused.
+fn analyze_assign_sources(
     module: &NetlistModule,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
-) -> Result<Vec<Option<ScalarAssignSource>>> {
-    let mut sources = vec![None; nets.len()];
+    bit_index: &StaBitIndex,
+) -> Result<AssignSourceAnalysis> {
+    let mut sources = vec![None; bit_index.bits.len()];
+    let mut unsupported_sources = Vec::new();
     for assign in &module.assigns {
-        let source = match &assign.rhs {
-            AssignExpr::Leaf(NetRef::Literal(bits)) => {
-                ScalarAssignSource::Literal(scalar_literal_bits_value(
-                    bits,
-                    &format!(
-                        "assign to '{}'",
-                        render_assign_lhs(&assign.lhs, nets, interner)
-                    ),
-                )?)
+        let lhs_targets = bit_ref::net_ref_lsb_targets(&assign.lhs, nets, interner)?;
+        let lhs_bits: Vec<usize> = lhs_targets
+            .iter()
+            .copied()
+            .map(|bit| bit_index.bit_index(bit))
+            .collect::<Result<Vec<_>>>()?;
+        if let Some(rhs_sources) =
+            supported_assign_bit_sources(&assign.rhs, lhs_bits.len(), nets, interner)?
+        {
+            if rhs_sources.len() != lhs_bits.len() {
+                unsupported_sources.push(UnsupportedAssignSource {
+                    lhs_bits,
+                    rendered_lhs: bit_ref::render_net_ref(&assign.lhs, nets, interner),
+                });
+                continue;
             }
-            AssignExpr::Leaf(rhs) => {
-                ScalarAssignSource::Alias(scalar_assign_leaf_net_index(rhs, nets, interner)?)
+            for (lhs_bit_idx, rhs_source) in lhs_bits.into_iter().zip(rhs_sources) {
+                if sources[lhs_bit_idx].is_some() {
+                    let bit_name =
+                        bit_ref::render_net_bit(bit_index.bits[lhs_bit_idx], nets, interner);
+                    return Err(anyhow!(
+                        "net bit '{}' has multiple continuous assign drivers; wired multi-driver nets are unsupported in basic STA",
+                        bit_name
+                    ));
+                }
+                sources[lhs_bit_idx] = Some(match rhs_source {
+                    bit_ref::NetBitRef::Literal(value) => BitAssignSource::Literal(value),
+                    bit_ref::NetBitRef::Net(bit) => {
+                        BitAssignSource::Alias(bit_index.bit_index(bit)?)
+                    }
+                });
             }
-            AssignExpr::Not(_)
-            | AssignExpr::And(_, _)
-            | AssignExpr::Or(_, _)
-            | AssignExpr::Xor(_, _) => {
-                return Err(anyhow!(
-                    "basic STA only supports scalar literal or alias continuous assigns; unsupported assign to '{}'",
-                    render_assign_lhs(&assign.lhs, nets, interner)
+        } else {
+            unsupported_sources.push(UnsupportedAssignSource {
+                lhs_bits,
+                rendered_lhs: bit_ref::render_net_ref(&assign.lhs, nets, interner),
+            });
+        }
+    }
+    Ok(AssignSourceAnalysis {
+        bit_sources: sources,
+        unsupported_sources,
+    })
+}
+
+/// Returns supported zero-delay assign bit sources, or `None` for unsupported
+/// expression shapes.
+fn supported_assign_bit_sources(
+    rhs: &AssignExpr,
+    lhs_width: usize,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+) -> Result<Option<Vec<bit_ref::NetBitRef>>> {
+    match rhs {
+        AssignExpr::Leaf(NetRef::Literal(bits)) => {
+            let mut out = Vec::with_capacity(lhs_width);
+            for bit_idx in 0..lhs_width {
+                out.push(bit_ref::NetBitRef::Literal(
+                    bits.get_bit(bit_idx).unwrap_or(false),
                 ));
             }
-        };
-        let net_idx = scalar_assign_lhs_net_index(&assign.lhs, nets, interner)?;
-        if sources[net_idx.0].is_some() {
-            return Err(anyhow!(
-                "net '{}' has multiple continuous assign drivers; wired multi-driver nets are unsupported in basic STA",
-                net_name_for_index(nets, interner, net_idx)
-            ));
+            Ok(Some(out))
         }
-        sources[net_idx.0] = Some(source);
+        AssignExpr::Leaf(net_ref) => {
+            let refs = bit_ref::net_ref_lsb_bit_refs(net_ref, nets, interner)?;
+            if refs.len() == lhs_width {
+                Ok(Some(refs))
+            } else {
+                Ok(None)
+            }
+        }
+        AssignExpr::Not(_)
+        | AssignExpr::And(_, _)
+        | AssignExpr::Or(_, _)
+        | AssignExpr::Xor(_, _) => Ok(None),
     }
-    Ok(sources)
 }
 
-/// Returns the scalar net targeted by a supported continuous assign lhs.
-fn scalar_assign_lhs_net_index(
-    lhs: &NetRef,
+/// Rejects unsupported continuous assigns only when they drive timing-live
+/// bits.
+fn reject_live_unsupported_assigns(
+    unsupported_sources: &[UnsupportedAssignSource],
+    assign_sources: &[Option<BitAssignSource>],
+    bit_loads: &[Vec<NetEndpoint>],
+    has_module_output: &[bool],
+    bit_index: &StaBitIndex,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
-) -> Result<NetIndex> {
-    let net_idx = match lhs {
-        NetRef::Simple(net_idx) => *net_idx,
-        NetRef::BitSelect(_, _)
-        | NetRef::PartSelect(_, _, _)
-        | NetRef::Literal(_)
-        | NetRef::Unconnected
-        | NetRef::Concat(_) => {
+) -> Result<()> {
+    if unsupported_sources.is_empty() {
+        return Ok(());
+    }
+    let mut live = vec![false; bit_index.bits.len()];
+    for bit_idx in 0..bit_index.bits.len() {
+        live[bit_idx] = !bit_loads[bit_idx].is_empty() || has_module_output[bit_idx];
+    }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (bit_idx, source) in assign_sources.iter().enumerate() {
+            if !live[bit_idx] {
+                continue;
+            }
+            let Some(BitAssignSource::Alias(source_bit_idx)) = source else {
+                continue;
+            };
+            if !live[*source_bit_idx] {
+                live[*source_bit_idx] = true;
+                changed = true;
+            }
+        }
+    }
+    for unsupported in unsupported_sources {
+        if unsupported.lhs_bits.iter().any(|bit_idx| live[*bit_idx]) {
+            let live_names: Vec<String> = unsupported
+                .lhs_bits
+                .iter()
+                .filter(|bit_idx| live[**bit_idx])
+                .map(|bit_idx| bit_ref::render_net_bit(bit_index.bits[*bit_idx], nets, interner))
+                .collect();
             return Err(anyhow!(
-                "basic STA only supports scalar-net continuous assigns; unsupported assign lhs '{}'",
-                render_assign_lhs(lhs, nets, interner)
+                "basic STA only supports literal, alias, slice, or concat continuous assigns for live bits; unsupported assign to '{}' drives live bit(s): {}",
+                unsupported.rendered_lhs,
+                live_names.join(", ")
             ));
         }
-    };
-    if net_idx.0 >= nets.len() {
-        return Err(anyhow!(
-            "continuous assign references out-of-range lhs net index {}",
-            net_idx.0
-        ));
     }
-    if net_width_is_multibit(nets[net_idx.0].width) {
-        return Err(anyhow!(
-            "basic STA only supports scalar-net continuous assigns; net '{}' is multi-bit",
-            net_name_for_index(nets, interner, net_idx)
-        ));
-    }
-    Ok(net_idx)
-}
-
-/// Returns the scalar source net referenced by a supported alias RHS.
-fn scalar_assign_leaf_net_index(
-    rhs: &NetRef,
-    nets: &[Net],
-    interner: &StringInterner<StringBackend<SymbolU32>>,
-) -> Result<NetIndex> {
-    let net_idx = match rhs {
-        NetRef::Simple(net_idx) => *net_idx,
-        NetRef::BitSelect(_, _)
-        | NetRef::PartSelect(_, _, _)
-        | NetRef::Literal(_)
-        | NetRef::Unconnected
-        | NetRef::Concat(_) => {
-            return Err(anyhow!(
-                "basic STA only supports scalar-net alias continuous assigns; unsupported assign rhs '{}'",
-                render_assign_lhs(rhs, nets, interner)
-            ));
-        }
-    };
-    if net_idx.0 >= nets.len() {
-        return Err(anyhow!(
-            "alias continuous assign references out-of-range net index {}",
-            net_idx.0
-        ));
-    }
-    if net_width_is_multibit(nets[net_idx.0].width) {
-        return Err(anyhow!(
-            "basic STA only supports scalar-net alias continuous assigns; net '{}' is multi-bit",
-            net_name_for_index(nets, interner, net_idx)
-        ));
-    }
-    Ok(net_idx)
+    Ok(())
 }
 
 fn resolve_timing_source(
-    assign_sources: &[Option<ScalarAssignSource>],
-    start: NetIndex,
+    assign_sources: &[Option<BitAssignSource>],
+    start: usize,
+    bit_index: &StaBitIndex,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
 ) -> Result<ResolvedTimingSource> {
     let mut current = start;
     let mut seen = HashSet::new();
     loop {
-        if !seen.insert(current.0) {
+        if !seen.insert(current) {
             return Err(anyhow!(
-                "continuous assign aliases contain a cycle involving net '{}'",
-                net_name_for_index(nets, interner, current)
+                "continuous assign aliases contain a cycle involving net bit '{}'",
+                bit_ref::render_net_bit(bit_index.bits[current], nets, interner)
             ));
         }
-        let Some(source) = assign_sources.get(current.0).and_then(|source| *source) else {
-            return Ok(ResolvedTimingSource::Net(current));
+        let Some(source) = assign_sources.get(current).and_then(|source| *source) else {
+            return Ok(ResolvedTimingSource::Bit(current));
         };
         match source {
-            ScalarAssignSource::Literal(value) => return Ok(ResolvedTimingSource::Literal(value)),
-            ScalarAssignSource::Alias(next) => current = next,
+            BitAssignSource::Literal(value) => return Ok(ResolvedTimingSource::Literal(value)),
+            BitAssignSource::Alias(next) => current = next,
         }
     }
 }
 
 fn assign_known_values(
-    assign_sources: &[Option<ScalarAssignSource>],
+    assign_sources: &[Option<BitAssignSource>],
+    bit_index: &StaBitIndex,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
 ) -> Result<Vec<Option<bool>>> {
-    let mut values = vec![None; nets.len()];
-    for net_idx in 0..nets.len() {
+    let mut values = vec![None; bit_index.bits.len()];
+    for bit_idx in 0..bit_index.bits.len() {
         if let ResolvedTimingSource::Literal(value) =
-            resolve_timing_source(assign_sources, NetIndex(net_idx), nets, interner)?
+            resolve_timing_source(assign_sources, bit_idx, bit_index, nets, interner)?
         {
-            values[net_idx] = Some(value);
+            values[bit_idx] = Some(value);
         }
     }
     Ok(values)
 }
 
 fn propagate_alias_timings(
-    assign_sources: &[Option<ScalarAssignSource>],
-    net_timing_sets: &mut [Option<SignalTimingSet>],
+    assign_sources: &[Option<BitAssignSource>],
+    bit_timing_sets: &mut [Option<SignalTimingSet>],
+    bit_index: &StaBitIndex,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
 ) -> Result<()> {
     let mut changed = true;
     while changed {
         changed = false;
-        for net_idx in 0..assign_sources.len() {
-            let Some(ScalarAssignSource::Alias(source_net_idx)) = assign_sources[net_idx] else {
+        for bit_idx in 0..assign_sources.len() {
+            let Some(BitAssignSource::Alias(source_bit_idx)) = assign_sources[bit_idx] else {
                 continue;
             };
-            resolve_timing_source(assign_sources, NetIndex(net_idx), nets, interner)?;
-            let Some(source_timing) = net_timing_sets[source_net_idx.0].clone() else {
+            resolve_timing_source(assign_sources, bit_idx, bit_index, nets, interner)?;
+            let Some(source_timing) = bit_timing_sets[source_bit_idx].clone() else {
                 continue;
             };
-            if net_timing_sets[net_idx] != Some(source_timing.clone()) {
-                net_timing_sets[net_idx] = Some(source_timing);
+            if bit_timing_sets[bit_idx] != Some(source_timing.clone()) {
+                bit_timing_sets[bit_idx] = Some(source_timing);
                 changed = true;
             }
         }
@@ -1401,47 +1539,26 @@ fn propagate_alias_timings(
     Ok(())
 }
 
-fn render_assign_lhs(
-    lhs: &NetRef,
-    nets: &[Net],
-    interner: &StringInterner<StringBackend<SymbolU32>>,
-) -> String {
-    match lhs {
-        NetRef::Simple(net_idx) => net_name_for_index(nets, interner, *net_idx),
-        NetRef::BitSelect(net_idx, bit) => {
-            format!("{}[{}]", net_name_for_index(nets, interner, *net_idx), bit)
-        }
-        NetRef::PartSelect(net_idx, msb, lsb) => format!(
-            "{}[{}:{}]",
-            net_name_for_index(nets, interner, *net_idx),
-            msb,
-            lsb
-        ),
-        NetRef::Literal(bits) => bits.to_string(),
-        NetRef::Unconnected => "<unconnected>".to_string(),
-        NetRef::Concat(_) => "<concat>".to_string(),
+fn aggregate_bit_timing_by_net(
+    bit_timing_sets: &[Option<SignalTimingSet>],
+    bit_index: &StaBitIndex,
+    nets_len: usize,
+) -> Vec<Option<SignalTiming>> {
+    let mut aggregate_sets: Vec<Option<SignalTimingSet>> = vec![None; nets_len];
+    for (bit_idx, timing_set) in bit_timing_sets.iter().enumerate() {
+        let Some(timing_set) = timing_set else {
+            continue;
+        };
+        let net_idx = bit_index.bits[bit_idx].net.0;
+        aggregate_sets[net_idx] = Some(match aggregate_sets[net_idx].take() {
+            Some(prev) => prev.merge(timing_set),
+            None => timing_set.clone(),
+        });
     }
-}
-
-fn scalar_literal_bits_value(bits: &xlsynth::IrBits, context: &str) -> Result<bool> {
-    if bits.get_bit_count() != 1 {
-        return Err(anyhow!(
-            "{context}: basic STA only supports 1-bit scalar literals; got {} bits",
-            bits.get_bit_count()
-        ));
-    }
-    bits.get_bit(0)
-        .map_err(|e| anyhow!("{context}: could not read scalar literal bit: {e}"))
-}
-
-fn scalar_literal_netref_value(netref: &NetRef) -> Option<bool> {
-    let NetRef::Literal(bits) = netref else {
-        return None;
-    };
-    if bits.get_bit_count() != 1 {
-        return None;
-    }
-    bits.get_bit(0).ok()
+    aggregate_sets
+        .into_iter()
+        .map(|timing_set| timing_set.and_then(|set| set.as_report_signal_timing()))
+        .collect()
 }
 
 fn arc_when_may_apply(
@@ -2105,17 +2222,6 @@ fn resolve_symbol(
         .ok_or_else(|| anyhow!("could not resolve {} symbol {:?}", what, sym))
 }
 
-fn net_name_for_index(
-    nets: &[Net],
-    interner: &StringInterner<StringBackend<SymbolU32>>,
-    net_idx: NetIndex,
-) -> String {
-    nets.get(net_idx.0)
-        .and_then(|n| interner.resolve(n.name))
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| format!("<net:{}>", net_idx.0))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2353,8 +2459,90 @@ endmodule
         assert!(
             error
                 .to_string()
-                .contains("scalar literal or alias continuous assigns")
+                .contains("unsupported assign to 'y' drives live bit")
         );
+    }
+
+    #[test]
+    fn sta_ignores_unused_concat_continuous_assigns() {
+        let src = r#"
+module top (a, y);
+  input a;
+  output y;
+  wire a;
+  wire y;
+  wire n;
+  wire [1:0] unused;
+  INV u0 (.A(a), .Y(n));
+  INV u1 (.A(n), .Y(y));
+  assign unused = {1'b0, a};
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let report = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &scalar_inv_library(),
+            StaOptions::default(),
+        )
+        .expect("unused concat assign should not affect scalar STA");
+        assert_close(report.worst_output_arrival, 5.0);
+        assert_eq!(report.cell_levels, 2);
+    }
+
+    #[test]
+    fn sta_accepts_live_concat_continuous_assigns() {
+        let src = r#"
+module top (a, y);
+  input a;
+  output y;
+  wire a;
+  wire y;
+  wire live;
+  assign live = {a};
+  INV u0 (.A(live), .Y(y));
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let report = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &scalar_inv_library(),
+            StaOptions::default(),
+        )
+        .expect("live concat assign should be modeled as bit wiring");
+        assert_close(report.worst_output_arrival, 3.0);
+        assert_eq!(report.cell_levels, 1);
+    }
+
+    #[test]
+    fn sta_accepts_live_concat_through_alias_assigns() {
+        let src = r#"
+module top (a, y);
+  input a;
+  output y;
+  wire a;
+  wire y;
+  wire live_source;
+  wire live_alias;
+  assign live_source = {a};
+  assign live_alias = live_source;
+  INV u0 (.A(live_alias), .Y(y));
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let report = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &scalar_inv_library(),
+            StaOptions::default(),
+        )
+        .expect("live concat assign should be modeled through aliases");
+        assert_close(report.worst_output_arrival, 3.0);
+        assert_eq!(report.cell_levels, 1);
     }
 
     #[test]
@@ -2452,7 +2640,7 @@ endmodule
     }
 
     #[test]
-    fn sta_rejects_vector_pin_connectivity_until_bit_level_timing_is_supported() {
+    fn sta_accepts_vector_bit_select_connectivity() {
         let src = r#"
 module top (a, y);
   input [1:0] a;
@@ -2464,15 +2652,16 @@ module top (a, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let error = analyze_combinational_max_arrival_proto(
+        let report = analyze_combinational_max_arrival_proto(
             &module,
             &nets,
             &interner,
             &scalar_inv_library(),
             StaOptions::default(),
         )
-        .expect_err("vector pin connectivity should be rejected");
-        assert!(error.to_string().contains("vector connectivity"));
+        .expect("bit-select connectivity should be accepted");
+        assert_close(report.worst_output_arrival, 3.0);
+        assert_eq!(report.cell_levels, 1);
     }
 
     #[test]
@@ -2495,7 +2684,7 @@ endmodule
             StaOptions::default(),
         )
         .expect_err("whole-vector simple connectivity should be rejected");
-        assert!(error.to_string().contains("vector connectivity"));
+        assert!(error.to_string().contains("connects 2 bits"));
     }
 
     #[test]
@@ -2623,7 +2812,7 @@ endmodule
     }
 
     #[test]
-    fn sta_rejects_literal_tied_timing_inputs() {
+    fn sta_accepts_literal_tied_timing_inputs() {
         let src = r#"
 module top (a, y);
   input a;
@@ -2685,19 +2874,15 @@ endmodule
             ..Default::default()
         };
 
-        let error = analyze_combinational_max_arrival_proto(
+        let report = analyze_combinational_max_arrival_proto(
             &module,
             &nets,
             &interner,
             &lib,
             StaOptions::default(),
         )
-        .expect_err("literal-tied timing inputs should be rejected");
-        assert!(
-            error
-                .to_string()
-                .contains("does not model constant-tied timing inputs")
-        );
+        .expect("literal-tied timing inputs should use a zero-transition literal source");
+        assert_close(report.worst_output_arrival, 5.0);
     }
 
     #[test]

@@ -1773,12 +1773,25 @@ fn main() {
                         .action(ArgAction::Set),
                 )
                 .arg(
+                    Arg::new("module_name")
+                        .long("module_name")
+                        .help("Netlist module to convert. Required when the netlist contains multiple modules.")
+                        .action(ArgAction::Set),
+                )
+                .arg(
                     Arg::new("collapse_sequential")
                         .long("collapse_sequential")
                         .value_name("BOOL")
                         .default_value("true")
                         .value_parser(clap::value_parser!(bool))
                         .help("If true, collapse sequential state variables by substituting next_state.")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("output_function_name")
+                        .long("output_function_name")
+                        .value_name("NAME")
+                        .help("Override the function name emitted in the XLS IR package. Required when the netlist module name is 'top'.")
                         .action(ArgAction::Set),
                 )
         )
