@@ -134,6 +134,7 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> CanonicalG8rOptions
     let fold = parse_bool(matches, "fold", defaults.fold);
     let hash = parse_bool(matches, "hash", defaults.hash);
     let fraig = parse_bool(matches, "fraig", defaults.fraig);
+    let reassociation = parse_bool(matches, "reassociation", defaults.reassociation);
     let enable_rewrite_carry_out = parse_bool(
         matches,
         "enable-rewrite-carry-out",
@@ -206,6 +207,7 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> CanonicalG8rOptions
         adder_mapping,
         mul_adder_mapping,
         fraig,
+        reassociation,
         toggle_sample_count,
         toggle_sample_seed,
         compute_graph_logical_effort,

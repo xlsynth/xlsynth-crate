@@ -33,6 +33,11 @@ struct Args {
     #[arg(action = clap::ArgAction::Set)]
     fraig: bool,
 
+    /// Whether to reassociate single-fanout AND supergates into balanced trees.
+    #[arg(long, default_value_t = true)]
+    #[arg(action = clap::ArgAction::Set)]
+    reassociation: bool,
+
     #[arg(long)]
     fraig_max_iterations: Option<usize>,
 
@@ -122,6 +127,7 @@ fn main() {
         mul_adder_mapping: None,
         unsafe_gatify_gate_operation: args.unsafe_gatify_gate_operation,
         fraig: args.fraig,
+        reassociation: args.reassociation,
         emit_independent_op_stats: false,
         ir_top: None,
         emit_netlist: args.emit_netlist,

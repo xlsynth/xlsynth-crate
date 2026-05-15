@@ -243,6 +243,14 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 .action(ArgAction::Set),
         )
         .arg(
+            Arg::new("reassociation")
+                .long("reassociation")
+                .value_name("BOOL")
+                .help("Reassociate single-fanout AND supergates into balanced trees.")
+                .value_parser(["true", "false"])
+                .action(ArgAction::Set),
+        )
+        .arg(
             Arg::new("fraig_max_iterations")
                 .long("fraig-max-iterations")
                 .value_name("N")
@@ -506,6 +514,7 @@ fn parse_canonical_g8r_options(matches: &ArgMatches) -> CanonicalG8rOptions {
             .get_one::<String>("mul_adder_mapping")
             .map(|v| parse_adder_mapping(Some(v))),
         fraig: parse_cli_bool(matches, "fraig", defaults.fraig),
+        reassociation: parse_cli_bool(matches, "reassociation", defaults.reassociation),
         fraig_max_iterations: matches.get_one::<usize>("fraig_max_iterations").copied(),
         max_fraig_sim_samples: matches
             .get_one::<usize>("max_fraig_sim_samples")
@@ -1720,6 +1729,23 @@ mod tests {
         let cli = super::parse_pir_mcmc_args(&matches);
         assert_eq!(cli.canonical_g8r_options, CanonicalG8rOptions::default());
     }
+
+    #[test]
+    fn parser_accepts_reassociation_override() {
+        let matches = super::add_pir_mcmc_args(clap::Command::new("test"))
+            .try_get_matches_from([
+                "test",
+                "sample.ir",
+                "--iters",
+                "0",
+                "--reassociation",
+                "false",
+            ])
+            .unwrap();
+        let cli = super::parse_pir_mcmc_args(&matches);
+        assert!(!cli.canonical_g8r_options.reassociation);
+    }
+
     use xlsynth_pir::ir::Package;
     use xlsynth_pir::ir_parser;
 
