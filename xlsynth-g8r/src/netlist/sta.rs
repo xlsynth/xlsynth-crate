@@ -19,9 +19,10 @@
 //!   frontier reduction relies on larger transition/load queries not producing
 //!   smaller delay/slew values. Small decreases within the
 //!   characterization-noise tolerance are treated as effectively equal.
-//! - Accepts scalar bare-literal continuous assigns as zero-delay tie-offs so
-//!   mapped netlists emitted by tools such as ABC can preserve constant outputs
-//!   without needing synthetic tie cells.
+//! - Accepts scalar bare-literal and scalar alias continuous assigns as
+//!   zero-delay sources so mapped netlists emitted by tools such as ABC can
+//!   preserve constant outputs and wire aliases without needing synthetic
+//!   cells.
 //!
 //! At a high level, the analysis is:
 //! 1. Index each instance's cell/pin connectivity, recording one driver and all
@@ -296,6 +297,18 @@ struct NetEndpoint {
     pin_name: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScalarAssignSource {
+    Literal(bool),
+    Alias(NetIndex),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResolvedTimingSource {
+    Literal(bool),
+    Net(NetIndex),
+}
+
 pub fn analyze_combinational_max_arrival(
     module: &NetlistModule,
     nets: &[Net],
@@ -340,7 +353,8 @@ fn analyze_combinational_max_arrival_proto(
 
     let lib = StaLibraryIndex::new(library)?;
     let instance_count = module.instances.len();
-    let literal_source_values = scalar_literal_assign_sources(module, nets, interner)?;
+    let assign_sources = scalar_assign_sources(module, nets, interner)?;
+    let assign_known_values = assign_known_values(assign_sources.as_slice(), nets, interner)?;
 
     let mut instance_cell_indices: Vec<usize> = Vec::with_capacity(instance_count);
     let mut instance_cell_names: Vec<String> = Vec::with_capacity(instance_count);
@@ -502,7 +516,7 @@ fn analyze_combinational_max_arrival_proto(
                 }
             }
             if let Some(net_idx) = connected_nets.first()
-                && let Some(value) = literal_source_values[net_idx.0]
+                && let Some(value) = assign_known_values[net_idx.0]
             {
                 known_pin_values.insert(pin_name.clone(), value);
             }
@@ -547,27 +561,34 @@ fn analyze_combinational_max_arrival_proto(
     let mut indegree: Vec<usize> = vec![0; instance_count];
     let mut seen_edges: HashSet<(usize, usize)> = HashSet::new();
     for (net_idx, drivers) in net_drivers.iter().enumerate() {
-        if is_module_input[net_idx]
-            && (!drivers.is_empty() || literal_source_values[net_idx].is_some())
-        {
+        let has_assign_source = assign_sources[net_idx].is_some();
+        if is_module_input[net_idx] && (!drivers.is_empty() || has_assign_source) {
             let net_name = net_name_for_index(nets, interner, NetIndex(net_idx));
             return Err(anyhow!(
                 "module input net '{}' also has an internal driver; basic STA does not support multiply driven primary inputs",
                 net_name
             ));
         }
-        if drivers.len() > 1 || (!drivers.is_empty() && literal_source_values[net_idx].is_some()) {
+        if drivers.len() > 1 || (!drivers.is_empty() && has_assign_source) {
             let net_name = net_name_for_index(nets, interner, NetIndex(net_idx));
             return Err(anyhow!(
                 "net '{}' has {} drivers; wired multi-driver nets are unsupported in basic STA",
                 net_name,
-                drivers.len() + usize::from(literal_source_values[net_idx].is_some())
+                drivers.len() + usize::from(has_assign_source)
             ));
         }
-        let Some(driver) = drivers.first() else {
+    }
+
+    for (net_idx, loads) in net_loads.iter().enumerate() {
+        let ResolvedTimingSource::Net(source_net_idx) =
+            resolve_timing_source(assign_sources.as_slice(), NetIndex(net_idx), nets, interner)?
+        else {
             continue;
         };
-        for load in &net_loads[net_idx] {
+        let Some(driver) = net_drivers[source_net_idx.0].first() else {
+            continue;
+        };
+        for load in loads {
             if !instance_timing_related_input_pins[load.inst_idx].contains(&load.pin_name) {
                 continue;
             }
@@ -583,6 +604,11 @@ fn analyze_combinational_max_arrival_proto(
 
     let mut net_load_capacitance = vec![EdgeLoadCapacitance::default(); nets.len()];
     for (net_idx, loads) in net_loads.iter().enumerate() {
+        let ResolvedTimingSource::Net(load_source_net_idx) =
+            resolve_timing_source(assign_sources.as_slice(), NetIndex(net_idx), nets, interner)?
+        else {
+            continue;
+        };
         let mut cap = EdgeLoadCapacitance::default();
         for load in loads {
             let cell_idx = instance_cell_indices[load.inst_idx];
@@ -607,7 +633,8 @@ fn analyze_combinational_max_arrival_proto(
             cap.rise += options.module_output_load;
             cap.fall += options.module_output_load;
         }
-        net_load_capacitance[net_idx] = cap;
+        net_load_capacitance[load_source_net_idx.0].rise += cap.rise;
+        net_load_capacitance[load_source_net_idx.0].fall += cap.fall;
     }
 
     let source_timing = SignalTiming {
@@ -637,8 +664,14 @@ fn analyze_combinational_max_arrival_proto(
         if !drivers.is_empty() {
             continue;
         }
-        if literal_source_values[net_idx].is_some() {
+        if matches!(
+            assign_sources[net_idx],
+            Some(ScalarAssignSource::Literal(_))
+        ) {
             net_timing_sets[net_idx] = Some(literal_source_timing_set.clone());
+            continue;
+        }
+        if matches!(assign_sources[net_idx], Some(ScalarAssignSource::Alias(_))) {
             continue;
         }
         if is_module_input[net_idx] {
@@ -652,6 +685,12 @@ fn analyze_combinational_max_arrival_proto(
             ));
         }
     }
+    propagate_alias_timings(
+        assign_sources.as_slice(),
+        &mut net_timing_sets,
+        nets,
+        interner,
+    )?;
 
     let mut queue = VecDeque::new();
     let mut instance_levels = vec![1usize; instance_count];
@@ -848,6 +887,12 @@ fn analyze_combinational_max_arrival_proto(
                 queue.push_back(*succ);
             }
         }
+        propagate_alias_timings(
+            assign_sources.as_slice(),
+            &mut net_timing_sets,
+            nets,
+            interner,
+        )?;
     }
 
     if processed != instance_count {
@@ -878,8 +923,12 @@ fn analyze_combinational_max_arrival_proto(
                 .map(|current| current.max(output_arrival))
                 .unwrap_or(output_arrival),
         );
-        if let Some(driver) = net_drivers[net_idx.0].first() {
-            cell_levels = cell_levels.max(instance_levels[driver.inst_idx]);
+        if let ResolvedTimingSource::Net(source_net_idx) =
+            resolve_timing_source(assign_sources.as_slice(), *net_idx, nets, interner)?
+        {
+            if let Some(driver) = net_drivers[source_net_idx.0].first() {
+                cell_levels = cell_levels.max(instance_levels[driver.inst_idx]);
+            }
         }
     }
 
@@ -1174,39 +1223,50 @@ fn net_width_is_multibit(width: Option<(u32, u32)>) -> bool {
     matches!(width, Some((msb, lsb)) if msb != lsb)
 }
 
-/// Returns scalar nets driven by bare-literal continuous assigns.
-fn scalar_literal_assign_sources(
+/// Returns scalar nets driven by supported zero-delay continuous assigns.
+fn scalar_assign_sources(
     module: &NetlistModule,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
-) -> Result<Vec<Option<bool>>> {
-    let mut literal_source_values = vec![None; nets.len()];
+) -> Result<Vec<Option<ScalarAssignSource>>> {
+    let mut sources = vec![None; nets.len()];
     for assign in &module.assigns {
-        let AssignExpr::Leaf(NetRef::Literal(bits)) = &assign.rhs else {
-            return Err(anyhow!(
-                "basic STA only supports bare-literal continuous assigns; unsupported assign to '{}'",
-                render_assign_lhs(&assign.lhs, nets, interner)
-            ));
+        let source = match &assign.rhs {
+            AssignExpr::Leaf(NetRef::Literal(bits)) => {
+                ScalarAssignSource::Literal(scalar_literal_bits_value(
+                    bits,
+                    &format!(
+                        "assign to '{}'",
+                        render_assign_lhs(&assign.lhs, nets, interner)
+                    ),
+                )?)
+            }
+            AssignExpr::Leaf(rhs) => {
+                ScalarAssignSource::Alias(scalar_assign_leaf_net_index(rhs, nets, interner)?)
+            }
+            AssignExpr::Not(_)
+            | AssignExpr::And(_, _)
+            | AssignExpr::Or(_, _)
+            | AssignExpr::Xor(_, _) => {
+                return Err(anyhow!(
+                    "basic STA only supports scalar literal or alias continuous assigns; unsupported assign to '{}'",
+                    render_assign_lhs(&assign.lhs, nets, interner)
+                ));
+            }
         };
         let net_idx = scalar_assign_lhs_net_index(&assign.lhs, nets, interner)?;
-        if literal_source_values[net_idx.0].is_some() {
+        if sources[net_idx.0].is_some() {
             return Err(anyhow!(
-                "net '{}' has multiple bare-literal continuous assigns; wired multi-driver nets are unsupported in basic STA",
+                "net '{}' has multiple continuous assign drivers; wired multi-driver nets are unsupported in basic STA",
                 net_name_for_index(nets, interner, net_idx)
             ));
         }
-        literal_source_values[net_idx.0] = Some(scalar_literal_bits_value(
-            bits,
-            &format!(
-                "assign to '{}'",
-                net_name_for_index(nets, interner, net_idx)
-            ),
-        )?);
+        sources[net_idx.0] = Some(source);
     }
-    Ok(literal_source_values)
+    Ok(sources)
 }
 
-/// Returns the scalar net targeted by a supported bare-literal assign lhs.
+/// Returns the scalar net targeted by a supported continuous assign lhs.
 fn scalar_assign_lhs_net_index(
     lhs: &NetRef,
     nets: &[Net],
@@ -1220,24 +1280,125 @@ fn scalar_assign_lhs_net_index(
         | NetRef::Unconnected
         | NetRef::Concat(_) => {
             return Err(anyhow!(
-                "basic STA only supports scalar-net bare-literal continuous assigns; unsupported assign lhs '{}'",
+                "basic STA only supports scalar-net continuous assigns; unsupported assign lhs '{}'",
                 render_assign_lhs(lhs, nets, interner)
             ));
         }
     };
     if net_idx.0 >= nets.len() {
         return Err(anyhow!(
-            "bare-literal continuous assign references out-of-range net index {}",
+            "continuous assign references out-of-range lhs net index {}",
             net_idx.0
         ));
     }
     if net_width_is_multibit(nets[net_idx.0].width) {
         return Err(anyhow!(
-            "basic STA only supports scalar-net bare-literal continuous assigns; net '{}' is multi-bit",
+            "basic STA only supports scalar-net continuous assigns; net '{}' is multi-bit",
             net_name_for_index(nets, interner, net_idx)
         ));
     }
     Ok(net_idx)
+}
+
+/// Returns the scalar source net referenced by a supported alias RHS.
+fn scalar_assign_leaf_net_index(
+    rhs: &NetRef,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+) -> Result<NetIndex> {
+    let net_idx = match rhs {
+        NetRef::Simple(net_idx) => *net_idx,
+        NetRef::BitSelect(_, _)
+        | NetRef::PartSelect(_, _, _)
+        | NetRef::Literal(_)
+        | NetRef::Unconnected
+        | NetRef::Concat(_) => {
+            return Err(anyhow!(
+                "basic STA only supports scalar-net alias continuous assigns; unsupported assign rhs '{}'",
+                render_assign_lhs(rhs, nets, interner)
+            ));
+        }
+    };
+    if net_idx.0 >= nets.len() {
+        return Err(anyhow!(
+            "alias continuous assign references out-of-range net index {}",
+            net_idx.0
+        ));
+    }
+    if net_width_is_multibit(nets[net_idx.0].width) {
+        return Err(anyhow!(
+            "basic STA only supports scalar-net alias continuous assigns; net '{}' is multi-bit",
+            net_name_for_index(nets, interner, net_idx)
+        ));
+    }
+    Ok(net_idx)
+}
+
+fn resolve_timing_source(
+    assign_sources: &[Option<ScalarAssignSource>],
+    start: NetIndex,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+) -> Result<ResolvedTimingSource> {
+    let mut current = start;
+    let mut seen = HashSet::new();
+    loop {
+        if !seen.insert(current.0) {
+            return Err(anyhow!(
+                "continuous assign aliases contain a cycle involving net '{}'",
+                net_name_for_index(nets, interner, current)
+            ));
+        }
+        let Some(source) = assign_sources.get(current.0).and_then(|source| *source) else {
+            return Ok(ResolvedTimingSource::Net(current));
+        };
+        match source {
+            ScalarAssignSource::Literal(value) => return Ok(ResolvedTimingSource::Literal(value)),
+            ScalarAssignSource::Alias(next) => current = next,
+        }
+    }
+}
+
+fn assign_known_values(
+    assign_sources: &[Option<ScalarAssignSource>],
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+) -> Result<Vec<Option<bool>>> {
+    let mut values = vec![None; nets.len()];
+    for net_idx in 0..nets.len() {
+        if let ResolvedTimingSource::Literal(value) =
+            resolve_timing_source(assign_sources, NetIndex(net_idx), nets, interner)?
+        {
+            values[net_idx] = Some(value);
+        }
+    }
+    Ok(values)
+}
+
+fn propagate_alias_timings(
+    assign_sources: &[Option<ScalarAssignSource>],
+    net_timing_sets: &mut [Option<SignalTimingSet>],
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+) -> Result<()> {
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for net_idx in 0..assign_sources.len() {
+            let Some(ScalarAssignSource::Alias(source_net_idx)) = assign_sources[net_idx] else {
+                continue;
+            };
+            resolve_timing_source(assign_sources, NetIndex(net_idx), nets, interner)?;
+            let Some(source_timing) = net_timing_sets[source_net_idx.0].clone() else {
+                continue;
+            };
+            if net_timing_sets[net_idx] != Some(source_timing.clone()) {
+                net_timing_sets[net_idx] = Some(source_timing);
+                changed = true;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn render_assign_lhs(
@@ -2111,7 +2272,7 @@ endmodule
     }
 
     #[test]
-    fn sta_rejects_non_literal_continuous_assigns() {
+    fn sta_accepts_scalar_alias_output_assigns() {
         let src = r#"
 module top (a, y);
   input a;
@@ -2124,6 +2285,63 @@ module top (a, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
+        let report = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &scalar_inv_library(),
+            StaOptions::default(),
+        )
+        .expect("scalar alias output assign should be supported");
+        let n_idx = find_net_index(&nets, &interner, "n");
+        let y_idx = find_net_index(&nets, &interner, "y");
+        assert_eq!(report.timing_for_net(y_idx), report.timing_for_net(n_idx));
+        assert_close(report.worst_output_arrival, 3.0);
+        assert_eq!(report.cell_levels, 1);
+    }
+
+    #[test]
+    fn sta_accepts_scalar_alias_chains_to_instance_inputs() {
+        let src = r#"
+module top (a, y);
+  input a;
+  output y;
+  wire a;
+  wire y;
+  wire n0;
+  wire n1;
+  INV u0 (.A(a), .Y(n0));
+  assign n1 = n0;
+  INV u1 (.A(n1), .Y(y));
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let report = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &scalar_inv_library(),
+            StaOptions::default(),
+        )
+        .expect("scalar alias should carry timing into downstream instances");
+        assert_close(report.worst_output_arrival, 5.0);
+        assert_eq!(report.cell_levels, 2);
+    }
+
+    #[test]
+    fn sta_rejects_non_alias_continuous_assigns() {
+        let src = r#"
+module top (a, b, y);
+  input a;
+  input b;
+  output y;
+  wire a;
+  wire b;
+  wire y;
+  assign y = a & b;
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(src);
         let error = analyze_combinational_max_arrival_proto(
             &module,
             &nets,
@@ -2131,11 +2349,11 @@ endmodule
             &scalar_inv_library(),
             StaOptions::default(),
         )
-        .expect_err("non-literal continuous assigns should be rejected");
+        .expect_err("non-alias continuous assigns should be rejected");
         assert!(
             error
                 .to_string()
-                .contains("bare-literal continuous assigns")
+                .contains("scalar literal or alias continuous assigns")
         );
     }
 
