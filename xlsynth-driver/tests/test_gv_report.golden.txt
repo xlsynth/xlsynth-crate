@@ -1,0 +1,12 @@
+module: top
+time_unit: 1ps
+primary_input_transition: 0.010000
+module_output_load: 0.000000
+area: 3.000000
+delay: 3.000000
+cell_count: 2
+cell_levels: 2
+cell_counts:
+  NAND2 count=1 cell_area=2.000000 total_area=2.000000
+  INV count=1 cell_area=1.000000 total_area=1.000000
+output y rise_arrival=3.000000 fall_arrival=3.000000 rise_transition=0.100000 fall_transition=0.100000 worst_arrival=3.000000

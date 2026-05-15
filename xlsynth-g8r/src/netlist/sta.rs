@@ -11,13 +11,17 @@
 //!   load to query timing tables.
 //! - Treats primary-input sources as externally launched; it does not model
 //!   sequential launch/capture timing such as clock-to-Q or setup checks.
-//! - Rejects sequential output pins and conditional (`when`) timing arcs rather
-//!   than approximating unsupported timing semantics in this limited-scope
-//!   pass.
+//! - Rejects sequential output pins rather than approximating unsupported
+//!   launch/capture timing semantics in this limited-scope pass.
+//! - Uses Liberty `when` predicates when known scalar constants make an arc
+//!   provably false; arcs with true or unknown predicates remain possible.
 //! - Rejects timing tables with meaningful non-monotonicity because later
 //!   frontier reduction relies on larger transition/load queries not producing
-//!   smaller delay/slew values. Tiny decreases within the
+//!   smaller delay/slew values. Small decreases within the
 //!   characterization-noise tolerance are treated as effectively equal.
+//! - Accepts scalar bare-literal continuous assigns as zero-delay tie-offs so
+//!   mapped netlists emitted by tools such as ABC can preserve constant outputs
+//!   without needing synthetic tie cells.
 //!
 //! At a high level, the analysis is:
 //! 1. Index each instance's cell/pin connectivity, recording one driver and all
@@ -43,9 +47,10 @@
 //! 6. Report the maximum rise/fall arrival observed at module outputs.
 
 use crate::liberty::LibraryWithTimingData;
+use crate::liberty::cell_formula::parse_formula;
 use crate::liberty::timing_table::TimingTableArrayView;
 use crate::liberty_proto::{LuTableTemplate, Pin, PinDirection, TimingArc, TimingTable};
-use crate::netlist::parse::{Net, NetIndex, NetRef, NetlistModule, PortDirection};
+use crate::netlist::parse::{AssignExpr, Net, NetIndex, NetRef, NetlistModule, PortDirection};
 use anyhow::{Result, anyhow};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -53,7 +58,7 @@ use std::sync::OnceLock;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
 
-const MONOTONICITY_REL_TOLERANCE: f64 = 5.0e-4;
+const MONOTONICITY_REL_TOLERANCE: f64 = 1.0e-2;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EdgeTiming {
@@ -224,6 +229,7 @@ impl Default for StaOptions {
 pub struct StaReport {
     pub net_timing: Vec<Option<SignalTiming>>,
     pub worst_output_arrival: f64,
+    pub cell_levels: usize,
 }
 
 impl StaReport {
@@ -307,12 +313,6 @@ fn analyze_combinational_max_arrival_proto(
     library: &crate::liberty_proto::Library,
     options: StaOptions,
 ) -> Result<StaReport> {
-    if !module.assigns.is_empty() {
-        return Err(anyhow!(
-            "module contains {} continuous assign statement(s); basic STA only supports structural netlists without assigns",
-            module.assigns.len()
-        ));
-    }
     if !options.primary_input_transition.is_finite() {
         return Err(anyhow!(
             "primary_input_transition must be finite; got {}",
@@ -340,10 +340,13 @@ fn analyze_combinational_max_arrival_proto(
 
     let lib = StaLibraryIndex::new(library)?;
     let instance_count = module.instances.len();
+    let literal_source_values = scalar_literal_assign_sources(module, nets, interner)?;
 
     let mut instance_cell_indices: Vec<usize> = Vec::with_capacity(instance_count);
     let mut instance_cell_names: Vec<String> = Vec::with_capacity(instance_count);
     let mut instance_pin_nets: Vec<HashMap<String, Vec<NetIndex>>> =
+        Vec::with_capacity(instance_count);
+    let mut instance_known_pin_values: Vec<HashMap<String, bool>> =
         Vec::with_capacity(instance_count);
     let mut instance_timing_related_input_pins: Vec<HashSet<String>> =
         Vec::with_capacity(instance_count);
@@ -397,6 +400,7 @@ fn analyze_combinational_max_arrival_proto(
         }
 
         let mut pin_nets: HashMap<String, Vec<NetIndex>> = HashMap::new();
+        let mut known_pin_values = HashMap::new();
         for (port_sym, netref) in &inst.connections {
             let pin_name = resolve_symbol(interner, *port_sym, "pin name")?;
             if pin_nets.contains_key(pin_name.as_str()) {
@@ -459,6 +463,9 @@ fn analyze_combinational_max_arrival_proto(
             }
             let mut connected_nets = Vec::new();
             netref.collect_net_indices(&mut connected_nets);
+            if let Some(value) = scalar_literal_netref_value(netref) {
+                known_pin_values.insert(pin_name.clone(), value);
+            }
             for net_idx in &connected_nets {
                 if net_idx.0 >= nets.len() {
                     return Err(anyhow!(
@@ -494,9 +501,15 @@ fn analyze_combinational_max_arrival_proto(
                     }
                 }
             }
+            if let Some(net_idx) = connected_nets.first()
+                && let Some(value) = literal_source_values[net_idx.0]
+            {
+                known_pin_values.insert(pin_name.clone(), value);
+            }
             pin_nets.insert(pin_name, connected_nets);
         }
         instance_pin_nets.push(pin_nets);
+        instance_known_pin_values.push(known_pin_values);
         instance_timing_related_input_pins.push(timing_related_input_pins);
     }
 
@@ -534,19 +547,21 @@ fn analyze_combinational_max_arrival_proto(
     let mut indegree: Vec<usize> = vec![0; instance_count];
     let mut seen_edges: HashSet<(usize, usize)> = HashSet::new();
     for (net_idx, drivers) in net_drivers.iter().enumerate() {
-        if is_module_input[net_idx] && !drivers.is_empty() {
+        if is_module_input[net_idx]
+            && (!drivers.is_empty() || literal_source_values[net_idx].is_some())
+        {
             let net_name = net_name_for_index(nets, interner, NetIndex(net_idx));
             return Err(anyhow!(
-                "module input net '{}' also has an instance driver; basic STA does not support multiply driven primary inputs",
+                "module input net '{}' also has an internal driver; basic STA does not support multiply driven primary inputs",
                 net_name
             ));
         }
-        if drivers.len() > 1 {
+        if drivers.len() > 1 || (!drivers.is_empty() && literal_source_values[net_idx].is_some()) {
             let net_name = net_name_for_index(nets, interner, NetIndex(net_idx));
             return Err(anyhow!(
                 "net '{}' has {} drivers; wired multi-driver nets are unsupported in basic STA",
                 net_name,
-                drivers.len()
+                drivers.len() + usize::from(literal_source_values[net_idx].is_some())
             ));
         }
         let Some(driver) = drivers.first() else {
@@ -606,10 +621,24 @@ fn analyze_combinational_max_arrival_proto(
         },
     };
     let source_timing_set = SignalTimingSet::from_single(source_timing);
+    let literal_source_timing_set = SignalTimingSet::from_single(SignalTiming {
+        rise: EdgeTiming {
+            arrival: 0.0,
+            transition: 0.0,
+        },
+        fall: EdgeTiming {
+            arrival: 0.0,
+            transition: 0.0,
+        },
+    });
     let mut net_timing_sets: Vec<Option<SignalTimingSet>> = vec![None; nets.len()];
 
     for (net_idx, drivers) in net_drivers.iter().enumerate() {
         if !drivers.is_empty() {
+            continue;
+        }
+        if literal_source_values[net_idx].is_some() {
+            net_timing_sets[net_idx] = Some(literal_source_timing_set.clone());
             continue;
         }
         if is_module_input[net_idx] {
@@ -625,6 +654,7 @@ fn analyze_combinational_max_arrival_proto(
     }
 
     let mut queue = VecDeque::new();
+    let mut instance_levels = vec![1usize; instance_count];
     let mut validated_timing_tables: HashSet<*const TimingTable> = HashSet::new();
     for (idx, deg) in indegree.iter().enumerate() {
         if *deg == 0 {
@@ -639,6 +669,7 @@ fn analyze_combinational_max_arrival_proto(
         let cell_idx = instance_cell_indices[inst_idx];
         let cell_name = &instance_cell_names[inst_idx];
         let inst_pin_map = &instance_pin_nets[inst_idx];
+        let known_pin_values = &instance_known_pin_values[inst_idx];
         let instance = &module.instances[inst_idx];
         let instance_name = resolve_symbol(interner, instance.instance_name, "instance name")
             .unwrap_or_else(|_| "<unknown>".to_string());
@@ -686,25 +717,25 @@ fn analyze_combinational_max_arrival_proto(
                     pin.name
                 ));
             }
-            if let Some(conditional_arc) =
-                combinational_arcs.iter().find(|arc| !arc.when.is_empty())
-            {
-                return Err(anyhow!(
-                    "basic STA does not support conditional timing arcs; instance '{}' output pin '{}.{}' has related pin '{}' with when='{}'",
-                    instance_name,
-                    cell_name,
-                    pin.name,
-                    conditional_arc.related_pin,
-                    conditional_arc.when
-                ));
-            }
-
             for output_net in output_nets {
                 let output_load = net_load_capacitance[output_net.0];
                 let output_net_name = net_name_for_index(nets, interner, *output_net);
                 let mut accumulated: Option<SignalTimingSet> = None;
 
                 for arc in &combinational_arcs {
+                    let arc_context = format!(
+                        "cell '{}' output pin '{}' timing arc related_pin '{}'",
+                        cell_name, pin.name, arc.related_pin
+                    );
+                    if !arc_when_may_apply(arc, known_pin_values, arc_context.as_str())? {
+                        sta_trace(|| {
+                            format!(
+                                "inst={} cell={} out_pin={} when={} skipped=true",
+                                instance_name, cell_name, pin.name, arc.when,
+                            )
+                        });
+                        continue;
+                    }
                     for related_pin_name in split_related_pin_names(arc.related_pin.as_str()) {
                         let related_nets =
                             inst_pin_map.get(related_pin_name).ok_or_else(|| {
@@ -790,7 +821,7 @@ fn analyze_combinational_max_arrival_proto(
                 collapse_signal_timing_set_to_envelope(&mut out_timing_set);
                 sta_trace(|| {
                     format!(
-                        "inst={} cell={} out_pin={} out_net={} merged_rise={} merged_fall={} merged_rise_pick={} merged_fall_pick={}",
+                        "inst={} cell={} out_pin={} out_net={} envelope_rise={} envelope_fall={} envelope_rise_pick={} envelope_fall_pick={}",
                         instance_name,
                         cell_name,
                         pin.name,
@@ -811,6 +842,7 @@ fn analyze_combinational_max_arrival_proto(
         }
 
         for succ in &successors[inst_idx] {
+            instance_levels[*succ] = instance_levels[*succ].max(instance_levels[inst_idx] + 1);
             indegree[*succ] = indegree[*succ].saturating_sub(1);
             if indegree[*succ] == 0 {
                 queue.push_back(*succ);
@@ -827,6 +859,7 @@ fn analyze_combinational_max_arrival_proto(
     }
 
     let mut worst_output_arrival: Option<f64> = None;
+    let mut cell_levels = 0usize;
     for net_idx in &module_output_nets {
         let timing_set = net_timing_sets[net_idx.0].as_ref().ok_or_else(|| {
             anyhow!(
@@ -845,6 +878,9 @@ fn analyze_combinational_max_arrival_proto(
                 .map(|current| current.max(output_arrival))
                 .unwrap_or(output_arrival),
         );
+        if let Some(driver) = net_drivers[net_idx.0].first() {
+            cell_levels = cell_levels.max(instance_levels[driver.inst_idx]);
+        }
     }
 
     let net_timing: Vec<Option<SignalTiming>> = net_timing_sets
@@ -855,6 +891,7 @@ fn analyze_combinational_max_arrival_proto(
     Ok(StaReport {
         net_timing,
         worst_output_arrival: worst_output_arrival.unwrap_or(0.0),
+        cell_levels,
     })
 }
 fn effective_input_capacitance_by_edge(pin: &Pin, context: &str) -> Result<EdgeLoadCapacitance> {
@@ -1082,16 +1119,6 @@ pub fn validate_output_pin_for_basic_sta(
             unsupported_arc.timing_type
         ));
     }
-    if let Some(conditional_arc) = pin.timing_arcs.iter().find(|arc| !arc.when.is_empty()) {
-        return Err(anyhow!(
-            "cell '{}' output pin '{}' has conditional arc for related pin '{}' with when='{}'",
-            cell_name,
-            pin.name,
-            conditional_arc.related_pin,
-            conditional_arc.when
-        ));
-    }
-
     let combinational_arcs: Vec<&TimingArc> = pin.timing_arcs.iter().collect();
     let mut validated_tables = HashSet::new();
     validate_timing_tables_once(
@@ -1145,6 +1172,128 @@ pub fn validate_output_pin_for_basic_sta(
 
 fn net_width_is_multibit(width: Option<(u32, u32)>) -> bool {
     matches!(width, Some((msb, lsb)) if msb != lsb)
+}
+
+/// Returns scalar nets driven by bare-literal continuous assigns.
+fn scalar_literal_assign_sources(
+    module: &NetlistModule,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+) -> Result<Vec<Option<bool>>> {
+    let mut literal_source_values = vec![None; nets.len()];
+    for assign in &module.assigns {
+        let AssignExpr::Leaf(NetRef::Literal(bits)) = &assign.rhs else {
+            return Err(anyhow!(
+                "basic STA only supports bare-literal continuous assigns; unsupported assign to '{}'",
+                render_assign_lhs(&assign.lhs, nets, interner)
+            ));
+        };
+        let net_idx = scalar_assign_lhs_net_index(&assign.lhs, nets, interner)?;
+        if literal_source_values[net_idx.0].is_some() {
+            return Err(anyhow!(
+                "net '{}' has multiple bare-literal continuous assigns; wired multi-driver nets are unsupported in basic STA",
+                net_name_for_index(nets, interner, net_idx)
+            ));
+        }
+        literal_source_values[net_idx.0] = Some(scalar_literal_bits_value(
+            bits,
+            &format!(
+                "assign to '{}'",
+                net_name_for_index(nets, interner, net_idx)
+            ),
+        )?);
+    }
+    Ok(literal_source_values)
+}
+
+/// Returns the scalar net targeted by a supported bare-literal assign lhs.
+fn scalar_assign_lhs_net_index(
+    lhs: &NetRef,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+) -> Result<NetIndex> {
+    let net_idx = match lhs {
+        NetRef::Simple(net_idx) => *net_idx,
+        NetRef::BitSelect(_, _)
+        | NetRef::PartSelect(_, _, _)
+        | NetRef::Literal(_)
+        | NetRef::Unconnected
+        | NetRef::Concat(_) => {
+            return Err(anyhow!(
+                "basic STA only supports scalar-net bare-literal continuous assigns; unsupported assign lhs '{}'",
+                render_assign_lhs(lhs, nets, interner)
+            ));
+        }
+    };
+    if net_idx.0 >= nets.len() {
+        return Err(anyhow!(
+            "bare-literal continuous assign references out-of-range net index {}",
+            net_idx.0
+        ));
+    }
+    if net_width_is_multibit(nets[net_idx.0].width) {
+        return Err(anyhow!(
+            "basic STA only supports scalar-net bare-literal continuous assigns; net '{}' is multi-bit",
+            net_name_for_index(nets, interner, net_idx)
+        ));
+    }
+    Ok(net_idx)
+}
+
+fn render_assign_lhs(
+    lhs: &NetRef,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+) -> String {
+    match lhs {
+        NetRef::Simple(net_idx) => net_name_for_index(nets, interner, *net_idx),
+        NetRef::BitSelect(net_idx, bit) => {
+            format!("{}[{}]", net_name_for_index(nets, interner, *net_idx), bit)
+        }
+        NetRef::PartSelect(net_idx, msb, lsb) => format!(
+            "{}[{}:{}]",
+            net_name_for_index(nets, interner, *net_idx),
+            msb,
+            lsb
+        ),
+        NetRef::Literal(bits) => bits.to_string(),
+        NetRef::Unconnected => "<unconnected>".to_string(),
+        NetRef::Concat(_) => "<concat>".to_string(),
+    }
+}
+
+fn scalar_literal_bits_value(bits: &xlsynth::IrBits, context: &str) -> Result<bool> {
+    if bits.get_bit_count() != 1 {
+        return Err(anyhow!(
+            "{context}: basic STA only supports 1-bit scalar literals; got {} bits",
+            bits.get_bit_count()
+        ));
+    }
+    bits.get_bit(0)
+        .map_err(|e| anyhow!("{context}: could not read scalar literal bit: {e}"))
+}
+
+fn scalar_literal_netref_value(netref: &NetRef) -> Option<bool> {
+    let NetRef::Literal(bits) = netref else {
+        return None;
+    };
+    if bits.get_bit_count() != 1 {
+        return None;
+    }
+    bits.get_bit(0).ok()
+}
+
+fn arc_when_may_apply(
+    arc: &TimingArc,
+    known_pin_values: &HashMap<String, bool>,
+    context: &str,
+) -> Result<bool> {
+    if arc.when.is_empty() {
+        return Ok(true);
+    }
+    let when = parse_formula(arc.when.as_str())
+        .map_err(|e| anyhow!("{context}: could not parse when='{}': {}", arc.when, e))?;
+    Ok(when.evaluate_partial(known_pin_values) != Some(false))
 }
 
 #[cfg(test)]
@@ -1254,18 +1403,17 @@ fn evaluate_output_edge_set(
             output_load,
             &format!("{context} {}", delay_kind.as_raw()),
         )?;
+        // Linear extrapolation outside a Liberty table's characterized range
+        // can produce a slightly negative slew; physical transition is bounded
+        // below by zero.
         let transition = evaluate_table(
             library,
             slew_table,
             source_edge.transition,
             output_load,
             &format!("{context} {}", slew_kind.as_raw()),
-        )?;
-        validate_non_negative_finite(
-            transition,
-            &format!("{} result", slew_kind.as_raw()),
-            context,
-        )?;
+        )?
+        .max(0.0);
         let arrival = source_edge.arrival + delay;
         if !arrival.is_finite() {
             return Err(anyhow!(
@@ -1941,7 +2089,29 @@ mod tests {
     }
 
     #[test]
-    fn sta_rejects_continuous_assigns() {
+    fn sta_accepts_scalar_literal_output_tie_offs() {
+        let src = r#"
+module top (y);
+  output y;
+  wire y;
+  assign y = 1'b0;
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let report = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &scalar_inv_library(),
+            StaOptions::default(),
+        )
+        .expect("scalar literal output tie-off should be supported");
+        assert_eq!(report.worst_output_arrival, 0.0);
+        assert_eq!(report.cell_levels, 0);
+    }
+
+    #[test]
+    fn sta_rejects_non_literal_continuous_assigns() {
         let src = r#"
 module top (a, y);
   input a;
@@ -1961,8 +2131,12 @@ endmodule
             &scalar_inv_library(),
             StaOptions::default(),
         )
-        .expect_err("continuous assigns should be rejected");
-        assert!(error.to_string().contains("continuous assign"));
+        .expect_err("non-literal continuous assigns should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("bare-literal continuous assigns")
+        );
     }
 
     #[test]
@@ -2407,7 +2581,7 @@ endmodule
             StaOptions::default(),
         )
         .expect_err("primary inputs with instance drivers should be rejected");
-        assert!(error.to_string().contains("also has an instance driver"));
+        assert!(error.to_string().contains("also has an internal driver"));
     }
 
     #[test]
@@ -2808,7 +2982,7 @@ endmodule
     }
 
     #[test]
-    fn sta_rejects_conditional_timing_arcs() {
+    fn sta_accepts_unknown_conditional_timing_arcs_as_possible() {
         let src = r#"
 module top (a, en, y);
   input a;
@@ -2859,19 +3033,15 @@ endmodule
             ..Default::default()
         };
 
-        let error = analyze_combinational_max_arrival_proto(
+        let report = analyze_combinational_max_arrival_proto(
             &module,
             &nets,
             &interner,
             &lib,
             StaOptions::default(),
         )
-        .expect_err("conditional timing arcs should be rejected");
-        assert!(
-            error
-                .to_string()
-                .contains("does not support conditional timing arcs")
-        );
+        .expect("unknown conditional timing arcs should remain possible");
+        assert_eq!(report.worst_output_arrival, 3.0);
     }
 
     #[test]
@@ -3699,6 +3869,71 @@ endmodule
     }
 
     #[test]
+    fn sta_skips_conditional_timing_arcs_when_known_false() {
+        let src = r#"
+module top (a, en, y);
+  input a;
+  output y;
+  wire a;
+  wire en;
+  wire y;
+  assign en = 1'b0;
+  BUF_EN u0 (.A(a), .EN(en), .Y(y));
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let arc = |when: &str, cell_rise: f64, cell_fall: f64| TimingArc {
+            related_pin: "A".to_string(),
+            timing_sense: "positive_unate".to_string(),
+            timing_type: "combinational".to_string(),
+            when: when.to_string(),
+            tables: vec![
+                scalar_table("cell_rise", cell_rise),
+                scalar_table("cell_fall", cell_fall),
+                scalar_table("rise_transition", 0.0),
+                scalar_table("fall_transition", 0.0),
+            ],
+            ..Default::default()
+        };
+        let lib = crate::liberty_proto::Library {
+            cells: vec![Cell {
+                name: "BUF_EN".to_string(),
+                pins: vec![
+                    Pin {
+                        direction: PinDirection::Input as i32,
+                        name: "A".to_string(),
+                        ..Default::default()
+                    },
+                    Pin {
+                        direction: PinDirection::Input as i32,
+                        name: "EN".to_string(),
+                        ..Default::default()
+                    },
+                    Pin {
+                        direction: PinDirection::Output as i32,
+                        name: "Y".to_string(),
+                        timing_arcs: vec![arc("EN", 10.0, 10.0), arc("!EN", 2.0, 3.0)],
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let report = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &lib,
+            StaOptions::default(),
+        )
+        .expect("sta should skip conditional arcs that are provably false");
+
+        assert_close(report.worst_output_arrival, 3.0);
+    }
+
+    #[test]
     fn sta_uses_edge_specific_input_capacitance_for_net_load() {
         let src = r#"
 module top (a, n);
@@ -4009,7 +4244,7 @@ endmodule
     }
 
     #[test]
-    fn evaluate_table_accepts_tiny_non_monotone_noise() {
+    fn evaluate_table_accepts_small_asap7_characterization_noise() {
         let lib = crate::liberty_proto::Library {
             lu_table_templates: vec![LuTableTemplate {
                 kind: "lu_table_template".to_string(),
@@ -4024,16 +4259,16 @@ endmodule
             kind: "cell_rise".to_string(),
             template_id: 1,
             dimensions: vec![2],
-            values: vec![40.0822, 40.0809],
+            values: vec![28.4535, 28.2959],
             ..Default::default()
         };
 
         validate_timing_table_payload(&lib, &table, "characterization_noise")
-            .expect("tiny non-monotone characterization noise should be tolerated");
+            .expect("small ASAP7 characterization noise should be tolerated");
     }
 
     #[test]
-    fn evaluate_output_edge_set_rejects_negative_transition_results() {
+    fn evaluate_output_edge_set_clamps_negative_transition_results() {
         let input_timing = EdgeTimingSet::from_single(EdgeTiming {
             arrival: 0.0,
             transition: 0.1,
@@ -4041,7 +4276,7 @@ endmodule
         let delay_table = scalar_table("cell_rise", 1.0);
         let slew_table = scalar_table("rise_transition", -0.1);
 
-        let error = evaluate_output_edge_set(
+        let output = evaluate_output_edge_set(
             &crate::liberty_proto::Library::default(),
             &delay_table,
             &slew_table,
@@ -4051,11 +4286,13 @@ endmodule
             StaTimingTableKind::CellRise,
             StaTimingTableKind::RiseTransition,
         )
-        .expect_err("negative transition outputs should be rejected");
-        assert!(
-            error
-                .to_string()
-                .contains("rise_transition result must be non-negative")
+        .expect("negative transition outputs should clamp to physical zero");
+        assert_eq!(
+            output,
+            EdgeTimingSet::from_single(EdgeTiming {
+                arrival: 1.0,
+                transition: 0.0,
+            })
         );
     }
 

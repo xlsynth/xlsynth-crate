@@ -31,6 +31,39 @@ impl Term {
         self.collect_inputs(&mut v);
         v
     }
+
+    /// Evaluates the formula when enough input bindings are known.
+    pub fn evaluate_partial(&self, input_values: &HashMap<String, bool>) -> Option<bool> {
+        match self {
+            Term::Input(name) => input_values.get(name).copied(),
+            Term::And(lhs, rhs) => match (
+                lhs.evaluate_partial(input_values),
+                rhs.evaluate_partial(input_values),
+            ) {
+                (Some(false), _) | (_, Some(false)) => Some(false),
+                (Some(true), Some(true)) => Some(true),
+                _ => None,
+            },
+            Term::Or(lhs, rhs) => match (
+                lhs.evaluate_partial(input_values),
+                rhs.evaluate_partial(input_values),
+            ) {
+                (Some(true), _) | (_, Some(true)) => Some(true),
+                (Some(false), Some(false)) => Some(false),
+                _ => None,
+            },
+            Term::Xor(lhs, rhs) => match (
+                lhs.evaluate_partial(input_values),
+                rhs.evaluate_partial(input_values),
+            ) {
+                (Some(lhs), Some(rhs)) => Some(lhs ^ rhs),
+                _ => None,
+            },
+            Term::Negate(inner) => inner.evaluate_partial(input_values).map(|value| !value),
+            Term::Constant(value) => Some(*value),
+        }
+    }
+
     fn collect_inputs(&self, v: &mut Vec<String>) {
         match self {
             Term::Input(s) => v.push(s.clone()),
@@ -258,6 +291,20 @@ mod tests {
                 Box::new(Term::Input("B".to_string()))
             )
         );
+    }
+
+    #[test]
+    fn test_evaluate_partial_uses_known_constants() {
+        let t = parse_formula("A * !B + C").unwrap();
+        let mut inputs = HashMap::new();
+        inputs.insert("B".to_string(), true);
+        assert_eq!(t.evaluate_partial(&inputs), None);
+
+        inputs.insert("C".to_string(), false);
+        assert_eq!(t.evaluate_partial(&inputs), Some(false));
+
+        inputs.insert("C".to_string(), true);
+        assert_eq!(t.evaluate_partial(&inputs), Some(true));
     }
     #[test]
     fn test_parse_simple_or() {

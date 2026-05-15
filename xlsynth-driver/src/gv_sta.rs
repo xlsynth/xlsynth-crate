@@ -3,21 +3,11 @@
 use clap::ArgMatches;
 use serde::Serialize;
 use std::path::Path;
-use xlsynth_g8r::netlist::io::{
-    load_liberty_with_timing_data_from_path, parse_netlist_from_path, ParsedNetlist,
+use xlsynth_g8r::netlist::io::{load_liberty_with_timing_data_from_path, parse_netlist_from_path};
+use xlsynth_g8r::netlist::report::{
+    build_sta_report, select_module, NetlistStaReport, OutputTimingRow,
 };
-use xlsynth_g8r::netlist::parse::{NetlistModule, PortDirection};
-use xlsynth_g8r::netlist::sta::{analyze_combinational_max_arrival, StaOptions};
-
-#[derive(Debug, Serialize)]
-struct OutputTimingRow {
-    output: String,
-    rise_arrival: f64,
-    fall_arrival: f64,
-    rise_transition: f64,
-    fall_transition: f64,
-    worst_arrival: f64,
-}
+use xlsynth_g8r::netlist::sta::StaOptions;
 
 #[derive(Debug, Serialize)]
 struct StaSummary {
@@ -29,46 +19,17 @@ struct StaSummary {
     outputs: Vec<OutputTimingRow>,
 }
 
-fn resolve_symbol(
-    parsed: &ParsedNetlist,
-    sym: xlsynth_g8r::netlist::parse::PortId,
-    what: &str,
-) -> Result<String, String> {
-    parsed
-        .interner
-        .resolve(sym)
-        .map(|s| s.to_string())
-        .ok_or_else(|| format!("could not resolve {} symbol", what))
-}
-
-fn select_module<'a>(
-    parsed: &'a ParsedNetlist,
-    module_name: Option<&str>,
-) -> Result<&'a NetlistModule, String> {
-    if let Some(name) = module_name {
-        for module in &parsed.modules {
-            let m_name = resolve_symbol(parsed, module.name, "module name")?;
-            if m_name == name {
-                return Ok(module);
-            }
+impl From<NetlistStaReport> for StaSummary {
+    fn from(value: NetlistStaReport) -> Self {
+        Self {
+            module: value.module,
+            time_unit: value.time_unit,
+            primary_input_transition: value.primary_input_transition,
+            module_output_load: value.module_output_load,
+            worst_output_arrival: value.delay,
+            outputs: value.outputs,
         }
-        return Err(format!("module '{}' was not found in netlist", name));
     }
-
-    if parsed.modules.len() == 1 {
-        return Ok(&parsed.modules[0]);
-    }
-
-    let mut names: Vec<String> = Vec::with_capacity(parsed.modules.len());
-    for module in &parsed.modules {
-        names.push(resolve_symbol(parsed, module.name, "module name")?);
-    }
-    names.sort();
-    Err(format!(
-        "netlist contains {} modules; use --module_name; available modules: [{}]",
-        parsed.modules.len(),
-        names.join(", ")
-    ))
 }
 
 pub fn handle_gv_sta(matches: &ArgMatches) {
@@ -106,14 +67,6 @@ pub fn handle_gv_sta(matches: &ArgMatches) {
         }
     };
 
-    let module_name_text = match resolve_symbol(&parsed, module.name, "module name") {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("gv-sta error: {}", e);
-            std::process::exit(1);
-        }
-    };
-
     let liberty = match load_liberty_with_timing_data_from_path(Path::new(liberty_proto_path)) {
         Ok(l) => l,
         Err(e) => {
@@ -125,7 +78,7 @@ pub fn handle_gv_sta(matches: &ArgMatches) {
         }
     };
 
-    let report = match analyze_combinational_max_arrival(
+    let summary = match build_sta_report(
         module,
         parsed.nets.as_slice(),
         &parsed.interner,
@@ -135,67 +88,11 @@ pub fn handle_gv_sta(matches: &ArgMatches) {
             module_output_load,
         },
     ) {
-        Ok(r) => r,
+        Ok(r) => StaSummary::from(r),
         Err(e) => {
             eprintln!("gv-sta error: STA failed: {:#}", e);
             std::process::exit(1);
         }
-    };
-
-    let mut outputs: Vec<OutputTimingRow> = Vec::new();
-    for port in &module.ports {
-        if port.direction != PortDirection::Output {
-            continue;
-        }
-
-        let output_name = match resolve_symbol(&parsed, port.name, "output port") {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("gv-sta error: {}", e);
-                std::process::exit(1);
-            }
-        };
-
-        let Some(net_idx) = module.find_net_index(port.name, parsed.nets.as_slice()) else {
-            eprintln!(
-                "gv-sta error: output '{}' does not resolve to a net",
-                output_name
-            );
-            std::process::exit(1);
-        };
-
-        let Some(timing) = report.timing_for_net(net_idx) else {
-            eprintln!(
-                "gv-sta error: output '{}' has no computed timing",
-                output_name
-            );
-            std::process::exit(1);
-        };
-
-        outputs.push(OutputTimingRow {
-            output: output_name,
-            rise_arrival: timing.rise.arrival,
-            fall_arrival: timing.fall.arrival,
-            rise_transition: timing.rise.transition,
-            fall_transition: timing.fall.transition,
-            worst_arrival: timing.rise.arrival.max(timing.fall.arrival),
-        });
-    }
-
-    let time_unit = liberty
-        .units
-        .as_ref()
-        .map(|u| u.time_unit.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    let summary = StaSummary {
-        module: module_name_text,
-        time_unit,
-        primary_input_transition,
-        module_output_load,
-        worst_output_arrival: report.worst_output_arrival,
-        outputs,
     };
 
     let shown_time_unit = if summary.time_unit.is_empty() {

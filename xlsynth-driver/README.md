@@ -256,6 +256,44 @@ Key flags:
   `xlsynth_g8r::netlist::sta_trace` log target to emit per-arc timing-candidate
   diagnostics.
 
+### `gv-area`: gate-level mapped cell area
+
+Reports the summed standard-cell area for one selected gate-level netlist module using per-cell `area` values from a Liberty proto.
+
+```shell
+xlsynth-driver gv-area \
+  --netlist my_design.mapped.gv \
+  --liberty_proto ~/timing-enabled.liberty.proto
+```
+
+Key flags:
+
+- `--netlist <PATH>`: gate-level netlist (`.gv`, `.v`, or `.gv.gz`). Required.
+- `--liberty_proto <PATH>`: Liberty proto (`.proto` or `.textproto`). Required.
+- `--module_name <MODULE>`: optional module selection when netlist has multiple modules.
+- `--json_out <PATH>`: optional JSON area summary output path.
+
+### `gv-report`: gate-level mapped area + timing summary
+
+Reports mapped standard-cell area, combinational max-arrival delay, instance count, and combinational cell levels for one selected gate-level netlist module. Delay uses the same basic Liberty-table STA flow as `gv-sta`.
+
+```shell
+xlsynth-driver gv-report \
+  --netlist my_design.mapped.gv \
+  --liberty_proto ~/timing-enabled.liberty.proto \
+  --primary_input_transition 0.01 \
+  --module_output_load 0.0
+```
+
+Key flags:
+
+- `--netlist <PATH>`: gate-level netlist (`.gv`, `.v`, or `.gv.gz`). Required.
+- `--liberty_proto <PATH>`: timing-enabled Liberty proto (`.proto` or `.textproto`). Required.
+- `--module_name <MODULE>`: optional module selection when netlist has multiple modules.
+- `--primary_input_transition <VALUE>`: source transition for primary inputs (default: `0.01`).
+- `--module_output_load <VALUE>`: extra load capacitance added at module outputs (default: `0.0`).
+- `--json_out <PATH>`: optional JSON report output path.
+
 ### `gv-read-stats`: netlist statistics
 
 Reads a gate-level netlist (optionally gzipped) and prints summary statistics such as
