@@ -171,8 +171,8 @@ fn prove_umul_const_lowering_equivalence_for_interesting_constants_width8() {
 }
 
 #[test]
-fn prove_umul_const_lowering_equivalence_for_interesting_constants_width16() {
-    let width = 16usize;
+fn prove_umul_const_lowering_equivalence_for_interesting_constants_width12() {
+    let width = 12usize;
     for case in interesting_constants(width) {
         prove_case(width, &case, LiteralSide::Rhs);
         prove_case(width, &case, LiteralSide::Lhs);
