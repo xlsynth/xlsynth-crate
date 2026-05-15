@@ -299,7 +299,7 @@ endmodule
 }
 
 #[test]
-fn gv2aig_with_liberty_rejects_preserved_assigns() {
+fn gv2aig_with_liberty_supports_preserved_assigns() {
     let liberty_text = r#"
 cells: {
   name: "BUF"
@@ -310,23 +310,16 @@ cells: {
 "#;
     let netlist_text = r#"
 module top(a, y);
-  input a;
+  input [1:0] a;
   output y;
-  assign y = a;
+  wire [1:0] tmp;
+  assign tmp = {a[0], a[1]};
+  BUF u0 (.A(tmp[1]), .Y(y));
 endmodule
 "#;
 
-    let (_temp_dir, _out_path, output) = run_gv2aig(netlist_text, Some(liberty_text));
-    assert!(
-        !output.status.success(),
-        "preserved assigns with liberty should fail\nstdout={}\nstderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("does not support preserved continuous assigns"),
-        "unexpected stderr: {}",
-        String::from_utf8_lossy(&output.stderr),
-    );
+    let (_temp_dir, out_path, output) = run_gv2aig(netlist_text, Some(liberty_text));
+    assert_success(&output);
+    load_aiger_auto_from_path(&out_path, GateBuilderOptions::no_opt())
+        .expect("load liberty-backed preserved assign aiger");
 }
