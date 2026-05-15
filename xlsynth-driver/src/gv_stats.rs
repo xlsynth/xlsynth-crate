@@ -6,7 +6,7 @@ use xlsynth_g8r::netlist::io::{load_liberty_with_timing_data_from_path, parse_ne
 use xlsynth_g8r::netlist::report::{build_netlist_report, select_module, NetlistReport};
 use xlsynth_g8r::netlist::sta::StaOptions;
 
-const SUBCOMMAND: &str = "gv-report";
+const SUBCOMMAND: &str = "gv-stats";
 
 fn shown_time_unit(time_unit: &str) -> &str {
     if time_unit.is_empty() {
@@ -56,7 +56,7 @@ fn render_netlist_report(report: &NetlistReport) -> String {
     out
 }
 
-pub fn handle_gv_report(matches: &ArgMatches) {
+pub fn handle_gv_stats(matches: &ArgMatches) {
     let netlist_path = Path::new(matches.get_one::<String>("netlist").unwrap());
     let liberty_proto_path = Path::new(matches.get_one::<String>("liberty_proto").unwrap());
     let module_name = matches.get_one::<String>("module_name").map(|s| s.as_str());

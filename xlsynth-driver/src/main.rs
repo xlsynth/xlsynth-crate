@@ -75,8 +75,8 @@ mod gv_area;
 mod gv_dump_cone;
 mod gv_instance_csv;
 mod gv_read_stats;
-mod gv_report;
 mod gv_sta;
+mod gv_stats;
 mod ir2combo;
 mod ir2delayinfo;
 mod ir2gates;
@@ -1948,7 +1948,7 @@ fn main() {
                 ),
         )
         .subcommand(
-            clap::Command::new("gv-report")
+            clap::Command::new("gv-stats")
                 .about("Reports mapped area, delay, cell count, and cell levels for a gate-level netlist")
                 .arg(
                     Arg::new("netlist")
@@ -3618,8 +3618,8 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         Some(("gv-area", subm)) => {
             gv_area::handle_gv_area(subm);
         }
-        Some(("gv-report", subm)) => {
-            gv_report::handle_gv_report(subm);
+        Some(("gv-stats", subm)) => {
+            gv_stats::handle_gv_stats(subm);
         }
         Some(("gv-read-stats", subm)) => {
             gv_read_stats::handle_gv_read_stats(subm);

@@ -86,13 +86,13 @@ endmodule
 }
 
 #[test]
-fn gv_area_and_gv_report_emit_expected_text_and_json() {
+fn gv_area_and_gv_stats_emit_expected_text_and_json() {
     let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
     let temp_dir = write_fixture();
     let netlist_path = temp_dir.path().join("mapped.gv");
     let liberty_path = temp_dir.path().join("lib.textproto");
     let area_json_path = temp_dir.path().join("area.json");
-    let report_json_path = temp_dir.path().join("report.json");
+    let stats_json_path = temp_dir.path().join("stats.json");
 
     let area_output = Command::new(driver)
         .arg("gv-area")
@@ -121,32 +121,32 @@ fn gv_area_and_gv_report_emit_expected_text_and_json() {
     assert_eq!(area_json["area"], 3.0);
     assert_eq!(area_json["cell_count"], 2);
 
-    let report_output = Command::new(driver)
-        .arg("gv-report")
+    let stats_output = Command::new(driver)
+        .arg("gv-stats")
         .arg("--netlist")
         .arg(netlist_path.as_os_str())
         .arg("--liberty_proto")
         .arg(liberty_path.as_os_str())
         .arg("--json_out")
-        .arg(report_json_path.as_os_str())
+        .arg(stats_json_path.as_os_str())
         .output()
-        .expect("gv-report invocation should run");
+        .expect("gv-stats invocation should run");
     assert!(
-        report_output.status.success(),
-        "gv-report failed: status={:?}\nstdout={}\nstderr={}",
-        report_output.status,
-        String::from_utf8_lossy(&report_output.stdout),
-        String::from_utf8_lossy(&report_output.stderr)
+        stats_output.status.success(),
+        "gv-stats failed: status={:?}\nstdout={}\nstderr={}",
+        stats_output.status,
+        String::from_utf8_lossy(&stats_output.stdout),
+        String::from_utf8_lossy(&stats_output.stderr)
     );
     compare_golden_text(
-        String::from_utf8_lossy(&report_output.stdout).as_ref(),
-        "tests/test_gv_report.golden.txt",
+        String::from_utf8_lossy(&stats_output.stdout).as_ref(),
+        "tests/test_gv_stats.golden.txt",
     );
-    let report_json: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&report_json_path).expect("read gv-report json"))
-            .expect("parse gv-report json");
-    assert_eq!(report_json["area"], 3.0);
-    assert_eq!(report_json["delay"], 3.0);
-    assert_eq!(report_json["cell_count"], 2);
-    assert_eq!(report_json["cell_levels"], 2);
+    let stats_json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&stats_json_path).expect("read gv-stats json"))
+            .expect("parse gv-stats json");
+    assert_eq!(stats_json["area"], 3.0);
+    assert_eq!(stats_json["delay"], 3.0);
+    assert_eq!(stats_json["cell_count"], 2);
+    assert_eq!(stats_json["cell_levels"], 2);
 }

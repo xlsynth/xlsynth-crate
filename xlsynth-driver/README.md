@@ -273,12 +273,12 @@ Key flags:
 - `--module_name <MODULE>`: optional module selection when netlist has multiple modules.
 - `--json_out <PATH>`: optional JSON area summary output path.
 
-### `gv-report`: gate-level mapped area + timing summary
+### `gv-stats`: gate-level mapped area + timing summary
 
 Reports mapped standard-cell area, combinational max-arrival delay, instance count, and combinational cell levels for one selected gate-level netlist module. Delay uses the same basic Liberty-table STA flow as `gv-sta`.
 
 ```shell
-xlsynth-driver gv-report \
+xlsynth-driver gv-stats \
   --netlist my_design.mapped.gv \
   --liberty_proto ~/timing-enabled.liberty.proto \
   --primary_input_transition 0.01 \
