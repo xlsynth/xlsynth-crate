@@ -12,7 +12,7 @@
 use crate::liberty::load::{
     Library, LibraryWithTimingData, load_library_from_path, load_library_with_timing_data_from_path,
 };
-use crate::netlist::parse::{Net, NetlistModule, Parser as NetlistParser, TokenScanner};
+use crate::netlist::parse::{Net, NetlistModule, Parser as NetlistParser, PortId, TokenScanner};
 use anyhow::{Result, anyhow};
 use flate2::read::MultiGzDecoder;
 use std::fs::File;
@@ -26,6 +26,69 @@ pub struct ParsedNetlist {
     pub modules: Vec<NetlistModule>,
     pub nets: Vec<Net>,
     pub interner: StringInterner<StringBackend<SymbolU32>>,
+}
+
+/// Resolves one interned netlist symbol with an actionable error.
+pub fn resolve_symbol(
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    sym: PortId,
+    what: &str,
+) -> Result<String> {
+    interner
+        .resolve(sym)
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow!("could not resolve {} symbol", what))
+}
+
+/// Selects one module by name, or the only module when no name is provided.
+pub fn select_module<'a>(
+    parsed: &'a ParsedNetlist,
+    module_name: Option<&str>,
+) -> Result<&'a NetlistModule> {
+    if let Some(name) = module_name {
+        for module in &parsed.modules {
+            let resolved = resolve_symbol(&parsed.interner, module.name, "module name")?;
+            if resolved == name {
+                return Ok(module);
+            }
+        }
+        let mut available: Vec<String> = parsed
+            .modules
+            .iter()
+            .map(|m| {
+                parsed
+                    .interner
+                    .resolve(m.name)
+                    .unwrap_or("<unknown>")
+                    .to_string()
+            })
+            .collect();
+        available.sort();
+        return Err(anyhow!(
+            "module '{}' not found in netlist; available modules: [{}]",
+            name,
+            available.join(", ")
+        ));
+    }
+
+    if parsed.modules.len() == 1 {
+        return Ok(&parsed.modules[0]);
+    }
+
+    let mut names = Vec::with_capacity(parsed.modules.len());
+    for module in &parsed.modules {
+        names.push(resolve_symbol(
+            &parsed.interner,
+            module.name,
+            "module name",
+        )?);
+    }
+    names.sort();
+    Err(anyhow!(
+        "netlist contains {} modules; specify --module_name; available modules: [{}]",
+        parsed.modules.len(),
+        names.join(", ")
+    ))
 }
 
 /// Parse a gate-level netlist (optionally gzipped) into modules, nets, and the

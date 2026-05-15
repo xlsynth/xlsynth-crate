@@ -4,8 +4,8 @@
 
 use crate::liberty::LibraryWithTimingData;
 use crate::liberty_proto::Library;
-use crate::netlist::io::ParsedNetlist;
-use crate::netlist::parse::{Net, NetlistModule, PortDirection, PortId};
+pub use crate::netlist::io::{resolve_symbol, select_module};
+use crate::netlist::parse::{Net, NetlistModule, PortDirection};
 use crate::netlist::sta::{StaOptions, analyze_combinational_max_arrival};
 use anyhow::{Result, anyhow};
 use serde::Serialize;
@@ -67,53 +67,6 @@ pub struct NetlistReport {
     pub cell_levels: usize,
     pub cells: Vec<CellAreaRow>,
     pub outputs: Vec<OutputTimingRow>,
-}
-
-/// Resolves one interned netlist symbol with an actionable error.
-pub fn resolve_symbol(
-    interner: &StringInterner<StringBackend<SymbolU32>>,
-    sym: PortId,
-    what: &str,
-) -> Result<String> {
-    interner
-        .resolve(sym)
-        .map(|s| s.to_string())
-        .ok_or_else(|| anyhow!("could not resolve {} symbol", what))
-}
-
-/// Selects one module by name, or the only module when no name is provided.
-pub fn select_module<'a>(
-    parsed: &'a ParsedNetlist,
-    module_name: Option<&str>,
-) -> Result<&'a NetlistModule> {
-    if let Some(name) = module_name {
-        for module in &parsed.modules {
-            let resolved = resolve_symbol(&parsed.interner, module.name, "module name")?;
-            if resolved == name {
-                return Ok(module);
-            }
-        }
-        return Err(anyhow!("module '{}' was not found in netlist", name));
-    }
-
-    if parsed.modules.len() == 1 {
-        return Ok(&parsed.modules[0]);
-    }
-
-    let mut names = Vec::with_capacity(parsed.modules.len());
-    for module in &parsed.modules {
-        names.push(resolve_symbol(
-            &parsed.interner,
-            module.name,
-            "module name",
-        )?);
-    }
-    names.sort();
-    Err(anyhow!(
-        "netlist contains {} modules; use --module_name; available modules: [{}]",
-        parsed.modules.len(),
-        names.join(", ")
-    ))
 }
 
 /// Builds mapped standard-cell area for one selected module.
@@ -336,6 +289,26 @@ mod tests {
                     ..Default::default()
                 },
                 Cell {
+                    name: "BUF".to_string(),
+                    pins: vec![
+                        Pin {
+                            name: "A".to_string(),
+                            direction: PinDirection::Input as i32,
+                            capacitance: Some(0.0),
+                            ..Default::default()
+                        },
+                        Pin {
+                            name: "Y".to_string(),
+                            direction: PinDirection::Output as i32,
+                            function: "A".to_string(),
+                            timing_arcs: vec![timing_arc("A", 1.0, 1.0)],
+                            ..Default::default()
+                        },
+                    ],
+                    area: 1.0,
+                    ..Default::default()
+                },
+                Cell {
                     name: "NAND2".to_string(),
                     pins: vec![
                         Pin {
@@ -436,6 +409,37 @@ endmodule
     }
 
     #[test]
+    fn build_netlist_report_accepts_yosys_concat_alias_assign() {
+        let parsed = parse_netlist(
+            r#"
+module top (x, y);
+  input [31:0] x;
+  output y;
+  wire [31:0] x;
+  wire y;
+  wire [8:0] exp_x_signed__2;
+  assign exp_x_signed__2 = { 1'h0, x[30:23] };
+  BUF u0 (.A(exp_x_signed__2[8]), .Y(y));
+endmodule
+"#,
+        );
+        let module = select_module(&parsed, None).expect("select only module");
+        let library = LibraryWithTimingData::from_proto(inv_nand_library());
+        let report = build_netlist_report(
+            module,
+            &parsed.nets,
+            &parsed.interner,
+            &library,
+            StaOptions::default(),
+        )
+        .expect("build report with Yosys concat alias assign");
+        assert_eq!(report.area, 1.0);
+        assert_eq!(report.delay, 1.0);
+        assert_eq!(report.cell_count, 1);
+        assert_eq!(report.cell_levels, 1);
+    }
+
+    #[test]
     fn build_area_report_rejects_unknown_cells() {
         let parsed = parse_netlist(
             r#"
@@ -444,13 +448,13 @@ module top (a, y);
   output y;
   wire a;
   wire y;
-  BUF u0 (.A(a), .Y(y));
+  UNKNOWN u0 (.A(a), .Y(y));
 endmodule
 "#,
         );
         let module = select_module(&parsed, None).expect("select only module");
         let error = build_area_report(module, &parsed.interner, &inv_nand_library())
             .expect_err("unknown cell should be rejected");
-        assert!(error.to_string().contains("unknown cell 'BUF'"));
+        assert!(error.to_string().contains("unknown cell 'UNKNOWN'"));
     }
 }

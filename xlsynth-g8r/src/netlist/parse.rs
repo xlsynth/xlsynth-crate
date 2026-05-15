@@ -1372,10 +1372,7 @@ impl<R: Read + 'static> Parser<R> {
                     return Ok(expr);
                 }
                 TokenPayload::OBrace => {
-                    return Err(ScanError {
-                        message: "concatenation is not supported in assign expressions".to_string(),
-                        span: tok.span,
-                    });
+                    return Ok(AssignExpr::Leaf(self.parse_netref_expr()?));
                 }
                 _ => {}
             }
@@ -1542,7 +1539,8 @@ impl<R: Read + 'static> Parser<R> {
     /// Parses: assign <lhs> = <rhs>;
     ///
     /// The supported RHS subset is limited to bitwise `~`, `&`, `|`, and `^`
-    /// over identifiers/literals with optional selects plus parentheses.
+    /// over identifiers/literals/concats with optional selects plus
+    /// parentheses.
     fn parse_assign(&mut self) -> Result<NetlistAssign, ScanError> {
         let t_assign = self.scanner.popt()?.ok_or_else(|| ScanError {
             message: "expected 'assign'".to_string(),
@@ -2600,7 +2598,7 @@ endmodule
     }
 
     #[test]
-    fn test_parse_module_rejects_concat_in_assign_expression() {
+    fn test_parse_module_accepts_concat_in_assign_expression() {
         let src = r#"
 module m(a, b, y);
   input a;
@@ -2610,12 +2608,11 @@ module m(a, b, y);
 endmodule
 "#;
         let mut parser = Parser::new(TokenScanner::from_str(src));
-        let err = parser.parse_file().expect_err("concat should be rejected");
-        assert!(
-            err.message.contains("concatenation is not supported"),
-            "unexpected error: {}",
-            err.message
-        );
+        let modules = parser.parse_file().expect("concat assign should parse");
+        match &modules[0].assigns[0].rhs {
+            AssignExpr::Leaf(NetRef::Concat(elems)) => assert_eq!(elems.len(), 2),
+            other => panic!("expected concat assign RHS, got {:?}", other),
+        }
     }
 
     #[test]

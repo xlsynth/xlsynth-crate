@@ -2,6 +2,7 @@
 
 pub mod assigns_to_gatefn;
 pub mod bench_synth_netlist;
+pub mod bit_ref;
 pub mod cone;
 pub mod connectivity;
 pub mod emit;

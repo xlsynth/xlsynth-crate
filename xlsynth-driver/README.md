@@ -117,14 +117,18 @@ xlsynth-driver gv2ir \
 ```
 
 - Optional flags:
+  - `--module_name <NAME>` – select the netlist module to convert. Required when the netlist contains multiple modules.
   - `--collapse_sequential <BOOL>` – if true (default), collapse sequential state variables by substituting next_state during projection. If false and a pin function references a sequential state variable (e.g., `IQ`/`IQN`), projection will fail.
+  - `--output_function_name <NAME>` – override the emitted XLS IR function name. Use this when the netlist module is named `top`, because `top` is reserved in XLS IR.
 
 Example (ASAP7):
 
 ```shell
 xlsynth-driver gv2ir \
   --netlist add_mul.vg \
-  --liberty_proto ~/asap7.proto > add_mul.ir
+  --liberty_proto ~/asap7.proto \
+  --module_name top \
+  --output_function_name top_fn > add_mul.ir
 ```
 
 ### `gv2block`: gate-level netlist to Block IR
