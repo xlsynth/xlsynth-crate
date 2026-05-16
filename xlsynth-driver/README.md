@@ -133,7 +133,7 @@ xlsynth-driver gv2ir \
 
 ### `gv2block`: gate-level netlist to Block IR
 
-Converts a gate-level netlist plus Liberty proto into an XLS block IR package. Cells are defined as separate blocks instantiated in the top block. The netlist must contain exactly one module.
+Converts a techmapped gate-level netlist plus Liberty proto into an XLS block IR package. Cells are defined as separate blocks instantiated in the top block. The netlist must contain exactly one module. Preserved `assign` / `tran` statements are accepted only when they are wiring artifacts such as aliases, slices, concats, or literal tieoffs; top-level combinational assign logic must be technology-mapped into cells first.
 
 ```shell
 xlsynth-driver gv2block \

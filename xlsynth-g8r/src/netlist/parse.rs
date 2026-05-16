@@ -184,9 +184,17 @@ impl AssignExpr {
 /// Continuous assignment preserved from the parsed netlist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetlistAssign {
+    pub kind: NetlistAssignKind,
     pub lhs: NetRef,
     pub rhs: AssignExpr,
     pub span: Span,
+}
+
+/// Preserved netlist statement kind represented by `NetlistAssign`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetlistAssignKind {
+    Continuous,
+    Tran,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1626,10 +1634,154 @@ impl<R: Read + 'static> Parser<R> {
             });
         }
         Ok(NetlistAssign {
+            kind: NetlistAssignKind::Continuous,
             lhs,
             rhs,
             span: Span {
                 start: t_assign.span.start,
+                limit: t_semi.span.limit,
+            },
+        })
+    }
+
+    /// Parses: tran [instance_name [msb:lsb]] ( lhs, rhs );
+    fn parse_tran(&mut self) -> Result<NetlistAssign, ScanError> {
+        let t_tran = self.scanner.popt()?.ok_or_else(|| ScanError {
+            message: "expected 'tran'".to_string(),
+            span: Span {
+                start: self.scanner.pos,
+                limit: self.scanner.pos,
+            },
+        })?;
+        if !matches!(t_tran.payload, TokenPayload::Identifier(ref s) if s == "tran") {
+            return Err(ScanError {
+                message: "expected 'tran'".to_string(),
+                span: t_tran.span,
+            });
+        }
+
+        self.skip_trivia()?;
+        if let Some(tok) = self.scanner.peekt()? {
+            if matches!(tok.payload, TokenPayload::Identifier(_)) {
+                self.scanner.popt()?;
+                self.skip_trivia()?;
+                if let Some(range_tok) = self.scanner.peekt()? {
+                    if matches!(range_tok.payload, TokenPayload::OBrack) {
+                        self.scanner.popt()?;
+                        self.skip_trivia()?;
+                        let _msb = self.scanner.popt()?.ok_or_else(|| ScanError {
+                            message: "expected msb in tran instance range".to_string(),
+                            span: Span {
+                                start: self.scanner.pos,
+                                limit: self.scanner.pos,
+                            },
+                        })?;
+                        self.skip_trivia()?;
+                        let colon = self.scanner.popt()?.ok_or_else(|| ScanError {
+                            message: "expected ':' in tran instance range".to_string(),
+                            span: Span {
+                                start: self.scanner.pos,
+                                limit: self.scanner.pos,
+                            },
+                        })?;
+                        if !matches!(colon.payload, TokenPayload::Colon) {
+                            return Err(ScanError {
+                                message: "expected ':' in tran instance range".to_string(),
+                                span: colon.span,
+                            });
+                        }
+                        self.skip_trivia()?;
+                        let _lsb = self.scanner.popt()?.ok_or_else(|| ScanError {
+                            message: "expected lsb in tran instance range".to_string(),
+                            span: Span {
+                                start: self.scanner.pos,
+                                limit: self.scanner.pos,
+                            },
+                        })?;
+                        self.skip_trivia()?;
+                        let cbrack = self.scanner.popt()?.ok_or_else(|| ScanError {
+                            message: "expected ']' after tran instance range".to_string(),
+                            span: Span {
+                                start: self.scanner.pos,
+                                limit: self.scanner.pos,
+                            },
+                        })?;
+                        if !matches!(cbrack.payload, TokenPayload::CBrack) {
+                            return Err(ScanError {
+                                message: "expected ']' after tran instance range".to_string(),
+                                span: cbrack.span,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        self.skip_trivia()?;
+        let oparen = self.scanner.popt()?.ok_or_else(|| ScanError {
+            message: "expected '(' after tran".to_string(),
+            span: Span {
+                start: self.scanner.pos,
+                limit: self.scanner.pos,
+            },
+        })?;
+        if !matches!(oparen.payload, TokenPayload::OParen) {
+            return Err(ScanError {
+                message: "expected '(' after tran".to_string(),
+                span: oparen.span,
+            });
+        }
+
+        let lhs = self.parse_netref_expr()?;
+        self.skip_trivia()?;
+        let comma = self.scanner.popt()?.ok_or_else(|| ScanError {
+            message: "expected ',' between tran terminals".to_string(),
+            span: Span {
+                start: self.scanner.pos,
+                limit: self.scanner.pos,
+            },
+        })?;
+        if !matches!(comma.payload, TokenPayload::Comma) {
+            return Err(ScanError {
+                message: "expected ',' between tran terminals".to_string(),
+                span: comma.span,
+            });
+        }
+        let rhs = self.parse_netref_expr()?;
+        self.skip_trivia()?;
+        let cparen = self.scanner.popt()?.ok_or_else(|| ScanError {
+            message: "expected ')' after tran terminals".to_string(),
+            span: Span {
+                start: self.scanner.pos,
+                limit: self.scanner.pos,
+            },
+        })?;
+        if !matches!(cparen.payload, TokenPayload::CParen) {
+            return Err(ScanError {
+                message: "expected ')' after tran terminals".to_string(),
+                span: cparen.span,
+            });
+        }
+        self.skip_trivia()?;
+        let t_semi = self.scanner.popt()?.ok_or_else(|| ScanError {
+            message: "expected ';' after tran".to_string(),
+            span: Span {
+                start: self.scanner.pos,
+                limit: self.scanner.pos,
+            },
+        })?;
+        if !matches!(t_semi.payload, TokenPayload::Semi) {
+            return Err(ScanError {
+                message: "expected ';' after tran".to_string(),
+                span: t_semi.span,
+            });
+        }
+        Ok(NetlistAssign {
+            kind: NetlistAssignKind::Tran,
+            lhs,
+            rhs: AssignExpr::Leaf(rhs),
+            span: Span {
+                start: t_tran.span.start,
                 limit: t_semi.span.limit,
             },
         })
@@ -1806,6 +1958,9 @@ impl<R: Read + 'static> Parser<R> {
                     }
                     TokenPayload::Identifier(s) if s == "assign" => {
                         assigns.push(self.parse_assign()?);
+                    }
+                    TokenPayload::Identifier(s) if s == "tran" => {
+                        assigns.push(self.parse_tran()?);
                     }
                     TokenPayload::Identifier(_) => {
                         let instance = self.parse_instance()?;
@@ -2444,10 +2599,55 @@ endmodule
         let modules = parser.parse_file().expect("parse ok");
         assert_eq!(modules.len(), 1);
         assert_eq!(modules[0].assigns.len(), 1);
+        assert_eq!(modules[0].assigns[0].kind, NetlistAssignKind::Continuous);
         assert!(matches!(modules[0].assigns[0].lhs, NetRef::BitSelect(_, 1)));
         assert!(matches!(
             modules[0].assigns[0].rhs,
             AssignExpr::Leaf(NetRef::Literal(_))
+        ));
+    }
+
+    #[test]
+    fn test_parse_module_accepts_unnamed_tran() {
+        let src = r#"
+module m(a, y);
+  input a;
+  output y;
+  wire a;
+  wire y;
+  tran(y, a);
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("tran should parse");
+        assert_eq!(modules[0].assigns.len(), 1);
+        assert_eq!(modules[0].assigns[0].kind, NetlistAssignKind::Tran);
+        assert!(matches!(modules[0].assigns[0].lhs, NetRef::Simple(_)));
+        assert!(matches!(
+            modules[0].assigns[0].rhs,
+            AssignExpr::Leaf(NetRef::Simple(_))
+        ));
+    }
+
+    #[test]
+    fn test_parse_module_accepts_named_arrayed_tran() {
+        let src = r#"
+module m(a, y);
+  input [1:0] a;
+  output [1:0] y;
+  wire [1:0] a;
+  wire [1:0] y;
+  tran t[1:0]({y[1], y[0]}, {a[1], a[0]});
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("arrayed tran should parse");
+        assert_eq!(modules[0].assigns.len(), 1);
+        assert_eq!(modules[0].assigns[0].kind, NetlistAssignKind::Tran);
+        assert!(matches!(modules[0].assigns[0].lhs, NetRef::Concat(_)));
+        assert!(matches!(
+            modules[0].assigns[0].rhs,
+            AssignExpr::Leaf(NetRef::Concat(_))
         ));
     }
 

@@ -17,6 +17,7 @@
 use crate::liberty::IndexedLibrary;
 use crate::liberty_proto::PinDirection;
 use crate::netlist::connectivity::NetlistConnectivity;
+use crate::netlist::normalized::BitIndex;
 use crate::netlist::parse::{InstIndex, Net, NetlistModule, PortId};
 use std::collections::{HashMap, HashSet, VecDeque};
 use string_interner::symbol::SymbolU32;
@@ -62,9 +63,9 @@ pub struct ConeVisit {
 /// Error type for cone traversal.
 #[derive(Debug)]
 pub enum ConeError {
-    /// Given when the selected module contains preserved continuous assigns,
-    /// which this instance-connectivity traversal does not model.
-    UnsupportedAssigns { module: String, assign_count: usize },
+    /// Given when normalized connectivity could not be built for the selected
+    /// module.
+    InvalidConnectivity { reason: String },
     /// Given when the user supplies an instance name to start from that is not
     /// present in the module.
     MissingInstance { name: String },
@@ -91,14 +92,7 @@ pub enum ConeError {
 impl std::fmt::Display for ConeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ConeError::UnsupportedAssigns {
-                module,
-                assign_count,
-            } => write!(
-                f,
-                "module '{}' contains {} preserved continuous assign(s); cone traversal only supports instance-based structural netlists",
-                module, assign_count
-            ),
+            ConeError::InvalidConnectivity { reason } => write!(f, "{reason}"),
             ConeError::MissingInstance { name } => {
                 write!(f, "start instance '{}' was not found in the module", name)
             }
@@ -140,7 +134,6 @@ type ConeResult<T> = std::result::Result<T, ConeError>;
 struct ModuleConeContext<'a> {
     /// The module being traversed.
     module: &'a NetlistModule,
-    nets: &'a [Net],
     interner: &'a StringInterner<StringBackend<SymbolU32>>,
 
     /// Net-level connectivity (drivers and loads per net), plus cached
@@ -160,13 +153,6 @@ impl<'a> ModuleConeContext<'a> {
         dff_cell_names: &HashSet<String>,
         module_port_dirs: Option<&HashMap<PortId, HashMap<PortId, PinDirection>>>,
     ) -> ConeResult<Self> {
-        if !module.assigns.is_empty() {
-            return Err(ConeError::UnsupportedAssigns {
-                module: resolve_to_string(interner, module.name),
-                assign_count: module.assigns.len(),
-            });
-        }
-
         // Precompute dff_types as a set of type-name symbols used by instances.
         let mut dff_types: HashSet<PortId> = HashSet::new();
 
@@ -198,11 +184,13 @@ impl<'a> ModuleConeContext<'a> {
                 colno: inst.inst_colno,
             });
         }
-        let connectivity = NetlistConnectivity::new(module, nets, interner, lib, module_port_dirs);
+        let connectivity = NetlistConnectivity::new(module, nets, interner, lib, module_port_dirs)
+            .map_err(|e| ConeError::InvalidConnectivity {
+                reason: format!("could not normalize module connectivity: {e}"),
+            })?;
 
         Ok(ModuleConeContext {
             module,
-            nets,
             interner,
             connectivity,
             dff_types,
@@ -237,6 +225,38 @@ fn resolve_to_string(
         .resolve(sym)
         .expect("symbol should always resolve in interner")
         .to_string()
+}
+
+fn reachable_bits_for_traversal(
+    ctx: &ModuleConeContext<'_>,
+    start_bit: BitIndex,
+    direction: TraversalDirection,
+    stop: StopCondition,
+) -> Vec<BitIndex> {
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::new();
+    let mut reachable = Vec::new();
+    queue.push_back(start_bit);
+    while let Some(bit_idx) = queue.pop_front() {
+        if !visited.insert(bit_idx) {
+            continue;
+        }
+        reachable.push(bit_idx);
+        if matches!(stop, StopCondition::AtBlockPort) && ctx.connectivity.is_block_port_bit(bit_idx)
+        {
+            continue;
+        }
+        let next_bits = match direction {
+            TraversalDirection::Fanin => ctx.connectivity.assign_fanin_bits(bit_idx),
+            TraversalDirection::Fanout => ctx.connectivity.assign_fanout_bits(bit_idx),
+        };
+        for next_bit in next_bits {
+            if !visited.contains(next_bit) {
+                queue.push_back(*next_bit);
+            }
+        }
+    }
+    reachable
 }
 
 /// Traverse the cone around `start_instance` in `module`, calling `on_visit`
@@ -426,89 +446,82 @@ where
                 continue;
             }
 
-            for net_idx in &port.nets {
-                assert!(
-                    net_idx.0 < ctx.nets.len(),
-                    "NetIndex({}) out of bounds for nets (len={}) during traversal",
-                    net_idx.0,
-                    ctx.nets.len()
-                );
-
-                // If we are stopping at block ports, do not traverse across
-                // module boundary nets.
-                if matches!(stop, StopCondition::AtBlockPort)
-                    && ctx.connectivity.is_block_port_net(*net_idx)
-                {
-                    continue;
-                }
-
-                let neighbor_level = level + 1;
-                if let StopCondition::Levels(max) = stop {
-                    if neighbor_level > max {
-                        continue;
-                    }
-                }
-
-                let neighbors = match direction {
-                    TraversalDirection::Fanin => ctx.connectivity.drivers_for_net(*net_idx),
-                    TraversalDirection::Fanout => ctx.connectivity.loads_for_net(*net_idx),
-                };
-
-                for (nbr_inst_idx, nbr_port_sym) in neighbors {
-                    if is_clocking_pin_for_instance(&ctx, *nbr_inst_idx, *nbr_port_sym) {
-                        continue;
-                    }
-                    // Skip self-loops; the starting instance has already been emitted.
-                    if *nbr_inst_idx == inst_idx {
+            for start_bit in &port.bits {
+                for bit_idx in reachable_bits_for_traversal(&ctx, *start_bit, direction, stop) {
+                    if matches!(stop, StopCondition::AtBlockPort)
+                        && ctx.connectivity.is_block_port_bit(bit_idx)
+                    {
                         continue;
                     }
 
-                    let nbr_inst = &ctx.module.instances[nbr_inst_idx.0];
-                    let nbr_type_str = resolve_to_string(&ctx.interner, nbr_inst.type_name);
-                    let nbr_name_str = resolve_to_string(&ctx.interner, nbr_inst.instance_name);
-                    let nbr_port_name = resolve_to_string(&ctx.interner, *nbr_port_sym);
-
-                    if emitted_ports.insert((*nbr_inst_idx, *nbr_port_sym)) {
-                        let visit = ConeVisit {
-                            instance_type: nbr_type_str,
-                            instance_name: nbr_name_str,
-                            traversal_pin: nbr_port_name,
-                            level: neighbor_level,
-                        };
-                        on_visit(&visit)?;
-                    }
-
-                    // Decide whether to enqueue this neighbor for further
-                    // expansion.
-                    let is_dff = ctx.dff_types.contains(&nbr_inst.type_name);
-                    match stop {
-                        StopCondition::Levels(max) => {
-                            if neighbor_level < max && visited_instances.insert(*nbr_inst_idx) {
-                                queue.push_back(QueueEntry {
-                                    inst_idx: *nbr_inst_idx,
-                                    level: neighbor_level,
-                                });
-                            }
+                    let neighbor_level = level + 1;
+                    if let StopCondition::Levels(max) = stop {
+                        if neighbor_level > max {
+                            continue;
                         }
-                        StopCondition::AtDff => {
-                            if is_dff {
-                                // Include the DFF in the output but do not
-                                // traverse beyond it.
-                                continue;
-                            }
-                            if visited_instances.insert(*nbr_inst_idx) {
-                                queue.push_back(QueueEntry {
-                                    inst_idx: *nbr_inst_idx,
-                                    level: neighbor_level,
-                                });
-                            }
+                    }
+
+                    let neighbors = match direction {
+                        TraversalDirection::Fanin => ctx.connectivity.drivers_for_bit(bit_idx),
+                        TraversalDirection::Fanout => ctx.connectivity.loads_for_bit(bit_idx),
+                    };
+
+                    for (nbr_inst_idx, nbr_port_sym) in neighbors {
+                        if is_clocking_pin_for_instance(&ctx, *nbr_inst_idx, *nbr_port_sym) {
+                            continue;
                         }
-                        StopCondition::AtBlockPort => {
-                            if visited_instances.insert(*nbr_inst_idx) {
-                                queue.push_back(QueueEntry {
-                                    inst_idx: *nbr_inst_idx,
-                                    level: neighbor_level,
-                                });
+                        // Skip self-loops; the starting instance has already been emitted.
+                        if *nbr_inst_idx == inst_idx {
+                            continue;
+                        }
+
+                        let nbr_inst = &ctx.module.instances[nbr_inst_idx.0];
+                        let nbr_type_str = resolve_to_string(&ctx.interner, nbr_inst.type_name);
+                        let nbr_name_str = resolve_to_string(&ctx.interner, nbr_inst.instance_name);
+                        let nbr_port_name = resolve_to_string(&ctx.interner, *nbr_port_sym);
+
+                        if emitted_ports.insert((*nbr_inst_idx, *nbr_port_sym)) {
+                            let visit = ConeVisit {
+                                instance_type: nbr_type_str,
+                                instance_name: nbr_name_str,
+                                traversal_pin: nbr_port_name,
+                                level: neighbor_level,
+                            };
+                            on_visit(&visit)?;
+                        }
+
+                        // Decide whether to enqueue this neighbor for further
+                        // expansion.
+                        let is_dff = ctx.dff_types.contains(&nbr_inst.type_name);
+                        match stop {
+                            StopCondition::Levels(max) => {
+                                if neighbor_level < max && visited_instances.insert(*nbr_inst_idx) {
+                                    queue.push_back(QueueEntry {
+                                        inst_idx: *nbr_inst_idx,
+                                        level: neighbor_level,
+                                    });
+                                }
+                            }
+                            StopCondition::AtDff => {
+                                if is_dff {
+                                    // Include the DFF in the output but do not
+                                    // traverse beyond it.
+                                    continue;
+                                }
+                                if visited_instances.insert(*nbr_inst_idx) {
+                                    queue.push_back(QueueEntry {
+                                        inst_idx: *nbr_inst_idx,
+                                        level: neighbor_level,
+                                    });
+                                }
+                            }
+                            StopCondition::AtBlockPort => {
+                                if visited_instances.insert(*nbr_inst_idx) {
+                                    queue.push_back(QueueEntry {
+                                        inst_idx: *nbr_inst_idx,
+                                        level: neighbor_level,
+                                    });
+                                }
                             }
                         }
                     }
@@ -1005,12 +1018,14 @@ mod tests {
     }
 
     #[test]
-    fn visit_module_cone_rejects_preserved_assigns() {
+    fn visit_module_cone_traverses_preserved_assign_dependencies() {
         let mut interner: StringInterner<StringBackend<SymbolU32>> = StringInterner::new();
         let a = interner.get_or_intern("a");
-        let n = interner.get_or_intern("n");
+        let n0 = interner.get_or_intern("n0");
+        let n1 = interner.get_or_intern("n1");
         let y = interner.get_or_intern("y");
         let buf = interner.get_or_intern("BUF");
+        let u0 = interner.get_or_intern("u0");
         let u1 = interner.get_or_intern("u1");
         let top = interner.get_or_intern("top");
 
@@ -1020,7 +1035,11 @@ mod tests {
                 width: None,
             },
             Net {
-                name: n,
+                name: n0,
+                width: None,
+            },
+            Net {
+                name: n1,
                 width: None,
             },
             Net {
@@ -1046,15 +1065,16 @@ mod tests {
             name: top,
             net_index_range: 0..nets.len(),
             ports,
-            wires: vec![NetIndex(0), NetIndex(1), NetIndex(2)],
+            wires: vec![NetIndex(0), NetIndex(1), NetIndex(2), NetIndex(3)],
             assigns: vec![crate::netlist::parse::NetlistAssign {
-                lhs: NetRef::Simple(NetIndex(1)),
+                kind: crate::netlist::parse::NetlistAssignKind::Continuous,
+                lhs: NetRef::Simple(NetIndex(2)),
                 rhs: crate::netlist::parse::AssignExpr::And(
                     Box::new(crate::netlist::parse::AssignExpr::Leaf(NetRef::Simple(
-                        NetIndex(0),
+                        NetIndex(1),
                     ))),
                     Box::new(crate::netlist::parse::AssignExpr::Leaf(NetRef::Simple(
-                        NetIndex(0),
+                        NetIndex(1),
                     ))),
                 ),
                 span: crate::netlist::parse::Span {
@@ -1068,45 +1088,67 @@ mod tests {
                     },
                 },
             }],
-            instances: vec![NetlistInstance {
-                type_name: buf,
-                instance_name: u1,
-                connections: vec![
-                    (interner.get_or_intern("A"), NetRef::Simple(NetIndex(1))),
-                    (interner.get_or_intern("Y"), NetRef::Simple(NetIndex(2))),
-                ],
-                inst_lineno: 0,
-                inst_colno: 0,
-            }],
+            instances: vec![
+                NetlistInstance {
+                    type_name: buf,
+                    instance_name: u0,
+                    connections: vec![
+                        (interner.get_or_intern("I"), NetRef::Simple(NetIndex(0))),
+                        (interner.get_or_intern("O"), NetRef::Simple(NetIndex(1))),
+                    ],
+                    inst_lineno: 0,
+                    inst_colno: 0,
+                },
+                NetlistInstance {
+                    type_name: buf,
+                    instance_name: u1,
+                    connections: vec![
+                        (interner.get_or_intern("I"), NetRef::Simple(NetIndex(2))),
+                        (interner.get_or_intern("O"), NetRef::Simple(NetIndex(3))),
+                    ],
+                    inst_lineno: 0,
+                    inst_colno: 0,
+                },
+            ],
         };
 
         let lib: Library = make_test_library();
         let indexed = IndexedLibrary::new(lib);
         let dff_cells: HashSet<String> = HashSet::new();
-        let err = visit_module_cone(
+        let mut visits = Vec::new();
+        visit_module_cone(
             &module,
             &nets,
             &interner,
             &indexed,
             &dff_cells,
             None::<&HashMap<PortId, HashMap<PortId, PinDirection>>>,
-            "u1",
+            "u0",
             None,
             TraversalDirection::Fanout,
             StopCondition::Levels(1),
-            |_v: &ConeVisit| Ok(()),
+            |visit: &ConeVisit| {
+                visits.push(visit.clone());
+                Ok(())
+            },
         )
-        .expect_err("preserved assigns should be rejected");
-
-        match err {
-            ConeError::UnsupportedAssigns {
-                module,
-                assign_count,
-            } => {
-                assert_eq!(module, "top");
-                assert_eq!(assign_count, 1);
-            }
-            other => panic!("unexpected error: {}", other),
-        }
+        .expect("preserved assign dependencies should be traversed");
+        assert_eq!(
+            visits,
+            vec![
+                ConeVisit {
+                    instance_type: "BUF".to_string(),
+                    instance_name: "u0".to_string(),
+                    traversal_pin: "O".to_string(),
+                    level: 0,
+                },
+                ConeVisit {
+                    instance_type: "BUF".to_string(),
+                    instance_name: "u1".to_string(),
+                    traversal_pin: "I".to_string(),
+                    level: 1,
+                },
+            ]
+        );
     }
 }
