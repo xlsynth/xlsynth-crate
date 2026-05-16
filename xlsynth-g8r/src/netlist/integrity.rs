@@ -121,7 +121,7 @@ impl BitCoverageTracker {
                     self.mark_netref(elem, nets);
                 }
             }
-            NetRef::Literal(_) | NetRef::Unconnected => {}
+            NetRef::Literal(_) | NetRef::UnknownLiteral(_) | NetRef::Unconnected => {}
         }
     }
 
@@ -160,6 +160,7 @@ fn advisory_net_ref_bit_is_driven(
         NetRef::PartSelect(idx, msb, lsb) => select_bit_number(*msb, *lsb, rhs_bit_index)
             .is_some_and(|bit_number| tracker.is_bit_marked(*idx, bit_number, nets)),
         NetRef::Literal(bits) => rhs_bit_index < bits.get_bit_count() || allow_literal_zero_extend,
+        NetRef::UnknownLiteral(width) => rhs_bit_index < *width,
         NetRef::Unconnected | NetRef::Concat(_) => false,
     }
 }
@@ -314,11 +315,12 @@ impl BitDriverTracker {
                 }
                 Ok(())
             }
-            NetRef::Literal(_) | NetRef::Unconnected | NetRef::Concat(_) => {
-                Err(StructuralAssignValidationError(
-                    "left-hand side of structural assign must be a net or net select".to_string(),
-                ))
-            }
+            NetRef::Literal(_)
+            | NetRef::UnknownLiteral(_)
+            | NetRef::Unconnected
+            | NetRef::Concat(_) => Err(StructuralAssignValidationError(
+                "left-hand side of structural assign must be a net or net select".to_string(),
+            )),
         }
     }
 
@@ -372,7 +374,7 @@ impl BitDriverTracker {
                 }
                 Ok(true)
             }
-            NetRef::Literal(_) => Ok(true),
+            NetRef::Literal(_) | NetRef::UnknownLiteral(_) => Ok(true),
             NetRef::Unconnected => Ok(false),
             NetRef::Concat(_) => Err(StructuralAssignValidationError(
                 "concatenation is not supported in structural assign expressions".to_string(),
@@ -480,6 +482,7 @@ fn net_ref_width_bits(
             Ok(width)
         }
         NetRef::Literal(bits) => Ok(bits.get_bit_count()),
+        NetRef::UnknownLiteral(width) => Ok(*width),
         NetRef::Unconnected => Err(StructuralAssignValidationError(
             "unconnected net reference is not supported in assign expressions".to_string(),
         )),
@@ -569,6 +572,15 @@ fn net_ref_bit_is_driven(
                     "literal bit {} out of range for {}-bit literal",
                     rhs_bit_index,
                     bits.get_bit_count()
+                )));
+            }
+            Ok(true)
+        }
+        NetRef::UnknownLiteral(width) => {
+            if rhs_bit_index >= *width {
+                return Err(StructuralAssignValidationError(format!(
+                    "unknown literal bit {} out of range for {}-bit literal",
+                    rhs_bit_index, width
                 )));
             }
             Ok(true)
@@ -701,6 +713,15 @@ fn net_ref_unresolved_bits(
             }
             Ok(())
         }
+        NetRef::UnknownLiteral(width) => {
+            if rhs_bit_index >= *width {
+                return Err(StructuralAssignValidationError(format!(
+                    "unknown literal bit {} out of range for {}-bit literal",
+                    rhs_bit_index, width
+                )));
+            }
+            Ok(())
+        }
         NetRef::Unconnected => Err(StructuralAssignValidationError(
             "unconnected net reference is not supported in assign expressions".to_string(),
         )),
@@ -823,11 +844,12 @@ fn expand_lhs_bits(
             }
             Ok(bits)
         }
-        NetRef::Literal(_) | NetRef::Unconnected | NetRef::Concat(_) => {
-            Err(StructuralAssignValidationError(
-                "left-hand side of structural assign must be a net or net select".to_string(),
-            ))
-        }
+        NetRef::Literal(_)
+        | NetRef::UnknownLiteral(_)
+        | NetRef::Unconnected
+        | NetRef::Concat(_) => Err(StructuralAssignValidationError(
+            "left-hand side of structural assign must be a net or net select".to_string(),
+        )),
     }
 }
 
@@ -843,6 +865,7 @@ fn render_net_ref(
             format!("{}[{}:{}]", net_name(*idx, nets, interner), msb, lsb)
         }
         NetRef::Literal(bits) => format!("{}", bits),
+        NetRef::UnknownLiteral(width) => format!("{}'hx", width),
         NetRef::Unconnected => "<unconnected>".to_string(),
         NetRef::Concat(_) => "<concat>".to_string(),
     }
@@ -1099,7 +1122,7 @@ pub fn check_module(
                 | NetRef::BitSelect(_, _)
                 | NetRef::PartSelect(_, _, _)
                 | NetRef::Concat(_) => mark(netref),
-                NetRef::Literal(_) | NetRef::Unconnected => {}
+                NetRef::Literal(_) | NetRef::UnknownLiteral(_) | NetRef::Unconnected => {}
             }
         }
     }

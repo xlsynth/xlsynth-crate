@@ -94,6 +94,8 @@ fn canonical_g8r_flag_args(options: &CanonicalG8rOptions) -> Vec<String> {
         options.adder_mapping.to_string(),
         "--fraig".to_string(),
         bool_arg(options.fraig),
+        "--reassociation".to_string(),
+        bool_arg(options.reassociation),
         "--max-fraig-sim-samples".to_string(),
         options.max_fraig_sim_samples.to_string(),
         "--gate-formal-backend".to_string(),

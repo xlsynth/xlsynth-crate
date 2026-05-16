@@ -374,6 +374,10 @@ impl AppExt for clap::Command {
                     .action(clap::ArgAction::Set),
             )
             .add_bool_arg("fraig", "Run fraig optimization")
+            .add_bool_arg(
+                "reassociation",
+                "Reassociate single-fanout AND supergates into balanced trees",
+            )
             .arg(
                 clap::Arg::new("fraig_max_iterations")
                     .long("fraig-max-iterations")

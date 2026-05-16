@@ -692,6 +692,7 @@ mod tests {
                             "1'b0".to_string()
                         }
                     }
+                    NetRef::UnknownLiteral(width) => format!("{}'hx", width),
                     NetRef::BitSelect(idx, bit) => format!("{}[{}]", net_name(mapped, *idx), bit),
                     NetRef::PartSelect(idx, msb, lsb) => {
                         format!("{}[{}:{}]", net_name(mapped, *idx), msb, lsb)

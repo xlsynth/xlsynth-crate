@@ -349,6 +349,9 @@ impl ResolvedNetValues {
                 }
                 Ok(Some(AigBitVector::from_lsb_is_index_0(&ops)))
             }
+            NetRef::UnknownLiteral(_) => {
+                Err("unknown literal net reference is not supported".to_string())
+            }
             NetRef::Unconnected => Ok(None),
             NetRef::Concat(_) => {
                 let bit_refs = bit_ref::net_ref_lsb_bit_refs(net_ref, nets, interner)
@@ -366,6 +369,11 @@ impl ResolvedNetValues {
                         }
                         bit_ref::NetBitRef::Literal(value) => {
                             bits.push(if value { gb.get_true() } else { gb.get_false() })
+                        }
+                        bit_ref::NetBitRef::Unknown => {
+                            return Err(
+                                "unknown literal net reference is not supported".to_string()
+                            );
                         }
                     }
                 }
@@ -470,7 +478,9 @@ impl ResolvedNetValues {
                 }
                 Ok(())
             }
-            NetRef::Literal(_) => Err("output destination cannot be a literal".to_string()),
+            NetRef::Literal(_) | NetRef::UnknownLiteral(_) => {
+                Err("output destination cannot be a literal".to_string())
+            }
             NetRef::Unconnected => Ok(()),
             NetRef::Concat(_) => {
                 let targets = bit_ref::net_ref_lsb_targets(dst_ref, nets, interner)
@@ -945,6 +955,7 @@ fn build_instance_input_map(
                 lsb
             ),
             crate::netlist::parse::NetRef::Literal(bits) => format!("{}", bits),
+            crate::netlist::parse::NetRef::UnknownLiteral(width) => format!("{}'hx", width),
             crate::netlist::parse::NetRef::Unconnected => "<unconnected>".to_string(),
             crate::netlist::parse::NetRef::Concat(_) => "<concat>".to_string(),
         };
@@ -1018,6 +1029,9 @@ fn build_instance_input_map(
                     };
                     input_map.insert(port_name.to_string(), val);
                 }
+                NetRef::UnknownLiteral(_) => {
+                    missing_inputs.push(format!("{} (<unknown-literal-unsupported>)", port_name));
+                }
                 NetRef::Unconnected => {
                     // Treat as a hard missing input and surface clearly.
                     missing_inputs.push(format!("{} (<unconnected>)", port_name));
@@ -1075,7 +1089,7 @@ fn write_bv_to_port_destination(
             | NetRef::Concat(_) => {
                 resolved.write_ref(dst_ref, src_bv, nets, interner)?;
             }
-            NetRef::Literal(_) => {
+            NetRef::Literal(_) | NetRef::UnknownLiteral(_) => {
                 log::warn!(
                     "DFF override: destination output as literal not supported for port '{}'",
                     pname
@@ -1121,6 +1135,9 @@ fn eval_assign_net_ref_bit(
         }
         bit_ref::NetBitRef::Literal(value) => {
             Ok(Some(if value { gb.get_true() } else { gb.get_false() }))
+        }
+        bit_ref::NetBitRef::Unknown => {
+            Err("unknown literal net reference is not supported".to_string())
         }
     }
 }

@@ -20,6 +20,7 @@ pub struct NetBit {
 pub enum NetBitRef {
     Net(NetBit),
     Literal(bool),
+    Unknown,
 }
 
 /// Returns the width of a packed select range.
@@ -78,6 +79,7 @@ pub fn render_net_ref(
             format!("{}[{}:{}]", net_name(*idx, nets, interner), msb, lsb)
         }
         NetRef::Literal(bits) => format!("{}", bits),
+        NetRef::UnknownLiteral(width) => format!("{}'hx", width),
         NetRef::Unconnected => "<unconnected>".to_string(),
         NetRef::Concat(elems) => {
             let parts: Vec<String> = elems
@@ -152,6 +154,7 @@ pub fn net_ref_width_bits(
             Ok(width)
         }
         NetRef::Literal(bits) => Ok(bits.get_bit_count()),
+        NetRef::UnknownLiteral(width) => Ok(*width),
         NetRef::Unconnected => Ok(0),
         NetRef::Concat(elems) => {
             if elems.is_empty() {
@@ -228,6 +231,7 @@ pub fn net_ref_lsb_bit_refs(
             }
             Ok(out)
         }
+        NetRef::UnknownLiteral(width) => Ok(vec![NetBitRef::Unknown; *width]),
         NetRef::Unconnected => Ok(Vec::new()),
         NetRef::Concat(elems) => {
             if elems.is_empty() {
@@ -255,6 +259,12 @@ pub fn net_ref_lsb_targets(
             NetBitRef::Literal(_) => {
                 return Err(anyhow!(
                     "left-hand side '{}' cannot contain a literal",
+                    render_net_ref(net_ref, nets, interner)
+                ));
+            }
+            NetBitRef::Unknown => {
+                return Err(anyhow!(
+                    "left-hand side '{}' cannot contain an unknown literal",
                     render_net_ref(net_ref, nets, interner)
                 ));
             }

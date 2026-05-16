@@ -19,6 +19,7 @@ use crate::aig::get_summary_stats::get_gate_depth;
 use crate::aig::graph_logical_effort::{self, analyze_graph_logical_effort};
 use crate::aig::logical_effort;
 use crate::aig::logical_effort::compute_logical_effort_min_delay;
+use crate::aig::reassociation;
 use crate::aig_serdes::emit_aiger_binary::emit_aiger_binary;
 use crate::aig_serdes::emit_netlist;
 use crate::aig_sim::count_toggles;
@@ -151,6 +152,8 @@ pub struct Options {
     /// predicate.
     pub unsafe_gatify_gate_operation: bool,
     pub fraig: bool,
+    /// Whether to reassociate single-fanout AND supergates into balanced trees.
+    pub reassociation: bool,
     pub emit_independent_op_stats: bool,
     /// Optional override for the top-level entry point in the IR package.
     ///
@@ -217,6 +220,7 @@ pub struct CanonicalG8rOptions {
     pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
     pub unsafe_gatify_gate_operation: bool,
     pub fraig: bool,
+    pub reassociation: bool,
     pub fraig_max_iterations: Option<usize>,
     pub max_fraig_sim_samples: usize,
     pub gate_formal_backend: GateFormalBackend,
@@ -243,6 +247,7 @@ impl Default for CanonicalG8rOptions {
             mul_adder_mapping: None,
             unsafe_gatify_gate_operation: false,
             fraig: true,
+            reassociation: true,
             fraig_max_iterations: None,
             max_fraig_sim_samples: DEFAULT_MAX_FRAIG_SIM_SAMPLES,
             gate_formal_backend: GateFormalBackend::default(),
@@ -279,6 +284,7 @@ impl CanonicalG8rOptions {
             mul_adder_mapping: self.mul_adder_mapping,
             unsafe_gatify_gate_operation: self.unsafe_gatify_gate_operation,
             fraig: self.fraig,
+            reassociation: self.reassociation,
             emit_independent_op_stats,
             ir_top: ir_top.map(|s| s.to_string()),
             fraig_max_iterations: self.fraig_max_iterations,
@@ -609,6 +615,11 @@ pub fn process_ir_text_with_gatefn(
         fraig_iteration_stats = Some(iteration_stats);
     }
 
+    if options.reassociation {
+        log::info!("reassociation enabled");
+        gate_fn = reassociation::reassociate_gatefn(&gate_fn);
+    }
+
     if let Some(db) = options.cut_db.as_ref() {
         log::info!("cut-db rewrite enabled");
         gate_fn = cut_db_rewrite::rewrite_gatefn_with_cut_db(
@@ -623,6 +634,10 @@ pub fn process_ir_text_with_gatefn(
                 mode: options.cut_db_rewrite_mode,
             },
         );
+        if options.reassociation {
+            log::info!("post-cut-db reassociation enabled");
+            gate_fn = reassociation::reassociate_gatefn(&gate_fn);
+        }
     }
 
     log::info!("gate fn signature: {}", gate_fn.get_signature());

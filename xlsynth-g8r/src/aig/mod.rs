@@ -15,6 +15,7 @@ pub mod get_summary_stats;
 pub mod graph_logical_effort;
 pub mod logical_effort;
 pub mod match_and_rewrite;
+pub mod reassociation;
 pub mod table;
 pub mod topo;
 
