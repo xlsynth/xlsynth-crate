@@ -1253,7 +1253,7 @@ fn net_ref_is_resolved(
             }
             true
         }
-        NetRef::Literal(_) | NetRef::Unconnected => true,
+        NetRef::Literal(_) | NetRef::UnknownLiteral(_) | NetRef::Unconnected => true,
         NetRef::Concat(elems) => elems
             .iter()
             .all(|e| net_ref_is_resolved(e, net_drivers, net_widths)),
@@ -1394,6 +1394,7 @@ fn net_ref_to_node(
             let width = bits.get_bit_count();
             Ok(b.add_node(NodePayload::Literal(lit), Type::Bits(width), None))
         }
+        NetRef::UnknownLiteral(_) => Err(anyhow!("unknown literal is unsupported in gv2block")),
         NetRef::Unconnected => Ok(b.add_literal_bits(expected_width, 0)),
         NetRef::Concat(elems) => {
             let mut parts: Vec<NodeRef> = Vec::new();

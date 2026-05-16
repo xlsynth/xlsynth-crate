@@ -98,6 +98,7 @@ fn render_netref(
             lsb
         )),
         NetRef::Literal(bits) => Ok(render_literal(bits)),
+        NetRef::UnknownLiteral(width) => Ok(format!("{}'hx", width)),
         NetRef::Unconnected => Ok("".to_string()),
         NetRef::Concat(parts) => {
             let mut rendered: Vec<String> = Vec::with_capacity(parts.len());

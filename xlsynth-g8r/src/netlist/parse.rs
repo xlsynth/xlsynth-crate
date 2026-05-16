@@ -131,6 +131,7 @@ pub enum NetRef {
     BitSelect(NetIndex, u32),       // b[5]
     PartSelect(NetIndex, u32, u32), // b[msb:lsb]
     Literal(IrBits),
+    UnknownLiteral(usize),
     Unconnected,
     Concat(Vec<NetRef>), // { a, b[5], c[7:0], 1'b0 }
 }
@@ -147,7 +148,7 @@ impl NetRef {
                     e.collect_net_indices(out);
                 }
             }
-            NetRef::Literal(_) | NetRef::Unconnected => {}
+            NetRef::Literal(_) | NetRef::UnknownLiteral(_) | NetRef::Unconnected => {}
         }
     }
 }
@@ -243,6 +244,7 @@ pub enum TokenPayload {
     Comment(String),
     Annotation { key: String, value: AnnotationValue },
     VerilogInt { width: Option<usize>, value: IrBits },
+    VerilogUnknownInt { width: Option<usize> },
 }
 
 fn is_simple_identifier(s: &str) -> bool {
@@ -317,6 +319,10 @@ impl fmt::Display for TokenPayload {
                     None => write!(f, "{}", v),
                 }
             }
+            TokenPayload::VerilogUnknownInt { width } => match width {
+                Some(w) => write!(f, "{}'hx", w),
+                None => write!(f, "'hx"),
+            },
         }
     }
 }
@@ -913,6 +919,10 @@ impl<R: Read + 'static> TokenScanner<R> {
                         break;
                     }
                 }
+                let has_unknown_digit = base_and_value
+                    .chars()
+                    .skip(1)
+                    .any(|ch| matches!(ch, 'x' | 'X' | 'z' | 'Z' | '?'));
                 // Convert Verilog base to Rust-style
                 let base_and_value = if let Some((_base, _rest)) = base_and_value
                     .split_once(|c: char| c == 'b' || c == 'h' || c == 'o' || c == 'd')
@@ -934,11 +944,17 @@ impl<R: Read + 'static> TokenScanner<R> {
                 } else {
                     base_and_value.clone()
                 };
+                let limit = self.pos;
+                if has_unknown_digit {
+                    return Ok(Some(Token {
+                        payload: TokenPayload::VerilogUnknownInt { width },
+                        span: Span { start, limit },
+                    }));
+                }
                 let value = xlsynth::IrValue::parse_typed(&irbits_str)
                     .unwrap()
                     .to_bits()
                     .unwrap();
-                let limit = self.pos;
                 return Ok(Some(Token {
                     payload: TokenPayload::VerilogInt { width, value },
                     span: Span { start, limit },
@@ -1285,6 +1301,9 @@ impl<R: Read + 'static> Parser<R> {
                 Ok(NetRef::Simple(net_idx))
             }
             TokenPayload::VerilogInt { value, width: _ } => Ok(NetRef::Literal(value)),
+            TokenPayload::VerilogUnknownInt { width } => {
+                Ok(NetRef::UnknownLiteral(width.unwrap_or(32)))
+            }
             other => Err(ScanError {
                 message: format!("expected identifier for net name, got {:?}", other),
                 span: net_tok.span,
@@ -1560,20 +1579,17 @@ impl<R: Read + 'static> Parser<R> {
         }
 
         self.skip_trivia()?;
-        let t_name = self.scanner.popt()?.ok_or_else(|| ScanError {
-            message: "expected identifier on left-hand side of assign".to_string(),
-            span: Span {
-                start: self.scanner.pos,
-                limit: self.scanner.pos,
-            },
-        })?;
-        let lhs = self.parse_non_concat_netref_from_token(t_name)?;
+        let lhs = self.parse_netref_expr()?;
         if !matches!(
             lhs,
-            NetRef::Simple(_) | NetRef::BitSelect(_, _) | NetRef::PartSelect(_, _, _)
+            NetRef::Simple(_)
+                | NetRef::BitSelect(_, _)
+                | NetRef::PartSelect(_, _, _)
+                | NetRef::Concat(_)
         ) {
             return Err(ScanError {
-                message: "left-hand side of assign must be an identifier or select".to_string(),
+                message: "left-hand side of assign must be an identifier, select, or concat"
+                    .to_string(),
                 span: t_assign.span,
             });
         }
@@ -2613,6 +2629,42 @@ endmodule
             AssignExpr::Leaf(NetRef::Concat(elems)) => assert_eq!(elems.len(), 2),
             other => panic!("expected concat assign RHS, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_parse_module_accepts_concat_on_assign_lhs() {
+        let src = r#"
+module m(a, b, y);
+  input a;
+  input b;
+  output [1:0] y;
+  assign {y[1], y[0]} = {a, b};
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser.parse_file().expect("concat assign lhs should parse");
+        match &modules[0].assigns[0].lhs {
+            NetRef::Concat(elems) => assert_eq!(elems.len(), 2),
+            other => panic!("expected concat assign LHS, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_parse_module_accepts_unknown_literal_in_assign() {
+        let src = r#"
+module m(y);
+  output y;
+  assign y = 1'hx;
+endmodule
+"#;
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let modules = parser
+            .parse_file()
+            .expect("unknown literal assign should parse");
+        assert!(matches!(
+            modules[0].assigns[0].rhs,
+            AssignExpr::Leaf(NetRef::UnknownLiteral(1))
+        ));
     }
 
     #[test]

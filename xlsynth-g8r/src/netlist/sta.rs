@@ -301,12 +301,14 @@ struct NetEndpoint {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BitAssignSource {
     Literal(bool),
+    Unknown,
     Alias(usize),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResolvedTimingSource {
     Literal(bool),
+    Unknown,
     Bit(usize),
 }
 
@@ -326,6 +328,7 @@ struct AssignSourceAnalysis {
 enum PinBitSource {
     Bit(usize),
     Literal(bool),
+    Unknown,
 }
 
 struct StaBitIndex {
@@ -380,6 +383,7 @@ impl StaBitIndex {
         match bit_ref {
             bit_ref::NetBitRef::Net(bit) => Ok(PinBitSource::Bit(self.bit_index(bit)?)),
             bit_ref::NetBitRef::Literal(value) => Ok(PinBitSource::Literal(value)),
+            bit_ref::NetBitRef::Unknown => Ok(PinBitSource::Unknown),
         }
     }
 
@@ -551,7 +555,7 @@ fn analyze_combinational_max_arrival_proto(
                             inst_idx,
                             pin_name: pin_name.clone(),
                         }),
-                        PinBitSource::Literal(_) => unreachable!(),
+                        PinBitSource::Literal(_) | PinBitSource::Unknown => unreachable!(),
                     },
                     d if d == PinDirection::Input as i32 => match source {
                         PinBitSource::Bit(bit_idx) => bit_loads[*bit_idx].push(NetEndpoint {
@@ -561,6 +565,7 @@ fn analyze_combinational_max_arrival_proto(
                         PinBitSource::Literal(value) => {
                             known_pin_values.insert(pin_name.clone(), *value);
                         }
+                        PinBitSource::Unknown => {}
                     },
                     _ => {
                         return Err(anyhow!(
@@ -747,7 +752,10 @@ fn analyze_combinational_max_arrival_proto(
         if !drivers.is_empty() {
             continue;
         }
-        if matches!(assign_sources[bit_idx], Some(BitAssignSource::Literal(_))) {
+        if matches!(
+            assign_sources[bit_idx],
+            Some(BitAssignSource::Literal(_) | BitAssignSource::Unknown)
+        ) {
             bit_timing_sets[bit_idx] = Some(literal_source_timing_set.clone());
             continue;
         }
@@ -911,6 +919,9 @@ fn analyze_combinational_max_arrival_proto(
                                     &literal_source_timing_set,
                                     if *value { "1'b1" } else { "1'b0" }.to_string(),
                                 ),
+                                PinBitSource::Unknown => {
+                                    (&literal_source_timing_set, "1'bx".to_string())
+                                }
                             };
                             let context = format!(
                                 "{}.{} (instance '{}') related_pin '{}'",
@@ -1366,6 +1377,7 @@ fn analyze_assign_sources(
                 }
                 sources[lhs_bit_idx] = Some(match rhs_source {
                     bit_ref::NetBitRef::Literal(value) => BitAssignSource::Literal(value),
+                    bit_ref::NetBitRef::Unknown => BitAssignSource::Unknown,
                     bit_ref::NetBitRef::Net(bit) => {
                         BitAssignSource::Alias(bit_index.bit_index(bit)?)
                     }
@@ -1490,6 +1502,7 @@ fn resolve_timing_source(
         };
         match source {
             BitAssignSource::Literal(value) => return Ok(ResolvedTimingSource::Literal(value)),
+            BitAssignSource::Unknown => return Ok(ResolvedTimingSource::Unknown),
             BitAssignSource::Alias(next) => current = next,
         }
     }
@@ -2513,6 +2526,56 @@ endmodule
             StaOptions::default(),
         )
         .expect("live concat assign should be modeled as bit wiring");
+        assert_close(report.worst_output_arrival, 3.0);
+        assert_eq!(report.cell_levels, 1);
+    }
+
+    #[test]
+    fn sta_accepts_live_concat_lhs_continuous_assigns() {
+        let src = r#"
+module top (a, y);
+  input a;
+  output y;
+  wire a;
+  wire y;
+  wire [1:0] live;
+  assign {live[1], live[0]} = {1'b0, a};
+  INV u0 (.A(live[0]), .Y(y));
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let report = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &scalar_inv_library(),
+            StaOptions::default(),
+        )
+        .expect("live concat lhs assign should be modeled as bit wiring");
+        assert_close(report.worst_output_arrival, 3.0);
+        assert_eq!(report.cell_levels, 1);
+    }
+
+    #[test]
+    fn sta_accepts_live_unknown_literal_continuous_assigns() {
+        let src = r#"
+module top (y);
+  output y;
+  wire y;
+  wire live;
+  assign live = 1'hx;
+  INV u0 (.A(live), .Y(y));
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let report = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &scalar_inv_library(),
+            StaOptions::default(),
+        )
+        .expect("live unknown literal assign should be a zero-delay timing source");
         assert_close(report.worst_output_arrival, 3.0);
         assert_eq!(report.cell_levels, 1);
     }

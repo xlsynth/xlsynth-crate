@@ -168,6 +168,9 @@ impl ResolvedNetValues {
                     gb.get_false()
                 }))
             }
+            NetRef::UnknownLiteral(_) => {
+                Err("unknown literal net reference is not supported".to_string())
+            }
             NetRef::Unconnected => Err("unconnected net reference is not supported".to_string()),
             NetRef::Concat(_) => {
                 Err("concatenation is not supported in structural mode".to_string())
@@ -275,6 +278,9 @@ fn net_ref_width_bits(
             Ok(width)
         }
         NetRef::Literal(bits) => Ok(bits.get_bit_count()),
+        NetRef::UnknownLiteral(_) => {
+            Err("unknown literal net reference is not supported in structural mode".to_string())
+        }
         NetRef::Unconnected => Err("unconnected net reference is not supported".to_string()),
         NetRef::Concat(_) => Err("concatenation is not supported in structural mode".to_string()),
     }
@@ -374,7 +380,10 @@ fn expand_lhs_bits(
             }
             Ok(bits)
         }
-        NetRef::Literal(_) | NetRef::Unconnected | NetRef::Concat(_) => {
+        NetRef::Literal(_)
+        | NetRef::UnknownLiteral(_)
+        | NetRef::Unconnected
+        | NetRef::Concat(_) => {
             Err("left-hand side of structural assign must be a net or net select".to_string())
         }
     }
@@ -392,6 +401,7 @@ fn render_net_ref(
             format!("{}[{}:{}]", net_name(*idx, nets, interner), msb, lsb)
         }
         NetRef::Literal(bits) => format!("{}", bits),
+        NetRef::UnknownLiteral(width) => format!("{}'hx", width),
         NetRef::Unconnected => "<unconnected>".to_string(),
         NetRef::Concat(_) => "<concat>".to_string(),
     }
@@ -558,7 +568,10 @@ fn collect_missing_refs(
                     out.push(render_named_bit(*idx, bit_number, nets, interner));
                 }
             }
-            NetRef::Literal(_) | NetRef::Unconnected | NetRef::Concat(_) => {}
+            NetRef::Literal(_)
+            | NetRef::UnknownLiteral(_)
+            | NetRef::Unconnected
+            | NetRef::Concat(_) => {}
         },
         AssignExpr::Not(inner) => collect_missing_refs(
             inner,
