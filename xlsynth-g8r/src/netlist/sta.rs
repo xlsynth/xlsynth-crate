@@ -312,6 +312,13 @@ enum ResolvedTimingSource {
     Bit(usize),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TimingSourceVisitState {
+    Unvisited,
+    Visiting,
+    Resolved(ResolvedTimingSource),
+}
+
 #[derive(Clone, Debug)]
 struct UnsupportedAssignSource {
     lhs_bits: Vec<usize>,
@@ -440,8 +447,8 @@ fn analyze_combinational_max_arrival_proto(
     let bit_count = bit_index.bits.len();
     let assign_analysis = analyze_assign_sources(module, nets, interner, &bit_index)?;
     let assign_sources = assign_analysis.bit_sources;
-    let assign_known_values =
-        assign_known_values(assign_sources.as_slice(), &bit_index, nets, interner)?;
+    let resolved_timing_sources =
+        resolve_timing_sources(assign_sources.as_slice(), &bit_index, nets, interner)?;
 
     let mut instance_cell_indices: Vec<usize> = Vec::with_capacity(instance_count);
     let mut instance_cell_names: Vec<String> = Vec::with_capacity(instance_count);
@@ -527,6 +534,16 @@ fn analyze_combinational_max_arrival_proto(
                 .into_iter()
                 .map(|bit_ref| bit_index.bit_ref_to_source(bit_ref))
                 .collect::<Result<Vec<_>>>()?;
+            let pin_bit_sources = if pin.direction == PinDirection::Input as i32 {
+                pin_bit_sources
+                    .into_iter()
+                    .map(|source| {
+                        canonicalize_pin_bit_source(source, resolved_timing_sources.as_slice())
+                    })
+                    .collect()
+            } else {
+                pin_bit_sources
+            };
             if pin_bit_sources.len() > 1 {
                 return Err(anyhow!(
                     "instance '{}' pin '{}.{}' connects {} bits; basic STA requires scalar cell pin connections after bit expansion",
@@ -579,11 +596,6 @@ fn analyze_combinational_max_arrival_proto(
                     }
                 }
             }
-            if let [PinBitSource::Bit(bit_idx)] = pin_bit_sources.as_slice()
-                && let Some(value) = assign_known_values[*bit_idx]
-            {
-                known_pin_values.insert(pin_name.clone(), value);
-            }
             pin_sources.insert(pin_name, pin_bit_sources);
         }
         instance_pin_sources.push(pin_sources);
@@ -624,6 +636,12 @@ fn analyze_combinational_max_arrival_proto(
         }
     }
     module_output_bits.sort_unstable();
+    let mut has_resolved_module_output = vec![false; bit_count];
+    for bit_idx in &module_output_bits {
+        if let ResolvedTimingSource::Bit(source_bit_idx) = resolved_timing_sources[*bit_idx] {
+            has_resolved_module_output[source_bit_idx] = true;
+        }
+    }
 
     reject_live_unsupported_assigns(
         assign_analysis.unsupported_sources.as_slice(),
@@ -657,17 +675,7 @@ fn analyze_combinational_max_arrival_proto(
         }
     }
 
-    for (bit_idx, loads) in bit_loads.iter().enumerate() {
-        let ResolvedTimingSource::Bit(source_bit_idx) = resolve_timing_source(
-            assign_sources.as_slice(),
-            bit_idx,
-            &bit_index,
-            nets,
-            interner,
-        )?
-        else {
-            continue;
-        };
+    for (source_bit_idx, loads) in bit_loads.iter().enumerate() {
         let Some(driver) = bit_drivers[source_bit_idx].first() else {
             continue;
         };
@@ -686,17 +694,7 @@ fn analyze_combinational_max_arrival_proto(
     }
 
     let mut bit_load_capacitance = vec![EdgeLoadCapacitance::default(); bit_count];
-    for (bit_idx, loads) in bit_loads.iter().enumerate() {
-        let ResolvedTimingSource::Bit(load_source_bit_idx) = resolve_timing_source(
-            assign_sources.as_slice(),
-            bit_idx,
-            &bit_index,
-            nets,
-            interner,
-        )?
-        else {
-            continue;
-        };
+    for (load_source_bit_idx, loads) in bit_loads.iter().enumerate() {
         let mut cap = EdgeLoadCapacitance::default();
         for load in loads {
             let cell_idx = instance_cell_indices[load.inst_idx];
@@ -717,12 +715,16 @@ fn analyze_combinational_max_arrival_proto(
             cap.rise += pin_cap.rise;
             cap.fall += pin_cap.fall;
         }
-        if has_module_output[bit_idx] {
-            cap.rise += options.module_output_load;
-            cap.fall += options.module_output_load;
-        }
         bit_load_capacitance[load_source_bit_idx].rise += cap.rise;
         bit_load_capacitance[load_source_bit_idx].fall += cap.fall;
+    }
+    for bit_idx in &module_output_bits {
+        let ResolvedTimingSource::Bit(output_source_bit_idx) = resolved_timing_sources[*bit_idx]
+        else {
+            continue;
+        };
+        bit_load_capacitance[output_source_bit_idx].rise += options.module_output_load;
+        bit_load_capacitance[output_source_bit_idx].fall += options.module_output_load;
     }
 
     let source_timing = SignalTiming {
@@ -752,34 +754,22 @@ fn analyze_combinational_max_arrival_proto(
         if !drivers.is_empty() {
             continue;
         }
-        if matches!(
-            assign_sources[bit_idx],
-            Some(BitAssignSource::Literal(_) | BitAssignSource::Unknown)
-        ) {
-            bit_timing_sets[bit_idx] = Some(literal_source_timing_set.clone());
-            continue;
-        }
-        if matches!(assign_sources[bit_idx], Some(BitAssignSource::Alias(_))) {
-            continue;
+        match resolved_timing_sources[bit_idx] {
+            ResolvedTimingSource::Literal(_) | ResolvedTimingSource::Unknown => continue,
+            ResolvedTimingSource::Bit(source_bit_idx) if source_bit_idx != bit_idx => continue,
+            ResolvedTimingSource::Bit(_) => {}
         }
         if is_module_input[bit_idx] {
             bit_timing_sets[bit_idx] = Some(source_timing_set.clone());
             continue;
         }
-        if !bit_loads[bit_idx].is_empty() || has_module_output[bit_idx] {
+        if !bit_loads[bit_idx].is_empty() || has_resolved_module_output[bit_idx] {
             return Err(anyhow!(
                 "net bit '{}' is undriven and is not a module input; basic STA does not support floating source nets",
                 bit_ref::render_net_bit(bit_index.bits[bit_idx], nets, interner)
             ));
         }
     }
-    propagate_alias_timings(
-        assign_sources.as_slice(),
-        &mut bit_timing_sets,
-        &bit_index,
-        nets,
-        interner,
-    )?;
 
     let mut queue = VecDeque::new();
     let mut instance_levels = vec![1usize; instance_count];
@@ -1004,13 +994,6 @@ fn analyze_combinational_max_arrival_proto(
                 queue.push_back(*succ);
             }
         }
-        propagate_alias_timings(
-            assign_sources.as_slice(),
-            &mut bit_timing_sets,
-            &bit_index,
-            nets,
-            interner,
-        )?;
     }
 
     if processed != instance_count {
@@ -1024,7 +1007,13 @@ fn analyze_combinational_max_arrival_proto(
     let mut worst_output_arrival: Option<f64> = None;
     let mut cell_levels = 0usize;
     for bit_idx in &module_output_bits {
-        let timing_set = bit_timing_sets[*bit_idx].as_ref().ok_or_else(|| {
+        let timing_source = resolved_timing_sources[*bit_idx];
+        let timing_set = timing_set_for_resolved_source(
+            timing_source,
+            bit_timing_sets.as_slice(),
+            &literal_source_timing_set,
+        )
+        .ok_or_else(|| {
             anyhow!(
                 "missing timing result for module output net bit '{}'",
                 bit_ref::render_net_bit(bit_index.bits[*bit_idx], nets, interner)
@@ -1041,21 +1030,20 @@ fn analyze_combinational_max_arrival_proto(
                 .map(|current| current.max(output_arrival))
                 .unwrap_or(output_arrival),
         );
-        if let ResolvedTimingSource::Bit(source_bit_idx) = resolve_timing_source(
-            assign_sources.as_slice(),
-            *bit_idx,
-            &bit_index,
-            nets,
-            interner,
-        )? {
+        if let ResolvedTimingSource::Bit(source_bit_idx) = timing_source {
             if let Some(driver) = bit_drivers[source_bit_idx].first() {
                 cell_levels = cell_levels.max(instance_levels[driver.inst_idx]);
             }
         }
     }
 
-    let net_timing =
-        aggregate_bit_timing_by_net(bit_timing_sets.as_slice(), &bit_index, nets.len());
+    let net_timing = aggregate_bit_timing_by_net(
+        bit_timing_sets.as_slice(),
+        resolved_timing_sources.as_slice(),
+        &literal_source_timing_set,
+        &bit_index,
+        nets.len(),
+    );
 
     Ok(StaReport {
         net_timing,
@@ -1481,85 +1469,97 @@ fn reject_live_unsupported_assigns(
     Ok(())
 }
 
-fn resolve_timing_source(
-    assign_sources: &[Option<BitAssignSource>],
-    start: usize,
-    bit_index: &StaBitIndex,
-    nets: &[Net],
-    interner: &StringInterner<StringBackend<SymbolU32>>,
-) -> Result<ResolvedTimingSource> {
-    let mut current = start;
-    let mut seen = HashSet::new();
-    loop {
-        if !seen.insert(current) {
-            return Err(anyhow!(
-                "continuous assign aliases contain a cycle involving net bit '{}'",
-                bit_ref::render_net_bit(bit_index.bits[current], nets, interner)
-            ));
-        }
-        let Some(source) = assign_sources.get(current).and_then(|source| *source) else {
-            return Ok(ResolvedTimingSource::Bit(current));
-        };
-        match source {
-            BitAssignSource::Literal(value) => return Ok(ResolvedTimingSource::Literal(value)),
-            BitAssignSource::Unknown => return Ok(ResolvedTimingSource::Unknown),
-            BitAssignSource::Alias(next) => current = next,
-        }
+fn canonicalize_pin_bit_source(
+    source: PinBitSource,
+    resolved_timing_sources: &[ResolvedTimingSource],
+) -> PinBitSource {
+    match source {
+        PinBitSource::Bit(bit_idx) => match resolved_timing_sources[bit_idx] {
+            ResolvedTimingSource::Literal(value) => PinBitSource::Literal(value),
+            ResolvedTimingSource::Unknown => PinBitSource::Unknown,
+            ResolvedTimingSource::Bit(source_bit_idx) => PinBitSource::Bit(source_bit_idx),
+        },
+        PinBitSource::Literal(_) | PinBitSource::Unknown => source,
     }
 }
 
-fn assign_known_values(
+/// Resolves zero-delay continuous-assign aliases once for all timing lookups.
+fn resolve_timing_sources(
     assign_sources: &[Option<BitAssignSource>],
     bit_index: &StaBitIndex,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
-) -> Result<Vec<Option<bool>>> {
-    let mut values = vec![None; bit_index.bits.len()];
-    for bit_idx in 0..bit_index.bits.len() {
-        if let ResolvedTimingSource::Literal(value) =
-            resolve_timing_source(assign_sources, bit_idx, bit_index, nets, interner)?
-        {
-            values[bit_idx] = Some(value);
+) -> Result<Vec<ResolvedTimingSource>> {
+    let mut visit_states = vec![TimingSourceVisitState::Unvisited; assign_sources.len()];
+    for start in 0..assign_sources.len() {
+        if matches!(visit_states[start], TimingSourceVisitState::Resolved(_)) {
+            continue;
         }
-    }
-    Ok(values)
-}
-
-fn propagate_alias_timings(
-    assign_sources: &[Option<BitAssignSource>],
-    bit_timing_sets: &mut [Option<SignalTimingSet>],
-    bit_index: &StaBitIndex,
-    nets: &[Net],
-    interner: &StringInterner<StringBackend<SymbolU32>>,
-) -> Result<()> {
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for bit_idx in 0..assign_sources.len() {
-            let Some(BitAssignSource::Alias(source_bit_idx)) = assign_sources[bit_idx] else {
-                continue;
-            };
-            resolve_timing_source(assign_sources, bit_idx, bit_index, nets, interner)?;
-            let Some(source_timing) = bit_timing_sets[source_bit_idx].clone() else {
-                continue;
-            };
-            if bit_timing_sets[bit_idx] != Some(source_timing.clone()) {
-                bit_timing_sets[bit_idx] = Some(source_timing);
-                changed = true;
+        let mut current = start;
+        let mut path = Vec::new();
+        let resolved = loop {
+            match visit_states[current] {
+                TimingSourceVisitState::Resolved(source) => break source,
+                TimingSourceVisitState::Visiting => {
+                    return Err(anyhow!(
+                        "continuous assign aliases contain a cycle involving net bit '{}'",
+                        bit_ref::render_net_bit(bit_index.bits[current], nets, interner)
+                    ));
+                }
+                TimingSourceVisitState::Unvisited => {
+                    visit_states[current] = TimingSourceVisitState::Visiting;
+                    path.push(current);
+                    match assign_sources[current] {
+                        Some(BitAssignSource::Literal(value)) => {
+                            break ResolvedTimingSource::Literal(value);
+                        }
+                        Some(BitAssignSource::Unknown) => break ResolvedTimingSource::Unknown,
+                        Some(BitAssignSource::Alias(next)) => current = next,
+                        None => break ResolvedTimingSource::Bit(current),
+                    }
+                }
             }
+        };
+        for bit_idx in path {
+            visit_states[bit_idx] = TimingSourceVisitState::Resolved(resolved);
         }
     }
-    Ok(())
+    Ok(visit_states
+        .into_iter()
+        .map(|state| match state {
+            TimingSourceVisitState::Resolved(source) => source,
+            TimingSourceVisitState::Unvisited | TimingSourceVisitState::Visiting => {
+                unreachable!("every timing source path should be resolved")
+            }
+        })
+        .collect())
+}
+
+fn timing_set_for_resolved_source<'a>(
+    source: ResolvedTimingSource,
+    bit_timing_sets: &'a [Option<SignalTimingSet>],
+    literal_source_timing_set: &'a SignalTimingSet,
+) -> Option<&'a SignalTimingSet> {
+    match source {
+        ResolvedTimingSource::Literal(_) | ResolvedTimingSource::Unknown => {
+            Some(literal_source_timing_set)
+        }
+        ResolvedTimingSource::Bit(bit_idx) => bit_timing_sets[bit_idx].as_ref(),
+    }
 }
 
 fn aggregate_bit_timing_by_net(
     bit_timing_sets: &[Option<SignalTimingSet>],
+    resolved_timing_sources: &[ResolvedTimingSource],
+    literal_source_timing_set: &SignalTimingSet,
     bit_index: &StaBitIndex,
     nets_len: usize,
 ) -> Vec<Option<SignalTiming>> {
     let mut aggregate_sets: Vec<Option<SignalTimingSet>> = vec![None; nets_len];
-    for (bit_idx, timing_set) in bit_timing_sets.iter().enumerate() {
-        let Some(timing_set) = timing_set else {
+    for (bit_idx, source) in resolved_timing_sources.iter().copied().enumerate() {
+        let Some(timing_set) =
+            timing_set_for_resolved_source(source, bit_timing_sets, literal_source_timing_set)
+        else {
             continue;
         };
         let net_idx = bit_index.bits[bit_idx].net.0;
