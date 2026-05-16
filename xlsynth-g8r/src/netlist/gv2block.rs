@@ -6,7 +6,10 @@ use crate::liberty::cell_formula::{EmitContext as FormulaEmitContext, Term, pars
 use crate::liberty::indexed::IndexedLibrary;
 use crate::liberty_proto::{Cell, PinDirection, SequentialKind};
 use crate::netlist::io::{ParsedNetlist, load_liberty_from_path, parse_netlist_from_path};
-use crate::netlist::parse::{Net, NetIndex, NetRef, NetlistInstance, NetlistModule};
+use crate::netlist::normalized::{
+    BitExpr, BitIndex, BitSource, NormalizedInstance, NormalizedNetlistModule,
+};
+use crate::netlist::parse::NetlistModule;
 use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -25,14 +28,10 @@ pub fn convert_gv2block_paths(netlist_path: &Path, liberty_proto_path: &Path) ->
         )));
     }
     let module = &parsed.modules[0];
-    if !module.assigns.is_empty() {
-        return Err(anyhow!(
-            "gv2block does not support preserved continuous assigns"
-        ));
-    }
     let liberty_lib = load_liberty_from_path(liberty_proto_path)?;
     let lib_indexed = IndexedLibrary::new(liberty_lib);
-    build_package_from_netlist(module, &parsed, &lib_indexed)
+    let normalized = NormalizedNetlistModule::new(module, &parsed.nets, &parsed.interner)?;
+    build_package_from_normalized_netlist(module, &parsed, &lib_indexed, &normalized)
 }
 
 pub fn convert_gv2block_paths_to_string(
@@ -99,23 +98,209 @@ struct ClockGatePassthroughSpec {
     output_pin: String,
 }
 
-/// Net connections for one elided clock-gate instance in the netlist.
 #[derive(Clone)]
 struct ClockGatePassthroughInstance {
     instance_name: String,
-    clock_ref: NetRef,
-    output_ref: NetRef,
+    clock_source: BitSource,
+    output_bit: BitIndex,
 }
 
-/// Aggregated clock-gate passthrough data used while building the top block.
 struct ClockGatePassthroughAnalysis {
-    /// Per-instance clock->output passthrough wiring for elided clock gates.
     passthroughs: Vec<ClockGatePassthroughInstance>,
-    /// Clock gaten istance names that should be skipped from normal block
-    /// instantiation.
     elided_instance_names: HashSet<String>,
-    /// Alias map from clock-gate output net to its source clock net.
-    net_aliases: HashMap<NetIndex, NetIndex>,
+    bit_aliases: HashMap<BitIndex, BitIndex>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResolvedWiringSource {
+    Bit(BitIndex),
+    Literal(bool),
+}
+
+struct WiringAssignResolver {
+    source_by_lhs: HashMap<BitIndex, BitSource>,
+}
+
+impl WiringAssignResolver {
+    fn new(normalized: &NormalizedNetlistModule<'_>, parsed: &ParsedNetlist) -> Result<Self> {
+        let mut source_by_lhs = HashMap::new();
+        for assign in &normalized.assigns {
+            for (lhs_bit, rhs_expr) in assign.lhs_bits.iter().copied().zip(&assign.rhs_bits) {
+                let source = match rhs_expr {
+                    BitExpr::Source(source) => *source,
+                    BitExpr::Not(_)
+                    | BitExpr::And(_, _)
+                    | BitExpr::Or(_, _)
+                    | BitExpr::Xor(_, _) => {
+                        return Err(anyhow!(format!(
+                            "gv2block only supports techmapped netlists; preserved combinational assign to '{}' at {} contains top-level logic; run technology mapping first",
+                            normalized.render_bit(lhs_bit, &parsed.nets, &parsed.interner),
+                            assign.span.to_human_string()
+                        )));
+                    }
+                };
+                if source_by_lhs.insert(lhs_bit, source).is_some() {
+                    return Err(anyhow!(format!(
+                        "gv2block found multiple preserved wiring assigns for '{}'",
+                        normalized.render_bit(lhs_bit, &parsed.nets, &parsed.interner)
+                    )));
+                }
+            }
+        }
+        let resolver = Self { source_by_lhs };
+        for lhs_bit in resolver.source_by_lhs.keys().copied() {
+            resolver.resolve_source(BitSource::Bit(lhs_bit), normalized, parsed)?;
+        }
+        Ok(resolver)
+    }
+
+    fn has_lhs(&self, bit_idx: BitIndex) -> bool {
+        self.source_by_lhs.contains_key(&bit_idx)
+    }
+
+    fn resolve_source(
+        &self,
+        source: BitSource,
+        normalized: &NormalizedNetlistModule<'_>,
+        parsed: &ParsedNetlist,
+    ) -> Result<ResolvedWiringSource> {
+        let mut seen_bits = HashSet::new();
+        let mut current = source;
+        loop {
+            match current {
+                BitSource::Bit(bit_idx) => {
+                    if !seen_bits.insert(bit_idx) {
+                        return Err(anyhow!(format!(
+                            "gv2block found a preserved wiring-assign cycle at '{}'",
+                            normalized.render_bit(bit_idx, &parsed.nets, &parsed.interner)
+                        )));
+                    }
+                    let Some(next_source) = self.source_by_lhs.get(&bit_idx).copied() else {
+                        return Ok(ResolvedWiringSource::Bit(bit_idx));
+                    };
+                    current = next_source;
+                }
+                BitSource::Literal(value) => return Ok(ResolvedWiringSource::Literal(value)),
+                BitSource::Unknown => {
+                    return Err(anyhow!(
+                        "gv2block does not support unknown literal preserved wiring"
+                    ));
+                }
+            }
+        }
+    }
+}
+
+struct BitDrivers {
+    drivers: Vec<Option<BitDriver>>,
+}
+
+/// One normalized bit driver; vector input bits stay lazy until consumed.
+#[derive(Clone, Copy)]
+enum BitDriver {
+    Node(NodeRef),
+    InputPortBit {
+        port_node: NodeRef,
+        bit_offset: usize,
+        port_width: usize,
+    },
+}
+
+impl BitDrivers {
+    fn new(bit_count: usize) -> Self {
+        Self {
+            drivers: vec![None; bit_count],
+        }
+    }
+
+    fn set_node_bit(
+        &mut self,
+        bit_idx: BitIndex,
+        node: NodeRef,
+        wiring: &WiringAssignResolver,
+        normalized: &NormalizedNetlistModule<'_>,
+        parsed: &ParsedNetlist,
+    ) -> Result<()> {
+        self.set_driver(bit_idx, BitDriver::Node(node), wiring, normalized, parsed)
+    }
+
+    fn set_input_bit(
+        &mut self,
+        bit_idx: BitIndex,
+        port_node: NodeRef,
+        bit_offset: usize,
+        port_width: usize,
+        wiring: &WiringAssignResolver,
+        normalized: &NormalizedNetlistModule<'_>,
+        parsed: &ParsedNetlist,
+    ) -> Result<()> {
+        self.set_driver(
+            bit_idx,
+            BitDriver::InputPortBit {
+                port_node,
+                bit_offset,
+                port_width,
+            },
+            wiring,
+            normalized,
+            parsed,
+        )
+    }
+
+    fn set_driver(
+        &mut self,
+        bit_idx: BitIndex,
+        driver: BitDriver,
+        wiring: &WiringAssignResolver,
+        normalized: &NormalizedNetlistModule<'_>,
+        parsed: &ParsedNetlist,
+    ) -> Result<()> {
+        if wiring.has_lhs(bit_idx) {
+            return Err(anyhow!(format!(
+                "multiple drivers for '{}': preserved wiring assign and explicit driver",
+                normalized.render_bit(bit_idx, &parsed.nets, &parsed.interner)
+            )));
+        }
+        let entry = self.drivers.get_mut(bit_idx).ok_or_else(|| {
+            anyhow!(format!(
+                "normalized bit index {} is out of range for gv2block driver table",
+                bit_idx
+            ))
+        })?;
+        if entry.replace(driver).is_some() {
+            return Err(anyhow!(format!(
+                "multiple drivers for '{}'",
+                normalized.render_bit(bit_idx, &parsed.nets, &parsed.interner)
+            )));
+        }
+        Ok(())
+    }
+
+    fn materialize_bit(&self, bit_idx: BitIndex, b: &mut PirFnBuilder) -> Option<NodeRef> {
+        let driver = self.drivers.get(bit_idx).copied().flatten()?;
+        Some(match driver {
+            BitDriver::Node(node) => node,
+            BitDriver::InputPortBit {
+                port_node,
+                bit_offset,
+                port_width,
+            } => {
+                if port_width == 1 {
+                    port_node
+                } else {
+                    b.add_node(
+                        NodePayload::BitSlice {
+                            arg: port_node,
+                            start: bit_offset,
+                            width: 1,
+                        },
+                        Type::Bits(1),
+                        None,
+                    )
+                }
+            }
+        })
+    }
 }
 
 fn get_clock_gate_passthrough_spec(cell: &Cell) -> Result<Option<ClockGatePassthroughSpec>> {
@@ -203,54 +388,109 @@ fn get_clock_gate_passthrough_spec(cell: &Cell) -> Result<Option<ClockGatePassth
     }))
 }
 
-fn instance_connection_for_port(
-    inst: &NetlistInstance,
+fn normalized_connection_for_port<'a>(
+    inst: &'a NormalizedInstance,
     parsed: &ParsedNetlist,
     port_name: &str,
-) -> Option<NetRef> {
-    inst.connections.iter().find_map(|(port_id, net_ref)| {
-        let Some(name) = parsed.interner.resolve(*port_id) else {
+) -> Option<&'a [BitSource]> {
+    inst.connections.iter().find_map(|connection| {
+        let Some(name) = parsed.interner.resolve(connection.port) else {
             return None;
         };
         if name == port_name {
-            return Some(net_ref.clone());
+            return Some(connection.bits.as_slice());
         }
         None
     })
 }
 
-fn resolve_net_alias(idx: NetIndex, aliases: &HashMap<NetIndex, NetIndex>) -> Result<NetIndex> {
-    let mut visited: HashSet<NetIndex> = HashSet::new();
-    let mut cur = idx;
-    while let Some(next) = aliases.get(&cur).copied() {
-        if !visited.insert(cur) {
-            return Err(anyhow!(format!(
-                "clock-gate net alias cycle detected at {:?}",
-                cur
-            )));
-        }
-        cur = next;
+fn source_bit_only(
+    sources: &[BitSource],
+    what: &str,
+    wiring: &WiringAssignResolver,
+    normalized: &NormalizedNetlistModule<'_>,
+    parsed: &ParsedNetlist,
+) -> Result<BitIndex> {
+    let [source] = sources else {
+        return Err(anyhow!(format!(
+            "{} must connect exactly one bit in gv2block",
+            what
+        )));
+    };
+    match wiring.resolve_source(*source, normalized, parsed)? {
+        ResolvedWiringSource::Bit(bit_idx) => Ok(bit_idx),
+        ResolvedWiringSource::Literal(_) => Err(anyhow!(format!(
+            "{} must be driven by a net bit in gv2block",
+            what
+        ))),
     }
-    Ok(cur)
 }
 
-fn net_ref_to_simple_index(net_ref: &NetRef) -> Option<NetIndex> {
-    match net_ref {
-        NetRef::Simple(idx) => Some(*idx),
-        _ => None,
+fn target_bit_only(
+    sources: &[BitSource],
+    what: &str,
+    normalized: &NormalizedNetlistModule<'_>,
+    parsed: &ParsedNetlist,
+) -> Result<BitIndex> {
+    let [BitSource::Bit(bit_idx)] = sources else {
+        return Err(anyhow!(format!(
+            "{} must connect exactly one net bit in gv2block; got {}",
+            what,
+            normalized.render_sources(sources, &parsed.nets, &parsed.interner)
+        )));
+    };
+    Ok(*bit_idx)
+}
+
+fn resolve_clock_bit(
+    bit_idx: BitIndex,
+    wiring: &WiringAssignResolver,
+    clock_gate_bit_aliases: &HashMap<BitIndex, BitIndex>,
+    normalized: &NormalizedNetlistModule<'_>,
+    parsed: &ParsedNetlist,
+) -> Result<BitIndex> {
+    let mut seen_bits = HashSet::new();
+    let mut current_bit = bit_idx;
+    loop {
+        if !seen_bits.insert(current_bit) {
+            return Err(anyhow!(format!(
+                "gv2block found a clock wiring cycle at '{}'",
+                normalized.render_bit(current_bit, &parsed.nets, &parsed.interner)
+            )));
+        }
+        current_bit =
+            match wiring.resolve_source(BitSource::Bit(current_bit), normalized, parsed)? {
+                ResolvedWiringSource::Bit(bit_idx) => bit_idx,
+                ResolvedWiringSource::Literal(_) => {
+                    return Err(anyhow!("gv2block clock pin is driven by a literal"));
+                }
+            };
+        let Some(next_bit) = clock_gate_bit_aliases.get(&current_bit).copied() else {
+            return Ok(current_bit);
+        };
+        current_bit = next_bit;
     }
+}
+
+fn render_clock_bit(
+    bit_idx: BitIndex,
+    normalized: &NormalizedNetlistModule<'_>,
+    parsed: &ParsedNetlist,
+) -> String {
+    normalized.render_bit(bit_idx, &parsed.nets, &parsed.interner)
 }
 
 fn collect_clock_gate_passthroughs(
-    module: &NetlistModule,
+    normalized: &NormalizedNetlistModule<'_>,
     parsed: &ParsedNetlist,
     lib_indexed: &IndexedLibrary,
+    wiring: &WiringAssignResolver,
 ) -> Result<ClockGatePassthroughAnalysis> {
-    let mut passthroughs: Vec<ClockGatePassthroughInstance> = Vec::new();
-    let mut elided_instance_names: HashSet<String> = HashSet::new();
-    let mut net_aliases: HashMap<NetIndex, NetIndex> = HashMap::new();
+    let mut passthroughs = Vec::new();
+    let mut elided_instance_names = HashSet::new();
+    let mut bit_aliases = HashMap::new();
 
-    for inst in &module.instances {
+    for inst in &normalized.instances {
         let inst_name = parsed
             .interner
             .resolve(inst.instance_name)
@@ -264,39 +504,52 @@ fn collect_clock_gate_passthroughs(
             continue;
         };
 
-        let clock_ref =
-            instance_connection_for_port(inst, parsed, &spec.clock_pin).ok_or_else(|| {
+        let clock_sources = normalized_connection_for_port(inst, parsed, &spec.clock_pin)
+            .ok_or_else(|| {
                 anyhow!(format!(
                     "clock-gate instance '{}' missing connection for clock pin '{}'",
                     inst_name, spec.clock_pin
                 ))
             })?;
-        let output_ref =
-            instance_connection_for_port(inst, parsed, &spec.output_pin).ok_or_else(|| {
+        let output_sources = normalized_connection_for_port(inst, parsed, &spec.output_pin)
+            .ok_or_else(|| {
                 anyhow!(format!(
                     "clock-gate instance '{}' missing connection for output pin '{}'",
                     inst_name, spec.output_pin
                 ))
             })?;
 
-        let clock_idx = net_ref_to_simple_index(&clock_ref).ok_or_else(|| {
-            anyhow!(format!(
-                "clock-gate instance '{}' clock pin '{}' is not connected to a simple net",
+        let [clock_source] = clock_sources else {
+            return Err(anyhow!(format!(
+                "clock-gate instance '{}' clock pin '{}' must connect exactly one bit",
                 inst_name, spec.clock_pin
-            ))
-        })?;
-        let output_idx = net_ref_to_simple_index(&output_ref).ok_or_else(|| {
-            anyhow!(format!(
-                "clock-gate instance '{}' output pin '{}' is not connected to a simple net",
+            )));
+        };
+        let output_bit = target_bit_only(
+            output_sources,
+            &format!(
+                "clock-gate instance '{}' output pin '{}'",
                 inst_name, spec.output_pin
-            ))
-        })?;
+            ),
+            normalized,
+            parsed,
+        )?;
+        let clock_bit = source_bit_only(
+            clock_sources,
+            &format!(
+                "clock-gate instance '{}' clock pin '{}'",
+                inst_name, spec.clock_pin
+            ),
+            wiring,
+            normalized,
+            parsed,
+        )?;
 
-        if let Some(existing) = net_aliases.insert(output_idx, clock_idx) {
-            if existing != clock_idx {
+        if let Some(existing) = bit_aliases.insert(output_bit, clock_bit) {
+            if existing != clock_bit {
                 return Err(anyhow!(format!(
-                    "clock-gate output net '{}' is aliased to multiple clock nets",
-                    net_name_by_index(output_idx, parsed)
+                    "clock-gate output bit '{}' is aliased to multiple clock bits",
+                    render_clock_bit(output_bit, normalized, parsed)
                 )));
             }
         }
@@ -304,103 +557,73 @@ fn collect_clock_gate_passthroughs(
         elided_instance_names.insert(inst_name.clone());
         passthroughs.push(ClockGatePassthroughInstance {
             instance_name: inst_name,
-            clock_ref,
-            output_ref,
+            clock_source: *clock_source,
+            output_bit,
         });
     }
 
     Ok(ClockGatePassthroughAnalysis {
         passthroughs,
         elided_instance_names,
-        net_aliases,
+        bit_aliases,
     })
 }
 
 fn apply_clock_gate_passthroughs(
     passthroughs: &[ClockGatePassthroughInstance],
+    wiring: &WiringAssignResolver,
+    normalized: &NormalizedNetlistModule<'_>,
     parsed: &ParsedNetlist,
-    net_drivers: &mut NetDrivers,
-    net_widths: &HashMap<NetIndex, (usize, i64)>,
+    bit_drivers: &mut BitDrivers,
     b: &mut PirFnBuilder,
-) -> Result<HashSet<NetIndex>> {
+) -> Result<HashSet<BitIndex>> {
     let mut pending_passthroughs = passthroughs.to_vec();
-    let mut unresolved_passthrough_output_nets: HashSet<NetIndex> = HashSet::new();
+    let mut unresolved_passthrough_output_bits = HashSet::new();
 
     while !pending_passthroughs.is_empty() {
         let mut progressed = false;
-        let mut next_pending: Vec<ClockGatePassthroughInstance> = Vec::new();
+        let mut next_pending = Vec::new();
         for passthrough in pending_passthroughs {
-            if !net_ref_is_resolved(&passthrough.clock_ref, net_drivers, net_widths) {
+            let ResolvedWiringSource::Bit(clock_bit) =
+                wiring.resolve_source(passthrough.clock_source, normalized, parsed)?
+            else {
+                return Err(anyhow!(format!(
+                    "clock-gate instance '{}' clock pin is driven by a literal",
+                    passthrough.instance_name
+                )));
+            };
+            let Some(source_node) = bit_drivers.materialize_bit(clock_bit, b) else {
                 next_pending.push(passthrough);
                 continue;
-            }
-
-            let source_node = net_ref_to_node(
-                &passthrough.clock_ref,
+            };
+            bit_drivers.set_node_bit(
+                passthrough.output_bit,
+                source_node,
+                wiring,
+                normalized,
                 parsed,
-                net_drivers,
-                net_widths,
-                b,
-                1,
             )?;
-            match &passthrough.output_ref {
-                NetRef::Simple(net_idx) => {
-                    net_drivers.set_whole(*net_idx, source_node, net_widths, parsed)?;
-                }
-                NetRef::BitSelect(net_idx, bit) => {
-                    net_drivers.set_bit(
-                        *net_idx,
-                        i64::from(*bit),
-                        source_node,
-                        net_widths,
-                        parsed,
-                    )?;
-                }
-                NetRef::PartSelect(net_idx, msb, lsb) => {
-                    if msb != lsb {
-                        return Err(anyhow!(format!(
-                            "clock-gate instance '{}' output connection is unsupported multi-bit part-select on net '{}'",
-                            passthrough.instance_name,
-                            net_name_by_index(*net_idx, parsed)
-                        )));
-                    }
-                    net_drivers.set_bit(
-                        *net_idx,
-                        i64::from(*lsb),
-                        source_node,
-                        net_widths,
-                        parsed,
-                    )?;
-                }
-                NetRef::Unconnected => {}
-                _ => {
-                    return Err(anyhow!(format!(
-                        "clock-gate instance '{}' output connection is unsupported net reference",
-                        passthrough.instance_name
-                    )));
-                }
-            }
             progressed = true;
         }
         if !progressed {
             for passthrough in &next_pending {
-                if let Some(output_idx) = net_ref_to_simple_index(&passthrough.output_ref) {
-                    unresolved_passthrough_output_nets.insert(output_idx);
-                }
+                unresolved_passthrough_output_bits.insert(passthrough.output_bit);
             }
             break;
         }
         pending_passthroughs = next_pending;
     }
 
-    Ok(unresolved_passthrough_output_nets)
+    Ok(unresolved_passthrough_output_bits)
 }
 
-fn build_package_from_netlist(
+fn build_package_from_normalized_netlist(
     module: &NetlistModule,
     parsed: &ParsedNetlist,
     lib_indexed: &IndexedLibrary,
+    normalized: &NormalizedNetlistModule<'_>,
 ) -> Result<Package> {
+    let wiring = WiringAssignResolver::new(normalized, parsed)?;
     let module_name =
         sanitize_to_xls_identifier(parsed.interner.resolve(module.name).unwrap_or("top"));
 
@@ -438,7 +661,7 @@ fn build_package_from_netlist(
         });
     }
 
-    let (top_fn, top_meta) = build_top_block(module, parsed, lib_indexed)?;
+    let (top_fn, top_meta) = build_top_block(module, parsed, lib_indexed, normalized, &wiring)?;
     pkg.members.push(PackageMember::Block {
         func: top_fn.clone(),
         metadata: top_meta,
@@ -733,114 +956,180 @@ fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<(PirFn,
     Ok((b.finish(ret_ty, ret_node_ref), meta))
 }
 
-struct NetDrivers {
-    whole: HashMap<NetIndex, NodeRef>,
-    bits: HashMap<NetIndex, Vec<Option<NodeRef>>>,
+fn add_input_bit_driver(
+    bit_idx: BitIndex,
+    bit_offset: usize,
+    port_width: usize,
+    port_node: NodeRef,
+    bit_drivers: &mut BitDrivers,
+    wiring: &WiringAssignResolver,
+    normalized: &NormalizedNetlistModule<'_>,
+    parsed: &ParsedNetlist,
+) -> Result<()> {
+    bit_drivers.set_input_bit(
+        bit_idx, port_node, bit_offset, port_width, wiring, normalized, parsed,
+    )
 }
 
-impl NetDrivers {
-    fn new() -> Self {
-        Self {
-            whole: HashMap::new(),
-            bits: HashMap::new(),
+fn add_literal_bit(b: &mut PirFnBuilder, value: bool) -> NodeRef {
+    b.add_literal_bits(1, if value { 1 } else { 0 })
+}
+
+fn resolved_wiring_source_to_node(
+    source: ResolvedWiringSource,
+    bit_drivers: &BitDrivers,
+    unresolved_passthrough_output_bits: &HashSet<BitIndex>,
+    normalized: &NormalizedNetlistModule<'_>,
+    parsed: &ParsedNetlist,
+    b: &mut PirFnBuilder,
+    allow_undriven_zero: bool,
+) -> Result<NodeRef> {
+    match source {
+        ResolvedWiringSource::Bit(bit_idx) => {
+            if let Some(node) = bit_drivers.materialize_bit(bit_idx, b) {
+                return Ok(node);
+            }
+            if unresolved_passthrough_output_bits.contains(&bit_idx) {
+                return Err(anyhow!(format!(
+                    "clock-gate output bit '{}' is unresolved as data (clock-only passthrough)",
+                    normalized.render_bit(bit_idx, &parsed.nets, &parsed.interner)
+                )));
+            }
+            if allow_undriven_zero {
+                return Ok(add_literal_bit(b, false));
+            }
+            Err(anyhow!(format!(
+                "net bit '{}' has no driver",
+                normalized.render_bit(bit_idx, &parsed.nets, &parsed.interner)
+            )))
         }
+        ResolvedWiringSource::Literal(value) => Ok(add_literal_bit(b, value)),
+    }
+}
+
+fn materialize_sources_to_node(
+    sources: &[BitSource],
+    empty_width: usize,
+    wiring: &WiringAssignResolver,
+    bit_drivers: &BitDrivers,
+    unresolved_passthrough_output_bits: &HashSet<BitIndex>,
+    normalized: &NormalizedNetlistModule<'_>,
+    parsed: &ParsedNetlist,
+    b: &mut PirFnBuilder,
+    allow_undriven_zero: bool,
+) -> Result<NodeRef> {
+    if sources.is_empty() {
+        return Ok(b.add_literal_bits(empty_width, 0));
     }
 
-    fn set_whole(
-        &mut self,
-        idx: NetIndex,
-        node: NodeRef,
-        net_widths: &HashMap<NetIndex, (usize, i64)>,
-        parsed: &ParsedNetlist,
-    ) -> Result<()> {
-        if self.bits.contains_key(&idx) {
-            let net_name = net_name_by_index(idx, parsed);
-            return Err(anyhow!(format!(
-                "multiple drivers for net '{}' (bit-level and whole-net)",
-                net_name
-            )));
-        }
-        if self.whole.insert(idx, node).is_some() {
-            let net_name = net_name_by_index(idx, parsed);
-            return Err(anyhow!(format!("multiple drivers for net '{}'", net_name)));
-        }
-        // Ensure widths map entry exists for later slices.
-        let _ = net_widths.get(&idx).copied().unwrap_or((1, 0));
-        Ok(())
+    let mut parts = Vec::with_capacity(sources.len());
+    for source in sources.iter().rev().copied() {
+        let resolved = wiring.resolve_source(source, normalized, parsed)?;
+        parts.push(resolved_wiring_source_to_node(
+            resolved,
+            bit_drivers,
+            unresolved_passthrough_output_bits,
+            normalized,
+            parsed,
+            b,
+            allow_undriven_zero,
+        )?);
     }
+    if parts.len() == 1 {
+        Ok(parts[0])
+    } else {
+        Ok(b.add_node(
+            NodePayload::Nary(NaryOp::Concat, parts),
+            Type::Bits(sources.len()),
+            None,
+        ))
+    }
+}
 
-    fn set_bit(
-        &mut self,
-        idx: NetIndex,
-        bit: i64,
-        node: NodeRef,
-        net_widths: &HashMap<NetIndex, (usize, i64)>,
-        parsed: &ParsedNetlist,
-    ) -> Result<()> {
-        if self.whole.contains_key(&idx) {
-            let net_name = net_name_by_index(idx, parsed);
-            return Err(anyhow!(format!(
-                "multiple drivers for net '{}' (whole-net and bit-level)",
-                net_name
-            )));
-        }
-        let (width, lsb) = net_widths.get(&idx).copied().unwrap_or((1, 0));
-        let offset = (bit - lsb) as usize;
-        if offset >= width {
-            let net_name = net_name_by_index(idx, parsed);
-            return Err(anyhow!(format!(
-                "bit {} out of range for net '{}' (width {}, lsb {})",
-                bit, net_name, width, lsb
-            )));
-        }
-        let entry = self.bits.entry(idx).or_insert_with(|| vec![None; width]);
-        if entry[offset].is_some() {
-            let net_name = net_name_by_index(idx, parsed);
-            return Err(anyhow!(format!("multiple drivers for net '{}'", net_name)));
-        }
-        entry[offset] = Some(node);
-        Ok(())
-    }
+fn materialize_bits_to_node(
+    bits: &[BitIndex],
+    wiring: &WiringAssignResolver,
+    bit_drivers: &BitDrivers,
+    unresolved_passthrough_output_bits: &HashSet<BitIndex>,
+    normalized: &NormalizedNetlistModule<'_>,
+    parsed: &ParsedNetlist,
+    b: &mut PirFnBuilder,
+    allow_undriven_zero: bool,
+) -> Result<NodeRef> {
+    let sources: Vec<BitSource> = bits.iter().copied().map(BitSource::Bit).collect();
+    materialize_sources_to_node(
+        sources.as_slice(),
+        bits.len(),
+        wiring,
+        bit_drivers,
+        unresolved_passthrough_output_bits,
+        normalized,
+        parsed,
+        b,
+        allow_undriven_zero,
+    )
+}
 
-    fn get_whole(&self, idx: NetIndex) -> Option<NodeRef> {
-        self.whole.get(&idx).copied()
-    }
+fn source_resolves_to_clock(
+    source: BitSource,
+    selected_clock_bit: BitIndex,
+    wiring: &WiringAssignResolver,
+    clock_gate_bit_aliases: &HashMap<BitIndex, BitIndex>,
+    normalized: &NormalizedNetlistModule<'_>,
+    parsed: &ParsedNetlist,
+) -> Result<bool> {
+    let ResolvedWiringSource::Bit(bit_idx) = wiring.resolve_source(source, normalized, parsed)?
+    else {
+        return Ok(false);
+    };
+    Ok(
+        resolve_clock_bit(bit_idx, wiring, clock_gate_bit_aliases, normalized, parsed)?
+            == selected_clock_bit,
+    )
+}
 
-    fn get_bits(&self, idx: NetIndex) -> Option<&Vec<Option<NodeRef>>> {
-        self.bits.get(&idx)
-    }
+fn top_input_port_name_for_bit(
+    bit_idx: BitIndex,
+    normalized: &NormalizedNetlistModule<'_>,
+    parsed: &ParsedNetlist,
+) -> Option<String> {
+    normalized
+        .ports
+        .iter()
+        .find(|port| {
+            port.direction == crate::netlist::parse::PortDirection::Input
+                && port.bits.contains(&bit_idx)
+        })
+        .and_then(|port| parsed.interner.resolve(port.name))
+        .map(|name| name.to_string())
 }
 
 fn build_top_block(
     module: &NetlistModule,
     parsed: &ParsedNetlist,
     lib_indexed: &IndexedLibrary,
+    normalized: &NormalizedNetlistModule<'_>,
+    wiring: &WiringAssignResolver,
 ) -> Result<(PirFn, BlockMetadata)> {
     let module_name_raw = parsed.interner.resolve(module.name).unwrap_or("top");
     let module_name = sanitize_to_xls_identifier(module_name_raw);
     let mut b = PirFnBuilder::new(&module_name);
 
-    let mut net_drivers = NetDrivers::new();
-    let mut net_widths: HashMap<NetIndex, (usize, i64)> = HashMap::new();
+    let mut bit_drivers = BitDrivers::new(normalized.bit_count());
     let mut top_port_name_legalizer = IdentifierLegalizer::default();
     let mut instance_name_legalizer = IdentifierLegalizer::default();
-
-    for (i, net) in parsed.nets.iter().enumerate() {
-        let idx = NetIndex(i);
-        net_widths.insert(idx, net_width_bits(net));
-    }
 
     let ClockGatePassthroughAnalysis {
         passthroughs: clock_gate_passthroughs,
         elided_instance_names: elided_clock_gate_instances,
-        net_aliases: clock_gate_net_aliases,
-    } = collect_clock_gate_passthroughs(module, parsed, lib_indexed)?;
+        bit_aliases: clock_gate_bit_aliases,
+    } = collect_clock_gate_passthroughs(normalized, parsed, lib_indexed, wiring)?;
 
-    // Identify a shared clock net name for DFFs (if any).
-    let mut clock_net_name: Option<String> = None;
-    let mut dff_clock_pins: Vec<String> = Vec::new();
+    let mut selected_clock_bit: Option<BitIndex> = None;
+    let mut selected_clock_port_name_raw: Option<String> = None;
+    let mut dff_clock_pins = Vec::new();
 
-    for inst in &module.instances {
+    for inst in &normalized.instances {
         let cell_name = parsed.interner.resolve(inst.type_name).unwrap_or("");
         let cell = lib_indexed
             .get_cell(cell_name)
@@ -860,7 +1149,7 @@ fn build_top_block(
         }
     }
 
-    for inst in &module.instances {
+    for inst in &normalized.instances {
         let cell_name = parsed.interner.resolve(inst.type_name).unwrap_or("");
         let cell = lib_indexed
             .get_cell(cell_name)
@@ -870,79 +1159,89 @@ fn build_top_block(
             .first()
             .is_some_and(|s| s.kind == SequentialKind::Ff as i32)
         {
-            for (port_name, net_ref) in &inst.connections {
-                let port = parsed.interner.resolve(*port_name).unwrap_or("");
-                if dff_clock_pins.iter().any(|p| p == port) {
-                    let net_idx = net_ref_to_simple_index(net_ref).ok_or_else(|| {
-                        anyhow!(format!(
-                            "clock pin '{}' on instance '{}' is not driven by a simple net",
-                            port,
-                            parsed
-                                .interner
-                                .resolve(inst.instance_name)
-                                .unwrap_or("<unknown>")
-                        ))
-                    })?;
-                    let resolved_net_idx = resolve_net_alias(net_idx, &clock_gate_net_aliases)?;
-                    let net_name = net_name_by_index(resolved_net_idx, parsed);
-                    match &clock_net_name {
-                        None => clock_net_name = Some(net_name),
-                        Some(existing) if existing != &net_name => {
-                            return Err(anyhow!(format!(
-                                "multiple clock nets detected: '{}' vs '{}'",
-                                existing, net_name
-                            )));
-                        }
-                        _ => {}
+            for connection in &inst.connections {
+                let port = parsed.interner.resolve(connection.port).unwrap_or("");
+                if !dff_clock_pins.iter().any(|clock_pin| clock_pin == port) {
+                    continue;
+                }
+                let raw_clock_bit = source_bit_only(
+                    connection.bits.as_slice(),
+                    &format!(
+                        "clock pin '{}' on instance '{}'",
+                        port,
+                        parsed
+                            .interner
+                            .resolve(inst.instance_name)
+                            .unwrap_or("<unknown>")
+                    ),
+                    wiring,
+                    normalized,
+                    parsed,
+                )?;
+                let clock_bit = resolve_clock_bit(
+                    raw_clock_bit,
+                    wiring,
+                    &clock_gate_bit_aliases,
+                    normalized,
+                    parsed,
+                )?;
+                match selected_clock_bit {
+                    None => selected_clock_bit = Some(clock_bit),
+                    Some(existing) if existing != clock_bit => {
+                        return Err(anyhow!(format!(
+                            "multiple clock nets detected: '{}' vs '{}'",
+                            render_clock_bit(existing, normalized, parsed),
+                            render_clock_bit(clock_bit, normalized, parsed)
+                        )));
                     }
+                    _ => {}
                 }
             }
         }
     }
 
-    if let Some(ref clk_net) = clock_net_name {
-        let is_top_input = module.ports.iter().any(|p| {
-            p.direction == crate::netlist::parse::PortDirection::Input
-                && parsed
-                    .interner
-                    .resolve(p.name)
-                    .is_some_and(|name| name == clk_net)
-        });
-        if !is_top_input {
+    if let Some(clock_bit) = selected_clock_bit {
+        selected_clock_port_name_raw = top_input_port_name_for_bit(clock_bit, normalized, parsed);
+        if selected_clock_port_name_raw.is_none() {
             return Err(anyhow!(format!(
                 "derived clock '{}' is not a top-level input port",
-                clk_net
+                render_clock_bit(clock_bit, normalized, parsed)
             )));
         }
     }
 
-    for port in &module.ports {
+    for port in &normalized.ports {
         if port.direction != crate::netlist::parse::PortDirection::Input {
             continue;
         }
         let name_raw = parsed.interner.resolve(port.name).unwrap_or("").to_string();
-        if clock_net_name.as_ref().is_some_and(|clk| clk == &name_raw) {
+        if selected_clock_port_name_raw
+            .as_ref()
+            .is_some_and(|clock_name| clock_name == &name_raw)
+        {
             continue;
         }
         let name = top_port_name_legalizer.legalize(&name_raw);
-        let width = port
-            .width
-            .map(|(msb, lsb)| (msb as i64 - lsb as i64).abs() as usize + 1)
-            .unwrap_or(1);
-        let nr = b.add_param(&name, Type::Bits(width));
-        let net_idx = parsed
-            .nets
-            .iter()
-            .position(|n| n.name == port.name)
-            .map(NetIndex)
-            .ok_or_else(|| anyhow!(format!("input port net '{}' not found", name)))?;
-        net_drivers.set_whole(net_idx, nr, &net_widths, parsed)?;
+        let width = port.bits.len();
+        let port_node = b.add_param(&name, Type::Bits(width));
+        for (bit_offset, bit_idx) in port.bits.iter().copied().enumerate() {
+            add_input_bit_driver(
+                bit_idx,
+                bit_offset,
+                width,
+                port_node,
+                &mut bit_drivers,
+                wiring,
+                normalized,
+                parsed,
+            )?;
+        }
     }
 
-    let mut instantiations: Vec<Instantiation> = Vec::new();
+    let mut instantiations = Vec::new();
     let mut instance_outputs: Vec<(String, String, Vec<(String, NodeRef)>)> = Vec::new();
 
-    for inst in &module.instances {
+    for inst in &normalized.instances {
         let inst_name_raw = parsed
             .interner
             .resolve(inst.instance_name)
@@ -965,7 +1264,7 @@ fn build_top_block(
         let outputs = lib_indexed
             .pins_for_dir(&cell_name, PinDirection::Output)
             .unwrap_or_default();
-        let mut output_refs: Vec<(String, NodeRef)> = Vec::new();
+        let mut output_refs = Vec::new();
         for pin in outputs {
             let output_node_name = format!("{}_{}", inst_name, pin.name);
             let nr = b.add_node(
@@ -981,53 +1280,48 @@ fn build_top_block(
         instance_outputs.push((inst_name_raw, inst_name, output_refs));
     }
 
-    // Map instance outputs to nets.
     for (inst_name_raw, _inst_name_legal, output_refs) in &instance_outputs {
-        let inst = module
+        let inst = normalized
             .instances
             .iter()
-            .find(|i| parsed.interner.resolve(i.instance_name).unwrap_or("") == inst_name_raw)
+            .find(|inst| parsed.interner.resolve(inst.instance_name).unwrap_or("") == inst_name_raw)
             .ok_or_else(|| anyhow!(format!("instance '{}' not found", inst_name_raw)))?;
-        for (port_id, net_ref) in &inst.connections {
-            let port_name = parsed.interner.resolve(*port_id).unwrap_or("").to_string();
+        for connection in &inst.connections {
+            let port_name = parsed
+                .interner
+                .resolve(connection.port)
+                .unwrap_or("")
+                .to_string();
             let Some(node_ref) = output_refs
                 .iter()
-                .find(|(n, _)| n == &port_name)
-                .map(|(_, r)| *r)
+                .find(|(name, _)| name == &port_name)
+                .map(|(_, node_ref)| *node_ref)
             else {
                 continue;
             };
-            match net_ref {
-                NetRef::Simple(net_idx) => {
-                    net_drivers.set_whole(*net_idx, node_ref, &net_widths, parsed)?;
-                }
-                NetRef::BitSelect(net_idx, bit) => {
-                    net_drivers.set_bit(*net_idx, *bit as i64, node_ref, &net_widths, parsed)?;
-                }
-                NetRef::PartSelect(net_idx, msb, lsb) => {
-                    if msb != lsb {
-                        return Err(anyhow!(format!(
-                            "unsupported multi-bit part-select output for net '{}'",
-                            net_name_by_index(*net_idx, parsed)
-                        )));
-                    }
-                    net_drivers.set_bit(*net_idx, *lsb as i64, node_ref, &net_widths, parsed)?;
-                }
-                _ => {}
+            if connection.bits.is_empty() {
+                continue;
             }
+            let output_bit = target_bit_only(
+                connection.bits.as_slice(),
+                &format!("instance output '{}.{}'", inst_name_raw, port_name),
+                normalized,
+                parsed,
+            )?;
+            bit_drivers.set_node_bit(output_bit, node_ref, wiring, normalized, parsed)?;
         }
     }
 
-    let unresolved_passthrough_output_nets = apply_clock_gate_passthroughs(
+    let unresolved_passthrough_output_bits = apply_clock_gate_passthroughs(
         &clock_gate_passthroughs,
+        wiring,
+        normalized,
         parsed,
-        &mut net_drivers,
-        &net_widths,
+        &mut bit_drivers,
         &mut b,
     )?;
 
-    // Emit instantiation inputs.
-    for inst in &module.instances {
+    for inst in &normalized.instances {
         let inst_name_raw = parsed
             .interner
             .resolve(inst.instance_name)
@@ -1048,12 +1342,12 @@ fn build_top_block(
         let inputs = lib_indexed
             .pins_for_dir(&cell_name, PinDirection::Input)
             .unwrap_or_default();
-        let input_pin_names: HashSet<String> = inputs.iter().map(|p| p.name.clone()).collect();
+        let input_pin_names: HashSet<String> = inputs.iter().map(|pin| pin.name.clone()).collect();
 
         let mut clock_pin_names: HashSet<String> = inputs
             .iter()
-            .filter(|p| p.is_clocking_pin)
-            .map(|p| p.name.clone())
+            .filter(|pin| pin.is_clocking_pin)
+            .map(|pin| pin.name.clone())
             .collect();
         if let Some(seq) = cell.sequential.first() {
             if !seq.clock_expr.is_empty() {
@@ -1062,29 +1356,52 @@ fn build_top_block(
             }
         }
 
-        for (port_id, net_ref) in &inst.connections {
-            let port_name = parsed.interner.resolve(*port_id).unwrap_or("").to_string();
+        for connection in &inst.connections {
+            let port_name = parsed
+                .interner
+                .resolve(connection.port)
+                .unwrap_or("")
+                .to_string();
             if !input_pin_names.contains(&port_name) || clock_pin_names.contains(&port_name) {
                 continue;
             }
-            if let (Some(clock_net), Some(net_idx)) =
-                (clock_net_name.as_ref(), net_ref_to_simple_index(net_ref))
-            {
-                let resolved_net_idx = resolve_net_alias(net_idx, &clock_gate_net_aliases)?;
-                if net_name_by_index(resolved_net_idx, parsed) == *clock_net {
-                    return Err(anyhow!(format!(
-                        "clock net '{}' is connected to non-clock input '{}.{}' (cell '{}'); gv2block does not support feeding the selected clock into ordinary logic",
-                        clock_net, inst_name, port_name, cell_name
-                    )));
+            if let Some(clock_bit) = selected_clock_bit {
+                for source in connection.bits.iter().copied() {
+                    if source_resolves_to_clock(
+                        source,
+                        clock_bit,
+                        wiring,
+                        &clock_gate_bit_aliases,
+                        normalized,
+                        parsed,
+                    )? {
+                        return Err(anyhow!(format!(
+                            "clock net '{}' is connected to non-clock input '{}.{}' (cell '{}'); gv2block does not support feeding the selected clock into ordinary logic",
+                            render_clock_bit(clock_bit, normalized, parsed),
+                            inst_name,
+                            port_name,
+                            cell_name
+                        )));
+                    }
                 }
             }
-            let val = net_ref_to_node(net_ref, parsed, &net_drivers, &net_widths, &mut b, 1)?;
+            let value = materialize_sources_to_node(
+                connection.bits.as_slice(),
+                1,
+                wiring,
+                &bit_drivers,
+                &unresolved_passthrough_output_bits,
+                normalized,
+                parsed,
+                &mut b,
+                false,
+            )?;
             let input_node_name = format!("{}_{}", inst_name, port_name);
             b.add_node(
                 NodePayload::InstantiationInput {
                     instantiation: inst_name.clone(),
                     port_name: port_name.clone(),
-                    arg: val,
+                    arg: value,
                 },
                 Type::Tuple(vec![]),
                 Some(&input_node_name),
@@ -1092,63 +1409,36 @@ fn build_top_block(
         }
     }
 
-    // Collect module outputs.
-    let mut output_names: Vec<String> = Vec::new();
-    let mut output_nodes: Vec<NodeRef> = Vec::new();
-    for port in &module.ports {
+    let mut output_names = Vec::new();
+    let mut output_nodes = Vec::new();
+    for port in &normalized.ports {
         if port.direction != crate::netlist::parse::PortDirection::Output {
             continue;
         }
         let name_raw = parsed.interner.resolve(port.name).unwrap_or("").to_string();
         let name = top_port_name_legalizer.legalize(&name_raw);
-        let net_idx = parsed
-            .nets
-            .iter()
-            .position(|n| n.name == port.name)
-            .map(NetIndex)
-            .ok_or_else(|| anyhow!(format!("output port net '{}' not found", name_raw)))?;
-        let (width, _) = net_widths.get(&net_idx).copied().unwrap_or((1, 0));
-        let node = if let Some(nr) = net_drivers.get_whole(net_idx) {
-            nr
-        } else if let Some(bits) = net_drivers.get_bits(net_idx) {
-            let mut parts: Vec<NodeRef> = Vec::new();
-            for bit in bits.iter().rev() {
-                let nr = match bit {
-                    Some(n) => *n,
-                    None => b.add_literal_bits(1, 0),
-                };
-                parts.push(nr);
-            }
-            if parts.len() == 1 {
-                parts[0]
-            } else {
-                b.add_node(
-                    NodePayload::Nary(NaryOp::Concat, parts),
-                    Type::Bits(width),
-                    None,
-                )
-            }
-        } else {
-            if unresolved_passthrough_output_nets.contains(&net_idx) {
-                return Err(anyhow!(format!(
-                    "clock-gate output net '{}' is unresolved as data (clock-only passthrough)",
-                    name
-                )));
-            }
-            b.add_literal_bits(width, 0)
-        };
+        let node = materialize_bits_to_node(
+            port.bits.as_slice(),
+            wiring,
+            &bit_drivers,
+            &unresolved_passthrough_output_bits,
+            normalized,
+            parsed,
+            &mut b,
+            true,
+        )?;
         output_names.push(name);
         output_nodes.push(node);
     }
 
     let (ret_ty, ret_node_ref) = build_return_node(&mut b, &output_nodes);
 
-    let mut input_port_ids: HashMap<String, usize> = HashMap::new();
-    for p in &b.params {
-        input_port_ids.insert(p.name.clone(), p.id.get_wrapped_id());
+    let mut input_port_ids = HashMap::new();
+    for param in &b.params {
+        input_port_ids.insert(param.name.clone(), param.id.get_wrapped_id());
     }
 
-    let clock_port_name = clock_net_name
+    let clock_port_name = selected_clock_port_name_raw
         .as_ref()
         .map(|name| top_port_name_legalizer.legalize(name));
 
@@ -1181,241 +1471,6 @@ fn build_return_node(b: &mut PirFnBuilder, outputs: &[NodeRef]) -> (Type, Option
     let tuple_ty = Type::Tuple(tys);
     let tuple_node = b.add_node(NodePayload::Tuple(outputs.to_vec()), tuple_ty.clone(), None);
     (tuple_ty, Some(tuple_node))
-}
-
-fn net_width_bits(net: &Net) -> (usize, i64) {
-    if let Some((msb, lsb)) = net.width {
-        let width = (msb as i64 - lsb as i64).abs() as usize + 1;
-        (width, lsb as i64)
-    } else {
-        (1, 0)
-    }
-}
-
-fn net_name_by_index(idx: NetIndex, parsed: &ParsedNetlist) -> String {
-    parsed
-        .interner
-        .resolve(parsed.nets[idx.0].name)
-        .unwrap_or("<unknown>")
-        .to_string()
-}
-
-fn net_ref_is_resolved(
-    net_ref: &NetRef,
-    net_drivers: &NetDrivers,
-    net_widths: &HashMap<NetIndex, (usize, i64)>,
-) -> bool {
-    match net_ref {
-        NetRef::Simple(idx) => {
-            if net_drivers.get_whole(*idx).is_some() {
-                return true;
-            }
-            net_drivers
-                .get_bits(*idx)
-                .is_some_and(|bits| bits.iter().all(|b| b.is_some()))
-        }
-        NetRef::BitSelect(idx, bit) => {
-            if net_drivers.get_whole(*idx).is_some() {
-                return true;
-            }
-            let Some(bits) = net_drivers.get_bits(*idx) else {
-                return false;
-            };
-            let (_, lsb) = net_widths.get(idx).copied().unwrap_or((1, 0));
-            let offset_i64 = i64::from(*bit) - lsb;
-            if offset_i64 < 0 {
-                return false;
-            }
-            bits.get(offset_i64 as usize).is_some_and(|n| n.is_some())
-        }
-        NetRef::PartSelect(idx, msb, lsb_select) => {
-            if msb < lsb_select {
-                return false;
-            }
-            if net_drivers.get_whole(*idx).is_some() {
-                return true;
-            }
-            let Some(bits) = net_drivers.get_bits(*idx) else {
-                return false;
-            };
-            let (_, net_lsb) = net_widths.get(idx).copied().unwrap_or((1, 0));
-            for bit in *lsb_select..=*msb {
-                let offset_i64 = i64::from(bit) - net_lsb;
-                if offset_i64 < 0 {
-                    return false;
-                }
-                let Some(nr_opt) = bits.get(offset_i64 as usize) else {
-                    return false;
-                };
-                if nr_opt.is_none() {
-                    return false;
-                }
-            }
-            true
-        }
-        NetRef::Literal(_) | NetRef::UnknownLiteral(_) | NetRef::Unconnected => true,
-        NetRef::Concat(elems) => elems
-            .iter()
-            .all(|e| net_ref_is_resolved(e, net_drivers, net_widths)),
-    }
-}
-
-fn net_ref_to_node(
-    net_ref: &NetRef,
-    parsed: &ParsedNetlist,
-    net_drivers: &NetDrivers,
-    net_widths: &HashMap<NetIndex, (usize, i64)>,
-    b: &mut PirFnBuilder,
-    expected_width: usize,
-) -> Result<NodeRef> {
-    match net_ref {
-        NetRef::Simple(idx) => {
-            if let Some(nr) = net_drivers.get_whole(*idx) {
-                return Ok(nr);
-            }
-            if let Some(bits) = net_drivers.get_bits(*idx) {
-                let (width, _lsb) = net_widths.get(idx).copied().unwrap_or((1, 0));
-                let mut parts: Vec<NodeRef> = Vec::new();
-                for bit in bits.iter().rev() {
-                    let nr = match bit {
-                        Some(n) => *n,
-                        None => b.add_literal_bits(1, 0),
-                    };
-                    parts.push(nr);
-                }
-                if width == 1 {
-                    return Ok(parts[0]);
-                }
-                return Ok(b.add_node(
-                    NodePayload::Nary(NaryOp::Concat, parts),
-                    Type::Bits(width),
-                    None,
-                ));
-            }
-            Err(anyhow!(format!(
-                "net '{}' has no driver",
-                net_name_by_index(*idx, parsed)
-            )))
-        }
-        NetRef::BitSelect(idx, bit) => {
-            if let Some(nr) = net_drivers.get_whole(*idx) {
-                let (_, lsb) = net_widths.get(idx).copied().unwrap_or((1, 0));
-                let start = (*bit as i64 - lsb) as usize;
-                return Ok(b.add_node(
-                    NodePayload::BitSlice {
-                        arg: nr,
-                        start,
-                        width: 1,
-                    },
-                    Type::Bits(1),
-                    None,
-                ));
-            }
-            if let Some(bits) = net_drivers.get_bits(*idx) {
-                let (_, lsb) = net_widths.get(idx).copied().unwrap_or((1, 0));
-                let start = (*bit as i64 - lsb) as usize;
-                if start >= bits.len() {
-                    return Err(anyhow!(format!(
-                        "net '{}' has no driver",
-                        net_name_by_index(*idx, parsed)
-                    )));
-                }
-                return bits[start].ok_or_else(|| {
-                    anyhow!(format!(
-                        "net '{}' has no driver",
-                        net_name_by_index(*idx, parsed)
-                    ))
-                });
-            }
-            Err(anyhow!(format!(
-                "net '{}' has no driver",
-                net_name_by_index(*idx, parsed)
-            )))
-        }
-        NetRef::PartSelect(idx, msb, lsb) => {
-            if let Some(nr) = net_drivers.get_whole(*idx) {
-                let (_, net_lsb) = net_widths.get(idx).copied().unwrap_or((1, 0));
-                let (hi, lo) = (*msb as i64, *lsb as i64);
-                if hi < lo {
-                    return Err(anyhow!(format!(
-                        "unsupported part-select with msb<lsb for net '{}'",
-                        net_name_by_index(*idx, parsed)
-                    )));
-                }
-                let width = (hi - lo + 1) as usize;
-                let start = (lo - net_lsb) as usize;
-                return Ok(b.add_node(
-                    NodePayload::BitSlice {
-                        arg: nr,
-                        start,
-                        width,
-                    },
-                    Type::Bits(width),
-                    None,
-                ));
-            }
-            if let Some(bits) = net_drivers.get_bits(*idx) {
-                let (_, net_lsb) = net_widths.get(idx).copied().unwrap_or((1, 0));
-                let (hi, lo) = (*msb as i64, *lsb as i64);
-                if hi < lo {
-                    return Err(anyhow!(format!(
-                        "unsupported part-select with msb<lsb for net '{}'",
-                        net_name_by_index(*idx, parsed)
-                    )));
-                }
-                let mut parts: Vec<NodeRef> = Vec::new();
-                for bit in (lo..=hi).rev() {
-                    let offset = (bit - net_lsb) as usize;
-                    let nr = bits.get(offset).and_then(|n| *n).ok_or_else(|| {
-                        anyhow!(format!(
-                            "net '{}' has no driver",
-                            net_name_by_index(*idx, parsed)
-                        ))
-                    })?;
-                    parts.push(nr);
-                }
-                let width = (hi - lo + 1) as usize;
-                if width == 1 {
-                    return Ok(parts[0]);
-                }
-                return Ok(b.add_node(
-                    NodePayload::Nary(NaryOp::Concat, parts),
-                    Type::Bits(width),
-                    None,
-                ));
-            }
-            Err(anyhow!(format!(
-                "net '{}' has no driver",
-                net_name_by_index(*idx, parsed)
-            )))
-        }
-        NetRef::Literal(bits) => {
-            let lit = IrValue::from_bits(bits);
-            let width = bits.get_bit_count();
-            Ok(b.add_node(NodePayload::Literal(lit), Type::Bits(width), None))
-        }
-        NetRef::UnknownLiteral(_) => Err(anyhow!("unknown literal is unsupported in gv2block")),
-        NetRef::Unconnected => Ok(b.add_literal_bits(expected_width, 0)),
-        NetRef::Concat(elems) => {
-            let mut parts: Vec<NodeRef> = Vec::new();
-            let mut total_width = 0usize;
-            for e in elems {
-                let nr = net_ref_to_node(e, parsed, net_drivers, net_widths, b, 1)?;
-                let ty = b.nodes[nr.index].ty.clone();
-                let width = match ty {
-                    Type::Bits(w) => w,
-                    _ => return Err(anyhow!("concat element must be bits, got {:?}", ty)),
-                };
-                total_width += width;
-                parts.push(nr);
-            }
-            Ok(b.add_node(
-                NodePayload::Nary(NaryOp::Concat, parts),
-                Type::Bits(total_width),
-                None,
-            ))
-        }
-    }
 }
 
 fn emit_term_as_pir(

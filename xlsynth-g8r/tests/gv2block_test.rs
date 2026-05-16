@@ -573,12 +573,61 @@ endmodule
 }
 
 #[test]
-fn test_gv2block_rejects_preserved_assigns() {
+fn test_gv2block_accepts_preserved_wiring_assigns() {
     let netlist = r#"
 module top (a, y);
   input a;
   output y;
-  assign y = a;
+  wire a;
+  wire y;
+  wire n;
+  BUF u0 (.A(a), .Y(n));
+  assign y = n;
+endmodule
+"#;
+    let mut liberty_file = NamedTempFile::new().unwrap();
+    write!(liberty_file, "{}", LIBERTY_TEXTPROTO).unwrap();
+    let mut netlist_file = NamedTempFile::new().unwrap();
+    write!(netlist_file, "{}", netlist).unwrap();
+
+    let got = convert_gv2block_paths_to_string(netlist_file.path(), liberty_file.path()).unwrap();
+    assert!(got.contains("u0_A: () = instantiation_input(a, instantiation=u0, port_name=A"));
+    assert!(got.contains("y: () = output_port(u0_Y, name=y"));
+}
+
+#[test]
+fn test_gv2block_accepts_preserved_tran_aliases() {
+    let netlist = r#"
+module top (a, y);
+  input a;
+  output y;
+  wire a;
+  wire y;
+  wire y_alias;
+  BUF u0 (.A(a), .Y(y_alias));
+  tran(y, y_alias);
+endmodule
+"#;
+    let mut liberty_file = NamedTempFile::new().unwrap();
+    write!(liberty_file, "{}", LIBERTY_TEXTPROTO).unwrap();
+    let mut netlist_file = NamedTempFile::new().unwrap();
+    write!(netlist_file, "{}", netlist).unwrap();
+
+    let got = convert_gv2block_paths_to_string(netlist_file.path(), liberty_file.path()).unwrap();
+    assert!(got.contains("y: () = output_port(u0_Y, name=y"));
+}
+
+#[test]
+fn test_gv2block_rejects_preserved_combinational_assigns() {
+    let netlist = r#"
+module top (a, b, y);
+  input a;
+  input b;
+  output y;
+  wire a;
+  wire b;
+  wire y;
+  assign y = a & b;
 endmodule
 "#;
     let mut liberty_file = NamedTempFile::new().unwrap();
@@ -587,9 +636,8 @@ endmodule
     write!(netlist_file, "{}", netlist).unwrap();
 
     let err = convert_gv2block_paths_to_string(netlist_file.path(), liberty_file.path())
-        .expect_err("expected preserved assigns to be rejected");
-    assert!(
-        err.to_string()
-            .contains("gv2block does not support preserved continuous assigns")
-    );
+        .expect_err("expected top-level logic assign to be rejected");
+    let err_text = err.to_string();
+    assert!(err_text.contains("gv2block only supports techmapped netlists"));
+    assert!(err_text.contains("run technology mapping first"));
 }

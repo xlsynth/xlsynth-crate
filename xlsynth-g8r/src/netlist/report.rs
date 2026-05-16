@@ -440,6 +440,37 @@ endmodule
     }
 
     #[test]
+    fn build_netlist_report_accepts_yosys_tran_alias() {
+        let parsed = parse_netlist(
+            r#"
+module top (x, y);
+  input x;
+  output y;
+  wire x;
+  wire y;
+  wire y_alias;
+  BUF u0 (.A(x), .Y(y_alias));
+  tran(y, y_alias);
+endmodule
+"#,
+        );
+        let module = select_module(&parsed, None).expect("select only module");
+        let library = LibraryWithTimingData::from_proto(inv_nand_library());
+        let report = build_netlist_report(
+            module,
+            &parsed.nets,
+            &parsed.interner,
+            &library,
+            StaOptions::default(),
+        )
+        .expect("build report with Yosys tran alias");
+        assert_eq!(report.area, 1.0);
+        assert_eq!(report.delay, 1.0);
+        assert_eq!(report.cell_count, 1);
+        assert_eq!(report.cell_levels, 1);
+    }
+
+    #[test]
     fn build_area_report_rejects_unknown_cells() {
         let parsed = parse_netlist(
             r#"

@@ -12,6 +12,7 @@ pub mod gv2block;
 pub mod gv2ir;
 pub mod integrity;
 pub mod io;
+pub mod normalized;
 pub mod parse;
 pub mod report;
 pub mod sta;

@@ -2,22 +2,25 @@
 
 //! Connectivity helpers for gate-level netlists.
 //!
-//! This module provides a small API for reasoning about which instances
-//! drive or load each net in a `NetlistModule`, combining information from
-//! the parsed netlist with Liberty pin directions via `IndexedLibrary`.
+//! This module derives per-bit instance and assign connectivity from the
+//! normalized netlist frontend. Parsed Verilog syntax such as concat, selects,
+//! continuous assigns, and plain `tran` aliases is lowered before cone-like
+//! consumers walk the graph.
 
 use crate::liberty::IndexedLibrary;
 use crate::liberty_proto::PinDirection;
+use crate::netlist::normalized::{BitIndex, BitSource, NormalizedNetlistModule};
 use crate::netlist::parse::{InstIndex, Net, NetIndex, NetlistModule, PortDirection, PortId};
+use anyhow::Result;
 use std::collections::HashMap;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
 
-/// Instances and ports that connect to a net.
-pub struct NetNeighbors {
-    /// Instances and ports that drive this net.
+/// Instances and ports that connect to one normalized net bit.
+pub struct BitNeighbors {
+    /// Instances and ports that drive this bit.
     pub drivers: Vec<(InstIndex, PortId)>,
-    /// Instances and ports that load this net.
+    /// Instances and ports that load this bit.
     pub loads: Vec<(InstIndex, PortId)>,
 }
 
@@ -30,98 +33,115 @@ pub struct InstancePortInfo {
     /// Direction of this pin on the cell (input/output), as derived from the
     /// Liberty library.
     pub dir: PinDirection,
-    /// All `NetIndex` values reachable from this port's connection expression.
-    ///
-    /// This may contain multiple nets when the Verilog connection is a concat
-    /// (e.g. `{a, b[5], c[7:0], 1'b0}`) or when a bus slice spans several
-    /// underlying nets.
-    pub nets: Vec<NetIndex>,
+    /// All normalized net bits reachable from this port's connection
+    /// expression. Literal, unknown, and unconnected sources are omitted.
+    pub bits: Vec<BitIndex>,
 }
 
-/// Block-level attachment for a net that touches one or more module ports.
-///
-/// This structure is stored sparsely: only nets that are attached to at least
-/// one module port get an entry in the `NetlistConnectivity` map.
+/// Block-level attachment for a normalized net bit that touches one or more
+/// module ports.
 pub struct BlockPortBoundary {
-    /// True if this net is attached to at least one module input port.
+    /// True if this bit is attached to at least one module input port.
     pub has_input: bool,
-    /// True if this net is attached to at least one module output port.
+    /// True if this bit is attached to at least one module output port.
     pub has_output: bool,
-    /// True if this net is attached to at least one module inout port.
+    /// True if this bit is attached to at least one module inout port.
     pub has_inout: bool,
 }
 
-/// Per-module connectivity derived from a `NetlistModule` and `IndexedLibrary`.
+/// Per-module connectivity derived from a normalized `NetlistModule` and
+/// `IndexedLibrary`.
 pub struct NetlistConnectivity<'a> {
     pub module: &'a NetlistModule,
     pub nets: &'a [Net],
     pub lib: &'a IndexedLibrary,
-    /// For each `NetIndex.0`, the instances and ports that drive/load it.
-    pub net_neighbors: Vec<NetNeighbors>,
-    /// Sparse map from nets that touch module ports to their block-port roles
-    /// (whether they are attached to input / output / inout ports).
-    pub block_port_nets: HashMap<NetIndex, BlockPortBoundary>,
+    normalized: NormalizedNetlistModule<'a>,
+    /// For each normalized bit index, the instances and ports that drive/load
+    /// it.
+    pub bit_neighbors: Vec<BitNeighbors>,
+    /// For each normalized bit index, assign-source bits that feed it.
+    pub assign_fanin_bits: Vec<Vec<BitIndex>>,
+    /// For each normalized bit index, assign-destination bits fed by it.
+    pub assign_fanout_bits: Vec<Vec<BitIndex>>,
+    /// Sparse map from normalized bits that touch module ports to their
+    /// block-port roles.
+    pub block_port_bits: HashMap<BitIndex, BlockPortBoundary>,
     /// For each instance index in `module.instances`, the list of its ports,
-    /// pin directions, and connected nets. Ports for each instance are stored
-    /// in a deterministic order by port name.
+    /// pin directions, and connected normalized bits. Ports for each instance
+    /// are stored in a deterministic order by port name.
     instance_ports: Vec<Vec<InstancePortInfo>>,
 }
 
 impl<'a> NetlistConnectivity<'a> {
     /// Builds connectivity information for `module` using the given Liberty
-    /// library. This constructor iterates all instances once and classifies
-    /// their connections as drivers or loads for each net.
+    /// library. This constructor classifies instance pin bindings and lowers
+    /// normalized assign dependencies onto the bit graph.
     pub fn new(
         module: &'a NetlistModule,
         nets: &'a [Net],
         interner: &StringInterner<StringBackend<SymbolU32>>,
         lib: &'a IndexedLibrary,
         module_port_dirs: Option<&HashMap<PortId, HashMap<PortId, PinDirection>>>,
-    ) -> Self {
-        let block_port_nets = build_block_port_nets(module, nets);
-        let mut net_neighbors = create_empty_net_neighbors(nets.len());
+    ) -> Result<Self> {
+        let normalized = NormalizedNetlistModule::new(module, nets, interner)?;
+        let block_port_bits = build_block_port_bits(&normalized);
+        let mut bit_neighbors = create_empty_bit_neighbors(normalized.bit_count());
+        let (assign_fanin_bits, assign_fanout_bits) = build_assign_connectivity(&normalized);
         let instance_ports = build_instance_connectivity(
-            module,
-            nets,
+            &normalized,
             interner,
             lib,
             module_port_dirs,
-            &mut net_neighbors,
+            bit_neighbors.as_mut_slice(),
         );
 
-        NetlistConnectivity {
+        Ok(Self {
             module,
             nets,
             lib,
-            net_neighbors,
-            block_port_nets,
+            normalized,
+            bit_neighbors,
+            assign_fanin_bits,
+            assign_fanout_bits,
+            block_port_bits,
             instance_ports,
-        }
+        })
     }
 
-    /// Returns the instances and ports that drive `net`.
-    pub fn drivers_for_net(&self, net: NetIndex) -> &[(InstIndex, PortId)] {
-        &self.net_neighbors[net.0].drivers
+    /// Returns the instances and ports that drive normalized `bit`.
+    pub fn drivers_for_bit(&self, bit: BitIndex) -> &[(InstIndex, PortId)] {
+        &self.bit_neighbors[bit].drivers
     }
 
-    /// Returns the instances and ports that load `net`.
-    pub fn loads_for_net(&self, net: NetIndex) -> &[(InstIndex, PortId)] {
-        &self.net_neighbors[net.0].loads
+    /// Returns the instances and ports that load normalized `bit`.
+    pub fn loads_for_bit(&self, bit: BitIndex) -> &[(InstIndex, PortId)] {
+        &self.bit_neighbors[bit].loads
     }
 
-    /// Returns true if `net` is attached to at least one module port (input,
-    /// output, or inout).
-    pub fn is_block_port_net(&self, net: NetIndex) -> bool {
-        self.block_port_nets.contains_key(&net)
+    /// Returns assign-source bits that feed normalized `bit`.
+    pub fn assign_fanin_bits(&self, bit: BitIndex) -> &[BitIndex] {
+        self.assign_fanin_bits[bit].as_slice()
     }
 
-    /// Returns the sparse block-port boundary metadata for `net`, if any.
-    pub fn net_block_port_boundary(&self, net: NetIndex) -> Option<&BlockPortBoundary> {
-        self.block_port_nets.get(&net)
+    /// Returns assign-destination bits fed by normalized `bit`.
+    pub fn assign_fanout_bits(&self, bit: BitIndex) -> &[BitIndex] {
+        self.assign_fanout_bits[bit].as_slice()
+    }
+
+    /// Returns true if normalized `bit` is attached to at least one module
+    /// port (input, output, or inout).
+    pub fn is_block_port_bit(&self, bit: BitIndex) -> bool {
+        self.block_port_bits.contains_key(&bit)
+    }
+
+    /// Returns the sparse block-port boundary metadata for normalized `bit`,
+    /// if any.
+    pub fn bit_block_port_boundary(&self, bit: BitIndex) -> Option<&BlockPortBoundary> {
+        self.block_port_bits.get(&bit)
     }
 
     /// Returns the per-port view for `inst_idx`, including pin direction and
-    /// connected nets.
+    /// connected normalized bits.
     pub fn instance_ports(
         &self,
         inst_idx: InstIndex,
@@ -129,66 +149,87 @@ impl<'a> NetlistConnectivity<'a> {
     ) -> &[InstancePortInfo] {
         &self.instance_ports[inst_idx.0]
     }
-}
 
-fn build_block_port_nets(
-    module: &NetlistModule,
-    nets: &[Net],
-) -> HashMap<NetIndex, BlockPortBoundary> {
-    // Map from module port net symbol -> PortDirection for sparse block-port
-    // attachment metadata.
-    let mut port_dir_by_sym: HashMap<SymbolU32, PortDirection> = HashMap::new();
-    for port in &module.ports {
-        port_dir_by_sym.insert(port.name, port.direction.clone());
+    /// Renders one normalized bit through the underlying parsed netlist names.
+    pub fn render_bit(
+        &self,
+        bit: BitIndex,
+        interner: &StringInterner<StringBackend<SymbolU32>>,
+    ) -> String {
+        self.normalized.render_bit(bit, self.nets, interner)
     }
 
-    // Sparse per-net module-port attachment (only nets that touch block ports
-    // get entries).
-    let mut block_port_nets: HashMap<NetIndex, BlockPortBoundary> = HashMap::new();
-    for (idx, net) in nets.iter().enumerate() {
-        if let Some(dir) = port_dir_by_sym.get(&net.name) {
-            let entry = block_port_nets
-                .entry(NetIndex(idx))
+    /// Returns the parsed net containing normalized `bit`.
+    pub fn net_for_bit(&self, bit: BitIndex) -> NetIndex {
+        self.normalized.bit(bit).net
+    }
+}
+
+fn build_block_port_bits(
+    normalized: &NormalizedNetlistModule<'_>,
+) -> HashMap<BitIndex, BlockPortBoundary> {
+    let mut block_port_bits = HashMap::new();
+    for port in &normalized.ports {
+        for bit in &port.bits {
+            let entry = block_port_bits
+                .entry(*bit)
                 .or_insert_with(|| BlockPortBoundary {
                     has_input: false,
                     has_output: false,
                     has_inout: false,
                 });
-            match dir {
+            match port.direction {
                 PortDirection::Input => entry.has_input = true,
                 PortDirection::Output => entry.has_output = true,
                 PortDirection::Inout => entry.has_inout = true,
             }
         }
     }
-
-    block_port_nets
+    block_port_bits
 }
 
-fn create_empty_net_neighbors(nets_len: usize) -> Vec<NetNeighbors> {
-    let mut net_neighbors: Vec<NetNeighbors> = Vec::with_capacity(nets_len);
-    net_neighbors.resize_with(nets_len, || NetNeighbors {
+fn create_empty_bit_neighbors(bits_len: usize) -> Vec<BitNeighbors> {
+    let mut bit_neighbors = Vec::with_capacity(bits_len);
+    bit_neighbors.resize_with(bits_len, || BitNeighbors {
         drivers: Vec::new(),
         loads: Vec::new(),
     });
-    net_neighbors
+    bit_neighbors
+}
+
+fn build_assign_connectivity(
+    normalized: &NormalizedNetlistModule<'_>,
+) -> (Vec<Vec<BitIndex>>, Vec<Vec<BitIndex>>) {
+    let mut assign_fanin_bits = vec![Vec::new(); normalized.bit_count()];
+    let mut assign_fanout_bits = vec![Vec::new(); normalized.bit_count()];
+    for assign in &normalized.assigns {
+        for (lhs_bit, rhs_expr) in assign.lhs_bits.iter().copied().zip(&assign.rhs_bits) {
+            let mut rhs_bits = Vec::new();
+            rhs_expr.collect_source_bits(&mut rhs_bits);
+            rhs_bits.sort_unstable();
+            rhs_bits.dedup();
+            for rhs_bit in rhs_bits {
+                extend_unique_bit(&mut assign_fanin_bits[lhs_bit], rhs_bit);
+                extend_unique_bit(&mut assign_fanout_bits[rhs_bit], lhs_bit);
+            }
+        }
+    }
+    (assign_fanin_bits, assign_fanout_bits)
 }
 
 fn build_instance_connectivity(
-    module: &NetlistModule,
-    nets: &[Net],
+    normalized: &NormalizedNetlistModule<'_>,
     interner: &StringInterner<StringBackend<SymbolU32>>,
     lib: &IndexedLibrary,
     module_port_dirs: Option<&HashMap<PortId, HashMap<PortId, PinDirection>>>,
-    net_neighbors: &mut [NetNeighbors],
+    bit_neighbors: &mut [BitNeighbors],
 ) -> Vec<Vec<InstancePortInfo>> {
-    let mut instance_ports: Vec<Vec<InstancePortInfo>> = Vec::with_capacity(module.instances.len());
-    instance_ports.resize_with(module.instances.len(), Vec::new);
+    let mut instance_ports: Vec<Vec<InstancePortInfo>> =
+        Vec::with_capacity(normalized.instances.len());
+    instance_ports.resize_with(normalized.instances.len(), Vec::new);
 
-    for (inst_idx_raw, inst) in module.instances.iter().enumerate() {
-        let inst_idx = InstIndex(inst_idx_raw);
-
-        // Resolve cell or module pin directions once per instance.
+    for inst in &normalized.instances {
+        let inst_idx = inst.raw_index;
         let type_sym = inst.type_name;
         let type_name = resolve_to_string(interner, type_sym);
 
@@ -200,47 +241,66 @@ fn build_instance_connectivity(
         };
 
         let mut ports_for_instance: HashMap<PortId, InstancePortInfo> = HashMap::new();
-
-        for (port_sym, netref) in &inst.connections {
-            let port_name = resolve_to_string(interner, *port_sym);
+        for connection in &inst.connections {
+            let port_name = resolve_to_string(interner, connection.port);
             let dir = *dir_by_pin
                 .get(port_name.as_str())
                 .unwrap_or(&PinDirection::Invalid);
-
             let entry = ports_for_instance
-                .entry(*port_sym)
+                .entry(connection.port)
                 .or_insert_with(|| InstancePortInfo {
-                    port: *port_sym,
+                    port: connection.port,
                     dir,
-                    nets: Vec::new(),
+                    bits: Vec::new(),
                 });
-
-            let mut net_indices: Vec<NetIndex> = Vec::new();
-            netref.collect_net_indices(&mut net_indices);
-
-            for idx in net_indices {
-                if idx.0 >= nets.len() {
-                    continue;
-                }
-                let nn_entry = &mut net_neighbors[idx.0];
+            let mut bit_indices = connection
+                .bits
+                .iter()
+                .filter_map(|source| match source {
+                    BitSource::Bit(bit_idx) => Some(*bit_idx),
+                    BitSource::Literal(_) | BitSource::Unknown => None,
+                })
+                .collect::<Vec<_>>();
+            bit_indices.sort_unstable();
+            bit_indices.dedup();
+            for bit_idx in bit_indices {
+                let neighbors = &mut bit_neighbors[bit_idx];
                 match dir {
-                    PinDirection::Output => nn_entry.drivers.push((inst_idx, *port_sym)),
-                    PinDirection::Input => nn_entry.loads.push((inst_idx, *port_sym)),
+                    PinDirection::Output => {
+                        extend_unique_endpoint(&mut neighbors.drivers, (inst_idx, connection.port))
+                    }
+                    PinDirection::Input => {
+                        extend_unique_endpoint(&mut neighbors.loads, (inst_idx, connection.port))
+                    }
                     PinDirection::Invalid => {
-                        nn_entry.drivers.push((inst_idx, *port_sym));
-                        nn_entry.loads.push((inst_idx, *port_sym));
+                        extend_unique_endpoint(&mut neighbors.drivers, (inst_idx, connection.port));
+                        extend_unique_endpoint(&mut neighbors.loads, (inst_idx, connection.port));
                     }
                 }
-                entry.nets.push(idx);
+                entry.bits.push(bit_idx);
             }
+            entry.bits.sort_unstable();
+            entry.bits.dedup();
         }
 
         let mut ports_vec: Vec<InstancePortInfo> = ports_for_instance.into_values().collect();
-        ports_vec.sort_by_key(|p| resolve_to_string(interner, p.port));
-        instance_ports[inst_idx_raw] = ports_vec;
+        ports_vec.sort_by_key(|port| resolve_to_string(interner, port.port));
+        instance_ports[inst_idx.0] = ports_vec;
     }
 
     instance_ports
+}
+
+fn extend_unique_endpoint(endpoints: &mut Vec<(InstIndex, PortId)>, endpoint: (InstIndex, PortId)) {
+    if !endpoints.contains(&endpoint) {
+        endpoints.push(endpoint);
+    }
+}
+
+fn extend_unique_bit(bits: &mut Vec<BitIndex>, bit: BitIndex) {
+    if !bits.contains(&bit) {
+        bits.push(bit);
+    }
 }
 
 fn build_dir_by_pin_for_instance(
@@ -442,95 +502,133 @@ mod tests {
     #[test]
     fn connectivity_identifies_simple_drivers_and_loads() {
         let (module, nets, interner, indexed) = make_simple_module_and_lib();
-        let conn = NetlistConnectivity::new(&module, &nets, &interner, &indexed, None);
+        let conn = NetlistConnectivity::new(&module, &nets, &interner, &indexed, None)
+            .expect("connectivity");
+        let bit_n0 = conn.normalized.net_bits(NetIndex(0))[0];
+        let bit_n1 = conn.normalized.net_bits(NetIndex(1))[0];
+        let bit_n2 = conn.normalized.net_bits(NetIndex(2))[0];
 
-        // Net 0: driven by no instance (primary input), loaded by u1.A.
-        let loads_n0 = conn.loads_for_net(NetIndex(0));
+        // Bit 0: driven by no instance (primary input), loaded by u1.A.
+        let loads_n0 = conn.loads_for_bit(bit_n0);
         assert_eq!(loads_n0.len(), 1);
 
-        // Net 1: driven by u1.Y, loaded by u2.A.
-        let drivers_n1 = conn.drivers_for_net(NetIndex(1));
-        let loads_n1 = conn.loads_for_net(NetIndex(1));
+        // Bit 1: driven by u1.Y, loaded by u2.A.
+        let drivers_n1 = conn.drivers_for_bit(bit_n1);
+        let loads_n1 = conn.loads_for_bit(bit_n1);
         assert_eq!(drivers_n1.len(), 1);
         assert_eq!(loads_n1.len(), 1);
 
-        // Net 2: driven by u2.Y, no loads.
-        let drivers_n2 = conn.drivers_for_net(NetIndex(2));
-        let loads_n2 = conn.loads_for_net(NetIndex(2));
+        // Bit 2: driven by u2.Y, no loads.
+        let drivers_n2 = conn.drivers_for_bit(bit_n2);
+        let loads_n2 = conn.loads_for_bit(bit_n2);
         assert_eq!(drivers_n2.len(), 1);
         assert!(loads_n2.is_empty());
     }
 
     #[test]
-    fn block_port_nets_match_module_ports() {
+    fn block_port_bits_match_module_ports() {
         let (module, nets, interner, indexed) = make_simple_module_and_lib();
-        let conn = NetlistConnectivity::new(&module, &nets, &interner, &indexed, None);
+        let conn = NetlistConnectivity::new(&module, &nets, &interner, &indexed, None)
+            .expect("connectivity");
+        let bit_n0 = conn.normalized.net_bits(NetIndex(0))[0];
+        let bit_n1 = conn.normalized.net_bits(NetIndex(1))[0];
+        let bit_n2 = conn.normalized.net_bits(NetIndex(2))[0];
 
-        // Net 0 corresponds to primary input "a".
-        assert!(conn.is_block_port_net(NetIndex(0)));
+        // Bit 0 corresponds to primary input "a".
+        assert!(conn.is_block_port_bit(bit_n0));
         let b0 = conn
-            .net_block_port_boundary(NetIndex(0))
-            .expect("net 0 should have block-port metadata");
+            .bit_block_port_boundary(bit_n0)
+            .expect("bit 0 should have block-port metadata");
         assert!(b0.has_input);
         assert!(!b0.has_output);
         assert!(!b0.has_inout);
 
-        // Net 1 is internal-only.
-        assert!(!conn.is_block_port_net(NetIndex(1)));
-        assert!(conn.net_block_port_boundary(NetIndex(1)).is_none());
+        // Bit 1 is internal-only.
+        assert!(!conn.is_block_port_bit(bit_n1));
+        assert!(conn.bit_block_port_boundary(bit_n1).is_none());
 
-        // Net 2 corresponds to primary output "y".
-        assert!(conn.is_block_port_net(NetIndex(2)));
+        // Bit 2 corresponds to primary output "y".
+        assert!(conn.is_block_port_bit(bit_n2));
         let b2 = conn
-            .net_block_port_boundary(NetIndex(2))
-            .expect("net 2 should have block-port metadata");
+            .bit_block_port_boundary(bit_n2)
+            .expect("bit 2 should have block-port metadata");
         assert!(!b2.has_input);
         assert!(b2.has_output);
         assert!(!b2.has_inout);
     }
 
     #[test]
-    fn instance_ports_reports_directions_and_nets() {
+    fn instance_ports_reports_directions_and_bits() {
         let (module, nets, interner, indexed) = make_simple_module_and_lib();
-        let conn = NetlistConnectivity::new(&module, &nets, &interner, &indexed, None);
+        let conn = NetlistConnectivity::new(&module, &nets, &interner, &indexed, None)
+            .expect("connectivity");
+        let bit_n0 = conn.normalized.net_bits(NetIndex(0))[0];
+        let bit_n1 = conn.normalized.net_bits(NetIndex(1))[0];
+        let bit_n2 = conn.normalized.net_bits(NetIndex(2))[0];
 
         // Instance 0: INVX1 u1
         let ports_u1 = conn.instance_ports(InstIndex(0), &interner);
-        let mut rendered_u1: Vec<(String, PinDirection, Vec<NetIndex>)> = Vec::new();
+        let mut rendered_u1: Vec<(String, PinDirection, Vec<BitIndex>)> = Vec::new();
         for p in ports_u1.iter() {
             let name = interner
                 .resolve(p.port)
                 .expect("port symbol should resolve")
                 .to_string();
-            rendered_u1.push((name, p.dir, p.nets.clone()));
+            rendered_u1.push((name, p.dir, p.bits.clone()));
         }
 
         // Expect a deterministic ordering by port name.
         assert_eq!(rendered_u1.len(), 2);
         assert_eq!(rendered_u1[0].0, "A");
         assert_eq!(rendered_u1[0].1, PinDirection::Input);
-        assert_eq!(rendered_u1[0].2, vec![NetIndex(0)]);
+        assert_eq!(rendered_u1[0].2, vec![bit_n0]);
         assert_eq!(rendered_u1[1].0, "Y");
         assert_eq!(rendered_u1[1].1, PinDirection::Output);
-        assert_eq!(rendered_u1[1].2, vec![NetIndex(1)]);
+        assert_eq!(rendered_u1[1].2, vec![bit_n1]);
 
         // Instance 1: INVX1 u2
         let ports_u2 = conn.instance_ports(InstIndex(1), &interner);
-        let mut rendered_u2: Vec<(String, PinDirection, Vec<NetIndex>)> = Vec::new();
+        let mut rendered_u2: Vec<(String, PinDirection, Vec<BitIndex>)> = Vec::new();
         for p in ports_u2.iter() {
             let name = interner
                 .resolve(p.port)
                 .expect("port symbol should resolve")
                 .to_string();
-            rendered_u2.push((name, p.dir, p.nets.clone()));
+            rendered_u2.push((name, p.dir, p.bits.clone()));
         }
 
         assert_eq!(rendered_u2.len(), 2);
         assert_eq!(rendered_u2[0].0, "A");
         assert_eq!(rendered_u2[0].1, PinDirection::Input);
-        assert_eq!(rendered_u2[0].2, vec![NetIndex(1)]);
+        assert_eq!(rendered_u2[0].2, vec![bit_n1]);
         assert_eq!(rendered_u2[1].0, "Y");
         assert_eq!(rendered_u2[1].1, PinDirection::Output);
-        assert_eq!(rendered_u2[1].2, vec![NetIndex(2)]);
+        assert_eq!(rendered_u2[1].2, vec![bit_n2]);
+    }
+
+    #[test]
+    fn connectivity_tracks_normalized_assign_dependencies() {
+        let (mut module, nets, interner, indexed) = make_simple_module_and_lib();
+        module.assigns.push(crate::netlist::parse::NetlistAssign {
+            kind: crate::netlist::parse::NetlistAssignKind::Continuous,
+            lhs: NetRef::Simple(NetIndex(2)),
+            rhs: crate::netlist::parse::AssignExpr::Leaf(NetRef::Simple(NetIndex(1))),
+            span: crate::netlist::parse::Span {
+                start: crate::netlist::parse::Pos {
+                    lineno: 1,
+                    colno: 1,
+                },
+                limit: crate::netlist::parse::Pos {
+                    lineno: 1,
+                    colno: 15,
+                },
+            },
+        });
+        let conn = NetlistConnectivity::new(&module, &nets, &interner, &indexed, None)
+            .expect("connectivity");
+        let bit_n1 = conn.normalized.net_bits(NetIndex(1))[0];
+        let bit_n2 = conn.normalized.net_bits(NetIndex(2))[0];
+        assert_eq!(conn.assign_fanout_bits(bit_n1), &[bit_n2]);
+        assert_eq!(conn.assign_fanin_bits(bit_n2), &[bit_n1]);
     }
 }

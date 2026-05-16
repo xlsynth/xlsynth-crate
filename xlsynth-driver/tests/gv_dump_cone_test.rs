@@ -78,7 +78,7 @@ INV,u2,A,1
 }
 
 #[test]
-fn gv_dump_cone_rejects_preserved_assigns() {
+fn gv_dump_cone_traverses_preserved_assigns() {
     let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
 
     let liberty_text = r#"
@@ -98,13 +98,14 @@ cells: {
 "#;
 
     let netlist_text = r#"
-module top (a, b, y);
+module top (a, y);
   input a;
-  input b;
   output y;
-  wire n;
-  assign n = a & b;
-  BUF u1 (.A(n), .Y(y));
+  wire n0;
+  wire n1;
+  BUF u0 (.A(a), .Y(n0));
+  assign n1 = n0 & n0;
+  BUF u1 (.A(n1), .Y(y));
 endmodule
 "#;
 
@@ -122,26 +123,29 @@ endmodule
         .arg("--liberty_proto")
         .arg(liberty_file.path().as_os_str())
         .arg("--instance")
-        .arg("u1")
+        .arg("u0")
         .arg("--traverse")
-        .arg("fanin")
+        .arg("fanout")
         .arg("--stop-at-levels")
         .arg("1")
         .output()
         .expect("gv-dump-cone invocation should run");
 
     assert!(
-        !output.status.success(),
-        "gv-dump-cone should reject preserved assigns: status={:?}\nstdout={}\nstderr={}",
+        output.status.success(),
+        "gv-dump-cone failed: status={:?}\nstdout={}\nstderr={}",
         output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("does not support preserved continuous assigns"),
-        "unexpected stderr: {}",
-        stderr,
-    );
+    let got = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
+
+    let want = "\
+instance_type,instance_name,traversal_pin,levels
+BUF,u0,Y,0
+BUF,u1,A,1
+";
+
+    assert_eq!(got, want);
 }

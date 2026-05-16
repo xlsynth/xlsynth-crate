@@ -6,8 +6,10 @@ use crate::aig::gate::{AigBitVector, AigOperand, GateFn};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use crate::liberty::cell_formula::Term;
 use crate::liberty_proto::Library;
-use crate::netlist::bit_ref;
-use crate::netlist::parse::{AssignExpr, Net, NetIndex, NetRef, NetlistModule};
+use crate::netlist::normalized::{
+    BitExpr, BitIndex, BitSource, NormalizedConnection, NormalizedInstance, NormalizedNetlistModule,
+};
+use crate::netlist::parse::{Net, NetlistModule, PortDirection};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use string_interner::symbol::SymbolU32;
@@ -190,358 +192,220 @@ fn build_cell_formula_map(
     Ok(cell_formula_map)
 }
 
-fn check_undriven_nets(
-    used_as_input: &HashSet<SymbolU32>,
-    driven: &HashSet<SymbolU32>,
-    interner: &StringInterner<StringBackend<SymbolU32>>,
-) {
-    for net in used_as_input {
-        if !driven.contains(net) {
-            let net_name = interner.resolve(*net).unwrap_or("<unknown>");
-            panic!(
-                "Net '{}' is used as an input but is never driven by any instance or module input!",
-                net_name
-            );
-        }
-    }
-}
-
-fn net_name(
-    idx: NetIndex,
+fn check_undriven_bits(
+    used_as_input: &HashSet<BitIndex>,
+    driven: &HashSet<BitIndex>,
+    normalized: &NormalizedNetlistModule<'_>,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
-) -> String {
-    interner
-        .resolve(nets[idx.0].name)
-        .unwrap_or("<unknown>")
-        .to_string()
-}
-
-fn select_width_bits(msb: u32, lsb: u32) -> usize {
-    (u32::abs_diff(msb, lsb) as usize) + 1
-}
-
-fn select_bit_number(msb: u32, lsb: u32, bit_offset: usize) -> Option<u32> {
-    if bit_offset >= select_width_bits(msb, lsb) {
-        return None;
+) -> Result<(), String> {
+    for bit_idx in used_as_input {
+        if !driven.contains(bit_idx) {
+            return Err(format!(
+                "net bit '{}' is used as an input but is never driven by any instance, continuous assign, or module input",
+                normalized.render_bit(*bit_idx, nets, interner)
+            ));
+        }
     }
-    let offset = bit_offset as u32;
-    if msb >= lsb {
-        Some(lsb + offset)
-    } else {
-        Some(lsb - offset)
-    }
+    Ok(())
 }
 
-struct ResolvedNetValues {
-    values: HashMap<NetIndex, Vec<Option<AigOperand>>>,
+struct ResolvedBitValues {
+    values: Vec<Option<AigOperand>>,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct PendingAssignBit {
     assign_index: usize,
     rhs_bit_index: usize,
-    target: bit_ref::NetBit,
+    target: BitIndex,
 }
 
-impl ResolvedNetValues {
-    fn new() -> Self {
+impl ResolvedBitValues {
+    fn new(bit_count: usize) -> Self {
         Self {
-            values: HashMap::new(),
+            values: vec![None; bit_count],
         }
     }
 
-    fn seed_input(&mut self, idx: NetIndex, bv: &AigBitVector) {
-        self.values.insert(
-            idx,
-            bv.iter_lsb_to_msb()
-                .map(|bit| Some(*bit))
-                .collect::<Vec<_>>(),
-        );
+    fn resolve_bit(&self, bit_idx: BitIndex) -> Option<AigOperand> {
+        self.values[bit_idx]
     }
 
-    fn ensure_entry(&mut self, idx: NetIndex, width: usize) -> &mut Vec<Option<AigOperand>> {
-        self.values.entry(idx).or_insert_with(|| vec![None; width])
-    }
-
-    fn resolve_bit(
+    fn resolve_source(
         &self,
-        idx: NetIndex,
-        bit_number: u32,
-        nets: &[Net],
-        interner: &StringInterner<StringBackend<SymbolU32>>,
+        source: BitSource,
+        gb: &mut GateBuilder,
     ) -> Result<Option<AigOperand>, String> {
-        let Some(offset) = nets[idx.0].bit_offset(bit_number) else {
-            return Err(format!(
-                "bit {} out of range for net '{}'",
-                bit_number,
-                net_name(idx, nets, interner)
-            ));
-        };
-        Ok(self
-            .values
-            .get(&idx)
-            .and_then(|bits| bits.get(offset))
-            .copied()
-            .flatten())
+        match source {
+            BitSource::Bit(bit_idx) => Ok(self.resolve_bit(bit_idx)),
+            BitSource::Literal(value) => {
+                Ok(Some(if value { gb.get_true() } else { gb.get_false() }))
+            }
+            BitSource::Unknown => Err("unknown literal net reference is not supported".to_string()),
+        }
     }
 
-    fn materialize_ref(
+    fn materialize_sources(
         &self,
-        net_ref: &NetRef,
-        nets: &[Net],
-        interner: &StringInterner<StringBackend<SymbolU32>>,
+        sources: &[BitSource],
         gb: &mut GateBuilder,
     ) -> Result<Option<AigBitVector>, String> {
-        match net_ref {
-            NetRef::Simple(idx) => {
-                let net = &nets[idx.0];
-                let mut bits = Vec::with_capacity(net.width_bits());
-                for offset in 0..net.width_bits() {
-                    let bit_number = net.bit_number(offset).ok_or_else(|| {
-                        format!(
-                            "internal error computing bit {} for net '{}'",
-                            offset,
-                            net_name(*idx, nets, interner)
-                        )
-                    })?;
-                    let Some(bit) = self.resolve_bit(*idx, bit_number, nets, interner)? else {
-                        return Ok(None);
-                    };
-                    bits.push(bit);
-                }
-                Ok(Some(AigBitVector::from_lsb_is_index_0(&bits)))
-            }
-            NetRef::BitSelect(idx, bit) => {
-                let Some(bit) = self.resolve_bit(*idx, *bit, nets, interner)? else {
-                    return Ok(None);
-                };
-                Ok(Some(AigBitVector::from_bit(bit)))
-            }
-            NetRef::PartSelect(idx, msb, lsb) => {
-                let width = select_width_bits(*msb, *lsb);
-                let mut bits = Vec::with_capacity(width);
-                for offset in 0..width {
-                    let bit_number = select_bit_number(*msb, *lsb, offset).ok_or_else(|| {
-                        format!(
-                            "invalid part-select [{}:{}] on net '{}'",
-                            msb,
-                            lsb,
-                            net_name(*idx, nets, interner)
-                        )
-                    })?;
-                    let Some(bit) = self.resolve_bit(*idx, bit_number, nets, interner)? else {
-                        return Ok(None);
-                    };
-                    bits.push(bit);
-                }
-                Ok(Some(AigBitVector::from_lsb_is_index_0(&bits)))
-            }
-            NetRef::Literal(bits) => {
-                let mut ops = Vec::with_capacity(bits.get_bit_count());
-                for i in 0..bits.get_bit_count() {
-                    let bit_is_one = bits.get_bit(i).unwrap_or(false);
-                    ops.push(if bit_is_one {
-                        gb.get_true()
-                    } else {
-                        gb.get_false()
-                    });
-                }
-                Ok(Some(AigBitVector::from_lsb_is_index_0(&ops)))
-            }
-            NetRef::UnknownLiteral(_) => {
-                Err("unknown literal net reference is not supported".to_string())
-            }
-            NetRef::Unconnected => Ok(None),
-            NetRef::Concat(_) => {
-                let bit_refs = bit_ref::net_ref_lsb_bit_refs(net_ref, nets, interner)
-                    .map_err(|e| e.to_string())?;
-                let mut bits = Vec::with_capacity(bit_refs.len());
-                for bit_ref in bit_refs {
-                    match bit_ref {
-                        bit_ref::NetBitRef::Net(bit) => {
-                            let Some(op) =
-                                self.resolve_bit(bit.net, bit.bit_number, nets, interner)?
-                            else {
-                                return Ok(None);
-                            };
-                            bits.push(op);
-                        }
-                        bit_ref::NetBitRef::Literal(value) => {
-                            bits.push(if value { gb.get_true() } else { gb.get_false() })
-                        }
-                        bit_ref::NetBitRef::Unknown => {
-                            return Err(
-                                "unknown literal net reference is not supported".to_string()
-                            );
-                        }
-                    }
-                }
-                Ok(Some(AigBitVector::from_lsb_is_index_0(&bits)))
-            }
+        if sources.is_empty() {
+            return Ok(None);
         }
+        let mut bits = Vec::with_capacity(sources.len());
+        for source in sources {
+            let Some(bit) = self.resolve_source(*source, gb)? else {
+                return Ok(None);
+            };
+            bits.push(bit);
+        }
+        Ok(Some(AigBitVector::from_lsb_is_index_0(&bits)))
     }
 
     fn write_bit(
         &mut self,
-        idx: NetIndex,
-        bit_number: u32,
+        bit_idx: BitIndex,
         value: AigOperand,
+        normalized: &NormalizedNetlistModule<'_>,
         nets: &[Net],
         interner: &StringInterner<StringBackend<SymbolU32>>,
     ) -> Result<(), String> {
-        let net = &nets[idx.0];
-        let width = net.width_bits();
-        let Some(offset) = net.bit_offset(bit_number) else {
-            return Err(format!(
-                "bit {} out of range for net '{}'",
-                bit_number,
-                net_name(idx, nets, interner)
-            ));
-        };
-        let entry = self.ensure_entry(idx, width);
-        if entry[offset].is_some() {
+        if self.values[bit_idx].is_some() {
+            let bit = normalized.bit(bit_idx);
             return Err(format!(
                 "net '{}' bit {} was assigned more than once during projection",
-                net_name(idx, nets, interner),
-                bit_number
+                crate::netlist::bit_ref::net_name(bit.net, nets, interner),
+                bit.bit_number
             ));
         }
-        entry[offset] = Some(value);
+        self.values[bit_idx] = Some(value);
         Ok(())
     }
 
-    fn write_ref(
+    fn write_bits(
         &mut self,
-        dst_ref: &NetRef,
+        targets: &[BitIndex],
         src_bv: &AigBitVector,
+        normalized: &NormalizedNetlistModule<'_>,
         nets: &[Net],
         interner: &StringInterner<StringBackend<SymbolU32>>,
     ) -> Result<(), String> {
-        match dst_ref {
-            NetRef::Simple(idx) => {
-                let net = &nets[idx.0];
-                let width = net.width_bits();
-                if src_bv.get_bit_count() != width {
-                    return Err(format!(
-                        "width mismatch assigning to net '{}': expected {} bits but got {}",
-                        net_name(*idx, nets, interner),
-                        width,
-                        src_bv.get_bit_count()
-                    ));
-                }
-                for offset in 0..width {
-                    let bit_number = net.bit_number(offset).ok_or_else(|| {
-                        format!(
-                            "internal error computing bit {} for net '{}'",
-                            offset,
-                            net_name(*idx, nets, interner)
-                        )
-                    })?;
-                    self.write_bit(*idx, bit_number, *src_bv.get_lsb(offset), nets, interner)?;
-                }
-                Ok(())
-            }
-            NetRef::BitSelect(idx, bit) => {
-                if src_bv.get_bit_count() != 1 {
-                    return Err(format!(
-                        "width mismatch assigning to net '{}[{}]': expected 1 bit but got {}",
-                        net_name(*idx, nets, interner),
-                        bit,
-                        src_bv.get_bit_count()
-                    ));
-                }
-                self.write_bit(*idx, *bit, *src_bv.get_lsb(0), nets, interner)
-            }
-            NetRef::PartSelect(idx, msb, lsb) => {
-                let width = select_width_bits(*msb, *lsb);
-                if src_bv.get_bit_count() != width {
-                    return Err(format!(
-                        "width mismatch assigning to net '{}[{}:{}]': expected {} bits but got {}",
-                        net_name(*idx, nets, interner),
-                        msb,
-                        lsb,
-                        width,
-                        src_bv.get_bit_count()
-                    ));
-                }
-                for offset in 0..width {
-                    let bit_number = select_bit_number(*msb, *lsb, offset).ok_or_else(|| {
-                        format!(
-                            "invalid part-select [{}:{}] on net '{}'",
-                            msb,
-                            lsb,
-                            net_name(*idx, nets, interner)
-                        )
-                    })?;
-                    self.write_bit(*idx, bit_number, *src_bv.get_lsb(offset), nets, interner)?;
-                }
-                Ok(())
-            }
-            NetRef::Literal(_) | NetRef::UnknownLiteral(_) => {
-                Err("output destination cannot be a literal".to_string())
-            }
-            NetRef::Unconnected => Ok(()),
-            NetRef::Concat(_) => {
-                let targets = bit_ref::net_ref_lsb_targets(dst_ref, nets, interner)
-                    .map_err(|e| e.to_string())?;
-                if src_bv.get_bit_count() != targets.len() {
-                    return Err(format!(
-                        "width mismatch assigning to '{}': expected {} bits but got {}",
-                        bit_ref::render_net_ref(dst_ref, nets, interner),
-                        targets.len(),
-                        src_bv.get_bit_count()
-                    ));
-                }
-                for (offset, target) in targets.iter().copied().enumerate() {
-                    self.write_bit(
-                        target.net,
-                        target.bit_number,
-                        *src_bv.get_lsb(offset),
-                        nets,
-                        interner,
-                    )?;
-                }
-                Ok(())
-            }
+        if targets.is_empty() {
+            return Ok(());
         }
+        if src_bv.get_bit_count() != targets.len() {
+            return Err(format!(
+                "width mismatch assigning to '{}': expected {} bits but got {}",
+                normalized.render_bit(targets[0], nets, interner),
+                targets.len(),
+                src_bv.get_bit_count()
+            ));
+        }
+        for (offset, target) in targets.iter().copied().enumerate() {
+            self.write_bit(target, *src_bv.get_lsb(offset), normalized, nets, interner)?;
+        }
+        Ok(())
     }
 
     fn materialize_output_or_false(
         &self,
-        idx: NetIndex,
-        nets: &[Net],
-        interner: &StringInterner<StringBackend<SymbolU32>>,
+        output_bits: &[BitIndex],
         gb: &mut GateBuilder,
-    ) -> Result<AigBitVector, String> {
-        let net = &nets[idx.0];
-        let mut bits = Vec::with_capacity(net.width_bits());
-        for offset in 0..net.width_bits() {
-            let bit_number = net.bit_number(offset).ok_or_else(|| {
-                format!(
-                    "internal error computing bit {} for net '{}'",
-                    offset,
-                    net_name(idx, nets, interner)
-                )
-            })?;
-            bits.push(
-                self.resolve_bit(idx, bit_number, nets, interner)?
-                    .unwrap_or_else(|| gb.get_false()),
-            );
+    ) -> AigBitVector {
+        let bits = output_bits
+            .iter()
+            .map(|bit_idx| self.resolve_bit(*bit_idx).unwrap_or_else(|| gb.get_false()))
+            .collect::<Vec<_>>();
+        AigBitVector::from_lsb_is_index_0(&bits)
+    }
+}
+
+fn collect_expr_source_bits(expr: &BitExpr, out: &mut HashSet<BitIndex>) {
+    let mut bits = Vec::new();
+    expr.collect_source_bits(&mut bits);
+    out.extend(bits);
+}
+
+fn output_target_bits(connection: &NormalizedConnection) -> Result<Vec<BitIndex>, String> {
+    connection
+        .bits
+        .iter()
+        .map(|source| match source {
+            BitSource::Bit(bit_idx) => Ok(*bit_idx),
+            BitSource::Literal(_) | BitSource::Unknown => {
+                Err("output destination cannot be a literal or unknown".to_string())
+            }
+        })
+        .collect()
+}
+
+fn eval_bit_expr(
+    expr: &BitExpr,
+    resolved: &ResolvedBitValues,
+    gb: &mut GateBuilder,
+) -> Result<Option<AigOperand>, String> {
+    match expr {
+        BitExpr::Source(source) => resolved.resolve_source(*source, gb),
+        BitExpr::Not(inner) => {
+            let Some(value) = eval_bit_expr(inner, resolved, gb)? else {
+                return Ok(None);
+            };
+            Ok(Some(gb.add_not(value)))
         }
-        Ok(AigBitVector::from_lsb_is_index_0(&bits))
+        BitExpr::And(lhs, rhs) | BitExpr::Or(lhs, rhs) | BitExpr::Xor(lhs, rhs) => {
+            let Some(lhs_value) = eval_bit_expr(lhs, resolved, gb)? else {
+                return Ok(None);
+            };
+            let Some(rhs_value) = eval_bit_expr(rhs, resolved, gb)? else {
+                return Ok(None);
+            };
+            Ok(Some(match expr {
+                BitExpr::And(_, _) => gb.add_and_binary(lhs_value, rhs_value),
+                BitExpr::Or(_, _) => gb.add_or_binary(lhs_value, rhs_value),
+                BitExpr::Xor(_, _) => gb.add_xor_binary(lhs_value, rhs_value),
+                BitExpr::Source(_) | BitExpr::Not(_) => unreachable!(),
+            }))
+        }
+    }
+}
+
+fn collect_missing_expr_sources(
+    expr: &BitExpr,
+    resolved: &ResolvedBitValues,
+    normalized: &NormalizedNetlistModule<'_>,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    out: &mut Vec<String>,
+) {
+    match expr {
+        BitExpr::Source(BitSource::Bit(bit_idx)) => {
+            if resolved.resolve_bit(*bit_idx).is_none() {
+                out.push(normalized.render_bit(*bit_idx, nets, interner));
+            }
+        }
+        BitExpr::Source(BitSource::Literal(_) | BitSource::Unknown) => {}
+        BitExpr::Not(inner) => {
+            collect_missing_expr_sources(inner, resolved, normalized, nets, interner, out)
+        }
+        BitExpr::And(lhs, rhs) | BitExpr::Or(lhs, rhs) | BitExpr::Xor(lhs, rhs) => {
+            collect_missing_expr_sources(lhs, resolved, normalized, nets, interner, out);
+            collect_missing_expr_sources(rhs, resolved, normalized, nets, interner, out);
+        }
     }
 }
 
 fn process_instance_outputs(
-    inst: &crate::netlist::parse::NetlistInstance,
+    inst: &NormalizedInstance,
     type_name: &str,
     inst_name: &str,
     pin_directions: &HashMap<&str, i32>,
     interner: &StringInterner<StringBackend<SymbolU32>>,
     nets: &[Net],
     gb: &mut GateBuilder,
-    resolved: &mut ResolvedNetValues,
+    resolved: &mut ResolvedBitValues,
+    normalized: &NormalizedNetlistModule<'_>,
     dff_cells_identity: &std::collections::HashSet<String>,
     dff_cells_inverted: &std::collections::HashSet<String>,
     cell_formula_map: &HashMap<(String, String), (crate::liberty::cell_formula::Term, String)>,
@@ -549,8 +413,8 @@ fn process_instance_outputs(
     port_map: &HashMap<String, String>,
 ) -> Result<bool, String> {
     let mut processed_any_output = false;
-    for (port, netref) in &inst.connections {
-        let port_name = interner.resolve(*port).unwrap();
+    for connection in &inst.connections {
+        let port_name = interner.resolve(connection.port).unwrap();
         let pin_dir = *pin_directions.get(port_name).unwrap_or(&0); // 1=OUTPUT, 2=INPUT
         if pin_dir == 1 {
             if handle_dff_identity_override(
@@ -561,6 +425,7 @@ fn process_instance_outputs(
                 interner,
                 gb,
                 resolved,
+                normalized,
                 dff_cells_identity,
                 dff_cells_inverted,
                 nets,
@@ -588,7 +453,8 @@ fn process_instance_outputs(
                     )
                 })?;
             let src_bv = AigBitVector::from_bit(out_op);
-            resolved.write_ref(netref, &src_bv, nets, interner)?;
+            let output_bits = output_target_bits(connection)?;
+            resolved.write_bits(output_bits.as_slice(), &src_bv, normalized, nets, interner)?;
             processed_any_output = true;
         }
     }
@@ -632,6 +498,8 @@ pub fn project_gatefn_from_netlist_and_liberty_with_options(
     dff_cells_inverted: &std::collections::HashSet<String>,
     options: &GateFnProjectOptions,
 ) -> Result<GateFn, String> {
+    let normalized =
+        NormalizedNetlistModule::new(module, nets, interner).map_err(|e| e.to_string())?;
     let used_cell_names: HashSet<String> = module
         .instances
         .iter()
@@ -646,30 +514,24 @@ pub fn project_gatefn_from_netlist_and_liberty_with_options(
     )?;
     let module_name = interner.resolve(module.name).unwrap();
     let mut gb = GateBuilder::new(module_name.to_string(), GateBuilderOptions::no_opt());
-    let mut resolved = ResolvedNetValues::new();
-    collect_module_io_nets(module, nets, interner, &mut gb, &mut resolved);
-    let module_output_bits = collect_module_output_bits(module, nets)?;
-    let mut pending_assigns = build_pending_assign_bits(module, nets, interner)?;
+    let mut resolved = ResolvedBitValues::new(normalized.bit_count());
+    collect_module_io_bits(&normalized, nets, interner, &mut gb, &mut resolved)?;
+    let module_output_bits = collect_module_output_bits(&normalized);
+    let mut pending_assigns = build_pending_assign_bits(&normalized);
     let mut used_as_input = HashSet::new();
     let mut driven = HashSet::new();
-    for port in &module.ports {
-        if port.direction == crate::netlist::parse::PortDirection::Input {
-            driven.insert(port.name);
+    for port in &normalized.ports {
+        if port.direction == PortDirection::Input {
+            driven.extend(port.bits.iter().copied());
         }
     }
-    for assign in &module.assigns {
-        let mut lhs_nets = Vec::new();
-        assign.lhs.collect_net_indices(&mut lhs_nets);
-        for net_idx in lhs_nets {
-            driven.insert(nets[net_idx.0].name);
-        }
-        let mut rhs_nets = Vec::new();
-        assign.rhs.collect_net_indices(&mut rhs_nets);
-        for net_idx in rhs_nets {
-            used_as_input.insert(nets[net_idx.0].name);
+    for assign in &normalized.assigns {
+        driven.extend(assign.lhs_bits.iter().copied());
+        for rhs in &assign.rhs_bits {
+            collect_expr_source_bits(rhs, &mut used_as_input);
         }
     }
-    for inst in &module.instances {
+    for inst in &normalized.instances {
         let type_name = interner.resolve(inst.type_name).unwrap();
         let cell = liberty_lib
             .cells
@@ -680,34 +542,27 @@ pub fn project_gatefn_from_netlist_and_liberty_with_options(
         for pin in &cell.pins {
             pin_directions.insert(pin.name.as_str(), pin.direction);
         }
-        for (port, netref) in &inst.connections {
-            let port_name = interner.resolve(*port).unwrap();
+        for connection in &inst.connections {
+            let port_name = interner.resolve(connection.port).unwrap();
             let pin_dir = *pin_directions.get(port_name).unwrap_or(&0); // 1=OUTPUT, 2=INPUT
-            match netref {
-                crate::netlist::parse::NetRef::Simple(net_idx)
-                | crate::netlist::parse::NetRef::BitSelect(net_idx, _)
-                | crate::netlist::parse::NetRef::PartSelect(net_idx, _, _) => {
-                    if pin_dir == 1 {
-                        driven.insert(nets[net_idx.0].name);
-                    } else if pin_dir == 2 {
-                        used_as_input.insert(nets[net_idx.0].name);
-                    }
-                }
-                crate::netlist::parse::NetRef::Unconnected => {
-                    // Do not count as driven/used.
-                }
-                _ => {}
+            if pin_dir == 1 {
+                driven.extend(output_target_bits(connection)?);
+            } else if pin_dir == 2 {
+                used_as_input.extend(connection.bits.iter().filter_map(|source| match source {
+                    BitSource::Bit(bit_idx) => Some(*bit_idx),
+                    BitSource::Literal(_) | BitSource::Unknown => None,
+                }));
             }
         }
     }
-    check_undriven_nets(&used_as_input, &driven, interner);
-    let mut unprocessed: Vec<_> = module.instances.iter().collect();
+    check_undriven_bits(&used_as_input, &driven, &normalized, nets, interner)?;
+    let mut unprocessed: Vec<_> = normalized.instances.iter().collect();
     let mut processed_any = true;
     while (!unprocessed.is_empty() || !pending_assigns.is_empty()) && processed_any {
         processed_any = false;
         let (next_pending_assigns, processed_assign) = process_pending_assign_bits(
             pending_assigns,
-            module,
+            &normalized,
             &mut resolved,
             nets,
             interner,
@@ -729,8 +584,15 @@ pub fn project_gatefn_from_netlist_and_liberty_with_options(
             for pin in &cell.pins {
                 pin_directions.insert(pin.name.as_str(), pin.direction);
             }
-            let (input_map, missing_inputs, port_map) =
-                build_instance_input_map(inst, &pin_directions, interner, nets, &resolved, &mut gb);
+            let (input_map, missing_inputs, port_map) = build_instance_input_map(
+                inst,
+                &pin_directions,
+                interner,
+                nets,
+                &resolved,
+                &mut gb,
+                &normalized,
+            );
             if !missing_inputs.is_empty() {
                 log::trace!(
                     "Skipping instance '{}' (cell '{}') due to missing input nets: {:?}",
@@ -750,6 +612,7 @@ pub fn project_gatefn_from_netlist_and_liberty_with_options(
                 nets,
                 &mut gb,
                 &mut resolved,
+                &normalized,
                 dff_cells_identity,
                 dff_cells_inverted,
                 &cell_formula_map,
@@ -795,6 +658,7 @@ pub fn project_gatefn_from_netlist_and_liberty_with_options(
                     nets,
                     &resolved,
                     &mut gb,
+                    &normalized,
                 );
                 if missing_inputs.is_empty() {
                     diag_lines.push(format!(
@@ -832,97 +696,92 @@ pub fn project_gatefn_from_netlist_and_liberty_with_options(
                     pending_assigns.len()
                 ));
                 for pending_bit in pending_assigns.iter().take(10) {
-                    let assign = &module.assigns[pending_bit.assign_index];
-                    msg.push_str(&format!(
-                        "- assign to '{}' at {} remains unresolved\n",
-                        bit_ref::render_net_bit(pending_bit.target, nets, interner),
-                        assign.span.to_human_string()
-                    ));
+                    let assign = &normalized.assigns[pending_bit.assign_index];
+                    let mut missing = Vec::new();
+                    collect_missing_expr_sources(
+                        &assign.rhs_bits[pending_bit.rhs_bit_index],
+                        &resolved,
+                        &normalized,
+                        nets,
+                        interner,
+                        &mut missing,
+                    );
+                    missing.sort();
+                    missing.dedup();
+                    if missing.is_empty() {
+                        msg.push_str(&format!(
+                            "- assign to '{}' at {} remains unresolved\n",
+                            normalized.render_bit(pending_bit.target, nets, interner),
+                            assign.span.to_human_string()
+                        ));
+                    } else {
+                        msg.push_str(&format!(
+                            "- assign to '{}' at {} is waiting on [{}]\n",
+                            normalized.render_bit(pending_bit.target, nets, interner),
+                            assign.span.to_human_string(),
+                            missing.join(", ")
+                        ));
+                    }
                 }
             }
             msg.push_str(r#"Hint: re-run with RUST_LOG=trace to log skipped instances and their missing nets during processing."#);
             return Err(msg);
         }
     }
-    for port in &module.ports {
-        if port.direction == crate::netlist::parse::PortDirection::Output {
-            let net_idx = nets
-                .iter()
-                .position(|n| n.name == port.name)
-                .map(NetIndex)
-                .ok_or("output port net not found")?;
-            let net = &nets[net_idx.0];
-            let net_name = interner.resolve(net.name).unwrap();
-            let width = net.width_bits();
-            let bv = resolved.materialize_output_or_false(net_idx, nets, interner, &mut gb)?;
+    for port in &normalized.ports {
+        if port.direction == PortDirection::Output {
+            let net_name = interner.resolve(port.name).unwrap();
+            let bv = resolved.materialize_output_or_false(port.bits.as_slice(), &mut gb);
             assert_eq!(
                 bv.get_bit_count(),
-                width,
+                port.bits.len(),
                 "Output net '{}' width mismatch",
                 net_name
             );
-            gb.add_output(net_name.to_string(), bv.clone());
+            gb.add_output(net_name.to_string(), bv);
         }
     }
     Ok(gb.build())
 }
 
-fn collect_module_io_nets(
-    module: &NetlistModule,
+fn collect_module_io_bits(
+    normalized: &NormalizedNetlistModule<'_>,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
     gb: &mut GateBuilder,
-    resolved: &mut ResolvedNetValues,
-) {
-    for port in &module.ports {
-        if port.direction == crate::netlist::parse::PortDirection::Input {
-            let net_idx = nets
-                .iter()
-                .position(|n| n.name == port.name)
-                .map(NetIndex)
-                .expect("input port net not found");
-            let net = &nets[net_idx.0];
-            let net_name = interner.resolve(net.name).unwrap();
-            let width = net.width_bits();
-            let bv = gb.add_input(net_name.to_string(), width);
-            resolved.seed_input(net_idx, &bv);
+    resolved: &mut ResolvedBitValues,
+) -> Result<(), String> {
+    for port in &normalized.ports {
+        if port.direction == PortDirection::Input {
+            let port_name = interner.resolve(port.name).unwrap();
+            let bv = gb.add_input(port_name.to_string(), port.bits.len());
+            for (bit_idx, bit) in port.bits.iter().copied().zip(bv.iter_lsb_to_msb()) {
+                resolved.write_bit(bit_idx, *bit, normalized, nets, interner)?;
+            }
         }
     }
+    Ok(())
 }
 
-fn collect_module_output_bits(
-    module: &NetlistModule,
-    nets: &[Net],
-) -> Result<HashSet<bit_ref::NetBit>, String> {
+fn collect_module_output_bits(normalized: &NormalizedNetlistModule<'_>) -> HashSet<BitIndex> {
     let mut output_bits = HashSet::new();
-    for port in &module.ports {
-        if port.direction != crate::netlist::parse::PortDirection::Output {
+    for port in &normalized.ports {
+        if port.direction != PortDirection::Output {
             continue;
         }
-        let net_idx = module
-            .find_net_index(port.name, nets)
-            .ok_or_else(|| "output port net not found".to_string())?;
-        let net = &nets[net_idx.0];
-        for offset in 0..net.width_bits() {
-            let bit_number = net
-                .bit_number(offset)
-                .ok_or_else(|| "internal error computing output bit number".to_string())?;
-            output_bits.insert(bit_ref::NetBit {
-                net: net_idx,
-                bit_number,
-            });
-        }
+        output_bits.extend(port.bits.iter().copied());
     }
-    Ok(output_bits)
+    output_bits
 }
 
 fn build_instance_input_map(
-    inst: &crate::netlist::parse::NetlistInstance,
+    inst: &NormalizedInstance,
     pin_directions: &HashMap<&str, i32>,
     interner: &StringInterner<StringBackend<SymbolU32>>,
     nets: &[Net],
-    resolved: &ResolvedNetValues,
+    resolved: &ResolvedBitValues,
     gb: &mut GateBuilder,
+    normalized: &NormalizedNetlistModule<'_>,
 ) -> (
     HashMap<String, AigOperand>,
     Vec<String>,
@@ -931,115 +790,30 @@ fn build_instance_input_map(
     let mut input_map = HashMap::new();
     let mut missing_inputs = Vec::new();
     let mut port_map = HashMap::new();
-    for (port, netref) in &inst.connections {
-        let port_name = interner.resolve(*port).unwrap();
+    for connection in &inst.connections {
+        let port_name = interner.resolve(connection.port).unwrap();
         let pin_dir = *pin_directions.get(port_name).unwrap_or(&0); // 1=OUTPUT, 2=INPUT
-        let net_name_str = match netref {
-            crate::netlist::parse::NetRef::Simple(net_idx) => interner
-                .resolve(nets[net_idx.0].name)
-                .unwrap_or("<unknown>")
-                .to_string(),
-            crate::netlist::parse::NetRef::BitSelect(net_idx, bit) => format!(
-                "{}[{}]",
-                interner
-                    .resolve(nets[net_idx.0].name)
-                    .unwrap_or("<unknown>"),
-                bit
-            ),
-            crate::netlist::parse::NetRef::PartSelect(net_idx, msb, lsb) => format!(
-                "{}[{}:{}]",
-                interner
-                    .resolve(nets[net_idx.0].name)
-                    .unwrap_or("<unknown>"),
-                msb,
-                lsb
-            ),
-            crate::netlist::parse::NetRef::Literal(bits) => format!("{}", bits),
-            crate::netlist::parse::NetRef::UnknownLiteral(width) => format!("{}'hx", width),
-            crate::netlist::parse::NetRef::Unconnected => "<unconnected>".to_string(),
-            crate::netlist::parse::NetRef::Concat(_) => "<concat>".to_string(),
-        };
-        port_map.insert(port_name.to_string(), net_name_str);
+        port_map.insert(
+            port_name.to_string(),
+            normalized.render_sources(connection.bits.as_slice(), nets, interner),
+        );
         if pin_dir == 2 {
-            match netref {
-                NetRef::Simple(net_idx) => {
-                    let materialized = resolved.materialize_ref(netref, nets, interner, gb);
-                    match materialized {
-                        Ok(Some(bv)) => {
-                            if bv.get_bit_count() == 1 {
-                                input_map.insert(port_name.to_string(), *bv.get_lsb(0));
-                            }
-                        }
-                        Ok(None) => {
-                            missing_inputs.push(format!(
-                                "{} (NetIndex({}), name='{}')",
-                                port_name,
-                                net_idx.0,
-                                net_name(*net_idx, nets, interner)
-                            ));
-                        }
-                        Err(e) => missing_inputs.push(format!("{} ({})", port_name, e)),
+            if connection.bits.is_empty() {
+                missing_inputs.push(format!("{} (<unconnected>)", port_name));
+                continue;
+            }
+            match resolved.materialize_sources(connection.bits.as_slice(), gb) {
+                Ok(Some(bv)) => {
+                    if bv.get_bit_count() == 1 {
+                        input_map.insert(port_name.to_string(), *bv.get_lsb(0));
                     }
                 }
-                NetRef::BitSelect(net_idx, bit) => {
-                    match resolved.materialize_ref(netref, nets, interner, gb) {
-                        Ok(Some(bv)) => {
-                            input_map.insert(port_name.to_string(), *bv.get_lsb(0));
-                        }
-                        Ok(None) => {
-                            missing_inputs.push(format!(
-                                "{} (NetIndex({}), name='{}', bit={})",
-                                port_name,
-                                net_idx.0,
-                                net_name(*net_idx, nets, interner),
-                                bit
-                            ));
-                        }
-                        Err(e) => missing_inputs.push(format!("{} ({})", port_name, e)),
-                    }
-                }
-                NetRef::PartSelect(net_idx, msb, lsb) => {
-                    match resolved.materialize_ref(netref, nets, interner, gb) {
-                        Ok(Some(bv)) => {
-                            if bv.get_bit_count() == 1 {
-                                input_map.insert(port_name.to_string(), *bv.get_lsb(0));
-                            }
-                        }
-                        Ok(None) => {
-                            missing_inputs.push(format!(
-                                "{} (NetIndex({}), name='{}', part-select=[{}:{}])",
-                                port_name,
-                                net_idx.0,
-                                net_name(*net_idx, nets, interner),
-                                msb,
-                                lsb
-                            ));
-                        }
-                        Err(e) => missing_inputs.push(format!("{} ({})", port_name, e)),
-                    }
-                }
-                NetRef::Literal(bits) => {
-                    let bit_count = bits.get_bit_count();
-                    assert_eq!(bit_count, 1);
-                    let is_one = bits.get_bit(0).unwrap();
-                    let val = if is_one {
-                        gb.get_true()
-                    } else {
-                        gb.get_false()
-                    };
-                    input_map.insert(port_name.to_string(), val);
-                }
-                NetRef::UnknownLiteral(_) => {
-                    missing_inputs.push(format!("{} (<unknown-literal-unsupported>)", port_name));
-                }
-                NetRef::Unconnected => {
-                    // Treat as a hard missing input and surface clearly.
-                    missing_inputs.push(format!("{} (<unconnected>)", port_name));
-                }
-                NetRef::Concat(_) => {
-                    // Currently unsupported for cell inputs; surface clearly.
-                    missing_inputs.push(format!("{} (<concat-unsupported>)", port_name));
-                }
+                Ok(None) => missing_inputs.push(format!(
+                    "{} ({})",
+                    port_name,
+                    normalized.render_sources(connection.bits.as_slice(), nets, interner)
+                )),
+                Err(e) => missing_inputs.push(format!("{} ({})", port_name, e)),
             }
         }
     }
@@ -1056,182 +830,41 @@ fn invert_bv(gb: &mut GateBuilder, src: &AigBitVector) -> AigBitVector {
 }
 
 fn build_d_bv(
-    d_netref: &NetRef,
+    d_connection: &NormalizedConnection,
     gb: &mut GateBuilder,
-    resolved: &ResolvedNetValues,
-    nets: &[Net],
-    interner: &StringInterner<StringBackend<SymbolU32>>,
+    resolved: &ResolvedBitValues,
     invert: bool,
 ) -> Result<Option<AigBitVector>, String> {
-    let Some(bv) = resolved.materialize_ref(d_netref, nets, interner, gb)? else {
+    let Some(bv) = resolved.materialize_sources(d_connection.bits.as_slice(), gb)? else {
         return Ok(None);
     };
     Ok(Some(if invert { invert_bv(gb, &bv) } else { bv }))
 }
 
 fn write_bv_to_port_destination(
-    inst: &crate::netlist::parse::NetlistInstance,
+    inst: &NormalizedInstance,
     interner: &StringInterner<StringBackend<SymbolU32>>,
-    resolved: &mut ResolvedNetValues,
+    resolved: &mut ResolvedBitValues,
+    normalized: &NormalizedNetlistModule<'_>,
     nets: &[Net],
     target_port_ci: &str,
     src_bv: &AigBitVector,
 ) -> Result<(), String> {
-    for (p, dst_ref) in &inst.connections {
-        let pname = interner.resolve(*p).unwrap();
+    for connection in &inst.connections {
+        let pname = interner.resolve(connection.port).unwrap();
         if !pname.eq_ignore_ascii_case(target_port_ci) {
             continue;
         }
-        match dst_ref {
-            NetRef::Simple(_)
-            | NetRef::BitSelect(_, _)
-            | NetRef::PartSelect(_, _, _)
-            | NetRef::Concat(_) => {
-                resolved.write_ref(dst_ref, src_bv, nets, interner)?;
-            }
-            NetRef::Literal(_) | NetRef::UnknownLiteral(_) => {
-                log::warn!(
-                    "DFF override: destination output as literal not supported for port '{}'",
-                    pname
-                );
-            }
-            NetRef::Unconnected => {
-                // Nothing to write.
-            }
-        }
+        let output_bits = output_target_bits(connection)?;
+        resolved.write_bits(output_bits.as_slice(), src_bv, normalized, nets, interner)?;
     }
     Ok(())
 }
 
-fn is_bare_literal_assign_expr(expr: &AssignExpr) -> bool {
-    matches!(expr, AssignExpr::Leaf(NetRef::Literal(_)))
-}
-
-fn eval_assign_net_ref_bit(
-    net_ref: &NetRef,
-    rhs_bit_index: usize,
-    allow_literal_zero_extend: bool,
-    resolved: &ResolvedNetValues,
-    nets: &[Net],
-    interner: &StringInterner<StringBackend<SymbolU32>>,
-    gb: &mut GateBuilder,
-) -> Result<Option<AigOperand>, String> {
-    let bit_refs =
-        bit_ref::net_ref_lsb_bit_refs(net_ref, nets, interner).map_err(|e| e.to_string())?;
-    if rhs_bit_index >= bit_refs.len() {
-        if allow_literal_zero_extend && matches!(net_ref, NetRef::Literal(_)) {
-            return Ok(Some(gb.get_false()));
-        }
-        return Err(format!(
-            "bit {} out of range for {}-bit expression '{}'",
-            rhs_bit_index,
-            bit_refs.len(),
-            bit_ref::render_net_ref(net_ref, nets, interner)
-        ));
-    }
-    match bit_refs[rhs_bit_index] {
-        bit_ref::NetBitRef::Net(bit) => {
-            resolved.resolve_bit(bit.net, bit.bit_number, nets, interner)
-        }
-        bit_ref::NetBitRef::Literal(value) => {
-            Ok(Some(if value { gb.get_true() } else { gb.get_false() }))
-        }
-        bit_ref::NetBitRef::Unknown => {
-            Err("unknown literal net reference is not supported".to_string())
-        }
-    }
-}
-
-fn eval_assign_expr_bit(
-    expr: &AssignExpr,
-    rhs_bit_index: usize,
-    allow_literal_zero_extend: bool,
-    resolved: &ResolvedNetValues,
-    nets: &[Net],
-    interner: &StringInterner<StringBackend<SymbolU32>>,
-    gb: &mut GateBuilder,
-) -> Result<Option<AigOperand>, String> {
-    match expr {
-        AssignExpr::Leaf(net_ref) => eval_assign_net_ref_bit(
-            net_ref,
-            rhs_bit_index,
-            allow_literal_zero_extend,
-            resolved,
-            nets,
-            interner,
-            gb,
-        ),
-        AssignExpr::Not(inner) => {
-            let Some(value) = eval_assign_expr_bit(
-                inner,
-                rhs_bit_index,
-                allow_literal_zero_extend,
-                resolved,
-                nets,
-                interner,
-                gb,
-            )?
-            else {
-                return Ok(None);
-            };
-            Ok(Some(gb.add_not(value)))
-        }
-        AssignExpr::And(lhs, rhs) | AssignExpr::Or(lhs, rhs) | AssignExpr::Xor(lhs, rhs) => {
-            let Some(lhs_value) = eval_assign_expr_bit(
-                lhs,
-                rhs_bit_index,
-                allow_literal_zero_extend,
-                resolved,
-                nets,
-                interner,
-                gb,
-            )?
-            else {
-                return Ok(None);
-            };
-            let Some(rhs_value) = eval_assign_expr_bit(
-                rhs,
-                rhs_bit_index,
-                allow_literal_zero_extend,
-                resolved,
-                nets,
-                interner,
-                gb,
-            )?
-            else {
-                return Ok(None);
-            };
-            Ok(Some(match expr {
-                AssignExpr::And(_, _) => gb.add_and_binary(lhs_value, rhs_value),
-                AssignExpr::Or(_, _) => gb.add_or_binary(lhs_value, rhs_value),
-                AssignExpr::Xor(_, _) => gb.add_xor_binary(lhs_value, rhs_value),
-                _ => unreachable!(),
-            }))
-        }
-    }
-}
-
-fn build_pending_assign_bits(
-    module: &NetlistModule,
-    nets: &[Net],
-    interner: &StringInterner<StringBackend<SymbolU32>>,
-) -> Result<Vec<PendingAssignBit>, String> {
+fn build_pending_assign_bits(normalized: &NormalizedNetlistModule<'_>) -> Vec<PendingAssignBit> {
     let mut pending = Vec::new();
-    for (assign_index, assign) in module.assigns.iter().enumerate() {
-        let lhs_bits =
-            bit_ref::net_ref_lsb_targets(&assign.lhs, nets, interner).map_err(|e| e.to_string())?;
-        let rhs_width = bit_ref::assign_expr_width_bits(&assign.rhs, nets, interner)
-            .map_err(|e| e.to_string())?;
-        let allow_literal_zero_extend = is_bare_literal_assign_expr(&assign.rhs);
-        if lhs_bits.len() != rhs_width && !allow_literal_zero_extend {
-            return Err(format!(
-                "assign to '{}' has lhs width {} but rhs width {}; Liberty-backed projection requires exact-width assigns except for bare literal tie-offs",
-                bit_ref::render_net_ref(&assign.lhs, nets, interner),
-                lhs_bits.len(),
-                rhs_width
-            ));
-        }
-        for (rhs_bit_index, target) in lhs_bits.into_iter().enumerate() {
+    for (assign_index, assign) in normalized.assigns.iter().enumerate() {
+        for (rhs_bit_index, target) in assign.lhs_bits.iter().copied().enumerate() {
             pending.push(PendingAssignBit {
                 assign_index,
                 rhs_bit_index,
@@ -1239,13 +872,13 @@ fn build_pending_assign_bits(
             });
         }
     }
-    Ok(pending)
+    pending
 }
 
 fn process_pending_assign_bits(
     pending: Vec<PendingAssignBit>,
-    module: &NetlistModule,
-    resolved: &mut ResolvedNetValues,
+    normalized: &NormalizedNetlistModule<'_>,
+    resolved: &mut ResolvedBitValues,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
     gb: &mut GateBuilder,
@@ -1253,27 +886,13 @@ fn process_pending_assign_bits(
     let mut next_pending = Vec::new();
     let mut processed_any = false;
     for pending_bit in pending {
-        let assign = &module.assigns[pending_bit.assign_index];
-        let Some(value) = eval_assign_expr_bit(
-            &assign.rhs,
-            pending_bit.rhs_bit_index,
-            is_bare_literal_assign_expr(&assign.rhs),
-            resolved,
-            nets,
-            interner,
-            gb,
-        )?
+        let assign = &normalized.assigns[pending_bit.assign_index];
+        let Some(value) = eval_bit_expr(&assign.rhs_bits[pending_bit.rhs_bit_index], resolved, gb)?
         else {
             next_pending.push(pending_bit);
             continue;
         };
-        resolved.write_bit(
-            pending_bit.target.net,
-            pending_bit.target.bit_number,
-            value,
-            nets,
-            interner,
-        )?;
+        resolved.write_bit(pending_bit.target, value, normalized, nets, interner)?;
         processed_any = true;
     }
     Ok((next_pending, processed_any))
@@ -1282,10 +901,7 @@ fn process_pending_assign_bits(
 /// Implements DFF output overrides for identity (Q=D) and inverted (QN=NOT(D)).
 ///
 /// This bypasses formula emission by directly wiring from the connected `D`
-/// netref into the `Q`/`QN` destination, supporting Simple, BitSelect, and
-/// PartSelect on the destination side. Destination bitvectors are sized to the
-/// full declared width of the destination net, and part-selects are written at
-/// the correct least-significant-bit offset.
+/// bits into the `Q`/`QN` destination bits after normalized bit expansion.
 ///
 /// Returns `true` when this function fully handled this output port; `false`
 /// when the instance is not a recognized DFF and normal handling should
@@ -1294,10 +910,11 @@ fn handle_dff_identity_override(
     type_name: &str,
     inst_name: &str,
     port_name: &str,
-    inst: &crate::netlist::parse::NetlistInstance,
+    inst: &NormalizedInstance,
     interner: &StringInterner<StringBackend<SymbolU32>>,
     gb: &mut GateBuilder,
-    resolved: &mut ResolvedNetValues,
+    resolved: &mut ResolvedBitValues,
+    normalized: &NormalizedNetlistModule<'_>,
     dff_cells_identity: &std::collections::HashSet<String>,
     dff_cells_inverted: &std::collections::HashSet<String>,
     nets: &[Net],
@@ -1323,12 +940,12 @@ fn handle_dff_identity_override(
         return Ok(true);
     };
     // Resolve D input
-    let d_input = inst.connections.iter().find_map(|(p, nref)| {
-        let pname = interner.resolve(*p).unwrap();
+    let d_input = inst.connections.iter().find(|connection| {
+        let pname = interner.resolve(connection.port).unwrap();
         if pname.eq_ignore_ascii_case("d") {
-            Some(nref)
+            true
         } else {
-            None
+            false
         }
     });
     if d_input.is_none() {
@@ -1340,8 +957,16 @@ Ensure the cell exposes a 'd' pin or do not classify it as DFF-like.",
         ));
     }
     // Build D (optionally inverted) and write to destination port.
-    if let Some(d_bv) = build_d_bv(d_input.unwrap(), gb, resolved, nets, interner, invert)? {
-        write_bv_to_port_destination(inst, interner, resolved, nets, target_port, &d_bv)?;
+    if let Some(d_bv) = build_d_bv(d_input.unwrap(), gb, resolved, invert)? {
+        write_bv_to_port_destination(
+            inst,
+            interner,
+            resolved,
+            normalized,
+            nets,
+            target_port,
+            &d_bv,
+        )?;
     } else {
         return Err(format!(
             "DFF override: D net not available for cell '{}' instance '{}' (output '{}'). \
@@ -1358,7 +983,7 @@ mod tests {
     use crate::aig_sim::gate_sim::{self, Collect};
     use crate::liberty_proto::{Cell, Library, Pin, PinDirection};
     use crate::netlist::parse::{
-        Net, NetRef, NetlistInstance, NetlistModule, NetlistPort, Parser, PortDirection,
+        Net, NetIndex, NetRef, NetlistInstance, NetlistModule, NetlistPort, Parser, PortDirection,
         TokenScanner,
     };
     use string_interner::{StringInterner, backend::StringBackend};
@@ -1522,6 +1147,26 @@ endmodule
         let y_from_bit0_zero =
             eval_output_by_name(&gate_fn, vec![IrBits::make_ubits(2, 0b10).unwrap()], "y");
         assert_bits(&y_from_bit0_zero, &[false]);
+    }
+
+    #[test]
+    fn test_liberty_projection_supports_preserved_tran_aliases() {
+        let gate_fn = project_parsed_netlist(
+            r#"
+module top (a, y);
+  input a;
+  output y;
+  wire a;
+  wire y;
+  wire y_alias;
+  tran(y, y_alias);
+  BUF u0 (.A(a), .Y(y_alias));
+endmodule
+"#,
+        );
+
+        assert!(eval_single_output_bit(&gate_fn, &[true]));
+        assert!(!eval_single_output_bit(&gate_fn, &[false]));
     }
 
     fn assert_bits(bits: &IrBits, expected_lsb_to_msb: &[bool]) {

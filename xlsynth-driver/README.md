@@ -133,7 +133,7 @@ xlsynth-driver gv2ir \
 
 ### `gv2block`: gate-level netlist to Block IR
 
-Converts a gate-level netlist plus Liberty proto into an XLS block IR package. Cells are defined as separate blocks instantiated in the top block. The netlist must contain exactly one module.
+Converts a techmapped gate-level netlist plus Liberty proto into an XLS block IR package. Cells are defined as separate blocks instantiated in the top block. The netlist must contain exactly one module. Preserved `assign` / `tran` statements are accepted only when they are wiring artifacts such as aliases, slices, concats, or literal tieoffs; top-level combinational assign logic must be technology-mapped into cells first.
 
 ```shell
 xlsynth-driver gv2block \
@@ -340,7 +340,7 @@ Additional flags:
 - `--module_name <MODULE>`: Optional module name to restrict the search; required when the netlist contains multiple modules.
 - `--start-pins <CSV>`: Optional comma-separated list of starting pins on the instance; defaults to all input pins for `--traverse=fanin` and all output pins for `--traverse=fanout`.
 - `--dff_cells <CSV>`: Comma-separated list of DFF cell names that should be treated as stop boundaries when using `--stop-at-dff` (required if `--stop-at-dff` is selected).
-- `gv-dump-cone` operates on instance-based structural connectivity; modules with preserved continuous `assign` statements are rejected rather than partially ignored.
+- `gv-dump-cone` operates on normalized bit-level connectivity, including preserved continuous `assign` dependencies that can be normalized by the frontend.
 
 Output format:
 
