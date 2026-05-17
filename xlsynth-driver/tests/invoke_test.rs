@@ -12027,6 +12027,52 @@ top fn main(p: bits[1] id=1, x: bits[8] id=2, y: bits[8] id=3) -> (bits[8], bits
 }
 
 #[test]
+fn test_ir_rewrite_default_none_does_not_match_defaulted_select() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package test
+
+top fn main(p: bits[1] id=1, x: bits[8] id=2, d: bits[8] id=3) -> (bits[8], bits[8]) {
+  no_default: bits[8] = sel(p, cases=[x, x], id=10)
+  has_default: bits[8] = sel(p, cases=[x, x], default=d, id=11)
+  ret tuple.12: (bits[8], bits[8]) = tuple(no_default, has_default, id=12)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("test.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-rewrite")
+        .arg(ir_path.to_str().unwrap())
+        .arg("sel(selector=p, cases=[v, v], default=None)")
+        .arg("v")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-rewrite failed (status={});\nstdout:{}\nstderr:{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("ret tuple.12: (bits[8], bits[8]) = tuple(x, has_default, id=12)"),
+        "expected no-default select to rewrite while defaulted select remains: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("has_default: bits[8] = sel(p, cases=[x, x], default=d, id=11)"),
+        "defaulted select should not match default=None: {}",
+        stdout
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
 fn test_ir_rewrite_all_matches_does_not_rewrite_new_helper_nodes() {
     let _ = env_logger::builder().is_test(true).try_init();
 
