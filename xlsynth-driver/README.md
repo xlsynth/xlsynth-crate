@@ -385,6 +385,27 @@ The command above leaves three artifacts:
 1. `my_module.g8rbin` – compact bincode serialisation of the same GateFn.
 1. `my_module.stats.json` – structural summary statistics as JSON.
 
+### `ir-prep-for-gates`: IR to prepared residual PIR
+
+Runs the same `prep_for_gatify` stage used by `ir2gates` / `ir2g8r`, then emits
+the top-only residual PIR package to stdout without constructing a `GateFn`.
+This is useful for inspecting extension-op rewrites such as `ext_clz`,
+`ext_prio_encode`, `ext_nary_add`, and `ext_mask_low`.
+
+Supported flags:
+
+- `--top <TOP>` – override the top-level entry point (required if the IR package has no `top fn`).
+- The same gate-lowering flags accepted by `ir2gates` are accepted. The prep
+  output is affected by the `--enable-rewrite-*` flags; later GateFn-only
+  optimization / analysis flags are accepted for CLI consistency but do not
+  change the emitted prepared PIR.
+
+Example:
+
+```shell
+xlsynth-driver ir-prep-for-gates my_module.opt.ir --top main > my_module.prepared.ir
+```
+
 ### `g8r2v`: GateFn to gate-level netlist (Verilog-like)
 
 Converts a `.g8r` (text) or `.g8rbin` (bincode) file containing a gate-level `GateFn` to a `.ugv` netlist (human-readable, Verilog-like) on **stdout**.

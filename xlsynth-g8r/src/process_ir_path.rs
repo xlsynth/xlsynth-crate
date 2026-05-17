@@ -340,6 +340,110 @@ impl From<&Options> for ir2gates::Ir2GatesOptions {
     }
 }
 
+impl From<&CanonicalG8rOptions> for ir2gates::Ir2GatesOptions {
+    fn from(options: &CanonicalG8rOptions) -> Self {
+        Self {
+            fold: options.fold,
+            hash: options.hash,
+            check_equivalence: false,
+            enable_rewrite_carry_out: options.enable_rewrite_carry_out,
+            enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
+            enable_rewrite_nary_add: options.enable_rewrite_nary_add,
+            enable_rewrite_mask_low: options.enable_rewrite_mask_low,
+            adder_mapping: options.adder_mapping,
+            mul_adder_mapping: options.mul_adder_mapping,
+            unsafe_gatify_gate_operation: options.unsafe_gatify_gate_operation,
+            aug_opt: Default::default(),
+            ..Self::default()
+        }
+    }
+}
+
+fn prep_options_from_process_options(options: &Options) -> PrepForGatifyOptions {
+    PrepForGatifyOptions {
+        enable_rewrite_carry_out: options.enable_rewrite_carry_out,
+        enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
+        enable_rewrite_nary_add: options.enable_rewrite_nary_add,
+        enable_rewrite_mask_low: options.enable_rewrite_mask_low,
+        ..PrepForGatifyOptions::all_opts_enabled()
+    }
+}
+
+fn prep_options_from_canonical_options(options: &CanonicalG8rOptions) -> PrepForGatifyOptions {
+    PrepForGatifyOptions {
+        enable_rewrite_carry_out: options.enable_rewrite_carry_out,
+        enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
+        enable_rewrite_nary_add: options.enable_rewrite_nary_add,
+        enable_rewrite_mask_low: options.enable_rewrite_mask_low,
+        ..PrepForGatifyOptions::all_opts_enabled()
+    }
+}
+
+fn prepared_ir_text_from_package(
+    ir_package: &ir::Package,
+    top_fn_name: &str,
+    range_info: &IrRangeInfo,
+    prep_opts: PrepForGatifyOptions,
+) -> Result<String, String> {
+    let ir_top = ir_package
+        .get_fn(top_fn_name)
+        .expect("top fn should exist in pir_package");
+    let prepared_fn = prep_for_gatify(ir_top, Some(range_info), prep_opts);
+    let external_refs = ir_utils::external_function_references(&prepared_fn);
+    if !external_refs.is_empty() {
+        let refs = external_refs.into_iter().collect::<Vec<_>>().join(", ");
+        return Err(format!(
+            "Refusing to emit prepared IR with external function references from top `{}`: {}",
+            prepared_fn.name, refs
+        ));
+    }
+    let prepared_member = ir_package
+        .members
+        .iter()
+        .find_map(|member| match member {
+            ir::PackageMember::Function(f) if f.name == top_fn_name => {
+                Some(ir::PackageMember::Function(prepared_fn.clone()))
+            }
+            ir::PackageMember::Block { func, metadata } if func.name == top_fn_name => {
+                Some(ir::PackageMember::Block {
+                    func: prepared_fn.clone(),
+                    metadata: metadata.clone(),
+                })
+            }
+            _ => None,
+        })
+        .expect("top member should exist in pir_package");
+    let prepared_top = match &prepared_member {
+        ir::PackageMember::Function(_) => Some((top_fn_name.to_string(), ir::MemberType::Function)),
+        ir::PackageMember::Block { .. } => Some((top_fn_name.to_string(), ir::MemberType::Block)),
+    };
+    let prepared_pkg = ir::Package {
+        name: ir_package.name.clone(),
+        file_table: ir_package.file_table.clone(),
+        members: vec![prepared_member],
+        top: prepared_top,
+    };
+    Ok(prepared_pkg.to_string())
+}
+
+/// Emits the top-only PIR package immediately after `prep_for_gatify`.
+pub fn canonical_ir_text_to_prepared_gatify_ir(
+    ir_text: &str,
+    ir_top: Option<&str>,
+    lowering_options: &CanonicalG8rOptions,
+) -> Result<String, String> {
+    let prep_opts = prep_options_from_canonical_options(lowering_options);
+    let ir2gates_options = ir2gates::Ir2GatesOptions::from(lowering_options);
+    let prepared =
+        ir2gates::prepare_ir_for_gatify_from_ir_text(ir_text, ir_top, &ir2gates_options)?;
+    prepared_ir_text_from_package(
+        &prepared.pir_package,
+        &prepared.top_fn_name,
+        prepared.range_info.as_ref(),
+        prep_opts,
+    )
+}
+
 struct GatifyOptionsInput<'a> {
     options: &'a Options,
     range_info: std::sync::Arc<IrRangeInfo>,
@@ -370,13 +474,7 @@ pub fn process_ir_text_with_gatefn(
     ir_text: &str,
     options: &Options,
 ) -> Result<(crate::aig::GateFn, Ir2GatesSummaryStats), String> {
-    let prep_opts = PrepForGatifyOptions {
-        enable_rewrite_carry_out: options.enable_rewrite_carry_out,
-        enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
-        enable_rewrite_nary_add: options.enable_rewrite_nary_add,
-        enable_rewrite_mask_low: options.enable_rewrite_mask_low,
-        ..PrepForGatifyOptions::all_opts_enabled()
-    };
+    let prep_opts = prep_options_from_process_options(options);
     let ir2gates_options = ir2gates::Ir2GatesOptions::from(options);
     let ir2gates_output =
         ir2gates::ir2gates_from_ir_text(ir_text, options.ir_top.as_deref(), ir2gates_options)?;
@@ -395,47 +493,13 @@ pub fn process_ir_text_with_gatefn(
     log::info!("IR top:\n{}", ir_top.to_string());
 
     if let Some(out_path) = options.prepared_ir_out.as_ref() {
-        let prepared_fn = prep_for_gatify(ir_top, Some(range_info.as_ref()), prep_opts);
-        let external_refs = ir_utils::external_function_references(&prepared_fn);
-        if !external_refs.is_empty() {
-            let refs = external_refs.into_iter().collect::<Vec<_>>().join(", ");
-            return Err(format!(
-                "Refusing to emit --prepared-ir-out with external function references from top `{}`: {}",
-                prepared_fn.name, refs
-            ));
-        }
-        let prepared_member = ir_package
-            .members
-            .iter()
-            .find_map(|member| match member {
-                ir::PackageMember::Function(f) if f.name == top_fn_name => {
-                    Some(ir::PackageMember::Function(prepared_fn.clone()))
-                }
-                ir::PackageMember::Block { func, metadata } if func.name == top_fn_name => {
-                    Some(ir::PackageMember::Block {
-                        func: prepared_fn.clone(),
-                        metadata: metadata.clone(),
-                    })
-                }
-                _ => None,
-            })
-            .expect("top member should exist in pir_package");
-        let prepared_pkg = ir::Package {
-            name: ir_package.name.clone(),
-            file_table: ir_package.file_table.clone(),
-            members: vec![prepared_member],
-            top: ir_package.top.clone(),
-        };
-        let prepared_text = prepared_pkg.to_string();
-        let mut file = std::fs::File::create(out_path).map_err(|e| {
-            format!(
-                "Failed to create prepared IR output {}: {}",
-                out_path.display(),
-                e
-            )
-        })?;
-        use std::io::Write;
-        file.write_all(prepared_text.as_bytes()).map_err(|e| {
+        let prepared_text = prepared_ir_text_from_package(
+            &ir_package,
+            &top_fn_name,
+            range_info.as_ref(),
+            prep_opts,
+        )?;
+        std::fs::write(out_path, prepared_text.as_bytes()).map_err(|e| {
             format!(
                 "Failed to write prepared IR output {}: {}",
                 out_path.display(),

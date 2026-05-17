@@ -257,6 +257,17 @@ fn ext_clz_for_adjustment(
     }
 }
 
+fn widened_ext_clz(f: &ir::Fn, nr: NodeRef, output_width: usize) -> Option<(NodeRef, usize)> {
+    match f.get_node(nr).payload {
+        NodePayload::ExtClz {
+            arg,
+            offset,
+            new_bit_count,
+        } if new_bit_count <= output_width => Some((arg, offset)),
+        _ => None,
+    }
+}
+
 fn clz_plus_const_from_binop(
     f: &ir::Fn,
     lhs: NodeRef,
@@ -333,6 +344,56 @@ fn rewrite_clz_plus_constant_to_ext_clz(f: &mut ir::Fn) -> usize {
             Some(Type::Bits(output_width)),
         )
         .expect("prep_for_gatify: ext_clz payload replacement failed");
+        rewrites += 1;
+    }
+    rewrites
+}
+
+/// Folds local zero-extension of `ext_clz` into the existing `ext_clz` op.
+fn rewrite_zero_extended_clz_to_ext_clz(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+    let original_len = f.nodes.len();
+    for node_index in 0..original_len {
+        let Some(output_width) = bits_width(&f.nodes[node_index].ty) else {
+            continue;
+        };
+        let payload = f.nodes[node_index].payload.clone();
+        let Some((arg, offset)) = (match payload {
+            NodePayload::ZeroExt {
+                arg: clz,
+                new_bit_count,
+            } if new_bit_count == output_width => widened_ext_clz(f, clz, output_width),
+            NodePayload::Nary(NaryOp::Concat, operands) => {
+                let Some((&low_clz, high_operands)) = operands.split_last() else {
+                    continue;
+                };
+                if high_operands.is_empty() {
+                    continue;
+                }
+                if !high_operands.iter().all(|nr| {
+                    bits_width(&f.get_node(*nr).ty)
+                        .is_some_and(|w| is_ubits_literal_zero_of_width(f, *nr, w))
+                }) {
+                    continue;
+                }
+                widened_ext_clz(f, low_clz, output_width)
+            }
+            _ => None,
+        }) else {
+            continue;
+        };
+
+        ir_utils::replace_node_payload(
+            f,
+            NodeRef { index: node_index },
+            NodePayload::ExtClz {
+                arg,
+                offset,
+                new_bit_count: output_width,
+            },
+            Some(Type::Bits(output_width)),
+        )
+        .expect("prep_for_gatify: rewriting zero-extended clz failed");
         rewrites += 1;
     }
     rewrites
@@ -2194,6 +2255,7 @@ pub fn prep_for_gatify(
     if options.enable_rewrite_prio_encode {
         let _rewrites = rewrite_encode_one_hot_idioms_to_ext_ops(&mut cloned);
         let _rewrites = rewrite_clz_plus_constant_to_ext_clz(&mut cloned);
+        let _rewrites = rewrite_zero_extended_clz_to_ext_clz(&mut cloned);
     }
     mark_dead_nodes_as_nil(&mut cloned);
     cloned
@@ -2235,6 +2297,39 @@ mod tests {
                 ..PrepForGatifyOptions::default()
             },
         )
+    }
+
+    #[test]
+    fn zero_extended_clz_is_folded_into_ext_clz_width() {
+        let f = parse_test_fn(
+            r#"package sample
+
+top fn f(x: bits[7] id=1) -> bits[8] {
+  clz: bits[3] = ext_clz(x, offset=0, new_bit_count=3, id=2)
+  zero: bits[5] = literal(value=0, id=3)
+  ret out: bits[8] = concat(zero, clz, id=4)
+}"#,
+        );
+        let optimized = prep_for_gatify(
+            &f,
+            None,
+            PrepForGatifyOptions {
+                enable_rewrite_prio_encode: true,
+                ..PrepForGatifyOptions::default()
+            },
+        );
+        let optimized_text = optimized.to_string();
+        assert!(
+            optimized_text
+                .contains("ret out: bits[8] = ext_clz(x, offset=0, new_bit_count=8, id=4)"),
+            "expected zero-extended clz to fold into wider ext_clz, got:\n{}",
+            optimized_text
+        );
+        assert!(
+            !optimized_text.contains("concat(zero, clz"),
+            "did not expect zero-ext concat to remain, got:\n{}",
+            optimized_text
+        );
     }
 
     fn gated_inc_dec_factor_name(

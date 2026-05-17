@@ -54,6 +54,25 @@ pub fn handle_ir2gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) 
     }
 }
 
+pub fn handle_ir_prep_for_gates(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
+    let input_file = matches.get_one::<String>("ir_input_file").unwrap();
+    let ir_top = matches.get_one::<String>("ir_top").map(|s| s.as_str());
+    let input_path = std::path::Path::new(input_file);
+    let ir_text = std::fs::read_to_string(input_path)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {}", input_path.display(), e));
+    let lowering_options = crate::g8r_cli::parse_g8r_cli_options(matches);
+    let prepared_ir = process_ir_path::canonical_ir_text_to_prepared_gatify_ir(
+        &ir_text,
+        ir_top,
+        &lowering_options,
+    )
+    .unwrap_or_else(|err| {
+        eprintln!("Error encountered preparing IR for gates: {}", err);
+        std::process::exit(1);
+    });
+    print!("{}", prepared_ir);
+}
+
 pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
     let input_file = matches.get_one::<String>("ir_input_file").unwrap();
     let ir_top = matches.get_one::<String>("ir_top").map(|s| s.as_str());

@@ -1546,6 +1546,19 @@ fn main() {
                 .add_ir_top_arg(false),
         )
         .subcommand(
+            clap::Command::new("ir-prep-for-gates")
+                .about("Runs prep_for_gatify on IR and emits the residual PIR to stdout")
+                .arg(
+                    clap::Arg::new("ir_input_file")
+                        .value_name("IR_INPUT_FILE")
+                        .help("The input IR file")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .add_ir_top_arg(false)
+                .add_g8r_lowering_flags(),
+        )
+        .subcommand(
             clap::Command::new("ir2gates")
                 .about("Converts IR to GateFn and emits it to stdout as JSON")
                 .arg(
@@ -3610,6 +3623,9 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("ir-annotate-ranges", subm)) => {
             ir_annotate_ranges::handle_ir_annotate_ranges(subm, &config);
+        }
+        Some(("ir-prep-for-gates", subm)) => {
+            ir2gates::handle_ir_prep_for_gates(subm, &config);
         }
         Some(("ir2gates", subm)) => {
             ir2gates::handle_ir2gates(subm, &config);

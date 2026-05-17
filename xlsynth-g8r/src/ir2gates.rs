@@ -56,11 +56,28 @@ impl Ir2GatesOutput {
     }
 }
 
-pub fn ir2gates_from_ir_text(
+/// PIR package plus analysis data needed immediately before gatification.
+pub struct PreparedIrForGatify {
+    pub pir_package: ir::Package,
+    pub top_fn_name: String,
+    pub range_info: std::sync::Arc<IrRangeInfo>,
+}
+
+impl PreparedIrForGatify {
+    pub fn pir_top_fn(&self) -> &ir::Fn {
+        self.pir_package
+            .get_fn(&self.top_fn_name)
+            .expect("top_fn_name should be present in pir_package")
+    }
+}
+
+/// Parses IR and builds the PIR/range-analysis state needed by
+/// `prep_for_gatify`.
+pub fn prepare_ir_for_gatify_from_ir_text(
     ir_text: &str,
     top: Option<&str>,
-    options: Ir2GatesOptions,
-) -> Result<Ir2GatesOutput, String> {
+    options: &Ir2GatesOptions,
+) -> Result<PreparedIrForGatify, String> {
     let mut ir_text_for_processing: String = ir_text.to_string();
 
     // Parse with PIR for lowering.
@@ -109,6 +126,27 @@ pub fn ir2gates_from_ir_text(
 
     let range_info = IrRangeInfo::build_from_analysis(&analysis, pir_fn)
         .map_err(|e| format!("building IrRangeInfo failed: {e}"))?;
+
+    Ok(PreparedIrForGatify {
+        pir_package,
+        top_fn_name,
+        range_info,
+    })
+}
+
+pub fn ir2gates_from_ir_text(
+    ir_text: &str,
+    top: Option<&str>,
+    options: Ir2GatesOptions,
+) -> Result<Ir2GatesOutput, String> {
+    let PreparedIrForGatify {
+        pir_package,
+        top_fn_name,
+        range_info,
+    } = prepare_ir_for_gatify_from_ir_text(ir_text, top, &options)?;
+    let pir_fn = pir_package
+        .get_fn(&top_fn_name)
+        .expect("top_fn_name should be present in pir_package");
 
     let gatify_output = ir2gate::gatify(
         pir_fn,

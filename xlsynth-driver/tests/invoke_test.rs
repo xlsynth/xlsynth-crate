@@ -3700,6 +3700,24 @@ top fn main(x: bits[32] id=1) -> bits[5] {
         prepared_text
     );
 
+    let prep_output = std::process::Command::new(command_path)
+        .arg("ir-prep-for-gates")
+        .arg(ir_path.to_str().unwrap())
+        .arg("--fraig=false")
+        .output()
+        .unwrap();
+    assert!(
+        prep_output.status.success(),
+        "ir-prep-for-gates failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&prep_output.stdout),
+        String::from_utf8_lossy(&prep_output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&prep_output.stdout),
+        prepared_text,
+        "expected ir-prep-for-gates stdout to match ir2gates --prepared-ir-out"
+    );
+
     // Explicitly disabling the rewrite should suppress the extension op.
     let output_disabled = std::process::Command::new(command_path)
         .arg("ir2gates")
