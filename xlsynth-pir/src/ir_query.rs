@@ -85,6 +85,14 @@ pub enum NamedArgValue {
     Numeric(NumericPattern),
     Expr(QueryExpr),
     ExprList(Vec<QueryExpr>),
+    DefaultOption(DefaultOptionPattern),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefaultOptionPattern {
+    Any,
+    None,
+    Some(Box<QueryExpr>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,6 +198,12 @@ fn validate_ellipsis_placement(expr: &QueryExpr) -> Result<(), String> {
                         | NamedArgValue::String(_) => {}
                         NamedArgValue::Numeric(_) => {}
                         NamedArgValue::Expr(e) => walk(e, /* ellipsis_allowed_here= */ false)?,
+                        NamedArgValue::DefaultOption(DefaultOptionPattern::Some(e)) => {
+                            walk(e, /* ellipsis_allowed_here= */ false)?
+                        }
+                        NamedArgValue::DefaultOption(
+                            DefaultOptionPattern::Any | DefaultOptionPattern::None,
+                        ) => {}
                         NamedArgValue::ExprList(es) => {
                             let allow_in_list = na.name.as_str() == "cases";
                             for e in es {
@@ -342,6 +356,12 @@ fn validate_width_matcher_placement(expr: &QueryExpr) -> Result<(), String> {
                         NamedArgValue::Expr(e) => {
                             walk(e, /* width_allowed_here= */ false)?;
                         }
+                        NamedArgValue::DefaultOption(DefaultOptionPattern::Some(e)) => {
+                            walk(e, /* width_allowed_here= */ false)?;
+                        }
+                        NamedArgValue::DefaultOption(
+                            DefaultOptionPattern::Any | DefaultOptionPattern::None,
+                        ) => {}
                         NamedArgValue::ExprList(es) => {
                             for e in es {
                                 walk(e, /* width_allowed_here= */ false)?;
@@ -1052,6 +1072,7 @@ fn match_numeric_named_arg(
         | NamedArgValue::Number(_)
         | NamedArgValue::String(_)
         | NamedArgValue::Expr(_)
+        | NamedArgValue::DefaultOption(_)
         | NamedArgValue::ExprList(_) => vec![],
     }
 }
@@ -1107,10 +1128,19 @@ fn match_select_named_arg(
             _ => vec![],
         },
         "default" => match &arg.value {
-            NamedArgValue::Any => match default {
-                Some(_) => vec![bindings.clone()],
+            NamedArgValue::DefaultOption(DefaultOptionPattern::Any) => vec![bindings.clone()],
+            NamedArgValue::DefaultOption(DefaultOptionPattern::None) => {
+                if default.is_none() {
+                    vec![bindings.clone()]
+                } else {
+                    vec![]
+                }
+            }
+            NamedArgValue::DefaultOption(DefaultOptionPattern::Some(expr)) => match default {
+                Some(node_ref) => match_solutions(expr, f, users, *node_ref, bindings),
                 None => vec![],
             },
+            NamedArgValue::Any => vec![bindings.clone()],
             NamedArgValue::Expr(expr) => match default {
                 Some(node_ref) => match_solutions(expr, f, users, *node_ref, bindings),
                 None => vec![],
@@ -1127,6 +1157,17 @@ mod tests {
     use crate::ir;
     use crate::ir::PackageMember;
     use crate::ir_parser::Parser;
+
+    fn node_ref_by_textual_id(f: &ir::Fn, id: &str) -> ir::NodeRef {
+        f.nodes
+            .iter()
+            .enumerate()
+            .find_map(|(index, _node)| {
+                let node_ref = ir::NodeRef { index };
+                (ir::node_textual_id(f, node_ref) == id).then_some(node_ref)
+            })
+            .unwrap_or_else(|| panic!("missing node with textual id {id}"))
+    }
 
     #[test]
     fn parse_basic_query() {
@@ -1201,6 +1242,49 @@ mod tests {
         match &matcher.named_args[1].value {
             NamedArgValue::ExprList(exprs) => assert_eq!(exprs.len(), 2),
             other => panic!("expected cases list, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_select_default_option_patterns() {
+        let cases = [
+            ("sel(default=_)", DefaultOptionPattern::Any),
+            ("sel(default=None)", DefaultOptionPattern::None),
+            (
+                "sel(default=Some(_))",
+                DefaultOptionPattern::Some(Box::new(QueryExpr::Placeholder(PlaceholderExpr {
+                    name: "_".to_string(),
+                    ty: None,
+                }))),
+            ),
+            (
+                "sel(default=Some(d))",
+                DefaultOptionPattern::Some(Box::new(QueryExpr::Placeholder(PlaceholderExpr {
+                    name: "d".to_string(),
+                    ty: None,
+                }))),
+            ),
+            (
+                "sel(default=d)",
+                DefaultOptionPattern::Some(Box::new(QueryExpr::Placeholder(PlaceholderExpr {
+                    name: "d".to_string(),
+                    ty: None,
+                }))),
+            ),
+        ];
+
+        for (query_text, expected) in cases {
+            let query = parse_query(query_text).unwrap();
+            let QueryExpr::Matcher(matcher) = query else {
+                panic!("expected matcher");
+            };
+            assert_eq!(matcher.named_args.len(), 1);
+            assert_eq!(matcher.named_args[0].name, "default");
+            assert_eq!(
+                matcher.named_args[0].value,
+                NamedArgValue::DefaultOption(expected),
+                "query {query_text}"
+            );
         }
     }
 
@@ -1550,6 +1634,58 @@ fn main(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
         assert_eq!(matches.len(), 1);
         let node_id = ir::node_textual_id(f, matches[0]);
         assert_eq!(node_id, "prio");
+    }
+
+    #[test]
+    fn find_matches_select_like_default_option_patterns() {
+        let pkg_text = r#"package test
+
+fn main(sel1: bits[1] id=1, sel2: bits[2] id=2, x: bits[8] id=3, y: bits[8] id=4, d: bits[8] id=5) -> (bits[8], bits[8], bits[8], bits[8]) {
+  s_none: bits[8] = sel(sel1, cases=[x, y], id=6)
+  s_some: bits[8] = sel(sel1, cases=[x, y], default=d, id=7)
+  p_some: bits[8] = priority_sel(sel2, cases=[x, y], default=d, id=8)
+  oh: bits[8] = one_hot_sel(sel2, cases=[x, y], id=10)
+  ret out: (bits[8], bits[8], bits[8], bits[8]) = tuple(s_none, s_some, p_some, oh, id=11)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+
+        let ids_for_query = |query_text: &str| -> Vec<String> {
+            let query = parse_query(query_text).unwrap();
+            let mut ids: Vec<String> = find_matching_nodes(f, &query)
+                .into_iter()
+                .map(|node_ref| ir::node_textual_id(f, node_ref))
+                .collect();
+            ids.sort();
+            ids
+        };
+
+        assert_eq!(
+            ids_for_query("sel(default=_)"),
+            vec!["s_none".to_string(), "s_some".to_string()]
+        );
+        assert_eq!(ids_for_query("sel(default=None)"), vec!["s_none"]);
+        assert_eq!(ids_for_query("sel(default=Some(_))"), vec!["s_some"]);
+        assert_eq!(ids_for_query("sel(default=d)"), vec!["s_some"]);
+        assert_eq!(ids_for_query("priority_sel(default=_)"), vec!["p_some"]);
+        assert_eq!(
+            ids_for_query("priority_sel(default=Some(_))"),
+            vec!["p_some"]
+        );
+        assert!(ids_for_query("priority_sel(default=None)").is_empty());
+        assert_eq!(ids_for_query("one_hot_sel(default=_)"), vec!["oh"]);
+        assert_eq!(ids_for_query("one_hot_sel(default=None)"), vec!["oh"]);
+        assert!(ids_for_query("one_hot_sel(default=Some(_))").is_empty());
+
+        let query = parse_query("sel(default=Some(d))").unwrap();
+        let users = crate::ir_utils::compute_users(f);
+        let s_some = node_ref_by_textual_id(f, "s_some");
+        let d = node_ref_by_textual_id(f, "d");
+        let bindings = find_root_query_bindings(&query, f, &users, s_some);
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].get("d"), Some(&Binding::Node(d)));
     }
 
     #[test]

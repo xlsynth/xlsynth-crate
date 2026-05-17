@@ -5,8 +5,8 @@
 use crate::ir;
 
 use super::{
-    MatcherExpr, MatcherKind, NamedArg, NamedArgValue, NumericExpr, NumericPattern,
-    PlaceholderExpr, QueryExpr,
+    DefaultOptionPattern, MatcherExpr, MatcherKind, NamedArg, NamedArgValue, NumericExpr,
+    NumericPattern, PlaceholderExpr, QueryExpr,
 };
 
 pub struct QueryParser<'a> {
@@ -357,6 +357,10 @@ impl<'a> QueryParser<'a> {
             Some(b'"') => NamedArgValue::String(self.parse_string_literal()?),
             Some(b'[') => NamedArgValue::ExprList(self.parse_expr_list()?),
             _ => {
+                if ident == "default" {
+                    return self.parse_default_named_arg(ident);
+                }
+
                 if ident == "lsb_prio" {
                     let expr = self.parse_expr()?;
                     return self.parse_bool_named_arg(ident, expr);
@@ -453,6 +457,39 @@ impl<'a> QueryParser<'a> {
             }
         }
         Ok(items)
+    }
+
+    fn parse_default_named_arg(&mut self, name: String) -> Result<Option<NamedArg>, String> {
+        let pattern = self.parse_default_option_pattern()?;
+        Ok(Some(NamedArg {
+            name,
+            value: NamedArgValue::DefaultOption(pattern),
+        }))
+    }
+
+    fn parse_default_option_pattern(&mut self) -> Result<DefaultOptionPattern, String> {
+        self.skip_ws();
+        let start = self.pos;
+        if matches!(self.peek(), Some(c) if c.is_ascii_alphabetic() || c == b'_') {
+            let ident = self.parse_ident("default pattern")?;
+            self.skip_ws();
+            match ident.as_str() {
+                "_" => return Ok(DefaultOptionPattern::Any),
+                "None" => return Ok(DefaultOptionPattern::None),
+                "Some" if self.peek() == Some(b'(') => {
+                    self.expect('(')?;
+                    let expr = self.parse_expr()?;
+                    self.expect(')')?;
+                    return Ok(DefaultOptionPattern::Some(Box::new(expr)));
+                }
+                _ => {
+                    self.pos = start;
+                }
+            }
+        }
+
+        let expr = self.parse_expr()?;
+        Ok(DefaultOptionPattern::Some(Box::new(expr)))
     }
 
     fn parse_numeric_expr(&mut self) -> Result<NumericExpr, String> {

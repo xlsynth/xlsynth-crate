@@ -1060,10 +1060,24 @@ fn collect_match_binders(
                             );
                         }
                     }
+                    ir_query::NamedArgValue::DefaultOption(
+                        ir_query::DefaultOptionPattern::Some(expr),
+                    ) => {
+                        collect_match_binders(
+                            expr,
+                            node_binders,
+                            literal_binders,
+                            numeric_binders,
+                            false,
+                        );
+                    }
                     ir_query::NamedArgValue::Bool(_)
                     | ir_query::NamedArgValue::Number(_)
                     | ir_query::NamedArgValue::Any
-                    | ir_query::NamedArgValue::String(_) => {}
+                    | ir_query::NamedArgValue::String(_)
+                    | ir_query::NamedArgValue::DefaultOption(
+                        ir_query::DefaultOptionPattern::Any | ir_query::DefaultOptionPattern::None,
+                    ) => {}
                 }
             }
         }

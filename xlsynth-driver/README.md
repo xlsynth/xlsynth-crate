@@ -1280,6 +1280,7 @@ Query expression basics:
 - `msb(x)` is shorthand for matching a `bit_slice` of the highest bit (width 1) of `x`.
 - Named arguments are supported where the IR operator accepts them (e.g., `sel(selector=..., cases=[...], default=...)`).
   - Named-arg values use the same expression syntax as positional args, so numeric literals like `selector=1` and `default=0` match literal nodes.
+  - Select-like `default` arguments support Rust-like option matching: `default=_` matches either present or absent defaults, `default=None` matches only absent defaults, and `default=Some(d)` matches and binds a present default. For compatibility, `default=d` is equivalent to `default=Some(d)`.
   - String literals are supported in named args (e.g., `name="foo"`).
   - `name="foo"` is a universal named-arg matcher that checks the node's name.
   - `lsb_prio` accepts only `true`, `false`, or `_` and is rejected otherwise.
@@ -1331,6 +1332,12 @@ Example: find all consumers of `encode(one_hot(x))`:
 
 ```shell
 xlsynth-driver ir-query my_pkg.ir '$users(encode(one_hot(x)))'
+```
+
+Example: match only select nodes with no default arm:
+
+```shell
+xlsynth-driver ir-query my_pkg.ir 'sel(selector=s, cases=[a, b], default=None)'
 ```
 
 ### `ir-rewrite`
