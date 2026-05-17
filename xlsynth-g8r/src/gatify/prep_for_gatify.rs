@@ -10,8 +10,9 @@
 //!   more direct representation of the intended semantics for gateification.
 //! - **May delete/rewrite internal nodes** (including DCE-like cleanup) but
 //!   keeps the **function signature** unchanged.
-//! - Preserves **node indices** (no compaction/reindexing); dead nodes are
-//!   marked as `Nil` to maintain PIR layout invariants.
+//! - Preserves stable **text IDs** across rewrites; the returned residual PIR
+//!   is compacted and topologically reordered so helper nodes appear before
+//!   their users.
 //!
 //! Note: `xlsynth`/libxls analysis does not understand extension ops; callers
 //! that need analysis should project to the XLS basis ops separately (see
@@ -394,6 +395,133 @@ fn rewrite_zero_extended_clz_to_ext_clz(f: &mut ir::Fn) -> usize {
             Some(Type::Bits(output_width)),
         )
         .expect("prep_for_gatify: rewriting zero-extended clz failed");
+        rewrites += 1;
+    }
+    rewrites
+}
+
+fn ext_clz_eq_literal_target_clz_count(
+    f: &ir::Fn,
+    lhs: NodeRef,
+    rhs: NodeRef,
+) -> Option<(NodeRef, usize)> {
+    let (clz_ref, literal_ref) = match (&f.get_node(lhs).payload, &f.get_node(rhs).payload) {
+        (NodePayload::ExtClz { .. }, NodePayload::Literal(_)) => (lhs, rhs),
+        (NodePayload::Literal(_), NodePayload::ExtClz { .. }) => (rhs, lhs),
+        _ => return None,
+    };
+    let NodePayload::ExtClz {
+        arg,
+        offset,
+        new_bit_count,
+    } = f.get_node(clz_ref).payload
+    else {
+        unreachable!("matched ext_clz above");
+    };
+    let literal_value = literal_usize_value(f, literal_ref)?;
+    let input_width = bits_width(&f.get_node(arg).ty)?;
+    if input_width == 0 || new_bit_count >= usize::BITS as usize {
+        return None;
+    }
+    let modulus = 1usize << new_bit_count;
+    let mut matches = Vec::new();
+    for clz_value in 0..=input_width {
+        let adjusted = offset.checked_add(clz_value)?;
+        if adjusted % modulus == literal_value {
+            matches.push(clz_value);
+        }
+    }
+    (matches.len() == 1).then_some((arg, matches[0]))
+}
+
+fn negate_predicate_payload(f: &mut ir::Fn, payload: NodePayload) -> NodePayload {
+    let predicate = push_node(f, Type::Bits(1), payload);
+    NodePayload::Unop(Unop::Not, predicate)
+}
+
+fn exact_clz_count_predicate_payload(
+    f: &mut ir::Fn,
+    arg: NodeRef,
+    clz_count: usize,
+) -> Option<NodePayload> {
+    let input_width = bits_width(&f.get_node(arg).ty)?;
+    if input_width == 0 || clz_count > input_width {
+        return None;
+    }
+    if clz_count == 0 {
+        return Some(NodePayload::BitSlice {
+            arg,
+            start: input_width - 1,
+            width: 1,
+        });
+    }
+    if clz_count == input_width {
+        let any = push_node(f, Type::Bits(1), NodePayload::Unop(Unop::OrReduce, arg));
+        return Some(NodePayload::Unop(Unop::Not, any));
+    }
+
+    let zero_prefix = push_node(
+        f,
+        Type::Bits(clz_count),
+        NodePayload::BitSlice {
+            arg,
+            start: input_width - clz_count,
+            width: clz_count,
+        },
+    );
+    let zero_prefix_any = push_node(
+        f,
+        Type::Bits(1),
+        NodePayload::Unop(Unop::OrReduce, zero_prefix),
+    );
+    let zero_prefix_is_zero = push_node(
+        f,
+        Type::Bits(1),
+        NodePayload::Unop(Unop::Not, zero_prefix_any),
+    );
+    let first_one = push_node(
+        f,
+        Type::Bits(1),
+        NodePayload::BitSlice {
+            arg,
+            start: input_width - clz_count - 1,
+            width: 1,
+        },
+    );
+    Some(NodePayload::Nary(
+        NaryOp::And,
+        vec![zero_prefix_is_zero, first_one],
+    ))
+}
+
+/// Rewrites exact CLZ literal predicates into equivalent direct predicates over
+/// `x`.
+fn rewrite_eq_ne_clz_literal_to_input_predicate(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+    let original_len = f.nodes.len();
+    for node_index in 0..original_len {
+        let payload = f.nodes[node_index].payload.clone();
+        let NodePayload::Binop(op @ (Binop::Eq | Binop::Ne), lhs, rhs) = payload else {
+            continue;
+        };
+        let Some((arg, clz_count)) = ext_clz_eq_literal_target_clz_count(f, lhs, rhs) else {
+            continue;
+        };
+        let Some(replacement_payload) = exact_clz_count_predicate_payload(f, arg, clz_count) else {
+            continue;
+        };
+        let replacement_payload = if op == Binop::Ne {
+            negate_predicate_payload(f, replacement_payload)
+        } else {
+            replacement_payload
+        };
+        ir_utils::replace_node_payload(
+            f,
+            NodeRef { index: node_index },
+            replacement_payload,
+            Some(Type::Bits(1)),
+        )
+        .expect("prep_for_gatify: rewriting eq/ne(ext_clz, literal) failed");
         rewrites += 1;
     }
     rewrites
@@ -2256,8 +2384,11 @@ pub fn prep_for_gatify(
         let _rewrites = rewrite_encode_one_hot_idioms_to_ext_ops(&mut cloned);
         let _rewrites = rewrite_clz_plus_constant_to_ext_clz(&mut cloned);
         let _rewrites = rewrite_zero_extended_clz_to_ext_clz(&mut cloned);
+        let _rewrites = rewrite_eq_ne_clz_literal_to_input_predicate(&mut cloned);
     }
     mark_dead_nodes_as_nil(&mut cloned);
+    ir_utils::compact_and_toposort_in_place(&mut cloned)
+        .expect("prep_for_gatify: compact/toposort failed");
     cloned
 }
 
@@ -2310,14 +2441,7 @@ top fn f(x: bits[7] id=1) -> bits[8] {
   ret out: bits[8] = concat(zero, clz, id=4)
 }"#,
         );
-        let optimized = prep_for_gatify(
-            &f,
-            None,
-            PrepForGatifyOptions {
-                enable_rewrite_prio_encode: true,
-                ..PrepForGatifyOptions::default()
-            },
-        );
+        let optimized = prep_for_gatify(&f, None, PrepForGatifyOptions::all_opts_enabled());
         let optimized_text = optimized.to_string();
         assert!(
             optimized_text
@@ -2330,6 +2454,43 @@ top fn f(x: bits[7] id=1) -> bits[8] {
             "did not expect zero-ext concat to remain, got:\n{}",
             optimized_text
         );
+    }
+
+    #[test]
+    fn eq_clz_literal_is_rewritten_to_input_bit_predicate() {
+        let f = parse_test_fn(
+            r#"package sample
+
+top fn f(x: bits[4] id=1) -> bits[1] {
+  clz: bits[3] = ext_clz(x, offset=0, new_bit_count=3, id=2)
+  target: bits[3] = literal(value=2, id=3)
+  ret out: bits[1] = eq(clz, target, id=4)
+}"#,
+        );
+        let optimized = prep_for_gatify(&f, None, PrepForGatifyOptions::all_opts_enabled());
+        let optimized_text = optimized.to_string();
+        assert!(
+            !optimized_text.contains("eq(clz, target"),
+            "did not expect eq(ext_clz, literal) to remain, got:\n{}",
+            optimized_text
+        );
+        assert!(
+            optimized_text.contains("ret out: bits[1] = and("),
+            "expected direct input-bit predicate, got:\n{}",
+            optimized_text
+        );
+        for x in 0u64..16 {
+            let args = [IrValue::make_ubits(4, x).unwrap()];
+            let got_orig = match eval_fn(&f, &args) {
+                FnEvalResult::Success(s) => s.value,
+                FnEvalResult::Failure(f) => panic!("unexpected original eval failure: {:?}", f),
+            };
+            let got_opt = match eval_fn(&optimized, &args) {
+                FnEvalResult::Success(s) => s.value,
+                FnEvalResult::Failure(f) => panic!("unexpected optimized eval failure: {:?}", f),
+            };
+            assert_eq!(got_orig, got_opt, "mismatch at x={x}");
+        }
     }
 
     fn gated_inc_dec_factor_name(
