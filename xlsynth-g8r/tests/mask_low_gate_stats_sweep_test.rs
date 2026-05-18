@@ -2,7 +2,6 @@
 
 use xlsynth_g8r::aig::get_summary_stats::{SummaryStats, get_summary_stats};
 use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify};
-use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::ir2gates;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
@@ -136,18 +135,9 @@ fn stats_for_ir_text_via_ir2gates(ir_text: &str, enable_rewrite_mask_low: bool) 
         ir_text,
         None,
         ir2gates::Ir2GatesOptions {
-            fold: true,
-            hash: true,
             check_equivalence: true,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
             enable_rewrite_mask_low,
-            enable_rewrite_normalize_left: false,
-            adder_mapping: AdderMapping::default(),
-            mul_adder_mapping: None,
-            unsafe_gatify_gate_operation: false,
-            aug_opt: Default::default(),
+            ..ir2gates::Ir2GatesOptions::all_opts_disabled()
         },
     )
     .expect("ir2gates");

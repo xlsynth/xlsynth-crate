@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 
 use pretty_assertions::assert_eq;
 use xlsynth_g8r::aig::get_summary_stats::{SummaryStats, get_summary_stats};
-use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::ir2gates;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,20 +62,7 @@ fn gate_stats_for_wrapper(module_name: &str, source: &str, top: &str) -> Summary
     let out = ir2gates::ir2gates_from_ir_text(
         &optimized_ir_text,
         Some(&ir_top),
-        ir2gates::Ir2GatesOptions {
-            fold: true,
-            hash: true,
-            check_equivalence: false,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
-            enable_rewrite_mask_low: false,
-            enable_rewrite_normalize_left: false,
-            adder_mapping: AdderMapping::default(),
-            mul_adder_mapping: None,
-            aug_opt: Default::default(),
-            unsafe_gatify_gate_operation: false,
-        },
+        ir2gates::Ir2GatesOptions::all_opts_disabled(),
     )
     .expect("g8r should lower wrapper IR");
     get_summary_stats(&out.gatify_output.gate_fn)

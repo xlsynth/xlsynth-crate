@@ -2,7 +2,6 @@
 
 use xlsynth_g8r::aig::get_summary_stats::{get_aig_stats, get_summary_stats};
 use xlsynth_g8r::gatify::ir2gate;
-use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::ir2gates;
 use xlsynth_pir::ir_parser;
 
@@ -24,16 +23,7 @@ top fn main(a0: bits[8] id=1, a1: bits[8] id=2, a2: bits[8] id=3, a3: bits[8] id
         ir2gates::Ir2GatesOptions {
             fold: false,
             hash: false,
-            check_equivalence: false,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
-            enable_rewrite_mask_low: false,
-            enable_rewrite_normalize_left: false,
-            adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::default(),
-            mul_adder_mapping: None,
-            unsafe_gatify_gate_operation: false,
-            aug_opt: Default::default(),
+            ..ir2gates::Ir2GatesOptions::all_opts_disabled()
         },
     )
     .unwrap();
@@ -71,20 +61,7 @@ top fn f(x: bits[32] id=1, y: bits[7] id=2, z: bits[32] id=3) -> bits[1] {
     let out = ir2gates::ir2gates_from_ir_text(
         ir_text,
         None,
-        ir2gates::Ir2GatesOptions {
-            fold: true,
-            hash: true,
-            check_equivalence: false,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
-            enable_rewrite_mask_low: false,
-            enable_rewrite_normalize_left: false,
-            adder_mapping: AdderMapping::default(),
-            mul_adder_mapping: None,
-            unsafe_gatify_gate_operation: false,
-            aug_opt: Default::default(),
-        },
+        ir2gates::Ir2GatesOptions::all_opts_disabled(),
     )
     .unwrap();
 
@@ -117,40 +94,14 @@ top fn f(x: bits[32] id=1, y: bits[7] id=2, z: bits[32] id=3) -> bits[1] {
     let out_xy = ir2gates::ir2gates_from_ir_text(
         ir_text_xy,
         None,
-        ir2gates::Ir2GatesOptions {
-            fold: true,
-            hash: true,
-            check_equivalence: false,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
-            enable_rewrite_mask_low: false,
-            enable_rewrite_normalize_left: false,
-            adder_mapping: AdderMapping::default(),
-            mul_adder_mapping: None,
-            unsafe_gatify_gate_operation: false,
-            aug_opt: Default::default(),
-        },
+        ir2gates::Ir2GatesOptions::all_opts_disabled(),
     )
     .unwrap();
 
     let out_yx = ir2gates::ir2gates_from_ir_text(
         ir_text_yx,
         None,
-        ir2gates::Ir2GatesOptions {
-            fold: true,
-            hash: true,
-            check_equivalence: false,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
-            enable_rewrite_mask_low: false,
-            enable_rewrite_normalize_left: false,
-            adder_mapping: AdderMapping::default(),
-            mul_adder_mapping: None,
-            unsafe_gatify_gate_operation: false,
-            aug_opt: Default::default(),
-        },
+        ir2gates::Ir2GatesOptions::all_opts_disabled(),
     )
     .unwrap();
 
@@ -176,20 +127,7 @@ top fn cone(leaf_94: bits[9] id=1) -> bits[1] {
     let out = ir2gates::ir2gates_from_ir_text(
         ir_text,
         None,
-        ir2gates::Ir2GatesOptions {
-            fold: true,
-            hash: true,
-            check_equivalence: false,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
-            enable_rewrite_mask_low: false,
-            enable_rewrite_normalize_left: false,
-            adder_mapping: AdderMapping::default(),
-            mul_adder_mapping: None,
-            unsafe_gatify_gate_operation: false,
-            aug_opt: Default::default(),
-        },
+        ir2gates::Ir2GatesOptions::all_opts_disabled(),
     )
     .unwrap();
 

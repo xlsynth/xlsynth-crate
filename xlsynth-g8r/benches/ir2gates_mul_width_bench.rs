@@ -10,7 +10,6 @@ use xlsynth_g8r::cut_db::loader::CutDb;
 use xlsynth_g8r::cut_db_cli_defaults::{
     CUT_DB_REWRITE_MAX_CUTS_PER_NODE_CLI, CUT_DB_REWRITE_MAX_ITERATIONS_CLI,
 };
-use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::ir2gates;
 
 static CUT_DB: OnceLock<Arc<CutDb>> = OnceLock::new();
@@ -34,19 +33,7 @@ fn run_ir2gates_like_flow_for_umul(width: usize) {
     let ir2gates_output = ir2gates::ir2gates_from_ir_text(
         &ir_text,
         None,
-        ir2gates::Ir2GatesOptions {
-            fold: true,
-            hash: true,
-            check_equivalence: false,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
-            enable_rewrite_mask_low: false,
-            adder_mapping: AdderMapping::default(),
-            mul_adder_mapping: None,
-            aug_opt: Default::default(),
-            unsafe_gatify_gate_operation: false,
-        },
+        ir2gates::Ir2GatesOptions::all_opts_disabled(),
     )
     .unwrap();
     let gate_fn = ir2gates_output.gatify_output.gate_fn;

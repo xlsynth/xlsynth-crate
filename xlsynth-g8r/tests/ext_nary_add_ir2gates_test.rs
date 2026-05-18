@@ -165,16 +165,9 @@ fn lower_ir_to_gates_output_with_options(
         ir2gates::Ir2GatesOptions {
             fold,
             hash,
-            check_equivalence: false,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
             enable_rewrite_nary_add,
-            enable_rewrite_mask_low: false,
-            enable_rewrite_normalize_left: false,
             adder_mapping,
-            mul_adder_mapping: None,
-            unsafe_gatify_gate_operation: false,
-            aug_opt: Default::default(),
+            ..ir2gates::Ir2GatesOptions::all_opts_disabled()
         },
     )
     .expect("ir2gates")

@@ -23,8 +23,9 @@ pub struct Ir2GatesOptions {
     pub aug_opt: AugOptOptions,
 }
 
-impl Default for Ir2GatesOptions {
-    fn default() -> Self {
+impl Ir2GatesOptions {
+    /// Returns ir2gates options with all prep-for-gatify rewrites enabled.
+    pub fn all_opts_enabled() -> Self {
         let prep_defaults = PrepForGatifyOptions::all_opts_enabled();
         Self {
             fold: true,
@@ -40,6 +41,31 @@ impl Default for Ir2GatesOptions {
             unsafe_gatify_gate_operation: false,
             aug_opt: AugOptOptions::default(),
         }
+    }
+
+    /// Returns ir2gates options with all prep-for-gatify rewrites disabled.
+    pub fn all_opts_disabled() -> Self {
+        let prep_defaults = PrepForGatifyOptions::all_opts_disabled();
+        Self {
+            fold: true,
+            hash: true,
+            check_equivalence: false,
+            enable_rewrite_carry_out: prep_defaults.enable_rewrite_carry_out,
+            enable_rewrite_prio_encode: prep_defaults.enable_rewrite_prio_encode,
+            enable_rewrite_nary_add: prep_defaults.enable_rewrite_nary_add,
+            enable_rewrite_mask_low: prep_defaults.enable_rewrite_mask_low,
+            enable_rewrite_normalize_left: prep_defaults.enable_rewrite_normalize_left,
+            adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
+            mul_adder_mapping: None,
+            unsafe_gatify_gate_operation: false,
+            aug_opt: AugOptOptions::default(),
+        }
+    }
+}
+
+impl Default for Ir2GatesOptions {
+    fn default() -> Self {
+        Self::all_opts_enabled()
     }
 }
 
