@@ -31,26 +31,9 @@ top fn ext_clz_{bit_count}b(input: bits[{bit_count}] id=1) -> bits[{out_w}] {{\n
 
 fn stats_for_ext_clz(bit_count: u32) -> SummaryStats {
     let pir_fn = parse_top_fn(&build_ext_clz_ir_text(bit_count));
-    let gate_fn = gatify(
-        &pir_fn,
-        GatifyOptions {
-            fold: true,
-            hash: true,
-            check_equivalence: false,
-            adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::default(),
-            mul_adder_mapping: None,
-            range_info: None,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
-            enable_rewrite_mask_low: false,
-            enable_rewrite_normalize_left: false,
-            array_index_lowering_strategy: Default::default(),
-            unsafe_gatify_gate_operation: false,
-        },
-    )
-    .expect("gatify")
-    .gate_fn;
+    let gate_fn = gatify(&pir_fn, GatifyOptions::all_opts_disabled())
+        .expect("gatify")
+        .gate_fn;
     get_summary_stats(&gate_fn)
 }
 

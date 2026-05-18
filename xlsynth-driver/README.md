@@ -391,7 +391,8 @@ The command above leaves three artifacts:
 Runs the same `prep_for_gatify` stage used by `ir2gates` / `ir2g8r`, then emits
 the top-only residual PIR package to stdout without constructing a `GateFn`.
 This is useful for inspecting extension-op rewrites such as `ext_clz`,
-`ext_prio_encode`, `ext_nary_add`, and `ext_mask_low`.
+`ext_prio_encode`, `ext_nary_add`, `ext_mask_low`, and
+`ext_normalize_left`.
 
 Supported flags:
 

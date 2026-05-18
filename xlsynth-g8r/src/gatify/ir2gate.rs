@@ -4102,6 +4102,48 @@ pub struct GatifyOptions {
     pub unsafe_gatify_gate_operation: bool,
 }
 
+impl GatifyOptions {
+    /// Returns optimized gatify options with all gatify-controlled rewrites
+    /// enabled.
+    pub fn all_opts_enabled() -> Self {
+        Self {
+            fold: true,
+            hash: true,
+            check_equivalence: false,
+            adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
+            mul_adder_mapping: None,
+            range_info: None,
+            enable_rewrite_carry_out: true,
+            enable_rewrite_prio_encode: true,
+            enable_rewrite_nary_add: true,
+            enable_rewrite_mask_low: true,
+            enable_rewrite_normalize_left: true,
+            array_index_lowering_strategy: Default::default(),
+            unsafe_gatify_gate_operation: false,
+        }
+    }
+
+    /// Returns optimized gatify options with all gatify-controlled rewrites
+    /// disabled.
+    pub fn all_opts_disabled() -> Self {
+        Self {
+            fold: true,
+            hash: true,
+            check_equivalence: false,
+            adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
+            mul_adder_mapping: None,
+            range_info: None,
+            enable_rewrite_carry_out: false,
+            enable_rewrite_prio_encode: false,
+            enable_rewrite_nary_add: false,
+            enable_rewrite_mask_low: false,
+            enable_rewrite_normalize_left: false,
+            array_index_lowering_strategy: Default::default(),
+            unsafe_gatify_gate_operation: false,
+        }
+    }
+}
+
 // Type alias for the lowering map
 pub type IrToGateMap = HashMap<ir::NodeRef, AigBitVector>;
 
