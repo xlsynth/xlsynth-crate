@@ -1113,8 +1113,8 @@ fn shll_const_and_resize(
     output_bit_count: usize,
     gb: &mut GateBuilder,
 ) -> AigBitVector {
-    if output_bit_count == 0 {
-        return AigBitVector::zeros(0);
+    if output_bit_count == 0 || shift >= output_bit_count {
+        return AigBitVector::zeros(output_bit_count);
     }
     let mut shifted = vec![gb.get_false(); shift];
     shifted.extend(arg_bits.iter_lsb_to_msb().cloned());

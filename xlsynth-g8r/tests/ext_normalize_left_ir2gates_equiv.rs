@@ -58,6 +58,25 @@ top fn ext_normalize_left_5b(input: bits[5] id=1) -> (bits[7], bits[4]) {
 }
 
 #[test]
+fn direct_ext_normalize_left_large_shift_offset_matches_desugared_semantics() {
+    let pir_fn = parse_top_fn(
+        r#"package sample
+
+top fn ext_normalize_left_zeroed(input: bits[4] id=1) -> bits[8] {
+  ret normalized: bits[8] = ext_normalize_left(input, shift_offset=8, normalized_bit_count=8, id=2)
+}
+"#,
+    );
+    let mut desugared_fn = pir_fn.clone();
+    desugar_extensions_in_fn(&mut desugared_fn).expect("desugar ext_normalize_left");
+
+    let gate_ext = gatify_for_test(&pir_fn);
+    let gate_desugared = gatify_for_test(&desugared_fn);
+    check_equivalence::prove_same_gate_fn_via_ir(&gate_ext, &gate_desugared)
+        .expect("large-offset ext_normalize_left lowering should match desugared semantics");
+}
+
+#[test]
 fn prep_rewrites_normalize_shift_and_shares_widened_raw_clz() {
     let pir_fn = parse_top_fn(
         r#"package sample
