@@ -91,8 +91,6 @@ the workflow is updated in the same change.
 
 ## Agent Guidance: xlsynth-g8r and Fuzz Targets
 
-If you are modifying code in the `xlsynth-g8r` crate, you **must** ensure that all related fuzz targets (such as those in `xlsynth-g8r/fuzz/fuzz_targets`) still build. CI will fail if any fuzz target does not build. Always check the build status of these fuzz targets after making changes to `xlsynth-g8r`.
-
 All fuzz targets must be documented in `FUZZ.md` with a short paragraph describing the essential property under test and the main failure modes being surfaced.
 
 Do not bias a generic fuzz target by injecting a directed, hand-crafted case for

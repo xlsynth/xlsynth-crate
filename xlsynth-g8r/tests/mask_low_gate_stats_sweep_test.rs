@@ -2,7 +2,6 @@
 
 use xlsynth_g8r::aig::get_summary_stats::{SummaryStats, get_summary_stats};
 use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify};
-use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::ir2gates;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
@@ -125,25 +124,9 @@ top fn zero_concat_low_mask_{low_width}b(count: bits[{count_width}] id=1) -> bit
 
 fn stats_for_ext_mask_low(output_width: usize) -> SummaryStats {
     let pir_fn = parse_top_fn(&build_ext_mask_low_ir_text(output_width));
-    let gate_fn = gatify(
-        &pir_fn,
-        GatifyOptions {
-            fold: true,
-            hash: true,
-            check_equivalence: false,
-            adder_mapping: AdderMapping::default(),
-            mul_adder_mapping: None,
-            range_info: None,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
-            enable_rewrite_mask_low: false,
-            array_index_lowering_strategy: Default::default(),
-            unsafe_gatify_gate_operation: false,
-        },
-    )
-    .expect("gatify")
-    .gate_fn;
+    let gate_fn = gatify(&pir_fn, GatifyOptions::all_opts_disabled())
+        .expect("gatify")
+        .gate_fn;
     get_summary_stats(&gate_fn)
 }
 
@@ -152,17 +135,9 @@ fn stats_for_ir_text_via_ir2gates(ir_text: &str, enable_rewrite_mask_low: bool) 
         ir_text,
         None,
         ir2gates::Ir2GatesOptions {
-            fold: true,
-            hash: true,
             check_equivalence: true,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
             enable_rewrite_mask_low,
-            adder_mapping: AdderMapping::default(),
-            mul_adder_mapping: None,
-            unsafe_gatify_gate_operation: false,
-            aug_opt: Default::default(),
+            ..ir2gates::Ir2GatesOptions::all_opts_disabled()
         },
     )
     .expect("ir2gates");

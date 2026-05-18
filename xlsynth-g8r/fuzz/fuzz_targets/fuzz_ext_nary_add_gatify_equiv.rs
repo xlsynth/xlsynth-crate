@@ -10,7 +10,6 @@ use rand::{Rng, SeedableRng};
 use xlsynth::{IrBits, IrValue};
 use xlsynth_g8r::aig_serdes::gate2ir;
 use xlsynth_g8r::gatify::ir2gate::{self, GatifyOptions};
-use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_pir::desugar_extensions::emit_package_as_xls_ir_text;
 use xlsynth_pir::ir::{
     self, ExtNaryAddArchitecture, ExtNaryAddTerm, FileTable, MemberType, Node, NodePayload, Package,
@@ -125,20 +124,7 @@ fuzz_target!(|data: &[u8]| {
     let gatify_start = Instant::now();
     let gatify_output = ir2gate::gatify(
         pir_fn,
-        GatifyOptions {
-            fold: true,
-            hash: true,
-            check_equivalence: false,
-            adder_mapping: AdderMapping::default(),
-            mul_adder_mapping: None,
-            range_info: None,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
-            enable_rewrite_mask_low: false,
-            array_index_lowering_strategy: Default::default(),
-            unsafe_gatify_gate_operation: false,
-        },
+        GatifyOptions::all_opts_disabled(),
     )
     .expect("gatify should succeed for generated ext_nary_add IR");
     log::info!("gatify completed in {:?}", gatify_start.elapsed());

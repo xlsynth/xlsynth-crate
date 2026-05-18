@@ -1576,7 +1576,7 @@ fn build_special_payload(
             })
         }
         "ext_clz" => {
-            named_args.require_no_extra(operator, &[])?;
+            named_args.require_no_extra(operator, &["offset", "new_bit_count"])?;
             if positional_refs.len() != 1 {
                 return Err(MatchRewriteRuleApplyError::InvalidRewriteTemplate(
                     "ext_clz expects exactly 1 positional operand".to_string(),
@@ -1584,6 +1584,25 @@ fn build_special_payload(
             }
             Ok(NodePayload::ExtClz {
                 arg: positional_refs[0],
+                offset: named_args.require_numeric("offset")?,
+                new_bit_count: named_args.require_numeric("new_bit_count")?,
+            })
+        }
+        "ext_normalize_left" => {
+            named_args.require_no_extra(
+                operator,
+                &["shift_offset", "normalized_bit_count", "clz_bit_count"],
+            )?;
+            if positional_refs.len() != 1 {
+                return Err(MatchRewriteRuleApplyError::InvalidRewriteTemplate(
+                    "ext_normalize_left expects exactly 1 positional operand".to_string(),
+                ));
+            }
+            Ok(NodePayload::ExtNormalizeLeft {
+                arg: positional_refs[0],
+                shift_offset: named_args.require_numeric("shift_offset")?,
+                normalized_bit_count: named_args.require_numeric("normalized_bit_count")?,
+                clz_bit_count: named_args.numerics.get("clz_bit_count").copied(),
             })
         }
         "ext_mask_low" => {

@@ -30,7 +30,6 @@ use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;
 use crate::aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Output, PirNodeIds};
 use crate::aig::topo::topo_sort_refs;
 use crate::gatify::ir2gate::{GatifyOptions, gatify};
-use crate::ir2gate_utils::AdderMapping;
 use crate::prove_gate_fn_equiv_common::{EquivResult, GateFormalBackend};
 use crate::prove_gate_fn_equiv_sat::{
     CadicalSat, IncrementalSat, SatModel, SatSolveResult, prove_gate_fn_equiv_with_backend,
@@ -341,20 +340,7 @@ pub fn confirm_or_deny_candidate_equivalence(
     gate_fn: &GateFn,
     candidate: &IrAigEquivalenceCandidate,
 ) -> Result<bool, String> {
-    let opts = GatifyOptions {
-        fold: true,
-        hash: true,
-        check_equivalence: false,
-        adder_mapping: AdderMapping::default(),
-        mul_adder_mapping: None,
-        range_info: None,
-        enable_rewrite_carry_out: false,
-        enable_rewrite_prio_encode: false,
-        enable_rewrite_nary_add: false,
-        enable_rewrite_mask_low: false,
-        array_index_lowering_strategy: Default::default(),
-        unsafe_gatify_gate_operation: false,
-    };
+    let opts = GatifyOptions::all_opts_disabled();
     let proofs =
         prove_equivalence_candidates_varisat(pir_fn, gate_fn, &[candidate.clone()], &opts)?;
     match &proofs[0].result {

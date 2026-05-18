@@ -211,6 +211,14 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 .action(ArgAction::Set),
         )
         .arg(
+            Arg::new("enable_rewrite_normalize_left")
+                .long("enable-rewrite-normalize-left")
+                .value_name("BOOL")
+                .help("Enable left-normalize rewrite in prep_for_gatify.")
+                .value_parser(["true", "false"])
+                .action(ArgAction::Set),
+        )
+        .arg(
             Arg::new("unsafe_gatify_gate_operation")
                 .long("unsafe-gatify-gate-operation")
                 .value_name("BOOL")
@@ -503,6 +511,11 @@ fn parse_canonical_g8r_options(matches: &ArgMatches) -> CanonicalG8rOptions {
             matches,
             "enable_rewrite_mask_low",
             defaults.enable_rewrite_mask_low,
+        ),
+        enable_rewrite_normalize_left: parse_cli_bool(
+            matches,
+            "enable_rewrite_normalize_left",
+            defaults.enable_rewrite_normalize_left,
         ),
         unsafe_gatify_gate_operation: parse_cli_bool(
             matches,

@@ -155,6 +155,11 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> CanonicalG8rOptions
         "enable-rewrite-mask-low",
         defaults.enable_rewrite_mask_low,
     );
+    let enable_rewrite_normalize_left = parse_bool(
+        matches,
+        "enable-rewrite-normalize-left",
+        defaults.enable_rewrite_normalize_left,
+    );
     let unsafe_gatify_gate_operation = parse_bool(
         matches,
         "unsafe-gatify-gate-operation",
@@ -203,6 +208,7 @@ pub(crate) fn parse_g8r_cli_options(matches: &ArgMatches) -> CanonicalG8rOptions
         enable_rewrite_prio_encode,
         enable_rewrite_nary_add,
         enable_rewrite_mask_low,
+        enable_rewrite_normalize_left,
         unsafe_gatify_gate_operation,
         adder_mapping,
         mul_adder_mapping,

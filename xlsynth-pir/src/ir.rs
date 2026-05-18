@@ -118,6 +118,20 @@ impl Type {
     }
 }
 
+/// Returns the result type for `ext_normalize_left`.
+pub fn ext_normalize_left_result_type(
+    normalized_bit_count: usize,
+    clz_bit_count: Option<usize>,
+) -> Type {
+    match clz_bit_count {
+        Some(clz_bit_count) => Type::Tuple(vec![
+            Box::new(Type::Bits(normalized_bit_count)),
+            Box::new(Type::Bits(clz_bit_count)),
+        ]),
+        None => Type::Bits(normalized_bit_count),
+    }
+}
+
 impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -449,9 +463,25 @@ pub enum NodePayload {
     /// bits-typed operand.
     ///
     /// Semantics: for `arg: bits[N]`, returns the number of consecutive zeros
-    /// starting at the MSb edge. As with `clz`, an all-zero input returns `N`.
+    /// starting at the MSb edge, plus `offset`, as `bits[new_bit_count]`. As
+    /// with `clz`, an all-zero input contributes the count `N`.
     ExtClz {
         arg: NodeRef,
+        offset: usize,
+        new_bit_count: usize,
+    },
+    /// Extension (non-upstream) op: normalize a bits-typed operand left by its
+    /// leading-zero count plus a static shift offset.
+    ///
+    /// Semantics: for `arg: bits[N]`, zero-extend `arg` to
+    /// `bits[normalized_bit_count]` and logically shift it left by
+    /// `clz(arg) + shift_offset`. If `clz_bit_count` is present, the result is
+    /// `(normalized, clz(arg))`; otherwise the result is only `normalized`.
+    ExtNormalizeLeft {
+        arg: NodeRef,
+        shift_offset: usize,
+        normalized_bit_count: usize,
+        clz_bit_count: Option<usize>,
     },
     /// Extension (non-upstream) op: build a low-bit mask from a dynamic count.
     ///
@@ -560,6 +590,7 @@ impl NodePayload {
             NodePayload::ExtCarryOut { .. }
                 | NodePayload::ExtPrioEncode { .. }
                 | NodePayload::ExtClz { .. }
+                | NodePayload::ExtNormalizeLeft { .. }
                 | NodePayload::ExtMaskLow { .. }
                 | NodePayload::ExtNaryAdd { .. }
         )
@@ -586,6 +617,7 @@ impl NodePayload {
             NodePayload::ExtCarryOut { .. } => "ext_carry_out",
             NodePayload::ExtPrioEncode { .. } => "ext_prio_encode",
             NodePayload::ExtClz { .. } => "ext_clz",
+            NodePayload::ExtNormalizeLeft { .. } => "ext_normalize_left",
             NodePayload::ExtMaskLow { .. } => "ext_mask_low",
             NodePayload::ExtNaryAdd { .. } => "ext_nary_add",
             NodePayload::Assert { .. } => "assert",
@@ -660,7 +692,22 @@ impl NodePayload {
                 }
                 Ok(())
             }
-            NodePayload::ExtClz { .. } => Ok(()),
+            NodePayload::ExtClz {
+                arg,
+                new_bit_count: _,
+                ..
+            } => {
+                if !matches!(f.get_node_ty(*arg), Type::Bits(_)) {
+                    return Err("ext_clz arg must be bits-typed".to_string());
+                }
+                Ok(())
+            }
+            NodePayload::ExtNormalizeLeft { arg, .. } => {
+                if !matches!(f.get_node_ty(*arg), Type::Bits(_)) {
+                    return Err("ext_normalize_left arg must be bits-typed".to_string());
+                }
+                Ok(())
+            }
             NodePayload::ExtMaskLow { count } => {
                 if !matches!(f.get_node_ty(*count), Type::Bits(_)) {
                     return Err("ext_mask_low count must be bits-typed".to_string());
@@ -702,7 +749,31 @@ impl NodePayload {
             NodePayload::ExtPrioEncode { arg, lsb_prio } => {
                 vec![format_operand(*arg), format!("lsb_prio={}", lsb_prio)]
             }
-            NodePayload::ExtClz { arg } => vec![format_operand(*arg)],
+            NodePayload::ExtClz {
+                arg,
+                offset,
+                new_bit_count,
+            } => vec![
+                format_operand(*arg),
+                format!("offset={}", offset),
+                format!("new_bit_count={}", new_bit_count),
+            ],
+            NodePayload::ExtNormalizeLeft {
+                arg,
+                shift_offset,
+                normalized_bit_count,
+                clz_bit_count,
+            } => {
+                let mut attrs = vec![
+                    format_operand(*arg),
+                    format!("shift_offset={}", shift_offset),
+                    format!("normalized_bit_count={}", normalized_bit_count),
+                ];
+                if let Some(clz_bit_count) = clz_bit_count {
+                    attrs.push(format!("clz_bit_count={}", clz_bit_count));
+                }
+                attrs
+            }
             NodePayload::ExtMaskLow { count } => vec![format_operand(*count)],
             NodePayload::ExtNaryAdd { terms, arch } => {
                 let mut attrs: Vec<String> = terms
@@ -1050,6 +1121,28 @@ impl Node {
             NodePayload::SignExt { new_bit_count, .. }
             | NodePayload::ZeroExt { new_bit_count, .. } => {
                 format!(", new_bit_count={}", new_bit_count)
+            }
+            NodePayload::ExtClz {
+                offset,
+                new_bit_count,
+                ..
+            } => {
+                format!(", offset={}, new_bit_count={}", offset, new_bit_count)
+            }
+            NodePayload::ExtNormalizeLeft {
+                shift_offset,
+                normalized_bit_count,
+                clz_bit_count,
+                ..
+            } => {
+                let mut attrs = format!(
+                    ", shift_offset={}, normalized_bit_count={}",
+                    shift_offset, normalized_bit_count
+                );
+                if let Some(clz_bit_count) = clz_bit_count {
+                    attrs.push_str(&format!(", clz_bit_count={}", clz_bit_count));
+                }
+                attrs
             }
             _ => "".to_string(),
         };

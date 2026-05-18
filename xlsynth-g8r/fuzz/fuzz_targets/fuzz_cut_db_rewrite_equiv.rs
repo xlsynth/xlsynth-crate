@@ -7,8 +7,8 @@ use std::sync::OnceLock;
 
 use xlsynth_g8r::aig::cut_db_rewrite::{RewriteOptions, rewrite_gatefn_with_cut_db};
 use xlsynth_g8r::cut_db::loader::CutDb;
-use xlsynth_g8r::prove_gate_fn_equiv_common::EquivResult;
-use xlsynth_g8r::prove_gate_fn_equiv_sat::{Ctx as VarisatCtx, prove_gate_fn_equiv as prove_sat};
+use xlsynth_g8r::prove_gate_fn_equiv_common::{EquivResult, GateFormalBackend};
+use xlsynth_g8r::prove_gate_fn_equiv_sat::prove_gate_fn_equiv_with_backend;
 use xlsynth_g8r_fuzz::{FuzzGraph, build_graph};
 
 static CUT_DB_BYTES: &[u8] = include_bytes!("../../data/cut_db_v1.bin");
@@ -47,8 +47,13 @@ fuzz_target!(|graph: FuzzGraph| {
         },
     );
 
-    let mut ctx = VarisatCtx::new();
-    match prove_sat(&orig_g, &rewritten, &mut ctx) {
+    match prove_gate_fn_equiv_with_backend(
+        &orig_g,
+        &rewritten,
+        GateFormalBackend::Cadical,
+    )
+    .expect("Cadical gate equivalence should run for cut-db rewrites")
+    {
         EquivResult::Proved => {}
         EquivResult::Disproved(cex) => {
             panic!("cut-db rewrite broke equivalence; counterexample inputs: {:?}", cex);

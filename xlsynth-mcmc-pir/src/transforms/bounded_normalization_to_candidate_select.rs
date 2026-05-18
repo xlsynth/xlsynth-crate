@@ -12,7 +12,7 @@ pub struct BoundedNormalizationToCandidateSelectTransform;
 impl BoundedNormalizationToCandidateSelectTransform {
     fn clz_of_arg(f: &IrFn, amount: NodeRef) -> Option<NodeRef> {
         match f.get_node(amount).payload {
-            NodePayload::ExtClz { arg } => Some(arg),
+            NodePayload::ExtClz { arg, .. } => Some(arg),
             NodePayload::Encode { arg: one_hot } => {
                 let NodePayload::OneHot {
                     arg: reversed,
@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn expands_ext_clz_shift_to_candidates() {
         let ir_text = r#"fn t(x: bits[4] id=1) -> bits[4] {
-  c: bits[3] = ext_clz(x, id=2)
+  c: bits[3] = ext_clz(x, offset=0, new_bit_count=3, id=2)
   ret out: bits[4] = shll(x, c, id=3)
 }"#;
         let mut f = ir_parser::Parser::new(ir_text).parse_fn().unwrap();

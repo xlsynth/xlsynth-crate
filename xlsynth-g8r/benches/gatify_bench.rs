@@ -7,7 +7,6 @@ use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use xlsynth_g8r::{
     gate_builder::GateBuilderOptions,
     gatify::ir2gate,
-    ir2gate_utils::AdderMapping,
     test_utils::{Opt, load_bf16_add_sample, load_bf16_mul_sample},
 };
 
@@ -26,16 +25,7 @@ fn gatify_bf16_mul_benchmark(c: &mut Criterion) {
             let gatify_options = ir2gate::GatifyOptions {
                 fold: builder_options.fold,
                 hash: builder_options.hash,
-                check_equivalence: false, // Not needed for benchmark
-                adder_mapping: AdderMapping::default(),
-                mul_adder_mapping: None,
-                range_info: None,
-                enable_rewrite_carry_out: false,
-                enable_rewrite_prio_encode: false,
-                enable_rewrite_nary_add: false,
-                enable_rewrite_mask_low: false,
-                array_index_lowering_strategy: Default::default(),
-                unsafe_gatify_gate_operation: false,
+                ..ir2gate::GatifyOptions::all_opts_disabled()
             };
             ir2gate::gatify(black_box(&ir_fn), gatify_options).unwrap();
         })
@@ -50,16 +40,7 @@ fn gatify_bf16_mul_benchmark(c: &mut Criterion) {
             let gatify_options = ir2gate::GatifyOptions {
                 fold: builder_options.fold,
                 hash: builder_options.hash,
-                check_equivalence: false, // Not needed for benchmark
-                adder_mapping: AdderMapping::default(),
-                mul_adder_mapping: None,
-                range_info: None,
-                enable_rewrite_carry_out: false,
-                enable_rewrite_prio_encode: false,
-                enable_rewrite_nary_add: false,
-                enable_rewrite_mask_low: false,
-                array_index_lowering_strategy: Default::default(),
-                unsafe_gatify_gate_operation: false,
+                ..ir2gate::GatifyOptions::all_opts_disabled()
             };
             ir2gate::gatify(black_box(&ir_fn), gatify_options).unwrap();
         })
@@ -74,16 +55,7 @@ fn gatify_bf16_mul_benchmark(c: &mut Criterion) {
             let gatify_options = ir2gate::GatifyOptions {
                 fold: builder_options.fold,
                 hash: builder_options.hash,
-                check_equivalence: false, // Not needed for benchmark
-                adder_mapping: AdderMapping::default(),
-                mul_adder_mapping: None,
-                range_info: None,
-                enable_rewrite_carry_out: false,
-                enable_rewrite_prio_encode: false,
-                enable_rewrite_nary_add: false,
-                enable_rewrite_mask_low: false,
-                array_index_lowering_strategy: Default::default(),
-                unsafe_gatify_gate_operation: false,
+                ..ir2gate::GatifyOptions::all_opts_disabled()
             };
             ir2gate::gatify(black_box(&ir_fn), gatify_options).unwrap();
         })
@@ -107,16 +79,7 @@ fn gatify_bf16_add_benchmark(c: &mut Criterion) {
             let gatify_options = ir2gate::GatifyOptions {
                 fold: builder_options.fold,
                 hash: builder_options.hash,
-                check_equivalence: false,
-                adder_mapping: AdderMapping::default(),
-                mul_adder_mapping: None,
-                range_info: None,
-                enable_rewrite_carry_out: false,
-                enable_rewrite_prio_encode: false,
-                enable_rewrite_nary_add: false,
-                enable_rewrite_mask_low: false,
-                array_index_lowering_strategy: Default::default(),
-                unsafe_gatify_gate_operation: false,
+                ..ir2gate::GatifyOptions::all_opts_disabled()
             };
             ir2gate::gatify(black_box(&ir_fn), gatify_options).unwrap();
         })
@@ -131,16 +94,7 @@ fn gatify_bf16_add_benchmark(c: &mut Criterion) {
             let gatify_options = ir2gate::GatifyOptions {
                 fold: builder_options.fold,
                 hash: builder_options.hash,
-                check_equivalence: false,
-                adder_mapping: AdderMapping::default(),
-                mul_adder_mapping: None,
-                range_info: None,
-                enable_rewrite_carry_out: false,
-                enable_rewrite_prio_encode: false,
-                enable_rewrite_nary_add: false,
-                enable_rewrite_mask_low: false,
-                array_index_lowering_strategy: Default::default(),
-                unsafe_gatify_gate_operation: false,
+                ..ir2gate::GatifyOptions::all_opts_disabled()
             };
             ir2gate::gatify(black_box(&ir_fn), gatify_options).unwrap();
         })
@@ -155,16 +109,7 @@ fn gatify_bf16_add_benchmark(c: &mut Criterion) {
             let gatify_options = ir2gate::GatifyOptions {
                 fold: builder_options.fold,
                 hash: builder_options.hash,
-                check_equivalence: false,
-                adder_mapping: AdderMapping::default(),
-                mul_adder_mapping: None,
-                range_info: None,
-                enable_rewrite_carry_out: false,
-                enable_rewrite_prio_encode: false,
-                enable_rewrite_nary_add: false,
-                enable_rewrite_mask_low: false,
-                array_index_lowering_strategy: Default::default(),
-                unsafe_gatify_gate_operation: false,
+                ..ir2gate::GatifyOptions::all_opts_disabled()
             };
             ir2gate::gatify(black_box(&ir_fn), gatify_options).unwrap();
         })

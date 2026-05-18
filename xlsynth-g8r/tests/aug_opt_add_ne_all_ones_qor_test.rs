@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use xlsynth_g8r::aig::get_summary_stats::get_summary_stats;
-use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::ir2gates;
 use xlsynth_pir::aug_opt::{AugOptMode, AugOptOptions};
 
@@ -21,21 +20,13 @@ fn stats_for_aug_opt_mode(enable_aug_opt: bool) -> (usize, usize) {
         sample_ir_text(),
         Some("cone"),
         ir2gates::Ir2GatesOptions {
-            fold: true,
-            hash: true,
             check_equivalence: true,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
-            enable_rewrite_mask_low: false,
-            adder_mapping: AdderMapping::default(),
-            mul_adder_mapping: None,
-            unsafe_gatify_gate_operation: false,
             aug_opt: AugOptOptions {
                 enable: enable_aug_opt,
                 rounds: 1,
                 mode: AugOptMode::PirOnly,
             },
+            ..ir2gates::Ir2GatesOptions::all_opts_disabled()
         },
     )
     .expect("ir2gates");

@@ -8,11 +8,25 @@ use xlsynth_prover::prover::prove_ir_equiv;
 use xlsynth_prover::prover::types::{AssertionSemantics, EquivParallelism, EquivResult, ProverFn};
 
 #[test]
-fn ext_clz_equivalent_to_desugared_export_form_and_exports_to_upstream() {
-    for w in 1u64..=16u64 {
-        let out_w = xlsynth_pir::math::ceil_log2((w as usize).saturating_add(1));
+fn ext_normalize_left_equivalent_to_desugared_export_form_and_exports_to_upstream() {
+    for (input_width, normalized_bit_count, shift_offset, clz_bit_count) in [
+        (1usize, 1usize, 0usize, None),
+        (4, 4, 0, Some(3)),
+        (4, 8, 1, Some(3)),
+        (7, 8, 0, Some(8)),
+        (8, 16, 1, None),
+    ] {
+        let ret_ty = match clz_bit_count {
+            Some(clz_bit_count) => {
+                format!("(bits[{normalized_bit_count}], bits[{clz_bit_count}])")
+            }
+            None => format!("bits[{normalized_bit_count}]"),
+        };
+        let clz_attr = clz_bit_count
+            .map(|clz_bit_count| format!(", clz_bit_count={clz_bit_count}"))
+            .unwrap_or_default();
         let ir = format!(
-            "package test\n\nfn f(arg: bits[{w}] id=1) -> bits[{out_w}] {{\n  ret r: bits[{out_w}] = ext_clz(arg, offset=0, new_bit_count={out_w}, id=2)\n}}\n"
+            "package test\n\nfn f(arg: bits[{input_width}] id=1) -> {ret_ty} {{\n  ret r: {ret_ty} = ext_normalize_left(arg, shift_offset={shift_offset}, normalized_bit_count={normalized_bit_count}{clz_attr}, id=2)\n}}\n"
         );
         let pkg = {
             let mut p = Parser::new(&ir);
@@ -21,8 +35,8 @@ fn ext_clz_equivalent_to_desugared_export_form_and_exports_to_upstream() {
 
         let exported = emit_package_as_xls_ir_text(&pkg).expect("export desugaring");
         assert!(
-            !exported.contains("ext_clz"),
-            "export should not contain ext_clz:\n{}",
+            !exported.contains("ext_normalize_left"),
+            "export should not contain ext_normalize_left:\n{}",
             exported
         );
         let exported_pkg = IrPackage::parse_ir(&exported, None).expect("upstream parse");
@@ -50,16 +64,15 @@ fn ext_clz_equivalent_to_desugared_export_form_and_exports_to_upstream() {
             EquivResult::Proved => {}
             EquivResult::ToolchainDisproved(msg)
                 if msg.contains("Unknown operation")
-                    && msg.contains("ext_clz")
+                    && msg.contains("ext_normalize_left")
                     && msg.contains("string-to-op conversion") =>
             {
-                // Not a sample failure: when no SMT backend is enabled,
-                // `xlsynth-prover` falls back to the external XLS toolchain
-                // prover, and upstream XLS does not understand PIR extension ops
-                // like `ext_clz`.
                 return;
             }
-            _ => panic!("formal equivalence failed at w={}: {:?}", w, res),
+            _ => panic!(
+                "formal equivalence failed at input_width={} normalized_bit_count={} shift_offset={} clz_bit_count={:?}: {:?}",
+                input_width, normalized_bit_count, shift_offset, clz_bit_count, res
+            ),
         }
     }
 }

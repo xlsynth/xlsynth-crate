@@ -200,18 +200,8 @@ fn gatify_for_test(pir_fn: &ir::Fn, enable_rewrite_mask_low: bool) -> xlsynth_g8
     gatify(
         pir_fn,
         GatifyOptions {
-            fold: true,
-            hash: true,
-            check_equivalence: false,
-            adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::default(),
-            mul_adder_mapping: None,
-            range_info: None,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
             enable_rewrite_mask_low,
-            array_index_lowering_strategy: Default::default(),
-            unsafe_gatify_gate_operation: false,
+            ..GatifyOptions::all_opts_disabled()
         },
     )
     .expect("gatify")

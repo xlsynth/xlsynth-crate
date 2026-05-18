@@ -4138,7 +4138,6 @@ mod tests {
     use count_toggles::WeightedSwitchingOptions;
     use tempfile::tempdir;
     use xlsynth_g8r::gatify::ir2gate::{self, GatifyOptions};
-    use xlsynth_g8r::ir2gate_utils::AdderMapping;
     use xlsynth_pir::ir::{ExtNaryAddArchitecture, NodePayload};
     use xlsynth_pir::ir_parser;
     use xlsynth_pir::ir_utils::remap_payload_with;
@@ -5290,24 +5289,8 @@ top fn f(x: bits[8] id=1) -> bits[8] {
             })
             .expect("expected reconstructed brent_kung ext_nary_add");
 
-        let gatify_output = ir2gate::gatify(
-            &optimized,
-            GatifyOptions {
-                fold: true,
-                hash: true,
-                check_equivalence: false,
-                adder_mapping: AdderMapping::default(),
-                array_index_lowering_strategy: Default::default(),
-                mul_adder_mapping: None,
-                range_info: None,
-                enable_rewrite_carry_out: false,
-                enable_rewrite_prio_encode: false,
-                enable_rewrite_nary_add: false,
-                enable_rewrite_mask_low: false,
-                unsafe_gatify_gate_operation: false,
-            },
-        )
-        .unwrap();
+        let gatify_output =
+            ir2gate::gatify(&optimized, GatifyOptions::all_opts_disabled()).unwrap();
         let gate_fn_text = gatify_output.gate_fn.to_string();
         assert!(
             gate_fn_text.contains(&format!(

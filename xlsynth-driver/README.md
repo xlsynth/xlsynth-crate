@@ -364,6 +364,7 @@ Converts an XLS IR file to an `xlsynth_g8r::GateFn` (i.e. a gate-level netlist i
   - `--enable-rewrite-prio-encode=<BOOL>` – when `true`, enable prio-encode and CLZ idiom rewrites during `prep_for_gatify` (introduces `ext_prio_encode` / `ext_clz`). Default `true`.
   - `--enable-rewrite-nary-add=<BOOL>` – when `true`, rewrite width-preserving add/sub trees and explicit gated increment/decrement helper networks into `ext_nary_add`, then greedily absorb/merge nested terms to a fixed point during `prep_for_gatify`. Default `true`.
   - `--enable-rewrite-mask-low=<BOOL>` – when `true`, rewrite dynamic low-mask idioms into `ext_mask_low` during `prep_for_gatify`. Default `true`.
+  - `--enable-rewrite-normalize-left=<BOOL>` – when `true`, rewrite left-normalization idioms into `ext_normalize_left` during `prep_for_gatify`. Default `true`.
   - `--unsafe-gatify-gate-operation=<BOOL>` – when `true`, lower XLS `gate` operations by masking the flattened value with the `bits[1]` predicate. Default `false`.
   - `--reassociation=<BOOL>` – when `true`, rebalance single-fanout AND supergates after FRAIG and again after cut-db rewrite. Default `true`.
   - `--cut-db-enable-large-cone-rewrite=<BOOL>` – when `true`, run the large-cone cut-db rewrite phases after the 4-input cut-db phases. Default `true`.
@@ -384,6 +385,28 @@ The command above leaves three artifacts:
 1. `my_module.g8r` – human-readable GateFn (stdout redirection).
 1. `my_module.g8rbin` – compact bincode serialisation of the same GateFn.
 1. `my_module.stats.json` – structural summary statistics as JSON.
+
+### `ir-prep-for-gates`: IR to prepared residual PIR
+
+Runs the same `prep_for_gatify` stage used by `ir2gates` / `ir2g8r`, then emits
+the top-only residual PIR package to stdout without constructing a `GateFn`.
+This is useful for inspecting extension-op rewrites such as `ext_clz`,
+`ext_prio_encode`, `ext_nary_add`, `ext_mask_low`, and
+`ext_normalize_left`.
+
+Supported flags:
+
+- `--top <TOP>` – override the top-level entry point (required if the IR package has no `top fn`).
+- The same gate-lowering flags accepted by `ir2gates` are accepted. The prep
+  output is affected by the `--enable-rewrite-*` flags; later GateFn-only
+  optimization / analysis flags are accepted for CLI consistency but do not
+  change the emitted prepared PIR.
+
+Example:
+
+```shell
+xlsynth-driver ir-prep-for-gates my_module.opt.ir --top main > my_module.prepared.ir
+```
 
 ### `g8r2v`: GateFn to gate-level netlist (Verilog-like)
 
@@ -1591,6 +1614,7 @@ Supported flags include the common gate-optimization controls:
 - `--enable-rewrite-prio-encode=<BOOL>` – when `true`, enable prio-encode and CLZ idiom rewrites during `prep_for_gatify` (introduces `ext_prio_encode` / `ext_clz`). Default `true`.
 - `--enable-rewrite-nary-add=<BOOL>` – when `true`, rewrite width-preserving add/sub trees and explicit gated increment/decrement helper networks into `ext_nary_add`, then greedily absorb/merge nested terms to a fixed point during `prep_for_gatify`. Default `true`.
 - `--enable-rewrite-mask-low=<BOOL>` – when `true`, rewrite dynamic low-mask idioms into `ext_mask_low` during `prep_for_gatify`. Default `true`.
+- `--enable-rewrite-normalize-left=<BOOL>` – when `true`, rewrite left-normalization idioms into `ext_normalize_left` during `prep_for_gatify`. Default `true`.
 - `--unsafe-gatify-gate-operation=<BOOL>` – when `true`, lower XLS `gate` operations by masking the flattened value with the `bits[1]` predicate. Default `false`.
 - `--reassociation=<BOOL>` – when `true`, rebalance single-fanout AND supergates after FRAIG and again after cut-db rewrite. Default `true`.
 - `--cut-db-enable-large-cone-rewrite=<BOOL>` – when `true`, run the large-cone cut-db rewrite phases after the 4-input cut-db phases. Default `true`.

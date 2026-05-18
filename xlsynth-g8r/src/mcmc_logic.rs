@@ -786,20 +786,7 @@ pub fn load_start<P: AsRef<Path>>(p_generic: P) -> Result<GateFn> {
                 })?;
                 println!("Found top function: {}", top_entity.name);
 
-                let gatify_options = GatifyOptions {
-                    fold: true,
-                    hash: true,
-                    check_equivalence: false,
-                    adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
-                    mul_adder_mapping: None,
-                    range_info: None,
-                    enable_rewrite_carry_out: false,
-                    enable_rewrite_prio_encode: false,
-                    enable_rewrite_nary_add: false,
-                    enable_rewrite_mask_low: false,
-                    array_index_lowering_strategy: Default::default(),
-                    unsafe_gatify_gate_operation: false,
-                };
+                let gatify_options = GatifyOptions::all_opts_disabled();
                 let gatify_output = ir2gate::gatify(top_entity, gatify_options)
                     .map_err(|e| anyhow::anyhow!("Failed to gatify IR from '{}': {}", p_str, e))?;
                 println!("Successfully gatified main function into GateFn.");

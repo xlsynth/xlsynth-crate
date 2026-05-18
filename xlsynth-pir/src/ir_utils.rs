@@ -265,7 +265,8 @@ pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
         } => vec![*arg, *start, *update_value],
         ExtCarryOut { lhs, rhs, c_in } => vec![*lhs, *rhs, *c_in],
         ExtPrioEncode { arg, lsb_prio: _ } => vec![*arg],
-        ExtClz { arg } => vec![*arg],
+        ExtClz { arg, .. } => vec![*arg],
+        ExtNormalizeLeft { arg, .. } => vec![*arg],
         ExtMaskLow { count } => vec![*count],
         ExtNaryAdd { terms, arch: _ } => terms.iter().map(|term| term.operand).collect(),
         Assert {
@@ -999,8 +1000,25 @@ where
             arg: map((0, *arg)),
             lsb_prio: *lsb_prio,
         },
-        NodePayload::ExtClz { arg } => NodePayload::ExtClz {
+        NodePayload::ExtClz {
+            arg,
+            offset,
+            new_bit_count,
+        } => NodePayload::ExtClz {
             arg: map((0, *arg)),
+            offset: *offset,
+            new_bit_count: *new_bit_count,
+        },
+        NodePayload::ExtNormalizeLeft {
+            arg,
+            shift_offset,
+            normalized_bit_count,
+            clz_bit_count,
+        } => NodePayload::ExtNormalizeLeft {
+            arg: map((0, *arg)),
+            shift_offset: *shift_offset,
+            normalized_bit_count: *normalized_bit_count,
+            clz_bit_count: *clz_bit_count,
         },
         NodePayload::ExtMaskLow { count } => NodePayload::ExtMaskLow {
             count: map((0, *count)),

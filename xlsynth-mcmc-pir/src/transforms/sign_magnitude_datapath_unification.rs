@@ -32,7 +32,7 @@ impl SignMagnitudeDatapathUnificationTransform {
                 | NodePayload::SignExt { arg: a, .. }
                 | NodePayload::ZeroExt { arg: a, .. }
                 | NodePayload::Encode { arg: a }
-                | NodePayload::ExtClz { arg: a }
+                | NodePayload::ExtClz { arg: a, .. }
                 | NodePayload::Decode { arg: a, .. } => stack.push(*a),
                 NodePayload::Nary(_, ops)
                 | NodePayload::Tuple(ops)

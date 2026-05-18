@@ -23,25 +23,9 @@ top fn ext_mask_low_{output_width}b_count{count_width}b(count: bits[{count_width
 }
 
 fn gatify_for_test(pir_fn: &ir::Fn) -> xlsynth_g8r::aig::GateFn {
-    gatify(
-        pir_fn,
-        GatifyOptions {
-            fold: true,
-            hash: true,
-            check_equivalence: false,
-            adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::default(),
-            mul_adder_mapping: None,
-            range_info: None,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
-            enable_rewrite_mask_low: false,
-            array_index_lowering_strategy: Default::default(),
-            unsafe_gatify_gate_operation: false,
-        },
-    )
-    .expect("gatify")
-    .gate_fn
+    gatify(pir_fn, GatifyOptions::all_opts_disabled())
+        .expect("gatify")
+        .gate_fn
 }
 
 #[test]

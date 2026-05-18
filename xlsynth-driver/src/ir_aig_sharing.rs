@@ -9,7 +9,6 @@ use xlsynth_g8r::aig_serdes::gate2ir::{repack_gate_fn_inputs_with_schema, GateFn
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
-use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::ir_aig_sharing::{
     get_equivalences, prove_equivalence_candidates_with_backend_streaming, CandidateProofResult,
     IrAigCandidateRhs, IrAigSharingOptions,
@@ -255,20 +254,7 @@ pub fn handle_ir_aig_sharing(matches: &ArgMatches, _config: &Option<ToolchainCon
         candidates.truncate(max_proofs);
     }
 
-    let gatify_opts = GatifyOptions {
-        fold: true,
-        hash: true,
-        check_equivalence: false,
-        adder_mapping: AdderMapping::default(),
-        array_index_lowering_strategy: Default::default(),
-        unsafe_gatify_gate_operation: false,
-        mul_adder_mapping: None,
-        range_info: None,
-        enable_rewrite_carry_out: false,
-        enable_rewrite_prio_encode: false,
-        enable_rewrite_nary_add: false,
-        enable_rewrite_mask_low: false,
-    };
+    let gatify_opts = GatifyOptions::all_opts_disabled();
 
     // Streaming proof + streaming per-node mapping output (in PIR topo order).
     let mut proved = 0usize;

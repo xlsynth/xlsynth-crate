@@ -6,18 +6,14 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 
-#[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]
-use xlsynth_g8r::prove_gate_fn_equiv_common::EquivResult;
-#[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]
-use xlsynth_g8r::prove_gate_fn_equiv_sat::{
-    Ctx as VarisatCtx, prove_gate_fn_equiv as prove_sat,
-};
-#[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]
-use xlsynth_g8r::prove_gate_fn_equiv_z3::{Ctx as Z3Ctx, prove_gate_fn_equiv as prove_z3};
+use xlsynth_g8r::prove_gate_fn_equiv_common::{EquivResult, GateFormalBackend};
+use xlsynth_g8r::prove_gate_fn_equiv_sat::prove_gate_fn_equiv_with_backend;
 use xlsynth_g8r::transforms::{self, transform_trait::TransformDirection};
 use xlsynth_g8r_fuzz::{FuzzGraph, build_graph};
 
-const NUM_STEPS: usize = 32;
+// Each successful step runs gate-level equivalence checks twice, so bound the
+// transform sequence to keep one fuzz input comfortably short.
+const NUM_STEPS: usize = 8;
 const MAX_TRANSFORM_DRAWS: usize = NUM_STEPS * 32;
 
 fn make_rng(graph: &FuzzGraph) -> StdRng {
@@ -48,7 +44,6 @@ fuzz_target!(|graph: FuzzGraph| {
         return;
     };
 
-    #[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]
     let orig_g = cur_g.clone();
 
     // Prepare the transform set & RNG.
@@ -87,51 +82,30 @@ fuzz_target!(|graph: FuzzGraph| {
 
         attempts += 1; // Count this attempted (and successful) application
 
-        // Cross-check equivalence solvers.
-        #[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]
-        {
-            let mut varisat_ctx = VarisatCtx::new();
-            let sat_orig_cur = prove_sat(&orig_g, &cur_g, &mut varisat_ctx);
-            let mut z3_ctx = Z3Ctx::new();
-            let z3_orig_cur = prove_z3(&orig_g, &cur_g, &mut z3_ctx);
-            assert_eq!(
-                matches!(sat_orig_cur, EquivResult::Proved),
-                matches!(z3_orig_cur, EquivResult::Proved),
-                "Disagreement between SAT and Z3 on orig vs cur (transform {}): {:?} vs {:?}",
-                t.display_name(),
-                sat_orig_cur,
-                z3_orig_cur
-            );
-        }
+        let _orig_cur = prove_gate_fn_equiv_with_backend(
+            &orig_g,
+            &cur_g,
+            GateFormalBackend::Cadical,
+        )
+        .expect("Cadical gate equivalence should run for orig vs cur");
 
-        #[cfg(any(feature = "with-z3-system", feature = "with-z3-built"))]
-        {
-            let mut varisat_ctx2 = VarisatCtx::new();
-            let mut z3_ctx2 = Z3Ctx::new();
-            let sat_cur_next = prove_sat(&cur_g, &next_g, &mut varisat_ctx2);
-            let z3_cur_next = prove_z3(&cur_g, &next_g, &mut z3_ctx2);
-            assert_eq!(
-                matches!(sat_cur_next, EquivResult::Proved),
-                matches!(z3_cur_next, EquivResult::Proved),
-                "Disagreement between SAT and Z3 on cur vs next (transform {}): {:?} vs {:?}",
-                t.display_name(),
-                sat_cur_next,
-                z3_cur_next
-            );
+        let cur_next = prove_gate_fn_equiv_with_backend(
+            &cur_g,
+            &next_g,
+            GateFormalBackend::Cadical,
+        )
+        .expect("Cadical gate equivalence should run for cur vs next");
 
-            // If the transform is claimed to be always-equivalent, equivalence must hold.
-            if t.always_equivalent() {
-                if !matches!(sat_cur_next, EquivResult::Proved) {
-                    log::info!(
-                        "ALWAYS-EQUIV transform {} produced inequivalence; panicking",
-                        t.display_name()
-                    );
-                    panic!(
-                        "Transform {} is marked always_equivalent but produced inequivalence",
-                        t.display_name()
-                    );
-                }
-            }
+        // If the transform is claimed to be always-equivalent, equivalence must hold.
+        if t.always_equivalent() && !matches!(cur_next, EquivResult::Proved) {
+            log::info!(
+                "ALWAYS-EQUIV transform {} produced inequivalence; panicking",
+                t.display_name()
+            );
+            panic!(
+                "Transform {} is marked always_equivalent but produced inequivalence",
+                t.display_name()
+            );
         }
 
         // Advance.

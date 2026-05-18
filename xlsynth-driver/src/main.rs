@@ -351,6 +351,10 @@ impl AppExt for clap::Command {
                 "Enable mask-low rewrite in prep_for_gatify (introduces ext_mask_low)",
             )
             .add_bool_arg(
+                "enable-rewrite-normalize-left",
+                "Enable left-normalize rewrite in prep_for_gatify (introduces ext_normalize_left)",
+            )
+            .add_bool_arg(
                 "unsafe-gatify-gate-operation",
                 "Opt into lowering XLS gate operations by masking the value with the predicate",
             )
@@ -1544,6 +1548,19 @@ fn main() {
                         .index(1),
                 )
                 .add_ir_top_arg(false),
+        )
+        .subcommand(
+            clap::Command::new("ir-prep-for-gates")
+                .about("Runs prep_for_gatify on IR and emits the residual PIR to stdout")
+                .arg(
+                    clap::Arg::new("ir_input_file")
+                        .value_name("IR_INPUT_FILE")
+                        .help("The input IR file")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .add_ir_top_arg(false)
+                .add_g8r_lowering_flags(),
         )
         .subcommand(
             clap::Command::new("ir2gates")
@@ -3610,6 +3627,9 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("ir-annotate-ranges", subm)) => {
             ir_annotate_ranges::handle_ir_annotate_ranges(subm, &config);
+        }
+        Some(("ir-prep-for-gates", subm)) => {
+            ir2gates::handle_ir_prep_for_gates(subm, &config);
         }
         Some(("ir2gates", subm)) => {
             ir2gates::handle_ir2gates(subm, &config);

@@ -112,6 +112,14 @@ enum WrappedExtensionSpec {
     },
     ExtClz {
         input_width: usize,
+        output_width: usize,
+        offset: usize,
+    },
+    ExtNormalizeLeft {
+        input_width: usize,
+        normalized_bit_count: usize,
+        shift_offset: usize,
+        clz_bit_count: Option<usize>,
     },
     ExtMaskLow {
         output_width: usize,
@@ -219,7 +227,63 @@ fn parse_wrapped_extension_spec_from_attr(
                 .copied()
                 .ok_or_else(|| ParseError::new("missing width for ext_clz metadata".to_string()))?;
             let input_width = parse_wrapped_extension_usize_field(input_width, "ext_clz", "width")?;
-            Ok(Some(WrappedExtensionSpec::ExtClz { input_width }))
+            let output_width = fields.get("out_width").copied().ok_or_else(|| {
+                ParseError::new("missing out_width for ext_clz metadata".to_string())
+            })?;
+            let output_width =
+                parse_wrapped_extension_usize_field(output_width, "ext_clz", "out_width")?;
+            let offset = fields.get("offset").copied().ok_or_else(|| {
+                ParseError::new("missing offset for ext_clz metadata".to_string())
+            })?;
+            let offset = parse_wrapped_extension_usize_field(offset, "ext_clz", "offset")?;
+            Ok(Some(WrappedExtensionSpec::ExtClz {
+                input_width,
+                output_width,
+                offset,
+            }))
+        }
+        "ext_normalize_left" => {
+            let input_width = fields.get("width").copied().ok_or_else(|| {
+                ParseError::new("missing width for ext_normalize_left metadata".to_string())
+            })?;
+            let input_width =
+                parse_wrapped_extension_usize_field(input_width, "ext_normalize_left", "width")?;
+            let normalized_bit_count =
+                fields.get("normalized_width").copied().ok_or_else(|| {
+                    ParseError::new(
+                        "missing normalized_width for ext_normalize_left metadata".to_string(),
+                    )
+                })?;
+            let normalized_bit_count = parse_wrapped_extension_usize_field(
+                normalized_bit_count,
+                "ext_normalize_left",
+                "normalized_width",
+            )?;
+            let shift_offset = fields.get("shift_offset").copied().ok_or_else(|| {
+                ParseError::new("missing shift_offset for ext_normalize_left metadata".to_string())
+            })?;
+            let shift_offset = parse_wrapped_extension_usize_field(
+                shift_offset,
+                "ext_normalize_left",
+                "shift_offset",
+            )?;
+            let clz_bit_count = fields
+                .get("clz_width")
+                .copied()
+                .map(|clz_bit_count| {
+                    parse_wrapped_extension_usize_field(
+                        clz_bit_count,
+                        "ext_normalize_left",
+                        "clz_width",
+                    )
+                })
+                .transpose()?;
+            Ok(Some(WrappedExtensionSpec::ExtNormalizeLeft {
+                input_width,
+                normalized_bit_count,
+                shift_offset,
+                clz_bit_count,
+            }))
         }
         "ext_mask_low" => {
             let output_width = fields.get("out_width").copied().ok_or_else(|| {
@@ -413,18 +477,50 @@ fn canonicalize_wrapped_extension_helper_spec(
                 arch,
             })
         }
-        WrappedExtensionSpec::ExtClz { input_width } => {
-            let expected_ret_ty = ir::Type::Bits(ceil_log2(input_width.saturating_add(1)));
+        WrappedExtensionSpec::ExtClz {
+            input_width,
+            output_width,
+            offset,
+        } => {
+            let expected_ret_ty = ir::Type::Bits(output_width);
             if f.params.len() != 1
                 || f.params[0].ty != ir::Type::Bits(input_width)
                 || f.ret_ty != expected_ret_ty
             {
                 return Err(ParseError::new(format!(
-                    "ffi wrapper helper '{}' does not match ext_clz signature for width {}",
-                    f.name, input_width
+                    "ffi wrapper helper '{}' does not match ext_clz signature for width {}, out_width {}, offset {}",
+                    f.name, input_width, output_width, offset
                 )));
             }
-            Ok(WrappedExtensionSpec::ExtClz { input_width })
+            Ok(WrappedExtensionSpec::ExtClz {
+                input_width,
+                output_width,
+                offset,
+            })
+        }
+        WrappedExtensionSpec::ExtNormalizeLeft {
+            input_width,
+            normalized_bit_count,
+            shift_offset,
+            clz_bit_count,
+        } => {
+            let expected_ret_ty =
+                ir::ext_normalize_left_result_type(normalized_bit_count, clz_bit_count);
+            if f.params.len() != 1
+                || f.params[0].ty != ir::Type::Bits(input_width)
+                || f.ret_ty != expected_ret_ty
+            {
+                return Err(ParseError::new(format!(
+                    "ffi wrapper helper '{}' does not match ext_normalize_left signature for width {}, normalized width {}, shift offset {}, clz width {:?}",
+                    f.name, input_width, normalized_bit_count, shift_offset, clz_bit_count
+                )));
+            }
+            Ok(WrappedExtensionSpec::ExtNormalizeLeft {
+                input_width,
+                normalized_bit_count,
+                shift_offset,
+                clz_bit_count,
+            })
         }
         WrappedExtensionSpec::ExtMaskLow {
             output_width,
@@ -521,7 +617,11 @@ fn convert_ffi_invokes_to_extension_ops_in_fn(
                     c_in: operands[2],
                 };
             }
-            WrappedExtensionSpec::ExtClz { input_width } => {
+            WrappedExtensionSpec::ExtClz {
+                input_width,
+                output_width,
+                offset,
+            } => {
                 if operands.len() != 1 {
                     return Err(ParseError::new(format!(
                         "invoke of wrapped ext_clz helper '{}' expected 1 operand, got {}",
@@ -529,7 +629,7 @@ fn convert_ffi_invokes_to_extension_ops_in_fn(
                         operands.len()
                     )));
                 }
-                let expected_ty = ir::Type::Bits(ceil_log2(input_width.saturating_add(1)));
+                let expected_ty = ir::Type::Bits(output_width);
                 if f.nodes[idx].ty != expected_ty {
                     return Err(ParseError::new(format!(
                         "invoke of wrapped ext_clz helper '{}' had type {}, expected {}",
@@ -543,7 +643,46 @@ fn convert_ffi_invokes_to_extension_ops_in_fn(
                         to_apply, operand_tys[0], expected_operand_ty
                     )));
                 }
-                f.nodes[idx].payload = ir::NodePayload::ExtClz { arg: operands[0] };
+                f.nodes[idx].payload = ir::NodePayload::ExtClz {
+                    arg: operands[0],
+                    offset,
+                    new_bit_count: output_width,
+                };
+            }
+            WrappedExtensionSpec::ExtNormalizeLeft {
+                input_width,
+                normalized_bit_count,
+                shift_offset,
+                clz_bit_count,
+            } => {
+                if operands.len() != 1 {
+                    return Err(ParseError::new(format!(
+                        "invoke of wrapped ext_normalize_left helper '{}' expected 1 operand, got {}",
+                        to_apply,
+                        operands.len()
+                    )));
+                }
+                let expected_ty =
+                    ir::ext_normalize_left_result_type(normalized_bit_count, clz_bit_count);
+                if f.nodes[idx].ty != expected_ty {
+                    return Err(ParseError::new(format!(
+                        "invoke of wrapped ext_normalize_left helper '{}' had type {}, expected {}",
+                        to_apply, f.nodes[idx].ty, expected_ty
+                    )));
+                }
+                let expected_operand_ty = ir::Type::Bits(input_width);
+                if operand_tys[0] != expected_operand_ty {
+                    return Err(ParseError::new(format!(
+                        "invoke of wrapped ext_normalize_left helper '{}' operand 0 had type {}, expected {}",
+                        to_apply, operand_tys[0], expected_operand_ty
+                    )));
+                }
+                f.nodes[idx].payload = ir::NodePayload::ExtNormalizeLeft {
+                    arg: operands[0],
+                    shift_offset,
+                    normalized_bit_count,
+                    clz_bit_count,
+                };
             }
             WrappedExtensionSpec::ExtMaskLow {
                 output_width,
@@ -1996,10 +2135,19 @@ impl Parser {
             }
             "ext_clz" => {
                 let arg = self.parse_node_ref(&node_env, "ext_clz arg")?;
+                let mut offset: Option<usize> = None;
+                let mut new_bit_count: Option<usize> = None;
                 if self.peek_is(",") {
                     self.dropc()?;
-                    let id_attr = self.parse_id_attribute()?;
-                    maybe_id = Some(id_attr);
+                    offset = Some(self.parse_usize_attribute("offset")?);
+                }
+                if self.peek_is(",") {
+                    self.dropc()?;
+                    new_bit_count = Some(self.parse_usize_attribute("new_bit_count")?);
+                }
+                if self.peek_is(",") {
+                    self.dropc()?;
+                    maybe_id = Some(self.parse_id_attribute()?);
                 }
                 if maybe_id.is_none() {
                     return Err(ParseError::new(format!(
@@ -2007,7 +2155,78 @@ impl Parser {
                         self.rest_of_line()
                     )));
                 }
-                (ir::NodePayload::ExtClz { arg }, maybe_id.unwrap())
+                let offset = offset.ok_or_else(|| {
+                    ParseError::new(format!(
+                        "expected offset for ext_clz; rest_of_line: {:?}",
+                        self.rest_of_line()
+                    ))
+                })?;
+                let new_bit_count = new_bit_count.ok_or_else(|| {
+                    ParseError::new(format!(
+                        "expected new_bit_count for ext_clz; rest_of_line: {:?}",
+                        self.rest_of_line()
+                    ))
+                })?;
+                (
+                    ir::NodePayload::ExtClz {
+                        arg,
+                        offset,
+                        new_bit_count,
+                    },
+                    maybe_id.unwrap(),
+                )
+            }
+            "ext_normalize_left" => {
+                let arg = self.parse_node_ref(&node_env, "ext_normalize_left arg")?;
+                let mut shift_offset: Option<usize> = None;
+                let mut normalized_bit_count: Option<usize> = None;
+                let mut clz_bit_count: Option<usize> = None;
+                if self.peek_is(",") {
+                    self.dropc()?;
+                    shift_offset = Some(self.parse_usize_attribute("shift_offset")?);
+                }
+                if self.peek_is(",") {
+                    self.dropc()?;
+                    normalized_bit_count = Some(self.parse_usize_attribute("normalized_bit_count")?);
+                }
+                if self.peek_is(",") {
+                    self.dropc()?;
+                    self.drop_whitespace_and_comments();
+                    if self.peek_is("clz_bit_count") {
+                        clz_bit_count = Some(self.parse_usize_attribute("clz_bit_count")?);
+                        if self.peek_is(",") {
+                            self.dropc()?;
+                        }
+                    }
+                    maybe_id = Some(self.parse_id_attribute()?);
+                }
+                if maybe_id.is_none() {
+                    return Err(ParseError::new(format!(
+                        "expected id for ext_normalize_left; rest_of_line: {:?}",
+                        self.rest_of_line()
+                    )));
+                }
+                let shift_offset = shift_offset.ok_or_else(|| {
+                    ParseError::new(format!(
+                        "expected shift_offset for ext_normalize_left; rest_of_line: {:?}",
+                        self.rest_of_line()
+                    ))
+                })?;
+                let normalized_bit_count = normalized_bit_count.ok_or_else(|| {
+                    ParseError::new(format!(
+                        "expected normalized_bit_count for ext_normalize_left; rest_of_line: {:?}",
+                        self.rest_of_line()
+                    ))
+                })?;
+                (
+                    ir::NodePayload::ExtNormalizeLeft {
+                        arg,
+                        shift_offset,
+                        normalized_bit_count,
+                        clz_bit_count,
+                    },
+                    maybe_id.unwrap(),
+                )
             }
             "ext_mask_low" => {
                 let count = self.parse_node_ref(&node_env, "ext_mask_low count")?;

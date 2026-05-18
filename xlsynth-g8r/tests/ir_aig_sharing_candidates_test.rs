@@ -7,7 +7,6 @@ use xlsynth_g8r::ir_aig_sharing::{
     CandidateProofResult, IrAigCandidateRhs, IrAigSharingOptions, get_equivalences,
     prove_equivalence_candidates_cadical, prove_equivalence_candidates_varisat,
 };
-use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_pir::ir_parser::Parser as PirParser;
 
 #[test]
@@ -54,20 +53,7 @@ top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
         "expected a candidate mapping to the AND node"
     );
 
-    let gatify_opts = GatifyOptions {
-        fold: true,
-        hash: true,
-        check_equivalence: false,
-        adder_mapping: AdderMapping::default(),
-        mul_adder_mapping: None,
-        range_info: None,
-        enable_rewrite_carry_out: false,
-        enable_rewrite_prio_encode: false,
-        enable_rewrite_nary_add: false,
-        enable_rewrite_mask_low: false,
-        array_index_lowering_strategy: Default::default(),
-        unsafe_gatify_gate_operation: false,
-    };
+    let gatify_opts = GatifyOptions::all_opts_disabled();
     let proofs = prove_equivalence_candidates_varisat(pir_fn, &gate_fn, &hits, &gatify_opts)
         .expect("prove equivalence candidates");
     assert!(

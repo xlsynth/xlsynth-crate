@@ -12,7 +12,7 @@ use xlsynth_pir::math::ceil_log2;
 fn build_ext_clz_ir(width: u64) -> String {
     let out_w = ceil_log2((width as usize).saturating_add(1));
     format!(
-        "package test\n\nfn f(arg: bits[{width}] id=1) -> bits[{out_w}] {{\n  ret r: bits[{out_w}] = ext_clz(arg, id=2)\n}}\n"
+        "package test\n\nfn f(arg: bits[{width}] id=1) -> bits[{out_w}] {{\n  ret r: bits[{out_w}] = ext_clz(arg, offset=0, new_bit_count={out_w}, id=2)\n}}\n"
     )
 }
 
@@ -56,7 +56,7 @@ fn ext_clz_round_trips_via_text() {
 
     let text = pkg.to_string();
     assert!(
-        text.contains("ext_clz(arg, id=2)"),
+        text.contains("ext_clz(arg, offset=0, new_bit_count=4, id=2)"),
         "expected ext_clz to appear in emitted text:\n{}",
         text
     );
@@ -85,12 +85,12 @@ fn ext_clz_round_trips_via_ffi_wrapped_text() {
         wrapped
     );
     assert!(
-        wrapped.contains("__pir_ext__ext_clz__w8"),
+        wrapped.contains("__pir_ext__ext_clz__inw8__outw4__off0"),
         "expected deterministic helper name in wrapped text:\n{}",
         wrapped
     );
     assert!(
-        wrapped.contains("invoke(arg, to_apply=__pir_ext__ext_clz__w8, id=2)"),
+        wrapped.contains("invoke(arg, to_apply=__pir_ext__ext_clz__inw8__outw4__off0, id=2)"),
         "expected invoke of the ffi helper in wrapped text:\n{}",
         wrapped
     );
@@ -102,7 +102,11 @@ fn ext_clz_round_trips_via_ffi_wrapped_text() {
     };
     let wrapped_f = wrapped_pkg.get_fn("f").expect("fn f present");
     assert_eq!(wrapped_pkg.members.len(), 1);
-    assert!(wrapped_pkg.get_fn("__pir_ext__ext_clz__w8").is_none());
+    assert!(
+        wrapped_pkg
+            .get_fn("__pir_ext__ext_clz__inw8__outw4__off0")
+            .is_none()
+    );
     assert_eq!(get_ext_clz_count(wrapped_f), 1);
 
     let rewrapped =

@@ -640,18 +640,8 @@ top fn do_and(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
         let gatify_output = gatify(
             &ir_top,
             GatifyOptions {
-                fold: true,
                 check_equivalence: true,
-                hash: true,
-                adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
-                mul_adder_mapping: None,
-                range_info: None,
-                enable_rewrite_carry_out: false,
-                enable_rewrite_prio_encode: false,
-                enable_rewrite_nary_add: false,
-                enable_rewrite_mask_low: false,
-                array_index_lowering_strategy: Default::default(),
-                unsafe_gatify_gate_operation: false,
+                ..GatifyOptions::all_opts_disabled()
             },
         )
         .unwrap();
@@ -674,18 +664,8 @@ top fn do_not(a: bits[1] id=1) -> bits[1] {
         let gatify_output = gatify(
             &ir_top,
             GatifyOptions {
-                fold: true,
                 check_equivalence: true,
-                hash: true,
-                adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
-                mul_adder_mapping: None,
-                range_info: None,
-                enable_rewrite_carry_out: false,
-                enable_rewrite_prio_encode: false,
-                enable_rewrite_nary_add: false,
-                enable_rewrite_mask_low: false,
-                array_index_lowering_strategy: Default::default(),
-                unsafe_gatify_gate_operation: false,
+                ..GatifyOptions::all_opts_disabled()
             },
         )
         .unwrap();
@@ -710,18 +690,8 @@ top fn do_nand(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
         let gatify_output = gatify(
             &ir_top,
             GatifyOptions {
-                fold: true,
                 check_equivalence: true,
-                hash: true,
-                adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
-                mul_adder_mapping: None,
-                range_info: None,
-                enable_rewrite_carry_out: false,
-                enable_rewrite_prio_encode: false,
-                enable_rewrite_nary_add: false,
-                enable_rewrite_mask_low: false,
-                array_index_lowering_strategy: Default::default(),
-                unsafe_gatify_gate_operation: false,
+                ..GatifyOptions::all_opts_disabled()
             },
         )
         .unwrap();

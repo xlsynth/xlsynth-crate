@@ -21,7 +21,7 @@ use crate::ir::{Param, ParamId};
 use crate::ir_rebase_ids::rebase_fn_ids;
 use crate::ir_utils::compact_and_toposort_in_place;
 use crate::math::ceil_log2;
-use xlsynth::IrValue;
+use xlsynth::{IrBits, IrValue};
 
 #[derive(Debug, Clone)]
 pub struct DesugarError {
@@ -187,14 +187,34 @@ impl ExtPrioEncodeShape {
 struct ExtClzShape {
     input_width: usize,
     output_width: usize,
+    offset: usize,
 }
 
 impl ExtClzShape {
-    fn new(input_width: usize) -> Self {
+    fn new(input_width: usize, output_width: usize, offset: usize) -> Self {
         Self {
             input_width,
-            output_width: ceil_log2(input_width.saturating_add(1)),
+            output_width,
+            offset,
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ExtNormalizeLeftShape {
+    input_width: usize,
+    normalized_bit_count: usize,
+    shift_offset: usize,
+    clz_bit_count: Option<usize>,
+}
+
+impl ExtNormalizeLeftShape {
+    fn internal_shift_bit_count(self) -> usize {
+        ceil_log2(
+            self.input_width
+                .saturating_add(self.shift_offset)
+                .saturating_add(1),
+        )
     }
 }
 
@@ -211,9 +231,54 @@ fn analyze_ext_prio_encode(
 
 /// Validates `ext_clz` operands and returns the shared shape info used by both
 /// inline lowering and FFI wrapper synthesis.
-fn analyze_ext_clz(f: &Fn, arg: NodeRef) -> Result<ExtClzShape, DesugarError> {
+fn analyze_ext_clz(
+    f: &Fn,
+    nr: NodeRef,
+    arg: NodeRef,
+    offset: usize,
+    new_bit_count: usize,
+) -> Result<ExtClzShape, DesugarError> {
     let input_width = expect_bits_width(f, arg, "ext_clz.arg")?;
-    Ok(ExtClzShape::new(input_width))
+    match &f.get_node(nr).ty {
+        Type::Bits(width) if *width == new_bit_count => {
+            Ok(ExtClzShape::new(input_width, new_bit_count, offset))
+        }
+        ty => Err(DesugarError::new(format!(
+            "ext_clz result type must be bits[{new_bit_count}], got {ty}"
+        ))),
+    }
+}
+
+/// Validates `ext_normalize_left` operands and returns the shared shape info
+/// used by both inline lowering and FFI wrapper synthesis.
+fn analyze_ext_normalize_left(
+    f: &Fn,
+    nr: NodeRef,
+    arg: NodeRef,
+    shift_offset: usize,
+    normalized_bit_count: usize,
+    clz_bit_count: Option<usize>,
+) -> Result<ExtNormalizeLeftShape, DesugarError> {
+    let input_width = expect_bits_width(f, arg, "ext_normalize_left.arg")?;
+    if normalized_bit_count < input_width {
+        return Err(DesugarError::new(format!(
+            "ext_normalize_left normalized width {normalized_bit_count} must be at least input width {input_width}"
+        )));
+    }
+    let expected_ty =
+        crate::ir::ext_normalize_left_result_type(normalized_bit_count, clz_bit_count);
+    if f.get_node(nr).ty != expected_ty {
+        return Err(DesugarError::new(format!(
+            "ext_normalize_left result type must be {expected_ty}, got {}",
+            f.get_node(nr).ty
+        )));
+    }
+    Ok(ExtNormalizeLeftShape {
+        input_width,
+        normalized_bit_count,
+        shift_offset,
+        clz_bit_count,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -266,7 +331,11 @@ fn append_lowered_ext_prio_encode(f: &mut Fn, arg: NodeRef, shape: ExtPrioEncode
 
 /// Appends the basis-op implementation of `ext_clz` and returns the lowered
 /// encoded-result node.
-fn append_lowered_ext_clz(f: &mut Fn, arg: NodeRef, shape: ExtClzShape) -> NodeRef {
+fn append_lowered_ext_clz(
+    f: &mut Fn,
+    arg: NodeRef,
+    shape: ExtClzShape,
+) -> Result<NodeRef, DesugarError> {
     let reversed = push_node(
         f,
         Type::Bits(shape.input_width),
@@ -281,11 +350,70 @@ fn append_lowered_ext_clz(f: &mut Fn, arg: NodeRef, shape: ExtClzShape) -> NodeR
             lsb_prio: true,
         },
     );
-    push_node(
+    let encoded = push_node(
+        f,
+        Type::Bits(ceil_log2(shape.input_width.saturating_add(1))),
+        NodePayload::Encode { arg: one_hot },
+    );
+    let resized = extend_or_truncate_to_width(
+        f,
+        encoded,
+        shape.output_width,
+        /* signed= */ false,
+        "ext_clz.encoded",
+    )?;
+    if shape.offset == 0 {
+        return Ok(resized);
+    }
+    let offset = make_usize_bits_literal(f, shape.output_width, shape.offset);
+    Ok(push_node(
         f,
         Type::Bits(shape.output_width),
-        NodePayload::Encode { arg: one_hot },
-    )
+        NodePayload::Binop(Binop::Add, resized, offset),
+    ))
+}
+
+/// Appends the basis-op implementation of `ext_normalize_left` and returns the
+/// lowered normalized value or `(normalized, raw_clz)` tuple.
+fn append_lowered_ext_normalize_left(
+    f: &mut Fn,
+    arg: NodeRef,
+    shape: ExtNormalizeLeftShape,
+) -> Result<NodeRef, DesugarError> {
+    let normalized_input = extend_or_truncate_to_width(
+        f,
+        arg,
+        shape.normalized_bit_count,
+        /* signed= */ false,
+        "ext_normalize_left.arg",
+    )?;
+    let shift_amount = append_lowered_ext_clz(
+        f,
+        arg,
+        ExtClzShape::new(
+            shape.input_width,
+            shape.internal_shift_bit_count(),
+            shape.shift_offset,
+        ),
+    )?;
+    let normalized = push_node(
+        f,
+        Type::Bits(shape.normalized_bit_count),
+        NodePayload::Binop(Binop::Shll, normalized_input, shift_amount),
+    );
+    let Some(clz_bit_count) = shape.clz_bit_count else {
+        return Ok(normalized);
+    };
+    let raw_clz = append_lowered_ext_clz(
+        f,
+        arg,
+        ExtClzShape::new(shape.input_width, clz_bit_count, /* offset= */ 0),
+    )?;
+    Ok(push_node(
+        f,
+        crate::ir::ext_normalize_left_result_type(shape.normalized_bit_count, Some(clz_bit_count)),
+        NodePayload::Tuple(vec![normalized, raw_clz]),
+    ))
 }
 
 fn push_node(f: &mut Fn, ty: Type, payload: NodePayload) -> NodeRef {
@@ -314,6 +442,20 @@ fn make_ubits_literal(f: &mut Fn, width: usize, value: u64) -> NodeRef {
         f,
         Type::Bits(width),
         NodePayload::Literal(IrValue::make_ubits(width, value).expect("bits literal")),
+    )
+}
+
+fn make_usize_bits_literal(f: &mut Fn, width: usize, value: usize) -> NodeRef {
+    let mut bits = vec![false; width];
+    for (i, bit) in bits.iter_mut().enumerate() {
+        if i < usize::BITS as usize {
+            *bit = ((value >> i) & 1) == 1;
+        }
+    }
+    push_node(
+        f,
+        Type::Bits(width),
+        NodePayload::Literal(IrValue::from_bits(&IrBits::from_lsb_is_0(&bits))),
     )
 }
 
@@ -501,6 +643,14 @@ enum FfiWrapKey {
     },
     ExtClz {
         input_width: usize,
+        output_width: usize,
+        offset: usize,
+    },
+    ExtNormalizeLeft {
+        input_width: usize,
+        normalized_bit_count: usize,
+        shift_offset: usize,
+        clz_bit_count: Option<usize>,
     },
     ExtMaskLow {
         output_width: usize,
@@ -524,8 +674,26 @@ fn helper_base_name(key: &FfiWrapKey) -> String {
         FfiWrapKey::ExtCarryOut { width } => {
             format!("__pir_ext__ext_carry_out__w{width}")
         }
-        FfiWrapKey::ExtClz { input_width } => {
-            format!("__pir_ext__ext_clz__w{input_width}")
+        FfiWrapKey::ExtClz {
+            input_width,
+            output_width,
+            offset,
+        } => {
+            format!("__pir_ext__ext_clz__inw{input_width}__outw{output_width}__off{offset}")
+        }
+        FfiWrapKey::ExtNormalizeLeft {
+            input_width,
+            normalized_bit_count,
+            shift_offset,
+            clz_bit_count,
+        } => {
+            let mut name = format!(
+                "__pir_ext__ext_normalize_left__inw{input_width}__normw{normalized_bit_count}__off{shift_offset}"
+            );
+            if let Some(clz_bit_count) = clz_bit_count {
+                name.push_str(&format!("__clzw{clz_bit_count}"));
+            }
+            name
         }
         FfiWrapKey::ExtMaskLow {
             output_width,
@@ -617,9 +785,31 @@ fn helper_code_template(key: &FfiWrapKey) -> String {
         FfiWrapKey::ExtCarryOut { width } => format!(
             "pir_ext_carry_out {{fn}} (.lhs({{lhs}}), .rhs({{rhs}}), .c_in({{c_in}}), .out({{return}})); /* xlsynth_pir_ext=ext_carry_out;width={width} */"
         ),
-        FfiWrapKey::ExtClz { input_width } => {
-            let metadata = format!("xlsynth_pir_ext=ext_clz;width={input_width}");
+        FfiWrapKey::ExtClz {
+            input_width,
+            output_width,
+            offset,
+        } => {
+            let metadata = format!(
+                "xlsynth_pir_ext=ext_clz;width={input_width};out_width={output_width};offset={offset}"
+            );
             format!("pir_ext_clz {{fn}} (.arg({{arg}}), .out({{return}})); /* {metadata} */")
+        }
+        FfiWrapKey::ExtNormalizeLeft {
+            input_width,
+            normalized_bit_count,
+            shift_offset,
+            clz_bit_count,
+        } => {
+            let mut metadata = format!(
+                "xlsynth_pir_ext=ext_normalize_left;width={input_width};normalized_width={normalized_bit_count};shift_offset={shift_offset}"
+            );
+            if let Some(clz_bit_count) = clz_bit_count {
+                metadata.push_str(&format!(";clz_width={clz_bit_count}"));
+            }
+            format!(
+                "pir_ext_normalize_left {{fn}} (.arg({{arg}}), .out({{return}})); /* {metadata} */"
+            )
         }
         FfiWrapKey::ExtMaskLow {
             output_width,
@@ -792,19 +982,64 @@ fn make_helper_fn(name: String, key: &FfiWrapKey) -> Fn {
             helper.ret_node_ref = Some(ret_node_ref);
             helper
         }
-        FfiWrapKey::ExtClz { input_width } => {
+        FfiWrapKey::ExtClz {
+            input_width,
+            output_width,
+            offset,
+        } => {
             let params = vec![Param {
                 name: "arg".to_string(),
                 ty: Type::Bits(*input_width),
                 id: ParamId::new(1),
             }];
-            let shape = ExtClzShape::new(*input_width);
+            let shape = ExtClzShape::new(*input_width, *output_width, *offset);
             let mut helper =
                 make_helper_with_params(name, params, Type::Bits(shape.output_width), key);
-            let lowered = append_lowered_ext_clz(&mut helper, NodeRef { index: 1 }, shape);
+            let lowered = append_lowered_ext_clz(&mut helper, NodeRef { index: 1 }, shape)
+                .expect("helper ext_clz lowering must be well-typed");
             let ret_node_ref = push_node(
                 &mut helper,
                 Type::Bits(shape.output_width),
+                NodePayload::Unop(Unop::Identity, lowered),
+            );
+            helper.ret_node_ref = Some(ret_node_ref);
+            helper
+        }
+        FfiWrapKey::ExtNormalizeLeft {
+            input_width,
+            normalized_bit_count,
+            shift_offset,
+            clz_bit_count,
+        } => {
+            let params = vec![Param {
+                name: "arg".to_string(),
+                ty: Type::Bits(*input_width),
+                id: ParamId::new(1),
+            }];
+            let shape = ExtNormalizeLeftShape {
+                input_width: *input_width,
+                normalized_bit_count: *normalized_bit_count,
+                shift_offset: *shift_offset,
+                clz_bit_count: *clz_bit_count,
+            };
+            let mut helper = make_helper_with_params(
+                name,
+                params,
+                crate::ir::ext_normalize_left_result_type(
+                    shape.normalized_bit_count,
+                    shape.clz_bit_count,
+                ),
+                key,
+            );
+            let lowered =
+                append_lowered_ext_normalize_left(&mut helper, NodeRef { index: 1 }, shape)
+                    .expect("helper ext_normalize_left lowering must be well-typed");
+            let ret_node_ref = push_node(
+                &mut helper,
+                crate::ir::ext_normalize_left_result_type(
+                    shape.normalized_bit_count,
+                    shape.clz_bit_count,
+                ),
                 NodePayload::Unop(Unop::Identity, lowered),
             );
             helper.ret_node_ref = Some(ret_node_ref);
@@ -926,10 +1161,16 @@ fn wrap_extensions_in_fn(
                 };
                 changed = true;
             }
-            NodePayload::ExtClz { arg } => {
-                let shape = analyze_ext_clz(f, arg)?;
+            NodePayload::ExtClz {
+                arg,
+                offset,
+                new_bit_count,
+            } => {
+                let shape = analyze_ext_clz(f, nr, arg, offset, new_bit_count)?;
                 let key = FfiWrapKey::ExtClz {
                     input_width: shape.input_width,
+                    output_width: shape.output_width,
+                    offset: shape.offset,
                 };
                 let helper_name = get_or_create_helper_name(
                     &key,
@@ -940,6 +1181,44 @@ fn wrap_extensions_in_fn(
                 );
                 let node = f.get_node_mut(nr);
                 node.ty = Type::Bits(shape.output_width);
+                node.payload = NodePayload::Invoke {
+                    to_apply: helper_name,
+                    operands: vec![arg],
+                };
+                changed = true;
+            }
+            NodePayload::ExtNormalizeLeft {
+                arg,
+                shift_offset,
+                normalized_bit_count,
+                clz_bit_count,
+            } => {
+                let shape = analyze_ext_normalize_left(
+                    f,
+                    nr,
+                    arg,
+                    shift_offset,
+                    normalized_bit_count,
+                    clz_bit_count,
+                )?;
+                let key = FfiWrapKey::ExtNormalizeLeft {
+                    input_width: shape.input_width,
+                    normalized_bit_count: shape.normalized_bit_count,
+                    shift_offset: shape.shift_offset,
+                    clz_bit_count: shape.clz_bit_count,
+                };
+                let helper_name = get_or_create_helper_name(
+                    &key,
+                    helper_names,
+                    helper_fns,
+                    existing_names,
+                    current_max_text_id,
+                );
+                let node = f.get_node_mut(nr);
+                node.ty = crate::ir::ext_normalize_left_result_type(
+                    shape.normalized_bit_count,
+                    shape.clz_bit_count,
+                );
                 node.payload = NodePayload::Invoke {
                     to_apply: helper_name,
                     operands: vec![arg],
@@ -1121,17 +1400,61 @@ fn desugar_ext_clz_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
     for idx in 0..original_len {
         let nr = NodeRef { index: idx };
         let payload = f.get_node(nr).payload.clone();
-        let NodePayload::ExtClz { arg } = payload else {
+        let NodePayload::ExtClz {
+            arg,
+            offset,
+            new_bit_count,
+        } = payload
+        else {
             continue;
         };
         changed = true;
 
-        let shape = analyze_ext_clz(f, arg)?;
-        let encoded = append_lowered_ext_clz(f, arg, shape);
+        let shape = analyze_ext_clz(f, nr, arg, offset, new_bit_count)?;
+        let encoded = append_lowered_ext_clz(f, arg, shape)?;
 
         let node = f.get_node_mut(nr);
         node.ty = Type::Bits(shape.output_width);
         node.payload = NodePayload::Unop(Unop::Identity, encoded);
+    }
+
+    Ok(changed)
+}
+
+fn desugar_ext_normalize_left_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
+    let mut changed = false;
+
+    let original_len = f.nodes.len();
+    for idx in 0..original_len {
+        let nr = NodeRef { index: idx };
+        let payload = f.get_node(nr).payload.clone();
+        let NodePayload::ExtNormalizeLeft {
+            arg,
+            shift_offset,
+            normalized_bit_count,
+            clz_bit_count,
+        } = payload
+        else {
+            continue;
+        };
+        changed = true;
+
+        let shape = analyze_ext_normalize_left(
+            f,
+            nr,
+            arg,
+            shift_offset,
+            normalized_bit_count,
+            clz_bit_count,
+        )?;
+        let lowered = append_lowered_ext_normalize_left(f, arg, shape)?;
+
+        let node = f.get_node_mut(nr);
+        node.ty = crate::ir::ext_normalize_left_result_type(
+            shape.normalized_bit_count,
+            shape.clz_bit_count,
+        );
+        node.payload = NodePayload::Unop(Unop::Identity, lowered);
     }
 
     Ok(changed)
@@ -1166,6 +1489,7 @@ fn desugar_ext_mask_low_in_fn(f: &mut Fn) -> Result<bool, DesugarError> {
 pub fn desugar_extensions_in_fn(f: &mut Fn) -> Result<(), DesugarError> {
     let _changed = desugar_ext_carry_out_in_fn(f)?
         | desugar_ext_clz_in_fn(f)?
+        | desugar_ext_normalize_left_in_fn(f)?
         | desugar_ext_mask_low_in_fn(f)?
         | desugar_ext_nary_add_in_fn(f)?
         | desugar_ext_prio_encode_in_fn(f)?;

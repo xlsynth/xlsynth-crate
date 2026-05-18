@@ -16,14 +16,16 @@ pub struct Ir2GatesOptions {
     pub enable_rewrite_prio_encode: bool,
     pub enable_rewrite_nary_add: bool,
     pub enable_rewrite_mask_low: bool,
+    pub enable_rewrite_normalize_left: bool,
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
     pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
     pub unsafe_gatify_gate_operation: bool,
     pub aug_opt: AugOptOptions,
 }
 
-impl Default for Ir2GatesOptions {
-    fn default() -> Self {
+impl Ir2GatesOptions {
+    /// Returns ir2gates options with all prep-for-gatify rewrites enabled.
+    pub fn all_opts_enabled() -> Self {
         let prep_defaults = PrepForGatifyOptions::all_opts_enabled();
         Self {
             fold: true,
@@ -33,11 +35,37 @@ impl Default for Ir2GatesOptions {
             enable_rewrite_prio_encode: prep_defaults.enable_rewrite_prio_encode,
             enable_rewrite_nary_add: prep_defaults.enable_rewrite_nary_add,
             enable_rewrite_mask_low: prep_defaults.enable_rewrite_mask_low,
+            enable_rewrite_normalize_left: prep_defaults.enable_rewrite_normalize_left,
             adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
             mul_adder_mapping: None,
             unsafe_gatify_gate_operation: false,
             aug_opt: AugOptOptions::default(),
         }
+    }
+
+    /// Returns ir2gates options with all prep-for-gatify rewrites disabled.
+    pub fn all_opts_disabled() -> Self {
+        let prep_defaults = PrepForGatifyOptions::all_opts_disabled();
+        Self {
+            fold: true,
+            hash: true,
+            check_equivalence: false,
+            enable_rewrite_carry_out: prep_defaults.enable_rewrite_carry_out,
+            enable_rewrite_prio_encode: prep_defaults.enable_rewrite_prio_encode,
+            enable_rewrite_nary_add: prep_defaults.enable_rewrite_nary_add,
+            enable_rewrite_mask_low: prep_defaults.enable_rewrite_mask_low,
+            enable_rewrite_normalize_left: prep_defaults.enable_rewrite_normalize_left,
+            adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
+            mul_adder_mapping: None,
+            unsafe_gatify_gate_operation: false,
+            aug_opt: AugOptOptions::default(),
+        }
+    }
+}
+
+impl Default for Ir2GatesOptions {
+    fn default() -> Self {
+        Self::all_opts_enabled()
     }
 }
 
@@ -56,11 +84,28 @@ impl Ir2GatesOutput {
     }
 }
 
-pub fn ir2gates_from_ir_text(
+/// PIR package plus analysis data needed immediately before gatification.
+pub struct PreparedIrForGatify {
+    pub pir_package: ir::Package,
+    pub top_fn_name: String,
+    pub range_info: std::sync::Arc<IrRangeInfo>,
+}
+
+impl PreparedIrForGatify {
+    pub fn pir_top_fn(&self) -> &ir::Fn {
+        self.pir_package
+            .get_fn(&self.top_fn_name)
+            .expect("top_fn_name should be present in pir_package")
+    }
+}
+
+/// Parses IR and builds the PIR/range-analysis state needed by
+/// `prep_for_gatify`.
+pub fn prepare_ir_for_gatify_from_ir_text(
     ir_text: &str,
     top: Option<&str>,
-    options: Ir2GatesOptions,
-) -> Result<Ir2GatesOutput, String> {
+    options: &Ir2GatesOptions,
+) -> Result<PreparedIrForGatify, String> {
     let mut ir_text_for_processing: String = ir_text.to_string();
 
     // Parse with PIR for lowering.
@@ -110,6 +155,27 @@ pub fn ir2gates_from_ir_text(
     let range_info = IrRangeInfo::build_from_analysis(&analysis, pir_fn)
         .map_err(|e| format!("building IrRangeInfo failed: {e}"))?;
 
+    Ok(PreparedIrForGatify {
+        pir_package,
+        top_fn_name,
+        range_info,
+    })
+}
+
+pub fn ir2gates_from_ir_text(
+    ir_text: &str,
+    top: Option<&str>,
+    options: Ir2GatesOptions,
+) -> Result<Ir2GatesOutput, String> {
+    let PreparedIrForGatify {
+        pir_package,
+        top_fn_name,
+        range_info,
+    } = prepare_ir_for_gatify_from_ir_text(ir_text, top, &options)?;
+    let pir_fn = pir_package
+        .get_fn(&top_fn_name)
+        .expect("top_fn_name should be present in pir_package");
+
     let gatify_output = ir2gate::gatify(
         pir_fn,
         ir2gate::GatifyOptions {
@@ -123,8 +189,9 @@ pub fn ir2gates_from_ir_text(
             enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
             enable_rewrite_nary_add: options.enable_rewrite_nary_add,
             enable_rewrite_mask_low: options.enable_rewrite_mask_low,
-            array_index_lowering_strategy: Default::default(),
+            enable_rewrite_normalize_left: options.enable_rewrite_normalize_left,
             unsafe_gatify_gate_operation: options.unsafe_gatify_gate_operation,
+            ..ir2gate::GatifyOptions::all_opts_disabled()
         },
     )?;
 

@@ -9,7 +9,6 @@ use std::path::PathBuf;
 use rayon::prelude::*;
 
 use crate::aig::get_summary_stats::get_gate_depth;
-use crate::ir2gate_utils::AdderMapping;
 use crate::ir2gates;
 use crate::use_count::get_id_to_use_count;
 use xlsynth_pir::ir;
@@ -272,19 +271,7 @@ pub fn select_ir_diverse_samples_with_options(
             let output = match ir2gates::ir2gates_from_ir_text(
                 &ir_text,
                 None,
-                ir2gates::Ir2GatesOptions {
-                    fold: true,
-                    hash: true,
-                    check_equivalence: false,
-                    enable_rewrite_carry_out: false,
-                    enable_rewrite_prio_encode: false,
-                    enable_rewrite_nary_add: false,
-                    enable_rewrite_mask_low: false,
-                    adder_mapping: AdderMapping::default(),
-                    mul_adder_mapping: None,
-                    unsafe_gatify_gate_operation: false,
-                    aug_opt: Default::default(),
-                },
+                ir2gates::Ir2GatesOptions::all_opts_disabled(),
             ) {
                 Ok(o) => o,
                 Err(e) => {
