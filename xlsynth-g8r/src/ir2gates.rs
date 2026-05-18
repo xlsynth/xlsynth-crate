@@ -164,8 +164,8 @@ pub fn ir2gates_from_ir_text(
             enable_rewrite_nary_add: options.enable_rewrite_nary_add,
             enable_rewrite_mask_low: options.enable_rewrite_mask_low,
             enable_rewrite_normalize_left: options.enable_rewrite_normalize_left,
-            array_index_lowering_strategy: Default::default(),
             unsafe_gatify_gate_operation: options.unsafe_gatify_gate_operation,
+            ..ir2gate::GatifyOptions::all_opts_disabled()
         },
     )?;
 

@@ -25,18 +25,9 @@ fn stats_for_ir_text(ir_text: &str, opt: Opt) -> SummaryStats {
         &ir_fn,
         GatifyOptions {
             fold: opt == Opt::Yes,
-            check_equivalence: false,
             hash: opt == Opt::Yes,
             adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::RippleCarry,
-            mul_adder_mapping: None,
-            range_info: None,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
-            enable_rewrite_mask_low: false,
-            enable_rewrite_normalize_left: false,
-            array_index_lowering_strategy: Default::default(),
-            unsafe_gatify_gate_operation: false,
+            ..GatifyOptions::all_opts_disabled()
         },
     )
     .expect("gatify");

@@ -24,21 +24,7 @@ fn assert_ir_fns_equivalent(orig_fn: &ir::Fn, prepared_fn: &ir::Fn) {
 fn gatify_without_prep(pir_fn: &ir::Fn) -> (GateFn, SummaryStats) {
     let out = gatify_prepared_fn(
         pir_fn,
-        GatifyOptions {
-            fold: true,
-            hash: true,
-            check_equivalence: false,
-            adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::default(),
-            mul_adder_mapping: None,
-            range_info: None,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
-            enable_rewrite_mask_low: false,
-            enable_rewrite_normalize_left: false,
-            array_index_lowering_strategy: Default::default(),
-            unsafe_gatify_gate_operation: false,
-        },
+        GatifyOptions::all_opts_disabled(),
     )
     .expect("gatify_prepared_fn");
     let stats = get_summary_stats(&out.gate_fn);

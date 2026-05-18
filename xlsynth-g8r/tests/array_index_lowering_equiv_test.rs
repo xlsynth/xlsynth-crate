@@ -47,19 +47,9 @@ fn gatify_ir_text_with_strategy(
     let gatify_output = gatify(
         &ir_fn,
         GatifyOptions {
-            fold: true,
-            check_equivalence: false,
-            hash: true,
             adder_mapping: AdderMapping::RippleCarry,
-            mul_adder_mapping: None,
-            range_info: None,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
-            enable_rewrite_mask_low: false,
-            enable_rewrite_normalize_left: false,
             array_index_lowering_strategy: strategy,
-            unsafe_gatify_gate_operation: false,
+            ..GatifyOptions::all_opts_disabled()
         },
     )
     .expect("gatify");

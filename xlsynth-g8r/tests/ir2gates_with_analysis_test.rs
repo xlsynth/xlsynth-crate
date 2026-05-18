@@ -49,17 +49,7 @@ top fn main(a0: bits[8] id=1, a1: bits[8] id=2, a2: bits[8] id=3, a3: bits[8] id
         ir2gate::GatifyOptions {
             fold: false,
             hash: false,
-            check_equivalence: false,
-            adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::default(),
-            mul_adder_mapping: None,
-            range_info: None,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
-            enable_rewrite_mask_low: false,
-            enable_rewrite_normalize_left: false,
-            array_index_lowering_strategy: Default::default(),
-            unsafe_gatify_gate_operation: false,
+            ..ir2gate::GatifyOptions::all_opts_disabled()
         },
     )
     .unwrap();

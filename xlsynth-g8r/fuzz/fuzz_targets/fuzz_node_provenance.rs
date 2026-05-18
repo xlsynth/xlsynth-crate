@@ -49,17 +49,7 @@ fuzz_target!(|sample: FuzzSample| {
         GatifyOptions {
             fold: false,
             hash: false,
-            check_equivalence: false,
-            adder_mapping: AdderMapping::default(),
-            mul_adder_mapping: None,
-            range_info: None,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
-            enable_rewrite_mask_low: false,
-            enable_rewrite_normalize_left: false,
-            array_index_lowering_strategy: Default::default(),
-            unsafe_gatify_gate_operation: false,
+            ..GatifyOptions::all_opts_disabled()
         },
     ) {
         Ok(output) => output,

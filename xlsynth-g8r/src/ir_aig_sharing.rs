@@ -341,21 +341,7 @@ pub fn confirm_or_deny_candidate_equivalence(
     gate_fn: &GateFn,
     candidate: &IrAigEquivalenceCandidate,
 ) -> Result<bool, String> {
-    let opts = GatifyOptions {
-        fold: true,
-        hash: true,
-        check_equivalence: false,
-        adder_mapping: AdderMapping::default(),
-        mul_adder_mapping: None,
-        range_info: None,
-        enable_rewrite_carry_out: false,
-        enable_rewrite_prio_encode: false,
-        enable_rewrite_nary_add: false,
-        enable_rewrite_mask_low: false,
-        enable_rewrite_normalize_left: false,
-        array_index_lowering_strategy: Default::default(),
-        unsafe_gatify_gate_operation: false,
-    };
+    let opts = GatifyOptions::all_opts_disabled();
     let proofs =
         prove_equivalence_candidates_varisat(pir_fn, gate_fn, &[candidate.clone()], &opts)?;
     match &proofs[0].result {

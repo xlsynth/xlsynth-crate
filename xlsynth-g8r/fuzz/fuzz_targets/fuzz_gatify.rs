@@ -109,17 +109,7 @@ fuzz_target!(|sample: FuzzSample| {
         ir2gate::GatifyOptions {
             fold: false,
             hash: false,
-            check_equivalence: false,
-            adder_mapping: ir2gate_utils::AdderMapping::default(),
-            mul_adder_mapping: None,
-            range_info: None,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
-            enable_rewrite_mask_low: false,
-            enable_rewrite_normalize_left: false,
-            array_index_lowering_strategy: Default::default(),
-            unsafe_gatify_gate_operation: false,
+            ..ir2gate::GatifyOptions::all_opts_disabled()
         },
     );
     let gate_fn_no_fold = gate_fn_no_fold.expect("unfolded gatify should succeed");
@@ -130,21 +120,7 @@ fuzz_target!(|sample: FuzzSample| {
     // Now check the folded version is also equivalent.
     let gate_fn_fold = ir2gate::gatify(
         &parsed_fn,
-        ir2gate::GatifyOptions {
-            fold: true,
-            hash: true,
-            check_equivalence: false,
-            adder_mapping: ir2gate_utils::AdderMapping::default(),
-            mul_adder_mapping: None,
-            range_info: None,
-            enable_rewrite_carry_out: false,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
-            enable_rewrite_mask_low: false,
-            enable_rewrite_normalize_left: false,
-            array_index_lowering_strategy: Default::default(),
-            unsafe_gatify_gate_operation: false,
-        },
+        ir2gate::GatifyOptions::all_opts_disabled(),
     );
     let gate_fn_fold = gate_fn_fold.expect("folded gatify should succeed");
     prove_orig_vs_gate_equiv("folded", &orig_ir, orig_top, &fn_type, &gate_fn_fold);

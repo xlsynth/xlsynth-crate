@@ -255,21 +255,7 @@ pub fn handle_ir_aig_sharing(matches: &ArgMatches, _config: &Option<ToolchainCon
         candidates.truncate(max_proofs);
     }
 
-    let gatify_opts = GatifyOptions {
-        fold: true,
-        hash: true,
-        check_equivalence: false,
-        adder_mapping: AdderMapping::default(),
-        array_index_lowering_strategy: Default::default(),
-        unsafe_gatify_gate_operation: false,
-        mul_adder_mapping: None,
-        range_info: None,
-        enable_rewrite_carry_out: false,
-        enable_rewrite_prio_encode: false,
-        enable_rewrite_nary_add: false,
-        enable_rewrite_mask_low: false,
-        enable_rewrite_normalize_left: false,
-    };
+    let gatify_opts = GatifyOptions::all_opts_disabled();
 
     // Streaming proof + streaming per-node mapping output (in PIR topo order).
     let mut proved = 0usize;

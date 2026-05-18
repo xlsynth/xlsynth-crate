@@ -100,16 +100,9 @@ top fn cone(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
             fold: false,
             hash: false,
             check_equivalence: true,
-            adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::default(),
-            mul_adder_mapping: None,
             range_info: Some(range_info),
             enable_rewrite_carry_out: true,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
-            enable_rewrite_mask_low: false,
-            enable_rewrite_normalize_left: false,
-            array_index_lowering_strategy: Default::default(),
-            unsafe_gatify_gate_operation: false,
+            ..ir2gate::GatifyOptions::all_opts_disabled()
         },
     )
     .expect("gatify");
@@ -155,16 +148,8 @@ fn carry_out_rewrite_sweep_up_to_4_bits_only_triggers_for_msb_slice() {
                     fold: false,
                     hash: false,
                     check_equivalence: true,
-                    adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::default(),
-                    mul_adder_mapping: None,
-                    range_info: None,
                     enable_rewrite_carry_out: true,
-                    enable_rewrite_prio_encode: false,
-                    enable_rewrite_nary_add: false,
-                    enable_rewrite_mask_low: false,
-                    enable_rewrite_normalize_left: false,
-                    array_index_lowering_strategy: Default::default(),
-                    unsafe_gatify_gate_operation: false,
+                    ..ir2gate::GatifyOptions::all_opts_disabled()
                 },
             )
             .expect("gatify");
@@ -212,16 +197,8 @@ top fn cone(a: bits[9] id=1, b: bits[9] id=2) -> bits[1] {
             fold: false,
             hash: false,
             check_equivalence: true,
-            adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::default(),
-            mul_adder_mapping: None,
-            range_info: None,
             enable_rewrite_carry_out: true,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
-            enable_rewrite_mask_low: false,
-            enable_rewrite_normalize_left: false,
-            array_index_lowering_strategy: Default::default(),
-            unsafe_gatify_gate_operation: false,
+            ..ir2gate::GatifyOptions::all_opts_disabled()
         },
     )
     .expect("gatify");
@@ -270,16 +247,9 @@ top fn cone(p0: bits[9] id=1, p1: bits[9] id=2) -> bits[1] {
             fold: false,
             hash: false,
             check_equivalence: true,
-            adder_mapping: xlsynth_g8r::ir2gate_utils::AdderMapping::default(),
-            mul_adder_mapping: None,
             range_info: Some(range_info),
             enable_rewrite_carry_out: true,
-            enable_rewrite_prio_encode: false,
-            enable_rewrite_nary_add: false,
-            enable_rewrite_mask_low: false,
-            enable_rewrite_normalize_left: false,
-            array_index_lowering_strategy: Default::default(),
-            unsafe_gatify_gate_operation: false,
+            ..ir2gate::GatifyOptions::all_opts_disabled()
         },
     )
     .expect("gatify");
