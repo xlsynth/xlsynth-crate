@@ -12073,6 +12073,48 @@ top fn main(p: bits[1] id=1, x: bits[8] id=2, d: bits[8] id=3) -> (bits[8], bits
 }
 
 #[test]
+fn test_ir_rewrite_commutative_match_rewrites_both_operand_orders() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let ir_text = r#"package test
+
+top fn main(x: bits[8] id=1) -> (bits[8], bits[8]) {
+  zero: bits[8] = literal(value=0, id=2)
+  add_rhs: bits[8] = add(x, zero, id=10)
+  add_lhs: bits[8] = add(zero, x, id=11)
+  ret tuple.12: (bits[8], bits[8]) = tuple(add_rhs, add_lhs, id=12)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("test.ir");
+    std::fs::write(&ir_path, ir_text).unwrap();
+
+    let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = Command::new(driver)
+        .arg("ir-rewrite")
+        .arg(ir_path.to_str().unwrap())
+        .arg("add[comm](x, literal(0))")
+        .arg("x")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "ir-rewrite failed (status={});\nstdout:{}\nstderr:{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("ret tuple.12: (bits[8], bits[8]) = tuple(x, x, id=12)"),
+        "expected both add operand orders to rewrite: {}",
+        stdout
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
 fn test_ir_rewrite_all_matches_does_not_rewrite_new_helper_nodes() {
     let _ = env_logger::builder().is_test(true).try_init();
 
