@@ -34,8 +34,10 @@ The `xlsynth` AOT framework consists of the following pieces:
 
 ## Using AOT compilation
 
-- Invoke the builder API from the `build.rs` file of the project to AOT-compile
-  the XLS code and create the generated Rust code at build time.
+- Enable the `xlsynth` crate's `standalone-aot` Cargo feature for the
+  build-dependency that runs the generator, then invoke the builder API from the
+  project's `build.rs` file to AOT-compile the XLS code and create the generated
+  Rust code at build time.
 - Add `xlsynth-aot-runtime` as a normal dependency of the crate that includes
   the generated wrapper source.
 - Provide the XLS-owned standalone runtime archive to the build through

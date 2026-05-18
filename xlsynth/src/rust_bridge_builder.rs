@@ -36,6 +36,7 @@ pub struct RustBridgeBuilder {
 /// the runtime-neutral standalone AOT surface.
 enum RustBridgeMode {
     Xlsynth,
+    #[cfg(feature = "standalone-aot")]
     Standalone,
 }
 
@@ -129,6 +130,7 @@ impl RustBridgeBuilder {
     ///
     /// Standalone AOT wrappers use this mode so generated runtime consumers do
     /// not need the `xlsynth` crate merely to name bridge types.
+    #[cfg(feature = "standalone-aot")]
     pub(crate) fn standalone() -> Self {
         Self {
             mode: RustBridgeMode::Standalone,
@@ -140,6 +142,7 @@ impl RustBridgeBuilder {
     ///
     /// This is used by AOT generation to place `Runner` beside the typed DSLX
     /// definitions for the top function.
+    #[cfg(feature = "standalone-aot")]
     pub(crate) fn with_runner_items(mut self, runner_items: impl Into<String>) -> Self {
         self.runner_items = Some(runner_items.into());
         self
@@ -151,6 +154,7 @@ impl RustBridgeBuilder {
     /// bridge rendering. Callers should pass items that are already valid in
     /// the target module's namespace; inserting cross-module paths here
     /// would make generated code depend on the wrong ownership context.
+    #[cfg(feature = "standalone-aot")]
     pub(crate) fn with_leading_items(
         mut self,
         leading_items: impl IntoIterator<Item = String>,
@@ -164,6 +168,7 @@ impl RustBridgeBuilder {
     /// Typed DSLX AOT generation uses this when it renders several modules
     /// together and has already collected the concrete specializations that
     /// should be emitted in their defining modules.
+    #[cfg(feature = "standalone-aot")]
     pub(crate) fn with_deferred_parametric_struct_emission(mut self) -> Self {
         self.defer_parametric_struct_emission = true;
         self
@@ -210,6 +215,7 @@ impl RustBridgeBuilder {
     /// Standalone callers must use this path so imported type references stay
     /// canonical while bits-like values map to `UBits` and `SBits` instead of
     /// `xlsynth` runtime wrappers.
+    #[cfg(feature = "standalone-aot")]
     pub(crate) fn standalone_rust_type_name_from_dslx_module(
         current_module_name: &str,
         type_info: &dslx::TypeInfo,
@@ -265,6 +271,7 @@ impl RustBridgeBuilder {
                     let signed_str = if is_signed { "S" } else { "U" };
                     format!("Ir{signed_str}Bits<{bit_count}>")
                 }
+                #[cfg(feature = "standalone-aot")]
                 RustBridgeMode::Standalone => standalone_bits_rust_type(is_signed, bit_count),
             })
         } else if ty.is_enum() {
@@ -490,6 +497,7 @@ impl RustBridgeBuilder {
 
 /// Returns the smallest runtime-neutral Rust type that can hold one DSLX bits
 /// value.
+#[cfg(feature = "standalone-aot")]
 fn standalone_bits_rust_type(is_signed: bool, bit_count: usize) -> String {
     if is_signed {
         format!("SBits<{bit_count}>")
@@ -527,6 +535,7 @@ impl BridgeBuilder for RustBridgeBuilder {
         self.emitted_parametric_structs.clear();
         let imports = match self.mode {
             RustBridgeMode::Xlsynth => "use xlsynth::{IrValue, IrUBits, IrSBits};\n".to_string(),
+            #[cfg(feature = "standalone-aot")]
             RustBridgeMode::Standalone => {
                 let root = std::iter::repeat_n("super", self.module_path.len())
                     .collect::<Vec<_>>()
@@ -764,6 +773,7 @@ fn rust_module_path_from_import(import: &dslx::Import) -> Vec<String> {
 ///
 /// The result uses `super` segments when needed, so callers should pass DSLX
 /// module names rather than already-qualified Rust paths.
+#[cfg(feature = "standalone-aot")]
 pub(crate) fn rust_type_path_between_dslx_modules(
     current_module_name: &str,
     target_module_name: &str,

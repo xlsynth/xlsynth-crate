@@ -17,7 +17,7 @@ workspace = true
 xlsynth-aot-runtime = { path = "../../../xlsynth-aot-runtime" }
 
 [build-dependencies]
-xlsynth = { path = "../.." }
+xlsynth = { path = "../..", features = ["standalone-aot"] }
 
 [dev-dependencies]
 xlsynth = { path = "../.." }
