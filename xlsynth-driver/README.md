@@ -685,6 +685,13 @@ Additional outputs:
 - `--output_unopt_ir <PATH>` – write the unoptimized IR package to a file.
 - `--output_opt_ir <PATH>` – write the optimized IR package to a file.
 
+Extern-Verilog policy:
+
+- `--allow_extern_verilog=true|false` – permit codegen IR that still contains
+  Verilog FFI declarations (`#[ffi_proto(...)]`), such as IR emitted for DSLX
+  `extern_verilog`. The default is `true`; set it to `false` to reject such IR
+  before codegen.
+
 ### `dslx2ir`: DSLX to IR
 
 Converts DSLX source code to the XLS IR. The IR text is emitted on **stdout**.
@@ -1017,6 +1024,13 @@ Optional optimization:
 - `--opt=true` – optimize the IR before scheduling/codegen.
 - `--aug-opt=true|false` – use the augmented optimizer “opt sandwich” when `--opt=true` (default: `false`).
 
+Extern-Verilog policy:
+
+- `--allow_extern_verilog=true|false` – permit codegen IR that still contains
+  Verilog FFI declarations (`#[ffi_proto(...)]`), such as IR emitted for DSLX
+  `extern_verilog`. The default is `true`; set it to `false` to reject such IR
+  before codegen.
+
 ### `ir2combo`: IR to *combinational* SystemVerilog
 
 Similar to `ir2pipeline` but requests the *combinational* backend in `codegen_main`.
@@ -1028,6 +1042,13 @@ Optional optimization:
 
 - `--opt=true` – optimize the IR before code generation.
 - `--aug-opt=true|false` – use the augmented optimizer “opt sandwich” when `--opt=true` (default: `false`).
+
+Extern-Verilog policy:
+
+- `--allow_extern_verilog=true|false` – permit codegen IR that still contains
+  Verilog FFI declarations (`#[ffi_proto(...)]`), such as IR emitted for DSLX
+  `extern_verilog`. The default is `true`; set it to `false` to reject such IR
+  before codegen.
 
 Example:
 

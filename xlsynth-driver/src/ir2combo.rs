@@ -7,7 +7,10 @@
 use clap::ArgMatches;
 use std::process;
 
-use crate::common::{extract_codegen_flags, CodegenFlags};
+use crate::common::{
+    enforce_extern_verilog_codegen_policy, extract_codegen_flags, parse_bool_flag_or, CodegenFlags,
+};
+use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::{run_codegen_combinational, run_opt_main};
 use xlsynth_pir::{run_aug_opt_over_ir_text, AugOptOptions};
@@ -33,6 +36,7 @@ pub fn handle_ir2combo(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
         .get_one::<String>("aug_opt")
         .map(|s| s == "true")
         .unwrap_or(false);
+    let allow_extern_verilog = parse_bool_flag_or(matches, "allow_extern_verilog", true);
 
     let ir_top_opt = matches.get_one::<String>("ir_top");
 
@@ -42,6 +46,7 @@ pub fn handle_ir2combo(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
         &codegen_flags,
         optimize,
         aug_opt,
+        allow_extern_verilog,
         ir_top_opt.map(|s| s.as_str()),
         &keep_temps,
         config,
@@ -54,6 +59,7 @@ fn ir2combo(
     codegen_flags: &CodegenFlags,
     optimize: bool,
     aug_opt: bool,
+    allow_extern_verilog: bool,
     ir_top: Option<&str>,
     keep_temps: &Option<bool>,
     config: &Option<ToolchainConfig>,
@@ -101,6 +107,10 @@ fn ir2combo(
     } else {
         input_file.to_path_buf()
     };
+    let ir_for_codegen_text = std::fs::read_to_string(&ir_for_codegen_path)
+        .expect("IR file handed to codegen should be readable");
+    enforce_extern_verilog_codegen_policy(&ir_for_codegen_text, allow_extern_verilog)
+        .unwrap_or_else(|err| report_cli_error_and_exit(&err, Some("ir2combo"), vec![]));
 
     let sv = run_codegen_combinational(&ir_for_codegen_path, delay_model, codegen_flags, tool_path);
 

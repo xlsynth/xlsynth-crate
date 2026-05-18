@@ -5,10 +5,11 @@ use std::process;
 use clap::ArgMatches;
 
 use crate::common::{
-    extract_codegen_flags, extract_pipeline_spec, parse_bool_flag, pipeline_codegen_flags_proto,
-    resolve_type_inference_v2, scheduling_options_proto, CodegenFlags, PipelineSpec,
-    DEFAULT_WARNINGS_AS_ERRORS,
+    enforce_extern_verilog_codegen_policy, extract_codegen_flags, extract_pipeline_spec,
+    parse_bool_flag, parse_bool_flag_or, pipeline_codegen_flags_proto, resolve_type_inference_v2,
+    scheduling_options_proto, CodegenFlags, PipelineSpec, DEFAULT_WARNINGS_AS_ERRORS,
 };
+use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::{run_codegen_pipeline, run_ir_converter_main, run_opt_main};
 
@@ -22,6 +23,7 @@ fn dslx2pipeline(
     delay_model: &str,
     keep_temps: &Option<bool>,
     type_inference_v2: Option<bool>,
+    allow_extern_verilog: bool,
     output_unopt_ir: &Option<&std::path::Path>,
     output_opt_ir: &Option<&std::path::Path>,
     config: &Option<ToolchainConfig>,
@@ -68,6 +70,8 @@ fn dslx2pipeline(
         std::fs::write(&unopt_ir_path, unopt_ir).unwrap();
 
         let opt_ir = run_opt_main(&unopt_ir_path, Some(&ir_top), tool_path);
+        enforce_extern_verilog_codegen_policy(&opt_ir, allow_extern_verilog)
+            .unwrap_or_else(|err| report_cli_error_and_exit(&err, Some("dslx2pipeline"), vec![]));
         let opt_ir_path = temp_dir.path().join("opt.ir");
         std::fs::write(&opt_ir_path, opt_ir.clone()).unwrap();
 
@@ -163,13 +167,16 @@ fn dslx2pipeline(
         }
 
         let opt_ir = xlsynth::optimize_ir(&convert_result.ir, &ir_top).unwrap();
+        let opt_ir_text = opt_ir.to_string();
+        enforce_extern_verilog_codegen_policy(&opt_ir_text, allow_extern_verilog)
+            .unwrap_or_else(|err| report_cli_error_and_exit(&err, Some("dslx2pipeline"), vec![]));
 
         // If user requested, persist the IR artifacts to the provided paths.
         if let Some(path) = output_unopt_ir {
             std::fs::write(path, &convert_result.ir.to_string()).expect("write output_unopt_ir");
         }
         if let Some(path) = output_opt_ir {
-            std::fs::write(path, &opt_ir.to_string()).expect("write output_opt_ir");
+            std::fs::write(path, &opt_ir_text).expect("write output_opt_ir");
         }
 
         let scheduling_options_flags_proto = scheduling_options_proto(delay_model, pipeline_spec);
@@ -193,6 +200,7 @@ pub fn handle_dslx2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfi
     let pipeline_spec = extract_pipeline_spec(matches);
     let delay_model = matches.get_one::<String>("DELAY_MODEL").unwrap();
     let keep_temps = parse_bool_flag(matches, "keep_temps");
+    let allow_extern_verilog = parse_bool_flag_or(matches, "allow_extern_verilog", true);
     let codegen_flags = extract_codegen_flags(matches, config.as_ref());
 
     // New optional output paths for capturing IR artifacts
@@ -213,6 +221,7 @@ pub fn handle_dslx2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfi
         delay_model,
         &keep_temps,
         type_inference_v2,
+        allow_extern_verilog,
         &output_unopt_ir.as_deref(),
         &output_opt_ir.as_deref(),
         config,

@@ -6,6 +6,7 @@ use std::io::Write;
 use std::process;
 use std::process::Command;
 use xlsynth::mangle_dslx_name;
+use xlsynth_pir::{ir::PackageMember, ir_parser};
 
 // By default in the driver we treat warnings as errors.
 pub const DEFAULT_WARNINGS_AS_ERRORS: bool = true;
@@ -30,6 +31,49 @@ pub fn parse_bool_flag(matches: &ArgMatches, flag_name: &str) -> Option<bool> {
 /// present on the command line.
 pub fn parse_bool_flag_or(matches: &ArgMatches, flag_name: &str, default_value: bool) -> bool {
     parse_bool_flag(matches, flag_name).unwrap_or(default_value)
+}
+
+/// Rejects codegen IR that still carries Verilog FFI declarations unless the
+/// caller explicitly opted in to them.
+pub fn enforce_extern_verilog_codegen_policy(
+    ir_text: &str,
+    allow_extern_verilog: bool,
+) -> Result<(), String> {
+    if allow_extern_verilog {
+        return Ok(());
+    }
+
+    let mut parser = ir_parser::Parser::new(ir_text);
+    let package = parser.parse_package().map_err(|err| {
+        format!(
+            "could not inspect IR for extern Verilog declarations while --allow_extern_verilog=false: {err}"
+        )
+    })?;
+
+    let ffi_members = package
+        .members
+        .iter()
+        .filter_map(|member| {
+            let function = match member {
+                PackageMember::Function(function) => function,
+                PackageMember::Block { func, .. } => func,
+            };
+            function
+                .outer_attrs
+                .iter()
+                .any(|attr| attr.trim_start().starts_with("#[ffi_proto("))
+                .then(|| function.name.clone())
+        })
+        .collect::<Vec<_>>();
+
+    if ffi_members.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "IR contains Verilog FFI declaration(s) via #[ffi_proto(...)] on: {}. Pass --allow_extern_verilog=true to permit codegen of DSLX extern_verilog / Verilog FFI IR.",
+            ffi_members.join(", ")
+        ))
+    }
 }
 
 /// Determines the effective value of the experimental `type_inference_v2`
@@ -641,6 +685,47 @@ pub fn parse_uf_spec(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const IR_WITH_VERILOG_FFI: &str = r#"package extern_verilog_policy
+
+#[ffi_proto("""code_template: "assign {return} = {x};"
+""")]
+fn verilog_passthrough(x: bits[8] id=1) -> bits[8] {
+  ret x: bits[8] = param(name=x, id=1)
+}
+
+top fn main(x: bits[8] id=2) -> bits[8] {
+  ret x: bits[8] = param(name=x, id=2)
+}
+"#;
+
+    const IR_WITHOUT_VERILOG_FFI: &str = r#"package ordinary_codegen
+
+top fn main(x: bits[8] id=1) -> bits[8] {
+  ret x: bits[8] = param(name=x, id=1)
+}
+"#;
+
+    #[test]
+    fn extern_verilog_codegen_policy_accepts_ordinary_ir() {
+        enforce_extern_verilog_codegen_policy(IR_WITHOUT_VERILOG_FFI, false)
+            .expect("ordinary IR should pass policy check");
+    }
+
+    #[test]
+    fn extern_verilog_codegen_policy_rejects_ffi_ir_when_disabled() {
+        let err = enforce_extern_verilog_codegen_policy(IR_WITH_VERILOG_FFI, false)
+            .expect_err("Verilog FFI IR should require explicit opt-in");
+
+        assert!(err.contains("verilog_passthrough"), "{err}");
+        assert!(err.contains("--allow_extern_verilog=true"), "{err}");
+    }
+
+    #[test]
+    fn extern_verilog_codegen_policy_accepts_ffi_ir_when_enabled() {
+        enforce_extern_verilog_codegen_policy(IR_WITH_VERILOG_FFI, true)
+            .expect("explicit opt-in should allow Verilog FFI IR");
+    }
 
     #[test]
     fn test_get_function_enum_param_domains_cross_module() {
