@@ -52,11 +52,12 @@ Primarily tests:
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_mul_by_const_csd_equiv.rs
 
-Builds small `umul(x, literal)` PIR functions (with the literal on either side),
-then gatifies with built-in mul-by-const lowering. Each run requests IR-to-gate
-equivalence checking so the target surfaces any semantic
-mismatch introduced by the Canonical Signed Digit (CSD) / Non-Adjacent Form
-(NAF) gate-level lowering path.
+Builds small `umul(x, literal)` PIR functions up to 12 bits wide (with the
+literal on either side), then gatifies with built-in mul-by-const lowering. Each
+run exports the gates back to IR and proves source-vs-gate equivalence with the
+in-process Bitwuzla prover so the target surfaces any semantic mismatch
+introduced by the Canonical Signed Digit (CSD) / Non-Adjacent Form (NAF)
+gate-level lowering path.
 
 Primarily tests:
 
@@ -203,16 +204,18 @@ Primarily tests:
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_gate_transform_arbitrary.rs
 
-Performs random sequences of transformations over a `GateFn` and cross-checks equivalence between SAT (Varisat) and Z3 on original/current/next pairs; panics on disagreements or when an always-equivalent transform yields inequivalence.
+Performs bounded random sequences of transformations over a `GateFn` and
+runs Cadical gate-level equivalence proofs on original/current/next pairs;
+panics when an always-equivalent transform yields inequivalence.
 
 Primarily tests:
 
 - Transform engine correctness under random application
-- Cross-solver consistency for equivalence
+- Cadical-backed gate formal validation remains stable under transform churn
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_cut_db_rewrite_equiv.rs
 
-Builds a random `GateFn`, runs the cut-db rewrite pass (`rewrite_gatefn_with_cut_db`) using the vendored 4-input cut database, checks area-cost deltas and delay-gating decisions for accepted rewrites against independently DCE-cleaned graph copies, and proves the rewritten graph is SAT-equivalent (Varisat) to the original. Panics on any semantic mismatch or cost-accounting inconsistency.
+Builds a random `GateFn`, runs the cut-db rewrite pass (`rewrite_gatefn_with_cut_db`) using the vendored 4-input cut database, checks area-cost deltas and delay-gating decisions for accepted rewrites against independently DCE-cleaned graph copies, and proves the rewritten graph is SAT-equivalent (Cadical) to the original. Panics on any semantic mismatch or cost-accounting inconsistency.
 
 Primarily tests:
 

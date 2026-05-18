@@ -9,8 +9,8 @@ Usage:
   python3 scripts/run_all_fuzz_tests.py
 
   # With custom args:
-  #   cargo fuzz run --release --features=foo,bar <target> -- -max_total_time=10
-  python3 scripts/run_all_fuzz_tests.py --fuzz-run-args=--release --features=foo,bar --fuzz-bin-args=-max_total_time=10
+  #   cargo fuzz run --release --features=foo,bar <target> -- -max_total_time=10 -timeout=5
+  python3 scripts/run_all_fuzz_tests.py --fuzz-run-args=--release --features=foo,bar --fuzz-bin-args="-max_total_time=10 -timeout=5"
 """
 
 import argparse
@@ -29,7 +29,7 @@ DEFAULT_FEATURES: list[str] = [
     "with-z3-system",
 ]
 DEFAULT_FUZZ_RUN_ARGS: str = ""
-DEFAULT_FUZZ_BIN_ARGS: str = "-max_total_time=5"
+DEFAULT_FUZZ_BIN_ARGS: str = "-max_total_time=5 -timeout=5"
 DEFAULT_THREADS: int = 4
 
 # Targets which are known to fail.
@@ -104,7 +104,7 @@ def main() -> int:
     parser.add_argument(
         "--fuzz-bin-args",
         default=DEFAULT_FUZZ_BIN_ARGS,
-        help='Arguments string passed to the fuzz binary. Example: "-max_total_time=10"',
+        help='Arguments string passed to the fuzz binary. Example: "-max_total_time=10 -timeout=5"',
     )
     parser.add_argument(
         "--features",

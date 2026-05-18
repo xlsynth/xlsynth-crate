@@ -4,8 +4,14 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use xlsynth_g8r::gatify::ir2gate::{self, GatifyOptions};
+use xlsynth_g8r::aig_serdes::gate2ir;
+use xlsynth_g8r::gatify::ir2gate::{self, GatifyOptions, GatifyOutput};
+use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser::Parser;
+#[cfg(feature = "has-bitwuzla")]
+use xlsynth_prover::ir_equiv::{IrEquivRequest, IrModule, run_ir_equiv};
+#[cfg(feature = "has-bitwuzla")]
+use xlsynth_prover::prover::SolverChoice;
 
 #[derive(Debug, Clone, Arbitrary)]
 struct MulConstSample {
@@ -15,7 +21,9 @@ struct MulConstSample {
 }
 
 fn build_ir_text(sample: &MulConstSample) -> String {
-    let width = usize::from(sample.width).clamp(1, 16);
+    // Wider cases push the external IR-equivalence checker into multi-second
+    // or slower proofs; keep the generic fuzz target responsive.
+    let width = usize::from(sample.width).clamp(1, 12);
     let modulus = if width == 16 { 1u64 << 16 } else { 1u64 << width };
     let constant = u64::from(sample.constant) % modulus;
     let umul = if sample.literal_on_lhs {
@@ -34,6 +42,45 @@ top fn mul_const(x: bits[{width}] id=1) -> bits[{width}] {{
     )
 }
 
+#[cfg(feature = "has-bitwuzla")]
+fn prove_orig_vs_gate_equiv(
+    orig_ir: &str,
+    orig_top: &str,
+    fn_type: &ir::FunctionType,
+    gate_output: &GatifyOutput,
+) {
+    let gate_ir = gate2ir::gate_fn_to_xlsynth_ir(&gate_output.gate_fn, "gate_pkg", fn_type)
+        .expect("gate_fn_to_xlsynth_ir should succeed")
+        .to_string();
+    let gate_top = gate_output.gate_fn.name.as_str();
+    let request = IrEquivRequest::new(
+        IrModule::new(orig_ir).with_top(Some(orig_top)),
+        IrModule::new(&gate_ir).with_top(Some(gate_top)),
+    )
+    .with_solver(Some(SolverChoice::Bitwuzla));
+    let report = run_ir_equiv(&request).expect("Bitwuzla IR equivalence should run");
+    assert!(
+        report.is_success(),
+        "mul-by-const gate lowering must match source IR: {}",
+        report
+            .error_str()
+            .unwrap_or_else(|| "unknown equivalence failure".to_string())
+    );
+}
+
+#[cfg(not(feature = "has-bitwuzla"))]
+fn prove_orig_vs_gate_equiv(
+    _orig_ir: &str,
+    _orig_top: &str,
+    _fn_type: &ir::FunctionType,
+    _gate_output: &GatifyOutput,
+) {
+    panic!(
+        "fuzz_mul_by_const_csd_equiv requires an in-process solver; \
+         build with --features=with-bitwuzla-system (or with-bitwuzla-built)"
+    );
+}
+
 fuzz_target!(|sample: MulConstSample| {
     let _ = env_logger::builder().is_test(true).try_init();
 
@@ -43,14 +90,13 @@ fuzz_target!(|sample: MulConstSample| {
         .parse_and_validate_package()
         .expect("constructed mul-by-const IR should parse");
     let pir_fn = pkg.get_top_fn().expect("top fn");
+    let fn_type = pir_fn.get_type();
 
-    let _gatify = ir2gate::gatify(
+    let gatify_output = ir2gate::gatify(
         pir_fn,
-        GatifyOptions {
-            check_equivalence: true,
-            ..GatifyOptions::all_opts_disabled()
-        },
+        GatifyOptions::all_opts_disabled(),
     )
     .expect("gatify with built-in mul-by-const lowering");
 
+    prove_orig_vs_gate_equiv(&ir_text, pir_fn.name.as_str(), &fn_type, &gatify_output);
 });
