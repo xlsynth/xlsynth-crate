@@ -211,6 +211,14 @@ pub fn add_pir_mcmc_args(command: Command) -> Command {
                 .action(ArgAction::Set),
         )
         .arg(
+            Arg::new("enable_rewrite_normalize_left")
+                .long("enable-rewrite-normalize-left")
+                .value_name("BOOL")
+                .help("Enable left-normalize rewrite in prep_for_gatify.")
+                .value_parser(["true", "false"])
+                .action(ArgAction::Set),
+        )
+        .arg(
             Arg::new("unsafe_gatify_gate_operation")
                 .long("unsafe-gatify-gate-operation")
                 .value_name("BOOL")

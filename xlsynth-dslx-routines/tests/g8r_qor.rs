@@ -71,6 +71,7 @@ fn gate_stats_for_wrapper(module_name: &str, source: &str, top: &str) -> Summary
             enable_rewrite_prio_encode: false,
             enable_rewrite_nary_add: false,
             enable_rewrite_mask_low: false,
+            enable_rewrite_normalize_left: false,
             adder_mapping: AdderMapping::default(),
             mul_adder_mapping: None,
             aug_opt: Default::default(),
