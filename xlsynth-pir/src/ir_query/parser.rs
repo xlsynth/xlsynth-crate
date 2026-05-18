@@ -6,7 +6,7 @@ use crate::ir;
 
 use super::{
     DefaultOptionPattern, MatcherExpr, MatcherKind, NamedArg, NamedArgValue, NumericExpr,
-    NumericPattern, PlaceholderExpr, QueryExpr,
+    NumericPattern, OperandMatchMode, PlaceholderExpr, QueryExpr,
 };
 
 pub struct QueryParser<'a> {
@@ -69,6 +69,7 @@ impl<'a> QueryParser<'a> {
                     return Ok(QueryExpr::Matcher(MatcherExpr {
                         kind,
                         user_count,
+                        operand_match_mode: OperandMatchMode::Ordered,
                         args: vec![QueryExpr::Numeric(expr)],
                         named_args: vec![],
                     }));
@@ -90,6 +91,7 @@ impl<'a> QueryParser<'a> {
                 Ok(QueryExpr::Matcher(MatcherExpr {
                     kind,
                     user_count,
+                    operand_match_mode: OperandMatchMode::Ordered,
                     args: parsed_args.args,
                     named_args: parsed_args.named_args,
                 }))
@@ -125,11 +127,27 @@ impl<'a> QueryParser<'a> {
 
                 let mut user_count: Option<usize> = None;
                 let mut predicate: Option<String> = None;
-                if self.peek() == Some(b'[') {
+                let mut operand_match_mode = OperandMatchMode::Ordered;
+                while self.peek() == Some(b'[') {
                     match self.parse_bracket_clause()? {
-                        BracketClause::UserCount(n) => user_count = Some(n),
-                        BracketClause::Ident(s) => predicate = Some(s),
+                        BracketClause::UserCount(n) => {
+                            if user_count.replace(n).is_some() {
+                                return Err(self.error("duplicate user-count constraint"));
+                            }
+                        }
+                        BracketClause::Ident(s) if s == "comm" => {
+                            if operand_match_mode == OperandMatchMode::CommutativeBinary {
+                                return Err(self.error("duplicate [comm] bracket clause"));
+                            }
+                            operand_match_mode = OperandMatchMode::CommutativeBinary;
+                        }
+                        BracketClause::Ident(s) => {
+                            if predicate.replace(s).is_some() {
+                                return Err(self.error("duplicate identifier bracket clause"));
+                            }
+                        }
                     }
+                    self.skip_ws();
                 }
 
                 self.skip_ws();
@@ -167,6 +185,7 @@ impl<'a> QueryParser<'a> {
                 Ok(QueryExpr::Matcher(MatcherExpr {
                     kind,
                     user_count,
+                    operand_match_mode,
                     args: parsed_args.args,
                     named_args: parsed_args.named_args,
                 }))

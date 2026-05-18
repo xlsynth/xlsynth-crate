@@ -38,8 +38,15 @@ pub enum QueryExpr {
 pub struct MatcherExpr {
     pub kind: MatcherKind,
     pub user_count: Option<usize>,
+    pub operand_match_mode: OperandMatchMode,
     pub args: Vec<QueryExpr>,
     pub named_args: Vec<NamedArg>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperandMatchMode {
+    Ordered,
+    CommutativeBinary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,6 +172,7 @@ pub fn parse_query(input: &str) -> Result<QueryExpr, String> {
 pub fn validate_query(expr: &QueryExpr) -> Result<(), String> {
     validate_ellipsis_placement(expr)?;
     validate_width_matcher_placement(expr)?;
+    validate_operand_match_mode(expr)?;
     Ok(())
 }
 
@@ -376,6 +384,81 @@ fn validate_width_matcher_placement(expr: &QueryExpr) -> Result<(), String> {
     walk(expr, /* width_allowed_here= */ false)
 }
 
+fn validate_operand_match_mode(expr: &QueryExpr) -> Result<(), String> {
+    fn is_supported_commutative_operator(kind: &MatcherKind) -> bool {
+        let MatcherKind::OpName(opname) = kind else {
+            return false;
+        };
+        matches!(
+            opname.as_str(),
+            "add"
+                | "eq"
+                | "ne"
+                | "umul"
+                | "smul"
+                | "umulp"
+                | "smulp"
+                | "and"
+                | "or"
+                | "xor"
+                | "nand"
+                | "nor"
+        )
+    }
+
+    fn walk(expr: &QueryExpr) -> Result<(), String> {
+        match expr {
+            QueryExpr::Ellipsis
+            | QueryExpr::Placeholder(_)
+            | QueryExpr::Number(_)
+            | QueryExpr::Numeric(_) => Ok(()),
+            QueryExpr::Matcher(m) => {
+                if m.operand_match_mode == OperandMatchMode::CommutativeBinary {
+                    if !is_supported_commutative_operator(&m.kind) {
+                        return Err(
+                            "[comm] is only supported on known commutative concrete operators"
+                                .to_string(),
+                        );
+                    }
+                    if m.args.len() != 2 || m.args.iter().any(|a| matches!(a, QueryExpr::Ellipsis))
+                    {
+                        return Err(
+                            "[comm] matchers must have exactly two non-ellipsis arguments"
+                                .to_string(),
+                        );
+                    }
+                }
+
+                for arg in &m.args {
+                    walk(arg)?;
+                }
+                for named_arg in &m.named_args {
+                    match &named_arg.value {
+                        NamedArgValue::Any
+                        | NamedArgValue::Bool(_)
+                        | NamedArgValue::Number(_)
+                        | NamedArgValue::String(_)
+                        | NamedArgValue::Numeric(_)
+                        | NamedArgValue::DefaultOption(
+                            DefaultOptionPattern::Any | DefaultOptionPattern::None,
+                        ) => {}
+                        NamedArgValue::Expr(e) => walk(e)?,
+                        NamedArgValue::DefaultOption(DefaultOptionPattern::Some(e)) => walk(e)?,
+                        NamedArgValue::ExprList(es) => {
+                            for e in es {
+                                walk(e)?;
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    walk(expr)
+}
+
 /// Finds all node references in `f` that satisfy the query expression.
 pub fn find_matching_nodes(f: &ir::Fn, query: &QueryExpr) -> Vec<ir::NodeRef> {
     validate_query(query).expect("invalid query AST");
@@ -559,7 +642,7 @@ fn match_solutions(
             // bound within the operand expressions.
             let mut out = Vec::new();
             let operand_bindings =
-                match_args_solutions(&matcher.args, &operands, f, users, bindings);
+                match_matcher_args_solutions(matcher, &operands, f, users, bindings);
             for b in operand_bindings {
                 out.extend(match_named_args_solutions(
                     &matcher.named_args,
@@ -570,6 +653,35 @@ fn match_solutions(
                     &b,
                 ));
             }
+            out
+        }
+    }
+}
+
+fn match_matcher_args_solutions(
+    matcher: &MatcherExpr,
+    operands: &[ir::NodeRef],
+    f: &ir::Fn,
+    users: &Users,
+    bindings: &Bindings,
+) -> Vec<Bindings> {
+    match matcher.operand_match_mode {
+        OperandMatchMode::Ordered => {
+            match_args_solutions(&matcher.args, operands, f, users, bindings)
+        }
+        OperandMatchMode::CommutativeBinary => {
+            if matcher.args.len() != 2 || operands.len() != 2 {
+                return vec![];
+            }
+            let mut out = match_args_solutions(&matcher.args, operands, f, users, bindings);
+            let swapped = [operands[1], operands[0]];
+            out.extend(match_args_solutions(
+                &matcher.args,
+                &swapped,
+                f,
+                users,
+                bindings,
+            ));
             out
         }
     }
@@ -1226,6 +1338,56 @@ mod tests {
     }
 
     #[test]
+    fn parse_commutative_operator_matchers() {
+        let query = parse_query("eq[comm](x, y)").unwrap();
+        let QueryExpr::Matcher(matcher) = query else {
+            panic!("expected matcher");
+        };
+        assert_eq!(matcher.kind, MatcherKind::OpName("eq".to_string()));
+        assert_eq!(
+            matcher.operand_match_mode,
+            OperandMatchMode::CommutativeBinary
+        );
+        assert_eq!(matcher.user_count, None);
+        assert_eq!(matcher.args.len(), 2);
+
+        let query = parse_query("add[comm][1u](x, y)").unwrap();
+        let QueryExpr::Matcher(matcher) = query else {
+            panic!("expected matcher");
+        };
+        assert_eq!(
+            matcher.operand_match_mode,
+            OperandMatchMode::CommutativeBinary
+        );
+        assert_eq!(matcher.user_count, Some(1));
+
+        let query = parse_query("add[1u][comm](x, y)").unwrap();
+        let QueryExpr::Matcher(matcher) = query else {
+            panic!("expected matcher");
+        };
+        assert_eq!(
+            matcher.operand_match_mode,
+            OperandMatchMode::CommutativeBinary
+        );
+        assert_eq!(matcher.user_count, Some(1));
+    }
+
+    #[test]
+    fn parse_rejects_unsupported_commutative_matchers() {
+        for query in [
+            "sub[comm](x, y)",
+            "$anycmp[comm](x, y)",
+            "add[comm](x, y, z)",
+            "or[comm](..., x)",
+        ] {
+            assert!(
+                parse_query(query).is_err(),
+                "query should be rejected: {query}"
+            );
+        }
+    }
+
+    #[test]
     fn parse_priority_sel_with_cases_named_args() {
         let query = parse_query("priority_sel(selector=s, cases=[a, b], default=d)").unwrap();
         let QueryExpr::Matcher(matcher) = query else {
@@ -1358,6 +1520,7 @@ mod tests {
         let query = QueryExpr::Matcher(MatcherExpr {
             kind: MatcherKind::OpName("bit_slice".to_string()),
             user_count: None,
+            operand_match_mode: OperandMatchMode::Ordered,
             args: vec![QueryExpr::Placeholder(PlaceholderExpr {
                 name: "_".to_string(),
                 ty: None,
@@ -1592,6 +1755,76 @@ fn main(x: bits[8] id=1) -> bits[1] {
         assert_eq!(matches.len(), 1);
         let node_id = ir::node_textual_id(f, matches[0]);
         assert_eq!(node_id, "cmp_pow2");
+    }
+
+    #[test]
+    fn find_matches_commutative_binary_ops() {
+        let pkg_text = r#"package test
+
+fn main(x: bits[8] id=1) -> (bits[1], bits[1], bits[8], bits[8]) {
+  lit: bits[8] = literal(value=5, id=2)
+  zero: bits[8] = literal(value=0, id=3)
+  cmp_rhs: bits[1] = eq(x, lit, id=4)
+  cmp_lhs: bits[1] = eq(lit, x, id=5)
+  add_rhs: bits[8] = add(x, zero, id=6)
+  add_lhs: bits[8] = add(zero, x, id=7)
+  ret out: (bits[1], bits[1], bits[8], bits[8]) = tuple(cmp_rhs, cmp_lhs, add_rhs, add_lhs, id=8)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+
+        let ids_for_query = |query_text: &str| -> Vec<String> {
+            let query = parse_query(query_text).unwrap();
+            let mut ids: Vec<String> = find_matching_nodes(f, &query)
+                .into_iter()
+                .map(|node_ref| ir::node_textual_id(f, node_ref))
+                .collect();
+            ids.sort();
+            ids
+        };
+
+        assert_eq!(
+            ids_for_query("eq[comm](x, literal(C))"),
+            vec!["cmp_lhs", "cmp_rhs"]
+        );
+        assert_eq!(
+            ids_for_query("add[comm](x, literal(0))"),
+            vec!["add_lhs", "add_rhs"]
+        );
+        assert_eq!(ids_for_query("eq(x, literal(C))"), vec!["cmp_rhs"]);
+
+        let users = crate::ir_utils::compute_users(f);
+        let query = parse_query("eq[comm](x, literal(C))").unwrap();
+        let cmp_lhs = node_ref_by_textual_id(f, "cmp_lhs");
+        let x = node_ref_by_textual_id(f, "x");
+        let bindings = find_root_query_bindings(&query, f, &users, cmp_lhs);
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].get("x"), Some(&Binding::Node(x)));
+        assert!(matches!(
+            bindings[0].get("C"),
+            Some(Binding::LiteralValue { .. })
+        ));
+    }
+
+    #[test]
+    fn find_matches_commutative_binary_backtracks_bindings() {
+        let pkg_text = r#"package test
+
+fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
+  cmp: bits[1] = eq(a, b, id=3)
+  ret out: bits[1] = and(cmp, b, id=4)
+}
+"#;
+        let mut parser = Parser::new(pkg_text);
+        let pkg = parser.parse_and_validate_package().expect("parse package");
+        let f = pkg.get_top_fn().expect("top function");
+
+        let query = parse_query("and(eq[comm](x, y), x)").unwrap();
+        let matches = find_matching_nodes(f, &query);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(ir::node_textual_id(f, matches[0]), "out");
     }
 
     #[test]

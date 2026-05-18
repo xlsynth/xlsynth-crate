@@ -1262,6 +1262,7 @@ Query expression basics:
 - `$anymul(...)` matches any multiply op (e.g., `umul`, `smul`, `umulp`, `smulp`).
 - `$users(pattern)` matches any node that consumes a node matching `pattern`.
 - Concrete operator matchers like `add(...)`, `sub(...)`, `and(...)`, etc. match nodes with that exact IR operator name.
+- Add `[comm]` to selected exact-binary operator matchers to match either operand order, e.g. `add[comm](x, literal(0))`. Supported operators are `add`, `eq`, `ne`, `umul`, `smul`, `umulp`, `smulp`, and exact two-operand `and`, `or`, `xor`, `nand`, `nor`.
 - `...` is a variadic wildcard usable inside operator argument lists for n-ary ops:
   - `nor(..., a, ...)` means `a` appears in *some* operand position.
   - `nor(a, ...)` means `a` is the *first* operand.
@@ -1302,6 +1303,12 @@ Example: match subtraction of an addition with a repeated constant:
 
 ```shell
 xlsynth-driver ir-query my_pkg.ir 'sub(add(x, literal(L)), literal(L))'
+```
+
+Example: rewrite additions by zero regardless of operand order:
+
+```shell
+xlsynth-driver ir-rewrite my_pkg.ir 'add[comm](x, literal(0))' 'x'
 ```
 
 Example: find comparisons against a power-of-two constant:

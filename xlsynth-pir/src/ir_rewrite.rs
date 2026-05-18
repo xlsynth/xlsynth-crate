@@ -2551,6 +2551,30 @@ mod tests {
     }
 
     #[test]
+    fn apply_all_matches_single_pass_rewrites_commutative_operand_orders() {
+        let ir_text = r#"fn t(x: bits[8] id=1) -> (bits[8], bits[8]) {
+  zero: bits[8] = literal(value=0, id=2)
+  add_rhs: bits[8] = add(x, zero, id=10)
+  add_lhs: bits[8] = add(zero, x, id=11)
+  ret tuple.12: (bits[8], bits[8]) = tuple(add_rhs, add_lhs, id=12)
+}"#;
+        let rule = MatchRewriteRule::from_strings("add[comm](x, literal(0))", "x").unwrap();
+        let outcome = rule
+            .apply_to_fn(&parse_fn(ir_text), RewriteApplyMode::AllMatchesSinglePass)
+            .unwrap();
+        assert_eq!(outcome.rewrite_count(), 2);
+        assert_eq!(
+            outcome.rewritten_fn().to_string(),
+            normalized_fn_text(
+                r#"fn t(x: bits[8] id=1) -> (bits[8], bits[8]) {
+  zero: bits[8] = literal(value=0, id=2)
+  ret tuple.12: (bits[8], bits[8]) = tuple(x, x, id=12)
+}"#
+            )
+        );
+    }
+
+    #[test]
     fn apply_all_matches_single_pass_rewrites_overlapping_matches_in_topological_order() {
         let ir_text = r#"fn t(x: bits[8] id=1) -> bits[8] {
   a: bits[8] = add(x, x, id=10)
@@ -2619,6 +2643,23 @@ mod tests {
                 match_count: 2,
             }
         );
+    }
+
+    #[test]
+    fn apply_all_matches_single_pass_reports_ambiguous_commutative_bindings() {
+        let ir_text = r#"fn t(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
+  ret add.10: bits[8] = add(a, b, id=10)
+}"#;
+        let rule = MatchRewriteRule::from_strings("add[comm](x, y)", "x").unwrap();
+        let err = rule
+            .apply_to_fn(&parse_fn(ir_text), RewriteApplyMode::AllMatchesSinglePass)
+            .unwrap_err();
+        match err {
+            MatchRewriteRuleApplyError::AmbiguousMatch { match_count, .. } => {
+                assert_eq!(match_count, 2);
+            }
+            other => panic!("expected ambiguous match error, got {other:?}"),
+        }
     }
 
     #[test]
