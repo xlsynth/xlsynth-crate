@@ -146,6 +146,7 @@ pub struct Options {
     pub enable_rewrite_prio_encode: bool,
     pub enable_rewrite_nary_add: bool,
     pub enable_rewrite_mask_low: bool,
+    pub enable_rewrite_normalize_left: bool,
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
     pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
     /// Opt into lowering XLS `gate` operations by masking the value with the
@@ -216,6 +217,7 @@ pub struct CanonicalG8rOptions {
     pub enable_rewrite_prio_encode: bool,
     pub enable_rewrite_nary_add: bool,
     pub enable_rewrite_mask_low: bool,
+    pub enable_rewrite_normalize_left: bool,
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
     pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
     pub unsafe_gatify_gate_operation: bool,
@@ -243,6 +245,7 @@ impl Default for CanonicalG8rOptions {
             enable_rewrite_prio_encode: prep_defaults.enable_rewrite_prio_encode,
             enable_rewrite_nary_add: prep_defaults.enable_rewrite_nary_add,
             enable_rewrite_mask_low: prep_defaults.enable_rewrite_mask_low,
+            enable_rewrite_normalize_left: prep_defaults.enable_rewrite_normalize_left,
             adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
             mul_adder_mapping: None,
             unsafe_gatify_gate_operation: false,
@@ -280,6 +283,7 @@ impl CanonicalG8rOptions {
             enable_rewrite_prio_encode: self.enable_rewrite_prio_encode,
             enable_rewrite_nary_add: self.enable_rewrite_nary_add,
             enable_rewrite_mask_low: self.enable_rewrite_mask_low,
+            enable_rewrite_normalize_left: self.enable_rewrite_normalize_left,
             adder_mapping: self.adder_mapping,
             mul_adder_mapping: self.mul_adder_mapping,
             unsafe_gatify_gate_operation: self.unsafe_gatify_gate_operation,
@@ -331,6 +335,7 @@ impl From<&Options> for ir2gates::Ir2GatesOptions {
             enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
             enable_rewrite_nary_add: options.enable_rewrite_nary_add,
             enable_rewrite_mask_low: options.enable_rewrite_mask_low,
+            enable_rewrite_normalize_left: options.enable_rewrite_normalize_left,
             adder_mapping: options.adder_mapping,
             mul_adder_mapping: options.mul_adder_mapping,
             unsafe_gatify_gate_operation: options.unsafe_gatify_gate_operation,
@@ -350,6 +355,7 @@ impl From<&CanonicalG8rOptions> for ir2gates::Ir2GatesOptions {
             enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
             enable_rewrite_nary_add: options.enable_rewrite_nary_add,
             enable_rewrite_mask_low: options.enable_rewrite_mask_low,
+            enable_rewrite_normalize_left: options.enable_rewrite_normalize_left,
             adder_mapping: options.adder_mapping,
             mul_adder_mapping: options.mul_adder_mapping,
             unsafe_gatify_gate_operation: options.unsafe_gatify_gate_operation,
@@ -365,6 +371,7 @@ fn prep_options_from_process_options(options: &Options) -> PrepForGatifyOptions 
         enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
         enable_rewrite_nary_add: options.enable_rewrite_nary_add,
         enable_rewrite_mask_low: options.enable_rewrite_mask_low,
+        enable_rewrite_normalize_left: options.enable_rewrite_normalize_left,
         ..PrepForGatifyOptions::all_opts_enabled()
     }
 }
@@ -375,6 +382,7 @@ fn prep_options_from_canonical_options(options: &CanonicalG8rOptions) -> PrepFor
         enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
         enable_rewrite_nary_add: options.enable_rewrite_nary_add,
         enable_rewrite_mask_low: options.enable_rewrite_mask_low,
+        enable_rewrite_normalize_left: options.enable_rewrite_normalize_left,
         ..PrepForGatifyOptions::all_opts_enabled()
     }
 }
@@ -463,6 +471,7 @@ impl From<GatifyOptionsInput<'_>> for ir2gate::GatifyOptions {
             enable_rewrite_prio_encode: input.prep_opts.enable_rewrite_prio_encode,
             enable_rewrite_nary_add: input.prep_opts.enable_rewrite_nary_add,
             enable_rewrite_mask_low: input.prep_opts.enable_rewrite_mask_low,
+            enable_rewrite_normalize_left: input.prep_opts.enable_rewrite_normalize_left,
             array_index_lowering_strategy: Default::default(),
             unsafe_gatify_gate_operation: input.options.unsafe_gatify_gate_operation,
         }

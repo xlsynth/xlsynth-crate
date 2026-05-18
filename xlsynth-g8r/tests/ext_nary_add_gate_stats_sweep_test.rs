@@ -228,6 +228,7 @@ fn get_ir_gate_stats(ir_text: &str) -> (usize, usize) {
             enable_rewrite_prio_encode: false,
             enable_rewrite_nary_add: false,
             enable_rewrite_mask_low: false,
+            enable_rewrite_normalize_left: false,
             adder_mapping: AdderMapping::BrentKung,
             mul_adder_mapping: None,
             unsafe_gatify_gate_operation: false,

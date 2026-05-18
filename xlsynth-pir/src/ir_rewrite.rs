@@ -1588,6 +1588,23 @@ fn build_special_payload(
                 new_bit_count: named_args.require_numeric("new_bit_count")?,
             })
         }
+        "ext_normalize_left" => {
+            named_args.require_no_extra(
+                operator,
+                &["shift_offset", "normalized_bit_count", "clz_bit_count"],
+            )?;
+            if positional_refs.len() != 1 {
+                return Err(MatchRewriteRuleApplyError::InvalidRewriteTemplate(
+                    "ext_normalize_left expects exactly 1 positional operand".to_string(),
+                ));
+            }
+            Ok(NodePayload::ExtNormalizeLeft {
+                arg: positional_refs[0],
+                shift_offset: named_args.require_numeric("shift_offset")?,
+                normalized_bit_count: named_args.require_numeric("normalized_bit_count")?,
+                clz_bit_count: named_args.numerics.get("clz_bit_count").copied(),
+            })
+        }
         "ext_mask_low" => {
             named_args.require_no_extra(operator, &[])?;
             if positional_refs.len() != 1 {

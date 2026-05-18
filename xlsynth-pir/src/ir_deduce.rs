@@ -412,6 +412,22 @@ where
                 _ => Err(DeduceError::ExpectedBits("ext_clz.arg")),
             }
         }
+        NodePayload::ExtNormalizeLeft {
+            normalized_bit_count,
+            clz_bit_count,
+            ..
+        } => {
+            let arg_ty = operand_types
+                .get(0)
+                .ok_or(DeduceError::MissingOperand("ext_normalize_left.arg"))?;
+            match arg_ty {
+                Type::Bits(_) => Ok(Some(crate::ir::ext_normalize_left_result_type(
+                    *normalized_bit_count,
+                    *clz_bit_count,
+                ))),
+                _ => Err(DeduceError::ExpectedBits("ext_normalize_left.arg")),
+            }
+        }
         NodePayload::ExtMaskLow { .. } => {
             let count_ty = operand_types
                 .get(0)

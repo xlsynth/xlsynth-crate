@@ -5304,6 +5304,7 @@ top fn f(x: bits[8] id=1) -> bits[8] {
                 enable_rewrite_prio_encode: false,
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
+                enable_rewrite_normalize_left: false,
                 unsafe_gatify_gate_operation: false,
             },
         )

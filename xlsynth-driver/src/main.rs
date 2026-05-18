@@ -351,6 +351,10 @@ impl AppExt for clap::Command {
                 "Enable mask-low rewrite in prep_for_gatify (introduces ext_mask_low)",
             )
             .add_bool_arg(
+                "enable-rewrite-normalize-left",
+                "Enable left-normalize rewrite in prep_for_gatify (introduces ext_normalize_left)",
+            )
+            .add_bool_arg(
                 "unsafe-gatify-gate-operation",
                 "Opt into lowering XLS gate operations by masking the value with the predicate",
             )

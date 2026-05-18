@@ -115,6 +115,12 @@ enum WrappedExtensionSpec {
         output_width: usize,
         offset: usize,
     },
+    ExtNormalizeLeft {
+        input_width: usize,
+        normalized_bit_count: usize,
+        shift_offset: usize,
+        clz_bit_count: Option<usize>,
+    },
     ExtMaskLow {
         output_width: usize,
         count_width: usize,
@@ -234,6 +240,49 @@ fn parse_wrapped_extension_spec_from_attr(
                 input_width,
                 output_width,
                 offset,
+            }))
+        }
+        "ext_normalize_left" => {
+            let input_width = fields.get("width").copied().ok_or_else(|| {
+                ParseError::new("missing width for ext_normalize_left metadata".to_string())
+            })?;
+            let input_width =
+                parse_wrapped_extension_usize_field(input_width, "ext_normalize_left", "width")?;
+            let normalized_bit_count =
+                fields.get("normalized_width").copied().ok_or_else(|| {
+                    ParseError::new(
+                        "missing normalized_width for ext_normalize_left metadata".to_string(),
+                    )
+                })?;
+            let normalized_bit_count = parse_wrapped_extension_usize_field(
+                normalized_bit_count,
+                "ext_normalize_left",
+                "normalized_width",
+            )?;
+            let shift_offset = fields.get("shift_offset").copied().ok_or_else(|| {
+                ParseError::new("missing shift_offset for ext_normalize_left metadata".to_string())
+            })?;
+            let shift_offset = parse_wrapped_extension_usize_field(
+                shift_offset,
+                "ext_normalize_left",
+                "shift_offset",
+            )?;
+            let clz_bit_count = fields
+                .get("clz_width")
+                .copied()
+                .map(|clz_bit_count| {
+                    parse_wrapped_extension_usize_field(
+                        clz_bit_count,
+                        "ext_normalize_left",
+                        "clz_width",
+                    )
+                })
+                .transpose()?;
+            Ok(Some(WrappedExtensionSpec::ExtNormalizeLeft {
+                input_width,
+                normalized_bit_count,
+                shift_offset,
+                clz_bit_count,
             }))
         }
         "ext_mask_low" => {
@@ -449,6 +498,30 @@ fn canonicalize_wrapped_extension_helper_spec(
                 offset,
             })
         }
+        WrappedExtensionSpec::ExtNormalizeLeft {
+            input_width,
+            normalized_bit_count,
+            shift_offset,
+            clz_bit_count,
+        } => {
+            let expected_ret_ty =
+                ir::ext_normalize_left_result_type(normalized_bit_count, clz_bit_count);
+            if f.params.len() != 1
+                || f.params[0].ty != ir::Type::Bits(input_width)
+                || f.ret_ty != expected_ret_ty
+            {
+                return Err(ParseError::new(format!(
+                    "ffi wrapper helper '{}' does not match ext_normalize_left signature for width {}, normalized width {}, shift offset {}, clz width {:?}",
+                    f.name, input_width, normalized_bit_count, shift_offset, clz_bit_count
+                )));
+            }
+            Ok(WrappedExtensionSpec::ExtNormalizeLeft {
+                input_width,
+                normalized_bit_count,
+                shift_offset,
+                clz_bit_count,
+            })
+        }
         WrappedExtensionSpec::ExtMaskLow {
             output_width,
             count_width,
@@ -574,6 +647,41 @@ fn convert_ffi_invokes_to_extension_ops_in_fn(
                     arg: operands[0],
                     offset,
                     new_bit_count: output_width,
+                };
+            }
+            WrappedExtensionSpec::ExtNormalizeLeft {
+                input_width,
+                normalized_bit_count,
+                shift_offset,
+                clz_bit_count,
+            } => {
+                if operands.len() != 1 {
+                    return Err(ParseError::new(format!(
+                        "invoke of wrapped ext_normalize_left helper '{}' expected 1 operand, got {}",
+                        to_apply,
+                        operands.len()
+                    )));
+                }
+                let expected_ty =
+                    ir::ext_normalize_left_result_type(normalized_bit_count, clz_bit_count);
+                if f.nodes[idx].ty != expected_ty {
+                    return Err(ParseError::new(format!(
+                        "invoke of wrapped ext_normalize_left helper '{}' had type {}, expected {}",
+                        to_apply, f.nodes[idx].ty, expected_ty
+                    )));
+                }
+                let expected_operand_ty = ir::Type::Bits(input_width);
+                if operand_tys[0] != expected_operand_ty {
+                    return Err(ParseError::new(format!(
+                        "invoke of wrapped ext_normalize_left helper '{}' operand 0 had type {}, expected {}",
+                        to_apply, operand_tys[0], expected_operand_ty
+                    )));
+                }
+                f.nodes[idx].payload = ir::NodePayload::ExtNormalizeLeft {
+                    arg: operands[0],
+                    shift_offset,
+                    normalized_bit_count,
+                    clz_bit_count,
                 };
             }
             WrappedExtensionSpec::ExtMaskLow {
@@ -2064,6 +2172,58 @@ impl Parser {
                         arg,
                         offset,
                         new_bit_count,
+                    },
+                    maybe_id.unwrap(),
+                )
+            }
+            "ext_normalize_left" => {
+                let arg = self.parse_node_ref(&node_env, "ext_normalize_left arg")?;
+                let mut shift_offset: Option<usize> = None;
+                let mut normalized_bit_count: Option<usize> = None;
+                let mut clz_bit_count: Option<usize> = None;
+                if self.peek_is(",") {
+                    self.dropc()?;
+                    shift_offset = Some(self.parse_usize_attribute("shift_offset")?);
+                }
+                if self.peek_is(",") {
+                    self.dropc()?;
+                    normalized_bit_count = Some(self.parse_usize_attribute("normalized_bit_count")?);
+                }
+                if self.peek_is(",") {
+                    self.dropc()?;
+                    self.drop_whitespace_and_comments();
+                    if self.peek_is("clz_bit_count") {
+                        clz_bit_count = Some(self.parse_usize_attribute("clz_bit_count")?);
+                        if self.peek_is(",") {
+                            self.dropc()?;
+                        }
+                    }
+                    maybe_id = Some(self.parse_id_attribute()?);
+                }
+                if maybe_id.is_none() {
+                    return Err(ParseError::new(format!(
+                        "expected id for ext_normalize_left; rest_of_line: {:?}",
+                        self.rest_of_line()
+                    )));
+                }
+                let shift_offset = shift_offset.ok_or_else(|| {
+                    ParseError::new(format!(
+                        "expected shift_offset for ext_normalize_left; rest_of_line: {:?}",
+                        self.rest_of_line()
+                    ))
+                })?;
+                let normalized_bit_count = normalized_bit_count.ok_or_else(|| {
+                    ParseError::new(format!(
+                        "expected normalized_bit_count for ext_normalize_left; rest_of_line: {:?}",
+                        self.rest_of_line()
+                    ))
+                })?;
+                (
+                    ir::NodePayload::ExtNormalizeLeft {
+                        arg,
+                        shift_offset,
+                        normalized_bit_count,
+                        clz_bit_count,
                     },
                     maybe_id.unwrap(),
                 )

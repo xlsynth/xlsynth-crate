@@ -504,6 +504,11 @@ fn parse_canonical_g8r_options(matches: &ArgMatches) -> CanonicalG8rOptions {
             "enable_rewrite_mask_low",
             defaults.enable_rewrite_mask_low,
         ),
+        enable_rewrite_normalize_left: parse_cli_bool(
+            matches,
+            "enable_rewrite_normalize_left",
+            defaults.enable_rewrite_normalize_left,
+        ),
         unsafe_gatify_gate_operation: parse_cli_bool(
             matches,
             "unsafe_gatify_gate_operation",

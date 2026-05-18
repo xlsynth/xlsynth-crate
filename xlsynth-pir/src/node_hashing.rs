@@ -119,6 +119,19 @@ fn hash_payload_attributes(f: &Fn, payload: &NodePayload, hasher: &mut blake3::H
             update_hash_u64(hasher, *offset as u64);
             update_hash_u64(hasher, *new_bit_count as u64);
         }
+        NodePayload::ExtNormalizeLeft {
+            shift_offset,
+            normalized_bit_count,
+            clz_bit_count,
+            ..
+        } => {
+            update_hash_u64(hasher, *shift_offset as u64);
+            update_hash_u64(hasher, *normalized_bit_count as u64);
+            update_hash_bool(hasher, clz_bit_count.is_some());
+            if let Some(clz_bit_count) = clz_bit_count {
+                update_hash_u64(hasher, *clz_bit_count as u64);
+            }
+        }
         NodePayload::ExtMaskLow { .. } => {}
         NodePayload::ExtNaryAdd { terms, arch } => {
             update_hash_u64(hasher, terms.len() as u64);
@@ -282,6 +295,18 @@ pub fn node_structural_signature_string(f: &Fn, node_ref: NodeRef) -> String {
         } => {
             attrs.push(format!("offset={offset}"));
             attrs.push(format!("new_bit_count={new_bit_count}"));
+        }
+        NodePayload::ExtNormalizeLeft {
+            shift_offset,
+            normalized_bit_count,
+            clz_bit_count,
+            ..
+        } => {
+            attrs.push(format!("shift_offset={shift_offset}"));
+            attrs.push(format!("normalized_bit_count={normalized_bit_count}"));
+            if let Some(clz_bit_count) = clz_bit_count {
+                attrs.push(format!("clz_bit_count={clz_bit_count}"));
+            }
         }
         NodePayload::ArrayUpdate {
             assumed_in_bounds, ..

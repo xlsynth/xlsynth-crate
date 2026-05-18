@@ -57,6 +57,7 @@ fn gatify_ir_text_with_strategy(
             enable_rewrite_prio_encode: false,
             enable_rewrite_nary_add: false,
             enable_rewrite_mask_low: false,
+            enable_rewrite_normalize_left: false,
             array_index_lowering_strategy: strategy,
             unsafe_gatify_gate_operation: false,
         },

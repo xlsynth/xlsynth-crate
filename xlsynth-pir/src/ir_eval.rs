@@ -77,6 +77,7 @@ fn append_operand_values<'a>(
         | BitSlice { arg, .. }
         | ExtPrioEncode { arg, .. }
         | ExtClz { arg, .. }
+        | ExtNormalizeLeft { arg, .. }
         | OneHot { arg, .. }
         | Decode { arg, .. }
         | Encode { arg, .. }
@@ -632,6 +633,55 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
             let adjusted =
                 IrBits::from_lsb_is_0(&clz_bits).add(&IrBits::from_lsb_is_0(&offset_bits));
             IrValue::from_bits(&adjusted)
+        }
+        ir::NodePayload::ExtNormalizeLeft {
+            shift_offset,
+            normalized_bit_count,
+            clz_bit_count,
+            ..
+        } => {
+            let arg_bits: IrBits = operand_values[0].to_bits().unwrap();
+            let input_width = arg_bits.get_bit_count();
+            let mut leading_zero_count = input_width;
+            for i in 0..input_width {
+                if arg_bits.get_bit(input_width - 1 - i).unwrap() {
+                    leading_zero_count = i;
+                    break;
+                }
+            }
+
+            let mut resized_bits = Vec::with_capacity(normalized_bit_count);
+            for i in 0..normalized_bit_count {
+                resized_bits.push(if i < input_width {
+                    arg_bits.get_bit(i).unwrap()
+                } else {
+                    false
+                });
+            }
+            let resized = IrBits::from_lsb_is_0(&resized_bits);
+            let shift = leading_zero_count.saturating_add(shift_offset);
+            let normalized = if shift >= normalized_bit_count {
+                IrBits::make_ubits(normalized_bit_count, 0)
+                    .expect("normalize-left zero result must construct")
+            } else if let Ok(shift_i64) = i64::try_from(shift) {
+                resized.shll(shift_i64)
+            } else {
+                IrBits::make_ubits(normalized_bit_count, 0)
+                    .expect("normalize-left oversized shift result must construct")
+            };
+            let normalized_value = IrValue::from_bits(&normalized);
+
+            match clz_bit_count {
+                Some(clz_bit_count) => {
+                    let mut clz_bits = vec![false; clz_bit_count];
+                    for (i, bit) in clz_bits.iter_mut().enumerate() {
+                        *bit = i < usize::BITS as usize && ((leading_zero_count >> i) & 1) == 1;
+                    }
+                    let clz_value = IrValue::from_bits(&IrBits::from_lsb_is_0(&clz_bits));
+                    IrValue::make_tuple(&[normalized_value, clz_value])
+                }
+                None => normalized_value,
+            }
         }
         ir::NodePayload::ExtMaskLow { .. } => {
             let out_w = match n.ty {

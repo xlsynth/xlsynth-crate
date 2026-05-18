@@ -364,6 +364,7 @@ Converts an XLS IR file to an `xlsynth_g8r::GateFn` (i.e. a gate-level netlist i
   - `--enable-rewrite-prio-encode=<BOOL>` – when `true`, enable prio-encode and CLZ idiom rewrites during `prep_for_gatify` (introduces `ext_prio_encode` / `ext_clz`). Default `true`.
   - `--enable-rewrite-nary-add=<BOOL>` – when `true`, rewrite width-preserving add/sub trees and explicit gated increment/decrement helper networks into `ext_nary_add`, then greedily absorb/merge nested terms to a fixed point during `prep_for_gatify`. Default `true`.
   - `--enable-rewrite-mask-low=<BOOL>` – when `true`, rewrite dynamic low-mask idioms into `ext_mask_low` during `prep_for_gatify`. Default `true`.
+  - `--enable-rewrite-normalize-left=<BOOL>` – when `true`, rewrite left-normalization idioms into `ext_normalize_left` during `prep_for_gatify`. Default `true`.
   - `--unsafe-gatify-gate-operation=<BOOL>` – when `true`, lower XLS `gate` operations by masking the flattened value with the `bits[1]` predicate. Default `false`.
   - `--reassociation=<BOOL>` – when `true`, rebalance single-fanout AND supergates after FRAIG and again after cut-db rewrite. Default `true`.
   - `--cut-db-enable-large-cone-rewrite=<BOOL>` – when `true`, run the large-cone cut-db rewrite phases after the 4-input cut-db phases. Default `true`.
@@ -1612,6 +1613,7 @@ Supported flags include the common gate-optimization controls:
 - `--enable-rewrite-prio-encode=<BOOL>` – when `true`, enable prio-encode and CLZ idiom rewrites during `prep_for_gatify` (introduces `ext_prio_encode` / `ext_clz`). Default `true`.
 - `--enable-rewrite-nary-add=<BOOL>` – when `true`, rewrite width-preserving add/sub trees and explicit gated increment/decrement helper networks into `ext_nary_add`, then greedily absorb/merge nested terms to a fixed point during `prep_for_gatify`. Default `true`.
 - `--enable-rewrite-mask-low=<BOOL>` – when `true`, rewrite dynamic low-mask idioms into `ext_mask_low` during `prep_for_gatify`. Default `true`.
+- `--enable-rewrite-normalize-left=<BOOL>` – when `true`, rewrite left-normalization idioms into `ext_normalize_left` during `prep_for_gatify`. Default `true`.
 - `--unsafe-gatify-gate-operation=<BOOL>` – when `true`, lower XLS `gate` operations by masking the flattened value with the `bits[1]` predicate. Default `false`.
 - `--reassociation=<BOOL>` – when `true`, rebalance single-fanout AND supergates after FRAIG and again after cut-db rewrite. Default `true`.
 - `--cut-db-enable-large-cone-rewrite=<BOOL>` – when `true`, run the large-cone cut-db rewrite phases after the 4-input cut-db phases. Default `true`.

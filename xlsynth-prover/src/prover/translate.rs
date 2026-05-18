@@ -395,6 +395,55 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     bitvec,
                 }
             }
+            NodePayload::ExtNormalizeLeft {
+                arg,
+                shift_offset,
+                normalized_bit_count,
+                clz_bit_count,
+            } => {
+                let a = env
+                    .get(arg)
+                    .expect("ext_normalize_left.arg must be present")
+                    .clone();
+                let reversed = solver.reverse(&a.bitvec);
+                let one_hot = solver.xls_one_hot(&reversed, /* lsb_prio= */ true);
+                let encoded = solver.xls_encode(&one_hot);
+                let raw_clz_width = encoded.get_width();
+                let normalized_input = solver.zero_extend_to(&a.bitvec, *normalized_bit_count);
+                let shift_width = xlsynth_pir::math::ceil_log2(
+                    a.ir_type
+                        .bit_count()
+                        .saturating_add(*shift_offset)
+                        .saturating_add(1),
+                );
+                let raw_shift = if raw_clz_width <= shift_width {
+                    solver.zero_extend_to(&encoded, shift_width)
+                } else {
+                    solver.slice(&encoded, 0, shift_width)
+                };
+                let adjusted_shift = if *shift_offset == 0 || shift_width == 0 {
+                    raw_shift
+                } else {
+                    let offset_bv = solver.numerical_u128(shift_width, *shift_offset as u128);
+                    solver.add(&raw_shift, &offset_bv)
+                };
+                let normalized = solver.xls_shll(&normalized_input, &adjusted_shift);
+                let bitvec = match clz_bit_count {
+                    Some(clz_bit_count) => {
+                        let raw_clz = if raw_clz_width <= *clz_bit_count {
+                            solver.zero_extend_to(&encoded, *clz_bit_count)
+                        } else {
+                            solver.slice(&encoded, 0, *clz_bit_count)
+                        };
+                        solver.concat(&normalized, &raw_clz)
+                    }
+                    None => normalized,
+                };
+                IrTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec,
+                }
+            }
             NodePayload::ExtMaskLow { count } => {
                 let c = env
                     .get(count)

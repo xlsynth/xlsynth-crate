@@ -92,6 +92,7 @@ fn assert_ir_gate_equivalent_unary_cmp(
             enable_rewrite_prio_encode: false,
             enable_rewrite_nary_add: false,
             enable_rewrite_mask_low: false,
+            enable_rewrite_normalize_left: false,
             array_index_lowering_strategy: Default::default(),
             unsafe_gatify_gate_operation: false,
         },

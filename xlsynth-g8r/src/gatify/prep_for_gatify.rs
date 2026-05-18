@@ -54,6 +54,10 @@ pub struct PrepForGatifyOptions {
     /// `(bits[N]:1 << count) - bits[N]:1`, `bits[N]:all_ones << count`,
     /// `bits[N]:all_ones >> count`, and zero-extended low masks.
     pub enable_rewrite_mask_low: bool,
+
+    /// When true, rewrite left-normalization idioms like
+    /// `shll(zero_ext(x), ext_clz(x, ...))` into `ext_normalize_left`.
+    pub enable_rewrite_normalize_left: bool,
 }
 
 impl PrepForGatifyOptions {
@@ -65,6 +69,7 @@ impl PrepForGatifyOptions {
             enable_rewrite_small_shift_choices: true,
             enable_rewrite_nary_add: true,
             enable_rewrite_mask_low: true,
+            enable_rewrite_normalize_left: true,
         }
     }
 
@@ -76,6 +81,7 @@ impl PrepForGatifyOptions {
             enable_rewrite_small_shift_choices: false,
             enable_rewrite_nary_add: false,
             enable_rewrite_mask_low: false,
+            enable_rewrite_normalize_left: false,
         }
     }
 }
@@ -395,6 +401,152 @@ fn rewrite_zero_extended_clz_to_ext_clz(f: &mut ir::Fn) -> usize {
             Some(Type::Bits(output_width)),
         )
         .expect("prep_for_gatify: rewriting zero-extended clz failed");
+        rewrites += 1;
+    }
+    rewrites
+}
+
+fn zero_extended_shift_input_width(
+    f: &ir::Fn,
+    shift_input: NodeRef,
+    arg: NodeRef,
+) -> Option<usize> {
+    let output_width = bits_width(&f.get_node(shift_input).ty)?;
+    if shift_input == arg {
+        return Some(output_width);
+    }
+    match f.get_node(shift_input).payload.clone() {
+        NodePayload::ZeroExt {
+            arg: zero_extended_arg,
+            new_bit_count,
+        } if zero_extended_arg == arg && new_bit_count == output_width => Some(output_width),
+        NodePayload::Nary(NaryOp::Concat, operands) => {
+            let Some((&low_arg, high_operands)) = operands.split_last() else {
+                return None;
+            };
+            if low_arg != arg || high_operands.is_empty() {
+                return None;
+            }
+            high_operands
+                .iter()
+                .all(|nr| {
+                    bits_width(&f.get_node(*nr).ty)
+                        .is_some_and(|w| is_ubits_literal_zero_of_width(f, *nr, w))
+                })
+                .then_some(output_width)
+        }
+        _ => None,
+    }
+}
+
+fn collect_raw_clz_nodes_for_normalize(
+    f: &ir::Fn,
+    arg: NodeRef,
+    shift_amount: NodeRef,
+    shift_offset: usize,
+) -> Vec<(NodeRef, usize)> {
+    let use_counts = get_use_counts(f);
+    let mut raw_clz_nodes = Vec::new();
+    for (idx, node) in f.nodes.iter().enumerate() {
+        let NodePayload::ExtClz {
+            arg: clz_arg,
+            offset,
+            new_bit_count,
+        } = node.payload
+        else {
+            continue;
+        };
+        if clz_arg != arg || offset != 0 || use_counts[idx] == 0 {
+            continue;
+        }
+        let node_ref = NodeRef { index: idx };
+        if node_ref == shift_amount && shift_offset == 0 && use_counts[idx] == 1 {
+            continue;
+        }
+        raw_clz_nodes.push((node_ref, new_bit_count));
+    }
+    raw_clz_nodes
+}
+
+fn rewrite_left_normalize_shift_to_ext_normalize_left(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+    let original_len = f.nodes.len();
+    for node_index in 0..original_len {
+        let shll_ref = NodeRef { index: node_index };
+        let NodePayload::Binop(Binop::Shll, shift_input, shift_amount) =
+            f.get_node(shll_ref).payload.clone()
+        else {
+            continue;
+        };
+        let NodePayload::ExtClz {
+            arg,
+            offset: shift_offset,
+            ..
+        } = f.get_node(shift_amount).payload
+        else {
+            continue;
+        };
+        let Some(normalized_bit_count) = zero_extended_shift_input_width(f, shift_input, arg)
+        else {
+            continue;
+        };
+        if bits_width(&f.get_node(shll_ref).ty) != Some(normalized_bit_count) {
+            continue;
+        }
+
+        let raw_clz_nodes = collect_raw_clz_nodes_for_normalize(f, arg, shift_amount, shift_offset);
+        let clz_bit_count = raw_clz_nodes.iter().map(|(_, width)| *width).max();
+        let normalize_ref = push_node(
+            f,
+            ir::ext_normalize_left_result_type(normalized_bit_count, clz_bit_count),
+            NodePayload::ExtNormalizeLeft {
+                arg,
+                shift_offset,
+                normalized_bit_count,
+                clz_bit_count,
+            },
+        );
+        let normalized_ref = match clz_bit_count {
+            Some(_) => push_node(
+                f,
+                Type::Bits(normalized_bit_count),
+                NodePayload::TupleIndex {
+                    tuple: normalize_ref,
+                    index: 0,
+                },
+            ),
+            None => normalize_ref,
+        };
+        ir_utils::replace_node_with_ref(f, shll_ref, normalized_ref)
+            .expect("prep_for_gatify: rewriting normalize shll failed");
+
+        if let Some(clz_bit_count) = clz_bit_count {
+            let raw_clz_ref = push_node(
+                f,
+                Type::Bits(clz_bit_count),
+                NodePayload::TupleIndex {
+                    tuple: normalize_ref,
+                    index: 1,
+                },
+            );
+            for (raw_clz_node, raw_clz_width) in raw_clz_nodes {
+                let replacement = if raw_clz_width == clz_bit_count {
+                    raw_clz_ref
+                } else {
+                    push_node(
+                        f,
+                        Type::Bits(raw_clz_width),
+                        NodePayload::BitSlice {
+                            arg: raw_clz_ref,
+                            start: 0,
+                            width: raw_clz_width,
+                        },
+                    )
+                };
+                ir_utils::replace_node_with_ref(f, raw_clz_node, replacement)
+                    .expect("prep_for_gatify: replacing raw clz with normalize output failed");
+            }
+        }
         rewrites += 1;
     }
     rewrites
@@ -2385,6 +2537,9 @@ pub fn prep_for_gatify(
         let _rewrites = rewrite_clz_plus_constant_to_ext_clz(&mut cloned);
         let _rewrites = rewrite_zero_extended_clz_to_ext_clz(&mut cloned);
         let _rewrites = rewrite_eq_ne_clz_literal_to_input_predicate(&mut cloned);
+    }
+    if options.enable_rewrite_normalize_left {
+        let _rewrites = rewrite_left_normalize_shift_to_ext_normalize_left(&mut cloned);
     }
     mark_dead_nodes_as_nil(&mut cloned);
     ir_utils::compact_and_toposort_in_place(&mut cloned)

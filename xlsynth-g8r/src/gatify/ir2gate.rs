@@ -1127,6 +1127,101 @@ fn shll_const_and_resize(
     AigBitVector::from_lsb_is_index_0(&shifted)
 }
 
+fn gatify_clz_value_bits_from_one_hot(
+    g8_builder: &mut GateBuilder,
+    clz_one_hot: &AigBitVector,
+    input_bit_count: usize,
+    offset: usize,
+    output_bit_count: usize,
+) -> Result<AigBitVector, String> {
+    let mut out: Vec<AigOperand> = Vec::with_capacity(output_bit_count);
+    for bit_i in 0..output_bit_count {
+        let mut selected = Vec::new();
+        for clz_value in 0..=input_bit_count {
+            let adjusted = offset.checked_add(clz_value).ok_or_else(|| {
+                format!(
+                    "ExtClz offset overflow: offset {} plus clz value {}",
+                    offset, clz_value
+                )
+            })?;
+            if bit_i < usize::BITS as usize && ((adjusted >> bit_i) & 1) == 1 {
+                selected.push(*clz_one_hot.get_lsb(clz_value));
+            }
+        }
+        let gate = match selected.len() {
+            0 => g8_builder.get_false(),
+            1 => selected[0],
+            _ => {
+                let selected_bits = AigBitVector::from_lsb_is_index_0(&selected);
+                g8_builder.add_or_reduce(&selected_bits, ReductionKind::Tree)
+            }
+        };
+        out.push(gate);
+    }
+    Ok(AigBitVector::from_lsb_is_index_0(&out))
+}
+
+/// Lowers normalize-left as a logarithmic shift/count tree.
+fn gatify_ext_normalize_left_staged(
+    g8_builder: &mut GateBuilder,
+    arg_bits: &AigBitVector,
+    shift_offset: usize,
+    normalized_bit_count: usize,
+    clz_bit_count: Option<usize>,
+) -> Result<(AigBitVector, Option<AigBitVector>), String> {
+    let input_bit_count = arg_bits.get_bit_count();
+    let mut normalized = arg_bits.clone();
+    let mut clz_nonzero_bits =
+        clz_bit_count.map(|bit_count| vec![g8_builder.get_false(); bit_count]);
+
+    let mut shift = input_bit_count
+        .checked_next_power_of_two()
+        .unwrap_or(usize::MAX)
+        >> 1;
+    while shift > 0 {
+        let upper_bits = normalized.get_msbs(shift);
+        let should_shift = g8_builder.add_ez(&upper_bits, ReductionKind::Tree);
+        let shifted = shll_const_and_resize(&normalized, shift, input_bit_count, g8_builder);
+        normalized = g8_builder.add_mux2_vec(&should_shift, &shifted, &normalized);
+
+        if let Some(clz_bits) = clz_nonzero_bits.as_mut() {
+            let bit_i = shift.trailing_zeros() as usize;
+            if bit_i < clz_bits.len() {
+                clz_bits[bit_i] = should_shift;
+            }
+        }
+        shift >>= 1;
+    }
+
+    let normalized =
+        shll_const_and_resize(&normalized, shift_offset, normalized_bit_count, g8_builder);
+
+    let clz_bits = match clz_nonzero_bits {
+        Some(clz_nonzero_bits) => {
+            let clz_nonzero_bits = AigBitVector::from_lsb_is_index_0(&clz_nonzero_bits);
+            let arg_is_zero = if input_bit_count == 0 {
+                g8_builder.get_true()
+            } else {
+                g8_builder.add_ez(arg_bits, ReductionKind::Tree)
+            };
+            let clz_zero_bits = usize_as_aig_bits(
+                input_bit_count,
+                clz_nonzero_bits.get_bit_count(),
+                g8_builder,
+            );
+            Some(g8_builder.add_mux2_vec(&arg_is_zero, &clz_zero_bits, &clz_nonzero_bits))
+        }
+        None => None,
+    };
+    Ok((normalized, clz_bits))
+}
+
+fn tag_output_bits(g8_builder: &mut GateBuilder, bits: &AigBitVector, prefix: &str) {
+    for (i, gate) in bits.iter_lsb_to_msb().enumerate() {
+        g8_builder.add_tag(gate.node, format!("{prefix}_output_bit_{i}"));
+    }
+}
+
 fn usize_as_aig_bits(value: usize, bit_count: usize, gb: &mut GateBuilder) -> AigBitVector {
     let mut bits = Vec::with_capacity(bit_count);
     for i in 0..bit_count {
@@ -3217,38 +3312,58 @@ fn gatify_node(
                 /* lsb_prio= */ true,
                 /* value_cannot_be_zero= */ false,
             );
-            let mut out: Vec<AigOperand> = Vec::with_capacity(expected_out_w);
-            for bit_i in 0..expected_out_w {
-                let mut selected = Vec::new();
-                for clz_value in 0..=in_w {
-                    let adjusted = offset.checked_add(clz_value).ok_or_else(|| {
-                        format!(
-                            "ExtClz offset overflow: offset {} plus clz value {}",
-                            offset, clz_value
-                        )
-                    })?;
-                    if bit_i < usize::BITS as usize && ((adjusted >> bit_i) & 1) == 1 {
-                        selected.push(*clz_one_hot.get_lsb(clz_value));
-                    }
-                }
-                let gate = match selected.len() {
-                    0 => g8_builder.get_false(),
-                    1 => selected[0],
-                    _ => {
-                        let selected_bits = AigBitVector::from_lsb_is_index_0(&selected);
-                        g8_builder.add_or_reduce(&selected_bits, ReductionKind::Tree)
-                    }
-                };
-                out.push(gate);
+            let out_bits = gatify_clz_value_bits_from_one_hot(
+                g8_builder,
+                &clz_one_hot,
+                in_w,
+                *offset,
+                expected_out_w,
+            )?;
+            tag_output_bits(g8_builder, &out_bits, &format!("ext_clz_{}", node.text_id));
+            env.add(node_ref, GateOrVec::BitVector(out_bits));
+        }
+        ir::NodePayload::ExtNormalizeLeft {
+            arg,
+            shift_offset,
+            normalized_bit_count,
+            clz_bit_count,
+        } => {
+            let arg_bits = env
+                .get_bit_vector(*arg)
+                .expect("ext_normalize_left arg should be present");
+            let expected_ty =
+                ir::ext_normalize_left_result_type(*normalized_bit_count, *clz_bit_count);
+            if node.ty != expected_ty {
+                return Err(format!(
+                    "ExtNormalizeLeft output type mismatch; expected {} got {}",
+                    expected_ty, node.ty
+                ));
             }
 
-            let out_bits = AigBitVector::from_lsb_is_index_0(&out);
-            for (i, gate) in out_bits.iter_lsb_to_msb().enumerate() {
-                g8_builder.add_tag(
-                    gate.node,
-                    format!("ext_clz_{}_output_bit_{}", node.text_id, i),
-                );
-            }
+            let (normalized_bits, clz_bits) = gatify_ext_normalize_left_staged(
+                g8_builder,
+                &arg_bits,
+                *shift_offset,
+                *normalized_bit_count,
+                *clz_bit_count,
+            )?;
+            tag_output_bits(
+                g8_builder,
+                &normalized_bits,
+                &format!("ext_normalize_left_{}_normalized", node.text_id),
+            );
+
+            let out_bits = match clz_bits {
+                Some(clz_bits) => {
+                    tag_output_bits(
+                        g8_builder,
+                        &clz_bits,
+                        &format!("ext_normalize_left_{}_clz", node.text_id),
+                    );
+                    AigBitVector::concat(normalized_bits, clz_bits)
+                }
+                None => normalized_bits,
+            };
             env.add(node_ref, GateOrVec::BitVector(out_bits));
         }
         ir::NodePayload::ExtMaskLow { count } => {
@@ -3982,6 +4097,7 @@ pub struct GatifyOptions {
     pub enable_rewrite_prio_encode: bool,
     pub enable_rewrite_nary_add: bool,
     pub enable_rewrite_mask_low: bool,
+    pub enable_rewrite_normalize_left: bool,
     pub array_index_lowering_strategy: ArrayIndexLoweringStrategy,
     pub unsafe_gatify_gate_operation: bool,
 }
@@ -4091,6 +4207,7 @@ pub fn gatify(orig_fn: &ir::Fn, options: GatifyOptions) -> Result<GatifyOutput, 
             enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
             enable_rewrite_nary_add: options.enable_rewrite_nary_add,
             enable_rewrite_mask_low: options.enable_rewrite_mask_low,
+            enable_rewrite_normalize_left: options.enable_rewrite_normalize_left,
             ..PrepForGatifyOptions::all_opts_enabled()
         },
     );
@@ -4115,6 +4232,7 @@ pub fn gatify_node_as_fn(
             enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
             enable_rewrite_nary_add: options.enable_rewrite_nary_add,
             enable_rewrite_mask_low: options.enable_rewrite_mask_low,
+            enable_rewrite_normalize_left: options.enable_rewrite_normalize_left,
             ..PrepForGatifyOptions::all_opts_enabled()
         },
     );
@@ -4258,6 +4376,7 @@ mod tests {
                 enable_rewrite_prio_encode: false,
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
+                enable_rewrite_normalize_left: false,
                 array_index_lowering_strategy: Default::default(),
                 unsafe_gatify_gate_operation: false,
             },
@@ -4345,6 +4464,7 @@ top fn f(p: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
                 enable_rewrite_prio_encode: false,
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
+                enable_rewrite_normalize_left: false,
                 array_index_lowering_strategy: Default::default(),
                 unsafe_gatify_gate_operation: false,
             },
@@ -4383,6 +4503,7 @@ fn f(a: bits[8], b: bits[8]) -> bits[8] {
                 enable_rewrite_prio_encode: false,
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
+                enable_rewrite_normalize_left: false,
                 array_index_lowering_strategy: Default::default(),
                 unsafe_gatify_gate_operation: false,
             },
@@ -4459,6 +4580,7 @@ fn f(a: bits[2] id=1, b: bits[2] id=2) -> bits[2] {
                 enable_rewrite_prio_encode: false,
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
+                enable_rewrite_normalize_left: false,
                 array_index_lowering_strategy: Default::default(),
                 unsafe_gatify_gate_operation: false,
             },
@@ -5400,6 +5522,7 @@ top fn main(x: bits[{width}], amt: bits[{amount_width}]) -> bits[{width}] {{
                 enable_rewrite_prio_encode: false,
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
+                enable_rewrite_normalize_left: false,
                 array_index_lowering_strategy: Default::default(),
                 unsafe_gatify_gate_operation: false,
             },
@@ -5684,6 +5807,7 @@ top fn main(x: bits[{arg_width}], start: bits[{start_width}], update: bits[{upda
                 enable_rewrite_prio_encode: false,
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
+                enable_rewrite_normalize_left: false,
                 array_index_lowering_strategy: Default::default(),
                 unsafe_gatify_gate_operation: false,
             },
@@ -6002,6 +6126,7 @@ top fn main(array: bits[{element_width}][{array_len}], start: bits[{start_width}
                 enable_rewrite_prio_encode: false,
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
+                enable_rewrite_normalize_left: false,
                 array_index_lowering_strategy: Default::default(),
                 unsafe_gatify_gate_operation: false,
             },
@@ -6155,6 +6280,7 @@ top fn f(start: bits[2], a: bits[8]) -> bits[8][1] {
                 enable_rewrite_prio_encode: false,
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
+                enable_rewrite_normalize_left: false,
                 array_index_lowering_strategy: Default::default(),
                 unsafe_gatify_gate_operation: false,
             },
@@ -6198,6 +6324,7 @@ top fn f(start: bits[4], a: bits[8], b: bits[8]) -> bits[8][1] {
                 enable_rewrite_prio_encode: false,
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
+                enable_rewrite_normalize_left: false,
                 array_index_lowering_strategy: Default::default(),
                 unsafe_gatify_gate_operation: false,
             },
@@ -6240,6 +6367,7 @@ top fn f(start: bits[4], a: bits[8], b: bits[8]) -> bits[8][1] {
                 enable_rewrite_prio_encode: false,
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
+                enable_rewrite_normalize_left: false,
                 array_index_lowering_strategy: Default::default(),
                 unsafe_gatify_gate_operation: false,
             },
@@ -6265,6 +6393,7 @@ top fn f(start: bits[4], a: bits[8], b: bits[8]) -> bits[8][1] {
                 enable_rewrite_prio_encode: false,
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
+                enable_rewrite_normalize_left: false,
                 array_index_lowering_strategy: Default::default(),
                 unsafe_gatify_gate_operation: true,
             },
@@ -6296,6 +6425,7 @@ top fn f(pred: bits[1] id=1, x: bits[3] id=2) -> bits[3] {
                 enable_rewrite_prio_encode: false,
                 enable_rewrite_nary_add: false,
                 enable_rewrite_mask_low: false,
+                enable_rewrite_normalize_left: false,
                 array_index_lowering_strategy: Default::default(),
                 unsafe_gatify_gate_operation: false,
             },
