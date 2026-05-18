@@ -10,7 +10,6 @@ use rand::{Rng, SeedableRng};
 use xlsynth::{IrBits, IrValue};
 use xlsynth_g8r::aig_serdes::gate2ir;
 use xlsynth_g8r::gatify::ir2gate::{self, GatifyOptions};
-use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_pir::desugar_extensions::emit_package_as_xls_ir_text;
 use xlsynth_pir::ir::{
     self, ExtNaryAddArchitecture, ExtNaryAddTerm, FileTable, MemberType, Node, NodePayload, Package,

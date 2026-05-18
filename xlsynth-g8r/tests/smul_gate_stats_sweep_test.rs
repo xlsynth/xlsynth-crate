@@ -44,9 +44,11 @@ top fn smul_sign_extend_w{operand_width}_o{output_width}(lhs: bits[{operand_widt
 }
 
 fn gatify_options() -> GatifyOptions {
-fn gatify_options() ->     adder_mapping: AdderMapping::RippleCarry,
-fn gatify_options() ->     ..GatifyOptions::all_opts_disabled()
-fn gatify_options() -> }
+    GatifyOptions {
+        adder_mapping: AdderMapping::RippleCarry,
+        ..GatifyOptions::all_opts_disabled()
+    }
+}
 
 fn gate_fn_for_ir_text(ir_text: &str) -> GateFn {
     let mut parser = ir_parser::Parser::new(ir_text);

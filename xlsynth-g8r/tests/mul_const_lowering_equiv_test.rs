@@ -2,7 +2,6 @@
 
 use xlsynth_g8r::check_equivalence;
 use xlsynth_g8r::gatify::ir2gate::{self, GatifyOptions};
-use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_pir::ir_parser;
 
 #[derive(Clone, Copy, Debug)]
@@ -130,11 +129,7 @@ fn prove_case(width: usize, case: &ConstantCase, literal_side: LiteralSide) {
     let mut parser = ir_parser::Parser::new(&ir_text);
     let pkg = parser.parse_and_validate_package().expect("parse/validate");
     let pir_fn = pkg.get_top_fn().expect("top fn");
-    let output = ir2gate::gatify(
-        pir_fn,
-        GatifyOptions::all_opts_disabled(),
-    )
-    .unwrap_or_else(|e| {
+    let output = ir2gate::gatify(pir_fn, GatifyOptions::all_opts_disabled()).unwrap_or_else(|e| {
         panic!(
             "gatify failed for width={} case={} constant={} side={:?}: {}",
             width, case.name, case.value, literal_side, e

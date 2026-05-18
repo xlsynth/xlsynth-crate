@@ -459,19 +459,23 @@ struct GatifyOptionsInput<'a> {
 }
 
 impl From<GatifyOptionsInput<'_>> for ir2gate::GatifyOptions {
-impl From<GatifyOptionsInput<'_>> for     fold: input.options.fold,
-impl From<GatifyOptionsInput<'_>> for     hash: input.options.hash,
-impl From<GatifyOptionsInput<'_>> for     adder_mapping: input.options.adder_mapping,
-impl From<GatifyOptionsInput<'_>> for     mul_adder_mapping: input.options.mul_adder_mapping,
-impl From<GatifyOptionsInput<'_>> for     range_info: Some(input.range_info),
-impl From<GatifyOptionsInput<'_>> for     enable_rewrite_carry_out: input.prep_opts.enable_rewrite_carry_out,
-impl From<GatifyOptionsInput<'_>> for     enable_rewrite_prio_encode: input.prep_opts.enable_rewrite_prio_encode,
-impl From<GatifyOptionsInput<'_>> for     enable_rewrite_nary_add: input.prep_opts.enable_rewrite_nary_add,
-impl From<GatifyOptionsInput<'_>> for     enable_rewrite_mask_low: input.prep_opts.enable_rewrite_mask_low,
-impl From<GatifyOptionsInput<'_>> for     enable_rewrite_normalize_left: input.prep_opts.enable_rewrite_normalize_left,
-impl From<GatifyOptionsInput<'_>> for     unsafe_gatify_gate_operation: input.options.unsafe_gatify_gate_operation,
-impl From<GatifyOptionsInput<'_>> for     ..ir2gate::GatifyOptions::all_opts_disabled()
-impl From<GatifyOptionsInput<'_>> for }
+    fn from(input: GatifyOptionsInput<'_>) -> Self {
+        Self {
+            fold: input.options.fold,
+            hash: input.options.hash,
+            adder_mapping: input.options.adder_mapping,
+            mul_adder_mapping: input.options.mul_adder_mapping,
+            range_info: Some(input.range_info),
+            enable_rewrite_carry_out: input.prep_opts.enable_rewrite_carry_out,
+            enable_rewrite_prio_encode: input.prep_opts.enable_rewrite_prio_encode,
+            enable_rewrite_nary_add: input.prep_opts.enable_rewrite_nary_add,
+            enable_rewrite_mask_low: input.prep_opts.enable_rewrite_mask_low,
+            enable_rewrite_normalize_left: input.prep_opts.enable_rewrite_normalize_left,
+            unsafe_gatify_gate_operation: input.options.unsafe_gatify_gate_operation,
+            ..ir2gate::GatifyOptions::all_opts_disabled()
+        }
+    }
+}
 
 /// Processes IR text through the canonical g8r lowering path.
 pub fn process_ir_text_with_gatefn(

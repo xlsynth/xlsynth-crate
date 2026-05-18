@@ -4,7 +4,6 @@
 use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::aig_serdes::gate2ir;
 use xlsynth_g8r::gatify::ir2gate::{self, GatifyOutput};
-use xlsynth_g8r::ir2gate_utils;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_fuzz::{generate_ir_fn, FuzzSample};
 use xlsynth_pir::ir_parser;

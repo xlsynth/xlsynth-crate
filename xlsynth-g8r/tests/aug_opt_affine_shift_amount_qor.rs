@@ -51,12 +51,9 @@ fn aug_opt_for_test(ir_text: &str) -> xlsynth_pir::aug_opt::AugOptRunResult {
 }
 
 fn gatify_gate_fn(pir_fn: &ir::Fn) -> xlsynth_g8r::aig::GateFn {
-    gatify_prepared_fn(
-        pir_fn,
-        GatifyOptions::all_opts_disabled(),
-    )
-    .expect("gatify_prepared_fn")
-    .gate_fn
+    gatify_prepared_fn(pir_fn, GatifyOptions::all_opts_disabled())
+        .expect("gatify_prepared_fn")
+        .gate_fn
 }
 
 fn build_affine_shift_ir(case: AffineShiftQorCase) -> String {

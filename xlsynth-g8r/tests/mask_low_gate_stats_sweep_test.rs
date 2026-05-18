@@ -125,12 +125,9 @@ top fn zero_concat_low_mask_{low_width}b(count: bits[{count_width}] id=1) -> bit
 
 fn stats_for_ext_mask_low(output_width: usize) -> SummaryStats {
     let pir_fn = parse_top_fn(&build_ext_mask_low_ir_text(output_width));
-    let gate_fn = gatify(
-        &pir_fn,
-        GatifyOptions::all_opts_disabled(),
-    )
-    .expect("gatify")
-    .gate_fn;
+    let gate_fn = gatify(&pir_fn, GatifyOptions::all_opts_disabled())
+        .expect("gatify")
+        .gate_fn;
     get_summary_stats(&gate_fn)
 }
 

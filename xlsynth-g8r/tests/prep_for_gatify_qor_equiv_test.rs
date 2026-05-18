@@ -22,11 +22,8 @@ fn assert_ir_fns_equivalent(orig_fn: &ir::Fn, prepared_fn: &ir::Fn) {
 }
 
 fn gatify_without_prep(pir_fn: &ir::Fn) -> (GateFn, SummaryStats) {
-    let out = gatify_prepared_fn(
-        pir_fn,
-        GatifyOptions::all_opts_disabled(),
-    )
-    .expect("gatify_prepared_fn");
+    let out =
+        gatify_prepared_fn(pir_fn, GatifyOptions::all_opts_disabled()).expect("gatify_prepared_fn");
     let stats = get_summary_stats(&out.gate_fn);
     (out.gate_fn, stats)
 }

@@ -30,7 +30,6 @@ use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;
 use crate::aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Output, PirNodeIds};
 use crate::aig::topo::topo_sort_refs;
 use crate::gatify::ir2gate::{GatifyOptions, gatify};
-use crate::ir2gate_utils::AdderMapping;
 use crate::prove_gate_fn_equiv_common::{EquivResult, GateFormalBackend};
 use crate::prove_gate_fn_equiv_sat::{
     CadicalSat, IncrementalSat, SatModel, SatSolveResult, prove_gate_fn_equiv_with_backend,

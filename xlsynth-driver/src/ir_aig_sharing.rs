@@ -9,7 +9,6 @@ use xlsynth_g8r::aig_serdes::gate2ir::{repack_gate_fn_inputs_with_schema, GateFn
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
-use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::ir_aig_sharing::{
     get_equivalences, prove_equivalence_candidates_with_backend_streaming, CandidateProofResult,
     IrAigCandidateRhs, IrAigSharingOptions,

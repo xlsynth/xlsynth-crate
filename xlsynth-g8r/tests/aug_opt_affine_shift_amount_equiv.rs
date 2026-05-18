@@ -86,12 +86,9 @@ fn aug_opt_for_test(ir_text: &str) -> ir::Fn {
 }
 
 fn gatify_without_prep(pir_fn: &ir::Fn) -> GateFn {
-    gatify_prepared_fn(
-        pir_fn,
-        GatifyOptions::all_opts_disabled(),
-    )
-    .expect("gatify_prepared_fn")
-    .gate_fn
+    gatify_prepared_fn(pir_fn, GatifyOptions::all_opts_disabled())
+        .expect("gatify_prepared_fn")
+        .gate_fn
 }
 
 fn assert_ir_fns_equivalent(orig_fn: &ir::Fn, prepared_fn: &ir::Fn, label: &str) {

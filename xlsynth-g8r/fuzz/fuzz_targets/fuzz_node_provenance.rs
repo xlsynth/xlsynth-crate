@@ -7,7 +7,6 @@ use std::collections::HashSet;
 use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::aig::gate::AigNode;
 use xlsynth_g8r::gatify::ir2gate::{self, GatifyOptions};
-use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_pir::ir_fuzz::{FuzzSample, generate_ir_fn};
 use xlsynth_pir::ir_parser;
 

@@ -7,7 +7,6 @@ use xlsynth_g8r::ir_aig_sharing::{
     CandidateProofResult, IrAigCandidateRhs, IrAigSharingOptions, get_equivalences,
     prove_equivalence_candidates_cadical, prove_equivalence_candidates_varisat,
 };
-use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_pir::ir_parser::Parser as PirParser;
 
 #[test]

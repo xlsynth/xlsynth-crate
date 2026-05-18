@@ -23,12 +23,9 @@ top fn ext_mask_low_{output_width}b_count{count_width}b(count: bits[{count_width
 }
 
 fn gatify_for_test(pir_fn: &ir::Fn) -> xlsynth_g8r::aig::GateFn {
-    gatify(
-        pir_fn,
-        GatifyOptions::all_opts_disabled(),
-    )
-    .expect("gatify")
-    .gate_fn
+    gatify(pir_fn, GatifyOptions::all_opts_disabled())
+        .expect("gatify")
+        .gate_fn
 }
 
 #[test]
