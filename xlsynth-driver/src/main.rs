@@ -538,6 +538,10 @@ fn main() {
                 .add_dslx_input_args(true)
                 .add_pipeline_args()
                 .add_codegen_args()
+                .add_bool_arg(
+                    "allow_extern_verilog",
+                    "Allow codegen IR containing Verilog FFI declarations emitted from DSLX extern_verilog",
+                )
                 .add_bool_arg("keep_temps", "Keep temporary files")
                 .add_bool_arg(
                     "type_inference_v2",
@@ -930,6 +934,10 @@ fn main() {
                 .add_codegen_args()
                 .add_pipeline_args()
                 .add_bool_arg("opt", "Optimize the IR before scheduling pipeline")
+                .add_bool_arg(
+                    "allow_extern_verilog",
+                    "Allow codegen IR containing Verilog FFI declarations emitted from DSLX extern_verilog",
+                )
                 .arg(
                     Arg::new("aug_opt")
                         .long("aug-opt")
@@ -954,6 +962,10 @@ fn main() {
                 .add_ir_top_arg(false)
                 .add_codegen_args()
                 .add_bool_arg("opt", "Optimize the IR before codegen")
+                .add_bool_arg(
+                    "allow_extern_verilog",
+                    "Allow codegen IR containing Verilog FFI declarations emitted from DSLX extern_verilog",
+                )
                 .arg(
                     Arg::new("aug_opt")
                         .long("aug-opt")

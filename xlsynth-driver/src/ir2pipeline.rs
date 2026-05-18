@@ -3,9 +3,11 @@
 use clap::ArgMatches;
 
 use crate::common::{
-    extract_codegen_flags, extract_pipeline_spec, pipeline_codegen_flags_proto,
-    scheduling_options_proto, CodegenFlags, PipelineSpec,
+    enforce_extern_verilog_codegen_policy, extract_codegen_flags, extract_pipeline_spec,
+    parse_bool_flag_or, pipeline_codegen_flags_proto, scheduling_options_proto, CodegenFlags,
+    PipelineSpec,
 };
+use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::{run_codegen_pipeline, run_opt_main};
 use xlsynth_pir::{run_aug_opt_over_ir_text, AugOptOptions};
@@ -31,6 +33,7 @@ pub fn handle_ir2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>
         .get_one::<String>("aug_opt")
         .map(|s| s == "true")
         .unwrap_or(false);
+    let allow_extern_verilog = parse_bool_flag_or(matches, "allow_extern_verilog", true);
 
     let ir_top_opt = matches.get_one::<String>("ir_top");
 
@@ -41,6 +44,7 @@ pub fn handle_ir2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>
         &codegen_flags,
         optimize,
         aug_opt,
+        allow_extern_verilog,
         ir_top_opt.map(|s| s.as_str()),
         &keep_temps,
         config,
@@ -56,6 +60,7 @@ fn ir2pipeline(
     codegen_flags: &CodegenFlags,
     optimize: bool,
     aug_opt: bool,
+    allow_extern_verilog: bool,
     ir_top: Option<&str>,
     keep_temps: &Option<bool>,
     config: &Option<ToolchainConfig>,
@@ -99,6 +104,10 @@ fn ir2pipeline(
             // Just use the input file directly (no optimization step).
             input_file.to_path_buf()
         };
+        let ir_for_codegen_text = std::fs::read_to_string(&ir_for_codegen_path)
+            .expect("IR file handed to codegen should be readable");
+        enforce_extern_verilog_codegen_policy(&ir_for_codegen_text, allow_extern_verilog)
+            .unwrap_or_else(|err| report_cli_error_and_exit(&err, Some("ir2pipeline"), vec![]));
 
         // Run the codegen pipeline.
         let sv = run_codegen_pipeline(
@@ -160,6 +169,9 @@ fn ir2pipeline(
                     .expect("IR optimization should succeed");
             }
         }
+        let ir_for_codegen_text = ir_package.to_string();
+        enforce_extern_verilog_codegen_policy(&ir_for_codegen_text, allow_extern_verilog)
+            .unwrap_or_else(|err| report_cli_error_and_exit(&err, Some("ir2pipeline"), vec![]));
 
         let scheduling_options_flags_proto = scheduling_options_proto(delay_model, pipeline_spec);
         let codegen_flags_proto = pipeline_codegen_flags_proto(codegen_flags);
