@@ -75,7 +75,7 @@ top fn ext_normalize_left_5b(input: bits[5] id=1) -> (bits[7], bits[4]) {
 }
 
 #[test]
-fn prep_rewrites_normalize_shift_and_absorbs_widened_raw_clz() {
+fn prep_rewrites_normalize_shift_and_shares_widened_raw_clz() {
     let pir_fn = parse_top_fn(
         r#"package sample
 
@@ -102,16 +102,16 @@ top fn normalize_with_wide_clz(x: bits[7] id=1) -> (bits[8], bits[8]) {
     let prepared_text = prepared.to_string();
     assert!(
         prepared_text.contains(
-            "ext_normalize_left(x, shift_offset=0, normalized_bit_count=8, clz_bit_count=8"
+            "ext_normalize_left(x, shift_offset=0, normalized_bit_count=8, clz_bit_count=3"
         ),
-        "expected normalize rewrite with widened raw clz output, got:\n{prepared_text}"
+        "expected normalize rewrite to keep the narrow raw clz output, got:\n{prepared_text}"
     );
     assert!(
         !prepared_text.contains("shll("),
         "did not expect generic shll to remain, got:\n{prepared_text}"
     );
     assert!(
-        !prepared_text.contains("concat(clz_zero, clz"),
-        "did not expect zext(raw clz) concat to remain, got:\n{prepared_text}"
+        prepared_text.contains("wide_clz: bits[8] = zero_ext(tuple_index."),
+        "expected widened raw clz consumer to zero-extend the shared narrow clz, got:\n{prepared_text}"
     );
 }

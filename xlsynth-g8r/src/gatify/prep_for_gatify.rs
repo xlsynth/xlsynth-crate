@@ -406,6 +406,74 @@ fn rewrite_zero_extended_clz_to_ext_clz(f: &mut ir::Fn) -> usize {
     rewrites
 }
 
+fn lossless_ext_clz_output_width(f: &ir::Fn, arg: NodeRef, offset: usize) -> Option<usize> {
+    let input_width = bits_width(&f.get_node(arg).ty)?;
+    let max_adjusted_clz = input_width.checked_add(offset)?;
+    let representable_value_count = max_adjusted_clz.checked_add(1)?;
+    Some(ceil_log2(representable_value_count))
+}
+
+/// Shares same-source `ext_clz` nodes when a narrower width is lossless.
+fn rewrite_lossless_ext_clz_width_sharing(f: &mut ir::Fn) -> usize {
+    let mut rewrites = 0usize;
+    let original_len = f.nodes.len();
+    let use_counts = get_use_counts(f);
+    for node_index in 0..original_len {
+        let node_ref = NodeRef { index: node_index };
+        let NodePayload::ExtClz {
+            arg,
+            offset,
+            new_bit_count,
+        } = f.get_node(node_ref).payload.clone()
+        else {
+            continue;
+        };
+        let Some(lossless_width) = lossless_ext_clz_output_width(f, arg, offset) else {
+            continue;
+        };
+        let Some((shared_clz, _shared_width)) = (0..original_len)
+            .filter_map(|candidate_index| {
+                if candidate_index == node_index {
+                    return None;
+                }
+                let candidate_ref = NodeRef {
+                    index: candidate_index,
+                };
+                let NodePayload::ExtClz {
+                    arg: candidate_arg,
+                    offset: candidate_offset,
+                    new_bit_count: candidate_width,
+                } = f.get_node(candidate_ref).payload.clone()
+                else {
+                    return None;
+                };
+                (candidate_arg == arg
+                    && candidate_offset == offset
+                    && use_counts[candidate_index] > 0
+                    && candidate_width >= lossless_width
+                    && candidate_width < new_bit_count)
+                    .then_some((candidate_ref, candidate_width))
+            })
+            .min_by_key(|(candidate_ref, candidate_width)| (*candidate_width, candidate_ref.index))
+        else {
+            continue;
+        };
+
+        ir_utils::replace_node_payload(
+            f,
+            node_ref,
+            NodePayload::ZeroExt {
+                arg: shared_clz,
+                new_bit_count,
+            },
+            Some(Type::Bits(new_bit_count)),
+        )
+        .expect("prep_for_gatify: rewriting shared ext_clz width failed");
+        rewrites += 1;
+    }
+    rewrites
+}
+
 fn zero_extended_shift_input_width(
     f: &ir::Fn,
     shift_input: NodeRef,
@@ -2536,6 +2604,7 @@ pub fn prep_for_gatify(
         let _rewrites = rewrite_encode_one_hot_idioms_to_ext_ops(&mut cloned);
         let _rewrites = rewrite_clz_plus_constant_to_ext_clz(&mut cloned);
         let _rewrites = rewrite_zero_extended_clz_to_ext_clz(&mut cloned);
+        let _rewrites = rewrite_lossless_ext_clz_width_sharing(&mut cloned);
         let _rewrites = rewrite_eq_ne_clz_literal_to_input_predicate(&mut cloned);
     }
     if options.enable_rewrite_normalize_left {
@@ -2607,6 +2676,68 @@ top fn f(x: bits[7] id=1) -> bits[8] {
         assert!(
             !optimized_text.contains("concat(zero, clz"),
             "did not expect zero-ext concat to remain, got:\n{}",
+            optimized_text
+        );
+    }
+
+    #[test]
+    fn lossless_ext_clz_widths_share_narrow_clz() {
+        let f = parse_test_fn(
+            r#"package sample
+
+top fn f(x: bits[4] id=1) -> (bits[3], bits[8]) {
+  narrow: bits[3] = ext_clz(x, offset=0, new_bit_count=3, id=2)
+  wide: bits[8] = ext_clz(x, offset=0, new_bit_count=8, id=3)
+  ret pair: (bits[3], bits[8]) = tuple(narrow, wide, id=4)
+}"#,
+        );
+        let optimized = prep_for_gatify(&f, None, PrepForGatifyOptions::all_opts_enabled());
+        let optimized_text = optimized.to_string();
+        assert!(
+            optimized_text.contains("wide: bits[8] = zero_ext(narrow, new_bit_count=8"),
+            "expected wide ext_clz to share narrow ext_clz, got:\n{}",
+            optimized_text
+        );
+        assert!(
+            !optimized_text.contains("wide: bits[8] = ext_clz("),
+            "did not expect duplicate wide ext_clz to remain, got:\n{}",
+            optimized_text
+        );
+        for x in 0u64..16 {
+            let args = [IrValue::make_ubits(4, x).unwrap()];
+            let got_orig = match eval_fn(&f, &args) {
+                FnEvalResult::Success(s) => s.value,
+                FnEvalResult::Failure(f) => panic!("unexpected original eval failure: {:?}", f),
+            };
+            let got_opt = match eval_fn(&optimized, &args) {
+                FnEvalResult::Success(s) => s.value,
+                FnEvalResult::Failure(f) => panic!("unexpected optimized eval failure: {:?}", f),
+            };
+            assert_eq!(got_orig, got_opt, "mismatch at x={x}");
+        }
+    }
+
+    #[test]
+    fn lossy_ext_clz_widths_do_not_share_narrow_clz() {
+        let f = parse_test_fn(
+            r#"package sample
+
+top fn f(x: bits[8] id=1) -> (bits[3], bits[8]) {
+  narrow: bits[3] = ext_clz(x, offset=0, new_bit_count=3, id=2)
+  wide: bits[8] = ext_clz(x, offset=0, new_bit_count=8, id=3)
+  ret pair: (bits[3], bits[8]) = tuple(narrow, wide, id=4)
+}"#,
+        );
+        let optimized = prep_for_gatify(&f, None, PrepForGatifyOptions::all_opts_enabled());
+        let optimized_text = optimized.to_string();
+        assert!(
+            optimized_text.contains("wide: bits[8] = ext_clz(x, offset=0, new_bit_count=8"),
+            "expected lossy wide ext_clz to remain, got:\n{}",
+            optimized_text
+        );
+        assert!(
+            !optimized_text.contains("wide: bits[8] = zero_ext(narrow, new_bit_count=8"),
+            "did not expect lossy narrow ext_clz to be shared, got:\n{}",
             optimized_text
         );
     }
