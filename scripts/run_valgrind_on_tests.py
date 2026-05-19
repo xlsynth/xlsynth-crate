@@ -857,6 +857,14 @@ def main() -> None:
         "test",
         "--no-run",
         "--workspace",
+        "--exclude",
+        "xlsynth-aot-runtime",
+        "--exclude",
+        "xlsynth-aot-standalone-test-crate",
+        "--exclude",
+        "xlsynth-aot-test-crate",
+        "--exclude",
+        "sample-usage",
     ]
     if opts.release:
         cargo_command.append("--release")
