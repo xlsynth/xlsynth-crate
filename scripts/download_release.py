@@ -118,7 +118,13 @@ def check_sha256sum(artifact_path: str, sha256_path: str) -> bool:
 
 
 def high_integrity_download(
-    base_url, filename, target_dir, max_attempts, is_binary=False, platform=None
+    base_url,
+    filename,
+    target_dir,
+    max_attempts,
+    is_binary=False,
+    platform=None,
+    output_filename=None,
 ):
     print(f"Starting download of {filename}...")
     start_time = time.time()
@@ -131,8 +137,13 @@ def high_integrity_download(
         artifact_path = os.path.join(temp_dir, filename)
 
         # Determine target filename and associated path.
-        target_filename = filename
-        if is_binary and platform and filename.endswith(f"-{platform}"):
+        target_filename = output_filename or filename
+        if (
+            output_filename is None
+            and is_binary
+            and platform
+            and filename.endswith(f"-{platform}")
+        ):
             target_filename = filename[: -(len(platform) + 1)]  # Remove '-platform'
 
         # Detect gzipped DSO assets (libxls-*.{so,dylib}.gz). For these we will
@@ -241,6 +252,35 @@ def ensure_versioned_dso_alias(output_dir: str, version: str, platform: str) -> 
     )
 
 
+def build_static_aot_runtime_release_filename(platform: str) -> str:
+    return f"libxls_aot_runtime-{platform}.a"
+
+
+def build_static_aot_runtime_link_config_release_filename(platform: str) -> str:
+    return f"libxls_aot_runtime_link-{platform}.toml"
+
+
+def download_static_aot_runtime_assets(
+    base_url: str, output_dir: str, platform: str, max_attempts: int
+) -> None:
+    high_integrity_download(
+        base_url,
+        build_static_aot_runtime_release_filename(platform),
+        output_dir,
+        max_attempts,
+        is_binary=False,
+        output_filename="libxls_aot_runtime.a",
+    )
+    high_integrity_download(
+        base_url,
+        build_static_aot_runtime_link_config_release_filename(platform),
+        output_dir,
+        max_attempts,
+        is_binary=False,
+        output_filename="libxls_aot_runtime_link.toml",
+    )
+
+
 def main():
     parser = OptionParser()
     parser.add_option(
@@ -260,6 +300,16 @@ def main():
         "--dso",
         dest="dso",
         help="Download the DSO library",
+        action="store_true",
+        default=False,
+    )
+    parser.add_option(
+        "--standalone-aot-runtime",
+        dest="standalone_aot_runtime",
+        help=(
+            "Download the same-version standalone AOT runtime archive and "
+            "producer-authored link config"
+        ),
         action="store_true",
         default=False,
     )
@@ -338,6 +388,14 @@ def main():
 
     if options.dso:
         ensure_versioned_dso_alias(output_dir, version, options.platform)
+
+    if options.standalone_aot_runtime:
+        download_static_aot_runtime_assets(
+            base_url,
+            output_dir,
+            options.platform,
+            options.max_attempts,
+        )
 
     # Download and extract dslx_stdlib.tar.gz
     stdlib_filename = "dslx_stdlib.tar.gz"

@@ -1055,7 +1055,7 @@ jobs:
           # requirements.
           TAG='${{ steps.resolve-xls-tag-predownload.outputs.tag }}'
           echo "Resolved XLS release tag: ${TAG}"
-          python3 scripts/download_release.py -p rocky8 -o pre_download -d -v ${TAG}
+          python3 scripts/download_release.py -p rocky8 -o pre_download -d --standalone-aot-runtime -v ${TAG}
 
       - name: Run cargo tests using pre-downloaded artifacts
         env:
@@ -1066,6 +1066,24 @@ jobs:
           echo "Using XLS_DSO_PATH=${XLS_DSO_PATH}"
           echo "Using DSLX_STDLIB_PATH=${DSLX_STDLIB_PATH}"
           cargo test -p xlsynth --verbose
+
+      - name: Run standalone runtime tests using pre-downloaded artifacts
+        run: |
+          cat > pre_download/xlsynth_artifacts.toml <<'EOF'
+          dso_path = "libxls-rocky8.so"
+          dslx_stdlib_path = "xls/dslx/stdlib"
+          aot_runtime_path = "libxls_aot_runtime.a"
+          aot_runtime_link_config_path = "libxls_aot_runtime_link.toml"
+          EOF
+          export XLSYNTH_ARTIFACT_CONFIG="$(realpath pre_download/xlsynth_artifacts.toml)"
+          export LD_LIBRARY_PATH="$(realpath pre_download)${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+          echo "Using XLSYNTH_ARTIFACT_CONFIG=${XLSYNTH_ARTIFACT_CONFIG}"
+          cargo test \
+            -p xlsynth-aot-runtime \
+            -p xlsynth-aot-standalone-test-crate \
+            -p xlsynth-aot-test-crate \
+            -p sample-usage \
+            --verbose
 
   fuzz-smoke:
     name: Fuzz Smoke Test
