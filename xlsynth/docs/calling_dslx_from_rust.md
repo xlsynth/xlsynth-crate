@@ -10,6 +10,21 @@ interoperate with SystemVerilog code bases with "Single Source of Truth" type de
 
 To help enable this interop, the `xlsynth` crate offers "DSLX bridge" facilities.
 
+Generated bridge source uses the standalone runtime value types from
+`xlsynth-aot-runtime`, such as `UBits` and `SBits`. The crate that includes the
+generated Rust source therefore needs a normal compile-time dependency on
+`xlsynth-aot-runtime`.
+
+For example:
+
+```toml
+[dependencies]
+xlsynth-aot-runtime = "..."
+
+[build-dependencies]
+xlsynth = "..."
+```
+
 ## Building the bridge
 
 In your `build.rs`, create Rust code that corresponds to your `.x` file, and export the path that was created through an environment variable so that it can be used in your crate:

@@ -341,6 +341,10 @@ fn x_path_to_rs_filename(path: &std::path::Path) -> String {
 
 /// Converts a DSLX module (i.e. `.x` file) into its corresponding Rust bridge
 /// code, and emits that Rust code to a corresponding filename in the `out_dir`.
+///
+/// The generated source uses `xlsynth-aot-runtime` value types such as
+/// `UBits` and `SBits`, so crates that `include!` the bridge source must depend
+/// on `xlsynth-aot-runtime` at normal compile time.
 pub fn x_path_to_rs_bridge(
     relpath: &str,
     out_dir: &std::path::Path,
@@ -368,6 +372,9 @@ pub fn x_path_to_rs_bridge(
 // - the `out_dir` comes from the environment variable `OUT_DIR` which is
 //   populated e.g. by `cargo` in `build.rs` execution.
 // - the working directory comes from the repository root
+//
+// The returned source has the same normal compile-time dependency on
+// `xlsynth-aot-runtime` as `x_path_to_rs_bridge`.
 pub fn x_path_to_rs_bridge_via_env(relpath: &str) -> std::path::PathBuf {
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR should be set");
     let metadata = cargo_metadata::MetadataCommand::new()

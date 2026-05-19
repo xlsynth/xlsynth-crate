@@ -104,12 +104,9 @@ fn validate_use() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Validates that we can convert an enum value that we generated using the
-/// bridge into an IR value.
-fn validate_passing_generated_enum() -> Result<(), Box<dyn std::error::Error>> {
-    let enum_c_value = sample_with_enum_def::MyEnum::C;
-    let enum_c_value_into_ir: xlsynth::IrValue = enum_c_value.into();
-    assert_eq!(enum_c_value_into_ir.to_string(), "bits[8]:255");
+/// Validates that a generated bridge enum keeps its DSLX discriminant value.
+fn validate_generated_enum_discriminant() -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(sample_with_enum_def::MyEnum::C as u8, 255);
     Ok(())
 }
 
@@ -142,8 +139,8 @@ fn main() {
     validate_fail().expect("failing function invocation should work as expected");
     println!("fail-function validation complete");
 
-    validate_passing_generated_enum().expect("enum conversion should work");
-    println!("enum conversion validation complete");
+    validate_generated_enum_discriminant().expect("generated enum validation should work");
+    println!("generated enum validation complete");
 
     validate_all_threads_compute_add1();
     println!("multi-threaded validation complete");
@@ -189,5 +186,10 @@ mod tests {
     fn test_validate_add_invert_via_ir_builder() {
         let _ = env_logger::try_init();
         validate_add_invert_via_ir_builder().expect("validation should succeed");
+    }
+
+    #[test]
+    fn test_validate_generated_enum_discriminant() {
+        validate_generated_enum_discriminant().expect("generated enum validation should succeed");
     }
 }

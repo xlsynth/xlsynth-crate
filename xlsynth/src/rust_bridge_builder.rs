@@ -28,16 +28,6 @@ pub struct RustBridgeBuilder {
     leading_items: Vec<String>,
     emitted_parametric_structs: BTreeSet<String>,
     defer_parametric_struct_emission: bool,
-    mode: RustBridgeMode,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Selects whether generated bridge types target normal `xlsynth` values or
-/// the runtime-neutral standalone AOT surface.
-enum RustBridgeMode {
-    Xlsynth,
-    #[cfg(feature = "standalone-aot")]
-    Standalone,
 }
 
 /// Rust items generated for one DSLX module, before parent modules are
@@ -122,19 +112,6 @@ impl RustBridgeBuilder {
             leading_items: vec![],
             emitted_parametric_structs: BTreeSet::new(),
             defer_parametric_struct_emission: false,
-            mode: RustBridgeMode::Xlsynth,
-        }
-    }
-
-    /// Creates a builder that emits runtime-neutral Rust definitions.
-    ///
-    /// Standalone AOT wrappers use this mode so generated runtime consumers do
-    /// not need the `xlsynth` crate merely to name bridge types.
-    #[cfg(feature = "standalone-aot")]
-    pub(crate) fn standalone() -> Self {
-        Self {
-            mode: RustBridgeMode::Standalone,
-            ..Self::new()
         }
     }
 
@@ -181,7 +158,13 @@ impl RustBridgeBuilder {
     /// Reusing a builder after `build` is allowed, but doing so observes the
     /// same accumulated lines and epilogue.
     pub fn build(&self) -> String {
-        render_rust_module_fragments([self.module_fragment()])
+        render_rust_module_fragments([
+            RustModuleFragment {
+                path: vec![],
+                body: render_standalone_runtime_imports().to_string(),
+            },
+            self.module_fragment(),
+        ])
     }
 
     /// Returns this builder's current module body as a renderable fragment.
@@ -206,34 +189,26 @@ impl RustBridgeBuilder {
         type_annotation: Option<&dslx::TypeAnnotation>,
         ty: &dslx::Type,
     ) -> Result<String, XlsynthError> {
-        Self::convert_type_with_annotation(RustBridgeMode::Xlsynth, &[], None, type_annotation, ty)
+        Self::convert_type_with_annotation(&[], None, type_annotation, ty)
     }
 
-    /// Returns the runtime-neutral Rust type name for a DSLX type in one
-    /// module.
+    /// Returns the Rust bridge type name for a DSLX type in one module.
     ///
-    /// Standalone callers must use this path so imported type references stay
-    /// canonical while bits-like values map to `UBits` and `SBits` instead of
-    /// `xlsynth` runtime wrappers.
+    /// Typed callers use this path so imported type references stay canonical
+    /// while bits-like values map to the standalone `UBits` and `SBits`
+    /// runtime types.
     #[cfg(feature = "standalone-aot")]
-    pub(crate) fn standalone_rust_type_name_from_dslx_module(
+    pub(crate) fn rust_type_name_from_dslx_module(
         current_module_name: &str,
         type_info: &dslx::TypeInfo,
         type_annotation: Option<&dslx::TypeAnnotation>,
         ty: &dslx::Type,
     ) -> Result<String, XlsynthError> {
         let module_path = rust_module_path_from_dslx_module_name(current_module_name);
-        Self::convert_type_with_annotation(
-            RustBridgeMode::Standalone,
-            &module_path,
-            Some(type_info),
-            type_annotation,
-            ty,
-        )
+        Self::convert_type_with_annotation(&module_path, Some(type_info), type_annotation, ty)
     }
 
     fn convert_type_with_annotation(
-        mode: RustBridgeMode,
         current_module_path: &[String],
         type_info: Option<&dslx::TypeInfo>,
         type_annotation: Option<&dslx::TypeAnnotation>,
@@ -245,7 +220,6 @@ impl RustBridgeBuilder {
                     let element_annotation = array_annotation.get_element_type();
                     let element_ty = ty.get_array_element_type();
                     let rust_ty = Self::convert_type_with_annotation(
-                        mode,
                         current_module_path,
                         type_info,
                         Some(&element_annotation),
@@ -266,14 +240,7 @@ impl RustBridgeBuilder {
             }
         }
         if let Some((is_signed, bit_count)) = ty.is_bits_like() {
-            Ok(match mode {
-                RustBridgeMode::Xlsynth => {
-                    let signed_str = if is_signed { "S" } else { "U" };
-                    format!("Ir{signed_str}Bits<{bit_count}>")
-                }
-                #[cfg(feature = "standalone-aot")]
-                RustBridgeMode::Standalone => standalone_bits_rust_type(is_signed, bit_count),
-            })
+            Ok(standalone_bits_rust_type(is_signed, bit_count))
         } else if ty.is_enum() {
             let enum_def = ty.get_enum_def()?;
             Ok(enum_def.get_identifier().to_string())
@@ -284,7 +251,6 @@ impl RustBridgeBuilder {
             let array_ty = ty.get_array_element_type();
             let array_size = ty.get_array_size();
             let rust_ty = Self::convert_type_with_annotation(
-                mode,
                 current_module_path,
                 type_info,
                 None,
@@ -476,7 +442,6 @@ impl RustBridgeBuilder {
                 &field_ty,
             )?;
             let field_rust_ty = Self::convert_type_with_annotation(
-                self.mode,
                 &self.module_path,
                 Some(type_info),
                 Some(&field_annotation),
@@ -495,9 +460,20 @@ impl RustBridgeBuilder {
     }
 }
 
+/// Renders the runtime imports shared by generated standalone bridge source.
+pub(crate) fn render_standalone_runtime_imports() -> &'static str {
+    r#"pub use xlsynth_aot_runtime::{
+    AotArtifactMetadata, AotError, AotRunResult, SBits, UBits,
+};
+#[allow(unused_imports)]
+use xlsynth_aot_runtime::{
+    read_leaf_element, write_leaf_element, AotElementLayout, AotRunnerLayout, StandaloneRunner,
+};
+"#
+}
+
 /// Returns the smallest runtime-neutral Rust type that can hold one DSLX bits
 /// value.
-#[cfg(feature = "standalone-aot")]
 fn standalone_bits_rust_type(is_signed: bool, bit_count: usize) -> String {
     if is_signed {
         format!("SBits<{bit_count}>")
@@ -533,21 +509,15 @@ impl BridgeBuilder for RustBridgeBuilder {
     fn start_module(&mut self, module_name: &str) -> Result<(), XlsynthError> {
         self.module_path = rust_module_path_from_dslx_module_name(module_name);
         self.emitted_parametric_structs.clear();
-        let imports = match self.mode {
-            RustBridgeMode::Xlsynth => "use xlsynth::{IrValue, IrUBits, IrSBits};\n".to_string(),
-            #[cfg(feature = "standalone-aot")]
-            RustBridgeMode::Standalone => {
-                let root = std::iter::repeat_n("super", self.module_path.len())
-                    .collect::<Vec<_>>()
-                    .join("::");
-                if root.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        "use {root}::{{read_leaf_element, write_leaf_element, AotArtifactMetadata, AotElementLayout, AotError, AotRunResult, AotRunnerLayout, SBits, StandaloneRunner, UBits}};\n"
-                    )
-                }
-            }
+        let root = std::iter::repeat_n("super", self.module_path.len())
+            .collect::<Vec<_>>()
+            .join("::");
+        let imports = if root.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "use {root}::{{read_leaf_element, write_leaf_element, AotArtifactMetadata, AotElementLayout, AotError, AotRunResult, AotRunnerLayout, SBits, StandaloneRunner, UBits}};\n"
+            )
         };
         self.lines = vec![
             // We allow e.g. enum variants to be unused in consumer code.
@@ -590,30 +560,6 @@ impl BridgeBuilder for RustBridgeBuilder {
                 .push(format!("    {} = {},", name, value_to_string(value)?));
         }
         self.lines.push("}\n".to_string());
-
-        if self.mode == RustBridgeMode::Xlsynth {
-            // Emit the converter used by non-standalone bridge consumers that
-            // pass generated Rust enums back into interpreter APIs.
-            self.lines
-                .push(format!("impl From<{dslx_name}> for IrValue {{"));
-            self.lines
-                .push(format!("    fn from(value: {dslx_name}) -> Self {{"));
-            self.lines.push("        match value {".to_string());
-            for (member_name, value) in members.iter() {
-                let value_str = value_to_string(value)?;
-                self.lines.push(format!(
-                    "            {}::{} => IrValue::make_{}bits({}, {}).unwrap(),",
-                    dslx_name,
-                    member_name,
-                    if is_signed { "s" } else { "u" },
-                    value.bit_count()?,
-                    value_str
-                ));
-            }
-            self.lines.push("        }".to_string());
-            self.lines.push("    }".to_string());
-            self.lines.push("}\n".to_string());
-        }
         Ok(())
     }
 
@@ -627,7 +573,6 @@ impl BridgeBuilder for RustBridgeBuilder {
         self.lines.push(format!("pub struct {dslx_name} {{"));
         for member in members {
             let rust_ty = Self::convert_type_with_annotation(
-                self.mode,
                 &self.module_path,
                 None,
                 Some(&member.type_annotation),
@@ -658,7 +603,6 @@ impl BridgeBuilder for RustBridgeBuilder {
         self.lines.push(format!("pub struct {dslx_name} {{"));
         for member in members {
             let rust_ty = Self::convert_type_with_annotation(
-                self.mode,
                 &self.module_path,
                 Some(type_info),
                 Some(&member.type_annotation),
@@ -678,7 +622,6 @@ impl BridgeBuilder for RustBridgeBuilder {
         concrete_type: &dslx::Type,
     ) -> Result<(), XlsynthError> {
         let rust_ty = Self::convert_type_with_annotation(
-            self.mode,
             &self.module_path,
             None,
             Some(type_annotation),
@@ -702,7 +645,6 @@ impl BridgeBuilder for RustBridgeBuilder {
             concrete_type,
         )?;
         let rust_ty = Self::convert_type_with_annotation(
-            self.mode,
             &self.module_path,
             Some(type_info),
             Some(type_annotation),
@@ -884,8 +826,8 @@ mod tests {
 
     use super::*;
 
-    // Verifies: enum-only DSLX modules emit Rust enums with IR conversions.
-    // Catches: regressions in enum discriminant or conversion rendering.
+    // Verifies: enum-only DSLX modules emit Rust enums with DSLX discriminants.
+    // Catches: regressions in enum discriminant rendering.
     #[test]
     fn test_convert_leaf_module_enum_def_only() {
         let dslx = r#"
@@ -897,24 +839,24 @@ mod tests {
         convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
         assert_eq!(
             builder.build(),
-            r#"pub mod my_module {
+            r#"pub use xlsynth_aot_runtime::{
+    AotArtifactMetadata, AotError, AotRunResult, SBits, UBits,
+};
+#[allow(unused_imports)]
+use xlsynth_aot_runtime::{
+    read_leaf_element, write_leaf_element, AotElementLayout, AotRunnerLayout, StandaloneRunner,
+};
+
+
+pub mod my_module {
 #![allow(dead_code)]
 #![allow(unused_imports)]
-use xlsynth::{IrValue, IrUBits, IrSBits};
+use super::{read_leaf_element, write_leaf_element, AotArtifactMetadata, AotElementLayout, AotError, AotRunResult, AotRunnerLayout, SBits, StandaloneRunner, UBits};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MyEnum {
     A = 0,
     B = 3,
-}
-
-impl From<MyEnum> for IrValue {
-    fn from(value: MyEnum) -> Self {
-        match value {
-            MyEnum::A => IrValue::make_ubits(2, 0).unwrap(),
-            MyEnum::B => IrValue::make_ubits(2, 3).unwrap(),
-        }
-    }
 }
 
 }"#
@@ -937,15 +879,24 @@ impl From<MyEnum> for IrValue {
         convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
         assert_eq!(
             builder.build(),
-            r#"pub mod my_module {
+            r#"pub use xlsynth_aot_runtime::{
+    AotArtifactMetadata, AotError, AotRunResult, SBits, UBits,
+};
+#[allow(unused_imports)]
+use xlsynth_aot_runtime::{
+    read_leaf_element, write_leaf_element, AotElementLayout, AotRunnerLayout, StandaloneRunner,
+};
+
+
+pub mod my_module {
 #![allow(dead_code)]
 #![allow(unused_imports)]
-use xlsynth::{IrValue, IrUBits, IrSBits};
+use super::{read_leaf_element, write_leaf_element, AotArtifactMetadata, AotElementLayout, AotError, AotRunResult, AotRunnerLayout, SBits, StandaloneRunner, UBits};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MyStruct {
-    pub a: IrUBits<32>,
-    pub b: IrSBits<16>,
+    pub a: UBits<32>,
+    pub b: SBits<16>,
 }
 
 }"#
@@ -969,10 +920,19 @@ pub struct MyStruct {
         convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
         assert_eq!(
             builder.build(),
-            r#"pub mod my_module {
+            r#"pub use xlsynth_aot_runtime::{
+    AotArtifactMetadata, AotError, AotRunResult, SBits, UBits,
+};
+#[allow(unused_imports)]
+use xlsynth_aot_runtime::{
+    read_leaf_element, write_leaf_element, AotElementLayout, AotRunnerLayout, StandaloneRunner,
+};
+
+
+pub mod my_module {
 #![allow(dead_code)]
 #![allow(unused_imports)]
-use xlsynth::{IrValue, IrUBits, IrSBits};
+use super::{read_leaf_element, write_leaf_element, AotArtifactMetadata, AotElementLayout, AotError, AotRunResult, AotRunnerLayout, SBits, StandaloneRunner, UBits};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MyEnum {
@@ -980,19 +940,10 @@ pub enum MyEnum {
     B = 3,
 }
 
-impl From<MyEnum> for IrValue {
-    fn from(value: MyEnum) -> Self {
-        match value {
-            MyEnum::A => IrValue::make_ubits(2, 0).unwrap(),
-            MyEnum::B => IrValue::make_ubits(2, 3).unwrap(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MyStruct {
     pub a: MyEnum,
-    pub b: IrSBits<16>,
+    pub b: SBits<16>,
 }
 
 }"#
@@ -1020,21 +971,30 @@ pub struct MyStruct {
         convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
         assert_eq!(
             builder.build(),
-            r#"pub mod my_module {
+            r#"pub use xlsynth_aot_runtime::{
+    AotArtifactMetadata, AotError, AotRunResult, SBits, UBits,
+};
+#[allow(unused_imports)]
+use xlsynth_aot_runtime::{
+    read_leaf_element, write_leaf_element, AotElementLayout, AotRunnerLayout, StandaloneRunner,
+};
+
+
+pub mod my_module {
 #![allow(dead_code)]
 #![allow(unused_imports)]
-use xlsynth::{IrValue, IrUBits, IrSBits};
+use super::{read_leaf_element, write_leaf_element, AotArtifactMetadata, AotElementLayout, AotError, AotRunResult, AotRunnerLayout, SBits, StandaloneRunner, UBits};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MyInnerStruct {
-    pub x: IrUBits<8>,
-    pub y: IrUBits<8>,
+    pub x: UBits<8>,
+    pub y: UBits<8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MyStruct {
-    pub a: IrUBits<32>,
-    pub b: IrSBits<16>,
+    pub a: UBits<32>,
+    pub b: SBits<16>,
     pub c: MyInnerStruct,
 }
 
@@ -1059,16 +1019,25 @@ pub struct MyStruct {
         convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
         assert_eq!(
             builder.build(),
-            r#"pub mod my_module {
+            r#"pub use xlsynth_aot_runtime::{
+    AotArtifactMetadata, AotError, AotRunResult, SBits, UBits,
+};
+#[allow(unused_imports)]
+use xlsynth_aot_runtime::{
+    read_leaf_element, write_leaf_element, AotElementLayout, AotRunnerLayout, StandaloneRunner,
+};
+
+
+pub mod my_module {
 #![allow(dead_code)]
 #![allow(unused_imports)]
-use xlsynth::{IrValue, IrUBits, IrSBits};
+use super::{read_leaf_element, write_leaf_element, AotArtifactMetadata, AotElementLayout, AotError, AotRunResult, AotRunnerLayout, SBits, StandaloneRunner, UBits};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MyStruct {
-    pub a: IrUBits<32>,
-    pub b: IrSBits<16>,
-    pub c: [IrUBits<8>; 4],
+    pub a: UBits<32>,
+    pub b: SBits<16>,
+    pub c: [UBits<8>; 4],
 }
 
 }"#
@@ -1086,12 +1055,21 @@ pub struct MyStruct {
         convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
         assert_eq!(
             builder.build(),
-            r#"pub mod my_module {
+            r#"pub use xlsynth_aot_runtime::{
+    AotArtifactMetadata, AotError, AotRunResult, SBits, UBits,
+};
+#[allow(unused_imports)]
+use xlsynth_aot_runtime::{
+    read_leaf_element, write_leaf_element, AotElementLayout, AotRunnerLayout, StandaloneRunner,
+};
+
+
+pub mod my_module {
 #![allow(dead_code)]
 #![allow(unused_imports)]
-use xlsynth::{IrValue, IrUBits, IrSBits};
+use super::{read_leaf_element, write_leaf_element, AotArtifactMetadata, AotElementLayout, AotError, AotRunResult, AotRunnerLayout, SBits, StandaloneRunner, UBits};
 
-pub type MyType = IrUBits<8>;
+pub type MyType = UBits<8>;
 
 }"#
         );
@@ -1136,10 +1114,19 @@ pub type MyType = IrUBits<8>;
         convert_imported_module(&importer_typechecked, &mut builder).unwrap();
         assert_eq!(
             builder.build(),
-            "pub mod importer {
+            "pub use xlsynth_aot_runtime::{
+    AotArtifactMetadata, AotError, AotRunResult, SBits, UBits,
+};
+#[allow(unused_imports)]
+use xlsynth_aot_runtime::{
+    read_leaf_element, write_leaf_element, AotElementLayout, AotRunnerLayout, StandaloneRunner,
+};
+
+
+pub mod importer {
 #![allow(dead_code)]
 #![allow(unused_imports)]
-use xlsynth::{IrValue, IrUBits, IrSBits};
+use super::{read_leaf_element, write_leaf_element, AotArtifactMetadata, AotElementLayout, AotError, AotRunResult, AotRunnerLayout, SBits, StandaloneRunner, UBits};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MyStruct {
@@ -1169,10 +1156,19 @@ pub struct MyStruct {
         convert_imported_module(&importer_typechecked, &mut builder).unwrap();
         assert_eq!(
             builder.build(),
-            "pub mod importer {
+            "pub use xlsynth_aot_runtime::{
+    AotArtifactMetadata, AotError, AotRunResult, SBits, UBits,
+};
+#[allow(unused_imports)]
+use xlsynth_aot_runtime::{
+    read_leaf_element, write_leaf_element, AotElementLayout, AotRunnerLayout, StandaloneRunner,
+};
+
+
+pub mod importer {
 #![allow(dead_code)]
 #![allow(unused_imports)]
-use xlsynth::{IrValue, IrUBits, IrSBits};
+use super::{read_leaf_element, write_leaf_element, AotArtifactMetadata, AotElementLayout, AotError, AotRunResult, AotRunnerLayout, SBits, StandaloneRunner, UBits};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MyStruct {
@@ -1212,10 +1208,19 @@ pub struct MyStruct {
         convert_imported_module(&importer_typechecked, &mut builder).unwrap();
         assert_eq!(
             builder.build(),
-            "pub mod importer {
+            "pub use xlsynth_aot_runtime::{
+    AotArtifactMetadata, AotError, AotRunResult, SBits, UBits,
+};
+#[allow(unused_imports)]
+use xlsynth_aot_runtime::{
+    read_leaf_element, write_leaf_element, AotElementLayout, AotRunnerLayout, StandaloneRunner,
+};
+
+
+pub mod importer {
 #![allow(dead_code)]
 #![allow(unused_imports)]
-use xlsynth::{IrValue, IrUBits, IrSBits};
+use super::{read_leaf_element, write_leaf_element, AotArtifactMetadata, AotElementLayout, AotError, AotRunResult, AotRunnerLayout, SBits, StandaloneRunner, UBits};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MyStruct {
@@ -1255,10 +1260,19 @@ pub struct MyStruct {
         convert_imported_module(&importer_typechecked, &mut builder).unwrap();
         assert_eq!(
             builder.build(),
-            "pub mod importer {
+            "pub use xlsynth_aot_runtime::{
+    AotArtifactMetadata, AotError, AotRunResult, SBits, UBits,
+};
+#[allow(unused_imports)]
+use xlsynth_aot_runtime::{
+    read_leaf_element, write_leaf_element, AotElementLayout, AotRunnerLayout, StandaloneRunner,
+};
+
+
+pub mod importer {
 #![allow(dead_code)]
 #![allow(unused_imports)]
-use xlsynth::{IrValue, IrUBits, IrSBits};
+use super::{read_leaf_element, write_leaf_element, AotArtifactMetadata, AotElementLayout, AotError, AotRunResult, AotRunnerLayout, SBits, StandaloneRunner, UBits};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MyStruct {
@@ -1286,15 +1300,24 @@ pub struct MyStruct {
         convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
         assert_eq!(
             builder.build(),
-            r#"pub mod my_module {
+            r#"pub use xlsynth_aot_runtime::{
+    AotArtifactMetadata, AotError, AotRunResult, SBits, UBits,
+};
+#[allow(unused_imports)]
+use xlsynth_aot_runtime::{
+    read_leaf_element, write_leaf_element, AotElementLayout, AotRunnerLayout, StandaloneRunner,
+};
+
+
+pub mod my_module {
 #![allow(dead_code)]
 #![allow(unused_imports)]
-use xlsynth::{IrValue, IrUBits, IrSBits};
+use super::{read_leaf_element, write_leaf_element, AotArtifactMetadata, AotElementLayout, AotError, AotRunResult, AotRunnerLayout, SBits, StandaloneRunner, UBits};
 
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Box__N_8 {
-    pub value: IrUBits<8>,
+    pub value: UBits<8>,
 }
 
 pub type Box8 = Box__N_8;
@@ -1322,15 +1345,24 @@ pub type Box8 = Box__N_8;
         convert_leaf_module(&mut import_data, dslx, &path, &mut builder).unwrap();
         assert_eq!(
             builder.build(),
-            r#"pub mod my_module {
+            r#"pub use xlsynth_aot_runtime::{
+    AotArtifactMetadata, AotError, AotRunResult, SBits, UBits,
+};
+#[allow(unused_imports)]
+use xlsynth_aot_runtime::{
+    read_leaf_element, write_leaf_element, AotElementLayout, AotRunnerLayout, StandaloneRunner,
+};
+
+
+pub mod my_module {
 #![allow(dead_code)]
 #![allow(unused_imports)]
-use xlsynth::{IrValue, IrUBits, IrSBits};
+use super::{read_leaf_element, write_leaf_element, AotArtifactMetadata, AotElementLayout, AotError, AotRunResult, AotRunnerLayout, SBits, StandaloneRunner, UBits};
 
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Box__N_8 {
-    pub value: IrUBits<8>,
+    pub value: UBits<8>,
 }
 
 }"#

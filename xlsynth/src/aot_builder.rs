@@ -18,8 +18,8 @@ use crate::aot_entrypoint_metadata::{
 use crate::aot_lib::{AotCompiled, AotResult};
 use crate::dslx_bridge::{convert_imported_module, BridgeBuilder};
 use crate::rust_bridge_builder::{
-    render_rust_module_fragments, rust_type_path_between_dslx_modules, RustBridgeBuilder,
-    RustModuleFragment,
+    render_rust_module_fragments, render_standalone_runtime_imports,
+    rust_type_path_between_dslx_modules, RustBridgeBuilder, RustModuleFragment,
 };
 use crate::xlsynth_error::XlsynthError;
 use crate::{
@@ -2266,7 +2266,7 @@ impl TypedDslxTypeContext {
         ty: &dslx::Type,
     ) -> AotResult<String> {
         if type_annotation.is_some() {
-            return RustBridgeBuilder::standalone_rust_type_name_from_dslx_module(
+            return RustBridgeBuilder::rust_type_name_from_dslx_module(
                 local_module_name,
                 current_type_info,
                 type_annotation,
@@ -2343,7 +2343,7 @@ impl<'a> TypedConcreteParametricStructCollector<'a> {
                             struct_def.get_identifier()
                         )));
                     };
-                    let rust_name = RustBridgeBuilder::standalone_rust_type_name_from_dslx_module(
+                    let rust_name = RustBridgeBuilder::rust_type_name_from_dslx_module(
                         &defining_module.dslx_name,
                         current_type_info,
                         Some(type_annotation),
@@ -3371,18 +3371,6 @@ fn make_unique_typed_dslx_argument_names(params: &[TypedDslxParam]) -> Vec<Strin
         .collect()
 }
 
-/// Renders the runtime imports shared by generated standalone wrappers.
-fn render_standalone_runtime_imports() -> &'static str {
-    r#"pub use xlsynth_aot_runtime::{
-    AotArtifactMetadata, AotError, AotRunResult, SBits, UBits,
-};
-#[allow(unused_imports)]
-use xlsynth_aot_runtime::{
-    read_leaf_element, write_leaf_element, AotElementLayout, AotRunnerLayout, StandaloneRunner,
-};
-"#
-}
-
 /// Renders the generated runner items inserted into the top DSLX bridge module.
 ///
 /// The epilogue owns the linked symbol declaration, descriptor, typed
@@ -3599,7 +3587,7 @@ fn render_typed_dslx_generated_module(
     });
     for bridge_module in &typechecked.bridge_modules {
         let module_name = bridge_module.get_module().get_name();
-        let mut builder = RustBridgeBuilder::standalone()
+        let mut builder = RustBridgeBuilder::new()
             .with_leading_items(
                 leading_items_by_module
                     .remove(&module_name)
@@ -3610,7 +3598,7 @@ fn render_typed_dslx_generated_module(
         modules.push(builder.module_fragment());
     }
 
-    let mut top_builder = RustBridgeBuilder::standalone()
+    let mut top_builder = RustBridgeBuilder::new()
         .with_leading_items(
             leading_items_by_module
                 .remove(&top_module_name)
@@ -3686,7 +3674,7 @@ fn emit_typed_dslx_aot_package_with_out_dir(
     });
     for module in &typechecked.modules {
         let module_name = module.typechecked.get_module().get_name();
-        let mut builder = RustBridgeBuilder::standalone()
+        let mut builder = RustBridgeBuilder::new()
             .with_leading_items(
                 leading_items_by_module
                     .remove(&module_name)
@@ -3736,7 +3724,7 @@ fn emit_typed_dslx_aot_package_with_out_dir(
             &typed_signature,
             entrypoint.runtime_features,
         )?;
-        let mut runner_builder = RustBridgeBuilder::standalone()
+        let mut runner_builder = RustBridgeBuilder::new()
             .with_leading_items(["use super::*;".to_string()])
             .with_runner_items(runner_epilogue);
         runner_builder.start_module(&runner_module_name)?;
@@ -4135,7 +4123,7 @@ top fn covered(x: bits[1]) -> bits[1] {
             fields: vec![TypedDslxField {
                 name: "value".to_string(),
                 ty: TypedDslxType::Bits {
-                    rust_type: "xlsynth::IrUBits<8>".to_string(),
+                    rust_type: "UBits<8>".to_string(),
                     is_signed: false,
                     bit_count: 8,
                 },
