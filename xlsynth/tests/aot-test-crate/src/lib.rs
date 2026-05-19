@@ -34,8 +34,12 @@ pub mod wide_bits_tuple_aot {
     include!(env!("XLSYNTH_AOT_WIDE_BITS_TUPLE_RS"));
 }
 
-pub mod trace_assert_aot {
-    include!(env!("XLSYNTH_AOT_TRACE_ASSERT_RS"));
+pub mod assert_pair_aot {
+    include!(env!("XLSYNTH_AOT_ASSERT_PAIR_RS"));
+}
+
+pub mod wide_counted_for_aot {
+    include!(env!("XLSYNTH_AOT_WIDE_COUNTED_FOR_RS"));
 }
 
 /// Generated typed DSLX AOT wrapper for the widget/frob fixture.
@@ -91,38 +95,44 @@ pub mod namespaced_widget_package_aot {
 
 #[cfg(test)]
 mod tests {
-    use xlsynth::{IrSBits, IrUBits, XlsynthError};
+    use xlsynth_aot_runtime::{AotError, UBits};
 
     use super::widget_frob_aot::widget_types::{
         new_runner, FrobNibbles, SignedWidgetMode, Widget, WidgetMode, WidgetOutcome, WidgetTuning,
     };
 
-    fn ub<const BIT_COUNT: usize>(value: u64) -> IrUBits<BIT_COUNT> {
-        IrUBits::from_u64(value).unwrap()
-    }
-
-    fn sb<const BIT_COUNT: usize>(value: i64) -> IrSBits<BIT_COUNT> {
-        IrSBits::from_i64(value).unwrap()
+    fn ub<const BIT_COUNT: usize>(value: u64) -> UBits<BIT_COUNT> {
+        UBits::from_u64(value).unwrap()
     }
 
     // Verifies: generated typed DSLX runners accept and return DSLX bridge types.
     // Catches: regressions that expose structural AOT tuple aliases instead.
     #[test]
-    fn widget_frob_aot_uses_generated_typed_dslx_types() -> Result<(), XlsynthError> {
-        let garnish: FrobNibbles = [ub(5), ub(6), ub(7)];
+    fn widget_frob_aot_uses_generated_typed_dslx_types() -> Result<(), Box<dyn std::error::Error>> {
+        use super::widget_frob_aot::{SBits, UBits};
+
+        let garnish: FrobNibbles = [
+            UBits::from_u64(5)?,
+            UBits::from_u64(6)?,
+            UBits::from_u64(7)?,
+        ];
         let cases = [
-            (sb(-3), SignedWidgetMode::Negative, -4),
-            (sb(2), SignedWidgetMode::Positive, 1),
+            (SBits::from_i64(-3)?, SignedWidgetMode::Negative, -4),
+            (SBits::from_i64(2)?, SignedWidgetMode::Positive, 1),
         ];
 
         for (wobble, signed_mode, expected_wobble) in cases {
             let widget = Widget {
-                widget_id: ub(7),
+                widget_id: UBits::from_u64(7)?,
                 mode: WidgetMode::Frob,
-                frobs: [ub(1), ub(2), ub(3)],
+                frobs: [
+                    UBits::from_u64(1)?,
+                    UBits::from_u64(2)?,
+                    UBits::from_u64(3)?,
+                ],
                 tuning: WidgetTuning {
-                    frob_bias: ub(1),
-                    wobble_trim: sb(1),
+                    frob_bias: UBits::from_u64(1)?,
+                    wobble_trim: SBits::from_i64(1)?,
                 },
                 wobble,
                 signed_mode,
@@ -148,7 +158,11 @@ mod tests {
         assert!(source.contains("pub fn run("));
         assert!(source.contains("widget: &Widget"));
         assert!(source.contains("garnish: &FrobNibbles"));
-        assert!(source.contains(") -> Result<WidgetOutcome, xlsynth::XlsynthError>"));
+        assert!(source.contains(") -> Result<WidgetOutcome, AotError>"));
+        assert!(!source.contains("use xlsynth::"));
+        assert!(!source.contains("xlsynth::AotRunner"));
+        assert!(!source.contains("xlsynth::XlsynthError"));
+        assert!(!source.contains("xlsynth::Ir"));
         assert!(!source.contains("WidgetFrobWidget"));
         assert!(!source.contains("WidgetFrobGarnish"));
         assert!(!source.contains("WidgetFrobReturn"));
@@ -161,17 +175,20 @@ mod tests {
     // Catches: self-alias regressions that emit redundant local type aliases.
     #[test]
     fn widget_handle_signature_uses_canonical_bridge_type_without_self_alias(
-    ) -> Result<(), XlsynthError> {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         use super::self_alias_widget_aot::self_alias_widget::{new_runner, WidgetHandle};
+        use super::self_alias_widget_aot::UBits;
 
-        let widget = WidgetHandle { widget_id: ub(9) };
+        let widget = WidgetHandle {
+            widget_id: UBits::from_u64(9)?,
+        };
         let mut runner = new_runner()?;
         let result: WidgetHandle = runner.run(&widget)?;
         assert_eq!(result.widget_id.to_u64()?, 9);
 
         let source = std::fs::read_to_string(env!("XLSYNTH_AOT_SELF_ALIAS_WIDGET_RS")).unwrap();
         assert!(source.contains("widget: &WidgetHandle"));
-        assert!(source.contains(") -> Result<WidgetHandle, xlsynth::XlsynthError>"));
+        assert!(source.contains(") -> Result<WidgetHandle, AotError>"));
         assert!(!source.contains("pub type WidgetHandle"));
         Ok(())
     }
@@ -180,10 +197,14 @@ mod tests {
     // suffixed by evaluated parameter values.
     // Catches: regressions that emit unspecialized `Box` or field type `bits[N]`.
     #[test]
-    fn parametric_box_aot_uses_concrete_generated_struct() -> Result<(), XlsynthError> {
+    fn parametric_box_aot_uses_concrete_generated_struct() -> Result<(), Box<dyn std::error::Error>>
+    {
         use super::parametric_box_aot::parametric_box::{new_runner, Box8};
+        use super::parametric_box_aot::UBits;
 
-        let input = Box8 { value: ub(42) };
+        let input = Box8 {
+            value: UBits::from_u64(42)?,
+        };
         let mut runner = new_runner()?;
         let result: Box8 = runner.run(&input)?;
         assert_eq!(result.value.to_u64()?, 42);
@@ -192,7 +213,7 @@ mod tests {
         assert!(source.contains("pub struct Box__N_8"));
         assert!(source.contains("pub type Box8 = Box__N_8;"));
         assert!(source.contains("x: &Box8"));
-        assert!(source.contains(") -> Result<Box8, xlsynth::XlsynthError>"));
+        assert!(source.contains(") -> Result<Box8, AotError>"));
         Ok(())
     }
 
@@ -200,13 +221,29 @@ mod tests {
     // distinct parameter values.
     // Catches: regressions in concrete struct naming or per-field lowering.
     #[test]
-    fn parametric_shapes_aot_executes_concrete_aliases() -> Result<(), XlsynthError> {
+    fn parametric_shapes_aot_executes_concrete_aliases() -> Result<(), Box<dyn std::error::Error>> {
         use super::parametric_shapes_aot::parametric_shapes::{new_runner, Box16, Box8, Matrix2x3};
+        use super::parametric_shapes_aot::UBits;
 
-        let box8 = Box8 { value: ub(8) };
-        let box16 = Box16 { value: ub(16) };
+        let box8 = Box8 {
+            value: UBits::from_u64(8)?,
+        };
+        let box16 = Box16 {
+            value: UBits::from_u64(16)?,
+        };
         let matrix = Matrix2x3 {
-            rows: [[ub(1), ub(2), ub(3)], [ub(4), ub(5), ub(6)]],
+            rows: [
+                [
+                    UBits::from_u64(1)?,
+                    UBits::from_u64(2)?,
+                    UBits::from_u64(3)?,
+                ],
+                [
+                    UBits::from_u64(4)?,
+                    UBits::from_u64(5)?,
+                    UBits::from_u64(6)?,
+                ],
+            ],
         };
 
         let mut runner = new_runner()?;
@@ -223,23 +260,42 @@ mod tests {
     // end through the typed AOT wrapper.
     // Catches: recursive decode regressions that construct unspecialized `Box`.
     #[test]
-    fn parametric_arrays_aot_executes_alias_to_parametric_array() -> Result<(), XlsynthError> {
+    fn parametric_arrays_aot_executes_alias_to_parametric_array(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         use super::parametric_arrays_aot::parametric_arrays::{
             new_runner, ArrayBox4, Box8Array4, Box__N_16, Box__N_8, OuterBox,
         };
+        use super::parametric_arrays_aot::UBits;
 
         let array_box = ArrayBox4 {
-            items: [ub(10), ub(11), ub(12), ub(13)],
+            items: [
+                UBits::from_u64(10)?,
+                UBits::from_u64(11)?,
+                UBits::from_u64(12)?,
+                UBits::from_u64(13)?,
+            ],
         };
         let box_array: Box8Array4 = [
-            Box__N_8 { value: ub(20) },
-            Box__N_8 { value: ub(21) },
-            Box__N_8 { value: ub(22) },
-            Box__N_8 { value: ub(23) },
+            Box__N_8 {
+                value: UBits::from_u64(20)?,
+            },
+            Box__N_8 {
+                value: UBits::from_u64(21)?,
+            },
+            Box__N_8 {
+                value: UBits::from_u64(22)?,
+            },
+            Box__N_8 {
+                value: UBits::from_u64(23)?,
+            },
         ];
         let outer = OuterBox {
-            inner: Box__N_8 { value: ub(30) },
-            wider: Box__N_16 { value: ub(300) },
+            inner: Box__N_8 {
+                value: UBits::from_u64(30)?,
+            },
+            wider: Box__N_16 {
+                value: UBits::from_u64(300)?,
+            },
         };
 
         let mut runner = new_runner()?;
@@ -256,14 +312,21 @@ mod tests {
     // literals all execute after suffix generation.
     // Catches: concrete-name support that compiles but fails AOT conversion.
     #[test]
-    fn parametric_values_aot_executes_value_kinds() -> Result<(), XlsynthError> {
+    fn parametric_values_aot_executes_value_kinds() -> Result<(), Box<dyn std::error::Error>> {
         use super::parametric_values_aot::parametric_values::{
             new_runner, ExprBox8, HugeTag, NegativeTag,
         };
+        use super::parametric_values_aot::UBits;
 
-        let expr_box = ExprBox8 { value: ub(77) };
-        let negative = NegativeTag { payload: ub(88) };
-        let huge = HugeTag { payload: ub(99) };
+        let expr_box = ExprBox8 {
+            value: UBits::from_u64(77)?,
+        };
+        let negative = NegativeTag {
+            payload: UBits::from_u64(88)?,
+        };
+        let huge = HugeTag {
+            payload: UBits::from_u64(99)?,
+        };
 
         let mut runner = new_runner()?;
         let result = runner.run(&expr_box, &negative, &huge)?;
@@ -278,7 +341,7 @@ mod tests {
     // owner-module emission handles nested arrays plus multi-parameter shapes.
     // Catches: regressions back to alias-only imported parametric support.
     #[test]
-    fn parametric_imports_aot_executes_direct_imports() -> Result<(), XlsynthError> {
+    fn parametric_imports_aot_executes_direct_imports() -> Result<(), AotError> {
         use super::parametric_imports_aot::{parametric_imports, parametric_lib};
         use parametric_imports::{Box__N_8, LocalMode, Mixed__N_4};
 
@@ -347,10 +410,14 @@ mod tests {
     // Verifies: duplicate imported type names use canonical nested paths.
     // Catches: bare-name resolution that confuses sibling DSLX modules.
     #[test]
-    fn duplicate_widget_modules_use_canonical_nested_paths() -> Result<(), XlsynthError> {
+    fn duplicate_widget_modules_use_canonical_nested_paths(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use super::duplicate_widget_aot::UBits;
         use super::duplicate_widget_aot::{bar, foo, frobber};
 
-        let widget = foo::widget::Widget { widget_id: ub(41) };
+        let widget = foo::widget::Widget {
+            widget_id: UBits::from_u64(41)?,
+        };
         let mut runner = frobber::new_runner()?;
         let result: bar::widget::Widget = runner.run(&widget)?;
         assert_eq!(result.widget_id.to_u64()?, 42);
@@ -359,14 +426,14 @@ mod tests {
         assert!(source.contains("pub mod foo"));
         assert!(source.contains("pub mod bar"));
         assert!(source.contains("widget: &super::foo::widget::Widget"));
-        assert!(source.contains(") -> Result<super::bar::widget::Widget, xlsynth::XlsynthError>"));
+        assert!(source.contains(") -> Result<super::bar::widget::Widget, AotError>"));
         Ok(())
     }
 
     // Verifies: package-generated runners share one nominal Rust type universe.
     // Catches: per-wrapper duplicate bridge types that require adapter rebuilds.
     #[test]
-    fn package_builder_shares_nominal_types_across_runners() -> Result<(), XlsynthError> {
+    fn package_builder_shares_nominal_types_across_runners() -> Result<(), AotError> {
         use super::shared_widget_package_aot::{
             shared_widget_bump::aot_bump_widget, shared_widget_echo::aot_echo_widget,
             shared_widget_types::Widget,
@@ -386,8 +453,7 @@ mod tests {
     // two entrypoint files share the same basename. Catches: package tops
     // flattening to one file-stem-only Rust module.
     #[test]
-    fn package_builder_supports_nested_modules_with_same_basename_tops() -> Result<(), XlsynthError>
-    {
+    fn package_builder_supports_nested_modules_with_same_basename_tops() -> Result<(), AotError> {
         use super::namespaced_widget_package_aot::{
             bar::widget::aot_namespaced_bump_widget, foo::widget::aot_namespaced_echo_widget,
             types::widget::Widget,
