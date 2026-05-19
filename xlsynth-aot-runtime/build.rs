@@ -57,6 +57,7 @@ fn runtime_inputs_from_artifact_config(config_path: &Path) -> RuntimeInputs {
             config_path.display()
         );
     }
+    println!("cargo:rerun-if-changed={}", config_path.display());
     let config = parse_toml_file(config_path, XLSYNTH_ARTIFACT_CONFIG_ENV);
     RuntimeInputs {
         archive_path: resolve_artifact_config_path(config_path, &config, "aot_runtime_path"),
