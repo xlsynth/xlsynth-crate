@@ -1057,6 +1057,11 @@ jobs:
           echo "Resolved XLS release tag: ${TAG}"
           python3 scripts/download_release.py -p rocky8 -o pre_download -d --standalone-aot-runtime -v ${TAG}
 
+      - name: Install libc++ from llvm-18
+        run: |
+          bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" update
+          bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" install --no-install-recommends libc++-18-dev libc++abi-18-dev
+
       - name: Run cargo tests using pre-downloaded artifacts
         env:
           XLS_DSO_PATH: ${{ github.workspace }}/pre_download/libxls-rocky8.so
