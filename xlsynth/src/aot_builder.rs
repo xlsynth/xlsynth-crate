@@ -12,8 +12,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::aot_entrypoint_metadata::{
-    get_entrypoint_function_signature, AotEntrypointMetadata, AotFunctionSignature, AotType,
-    AotTypeLayout,
+    get_entrypoint_function_signature, get_entrypoint_runtime_features, AotEntrypointMetadata,
+    AotFunctionSignature, AotRuntimeFeature, AotType, AotTypeLayout,
 };
 use crate::aot_lib::{AotCompiled, AotResult};
 use crate::dslx_bridge::{convert_imported_module, BridgeBuilder};
@@ -154,15 +154,21 @@ pub fn compile_ir_to_aot(ir_text: &str, top: &str) -> AotResult<AotCompiled> {
 ///
 /// The wrapper gives emitted objects a deterministic artifact-scoped exported
 /// symbol without mutating the caller's original function names. Standalone
-/// generation currently follows the direct-call closure only; callback-bearing
-/// nodes such as `trace` and `cover` are rejected before compilation because
-/// their runtime callbacks are not part of the first standalone ABI.
+/// generation uses XLS-produced entrypoint metadata as the authority for the
+/// reachable callback-bearing nodes. `trace` and `cover` requirements are
+/// rejected before standalone artifacts are emitted because their runtime
+/// callbacks are not part of the first standalone ABI.
 fn compile_ir_to_standalone_aot(
     ir_text: &str,
     top: &str,
     base_name: &str,
 ) -> AotResult<(AotCompiled, AotRuntimeFeatures)> {
-    let runtime_features = classify_reachable_runtime_features(ir_text, top)?;
+    let wrapper_name = format!("__xlsynth_standalone_{base_name}");
+    let wrapped_ir = append_standalone_wrapper_ir(ir_text, top, &wrapper_name)?;
+    let compiled = AotCompiled::compile_ir(&wrapped_ir, &wrapper_name)?;
+    let runtime_feature_requirements = get_entrypoint_runtime_features(&compiled.entrypoints_proto)
+        .map_err(|e| XlsynthError(format!("AOT metadata parse failed: {}", e.0)))?;
+    let runtime_features = AotRuntimeFeatures::from_xls_requirements(&runtime_feature_requirements);
     if runtime_features.has_traces {
         return Err(XlsynthError(
             "AOT standalone runtime does not support `trace` nodes".to_string(),
@@ -173,94 +179,25 @@ fn compile_ir_to_standalone_aot(
         ));
     }
 
-    let wrapper_name = format!("__xlsynth_standalone_{base_name}");
-    let wrapped_ir = append_standalone_wrapper_ir(ir_text, top, &wrapper_name)?;
-    let compiled = AotCompiled::compile_ir(&wrapped_ir, &wrapper_name)?;
     Ok((compiled, runtime_features))
 }
 
-/// Classifies runtime features reachable from one selected top function.
-///
-/// The traversal assumes canonical XLS IR text and follows only direct function
-/// references that the standalone generator knows how to preserve.
-fn classify_reachable_runtime_features(ir_text: &str, top: &str) -> AotResult<AotRuntimeFeatures> {
-    let package = crate::ir_package::IrPackage::parse_ir(ir_text, Some("standalone_aot.ir"))
-        .map_err(|e| XlsynthError(format!("AOT runtime feature parse failed: {}", e.0)))?;
-    let mut pending = vec![top.to_string()];
-    let mut visited = HashSet::new();
-    let mut runtime_features = AotRuntimeFeatures {
-        has_asserts: false,
-        has_traces: false,
-        has_covers: false,
-    };
-
-    while let Some(function_name) = pending.pop() {
-        if visited.insert(function_name.clone()) {
-            let function = package.get_function(&function_name).map_err(|e| {
-                XlsynthError(format!(
-                    "AOT runtime feature function lookup failed for `{function_name}`: {}",
-                    e.0
-                ))
-            })?;
-            let function_ir = function.to_ir_string().map_err(|e| {
-                XlsynthError(format!(
-                    "AOT runtime feature IR formatting failed for `{function_name}`: {}",
-                    e.0
-                ))
-            })?;
-            runtime_features.merge(classify_runtime_features_in_function(&function_ir));
-            pending.extend(referenced_function_names(&function_ir));
-        }
-    }
-
-    Ok(runtime_features)
-}
-
 impl AotRuntimeFeatures {
-    /// Merges runtime features discovered in another reachable function.
-    fn merge(&mut self, other: Self) {
-        self.has_asserts |= other.has_asserts;
-        self.has_traces |= other.has_traces;
-        self.has_covers |= other.has_covers;
+    fn from_xls_requirements(features: &[AotRuntimeFeature]) -> Self {
+        let mut runtime_features = Self {
+            has_asserts: false,
+            has_traces: false,
+            has_covers: false,
+        };
+        for feature in features {
+            match feature {
+                AotRuntimeFeature::Assertions => runtime_features.has_asserts = true,
+                AotRuntimeFeature::Traces => runtime_features.has_traces = true,
+                AotRuntimeFeature::Covers => runtime_features.has_covers = true,
+            }
+        }
+        runtime_features
     }
-}
-
-/// Classifies the runtime features used by one canonical XLS IR function.
-fn classify_runtime_features_in_function(function_ir: &str) -> AotRuntimeFeatures {
-    AotRuntimeFeatures {
-        has_asserts: function_ir.lines().any(|line| line.contains(" = assert(")),
-        has_traces: function_ir.lines().any(|line| line.contains(" = trace(")),
-        has_covers: function_ir.lines().any(|line| line.contains(" = cover(")),
-    }
-}
-
-/// Returns direct function references carried by canonical XLS IR node attrs.
-///
-/// The standalone generator intentionally recognizes only the direct-call
-/// attributes it can preserve today, so adding another call-bearing node shape
-/// requires extending this list as part of that feature work.
-fn referenced_function_names(function_ir: &str) -> Vec<String> {
-    function_ir
-        .lines()
-        .flat_map(|line| {
-            ["to_apply=", "body="]
-                .iter()
-                .copied()
-                .filter_map(move |attribute| function_attr_value(line, attribute))
-        })
-        .collect()
-}
-
-/// Extracts one unquoted canonical XLS IR function-reference attribute value.
-fn function_attr_value(line: &str, attribute: &str) -> Option<String> {
-    line.split_once(attribute)
-        .map(|(_, suffix)| {
-            suffix
-                .chars()
-                .take_while(|ch| !matches!(ch, ',' | ')' | ' ' | '\t'))
-                .collect::<String>()
-        })
-        .filter(|value| !value.is_empty())
 }
 
 /// Appends an artifact-scoped forwarding wrapper around the requested top.
