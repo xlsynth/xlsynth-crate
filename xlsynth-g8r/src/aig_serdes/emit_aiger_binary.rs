@@ -15,8 +15,8 @@
 // - We emit outputs and (optional) symbol table as ASCII, followed by the
 //   binary delta-encoded AND section per the AIGER spec.
 
-use crate::aig::gate::{self, AigNode, AigOperand};
-use std::collections::HashMap;
+use crate::aig::gate;
+use crate::aig_serdes::canonical_aiger_layout::CanonicalAigerLayout;
 use std::fmt::Write as _;
 
 fn encode_u32_as_aiger_varint(mut x: u32, out: &mut Vec<u8>) {
@@ -27,86 +27,24 @@ fn encode_u32_as_aiger_varint(mut x: u32, out: &mut Vec<u8>) {
     out.push((x & 0x7f) as u8);
 }
 
-fn is_const_literal(gf: &gate::GateFn, op: AigOperand) -> Option<bool> {
-    match gf.get(op.node) {
-        AigNode::Literal { value: v, .. } => Some(*v),
-        _ => None,
-    }
-}
-
-fn operand_to_literal_with_var_map(
-    gf: &gate::GateFn,
-    var_map: &HashMap<usize, u32>,
-    op: AigOperand,
-) -> Result<u32, String> {
-    if let Some(val) = is_const_literal(gf, op) {
-        let base = if val { 1u32 } else { 0u32 };
-        return Ok(base ^ (op.negated as u32));
-    }
-    let var = *var_map
-        .get(&op.node.id)
-        .ok_or_else(|| format!("missing var mapping for node id {}", op.node.id))?;
-    Ok((var << 1) ^ (op.negated as u32))
-}
-
 /// Emits the supplied `GateFn` into binary AIGER ("aig") format.
 ///
 /// Returns the serialized bytes on success.
 pub fn emit_aiger_binary(gate_fn: &gate::GateFn, include_symbols: bool) -> Result<Vec<u8>, String> {
     // We only handle purely combinational circuits today.
     let latch_count = 0u32;
-
-    // Stable input-bit ordering.
-    let mut input_node_ids: Vec<usize> = Vec::new();
-    for input in &gate_fn.inputs {
-        for bit in input.bit_vector.iter_lsb_to_msb() {
-            input_node_ids.push(bit.node.id);
-        }
-    }
-    let input_count = input_node_ids.len() as u32;
-
-    // Determine AND nodes in a deterministic, dependency-respecting order by
-    // using a post-order traversal from outputs.
-    //
-    // Note: `post_order_operands()` deduplicates by *operand* (node + negation),
-    // but we need a node-only ordering for AIGER encoding. So we explicitly
-    // deduplicate by node id while preserving first-seen order.
-    let mut and_node_ids: Vec<usize> = Vec::new();
-    let mut seen_and_node_ids: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    for op in gate_fn.post_order_operands(true) {
-        if matches!(gate_fn.get(op.node), AigNode::And2 { .. })
-            && seen_and_node_ids.insert(op.node.id)
-        {
-            and_node_ids.push(op.node.id);
-        }
-    }
-    let and_count = and_node_ids.len() as u32;
-
-    // Build var mapping: constant false is var 0; inputs are 1..=I; AND nodes
-    // are then I+1..=I+A in the order selected above.
-    let mut var_map: HashMap<usize, u32> = HashMap::new();
-    for (i, node_id) in input_node_ids.iter().enumerate() {
-        var_map.insert(*node_id, (i as u32) + 1);
-    }
-    for (i, node_id) in and_node_ids.iter().enumerate() {
-        var_map.insert(*node_id, input_count + (i as u32) + 1);
-    }
-
-    // M is maximum variable index referenced. With our remapping, that's I + A.
-    let max_var_index = input_count + and_count;
-
-    let output_count = gate_fn
-        .outputs
-        .iter()
-        .map(|o| o.bit_vector.get_bit_count())
-        .sum::<usize>() as u32;
+    let layout = CanonicalAigerLayout::new(gate_fn);
 
     let mut bytes: Vec<u8> = Vec::new();
 
     // Header.
     let header = format!(
         "aig {} {} {} {} {}\n",
-        max_var_index, input_count, latch_count, output_count, and_count
+        layout.max_var_index,
+        layout.input_count,
+        latch_count,
+        layout.output_count,
+        layout.and_count
     );
     bytes.extend_from_slice(header.as_bytes());
 
@@ -114,7 +52,7 @@ pub fn emit_aiger_binary(gate_fn: &gate::GateFn, include_symbols: bool) -> Resul
     // variant (per the AIGER spec / ABC expectations).
     for output in &gate_fn.outputs {
         for bit in output.bit_vector.iter_lsb_to_msb() {
-            let lit = operand_to_literal_with_var_map(gate_fn, &var_map, *bit)?;
+            let lit = layout.operand_to_literal(gate_fn, *bit)?;
             let line = format!("{lit}\n");
             bytes.extend_from_slice(line.as_bytes());
         }
@@ -124,21 +62,8 @@ pub fn emit_aiger_binary(gate_fn: &gate::GateFn, include_symbols: bool) -> Resul
     //   delta0 = lhs - rhs0
     //   delta1 = rhs0 - rhs1
     // with rhs0 >= rhs1 and both < lhs.
-    for node_id in &and_node_ids {
-        let lhs_var = *var_map
-            .get(node_id)
-            .ok_or_else(|| format!("missing var mapping for AND node id {}", node_id))?;
-        let lhs_lit = lhs_var << 1;
-        let (mut rhs0, mut rhs1) = match &gate_fn.gates[*node_id] {
-            AigNode::And2 { a, b, .. } => (
-                operand_to_literal_with_var_map(gate_fn, &var_map, *a)?,
-                operand_to_literal_with_var_map(gate_fn, &var_map, *b)?,
-            ),
-            _ => return Err("internal error: and_node_ids contained non-AND node".to_string()),
-        };
-        if rhs1 > rhs0 {
-            std::mem::swap(&mut rhs0, &mut rhs1);
-        }
+    for node_id in &layout.and_node_ids {
+        let (lhs_lit, rhs0, rhs1) = layout.sorted_and_literals(gate_fn, *node_id)?;
         debug_assert!(rhs0 < lhs_lit);
         debug_assert!(rhs1 <= rhs0);
         let delta0 = lhs_lit

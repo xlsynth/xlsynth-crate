@@ -19,37 +19,19 @@
 //   • Output literals are produced directly, taking into account operand
 //     negation.
 //
-// No additional optimization or topological re-ordering is required; AIGER
-// tools tolerate arbitrary ordering as long as the header counts are
-// consistent and every AND left-hand-side literal is unique.
+// ASCII and binary AIGER emission share the same canonical live-node ordering:
+// inputs first, then AND nodes numbered by output-rooted post-order traversal.
+// AND operands are ordered by descending emitted literal, matching the binary
+// AIGER delta encoding requirement. This keeps heuristic downstream tools from
+// seeing dialect-dependent graph presentations.
 //
 // INVARIANTS asserted throughout help catch accidental inconsistencies early
 // while still compiling with `--release` (they become no-ops outside of debug
 // builds).
 
-use crate::aig::gate::{self, AigNode, AigOperand};
+use crate::aig::gate;
+use crate::aig_serdes::canonical_aiger_layout::CanonicalAigerLayout;
 use std::fmt::Write as _; // for write! macro on String // Needed for AigBitVector in tests
-
-/// Converts the given operand into an AIGER literal.
-///
-/// A literal is `2 * var + negated`, where `var` is the variable index.  The
-/// special variable 0 is the dedicated constant-false, therefore literal 0 is
-/// constant false and literal 1 is constant true.
-fn operand_to_literal(gf: &gate::GateFn, op: AigOperand) -> u32 {
-    match &gf.gates[op.node.id] {
-        AigNode::Literal { value: val, .. } => {
-            let base = if *val { 1 } else { 0 }; // constant true/false
-            base ^ (op.negated as u32)
-        }
-        _ => {
-            let mut lit = (op.node.id as u32) << 1;
-            if op.negated {
-                lit ^= 1;
-            }
-            lit
-        }
-    }
-}
 
 /// Emits the supplied `GateFn` into ASCII AIGER ("aag") format.
 ///
@@ -58,53 +40,24 @@ pub fn emit_aiger(gate_fn: &gate::GateFn, include_symbols: bool) -> Result<Strin
     // We only handle purely combinational circuits today.
     // Future work: support flops by mapping them onto AIGER latches.
     let latch_count = 0u32;
-
-    // Count input bits and collect their gate IDs.
-    let mut input_ids: Vec<usize> = Vec::new();
-    for input in &gate_fn.inputs {
-        for bit in input.bit_vector.iter_lsb_to_msb() {
-            // Ensure the referenced node is indeed an Input.
-            debug_assert!(matches!(gate_fn.get(bit.node), AigNode::Input { .. }));
-            input_ids.push(bit.node.id);
-        }
-    }
-
-    // Gather AND nodes (their IDs), skipping index 0 (constant) and any literals.
-    let mut and_ids: Vec<usize> = Vec::new();
-    for (idx, node) in gate_fn.gates.iter().enumerate() {
-        if matches!(node, AigNode::And2 { .. }) {
-            and_ids.push(idx);
-        }
-    }
-
-    let max_var_index = input_ids
-        .iter()
-        .chain(and_ids.iter())
-        .copied()
-        .max()
-        .unwrap_or(0) as u32; // `0` handles degenerate 0-gate case.
-
-    let output_count = gate_fn
-        .outputs
-        .iter()
-        .map(|o| o.bit_vector.get_bit_count())
-        .sum::<usize>() as u32;
+    let layout = CanonicalAigerLayout::new(gate_fn);
 
     let header = format!(
         "aag {} {} {} {} {}\n",
-        max_var_index,   // M – maximum variable index referenced
-        input_ids.len(), // I – #inputs
-        latch_count,     // L – #latches (none)
-        output_count,    // O – #outputs
-        and_ids.len()    // A – #AND gates
+        layout.max_var_index, // M – maximum variable index referenced
+        layout.input_count,   // I – #inputs
+        latch_count,          // L – #latches (none)
+        layout.output_count,  // O – #outputs
+        layout.and_count      // A – #AND gates
     );
 
-    let mut out = String::with_capacity(header.len() + 64 * (input_ids.len() + and_ids.len()));
+    let mut out =
+        String::with_capacity(header.len() + 64 * (layout.input_count + layout.and_count) as usize);
     out.push_str(&header);
 
     // --- Inputs (one per line) ------------------------------------------------
-    for id in &input_ids {
-        write!(&mut out, "{}\n", (*id as u32) << 1).unwrap();
+    for input_index in 0..layout.input_count {
+        write!(&mut out, "{}\n", (input_index + 1) << 1).unwrap();
     }
 
     // --- Latches (none) -------------------------------------------------------
@@ -113,22 +66,15 @@ pub fn emit_aiger(gate_fn: &gate::GateFn, include_symbols: bool) -> Result<Strin
     // --- Outputs --------------------------------------------------------------
     for output in &gate_fn.outputs {
         for bit in output.bit_vector.iter_lsb_to_msb() {
-            let lit = operand_to_literal(gate_fn, *bit);
+            let lit = layout.operand_to_literal(gate_fn, *bit)?;
             write!(&mut out, "{}\n", lit).unwrap();
         }
     }
 
     // --- AND gates ------------------------------------------------------------
-    // Emit in ascending gate ID order to keep things deterministic.
-    for id in &and_ids {
-        if let AigNode::And2 { a, b, .. } = &gate_fn.gates[*id] {
-            let lhs = (*id as u32) << 1;
-            let rhs0 = operand_to_literal(gate_fn, *a);
-            let rhs1 = operand_to_literal(gate_fn, *b);
-            write!(&mut out, "{} {} {}\n", lhs, rhs0, rhs1).unwrap();
-        } else {
-            unreachable!("and_ids filtered to AND nodes only");
-        }
+    for node_id in &layout.and_node_ids {
+        let (lhs, rhs0, rhs1) = layout.sorted_and_literals(gate_fn, *node_id)?;
+        write!(&mut out, "{} {} {}\n", lhs, rhs0, rhs1).unwrap();
     }
 
     if include_symbols {
@@ -196,12 +142,32 @@ mod tests {
         // Header: aag 3 2 0 1 1
         // Inputs: 2,4
         // Output: 6 (literal of id 3)
-        // AND:    6 2 4
+        // AND:    6 4 2
         // Symbols: i0, i1, o
 
-        let expected = "aag 3 2 0 1 1\n2\n4\n6\n6 2 4\ni0 i0\ni1 i1\no0 o\nc\ngenerated by xlsynth-g8r emit_aiger\n";
+        let expected = "aag 3 2 0 1 1\n2\n4\n6\n6 4 2\ni0 i0\ni1 i1\no0 o\nc\ngenerated by xlsynth-g8r emit_aiger\n";
 
         // Because symbol table ordering is deterministic, we can compare.
+        assert_eq!(aiger, expected);
+    }
+
+    #[test]
+    fn test_emit_aiger_uses_post_order_numbering() {
+        let mut gb = GateBuilder::new("post_order_fn".to_string(), GateBuilderOptions::no_opt());
+        let i0 = gb.add_input("i0".to_string(), 1);
+        let i1 = gb.add_input("i1".to_string(), 1);
+        let i2 = gb.add_input("i2".to_string(), 1);
+
+        // Create the right-hand subtree first so GateFn creation order differs
+        // from the output-rooted post-order that AIGER emission should expose.
+        let right = gb.add_and_binary(*i1.get_lsb(0), *i2.get_lsb(0));
+        let left = gb.add_and_binary(*i0.get_lsb(0), *i1.get_lsb(0));
+        let root = gb.add_and_binary(left, right);
+        gb.add_output("o".to_string(), gate::AigBitVector::from_bit(root));
+        let gf = gb.build();
+
+        let aiger = emit_aiger(&gf, false).unwrap();
+        let expected = "aag 6 3 0 1 3\n2\n4\n6\n12\n8 4 2\n10 6 4\n12 10 8\nc\ngenerated by xlsynth-g8r emit_aiger\n";
         assert_eq!(aiger, expected);
     }
 }

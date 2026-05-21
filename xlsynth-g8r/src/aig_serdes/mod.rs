@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod canonical_aiger_layout;
+
 pub mod emit_aiger;
 pub mod emit_aiger_binary;
 pub mod emit_netlist;
