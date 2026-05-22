@@ -1,10 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
+//! Selects the native linking contract for the standalone AOT runtime crate.
+//!
+//! Direct Cargo consumers use the released native archive and companion link
+//! configuration. Bazel consumers set declared-link mode because their final
+//! target declares and links the source-backed runtime dependency itself; in
+//! that mode this build script must not issue duplicate native link requests.
 
 use std::path::{Path, PathBuf};
 
 const XLS_AOT_RUNTIME_PATH_ENV: &str = "XLS_AOT_RUNTIME_PATH";
 const XLS_AOT_RUNTIME_LINK_CONFIG_PATH_ENV: &str = "XLS_AOT_RUNTIME_LINK_CONFIG_PATH";
+/// Selects whether Cargo or the enclosing build graph owns native runtime
+/// linking.
+const XLS_AOT_RUNTIME_LINK_MODE_ENV: &str = "XLS_AOT_RUNTIME_LINK_MODE";
 const XLSYNTH_ARTIFACT_CONFIG_ENV: &str = "XLSYNTH_ARTIFACT_CONFIG";
+
+/// Identifies which build system is responsible for providing native runtime
+/// symbols.
+#[derive(Clone, Copy)]
+enum LinkDirectiveMode {
+    /// Cargo links the released `libxls_aot_runtime.a` archive and its system
+    /// dependencies.
+    Native,
+    /// The enclosing build graph supplies the runtime dependency and Cargo
+    /// emits no native links.
+    Declared,
+}
 
 struct RuntimeInputs {
     archive_path: PathBuf,
@@ -14,6 +35,31 @@ struct RuntimeInputs {
 struct RuntimeLinkConfig {
     system_libraries: Vec<String>,
     frameworks: Vec<String>,
+}
+
+/// Parses the link-ownership contract, preserving native linking as the
+/// default.
+///
+/// Declared mode is opt-in because ordinary Cargo builds do not otherwise have
+/// a Bazel target available to satisfy the standalone runtime symbols.
+fn parse_link_directive_mode() -> LinkDirectiveMode {
+    match std::env::var(XLS_AOT_RUNTIME_LINK_MODE_ENV) {
+        Ok(value) => match value.as_str() {
+            "native" => LinkDirectiveMode::Native,
+            "declared" => LinkDirectiveMode::Declared,
+            _ => panic!(
+                "{XLS_AOT_RUNTIME_LINK_MODE_ENV} must be one of 'native' or 'declared'; got {:?}",
+                value
+            ),
+        },
+        Err(std::env::VarError::NotPresent) => LinkDirectiveMode::Native,
+        Err(std::env::VarError::NotUnicode(value)) => {
+            panic!(
+                "{XLS_AOT_RUNTIME_LINK_MODE_ENV} must be valid UTF-8; got {:?}",
+                value
+            )
+        }
+    }
 }
 
 fn parse_toml_file(path: &Path, label: &str) -> toml::Table {
@@ -159,12 +205,11 @@ fn read_link_config(path: &Path, target_os: &str) -> RuntimeLinkConfig {
     }
 }
 
-fn main() {
-    println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-env-changed={XLS_AOT_RUNTIME_PATH_ENV}");
-    println!("cargo:rerun-if-env-changed={XLS_AOT_RUNTIME_LINK_CONFIG_PATH_ENV}");
-    println!("cargo:rerun-if-env-changed={XLSYNTH_ARTIFACT_CONFIG_ENV}");
-
+/// Emits all native linker inputs required by direct Cargo consumers.
+///
+/// This must not be invoked in declared-link mode: doing so would cause both
+/// Cargo and the enclosing Bazel link graph to provide the runtime dependency.
+fn emit_native_link_directives() {
     let inputs = resolve_runtime_inputs();
     let archive_path = &inputs.archive_path;
     if archive_path.file_name().and_then(|name| name.to_str()) != Some("libxls_aot_runtime.a") {
@@ -207,5 +252,25 @@ fn main() {
     }
     for framework in link_config.frameworks {
         println!("cargo:rustc-link-lib=framework={framework}");
+    }
+}
+
+/// Applies the selected native-link ownership contract to this crate build.
+fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed={XLS_AOT_RUNTIME_PATH_ENV}");
+    println!("cargo:rerun-if-env-changed={XLS_AOT_RUNTIME_LINK_CONFIG_PATH_ENV}");
+    println!("cargo:rerun-if-env-changed={XLS_AOT_RUNTIME_LINK_MODE_ENV}");
+    println!("cargo:rerun-if-env-changed={XLSYNTH_ARTIFACT_CONFIG_ENV}");
+    println!("cargo:rustc-check-cfg=cfg(xls_aot_runtime_declared_link)");
+
+    match parse_link_directive_mode() {
+        LinkDirectiveMode::Native => emit_native_link_directives(),
+        LinkDirectiveMode::Declared => {
+            println!("cargo:rustc-cfg=xls_aot_runtime_declared_link");
+            println!(
+                "cargo:info=Skipping native link directives because {XLS_AOT_RUNTIME_LINK_MODE_ENV}=declared"
+            );
+        }
     }
 }

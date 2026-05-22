@@ -318,7 +318,14 @@ struct XlsStandaloneAotRuntime {
     _private: [u8; 0],
 }
 
-#[link(name = "xls_aot_runtime", kind = "static")]
+// Import the standalone runtime ABI without choosing a second native link
+// owner. Direct Cargo builds retain the released static archive annotation;
+// Bazel-declared builds omit it because the final Bazel target provides the
+// same symbols through its source-backed runtime dependency.
+#[cfg_attr(
+    not(xls_aot_runtime_declared_link),
+    link(name = "xls_aot_runtime", kind = "static")
+)]
 unsafe extern "C" {
     fn xls_standalone_aot_runtime_create(
         abi_version: u32,
