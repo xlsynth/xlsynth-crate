@@ -101,10 +101,10 @@ fn output_text(output: &std::process::Output) -> String {
     )
 }
 
-/// Writes the minimal native-mode archive and platform link configuration.
+/// Writes a valid empty native-mode archive and platform link configuration.
 fn write_native_runtime_inputs(root: &Path) -> (PathBuf, PathBuf) {
     let archive_path = root.join("libxls_aot_runtime.a");
-    write_file(&archive_path, "");
+    write_file(&archive_path, "!<arch>\n");
     let target_os = if cfg!(target_os = "macos") {
         "macos"
     } else {

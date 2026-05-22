@@ -1006,7 +1006,7 @@ jobs:
         run: |
           export SLANG_PATH=$(realpath slang)
           export XLSYNTH_TOOLS=$(realpath xlsynth_tools)
-          cp $(find -name 'libxls-v*-*.so' | head -n 1) .
+          cp "$(find . -name 'libxls-${{ steps.resolve-xls-tag-valgrind.outputs.tag }}-ubuntu2004.so' -print -quit)" .
           export LD_LIBRARY_PATH=$(pwd):$LD_LIBRARY_PATH
           python3 scripts/run_valgrind_on_tests.py --filter-to-run=sample_usage,ir_interpret_test
 
