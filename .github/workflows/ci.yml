@@ -1059,8 +1059,8 @@ jobs:
 
       - name: Install libc++ from llvm-18
         run: |
-          bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" update
-          bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" install --no-install-recommends libc++-18-dev libc++abi-18-dev
+          sudo bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" update
+          sudo bash "${GITHUB_WORKSPACE}/scripts/ci_apt_retry.sh" install --no-install-recommends libc++-18-dev libc++abi-18-dev
 
       - name: Run cargo tests using pre-downloaded artifacts
         env:
