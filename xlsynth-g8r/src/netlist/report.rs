@@ -7,7 +7,8 @@ use crate::liberty_proto::Library;
 pub use crate::netlist::io::{resolve_symbol, select_module};
 use crate::netlist::parse::{Net, NetlistModule, PortDirection};
 use crate::netlist::sta::{
-    StaOptions, StaReport, analyze_combinational_max_arrival, analyze_register_boundary_max_arrival,
+    RegisterPathDelayBreakdown, StaOptions, StaReport, analyze_combinational_max_arrival,
+    analyze_register_boundary_max_arrival,
 };
 use crate::netlist::stages::{StagePartitionStatus, analyze_register_stages};
 use anyhow::{Result, anyhow};
@@ -67,8 +68,11 @@ pub struct NetlistReport {
     pub cell_area: f64,
     pub max_delay: f64,
     pub max_input_to_register_delay: Option<f64>,
+    pub max_input_to_register_delay_breakdown: Option<RegisterPathDelayBreakdown>,
     pub max_register_to_register_delay: Option<f64>,
+    pub max_register_to_register_delay_breakdown: Option<RegisterPathDelayBreakdown>,
     pub max_register_to_output_delay: Option<f64>,
+    pub max_register_to_output_delay_breakdown: Option<RegisterPathDelayBreakdown>,
     pub cell_count: usize,
     pub cell_levels: usize,
     pub sequential_cell_area: f64,
@@ -84,6 +88,7 @@ pub struct NetlistReport {
 pub struct StageReportRow {
     pub stage: usize,
     pub max_delay: f64,
+    pub max_delay_breakdown: Option<RegisterPathDelayBreakdown>,
     pub combinational_cell_area: f64,
 }
 
@@ -240,8 +245,11 @@ pub fn build_netlist_report(
             cell_area: area.area,
             max_delay: sta.delay,
             max_input_to_register_delay: None,
+            max_input_to_register_delay_breakdown: None,
             max_register_to_register_delay: None,
+            max_register_to_register_delay_breakdown: None,
             max_register_to_output_delay: None,
+            max_register_to_output_delay_breakdown: None,
             cell_count: area.cell_count,
             cell_levels: sta.cell_levels,
             sequential_cell_area: stages.sequential_area,
@@ -282,16 +290,28 @@ pub fn build_netlist_report(
                 false,
                 launch_registers.as_slice(),
             )?;
-            let delay = stages
+            let mut delay = 0.0;
+            let mut max_delay_breakdown = None;
+            let mut found_delay = false;
+            for idx in stages
                 .register_indices
                 .iter()
                 .copied()
                 .filter(|idx| stages.register_levels[*idx] == Some(*stage + 1))
-                .filter_map(|idx| stage_timing.register_input_arrivals[idx])
-                .fold(0.0, f64::max);
+            {
+                let Some(candidate_delay) = stage_timing.register_input_arrivals[idx] else {
+                    continue;
+                };
+                if !found_delay || candidate_delay > delay {
+                    found_delay = true;
+                    delay = candidate_delay;
+                    max_delay_breakdown = stage_timing.register_input_breakdowns[idx];
+                }
+            }
             stage_rows.push(StageReportRow {
                 stage: *stage,
                 max_delay: delay,
+                max_delay_breakdown,
                 combinational_cell_area: *stage_area,
             });
         }
@@ -312,8 +332,11 @@ pub fn build_netlist_report(
         cell_area: area.area,
         max_delay: input_launch.worst_output_arrival,
         max_input_to_register_delay: Some(input_launch.worst_register_input_arrival),
+        max_input_to_register_delay_breakdown: input_launch.worst_register_input_breakdown,
         max_register_to_register_delay: Some(register_launch.worst_register_input_arrival),
+        max_register_to_register_delay_breakdown: register_launch.worst_register_input_breakdown,
         max_register_to_output_delay: Some(register_launch.worst_output_arrival),
+        max_register_to_output_delay_breakdown: register_launch.worst_output_breakdown,
         cell_count: area.cell_count,
         cell_levels: input_launch.cell_levels,
         sequential_cell_area: stages.sequential_area,
@@ -334,7 +357,7 @@ mod tests {
     };
     use crate::netlist::io::ParsedNetlist;
     use crate::netlist::parse::{Parser as NetlistParser, TokenScanner};
-    use crate::netlist::sta::StaOptions;
+    use crate::netlist::sta::{RegisterPathDelayBreakdown, StaOptions};
     use crate::netlist::stages::StagePartitionStatus;
 
     fn parse_netlist(src: &'static str) -> ParsedNetlist {
@@ -372,6 +395,57 @@ mod tests {
                 TimingTable {
                     kind: "fall_transition".to_string(),
                     values: vec![0.1],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn clock_to_output_arc() -> TimingArc {
+        TimingArc {
+            related_pin: "CLK".to_string(),
+            timing_sense: "non_unate".to_string(),
+            timing_type: "rising_edge".to_string(),
+            tables: vec![
+                TimingTable {
+                    kind: "cell_rise".to_string(),
+                    values: vec![0.5],
+                    ..Default::default()
+                },
+                TimingTable {
+                    kind: "cell_fall".to_string(),
+                    values: vec![0.5],
+                    ..Default::default()
+                },
+                TimingTable {
+                    kind: "rise_transition".to_string(),
+                    values: vec![0.1],
+                    ..Default::default()
+                },
+                TimingTable {
+                    kind: "fall_transition".to_string(),
+                    values: vec![0.1],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn setup_arc() -> TimingArc {
+        TimingArc {
+            related_pin: "CLK".to_string(),
+            timing_type: "setup_rising".to_string(),
+            tables: vec![
+                TimingTable {
+                    kind: "rise_constraint".to_string(),
+                    values: vec![0.25],
+                    ..Default::default()
+                },
+                TimingTable {
+                    kind: "fall_constraint".to_string(),
+                    values: vec![0.25],
                     ..Default::default()
                 },
             ],
@@ -455,6 +529,7 @@ mod tests {
                             name: "D".to_string(),
                             direction: PinDirection::Input as i32,
                             capacitance: Some(0.0),
+                            timing_arcs: vec![setup_arc()],
                             ..Default::default()
                         },
                         Pin {
@@ -467,6 +542,7 @@ mod tests {
                         Pin {
                             name: "Q".to_string(),
                             direction: PinDirection::Output as i32,
+                            timing_arcs: vec![clock_to_output_arc()],
                             ..Default::default()
                         },
                     ],
@@ -654,14 +730,46 @@ endmodule
             StagePartitionStatus::Partitioned
         );
         assert_eq!(report.max_delay, 0.0);
-        assert_eq!(report.max_input_to_register_delay, Some(1.0));
-        assert_eq!(report.max_register_to_register_delay, Some(1.0));
-        assert_eq!(report.max_register_to_output_delay, Some(1.0));
+        assert_eq!(report.max_input_to_register_delay, Some(1.25));
+        assert_eq!(
+            report.max_input_to_register_delay_breakdown,
+            Some(RegisterPathDelayBreakdown {
+                clock_to_output_delay: 0.0,
+                combinational_delay: 1.0,
+                setup_delay: 0.25,
+            })
+        );
+        assert_eq!(report.max_register_to_register_delay, Some(1.75));
+        assert_eq!(
+            report.max_register_to_register_delay_breakdown,
+            Some(RegisterPathDelayBreakdown {
+                clock_to_output_delay: 0.5,
+                combinational_delay: 1.0,
+                setup_delay: 0.25,
+            })
+        );
+        assert_eq!(report.max_register_to_output_delay, Some(1.5));
+        assert_eq!(
+            report.max_register_to_output_delay_breakdown,
+            Some(RegisterPathDelayBreakdown {
+                clock_to_output_delay: 0.5,
+                combinational_delay: 1.0,
+                setup_delay: 0.0,
+            })
+        );
         assert_eq!(report.sequential_cell_area, 8.0);
         assert_eq!(report.non_stage_combinational_cell_area, 2.0);
         assert_eq!(report.stages.len(), 1);
         assert_eq!(report.stages[0].stage, 0);
-        assert_eq!(report.stages[0].max_delay, 1.0);
+        assert_eq!(report.stages[0].max_delay, 1.75);
+        assert_eq!(
+            report.stages[0].max_delay_breakdown,
+            Some(RegisterPathDelayBreakdown {
+                clock_to_output_delay: 0.5,
+                combinational_delay: 1.0,
+                setup_delay: 0.25,
+            })
+        );
         assert_eq!(report.stages[0].combinational_cell_area, 1.0);
         assert_eq!(
             report.cell_area,
@@ -712,9 +820,9 @@ endmodule
             report.stage_partition_status,
             StagePartitionStatus::Partitioned
         );
-        assert_eq!(report.max_register_to_register_delay, Some(2.0));
+        assert_eq!(report.max_register_to_register_delay, Some(2.75));
         assert_eq!(report.stages.len(), 1);
-        assert_eq!(report.stages[0].max_delay, 2.0);
+        assert_eq!(report.stages[0].max_delay, 2.75);
         assert_eq!(report.stages[0].combinational_cell_area, 2.0);
         assert_eq!(report.non_stage_combinational_cell_area, 1.0);
     }
@@ -761,7 +869,7 @@ endmodule
         assert!(report.stages.is_empty());
         assert_eq!(report.sequential_cell_area, 12.0);
         assert_eq!(report.non_stage_combinational_cell_area, 4.0);
-        assert_eq!(report.max_register_to_register_delay, Some(2.0));
+        assert_eq!(report.max_register_to_register_delay, Some(2.75));
         assert_eq!(report.cell_area, 16.0);
     }
 
@@ -800,10 +908,10 @@ endmodule
             report.stage_partition_status,
             StagePartitionStatus::Partitioned
         );
-        assert_eq!(report.max_register_to_register_delay, Some(2.0));
+        assert_eq!(report.max_register_to_register_delay, Some(2.75));
         assert_eq!(report.stages.len(), 1);
         assert_eq!(report.stages[0].stage, 0);
-        assert_eq!(report.stages[0].max_delay, 2.0);
+        assert_eq!(report.stages[0].max_delay, 2.75);
         assert_eq!(report.stages[0].combinational_cell_area, 0.0);
         assert_eq!(report.sequential_cell_area, 8.0);
         assert_eq!(report.non_stage_combinational_cell_area, 3.0);

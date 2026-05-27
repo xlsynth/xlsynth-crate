@@ -23,6 +23,52 @@ fn shown_optional_metric(value: Option<f64>) -> String {
         .unwrap_or_else(|| "n/a".to_string())
 }
 
+fn push_input_to_register_delay_breakdown(
+    out: &mut String,
+    value: Option<xlsynth_g8r::netlist::sta::RegisterPathDelayBreakdown>,
+) {
+    if let Some(value) = value {
+        out.push_str(&format!(
+            "  combinational_delay: {:.6}\n",
+            value.combinational_delay
+        ));
+        out.push_str(&format!("  setup_delay: {:.6}\n", value.setup_delay));
+    }
+}
+
+fn push_register_to_register_delay_breakdown(
+    out: &mut String,
+    value: Option<xlsynth_g8r::netlist::sta::RegisterPathDelayBreakdown>,
+) {
+    if let Some(value) = value {
+        out.push_str(&format!(
+            "  clock_to_output_delay: {:.6}\n",
+            value.clock_to_output_delay
+        ));
+        out.push_str(&format!(
+            "  combinational_delay: {:.6}\n",
+            value.combinational_delay
+        ));
+        out.push_str(&format!("  setup_delay: {:.6}\n", value.setup_delay));
+    }
+}
+
+fn push_register_to_output_delay_breakdown(
+    out: &mut String,
+    value: Option<xlsynth_g8r::netlist::sta::RegisterPathDelayBreakdown>,
+) {
+    if let Some(value) = value {
+        out.push_str(&format!(
+            "  clock_to_output_delay: {:.6}\n",
+            value.clock_to_output_delay
+        ));
+        out.push_str(&format!(
+            "  combinational_delay: {:.6}\n",
+            value.combinational_delay
+        ));
+    }
+}
+
 fn shown_stage_status(status: StagePartitionStatus) -> &'static str {
     match status {
         StagePartitionStatus::NoRegisters => "no_registers",
@@ -53,14 +99,23 @@ fn render_netlist_report(report: &NetlistReport) -> String {
         "max_input_to_register_delay: {}\n",
         shown_optional_metric(report.max_input_to_register_delay)
     ));
+    push_input_to_register_delay_breakdown(&mut out, report.max_input_to_register_delay_breakdown);
     out.push_str(&format!(
         "max_register_to_register_delay: {}\n",
         shown_optional_metric(report.max_register_to_register_delay)
     ));
+    push_register_to_register_delay_breakdown(
+        &mut out,
+        report.max_register_to_register_delay_breakdown,
+    );
     out.push_str(&format!(
         "max_register_to_output_delay: {}\n",
         shown_optional_metric(report.max_register_to_output_delay)
     ));
+    push_register_to_output_delay_breakdown(
+        &mut out,
+        report.max_register_to_output_delay_breakdown,
+    );
     out.push_str(&format!("cell_count: {}\n", report.cell_count));
     out.push_str(&format!("cell_levels: {}\n", report.cell_levels));
     out.push_str(&format!(
@@ -80,6 +135,7 @@ fn render_netlist_report(report: &NetlistReport) -> String {
             "stage {} max_delay={:.6} combinational_cell_area={:.6}\n",
             stage.stage, stage.max_delay, stage.combinational_cell_area
         ));
+        push_register_to_register_delay_breakdown(&mut out, stage.max_delay_breakdown);
     }
     out.push_str("cell_counts:\n");
     for cell in &report.cells {
@@ -172,7 +228,7 @@ mod tests {
     use xlsynth_g8r::netlist::report::{
         CellAreaRow, NetlistReport, OutputTimingRow, StageReportRow,
     };
-    use xlsynth_g8r::netlist::stages::StagePartitionStatus;
+    use xlsynth_g8r::netlist::{sta::RegisterPathDelayBreakdown, stages::StagePartitionStatus};
 
     #[test]
     fn render_netlist_report_is_stable() {
@@ -184,8 +240,23 @@ mod tests {
             cell_area: 4.0,
             max_delay: 3.0,
             max_input_to_register_delay: Some(1.0),
+            max_input_to_register_delay_breakdown: Some(RegisterPathDelayBreakdown {
+                clock_to_output_delay: 0.0,
+                combinational_delay: 0.75,
+                setup_delay: 0.25,
+            }),
             max_register_to_register_delay: Some(2.0),
+            max_register_to_register_delay_breakdown: Some(RegisterPathDelayBreakdown {
+                clock_to_output_delay: 0.5,
+                combinational_delay: 1.25,
+                setup_delay: 0.25,
+            }),
             max_register_to_output_delay: Some(3.0),
+            max_register_to_output_delay_breakdown: Some(RegisterPathDelayBreakdown {
+                clock_to_output_delay: 0.5,
+                combinational_delay: 2.5,
+                setup_delay: 0.0,
+            }),
             cell_count: 3,
             cell_levels: 2,
             sequential_cell_area: 1.0,
@@ -194,6 +265,11 @@ mod tests {
             stages: vec![StageReportRow {
                 stage: 0,
                 max_delay: 2.0,
+                max_delay_breakdown: Some(RegisterPathDelayBreakdown {
+                    clock_to_output_delay: 0.5,
+                    combinational_delay: 1.25,
+                    setup_delay: 0.25,
+                }),
                 combinational_cell_area: 2.0,
             }],
             cells: vec![CellAreaRow {
@@ -213,7 +289,19 @@ mod tests {
         };
         assert!(render_netlist_report(&report).contains("cell_levels: 2\n"));
         assert!(render_netlist_report(&report).contains("max_delay: 3.000000\n"));
+        assert!(render_netlist_report(&report).contains(
+            "max_input_to_register_delay: 1.000000\n  combinational_delay: 0.750000\n  setup_delay: 0.250000\n"
+        ));
+        assert!(render_netlist_report(&report).contains(
+            "max_register_to_register_delay: 2.000000\n  clock_to_output_delay: 0.500000\n  combinational_delay: 1.250000\n  setup_delay: 0.250000\n"
+        ));
+        assert!(render_netlist_report(&report).contains(
+            "max_register_to_output_delay: 3.000000\n  clock_to_output_delay: 0.500000\n  combinational_delay: 2.500000\n"
+        ));
         assert!(render_netlist_report(&report)
             .contains("stage 0 max_delay=2.000000 combinational_cell_area=2.000000\n"));
+        assert!(render_netlist_report(&report).contains(
+            "stage 0 max_delay=2.000000 combinational_cell_area=2.000000\n  clock_to_output_delay: 0.500000\n  combinational_delay: 1.250000\n  setup_delay: 0.250000\n"
+        ));
     }
 }

@@ -56,9 +56,32 @@ cells: {
 }
 cells: {
   name: "DFF"
-  pins: { name: "D" direction: INPUT capacitance: 0.0 }
+  pins: {
+    name: "D"
+    direction: INPUT
+    capacitance: 0.0
+    timing_arcs: {
+      related_pin: "CLK"
+      timing_type: "setup_rising"
+      tables: { kind: "rise_constraint" values: 0.25 }
+      tables: { kind: "fall_constraint" values: 0.25 }
+    }
+  }
   pins: { name: "CLK" direction: INPUT is_clocking_pin: true capacitance: 0.0 }
-  pins: { name: "Q" direction: OUTPUT function: "Q" }
+  pins: {
+    name: "Q"
+    direction: OUTPUT
+    function: "Q"
+    timing_arcs: {
+      related_pin: "CLK"
+      timing_sense: "non_unate"
+      timing_type: "rising_edge"
+      tables: { kind: "cell_rise" values: 0.5 }
+      tables: { kind: "cell_fall" values: 0.5 }
+      tables: { kind: "rise_transition" values: 0.1 }
+      tables: { kind: "fall_transition" values: 0.1 }
+    }
+  }
   area: 4.0
   sequential: {
     state_var: "Q"
@@ -227,8 +250,48 @@ fn gv_stats_reports_registered_pipeline_stages() {
         serde_json::from_slice(&std::fs::read(&stats_json_path).expect("read gv-stats json"))
             .expect("parse gv-stats json");
     assert_eq!(stats_json["stage_partition_status"], "partitioned");
-    assert_eq!(stats_json["max_register_to_register_delay"], 1.0);
+    assert_eq!(
+        stats_json["max_input_to_register_delay_breakdown"]["combinational_delay"],
+        1.0
+    );
+    assert_eq!(
+        stats_json["max_input_to_register_delay_breakdown"]["setup_delay"],
+        0.25
+    );
+    assert_eq!(stats_json["max_register_to_register_delay"], 1.75);
+    assert_eq!(
+        stats_json["max_register_to_register_delay_breakdown"]["clock_to_output_delay"],
+        0.5
+    );
+    assert_eq!(
+        stats_json["max_register_to_register_delay_breakdown"]["combinational_delay"],
+        1.0
+    );
+    assert_eq!(
+        stats_json["max_register_to_register_delay_breakdown"]["setup_delay"],
+        0.25
+    );
+    assert_eq!(
+        stats_json["max_register_to_output_delay_breakdown"]["clock_to_output_delay"],
+        0.5
+    );
+    assert_eq!(
+        stats_json["max_register_to_output_delay_breakdown"]["combinational_delay"],
+        1.0
+    );
     assert_eq!(stats_json["sequential_cell_area"], 8.0);
     assert_eq!(stats_json["non_stage_combinational_cell_area"], 2.0);
     assert_eq!(stats_json["stages"][0]["combinational_cell_area"], 1.0);
+    assert_eq!(
+        stats_json["stages"][0]["max_delay_breakdown"]["clock_to_output_delay"],
+        0.5
+    );
+    assert_eq!(
+        stats_json["stages"][0]["max_delay_breakdown"]["combinational_delay"],
+        1.0
+    );
+    assert_eq!(
+        stats_json["stages"][0]["max_delay_breakdown"]["setup_delay"],
+        0.25
+    );
 }
