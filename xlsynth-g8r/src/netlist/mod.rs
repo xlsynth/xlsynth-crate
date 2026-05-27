@@ -16,6 +16,7 @@ pub mod normalized;
 pub mod parse;
 pub mod report;
 pub mod sta;
+pub mod stages;
 pub mod stats;
 pub mod techmap;
 pub mod utils;

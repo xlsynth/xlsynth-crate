@@ -231,6 +231,8 @@ impl Default for StaOptions {
 pub struct StaReport {
     pub net_timing: Vec<Option<SignalTiming>>,
     pub worst_output_arrival: f64,
+    pub worst_register_input_arrival: f64,
+    pub register_input_arrivals: Vec<Option<f64>>,
     pub cell_levels: usize,
 }
 
@@ -343,12 +345,103 @@ pub fn analyze_combinational_max_arrival(
     analyze_combinational_max_arrival_proto(module, nets, interner, library.as_proto(), options)
 }
 
+/// Analyzes combinational segments launched by primary inputs and/or selected
+/// sequential instances, treating sequential inputs as capture boundaries.
+pub fn analyze_register_boundary_max_arrival(
+    module: &NetlistModule,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    library: &LibraryWithTimingData,
+    options: StaOptions,
+    launch_primary_inputs: bool,
+    launch_register_instances: &[usize],
+) -> Result<StaReport> {
+    let launch_register_instances: HashSet<usize> =
+        launch_register_instances.iter().copied().collect();
+    analyze_max_arrival_proto_with_mode(
+        module,
+        nets,
+        interner,
+        library.as_proto(),
+        options,
+        StaAnalysisMode::RegisterBoundaries {
+            launch_primary_inputs,
+            launch_register_instances: &launch_register_instances,
+        },
+    )
+}
+
+/// Returns whether a cell should form a timing boundary for register-aware
+/// segment analysis.
+pub(crate) fn is_sequential_boundary_cell(cell: &crate::liberty_proto::Cell) -> bool {
+    !cell.sequential.is_empty()
+        || cell.pins.iter().any(|pin| {
+            pin.direction == PinDirection::Output as i32
+                && pin
+                    .timing_arcs
+                    .iter()
+                    .any(|arc| matches!(arc.timing_type.as_str(), "rising_edge" | "falling_edge"))
+        })
+}
+
+enum StaAnalysisMode<'a> {
+    CombinationalOnly,
+    RegisterBoundaries {
+        launch_primary_inputs: bool,
+        launch_register_instances: &'a HashSet<usize>,
+    },
+}
+
+impl StaAnalysisMode<'_> {
+    fn uses_register_boundaries(&self) -> bool {
+        matches!(self, Self::RegisterBoundaries { .. })
+    }
+
+    fn launches_primary_inputs(&self) -> bool {
+        match self {
+            Self::CombinationalOnly => true,
+            Self::RegisterBoundaries {
+                launch_primary_inputs,
+                ..
+            } => *launch_primary_inputs,
+        }
+    }
+
+    fn launches_register(&self, inst_idx: usize) -> bool {
+        match self {
+            Self::CombinationalOnly => false,
+            Self::RegisterBoundaries {
+                launch_register_instances,
+                ..
+            } => launch_register_instances.contains(&inst_idx),
+        }
+    }
+}
+
 fn analyze_combinational_max_arrival_proto(
     module: &NetlistModule,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
     library: &crate::liberty_proto::Library,
     options: StaOptions,
+) -> Result<StaReport> {
+    analyze_max_arrival_proto_with_mode(
+        module,
+        nets,
+        interner,
+        library,
+        options,
+        StaAnalysisMode::CombinationalOnly,
+    )
+}
+
+fn analyze_max_arrival_proto_with_mode(
+    module: &NetlistModule,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    library: &crate::liberty_proto::Library,
+    options: StaOptions,
+    analysis_mode: StaAnalysisMode<'_>,
 ) -> Result<StaReport> {
     if !options.primary_input_transition.is_finite() {
         return Err(anyhow!(
@@ -392,6 +485,7 @@ fn analyze_combinational_max_arrival_proto(
         Vec::with_capacity(instance_count);
     let mut instance_timing_related_input_pins: Vec<HashSet<String>> =
         Vec::with_capacity(instance_count);
+    let mut instance_is_sequential: Vec<bool> = Vec::with_capacity(instance_count);
 
     let mut bit_drivers: Vec<Vec<NetEndpoint>> = vec![Vec::new(); bit_count];
     let mut bit_loads: Vec<Vec<NetEndpoint>> = vec![Vec::new(); bit_count];
@@ -408,35 +502,37 @@ fn analyze_combinational_max_arrival_proto(
         })?;
         instance_cell_indices.push(cell_idx);
         instance_cell_names.push(cell_name.clone());
+        let is_sequential = is_sequential_boundary_cell(&lib.library.cells[cell_idx]);
+        instance_is_sequential.push(is_sequential);
         let mut timing_related_input_pins = HashSet::new();
-        for output_pin in lib.library.cells[cell_idx]
-            .pins
-            .iter()
-            .filter(|pin| pin.direction == PinDirection::Output as i32)
-        {
-            for arc in output_pin
-                .timing_arcs
+        if !(analysis_mode.uses_register_boundaries() && is_sequential) {
+            for output_pin in lib.library.cells[cell_idx]
+                .pins
                 .iter()
-                .filter(|arc| StaTimingType::from_raw(arc.timing_type.as_str()).is_combinational())
+                .filter(|pin| pin.direction == PinDirection::Output as i32)
             {
-                for related_pin_name in split_related_pin_names(arc.related_pin.as_str()) {
-                    let related_pin = lib.pin(cell_idx, related_pin_name).ok_or_else(|| {
-                        anyhow!(
-                            "cell '{}' output pin '{}' has timing arc with unknown related pin '{}'",
-                            cell_name,
-                            output_pin.name,
-                            related_pin_name
-                        )
-                    })?;
-                    if related_pin.direction != PinDirection::Input as i32 {
-                        return Err(anyhow!(
-                            "cell '{}' output pin '{}' has unsupported non-input related pin '{}'; basic STA only supports input-related combinational arcs",
-                            cell_name,
-                            output_pin.name,
-                            related_pin_name
-                        ));
+                for arc in output_pin.timing_arcs.iter().filter(|arc| {
+                    StaTimingType::from_raw(arc.timing_type.as_str()).is_combinational()
+                }) {
+                    for related_pin_name in split_related_pin_names(arc.related_pin.as_str()) {
+                        let related_pin = lib.pin(cell_idx, related_pin_name).ok_or_else(|| {
+                            anyhow!(
+                                "cell '{}' output pin '{}' has timing arc with unknown related pin '{}'",
+                                cell_name,
+                                output_pin.name,
+                                related_pin_name
+                            )
+                        })?;
+                        if related_pin.direction != PinDirection::Input as i32 {
+                            return Err(anyhow!(
+                                "cell '{}' output pin '{}' has unsupported non-input related pin '{}'; basic STA only supports input-related combinational arcs",
+                                cell_name,
+                                output_pin.name,
+                                related_pin_name
+                            ));
+                        }
+                        timing_related_input_pins.insert(related_pin_name.to_string());
                     }
-                    timing_related_input_pins.insert(related_pin_name.to_string());
                 }
             }
         }
@@ -685,11 +781,13 @@ fn analyze_combinational_max_arrival_proto(
             ResolvedTimingSource::Bit(source_bit_idx) if source_bit_idx != bit_idx => continue,
             ResolvedTimingSource::Bit(_) => {}
         }
-        if is_module_input[bit_idx] {
+        if is_module_input[bit_idx] && analysis_mode.launches_primary_inputs() {
             bit_timing_sets[bit_idx] = Some(source_timing_set.clone());
             continue;
         }
-        if !bit_loads[bit_idx].is_empty() || has_resolved_module_output[bit_idx] {
+        if (!bit_loads[bit_idx].is_empty() || has_resolved_module_output[bit_idx])
+            && !analysis_mode.uses_register_boundaries()
+        {
             return Err(anyhow!(
                 "net bit '{}' is undriven and is not a module input; basic STA does not support floating source nets",
                 normalized.render_bit(bit_idx, nets, interner)
@@ -726,6 +824,16 @@ fn analyze_combinational_max_arrival_proto(
                 continue;
             };
             if output_sources.is_empty() {
+                continue;
+            }
+            if analysis_mode.uses_register_boundaries() && instance_is_sequential[inst_idx] {
+                if analysis_mode.launches_register(inst_idx) {
+                    for output_source in output_sources {
+                        if let PinBitSource::Bit(output_bit_idx) = *output_source {
+                            bit_timing_sets[output_bit_idx] = Some(source_timing_set.clone());
+                        }
+                    }
+                }
                 continue;
             }
             if let Some(unsupported_arc) = pin
@@ -806,25 +914,28 @@ fn analyze_combinational_max_arrival_proto(
                         for related_source in related_sources {
                             let (input_timing_set, related_net_name) = match related_source {
                                 PinBitSource::Bit(related_bit_idx) => {
-                                    let timing = bit_timing_sets[*related_bit_idx]
-                                        .as_ref()
-                                        .ok_or_else(|| {
-                                            anyhow!(
-                                                "missing source timing for net bit '{}' feeding '{}.{}' (related pin '{}')",
-                                                normalized.render_bit(
-                                                    *related_bit_idx,
-                                                    nets,
-                                                    interner
-                                                ),
-                                                cell_name,
-                                                pin.name,
-                                                related_pin_name
-                                            )
-                                        })?;
+                                    let Some(timing) = bit_timing_sets[*related_bit_idx].as_ref()
+                                    else {
+                                        if analysis_mode.uses_register_boundaries() {
+                                            continue;
+                                        }
+                                        return Err(anyhow!(
+                                            "missing source timing for net bit '{}' feeding '{}.{}' (related pin '{}')",
+                                            normalized.render_bit(*related_bit_idx, nets, interner),
+                                            cell_name,
+                                            pin.name,
+                                            related_pin_name
+                                        ));
+                                    };
                                     (
                                         timing,
                                         normalized.render_bit(*related_bit_idx, nets, interner),
                                     )
+                                }
+                                PinBitSource::Literal(_) | PinBitSource::Unknown
+                                    if analysis_mode.uses_register_boundaries() =>
+                                {
+                                    continue;
                                 }
                                 PinBitSource::Literal(value) => (
                                     &literal_source_timing_set,
@@ -875,14 +986,17 @@ fn analyze_combinational_max_arrival_proto(
                     }
                 }
 
-                let mut out_timing_set = accumulated.ok_or_else(|| {
-                    anyhow!(
+                let Some(mut out_timing_set) = accumulated else {
+                    if analysis_mode.uses_register_boundaries() {
+                        continue;
+                    }
+                    return Err(anyhow!(
                         "no usable combinational timing arcs for instance '{}' pin '{}.{}'",
                         instance_name,
                         cell_name,
                         pin.name
-                    )
-                })?;
+                    ));
+                };
                 // Use a conservative per-edge envelope: max arrival and max
                 // transition may come from different source candidates.
                 collapse_signal_timing_set_to_envelope(&mut out_timing_set);
@@ -929,17 +1043,28 @@ fn analyze_combinational_max_arrival_proto(
     let mut cell_levels = 0usize;
     for bit_idx in &module_output_bits {
         let timing_source = resolved_timing_sources[*bit_idx];
-        let timing_set = timing_set_for_resolved_source(
-            timing_source,
-            bit_timing_sets.as_slice(),
-            &literal_source_timing_set,
-        )
-        .ok_or_else(|| {
-            anyhow!(
+        let timing_set = if analysis_mode.uses_register_boundaries()
+            && matches!(
+                timing_source,
+                ResolvedTimingSource::Literal(_) | ResolvedTimingSource::Unknown
+            ) {
+            None
+        } else {
+            timing_set_for_resolved_source(
+                timing_source,
+                bit_timing_sets.as_slice(),
+                &literal_source_timing_set,
+            )
+        };
+        let Some(timing_set) = timing_set else {
+            if analysis_mode.uses_register_boundaries() {
+                continue;
+            }
+            return Err(anyhow!(
                 "missing timing result for module output net bit '{}'",
                 normalized.render_bit(*bit_idx, nets, interner)
-            )
-        })?;
+            ));
+        };
         let output_arrival = timing_set.worst_arrival().ok_or_else(|| {
             anyhow!(
                 "missing edge timing candidates for module output net bit '{}'",
@@ -958,6 +1083,48 @@ fn analyze_combinational_max_arrival_proto(
         }
     }
 
+    let mut register_input_arrivals: Vec<Option<f64>> = vec![None; instance_count];
+    let mut worst_register_input_arrival: Option<f64> = None;
+    if analysis_mode.uses_register_boundaries() {
+        for inst_idx in 0..instance_count {
+            if !instance_is_sequential[inst_idx] {
+                continue;
+            }
+            let cell_idx = instance_cell_indices[inst_idx];
+            let pin_sources = &instance_pin_sources[inst_idx];
+            for pin in lib.library.cells[cell_idx]
+                .pins
+                .iter()
+                .filter(|pin| pin.direction == PinDirection::Input as i32 && !pin.is_clocking_pin)
+            {
+                let Some(sources) = pin_sources.get(pin.name.as_str()) else {
+                    continue;
+                };
+                for source in sources {
+                    let PinBitSource::Bit(bit_idx) = source else {
+                        continue;
+                    };
+                    let Some(timing_set) = bit_timing_sets[*bit_idx].as_ref() else {
+                        continue;
+                    };
+                    let Some(arrival) = timing_set.worst_arrival() else {
+                        continue;
+                    };
+                    register_input_arrivals[inst_idx] = Some(
+                        register_input_arrivals[inst_idx]
+                            .map(|current| current.max(arrival))
+                            .unwrap_or(arrival),
+                    );
+                    worst_register_input_arrival = Some(
+                        worst_register_input_arrival
+                            .map(|current| current.max(arrival))
+                            .unwrap_or(arrival),
+                    );
+                }
+            }
+        }
+    }
+
     let net_timing = aggregate_bit_timing_by_net(
         bit_timing_sets.as_slice(),
         resolved_timing_sources.as_slice(),
@@ -969,6 +1136,8 @@ fn analyze_combinational_max_arrival_proto(
     Ok(StaReport {
         net_timing,
         worst_output_arrival: worst_output_arrival.unwrap_or(0.0),
+        worst_register_input_arrival: worst_register_input_arrival.unwrap_or(0.0),
+        register_input_arrivals,
         cell_levels,
     })
 }

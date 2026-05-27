@@ -279,7 +279,9 @@ Key flags:
 
 ### `gv-stats`: gate-level mapped area + timing summary
 
-Reports mapped standard-cell area, combinational max-arrival delay, instance count, and combinational cell levels for one selected gate-level netlist module. Delay uses the same basic Liberty-table STA flow as `gv-sta`.
+Reports mapped standard-cell area, combinational input-to-output max-arrival delay, instance count, and combinational cell levels for one selected gate-level netlist module. For modules containing sequential cells it also reports maximum input-to-register, register-to-register, and register-to-output segment delays, using register outputs as zero-arrival launch boundaries without modeling clock-to-Q or setup timing.
+
+When register dependencies admit an unambiguous adjacent-stage partition, the report includes `max_delay` and `combinational_cell_area` for each register-to-register stage. Cycle-closing register dependencies may be treated as feedback; an ambiguous or non-partitionable register graph is reported without stage rows. Area is always completely accounted for as `cell_area = sequential_cell_area + non_stage_combinational_cell_area + sum(stage combinational_cell_area)`, with shared, boundary, and feedback combinational logic included in `non_stage_combinational_cell_area`.
 
 ```shell
 xlsynth-driver gv-stats \
