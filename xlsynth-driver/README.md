@@ -349,11 +349,11 @@ Output format:
 
 ### `ir2g8r`: IR to gate-level representation
 
-Converts an XLS IR file to an `xlsynth_g8r::GateFn` (i.e. a gate-level netlist in AIG form).
+Converts an XLS IR file to an `xlsynth_g8r::GateFn` (i.e. a gate-level netlist in AIG form), then stores it as a native `SequentialGateFn` design with no clock or registers.
 
-- By default the pretty-printed GateFn is sent to **stdout**.
+- By default a text `.g8r` design beginning with `g8r_v1` is sent to **stdout**.
 - Additional artifacts can be emitted with flags:
-  - `--bin-out <PATH>` – write the GateFn as a binary **.g8rbin** file (bincode-encoded).
+  - `--bin-out <PATH>` – write the design as a binary **.g8rbin** file beginning with the visible `g8rbin_v1` format prefix.
   - `--aiger-out <PATH>` – write the GateFn as AIGER:
     - use a `.aag` suffix for ASCII AIGER (`aag`)
     - use a `.aig` suffix for binary AIGER (`aig`)
@@ -382,9 +382,15 @@ xlsynth-driver ir2g8r my_module.opt.ir \
 
 The command above leaves three artifacts:
 
-1. `my_module.g8r` – human-readable GateFn (stdout redirection).
-1. `my_module.g8rbin` – compact bincode serialisation of the same GateFn.
+1. `my_module.g8r` – human-readable native g8r file containing the combinational design.
+1. `my_module.g8rbin` – compact native g8r binary file containing the same design.
 1. `my_module.stats.json` – structural summary statistics as JSON.
+
+Every native `.g8r` and `.g8rbin` file stores a `SequentialGateFn`: transition
+logic plus optional clock and register bindings. Its single clock is an XLS
+block clock port; the native representation does not include an alternate
+clock-edge selector. Combinational consumers accept only designs with no clock
+and no registers, converting those designs to `GateFn` after loading.
 
 ### `ir-prep-for-gates`: IR to prepared residual PIR
 
@@ -410,7 +416,7 @@ xlsynth-driver ir-prep-for-gates my_module.opt.ir --top main > my_module.prepare
 
 ### `g8r2v`: GateFn to gate-level netlist (Verilog-like)
 
-Converts a `.g8r` (text) or `.g8rbin` (bincode) file containing a gate-level `GateFn` to a `.ugv` netlist (human-readable, Verilog-like) on **stdout**.
+Converts a combinational `.g8r` (text) or `.g8rbin` (binary) design to a `.ugv` netlist (human-readable, Verilog-like) on **stdout**. Designs that declare a clock or contain registers are rejected because this command does not yet emit stored sequential boundaries.
 
 - By default, emits the netlist with the original GateFn inputs.
 - The `--add-clk-port[=NAME]` flag inserts an (unused) clock port as the first input:
@@ -525,7 +531,7 @@ xlsynth-driver aig2v design.aig \
 
 ### `g8r2ir`: GateFn to XLS IR package
 
-Converts a `.g8r` (text) or `.g8rbin` (bincode) file containing a gate-level `GateFn` into an XLS IR *package* and prints it on **stdout**.
+Converts a combinational `.g8r` (text) or `.g8rbin` (binary) design into an XLS IR *package* and prints it on **stdout**. Designs that declare a clock or contain registers are rejected because this command currently produces function IR rather than block IR.
 
 - The reconstructed IR uses the GateFn’s flattened bit-vector signature (one `bits[W]` parameter per input and a `bits[W]` or tuple-of-bits return type).
 - This is useful for IR-level inspection, equivalence checking, and debugging of GateFn transforms.
@@ -572,7 +578,7 @@ xlsynth-driver aig2ir my_module.aag --fn-type '(bits[8][4]) -> bits[8][4]' > my_
 
 ### `g8r-area-table`: Per-PIR-node live AIG area attribution
 
-Reads a `.g8r` or `.g8rbin` `GateFn` plus an XLS IR package and prints a table that attributes live AIG AND-node area back to PIR node ids carried in g8r provenance.
+Reads a combinational `.g8r` or `.g8rbin` design plus an XLS IR package and prints a table that attributes live AIG AND-node area back to PIR node ids carried in g8r provenance. Designs with clocks or registers are not accepted by this combinational attribution command.
 
 - One row is emitted per PIR node id that appears on at least one live `And2` node and resolves against the selected IR member.
 
@@ -614,7 +620,7 @@ xlsynth-driver g8r-area-table my_module.g8r my_module.ir --group-by-opcode
 
 ### `g8r-critical-path-table`: Per-PIR-node attribution for level-critical AIG nodes
 
-Reads a `.g8r` or `.g8rbin` `GateFn` plus an XLS IR package and prints the same attribution table shape as `g8r-area-table`, but only for live AIG `And2` nodes that lie on at least one critical path as measured by AIG levels from primary inputs to primary outputs.
+Reads a combinational `.g8r` or `.g8rbin` design plus an XLS IR package and prints the same attribution table shape as `g8r-area-table`, but only for live AIG `And2` nodes that lie on at least one critical path as measured by AIG levels from primary inputs to primary outputs. Designs with clocks or registers are not accepted by this combinational attribution command.
 
 - One row is emitted per PIR node id that appears on at least one critical-path `And2` node and resolves against the selected IR member.
 
@@ -1913,7 +1919,7 @@ xlsynth-driver ir-diverse-samples ./corpus_dir > selected.txt
 
 ### `g8r-equiv`
 
-Checks two GateFns for functional equivalence by lifting both sides to IR and
+Checks two combinational `.g8r`/`.g8rbin` designs for functional equivalence by lifting both sides to IR and
 running the same prover-backed flow as `ir-equiv`.
 
 - Positional arguments: `<lhs_g8r_file> <rhs_g8r_file>`
@@ -1929,9 +1935,10 @@ non-zero.
 
 ### `g8r-ir-equiv`
 
-Checks a **GateFn (`.g8r` or `.g8rbin`)** design against an **IR** function by
+Checks a combinational **`.g8r` or `.g8rbin`** design against an **IR** function by
 lifting the GateFn into IR and then running the same IR equivalence flow as
-`ir-equiv`.
+`ir-equiv`. Designs with clocks or registers are not accepted by this
+function-equivalence command.
 
 - Positional arguments: `<g8r_file> <rhs_ir_file>`
 - Top selection:

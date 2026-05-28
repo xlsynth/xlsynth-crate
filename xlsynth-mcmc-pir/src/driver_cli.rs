@@ -10,7 +10,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc;
 use tempfile::Builder;
-use xlsynth_g8r::aig::gate::GateFn;
+use xlsynth_g8r::aig::{GateFn, SequentialGateFn};
+use xlsynth_g8r::aig_serdes::g8r::emit_g8r;
 use xlsynth_g8r::aig_serdes::gate2ir::GateFnInterfaceSchema;
 use xlsynth_g8r::process_ir_path::{
     CanonicalG8rOptions, canonical_ir_text_to_g8r_lowering_artifacts,
@@ -764,7 +765,7 @@ fn gatify_ir_text_to_artifacts(
     let schema = GateFnInterfaceSchema::from_pir_fn(top_fn)
         .map_err(|e| anyhow::anyhow!("failed to derive gate interface schema: {}", e))?;
     Ok(GatifiedArtifacts {
-        g8r_text: gate_fn.to_string(),
+        g8r_text: emit_g8r(&SequentialGateFn::from_gate_fn(gate_fn.clone())),
         raw_stats,
         gate_fn,
         schema,

@@ -1596,7 +1596,7 @@ fn main() {
         )
         .subcommand(
             clap::Command::new("ir2g8r")
-                .about("Converts IR to GateFn and emits it to stdout; optionally writes .g8rbin, netlist, and stats")
+                .about("Converts IR to a combinational SequentialGateFn in native .g8r format on stdout; optionally writes .g8rbin, netlist, and stats")
                 .arg(
                     clap::Arg::new("ir_input_file")
                         .help("The input IR file")
@@ -2127,7 +2127,7 @@ fn main() {
         )
         .subcommand(
             clap::Command::new("g8r2v")
-                .about("Converts a .g8r or .g8rbin file to a .ugv netlist on stdout, optionally adding a clock port as the first input.")
+                .about("Converts a combinational .g8r or .g8rbin design to a .ugv netlist on stdout, optionally adding a clock port as the first input.")
                 .arg(
                     clap::Arg::new("g8r_input_file")
                         .help("The input .g8r or .g8rbin file")
@@ -2263,7 +2263,7 @@ fn main() {
         )
         .subcommand(
             clap::Command::new("g8r2ir")
-                .about("Converts a .g8r or .g8rbin GateFn file to an XLS IR package on stdout.")
+                .about("Converts a combinational .g8r or .g8rbin design to an XLS IR package on stdout.")
                 .arg(
                     clap::Arg::new("g8r_input_file")
                         .help("The input .g8r or .g8rbin file")

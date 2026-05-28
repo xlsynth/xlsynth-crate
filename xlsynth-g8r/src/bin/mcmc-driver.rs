@@ -13,8 +13,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tempfile::Builder;
-use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::aig::get_summary_stats::SummaryStats;
+use xlsynth_g8r::aig::{GateFn, SequentialGateFn};
+use xlsynth_g8r::aig_serdes::g8r::emit_g8r;
 
 use xlsynth_g8r::aig::fraig::{IterationBounds, fraig_optimize_with_backend};
 use xlsynth_g8r::aig::get_summary_stats;
@@ -579,7 +580,7 @@ fn main() -> Result<()> {
         output_g8r_path.display()
     );
     let mut f_g8r = fs::File::create(&output_g8r_path)?;
-    f_g8r.write_all(best_gfn.to_string().as_bytes())?;
+    f_g8r.write_all(emit_g8r(&SequentialGateFn::from_gate_fn(best_gfn.clone())).as_bytes())?;
     println!(
         "[mcmc] Successfully wrote output to {}",
         output_g8r_path.display()

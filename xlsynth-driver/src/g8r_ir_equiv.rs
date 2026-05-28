@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fs;
 use std::path::Path;
 
 use crate::ir_equiv::{dispatch_ir_equiv, IrEquivRequest, IrModule};
 use crate::toolchain_config::ToolchainConfig;
 use xlsynth_g8r::aig::GateFn;
+use xlsynth_g8r::aig_serdes::g8r::load_gate_fn_from_path;
 use xlsynth_g8r::aig_serdes::gate2ir::gate_fn_to_xlsynth_ir;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
@@ -13,24 +13,6 @@ use xlsynth_prover::prover::types::{AssertionSemantics, EquivParallelism};
 use xlsynth_prover::prover::SolverChoice;
 
 const SUBCOMMAND: &str = "g8r-ir-equiv";
-
-fn load_gate_fn(path: &Path) -> Result<GateFn, String> {
-    let bytes = fs::read(path).map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
-    if path.extension().map(|e| e == "g8rbin").unwrap_or(false) {
-        bincode::deserialize(&bytes).map_err(|e| {
-            format!(
-                "failed to deserialize GateFn from {}: {}",
-                path.display(),
-                e
-            )
-        })
-    } else {
-        let txt = String::from_utf8(bytes)
-            .map_err(|e| format!("failed to decode utf8 from {}: {}", path.display(), e))?;
-        GateFn::try_from(txt.as_str())
-            .map_err(|e| format!("failed to parse GateFn from {}: {}", path.display(), e))
-    }
-}
 
 fn parse_pir_top_fn(
     ir_text: &str,
@@ -148,7 +130,7 @@ pub fn handle_g8r_ir_equiv(matches: &clap::ArgMatches, config: &Option<Toolchain
             std::process::exit(2)
         });
 
-    let gate_fn = load_gate_fn(g8r_path).unwrap_or_else(|e| {
+    let gate_fn = load_gate_fn_from_path(g8r_path).unwrap_or_else(|e| {
         eprintln!("{} error: {}", SUBCOMMAND, e);
         std::process::exit(2)
     });

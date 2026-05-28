@@ -5,6 +5,7 @@
 pub mod aig;
 pub mod aig_serdes;
 pub mod aig_sim;
+pub mod block2sequential;
 pub mod gatify;
 pub mod ir_aig_sharing;
 
