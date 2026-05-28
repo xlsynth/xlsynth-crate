@@ -19,8 +19,10 @@ use xlsynth_mcmc::McmcStats as SharedMcmcStats;
 use xlsynth_mcmc::metropolis_accept;
 
 // Imports from the xlsynth_g8r crate
+use crate::aig::SequentialGateFn;
 use crate::aig::gate::GateFn;
 use crate::aig::{dce, get_summary_stats};
+use crate::aig_serdes::g8r::{emit_g8r, encode_g8r_binary, load_gate_fn_from_path};
 use crate::aig_sim::gate_simd::{self, Vec256};
 use crate::gatify::ir2gate::{self, GatifyOptions};
 use crate::prove_gate_fn_equiv_common::{EquivResult, GateFormalBackend};
@@ -34,7 +36,7 @@ use crate::transforms::transform_trait::{TransformDirection, TransformKind};
 use clap::ValueEnum;
 use core::simd::u64x4;
 use serde_json;
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
@@ -762,12 +764,7 @@ pub fn load_start<P: AsRef<Path>>(p_generic: P) -> Result<GateFn> {
         match path.extension().and_then(|e| e.to_str()) {
             Some("g8r") => {
                 println!("Loading GateFn from path: {}", p_str);
-                let contents = fs::read_to_string(path).map_err(|e| {
-                    anyhow::anyhow!("Failed to read GateFn file '{}': {}", p_str, e)
-                })?;
-                let gfn = GateFn::try_from(contents.as_str()).map_err(|e| {
-                    anyhow::anyhow!("Failed to parse GateFn from '{}': {}", p_str, e)
-                })?;
+                let gfn = load_gate_fn_from_path(path).map_err(anyhow::Error::msg)?;
                 let g_cost = cost(&gfn);
                 println!(
                     "Loaded GateFn. Initial stats: nodes={}, depth={}",
@@ -853,10 +850,18 @@ fn write_checkpoint(
             let cand_dump = dump_dir.join(format!("cand_iter_{}.g8r", iter));
             let orig_bin_dump = dump_dir.join(format!("orig_iter_{}.g8rbin", iter));
             let cand_bin_dump = dump_dir.join(format!("cand_iter_{}.g8rbin", iter));
-            let _ = std::fs::write(&orig_dump, original_gfn.to_string());
-            let _ = std::fs::write(&cand_dump, best_gfn.to_string());
-            let _ = std::fs::write(&orig_bin_dump, bincode::serialize(original_gfn).unwrap());
-            let _ = std::fs::write(&cand_bin_dump, bincode::serialize(best_gfn).unwrap());
+            let original_design = SequentialGateFn::from_gate_fn(original_gfn.clone());
+            let candidate_design = SequentialGateFn::from_gate_fn(best_gfn.clone());
+            let _ = std::fs::write(&orig_dump, emit_g8r(&original_design));
+            let _ = std::fs::write(&cand_dump, emit_g8r(&candidate_design));
+            let _ = std::fs::write(
+                &orig_bin_dump,
+                encode_g8r_binary(&original_design).expect("serializing GateFn should succeed"),
+            );
+            let _ = std::fs::write(
+                &cand_bin_dump,
+                encode_g8r_binary(&candidate_design).expect("serializing GateFn should succeed"),
+            );
             eprintln!(
                 "[mcmc] Disagreeing GateFns dumped to {} and {} (text), {} and {} (bincode)",
                 orig_dump.display(),
@@ -889,7 +894,8 @@ fn write_checkpoint(
         }
         IrCheckResult::NotEquivalent => {}
     }
-    if let Err(e) = std::fs::write(g8r_path, best_gfn.to_string()) {
+    let best_design = SequentialGateFn::from_gate_fn(best_gfn.clone());
+    if let Err(e) = std::fs::write(g8r_path, emit_g8r(&best_design)) {
         eprintln!(
             "[mcmc] Warning: Failed to write {} checkpoint to {}: {:?}",
             context,

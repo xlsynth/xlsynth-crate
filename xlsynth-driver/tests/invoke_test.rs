@@ -9,9 +9,10 @@ use std::io::Write;
 use std::process::Command;
 use std::process::Stdio;
 use xlsynth::{IrBits, IrValue};
-use xlsynth_g8r::aig::{AigBitVector, AigOperand, GateFn};
+use xlsynth_g8r::aig::{AigBitVector, AigOperand, GateFn, SequentialGateFn};
 use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
 use xlsynth_g8r::aig_serdes::emit_aiger_binary::emit_aiger_binary;
+use xlsynth_g8r::aig_serdes::g8r::{emit_g8r, encode_g8r_binary};
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use xlsynth_g8r::test_utils::interesting_ir_roundtrip_cases;
 use xlsynth_pir::ir_parser;
@@ -61,6 +62,17 @@ fn write_aiger_binary_file(
     let path = temp_dir.path().join(file_name);
     std::fs::write(&path, aiger).expect("failed to write binary aiger file");
     path
+}
+
+fn write_g8r_file(path: &std::path::Path, gate_fn: &GateFn) {
+    let design = SequentialGateFn::from_gate_fn(gate_fn.clone());
+    std::fs::write(path, emit_g8r(&design)).expect("failed to write g8r file");
+}
+
+fn write_g8r_binary_file(path: &std::path::Path, gate_fn: &GateFn) {
+    let design = SequentialGateFn::from_gate_fn(gate_fn.clone());
+    let bytes = encode_g8r_binary(&design).expect("failed to serialize g8rbin file");
+    std::fs::write(path, bytes).expect("failed to write g8rbin file");
 }
 
 fn ir_bits_to_msb_string(bits: &IrBits) -> String {
@@ -4460,7 +4472,7 @@ fn test_ir2pipeline_subcommand(use_tool_path: bool, optimize: bool) {
 
 #[test]
 fn test_ir2g8r_emits_all_outputs() {
-    // This test checks that ir2g8r emits the pretty GateFn to stdout,
+    // This test checks that ir2g8r emits native g8r text to stdout,
     // and writes both the .g8rbin and stats JSON files when requested.
     let _ = env_logger::try_init();
     // Use a simple DSLX function to generate IR
@@ -4508,8 +4520,13 @@ fn test_ir2g8r_emits_all_outputs() {
         "ir2g8r failed: {}",
         String::from_utf8_lossy(&ir2g8r_output.stderr)
     );
-    // Check stdout contains the pretty GateFn (should have 'fn __main__main(')
+    // Check stdout identifies the native format and contains its transition body.
     let stdout = String::from_utf8_lossy(&ir2g8r_output.stdout);
+    assert!(
+        stdout.starts_with("g8r_v1\n"),
+        "stdout did not contain the g8r header: {}",
+        stdout
+    );
     assert!(
         stdout.contains("fn __main__main("),
         "stdout did not contain pretty GateFn: {}",
@@ -4518,6 +4535,7 @@ fn test_ir2g8r_emits_all_outputs() {
     // Check .g8rbin file exists and is non-empty
     let g8rbin_data = std::fs::read(&g8rbin_path).expect(".g8rbin file not found");
     assert!(!g8rbin_data.is_empty(), ".g8rbin file is empty");
+    assert!(g8rbin_data.starts_with(b"g8rbin_v1\n"));
     // Check stats JSON file exists and contains expected keys
     let stats_json = std::fs::read_to_string(&stats_path).expect("stats JSON file not found");
     let stats: serde_json::Value =
@@ -4553,7 +4571,7 @@ fn test_g8r2ir_basic_ir_output() {
 
     let temp_dir = tempfile::tempdir().unwrap();
     let g8r_path = temp_dir.path().join("testmod.g8r");
-    std::fs::write(&g8r_path, gate_fn.to_string()).unwrap();
+    write_g8r_file(&g8r_path, &gate_fn);
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
@@ -4591,7 +4609,7 @@ fn test_g8r2ir_preserves_scalar_multi_output_order() {
 
     let temp_dir = tempfile::tempdir().unwrap();
     let g8r_path = temp_dir.path().join("testmod_multi_output.g8r");
-    std::fs::write(&g8r_path, gate_fn.to_string()).unwrap();
+    write_g8r_file(&g8r_path, &gate_fn);
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
@@ -4889,7 +4907,7 @@ top fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
     let temp_dir = tempfile::tempdir().unwrap();
     let g8r_path = temp_dir.path().join("testmod.g8rbin");
     let ir_path = temp_dir.path().join("sample.ir");
-    std::fs::write(&g8r_path, bincode::serialize(&gate_fn).unwrap()).unwrap();
+    write_g8r_binary_file(&g8r_path, &gate_fn);
     std::fs::write(&ir_path, ir_text).unwrap();
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
@@ -4961,7 +4979,7 @@ top fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
     let temp_dir = tempfile::tempdir().unwrap();
     let g8r_path = temp_dir.path().join("testmod.g8rbin");
     let ir_path = temp_dir.path().join("sample.ir");
-    std::fs::write(&g8r_path, bincode::serialize(&gate_fn).unwrap()).unwrap();
+    write_g8r_binary_file(&g8r_path, &gate_fn);
     std::fs::write(&ir_path, ir_text).unwrap();
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
@@ -5036,7 +5054,7 @@ top fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
     let temp_dir = tempfile::tempdir().unwrap();
     let g8r_path = temp_dir.path().join("testmod.g8rbin");
     let ir_path = temp_dir.path().join("sample.ir");
-    std::fs::write(&g8r_path, bincode::serialize(&gate_fn).unwrap()).unwrap();
+    write_g8r_binary_file(&g8r_path, &gate_fn);
     std::fs::write(&ir_path, ir_text).unwrap();
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
@@ -5110,7 +5128,7 @@ top fn f(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
     let temp_dir = tempfile::tempdir().unwrap();
     let g8r_path = temp_dir.path().join("testmod.g8rbin");
     let ir_path = temp_dir.path().join("sample.ir");
-    std::fs::write(&g8r_path, bincode::serialize(&gate_fn).unwrap()).unwrap();
+    write_g8r_binary_file(&g8r_path, &gate_fn);
     std::fs::write(&ir_path, ir_text).unwrap();
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
@@ -5773,7 +5791,7 @@ fn test_g8r2v_add_clk_port_behavior() {
 
     let temp_dir = tempfile::tempdir().unwrap();
     let g8r_path = temp_dir.path().join("testmod.g8r");
-    std::fs::write(&g8r_path, gate_fn.to_string()).unwrap();
+    write_g8r_file(&g8r_path, &gate_fn);
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
@@ -5806,7 +5824,7 @@ fn test_g8r2v_module_name() {
 
     let temp_dir = tempfile::tempdir().unwrap();
     let g8r_path = temp_dir.path().join("testmod.g8r");
-    std::fs::write(&g8r_path, gate_fn.to_string()).unwrap();
+    write_g8r_file(&g8r_path, &gate_fn);
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
@@ -5864,7 +5882,7 @@ fn test_g8r2v_flop_inputs_outputs() {
 
     let temp_dir = tempfile::tempdir().unwrap();
     let g8r_path = temp_dir.path().join("my_flop_inv.g8r");
-    std::fs::write(&g8r_path, gate_fn.to_string()).unwrap();
+    write_g8r_file(&g8r_path, &gate_fn);
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
@@ -5902,7 +5920,7 @@ fn test_g8r2v_flop_inputs_only() {
 
     let temp_dir = tempfile::tempdir().unwrap();
     let g8r_path = temp_dir.path().join("my_flop_inv_fi.g8r");
-    std::fs::write(&g8r_path, gate_fn.to_string()).unwrap();
+    write_g8r_file(&g8r_path, &gate_fn);
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
@@ -5951,7 +5969,7 @@ fn test_g8r2v_flop_outputs_only() {
 
     let temp_dir = tempfile::tempdir().unwrap();
     let g8r_path = temp_dir.path().join("my_flop_inv_fo.g8r");
-    std::fs::write(&g8r_path, gate_fn.to_string()).unwrap();
+    write_g8r_file(&g8r_path, &gate_fn);
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
@@ -5987,7 +6005,7 @@ fn test_g8r2v_flop_requires_clk_port_error() {
 
     let temp_dir = tempfile::tempdir().unwrap();
     let g8r_path = temp_dir.path().join("dummy.g8r");
-    std::fs::write(&g8r_path, gate_fn.to_string()).unwrap();
+    write_g8r_file(&g8r_path, &gate_fn);
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
@@ -6024,7 +6042,7 @@ fn test_g8r2v_flop_with_custom_clk_name() {
 
     let temp_dir = tempfile::tempdir().unwrap();
     let g8r_path = temp_dir.path().join("my_custom_clk_inv.g8r");
-    std::fs::write(&g8r_path, gate_fn.to_string()).unwrap();
+    write_g8r_file(&g8r_path, &gate_fn);
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
@@ -6075,7 +6093,7 @@ fn test_g8r2v_use_system_verilog() {
 
     let temp_dir = tempfile::tempdir().unwrap();
     let g8r_path = temp_dir.path().join("my_sv_inv.g8r");
-    std::fs::write(&g8r_path, gate_fn.to_string()).unwrap();
+    write_g8r_file(&g8r_path, &gate_fn);
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
@@ -11227,8 +11245,8 @@ fn test_g8r_equiv_reports_equivalent_designs() {
     let rhs_gate = two_input_gate_fn("and_rhs", |a, b, gb| gb.add_and_binary(b, a));
     let lhs_g8r_path = temp_dir.path().join("lhs.g8r");
     let rhs_g8r_path = temp_dir.path().join("rhs.g8r");
-    std::fs::write(&lhs_g8r_path, lhs_gate.to_string()).unwrap();
-    std::fs::write(&rhs_g8r_path, rhs_gate.to_string()).unwrap();
+    write_g8r_file(&lhs_g8r_path, &lhs_gate);
+    write_g8r_file(&rhs_g8r_path, &rhs_gate);
 
     let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(driver)
@@ -11267,7 +11285,7 @@ fn test_g8r_ir_equiv_reports_equivalent_designs() {
 
     let lhs_gate = two_input_gate_fn("main", |a, b, gb| gb.add_and_binary(a, b));
     let lhs_g8r_path = temp_dir.path().join("lhs.g8r");
-    std::fs::write(&lhs_g8r_path, lhs_gate.to_string()).unwrap();
+    write_g8r_file(&lhs_g8r_path, &lhs_gate);
     let rhs_ir = r#"package sample
 
 top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
@@ -11316,7 +11334,7 @@ fn test_g8r_ir_equiv_reports_non_equivalent_designs() {
 
     let lhs_gate = two_input_gate_fn("main", |a, b, gb| gb.add_and_binary(a, b));
     let lhs_g8r_path = temp_dir.path().join("lhs_not_equiv.g8r");
-    std::fs::write(&lhs_g8r_path, lhs_gate.to_string()).unwrap();
+    write_g8r_file(&lhs_g8r_path, &lhs_gate);
     let rhs_ir = r#"package sample
 
 top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
@@ -11369,7 +11387,7 @@ fn test_g8r_ir_equiv_preserves_scalar_multi_output_order() {
     builder.add_output("o1".to_string(), AigBitVector::from_bit(*b.get_lsb(0)));
     let lhs_gate = builder.build();
     let lhs_g8r_path = temp_dir.path().join("lhs_multi_output.g8r");
-    std::fs::write(&lhs_g8r_path, lhs_gate.to_string()).unwrap();
+    write_g8r_file(&lhs_g8r_path, &lhs_gate);
 
     let rhs_ir = r#"package sample
 

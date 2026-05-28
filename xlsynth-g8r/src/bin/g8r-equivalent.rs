@@ -7,14 +7,13 @@
 //!   1 – at least one checker reports non-equivalence or disagreement occurs
 //!   2 – command-line / I/O / parse error
 
-use std::fs;
 use std::path::PathBuf;
 use std::process::exit;
 
-use anyhow::Context;
 use clap::Parser;
 
 use xlsynth_g8r::aig::GateFn;
+use xlsynth_g8r::aig_serdes::g8r::load_gate_fn_from_path;
 use xlsynth_g8r::mcmc_logic::oracle_equiv_sat;
 use xlsynth_g8r::prove_gate_fn_equiv_sat::{self, EquivResult};
 
@@ -29,22 +28,7 @@ struct Cli {
 }
 
 fn load_gfn(p: &PathBuf) -> anyhow::Result<GateFn> {
-    let bytes =
-        fs::read(p).with_context(|| format!("failed to read GateFn file {}", p.display()))?;
-    if p.extension().map(|e| e == "g8rbin").unwrap_or(false) {
-        bincode::deserialize(&bytes).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to bincode-deserialize GateFn from {}: {}",
-                p.display(),
-                e
-            )
-        })
-    } else {
-        let txt = String::from_utf8(bytes)
-            .map_err(|e| anyhow::anyhow!("failed to decode utf8 from {}: {}", p.display(), e))?;
-        GateFn::try_from(txt.as_str())
-            .map_err(|e| anyhow::anyhow!("failed to parse GateFn from {}: {}", p.display(), e))
-    }
+    load_gate_fn_from_path(p).map_err(anyhow::Error::msg)
 }
 
 fn main() {

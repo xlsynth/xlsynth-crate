@@ -5,6 +5,7 @@ mod canonical_aiger_layout;
 pub mod emit_aiger;
 pub mod emit_aiger_binary;
 pub mod emit_netlist;
+pub mod g8r;
 pub mod gate2ir;
 pub mod gate_parser;
 pub mod load_aiger;

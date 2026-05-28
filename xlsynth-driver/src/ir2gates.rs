@@ -7,9 +7,11 @@ use clap::ArgMatches;
 use crate::toolchain_config::ToolchainConfig;
 use std::fs::File;
 use std::io::Write;
+use xlsynth_g8r::aig::SequentialGateFn;
 use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
 use xlsynth_g8r::aig_serdes::emit_aiger_binary::emit_aiger_binary;
 use xlsynth_g8r::aig_serdes::emit_netlist;
+use xlsynth_g8r::aig_serdes::g8r::{emit_g8r, encode_g8r_binary};
 use xlsynth_g8r::process_ir_path;
 use xlsynth_g8r::process_ir_path::canonical_ir_text_to_g8r_lowering_artifacts;
 
@@ -92,11 +94,12 @@ pub fn handle_ir2g8r(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
             });
     let gate_fn = artifacts.gate_fn;
     let stats = artifacts.stats;
-    // Always print the GateFn to stdout
-    println!("{}", gate_fn.to_string());
-    // If --bin-out is given, write the GateFn as bincode
+    let design = SequentialGateFn::from_gate_fn(gate_fn.clone());
+    // Always print the native sequential design representation to stdout.
+    println!("{}", emit_g8r(&design));
+    // If --bin-out is given, write the native binary representation.
     if let Some(bin_path) = bin_out {
-        let bin = bincode::serialize(&gate_fn).expect("Failed to serialize GateFn");
+        let bin = encode_g8r_binary(&design).expect("Failed to serialize g8r design");
         let mut f = File::create(bin_path).expect("Failed to create bin_out file");
         f.write_all(&bin).expect("Failed to write bin_out file");
     }

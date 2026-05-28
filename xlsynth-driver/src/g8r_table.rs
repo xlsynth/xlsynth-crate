@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::cmp::Ordering;
-use std::fs;
 use std::path::Path;
 
 use comfy_table::presets::ASCII_MARKDOWN;
@@ -12,7 +11,7 @@ use xlsynth_g8r::aig::table::{
     OpcodeAreaTableReport, UnattributedAreaTableRow,
 };
 use xlsynth_g8r::aig::GateFn;
-use xlsynth_g8r::aig_serdes::gate_parser::parse_gate_fn;
+use xlsynth_g8r::aig_serdes::g8r::load_gate_fn_from_path;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
 
@@ -50,23 +49,7 @@ fn truncate_for_table(value: &str, max_width: usize) -> String {
 
 fn load_gate_fn(path: &Path, subcommand: &str) -> Result<GateFn, String> {
     match path.extension().and_then(|e| e.to_str()) {
-        Some("g8rbin") => {
-            let bytes =
-                fs::read(path).map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
-            bincode::deserialize(&bytes).map_err(|e| {
-                format!(
-                    "failed to deserialize GateFn from {}: {}",
-                    path.display(),
-                    e
-                )
-            })
-        }
-        Some("g8r") => {
-            let text = fs::read_to_string(path)
-                .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
-            parse_gate_fn(&text)
-                .map_err(|e| format!("failed to parse GateFn from {}: {}", path.display(), e))
-        }
+        Some("g8rbin") | Some("g8r") => load_gate_fn_from_path(path),
         _ => Err(format!(
             "{} requires a .g8r or .g8rbin input, got {}",
             subcommand,
@@ -474,6 +457,8 @@ fn handle_g8r_attribution_table(
 mod tests {
     use tempfile::Builder;
     use xlsynth_g8r::aig::table::{AreaTableReport, AreaTableRow, UnattributedAreaTableRow};
+    use xlsynth_g8r::aig::SequentialGateFn;
+    use xlsynth_g8r::aig_serdes::g8r::emit_g8r;
     use xlsynth_g8r::test_utils::setup_simple_graph;
 
     use super::{
@@ -617,7 +602,7 @@ Metrics:
         for (idx, node) in g.gates.iter_mut().enumerate() {
             node.try_add_pir_node_ids(&[u32::try_from(idx + 21).expect("fits in u32")]);
         }
-        let text = g.to_string();
+        let text = emit_g8r(&SequentialGateFn::from_gate_fn(g.clone()));
 
         let file = Builder::new()
             .suffix(".g8r")
