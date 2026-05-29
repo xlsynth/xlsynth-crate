@@ -58,6 +58,7 @@ mod dslx_list_fns;
 mod dslx_show;
 #[cfg(feature = "unstable-dslx-specialize")]
 mod dslx_specialize;
+mod dslx_stitch_g8r_pipeline;
 mod dslx_stitch_pipeline;
 mod flag_defaults;
 mod fn_eval;
@@ -617,6 +618,74 @@ fn main() {
                 .add_bool_arg(
                     "array_index_bounds_checking",
                     "Whether to emit array index bounds checking",
+                ),
+        )
+        .subcommand(
+            clap::Command::new("dslx-stitch-g8r-pipeline")
+                .about("Stitches DSLX pipeline stages into a native sequential .g8r design")
+                .add_dslx_input_args(false)
+                .arg(
+                    Arg::new("dslx_top")
+                        .long("dslx_top")
+                        .value_name("DSLX_TOP")
+                        .help("Top-level pipeline prefix for implicit <top>_cycleN discovery; ignored when --stages is used")
+                        .conflicts_with("stages")
+                        .required_unless_present("stages"),
+                )
+                .arg(
+                    Arg::new("stages")
+                        .long("stages")
+                        .value_name("CSV")
+                        .help("Comma-separated explicit stage names in order (overrides automatic _cycle indexing)")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("output_design_name")
+                        .long("output_design_name")
+                        .value_name("NAME")
+                        .help("Sequential g8r design name; required with --stages. Defaults to --dslx_top when using implicit discovery."),
+                )
+                .arg(
+                    Arg::new("clock_name")
+                        .long("clock_name")
+                        .value_name("NAME")
+                        .help("Clock port name for inserted registers (default clk)")
+                        .action(ArgAction::Set),
+                )
+                .add_bool_arg(
+                    "flop_inputs",
+                    "Whether to insert input pipeline flops (default true)",
+                )
+                .add_bool_arg(
+                    "flop_outputs",
+                    "Whether to insert output pipeline flops (default true)",
+                )
+                .arg(
+                    Arg::new("input_valid_signal")
+                        .long("input_valid_signal")
+                        .value_name("INPUT_VALID_SIGNAL")
+                        .help("Load enable signal for pipeline registers"),
+                )
+                .arg(
+                    Arg::new("output_valid_signal")
+                        .long("output_valid_signal")
+                        .value_name("OUTPUT_VALID_SIGNAL")
+                        .help("Output port holding pipelined valid signal"),
+                )
+                .arg(
+                    Arg::new("reset")
+                        .long("reset")
+                        .value_name("RESET")
+                        .help("Synchronous reset signal for valid pipeline registers"),
+                )
+                .add_bool_arg("reset_active_low", "Reset is active low")
+                .add_g8r_lowering_flags()
+                .arg(
+                    Arg::new("bin_out")
+                        .long("bin-out")
+                        .value_name("PATH")
+                        .help("Path to write the .g8rbin file")
+                        .action(ArgAction::Set),
                 ),
         )
         .subcommand(
@@ -3572,6 +3641,9 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("dslx-stitch-pipeline", subm)) => {
             dslx_stitch_pipeline::handle_dslx_stitch_pipeline(subm, &config);
+        }
+        Some(("dslx-stitch-g8r-pipeline", subm)) => {
+            dslx_stitch_g8r_pipeline::handle_dslx_stitch_g8r_pipeline(subm, &config);
         }
         Some(("dslx2ir", subm)) => {
             dslx2ir::handle_dslx2ir(subm, &config);

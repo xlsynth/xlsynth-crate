@@ -17,6 +17,7 @@ pub mod logical_effort;
 pub mod match_and_rewrite;
 pub mod reassociation;
 pub mod sequential_gate;
+pub mod sequential_pipeline;
 pub mod table;
 pub mod topo;
 
@@ -24,5 +25,8 @@ pub use crate::aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, In
 pub use crate::aig::sequential_gate::{
     ClockPort, RegisterBinding, SequentialGateFn, TransitionInputId, TransitionOutputId,
     add_input_registers, add_output_registers,
+};
+pub use crate::aig::sequential_pipeline::{
+    SequentialPipelineOptions, stitch_gate_fns_into_pipeline,
 };
 pub use crate::gate_builder::{GateBuilder, GateBuilderOptions};

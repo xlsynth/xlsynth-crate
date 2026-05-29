@@ -7461,6 +7461,54 @@ fn test_dslx_stitch_pipeline_add_mul() {
     compare_golden_sv(&sv, "tests/test_dslx_stitch_pipeline_add_mul.golden.v");
 }
 
+#[test]
+fn test_dslx_stitch_g8r_pipeline_with_valid_and_reset() {
+    let dslx = "fn pipe_cycle0(x: u2, y: u2) -> u2 { x + y }\nfn pipe_cycle1(sum: u2) -> u2 { sum ^ u2:3 }";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("pipe.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
+    let output = std::process::Command::new(command_path)
+        .arg("dslx-stitch-g8r-pipeline")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("pipe")
+        .arg("--input_valid_signal")
+        .arg("in_valid")
+        .arg("--output_valid_signal")
+        .arg("out_valid")
+        .arg("--reset")
+        .arg("rst")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    let design = parse_g8r(&text).unwrap();
+    let register_names = design
+        .registers
+        .iter()
+        .map(|register| register.name.as_str())
+        .collect::<Vec<&str>>();
+    assert_eq!(design.clock.unwrap().name, "clk");
+    assert_eq!(design.outputs.len(), 2);
+    assert_eq!(design.registers.len(), 7);
+    assert!(register_names.contains(&"p0_in_valid"));
+    assert!(register_names.contains(&"p1_in_valid"));
+    assert!(register_names.contains(&"p2_in_valid"));
+    compare_golden_text(
+        &format!("// SPDX-License-Identifier: Apache-2.0\n{text}\n"),
+        "tests/test_dslx_stitch_g8r_pipeline_with_valid_and_reset.golden.g8r",
+    );
+}
+
 #[test_case(true; "with_tool_path")]
 #[test_case(false; "without_tool_path")]
 fn test_dslx_stitch_pipeline_with_dslx_path_two_entries(use_tool_path: bool) {
