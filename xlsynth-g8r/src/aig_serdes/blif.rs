@@ -1186,7 +1186,14 @@ fn register_d_net(name: &str, bit: usize) -> String {
 }
 
 fn clock_net(name: &str) -> Result<String, String> {
-    verbatim_token(name, "clock port name")
+    let net = verbatim_token(name, "clock port name")?;
+    if parse_port_net(&net, "_input", "input").is_ok() {
+        return Err(format!(
+            "clock port name '{}' cannot be emitted as a BLIF clock net because it matches the flattened external-input net convention",
+            name
+        ));
+    }
+    Ok(net)
 }
 
 fn verbatim_token(name: &str, kind: &str) -> Result<String, String> {

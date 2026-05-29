@@ -171,6 +171,16 @@ fn sequential_blif_imports_supported_latch_initial_values() {
 }
 
 #[test]
+fn sequential_blif_rejects_clock_name_matching_flattened_data_input() {
+    let mut design = make_pipeline_design();
+    design.clock.as_mut().unwrap().name = "clk_input0[0]".to_string();
+    assert_eq!(
+        emit_blif(&design).unwrap_err(),
+        "clock port name 'clk_input0[0]' cannot be emitted as a BLIF clock net because it matches the flattened external-input net convention"
+    );
+}
+
+#[test]
 fn sequential_blif_rejects_unsupported_latch_semantics() {
     let text = emit_blif(&make_pipeline_design()).unwrap();
     let cases = [
