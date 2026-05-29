@@ -31,12 +31,13 @@ import re
 import os
 import subprocess
 import sys
-import urllib.request
 import json
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Tuple
 
 from datetime import datetime, timezone, tzinfo
+
+from crates_io_index import crate_version_is_published
 
 # Prefer stdlib zoneinfo (Python ≥3.9) for accurate TZ handling; fall back to a fixed offset if unavailable.
 try:
@@ -179,20 +180,8 @@ def get_all_tags() -> List[str]:
 
 
 def crate_published(crate_version: str) -> bool:
-    """Check if the given crate version is published on crates.io for xlsynth."""
-    url = "https://crates.io/api/v1/crates/xlsynth/versions"
-    try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            data = resp.read().decode("utf-8")
-            jdata = json.loads(data)
-            versions = [v["num"] for v in jdata.get("versions", [])]
-            return crate_version in versions
-    except Exception as e:
-        print(
-            f"Error checking crates.io for version {crate_version}: {e}",
-            file=sys.stderr,
-        )
-        return False
+    """Check if the given xlsynth crate version is published on crates.io."""
+    return crate_version_is_published("xlsynth", crate_version)
 
 
 def _load_existing_mappings(json_path: str) -> Dict[str, VersionMapping]:
