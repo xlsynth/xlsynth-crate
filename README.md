@@ -155,6 +155,8 @@ This repository publishes crates to crates.io via the GitHub Actions workflow in
 1. Create and push the tag (`git tag vX.Y.Z` then `git push origin vX.Y.Z`).
 1. The publish workflow validates that the checked-in crate versions match the tag, runs tests, and publishes the crates.
 
+Treat every pushed release tag as immutable. The publish workflow is restartable after a partial release: it skips an exact crate version that is already present in the crates.io sparse index and continues with missing crates. Never move or reuse a pushed release tag for different source. Fix forward with a new patch version instead.
+
 Important: the version for the next release is often already "waiting" in the repository. After a successful mainline `.0` release, the workflow pushes two follow-up commits:
 
 - `Bump version numbers after successful publish`

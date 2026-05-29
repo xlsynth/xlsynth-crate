@@ -84,6 +84,8 @@ jobs:
       # build and test step does not consume mutable repository cache state.
 
       - name: Build and test
+        env:
+          XLSYNTH_PUBLISH_VERSION: ${{ steps.version_vars.outputs.version_no_v }}
         run: cargo test --workspace
 
       - name: Publish crates in dependency order

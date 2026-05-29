@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Test that the current package version reflected in Cargo.toml is more than
-//! the released version -- this help make sure we bump the version
-//! appropriately after a release is performed.
+//! the released version -- this helps make sure we bump the version
+//! appropriately after a release is performed. A tagged publish workflow may
+//! allow equality for an exact version so a partial release can be resumed.
 //!
 //! This is done for all released crates in the workspace.
 
 use std::collections::BTreeMap;
 
 const USER_AGENT: &str = "xlsynth_crate_unit_test";
+const XLSYNTH_PUBLISH_VERSION: &str = "XLSYNTH_PUBLISH_VERSION";
 
 fn get_workspace_root() -> std::path::PathBuf {
     let workspace_dir = cargo_metadata::MetadataCommand::new()
@@ -104,13 +106,27 @@ fn validate_local_version_is_latest_patch_version(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Fetch the newest version for logging continuity with previous behavior.
     let local_version = fetch_local_version(workspace_path)?;
-    let local_semver = semver::Version::parse(&local_version)?;
 
     log::info!("crate: {crate_name} local_version: {local_version}");
     let latest_patches = get_latest_patch_versions(crate_name)?;
+    let publish_version = std::env::var(XLSYNTH_PUBLISH_VERSION).ok();
+    validate_local_version_against_latest_patches(
+        &local_version,
+        &latest_patches,
+        publish_version.as_deref(),
+    )
+}
 
+fn validate_local_version_against_latest_patches(
+    local_version: &str,
+    latest_patches: &BTreeMap<(u64, u64), u64>,
+    publish_version: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let local_semver = semver::Version::parse(local_version)?;
     if let Some(max_patch) = latest_patches.get(&(local_semver.major, local_semver.minor)) {
-        if local_semver.patch > *max_patch {
+        if local_semver.patch > *max_patch
+            || (local_semver.patch == *max_patch && publish_version == Some(local_version))
+        {
             Ok(())
         } else {
             Err(Box::new(std::io::Error::other(format!(
@@ -124,6 +140,51 @@ fn validate_local_version_is_latest_patch_version(
         // No released versions for this major.minor; vacuously the latest patch.
         Ok(())
     }
+}
+
+fn latest_patches(major: u64, minor: u64, patch: u64) -> BTreeMap<(u64, u64), u64> {
+    BTreeMap::from([((major, minor), patch)])
+}
+
+#[test]
+fn test_equal_patch_is_rejected_without_publish_version() {
+    let error =
+        validate_local_version_against_latest_patches("0.52.0", &latest_patches(0, 52, 0), None)
+            .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("Local version 0.52.0 must have a patch greater"));
+}
+
+#[test]
+fn test_equal_patch_is_accepted_for_exact_publish_version() {
+    validate_local_version_against_latest_patches(
+        "0.52.0",
+        &latest_patches(0, 52, 0),
+        Some("0.52.0"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_equal_patch_is_rejected_for_mismatched_publish_version() {
+    validate_local_version_against_latest_patches(
+        "0.52.0",
+        &latest_patches(0, 52, 0),
+        Some("0.52.1"),
+    )
+    .unwrap_err();
+}
+
+#[test]
+fn test_older_patch_is_rejected_for_exact_publish_version() {
+    validate_local_version_against_latest_patches(
+        "0.52.0",
+        &latest_patches(0, 52, 1),
+        Some("0.52.0"),
+    )
+    .unwrap_err();
 }
 
 #[test]
