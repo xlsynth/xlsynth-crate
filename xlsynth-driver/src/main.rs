@@ -43,6 +43,7 @@ mod aig_eval;
 mod aig_ir_equiv;
 mod aig_stats;
 mod aig_tech_map;
+mod blif2g8r;
 mod block2fn;
 mod common;
 mod dslx2ir;
@@ -61,7 +62,9 @@ mod dslx_stitch_pipeline;
 mod flag_defaults;
 mod fn_eval;
 mod fn_type_arg;
-mod g8r2ir;
+mod g8r2blif;
+mod g8r2ir_block;
+mod g8r2ir_fn;
 mod g8r2v;
 mod g8r_cli;
 mod g8r_equiv;
@@ -1596,7 +1599,7 @@ fn main() {
         )
         .subcommand(
             clap::Command::new("ir2g8r")
-                .about("Converts IR to a combinational SequentialGateFn in native .g8r format on stdout; optionally writes .g8rbin, netlist, and stats")
+                .about("Converts a selected IR function or block to a native SequentialGateFn in .g8r format on stdout; blocks preserve clock and register boundaries")
                 .arg(
                     clap::Arg::new("ir_input_file")
                         .help("The input IR file")
@@ -1616,14 +1619,14 @@ fn main() {
                     clap::Arg::new("aiger_out")
                         .long("aiger-out")
                         .value_name("PATH")
-                        .help("Path to write the GateFn as AIGER; use .aag for ASCII or .aig for binary")
+                        .help("Path to write a clockless, register-free result as AIGER; use .aag for ASCII or .aig for binary")
                         .action(clap::ArgAction::Set),
                 )
                 .arg(
                     clap::Arg::new("stats_out")
                         .long("stats-out")
                         .value_name("PATH")
-                        .help("Path to write the JSON summary statistics")
+                        .help("Path to write JSON summary statistics when the selected member is a function")
                         .action(clap::ArgAction::Set),
                 )
                 .arg(
@@ -2127,7 +2130,7 @@ fn main() {
         )
         .subcommand(
             clap::Command::new("g8r2v")
-                .about("Converts a combinational .g8r or .g8rbin design to a .ugv netlist on stdout, optionally adding a clock port as the first input.")
+                .about("Converts a .g8r or .g8rbin sequential design to a .ugv netlist on stdout, emitting stored registers and optionally adding boundary registers.")
                 .arg(
                     clap::Arg::new("g8r_input_file")
                         .help("The input .g8r or .g8rbin file")
@@ -2138,19 +2141,19 @@ fn main() {
                     clap::Arg::new("add-clk-port")
                         .long("add-clk-port")
                         .value_name("NAME")
-                        .help("Name for the clock port. Mandatory if --flop-inputs or --flop-outputs is used. If specified without flopping, adds a clock port with this name.")
+                        .help("Declare a clock port for a clockless design, or check the name of a stored clock. Required for boundary flops only when the input design has no clock.")
                         .required(false),
                 )
                 .arg(
                     clap::Arg::new("flop-inputs")
                         .long("flop-inputs")
-                        .help("Add a layer of flops for all inputs.")
+                        .help("Add a layer of input boundary registers to the sequential design.")
                         .action(clap::ArgAction::SetTrue),
                 )
                 .arg(
                     clap::Arg::new("flop-outputs")
                         .long("flop-outputs")
-                        .help("Add a layer of flops for all outputs.")
+                        .help("Add a layer of output boundary registers to the sequential design.")
                         .action(clap::ArgAction::SetTrue),
                 )
                 .arg(
@@ -2164,6 +2167,26 @@ fn main() {
                         .long("module-name")
                         .value_name("MODULE_NAME")
                         .help("Name of the generated module"),
+                )
+        )
+        .subcommand(
+            clap::Command::new("g8r2blif")
+                .about("Converts a .g8r or .g8rbin SequentialGateFn design to synchronous BLIF on stdout.")
+                .arg(
+                    clap::Arg::new("g8r_input_file")
+                        .help("The input .g8r or .g8rbin file")
+                        .required(true)
+                        .index(1),
+                )
+        )
+        .subcommand(
+            clap::Command::new("blif2g8r")
+                .about("Converts supported synchronous BLIF into a native SequentialGateFn in .g8r format on stdout.")
+                .arg(
+                    clap::Arg::new("blif_input_file")
+                        .help("The input BLIF file")
+                        .required(true)
+                        .index(1),
                 )
         )
         .subcommand(
@@ -2262,8 +2285,18 @@ fn main() {
                 .add_ir_top_arg(false),
         )
         .subcommand(
-            clap::Command::new("g8r2ir")
-                .about("Converts a combinational .g8r or .g8rbin design to an XLS IR package on stdout.")
+            clap::Command::new("g8r2ir-block")
+                .about("Converts a .g8r or .g8rbin SequentialGateFn design to an XLS block IR package on stdout.")
+                .arg(
+                    clap::Arg::new("g8r_input_file")
+                        .help("The input .g8r or .g8rbin file")
+                        .required(true)
+                        .index(1),
+                )
+        )
+        .subcommand(
+            clap::Command::new("g8r2ir-fn")
+                .about("Projects a clockless and register-free .g8r or .g8rbin SequentialGateFn design to an XLS function IR package on stdout.")
                 .arg(
                     clap::Arg::new("g8r_input_file")
                         .help("The input .g8r or .g8rbin file")
@@ -3681,13 +3714,30 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                 report_cli_error::report_cli_error_and_exit(&e, None, vec![]);
             }
         }
+        Some(("g8r2blif", subm)) => {
+            if let Err(e) = g8r2blif::handle_g8r2blif(subm) {
+                report_cli_error::report_cli_error_and_exit(&e, Some("g8r2blif"), vec![]);
+            }
+        }
+        Some(("blif2g8r", subm)) => {
+            if let Err(e) = blif2g8r::handle_blif2g8r(subm) {
+                report_cli_error::report_cli_error_and_exit(&e, Some("blif2g8r"), vec![]);
+            }
+        }
         Some(("aig2v", subm)) => {
             if let Err(e) = aig2v::handle_aig2v(subm) {
                 report_cli_error::report_cli_error_and_exit(&e, Some("aig2v"), vec![]);
             }
         }
-        Some(("g8r2ir", subm)) => {
-            g8r2ir::handle_g8r2ir(subm, &config);
+        Some(("g8r2ir-block", subm)) => {
+            if let Err(e) = g8r2ir_block::handle_g8r2ir_block(subm) {
+                report_cli_error::report_cli_error_and_exit(&e, Some("g8r2ir-block"), vec![]);
+            }
+        }
+        Some(("g8r2ir-fn", subm)) => {
+            if let Err(e) = g8r2ir_fn::handle_g8r2ir_fn(subm) {
+                report_cli_error::report_cli_error_and_exit(&e, Some("g8r2ir-fn"), vec![]);
+            }
         }
         Some(("g8r-area-table", subm)) => {
             g8r_table::handle_g8r_area_table(subm, &config);

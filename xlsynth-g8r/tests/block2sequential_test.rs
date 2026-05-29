@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use xlsynth::IrBits;
+use xlsynth_g8r::aig_serdes::sequential2ir::sequential_gate_fn_to_pir_block_package;
 use xlsynth_g8r::aig_sim::gate_sim::{self, Collect};
 use xlsynth_g8r::block2sequential::block_ir_to_sequential_gate_fn;
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
@@ -336,4 +337,42 @@ top block top(clk: clock, rst: bits[1], data: bits[1], out: bits[1]) {
         error,
         "block2sequential: register 'state' has a reset write but the block has no reset metadata"
     );
+}
+
+#[test]
+fn sequential_to_block_roundtrip_preserves_folded_load_enable_logic() {
+    let block_ir = r#"package pipeline
+
+top block pipe(clk: clock, data: bits[1], le: bits[1], out: bits[1]) {
+  reg state(bits[1])
+  data: bits[1] = input_port(name=data, id=1)
+  le: bits[1] = input_port(name=le, id=2)
+  state_q: bits[1] = register_read(register=state, id=3)
+  state_d: () = register_write(data, register=state, load_enable=le, id=4)
+  out: () = output_port(state_q, name=out, id=5)
+}
+"#;
+    let original = lower(block_ir);
+    let emitted = sequential_gate_fn_to_pir_block_package(&original, "roundtrip")
+        .unwrap()
+        .to_string();
+    assert!(emitted.contains("top block pipe(clk: clock"));
+    assert!(emitted.contains("register_write("));
+    assert!(!emitted.contains("load_enable="));
+    let restored = lower(&emitted);
+
+    for input_values in [
+        [false, false, false],
+        [true, false, false],
+        [false, true, true],
+        [true, true, false],
+    ] {
+        let inputs = input_values
+            .into_iter()
+            .map(IrBits::bool)
+            .collect::<Vec<IrBits>>();
+        let original_result = gate_sim::eval(&original.transition, &inputs, Collect::None);
+        let restored_result = gate_sim::eval(&restored.transition, &inputs, Collect::None);
+        assert_eq!(restored_result.outputs, original_result.outputs);
+    }
 }

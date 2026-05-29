@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 
 use xlsynth::IrBits;
 
-use crate::aig::gate::{GateFn, Input, Output};
+use crate::aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output};
 
 /// Identifies an input of a [`SequentialGateFn::transition`] function.
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
@@ -106,6 +106,207 @@ pub(crate) fn uniquify_transition_port_name(
         }
     }
     unreachable!("unbounded suffix sequence must provide a unique name")
+}
+
+/// Adds one register layer between each external input and the existing
+/// transition function.
+pub fn add_input_registers(
+    design: &SequentialGateFn,
+    clock: ClockPort,
+) -> Result<SequentialGateFn, String> {
+    design.validate()?;
+    let mut result = design.clone();
+    adopt_clock(&mut result, &clock)?;
+    let original_inputs = result.inputs.clone();
+    let mut register_names = result
+        .registers
+        .iter()
+        .map(|register| register.name.clone())
+        .collect::<BTreeSet<String>>();
+    let mut transition_input_names = result
+        .transition
+        .inputs
+        .iter()
+        .map(|input| input.name.clone())
+        .collect::<BTreeSet<String>>();
+    let mut transition_output_names = result
+        .transition
+        .outputs
+        .iter()
+        .map(|output| output.name.clone())
+        .collect::<BTreeSet<String>>();
+
+    for (external_index, old_input_id) in original_inputs.into_iter().enumerate() {
+        let old_input = result.transition.inputs[old_input_id.index()].clone();
+        let old_input_bit_count = old_input.get_bit_count();
+        let register_name =
+            uniquify_register_name(&format!("p0_{}", old_input.name), &mut register_names);
+        let q_name = uniquify_transition_port_name(
+            &canonical_register_q_name(&register_name),
+            &mut transition_input_names,
+        );
+        rename_transition_input(&mut result.transition, old_input_id, &q_name);
+
+        let external_input_id =
+            append_transition_input(&mut result.transition, old_input.name, old_input_bit_count);
+        result.inputs[external_index] = external_input_id;
+        let d_name = uniquify_transition_port_name(
+            &canonical_register_d_name(&register_name),
+            &mut transition_output_names,
+        );
+        let d_bit_vector = result.transition.inputs[external_input_id.index()]
+            .bit_vector
+            .clone();
+        let d_id = append_transition_output(&mut result.transition, d_name, d_bit_vector);
+        result.registers.push(RegisterBinding {
+            name: register_name,
+            q: old_input_id,
+            d: d_id,
+            initial_value: None,
+        });
+    }
+
+    result.validate()?;
+    Ok(result)
+}
+
+/// Adds one register layer between each existing external output and the
+/// visible output interface.
+pub fn add_output_registers(
+    design: &SequentialGateFn,
+    clock: ClockPort,
+) -> Result<SequentialGateFn, String> {
+    design.validate()?;
+    let mut result = design.clone();
+    adopt_clock(&mut result, &clock)?;
+    let original_outputs = result.outputs.clone();
+    let mut register_names = result
+        .registers
+        .iter()
+        .map(|register| register.name.clone())
+        .collect::<BTreeSet<String>>();
+    let mut transition_input_names = result
+        .transition
+        .inputs
+        .iter()
+        .map(|input| input.name.clone())
+        .collect::<BTreeSet<String>>();
+    let mut transition_output_names = result
+        .transition
+        .outputs
+        .iter()
+        .map(|output| output.name.clone())
+        .collect::<BTreeSet<String>>();
+
+    for (external_index, old_output_id) in original_outputs.into_iter().enumerate() {
+        let old_output = result.transition.outputs[old_output_id.index()].clone();
+        let register_name =
+            uniquify_register_name(&format!("p0_{}", old_output.name), &mut register_names);
+        let d_name = uniquify_transition_port_name(
+            &format!("{}_comb", old_output.name),
+            &mut transition_output_names,
+        );
+        result.transition.outputs[old_output_id.index()].name = d_name;
+
+        let q_name = uniquify_transition_port_name(
+            &canonical_register_q_name(&register_name),
+            &mut transition_input_names,
+        );
+        let q_id =
+            append_transition_input(&mut result.transition, q_name, old_output.get_bit_count());
+        let visible_bit_vector = result.transition.inputs[q_id.index()].bit_vector.clone();
+        let visible_output_id =
+            append_transition_output(&mut result.transition, old_output.name, visible_bit_vector);
+        result.outputs[external_index] = visible_output_id;
+        result.registers.push(RegisterBinding {
+            name: register_name,
+            q: q_id,
+            d: old_output_id,
+            initial_value: None,
+        });
+    }
+
+    result.validate()?;
+    Ok(result)
+}
+
+fn adopt_clock(design: &mut SequentialGateFn, clock: &ClockPort) -> Result<(), String> {
+    match &design.clock {
+        Some(existing) if existing != clock => Err(format!(
+            "cannot add boundary registers using clock '{}': design already declares clock '{}'",
+            clock.name, existing.name
+        )),
+        Some(_) => Ok(()),
+        None => {
+            design.clock = Some(clock.clone());
+            Ok(())
+        }
+    }
+}
+
+fn uniquify_register_name(preferred_name: &str, used_names: &mut BTreeSet<String>) -> String {
+    if used_names.insert(preferred_name.to_string()) {
+        return preferred_name.to_string();
+    }
+    for suffix in 1usize.. {
+        let candidate = format!("{preferred_name}__{suffix}");
+        if used_names.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded suffix sequence must provide a unique register name")
+}
+
+fn rename_transition_input(transition: &mut GateFn, id: TransitionInputId, name: &str) {
+    let bit_vector = transition.inputs[id.index()].bit_vector.clone();
+    transition.inputs[id.index()].name = name.to_string();
+    for bit in bit_vector.iter_lsb_to_msb() {
+        match &mut transition.gates[bit.node.id] {
+            AigNode::Input {
+                name: node_name, ..
+            } => *node_name = name.to_string(),
+            _ => unreachable!("transition input bits must refer to AIG input nodes"),
+        }
+    }
+}
+
+fn append_transition_input(
+    transition: &mut GateFn,
+    name: String,
+    bit_count: usize,
+) -> TransitionInputId {
+    let operands = (0..bit_count)
+        .map(|lsb_index| {
+            let node = AigRef {
+                id: transition.gates.len(),
+            };
+            transition.gates.push(AigNode::Input {
+                name: name.clone(),
+                lsb_index,
+                pir_node_ids: AigNode::with_pir_node_id(None),
+            });
+            AigOperand {
+                node,
+                negated: false,
+            }
+        })
+        .collect::<Vec<AigOperand>>();
+    let id = TransitionInputId::new(transition.inputs.len());
+    transition.inputs.push(Input {
+        name,
+        bit_vector: AigBitVector::from_lsb_is_index_0(&operands),
+    });
+    id
+}
+
+fn append_transition_output(
+    transition: &mut GateFn,
+    name: String,
+    bit_vector: AigBitVector,
+) -> TransitionOutputId {
+    let id = TransitionOutputId::new(transition.outputs.len());
+    transition.outputs.push(Output { name, bit_vector });
+    id
 }
 
 impl SequentialGateFn {

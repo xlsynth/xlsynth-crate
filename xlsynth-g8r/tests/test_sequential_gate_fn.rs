@@ -3,6 +3,7 @@
 use xlsynth::IrBits;
 use xlsynth_g8r::aig::{
     ClockPort, RegisterBinding, SequentialGateFn, TransitionInputId, TransitionOutputId,
+    add_input_registers, add_output_registers,
 };
 use xlsynth_g8r::aig_serdes::g8r::{decode_g8r_binary, emit_g8r, encode_g8r_binary, parse_g8r};
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
@@ -221,4 +222,63 @@ fn register_data_width_must_match_state_width() {
     .unwrap_err();
 
     assert_eq!(error, "register 'state' has Q width 8 but D width 1");
+}
+
+#[test]
+fn boundary_register_transforms_preserve_external_ports_and_add_state() {
+    let mut builder = GateBuilder::new("invert".to_string(), GateBuilderOptions::no_opt());
+    let input = builder.add_input("x".to_string(), 2);
+    let output = input
+        .iter_lsb_to_msb()
+        .map(|bit| builder.add_not(*bit))
+        .collect::<Vec<_>>();
+    builder.add_output(
+        "y".to_string(),
+        xlsynth_g8r::aig::AigBitVector::from_lsb_is_index_0(&output),
+    );
+    let clock = ClockPort {
+        name: "clk".to_string(),
+    };
+    let design = SequentialGateFn::from_gate_fn(builder.build());
+    let design = add_input_registers(&design, clock.clone()).unwrap();
+    let design = add_output_registers(&design, clock.clone()).unwrap();
+
+    assert_eq!(design.clock, Some(clock));
+    assert_eq!(design.registers.len(), 2);
+    assert_eq!(design.registers[0].name, "p0_x");
+    assert_eq!(design.registers[1].name, "p0_y");
+    assert_eq!(design.transition.inputs[design.inputs[0].index()].name, "x");
+    assert_eq!(
+        design.transition.outputs[design.outputs[0].index()].name,
+        "y"
+    );
+    assert_eq!(
+        design.transition.outputs[design.registers[1].d.index()].name,
+        "y_comb"
+    );
+}
+
+#[test]
+fn boundary_register_transform_rejects_another_clock_domain() {
+    let mut builder = GateBuilder::new("identity".to_string(), GateBuilderOptions::no_opt());
+    let x = builder.add_input("x".to_string(), 1);
+    builder.add_output("y".to_string(), x);
+    let clocked = add_input_registers(
+        &SequentialGateFn::from_gate_fn(builder.build()),
+        ClockPort {
+            name: "clk".to_string(),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        add_output_registers(
+            &clocked,
+            ClockPort {
+                name: "other_clk".to_string(),
+            },
+        )
+        .unwrap_err(),
+        "cannot add boundary registers using clock 'other_clk': design already declares clock 'clk'"
+    );
 }

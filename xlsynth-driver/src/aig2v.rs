@@ -2,7 +2,9 @@
 
 use std::path::Path;
 
-use xlsynth_g8r::aig::GateFn;
+use xlsynth_g8r::aig::{
+    add_input_registers, add_output_registers, ClockPort, GateFn, SequentialGateFn,
+};
 use xlsynth_g8r::aig_serdes::emit_netlist::{
     emit_netlist, emit_netlist_with_version_and_port_style, NetlistPortStyle,
 };
@@ -93,6 +95,28 @@ fn schema_from_supported_function_type(
     })
 }
 
+fn make_design_for_emission(
+    gate_fn: GateFn,
+    module_name: &str,
+    add_clk_port: Option<String>,
+    flop_inputs: bool,
+    flop_outputs: bool,
+) -> Result<SequentialGateFn, String> {
+    let mut design = SequentialGateFn::from_gate_fn(gate_fn);
+    design.name = module_name.to_string();
+    let clock = add_clk_port.map(|name| ClockPort { name });
+    if let Some(clock) = &clock {
+        design.clock = Some(clock.clone());
+    }
+    if flop_inputs {
+        design = add_input_registers(&design, clock.clone().unwrap())?;
+    }
+    if flop_outputs {
+        design = add_output_registers(&design, clock.unwrap())?;
+    }
+    Ok(design)
+}
+
 pub fn handle_aig2v(matches: &clap::ArgMatches) -> Result<(), String> {
     let aig_input_file = matches.get_one::<String>("aig_input_file").unwrap();
     let module_name = matches.get_one::<String>("module-name").unwrap();
@@ -121,24 +145,23 @@ pub fn handle_aig2v(matches: &clap::ArgMatches) -> Result<(), String> {
         } else {
             VerilogVersion::Verilog
         };
-        emit_netlist_with_version_and_port_style(
+        let design = make_design_for_emission(
+            gate_fn,
             module_name,
-            &gate_fn,
+            add_clk_port,
             flop_inputs,
             flop_outputs,
-            version,
-            add_clk_port,
-            NetlistPortStyle::PackedBits,
-        )?
+        )?;
+        emit_netlist_with_version_and_port_style(&design, version, NetlistPortStyle::PackedBits)?
     } else {
-        emit_netlist(
+        let design = make_design_for_emission(
+            gate_fn,
             module_name,
-            &gate_fn,
+            add_clk_port,
             flop_inputs,
             flop_outputs,
-            use_system_verilog,
-            add_clk_port,
-        )?
+        )?;
+        emit_netlist(&design, use_system_verilog)?
     };
 
     println!("{}", netlist_str);

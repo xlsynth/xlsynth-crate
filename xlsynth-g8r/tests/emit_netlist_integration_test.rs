@@ -2,7 +2,9 @@
 
 #[cfg(test)]
 mod tests {
-    use xlsynth_g8r::aig::{self, GateFn};
+    use xlsynth_g8r::aig::{
+        self, ClockPort, GateFn, SequentialGateFn, add_input_registers, add_output_registers,
+    };
     use xlsynth_g8r::aig_serdes::emit_netlist::{
         NetlistPortStyle, emit_netlist, emit_netlist_with_version_and_port_style,
     };
@@ -28,16 +30,36 @@ mod tests {
         g8_builder.build()
     }
 
+    fn wrap(
+        mut design: SequentialGateFn,
+        name: &str,
+        flop_inputs: bool,
+        flop_outputs: bool,
+    ) -> SequentialGateFn {
+        design.name = name.to_string();
+        let clock = ClockPort {
+            name: "clk".to_string(),
+        };
+        if flop_inputs {
+            design = add_input_registers(&design, clock.clone()).unwrap();
+        }
+        if flop_outputs {
+            design = add_output_registers(&design, clock).unwrap();
+        }
+        design
+    }
+
     #[test]
     fn test_emit_packed_flop_inputs_golden() {
-        let gate_fn = make_packed_inverter_gate_fn(2);
-        let netlist = emit_netlist_with_version_and_port_style(
+        let design = wrap(
+            SequentialGateFn::from_gate_fn(make_packed_inverter_gate_fn(2)),
             "packed_flop_inputs",
-            &gate_fn,
             true,
             false,
+        );
+        let netlist = emit_netlist_with_version_and_port_style(
+            &design,
             VerilogVersion::SystemVerilog,
-            Some("clk".to_string()),
             NetlistPortStyle::PackedBits,
         )
         .unwrap();
@@ -50,14 +72,15 @@ mod tests {
 
     #[test]
     fn test_emit_packed_flop_outputs_golden() {
-        let gate_fn = make_packed_inverter_gate_fn(2);
-        let netlist = emit_netlist_with_version_and_port_style(
+        let design = wrap(
+            SequentialGateFn::from_gate_fn(make_packed_inverter_gate_fn(2)),
             "packed_flop_outputs",
-            &gate_fn,
             false,
             true,
+        );
+        let netlist = emit_netlist_with_version_and_port_style(
+            &design,
             VerilogVersion::SystemVerilog,
-            Some("clk".to_string()),
             NetlistPortStyle::PackedBits,
         )
         .unwrap();
@@ -70,14 +93,15 @@ mod tests {
 
     #[test]
     fn test_emit_packed_flop_inputs_outputs_golden() {
-        let gate_fn = make_packed_inverter_gate_fn(2);
-        let netlist = emit_netlist_with_version_and_port_style(
+        let design = wrap(
+            SequentialGateFn::from_gate_fn(make_packed_inverter_gate_fn(2)),
             "packed_flop_inputs_outputs",
-            &gate_fn,
             true,
             true,
+        );
+        let netlist = emit_netlist_with_version_and_port_style(
+            &design,
             VerilogVersion::SystemVerilog,
-            Some("clk".to_string()),
             NetlistPortStyle::PackedBits,
         )
         .unwrap();
@@ -91,14 +115,13 @@ mod tests {
     #[test]
     fn test_emit_bf16_add_with_flops() {
         let gate_fn = load_bf16_add_sample(Opt::No).gate_fn;
-        let result = emit_netlist(
+        let design = wrap(
+            SequentialGateFn::from_gate_fn(gate_fn),
             "bf16_add_flopped",
-            &gate_fn,
-            true,  // flop_inputs
-            true,  // flop_outputs
-            false, // use_system_verilog
-            Some("clk".to_string()),
+            true,
+            true,
         );
+        let result = emit_netlist(&design, false);
 
         assert!(
             result.is_ok(),
@@ -130,14 +153,13 @@ mod tests {
     #[test]
     fn test_emit_bf16_mul_with_flops() {
         let gate_fn = load_bf16_mul_sample(Opt::No).gate_fn;
-        let result = emit_netlist(
+        let design = wrap(
+            SequentialGateFn::from_gate_fn(gate_fn),
             "bf16_mul_flopped",
-            &gate_fn,
-            true,  // flop_inputs
-            true,  // flop_outputs
-            false, // use_system_verilog
-            Some("clk".to_string()),
+            true,
+            true,
         );
+        let result = emit_netlist(&design, false);
 
         assert!(
             result.is_ok(),
