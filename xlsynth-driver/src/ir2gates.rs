@@ -74,18 +74,37 @@ fn select_ir2g8r_member(
         },
         None => match package.top.clone() {
             Some(top) => top,
-            None => match (package.get_top_fn(), package.get_top_block()) {
-                (Some(function), _) => (function.name.clone(), MemberType::Function),
-                (None, Some(PackageMember::Block { func, .. })) => {
-                    (func.name.clone(), MemberType::Block)
+            None => {
+                let candidates = package
+                    .members
+                    .iter()
+                    .map(|member| match member {
+                        PackageMember::Function(function) => {
+                            (function.name.clone(), MemberType::Function)
+                        }
+                        PackageMember::Block { func, .. } => (func.name.clone(), MemberType::Block),
+                    })
+                    .collect::<Vec<(String, MemberType)>>();
+                match candidates.as_slice() {
+                    [] => {
+                        return Err("PIR package has no function or block to lower".to_string());
+                    }
+                    [candidate] => candidate.clone(),
+                    _ => {
+                        let member_names = candidates
+                            .iter()
+                            .map(|(name, member_type)| match member_type {
+                                MemberType::Function => format!("function '{name}'"),
+                                MemberType::Block => format!("block '{name}'"),
+                            })
+                            .collect::<Vec<String>>()
+                            .join(", ");
+                        return Err(format!(
+                            "PIR package has no declared top and multiple lowerable members ({member_names}); provide --top to select one"
+                        ));
+                    }
                 }
-                (None, _) => {
-                    return Err(
-                        "PIR package has no function or block; provide --top to select one"
-                            .to_string(),
-                    );
-                }
-            },
+            }
         },
     };
     package.top = Some((name.clone(), member_type.clone()));

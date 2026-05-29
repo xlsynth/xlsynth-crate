@@ -4643,6 +4643,39 @@ block pipe(clk: clock, data: bits[1], le: bits[1], out: bits[1]) {
 }
 
 #[test]
+fn test_ir2g8r_requires_top_when_package_has_function_and_block_without_declared_top() {
+    let ir = r#"package ambiguous_member
+
+fn helper(x: bits[1] id=101) -> bits[1] {
+  ret identity.102: bits[1] = identity(x, id=102)
+}
+
+block pipe(data: bits[1], out: bits[1]) {
+  data: bits[1] = input_port(name=data, id=1)
+  out: () = output_port(data, name=out, id=2)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("ambiguous_member.ir");
+    std::fs::write(&ir_path, ir).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("ir2g8r")
+        .arg(&ir_path)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("PIR package has no declared top and multiple lowerable members")
+            && stderr.contains("function 'helper'")
+            && stderr.contains("block 'pipe'")
+            && stderr.contains("provide --top to select one"),
+        "unexpected error for ambiguous package: {stderr}"
+    );
+}
+
+#[test]
 fn test_ir2g8r_rejects_aiger_output_for_selected_registered_block() {
     let ir = r#"package selected_block
 
@@ -5505,24 +5538,34 @@ fn test_aig2v_flop_requires_clk_port_error() {
     let aag_path = write_aiger_file(&temp_dir, "dummy.aag", &gate_fn);
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
-    let output = Command::new(command_path)
-        .arg("aig2v")
-        .arg(aag_path.to_str().unwrap())
-        .arg("--module-name")
-        .arg("dummy")
-        .arg("--flop-inputs")
-        .output()
-        .unwrap();
+    for flop_flag in ["--flop-inputs", "--flop-outputs"] {
+        let output = Command::new(command_path)
+            .arg("aig2v")
+            .arg(aag_path.to_str().unwrap())
+            .arg("--module-name")
+            .arg("dummy")
+            .arg(flop_flag)
+            .output()
+            .unwrap();
 
-    assert!(!output.status.success(), "Command should fail");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains(
-            "--add-clk-port <NAME> is required when --flop-inputs or --flop-outputs is used."
-        ),
-        "Stderr should contain the specific error message. Stderr: {}",
-        stderr
-    );
+        assert!(
+            !output.status.success(),
+            "Command should fail for {flop_flag}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(
+                "--add-clk-port <NAME> is required when --flop-inputs or --flop-outputs is used."
+            ),
+            "Stderr should contain the specific error message for {flop_flag}. Stderr: {}",
+            stderr
+        );
+        assert!(
+            !stderr.contains("panicked"),
+            "Stderr should not contain a panic for {flop_flag}. Stderr: {}",
+            stderr
+        );
+    }
 }
 
 #[test]

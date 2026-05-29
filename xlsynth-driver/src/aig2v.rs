@@ -18,6 +18,9 @@ use xlsynth_pir::ir;
 
 use crate::fn_type_arg::parse_function_type_text;
 
+const MISSING_BOUNDARY_CLOCK_ERROR: &str =
+    "--add-clk-port <NAME> is required when --flop-inputs or --flop-outputs is used.";
+
 fn load_aig_gate_fn(path: &Path) -> Result<GateFn, String> {
     load_aiger_auto_from_path(path, GateBuilderOptions::no_opt())
         .map(|res| res.gate_fn)
@@ -108,11 +111,14 @@ fn make_design_for_emission(
     if let Some(clock) = &clock {
         design.clock = Some(clock.clone());
     }
-    if flop_inputs {
-        design = add_input_registers(&design, clock.clone().unwrap())?;
-    }
-    if flop_outputs {
-        design = add_output_registers(&design, clock.unwrap())?;
+    if flop_inputs || flop_outputs {
+        let clock = clock.ok_or_else(|| MISSING_BOUNDARY_CLOCK_ERROR.to_string())?;
+        if flop_inputs {
+            design = add_input_registers(&design, clock.clone())?;
+        }
+        if flop_outputs {
+            design = add_output_registers(&design, clock)?;
+        }
     }
     Ok(design)
 }
@@ -130,10 +136,7 @@ pub fn handle_aig2v(matches: &clap::ArgMatches) -> Result<(), String> {
         .transpose()?;
 
     if (flop_inputs || flop_outputs) && add_clk_port.is_none() {
-        return Err(
-            "--add-clk-port <NAME> is required when --flop-inputs or --flop-outputs is used."
-                .to_string(),
-        );
+        return Err(MISSING_BOUNDARY_CLOCK_ERROR.to_string());
     }
 
     let gate_fn = load_aig_gate_fn(Path::new(aig_input_file))?;

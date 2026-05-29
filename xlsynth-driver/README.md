@@ -374,7 +374,9 @@ combinational transition logic is lowered into the stored transition function.
   - `--reassociation=<BOOL>` – when `true`, rebalance single-fanout AND supergates after FRAIG and again after cut-db rewrite. Default `true`.
   - `--cut-db-enable-large-cone-rewrite=<BOOL>` – when `true`, run the large-cone cut-db rewrite phases after the 4-input cut-db phases. Default `true`.
   - `--cut-db-rewrite-mode=<delay|balanced|area>` – choose the cut-db optimization policy. `delay` runs delay-focused phases before area recovery and allows the delay phases to expand area; area phases preserve delay. `balanced` skips delay phases and preserves delay during area recovery. `area` skips delay phases and allows area recovery to increase delay. Default `delay`.
-  - `--top <TOP>` – override the top-level entry point (required if the IR package has no `top fn`).
+  - `--top <TOP>` – override the selected function or block. If the IR package
+    has no declared top, it may be omitted only when the package contains
+    exactly one function or block.
 
 Example:
 
