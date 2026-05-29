@@ -4,17 +4,19 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use xlsynth::IrBits;
 use xlsynth_pir::block_inline::inline_all_blocks_in_package;
 use xlsynth_pir::dce::remove_dead_nodes;
 use xlsynth_pir::ir::{self, BlockMetadata, MemberType, NodePayload, NodeRef, PackageMember, Type};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_utils::{get_topological, operands, remap_payload_with};
 use xlsynth_pir::ir_validate;
-use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;
 
+use crate::aig::sequential_gate::{
+    canonical_register_d_name, canonical_register_q_name, canonical_transition_name,
+    uniquify_transition_port_name,
+};
 use crate::aig::{
-    ClockPort, GateFn, Output, RegisterBinding, ResetSpec, SequentialGateFn, TransitionInputId,
+    ClockPort, GateFn, Output, RegisterBinding, SequentialGateFn, TransitionInputId,
     TransitionOutputId,
 };
 use crate::gatify::ir2gate::{GatifyOptions, gatify};
@@ -38,20 +40,10 @@ struct PendingRegisterBinding {
     name: String,
     q: TransitionInputId,
     d_output_index: usize,
-    load_enable_output_index: Option<usize>,
-    reset: Option<PendingResetSpec>,
-}
-
-#[derive(Debug)]
-struct PendingResetSpec {
-    signal_output_index: usize,
-    asynchronous: bool,
-    active_low: bool,
-    value: IrBits,
 }
 
 /// Parses an XLS IR package and lowers its selected block into a sequential
-/// gate function.
+/// gate function, rejecting asynchronous reset behavior.
 pub fn block_ir_to_sequential_gate_fn(
     block_ir_text: &str,
     gatify_options: GatifyOptions,
@@ -90,7 +82,8 @@ pub fn block_package_to_sequential_gate_fn(
     lower_block_to_sequential_gate_fn(func, metadata, gatify_options)
 }
 
-/// Lowers an already flattened/inlined block into a sequential gate function.
+/// Lowers an already flattened/inlined block into a sequential gate function,
+/// rejecting asynchronous reset behavior.
 pub fn lower_block_to_sequential_gate_fn(
     block: &ir::Fn,
     metadata: &BlockMetadata,
@@ -128,15 +121,6 @@ pub fn lower_block_to_sequential_gate_fn(
             name: register.name,
             q: register.q,
             d: TransitionOutputId::new(register.d_output_index),
-            load_enable: register
-                .load_enable_output_index
-                .map(TransitionOutputId::new),
-            reset: register.reset.map(|reset| ResetSpec {
-                signal: TransitionOutputId::new(reset.signal_output_index),
-                asynchronous: reset.asynchronous,
-                active_low: reset.active_low,
-                value: reset.value,
-            }),
             initial_value: None,
         })
         .collect();
@@ -361,7 +345,7 @@ fn build_transition_function(
         .unwrap_or(0);
 
     let mut transition = ir::Fn {
-        name: format!("{}__transition", block.name),
+        name: canonical_transition_name(&block.name),
         params: block.params.clone(),
         ret_ty: Type::nil(),
         nodes: vec![block.nodes[0].clone()],
@@ -387,7 +371,10 @@ fn build_transition_function(
     let mut register_q_refs: BTreeMap<String, (NodeRef, TransitionInputId)> = BTreeMap::new();
     for register in &metadata.registers {
         max_text_id += 1;
-        let q_name = unique_name(&format!("{}__q", register.name), &mut used_param_names);
+        let q_name = uniquify_transition_port_name(
+            &canonical_register_q_name(&register.name),
+            &mut used_param_names,
+        );
         let param_id = ir::ParamId::new(max_text_id);
         let q_ref = NodeRef {
             index: transition.nodes.len(),
@@ -488,7 +475,7 @@ fn build_transition_function(
             .get(&register.name)
             .expect("Q parameter was created for each register");
         let write = register_writes.get(&register.name).copied();
-        let d_ref = match write {
+        let mut d_ref = match write {
             Some(write) => remapped_ref(
                 &old_to_new,
                 write.arg,
@@ -496,33 +483,26 @@ fn build_transition_function(
             )?,
             None => q_ref,
         };
-        let d_output_index = push_endpoint(
-            &mut endpoints,
-            &mut used_output_names,
-            format!("{}__d", register.name),
-            d_ref,
-            register.ty.clone(),
-        );
+        if let Some(load_enable) = write.and_then(|write| write.load_enable) {
+            let load_enable_ref = remapped_ref(
+                &old_to_new,
+                load_enable,
+                &format!("register '{}' load enable", register.name),
+            )?;
+            d_ref = push_transition_node(
+                &mut transition,
+                &mut max_text_id,
+                format!("{}__load_enabled_d", register.name),
+                register.ty.clone(),
+                NodePayload::Sel {
+                    selector: load_enable_ref,
+                    cases: vec![q_ref, d_ref],
+                    default: None,
+                },
+            );
+        }
 
-        let load_enable_output_index = match write.and_then(|write| write.load_enable) {
-            Some(load_enable) => {
-                let load_enable_ref = remapped_ref(
-                    &old_to_new,
-                    load_enable,
-                    &format!("register '{}' load enable", register.name),
-                )?;
-                Some(push_endpoint(
-                    &mut endpoints,
-                    &mut used_output_names,
-                    format!("{}__load_enable", register.name),
-                    load_enable_ref,
-                    Type::Bits(1),
-                ))
-            }
-            None => None,
-        };
-
-        let reset = match (
+        match (
             write.and_then(|write| write.reset),
             register.reset_value.as_ref(),
         ) {
@@ -533,24 +513,40 @@ fn build_transition_function(
                         register.name
                     )
                 })?;
+                if reset_metadata.asynchronous {
+                    return Err(format!(
+                        "block2sequential: asynchronous reset is not supported for register '{}'",
+                        register.name
+                    ));
+                }
                 let reset_ref = remapped_ref(
                     &old_to_new,
                     reset_ref,
                     &format!("register '{}' reset", register.name),
                 )?;
-                let signal_output_index = push_endpoint(
-                    &mut endpoints,
-                    &mut used_output_names,
-                    format!("{}__reset", register.name),
-                    reset_ref,
-                    Type::Bits(1),
+                let reset_value_ref = push_transition_node(
+                    &mut transition,
+                    &mut max_text_id,
+                    format!("{}__reset_value", register.name),
+                    register.ty.clone(),
+                    NodePayload::Literal(reset_value.clone()),
                 );
-                Some(PendingResetSpec {
-                    signal_output_index,
-                    asynchronous: reset_metadata.asynchronous,
-                    active_low: reset_metadata.active_low,
-                    value: flatten_value(reset_value, &register.ty)?,
-                })
+                let cases = if reset_metadata.active_low {
+                    vec![reset_value_ref, d_ref]
+                } else {
+                    vec![d_ref, reset_value_ref]
+                };
+                d_ref = push_transition_node(
+                    &mut transition,
+                    &mut max_text_id,
+                    format!("{}__reset_d", register.name),
+                    register.ty.clone(),
+                    NodePayload::Sel {
+                        selector: reset_ref,
+                        cases,
+                        default: None,
+                    },
+                );
             }
             (Some(_), None) => {
                 return Err(format!(
@@ -564,15 +560,21 @@ fn build_transition_function(
                     register.name
                 ));
             }
-            (None, None) => None,
-        };
+            (None, None) => {}
+        }
+
+        let d_output_index = push_endpoint(
+            &mut endpoints,
+            &mut used_output_names,
+            canonical_register_d_name(&register.name),
+            d_ref,
+            register.ty.clone(),
+        );
 
         pending_registers.push(PendingRegisterBinding {
             name: register.name.clone(),
             q: q_input,
             d_output_index,
-            load_enable_output_index,
-            reset,
         });
     }
 
@@ -664,19 +666,6 @@ fn remapped_ref(
         .ok_or_else(|| format!("block2sequential: {context} refers to an unsupported node"))
 }
 
-fn unique_name(base: &str, used: &mut BTreeSet<String>) -> String {
-    if used.insert(base.to_string()) {
-        return base.to_string();
-    }
-    for suffix in 1usize.. {
-        let candidate = format!("{base}__{suffix}");
-        if used.insert(candidate.clone()) {
-            return candidate;
-        }
-    }
-    unreachable!("unbounded suffix sequence must provide a unique name")
-}
-
 fn push_endpoint(
     endpoints: &mut Vec<TransitionEndpoint>,
     used_names: &mut BTreeSet<String>,
@@ -684,17 +673,31 @@ fn push_endpoint(
     node_ref: NodeRef,
     ty: Type,
 ) -> usize {
-    let name = unique_name(&preferred_name, used_names);
+    let name = uniquify_transition_port_name(&preferred_name, used_names);
     let index = endpoints.len();
     endpoints.push(TransitionEndpoint { name, node_ref, ty });
     index
 }
 
-fn flatten_value(value: &xlsynth::IrValue, ty: &Type) -> Result<IrBits, String> {
-    let mut flat_bits = Vec::with_capacity(ty.bit_count());
-    flatten_ir_value_to_lsb0_bits_for_type(value, ty, &mut flat_bits)
-        .map_err(|e| format!("block2sequential: flatten reset value failed: {e}"))?;
-    Ok(IrBits::from_lsb_is_0(&flat_bits))
+fn push_transition_node(
+    transition: &mut ir::Fn,
+    max_text_id: &mut usize,
+    name: String,
+    ty: Type,
+    payload: NodePayload,
+) -> NodeRef {
+    *max_text_id += 1;
+    let node_ref = NodeRef {
+        index: transition.nodes.len(),
+    };
+    transition.nodes.push(ir::Node {
+        text_id: *max_text_id,
+        name: Some(name),
+        ty,
+        payload,
+        pos: None,
+    });
+    node_ref
 }
 
 fn set_transition_return(

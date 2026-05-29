@@ -351,9 +351,9 @@ Output format:
 
 Converts an XLS IR file to an `xlsynth_g8r::GateFn` (i.e. a gate-level netlist in AIG form), then stores it as a native `SequentialGateFn` design with no clock or registers.
 
-- By default a text `.g8r` design beginning with `g8r_v1` is sent to **stdout**.
+- By default a text `.g8r` design beginning with `g8r_v2` is sent to **stdout**.
 - Additional artifacts can be emitted with flags:
-  - `--bin-out <PATH>` – write the design as a binary **.g8rbin** file beginning with the visible `g8rbin_v1` format prefix.
+  - `--bin-out <PATH>` – write the design as a binary **.g8rbin** file beginning with the visible `g8rbin_v2` format prefix.
   - `--aiger-out <PATH>` – write the GateFn as AIGER:
     - use a `.aag` suffix for ASCII AIGER (`aag`)
     - use a `.aig` suffix for binary AIGER (`aig`)

@@ -11,13 +11,12 @@ use xlsynth::ir_value::IrFormatPreference;
 use xlsynth::{IrBits, IrValue};
 
 use crate::aig::{
-    ClockPort, GateFn, RegisterBinding, ResetSpec, SequentialGateFn, TransitionInputId,
-    TransitionOutputId,
+    ClockPort, GateFn, RegisterBinding, SequentialGateFn, TransitionInputId, TransitionOutputId,
 };
 use crate::aig_serdes::gate_parser::parse_gate_fn;
 
-const TEXT_HEADER: &str = "g8r_v1";
-const BINARY_HEADER: &[u8] = b"g8rbin_v1\n";
+const TEXT_HEADER: &str = "g8r_v2";
+const BINARY_HEADER: &[u8] = b"g8rbin_v2\n";
 
 /// Emits the canonical human-readable `.g8r` representation of a design.
 pub fn emit_g8r(design: &SequentialGateFn) -> String {
@@ -55,7 +54,7 @@ pub fn encode_g8r_binary(design: &SequentialGateFn) -> Result<Vec<u8>, String> {
 pub fn decode_g8r_binary(bytes: &[u8]) -> Result<SequentialGateFn, String> {
     let body = bytes
         .strip_prefix(BINARY_HEADER)
-        .ok_or_else(|| "unsupported g8rbin header; expected 'g8rbin_v1'".to_string())?;
+        .ok_or_else(|| "unsupported g8rbin header; expected 'g8rbin_v2'".to_string())?;
     let binary: BinarySequentialGateFn = bincode::deserialize(body)
         .map_err(|e| format!("failed to deserialize SequentialGateFn payload: {}", e))?;
     binary.try_into()
@@ -109,34 +108,11 @@ fn emit_sequential_g8r(sequential: &SequentialGateFn) -> String {
     ));
     text.push_str(&format!("registers {}\n", sequential.registers.len()));
     for register in &sequential.registers {
-        let (reset_signal, reset_asynchronous, reset_active_low, reset_value) =
-            match &register.reset {
-                None => (
-                    "none".to_string(),
-                    "none".to_string(),
-                    "none".to_string(),
-                    "none".to_string(),
-                ),
-                Some(reset) => (
-                    reset.signal.index().to_string(),
-                    reset.asynchronous.to_string(),
-                    reset.active_low.to_string(),
-                    format_bits(&reset.value),
-                ),
-            };
         text.push_str(&format!(
-            "register {} q={} d={} load_enable={} reset_signal={} reset_asynchronous={} reset_active_low={} reset_value={} initial_value={}\n",
+            "register {} q={} d={} initial_value={}\n",
             register.name,
             register.q.index(),
             register.d.index(),
-            register
-                .load_enable
-                .map(|id| id.index().to_string())
-                .unwrap_or_else(|| "none".to_string()),
-            reset_signal,
-            reset_asynchronous,
-            reset_active_low,
-            reset_value,
             register
                 .initial_value
                 .as_ref()
@@ -302,32 +278,6 @@ fn parse_register(line: &str) -> Result<RegisterBinding, String> {
     }
     let q = TransitionInputId::new(parse_required_usize(&mut fields, "q")?);
     let d = TransitionOutputId::new(parse_required_usize(&mut fields, "d")?);
-    let load_enable =
-        parse_optional_usize(&mut fields, "load_enable")?.map(TransitionOutputId::new);
-    let reset_signal = parse_optional_usize(&mut fields, "reset_signal")?;
-    let reset_asynchronous = parse_optional_bool(&mut fields, "reset_asynchronous")?;
-    let reset_active_low = parse_optional_bool(&mut fields, "reset_active_low")?;
-    let reset_value = parse_optional_bits(&mut fields, "reset_value")?;
-    let reset = match (
-        reset_signal,
-        reset_asynchronous,
-        reset_active_low,
-        reset_value,
-    ) {
-        (None, None, None, None) => None,
-        (Some(signal), Some(asynchronous), Some(active_low), Some(value)) => Some(ResetSpec {
-            signal: TransitionOutputId::new(signal),
-            asynchronous,
-            active_low,
-            value,
-        }),
-        _ => {
-            return Err(format!(
-                "register '{}' must provide all reset fields or none of them",
-                name
-            ));
-        }
-    };
     let initial_value = parse_optional_bits(&mut fields, "initial_value")?;
     if let Some(field) = fields.keys().next() {
         return Err(format!("unknown register field '{}'", field));
@@ -336,8 +286,6 @@ fn parse_register(line: &str) -> Result<RegisterBinding, String> {
         name,
         q,
         d,
-        load_enable,
-        reset,
         initial_value,
     })
 }
@@ -359,36 +307,6 @@ fn parse_required_usize<'a>(
     value
         .parse()
         .map_err(|e| format!("invalid register '{}' value '{}': {}", name, value, e))
-}
-
-fn parse_optional_usize<'a>(
-    fields: &mut BTreeMap<&'a str, &'a str>,
-    name: &str,
-) -> Result<Option<usize>, String> {
-    let value = take_required_field(fields, name)?;
-    if value == "none" {
-        Ok(None)
-    } else {
-        value
-            .parse()
-            .map(Some)
-            .map_err(|e| format!("invalid register '{}' value '{}': {}", name, value, e))
-    }
-}
-
-fn parse_optional_bool<'a>(
-    fields: &mut BTreeMap<&'a str, &'a str>,
-    name: &str,
-) -> Result<Option<bool>, String> {
-    match take_required_field(fields, name)? {
-        "none" => Ok(None),
-        "true" => Ok(Some(true)),
-        "false" => Ok(Some(false)),
-        value => Err(format!(
-            "invalid register '{}' bool value '{}'",
-            name, value
-        )),
-    }
 }
 
 fn format_bits(bits: &IrBits) -> String {
@@ -431,20 +349,10 @@ struct BinaryBits {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct BinaryResetSpec {
-    signal: usize,
-    asynchronous: bool,
-    active_low: bool,
-    value: BinaryBits,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 struct BinaryRegisterBinding {
     name: String,
     q: usize,
     d: usize,
-    load_enable: Option<usize>,
-    reset: Option<BinaryResetSpec>,
     initial_value: Option<BinaryBits>,
 }
 
@@ -471,13 +379,6 @@ impl From<&RegisterBinding> for BinaryRegisterBinding {
             name: value.name.clone(),
             q: value.q.index(),
             d: value.d.index(),
-            load_enable: value.load_enable.map(|id| id.index()),
-            reset: value.reset.as_ref().map(|reset| BinaryResetSpec {
-                signal: reset.signal.index(),
-                asynchronous: reset.asynchronous,
-                active_low: reset.active_low,
-                value: BinaryBits::from(&reset.value),
-            }),
             initial_value: value.initial_value.as_ref().map(BinaryBits::from),
         }
     }
@@ -511,13 +412,6 @@ impl TryFrom<BinarySequentialGateFn> for SequentialGateFn {
                 name: register.name,
                 q: TransitionInputId::new(register.q),
                 d: TransitionOutputId::new(register.d),
-                load_enable: register.load_enable.map(TransitionOutputId::new),
-                reset: register.reset.map(|reset| ResetSpec {
-                    signal: TransitionOutputId::new(reset.signal),
-                    asynchronous: reset.asynchronous,
-                    active_low: reset.active_low,
-                    value: reset.value.into(),
-                }),
                 initial_value: register.initial_value.map(IrBits::from),
             })
             .collect();

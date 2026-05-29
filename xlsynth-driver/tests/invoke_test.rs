@@ -4523,7 +4523,7 @@ fn test_ir2g8r_emits_all_outputs() {
     // Check stdout identifies the native format and contains its transition body.
     let stdout = String::from_utf8_lossy(&ir2g8r_output.stdout);
     assert!(
-        stdout.starts_with("g8r_v1\n"),
+        stdout.starts_with("g8r_v2\n"),
         "stdout did not contain the g8r header: {}",
         stdout
     );
@@ -4535,7 +4535,7 @@ fn test_ir2g8r_emits_all_outputs() {
     // Check .g8rbin file exists and is non-empty
     let g8rbin_data = std::fs::read(&g8rbin_path).expect(".g8rbin file not found");
     assert!(!g8rbin_data.is_empty(), ".g8rbin file is empty");
-    assert!(g8rbin_data.starts_with(b"g8rbin_v1\n"));
+    assert!(g8rbin_data.starts_with(b"g8rbin_v2\n"));
     // Check stats JSON file exists and contains expected keys
     let stats_json = std::fs::read_to_string(&stats_path).expect("stats JSON file not found");
     let stats: serde_json::Value =

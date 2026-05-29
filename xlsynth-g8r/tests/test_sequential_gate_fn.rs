@@ -2,7 +2,7 @@
 
 use xlsynth::IrBits;
 use xlsynth_g8r::aig::{
-    ClockPort, RegisterBinding, ResetSpec, SequentialGateFn, TransitionInputId, TransitionOutputId,
+    ClockPort, RegisterBinding, SequentialGateFn, TransitionInputId, TransitionOutputId,
 };
 use xlsynth_g8r::aig_serdes::g8r::{decode_g8r_binary, emit_g8r, encode_g8r_binary, parse_g8r};
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
@@ -45,13 +45,13 @@ fn native_g8r_stores_combinational_design_as_sequential_gate_fn() {
     .unwrap();
 
     let text = emit_g8r(&sequential);
-    assert!(text.starts_with("g8r_v1\n"));
+    assert!(text.starts_with("g8r_v2\n"));
     let parsed = parse_g8r(&text).unwrap();
     assert_eq!(parsed.name, "transition");
     assert!(parsed.registers.is_empty());
     assert!(structurally_equivalent(&transition, &parsed.transition));
     let binary = encode_g8r_binary(&sequential).unwrap();
-    assert!(binary.starts_with(b"g8rbin_v1\n"));
+    assert!(binary.starts_with(b"g8rbin_v2\n"));
     assert!(decode_g8r_binary(&binary).unwrap().registers.is_empty());
 
     let wrapped = SequentialGateFn::from_gate_fn(transition.clone());
@@ -63,42 +63,27 @@ fn native_g8r_stores_combinational_design_as_sequential_gate_fn() {
 }
 
 #[test]
-fn register_can_bind_data_load_enable_and_reset_transition_outputs() {
+fn register_binds_effective_next_state_transition_output() {
     let mut builder =
         GateBuilder::new("pipeline_transition".to_string(), GateBuilderOptions::opt());
     let data = builder.add_input("data".to_string(), 8);
-    let load_enable = builder.add_input("load_enable".to_string(), 1);
-    let reset = builder.add_input("reset".to_string(), 1);
     let state_q = builder.add_input("state_q".to_string(), 8);
     builder.add_output("result".to_string(), state_q);
     builder.add_output("state_d".to_string(), data);
-    builder.add_output("state_load_enable".to_string(), load_enable);
-    builder.add_output("state_reset".to_string(), reset);
 
     let sequential = SequentialGateFn::new(
         "pipeline".to_string(),
         builder.build(),
-        vec![
-            TransitionInputId::new(0),
-            TransitionInputId::new(1),
-            TransitionInputId::new(2),
-        ],
+        vec![TransitionInputId::new(0)],
         vec![TransitionOutputId::new(0)],
         Some(ClockPort {
             name: "clk".to_string(),
         }),
         vec![RegisterBinding {
             name: "state".to_string(),
-            q: TransitionInputId::new(3),
+            q: TransitionInputId::new(1),
             d: TransitionOutputId::new(1),
-            load_enable: Some(TransitionOutputId::new(2)),
-            reset: Some(ResetSpec {
-                signal: TransitionOutputId::new(3),
-                asynchronous: false,
-                active_low: false,
-                value: IrBits::make_ubits(8, 3).unwrap(),
-            }),
-            initial_value: None,
+            initial_value: Some(IrBits::make_ubits(8, 3).unwrap()),
         }],
     )
     .unwrap();
@@ -106,10 +91,9 @@ fn register_can_bind_data_load_enable_and_reset_transition_outputs() {
     assert_eq!(sequential.registers[0].name, "state");
     assert_eq!(
         sequential.registers[0]
-            .reset
+            .initial_value
             .as_ref()
             .unwrap()
-            .value
             .get_bit_count(),
         8
     );
@@ -205,8 +189,6 @@ fn registered_sequential_gate_fn_requires_clock() {
             name: "state".to_string(),
             q: TransitionInputId::new(0),
             d: TransitionOutputId::new(0),
-            load_enable: None,
-            reset: None,
             initial_value: None,
         }],
     )
@@ -233,8 +215,6 @@ fn register_data_width_must_match_state_width() {
             name: "state".to_string(),
             q: TransitionInputId::new(0),
             d: TransitionOutputId::new(0),
-            load_enable: None,
-            reset: None,
             initial_value: None,
         }],
     )

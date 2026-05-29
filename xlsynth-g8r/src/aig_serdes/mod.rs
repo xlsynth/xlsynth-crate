@@ -2,6 +2,7 @@
 
 mod canonical_aiger_layout;
 
+pub mod blif;
 pub mod emit_aiger;
 pub mod emit_aiger_binary;
 pub mod emit_netlist;

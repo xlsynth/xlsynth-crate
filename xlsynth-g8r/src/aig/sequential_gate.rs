@@ -43,40 +43,28 @@ pub struct ClockPort {
     pub name: String,
 }
 
-/// Reset behavior of a register.
-///
-/// `signal` is an output of the transition function because reset may be a
-/// combinational expression and must remain live during AIG optimization.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct ResetSpec {
-    pub signal: TransitionOutputId,
-    pub asynchronous: bool,
-    pub active_low: bool,
-    pub value: IrBits,
-}
-
 /// Binds one state element to the transition function interface.
 ///
 /// Register `Q` is a source of combinational logic, represented as a
-/// transition input. Register `D`, load enable, and reset are sequential-cell
-/// inputs, represented as transition outputs.
+/// transition input. Register `D` is the effective next-state value,
+/// represented as a transition output. Synchronous load-enable and reset
+/// behavior is part of that transition logic. Asynchronous reset is not
+/// representable by this type.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct RegisterBinding {
     pub name: String,
     pub q: TransitionInputId,
     pub d: TransitionOutputId,
-    pub load_enable: Option<TransitionOutputId>,
-    pub reset: Option<ResetSpec>,
     pub initial_value: Option<IrBits>,
 }
 
 /// A synchronous design represented as a combinational transition function
 /// plus its sequential boundaries.
 ///
-/// `transition.inputs` are classified as external `inputs` or register `Q`
-/// values. `transition.outputs` are externally visible `outputs`, register
-/// `D` values, or register control inputs. A design with no registers is valid
-/// and may omit `clock`.
+/// `transition.inputs` are classified as external `inputs`, including
+/// synchronous controls, or register `Q` values. `transition.outputs` are
+/// externally visible `outputs` or effective register `D` values. A design
+/// with no registers is valid and may omit `clock`.
 #[derive(Debug, Clone)]
 pub struct SequentialGateFn {
     pub name: String,
@@ -85,6 +73,39 @@ pub struct SequentialGateFn {
     pub outputs: Vec<TransitionOutputId>,
     pub clock: Option<ClockPort>,
     pub registers: Vec<RegisterBinding>,
+}
+
+/// Returns the canonical generated name for a sequential transition function.
+pub(crate) fn canonical_transition_name(design_name: &str) -> String {
+    format!("{design_name}__transition")
+}
+
+/// Returns the canonical generated transition input name for a register Q port.
+pub(crate) fn canonical_register_q_name(register_name: &str) -> String {
+    format!("{register_name}__q")
+}
+
+/// Returns the canonical generated transition output name for a register D
+/// port.
+pub(crate) fn canonical_register_d_name(register_name: &str) -> String {
+    format!("{register_name}__d")
+}
+
+/// Makes a canonical generated transition port name unique in an interface.
+pub(crate) fn uniquify_transition_port_name(
+    preferred_name: &str,
+    used_names: &mut BTreeSet<String>,
+) -> String {
+    if used_names.insert(preferred_name.to_string()) {
+        return preferred_name.to_string();
+    }
+    for suffix in 1usize.. {
+        let candidate = format!("{preferred_name}__{suffix}");
+        if used_names.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded suffix sequence must provide a unique name")
 }
 
 impl SequentialGateFn {
@@ -226,44 +247,6 @@ impl SequentialGateFn {
                     register_width,
                     d.get_bit_count()
                 ));
-            }
-
-            if let Some(load_enable) = register.load_enable {
-                let output = self.bind_transition_output(
-                    &mut output_is_bound,
-                    load_enable,
-                    &format!("register '{}' load enable", register.name),
-                )?;
-                if output.get_bit_count() != 1 {
-                    return Err(format!(
-                        "register '{}' load enable must be bits[1], got bits[{}]",
-                        register.name,
-                        output.get_bit_count()
-                    ));
-                }
-            }
-
-            if let Some(reset) = &register.reset {
-                let output = self.bind_transition_output(
-                    &mut output_is_bound,
-                    reset.signal,
-                    &format!("register '{}' reset", register.name),
-                )?;
-                if output.get_bit_count() != 1 {
-                    return Err(format!(
-                        "register '{}' reset signal must be bits[1], got bits[{}]",
-                        register.name,
-                        output.get_bit_count()
-                    ));
-                }
-                if reset.value.get_bit_count() != register_width {
-                    return Err(format!(
-                        "register '{}' reset value has width {} but register width is {}",
-                        register.name,
-                        reset.value.get_bit_count(),
-                        register_width
-                    ));
-                }
             }
 
             if let Some(initial_value) = &register.initial_value
