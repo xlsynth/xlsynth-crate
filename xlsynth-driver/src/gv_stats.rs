@@ -5,6 +5,7 @@ use std::path::Path;
 use xlsynth_g8r::netlist::io::{load_liberty_with_timing_data_from_path, parse_netlist_from_path};
 use xlsynth_g8r::netlist::report::{build_netlist_report, select_module, NetlistReport};
 use xlsynth_g8r::netlist::sta::StaOptions;
+use xlsynth_g8r::netlist::stages::StagePartitionStatus;
 
 const SUBCOMMAND: &str = "gv-stats";
 
@@ -13,6 +14,67 @@ fn shown_time_unit(time_unit: &str) -> &str {
         "<unspecified>"
     } else {
         time_unit
+    }
+}
+
+fn shown_optional_metric(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.6}"))
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn push_input_to_register_delay_breakdown(
+    out: &mut String,
+    value: Option<xlsynth_g8r::netlist::sta::RegisterPathDelayBreakdown>,
+) {
+    if let Some(value) = value {
+        out.push_str(&format!(
+            "  combinational_delay: {:.6}\n",
+            value.combinational_delay
+        ));
+        out.push_str(&format!("  setup_delay: {:.6}\n", value.setup_delay));
+    }
+}
+
+fn push_register_to_register_delay_breakdown(
+    out: &mut String,
+    value: Option<xlsynth_g8r::netlist::sta::RegisterPathDelayBreakdown>,
+) {
+    if let Some(value) = value {
+        out.push_str(&format!(
+            "  clock_to_output_delay: {:.6}\n",
+            value.clock_to_output_delay
+        ));
+        out.push_str(&format!(
+            "  combinational_delay: {:.6}\n",
+            value.combinational_delay
+        ));
+        out.push_str(&format!("  setup_delay: {:.6}\n", value.setup_delay));
+    }
+}
+
+fn push_register_to_output_delay_breakdown(
+    out: &mut String,
+    value: Option<xlsynth_g8r::netlist::sta::RegisterPathDelayBreakdown>,
+) {
+    if let Some(value) = value {
+        out.push_str(&format!(
+            "  clock_to_output_delay: {:.6}\n",
+            value.clock_to_output_delay
+        ));
+        out.push_str(&format!(
+            "  combinational_delay: {:.6}\n",
+            value.combinational_delay
+        ));
+    }
+}
+
+fn shown_stage_status(status: StagePartitionStatus) -> &'static str {
+    match status {
+        StagePartitionStatus::NoRegisters => "no_registers",
+        StagePartitionStatus::Partitioned => "partitioned",
+        StagePartitionStatus::NotPartitionable => "not_partitionable",
+        StagePartitionStatus::Ambiguous => "ambiguous",
     }
 }
 
@@ -31,10 +93,84 @@ fn render_netlist_report(report: &NetlistReport) -> String {
         "module_output_load: {:.6}\n",
         report.module_output_load
     ));
-    out.push_str(&format!("area: {:.6}\n", report.area));
-    out.push_str(&format!("delay: {:.6}\n", report.delay));
+    out.push_str(&format!("cell_area: {:.6}\n", report.cell_area));
+    out.push_str(&format!(
+        "max_delay: {}\n",
+        shown_optional_metric(report.max_delay)
+    ));
+    out.push_str(&format!(
+        "max_input_to_register_delay: {}\n",
+        shown_optional_metric(report.max_input_to_register_delay)
+    ));
+    push_input_to_register_delay_breakdown(&mut out, report.max_input_to_register_delay_breakdown);
+    out.push_str(&format!(
+        "max_register_to_register_delay: {}\n",
+        shown_optional_metric(report.max_register_to_register_delay)
+    ));
+    push_register_to_register_delay_breakdown(
+        &mut out,
+        report.max_register_to_register_delay_breakdown,
+    );
+    out.push_str(&format!(
+        "max_register_to_output_delay: {}\n",
+        shown_optional_metric(report.max_register_to_output_delay)
+    ));
+    push_register_to_output_delay_breakdown(
+        &mut out,
+        report.max_register_to_output_delay_breakdown,
+    );
+    out.push_str("timing_query_diagnostic_counts:\n");
+    out.push_str(&format!(
+        "  delay_slew_below_min_clamp_count: {}\n",
+        report
+            .timing_query_diagnostic_counts
+            .delay_slew_below_min_clamp_count
+    ));
+    out.push_str(&format!(
+        "  delay_slew_single_above_max_extrapolation_count: {}\n",
+        report
+            .timing_query_diagnostic_counts
+            .delay_slew_single_above_max_extrapolation_count
+    ));
+    out.push_str(&format!(
+        "  delay_slew_multiple_above_max_clamp_count: {}\n",
+        report
+            .timing_query_diagnostic_counts
+            .delay_slew_multiple_above_max_clamp_count
+    ));
+    out.push_str(&format!(
+        "  setup_below_min_clamp_count: {}\n",
+        report
+            .timing_query_diagnostic_counts
+            .setup_below_min_clamp_count
+    ));
+    out.push_str(&format!(
+        "  setup_above_max_clamp_count: {}\n",
+        report
+            .timing_query_diagnostic_counts
+            .setup_above_max_clamp_count
+    ));
     out.push_str(&format!("cell_count: {}\n", report.cell_count));
     out.push_str(&format!("cell_levels: {}\n", report.cell_levels));
+    out.push_str(&format!(
+        "sequential_cell_area: {:.6}\n",
+        report.sequential_cell_area
+    ));
+    out.push_str(&format!(
+        "non_stage_combinational_cell_area: {:.6}\n",
+        report.non_stage_combinational_cell_area
+    ));
+    out.push_str(&format!(
+        "stage_partition_status: {}\n",
+        shown_stage_status(report.stage_partition_status)
+    ));
+    for stage in &report.stages {
+        out.push_str(&format!(
+            "stage {} max_delay={:.6} combinational_cell_area={:.6}\n",
+            stage.stage, stage.max_delay, stage.combinational_cell_area
+        ));
+        push_register_to_register_delay_breakdown(&mut out, stage.max_delay_breakdown);
+    }
     out.push_str("cell_counts:\n");
     for cell in &report.cells {
         out.push_str(&format!(
@@ -123,7 +259,13 @@ pub fn handle_gv_stats(matches: &ArgMatches) {
 #[cfg(test)]
 mod tests {
     use super::render_netlist_report;
-    use xlsynth_g8r::netlist::report::{CellAreaRow, NetlistReport, OutputTimingRow};
+    use xlsynth_g8r::netlist::report::{
+        CellAreaRow, NetlistReport, OutputTimingRow, StageReportRow,
+    };
+    use xlsynth_g8r::netlist::{
+        sta::{RegisterPathDelayBreakdown, TimingQueryDiagnosticCounts},
+        stages::StagePartitionStatus,
+    };
 
     #[test]
     fn render_netlist_report_is_stable() {
@@ -132,10 +274,48 @@ mod tests {
             time_unit: "1ps".to_string(),
             primary_input_transition: 0.01,
             module_output_load: 0.0,
-            area: 4.0,
-            delay: 3.0,
+            cell_area: 4.0,
+            max_delay: Some(3.0),
+            max_input_to_register_delay: Some(1.0),
+            max_input_to_register_delay_breakdown: Some(RegisterPathDelayBreakdown {
+                clock_to_output_delay: 0.0,
+                combinational_delay: 0.75,
+                setup_delay: 0.25,
+            }),
+            max_register_to_register_delay: Some(2.0),
+            max_register_to_register_delay_breakdown: Some(RegisterPathDelayBreakdown {
+                clock_to_output_delay: 0.5,
+                combinational_delay: 1.25,
+                setup_delay: 0.25,
+            }),
+            max_register_to_output_delay: Some(3.0),
+            max_register_to_output_delay_breakdown: Some(RegisterPathDelayBreakdown {
+                clock_to_output_delay: 0.5,
+                combinational_delay: 2.5,
+                setup_delay: 0.0,
+            }),
+            timing_query_diagnostic_counts: TimingQueryDiagnosticCounts {
+                delay_slew_below_min_clamp_count: 1,
+                delay_slew_single_above_max_extrapolation_count: 2,
+                delay_slew_multiple_above_max_clamp_count: 3,
+                setup_below_min_clamp_count: 4,
+                setup_above_max_clamp_count: 5,
+            },
             cell_count: 3,
             cell_levels: 2,
+            sequential_cell_area: 1.0,
+            non_stage_combinational_cell_area: 1.0,
+            stage_partition_status: StagePartitionStatus::Partitioned,
+            stages: vec![StageReportRow {
+                stage: 0,
+                max_delay: 2.0,
+                max_delay_breakdown: Some(RegisterPathDelayBreakdown {
+                    clock_to_output_delay: 0.5,
+                    combinational_delay: 1.25,
+                    setup_delay: 0.25,
+                }),
+                combinational_cell_area: 2.0,
+            }],
             cells: vec![CellAreaRow {
                 cell: "INV".to_string(),
                 count: 2,
@@ -152,6 +332,23 @@ mod tests {
             }],
         };
         assert!(render_netlist_report(&report).contains("cell_levels: 2\n"));
-        assert!(render_netlist_report(&report).contains("delay: 3.000000\n"));
+        assert!(render_netlist_report(&report).contains("max_delay: 3.000000\n"));
+        assert!(render_netlist_report(&report).contains(
+            "max_input_to_register_delay: 1.000000\n  combinational_delay: 0.750000\n  setup_delay: 0.250000\n"
+        ));
+        assert!(render_netlist_report(&report).contains(
+            "max_register_to_register_delay: 2.000000\n  clock_to_output_delay: 0.500000\n  combinational_delay: 1.250000\n  setup_delay: 0.250000\n"
+        ));
+        assert!(render_netlist_report(&report).contains(
+            "max_register_to_output_delay: 3.000000\n  clock_to_output_delay: 0.500000\n  combinational_delay: 2.500000\n"
+        ));
+        assert!(render_netlist_report(&report).contains(
+            "timing_query_diagnostic_counts:\n  delay_slew_below_min_clamp_count: 1\n  delay_slew_single_above_max_extrapolation_count: 2\n  delay_slew_multiple_above_max_clamp_count: 3\n  setup_below_min_clamp_count: 4\n  setup_above_max_clamp_count: 5\n"
+        ));
+        assert!(render_netlist_report(&report)
+            .contains("stage 0 max_delay=2.000000 combinational_cell_area=2.000000\n"));
+        assert!(render_netlist_report(&report).contains(
+            "stage 0 max_delay=2.000000 combinational_cell_area=2.000000\n  clock_to_output_delay: 0.500000\n  combinational_delay: 1.250000\n  setup_delay: 0.250000\n"
+        ));
     }
 }

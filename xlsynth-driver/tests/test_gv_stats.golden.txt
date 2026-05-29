@@ -2,10 +2,22 @@ module: top
 time_unit: 1ps
 primary_input_transition: 0.010000
 module_output_load: 0.000000
-area: 3.000000
-delay: 3.000000
+cell_area: 3.000000
+max_delay: 3.000000
+max_input_to_register_delay: n/a
+max_register_to_register_delay: n/a
+max_register_to_output_delay: n/a
+timing_query_diagnostic_counts:
+  delay_slew_below_min_clamp_count: 0
+  delay_slew_single_above_max_extrapolation_count: 0
+  delay_slew_multiple_above_max_clamp_count: 0
+  setup_below_min_clamp_count: 0
+  setup_above_max_clamp_count: 0
 cell_count: 2
 cell_levels: 2
+sequential_cell_area: 0.000000
+non_stage_combinational_cell_area: 3.000000
+stage_partition_status: no_registers
 cell_counts:
   NAND2 count=1 cell_area=2.000000 total_area=2.000000
   INV count=1 cell_area=1.000000 total_area=1.000000

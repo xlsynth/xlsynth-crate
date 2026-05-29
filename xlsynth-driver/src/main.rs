@@ -2067,7 +2067,7 @@ fn main() {
         )
         .subcommand(
             clap::Command::new("gv-stats")
-                .about("Reports mapped area, delay, cell count, and cell levels for a gate-level netlist")
+                .about("Reports mapped area and combinational/register-boundary timing for a gate-level netlist")
                 .arg(
                     Arg::new("netlist")
                         .long("netlist")

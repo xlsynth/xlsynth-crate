@@ -1,0 +1,34 @@
+module: top
+time_unit: 1ps
+primary_input_transition: 0.010000
+module_output_load: 0.000000
+cell_area: 11.000000
+max_delay: n/a
+max_input_to_register_delay: 1.250000
+  combinational_delay: 1.000000
+  setup_delay: 0.250000
+max_register_to_register_delay: 1.750000
+  clock_to_output_delay: 0.500000
+  combinational_delay: 1.000000
+  setup_delay: 0.250000
+max_register_to_output_delay: 1.500000
+  clock_to_output_delay: 0.500000
+  combinational_delay: 1.000000
+timing_query_diagnostic_counts:
+  delay_slew_below_min_clamp_count: 0
+  delay_slew_single_above_max_extrapolation_count: 0
+  delay_slew_multiple_above_max_clamp_count: 0
+  setup_below_min_clamp_count: 0
+  setup_above_max_clamp_count: 0
+cell_count: 5
+cell_levels: 0
+sequential_cell_area: 8.000000
+non_stage_combinational_cell_area: 2.000000
+stage_partition_status: partitioned
+stage 0 max_delay=1.750000 combinational_cell_area=1.000000
+  clock_to_output_delay: 0.500000
+  combinational_delay: 1.000000
+  setup_delay: 0.250000
+cell_counts:
+  DFF count=2 cell_area=4.000000 total_area=8.000000
+  INV count=3 cell_area=1.000000 total_area=3.000000

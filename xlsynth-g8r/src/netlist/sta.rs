@@ -2,24 +2,28 @@
 
 //! Basic static timing analysis (STA) for parsed gate-level netlists.
 //!
-//! This module implements a limited-scope, combinational max-arrival analysis:
+//! This module implements a limited-scope max-arrival analysis:
 //! - Uses Liberty combinational timing arcs (`cell_rise`, `cell_fall`,
 //!   `rise_transition`, `fall_transition`).
 //! - Propagates rise/fall arrival and transition values bit-by-bit, then
 //!   aggregates report timing back to parsed nets.
 //! - Assumes fixed transition at primary-input sources.
 //! - Uses summed input-pin capacitance on each net plus a fixed module-output
-//!   load to query timing tables.
-//! - Treats primary-input sources as externally launched; it does not model
-//!   sequential launch/capture timing such as clock-to-Q or setup checks.
-//! - Rejects sequential output pins rather than approximating unsupported
-//!   launch/capture timing semantics in this limited-scope pass.
+//!   load to query timing tables; zero output load is evaluated at each table's
+//!   minimum characterized load coordinate.
+//! - In register-boundary analysis, models flip-flop clock-to-output arcs and
+//!   setup checks using an ideal clock edge evaluated at each table's minimum
+//!   characterized clock transition. Hold, skew, and physical clock delivery
+//!   are outside this model.
+//! - In combinational-only analysis, rejects sequential output pins.
 //! - Uses Liberty `when` predicates when known scalar constants make an arc
 //!   provably false; arcs with true or unknown predicates remain possible.
-//! - Rejects timing tables with meaningful non-monotonicity because later
-//!   frontier reduction relies on larger transition/load queries not producing
-//!   smaller delay/slew values. Small decreases within the
-//!   characterization-noise tolerance are treated as effectively equal.
+//! - Repairs non-monotone delay/slew tables during lookup with a conservative
+//!   coordinatewise upper envelope, because later frontier reduction relies on
+//!   larger transition/load queries not producing smaller delay/slew values.
+//! - Clamps below-minimum coordinates; for above-maximum delay/slew queries,
+//!   extrapolates one varying axis or holds multiple varying axes at their
+//!   characterized upper boundary. Setup queries remain clamped.
 //! - Accepts literal, alias, slice, and concat continuous assigns as zero-delay
 //!   bit sources so mapped netlists emitted by tools such as Yosys/ABC can
 //!   preserve constants and wire aliases without needing synthetic cells.
@@ -54,13 +58,12 @@ use crate::liberty_proto::{LuTableTemplate, Pin, PinDirection, TimingArc, Timing
 use crate::netlist::normalized::{BitExpr, BitSource, NormalizedNetlistModule};
 use crate::netlist::parse::{Net, NetIndex, NetlistModule, PortDirection};
 use anyhow::{Result, anyhow};
+use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
-
-const MONOTONICITY_REL_TOLERANCE: f64 = 1.0e-2;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EdgeTiming {
@@ -74,41 +77,93 @@ pub struct SignalTiming {
     pub fall: EdgeTiming,
 }
 
+/// Component delays making up one launched register-to-capture-register path.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub struct RegisterPathDelayBreakdown {
+    pub clock_to_output_delay: f64,
+    pub combinational_delay: f64,
+    pub setup_delay: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct EdgeTimingCandidate {
+    timing: EdgeTiming,
+    register_path_breakdown: Option<RegisterPathDelayBreakdown>,
+}
+
+impl EdgeTimingCandidate {
+    fn from_timing(timing: EdgeTiming) -> Self {
+        Self {
+            timing,
+            register_path_breakdown: None,
+        }
+    }
+
+    fn from_register_launch(timing: EdgeTiming) -> Self {
+        Self {
+            register_path_breakdown: Some(RegisterPathDelayBreakdown {
+                clock_to_output_delay: timing.arrival,
+                ..Default::default()
+            }),
+            timing,
+        }
+    }
+
+    fn from_primary_input_launch(timing: EdgeTiming) -> Self {
+        Self {
+            timing,
+            register_path_breakdown: Some(RegisterPathDelayBreakdown::default()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 struct EdgeTimingSet {
-    values: Vec<EdgeTiming>,
+    values: Vec<EdgeTimingCandidate>,
 }
 
 impl EdgeTimingSet {
     fn from_single(edge: EdgeTiming) -> Self {
         let mut set = Self::default();
-        set.insert(edge);
+        set.insert(EdgeTimingCandidate::from_timing(edge));
         set
     }
 
-    fn insert(&mut self, candidate: EdgeTiming) {
-        if self.values.contains(&candidate) {
+    fn from_primary_input_launch(edge: EdgeTiming) -> Self {
+        let mut set = Self::default();
+        set.insert(EdgeTimingCandidate::from_primary_input_launch(edge));
+        set
+    }
+
+    fn insert(&mut self, candidate: EdgeTimingCandidate) {
+        if self
+            .values
+            .iter()
+            .any(|existing| existing.timing == candidate.timing)
+        {
             return;
         }
 
         if self
             .values
             .iter()
-            .any(|existing| edge_timing_dominates(*existing, candidate))
+            .any(|existing| edge_timing_dominates(existing.timing, candidate.timing))
         {
             return;
         }
         self.values
-            .retain(|existing| !edge_timing_dominates(candidate, *existing));
+            .retain(|existing| !edge_timing_dominates(candidate.timing, existing.timing));
 
         self.values.push(candidate);
         self.values.sort_by(|lhs, rhs| {
-            lhs.arrival
-                .partial_cmp(&rhs.arrival)
+            lhs.timing
+                .arrival
+                .partial_cmp(&rhs.timing.arrival)
                 .unwrap_or(Ordering::Equal)
                 .then_with(|| {
-                    lhs.transition
-                        .partial_cmp(&rhs.transition)
+                    lhs.timing
+                        .transition
+                        .partial_cmp(&rhs.timing.transition)
                         .unwrap_or(Ordering::Equal)
                 })
         });
@@ -120,14 +175,19 @@ impl EdgeTimingSet {
         }
     }
 
-    fn max_arrival_edge(&self) -> Option<EdgeTiming> {
+    fn max_arrival_candidate(&self) -> Option<EdgeTimingCandidate> {
         self.values
             .iter()
             .copied()
-            .reduce(choose_worse_edge_timing_by_arrival)
+            .reduce(choose_worse_edge_timing_candidate_by_arrival)
     }
 
-    fn iter(&self) -> impl Iterator<Item = EdgeTiming> + '_ {
+    fn max_arrival_edge(&self) -> Option<EdgeTiming> {
+        self.max_arrival_candidate()
+            .map(|candidate| candidate.timing)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = EdgeTimingCandidate> + '_ {
         self.values.iter().copied()
     }
 }
@@ -146,6 +206,13 @@ impl SignalTimingSet {
         }
     }
 
+    fn from_primary_input_launch(signal: SignalTiming) -> Self {
+        Self {
+            rise: EdgeTimingSet::from_primary_input_launch(signal.rise),
+            fall: EdgeTimingSet::from_primary_input_launch(signal.fall),
+        }
+    }
+
     fn merge(mut self, rhs: &Self) -> Self {
         self.rise.extend_from(&rhs.rise);
         self.fall.extend_from(&rhs.fall);
@@ -159,13 +226,11 @@ impl SignalTimingSet {
         })
     }
 
-    fn worst_arrival(&self) -> Option<f64> {
-        Some(
-            self.rise
-                .max_arrival_edge()?
-                .arrival
-                .max(self.fall.max_arrival_edge()?.arrival),
-        )
+    fn worst_arrival_candidate(&self) -> Option<EdgeTimingCandidate> {
+        Some(choose_worse_edge_timing_candidate_by_arrival(
+            self.rise.max_arrival_candidate()?,
+            self.fall.max_arrival_candidate()?,
+        ))
     }
 }
 
@@ -201,7 +266,11 @@ fn format_edge_timing(edge: EdgeTiming) -> String {
 }
 
 fn format_edge_timing_set(set: &EdgeTimingSet) -> String {
-    let parts: Vec<String> = set.values.iter().copied().map(format_edge_timing).collect();
+    let parts: Vec<String> = set
+        .values
+        .iter()
+        .map(|candidate| format_edge_timing(candidate.timing))
+        .collect();
     format!("[{}]", parts.join(", "))
 }
 
@@ -227,10 +296,39 @@ impl Default for StaOptions {
     }
 }
 
+/// Counts timing-table coordinate queries evaluated outside characterized
+/// bounds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct TimingQueryDiagnosticCounts {
+    pub delay_slew_below_min_clamp_count: usize,
+    pub delay_slew_single_above_max_extrapolation_count: usize,
+    pub delay_slew_multiple_above_max_clamp_count: usize,
+    pub setup_below_min_clamp_count: usize,
+    pub setup_above_max_clamp_count: usize,
+}
+
+impl std::ops::AddAssign for TimingQueryDiagnosticCounts {
+    fn add_assign(&mut self, rhs: Self) {
+        self.delay_slew_below_min_clamp_count += rhs.delay_slew_below_min_clamp_count;
+        self.delay_slew_single_above_max_extrapolation_count +=
+            rhs.delay_slew_single_above_max_extrapolation_count;
+        self.delay_slew_multiple_above_max_clamp_count +=
+            rhs.delay_slew_multiple_above_max_clamp_count;
+        self.setup_below_min_clamp_count += rhs.setup_below_min_clamp_count;
+        self.setup_above_max_clamp_count += rhs.setup_above_max_clamp_count;
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct StaReport {
     pub net_timing: Vec<Option<SignalTiming>>,
     pub worst_output_arrival: f64,
+    pub worst_output_breakdown: Option<RegisterPathDelayBreakdown>,
+    pub worst_register_input_arrival: f64,
+    pub worst_register_input_breakdown: Option<RegisterPathDelayBreakdown>,
+    pub register_input_arrivals: Vec<Option<f64>>,
+    pub register_input_breakdowns: Vec<Option<RegisterPathDelayBreakdown>>,
+    pub timing_query_diagnostic_counts: TimingQueryDiagnosticCounts,
     pub cell_levels: usize,
 }
 
@@ -343,12 +441,103 @@ pub fn analyze_combinational_max_arrival(
     analyze_combinational_max_arrival_proto(module, nets, interner, library.as_proto(), options)
 }
 
+/// Analyzes combinational segments launched by primary inputs and/or selected
+/// sequential instances, treating sequential inputs as capture boundaries.
+pub fn analyze_register_boundary_max_arrival(
+    module: &NetlistModule,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    library: &LibraryWithTimingData,
+    options: StaOptions,
+    launch_primary_inputs: bool,
+    launch_register_instances: &[usize],
+) -> Result<StaReport> {
+    let launch_register_instances: HashSet<usize> =
+        launch_register_instances.iter().copied().collect();
+    analyze_max_arrival_proto_with_mode(
+        module,
+        nets,
+        interner,
+        library.as_proto(),
+        options,
+        StaAnalysisMode::RegisterBoundaries {
+            launch_primary_inputs,
+            launch_register_instances: &launch_register_instances,
+        },
+    )
+}
+
+/// Returns whether a cell should form a timing boundary for register-aware
+/// segment analysis.
+pub(crate) fn is_sequential_boundary_cell(cell: &crate::liberty_proto::Cell) -> bool {
+    !cell.sequential.is_empty()
+        || cell.pins.iter().any(|pin| {
+            pin.direction == PinDirection::Output as i32
+                && pin
+                    .timing_arcs
+                    .iter()
+                    .any(|arc| matches!(arc.timing_type.as_str(), "rising_edge" | "falling_edge"))
+        })
+}
+
+enum StaAnalysisMode<'a> {
+    CombinationalOnly,
+    RegisterBoundaries {
+        launch_primary_inputs: bool,
+        launch_register_instances: &'a HashSet<usize>,
+    },
+}
+
+impl StaAnalysisMode<'_> {
+    fn uses_register_boundaries(&self) -> bool {
+        matches!(self, Self::RegisterBoundaries { .. })
+    }
+
+    fn launches_primary_inputs(&self) -> bool {
+        match self {
+            Self::CombinationalOnly => true,
+            Self::RegisterBoundaries {
+                launch_primary_inputs,
+                ..
+            } => *launch_primary_inputs,
+        }
+    }
+
+    fn launches_register(&self, inst_idx: usize) -> bool {
+        match self {
+            Self::CombinationalOnly => false,
+            Self::RegisterBoundaries {
+                launch_register_instances,
+                ..
+            } => launch_register_instances.contains(&inst_idx),
+        }
+    }
+}
+
 fn analyze_combinational_max_arrival_proto(
     module: &NetlistModule,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
     library: &crate::liberty_proto::Library,
     options: StaOptions,
+) -> Result<StaReport> {
+    analyze_max_arrival_proto_with_mode(
+        module,
+        nets,
+        interner,
+        library,
+        options,
+        StaAnalysisMode::CombinationalOnly,
+    )
+}
+
+fn analyze_max_arrival_proto_with_mode(
+    module: &NetlistModule,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    library: &crate::liberty_proto::Library,
+    options: StaOptions,
+    analysis_mode: StaAnalysisMode<'_>,
 ) -> Result<StaReport> {
     if !options.primary_input_transition.is_finite() {
         return Err(anyhow!(
@@ -392,6 +581,7 @@ fn analyze_combinational_max_arrival_proto(
         Vec::with_capacity(instance_count);
     let mut instance_timing_related_input_pins: Vec<HashSet<String>> =
         Vec::with_capacity(instance_count);
+    let mut instance_is_sequential: Vec<bool> = Vec::with_capacity(instance_count);
 
     let mut bit_drivers: Vec<Vec<NetEndpoint>> = vec![Vec::new(); bit_count];
     let mut bit_loads: Vec<Vec<NetEndpoint>> = vec![Vec::new(); bit_count];
@@ -408,35 +598,37 @@ fn analyze_combinational_max_arrival_proto(
         })?;
         instance_cell_indices.push(cell_idx);
         instance_cell_names.push(cell_name.clone());
+        let is_sequential = is_sequential_boundary_cell(&lib.library.cells[cell_idx]);
+        instance_is_sequential.push(is_sequential);
         let mut timing_related_input_pins = HashSet::new();
-        for output_pin in lib.library.cells[cell_idx]
-            .pins
-            .iter()
-            .filter(|pin| pin.direction == PinDirection::Output as i32)
-        {
-            for arc in output_pin
-                .timing_arcs
+        if !(analysis_mode.uses_register_boundaries() && is_sequential) {
+            for output_pin in lib.library.cells[cell_idx]
+                .pins
                 .iter()
-                .filter(|arc| StaTimingType::from_raw(arc.timing_type.as_str()).is_combinational())
+                .filter(|pin| pin.direction == PinDirection::Output as i32)
             {
-                for related_pin_name in split_related_pin_names(arc.related_pin.as_str()) {
-                    let related_pin = lib.pin(cell_idx, related_pin_name).ok_or_else(|| {
-                        anyhow!(
-                            "cell '{}' output pin '{}' has timing arc with unknown related pin '{}'",
-                            cell_name,
-                            output_pin.name,
-                            related_pin_name
-                        )
-                    })?;
-                    if related_pin.direction != PinDirection::Input as i32 {
-                        return Err(anyhow!(
-                            "cell '{}' output pin '{}' has unsupported non-input related pin '{}'; basic STA only supports input-related combinational arcs",
-                            cell_name,
-                            output_pin.name,
-                            related_pin_name
-                        ));
+                for arc in output_pin.timing_arcs.iter().filter(|arc| {
+                    StaTimingType::from_raw(arc.timing_type.as_str()).is_combinational()
+                }) {
+                    for related_pin_name in split_related_pin_names(arc.related_pin.as_str()) {
+                        let related_pin = lib.pin(cell_idx, related_pin_name).ok_or_else(|| {
+                            anyhow!(
+                                "cell '{}' output pin '{}' has timing arc with unknown related pin '{}'",
+                                cell_name,
+                                output_pin.name,
+                                related_pin_name
+                            )
+                        })?;
+                        if related_pin.direction != PinDirection::Input as i32 {
+                            return Err(anyhow!(
+                                "cell '{}' output pin '{}' has unsupported non-input related pin '{}'; basic STA only supports input-related combinational arcs",
+                                cell_name,
+                                output_pin.name,
+                                related_pin_name
+                            ));
+                        }
+                        timing_related_input_pins.insert(related_pin_name.to_string());
                     }
-                    timing_related_input_pins.insert(related_pin_name.to_string());
                 }
             }
         }
@@ -663,7 +855,11 @@ fn analyze_combinational_max_arrival_proto(
             transition: options.primary_input_transition,
         },
     };
-    let source_timing_set = SignalTimingSet::from_single(source_timing);
+    let source_timing_set = if analysis_mode.uses_register_boundaries() {
+        SignalTimingSet::from_primary_input_launch(source_timing)
+    } else {
+        SignalTimingSet::from_single(source_timing)
+    };
     let literal_source_timing_set = SignalTimingSet::from_single(SignalTiming {
         rise: EdgeTiming {
             arrival: 0.0,
@@ -685,11 +881,13 @@ fn analyze_combinational_max_arrival_proto(
             ResolvedTimingSource::Bit(source_bit_idx) if source_bit_idx != bit_idx => continue,
             ResolvedTimingSource::Bit(_) => {}
         }
-        if is_module_input[bit_idx] {
+        if is_module_input[bit_idx] && analysis_mode.launches_primary_inputs() {
             bit_timing_sets[bit_idx] = Some(source_timing_set.clone());
             continue;
         }
-        if !bit_loads[bit_idx].is_empty() || has_resolved_module_output[bit_idx] {
+        if (!bit_loads[bit_idx].is_empty() || has_resolved_module_output[bit_idx])
+            && !analysis_mode.uses_register_boundaries()
+        {
             return Err(anyhow!(
                 "net bit '{}' is undriven and is not a module input; basic STA does not support floating source nets",
                 normalized.render_bit(bit_idx, nets, interner)
@@ -700,6 +898,7 @@ fn analyze_combinational_max_arrival_proto(
     let mut queue = VecDeque::new();
     let mut instance_levels = vec![1usize; instance_count];
     let mut validated_timing_tables: HashSet<*const TimingTable> = HashSet::new();
+    let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
     for (idx, deg) in indegree.iter().enumerate() {
         if *deg == 0 {
             queue.push_back(idx);
@@ -726,6 +925,30 @@ fn analyze_combinational_max_arrival_proto(
                 continue;
             };
             if output_sources.is_empty() {
+                continue;
+            }
+            if analysis_mode.uses_register_boundaries() && instance_is_sequential[inst_idx] {
+                if analysis_mode.launches_register(inst_idx) {
+                    for output_source in output_sources {
+                        if let PinBitSource::Bit(output_bit_idx) = *output_source {
+                            let output_load = bit_load_capacitance[output_bit_idx];
+                            bit_timing_sets[output_bit_idx] =
+                                Some(evaluate_register_launch_output_set(
+                                    lib.library,
+                                    cell_name,
+                                    pin,
+                                    known_pin_values,
+                                    output_load,
+                                    &mut validated_timing_tables,
+                                    &mut timing_query_diagnostic_counts,
+                                    &format!(
+                                        "{}.{} (instance '{}') clock-to-output",
+                                        cell_name, pin.name, instance_name
+                                    ),
+                                )?);
+                        }
+                    }
+                }
                 continue;
             }
             if let Some(unsupported_arc) = pin
@@ -806,25 +1029,28 @@ fn analyze_combinational_max_arrival_proto(
                         for related_source in related_sources {
                             let (input_timing_set, related_net_name) = match related_source {
                                 PinBitSource::Bit(related_bit_idx) => {
-                                    let timing = bit_timing_sets[*related_bit_idx]
-                                        .as_ref()
-                                        .ok_or_else(|| {
-                                            anyhow!(
-                                                "missing source timing for net bit '{}' feeding '{}.{}' (related pin '{}')",
-                                                normalized.render_bit(
-                                                    *related_bit_idx,
-                                                    nets,
-                                                    interner
-                                                ),
-                                                cell_name,
-                                                pin.name,
-                                                related_pin_name
-                                            )
-                                        })?;
+                                    let Some(timing) = bit_timing_sets[*related_bit_idx].as_ref()
+                                    else {
+                                        if analysis_mode.uses_register_boundaries() {
+                                            continue;
+                                        }
+                                        return Err(anyhow!(
+                                            "missing source timing for net bit '{}' feeding '{}.{}' (related pin '{}')",
+                                            normalized.render_bit(*related_bit_idx, nets, interner),
+                                            cell_name,
+                                            pin.name,
+                                            related_pin_name
+                                        ));
+                                    };
                                     (
                                         timing,
                                         normalized.render_bit(*related_bit_idx, nets, interner),
                                     )
+                                }
+                                PinBitSource::Literal(_) | PinBitSource::Unknown
+                                    if analysis_mode.uses_register_boundaries() =>
+                                {
+                                    continue;
                                 }
                                 PinBitSource::Literal(value) => (
                                     &literal_source_timing_set,
@@ -843,6 +1069,7 @@ fn analyze_combinational_max_arrival_proto(
                                 arc,
                                 input_timing_set,
                                 output_load,
+                                &mut timing_query_diagnostic_counts,
                                 &context,
                             )?;
                             sta_trace(|| {
@@ -875,14 +1102,17 @@ fn analyze_combinational_max_arrival_proto(
                     }
                 }
 
-                let mut out_timing_set = accumulated.ok_or_else(|| {
-                    anyhow!(
+                let Some(mut out_timing_set) = accumulated else {
+                    if analysis_mode.uses_register_boundaries() {
+                        continue;
+                    }
+                    return Err(anyhow!(
                         "no usable combinational timing arcs for instance '{}' pin '{}.{}'",
                         instance_name,
                         cell_name,
                         pin.name
-                    )
-                })?;
+                    ));
+                };
                 // Use a conservative per-edge envelope: max arrival and max
                 // transition may come from different source candidates.
                 collapse_signal_timing_set_to_envelope(&mut out_timing_set);
@@ -925,35 +1155,124 @@ fn analyze_combinational_max_arrival_proto(
         ));
     }
 
-    let mut worst_output_arrival: Option<f64> = None;
+    let mut worst_output: Option<EdgeTimingCandidate> = None;
     let mut cell_levels = 0usize;
     for bit_idx in &module_output_bits {
         let timing_source = resolved_timing_sources[*bit_idx];
-        let timing_set = timing_set_for_resolved_source(
-            timing_source,
-            bit_timing_sets.as_slice(),
-            &literal_source_timing_set,
-        )
-        .ok_or_else(|| {
-            anyhow!(
+        let timing_set = if analysis_mode.uses_register_boundaries()
+            && matches!(
+                timing_source,
+                ResolvedTimingSource::Literal(_) | ResolvedTimingSource::Unknown
+            ) {
+            None
+        } else {
+            timing_set_for_resolved_source(
+                timing_source,
+                bit_timing_sets.as_slice(),
+                &literal_source_timing_set,
+            )
+        };
+        let Some(timing_set) = timing_set else {
+            if analysis_mode.uses_register_boundaries() {
+                continue;
+            }
+            return Err(anyhow!(
                 "missing timing result for module output net bit '{}'",
                 normalized.render_bit(*bit_idx, nets, interner)
-            )
-        })?;
-        let output_arrival = timing_set.worst_arrival().ok_or_else(|| {
+            ));
+        };
+        let output_timing = timing_set.worst_arrival_candidate().ok_or_else(|| {
             anyhow!(
                 "missing edge timing candidates for module output net bit '{}'",
                 normalized.render_bit(*bit_idx, nets, interner)
             )
         })?;
-        worst_output_arrival = Some(
-            worst_output_arrival
-                .map(|current| current.max(output_arrival))
-                .unwrap_or(output_arrival),
-        );
+        worst_output = Some(match worst_output {
+            Some(current) => choose_worse_edge_timing_candidate_by_arrival(current, output_timing),
+            None => output_timing,
+        });
         if let ResolvedTimingSource::Bit(source_bit_idx) = timing_source {
             if let Some(driver) = bit_drivers[source_bit_idx].first() {
                 cell_levels = cell_levels.max(instance_levels[driver.inst_idx]);
+            }
+        }
+    }
+
+    let mut register_input_timings: Vec<Option<RegisterCaptureTimingCandidate>> =
+        vec![None; instance_count];
+    let mut worst_register_input: Option<RegisterCaptureTimingCandidate> = None;
+    if analysis_mode.uses_register_boundaries() {
+        for inst_idx in 0..instance_count {
+            if !instance_is_sequential[inst_idx] {
+                continue;
+            }
+            let cell_idx = instance_cell_indices[inst_idx];
+            let pin_sources = &instance_pin_sources[inst_idx];
+            for pin in lib.library.cells[cell_idx]
+                .pins
+                .iter()
+                .filter(|pin| pin.direction == PinDirection::Input as i32 && !pin.is_clocking_pin)
+            {
+                let setup_arcs: Vec<&TimingArc> = pin
+                    .timing_arcs
+                    .iter()
+                    .filter(|arc| StaTimingType::from_raw(arc.timing_type.as_str()).is_setup())
+                    .collect();
+                if setup_arcs.is_empty() {
+                    continue;
+                }
+                validate_constraint_tables_once(
+                    lib.library,
+                    &instance_cell_names[inst_idx],
+                    pin.name.as_str(),
+                    setup_arcs.as_slice(),
+                    &mut validated_timing_tables,
+                )?;
+                let Some(sources) = pin_sources.get(pin.name.as_str()) else {
+                    continue;
+                };
+                for source in sources {
+                    let PinBitSource::Bit(bit_idx) = source else {
+                        continue;
+                    };
+                    let Some(timing_set) = bit_timing_sets[*bit_idx].as_ref() else {
+                        continue;
+                    };
+                    let Some(capture_timing) = evaluate_register_setup_capture_arrival(
+                        lib.library,
+                        setup_arcs.as_slice(),
+                        &instance_known_pin_values[inst_idx],
+                        timing_set,
+                        &mut timing_query_diagnostic_counts,
+                        &format!(
+                            "{}.{} (instance '{}') setup",
+                            instance_cell_names[inst_idx],
+                            pin.name,
+                            resolve_symbol(
+                                interner,
+                                normalized.instances[inst_idx].instance_name,
+                                "instance name"
+                            )
+                            .unwrap_or_else(|_| "<unknown>".to_string())
+                        ),
+                    )?
+                    else {
+                        continue;
+                    };
+                    register_input_timings[inst_idx] =
+                        Some(match register_input_timings[inst_idx] {
+                            Some(current) => {
+                                choose_worse_register_capture_timing(current, capture_timing)
+                            }
+                            None => capture_timing,
+                        });
+                    worst_register_input = Some(match worst_register_input {
+                        Some(current) => {
+                            choose_worse_register_capture_timing(current, capture_timing)
+                        }
+                        None => capture_timing,
+                    });
+                }
             }
         }
     }
@@ -965,10 +1284,29 @@ fn analyze_combinational_max_arrival_proto(
         &normalized,
         nets.len(),
     );
+    let register_input_arrivals = register_input_timings
+        .iter()
+        .map(|timing| timing.map(|timing| timing.arrival))
+        .collect();
+    let register_input_breakdowns = register_input_timings
+        .iter()
+        .map(|timing| timing.and_then(|timing| timing.register_path_breakdown))
+        .collect();
 
     Ok(StaReport {
         net_timing,
-        worst_output_arrival: worst_output_arrival.unwrap_or(0.0),
+        worst_output_arrival: worst_output
+            .map(|timing| timing.timing.arrival)
+            .unwrap_or(0.0),
+        worst_output_breakdown: worst_output.and_then(|timing| timing.register_path_breakdown),
+        worst_register_input_arrival: worst_register_input
+            .map(|timing| timing.arrival)
+            .unwrap_or(0.0),
+        worst_register_input_breakdown: worst_register_input
+            .and_then(|timing| timing.register_path_breakdown),
+        register_input_arrivals,
+        register_input_breakdowns,
+        timing_query_diagnostic_counts,
         cell_levels,
     })
 }
@@ -1010,6 +1348,10 @@ enum StaTimingType {
     Combinational,
     CombinationalRise,
     CombinationalFall,
+    RisingEdge,
+    FallingEdge,
+    SetupRising,
+    SetupFalling,
     Other,
 }
 
@@ -1019,12 +1361,27 @@ impl StaTimingType {
             "" | "combinational" => Self::Combinational,
             "combinational_rise" => Self::CombinationalRise,
             "combinational_fall" => Self::CombinationalFall,
+            "rising_edge" => Self::RisingEdge,
+            "falling_edge" => Self::FallingEdge,
+            "setup_rising" => Self::SetupRising,
+            "setup_falling" => Self::SetupFalling,
             _ => Self::Other,
         }
     }
 
     fn is_combinational(self) -> bool {
-        !matches!(self, Self::Other)
+        matches!(
+            self,
+            Self::Combinational | Self::CombinationalRise | Self::CombinationalFall
+        )
+    }
+
+    fn is_clock_to_output(self) -> bool {
+        matches!(self, Self::RisingEdge | Self::FallingEdge)
+    }
+
+    fn is_setup(self) -> bool {
+        matches!(self, Self::SetupRising | Self::SetupFalling)
     }
 
     fn produces_rise(self) -> bool {
@@ -1067,6 +1424,8 @@ enum StaTimingTableKind {
     CellFall,
     RiseTransition,
     FallTransition,
+    RiseConstraint,
+    FallConstraint,
 }
 
 impl StaTimingTableKind {
@@ -1076,6 +1435,8 @@ impl StaTimingTableKind {
             Self::CellFall => "cell_fall",
             Self::RiseTransition => "rise_transition",
             Self::FallTransition => "fall_transition",
+            Self::RiseConstraint => "rise_constraint",
+            Self::FallConstraint => "fall_constraint",
         }
     }
 }
@@ -1086,6 +1447,8 @@ enum LibertyTableKind {
     CellFall,
     RiseTransition,
     FallTransition,
+    RiseConstraint,
+    FallConstraint,
     RisePower,
     FallPower,
     Other,
@@ -1098,6 +1461,8 @@ impl LibertyTableKind {
             "cell_fall" => Self::CellFall,
             "rise_transition" => Self::RiseTransition,
             "fall_transition" => Self::FallTransition,
+            "rise_constraint" => Self::RiseConstraint,
+            "fall_constraint" => Self::FallConstraint,
             "rise_power" => Self::RisePower,
             "fall_power" => Self::FallPower,
             _ => Self::Other,
@@ -1106,9 +1471,12 @@ impl LibertyTableKind {
 
     fn template_kind(self) -> Option<LuTableTemplateKind> {
         match self {
-            Self::CellRise | Self::CellFall | Self::RiseTransition | Self::FallTransition => {
-                Some(LuTableTemplateKind::Timing)
-            }
+            Self::CellRise
+            | Self::CellFall
+            | Self::RiseTransition
+            | Self::FallTransition
+            | Self::RiseConstraint
+            | Self::FallConstraint => Some(LuTableTemplateKind::Timing),
             Self::RisePower | Self::FallPower => Some(LuTableTemplateKind::Power),
             Self::Other => None,
         }
@@ -1145,6 +1513,8 @@ enum AxisVariable {
     Unspecified,
     InputTransition,
     OutputLoad,
+    ConstrainedPinTransition,
+    RelatedPinTransition,
     Other,
 }
 
@@ -1154,6 +1524,8 @@ impl AxisVariable {
             "" => Self::Unspecified,
             "input_net_transition" | "input_transition_time" => Self::InputTransition,
             "total_output_net_capacitance" => Self::OutputLoad,
+            "constrained_pin_transition" => Self::ConstrainedPinTransition,
+            "related_pin_transition" => Self::RelatedPinTransition,
             _ => Self::Other,
         }
     }
@@ -1474,6 +1846,7 @@ fn evaluate_arc(
     output_load: f64,
     context: &str,
 ) -> Result<SignalTiming> {
+    let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
     let set = evaluate_arc_set(
         library,
         arc,
@@ -1482,6 +1855,7 @@ fn evaluate_arc(
             rise: output_load,
             fall: output_load,
         },
+        &mut timing_query_diagnostic_counts,
         context,
     )?;
     set.as_report_signal_timing().ok_or_else(|| {
@@ -1494,6 +1868,7 @@ fn evaluate_arc_set(
     arc: &TimingArc,
     input_timing: &SignalTimingSet,
     output_load: EdgeLoadCapacitance,
+    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
     context: &str,
 ) -> Result<SignalTimingSet> {
     let timing_type = StaTimingType::from_raw(arc.timing_type.as_str());
@@ -1531,6 +1906,7 @@ fn evaluate_arc_set(
             rise_transition,
             source_edges(true)?,
             output_load.rise,
+            timing_query_diagnostic_counts,
             context,
             StaTimingTableKind::CellRise,
             StaTimingTableKind::RiseTransition,
@@ -1545,6 +1921,7 @@ fn evaluate_arc_set(
             fall_transition,
             source_edges(false)?,
             output_load.fall,
+            timing_query_diagnostic_counts,
             context,
             StaTimingTableKind::CellFall,
             StaTimingTableKind::FallTransition,
@@ -1559,6 +1936,7 @@ fn evaluate_output_edge_set(
     slew_table: &TimingTable,
     source_edges: &EdgeTimingSet,
     output_load: f64,
+    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
     context: &str,
     delay_kind: StaTimingTableKind,
     slew_kind: StaTimingTableKind,
@@ -1566,36 +1944,43 @@ fn evaluate_output_edge_set(
     let mut outputs = EdgeTimingSet::default();
 
     for source_edge in source_edges.iter() {
-        let delay = evaluate_table(
+        let delay = evaluate_table_with_diagnostics(
             library,
             delay_table,
-            source_edge.transition,
+            source_edge.timing.transition,
             output_load,
+            timing_query_diagnostic_counts,
             &format!("{context} {}", delay_kind.as_raw()),
         )?;
-        // Linear extrapolation outside a Liberty table's characterized range
-        // can produce a slightly negative slew; physical transition is bounded
-        // below by zero.
-        let transition = evaluate_table(
+        // Characterized transition values may contain small negative artifacts;
+        // physical transition is bounded below by zero.
+        let transition = evaluate_table_with_diagnostics(
             library,
             slew_table,
-            source_edge.transition,
+            source_edge.timing.transition,
             output_load,
+            timing_query_diagnostic_counts,
             &format!("{context} {}", slew_kind.as_raw()),
         )?
         .max(0.0);
-        let arrival = source_edge.arrival + delay;
+        let arrival = source_edge.timing.arrival + delay;
         if !arrival.is_finite() {
             return Err(anyhow!(
                 "{context}: propagated arrival must be finite; got {} + {} = {}",
-                source_edge.arrival,
+                source_edge.timing.arrival,
                 delay,
                 arrival
             ));
         }
-        outputs.insert(EdgeTiming {
-            arrival,
-            transition,
+        outputs.insert(EdgeTimingCandidate {
+            timing: EdgeTiming {
+                arrival,
+                transition,
+            },
+            register_path_breakdown: source_edge.register_path_breakdown.map(|mut breakdown| {
+                breakdown.combinational_delay += delay;
+                breakdown
+            }),
         });
     }
 
@@ -1610,52 +1995,248 @@ fn evaluate_output_edge_set(
     Ok(outputs)
 }
 
+/// Evaluates a register output launched by an ideal clock edge.
+fn evaluate_register_launch_output_set(
+    library: &crate::liberty_proto::Library,
+    cell_name: &str,
+    pin: &Pin,
+    known_pin_values: &HashMap<String, bool>,
+    output_load: EdgeLoadCapacitance,
+    validated_tables: &mut HashSet<*const TimingTable>,
+    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
+    context: &str,
+) -> Result<SignalTimingSet> {
+    let launch_arcs: Vec<&TimingArc> = pin
+        .timing_arcs
+        .iter()
+        .filter(|arc| StaTimingType::from_raw(arc.timing_type.as_str()).is_clock_to_output())
+        .collect();
+    if launch_arcs.is_empty() {
+        return Err(anyhow!(
+            "{context}: sequential output pin has no rising_edge or falling_edge timing arc"
+        ));
+    }
+    validate_timing_tables_once(
+        library,
+        cell_name,
+        pin.name.as_str(),
+        launch_arcs.as_slice(),
+        validated_tables,
+    )?;
+
+    let mut output = SignalTimingSet::default();
+    for arc in launch_arcs {
+        if !arc_when_may_apply(arc, known_pin_values, context)? {
+            continue;
+        }
+        if let Some((delay, transition)) = find_optional_delay_slew_tables(
+            arc,
+            StaTimingTableKind::CellRise,
+            StaTimingTableKind::RiseTransition,
+            context,
+        )? {
+            let query = TimingTableQuery::ideal_clock_to_output(output_load.rise);
+            let arrival = evaluate_table_with_query_and_diagnostics(
+                library,
+                delay,
+                query,
+                timing_query_diagnostic_counts,
+                &format!("{context} {}", StaTimingTableKind::CellRise.as_raw()),
+            )?;
+            output
+                .rise
+                .insert(EdgeTimingCandidate::from_register_launch(EdgeTiming {
+                    arrival,
+                    transition: evaluate_table_with_query_and_diagnostics(
+                        library,
+                        transition,
+                        query,
+                        timing_query_diagnostic_counts,
+                        &format!("{context} {}", StaTimingTableKind::RiseTransition.as_raw()),
+                    )?
+                    .max(0.0),
+                }));
+        }
+        if let Some((delay, transition)) = find_optional_delay_slew_tables(
+            arc,
+            StaTimingTableKind::CellFall,
+            StaTimingTableKind::FallTransition,
+            context,
+        )? {
+            let query = TimingTableQuery::ideal_clock_to_output(output_load.fall);
+            let arrival = evaluate_table_with_query_and_diagnostics(
+                library,
+                delay,
+                query,
+                timing_query_diagnostic_counts,
+                &format!("{context} {}", StaTimingTableKind::CellFall.as_raw()),
+            )?;
+            output
+                .fall
+                .insert(EdgeTimingCandidate::from_register_launch(EdgeTiming {
+                    arrival,
+                    transition: evaluate_table_with_query_and_diagnostics(
+                        library,
+                        transition,
+                        query,
+                        timing_query_diagnostic_counts,
+                        &format!("{context} {}", StaTimingTableKind::FallTransition.as_raw()),
+                    )?
+                    .max(0.0),
+                }));
+        }
+    }
+    if output.rise.values.is_empty() || output.fall.values.is_empty() {
+        return Err(anyhow!(
+            "{context}: clock-to-output arcs do not provide complete rise/fall delay and transition coverage"
+        ));
+    }
+    collapse_signal_timing_set_to_envelope(&mut output);
+    Ok(output)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RegisterCaptureTimingCandidate {
+    arrival: f64,
+    register_path_breakdown: Option<RegisterPathDelayBreakdown>,
+}
+
+/// Returns the worst data arrival plus setup requirement at one capture pin.
+fn evaluate_register_setup_capture_arrival(
+    library: &crate::liberty_proto::Library,
+    setup_arcs: &[&TimingArc],
+    known_pin_values: &HashMap<String, bool>,
+    data_timing: &SignalTimingSet,
+    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
+    context: &str,
+) -> Result<Option<RegisterCaptureTimingCandidate>> {
+    let mut worst_timing: Option<RegisterCaptureTimingCandidate> = None;
+    for arc in setup_arcs {
+        if !arc_when_may_apply(arc, known_pin_values, context)? {
+            continue;
+        }
+        if let Some(table) =
+            find_optional_unique_table(arc, StaTimingTableKind::RiseConstraint, context)?
+        {
+            for data_edge in data_timing.rise.iter() {
+                let setup = evaluate_table_with_query_and_diagnostics(
+                    library,
+                    table,
+                    TimingTableQuery::ideal_clock_setup(data_edge.timing.transition),
+                    timing_query_diagnostic_counts,
+                    &format!("{context} {}", StaTimingTableKind::RiseConstraint.as_raw()),
+                )?;
+                let capture_arrival = data_edge.timing.arrival + setup;
+                if !capture_arrival.is_finite() {
+                    return Err(anyhow!(
+                        "{context}: setup-adjusted arrival must be finite; got {} + {} = {}",
+                        data_edge.timing.arrival,
+                        setup,
+                        capture_arrival
+                    ));
+                }
+                let candidate = register_capture_timing_candidate(data_edge, setup);
+                worst_timing = Some(match worst_timing {
+                    Some(current) => choose_worse_register_capture_timing(current, candidate),
+                    None => candidate,
+                });
+            }
+        }
+        if let Some(table) =
+            find_optional_unique_table(arc, StaTimingTableKind::FallConstraint, context)?
+        {
+            for data_edge in data_timing.fall.iter() {
+                let setup = evaluate_table_with_query_and_diagnostics(
+                    library,
+                    table,
+                    TimingTableQuery::ideal_clock_setup(data_edge.timing.transition),
+                    timing_query_diagnostic_counts,
+                    &format!("{context} {}", StaTimingTableKind::FallConstraint.as_raw()),
+                )?;
+                let capture_arrival = data_edge.timing.arrival + setup;
+                if !capture_arrival.is_finite() {
+                    return Err(anyhow!(
+                        "{context}: setup-adjusted arrival must be finite; got {} + {} = {}",
+                        data_edge.timing.arrival,
+                        setup,
+                        capture_arrival
+                    ));
+                }
+                let candidate = register_capture_timing_candidate(data_edge, setup);
+                worst_timing = Some(match worst_timing {
+                    Some(current) => choose_worse_register_capture_timing(current, candidate),
+                    None => candidate,
+                });
+            }
+        }
+    }
+    Ok(worst_timing)
+}
+
+fn register_capture_timing_candidate(
+    data_edge: EdgeTimingCandidate,
+    setup: f64,
+) -> RegisterCaptureTimingCandidate {
+    RegisterCaptureTimingCandidate {
+        arrival: data_edge.timing.arrival + setup,
+        register_path_breakdown: data_edge.register_path_breakdown.map(|mut breakdown| {
+            breakdown.setup_delay += setup;
+            breakdown
+        }),
+    }
+}
+
+fn choose_worse_register_capture_timing(
+    lhs: RegisterCaptureTimingCandidate,
+    rhs: RegisterCaptureTimingCandidate,
+) -> RegisterCaptureTimingCandidate {
+    if rhs.arrival > lhs.arrival { rhs } else { lhs }
+}
+
 fn collapse_signal_timing_set_to_envelope(signal: &mut SignalTimingSet) {
     collapse_edge_timing_set_to_envelope(&mut signal.rise);
     collapse_edge_timing_set_to_envelope(&mut signal.fall);
 }
 
 fn collapse_edge_timing_set_to_envelope(set: &mut EdgeTimingSet) {
-    let max_arrival = set.values.iter().map(|edge| edge.arrival).reduce(f64::max);
+    let max_arrival_candidate = set.max_arrival_candidate();
     let max_transition = set
         .values
         .iter()
-        .map(|edge| edge.transition)
+        .map(|edge| edge.timing.transition)
         .reduce(f64::max);
-    if let (Some(arrival), Some(transition)) = (max_arrival, max_transition) {
+    if let (Some(mut candidate), Some(transition)) = (max_arrival_candidate, max_transition) {
+        candidate.timing.transition = transition;
         set.values.clear();
-        set.values.push(EdgeTiming {
-            arrival,
-            transition,
-        });
+        set.values.push(candidate);
     }
 }
 
-fn choose_worse_edge_timing_by_arrival(lhs: EdgeTiming, rhs: EdgeTiming) -> EdgeTiming {
-    if lhs.arrival > rhs.arrival {
+fn choose_worse_edge_timing_candidate_by_arrival(
+    lhs: EdgeTimingCandidate,
+    rhs: EdgeTimingCandidate,
+) -> EdgeTimingCandidate {
+    if lhs.timing.arrival > rhs.timing.arrival {
         lhs
-    } else if rhs.arrival > lhs.arrival {
+    } else if rhs.timing.arrival > lhs.timing.arrival {
+        rhs
+    } else if rhs.timing.transition > lhs.timing.transition {
         rhs
     } else {
-        EdgeTiming {
-            arrival: lhs.arrival,
-            transition: lhs.transition.max(rhs.transition),
-        }
+        lhs
     }
 }
 
-fn find_unique_table<'a>(
+fn find_optional_unique_table<'a>(
     arc: &'a TimingArc,
     kind: StaTimingTableKind,
     context: &str,
-) -> Result<&'a TimingTable> {
+) -> Result<Option<&'a TimingTable>> {
     let mut matches = arc
         .tables
         .iter()
         .filter(|table| table.kind == kind.as_raw());
-    let first = matches
-        .next()
-        .ok_or_else(|| anyhow!("{context}: missing '{}' timing table", kind.as_raw()))?;
+    let first = matches.next();
     if matches.next().is_some() {
         return Err(anyhow!(
             "{context}: multiple '{}' timing tables are unsupported in basic STA",
@@ -1663,6 +2244,34 @@ fn find_unique_table<'a>(
         ));
     }
     Ok(first)
+}
+
+fn find_unique_table<'a>(
+    arc: &'a TimingArc,
+    kind: StaTimingTableKind,
+    context: &str,
+) -> Result<&'a TimingTable> {
+    find_optional_unique_table(arc, kind, context)?
+        .ok_or_else(|| anyhow!("{context}: missing '{}' timing table", kind.as_raw()))
+}
+
+fn find_optional_delay_slew_tables<'a>(
+    arc: &'a TimingArc,
+    delay_kind: StaTimingTableKind,
+    slew_kind: StaTimingTableKind,
+    context: &str,
+) -> Result<Option<(&'a TimingTable, &'a TimingTable)>> {
+    let delay = find_optional_unique_table(arc, delay_kind, context)?;
+    let slew = find_optional_unique_table(arc, slew_kind, context)?;
+    match (delay, slew) {
+        (Some(delay), Some(slew)) => Ok(Some((delay, slew))),
+        (None, None) => Ok(None),
+        _ => Err(anyhow!(
+            "{context}: '{}' and '{}' timing tables must both be present for an output edge",
+            delay_kind.as_raw(),
+            slew_kind.as_raw()
+        )),
+    }
 }
 
 fn expected_template_kind_for_timing_table(table: &TimingTable) -> Result<LuTableTemplateKind> {
@@ -1722,9 +2331,9 @@ fn timing_table_layout<'a>(
     })
 }
 
-/// Validates query-invariant timing-table properties once before STA
-/// propagation.
-fn validate_timing_table_payload(
+/// Validates table shape, axes, and numeric payload without imposing delay
+/// monotonicity requirements.
+fn validate_timing_table_structure(
     library: &crate::liberty_proto::Library,
     table: &TimingTable,
     context: &str,
@@ -1769,7 +2378,17 @@ fn validate_timing_table_payload(
             ));
         }
     }
-    validate_monotone_timing_table(&array, table.dimensions.as_slice(), context)
+    Ok(())
+}
+
+/// Validates query-invariant delay/slew table structure once before STA
+/// propagation. Non-monotone values are repaired conservatively during lookup.
+fn validate_timing_table_payload(
+    library: &crate::liberty_proto::Library,
+    table: &TimingTable,
+    context: &str,
+) -> Result<()> {
+    validate_timing_table_structure(library, table, context)
 }
 
 /// Validates each queried delay/slew table at most once during an STA run.
@@ -1807,6 +2426,92 @@ fn validate_timing_tables_once(
     Ok(())
 }
 
+/// Validates setup constraint tables without requiring a monotone surface.
+///
+/// Setup surfaces commonly decrease as related clock transition increases, so
+/// the monotonicity rule used for combinational delay/slew propagation does not
+/// apply.
+fn validate_constraint_tables_once(
+    library: &crate::liberty_proto::Library,
+    cell_name: &str,
+    pin_name: &str,
+    arcs: &[&TimingArc],
+    validated_tables: &mut HashSet<*const TimingTable>,
+) -> Result<()> {
+    for arc in arcs {
+        for table in &arc.tables {
+            if !matches!(
+                LibertyTableKind::from_raw(table.kind.as_str()),
+                LibertyTableKind::RiseConstraint | LibertyTableKind::FallConstraint
+            ) {
+                continue;
+            }
+            if !validated_tables.insert(table as *const TimingTable) {
+                continue;
+            }
+            validate_timing_table_structure(
+                library,
+                table,
+                &format!(
+                    "cell '{}' pin '{}' related_pin '{}' table '{}'",
+                    cell_name, pin_name, arc.related_pin, table.kind
+                ),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MinimumCharacterizedAxis {
+    None,
+    InputTransition,
+    RelatedPinTransition,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TimingTableQuery {
+    input_transition: f64,
+    output_load: f64,
+    constrained_pin_transition: f64,
+    related_pin_transition: f64,
+    /// For an ideal clock, select the fastest slew characterized by each table.
+    minimum_characterized_axis: MinimumCharacterizedAxis,
+}
+
+impl TimingTableQuery {
+    fn combinational(input_transition: f64, output_load: f64) -> Self {
+        Self {
+            input_transition,
+            output_load,
+            constrained_pin_transition: input_transition,
+            related_pin_transition: input_transition,
+            minimum_characterized_axis: MinimumCharacterizedAxis::None,
+        }
+    }
+
+    fn ideal_clock_to_output(output_load: f64) -> Self {
+        Self {
+            input_transition: 0.0,
+            output_load,
+            constrained_pin_transition: 0.0,
+            related_pin_transition: 0.0,
+            minimum_characterized_axis: MinimumCharacterizedAxis::InputTransition,
+        }
+    }
+
+    fn ideal_clock_setup(data_transition: f64) -> Self {
+        Self {
+            input_transition: data_transition,
+            output_load: 0.0,
+            constrained_pin_transition: data_transition,
+            related_pin_transition: 0.0,
+            minimum_characterized_axis: MinimumCharacterizedAxis::RelatedPinTransition,
+        }
+    }
+}
+
+#[cfg(test)]
 fn evaluate_table(
     library: &crate::liberty_proto::Library,
     table: &TimingTable,
@@ -1814,8 +2519,53 @@ fn evaluate_table(
     output_load: f64,
     context: &str,
 ) -> Result<f64> {
-    validate_non_negative_finite(input_transition, "input transition query", context)?;
-    validate_non_negative_finite(output_load, "output load query", context)?;
+    let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
+    evaluate_table_with_diagnostics(
+        library,
+        table,
+        input_transition,
+        output_load,
+        &mut timing_query_diagnostic_counts,
+        context,
+    )
+}
+
+fn evaluate_table_with_diagnostics(
+    library: &crate::liberty_proto::Library,
+    table: &TimingTable,
+    input_transition: f64,
+    output_load: f64,
+    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
+    context: &str,
+) -> Result<f64> {
+    evaluate_table_with_query_and_diagnostics(
+        library,
+        table,
+        TimingTableQuery::combinational(input_transition, output_load),
+        timing_query_diagnostic_counts,
+        context,
+    )
+}
+
+fn evaluate_table_with_query_and_diagnostics(
+    library: &crate::liberty_proto::Library,
+    table: &TimingTable,
+    query: TimingTableQuery,
+    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
+    context: &str,
+) -> Result<f64> {
+    validate_non_negative_finite(query.input_transition, "input transition query", context)?;
+    validate_non_negative_finite(query.output_load, "output load query", context)?;
+    validate_non_negative_finite(
+        query.constrained_pin_transition,
+        "constrained pin transition query",
+        context,
+    )?;
+    validate_non_negative_finite(
+        query.related_pin_transition,
+        "related pin transition query",
+        context,
+    )?;
     let array = TimingTableArrayView::from_timing_table(table)
         .map_err(|e| anyhow!("{context}: invalid timing table payload: {e}"))?;
     let layout = timing_table_layout(library, table, context)?;
@@ -1826,32 +2576,103 @@ fn evaluate_table(
             .ok_or_else(|| anyhow!("{context}: scalar timing table had no value"));
     }
     let mut bounds: Vec<(usize, usize, f64)> = Vec::with_capacity(rank);
+    let mut axis_queries: Vec<f64> = Vec::with_capacity(rank);
+    let is_setup = matches!(
+        LibertyTableKind::from_raw(table.kind.as_str()),
+        LibertyTableKind::RiseConstraint | LibertyTableKind::FallConstraint
+    );
+    let mut above_max_axis_count = 0usize;
 
     for axis_idx in 0..rank {
         let axis = layout.axes[axis_idx];
-        let query = axis_query_value(
-            layout.variables[axis_idx],
-            axis_idx,
-            input_transition,
-            output_load,
-            context,
-        )?;
+        let axis_variable = AxisVariable::from_raw(layout.variables[axis_idx]);
+        let raw_axis_query =
+            axis_query_value_with_query(layout.variables[axis_idx], axis_idx, query, context)?;
         let axis_lo = axis[0];
         let axis_hi = axis[axis.len() - 1];
-        if query < axis_lo || query > axis_hi {
+        let selects_minimum_characterized_coordinate = match query.minimum_characterized_axis {
+            MinimumCharacterizedAxis::None => false,
+            MinimumCharacterizedAxis::InputTransition => {
+                axis_variable == AxisVariable::InputTransition
+                    || (axis_variable == AxisVariable::Unspecified && axis_idx == 0)
+            }
+            MinimumCharacterizedAxis::RelatedPinTransition => {
+                axis_variable == AxisVariable::RelatedPinTransition
+            }
+        } || (query.output_load == 0.0
+            && (axis_variable == AxisVariable::OutputLoad
+                || (axis_variable == AxisVariable::Unspecified && axis_idx == 1)));
+        let axis_query = if selects_minimum_characterized_coordinate {
+            axis_lo
+        } else {
+            raw_axis_query
+        };
+        if axis_query < axis_lo {
+            if is_setup {
+                timing_query_diagnostic_counts.setup_below_min_clamp_count += 1;
+            } else {
+                timing_query_diagnostic_counts.delay_slew_below_min_clamp_count += 1;
+            }
+        } else if axis_query > axis_hi {
+            above_max_axis_count += 1;
+        }
+        axis_queries.push(axis_query);
+    }
+
+    let extrapolate_single_delay_slew_axis = !is_setup && above_max_axis_count == 1;
+    if is_setup {
+        timing_query_diagnostic_counts.setup_above_max_clamp_count += above_max_axis_count;
+    } else if above_max_axis_count == 1 {
+        timing_query_diagnostic_counts.delay_slew_single_above_max_extrapolation_count += 1;
+    } else if above_max_axis_count > 1 {
+        timing_query_diagnostic_counts.delay_slew_multiple_above_max_clamp_count += 1;
+    }
+
+    for (axis_idx, raw_axis_query) in axis_queries.into_iter().enumerate() {
+        let axis = layout.axes[axis_idx];
+        let axis_lo = axis[0];
+        let axis_hi = axis[axis.len() - 1];
+        let mut axis_query = raw_axis_query;
+        if axis_query < axis_lo {
             sta_trace(|| {
                 format!(
-                    "table_query_out_of_range context='{}' axis={} var='{}' query={:.6} axis_lo={:.6} axis_hi={:.6}",
+                    "table_query_clamped_below_min context='{}' axis={} var='{}' query={:.6} axis_lo={:.6} axis_hi={:.6}",
                     context,
                     axis_idx + 1,
                     layout.variables[axis_idx],
-                    query,
+                    raw_axis_query,
+                    axis_lo,
+                    axis_hi,
+                )
+            });
+        } else if axis_query > axis_hi {
+            let action = if is_setup {
+                "clamped_above_max_setup"
+            } else if extrapolate_single_delay_slew_axis {
+                "extrapolated_above_max_single_axis"
+            } else {
+                "clamped_above_max_multiple_axes"
+            };
+            sta_trace(|| {
+                format!(
+                    "table_query_{} context='{}' axis={} var='{}' query={:.6} axis_lo={:.6} axis_hi={:.6}",
+                    action,
+                    context,
+                    axis_idx + 1,
+                    layout.variables[axis_idx],
+                    raw_axis_query,
                     axis_lo,
                     axis_hi,
                 )
             });
         }
-        bounds.push(bracket_axis(axis, query));
+        if axis_query < axis_lo {
+            axis_query = axis_query.max(axis_lo);
+        }
+        if !extrapolate_single_delay_slew_axis || axis_query <= axis_hi {
+            axis_query = axis_query.min(axis_hi);
+        }
+        bounds.push(bracket_axis(axis, axis_query));
     }
 
     let mut indices = vec![0usize; rank];
@@ -1877,9 +2698,7 @@ fn evaluate_table(
                 weight *= 1.0 - *t;
             }
         }
-        let value = array
-            .get(indices.as_slice())
-            .ok_or_else(|| anyhow!("{context}: could not index timing table at {:?}", indices))?;
+        let value = evaluate_table_corner_value(&array, table, indices.as_slice(), context)?;
         result += weight * value;
     }
     if !result.is_finite() {
@@ -1889,6 +2708,56 @@ fn evaluate_table(
         ));
     }
     Ok(result)
+}
+
+fn uses_monotone_upper_envelope(table: &TimingTable) -> bool {
+    matches!(
+        LibertyTableKind::from_raw(table.kind.as_str()),
+        LibertyTableKind::CellRise
+            | LibertyTableKind::CellFall
+            | LibertyTableKind::RiseTransition
+            | LibertyTableKind::FallTransition
+    )
+}
+
+/// Evaluates one characterized point after conservatively repairing delay/slew
+/// values: a point is at least as large as any predecessor along its axes.
+fn evaluate_table_corner_value(
+    array: &TimingTableArrayView<'_>,
+    table: &TimingTable,
+    indices: &[usize],
+    context: &str,
+) -> Result<f64> {
+    if !uses_monotone_upper_envelope(table) || indices.is_empty() {
+        return array
+            .get(indices)
+            .ok_or_else(|| anyhow!("{context}: could not index timing table at {:?}", indices));
+    }
+
+    let mut cursor = vec![0usize; indices.len()];
+    let mut maximum = f64::NEG_INFINITY;
+    loop {
+        let value = array
+            .get(cursor.as_slice())
+            .ok_or_else(|| anyhow!("{context}: could not index timing table at {:?}", cursor))?;
+        maximum = maximum.max(value);
+
+        let mut advanced = false;
+        for axis_idx in (0..cursor.len()).rev() {
+            if cursor[axis_idx] < indices[axis_idx] {
+                cursor[axis_idx] += 1;
+                for trailing in cursor.iter_mut().skip(axis_idx + 1) {
+                    *trailing = 0;
+                }
+                advanced = true;
+                break;
+            }
+        }
+        if !advanced {
+            break;
+        }
+    }
+    Ok(maximum)
 }
 
 fn validate_non_negative_finite(value: f64, what: &str, context: &str) -> Result<()> {
@@ -1957,71 +2826,6 @@ fn validate_effective_axes(table: &TimingTable, axes: [&[f64]; 3], context: &str
     Ok(())
 }
 
-/// Rejects tables that meaningfully decrease along any axis; envelope reduction
-/// requires monotone queries, while real Liberty data can contain tiny
-/// characterization-noise decreases.
-fn validate_monotone_timing_table(
-    array: &TimingTableArrayView<'_>,
-    dimensions: &[u32],
-    context: &str,
-) -> Result<()> {
-    if dimensions.is_empty() {
-        return Ok(());
-    }
-
-    let mut indices = vec![0usize; dimensions.len()];
-    loop {
-        let current = array.get(indices.as_slice()).ok_or_else(|| {
-            anyhow!(
-                "{context}: could not index timing table at {:?} while checking monotonicity",
-                indices
-            )
-        })?;
-
-        for (axis_idx, dimension) in dimensions.iter().copied().enumerate() {
-            if indices[axis_idx] + 1 >= dimension as usize {
-                continue;
-            }
-            let mut next_indices = indices.clone();
-            next_indices[axis_idx] += 1;
-            let next = array.get(next_indices.as_slice()).ok_or_else(|| {
-                anyhow!(
-                    "{context}: could not index timing table at {:?} while checking monotonicity",
-                    next_indices
-                )
-            })?;
-            let scale = current.abs().max(next.abs());
-            let tolerance = MONOTONICITY_REL_TOLERANCE * scale;
-            if next + tolerance < current {
-                return Err(anyhow!(
-                    "{context}: timing table decreases along axis {} between {:?}={} and {:?}={}; basic STA requires monotone timing tables up to relative tolerance {}",
-                    axis_idx + 1,
-                    indices,
-                    current,
-                    next_indices,
-                    next,
-                    MONOTONICITY_REL_TOLERANCE
-                ));
-            }
-        }
-
-        let mut axis_idx = dimensions.len();
-        while axis_idx > 0 {
-            axis_idx -= 1;
-            indices[axis_idx] += 1;
-            if indices[axis_idx] < dimensions[axis_idx] as usize {
-                break;
-            }
-            indices[axis_idx] = 0;
-        }
-        if axis_idx == 0 && indices[0] == 0 {
-            break;
-        }
-    }
-
-    Ok(())
-}
-
 fn effective_axis<'a>(table_axis: &'a [f64], template_axis: Option<&'a [f64]>) -> &'a [f64] {
     if table_axis.is_empty() {
         template_axis.unwrap_or(&[])
@@ -2030,6 +2834,7 @@ fn effective_axis<'a>(table_axis: &'a [f64], template_axis: Option<&'a [f64]>) -
     }
 }
 
+#[cfg(test)]
 fn axis_query_value(
     variable_name: &str,
     axis_idx: usize,
@@ -2037,17 +2842,33 @@ fn axis_query_value(
     output_load: f64,
     context: &str,
 ) -> Result<f64> {
+    axis_query_value_with_query(
+        variable_name,
+        axis_idx,
+        TimingTableQuery::combinational(input_transition, output_load),
+        context,
+    )
+}
+
+fn axis_query_value_with_query(
+    variable_name: &str,
+    axis_idx: usize,
+    query: TimingTableQuery,
+    context: &str,
+) -> Result<f64> {
     match AxisVariable::from_raw(variable_name) {
         AxisVariable::Unspecified => match axis_idx {
-            0 => Ok(input_transition),
-            1 => Ok(output_load),
+            0 => Ok(query.input_transition),
+            1 => Ok(query.output_load),
             _ => Err(anyhow!(
                 "{context}: missing variable name for axis {}; cannot infer query value",
                 axis_idx + 1
             )),
         },
-        AxisVariable::InputTransition => Ok(input_transition),
-        AxisVariable::OutputLoad => Ok(output_load),
+        AxisVariable::InputTransition => Ok(query.input_transition),
+        AxisVariable::OutputLoad => Ok(query.output_load),
+        AxisVariable::ConstrainedPinTransition => Ok(query.constrained_pin_transition),
+        AxisVariable::RelatedPinTransition => Ok(query.related_pin_transition),
         AxisVariable::Other => Err(anyhow!(
             "{context}: unsupported axis variable '{}' for basic STA",
             variable_name
@@ -2190,6 +3011,89 @@ mod tests {
                 .to_string()
                 .contains("unsupported axis variable")
         );
+    }
+
+    #[test]
+    fn ideal_clock_queries_select_minimum_characterized_slew_without_diagnostic() {
+        let lib = crate::liberty_proto::Library {
+            lu_table_templates: vec![
+                LuTableTemplate {
+                    kind: "lu_table_template".to_string(),
+                    name: "delay".to_string(),
+                    variable_1: "input_net_transition".to_string(),
+                    index_1: vec![5.0, 10.0],
+                    ..Default::default()
+                },
+                LuTableTemplate {
+                    kind: "lu_table_template".to_string(),
+                    name: "constraint".to_string(),
+                    variable_1: "constrained_pin_transition".to_string(),
+                    variable_2: "related_pin_transition".to_string(),
+                    index_1: vec![1.0, 2.0],
+                    index_2: vec![5.0, 10.0],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let c2q = TimingTable {
+            kind: "cell_rise".to_string(),
+            template_id: 1,
+            dimensions: vec![2],
+            values: vec![7.0, 9.0],
+            ..Default::default()
+        };
+        let setup = TimingTable {
+            kind: "rise_constraint".to_string(),
+            template_id: 2,
+            dimensions: vec![2, 2],
+            values: vec![3.0, 1.0, 4.0, 2.0],
+            ..Default::default()
+        };
+        let mut counts = TimingQueryDiagnosticCounts::default();
+
+        assert_close(
+            evaluate_table_with_query_and_diagnostics(
+                &lib,
+                &c2q,
+                TimingTableQuery::ideal_clock_to_output(0.0),
+                &mut counts,
+                "clock_to_q",
+            )
+            .expect("clock-to-output table evaluation"),
+            7.0,
+        );
+        validate_timing_table_structure(&lib, &setup, "setup")
+            .expect("non-monotone setup table should be structurally valid");
+        assert_close(
+            evaluate_table_with_query_and_diagnostics(
+                &lib,
+                &setup,
+                TimingTableQuery::ideal_clock_setup(1.0),
+                &mut counts,
+                "setup",
+            )
+            .expect("setup table evaluation"),
+            3.0,
+        );
+        assert_close(
+            evaluate_table_with_query_and_diagnostics(
+                &lib,
+                &setup,
+                TimingTableQuery {
+                    input_transition: 0.0,
+                    output_load: 0.0,
+                    constrained_pin_transition: 1.0,
+                    related_pin_transition: 10.0,
+                    minimum_characterized_axis: MinimumCharacterizedAxis::None,
+                },
+                &mut counts,
+                "raw_setup_surface",
+            )
+            .expect("setup table evaluation"),
+            1.0,
+        );
+        assert_eq!(counts, TimingQueryDiagnosticCounts::default());
     }
 
     #[test]
@@ -4404,7 +5308,7 @@ endmodule
     }
 
     #[test]
-    fn evaluate_table_extrapolates_below_axis_range() {
+    fn evaluate_table_clamps_below_axis_range() {
         let lib = crate::liberty_proto::Library {
             lu_table_templates: vec![LuTableTemplate {
                 kind: "lu_table_template".to_string(),
@@ -4425,11 +5329,155 @@ endmodule
             ..Default::default()
         };
 
-        let extrapolated =
-            evaluate_table(&lib, &table, 0.0, 0.619_928, "extrapolated").expect("table eval");
-        assert!(
-            (extrapolated - 4.704_690_972_222_221).abs() <= 2e-6,
-            "expected 4.704690972222221 ~= {extrapolated}"
+        let clamped = evaluate_table(&lib, &table, 0.0, 0.619_928, "clamped").expect("table eval");
+        assert_close(clamped, 6.90715);
+    }
+
+    #[test]
+    fn evaluate_table_counts_clamp_categories() {
+        let lib = crate::liberty_proto::Library {
+            lu_table_templates: vec![
+                LuTableTemplate {
+                    kind: "lu_table_template".to_string(),
+                    name: "tmpl_2d_delay_diagnostics".to_string(),
+                    variable_1: "input_net_transition".to_string(),
+                    variable_2: "total_output_net_capacitance".to_string(),
+                    index_1: vec![5.0, 10.0],
+                    index_2: vec![0.72, 1.44],
+                    ..Default::default()
+                },
+                LuTableTemplate {
+                    kind: "lu_table_template".to_string(),
+                    name: "tmpl_2d_setup_diagnostics".to_string(),
+                    variable_1: "constrained_pin_transition".to_string(),
+                    variable_2: "related_pin_transition".to_string(),
+                    index_1: vec![5.0, 10.0],
+                    index_2: vec![5.0, 10.0],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let delay_table = TimingTable {
+            kind: "cell_rise".to_string(),
+            template_id: 1,
+            dimensions: vec![2, 2],
+            values: vec![1.0, 2.0, 3.0, 4.0],
+            ..Default::default()
+        };
+        let setup_table = TimingTable {
+            kind: "rise_constraint".to_string(),
+            template_id: 2,
+            dimensions: vec![2, 2],
+            values: vec![1.0, 2.0, 3.0, 4.0],
+            ..Default::default()
+        };
+        let mut counts = TimingQueryDiagnosticCounts::default();
+
+        assert_close(
+            evaluate_table_with_query_and_diagnostics(
+                &lib,
+                &delay_table,
+                TimingTableQuery::combinational(5.0, 0.0),
+                &mut counts,
+                "delay_minimum_characterized_zero_load",
+            )
+            .expect("delay/slew zero-load table evaluation"),
+            1.0,
+        );
+        evaluate_table_with_query_and_diagnostics(
+            &lib,
+            &delay_table,
+            TimingTableQuery::combinational(0.0, 1.0),
+            &mut counts,
+            "delay_below_min_data",
+        )
+        .expect("delay/slew below-minimum transition table evaluation");
+        evaluate_table_with_query_and_diagnostics(
+            &lib,
+            &delay_table,
+            TimingTableQuery::combinational(7.0, 0.1),
+            &mut counts,
+            "delay_below_min_positive_load",
+        )
+        .expect("delay/slew below-minimum positive-load table evaluation");
+        evaluate_table_with_query_and_diagnostics(
+            &lib,
+            &delay_table,
+            TimingTableQuery::ideal_clock_to_output(1.0),
+            &mut counts,
+            "delay_minimum_characterized_clock",
+        )
+        .expect("delay/slew ideal-clock minimum-characterized table evaluation");
+        let extrapolated = evaluate_table_with_query_and_diagnostics(
+            &lib,
+            &delay_table,
+            TimingTableQuery::combinational(7.0, 2.0),
+            &mut counts,
+            "delay_single_above_max_load",
+        )
+        .expect("delay/slew single-axis above-maximum table evaluation");
+        assert!(extrapolated > 3.0);
+        assert_close(
+            evaluate_table_with_query_and_diagnostics(
+                &lib,
+                &delay_table,
+                TimingTableQuery::combinational(11.0, 2.0),
+                &mut counts,
+                "delay_multiple_above_max",
+            )
+            .expect("delay/slew multi-axis above-maximum table evaluation"),
+            4.0,
+        );
+        evaluate_table_with_query_and_diagnostics(
+            &lib,
+            &setup_table,
+            TimingTableQuery::ideal_clock_setup(7.0),
+            &mut counts,
+            "setup_minimum_characterized_clock",
+        )
+        .expect("setup ideal-clock minimum-characterized table evaluation");
+        evaluate_table_with_query_and_diagnostics(
+            &lib,
+            &setup_table,
+            TimingTableQuery {
+                input_transition: 0.0,
+                output_load: 0.0,
+                constrained_pin_transition: 0.0,
+                related_pin_transition: 7.0,
+                minimum_characterized_axis: MinimumCharacterizedAxis::None,
+            },
+            &mut counts,
+            "setup_below_min",
+        )
+        .expect("setup below-minimum table evaluation");
+        assert_close(
+            evaluate_table_with_query_and_diagnostics(
+                &lib,
+                &setup_table,
+                TimingTableQuery {
+                    input_transition: 0.0,
+                    output_load: 0.0,
+                    constrained_pin_transition: 11.0,
+                    related_pin_transition: 5.0,
+                    minimum_characterized_axis: MinimumCharacterizedAxis::None,
+                },
+                &mut counts,
+                "setup_above_max",
+            )
+            .expect("setup above-maximum table evaluation"),
+            3.0,
+        );
+
+        assert_eq!(
+            counts,
+            TimingQueryDiagnosticCounts {
+                delay_slew_below_min_clamp_count: 2,
+                delay_slew_single_above_max_extrapolation_count: 1,
+                delay_slew_multiple_above_max_clamp_count: 1,
+                setup_below_min_clamp_count: 1,
+                setup_above_max_clamp_count: 1,
+            }
         );
     }
 
@@ -4560,7 +5608,7 @@ endmodule
     }
 
     #[test]
-    fn evaluate_table_rejects_non_monotone_values() {
+    fn evaluate_table_repairs_non_monotone_delay_values_with_upper_envelope() {
         let lib = crate::liberty_proto::Library {
             lu_table_templates: vec![LuTableTemplate {
                 kind: "lu_table_template".to_string(),
@@ -4579,17 +5627,44 @@ endmodule
             ..Default::default()
         };
 
-        let error = validate_timing_table_payload(&lib, &table, "non_monotone")
-            .expect_err("non-monotone values should be rejected");
-        assert!(
-            error
-                .to_string()
-                .contains("basic STA requires monotone timing tables")
+        validate_timing_table_payload(&lib, &table, "non_monotone")
+            .expect("non-monotone delay tables should be structurally valid");
+        assert_close(
+            evaluate_table(&lib, &table, 1.0, 0.0, "non_monotone").expect("table eval"),
+            2.0,
         );
     }
 
     #[test]
-    fn evaluate_table_accepts_small_asap7_characterization_noise() {
+    fn evaluate_table_repairs_two_dimensional_delay_values_coordinatewise() {
+        let lib = crate::liberty_proto::Library {
+            lu_table_templates: vec![LuTableTemplate {
+                kind: "lu_table_template".to_string(),
+                name: "tmpl_non_monotone_2d".to_string(),
+                variable_1: "input_net_transition".to_string(),
+                variable_2: "total_output_net_capacitance".to_string(),
+                index_1: vec![0.0, 1.0],
+                index_2: vec![0.0, 1.0],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let table = TimingTable {
+            kind: "cell_rise".to_string(),
+            template_id: 1,
+            dimensions: vec![2, 2],
+            values: vec![1.0, 4.0, 3.0, 2.0],
+            ..Default::default()
+        };
+
+        assert_close(
+            evaluate_table(&lib, &table, 1.0, 1.0, "non_monotone_2d").expect("table eval"),
+            4.0,
+        );
+    }
+
+    #[test]
+    fn evaluate_table_repairs_small_characterization_noise() {
         let lib = crate::liberty_proto::Library {
             lu_table_templates: vec![LuTableTemplate {
                 kind: "lu_table_template".to_string(),
@@ -4608,8 +5683,10 @@ endmodule
             ..Default::default()
         };
 
-        validate_timing_table_payload(&lib, &table, "characterization_noise")
-            .expect("small ASAP7 characterization noise should be tolerated");
+        assert_close(
+            evaluate_table(&lib, &table, 1.0, 0.0, "characterization_noise").expect("table eval"),
+            28.4535,
+        );
     }
 
     #[test]
@@ -4620,6 +5697,7 @@ endmodule
         });
         let delay_table = scalar_table("cell_rise", 1.0);
         let slew_table = scalar_table("rise_transition", -0.1);
+        let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
 
         let output = evaluate_output_edge_set(
             &crate::liberty_proto::Library::default(),
@@ -4627,6 +5705,7 @@ endmodule
             &slew_table,
             &input_timing,
             0.0,
+            &mut timing_query_diagnostic_counts,
             "negative_transition",
             StaTimingTableKind::CellRise,
             StaTimingTableKind::RiseTransition,
@@ -4649,6 +5728,7 @@ endmodule
         });
         let delay_table = scalar_table("cell_rise", f64::MAX);
         let slew_table = scalar_table("rise_transition", 0.1);
+        let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
 
         let error = evaluate_output_edge_set(
             &crate::liberty_proto::Library::default(),
@@ -4656,6 +5736,7 @@ endmodule
             &slew_table,
             &input_timing,
             0.0,
+            &mut timing_query_diagnostic_counts,
             "overflow_arrival",
             StaTimingTableKind::CellRise,
             StaTimingTableKind::RiseTransition,
