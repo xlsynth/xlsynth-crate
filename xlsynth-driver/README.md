@@ -347,19 +347,24 @@ Output format:
 - A single header row: `instance_type,instance_name,traversal_pin,levels`
 - One data row per visited instance/pin in a deterministic traversal order.
 
-### `ir2g8r`: IR to gate-level representation
+### `ir2g8r`: IR function or block to native g8r
 
-Converts an XLS IR file to an `xlsynth_g8r::GateFn` (i.e. a gate-level netlist in AIG form), then stores it as a native `SequentialGateFn` design with no clock or registers.
+Converts the selected XLS IR member to a native `SequentialGateFn`. If the
+selected member is a function, the result has no clock or registers. If it is
+a block, register boundaries and its clock are preserved and the block's
+combinational transition logic is lowered into the stored transition function.
+`--top` may name either kind of member.
 
 - By default a text `.g8r` design beginning with `g8r_v2` is sent to **stdout**.
 - Additional artifacts can be emitted with flags:
   - `--bin-out <PATH>` – write the design as a binary **.g8rbin** file beginning with the visible `g8rbin_v2` format prefix.
-  - `--aiger-out <PATH>` – write the GateFn as AIGER:
+  - `--aiger-out <PATH>` – write a clockless, register-free result as AIGER:
     - use a `.aag` suffix for ASCII AIGER (`aag`)
     - use a `.aig` suffix for binary AIGER (`aig`)
-  - `--stats-out <PATH>` – write a JSON summary of structural statistics.
+  - `--stats-out <PATH>` – write a JSON summary of structural statistics for a selected function. Sequential block statistics are not yet exposed by this command.
   - `--netlist-out <PATH>` – write a human-readable gate-level netlist to a file.
-- The same optimization / analysis flags accepted by `ir2gates` are supported (`--fold`, `--hash`, `--fraig`, `--reassociation`, `--toggle-sample-count`, …).
+- For selected functions, the same optimization / analysis flags accepted by `ir2gates` are supported (`--fold`, `--hash`, `--fraig`, `--reassociation`, `--toggle-sample-count`, ...).
+- For selected blocks, the transition lowering honors gatification flags such as `--fold`, `--hash`, `--enable-rewrite-*`, and adder mapping; function-only post-lowering statistics are not run.
   - `--enable-rewrite-carry-out=<BOOL>` – when `true`, enable a carry-out idiom rewrite during `prep_for_gatify` (introduces `ext_carry_out`). Default `true`.
   - `--enable-rewrite-prio-encode=<BOOL>` – when `true`, enable prio-encode and CLZ idiom rewrites during `prep_for_gatify` (introduces `ext_prio_encode` / `ext_clz`). Default `true`.
   - `--enable-rewrite-nary-add=<BOOL>` – when `true`, rewrite width-preserving add/sub trees and explicit gated increment/decrement helper networks into `ext_nary_add`, then greedily absorb/merge nested terms to a fixed point during `prep_for_gatify`. Default `true`.
@@ -369,7 +374,9 @@ Converts an XLS IR file to an `xlsynth_g8r::GateFn` (i.e. a gate-level netlist i
   - `--reassociation=<BOOL>` – when `true`, rebalance single-fanout AND supergates after FRAIG and again after cut-db rewrite. Default `true`.
   - `--cut-db-enable-large-cone-rewrite=<BOOL>` – when `true`, run the large-cone cut-db rewrite phases after the 4-input cut-db phases. Default `true`.
   - `--cut-db-rewrite-mode=<delay|balanced|area>` – choose the cut-db optimization policy. `delay` runs delay-focused phases before area recovery and allows the delay phases to expand area; area phases preserve delay. `balanced` skips delay phases and preserves delay during area recovery. `area` skips delay phases and allows area recovery to increase delay. Default `delay`.
-  - `--top <TOP>` – override the top-level entry point (required if the IR package has no `top fn`).
+  - `--top <TOP>` – override the selected function or block. If the IR package
+    has no declared top, it may be omitted only when the package contains
+    exactly one function or block.
 
 Example:
 
@@ -380,7 +387,15 @@ xlsynth-driver ir2g8r my_module.opt.ir \
   --stats-out my_module.stats.json > my_module.g8r
 ```
 
-The command above leaves three artifacts:
+Block example:
+
+```shell
+xlsynth-driver ir2g8r pipeline.ir --top pipe \
+  --bin-out pipeline.g8rbin \
+  --netlist-out pipeline.ugv > pipeline.g8r
+```
+
+The function example above leaves three artifacts:
 
 1. `my_module.g8r` – human-readable native g8r file containing the combinational design.
 1. `my_module.g8rbin` – compact native g8r binary file containing the same design.
@@ -414,24 +429,30 @@ Example:
 xlsynth-driver ir-prep-for-gates my_module.opt.ir --top main > my_module.prepared.ir
 ```
 
-### `g8r2v`: GateFn to gate-level netlist (Verilog-like)
+### `g8r2v`: SequentialGateFn to gate-level netlist (Verilog-like)
 
-Converts a combinational `.g8r` (text) or `.g8rbin` (binary) design to a `.ugv` netlist (human-readable, Verilog-like) on **stdout**. Designs that declare a clock or contain registers are rejected because this command does not yet emit stored sequential boundaries.
+Converts a `.g8r` (text) or `.g8rbin` (binary) `SequentialGateFn` design to a
+`.ugv` netlist (human-readable, Verilog-like) on **stdout**. Stored register
+bindings are emitted as `always_ff @ (posedge <clock>)` assignments. A
+combinational design is the zero-register case.
 
-- By default, emits the netlist with the original GateFn inputs.
+- By default, emits the stored design interface and sequential boundaries.
 - The `--add-clk-port[=NAME]` flag inserts an (unused) clock port as the first input:
   - If omitted: no clock port is added.
   - If given as `--add-clk-port` (no value): adds a port named `clk`.
   - If given as `--add-clk-port=foo`: adds a port named `foo`.
+  - If the input design already declares a clock, the supplied name must match it.
 
 Additional flags:
 
-- `--flop-inputs` – add a layer of flops for all inputs.
-- `--flop-outputs` – add a layer of flops for all outputs.
+- `--flop-inputs` – add a layer of boundary registers for all external inputs.
+- `--flop-outputs` – add a layer of boundary registers for all external outputs.
 - `--use-system-verilog` – emit SystemVerilog instead of Verilog.
 - `--module-name <NAME>` – override the generated module name.
 
-Note: If `--flop-inputs` or `--flop-outputs` is used you must also provide `--add-clk-port=<NAME>` to name the clock.
+Note: If `--flop-inputs` or `--flop-outputs` is used on a clockless
+combinational design, provide `--add-clk-port=<NAME>`. A design that already
+declares its clock uses that clock for added boundary registers.
 
 Example usage:
 
@@ -456,6 +477,41 @@ xlsynth-driver g8r2v my_module.g8r \
   --flop-inputs --flop-outputs \
   --use-system-verilog \
   --module-name=my_module_g8r > my_module.ugv
+```
+
+### `g8r2blif`: SequentialGateFn to BLIF
+
+Converts a `.g8r` or `.g8rbin` `SequentialGateFn` design to BLIF on
+**stdout**. Combinational logic is emitted as `.names` tables and stored
+registers are emitted as rising-edge `.latch` records. Synchronous controls
+already represented in register `D` logic remain combinational logic in the
+BLIF.
+
+Positional arguments:
+
+- `<g8r_input_file>` - input `.g8r` or `.g8rbin` file.
+
+Example usage:
+
+```shell
+xlsynth-driver g8r2blif pipeline.g8r > pipeline.blif
+```
+
+### `blif2g8r`: BLIF to SequentialGateFn
+
+Converts supported synchronous BLIF to canonical `.g8r` text on **stdout**.
+This reader targets BLIF written by `g8r2blif` and compatible ABC output: port,
+register, and clock identities are recovered using the emitted flattened-net
+naming convention. It is not intended as a general-purpose BLIF frontend.
+
+Positional arguments:
+
+- `<blif_input_file>` - input `.blif` file.
+
+Example usage:
+
+```shell
+xlsynth-driver blif2g8r pipeline.blif > pipeline.g8r
 ```
 
 ### `aig2v`: AIGER to gate-level netlist
@@ -529,12 +585,13 @@ xlsynth-driver aig2v design.aig \
   --module-name add_bf16 > add_bf16_comb.v
 ```
 
-### `g8r2ir`: GateFn to XLS IR package
+### `g8r2ir-block`: SequentialGateFn to XLS block IR
 
-Converts a combinational `.g8r` (text) or `.g8rbin` (binary) design into an XLS IR *package* and prints it on **stdout**. Designs that declare a clock or contain registers are rejected because this command currently produces function IR rather than block IR.
-
-- The reconstructed IR uses the GateFn’s flattened bit-vector signature (one `bits[W]` parameter per input and a `bits[W]` or tuple-of-bits return type).
-- This is useful for IR-level inspection, equivalence checking, and debugging of GateFn transforms.
+Converts a `.g8r` (text) or `.g8rbin` (binary) `SequentialGateFn` design into
+an XLS IR package whose top member is a block, and prints it on **stdout**.
+This is the state-preserving conversion for the native g8r representation:
+clock and register bindings become block clock/register boundaries, and a
+zero-register design remains a combinational block.
 
 Positional arguments:
 
@@ -543,10 +600,23 @@ Positional arguments:
 Example usage:
 
 ```shell
-xlsynth-driver g8r2ir my_module.g8r > my_module.g8r.ir
+xlsynth-driver g8r2ir-block pipeline.g8r > pipeline.block.ir
 ```
 
 The output is always written to stdout; redirect to a `.ir` file as needed.
+
+### `g8r2ir-fn`: SequentialGateFn to XLS function IR
+
+Projects a native `.g8r` or `.g8rbin` design into an XLS function IR package.
+This command succeeds only if the stored `SequentialGateFn` has no clock and
+no registers; use `g8r2ir-block` when preserving block identity or sequential
+state.
+
+Example usage:
+
+```shell
+xlsynth-driver g8r2ir-fn adder.g8r > adder.fn.ir
+```
 
 ### `aig2ir`: AIGER to XLS IR package
 

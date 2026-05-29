@@ -1,0 +1,10 @@
+package gate
+
+top block pipeline(clk: clock, data: bits[1], result: bits[1]) {
+  reg state(bits[1])
+  data: bits[1] = input_port(name=data, id=1)
+  state_q: bits[1] = register_read(register=state, id=2)
+  state_d: () = register_write(data, register=state, id=4)
+  result: () = output_port(state_q, name=result, id=5)
+}
+

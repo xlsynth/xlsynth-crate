@@ -8,6 +8,7 @@ use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 
+use crate::aig::SequentialGateFn;
 use crate::aig::cut_db_rewrite;
 use crate::aig::dce;
 use crate::aig::fanout::fanout_histogram;
@@ -725,7 +726,8 @@ pub fn process_ir_text_with_gatefn(
     }
 
     if options.emit_netlist {
-        let netlist = emit_netlist::emit_netlist(&ir_top.name, &gate_fn, false, false, false, None)
+        let design = SequentialGateFn::from_gate_fn(gate_fn.clone());
+        let netlist = emit_netlist::emit_netlist(&design, false)
             .map_err(|e| format!("Failed to emit netlist: {}", e))?;
         println!("{}", netlist);
     }

@@ -1,0 +1,8 @@
+package gate
+
+top block testmod(a: bits[1], y: bits[1]) {
+  a: bits[1] = input_port(name=a, id=1)
+  and.2: bits[1] = and(a, a, id=2)
+  y: () = output_port(and.2, name=y, id=3)
+}
+

@@ -9,10 +9,13 @@ use std::io::Write;
 use std::process::Command;
 use std::process::Stdio;
 use xlsynth::{IrBits, IrValue};
-use xlsynth_g8r::aig::{AigBitVector, AigOperand, GateFn, SequentialGateFn};
+use xlsynth_g8r::aig::{
+    AigBitVector, AigOperand, ClockPort, GateFn, RegisterBinding, SequentialGateFn,
+    TransitionInputId, TransitionOutputId,
+};
 use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
 use xlsynth_g8r::aig_serdes::emit_aiger_binary::emit_aiger_binary;
-use xlsynth_g8r::aig_serdes::g8r::{emit_g8r, encode_g8r_binary};
+use xlsynth_g8r::aig_serdes::g8r::{emit_g8r, encode_g8r_binary, parse_g8r};
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use xlsynth_g8r::test_utils::interesting_ir_roundtrip_cases;
 use xlsynth_pir::ir_parser;
@@ -73,6 +76,33 @@ fn write_g8r_binary_file(path: &std::path::Path, gate_fn: &GateFn) {
     let design = SequentialGateFn::from_gate_fn(gate_fn.clone());
     let bytes = encode_g8r_binary(&design).expect("failed to serialize g8rbin file");
     std::fs::write(path, bytes).expect("failed to write g8rbin file");
+}
+
+fn make_pipeline_sequential_design() -> SequentialGateFn {
+    let mut builder = GateBuilder::new(
+        "pipeline_transition".to_string(),
+        GateBuilderOptions::no_opt(),
+    );
+    let data = builder.add_input("data".to_string(), 1);
+    let state_q = builder.add_input("state_q".to_string(), 1);
+    builder.add_output("result".to_string(), state_q);
+    builder.add_output("state_d".to_string(), data);
+    SequentialGateFn::new(
+        "pipeline".to_string(),
+        builder.build(),
+        vec![TransitionInputId::new(0)],
+        vec![TransitionOutputId::new(0)],
+        Some(ClockPort {
+            name: "clk".to_string(),
+        }),
+        vec![RegisterBinding {
+            name: "state".to_string(),
+            q: TransitionInputId::new(1),
+            d: TransitionOutputId::new(1),
+            initial_value: None,
+        }],
+    )
+    .unwrap()
 }
 
 fn ir_bits_to_msb_string(bits: &IrBits) -> String {
@@ -4559,7 +4589,124 @@ fn test_ir2g8r_emits_all_outputs() {
 }
 
 #[test]
-fn test_g8r2ir_basic_ir_output() {
+fn test_ir2g8r_selects_block_and_preserves_sequential_state() {
+    let ir = r#"package selected_block
+
+top fn decoy(x: bits[1] id=101) -> bits[1] {
+  ret identity.102: bits[1] = identity(x, id=102)
+}
+
+block pipe(clk: clock, data: bits[1], le: bits[1], out: bits[1]) {
+  reg state(bits[1])
+  data: bits[1] = input_port(name=data, id=1)
+  le: bits[1] = input_port(name=le, id=2)
+  state_q: bits[1] = register_read(register=state, id=3)
+  state_d: () = register_write(data, register=state, load_enable=le, id=4)
+  out: () = output_port(state_q, name=out, id=5)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("selected_block.ir");
+    let bin_path = temp_dir.path().join("selected_block.g8rbin");
+    let netlist_path = temp_dir.path().join("selected_block.sv");
+    std::fs::write(&ir_path, ir).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("ir2g8r")
+        .arg(&ir_path)
+        .arg("--top")
+        .arg("pipe")
+        .arg("--bin-out")
+        .arg(&bin_path)
+        .arg("--netlist-out")
+        .arg(&netlist_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "ir2g8r block lowering failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let design = parse_g8r(&String::from_utf8(output.stdout).unwrap()).unwrap();
+    assert_eq!(design.name, "pipe");
+    assert_eq!(design.clock.as_ref().unwrap().name, "clk");
+    assert_eq!(design.registers.len(), 1);
+    assert_eq!(design.registers[0].name, "state");
+    assert!(std::fs::read(&bin_path)
+        .unwrap()
+        .starts_with(b"g8rbin_v2\n"));
+    let netlist = std::fs::read_to_string(&netlist_path).unwrap();
+    assert!(netlist.contains("always_ff @ (posedge clk)"));
+    assert!(netlist.contains("state <="));
+}
+
+#[test]
+fn test_ir2g8r_requires_top_when_package_has_function_and_block_without_declared_top() {
+    let ir = r#"package ambiguous_member
+
+fn helper(x: bits[1] id=101) -> bits[1] {
+  ret identity.102: bits[1] = identity(x, id=102)
+}
+
+block pipe(data: bits[1], out: bits[1]) {
+  data: bits[1] = input_port(name=data, id=1)
+  out: () = output_port(data, name=out, id=2)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("ambiguous_member.ir");
+    std::fs::write(&ir_path, ir).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("ir2g8r")
+        .arg(&ir_path)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("PIR package has no declared top and multiple lowerable members")
+            && stderr.contains("function 'helper'")
+            && stderr.contains("block 'pipe'")
+            && stderr.contains("provide --top to select one"),
+        "unexpected error for ambiguous package: {stderr}"
+    );
+}
+
+#[test]
+fn test_ir2g8r_rejects_aiger_output_for_selected_registered_block() {
+    let ir = r#"package selected_block
+
+top block pipe(clk: clock, data: bits[1], out: bits[1]) {
+  reg state(bits[1])
+  data: bits[1] = input_port(name=data, id=1)
+  state_q: bits[1] = register_read(register=state, id=2)
+  state_d: () = register_write(data, register=state, id=3)
+  out: () = output_port(state_q, name=out, id=4)
+}
+"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let ir_path = temp_dir.path().join("registered.ir");
+    let aiger_path = temp_dir.path().join("registered.aag");
+    std::fs::write(&ir_path, ir).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("ir2g8r")
+        .arg(&ir_path)
+        .arg("--aiger-out")
+        .arg(&aiger_path)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("--aiger-out requires a clockless, register-free design"));
+    assert!(!aiger_path.exists());
+}
+
+#[test]
+fn test_g8r2ir_fn_basic_ir_output() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     // Build a simple 1-bit GateFn: y = a & a.
@@ -4575,14 +4722,14 @@ fn test_g8r2ir_basic_ir_output() {
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
-        .arg("g8r2ir")
+        .arg("g8r2ir-fn")
         .arg(g8r_path.to_str().unwrap())
         .output()
         .unwrap();
 
     assert!(
         output.status.success(),
-        "g8r2ir failed:\nstdout: {}\nstderr: {}",
+        "g8r2ir-fn failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -4590,14 +4737,14 @@ fn test_g8r2ir_basic_ir_output() {
     let ir_text = String::from_utf8_lossy(&output.stdout).to_string();
 
     // Compare against golden IR to lock in the reconstructed package shape.
-    let golden_rel = "tests/test_g8r2ir_basic_ir_output.golden.ir";
+    let golden_rel = "tests/test_g8r2ir_fn_basic_ir_output.golden.ir";
     let golden_dir = std::path::Path::new(golden_rel).parent().unwrap();
     let _ = std::fs::create_dir_all(golden_dir);
     compare_golden_text(&ir_text, golden_rel);
 }
 
 #[test]
-fn test_g8r2ir_preserves_scalar_multi_output_order() {
+fn test_g8r2ir_fn_preserves_scalar_multi_output_order() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let mut g8_builder = GateBuilder::new("testmod".to_string(), GateBuilderOptions::no_opt());
@@ -4613,14 +4760,14 @@ fn test_g8r2ir_preserves_scalar_multi_output_order() {
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
     let output = Command::new(command_path)
-        .arg("g8r2ir")
+        .arg("g8r2ir-fn")
         .arg(g8r_path.to_str().unwrap())
         .output()
         .unwrap();
 
     assert!(
         output.status.success(),
-        "g8r2ir failed:\nstdout: {}\nstderr: {}",
+        "g8r2ir-fn failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -4636,6 +4783,115 @@ fn test_g8r2ir_preserves_scalar_multi_output_order() {
         "scalar multi-output order was reversed unexpectedly:\n{}",
         ir_text
     );
+}
+
+#[test]
+fn test_g8r2ir_block_zero_register_design_emits_block() {
+    let mut builder = GateBuilder::new("testmod".to_string(), GateBuilderOptions::no_opt());
+    let a_val = builder.add_input("a".to_string(), 1);
+    let y_val = builder.add_and_binary(*a_val.get_lsb(0), *a_val.get_lsb(0));
+    builder.add_output("y".to_string(), AigBitVector::from_bit(y_val));
+    let temp_dir = tempfile::tempdir().unwrap();
+    let path = temp_dir.path().join("testmod.g8r");
+    write_g8r_file(&path, &builder.build());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("g8r2ir-block")
+        .arg(path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "g8r2ir-block failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    compare_golden_text(
+        &String::from_utf8_lossy(&output.stdout),
+        "tests/test_g8r2ir_block_combinational.golden.ir",
+    );
+}
+
+#[test]
+fn test_g8r2ir_block_emits_stored_registers() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let path = temp_dir.path().join("pipeline.g8r");
+    std::fs::write(&path, emit_g8r(&make_pipeline_sequential_design())).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("g8r2ir-block")
+        .arg(path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "g8r2ir-block failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    compare_golden_text(
+        &String::from_utf8_lossy(&output.stdout),
+        "tests/test_g8r2ir_block_registered.golden.ir",
+    );
+}
+
+#[test]
+fn test_g8r2ir_fn_rejects_stored_registers() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let path = temp_dir.path().join("pipeline.g8r");
+    std::fs::write(&path, emit_g8r(&make_pipeline_sequential_design())).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("g8r2ir-fn")
+        .arg(path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains(
+        "cannot convert design 'pipeline' to GateFn: design contains 1 register(s) and clock 'clk'"
+    ));
+}
+
+#[test]
+fn test_g8r_blif_cli_roundtrip_preserves_stored_registers() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let g8r_path = temp_dir.path().join("pipeline.g8r");
+    let blif_path = temp_dir.path().join("pipeline.blif");
+    std::fs::write(&g8r_path, emit_g8r(&make_pipeline_sequential_design())).unwrap();
+
+    let blif_output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("g8r2blif")
+        .arg(&g8r_path)
+        .output()
+        .unwrap();
+    assert!(
+        blif_output.status.success(),
+        "g8r2blif failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&blif_output.stdout),
+        String::from_utf8_lossy(&blif_output.stderr)
+    );
+    let blif_text = String::from_utf8(blif_output.stdout).unwrap();
+    assert!(blif_text.contains(".model pipeline\n"));
+    assert!(blif_text.contains(".latch state_next[0] state_reg[0] re clk 2\n"));
+    std::fs::write(&blif_path, blif_text).unwrap();
+
+    let g8r_output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("blif2g8r")
+        .arg(&blif_path)
+        .output()
+        .unwrap();
+    assert!(
+        g8r_output.status.success(),
+        "blif2g8r failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&g8r_output.stdout),
+        String::from_utf8_lossy(&g8r_output.stderr)
+    );
+    let design = parse_g8r(&String::from_utf8(g8r_output.stdout).unwrap()).unwrap();
+    assert_eq!(design.name, "pipeline");
+    assert_eq!(design.clock.as_ref().unwrap().name, "clk");
+    assert_eq!(design.registers.len(), 1);
+    assert_eq!(design.registers[0].name, "state");
+    assert!(design.registers[0].initial_value.is_none());
 }
 
 #[test]
@@ -5282,24 +5538,34 @@ fn test_aig2v_flop_requires_clk_port_error() {
     let aag_path = write_aiger_file(&temp_dir, "dummy.aag", &gate_fn);
 
     let command_path = env!("CARGO_BIN_EXE_xlsynth-driver");
-    let output = Command::new(command_path)
-        .arg("aig2v")
-        .arg(aag_path.to_str().unwrap())
-        .arg("--module-name")
-        .arg("dummy")
-        .arg("--flop-inputs")
-        .output()
-        .unwrap();
+    for flop_flag in ["--flop-inputs", "--flop-outputs"] {
+        let output = Command::new(command_path)
+            .arg("aig2v")
+            .arg(aag_path.to_str().unwrap())
+            .arg("--module-name")
+            .arg("dummy")
+            .arg(flop_flag)
+            .output()
+            .unwrap();
 
-    assert!(!output.status.success(), "Command should fail");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains(
-            "--add-clk-port <NAME> is required when --flop-inputs or --flop-outputs is used."
-        ),
-        "Stderr should contain the specific error message. Stderr: {}",
-        stderr
-    );
+        assert!(
+            !output.status.success(),
+            "Command should fail for {flop_flag}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(
+                "--add-clk-port <NAME> is required when --flop-inputs or --flop-outputs is used."
+            ),
+            "Stderr should contain the specific error message for {flop_flag}. Stderr: {}",
+            stderr
+        );
+        assert!(
+            !stderr.contains("panicked"),
+            "Stderr should not contain a panic for {flop_flag}. Stderr: {}",
+            stderr
+        );
+    }
 }
 
 #[test]
@@ -5812,6 +6078,32 @@ fn test_g8r2v_add_clk_port_behavior() {
 
     let expected_netlist = "module testmod(\n  input wire clk,\n  input wire a,\n  output wire y\n);\n  wire G0;\n  wire G2;\n  assign G0 = 1'b0;\n  assign G2 = a & a;\n  assign y = G2;\nendmodule\n\n";
     assert_eq!(netlist, expected_netlist);
+}
+
+#[test]
+fn test_g8r2v_emits_stored_sequential_gate_fn_registers() {
+    let design = make_pipeline_sequential_design();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let path = temp_dir.path().join("pipeline.g8r");
+    std::fs::write(&path, emit_g8r(&design)).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("g8r2v")
+        .arg(path.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let netlist = String::from_utf8_lossy(&output.stdout);
+    assert!(netlist.contains("input wire clk"));
+    assert!(netlist.contains("reg state;"));
+    assert!(netlist.contains("always_ff @ (posedge clk)"));
+    assert!(netlist.contains("state <= data;"));
+    assert!(netlist.contains("assign result = state;"));
 }
 
 #[test]
