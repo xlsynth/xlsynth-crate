@@ -18,6 +18,8 @@ use common::{PipelineCfg, Port, StageInfo};
 mod build_pipeline;
 use build_pipeline::{PipelineConfig as BuildPipelineConfig, build_pipeline as build_wrapper};
 
+pub mod g8r_pipeline;
+
 mod names;
 use names::{collect_stage_name_infos, validate_stitch_pipeline_names};
 

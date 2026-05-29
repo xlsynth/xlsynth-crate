@@ -2702,6 +2702,46 @@ xlsynth-driver dslx-stitch-pipeline \
   --output_module_name=foo > foo.sv
 ```
 
+### `dslx-stitch-g8r-pipeline`: Stitch DSLX stages into sequential g8r
+
+Lowers selected DSLX stage functions to combinational g8r logic and connects
+each adjacent stage through a register layer in one `SequentialGateFn`. Text
+`.g8r` output is written to stdout; use `--bin-out=<PATH>` to also write the
+binary `.g8rbin` encoding.
+
+Stage selection follows `dslx-stitch-pipeline`: use `--dslx_top=<NAME>` to
+discover `<NAME>_cycle0`, `<NAME>_cycle1`, ... functions, or use
+`--stages=<CSV>` with `--output_design_name=<NAME>` for an explicit order.
+
+Pipeline flags:
+
+- `--clock_name=<NAME>` - inserted-register clock name, default `clk`.
+- `--flop_inputs=<BOOL>` and `--flop_outputs=<BOOL>` - add external register
+  layers; both default to `true`.
+- `--input_valid_signal=<NAME>` - add a valid pipeline and make each data
+  register load-enabled by the current valid bit.
+- `--output_valid_signal=<NAME>` - expose the final valid bit; requires
+  `--input_valid_signal`.
+- `--reset=<NAME>` and `--reset_active_low=<BOOL>` - synchronously clear valid
+  registers; reset requires `--input_valid_signal`. Data registers hold/load
+  according to valid rather than being reset.
+
+The standard DSLX path flags and the g8r lowering flags accepted by `ir2g8r`
+are also accepted.
+
+```shell
+xlsynth-driver dslx-stitch-g8r-pipeline \
+  --dslx_input_file my_design.x \
+  --dslx_top foo > foo.g8r
+
+xlsynth-driver dslx-stitch-g8r-pipeline \
+  --dslx_input_file my_design.x \
+  --stages=foo_cycle0,foo_cycle1,foo_cycle2 \
+  --output_design_name=foo \
+  --input_valid_signal=in_valid --output_valid_signal=out_valid \
+  --reset=rst --bin-out=foo.g8rbin > foo.g8r
+```
+
 ### `run-verilog-pipeline` *(experimental)*
 
 Runs a synthesized *pipelined* SystemVerilog module through a throw-away, automatically-generated test-bench and prints the value(s) that appear on the data output port(s).
