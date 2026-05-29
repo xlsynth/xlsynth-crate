@@ -30,12 +30,19 @@ echo "==> Fetching XLS artifacts (tag: ${tag}, platform: ${platform})"
 # Note: we use system python for this as we installed the python3-requests package earlier.
 # This downloads:
 # - libxls DSO (decompressed if the release asset is gzipped)
+# - standalone AOT runtime archive and producer-authored link config
 # - dslx_stdlib.tar.gz and unpacks it to "${tools_dir}/xls/dslx/stdlib"
-/usr/bin/python3 "${repo_root}/scripts/download_release.py" -p "${platform}" -o "${tools_dir}" -d -v "${tag}"
+/usr/bin/python3 "${repo_root}/scripts/download_release.py" -p "${platform}" -o "${tools_dir}" -v "${tag}"
 
 dso_path="$(ls "${tools_dir}"/libxls-*.so 2>/dev/null | head -n 1 || true)"
 if [ -z "${dso_path}" ] || [ ! -f "${dso_path}" ]; then
   echo "Expected to find a libxls DSO under ${tools_dir} but did not." 1>&2
+  exit 1
+fi
+aot_runtime_path="${tools_dir}/libxls_aot_runtime.a"
+aot_runtime_link_config_path="${tools_dir}/libxls_aot_runtime_link.toml"
+if [ ! -f "${aot_runtime_path}" ] || [ ! -f "${aot_runtime_link_config_path}" ]; then
+  echo "Expected to find standalone AOT runtime artifacts under ${tools_dir} but did not." 1>&2
   exit 1
 fi
 
@@ -60,8 +67,11 @@ export DSLX_STDLIB_PATH="$XLSYNTH_TOOLS/xls/dslx/stdlib"
 export SLANG_PATH="/usr/local/bin/slang"
 export PATH="$PATH:${repo_root}"
 export XLS_DSO_PATH="${dso_path}"
+export XLS_AOT_RUNTIME_PATH="${aot_runtime_path}"
+export XLS_AOT_RUNTIME_LINK_CONFIG_PATH="${aot_runtime_link_config_path}"
 
 [ -f "$XLS_DSO_PATH" ] && echo "DSO found OK"
+[ -f "$XLS_AOT_RUNTIME_PATH" ] && echo "Standalone AOT runtime archive found OK"
 
 echo "==> Persisting environment variables for subsequent commands"
 ENV_SH="${HOME}/.xlsynth_codex_env.sh"
@@ -71,6 +81,8 @@ export XLSYNTH_TOOLS=$(printf '%q' "${XLSYNTH_TOOLS}")
 export DSLX_STDLIB_PATH=$(printf '%q' "${DSLX_STDLIB_PATH}")
 export SLANG_PATH=$(printf '%q' "${SLANG_PATH}")
 export XLS_DSO_PATH=$(printf '%q' "${XLS_DSO_PATH}")
+export XLS_AOT_RUNTIME_PATH=$(printf '%q' "${XLS_AOT_RUNTIME_PATH}")
+export XLS_AOT_RUNTIME_LINK_CONFIG_PATH=$(printf '%q' "${XLS_AOT_RUNTIME_LINK_CONFIG_PATH}")
 export CARGO_NET_OFFLINE=true
 export PATH=\$PATH:$(printf '%q' "${repo_root}")
 EOF

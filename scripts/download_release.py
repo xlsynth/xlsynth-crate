@@ -299,19 +299,33 @@ def main():
         "-d",
         "--dso",
         dest="dso",
-        help="Download the DSO library",
+        help="Download the DSO library (default)",
         action="store_true",
-        default=False,
+        default=True,
+    )
+    parser.add_option(
+        "--no-dso",
+        dest="dso",
+        help="Do not download the DSO library",
+        action="store_false",
     )
     parser.add_option(
         "--standalone-aot-runtime",
         dest="standalone_aot_runtime",
         help=(
             "Download the same-version standalone AOT runtime archive and "
-            "producer-authored link config"
+            "producer-authored link config (default)"
         ),
         action="store_true",
-        default=False,
+        default=True,
+    )
+    parser.add_option(
+        "--no-standalone-aot-runtime",
+        dest="standalone_aot_runtime",
+        help=(
+            "Do not download the standalone AOT runtime archive or its " "link config"
+        ),
+        action="store_false",
     )
     default_binaries_csv = ",".join(DEFAULT_BINARIES)
     parser.add_option(

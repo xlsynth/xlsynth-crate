@@ -77,6 +77,8 @@ jobs:
       - name: Build and test
         run: |
           export XLSYNTH_TOOLS=`realpath xlsynth_tools`
+          export XLS_AOT_RUNTIME_PATH="${XLSYNTH_TOOLS}/libxls_aot_runtime.a"
+          export XLS_AOT_RUNTIME_LINK_CONFIG_PATH="${XLSYNTH_TOOLS}/libxls_aot_runtime_link.toml"
           cargo test --workspace
 
       - name: Install Python dependencies for polling script
