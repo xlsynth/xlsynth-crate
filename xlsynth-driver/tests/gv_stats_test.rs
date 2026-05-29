@@ -218,6 +218,27 @@ fn gv_area_and_gv_stats_emit_expected_text_and_json() {
     assert_eq!(stats_json["max_delay"], 3.0);
     assert_eq!(stats_json["cell_count"], 2);
     assert_eq!(stats_json["cell_levels"], 2);
+    assert_eq!(
+        stats_json["timing_query_diagnostic_counts"]["delay_slew_below_min_clamp_count"],
+        0
+    );
+    assert_eq!(
+        stats_json["timing_query_diagnostic_counts"]
+            ["delay_slew_single_above_max_extrapolation_count"],
+        0
+    );
+    assert_eq!(
+        stats_json["timing_query_diagnostic_counts"]["delay_slew_multiple_above_max_clamp_count"],
+        0
+    );
+    assert_eq!(
+        stats_json["timing_query_diagnostic_counts"]["setup_below_min_clamp_count"],
+        0
+    );
+    assert_eq!(
+        stats_json["timing_query_diagnostic_counts"]["setup_above_max_clamp_count"],
+        0
+    );
 }
 
 #[test]
@@ -250,6 +271,7 @@ fn gv_stats_reports_registered_pipeline_stages() {
         serde_json::from_slice(&std::fs::read(&stats_json_path).expect("read gv-stats json"))
             .expect("parse gv-stats json");
     assert_eq!(stats_json["stage_partition_status"], "partitioned");
+    assert_eq!(stats_json["max_delay"], serde_json::Value::Null);
     assert_eq!(
         stats_json["max_input_to_register_delay_breakdown"]["combinational_delay"],
         1.0
@@ -281,6 +303,27 @@ fn gv_stats_reports_registered_pipeline_stages() {
     );
     assert_eq!(stats_json["sequential_cell_area"], 8.0);
     assert_eq!(stats_json["non_stage_combinational_cell_area"], 2.0);
+    assert_eq!(
+        stats_json["timing_query_diagnostic_counts"]["delay_slew_below_min_clamp_count"],
+        0
+    );
+    assert_eq!(
+        stats_json["timing_query_diagnostic_counts"]
+            ["delay_slew_single_above_max_extrapolation_count"],
+        0
+    );
+    assert_eq!(
+        stats_json["timing_query_diagnostic_counts"]["delay_slew_multiple_above_max_clamp_count"],
+        0
+    );
+    assert_eq!(
+        stats_json["timing_query_diagnostic_counts"]["setup_below_min_clamp_count"],
+        0
+    );
+    assert_eq!(
+        stats_json["timing_query_diagnostic_counts"]["setup_above_max_clamp_count"],
+        0
+    );
     assert_eq!(stats_json["stages"][0]["combinational_cell_area"], 1.0);
     assert_eq!(
         stats_json["stages"][0]["max_delay_breakdown"]["clock_to_output_delay"],

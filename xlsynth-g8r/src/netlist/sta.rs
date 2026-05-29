@@ -9,9 +9,10 @@
 //!   aggregates report timing back to parsed nets.
 //! - Assumes fixed transition at primary-input sources.
 //! - Uses summed input-pin capacitance on each net plus a fixed module-output
-//!   load to query timing tables.
+//!   load to query timing tables; zero output load is evaluated at each table's
+//!   minimum characterized load coordinate.
 //! - In register-boundary analysis, models flip-flop clock-to-output arcs and
-//!   setup checks using an ideal clock edge clamped to each table's minimum
+//!   setup checks using an ideal clock edge evaluated at each table's minimum
 //!   characterized clock transition. Hold, skew, and physical clock delivery
 //!   are outside this model.
 //! - In combinational-only analysis, rejects sequential output pins.
@@ -20,8 +21,9 @@
 //! - Repairs non-monotone delay/slew tables during lookup with a conservative
 //!   coordinatewise upper envelope, because later frontier reduction relies on
 //!   larger transition/load queries not producing smaller delay/slew values.
-//! - Clamps table coordinates to each characterized axis range before
-//!   interpolation.
+//! - Clamps below-minimum coordinates; for above-maximum delay/slew queries,
+//!   extrapolates one varying axis or holds multiple varying axes at their
+//!   characterized upper boundary. Setup queries remain clamped.
 //! - Accepts literal, alias, slice, and concat continuous assigns as zero-delay
 //!   bit sources so mapped netlists emitted by tools such as Yosys/ABC can
 //!   preserve constants and wire aliases without needing synthetic cells.
@@ -294,6 +296,29 @@ impl Default for StaOptions {
     }
 }
 
+/// Counts timing-table coordinate queries evaluated outside characterized
+/// bounds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct TimingQueryDiagnosticCounts {
+    pub delay_slew_below_min_clamp_count: usize,
+    pub delay_slew_single_above_max_extrapolation_count: usize,
+    pub delay_slew_multiple_above_max_clamp_count: usize,
+    pub setup_below_min_clamp_count: usize,
+    pub setup_above_max_clamp_count: usize,
+}
+
+impl std::ops::AddAssign for TimingQueryDiagnosticCounts {
+    fn add_assign(&mut self, rhs: Self) {
+        self.delay_slew_below_min_clamp_count += rhs.delay_slew_below_min_clamp_count;
+        self.delay_slew_single_above_max_extrapolation_count +=
+            rhs.delay_slew_single_above_max_extrapolation_count;
+        self.delay_slew_multiple_above_max_clamp_count +=
+            rhs.delay_slew_multiple_above_max_clamp_count;
+        self.setup_below_min_clamp_count += rhs.setup_below_min_clamp_count;
+        self.setup_above_max_clamp_count += rhs.setup_above_max_clamp_count;
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct StaReport {
     pub net_timing: Vec<Option<SignalTiming>>,
@@ -303,6 +328,7 @@ pub struct StaReport {
     pub worst_register_input_breakdown: Option<RegisterPathDelayBreakdown>,
     pub register_input_arrivals: Vec<Option<f64>>,
     pub register_input_breakdowns: Vec<Option<RegisterPathDelayBreakdown>>,
+    pub timing_query_diagnostic_counts: TimingQueryDiagnosticCounts,
     pub cell_levels: usize,
 }
 
@@ -872,6 +898,7 @@ fn analyze_max_arrival_proto_with_mode(
     let mut queue = VecDeque::new();
     let mut instance_levels = vec![1usize; instance_count];
     let mut validated_timing_tables: HashSet<*const TimingTable> = HashSet::new();
+    let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
     for (idx, deg) in indegree.iter().enumerate() {
         if *deg == 0 {
             queue.push_back(idx);
@@ -913,6 +940,7 @@ fn analyze_max_arrival_proto_with_mode(
                                     known_pin_values,
                                     output_load,
                                     &mut validated_timing_tables,
+                                    &mut timing_query_diagnostic_counts,
                                     &format!(
                                         "{}.{} (instance '{}') clock-to-output",
                                         cell_name, pin.name, instance_name
@@ -1041,6 +1069,7 @@ fn analyze_max_arrival_proto_with_mode(
                                 arc,
                                 input_timing_set,
                                 output_load,
+                                &mut timing_query_diagnostic_counts,
                                 &context,
                             )?;
                             sta_trace(|| {
@@ -1214,6 +1243,7 @@ fn analyze_max_arrival_proto_with_mode(
                         setup_arcs.as_slice(),
                         &instance_known_pin_values[inst_idx],
                         timing_set,
+                        &mut timing_query_diagnostic_counts,
                         &format!(
                             "{}.{} (instance '{}') setup",
                             instance_cell_names[inst_idx],
@@ -1276,6 +1306,7 @@ fn analyze_max_arrival_proto_with_mode(
             .and_then(|timing| timing.register_path_breakdown),
         register_input_arrivals,
         register_input_breakdowns,
+        timing_query_diagnostic_counts,
         cell_levels,
     })
 }
@@ -1815,6 +1846,7 @@ fn evaluate_arc(
     output_load: f64,
     context: &str,
 ) -> Result<SignalTiming> {
+    let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
     let set = evaluate_arc_set(
         library,
         arc,
@@ -1823,6 +1855,7 @@ fn evaluate_arc(
             rise: output_load,
             fall: output_load,
         },
+        &mut timing_query_diagnostic_counts,
         context,
     )?;
     set.as_report_signal_timing().ok_or_else(|| {
@@ -1835,6 +1868,7 @@ fn evaluate_arc_set(
     arc: &TimingArc,
     input_timing: &SignalTimingSet,
     output_load: EdgeLoadCapacitance,
+    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
     context: &str,
 ) -> Result<SignalTimingSet> {
     let timing_type = StaTimingType::from_raw(arc.timing_type.as_str());
@@ -1872,6 +1906,7 @@ fn evaluate_arc_set(
             rise_transition,
             source_edges(true)?,
             output_load.rise,
+            timing_query_diagnostic_counts,
             context,
             StaTimingTableKind::CellRise,
             StaTimingTableKind::RiseTransition,
@@ -1886,6 +1921,7 @@ fn evaluate_arc_set(
             fall_transition,
             source_edges(false)?,
             output_load.fall,
+            timing_query_diagnostic_counts,
             context,
             StaTimingTableKind::CellFall,
             StaTimingTableKind::FallTransition,
@@ -1900,6 +1936,7 @@ fn evaluate_output_edge_set(
     slew_table: &TimingTable,
     source_edges: &EdgeTimingSet,
     output_load: f64,
+    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
     context: &str,
     delay_kind: StaTimingTableKind,
     slew_kind: StaTimingTableKind,
@@ -1907,20 +1944,22 @@ fn evaluate_output_edge_set(
     let mut outputs = EdgeTimingSet::default();
 
     for source_edge in source_edges.iter() {
-        let delay = evaluate_table(
+        let delay = evaluate_table_with_diagnostics(
             library,
             delay_table,
             source_edge.timing.transition,
             output_load,
+            timing_query_diagnostic_counts,
             &format!("{context} {}", delay_kind.as_raw()),
         )?;
         // Characterized transition values may contain small negative artifacts;
         // physical transition is bounded below by zero.
-        let transition = evaluate_table(
+        let transition = evaluate_table_with_diagnostics(
             library,
             slew_table,
             source_edge.timing.transition,
             output_load,
+            timing_query_diagnostic_counts,
             &format!("{context} {}", slew_kind.as_raw()),
         )?
         .max(0.0);
@@ -1964,6 +2003,7 @@ fn evaluate_register_launch_output_set(
     known_pin_values: &HashMap<String, bool>,
     output_load: EdgeLoadCapacitance,
     validated_tables: &mut HashSet<*const TimingTable>,
+    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
     context: &str,
 ) -> Result<SignalTimingSet> {
     let launch_arcs: Vec<&TimingArc> = pin
@@ -1996,20 +2036,22 @@ fn evaluate_register_launch_output_set(
             context,
         )? {
             let query = TimingTableQuery::ideal_clock_to_output(output_load.rise);
-            let arrival = evaluate_table_with_query(
+            let arrival = evaluate_table_with_query_and_diagnostics(
                 library,
                 delay,
                 query,
+                timing_query_diagnostic_counts,
                 &format!("{context} {}", StaTimingTableKind::CellRise.as_raw()),
             )?;
             output
                 .rise
                 .insert(EdgeTimingCandidate::from_register_launch(EdgeTiming {
                     arrival,
-                    transition: evaluate_table_with_query(
+                    transition: evaluate_table_with_query_and_diagnostics(
                         library,
                         transition,
                         query,
+                        timing_query_diagnostic_counts,
                         &format!("{context} {}", StaTimingTableKind::RiseTransition.as_raw()),
                     )?
                     .max(0.0),
@@ -2022,20 +2064,22 @@ fn evaluate_register_launch_output_set(
             context,
         )? {
             let query = TimingTableQuery::ideal_clock_to_output(output_load.fall);
-            let arrival = evaluate_table_with_query(
+            let arrival = evaluate_table_with_query_and_diagnostics(
                 library,
                 delay,
                 query,
+                timing_query_diagnostic_counts,
                 &format!("{context} {}", StaTimingTableKind::CellFall.as_raw()),
             )?;
             output
                 .fall
                 .insert(EdgeTimingCandidate::from_register_launch(EdgeTiming {
                     arrival,
-                    transition: evaluate_table_with_query(
+                    transition: evaluate_table_with_query_and_diagnostics(
                         library,
                         transition,
                         query,
+                        timing_query_diagnostic_counts,
                         &format!("{context} {}", StaTimingTableKind::FallTransition.as_raw()),
                     )?
                     .max(0.0),
@@ -2063,6 +2107,7 @@ fn evaluate_register_setup_capture_arrival(
     setup_arcs: &[&TimingArc],
     known_pin_values: &HashMap<String, bool>,
     data_timing: &SignalTimingSet,
+    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
     context: &str,
 ) -> Result<Option<RegisterCaptureTimingCandidate>> {
     let mut worst_timing: Option<RegisterCaptureTimingCandidate> = None;
@@ -2074,10 +2119,11 @@ fn evaluate_register_setup_capture_arrival(
             find_optional_unique_table(arc, StaTimingTableKind::RiseConstraint, context)?
         {
             for data_edge in data_timing.rise.iter() {
-                let setup = evaluate_table_with_query(
+                let setup = evaluate_table_with_query_and_diagnostics(
                     library,
                     table,
                     TimingTableQuery::ideal_clock_setup(data_edge.timing.transition),
+                    timing_query_diagnostic_counts,
                     &format!("{context} {}", StaTimingTableKind::RiseConstraint.as_raw()),
                 )?;
                 let capture_arrival = data_edge.timing.arrival + setup;
@@ -2100,10 +2146,11 @@ fn evaluate_register_setup_capture_arrival(
             find_optional_unique_table(arc, StaTimingTableKind::FallConstraint, context)?
         {
             for data_edge in data_timing.fall.iter() {
-                let setup = evaluate_table_with_query(
+                let setup = evaluate_table_with_query_and_diagnostics(
                     library,
                     table,
                     TimingTableQuery::ideal_clock_setup(data_edge.timing.transition),
+                    timing_query_diagnostic_counts,
                     &format!("{context} {}", StaTimingTableKind::FallConstraint.as_raw()),
                 )?;
                 let capture_arrival = data_edge.timing.arrival + setup;
@@ -2416,7 +2463,7 @@ fn validate_constraint_tables_once(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MinimumClampedAxis {
+enum MinimumCharacterizedAxis {
     None,
     InputTransition,
     RelatedPinTransition,
@@ -2428,7 +2475,8 @@ struct TimingTableQuery {
     output_load: f64,
     constrained_pin_transition: f64,
     related_pin_transition: f64,
-    minimum_clamped_axis: MinimumClampedAxis,
+    /// For an ideal clock, select the fastest slew characterized by each table.
+    minimum_characterized_axis: MinimumCharacterizedAxis,
 }
 
 impl TimingTableQuery {
@@ -2438,7 +2486,7 @@ impl TimingTableQuery {
             output_load,
             constrained_pin_transition: input_transition,
             related_pin_transition: input_transition,
-            minimum_clamped_axis: MinimumClampedAxis::None,
+            minimum_characterized_axis: MinimumCharacterizedAxis::None,
         }
     }
 
@@ -2448,7 +2496,7 @@ impl TimingTableQuery {
             output_load,
             constrained_pin_transition: 0.0,
             related_pin_transition: 0.0,
-            minimum_clamped_axis: MinimumClampedAxis::InputTransition,
+            minimum_characterized_axis: MinimumCharacterizedAxis::InputTransition,
         }
     }
 
@@ -2458,11 +2506,12 @@ impl TimingTableQuery {
             output_load: 0.0,
             constrained_pin_transition: data_transition,
             related_pin_transition: 0.0,
-            minimum_clamped_axis: MinimumClampedAxis::RelatedPinTransition,
+            minimum_characterized_axis: MinimumCharacterizedAxis::RelatedPinTransition,
         }
     }
 }
 
+#[cfg(test)]
 fn evaluate_table(
     library: &crate::liberty_proto::Library,
     table: &TimingTable,
@@ -2470,18 +2519,39 @@ fn evaluate_table(
     output_load: f64,
     context: &str,
 ) -> Result<f64> {
-    evaluate_table_with_query(
+    let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
+    evaluate_table_with_diagnostics(
         library,
         table,
-        TimingTableQuery::combinational(input_transition, output_load),
+        input_transition,
+        output_load,
+        &mut timing_query_diagnostic_counts,
         context,
     )
 }
 
-fn evaluate_table_with_query(
+fn evaluate_table_with_diagnostics(
+    library: &crate::liberty_proto::Library,
+    table: &TimingTable,
+    input_transition: f64,
+    output_load: f64,
+    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
+    context: &str,
+) -> Result<f64> {
+    evaluate_table_with_query_and_diagnostics(
+        library,
+        table,
+        TimingTableQuery::combinational(input_transition, output_load),
+        timing_query_diagnostic_counts,
+        context,
+    )
+}
+
+fn evaluate_table_with_query_and_diagnostics(
     library: &crate::liberty_proto::Library,
     table: &TimingTable,
     query: TimingTableQuery,
+    timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
     context: &str,
 ) -> Result<f64> {
     validate_non_negative_finite(query.input_transition, "input transition query", context)?;
@@ -2506,41 +2576,102 @@ fn evaluate_table_with_query(
             .ok_or_else(|| anyhow!("{context}: scalar timing table had no value"));
     }
     let mut bounds: Vec<(usize, usize, f64)> = Vec::with_capacity(rank);
+    let mut axis_queries: Vec<f64> = Vec::with_capacity(rank);
+    let is_setup = matches!(
+        LibertyTableKind::from_raw(table.kind.as_str()),
+        LibertyTableKind::RiseConstraint | LibertyTableKind::FallConstraint
+    );
+    let mut above_max_axis_count = 0usize;
 
     for axis_idx in 0..rank {
         let axis = layout.axes[axis_idx];
         let axis_variable = AxisVariable::from_raw(layout.variables[axis_idx]);
-        let mut axis_query =
+        let raw_axis_query =
             axis_query_value_with_query(layout.variables[axis_idx], axis_idx, query, context)?;
         let axis_lo = axis[0];
         let axis_hi = axis[axis.len() - 1];
-        let clamp_to_minimum = match query.minimum_clamped_axis {
-            MinimumClampedAxis::None => false,
-            MinimumClampedAxis::InputTransition => {
+        let selects_minimum_characterized_coordinate = match query.minimum_characterized_axis {
+            MinimumCharacterizedAxis::None => false,
+            MinimumCharacterizedAxis::InputTransition => {
                 axis_variable == AxisVariable::InputTransition
                     || (axis_variable == AxisVariable::Unspecified && axis_idx == 0)
             }
-            MinimumClampedAxis::RelatedPinTransition => {
+            MinimumCharacterizedAxis::RelatedPinTransition => {
                 axis_variable == AxisVariable::RelatedPinTransition
             }
+        } || (query.output_load == 0.0
+            && (axis_variable == AxisVariable::OutputLoad
+                || (axis_variable == AxisVariable::Unspecified && axis_idx == 1)));
+        let axis_query = if selects_minimum_characterized_coordinate {
+            axis_lo
+        } else {
+            raw_axis_query
         };
-        if axis_query < axis_lo || axis_query > axis_hi {
+        if axis_query < axis_lo {
+            if is_setup {
+                timing_query_diagnostic_counts.setup_below_min_clamp_count += 1;
+            } else {
+                timing_query_diagnostic_counts.delay_slew_below_min_clamp_count += 1;
+            }
+        } else if axis_query > axis_hi {
+            above_max_axis_count += 1;
+        }
+        axis_queries.push(axis_query);
+    }
+
+    let extrapolate_single_delay_slew_axis = !is_setup && above_max_axis_count == 1;
+    if is_setup {
+        timing_query_diagnostic_counts.setup_above_max_clamp_count += above_max_axis_count;
+    } else if above_max_axis_count == 1 {
+        timing_query_diagnostic_counts.delay_slew_single_above_max_extrapolation_count += 1;
+    } else if above_max_axis_count > 1 {
+        timing_query_diagnostic_counts.delay_slew_multiple_above_max_clamp_count += 1;
+    }
+
+    for (axis_idx, raw_axis_query) in axis_queries.into_iter().enumerate() {
+        let axis = layout.axes[axis_idx];
+        let axis_lo = axis[0];
+        let axis_hi = axis[axis.len() - 1];
+        let mut axis_query = raw_axis_query;
+        if axis_query < axis_lo {
             sta_trace(|| {
                 format!(
-                    "table_query_clamped context='{}' axis={} var='{}' query={:.6} axis_lo={:.6} axis_hi={:.6}",
+                    "table_query_clamped_below_min context='{}' axis={} var='{}' query={:.6} axis_lo={:.6} axis_hi={:.6}",
                     context,
                     axis_idx + 1,
                     layout.variables[axis_idx],
-                    axis_query,
+                    raw_axis_query,
+                    axis_lo,
+                    axis_hi,
+                )
+            });
+        } else if axis_query > axis_hi {
+            let action = if is_setup {
+                "clamped_above_max_setup"
+            } else if extrapolate_single_delay_slew_axis {
+                "extrapolated_above_max_single_axis"
+            } else {
+                "clamped_above_max_multiple_axes"
+            };
+            sta_trace(|| {
+                format!(
+                    "table_query_{} context='{}' axis={} var='{}' query={:.6} axis_lo={:.6} axis_hi={:.6}",
+                    action,
+                    context,
+                    axis_idx + 1,
+                    layout.variables[axis_idx],
+                    raw_axis_query,
                     axis_lo,
                     axis_hi,
                 )
             });
         }
-        if clamp_to_minimum || axis_query < axis_lo {
+        if axis_query < axis_lo {
             axis_query = axis_query.max(axis_lo);
         }
-        axis_query = axis_query.min(axis_hi);
+        if !extrapolate_single_delay_slew_axis || axis_query <= axis_hi {
+            axis_query = axis_query.min(axis_hi);
+        }
         bounds.push(bracket_axis(axis, axis_query));
     }
 
@@ -2883,7 +3014,7 @@ mod tests {
     }
 
     #[test]
-    fn ideal_clock_queries_clamp_to_minimum_characterized_slew() {
+    fn ideal_clock_queries_select_minimum_characterized_slew_without_diagnostic() {
         let lib = crate::liberty_proto::Library {
             lu_table_templates: vec![
                 LuTableTemplate {
@@ -2919,12 +3050,14 @@ mod tests {
             values: vec![3.0, 1.0, 4.0, 2.0],
             ..Default::default()
         };
+        let mut counts = TimingQueryDiagnosticCounts::default();
 
         assert_close(
-            evaluate_table_with_query(
+            evaluate_table_with_query_and_diagnostics(
                 &lib,
                 &c2q,
                 TimingTableQuery::ideal_clock_to_output(0.0),
+                &mut counts,
                 "clock_to_q",
             )
             .expect("clock-to-output table evaluation"),
@@ -2933,17 +3066,18 @@ mod tests {
         validate_timing_table_structure(&lib, &setup, "setup")
             .expect("non-monotone setup table should be structurally valid");
         assert_close(
-            evaluate_table_with_query(
+            evaluate_table_with_query_and_diagnostics(
                 &lib,
                 &setup,
                 TimingTableQuery::ideal_clock_setup(1.0),
+                &mut counts,
                 "setup",
             )
             .expect("setup table evaluation"),
             3.0,
         );
         assert_close(
-            evaluate_table_with_query(
+            evaluate_table_with_query_and_diagnostics(
                 &lib,
                 &setup,
                 TimingTableQuery {
@@ -2951,13 +3085,15 @@ mod tests {
                     output_load: 0.0,
                     constrained_pin_transition: 1.0,
                     related_pin_transition: 10.0,
-                    minimum_clamped_axis: MinimumClampedAxis::None,
+                    minimum_characterized_axis: MinimumCharacterizedAxis::None,
                 },
+                &mut counts,
                 "raw_setup_surface",
             )
             .expect("setup table evaluation"),
             1.0,
         );
+        assert_eq!(counts, TimingQueryDiagnosticCounts::default());
     }
 
     #[test]
@@ -5198,6 +5334,154 @@ endmodule
     }
 
     #[test]
+    fn evaluate_table_counts_clamp_categories() {
+        let lib = crate::liberty_proto::Library {
+            lu_table_templates: vec![
+                LuTableTemplate {
+                    kind: "lu_table_template".to_string(),
+                    name: "tmpl_2d_delay_diagnostics".to_string(),
+                    variable_1: "input_net_transition".to_string(),
+                    variable_2: "total_output_net_capacitance".to_string(),
+                    index_1: vec![5.0, 10.0],
+                    index_2: vec![0.72, 1.44],
+                    ..Default::default()
+                },
+                LuTableTemplate {
+                    kind: "lu_table_template".to_string(),
+                    name: "tmpl_2d_setup_diagnostics".to_string(),
+                    variable_1: "constrained_pin_transition".to_string(),
+                    variable_2: "related_pin_transition".to_string(),
+                    index_1: vec![5.0, 10.0],
+                    index_2: vec![5.0, 10.0],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let delay_table = TimingTable {
+            kind: "cell_rise".to_string(),
+            template_id: 1,
+            dimensions: vec![2, 2],
+            values: vec![1.0, 2.0, 3.0, 4.0],
+            ..Default::default()
+        };
+        let setup_table = TimingTable {
+            kind: "rise_constraint".to_string(),
+            template_id: 2,
+            dimensions: vec![2, 2],
+            values: vec![1.0, 2.0, 3.0, 4.0],
+            ..Default::default()
+        };
+        let mut counts = TimingQueryDiagnosticCounts::default();
+
+        assert_close(
+            evaluate_table_with_query_and_diagnostics(
+                &lib,
+                &delay_table,
+                TimingTableQuery::combinational(5.0, 0.0),
+                &mut counts,
+                "delay_minimum_characterized_zero_load",
+            )
+            .expect("delay/slew zero-load table evaluation"),
+            1.0,
+        );
+        evaluate_table_with_query_and_diagnostics(
+            &lib,
+            &delay_table,
+            TimingTableQuery::combinational(0.0, 1.0),
+            &mut counts,
+            "delay_below_min_data",
+        )
+        .expect("delay/slew below-minimum transition table evaluation");
+        evaluate_table_with_query_and_diagnostics(
+            &lib,
+            &delay_table,
+            TimingTableQuery::combinational(7.0, 0.1),
+            &mut counts,
+            "delay_below_min_positive_load",
+        )
+        .expect("delay/slew below-minimum positive-load table evaluation");
+        evaluate_table_with_query_and_diagnostics(
+            &lib,
+            &delay_table,
+            TimingTableQuery::ideal_clock_to_output(1.0),
+            &mut counts,
+            "delay_minimum_characterized_clock",
+        )
+        .expect("delay/slew ideal-clock minimum-characterized table evaluation");
+        let extrapolated = evaluate_table_with_query_and_diagnostics(
+            &lib,
+            &delay_table,
+            TimingTableQuery::combinational(7.0, 2.0),
+            &mut counts,
+            "delay_single_above_max_load",
+        )
+        .expect("delay/slew single-axis above-maximum table evaluation");
+        assert!(extrapolated > 3.0);
+        assert_close(
+            evaluate_table_with_query_and_diagnostics(
+                &lib,
+                &delay_table,
+                TimingTableQuery::combinational(11.0, 2.0),
+                &mut counts,
+                "delay_multiple_above_max",
+            )
+            .expect("delay/slew multi-axis above-maximum table evaluation"),
+            4.0,
+        );
+        evaluate_table_with_query_and_diagnostics(
+            &lib,
+            &setup_table,
+            TimingTableQuery::ideal_clock_setup(7.0),
+            &mut counts,
+            "setup_minimum_characterized_clock",
+        )
+        .expect("setup ideal-clock minimum-characterized table evaluation");
+        evaluate_table_with_query_and_diagnostics(
+            &lib,
+            &setup_table,
+            TimingTableQuery {
+                input_transition: 0.0,
+                output_load: 0.0,
+                constrained_pin_transition: 0.0,
+                related_pin_transition: 7.0,
+                minimum_characterized_axis: MinimumCharacterizedAxis::None,
+            },
+            &mut counts,
+            "setup_below_min",
+        )
+        .expect("setup below-minimum table evaluation");
+        assert_close(
+            evaluate_table_with_query_and_diagnostics(
+                &lib,
+                &setup_table,
+                TimingTableQuery {
+                    input_transition: 0.0,
+                    output_load: 0.0,
+                    constrained_pin_transition: 11.0,
+                    related_pin_transition: 5.0,
+                    minimum_characterized_axis: MinimumCharacterizedAxis::None,
+                },
+                &mut counts,
+                "setup_above_max",
+            )
+            .expect("setup above-maximum table evaluation"),
+            3.0,
+        );
+
+        assert_eq!(
+            counts,
+            TimingQueryDiagnosticCounts {
+                delay_slew_below_min_clamp_count: 2,
+                delay_slew_single_above_max_extrapolation_count: 1,
+                delay_slew_multiple_above_max_clamp_count: 1,
+                setup_below_min_clamp_count: 1,
+                setup_above_max_clamp_count: 1,
+            }
+        );
+    }
+
+    #[test]
     fn evaluate_table_rejects_axis_dimension_mismatch() {
         let lib = crate::liberty_proto::Library {
             lu_table_templates: vec![LuTableTemplate {
@@ -5413,6 +5697,7 @@ endmodule
         });
         let delay_table = scalar_table("cell_rise", 1.0);
         let slew_table = scalar_table("rise_transition", -0.1);
+        let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
 
         let output = evaluate_output_edge_set(
             &crate::liberty_proto::Library::default(),
@@ -5420,6 +5705,7 @@ endmodule
             &slew_table,
             &input_timing,
             0.0,
+            &mut timing_query_diagnostic_counts,
             "negative_transition",
             StaTimingTableKind::CellRise,
             StaTimingTableKind::RiseTransition,
@@ -5442,6 +5728,7 @@ endmodule
         });
         let delay_table = scalar_table("cell_rise", f64::MAX);
         let slew_table = scalar_table("rise_transition", 0.1);
+        let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
 
         let error = evaluate_output_edge_set(
             &crate::liberty_proto::Library::default(),
@@ -5449,6 +5736,7 @@ endmodule
             &slew_table,
             &input_timing,
             0.0,
+            &mut timing_query_diagnostic_counts,
             "overflow_arrival",
             StaTimingTableKind::CellRise,
             StaTimingTableKind::RiseTransition,

@@ -7,6 +7,12 @@ max_delay: 3.000000
 max_input_to_register_delay: n/a
 max_register_to_register_delay: n/a
 max_register_to_output_delay: n/a
+timing_query_diagnostic_counts:
+  delay_slew_below_min_clamp_count: 0
+  delay_slew_single_above_max_extrapolation_count: 0
+  delay_slew_multiple_above_max_clamp_count: 0
+  setup_below_min_clamp_count: 0
+  setup_above_max_clamp_count: 0
 cell_count: 2
 cell_levels: 2
 sequential_cell_area: 0.000000

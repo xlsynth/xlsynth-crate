@@ -7,8 +7,8 @@ use crate::liberty_proto::Library;
 pub use crate::netlist::io::{resolve_symbol, select_module};
 use crate::netlist::parse::{Net, NetlistModule, PortDirection};
 use crate::netlist::sta::{
-    RegisterPathDelayBreakdown, StaOptions, StaReport, analyze_combinational_max_arrival,
-    analyze_register_boundary_max_arrival,
+    RegisterPathDelayBreakdown, StaOptions, StaReport, TimingQueryDiagnosticCounts,
+    analyze_combinational_max_arrival, analyze_register_boundary_max_arrival,
 };
 use crate::netlist::stages::{StagePartitionStatus, analyze_register_stages};
 use anyhow::{Result, anyhow};
@@ -55,6 +55,7 @@ pub struct NetlistStaReport {
     pub module_output_load: f64,
     pub delay: f64,
     pub cell_levels: usize,
+    pub timing_query_diagnostic_counts: TimingQueryDiagnosticCounts,
     pub outputs: Vec<OutputTimingRow>,
 }
 
@@ -66,13 +67,14 @@ pub struct NetlistReport {
     pub primary_input_transition: f64,
     pub module_output_load: f64,
     pub cell_area: f64,
-    pub max_delay: f64,
+    pub max_delay: Option<f64>,
     pub max_input_to_register_delay: Option<f64>,
     pub max_input_to_register_delay_breakdown: Option<RegisterPathDelayBreakdown>,
     pub max_register_to_register_delay: Option<f64>,
     pub max_register_to_register_delay_breakdown: Option<RegisterPathDelayBreakdown>,
     pub max_register_to_output_delay: Option<f64>,
     pub max_register_to_output_delay_breakdown: Option<RegisterPathDelayBreakdown>,
+    pub timing_query_diagnostic_counts: TimingQueryDiagnosticCounts,
     pub cell_count: usize,
     pub cell_levels: usize,
     pub sequential_cell_area: f64,
@@ -185,6 +187,7 @@ pub fn build_sta_report(
         module_output_load: options.module_output_load,
         delay: report.worst_output_arrival,
         cell_levels: report.cell_levels,
+        timing_query_diagnostic_counts: report.timing_query_diagnostic_counts,
         outputs,
     })
 }
@@ -224,6 +227,22 @@ fn output_timing_rows(
     Ok(outputs)
 }
 
+fn maximum_output_arrival(outputs: &[OutputTimingRow]) -> Option<f64> {
+    outputs
+        .iter()
+        .map(|output| output.worst_arrival)
+        .reduce(f64::max)
+}
+
+fn maximum_register_input_arrival(report: &StaReport) -> Option<f64> {
+    report
+        .register_input_arrivals
+        .iter()
+        .copied()
+        .flatten()
+        .reduce(f64::max)
+}
+
 /// Builds mapped area plus combinational timing metrics for one selected
 /// module.
 pub fn build_netlist_report(
@@ -243,13 +262,14 @@ pub fn build_netlist_report(
             primary_input_transition: sta.primary_input_transition,
             module_output_load: sta.module_output_load,
             cell_area: area.area,
-            max_delay: sta.delay,
+            max_delay: Some(sta.delay),
             max_input_to_register_delay: None,
             max_input_to_register_delay_breakdown: None,
             max_register_to_register_delay: None,
             max_register_to_register_delay_breakdown: None,
             max_register_to_output_delay: None,
             max_register_to_output_delay_breakdown: None,
+            timing_query_diagnostic_counts: sta.timing_query_diagnostic_counts,
             cell_count: area.cell_count,
             cell_levels: sta.cell_levels,
             sequential_cell_area: stages.sequential_area,
@@ -272,6 +292,8 @@ pub fn build_netlist_report(
         false,
         stages.register_indices.as_slice(),
     )?;
+    let mut timing_query_diagnostic_counts = input_launch.timing_query_diagnostic_counts;
+    timing_query_diagnostic_counts += register_launch.timing_query_diagnostic_counts;
     let mut stage_rows = Vec::new();
     if stages.status == StagePartitionStatus::Partitioned {
         for (stage, stage_area) in &stages.stage_areas {
@@ -290,6 +312,7 @@ pub fn build_netlist_report(
                 false,
                 launch_registers.as_slice(),
             )?;
+            timing_query_diagnostic_counts += stage_timing.timing_query_diagnostic_counts;
             let mut delay = 0.0;
             let mut max_delay_breakdown = None;
             let mut found_delay = false;
@@ -317,6 +340,8 @@ pub fn build_netlist_report(
         }
     }
     let outputs = output_timing_rows(module, nets, interner, &input_launch, false)?;
+    let register_launch_outputs =
+        output_timing_rows(module, nets, interner, &register_launch, false)?;
     let time_unit = library
         .units
         .as_ref()
@@ -330,13 +355,14 @@ pub fn build_netlist_report(
         primary_input_transition: options.primary_input_transition,
         module_output_load: options.module_output_load,
         cell_area: area.area,
-        max_delay: input_launch.worst_output_arrival,
-        max_input_to_register_delay: Some(input_launch.worst_register_input_arrival),
+        max_delay: maximum_output_arrival(outputs.as_slice()),
+        max_input_to_register_delay: maximum_register_input_arrival(&input_launch),
         max_input_to_register_delay_breakdown: input_launch.worst_register_input_breakdown,
-        max_register_to_register_delay: Some(register_launch.worst_register_input_arrival),
+        max_register_to_register_delay: maximum_register_input_arrival(&register_launch),
         max_register_to_register_delay_breakdown: register_launch.worst_register_input_breakdown,
-        max_register_to_output_delay: Some(register_launch.worst_output_arrival),
+        max_register_to_output_delay: maximum_output_arrival(register_launch_outputs.as_slice()),
         max_register_to_output_delay_breakdown: register_launch.worst_output_breakdown,
+        timing_query_diagnostic_counts,
         cell_count: area.cell_count,
         cell_levels: input_launch.cell_levels,
         sequential_cell_area: stages.sequential_area,
@@ -624,7 +650,7 @@ endmodule
         )
         .expect("build report");
         assert_eq!(report.cell_area, 3.0);
-        assert_eq!(report.max_delay, 3.0);
+        assert_eq!(report.max_delay, Some(3.0));
         assert_eq!(report.cell_count, 2);
         assert_eq!(report.cell_levels, 2);
         assert_eq!(report.outputs[0].worst_arrival, 3.0);
@@ -656,7 +682,7 @@ endmodule
         )
         .expect("build report with Yosys concat alias assign");
         assert_eq!(report.cell_area, 1.0);
-        assert_eq!(report.max_delay, 1.0);
+        assert_eq!(report.max_delay, Some(1.0));
         assert_eq!(report.cell_count, 1);
         assert_eq!(report.cell_levels, 1);
     }
@@ -687,7 +713,7 @@ endmodule
         )
         .expect("build report with Yosys tran alias");
         assert_eq!(report.cell_area, 1.0);
-        assert_eq!(report.max_delay, 1.0);
+        assert_eq!(report.max_delay, Some(1.0));
         assert_eq!(report.cell_count, 1);
         assert_eq!(report.cell_levels, 1);
     }
@@ -729,7 +755,7 @@ endmodule
             report.stage_partition_status,
             StagePartitionStatus::Partitioned
         );
-        assert_eq!(report.max_delay, 0.0);
+        assert_eq!(report.max_delay, None);
         assert_eq!(report.max_input_to_register_delay, Some(1.25));
         assert_eq!(
             report.max_input_to_register_delay_breakdown,
@@ -781,6 +807,36 @@ endmodule
                     .map(|stage| stage.combinational_cell_area)
                     .sum::<f64>()
         );
+    }
+
+    #[test]
+    fn build_netlist_report_uses_none_for_absent_registered_path_classes() {
+        let parsed = parse_netlist(
+            r#"
+module top (clk, y);
+  input clk;
+  output y;
+  wire clk;
+  wire y;
+  DFF r0 (.D(1'b0), .CLK(clk), .Q(y));
+endmodule
+"#,
+        );
+        let module = select_module(&parsed, None).expect("select only module");
+        let library = LibraryWithTimingData::from_proto(inv_nand_library());
+        let report = build_netlist_report(
+            module,
+            &parsed.nets,
+            &parsed.interner,
+            &library,
+            StaOptions::default(),
+        )
+        .expect("build tied-input registered report");
+
+        assert_eq!(report.max_delay, None);
+        assert_eq!(report.max_input_to_register_delay, None);
+        assert_eq!(report.max_register_to_register_delay, None);
+        assert_eq!(report.max_register_to_output_delay, Some(0.5));
     }
 
     #[test]

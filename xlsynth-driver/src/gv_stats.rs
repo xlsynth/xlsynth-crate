@@ -94,7 +94,10 @@ fn render_netlist_report(report: &NetlistReport) -> String {
         report.module_output_load
     ));
     out.push_str(&format!("cell_area: {:.6}\n", report.cell_area));
-    out.push_str(&format!("max_delay: {:.6}\n", report.max_delay));
+    out.push_str(&format!(
+        "max_delay: {}\n",
+        shown_optional_metric(report.max_delay)
+    ));
     out.push_str(&format!(
         "max_input_to_register_delay: {}\n",
         shown_optional_metric(report.max_input_to_register_delay)
@@ -116,6 +119,37 @@ fn render_netlist_report(report: &NetlistReport) -> String {
         &mut out,
         report.max_register_to_output_delay_breakdown,
     );
+    out.push_str("timing_query_diagnostic_counts:\n");
+    out.push_str(&format!(
+        "  delay_slew_below_min_clamp_count: {}\n",
+        report
+            .timing_query_diagnostic_counts
+            .delay_slew_below_min_clamp_count
+    ));
+    out.push_str(&format!(
+        "  delay_slew_single_above_max_extrapolation_count: {}\n",
+        report
+            .timing_query_diagnostic_counts
+            .delay_slew_single_above_max_extrapolation_count
+    ));
+    out.push_str(&format!(
+        "  delay_slew_multiple_above_max_clamp_count: {}\n",
+        report
+            .timing_query_diagnostic_counts
+            .delay_slew_multiple_above_max_clamp_count
+    ));
+    out.push_str(&format!(
+        "  setup_below_min_clamp_count: {}\n",
+        report
+            .timing_query_diagnostic_counts
+            .setup_below_min_clamp_count
+    ));
+    out.push_str(&format!(
+        "  setup_above_max_clamp_count: {}\n",
+        report
+            .timing_query_diagnostic_counts
+            .setup_above_max_clamp_count
+    ));
     out.push_str(&format!("cell_count: {}\n", report.cell_count));
     out.push_str(&format!("cell_levels: {}\n", report.cell_levels));
     out.push_str(&format!(
@@ -228,7 +262,10 @@ mod tests {
     use xlsynth_g8r::netlist::report::{
         CellAreaRow, NetlistReport, OutputTimingRow, StageReportRow,
     };
-    use xlsynth_g8r::netlist::{sta::RegisterPathDelayBreakdown, stages::StagePartitionStatus};
+    use xlsynth_g8r::netlist::{
+        sta::{RegisterPathDelayBreakdown, TimingQueryDiagnosticCounts},
+        stages::StagePartitionStatus,
+    };
 
     #[test]
     fn render_netlist_report_is_stable() {
@@ -238,7 +275,7 @@ mod tests {
             primary_input_transition: 0.01,
             module_output_load: 0.0,
             cell_area: 4.0,
-            max_delay: 3.0,
+            max_delay: Some(3.0),
             max_input_to_register_delay: Some(1.0),
             max_input_to_register_delay_breakdown: Some(RegisterPathDelayBreakdown {
                 clock_to_output_delay: 0.0,
@@ -257,6 +294,13 @@ mod tests {
                 combinational_delay: 2.5,
                 setup_delay: 0.0,
             }),
+            timing_query_diagnostic_counts: TimingQueryDiagnosticCounts {
+                delay_slew_below_min_clamp_count: 1,
+                delay_slew_single_above_max_extrapolation_count: 2,
+                delay_slew_multiple_above_max_clamp_count: 3,
+                setup_below_min_clamp_count: 4,
+                setup_above_max_clamp_count: 5,
+            },
             cell_count: 3,
             cell_levels: 2,
             sequential_cell_area: 1.0,
@@ -297,6 +341,9 @@ mod tests {
         ));
         assert!(render_netlist_report(&report).contains(
             "max_register_to_output_delay: 3.000000\n  clock_to_output_delay: 0.500000\n  combinational_delay: 2.500000\n"
+        ));
+        assert!(render_netlist_report(&report).contains(
+            "timing_query_diagnostic_counts:\n  delay_slew_below_min_clamp_count: 1\n  delay_slew_single_above_max_extrapolation_count: 2\n  delay_slew_multiple_above_max_clamp_count: 3\n  setup_below_min_clamp_count: 4\n  setup_above_max_clamp_count: 5\n"
         ));
         assert!(render_netlist_report(&report)
             .contains("stage 0 max_delay=2.000000 combinational_cell_area=2.000000\n"));
