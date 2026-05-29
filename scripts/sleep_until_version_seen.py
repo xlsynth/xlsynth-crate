@@ -3,39 +3,36 @@
 
 import sys
 import time
-import requests
-import json
+import urllib.error
+
+from crates_io_index import crate_version_is_published
 
 
 def check_crate_version(crate_name, version_wanted):
-    """
-    Checks crates.io API for the specified version of a crate.
-    Returns True if found, False otherwise.
-    Prints brief error messages for API or JSON issues without exiting.
-    """
-    api_url = f"https://crates.io/api/v1/crates/{crate_name}"
+    """Return whether the crate version is visible in the sparse index."""
+    return crate_version_is_published(crate_name, version_wanted)
+
+
+def check_crate_version_for_polling(crate_name, version_wanted):
+    """Return version visibility while retrying transient post-publish failures."""
     try:
-        # Set a timeout for the request itself (e.g., 15 seconds)
-        response = requests.get(api_url, timeout=15)
-        # Raise an exception for HTTP errors (4xx or 5xx)
-        response.raise_for_status()
-        data = response.json()
-        # The 'versions' key contains a list of version objects
-        versions_data = data.get("versions", [])
-        for v_info in versions_data:
-            if v_info.get("num") == version_wanted:
-                return True
-    except requests.exceptions.Timeout:
-        print("\n[API Request Timeout]", end="", flush=True)
-    except requests.exceptions.HTTPError as e:
-        # Log HTTP errors (like 404 if crate not found yet), but continue polling
-        print(f"\n[API HTTP Error: {e.response.status_code}]", end="", flush=True)
-    except requests.exceptions.RequestException as e:
-        # Other request-related errors (DNS, connection, etc.)
-        print(f"\n[API Request Error: {e}]", end="", flush=True)
-    except json.JSONDecodeError:
-        print("\n[API JSON Decode Error]", end="", flush=True)
-    return False
+        return check_crate_version(crate_name, version_wanted)
+    except urllib.error.HTTPError as error:
+        if 500 <= error.code < 600:
+            print(
+                "\n[Sparse index HTTP error: {}]".format(error.code),
+                end="",
+                flush=True,
+            )
+            return False
+        raise
+    except (urllib.error.URLError, TimeoutError) as error:
+        print(
+            "\n[Sparse index request error: {}]".format(error),
+            end="",
+            flush=True,
+        )
+        return False
 
 
 def main():
@@ -53,7 +50,7 @@ def main():
     timeout_total_seconds = 5 * 60  # Total timeout of 5 minutes
 
     print(
-        f"Waiting for {crate_name} v{version_wanted} to appear on crates.io (polling every {poll_interval_seconds}s, timeout: {timeout_total_seconds}s)...",
+        f"Waiting for {crate_name} v{version_wanted} to appear in the crates.io sparse index (polling every {poll_interval_seconds}s, timeout: {timeout_total_seconds}s)...",
         end="",
         flush=True,
     )
@@ -64,7 +61,7 @@ def main():
 
     try:
         while True:
-            if check_crate_version(crate_name, version_wanted):
+            if check_crate_version_for_polling(crate_name, version_wanted):
                 print("\nVersion found!")
                 sys.exit(0)
 
