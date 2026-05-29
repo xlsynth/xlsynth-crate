@@ -17,10 +17,11 @@
 //! - In combinational-only analysis, rejects sequential output pins.
 //! - Uses Liberty `when` predicates when known scalar constants make an arc
 //!   provably false; arcs with true or unknown predicates remain possible.
-//! - Rejects timing tables with meaningful non-monotonicity because later
-//!   frontier reduction relies on larger transition/load queries not producing
-//!   smaller delay/slew values. Small decreases within the
-//!   characterization-noise tolerance are treated as effectively equal.
+//! - Repairs non-monotone delay/slew tables during lookup with a conservative
+//!   coordinatewise upper envelope, because later frontier reduction relies on
+//!   larger transition/load queries not producing smaller delay/slew values.
+//! - Clamps table coordinates to each characterized axis range before
+//!   interpolation.
 //! - Accepts literal, alias, slice, and concat continuous assigns as zero-delay
 //!   bit sources so mapped netlists emitted by tools such as Yosys/ABC can
 //!   preserve constants and wire aliases without needing synthetic cells.
@@ -61,8 +62,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
-
-const MONOTONICITY_REL_TOLERANCE: f64 = 1.0e-2;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EdgeTiming {
@@ -1915,9 +1914,8 @@ fn evaluate_output_edge_set(
             output_load,
             &format!("{context} {}", delay_kind.as_raw()),
         )?;
-        // Linear extrapolation outside a Liberty table's characterized range
-        // can produce a slightly negative slew; physical transition is bounded
-        // below by zero.
+        // Characterized transition values may contain small negative artifacts;
+        // physical transition is bounded below by zero.
         let transition = evaluate_table(
             library,
             slew_table,
@@ -2336,17 +2334,14 @@ fn validate_timing_table_structure(
     Ok(())
 }
 
-/// Validates query-invariant delay/slew table properties once before STA
-/// propagation.
+/// Validates query-invariant delay/slew table structure once before STA
+/// propagation. Non-monotone values are repaired conservatively during lookup.
 fn validate_timing_table_payload(
     library: &crate::liberty_proto::Library,
     table: &TimingTable,
     context: &str,
 ) -> Result<()> {
-    validate_timing_table_structure(library, table, context)?;
-    let array = TimingTableArrayView::from_timing_table(table)
-        .map_err(|e| anyhow!("{context}: invalid timing table payload: {e}"))?;
-    validate_monotone_timing_table(&array, table.dimensions.as_slice(), context)
+    validate_timing_table_structure(library, table, context)
 }
 
 /// Validates each queried delay/slew table at most once during an STA run.
@@ -2529,13 +2524,10 @@ fn evaluate_table_with_query(
                 axis_variable == AxisVariable::RelatedPinTransition
             }
         };
-        if clamp_to_minimum {
-            axis_query = axis_query.max(axis_lo);
-        }
         if axis_query < axis_lo || axis_query > axis_hi {
             sta_trace(|| {
                 format!(
-                    "table_query_out_of_range context='{}' axis={} var='{}' query={:.6} axis_lo={:.6} axis_hi={:.6}",
+                    "table_query_clamped context='{}' axis={} var='{}' query={:.6} axis_lo={:.6} axis_hi={:.6}",
                     context,
                     axis_idx + 1,
                     layout.variables[axis_idx],
@@ -2545,6 +2537,10 @@ fn evaluate_table_with_query(
                 )
             });
         }
+        if clamp_to_minimum || axis_query < axis_lo {
+            axis_query = axis_query.max(axis_lo);
+        }
+        axis_query = axis_query.min(axis_hi);
         bounds.push(bracket_axis(axis, axis_query));
     }
 
@@ -2571,9 +2567,7 @@ fn evaluate_table_with_query(
                 weight *= 1.0 - *t;
             }
         }
-        let value = array
-            .get(indices.as_slice())
-            .ok_or_else(|| anyhow!("{context}: could not index timing table at {:?}", indices))?;
+        let value = evaluate_table_corner_value(&array, table, indices.as_slice(), context)?;
         result += weight * value;
     }
     if !result.is_finite() {
@@ -2583,6 +2577,56 @@ fn evaluate_table_with_query(
         ));
     }
     Ok(result)
+}
+
+fn uses_monotone_upper_envelope(table: &TimingTable) -> bool {
+    matches!(
+        LibertyTableKind::from_raw(table.kind.as_str()),
+        LibertyTableKind::CellRise
+            | LibertyTableKind::CellFall
+            | LibertyTableKind::RiseTransition
+            | LibertyTableKind::FallTransition
+    )
+}
+
+/// Evaluates one characterized point after conservatively repairing delay/slew
+/// values: a point is at least as large as any predecessor along its axes.
+fn evaluate_table_corner_value(
+    array: &TimingTableArrayView<'_>,
+    table: &TimingTable,
+    indices: &[usize],
+    context: &str,
+) -> Result<f64> {
+    if !uses_monotone_upper_envelope(table) || indices.is_empty() {
+        return array
+            .get(indices)
+            .ok_or_else(|| anyhow!("{context}: could not index timing table at {:?}", indices));
+    }
+
+    let mut cursor = vec![0usize; indices.len()];
+    let mut maximum = f64::NEG_INFINITY;
+    loop {
+        let value = array
+            .get(cursor.as_slice())
+            .ok_or_else(|| anyhow!("{context}: could not index timing table at {:?}", cursor))?;
+        maximum = maximum.max(value);
+
+        let mut advanced = false;
+        for axis_idx in (0..cursor.len()).rev() {
+            if cursor[axis_idx] < indices[axis_idx] {
+                cursor[axis_idx] += 1;
+                for trailing in cursor.iter_mut().skip(axis_idx + 1) {
+                    *trailing = 0;
+                }
+                advanced = true;
+                break;
+            }
+        }
+        if !advanced {
+            break;
+        }
+    }
+    Ok(maximum)
 }
 
 fn validate_non_negative_finite(value: f64, what: &str, context: &str) -> Result<()> {
@@ -2648,71 +2692,6 @@ fn validate_effective_axes(table: &TimingTable, axes: [&[f64]; 3], context: &str
             ));
         }
     }
-    Ok(())
-}
-
-/// Rejects tables that meaningfully decrease along any axis; envelope reduction
-/// requires monotone queries, while real Liberty data can contain tiny
-/// characterization-noise decreases.
-fn validate_monotone_timing_table(
-    array: &TimingTableArrayView<'_>,
-    dimensions: &[u32],
-    context: &str,
-) -> Result<()> {
-    if dimensions.is_empty() {
-        return Ok(());
-    }
-
-    let mut indices = vec![0usize; dimensions.len()];
-    loop {
-        let current = array.get(indices.as_slice()).ok_or_else(|| {
-            anyhow!(
-                "{context}: could not index timing table at {:?} while checking monotonicity",
-                indices
-            )
-        })?;
-
-        for (axis_idx, dimension) in dimensions.iter().copied().enumerate() {
-            if indices[axis_idx] + 1 >= dimension as usize {
-                continue;
-            }
-            let mut next_indices = indices.clone();
-            next_indices[axis_idx] += 1;
-            let next = array.get(next_indices.as_slice()).ok_or_else(|| {
-                anyhow!(
-                    "{context}: could not index timing table at {:?} while checking monotonicity",
-                    next_indices
-                )
-            })?;
-            let scale = current.abs().max(next.abs());
-            let tolerance = MONOTONICITY_REL_TOLERANCE * scale;
-            if next + tolerance < current {
-                return Err(anyhow!(
-                    "{context}: timing table decreases along axis {} between {:?}={} and {:?}={}; basic STA requires monotone timing tables up to relative tolerance {}",
-                    axis_idx + 1,
-                    indices,
-                    current,
-                    next_indices,
-                    next,
-                    MONOTONICITY_REL_TOLERANCE
-                ));
-            }
-        }
-
-        let mut axis_idx = dimensions.len();
-        while axis_idx > 0 {
-            axis_idx -= 1;
-            indices[axis_idx] += 1;
-            if indices[axis_idx] < dimensions[axis_idx] as usize {
-                break;
-            }
-            indices[axis_idx] = 0;
-        }
-        if axis_idx == 0 && indices[0] == 0 {
-            break;
-        }
-    }
-
     Ok(())
 }
 
@@ -2962,6 +2941,22 @@ mod tests {
             )
             .expect("setup table evaluation"),
             3.0,
+        );
+        assert_close(
+            evaluate_table_with_query(
+                &lib,
+                &setup,
+                TimingTableQuery {
+                    input_transition: 0.0,
+                    output_load: 0.0,
+                    constrained_pin_transition: 1.0,
+                    related_pin_transition: 10.0,
+                    minimum_clamped_axis: MinimumClampedAxis::None,
+                },
+                "raw_setup_surface",
+            )
+            .expect("setup table evaluation"),
+            1.0,
         );
     }
 
@@ -5177,7 +5172,7 @@ endmodule
     }
 
     #[test]
-    fn evaluate_table_extrapolates_below_axis_range() {
+    fn evaluate_table_clamps_below_axis_range() {
         let lib = crate::liberty_proto::Library {
             lu_table_templates: vec![LuTableTemplate {
                 kind: "lu_table_template".to_string(),
@@ -5198,12 +5193,8 @@ endmodule
             ..Default::default()
         };
 
-        let extrapolated =
-            evaluate_table(&lib, &table, 0.0, 0.619_928, "extrapolated").expect("table eval");
-        assert!(
-            (extrapolated - 4.704_690_972_222_221).abs() <= 2e-6,
-            "expected 4.704690972222221 ~= {extrapolated}"
-        );
+        let clamped = evaluate_table(&lib, &table, 0.0, 0.619_928, "clamped").expect("table eval");
+        assert_close(clamped, 6.90715);
     }
 
     #[test]
@@ -5333,7 +5324,7 @@ endmodule
     }
 
     #[test]
-    fn evaluate_table_rejects_non_monotone_values() {
+    fn evaluate_table_repairs_non_monotone_delay_values_with_upper_envelope() {
         let lib = crate::liberty_proto::Library {
             lu_table_templates: vec![LuTableTemplate {
                 kind: "lu_table_template".to_string(),
@@ -5352,17 +5343,44 @@ endmodule
             ..Default::default()
         };
 
-        let error = validate_timing_table_payload(&lib, &table, "non_monotone")
-            .expect_err("non-monotone values should be rejected");
-        assert!(
-            error
-                .to_string()
-                .contains("basic STA requires monotone timing tables")
+        validate_timing_table_payload(&lib, &table, "non_monotone")
+            .expect("non-monotone delay tables should be structurally valid");
+        assert_close(
+            evaluate_table(&lib, &table, 1.0, 0.0, "non_monotone").expect("table eval"),
+            2.0,
         );
     }
 
     #[test]
-    fn evaluate_table_accepts_small_asap7_characterization_noise() {
+    fn evaluate_table_repairs_two_dimensional_delay_values_coordinatewise() {
+        let lib = crate::liberty_proto::Library {
+            lu_table_templates: vec![LuTableTemplate {
+                kind: "lu_table_template".to_string(),
+                name: "tmpl_non_monotone_2d".to_string(),
+                variable_1: "input_net_transition".to_string(),
+                variable_2: "total_output_net_capacitance".to_string(),
+                index_1: vec![0.0, 1.0],
+                index_2: vec![0.0, 1.0],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let table = TimingTable {
+            kind: "cell_rise".to_string(),
+            template_id: 1,
+            dimensions: vec![2, 2],
+            values: vec![1.0, 4.0, 3.0, 2.0],
+            ..Default::default()
+        };
+
+        assert_close(
+            evaluate_table(&lib, &table, 1.0, 1.0, "non_monotone_2d").expect("table eval"),
+            4.0,
+        );
+    }
+
+    #[test]
+    fn evaluate_table_repairs_small_characterization_noise() {
         let lib = crate::liberty_proto::Library {
             lu_table_templates: vec![LuTableTemplate {
                 kind: "lu_table_template".to_string(),
@@ -5381,8 +5399,10 @@ endmodule
             ..Default::default()
         };
 
-        validate_timing_table_payload(&lib, &table, "characterization_noise")
-            .expect("small ASAP7 characterization noise should be tolerated");
+        assert_close(
+            evaluate_table(&lib, &table, 1.0, 0.0, "characterization_noise").expect("table eval"),
+            28.4535,
+        );
     }
 
     #[test]
