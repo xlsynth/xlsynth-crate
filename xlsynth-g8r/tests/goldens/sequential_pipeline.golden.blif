@@ -1,0 +1,16 @@
+.model pipeline
+.inputs data_input0[0] data_input0[1] clk_main
+.outputs out_output0[0] out_output0[1]
+.names data_input0[0] state_reg[0] $g8r$node5
+11 1
+.names state_reg[0] out_output0[0]
+1 1
+.names state_reg[1] out_output0[1]
+1 1
+.names $g8r$node5 state_next[0]
+1 1
+.names data_input0[1] state_next[1]
+1 1
+.latch state_next[0] state_reg[0] re clk_main 1
+.latch state_next[1] state_reg[1] re clk_main 1
+.end

@@ -22,6 +22,6 @@ pub mod topo;
 
 pub use crate::aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Input, Output};
 pub use crate::aig::sequential_gate::{
-    ClockPort, RegisterBinding, ResetSpec, SequentialGateFn, TransitionInputId, TransitionOutputId,
+    ClockPort, RegisterBinding, SequentialGateFn, TransitionInputId, TransitionOutputId,
 };
 pub use crate::gate_builder::{GateBuilder, GateBuilderOptions};

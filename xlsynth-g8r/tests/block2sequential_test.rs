@@ -59,7 +59,7 @@ top block top(a: bits[1], b: bits[1], y: bits[1], z: bits[1]) {
 }
 
 #[test]
-fn lowers_register_data_enable_and_reset_to_transition_boundaries() {
+fn lowers_register_load_enable_and_synchronous_reset_into_effective_d() {
     let block_ir = r#"package pipeline
 
 top block pipe(clk: clock, rst: bits[1], data: bits[8], le: bits[1], out: bits[8]) {
@@ -95,21 +95,15 @@ top block pipe(clk: clock, rst: bits[1], data: bits[8], le: bits[1], out: bits[8
             .iter()
             .map(|output| output.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["out", "state__d", "state__load_enable", "state__reset"]
+        vec!["out", "state__d"]
     );
 
     let register = &sequential.registers[0];
     assert_eq!(register.name, "state");
     assert_eq!(register.q.index(), 3);
     assert_eq!(register.d.index(), 1);
-    assert_eq!(register.load_enable.expect("load enable").index(), 2);
-    let reset = register.reset.as_ref().expect("reset");
-    assert_eq!(reset.signal.index(), 3);
-    assert!(!reset.asynchronous);
-    assert!(reset.active_low);
-    assert_eq!(reset.value, IrBits::make_ubits(8, 3).unwrap());
 
-    let result = gate_sim::eval(
+    let reset_result = gate_sim::eval(
         &sequential.transition,
         &[
             IrBits::bool(false),
@@ -120,12 +114,46 @@ top block pipe(clk: clock, rst: bits[1], data: bits[8], le: bits[1], out: bits[8
         Collect::None,
     );
     assert_eq!(
-        result.outputs,
+        reset_result.outputs,
+        vec![
+            IrBits::make_ubits(8, 5).unwrap(),
+            IrBits::make_ubits(8, 3).unwrap(),
+        ]
+    );
+
+    let held_result = gate_sim::eval(
+        &sequential.transition,
+        &[
+            IrBits::bool(true),
+            IrBits::make_ubits(8, 2).unwrap(),
+            IrBits::bool(false),
+            IrBits::make_ubits(8, 5).unwrap(),
+        ],
+        Collect::None,
+    );
+    assert_eq!(
+        held_result.outputs,
+        vec![
+            IrBits::make_ubits(8, 5).unwrap(),
+            IrBits::make_ubits(8, 5).unwrap(),
+        ]
+    );
+
+    let enabled_result = gate_sim::eval(
+        &sequential.transition,
+        &[
+            IrBits::bool(true),
+            IrBits::make_ubits(8, 2).unwrap(),
+            IrBits::bool(true),
+            IrBits::make_ubits(8, 5).unwrap(),
+        ],
+        Collect::None,
+    );
+    assert_eq!(
+        enabled_result.outputs,
         vec![
             IrBits::make_ubits(8, 5).unwrap(),
             IrBits::make_ubits(8, 7).unwrap(),
-            IrBits::bool(true),
-            IrBits::bool(false),
         ]
     );
 }
@@ -190,9 +218,16 @@ top block top(clk: clock, rst: bits[1], data: bits[1], out: bits[1]) {
 
     let sequential = lower(block_ir);
 
-    let reset = sequential.registers[0].reset.as_ref().expect("reset");
-    assert!(!reset.asynchronous);
-    assert!(reset.active_low);
+    assert_eq!(sequential.registers[0].d.index(), 1);
+    assert_eq!(
+        sequential
+            .transition
+            .outputs
+            .iter()
+            .map(|output| output.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["out", "s0__state__d"]
+    );
 }
 
 #[test]
@@ -229,7 +264,7 @@ fn rejects_inlined_reset_block_with_incompatible_reset_behavior() {
     let block_ir = r#"package hierarchical_reset_mismatch
 
 block stage(clk: clock, local_rst: bits[1], data: bits[1], out: bits[1]) {
-  #![reset(port="local_rst", asynchronous=true, active_low=true)]
+  #![reset(port="local_rst", asynchronous=false, active_low=false)]
   reg state(bits[1], reset_value=0)
   local_rst: bits[1] = input_port(name=local_rst, id=1)
   data: bits[1] = input_port(name=data, id=2)
@@ -254,7 +289,30 @@ top block top(clk: clock, rst: bits[1], data: bits[1], out: bits[1]) {
         block_ir_to_sequential_gate_fn(block_ir, GatifyOptions::all_opts_disabled()).unwrap_err();
     assert_eq!(
         error,
-        "block2sequential: reset-bearing instantiated block 'stage' at 'top.s0' declares reset behavior (asynchronous=true, active_low=true) incompatible with top reset behavior (asynchronous=false, active_low=true)"
+        "block2sequential: reset-bearing instantiated block 'stage' at 'top.s0' declares reset behavior (asynchronous=false, active_low=false) incompatible with top reset behavior (asynchronous=false, active_low=true)"
+    );
+}
+
+#[test]
+fn rejects_asynchronous_register_reset() {
+    let block_ir = r#"package asynchronous_reset
+
+top block top(clk: clock, rst: bits[1], data: bits[1], out: bits[1]) {
+  #![reset(port="rst", asynchronous=true, active_low=false)]
+  reg state(bits[1], reset_value=0)
+  rst: bits[1] = input_port(name=rst, id=1)
+  data: bits[1] = input_port(name=data, id=2)
+  state_q: bits[1] = register_read(register=state, id=3)
+  state_d: () = register_write(data, register=state, reset=rst, id=4)
+  out: () = output_port(state_q, name=out, id=5)
+}
+"#;
+
+    let error =
+        block_ir_to_sequential_gate_fn(block_ir, GatifyOptions::all_opts_disabled()).unwrap_err();
+    assert_eq!(
+        error,
+        "block2sequential: asynchronous reset is not supported for register 'state'"
     );
 }
 
