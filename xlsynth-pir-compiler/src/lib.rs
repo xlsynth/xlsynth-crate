@@ -17,15 +17,16 @@ use xlsynth::{IrBits, IrValue};
 use xlsynth_pir::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
 use xlsynth_pir::ir_utils::{get_topological, is_observable_effect_root, operands};
 pub use xlsynth_pir_compiler_runtime::{
-    AssertionFailure, CompiledEntrypoint, CompiledFunctionMetadata, CoverCount, EventKind,
-    EventSiteMetadata, ExecutionContext, ExecutionResult, RawExecutionContext, TraceMessage,
-    TraceTupleFieldLayout, TraceValueLayout, WideBinaryOp, WideUnaryOp,
+    AssertionFailure, AssumptionFailure, AssumptionFailureKind, CompiledEntrypoint,
+    CompiledFunctionMetadata, CoverCount, EventKind, EventSiteMetadata, ExecutionContext,
+    ExecutionResult, RawExecutionContext, TraceMessage, TraceTupleFieldLayout, TraceValueLayout,
+    WideBinaryOp, WideUnaryOp,
 };
 use xlsynth_pir_compiler_runtime::{
-    xlsynth_pir_record_assert, xlsynth_pir_record_cover, xlsynth_pir_record_trace,
-    xlsynth_pir_runtime_wide_binop, xlsynth_pir_runtime_wide_bit_slice_update,
-    xlsynth_pir_runtime_wide_dynamic_bit_slice, xlsynth_pir_runtime_wide_mulp,
-    xlsynth_pir_runtime_wide_unary_op,
+    xlsynth_pir_record_assert, xlsynth_pir_record_assumption_failure, xlsynth_pir_record_cover,
+    xlsynth_pir_record_trace, xlsynth_pir_runtime_wide_binop,
+    xlsynth_pir_runtime_wide_bit_slice_update, xlsynth_pir_runtime_wide_dynamic_bit_slice,
+    xlsynth_pir_runtime_wide_mulp, xlsynth_pir_runtime_wide_unary_op,
 };
 
 type NativeEntrypoint = CompiledEntrypoint;
@@ -361,6 +362,10 @@ impl PirFunctionJit {
         builder.symbol(
             "xlsynth_pir_record_assert",
             xlsynth_pir_record_assert as *const u8,
+        );
+        builder.symbol(
+            "xlsynth_pir_record_assumption_failure",
+            xlsynth_pir_record_assumption_failure as *const u8,
         );
         builder.symbol(
             "xlsynth_pir_record_cover",
@@ -1126,6 +1131,7 @@ enum ComputedValue {
 #[derive(Clone, Copy)]
 struct RuntimeCallbacks {
     record_assert: FuncRef,
+    record_assumption_failure: FuncRef,
     record_cover: FuncRef,
     record_trace: FuncRef,
     wide_binop: FuncRef,
@@ -1193,6 +1199,28 @@ fn build_event_metadata(
                 format: None,
                 operand_layouts: Vec::new(),
             }),
+            NodePayload::ArrayIndex {
+                assumed_in_bounds: true,
+                ..
+            } => Some(EventSiteMetadata {
+                node_text_id: node.text_id,
+                kind: EventKind::Assumption(AssumptionFailureKind::ArrayIndexOutOfBounds),
+                label: None,
+                message: None,
+                format: None,
+                operand_layouts: Vec::new(),
+            }),
+            NodePayload::ArrayUpdate {
+                assumed_in_bounds: true,
+                ..
+            } => Some(EventSiteMetadata {
+                node_text_id: node.text_id,
+                kind: EventKind::Assumption(AssumptionFailureKind::ArrayUpdateOutOfBounds),
+                label: None,
+                message: None,
+                format: None,
+                operand_layouts: Vec::new(),
+            }),
             NodePayload::Trace {
                 format, operands, ..
             } => Some(EventSiteMetadata {
@@ -1231,7 +1259,19 @@ fn reachable_topological_order(function: &ir::Fn) -> Result<Vec<NodeRef>, JitErr
             .nodes
             .iter()
             .enumerate()
-            .filter(|(_, node)| is_observable_effect_root(&node.payload))
+            .filter(|(_, node)| {
+                is_observable_effect_root(&node.payload)
+                    || matches!(
+                        &node.payload,
+                        NodePayload::ArrayIndex {
+                            assumed_in_bounds: true,
+                            ..
+                        } | NodePayload::ArrayUpdate {
+                            assumed_in_bounds: true,
+                            ..
+                        }
+                    )
+            })
             .map(|(index, _)| NodeRef { index }),
     );
     let mut reachable = HashSet::new();
@@ -1263,6 +1303,13 @@ fn declare_runtime_callbacks(
     let assert_id = module
         .declare_function(
             "xlsynth_pir_record_assert",
+            Linkage::Import,
+            &site_signature,
+        )
+        .map_err(|error| JitError::Backend(error.to_string()))?;
+    let assumption_failure_id = module
+        .declare_function(
+            "xlsynth_pir_record_assumption_failure",
             Linkage::Import,
             &site_signature,
         )
@@ -1362,6 +1409,7 @@ fn declare_runtime_callbacks(
         .map_err(|error| JitError::Backend(error.to_string()))?;
     Ok(RuntimeCallbacks {
         record_assert: module.declare_func_in_func(assert_id, function),
+        record_assumption_failure: module.declare_func_in_func(assumption_failure_id, function),
         record_cover: module.declare_func_in_func(cover_id, function),
         record_trace: module.declare_func_in_func(trace_id, function),
         wide_binop: module.declare_func_in_func(wide_binop_id, function),
@@ -2222,12 +2270,16 @@ fn lower_function(
                 builder,
                 function,
                 node,
+                *node_ref,
                 *array,
                 indices,
                 *assumed_in_bounds,
                 &values,
                 &layout,
                 pointer_type,
+                event_sites,
+                runtime_callbacks.record_assumption_failure,
+                execution_context,
             )?,
             NodePayload::ArraySlice {
                 array,
@@ -2263,29 +2315,26 @@ fn lower_function(
                 value,
                 indices,
                 assumed_in_bounds,
-            } => {
-                if layout.byte_count() == 0 {
-                    ComputedValue::ZeroSized
-                } else {
-                    lower_array_update(
-                        builder,
-                        function,
-                        node,
-                        *node_ref,
-                        return_node,
-                        output_pointer,
-                        scratch_pointer,
-                        scratch_plan,
-                        *array,
-                        *value,
-                        indices,
-                        *assumed_in_bounds,
-                        &values,
-                        &layout,
-                        pointer_type,
-                    )?
-                }
-            }
+            } => lower_array_update(
+                builder,
+                function,
+                node,
+                *node_ref,
+                return_node,
+                output_pointer,
+                scratch_pointer,
+                scratch_plan,
+                *array,
+                *value,
+                indices,
+                *assumed_in_bounds,
+                &values,
+                &layout,
+                pointer_type,
+                event_sites,
+                runtime_callbacks.record_assumption_failure,
+                execution_context,
+            )?,
             NodePayload::Sel {
                 selector,
                 cases,
@@ -4380,12 +4429,16 @@ fn lower_array_index(
     builder: &mut FunctionBuilder<'_>,
     function: &ir::Fn,
     node: &ir::Node,
+    node_ref: NodeRef,
     array: NodeRef,
     indices: &[NodeRef],
     assumed_in_bounds: bool,
     values: &[Option<ComputedValue>],
     layout: &NativeValueLayout,
     pointer_type: ClifType,
+    event_sites: &HashMap<NodeRef, u32>,
+    record_assumption_failure: FuncRef,
+    execution_context: Value,
 ) -> Result<ComputedValue, JitError> {
     if indices.is_empty() {
         let value = computed_value_for(values, array)?;
@@ -4398,11 +4451,13 @@ fn lower_array_index(
         }
         return Ok(value);
     }
-    if layout.byte_count() == 0 {
-        return Ok(ComputedValue::ZeroSized);
-    }
-    let mut pointer = address_value_for(values, array)?;
+    let mut pointer = if layout.byte_count() == 0 {
+        None
+    } else {
+        Some(address_value_for(values, array)?)
+    };
     let mut current_layout = NativeValueLayout::from_type(&function.get_node(array).ty)?;
+    let mut all_in_bounds = None;
     for index in indices {
         let NativeValueLayout::Array {
             element,
@@ -4420,23 +4475,25 @@ fn lower_array_index(
             ));
         }
         let index_layout = NativeValueLayout::from_type(&function.get_node(*index).ty)?;
-        let (address_index, _) = bounded_array_index(
+        let (address_index, is_in_bounds) = bounded_array_index(
             builder,
             computed_value_for(values, *index)?,
             &index_layout,
             element_count,
-            assumed_in_bounds,
-            node,
             pointer_type,
         )?;
-        let offset = if element.byte_count() == 1 {
-            address_index
-        } else {
-            builder
-                .ins()
-                .imul_imm(address_index, element.byte_count() as i64)
-        };
-        pointer = builder.ins().iadd(pointer, offset);
+        all_in_bounds = Some(match all_in_bounds {
+            Some(condition) => builder.ins().band(condition, is_in_bounds),
+            None => is_in_bounds,
+        });
+        if let Some(current_pointer) = pointer {
+            pointer = Some(array_element_pointer_from_address_index(
+                builder,
+                current_pointer,
+                address_index,
+                element.byte_count(),
+            ));
+        }
         current_layout = *element;
     }
     if &current_layout != layout {
@@ -4445,7 +4502,25 @@ fn lower_array_index(
             node.text_id
         )));
     }
-    Ok(load_value_from_storage(builder, pointer, layout))
+    if assumed_in_bounds {
+        let site_id = event_site_id(event_sites, node_ref, node)?;
+        let failed = builder.ins().icmp_imm(
+            IntCC::Equal,
+            all_in_bounds.expect("nonempty array index has an index condition"),
+            0,
+        );
+        emit_conditional_site_call(
+            builder,
+            failed,
+            record_assumption_failure,
+            execution_context,
+            site_id,
+        );
+    }
+    match pointer {
+        Some(pointer) => Ok(load_value_from_storage(builder, pointer, layout)),
+        None => Ok(ComputedValue::ZeroSized),
+    }
 }
 
 fn lower_scalar_literal(
@@ -4815,7 +4890,6 @@ fn lower_array_slice(
             output_index,
             input_element.byte_count(),
             pointer_type,
-            &function.get_node(start),
         )?;
         let destination_element = pointer_at_offset(
             builder,
@@ -4845,25 +4919,32 @@ fn lower_array_update(
     values: &[Option<ComputedValue>],
     layout: &NativeValueLayout,
     pointer_type: ClifType,
+    event_sites: &HashMap<NodeRef, u32>,
+    record_assumption_failure: FuncRef,
+    execution_context: Value,
 ) -> Result<ComputedValue, JitError> {
     if indices.is_empty() {
         return Ok(computed_value_for(values, value)?);
     }
-    let destination = materialized_destination(
-        builder,
-        node_ref,
-        return_node,
-        output_pointer,
-        scratch_pointer,
-        scratch_plan,
-    )?;
-    store_value_to_storage(
-        builder,
-        destination,
-        computed_value_for(values, array)?,
-        layout,
-    )?;
-
+    let destination = if layout.byte_count() == 0 {
+        None
+    } else {
+        let destination = materialized_destination(
+            builder,
+            node_ref,
+            return_node,
+            output_pointer,
+            scratch_pointer,
+            scratch_plan,
+        )?;
+        store_value_to_storage(
+            builder,
+            destination,
+            computed_value_for(values, array)?,
+            layout,
+        )?;
+        Some(destination)
+    };
     let mut target = destination;
     let mut target_layout = layout.clone();
     let mut all_in_bounds = None;
@@ -4884,23 +4965,37 @@ fn lower_array_update(
             computed_value_for(values, *index)?,
             &index_layout,
             element_count,
-            assumed_in_bounds,
-            node,
             pointer_type,
         )?;
         all_in_bounds = Some(match all_in_bounds {
             Some(condition) => builder.ins().band(condition, is_in_bounds),
             None => is_in_bounds,
         });
-        target = array_element_pointer_from_address_index(
-            builder,
-            target,
-            bounded_index,
-            element.byte_count(),
-        );
+        if let Some(current_target) = target {
+            target = Some(array_element_pointer_from_address_index(
+                builder,
+                current_target,
+                bounded_index,
+                element.byte_count(),
+            ));
+        }
         target_layout = *element;
     }
     let condition = all_in_bounds.expect("nonempty array update has an index condition");
+    if assumed_in_bounds {
+        let site_id = event_site_id(event_sites, node_ref, node)?;
+        let failed = builder.ins().icmp_imm(IntCC::Equal, condition, 0);
+        emit_conditional_site_call(
+            builder,
+            failed,
+            record_assumption_failure,
+            execution_context,
+            site_id,
+        );
+    }
+    let Some(target) = target else {
+        return Ok(ComputedValue::ZeroSized);
+    };
     let original = load_value_from_storage(builder, target, &target_layout);
     write_selected_value_to_storage(
         builder,
@@ -4910,7 +5005,9 @@ fn lower_array_update(
         Some(original),
         &target_layout,
     )?;
-    Ok(ComputedValue::Address(destination))
+    Ok(ComputedValue::Address(destination.expect(
+        "nonempty array update has materialized destination",
+    )))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5453,7 +5550,6 @@ fn clamped_array_element_pointer_for_bits(
     additional_index: usize,
     element_byte_count: usize,
     pointer_type: ClifType,
-    node: &ir::Node,
 ) -> Result<Value, JitError> {
     let max_index = element_count - 1;
     if max_index as u128 > i64::MAX as u128 {
@@ -5465,15 +5561,8 @@ fn clamped_array_element_pointer_for_bits(
         builder.ins().iconst(pointer_type, max_index as i64)
     } else {
         let max_start = max_index - additional_index;
-        let (bounded_start, _) = bounded_array_index(
-            builder,
-            index,
-            index_layout,
-            max_start + 1,
-            /* assumed_in_bounds= */ false,
-            node,
-            pointer_type,
-        )?;
+        let (bounded_start, _) =
+            bounded_array_index(builder, index, index_layout, max_start + 1, pointer_type)?;
         if additional_index == 0 {
             bounded_start
         } else {
@@ -5495,8 +5584,6 @@ fn bounded_array_index(
     index: ComputedValue,
     layout: &NativeValueLayout,
     element_count: usize,
-    assumed_in_bounds: bool,
-    node: &ir::Node,
     pointer_type: ClifType,
 ) -> Result<(Value, Value), JitError> {
     let max_index = element_count - 1;
@@ -5513,12 +5600,6 @@ fn bounded_array_index(
                 let in_bounds = builder.ins().icmp(IntCC::Equal, index, index);
                 return Ok((address_index, in_bounds));
             }
-            if assumed_in_bounds {
-                return Err(JitError::UnsupportedNode(format!(
-                    "array index assumed_in_bounds cannot be guaranteed at node {}",
-                    node.text_id
-                )));
-            }
             let in_bounds =
                 builder
                     .ins()
@@ -5530,12 +5611,6 @@ fn bounded_array_index(
             ))
         }
         NativeValueLayout::WideBits(wide) => {
-            if assumed_in_bounds {
-                return Err(JitError::UnsupportedNode(format!(
-                    "array index assumed_in_bounds cannot be guaranteed at node {}",
-                    node.text_id
-                )));
-            }
             let address = expect_address(index)?;
             let low = load_wide_limb(builder, address, 0);
             let mut high = builder.ins().iconst(types::I64, 0);

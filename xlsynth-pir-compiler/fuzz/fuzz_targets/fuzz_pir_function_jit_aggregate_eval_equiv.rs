@@ -5,8 +5,7 @@
 use libfuzzer_sys::fuzz_target;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
 use xlsynth_pir::ir_random::{
-    DepletableBytes, OperationSet, RandomFnOptions, RandomOperation, StopPolicy,
-    generate_arguments, generate_fn,
+    DepletableBytes, OperationSet, RandomFnOptions, StopPolicy, generate_arguments, generate_fn,
 };
 use xlsynth_pir_compiler::PirFunctionJit;
 
@@ -27,74 +26,8 @@ fn options() -> RandomFnOptions {
         allow_arbitrary_width_multiply: true,
         allow_empty_case_sel: true,
         allow_events: true,
-        enabled_operations: OperationSet::new([
-            RandomOperation::Literal,
-            RandomOperation::Identity,
-            RandomOperation::Not,
-            RandomOperation::Neg,
-            RandomOperation::Reverse,
-            RandomOperation::OrReduce,
-            RandomOperation::AndReduce,
-            RandomOperation::XorReduce,
-            RandomOperation::And,
-            RandomOperation::Nand,
-            RandomOperation::Nor,
-            RandomOperation::Or,
-            RandomOperation::Xor,
-            RandomOperation::Add,
-            RandomOperation::Sub,
-            RandomOperation::Umul,
-            RandomOperation::Smul,
-            RandomOperation::Udiv,
-            RandomOperation::Sdiv,
-            RandomOperation::Umod,
-            RandomOperation::Smod,
-            RandomOperation::Umulp,
-            RandomOperation::Smulp,
-            RandomOperation::Eq,
-            RandomOperation::Ne,
-            RandomOperation::Ugt,
-            RandomOperation::Uge,
-            RandomOperation::Ult,
-            RandomOperation::Ule,
-            RandomOperation::Sgt,
-            RandomOperation::Sge,
-            RandomOperation::Slt,
-            RandomOperation::Sle,
-            RandomOperation::Shll,
-            RandomOperation::Shrl,
-            RandomOperation::Shra,
-            RandomOperation::Gate,
-            RandomOperation::ZeroExt,
-            RandomOperation::SignExt,
-            RandomOperation::BitSlice,
-            RandomOperation::DynamicBitSlice,
-            RandomOperation::BitSliceUpdate,
-            RandomOperation::Concat,
-            RandomOperation::Array,
-            RandomOperation::ArrayIndex,
-            RandomOperation::ArrayConcat,
-            RandomOperation::ArraySlice,
-            RandomOperation::ArrayUpdate,
-            RandomOperation::Tuple,
-            RandomOperation::TupleIndex,
-            RandomOperation::Sel,
-            RandomOperation::PrioritySel,
-            RandomOperation::OneHotSel,
-            RandomOperation::OneHot,
-            RandomOperation::Encode,
-            RandomOperation::Decode,
-            RandomOperation::ExtCarryOut,
-            RandomOperation::ExtPrioEncode,
-            RandomOperation::ExtClz,
-            RandomOperation::ExtNormalizeLeft,
-            RandomOperation::ExtMaskLow,
-            RandomOperation::ExtNaryAdd,
-            RandomOperation::AfterAll,
-            RandomOperation::Cover,
-            RandomOperation::Assert,
-            RandomOperation::Trace,
-        ]),
+        allow_assumed_in_bounds: true,
+        enabled_operations: OperationSet::all_supported(),
         ..RandomFnOptions::default()
     }
 }
@@ -126,6 +59,10 @@ fuzz_target!(|data: &[u8]| {
             assert!(
                 actual.events.assertion_failures.is_empty(),
                 "compiler unexpectedly reported assertions\nIR:\n{ir_text}\nargs={args:?}"
+            );
+            assert!(
+                actual.events.assumption_failures.is_empty(),
+                "compiler unexpectedly reported assumption failures\nIR:\n{ir_text}\nargs={args:?}"
             );
             assert_eq!(
                 sorted(
@@ -182,6 +119,24 @@ fuzz_target!(|data: &[u8]| {
                         .collect()
                 ),
                 "PIR compiler/evaluator assertion mismatch\nIR:\n{ir_text}\nargs={args:?}"
+            );
+            assert_eq!(
+                sorted(
+                    actual
+                        .events
+                        .assumption_failures
+                        .iter()
+                        .map(|failure| (failure.node_text_id, format!("{:?}", failure.kind)))
+                        .collect()
+                ),
+                sorted(
+                    expected
+                        .assumption_failures
+                        .iter()
+                        .map(|failure| (failure.node_text_id, format!("{:?}", failure.kind)))
+                        .collect()
+                ),
+                "PIR compiler/evaluator assumption mismatch\nIR:\n{ir_text}\nargs={args:?}"
             );
             assert_eq!(
                 sorted(

@@ -241,4 +241,25 @@ mod tests {
         }
         assert!(g.nodes.iter().all(|node| node.text_id != 6));
     }
+
+    #[test]
+    fn remove_dead_nodes_may_remove_unused_assumed_in_bounds_accesses() {
+        let f = parse_fn(
+            r#"fn f(a: bits[8][2] id=1, v: bits[8] id=2, i: bits[2] id=3) -> bits[8] {
+  a: bits[8][2] = param(name=a, id=1)
+  v: bits[8] = param(name=v, id=2)
+  i: bits[2] = param(name=i, id=3)
+  dead_index: bits[8] = array_index(a, indices=[i], assumed_in_bounds=true, id=4)
+  dead_update: bits[8][2] = array_update(a, v, indices=[i], assumed_in_bounds=true, id=5)
+  ret out: bits[8] = identity(v, id=6)
+}"#,
+        );
+
+        let dead = get_dead_nodes(&f);
+        for id in [4, 5] {
+            assert!(dead.iter().any(|nr| f.get_node(*nr).text_id == id));
+        }
+        let g = remove_dead_nodes(&f);
+        assert!(g.nodes.iter().all(|node| !matches!(node.text_id, 4 | 5)));
+    }
 }

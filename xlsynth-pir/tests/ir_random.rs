@@ -625,6 +625,7 @@ fn probabilistic_aggregate_options_generate_arrays_and_tuples() {
         max_tuple_length: 4,
         allow_arrays: true,
         allow_tuples: true,
+        allow_assumed_in_bounds: true,
         ..RandomFnOptions::default()
     };
     let mut entropy = RngEntropy::new(Pcg64Mcg::new(0xf0a5_a731));
@@ -636,6 +637,8 @@ fn probabilistic_aggregate_options_generate_arrays_and_tuples() {
     let mut saw_multidimensional_array = false;
     let mut saw_array_of_tuple = false;
     let mut saw_tuple_with_array_element = false;
+    let mut saw_assumed_array_index = false;
+    let mut saw_assumed_array_update = false;
     let mut saw_zero_params = false;
     let mut saw_max_params = false;
     for _ in 0..2_000 {
@@ -643,6 +646,19 @@ fn probabilistic_aggregate_options_generate_arrays_and_tuples() {
             generate_fn(&mut entropy, &options, StopPolicy::ExactBodyNodes(32)).unwrap();
         validate_generated(&generated.function);
         operations.extend(generated.stats.emitted_operations.keys().cloned());
+        for node in &generated.function.nodes {
+            match &node.payload {
+                NodePayload::ArrayIndex {
+                    assumed_in_bounds: true,
+                    ..
+                } => saw_assumed_array_index = true,
+                NodePayload::ArrayUpdate {
+                    assumed_in_bounds: true,
+                    ..
+                } => saw_assumed_array_update = true,
+                _ => {}
+            }
+        }
         saw_array_type |= function_types(&generated.function).any(type_has_array);
         saw_tuple_type |= function_types(&generated.function).any(type_has_tuple);
         saw_empty_tuple |= function_types(&generated.function).any(type_has_empty_tuple);
@@ -673,6 +689,8 @@ fn probabilistic_aggregate_options_generate_arrays_and_tuples() {
     assert!(saw_multidimensional_array);
     assert!(saw_array_of_tuple);
     assert!(saw_tuple_with_array_element);
+    assert!(saw_assumed_array_index);
+    assert!(saw_assumed_array_update);
     assert!(saw_zero_params);
     assert!(saw_max_params);
     assert!(operations.contains("array"));
@@ -703,6 +721,73 @@ fn probabilistic_disabled_aggregate_options_exclude_aggregate_nodes() {
         assert!(!generated.stats.emitted_operations.contains_key("array"));
         assert!(!generated.stats.emitted_operations.contains_key("tuple"));
     }
+}
+
+#[test]
+fn probabilistic_assumed_in_bounds_option_controls_array_attributes() {
+    let options = RandomFnOptions {
+        max_params: 5,
+        max_nodes: 48,
+        max_bit_width: 16,
+        allow_arrays: true,
+        allow_tuples: false,
+        enabled_operations: OperationSet::new([
+            RandomOperation::Literal,
+            RandomOperation::Array,
+            RandomOperation::ArrayIndex,
+            RandomOperation::ArrayUpdate,
+        ]),
+        ..RandomFnOptions::default()
+    };
+    let mut entropy = RngEntropy::new(Pcg64Mcg::new(0x481b_00dd));
+    for _ in 0..500 {
+        let generated =
+            generate_fn(&mut entropy, &options, StopPolicy::ExactBodyNodes(40)).unwrap();
+        validate_generated(&generated.function);
+        assert!(generated.function.nodes.iter().all(|node| !matches!(
+            &node.payload,
+            NodePayload::ArrayIndex {
+                assumed_in_bounds: true,
+                ..
+            } | NodePayload::ArrayUpdate {
+                assumed_in_bounds: true,
+                ..
+            }
+        )));
+    }
+
+    let enabled = RandomFnOptions {
+        allow_assumed_in_bounds: true,
+        ..options
+    };
+    let mut entropy = RngEntropy::new(Pcg64Mcg::new(0x481b_00de));
+    let mut saw_index = false;
+    let mut saw_update = false;
+    for _ in 0..500 {
+        let generated =
+            generate_fn(&mut entropy, &enabled, StopPolicy::ExactBodyNodes(40)).unwrap();
+        validate_generated(&generated.function);
+        saw_index |= generated.function.nodes.iter().any(|node| {
+            matches!(
+                &node.payload,
+                NodePayload::ArrayIndex {
+                    assumed_in_bounds: true,
+                    ..
+                }
+            )
+        });
+        saw_update |= generated.function.nodes.iter().any(|node| {
+            matches!(
+                &node.payload,
+                NodePayload::ArrayUpdate {
+                    assumed_in_bounds: true,
+                    ..
+                }
+            )
+        });
+    }
+    assert!(saw_index);
+    assert!(saw_update);
 }
 
 #[test]
@@ -1242,6 +1327,23 @@ fn probabilistic_extension_option_covers_all_extension_operations() {
         let generated =
             generate_fn(&mut entropy, &options, StopPolicy::ExactBodyNodes(48)).unwrap();
         validate_generated(&generated.function);
+        for node in &generated.function.nodes {
+            let NodePayload::ExtNormalizeLeft {
+                arg,
+                normalized_bit_count,
+                ..
+            } = &node.payload
+            else {
+                continue;
+            };
+            let Type::Bits(arg_width) = &generated.function.get_node(*arg).ty else {
+                unreachable!("ext_normalize_left argument must be bits-typed");
+            };
+            assert!(
+                normalized_bit_count >= arg_width,
+                "ext_normalize_left result must be at least as wide as its operand"
+            );
+        }
         emitted.extend(generated.stats.emitted_operations.keys().cloned());
         live.extend(generated.stats.live_operations.keys().cloned());
     }

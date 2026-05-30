@@ -30,6 +30,7 @@ fn options() -> RandomFnOptions {
         allow_arbitrary_width_multiply: true,
         allow_empty_case_sel: true,
         allow_events: true,
+        allow_assumed_in_bounds: true,
         enabled_operations: OperationSet::all_supported(),
         ..RandomFnOptions::default()
     }
@@ -63,6 +64,10 @@ fuzz_target!(|data: &[u8]| {
             assert!(
                 actual.events.assertion_failures.is_empty(),
                 "compiler unexpectedly reported assertions\nIR:\n{ir_text}\nargs={args:?}"
+            );
+            assert!(
+                actual.events.assumption_failures.is_empty(),
+                "compiler unexpectedly reported assumption failures\nIR:\n{ir_text}\nargs={args:?}"
             );
             assert_eq!(
                 sorted(
@@ -119,6 +124,24 @@ fuzz_target!(|data: &[u8]| {
                         .collect()
                 ),
                 "PIR compiler/evaluator wide assertion mismatch\nIR:\n{ir_text}\nargs={args:?}"
+            );
+            assert_eq!(
+                sorted(
+                    actual
+                        .events
+                        .assumption_failures
+                        .iter()
+                        .map(|failure| (failure.node_text_id, format!("{:?}", failure.kind)))
+                        .collect()
+                ),
+                sorted(
+                    expected
+                        .assumption_failures
+                        .iter()
+                        .map(|failure| (failure.node_text_id, format!("{:?}", failure.kind)))
+                        .collect()
+                ),
+                "PIR compiler/evaluator wide assumption mismatch\nIR:\n{ir_text}\nargs={args:?}"
             );
             assert_eq!(
                 sorted(

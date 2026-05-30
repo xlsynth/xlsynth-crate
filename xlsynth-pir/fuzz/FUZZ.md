@@ -33,9 +33,9 @@ ______________________________________________________________________
 
 These fuzz targets generate two same-signature PIR functions directly with
 `xlsynth_pir::ir_random` across its full function-level PIR surface, including
-aggregate and extension-operation forms, compute edits using a matcher, apply
-those edits to the first function, and assert the result is isomorphic to the
-second.
+aggregate, extension-operation, and `assumed_in_bounds` array-attribute
+forms, compute edits using a matcher, apply those edits to the first function,
+and assert the result is isomorphic to the second.
 
 Target names: `fuzz_greedy_matching_ged`, `fuzz_naive_matching_ged`
 

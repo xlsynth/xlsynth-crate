@@ -11,7 +11,11 @@ pub struct BoolSelToSumOfProductsTransform;
 impl BoolSelToSumOfProductsTransform {
     fn and_operands(ctx: &m::MatchCtx<'_>, node: NodeRef) -> Option<[NodeRef; 2]> {
         let ops = ctx.flattened_nary_operands(node, NaryOp::And)?;
-        (ops.len() == 2).then_some([ops[0], ops[1]])
+        if ops.len() == 2 {
+            Some([ops[0], ops[1]])
+        } else {
+            None
+        }
     }
 
     fn forward_parts(f: &IrFn, nr: NodeRef) -> Option<(NodeRef, NodeRef, NodeRef)> {
@@ -134,5 +138,23 @@ mod tests {
             NodePayload::GetParam(_)
         ));
         assert_eq!(cases.len(), 2);
+    }
+
+    #[test]
+    fn ignores_degenerate_and_terms_while_searching_for_fold_candidates() {
+        for ir_text in [
+            r#"fn t(p: bits[1] id=1) -> bits[1] {
+  and.2: bits[1] = and(p, id=2)
+  ret out: bits[1] = or(and.2, p, id=3)
+}"#,
+            r#"fn t(p: bits[1] id=1) -> bits[1] {
+  and.2: bits[1] = and(id=2)
+  ret out: bits[1] = or(and.2, p, id=3)
+}"#,
+        ] {
+            let f = ir_parser::Parser::new(ir_text).parse_fn().unwrap();
+            let mut t = BoolSelToSumOfProductsTransform;
+            assert!(t.find_candidates(&f).is_empty());
+        }
     }
 }

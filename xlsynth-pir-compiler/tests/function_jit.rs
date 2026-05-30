@@ -4,8 +4,8 @@ use xlsynth::IrValue;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir_compiler::{
-    ExecutionContext, JitError, NativeTupleFieldLayout, NativeValueLayout, PirFunctionJit,
-    ScalarLayout, WideBitsLayout,
+    AssumptionFailureKind, ExecutionContext, JitError, NativeTupleFieldLayout, NativeValueLayout,
+    PirFunctionJit, ScalarLayout, WideBitsLayout,
 };
 
 fn compile(ir: &str) -> PirFunctionJit {
@@ -708,6 +708,42 @@ fn f(index: bits[2] id=1) -> bits[3] {
 "#,
     );
     assert_eq!(jit.run_u64(&[3]).expect("execute"), 6);
+}
+
+#[test]
+fn assumed_in_bounds_array_violations_accumulate_for_retained_graph_nodes() {
+    let jit = compile(
+        r#"package test
+
+fn f(a: bits[8][2] id=1, v: bits[8] id=2, i: bits[2] id=3) -> bits[8] {
+  dead_index: bits[8] = array_index(a, indices=[i], assumed_in_bounds=true, id=4)
+  dead_update: bits[8][2] = array_update(a, v, indices=[i], assumed_in_bounds=true, id=5)
+  ret out: bits[8] = identity(v, id=6)
+}
+"#,
+    );
+    let values = array(8, &[10, 11]);
+    let in_bounds = jit
+        .run_ir_values_with_events(&[values.clone(), bits(8, 99), bits(2, 1)])
+        .expect("in-bounds execution");
+    assert!(in_bounds.events.assumption_failures.is_empty());
+
+    let out_of_bounds = jit
+        .run_ir_values_with_events(&[values, bits(8, 99), bits(2, 3)])
+        .expect("out-of-bounds execution remains safe");
+    assert_eq!(out_of_bounds.value, bits(8, 99));
+    assert_eq!(
+        out_of_bounds
+            .events
+            .assumption_failures
+            .iter()
+            .map(|failure| (failure.node_text_id, failure.kind))
+            .collect::<Vec<_>>(),
+        vec![
+            (4, AssumptionFailureKind::ArrayIndexOutOfBounds),
+            (5, AssumptionFailureKind::ArrayUpdateOutOfBounds),
+        ]
+    );
 }
 
 #[test]
