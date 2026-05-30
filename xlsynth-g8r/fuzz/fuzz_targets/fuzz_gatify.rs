@@ -4,9 +4,9 @@
 use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::aig_serdes::gate2ir;
 use xlsynth_g8r::gatify::ir2gate::{self, GatifyOutput};
+use xlsynth_g8r_fuzz::generate_gatify_random_pir_package;
+use xlsynth_pir::desugar_extensions::emit_package_as_xls_ir_text;
 use xlsynth_pir::ir;
-use xlsynth_pir::ir_fuzz::{generate_ir_fn, FuzzSample};
-use xlsynth_pir::ir_parser;
 #[cfg(feature = "has-bitwuzla")]
 use xlsynth_prover::ir_equiv::{run_ir_equiv, IrEquivRequest, IrModule};
 #[cfg(feature = "has-bitwuzla")]
@@ -70,41 +70,21 @@ fn prove_orig_vs_gate_equiv(
     );
 }
 
-fuzz_target!(|sample: FuzzSample| {
-    // Skip empty operation lists
-    if sample.ops.is_empty() {
-        return;
-    }
-
+fuzz_target!(|data: &[u8]| {
     let _ = env_logger::builder().try_init();
 
-    // Generate IR function from fuzz input
-    let mut package = xlsynth::IrPackage::new("fuzz_test").unwrap();
-    if let Err(e) = generate_ir_fn(sample.ops, &mut package, None) {
-        log::info!("Error generating IR function: {}", e);
-        return;
-    }
-
-    let parsed_package =
-        match ir_parser::Parser::new(&package.to_string()).parse_and_validate_package() {
-            Ok(parsed_package) => parsed_package,
-            Err(e) => {
-                log::error!(
-                    "Error parsing IR package: {}\npackage:\n{}",
-                    e,
-                    package.to_string()
-                );
-                return;
-            }
-        };
-    let parsed_fn = parsed_package.get_top_fn().unwrap();
-    let orig_ir = package.to_string();
+    let package = generate_gatify_random_pir_package(data, "fuzz_test");
+    let parsed_fn = package
+        .get_top_fn()
+        .expect("generated PIR package should have a top function");
+    let orig_ir = emit_package_as_xls_ir_text(&package)
+        .expect("generated extension-bearing PIR should desugar to XLS IR");
     let orig_top = parsed_fn.name.as_str();
     let fn_type = parsed_fn.get_type();
 
     // Convert to gates with folding disabled to make less machinery under test.
     let gate_fn_no_fold = ir2gate::gatify(
-        &parsed_fn,
+        parsed_fn,
         ir2gate::GatifyOptions {
             fold: false,
             hash: false,
@@ -117,10 +97,7 @@ fuzz_target!(|sample: FuzzSample| {
     log::info!("unfolded conversion succeeded, attempting folded version...");
 
     // Now check the folded version is also equivalent.
-    let gate_fn_fold = ir2gate::gatify(
-        &parsed_fn,
-        ir2gate::GatifyOptions::all_opts_disabled(),
-    );
+    let gate_fn_fold = ir2gate::gatify(parsed_fn, ir2gate::GatifyOptions::all_opts_disabled());
     let gate_fn_fold = gate_fn_fold.expect("folded gatify should succeed");
     prove_orig_vs_gate_equiv("folded", &orig_ir, orig_top, &fn_type, &gate_fn_fold);
 

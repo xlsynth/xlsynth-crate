@@ -2897,11 +2897,6 @@ fn gatify_node(
             indices,
             assumed_in_bounds,
         } => {
-            assert!(
-                !indices.is_empty(),
-                "Array index must have at least one index"
-            );
-
             let mut array_ty = match f.get_node_ty(*array) {
                 ir::Type::Array(array_ty_data) => array_ty_data,
                 other => panic!("Expected array type for array_index, got {:?}", other),
@@ -2968,17 +2963,17 @@ fn gatify_node(
             indices,
             assumed_in_bounds: _,
         } => {
-            assert!(
-                !indices.is_empty(),
-                "Array update must have at least one index",
-            );
+            let value_bits = env.get_bit_vector(*value).unwrap();
+            if indices.is_empty() {
+                env.add(node_ref, GateOrVec::BitVector(value_bits));
+                return Ok(());
+            }
             let array_ty = match f.get_node_ty(*array) {
                 ir::Type::Array(array_ty_data) => array_ty_data,
                 other => panic!("Expected array type for array_update, got {:?}", other),
             };
 
             let array_bits = env.get_bit_vector(*array).unwrap();
-            let value_bits = env.get_bit_vector(*value).unwrap();
             let index_bits: Vec<AigBitVector> = indices
                 .iter()
                 .map(|i| env.get_bit_vector(*i).unwrap())
@@ -4021,6 +4016,7 @@ fn gatify_internal(
     g8_builder: &mut GateBuilder,
     env: &mut GateEnv,
     options: &GatifyOptions,
+    provenance_by_node: Option<&HashMap<ir::NodeRef, Option<u32>>>,
 ) -> Result<(), String> {
     log::debug!("gatify_internal; f.name: {}", f.name);
     log::debug!("gatify; f:\n{}", f.to_string());
@@ -4033,7 +4029,11 @@ fn gatify_internal(
         let param_ref = ir::NodeRef { index: i + 1 };
         assert!(f.nodes[i + 1].payload == ir::NodePayload::GetParam(param.id));
         log::debug!("Gatifying param {:?}", param);
-        g8_builder.set_current_pir_node_id(Some(f.nodes[i + 1].text_id as u32));
+        let provenance_id = provenance_by_node.map_or_else(
+            || Some(f.nodes[i + 1].text_id as u32),
+            |by_node| by_node.get(&param_ref).copied().flatten(),
+        );
+        g8_builder.set_current_pir_node_id(provenance_id);
         let gate_ref_vec = g8_builder.add_input(param.name.clone(), param.ty.bit_count());
         g8_builder.set_current_pir_node_id(None);
         env.add(param_ref, GateOrVec::BitVector(gate_ref_vec));
@@ -4049,9 +4049,11 @@ fn gatify_internal(
             node.ty,
             node.payload
         );
-        g8_builder.set_current_pir_node_id(Some(
-            u32::try_from(node.text_id).expect("node id too large for u32"),
-        ));
+        let provenance_id = provenance_by_node.map_or_else(
+            || Some(u32::try_from(node.text_id).expect("node id too large for u32")),
+            |by_node| by_node.get(&node_ref).copied().flatten(),
+        );
+        g8_builder.set_current_pir_node_id(provenance_id);
         gatify_node(
             f,
             node_ref,
@@ -4083,6 +4085,34 @@ fn gatify_internal(
     );
     g8_builder.add_output("output_value".to_string(), gate_refs);
     Ok(())
+}
+
+/// Attributes prep-created nodes to an original operand when no original node
+/// with the same text ID survives the preparation rewrite.
+fn build_prepared_provenance_map(
+    f: &ir::Fn,
+    orig_ref_by_text_id: &HashMap<usize, ir::NodeRef>,
+) -> HashMap<ir::NodeRef, Option<u32>> {
+    let mut provenance_by_node: HashMap<ir::NodeRef, Option<u32>> = HashMap::new();
+    for (index, node) in f.nodes.iter().enumerate() {
+        let node_ref = ir::NodeRef { index };
+        if orig_ref_by_text_id.contains_key(&node.text_id) {
+            provenance_by_node.insert(
+                node_ref,
+                Some(u32::try_from(node.text_id).expect("node id too large for u32")),
+            );
+        }
+    }
+    for node_ref in ir_utils::get_topological(f) {
+        if provenance_by_node.contains_key(&node_ref) {
+            continue;
+        }
+        let provenance_id = ir_utils::operands(&f.get_node(node_ref).payload)
+            .into_iter()
+            .find_map(|operand| provenance_by_node.get(&operand).copied().flatten());
+        provenance_by_node.insert(node_ref, provenance_id);
+    }
+    provenance_by_node
 }
 
 #[derive(Clone)]
@@ -4183,7 +4213,15 @@ fn gatify_lower_prepared_fn(
         },
     );
     let mut env = GateEnv::new();
-    gatify_internal(f, &mut g8_builder, &mut env, options)?;
+    let provenance_by_node =
+        orig_ref_by_text_id.map(|original| build_prepared_provenance_map(f, original));
+    gatify_internal(
+        f,
+        &mut g8_builder,
+        &mut env,
+        options,
+        provenance_by_node.as_ref(),
+    )?;
     let gate_fn = g8_builder.build();
     log::debug!(
         "converted IR function to gate function:\n{}",
@@ -4594,6 +4632,49 @@ fn f(a: bits[2] id=1, b: bits[2] id=2) -> bits[2] {
                     node.get_pir_node_ids(),
                     &[3],
                     "every lowered AND for this simple add should carry the add node text_id"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_gatify_prep_created_nodes_keep_original_provenance() {
+        let ir_text = r#"package sample
+fn f(x: bits[2] id=1, selector: bits[2] id=2) -> bits[2] {
+  zero: bits[2] = literal(value=0, id=3)
+  one: bits[2] = literal(value=1, id=4)
+  amount: bits[2] = priority_sel(selector, cases=[zero, one], default=zero, id=5)
+  ret shifted: bits[2] = shrl(x, amount, id=6)
+}
+"#;
+        let mut parser = ir_parser::Parser::new(ir_text);
+        let ir_package = parser.parse_and_validate_package().unwrap();
+        let ir_fn = ir_package.get_top_fn().unwrap();
+        let original_ids: std::collections::HashSet<u32> = ir_fn
+            .nodes
+            .iter()
+            .map(|node| u32::try_from(node.text_id).unwrap())
+            .collect();
+
+        let gate_fn = gatify(
+            ir_fn,
+            GatifyOptions {
+                fold: false,
+                hash: false,
+                ..GatifyOptions::all_opts_disabled()
+            },
+        )
+        .unwrap()
+        .gate_fn;
+
+        for node in &gate_fn.gates {
+            if let AigNode::Input { pir_node_ids, .. } | AigNode::And2 { pir_node_ids, .. } = node {
+                assert!(!pir_node_ids.is_empty());
+                assert!(
+                    pir_node_ids
+                        .iter()
+                        .all(|pir_node_id| original_ids.contains(pir_node_id)),
+                    "prep-created gates should only reference original PIR ids: {node:?}"
                 );
             }
         }
@@ -6375,6 +6456,43 @@ top fn f(pred: bits[1] id=1, x: bits[2] id=2, y: bits[3] id=3) -> (bits[2], bits
             eval(1, 0b10, 0b101),
             IrBits::make_ubits(5, 0b10101).unwrap()
         );
+    }
+
+    #[test]
+    fn test_zero_index_array_ops_lower_as_identity_and_replacement() {
+        let index_ir = r#"package sample
+
+top fn f(a: bits[3][2] id=1) -> bits[3][2] {
+  ret selected: bits[3][2] = array_index(a, indices=[], id=2)
+}
+"#;
+        let index_gate_fn = gatify_ir_text(index_ir);
+        let array_bits = IrBits::make_ubits(6, 0b10_1011).unwrap();
+        let indexed = gate_sim::eval(
+            &index_gate_fn,
+            std::slice::from_ref(&array_bits),
+            gate_sim::Collect::None,
+        )
+        .outputs[0]
+            .clone();
+        assert_eq!(indexed, array_bits);
+
+        let update_ir = r#"package sample
+
+top fn f(a: bits[3][2] id=1, replacement: bits[3][2] id=2) -> bits[3][2] {
+  ret updated: bits[3][2] = array_update(a, replacement, indices=[], id=3)
+}
+"#;
+        let update_gate_fn = gatify_ir_text(update_ir);
+        let replacement_bits = IrBits::make_ubits(6, 0b01_0110).unwrap();
+        let updated = gate_sim::eval(
+            &update_gate_fn,
+            &[array_bits, replacement_bits.clone()],
+            gate_sim::Collect::None,
+        )
+        .outputs[0]
+            .clone();
+        assert_eq!(updated, replacement_bits);
     }
 
     fn gate_eval_1bit(gate_fn: &GateFn, lhs: u64, lhs_width: usize) -> bool {

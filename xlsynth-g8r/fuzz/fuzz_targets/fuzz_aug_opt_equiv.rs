@@ -2,11 +2,10 @@
 
 #![no_main]
 
-use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use std::sync::atomic::{AtomicU64, Ordering};
+use xlsynth_g8r_fuzz::generate_upstream_formal_random_pir_package;
 use xlsynth_pir::aug_opt::{run_aug_opt_over_ir_text_with_stats, AugOptOptions};
-use xlsynth_pir::ir_fuzz::{generate_ir_fn, FuzzSample};
 #[cfg(feature = "has-bitwuzla")]
 use xlsynth_prover::ir_equiv::{run_ir_equiv, IrEquivRequest, IrModule};
 #[cfg(feature = "has-bitwuzla")]
@@ -19,31 +18,13 @@ static POW2_MSB_TIEBREAK_REWRITES: AtomicU64 = AtomicU64::new(0);
 static SELECTED_OPPOSITE_SUBTRACT_REWRITES: AtomicU64 = AtomicU64::new(0);
 
 fuzz_target!(|data: &[u8]| {
-    let mut u = Unstructured::new(data);
-    let sample = match FuzzSample::arbitrary(&mut u) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
     let run_idx = RUN_COUNT.fetch_add(1, Ordering::Relaxed).saturating_add(1);
-
-    if sample.ops.is_empty() {
-        // Empty op lists cannot form a function body, so they are not
-        // informative for rewrite equivalence.
-        return;
-    }
 
     let _ = env_logger::builder().is_test(true).try_init();
 
-    let mut pkg = xlsynth::IrPackage::new("fuzz_pkg").unwrap();
-    if let Err(e) = generate_ir_fn(sample.ops.clone(), &mut pkg, None) {
-        // The generator can intentionally skip unsupported combos; treat as
-        // non-actionable for rewrite equivalence.
-        log::debug!("IR generation failed: {}", e);
-        return;
-    }
-
+    let pkg = generate_upstream_formal_random_pir_package(data, "fuzz_pkg");
     let orig_ir = pkg.to_string();
-    let top_fn_name = "fuzz_test";
+    let top_fn_name = "random_fn";
 
     let aug_result = match run_aug_opt_over_ir_text_with_stats(
         &orig_ir,
@@ -64,8 +45,8 @@ fuzz_target!(|data: &[u8]| {
     let total_rewrites = u64::try_from(aug_result.total_rewrites).unwrap_or(u64::MAX);
     let eq_shll_slice_literal_rewrites =
         u64::try_from(aug_result.rewrite_stats.eq_shll_slice_literal).unwrap_or(u64::MAX);
-    let pow2_rewrites =
-        u64::try_from(aug_result.rewrite_stats.pow2_msb_compare_with_eq_tiebreak).unwrap_or(u64::MAX);
+    let pow2_rewrites = u64::try_from(aug_result.rewrite_stats.pow2_msb_compare_with_eq_tiebreak)
+        .unwrap_or(u64::MAX);
     let selected_opposite_subtract_rewrites =
         u64::try_from(aug_result.rewrite_stats.selected_opposite_subtracts).unwrap_or(u64::MAX);
     TOTAL_REWRITES.fetch_add(total_rewrites, Ordering::Relaxed);

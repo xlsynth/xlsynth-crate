@@ -4,9 +4,8 @@
 use libfuzzer_sys::fuzz_target;
 
 use xlsynth_autocov::{generate_ir_fn_corpus_from_ir_text, IrFnAutocovGenerateConfig};
+use xlsynth_g8r_fuzz::generate_upstream_eval_random_pir_package;
 use xlsynth_pir::ir_eval::{eval_fn_in_package, FnEvalResult};
-use xlsynth_pir::ir_fuzz::{generate_ir_fn, FuzzSample};
-use xlsynth_pir::ir_parser::Parser;
 
 const AUTOCOV_MAX_ITERS: u64 = 256;
 const AUTOCOV_MAX_CORPUS_LEN: usize = 64;
@@ -21,33 +20,24 @@ fn stable_hash_u64(text: &str) -> u64 {
     hash
 }
 
-fuzz_target!(|sample: FuzzSample| {
-    // Empty op lists cannot form a function body, so they do not exercise the
-    // interpreter parity property.
-    if sample.ops.is_empty() {
-        return;
-    }
-
+fuzz_target!(|data: &[u8]| {
     let _ = env_logger::builder().is_test(true).try_init();
 
-    // Generate an XLS IR function via C++ bindings.
-    let mut pkg = xlsynth::IrPackage::new("fuzz_pkg").expect("IrPackage::new should not fail");
-    let xls_fn = match generate_ir_fn(sample.ops.clone(), &mut pkg, None) {
-        Ok(f) => f,
-        Err(_) => {
-            // The generator can intentionally reject unsupported op/type
-            // combinations; those are not actionable parity failures.
-            return;
-        }
-    };
-    let pkg_text = pkg.to_string();
-    let fn_name = xls_fn.get_name();
+    let parsed_pkg = generate_upstream_eval_random_pir_package(data, "fuzz_pkg");
+    let pkg_text = parsed_pkg.to_string();
+    let fn_name = parsed_pkg
+        .get_top_fn()
+        .expect("generated package should have a top function")
+        .name
+        .clone();
+    let xls_pkg = xlsynth::IrPackage::parse_ir(&pkg_text, None)
+        .expect("PIR-emitted standard XLS IR should parse in libxls");
+    let xls_fn = xls_pkg
+        .get_function(&fn_name)
+        .expect("libxls package should contain the generated top function");
 
     log::info!("pkg_text:\n{}", pkg_text);
 
-    let parsed_pkg = Parser::new(&pkg_text)
-        .parse_and_validate_package()
-        .expect("parse_and_validate_package should succeed for generated IR");
     let parsed_fn = match parsed_pkg.get_fn(&fn_name) {
         Some(f) => f,
         None => panic!("missing function {fn_name} in parsed package"),
@@ -61,7 +51,7 @@ fuzz_target!(|sample: FuzzSample| {
 
     let corpus_result = generate_ir_fn_corpus_from_ir_text(
         &pkg_text,
-        &fn_name,
+        fn_name.as_str(),
         IrFnAutocovGenerateConfig {
             seed: stable_hash_u64(&pkg_text),
             max_iters: Some(AUTOCOV_MAX_ITERS),

@@ -12,20 +12,20 @@ use xlsynth_g8r::aig_serdes::gate2ir;
 use xlsynth_g8r::gatify::ir2gate::{self, GatifyOptions};
 use xlsynth_pir::desugar_extensions::emit_package_as_xls_ir_text;
 use xlsynth_pir::ir::{
-    self, ExtNaryAddArchitecture, ExtNaryAddTerm, FileTable, MemberType, Node, NodePayload, Package,
-    PackageMember, Param, ParamId, Type,
+    self, ExtNaryAddArchitecture, ExtNaryAddTerm, FileTable, MemberType, Node, NodePayload,
+    Package, PackageMember, Param, ParamId, Type,
 };
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_validate;
-use xlsynth_prover::prover::types::EquivResult;
 #[cfg(feature = "has-bitwuzla")]
 use xlsynth_prover::prover::ir_equiv::prove_ir_fn_equiv;
+#[cfg(all(not(feature = "has-bitwuzla"), feature = "has-boolector"))]
+use xlsynth_prover::prover::ir_equiv::prove_ir_fn_equiv;
+use xlsynth_prover::prover::types::EquivResult;
 #[cfg(any(feature = "has-bitwuzla", feature = "has-boolector"))]
 use xlsynth_prover::prover::types::{AssertionSemantics, ProverFn};
 #[cfg(feature = "has-bitwuzla")]
 use xlsynth_prover::solver::bitwuzla::{Bitwuzla, BitwuzlaOptions};
-#[cfg(all(not(feature = "has-bitwuzla"), feature = "has-boolector"))]
-use xlsynth_prover::prover::ir_equiv::prove_ir_fn_equiv;
 #[cfg(all(not(feature = "has-bitwuzla"), feature = "has-boolector"))]
 use xlsynth_prover::solver::boolector::{Boolector, BoolectorConfig};
 
@@ -119,14 +119,13 @@ fuzz_target!(|data: &[u8]| {
         .unwrap_or_else(|e| panic!("generated ext_nary_add package should validate: {e:?}"));
     let ir_text = pkg.to_string();
     log::info!("generated ext_nary_add IR:\n{}", ir_text);
-    let pir_fn = pkg.get_top_fn().expect("generated package should have a top fn");
+    let pir_fn = pkg
+        .get_top_fn()
+        .expect("generated package should have a top fn");
 
     let gatify_start = Instant::now();
-    let gatify_output = ir2gate::gatify(
-        pir_fn,
-        GatifyOptions::all_opts_disabled(),
-    )
-    .expect("gatify should succeed for generated ext_nary_add IR");
+    let gatify_output = ir2gate::gatify(pir_fn, GatifyOptions::all_opts_disabled())
+        .expect("gatify should succeed for generated ext_nary_add IR");
     log::info!("gatify completed in {:?}", gatify_start.elapsed());
 
     // The in-process prover works over PIR functions, so we prove equivalence
@@ -140,13 +139,10 @@ fuzz_target!(|data: &[u8]| {
         exported_ir_text.len()
     );
     let gate_ir_start = Instant::now();
-    let gate_ir_text = gate2ir::gate_fn_to_xlsynth_ir(
-        &gatify_output.gate_fn,
-        FUNCTION_NAME,
-        &pir_fn.get_type(),
-    )
-    .expect("gate_fn_to_xlsynth_ir should succeed")
-    .to_string();
+    let gate_ir_text =
+        gate2ir::gate_fn_to_xlsynth_ir(&gatify_output.gate_fn, FUNCTION_NAME, &pir_fn.get_type())
+            .expect("gate_fn_to_xlsynth_ir should succeed")
+            .to_string();
     log::info!(
         "gate_fn_to_xlsynth_ir completed in {:?} ({} bytes)",
         gate_ir_start.elapsed(),
@@ -169,8 +165,7 @@ fuzz_target!(|data: &[u8]| {
         .expect("gate package should have a top fn");
 
     let prove_start = Instant::now();
-    let equiv_result =
-        prove_exported_vs_gate_equiv(exported_fn, &exported_pkg, gate_fn, &gate_pkg);
+    let equiv_result = prove_exported_vs_gate_equiv(exported_fn, &exported_pkg, gate_fn, &gate_pkg);
 
     match equiv_result {
         EquivResult::Proved => {}
@@ -186,7 +181,10 @@ fuzz_target!(|data: &[u8]| {
             "in-process formal equivalence failed for generated ext_nary_add IR:\n{ir_text}\nmessage: {msg}"
         ),
     }
-    log::info!("in-process equivalence completed in {:?}", prove_start.elapsed());
+    log::info!(
+        "in-process equivalence completed in {:?}",
+        prove_start.elapsed()
+    );
 });
 
 /// Generates a typed `ext_nary_add` fuzz sample from deterministic entropy

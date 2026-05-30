@@ -9,7 +9,7 @@ use xlsynth_g8r::gatify::ir2gate::{self, GatifyOptions, GatifyOutput};
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser::Parser;
 #[cfg(feature = "has-bitwuzla")]
-use xlsynth_prover::ir_equiv::{IrEquivRequest, IrModule, run_ir_equiv};
+use xlsynth_prover::ir_equiv::{run_ir_equiv, IrEquivRequest, IrModule};
 #[cfg(feature = "has-bitwuzla")]
 use xlsynth_prover::prover::SolverChoice;
 
@@ -24,7 +24,11 @@ fn build_ir_text(sample: &MulConstSample) -> String {
     // Wider cases push the external IR-equivalence checker into multi-second
     // or slower proofs; keep the generic fuzz target responsive.
     let width = usize::from(sample.width).clamp(1, 12);
-    let modulus = if width == 16 { 1u64 << 16 } else { 1u64 << width };
+    let modulus = if width == 16 {
+        1u64 << 16
+    } else {
+        1u64 << width
+    };
     let constant = u64::from(sample.constant) % modulus;
     let umul = if sample.literal_on_lhs {
         "umul(c, x, id=3)"
@@ -92,11 +96,8 @@ fuzz_target!(|sample: MulConstSample| {
     let pir_fn = pkg.get_top_fn().expect("top fn");
     let fn_type = pir_fn.get_type();
 
-    let gatify_output = ir2gate::gatify(
-        pir_fn,
-        GatifyOptions::all_opts_disabled(),
-    )
-    .expect("gatify with built-in mul-by-const lowering");
+    let gatify_output = ir2gate::gatify(pir_fn, GatifyOptions::all_opts_disabled())
+        .expect("gatify with built-in mul-by-const lowering");
 
     prove_orig_vs_gate_equiv(&ir_text, pir_fn.name.as_str(), &fn_type, &gatify_output);
 });

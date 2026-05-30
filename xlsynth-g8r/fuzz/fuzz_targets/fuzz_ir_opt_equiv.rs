@@ -3,16 +3,18 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::check_equivalence;
-use xlsynth_pir::ir_fuzz::{FuzzSample, generate_ir_fn};
 use xlsynth_pir::ir_parser;
+use xlsynth_pir::ir_random::{
+    generate_fn, DepletableBytes, OperationSet, RandomFnOptions, RandomOperation, StopPolicy,
+};
+use xlsynth_prover::prover::ir_equiv::{prove_ir_fn_equiv, prove_ir_fn_equiv_output_bits_parallel};
+use xlsynth_prover::prover::types::{AssertionSemantics, EquivResult, ProverFn};
 #[cfg(feature = "has-bitwuzla")]
 use xlsynth_prover::solver::bitwuzla::{Bitwuzla, BitwuzlaOptions};
 #[cfg(feature = "has-boolector")]
 use xlsynth_prover::solver::boolector::{Boolector, BoolectorConfig};
 #[cfg(feature = "has-easy-smt")]
 use xlsynth_prover::solver::easy_smt::{EasySmtConfig, EasySmtSolver};
-use xlsynth_prover::prover::ir_equiv::{prove_ir_fn_equiv, prove_ir_fn_equiv_output_bits_parallel};
-use xlsynth_prover::prover::types::{AssertionSemantics, EquivResult, ProverFn};
 
 // Insert helper that checks consistency among the external tool, a primary
 // solver result, and an optional per-bit parallel solver result.
@@ -56,29 +58,49 @@ fn validate_equiv_result(
     }
 }
 
-fuzz_target!(|sample: FuzzSample| {
+fuzz_target!(|data: &[u8]| {
     // Ensure XLSYNTH_TOOLS is set for equivalence checking
     if std::env::var("XLSYNTH_TOOLS").is_err() {
         panic!("XLSYNTH_TOOLS environment variable must be set for fuzzing.");
     }
 
-    if sample.ops.is_empty() {
-        return;
-    }
-
     let _ = env_logger::builder().is_test(true).try_init();
 
-    // Build an XLS IR package from the fuzz sample
-    let mut pkg = xlsynth::IrPackage::new("fuzz_pkg").unwrap();
-    if let Err(e) = generate_ir_fn(sample.ops.clone(), &mut pkg, None) {
-        log::info!("IR generation failed: {}", e);
-        return;
-    }
-
-    let top_fn = pkg.get_function("fuzz_test").unwrap();
+    // Construct valid PIR directly, then load it through libxls because this
+    // target exercises the XLS optimizer.
+    let operations = OperationSet::new(OperationSet::all_supported().iter().filter(|operation| {
+        !matches!(
+            operation,
+            RandomOperation::Umulp
+                | RandomOperation::Smulp
+                | RandomOperation::ExtCarryOut
+                | RandomOperation::ExtPrioEncode
+                | RandomOperation::ExtClz
+                | RandomOperation::ExtNormalizeLeft
+                | RandomOperation::ExtMaskLow
+                | RandomOperation::ExtNaryAdd
+        )
+    }));
+    let options = RandomFnOptions {
+        allow_arbitrary_width_multiply: true,
+        allow_gate: true,
+        enabled_operations: operations,
+        ..RandomFnOptions::default()
+    };
+    let mut entropy = DepletableBytes::new(data);
+    let generated = generate_fn(
+        &mut entropy,
+        &options,
+        StopPolicy::WhenEntropyDepleted,
+    )
+    .expect("fixed random PIR options should construct a valid function");
+    let orig_ir = generated.into_top_package("fuzz_pkg").to_string();
+    let pkg = xlsynth::IrPackage::parse_ir(&orig_ir, None)
+        .expect("PIR-emitted standard XLS IR should parse in libxls");
+    let top_fn_name = "random_fn";
 
     // Optimize the IR
-    let optimized_pkg = match xlsynth::optimize_ir(&pkg, top_fn.get_name().as_str()) {
+    let optimized_pkg = match xlsynth::optimize_ir(&pkg, top_fn_name) {
         Ok(p) => p,
         Err(e) => {
             log::error!("optimize_ir failed: {}", e);
@@ -87,7 +109,7 @@ fuzz_target!(|sample: FuzzSample| {
     };
 
     // Parse both packages using the xlsynth-g8r parser
-    let orig_pkg = ir_parser::Parser::new(&pkg.to_string())
+    let orig_pkg = ir_parser::Parser::new(&orig_ir)
         .parse_and_validate_package()
         .unwrap();
     let opt_pkg = ir_parser::Parser::new(&optimized_pkg.to_string())
@@ -98,9 +120,7 @@ fuzz_target!(|sample: FuzzSample| {
     let opt_fn = opt_pkg.get_top_fn().unwrap();
 
     // Check equivalence using the external tool first, specifying the top function
-    let orig_ir = pkg.to_string();
     let opt_ir = optimized_pkg.to_string();
-    let top_fn_name = "fuzz_test";
     let ext_equiv =
         check_equivalence::check_equivalence_with_top(&orig_ir, &opt_ir, Some(top_fn_name), false);
     #[cfg(feature = "has-bitwuzla")]

@@ -2536,48 +2536,39 @@ pub fn generate_ir_fn_corpus_from_ir_path_with_replay(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arbitrary::{Arbitrary, Unstructured};
-    use rand::{RngCore, SeedableRng};
+    use rand::SeedableRng;
     use xlsynth::IrValue;
     use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
-    use xlsynth_pir::ir_fuzz::{FuzzSample, generate_ir_fn};
     use xlsynth_pir::ir_parser::Parser;
+    use xlsynth_pir::ir_random::{
+        OperationSet, RandomFnOptions, RandomOperation, RngEntropy, StopPolicy, generate_fn,
+    };
 
     fn find_fuzz_generated_ir_for_interp_parity(seed: u64) -> (String, String) {
-        let mut rng = StdRng::seed_from_u64(seed);
+        let operations =
+            OperationSet::new(OperationSet::all_supported().iter().filter(|operation| {
+                !matches!(operation, RandomOperation::Umulp | RandomOperation::Smulp)
+            }));
+        let options = RandomFnOptions {
+            max_nodes: 40,
+            enabled_operations: operations,
+            ..RandomFnOptions::default()
+        };
+        let mut entropy = RngEntropy::new(StdRng::seed_from_u64(seed));
         for attempt in 0..256usize {
-            let mut bytes = vec![0u8; 512];
-            rng.fill_bytes(&mut bytes);
-            let mut u = Unstructured::new(&bytes);
-            let Ok(sample) = FuzzSample::arbitrary(&mut u) else {
-                continue;
-            };
-            if sample.ops.is_empty() {
-                continue;
-            }
-
-            let mut pkg = match xlsynth::IrPackage::new(&format!("autocov_fuzz_pkg_{attempt}")) {
-                Ok(pkg) => pkg,
-                Err(_) => continue,
-            };
-            let Ok(_xls_f) = generate_ir_fn(sample.ops.clone(), &mut pkg, None) else {
-                continue;
-            };
+            let generated = generate_fn(&mut entropy, &options, StopPolicy::ExactBodyNodes(32))
+                .expect("fixed random PIR options should generate a valid function");
+            let pkg = generated.into_top_package(format!("autocov_fuzz_pkg_{attempt}"));
             let ir_text = pkg.to_string();
-
-            let mut parser = Parser::new(&ir_text);
-            let Ok(parsed_pkg) = parser.parse_and_validate_package() else {
-                continue;
-            };
-            let Some(pir_f) = parsed_pkg.get_fn("fuzz_test") else {
-                continue;
-            };
+            let pir_f = pkg
+                .get_top_fn()
+                .expect("generated package should have a top function");
             if pir_f.params.is_empty() {
                 continue;
             }
-            return (ir_text, "fuzz_test".to_string());
+            return (ir_text, pir_f.name.clone());
         }
-        panic!("failed to find a seeded fuzz sample that builds a non-nullary function");
+        panic!("failed to generate a seeded non-nullary PIR function");
     }
 
     fn assert_autocov_corpus_matches_xlsynth_and_pir_interpreters(

@@ -6,7 +6,7 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::aig::dynamic_structural_hash::{DynamicStructuralHash, EdgeRef};
 use xlsynth_g8r::aig::{AigNode, AigOperand, AigRef};
-use xlsynth_g8r_fuzz::{FuzzGraph, build_graph};
+use xlsynth_g8r_fuzz::{build_graph, FuzzGraph};
 
 const MAX_STEPS: usize = 128;
 

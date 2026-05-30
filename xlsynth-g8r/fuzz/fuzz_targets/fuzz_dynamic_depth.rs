@@ -7,7 +7,7 @@ use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::aig::dynamic_depth::DynamicDepthState;
 use xlsynth_g8r::aig::dynamic_structural_hash::{DynamicStructuralHash, EdgeRef};
 use xlsynth_g8r::aig::{AigNode, AigOperand, AigRef};
-use xlsynth_g8r_fuzz::{FuzzGraph, build_graph};
+use xlsynth_g8r_fuzz::{build_graph, FuzzGraph};
 
 const MAX_STEPS: usize = 128;
 
@@ -185,8 +185,7 @@ fuzz_target!(|sample: EditSample| {
                 replacement_neg,
             } => {
                 let and_nodes = hash.live_and_nodes();
-                let Some(replacement) =
-                    indexed_operand(&live_nodes, replacement, replacement_neg)
+                let Some(replacement) = indexed_operand(&live_nodes, replacement, replacement_neg)
                 else {
                     continue;
                 };

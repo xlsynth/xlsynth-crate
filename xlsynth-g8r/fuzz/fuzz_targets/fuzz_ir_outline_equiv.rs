@@ -5,19 +5,18 @@ use libfuzzer_sys::fuzz_target;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use xlsynth_prover::prover::ir_equiv::prove_ir_fn_equiv;
+use xlsynth_prover::prover::types::{AssertionSemantics, EquivResult, ProverFn as EqProverFn};
 #[cfg(any(feature = "with-bitwuzla-system", feature = "with-bitwuzla-built"))]
 use xlsynth_prover::solver::bitwuzla::{Bitwuzla, BitwuzlaOptions};
 #[cfg(any(feature = "with-boolector-system", feature = "with-boolector-built"))]
 use xlsynth_prover::solver::boolector::{Boolector, BoolectorConfig};
 #[cfg(feature = "has-easy-smt")]
 use xlsynth_prover::solver::easy_smt::{EasySmtConfig, EasySmtSolver};
-use xlsynth_prover::prover::ir_equiv::prove_ir_fn_equiv;
-use xlsynth_prover::prover::types::{AssertionSemantics, EquivResult, ProverFn as EqProverFn};
 
+use xlsynth_g8r_fuzz::generate_upstream_formal_random_pir_package;
 use xlsynth_pir::ir::{Fn as IrFn, NodeRef, PackageMember};
-use xlsynth_pir::ir_fuzz::{FuzzSample, generate_ir_fn};
-use xlsynth_pir::ir_outline::{OutlineOrdering, compute_default_ordering, outline_with_ordering};
-use xlsynth_pir::ir_parser::Parser;
+use xlsynth_pir::ir_outline::{compute_default_ordering, outline_with_ordering, OutlineOrdering};
 use xlsynth_pir::ir_utils::operands;
 
 fn build_users(f: &IrFn) -> HashMap<usize, Vec<usize>> {
@@ -131,44 +130,15 @@ fn permute_vec_deterministic<T: Clone>(v: &mut Vec<T>, seed: u64) {
     }
 }
 
-fuzz_target!(|sample: FuzzSample| {
+fuzz_target!(|data: &[u8]| {
     let _ = env_logger::builder().is_test(true).try_init();
 
-    // Degenerate fuzz samples are not informative for outlining, skip.
-    if sample.ops.is_empty() {
-        // Early-return: degenerate input (no ops or zero-width inputs)
-        return;
-    }
-
-    // Build an XLS IR package via C++ bindings
-    let mut cpp_pkg = match xlsynth::IrPackage::new("outline_fuzz_pkg") {
-        Ok(p) => p,
-        Err(_) => {
-            // Early-return: infra issue constructing package
-            return;
-        }
-    };
-    if let Err(_e) = generate_ir_fn(sample.ops.clone(), &mut cpp_pkg, None) {
-        // Early-return: generator could not build function with given ops
-        return;
-    }
-
-    // Parse into Rust IR (g8r)
-    let orig_pkg_text = cpp_pkg.to_string();
-    let orig_pkg = match Parser::new(&orig_pkg_text).parse_and_validate_package() {
-        Ok(p) => p,
-        Err(_e) => {
-            // Unexpected: our own pretty-printed text should parse; flag failure.
-            panic!("Rust IR parser failed on C++-emitted package text");
-        }
-    };
+    let orig_pkg = generate_upstream_formal_random_pir_package(data, "outline_fuzz_pkg");
+    let orig_pkg_text = orig_pkg.to_string();
 
     log::info!("orig_pkg_text:\n{}", orig_pkg_text);
 
-    let mut work_pkg = match Parser::new(&orig_pkg_text).parse_and_validate_package() {
-        Ok(p) => p,
-        Err(_e) => panic!("Rust IR parser failed on C++-emitted package text (clone)"),
-    };
+    let mut work_pkg = orig_pkg.clone();
 
     let orig_fn = orig_pkg.get_top_fn().expect("missing top function").clone();
     let n = orig_fn.nodes.len();
@@ -236,8 +206,8 @@ fuzz_target!(|sample: FuzzSample| {
     log::info!("work_pkg_text:\n{}", work_pkg.to_string());
 
     // Prove equivalence: original function == outlined outer function
-    let lhs = EqProverFn::new(&orig_fn, None);
-    let rhs = EqProverFn::new(&res.outer, None);
+    let lhs = EqProverFn::new(&orig_fn, Some(&orig_pkg));
+    let rhs = EqProverFn::new(&res.outer, Some(&work_pkg));
 
     #[cfg(feature = "has-bitwuzla")]
     {

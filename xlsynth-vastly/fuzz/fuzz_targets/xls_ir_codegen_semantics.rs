@@ -8,21 +8,22 @@ use std::collections::BTreeMap;
 use std::sync::Once;
 use std::time::SystemTime;
 
-use arbitrary::Arbitrary;
-use arbitrary::Unstructured;
 use libfuzzer_sys::fuzz_target;
 
-use xlsynth_vastly::LogicBit;
-use xlsynth_vastly::Signedness;
-use xlsynth_vastly::Value4;
-use xlsynth::IrValue;
-use xlsynth::XlsynthError;
-use xlsynth_pir::ir_fuzz::FuzzSampleWithArgs;
-use xlsynth_autocov::{generate_ir_fn_corpus_from_ir_text_with_replay, IrFnAutocovGenerateConfig};
 use vastly_fuzz::codegen_semantics::make_vastly_input_map;
 use vastly_fuzz::codegen_semantics::pack_ir_value_to_value4;
 use vastly_fuzz::codegen_semantics::packed_signature;
 use vastly_fuzz::codegen_semantics::parse_pir_top_fn;
+use xlsynth::IrValue;
+use xlsynth::XlsynthError;
+use xlsynth_autocov::{generate_ir_fn_corpus_from_ir_text_with_replay, IrFnAutocovGenerateConfig};
+use xlsynth_pir::ir_random::{
+    generate_arguments, generate_fn, DepletableBytes, OperationSet, RandomFnOptions,
+    RandomOperation, StopPolicy,
+};
+use xlsynth_vastly::LogicBit;
+use xlsynth_vastly::Signedness;
+use xlsynth_vastly::Value4;
 
 fuzz_target!(|data: &[u8]| {
     install_panic_context_hook();
@@ -30,30 +31,25 @@ fuzz_target!(|data: &[u8]| {
     maybe_enable_backtrace_on_failure();
     let _panic_ctx_guard = begin_panic_context(data);
 
-    let mut u = Unstructured::new(data);
-    let fuzz_case = match FuzzSampleWithArgs::arbitrary(&mut u) {
-        Ok(v) => v,
-        // Invalid arbitrary payload shape; skip rather than fail this sample.
-        Err(_) => return,
-    };
-
-    let mut package = match xlsynth::IrPackage::new("fuzz_pkg") {
-        Ok(p) => p,
-        // Package construction failures are infrastructure-level, not sample-specific semantics.
-        Err(_) => return,
-    };
-    let f = match xlsynth_pir::ir_fuzz::generate_ir_fn(fuzz_case.sample.ops.clone(), &mut package, None) {
-        Ok(f) => f,
-        // Generator rejects some op sequences; treat those as uninteresting corpus points.
-        Err(_) => return,
-    };
-    let fname = f.get_name();
-    if package.set_top_by_name(&fname).is_err() {
-        // If we cannot mark the generated function as top, we cannot run codegen/eval meaningfully.
-        return;
-    }
-
-    let ir_text = package.to_string();
+    let mut graph_entropy = DepletableBytes::new(data);
+    let generated = generate_fn(
+        &mut graph_entropy,
+        &codegen_random_options(),
+        StopPolicy::WhenEntropyDepleted,
+    )
+    .expect("fixed codegen fuzz options should construct valid PIR");
+    let pir_package = generated.into_top_package("fuzz_pkg");
+    let fname = pir_package
+        .get_top_fn()
+        .expect("generated package should have a top function")
+        .name
+        .clone();
+    let ir_text = pir_package.to_string();
+    let package = xlsynth::IrPackage::parse_ir(&ir_text, None)
+        .expect("PIR-emitted standard IR should parse in libxls");
+    let f = package
+        .get_function(&fname)
+        .expect("libxls package should contain the generated top function");
     set_panic_context_ir(&ir_text);
     // Skip samples that commonly lower via assertion machinery in non-SV
     // codegen or that the optional autocov engine cannot currently evaluate.
@@ -72,7 +68,9 @@ fuzz_target!(|data: &[u8]| {
         // Non-packable signatures are outside this target's current simulation harness.
         None => return,
     };
-    let stimuli = match generate_stimuli(&fuzz_case, &pir_top, &ir_text, data) {
+    let mut arg_entropy = DepletableBytes::new(data);
+    let base_args = generate_arguments(&mut arg_entropy, &pir_top);
+    let stimuli = match generate_stimuli(base_args, &pir_top, &ir_text, data) {
         Ok(v) => v,
         Err(e) => {
             unsupported(
@@ -361,20 +359,20 @@ fuzz_target!(|data: &[u8]| {
                 return;
             }
         };
-        let pipeline_outputs = match eval_pipeline_with_vastly(&pipeline_src, 1, &pipeline_input_vectors)
-        {
-            Ok(v) => v,
-            Err(e) => {
-                unsupported(
-                    "vastly could not compile/eval generated stage1 pipeline",
-                    &ir_text,
-                    Some(&pipeline_src),
-                    Some(&e),
-                    data,
-                );
-                return;
-            }
-        };
+        let pipeline_outputs =
+            match eval_pipeline_with_vastly(&pipeline_src, 1, &pipeline_input_vectors) {
+                Ok(v) => v,
+                Err(e) => {
+                    unsupported(
+                        "vastly could not compile/eval generated stage1 pipeline",
+                        &ir_text,
+                        Some(&pipeline_src),
+                        Some(&e),
+                        data,
+                    );
+                    return;
+                }
+            };
         if pipeline_outputs.len() != expected_outputs.len() {
             maybe_enable_backtrace_on_failure();
             emit_mismatch_context(&ir_text, &pipeline_src);
@@ -425,20 +423,20 @@ fuzz_target!(|data: &[u8]| {
                 return;
             }
         };
-        let pipeline2_outputs = match eval_pipeline_with_vastly(&pipeline2_src, 2, &pipeline_input_vectors)
-        {
-            Ok(v) => v,
-            Err(e) => {
-                unsupported(
-                    "vastly could not compile/eval generated stage2 pipeline",
-                    &ir_text,
-                    Some(&pipeline2_src),
-                    Some(&e),
-                    data,
-                );
-                return;
-            }
-        };
+        let pipeline2_outputs =
+            match eval_pipeline_with_vastly(&pipeline2_src, 2, &pipeline_input_vectors) {
+                Ok(v) => v,
+                Err(e) => {
+                    unsupported(
+                        "vastly could not compile/eval generated stage2 pipeline",
+                        &ir_text,
+                        Some(&pipeline2_src),
+                        Some(&e),
+                        data,
+                    );
+                    return;
+                }
+            };
         if pipeline2_outputs.len() != expected_outputs.len() {
             maybe_enable_backtrace_on_failure();
             emit_mismatch_context(&ir_text, &pipeline2_src);
@@ -511,13 +509,25 @@ fuzz_target!(|data: &[u8]| {
     }
 });
 
+fn codegen_random_options() -> RandomFnOptions {
+    let operations =
+        OperationSet::new(OperationSet::all_supported().iter().filter(|operation| {
+            !matches!(operation, RandomOperation::Umulp | RandomOperation::Smulp)
+        }));
+    RandomFnOptions {
+        max_nodes: 32,
+        max_bit_width: 16,
+        enabled_operations: operations,
+        ..RandomFnOptions::default()
+    }
+}
+
 fn generate_stimuli(
-    fuzz_case: &FuzzSampleWithArgs,
+    base_args: Vec<IrValue>,
     pir_top: &xlsynth_pir::ir::Fn,
     ir_text: &str,
     sample_data: &[u8],
 ) -> Result<Vec<IrValue>, String> {
-    let base_args = fuzz_case.gen_args_for_fn(pir_top);
     let base_tuple = IrValue::make_tuple(&base_args);
     if !use_autocov_stimuli() {
         return Ok(vec![base_tuple]);
@@ -540,7 +550,12 @@ fn generate_stimuli(
             cfg,
         )
     }))
-    .map_err(|panic_payload| format!("autocov panicked: {}", summarize_panic_payload(panic_payload)))??;
+    .map_err(|panic_payload| {
+        format!(
+            "autocov panicked: {}",
+            summarize_panic_payload(panic_payload)
+        )
+    })??;
     if result.corpus.is_empty() {
         return Ok(vec![base_tuple]);
     }
@@ -565,6 +580,7 @@ fn codegen_combo(
 generator: GENERATOR_KIND_COMBINATIONAL\n\
 use_system_verilog: {use_system_verilog}\n\
 module_name: \"{module_name}\"\n\
+array_index_bounds_checking: true\n\
 add_invariant_assertions: false\n\
 codegen_version: 1"
     );
@@ -586,6 +602,7 @@ use_system_verilog: true\n\
 module_name: \"{module_name}\"\n\
 input_valid_signal: \"input_valid\"\n\
 output_valid_signal: \"output_valid\"\n\
+array_index_bounds_checking: true\n\
 flop_inputs: false\n\
 flop_outputs: false\n\
 reset: \"rst\"\n\
@@ -623,7 +640,8 @@ fn eval_codegen_with_vastly(
             return Err(format!("missing expected input `{}`", p.name));
         }
     }
-    let plan = xlsynth_vastly::plan_combo_eval(&m).map_err(|e| format!("plan_combo_eval failed: {e:?}"))?;
+    let plan = xlsynth_vastly::plan_combo_eval(&m)
+        .map_err(|e| format!("plan_combo_eval failed: {e:?}"))?;
     let env = xlsynth_vastly::eval_combo(&m, &plan, inputs)
         .map_err(|e| format!("eval_combo failed: {e:?}"))?;
     let out_port = &m.output_ports[0];
@@ -655,8 +673,8 @@ fn eval_codegen_with_iverilog_verilog(
             .map_err(|e| format!("run_iverilog_combo_and_collect_vcd failed: {e:?}"))?;
         let vcd_text =
             std::fs::read_to_string(&out_vcd_path).map_err(|e| format!("read VCD failed: {e}"))?;
-        let vcd =
-            xlsynth_vastly::Vcd::parse(&vcd_text).map_err(|e| format!("parse VCD failed: {e:?}"))?;
+        let vcd = xlsynth_vastly::Vcd::parse(&vcd_text)
+            .map_err(|e| format!("parse VCD failed: {e:?}"))?;
         extract_output_from_vcd(&vcd, &out_name)
     })();
     let _ = std::fs::remove_dir_all(&td);
@@ -708,8 +726,9 @@ fn eval_pipeline_with_vastly(
     let data_output_name = data_outputs[0].name.clone();
     let stimulus = build_pipeline_stimulus(&m, input_vectors, pipeline_stages)?;
     let initial_state = m.initial_state_x();
-    let cycle_outputs = xlsynth_vastly::run_pipeline_and_collect_outputs(&m, &stimulus, &initial_state)
-        .map_err(|e| format!("run_pipeline_and_collect_outputs failed: {e:?}"))?;
+    let cycle_outputs =
+        xlsynth_vastly::run_pipeline_and_collect_outputs(&m, &stimulus, &initial_state)
+            .map_err(|e| format!("run_pipeline_and_collect_outputs failed: {e:?}"))?;
     let mut retired = Vec::new();
     for cycle_out in cycle_outputs {
         let valid = cycle_out.get(output_valid_name).ok_or_else(|| {

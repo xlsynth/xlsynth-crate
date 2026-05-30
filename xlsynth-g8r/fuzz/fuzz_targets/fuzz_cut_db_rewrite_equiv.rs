@@ -5,11 +5,11 @@ use libfuzzer_sys::fuzz_target;
 
 use std::sync::OnceLock;
 
-use xlsynth_g8r::aig::cut_db_rewrite::{RewriteOptions, rewrite_gatefn_with_cut_db};
+use xlsynth_g8r::aig::cut_db_rewrite::{rewrite_gatefn_with_cut_db, RewriteOptions};
 use xlsynth_g8r::cut_db::loader::CutDb;
 use xlsynth_g8r::prove_gate_fn_equiv_common::{EquivResult, GateFormalBackend};
 use xlsynth_g8r::prove_gate_fn_equiv_sat::prove_gate_fn_equiv_with_backend;
-use xlsynth_g8r_fuzz::{FuzzGraph, build_graph};
+use xlsynth_g8r_fuzz::{build_graph, FuzzGraph};
 
 static CUT_DB_BYTES: &[u8] = include_bytes!("../../data/cut_db_v1.bin");
 static CUT_DB: OnceLock<CutDb> = OnceLock::new();
@@ -24,13 +24,17 @@ fuzz_target!(|graph: FuzzGraph| {
         .try_init();
 
     let Some(orig_g) = build_graph(&graph) else {
-        // Degenerate/unbuildable graph samples are not informative for rewrite soundness.
+        // Degenerate/unbuildable graph samples are not informative for rewrite
+        // soundness.
         return;
     };
 
     let db = CUT_DB.get_or_init(|| {
         CutDb::load_from_reader(CUT_DB_BYTES).unwrap_or_else(|e| {
-            panic!("failed to load vendored cut DB xlsynth-g8r/data/cut_db_v1.bin: {:?}", e)
+            panic!(
+                "failed to load vendored cut DB xlsynth-g8r/data/cut_db_v1.bin: {:?}",
+                e
+            )
         })
     });
 
@@ -47,16 +51,15 @@ fuzz_target!(|graph: FuzzGraph| {
         },
     );
 
-    match prove_gate_fn_equiv_with_backend(
-        &orig_g,
-        &rewritten,
-        GateFormalBackend::Cadical,
-    )
-    .expect("Cadical gate equivalence should run for cut-db rewrites")
+    match prove_gate_fn_equiv_with_backend(&orig_g, &rewritten, GateFormalBackend::Cadical)
+        .expect("Cadical gate equivalence should run for cut-db rewrites")
     {
         EquivResult::Proved => {}
         EquivResult::Disproved(cex) => {
-            panic!("cut-db rewrite broke equivalence; counterexample inputs: {:?}", cex);
+            panic!(
+                "cut-db rewrite broke equivalence; counterexample inputs: {:?}",
+                cex
+            );
         }
     }
 });

@@ -12,7 +12,7 @@ use std::sync::Once;
 
 use xlsynth_g8r::aig::bulk_replace::{bulk_replace, SubstitutionMap};
 use xlsynth_g8r::aig::dce::dce;
-use xlsynth_g8r::aig::{AigBitVector, AigOperand, AigRef, GateFn, GateBuilder, GateBuilderOptions};
+use xlsynth_g8r::aig::{AigBitVector, AigOperand, AigRef, GateBuilder, GateBuilderOptions, GateFn};
 use xlsynth_g8r::aig_sim::gate_sim::{eval, Collect};
 
 use xlsynth_pir::fuzz_utils;
@@ -612,8 +612,8 @@ fuzz_target!(|data: (FuzzGateGraph, FuzzSubstitutions)| {
 
     // 2. No-op rebuild: the original substitution map is expressed in terms of
     //    `gate_fn` node IDs, but `bulk_replace` runs DCE and renumbers nodes in
-    //    `new_fn`. Reapplying that stale map would be invalid, so rebuild
-    //    `new_fn` with an empty map instead and check output shape stability.
+    //    `new_fn`. Reapplying that stale map would be invalid, so rebuild `new_fn`
+    //    with an empty map instead and check output shape stability.
     let no_op_substitutions = SubstitutionMap::new();
     let new_fn2 = bulk_replace(&new_fn, &no_op_substitutions, opts);
     assert_eq!(

@@ -88,14 +88,20 @@ fn hash_payload_attributes(f: &Fn, payload: &NodePayload, hasher: &mut blake3::H
         NodePayload::ArrayUpdate {
             array: _,
             value: _,
-            indices: _,
+            indices,
             assumed_in_bounds,
-        } => update_hash_bool(hasher, *assumed_in_bounds),
+        } => {
+            update_hash_u64(hasher, indices.len() as u64);
+            update_hash_bool(hasher, *assumed_in_bounds);
+        }
         NodePayload::ArrayIndex {
             array: _,
-            indices: _,
+            indices,
             assumed_in_bounds,
-        } => update_hash_bool(hasher, *assumed_in_bounds),
+        } => {
+            update_hash_u64(hasher, indices.len() as u64);
+            update_hash_bool(hasher, *assumed_in_bounds);
+        }
         NodePayload::ArraySlice { width, .. } => update_hash_u64(hasher, *width as u64),
         NodePayload::DynamicBitSlice { width, .. } => update_hash_u64(hasher, *width as u64),
         NodePayload::BitSlice { start, width, .. } => {

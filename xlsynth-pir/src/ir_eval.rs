@@ -515,6 +515,23 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
                     let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
                     IrValue::bool(lhs_bits.sle(&rhs_bits))
                 }
+                ir::Binop::ArrayConcat => {
+                    let lhs_count = lhs_value
+                        .get_element_count()
+                        .expect("array_concat lhs must be an array");
+                    let rhs_count = rhs_value
+                        .get_element_count()
+                        .expect("array_concat rhs must be an array");
+                    let mut elements = Vec::with_capacity(lhs_count + rhs_count);
+                    for index in 0..lhs_count {
+                        elements.push(lhs_value.get_element(index).unwrap());
+                    }
+                    for index in 0..rhs_count {
+                        elements.push(rhs_value.get_element(index).unwrap());
+                    }
+                    IrValue::make_array(&elements)
+                        .expect("array_concat operands must have matching element types")
+                }
                 ir::Binop::Gate => {
                     // XLS `gate`: when predicate is false, returns all-zero value.
                     // Predicate is expected to be bits[1].
@@ -522,13 +539,9 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
                     if pred {
                         rhs_value.clone()
                     } else {
-                        let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
-                        let zeros: Vec<bool> = vec![false; rhs_bits.get_bit_count()];
-                        let out = IrBits::from_lsb_is_0(&zeros);
-                        IrValue::from_bits(&out)
+                        zero_ir_value_for_type(&n.ty)
                     }
                 }
-                _ => panic!("Unsupported binop: {:?}", binop),
             }
         }
         ir::NodePayload::ExtCarryOut { .. } => {
@@ -928,11 +941,10 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
             IrValue::from_bits(&r)
         }
         ir::NodePayload::Nary(op, _) => {
-            let mut iter = operand_values.iter();
-            let first = iter.next().unwrap();
-            let mut acc = first.to_bits().unwrap();
             match op {
                 ir::NaryOp::And => {
+                    let mut iter = operand_values.iter();
+                    let mut acc = iter.next().unwrap().to_bits().unwrap();
                     for operand_value in iter {
                         let bits = operand_value.to_bits().unwrap();
                         acc = acc.and(&bits);
@@ -940,6 +952,8 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
                     IrValue::from_bits(&acc)
                 }
                 ir::NaryOp::Or => {
+                    let mut iter = operand_values.iter();
+                    let mut acc = iter.next().unwrap().to_bits().unwrap();
                     for operand_value in iter {
                         let bits = operand_value.to_bits().unwrap();
                         acc = acc.or(&bits);
@@ -947,6 +961,8 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
                     IrValue::from_bits(&acc)
                 }
                 ir::NaryOp::Xor => {
+                    let mut iter = operand_values.iter();
+                    let mut acc = iter.next().unwrap().to_bits().unwrap();
                     for operand_value in iter {
                         let bits = operand_value.to_bits().unwrap();
                         acc = acc.xor(&bits);
@@ -954,6 +970,8 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
                     IrValue::from_bits(&acc)
                 }
                 ir::NaryOp::Nand => {
+                    let mut iter = operand_values.iter();
+                    let mut acc = iter.next().unwrap().to_bits().unwrap();
                     for operand_value in iter {
                         let bits = operand_value.to_bits().unwrap();
                         acc = acc.and(&bits);
@@ -962,6 +980,8 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
                     IrValue::from_bits(&r)
                 }
                 ir::NaryOp::Nor => {
+                    let mut iter = operand_values.iter();
+                    let mut acc = iter.next().unwrap().to_bits().unwrap();
                     for operand_value in iter {
                         let bits = operand_value.to_bits().unwrap();
                         acc = acc.or(&bits);
@@ -1046,7 +1066,10 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
         ir::NodePayload::Sel {
             ref cases, default, ..
         } => {
-            assert!(!cases.is_empty(), "Sel must have at least one case");
+            assert!(
+                !cases.is_empty() || default.is_some(),
+                "Sel must have a case or a default"
+            );
             let sel_bits: IrBits = operand_values[0].to_bits().unwrap();
             let sel_w = sel_bits.get_bit_count();
             // Default result
@@ -1482,7 +1505,10 @@ fn observe_select_like_node(
             cases,
             default,
         } => {
-            assert!(!cases.is_empty(), "Sel must have at least one case");
+            assert!(
+                !cases.is_empty() || default.is_some(),
+                "Sel must have a case or a default"
+            );
             let sel_bits: IrBits = env
                 .get(selector)
                 .expect("Sel selector must be evaluated")
@@ -2094,20 +2120,13 @@ fn eval_fn_impl<'a>(
         // permitted by semantics but the annotated type narrows (e.g. smul/umul,
         // or decode results). For other nodes we do not coerce.
         let coerced: IrValue = match &node.payload {
-            ir::NodePayload::Binop(binop, _, _)
-                if matches!(
-                    binop,
-                    ir::Binop::Smul | ir::Binop::Umul | ir::Binop::Smulp | ir::Binop::Umulp
-                ) =>
-            {
+            ir::NodePayload::Binop(binop @ (ir::Binop::Smul | ir::Binop::Umul), _, _) => {
                 match (&node.ty, value.to_bits()) {
                     (ir::Type::Bits(expected_w), Ok(bits)) => {
-                        let got_w = bits.get_bit_count();
-                        if got_w > *expected_w {
-                            let sliced = bits.width_slice(0, *expected_w as i64);
-                            IrValue::from_bits(&sliced)
+                        if matches!(binop, ir::Binop::Smul) {
+                            IrValue::from_bits(&eval_sign_resize_bits(&bits, *expected_w))
                         } else {
-                            value.clone()
+                            IrValue::from_bits(&eval_zero_resize_bits(&bits, *expected_w))
                         }
                     }
                     _ => value.clone(),

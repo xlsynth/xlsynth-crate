@@ -3,70 +3,38 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
-use xlsynth_pir::ir_fuzz::{FuzzSampleSameTypedPair, generate_ir_fn};
+use xlsynth_g8r_fuzz::generate_upstream_formal_random_pir_pair;
+use xlsynth_pir::ir;
 use xlsynth_pir::ir_validate::validate_fn;
 use xlsynth_pir::prove_equiv_via_toolchain::{
-    ToolchainEquivResult, prove_ir_fn_equiv_via_toolchain,
+    prove_ir_fn_equiv_via_toolchain, ToolchainEquivResult,
 };
 use xlsynth_pir::simple_rebase::rebase_onto;
-use xlsynth_pir::{ir, ir_parser};
 
 fn max_text_id(f: &ir::Fn) -> usize {
     f.nodes.iter().map(|n| n.text_id).max().unwrap_or(0)
 }
 
-fuzz_target!(|pair: FuzzSampleSameTypedPair| {
+fuzz_target!(|data: &[u8]| {
     // Require toolchain path for equivalence checking; without it this target
     // cannot check the property under test.
     if std::env::var("XLSYNTH_TOOLS").is_err() {
         panic!("XLSYNTH_TOOLS environment variable must be set for fuzzing.");
     }
 
-    // Skip degenerate samples early.
-    if pair.first.ops.is_empty() || pair.second.ops.is_empty() {
-        // Degenerate generator inputs (no ops or zero-width inputs) are not
-        // informative for this property.
-        return;
-    }
-
     let _ = env_logger::builder().is_test(true).try_init();
 
-    // 1) Build orig IR from the first sample
-    let mut pkg_orig = xlsynth::IrPackage::new("fuzz_pkg_orig").unwrap();
-    if let Err(_) = generate_ir_fn(pair.first.ops.clone(), &mut pkg_orig, None) {
-        // Generator can produce temporarily unsupported constructs; not a sample
-        // failure.
-        return;
-    }
+    let (orig, desired) = generate_upstream_formal_random_pir_pair(data);
 
-    // 2) Build desired IR from the second sample
-    let mut pkg_desired = xlsynth::IrPackage::new("fuzz_pkg_desired").unwrap();
-    if let Err(_) = generate_ir_fn(pair.second.ops.clone(), &mut pkg_desired, None) {
-        // Generator can produce temporarily unsupported constructs; not a sample
-        // failure.
-        return;
-    }
-
-    // 3) Parse both packages into Rust IR and obtain tops
-    let orig_pkg = ir_parser::Parser::new(&pkg_orig.to_string())
-        .parse_and_validate_package()
-        .unwrap();
-    let desired_pkg = ir_parser::Parser::new(&pkg_desired.to_string())
-        .parse_and_validate_package()
-        .unwrap();
-    let orig = orig_pkg.get_top_fn().unwrap();
-    let desired = desired_pkg.get_top_fn().unwrap().clone();
-
-    // 4) Precondition: signatures must match; guaranteed by FuzzSampleSameTypedPair
+    // Precondition: signatures must match; guaranteed by constrained generation.
     assert_eq!(
         orig.get_type(),
         desired.get_type(),
-        "FuzzSampleSameTypedPair must produce functions with identical signatures"
+        "paired random PIR generation must produce identical signatures"
     );
 
-    // 5) Rebase desired onto orig and prove semantic equivalence: rebase_onto(orig,
-    //    desired) == desired
-    let mut next_id = max_text_id(orig) + 1;
+    // Rebase desired onto orig and prove semantic equivalence: rebased == desired.
+    let mut next_id = max_text_id(&orig) + 1;
     let rebased: ir::Fn = rebase_onto(&desired, &orig, "rebased", || {
         let id = next_id;
         next_id += 1;

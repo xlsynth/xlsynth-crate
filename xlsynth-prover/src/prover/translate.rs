@@ -121,7 +121,10 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
             max_indexable_elements.min(num_elements)
         }
         let exp: IrTypedBitVec<'ir, S::Term> = match &node.payload {
-            NodePayload::Nil => continue,
+            NodePayload::Nil => IrTypedBitVec {
+                ir_type: &node.ty,
+                bitvec: BitVec::ZeroWidth,
+            },
             NodePayload::GetParam(pid) => {
                 let p = inputs.params().iter().find(|p| p.id == *pid).unwrap();
                 if let Some(sym) = inputs.inputs.get(&p.name) {

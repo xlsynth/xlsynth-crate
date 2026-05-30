@@ -91,9 +91,15 @@ pub trait Solver: Sized {
         self.from_raw_str(width, &s)
     }
     fn zero(&mut self, width: usize) -> BitVec<Self::Term> {
+        if width == 0 {
+            return BitVec::ZeroWidth;
+        }
         self.numerical(width, 0)
     }
     fn one(&mut self, width: usize) -> BitVec<Self::Term> {
+        if width == 0 {
+            return BitVec::ZeroWidth;
+        }
         self.numerical(width, 1)
     }
     fn all_ones(&mut self, width: usize) -> BitVec<Self::Term> {
@@ -284,6 +290,9 @@ pub trait Solver: Sized {
         self.eq(bit_vec, &signed_min_value)
     }
     fn concat_many(&mut self, bvs: Vec<&BitVec<Self::Term>>) -> BitVec<Self::Term> {
+        if bvs.is_empty() {
+            return BitVec::ZeroWidth;
+        }
         reduce_many(self, bvs, Self::concat)
     }
     fn and_many(&mut self, bvs: Vec<&BitVec<Self::Term>>) -> BitVec<Self::Term> {
@@ -1980,6 +1989,20 @@ macro_rules! test_solver {
                 12,
                 0x123
             );
+            #[test]
+            fn test_concat_many_empty_is_zero_width() {
+                let mut solver = $solver;
+                assert!(matches!(
+                    solver.concat_many(Vec::new()),
+                    crate::solver::BitVec::ZeroWidth
+                ));
+            }
+            #[test]
+            fn test_zero_width_constants_are_zero_width() {
+                let mut solver = $solver;
+                assert!(matches!(solver.zero(0), crate::solver::BitVec::ZeroWidth));
+                assert!(matches!(solver.one(0), crate::solver::BitVec::ZeroWidth));
+            }
             crate::test_solver_many!(
                 test_and_many,
                 $solver,
