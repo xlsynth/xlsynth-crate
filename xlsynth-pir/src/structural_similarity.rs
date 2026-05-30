@@ -63,6 +63,7 @@ pub fn collect_structural_entries(f: &Fn) -> (Vec<StructuralEntry<FwdHash>>, Vec
             NodePayload::GetParam(_) => {}
             NodePayload::Tuple(elems)
             | NodePayload::Array(elems)
+            | NodePayload::ArrayConcat(elems)
             | NodePayload::AfterAll(elems)
             | NodePayload::Nary(_, elems) => {
                 for r in elems.iter() {

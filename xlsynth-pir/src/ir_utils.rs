@@ -35,9 +35,9 @@ pub fn is_structural_payload(payload: &NodePayload) -> bool {
         NodePayload::Literal(_) => true,
         NodePayload::Tuple(_) => true,
         NodePayload::Array(_) => true,
+        NodePayload::ArrayConcat(_) => true,
         NodePayload::ArraySlice { .. } => true,
         NodePayload::TupleIndex { .. } => true,
-        NodePayload::Binop(crate::ir::Binop::ArrayConcat, _, _) => true,
         NodePayload::Unop(op, _) => {
             matches!(op, crate::ir::Unop::Identity | crate::ir::Unop::Reverse)
         }
@@ -212,6 +212,7 @@ pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
         GetParam(_) => vec![],
         Tuple(elems) => elems.clone(),
         Array(elems) => elems.clone(),
+        ArrayConcat(elems) => elems.clone(),
         ArraySlice {
             array,
             start,
@@ -914,6 +915,13 @@ where
                 .collect(),
         ),
         NodePayload::Array(elems) => NodePayload::Array(
+            elems
+                .iter()
+                .enumerate()
+                .map(|(i, r)| map((i, *r)))
+                .collect(),
+        ),
+        NodePayload::ArrayConcat(elems) => NodePayload::ArrayConcat(
             elems
                 .iter()
                 .enumerate()

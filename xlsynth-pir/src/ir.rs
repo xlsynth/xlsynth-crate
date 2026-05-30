@@ -167,7 +167,6 @@ pub enum Binop {
     Shrl,
     Shra,
 
-    ArrayConcat,
     Smulp,
     Umulp,
 
@@ -203,7 +202,6 @@ pub fn operator_to_binop(operator: &str) -> Option<Binop> {
         "shrl" => Some(Binop::Shrl),
         "shra" => Some(Binop::Shra),
 
-        "array_concat" => Some(Binop::ArrayConcat),
         "smulp" => Some(Binop::Smulp),
         "umulp" => Some(Binop::Umulp),
         "umod" => Some(Binop::Umod),
@@ -241,7 +239,6 @@ pub fn binop_to_operator(binop: Binop) -> &'static str {
         Binop::Shll => "shll",
         Binop::Shrl => "shrl",
         Binop::Shra => "shra",
-        Binop::ArrayConcat => "array_concat",
         Binop::Smulp => "smulp",
         Binop::Umulp => "umulp",
         Binop::Eq => "eq",
@@ -386,6 +383,8 @@ pub enum NodePayload {
     GetParam(ParamId),
     Tuple(Vec<NodeRef>),
     Array(Vec<NodeRef>),
+    /// Concatenates one or more same-element-typed arrays.
+    ArrayConcat(Vec<NodeRef>),
     /// array_slice(array, start, width=<width>) -> Array
     /// Returns a slice of the input array consisting of `width` consecutive
     /// elements starting at `start`. If any selected index is out-of-bounds,
@@ -602,6 +601,7 @@ impl NodePayload {
             NodePayload::GetParam(_) => "get_param",
             NodePayload::Tuple(_) => "tuple",
             NodePayload::Array(_) => "array",
+            NodePayload::ArrayConcat(_) => "array_concat",
             NodePayload::ArraySlice { .. } => "array_slice",
             NodePayload::TupleIndex { .. } => "tuple_index",
             NodePayload::Binop(op, _, _) => binop_to_operator(*op),
@@ -646,6 +646,7 @@ impl NodePayload {
             NodePayload::GetParam(_) => Ok(()),
             NodePayload::Tuple(_) => Ok(()),
             NodePayload::Array(_) => Ok(()),
+            NodePayload::ArrayConcat(_) => Ok(()),
             NodePayload::TupleIndex { tuple, index } => {
                 if tuple.index >= f.nodes.len() {
                     return Err(format!(
@@ -728,6 +729,7 @@ impl NodePayload {
         let result = match self {
             NodePayload::Tuple(nodes) => format_operands(nodes),
             NodePayload::Array(nodes) => format_operands(nodes),
+            NodePayload::ArrayConcat(nodes) => format_operands(nodes),
             NodePayload::ArraySlice {
                 array,
                 start,
@@ -1281,7 +1283,7 @@ impl Fn {
             let is_used = self.nodes.iter().any(|n| {
                 use ir::NodePayload::*;
                 match &n.payload {
-                    Tuple(nodes) | Array(nodes) => nodes.contains(&node_ref),
+                    Tuple(nodes) | Array(nodes) | ArrayConcat(nodes) => nodes.contains(&node_ref),
                     ArraySlice { array, start, .. } => array == &node_ref || start == &node_ref,
                     TupleIndex { tuple, .. } => tuple == &node_ref,
                     Binop(_, a, b) => a == &node_ref || b == &node_ref,

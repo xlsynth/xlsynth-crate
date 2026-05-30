@@ -102,6 +102,14 @@ fn compute_node_signature(f: &Fn, node: &Node) -> Option<NodeSignature> {
                 operands: operand_names,
             })
         }
+        NodePayload::ArrayConcat(operand_refs) => Some(NodeSignature::WithOperands {
+            op: "array_concat".to_string(),
+            ty: format!("{}", node.ty),
+            operands: operand_refs
+                .iter()
+                .map(|nr| extract_operand_name(f.get_node(*nr)))
+                .collect(),
+        }),
         _ => Some(NodeSignature::Simple(format!("{}:{}", op, node.ty))),
     }
 }

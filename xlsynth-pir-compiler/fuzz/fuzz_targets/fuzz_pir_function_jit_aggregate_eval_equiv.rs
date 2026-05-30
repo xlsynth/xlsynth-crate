@@ -20,6 +20,7 @@ fn options() -> RandomFnOptions {
         allow_gate: true,
         allow_extension_ops: true,
         allow_arbitrary_width_multiply: true,
+        allow_empty_case_sel: true,
         enabled_operations: OperationSet::new([
             RandomOperation::Literal,
             RandomOperation::Identity,
@@ -44,6 +45,8 @@ fn options() -> RandomFnOptions {
             RandomOperation::Smod,
             RandomOperation::Umulp,
             RandomOperation::Smulp,
+            RandomOperation::Eq,
+            RandomOperation::Ne,
             RandomOperation::Ugt,
             RandomOperation::Uge,
             RandomOperation::Ult,

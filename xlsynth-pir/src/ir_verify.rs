@@ -40,6 +40,7 @@ pub fn verify_fn_operand_indices_in_bounds(f: &Fn) -> Result<(), String> {
             NodePayload::Nil | NodePayload::GetParam(_) | NodePayload::Literal(_) => {}
             NodePayload::Tuple(nodes)
             | NodePayload::Array(nodes)
+            | NodePayload::ArrayConcat(nodes)
             | NodePayload::AfterAll(nodes)
             | NodePayload::Nary(_, nodes) => {
                 for r in nodes.iter() {

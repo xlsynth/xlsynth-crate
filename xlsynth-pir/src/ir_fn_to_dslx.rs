@@ -540,7 +540,6 @@ fn lower_node_payload(
                         lhs_name, lhs_w, rhs_name, out_w
                     ))
                 }
-                Binop::ArrayConcat => Ok(format!("{} ++ {}", lhs_name, rhs_name)),
                 Binop::Umulp => Ok(format!("umulp({}, {})", lhs_name, rhs_name)),
                 Binop::Smulp => {
                     let lhs_w = bits_width(&func.get_node(*lhs).ty)?;
@@ -576,6 +575,18 @@ fn lower_node_payload(
                 .map(|nr| node_name(node_names, *nr).map(|s| s.to_string()))
                 .collect::<Result<Vec<String>, IrFnToDslxError>>()?;
             array_literal_expr_for_type(&node.ty, &values)
+        }
+        NodePayload::ArrayConcat(elements) => {
+            let values = elements
+                .iter()
+                .map(|nr| node_name(node_names, *nr).map(|s| s.to_string()))
+                .collect::<Result<Vec<String>, IrFnToDslxError>>()?;
+            if values.is_empty() {
+                return Err(IrFnToDslxError::UnsupportedNode(
+                    "array_concat requires at least one operand".to_string(),
+                ));
+            }
+            Ok(values.join(" ++ "))
         }
         NodePayload::ArrayIndex { array, indices, .. } => {
             let array_name = node_name(node_names, *array)?;

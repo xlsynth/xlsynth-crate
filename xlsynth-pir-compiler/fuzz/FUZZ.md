@@ -36,9 +36,10 @@ cargo fuzz run fuzz_pir_function_jit_aggregate_eval_equiv
 
 This target expands the same differential property to native aggregates,
 including multidimensional arrays, nested tuples, aggregate construction and
-indexing, and aggregate-valued gate or selection results. It also exercises
-tuple-valued extension results such as `ext_normalize_left` and XLS
-partial-product multiply tuples.
+indexing, aggregate equality/inequality, aggregate-valued gate or selection
+results, and default-only `sel` nodes. It also exercises tuple-valued
+extension results such as `ext_normalize_left` and XLS partial-product
+multiply tuples.
 
 Main additional failure modes surfaced:
 

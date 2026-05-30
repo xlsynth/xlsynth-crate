@@ -1390,7 +1390,15 @@ fn build_operator_payload(
         .collect::<Result<Vec<NodeRef>, _>>()?;
     let named_args = materialize_named_args(state, &call.named_args)?;
 
-    let payload = if let Some(binop) = ir::operator_to_binop(&call.operator) {
+    let payload = if call.operator == "array_concat" {
+        require_no_named_args(&call.operator, &named_args)?;
+        if positional_refs.is_empty() {
+            return Err(MatchRewriteRuleApplyError::InvalidRewriteTemplate(
+                "array_concat expects at least 1 positional operand".to_string(),
+            ));
+        }
+        NodePayload::ArrayConcat(positional_refs)
+    } else if let Some(binop) = ir::operator_to_binop(&call.operator) {
         require_no_named_args(&call.operator, &named_args)?;
         if positional_refs.len() != 2 {
             return Err(MatchRewriteRuleApplyError::InvalidRewriteTemplate(format!(
@@ -1648,7 +1656,7 @@ fn build_special_payload(
             };
 
             let cases = named_args.require_expr_list("cases")?;
-            if cases.is_empty() {
+            if cases.is_empty() && operator != "sel" {
                 return Err(MatchRewriteRuleApplyError::InvalidRewriteTemplate(format!(
                     "{} requires a non-empty cases=[...] list",
                     operator
@@ -1657,6 +1665,12 @@ fn build_special_payload(
             match operator {
                 "sel" => {
                     named_args.require_no_extra(operator, &["selector", "cases", "default"])?;
+                    if cases.is_empty() && named_args.optional_expr("default").is_none() {
+                        return Err(MatchRewriteRuleApplyError::InvalidRewriteTemplate(
+                            "sel requires a non-empty cases=[...] list or default=<expr>"
+                                .to_string(),
+                        ));
+                    }
                     Ok(NodePayload::Sel {
                         selector,
                         cases,

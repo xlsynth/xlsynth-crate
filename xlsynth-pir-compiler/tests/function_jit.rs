@@ -599,11 +599,20 @@ fn native_array_concat_slice_and_update_match_pir_evaluator() {
     assert_matches_evaluator(
         r#"package test
 
-fn f(lhs: bits[8][2] id=1, rhs: bits[8][2] id=2) -> bits[8][4] {
-  ret joined: bits[8][4] = array_concat(lhs, rhs, id=3)
+fn f(lhs: bits[8][1] id=1, middle: bits[8][2] id=2, rhs: bits[8][1] id=3) -> bits[8][4] {
+  ret joined: bits[8][4] = array_concat(lhs, middle, rhs, id=4)
 }
 "#,
-        &[vec![array(8, &[1, 2]), array(8, &[3, 4])]],
+        &[vec![array(8, &[1]), array(8, &[2, 3]), array(8, &[4])]],
+    );
+    assert_matches_evaluator(
+        r#"package test
+
+fn f(values: bits[8][2] id=1) -> bits[8][2] {
+  ret joined: bits[8][2] = array_concat(values, id=2)
+}
+"#,
+        &[vec![array(8, &[7, 9])]],
     );
     assert_matches_evaluator(
         r#"package test
@@ -672,6 +681,39 @@ fn f(selector: bits[2] id=1, pred: bits[1] id=2, a: bits[8][2] id=3, b: bits[8][
                 array(8, &[16, 32]),
             ],
         ],
+    );
+}
+
+#[test]
+fn aggregate_comparisons_and_default_only_sel_match_pir_evaluator() {
+    assert_matches_evaluator(
+        r#"package test
+
+fn f(lhs: (bits[8], bits[4][2]) id=1, rhs: (bits[8], bits[4][2]) id=2) -> (bits[1], bits[1]) {
+  same: bits[1] = eq(lhs, rhs, id=3)
+  different: bits[1] = ne(lhs, rhs, id=4)
+  ret result: (bits[1], bits[1]) = tuple(same, different, id=5)
+}
+"#,
+        &[
+            vec![
+                tuple(&[bits(8, 3), array(4, &[1, 2])]),
+                tuple(&[bits(8, 3), array(4, &[1, 2])]),
+            ],
+            vec![
+                tuple(&[bits(8, 3), array(4, &[1, 2])]),
+                tuple(&[bits(8, 3), array(4, &[1, 4])]),
+            ],
+        ],
+    );
+    assert_matches_evaluator(
+        r#"package test
+
+fn f(selector: bits[2] id=1, fallback: bits[8][2] id=2) -> bits[8][2] {
+  ret result: bits[8][2] = sel(selector, cases=[], default=fallback, id=3)
+}
+"#,
+        &[vec![bits(2, 3), array(8, &[11, 27])]],
     );
 }
 

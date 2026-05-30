@@ -3416,14 +3416,20 @@ fn gatify_node(
             g8_builder.add_tag(gate.node, format!("ne_{}", node.text_id));
             env.add(node_ref, GateOrVec::Gate(gate));
         }
-        ir::NodePayload::Binop(ir::Binop::ArrayConcat, a, b) => {
-            let a_bits = env
-                .get_bit_vector(*a)
-                .expect("array_concat lhs should be present");
-            let b_bits = env
-                .get_bit_vector(*b)
-                .expect("array_concat rhs should be present");
-            let bits = AigBitVector::concat(b_bits, a_bits);
+        ir::NodePayload::ArrayConcat(args) => {
+            let mut args = args.iter();
+            let first = args
+                .next()
+                .expect("array_concat must have at least one operand");
+            let mut bits = env
+                .get_bit_vector(*first)
+                .expect("array_concat operand should be present");
+            for arg in args {
+                let next = env
+                    .get_bit_vector(*arg)
+                    .expect("array_concat operand should be present");
+                bits = AigBitVector::concat(next, bits);
+            }
             assert_eq!(bits.get_bit_count(), node.ty.bit_count());
             for (i, bit) in bits.iter_lsb_to_msb().enumerate() {
                 g8_builder.add_tag(
@@ -4467,21 +4473,22 @@ mod tests {
         let gate_fn = gatify_ir_text(
             r#"package sample
 
-top fn f(lhs: bits[4][2] id=1, rhs: bits[4][3] id=2) -> bits[4][5] {
-  ret joined: bits[4][5] = array_concat(lhs, rhs, id=3)
+top fn f(lhs: bits[4][2] id=1, middle: bits[4][1] id=2, rhs: bits[4][2] id=3) -> bits[4][5] {
+  ret joined: bits[4][5] = array_concat(lhs, middle, rhs, id=4)
 }
 "#,
         );
         let lhs_ty = ir::Type::new_array(ir::Type::Bits(4), 2);
-        let rhs_ty = ir::Type::new_array(ir::Type::Bits(4), 3);
+        let middle_ty = ir::Type::new_array(ir::Type::Bits(4), 1);
+        let rhs_ty = ir::Type::new_array(ir::Type::Bits(4), 2);
         let out_ty = ir::Type::new_array(ir::Type::Bits(4), 5);
         let lhs_value = IrValue::make_array(&[
             IrValue::make_ubits(4, 1).unwrap(),
             IrValue::make_ubits(4, 2).unwrap(),
         ])
         .unwrap();
+        let middle_value = IrValue::make_array(&[IrValue::make_ubits(4, 3).unwrap()]).unwrap();
         let rhs_value = IrValue::make_array(&[
-            IrValue::make_ubits(4, 3).unwrap(),
             IrValue::make_ubits(4, 4).unwrap(),
             IrValue::make_ubits(4, 5).unwrap(),
         ])
@@ -4501,6 +4508,7 @@ top fn f(lhs: bits[4][2] id=1, rhs: bits[4][3] id=2) -> bits[4][5] {
             &gate_fn,
             &[
                 ir_value_to_gate_bits(&lhs_value, &lhs_ty),
+                ir_value_to_gate_bits(&middle_value, &middle_ty),
                 ir_value_to_gate_bits(&rhs_value, &rhs_ty),
             ],
             gate_sim::Collect::None,

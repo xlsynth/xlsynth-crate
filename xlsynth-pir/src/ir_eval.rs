@@ -57,7 +57,7 @@ fn append_operand_values<'a>(
 
     match payload {
         Nil | GetParam(_) | Literal(_) | InstantiationOutput { .. } | RegisterRead { .. } => {}
-        Tuple(elems) | Array(elems) | AfterAll(elems) | Nary(_, elems) => {
+        Tuple(elems) | Array(elems) | ArrayConcat(elems) | AfterAll(elems) | Nary(_, elems) => {
             for elem in elems {
                 push(elem);
             }
@@ -560,23 +560,6 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
                     let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
                     IrValue::bool(lhs_bits.sle(&rhs_bits))
                 }
-                ir::Binop::ArrayConcat => {
-                    let lhs_count = lhs_value
-                        .get_element_count()
-                        .expect("array_concat lhs must be an array");
-                    let rhs_count = rhs_value
-                        .get_element_count()
-                        .expect("array_concat rhs must be an array");
-                    let mut elements = Vec::with_capacity(lhs_count + rhs_count);
-                    for index in 0..lhs_count {
-                        elements.push(lhs_value.get_element(index).unwrap());
-                    }
-                    for index in 0..rhs_count {
-                        elements.push(rhs_value.get_element(index).unwrap());
-                    }
-                    IrValue::make_array(&elements)
-                        .expect("array_concat operands must have matching element types")
-                }
                 ir::Binop::Gate => {
                     // XLS `gate`: when predicate is false, returns all-zero value.
                     // Predicate is expected to be bits[1].
@@ -842,6 +825,19 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
         ir::NodePayload::Array(_) => {
             let values: Vec<IrValue> = operand_values.iter().map(|v| (*v).clone()).collect();
             IrValue::make_array(&values).unwrap()
+        }
+        ir::NodePayload::ArrayConcat(_) => {
+            let mut elements: Vec<IrValue> = Vec::new();
+            for operand_value in operand_values {
+                let count = operand_value
+                    .get_element_count()
+                    .expect("array_concat operand must be an array");
+                for index in 0..count {
+                    elements.push(operand_value.get_element(index).unwrap());
+                }
+            }
+            IrValue::make_array(&elements)
+                .expect("array_concat operands must have matching element types")
         }
         ir::NodePayload::ArraySlice { width, .. } => {
             let arr = operand_values[0].clone();

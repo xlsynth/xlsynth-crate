@@ -280,6 +280,29 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     }
                 }
             }
+            NodePayload::ArrayConcat(args) => {
+                let mut args = args.iter();
+                let first = args
+                    .next()
+                    .expect("array_concat must have at least one operand");
+                let mut bitvec = env
+                    .get(first)
+                    .expect("ArrayConcat operand must be present")
+                    .bitvec
+                    .clone();
+                for arg in args {
+                    let next = &env
+                        .get(arg)
+                        .expect("ArrayConcat operand must be present")
+                        .bitvec;
+                    // Arrays are flattened with element 0 in the low bits.
+                    bitvec = solver.concat(next, &bitvec);
+                }
+                IrTypedBitVec {
+                    ir_type: &node.ty,
+                    bitvec,
+                }
+            }
             NodePayload::Binop(op, lhs, rhs) => {
                 let l = env.get(lhs).unwrap().clone();
                 let r = env.get(rhs).unwrap().clone();
@@ -290,11 +313,6 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     ir::Binop::Shll => solver.xls_shll(&l.bitvec, &r.bitvec),
                     ir::Binop::Shrl => solver.xls_shrl(&l.bitvec, &r.bitvec),
                     ir::Binop::Shra => solver.xls_shra(&l.bitvec, &r.bitvec),
-                    ir::Binop::ArrayConcat => {
-                        // Arrays are flattened with element 0 in the low bits, so the
-                        // right operand occupies the high bits of the concatenated array.
-                        solver.concat(&r.bitvec, &l.bitvec)
-                    }
                     ir::Binop::Eq => solver.eq(&l.bitvec, &r.bitvec),
                     ir::Binop::Ne => solver.ne(&l.bitvec, &r.bitvec),
                     ir::Binop::Uge => solver.uge(&l.bitvec, &r.bitvec),

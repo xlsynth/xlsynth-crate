@@ -852,6 +852,8 @@ fn probabilistic_new_operand_shapes_are_generated() {
             RandomOperation::Concat,
             RandomOperation::Umul,
             RandomOperation::Smul,
+            RandomOperation::Umulp,
+            RandomOperation::Smulp,
             RandomOperation::Eq,
             RandomOperation::Ne,
             RandomOperation::Shll,
@@ -864,6 +866,7 @@ fn probabilistic_new_operand_shapes_are_generated() {
             RandomOperation::DynamicBitSlice,
             RandomOperation::Array,
             RandomOperation::ArrayIndex,
+            RandomOperation::ArrayConcat,
             RandomOperation::ArrayUpdate,
             RandomOperation::Tuple,
             RandomOperation::Sel,
@@ -878,6 +881,7 @@ fn probabilistic_new_operand_shapes_are_generated() {
     let mut saw_three_or_more_nary = false;
     let mut saw_empty_concat = false;
     let mut saw_width_varying_multiply = false;
+    let mut saw_arbitrary_mulp_result_width = false;
     let mut saw_mixed_width_shift = false;
     let mut saw_noop_extension = false;
     let mut saw_zero_extend_from_zero = false;
@@ -890,6 +894,8 @@ fn probabilistic_new_operand_shapes_are_generated() {
     let mut saw_multidimensional_array_op = false;
     let mut saw_zero_width_operation = false;
     let mut saw_select_with_default = false;
+    let mut saw_unary_array_concat = false;
+    let mut saw_three_or_more_array_concat = false;
 
     for sample in 0..1_500 {
         let generated =
@@ -920,6 +926,19 @@ fn probabilistic_new_operand_shapes_are_generated() {
                         != generated.function.get_node(*rhs).ty
                         || node.ty != generated.function.get_node(*lhs).ty;
                 }
+                NodePayload::Binop(Binop::Umulp | Binop::Smulp, lhs, rhs) => {
+                    let (Type::Bits(lhs_width), Type::Bits(rhs_width), Type::Tuple(fields)) = (
+                        &generated.function.get_node(*lhs).ty,
+                        &generated.function.get_node(*rhs).ty,
+                        &node.ty,
+                    ) else {
+                        panic!("mulp has invalid generated types");
+                    };
+                    let Type::Bits(result_width) = fields[0].as_ref() else {
+                        panic!("mulp result field is not bits");
+                    };
+                    saw_arbitrary_mulp_result_width |= *result_width != lhs_width + rhs_width;
+                }
                 NodePayload::Binop(Binop::Shll | Binop::Shrl | Binop::Shra, lhs, rhs) => {
                     saw_mixed_width_shift |= generated.function.get_node(*lhs).ty
                         != generated.function.get_node(*rhs).ty;
@@ -949,6 +968,10 @@ fn probabilistic_new_operand_shapes_are_generated() {
                     saw_zero_index_array_op |= indices.is_empty();
                     saw_multidimensional_array_op |= indices.len() >= 2;
                 }
+                NodePayload::ArrayConcat(operands) => {
+                    saw_unary_array_concat |= operands.len() == 1;
+                    saw_three_or_more_array_concat |= operands.len() >= 3;
+                }
                 NodePayload::BitSlice { width, .. }
                 | NodePayload::DynamicBitSlice { width, .. }
                 | NodePayload::Decode { width, .. } => {
@@ -974,6 +997,7 @@ fn probabilistic_new_operand_shapes_are_generated() {
     assert!(saw_three_or_more_nary);
     assert!(saw_empty_concat);
     assert!(saw_width_varying_multiply);
+    assert!(saw_arbitrary_mulp_result_width);
     assert!(saw_mixed_width_shift);
     assert!(saw_noop_extension);
     assert!(saw_zero_extend_from_zero);
@@ -984,8 +1008,39 @@ fn probabilistic_new_operand_shapes_are_generated() {
     assert!(saw_aggregate_gate);
     assert!(saw_zero_index_array_op);
     assert!(saw_multidimensional_array_op);
+    assert!(saw_unary_array_concat);
+    assert!(saw_three_or_more_array_concat);
     assert!(saw_zero_width_operation);
     assert!(saw_select_with_default);
+}
+
+#[test]
+fn empty_case_sel_generation_is_opt_in_for_pir_consumers() {
+    let options = RandomFnOptions {
+        max_nodes: 32,
+        max_bit_width: 8,
+        allow_arrays: false,
+        allow_tuples: false,
+        allow_empty_case_sel: true,
+        enabled_operations: OperationSet::new([RandomOperation::Literal, RandomOperation::Sel]),
+        ..RandomFnOptions::default()
+    };
+    let mut entropy = RngEntropy::new(Pcg64Mcg::new(0x781e_002c));
+    let mut saw_default_only_sel = false;
+    for _ in 0..200 {
+        let generated =
+            generate_fn(&mut entropy, &options, StopPolicy::ExactBodyNodes(24)).unwrap();
+        validate_generated(&generated.function);
+        saw_default_only_sel |= generated.function.nodes.iter().any(|node| {
+            matches!(
+                &node.payload,
+                NodePayload::Sel { cases, default, .. }
+                    if cases.is_empty() && default.is_some()
+            )
+        });
+    }
+    // XLS evaluates this form, but its text parser currently rejects cases=[].
+    assert!(saw_default_only_sel);
 }
 
 #[test]

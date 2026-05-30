@@ -772,13 +772,10 @@ fn needs_aggregate_destination(node: &ir::Node) -> bool {
             NodePayload::Literal(_)
                 | NodePayload::Array(_)
                 | NodePayload::Tuple(_)
+                | NodePayload::ArrayConcat(_)
                 | NodePayload::ArraySlice { .. }
                 | NodePayload::ArrayUpdate { .. }
-                | NodePayload::Binop(
-                    Binop::ArrayConcat | Binop::Gate | Binop::Umulp | Binop::Smulp,
-                    _,
-                    _,
-                )
+                | NodePayload::Binop(Binop::Gate | Binop::Umulp | Binop::Smulp, _, _,)
                 | NodePayload::Sel { .. }
                 | NodePayload::PrioritySel { .. }
                 | NodePayload::OneHotSel { .. }
@@ -926,7 +923,7 @@ fn lower_function(
                     scalar_layout,
                 )?)
             }
-            NodePayload::Binop(Binop::ArrayConcat, lhs, rhs) => {
+            NodePayload::ArrayConcat(args) => {
                 let destination = materialized_destination(
                     builder,
                     *node_ref,
@@ -935,15 +932,7 @@ fn lower_function(
                     scratch_pointer,
                     scratch_plan,
                 )?;
-                lower_array_concat(
-                    builder,
-                    destination,
-                    computed_value_for(&values, *lhs)?,
-                    computed_value_for(&values, *rhs)?,
-                    &function.get_node(*lhs).ty,
-                    &function.get_node(*rhs).ty,
-                    &layout,
-                )?;
+                lower_array_concat(builder, function, destination, args, &values, &layout)?;
                 ComputedValue::Address(destination)
             }
             NodePayload::Binop(Binop::Gate, predicate, gated) => lower_gate(
@@ -977,6 +966,24 @@ fn lower_function(
                     &layout,
                 )?;
                 ComputedValue::Address(destination)
+            }
+            NodePayload::Binop(op @ (Binop::Eq | Binop::Ne), lhs, rhs)
+                if matches!(function.get_node(*lhs).ty, Type::Array(_) | Type::Tuple(_)) =>
+            {
+                let result_layout = require_scalar_layout(&layout)?;
+                let operand_layout = NativeValueLayout::from_type(&function.get_node(*lhs).ty)?;
+                let equal = lower_value_equality(
+                    builder,
+                    computed_value_for(&values, *lhs)?,
+                    computed_value_for(&values, *rhs)?,
+                    &operand_layout,
+                )?;
+                let compared = if *op == Binop::Eq {
+                    equal
+                } else {
+                    builder.ins().icmp_imm(IntCC::Equal, equal, 0)
+                };
+                ComputedValue::Scalar(mask_value(builder, compared, result_layout))
             }
             NodePayload::Binop(op, lhs, rhs) => {
                 let scalar_layout = require_scalar_layout(&layout)?;
@@ -2175,11 +2182,10 @@ fn lower_tuple_index(
 
 fn lower_array_concat(
     builder: &mut FunctionBuilder<'_>,
+    function: &ir::Fn,
     destination: Value,
-    lhs: ComputedValue,
-    rhs: ComputedValue,
-    lhs_ty: &Type,
-    rhs_ty: &Type,
+    args: &[NodeRef],
+    values: &[Option<ComputedValue>],
     result_layout: &NativeValueLayout,
 ) -> Result<(), JitError> {
     let NativeValueLayout::Array {
@@ -2191,37 +2197,85 @@ fn lower_array_concat(
             "array_concat node did not have array result type".into(),
         ));
     };
-    let Type::Array(lhs_ty) = lhs_ty else {
+    if args.is_empty() {
         return Err(JitError::InvalidFunction(
-            "array_concat lhs did not have array type".into(),
+            "array_concat requires at least one operand".into(),
         ));
-    };
-    let Type::Array(rhs_ty) = rhs_ty else {
-        return Err(JitError::InvalidFunction(
-            "array_concat rhs did not have array type".into(),
-        ));
-    };
-    if lhs_ty.element_count + rhs_ty.element_count != *element_count {
+    }
+    let mut destination_start = 0usize;
+    for arg in args {
+        let Type::Array(arg_ty) = &function.get_node(*arg).ty else {
+            return Err(JitError::InvalidFunction(
+                "array_concat operand did not have array type".into(),
+            ));
+        };
+        copy_array_elements(
+            builder,
+            destination,
+            destination_start,
+            expect_address(computed_value_for(values, *arg)?)?,
+            arg_ty.element_count,
+            element,
+        )?;
+        destination_start += arg_ty.element_count;
+    }
+    if destination_start != *element_count {
         return Err(JitError::InvalidFunction(
             "array_concat result length disagrees with operands".into(),
         ));
     }
-    copy_array_elements(
-        builder,
-        destination,
-        0,
-        expect_address(lhs)?,
-        lhs_ty.element_count,
-        element,
-    )?;
-    copy_array_elements(
-        builder,
-        destination,
-        lhs_ty.element_count,
-        expect_address(rhs)?,
-        rhs_ty.element_count,
-        element,
-    )
+    Ok(())
+}
+
+/// Compares native values recursively without observing tuple padding bytes.
+fn lower_value_equality(
+    builder: &mut FunctionBuilder<'_>,
+    lhs: ComputedValue,
+    rhs: ComputedValue,
+    layout: &NativeValueLayout,
+) -> Result<Value, JitError> {
+    match layout {
+        NativeValueLayout::Scalar(_) => {
+            Ok(builder
+                .ins()
+                .icmp(IntCC::Equal, expect_scalar(lhs)?, expect_scalar(rhs)?))
+        }
+        NativeValueLayout::Array {
+            element,
+            element_count,
+        } => {
+            let lhs = expect_address(lhs)?;
+            let rhs = expect_address(rhs)?;
+            let mut equal = builder.ins().iconst(types::I8, 1);
+            for index in 0..*element_count {
+                let offset = index * element.byte_count();
+                let lhs_pointer = pointer_at_offset(builder, lhs, offset);
+                let rhs_pointer = pointer_at_offset(builder, rhs, offset);
+                let lhs_child = load_value_from_storage(builder, lhs_pointer, element);
+                let rhs_child = load_value_from_storage(builder, rhs_pointer, element);
+                let child_equal = lower_value_equality(builder, lhs_child, rhs_child, element)?;
+                equal = builder.ins().band(equal, child_equal);
+            }
+            Ok(equal)
+        }
+        NativeValueLayout::Tuple { fields, .. } => {
+            let lhs = expect_address(lhs)?;
+            let rhs = expect_address(rhs)?;
+            let mut equal = builder.ins().iconst(types::I8, 1);
+            for field in fields {
+                let lhs_pointer = pointer_at_offset(builder, lhs, field.offset);
+                let rhs_pointer = pointer_at_offset(builder, rhs, field.offset);
+                let lhs_child =
+                    load_value_from_storage(builder, lhs_pointer, field.layout.as_ref());
+                let rhs_child =
+                    load_value_from_storage(builder, rhs_pointer, field.layout.as_ref());
+                let child_equal =
+                    lower_value_equality(builder, lhs_child, rhs_child, field.layout.as_ref())?;
+                equal = builder.ins().band(equal, child_equal);
+            }
+            Ok(equal)
+        }
+    }
 }
 
 fn copy_array_elements(

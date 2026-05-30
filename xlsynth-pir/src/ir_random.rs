@@ -278,9 +278,15 @@ pub struct RandomFnOptions {
     /// concat or a zero-width slice. This is off by default because not every
     /// downstream consumer supports zero-width values yet.
     pub allow_zero_width_bits: bool,
-    /// Permits `umul` and `smul` operands and results to have independently
-    /// selected widths, as XLS allows.
+    /// Permits multiply operands/results, including `mulp` result fields, to
+    /// have independently selected widths, as XLS allows.
     pub allow_arbitrary_width_multiply: bool,
+    /// Permits `sel(selector, cases=[], default=value)`.
+    ///
+    /// XLS evaluates this node form, but its text IR parser currently rejects
+    /// it, so generators whose output is parsed by libxls should leave this
+    /// disabled.
+    pub allow_empty_case_sel: bool,
     /// Permits the XLS `gate` operation when it is included in
     /// `enabled_operations`.
     pub allow_gate: bool,
@@ -305,6 +311,7 @@ impl Default for RandomFnOptions {
             allow_tuples: true,
             allow_zero_width_bits: false,
             allow_arbitrary_width_multiply: false,
+            allow_empty_case_sel: false,
             allow_gate: false,
             allow_extension_ops: false,
             enabled_operations: OperationSet::default(),
@@ -1020,7 +1027,14 @@ impl<'a> FunctionGenerator<'a> {
             | RandomOperation::Decode => !self.bits_types().is_empty(),
             RandomOperation::Eq | RandomOperation::Ne => !self.selectable_types().is_empty(),
             RandomOperation::Umulp | RandomOperation::Smulp => {
-                self.options.allow_tuples && self.has_mulp_pair()
+                self.options.allow_tuples
+                    && self.options.max_type_depth >= 1
+                    && self.options.max_aggregate_leaves >= 2
+                    && if self.options.allow_arbitrary_width_multiply {
+                        !self.bits_types().is_empty()
+                    } else {
+                        self.has_mulp_pair()
+                    }
             }
             RandomOperation::Gate => {
                 self.options.allow_gate
@@ -1039,7 +1053,7 @@ impl<'a> FunctionGenerator<'a> {
                 self.options.allow_arrays && !self.array_index_shapes().is_empty()
             }
             RandomOperation::ArrayConcat => {
-                self.options.allow_arrays && self.has_array_concat_pair()
+                self.options.allow_arrays && !self.array_types().is_empty()
             }
             RandomOperation::ArraySlice => {
                 self.options.allow_arrays
@@ -1223,8 +1237,14 @@ impl<'a> FunctionGenerator<'a> {
                 Ok(self.add_node(Type::Bits(1), NodePayload::Binop(op, lhs, rhs), None))
             }
             RandomOperation::Umulp | RandomOperation::Smulp => {
-                let (lhs_width, lhs, rhs_width, rhs) = self.choose_mulp_pair(source);
-                let product_width = lhs_width + rhs_width;
+                let (lhs, rhs, result_width) = if self.options.allow_arbitrary_width_multiply {
+                    let (_, lhs) = self.choose_bits_ref(source);
+                    let (_, rhs) = self.choose_bits_ref(source);
+                    (lhs, rhs, random_width(source, self.options.max_bit_width))
+                } else {
+                    let (lhs_width, lhs, rhs_width, rhs) = self.choose_mulp_pair(source);
+                    (lhs, rhs, lhs_width + rhs_width)
+                };
                 let op = if operation == RandomOperation::Umulp {
                     Binop::Umulp
                 } else {
@@ -1232,8 +1252,8 @@ impl<'a> FunctionGenerator<'a> {
                 };
                 Ok(self.add_node(
                     Type::Tuple(vec![
-                        Box::new(Type::Bits(product_width)),
-                        Box::new(Type::Bits(product_width)),
+                        Box::new(Type::Bits(result_width)),
+                        Box::new(Type::Bits(result_width)),
                     ]),
                     NodePayload::Binop(op, lhs, rhs),
                     None,
@@ -1368,18 +1388,8 @@ impl<'a> FunctionGenerator<'a> {
                 ))
             }
             RandomOperation::ArrayConcat => {
-                let (lhs_ty, lhs, rhs_ty, rhs) = self.choose_array_concat_pair(source);
-                let (Type::Array(lhs_data), Type::Array(rhs_data)) = (&lhs_ty, &rhs_ty) else {
-                    unreachable!("selected array-concat operands have array types")
-                };
-                Ok(self.add_node(
-                    Type::new_array(
-                        (*lhs_data.element_type).clone(),
-                        lhs_data.element_count + rhs_data.element_count,
-                    ),
-                    NodePayload::Binop(Binop::ArrayConcat, lhs, rhs),
-                    None,
-                ))
+                let (result_ty, operands) = self.choose_array_concat_operands(source);
+                Ok(self.add_node(result_ty, NodePayload::ArrayConcat(operands), None))
             }
             RandomOperation::ArraySlice => {
                 let array_ty = self.choose_array_type(source);
@@ -1466,10 +1476,15 @@ impl<'a> FunctionGenerator<'a> {
                 let case_count = match operation {
                     RandomOperation::Sel => {
                         let complete_case_count = 1usize << selector_width;
-                        if source.take_u64() & 1 == 0 {
-                            complete_case_count
+                        let form_count = if self.options.allow_empty_case_sel {
+                            3
                         } else {
-                            choose_between(source, 1, complete_case_count - 1)
+                            2
+                        };
+                        match source.take_u64() % form_count {
+                            0 => complete_case_count,
+                            1 => choose_between(source, 1, complete_case_count - 1),
+                            _ => 0,
                         }
                     }
                     RandomOperation::PrioritySel | RandomOperation::OneHotSel => selector_width,
@@ -1825,40 +1840,42 @@ impl<'a> FunctionGenerator<'a> {
         max_array_length_for_element(self.options, element_ty)
     }
 
-    fn array_concat_pairs(&self) -> Vec<(Type, Type)> {
-        let arrays = self.array_types();
-        arrays
-            .iter()
-            .flat_map(|lhs| {
-                arrays.iter().filter_map(move |rhs| {
-                    let (Type::Array(lhs_data), Type::Array(rhs_data)) = (lhs, rhs) else {
-                        unreachable!("array type list contains arrays")
-                    };
-                    let count = lhs_data.element_count + rhs_data.element_count;
-                    (lhs_data.element_type == rhs_data.element_type
-                        && count <= self.max_array_length_for_element(&lhs_data.element_type))
-                    .then(|| (lhs.clone(), rhs.clone()))
-                })
-            })
-            .collect()
-    }
-
-    fn has_array_concat_pair(&self) -> bool {
-        !self.array_concat_pairs().is_empty()
-    }
-
-    fn choose_array_concat_pair<S: EntropySource>(
+    fn choose_array_concat_operands<S: EntropySource>(
         &self,
         source: &mut S,
-    ) -> (Type, NodeRef, Type, NodeRef) {
-        let pairs = self.array_concat_pairs();
-        let (lhs_ty, rhs_ty) = pairs[choose_count(source, pairs.len())].clone();
-        (
-            lhs_ty.clone(),
-            self.choose_ref_for_type(source, &lhs_ty),
-            rhs_ty.clone(),
-            self.choose_ref_for_type(source, &rhs_ty),
-        )
+    ) -> (Type, Vec<NodeRef>) {
+        let first_ty = self.choose_array_type(source);
+        let Type::Array(first) = &first_ty else {
+            unreachable!("selected array concat operand is an array")
+        };
+        let element_ty = (*first.element_type).clone();
+        let max_length = self.max_array_length_for_element(&element_ty);
+        let desired_count = choose_between(source, 1, self.options.max_nary_operands);
+        let mut result_count = first.element_count;
+        let mut operands = vec![self.choose_ref_for_type(source, &first_ty)];
+        for _ in 1..desired_count {
+            let candidates: Vec<Type> = self
+                .array_types()
+                .into_iter()
+                .filter(|candidate| {
+                    let Type::Array(array) = candidate else {
+                        unreachable!("array type list contains arrays")
+                    };
+                    array.element_type.as_ref() == &element_ty
+                        && result_count + array.element_count <= max_length
+                })
+                .collect();
+            if candidates.is_empty() {
+                break;
+            }
+            let candidate = &candidates[choose_count(source, candidates.len())];
+            let Type::Array(array) = candidate else {
+                unreachable!("array concat candidate is an array")
+            };
+            result_count += array.element_count;
+            operands.push(self.choose_ref_for_type(source, candidate));
+        }
+        (Type::new_array(element_ty, result_count), operands)
     }
 
     fn indexed_type(ty: &Type, index_count: usize) -> Option<Type> {
