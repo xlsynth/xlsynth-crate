@@ -3109,7 +3109,7 @@ top block blk(x: bits[8], out: bits[8]) {
     }
 
     #[test]
-    fn apply_rejects_empty_sel_cases_list() {
+    fn apply_allows_default_only_sel_cases_list() {
         let ir_text = r#"fn t(p: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
   ret sel.10: bits[8] = sel(p, cases=[x, x], id=10)
 }"#;
@@ -3118,13 +3118,36 @@ top block blk(x: bits[8], out: bits[8]) {
             "sel(selector=p, cases=[], default=x)",
         )
         .unwrap();
+        let outcome = rule
+            .apply_to_fn(&parse_fn(ir_text), RewriteApplyMode::FirstMatch)
+            .unwrap();
+        assert_eq!(
+            outcome.rewritten_fn().to_string(),
+            normalized_fn_text(
+                r#"fn t(p: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  ret sel.10: bits[8] = sel(p, cases=[], default=x, id=10)
+}"#
+            )
+        );
+    }
+
+    #[test]
+    fn apply_rejects_empty_sel_cases_list_without_default() {
+        let ir_text = r#"fn t(p: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  ret sel.10: bits[8] = sel(p, cases=[x, x], id=10)
+}"#;
+        let rule = MatchRewriteRule::from_strings(
+            "sel(selector=p, cases=[x, x])",
+            "sel(selector=p, cases=[])",
+        )
+        .unwrap();
         let err = rule
             .apply_to_fn(&parse_fn(ir_text), RewriteApplyMode::FirstMatch)
             .unwrap_err();
         assert!(matches!(
             err,
             MatchRewriteRuleApplyError::InvalidRewriteTemplate(ref msg)
-                if msg == "sel requires a non-empty cases=[...] list"
+                if msg == "sel requires a non-empty cases=[...] list or default=<expr>"
         ));
     }
 
