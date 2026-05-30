@@ -12408,8 +12408,8 @@ fn test_ir_rewrite_default_none_does_not_match_defaulted_select() {
 
     let ir_text = r#"package test
 
-top fn main(p: bits[1] id=1, x: bits[8] id=2, d: bits[8] id=3) -> (bits[8], bits[8]) {
-  no_default: bits[8] = sel(p, cases=[x, x], id=10)
+top fn main(p: bits[2] id=1, x: bits[8] id=2, d: bits[8] id=3) -> (bits[8], bits[8]) {
+  no_default: bits[8] = sel(p, cases=[x, x, x, x], id=10)
   has_default: bits[8] = sel(p, cases=[x, x], default=d, id=11)
   ret tuple.12: (bits[8], bits[8]) = tuple(no_default, has_default, id=12)
 }
@@ -12422,7 +12422,7 @@ top fn main(p: bits[1] id=1, x: bits[8] id=2, d: bits[8] id=3) -> (bits[8], bits
     let output = Command::new(driver)
         .arg("ir-rewrite")
         .arg(ir_path.to_str().unwrap())
-        .arg("sel(selector=p, cases=[v, v], default=None)")
+        .arg("sel(selector=p, cases=[v, ...], default=None)")
         .arg("v")
         .output()
         .unwrap();
