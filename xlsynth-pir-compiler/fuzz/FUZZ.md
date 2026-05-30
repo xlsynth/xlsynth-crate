@@ -50,3 +50,26 @@ Main additional failure modes surfaced:
 - Incorrect scratch materialization or recursive copying of aggregate values.
 - Incorrect out-of-bounds semantics for native array slice/update/index nodes.
 - Divergent assertion, trace, or cover callback behavior.
+
+Target name: `fuzz_pir_function_compiler_wide_eval_equiv`
+
+Run:
+
+```bash
+cargo fuzz run fuzz_pir_function_compiler_wide_eval_equiv
+```
+
+This target compares the PIR evaluator with native compilation for functions
+whose bitvector leaves may be as wide as `bits[1024]`, including arrays and
+tuples. Width generation is biased toward scalar-sized values while
+periodically sampling the full wide range, so it exercises mixed narrow/wide
+graphs as well as genuinely large values.
+
+Main additional failure modes surfaced:
+
+- Incorrect little-endian `u64` limb storage or high-limb masking.
+- Incorrect direct limb lowering for wide bitwise, comparison, slice, concat,
+  selection, or add-family operations.
+- Incorrect runtime-helper semantics for wide multiply, divide, shifts, or
+  dynamic bit updates.
+- Incorrect recursive layout or copying of aggregates containing wide leaves.

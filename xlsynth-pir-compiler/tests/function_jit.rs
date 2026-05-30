@@ -5,7 +5,7 @@ use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir_compiler::{
     ExecutionContext, JitError, NativeTupleFieldLayout, NativeValueLayout, PirFunctionJit,
-    ScalarLayout,
+    ScalarLayout, WideBitsLayout,
 };
 
 fn compile(ir: &str) -> PirFunctionJit {
@@ -36,6 +36,10 @@ fn assert_matches_evaluator(ir: &str, argument_sets: &[Vec<IrValue>]) {
 
 fn bits(width: usize, value: u64) -> IrValue {
     IrValue::make_ubits(width, value).unwrap()
+}
+
+fn wide_bits(text: &str) -> IrValue {
+    IrValue::parse_typed(text).unwrap()
 }
 
 fn array(width: usize, values: &[u64]) -> IrValue {
@@ -1292,4 +1296,127 @@ fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
         ])
         .expect("execute");
     assert_eq!(result, IrValue::make_ubits(8, 254).unwrap());
+}
+
+#[test]
+fn wide_native_limb_storage_and_direct_lowerings_match_evaluator() {
+    let identity = compile(
+        r#"package test
+
+fn f(x: bits[129] id=1) -> bits[129] {
+  ret value: bits[129] = identity(x, id=2)
+}
+"#,
+    );
+    assert_eq!(
+        identity.result_layout(),
+        &NativeValueLayout::WideBits(WideBitsLayout {
+            bit_count: 129,
+            limb_count: 3,
+        })
+    );
+    let input = [0x0123_4567_89ab_cdefu64, 0xfedc_ba98_7654_3210, 1];
+    let mut output = [0u64; 3];
+    let inputs = [input.as_ptr().cast::<u8>()];
+    // SAFETY: `input` and `output` are three aligned, least-significant-first
+    // u64 limbs, matching the published `bits[129]` native layout.
+    unsafe {
+        identity
+            .run_native(&inputs, output.as_mut_ptr().cast::<u8>())
+            .expect("wide native identity execution");
+    }
+    assert_eq!(output, input);
+
+    assert_matches_evaluator(
+        r#"package test
+
+fn f(x: bits[129] id=1, y: bits[129] id=2, c: bits[1] id=3) -> (bits[129], bits[129], bits[1], bits[128], bits[130], bits[1], bits[130], bits[13]) {
+  inverted: bits[129] = not(x, id=4)
+  sum: bits[129] = add(x, y, id=5)
+  less: bits[1] = ult(x, y, id=6)
+  sliced: bits[128] = bit_slice(sum, start=1, width=128, id=7)
+  joined: bits[130] = concat(c, x, id=8)
+  carry: bits[1] = ext_carry_out(x, y, c, id=9)
+  wide_sum: bits[130] = ext_nary_add(x, y, c, signed=[true, false, false], negated=[false, true, false], arch=ripple_carry, id=10)
+  low_sum: bits[13] = ext_nary_add(x, y, signed=[true, false], negated=[false, true], arch=kogge_stone, id=11)
+  ret result: (bits[129], bits[129], bits[1], bits[128], bits[130], bits[1], bits[130], bits[13]) = tuple(inverted, sum, less, sliced, joined, carry, wide_sum, low_sum, id=12)
+}
+"#,
+        &[
+            vec![
+                wide_bits("bits[129]:0x1_0123_4567_89ab_cdef_fedc_ba98_7654_3210"),
+                wide_bits("bits[129]:0x0_ffff_ffff_ffff_ffff_0000_0000_0000_0001"),
+                bits(1, 1),
+            ],
+            vec![
+                wide_bits("bits[129]:0x1_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff"),
+                wide_bits("bits[129]:0x0_0000_0000_0000_0000_0000_0000_0000_0001"),
+                bits(1, 0),
+            ],
+        ],
+    );
+}
+
+#[test]
+fn wide_runtime_backed_operations_match_evaluator() {
+    assert_matches_evaluator(
+        r#"package test
+
+fn f(x: bits[129] id=1, y: bits[129] id=2, shift: bits[8] id=3, replacement: bits[73] id=4) -> (bits[129], bits[129], bits[129], bits[129], bits[129], bits[96], bits[32], bits[129]) {
+  product: bits[129] = umul(x, y, id=5)
+  signed_product: bits[129] = smul(x, y, id=6)
+  quotient: bits[129] = udiv(x, y, id=7)
+  left: bits[129] = shll(x, shift, id=8)
+  right: bits[129] = shra(x, shift, id=9)
+  slice: bits[96] = dynamic_bit_slice(x, shift, width=96, id=10)
+  low_slice: bits[32] = dynamic_bit_slice(x, shift, width=32, id=11)
+  updated: bits[129] = bit_slice_update(x, shift, replacement, id=12)
+  ret result: (bits[129], bits[129], bits[129], bits[129], bits[129], bits[96], bits[32], bits[129]) = tuple(product, signed_product, quotient, left, right, slice, low_slice, updated, id=13)
+}
+"#,
+        &[
+            vec![
+                wide_bits("bits[129]:0x1_0000_0000_0000_0000_0123_4567_89ab_cdef"),
+                wide_bits("bits[129]:0x0_0000_0000_0000_0000_0000_0000_0000_0003"),
+                bits(8, 63),
+                wide_bits("bits[73]:0x1ab_cdef0_1234_5678"),
+            ],
+            vec![
+                wide_bits("bits[129]:0x1_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff"),
+                wide_bits("bits[129]:0x0"),
+                bits(8, 130),
+                wide_bits("bits[73]:0x100_0000_0000_0001"),
+            ],
+        ],
+    );
+}
+
+#[test]
+fn aggregates_can_contain_wide_native_values() {
+    assert_matches_evaluator(
+        r#"package test
+
+fn f(x: bits[129] id=1, y: bits[129] id=2, choose: bits[1] id=3, index: bits[1] id=4) -> bits[129] {
+  values: bits[129][2] = array(x, y, id=5)
+  pair: (bits[129][2], bits[129]) = tuple(values, x, id=6)
+  restored: bits[129][2] = tuple_index(pair, index=0, id=7)
+  selected: bits[129] = array_index(restored, indices=[index], id=8)
+  ret result: bits[129] = sel(choose, cases=[selected], default=y, id=9)
+}
+"#,
+        &[
+            vec![
+                wide_bits("bits[129]:0x1_0000_0000_0000_0001"),
+                wide_bits("bits[129]:0x0_ffff_ffff_ffff_ffff"),
+                bits(1, 0),
+                bits(1, 1),
+            ],
+            vec![
+                wide_bits("bits[129]:0x1_0000_0000_0000_0001"),
+                wide_bits("bits[129]:0x0_ffff_ffff_ffff_ffff"),
+                bits(1, 1),
+                bits(1, 0),
+            ],
+        ],
+    );
 }

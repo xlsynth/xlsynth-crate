@@ -5,7 +5,8 @@ use std::collections::{BTreeSet, HashSet};
 use rand::RngCore;
 use rand_pcg::Pcg64Mcg;
 use xlsynth_pir::ir::{
-    Binop, FileTable, MemberType, NaryOp, NodePayload, Package, PackageMember, Type, Unop,
+    Binop, ExtNaryAddArchitecture, FileTable, MemberType, NaryOp, NodePayload, Package,
+    PackageMember, Type, Unop,
 };
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_random::{
@@ -705,6 +706,40 @@ fn probabilistic_disabled_aggregate_options_exclude_aggregate_nodes() {
 }
 
 #[test]
+fn probabilistic_wide_widths_are_present_but_sparse() {
+    let options = RandomFnOptions {
+        max_params: 5,
+        max_nodes: 32,
+        max_bit_width: 1024,
+        allow_arrays: false,
+        allow_tuples: false,
+        enabled_operations: OperationSet::new([RandomOperation::Literal]),
+        ..RandomFnOptions::default()
+    };
+    let mut entropy = RngEntropy::new(Pcg64Mcg::new(0xd195_3328));
+    let mut widths = Vec::new();
+    for _ in 0..500 {
+        let generated =
+            generate_fn(&mut entropy, &options, StopPolicy::ExactBodyNodes(24)).unwrap();
+        validate_generated(&generated.function);
+        widths.extend(
+            function_types(&generated.function).filter_map(|ty| match ty {
+                Type::Bits(width) => Some(*width),
+                _ => None,
+            }),
+        );
+    }
+    let wide_count = widths.iter().filter(|width| **width > 64).count();
+    assert!(wide_count > widths.len() / 20, "wide types were too rare");
+    assert!(
+        wide_count < widths.len() / 4,
+        "wide types dominated generation"
+    );
+    assert!(widths.iter().any(|width| *width <= 64));
+    assert!(widths.iter().any(|width| *width >= 900));
+}
+
+#[test]
 fn probabilistic_generation_covers_new_standard_operations_and_gate() {
     let requested = [
         RandomOperation::Reverse,
@@ -1223,6 +1258,81 @@ fn probabilistic_extension_option_covers_all_extension_operations() {
             operation.name()
         );
     }
+}
+
+#[test]
+fn probabilistic_ext_nary_add_covers_term_and_width_forms() {
+    let options = RandomFnOptions {
+        max_params: 5,
+        max_nodes: 64,
+        max_bit_width: 128,
+        max_nary_operands: 5,
+        allow_arrays: false,
+        allow_tuples: false,
+        allow_extension_ops: true,
+        enabled_operations: OperationSet::new([
+            RandomOperation::Literal,
+            RandomOperation::ExtNaryAdd,
+        ]),
+        ..RandomFnOptions::default()
+    };
+    let mut entropy = RngEntropy::new(Pcg64Mcg::new(0xea34_83b7));
+    let mut term_counts = BTreeSet::new();
+    let mut architectures = BTreeSet::new();
+    let mut saw_signed = false;
+    let mut saw_unsigned = false;
+    let mut saw_negated = false;
+    let mut saw_non_negated = false;
+    let mut saw_mixed_term_widths = false;
+    let mut saw_independent_result_width = false;
+    let mut saw_wide_term_narrow_result = false;
+    for _ in 0..1_000 {
+        let generated =
+            generate_fn(&mut entropy, &options, StopPolicy::ExactBodyNodes(48)).unwrap();
+        validate_generated(&generated.function);
+        for node in &generated.function.nodes {
+            let NodePayload::ExtNaryAdd { terms, arch } = &node.payload else {
+                continue;
+            };
+            term_counts.insert(terms.len());
+            architectures.insert(match arch {
+                None => "none",
+                Some(ExtNaryAddArchitecture::RippleCarry) => "ripple",
+                Some(ExtNaryAddArchitecture::KoggeStone) => "kogge_stone",
+                Some(ExtNaryAddArchitecture::BrentKung) => "brent_kung",
+            });
+            saw_signed |= terms.iter().any(|term| term.signed);
+            saw_unsigned |= terms.iter().any(|term| !term.signed);
+            saw_negated |= terms.iter().any(|term| term.negated);
+            saw_non_negated |= terms.iter().any(|term| !term.negated);
+            let term_widths = terms
+                .iter()
+                .map(|term| match &generated.function.get_node(term.operand).ty {
+                    Type::Bits(width) => *width,
+                    _ => unreachable!("ext_nary_add term is bits-typed"),
+                })
+                .collect::<BTreeSet<_>>();
+            saw_mixed_term_widths |= term_widths.len() > 1;
+            let Type::Bits(result_width) = &node.ty else {
+                unreachable!("ext_nary_add result is bits-typed");
+            };
+            saw_independent_result_width |= term_widths.iter().any(|width| width != result_width);
+            saw_wide_term_narrow_result |=
+                *result_width <= 64 && term_widths.iter().any(|width| *width > 64);
+        }
+    }
+    assert_eq!(term_counts, BTreeSet::from([0, 1, 2, 3, 4, 5]));
+    assert_eq!(
+        architectures,
+        BTreeSet::from(["none", "ripple", "kogge_stone", "brent_kung"])
+    );
+    assert!(saw_signed);
+    assert!(saw_unsigned);
+    assert!(saw_negated);
+    assert!(saw_non_negated);
+    assert!(saw_mixed_term_widths);
+    assert!(saw_independent_result_width);
+    assert!(saw_wide_term_narrow_result);
 }
 
 #[test]

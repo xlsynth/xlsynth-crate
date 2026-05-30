@@ -812,15 +812,19 @@ fn choose_between<S: EntropySource>(source: &mut S, minimum: usize, maximum: usi
 }
 
 fn random_width<S: EntropySource>(source: &mut S, max_bit_width: usize) -> usize {
-    let preferred: Vec<usize> = [1, 2, 4, 8, 16, 32, 64, max_bit_width]
-        .into_iter()
-        .filter(|width| *width <= max_bit_width)
-        .collect();
     let choice = source.take_u64();
+    if max_bit_width > 64 && choice & 7 == 7 {
+        return 65 + (((choice >> 3) as usize) % (max_bit_width - 64));
+    }
+    let narrow_max = max_bit_width.min(64);
+    let preferred: Vec<usize> = [1, 2, 4, 8, 16, 32, 64, narrow_max]
+        .into_iter()
+        .filter(|width| *width <= narrow_max)
+        .collect();
     if choice & 1 == 0 {
         preferred[((choice >> 1) as usize) % preferred.len()]
     } else {
-        1 + (((choice >> 1) as usize) % max_bit_width)
+        1 + (((choice >> 1) as usize) % narrow_max)
     }
 }
 
