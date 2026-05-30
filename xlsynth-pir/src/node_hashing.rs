@@ -3,7 +3,7 @@
 //! Helpers for computing structural hashes of XLS IR nodes.
 
 use crate::ir::{self, Fn, NodePayload, NodeRef, ParamId, Type};
-use crate::ir_utils::{get_topological, operands};
+use crate::ir_utils::{get_topological, is_observable_effect_root, operands};
 
 #[derive(Clone, Copy, Eq, PartialEq, Hash, Debug)]
 pub struct FwdHash(pub blake3::Hash);
@@ -33,6 +33,12 @@ fn update_hash_u64(hasher: &mut blake3::Hasher, x: u64) {
 
 fn update_hash_bool(hasher: &mut blake3::Hasher, x: bool) {
     update_hash_u64(hasher, if x { 1 } else { 0 });
+}
+
+fn update_hash_string_attribute(hasher: &mut blake3::Hasher, name: &str, value: &str) {
+    update_hash_str(hasher, name);
+    update_hash_u64(hasher, value.len() as u64);
+    update_hash_str(hasher, value);
 }
 
 fn update_hash_type(hasher: &mut blake3::Hasher, ty: &Type) {
@@ -150,18 +156,13 @@ fn hash_payload_attributes(f: &Fn, payload: &NodePayload, hasher: &mut blake3::H
                 update_hash_str(hasher, &arch.to_string());
             }
         }
-        NodePayload::Assert {
-            token: _,
-            activate: _,
-            message: _,
-            label: _,
-        } => {}
-        NodePayload::Trace {
-            token: _,
-            activated: _,
-            format: _,
-            operands: _,
-        } => {}
+        NodePayload::Assert { message, label, .. } => {
+            update_hash_string_attribute(hasher, "message", message);
+            update_hash_string_attribute(hasher, "label", label);
+        }
+        NodePayload::Trace { format, .. } => {
+            update_hash_string_attribute(hasher, "format", format);
+        }
         NodePayload::InstantiationInput {
             instantiation,
             port_name,
@@ -219,10 +220,9 @@ fn hash_payload_attributes(f: &Fn, payload: &NodePayload, hasher: &mut blake3::H
             update_hash_bool(hasher, default.is_some());
             update_hash_u64(hasher, cases.len() as u64);
         }
-        NodePayload::Cover {
-            predicate: _,
-            label: _,
-        } => {}
+        NodePayload::Cover { label, .. } => {
+            update_hash_string_attribute(hasher, "label", label);
+        }
         NodePayload::Decode { arg: _, width } => update_hash_u64(hasher, *width as u64),
         NodePayload::Encode { arg: _ } => {}
         NodePayload::CountedFor {
@@ -362,6 +362,12 @@ pub fn node_structural_signature_string(f: &Fn, node_ref: NodeRef) -> String {
             attrs.push(format!("has_load_enable={}", load_enable.is_some()));
             attrs.push(format!("has_reset={}", reset.is_some()));
         }
+        NodePayload::Assert { message, label, .. } => {
+            attrs.push(format!("message={message:?}"));
+            attrs.push(format!("label={label:?}"));
+        }
+        NodePayload::Trace { format, .. } => attrs.push(format!("format={format:?}")),
+        NodePayload::AfterAll(nodes) => attrs.push(format!("len={}", nodes.len())),
         NodePayload::PrioritySel { cases, default, .. } => {
             attrs.push(format!("len={}", cases.len()));
             attrs.push(format!("has_default={}", default.is_some()));
@@ -371,6 +377,7 @@ pub fn node_structural_signature_string(f: &Fn, node_ref: NodeRef) -> String {
             attrs.push(format!("len={}", cases.len()));
             attrs.push(format!("has_default={}", default.is_some()));
         }
+        NodePayload::Cover { label, .. } => attrs.push(format!("label={label:?}")),
         NodePayload::CountedFor {
             trip_count,
             stride,
@@ -427,10 +434,20 @@ pub fn compute_node_backward_structural_hash(
     BwdHash(hasher.finalize())
 }
 
-/// Returns true if two functions are structurally isomorphic between the
-/// parameters and the return node. That is, the functions have the same
-/// signature and the return value is equivalent in the CSE (common
-/// subexpression elimination) sense.
+fn observable_effect_hashes(f: &Fn, forward_hashes: &[FwdHash]) -> Vec<FwdHash> {
+    let mut hashes: Vec<FwdHash> = f
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| is_observable_effect_root(&node.payload))
+        .map(|(index, _)| forward_hashes[index])
+        .collect();
+    hashes.sort_by(|lhs, rhs| lhs.as_bytes().cmp(rhs.as_bytes()));
+    hashes
+}
+
+/// Returns true if two functions have structurally equivalent returns and
+/// observable effects. Pure nodes outside those dependency cones are ignored.
 pub fn functions_structurally_equivalent(lhs: &Fn, rhs: &Fn) -> bool {
     if lhs.get_type() != rhs.get_type() {
         return false;
@@ -445,6 +462,7 @@ pub fn functions_structurally_equivalent(lhs: &Fn, rhs: &Fn) -> bool {
     let lhs_fwd = compute_forward_structural_hashes(lhs);
     let rhs_fwd = compute_forward_structural_hashes(rhs);
     lhs_fwd[lhs.ret_node_ref.unwrap().index] == rhs_fwd[rhs.ret_node_ref.unwrap().index]
+        && observable_effect_hashes(lhs, &lhs_fwd) == observable_effect_hashes(rhs, &rhs_fwd)
 }
 
 /// Computes depth-limited forward structural hashes for all nodes in `f`.
@@ -518,18 +536,25 @@ pub fn compute_forward_structural_hashes(f: &Fn) -> Vec<FwdHash> {
 ///
 /// This hash is intentionally based on:
 /// - the return cone structural hash, and
+/// - all observable or conservatively effectful node cones, and
 /// - the function interface (parameter types + return type),
 ///
-/// so textual names / ids do not affect the result.
+/// so textual names / ids do not affect the result while event metadata does.
 pub fn compute_function_structural_hash(f: &Fn) -> FwdHash {
     let mut hasher = blake3::Hasher::new();
-    update_hash_str(&mut hasher, "fn_structural_hash_v1");
+    update_hash_str(&mut hasher, "fn_structural_hash_v2");
 
     let fwd_hashes = compute_forward_structural_hashes(f);
     if let Some(ret_nr) = f.ret_node_ref {
         hasher.update(fwd_hashes[ret_nr.index].as_bytes());
     } else {
         update_hash_str(&mut hasher, "<no_ret_node>");
+    }
+
+    let effect_hashes = observable_effect_hashes(f, &fwd_hashes);
+    update_hash_u64(&mut hasher, effect_hashes.len() as u64);
+    for effect_hash in effect_hashes {
+        hasher.update(effect_hash.as_bytes());
     }
 
     update_hash_u64(&mut hasher, f.params.len() as u64);
@@ -657,5 +682,75 @@ mod tests {
             compute_function_structural_hash(&lhs),
             compute_function_structural_hash(&rhs)
         );
+    }
+
+    #[test]
+    fn function_structural_hash_includes_event_metadata() {
+        let cases = [
+            (
+                r#"package p
+top fn f(tok: token, p: bits[1]) -> token {
+  ret a: token = assert(tok, p, message="left", label="label", id=3)
+}"#,
+                r#"package q
+top fn f(tok: token, p: bits[1]) -> token {
+  ret a: token = assert(tok, p, message="right", label="label", id=3)
+}"#,
+            ),
+            (
+                r#"package p
+top fn f(tok: token, p: bits[1]) -> token {
+  ret t: token = trace(tok, p, format="p={}", data_operands=[p], id=3)
+}"#,
+                r#"package q
+top fn f(tok: token, p: bits[1]) -> token {
+  ret t: token = trace(tok, p, format="other={}", data_operands=[p], id=3)
+}"#,
+            ),
+            (
+                r#"package p
+top fn f(p: bits[1]) -> () {
+  ret c: () = cover(p, label="left", id=2)
+}"#,
+                r#"package q
+top fn f(p: bits[1]) -> () {
+  ret c: () = cover(p, label="right", id=2)
+}"#,
+            ),
+        ];
+
+        for (lhs_text, rhs_text) in cases {
+            let lhs = parse_top_fn(lhs_text);
+            let rhs = parse_top_fn(rhs_text);
+            assert_ne!(
+                compute_function_structural_hash(&lhs),
+                compute_function_structural_hash(&rhs)
+            );
+            assert!(!functions_structurally_equivalent(&lhs, &rhs));
+        }
+    }
+
+    #[test]
+    fn function_structural_hash_includes_effects_outside_return_cone() {
+        let lhs = parse_top_fn(
+            r#"package p
+top fn f(x: bits[1]) -> bits[1] {
+  ret out: bits[1] = identity(x, id=2)
+}"#,
+        );
+        let rhs = parse_top_fn(
+            r#"package q
+top fn f(x: bits[1]) -> bits[1] {
+  tok: token = after_all(id=2)
+  tr: token = trace(tok, x, format="x={}", data_operands=[x], id=3)
+  ret out: bits[1] = identity(x, id=4)
+}"#,
+        );
+
+        assert_ne!(
+            compute_function_structural_hash(&lhs),
+            compute_function_structural_hash(&rhs)
+        );
+        assert!(!functions_structurally_equivalent(&lhs, &rhs));
     }
 }

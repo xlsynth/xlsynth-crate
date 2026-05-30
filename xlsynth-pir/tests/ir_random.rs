@@ -144,7 +144,7 @@ fn assert_type_obeys_options(ty: &Type, options: &RandomFnOptions) {
                 assert_type_obeys_options(field, options);
             }
         }
-        Type::Token => {}
+        Type::Token => assert!(options.allow_events),
     }
 }
 
@@ -1235,12 +1235,17 @@ fn probabilistic_gate_and_extension_options_exclude_disabled_operations() {
         RandomOperation::ExtNormalizeLeft,
         RandomOperation::ExtMaskLow,
         RandomOperation::ExtNaryAdd,
+        RandomOperation::AfterAll,
+        RandomOperation::Cover,
+        RandomOperation::Assert,
+        RandomOperation::Trace,
     ];
     let options = RandomFnOptions {
         max_params: 4,
         max_nodes: 48,
         allow_gate: false,
         allow_extension_ops: false,
+        allow_events: false,
         enabled_operations: OperationSet::new(
             [RandomOperation::Literal].into_iter().chain(prohibited),
         ),
@@ -1258,6 +1263,110 @@ fn probabilistic_gate_and_extension_options_exclude_disabled_operations() {
                     .emitted_operations
                     .contains_key(operation.name())
             );
+        }
+        assert!(function_types(&generated.function).all(|ty| ty != &Type::Token));
+    }
+}
+
+#[test]
+fn probabilistic_event_generation_emits_tokens_effects_and_valid_xls_ir() {
+    let requested = [
+        RandomOperation::AfterAll,
+        RandomOperation::Cover,
+        RandomOperation::Assert,
+        RandomOperation::Trace,
+    ];
+    let options = RandomFnOptions {
+        max_params: 5,
+        max_nodes: 56,
+        max_bit_width: 16,
+        allow_arrays: false,
+        allow_tuples: true,
+        allow_events: true,
+        enabled_operations: OperationSet::new(
+            [RandomOperation::Literal].into_iter().chain(requested),
+        ),
+        ..RandomFnOptions::default()
+    };
+    let mut entropy = RngEntropy::new(Pcg64Mcg::new(0xa55e_12c7));
+    let mut emitted = HashSet::new();
+    let mut live = HashSet::new();
+    let mut saw_token_param = false;
+    let mut saw_token_literal = false;
+    let mut saw_trace_dynamic_operand = false;
+
+    for sample in 0..750 {
+        let generated =
+            generate_fn(&mut entropy, &options, StopPolicy::ExactBodyNodes(48)).unwrap();
+        validate_generated(&generated.function);
+        emitted.extend(generated.stats.emitted_operations.keys().cloned());
+        live.extend(generated.stats.live_operations.keys().cloned());
+        saw_token_param |= generated
+            .function
+            .params
+            .iter()
+            .any(|param| param.ty == Type::Token);
+        for node in &generated.function.nodes {
+            match &node.payload {
+                NodePayload::Literal(_) if node.ty == Type::Token => saw_token_literal = true,
+                NodePayload::Trace {
+                    format, operands, ..
+                } => {
+                    saw_trace_dynamic_operand |= format == "random_trace={}"
+                        && operands.len() == 1
+                        && generated.function.get_node(operands[0]).ty != Type::Token;
+                }
+                _ => {}
+            }
+        }
+        for ty in function_types(&generated.function) {
+            assert_type_obeys_options(ty, &options);
+        }
+        let ir_text = generated
+            .into_top_package(format!("eventful_random_parse_{sample}"))
+            .to_string();
+        xlsynth::IrPackage::parse_ir(&ir_text, None)
+            .unwrap_or_else(|error| panic!("libxls rejected generated PIR:\n{ir_text}\n{error}"));
+    }
+
+    for operation in requested {
+        assert!(
+            emitted.contains(operation.name()),
+            "never emitted {}",
+            operation.name()
+        );
+        assert!(
+            live.contains(operation.name()),
+            "never emitted live {}",
+            operation.name()
+        );
+    }
+    assert!(saw_token_param);
+    assert!(saw_token_literal);
+    assert!(saw_trace_dynamic_operand);
+}
+
+#[test]
+fn probabilistic_cover_requires_tuple_support_even_with_events_enabled() {
+    let options = RandomFnOptions {
+        max_params: 4,
+        max_nodes: 40,
+        max_bit_width: 8,
+        allow_arrays: false,
+        allow_tuples: false,
+        allow_events: true,
+        enabled_operations: OperationSet::new([RandomOperation::Literal, RandomOperation::Cover]),
+        ..RandomFnOptions::default()
+    };
+    let mut entropy = RngEntropy::new(Pcg64Mcg::new(0xc0ee_71e5));
+
+    for _ in 0..1_000 {
+        let generated =
+            generate_fn(&mut entropy, &options, StopPolicy::ExactBodyNodes(32)).unwrap();
+        validate_generated(&generated.function);
+        assert!(!generated.stats.emitted_operations.contains_key("cover"));
+        for ty in function_types(&generated.function) {
+            assert_type_obeys_options(ty, &options);
         }
     }
 }

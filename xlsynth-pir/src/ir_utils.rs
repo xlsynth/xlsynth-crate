@@ -357,6 +357,24 @@ pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
     }
 }
 
+/// Returns whether a function node must be retained even when it does not feed
+/// the returned value.
+///
+/// Calls and loops are conservatively considered observable because deciding
+/// whether their referenced body emits events requires package-level analysis.
+/// Block state and instantiation nodes are intentionally excluded:
+/// reachability of those nodes is determined by block-to-function conversion.
+pub fn is_observable_effect_root(payload: &NodePayload) -> bool {
+    matches!(
+        payload,
+        NodePayload::Assert { .. }
+            | NodePayload::Trace { .. }
+            | NodePayload::Cover { .. }
+            | NodePayload::Invoke { .. }
+            | NodePayload::CountedFor { .. }
+    )
+}
+
 /// Returns a topologically sorted list of node references for the given IR
 /// function.
 ///
