@@ -5,10 +5,14 @@
 use libfuzzer_sys::fuzz_target;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
 use xlsynth_pir::ir_random::{
-    DepletableBytes, OperationSet, RandomFnOptions, RandomOperation, StopPolicy,
-    generate_arguments, generate_fn,
+    DepletableBytes, OperationSet, RandomFnOptions, StopPolicy, generate_arguments, generate_fn,
 };
 use xlsynth_pir_compiler::PirFunctionJit;
+
+fn sorted<T: Ord>(mut values: Vec<T>) -> Vec<T> {
+    values.sort();
+    values
+}
 
 fn options() -> RandomFnOptions {
     RandomFnOptions {
@@ -25,58 +29,8 @@ fn options() -> RandomFnOptions {
         allow_extension_ops: true,
         allow_arbitrary_width_multiply: true,
         allow_empty_case_sel: true,
-        enabled_operations: OperationSet::new([
-            RandomOperation::Literal,
-            RandomOperation::Identity,
-            RandomOperation::Not,
-            RandomOperation::Neg,
-            RandomOperation::Reverse,
-            RandomOperation::OrReduce,
-            RandomOperation::AndReduce,
-            RandomOperation::XorReduce,
-            RandomOperation::And,
-            RandomOperation::Nand,
-            RandomOperation::Nor,
-            RandomOperation::Or,
-            RandomOperation::Xor,
-            RandomOperation::Add,
-            RandomOperation::Sub,
-            RandomOperation::Umul,
-            RandomOperation::Smul,
-            RandomOperation::Udiv,
-            RandomOperation::Sdiv,
-            RandomOperation::Umod,
-            RandomOperation::Smod,
-            RandomOperation::Eq,
-            RandomOperation::Ne,
-            RandomOperation::Ugt,
-            RandomOperation::Uge,
-            RandomOperation::Ult,
-            RandomOperation::Ule,
-            RandomOperation::Sgt,
-            RandomOperation::Sge,
-            RandomOperation::Slt,
-            RandomOperation::Sle,
-            RandomOperation::Shll,
-            RandomOperation::Shrl,
-            RandomOperation::Shra,
-            RandomOperation::Gate,
-            RandomOperation::ZeroExt,
-            RandomOperation::SignExt,
-            RandomOperation::BitSlice,
-            RandomOperation::DynamicBitSlice,
-            RandomOperation::BitSliceUpdate,
-            RandomOperation::Concat,
-            RandomOperation::Array,
-            RandomOperation::ArrayConcat,
-            RandomOperation::Tuple,
-            RandomOperation::TupleIndex,
-            RandomOperation::Sel,
-            RandomOperation::PrioritySel,
-            RandomOperation::OneHotSel,
-            RandomOperation::ExtCarryOut,
-            RandomOperation::ExtNaryAdd,
-        ]),
+        allow_events: true,
+        enabled_operations: OperationSet::all_supported(),
         ..RandomFnOptions::default()
     }
 }
@@ -96,15 +50,112 @@ fuzz_target!(|data: &[u8]| {
     });
     let mut argument_entropy = DepletableBytes::new(data);
     let args = generate_arguments(&mut argument_entropy, function);
-    let expected = match eval_fn(function, &args) {
-        FnEvalResult::Success(success) => success.value,
-        other => panic!("PIR evaluator failed for generated wide IR:\n{ir_text}\n{other:?}"),
-    };
+    let expected = eval_fn(function, &args);
     let actual = compiler
-        .run_ir_values(&args)
+        .run_ir_values_with_events(&args)
         .unwrap_or_else(|error| panic!("native execution failed:\n{ir_text}\n{error}"));
-    assert_eq!(
-        actual, expected,
-        "PIR compiler/evaluator wide mismatch\nIR:\n{ir_text}\nargs={args:?}"
-    );
+    match expected {
+        FnEvalResult::Success(expected) => {
+            assert_eq!(
+                actual.value, expected.value,
+                "PIR compiler/evaluator wide value mismatch\nIR:\n{ir_text}\nargs={args:?}"
+            );
+            assert!(
+                actual.events.assertion_failures.is_empty(),
+                "compiler unexpectedly reported assertions\nIR:\n{ir_text}\nargs={args:?}"
+            );
+            assert_eq!(
+                sorted(
+                    actual
+                        .events
+                        .trace_messages
+                        .iter()
+                        .map(|trace| (trace.message.clone(), trace.verbosity))
+                        .collect()
+                ),
+                sorted(
+                    expected
+                        .trace_messages
+                        .iter()
+                        .map(|trace| (trace.message.clone(), trace.verbosity))
+                        .collect()
+                ),
+                "PIR compiler/evaluator wide trace mismatch\nIR:\n{ir_text}\nargs={args:?}"
+            );
+            assert_eq!(
+                sorted(
+                    actual
+                        .events
+                        .cover_counts
+                        .iter()
+                        .map(|cover| (cover.node_text_id, cover.label.clone(), cover.count))
+                        .collect()
+                ),
+                sorted(
+                    expected
+                        .cover_counts
+                        .iter()
+                        .map(|cover| (cover.node_text_id, cover.label.clone(), cover.count))
+                        .collect()
+                ),
+                "PIR compiler/evaluator wide cover mismatch\nIR:\n{ir_text}\nargs={args:?}"
+            );
+        }
+        FnEvalResult::Failure(expected) => {
+            assert_eq!(
+                sorted(
+                    actual
+                        .events
+                        .assertion_failures
+                        .iter()
+                        .map(|failure| (failure.message.clone(), failure.label.clone()))
+                        .collect()
+                ),
+                sorted(
+                    expected
+                        .assertion_failures
+                        .iter()
+                        .map(|failure| (failure.message.clone(), failure.label.clone()))
+                        .collect()
+                ),
+                "PIR compiler/evaluator wide assertion mismatch\nIR:\n{ir_text}\nargs={args:?}"
+            );
+            assert_eq!(
+                sorted(
+                    actual
+                        .events
+                        .trace_messages
+                        .iter()
+                        .map(|trace| (trace.message.clone(), trace.verbosity))
+                        .collect()
+                ),
+                sorted(
+                    expected
+                        .trace_messages
+                        .iter()
+                        .map(|trace| (trace.message.clone(), trace.verbosity))
+                        .collect()
+                ),
+                "PIR compiler/evaluator wide failing-trace mismatch\nIR:\n{ir_text}\nargs={args:?}"
+            );
+            assert_eq!(
+                sorted(
+                    actual
+                        .events
+                        .cover_counts
+                        .iter()
+                        .map(|cover| (cover.node_text_id, cover.label.clone(), cover.count))
+                        .collect()
+                ),
+                sorted(
+                    expected
+                        .cover_counts
+                        .iter()
+                        .map(|cover| (cover.node_text_id, cover.label.clone(), cover.count))
+                        .collect()
+                ),
+                "PIR compiler/evaluator wide failing-cover mismatch\nIR:\n{ir_text}\nargs={args:?}"
+            );
+        }
+    }
 });

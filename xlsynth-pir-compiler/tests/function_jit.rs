@@ -1392,6 +1392,19 @@ fn f(x: bits[129] id=1, y: bits[129] id=2, shift: bits[8] id=3, replacement: bit
 }
 
 #[test]
+fn wide_input_bit_slice_to_i64_scalar_carrier_matches_evaluator() {
+    assert_matches_evaluator(
+        r#"package test
+
+fn f(x: bits[576] id=1) -> bits[44] {
+  ret bit_slice.2: bits[44] = bit_slice(x, start=319, width=44, id=2)
+}
+"#,
+        &[vec![wide_bits("bits[576]:0x0")]],
+    );
+}
+
+#[test]
 fn aggregates_can_contain_wide_native_values() {
     assert_matches_evaluator(
         r#"package test
@@ -1416,6 +1429,95 @@ fn f(x: bits[129] id=1, y: bits[129] id=2, choose: bits[1] id=3, index: bits[1] 
                 wide_bits("bits[129]:0x0_ffff_ffff_ffff_ffff"),
                 bits(1, 1),
                 bits(1, 0),
+            ],
+        ],
+    );
+}
+
+#[test]
+fn wide_mulp_and_encoding_operations_match_evaluator() {
+    assert_matches_evaluator(
+        r#"package test
+
+fn f(x: bits[129] id=1, y: bits[73] id=2, index: bits[129] id=3) -> ((bits[130], bits[130]), (bits[130], bits[130]), bits[130], bits[8], bits[130]) {
+  unsigned_parts: (bits[130], bits[130]) = umulp(x, y, id=4)
+  signed_parts: (bits[130], bits[130]) = smulp(x, y, id=5)
+  hot: bits[130] = one_hot(x, lsb_prio=true, id=6)
+  encoded: bits[8] = encode(hot, id=7)
+  decoded: bits[130] = decode(index, width=130, id=8)
+  ret result: ((bits[130], bits[130]), (bits[130], bits[130]), bits[130], bits[8], bits[130]) = tuple(unsigned_parts, signed_parts, hot, encoded, decoded, id=9)
+}
+"#,
+        &[
+            vec![
+                wide_bits("bits[129]:0x1_0000_0000_0000_0000_0000_0000_0000_0001"),
+                wide_bits("bits[73]:0x1_0000_0000_0000_0001"),
+                wide_bits("bits[129]:0x40"),
+            ],
+            vec![
+                wide_bits("bits[129]:0x0"),
+                wide_bits("bits[73]:0x1ff_ffff_ffff_ffff_ffff"),
+                wide_bits("bits[129]:0x100"),
+            ],
+        ],
+    );
+}
+
+#[test]
+fn wide_extension_operations_match_evaluator() {
+    assert_matches_evaluator(
+        r#"package test
+
+fn f(x: bits[129] id=1, count: bits[129] id=2) -> (bits[8], bits[130], (bits[160], bits[130]), bits[160]) {
+  priority: bits[8] = ext_prio_encode(x, lsb_prio=false, id=3)
+  zeroes: bits[130] = ext_clz(x, offset=7, new_bit_count=130, id=4)
+  normalized: (bits[160], bits[130]) = ext_normalize_left(x, shift_offset=3, normalized_bit_count=160, clz_bit_count=130, id=5)
+  mask: bits[160] = ext_mask_low(count, id=6)
+  ret result: (bits[8], bits[130], (bits[160], bits[130]), bits[160]) = tuple(priority, zeroes, normalized, mask, id=7)
+}
+"#,
+        &[
+            vec![
+                wide_bits("bits[129]:0x0_0000_0000_0000_0000_0000_0000_0000_0001"),
+                wide_bits("bits[129]:0x50"),
+            ],
+            vec![wide_bits("bits[129]:0x0"), wide_bits("bits[129]:0x200")],
+        ],
+    );
+}
+
+#[test]
+fn wide_array_indices_and_slices_match_evaluator() {
+    assert_matches_evaluator(
+        r#"package test
+
+fn f(a: bits[129][3] id=1, index: bits[129] id=2, replacement: bits[129] id=3) -> (bits[129], bits[129][3], bits[129][2]) {
+  selected: bits[129] = array_index(a, indices=[index], id=4)
+  updated: bits[129][3] = array_update(a, replacement, indices=[index], id=5)
+  sliced: bits[129][2] = array_slice(a, index, width=2, id=6)
+  ret result: (bits[129], bits[129][3], bits[129][2]) = tuple(selected, updated, sliced, id=7)
+}
+"#,
+        &[
+            vec![
+                IrValue::make_array(&[
+                    wide_bits("bits[129]:0x1"),
+                    wide_bits("bits[129]:0x2"),
+                    wide_bits("bits[129]:0x3"),
+                ])
+                .unwrap(),
+                wide_bits("bits[129]:0x1"),
+                wide_bits("bits[129]:0xff"),
+            ],
+            vec![
+                IrValue::make_array(&[
+                    wide_bits("bits[129]:0x1"),
+                    wide_bits("bits[129]:0x2"),
+                    wide_bits("bits[129]:0x3"),
+                ])
+                .unwrap(),
+                wide_bits("bits[129]:0x1_0000_0000_0000_0000"),
+                wide_bits("bits[129]:0xff"),
             ],
         ],
     );

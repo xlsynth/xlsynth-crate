@@ -63,13 +63,17 @@ This target compares the PIR evaluator with native compilation for functions
 whose bitvector leaves may be as wide as `bits[1024]`, including arrays and
 tuples. Width generation is biased toward scalar-sized values while
 periodically sampling the full wide range, so it exercises mixed narrow/wide
-graphs as well as genuinely large values.
+graphs as well as genuinely large values. It also generates token-based
+`after_all`, `cover`, `assert`, and `trace` nodes and compares their observable
+runtime results. The target enables every operation provided by the random PIR
+function generator.
 
 Main additional failure modes surfaced:
 
 - Incorrect little-endian `u64` limb storage or high-limb masking.
 - Incorrect direct limb lowering for wide bitwise, comparison, slice, concat,
   selection, or add-family operations.
-- Incorrect runtime-helper semantics for wide multiply, divide, shifts, or
-  dynamic bit updates.
+- Incorrect runtime-helper semantics for wide multiply, divide, shifts,
+  dynamic bit updates, encoding operations, or extension operations.
 - Incorrect recursive layout or copying of aggregates containing wide leaves.
+- Divergent assertion, trace, or cover callback behavior involving wide data.

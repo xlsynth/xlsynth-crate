@@ -2105,8 +2105,8 @@ impl Parser {
             "ext_prio_encode" => {
                 let arg = self.parse_node_ref(&node_env, "ext_prio_encode arg")?;
                 let mut lsb_prio: Option<bool> = None;
-                while self.peek_is(",") {
-                    self.dropc()?;
+                while self.try_drop(",") {
+                    self.drop_whitespace_and_comments();
                     if self.peek_is("id=") {
                         let id_attr = self.parse_id_attribute()?;
                         maybe_id = Some(id_attr);
