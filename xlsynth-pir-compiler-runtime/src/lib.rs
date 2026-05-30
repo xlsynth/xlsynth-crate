@@ -37,6 +37,10 @@ pub enum TraceValueLayout {
         bit_count: usize,
         byte_count: usize,
     },
+    WideBits {
+        bit_count: usize,
+        limb_count: usize,
+    },
     Array {
         element: Box<TraceValueLayout>,
         element_count: usize,
@@ -46,6 +50,66 @@ pub enum TraceValueLayout {
         byte_count: usize,
     },
     Token,
+}
+
+/// Operation implemented by [`xlsynth_pir_runtime_wide_binop`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum WideBinaryOp {
+    Umul = 0,
+    Smul = 1,
+    Udiv = 2,
+    Sdiv = 3,
+    Umod = 4,
+    Smod = 5,
+    Shll = 6,
+    Shrl = 7,
+    Shra = 8,
+}
+
+impl WideBinaryOp {
+    fn from_abi(value: u32) -> Option<Self> {
+        Some(match value {
+            0 => Self::Umul,
+            1 => Self::Smul,
+            2 => Self::Udiv,
+            3 => Self::Sdiv,
+            4 => Self::Umod,
+            5 => Self::Smod,
+            6 => Self::Shll,
+            7 => Self::Shrl,
+            8 => Self::Shra,
+            _ => return None,
+        })
+    }
+}
+
+/// Operation implemented by [`xlsynth_pir_runtime_wide_unary_op`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum WideUnaryOp {
+    OneHot = 0,
+    Encode = 1,
+    Decode = 2,
+    ExtPrioEncode = 3,
+    ExtClz = 4,
+    ExtNormalizeLeft = 5,
+    ExtMaskLow = 6,
+}
+
+impl WideUnaryOp {
+    fn from_abi(value: u32) -> Option<Self> {
+        Some(match value {
+            0 => Self::OneHot,
+            1 => Self::Encode,
+            2 => Self::Decode,
+            3 => Self::ExtPrioEncode,
+            4 => Self::ExtClz,
+            5 => Self::ExtNormalizeLeft,
+            6 => Self::ExtMaskLow,
+            _ => return None,
+        })
+    }
 }
 
 /// Description of one tuple field supplied as a trace operand.
@@ -301,6 +365,381 @@ pub unsafe extern "C" fn xlsynth_pir_record_trace(
     });
 }
 
+fn bit_mask(bit_count: usize) -> BigUint {
+    if bit_count == 0 {
+        BigUint::from(0u8)
+    } else {
+        (BigUint::from(1u8) << bit_count) - BigUint::from(1u8)
+    }
+}
+
+fn truncate_unsigned(value: BigUint, bit_count: usize) -> BigUint {
+    value & bit_mask(bit_count)
+}
+
+fn as_signed(value: BigUint, bit_count: usize) -> BigInt {
+    if bit_count != 0 && (&value & (BigUint::from(1u8) << (bit_count - 1))) != BigUint::from(0u8) {
+        BigInt::from_biguint(Sign::Plus, value)
+            - BigInt::from_biguint(Sign::Plus, BigUint::from(1u8) << bit_count)
+    } else {
+        BigInt::from_biguint(Sign::Plus, value)
+    }
+}
+
+fn truncate_signed(value: BigInt, bit_count: usize) -> BigUint {
+    if bit_count == 0 {
+        return BigUint::from(0u8);
+    }
+    let modulus = BigInt::from_biguint(Sign::Plus, BigUint::from(1u8) << bit_count);
+    let mut reduced = value % &modulus;
+    if reduced.sign() == Sign::Minus {
+        reduced += &modulus;
+    }
+    let (_, bytes) = reduced.to_bytes_le();
+    BigUint::from_bytes_le(&bytes)
+}
+
+fn bounded_shift_amount(value: &BigUint, bit_count: usize) -> Option<usize> {
+    let digits = value.to_u64_digits();
+    if digits.len() > 1 {
+        return None;
+    }
+    let amount = digits.first().copied().unwrap_or(0);
+    usize::try_from(amount)
+        .ok()
+        .filter(|amount| *amount < bit_count)
+}
+
+/// Reads a fixed-width value from least-significant-first native `u64` limbs.
+///
+/// # Safety
+///
+/// `limbs` must be readable for `bit_count.div_ceil(64)` native `u64` values.
+unsafe fn read_wide_bits(limbs: *const u64, bit_count: usize) -> BigUint {
+    let limb_count = bit_count.div_ceil(64);
+    let mut bytes = Vec::with_capacity(limb_count * std::mem::size_of::<u64>());
+    for index in 0..limb_count {
+        // SAFETY: forwarded from this function's pointer contract.
+        let limb = unsafe { limbs.add(index).read() };
+        bytes.extend_from_slice(&limb.to_le_bytes());
+    }
+    truncate_unsigned(BigUint::from_bytes_le(&bytes), bit_count)
+}
+
+/// Writes a fixed-width value to least-significant-first native `u64` limbs.
+///
+/// # Safety
+///
+/// `limbs` must be writable for `bit_count.div_ceil(64)` native `u64` values.
+unsafe fn write_wide_bits(limbs: *mut u64, bit_count: usize, value: BigUint) {
+    let limb_count = bit_count.div_ceil(64);
+    let bytes = truncate_unsigned(value, bit_count).to_bytes_le();
+    for index in 0..limb_count {
+        let mut limb_bytes = [0u8; std::mem::size_of::<u64>()];
+        let start = index * std::mem::size_of::<u64>();
+        if start < bytes.len() {
+            let end = bytes.len().min(start + std::mem::size_of::<u64>());
+            limb_bytes[..end - start].copy_from_slice(&bytes[start..end]);
+        }
+        // SAFETY: forwarded from this function's pointer contract.
+        unsafe { limbs.add(index).write(u64::from_le_bytes(limb_bytes)) };
+    }
+}
+
+fn get_bit(value: &BigUint, index: usize) -> bool {
+    value
+        .to_u64_digits()
+        .get(index / u64::BITS as usize)
+        .is_some_and(|limb| limb & (1u64 << (index % u64::BITS as usize)) != 0)
+}
+
+fn prioritized_set_bit(value: &BigUint, bit_count: usize, lsb_prio: bool) -> Option<usize> {
+    if lsb_prio {
+        (0..bit_count).find(|index| get_bit(value, *index))
+    } else {
+        (0..bit_count).rev().find(|index| get_bit(value, *index))
+    }
+}
+
+fn leading_zero_count(value: &BigUint, bit_count: usize) -> usize {
+    prioritized_set_bit(value, bit_count, /* lsb_prio= */ false)
+        .map(|index| bit_count - index - 1)
+        .unwrap_or(bit_count)
+}
+
+fn mulp_offset(result_width: usize) -> BigUint {
+    let low_width = result_width.saturating_sub(2);
+    let high_width = result_width - low_width;
+    let low_shift = low_width.saturating_sub(1).min(3);
+    let low = if low_width == 0 {
+        BigUint::from(0u8)
+    } else {
+        bit_mask(low_width) >> low_shift
+    };
+    let high = if high_width == 0 {
+        BigUint::from(0u8)
+    } else {
+        bit_mask(high_width.saturating_sub(1)) << low_width
+    };
+    low | high
+}
+
+/// Computes a complex arbitrary-width binary operation over native limb
+/// storage.
+///
+/// Limb arrays are ordered from least- to most-significant limb. The result is
+/// truncated to `dst_bit_count`. `dst` may not alias either source.
+///
+/// # Safety
+///
+/// Each pointer must be valid for the number of `u64` limbs implied by its
+/// supplied bit count and obey the non-aliasing rule above.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xlsynth_pir_runtime_wide_binop(
+    dst: *mut u64,
+    dst_bit_count: usize,
+    lhs: *const u64,
+    lhs_bit_count: usize,
+    rhs: *const u64,
+    rhs_bit_count: usize,
+    operation: u32,
+) {
+    let Some(operation) = WideBinaryOp::from_abi(operation) else {
+        return;
+    };
+    // SAFETY: forwarded from this callback's pointer contract.
+    let lhs_unsigned = unsafe { read_wide_bits(lhs, lhs_bit_count) };
+    // SAFETY: forwarded from this callback's pointer contract.
+    let rhs_unsigned = unsafe { read_wide_bits(rhs, rhs_bit_count) };
+    let result = match operation {
+        WideBinaryOp::Umul => truncate_unsigned(lhs_unsigned * rhs_unsigned, dst_bit_count),
+        WideBinaryOp::Smul => truncate_signed(
+            as_signed(lhs_unsigned, lhs_bit_count) * as_signed(rhs_unsigned, rhs_bit_count),
+            dst_bit_count,
+        ),
+        WideBinaryOp::Udiv => {
+            if rhs_unsigned == BigUint::from(0u8) {
+                bit_mask(dst_bit_count)
+            } else {
+                truncate_unsigned(lhs_unsigned / rhs_unsigned, dst_bit_count)
+            }
+        }
+        WideBinaryOp::Umod => {
+            if rhs_unsigned == BigUint::from(0u8) {
+                BigUint::from(0u8)
+            } else {
+                truncate_unsigned(lhs_unsigned % rhs_unsigned, dst_bit_count)
+            }
+        }
+        WideBinaryOp::Sdiv | WideBinaryOp::Smod => {
+            let lhs_signed = as_signed(lhs_unsigned, lhs_bit_count);
+            let rhs_signed = as_signed(rhs_unsigned, rhs_bit_count);
+            if rhs_signed == BigInt::from(0u8) {
+                if operation == WideBinaryOp::Smod {
+                    BigUint::from(0u8)
+                } else if lhs_signed.sign() == Sign::Minus {
+                    BigUint::from(1u8) << (dst_bit_count - 1)
+                } else {
+                    (BigUint::from(1u8) << (dst_bit_count - 1)) - BigUint::from(1u8)
+                }
+            } else if operation == WideBinaryOp::Sdiv {
+                truncate_signed(lhs_signed / rhs_signed, dst_bit_count)
+            } else {
+                truncate_signed(lhs_signed % rhs_signed, dst_bit_count)
+            }
+        }
+        WideBinaryOp::Shll | WideBinaryOp::Shrl | WideBinaryOp::Shra => {
+            match bounded_shift_amount(&rhs_unsigned, lhs_bit_count) {
+                None if operation == WideBinaryOp::Shra => {
+                    if as_signed(lhs_unsigned, lhs_bit_count).sign() == Sign::Minus {
+                        bit_mask(dst_bit_count)
+                    } else {
+                        BigUint::from(0u8)
+                    }
+                }
+                None => BigUint::from(0u8),
+                Some(amount) if operation == WideBinaryOp::Shll => {
+                    truncate_unsigned(lhs_unsigned << amount, dst_bit_count)
+                }
+                Some(amount) if operation == WideBinaryOp::Shrl => {
+                    truncate_unsigned(lhs_unsigned >> amount, dst_bit_count)
+                }
+                Some(amount) => truncate_signed(
+                    as_signed(lhs_unsigned, lhs_bit_count) >> amount,
+                    dst_bit_count,
+                ),
+            }
+        }
+    };
+    // SAFETY: forwarded from this callback's pointer contract.
+    unsafe { write_wide_bits(dst, dst_bit_count, result) };
+}
+
+/// Computes a zero-filled dynamic slice into native limb storage.
+///
+/// # Safety
+///
+/// Pointer requirements match [`xlsynth_pir_runtime_wide_binop`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xlsynth_pir_runtime_wide_dynamic_bit_slice(
+    dst: *mut u64,
+    dst_bit_count: usize,
+    arg: *const u64,
+    arg_bit_count: usize,
+    start: *const u64,
+    start_bit_count: usize,
+) {
+    // SAFETY: forwarded from this callback's pointer contract.
+    let arg = unsafe { read_wide_bits(arg, arg_bit_count) };
+    // SAFETY: forwarded from this callback's pointer contract.
+    let start = unsafe { read_wide_bits(start, start_bit_count) };
+    let result = bounded_shift_amount(&start, arg_bit_count)
+        .map(|amount| truncate_unsigned(arg >> amount, dst_bit_count))
+        .unwrap_or_else(|| BigUint::from(0u8));
+    // SAFETY: forwarded from this callback's pointer contract.
+    unsafe { write_wide_bits(dst, dst_bit_count, result) };
+}
+
+/// Inserts a dynamically positioned low-to-high slice into native limb storage.
+///
+/// # Safety
+///
+/// Pointer requirements match [`xlsynth_pir_runtime_wide_binop`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xlsynth_pir_runtime_wide_bit_slice_update(
+    dst: *mut u64,
+    dst_bit_count: usize,
+    arg: *const u64,
+    arg_bit_count: usize,
+    start: *const u64,
+    start_bit_count: usize,
+    update: *const u64,
+    update_bit_count: usize,
+) {
+    // SAFETY: forwarded from this callback's pointer contract.
+    let arg = unsafe { read_wide_bits(arg, arg_bit_count) };
+    // SAFETY: forwarded from this callback's pointer contract.
+    let start = unsafe { read_wide_bits(start, start_bit_count) };
+    // SAFETY: forwarded from this callback's pointer contract.
+    let update = unsafe { read_wide_bits(update, update_bit_count) };
+    let result = if let Some(start) = bounded_shift_amount(&start, arg_bit_count) {
+        let written_width = update_bit_count.min(arg_bit_count - start);
+        let written_mask = bit_mask(written_width) << start;
+        let retained = &arg & (&bit_mask(arg_bit_count) ^ &written_mask);
+        retained | ((update & bit_mask(written_width)) << start)
+    } else {
+        arg
+    };
+    // SAFETY: forwarded from this callback's pointer contract.
+    unsafe { write_wide_bits(dst, dst_bit_count, result) };
+}
+
+/// Computes an arbitrary-width single-operand PIR transform.
+///
+/// `attribute` is interpreted as `lsb_prio` for `one_hot` and
+/// `ext_prio_encode`, and as the static shift/count offset for `ext_clz` and
+/// `ext_normalize_left`.
+///
+/// # Safety
+///
+/// Pointer requirements match [`xlsynth_pir_runtime_wide_binop`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xlsynth_pir_runtime_wide_unary_op(
+    dst: *mut u64,
+    dst_bit_count: usize,
+    arg: *const u64,
+    arg_bit_count: usize,
+    operation: u32,
+    attribute: usize,
+) {
+    let Some(operation) = WideUnaryOp::from_abi(operation) else {
+        return;
+    };
+    // SAFETY: forwarded from this callback's pointer contract.
+    let arg = unsafe { read_wide_bits(arg, arg_bit_count) };
+    let result = match operation {
+        WideUnaryOp::OneHot => {
+            let selected =
+                prioritized_set_bit(&arg, arg_bit_count, attribute != 0).unwrap_or(arg_bit_count);
+            BigUint::from(1u8) << selected
+        }
+        WideUnaryOp::Encode => {
+            let mut result = 0usize;
+            for index in 0..arg_bit_count {
+                if get_bit(&arg, index) {
+                    result |= index;
+                }
+            }
+            BigUint::from(result)
+        }
+        WideUnaryOp::Decode => bounded_shift_amount(&arg, dst_bit_count)
+            .map(|amount| BigUint::from(1u8) << amount)
+            .unwrap_or_else(|| BigUint::from(0u8)),
+        WideUnaryOp::ExtPrioEncode => BigUint::from(
+            prioritized_set_bit(&arg, arg_bit_count, attribute != 0).unwrap_or(arg_bit_count),
+        ),
+        WideUnaryOp::ExtClz => BigUint::from(leading_zero_count(&arg, arg_bit_count) + attribute),
+        WideUnaryOp::ExtNormalizeLeft => {
+            let shift = leading_zero_count(&arg, arg_bit_count).saturating_add(attribute);
+            if shift >= dst_bit_count {
+                BigUint::from(0u8)
+            } else {
+                truncate_unsigned(arg << shift, dst_bit_count)
+            }
+        }
+        WideUnaryOp::ExtMaskLow => {
+            if arg >= BigUint::from(dst_bit_count) {
+                bit_mask(dst_bit_count)
+            } else {
+                let count = arg.to_u64_digits().first().copied().unwrap_or(0) as usize;
+                bit_mask(count)
+            }
+        }
+    };
+    // SAFETY: forwarded from this callback's pointer contract.
+    unsafe { write_wide_bits(dst, dst_bit_count, result) };
+}
+
+/// Computes the deterministic pair used for arbitrary-width `umulp`/`smulp`.
+///
+/// # Safety
+///
+/// Pointer requirements match [`xlsynth_pir_runtime_wide_binop`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xlsynth_pir_runtime_wide_mulp(
+    offset_dst: *mut u64,
+    residual_dst: *mut u64,
+    dst_bit_count: usize,
+    lhs: *const u64,
+    lhs_bit_count: usize,
+    rhs: *const u64,
+    rhs_bit_count: usize,
+    signed: u32,
+) {
+    // SAFETY: forwarded from this callback's pointer contract.
+    let lhs = unsafe { read_wide_bits(lhs, lhs_bit_count) };
+    // SAFETY: forwarded from this callback's pointer contract.
+    let rhs = unsafe { read_wide_bits(rhs, rhs_bit_count) };
+    let product = if signed != 0 {
+        truncate_signed(
+            as_signed(lhs, lhs_bit_count) * as_signed(rhs, rhs_bit_count),
+            dst_bit_count,
+        )
+    } else {
+        truncate_unsigned(lhs * rhs, dst_bit_count)
+    };
+    let offset = mulp_offset(dst_bit_count);
+    let residual = truncate_signed(
+        BigInt::from_biguint(Sign::Plus, product)
+            - BigInt::from_biguint(Sign::Plus, offset.clone()),
+        dst_bit_count,
+    );
+    // SAFETY: forwarded from this callback's pointer contract.
+    unsafe { write_wide_bits(offset_dst, dst_bit_count, offset) };
+    // SAFETY: forwarded from this callback's pointer contract.
+    unsafe { write_wide_bits(residual_dst, dst_bit_count, residual) };
+}
+
 /// Formats a trace message according to the XLS trace-format string syntax.
 unsafe fn format_trace_message(
     format: &str,
@@ -364,6 +803,15 @@ unsafe fn format_native_value(
             } else {
                 BigUint::from_bytes_be(&bytes)
             };
+            format_trace_bits(value, *bit_count, preference)
+        }
+        TraceValueLayout::WideBits {
+            bit_count,
+            limb_count: _,
+        } => {
+            // SAFETY: callback ABI provides the number of native limbs
+            // prescribed by this layout.
+            let value = unsafe { read_wide_bits(pointer.cast::<u64>(), *bit_count) };
             format_trace_bits(value, *bit_count, preference)
         }
         TraceValueLayout::Array {
@@ -483,6 +931,7 @@ impl TraceValueLayout {
     fn byte_count(&self) -> usize {
         match self {
             Self::Bits { byte_count, .. } => *byte_count,
+            Self::WideBits { limb_count, .. } => limb_count * std::mem::size_of::<u64>(),
             Self::Array {
                 element,
                 element_count,
@@ -655,5 +1104,179 @@ mod tests {
         assert!(result.assertion_failures.is_empty());
         assert!(result.trace_messages.is_empty());
         assert_eq!(result.cover_counts[0].count, 0);
+    }
+
+    #[test]
+    fn wide_trace_values_use_lsb_first_native_limbs() {
+        let value = [1u64, 1u64];
+        // SAFETY: `value` contains the two limbs required for bits[72].
+        let formatted = unsafe {
+            format_native_value(
+                value.as_ptr().cast(),
+                &TraceValueLayout::WideBits {
+                    bit_count: 72,
+                    limb_count: 2,
+                },
+                TraceFormatPreference::Hex,
+            )
+        };
+        assert_eq!(formatted, "0x1_0000_0000_0000_0001");
+    }
+
+    #[test]
+    fn wide_binary_runtime_helpers_cover_arithmetic_shifts_and_slices() {
+        let lhs = [u64::MAX, 1];
+        let rhs = [2u64, 0];
+        let mut output = [0u64; 2];
+        // SAFETY: all arrays contain the required two native limbs.
+        unsafe {
+            xlsynth_pir_runtime_wide_binop(
+                output.as_mut_ptr(),
+                65,
+                lhs.as_ptr(),
+                65,
+                rhs.as_ptr(),
+                65,
+                WideBinaryOp::Umul as u32,
+            );
+        }
+        assert_eq!(output, [u64::MAX - 1, 1]);
+
+        let negative = [0u64, 1];
+        let shift = [1u64, 0];
+        // SAFETY: all arrays contain the required two native limbs.
+        unsafe {
+            xlsynth_pir_runtime_wide_binop(
+                output.as_mut_ptr(),
+                65,
+                negative.as_ptr(),
+                65,
+                shift.as_ptr(),
+                65,
+                WideBinaryOp::Shra as u32,
+            );
+        }
+        assert_eq!(output, [1u64 << 63, 1]);
+
+        let start = [63u64, 0];
+        // SAFETY: all arrays contain the limbs prescribed by their widths.
+        unsafe {
+            xlsynth_pir_runtime_wide_dynamic_bit_slice(
+                output.as_mut_ptr(),
+                65,
+                lhs.as_ptr(),
+                65,
+                start.as_ptr(),
+                65,
+            );
+        }
+        assert_eq!(output, [3, 0]);
+
+        let zero = [0u64, 0];
+        let update = [3u64, 0];
+        // SAFETY: all arrays contain the limbs prescribed by their widths.
+        unsafe {
+            xlsynth_pir_runtime_wide_bit_slice_update(
+                output.as_mut_ptr(),
+                65,
+                zero.as_ptr(),
+                65,
+                start.as_ptr(),
+                65,
+                update.as_ptr(),
+                65,
+            );
+        }
+        assert_eq!(output, [1u64 << 63, 1]);
+    }
+
+    #[test]
+    fn wide_unary_runtime_helpers_cover_encoding_and_extensions() {
+        let input = [1u64 << 63, 1];
+        let mut output = [0u64; 3];
+        // SAFETY: all arrays contain sufficient native limbs for their widths.
+        unsafe {
+            xlsynth_pir_runtime_wide_unary_op(
+                output.as_mut_ptr(),
+                66,
+                input.as_ptr(),
+                65,
+                WideUnaryOp::OneHot as u32,
+                1,
+            );
+        }
+        assert_eq!(output[..2], [1u64 << 63, 0]);
+
+        // SAFETY: all arrays contain sufficient native limbs for their widths.
+        unsafe {
+            xlsynth_pir_runtime_wide_unary_op(
+                output.as_mut_ptr(),
+                7,
+                input.as_ptr(),
+                65,
+                WideUnaryOp::ExtPrioEncode as u32,
+                0,
+            );
+        }
+        assert_eq!(output[0], 64);
+
+        let zeros = [0u64; 2];
+        // SAFETY: all arrays contain sufficient native limbs for their widths.
+        unsafe {
+            xlsynth_pir_runtime_wide_unary_op(
+                output.as_mut_ptr(),
+                129,
+                zeros.as_ptr(),
+                65,
+                WideUnaryOp::ExtMaskLow as u32,
+                0,
+            );
+        }
+        assert_eq!(output, [0, 0, 0]);
+
+        let count = [80u64, 0];
+        // SAFETY: all arrays contain sufficient native limbs for their widths.
+        unsafe {
+            xlsynth_pir_runtime_wide_unary_op(
+                output.as_mut_ptr(),
+                129,
+                count.as_ptr(),
+                65,
+                WideUnaryOp::ExtMaskLow as u32,
+                0,
+            );
+        }
+        assert_eq!(output, [u64::MAX, 0xffff, 0]);
+    }
+
+    #[test]
+    fn wide_mulp_runtime_helper_returns_components_summing_to_product() {
+        let lhs = [u64::MAX, 1];
+        let rhs = [3u64, 0];
+        let mut offset = [0u64; 3];
+        let mut residual = [0u64; 3];
+        // SAFETY: all arrays contain sufficient native limbs for their widths.
+        unsafe {
+            xlsynth_pir_runtime_wide_mulp(
+                offset.as_mut_ptr(),
+                residual.as_mut_ptr(),
+                129,
+                lhs.as_ptr(),
+                65,
+                rhs.as_ptr(),
+                65,
+                0,
+            );
+        }
+        let offset = unsafe { read_wide_bits(offset.as_ptr(), 129) };
+        let residual = unsafe { read_wide_bits(residual.as_ptr(), 129) };
+        assert_eq!(
+            truncate_unsigned(offset + residual, 129),
+            truncate_unsigned(
+                unsafe { read_wide_bits(lhs.as_ptr(), 65) }
+                    * unsafe { read_wide_bits(rhs.as_ptr(), 65) },
+                129,
+            )
+        );
     }
 }
