@@ -6,7 +6,10 @@ from unittest import mock
 
 import pytest
 
-from sleep_until_version_seen import check_crate_version_for_polling
+from sleep_until_version_seen import (
+    check_crate_version_for_polling,
+    wait_until_version_seen,
+)
 
 
 def test_polling_retries_transient_server_error(capsys):
@@ -30,3 +33,37 @@ def test_polling_does_not_retry_policy_error():
     with mock.patch("sleep_until_version_seen.check_crate_version", side_effect=error):
         with pytest.raises(urllib.error.HTTPError):
             check_crate_version_for_polling("xlsynth-sys", "0.51.1")
+
+
+def test_wait_until_version_seen_returns_when_version_appears():
+    with (
+        mock.patch(
+            "sleep_until_version_seen.check_crate_version_for_polling",
+            side_effect=[False, True],
+        ),
+        mock.patch("sleep_until_version_seen.time.sleep") as sleep,
+    ):
+        assert wait_until_version_seen(
+            "xlsynth-sys",
+            "0.51.1",
+            poll_interval_seconds=2,
+            timeout_total_seconds=10,
+        )
+
+    sleep.assert_called_once_with(2)
+
+
+def test_wait_until_version_seen_returns_false_after_timeout():
+    with (
+        mock.patch(
+            "sleep_until_version_seen.check_crate_version_for_polling",
+            return_value=False,
+        ),
+        mock.patch("sleep_until_version_seen.time.time", side_effect=[10, 21]),
+    ):
+        assert not wait_until_version_seen(
+            "xlsynth-sys",
+            "0.51.1",
+            poll_interval_seconds=2,
+            timeout_total_seconds=10,
+        )

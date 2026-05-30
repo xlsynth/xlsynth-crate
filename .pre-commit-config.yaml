@@ -63,7 +63,7 @@ repos:
       - id: pytest-release-helper-scripts
         name: pytest (release helper scripts)
         description: Run pytest on release helper script tests
-        entry: pytest -q scripts/bump_version_numbers.py scripts/crates_io_index_test.py scripts/sleep_until_version_seen_test.py
+        entry: pytest -q scripts/bump_version_numbers.py scripts/crates_io_index_test.py scripts/sleep_until_version_seen_test.py scripts/publish_crates_test.py
         language: python
         additional_dependencies: ["pytest"]
         pass_filenames: false

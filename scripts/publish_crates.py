@@ -4,17 +4,39 @@
 """Publish crates from publish_order.toml in dependency order."""
 
 import argparse
+import enum
 import json
 import os
 import re
 import subprocess
 import sys
+import time
 
-from sleep_until_version_seen import check_crate_version
+from sleep_until_version_seen import (
+    check_crate_version,
+    check_crate_version_for_polling,
+    wait_until_version_seen,
+)
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ORDER_PATH = os.path.join(REPO_ROOT, "publish_order.toml")
+MAX_PUBLISH_ATTEMPTS = 3
+RETRY_BACKOFF_SECONDS = 15
+_TRANSIENT_ERROR_PATTERNS = (
+    r"\b(?:got|status(?: code)?)\s+(?:429|5\d\d)\b",
+    r"\b(?:timed out|timeout|connection refused|connection reset|failed to connect|network failure|spurious network error)\b",
+)
+_DUPLICATE_ERROR_PATTERNS = (
+    r"\balready (?:exists|uploaded|published)\b",
+    r"\bversion .* is already uploaded\b",
+)
+
+
+class PublishFailureKind(enum.Enum):
+    TRANSIENT = "transient"
+    DUPLICATE = "duplicate"
+    FATAL = "fatal"
 
 
 def load_publish_order():
@@ -49,32 +71,104 @@ def crate_dir(package):
     return os.path.dirname(os.path.relpath(manifest_path, REPO_ROOT))
 
 
-def publish_crates(version):
-    cargo_registry_token = os.environ["CARGO_REGISTRY_TOKEN"]
-    packages = load_workspace_packages()
-    for crate_name in load_publish_order():
-        package = packages[crate_name]
-        package_dir = crate_dir(package)
+def _run_cargo_publish(package_dir):
+    result = subprocess.run(
+        ["cargo", "publish"],
+        cwd=os.path.join(REPO_ROOT, package_dir),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+    )
+    if result.stdout:
+        print(result.stdout, end="", flush=True)
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr, flush=True)
+    return result
+
+
+def _classify_publish_failure(result):
+    """Classify cargo's unstructured publish output at the subprocess boundary."""
+    output = "{}\n{}".format(result.stdout, result.stderr)
+    if any(
+        re.search(pattern, output, re.IGNORECASE)
+        for pattern in _DUPLICATE_ERROR_PATTERNS
+    ):
+        return PublishFailureKind.DUPLICATE
+    if any(
+        re.search(pattern, output, re.IGNORECASE)
+        for pattern in _TRANSIENT_ERROR_PATTERNS
+    ):
+        return PublishFailureKind.TRANSIENT
+    return PublishFailureKind.FATAL
+
+
+def _publish_error(result):
+    return subprocess.CalledProcessError(
+        result.returncode,
+        ["cargo", "publish"],
+        output=result.stdout,
+        stderr=result.stderr,
+    )
+
+
+def publish_crate_with_retries(crate_name, version, package_dir):
+    """Publish one crate, retrying failed uploads that remain absent from crates.io."""
+    for attempt in range(1, MAX_PUBLISH_ATTEMPTS + 1):
         if check_crate_version(crate_name, version):
             print(
                 "{} {} is already on crates.io; skipping.".format(crate_name, version),
                 flush=True,
             )
-            continue
-        print("Publishing {}...".format(crate_name), flush=True)
-        subprocess.check_call(
-            ["cargo", "publish", "--token", cargo_registry_token],
-            cwd=os.path.join(REPO_ROOT, package_dir),
+            return
+        print(
+            "Publishing {} (attempt {}/{})...".format(
+                crate_name, attempt, MAX_PUBLISH_ATTEMPTS
+            ),
+            flush=True,
         )
-        subprocess.check_call(
-            [
-                sys.executable,
-                os.path.join(REPO_ROOT, "scripts", "sleep_until_version_seen.py"),
-                crate_name,
-                version,
-            ],
-            cwd=REPO_ROOT,
-        )
+        result = _run_cargo_publish(package_dir)
+        if result.returncode == 0:
+            if not wait_until_version_seen(crate_name, version):
+                raise RuntimeError(
+                    "{} {} did not appear in the crates.io sparse index".format(
+                        crate_name, version
+                    )
+                )
+            return
+
+        failure_kind = _classify_publish_failure(result)
+        if check_crate_version_for_polling(crate_name, version):
+            return
+        if failure_kind in (PublishFailureKind.TRANSIENT, PublishFailureKind.DUPLICATE):
+            if wait_until_version_seen(crate_name, version):
+                return
+        if failure_kind == PublishFailureKind.TRANSIENT:
+            if attempt == MAX_PUBLISH_ATTEMPTS:
+                raise _publish_error(result)
+            print(
+                "cargo publish failed for {}; retrying.".format(crate_name),
+                flush=True,
+            )
+            time.sleep(RETRY_BACKOFF_SECONDS)
+        elif failure_kind == PublishFailureKind.DUPLICATE:
+            raise RuntimeError(
+                "cargo publish reported that {} {} already exists, but the version did not appear in the crates.io sparse index".format(
+                    crate_name, version
+                )
+            )
+        else:
+            raise _publish_error(result)
+
+
+def publish_crates(version):
+    # Validate configuration early. Cargo reads the token from the environment,
+    # which avoids exposing it in the process argument list and exceptions.
+    os.environ["CARGO_REGISTRY_TOKEN"]
+    packages = load_workspace_packages()
+    for crate_name in load_publish_order():
+        package = packages[crate_name]
+        package_dir = crate_dir(package)
+        publish_crate_with_retries(crate_name, version, package_dir)
 
 
 def main():
