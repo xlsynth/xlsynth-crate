@@ -15,8 +15,8 @@ fn options() -> RandomFnOptions {
         max_params: 5,
         max_nodes: 64,
         max_bit_width: 64,
-        allow_arrays: false,
-        allow_tuples: false,
+        allow_arrays: true,
+        allow_tuples: true,
         allow_gate: true,
         allow_extension_ops: true,
         enabled_operations: OperationSet::new([
@@ -41,8 +41,8 @@ fn options() -> RandomFnOptions {
             RandomOperation::Sdiv,
             RandomOperation::Umod,
             RandomOperation::Smod,
-            RandomOperation::Eq,
-            RandomOperation::Ne,
+            RandomOperation::Umulp,
+            RandomOperation::Smulp,
             RandomOperation::Ugt,
             RandomOperation::Uge,
             RandomOperation::Ult,
@@ -61,6 +61,13 @@ fn options() -> RandomFnOptions {
             RandomOperation::DynamicBitSlice,
             RandomOperation::BitSliceUpdate,
             RandomOperation::Concat,
+            RandomOperation::Array,
+            RandomOperation::ArrayIndex,
+            RandomOperation::ArrayConcat,
+            RandomOperation::ArraySlice,
+            RandomOperation::ArrayUpdate,
+            RandomOperation::Tuple,
+            RandomOperation::TupleIndex,
             RandomOperation::Sel,
             RandomOperation::PrioritySel,
             RandomOperation::OneHotSel,
@@ -85,7 +92,7 @@ fuzz_target!(|data: &[u8]| {
         &options(),
         StopPolicy::WhenEntropyDepleted,
     )
-    .expect("the scalar fuzz generator options should always construct a PIR function");
+    .expect("aggregate fuzz generator options should always construct a PIR function");
     let function = &generated.function;
     let ir_text = function.to_string();
     let jit = PirFunctionJit::compile(function)

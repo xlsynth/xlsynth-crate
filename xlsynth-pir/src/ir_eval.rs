@@ -370,6 +370,30 @@ fn eval_sign_resize_bits(arg_bits: &IrBits, width: usize) -> IrBits {
     IrBits::from_lsb_is_0(&out)
 }
 
+/// Returns the deterministic partial-product offset used by the XLS LLVM JIT.
+///
+/// XLS allows different execution engines to choose different component
+/// values for `umulp`/`smulp`, provided their modular sum is the product.
+/// Matching the JIT offset makes this evaluator usable as its differential
+/// reference.
+fn eval_mulp_llvm_jit_offset(result_width: usize) -> IrBits {
+    let low_width = result_width.saturating_sub(2);
+    let high_width = result_width - low_width;
+    let low_shift = low_width.saturating_sub(1).min(3);
+    let mut bits = vec![false; result_width];
+    for bit in bits.iter_mut().take(low_width.saturating_sub(low_shift)) {
+        *bit = true;
+    }
+    for bit in bits
+        .iter_mut()
+        .skip(low_width)
+        .take(high_width.saturating_sub(1))
+    {
+        *bit = true;
+    }
+    IrBits::from_lsb_is_0(&bits)
+}
+
 fn eval_bit_slice_update_bits(arg_bits: &IrBits, start_bits: &IrBits, upd_bits: &IrBits) -> IrBits {
     let arg_w = arg_bits.get_bit_count();
     let upd_w = upd_bits.get_bit_count();
@@ -431,17 +455,38 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
                     let r = eval_shift_bits(&lhs_bits, &rhs_bits, ShiftKind::Shra);
                     IrValue::from_bits(&r)
                 }
-                ir::Binop::Smulp | ir::Binop::Smul => {
+                ir::Binop::Smul => {
                     let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
                     let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
                     let r = lhs_bits.smul(&rhs_bits);
                     IrValue::from_bits(&r)
                 }
-                ir::Binop::Umulp | ir::Binop::Umul => {
+                ir::Binop::Umul => {
                     let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
                     let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
                     let r = lhs_bits.umul(&rhs_bits);
                     IrValue::from_bits(&r)
+                }
+                ir::Binop::Smulp | ir::Binop::Umulp => {
+                    let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
+                    let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
+                    let ir::Type::Tuple(fields) = &n.ty else {
+                        panic!("partial-product multiply result must be tuple-typed");
+                    };
+                    let ir::Type::Bits(result_width) = fields[0].as_ref() else {
+                        panic!("partial-product multiply result fields must be bits-typed");
+                    };
+                    let product = if binop == ir::Binop::Smulp {
+                        eval_sign_resize_bits(&lhs_bits.smul(&rhs_bits), *result_width)
+                    } else {
+                        eval_zero_resize_bits(&lhs_bits.umul(&rhs_bits), *result_width)
+                    };
+                    let offset = eval_mulp_llvm_jit_offset(*result_width);
+                    let residual = product.sub(&offset);
+                    IrValue::make_tuple(&[
+                        IrValue::from_bits(&offset),
+                        IrValue::from_bits(&residual),
+                    ])
                 }
                 ir::Binop::Udiv => {
                     let lhs_bits: IrBits = lhs_value.to_bits().unwrap();

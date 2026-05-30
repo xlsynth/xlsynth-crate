@@ -87,7 +87,9 @@ impl ScalarLayout {
 /// Describes the native in-memory layout used for one supported PIR value.
 ///
 /// Arrays use the same contiguous element layout as a Rust or C array whose
-/// leaf type is the corresponding native scalar carrier.
+/// leaf type is the corresponding native scalar carrier. Tuples use C struct
+/// field ordering, padding, and alignment, so callers may use corresponding
+/// Rust structs annotated with `#[repr(C)]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeValueLayout {
     /// A bits value carried as a native integer type.
@@ -99,6 +101,24 @@ pub enum NativeValueLayout {
         /// Number of array elements.
         element_count: usize,
     },
+    /// A native C-compatible struct with recursively described fields.
+    Tuple {
+        /// Layout and byte offset of each field.
+        fields: Vec<NativeTupleFieldLayout>,
+        /// Size of the complete struct, including tail padding.
+        byte_count: usize,
+        /// Required alignment for the struct.
+        alignment: usize,
+    },
+}
+
+/// Describes one field in a native C-compatible PIR tuple layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeTupleFieldLayout {
+    /// Native layout of the field value.
+    pub layout: Box<NativeValueLayout>,
+    /// Byte offset of the field from the containing tuple address.
+    pub offset: usize,
 }
 
 impl NativeValueLayout {
@@ -124,7 +144,32 @@ impl NativeValueLayout {
                     element_count: array.element_count,
                 })
             }
-            _ => Err(JitError::UnsupportedType(ty.to_string())),
+            Type::Tuple(field_types) => {
+                let mut fields = Vec::with_capacity(field_types.len());
+                let mut byte_count = 0usize;
+                let mut alignment = 1usize;
+                for field_ty in field_types {
+                    let layout = Self::from_type(field_ty)?;
+                    byte_count = align_up(byte_count, layout.alignment())?;
+                    fields.push(NativeTupleFieldLayout {
+                        layout: Box::new(layout.clone()),
+                        offset: byte_count,
+                    });
+                    byte_count = byte_count.checked_add(layout.byte_count()).ok_or_else(|| {
+                        JitError::UnsupportedType(format!(
+                            "native tuple layout size overflow for {ty}"
+                        ))
+                    })?;
+                    alignment = alignment.max(layout.alignment());
+                }
+                byte_count = align_up(byte_count, alignment)?;
+                Ok(Self::Tuple {
+                    fields,
+                    byte_count,
+                    alignment,
+                })
+            }
+            Type::Token => Err(JitError::UnsupportedType(ty.to_string())),
         }
     }
 
@@ -136,6 +181,7 @@ impl NativeValueLayout {
                 element,
                 element_count,
             } => element.byte_count() * element_count,
+            Self::Tuple { byte_count, .. } => *byte_count,
         }
     }
 
@@ -144,6 +190,7 @@ impl NativeValueLayout {
         match self {
             Self::Scalar(layout) => layout.byte_count,
             Self::Array { element, .. } => element.alignment(),
+            Self::Tuple { alignment, .. } => *alignment,
         }
     }
 
@@ -151,7 +198,7 @@ impl NativeValueLayout {
     pub fn element_stride(&self) -> Option<usize> {
         match self {
             Self::Array { element, .. } => Some(element.byte_count()),
-            Self::Scalar(_) => None,
+            Self::Scalar(_) | Self::Tuple { .. } => None,
         }
     }
 
@@ -159,7 +206,7 @@ impl NativeValueLayout {
     pub fn as_scalar(&self) -> Option<ScalarLayout> {
         match self {
             Self::Scalar(layout) => Some(*layout),
-            Self::Array { .. } => None,
+            Self::Array { .. } | Self::Tuple { .. } => None,
         }
     }
 }
@@ -202,7 +249,8 @@ impl JitError {
 ///
 /// Bits values use native integer carrier storage sized to the next one of
 /// `u8`, `u16`, `u32`, or `u64`. Arrays of supported values use native
-/// contiguous array storage.
+/// contiguous array storage; tuples use `#[repr(C)]`-compatible struct
+/// storage.
 pub struct PirFunctionJit {
     module: Option<JITModule>,
     entrypoint: NativeEntrypoint,
@@ -380,33 +428,20 @@ impl PirFunctionJit {
                 args.len()
             )));
         }
-        let param_layouts = self
-            .param_layouts
+        let inputs = args
             .iter()
-            .map(require_scalar_layout)
+            .zip(&self.param_layouts)
+            .map(|(arg, layout)| NativeValueStorage::from_ir_value(layout, arg))
             .collect::<Result<Vec<_>, _>>()?;
-        let result_layout = require_scalar_layout(&self.result_layout)?;
-        let scalar_args = args
+        let pointers = inputs
             .iter()
-            .zip(&param_layouts)
-            .map(|(arg, layout)| {
-                let bits = arg
-                    .to_bits()
-                    .map_err(|error| JitError::Value(error.to_string()))?;
-                if bits.get_bit_count() != layout.bit_count {
-                    return Err(JitError::InvalidArgument(format!(
-                        "expected bits[{}] argument, got bits[{}]",
-                        layout.bit_count,
-                        bits.get_bit_count()
-                    )));
-                }
-                bits.to_u64()
-                    .map_err(|error| JitError::Value(error.to_string()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let result = self.run_u64(&scalar_args)?;
-        IrValue::make_ubits(result_layout.bit_count, result)
-            .map_err(|error| JitError::Value(error.to_string()))
+            .map(NativeValueStorage::as_ptr)
+            .collect::<Vec<_>>();
+        let mut output = NativeValueStorage::zeroed(&self.result_layout);
+        // SAFETY: each `NativeValueStorage` owns aligned storage with exactly
+        // the corresponding published native layout and lives across the call.
+        unsafe { self.run_native(&pointers, output.as_mut_ptr())? };
+        output.to_ir_value(&self.result_layout)
     }
 }
 
@@ -423,7 +458,7 @@ impl Drop for PirFunctionJit {
 
 fn require_scalar_layout(layout: &NativeValueLayout) -> Result<ScalarLayout, JitError> {
     layout.as_scalar().ok_or_else(|| {
-        JitError::UnsupportedType("dynamic adapter supports scalar function signatures only".into())
+        JitError::UnsupportedType("this operation requires a native scalar value".into())
     })
 }
 
@@ -432,6 +467,156 @@ enum NativeScalar {
     U16(u16),
     U32(u32),
     U64(u64),
+}
+
+/// Aligned native storage used by the dynamic-value test/fuzz adapter.
+struct NativeValueStorage {
+    words: Vec<u64>,
+}
+
+impl NativeValueStorage {
+    fn zeroed(layout: &NativeValueLayout) -> Self {
+        Self {
+            words: vec![0; layout.byte_count().div_ceil(std::mem::size_of::<u64>())],
+        }
+    }
+
+    fn from_ir_value(layout: &NativeValueLayout, value: &IrValue) -> Result<Self, JitError> {
+        let mut storage = Self::zeroed(layout);
+        // SAFETY: storage is sized from `layout` and aligned to at least all
+        // currently supported scalar and aggregate layouts.
+        unsafe { write_ir_value_to_native(storage.as_mut_ptr(), layout, value)? };
+        Ok(storage)
+    }
+
+    fn as_ptr(&self) -> *const u8 {
+        self.words.as_ptr().cast()
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.words.as_mut_ptr().cast()
+    }
+
+    fn to_ir_value(&self, layout: &NativeValueLayout) -> Result<IrValue, JitError> {
+        // SAFETY: storage remains live and was allocated for `layout`.
+        unsafe { read_ir_value_from_native(self.as_ptr(), layout) }
+    }
+}
+
+unsafe fn write_ir_value_to_native(
+    destination: *mut u8,
+    layout: &NativeValueLayout,
+    value: &IrValue,
+) -> Result<(), JitError> {
+    match layout {
+        NativeValueLayout::Scalar(scalar) => {
+            let bits = value
+                .to_bits()
+                .map_err(|error| JitError::Value(error.to_string()))?;
+            if bits.get_bit_count() != scalar.bit_count {
+                return Err(JitError::InvalidArgument(format!(
+                    "expected bits[{}] argument, got bits[{}]",
+                    scalar.bit_count,
+                    bits.get_bit_count()
+                )));
+            }
+            let integer = bits
+                .to_u64()
+                .map_err(|error| JitError::Value(error.to_string()))?;
+            let bytes = integer.to_ne_bytes();
+            // SAFETY: the caller provides storage for this scalar layout.
+            unsafe {
+                ptr::copy_nonoverlapping(bytes.as_ptr(), destination, scalar.byte_count);
+            }
+        }
+        NativeValueLayout::Array {
+            element,
+            element_count,
+        } => {
+            let elements = value
+                .get_elements()
+                .map_err(|error| JitError::InvalidArgument(error.to_string()))?;
+            if elements.len() != *element_count {
+                return Err(JitError::InvalidArgument(format!(
+                    "expected array with {element_count} elements, got {}",
+                    elements.len()
+                )));
+            }
+            for (index, child) in elements.iter().enumerate() {
+                // SAFETY: each child lies in its recursively described region.
+                unsafe {
+                    write_ir_value_to_native(
+                        destination.add(index * element.byte_count()),
+                        element,
+                        child,
+                    )?;
+                }
+            }
+        }
+        NativeValueLayout::Tuple { fields, .. } => {
+            let elements = value
+                .get_elements()
+                .map_err(|error| JitError::InvalidArgument(error.to_string()))?;
+            if elements.len() != fields.len() {
+                return Err(JitError::InvalidArgument(format!(
+                    "expected tuple with {} fields, got {}",
+                    fields.len(),
+                    elements.len()
+                )));
+            }
+            for (field, child) in fields.iter().zip(elements.iter()) {
+                // SAFETY: each field lies at its published C-compatible offset.
+                unsafe {
+                    write_ir_value_to_native(
+                        destination.add(field.offset),
+                        field.layout.as_ref(),
+                        child,
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+unsafe fn read_ir_value_from_native(
+    source: *const u8,
+    layout: &NativeValueLayout,
+) -> Result<IrValue, JitError> {
+    match layout {
+        NativeValueLayout::Scalar(scalar) => {
+            let mut bytes = [0u8; std::mem::size_of::<u64>()];
+            // SAFETY: the caller provides readable storage for this scalar layout.
+            unsafe {
+                ptr::copy_nonoverlapping(source, bytes.as_mut_ptr(), scalar.byte_count);
+            }
+            IrValue::make_ubits(scalar.bit_count, u64::from_ne_bytes(bytes) & scalar.mask())
+                .map_err(|error| JitError::Value(error.to_string()))
+        }
+        NativeValueLayout::Array {
+            element,
+            element_count,
+        } => {
+            let mut elements = Vec::with_capacity(*element_count);
+            for index in 0..*element_count {
+                // SAFETY: each child lies in its recursively described region.
+                elements.push(unsafe {
+                    read_ir_value_from_native(source.add(index * element.byte_count()), element)?
+                });
+            }
+            IrValue::make_array(&elements).map_err(|error| JitError::Value(error.to_string()))
+        }
+        NativeValueLayout::Tuple { fields, .. } => {
+            let mut elements = Vec::with_capacity(fields.len());
+            for field in fields {
+                // SAFETY: each field lies at its published C-compatible offset.
+                elements.push(unsafe {
+                    read_ir_value_from_native(source.add(field.offset), field.layout.as_ref())?
+                });
+            }
+            Ok(IrValue::make_tuple(&elements))
+        }
+    }
 }
 
 impl NativeScalar {
@@ -482,7 +667,7 @@ struct ScratchPlan {
 }
 
 impl ScratchPlan {
-    /// Assigns native scratch slots for materialized intermediate arrays.
+    /// Assigns native scratch slots for materialized intermediate aggregates.
     fn for_function(function: &ir::Fn, order: &[NodeRef]) -> Result<Self, JitError> {
         let mut offsets = HashMap::new();
         let mut byte_count = 0usize;
@@ -490,7 +675,7 @@ impl ScratchPlan {
         for node_ref in order {
             let node = function.get_node(*node_ref);
             let layout = NativeValueLayout::from_type(&node.ty)?;
-            if !needs_array_destination(node)
+            if !needs_aggregate_destination(node)
                 || function
                     .ret_node_ref
                     .is_some_and(|result| result == *node_ref)
@@ -520,11 +705,25 @@ fn align_up(value: usize, alignment: usize) -> Result<usize, JitError> {
         .ok_or_else(|| JitError::UnsupportedType("native layout size overflow".into()))
 }
 
-fn needs_array_destination(node: &ir::Node) -> bool {
-    matches!(
-        &node.payload,
-        NodePayload::Literal(_) | NodePayload::Array(_)
-    ) && matches!(node.ty, Type::Array(_))
+fn needs_aggregate_destination(node: &ir::Node) -> bool {
+    matches!(node.ty, Type::Array(_) | Type::Tuple(_))
+        && matches!(
+            &node.payload,
+            NodePayload::Literal(_)
+                | NodePayload::Array(_)
+                | NodePayload::Tuple(_)
+                | NodePayload::ArraySlice { .. }
+                | NodePayload::ArrayUpdate { .. }
+                | NodePayload::Binop(
+                    Binop::ArrayConcat | Binop::Gate | Binop::Umulp | Binop::Smulp,
+                    _,
+                    _,
+                )
+                | NodePayload::Sel { .. }
+                | NodePayload::PrioritySel { .. }
+                | NodePayload::OneHotSel { .. }
+                | NodePayload::ExtNormalizeLeft { .. }
+        )
 }
 
 #[derive(Clone, Copy)]
@@ -603,7 +802,7 @@ fn lower_function(
                 NativeValueLayout::Scalar(scalar) => {
                     ComputedValue::Scalar(lower_scalar_literal(builder, literal, *scalar)?)
                 }
-                NativeValueLayout::Array { .. } => {
+                NativeValueLayout::Array { .. } | NativeValueLayout::Tuple { .. } => {
                     let destination = materialized_destination(
                         builder,
                         *node_ref,
@@ -616,14 +815,42 @@ fn lower_function(
                     ComputedValue::Address(destination)
                 }
             },
+            NodePayload::Unop(Unop::Identity, arg)
+                if matches!(
+                    layout,
+                    NativeValueLayout::Array { .. } | NativeValueLayout::Tuple { .. }
+                ) =>
+            {
+                computed_value_for(&values, *arg)?
+            }
             NodePayload::Unop(op, arg) => {
                 let scalar_layout = require_scalar_layout(&layout)?;
                 let arg_value = scalar_value_for(&values, *arg)?;
+                let arg_layout = ScalarLayout::from_type(&function.get_node(*arg).ty)?;
                 let raw = match op {
                     Unop::Identity => arg_value,
                     Unop::Not => builder.ins().bnot(arg_value),
                     Unop::Neg => builder.ins().ineg(arg_value),
-                    _ => return Err(unsupported_node(node)),
+                    Unop::Reverse => {
+                        let reversed = builder.ins().bitrev(arg_value);
+                        let padding = arg_layout.storage_bit_count() - arg_layout.bit_count;
+                        if padding == 0 {
+                            reversed
+                        } else {
+                            builder.ins().ushr_imm(reversed, padding as i64)
+                        }
+                    }
+                    Unop::OrReduce => builder.ins().icmp_imm(IntCC::NotEqual, arg_value, 0),
+                    Unop::AndReduce => {
+                        builder
+                            .ins()
+                            .icmp_imm(IntCC::Equal, arg_value, arg_layout.mask() as i64)
+                    }
+                    Unop::XorReduce => {
+                        let population = builder.ins().popcnt(arg_value);
+                        let parity = builder.ins().band_imm(population, 1);
+                        resize_unsigned(builder, parity, arg_layout, scalar_layout)
+                    }
                 };
                 ComputedValue::Scalar(mask_value(builder, raw, scalar_layout))
             }
@@ -638,6 +865,58 @@ fn lower_function(
                     &values,
                     scalar_layout,
                 )?)
+            }
+            NodePayload::Binop(Binop::ArrayConcat, lhs, rhs) => {
+                let destination = materialized_destination(
+                    builder,
+                    *node_ref,
+                    return_node,
+                    output_pointer,
+                    scratch_pointer,
+                    scratch_plan,
+                )?;
+                lower_array_concat(
+                    builder,
+                    destination,
+                    computed_value_for(&values, *lhs)?,
+                    computed_value_for(&values, *rhs)?,
+                    &function.get_node(*lhs).ty,
+                    &function.get_node(*rhs).ty,
+                    &layout,
+                )?;
+                ComputedValue::Address(destination)
+            }
+            NodePayload::Binop(Binop::Gate, predicate, gated) => lower_gate(
+                builder,
+                *node_ref,
+                return_node,
+                output_pointer,
+                scratch_pointer,
+                scratch_plan,
+                scalar_value_for(&values, *predicate)?,
+                computed_value_for(&values, *gated)?,
+                &layout,
+            )?,
+            NodePayload::Binop(op @ (Binop::Umulp | Binop::Smulp), lhs, rhs) => {
+                let destination = materialized_destination(
+                    builder,
+                    *node_ref,
+                    return_node,
+                    output_pointer,
+                    scratch_pointer,
+                    scratch_plan,
+                )?;
+                lower_mulp(
+                    builder,
+                    function,
+                    destination,
+                    *op,
+                    *lhs,
+                    *rhs,
+                    &values,
+                    &layout,
+                )?;
+                ComputedValue::Address(destination)
             }
             NodePayload::Binop(op, lhs, rhs) => {
                 let scalar_layout = require_scalar_layout(&layout)?;
@@ -689,6 +968,118 @@ fn lower_function(
                 let resized = resize_unsigned(builder, shifted, arg_layout, layout);
                 ComputedValue::Scalar(mask_value(builder, resized, layout))
             }
+            NodePayload::DynamicBitSlice {
+                arg,
+                start,
+                width: _,
+            } => {
+                let result_layout = require_scalar_layout(&layout)?;
+                let arg_layout = ScalarLayout::from_type(&function.get_node(*arg).ty)?;
+                let start_layout = ScalarLayout::from_type(&function.get_node(*start).ty)?;
+                ComputedValue::Scalar(lower_dynamic_bit_slice(
+                    builder,
+                    scalar_value_for(&values, *arg)?,
+                    arg_layout,
+                    scalar_value_for(&values, *start)?,
+                    start_layout,
+                    result_layout,
+                ))
+            }
+            NodePayload::BitSliceUpdate {
+                arg,
+                start,
+                update_value,
+            } => {
+                let result_layout = require_scalar_layout(&layout)?;
+                let arg_layout = ScalarLayout::from_type(&function.get_node(*arg).ty)?;
+                let start_layout = ScalarLayout::from_type(&function.get_node(*start).ty)?;
+                let update_layout = ScalarLayout::from_type(&function.get_node(*update_value).ty)?;
+                ComputedValue::Scalar(lower_bit_slice_update(
+                    builder,
+                    scalar_value_for(&values, *arg)?,
+                    arg_layout,
+                    scalar_value_for(&values, *start)?,
+                    start_layout,
+                    scalar_value_for(&values, *update_value)?,
+                    update_layout,
+                    result_layout,
+                ))
+            }
+            NodePayload::ExtCarryOut { lhs, rhs, c_in } => {
+                let result_layout = require_scalar_layout(&layout)?;
+                let operand_layout = ScalarLayout::from_type(&function.get_node(*lhs).ty)?;
+                let c_in_layout = ScalarLayout::from_type(&function.get_node(*c_in).ty)?;
+                ComputedValue::Scalar(lower_ext_carry_out(
+                    builder,
+                    scalar_value_for(&values, *lhs)?,
+                    scalar_value_for(&values, *rhs)?,
+                    scalar_value_for(&values, *c_in)?,
+                    operand_layout,
+                    c_in_layout,
+                    result_layout,
+                ))
+            }
+            NodePayload::ExtPrioEncode { arg, lsb_prio } => {
+                let result_layout = require_scalar_layout(&layout)?;
+                let arg_layout = ScalarLayout::from_type(&function.get_node(*arg).ty)?;
+                ComputedValue::Scalar(lower_ext_prio_encode(
+                    builder,
+                    scalar_value_for(&values, *arg)?,
+                    arg_layout,
+                    result_layout,
+                    *lsb_prio,
+                ))
+            }
+            NodePayload::ExtClz { arg, offset, .. } => {
+                let result_layout = require_scalar_layout(&layout)?;
+                let arg_layout = ScalarLayout::from_type(&function.get_node(*arg).ty)?;
+                ComputedValue::Scalar(lower_ext_clz(
+                    builder,
+                    scalar_value_for(&values, *arg)?,
+                    arg_layout,
+                    result_layout,
+                    *offset,
+                ))
+            }
+            NodePayload::ExtNormalizeLeft {
+                arg,
+                shift_offset,
+                normalized_bit_count: _,
+                clz_bit_count: _,
+            } => lower_ext_normalize_left(
+                builder,
+                function,
+                node,
+                *node_ref,
+                return_node,
+                output_pointer,
+                scratch_pointer,
+                scratch_plan,
+                *arg,
+                *shift_offset,
+                scalar_value_for(&values, *arg)?,
+                &layout,
+            )?,
+            NodePayload::ExtMaskLow { count } => {
+                let result_layout = require_scalar_layout(&layout)?;
+                let count_layout = ScalarLayout::from_type(&function.get_node(*count).ty)?;
+                ComputedValue::Scalar(lower_ext_mask_low(
+                    builder,
+                    scalar_value_for(&values, *count)?,
+                    count_layout,
+                    result_layout,
+                ))
+            }
+            NodePayload::ExtNaryAdd { terms, arch: _ } => {
+                let result_layout = require_scalar_layout(&layout)?;
+                ComputedValue::Scalar(lower_ext_nary_add(
+                    builder,
+                    function,
+                    terms,
+                    &values,
+                    result_layout,
+                )?)
+            }
             NodePayload::Array(args) => {
                 let destination = materialized_destination(
                     builder,
@@ -700,6 +1091,21 @@ fn lower_function(
                 )?;
                 lower_array_construction(builder, destination, args, &values, &layout)?;
                 ComputedValue::Address(destination)
+            }
+            NodePayload::Tuple(args) => {
+                let destination = materialized_destination(
+                    builder,
+                    *node_ref,
+                    return_node,
+                    output_pointer,
+                    scratch_pointer,
+                    scratch_plan,
+                )?;
+                lower_tuple_construction(builder, destination, args, &values, &layout)?;
+                ComputedValue::Address(destination)
+            }
+            NodePayload::TupleIndex { tuple, index } => {
+                lower_tuple_index(builder, *tuple, *index, &values, &layout, function, node)?
             }
             NodePayload::ArrayIndex {
                 array,
@@ -716,6 +1122,134 @@ fn lower_function(
                 &layout,
                 pointer_type,
             )?,
+            NodePayload::ArraySlice {
+                array,
+                start,
+                width: _,
+            } => {
+                let destination = materialized_destination(
+                    builder,
+                    *node_ref,
+                    return_node,
+                    output_pointer,
+                    scratch_pointer,
+                    scratch_plan,
+                )?;
+                lower_array_slice(
+                    builder,
+                    function,
+                    destination,
+                    *array,
+                    *start,
+                    &values,
+                    &layout,
+                    pointer_type,
+                )?;
+                ComputedValue::Address(destination)
+            }
+            NodePayload::ArrayUpdate {
+                array,
+                value,
+                indices,
+                assumed_in_bounds,
+            } => lower_array_update(
+                builder,
+                function,
+                node,
+                *node_ref,
+                return_node,
+                output_pointer,
+                scratch_pointer,
+                scratch_plan,
+                *array,
+                *value,
+                indices,
+                *assumed_in_bounds,
+                &values,
+                &layout,
+                pointer_type,
+            )?,
+            NodePayload::Sel {
+                selector,
+                cases,
+                default,
+            } => lower_sel(
+                builder,
+                *node_ref,
+                return_node,
+                output_pointer,
+                scratch_pointer,
+                scratch_plan,
+                *selector,
+                cases,
+                *default,
+                &values,
+                &layout,
+            )?,
+            NodePayload::PrioritySel {
+                selector,
+                cases,
+                default,
+            } => lower_priority_sel(
+                builder,
+                function,
+                node,
+                *node_ref,
+                return_node,
+                output_pointer,
+                scratch_pointer,
+                scratch_plan,
+                *selector,
+                cases,
+                *default,
+                &values,
+                &layout,
+            )?,
+            NodePayload::OneHotSel { selector, cases } => lower_one_hot_sel(
+                builder,
+                function,
+                node,
+                *node_ref,
+                return_node,
+                output_pointer,
+                scratch_pointer,
+                scratch_plan,
+                *selector,
+                cases,
+                &values,
+                &layout,
+            )?,
+            NodePayload::OneHot { arg, lsb_prio } => {
+                let result_layout = require_scalar_layout(&layout)?;
+                let arg_layout = ScalarLayout::from_type(&function.get_node(*arg).ty)?;
+                ComputedValue::Scalar(lower_one_hot(
+                    builder,
+                    scalar_value_for(&values, *arg)?,
+                    arg_layout,
+                    result_layout,
+                    *lsb_prio,
+                ))
+            }
+            NodePayload::Encode { arg } => {
+                let result_layout = require_scalar_layout(&layout)?;
+                let arg_layout = ScalarLayout::from_type(&function.get_node(*arg).ty)?;
+                ComputedValue::Scalar(lower_encode(
+                    builder,
+                    scalar_value_for(&values, *arg)?,
+                    arg_layout,
+                    result_layout,
+                ))
+            }
+            NodePayload::Decode { arg, width: _ } => {
+                let result_layout = require_scalar_layout(&layout)?;
+                let arg_layout = ScalarLayout::from_type(&function.get_node(*arg).ty)?;
+                ComputedValue::Scalar(lower_decode(
+                    builder,
+                    scalar_value_for(&values, *arg)?,
+                    arg_layout,
+                    result_layout,
+                ))
+            }
             _ => return Err(unsupported_node(node)),
         };
         values[node_ref.index] = Some(value);
@@ -799,7 +1333,7 @@ fn lower_binop(
             .icmp(IntCC::UnsignedLessThanOrEqual, lhs_value, rhs_value),
         Binop::Sgt | Binop::Sge | Binop::Slt | Binop::Sle => {
             let lhs_signed = signed_value(builder, lhs_value, lhs_layout);
-            let rhs_signed = signed_value(builder, rhs_value, lhs_layout);
+            let rhs_signed = signed_value(builder, rhs_value, rhs_layout);
             let condition = match op {
                 Binop::Sgt => IntCC::SignedGreaterThan,
                 Binop::Sge => IntCC::SignedGreaterThanOrEqual,
@@ -809,20 +1343,123 @@ fn lower_binop(
             };
             builder.ins().icmp(condition, lhs_signed, rhs_signed)
         }
-        Binop::Shll => {
-            let out_of_bounds = builder.ins().icmp_imm(
-                IntCC::UnsignedGreaterThanOrEqual,
-                rhs_value,
-                lhs_layout.bit_count as i64,
-            );
-            let shift = resize_unsigned(builder, rhs_value, rhs_layout, lhs_layout);
-            let shifted = builder.ins().ishl(lhs_value, shift);
-            let zero = builder.ins().iconst(layout.clif_type(), 0);
-            builder.ins().select(out_of_bounds, zero, shifted)
+        Binop::Shll => lower_shift(builder, lhs_value, rhs_value, lhs_layout, rhs_layout, op),
+        Binop::Shrl | Binop::Shra => {
+            lower_shift(builder, lhs_value, rhs_value, lhs_layout, rhs_layout, op)
+        }
+        Binop::Udiv | Binop::Umod | Binop::Sdiv | Binop::Smod => {
+            lower_divmod(builder, lhs_value, rhs_value, lhs_layout, op)
         }
         _ => return Err(unsupported_node(node)),
     };
     Ok(mask_value(builder, raw, layout))
+}
+
+fn lower_shift(
+    builder: &mut FunctionBuilder<'_>,
+    lhs: Value,
+    rhs: Value,
+    lhs_layout: ScalarLayout,
+    rhs_layout: ScalarLayout,
+    op: Binop,
+) -> Value {
+    let out_of_bounds = builder.ins().icmp_imm(
+        IntCC::UnsignedGreaterThanOrEqual,
+        rhs,
+        lhs_layout.bit_count as i64,
+    );
+    let shift = resize_unsigned(builder, rhs, rhs_layout, lhs_layout);
+    match op {
+        Binop::Shll => {
+            let shifted = builder.ins().ishl(lhs, shift);
+            let zero = builder.ins().iconst(lhs_layout.clif_type(), 0);
+            builder.ins().select(out_of_bounds, zero, shifted)
+        }
+        Binop::Shrl => {
+            let shifted = builder.ins().ushr(lhs, shift);
+            let zero = builder.ins().iconst(lhs_layout.clif_type(), 0);
+            builder.ins().select(out_of_bounds, zero, shifted)
+        }
+        Binop::Shra => {
+            let signed = signed_value(builder, lhs, lhs_layout);
+            let shifted = builder.ins().sshr(signed, shift);
+            let fill = builder
+                .ins()
+                .sshr_imm(signed, (lhs_layout.bit_count - 1) as i64);
+            builder.ins().select(out_of_bounds, fill, shifted)
+        }
+        _ => unreachable!("lower_shift is called only for shift operations"),
+    }
+}
+
+/// Lowers division and remainder while avoiding Cranelift traps for XLS-defined
+/// divide-by-zero and signed-overflow cases.
+fn lower_divmod(
+    builder: &mut FunctionBuilder<'_>,
+    lhs: Value,
+    rhs: Value,
+    layout: ScalarLayout,
+    op: Binop,
+) -> Value {
+    let zero = builder.ins().iconst(layout.clif_type(), 0);
+    let one = builder.ins().iconst(layout.clif_type(), 1);
+    let divisor_is_zero = builder.ins().icmp_imm(IntCC::Equal, rhs, 0);
+    match op {
+        Binop::Udiv | Binop::Umod => {
+            let safe_rhs = builder.ins().select(divisor_is_zero, one, rhs);
+            let computed = if op == Binop::Udiv {
+                builder.ins().udiv(lhs, safe_rhs)
+            } else {
+                builder.ins().urem(lhs, safe_rhs)
+            };
+            let exceptional = if op == Binop::Udiv {
+                builder
+                    .ins()
+                    .iconst(layout.clif_type(), layout.mask() as i64)
+            } else {
+                zero
+            };
+            builder.ins().select(divisor_is_zero, exceptional, computed)
+        }
+        Binop::Sdiv | Binop::Smod => {
+            let signed_lhs = signed_value(builder, lhs, layout);
+            let signed_rhs = signed_value(builder, rhs, layout);
+            let minimum = builder
+                .ins()
+                .iconst(layout.clif_type(), (1u64 << (layout.bit_count - 1)) as i64);
+            let negative_one = builder
+                .ins()
+                .iconst(layout.clif_type(), layout.mask() as i64);
+            let lhs_is_minimum = builder.ins().icmp(IntCC::Equal, lhs, minimum);
+            let rhs_is_negative_one = builder.ins().icmp(IntCC::Equal, rhs, negative_one);
+            let signed_overflow = builder.ins().band(lhs_is_minimum, rhs_is_negative_one);
+            let exceptional = builder.ins().bor(divisor_is_zero, signed_overflow);
+            let safe_rhs = builder.ins().select(exceptional, one, signed_rhs);
+            let computed = if op == Binop::Sdiv {
+                builder.ins().sdiv(signed_lhs, safe_rhs)
+            } else {
+                builder.ins().srem(signed_lhs, safe_rhs)
+            };
+            if op == Binop::Smod {
+                builder.ins().select(exceptional, zero, computed)
+            } else {
+                let sign_is_negative = builder.ins().icmp_imm(IntCC::SignedLessThan, signed_lhs, 0);
+                let maximum = builder.ins().iconst(
+                    layout.clif_type(),
+                    ((1u64 << (layout.bit_count - 1)) - 1) as i64,
+                );
+                let div_by_zero_result = builder.ins().select(sign_is_negative, minimum, maximum);
+                let exceptional_result =
+                    builder
+                        .ins()
+                        .select(signed_overflow, minimum, div_by_zero_result);
+                builder
+                    .ins()
+                    .select(exceptional, exceptional_result, computed)
+            }
+        }
+        _ => unreachable!("lower_divmod is called only for division/remainder operations"),
+    }
 }
 
 /// Lowers a scalar concatenation into extension, shifting, and or-ing.
@@ -864,6 +1501,380 @@ fn lower_concat(
     Ok(mask_value(builder, result, layout))
 }
 
+/// Lowers a zero-filled dynamic bit slice without allowing a backend overshift.
+fn lower_dynamic_bit_slice(
+    builder: &mut FunctionBuilder<'_>,
+    arg: Value,
+    arg_layout: ScalarLayout,
+    start: Value,
+    start_layout: ScalarLayout,
+    result_layout: ScalarLayout,
+) -> Value {
+    let out_of_bounds = builder.ins().icmp_imm(
+        IntCC::UnsignedGreaterThanOrEqual,
+        start,
+        arg_layout.bit_count as i64,
+    );
+    let zero_start = builder.ins().iconst(start_layout.clif_type(), 0);
+    let safe_start = builder.ins().select(out_of_bounds, zero_start, start);
+    let shift = resize_unsigned(builder, safe_start, start_layout, arg_layout);
+    let shifted = builder.ins().ushr(arg, shift);
+    let resized = resize_unsigned(builder, shifted, arg_layout, result_layout);
+    let zero = builder.ins().iconst(result_layout.clif_type(), 0);
+    let selected = builder.ins().select(out_of_bounds, zero, resized);
+    mask_value(builder, selected, result_layout)
+}
+
+/// Lowers insertion of a dynamic low-to-high bit slice into a bits value.
+#[allow(clippy::too_many_arguments)]
+fn lower_bit_slice_update(
+    builder: &mut FunctionBuilder<'_>,
+    arg: Value,
+    arg_layout: ScalarLayout,
+    start: Value,
+    start_layout: ScalarLayout,
+    update: Value,
+    update_layout: ScalarLayout,
+    result_layout: ScalarLayout,
+) -> Value {
+    let out_of_bounds = builder.ins().icmp_imm(
+        IntCC::UnsignedGreaterThanOrEqual,
+        start,
+        arg_layout.bit_count as i64,
+    );
+    let zero_start = builder.ins().iconst(start_layout.clif_type(), 0);
+    let safe_start = builder.ins().select(out_of_bounds, zero_start, start);
+    let shift = resize_unsigned(builder, safe_start, start_layout, arg_layout);
+    let resized_update = resize_unsigned(builder, update, update_layout, arg_layout);
+    let update_mask = if update_layout.bit_count >= arg_layout.bit_count {
+        arg_layout.mask()
+    } else {
+        update_layout.mask()
+    };
+    let update_mask = builder
+        .ins()
+        .iconst(arg_layout.clif_type(), update_mask as i64);
+    let shifted_mask = builder.ins().ishl(update_mask, shift);
+    let keep_mask = builder.ins().bnot(shifted_mask);
+    let retained = builder.ins().band(arg, keep_mask);
+    let inserted = builder.ins().ishl(resized_update, shift);
+    let updated = builder.ins().bor(retained, inserted);
+    let selected = builder.ins().select(out_of_bounds, arg, updated);
+    mask_value(builder, selected, result_layout)
+}
+
+/// Lowers the extended carry-out operation for native scalar widths.
+fn lower_ext_carry_out(
+    builder: &mut FunctionBuilder<'_>,
+    lhs: Value,
+    rhs: Value,
+    c_in: Value,
+    operand_layout: ScalarLayout,
+    c_in_layout: ScalarLayout,
+    result_layout: ScalarLayout,
+) -> Value {
+    let carry = if operand_layout.bit_count == 64 {
+        let sum = builder.ins().iadd(lhs, rhs);
+        let carry_from_operands = builder.ins().icmp(IntCC::UnsignedLessThan, sum, lhs);
+        let c_in = resize_integer_type_unsigned(builder, c_in, c_in_layout, types::I64);
+        let sum_with_carry = builder.ins().iadd(sum, c_in);
+        let carry_from_input = builder
+            .ins()
+            .icmp(IntCC::UnsignedLessThan, sum_with_carry, sum);
+        builder.ins().bor(carry_from_operands, carry_from_input)
+    } else {
+        let lhs = resize_integer_type_unsigned(builder, lhs, operand_layout, types::I64);
+        let rhs = resize_integer_type_unsigned(builder, rhs, operand_layout, types::I64);
+        let c_in = resize_integer_type_unsigned(builder, c_in, c_in_layout, types::I64);
+        let sum = builder.ins().iadd(lhs, rhs);
+        let sum = builder.ins().iadd(sum, c_in);
+        let shifted = builder.ins().ushr_imm(sum, operand_layout.bit_count as i64);
+        let bit = builder.ins().band_imm(shifted, 1);
+        builder.ins().icmp_imm(IntCC::NotEqual, bit, 0)
+    };
+    mask_value(builder, carry, result_layout)
+}
+
+/// Lowers priority encode while preserving its all-zero sentinel index.
+fn lower_ext_prio_encode(
+    builder: &mut FunctionBuilder<'_>,
+    arg: Value,
+    arg_layout: ScalarLayout,
+    result_layout: ScalarLayout,
+    lsb_prio: bool,
+) -> Value {
+    let mut result = builder
+        .ins()
+        .iconst(result_layout.clif_type(), arg_layout.bit_count as i64);
+    let indices: Box<dyn Iterator<Item = usize>> = if lsb_prio {
+        Box::new((0..arg_layout.bit_count).rev())
+    } else {
+        Box::new(0..arg_layout.bit_count)
+    };
+    for index in indices {
+        let selected = bit_is_set(builder, arg, arg_layout, index);
+        let encoded = builder
+            .ins()
+            .iconst(result_layout.clif_type(), index as i64);
+        result = builder.ins().select(selected, encoded, result);
+    }
+    mask_value(builder, result, result_layout)
+}
+
+/// Computes the leading-zero count for the logical PIR width, excluding
+/// padding in its native carrier.
+fn lower_logical_clz(
+    builder: &mut FunctionBuilder<'_>,
+    arg: Value,
+    arg_layout: ScalarLayout,
+) -> Value {
+    let clz = builder.ins().clz(arg);
+    let padding = arg_layout.storage_bit_count() - arg_layout.bit_count;
+    if padding == 0 {
+        clz
+    } else {
+        builder.ins().iadd_imm(clz, -(padding as i64))
+    }
+}
+
+/// Lowers leading-zero count plus a static offset modulo the result width.
+fn lower_ext_clz(
+    builder: &mut FunctionBuilder<'_>,
+    arg: Value,
+    arg_layout: ScalarLayout,
+    result_layout: ScalarLayout,
+    offset: usize,
+) -> Value {
+    let clz = lower_logical_clz(builder, arg, arg_layout);
+    let resized = resize_unsigned(builder, clz, arg_layout, result_layout);
+    let adjusted = builder
+        .ins()
+        .iadd_imm(resized, (offset as u64 & result_layout.mask()) as i64);
+    mask_value(builder, adjusted, result_layout)
+}
+
+/// Lowers normalize-left, materializing the optional `(normalized, clz)`
+/// tuple result in native tuple storage.
+#[allow(clippy::too_many_arguments)]
+fn lower_ext_normalize_left(
+    builder: &mut FunctionBuilder<'_>,
+    function: &ir::Fn,
+    node: &ir::Node,
+    node_ref: NodeRef,
+    return_node: NodeRef,
+    output_pointer: Value,
+    scratch_pointer: Value,
+    scratch_plan: &ScratchPlan,
+    arg: NodeRef,
+    shift_offset: usize,
+    arg_value: Value,
+    result_layout: &NativeValueLayout,
+) -> Result<ComputedValue, JitError> {
+    let arg_layout = ScalarLayout::from_type(&function.get_node(arg).ty)?;
+    let (normalized_layout, clz_layout) = match result_layout {
+        NativeValueLayout::Scalar(layout) => (*layout, None),
+        NativeValueLayout::Tuple { fields, .. } if fields.len() == 2 => (
+            require_scalar_layout(fields[0].layout.as_ref())?,
+            Some(require_scalar_layout(fields[1].layout.as_ref())?),
+        ),
+        _ => {
+            return Err(JitError::InvalidFunction(format!(
+                "ext_normalize_left has unexpected result layout at {}",
+                node.text_id
+            )));
+        }
+    };
+    let logical_clz = lower_logical_clz(builder, arg_value, arg_layout);
+    let normalized_zero = builder.ins().iconst(normalized_layout.clif_type(), 0);
+    let normalized = if shift_offset >= normalized_layout.bit_count {
+        normalized_zero
+    } else {
+        let resized_arg = resize_unsigned(builder, arg_value, arg_layout, normalized_layout);
+        let shift = builder.ins().iadd_imm(logical_clz, shift_offset as i64);
+        let out_of_bounds = builder.ins().icmp_imm(
+            IntCC::UnsignedGreaterThanOrEqual,
+            shift,
+            normalized_layout.bit_count as i64,
+        );
+        let zero_shift = builder.ins().iconst(arg_layout.clif_type(), 0);
+        let safe_shift = builder.ins().select(out_of_bounds, zero_shift, shift);
+        let safe_shift = resize_unsigned(builder, safe_shift, arg_layout, normalized_layout);
+        let shifted = builder.ins().ishl(resized_arg, safe_shift);
+        builder
+            .ins()
+            .select(out_of_bounds, normalized_zero, shifted)
+    };
+    let normalized = mask_value(builder, normalized, normalized_layout);
+    let Some(clz_layout) = clz_layout else {
+        return Ok(ComputedValue::Scalar(normalized));
+    };
+    let NativeValueLayout::Tuple { fields, .. } = result_layout else {
+        unreachable!("clz layout is present only for a tuple result");
+    };
+    let destination = materialized_destination(
+        builder,
+        node_ref,
+        return_node,
+        output_pointer,
+        scratch_pointer,
+        scratch_plan,
+    )?;
+    let normalized_pointer = pointer_at_offset(builder, destination, fields[0].offset);
+    store_value_to_storage(
+        builder,
+        normalized_pointer,
+        ComputedValue::Scalar(normalized),
+        fields[0].layout.as_ref(),
+    )?;
+    let clz = resize_unsigned(builder, logical_clz, arg_layout, clz_layout);
+    let clz = mask_value(builder, clz, clz_layout);
+    let clz_pointer = pointer_at_offset(builder, destination, fields[1].offset);
+    store_value_to_storage(
+        builder,
+        clz_pointer,
+        ComputedValue::Scalar(clz),
+        fields[1].layout.as_ref(),
+    )?;
+    Ok(ComputedValue::Address(destination))
+}
+
+/// Lowers generation of a low-bit mask with saturating large counts.
+fn lower_ext_mask_low(
+    builder: &mut FunctionBuilder<'_>,
+    count: Value,
+    count_layout: ScalarLayout,
+    result_layout: ScalarLayout,
+) -> Value {
+    let saturated = builder.ins().icmp_imm(
+        IntCC::UnsignedGreaterThanOrEqual,
+        count,
+        result_layout.bit_count as i64,
+    );
+    let zero_count = builder.ins().iconst(count_layout.clif_type(), 0);
+    let safe_count = builder.ins().select(saturated, zero_count, count);
+    let shift = resize_unsigned(builder, safe_count, count_layout, result_layout);
+    let one = builder.ins().iconst(result_layout.clif_type(), 1);
+    let power = builder.ins().ishl(one, shift);
+    let mask = builder.ins().isub(power, one);
+    let all_ones = builder
+        .ins()
+        .iconst(result_layout.clif_type(), result_layout.mask() as i64);
+    let selected = builder.ins().select(saturated, all_ones, mask);
+    mask_value(builder, selected, result_layout)
+}
+
+/// Lowers signed/unsigned and optionally negated terms into a modular sum.
+fn lower_ext_nary_add(
+    builder: &mut FunctionBuilder<'_>,
+    function: &ir::Fn,
+    terms: &[ir::ExtNaryAddTerm],
+    values: &[Option<ComputedValue>],
+    result_layout: ScalarLayout,
+) -> Result<Value, JitError> {
+    let mut result = builder.ins().iconst(result_layout.clif_type(), 0);
+    for term in terms {
+        let term_layout = ScalarLayout::from_type(&function.get_node(term.operand).ty)?;
+        let value = scalar_value_for(values, term.operand)?;
+        let resized = if term.signed {
+            let signed = signed_value(builder, value, term_layout);
+            resize_signed(builder, signed, term_layout, result_layout)
+        } else {
+            resize_unsigned(builder, value, term_layout, result_layout)
+        };
+        let contribution = if term.negated {
+            builder.ins().ineg(resized)
+        } else {
+            resized
+        };
+        result = builder.ins().iadd(result, contribution);
+    }
+    Ok(mask_value(builder, result, result_layout))
+}
+
+/// Lowers XLS partial-product multiplies using the same deterministic
+/// decomposition selected by the existing LLVM JIT.
+#[allow(clippy::too_many_arguments)]
+fn lower_mulp(
+    builder: &mut FunctionBuilder<'_>,
+    function: &ir::Fn,
+    destination: Value,
+    op: Binop,
+    lhs: NodeRef,
+    rhs: NodeRef,
+    values: &[Option<ComputedValue>],
+    result_layout: &NativeValueLayout,
+) -> Result<(), JitError> {
+    let NativeValueLayout::Tuple { fields, .. } = result_layout else {
+        return Err(JitError::InvalidFunction(
+            "partial-product multiply did not have tuple result type".into(),
+        ));
+    };
+    if fields.len() != 2 || fields[0].layout != fields[1].layout {
+        return Err(JitError::InvalidFunction(
+            "partial-product multiply requires two equal scalar tuple fields".into(),
+        ));
+    }
+    let element_layout = require_scalar_layout(fields[0].layout.as_ref())?;
+    let lhs_layout = ScalarLayout::from_type(&function.get_node(lhs).ty)?;
+    let rhs_layout = ScalarLayout::from_type(&function.get_node(rhs).ty)?;
+    let lhs_value = scalar_value_for(values, lhs)?;
+    let rhs_value = scalar_value_for(values, rhs)?;
+    let (lhs_value, rhs_value) = if op == Binop::Smulp {
+        let lhs_signed = signed_value(builder, lhs_value, lhs_layout);
+        let rhs_signed = signed_value(builder, rhs_value, rhs_layout);
+        (
+            resize_signed(builder, lhs_signed, lhs_layout, element_layout),
+            resize_signed(builder, rhs_signed, rhs_layout, element_layout),
+        )
+    } else {
+        (
+            resize_unsigned(builder, lhs_value, lhs_layout, element_layout),
+            resize_unsigned(builder, rhs_value, rhs_layout, element_layout),
+        )
+    };
+    let product = builder.ins().imul(lhs_value, rhs_value);
+    let product = mask_value(builder, product, element_layout);
+    let offset_value = mulp_offset_for_llvm_jit(element_layout.bit_count);
+    let offset = builder
+        .ins()
+        .iconst(element_layout.clif_type(), offset_value as i64);
+    let residual = builder.ins().isub(product, offset);
+    let residual = mask_value(builder, residual, element_layout);
+    let first = pointer_at_offset(builder, destination, fields[0].offset);
+    let second = pointer_at_offset(builder, destination, fields[1].offset);
+    store_value_to_storage(
+        builder,
+        first,
+        ComputedValue::Scalar(offset),
+        fields[0].layout.as_ref(),
+    )?;
+    store_value_to_storage(
+        builder,
+        second,
+        ComputedValue::Scalar(residual),
+        fields[1].layout.as_ref(),
+    )?;
+    Ok(())
+}
+
+/// Returns XLS LLVM JIT's deterministic partial-product offset.
+fn mulp_offset_for_llvm_jit(result_width: usize) -> u64 {
+    let low_width = result_width.saturating_sub(2);
+    let high_width = result_width - low_width;
+    let low_shift = low_width.saturating_sub(1).min(3);
+    let low = if low_width == 0 {
+        0
+    } else {
+        ((1u64 << low_width) - 1) >> low_shift
+    };
+    let high = if high_width == 0 {
+        0
+    } else {
+        (1u64 << (high_width - 1)) - 1
+    };
+    (high << low_width) | low
+}
+
 /// Lowers indexing into a native array, returning either an element scalar or
 /// an address into a nested array value.
 fn lower_array_index(
@@ -878,7 +1889,15 @@ fn lower_array_index(
     pointer_type: ClifType,
 ) -> Result<ComputedValue, JitError> {
     if indices.is_empty() {
-        return Err(unsupported_node(node));
+        let value = computed_value_for(values, array)?;
+        let input_layout = NativeValueLayout::from_type(&function.get_node(array).ty)?;
+        if input_layout != *layout {
+            return Err(JitError::InvalidFunction(format!(
+                "zero-index array_index result layout disagrees with input at {}",
+                node.text_id
+            )));
+        }
+        return Ok(value);
     }
     let mut pointer = address_value_for(values, array)?;
     let mut current_layout = NativeValueLayout::from_type(&function.get_node(array).ty)?;
@@ -969,6 +1988,20 @@ fn lower_literal_to_storage(
                 lower_literal_to_storage(builder, pointer, child, element)?;
             }
         }
+        NativeValueLayout::Tuple { fields, .. } => {
+            let elements = literal
+                .get_elements()
+                .map_err(|error| JitError::Value(error.to_string()))?;
+            if elements.len() != fields.len() {
+                return Err(JitError::InvalidFunction(
+                    "literal tuple field count disagrees with its PIR type".into(),
+                ));
+            }
+            for (field, child) in fields.iter().zip(elements.iter()) {
+                let pointer = pointer_at_offset(builder, destination, field.offset);
+                lower_literal_to_storage(builder, pointer, child, field.layout.as_ref())?;
+            }
+        }
     }
     Ok(())
 }
@@ -1004,6 +2037,831 @@ fn lower_array_construction(
         )?;
     }
     Ok(())
+}
+
+fn lower_tuple_construction(
+    builder: &mut FunctionBuilder<'_>,
+    destination: Value,
+    elements: &[NodeRef],
+    values: &[Option<ComputedValue>],
+    layout: &NativeValueLayout,
+) -> Result<(), JitError> {
+    let NativeValueLayout::Tuple { fields, .. } = layout else {
+        return Err(JitError::InvalidFunction(
+            "tuple node did not have tuple result type".into(),
+        ));
+    };
+    if elements.len() != fields.len() {
+        return Err(JitError::InvalidFunction(
+            "tuple node operand count disagrees with its result type".into(),
+        ));
+    }
+    for (node_ref, field) in elements.iter().zip(fields.iter()) {
+        let pointer = pointer_at_offset(builder, destination, field.offset);
+        store_value_to_storage(
+            builder,
+            pointer,
+            computed_value_for(values, *node_ref)?,
+            field.layout.as_ref(),
+        )?;
+    }
+    Ok(())
+}
+
+fn lower_tuple_index(
+    builder: &mut FunctionBuilder<'_>,
+    tuple: NodeRef,
+    index: usize,
+    values: &[Option<ComputedValue>],
+    result_layout: &NativeValueLayout,
+    function: &ir::Fn,
+    node: &ir::Node,
+) -> Result<ComputedValue, JitError> {
+    let tuple_layout = NativeValueLayout::from_type(&function.get_node(tuple).ty)?;
+    let NativeValueLayout::Tuple { fields, .. } = tuple_layout else {
+        return Err(JitError::InvalidFunction(format!(
+            "tuple_index operand is not a tuple at {}",
+            node.text_id
+        )));
+    };
+    let field = fields.get(index).ok_or_else(|| {
+        JitError::InvalidFunction(format!("tuple_index is out of bounds at {}", node.text_id))
+    })?;
+    if field.layout.as_ref() != result_layout {
+        return Err(JitError::InvalidFunction(format!(
+            "tuple_index result layout disagrees with result type at {}",
+            node.text_id
+        )));
+    }
+    let tuple_pointer = address_value_for(values, tuple)?;
+    let field_pointer = pointer_at_offset(builder, tuple_pointer, field.offset);
+    Ok(load_value_from_storage(
+        builder,
+        field_pointer,
+        result_layout,
+    ))
+}
+
+fn lower_array_concat(
+    builder: &mut FunctionBuilder<'_>,
+    destination: Value,
+    lhs: ComputedValue,
+    rhs: ComputedValue,
+    lhs_ty: &Type,
+    rhs_ty: &Type,
+    result_layout: &NativeValueLayout,
+) -> Result<(), JitError> {
+    let NativeValueLayout::Array {
+        element,
+        element_count,
+    } = result_layout
+    else {
+        return Err(JitError::InvalidFunction(
+            "array_concat node did not have array result type".into(),
+        ));
+    };
+    let Type::Array(lhs_ty) = lhs_ty else {
+        return Err(JitError::InvalidFunction(
+            "array_concat lhs did not have array type".into(),
+        ));
+    };
+    let Type::Array(rhs_ty) = rhs_ty else {
+        return Err(JitError::InvalidFunction(
+            "array_concat rhs did not have array type".into(),
+        ));
+    };
+    if lhs_ty.element_count + rhs_ty.element_count != *element_count {
+        return Err(JitError::InvalidFunction(
+            "array_concat result length disagrees with operands".into(),
+        ));
+    }
+    copy_array_elements(
+        builder,
+        destination,
+        0,
+        expect_address(lhs)?,
+        lhs_ty.element_count,
+        element,
+    )?;
+    copy_array_elements(
+        builder,
+        destination,
+        lhs_ty.element_count,
+        expect_address(rhs)?,
+        rhs_ty.element_count,
+        element,
+    )
+}
+
+fn copy_array_elements(
+    builder: &mut FunctionBuilder<'_>,
+    destination: Value,
+    destination_start: usize,
+    source: Value,
+    source_element_count: usize,
+    element_layout: &NativeValueLayout,
+) -> Result<(), JitError> {
+    for index in 0..source_element_count {
+        let source_element =
+            pointer_at_offset(builder, source, index * element_layout.byte_count());
+        let destination_element = pointer_at_offset(
+            builder,
+            destination,
+            (destination_start + index) * element_layout.byte_count(),
+        );
+        let element = load_value_from_storage(builder, source_element, element_layout);
+        store_value_to_storage(builder, destination_element, element, element_layout)?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_array_slice(
+    builder: &mut FunctionBuilder<'_>,
+    function: &ir::Fn,
+    destination: Value,
+    array: NodeRef,
+    start: NodeRef,
+    values: &[Option<ComputedValue>],
+    result_layout: &NativeValueLayout,
+    pointer_type: ClifType,
+) -> Result<(), JitError> {
+    let NativeValueLayout::Array {
+        element: result_element,
+        element_count: result_count,
+    } = result_layout
+    else {
+        return Err(JitError::InvalidFunction(
+            "array_slice node did not have array result type".into(),
+        ));
+    };
+    let NativeValueLayout::Array {
+        element: input_element,
+        element_count: input_count,
+    } = NativeValueLayout::from_type(&function.get_node(array).ty)?
+    else {
+        return Err(JitError::InvalidFunction(
+            "array_slice operand did not have array type".into(),
+        ));
+    };
+    if input_element.as_ref() != result_element.as_ref() {
+        return Err(JitError::InvalidFunction(
+            "array_slice element layout disagrees with result type".into(),
+        ));
+    }
+    let source = address_value_for(values, array)?;
+    let start_value = scalar_value_for(values, start)?;
+    let start_layout = ScalarLayout::from_type(&function.get_node(start).ty)?;
+    for output_index in 0..*result_count {
+        let source_element = clamped_array_element_pointer(
+            builder,
+            source,
+            start_value,
+            start_layout,
+            input_count,
+            output_index,
+            input_element.byte_count(),
+            pointer_type,
+        )?;
+        let destination_element = pointer_at_offset(
+            builder,
+            destination,
+            output_index * result_element.byte_count(),
+        );
+        let element = load_value_from_storage(builder, source_element, result_element);
+        store_value_to_storage(builder, destination_element, element, result_element)?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_array_update(
+    builder: &mut FunctionBuilder<'_>,
+    function: &ir::Fn,
+    node: &ir::Node,
+    node_ref: NodeRef,
+    return_node: NodeRef,
+    output_pointer: Value,
+    scratch_pointer: Value,
+    scratch_plan: &ScratchPlan,
+    array: NodeRef,
+    value: NodeRef,
+    indices: &[NodeRef],
+    assumed_in_bounds: bool,
+    values: &[Option<ComputedValue>],
+    layout: &NativeValueLayout,
+    pointer_type: ClifType,
+) -> Result<ComputedValue, JitError> {
+    if indices.is_empty() {
+        return Ok(computed_value_for(values, value)?);
+    }
+    let destination = materialized_destination(
+        builder,
+        node_ref,
+        return_node,
+        output_pointer,
+        scratch_pointer,
+        scratch_plan,
+    )?;
+    store_value_to_storage(
+        builder,
+        destination,
+        computed_value_for(values, array)?,
+        layout,
+    )?;
+
+    let mut target = destination;
+    let mut target_layout = layout.clone();
+    let mut all_in_bounds = None;
+    for index in indices {
+        let NativeValueLayout::Array {
+            element,
+            element_count,
+        } = target_layout
+        else {
+            return Err(JitError::InvalidFunction(format!(
+                "array_update exceeds array dimensions at {}",
+                node.text_id
+            )));
+        };
+        let index_layout = ScalarLayout::from_type(&function.get_node(*index).ty)?;
+        let (bounded_index, is_in_bounds) = update_array_index(
+            builder,
+            scalar_value_for(values, *index)?,
+            index_layout,
+            element_count,
+            assumed_in_bounds,
+            node,
+        )?;
+        all_in_bounds = Some(match all_in_bounds {
+            Some(condition) => builder.ins().band(condition, is_in_bounds),
+            None => is_in_bounds,
+        });
+        target = array_element_pointer(
+            builder,
+            target,
+            bounded_index,
+            index_layout,
+            element.byte_count(),
+            pointer_type,
+        );
+        target_layout = *element;
+    }
+    let condition = all_in_bounds.expect("nonempty array update has an index condition");
+    let original = load_value_from_storage(builder, target, &target_layout);
+    write_selected_value_to_storage(
+        builder,
+        target,
+        condition,
+        computed_value_for(values, value)?,
+        Some(original),
+        &target_layout,
+    )?;
+    Ok(ComputedValue::Address(destination))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_gate(
+    builder: &mut FunctionBuilder<'_>,
+    node_ref: NodeRef,
+    return_node: NodeRef,
+    output_pointer: Value,
+    scratch_pointer: Value,
+    scratch_plan: &ScratchPlan,
+    predicate: Value,
+    gated: ComputedValue,
+    layout: &NativeValueLayout,
+) -> Result<ComputedValue, JitError> {
+    let enabled = builder.ins().icmp_imm(IntCC::NotEqual, predicate, 0);
+    selected_value(
+        builder,
+        node_ref,
+        return_node,
+        output_pointer,
+        scratch_pointer,
+        scratch_plan,
+        enabled,
+        gated,
+        None,
+        layout,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_sel(
+    builder: &mut FunctionBuilder<'_>,
+    node_ref: NodeRef,
+    return_node: NodeRef,
+    output_pointer: Value,
+    scratch_pointer: Value,
+    scratch_plan: &ScratchPlan,
+    selector: NodeRef,
+    cases: &[NodeRef],
+    default: Option<NodeRef>,
+    values: &[Option<ComputedValue>],
+    layout: &NativeValueLayout,
+) -> Result<ComputedValue, JitError> {
+    let selector_value = scalar_value_for(values, selector)?;
+    let initial = default
+        .or_else(|| cases.last().copied())
+        .ok_or_else(|| JitError::InvalidFunction("sel requires a case or default".into()))?;
+    let mut result = computed_value_for(values, initial)?;
+    for (index, case) in cases.iter().enumerate().rev() {
+        let selected = builder
+            .ins()
+            .icmp_imm(IntCC::Equal, selector_value, index as i64);
+        result = selected_value(
+            builder,
+            node_ref,
+            return_node,
+            output_pointer,
+            scratch_pointer,
+            scratch_plan,
+            selected,
+            computed_value_for(values, *case)?,
+            Some(result),
+            layout,
+        )?;
+    }
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_priority_sel(
+    builder: &mut FunctionBuilder<'_>,
+    function: &ir::Fn,
+    node: &ir::Node,
+    node_ref: NodeRef,
+    return_node: NodeRef,
+    output_pointer: Value,
+    scratch_pointer: Value,
+    scratch_plan: &ScratchPlan,
+    selector: NodeRef,
+    cases: &[NodeRef],
+    default: Option<NodeRef>,
+    values: &[Option<ComputedValue>],
+    layout: &NativeValueLayout,
+) -> Result<ComputedValue, JitError> {
+    let Some(default) = default else {
+        return Err(JitError::UnsupportedNode(format!(
+            "priority_sel without default at node {}",
+            node.text_id
+        )));
+    };
+    let selector_value = scalar_value_for(values, selector)?;
+    let selector_layout = ScalarLayout::from_type(&function.get_node(selector).ty)?;
+    let mut result = computed_value_for(values, default)?;
+    for (index, case) in cases.iter().enumerate().rev() {
+        let selected = bit_is_set(builder, selector_value, selector_layout, index);
+        result = selected_value(
+            builder,
+            node_ref,
+            return_node,
+            output_pointer,
+            scratch_pointer,
+            scratch_plan,
+            selected,
+            computed_value_for(values, *case)?,
+            Some(result),
+            layout,
+        )?;
+    }
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_one_hot_sel(
+    builder: &mut FunctionBuilder<'_>,
+    function: &ir::Fn,
+    node: &ir::Node,
+    node_ref: NodeRef,
+    return_node: NodeRef,
+    output_pointer: Value,
+    scratch_pointer: Value,
+    scratch_plan: &ScratchPlan,
+    selector: NodeRef,
+    cases: &[NodeRef],
+    values: &[Option<ComputedValue>],
+    layout: &NativeValueLayout,
+) -> Result<ComputedValue, JitError> {
+    if cases.is_empty() {
+        return Err(unsupported_node(node));
+    }
+    let selector_value = scalar_value_for(values, selector)?;
+    let selector_layout = ScalarLayout::from_type(&function.get_node(selector).ty)?;
+    match layout {
+        NativeValueLayout::Scalar(scalar) => {
+            let mut result = builder.ins().iconst(scalar.clif_type(), 0);
+            for (index, case) in cases.iter().enumerate() {
+                let active = bit_is_set(builder, selector_value, selector_layout, index);
+                let with_case = builder.ins().bor(result, scalar_value_for(values, *case)?);
+                result = builder.ins().select(active, with_case, result);
+            }
+            Ok(ComputedValue::Scalar(mask_value(builder, result, *scalar)))
+        }
+        NativeValueLayout::Array { .. } | NativeValueLayout::Tuple { .. } => {
+            let destination = materialized_destination(
+                builder,
+                node_ref,
+                return_node,
+                output_pointer,
+                scratch_pointer,
+                scratch_plan,
+            )?;
+            write_zero_value_to_storage(builder, destination, layout);
+            for (index, case) in cases.iter().enumerate() {
+                let active = bit_is_set(builder, selector_value, selector_layout, index);
+                write_selected_or_value_to_storage(
+                    builder,
+                    destination,
+                    active,
+                    computed_value_for(values, *case)?,
+                    layout,
+                )?;
+            }
+            Ok(ComputedValue::Address(destination))
+        }
+    }
+}
+
+fn lower_one_hot(
+    builder: &mut FunctionBuilder<'_>,
+    arg: Value,
+    arg_layout: ScalarLayout,
+    result_layout: ScalarLayout,
+    lsb_prio: bool,
+) -> Value {
+    let mut result = builder.ins().iconst(
+        result_layout.clif_type(),
+        (1u64 << arg_layout.bit_count) as i64,
+    );
+    let indices: Box<dyn Iterator<Item = usize>> = if lsb_prio {
+        Box::new((0..arg_layout.bit_count).rev())
+    } else {
+        Box::new(0..arg_layout.bit_count)
+    };
+    for index in indices {
+        let selected = bit_is_set(builder, arg, arg_layout, index);
+        let one_hot = builder
+            .ins()
+            .iconst(result_layout.clif_type(), (1u64 << index) as i64);
+        result = builder.ins().select(selected, one_hot, result);
+    }
+    mask_value(builder, result, result_layout)
+}
+
+fn lower_encode(
+    builder: &mut FunctionBuilder<'_>,
+    arg: Value,
+    arg_layout: ScalarLayout,
+    result_layout: ScalarLayout,
+) -> Value {
+    let mut result = builder.ins().iconst(result_layout.clif_type(), 0);
+    for index in 0..arg_layout.bit_count {
+        let selected = bit_is_set(builder, arg, arg_layout, index);
+        let encoded = builder
+            .ins()
+            .iconst(result_layout.clif_type(), index as i64);
+        let zero = builder.ins().iconst(result_layout.clif_type(), 0);
+        let contribution = builder.ins().select(selected, encoded, zero);
+        result = builder.ins().bor(result, contribution);
+    }
+    mask_value(builder, result, result_layout)
+}
+
+fn lower_decode(
+    builder: &mut FunctionBuilder<'_>,
+    arg: Value,
+    arg_layout: ScalarLayout,
+    result_layout: ScalarLayout,
+) -> Value {
+    let in_bounds =
+        builder
+            .ins()
+            .icmp_imm(IntCC::UnsignedLessThan, arg, result_layout.bit_count as i64);
+    let shift = resize_unsigned(builder, arg, arg_layout, result_layout);
+    let one = builder.ins().iconst(result_layout.clif_type(), 1);
+    let decoded = builder.ins().ishl(one, shift);
+    let zero = builder.ins().iconst(result_layout.clif_type(), 0);
+    builder.ins().select(in_bounds, decoded, zero)
+}
+
+fn bit_is_set(
+    builder: &mut FunctionBuilder<'_>,
+    value: Value,
+    layout: ScalarLayout,
+    index: usize,
+) -> Value {
+    if index >= layout.bit_count {
+        return builder.ins().icmp(IntCC::NotEqual, value, value);
+    }
+    let masked = builder.ins().band_imm(value, (1u64 << index) as i64);
+    builder.ins().icmp_imm(IntCC::NotEqual, masked, 0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn selected_value(
+    builder: &mut FunctionBuilder<'_>,
+    node_ref: NodeRef,
+    return_node: NodeRef,
+    output_pointer: Value,
+    scratch_pointer: Value,
+    scratch_plan: &ScratchPlan,
+    condition: Value,
+    when_true: ComputedValue,
+    when_false: Option<ComputedValue>,
+    layout: &NativeValueLayout,
+) -> Result<ComputedValue, JitError> {
+    match layout {
+        NativeValueLayout::Scalar(scalar) => {
+            let true_value = expect_scalar(when_true)?;
+            let false_value = match when_false {
+                Some(value) => expect_scalar(value)?,
+                None => builder.ins().iconst(scalar.clif_type(), 0),
+            };
+            Ok(ComputedValue::Scalar(builder.ins().select(
+                condition,
+                true_value,
+                false_value,
+            )))
+        }
+        NativeValueLayout::Array { .. } | NativeValueLayout::Tuple { .. } => {
+            let destination = materialized_destination(
+                builder,
+                node_ref,
+                return_node,
+                output_pointer,
+                scratch_pointer,
+                scratch_plan,
+            )?;
+            write_selected_value_to_storage(
+                builder,
+                destination,
+                condition,
+                when_true,
+                when_false,
+                layout,
+            )?;
+            Ok(ComputedValue::Address(destination))
+        }
+    }
+}
+
+fn write_selected_value_to_storage(
+    builder: &mut FunctionBuilder<'_>,
+    destination: Value,
+    condition: Value,
+    when_true: ComputedValue,
+    when_false: Option<ComputedValue>,
+    layout: &NativeValueLayout,
+) -> Result<(), JitError> {
+    match layout {
+        NativeValueLayout::Scalar(scalar) => {
+            let false_value = match when_false {
+                Some(value) => expect_scalar(value)?,
+                None => builder.ins().iconst(scalar.clif_type(), 0),
+            };
+            let selected = builder
+                .ins()
+                .select(condition, expect_scalar(when_true)?, false_value);
+            builder
+                .ins()
+                .store(MemFlags::new(), selected, destination, 0);
+        }
+        NativeValueLayout::Array {
+            element,
+            element_count,
+        } => {
+            let true_source = expect_address(when_true)?;
+            let false_source = when_false.map(expect_address).transpose()?;
+            for index in 0..*element_count {
+                let offset = index * element.byte_count();
+                let child_destination = pointer_at_offset(builder, destination, offset);
+                let true_pointer = pointer_at_offset(builder, true_source, offset);
+                let true_child = load_value_from_storage(builder, true_pointer, element);
+                let false_child = false_source.map(|source| {
+                    let false_pointer = pointer_at_offset(builder, source, offset);
+                    load_value_from_storage(builder, false_pointer, element)
+                });
+                write_selected_value_to_storage(
+                    builder,
+                    child_destination,
+                    condition,
+                    true_child,
+                    false_child,
+                    element,
+                )?;
+            }
+        }
+        NativeValueLayout::Tuple { fields, .. } => {
+            let true_source = expect_address(when_true)?;
+            let false_source = when_false.map(expect_address).transpose()?;
+            for field in fields {
+                let child_destination = pointer_at_offset(builder, destination, field.offset);
+                let true_pointer = pointer_at_offset(builder, true_source, field.offset);
+                let true_child =
+                    load_value_from_storage(builder, true_pointer, field.layout.as_ref());
+                let false_child = false_source.map(|source| {
+                    let false_pointer = pointer_at_offset(builder, source, field.offset);
+                    load_value_from_storage(builder, false_pointer, field.layout.as_ref())
+                });
+                write_selected_value_to_storage(
+                    builder,
+                    child_destination,
+                    condition,
+                    true_child,
+                    false_child,
+                    field.layout.as_ref(),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_zero_value_to_storage(
+    builder: &mut FunctionBuilder<'_>,
+    destination: Value,
+    layout: &NativeValueLayout,
+) {
+    match layout {
+        NativeValueLayout::Scalar(scalar) => {
+            let zero = builder.ins().iconst(scalar.clif_type(), 0);
+            builder.ins().store(MemFlags::new(), zero, destination, 0);
+        }
+        NativeValueLayout::Array {
+            element,
+            element_count,
+        } => {
+            for index in 0..*element_count {
+                let child = pointer_at_offset(builder, destination, index * element.byte_count());
+                write_zero_value_to_storage(builder, child, element);
+            }
+        }
+        NativeValueLayout::Tuple { fields, .. } => {
+            for field in fields {
+                let child = pointer_at_offset(builder, destination, field.offset);
+                write_zero_value_to_storage(builder, child, field.layout.as_ref());
+            }
+        }
+    }
+}
+
+fn write_selected_or_value_to_storage(
+    builder: &mut FunctionBuilder<'_>,
+    destination: Value,
+    condition: Value,
+    value: ComputedValue,
+    layout: &NativeValueLayout,
+) -> Result<(), JitError> {
+    match layout {
+        NativeValueLayout::Scalar(scalar) => {
+            let current = builder
+                .ins()
+                .load(scalar.clif_type(), MemFlags::new(), destination, 0);
+            let combined = builder.ins().bor(current, expect_scalar(value)?);
+            let selected = builder.ins().select(condition, combined, current);
+            builder
+                .ins()
+                .store(MemFlags::new(), selected, destination, 0);
+        }
+        NativeValueLayout::Array {
+            element,
+            element_count,
+        } => {
+            let source = expect_address(value)?;
+            for index in 0..*element_count {
+                let offset = index * element.byte_count();
+                let destination_element = pointer_at_offset(builder, destination, offset);
+                let source_element = pointer_at_offset(builder, source, offset);
+                let value = load_value_from_storage(builder, source_element, element);
+                write_selected_or_value_to_storage(
+                    builder,
+                    destination_element,
+                    condition,
+                    value,
+                    element,
+                )?;
+            }
+        }
+        NativeValueLayout::Tuple { fields, .. } => {
+            let source = expect_address(value)?;
+            for field in fields {
+                let destination_field = pointer_at_offset(builder, destination, field.offset);
+                let source_field = pointer_at_offset(builder, source, field.offset);
+                let value = load_value_from_storage(builder, source_field, field.layout.as_ref());
+                write_selected_or_value_to_storage(
+                    builder,
+                    destination_field,
+                    condition,
+                    value,
+                    field.layout.as_ref(),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn array_element_pointer(
+    builder: &mut FunctionBuilder<'_>,
+    array_pointer: Value,
+    index: Value,
+    index_layout: ScalarLayout,
+    element_byte_count: usize,
+    pointer_type: ClifType,
+) -> Value {
+    let address_index = resize_integer_type_unsigned(builder, index, index_layout, pointer_type);
+    let offset = if element_byte_count == 1 {
+        address_index
+    } else {
+        builder
+            .ins()
+            .imul_imm(address_index, element_byte_count as i64)
+    };
+    builder.ins().iadd(array_pointer, offset)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn clamped_array_element_pointer(
+    builder: &mut FunctionBuilder<'_>,
+    array_pointer: Value,
+    index: Value,
+    index_layout: ScalarLayout,
+    element_count: usize,
+    additional_index: usize,
+    element_byte_count: usize,
+    pointer_type: ClifType,
+) -> Result<Value, JitError> {
+    let max_index = element_count - 1;
+    if max_index as u128 > i64::MAX as u128 {
+        return Err(JitError::UnsupportedType(
+            "array dimensions larger than i64::MAX are unsupported".into(),
+        ));
+    }
+    let address_index = resize_integer_type_unsigned(builder, index, index_layout, pointer_type);
+    let bounded = if additional_index > max_index {
+        builder.ins().iconst(pointer_type, max_index as i64)
+    } else {
+        let candidate = if additional_index == 0 {
+            address_index
+        } else {
+            builder
+                .ins()
+                .iadd_imm(address_index, additional_index as i64)
+        };
+        let max_start = max_index - additional_index;
+        if max_start as u128 >= index_layout.mask() as u128 {
+            candidate
+        } else {
+            let out_of_bounds =
+                builder
+                    .ins()
+                    .icmp_imm(IntCC::UnsignedGreaterThan, index, max_start as i64);
+            let final_index = builder.ins().iconst(pointer_type, max_index as i64);
+            builder.ins().select(out_of_bounds, final_index, candidate)
+        }
+    };
+    let offset = if element_byte_count == 1 {
+        bounded
+    } else {
+        builder.ins().imul_imm(bounded, element_byte_count as i64)
+    };
+    Ok(builder.ins().iadd(array_pointer, offset))
+}
+
+fn update_array_index(
+    builder: &mut FunctionBuilder<'_>,
+    index: Value,
+    layout: ScalarLayout,
+    element_count: usize,
+    assumed_in_bounds: bool,
+    node: &ir::Node,
+) -> Result<(Value, Value), JitError> {
+    let max_index = element_count - 1;
+    if max_index as u128 > i64::MAX as u128 {
+        return Err(JitError::UnsupportedType(
+            "array dimensions larger than i64::MAX are unsupported".into(),
+        ));
+    }
+    if layout.mask() <= max_index as u64 {
+        let in_bounds = builder.ins().icmp(IntCC::Equal, index, index);
+        return Ok((index, in_bounds));
+    }
+    if assumed_in_bounds {
+        return Err(JitError::UnsupportedNode(format!(
+            "array_update assumed_in_bounds cannot be guaranteed at node {}",
+            node.text_id
+        )));
+    }
+    let in_bounds = builder
+        .ins()
+        .icmp_imm(IntCC::UnsignedLessThan, index, element_count as i64);
+    let final_index = builder.ins().iconst(layout.clif_type(), max_index as i64);
+    Ok((
+        builder.ins().select(in_bounds, index, final_index),
+        in_bounds,
+    ))
 }
 
 fn clamped_array_index(
@@ -1068,7 +2926,7 @@ fn materialized_destination(
         .copied()
         .ok_or_else(|| {
             JitError::InvalidFunction(format!(
-                "materialized array node {} has no scratch assignment",
+                "materialized aggregate node {} has no scratch assignment",
                 node_ref.index
             ))
         })?;
@@ -1095,7 +2953,9 @@ fn load_value_from_storage(
                 .load(scalar.clif_type(), MemFlags::new(), pointer, 0);
             ComputedValue::Scalar(mask_value(builder, value, *scalar))
         }
-        NativeValueLayout::Array { .. } => ComputedValue::Address(pointer),
+        NativeValueLayout::Array { .. } | NativeValueLayout::Tuple { .. } => {
+            ComputedValue::Address(pointer)
+        }
     }
 }
 
@@ -1122,6 +2982,15 @@ fn store_value_to_storage(
                 let destination_element = pointer_at_offset(builder, destination, offset);
                 let child = load_value_from_storage(builder, source_element, element);
                 store_value_to_storage(builder, destination_element, child, element)?;
+            }
+        }
+        NativeValueLayout::Tuple { fields, .. } => {
+            let source = expect_address(value)?;
+            for field in fields {
+                let source_field = pointer_at_offset(builder, source, field.offset);
+                let destination_field = pointer_at_offset(builder, destination, field.offset);
+                let child = load_value_from_storage(builder, source_field, field.layout.as_ref());
+                store_value_to_storage(builder, destination_field, child, field.layout.as_ref())?;
             }
         }
     }

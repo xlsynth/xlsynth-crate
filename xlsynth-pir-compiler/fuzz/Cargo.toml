@@ -24,3 +24,9 @@ name = "fuzz_pir_function_jit_eval_equiv"
 path = "fuzz_targets/fuzz_pir_function_jit_eval_equiv.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_pir_function_jit_aggregate_eval_equiv"
+path = "fuzz_targets/fuzz_pir_function_jit_aggregate_eval_equiv.rs"
+test = false
+doc = false
