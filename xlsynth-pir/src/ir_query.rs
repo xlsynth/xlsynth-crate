@@ -1875,7 +1875,7 @@ fn main(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
 
 fn main(sel1: bits[1] id=1, sel2: bits[2] id=2, x: bits[8] id=3, y: bits[8] id=4, d: bits[8] id=5) -> (bits[8], bits[8], bits[8], bits[8]) {
   s_none: bits[8] = sel(sel1, cases=[x, y], id=6)
-  s_some: bits[8] = sel(sel1, cases=[x, y], default=d, id=7)
+  s_some: bits[8] = sel(sel2, cases=[x, y], default=d, id=7)
   p_some: bits[8] = priority_sel(sel2, cases=[x, y], default=d, id=8)
   oh: bits[8] = one_hot_sel(sel2, cases=[x, y], id=10)
   ret out: (bits[8], bits[8], bits[8], bits[8]) = tuple(s_none, s_some, p_some, oh, id=11)
