@@ -1294,6 +1294,11 @@ fn probabilistic_event_generation_emits_tokens_effects_and_valid_xls_ir() {
     let mut saw_token_param = false;
     let mut saw_token_literal = false;
     let mut saw_trace_operand_counts = BTreeSet::new();
+    let mut saw_trace_format_specifiers = BTreeSet::new();
+    let mut saw_trace_escaped_open_brace = false;
+    let trace_format_specifiers = [
+        "{}", "{:u}", "{:d}", "{:x}", "{:0x}", "{:#x}", "{:b}", "{:0b}", "{:#b}",
+    ];
 
     for sample in 0..750 {
         let generated =
@@ -1312,17 +1317,19 @@ fn probabilistic_event_generation_emits_tokens_effects_and_valid_xls_ir() {
                 NodePayload::Trace {
                     format, operands, ..
                 } => {
-                    let expected_format = match operands.len() {
-                        0 => "random_trace".to_string(),
-                        count => format!("random_trace={}", vec!["{}"; count].join(",")),
-                    };
-                    assert_eq!(format, &expected_format);
+                    assert!(format.starts_with("random_trace"));
                     assert!(
                         operands
                             .iter()
                             .all(|operand| generated.function.get_node(*operand).ty != Type::Token)
                     );
                     saw_trace_operand_counts.insert(operands.len());
+                    saw_trace_escaped_open_brace |= format.contains("{{");
+                    for specifier in trace_format_specifiers {
+                        if format.contains(specifier) {
+                            saw_trace_format_specifiers.insert(specifier);
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -1352,6 +1359,11 @@ fn probabilistic_event_generation_emits_tokens_effects_and_valid_xls_ir() {
     assert!(saw_token_param);
     assert!(saw_token_literal);
     assert_eq!(saw_trace_operand_counts, BTreeSet::from([0, 1, 2, 3]));
+    assert_eq!(
+        saw_trace_format_specifiers,
+        BTreeSet::from(trace_format_specifiers)
+    );
+    assert!(saw_trace_escaped_open_brace);
 }
 
 #[test]

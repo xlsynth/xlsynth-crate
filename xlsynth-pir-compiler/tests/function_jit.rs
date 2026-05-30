@@ -348,6 +348,52 @@ fn f(emit: bits[1] id=1) -> token {
 }
 
 #[test]
+fn compiled_trace_formats_match_evaluator_and_xls_syntax() {
+    let ir = r#"package test
+
+fn f(x: bits[12] id=1, neg: bits[8] id=2) -> token {
+  t: token = after_all(id=3)
+  one: bits[1] = literal(value=1, id=4)
+  ret tr: token = trace(t, one, format="literal={{ default={} u={:u} d={:d} x={:x} 0x={:0x} #x={:#x} b={:b} 0b={:0b} #b={:#b}", data_operands=[x, x, neg, x, x, x, x, x, x], id=5)
+}
+"#;
+    let package = Parser::new(ir)
+        .parse_and_validate_package()
+        .expect("test PIR should parse and validate");
+    let function = package.get_fn("f").expect("function f should exist");
+    let jit = PirFunctionJit::compile(function).expect("function should compile");
+    let args = vec![bits(12, 43), bits(8, 251)];
+    let actual = jit
+        .run_ir_values_with_events(&args)
+        .expect("compiled execution should succeed");
+    let expected = match eval_fn(function, &args) {
+        FnEvalResult::Success(success) => success,
+        FnEvalResult::Failure(_) => panic!("trace should not cause evaluation failure"),
+    };
+    let actual_messages = actual
+        .events
+        .trace_messages
+        .iter()
+        .map(|message| message.message.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual_messages,
+        expected
+            .trace_messages
+            .iter()
+            .map(|message| message.message.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        actual_messages,
+        vec![
+            "literal={{ default=43 u=43 d=-5 x=2b 0x=02b #x=0x2b b=101011 0b=0000_0010_1011 #b=0b10_1011"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
 fn odd_width_arithmetic_masks_to_pir_width() {
     let jit = compile(
         r#"package test

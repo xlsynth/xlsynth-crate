@@ -12,6 +12,9 @@ homepage = "https://github.com/xlsynth/xlsynth-crate"
 [lints]
 workspace = true
 
+[dependencies]
+num-bigint = "0.4.6"
+
 [lib]
 name = "xlsynth_pir_compiler_runtime"
 path = "src/lib.rs"

@@ -16,6 +16,10 @@ use crate::ir::{
 use crate::ir_utils::{is_observable_effect_root, operands};
 use crate::math::ceil_log2;
 
+const TRACE_FORMAT_SPECIFIERS: [&str; 9] = [
+    "{}", "{:u}", "{:d}", "{:x}", "{:0x}", "{:#x}", "{:b}", "{:0b}", "{:#b}",
+];
+
 /// Operations that the random generator can introduce into a function body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum RandomOperation {
@@ -1745,10 +1749,21 @@ impl<'a> FunctionGenerator<'a> {
                         self.choose_ref_for_type(source, &operand_ty)
                     })
                     .collect();
-                let format = match operand_count {
-                    0 => "random_trace".to_string(),
-                    count => format!("random_trace={}", vec!["{}"; count].join(",")),
+                let mut format = if choose_count(source, 4) == 0 {
+                    "random_trace={{".to_string()
+                } else {
+                    "random_trace".to_string()
                 };
+                if operand_count != 0 {
+                    let specifiers = (0..operand_count)
+                        .map(|_| {
+                            TRACE_FORMAT_SPECIFIERS
+                                [choose_count(source, TRACE_FORMAT_SPECIFIERS.len())]
+                        })
+                        .collect::<Vec<_>>();
+                    format.push('=');
+                    format.push_str(&specifiers.join(","));
+                }
                 Ok(self.add_node(
                     Type::Token,
                     NodePayload::Trace {

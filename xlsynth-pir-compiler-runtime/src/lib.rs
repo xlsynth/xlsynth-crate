@@ -6,6 +6,8 @@ use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::ptr;
 
+use num_bigint::{BigInt, BigUint, Sign};
+
 /// Native compiled-function entrypoint shared by in-memory and AOT execution.
 pub type CompiledEntrypoint = unsafe extern "C" fn(
     inputs: *const *const u8,
@@ -101,6 +103,31 @@ pub struct ExecutionResult {
     pub trace_messages: Vec<TraceMessage>,
     pub cover_counts: Vec<CoverCount>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TraceFormatPreference {
+    Default,
+    UnsignedDecimal,
+    SignedDecimal,
+    PlainHex,
+    ZeroPaddedHex,
+    Hex,
+    PlainBinary,
+    ZeroPaddedBinary,
+    Binary,
+}
+
+const TRACE_FORMAT_SPECIFIERS: [(&str, TraceFormatPreference); 9] = [
+    ("{}", TraceFormatPreference::Default),
+    ("{:u}", TraceFormatPreference::UnsignedDecimal),
+    ("{:d}", TraceFormatPreference::SignedDecimal),
+    ("{:x}", TraceFormatPreference::PlainHex),
+    ("{:0x}", TraceFormatPreference::ZeroPaddedHex),
+    ("{:#x}", TraceFormatPreference::Hex),
+    ("{:b}", TraceFormatPreference::PlainBinary),
+    ("{:0b}", TraceFormatPreference::ZeroPaddedBinary),
+    ("{:#b}", TraceFormatPreference::Binary),
+];
 
 struct ContextState {
     metadata: *const CompiledFunctionMetadata,
@@ -260,59 +287,84 @@ pub unsafe extern "C" fn xlsynth_pir_record_trace(
     if !site.operand_layouts.is_empty() && operand_ptrs.is_null() {
         return;
     }
-    let values = site
-        .operand_layouts
-        .iter()
-        .enumerate()
-        .map(|(index, layout)| {
-            // SAFETY: the generated caller supplies one pointer per metadata operand.
-            let pointer = unsafe { *operand_ptrs.add(index) };
-            // SAFETY: the pointer and recursively described native layout match.
-            unsafe { format_native_value(pointer, layout) }
-        })
-        .collect::<Vec<_>>();
     state.trace_messages.push(TraceMessage {
         node_text_id: site.node_text_id,
-        message: substitute_trace_values(site.format.as_deref().unwrap_or(""), &values),
+        // SAFETY: the generated caller supplies one pointer per metadata operand.
+        message: unsafe {
+            format_trace_message(
+                site.format.as_deref().unwrap_or(""),
+                &site.operand_layouts,
+                operand_ptrs,
+            )
+        },
         verbosity: 0,
     });
 }
 
-fn substitute_trace_values(format: &str, values: &[String]) -> String {
+/// Formats a trace message according to the XLS trace-format string syntax.
+unsafe fn format_trace_message(
+    format: &str,
+    layouts: &[TraceValueLayout],
+    operand_ptrs: *const *const u8,
+) -> String {
     let mut output = String::new();
-    let mut remainder = format;
-    let mut value_index = 0usize;
-    while let Some(index) = remainder.find("{}") {
-        output.push_str(&remainder[..index]);
-        if let Some(value) = values.get(value_index) {
-            output.push_str(value);
+    let mut offset = 0usize;
+    let mut operand_index = 0usize;
+    while offset < format.len() {
+        let remainder = &format[offset..];
+        if remainder.starts_with("{{") || remainder.starts_with("}}") {
+            // XLS preserves escaped braces in trace output; Verilog emission
+            // performs the collapse to single braces separately.
+            output.push_str(&remainder[..2]);
+            offset += 2;
+            continue;
         }
-        value_index += 1;
-        remainder = &remainder[index + 2..];
-    }
-    output.push_str(remainder);
-    if value_index < values.len() {
-        output.push_str(" [");
-        output.push_str(&values[value_index..].join(", "));
-        output.push(']');
+        if let Some((specifier, preference)) = TRACE_FORMAT_SPECIFIERS
+            .iter()
+            .find(|(specifier, _)| remainder.starts_with(specifier))
+        {
+            if let Some(layout) = layouts.get(operand_index) {
+                // SAFETY: callback ABI provides one matching pointer per layout.
+                let pointer = unsafe { *operand_ptrs.add(operand_index) };
+                // SAFETY: callback ABI specifies readable storage matching `layout`.
+                output.push_str(&unsafe { format_native_value(pointer, layout, *preference) });
+            }
+            operand_index += 1;
+            offset += specifier.len();
+            continue;
+        }
+        let character = remainder
+            .chars()
+            .next()
+            .expect("offset is within trace format string");
+        output.push(character);
+        offset += character.len_utf8();
     }
     output
 }
 
-unsafe fn format_native_value(pointer: *const u8, layout: &TraceValueLayout) -> String {
+/// Formats one caller-owned native value without constructing an XLS value.
+unsafe fn format_native_value(
+    pointer: *const u8,
+    layout: &TraceValueLayout,
+    preference: TraceFormatPreference,
+) -> String {
     match layout {
         TraceValueLayout::Bits {
             bit_count,
             byte_count,
         } => {
-            let mut bytes = [0u8; std::mem::size_of::<u64>()];
-            // SAFETY: callback ABI provides native scalar storage of this size.
-            unsafe { ptr::copy_nonoverlapping(pointer, bytes.as_mut_ptr(), *byte_count) };
-            let mut value = u64::from_ne_bytes(bytes);
-            if *bit_count < 64 {
-                value &= (1u64 << *bit_count) - 1;
+            let mut bytes = vec![0u8; *byte_count];
+            if *byte_count != 0 {
+                // SAFETY: callback ABI provides native scalar storage of this size.
+                unsafe { ptr::copy_nonoverlapping(pointer, bytes.as_mut_ptr(), *byte_count) };
             }
-            format!("bits[{bit_count}]:{value}")
+            let value = if cfg!(target_endian = "little") {
+                BigUint::from_bytes_le(&bytes)
+            } else {
+                BigUint::from_bytes_be(&bytes)
+            };
+            format_trace_bits(value, *bit_count, preference)
         }
         TraceValueLayout::Array {
             element,
@@ -325,6 +377,7 @@ unsafe fn format_native_value(pointer: *const u8, layout: &TraceValueLayout) -> 
                         format_native_value(
                             pointer.wrapping_add(index * element.byte_count()),
                             element,
+                            preference,
                         )
                     }
                 })
@@ -337,7 +390,11 @@ unsafe fn format_native_value(pointer: *const u8, layout: &TraceValueLayout) -> 
                 .map(|field| {
                     // SAFETY: each field offset is prescribed by native tuple metadata.
                     unsafe {
-                        format_native_value(pointer.wrapping_add(field.offset), &field.layout)
+                        format_native_value(
+                            pointer.wrapping_add(field.offset),
+                            &field.layout,
+                            preference,
+                        )
                     }
                 })
                 .collect::<Vec<_>>();
@@ -345,6 +402,81 @@ unsafe fn format_native_value(pointer: *const u8, layout: &TraceValueLayout) -> 
         }
         TraceValueLayout::Token => "token".to_string(),
     }
+}
+
+fn format_trace_bits(
+    mut value: BigUint,
+    bit_count: usize,
+    preference: TraceFormatPreference,
+) -> String {
+    if bit_count == 0 {
+        value = BigUint::from(0u8);
+    } else {
+        value &= (BigUint::from(1u8) << bit_count) - BigUint::from(1u8);
+    }
+    match preference {
+        TraceFormatPreference::Default => {
+            if bit_count <= 64 {
+                value.to_str_radix(10)
+            } else {
+                format_trace_bits(value, bit_count, TraceFormatPreference::Hex)
+            }
+        }
+        TraceFormatPreference::UnsignedDecimal => value.to_str_radix(10),
+        TraceFormatPreference::SignedDecimal => {
+            if bit_count != 0
+                && (&value & (BigUint::from(1u8) << (bit_count - 1))) != BigUint::from(0u8)
+            {
+                (BigInt::from_biguint(Sign::Plus, value)
+                    - BigInt::from_biguint(Sign::Plus, BigUint::from(1u8) << bit_count))
+                .to_string()
+            } else {
+                value.to_str_radix(10)
+            }
+        }
+        TraceFormatPreference::PlainHex => value.to_str_radix(16),
+        TraceFormatPreference::ZeroPaddedHex => {
+            zero_padded_grouped_digits(&value, bit_count, 4, 16)
+        }
+        TraceFormatPreference::Hex => {
+            format!("0x{}", grouped_digits(&value.to_str_radix(16)))
+        }
+        TraceFormatPreference::PlainBinary => value.to_str_radix(2),
+        TraceFormatPreference::ZeroPaddedBinary => {
+            zero_padded_grouped_digits(&value, bit_count, 1, 2)
+        }
+        TraceFormatPreference::Binary => {
+            format!("0b{}", grouped_digits(&value.to_str_radix(2)))
+        }
+    }
+}
+
+fn zero_padded_grouped_digits(
+    value: &BigUint,
+    bit_count: usize,
+    bits_per_digit: usize,
+    radix: u32,
+) -> String {
+    let digit_count = bit_count.div_ceil(bits_per_digit).max(1);
+    let digits = format!(
+        "{:0>width$}",
+        value.to_str_radix(radix),
+        width = digit_count
+    );
+    grouped_digits(&digits)
+}
+
+fn grouped_digits(digits: &str) -> String {
+    let first_group_width = match digits.len() % 4 {
+        0 => 4,
+        remainder => remainder,
+    };
+    let mut result = digits[..first_group_width].to_string();
+    for group_start in (first_group_width..digits.len()).step_by(4) {
+        result.push('_');
+        result.push_str(&digits[group_start..group_start + 4]);
+    }
+    result
 }
 
 impl TraceValueLayout {
@@ -443,9 +575,71 @@ mod tests {
         array[0] = 91;
         assert_eq!(scalar, 90);
         assert_eq!(array[0], 91);
+        assert_eq!(context.result().trace_messages[0].message, "x=7 arr=[2, 3]");
+    }
+
+    #[test]
+    fn trace_callback_formats_all_specifiers_and_wide_decimal_without_xls() {
+        let twelve_bits = TraceValueLayout::Bits {
+            bit_count: 12,
+            byte_count: 2,
+        };
+        let metadata = CompiledFunctionMetadata {
+            event_sites: vec![EventSiteMetadata {
+                node_text_id: 20,
+                kind: EventKind::Trace,
+                label: None,
+                message: None,
+                format: Some(
+                    "literal={{ default={} u={:u} d={:d} x={:x} 0x={:0x} #x={:#x} b={:b} 0b={:0b} #b={:#b} wide={} wide_u={:u}".to_string(),
+                ),
+                operand_layouts: vec![
+                    twelve_bits.clone(),
+                    twelve_bits.clone(),
+                    TraceValueLayout::Bits {
+                        bit_count: 8,
+                        byte_count: 1,
+                    },
+                    twelve_bits.clone(),
+                    twelve_bits.clone(),
+                    twelve_bits.clone(),
+                    twelve_bits.clone(),
+                    twelve_bits.clone(),
+                    twelve_bits,
+                    TraceValueLayout::Bits {
+                        bit_count: 72,
+                        byte_count: 9,
+                    },
+                    TraceValueLayout::Bits {
+                        bit_count: 72,
+                        byte_count: 9,
+                    },
+                ],
+            }],
+        };
+        let mut context = ExecutionContext::new(&metadata);
+        let mut raw = context.raw_context();
+        let twelve = 43u16;
+        let negative = 251u8;
+        let wide = [1u8, 0, 0, 0, 0, 0, 0, 0, 1];
+        let operands = [
+            ptr::from_ref(&twelve).cast::<u8>(),
+            ptr::from_ref(&twelve).cast::<u8>(),
+            ptr::from_ref(&negative).cast::<u8>(),
+            ptr::from_ref(&twelve).cast::<u8>(),
+            ptr::from_ref(&twelve).cast::<u8>(),
+            ptr::from_ref(&twelve).cast::<u8>(),
+            ptr::from_ref(&twelve).cast::<u8>(),
+            ptr::from_ref(&twelve).cast::<u8>(),
+            ptr::from_ref(&twelve).cast::<u8>(),
+            ptr::from_ref(&wide).cast::<u8>(),
+            ptr::from_ref(&wide).cast::<u8>(),
+        ];
+        // SAFETY: operands use the native layouts specified by trace metadata.
+        unsafe { xlsynth_pir_record_trace(&mut raw, 0, operands.as_ptr()) };
         assert_eq!(
             context.result().trace_messages[0].message,
-            "x=bits[8]:7 arr=[bits[8]:2, bits[8]:3]"
+            "literal={{ default=43 u=43 d=-5 x=2b 0x=02b #x=0x2b b=101011 0b=0000_0010_1011 #b=0b10_1011 wide=0x1_0000_0000_0000_0001 wide_u=18446744073709551617"
         );
     }
 
