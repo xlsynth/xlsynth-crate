@@ -12,7 +12,11 @@ import subprocess
 import sys
 import time
 
-from sleep_until_version_seen import check_crate_version, wait_until_version_seen
+from sleep_until_version_seen import (
+    check_crate_version,
+    check_crate_version_for_polling,
+    wait_until_version_seen,
+)
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -71,8 +75,9 @@ def _run_cargo_publish(package_dir):
     result = subprocess.run(
         ["cargo", "publish"],
         cwd=os.path.join(REPO_ROOT, package_dir),
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
     )
     if result.stdout:
         print(result.stdout, end="", flush=True)
@@ -132,7 +137,7 @@ def publish_crate_with_retries(crate_name, version, package_dir):
             return
 
         failure_kind = _classify_publish_failure(result)
-        if check_crate_version(crate_name, version):
+        if check_crate_version_for_polling(crate_name, version):
             return
         if failure_kind in (PublishFailureKind.TRANSIENT, PublishFailureKind.DUPLICATE):
             if wait_until_version_seen(crate_name, version):
