@@ -114,6 +114,27 @@ fn f(x: bits[5] id=1, y: bits[5] id=2) -> bits[5] {
 }
 
 #[test]
+fn rejects_unvalidated_out_of_bounds_static_bit_slice() {
+    let package = Parser::new(
+        r#"package test
+
+fn f(x: bits[8] id=1) -> bits[2] {
+  ret s: bits[2] = bit_slice(x, start=7, width=2, id=2)
+}
+"#,
+    )
+    .parse_package()
+    .expect("unvalidated function should parse as PIR");
+    let function = package.get_fn("f").expect("function f should exist");
+    let error = match PirFunctionJit::compile(function) {
+        Ok(_) => panic!("out-of-bounds bit_slice should not JIT compile"),
+        Err(error) => error,
+    };
+    assert!(error.is_unsupported());
+    assert!(error.to_string().contains("out-of-bounds bit_slice"));
+}
+
+#[test]
 fn signed_comparisons_use_logical_bit_width() {
     let jit = compile(
         r#"package test

@@ -29,6 +29,14 @@ pub enum ValidationError {
         node_index: usize,
         operand: usize,
     },
+    /// A static `bit_slice` selects bits beyond its operand's width.
+    BitSliceOutOfBounds {
+        func: String,
+        node_index: usize,
+        start: usize,
+        width: usize,
+        operand_width: usize,
+    },
     /// A function's return node is missing.
     MissingReturnNode(String),
     /// A function's declared return type doesn't match the return node type.
@@ -228,6 +236,19 @@ impl std::fmt::Display for ValidationError {
                     f,
                     "function '{}' node {} uses operand {} before definition",
                     func, node_index, operand
+                )
+            }
+            ValidationError::BitSliceOutOfBounds {
+                func,
+                node_index,
+                start,
+                width,
+                operand_width,
+            } => {
+                write!(
+                    f,
+                    "function '{}' node {} bit_slice start {} + width {} exceeds operand width {}",
+                    func, node_index, start, width, operand_width
                 )
             }
             ValidationError::MissingReturnNode(func) => {
@@ -798,6 +819,23 @@ where
             }
         }
 
+        if let NodePayload::BitSlice { arg, start, width } = &node.payload {
+            if let Type::Bits(operand_width) = &f.get_node(*arg).ty {
+                let exceeds_operand = start
+                    .checked_add(*width)
+                    .map_or(true, |end| end > *operand_width);
+                if exceeds_operand {
+                    return Err(ValidationError::BitSliceOutOfBounds {
+                        func: f.name.clone(),
+                        node_index: i,
+                        start: *start,
+                        width: *width,
+                        operand_width: *operand_width,
+                    });
+                }
+            }
+        }
+
         // Validate cross-package references.
         match &node.payload {
             NodePayload::Invoke { to_apply, .. } => {
@@ -1300,6 +1338,27 @@ mod tests {
         assert!(matches!(
             validate_package(&pkg),
             Err(ValidationError::PartialProductResultTypeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn static_bit_slice_rejects_range_beyond_operand_width() {
+        let ir = r#"
+        package test
+
+        fn foo(x: bits[8] id=1) -> bits[2] {
+          ret slice: bits[2] = bit_slice(x, start=7, width=2, id=2)
+        }
+        "#;
+        let pkg = Parser::new(ir).parse_package().unwrap();
+        assert!(matches!(
+            validate_package(&pkg),
+            Err(ValidationError::BitSliceOutOfBounds {
+                start: 7,
+                width: 2,
+                operand_width: 8,
+                ..
+            })
         ));
     }
 

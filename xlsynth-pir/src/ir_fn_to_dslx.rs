@@ -1111,7 +1111,10 @@ top fn f(x: bits[8] id=1) -> bits[1] {{
 "#,
             usize::MAX
         );
-        let err = convert_ir_package_fn_to_dslx(&ir_text, None).unwrap_err();
+        let pkg = ir_parser::Parser::new(&ir_text)
+            .parse_package()
+            .expect("overflowing slice should parse before validation");
+        let err = convert_ir_fn_to_dslx(pkg.get_top_fn().expect("top function")).unwrap_err();
         assert!(
             matches!(&err, IrFnToDslxError::UnsupportedNode(msg) if msg.contains("overflows usize")),
             "unexpected error: {err}"

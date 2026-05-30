@@ -4001,8 +4001,9 @@ fn f(x: bits[6] id=1) -> bits[3] {
     }
 
     #[test]
-    fn test_eval_fn_oob_bit_slice_early_fail() {
-        // OOB static bit_slice: start=3, width=1 on a bits[3] value.
+    fn test_eval_fn_oob_bit_slice_early_fail_for_unvalidated_fn() {
+        // OOB static bit_slice is invalid XLS IR. Keep evaluation defensive
+        // for callers that construct or parse a function without validation.
         let ir_text = r#"package test
 
 fn f(x: bits[3] id=1) -> bits[1] {
@@ -4010,7 +4011,7 @@ fn f(x: bits[3] id=1) -> bits[1] {
 }
 "#;
         let mut p = Parser::new(ir_text);
-        let pkg = p.parse_and_validate_package().expect("parse ok");
+        let pkg = p.parse_package().expect("unvalidated parse ok");
         let f = match &pkg.members[0] {
             ir::PackageMember::Function(f) => f.clone(),
             _ => unreachable!(),
