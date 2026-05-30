@@ -1288,6 +1288,20 @@ pub struct AssertionFailure {
     pub label: String,
 }
 
+/// Kind of failed contract attached to an `assumed_in_bounds` array operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AssumptionFailureKind {
+    ArrayIndexOutOfBounds,
+    ArrayUpdateOutOfBounds,
+}
+
+/// One failed assumption encountered while evaluating a function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssumptionFailure {
+    pub node_text_id: usize,
+    pub kind: AssumptionFailureKind,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoverCount {
     pub node_text_id: usize,
@@ -1325,6 +1339,7 @@ pub struct FnEvalSuccess {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnEvalFailure {
     pub assertion_failures: Vec<AssertionFailure>,
+    pub assumption_failures: Vec<AssumptionFailure>,
     pub trace_messages: Vec<TraceMessage>,
     pub cover_counts: Vec<CoverCount>,
 }
@@ -1960,6 +1975,7 @@ fn eval_fn_impl<'a>(
     let mut env = DenseEvalEnv::new(f.nodes.len());
     let mut trace_messages: Vec<TraceMessage> = Vec::new();
     let mut assertion_failures: Vec<AssertionFailure> = Vec::new();
+    let mut assumption_failures: Vec<AssumptionFailure> = Vec::new();
     let mut cover_counts: Vec<CoverCount> = Vec::new();
     let mut cover_index_by_text_id: HashMap<usize, usize> = HashMap::new();
     for nr in eval_order(f, order_policy) {
@@ -2079,6 +2095,7 @@ fn eval_fn_impl<'a>(
                     }
                     FnEvalResult::Failure(fail) => {
                         assertion_failures.extend(fail.assertion_failures);
+                        assumption_failures.extend(fail.assumption_failures);
                         trace_messages.extend(fail.trace_messages);
                         for cover_count in fail.cover_counts {
                             accumulate_cover_count(
@@ -2089,6 +2106,7 @@ fn eval_fn_impl<'a>(
                         }
                         return FnEvalResult::Failure(FnEvalFailure {
                             assertion_failures,
+                            assumption_failures,
                             trace_messages,
                             cover_counts,
                         });
@@ -2116,6 +2134,7 @@ fn eval_fn_impl<'a>(
                     }
                     return FnEvalResult::Failure(FnEvalFailure {
                         assertion_failures,
+                        assumption_failures,
                         trace_messages,
                         cover_counts,
                     });
@@ -2239,9 +2258,8 @@ fn eval_fn_impl<'a>(
                 assumed_in_bounds,
             } => {
                 // XLS semantics: out-of-bounds indices are clamped to the maximum in-bounds
-                // index for the respective dimension. If `assumed_in_bounds` is
-                // true, any OOB index is considered a sample failure and we
-                // return Failure.
+                // index for the respective dimension. `assumed_in_bounds` makes
+                // an OOB access observable without changing that safe value.
                 let mut value = env.get(array).expect("array must be evaluated").clone();
                 let mut clamped_any = false;
                 for idx_ref in indices.iter() {
@@ -2255,26 +2273,25 @@ fn eval_fn_impl<'a>(
                     if let Some(idx) = ir_bits_to_usize_in_range(&idx, count) {
                         value = value.get_element(idx).unwrap();
                     } else {
-                        if *assumed_in_bounds {
-                            if let Some(observer) = observer {
-                                unsafe {
-                                    (&mut *observer).on_failure_event(FailureEvent {
-                                        node_ref: nr,
-                                        node_text_id: node.text_id,
-                                        kind: FailureKind::ArrayIndexOobAssumedInBounds,
-                                        tag: 0,
-                                    });
-                                }
-                            }
-                            return FnEvalResult::Failure(FnEvalFailure {
-                                assertion_failures,
-                                trace_messages,
-                                cover_counts,
-                            });
-                        }
                         clamped_any = true;
                         value = value.get_element(count - 1).unwrap();
                     }
+                }
+                if clamped_any && *assumed_in_bounds {
+                    if let Some(observer) = observer {
+                        unsafe {
+                            (&mut *observer).on_failure_event(FailureEvent {
+                                node_ref: nr,
+                                node_text_id: node.text_id,
+                                kind: FailureKind::ArrayIndexOobAssumedInBounds,
+                                tag: 0,
+                            });
+                        }
+                    }
+                    assumption_failures.push(AssumptionFailure {
+                        node_text_id: node.text_id,
+                        kind: AssumptionFailureKind::ArrayIndexOutOfBounds,
+                    });
                 }
                 if let Some(observer) = observer {
                     unsafe {
@@ -2299,8 +2316,8 @@ fn eval_fn_impl<'a>(
                 assumed_in_bounds,
             } => {
                 // XLS semantics: if any index is out of bounds, the result is identical to the
-                // input array, unless `assumed_in_bounds` is true, in which case OOB is an
-                // error.
+                // input array. `assumed_in_bounds` additionally reports an
+                // observable contract violation.
                 let arr = env.get(array).expect("array must be evaluated").clone();
                 let val = env.get(value).expect("value must be evaluated").clone();
                 // Gather concrete indices, preserving values that exceed host width as OOB.
@@ -2356,15 +2373,13 @@ fn eval_fn_impl<'a>(
                                     });
                                 }
                             }
-                            return FnEvalResult::Failure(FnEvalFailure {
-                                assertion_failures,
-                                trace_messages,
-                                cover_counts,
+                            assumption_failures.push(AssumptionFailure {
+                                node_text_id: node.text_id,
+                                kind: AssumptionFailureKind::ArrayUpdateOutOfBounds,
                             });
-                        } else {
-                            // OOB but not assumed in-bounds: return the original array unchanged.
-                            arr
                         }
+                        // An OOB update leaves the original array unchanged.
+                        arr
                     }
                 }
             }
@@ -2440,7 +2455,7 @@ fn eval_fn_impl<'a>(
         .expect("return value must have been computed")
         .clone();
 
-    if assertion_failures.is_empty() {
+    if assertion_failures.is_empty() && assumption_failures.is_empty() {
         FnEvalResult::Success(FnEvalSuccess {
             value: ret_value,
             trace_messages,
@@ -2449,6 +2464,7 @@ fn eval_fn_impl<'a>(
     } else {
         FnEvalResult::Failure(FnEvalFailure {
             assertion_failures,
+            assumption_failures,
             trace_messages,
             cover_counts,
         })
@@ -4591,7 +4607,7 @@ fn f(a: bits[5][4] id=1, v: bits[5] id=2, i: bits[32] id=3) -> bits[5][4] {
             _ => unreachable!(),
         };
 
-        // OOB index with assumed_in_bounds=true => Failure
+        // OOB index with assumed_in_bounds=true => recorded failure.
         let a = IrValue::make_array(&[
             IrValue::make_ubits(5, 1).unwrap(),
             IrValue::make_ubits(5, 2).unwrap(),
@@ -4603,9 +4619,13 @@ fn f(a: bits[5][4] id=1, v: bits[5] id=2, i: bits[32] id=3) -> bits[5][4] {
         let i = IrValue::make_ubits(32, 7).unwrap();
 
         match eval_fn(&f, &[a, v, i]) {
-            FnEvalResult::Failure(_fail) => {
-                // Early failure as expected
-            }
+            FnEvalResult::Failure(fail) => assert_eq!(
+                fail.assumption_failures,
+                vec![AssumptionFailure {
+                    node_text_id: 4,
+                    kind: AssumptionFailureKind::ArrayUpdateOutOfBounds,
+                }]
+            ),
             other => panic!("unexpected result: {:?}", other),
         }
     }
@@ -4711,7 +4731,52 @@ fn f(a: bits[8][4] id=1, i: bits[3] id=2) -> bits[8] {
         let r = eval_fn_with_observer(&f, &args, None);
         match r {
             FnEvalResult::Success(_) => panic!("expected failure"),
-            FnEvalResult::Failure(_f) => {}
+            FnEvalResult::Failure(fail) => assert_eq!(
+                fail.assumption_failures,
+                vec![AssumptionFailure {
+                    node_text_id: 3,
+                    kind: AssumptionFailureKind::ArrayIndexOutOfBounds,
+                }]
+            ),
+        }
+    }
+
+    #[test]
+    fn test_eval_fn_accumulates_dead_assumed_in_bounds_array_violations() {
+        let ir_text = r#"package test
+
+fn f(a: bits[8][2] id=1, v: bits[8] id=2, i: bits[2] id=3) -> bits[8] {
+  dead_index: bits[8] = array_index(a, indices=[i], assumed_in_bounds=true, id=4)
+  dead_update: bits[8][2] = array_update(a, v, indices=[i], assumed_in_bounds=true, id=5)
+  ret out: bits[8] = identity(v, id=6)
+}
+"#;
+        let pkg = Parser::new(ir_text).parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap();
+        let args = vec![
+            IrValue::make_array(&[
+                IrValue::make_ubits(8, 10).unwrap(),
+                IrValue::make_ubits(8, 11).unwrap(),
+            ])
+            .unwrap(),
+            IrValue::make_ubits(8, 99).unwrap(),
+            IrValue::make_ubits(2, 3).unwrap(),
+        ];
+        match eval_fn(f, &args) {
+            FnEvalResult::Failure(fail) => assert_eq!(
+                fail.assumption_failures,
+                vec![
+                    AssumptionFailure {
+                        node_text_id: 4,
+                        kind: AssumptionFailureKind::ArrayIndexOutOfBounds,
+                    },
+                    AssumptionFailure {
+                        node_text_id: 5,
+                        kind: AssumptionFailureKind::ArrayUpdateOutOfBounds,
+                    },
+                ]
+            ),
+            other => panic!("unexpected result: {other:?}"),
         }
     }
 
@@ -4983,7 +5048,7 @@ fn f(a: bits[8][4] id=1, i: bits[3] id=2) -> bits[8] {
         let mut obs = RecordingCornerFailureObserver::default();
         let r = eval_fn_with_observer(&f, &args, Some(&mut obs));
         assert!(matches!(r, FnEvalResult::Failure(_)));
-        assert!(obs.corner_events.is_empty());
+        assert_eq!(obs.corner_events, vec![(10, CornerKind::ArrayIndex, 1)]);
         assert_eq!(
             obs.failure_events,
             vec![(10, FailureKind::ArrayIndexOobAssumedInBounds)]

@@ -41,6 +41,8 @@ indexing, aggregate equality/inequality, aggregate-valued gate or selection
 results, and default-only `sel` nodes. It also exercises tuple-valued
 extension results such as `ext_normalize_left` and XLS partial-product
 multiply tuples, along with `after_all`, `cover`, `assert`, and `trace`.
+Generated array operations also exercise `assumed_in_bounds=true` and compare
+reported out-of-bounds assumption violations.
 Observable event results are compared as unordered multisets because independent
 event nodes are not semantically ordered unless their token dependencies require it.
 
@@ -49,7 +51,7 @@ Main additional failure modes surfaced:
 - Incorrect native array stride or `#[repr(C)]`-compatible tuple field layout.
 - Incorrect scratch materialization or recursive copying of aggregate values.
 - Incorrect out-of-bounds semantics for native array slice/update/index nodes.
-- Divergent assertion, trace, or cover callback behavior.
+- Divergent assertion, assumption-violation, trace, or cover callback behavior.
 
 Target name: `fuzz_pir_function_compiler_wide_eval_equiv`
 
@@ -65,8 +67,9 @@ tuples. Width generation is biased toward scalar-sized values while
 periodically sampling the full wide range, so it exercises mixed narrow/wide
 graphs as well as genuinely large values. It also generates token-based
 `after_all`, `cover`, `assert`, and `trace` nodes and compares their observable
-runtime results. The target enables every operation provided by the random PIR
-function generator.
+runtime results. It also generates `assumed_in_bounds=true` array operations
+and compares reported out-of-bounds violations. The target enables every
+operation provided by the random PIR function generator.
 
 Main additional failure modes surfaced:
 
@@ -76,4 +79,4 @@ Main additional failure modes surfaced:
 - Incorrect runtime-helper semantics for wide multiply, divide, shifts,
   dynamic bit updates, encoding operations, or extension operations.
 - Incorrect recursive layout or copying of aggregates containing wide leaves.
-- Divergent assertion, trace, or cover callback behavior involving wide data.
+- Divergent assertion, assumption-violation, trace, or cover callback behavior involving wide data.

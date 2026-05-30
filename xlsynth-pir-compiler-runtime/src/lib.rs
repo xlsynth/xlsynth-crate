@@ -26,6 +26,7 @@ pub struct RawExecutionContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventKind {
     Assert,
+    Assumption(AssumptionFailureKind),
     Cover,
     Trace,
 }
@@ -144,6 +145,20 @@ pub struct AssertionFailure {
     pub label: String,
 }
 
+/// A failed contract asserted by an `assumed_in_bounds` array operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AssumptionFailureKind {
+    ArrayIndexOutOfBounds,
+    ArrayUpdateOutOfBounds,
+}
+
+/// One failed assumption observed while executing compiled code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssumptionFailure {
+    pub node_text_id: usize,
+    pub kind: AssumptionFailureKind,
+}
+
 /// One emitted compiled trace statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceMessage {
@@ -164,6 +179,7 @@ pub struct CoverCount {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExecutionResult {
     pub assertion_failures: Vec<AssertionFailure>,
+    pub assumption_failures: Vec<AssumptionFailure>,
     pub trace_messages: Vec<TraceMessage>,
     pub cover_counts: Vec<CoverCount>,
 }
@@ -196,15 +212,16 @@ const TRACE_FORMAT_SPECIFIERS: [(&str, TraceFormatPreference); 9] = [
 struct ContextState {
     metadata: *const CompiledFunctionMetadata,
     assertion_failures: Vec<AssertionFailure>,
+    assumption_failures: Vec<AssumptionFailure>,
     trace_messages: Vec<TraceMessage>,
     event_counts: Vec<u64>,
 }
 
 /// Rust-owned event collector used for one or more compiled executions.
 ///
-/// Cover counts accumulate until [`Self::clear`] is called. Assertion and
-/// trace messages also accumulate, permitting callers to consume a batch of
-/// invocations through one context.
+/// Cover counts accumulate until [`Self::clear`] is called. Assertion,
+/// assumption, and trace results also accumulate, permitting callers to
+/// consume a batch of invocations through one context.
 pub struct ExecutionContext<'metadata> {
     state: Box<ContextState>,
     marker: PhantomData<&'metadata CompiledFunctionMetadata>,
@@ -217,6 +234,7 @@ impl<'metadata> ExecutionContext<'metadata> {
             state: Box::new(ContextState {
                 metadata,
                 assertion_failures: Vec::new(),
+                assumption_failures: Vec::new(),
                 trace_messages: Vec::new(),
                 event_counts: vec![0; metadata.event_sites.len()],
             }),
@@ -248,6 +266,7 @@ impl<'metadata> ExecutionContext<'metadata> {
             .collect();
         ExecutionResult {
             assertion_failures: self.state.assertion_failures.clone(),
+            assumption_failures: self.state.assumption_failures.clone(),
             trace_messages: self.state.trace_messages.clone(),
             cover_counts,
         }
@@ -256,6 +275,7 @@ impl<'metadata> ExecutionContext<'metadata> {
     /// Clears all event records and accumulated cover counters.
     pub fn clear(&mut self) {
         self.state.assertion_failures.clear();
+        self.state.assumption_failures.clear();
         self.state.trace_messages.clear();
         self.state.event_counts.fill(0);
     }
@@ -309,6 +329,34 @@ pub unsafe extern "C" fn xlsynth_pir_record_assert(
         node_text_id: site.node_text_id,
         message: site.message.unwrap_or_default(),
         label: site.label.unwrap_or_default(),
+    });
+}
+
+/// Records a failed `assumed_in_bounds` contract from generated code.
+///
+/// # Safety
+///
+/// `context` must point to an active raw context created by
+/// [`ExecutionContext::raw_context`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xlsynth_pir_record_assumption_failure(
+    context: *mut RawExecutionContext,
+    site_id: u32,
+) {
+    // SAFETY: forwarded from the caller's ABI contract.
+    let state = unsafe { state_from_raw(context) };
+    // SAFETY: the owning `ExecutionContext` keeps metadata alive.
+    let Some(site) = (unsafe { state.metadata.as_ref() })
+        .and_then(|metadata| metadata.event_sites.get(site_id as usize))
+    else {
+        return;
+    };
+    let EventKind::Assumption(kind) = site.kind else {
+        return;
+    };
+    state.assumption_failures.push(AssumptionFailure {
+        node_text_id: site.node_text_id,
+        kind,
     });
 }
 
@@ -985,6 +1033,14 @@ mod tests {
                         },
                     ],
                 },
+                EventSiteMetadata {
+                    node_text_id: 13,
+                    kind: EventKind::Assumption(AssumptionFailureKind::ArrayIndexOutOfBounds),
+                    label: None,
+                    message: None,
+                    format: None,
+                    operand_layouts: Vec::new(),
+                },
             ],
         }
     }
@@ -999,12 +1055,20 @@ mod tests {
             xlsynth_pir_record_cover(&mut raw, 0);
             xlsynth_pir_record_cover(&mut raw, 0);
             xlsynth_pir_record_assert(&mut raw, 1);
+            xlsynth_pir_record_assumption_failure(&mut raw, 3);
         }
         let result = context.result();
         assert_eq!(result.cover_counts[0].count, 2);
         assert_eq!(result.cover_counts[0].label, "covered");
         assert_eq!(result.assertion_failures[0].message, "failed");
         assert_eq!(result.assertion_failures[0].label, "assert_label");
+        assert_eq!(
+            result.assumption_failures,
+            vec![AssumptionFailure {
+                node_text_id: 13,
+                kind: AssumptionFailureKind::ArrayIndexOutOfBounds,
+            }]
+        );
     }
 
     #[test]
@@ -1102,6 +1166,7 @@ mod tests {
         context.clear();
         let result = context.result();
         assert!(result.assertion_failures.is_empty());
+        assert!(result.assumption_failures.is_empty());
         assert!(result.trace_messages.is_empty());
         assert_eq!(result.cover_counts[0].count, 0);
     }

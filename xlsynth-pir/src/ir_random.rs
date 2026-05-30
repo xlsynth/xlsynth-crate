@@ -315,6 +315,11 @@ pub struct RandomFnOptions {
     /// `cover` additionally requires `allow_tuples` because its result type is
     /// the empty tuple.
     pub allow_events: bool,
+    /// Permits generated array operations to assert `assumed_in_bounds=true`.
+    ///
+    /// An out-of-bounds execution of such a node reports an assumption
+    /// violation in evaluator/compiler event results.
+    pub allow_assumed_in_bounds: bool,
     pub enabled_operations: OperationSet,
 }
 
@@ -337,6 +342,7 @@ impl Default for RandomFnOptions {
             allow_gate: false,
             allow_extension_ops: false,
             allow_events: false,
+            allow_assumed_in_bounds: false,
             enabled_operations: OperationSet::default(),
         }
     }
@@ -1429,7 +1435,8 @@ impl<'a> FunctionGenerator<'a> {
                     NodePayload::ArrayIndex {
                         array: array_ref,
                         indices,
-                        assumed_in_bounds: false,
+                        assumed_in_bounds: self.options.allow_assumed_in_bounds
+                            && source.take_u64() & 1 != 0,
                     },
                     None,
                 ))
@@ -1473,7 +1480,8 @@ impl<'a> FunctionGenerator<'a> {
                         array,
                         value,
                         indices,
-                        assumed_in_bounds: false,
+                        assumed_in_bounds: self.options.allow_assumed_in_bounds
+                            && source.take_u64() & 1 != 0,
                     },
                     None,
                 ))
