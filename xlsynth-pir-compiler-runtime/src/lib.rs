@@ -1,0 +1,659 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! Runtime ABI and observable-event collection for compiled PIR functions.
+
+use std::ffi::c_void;
+use std::marker::PhantomData;
+use std::ptr;
+
+use num_bigint::{BigInt, BigUint, Sign};
+
+/// Native compiled-function entrypoint shared by in-memory and AOT execution.
+pub type CompiledEntrypoint = unsafe extern "C" fn(
+    inputs: *const *const u8,
+    output: *mut u8,
+    scratch: *mut u8,
+    context: *mut RawExecutionContext,
+) -> i32;
+
+/// Opaque execution context forwarded by compiled code to runtime callbacks.
+#[repr(C)]
+pub struct RawExecutionContext {
+    private_state: *mut c_void,
+}
+
+/// Kind of observable PIR event described by an event site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventKind {
+    Assert,
+    Cover,
+    Trace,
+}
+
+/// Native data description sufficient for immediate trace-value decoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TraceValueLayout {
+    Bits {
+        bit_count: usize,
+        byte_count: usize,
+    },
+    Array {
+        element: Box<TraceValueLayout>,
+        element_count: usize,
+    },
+    Tuple {
+        fields: Vec<TraceTupleFieldLayout>,
+        byte_count: usize,
+    },
+    Token,
+}
+
+/// Description of one tuple field supplied as a trace operand.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceTupleFieldLayout {
+    pub layout: Box<TraceValueLayout>,
+    pub offset: usize,
+}
+
+/// Static information attached to one observable node in compiled code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventSiteMetadata {
+    pub node_text_id: usize,
+    pub kind: EventKind,
+    pub label: Option<String>,
+    pub message: Option<String>,
+    pub format: Option<String>,
+    pub operand_layouts: Vec<TraceValueLayout>,
+}
+
+/// Runtime metadata for all observable sites in one compiled function.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CompiledFunctionMetadata {
+    pub event_sites: Vec<EventSiteMetadata>,
+}
+
+/// A failed compiled assertion, resolved to its source-site metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssertionFailure {
+    pub node_text_id: usize,
+    pub message: String,
+    pub label: String,
+}
+
+/// One emitted compiled trace statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceMessage {
+    pub node_text_id: usize,
+    pub message: String,
+    pub verbosity: i64,
+}
+
+/// Accumulated execution count for a compiled `cover` site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoverCount {
+    pub node_text_id: usize,
+    pub label: String,
+    pub count: u64,
+}
+
+/// Rust-owned observable results recorded while executing compiled code.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExecutionResult {
+    pub assertion_failures: Vec<AssertionFailure>,
+    pub trace_messages: Vec<TraceMessage>,
+    pub cover_counts: Vec<CoverCount>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TraceFormatPreference {
+    Default,
+    UnsignedDecimal,
+    SignedDecimal,
+    PlainHex,
+    ZeroPaddedHex,
+    Hex,
+    PlainBinary,
+    ZeroPaddedBinary,
+    Binary,
+}
+
+const TRACE_FORMAT_SPECIFIERS: [(&str, TraceFormatPreference); 9] = [
+    ("{}", TraceFormatPreference::Default),
+    ("{:u}", TraceFormatPreference::UnsignedDecimal),
+    ("{:d}", TraceFormatPreference::SignedDecimal),
+    ("{:x}", TraceFormatPreference::PlainHex),
+    ("{:0x}", TraceFormatPreference::ZeroPaddedHex),
+    ("{:#x}", TraceFormatPreference::Hex),
+    ("{:b}", TraceFormatPreference::PlainBinary),
+    ("{:0b}", TraceFormatPreference::ZeroPaddedBinary),
+    ("{:#b}", TraceFormatPreference::Binary),
+];
+
+struct ContextState {
+    metadata: *const CompiledFunctionMetadata,
+    assertion_failures: Vec<AssertionFailure>,
+    trace_messages: Vec<TraceMessage>,
+    event_counts: Vec<u64>,
+}
+
+/// Rust-owned event collector used for one or more compiled executions.
+///
+/// Cover counts accumulate until [`Self::clear`] is called. Assertion and
+/// trace messages also accumulate, permitting callers to consume a batch of
+/// invocations through one context.
+pub struct ExecutionContext<'metadata> {
+    state: Box<ContextState>,
+    marker: PhantomData<&'metadata CompiledFunctionMetadata>,
+}
+
+impl<'metadata> ExecutionContext<'metadata> {
+    /// Creates an empty collector for the supplied function metadata.
+    pub fn new(metadata: &'metadata CompiledFunctionMetadata) -> Self {
+        Self {
+            state: Box::new(ContextState {
+                metadata,
+                assertion_failures: Vec::new(),
+                trace_messages: Vec::new(),
+                event_counts: vec![0; metadata.event_sites.len()],
+            }),
+            marker: PhantomData,
+        }
+    }
+
+    /// Returns an opaque ABI object valid while this context is mutably
+    /// borrowed.
+    pub fn raw_context(&mut self) -> RawExecutionContext {
+        RawExecutionContext {
+            private_state: ptr::from_mut(self.state.as_mut()).cast(),
+        }
+    }
+
+    /// Resolves all currently recorded events into ordinary Rust values.
+    pub fn result(&self) -> ExecutionResult {
+        let metadata = self.metadata();
+        let cover_counts = metadata
+            .event_sites
+            .iter()
+            .zip(&self.state.event_counts)
+            .filter(|(site, _)| site.kind == EventKind::Cover)
+            .map(|(site, count)| CoverCount {
+                node_text_id: site.node_text_id,
+                label: site.label.clone().unwrap_or_default(),
+                count: *count,
+            })
+            .collect();
+        ExecutionResult {
+            assertion_failures: self.state.assertion_failures.clone(),
+            trace_messages: self.state.trace_messages.clone(),
+            cover_counts,
+        }
+    }
+
+    /// Clears all event records and accumulated cover counters.
+    pub fn clear(&mut self) {
+        self.state.assertion_failures.clear();
+        self.state.trace_messages.clear();
+        self.state.event_counts.fill(0);
+    }
+
+    fn metadata(&self) -> &CompiledFunctionMetadata {
+        // SAFETY: the context's lifetime guarantees metadata remains alive.
+        unsafe { &*self.state.metadata }
+    }
+}
+
+unsafe fn state_from_raw<'a>(context: *mut RawExecutionContext) -> &'a mut ContextState {
+    assert!(
+        !context.is_null(),
+        "compiled PIR callback requires an execution context"
+    );
+    // SAFETY: generated entrypoints receive a `RawExecutionContext` produced
+    // by `ExecutionContext::raw_context` for the duration of the call.
+    unsafe {
+        (*context)
+            .private_state
+            .cast::<ContextState>()
+            .as_mut()
+            .expect("compiled PIR callback received an invalid execution context")
+    }
+}
+
+fn site(state: &ContextState, site_id: u32, kind: EventKind) -> Option<&EventSiteMetadata> {
+    // SAFETY: the owning `ExecutionContext` keeps metadata alive.
+    let metadata = unsafe { state.metadata.as_ref()? };
+    let site = metadata.event_sites.get(site_id as usize)?;
+    (site.kind == kind).then_some(site)
+}
+
+/// Records a failed assertion from generated code.
+///
+/// # Safety
+///
+/// `context` must point to an active raw context created by
+/// [`ExecutionContext::raw_context`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xlsynth_pir_record_assert(
+    context: *mut RawExecutionContext,
+    site_id: u32,
+) {
+    // SAFETY: forwarded from the caller's ABI contract.
+    let state = unsafe { state_from_raw(context) };
+    let Some(site) = site(state, site_id, EventKind::Assert).cloned() else {
+        return;
+    };
+    state.assertion_failures.push(AssertionFailure {
+        node_text_id: site.node_text_id,
+        message: site.message.unwrap_or_default(),
+        label: site.label.unwrap_or_default(),
+    });
+}
+
+/// Records one active cover occurrence from generated code.
+///
+/// # Safety
+///
+/// `context` must point to an active raw context created by
+/// [`ExecutionContext::raw_context`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xlsynth_pir_record_cover(context: *mut RawExecutionContext, site_id: u32) {
+    // SAFETY: forwarded from the caller's ABI contract.
+    let state = unsafe { state_from_raw(context) };
+    if site(state, site_id, EventKind::Cover).is_some() {
+        if let Some(count) = state.event_counts.get_mut(site_id as usize) {
+            *count = count.saturating_add(1);
+        }
+    }
+}
+
+/// Records and formats one active trace occurrence from generated code.
+///
+/// # Safety
+///
+/// `context` must point to an active raw context created by
+/// [`ExecutionContext::raw_context`]. Each operand pointer must describe
+/// readable native storage matching the corresponding site's operand layout
+/// for the duration of this callback.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn xlsynth_pir_record_trace(
+    context: *mut RawExecutionContext,
+    site_id: u32,
+    operand_ptrs: *const *const u8,
+) {
+    // SAFETY: forwarded from the caller's ABI contract.
+    let state = unsafe { state_from_raw(context) };
+    let Some(site) = site(state, site_id, EventKind::Trace).cloned() else {
+        return;
+    };
+    if !site.operand_layouts.is_empty() && operand_ptrs.is_null() {
+        return;
+    }
+    state.trace_messages.push(TraceMessage {
+        node_text_id: site.node_text_id,
+        // SAFETY: the generated caller supplies one pointer per metadata operand.
+        message: unsafe {
+            format_trace_message(
+                site.format.as_deref().unwrap_or(""),
+                &site.operand_layouts,
+                operand_ptrs,
+            )
+        },
+        verbosity: 0,
+    });
+}
+
+/// Formats a trace message according to the XLS trace-format string syntax.
+unsafe fn format_trace_message(
+    format: &str,
+    layouts: &[TraceValueLayout],
+    operand_ptrs: *const *const u8,
+) -> String {
+    let mut output = String::new();
+    let mut offset = 0usize;
+    let mut operand_index = 0usize;
+    while offset < format.len() {
+        let remainder = &format[offset..];
+        if remainder.starts_with("{{") || remainder.starts_with("}}") {
+            // XLS preserves escaped braces in trace output; Verilog emission
+            // performs the collapse to single braces separately.
+            output.push_str(&remainder[..2]);
+            offset += 2;
+            continue;
+        }
+        if let Some((specifier, preference)) = TRACE_FORMAT_SPECIFIERS
+            .iter()
+            .find(|(specifier, _)| remainder.starts_with(specifier))
+        {
+            if let Some(layout) = layouts.get(operand_index) {
+                // SAFETY: callback ABI provides one matching pointer per layout.
+                let pointer = unsafe { *operand_ptrs.add(operand_index) };
+                // SAFETY: callback ABI specifies readable storage matching `layout`.
+                output.push_str(&unsafe { format_native_value(pointer, layout, *preference) });
+            }
+            operand_index += 1;
+            offset += specifier.len();
+            continue;
+        }
+        let character = remainder
+            .chars()
+            .next()
+            .expect("offset is within trace format string");
+        output.push(character);
+        offset += character.len_utf8();
+    }
+    output
+}
+
+/// Formats one caller-owned native value without constructing an XLS value.
+unsafe fn format_native_value(
+    pointer: *const u8,
+    layout: &TraceValueLayout,
+    preference: TraceFormatPreference,
+) -> String {
+    match layout {
+        TraceValueLayout::Bits {
+            bit_count,
+            byte_count,
+        } => {
+            let mut bytes = vec![0u8; *byte_count];
+            if *byte_count != 0 {
+                // SAFETY: callback ABI provides native scalar storage of this size.
+                unsafe { ptr::copy_nonoverlapping(pointer, bytes.as_mut_ptr(), *byte_count) };
+            }
+            let value = if cfg!(target_endian = "little") {
+                BigUint::from_bytes_le(&bytes)
+            } else {
+                BigUint::from_bytes_be(&bytes)
+            };
+            format_trace_bits(value, *bit_count, preference)
+        }
+        TraceValueLayout::Array {
+            element,
+            element_count,
+        } => {
+            let elements = (0..*element_count)
+                .map(|index| {
+                    // SAFETY: each element is within the caller-provided array region.
+                    unsafe {
+                        format_native_value(
+                            pointer.wrapping_add(index * element.byte_count()),
+                            element,
+                            preference,
+                        )
+                    }
+                })
+                .collect::<Vec<_>>();
+            format!("[{}]", elements.join(", "))
+        }
+        TraceValueLayout::Tuple { fields, .. } => {
+            let fields = fields
+                .iter()
+                .map(|field| {
+                    // SAFETY: each field offset is prescribed by native tuple metadata.
+                    unsafe {
+                        format_native_value(
+                            pointer.wrapping_add(field.offset),
+                            &field.layout,
+                            preference,
+                        )
+                    }
+                })
+                .collect::<Vec<_>>();
+            format!("({})", fields.join(", "))
+        }
+        TraceValueLayout::Token => "token".to_string(),
+    }
+}
+
+fn format_trace_bits(
+    mut value: BigUint,
+    bit_count: usize,
+    preference: TraceFormatPreference,
+) -> String {
+    if bit_count == 0 {
+        value = BigUint::from(0u8);
+    } else {
+        value &= (BigUint::from(1u8) << bit_count) - BigUint::from(1u8);
+    }
+    match preference {
+        TraceFormatPreference::Default => {
+            if bit_count <= 64 {
+                value.to_str_radix(10)
+            } else {
+                format_trace_bits(value, bit_count, TraceFormatPreference::Hex)
+            }
+        }
+        TraceFormatPreference::UnsignedDecimal => value.to_str_radix(10),
+        TraceFormatPreference::SignedDecimal => {
+            if bit_count != 0
+                && (&value & (BigUint::from(1u8) << (bit_count - 1))) != BigUint::from(0u8)
+            {
+                (BigInt::from_biguint(Sign::Plus, value)
+                    - BigInt::from_biguint(Sign::Plus, BigUint::from(1u8) << bit_count))
+                .to_string()
+            } else {
+                value.to_str_radix(10)
+            }
+        }
+        TraceFormatPreference::PlainHex => value.to_str_radix(16),
+        TraceFormatPreference::ZeroPaddedHex => {
+            zero_padded_grouped_digits(&value, bit_count, 4, 16)
+        }
+        TraceFormatPreference::Hex => {
+            format!("0x{}", grouped_digits(&value.to_str_radix(16)))
+        }
+        TraceFormatPreference::PlainBinary => value.to_str_radix(2),
+        TraceFormatPreference::ZeroPaddedBinary => {
+            zero_padded_grouped_digits(&value, bit_count, 1, 2)
+        }
+        TraceFormatPreference::Binary => {
+            format!("0b{}", grouped_digits(&value.to_str_radix(2)))
+        }
+    }
+}
+
+fn zero_padded_grouped_digits(
+    value: &BigUint,
+    bit_count: usize,
+    bits_per_digit: usize,
+    radix: u32,
+) -> String {
+    let digit_count = bit_count.div_ceil(bits_per_digit).max(1);
+    let digits = format!(
+        "{:0>width$}",
+        value.to_str_radix(radix),
+        width = digit_count
+    );
+    grouped_digits(&digits)
+}
+
+fn grouped_digits(digits: &str) -> String {
+    let first_group_width = match digits.len() % 4 {
+        0 => 4,
+        remainder => remainder,
+    };
+    let mut result = digits[..first_group_width].to_string();
+    for group_start in (first_group_width..digits.len()).step_by(4) {
+        result.push('_');
+        result.push_str(&digits[group_start..group_start + 4]);
+    }
+    result
+}
+
+impl TraceValueLayout {
+    fn byte_count(&self) -> usize {
+        match self {
+            Self::Bits { byte_count, .. } => *byte_count,
+            Self::Array {
+                element,
+                element_count,
+            } => element.byte_count() * element_count,
+            Self::Tuple { byte_count, .. } => *byte_count,
+            Self::Token => 0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn metadata() -> CompiledFunctionMetadata {
+        CompiledFunctionMetadata {
+            event_sites: vec![
+                EventSiteMetadata {
+                    node_text_id: 10,
+                    kind: EventKind::Cover,
+                    label: Some("covered".to_string()),
+                    message: None,
+                    format: None,
+                    operand_layouts: Vec::new(),
+                },
+                EventSiteMetadata {
+                    node_text_id: 11,
+                    kind: EventKind::Assert,
+                    label: Some("assert_label".to_string()),
+                    message: Some("failed".to_string()),
+                    format: None,
+                    operand_layouts: Vec::new(),
+                },
+                EventSiteMetadata {
+                    node_text_id: 12,
+                    kind: EventKind::Trace,
+                    label: None,
+                    message: None,
+                    format: Some("x={} arr={}".to_string()),
+                    operand_layouts: vec![
+                        TraceValueLayout::Bits {
+                            bit_count: 8,
+                            byte_count: 1,
+                        },
+                        TraceValueLayout::Array {
+                            element: Box::new(TraceValueLayout::Bits {
+                                bit_count: 8,
+                                byte_count: 1,
+                            }),
+                            element_count: 2,
+                        },
+                    ],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn cover_and_assert_callbacks_collect_rust_owned_results() {
+        let metadata = metadata();
+        let mut context = ExecutionContext::new(&metadata);
+        let mut raw = context.raw_context();
+        // SAFETY: `raw` points into `context` for these immediate calls.
+        unsafe {
+            xlsynth_pir_record_cover(&mut raw, 0);
+            xlsynth_pir_record_cover(&mut raw, 0);
+            xlsynth_pir_record_assert(&mut raw, 1);
+        }
+        let result = context.result();
+        assert_eq!(result.cover_counts[0].count, 2);
+        assert_eq!(result.cover_counts[0].label, "covered");
+        assert_eq!(result.assertion_failures[0].message, "failed");
+        assert_eq!(result.assertion_failures[0].label, "assert_label");
+    }
+
+    #[test]
+    fn trace_callback_decodes_values_before_native_storage_changes() {
+        let metadata = metadata();
+        let mut context = ExecutionContext::new(&metadata);
+        let mut raw = context.raw_context();
+        let mut scalar = 7u8;
+        let mut array = [2u8, 3u8];
+        let operands = [
+            ptr::from_ref(&scalar).cast::<u8>(),
+            ptr::from_ref(&array).cast::<u8>(),
+        ];
+        // SAFETY: operands use the native layouts specified by trace metadata.
+        unsafe { xlsynth_pir_record_trace(&mut raw, 2, operands.as_ptr()) };
+        scalar = 90;
+        array[0] = 91;
+        assert_eq!(scalar, 90);
+        assert_eq!(array[0], 91);
+        assert_eq!(context.result().trace_messages[0].message, "x=7 arr=[2, 3]");
+    }
+
+    #[test]
+    fn trace_callback_formats_all_specifiers_and_wide_decimal_without_xls() {
+        let twelve_bits = TraceValueLayout::Bits {
+            bit_count: 12,
+            byte_count: 2,
+        };
+        let metadata = CompiledFunctionMetadata {
+            event_sites: vec![EventSiteMetadata {
+                node_text_id: 20,
+                kind: EventKind::Trace,
+                label: None,
+                message: None,
+                format: Some(
+                    "literal={{ default={} u={:u} d={:d} x={:x} 0x={:0x} #x={:#x} b={:b} 0b={:0b} #b={:#b} wide={} wide_u={:u}".to_string(),
+                ),
+                operand_layouts: vec![
+                    twelve_bits.clone(),
+                    twelve_bits.clone(),
+                    TraceValueLayout::Bits {
+                        bit_count: 8,
+                        byte_count: 1,
+                    },
+                    twelve_bits.clone(),
+                    twelve_bits.clone(),
+                    twelve_bits.clone(),
+                    twelve_bits.clone(),
+                    twelve_bits.clone(),
+                    twelve_bits,
+                    TraceValueLayout::Bits {
+                        bit_count: 72,
+                        byte_count: 9,
+                    },
+                    TraceValueLayout::Bits {
+                        bit_count: 72,
+                        byte_count: 9,
+                    },
+                ],
+            }],
+        };
+        let mut context = ExecutionContext::new(&metadata);
+        let mut raw = context.raw_context();
+        let twelve = 43u16;
+        let negative = 251u8;
+        let wide = [1u8, 0, 0, 0, 0, 0, 0, 0, 1];
+        let operands = [
+            ptr::from_ref(&twelve).cast::<u8>(),
+            ptr::from_ref(&twelve).cast::<u8>(),
+            ptr::from_ref(&negative).cast::<u8>(),
+            ptr::from_ref(&twelve).cast::<u8>(),
+            ptr::from_ref(&twelve).cast::<u8>(),
+            ptr::from_ref(&twelve).cast::<u8>(),
+            ptr::from_ref(&twelve).cast::<u8>(),
+            ptr::from_ref(&twelve).cast::<u8>(),
+            ptr::from_ref(&twelve).cast::<u8>(),
+            ptr::from_ref(&wide).cast::<u8>(),
+            ptr::from_ref(&wide).cast::<u8>(),
+        ];
+        // SAFETY: operands use the native layouts specified by trace metadata.
+        unsafe { xlsynth_pir_record_trace(&mut raw, 0, operands.as_ptr()) };
+        assert_eq!(
+            context.result().trace_messages[0].message,
+            "literal={{ default=43 u=43 d=-5 x=2b 0x=02b #x=0x2b b=101011 0b=0000_0010_1011 #b=0b10_1011 wide=0x1_0000_0000_0000_0001 wide_u=18446744073709551617"
+        );
+    }
+
+    #[test]
+    fn clear_resets_accumulated_event_results() {
+        let metadata = metadata();
+        let mut context = ExecutionContext::new(&metadata);
+        let mut raw = context.raw_context();
+        // SAFETY: `raw` points into `context` for this immediate call.
+        unsafe { xlsynth_pir_record_cover(&mut raw, 0) };
+        context.clear();
+        let result = context.result();
+        assert!(result.assertion_failures.is_empty());
+        assert!(result.trace_messages.is_empty());
+        assert_eq!(result.cover_counts[0].count, 0);
+    }
+}

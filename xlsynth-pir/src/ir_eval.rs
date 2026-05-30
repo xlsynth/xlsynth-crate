@@ -13,6 +13,7 @@ use crate::ir_value_utils::{
     deep_or_ir_values_for_type, ir_bits_to_usize, ir_bits_to_usize_in_range, zero_ir_value_for_type,
 };
 use crate::math::ceil_log2;
+use num_bigint::{BigInt, BigUint, Sign};
 use smallvec::SmallVec;
 use std::collections::HashMap;
 use xlsynth::{IrBits, IrValue};
@@ -1287,22 +1288,239 @@ pub struct AssertionFailure {
     pub label: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoverCount {
+    pub node_text_id: usize,
+    pub label: String,
+    pub count: u64,
+}
+
+/// Accumulates cover hits by package-unique static site while preserving
+/// discovery order.
+fn accumulate_cover_count(
+    cover_counts: &mut Vec<CoverCount>,
+    cover_index_by_text_id: &mut HashMap<usize, usize>,
+    incoming: CoverCount,
+) {
+    if let Some(index) = cover_index_by_text_id.get(&incoming.node_text_id) {
+        let existing = &mut cover_counts[*index];
+        debug_assert_eq!(
+            existing.label, incoming.label,
+            "one cover text id should refer to one static site"
+        );
+        existing.count = existing.count.saturating_add(incoming.count);
+    } else {
+        cover_index_by_text_id.insert(incoming.node_text_id, cover_counts.len());
+        cover_counts.push(incoming);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnEvalSuccess {
     pub value: IrValue,
     pub trace_messages: Vec<TraceMessage>,
+    pub cover_counts: Vec<CoverCount>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnEvalFailure {
     pub assertion_failures: Vec<AssertionFailure>,
     pub trace_messages: Vec<TraceMessage>,
+    pub cover_counts: Vec<CoverCount>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FnEvalResult {
     Success(FnEvalSuccess),
     Failure(FnEvalFailure),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TraceFormatPreference {
+    Default,
+    UnsignedDecimal,
+    SignedDecimal,
+    PlainHex,
+    ZeroPaddedHex,
+    Hex,
+    PlainBinary,
+    ZeroPaddedBinary,
+    Binary,
+}
+
+const TRACE_FORMAT_SPECIFIERS: [(&str, TraceFormatPreference); 9] = [
+    ("{}", TraceFormatPreference::Default),
+    ("{:u}", TraceFormatPreference::UnsignedDecimal),
+    ("{:d}", TraceFormatPreference::SignedDecimal),
+    ("{:x}", TraceFormatPreference::PlainHex),
+    ("{:0x}", TraceFormatPreference::ZeroPaddedHex),
+    ("{:#x}", TraceFormatPreference::Hex),
+    ("{:b}", TraceFormatPreference::PlainBinary),
+    ("{:0b}", TraceFormatPreference::ZeroPaddedBinary),
+    ("{:#b}", TraceFormatPreference::Binary),
+];
+
+/// Formats one trace operand using the XLS trace human-value convention.
+fn format_trace_value(value: &IrValue, ty: &ir::Type, preference: TraceFormatPreference) -> String {
+    match ty {
+        ir::Type::Bits(bit_count) => {
+            let bytes = value
+                .to_bits()
+                .expect("trace bits value must have bits representation")
+                .to_le_bytes()
+                .expect("trace bits payload must convert to bytes");
+            format_trace_bits(BigUint::from_bytes_le(&bytes), *bit_count, preference)
+        }
+        ir::Type::Tuple(fields) => {
+            let elements = fields
+                .iter()
+                .enumerate()
+                .map(|(index, field_ty)| {
+                    format_trace_value(
+                        &value
+                            .get_element(index)
+                            .expect("trace tuple value must have expected field"),
+                        field_ty,
+                        preference,
+                    )
+                })
+                .collect::<Vec<_>>();
+            format!("({})", elements.join(", "))
+        }
+        ir::Type::Array(array) => {
+            let elements = (0..array.element_count)
+                .map(|index| {
+                    format_trace_value(
+                        &value
+                            .get_element(index)
+                            .expect("trace array value must have expected element"),
+                        &array.element_type,
+                        preference,
+                    )
+                })
+                .collect::<Vec<_>>();
+            format!("[{}]", elements.join(", "))
+        }
+        ir::Type::Token => "token".to_string(),
+    }
+}
+
+fn format_trace_bits(
+    mut value: BigUint,
+    bit_count: usize,
+    preference: TraceFormatPreference,
+) -> String {
+    if bit_count == 0 {
+        value = BigUint::from(0u8);
+    } else {
+        value &= (BigUint::from(1u8) << bit_count) - BigUint::from(1u8);
+    }
+    match preference {
+        TraceFormatPreference::Default => {
+            if bit_count <= 64 {
+                value.to_str_radix(10)
+            } else {
+                format_trace_bits(value, bit_count, TraceFormatPreference::Hex)
+            }
+        }
+        TraceFormatPreference::UnsignedDecimal => value.to_str_radix(10),
+        TraceFormatPreference::SignedDecimal => {
+            if bit_count != 0
+                && (&value & (BigUint::from(1u8) << (bit_count - 1))) != BigUint::from(0u8)
+            {
+                (BigInt::from_biguint(Sign::Plus, value)
+                    - BigInt::from_biguint(Sign::Plus, BigUint::from(1u8) << bit_count))
+                .to_string()
+            } else {
+                value.to_str_radix(10)
+            }
+        }
+        TraceFormatPreference::PlainHex => value.to_str_radix(16),
+        TraceFormatPreference::ZeroPaddedHex => {
+            zero_padded_grouped_digits(&value, bit_count, 4, 16)
+        }
+        TraceFormatPreference::Hex => {
+            format!("0x{}", grouped_digits(&value.to_str_radix(16)))
+        }
+        TraceFormatPreference::PlainBinary => value.to_str_radix(2),
+        TraceFormatPreference::ZeroPaddedBinary => {
+            zero_padded_grouped_digits(&value, bit_count, 1, 2)
+        }
+        TraceFormatPreference::Binary => {
+            format!("0b{}", grouped_digits(&value.to_str_radix(2)))
+        }
+    }
+}
+
+fn zero_padded_grouped_digits(
+    value: &BigUint,
+    bit_count: usize,
+    bits_per_digit: usize,
+    radix: u32,
+) -> String {
+    let digit_count = bit_count.div_ceil(bits_per_digit).max(1);
+    let digits = format!(
+        "{:0>width$}",
+        value.to_str_radix(radix),
+        width = digit_count
+    );
+    grouped_digits(&digits)
+}
+
+fn grouped_digits(digits: &str) -> String {
+    let first_group_width = match digits.len() % 4 {
+        0 => 4,
+        remainder => remainder,
+    };
+    let mut result = digits[..first_group_width].to_string();
+    for group_start in (first_group_width..digits.len()).step_by(4) {
+        result.push('_');
+        result.push_str(&digits[group_start..group_start + 4]);
+    }
+    result
+}
+
+/// Applies a verified XLS trace format string to evaluated operand values.
+fn format_trace_message(
+    format: &str,
+    operands: &[ir::NodeRef],
+    f: &ir::Fn,
+    env: &DenseEvalEnv,
+) -> String {
+    let mut output = String::new();
+    let mut offset = 0usize;
+    let mut operand_index = 0usize;
+    while offset < format.len() {
+        let remainder = &format[offset..];
+        if remainder.starts_with("{{") || remainder.starts_with("}}") {
+            // XLS preserves escaped braces in IR trace output.
+            output.push_str(&remainder[..2]);
+            offset += 2;
+            continue;
+        }
+        if let Some((specifier, preference)) = TRACE_FORMAT_SPECIFIERS
+            .iter()
+            .find(|(specifier, _)| remainder.starts_with(specifier))
+        {
+            if let Some(operand) = operands.get(operand_index) {
+                output.push_str(&format_trace_value(
+                    env.get(operand).expect("trace operand must be evaluated"),
+                    &f.get_node(*operand).ty,
+                    *preference,
+                ));
+            }
+            operand_index += 1;
+            offset += specifier.len();
+            continue;
+        }
+        let character = remainder
+            .chars()
+            .next()
+            .expect("offset is within trace format string");
+        output.push(character);
+        offset += character.len_utf8();
+    }
+    output
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1668,8 +1886,8 @@ fn observe_select_like_node(
 ///
 /// - Produces `TraceMessage`s for `trace` nodes whose `activated` predicate is
 ///   true.
-/// - Records `AssertionFailure`s for `assert` nodes whose `activate` predicate
-///   is true.
+/// - Records `AssertionFailure`s for `assert` nodes whose predicate is false.
+/// - Records `CoverCount`s for `cover` nodes, including inactive sites.
 /// - Returns the value of the function's return node on success.
 pub fn eval_fn_with_observer(
     f: &ir::Fn,
@@ -1742,6 +1960,8 @@ fn eval_fn_impl<'a>(
     let mut env = DenseEvalEnv::new(f.nodes.len());
     let mut trace_messages: Vec<TraceMessage> = Vec::new();
     let mut assertion_failures: Vec<AssertionFailure> = Vec::new();
+    let mut cover_counts: Vec<CoverCount> = Vec::new();
+    let mut cover_index_by_text_id: HashMap<usize, usize> = HashMap::new();
     for nr in eval_order(f, order_policy) {
         let node = f.get_node(nr);
         let value: IrValue = match &node.payload {
@@ -1761,12 +1981,12 @@ fn eval_fn_impl<'a>(
                 label,
             } => {
                 let _token_val = env.get(token).cloned().unwrap_or_else(IrValue::make_token);
-                let active = env
+                let condition = env
                     .get(activate)
                     .expect("assert activate operand must be evaluated")
                     .to_bool()
                     .expect("activate must be bits[1]");
-                if active {
+                if !condition {
                     if let Some(observer) = observer {
                         unsafe {
                             (&mut *observer).on_failure_event(FailureEvent {
@@ -1798,49 +2018,32 @@ fn eval_fn_impl<'a>(
                     .to_bool()
                     .expect("activated must be bits[1]");
                 if is_active {
-                    // Build a message by replacing sequential `{}` occurrences with operand values
-                    // in default formatting. If placeholders are fewer than operands, extra
-                    // operands are appended in bracketed list for visibility.
-                    let mut msg = String::new();
-                    let mut parts = format.split("{}");
-                    let mut first = true;
-                    let mut op_iter = operands.iter();
-                    loop {
-                        let part = parts.next();
-                        if part.is_none() {
-                            break;
-                        }
-                        let part = part.unwrap();
-                        if !first {
-                            if let Some(op_ref) = op_iter.next() {
-                                let v = env.get(op_ref).expect("trace operand must be evaluated");
-                                msg.push_str(&v.to_string());
-                            }
-                        }
-                        first = false;
-                        msg.push_str(part);
-                    }
-                    // Append any remaining operands if there were more operands than `{}`.
-                    let remaining: Vec<String> = op_iter
-                        .map(|r| {
-                            env.get(r)
-                                .expect("trace operand must be evaluated")
-                                .to_string()
-                        })
-                        .collect();
-                    if !remaining.is_empty() {
-                        msg.push_str(" [");
-                        msg.push_str(&remaining.join(", "));
-                        msg.push(']');
-                    }
                     trace_messages.push(TraceMessage {
-                        message: msg,
+                        message: format_trace_message(format, operands, f, &env),
                         // XLS trace nodes in this IR do not carry verbosity; use 0.
                         verbosity: 0,
                     });
                 }
                 // The result of trace is a token.
                 IrValue::make_token()
+            }
+            P::Cover { predicate, label } => {
+                let active = env
+                    .get(predicate)
+                    .expect("cover predicate operand must be evaluated")
+                    .to_bool()
+                    .expect("cover predicate must be bits[1]");
+                accumulate_cover_count(
+                    &mut cover_counts,
+                    &mut cover_index_by_text_id,
+                    CoverCount {
+                        node_text_id: node.text_id,
+                        label: label.clone(),
+                        count: u64::from(active),
+                    },
+                );
+                // XLS cover produces the zero-sized unit value.
+                IrValue::make_tuple(&[])
             }
             P::AfterAll(_deps) => {
                 // Tokens have no payload; produce a fresh token value.
@@ -1865,14 +2068,29 @@ fn eval_fn_impl<'a>(
                 match callee_result {
                     FnEvalResult::Success(success) => {
                         trace_messages.extend(success.trace_messages);
+                        for cover_count in success.cover_counts {
+                            accumulate_cover_count(
+                                &mut cover_counts,
+                                &mut cover_index_by_text_id,
+                                cover_count,
+                            );
+                        }
                         success.value
                     }
                     FnEvalResult::Failure(fail) => {
                         assertion_failures.extend(fail.assertion_failures);
                         trace_messages.extend(fail.trace_messages);
+                        for cover_count in fail.cover_counts {
+                            accumulate_cover_count(
+                                &mut cover_counts,
+                                &mut cover_index_by_text_id,
+                                cover_count,
+                            );
+                        }
                         return FnEvalResult::Failure(FnEvalFailure {
                             assertion_failures,
                             trace_messages,
+                            cover_counts,
                         });
                     }
                 }
@@ -1899,6 +2117,7 @@ fn eval_fn_impl<'a>(
                     return FnEvalResult::Failure(FnEvalFailure {
                         assertion_failures,
                         trace_messages,
+                        cover_counts,
                     });
                 }
                 let r = arg_bits.width_slice(*start as i64, *width as i64);
@@ -2050,6 +2269,7 @@ fn eval_fn_impl<'a>(
                             return FnEvalResult::Failure(FnEvalFailure {
                                 assertion_failures,
                                 trace_messages,
+                                cover_counts,
                             });
                         }
                         clamped_any = true;
@@ -2139,6 +2359,7 @@ fn eval_fn_impl<'a>(
                             return FnEvalResult::Failure(FnEvalFailure {
                                 assertion_failures,
                                 trace_messages,
+                                cover_counts,
                             });
                         } else {
                             // OOB but not assumed in-bounds: return the original array unchanged.
@@ -2223,11 +2444,13 @@ fn eval_fn_impl<'a>(
         FnEvalResult::Success(FnEvalSuccess {
             value: ret_value,
             trace_messages,
+            cover_counts,
         })
     } else {
         FnEvalResult::Failure(FnEvalFailure {
             assertion_failures,
             trace_messages,
+            cover_counts,
         })
     }
 }
@@ -3698,30 +3921,163 @@ fn f(x: bits[1] id=1) -> bits[1] {
             _ => unreachable!(),
         };
 
-        // Case 1: x = 0 => no assert triggered, one trace inactive, success
+        // Case 1: x = 0 => assert fails and trace is inactive.
         let x0 = IrValue::make_ubits(1, 0).unwrap();
         let res0 = eval_fn(&f, &[x0]);
         match res0 {
-            FnEvalResult::Success(success) => {
-                assert_eq!(success.value, IrValue::make_ubits(1, 1).unwrap());
-                assert!(success.trace_messages.is_empty());
-            }
-            other => panic!("unexpected result: {:?}", other),
-        }
-
-        // Case 2: x = 1 => assert fires and trace emits
-        let x1 = IrValue::make_ubits(1, 1).unwrap();
-        let res1 = eval_fn(&f, &[x1]);
-        match res1 {
             FnEvalResult::Failure(fail) => {
                 assert_eq!(fail.assertion_failures.len(), 1);
                 assert_eq!(fail.assertion_failures[0].message, "boom");
                 assert_eq!(fail.assertion_failures[0].label, "L");
-                assert_eq!(fail.trace_messages.len(), 1);
-                assert_eq!(fail.trace_messages[0].message, "x=bits[1]:1 done");
+                assert!(fail.trace_messages.is_empty());
             }
             other => panic!("unexpected result: {:?}", other),
         }
+
+        // Case 2: x = 1 => assert passes and trace emits.
+        let x1 = IrValue::make_ubits(1, 1).unwrap();
+        let res1 = eval_fn(&f, &[x1]);
+        match res1 {
+            FnEvalResult::Success(success) => {
+                assert_eq!(success.value, IrValue::make_ubits(1, 1).unwrap());
+                assert_eq!(success.trace_messages.len(), 1);
+                assert_eq!(success.trace_messages[0].message, "x=1 done");
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_fn_trace_formats_match_xls_human_value_syntax() {
+        let ir_text = r#"package test
+
+fn f(x: bits[12] id=1, neg: bits[8] id=2, wide: bits[72] id=3) -> token {
+  t: token = after_all(id=4)
+  one: bits[1] = literal(value=1, id=5)
+  ret tr: token = trace(t, one, format="literal={{ default={} u={:u} d={:d} x={:x} 0x={:0x} #x={:#x} b={:b} 0b={:0b} #b={:#b} wide={} wide_u={:u}", data_operands=[x, x, neg, x, x, x, x, x, x, wide, wide], id=6)
+}
+"#;
+        let mut p = Parser::new(ir_text);
+        let pkg = p.parse_and_validate_package().expect("parse ok");
+        let f = pkg.get_fn("f").expect("f");
+        let args = vec![
+            IrValue::make_ubits(12, 43).unwrap(),
+            IrValue::make_ubits(8, 251).unwrap(),
+            IrValue::parse_typed("bits[72]:0x1_0000_0000_0000_0001").unwrap(),
+        ];
+        let res = eval_fn(f, &args);
+        let FnEvalResult::Success(success) = res else {
+            panic!("trace should not fail: {res:?}");
+        };
+        assert_eq!(
+            success.trace_messages[0].message,
+            "literal={{ default=43 u=43 d=-5 x=2b 0x=02b #x=0x2b b=101011 0b=0000_0010_1011 #b=0b10_1011 wide=0x1_0000_0000_0000_0001 wide_u=18446744073709551617"
+        );
+    }
+
+    #[test]
+    fn test_eval_fn_cover_records_active_and_inactive_sites() {
+        let ir_text = r#"package test
+
+fn f(x: bits[1] id=1) -> bits[1] {
+  nx: bits[1] = not(x, id=2)
+  _active: () = cover(x, label="active", id=3)
+  _inactive: () = cover(nx, label="inactive", id=4)
+  ret identity.5: bits[1] = identity(x, id=5)
+}
+"#;
+        let mut p = Parser::new(ir_text);
+        let pkg = p.parse_and_validate_package().expect("parse ok");
+        let f = match &pkg.members[0] {
+            ir::PackageMember::Function(f) => f.clone(),
+            _ => unreachable!(),
+        };
+        let result = eval_fn(&f, &[IrValue::make_ubits(1, 1).unwrap()]);
+        let FnEvalResult::Success(success) = result else {
+            panic!("unexpected result: {result:?}");
+        };
+        assert_eq!(
+            success.cover_counts,
+            vec![
+                CoverCount {
+                    node_text_id: 3,
+                    label: "active".to_string(),
+                    count: 1,
+                },
+                CoverCount {
+                    node_text_id: 4,
+                    label: "inactive".to_string(),
+                    count: 0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_eval_fn_in_package_invoke_accumulates_repeated_cover_site() {
+        let ir_text = r#"package test
+
+fn g(x: bits[1] id=1) -> bits[1] {
+  _covered: () = cover(x, label="hit", id=2)
+  ret identity.3: bits[1] = identity(x, id=3)
+}
+
+fn f(x: bits[1] id=10) -> bits[1] {
+  first: bits[1] = invoke(x, to_apply=g, id=11)
+  second: bits[1] = invoke(x, to_apply=g, id=12)
+  ret and.13: bits[1] = and(first, second, id=13)
+}
+"#;
+        let mut p = Parser::new(ir_text);
+        let pkg = p.parse_and_validate_package().expect("parse ok");
+        let f = pkg.get_fn("f").expect("f");
+        let result = eval_fn_in_package(&pkg, f, &[IrValue::make_ubits(1, 1).unwrap()]);
+        let FnEvalResult::Success(success) = result else {
+            panic!("unexpected result: {result:?}");
+        };
+        assert_eq!(
+            success.cover_counts,
+            vec![CoverCount {
+                node_text_id: 2,
+                label: "hit".to_string(),
+                count: 2,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_eval_fn_in_package_failure_accumulates_repeated_cover_site() {
+        let ir_text = r#"package test
+
+fn g(x: bits[1] id=1) -> bits[1] {
+  t: token = after_all(id=2)
+  _covered: () = cover(x, label="hit", id=3)
+  _asserted: token = assert(t, x, message="not set", label="asserted", id=4)
+  ret identity.5: bits[1] = identity(x, id=5)
+}
+
+fn f() -> bits[1] {
+  one: bits[1] = literal(value=1, id=10)
+  first: bits[1] = invoke(one, to_apply=g, id=11)
+  zero: bits[1] = not(first, id=12)
+  ret second: bits[1] = invoke(zero, to_apply=g, id=13)
+}
+"#;
+        let mut p = Parser::new(ir_text);
+        let pkg = p.parse_and_validate_package().expect("parse ok");
+        let f = pkg.get_fn("f").expect("f");
+        let result = eval_fn_in_package(&pkg, f, &[]);
+        let FnEvalResult::Failure(failure) = result else {
+            panic!("unexpected result: {result:?}");
+        };
+        assert_eq!(
+            failure.cover_counts,
+            vec![CoverCount {
+                node_text_id: 3,
+                label: "hit".to_string(),
+                count: 1,
+            }]
+        );
     }
 
     #[test]
@@ -3905,7 +4261,7 @@ fn f(x: bits[8] id=10) -> bits[8] {
             FnEvalResult::Success(success) => {
                 assert_eq!(success.value, IrValue::make_ubits(8, 7).unwrap());
                 let want = vec![TraceMessage {
-                    message: "in g x=bits[8]:7".to_string(),
+                    message: "in g x=7".to_string(),
                     verbosity: 0,
                 }];
                 assert_eq!(success.trace_messages, want);

@@ -20,6 +20,7 @@ cranelift-module = "0.132.0"
 thiserror = "1"
 xlsynth = { path = "../xlsynth", version = "0.53.0" }
 xlsynth-pir = { path = "../xlsynth-pir", version = "0.53.0" }
+xlsynth-pir-compiler-runtime = { path = "../xlsynth-pir-compiler-runtime", version = "0.53.0" }
 
 [lib]
 name = "xlsynth_pir_compiler"

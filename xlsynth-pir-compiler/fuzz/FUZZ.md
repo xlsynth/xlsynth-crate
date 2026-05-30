@@ -34,15 +34,19 @@ Run:
 cargo fuzz run fuzz_pir_function_jit_aggregate_eval_equiv
 ```
 
-This target expands the same differential property to native aggregates,
+This target expands the same differential property to native aggregates and
+observable function events,
 including multidimensional arrays, nested tuples, aggregate construction and
 indexing, aggregate equality/inequality, aggregate-valued gate or selection
 results, and default-only `sel` nodes. It also exercises tuple-valued
 extension results such as `ext_normalize_left` and XLS partial-product
-multiply tuples.
+multiply tuples, along with `after_all`, `cover`, `assert`, and `trace`.
+Observable event results are compared as unordered multisets because independent
+event nodes are not semantically ordered unless their token dependencies require it.
 
 Main additional failure modes surfaced:
 
 - Incorrect native array stride or `#[repr(C)]`-compatible tuple field layout.
 - Incorrect scratch materialization or recursive copying of aggregate values.
 - Incorrect out-of-bounds semantics for native array slice/update/index nodes.
+- Divergent assertion, trace, or cover callback behavior.
