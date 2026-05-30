@@ -45,8 +45,7 @@ Generates upstream-standard PIR directly, including `gate`, arbitrary-width
 multiply, product-pair, token, and event forms (`after_all`, `assert`,
 `trace`, and `cover`), along with `assumed_in_bounds` array attributes,
 serializes it, parses and re-emits it through libxls, then parses and re-emits
-the libxls output through PIR. This intentionally tests the `PIR printer ->
-libxls parser/printer -> PIR parser/printer` interoperability boundary and
+the libxls output through PIR. This intentionally tests the `PIR printer -> libxls parser/printer -> PIR parser/printer` interoperability boundary and
 structural stability, including event and assumption metadata, of the PIR
 roundtrip.
 
