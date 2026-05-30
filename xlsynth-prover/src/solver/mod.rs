@@ -91,9 +91,15 @@ pub trait Solver: Sized {
         self.from_raw_str(width, &s)
     }
     fn zero(&mut self, width: usize) -> BitVec<Self::Term> {
+        if width == 0 {
+            return BitVec::ZeroWidth;
+        }
         self.numerical(width, 0)
     }
     fn one(&mut self, width: usize) -> BitVec<Self::Term> {
+        if width == 0 {
+            return BitVec::ZeroWidth;
+        }
         self.numerical(width, 1)
     }
     fn all_ones(&mut self, width: usize) -> BitVec<Self::Term> {
@@ -1990,6 +1996,12 @@ macro_rules! test_solver {
                     solver.concat_many(Vec::new()),
                     crate::solver::BitVec::ZeroWidth
                 ));
+            }
+            #[test]
+            fn test_zero_width_constants_are_zero_width() {
+                let mut solver = $solver;
+                assert!(matches!(solver.zero(0), crate::solver::BitVec::ZeroWidth));
+                assert!(matches!(solver.one(0), crate::solver::BitVec::ZeroWidth));
             }
             crate::test_solver_many!(
                 test_and_many,

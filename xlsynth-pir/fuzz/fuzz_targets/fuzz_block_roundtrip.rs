@@ -88,7 +88,13 @@ fuzz_target!(|data: &[u8]| {
     // 4) Roundtrip the IR through the parser and emitter.
     let pkg1 = Parser::new(&generated_ir_text)
         .parse_and_validate_package()
-        .expect("parse and validate package should succeed");
+        .unwrap_or_else(|error| {
+            panic!(
+                "parse and validate generated block package should succeed: {error:?}\n\
+                 === INPUT IR ===\n{}\n=== GENERATED BLOCK IR ===\n{}",
+                pkg, generated_ir_text
+            )
+        });
     let roundtrip_ir_text = pkg1.to_string();
     let roundtrip_path = tmpdir.path().join("roundtrip.ir");
     std::fs::write(&roundtrip_path, &roundtrip_ir_text).expect("write roundtrip.ir should succeed");

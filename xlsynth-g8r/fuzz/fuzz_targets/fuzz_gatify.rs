@@ -5,6 +5,7 @@ use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::aig_serdes::gate2ir;
 use xlsynth_g8r::gatify::ir2gate::{self, GatifyOutput};
 use xlsynth_g8r_fuzz::generate_gatify_random_pir_package;
+use xlsynth_pir::desugar_extensions::emit_package_as_xls_ir_text;
 use xlsynth_pir::ir;
 #[cfg(feature = "has-bitwuzla")]
 use xlsynth_prover::ir_equiv::{run_ir_equiv, IrEquivRequest, IrModule};
@@ -76,7 +77,8 @@ fuzz_target!(|data: &[u8]| {
     let parsed_fn = package
         .get_top_fn()
         .expect("generated PIR package should have a top function");
-    let orig_ir = package.to_string();
+    let orig_ir = emit_package_as_xls_ir_text(&package)
+        .expect("generated extension-bearing PIR should desugar to XLS IR");
     let orig_top = parsed_fn.name.as_str();
     let fn_type = parsed_fn.get_type();
 

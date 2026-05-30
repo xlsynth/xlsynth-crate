@@ -937,6 +937,34 @@ mod tests {
     }
 
     #[test]
+    fn array_index_with_different_index_arity_is_not_shape_matched() {
+        let pkg_old = parse_ir_from_string(
+            r#"package p
+            top fn f(a: bits[1][1] id=1, b: bits[1][1][1] id=2, i: bits[1] id=3) -> bits[1] {
+                ret indexed: bits[1] = array_index(a, indices=[i], id=4)
+            }
+            "#,
+        );
+        let old_fn = pkg_old.get_top_fn().unwrap();
+
+        let pkg_new = parse_ir_from_string(
+            r#"package p
+            top fn f(a: bits[1][1] id=1, b: bits[1][1][1] id=2, i: bits[1] id=3) -> bits[1] {
+                ret indexed: bits[1] = array_index(b, indices=[i, i], id=4)
+            }
+            "#,
+        );
+        let new_fn = pkg_new.get_top_fn().unwrap();
+
+        let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
+        let edits = compute_fn_edit(old_fn, new_fn, &mut selector).unwrap();
+        let patched = apply_fn_edits(old_fn, &edits).unwrap();
+        assert!(crate::node_hashing::functions_structurally_equivalent(
+            &patched, new_fn
+        ));
+    }
+
+    #[test]
     fn apply_edits_add_identity_of_literal() {
         let pkg_old = parse_ir_from_string(
             r#"package p

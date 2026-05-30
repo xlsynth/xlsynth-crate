@@ -188,13 +188,17 @@ fn type_to_dslx(ty: &Type) -> Result<String, IrFnToDslxError> {
         Type::Bits(w) => Ok(format!("uN[{}]", w)),
         Type::Token => Ok("token".to_string()),
         Type::Tuple(members) => {
+            if members.is_empty() {
+                return Err(IrFnToDslxError::UnsupportedType(
+                    "empty tuple values are not representable by the current DSLX lowering"
+                        .to_string(),
+                ));
+            }
             let members = members
                 .iter()
                 .map(|m| type_to_dslx(m))
                 .collect::<Result<Vec<String>, IrFnToDslxError>>()?;
-            if members.is_empty() {
-                Ok("()".to_string())
-            } else if members.len() == 1 {
+            if members.len() == 1 {
                 Ok(format!("({},)", members[0]))
             } else {
                 Ok(format!("({})", members.join(", ")))
@@ -1145,6 +1149,21 @@ top fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
         let result = convert_ir_package_fn_to_dslx(ir_text, None).unwrap();
         assert!(result.dslx_text.contains("let t: (uN[8], uN[8]) = (x, y);"));
         assert!(result.dslx_text.contains("t.1"));
+    }
+
+    #[test]
+    fn test_empty_tuple_type_is_reported_as_unsupported() {
+        let ir_text = r#"package sample
+
+top fn f() -> () {
+  ret unit: () = tuple(id=1)
+}
+"#;
+        let err = convert_ir_package_fn_to_dslx(ir_text, None).unwrap_err();
+        assert!(
+            matches!(&err, IrFnToDslxError::UnsupportedType(msg) if msg.contains("empty tuple")),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

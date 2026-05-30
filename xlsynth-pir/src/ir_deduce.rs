@@ -207,7 +207,8 @@ where
                     _ => Err(DeduceError::ExpectedArray("array_concat")),
                 }
             }
-            // Partial-product multiplies return (lo, hi) with width L+R each.
+            // Partial-product multiplies have an explicit result width in XLS
+            // IR; it need not be derivable from either operand width.
             Binop::Smulp | Binop::Umulp => {
                 let lhs_ty = operand_types
                     .get(0)
@@ -216,13 +217,7 @@ where
                     .get(1)
                     .ok_or(DeduceError::MissingOperand("mulp.rhs"))?;
                 match (lhs_ty, rhs_ty) {
-                    (Type::Bits(lw), Type::Bits(rw)) => {
-                        let w = *lw + *rw;
-                        Ok(Some(Type::Tuple(vec![
-                            Box::new(Type::Bits(w)),
-                            Box::new(Type::Bits(w)),
-                        ])))
-                    }
+                    (Type::Bits(_), Type::Bits(_)) => Ok(None),
                     _ => Err(DeduceError::ExpectedBits("smulp/umulp")),
                 }
             }

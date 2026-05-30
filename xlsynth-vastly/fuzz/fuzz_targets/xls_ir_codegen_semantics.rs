@@ -580,6 +580,7 @@ fn codegen_combo(
 generator: GENERATOR_KIND_COMBINATIONAL\n\
 use_system_verilog: {use_system_verilog}\n\
 module_name: \"{module_name}\"\n\
+array_index_bounds_checking: true\n\
 add_invariant_assertions: false\n\
 codegen_version: 1"
     );
@@ -601,6 +602,7 @@ use_system_verilog: true\n\
 module_name: \"{module_name}\"\n\
 input_valid_signal: \"input_valid\"\n\
 output_valid_signal: \"output_valid\"\n\
+array_index_bounds_checking: true\n\
 flop_inputs: false\n\
 flop_outputs: false\n\
 reset: \"rst\"\n\

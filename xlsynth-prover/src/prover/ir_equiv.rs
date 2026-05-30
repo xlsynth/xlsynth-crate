@@ -1437,6 +1437,40 @@ pub mod test_utils {
         );
     }
 
+    pub fn test_empty_tuple_eq_nil_is_true<S: Solver>(solver_config: &S::Config) {
+        let mut lhs = ir_parser::Parser::new(
+            r#"fn f() -> bits[1] {
+                empty: () = tuple(id=1)
+                ret result: bits[1] = eq(empty, empty, id=2)
+            }"#,
+        )
+        .parse_fn()
+        .unwrap();
+        let lhs_ret = lhs.ret_node_ref.unwrap();
+        let ir::NodePayload::Binop(ir::Binop::Eq, _, rhs) = &mut lhs.nodes[lhs_ret.index].payload
+        else {
+            panic!("expected eq return node");
+        };
+        *rhs = ir::NodeRef { index: 0 };
+
+        let rhs = ir_parser::Parser::new(
+            r#"fn g() -> bits[1] {
+                ret result: bits[1] = literal(value=1, id=1)
+            }"#,
+        )
+        .parse_fn()
+        .unwrap();
+        let result = prove_ir_fn_equiv::<S>(
+            solver_config,
+            &ProverFn::new(&lhs, None),
+            &ProverFn::new(&rhs, None),
+            AssertionSemantics::Same,
+            None,
+            false,
+        );
+        assert!(matches!(result, EquivResult::Proved));
+    }
+
     pub fn test_ir_value_tuple<S: Solver>(solver_config: &S::Config) {
         assert_ir_value_to_bv_eq::<S>(
             solver_config,
@@ -2766,6 +2800,10 @@ macro_rules! test_with_solver {
             #[test]
             fn test_gate_tuple_equiv_manual_zero_tuple() {
                 test_utils::test_gate_tuple_equiv_manual_zero_tuple::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_empty_tuple_eq_nil_is_true() {
+                test_utils::test_empty_tuple_eq_nil_is_true::<$solver_type>($solver_config);
             }
             #[test]
             fn test_ir_value_tuple() {

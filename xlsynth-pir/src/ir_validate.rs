@@ -4,7 +4,9 @@
 
 use std::collections::HashSet;
 
-use super::ir::{BlockMetadata, Fn, MemberType, NaryOp, NodePayload, Package, PackageMember, Type};
+use super::ir::{
+    Binop, BlockMetadata, Fn, MemberType, NaryOp, NodePayload, Package, PackageMember, Type,
+};
 use super::ir_deduce::deduce_result_type_with_registers;
 use super::ir_utils::operands;
 
@@ -143,6 +145,12 @@ pub enum ValidationError {
     ExtMaskLowCountTypeMismatch { func: String, node_index: usize },
     /// `ext_mask_low` requires a bits-typed result.
     ExtMaskLowResultTypeMismatch {
+        func: String,
+        node_index: usize,
+        actual: Type,
+    },
+    /// `smulp` and `umulp` require a pair of identically sized bits results.
+    PartialProductResultTypeMismatch {
         func: String,
         node_index: usize,
         actual: Type,
@@ -444,6 +452,17 @@ impl std::fmt::Display for ValidationError {
                 write!(
                     f,
                     "function '{}' node {} ext_mask_low requires bits result type, got {}",
+                    func, node_index, actual
+                )
+            }
+            ValidationError::PartialProductResultTypeMismatch {
+                func,
+                node_index,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "function '{}' node {} partial-product result must be (bits[N], bits[N]); got {}",
                     func, node_index, actual
                 )
             }
@@ -1038,6 +1057,26 @@ where
             }
         }
 
+        if matches!(
+            node.payload,
+            NodePayload::Binop(Binop::Smulp | Binop::Umulp, _, _)
+        ) {
+            let valid_result_type = matches!(
+                &node.ty,
+                Type::Tuple(members)
+                    if members.len() == 2
+                        && members[0] == members[1]
+                        && matches!(members[0].as_ref(), Type::Bits(_))
+            );
+            if !valid_result_type {
+                return Err(ValidationError::PartialProductResultTypeMismatch {
+                    func: f.name.clone(),
+                    node_index: i,
+                    actual: node.ty.clone(),
+                });
+            }
+        }
+
         // After structural checks, ensure deduced node type matches declared.
         let op_refs = operands(&node.payload);
         let mut op_types: Vec<Type> = Vec::with_capacity(op_refs.len());
@@ -1233,6 +1272,35 @@ mod tests {
         let mut parser = Parser::new(ir);
         let pkg = parser.parse_package().unwrap();
         validate_package(&pkg).unwrap();
+    }
+
+    #[test]
+    fn partial_product_accepts_explicit_result_width_independent_of_operands() {
+        let ir = r#"
+        package test
+
+        fn foo(x: bits[6]) -> (bits[29], bits[29]) {
+          ret split: (bits[29], bits[29]) = umulp(x, x, id=2)
+        }
+        "#;
+        let pkg = Parser::new(ir).parse_package().unwrap();
+        validate_package(&pkg).unwrap();
+    }
+
+    #[test]
+    fn partial_product_rejects_non_pair_result_type() {
+        let ir = r#"
+        package test
+
+        fn foo(x: bits[6]) -> bits[29] {
+          ret split: bits[29] = umulp(x, x, id=2)
+        }
+        "#;
+        let pkg = Parser::new(ir).parse_package().unwrap();
+        assert!(matches!(
+            validate_package(&pkg),
+            Err(ValidationError::PartialProductResultTypeMismatch { .. })
+        ));
     }
 
     #[test]
