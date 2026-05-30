@@ -16,6 +16,7 @@ fuzz_target!(|data: &[u8]| {
     let options = RandomFnOptions {
         allow_arbitrary_width_multiply: true,
         allow_gate: true,
+        allow_events: true,
         ..RandomFnOptions::default()
     };
     let generated = generate_fn(

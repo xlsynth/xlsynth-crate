@@ -114,6 +114,7 @@ fn full_random_pir_options(max_nodes: usize) -> RandomFnOptions {
         allow_arbitrary_width_multiply: true,
         allow_gate: true,
         allow_extension_ops: true,
+        allow_events: true,
         ..RandomFnOptions::default()
     }
 }

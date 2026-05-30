@@ -13,7 +13,7 @@ use crate::ir::{
     Binop, ExtNaryAddArchitecture, ExtNaryAddTerm, FileTable, Fn, MemberType, NaryOp, Node,
     NodePayload, NodeRef, Package, PackageMember, Param, ParamId, Type, Unop,
 };
-use crate::ir_utils::operands;
+use crate::ir_utils::{is_observable_effect_root, operands};
 use crate::math::ceil_log2;
 
 /// Operations that the random generator can introduce into a function body.
@@ -81,6 +81,10 @@ pub enum RandomOperation {
     ExtNormalizeLeft,
     ExtMaskLow,
     ExtNaryAdd,
+    AfterAll,
+    Cover,
+    Assert,
+    Trace,
 }
 
 impl RandomOperation {
@@ -148,6 +152,10 @@ impl RandomOperation {
             Self::ExtNormalizeLeft,
             Self::ExtMaskLow,
             Self::ExtNaryAdd,
+            Self::AfterAll,
+            Self::Cover,
+            Self::Assert,
+            Self::Trace,
         ]
     }
 
@@ -216,6 +224,10 @@ impl RandomOperation {
             Self::ExtNormalizeLeft => "ext_normalize_left",
             Self::ExtMaskLow => "ext_mask_low",
             Self::ExtNaryAdd => "ext_nary_add",
+            Self::AfterAll => "after_all",
+            Self::Cover => "cover",
+            Self::Assert => "assert",
+            Self::Trace => "trace",
         }
     }
 }
@@ -293,6 +305,12 @@ pub struct RandomFnOptions {
     /// Permits non-upstream `ext_*` operations when they are included in
     /// `enabled_operations`.
     pub allow_extension_ops: bool,
+    /// Permits token values and the effect operations `after_all`, `cover`,
+    /// `assert`, and `trace` when they are included in `enabled_operations`.
+    ///
+    /// `cover` additionally requires `allow_tuples` because its result type is
+    /// the empty tuple.
+    pub allow_events: bool,
     pub enabled_operations: OperationSet,
 }
 
@@ -314,6 +332,7 @@ impl Default for RandomFnOptions {
             allow_empty_case_sel: false,
             allow_gate: false,
             allow_extension_ops: false,
+            allow_events: false,
             enabled_operations: OperationSet::default(),
         }
     }
@@ -700,8 +719,9 @@ fn validate_signature_type(ty: &Type, options: &RandomFnOptions) -> Result<(), G
         )));
     }
     match ty {
+        Type::Token if options.allow_events => Ok(()),
         Type::Token => Err(GenerationError::InvalidSignature(
-            "token signatures are not supported by random function generation".to_string(),
+            "token signature type requires allow_events".to_string(),
         )),
         Type::Bits(width)
             if *width > options.max_bit_width
@@ -814,6 +834,9 @@ fn max_array_length_for_element(options: &RandomFnOptions, element_ty: &Type) ->
 }
 
 fn random_type<S: EntropySource>(source: &mut S, options: &RandomFnOptions, depth: usize) -> Type {
+    if depth == 0 && options.allow_events && source.take_u64() % 16 == 0 {
+        return Type::Token;
+    }
     let may_aggregate = depth < options.max_type_depth;
     let family_count = 1
         + usize::from(may_aggregate && options.allow_arrays)
@@ -852,6 +875,15 @@ fn type_leaf_count(ty: &Type) -> usize {
     }
 }
 
+fn type_contains_token(ty: &Type) -> bool {
+    match ty {
+        Type::Token => true,
+        Type::Bits(_) => false,
+        Type::Tuple(fields) => fields.iter().any(|field| type_contains_token(field)),
+        Type::Array(array) => type_contains_token(&array.element_type),
+    }
+}
+
 fn type_depth(ty: &Type) -> usize {
     match ty {
         Type::Token | Type::Bits(_) => 0,
@@ -874,11 +906,7 @@ fn required_materialization_nodes(
         return Ok(0);
     }
     let nodes = match ty {
-        Type::Token => {
-            return Err(GenerationError::InvalidSignature(
-                "cannot synthesize a token-valued function result".to_string(),
-            ));
-        }
+        Type::Token => 1,
         Type::Bits(_) => 1,
         Type::Tuple(fields) => {
             let mut nodes = 1;
@@ -1093,6 +1121,17 @@ impl<'a> FunctionGenerator<'a> {
             | RandomOperation::ExtMaskLow
             | RandomOperation::ExtNaryAdd => {
                 self.options.allow_extension_ops && !self.bits_types().is_empty()
+            }
+            RandomOperation::AfterAll => self.options.allow_events,
+            RandomOperation::Cover => {
+                self.options.allow_events
+                    && self.options.allow_tuples
+                    && self.nodes_by_type.contains_key(&Type::Bits(1))
+            }
+            RandomOperation::Assert | RandomOperation::Trace => {
+                self.options.allow_events
+                    && self.nodes_by_type.contains_key(&Type::Token)
+                    && self.nodes_by_type.contains_key(&Type::Bits(1))
             }
         }
     }
@@ -1659,6 +1698,59 @@ impl<'a> FunctionGenerator<'a> {
                     None,
                 ))
             }
+            RandomOperation::AfterAll => {
+                let token_refs = self.token_refs();
+                let operand_count = choose_count(
+                    source,
+                    self.options.max_nary_operands.min(token_refs.len()) + 1,
+                );
+                let operands = (0..operand_count)
+                    .map(|_| token_refs[choose_count(source, token_refs.len())])
+                    .collect();
+                Ok(self.add_node(Type::Token, NodePayload::AfterAll(operands), None))
+            }
+            RandomOperation::Cover => {
+                let predicate = self.choose_ref_for_type(source, &Type::Bits(1));
+                Ok(self.add_node(
+                    Type::nil(),
+                    NodePayload::Cover {
+                        predicate,
+                        label: format!("random_cover_{}", self.nodes.len()),
+                    },
+                    None,
+                ))
+            }
+            RandomOperation::Assert => {
+                let token = self.choose_token_ref(source);
+                let activate = self.choose_ref_for_type(source, &Type::Bits(1));
+                let site = self.nodes.len();
+                Ok(self.add_node(
+                    Type::Token,
+                    NodePayload::Assert {
+                        token,
+                        activate,
+                        message: format!("random assertion at site {site}"),
+                        label: format!("random_assert_{site}"),
+                    },
+                    None,
+                ))
+            }
+            RandomOperation::Trace => {
+                let token = self.choose_token_ref(source);
+                let activated = self.choose_ref_for_type(source, &Type::Bits(1));
+                let operand_ty = self.choose_selectable_type(source);
+                let operand = self.choose_ref_for_type(source, &operand_ty);
+                Ok(self.add_node(
+                    Type::Token,
+                    NodePayload::Trace {
+                        token,
+                        activated,
+                        format: "random_trace={}".to_string(),
+                        operands: vec![operand],
+                    },
+                    None,
+                ))
+            }
         }
     }
 
@@ -1744,6 +1836,17 @@ impl<'a> FunctionGenerator<'a> {
         refs[choose_count(source, refs.len())]
     }
 
+    fn token_refs(&self) -> Vec<NodeRef> {
+        self.nodes_by_type
+            .get(&Type::Token)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn choose_token_ref<S: EntropySource>(&self, source: &mut S) -> NodeRef {
+        self.choose_ref_for_type(source, &Type::Token)
+    }
+
     fn has_concat_pair(&self) -> bool {
         self.bits_types().iter().any(|lhs| {
             self.bits_types()
@@ -1811,7 +1914,8 @@ impl<'a> FunctionGenerator<'a> {
         self.nodes_by_type
             .keys()
             .filter(|ty| {
-                type_depth(ty) < self.options.max_type_depth
+                !type_contains_token(ty)
+                    && type_depth(ty) < self.options.max_type_depth
                     && type_leaf_count(ty) <= self.options.max_aggregate_leaves
             })
             .cloned()
@@ -1826,7 +1930,7 @@ impl<'a> FunctionGenerator<'a> {
     fn array_types(&self) -> Vec<Type> {
         self.nodes_by_type
             .keys()
-            .filter(|ty| matches!(ty, Type::Array(_)))
+            .filter(|ty| matches!(ty, Type::Array(_)) && !type_contains_token(ty))
             .cloned()
             .collect()
     }
@@ -1931,7 +2035,8 @@ impl<'a> FunctionGenerator<'a> {
         self.nodes_by_type
             .iter()
             .filter(|(ty, _)| {
-                type_depth(ty) < self.options.max_type_depth
+                !type_contains_token(ty)
+                    && type_depth(ty) < self.options.max_type_depth
                     && type_leaf_count(ty) <= self.options.max_aggregate_leaves
             })
             .flat_map(|(ty, refs)| refs.iter().map(|node_ref| (ty.clone(), *node_ref)))
@@ -1941,7 +2046,9 @@ impl<'a> FunctionGenerator<'a> {
     fn tuple_types(&self) -> Vec<Type> {
         self.nodes_by_type
             .keys()
-            .filter(|ty| matches!(ty, Type::Tuple(fields) if !fields.is_empty()))
+            .filter(|ty| {
+                matches!(ty, Type::Tuple(fields) if !fields.is_empty()) && !type_contains_token(ty)
+            })
             .cloned()
             .collect()
     }
@@ -1952,7 +2059,11 @@ impl<'a> FunctionGenerator<'a> {
     }
 
     fn selectable_types(&self) -> Vec<Type> {
-        self.nodes_by_type.keys().cloned().collect()
+        self.nodes_by_type
+            .keys()
+            .filter(|ty| !type_contains_token(ty))
+            .cloned()
+            .collect()
     }
 
     fn choose_selectable_type<S: EntropySource>(&self, source: &mut S) -> Type {
@@ -1976,8 +2087,10 @@ impl<'a> FunctionGenerator<'a> {
             return Ok(self.choose_ref_for_type(source, ty));
         }
         match ty {
-            Type::Token => Err(GenerationError::Construction(
-                "cannot materialize a token-valued result".to_string(),
+            Type::Token => Ok(self.add_node(
+                Type::Token,
+                NodePayload::Literal(IrValue::make_token()),
+                None,
             )),
             Type::Bits(width) => Ok(self.pick_or_generate_bits_value(source, *width)),
             Type::Tuple(fields) => {
@@ -2085,6 +2198,14 @@ fn gather_stats(function: &Fn) -> GeneratedFnStats {
             .ret_node_ref
             .expect("generated function always has a return node"),
     ];
+    pending.extend(
+        function
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| is_observable_effect_root(&node.payload))
+            .map(|(index, _)| NodeRef { index }),
+    );
     while let Some(node_ref) = pending.pop() {
         if live_indices.insert(node_ref.index) {
             pending.extend(operands(&function.nodes[node_ref.index].payload));

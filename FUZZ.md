@@ -5,16 +5,17 @@ This document lists the fuzz targets in the repository and summarizes what each 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ir_roundtrip.rs
 
 Generates an upstream-standard random function directly as PIR, including
-`gate`, arbitrary-width multiply, and product-pair forms, parses and re-emits
-it through libxls, then reparses with the Rust parser and checks IR-level
-structural equivalence across the PIR roundtrip. Panics if either
-implementation rejects the emitted IR or if the top function is missing.
+`gate`, arbitrary-width multiply, product-pair, token, and event forms
+(`after_all`, `assert`, `trace`, and `cover`), parses and re-emits it through
+libxls, then reparses with the Rust parser and checks IR-level structural
+equivalence across the PIR roundtrip. Panics if either implementation rejects
+the emitted IR or if the top function is missing.
 
 Primarily tests:
 
 - libxls parse/re-emit IR text compatibility with the Rust parser
 - Function/package pretty-printer roundtrip soundness
-- Structural equivalence stability across roundtrip
+- Structural equivalence stability across roundtrip, including event metadata
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ir_opt_equiv.rs
 
@@ -298,9 +299,10 @@ Primarily tests:
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ir_same_sig_pair.rs
 
 Builds two PIR functions across the full function-level random-generator
-surface with `generate_same_signature_pair` and asserts that both validate and
-share an identical signature. Panics if either function fails to validate or
-if their types differ.
+surface, including token values and event operations, with
+`generate_same_signature_pair` and asserts that both validate and share an
+identical signature. Panics if either function fails to validate or if their
+types differ.
 
 Primarily tests:
 

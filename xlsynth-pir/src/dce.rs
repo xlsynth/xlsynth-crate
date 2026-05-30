@@ -3,10 +3,38 @@
 //! Dead-code elimination utilities for XLS IR functions.
 
 use crate::ir::{Fn, NodeRef};
-use crate::ir_utils::{compact_and_toposort_in_place, operands};
+use crate::ir_utils::{compact_and_toposort_in_place, is_observable_effect_root, operands};
 
-/// Returns a list of nodes that are dead (unreachable from the function's
-/// return value by following operand edges).
+/// Computes nodes required by the return value or an observable effect.
+fn compute_live_nodes(f: &Fn) -> Vec<bool> {
+    let mut live: Vec<bool> = vec![false; f.nodes.len()];
+    let mut stack: Vec<NodeRef> = vec![
+        f.ret_node_ref
+            .expect("DCE requires a function with a return node"),
+    ];
+    stack.extend(
+        f.nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| is_observable_effect_root(&node.payload))
+            .map(|(index, _)| NodeRef { index }),
+    );
+    while let Some(nr) = stack.pop() {
+        if live[nr.index] {
+            continue;
+        }
+        live[nr.index] = true;
+        for dep in operands(&f.get_node(nr).payload) {
+            if !live[dep.index] {
+                stack.push(dep);
+            }
+        }
+    }
+    live
+}
+
+/// Returns a list of nodes that are not required by the return value or any
+/// observable effect root.
 ///
 /// The returned vector is sorted by node index ascending to ensure
 /// deterministic ordering.
@@ -16,26 +44,11 @@ pub fn get_dead_nodes(f: &Fn) -> Vec<NodeRef> {
         return Vec::new();
     }
 
-    // Mark nodes reachable from the return node via operands.
-    let mut live: Vec<bool> = vec![false; n];
     assert!(
         f.ret_node_ref.is_some(),
         "get_dead_nodes: function has no return node"
     );
-    let ret = f.ret_node_ref.unwrap();
-    let mut stack: Vec<NodeRef> = vec![ret];
-    while let Some(nr) = stack.pop() {
-        if live[nr.index] {
-            continue;
-        }
-        live[nr.index] = true;
-        let node = f.get_node(nr);
-        for dep in operands(&node.payload) {
-            if !live[dep.index] {
-                stack.push(dep);
-            }
-        }
-    }
+    let live = compute_live_nodes(f);
 
     // Dead nodes are those never marked live.
     let mut dead: Vec<NodeRef> = Vec::new();
@@ -47,11 +60,11 @@ pub fn get_dead_nodes(f: &Fn) -> Vec<NodeRef> {
     dead
 }
 
-/// Returns a new function with dead nodes (unreachable from the return value)
-/// removed and all remaining node indices compacted. Operand references are
-/// remapped to the new indices. GetParam nodes are preserved even if they would
-/// otherwise be considered dead, to satisfy validation rules requiring a
-/// GetParam for each declared parameter.
+/// Returns a new function with nodes irrelevant to its return value and
+/// observable effects removed, and all remaining node indices compacted.
+/// Operand references are remapped to the new indices. GetParam nodes are
+/// preserved even if they would otherwise be considered dead, to satisfy
+/// validation rules requiring a GetParam for each declared parameter.
 pub fn remove_dead_nodes(f: &Fn) -> Fn {
     let n = f.nodes.len();
     assert!(n > 0, "remove_dead_nodes: function has no nodes");
@@ -60,21 +73,7 @@ pub fn remove_dead_nodes(f: &Fn) -> Fn {
         "remove_dead_nodes: function has no return node"
     );
 
-    // Compute liveness from the return.
-    let mut live: Vec<bool> = vec![false; n];
-    let mut stack: Vec<NodeRef> = vec![f.ret_node_ref.unwrap()];
-    while let Some(nr) = stack.pop() {
-        if live[nr.index] {
-            continue;
-        }
-        live[nr.index] = true;
-        let node = f.get_node(nr);
-        for dep in operands(&node.payload) {
-            if !live[dep.index] {
-                stack.push(dep);
-            }
-        }
-    }
+    let live = compute_live_nodes(f);
 
     // Always keep layout-invariant nodes:
     // - node[0] is reserved Nil
@@ -211,5 +210,35 @@ mod tests {
         assert!(!dead.contains(&a));
         assert!(!dead.contains(&b));
         assert!(!dead.contains(&and_ref.unwrap()));
+    }
+
+    #[test]
+    fn remove_dead_nodes_preserves_effect_nodes_and_their_token_chain() {
+        let f = parse_fn(
+            r#"fn f(x: bits[1] id=1) -> bits[1] {
+  x: bits[1] = param(name=x, id=1)
+  tok: token = after_all(id=2)
+  tr: token = trace(tok, x, format="x={}", data_operands=[x], id=3)
+  cv: () = cover(x, label="hit", id=4)
+  as: token = assert(tr, x, message="failed", label="a", id=5)
+  dead: bits[1] = not(x, id=6)
+  ret out: bits[1] = identity(x, id=7)
+}"#,
+        );
+
+        let dead = get_dead_nodes(&f);
+        assert!(dead.iter().any(|nr| f.get_node(*nr).text_id == 6));
+        for effect_id in [2, 3, 4, 5] {
+            assert!(
+                dead.iter().all(|nr| f.get_node(*nr).text_id != effect_id),
+                "effect/token dependency node {effect_id} was classified as dead"
+            );
+        }
+
+        let g = remove_dead_nodes(&f);
+        for effect_id in [2, 3, 4, 5] {
+            assert!(g.nodes.iter().any(|node| node.text_id == effect_id));
+        }
+        assert!(g.nodes.iter().all(|node| node.text_id != 6));
     }
 }
