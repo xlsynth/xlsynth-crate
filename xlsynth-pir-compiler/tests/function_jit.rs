@@ -152,8 +152,11 @@ fn f(x: bits[8] id=1) -> bits[2] {
         Ok(_) => panic!("out-of-bounds bit_slice should not JIT compile"),
         Err(error) => error,
     };
-    assert!(error.is_unsupported());
-    assert!(error.to_string().contains("out-of-bounds bit_slice"));
+    assert!(matches!(
+        error,
+        JitError::InvalidFunction(message)
+            if message.contains("bit_slice start 7 plus width 2 exceeds operand width 8")
+    ));
 }
 
 #[test]
