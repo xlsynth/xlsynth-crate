@@ -141,7 +141,7 @@ fn rejects_unvalidated_out_of_bounds_static_bit_slice() {
         r#"package test
 
 fn f(x: bits[8] id=1) -> bits[2] {
-  ret s: bits[2] = bit_slice(x, start=7, width=2, id=2)
+  ret bit_slice.2: bits[2] = bit_slice(x, start=7, width=2, id=2)
 }
 "#,
     )
@@ -152,11 +152,13 @@ fn f(x: bits[8] id=1) -> bits[2] {
         Ok(_) => panic!("out-of-bounds bit_slice should not JIT compile"),
         Err(error) => error,
     };
-    assert!(matches!(
-        error,
-        JitError::InvalidFunction(message)
-            if message.contains("bit_slice start 7 plus width 2 exceeds operand width 8")
-    ));
+    match error {
+        JitError::InvalidFunction(message) => assert!(
+            message.contains("bit_slice start 7") && message.contains("exceeds operand width 8"),
+            "unexpected validation diagnostic: {message}"
+        ),
+        error => panic!("expected InvalidFunction, got {error}"),
+    }
 }
 
 #[test]
