@@ -16,7 +16,7 @@ use xlsynth_pir::ir::{
     Package, PackageMember, Param, ParamId, Type,
 };
 use xlsynth_pir::ir_parser::Parser;
-use xlsynth_pir::ir_validate;
+use xlsynth_pir::ir_verify;
 #[cfg(feature = "has-bitwuzla")]
 use xlsynth_prover::prover::ir_equiv::prove_ir_fn_equiv;
 #[cfg(all(not(feature = "has-bitwuzla"), feature = "has-boolector"))]
@@ -115,7 +115,7 @@ fuzz_target!(|data: &[u8]| {
 
     let sample = generate_ext_nary_add_fn_sample_without_zero_widths(data);
     let pkg = build_ext_nary_add_package(&sample);
-    ir_validate::validate_package(&pkg)
+    ir_verify::verify_package(&pkg)
         .unwrap_or_else(|e| panic!("generated ext_nary_add package should validate: {e:?}"));
     let ir_text = pkg.to_string();
     log::info!("generated ext_nary_add IR:\n{}", ir_text);

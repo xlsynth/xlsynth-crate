@@ -52,9 +52,9 @@ fuzz_target!(|ir_text: String| {
         return;
     }
 
-    // PIR validate
+    // PIR verify
     let pir_result: Result<(), ErrorCategory> =
-        xlsynth_pir::ir_validate::validate_package(&pkg).map_err(|e| categorize_pir_error(&e));
+        xlsynth_pir::ir_verify::verify_package(&pkg).map_err(|e| categorize_pir_error(&e));
 
     // XLS must also parse if PIR parses; treat parse failures as a fuzz failure.
     let xls_result: Result<(), ErrorCategory> = match xlsynth::IrPackage::parse_ir(&ir_text, None) {

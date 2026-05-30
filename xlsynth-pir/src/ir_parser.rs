@@ -8,7 +8,7 @@ use crate::ir::{
     self, ArrayTypeData, BlockMetadata, FileTable, MemberType, PackageMember, operator_to_nary_op,
 };
 use crate::ir_node_env::{IrNodeEnv, NameOrId};
-use crate::ir_validate;
+use crate::ir_verify;
 use crate::math::ceil_log2;
 
 pub fn parse_path_to_package(path: &std::path::Path) -> Result<ir::Package, ParseError> {
@@ -18,13 +18,20 @@ pub fn parse_path_to_package(path: &std::path::Path) -> Result<ir::Package, Pars
     parser.parse_package()
 }
 
-/// Parses a package from `path` and validates the resulting IR.
-pub fn parse_and_validate_path_to_package(
+/// Parses a package from `path` and verifies the resulting IR.
+pub fn parse_and_verify_path_to_package(
     path: &std::path::Path,
 ) -> Result<ir::Package, ParseOrValidateError> {
     let pkg = parse_path_to_package(path)?;
-    ir_validate::validate_package(&pkg)?;
+    ir_verify::verify_package(&pkg)?;
     Ok(pkg)
+}
+
+/// Compatibility name for [`parse_and_verify_path_to_package`].
+pub fn parse_and_validate_path_to_package(
+    path: &std::path::Path,
+) -> Result<ir::Package, ParseOrValidateError> {
+    parse_and_verify_path_to_package(path)
 }
 
 #[derive(Debug)]
@@ -48,7 +55,7 @@ impl std::fmt::Display for ParseError {
 #[derive(Debug)]
 pub enum ParseOrValidateError {
     Parse(ParseError),
-    Validate(ir_validate::ValidationError),
+    Validate(ir_verify::VerifyError),
 }
 
 impl std::fmt::Display for ParseOrValidateError {
@@ -68,8 +75,8 @@ impl From<ParseError> for ParseOrValidateError {
     }
 }
 
-impl From<ir_validate::ValidationError> for ParseOrValidateError {
-    fn from(e: ir_validate::ValidationError) -> Self {
+impl From<ir_verify::VerifyError> for ParseOrValidateError {
+    fn from(e: ir_verify::VerifyError) -> Self {
         ParseOrValidateError::Validate(e)
     }
 }
@@ -3825,11 +3832,16 @@ pub fn emit_fn_as_block(
 }
 
 impl Parser {
-    /// Parses a package from the input and validates the resulting IR.
-    pub fn parse_and_validate_package(&mut self) -> Result<ir::Package, ParseOrValidateError> {
+    /// Parses a package from the input and verifies the resulting IR.
+    pub fn parse_and_verify_package(&mut self) -> Result<ir::Package, ParseOrValidateError> {
         let pkg = self.parse_package()?;
-        ir_validate::validate_package(&pkg)?;
+        ir_verify::verify_package(&pkg)?;
         Ok(pkg)
+    }
+
+    /// Compatibility name for [`Self::parse_and_verify_package`].
+    pub fn parse_and_validate_package(&mut self) -> Result<ir::Package, ParseOrValidateError> {
+        self.parse_and_verify_package()
     }
 }
 

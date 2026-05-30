@@ -612,8 +612,8 @@ top fn f(a: bits[8] id=10) -> bits[8] {
 
         let counted_for_pkg = r#"package p
 
-fn body(x: bits[8] id=1) -> bits[8] {
-  ret add.2: bits[8] = add(x, x, id=2)
+fn body(i: bits[8] id=1, x: bits[8] id=2) -> bits[8] {
+  ret add.3: bits[8] = add(x, x, id=3)
 }
 
 top fn f(a: bits[8] id=10) -> bits[8] {
@@ -674,8 +674,8 @@ top fn f(a: bits[8] id=10) -> bits[8] {
 
         let counted_for_pkg = r#"package p
 
-fn body(x: bits[8] id=1) -> bits[8] {
-  ret add.2: bits[8] = add(x, x, id=2)
+fn body(i: bits[8] id=1, x: bits[8] id=2) -> bits[8] {
+  ret add.3: bits[8] = add(x, x, id=3)
 }
 
 top fn f(a: bits[8] id=10) -> bits[8] {

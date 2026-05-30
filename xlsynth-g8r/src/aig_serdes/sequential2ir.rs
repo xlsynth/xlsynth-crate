@@ -9,7 +9,7 @@ use xlsynth_pir::ir::{
     Register, Type,
 };
 use xlsynth_pir::ir_parser::Parser;
-use xlsynth_pir::ir_validate;
+use xlsynth_pir::ir_verify;
 
 use crate::aig::SequentialGateFn;
 use crate::aig_serdes::gate2ir::gate_fn_to_xlsynth_ir;
@@ -145,7 +145,7 @@ pub fn sequential_gate_fn_to_pir_block_package(
         }],
         top: Some((design.name.clone(), MemberType::Block)),
     };
-    ir_validate::validate_package(&package)
+    ir_verify::verify_package(&package)
         .map_err(|e| format!("sequential2ir: generated invalid block package: {e}"))?;
     Ok(package)
 }

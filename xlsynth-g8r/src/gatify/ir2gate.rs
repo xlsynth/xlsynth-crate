@@ -14,7 +14,7 @@ use std::sync::Arc;
 use xlsynth_pir::ir::{self, ParamId, StartAndLimit};
 use xlsynth_pir::ir_range_info::IrRangeInfo;
 use xlsynth_pir::ir_utils;
-use xlsynth_pir::ir_validate;
+use xlsynth_pir::ir_verify;
 
 use crate::ir2gate_utils::{
     AdderMapping, Direction, array_add_with_carry_out, gatify_add_brent_kung,
@@ -4202,7 +4202,7 @@ fn validate_fn_for_gatify(f: &ir::Fn) -> Result<(), String> {
         members: vec![ir::PackageMember::Function(f.clone())],
         top: Some((f.name.clone(), ir::MemberType::Function)),
     };
-    ir_validate::validate_package(&pkg).map_err(|e| e.to_string())
+    ir_verify::verify_package(&pkg).map_err(|e| e.to_string())
 }
 
 fn gatify_lower_prepared_fn(

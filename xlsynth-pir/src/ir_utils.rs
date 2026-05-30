@@ -1302,9 +1302,9 @@ fn main(x: bits[8] id=1) -> bits[8] {
     #[test]
     fn external_function_references_ignores_self_references() {
         let f = parse_fn_named(
-            r#"fn main(x: bits[8] id=1) -> bits[8] {
-  i: bits[8] = invoke(x, to_apply=main, id=2)
-  ret loop: bits[8] = counted_for(i, trip_count=2, stride=1, body=main, id=3)
+            r#"fn main(index: bits[8] id=1, x: bits[8] id=2) -> bits[8] {
+  invoked: bits[8] = invoke(index, x, to_apply=main, id=3)
+  ret loop: bits[8] = counted_for(invoked, trip_count=2, stride=1, body=main, id=4)
 }"#,
             "main",
         );

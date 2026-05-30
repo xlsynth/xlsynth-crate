@@ -9,7 +9,7 @@ use xlsynth_pir::ir::{
     ExtNaryAddArchitecture, ExtNaryAddTerm, FileTable, MemberType, Node, NodePayload, Package,
     PackageMember, Param, ParamId, Type,
 };
-use xlsynth_pir::ir_validate;
+use xlsynth_pir::ir_verify;
 
 #[derive(Clone, Copy, Debug)]
 enum OperandKind {
@@ -125,7 +125,7 @@ fn build_single_stage_ext_nary_add_ir_text(result_width: usize, terms: &[Operand
         top: Some(("f".to_string(), MemberType::Function)),
     };
 
-    ir_validate::validate_package(&package)
+    ir_verify::verify_package(&package)
         .expect("programmatically built ext_nary_add package must validate");
     package.to_string()
 }
