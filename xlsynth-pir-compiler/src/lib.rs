@@ -344,11 +344,24 @@ impl PirFunctionJit {
         &self.result_layout
     }
 
+    /// Returns the required size of the aggregate-intermediate scratch slab.
+    pub fn scratch_byte_count(&self) -> usize {
+        self.scratch_byte_count
+    }
+
+    /// Returns the required alignment of the aggregate-intermediate scratch
+    /// slab.
+    pub fn scratch_alignment(&self) -> usize {
+        self.scratch_alignment
+    }
+
     /// Runs generated code directly against caller-owned native storage.
     ///
     /// No parameter or result values are copied by this method. The generated
     /// code reads from the provided input pointers and writes the result at
-    /// `output`.
+    /// `output`. This convenience entrypoint allocates its scratch slab for
+    /// each call; use [`Self::run_native_with_scratch`] to reuse scratch
+    /// storage across repeated executions.
     ///
     /// # Safety
     ///
@@ -359,6 +372,48 @@ impl PirFunctionJit {
     /// When an aggregate result is copied from an input aggregate, input and
     /// output storage must not partially overlap.
     pub unsafe fn run_native(&self, inputs: &[*const u8], output: *mut u8) -> Result<(), JitError> {
+        debug_assert!(self.scratch_alignment <= std::mem::align_of::<u64>());
+        let mut scratch_words =
+            vec![0u64; self.scratch_byte_count.div_ceil(std::mem::size_of::<u64>())];
+        let scratch = if scratch_words.is_empty() {
+            ptr::null_mut()
+        } else {
+            scratch_words.as_mut_ptr().cast::<u8>()
+        };
+        // SAFETY: the caller upholds the native argument/result contract; the
+        // scratch vector is aligned and remains alive for this call.
+        unsafe {
+            self.run_native_with_scratch(
+                inputs,
+                output,
+                scratch,
+                scratch_words.len() * std::mem::size_of::<u64>(),
+            )
+        }
+    }
+
+    /// Runs generated code using caller-owned inputs, result, and scratch
+    /// storage.
+    ///
+    /// This is the allocation-free execution entrypoint for repeated calls.
+    /// A nonempty scratch buffer must have at least
+    /// [`Self::scratch_byte_count`] bytes and satisfy
+    /// [`Self::scratch_alignment`].
+    ///
+    /// # Safety
+    ///
+    /// The input and output requirements are the same as for
+    /// [`Self::run_native`]. When scratch storage is required, `scratch` must
+    /// be non-null, properly aligned, writable for `scratch_byte_count` bytes,
+    /// and remain alive for this call. The scratch and output storage must not
+    /// overlap any storage read during execution.
+    pub unsafe fn run_native_with_scratch(
+        &self,
+        inputs: &[*const u8],
+        output: *mut u8,
+        scratch: *mut u8,
+        scratch_byte_count: usize,
+    ) -> Result<(), JitError> {
         if inputs.len() != self.param_layouts.len() {
             return Err(JitError::InvalidArgument(format!(
                 "expected {} input pointers, got {}",
@@ -371,17 +426,22 @@ impl PirFunctionJit {
                 "native input/output pointers must be non-null".to_string(),
             ));
         }
-        debug_assert!(self.scratch_alignment <= std::mem::align_of::<u64>());
-        let mut scratch_words =
-            vec![0u64; self.scratch_byte_count.div_ceil(std::mem::size_of::<u64>())];
-        let scratch = if scratch_words.is_empty() {
-            ptr::null_mut()
-        } else {
-            scratch_words.as_mut_ptr().cast::<u8>()
-        };
+        if scratch_byte_count < self.scratch_byte_count {
+            return Err(JitError::InvalidArgument(format!(
+                "scratch buffer has {scratch_byte_count} bytes, requires {}",
+                self.scratch_byte_count
+            )));
+        }
+        if self.scratch_byte_count != 0
+            && (scratch.is_null() || (scratch as usize) % self.scratch_alignment != 0)
+        {
+            return Err(JitError::InvalidArgument(format!(
+                "scratch buffer must be non-null and aligned to {} bytes",
+                self.scratch_alignment
+            )));
+        }
         // SAFETY: the caller upholds the pointer and layout contract stated
-        // above; scratch storage is aligned and remains alive for this call;
-        // the function was finalized with this exact ABI.
+        // above; the function was finalized with this exact ABI.
         let status = unsafe { (self.entrypoint)(inputs.as_ptr(), output, scratch) };
         if status == 0 {
             Ok(())
@@ -1316,7 +1376,18 @@ fn lower_binop(
     let raw = match op {
         Binop::Add => builder.ins().iadd(lhs_value, rhs_value),
         Binop::Sub => builder.ins().isub(lhs_value, rhs_value),
-        Binop::Umul | Binop::Smul => builder.ins().imul(lhs_value, rhs_value),
+        Binop::Umul => {
+            let lhs_value = resize_unsigned(builder, lhs_value, lhs_layout, layout);
+            let rhs_value = resize_unsigned(builder, rhs_value, rhs_layout, layout);
+            builder.ins().imul(lhs_value, rhs_value)
+        }
+        Binop::Smul => {
+            let lhs_value = signed_value(builder, lhs_value, lhs_layout);
+            let rhs_value = signed_value(builder, rhs_value, rhs_layout);
+            let lhs_value = resize_signed(builder, lhs_value, lhs_layout, layout);
+            let rhs_value = resize_signed(builder, rhs_value, rhs_layout, layout);
+            builder.ins().imul(lhs_value, rhs_value)
+        }
         Binop::Eq => builder.ins().icmp(IntCC::Equal, lhs_value, rhs_value),
         Binop::Ne => builder.ins().icmp(IntCC::NotEqual, lhs_value, rhs_value),
         Binop::Ugt => builder

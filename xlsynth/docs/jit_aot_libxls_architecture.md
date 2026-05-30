@@ -5,10 +5,6 @@ crate, with emphasis on the boundary that would need to change for a
 Rust-native implementation. It is an inventory of the existing function
 execution flow, not yet a replacement design.
 
-A proposed first replacement based on PIR functions and Cranelift is described
-in
-[../../xlsynth-pir/docs/cranelift_jit_plan.md](../../xlsynth-pir/docs/cranelift_jit_plan.md).
-
 ## Scope and source baseline
 
 The Rust APIs currently traced here compile and execute XLS **functions**:

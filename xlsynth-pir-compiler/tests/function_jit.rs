@@ -229,6 +229,58 @@ fn f(x: bits[{width}] id=1, y: bits[{width}] id=2) -> bits[{width}] {{
 }
 
 #[test]
+fn arbitrary_width_multiply_matches_pir_evaluator() {
+    assert_matches_evaluator(
+        r#"package test
+
+fn f(lhs: bits[24] id=1, rhs: bits[24] id=2) -> bits[48] {
+  ret result: bits[48] = umul(lhs, rhs, id=3)
+}
+"#,
+        &[
+            vec![bits(24, 0), bits(24, 0x12_3456)],
+            vec![bits(24, 0xff_ffff), bits(24, 0xab_cdef)],
+        ],
+    );
+    assert_matches_evaluator(
+        r#"package test
+
+fn f(lhs: bits[7] id=1, rhs: bits[32] id=2) -> bits[32] {
+  ret result: bits[32] = umul(lhs, rhs, id=3)
+}
+"#,
+        &[
+            vec![bits(7, 0x7f), bits(32, 0x1234_5678)],
+            vec![bits(7, 3), bits(32, 17)],
+        ],
+    );
+    assert_matches_evaluator(
+        r#"package test
+
+fn f(lhs: bits[5] id=1, rhs: bits[9] id=2) -> bits[20] {
+  ret result: bits[20] = smul(lhs, rhs, id=3)
+}
+"#,
+        &[
+            vec![bits(5, 0x1f), bits(9, 3)],
+            vec![bits(5, 0x11), bits(9, 0x1ff)],
+        ],
+    );
+    assert_matches_evaluator(
+        r#"package test
+
+fn f(lhs: bits[10] id=1, rhs: bits[9] id=2) -> bits[6] {
+  ret result: bits[6] = smul(lhs, rhs, id=3)
+}
+"#,
+        &[
+            vec![bits(10, 0x3ff), bits(9, 3)],
+            vec![bits(10, 0x201), bits(9, 0x1ff)],
+        ],
+    );
+}
+
+#[test]
 fn gate_select_and_encoding_operations_match_pir_evaluator() {
     assert_matches_evaluator(
         r#"package test
@@ -468,6 +520,35 @@ fn f(x: bits[8] id=1, y: bits[8] id=2, index: bits[2] id=3) -> bits[8] {
     assert_eq!(jit.run_u64(&[7, 13, 0]).expect("execute"), 7);
     assert_eq!(jit.run_u64(&[7, 13, 1]).expect("execute"), 13);
     assert_eq!(jit.run_u64(&[7, 13, 3]).expect("execute"), 13);
+
+    let x: u8 = 7;
+    let y: u8 = 13;
+    let index: u8 = 1;
+    let mut output = 0u8;
+    let inputs = [
+        std::ptr::from_ref(&x).cast::<u8>(),
+        std::ptr::from_ref(&y).cast::<u8>(),
+        std::ptr::from_ref(&index).cast::<u8>(),
+    ];
+    let mut scratch = vec![
+        0u64;
+        jit.scratch_byte_count()
+            .div_ceil(std::mem::size_of::<u64>())
+    ];
+    assert!(jit.scratch_byte_count() > 0);
+    assert!(jit.scratch_alignment() <= std::mem::align_of::<u64>());
+    // SAFETY: all values use their native scalar layouts, and `scratch` is
+    // sufficiently sized and aligned for the published scratch requirement.
+    unsafe {
+        jit.run_native_with_scratch(
+            &inputs,
+            std::ptr::from_mut(&mut output).cast(),
+            scratch.as_mut_ptr().cast(),
+            scratch.len() * std::mem::size_of::<u64>(),
+        )
+        .expect("execution with caller-owned scratch should succeed");
+    }
+    assert_eq!(output, 13);
 }
 
 #[test]
