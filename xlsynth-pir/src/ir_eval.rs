@@ -1295,6 +1295,26 @@ pub struct CoverCount {
     pub count: u64,
 }
 
+/// Accumulates cover hits by package-unique static site while preserving
+/// discovery order.
+fn accumulate_cover_count(
+    cover_counts: &mut Vec<CoverCount>,
+    cover_index_by_text_id: &mut HashMap<usize, usize>,
+    incoming: CoverCount,
+) {
+    if let Some(index) = cover_index_by_text_id.get(&incoming.node_text_id) {
+        let existing = &mut cover_counts[*index];
+        debug_assert_eq!(
+            existing.label, incoming.label,
+            "one cover text id should refer to one static site"
+        );
+        existing.count = existing.count.saturating_add(incoming.count);
+    } else {
+        cover_index_by_text_id.insert(incoming.node_text_id, cover_counts.len());
+        cover_counts.push(incoming);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnEvalSuccess {
     pub value: IrValue,
@@ -1941,6 +1961,7 @@ fn eval_fn_impl<'a>(
     let mut trace_messages: Vec<TraceMessage> = Vec::new();
     let mut assertion_failures: Vec<AssertionFailure> = Vec::new();
     let mut cover_counts: Vec<CoverCount> = Vec::new();
+    let mut cover_index_by_text_id: HashMap<usize, usize> = HashMap::new();
     for nr in eval_order(f, order_policy) {
         let node = f.get_node(nr);
         let value: IrValue = match &node.payload {
@@ -2012,11 +2033,15 @@ fn eval_fn_impl<'a>(
                     .expect("cover predicate operand must be evaluated")
                     .to_bool()
                     .expect("cover predicate must be bits[1]");
-                cover_counts.push(CoverCount {
-                    node_text_id: node.text_id,
-                    label: label.clone(),
-                    count: u64::from(active),
-                });
+                accumulate_cover_count(
+                    &mut cover_counts,
+                    &mut cover_index_by_text_id,
+                    CoverCount {
+                        node_text_id: node.text_id,
+                        label: label.clone(),
+                        count: u64::from(active),
+                    },
+                );
                 // XLS cover produces the zero-sized unit value.
                 IrValue::make_tuple(&[])
             }
@@ -2043,13 +2068,25 @@ fn eval_fn_impl<'a>(
                 match callee_result {
                     FnEvalResult::Success(success) => {
                         trace_messages.extend(success.trace_messages);
-                        cover_counts.extend(success.cover_counts);
+                        for cover_count in success.cover_counts {
+                            accumulate_cover_count(
+                                &mut cover_counts,
+                                &mut cover_index_by_text_id,
+                                cover_count,
+                            );
+                        }
                         success.value
                     }
                     FnEvalResult::Failure(fail) => {
                         assertion_failures.extend(fail.assertion_failures);
                         trace_messages.extend(fail.trace_messages);
-                        cover_counts.extend(fail.cover_counts);
+                        for cover_count in fail.cover_counts {
+                            accumulate_cover_count(
+                                &mut cover_counts,
+                                &mut cover_index_by_text_id,
+                                cover_count,
+                            );
+                        }
                         return FnEvalResult::Failure(FnEvalFailure {
                             assertion_failures,
                             trace_messages,
@@ -3973,6 +4010,73 @@ fn f(x: bits[1] id=1) -> bits[1] {
                     count: 0,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn test_eval_fn_in_package_invoke_accumulates_repeated_cover_site() {
+        let ir_text = r#"package test
+
+fn g(x: bits[1] id=1) -> bits[1] {
+  _covered: () = cover(x, label="hit", id=2)
+  ret identity.3: bits[1] = identity(x, id=3)
+}
+
+fn f(x: bits[1] id=10) -> bits[1] {
+  first: bits[1] = invoke(x, to_apply=g, id=11)
+  second: bits[1] = invoke(x, to_apply=g, id=12)
+  ret and.13: bits[1] = and(first, second, id=13)
+}
+"#;
+        let mut p = Parser::new(ir_text);
+        let pkg = p.parse_and_validate_package().expect("parse ok");
+        let f = pkg.get_fn("f").expect("f");
+        let result = eval_fn_in_package(&pkg, f, &[IrValue::make_ubits(1, 1).unwrap()]);
+        let FnEvalResult::Success(success) = result else {
+            panic!("unexpected result: {result:?}");
+        };
+        assert_eq!(
+            success.cover_counts,
+            vec![CoverCount {
+                node_text_id: 2,
+                label: "hit".to_string(),
+                count: 2,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_eval_fn_in_package_failure_accumulates_repeated_cover_site() {
+        let ir_text = r#"package test
+
+fn g(x: bits[1] id=1) -> bits[1] {
+  t: token = after_all(id=2)
+  _covered: () = cover(x, label="hit", id=3)
+  _asserted: token = assert(t, x, message="not set", label="asserted", id=4)
+  ret identity.5: bits[1] = identity(x, id=5)
+}
+
+fn f() -> bits[1] {
+  one: bits[1] = literal(value=1, id=10)
+  first: bits[1] = invoke(one, to_apply=g, id=11)
+  zero: bits[1] = not(first, id=12)
+  ret second: bits[1] = invoke(zero, to_apply=g, id=13)
+}
+"#;
+        let mut p = Parser::new(ir_text);
+        let pkg = p.parse_and_validate_package().expect("parse ok");
+        let f = pkg.get_fn("f").expect("f");
+        let result = eval_fn_in_package(&pkg, f, &[]);
+        let FnEvalResult::Failure(failure) = result else {
+            panic!("unexpected result: {result:?}");
+        };
+        assert_eq!(
+            failure.cover_counts,
+            vec![CoverCount {
+                node_text_id: 3,
+                label: "hit".to_string(),
+                count: 1,
+            }]
         );
     }
 
