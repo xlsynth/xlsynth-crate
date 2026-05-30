@@ -10,7 +10,7 @@
 
 use crate::ir::{MemberType, NodePayload, Package, PackageMember};
 use crate::ir_parser::Parser;
-use crate::ir_validate;
+use crate::ir_verify;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -124,7 +124,7 @@ fn run_ir_inline_over_ir_text_via_toolchain(
     }
 
     let reachable_pkg = retain_reachable_functions(&output_pkg, top_name)?;
-    ir_validate::validate_package(&reachable_pkg)
+    ir_verify::verify_package(&reachable_pkg)
         .map_err(|e| format!("ir_inline: retained package validation failed: {e}"))?;
     Ok(reachable_pkg.to_string())
 }

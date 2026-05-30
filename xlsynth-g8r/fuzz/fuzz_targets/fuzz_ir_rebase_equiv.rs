@@ -5,7 +5,7 @@ use libfuzzer_sys::fuzz_target;
 
 use xlsynth_g8r_fuzz::generate_upstream_formal_random_pir_pair;
 use xlsynth_pir::ir;
-use xlsynth_pir::ir_validate::validate_fn;
+use xlsynth_pir::ir_verify::verify_function_in_package;
 use xlsynth_pir::prove_equiv_via_toolchain::{
     prove_ir_fn_equiv_via_toolchain, ToolchainEquivResult,
 };
@@ -41,15 +41,15 @@ fuzz_target!(|data: &[u8]| {
         id
     });
 
-    // 5a) Verify the rebased function via the composite validator
+    // 5a) Verify the rebased function in its package context.
     let pkg = ir::Package {
         name: "rebased_pkg".to_string(),
         file_table: ir::FileTable::new(),
         members: vec![ir::PackageMember::Function(rebased.clone())],
         top: Some(("rebased".to_string(), ir::MemberType::Function)),
     };
-    if let Err(e) = validate_fn(&rebased, &pkg) {
-        panic!("rebased IR failed composite validation: {}", e);
+    if let Err(e) = verify_function_in_package(&rebased, &pkg) {
+        panic!("rebased IR failed verification: {}", e);
     }
 
     match prove_ir_fn_equiv_via_toolchain(&desired, &rebased) {

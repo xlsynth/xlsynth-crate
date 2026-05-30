@@ -52,7 +52,7 @@ mod tests {
     use super::rebase_fn_ids;
     use crate::ir::{self, NodePayload};
     use crate::ir_parser::Parser;
-    use crate::ir_validate::validate_fn;
+    use crate::ir_verify::verify_function_in_package;
 
     fn parse_function(ir: &str) -> ir::Fn {
         let mut parser = Parser::new(ir);
@@ -200,7 +200,7 @@ fn no_params() -> bits[32] {
         let rebased = rebase_fn_ids(&original, base);
         let package = package_with_function(&rebased);
 
-        validate_fn(&rebased, &package).expect("rebased function should validate");
+        verify_function_in_package(&rebased, &package).expect("rebased function should verify");
     }
 
     #[test]
@@ -229,7 +229,7 @@ fn no_params() -> bits[32] {
         assert_eq!(rebased_gap, original_gap);
 
         let package = package_with_function(&rebased);
-        validate_fn(&rebased, &package).expect("sparse ids should still validate");
+        verify_function_in_package(&rebased, &package).expect("sparse ids should still verify");
     }
 
     #[test]

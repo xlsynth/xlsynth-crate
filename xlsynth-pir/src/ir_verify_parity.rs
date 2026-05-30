@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::ir_validate::ValidationError;
+use crate::ir_verify::VerifyError;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ErrorCategory {
@@ -19,21 +19,21 @@ pub enum ErrorCategory {
     Other,
 }
 
-pub fn categorize_pir_error(err: &ValidationError) -> ErrorCategory {
+pub fn categorize_pir_error(err: &VerifyError) -> ErrorCategory {
     use ErrorCategory::*;
     match err {
-        ValidationError::UnknownCallee { .. } => UnknownCallee,
-        ValidationError::NodeTypeMismatch { .. } => NodeTypeMismatch,
-        ValidationError::OperandOutOfBounds { .. } => OperandOutOfBounds,
-        ValidationError::OperandUsesUndefined { .. } => OperandUsesUndefined,
-        ValidationError::DuplicateTextId { .. } => DuplicateTextId,
-        ValidationError::ReturnTypeMismatch { .. } => ReturnTypeMismatch,
-        ValidationError::MissingReturnNode { .. } => MissingReturnNode,
-        ValidationError::DuplicateParamName { .. } => DuplicateParamName,
-        ValidationError::MissingParamNode { .. } => MissingParamNode,
-        ValidationError::ExtraParamNode { .. } => ExtraParamNode,
-        ValidationError::NodeNameOpMismatch { .. } => NodeNameOpMismatch,
-        ValidationError::NodeNameIdSuffixMismatch { .. } => NodeNameIdSuffixMismatch,
+        VerifyError::UnknownCallee { .. } => UnknownCallee,
+        VerifyError::NodeTypeMismatch { .. } => NodeTypeMismatch,
+        VerifyError::OperandOutOfBounds { .. } => OperandOutOfBounds,
+        VerifyError::OperandUsesUndefined { .. } => OperandUsesUndefined,
+        VerifyError::DuplicateTextId { .. } => DuplicateTextId,
+        VerifyError::ReturnTypeMismatch { .. } => ReturnTypeMismatch,
+        VerifyError::MissingReturnNode { .. } => MissingReturnNode,
+        VerifyError::DuplicateParamName { .. } => DuplicateParamName,
+        VerifyError::MissingParamNode { .. } => MissingParamNode,
+        VerifyError::ExtraParamNode { .. } => ExtraParamNode,
+        VerifyError::NodeNameOpMismatch { .. } => NodeNameOpMismatch,
+        VerifyError::NodeNameIdSuffixMismatch { .. } => NodeNameIdSuffixMismatch,
         _ => Other,
     }
 }

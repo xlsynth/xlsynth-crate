@@ -4,7 +4,7 @@ use xlsynth::IrValue;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir_compiler::{
-    NativeTupleFieldLayout, NativeValueLayout, PirFunctionJit, ScalarLayout,
+    JitError, NativeTupleFieldLayout, NativeValueLayout, PirFunctionJit, ScalarLayout,
 };
 
 fn compile(ir: &str) -> PirFunctionJit {
@@ -49,6 +49,28 @@ fn array(width: usize, values: &[u64]) -> IrValue {
 
 fn tuple(elements: &[IrValue]) -> IrValue {
     IrValue::make_tuple(elements)
+}
+
+#[test]
+fn compile_rejects_unvalidated_invalid_xls_node_semantics() {
+    let package = Parser::new(
+        r#"package test
+
+fn f(x: bits[8] id=1, y: bits[7] id=2) -> bits[8] {
+  ret add.3: bits[8] = add(x, y, id=3)
+}
+"#,
+    )
+    .parse_package()
+    .expect("invalid semantics should still parse structurally");
+    let error = match PirFunctionJit::compile(package.get_fn("f").unwrap()) {
+        Err(error) => error,
+        Ok(_) => panic!("invalid XLS node semantics should not compile"),
+    };
+    assert!(matches!(
+        error,
+        JitError::InvalidFunction(message) if message.contains("right operand")
+    ));
 }
 
 #[test]

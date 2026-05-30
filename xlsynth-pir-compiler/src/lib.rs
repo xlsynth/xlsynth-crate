@@ -266,8 +266,8 @@ impl PirFunctionJit {
         function
             .check_pir_layout_invariants()
             .map_err(JitError::InvalidFunction)?;
-        xlsynth_pir::ir_verify::verify_fn_types_agree_with_deduction(function)
-            .map_err(JitError::InvalidFunction)?;
+        xlsynth_pir::ir_verify::verify_function(function)
+            .map_err(|e| JitError::InvalidFunction(e.to_string()))?;
 
         let param_layouts = function
             .params

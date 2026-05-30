@@ -534,7 +534,7 @@ where
                 .ok_or(DeduceError::MissingOperand("counted_for.init"))?;
             Ok(Some(init_ty.clone()))
         }
-        NodePayload::Cover { .. } => Ok(Some(Type::Token)),
+        NodePayload::Cover { .. } => Ok(Some(Type::nil())),
         // We can deduce invoke result types if the caller provides a callee
         // return type resolver.
         NodePayload::Invoke { to_apply, .. } => {

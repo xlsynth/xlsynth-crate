@@ -9,7 +9,7 @@ use xlsynth_pir::dce::remove_dead_nodes;
 use xlsynth_pir::ir::{self, BlockMetadata, MemberType, NodePayload, NodeRef, PackageMember, Type};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_utils::{get_topological, operands, remap_payload_with};
-use xlsynth_pir::ir_validate;
+use xlsynth_pir::ir_verify;
 
 use crate::aig::sequential_gate::{
     canonical_register_d_name, canonical_register_q_name, canonical_transition_name,
@@ -61,7 +61,7 @@ pub fn block_package_to_sequential_gate_fn(
     package: &ir::Package,
     gatify_options: GatifyOptions,
 ) -> Result<SequentialGateFn, String> {
-    ir_validate::validate_package(package)
+    ir_verify::verify_package(package)
         .map_err(|e| format!("block2sequential: input package validation failed: {e}"))?;
 
     let top_name = selected_block_name(package)?;
@@ -70,7 +70,7 @@ pub fn block_package_to_sequential_gate_fn(
     inlined_package.top = Some((top_name, MemberType::Block));
     inline_all_blocks_in_package(&mut inlined_package)
         .map_err(|e| format!("block2sequential: block inlining failed: {e}"))?;
-    ir_validate::validate_package(&inlined_package)
+    ir_verify::verify_package(&inlined_package)
         .map_err(|e| format!("block2sequential: inlined package validation failed: {e}"))?;
 
     let PackageMember::Block { func, metadata } = inlined_package
@@ -105,7 +105,7 @@ pub fn lower_block_to_sequential_gate_fn(
         }],
         top: Some((block.name.clone(), MemberType::Block)),
     };
-    ir_validate::validate_package(&validation_package)
+    ir_verify::verify_package(&validation_package)
         .map_err(|e| format!("block2sequential: block validation failed: {e}"))?;
 
     let (transition_fn, endpoints, pending_registers, external_input_count, clock) =

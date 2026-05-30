@@ -12,7 +12,7 @@ use xlsynth_pir::ir::{
     Package, PackageMember, Param, ParamId, Type,
 };
 use xlsynth_pir::ir_eval::{eval_fn_in_package, FnEvalResult};
-use xlsynth_pir::ir_validate;
+use xlsynth_pir::ir_verify;
 
 const PACKAGE_NAME: &str = "sample";
 const FUNCTION_NAME: &str = "main";
@@ -54,7 +54,7 @@ fuzz_target!(|data: &[u8]| {
 
     let sample = generate_ext_nary_add_fn_sample(data);
     let pkg = build_ext_nary_add_package(&sample);
-    ir_validate::validate_package(&pkg)
+    ir_verify::verify_package(&pkg)
         .unwrap_or_else(|e| panic!("generated ext_nary_add package should validate: {e:?}"));
     let pir_fn = pkg
         .get_top_fn()

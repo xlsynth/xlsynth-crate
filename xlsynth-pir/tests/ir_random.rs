@@ -13,19 +13,17 @@ use xlsynth_pir::ir_random::{
     RandomOperation, RngEntropy, StopPolicy, generate_arguments, generate_fn,
     generate_fn_with_signature, generate_same_signature_pair, generate_value,
 };
-use xlsynth_pir::ir_validate::validate_package;
-use xlsynth_pir::ir_verify::verify_fn_types_agree_with_deduction;
+use xlsynth_pir::ir_verify::verify_package;
 
 fn validate_generated(function: &xlsynth_pir::ir::Fn) {
     function.check_pir_layout_invariants().unwrap();
-    verify_fn_types_agree_with_deduction(function).unwrap();
     let package = Package {
         name: "random_package".to_string(),
         file_table: FileTable::new(),
         members: vec![PackageMember::Function(function.clone())],
         top: Some((function.name.clone(), MemberType::Function)),
     };
-    validate_package(&package).unwrap();
+    verify_package(&package).unwrap();
 }
 
 fn type_has_array(ty: &Type) -> bool {
