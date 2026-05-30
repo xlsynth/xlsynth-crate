@@ -145,10 +145,14 @@ pub fn generate_upstream_eval_random_pir_package(data: &[u8], package_name: &str
 /// toolchain-backed equivalence properties.
 pub fn generate_upstream_formal_random_pir_pair(data: &[u8]) -> (IrFn, IrFn) {
     let options = upstream_formal_random_pir_options(64);
-    let mut entropy = DepletableBytes::new(data);
-    let (first, second) =
-        generate_same_signature_pair(&mut entropy, &options, StopPolicy::WhenEntropyDepleted)
-            .expect("fixed paired PIR fuzz options should construct matching functions");
+    let (mut first_entropy, mut second_entropy) = DepletableBytes::split(data);
+    let (first, second) = generate_same_signature_pair(
+        &mut first_entropy,
+        &mut second_entropy,
+        &options,
+        StopPolicy::WhenEntropyDepleted,
+    )
+    .expect("fixed paired PIR fuzz options should construct matching functions");
     (first.function, second.function)
 }
 
@@ -156,9 +160,13 @@ pub fn generate_upstream_formal_random_pir_pair(data: &[u8]) -> (IrFn, IrFn) {
 /// random-function surface for structural properties.
 pub fn generate_full_random_pir_pair(data: &[u8]) -> (IrFn, IrFn) {
     let options = full_random_pir_options(64);
-    let mut entropy = DepletableBytes::new(data);
-    let (first, second) =
-        generate_same_signature_pair(&mut entropy, &options, StopPolicy::WhenEntropyDepleted)
-            .expect("fixed paired PIR fuzz options should construct matching functions");
+    let (mut first_entropy, mut second_entropy) = DepletableBytes::split(data);
+    let (first, second) = generate_same_signature_pair(
+        &mut first_entropy,
+        &mut second_entropy,
+        &options,
+        StopPolicy::WhenEntropyDepleted,
+    )
+    .expect("fixed paired PIR fuzz options should construct matching functions");
     (first.function, second.function)
 }

@@ -33,9 +33,13 @@ pub fn generate_full_random_pir_pair(data: &[u8]) -> (IrFn, IrFn) {
         allow_extension_ops: true,
         ..RandomFnOptions::default()
     };
-    let mut entropy = DepletableBytes::new(data);
-    let (first, second) =
-        generate_same_signature_pair(&mut entropy, &options, StopPolicy::WhenEntropyDepleted)
-            .expect("fixed paired PIR fuzz options should construct matching functions");
+    let (mut first_entropy, mut second_entropy) = DepletableBytes::split(data);
+    let (first, second) = generate_same_signature_pair(
+        &mut first_entropy,
+        &mut second_entropy,
+        &options,
+        StopPolicy::WhenEntropyDepleted,
+    )
+    .expect("fixed paired PIR fuzz options should construct matching functions");
     (first.function, second.function)
 }

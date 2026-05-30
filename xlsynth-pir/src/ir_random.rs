@@ -387,6 +387,13 @@ impl<'a> DepletableBytes<'a> {
     pub fn new(data: &'a [u8]) -> Self {
         Self { data, offset: 0 }
     }
+
+    /// Splits fuzzer input into independent streams for paired generation.
+    pub fn split(data: &'a [u8]) -> (Self, Self) {
+        let midpoint = data.len() / 2 + data.len() % 2;
+        let (first, second) = data.split_at(midpoint);
+        (Self::new(first), Self::new(second))
+    }
 }
 
 impl EntropySource for DepletableBytes<'_> {
@@ -586,16 +593,17 @@ pub fn generate_fn_with_signature<S: EntropySource>(
     Ok(GeneratedFn { function, stats })
 }
 
-/// Generates two independently constructed functions with an identical
-/// signature.
-pub fn generate_same_signature_pair<S: EntropySource>(
-    source: &mut S,
+/// Generates two independently randomized functions with an identical
+/// signature, using separate entropy sources for their bodies.
+pub fn generate_same_signature_pair<S1: EntropySource, S2: EntropySource>(
+    first_source: &mut S1,
+    second_source: &mut S2,
     options: &RandomFnOptions,
     stop_policy: StopPolicy,
 ) -> Result<(GeneratedFn, GeneratedFn), GenerationError> {
-    let first = generate_fn(source, options, stop_policy)?;
+    let first = generate_fn(first_source, options, stop_policy)?;
     let signature = FunctionSignature::from_fn(&first.function);
-    let second = generate_fn_with_signature(source, options, stop_policy, &signature)?;
+    let second = generate_fn_with_signature(second_source, options, stop_policy, &signature)?;
     Ok((first, second))
 }
 

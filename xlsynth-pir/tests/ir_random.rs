@@ -394,13 +394,18 @@ fn probabilistic_same_signature_pairs_are_valid_and_exactly_matched() {
         allow_tuples: true,
         ..RandomFnOptions::default()
     };
-    let mut entropy = RngEntropy::new(Pcg64Mcg::new(0x551f_25b7));
+    let mut first_entropy = RngEntropy::new(Pcg64Mcg::new(0x551f_25b7));
+    let mut second_entropy = RngEntropy::new(Pcg64Mcg::new(0x93ce_b891));
     let mut saw_array_signature = false;
     let mut saw_tuple_signature = false;
     for _ in 0..1_000 {
-        let (first, second) =
-            generate_same_signature_pair(&mut entropy, &options, StopPolicy::ExactBodyNodes(48))
-                .unwrap();
+        let (first, second) = generate_same_signature_pair(
+            &mut first_entropy,
+            &mut second_entropy,
+            &options,
+            StopPolicy::ExactBodyNodes(48),
+        )
+        .unwrap();
         validate_generated(&first.function);
         validate_generated(&second.function);
         let signature = FunctionSignature::from_fn(&first.function);
@@ -419,6 +424,34 @@ fn probabilistic_same_signature_pairs_are_valid_and_exactly_matched() {
     }
     assert!(saw_array_signature);
     assert!(saw_tuple_signature);
+}
+
+#[test]
+fn same_signature_pair_uses_entropy_for_both_depletable_functions() {
+    let options = RandomFnOptions {
+        max_params: 0,
+        max_nodes: 64,
+        max_bit_width: 8,
+        allow_arrays: false,
+        allow_tuples: false,
+        enabled_operations: OperationSet::new([RandomOperation::Literal]),
+        ..RandomFnOptions::default()
+    };
+    let data = vec![0xa5; 256];
+    let (mut first_entropy, mut second_entropy) = DepletableBytes::split(&data);
+    let (first, second) = generate_same_signature_pair(
+        &mut first_entropy,
+        &mut second_entropy,
+        &options,
+        StopPolicy::WhenEntropyDepleted,
+    )
+    .unwrap();
+
+    validate_generated(&first.function);
+    validate_generated(&second.function);
+    assert!(first.stats.emitted_node_count > 1);
+    assert!(first.stats.emitted_node_count < options.max_nodes);
+    assert!(second.stats.emitted_node_count > 1);
 }
 
 #[test]
