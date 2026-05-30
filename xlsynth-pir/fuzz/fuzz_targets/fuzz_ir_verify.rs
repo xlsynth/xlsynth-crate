@@ -5,7 +5,9 @@
 use libfuzzer_sys::fuzz_target;
 use std::sync::Once;
 use xlsynth_pir::ir;
-use xlsynth_pir::ir_verify_parity::{categorize_pir_error, categorize_xls_error_text, ErrorCategory};
+use xlsynth_pir::ir_verify_parity::{
+    categorize_pir_error, categorize_xls_error_text, ErrorCategory,
+};
 
 static INIT_LOGGER: Once = Once::new();
 
@@ -31,7 +33,7 @@ fuzz_target!(|ir_text: String| {
     // First, require that PIR parses as a package; otherwise, skip the sample.
     let pkg = match xlsynth_pir::ir_parser::Parser::new(&ir_text).parse_package() {
         Ok(pkg) => pkg,
-        Err(parse_err) =>{
+        Err(parse_err) => {
             log::debug!("PIR parse failed: {:?}", parse_err);
             return;
         }
@@ -39,7 +41,9 @@ fuzz_target!(|ir_text: String| {
 
     if pkg.members.iter().any(|member| match member {
         ir::PackageMember::Function(f) => f.nodes.iter().any(|n| n.payload.is_extension_op()),
-        ir::PackageMember::Block { func, .. } => func.nodes.iter().any(|n| n.payload.is_extension_op()),
+        ir::PackageMember::Block { func, .. } => {
+            func.nodes.iter().any(|n| n.payload.is_extension_op())
+        }
     }) {
         // Early-return rationale: this fuzz target checks verification parity
         // between PIR and upstream XLS IR. Upstream does not understand PIR
@@ -49,8 +53,8 @@ fuzz_target!(|ir_text: String| {
     }
 
     // PIR validate
-    let pir_result: Result<(), ErrorCategory> = xlsynth_pir::ir_validate::validate_package(&pkg)
-        .map_err(|e| categorize_pir_error(&e));
+    let pir_result: Result<(), ErrorCategory> =
+        xlsynth_pir::ir_validate::validate_package(&pkg).map_err(|e| categorize_pir_error(&e));
 
     // XLS must also parse if PIR parses; treat parse failures as a fuzz failure.
     let xls_result: Result<(), ErrorCategory> = match xlsynth::IrPackage::parse_ir(&ir_text, None) {
@@ -58,7 +62,9 @@ fuzz_target!(|ir_text: String| {
             Ok(()) => Ok(()),
             Err(e) => {
                 let msg = e.to_string();
-                if msg.contains("Expected token of type \"ident\"") && msg.contains("Token(\"keyword\"") {
+                if msg.contains("Expected token of type \"ident\"")
+                    && msg.contains("Token(\"keyword\"")
+                {
                     // Early-return rationale: tokenizer differences (ident vs keyword)
                     // that our parser permits contextually. Not a semantic mismatch.
                     return;
@@ -68,7 +74,8 @@ fuzz_target!(|ir_text: String| {
         },
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("Expected token of type \"ident\"") && msg.contains("Token(\"keyword\"") {
+            if msg.contains("Expected token of type \"ident\"") && msg.contains("Token(\"keyword\"")
+            {
                 // Early-return rationale: tokenizer differences (ident vs keyword)
                 // that our parser permits contextually. Not a semantic mismatch.
                 return;
@@ -78,7 +85,10 @@ fuzz_target!(|ir_text: String| {
                 // category so parity can be checked at a coarse level.
                 Err(ErrorCategory::MissingReturnNode)
             } else {
-                panic!("xlsynth parse failed for IR that PIR parses:\n{}\nerror: {}", ir_text, msg)
+                panic!(
+                    "xlsynth parse failed for IR that PIR parses:\n{}\nerror: {}",
+                    ir_text, msg
+                )
             }
         }
     };

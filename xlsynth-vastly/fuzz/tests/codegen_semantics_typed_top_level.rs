@@ -3,6 +3,11 @@
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
+use vastly_fuzz::codegen_semantics::make_vastly_input_map;
+use vastly_fuzz::codegen_semantics::pack_ir_value_to_value4;
+use vastly_fuzz::codegen_semantics::packed_signature;
+use vastly_fuzz::codegen_semantics::parse_pir_top_fn;
+use xlsynth::IrValue;
 use xlsynth_vastly::compile_combo_module;
 use xlsynth_vastly::eval_combo;
 use xlsynth_vastly::eval_yosys_cxxrtl_combo;
@@ -13,11 +18,6 @@ use xlsynth_vastly::LogicBit;
 use xlsynth_vastly::Signedness;
 use xlsynth_vastly::Value4;
 use xlsynth_vastly::Vcd;
-use vastly_fuzz::codegen_semantics::make_vastly_input_map;
-use vastly_fuzz::codegen_semantics::pack_ir_value_to_value4;
-use vastly_fuzz::codegen_semantics::packed_signature;
-use vastly_fuzz::codegen_semantics::parse_pir_top_fn;
-use xlsynth::IrValue;
 
 const COMPOUND_SHAPES_IR: &str = r#"package aot_tests
 
@@ -103,7 +103,10 @@ fn eval_codegen_with_vastly(
     let plan = plan_combo_eval(&m).map_err(|e| format!("plan_combo_eval failed: {e:?}"))?;
     let env = eval_combo(&m, &plan, inputs).map_err(|e| format!("eval_combo failed: {e:?}"))?;
     if m.output_ports.len() != 1 {
-        return Err(format!("expected exactly one output port, got {}", m.output_ports.len()));
+        return Err(format!(
+            "expected exactly one output port, got {}",
+            m.output_ports.len()
+        ));
     }
     env.get(&m.output_ports[0].name)
         .cloned()
@@ -149,7 +152,10 @@ fn eval_codegen_with_yosys_cxxrtl_verilog(
 ) -> Result<Value4, String> {
     let m = compile_combo_module(src).map_err(|e| format!("compile_combo_module failed: {e:?}"))?;
     if m.output_ports.len() != 1 {
-        return Err(format!("expected exactly one output port, got {}", m.output_ports.len()));
+        return Err(format!(
+            "expected exactly one output port, got {}",
+            m.output_ports.len()
+        ));
     }
     let out_name = m.output_ports[0].name.clone();
     let outputs = eval_yosys_cxxrtl_combo(src, module_name, inputs)
@@ -246,9 +252,18 @@ fn typed_top_level_codegen_matches_ir_and_oracles() {
         None
     };
 
-    assert_eq!(got_v.to_bit_string_msb_first(), want.to_bit_string_msb_first());
-    assert_eq!(got_sv.to_bit_string_msb_first(), want.to_bit_string_msb_first());
-    assert_eq!(got_iv.to_bit_string_msb_first(), want.to_bit_string_msb_first());
+    assert_eq!(
+        got_v.to_bit_string_msb_first(),
+        want.to_bit_string_msb_first()
+    );
+    assert_eq!(
+        got_sv.to_bit_string_msb_first(),
+        want.to_bit_string_msb_first()
+    );
+    assert_eq!(
+        got_iv.to_bit_string_msb_first(),
+        want.to_bit_string_msb_first()
+    );
     if let Some(got_cxxrtl) = got_cxxrtl {
         assert_eq!(
             got_cxxrtl.to_bit_string_msb_first(),

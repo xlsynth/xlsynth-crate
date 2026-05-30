@@ -2,12 +2,12 @@
 
 use std::collections::BTreeMap;
 
-use xlsynth_vastly::LogicBit;
-use xlsynth_vastly::Signedness;
-use xlsynth_vastly::Value4;
 use xlsynth::IrValue;
 use xlsynth::XlsynthError;
 use xlsynth_pir::ir::Type as PirType;
+use xlsynth_vastly::LogicBit;
+use xlsynth_vastly::Signedness;
+use xlsynth_vastly::Value4;
 
 #[derive(Debug, Clone)]
 pub struct TypedPortSig {
@@ -79,10 +79,7 @@ pub fn contains_token(ty: &PirType) -> bool {
     }
 }
 
-fn append_ir_bits_lsb(
-    bits: &xlsynth::IrBits,
-    out: &mut Vec<LogicBit>,
-) -> Result<(), XlsynthError> {
+fn append_ir_bits_lsb(bits: &xlsynth::IrBits, out: &mut Vec<LogicBit>) -> Result<(), XlsynthError> {
     for i in 0..bits.get_bit_count() {
         let b = bits.get_bit(i)?;
         out.push(if b { LogicBit::One } else { LogicBit::Zero });

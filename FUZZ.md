@@ -4,17 +4,25 @@ This document lists the fuzz targets in the repository and summarizes what each 
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ir_roundtrip.rs
 
-Generates a random XLS IR function via the C++ bindings, serializes the package/function to text, reparses with the Rust parser, and checks IR-level structural equivalence of the original vs reparsed functions. Panics if parsing/validation of our own pretty-printed IR fails, or if the top function is missing.
+Generates an upstream-standard random function directly as PIR, including
+`gate`, arbitrary-width multiply, and product-pair forms, parses and re-emits
+it through libxls, then reparses with the Rust parser and checks IR-level
+structural equivalence across the PIR roundtrip. Panics if either
+implementation rejects the emitted IR or if the top function is missing.
 
 Primarily tests:
 
-- C++-emitted IR text compatibility with the Rust parser
+- libxls parse/re-emit IR text compatibility with the Rust parser
 - Function/package pretty-printer roundtrip soundness
 - Structural equivalence stability across roundtrip
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ir_opt_equiv.rs
 
-Builds an XLS IR package from a random sample, runs IR optimization, and cross-checks equivalence between original and optimized IR using an external tool and available SMT backends. Flags disagreements between engines and unexpected failures.
+Builds an XLS IR package from an upstream-standard random sample, including
+`gate` and arbitrary-width multiply but excluding product-pair operations
+pending prover support, runs IR optimization, and cross-checks equivalence
+between original and optimized IR using an external tool and available SMT
+backends. Flags disagreements between engines and unexpected failures.
 
 Primarily tests:
 
@@ -23,7 +31,11 @@ Primarily tests:
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_aug_opt_equiv.rs
 
-Generates a random XLS IR function, runs the PIR aug-opt rewrite loop, and checks toolchain equivalence between the original and rewritten IR when at least one rewrite fires. The target flags unexpected aug-opt failures or inequivalent rewrites.
+Generates an upstream-standard random XLS IR function, including `gate` and
+arbitrary-width multiply but excluding product-pair operations pending formal
+support, runs the PIR aug-opt rewrite loop, and checks toolchain equivalence
+between the original and rewritten IR when at least one rewrite fires. The
+target flags unexpected aug-opt failures or inequivalent rewrites.
 
 Primarily tests:
 
@@ -67,7 +79,9 @@ Primarily tests:
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_gatify.rs
 
-Parses C++-emitted IR into the Rust IR, then converts (gatifies) to `GateFn` with folding on and off, checking equivalence when requested. Skips uninteresting degenerate inputs.
+Generates gatify-supported PIR, including PIR extension operations, then
+converts it to `GateFn` with folding on and off and checks equivalence.
+Product-pair operations and opt-in XLS `gate` remain outside this target.
 
 Primarily tests:
 
@@ -99,9 +113,9 @@ Primarily tests:
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ir_eval_interp_equiv.rs
 
-Differentially compares our Rust IR function interpreter with the xlsynth C++ interpreter on the same randomly generated function, but instead of checking a single arbitrary argument tuple it uses autocov to grow a bounded corpus of interesting typed inputs for each `FuzzSample`.
+Differentially compares our Rust IR function interpreter with the xlsynth C++ interpreter on the same directly generated PIR function, but instead of checking a single arbitrary argument tuple it uses autocov to grow a bounded corpus of interesting typed inputs.
 
-- Generates a random XLS IR function (via C++ builder), pretty-prints, and reparses to the Rust internal IR.
+- Generates an upstream-standard random PIR function, including `gate` and arbitrary-width multiply, via `xlsynth_pir::ir_random`, then parses its emitted IR through libxls for the reference interpreter.
 - Runs autocov on the generated IR text to synthesize a small corpus of semantically interesting input tuples.
 - Evaluates every corpus sample with both engines and asserts the results are equal, including division/modulus edge cases and composite-valued `one_hot_sel` cases.
 
@@ -158,8 +172,8 @@ Primarily tests:
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_node_provenance.rs
 
-Builds a random PIR function using the shared `xlsynth_pir::ir_fuzz`
-generator, reparses it into PIR, then gatifies with `fold=false` and
+Builds a random gatify-supported PIR function, including PIR extension
+operations, using the shared `xlsynth_pir::ir_random` generator, then gatifies with `fold=false` and
 `hash=false`. For each resulting AIG node, the target checks the initial
 provenance seeding invariant against the original parsed PIR function: the
 builder's dedicated constant-false literal is the only literal node, and its
@@ -177,8 +191,8 @@ Primarily tests:
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_node_provenance_with_opts.rs
 
-Builds a random PIR function using the shared `xlsynth_pir::ir_fuzz`
-generator, reparses it into PIR, gatifies with folding and hashing enabled,
+Builds a random gatify-supported PIR function, including PIR extension
+operations, using the shared `xlsynth_pir::ir_random` generator, gatifies with folding and hashing enabled,
 then runs one bounded FRAIG iteration and one bounded cut-db rewrite
 iteration. For each surviving AIG node, the target checks the provenance
 invariant against the original parsed PIR function: every surviving `Input` /
@@ -283,16 +297,23 @@ Primarily tests:
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ir_same_sig_pair.rs
 
-Builds two XLS IR functions from a `FuzzSampleSameTypedPair` and asserts that both validate and share an identical `FnType`. Panics if either function fails to validate or if their types differ.
+Builds two PIR functions across the full function-level random-generator
+surface with `generate_same_signature_pair` and asserts that both validate and
+share an identical signature. Panics if either function fails to validate or
+if their types differ.
 
 Primarily tests:
 
-- `FuzzSample::gen_with_same_signature` produces paired samples with matching function signatures
+- `generate_same_signature_pair` produces paired samples with matching function signatures
 - IR validation succeeds for both generated functions
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ir_rebase_equiv.rs
 
-Generates two random XLS IR functions with the same input signature (orig and desired). Rebuilds desired on top of orig using `rebase_onto`, then proves semantic equivalence between `desired` and the rebased result using the external toolchain equivalence checker. Skips degenerate samples and generator-unsupported constructs.
+Generates two upstream-standard PIR functions with the same signature,
+including `gate` and arbitrary-width multiply but excluding product-pair
+operations pending formal support. Rebuilds desired on top of orig using
+`rebase_onto`, then proves semantic equivalence between `desired` and the
+rebased result using the external toolchain equivalence checker.
 
 Primarily tests:
 
@@ -301,7 +322,13 @@ Primarily tests:
 
 ### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ir_outline_equiv.rs
 
-Generates a random XLS IR function via the C++ builder, reparses into the Rust IR, then selects a random connected subgraph (via BFS from a seed) to outline into a new inner function. Rewrites the outer function to invoke the inner and proves semantic equivalence between the original function and the outlined outer using available SMT backends. The target also explores parameter/return ordering:
+Generates an upstream-standard random function directly as PIR, including
+`gate` and arbitrary-width multiply but excluding product-pair operations,
+then selects a random connected
+subgraph (via BFS from a seed) to outline into a new inner function. Rewrites
+the outer function to invoke the inner and proves semantic equivalence between
+the original function and the outlined outer using available SMT backends. The
+target also explores parameter/return ordering:
 
 - Param ordering mode: Default or deterministically shuffled non-default.
 - Return ordering mode: Default or deterministically shuffled non-default.

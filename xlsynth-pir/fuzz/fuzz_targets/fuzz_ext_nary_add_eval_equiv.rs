@@ -8,10 +8,10 @@ use rand::{Rng, SeedableRng};
 use xlsynth::{IrBits, IrValue};
 use xlsynth_pir::desugar_extensions::desugar_extensions_in_package;
 use xlsynth_pir::ir::{
-    self, ExtNaryAddArchitecture, ExtNaryAddTerm, FileTable, MemberType, Node, NodePayload, Package,
-    PackageMember, Param, ParamId, Type,
+    self, ExtNaryAddArchitecture, ExtNaryAddTerm, FileTable, MemberType, Node, NodePayload,
+    Package, PackageMember, Param, ParamId, Type,
 };
-use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
+use xlsynth_pir::ir_eval::{eval_fn_in_package, FnEvalResult};
 use xlsynth_pir::ir_validate;
 
 const PACKAGE_NAME: &str = "sample";
@@ -56,7 +56,9 @@ fuzz_target!(|data: &[u8]| {
     let pkg = build_ext_nary_add_package(&sample);
     ir_validate::validate_package(&pkg)
         .unwrap_or_else(|e| panic!("generated ext_nary_add package should validate: {e:?}"));
-    let pir_fn = pkg.get_top_fn().expect("generated package should have a top fn");
+    let pir_fn = pkg
+        .get_top_fn()
+        .expect("generated package should have a top fn");
     let ir_text = pkg.to_string();
     log::info!("generated ext_nary_add IR:\n{}", ir_text);
 
@@ -239,10 +241,7 @@ fn build_ext_nary_add_package(sample: &ExtNaryAddFnSample) -> Package {
 }
 
 /// Builds a deterministic, non-coverage-guided argument corpus for a sample.
-fn build_ext_nary_add_eval_corpus(
-    sample: &ExtNaryAddFnSample,
-    ir_text: &str,
-) -> Vec<Vec<IrValue>> {
+fn build_ext_nary_add_eval_corpus(sample: &ExtNaryAddFnSample, ir_text: &str) -> Vec<Vec<IrValue>> {
     if sample.params.is_empty() {
         return vec![Vec::new()];
     }
@@ -338,7 +337,11 @@ fn width_mask_u64(width: usize) -> u64 {
 }
 
 fn signed_min_value(width: usize) -> u64 {
-    if width == 0 { 0 } else { 1u64 << (width - 1) }
+    if width == 0 {
+        0
+    } else {
+        1u64 << (width - 1)
+    }
 }
 
 fn signed_max_value(width: usize) -> u64 {
@@ -371,8 +374,8 @@ fn edge_values_for_width(width: usize) -> Vec<u64> {
         width_mask_u64(width),
         if width == 0 { 0 } else { 1 },
         if width == 0 { 0 } else { 1u64 << (width - 1) },
-        alternating_pattern(width, /*lsb_is_one=*/ true),
-        alternating_pattern(width, /*lsb_is_one=*/ false),
+        alternating_pattern(width, /* lsb_is_one= */ true),
+        alternating_pattern(width, /* lsb_is_one= */ false),
         signed_min_value(width),
         signed_max_value(width),
     ] {

@@ -2,14 +2,14 @@
 
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
+use rand::SeedableRng;
 
 use xlsynth_g8r::prove_gate_fn_equiv_common::{EquivResult, GateFormalBackend};
 use xlsynth_g8r::prove_gate_fn_equiv_sat::prove_gate_fn_equiv_with_backend;
 use xlsynth_g8r::transforms::{self, transform_trait::TransformDirection};
-use xlsynth_g8r_fuzz::{FuzzGraph, build_graph};
+use xlsynth_g8r_fuzz::{build_graph, FuzzGraph};
 
 // Each successful step runs gate-level equivalence checks twice, so bound the
 // transform sequence to keep one fuzz input comfortably short.
@@ -82,19 +82,13 @@ fuzz_target!(|graph: FuzzGraph| {
 
         attempts += 1; // Count this attempted (and successful) application
 
-        let _orig_cur = prove_gate_fn_equiv_with_backend(
-            &orig_g,
-            &cur_g,
-            GateFormalBackend::Cadical,
-        )
-        .expect("Cadical gate equivalence should run for orig vs cur");
+        let _orig_cur =
+            prove_gate_fn_equiv_with_backend(&orig_g, &cur_g, GateFormalBackend::Cadical)
+                .expect("Cadical gate equivalence should run for orig vs cur");
 
-        let cur_next = prove_gate_fn_equiv_with_backend(
-            &cur_g,
-            &next_g,
-            GateFormalBackend::Cadical,
-        )
-        .expect("Cadical gate equivalence should run for cur vs next");
+        let cur_next =
+            prove_gate_fn_equiv_with_backend(&cur_g, &next_g, GateFormalBackend::Cadical)
+                .expect("Cadical gate equivalence should run for cur vs next");
 
         // If the transform is claimed to be always-equivalent, equivalence must hold.
         if t.always_equivalent() && !matches!(cur_next, EquivResult::Proved) {

@@ -7,35 +7,20 @@ use std::path::Path;
 use std::sync::Once;
 use xlsynth::DslxConvertOptions;
 use xlsynth_pir::ir_fn_to_dslx::IrFnToDslxError;
-use xlsynth_pir::ir_fuzz::{FuzzSample, generate_ir_fn};
-use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::prove_equiv_via_toolchain::{
-    ToolchainEquivResult, prove_ir_pkg_equiv_with_tool_dir,
+    prove_ir_pkg_equiv_with_tool_dir, ToolchainEquivResult,
 };
+use xlsynth_pir_fuzz::generate_standard_random_pir_package;
 
 static INIT_LOGGER: Once = Once::new();
 
-fuzz_target!(|sample: FuzzSample| {
+fuzz_target!(|data: &[u8]| {
     INIT_LOGGER.call_once(|| {
         let _ = env_logger::builder().is_test(true).try_init();
     });
 
-    let mut pkg =
-        xlsynth::IrPackage::new("fuzz_ir_fn_to_dslx_roundtrip").expect("IrPackage::new failed");
-    if generate_ir_fn(sample.ops.clone(), &mut pkg, None).is_err() {
-        // Early-return rationale: this target checks IR->DSLX->IR roundtrip
-        // soundness for samples that successfully build IR. Some arbitrary
-        // `FuzzSample` values are rejected by IR construction itself (e.g.
-        // invalid selector/case shapes for one_hot_select), which is outside
-        // the translator-equivalence property under test here.
-        return;
-    }
-    let ir_in = pkg.to_string();
-
-    let mut pir_parser = Parser::new(&ir_in);
-    let pir_pkg = pir_parser
-        .parse_and_validate_package()
-        .expect("generated IR failed PIR parse/validate");
+    let pir_pkg = generate_standard_random_pir_package(data, "fuzz_ir_fn_to_dslx_roundtrip");
+    let ir_in = pir_pkg.to_string();
     let top_fn = pir_pkg
         .get_top_fn()
         .expect("generated package should have a top function");
@@ -46,7 +31,8 @@ fuzz_target!(|sample: FuzzSample| {
             Ok(v) => v,
             Err(IrFnToDslxError::UnsupportedType(_)) | Err(IrFnToDslxError::UnsupportedNode(_)) => {
                 // Early-return rationale: this target focuses on the MVP
-                // translator surface (bits-only + currently supported ops).
+                // translator surface; generated forms outside that advertised
+                // subset are not translation soundness failures.
                 // Unsupported type/op samples are outside that scoped contract.
                 return;
             }

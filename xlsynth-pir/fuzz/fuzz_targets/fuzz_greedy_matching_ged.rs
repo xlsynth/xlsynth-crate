@@ -4,18 +4,17 @@
 
 use libfuzzer_sys::fuzz_target;
 use log::{debug, info};
-use xlsynth::IrPackage;
 use xlsynth_pir::dce::remove_dead_nodes;
 use xlsynth_pir::greedy_matching_ged::GreedyMatchSelector;
-use xlsynth_pir::ir_fuzz::{FuzzSampleSameTypedPair, generate_ir_fn};
 use xlsynth_pir::matching_ged::{
-    IrMatchSet, MatchAction, apply_fn_edits, compute_fn_edit, compute_fn_match,
-    convert_match_set_to_edit_set, format_ir_edits, format_match_actions,
+    apply_fn_edits, compute_fn_edit, compute_fn_match, convert_match_set_to_edit_set,
+    format_ir_edits, format_match_actions, IrMatchSet, MatchAction,
 };
-use xlsynth_pir::{ir_parser, node_hashing::functions_structurally_equivalent};
+use xlsynth_pir::node_hashing::functions_structurally_equivalent;
 use xlsynth_pir_fuzz::equiv::{
     compute_forward_equivalences, compute_reverse_equivalences_to_return,
 };
+use xlsynth_pir_fuzz::generate_full_random_pir_pair;
 
 // Returns the pairs of nodes which are CSE-equivalent between old and new
 // graphs. Only unique pairs are returned. If a node is equivalent to multiple
@@ -147,81 +146,41 @@ fn assert_equivalent_nodes_are_matched(
     }
 }
 
-fuzz_target!(|pair: FuzzSampleSameTypedPair| {
+fuzz_target!(|data: &[u8]| {
     info!("Sample generated.");
-
-    // Early-return on degenerate inputs.
-    if pair.first.ops.is_empty() || pair.second.ops.is_empty() {
-        return;
-    }
-    info!("Sample is not degenerate.");
 
     let _ = env_logger::builder().is_test(true).try_init();
 
-    // Build two XLS IR functions via the C++ bindings
-    let mut pkg1 = IrPackage::new("first").expect("IrPackage::new infra error");
-    let _ = match generate_ir_fn(pair.first.ops.clone(), &mut pkg1, None) {
-        Ok(f) => f,
-        Err(_) => return, // unsupported generator outputs are skipped
-    };
-
-    let mut pkg2 = IrPackage::new("second").expect("IrPackage::new infra error");
-    let _ = match generate_ir_fn(pair.second.ops.clone(), &mut pkg2, None) {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-
-    info!("IR function pair generated.");
-
-    // Convert both to text and parse via our Rust parser to obtain xls_ir::ir::Fn
-    let pkg1_text = pkg1.to_string();
-    let parsed1 = match ir_parser::Parser::new(&pkg1_text).parse_and_validate_package() {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-    let old_fn = match parsed1.get_top_fn() {
-        Some(f) => f,
-        None => return,
-    };
-
-    let pkg2_text = pkg2.to_string();
-    let parsed2 = match ir_parser::Parser::new(&pkg2_text).parse_and_validate_package() {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-    let new_fn = match parsed2.get_top_fn() {
-        Some(f) => f,
-        None => return,
-    };
+    let (old_fn, new_fn) = generate_full_random_pir_pair(data);
     info!(
-        "Parsable sample generated. sizes: old={}, new={}",
+        "IR function pair generated. sizes: old={}, new={}",
         old_fn.nodes.len(),
         new_fn.nodes.len()
     );
-    debug!("OLD IR TEXT:\n{}", pkg1_text);
-    debug!("NEW IR TEXT:\n{}", pkg2_text);
+    debug!("OLD IR TEXT:\n{}", old_fn);
+    debug!("NEW IR TEXT:\n{}", new_fn);
     info!(
         "old_fn.nodes.len() = {}, new_fn.nodes.len() = {}",
         old_fn.nodes.len(),
         new_fn.nodes.len()
     );
 
-    let mut selector = GreedyMatchSelector::new(old_fn, new_fn);
-    let edits = compute_fn_edit(old_fn, new_fn, &mut selector).expect("compute_fn_edit Err");
+    let mut selector = GreedyMatchSelector::new(&old_fn, &new_fn);
+    let edits = compute_fn_edit(&old_fn, &new_fn, &mut selector).expect("compute_fn_edit Err");
 
-    let patched = apply_fn_edits(old_fn, &edits).expect("apply_fn_edits returned Err (greedy)");
+    let patched = apply_fn_edits(&old_fn, &edits).expect("apply_fn_edits returned Err (greedy)");
     debug!("PATCHED IR TEXT:\n{}", patched);
     debug!(
         "IR EDITS ({}):\n{}",
         edits.edits.len(),
-        format_ir_edits(old_fn, &edits)
+        format_ir_edits(&old_fn, &edits)
     );
-    assert!(functions_structurally_equivalent(&patched, new_fn));
+    assert!(functions_structurally_equivalent(&patched, &new_fn));
 
     // Rerun matching after running DCE. This enables more precise testing of
     // expected invariants around equivalence.
-    let old_dce = remove_dead_nodes(old_fn);
-    let new_dce = remove_dead_nodes(new_fn);
+    let old_dce = remove_dead_nodes(&old_fn);
+    let new_dce = remove_dead_nodes(&new_fn);
     debug!("OLD IR (AFTER DCE):\n{}", old_dce);
     debug!("NEW IR (AFTER DCE):\n{}", new_dce);
 

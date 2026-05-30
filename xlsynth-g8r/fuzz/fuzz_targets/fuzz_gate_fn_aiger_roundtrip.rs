@@ -4,7 +4,7 @@ use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::aig::GateBuilderOptions;
 use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
 use xlsynth_g8r::aig_serdes::gate2ir::{
-    GateFnInterfaceSchema, repack_gate_fn_interface_with_schema,
+    repack_gate_fn_interface_with_schema, GateFnInterfaceSchema,
 };
 use xlsynth_g8r::aig_serdes::load_aiger::load_aiger;
 use xlsynth_g8r::test_utils::structurally_equivalent;

@@ -2,38 +2,37 @@
 
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use xlsynth_pir::ir_fuzz::{FuzzSample, generate_ir_fn};
 use xlsynth_pir::ir_parser;
+use xlsynth_pir::ir_random::{generate_fn, DepletableBytes, RandomFnOptions, StopPolicy};
 use xlsynth_pir::structural_similarity::structurally_equivalent_ir;
 
-fuzz_target!(|sample: FuzzSample| {
-    log::debug!("Testing FuzzSample IR roundtrip");
-    // Skip degenerate samples early.
-    if sample.ops.is_empty() {
-        // Degenerate generator inputs (no ops or zero-width inputs) are not
-        // interesting for this target and can arise frequently. We intentionally
-        // skip rather than crash to avoid biasing the corpus toward trivial cases.
-        return;
-    }
-
+fuzz_target!(|data: &[u8]| {
+    log::debug!("Testing random PIR function through libxls IR roundtrip");
     let _ = env_logger::builder().is_test(true).try_init();
 
-    // 1) Generate XLS IR via C++ bindings into a package
-    let mut pkg = xlsynth::IrPackage::new("fuzz_pkg")
-        .expect("IrPackage::new should not fail; treat as infra error");
-    if let Err(_) = generate_ir_fn(sample.ops.clone(), &mut pkg, None) {
-        // The generator can deliberately produce edge-case or temporarily unsupported
-        // constructs; those are not failures of this roundtrip target. Skip to let
-        // the generator evolve without turning such cases into crashes here.
-        return;
-    }
-    log::debug!("FuzzSample generated valid IR");
+    // 1) Generate valid PIR directly, then parse and re-emit it through
+    // libxls so the Rust parser continues to see XLS-emitted IR.
+    let mut entropy = DepletableBytes::new(data);
+    let options = RandomFnOptions {
+        allow_arbitrary_width_multiply: true,
+        allow_gate: true,
+        ..RandomFnOptions::default()
+    };
+    let generated = generate_fn(
+        &mut entropy,
+        &options,
+        StopPolicy::WhenEntropyDepleted,
+    )
+    .expect("fixed random PIR options should construct a valid function");
+    let pir_text = generated.into_top_package("fuzz_pkg").to_string();
+    let xls_pkg = xlsynth::IrPackage::parse_ir(&pir_text, None)
+        .expect("PIR-emitted standard XLS IR should parse in libxls");
+    let pkg_text = xls_pkg.to_string();
 
-    // 2) Serialize to text and parse back via our Rust parser
-    let pkg_text = pkg.to_string();
+    // 2) Parse the libxls-emitted text back via our Rust parser.
     let parsed_pkg = ir_parser::Parser::new(&pkg_text)
         .parse_and_validate_package()
-        .expect("C++-emitted IR failed to parse/validate in Rust parser");
+        .expect("libxls-emitted IR failed to parse/validate in Rust parser");
 
     // 3) Verify and obtain the top function
     let parsed_top = parsed_pkg

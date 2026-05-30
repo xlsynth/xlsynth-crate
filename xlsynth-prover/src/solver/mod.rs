@@ -284,6 +284,9 @@ pub trait Solver: Sized {
         self.eq(bit_vec, &signed_min_value)
     }
     fn concat_many(&mut self, bvs: Vec<&BitVec<Self::Term>>) -> BitVec<Self::Term> {
+        if bvs.is_empty() {
+            return BitVec::ZeroWidth;
+        }
         reduce_many(self, bvs, Self::concat)
     }
     fn and_many(&mut self, bvs: Vec<&BitVec<Self::Term>>) -> BitVec<Self::Term> {
@@ -1980,6 +1983,14 @@ macro_rules! test_solver {
                 12,
                 0x123
             );
+            #[test]
+            fn test_concat_many_empty_is_zero_width() {
+                let mut solver = $solver;
+                assert!(matches!(
+                    solver.concat_many(Vec::new()),
+                    crate::solver::BitVec::ZeroWidth
+                ));
+            }
             crate::test_solver_many!(
                 test_and_many,
                 $solver,

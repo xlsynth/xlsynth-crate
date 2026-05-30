@@ -5,58 +5,48 @@
 use std::sync::Once;
 
 use libfuzzer_sys::fuzz_target;
+use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
-use rand::SeedableRng;
-use xlsynth::IrPackage;
 use xlsynth_mcmc_pir::transforms::get_all_pir_transforms;
 use xlsynth_pir::ir;
-use xlsynth_pir::ir_fuzz::{generate_ir_fn, FuzzSample};
-use xlsynth_pir::ir_parser::Parser;
+use xlsynth_pir::ir_random::{
+    DepletableBytes, OperationSet, RandomFnOptions, RandomOperation, StopPolicy, generate_fn,
+};
 use xlsynth_pir::ir_utils::compact_and_toposort_in_place;
 use xlsynth_pir::ir_validate;
-use xlsynth_prover::prover::types::{
-    AssertionSemantics, EquivParallelism, EquivResult, ProverFn,
-};
-use xlsynth_prover::prover::{prover_for_choice, Prover, SolverChoice};
+use xlsynth_prover::prover::types::{AssertionSemantics, EquivParallelism, EquivResult, ProverFn};
+use xlsynth_prover::prover::{Prover, SolverChoice, prover_for_choice};
 
 const NUM_STEPS: usize = 32;
 const MAX_TRANSFORM_DRAWS: usize = NUM_STEPS * 32;
 
 static INIT_LOGGER: Once = Once::new();
 
-fuzz_target!(|sample: FuzzSample| {
+fuzz_target!(|data: &[u8]| {
     INIT_LOGGER.call_once(|| {
         let _ = env_logger::Builder::from_env(env_logger::Env::default())
             .is_test(true)
             .try_init();
     });
 
-    let mut xls_pkg =
-        IrPackage::new("fuzz_pir_transform_arbitrary").expect("IrPackage::new should succeed");
-    if let Err(e) = generate_ir_fn(sample.ops.clone(), &mut xls_pkg, None) {
-        // Early-return rationale: unsupported generator outputs are outside
-        // this target's transform-soundness scope; see FUZZ.md.
-        log::debug!("generate_ir_fn failed, skipping sample: {e}");
-        return;
-    }
-
-    let initial_ir_text = xls_pkg.to_string();
-    let mut cur_pkg = match Parser::new(&initial_ir_text).parse_and_validate_package() {
-        Ok(pkg) => pkg,
-        Err(e) => {
-            // Early-return rationale: this sample does not give us a valid
-            // starting PIR package, so transform application is not being
-            // exercised. See FUZZ.md.
-            log::debug!("initial parse/validate failed, skipping sample: {e}");
-            return;
-        }
+    let options = RandomFnOptions {
+        max_nodes: 20,
+        max_bit_width: 8,
+        enabled_operations: OperationSet::new(
+            OperationSet::all_supported().iter().filter(|operation| {
+                !matches!(operation, RandomOperation::Umulp | RandomOperation::Smulp)
+            }),
+        ),
+        ..RandomFnOptions::default()
     };
-    if cur_pkg.get_top_fn().is_none() {
-        // Early-return rationale: generated package has no function to mutate;
-        // this is a degenerate harness input rather than a transform bug.
-        return;
-    }
+    let mut entropy = DepletableBytes::new(data);
+    let generated = generate_fn(&mut entropy, &options, StopPolicy::WhenEntropyDepleted)
+        .expect("fixed random PIR options should always construct a valid function");
+    let mut cur_pkg = generated.into_top_package("fuzz_pir_transform_arbitrary");
+    ir_validate::validate_package(&cur_pkg)
+        .expect("directly generated PIR package should start valid");
+    let initial_ir_text = cur_pkg.to_string();
 
     let mut transforms = get_all_pir_transforms();
     if transforms.is_empty() {
@@ -157,7 +147,10 @@ fn prove_candidate_equivalent(
 }
 
 fn make_in_process_prover() -> Box<dyn Prover> {
-    if cfg!(not(any(feature = "has-bitwuzla", feature = "has-boolector"))) {
+    if cfg!(not(any(
+        feature = "has-bitwuzla",
+        feature = "has-boolector"
+    ))) {
         panic!(
             "fuzz_pir_transform_arbitrary refuses SolverChoice::Auto when it \
              would fall back to Toolchain; enable with-bitwuzla-system, \

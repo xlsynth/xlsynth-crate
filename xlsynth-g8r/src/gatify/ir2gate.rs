@@ -2897,11 +2897,6 @@ fn gatify_node(
             indices,
             assumed_in_bounds,
         } => {
-            assert!(
-                !indices.is_empty(),
-                "Array index must have at least one index"
-            );
-
             let mut array_ty = match f.get_node_ty(*array) {
                 ir::Type::Array(array_ty_data) => array_ty_data,
                 other => panic!("Expected array type for array_index, got {:?}", other),
@@ -2968,17 +2963,17 @@ fn gatify_node(
             indices,
             assumed_in_bounds: _,
         } => {
-            assert!(
-                !indices.is_empty(),
-                "Array update must have at least one index",
-            );
+            let value_bits = env.get_bit_vector(*value).unwrap();
+            if indices.is_empty() {
+                env.add(node_ref, GateOrVec::BitVector(value_bits));
+                return Ok(());
+            }
             let array_ty = match f.get_node_ty(*array) {
                 ir::Type::Array(array_ty_data) => array_ty_data,
                 other => panic!("Expected array type for array_update, got {:?}", other),
             };
 
             let array_bits = env.get_bit_vector(*array).unwrap();
-            let value_bits = env.get_bit_vector(*value).unwrap();
             let index_bits: Vec<AigBitVector> = indices
                 .iter()
                 .map(|i| env.get_bit_vector(*i).unwrap())
@@ -6375,6 +6370,43 @@ top fn f(pred: bits[1] id=1, x: bits[2] id=2, y: bits[3] id=3) -> (bits[2], bits
             eval(1, 0b10, 0b101),
             IrBits::make_ubits(5, 0b10101).unwrap()
         );
+    }
+
+    #[test]
+    fn test_zero_index_array_ops_lower_as_identity_and_replacement() {
+        let index_ir = r#"package sample
+
+top fn f(a: bits[3][2] id=1) -> bits[3][2] {
+  ret selected: bits[3][2] = array_index(a, indices=[], id=2)
+}
+"#;
+        let index_gate_fn = gatify_ir_text(index_ir);
+        let array_bits = IrBits::make_ubits(6, 0b10_1011).unwrap();
+        let indexed = gate_sim::eval(
+            &index_gate_fn,
+            std::slice::from_ref(&array_bits),
+            gate_sim::Collect::None,
+        )
+        .outputs[0]
+            .clone();
+        assert_eq!(indexed, array_bits);
+
+        let update_ir = r#"package sample
+
+top fn f(a: bits[3][2] id=1, replacement: bits[3][2] id=2) -> bits[3][2] {
+  ret updated: bits[3][2] = array_update(a, replacement, indices=[], id=3)
+}
+"#;
+        let update_gate_fn = gatify_ir_text(update_ir);
+        let replacement_bits = IrBits::make_ubits(6, 0b01_0110).unwrap();
+        let updated = gate_sim::eval(
+            &update_gate_fn,
+            &[array_bits, replacement_bits.clone()],
+            gate_sim::Collect::None,
+        )
+        .outputs[0]
+            .clone();
+        assert_eq!(updated, replacement_bits);
     }
 
     fn gate_eval_1bit(gate_fn: &GateFn, lhs: u64, lhs_width: usize) -> bool {

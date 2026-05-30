@@ -3404,11 +3404,6 @@ impl Parser {
             .map(|(n, _)| n.clone())
             .filter(|n| input_params.iter().all(|(inn, _, _)| inn != n))
             .collect();
-        if header_output_names.is_empty() {
-            return Err(ParseError::new(
-                "no outputs declared in block header".to_string(),
-            ));
-        }
         // Map output_port(name=...) by name.
         let mut out_map: std::collections::HashMap<String, ir::NodeRef> =
             std::collections::HashMap::new();
@@ -3620,7 +3615,7 @@ pub fn emit_fn_as_block(
         if let Some(pi) = port_ids {
             let expected = pi.output_names.len();
             if expected == 0 {
-                (Vec::new(), Vec::new(), None)
+                (Vec::new(), Vec::new(), f.ret_node_ref.map(|nr| nr.index))
             } else if expected == 1 {
                 if let Some(ret_nr) = f.ret_node_ref {
                     let ret_node = f.get_node(ret_nr);
@@ -3808,12 +3803,20 @@ pub fn emit_fn_as_block(
     if is_top {
         out.push_str("top ");
     }
-    out.push_str(&format!(
-        "block {}({}) {{\n{}\n}}",
-        f.name,
-        header_parts.join(", "),
-        lines.join("\n")
-    ));
+    if lines.is_empty() {
+        out.push_str(&format!(
+            "block {}({}) {{\n}}",
+            f.name,
+            header_parts.join(", ")
+        ));
+    } else {
+        out.push_str(&format!(
+            "block {}({}) {{\n{}\n}}",
+            f.name,
+            header_parts.join(", "),
+            lines.join("\n")
+        ));
+    }
     out
 }
 
@@ -4694,6 +4697,13 @@ fn id(x: bits[1] id=1) -> bits[1] {
   b_out: () = output_port(b, name=b_out, id=6)
 }"#;
 
+    const BLK_INPUT_WITH_NO_OUTPUTS: &str = r#"block sink(x: bits[1]) {
+  x: bits[1] = input_port(name=x, id=1)
+}"#;
+
+    const BLK_WITH_NO_PORTS: &str = r#"block sink() {
+}"#;
+
     const BLK_REG_LOAD_ENABLE: &str = r#"block my_block(clk: clock, in: bits[32], le: bits[1], out: bits[32]) {
   reg foo(bits[32])
   in: bits[32] = input_port(name=in, id=1)
@@ -4762,6 +4772,29 @@ fn id(x: bits[1] id=1) -> bits[1] {
             false,
         );
         assert_eq!(emitted, BLK_TWO_INPUTS_TWO_OUTPUTS_RT);
+    }
+
+    #[test]
+    fn test_roundtrip_block_parse_then_emit_no_outputs() {
+        let mut parser = Parser::new(BLK_INPUT_WITH_NO_OUTPUTS);
+        let (f, metadata) = parser.parse_block_to_fn_with_ports().unwrap();
+        assert!(f.ret_ty.is_nil());
+        assert!(f.ret_node_ref.is_some());
+        let emitted = emit_fn_as_block(&f, Some(&[]), Some(&metadata), false);
+        assert_eq!(emitted, BLK_INPUT_WITH_NO_OUTPUTS);
+
+        let package_text = format!("package test\n\n{}\n", BLK_INPUT_WITH_NO_OUTPUTS);
+        let mut parser = Parser::new(&package_text);
+        let package = parser.parse_and_validate_package().unwrap();
+        assert_eq!(package.to_string(), package_text);
+    }
+
+    #[test]
+    fn test_roundtrip_block_parse_then_emit_no_ports() {
+        let package_text = format!("package test\n\n{}\n", BLK_WITH_NO_PORTS);
+        let mut parser = Parser::new(&package_text);
+        let package = parser.parse_and_validate_package().unwrap();
+        assert_eq!(package.to_string(), package_text);
     }
 
     #[test]

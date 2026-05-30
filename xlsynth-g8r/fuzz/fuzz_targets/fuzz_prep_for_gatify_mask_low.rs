@@ -4,9 +4,9 @@
 
 use libfuzzer_sys::fuzz_target;
 use xlsynth::IrValue;
-use xlsynth_g8r::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
+use xlsynth_g8r::gatify::prep_for_gatify::{prep_for_gatify, PrepForGatifyOptions};
 use xlsynth_pir::ir;
-use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
+use xlsynth_pir::ir_eval::{eval_fn, FnEvalResult};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::math::ceil_log2;
 
@@ -115,7 +115,9 @@ fn parse_top_fn(ir_text: &str) -> ir::Fn {
     let pkg = parser
         .parse_and_validate_package()
         .unwrap_or_else(|e| panic!("constructed mask-low IR should parse:\n{ir_text}\n{e}"));
-    pkg.get_top_fn().expect("constructed package has top").clone()
+    pkg.get_top_fn()
+        .expect("constructed package has top")
+        .clone()
 }
 
 fn build_ir_text(sample: &MaskLowPrepSample) -> BuiltMaskLowIr {

@@ -814,6 +814,9 @@ impl GateBuilder {
         reduction_kind: ReductionKind,
     ) -> AigOperand {
         assert_eq!(a.get_bit_count(), b.get_bit_count());
+        if a.get_bit_count() == 0 {
+            return self.union_current_pir_node_id_into_operand(self.get_true());
+        }
         let xnors = self.add_xnor_vec(a, b);
         self.add_and_reduce(&xnors, reduction_kind)
     }
@@ -826,6 +829,9 @@ impl GateBuilder {
         reduction_kind: ReductionKind,
     ) -> AigOperand {
         assert_eq!(a.get_bit_count(), b.get_bit_count());
+        if a.get_bit_count() == 0 {
+            return self.union_current_pir_node_id_into_operand(self.get_false());
+        }
         let xors = self.add_xor_vec(a, b);
         assert_eq!(xors.get_bit_count(), a.get_bit_count());
         self.add_or_reduce(&xors, reduction_kind) // or-reduce to see if any bit
@@ -889,6 +895,20 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_zero_width_vector_comparison_constants() {
+        let mut builder = GateBuilder::new("zero_cmp".to_string(), GateBuilderOptions::no_opt());
+        let empty = AigBitVector::zeros(0);
+        assert_eq!(
+            builder.add_eq_vec(&empty, &empty, ReductionKind::Tree),
+            builder.get_true()
+        );
+        assert_eq!(
+            builder.add_ne_vec(&empty, &empty, ReductionKind::Tree),
+            builder.get_false()
+        );
     }
 
     #[test]

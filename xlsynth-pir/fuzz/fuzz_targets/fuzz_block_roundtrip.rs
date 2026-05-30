@@ -5,8 +5,8 @@
 use libfuzzer_sys::fuzz_target;
 use pretty_assertions::assert_eq;
 
-use xlsynth_pir::ir_fuzz::{FuzzSample, generate_ir_fn};
 use xlsynth_pir::ir_parser::Parser;
+use xlsynth_pir_fuzz::generate_standard_random_pir_package;
 
 fn run_codegen_block_ir_to_string(
     input_file: &std::path::Path,
@@ -52,18 +52,19 @@ fn run_codegen_block_ir_to_string(
         .expect("reading output_block_ir_path should succeed")
 }
 
-fuzz_target!(|sample_input: (FuzzSample, bool)| {
-    let (sample, pipeline_generator) = sample_input;
+fuzz_target!(|data: &[u8]| {
+    let pipeline_generator = data.first().map_or(false, |byte| byte & 1 != 0);
     // Toolchain path must be provided via environment for this fuzz target.
     let tool_path =
         std::env::var("XLSYNTH_TOOLS").expect("XLSYNTH_TOOLS must be set for fuzz_block_roundtrip");
 
-    // 1) Build IR package with a single function from the sample.
-    let mut pkg = xlsynth::IrPackage::new("fuzz_pkg").expect("IrPackage::new should succeed");
-    let fn_name = "fuzz_test";
-    if generate_ir_fn(sample.ops.clone(), &mut pkg, None).is_err() {
-        return;
-    }
+    // 1) Generate a valid PIR package with a single function.
+    let pkg = generate_standard_random_pir_package(data, "fuzz_pkg");
+    let fn_name = pkg
+        .get_top_fn()
+        .expect("generated PIR package should have a top function")
+        .name
+        .clone();
 
     // 2) Write IR to a temporary directory with a recognizable prefix.
     let tmpdir = tempfile::Builder::new()
@@ -72,13 +73,13 @@ fuzz_target!(|sample_input: (FuzzSample, bool)| {
         .expect("TempDir::new should succeed");
 
     let ir_path = tmpdir.path().join("input.ir");
-    std::fs::write(&ir_path, format!("{}", pkg)).expect("write IR file should succeed");
+    std::fs::write(&ir_path, pkg.to_string()).expect("write IR file should succeed");
 
     // 3) Run codegen_main to emit combinational block IR for the function top.
     let block_path = tmpdir.path().join("block.ir");
     let generated_ir_text = run_codegen_block_ir_to_string(
         &ir_path,
-        fn_name,
+        &fn_name,
         &tool_path,
         &block_path,
         pipeline_generator,
