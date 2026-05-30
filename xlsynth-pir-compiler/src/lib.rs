@@ -204,7 +204,7 @@ impl JitError {
 /// `u8`, `u16`, `u32`, or `u64`. Arrays of supported values use native
 /// contiguous array storage.
 pub struct PirFunctionJit {
-    _module: JITModule,
+    module: Option<JITModule>,
     entrypoint: NativeEntrypoint,
     param_layouts: Vec<NativeValueLayout>,
     result_layout: NativeValueLayout,
@@ -277,7 +277,7 @@ impl PirFunctionJit {
         // with the exact `NativeEntrypoint` signature above.
         let entrypoint: NativeEntrypoint = unsafe { std::mem::transmute(entrypoint_ptr) };
         Ok(Self {
-            _module: module,
+            module: Some(module),
             entrypoint,
             param_layouts,
             result_layout,
@@ -407,6 +407,17 @@ impl PirFunctionJit {
         let result = self.run_u64(&scalar_args)?;
         IrValue::make_ubits(result_layout.bit_count, result)
             .map_err(|error| JitError::Value(error.to_string()))
+    }
+}
+
+impl Drop for PirFunctionJit {
+    fn drop(&mut self) {
+        let Some(module) = self.module.take() else {
+            return;
+        };
+        // SAFETY: the entrypoint is private and all safe calls borrow `self`,
+        // so dropping this owner cannot overlap an invocation of its code.
+        unsafe { module.free_memory() };
     }
 }
 

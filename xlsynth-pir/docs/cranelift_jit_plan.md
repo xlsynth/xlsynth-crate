@@ -51,7 +51,7 @@ existing evaluator API also accepts and returns `xlsynth::IrValue`.
 There are therefore two separable objectives:
 
 1. Replace libxls **JIT compilation and execution** with Cranelift.
-2. Remove libxls from the PIR value, literal, and parsing boundary.
+1. Remove libxls from the PIR value, literal, and parsing boundary.
 
 A native typed JIT entrypoint can avoid `IrValue` for runtime inputs and
 outputs while proving the compiler backend. Literals in `ir::Fn` remain an
@@ -254,9 +254,9 @@ The design should keep these concepts separate:
 
 1. **Native interface layout**: the target-native Rust storage accessed
    directly through input/result pointers.
-2. **Computation representation**: CLIF scalar `Value`s or memory references
+1. **Computation representation**: CLIF scalar `Value`s or memory references
    used while lowering operations.
-3. **Scratch layout**: aligned slots allocated for materialized intermediate
+1. **Scratch layout**: aligned slots allocated for materialized intermediate
    values.
 
 LLVM currently makes these concepts look related because the existing JIT
