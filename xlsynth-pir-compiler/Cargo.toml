@@ -1,0 +1,26 @@
+[package]
+name = "xlsynth-pir-compiler"
+version = "0.51.0"
+edition = "2024"
+authors = ["Christopher D. Leary <cdleary@gmail.com>"]
+description = "Rust-native JIT compilation for xlsynth PIR functions"
+license = "Apache-2.0"
+repository = "https://github.com/xlsynth/xlsynth-crate"
+documentation = "https://docs.rs/xlsynth"
+homepage = "https://github.com/xlsynth/xlsynth-crate"
+
+[lints]
+workspace = true
+
+[dependencies]
+cranelift-codegen = "0.132.0"
+cranelift-frontend = "0.132.0"
+cranelift-jit = "0.132.0"
+cranelift-module = "0.132.0"
+thiserror = "1"
+xlsynth = { path = "../xlsynth", version = "0.51.0" }
+xlsynth-pir = { path = "../xlsynth-pir", version = "0.51.0" }
+
+[lib]
+name = "xlsynth_pir_compiler"
+path = "src/lib.rs"

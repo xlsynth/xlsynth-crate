@@ -1,0 +1,26 @@
+[workspace]
+members = ["."]
+
+[workspace.lints.rust]
+warnings = "deny"
+
+[package]
+name = "xlsynth-pir-compiler-fuzz"
+version = "0.51.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+xlsynth = { path = "../../xlsynth", version = "0.51.0" }
+xlsynth-pir-compiler = { path = "..", version = "0.51.0" }
+xlsynth-pir = { path = "../../xlsynth-pir", version = "0.51.0" }
+
+[[bin]]
+name = "fuzz_pir_function_jit_eval_equiv"
+path = "fuzz_targets/fuzz_pir_function_jit_eval_equiv.rs"
+test = false
+doc = false

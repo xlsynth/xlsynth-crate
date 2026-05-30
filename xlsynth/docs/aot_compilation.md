@@ -4,6 +4,9 @@ DSLX or XLS IR is compiled into object code at build time, and the resulting
 object code is wrapped in generated Rust code to enable easy integration into
 user code.
 
+For an inventory of the libxls compilation and runtime components underlying
+this API, see [JIT and AOT execution through libxls](jit_aot_libxls_architecture.md).
+
 Advantages compared to the DSLX interpreter or the XLS JIT:
 
 - Avoids compilation overhead at runtime.

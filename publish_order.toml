@@ -6,6 +6,7 @@ crates = [
     "xlsynth",
     "xlsynth-vastly",
     "xlsynth-pir",
+    "xlsynth-pir-compiler",
     "xlsynth-mcmc",
     "xlsynth-prover",
     "xlsynth-test-helpers",
