@@ -1657,8 +1657,12 @@ impl<'a> FunctionGenerator<'a> {
                 ))
             }
             RandomOperation::ExtNormalizeLeft => {
-                let (_, arg) = self.choose_bits_ref(source);
-                let normalized_width = random_width(source, self.options.max_bit_width);
+                let (arg_ty, arg) = self.choose_bits_ref(source);
+                let Type::Bits(arg_width) = arg_ty else {
+                    unreachable!("selected normalize-left operand has bits type")
+                };
+                let normalized_width =
+                    random_width(source, self.options.max_bit_width).max(arg_width);
                 let has_clz_result = self.options.allow_tuples
                     && self.options.max_type_depth >= 1
                     && self.options.max_aggregate_leaves >= 2

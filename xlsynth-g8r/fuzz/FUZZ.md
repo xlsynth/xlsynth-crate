@@ -43,11 +43,12 @@ output.
 
 Generates upstream-standard PIR directly, including `gate`, arbitrary-width
 multiply, product-pair, token, and event forms (`after_all`, `assert`,
-`trace`, and `cover`), serializes it, parses and re-emits it through libxls,
-then parses and re-emits the libxls output through PIR. This intentionally
-tests the `PIR printer -> libxls parser/printer -> PIR parser/printer`
-interoperability boundary and structural stability, including event metadata,
-of the PIR roundtrip.
+`trace`, and `cover`), along with `assumed_in_bounds` array attributes,
+serializes it, parses and re-emits it through libxls, then parses and re-emits
+the libxls output through PIR. This intentionally tests the `PIR printer ->
+libxls parser/printer -> PIR parser/printer` interoperability boundary and
+structural stability, including event and assumption metadata, of the PIR
+roundtrip.
 
 ## `fuzz_ir_opt_equiv`
 
@@ -70,7 +71,8 @@ semantic disagreement or PIR-to-libxls loading incompatibility.
 ## `fuzz_ir_same_sig_pair`
 
 Builds two direct random PIR functions across the full function-level PIR
-surface, including token values and event operations, using
+surface, including token values, event operations, and `assumed_in_bounds`
+array attributes, using
 constrained-signature generation and asserts that their complete function
 signatures match. Failures expose bugs in the paired-function generator used
 by graph-comparison targets.

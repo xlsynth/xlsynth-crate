@@ -31,6 +31,7 @@ pub fn generate_full_random_pir_pair(data: &[u8]) -> (IrFn, IrFn) {
         allow_arbitrary_width_multiply: true,
         allow_gate: true,
         allow_extension_ops: true,
+        allow_assumed_in_bounds: true,
         ..RandomFnOptions::default()
     };
     let (mut first_entropy, mut second_entropy) = DepletableBytes::split(data);

@@ -1327,6 +1327,23 @@ fn probabilistic_extension_option_covers_all_extension_operations() {
         let generated =
             generate_fn(&mut entropy, &options, StopPolicy::ExactBodyNodes(48)).unwrap();
         validate_generated(&generated.function);
+        for node in &generated.function.nodes {
+            let NodePayload::ExtNormalizeLeft {
+                arg,
+                normalized_bit_count,
+                ..
+            } = &node.payload
+            else {
+                continue;
+            };
+            let Type::Bits(arg_width) = &generated.function.get_node(*arg).ty else {
+                unreachable!("ext_normalize_left argument must be bits-typed");
+            };
+            assert!(
+                normalized_bit_count >= arg_width,
+                "ext_normalize_left result must be at least as wide as its operand"
+            );
+        }
         emitted.extend(generated.stats.emitted_operations.keys().cloned());
         live.extend(generated.stats.live_operations.keys().cloned());
     }
