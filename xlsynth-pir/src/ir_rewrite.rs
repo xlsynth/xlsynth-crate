@@ -1390,7 +1390,15 @@ fn build_operator_payload(
         .collect::<Result<Vec<NodeRef>, _>>()?;
     let named_args = materialize_named_args(state, &call.named_args)?;
 
-    let payload = if let Some(binop) = ir::operator_to_binop(&call.operator) {
+    let payload = if call.operator == "array_concat" {
+        require_no_named_args(&call.operator, &named_args)?;
+        if positional_refs.is_empty() {
+            return Err(MatchRewriteRuleApplyError::InvalidRewriteTemplate(
+                "array_concat expects at least 1 positional operand".to_string(),
+            ));
+        }
+        NodePayload::ArrayConcat(positional_refs)
+    } else if let Some(binop) = ir::operator_to_binop(&call.operator) {
         require_no_named_args(&call.operator, &named_args)?;
         if positional_refs.len() != 2 {
             return Err(MatchRewriteRuleApplyError::InvalidRewriteTemplate(format!(
@@ -1648,7 +1656,7 @@ fn build_special_payload(
             };
 
             let cases = named_args.require_expr_list("cases")?;
-            if cases.is_empty() {
+            if cases.is_empty() && operator != "sel" {
                 return Err(MatchRewriteRuleApplyError::InvalidRewriteTemplate(format!(
                     "{} requires a non-empty cases=[...] list",
                     operator
@@ -1657,6 +1665,12 @@ fn build_special_payload(
             match operator {
                 "sel" => {
                     named_args.require_no_extra(operator, &["selector", "cases", "default"])?;
+                    if cases.is_empty() && named_args.optional_expr("default").is_none() {
+                        return Err(MatchRewriteRuleApplyError::InvalidRewriteTemplate(
+                            "sel requires a non-empty cases=[...] list or default=<expr>"
+                                .to_string(),
+                        ));
+                    }
                     Ok(NodePayload::Sel {
                         selector,
                         cases,
@@ -3095,7 +3109,7 @@ top block blk(x: bits[8], out: bits[8]) {
     }
 
     #[test]
-    fn apply_rejects_empty_sel_cases_list() {
+    fn apply_allows_default_only_sel_cases_list() {
         let ir_text = r#"fn t(p: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
   ret sel.10: bits[8] = sel(p, cases=[x, x], id=10)
 }"#;
@@ -3104,13 +3118,36 @@ top block blk(x: bits[8], out: bits[8]) {
             "sel(selector=p, cases=[], default=x)",
         )
         .unwrap();
+        let outcome = rule
+            .apply_to_fn(&parse_fn(ir_text), RewriteApplyMode::FirstMatch)
+            .unwrap();
+        assert_eq!(
+            outcome.rewritten_fn().to_string(),
+            normalized_fn_text(
+                r#"fn t(p: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  ret sel.10: bits[8] = sel(p, cases=[], default=x, id=10)
+}"#
+            )
+        );
+    }
+
+    #[test]
+    fn apply_rejects_empty_sel_cases_list_without_default() {
+        let ir_text = r#"fn t(p: bits[1] id=1, x: bits[8] id=2) -> bits[8] {
+  ret sel.10: bits[8] = sel(p, cases=[x, x], id=10)
+}"#;
+        let rule = MatchRewriteRule::from_strings(
+            "sel(selector=p, cases=[x, x])",
+            "sel(selector=p, cases=[])",
+        )
+        .unwrap();
         let err = rule
             .apply_to_fn(&parse_fn(ir_text), RewriteApplyMode::FirstMatch)
             .unwrap_err();
         assert!(matches!(
             err,
             MatchRewriteRuleApplyError::InvalidRewriteTemplate(ref msg)
-                if msg == "sel requires a non-empty cases=[...] list"
+                if msg == "sel requires a non-empty cases=[...] list or default=<expr>"
         ));
     }
 

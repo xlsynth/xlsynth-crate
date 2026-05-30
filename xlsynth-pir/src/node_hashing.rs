@@ -72,7 +72,7 @@ fn hash_payload_attributes(f: &Fn, payload: &NodePayload, hasher: &mut blake3::H
             let ordinal = get_param_ordinal(f, *param_id) as u64 + 1;
             update_hash_u64(hasher, ordinal);
         }
-        NodePayload::Tuple(nodes) | NodePayload::Array(nodes) => {
+        NodePayload::Tuple(nodes) | NodePayload::Array(nodes) | NodePayload::ArrayConcat(nodes) => {
             update_hash_u64(hasher, nodes.len() as u64);
         }
         NodePayload::TupleIndex { tuple: _, index } => update_hash_u64(hasher, *index as u64),
@@ -289,6 +289,7 @@ pub fn node_structural_signature_string(f: &Fn, node_ref: NodeRef) -> String {
         }
         NodePayload::Tuple(nodes) => attrs.push(format!("len={}", nodes.len())),
         NodePayload::Array(nodes) => attrs.push(format!("len={}", nodes.len())),
+        NodePayload::ArrayConcat(nodes) => attrs.push(format!("len={}", nodes.len())),
         NodePayload::TupleIndex { index, .. } => attrs.push(format!("index={index}")),
         NodePayload::Literal(value) => attrs.push(format!("value={}", value.to_string())),
         NodePayload::SignExt { new_bit_count, .. } | NodePayload::ZeroExt { new_bit_count, .. } => {

@@ -43,7 +43,8 @@ To verify locally, run:
 pre-commit run --all-files
 ```
 
-PRs that fail this check will not be accepted.
+PRs that fail this check will not be accepted. No need to run pre-commit after each
+code change. Instead only run when requested.
 
 ## Tests
 

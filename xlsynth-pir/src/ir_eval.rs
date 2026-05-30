@@ -57,7 +57,7 @@ fn append_operand_values<'a>(
 
     match payload {
         Nil | GetParam(_) | Literal(_) | InstantiationOutput { .. } | RegisterRead { .. } => {}
-        Tuple(elems) | Array(elems) | AfterAll(elems) | Nary(_, elems) => {
+        Tuple(elems) | Array(elems) | ArrayConcat(elems) | AfterAll(elems) | Nary(_, elems) => {
             for elem in elems {
                 push(elem);
             }
@@ -370,6 +370,30 @@ fn eval_sign_resize_bits(arg_bits: &IrBits, width: usize) -> IrBits {
     IrBits::from_lsb_is_0(&out)
 }
 
+/// Returns the deterministic partial-product offset used by the XLS LLVM JIT.
+///
+/// XLS allows different execution engines to choose different component
+/// values for `umulp`/`smulp`, provided their modular sum is the product.
+/// Matching the JIT offset makes this evaluator usable as its differential
+/// reference.
+fn eval_mulp_llvm_jit_offset(result_width: usize) -> IrBits {
+    let low_width = result_width.saturating_sub(2);
+    let high_width = result_width - low_width;
+    let low_shift = low_width.saturating_sub(1).min(3);
+    let mut bits = vec![false; result_width];
+    for bit in bits.iter_mut().take(low_width.saturating_sub(low_shift)) {
+        *bit = true;
+    }
+    for bit in bits
+        .iter_mut()
+        .skip(low_width)
+        .take(high_width.saturating_sub(1))
+    {
+        *bit = true;
+    }
+    IrBits::from_lsb_is_0(&bits)
+}
+
 fn eval_bit_slice_update_bits(arg_bits: &IrBits, start_bits: &IrBits, upd_bits: &IrBits) -> IrBits {
     let arg_w = arg_bits.get_bit_count();
     let upd_w = upd_bits.get_bit_count();
@@ -431,17 +455,38 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
                     let r = eval_shift_bits(&lhs_bits, &rhs_bits, ShiftKind::Shra);
                     IrValue::from_bits(&r)
                 }
-                ir::Binop::Smulp | ir::Binop::Smul => {
+                ir::Binop::Smul => {
                     let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
                     let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
                     let r = lhs_bits.smul(&rhs_bits);
                     IrValue::from_bits(&r)
                 }
-                ir::Binop::Umulp | ir::Binop::Umul => {
+                ir::Binop::Umul => {
                     let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
                     let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
                     let r = lhs_bits.umul(&rhs_bits);
                     IrValue::from_bits(&r)
+                }
+                ir::Binop::Smulp | ir::Binop::Umulp => {
+                    let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
+                    let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
+                    let ir::Type::Tuple(fields) = &n.ty else {
+                        panic!("partial-product multiply result must be tuple-typed");
+                    };
+                    let ir::Type::Bits(result_width) = fields[0].as_ref() else {
+                        panic!("partial-product multiply result fields must be bits-typed");
+                    };
+                    let product = if binop == ir::Binop::Smulp {
+                        eval_sign_resize_bits(&lhs_bits.smul(&rhs_bits), *result_width)
+                    } else {
+                        eval_zero_resize_bits(&lhs_bits.umul(&rhs_bits), *result_width)
+                    };
+                    let offset = eval_mulp_llvm_jit_offset(*result_width);
+                    let residual = product.sub(&offset);
+                    IrValue::make_tuple(&[
+                        IrValue::from_bits(&offset),
+                        IrValue::from_bits(&residual),
+                    ])
                 }
                 ir::Binop::Udiv => {
                     let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
@@ -514,23 +559,6 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
                     let lhs_bits: IrBits = lhs_value.to_bits().unwrap();
                     let rhs_bits: IrBits = rhs_value.to_bits().unwrap();
                     IrValue::bool(lhs_bits.sle(&rhs_bits))
-                }
-                ir::Binop::ArrayConcat => {
-                    let lhs_count = lhs_value
-                        .get_element_count()
-                        .expect("array_concat lhs must be an array");
-                    let rhs_count = rhs_value
-                        .get_element_count()
-                        .expect("array_concat rhs must be an array");
-                    let mut elements = Vec::with_capacity(lhs_count + rhs_count);
-                    for index in 0..lhs_count {
-                        elements.push(lhs_value.get_element(index).unwrap());
-                    }
-                    for index in 0..rhs_count {
-                        elements.push(rhs_value.get_element(index).unwrap());
-                    }
-                    IrValue::make_array(&elements)
-                        .expect("array_concat operands must have matching element types")
                 }
                 ir::Binop::Gate => {
                     // XLS `gate`: when predicate is false, returns all-zero value.
@@ -797,6 +825,19 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
         ir::NodePayload::Array(_) => {
             let values: Vec<IrValue> = operand_values.iter().map(|v| (*v).clone()).collect();
             IrValue::make_array(&values).unwrap()
+        }
+        ir::NodePayload::ArrayConcat(_) => {
+            let mut elements: Vec<IrValue> = Vec::new();
+            for operand_value in operand_values {
+                let count = operand_value
+                    .get_element_count()
+                    .expect("array_concat operand must be an array");
+                for index in 0..count {
+                    elements.push(operand_value.get_element(index).unwrap());
+                }
+            }
+            IrValue::make_array(&elements)
+                .expect("array_concat operands must have matching element types")
         }
         ir::NodePayload::ArraySlice { width, .. } => {
             let arr = operand_values[0].clone();
@@ -3956,8 +3997,9 @@ fn f(x: bits[6] id=1) -> bits[3] {
     }
 
     #[test]
-    fn test_eval_fn_oob_bit_slice_early_fail() {
-        // OOB static bit_slice: start=3, width=1 on a bits[3] value.
+    fn test_eval_fn_oob_bit_slice_early_fail_for_unvalidated_fn() {
+        // OOB static bit_slice is invalid XLS IR. Keep evaluation defensive
+        // for callers that construct or parse a function without validation.
         let ir_text = r#"package test
 
 fn f(x: bits[3] id=1) -> bits[1] {
@@ -3965,7 +4007,7 @@ fn f(x: bits[3] id=1) -> bits[1] {
 }
 "#;
         let mut p = Parser::new(ir_text);
-        let pkg = p.parse_and_validate_package().expect("parse ok");
+        let pkg = p.parse_package().expect("unvalidated parse ok");
         let f = match &pkg.members[0] {
             ir::PackageMember::Function(f) => f.clone(),
             _ => unreachable!(),

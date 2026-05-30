@@ -89,6 +89,17 @@ fn id(x: bits[8] id=1) -> bits[8] {
 }
 
 #[test]
+fn cross_validate_oob_static_bit_slice_fails() {
+    let ir = r#"package test
+
+fn f(x: bits[8] id=1) -> bits[2] {
+  ret s: bits[2] = bit_slice(x, start=7, width=2, id=2)
+}
+"#;
+    assert_cross_validates_same(ir);
+}
+
+#[test]
 fn cross_validate_duplicate_text_id_fails() {
     let ir = r#"package test
 

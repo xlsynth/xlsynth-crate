@@ -175,6 +175,29 @@ where
             }
         }
 
+        NodePayload::ArrayConcat(_) => {
+            let first_ty = operand_types
+                .first()
+                .ok_or(DeduceError::MissingOperand("array_concat.operand"))?;
+            let Type::Array(first) = first_ty else {
+                return Err(DeduceError::ExpectedArray("array_concat"));
+            };
+            let mut element_count = 0usize;
+            for operand_ty in operand_types {
+                let Type::Array(array) = operand_ty else {
+                    return Err(DeduceError::ExpectedArray("array_concat"));
+                };
+                if array.element_type != first.element_type {
+                    return Err(DeduceError::ArrayConcatElementTypeMismatch);
+                }
+                element_count += array.element_count;
+            }
+            Ok(Some(Type::Array(ArrayTypeData {
+                element_type: first.element_type.clone(),
+                element_count,
+            })))
+        }
+
         NodePayload::Binop(binop, _, _) => match binop {
             // Arithmetic/logical ops that preserve lhs width.
             Binop::Add | Binop::Sub | Binop::Shll | Binop::Shrl | Binop::Shra => {
@@ -184,27 +207,6 @@ where
                 match lhs_ty {
                     Type::Bits(w) => Ok(Some(Type::Bits(*w))),
                     _ => Err(DeduceError::ExpectedBits("binop.lhs")),
-                }
-            }
-            // Array concatenation: element types must match; counts add.
-            Binop::ArrayConcat => {
-                let lhs_ty = operand_types
-                    .get(0)
-                    .ok_or(DeduceError::MissingOperand("array_concat.lhs"))?;
-                let rhs_ty = operand_types
-                    .get(1)
-                    .ok_or(DeduceError::MissingOperand("array_concat.rhs"))?;
-                match (lhs_ty, rhs_ty) {
-                    (Type::Array(a), Type::Array(b)) => {
-                        if a.element_type != b.element_type {
-                            return Err(DeduceError::ArrayConcatElementTypeMismatch);
-                        }
-                        Ok(Some(Type::Array(ArrayTypeData {
-                            element_type: a.element_type.clone(),
-                            element_count: a.element_count + b.element_count,
-                        })))
-                    }
-                    _ => Err(DeduceError::ExpectedArray("array_concat")),
                 }
             }
             // Partial-product multiplies have an explicit result width in XLS

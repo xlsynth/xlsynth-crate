@@ -2568,6 +2568,11 @@ impl Parser {
                     maybe_id.unwrap(),
                 )
             }
+            "array_concat" => {
+                let operands =
+                    self.parse_variadic_op(&node_env, &mut maybe_id, operator.as_str())?;
+                (ir::NodePayload::ArrayConcat(operands), maybe_id.unwrap())
+            }
             "and" | "nor" | "or" | "xor" | "nand" => {
                 let operands =
                     self.parse_variadic_op(&node_env, &mut maybe_id, operator.as_str())?;
@@ -2597,7 +2602,6 @@ impl Parser {
             "shll" | "shrl" | "shra"
             // weak arithmetic ops
             | "add" | "sub"
-            | "array_concat"
             // partial-product ops
             | "smulp" | "umulp"
             // strong arithmetic ops
