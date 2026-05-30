@@ -2683,8 +2683,8 @@ fn f(x: bits[2] id=1) -> (bits[8], bits[8]) {
   b_rel: bits[1] = eq(x, c0, id=12)
   a: bits[8] = literal(value=7, id=20)
   c: bits[8] = literal(value=9, id=21)
-  y_irrel: bits[8] = sel(b_irrel, cases=[a, a], default=a, id=30)
-  y_rel: bits[8] = sel(b_rel, cases=[a, c], default=a, id=31)
+  y_irrel: bits[8] = sel(b_irrel, cases=[a, a], id=30)
+  y_rel: bits[8] = sel(b_rel, cases=[a, c], id=31)
   ret t: (bits[8], bits[8]) = tuple(y_irrel, y_rel, id=40)
 }
 "#;
