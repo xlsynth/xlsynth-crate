@@ -10,6 +10,11 @@ use xlsynth_pir::ir_random::{
 };
 use xlsynth_pir_compiler::PirFunctionJit;
 
+fn sorted<T: Ord>(mut values: Vec<T>) -> Vec<T> {
+    values.sort();
+    values
+}
+
 fn options() -> RandomFnOptions {
     RandomFnOptions {
         max_params: 5,
@@ -21,6 +26,7 @@ fn options() -> RandomFnOptions {
         allow_extension_ops: true,
         allow_arbitrary_width_multiply: true,
         allow_empty_case_sel: true,
+        allow_events: true,
         enabled_operations: OperationSet::new([
             RandomOperation::Literal,
             RandomOperation::Identity,
@@ -84,6 +90,10 @@ fn options() -> RandomFnOptions {
             RandomOperation::ExtNormalizeLeft,
             RandomOperation::ExtMaskLow,
             RandomOperation::ExtNaryAdd,
+            RandomOperation::AfterAll,
+            RandomOperation::Cover,
+            RandomOperation::Assert,
+            RandomOperation::Trace,
         ]),
         ..RandomFnOptions::default()
     }
@@ -103,15 +113,112 @@ fuzz_target!(|data: &[u8]| {
         .unwrap_or_else(|error| panic!("JIT compilation failed for generated IR:\n{ir_text}\n{error}"));
     let mut argument_entropy = DepletableBytes::new(data);
     let args = generate_arguments(&mut argument_entropy, function);
-    let expected = match eval_fn(function, &args) {
-        FnEvalResult::Success(success) => success.value,
-        other => panic!("PIR evaluator failed for generated IR:\n{ir_text}\n{other:?}"),
-    };
+    let expected = eval_fn(function, &args);
     let actual = jit
-        .run_ir_values(&args)
+        .run_ir_values_with_events(&args)
         .unwrap_or_else(|error| panic!("JIT execution failed:\n{ir_text}\n{error}"));
-    assert_eq!(
-        actual, expected,
-        "PIR JIT/evaluator mismatch\nIR:\n{ir_text}\nargs={args:?}"
-    );
+    match expected {
+        FnEvalResult::Success(expected) => {
+            assert_eq!(
+                actual.value, expected.value,
+                "PIR compiler/evaluator value mismatch\nIR:\n{ir_text}\nargs={args:?}"
+            );
+            assert!(
+                actual.events.assertion_failures.is_empty(),
+                "compiler unexpectedly reported assertions\nIR:\n{ir_text}\nargs={args:?}"
+            );
+            assert_eq!(
+                sorted(
+                    actual
+                        .events
+                        .trace_messages
+                        .iter()
+                        .map(|trace| (trace.message.clone(), trace.verbosity))
+                        .collect()
+                ),
+                sorted(
+                    expected
+                        .trace_messages
+                        .iter()
+                        .map(|trace| (trace.message.clone(), trace.verbosity))
+                        .collect()
+                ),
+                "PIR compiler/evaluator trace mismatch\nIR:\n{ir_text}\nargs={args:?}"
+            );
+            assert_eq!(
+                sorted(
+                    actual
+                        .events
+                        .cover_counts
+                        .iter()
+                        .map(|cover| (cover.node_text_id, cover.label.clone(), cover.count))
+                        .collect()
+                ),
+                sorted(
+                    expected
+                        .cover_counts
+                        .iter()
+                        .map(|cover| (cover.node_text_id, cover.label.clone(), cover.count))
+                        .collect()
+                ),
+                "PIR compiler/evaluator cover mismatch\nIR:\n{ir_text}\nargs={args:?}"
+            );
+        }
+        FnEvalResult::Failure(expected) => {
+            assert_eq!(
+                sorted(
+                    actual
+                        .events
+                        .assertion_failures
+                        .iter()
+                        .map(|failure| (failure.message.clone(), failure.label.clone()))
+                        .collect()
+                ),
+                sorted(
+                    expected
+                        .assertion_failures
+                        .iter()
+                        .map(|failure| (failure.message.clone(), failure.label.clone()))
+                        .collect()
+                ),
+                "PIR compiler/evaluator assertion mismatch\nIR:\n{ir_text}\nargs={args:?}"
+            );
+            assert_eq!(
+                sorted(
+                    actual
+                        .events
+                        .trace_messages
+                        .iter()
+                        .map(|trace| (trace.message.clone(), trace.verbosity))
+                        .collect()
+                ),
+                sorted(
+                    expected
+                        .trace_messages
+                        .iter()
+                        .map(|trace| (trace.message.clone(), trace.verbosity))
+                        .collect()
+                ),
+                "PIR compiler/evaluator failing-trace mismatch\nIR:\n{ir_text}\nargs={args:?}"
+            );
+            assert_eq!(
+                sorted(
+                    actual
+                        .events
+                        .cover_counts
+                        .iter()
+                        .map(|cover| (cover.node_text_id, cover.label.clone(), cover.count))
+                        .collect()
+                ),
+                sorted(
+                    expected
+                        .cover_counts
+                        .iter()
+                        .map(|cover| (cover.node_text_id, cover.label.clone(), cover.count))
+                        .collect()
+                ),
+                "PIR compiler/evaluator failing-cover mismatch\nIR:\n{ir_text}\nargs={args:?}"
+            );
+        }
+    }
 });

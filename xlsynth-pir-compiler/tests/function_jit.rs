@@ -4,7 +4,8 @@ use xlsynth::IrValue;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir_compiler::{
-    JitError, NativeTupleFieldLayout, NativeValueLayout, PirFunctionJit, ScalarLayout,
+    ExecutionContext, JitError, NativeTupleFieldLayout, NativeValueLayout, PirFunctionJit,
+    ScalarLayout,
 };
 
 fn compile(ir: &str) -> PirFunctionJit {
@@ -49,6 +50,15 @@ fn array(width: usize, values: &[u64]) -> IrValue {
 
 fn tuple(elements: &[IrValue]) -> IrValue {
     IrValue::make_tuple(elements)
+}
+
+fn unit_array(element_count: usize) -> IrValue {
+    IrValue::make_array(&vec![tuple(&[]); element_count]).unwrap()
+}
+
+fn sorted<T: Ord>(mut values: Vec<T>) -> Vec<T> {
+    values.sort();
+    values
 }
 
 #[test]
@@ -98,6 +108,243 @@ fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
             .expect("native execution should succeed");
     }
     assert_eq!(output, 16);
+}
+
+#[test]
+fn compiles_zero_sized_token_and_cover_unit_results() {
+    let token_jit = compile(
+        r#"package test
+
+fn f() -> token {
+  ret t: token = after_all(id=1)
+}
+"#,
+    );
+    assert_eq!(token_jit.result_layout(), &NativeValueLayout::Token);
+    assert_eq!(
+        token_jit.run_ir_values(&[]).expect("token execution"),
+        IrValue::make_token()
+    );
+
+    let cover_jit = compile(
+        r#"package test
+
+fn f(x: bits[1] id=1) -> () {
+  ret cv: () = cover(x, label="hit", id=2)
+}
+"#,
+    );
+    assert_eq!(
+        cover_jit.result_layout(),
+        &NativeValueLayout::Tuple {
+            fields: vec![],
+            byte_count: 0,
+            alignment: 1,
+        }
+    );
+    let execution = cover_jit
+        .run_ir_values_with_events(&[bits(1, 1)])
+        .expect("unit-valued cover execution");
+    assert_eq!(execution.value, IrValue::make_tuple(&[]));
+    assert_eq!(execution.events.cover_counts.len(), 1);
+    assert_eq!(execution.events.cover_counts[0].label, "hit");
+    assert_eq!(execution.events.cover_counts[0].count, 1);
+}
+
+#[test]
+fn caller_owned_context_accumulates_cover_counts() {
+    let jit = compile(
+        r#"package test
+
+fn f(x: bits[1] id=1) -> bits[1] {
+  cv: () = cover(x, label="observed", id=2)
+  ret identity.3: bits[1] = identity(x, id=3)
+}
+"#,
+    );
+    let mut context = ExecutionContext::new(jit.metadata());
+    let mut output: u8 = 0;
+    for input in [1u8, 1u8, 0u8] {
+        let inputs = [std::ptr::from_ref(&input).cast::<u8>()];
+        // SAFETY: input and output carry `bits[1]` in the published native
+        // scalar layout, and `context` was created for this compiled function.
+        unsafe {
+            jit.run_native_with_context(
+                &inputs,
+                std::ptr::from_mut(&mut output).cast(),
+                &mut context,
+            )
+            .expect("native execution with context");
+        }
+    }
+    assert_eq!(context.result().cover_counts[0].count, 2);
+    context.clear();
+    assert_eq!(context.result().cover_counts[0].count, 0);
+}
+
+#[test]
+fn compiled_events_match_pir_evaluator_for_cover_assert_and_trace() {
+    let ir = r#"package test
+
+fn f(x: bits[8] id=1, ok: bits[1] id=2, emit: bits[1] id=3) -> bits[8] {
+  t: token = after_all(id=4)
+  cv: () = cover(emit, label="covered", id=5)
+  a: token = assert(t, ok, message="bad condition", label="A", id=6)
+  tr: token = trace(a, emit, format="x={}", data_operands=[x], id=7)
+  ret identity.8: bits[8] = identity(x, id=8)
+}
+"#;
+    let package = Parser::new(ir)
+        .parse_and_validate_package()
+        .expect("test PIR should parse and validate");
+    let function = package.get_fn("f").expect("function f should exist");
+    let jit = PirFunctionJit::compile(function).expect("function should compile");
+
+    for args in [
+        vec![bits(8, 0xa5), bits(1, 1), bits(1, 1)],
+        vec![bits(8, 0x3c), bits(1, 0), bits(1, 1)],
+        vec![bits(8, 0x12), bits(1, 1), bits(1, 0)],
+    ] {
+        let expected = eval_fn(function, &args);
+        let actual = jit
+            .run_ir_values_with_events(&args)
+            .expect("compiled execution should succeed");
+        match expected {
+            FnEvalResult::Success(expected) => {
+                assert_eq!(actual.value, expected.value);
+                assert!(actual.events.assertion_failures.is_empty());
+                assert_eq!(
+                    sorted(
+                        actual
+                            .events
+                            .trace_messages
+                            .iter()
+                            .map(|message| (message.message.clone(), message.verbosity))
+                            .collect()
+                    ),
+                    sorted(
+                        expected
+                            .trace_messages
+                            .iter()
+                            .map(|message| (message.message.clone(), message.verbosity))
+                            .collect()
+                    )
+                );
+                assert_eq!(
+                    sorted(
+                        actual
+                            .events
+                            .cover_counts
+                            .iter()
+                            .map(|cover| (cover.node_text_id, cover.label.clone(), cover.count))
+                            .collect()
+                    ),
+                    sorted(
+                        expected
+                            .cover_counts
+                            .iter()
+                            .map(|cover| (cover.node_text_id, cover.label.clone(), cover.count))
+                            .collect()
+                    )
+                );
+            }
+            FnEvalResult::Failure(expected) => {
+                assert_eq!(
+                    sorted(
+                        actual
+                            .events
+                            .assertion_failures
+                            .iter()
+                            .map(|failure| (failure.message.clone(), failure.label.clone()))
+                            .collect()
+                    ),
+                    sorted(
+                        expected
+                            .assertion_failures
+                            .iter()
+                            .map(|failure| (failure.message.clone(), failure.label.clone()))
+                            .collect()
+                    )
+                );
+                assert_eq!(
+                    sorted(
+                        actual
+                            .events
+                            .trace_messages
+                            .iter()
+                            .map(|message| (message.message.clone(), message.verbosity))
+                            .collect()
+                    ),
+                    sorted(
+                        expected
+                            .trace_messages
+                            .iter()
+                            .map(|message| (message.message.clone(), message.verbosity))
+                            .collect()
+                    )
+                );
+                assert_eq!(
+                    sorted(
+                        actual
+                            .events
+                            .cover_counts
+                            .iter()
+                            .map(|cover| (cover.node_text_id, cover.label.clone(), cover.count))
+                            .collect()
+                    ),
+                    sorted(
+                        expected
+                            .cover_counts
+                            .iter()
+                            .map(|cover| (cover.node_text_id, cover.label.clone(), cover.count))
+                            .collect()
+                    )
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn compiled_trace_matches_evaluator_for_zero_through_three_operands() {
+    let ir = r#"package test
+
+fn f(emit: bits[1] id=1) -> token {
+  unit: () = tuple(id=2)
+  units: ()[1] = array(unit, id=3)
+  t: token = after_all(id=4)
+  tr0: token = trace(t, emit, format="zero", data_operands=[], id=5)
+  tr1: token = trace(tr0, emit, format="one={}", data_operands=[unit], id=6)
+  tr2: token = trace(tr1, emit, format="two={},{}", data_operands=[unit, units], id=7)
+  ret tr3: token = trace(tr2, emit, format="three={},{},{}", data_operands=[unit, units, emit], id=8)
+}
+"#;
+    let package = Parser::new(ir)
+        .parse_and_validate_package()
+        .expect("test PIR should parse and validate");
+    let function = package.get_fn("f").expect("function f should exist");
+    let jit = PirFunctionJit::compile(function).expect("function should compile");
+    let args = vec![bits(1, 1)];
+    let expected = match eval_fn(function, &args) {
+        FnEvalResult::Success(success) => success,
+        FnEvalResult::Failure(_) => panic!("traces should not cause evaluation failure"),
+    };
+    let actual = jit
+        .run_ir_values_with_events(&args)
+        .expect("compiled execution should succeed");
+    assert_eq!(
+        actual
+            .events
+            .trace_messages
+            .iter()
+            .map(|message| message.message.clone())
+            .collect::<Vec<_>>(),
+        expected
+            .trace_messages
+            .iter()
+            .map(|message| message.message.clone())
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -671,6 +918,46 @@ fn f(values: bits[8][2][2] id=1, replacement: bits[8] id=2, i: bits[2] id=3, j: 
                 })
             })
             .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn zero_sized_aggregates_flow_through_array_operations() {
+    assert_matches_evaluator(
+        r#"package test
+
+fn f(values: ()[1] id=1) -> ()[1] {
+  ret joined: ()[1] = array_concat(values, id=2)
+}
+"#,
+        &[vec![unit_array(1)]],
+    );
+    assert_matches_evaluator(
+        r#"package test
+
+fn f(values: ()[2] id=1, index: bits[1] id=2) -> () {
+  ret selected: () = array_index(values, indices=[index], id=3)
+}
+"#,
+        &[vec![unit_array(2), bits(1, 1)]],
+    );
+    assert_matches_evaluator(
+        r#"package test
+
+fn f(values: ()[1] id=1, start: bits[1] id=2) -> ()[2] {
+  ret sliced: ()[2] = array_slice(values, start, width=2, id=3)
+}
+"#,
+        &[vec![unit_array(1), bits(1, 0)]],
+    );
+    assert_matches_evaluator(
+        r#"package test
+
+fn f(values: ()[2] id=1, replacement: () id=2, index: bits[1] id=3) -> ()[2] {
+  ret updated: ()[2] = array_update(values, replacement, indices=[index], id=4)
+}
+"#,
+        &[vec![unit_array(2), tuple(&[]), bits(1, 1)]],
     );
 }
 

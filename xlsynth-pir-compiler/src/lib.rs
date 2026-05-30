@@ -6,17 +6,26 @@ use std::collections::{HashMap, HashSet};
 use std::ptr;
 
 use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlags, Type as ClifType, Value, types};
+use cranelift_codegen::ir::{
+    AbiParam, FuncRef, InstBuilder, MemFlags, Type as ClifType, Value, types,
+};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Linkage, Module, default_libcall_names};
 use thiserror::Error;
 use xlsynth::IrValue;
 use xlsynth_pir::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
-use xlsynth_pir::ir_utils::{get_topological, operands};
+use xlsynth_pir::ir_utils::{get_topological, is_observable_effect_root, operands};
+pub use xlsynth_pir_compiler_runtime::{
+    AssertionFailure, CompiledEntrypoint, CompiledFunctionMetadata, CoverCount, EventKind,
+    EventSiteMetadata, ExecutionContext, ExecutionResult, RawExecutionContext, TraceMessage,
+    TraceTupleFieldLayout, TraceValueLayout,
+};
+use xlsynth_pir_compiler_runtime::{
+    xlsynth_pir_record_assert, xlsynth_pir_record_cover, xlsynth_pir_record_trace,
+};
 
-type NativeEntrypoint =
-    unsafe extern "C" fn(inputs: *const *const u8, output: *mut u8, scratch: *mut u8) -> i32;
+type NativeEntrypoint = CompiledEntrypoint;
 
 /// Describes the native scalar carrier used for one bits-typed PIR value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +119,8 @@ pub enum NativeValueLayout {
         /// Required alignment for the struct.
         alignment: usize,
     },
+    /// A zero-sized token used only for event ordering.
+    Token,
 }
 
 /// Describes one field in a native C-compatible PIR tuple layout.
@@ -169,7 +180,7 @@ impl NativeValueLayout {
                     alignment,
                 })
             }
-            Type::Token => Err(JitError::UnsupportedType(ty.to_string())),
+            Type::Token => Ok(Self::Token),
         }
     }
 
@@ -182,6 +193,7 @@ impl NativeValueLayout {
                 element_count,
             } => element.byte_count() * element_count,
             Self::Tuple { byte_count, .. } => *byte_count,
+            Self::Token => 0,
         }
     }
 
@@ -191,6 +203,7 @@ impl NativeValueLayout {
             Self::Scalar(layout) => layout.byte_count,
             Self::Array { element, .. } => element.alignment(),
             Self::Tuple { alignment, .. } => *alignment,
+            Self::Token => 1,
         }
     }
 
@@ -198,7 +211,7 @@ impl NativeValueLayout {
     pub fn element_stride(&self) -> Option<usize> {
         match self {
             Self::Array { element, .. } => Some(element.byte_count()),
-            Self::Scalar(_) | Self::Tuple { .. } => None,
+            Self::Scalar(_) | Self::Tuple { .. } | Self::Token => None,
         }
     }
 
@@ -206,7 +219,7 @@ impl NativeValueLayout {
     pub fn as_scalar(&self) -> Option<ScalarLayout> {
         match self {
             Self::Scalar(layout) => Some(*layout),
-            Self::Array { .. } | Self::Tuple { .. } => None,
+            Self::Array { .. } | Self::Tuple { .. } | Self::Token => None,
         }
     }
 }
@@ -256,8 +269,16 @@ pub struct PirFunctionJit {
     entrypoint: NativeEntrypoint,
     param_layouts: Vec<NativeValueLayout>,
     result_layout: NativeValueLayout,
+    metadata: CompiledFunctionMetadata,
     scratch_byte_count: usize,
     scratch_alignment: usize,
+}
+
+/// Value and observable events produced by one dynamic-value execution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IrExecutionResult {
+    pub value: IrValue,
+    pub events: ExecutionResult,
 }
 
 impl PirFunctionJit {
@@ -280,12 +301,26 @@ impl PirFunctionJit {
             NativeValueLayout::from_type(&function.get_node(*node_ref).ty)?;
         }
         let scratch_plan = ScratchPlan::for_function(function, &order)?;
+        let (metadata, event_sites) = build_event_metadata(function, &order)?;
 
-        let builder = JITBuilder::new(default_libcall_names())
+        let mut builder = JITBuilder::new(default_libcall_names())
             .map_err(|error| JitError::Backend(error.to_string()))?;
+        builder.symbol(
+            "xlsynth_pir_record_assert",
+            xlsynth_pir_record_assert as *const u8,
+        );
+        builder.symbol(
+            "xlsynth_pir_record_cover",
+            xlsynth_pir_record_cover as *const u8,
+        );
+        builder.symbol(
+            "xlsynth_pir_record_trace",
+            xlsynth_pir_record_trace as *const u8,
+        );
         let mut module = JITModule::new(builder);
         let pointer_type = module.target_config().pointer_type();
         let mut signature = module.make_signature();
+        signature.params.push(AbiParam::new(pointer_type));
         signature.params.push(AbiParam::new(pointer_type));
         signature.params.push(AbiParam::new(pointer_type));
         signature.params.push(AbiParam::new(pointer_type));
@@ -296,6 +331,8 @@ impl PirFunctionJit {
             .map_err(|error| JitError::Backend(error.to_string()))?;
         let mut context = module.make_context();
         context.func.signature = signature;
+        let runtime_callbacks =
+            declare_runtime_callbacks(&mut module, &mut context.func, pointer_type)?;
 
         let mut function_builder_context = FunctionBuilderContext::new();
         {
@@ -306,6 +343,8 @@ impl PirFunctionJit {
                 &order,
                 &param_layouts,
                 &scratch_plan,
+                &event_sites,
+                runtime_callbacks,
                 pointer_type,
                 &mut function_builder,
             )?;
@@ -329,6 +368,7 @@ impl PirFunctionJit {
             entrypoint,
             param_layouts,
             result_layout,
+            metadata,
             scratch_byte_count: scratch_plan.byte_count,
             scratch_alignment: scratch_plan.alignment,
         })
@@ -342,6 +382,11 @@ impl PirFunctionJit {
     /// Returns the native layout for the function result.
     pub fn result_layout(&self) -> &NativeValueLayout {
         &self.result_layout
+    }
+
+    /// Returns static metadata for observable event sites in this function.
+    pub fn metadata(&self) -> &CompiledFunctionMetadata {
+        &self.metadata
     }
 
     /// Returns the required size of the aggregate-intermediate scratch slab.
@@ -372,6 +417,23 @@ impl PirFunctionJit {
     /// When an aggregate result is copied from an input aggregate, input and
     /// output storage must not partially overlap.
     pub unsafe fn run_native(&self, inputs: &[*const u8], output: *mut u8) -> Result<(), JitError> {
+        let mut context = ExecutionContext::new(&self.metadata);
+        // SAFETY: this method forwards the caller's storage contract and owns
+        // an active execution context for the duration of generated execution.
+        unsafe { self.run_native_with_context(inputs, output, &mut context) }
+    }
+
+    /// Runs generated code with a caller-owned observable-event collector.
+    ///
+    /// # Safety
+    ///
+    /// Input and output pointer requirements match [`Self::run_native`].
+    pub unsafe fn run_native_with_context(
+        &self,
+        inputs: &[*const u8],
+        output: *mut u8,
+        context: &mut ExecutionContext<'_>,
+    ) -> Result<(), JitError> {
         debug_assert!(self.scratch_alignment <= std::mem::align_of::<u64>());
         let mut scratch_words =
             vec![0u64; self.scratch_byte_count.div_ceil(std::mem::size_of::<u64>())];
@@ -383,11 +445,12 @@ impl PirFunctionJit {
         // SAFETY: the caller upholds the native argument/result contract; the
         // scratch vector is aligned and remains alive for this call.
         unsafe {
-            self.run_native_with_scratch(
+            self.run_native_with_scratch_and_context(
                 inputs,
                 output,
                 scratch,
                 scratch_words.len() * std::mem::size_of::<u64>(),
+                context,
             )
         }
     }
@@ -414,6 +477,34 @@ impl PirFunctionJit {
         scratch: *mut u8,
         scratch_byte_count: usize,
     ) -> Result<(), JitError> {
+        let mut context = ExecutionContext::new(&self.metadata);
+        // SAFETY: this method forwards the caller's native-storage contract
+        // while owning an active context for the generated call.
+        unsafe {
+            self.run_native_with_scratch_and_context(
+                inputs,
+                output,
+                scratch,
+                scratch_byte_count,
+                &mut context,
+            )
+        }
+    }
+
+    /// Runs generated code with caller-owned storage and an event collector.
+    ///
+    /// # Safety
+    ///
+    /// Input, output, and scratch pointer requirements match
+    /// [`Self::run_native_with_scratch`].
+    pub unsafe fn run_native_with_scratch_and_context(
+        &self,
+        inputs: &[*const u8],
+        output: *mut u8,
+        scratch: *mut u8,
+        scratch_byte_count: usize,
+        context: &mut ExecutionContext<'_>,
+    ) -> Result<(), JitError> {
         if inputs.len() != self.param_layouts.len() {
             return Err(JitError::InvalidArgument(format!(
                 "expected {} input pointers, got {}",
@@ -421,9 +512,14 @@ impl PirFunctionJit {
                 inputs.len()
             )));
         }
-        if inputs.iter().any(|pointer| pointer.is_null()) || output.is_null() {
+        if inputs
+            .iter()
+            .zip(&self.param_layouts)
+            .any(|(pointer, layout)| layout.byte_count() != 0 && pointer.is_null())
+            || (self.result_layout.byte_count() != 0 && output.is_null())
+        {
             return Err(JitError::InvalidArgument(
-                "native input/output pointers must be non-null".to_string(),
+                "nonempty native input/output pointers must be non-null".to_string(),
             ));
         }
         if scratch_byte_count < self.scratch_byte_count {
@@ -442,7 +538,9 @@ impl PirFunctionJit {
         }
         // SAFETY: the caller upholds the pointer and layout contract stated
         // above; the function was finalized with this exact ABI.
-        let status = unsafe { (self.entrypoint)(inputs.as_ptr(), output, scratch) };
+        let mut raw_context = context.raw_context();
+        let status =
+            unsafe { (self.entrypoint)(inputs.as_ptr(), output, scratch, &mut raw_context) };
         if status == 0 {
             Ok(())
         } else {
@@ -481,6 +579,14 @@ impl PirFunctionJit {
     /// Transitional dynamic-value adapter used by differential tests and
     /// fuzzing.
     pub fn run_ir_values(&self, args: &[IrValue]) -> Result<IrValue, JitError> {
+        Ok(self.run_ir_values_with_events(args)?.value)
+    }
+
+    /// Runs dynamic PIR values and returns the value plus observable events.
+    pub fn run_ir_values_with_events(
+        &self,
+        args: &[IrValue],
+    ) -> Result<IrExecutionResult, JitError> {
         if args.len() != self.param_layouts.len() {
             return Err(JitError::InvalidArgument(format!(
                 "expected {} arguments, got {}",
@@ -498,10 +604,14 @@ impl PirFunctionJit {
             .map(NativeValueStorage::as_ptr)
             .collect::<Vec<_>>();
         let mut output = NativeValueStorage::zeroed(&self.result_layout);
+        let mut context = ExecutionContext::new(&self.metadata);
         // SAFETY: each `NativeValueStorage` owns aligned storage with exactly
         // the corresponding published native layout and lives across the call.
-        unsafe { self.run_native(&pointers, output.as_mut_ptr())? };
-        output.to_ir_value(&self.result_layout)
+        unsafe { self.run_native_with_context(&pointers, output.as_mut_ptr(), &mut context)? };
+        Ok(IrExecutionResult {
+            value: output.to_ir_value(&self.result_layout)?,
+            events: context.result(),
+        })
     }
 }
 
@@ -606,7 +716,7 @@ unsafe fn write_ir_value_to_native(
                 // SAFETY: each child lies in its recursively described region.
                 unsafe {
                     write_ir_value_to_native(
-                        destination.add(index * element.byte_count()),
+                        destination.wrapping_add(index * element.byte_count()),
                         element,
                         child,
                     )?;
@@ -628,12 +738,15 @@ unsafe fn write_ir_value_to_native(
                 // SAFETY: each field lies at its published C-compatible offset.
                 unsafe {
                     write_ir_value_to_native(
-                        destination.add(field.offset),
+                        destination.wrapping_add(field.offset),
                         field.layout.as_ref(),
                         child,
                     )?;
                 }
             }
+        }
+        NativeValueLayout::Token => {
+            // A token has no native bytes to write or inspect.
         }
     }
     Ok(())
@@ -661,7 +774,10 @@ unsafe fn read_ir_value_from_native(
             for index in 0..*element_count {
                 // SAFETY: each child lies in its recursively described region.
                 elements.push(unsafe {
-                    read_ir_value_from_native(source.add(index * element.byte_count()), element)?
+                    read_ir_value_from_native(
+                        source.wrapping_add(index * element.byte_count()),
+                        element,
+                    )?
                 });
             }
             IrValue::make_array(&elements).map_err(|error| JitError::Value(error.to_string()))
@@ -671,11 +787,15 @@ unsafe fn read_ir_value_from_native(
             for field in fields {
                 // SAFETY: each field lies at its published C-compatible offset.
                 elements.push(unsafe {
-                    read_ir_value_from_native(source.add(field.offset), field.layout.as_ref())?
+                    read_ir_value_from_native(
+                        source.wrapping_add(field.offset),
+                        field.layout.as_ref(),
+                    )?
                 });
             }
             Ok(IrValue::make_tuple(&elements))
         }
+        NativeValueLayout::Token => Ok(IrValue::make_token()),
     }
 }
 
@@ -722,14 +842,22 @@ impl NativeScalar {
 #[derive(Debug)]
 struct ScratchPlan {
     offsets: HashMap<NodeRef, usize>,
+    trace_sites: HashMap<NodeRef, TraceScratchPlan>,
     byte_count: usize,
     alignment: usize,
+}
+
+#[derive(Debug)]
+struct TraceScratchPlan {
+    pointer_array_offset: usize,
+    scalar_operand_offsets: Vec<Option<usize>>,
 }
 
 impl ScratchPlan {
     /// Assigns native scratch slots for materialized intermediate aggregates.
     fn for_function(function: &ir::Fn, order: &[NodeRef]) -> Result<Self, JitError> {
         let mut offsets = HashMap::new();
+        let mut trace_sites = HashMap::new();
         let mut byte_count = 0usize;
         let mut alignment = 1usize;
         for node_ref in order {
@@ -749,8 +877,42 @@ impl ScratchPlan {
             })?;
             alignment = alignment.max(layout.alignment());
         }
+        for node_ref in order {
+            let NodePayload::Trace { operands, .. } = &function.get_node(*node_ref).payload else {
+                continue;
+            };
+            let mut scalar_operand_offsets = Vec::with_capacity(operands.len());
+            for operand in operands {
+                let layout = NativeValueLayout::from_type(&function.get_node(*operand).ty)?;
+                if matches!(layout, NativeValueLayout::Scalar(_)) {
+                    byte_count = align_up(byte_count, layout.alignment())?;
+                    scalar_operand_offsets.push(Some(byte_count));
+                    byte_count = byte_count.checked_add(layout.byte_count()).ok_or_else(|| {
+                        JitError::UnsupportedType("trace scratch size overflow".into())
+                    })?;
+                    alignment = alignment.max(layout.alignment());
+                } else {
+                    scalar_operand_offsets.push(None);
+                }
+            }
+            let pointer_alignment = std::mem::align_of::<*const u8>();
+            byte_count = align_up(byte_count, pointer_alignment)?;
+            let pointer_array_offset = byte_count;
+            byte_count = byte_count
+                .checked_add(operands.len() * std::mem::size_of::<*const u8>())
+                .ok_or_else(|| JitError::UnsupportedType("trace pointer size overflow".into()))?;
+            alignment = alignment.max(pointer_alignment);
+            trace_sites.insert(
+                *node_ref,
+                TraceScratchPlan {
+                    pointer_array_offset,
+                    scalar_operand_offsets,
+                },
+            );
+        }
         Ok(Self {
             offsets,
+            trace_sites,
             byte_count,
             alignment,
         })
@@ -787,6 +949,96 @@ fn needs_aggregate_destination(node: &ir::Node) -> bool {
 enum ComputedValue {
     Scalar(Value),
     Address(Value),
+    ZeroSized,
+}
+
+#[derive(Clone, Copy)]
+struct RuntimeCallbacks {
+    record_assert: FuncRef,
+    record_cover: FuncRef,
+    record_trace: FuncRef,
+}
+
+fn trace_layout_from_native(layout: &NativeValueLayout) -> TraceValueLayout {
+    match layout {
+        NativeValueLayout::Scalar(scalar) => TraceValueLayout::Bits {
+            bit_count: scalar.bit_count,
+            byte_count: scalar.byte_count,
+        },
+        NativeValueLayout::Array {
+            element,
+            element_count,
+        } => TraceValueLayout::Array {
+            element: Box::new(trace_layout_from_native(element)),
+            element_count: *element_count,
+        },
+        NativeValueLayout::Tuple {
+            fields, byte_count, ..
+        } => TraceValueLayout::Tuple {
+            fields: fields
+                .iter()
+                .map(|field| TraceTupleFieldLayout {
+                    layout: Box::new(trace_layout_from_native(&field.layout)),
+                    offset: field.offset,
+                })
+                .collect(),
+            byte_count: *byte_count,
+        },
+        NativeValueLayout::Token => TraceValueLayout::Token,
+    }
+}
+
+fn build_event_metadata(
+    function: &ir::Fn,
+    order: &[NodeRef],
+) -> Result<(CompiledFunctionMetadata, HashMap<NodeRef, u32>), JitError> {
+    let mut event_sites = Vec::new();
+    let mut site_ids = HashMap::new();
+    for node_ref in order {
+        let node = function.get_node(*node_ref);
+        let site = match &node.payload {
+            NodePayload::Cover { label, .. } => Some(EventSiteMetadata {
+                node_text_id: node.text_id,
+                kind: EventKind::Cover,
+                label: Some(label.clone()),
+                message: None,
+                format: None,
+                operand_layouts: Vec::new(),
+            }),
+            NodePayload::Assert { message, label, .. } => Some(EventSiteMetadata {
+                node_text_id: node.text_id,
+                kind: EventKind::Assert,
+                label: Some(label.clone()),
+                message: Some(message.clone()),
+                format: None,
+                operand_layouts: Vec::new(),
+            }),
+            NodePayload::Trace {
+                format, operands, ..
+            } => Some(EventSiteMetadata {
+                node_text_id: node.text_id,
+                kind: EventKind::Trace,
+                label: None,
+                message: None,
+                format: Some(format.clone()),
+                operand_layouts: operands
+                    .iter()
+                    .map(|operand| {
+                        NativeValueLayout::from_type(&function.get_node(*operand).ty)
+                            .map(|layout| trace_layout_from_native(&layout))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            }),
+            _ => None,
+        };
+        if let Some(site) = site {
+            let site_id = u32::try_from(event_sites.len())
+                .map_err(|_| JitError::UnsupportedType("too many event sites".into()))?;
+            site_ids.insert(*node_ref, site_id);
+            event_sites.push(site);
+        }
+    }
+    Ok((CompiledFunctionMetadata { event_sites }, site_ids))
 }
 
 fn reachable_topological_order(function: &ir::Fn) -> Result<Vec<NodeRef>, JitError> {
@@ -794,6 +1046,14 @@ fn reachable_topological_order(function: &ir::Fn) -> Result<Vec<NodeRef>, JitErr
         JitError::InvalidFunction(format!("function '{}' has no return node", function.name))
     })?;
     let mut stack = vec![return_node];
+    stack.extend(
+        function
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| is_observable_effect_root(&node.payload))
+            .map(|(index, _)| NodeRef { index }),
+    );
     let mut reachable = HashSet::new();
     while let Some(node_ref) = stack.pop() {
         if node_ref.index >= function.nodes.len() {
@@ -812,11 +1072,48 @@ fn reachable_topological_order(function: &ir::Fn) -> Result<Vec<NodeRef>, JitErr
         .collect())
 }
 
+fn declare_runtime_callbacks(
+    module: &mut JITModule,
+    function: &mut cranelift_codegen::ir::Function,
+    pointer_type: ClifType,
+) -> Result<RuntimeCallbacks, JitError> {
+    let mut site_signature = module.make_signature();
+    site_signature.params.push(AbiParam::new(pointer_type));
+    site_signature.params.push(AbiParam::new(types::I32));
+    let assert_id = module
+        .declare_function(
+            "xlsynth_pir_record_assert",
+            Linkage::Import,
+            &site_signature,
+        )
+        .map_err(|error| JitError::Backend(error.to_string()))?;
+    let cover_id = module
+        .declare_function("xlsynth_pir_record_cover", Linkage::Import, &site_signature)
+        .map_err(|error| JitError::Backend(error.to_string()))?;
+
+    let mut trace_signature = site_signature;
+    trace_signature.params.push(AbiParam::new(pointer_type));
+    let trace_id = module
+        .declare_function(
+            "xlsynth_pir_record_trace",
+            Linkage::Import,
+            &trace_signature,
+        )
+        .map_err(|error| JitError::Backend(error.to_string()))?;
+    Ok(RuntimeCallbacks {
+        record_assert: module.declare_func_in_func(assert_id, function),
+        record_cover: module.declare_func_in_func(cover_id, function),
+        record_trace: module.declare_func_in_func(trace_id, function),
+    })
+}
+
 fn lower_function(
     function: &ir::Fn,
     order: &[NodeRef],
     param_layouts: &[NativeValueLayout],
     scratch_plan: &ScratchPlan,
+    event_sites: &HashMap<NodeRef, u32>,
+    runtime_callbacks: RuntimeCallbacks,
     pointer_type: ClifType,
     builder: &mut FunctionBuilder<'_>,
 ) -> Result<(), JitError> {
@@ -827,6 +1124,7 @@ fn lower_function(
     let inputs_pointer = builder.block_params(entry)[0];
     let output_pointer = builder.block_params(entry)[1];
     let scratch_pointer = builder.block_params(entry)[2];
+    let execution_context = builder.block_params(entry)[3];
     let return_node = function.ret_node_ref.ok_or_else(|| {
         JitError::InvalidFunction(format!("function '{}' has no return node", function.name))
     })?;
@@ -859,6 +1157,12 @@ fn lower_function(
                 NativeValueLayout::Scalar(scalar) => {
                     ComputedValue::Scalar(lower_scalar_literal(builder, literal, *scalar)?)
                 }
+                NativeValueLayout::Token => ComputedValue::ZeroSized,
+                NativeValueLayout::Array { .. } | NativeValueLayout::Tuple { .. }
+                    if layout.byte_count() == 0 =>
+                {
+                    ComputedValue::ZeroSized
+                }
                 NativeValueLayout::Array { .. } | NativeValueLayout::Tuple { .. } => {
                     let destination = materialized_destination(
                         builder,
@@ -872,6 +1176,63 @@ fn lower_function(
                     ComputedValue::Address(destination)
                 }
             },
+            NodePayload::AfterAll(_) => ComputedValue::ZeroSized,
+            NodePayload::Cover { predicate, .. } => {
+                let site_id = event_site_id(event_sites, *node_ref, node)?;
+                emit_conditional_site_call(
+                    builder,
+                    scalar_value_for(&values, *predicate)?,
+                    runtime_callbacks.record_cover,
+                    execution_context,
+                    site_id,
+                );
+                ComputedValue::ZeroSized
+            }
+            NodePayload::Assert {
+                activate,
+                token: _,
+                message: _,
+                label: _,
+            } => {
+                let site_id = event_site_id(event_sites, *node_ref, node)?;
+                let condition = scalar_value_for(&values, *activate)?;
+                let failed = builder.ins().icmp_imm(IntCC::Equal, condition, 0);
+                emit_conditional_site_call(
+                    builder,
+                    failed,
+                    runtime_callbacks.record_assert,
+                    execution_context,
+                    site_id,
+                );
+                ComputedValue::ZeroSized
+            }
+            NodePayload::Trace {
+                activated,
+                operands,
+                token: _,
+                format: _,
+            } => {
+                let site_id = event_site_id(event_sites, *node_ref, node)?;
+                let operand_pointers = lower_trace_operand_pointers(
+                    builder,
+                    function,
+                    *node_ref,
+                    operands,
+                    &values,
+                    scratch_pointer,
+                    scratch_plan,
+                    pointer_type,
+                )?;
+                emit_conditional_trace_call(
+                    builder,
+                    scalar_value_for(&values, *activated)?,
+                    runtime_callbacks.record_trace,
+                    execution_context,
+                    site_id,
+                    operand_pointers,
+                );
+                ComputedValue::ZeroSized
+            }
             NodePayload::Unop(Unop::Identity, arg)
                 if matches!(
                     layout,
@@ -924,16 +1285,20 @@ fn lower_function(
                 )?)
             }
             NodePayload::ArrayConcat(args) => {
-                let destination = materialized_destination(
-                    builder,
-                    *node_ref,
-                    return_node,
-                    output_pointer,
-                    scratch_pointer,
-                    scratch_plan,
-                )?;
-                lower_array_concat(builder, function, destination, args, &values, &layout)?;
-                ComputedValue::Address(destination)
+                if layout.byte_count() == 0 {
+                    ComputedValue::ZeroSized
+                } else {
+                    let destination = materialized_destination(
+                        builder,
+                        *node_ref,
+                        return_node,
+                        output_pointer,
+                        scratch_pointer,
+                        scratch_plan,
+                    )?;
+                    lower_array_concat(builder, function, destination, args, &values, &layout)?;
+                    ComputedValue::Address(destination)
+                }
             }
             NodePayload::Binop(Binop::Gate, predicate, gated) => lower_gate(
                 builder,
@@ -1148,28 +1513,36 @@ fn lower_function(
                 )?)
             }
             NodePayload::Array(args) => {
-                let destination = materialized_destination(
-                    builder,
-                    *node_ref,
-                    return_node,
-                    output_pointer,
-                    scratch_pointer,
-                    scratch_plan,
-                )?;
-                lower_array_construction(builder, destination, args, &values, &layout)?;
-                ComputedValue::Address(destination)
+                if layout.byte_count() == 0 {
+                    ComputedValue::ZeroSized
+                } else {
+                    let destination = materialized_destination(
+                        builder,
+                        *node_ref,
+                        return_node,
+                        output_pointer,
+                        scratch_pointer,
+                        scratch_plan,
+                    )?;
+                    lower_array_construction(builder, destination, args, &values, &layout)?;
+                    ComputedValue::Address(destination)
+                }
             }
             NodePayload::Tuple(args) => {
-                let destination = materialized_destination(
-                    builder,
-                    *node_ref,
-                    return_node,
-                    output_pointer,
-                    scratch_pointer,
-                    scratch_plan,
-                )?;
-                lower_tuple_construction(builder, destination, args, &values, &layout)?;
-                ComputedValue::Address(destination)
+                if layout.byte_count() == 0 {
+                    ComputedValue::ZeroSized
+                } else {
+                    let destination = materialized_destination(
+                        builder,
+                        *node_ref,
+                        return_node,
+                        output_pointer,
+                        scratch_pointer,
+                        scratch_plan,
+                    )?;
+                    lower_tuple_construction(builder, destination, args, &values, &layout)?;
+                    ComputedValue::Address(destination)
+                }
             }
             NodePayload::TupleIndex { tuple, index } => {
                 lower_tuple_index(builder, *tuple, *index, &values, &layout, function, node)?
@@ -1194,48 +1567,58 @@ fn lower_function(
                 start,
                 width: _,
             } => {
-                let destination = materialized_destination(
-                    builder,
-                    *node_ref,
-                    return_node,
-                    output_pointer,
-                    scratch_pointer,
-                    scratch_plan,
-                )?;
-                lower_array_slice(
-                    builder,
-                    function,
-                    destination,
-                    *array,
-                    *start,
-                    &values,
-                    &layout,
-                    pointer_type,
-                )?;
-                ComputedValue::Address(destination)
+                if layout.byte_count() == 0 {
+                    ComputedValue::ZeroSized
+                } else {
+                    let destination = materialized_destination(
+                        builder,
+                        *node_ref,
+                        return_node,
+                        output_pointer,
+                        scratch_pointer,
+                        scratch_plan,
+                    )?;
+                    lower_array_slice(
+                        builder,
+                        function,
+                        destination,
+                        *array,
+                        *start,
+                        &values,
+                        &layout,
+                        pointer_type,
+                    )?;
+                    ComputedValue::Address(destination)
+                }
             }
             NodePayload::ArrayUpdate {
                 array,
                 value,
                 indices,
                 assumed_in_bounds,
-            } => lower_array_update(
-                builder,
-                function,
-                node,
-                *node_ref,
-                return_node,
-                output_pointer,
-                scratch_pointer,
-                scratch_plan,
-                *array,
-                *value,
-                indices,
-                *assumed_in_bounds,
-                &values,
-                &layout,
-                pointer_type,
-            )?,
+            } => {
+                if layout.byte_count() == 0 {
+                    ComputedValue::ZeroSized
+                } else {
+                    lower_array_update(
+                        builder,
+                        function,
+                        node,
+                        *node_ref,
+                        return_node,
+                        output_pointer,
+                        scratch_pointer,
+                        scratch_plan,
+                        *array,
+                        *value,
+                        indices,
+                        *assumed_in_bounds,
+                        &values,
+                        &layout,
+                        pointer_type,
+                    )?
+                }
+            }
             NodePayload::Sel {
                 selector,
                 cases,
@@ -1323,15 +1706,107 @@ fn lower_function(
     }
 
     let result = computed_value_for(&values, return_node)?;
-    store_value_to_storage(
-        builder,
-        output_pointer,
-        result,
-        &NativeValueLayout::from_type(&function.ret_ty)?,
-    )?;
+    let result_layout = NativeValueLayout::from_type(&function.ret_ty)?;
+    if result_layout.byte_count() != 0 {
+        store_value_to_storage(builder, output_pointer, result, &result_layout)?;
+    }
     let success = builder.ins().iconst(types::I32, 0);
     builder.ins().return_(&[success]);
     Ok(())
+}
+
+fn event_site_id(
+    event_sites: &HashMap<NodeRef, u32>,
+    node_ref: NodeRef,
+    node: &ir::Node,
+) -> Result<u32, JitError> {
+    event_sites.get(&node_ref).copied().ok_or_else(|| {
+        JitError::InvalidFunction(format!("missing event metadata for node {}", node.text_id))
+    })
+}
+
+fn emit_conditional_site_call(
+    builder: &mut FunctionBuilder<'_>,
+    condition: Value,
+    callback: FuncRef,
+    execution_context: Value,
+    site_id: u32,
+) {
+    let invoke = builder.create_block();
+    let after = builder.create_block();
+    builder.ins().brif(condition, invoke, &[], after, &[]);
+    builder.switch_to_block(invoke);
+    builder.seal_block(invoke);
+    let site_id = builder.ins().iconst(types::I32, i64::from(site_id));
+    builder.ins().call(callback, &[execution_context, site_id]);
+    builder.ins().jump(after, &[]);
+    builder.switch_to_block(after);
+    builder.seal_block(after);
+}
+
+fn emit_conditional_trace_call(
+    builder: &mut FunctionBuilder<'_>,
+    condition: Value,
+    callback: FuncRef,
+    execution_context: Value,
+    site_id: u32,
+    operand_pointers: Value,
+) {
+    let invoke = builder.create_block();
+    let after = builder.create_block();
+    builder.ins().brif(condition, invoke, &[], after, &[]);
+    builder.switch_to_block(invoke);
+    builder.seal_block(invoke);
+    let site_id = builder.ins().iconst(types::I32, i64::from(site_id));
+    builder
+        .ins()
+        .call(callback, &[execution_context, site_id, operand_pointers]);
+    builder.ins().jump(after, &[]);
+    builder.switch_to_block(after);
+    builder.seal_block(after);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_trace_operand_pointers(
+    builder: &mut FunctionBuilder<'_>,
+    function: &ir::Fn,
+    trace_node: NodeRef,
+    operands: &[NodeRef],
+    values: &[Option<ComputedValue>],
+    scratch_pointer: Value,
+    scratch_plan: &ScratchPlan,
+    pointer_type: ClifType,
+) -> Result<Value, JitError> {
+    if operands.is_empty() {
+        return Ok(builder.ins().iconst(pointer_type, 0));
+    }
+    let plan = scratch_plan
+        .trace_sites
+        .get(&trace_node)
+        .ok_or_else(|| JitError::InvalidFunction("missing trace scratch allocation".to_string()))?;
+    let pointer_array = pointer_at_offset(builder, scratch_pointer, plan.pointer_array_offset);
+    for (index, operand) in operands.iter().enumerate() {
+        let layout = NativeValueLayout::from_type(&function.get_node(*operand).ty)?;
+        let pointer = match computed_value_for(values, *operand)? {
+            ComputedValue::Scalar(value) => {
+                let offset = plan.scalar_operand_offsets[index].ok_or_else(|| {
+                    JitError::InvalidFunction("missing trace scalar scratch allocation".into())
+                })?;
+                let pointer = pointer_at_offset(builder, scratch_pointer, offset);
+                store_value_to_storage(builder, pointer, ComputedValue::Scalar(value), &layout)?;
+                pointer
+            }
+            ComputedValue::Address(pointer) => pointer,
+            ComputedValue::ZeroSized => builder.ins().iconst(pointer_type, 0),
+        };
+        builder.ins().store(
+            MemFlags::new(),
+            pointer,
+            pointer_array,
+            (index * std::mem::size_of::<*const u8>()) as i32,
+        );
+    }
+    Ok(pointer_array)
 }
 
 fn lower_nary(
@@ -1977,6 +2452,9 @@ fn lower_array_index(
         }
         return Ok(value);
     }
+    if layout.byte_count() == 0 {
+        return Ok(ComputedValue::ZeroSized);
+    }
     let mut pointer = address_value_for(values, array)?;
     let mut current_layout = NativeValueLayout::from_type(&function.get_node(array).ty)?;
     for index in indices {
@@ -2080,6 +2558,7 @@ fn lower_literal_to_storage(
                 lower_literal_to_storage(builder, pointer, child, field.layout.as_ref())?;
             }
         }
+        NativeValueLayout::Token => {}
     }
     Ok(())
 }
@@ -2171,6 +2650,9 @@ fn lower_tuple_index(
             node.text_id
         )));
     }
+    if result_layout.byte_count() == 0 {
+        return Ok(ComputedValue::ZeroSized);
+    }
     let tuple_pointer = address_value_for(values, tuple)?;
     let field_pointer = pointer_at_offset(builder, tuple_pointer, field.offset);
     Ok(load_value_from_storage(
@@ -2234,6 +2716,9 @@ fn lower_value_equality(
     rhs: ComputedValue,
     layout: &NativeValueLayout,
 ) -> Result<Value, JitError> {
+    if layout.byte_count() == 0 {
+        return Ok(builder.ins().iconst(types::I8, 1));
+    }
     match layout {
         NativeValueLayout::Scalar(_) => {
             Ok(builder
@@ -2275,6 +2760,7 @@ fn lower_value_equality(
             }
             Ok(equal)
         }
+        NativeValueLayout::Token => Ok(builder.ins().iconst(types::I8, 1)),
     }
 }
 
@@ -2574,6 +3060,9 @@ fn lower_one_hot_sel(
     }
     let selector_value = scalar_value_for(values, selector)?;
     let selector_layout = ScalarLayout::from_type(&function.get_node(selector).ty)?;
+    if layout.byte_count() == 0 {
+        return Ok(ComputedValue::ZeroSized);
+    }
     match layout {
         NativeValueLayout::Scalar(scalar) => {
             let mut result = builder.ins().iconst(scalar.clif_type(), 0);
@@ -2606,6 +3095,7 @@ fn lower_one_hot_sel(
             }
             Ok(ComputedValue::Address(destination))
         }
+        NativeValueLayout::Token => Ok(ComputedValue::ZeroSized),
     }
 }
 
@@ -2697,6 +3187,9 @@ fn selected_value(
     when_false: Option<ComputedValue>,
     layout: &NativeValueLayout,
 ) -> Result<ComputedValue, JitError> {
+    if layout.byte_count() == 0 {
+        return Ok(ComputedValue::ZeroSized);
+    }
     match layout {
         NativeValueLayout::Scalar(scalar) => {
             let true_value = expect_scalar(when_true)?;
@@ -2729,6 +3222,7 @@ fn selected_value(
             )?;
             Ok(ComputedValue::Address(destination))
         }
+        NativeValueLayout::Token => Ok(ComputedValue::ZeroSized),
     }
 }
 
@@ -2740,6 +3234,9 @@ fn write_selected_value_to_storage(
     when_false: Option<ComputedValue>,
     layout: &NativeValueLayout,
 ) -> Result<(), JitError> {
+    if layout.byte_count() == 0 {
+        return Ok(());
+    }
     match layout {
         NativeValueLayout::Scalar(scalar) => {
             let false_value = match when_false {
@@ -2800,6 +3297,7 @@ fn write_selected_value_to_storage(
                 )?;
             }
         }
+        NativeValueLayout::Token => {}
     }
     Ok(())
 }
@@ -2829,6 +3327,7 @@ fn write_zero_value_to_storage(
                 write_zero_value_to_storage(builder, child, field.layout.as_ref());
             }
         }
+        NativeValueLayout::Token => {}
     }
 }
 
@@ -2839,6 +3338,9 @@ fn write_selected_or_value_to_storage(
     value: ComputedValue,
     layout: &NativeValueLayout,
 ) -> Result<(), JitError> {
+    if layout.byte_count() == 0 {
+        return Ok(());
+    }
     match layout {
         NativeValueLayout::Scalar(scalar) => {
             let current = builder
@@ -2884,6 +3386,7 @@ fn write_selected_or_value_to_storage(
                 )?;
             }
         }
+        NativeValueLayout::Token => {}
     }
     Ok(())
 }
@@ -3071,6 +3574,9 @@ fn load_value_from_storage(
     pointer: Value,
     layout: &NativeValueLayout,
 ) -> ComputedValue {
+    if layout.byte_count() == 0 {
+        return ComputedValue::ZeroSized;
+    }
     match layout {
         NativeValueLayout::Scalar(scalar) => {
             let value = builder
@@ -3081,6 +3587,7 @@ fn load_value_from_storage(
         NativeValueLayout::Array { .. } | NativeValueLayout::Tuple { .. } => {
             ComputedValue::Address(pointer)
         }
+        NativeValueLayout::Token => ComputedValue::ZeroSized,
     }
 }
 
@@ -3090,6 +3597,9 @@ fn store_value_to_storage(
     value: ComputedValue,
     layout: &NativeValueLayout,
 ) -> Result<(), JitError> {
+    if layout.byte_count() == 0 {
+        return Ok(());
+    }
     match layout {
         NativeValueLayout::Scalar(_) => {
             builder
@@ -3118,6 +3628,7 @@ fn store_value_to_storage(
                 store_value_to_storage(builder, destination_field, child, field.layout.as_ref())?;
             }
         }
+        NativeValueLayout::Token => {}
     }
     Ok(())
 }
@@ -3155,7 +3666,7 @@ fn address_value_for(
 fn expect_scalar(value: ComputedValue) -> Result<Value, JitError> {
     match value {
         ComputedValue::Scalar(value) => Ok(value),
-        ComputedValue::Address(_) => Err(JitError::InvalidFunction(
+        ComputedValue::Address(_) | ComputedValue::ZeroSized => Err(JitError::InvalidFunction(
             "array value used as a scalar".into(),
         )),
     }
@@ -3164,7 +3675,7 @@ fn expect_scalar(value: ComputedValue) -> Result<Value, JitError> {
 fn expect_address(value: ComputedValue) -> Result<Value, JitError> {
     match value {
         ComputedValue::Address(value) => Ok(value),
-        ComputedValue::Scalar(_) => Err(JitError::InvalidFunction(
+        ComputedValue::Scalar(_) | ComputedValue::ZeroSized => Err(JitError::InvalidFunction(
             "scalar value used as an array".into(),
         )),
     }

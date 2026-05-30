@@ -1738,15 +1738,24 @@ impl<'a> FunctionGenerator<'a> {
             RandomOperation::Trace => {
                 let token = self.choose_token_ref(source);
                 let activated = self.choose_ref_for_type(source, &Type::Bits(1));
-                let operand_ty = self.choose_selectable_type(source);
-                let operand = self.choose_ref_for_type(source, &operand_ty);
+                let operand_count = choose_between(source, 0, 3);
+                let operands = (0..operand_count)
+                    .map(|_| {
+                        let operand_ty = self.choose_selectable_type(source);
+                        self.choose_ref_for_type(source, &operand_ty)
+                    })
+                    .collect();
+                let format = match operand_count {
+                    0 => "random_trace".to_string(),
+                    count => format!("random_trace={}", vec!["{}"; count].join(",")),
+                };
                 Ok(self.add_node(
                     Type::Token,
                     NodePayload::Trace {
                         token,
                         activated,
-                        format: "random_trace={}".to_string(),
-                        operands: vec![operand],
+                        format,
+                        operands,
                     },
                     None,
                 ))

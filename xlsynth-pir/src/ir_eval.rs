@@ -1287,16 +1287,25 @@ pub struct AssertionFailure {
     pub label: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoverCount {
+    pub node_text_id: usize,
+    pub label: String,
+    pub count: u64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnEvalSuccess {
     pub value: IrValue,
     pub trace_messages: Vec<TraceMessage>,
+    pub cover_counts: Vec<CoverCount>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnEvalFailure {
     pub assertion_failures: Vec<AssertionFailure>,
     pub trace_messages: Vec<TraceMessage>,
+    pub cover_counts: Vec<CoverCount>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1668,8 +1677,8 @@ fn observe_select_like_node(
 ///
 /// - Produces `TraceMessage`s for `trace` nodes whose `activated` predicate is
 ///   true.
-/// - Records `AssertionFailure`s for `assert` nodes whose `activate` predicate
-///   is true.
+/// - Records `AssertionFailure`s for `assert` nodes whose predicate is false.
+/// - Records `CoverCount`s for `cover` nodes, including inactive sites.
 /// - Returns the value of the function's return node on success.
 pub fn eval_fn_with_observer(
     f: &ir::Fn,
@@ -1742,6 +1751,7 @@ fn eval_fn_impl<'a>(
     let mut env = DenseEvalEnv::new(f.nodes.len());
     let mut trace_messages: Vec<TraceMessage> = Vec::new();
     let mut assertion_failures: Vec<AssertionFailure> = Vec::new();
+    let mut cover_counts: Vec<CoverCount> = Vec::new();
     for nr in eval_order(f, order_policy) {
         let node = f.get_node(nr);
         let value: IrValue = match &node.payload {
@@ -1761,12 +1771,12 @@ fn eval_fn_impl<'a>(
                 label,
             } => {
                 let _token_val = env.get(token).cloned().unwrap_or_else(IrValue::make_token);
-                let active = env
+                let condition = env
                     .get(activate)
                     .expect("assert activate operand must be evaluated")
                     .to_bool()
                     .expect("activate must be bits[1]");
-                if active {
+                if !condition {
                     if let Some(observer) = observer {
                         unsafe {
                             (&mut *observer).on_failure_event(FailureEvent {
@@ -1842,6 +1852,20 @@ fn eval_fn_impl<'a>(
                 // The result of trace is a token.
                 IrValue::make_token()
             }
+            P::Cover { predicate, label } => {
+                let active = env
+                    .get(predicate)
+                    .expect("cover predicate operand must be evaluated")
+                    .to_bool()
+                    .expect("cover predicate must be bits[1]");
+                cover_counts.push(CoverCount {
+                    node_text_id: node.text_id,
+                    label: label.clone(),
+                    count: u64::from(active),
+                });
+                // XLS cover produces the zero-sized unit value.
+                IrValue::make_tuple(&[])
+            }
             P::AfterAll(_deps) => {
                 // Tokens have no payload; produce a fresh token value.
                 IrValue::make_token()
@@ -1865,14 +1889,17 @@ fn eval_fn_impl<'a>(
                 match callee_result {
                     FnEvalResult::Success(success) => {
                         trace_messages.extend(success.trace_messages);
+                        cover_counts.extend(success.cover_counts);
                         success.value
                     }
                     FnEvalResult::Failure(fail) => {
                         assertion_failures.extend(fail.assertion_failures);
                         trace_messages.extend(fail.trace_messages);
+                        cover_counts.extend(fail.cover_counts);
                         return FnEvalResult::Failure(FnEvalFailure {
                             assertion_failures,
                             trace_messages,
+                            cover_counts,
                         });
                     }
                 }
@@ -1899,6 +1926,7 @@ fn eval_fn_impl<'a>(
                     return FnEvalResult::Failure(FnEvalFailure {
                         assertion_failures,
                         trace_messages,
+                        cover_counts,
                     });
                 }
                 let r = arg_bits.width_slice(*start as i64, *width as i64);
@@ -2050,6 +2078,7 @@ fn eval_fn_impl<'a>(
                             return FnEvalResult::Failure(FnEvalFailure {
                                 assertion_failures,
                                 trace_messages,
+                                cover_counts,
                             });
                         }
                         clamped_any = true;
@@ -2139,6 +2168,7 @@ fn eval_fn_impl<'a>(
                             return FnEvalResult::Failure(FnEvalFailure {
                                 assertion_failures,
                                 trace_messages,
+                                cover_counts,
                             });
                         } else {
                             // OOB but not assumed in-bounds: return the original array unchanged.
@@ -2223,11 +2253,13 @@ fn eval_fn_impl<'a>(
         FnEvalResult::Success(FnEvalSuccess {
             value: ret_value,
             trace_messages,
+            cover_counts,
         })
     } else {
         FnEvalResult::Failure(FnEvalFailure {
             assertion_failures,
             trace_messages,
+            cover_counts,
         })
     }
 }
@@ -3698,30 +3730,68 @@ fn f(x: bits[1] id=1) -> bits[1] {
             _ => unreachable!(),
         };
 
-        // Case 1: x = 0 => no assert triggered, one trace inactive, success
+        // Case 1: x = 0 => assert fails and trace is inactive.
         let x0 = IrValue::make_ubits(1, 0).unwrap();
         let res0 = eval_fn(&f, &[x0]);
         match res0 {
-            FnEvalResult::Success(success) => {
-                assert_eq!(success.value, IrValue::make_ubits(1, 1).unwrap());
-                assert!(success.trace_messages.is_empty());
-            }
-            other => panic!("unexpected result: {:?}", other),
-        }
-
-        // Case 2: x = 1 => assert fires and trace emits
-        let x1 = IrValue::make_ubits(1, 1).unwrap();
-        let res1 = eval_fn(&f, &[x1]);
-        match res1 {
             FnEvalResult::Failure(fail) => {
                 assert_eq!(fail.assertion_failures.len(), 1);
                 assert_eq!(fail.assertion_failures[0].message, "boom");
                 assert_eq!(fail.assertion_failures[0].label, "L");
-                assert_eq!(fail.trace_messages.len(), 1);
-                assert_eq!(fail.trace_messages[0].message, "x=bits[1]:1 done");
+                assert!(fail.trace_messages.is_empty());
             }
             other => panic!("unexpected result: {:?}", other),
         }
+
+        // Case 2: x = 1 => assert passes and trace emits.
+        let x1 = IrValue::make_ubits(1, 1).unwrap();
+        let res1 = eval_fn(&f, &[x1]);
+        match res1 {
+            FnEvalResult::Success(success) => {
+                assert_eq!(success.value, IrValue::make_ubits(1, 1).unwrap());
+                assert_eq!(success.trace_messages.len(), 1);
+                assert_eq!(success.trace_messages[0].message, "x=bits[1]:1 done");
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_eval_fn_cover_records_active_and_inactive_sites() {
+        let ir_text = r#"package test
+
+fn f(x: bits[1] id=1) -> bits[1] {
+  nx: bits[1] = not(x, id=2)
+  _active: () = cover(x, label="active", id=3)
+  _inactive: () = cover(nx, label="inactive", id=4)
+  ret identity.5: bits[1] = identity(x, id=5)
+}
+"#;
+        let mut p = Parser::new(ir_text);
+        let pkg = p.parse_and_validate_package().expect("parse ok");
+        let f = match &pkg.members[0] {
+            ir::PackageMember::Function(f) => f.clone(),
+            _ => unreachable!(),
+        };
+        let result = eval_fn(&f, &[IrValue::make_ubits(1, 1).unwrap()]);
+        let FnEvalResult::Success(success) = result else {
+            panic!("unexpected result: {result:?}");
+        };
+        assert_eq!(
+            success.cover_counts,
+            vec![
+                CoverCount {
+                    node_text_id: 3,
+                    label: "active".to_string(),
+                    count: 1,
+                },
+                CoverCount {
+                    node_text_id: 4,
+                    label: "inactive".to_string(),
+                    count: 0,
+                },
+            ]
+        );
     }
 
     #[test]

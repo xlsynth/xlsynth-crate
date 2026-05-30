@@ -1293,7 +1293,7 @@ fn probabilistic_event_generation_emits_tokens_effects_and_valid_xls_ir() {
     let mut live = HashSet::new();
     let mut saw_token_param = false;
     let mut saw_token_literal = false;
-    let mut saw_trace_dynamic_operand = false;
+    let mut saw_trace_operand_counts = BTreeSet::new();
 
     for sample in 0..750 {
         let generated =
@@ -1312,9 +1312,17 @@ fn probabilistic_event_generation_emits_tokens_effects_and_valid_xls_ir() {
                 NodePayload::Trace {
                     format, operands, ..
                 } => {
-                    saw_trace_dynamic_operand |= format == "random_trace={}"
-                        && operands.len() == 1
-                        && generated.function.get_node(operands[0]).ty != Type::Token;
+                    let expected_format = match operands.len() {
+                        0 => "random_trace".to_string(),
+                        count => format!("random_trace={}", vec!["{}"; count].join(",")),
+                    };
+                    assert_eq!(format, &expected_format);
+                    assert!(
+                        operands
+                            .iter()
+                            .all(|operand| generated.function.get_node(*operand).ty != Type::Token)
+                    );
+                    saw_trace_operand_counts.insert(operands.len());
                 }
                 _ => {}
             }
@@ -1343,7 +1351,7 @@ fn probabilistic_event_generation_emits_tokens_effects_and_valid_xls_ir() {
     }
     assert!(saw_token_param);
     assert!(saw_token_literal);
-    assert!(saw_trace_dynamic_operand);
+    assert_eq!(saw_trace_operand_counts, BTreeSet::from([0, 1, 2, 3]));
 }
 
 #[test]

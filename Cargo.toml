@@ -10,6 +10,7 @@ members = [
     "xlsynth-driver",
     "xlsynth-estimator",
     "xlsynth-g8r",
+    "xlsynth-pir-compiler-runtime",
     "xlsynth-pir-compiler",
     "xlsynth-pir",
     "xlsynth-prover",
