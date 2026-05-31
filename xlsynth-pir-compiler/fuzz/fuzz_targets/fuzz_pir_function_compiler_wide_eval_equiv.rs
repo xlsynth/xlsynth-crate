@@ -7,7 +7,7 @@ use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
 use xlsynth_pir::ir_random::{
     DepletableBytes, OperationSet, RandomFnOptions, StopPolicy, generate_arguments, generate_fn,
 };
-use xlsynth_pir_compiler::PirFunctionJit;
+use xlsynth_pir_compiler::PirFunctionCompiler;
 
 fn sorted<T: Ord>(mut values: Vec<T>) -> Vec<T> {
     values.sort();
@@ -46,7 +46,7 @@ fuzz_target!(|data: &[u8]| {
     .expect("wide fuzz generator options should always construct a PIR function");
     let function = &generated.function;
     let ir_text = function.to_string();
-    let compiler = PirFunctionJit::compile(function).unwrap_or_else(|error| {
+    let compiler = PirFunctionCompiler::compile(function).unwrap_or_else(|error| {
         panic!("native compilation failed for generated wide IR:\n{ir_text}\n{error}")
     });
     let mut argument_entropy = DepletableBytes::new(data);

@@ -4,16 +4,16 @@ use xlsynth::IrValue;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir_compiler::{
-    AssumptionFailureKind, ExecutionContext, JitError, NativeTupleFieldLayout, NativeValueLayout,
-    PirFunctionJit, ScalarLayout, WideBitsLayout,
+    AssumptionFailureKind, CompilerError, ExecutionContext, NativeTupleFieldLayout,
+    NativeValueLayout, PirFunctionCompiler, ScalarLayout, WideBitsLayout,
 };
 
-fn compile(ir: &str) -> PirFunctionJit {
+fn compile(ir: &str) -> PirFunctionCompiler {
     let package = Parser::new(ir)
         .parse_and_validate_package()
         .expect("test PIR should parse and validate");
     let function = package.get_fn("f").expect("function f should exist");
-    PirFunctionJit::compile(function).expect("function should JIT compile")
+    PirFunctionCompiler::compile(function).expect("function should compile")
 }
 
 fn assert_matches_evaluator(ir: &str, argument_sets: &[Vec<IrValue>]) {
@@ -21,16 +21,16 @@ fn assert_matches_evaluator(ir: &str, argument_sets: &[Vec<IrValue>]) {
         .parse_and_validate_package()
         .expect("test PIR should parse and validate");
     let function = package.get_fn("f").expect("function f should exist");
-    let jit = PirFunctionJit::compile(function).expect("function should JIT compile");
+    let compiler = PirFunctionCompiler::compile(function).expect("function should compile");
     for args in argument_sets {
         let expected = match eval_fn(function, args) {
             FnEvalResult::Success(success) => success.value,
             FnEvalResult::Failure(_) => panic!("PIR evaluation failed for arguments {args:?}"),
         };
-        let actual = jit
+        let actual = compiler
             .run_ir_values(args)
-            .expect("JIT execution should succeed");
-        assert_eq!(actual, expected, "JIT mismatch for arguments {args:?}");
+            .expect("compiled execution should succeed");
+        assert_eq!(actual, expected, "compiler mismatch for arguments {args:?}");
     }
 }
 
@@ -77,19 +77,19 @@ fn f(x: bits[8] id=1, y: bits[7] id=2) -> bits[8] {
     )
     .parse_package()
     .expect("invalid semantics should still parse structurally");
-    let error = match PirFunctionJit::compile(package.get_fn("f").unwrap()) {
+    let error = match PirFunctionCompiler::compile(package.get_fn("f").unwrap()) {
         Err(error) => error,
         Ok(_) => panic!("invalid XLS node semantics should not compile"),
     };
     assert!(matches!(
         error,
-        JitError::InvalidFunction(message) if message.contains("right operand")
+        CompilerError::InvalidFunction(message) if message.contains("right operand")
     ));
 }
 
 #[test]
 fn native_carrier_storage_is_accessed_without_argument_copying() {
-    let jit = compile(
+    let compiler = compile(
         r#"package test
 
 fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
@@ -105,10 +105,11 @@ fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
         std::ptr::from_ref(&y).cast::<u8>(),
     ];
 
-    // SAFETY: the JIT signature describes two bits[8] (`u8`) inputs and one
+    // SAFETY: the compiled signature describes two bits[8] (`u8`) inputs and one
     // bits[8] (`u8`) output, all alive and properly aligned for this call.
     unsafe {
-        jit.run_native(&inputs, std::ptr::from_mut(&mut output).cast())
+        compiler
+            .run_native(&inputs, std::ptr::from_mut(&mut output).cast())
             .expect("native execution should succeed");
     }
     assert_eq!(output, 16);
@@ -116,7 +117,7 @@ fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
 
 #[test]
 fn compiles_zero_sized_token_and_cover_unit_results() {
-    let token_jit = compile(
+    let token_compiler = compile(
         r#"package test
 
 fn f() -> token {
@@ -124,13 +125,13 @@ fn f() -> token {
 }
 "#,
     );
-    assert_eq!(token_jit.result_layout(), &NativeValueLayout::Token);
+    assert_eq!(token_compiler.result_layout(), &NativeValueLayout::Token);
     assert_eq!(
-        token_jit.run_ir_values(&[]).expect("token execution"),
+        token_compiler.run_ir_values(&[]).expect("token execution"),
         IrValue::make_token()
     );
 
-    let cover_jit = compile(
+    let cover_compiler = compile(
         r#"package test
 
 fn f(x: bits[1] id=1) -> () {
@@ -139,14 +140,14 @@ fn f(x: bits[1] id=1) -> () {
 "#,
     );
     assert_eq!(
-        cover_jit.result_layout(),
+        cover_compiler.result_layout(),
         &NativeValueLayout::Tuple {
             fields: vec![],
             byte_count: 0,
             alignment: 1,
         }
     );
-    let execution = cover_jit
+    let execution = cover_compiler
         .run_ir_values_with_events(&[bits(1, 1)])
         .expect("unit-valued cover execution");
     assert_eq!(execution.value, IrValue::make_tuple(&[]));
@@ -157,7 +158,7 @@ fn f(x: bits[1] id=1) -> () {
 
 #[test]
 fn caller_owned_context_accumulates_cover_counts() {
-    let jit = compile(
+    let compiler = compile(
         r#"package test
 
 fn f(x: bits[1] id=1) -> bits[1] {
@@ -166,19 +167,20 @@ fn f(x: bits[1] id=1) -> bits[1] {
 }
 "#,
     );
-    let mut context = ExecutionContext::new(jit.metadata());
+    let mut context = ExecutionContext::new(compiler.metadata());
     let mut output: u8 = 0;
     for input in [1u8, 1u8, 0u8] {
         let inputs = [std::ptr::from_ref(&input).cast::<u8>()];
         // SAFETY: input and output carry `bits[1]` in the published native
         // scalar layout, and `context` was created for this compiled function.
         unsafe {
-            jit.run_native_with_context(
-                &inputs,
-                std::ptr::from_mut(&mut output).cast(),
-                &mut context,
-            )
-            .expect("native execution with context");
+            compiler
+                .run_native_with_context(
+                    &inputs,
+                    std::ptr::from_mut(&mut output).cast(),
+                    &mut context,
+                )
+                .expect("native execution with context");
         }
     }
     assert_eq!(context.result().cover_counts[0].count, 2);
@@ -202,7 +204,7 @@ fn f(x: bits[8] id=1, ok: bits[1] id=2, emit: bits[1] id=3) -> bits[8] {
         .parse_and_validate_package()
         .expect("test PIR should parse and validate");
     let function = package.get_fn("f").expect("function f should exist");
-    let jit = PirFunctionJit::compile(function).expect("function should compile");
+    let compiler = PirFunctionCompiler::compile(function).expect("function should compile");
 
     for args in [
         vec![bits(8, 0xa5), bits(1, 1), bits(1, 1)],
@@ -210,7 +212,7 @@ fn f(x: bits[8] id=1, ok: bits[1] id=2, emit: bits[1] id=3) -> bits[8] {
         vec![bits(8, 0x12), bits(1, 1), bits(1, 0)],
     ] {
         let expected = eval_fn(function, &args);
-        let actual = jit
+        let actual = compiler
             .run_ir_values_with_events(&args)
             .expect("compiled execution should succeed");
         match expected {
@@ -327,13 +329,13 @@ fn f(emit: bits[1] id=1) -> token {
         .parse_and_validate_package()
         .expect("test PIR should parse and validate");
     let function = package.get_fn("f").expect("function f should exist");
-    let jit = PirFunctionJit::compile(function).expect("function should compile");
+    let compiler = PirFunctionCompiler::compile(function).expect("function should compile");
     let args = vec![bits(1, 1)];
     let expected = match eval_fn(function, &args) {
         FnEvalResult::Success(success) => success,
         FnEvalResult::Failure(_) => panic!("traces should not cause evaluation failure"),
     };
-    let actual = jit
+    let actual = compiler
         .run_ir_values_with_events(&args)
         .expect("compiled execution should succeed");
     assert_eq!(
@@ -365,9 +367,9 @@ fn f(x: bits[12] id=1, neg: bits[8] id=2) -> token {
         .parse_and_validate_package()
         .expect("test PIR should parse and validate");
     let function = package.get_fn("f").expect("function f should exist");
-    let jit = PirFunctionJit::compile(function).expect("function should compile");
+    let compiler = PirFunctionCompiler::compile(function).expect("function should compile");
     let args = vec![bits(12, 43), bits(8, 251)];
-    let actual = jit
+    let actual = compiler
         .run_ir_values_with_events(&args)
         .expect("compiled execution should succeed");
     let expected = match eval_fn(function, &args) {
@@ -399,7 +401,7 @@ fn f(x: bits[12] id=1, neg: bits[8] id=2) -> token {
 
 #[test]
 fn odd_width_arithmetic_masks_to_pir_width() {
-    let jit = compile(
+    let compiler = compile(
         r#"package test
 
 fn f(x: bits[3] id=1, y: bits[3] id=2) -> bits[3] {
@@ -407,12 +409,12 @@ fn f(x: bits[3] id=1, y: bits[3] id=2) -> bits[3] {
 }
 "#,
     );
-    assert_eq!(jit.run_u64(&[7, 3]).expect("execute"), 2);
+    assert_eq!(compiler.run_u64(&[7, 3]).expect("execute"), 2);
 }
 
 #[test]
 fn lowers_bitwise_comparison_extension_and_slice_nodes() {
-    let jit = compile(
+    let compiler = compile(
         r#"package test
 
 fn f(x: bits[5] id=1, y: bits[5] id=2) -> bits[5] {
@@ -423,11 +425,11 @@ fn f(x: bits[5] id=1, y: bits[5] id=2) -> bits[5] {
 "#,
     );
     assert_eq!(
-        jit.run_u64(&[0b1_1110, 0b0_1111]).expect("execute"),
+        compiler.run_u64(&[0b1_1110, 0b0_1111]).expect("execute"),
         0b0_0111
     );
     assert_eq!(
-        jit.run_u64(&[0b1_0100, 0b0_1111]).expect("execute"),
+        compiler.run_u64(&[0b1_0100, 0b0_1111]).expect("execute"),
         0b0_0010
     );
 }
@@ -445,12 +447,12 @@ fn f(x: bits[8] id=1) -> bits[2] {
     .parse_package()
     .expect("unvalidated function should parse as PIR");
     let function = package.get_fn("f").expect("function f should exist");
-    let error = match PirFunctionJit::compile(function) {
-        Ok(_) => panic!("out-of-bounds bit_slice should not JIT compile"),
+    let error = match PirFunctionCompiler::compile(function) {
+        Ok(_) => panic!("out-of-bounds bit_slice should not compile"),
         Err(error) => error,
     };
     match error {
-        JitError::InvalidFunction(message) => assert!(
+        CompilerError::InvalidFunction(message) => assert!(
             message.contains("bit_slice start 7") && message.contains("exceeds operand width 8"),
             "unexpected validation diagnostic: {message}"
         ),
@@ -460,7 +462,7 @@ fn f(x: bits[8] id=1) -> bits[2] {
 
 #[test]
 fn signed_comparisons_use_logical_bit_width() {
-    let jit = compile(
+    let compiler = compile(
         r#"package test
 
 fn f(x: bits[3] id=1, y: bits[3] id=2) -> bits[1] {
@@ -468,13 +470,13 @@ fn f(x: bits[3] id=1, y: bits[3] id=2) -> bits[1] {
 }
 "#,
     );
-    assert_eq!(jit.run_u64(&[0b111, 0b001]).expect("execute"), 1);
-    assert_eq!(jit.run_u64(&[0b010, 0b111]).expect("execute"), 0);
+    assert_eq!(compiler.run_u64(&[0b111, 0b001]).expect("execute"), 1);
+    assert_eq!(compiler.run_u64(&[0b010, 0b111]).expect("execute"), 0);
 }
 
 #[test]
 fn logical_left_shift_returns_zero_on_pir_overshift() {
-    let jit = compile(
+    let compiler = compile(
         r#"package test
 
 fn f(x: bits[8] id=1, amount: bits[4] id=2) -> bits[8] {
@@ -482,14 +484,14 @@ fn f(x: bits[8] id=1, amount: bits[4] id=2) -> bits[8] {
 }
 "#,
     );
-    assert_eq!(jit.run_u64(&[3, 2]).expect("execute"), 12);
-    assert_eq!(jit.run_u64(&[3, 8]).expect("execute"), 0);
-    assert_eq!(jit.run_u64(&[3, 15]).expect("execute"), 0);
+    assert_eq!(compiler.run_u64(&[3, 2]).expect("execute"), 12);
+    assert_eq!(compiler.run_u64(&[3, 8]).expect("execute"), 0);
+    assert_eq!(compiler.run_u64(&[3, 15]).expect("execute"), 0);
 }
 
 #[test]
 fn concat_combines_scalar_values_of_different_widths() {
-    let jit = compile(
+    let compiler = compile(
         r#"package test
 
 fn f(high: bits[5] id=1, low: bits[3] id=2) -> bits[8] {
@@ -498,7 +500,7 @@ fn f(high: bits[5] id=1, low: bits[3] id=2) -> bits[8] {
 "#,
     );
     assert_eq!(
-        jit.run_u64(&[0b10101, 0b011]).expect("execute"),
+        compiler.run_u64(&[0b10101, 0b011]).expect("execute"),
         0b1010_1011
     );
 }
@@ -682,7 +684,7 @@ fn f(x: bits[3] id=1) -> bits[6] {
 
 #[test]
 fn literal_array_index_uses_xls_out_of_bounds_clamping() {
-    let jit = compile(
+    let compiler = compile(
         r#"package test
 
 fn f(index: bits[4] id=1) -> bits[3] {
@@ -691,14 +693,14 @@ fn f(index: bits[4] id=1) -> bits[3] {
 }
 "#,
     );
-    assert_eq!(jit.run_u64(&[0]).expect("execute"), 0);
-    assert_eq!(jit.run_u64(&[2]).expect("execute"), 4);
-    assert_eq!(jit.run_u64(&[15]).expect("execute"), 6);
+    assert_eq!(compiler.run_u64(&[0]).expect("execute"), 0);
+    assert_eq!(compiler.run_u64(&[2]).expect("execute"), 4);
+    assert_eq!(compiler.run_u64(&[15]).expect("execute"), 6);
 }
 
 #[test]
 fn bounded_literal_array_index_accepts_assumed_in_bounds() {
-    let jit = compile(
+    let compiler = compile(
         r#"package test
 
 fn f(index: bits[2] id=1) -> bits[3] {
@@ -707,12 +709,12 @@ fn f(index: bits[2] id=1) -> bits[3] {
 }
 "#,
     );
-    assert_eq!(jit.run_u64(&[3]).expect("execute"), 6);
+    assert_eq!(compiler.run_u64(&[3]).expect("execute"), 6);
 }
 
 #[test]
 fn assumed_in_bounds_array_violations_accumulate_for_retained_graph_nodes() {
-    let jit = compile(
+    let compiler = compile(
         r#"package test
 
 fn f(a: bits[8][2] id=1, v: bits[8] id=2, i: bits[2] id=3) -> bits[8] {
@@ -723,12 +725,12 @@ fn f(a: bits[8][2] id=1, v: bits[8] id=2, i: bits[2] id=3) -> bits[8] {
 "#,
     );
     let values = array(8, &[10, 11]);
-    let in_bounds = jit
+    let in_bounds = compiler
         .run_ir_values_with_events(&[values.clone(), bits(8, 99), bits(2, 1)])
         .expect("in-bounds execution");
     assert!(in_bounds.events.assumption_failures.is_empty());
 
-    let out_of_bounds = jit
+    let out_of_bounds = compiler
         .run_ir_values_with_events(&[values, bits(8, 99), bits(2, 3)])
         .expect("out-of-bounds execution remains safe");
     assert_eq!(out_of_bounds.value, bits(8, 99));
@@ -748,7 +750,7 @@ fn f(a: bits[8][2] id=1, v: bits[8] id=2, i: bits[2] id=3) -> bits[8] {
 
 #[test]
 fn native_scalar_array_input_uses_c_array_layout() {
-    let jit = compile(
+    let compiler = compile(
         r#"package test
 
 fn f(values: bits[9][4] id=1, index: bits[3] id=2) -> bits[9] {
@@ -757,7 +759,7 @@ fn f(values: bits[9][4] id=1, index: bits[3] id=2) -> bits[9] {
 "#,
     );
     assert_eq!(
-        jit.param_layouts()[0],
+        compiler.param_layouts()[0],
         NativeValueLayout::Array {
             element: Box::new(NativeValueLayout::Scalar(ScalarLayout {
                 bit_count: 9,
@@ -767,15 +769,15 @@ fn f(values: bits[9][4] id=1, index: bits[3] id=2) -> bits[9] {
         }
     );
     assert_eq!(
-        jit.param_layouts()[0].byte_count(),
+        compiler.param_layouts()[0].byte_count(),
         std::mem::size_of::<[u16; 4]>()
     );
     assert_eq!(
-        jit.param_layouts()[0].alignment(),
+        compiler.param_layouts()[0].alignment(),
         std::mem::align_of::<[u16; 4]>()
     );
     assert_eq!(
-        jit.param_layouts()[0].element_stride(),
+        compiler.param_layouts()[0].element_stride(),
         Some(std::mem::size_of::<u16>())
     );
 
@@ -787,9 +789,10 @@ fn f(values: bits[9][4] id=1, index: bits[3] id=2) -> bits[9] {
         std::ptr::from_ref(&index).cast::<u8>(),
     ];
     // SAFETY: `[u16; 4]` is exactly the native layout for `bits[9][4]`;
-    // `index` and `output` use the scalar layouts selected by the JIT.
+    // `index` and `output` use the scalar layouts selected by the compiler.
     unsafe {
-        jit.run_native(&inputs, std::ptr::from_mut(&mut output).cast())
+        compiler
+            .run_native(&inputs, std::ptr::from_mut(&mut output).cast())
             .expect("native array indexing should execute");
     }
     assert_eq!(output, 255);
@@ -801,7 +804,8 @@ fn f(values: bits[9][4] id=1, index: bits[3] id=2) -> bits[9] {
     ];
     // SAFETY: same native storage contract as the call above.
     unsafe {
-        jit.run_native(&inputs, std::ptr::from_mut(&mut output).cast())
+        compiler
+            .run_native(&inputs, std::ptr::from_mut(&mut output).cast())
             .expect("out-of-bounds index should clamp");
     }
     assert_eq!(output, 509);
@@ -809,7 +813,7 @@ fn f(values: bits[9][4] id=1, index: bits[3] id=2) -> bits[9] {
 
 #[test]
 fn native_array_result_is_written_to_c_array_storage() {
-    let jit = compile(
+    let compiler = compile(
         r#"package test
 
 fn f(x: bits[9] id=1, y: bits[9] id=2) -> bits[9][3] {
@@ -827,7 +831,8 @@ fn f(x: bits[9] id=1, y: bits[9] id=2) -> bits[9][3] {
     // SAFETY: the inputs and output use the published native layouts; the
     // output is directly writable as a C-compatible array of `u16`.
     unsafe {
-        jit.run_native(&inputs, std::ptr::from_mut(&mut output).cast())
+        compiler
+            .run_native(&inputs, std::ptr::from_mut(&mut output).cast())
             .expect("native array construction should execute");
     }
     assert_eq!(output, [12, 300, 12]);
@@ -835,7 +840,7 @@ fn f(x: bits[9] id=1, y: bits[9] id=2) -> bits[9][3] {
 
 #[test]
 fn nested_native_arrays_use_recursive_c_array_strides() {
-    let jit = compile(
+    let compiler = compile(
         r#"package test
 
 fn f(values: bits[8][2][2] id=1, i: bits[2] id=2, j: bits[2] id=3) -> bits[8] {
@@ -855,7 +860,8 @@ fn f(values: bits[8][2][2] id=1, i: bits[2] id=2, j: bits[2] id=3) -> bits[8] {
     // SAFETY: nested Rust arrays are contiguous recursive native array
     // storage corresponding to `bits[8][2][2]`.
     unsafe {
-        jit.run_native(&inputs, std::ptr::from_mut(&mut output).cast())
+        compiler
+            .run_native(&inputs, std::ptr::from_mut(&mut output).cast())
             .expect("nested native array indexing should execute");
     }
     assert_eq!(output, 3);
@@ -863,7 +869,7 @@ fn f(values: bits[8][2][2] id=1, i: bits[2] id=2, j: bits[2] id=3) -> bits[8] {
 
 #[test]
 fn native_subarray_result_copies_from_nested_array_storage() {
-    let jit = compile(
+    let compiler = compile(
         r#"package test
 
 fn f(values: bits[9][2][2] id=1, index: bits[1] id=2) -> bits[9][2] {
@@ -881,7 +887,8 @@ fn f(values: bits[9][2][2] id=1, index: bits[1] id=2) -> bits[9][2] {
     // SAFETY: nested input and separate output arrays obey the recursive
     // native layout contract and do not overlap.
     unsafe {
-        jit.run_native(&inputs, std::ptr::from_mut(&mut output).cast())
+        compiler
+            .run_native(&inputs, std::ptr::from_mut(&mut output).cast())
             .expect("subarray result should execute");
     }
     assert_eq!(output, [400, 401]);
@@ -889,7 +896,7 @@ fn f(values: bits[9][2][2] id=1, index: bits[1] id=2) -> bits[9][2] {
 
 #[test]
 fn intermediate_array_construction_uses_scratch_storage() {
-    let jit = compile(
+    let compiler = compile(
         r#"package test
 
 fn f(x: bits[8] id=1, y: bits[8] id=2, index: bits[2] id=3) -> bits[8] {
@@ -898,9 +905,9 @@ fn f(x: bits[8] id=1, y: bits[8] id=2, index: bits[2] id=3) -> bits[8] {
 }
 "#,
     );
-    assert_eq!(jit.run_u64(&[7, 13, 0]).expect("execute"), 7);
-    assert_eq!(jit.run_u64(&[7, 13, 1]).expect("execute"), 13);
-    assert_eq!(jit.run_u64(&[7, 13, 3]).expect("execute"), 13);
+    assert_eq!(compiler.run_u64(&[7, 13, 0]).expect("execute"), 7);
+    assert_eq!(compiler.run_u64(&[7, 13, 1]).expect("execute"), 13);
+    assert_eq!(compiler.run_u64(&[7, 13, 3]).expect("execute"), 13);
 
     let x: u8 = 7;
     let y: u8 = 13;
@@ -913,21 +920,23 @@ fn f(x: bits[8] id=1, y: bits[8] id=2, index: bits[2] id=3) -> bits[8] {
     ];
     let mut scratch = vec![
         0u64;
-        jit.scratch_byte_count()
+        compiler
+            .scratch_byte_count()
             .div_ceil(std::mem::size_of::<u64>())
     ];
-    assert!(jit.scratch_byte_count() > 0);
-    assert!(jit.scratch_alignment() <= std::mem::align_of::<u64>());
+    assert!(compiler.scratch_byte_count() > 0);
+    assert!(compiler.scratch_alignment() <= std::mem::align_of::<u64>());
     // SAFETY: all values use their native scalar layouts, and `scratch` is
     // sufficiently sized and aligned for the published scratch requirement.
     unsafe {
-        jit.run_native_with_scratch(
-            &inputs,
-            std::ptr::from_mut(&mut output).cast(),
-            scratch.as_mut_ptr().cast(),
-            scratch.len() * std::mem::size_of::<u64>(),
-        )
-        .expect("execution with caller-owned scratch should succeed");
+        compiler
+            .run_native_with_scratch(
+                &inputs,
+                std::ptr::from_mut(&mut output).cast(),
+                scratch.as_mut_ptr().cast(),
+                scratch.len() * std::mem::size_of::<u64>(),
+            )
+            .expect("execution with caller-owned scratch should succeed");
     }
     assert_eq!(output, 13);
 }
@@ -1125,7 +1134,7 @@ fn native_tuple_layout_matches_repr_c_storage() {
         high: u32,
     }
 
-    let jit = compile(
+    let compiler = compile(
         r#"package test
 
 fn f(low: bits[8] id=1, high: bits[17] id=2) -> (bits[8], bits[17]) {
@@ -1134,7 +1143,7 @@ fn f(low: bits[8] id=1, high: bits[17] id=2) -> (bits[8], bits[17]) {
 "#,
     );
     assert_eq!(
-        jit.result_layout(),
+        compiler.result_layout(),
         &NativeValueLayout::Tuple {
             fields: vec![
                 NativeTupleFieldLayout {
@@ -1164,10 +1173,11 @@ fn f(low: bits[8] id=1, high: bits[17] id=2) -> (bits[8], bits[17]) {
         std::ptr::from_ref(&low).cast::<u8>(),
         std::ptr::from_ref(&high).cast::<u8>(),
     ];
-    // SAFETY: `Pair` has the `#[repr(C)]` tuple layout published by the JIT,
+    // SAFETY: `Pair` has the `#[repr(C)]` tuple layout published by the compiler,
     // and the scalar inputs use their respective native carriers.
     unsafe {
-        jit.run_native(&inputs, std::ptr::from_mut(&mut output).cast())
+        compiler
+            .run_native(&inputs, std::ptr::from_mut(&mut output).cast())
             .expect("native tuple construction should execute");
     }
     assert_eq!(output.low, low);
@@ -1317,7 +1327,7 @@ fn f(lhs: bits[5] id=1, rhs: bits[4] id=2) -> (bits[8], bits[8]) {
 
 #[test]
 fn ir_value_adapter_matches_native_result() {
-    let jit = compile(
+    let compiler = compile(
         r#"package test
 
 fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
@@ -1325,7 +1335,7 @@ fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
 }
 "#,
     );
-    let result = jit
+    let result = compiler
         .run_ir_values(&[
             IrValue::make_ubits(8, 3).unwrap(),
             IrValue::make_ubits(8, 5).unwrap(),

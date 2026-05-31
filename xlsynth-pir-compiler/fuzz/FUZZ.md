@@ -1,11 +1,11 @@
-# PIR Function JIT vs Evaluator Fuzz Target
+# PIR Function Compiler vs Evaluator Fuzz Targets
 
-Target name: `fuzz_pir_function_jit_eval_equiv`
+Target name: `fuzz_pir_function_compiler_eval_equiv`
 
 Run:
 
 ```bash
-cargo fuzz run fuzz_pir_function_jit_eval_equiv
+cargo fuzz run fuzz_pir_function_compiler_eval_equiv
 ```
 
 This target uses `xlsynth_pir::ir_random` to construct typed scalar PIR
@@ -16,7 +16,7 @@ then requires identical returned values.
 
 Essential property under test:
 
-- Any generated PIR function within the configured JIT subset has the
+- Any generated PIR function within the configured compiler subset has the
   same semantics under generated native code and the PIR evaluator.
 
 Main failure modes surfaced:
@@ -26,12 +26,12 @@ Main failure modes surfaced:
 - Incorrect masking of padded native carrier bits.
 - Divergence in native argument/result access versus PIR evaluation.
 
-Target name: `fuzz_pir_function_jit_aggregate_eval_equiv`
+Target name: `fuzz_pir_function_compiler_aggregate_eval_equiv`
 
 Run:
 
 ```bash
-cargo fuzz run fuzz_pir_function_jit_aggregate_eval_equiv
+cargo fuzz run fuzz_pir_function_compiler_aggregate_eval_equiv
 ```
 
 This target expands the same differential property to native aggregates and

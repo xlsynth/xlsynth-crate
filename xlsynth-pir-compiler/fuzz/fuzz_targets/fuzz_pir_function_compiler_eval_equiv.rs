@@ -8,7 +8,7 @@ use xlsynth_pir::ir_random::{
     DepletableBytes, OperationSet, RandomFnOptions, RandomOperation, StopPolicy,
     generate_arguments, generate_fn,
 };
-use xlsynth_pir_compiler::PirFunctionJit;
+use xlsynth_pir_compiler::PirFunctionCompiler;
 
 fn options() -> RandomFnOptions {
     RandomFnOptions {
@@ -89,19 +89,19 @@ fuzz_target!(|data: &[u8]| {
     .expect("the scalar fuzz generator options should always construct a PIR function");
     let function = &generated.function;
     let ir_text = function.to_string();
-    let jit = PirFunctionJit::compile(function)
-        .unwrap_or_else(|error| panic!("JIT compilation failed for generated IR:\n{ir_text}\n{error}"));
+    let compiler = PirFunctionCompiler::compile(function)
+        .unwrap_or_else(|error| panic!("compiled-function compilation failed for generated IR:\n{ir_text}\n{error}"));
     let mut argument_entropy = DepletableBytes::new(data);
     let args = generate_arguments(&mut argument_entropy, function);
     let expected = match eval_fn(function, &args) {
         FnEvalResult::Success(success) => success.value,
         other => panic!("PIR evaluator failed for generated IR:\n{ir_text}\n{other:?}"),
     };
-    let actual = jit
+    let actual = compiler
         .run_ir_values(&args)
-        .unwrap_or_else(|error| panic!("JIT execution failed:\n{ir_text}\n{error}"));
+        .unwrap_or_else(|error| panic!("compiled-function execution failed:\n{ir_text}\n{error}"));
     assert_eq!(
         actual, expected,
-        "PIR JIT/evaluator mismatch\nIR:\n{ir_text}\nargs={args:?}"
+        "PIR compiler/evaluator mismatch\nIR:\n{ir_text}\nargs={args:?}"
     );
 });
