@@ -116,6 +116,29 @@ fn f(x: bits[8] id=1, y: bits[8] id=2) -> bits[8] {
 }
 
 #[test]
+fn native_aggregate_copy_allows_exact_input_output_aliasing() {
+    let compiler = compile(
+        r#"package test
+
+fn f(values: bits[16][4] id=1) -> bits[16][4] {
+  ret result: bits[16][4] = identity(values, id=2)
+}
+"#,
+    );
+    let mut values = [11u16, 22, 33, 44];
+    let inputs = [std::ptr::from_ref(&values).cast::<u8>()];
+
+    // SAFETY: `values` carries the published native array layout. Exact
+    // input/output aliasing is supported by the aggregate memmove lowering.
+    unsafe {
+        compiler
+            .run_native(&inputs, std::ptr::from_mut(&mut values).cast())
+            .expect("native aggregate identity should execute in place");
+    }
+    assert_eq!(values, [11, 22, 33, 44]);
+}
+
+#[test]
 fn compiles_zero_sized_token_and_cover_unit_results() {
     let token_compiler = compile(
         r#"package test
@@ -713,6 +736,22 @@ fn f(index: bits[2] id=1) -> bits[3] {
 }
 
 #[test]
+fn statically_safe_assumed_in_bounds_nodes_do_not_create_event_sites() {
+    let compiler = compile(
+        r#"package test
+
+fn f(a: bits[8][4] id=1, v: bits[8] id=2, i: bits[2] id=3) -> bits[8] {
+  dead_index: bits[8] = array_index(a, indices=[i], assumed_in_bounds=true, id=4)
+  dead_update: bits[8][4] = array_update(a, v, indices=[i], assumed_in_bounds=true, id=5)
+  ret out: bits[8] = identity(v, id=6)
+}
+"#,
+    );
+    assert!(compiler.metadata().event_sites.is_empty());
+    assert_eq!(compiler.scratch_byte_count(), 0);
+}
+
+#[test]
 fn assumed_in_bounds_array_violations_accumulate_for_retained_graph_nodes() {
     let compiler = compile(
         r#"package test
@@ -735,12 +774,14 @@ fn f(a: bits[8][2] id=1, v: bits[8] id=2, i: bits[2] id=3) -> bits[8] {
         .expect("out-of-bounds execution remains safe");
     assert_eq!(out_of_bounds.value, bits(8, 99));
     assert_eq!(
-        out_of_bounds
-            .events
-            .assumption_failures
-            .iter()
-            .map(|failure| (failure.node_text_id, failure.kind))
-            .collect::<Vec<_>>(),
+        sorted(
+            out_of_bounds
+                .events
+                .assumption_failures
+                .iter()
+                .map(|failure| (failure.node_text_id, failure.kind))
+                .collect::<Vec<_>>()
+        ),
         vec![
             (4, AssumptionFailureKind::ArrayIndexOutOfBounds),
             (5, AssumptionFailureKind::ArrayUpdateOutOfBounds),
@@ -1094,6 +1135,163 @@ fn f(selector: bits[2] id=1, pred: bits[1] id=2, a: bits[8][2] id=3, b: bits[8][
 }
 
 #[test]
+fn aggregate_sel_and_priority_sel_alias_input_storage_without_scratch() {
+    let sel = compile(
+        r#"package test
+
+fn f(selector: bits[1] id=1, a: bits[8][2] id=2, b: bits[8][2] id=3, index: bits[1] id=4) -> bits[8] {
+  selected: bits[8][2] = sel(selector, cases=[a], default=b, id=5)
+  ret result: bits[8] = array_index(selected, indices=[index], id=6)
+}
+"#,
+    );
+    assert_eq!(sel.scratch_byte_count(), 0);
+    assert_eq!(
+        sel.run_ir_values(&[
+            bits(1, 0),
+            array(8, &[11, 13]),
+            array(8, &[17, 19]),
+            bits(1, 0),
+        ])
+        .expect("aggregate sel execution"),
+        bits(8, 11)
+    );
+
+    let priority_sel = compile(
+        r#"package test
+
+fn f(selector: bits[2] id=1, a: bits[8][2] id=2, b: bits[8][2] id=3, d: bits[8][2] id=4, index: bits[1] id=5) -> bits[8] {
+  selected: bits[8][2] = priority_sel(selector, cases=[a, b], default=d, id=6)
+  ret result: bits[8] = array_index(selected, indices=[index], id=7)
+}
+"#,
+    );
+    assert_eq!(priority_sel.scratch_byte_count(), 0);
+    assert_eq!(
+        priority_sel
+            .run_ir_values(&[
+                bits(2, 2),
+                array(8, &[11, 13]),
+                array(8, &[17, 19]),
+                array(8, &[23, 29]),
+                bits(1, 1),
+            ])
+            .expect("aggregate priority_sel execution"),
+        bits(8, 19)
+    );
+}
+
+#[test]
+fn aggregate_gate_aliases_true_value_and_uses_shared_zero_storage() {
+    let compiler = compile(
+        r#"package test
+
+fn f(pred: bits[1] id=1, values: bits[8][4] id=2, index: bits[2] id=3) -> bits[8] {
+  gated: bits[8][4] = gate(pred, values, id=4)
+  ret result: bits[8] = array_index(gated, indices=[index], id=5)
+}
+"#,
+    );
+    assert_eq!(compiler.scratch_byte_count(), 4);
+    assert_eq!(
+        compiler
+            .run_ir_values(&[bits(1, 1), array(8, &[3, 5, 7, 11]), bits(2, 2)])
+            .expect("enabled aggregate gate execution"),
+        bits(8, 7)
+    );
+    assert_eq!(
+        compiler
+            .run_ir_values(&[bits(1, 0), array(8, &[3, 5, 7, 11]), bits(2, 2)])
+            .expect("disabled aggregate gate execution"),
+        bits(8, 0)
+    );
+}
+
+#[test]
+fn scratch_slots_are_reused_after_last_use_and_preserved_through_aliases() {
+    let reusable = compile(
+        r#"package test
+
+fn f(a: bits[8] id=1, b: bits[8] id=2, index: bits[1] id=3) -> bits[8] {
+  first: bits[8][2] = array(a, b, id=4)
+  selected: bits[8] = array_index(first, indices=[index], id=5)
+  second: bits[8][2] = array(selected, b, id=6)
+  ret result: bits[8] = array_index(second, indices=[index], id=7)
+}
+"#,
+    );
+    assert_eq!(reusable.scratch_byte_count(), 2);
+    assert_eq!(
+        reusable
+            .run_ir_values(&[bits(8, 7), bits(8, 13), bits(1, 0)])
+            .expect("reused scratch execution"),
+        bits(8, 7)
+    );
+
+    let preserved = compile(
+        r#"package test
+
+fn f(selector: bits[1] id=1, a: bits[8] id=2, b: bits[8] id=3, index: bits[1] id=4) -> bits[8] {
+  first: bits[8][2] = array(a, b, id=5)
+  selected: bits[8][2] = sel(selector, cases=[first], default=first, id=6)
+  second: bits[8][2] = array(b, a, id=7)
+  rhs: bits[8] = array_index(second, indices=[index], id=8)
+  lhs: bits[8] = array_index(selected, indices=[index], id=9)
+  ret result: bits[8] = add(lhs, rhs, id=10)
+}
+"#,
+    );
+    assert_eq!(preserved.scratch_byte_count(), 4);
+    assert_eq!(
+        preserved
+            .run_ir_values(&[bits(1, 1), bits(8, 7), bits(8, 13), bits(1, 0)])
+            .expect("transitively preserved scratch execution"),
+        bits(8, 20)
+    );
+}
+
+#[test]
+fn array_update_reuses_dead_scratch_storage_but_preserves_live_sources() {
+    let reusable = compile(
+        r#"package test
+
+fn f(a: bits[8] id=1, b: bits[8] id=2, replacement: bits[8] id=3, index: bits[1] id=4) -> bits[8] {
+  original: bits[8][2] = array(a, b, id=5)
+  updated: bits[8][2] = array_update(original, replacement, indices=[index], id=6)
+  ret result: bits[8] = array_index(updated, indices=[index], id=7)
+}
+"#,
+    );
+    assert_eq!(reusable.scratch_byte_count(), 2);
+    assert_eq!(
+        reusable
+            .run_ir_values(&[bits(8, 7), bits(8, 13), bits(8, 41), bits(1, 0)])
+            .expect("in-place array update execution"),
+        bits(8, 41)
+    );
+
+    let preserved = compile(
+        r#"package test
+
+fn f(a: bits[8] id=1, b: bits[8] id=2, replacement: bits[8] id=3, index: bits[1] id=4) -> bits[8] {
+  original: bits[8][2] = array(a, b, id=5)
+  updated: bits[8][2] = array_update(original, replacement, indices=[index], id=6)
+  before: bits[8] = array_index(original, indices=[index], id=7)
+  after: bits[8] = array_index(updated, indices=[index], id=8)
+  ret result: bits[8] = add(before, after, id=9)
+}
+"#,
+    );
+    assert_eq!(preserved.scratch_byte_count(), 4);
+    assert_eq!(
+        preserved
+            .run_ir_values(&[bits(8, 7), bits(8, 13), bits(8, 41), bits(1, 0)])
+            .expect("preserved array update source execution"),
+        bits(8, 48)
+    );
+}
+
+#[test]
 fn aggregate_comparisons_and_default_only_sel_match_pir_evaluator() {
     assert_matches_evaluator(
         r#"package test
@@ -1433,6 +1631,58 @@ fn f(x: bits[129] id=1, y: bits[129] id=2, shift: bits[8] id=3, replacement: bit
                 bits(8, 130),
                 wide_bits("bits[73]:0x100_0000_0000_0001"),
             ],
+        ],
+    );
+}
+
+#[test]
+fn direct_wide_dynamic_bit_slice_does_not_require_runtime_scratch() {
+    let ir = r#"package test
+
+fn f(x: bits[257] id=1, shift: bits[129] id=2) -> bits[96] {
+  ret sliced: bits[96] = dynamic_bit_slice(x, shift, width=96, id=3)
+}
+"#;
+    let compiler = compile(ir);
+    assert_eq!(compiler.scratch_byte_count(), 0);
+    assert_matches_evaluator(
+        ir,
+        &[
+            vec![
+                wide_bits(
+                    "bits[257]:0x1_0123_4567_89ab_cdef_fedc_ba98_7654_3210_55aa_aa55_1234_5678",
+                ),
+                wide_bits("bits[129]:0x3f"),
+            ],
+            vec![
+                wide_bits(
+                    "bits[257]:0x1_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff",
+                ),
+                wide_bits("bits[129]:0x100_0000_0000_0000_0000_0000_0000_0000"),
+            ],
+        ],
+    );
+}
+
+#[test]
+fn direct_wide_decode_does_not_require_runtime_scratch() {
+    let ir = r#"package test
+
+fn f(index: bits[129] id=1) -> bits[257] {
+  ret decoded: bits[257] = decode(index, width=257, id=2)
+}
+"#;
+    let compiler = compile(ir);
+    assert_eq!(compiler.scratch_byte_count(), 0);
+    assert_matches_evaluator(
+        ir,
+        &[
+            vec![wide_bits("bits[129]:0x0")],
+            vec![wide_bits("bits[129]:0x100")],
+            vec![wide_bits("bits[129]:0x101")],
+            vec![wide_bits(
+                "bits[129]:0x1_0000_0000_0000_0000_0000_0000_0000_0000",
+            )],
         ],
     );
 }

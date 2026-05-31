@@ -3,12 +3,14 @@
 //! Native compilation and in-memory execution for the supported subset of PIR
 //! functions.
 
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ptr;
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{
-    AbiParam, FuncRef, InstBuilder, MemFlags, Type as ClifType, Value, types,
+    AbiParam, ExtFuncData, ExternalName, FuncRef, InstBuilder, LibCall, MemFlags, Signature,
+    Type as ClifType, Value, types,
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -16,7 +18,7 @@ use cranelift_module::{Linkage, Module, default_libcall_names};
 use thiserror::Error;
 use xlsynth::{IrBits, IrValue};
 use xlsynth_pir::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
-use xlsynth_pir::ir_utils::{get_topological, is_observable_effect_root, operands};
+use xlsynth_pir::ir_utils::{is_observable_effect_root, operands};
 pub use xlsynth_pir_compiler_runtime::{
     AssertionFailure, AssumptionFailure, AssumptionFailureKind, CompiledEntrypoint,
     CompiledFunctionMetadata, CoverCount, EventKind, EventSiteMetadata, ExecutionContext,
@@ -353,7 +355,7 @@ impl PirFunctionCompiler {
             .map(|param| NativeValueLayout::from_type(&param.ty))
             .collect::<Result<Vec<_>, _>>()?;
         let result_layout = NativeValueLayout::from_type(&function.ret_ty)?;
-        let order = reachable_topological_order(function)?;
+        let order = reachable_scheduled_order(function)?;
         for node_ref in &order {
             NativeValueLayout::from_type(&function.get_node(*node_ref).ty)?;
         }
@@ -979,6 +981,9 @@ impl NativeScalar {
 #[derive(Debug)]
 struct ScratchPlan {
     offsets: HashMap<NodeRef, usize>,
+    in_place_array_updates: HashSet<NodeRef>,
+    gate_zero_offset: Option<usize>,
+    gate_zero_byte_count: usize,
     trace_sites: HashMap<NodeRef, TraceScratchPlan>,
     runtime_scalar_offsets: HashMap<NodeRef, usize>,
     runtime_temporary_offsets: [Option<usize>; 2],
@@ -992,32 +997,28 @@ struct TraceScratchPlan {
     scalar_operand_offsets: Vec<Option<usize>>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ScratchSlot {
+    offset: usize,
+    byte_count: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ActiveScratchSlot {
+    slot: ScratchSlot,
+    last_use: usize,
+}
+
 impl ScratchPlan {
-    /// Assigns native scratch slots for materialized intermediate aggregates.
+    /// Assigns reusable native scratch slots for materialized intermediates.
     fn for_function(function: &ir::Fn, order: &[NodeRef]) -> Result<Self, CompilerError> {
-        let mut offsets = HashMap::new();
+        let (offsets, in_place_array_updates, mut byte_count, mut alignment) =
+            assign_materialized_scratch_offsets(function, order)?;
+        let (gate_zero_offset, gate_zero_byte_count) =
+            reserve_gate_zero_storage(function, order, &mut byte_count, &mut alignment)?;
         let mut trace_sites = HashMap::new();
         let mut runtime_scalar_offsets = HashMap::new();
         let mut runtime_temporary_offsets = [None; 2];
-        let mut byte_count = 0usize;
-        let mut alignment = 1usize;
-        for node_ref in order {
-            let node = function.get_node(*node_ref);
-            let layout = NativeValueLayout::from_type(&node.ty)?;
-            if !needs_materialized_destination(node, &layout)
-                || function
-                    .ret_node_ref
-                    .is_some_and(|result| result == *node_ref)
-            {
-                continue;
-            }
-            byte_count = align_up(byte_count, layout.alignment())?;
-            offsets.insert(*node_ref, byte_count);
-            byte_count = byte_count.checked_add(layout.byte_count()).ok_or_else(|| {
-                CompilerError::UnsupportedType(format!("scratch size overflow for {}", node.ty))
-            })?;
-            alignment = alignment.max(layout.alignment());
-        }
         for node_ref in order {
             let NodePayload::Trace { operands, .. } = &function.get_node(*node_ref).payload else {
                 continue;
@@ -1053,11 +1054,7 @@ impl ScratchPlan {
                 },
             );
         }
-        let has_wide_bits = order.iter().try_fold(false, |found, node_ref| {
-            NativeValueLayout::from_type(&function.get_node(*node_ref).ty)
-                .map(|layout| found || layout_contains_wide_bits(&layout))
-        })?;
-        if has_wide_bits {
+        if function_uses_runtime_bits_callback(function, order)? {
             for node_ref in order {
                 let NativeValueLayout::Scalar(_) =
                     NativeValueLayout::from_type(&function.get_node(*node_ref).ty)?
@@ -1086,6 +1083,9 @@ impl ScratchPlan {
         }
         Ok(Self {
             offsets,
+            in_place_array_updates,
+            gate_zero_offset,
+            gate_zero_byte_count,
             trace_sites,
             runtime_scalar_offsets,
             runtime_temporary_offsets,
@@ -1093,6 +1093,277 @@ impl ScratchPlan {
             alignment,
         })
     }
+}
+
+/// Assigns overlapping scratch offsets to materialized values with disjoint
+/// lifetimes.
+fn assign_materialized_scratch_offsets(
+    function: &ir::Fn,
+    order: &[NodeRef],
+) -> Result<(HashMap<NodeRef, usize>, HashSet<NodeRef>, usize, usize), CompilerError> {
+    let return_node = function.ret_node_ref.ok_or_else(|| {
+        CompilerError::InvalidFunction(format!("function '{}' has no return node", function.name))
+    })?;
+    let positions = order
+        .iter()
+        .enumerate()
+        .map(|(position, node_ref)| (*node_ref, position))
+        .collect::<HashMap<_, _>>();
+    let direct_last_uses = direct_last_uses(function, order, return_node);
+    let (materialized, in_place_array_updates, owners) =
+        plan_scratch_storage_owners(function, order, return_node, &direct_last_uses)?;
+    let mut last_uses = materialized
+        .iter()
+        .map(|node_ref| (*node_ref, positions[node_ref]))
+        .collect::<HashMap<_, _>>();
+    for (position, node_ref) in order.iter().enumerate() {
+        for operand in operands(&function.get_node(*node_ref).payload) {
+            for owner in owners.get(&operand).into_iter().flatten() {
+                let owner_last_use =
+                    if aggregate_construction_preloads_scalar_operand(function, *node_ref, operand)
+                    {
+                        position.saturating_sub(1)
+                    } else {
+                        position
+                    };
+                last_uses
+                    .entry(*owner)
+                    .and_modify(|last_use| *last_use = (*last_use).max(owner_last_use));
+            }
+        }
+    }
+    for owner in owners.get(&return_node).into_iter().flatten() {
+        last_uses
+            .entry(*owner)
+            .and_modify(|last_use| *last_use = (*last_use).max(order.len()));
+    }
+
+    let mut offsets = HashMap::new();
+    let mut active = Vec::<ActiveScratchSlot>::new();
+    let mut free = Vec::<ScratchSlot>::new();
+    let mut byte_count = 0usize;
+    let mut alignment = 1usize;
+    for (position, node_ref) in order.iter().copied().enumerate() {
+        if !materialized.contains(&node_ref) {
+            continue;
+        }
+        let mut still_active = Vec::with_capacity(active.len());
+        for allocation in active.drain(..) {
+            if allocation.last_use < position {
+                free.push(allocation.slot);
+            } else {
+                still_active.push(allocation);
+            }
+        }
+        active = still_active;
+
+        let node = function.get_node(node_ref);
+        let layout = NativeValueLayout::from_type(&node.ty)?;
+        let layout_alignment = layout.alignment();
+        let layout_byte_count = layout.byte_count();
+        let reusable = free
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| {
+                slot.byte_count >= layout_byte_count && slot.offset % layout_alignment == 0
+            })
+            .min_by_key(|(_, slot)| slot.byte_count)
+            .map(|(index, _)| index);
+        let slot = if let Some(index) = reusable {
+            free.swap_remove(index)
+        } else {
+            byte_count = align_up(byte_count, layout_alignment)?;
+            let slot = ScratchSlot {
+                offset: byte_count,
+                byte_count: layout_byte_count,
+            };
+            byte_count = byte_count.checked_add(layout_byte_count).ok_or_else(|| {
+                CompilerError::UnsupportedType(format!("scratch size overflow for {}", node.ty))
+            })?;
+            slot
+        };
+        offsets.insert(node_ref, slot.offset);
+        active.push(ActiveScratchSlot {
+            slot,
+            last_use: last_uses[&node_ref],
+        });
+        alignment = alignment.max(layout_alignment);
+    }
+    Ok((offsets, in_place_array_updates, byte_count, alignment))
+}
+
+/// Returns whether lowering reads a scalar operand before writing aggregate
+/// destination storage, allowing its backing scratch slot to be reused.
+fn aggregate_construction_preloads_scalar_operand(
+    function: &ir::Fn,
+    node_ref: NodeRef,
+    operand: NodeRef,
+) -> bool {
+    matches!(
+        function.get_node(node_ref).payload,
+        NodePayload::Array(_) | NodePayload::Tuple(_)
+    ) && matches!(
+        NativeValueLayout::from_type(&function.get_node(operand).ty),
+        Ok(NativeValueLayout::Scalar(_))
+    )
+}
+
+/// Returns the final use position for each node value.
+fn direct_last_uses(
+    function: &ir::Fn,
+    order: &[NodeRef],
+    return_node: NodeRef,
+) -> HashMap<NodeRef, usize> {
+    let mut last_uses = order
+        .iter()
+        .enumerate()
+        .map(|(position, node_ref)| (*node_ref, position))
+        .collect::<HashMap<_, _>>();
+    for (position, node_ref) in order.iter().enumerate() {
+        for operand in operands(&function.get_node(*node_ref).payload) {
+            last_uses
+                .entry(operand)
+                .and_modify(|last_use| *last_use = (*last_use).max(position));
+        }
+    }
+    last_uses
+        .entry(return_node)
+        .and_modify(|last_use| *last_use = (*last_use).max(order.len()));
+    last_uses
+}
+
+/// Resolves scratch allocations and storage aliases, including array updates
+/// that can consume a dead scratch-owned input in place.
+fn plan_scratch_storage_owners(
+    function: &ir::Fn,
+    order: &[NodeRef],
+    return_node: NodeRef,
+    direct_last_uses: &HashMap<NodeRef, usize>,
+) -> Result<
+    (
+        HashSet<NodeRef>,
+        HashSet<NodeRef>,
+        HashMap<NodeRef, Vec<NodeRef>>,
+    ),
+    CompilerError,
+> {
+    let mut materialized = HashSet::new();
+    let mut in_place_array_updates = HashSet::new();
+    let mut owners = HashMap::<NodeRef, Vec<NodeRef>>::new();
+    for (position, node_ref) in order.iter().enumerate() {
+        let node = function.get_node(*node_ref);
+        let layout = NativeValueLayout::from_type(&node.ty)?;
+        let can_update_in_place = match &node.payload {
+            NodePayload::ArrayUpdate { array, indices, .. } if !indices.is_empty() => {
+                let source_owners = owners.get(array).cloned().unwrap_or_default();
+                source_owners.len() == 1
+                    && scratch_owner_is_dead_after_position(
+                        source_owners[0],
+                        position,
+                        &owners,
+                        direct_last_uses,
+                    )
+            }
+            _ => false,
+        };
+        if can_update_in_place {
+            in_place_array_updates.insert(*node_ref);
+        } else if *node_ref != return_node && needs_materialized_destination(node, &layout) {
+            materialized.insert(*node_ref);
+        }
+        let mut node_owners = if materialized.contains(node_ref) {
+            vec![*node_ref]
+        } else if can_update_in_place {
+            let NodePayload::ArrayUpdate { array, .. } = &node.payload else {
+                unreachable!("in-place update decision requires array_update")
+            };
+            owners.get(array).cloned().unwrap_or_default()
+        } else if layout.is_memory_backed() || scalar_storage_view_payload(&node.payload) {
+            aliased_storage_operands(&node.payload)
+                .into_iter()
+                .flat_map(|operand| owners.get(&operand).into_iter().flatten().copied())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        node_owners.sort_by_key(|owner| owner.index);
+        node_owners.dedup();
+        owners.insert(*node_ref, node_owners);
+    }
+    Ok((materialized, in_place_array_updates, owners))
+}
+
+/// Returns whether no existing view of a scratch owner survives an update.
+fn scratch_owner_is_dead_after_position(
+    owner: NodeRef,
+    position: usize,
+    owners: &HashMap<NodeRef, Vec<NodeRef>>,
+    direct_last_uses: &HashMap<NodeRef, usize>,
+) -> bool {
+    owners.iter().all(|(node_ref, node_owners)| {
+        !node_owners.contains(&owner) || direct_last_uses[node_ref] <= position
+    })
+}
+
+/// Returns whether a scalar result can preserve a view into backing storage.
+fn scalar_storage_view_payload(payload: &NodePayload) -> bool {
+    matches!(
+        payload,
+        NodePayload::Unop(Unop::Identity, _)
+            | NodePayload::ArrayIndex { .. }
+            | NodePayload::TupleIndex { .. }
+    )
+}
+
+/// Returns operands whose backing storage is preserved by a memory-backed view.
+fn aliased_storage_operands(payload: &NodePayload) -> Vec<NodeRef> {
+    match payload {
+        NodePayload::GetParam(_) => Vec::new(),
+        NodePayload::Unop(Unop::Identity, arg) => vec![*arg],
+        NodePayload::ArrayIndex { array, .. } => vec![*array],
+        NodePayload::TupleIndex { tuple, .. } => vec![*tuple],
+        NodePayload::ArrayUpdate { value, indices, .. } if indices.is_empty() => vec![*value],
+        NodePayload::Binop(Binop::Gate, _, gated) => vec![*gated],
+        NodePayload::Sel { cases, default, .. }
+        | NodePayload::PrioritySel { cases, default, .. } => {
+            let mut operands = cases.clone();
+            operands.extend(default.iter().copied());
+            operands
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Reserves one shared zero buffer used by memory-backed gate views.
+fn reserve_gate_zero_storage(
+    function: &ir::Fn,
+    order: &[NodeRef],
+    byte_count: &mut usize,
+    alignment: &mut usize,
+) -> Result<(Option<usize>, usize), CompilerError> {
+    let mut gate_zero_byte_count = 0usize;
+    let mut gate_zero_alignment = 1usize;
+    for node_ref in order {
+        let node = function.get_node(*node_ref);
+        if !matches!(node.payload, NodePayload::Binop(Binop::Gate, _, _)) {
+            continue;
+        }
+        let layout = NativeValueLayout::from_type(&node.ty)?;
+        if layout.is_memory_backed() {
+            gate_zero_byte_count = gate_zero_byte_count.max(layout.byte_count());
+            gate_zero_alignment = gate_zero_alignment.max(layout.alignment());
+        }
+    }
+    if gate_zero_byte_count == 0 {
+        return Ok((None, 0));
+    }
+    *byte_count = align_up(*byte_count, gate_zero_alignment)?;
+    let offset = *byte_count;
+    *byte_count = (*byte_count)
+        .checked_add(gate_zero_byte_count)
+        .ok_or_else(|| CompilerError::UnsupportedType("gate zero scratch size overflow".into()))?;
+    *alignment = (*alignment).max(gate_zero_alignment);
+    Ok((Some(offset), gate_zero_byte_count))
 }
 
 fn align_up(value: usize, alignment: usize) -> Result<usize, CompilerError> {
@@ -1111,30 +1382,61 @@ fn needs_materialized_destination(node: &ir::Node, layout: &NativeValueLayout) -
                 | NodePayload::Unop(Unop::Identity, _)
                 | NodePayload::ArrayIndex { .. }
                 | NodePayload::TupleIndex { .. }
-        ),
-        NativeValueLayout::Array { .. } | NativeValueLayout::Tuple { .. } => matches!(
-            &node.payload,
-            NodePayload::Literal(_)
-                | NodePayload::Array(_)
-                | NodePayload::Tuple(_)
-                | NodePayload::ArrayConcat(_)
-                | NodePayload::ArraySlice { .. }
-                | NodePayload::ArrayUpdate { .. }
-                | NodePayload::Binop(Binop::Gate | Binop::Umulp | Binop::Smulp, _, _,)
+                | NodePayload::Binop(Binop::Gate, _, _)
                 | NodePayload::Sel { .. }
                 | NodePayload::PrioritySel { .. }
-                | NodePayload::OneHotSel { .. }
-                | NodePayload::ExtNormalizeLeft { .. }
         ),
+        NativeValueLayout::Array { .. } | NativeValueLayout::Tuple { .. } => match &node.payload {
+            NodePayload::ArrayUpdate { indices, .. } => !indices.is_empty(),
+            NodePayload::Literal(_)
+            | NodePayload::Array(_)
+            | NodePayload::Tuple(_)
+            | NodePayload::ArrayConcat(_)
+            | NodePayload::ArraySlice { .. }
+            | NodePayload::Binop(Binop::Umulp | Binop::Smulp, _, _)
+            | NodePayload::OneHotSel { .. }
+            | NodePayload::ExtNormalizeLeft { .. } => true,
+            _ => false,
+        },
         NativeValueLayout::Scalar(_) | NativeValueLayout::Token => false,
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum ComputedValue {
     Scalar(Value),
+    ScalarAddress {
+        pointer: Value,
+        offset: usize,
+        layout: ScalarLayout,
+    },
+    ScalarArrayIndex(Box<DeferredScalarArrayIndex>),
     Address(Value),
     ZeroSized,
+}
+
+#[derive(Clone)]
+struct DeferredScalarArrayIndex {
+    array_pointer: Value,
+    dimensions: Vec<DeferredArrayIndexDimension>,
+    layout: ScalarLayout,
+    assumption_site: Option<DeferredAssumptionSite>,
+}
+
+#[derive(Clone)]
+struct DeferredArrayIndexDimension {
+    index: ComputedValue,
+    index_layout: NativeValueLayout,
+    element_count: usize,
+    element_byte_count: usize,
+    statically_in_bounds: bool,
+}
+
+#[derive(Clone, Copy)]
+struct DeferredAssumptionSite {
+    callback: FuncRef,
+    execution_context: Value,
+    site_id: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -1144,7 +1446,6 @@ struct RuntimeCallbacks {
     record_cover: FuncRef,
     record_trace: FuncRef,
     wide_binop: FuncRef,
-    wide_dynamic_bit_slice: FuncRef,
     wide_bit_slice_update: FuncRef,
     wide_unary_op: FuncRef,
     wide_mulp: FuncRef,
@@ -1183,6 +1484,63 @@ fn trace_layout_from_native(layout: &NativeValueLayout) -> TraceValueLayout {
     }
 }
 
+/// Returns a literal bits value as `usize` when it fits in the host address
+/// space.
+fn literal_bits_as_usize(value: &IrValue) -> Option<usize> {
+    let bytes = value.to_bits().ok()?.to_le_bytes().ok()?;
+    let mut result = 0usize;
+    for (index, byte) in bytes.into_iter().enumerate() {
+        if index >= std::mem::size_of::<usize>() {
+            if byte != 0 {
+                return None;
+            }
+            continue;
+        }
+        result |= usize::from(byte) << (index * 8);
+    }
+    Some(result)
+}
+
+/// Returns whether an index node is provably below an array dimension from its
+/// literal value or its bits type.
+fn bits_node_is_statically_less_than(
+    function: &ir::Fn,
+    node_ref: NodeRef,
+    upper_bound: usize,
+) -> bool {
+    if upper_bound == 0 {
+        return false;
+    }
+    let node = function.get_node(node_ref);
+    if let NodePayload::Literal(value) = &node.payload {
+        return literal_bits_as_usize(value).is_some_and(|value| value < upper_bound);
+    }
+    let Type::Bits(bit_count) = &node.ty else {
+        return false;
+    };
+    *bit_count < usize::BITS as usize && (1usize << *bit_count) <= upper_bound
+}
+
+/// Returns whether every index in a multidimensional array access is
+/// statically guaranteed to be in bounds.
+fn array_indices_are_statically_in_bounds(
+    function: &ir::Fn,
+    array: NodeRef,
+    indices: &[NodeRef],
+) -> bool {
+    let mut ty = &function.get_node(array).ty;
+    for index in indices {
+        let Type::Array(array) = ty else {
+            return false;
+        };
+        if !bits_node_is_statically_less_than(function, *index, array.element_count) {
+            return false;
+        }
+        ty = array.element_type.as_ref();
+    }
+    true
+}
+
 fn build_event_metadata(
     function: &ir::Fn,
     order: &[NodeRef],
@@ -1209,27 +1567,42 @@ fn build_event_metadata(
                 operand_layouts: Vec::new(),
             }),
             NodePayload::ArrayIndex {
+                array,
+                indices,
                 assumed_in_bounds: true,
-                ..
-            } => Some(EventSiteMetadata {
-                node_text_id: node.text_id,
-                kind: EventKind::Assumption(AssumptionFailureKind::ArrayIndexOutOfBounds),
-                label: None,
-                message: None,
-                format: None,
-                operand_layouts: Vec::new(),
-            }),
+            } if !array_indices_are_statically_in_bounds(function, *array, indices) => {
+                Some(EventSiteMetadata {
+                    node_text_id: node.text_id,
+                    kind: EventKind::Assumption(AssumptionFailureKind::ArrayIndexOutOfBounds),
+                    label: None,
+                    message: None,
+                    format: None,
+                    operand_layouts: Vec::new(),
+                })
+            }
             NodePayload::ArrayUpdate {
+                array,
+                indices,
                 assumed_in_bounds: true,
                 ..
-            } => Some(EventSiteMetadata {
-                node_text_id: node.text_id,
-                kind: EventKind::Assumption(AssumptionFailureKind::ArrayUpdateOutOfBounds),
-                label: None,
-                message: None,
-                format: None,
-                operand_layouts: Vec::new(),
-            }),
+            } if !array_indices_are_statically_in_bounds(function, *array, indices) => {
+                Some(EventSiteMetadata {
+                    node_text_id: node.text_id,
+                    kind: EventKind::Assumption(AssumptionFailureKind::ArrayUpdateOutOfBounds),
+                    label: None,
+                    message: None,
+                    format: None,
+                    operand_layouts: Vec::new(),
+                })
+            }
+            NodePayload::ArrayIndex {
+                assumed_in_bounds: true,
+                ..
+            }
+            | NodePayload::ArrayUpdate {
+                assumed_in_bounds: true,
+                ..
+            } => None,
             NodePayload::Trace {
                 format, operands, ..
             } => Some(EventSiteMetadata {
@@ -1258,7 +1631,8 @@ fn build_event_metadata(
     Ok((CompiledFunctionMetadata { event_sites }, site_ids))
 }
 
-fn reachable_topological_order(function: &ir::Fn) -> Result<Vec<NodeRef>, CompilerError> {
+/// Returns the reachable nodes in a pressure-aware topological lowering order.
+fn reachable_scheduled_order(function: &ir::Fn) -> Result<Vec<NodeRef>, CompilerError> {
     let return_node = function.ret_node_ref.ok_or_else(|| {
         CompilerError::InvalidFunction(format!("function '{}' has no return node", function.name))
     })?;
@@ -1270,20 +1644,24 @@ fn reachable_topological_order(function: &ir::Fn) -> Result<Vec<NodeRef>, Compil
             .enumerate()
             .filter(|(_, node)| {
                 is_observable_effect_root(&node.payload)
-                    || matches!(
-                        &node.payload,
+                    || match &node.payload {
                         NodePayload::ArrayIndex {
+                            array,
+                            indices,
                             assumed_in_bounds: true,
-                            ..
-                        } | NodePayload::ArrayUpdate {
-                            assumed_in_bounds: true,
-                            ..
                         }
-                    )
+                        | NodePayload::ArrayUpdate {
+                            array,
+                            indices,
+                            assumed_in_bounds: true,
+                            ..
+                        } => !array_indices_are_statically_in_bounds(function, *array, indices),
+                        _ => false,
+                    }
             })
             .map(|(index, _)| NodeRef { index }),
     );
-    let mut reachable = HashSet::new();
+    let mut reachable = vec![false; function.nodes.len()];
     while let Some(node_ref) = stack.pop() {
         if node_ref.index >= function.nodes.len() {
             return Err(CompilerError::InvalidFunction(format!(
@@ -1291,18 +1669,133 @@ fn reachable_topological_order(function: &ir::Fn) -> Result<Vec<NodeRef>, Compil
                 node_ref.index
             )));
         }
-        if reachable.insert(node_ref) {
+        if !reachable[node_ref.index] {
+            reachable[node_ref.index] = true;
             stack.extend(operands(&function.get_node(node_ref).payload));
         }
     }
-    Ok(get_topological(function)
-        .into_iter()
-        .filter(|node_ref| reachable.contains(node_ref))
-        .collect())
+    let reachable_count = reachable
+        .iter()
+        .filter(|is_reachable| **is_reachable)
+        .count();
+    let dependencies = function
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            if reachable[index] {
+                unique_operands(function, NodeRef { index })
+            } else {
+                Vec::new()
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut users = vec![Vec::<NodeRef>::new(); function.nodes.len()];
+    for (index, is_reachable) in reachable.iter().copied().enumerate() {
+        if !is_reachable {
+            continue;
+        }
+        for operand in &dependencies[index] {
+            users[operand.index].push(NodeRef { index });
+        }
+    }
+    let mut remaining_dependency_count = dependencies.iter().map(Vec::len).collect::<Vec<_>>();
+    let mut remaining_user_count = users.iter().map(Vec::len).collect::<Vec<_>>();
+    let is_scalar = function
+        .nodes
+        .iter()
+        .map(|node| scheduling_is_scalar(&node.ty))
+        .collect::<Result<Vec<_>, _>>()?;
+    let scheduling_priority = |node_ref: NodeRef, remaining_user_count: &[usize]| {
+        let scalar_operand_count = dependencies[node_ref.index]
+            .iter()
+            .filter(|operand| is_scalar[operand.index])
+            .count();
+        let scalars_freed = dependencies[node_ref.index]
+            .iter()
+            .filter(|operand| is_scalar[operand.index] && remaining_user_count[operand.index] == 1)
+            .count();
+        let scalar_result_allocated = usize::from(
+            is_scalar[node_ref.index]
+                && (remaining_user_count[node_ref.index] != 0 || node_ref == return_node),
+        );
+        (
+            scheduling_gain(scalars_freed, scalar_result_allocated),
+            scalar_operand_count,
+            Reverse(node_ref.index),
+        )
+    };
+    let mut eligible = reachable
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(index, is_reachable)| *is_reachable && remaining_dependency_count[*index] == 0)
+        .map(|(index, _)| scheduling_priority(NodeRef { index }, &remaining_user_count))
+        .collect::<BinaryHeap<_>>();
+    let mut scheduled = vec![false; function.nodes.len()];
+    let mut order = Vec::with_capacity(reachable_count);
+    while let Some(priority @ (_, _, Reverse(index))) = eligible.pop() {
+        if scheduled[index] {
+            continue;
+        }
+        let node_ref = NodeRef { index };
+        let current_priority = scheduling_priority(node_ref, &remaining_user_count);
+        if priority != current_priority {
+            eligible.push(current_priority);
+            continue;
+        }
+        scheduled[index] = true;
+        order.push(node_ref);
+        for operand in &dependencies[index] {
+            remaining_user_count[operand.index] -= 1;
+            if is_scalar[operand.index] && remaining_user_count[operand.index] == 1 {
+                for user in &users[operand.index] {
+                    if !scheduled[user.index] && remaining_dependency_count[user.index] == 0 {
+                        eligible.push(scheduling_priority(*user, &remaining_user_count));
+                    }
+                }
+            }
+        }
+        for user in &users[index] {
+            remaining_dependency_count[user.index] -= 1;
+            if remaining_dependency_count[user.index] == 0 {
+                eligible.push(scheduling_priority(*user, &remaining_user_count));
+            }
+        }
+    }
+    if order.len() != reachable_count {
+        return Err(CompilerError::InvalidFunction(format!(
+            "function '{}' contains a dependency cycle",
+            function.name
+        )));
+    }
+    Ok(order)
 }
 
-fn declare_runtime_callbacks(
-    module: &mut JITModule,
+/// Returns the estimated scalar-register pressure reduction from one node.
+fn scheduling_gain(scalars_freed: usize, scalar_results_allocated: usize) -> i128 {
+    let scalars_freed = i128::try_from(scalars_freed).unwrap_or(i128::MAX);
+    let scalar_results_allocated = i128::try_from(scalar_results_allocated).unwrap_or(i128::MAX);
+    scalars_freed.saturating_sub(scalar_results_allocated)
+}
+
+/// Returns the distinct operands of `node_ref` in stable operand order.
+fn unique_operands(function: &ir::Fn, node_ref: NodeRef) -> Vec<NodeRef> {
+    let mut seen = HashSet::new();
+    operands(&function.get_node(node_ref).payload)
+        .into_iter()
+        .filter(|operand| seen.insert(*operand))
+        .collect()
+}
+
+/// Returns whether a PIR value occupies one scalar Cranelift SSA register.
+fn scheduling_is_scalar(ty: &Type) -> Result<bool, CompilerError> {
+    let layout = NativeValueLayout::from_type(ty)?;
+    Ok(matches!(layout, NativeValueLayout::Scalar(_)))
+}
+
+fn declare_runtime_callbacks<M: Module>(
+    module: &mut M,
     function: &mut cranelift_codegen::ir::Function,
     pointer_type: ClifType,
 ) -> Result<RuntimeCallbacks, CompilerError> {
@@ -1352,20 +1845,6 @@ fn declare_runtime_callbacks(
             "xlsynth_pir_runtime_wide_binop",
             Linkage::Import,
             &wide_binop_signature,
-        )
-        .map_err(|error| CompilerError::Backend(error.to_string()))?;
-
-    let mut dynamic_slice_signature = module.make_signature();
-    for _ in 0..6 {
-        dynamic_slice_signature
-            .params
-            .push(AbiParam::new(pointer_type));
-    }
-    let wide_dynamic_bit_slice_id = module
-        .declare_function(
-            "xlsynth_pir_runtime_wide_dynamic_bit_slice",
-            Linkage::Import,
-            &dynamic_slice_signature,
         )
         .map_err(|error| CompilerError::Backend(error.to_string()))?;
 
@@ -1422,7 +1901,6 @@ fn declare_runtime_callbacks(
         record_cover: module.declare_func_in_func(cover_id, function),
         record_trace: module.declare_func_in_func(trace_id, function),
         wide_binop: module.declare_func_in_func(wide_binop_id, function),
-        wide_dynamic_bit_slice: module.declare_func_in_func(wide_dynamic_bit_slice_id, function),
         wide_bit_slice_update: module.declare_func_in_func(wide_bit_slice_update_id, function),
         wide_unary_op: module.declare_func_in_func(wide_unary_op_id, function),
         wide_mulp: module.declare_func_in_func(wide_mulp_id, function),
@@ -1447,6 +1925,14 @@ fn lower_function(
     let output_pointer = builder.block_params(entry)[1];
     let scratch_pointer = builder.block_params(entry)[2];
     let execution_context = builder.block_params(entry)[3];
+    if let Some(offset) = scratch_plan.gate_zero_offset {
+        let gate_zero_pointer = pointer_at_offset(builder, scratch_pointer, offset);
+        emit_memory_zero(
+            builder,
+            gate_zero_pointer,
+            scratch_plan.gate_zero_byte_count,
+        )?;
+    }
     let return_node = function.ret_node_ref.ok_or_else(|| {
         CompilerError::InvalidFunction(format!("function '{}' has no return node", function.name))
     })?;
@@ -1506,9 +1992,10 @@ fn lower_function(
             NodePayload::AfterAll(_) => ComputedValue::ZeroSized,
             NodePayload::Cover { predicate, .. } => {
                 let site_id = event_site_id(event_sites, *node_ref, node)?;
+                let predicate = scalar_value_for(builder, &mut values, *predicate)?;
                 emit_conditional_site_call(
                     builder,
-                    scalar_value_for(&values, *predicate)?,
+                    predicate,
                     runtime_callbacks.record_cover,
                     execution_context,
                     site_id,
@@ -1522,7 +2009,7 @@ fn lower_function(
                 label: _,
             } => {
                 let site_id = event_site_id(event_sites, *node_ref, node)?;
-                let condition = scalar_value_for(&values, *activate)?;
+                let condition = scalar_value_for(builder, &mut values, *activate)?;
                 let failed = builder.ins().icmp_imm(IntCC::Equal, condition, 0);
                 emit_conditional_site_call(
                     builder,
@@ -1550,9 +2037,10 @@ fn lower_function(
                     scratch_plan,
                     pointer_type,
                 )?;
+                let activated = scalar_value_for(builder, &mut values, *activated)?;
                 emit_conditional_trace_call(
                     builder,
-                    scalar_value_for(&values, *activated)?,
+                    activated,
                     runtime_callbacks.record_trace,
                     execution_context,
                     site_id,
@@ -1604,7 +2092,7 @@ fn lower_function(
             }
             NodePayload::Unop(op, arg) => {
                 let scalar_layout = require_scalar_layout(&layout)?;
-                let arg_value = scalar_value_for(&values, *arg)?;
+                let arg_value = scalar_value_for(builder, &mut values, *arg)?;
                 let arg_layout = ScalarLayout::from_type(&function.get_node(*arg).ty)?;
                 let raw = match op {
                     Unop::Identity => arg_value,
@@ -1657,7 +2145,7 @@ fn lower_function(
                         node,
                         *op,
                         args,
-                        &values,
+                        &mut values,
                         scalar_layout,
                     )?)
                 }
@@ -1674,21 +2162,29 @@ fn lower_function(
                         scratch_pointer,
                         scratch_plan,
                     )?;
-                    lower_array_concat(builder, function, destination, args, &values, &layout)?;
+                    lower_array_concat(
+                        builder,
+                        function,
+                        destination,
+                        args,
+                        &mut values,
+                        &layout,
+                        *node_ref != return_node,
+                    )?;
                     ComputedValue::Address(destination)
                 }
             }
-            NodePayload::Binop(Binop::Gate, predicate, gated) => lower_gate(
-                builder,
-                *node_ref,
-                return_node,
-                output_pointer,
-                scratch_pointer,
-                scratch_plan,
-                scalar_value_for(&values, *predicate)?,
-                computed_value_for(&values, *gated)?,
-                &layout,
-            )?,
+            NodePayload::Binop(Binop::Gate, predicate, gated) => {
+                let predicate = scalar_value_for(builder, &mut values, *predicate)?;
+                lower_gate(
+                    builder,
+                    scratch_pointer,
+                    scratch_plan,
+                    predicate,
+                    computed_value_for(&values, *gated)?,
+                    &layout,
+                )?
+            }
             NodePayload::Binop(op @ (Binop::Umulp | Binop::Smulp), lhs, rhs) => {
                 let destination = materialized_destination(
                     builder,
@@ -1711,7 +2207,7 @@ fn lower_function(
                         *op,
                         *lhs,
                         *rhs,
-                        &values,
+                        &mut values,
                         &layout,
                         scratch_pointer,
                         scratch_plan,
@@ -1726,7 +2222,7 @@ fn lower_function(
                         *op,
                         *lhs,
                         *rhs,
-                        &values,
+                        &mut values,
                         &layout,
                     )?;
                 }
@@ -1841,7 +2337,7 @@ fn lower_function(
                     pointer_type,
                     *lhs,
                     *rhs,
-                    &values,
+                    &mut values,
                     &layout,
                     operation,
                 )?
@@ -1855,7 +2351,7 @@ fn lower_function(
                     *op,
                     *lhs,
                     *rhs,
-                    &values,
+                    &mut values,
                     scalar_layout,
                 )?)
             }
@@ -1881,12 +2377,8 @@ fn lower_function(
                 } else {
                     let layout = require_scalar_layout(&layout)?;
                     let arg_layout = ScalarLayout::from_type(&function.get_node(*arg).ty)?;
-                    let resized = resize_unsigned(
-                        builder,
-                        scalar_value_for(&values, *arg)?,
-                        arg_layout,
-                        layout,
-                    );
+                    let arg = scalar_value_for(builder, &mut values, *arg)?;
+                    let resized = resize_unsigned(builder, arg, arg_layout, layout);
                     ComputedValue::Scalar(mask_value(builder, resized, layout))
                 }
             }
@@ -1912,8 +2404,8 @@ fn lower_function(
                 } else {
                     let layout = require_scalar_layout(&layout)?;
                     let arg_layout = ScalarLayout::from_type(&function.get_node(*arg).ty)?;
-                    let signed =
-                        signed_value(builder, scalar_value_for(&values, *arg)?, arg_layout);
+                    let arg = scalar_value_for(builder, &mut values, *arg)?;
+                    let signed = signed_value(builder, arg, arg_layout);
                     let resized = resize_signed(builder, signed, arg_layout, layout);
                     ComputedValue::Scalar(mask_value(builder, resized, layout))
                 }
@@ -1961,12 +2453,11 @@ fn lower_function(
                 } else {
                     let scalar_layout = require_scalar_layout(&layout)?;
                     let arg_layout = require_scalar_layout(&arg_native_layout)?;
+                    let arg = scalar_value_for(builder, &mut values, *arg)?;
                     let shifted = if *start == 0 {
-                        scalar_value_for(&values, *arg)?
+                        arg
                     } else {
-                        builder
-                            .ins()
-                            .ushr_imm(scalar_value_for(&values, *arg)?, *start as i64)
+                        builder.ins().ushr_imm(arg, *start as i64)
                     };
                     let resized = resize_unsigned(builder, shifted, arg_layout, scalar_layout);
                     ComputedValue::Scalar(mask_value(builder, resized, scalar_layout))
@@ -1981,27 +2472,27 @@ fn lower_function(
                 let start_layout = NativeValueLayout::from_type(&function.get_node(*start).ty)?;
                 if is_wide_bits(&layout) || is_wide_bits(&arg_layout) || is_wide_bits(&start_layout)
                 {
-                    lower_runtime_wide_dynamic_bit_slice(
+                    lower_direct_dynamic_bit_slice(
                         builder,
-                        function,
                         *node_ref,
                         return_node,
                         output_pointer,
                         scratch_pointer,
                         scratch_plan,
-                        runtime_callbacks.wide_dynamic_bit_slice,
-                        pointer_type,
-                        *arg,
-                        *start,
-                        &values,
+                        computed_value_for(&values, *arg)?,
+                        &arg_layout,
+                        computed_value_for(&values, *start)?,
+                        &start_layout,
                         &layout,
                     )?
                 } else {
+                    let arg = scalar_value_for(builder, &mut values, *arg)?;
+                    let start = scalar_value_for(builder, &mut values, *start)?;
                     ComputedValue::Scalar(lower_dynamic_bit_slice(
                         builder,
-                        scalar_value_for(&values, *arg)?,
+                        arg,
                         require_scalar_layout(&arg_layout)?,
-                        scalar_value_for(&values, *start)?,
+                        start,
                         require_scalar_layout(&start_layout)?,
                         require_scalar_layout(&layout)?,
                     ))
@@ -2038,13 +2529,16 @@ fn lower_function(
                         &layout,
                     )?
                 } else {
+                    let arg = scalar_value_for(builder, &mut values, *arg)?;
+                    let start = scalar_value_for(builder, &mut values, *start)?;
+                    let update_value = scalar_value_for(builder, &mut values, *update_value)?;
                     ComputedValue::Scalar(lower_bit_slice_update(
                         builder,
-                        scalar_value_for(&values, *arg)?,
+                        arg,
                         require_scalar_layout(&arg_layout)?,
-                        scalar_value_for(&values, *start)?,
+                        start,
                         require_scalar_layout(&start_layout)?,
-                        scalar_value_for(&values, *update_value)?,
+                        update_value,
                         require_scalar_layout(&update_layout)?,
                         require_scalar_layout(&layout)?,
                     ))
@@ -2052,23 +2546,28 @@ fn lower_function(
             }
             NodePayload::ExtCarryOut { lhs, rhs, c_in } => {
                 let operand_layout = NativeValueLayout::from_type(&function.get_node(*lhs).ty)?;
+                let c_in_layout = ScalarLayout::from_type(&function.get_node(*c_in).ty)?;
                 if let NativeValueLayout::WideBits(wide) = operand_layout {
+                    let c_in = scalar_value_for(builder, &mut values, *c_in)?;
                     ComputedValue::Scalar(lower_wide_ext_carry_out(
                         builder,
                         computed_value_for(&values, *lhs)?,
                         computed_value_for(&values, *rhs)?,
-                        scalar_value_for(&values, *c_in)?,
-                        ScalarLayout::from_type(&function.get_node(*c_in).ty)?,
+                        c_in,
+                        c_in_layout,
                         wide,
                     )?)
                 } else {
+                    let lhs = scalar_value_for(builder, &mut values, *lhs)?;
+                    let rhs = scalar_value_for(builder, &mut values, *rhs)?;
+                    let c_in = scalar_value_for(builder, &mut values, *c_in)?;
                     ComputedValue::Scalar(lower_ext_carry_out(
                         builder,
-                        scalar_value_for(&values, *lhs)?,
-                        scalar_value_for(&values, *rhs)?,
-                        scalar_value_for(&values, *c_in)?,
+                        lhs,
+                        rhs,
+                        c_in,
                         require_scalar_layout(&operand_layout)?,
-                        ScalarLayout::from_type(&function.get_node(*c_in).ty)?,
+                        c_in_layout,
                         require_scalar_layout(&layout)?,
                     ))
                 }
@@ -2094,9 +2593,10 @@ fn lower_function(
                     )?
                 } else {
                     let result_layout = require_scalar_layout(&layout)?;
+                    let arg = scalar_value_for(builder, &mut values, *arg)?;
                     ComputedValue::Scalar(lower_ext_prio_encode(
                         builder,
-                        scalar_value_for(&values, *arg)?,
+                        arg,
                         require_scalar_layout(&arg_layout)?,
                         result_layout,
                         *lsb_prio,
@@ -2124,9 +2624,10 @@ fn lower_function(
                     )?
                 } else {
                     let result_layout = require_scalar_layout(&layout)?;
+                    let arg = scalar_value_for(builder, &mut values, *arg)?;
                     ComputedValue::Scalar(lower_ext_clz(
                         builder,
-                        scalar_value_for(&values, *arg)?,
+                        arg,
                         require_scalar_layout(&arg_layout)?,
                         result_layout,
                         *offset,
@@ -2158,6 +2659,7 @@ fn lower_function(
                         &layout,
                     )?
                 } else {
+                    let arg_value = scalar_value_for(builder, &mut values, *arg)?;
                     lower_ext_normalize_left(
                         builder,
                         function,
@@ -2169,7 +2671,7 @@ fn lower_function(
                         scratch_plan,
                         *arg,
                         *shift_offset,
-                        scalar_value_for(&values, *arg)?,
+                        arg_value,
                         &layout,
                     )?
                 }
@@ -2195,9 +2697,10 @@ fn lower_function(
                     )?
                 } else {
                     let result_layout = require_scalar_layout(&layout)?;
+                    let count = scalar_value_for(builder, &mut values, *count)?;
                     ComputedValue::Scalar(lower_ext_mask_low(
                         builder,
-                        scalar_value_for(&values, *count)?,
+                        count,
                         require_scalar_layout(&count_layout)?,
                         result_layout,
                     ))
@@ -2225,7 +2728,7 @@ fn lower_function(
                         builder,
                         function,
                         terms,
-                        &values,
+                        &mut values,
                         result_layout,
                     )?)
                 } else {
@@ -2234,7 +2737,7 @@ fn lower_function(
                         builder,
                         function,
                         terms,
-                        &values,
+                        &mut values,
                         result_layout,
                     )?)
                 }
@@ -2251,7 +2754,14 @@ fn lower_function(
                         scratch_pointer,
                         scratch_plan,
                     )?;
-                    lower_array_construction(builder, destination, args, &values, &layout)?;
+                    lower_array_construction(
+                        builder,
+                        destination,
+                        args,
+                        &values,
+                        &layout,
+                        *node_ref != return_node,
+                    )?;
                     ComputedValue::Address(destination)
                 }
             }
@@ -2267,7 +2777,14 @@ fn lower_function(
                         scratch_pointer,
                         scratch_plan,
                     )?;
-                    lower_tuple_construction(builder, destination, args, &values, &layout)?;
+                    lower_tuple_construction(
+                        builder,
+                        destination,
+                        args,
+                        &values,
+                        &layout,
+                        *node_ref != return_node,
+                    )?;
                     ComputedValue::Address(destination)
                 }
             }
@@ -2286,7 +2803,7 @@ fn lower_function(
                 *array,
                 indices,
                 *assumed_in_bounds,
-                &values,
+                &mut values,
                 &layout,
                 pointer_type,
                 event_sites,
@@ -2318,6 +2835,7 @@ fn lower_function(
                         &values,
                         &layout,
                         pointer_type,
+                        *node_ref != return_node,
                     )?;
                     ComputedValue::Address(destination)
                 }
@@ -2340,7 +2858,7 @@ fn lower_function(
                 *value,
                 indices,
                 *assumed_in_bounds,
-                &values,
+                &mut values,
                 &layout,
                 pointer_type,
                 event_sites,
@@ -2353,15 +2871,12 @@ fn lower_function(
                 default,
             } => lower_sel(
                 builder,
-                *node_ref,
-                return_node,
-                output_pointer,
                 scratch_pointer,
                 scratch_plan,
                 *selector,
                 cases,
                 *default,
-                &values,
+                &mut values,
                 &layout,
             )?,
             NodePayload::PrioritySel {
@@ -2372,15 +2887,12 @@ fn lower_function(
                 builder,
                 function,
                 node,
-                *node_ref,
-                return_node,
-                output_pointer,
                 scratch_pointer,
                 scratch_plan,
                 *selector,
                 cases,
                 *default,
-                &values,
+                &mut values,
                 &layout,
             )?,
             NodePayload::OneHotSel { selector, cases } => lower_one_hot_sel(
@@ -2394,7 +2906,7 @@ fn lower_function(
                 scratch_plan,
                 *selector,
                 cases,
-                &values,
+                &mut values,
                 &layout,
             )?,
             NodePayload::OneHot { arg, lsb_prio } => {
@@ -2418,9 +2930,10 @@ fn lower_function(
                     )?
                 } else {
                     let result_layout = require_scalar_layout(&layout)?;
+                    let arg = scalar_value_for(builder, &mut values, *arg)?;
                     ComputedValue::Scalar(lower_one_hot(
                         builder,
-                        scalar_value_for(&values, *arg)?,
+                        arg,
                         require_scalar_layout(&arg_layout)?,
                         result_layout,
                         *lsb_prio,
@@ -2448,9 +2961,10 @@ fn lower_function(
                     )?
                 } else {
                     let result_layout = require_scalar_layout(&layout)?;
+                    let arg = scalar_value_for(builder, &mut values, *arg)?;
                     ComputedValue::Scalar(lower_encode(
                         builder,
-                        scalar_value_for(&values, *arg)?,
+                        arg,
                         require_scalar_layout(&arg_layout)?,
                         result_layout,
                     ))
@@ -2459,27 +2973,23 @@ fn lower_function(
             NodePayload::Decode { arg, width: _ } => {
                 let arg_layout = NativeValueLayout::from_type(&function.get_node(*arg).ty)?;
                 if is_wide_bits(&layout) || is_wide_bits(&arg_layout) {
-                    lower_runtime_wide_unary_op(
+                    lower_direct_decode(
                         builder,
-                        function,
                         *node_ref,
                         return_node,
                         output_pointer,
                         scratch_pointer,
                         scratch_plan,
-                        runtime_callbacks.wide_unary_op,
-                        pointer_type,
-                        *arg,
-                        &values,
+                        computed_value_for(&values, *arg)?,
+                        &arg_layout,
                         &layout,
-                        WideUnaryOp::Decode,
-                        0,
                     )?
                 } else {
                     let result_layout = require_scalar_layout(&layout)?;
+                    let arg = scalar_value_for(builder, &mut values, *arg)?;
                     ComputedValue::Scalar(lower_decode(
                         builder,
-                        scalar_value_for(&values, *arg)?,
+                        arg,
                         require_scalar_layout(&arg_layout)?,
                         result_layout,
                     ))
@@ -2519,6 +3029,7 @@ fn emit_conditional_site_call(
 ) {
     let invoke = builder.create_block();
     let after = builder.create_block();
+    builder.set_cold_block(invoke);
     builder.ins().brif(condition, invoke, &[], after, &[]);
     builder.switch_to_block(invoke);
     builder.seal_block(invoke);
@@ -2539,6 +3050,7 @@ fn emit_conditional_trace_call(
 ) {
     let invoke = builder.create_block();
     let after = builder.create_block();
+    builder.set_cold_block(invoke);
     builder.ins().brif(condition, invoke, &[], after, &[]);
     builder.switch_to_block(invoke);
     builder.seal_block(invoke);
@@ -2573,6 +3085,18 @@ fn lower_trace_operand_pointers(
         let layout = NativeValueLayout::from_type(&function.get_node(*operand).ty)?;
         let pointer = match computed_value_for(values, *operand)? {
             ComputedValue::Scalar(value) => {
+                let offset = plan.scalar_operand_offsets[index].ok_or_else(|| {
+                    CompilerError::InvalidFunction("missing trace scalar scratch allocation".into())
+                })?;
+                let pointer = pointer_at_offset(builder, scratch_pointer, offset);
+                store_value_to_storage(builder, pointer, ComputedValue::Scalar(value), &layout)?;
+                pointer
+            }
+            ComputedValue::ScalarAddress {
+                pointer, offset, ..
+            } => pointer_at_offset(builder, pointer, offset),
+            ComputedValue::ScalarArrayIndex(value) => {
+                let value = materialize_scalar(builder, ComputedValue::ScalarArrayIndex(value))?;
                 let offset = plan.scalar_operand_offsets[index].ok_or_else(|| {
                     CompilerError::InvalidFunction("missing trace scalar scratch allocation".into())
                 })?;
@@ -2631,6 +3155,54 @@ fn layout_contains_wide_bits(layout: &NativeValueLayout) -> bool {
     }
 }
 
+/// Returns whether lowering needs scratch storage for a runtime bits callback.
+fn function_uses_runtime_bits_callback(
+    function: &ir::Fn,
+    order: &[NodeRef],
+) -> Result<bool, CompilerError> {
+    for node_ref in order {
+        let node = function.get_node(*node_ref);
+        let may_call_runtime = matches!(
+            &node.payload,
+            NodePayload::Binop(
+                Binop::Umul
+                    | Binop::Smul
+                    | Binop::Udiv
+                    | Binop::Sdiv
+                    | Binop::Umod
+                    | Binop::Smod
+                    | Binop::Umulp
+                    | Binop::Smulp
+                    | Binop::Shll
+                    | Binop::Shrl
+                    | Binop::Shra,
+                _,
+                _
+            ) | NodePayload::BitSliceUpdate { .. }
+                | NodePayload::ExtPrioEncode { .. }
+                | NodePayload::ExtClz { .. }
+                | NodePayload::ExtNormalizeLeft { .. }
+                | NodePayload::ExtMaskLow { .. }
+                | NodePayload::OneHot { .. }
+                | NodePayload::Encode { .. }
+        );
+        if !may_call_runtime {
+            continue;
+        }
+        let result_layout = NativeValueLayout::from_type(&node.ty)?;
+        if layout_contains_wide_bits(&result_layout) {
+            return Ok(true);
+        }
+        for operand in operands(&node.payload) {
+            let operand_layout = NativeValueLayout::from_type(&function.get_node(operand).ty)?;
+            if layout_contains_wide_bits(&operand_layout) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 fn runtime_width_constant(
     builder: &mut FunctionBuilder<'_>,
     pointer_type: ClifType,
@@ -2687,8 +3259,8 @@ fn runtime_bits_operand_pointer(
     match layout {
         NativeValueLayout::Scalar(scalar) => {
             let pointer = runtime_scalar_pointer(builder, node_ref, scratch_pointer, scratch_plan)?;
-            let value =
-                resize_integer_type_unsigned(builder, expect_scalar(value)?, *scalar, types::I64);
+            let value = materialize_scalar(builder, value)?;
+            let value = resize_integer_type_unsigned(builder, value, *scalar, types::I64);
             builder.ins().store(MemFlags::new(), value, pointer, 0);
             Ok(pointer)
         }
@@ -3079,67 +3651,6 @@ fn lower_runtime_wide_mulp(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn lower_runtime_wide_dynamic_bit_slice(
-    builder: &mut FunctionBuilder<'_>,
-    function: &ir::Fn,
-    node_ref: NodeRef,
-    return_node: NodeRef,
-    output_pointer: Value,
-    scratch_pointer: Value,
-    scratch_plan: &ScratchPlan,
-    callback: FuncRef,
-    pointer_type: ClifType,
-    arg: NodeRef,
-    start: NodeRef,
-    values: &[Option<ComputedValue>],
-    layout: &NativeValueLayout,
-) -> Result<ComputedValue, CompilerError> {
-    let arg_layout = NativeValueLayout::from_type(&function.get_node(arg).ty)?;
-    let start_layout = NativeValueLayout::from_type(&function.get_node(start).ty)?;
-    let destination = runtime_bits_result_pointer(
-        builder,
-        node_ref,
-        return_node,
-        output_pointer,
-        scratch_pointer,
-        scratch_plan,
-        layout,
-    )?;
-    let arg_pointer = runtime_bits_operand_pointer(
-        builder,
-        arg,
-        computed_value_for(values, arg)?,
-        &arg_layout,
-        scratch_pointer,
-        scratch_plan,
-    )?;
-    let start_pointer = runtime_bits_operand_pointer(
-        builder,
-        start,
-        computed_value_for(values, start)?,
-        &start_layout,
-        scratch_pointer,
-        scratch_plan,
-    )?;
-    let result_width = runtime_width_constant(builder, pointer_type, bits_bit_count(layout)?)?;
-    let arg_width = runtime_width_constant(builder, pointer_type, bits_bit_count(&arg_layout)?)?;
-    let start_width =
-        runtime_width_constant(builder, pointer_type, bits_bit_count(&start_layout)?)?;
-    builder.ins().call(
-        callback,
-        &[
-            destination,
-            result_width,
-            arg_pointer,
-            arg_width,
-            start_pointer,
-            start_width,
-        ],
-    );
-    load_runtime_bits_result(builder, destination, layout)
-}
-
-#[allow(clippy::too_many_arguments)]
 fn lower_runtime_wide_bit_slice_update(
     builder: &mut FunctionBuilder<'_>,
     function: &ir::Fn,
@@ -3225,9 +3736,10 @@ fn load_raw_bits_limb(
             if limb != 0 {
                 return Ok(builder.ins().iconst(types::I64, 0));
             }
+            let value = materialize_scalar(builder, value)?;
             Ok(resize_integer_type_unsigned(
                 builder,
-                expect_scalar(value)?,
+                value,
                 *scalar,
                 types::I64,
             ))
@@ -3272,7 +3784,7 @@ fn load_extended_bits_limb(
     let bit_count = bits_bit_count(layout)?;
     let source_limbs = bits_limb_count(layout)?;
     let fill = if signed {
-        let sign = bit_sign_condition(builder, value, layout)?;
+        let sign = bit_sign_condition(builder, value.clone(), layout)?;
         let zero = builder.ins().iconst(types::I64, 0);
         let ones = builder.ins().iconst(types::I64, -1);
         builder.ins().select(sign, ones, zero)
@@ -3299,7 +3811,7 @@ fn load_zero_window(
 ) -> Result<Value, CompilerError> {
     let limb = start / 64;
     let shift = start % 64;
-    let low = load_raw_bits_limb(builder, value, layout, limb)?;
+    let low = load_raw_bits_limb(builder, value.clone(), layout, limb)?;
     if shift == 0 {
         return Ok(low);
     }
@@ -3347,7 +3859,7 @@ fn lower_wide_resize(
     signed: bool,
 ) -> Result<(), CompilerError> {
     for limb in 0..result_layout.limb_count {
-        let value = load_extended_bits_limb(builder, input, input_layout, limb, signed)?;
+        let value = load_extended_bits_limb(builder, input.clone(), input_layout, limb, signed)?;
         store_wide_limb(builder, destination, result_layout, limb, value);
     }
     Ok(())
@@ -3362,10 +3874,218 @@ fn lower_wide_static_slice(
     result_layout: WideBitsLayout,
 ) -> Result<(), CompilerError> {
     for limb in 0..result_layout.limb_count {
-        let value = load_zero_window(builder, input, input_layout, start + limb * 64)?;
+        let value = load_zero_window(builder, input.clone(), input_layout, start + limb * 64)?;
         store_wide_limb(builder, destination, result_layout, limb, value);
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct DynamicBitOffset {
+    low_bits: Value,
+    in_bounds: Value,
+}
+
+/// Produces the low offset bits and an explicit range check for a dynamic bit
+/// offset. Wide offsets are in range only when all limbs above the low limb are
+/// zero.
+fn lower_dynamic_bit_offset(
+    builder: &mut FunctionBuilder<'_>,
+    offset: ComputedValue,
+    offset_layout: &NativeValueLayout,
+    upper_bound: usize,
+) -> Result<DynamicBitOffset, CompilerError> {
+    let low_bits = load_raw_bits_limb(builder, offset.clone(), offset_layout, 0)?;
+    let mut high_bits = builder.ins().iconst(types::I64, 0);
+    for limb in 1..bits_limb_count(offset_layout)? {
+        let next = load_raw_bits_limb(builder, offset.clone(), offset_layout, limb)?;
+        high_bits = builder.ins().bor(high_bits, next);
+    }
+    let high_is_zero = builder.ins().icmp_imm(IntCC::Equal, high_bits, 0);
+    let low_is_in_bounds =
+        builder
+            .ins()
+            .icmp_imm(IntCC::UnsignedLessThan, low_bits, upper_bound as i64);
+    Ok(DynamicBitOffset {
+        low_bits,
+        in_bounds: builder.ins().band(high_is_zero, low_is_in_bounds),
+    })
+}
+
+/// Loads one dynamically selected input limb, returning zero when the limb or
+/// the original bit offset is out of range.
+fn load_dynamic_zero_limb(
+    builder: &mut FunctionBuilder<'_>,
+    input: ComputedValue,
+    input_layout: &NativeValueLayout,
+    limb: Value,
+    offset_in_bounds: Value,
+) -> Result<Value, CompilerError> {
+    let limb_count = bits_limb_count(input_layout)?;
+    let limb_is_in_bounds =
+        builder
+            .ins()
+            .icmp_imm(IntCC::UnsignedLessThan, limb, limb_count as i64);
+    let valid = builder.ins().band(offset_in_bounds, limb_is_in_bounds);
+    let raw = match input_layout {
+        NativeValueLayout::Scalar(_) => load_raw_bits_limb(builder, input, input_layout, 0)?,
+        NativeValueLayout::WideBits(_) => {
+            let zero = builder.ins().iconst(types::I64, 0);
+            let safe_limb = builder.ins().select(limb_is_in_bounds, limb, zero);
+            let pointer = expect_address(input)?;
+            let pointer_type = builder.func.dfg.value_type(pointer);
+            let safe_limb = if pointer_type == types::I64 {
+                safe_limb
+            } else {
+                builder.ins().ireduce(pointer_type, safe_limb)
+            };
+            let pointer = array_element_pointer_from_address_index(builder, pointer, safe_limb, 8);
+            builder.ins().load(types::I64, MemFlags::new(), pointer, 0)
+        }
+        _ => {
+            return Err(CompilerError::InvalidFunction(
+                "dynamic bit slice input is not bits-typed".into(),
+            ));
+        }
+    };
+    let zero = builder.ins().iconst(types::I64, 0);
+    Ok(builder.ins().select(valid, raw, zero))
+}
+
+/// Emits one dynamic zero-filled 64-bit window from a bits value.
+fn lower_dynamic_zero_window(
+    builder: &mut FunctionBuilder<'_>,
+    input: ComputedValue,
+    input_layout: &NativeValueLayout,
+    offset: DynamicBitOffset,
+    output_limb: usize,
+) -> Result<Value, CompilerError> {
+    let source_limb = builder.ins().ushr_imm(offset.low_bits, 6);
+    let source_limb = if output_limb == 0 {
+        source_limb
+    } else {
+        builder.ins().iadd_imm(source_limb, output_limb as i64)
+    };
+    let low = load_dynamic_zero_limb(
+        builder,
+        input.clone(),
+        input_layout,
+        source_limb,
+        offset.in_bounds,
+    )?;
+    let high_limb = builder.ins().iadd_imm(source_limb, 1);
+    let high = load_dynamic_zero_limb(builder, input, input_layout, high_limb, offset.in_bounds)?;
+    let shift = builder.ins().band_imm(offset.low_bits, 63);
+    let low = builder.ins().ushr(low, shift);
+    let high_shift = builder.ins().irsub_imm(shift, 64);
+    let high = builder.ins().ishl(high, high_shift);
+    let shift_is_zero = builder.ins().icmp_imm(IntCC::Equal, shift, 0);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let high = builder.ins().select(shift_is_zero, zero, high);
+    Ok(builder.ins().bor(low, high))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_direct_dynamic_bit_slice(
+    builder: &mut FunctionBuilder<'_>,
+    node_ref: NodeRef,
+    return_node: NodeRef,
+    output_pointer: Value,
+    scratch_pointer: Value,
+    scratch_plan: &ScratchPlan,
+    input: ComputedValue,
+    input_layout: &NativeValueLayout,
+    start: ComputedValue,
+    start_layout: &NativeValueLayout,
+    result_layout: &NativeValueLayout,
+) -> Result<ComputedValue, CompilerError> {
+    let offset =
+        lower_dynamic_bit_offset(builder, start, start_layout, bits_bit_count(input_layout)?)?;
+    match result_layout {
+        NativeValueLayout::WideBits(wide) => {
+            let destination = materialized_destination(
+                builder,
+                node_ref,
+                return_node,
+                output_pointer,
+                scratch_pointer,
+                scratch_plan,
+            )?;
+            for limb in 0..wide.limb_count {
+                let value =
+                    lower_dynamic_zero_window(builder, input.clone(), input_layout, offset, limb)?;
+                store_wide_limb(builder, destination, *wide, limb, value);
+            }
+            Ok(ComputedValue::Address(destination))
+        }
+        NativeValueLayout::Scalar(scalar) => {
+            let value = lower_dynamic_zero_window(builder, input, input_layout, offset, 0)?;
+            let value = if scalar.clif_type() == types::I64 {
+                value
+            } else {
+                builder.ins().ireduce(scalar.clif_type(), value)
+            };
+            Ok(ComputedValue::Scalar(mask_value(builder, value, *scalar)))
+        }
+        _ => Err(CompilerError::InvalidFunction(
+            "dynamic bit slice result is not bits-typed".into(),
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_direct_decode(
+    builder: &mut FunctionBuilder<'_>,
+    node_ref: NodeRef,
+    return_node: NodeRef,
+    output_pointer: Value,
+    scratch_pointer: Value,
+    scratch_plan: &ScratchPlan,
+    input: ComputedValue,
+    input_layout: &NativeValueLayout,
+    result_layout: &NativeValueLayout,
+) -> Result<ComputedValue, CompilerError> {
+    let offset =
+        lower_dynamic_bit_offset(builder, input, input_layout, bits_bit_count(result_layout)?)?;
+    let shift = builder.ins().band_imm(offset.low_bits, 63);
+    let one = builder.ins().iconst(types::I64, 1);
+    let shifted_one = builder.ins().ishl(one, shift);
+    match result_layout {
+        NativeValueLayout::WideBits(wide) => {
+            let destination = materialized_destination(
+                builder,
+                node_ref,
+                return_node,
+                output_pointer,
+                scratch_pointer,
+                scratch_plan,
+            )?;
+            let target_limb = builder.ins().ushr_imm(offset.low_bits, 6);
+            let zero = builder.ins().iconst(types::I64, 0);
+            for limb in 0..wide.limb_count {
+                let matches_limb = builder
+                    .ins()
+                    .icmp_imm(IntCC::Equal, target_limb, limb as i64);
+                let selected = builder.ins().band(offset.in_bounds, matches_limb);
+                let value = builder.ins().select(selected, shifted_one, zero);
+                store_wide_limb(builder, destination, *wide, limb, value);
+            }
+            Ok(ComputedValue::Address(destination))
+        }
+        NativeValueLayout::Scalar(scalar) => {
+            let zero = builder.ins().iconst(types::I64, 0);
+            let value = builder.ins().select(offset.in_bounds, shifted_one, zero);
+            let value = if scalar.clif_type() == types::I64 {
+                value
+            } else {
+                builder.ins().ireduce(scalar.clif_type(), value)
+            };
+            Ok(ComputedValue::Scalar(mask_value(builder, value, *scalar)))
+        }
+        _ => Err(CompilerError::InvalidFunction(
+            "decode result is not bits-typed".into(),
+        )),
+    }
 }
 
 fn lower_wide_bitwise_unop(
@@ -3379,7 +4099,7 @@ fn lower_wide_bitwise_unop(
     match op {
         Unop::Not => {
             for limb in 0..result_layout.limb_count {
-                let input = load_raw_bits_limb(builder, input, input_layout, limb)?;
+                let input = load_raw_bits_limb(builder, input.clone(), input_layout, limb)?;
                 let output = builder.ins().bnot(input);
                 store_wide_limb(builder, destination, result_layout, limb, output);
             }
@@ -3387,7 +4107,7 @@ fn lower_wide_bitwise_unop(
         Unop::Neg => {
             let mut carry = builder.ins().iconst(types::I64, 1);
             for limb in 0..result_layout.limb_count {
-                let input = load_raw_bits_limb(builder, input, input_layout, limb)?;
+                let input = load_raw_bits_limb(builder, input.clone(), input_layout, limb)?;
                 let inverted = builder.ins().bnot(input);
                 let sum = builder.ins().iadd(inverted, carry);
                 let overflow = builder.ins().icmp(IntCC::UnsignedLessThan, sum, inverted);
@@ -3399,7 +4119,7 @@ fn lower_wide_bitwise_unop(
             let padding = result_layout.limb_count * 64 - result_layout.bit_count;
             for limb in 0..result_layout.limb_count {
                 let source_limb = result_layout.limb_count - limb - 1;
-                let source = load_raw_bits_limb(builder, input, input_layout, source_limb)?;
+                let source = load_raw_bits_limb(builder, input.clone(), input_layout, source_limb)?;
                 let reversed = builder.ins().bitrev(source);
                 let output = if padding == 0 {
                     reversed
@@ -3408,8 +4128,12 @@ fn lower_wide_bitwise_unop(
                     let next = if source_limb == 0 {
                         builder.ins().iconst(types::I64, 0)
                     } else {
-                        let adjacent =
-                            load_raw_bits_limb(builder, input, input_layout, source_limb - 1)?;
+                        let adjacent = load_raw_bits_limb(
+                            builder,
+                            input.clone(),
+                            input_layout,
+                            source_limb - 1,
+                        )?;
                         builder.ins().bitrev(adjacent)
                     };
                     let high = builder.ins().ishl_imm(next, (64 - padding) as i64);
@@ -3438,7 +4162,7 @@ fn lower_wide_reduction(
         _ => builder.ins().iconst(types::I64, 0),
     };
     for limb in 0..input_layout.limb_count {
-        let mut value = load_wide_limb(builder, expect_address(input).unwrap(), limb);
+        let mut value = load_wide_limb(builder, expect_address(input.clone()).unwrap(), limb);
         if op == Unop::AndReduce
             && limb + 1 == input_layout.limb_count
             && input_layout.bit_count % 64 != 0
@@ -3637,7 +4361,13 @@ fn lower_wide_comparison(
             ));
         }
     };
-    let unsigned = lower_wide_unsigned_compare(builder, lhs, rhs, layout, unsigned_condition)?;
+    let unsigned = lower_wide_unsigned_compare(
+        builder,
+        lhs.clone(),
+        rhs.clone(),
+        layout,
+        unsigned_condition,
+    )?;
     if matches!(op, Binop::Ugt | Binop::Uge | Binop::Ult | Binop::Ule) {
         return Ok(unsigned);
     }
@@ -3666,14 +4396,14 @@ fn lower_wide_concat(
         builder,
         destination,
         &NativeValueLayout::WideBits(result_layout),
-    );
+    )?;
     let mut offset = 0usize;
     for arg in args.iter().rev() {
         let arg_layout = NativeValueLayout::from_type(&function.get_node(*arg).ty)?;
         let arg_width = bits_bit_count(&arg_layout)?;
         let arg_value = computed_value_for(values, *arg)?;
         for source_limb in 0..arg_width.div_ceil(64) {
-            let value = load_raw_bits_limb(builder, arg_value, &arg_layout, source_limb)?;
+            let value = load_raw_bits_limb(builder, arg_value.clone(), &arg_layout, source_limb)?;
             let destination_limb = (offset / 64) + source_limb;
             let shift = offset % 64;
             if destination_limb < result_layout.limb_count {
@@ -3727,15 +4457,20 @@ fn lower_wide_ext_nary_add(
         builder,
         destination,
         &NativeValueLayout::WideBits(result_layout),
-    );
+    )?;
     for term in terms {
         let operand_layout = NativeValueLayout::from_type(&function.get_node(term.operand).ty)?;
         let operand = computed_value_for(values, term.operand)?;
         let mut carry_or_borrow = builder.ins().iconst(types::I64, 0);
         for limb in 0..result_layout.limb_count {
             let current = load_wide_limb(builder, destination, limb);
-            let contribution =
-                load_extended_bits_limb(builder, operand, &operand_layout, limb, term.signed)?;
+            let contribution = load_extended_bits_limb(
+                builder,
+                operand.clone(),
+                &operand_layout,
+                limb,
+                term.signed,
+            )?;
             let partial = if term.negated {
                 builder.ins().isub(current, contribution)
             } else {
@@ -3774,16 +4509,15 @@ fn lower_mixed_ext_nary_add(
     builder: &mut FunctionBuilder<'_>,
     function: &ir::Fn,
     terms: &[ir::ExtNaryAddTerm],
-    values: &[Option<ComputedValue>],
+    values: &mut [Option<ComputedValue>],
     result_layout: ScalarLayout,
 ) -> Result<Value, CompilerError> {
     let mut result = builder.ins().iconst(result_layout.clif_type(), 0);
     for term in terms {
         let operand_layout = NativeValueLayout::from_type(&function.get_node(term.operand).ty)?;
-        let operand = computed_value_for(values, term.operand)?;
         let resized = match operand_layout {
             NativeValueLayout::Scalar(term_layout) => {
-                let value = expect_scalar(operand)?;
+                let value = scalar_value_for(builder, values, term.operand)?;
                 if term.signed {
                     let signed = signed_value(builder, value, term_layout);
                     resize_signed(builder, signed, term_layout, result_layout)
@@ -3792,6 +4526,7 @@ fn lower_mixed_ext_nary_add(
                 }
             }
             NativeValueLayout::WideBits(_) => {
+                let operand = computed_value_for(values, term.operand)?;
                 let raw = load_raw_bits_limb(builder, operand, &operand_layout, 0)?;
                 if result_layout.clif_type() == types::I64 {
                     raw
@@ -3821,7 +4556,7 @@ fn lower_nary(
     node: &ir::Node,
     op: NaryOp,
     args: &[NodeRef],
-    values: &[Option<ComputedValue>],
+    values: &mut [Option<ComputedValue>],
     layout: ScalarLayout,
 ) -> Result<Value, CompilerError> {
     if matches!(op, NaryOp::Concat) {
@@ -3830,9 +4565,9 @@ fn lower_nary(
     let Some((first, rest)) = args.split_first() else {
         return Err(unsupported_node(node));
     };
-    let mut result = scalar_value_for(values, *first)?;
+    let mut result = scalar_value_for(builder, values, *first)?;
     for arg in rest {
-        let rhs = scalar_value_for(values, *arg)?;
+        let rhs = scalar_value_for(builder, values, *arg)?;
         result = match op {
             NaryOp::And | NaryOp::Nand => builder.ins().band(result, rhs),
             NaryOp::Or | NaryOp::Nor => builder.ins().bor(result, rhs),
@@ -3854,13 +4589,13 @@ fn lower_binop(
     op: Binop,
     lhs: NodeRef,
     rhs: NodeRef,
-    values: &[Option<ComputedValue>],
+    values: &mut [Option<ComputedValue>],
     layout: ScalarLayout,
 ) -> Result<Value, CompilerError> {
     let lhs_layout = ScalarLayout::from_type(&function.get_node(lhs).ty)?;
     let rhs_layout = ScalarLayout::from_type(&function.get_node(rhs).ty)?;
-    let lhs_value = scalar_value_for(values, lhs)?;
-    let rhs_value = scalar_value_for(values, rhs)?;
+    let lhs_value = scalar_value_for(builder, values, lhs)?;
+    let rhs_value = scalar_value_for(builder, values, rhs)?;
     let raw = match op {
         Binop::Add => builder.ins().iadd(lhs_value, rhs_value),
         Binop::Sub => builder.ins().isub(lhs_value, rhs_value),
@@ -4027,7 +4762,7 @@ fn lower_concat(
     function: &ir::Fn,
     node: &ir::Node,
     args: &[NodeRef],
-    values: &[Option<ComputedValue>],
+    values: &mut [Option<ComputedValue>],
     layout: ScalarLayout,
 ) -> Result<Value, CompilerError> {
     if args.is_empty() {
@@ -4042,8 +4777,8 @@ fn lower_concat(
             .ok_or_else(|| {
                 CompilerError::InvalidFunction(format!("concat width overflow at {}", node.text_id))
             })?;
-        let extended =
-            resize_unsigned(builder, scalar_value_for(values, *arg)?, arg_layout, layout);
+        let arg = scalar_value_for(builder, values, *arg)?;
+        let extended = resize_unsigned(builder, arg, arg_layout, layout);
         let positioned = if remaining_width == 0 {
             extended
         } else {
@@ -4327,13 +5062,13 @@ fn lower_ext_nary_add(
     builder: &mut FunctionBuilder<'_>,
     function: &ir::Fn,
     terms: &[ir::ExtNaryAddTerm],
-    values: &[Option<ComputedValue>],
+    values: &mut [Option<ComputedValue>],
     result_layout: ScalarLayout,
 ) -> Result<Value, CompilerError> {
     let mut result = builder.ins().iconst(result_layout.clif_type(), 0);
     for term in terms {
         let term_layout = ScalarLayout::from_type(&function.get_node(term.operand).ty)?;
-        let value = scalar_value_for(values, term.operand)?;
+        let value = scalar_value_for(builder, values, term.operand)?;
         let resized = if term.signed {
             let signed = signed_value(builder, value, term_layout);
             resize_signed(builder, signed, term_layout, result_layout)
@@ -4360,7 +5095,7 @@ fn lower_mulp(
     op: Binop,
     lhs: NodeRef,
     rhs: NodeRef,
-    values: &[Option<ComputedValue>],
+    values: &mut [Option<ComputedValue>],
     result_layout: &NativeValueLayout,
 ) -> Result<(), CompilerError> {
     let NativeValueLayout::Tuple { fields, .. } = result_layout else {
@@ -4376,8 +5111,8 @@ fn lower_mulp(
     let element_layout = require_scalar_layout(fields[0].layout.as_ref())?;
     let lhs_layout = ScalarLayout::from_type(&function.get_node(lhs).ty)?;
     let rhs_layout = ScalarLayout::from_type(&function.get_node(rhs).ty)?;
-    let lhs_value = scalar_value_for(values, lhs)?;
-    let rhs_value = scalar_value_for(values, rhs)?;
+    let lhs_value = scalar_value_for(builder, values, lhs)?;
+    let rhs_value = scalar_value_for(builder, values, rhs)?;
     let (lhs_value, rhs_value) = if op == Binop::Smulp {
         let lhs_signed = signed_value(builder, lhs_value, lhs_layout);
         let rhs_signed = signed_value(builder, rhs_value, rhs_layout);
@@ -4462,6 +5197,26 @@ fn lower_array_index(
         }
         return Ok(value);
     }
+    if let NativeValueLayout::Scalar(layout) = layout {
+        let value = deferred_scalar_array_index(
+            function,
+            node,
+            node_ref,
+            array,
+            indices,
+            assumed_in_bounds,
+            values,
+            *layout,
+            event_sites,
+            record_assumption_failure,
+            execution_context,
+        )?;
+        return if assumed_in_bounds {
+            Ok(ComputedValue::Scalar(materialize_scalar(builder, value)?))
+        } else {
+            Ok(value)
+        };
+    }
     let mut pointer = if layout.byte_count() == 0 {
         None
     } else {
@@ -4486,22 +5241,20 @@ fn lower_array_index(
             ));
         }
         let index_layout = NativeValueLayout::from_type(&function.get_node(*index).ty)?;
-        let (address_index, is_in_bounds) = bounded_array_index(
+        let bounded = bounded_array_index(
             builder,
             computed_value_for(values, *index)?,
             &index_layout,
             element_count,
             pointer_type,
+            bits_node_is_statically_less_than(function, *index, element_count),
         )?;
-        all_in_bounds = Some(match all_in_bounds {
-            Some(condition) => builder.ins().band(condition, is_in_bounds),
-            None => is_in_bounds,
-        });
+        all_in_bounds = combine_optional_conditions(builder, all_in_bounds, bounded.in_bounds);
         if let Some(current_pointer) = pointer {
             pointer = Some(array_element_pointer_from_address_index(
                 builder,
                 current_pointer,
-                address_index,
+                bounded.address_index,
                 element.byte_count(),
             ));
         }
@@ -4513,13 +5266,9 @@ fn lower_array_index(
             node.text_id
         )));
     }
-    if assumed_in_bounds {
+    if assumed_in_bounds && let Some(all_in_bounds) = all_in_bounds {
         let site_id = event_site_id(event_sites, node_ref, node)?;
-        let failed = builder.ins().icmp_imm(
-            IntCC::Equal,
-            all_in_bounds.expect("nonempty array index has an index condition"),
-            0,
-        );
+        let failed = builder.ins().icmp_imm(IntCC::Equal, all_in_bounds, 0);
         emit_conditional_site_call(
             builder,
             failed,
@@ -4532,6 +5281,125 @@ fn lower_array_index(
         Some(pointer) => Ok(load_value_from_storage(builder, pointer, layout)),
         None => Ok(ComputedValue::ZeroSized),
     }
+}
+
+/// Builds a scalar array-index recipe whose address calculation is emitted
+/// only when the selected scalar is consumed.
+#[allow(clippy::too_many_arguments)]
+fn deferred_scalar_array_index(
+    function: &ir::Fn,
+    node: &ir::Node,
+    node_ref: NodeRef,
+    array: NodeRef,
+    indices: &[NodeRef],
+    assumed_in_bounds: bool,
+    values: &[Option<ComputedValue>],
+    layout: ScalarLayout,
+    event_sites: &HashMap<NodeRef, u32>,
+    record_assumption_failure: FuncRef,
+    execution_context: Value,
+) -> Result<ComputedValue, CompilerError> {
+    let array_pointer = address_value_for(values, array)?;
+    let mut current_layout = NativeValueLayout::from_type(&function.get_node(array).ty)?;
+    let mut dimensions = Vec::with_capacity(indices.len());
+    for index in indices {
+        let NativeValueLayout::Array {
+            element,
+            element_count,
+        } = current_layout
+        else {
+            return Err(CompilerError::InvalidFunction(format!(
+                "array_index exceeds array dimensions at {}",
+                node.text_id
+            )));
+        };
+        if element_count == 0 {
+            return Err(CompilerError::UnsupportedType(
+                "zero-length native arrays are not supported for indexing".into(),
+            ));
+        }
+        dimensions.push(DeferredArrayIndexDimension {
+            index: computed_value_for(values, *index)?,
+            index_layout: NativeValueLayout::from_type(&function.get_node(*index).ty)?,
+            element_count,
+            element_byte_count: element.byte_count(),
+            statically_in_bounds: bits_node_is_statically_less_than(
+                function,
+                *index,
+                element_count,
+            ),
+        });
+        current_layout = *element;
+    }
+    if current_layout != NativeValueLayout::Scalar(layout) {
+        return Err(CompilerError::InvalidFunction(format!(
+            "array_index result layout disagrees with result type at {}",
+            node.text_id
+        )));
+    }
+    let assumption_site = if assumed_in_bounds
+        && dimensions
+            .iter()
+            .any(|dimension| !dimension.statically_in_bounds)
+    {
+        Some(DeferredAssumptionSite {
+            callback: record_assumption_failure,
+            execution_context,
+            site_id: event_site_id(event_sites, node_ref, node)?,
+        })
+    } else {
+        None
+    };
+    Ok(ComputedValue::ScalarArrayIndex(Box::new(
+        DeferredScalarArrayIndex {
+            array_pointer,
+            dimensions,
+            layout,
+            assumption_site,
+        },
+    )))
+}
+
+/// Emits a deferred scalar array-index recipe and returns the selected value.
+fn materialize_deferred_scalar_array_index(
+    builder: &mut FunctionBuilder<'_>,
+    value: DeferredScalarArrayIndex,
+) -> Result<Value, CompilerError> {
+    let mut pointer = value.array_pointer;
+    let mut all_in_bounds = None;
+    for dimension in value.dimensions {
+        let bounded = bounded_array_index(
+            builder,
+            dimension.index,
+            &dimension.index_layout,
+            dimension.element_count,
+            builder.func.dfg.value_type(pointer),
+            dimension.statically_in_bounds,
+        )?;
+        all_in_bounds = combine_optional_conditions(builder, all_in_bounds, bounded.in_bounds);
+        pointer = array_element_pointer_from_address_index(
+            builder,
+            pointer,
+            bounded.address_index,
+            dimension.element_byte_count,
+        );
+    }
+    if let (Some(site), Some(all_in_bounds)) = (value.assumption_site, all_in_bounds) {
+        let failed = builder.ins().icmp_imm(IntCC::Equal, all_in_bounds, 0);
+        emit_conditional_site_call(
+            builder,
+            failed,
+            site.callback,
+            site.execution_context,
+            site.site_id,
+        );
+    }
+    let ComputedValue::Scalar(value) =
+        load_value_from_storage(builder, pointer, &NativeValueLayout::Scalar(value.layout))
+    else {
+        unreachable!("scalar array-index recipe has scalar layout")
+    };
+    Ok(value)
 }
 
 fn lower_scalar_literal(
@@ -4624,6 +5492,7 @@ fn lower_array_construction(
     elements: &[NodeRef],
     values: &[Option<ComputedValue>],
     layout: &NativeValueLayout,
+    non_overlapping: bool,
 ) -> Result<(), CompilerError> {
     let NativeValueLayout::Array {
         element,
@@ -4639,14 +5508,14 @@ fn lower_array_construction(
             "array node operand count disagrees with its result type".into(),
         ));
     }
-    for (index, node_ref) in elements.iter().enumerate() {
+    let values = preload_scalar_storage_views(builder, elements, values)?;
+    for (index, value) in values.into_iter().enumerate() {
         let pointer = pointer_at_offset(builder, destination, index * element.byte_count());
-        store_value_to_storage(
-            builder,
-            pointer,
-            computed_value_for(values, *node_ref)?,
-            element,
-        )?;
+        if non_overlapping {
+            store_nonoverlapping_value_to_storage(builder, pointer, value, element)?;
+        } else {
+            store_value_to_storage(builder, pointer, value, element)?;
+        }
     }
     Ok(())
 }
@@ -4657,6 +5526,7 @@ fn lower_tuple_construction(
     elements: &[NodeRef],
     values: &[Option<ComputedValue>],
     layout: &NativeValueLayout,
+    non_overlapping: bool,
 ) -> Result<(), CompilerError> {
     let NativeValueLayout::Tuple { fields, .. } = layout else {
         return Err(CompilerError::InvalidFunction(
@@ -4668,16 +5538,36 @@ fn lower_tuple_construction(
             "tuple node operand count disagrees with its result type".into(),
         ));
     }
-    for (node_ref, field) in elements.iter().zip(fields.iter()) {
+    let values = preload_scalar_storage_views(builder, elements, values)?;
+    for (value, field) in values.into_iter().zip(fields.iter()) {
         let pointer = pointer_at_offset(builder, destination, field.offset);
-        store_value_to_storage(
-            builder,
-            pointer,
-            computed_value_for(values, *node_ref)?,
-            field.layout.as_ref(),
-        )?;
+        if non_overlapping {
+            store_nonoverlapping_value_to_storage(builder, pointer, value, field.layout.as_ref())?;
+        } else {
+            store_value_to_storage(builder, pointer, value, field.layout.as_ref())?;
+        }
     }
     Ok(())
+}
+
+/// Loads deferred scalar aggregate views before aggregate destination writes.
+fn preload_scalar_storage_views(
+    builder: &mut FunctionBuilder<'_>,
+    elements: &[NodeRef],
+    values: &[Option<ComputedValue>],
+) -> Result<Vec<ComputedValue>, CompilerError> {
+    elements
+        .iter()
+        .map(|element| {
+            let value = computed_value_for(values, *element)?;
+            match value {
+                ComputedValue::ScalarAddress { .. } | ComputedValue::ScalarArrayIndex(_) => {
+                    Ok(ComputedValue::Scalar(materialize_scalar(builder, value)?))
+                }
+                _ => Ok(value),
+            }
+        })
+        .collect()
 }
 
 fn lower_tuple_index(
@@ -4709,12 +5599,16 @@ fn lower_tuple_index(
         return Ok(ComputedValue::ZeroSized);
     }
     let tuple_pointer = address_value_for(values, tuple)?;
-    let field_pointer = pointer_at_offset(builder, tuple_pointer, field.offset);
-    Ok(load_value_from_storage(
-        builder,
-        field_pointer,
-        result_layout,
-    ))
+    if let NativeValueLayout::Scalar(layout) = result_layout {
+        Ok(ComputedValue::ScalarAddress {
+            pointer: tuple_pointer,
+            offset: field.offset,
+            layout: *layout,
+        })
+    } else {
+        let field_pointer = pointer_at_offset(builder, tuple_pointer, field.offset);
+        Ok(deferred_value_from_storage(field_pointer, result_layout))
+    }
 }
 
 fn lower_array_concat(
@@ -4724,6 +5618,7 @@ fn lower_array_concat(
     args: &[NodeRef],
     values: &[Option<ComputedValue>],
     result_layout: &NativeValueLayout,
+    non_overlapping: bool,
 ) -> Result<(), CompilerError> {
     let NativeValueLayout::Array {
         element,
@@ -4753,6 +5648,7 @@ fn lower_array_concat(
             expect_address(computed_value_for(values, *arg)?)?,
             arg_ty.element_count,
             element,
+            non_overlapping,
         )?;
         destination_start += arg_ty.element_count;
     }
@@ -4776,9 +5672,9 @@ fn lower_value_equality(
     }
     match layout {
         NativeValueLayout::Scalar(_) => {
-            Ok(builder
-                .ins()
-                .icmp(IntCC::Equal, expect_scalar(lhs)?, expect_scalar(rhs)?))
+            let lhs = materialize_scalar(builder, lhs)?;
+            let rhs = materialize_scalar(builder, rhs)?;
+            Ok(builder.ins().icmp(IntCC::Equal, lhs, rhs))
         }
         NativeValueLayout::WideBits(wide) => {
             let lhs = expect_address(lhs)?;
@@ -4839,19 +5735,21 @@ fn copy_array_elements(
     source: Value,
     source_element_count: usize,
     element_layout: &NativeValueLayout,
+    non_overlapping: bool,
 ) -> Result<(), CompilerError> {
-    for index in 0..source_element_count {
-        let source_element =
-            pointer_at_offset(builder, source, index * element_layout.byte_count());
-        let destination_element = pointer_at_offset(
-            builder,
-            destination,
-            (destination_start + index) * element_layout.byte_count(),
-        );
-        let element = load_value_from_storage(builder, source_element, element_layout);
-        store_value_to_storage(builder, destination_element, element, element_layout)?;
+    let element_byte_count = element_layout.byte_count();
+    let destination_offset = destination_start
+        .checked_mul(element_byte_count)
+        .ok_or_else(|| CompilerError::UnsupportedType("array copy offset overflow".into()))?;
+    let byte_count = source_element_count
+        .checked_mul(element_byte_count)
+        .ok_or_else(|| CompilerError::UnsupportedType("array copy size overflow".into()))?;
+    let destination = pointer_at_offset(builder, destination, destination_offset);
+    if non_overlapping {
+        emit_nonoverlapping_memory_copy(builder, destination, source, byte_count)
+    } else {
+        emit_memory_copy(builder, destination, source, byte_count)
     }
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4864,6 +5762,7 @@ fn lower_array_slice(
     values: &[Option<ComputedValue>],
     result_layout: &NativeValueLayout,
     pointer_type: ClifType,
+    non_overlapping: bool,
 ) -> Result<(), CompilerError> {
     let NativeValueLayout::Array {
         element: result_element,
@@ -4895,7 +5794,7 @@ fn lower_array_slice(
         let source_element = clamped_array_element_pointer_for_bits(
             builder,
             source,
-            start_value,
+            start_value.clone(),
             &start_layout,
             input_count,
             output_index,
@@ -4908,7 +5807,16 @@ fn lower_array_slice(
             output_index * result_element.byte_count(),
         );
         let element = load_value_from_storage(builder, source_element, result_element);
-        store_value_to_storage(builder, destination_element, element, result_element)?;
+        if non_overlapping {
+            store_nonoverlapping_value_to_storage(
+                builder,
+                destination_element,
+                element,
+                result_element,
+            )?;
+        } else {
+            store_value_to_storage(builder, destination_element, element, result_element)?;
+        }
     }
     Ok(())
 }
@@ -4939,6 +5847,8 @@ fn lower_array_update(
     }
     let destination = if layout.byte_count() == 0 {
         None
+    } else if scratch_plan.in_place_array_updates.contains(&node_ref) {
+        Some(address_value_for(values, array)?)
     } else {
         let destination = materialized_destination(
             builder,
@@ -4948,12 +5858,12 @@ fn lower_array_update(
             scratch_pointer,
             scratch_plan,
         )?;
-        store_value_to_storage(
-            builder,
-            destination,
-            computed_value_for(values, array)?,
-            layout,
-        )?;
+        let array = computed_value_for(values, array)?;
+        if node_ref != return_node {
+            store_nonoverlapping_value_to_storage(builder, destination, array, layout)?;
+        } else {
+            store_value_to_storage(builder, destination, array, layout)?;
+        }
         Some(destination)
     };
     let mut target = destination;
@@ -4971,29 +5881,31 @@ fn lower_array_update(
             )));
         };
         let index_layout = NativeValueLayout::from_type(&function.get_node(*index).ty)?;
-        let (bounded_index, is_in_bounds) = bounded_array_index(
+        if element_count == 0 {
+            return Err(CompilerError::UnsupportedType(
+                "zero-length native arrays are not supported for updates".into(),
+            ));
+        }
+        let bounded = bounded_array_index(
             builder,
             computed_value_for(values, *index)?,
             &index_layout,
             element_count,
             pointer_type,
+            bits_node_is_statically_less_than(function, *index, element_count),
         )?;
-        all_in_bounds = Some(match all_in_bounds {
-            Some(condition) => builder.ins().band(condition, is_in_bounds),
-            None => is_in_bounds,
-        });
+        all_in_bounds = combine_optional_conditions(builder, all_in_bounds, bounded.in_bounds);
         if let Some(current_target) = target {
             target = Some(array_element_pointer_from_address_index(
                 builder,
                 current_target,
-                bounded_index,
+                bounded.address_index,
                 element.byte_count(),
             ));
         }
         target_layout = *element;
     }
-    let condition = all_in_bounds.expect("nonempty array update has an index condition");
-    if assumed_in_bounds {
+    if assumed_in_bounds && let Some(condition) = all_in_bounds {
         let site_id = event_site_id(event_sites, node_ref, node)?;
         let failed = builder.ins().icmp_imm(IntCC::Equal, condition, 0);
         emit_conditional_site_call(
@@ -5007,15 +5919,20 @@ fn lower_array_update(
     let Some(target) = target else {
         return Ok(ComputedValue::ZeroSized);
     };
-    let original = load_value_from_storage(builder, target, &target_layout);
-    write_selected_value_to_storage(
-        builder,
-        target,
-        condition,
-        computed_value_for(values, value)?,
-        Some(original),
-        &target_layout,
-    )?;
+    let replacement = computed_value_for(values, value)?;
+    if let Some(condition) = all_in_bounds {
+        let original = load_value_from_storage(builder, target, &target_layout);
+        write_selected_value_to_storage(
+            builder,
+            target,
+            condition,
+            replacement,
+            Some(original),
+            &target_layout,
+        )?;
+    } else {
+        store_value_to_storage(builder, target, replacement, &target_layout)?;
+    }
     Ok(ComputedValue::Address(destination.expect(
         "nonempty array update has materialized destination",
     )))
@@ -5024,9 +5941,6 @@ fn lower_array_update(
 #[allow(clippy::too_many_arguments)]
 fn lower_gate(
     builder: &mut FunctionBuilder<'_>,
-    node_ref: NodeRef,
-    return_node: NodeRef,
-    output_pointer: Value,
     scratch_pointer: Value,
     scratch_plan: &ScratchPlan,
     predicate: Value,
@@ -5036,9 +5950,6 @@ fn lower_gate(
     let enabled = builder.ins().icmp_imm(IntCC::NotEqual, predicate, 0);
     selected_value(
         builder,
-        node_ref,
-        return_node,
-        output_pointer,
         scratch_pointer,
         scratch_plan,
         enabled,
@@ -5051,18 +5962,15 @@ fn lower_gate(
 #[allow(clippy::too_many_arguments)]
 fn lower_sel(
     builder: &mut FunctionBuilder<'_>,
-    node_ref: NodeRef,
-    return_node: NodeRef,
-    output_pointer: Value,
     scratch_pointer: Value,
     scratch_plan: &ScratchPlan,
     selector: NodeRef,
     cases: &[NodeRef],
     default: Option<NodeRef>,
-    values: &[Option<ComputedValue>],
+    values: &mut [Option<ComputedValue>],
     layout: &NativeValueLayout,
 ) -> Result<ComputedValue, CompilerError> {
-    let selector_value = scalar_value_for(values, selector)?;
+    let selector_value = scalar_value_for(builder, values, selector)?;
     let initial = default
         .or_else(|| cases.last().copied())
         .ok_or_else(|| CompilerError::InvalidFunction("sel requires a case or default".into()))?;
@@ -5073,9 +5981,6 @@ fn lower_sel(
             .icmp_imm(IntCC::Equal, selector_value, index as i64);
         result = selected_value(
             builder,
-            node_ref,
-            return_node,
-            output_pointer,
             scratch_pointer,
             scratch_plan,
             selected,
@@ -5092,15 +5997,12 @@ fn lower_priority_sel(
     builder: &mut FunctionBuilder<'_>,
     function: &ir::Fn,
     node: &ir::Node,
-    node_ref: NodeRef,
-    return_node: NodeRef,
-    output_pointer: Value,
     scratch_pointer: Value,
     scratch_plan: &ScratchPlan,
     selector: NodeRef,
     cases: &[NodeRef],
     default: Option<NodeRef>,
-    values: &[Option<ComputedValue>],
+    values: &mut [Option<ComputedValue>],
     layout: &NativeValueLayout,
 ) -> Result<ComputedValue, CompilerError> {
     let Some(default) = default else {
@@ -5109,16 +6011,13 @@ fn lower_priority_sel(
             node.text_id
         )));
     };
-    let selector_value = scalar_value_for(values, selector)?;
+    let selector_value = scalar_value_for(builder, values, selector)?;
     let selector_layout = ScalarLayout::from_type(&function.get_node(selector).ty)?;
     let mut result = computed_value_for(values, default)?;
     for (index, case) in cases.iter().enumerate().rev() {
         let selected = bit_is_set(builder, selector_value, selector_layout, index);
         result = selected_value(
             builder,
-            node_ref,
-            return_node,
-            output_pointer,
             scratch_pointer,
             scratch_plan,
             selected,
@@ -5142,13 +6041,13 @@ fn lower_one_hot_sel(
     scratch_plan: &ScratchPlan,
     selector: NodeRef,
     cases: &[NodeRef],
-    values: &[Option<ComputedValue>],
+    values: &mut [Option<ComputedValue>],
     layout: &NativeValueLayout,
 ) -> Result<ComputedValue, CompilerError> {
     if cases.is_empty() {
         return Err(unsupported_node(node));
     }
-    let selector_value = scalar_value_for(values, selector)?;
+    let selector_value = scalar_value_for(builder, values, selector)?;
     let selector_layout = ScalarLayout::from_type(&function.get_node(selector).ty)?;
     if layout.byte_count() == 0 {
         return Ok(ComputedValue::ZeroSized);
@@ -5158,7 +6057,8 @@ fn lower_one_hot_sel(
             let mut result = builder.ins().iconst(scalar.clif_type(), 0);
             for (index, case) in cases.iter().enumerate() {
                 let active = bit_is_set(builder, selector_value, selector_layout, index);
-                let with_case = builder.ins().bor(result, scalar_value_for(values, *case)?);
+                let case = scalar_value_for(builder, values, *case)?;
+                let with_case = builder.ins().bor(result, case);
                 result = builder.ins().select(active, with_case, result);
             }
             Ok(ComputedValue::Scalar(mask_value(builder, result, *scalar)))
@@ -5174,7 +6074,7 @@ fn lower_one_hot_sel(
                 scratch_pointer,
                 scratch_plan,
             )?;
-            write_zero_value_to_storage(builder, destination, layout);
+            write_zero_value_to_storage(builder, destination, layout)?;
             for (index, case) in cases.iter().enumerate() {
                 let active = bit_is_set(builder, selector_value, selector_layout, index);
                 write_selected_or_value_to_storage(
@@ -5269,9 +6169,6 @@ fn bit_is_set(
 #[allow(clippy::too_many_arguments)]
 fn selected_value(
     builder: &mut FunctionBuilder<'_>,
-    node_ref: NodeRef,
-    return_node: NodeRef,
-    output_pointer: Value,
     scratch_pointer: Value,
     scratch_plan: &ScratchPlan,
     condition: Value,
@@ -5284,9 +6181,9 @@ fn selected_value(
     }
     match layout {
         NativeValueLayout::Scalar(scalar) => {
-            let true_value = expect_scalar(when_true)?;
+            let true_value = materialize_scalar(builder, when_true)?;
             let false_value = match when_false {
-                Some(value) => expect_scalar(value)?,
+                Some(value) => materialize_scalar(builder, value)?,
                 None => builder.ins().iconst(scalar.clif_type(), 0),
             };
             Ok(ComputedValue::Scalar(builder.ins().select(
@@ -5298,23 +6195,16 @@ fn selected_value(
         NativeValueLayout::WideBits(_)
         | NativeValueLayout::Array { .. }
         | NativeValueLayout::Tuple { .. } => {
-            let destination = materialized_destination(
-                builder,
-                node_ref,
-                return_node,
-                output_pointer,
-                scratch_pointer,
-                scratch_plan,
-            )?;
-            write_selected_value_to_storage(
-                builder,
-                destination,
+            let true_source = expect_address(when_true)?;
+            let false_source = match when_false {
+                Some(value) => expect_address(value)?,
+                None => gate_zero_pointer(builder, scratch_pointer, scratch_plan)?,
+            };
+            Ok(ComputedValue::Address(builder.ins().select(
                 condition,
-                when_true,
-                when_false,
-                layout,
-            )?;
-            Ok(ComputedValue::Address(destination))
+                true_source,
+                false_source,
+            )))
         }
         NativeValueLayout::Token => Ok(ComputedValue::ZeroSized),
     }
@@ -5334,12 +6224,11 @@ fn write_selected_value_to_storage(
     match layout {
         NativeValueLayout::Scalar(scalar) => {
             let false_value = match when_false {
-                Some(value) => expect_scalar(value)?,
+                Some(value) => materialize_scalar(builder, value)?,
                 None => builder.ins().iconst(scalar.clif_type(), 0),
             };
-            let selected = builder
-                .ins()
-                .select(condition, expect_scalar(when_true)?, false_value);
+            let when_true = materialize_scalar(builder, when_true)?;
+            let selected = builder.ins().select(condition, when_true, false_value);
             builder
                 .ins()
                 .store(MemFlags::new(), selected, destination, 0);
@@ -5366,52 +6255,17 @@ fn write_selected_value_to_storage(
                     .store(MemFlags::new(), selected, destination, offset);
             }
         }
-        NativeValueLayout::Array {
-            element,
-            element_count,
-        } => {
+        NativeValueLayout::Array { .. } | NativeValueLayout::Tuple { .. } => {
             let true_source = expect_address(when_true)?;
             let false_source = when_false.map(expect_address).transpose()?;
-            for index in 0..*element_count {
-                let offset = index * element.byte_count();
-                let child_destination = pointer_at_offset(builder, destination, offset);
-                let true_pointer = pointer_at_offset(builder, true_source, offset);
-                let true_child = load_value_from_storage(builder, true_pointer, element);
-                let false_child = false_source.map(|source| {
-                    let false_pointer = pointer_at_offset(builder, source, offset);
-                    load_value_from_storage(builder, false_pointer, element)
-                });
-                write_selected_value_to_storage(
-                    builder,
-                    child_destination,
-                    condition,
-                    true_child,
-                    false_child,
-                    element,
-                )?;
-            }
-        }
-        NativeValueLayout::Tuple { fields, .. } => {
-            let true_source = expect_address(when_true)?;
-            let false_source = when_false.map(expect_address).transpose()?;
-            for field in fields {
-                let child_destination = pointer_at_offset(builder, destination, field.offset);
-                let true_pointer = pointer_at_offset(builder, true_source, field.offset);
-                let true_child =
-                    load_value_from_storage(builder, true_pointer, field.layout.as_ref());
-                let false_child = false_source.map(|source| {
-                    let false_pointer = pointer_at_offset(builder, source, field.offset);
-                    load_value_from_storage(builder, false_pointer, field.layout.as_ref())
-                });
-                write_selected_value_to_storage(
-                    builder,
-                    child_destination,
-                    condition,
-                    true_child,
-                    false_child,
-                    field.layout.as_ref(),
-                )?;
-            }
+            emit_selected_memory_copy(
+                builder,
+                destination,
+                condition,
+                true_source,
+                false_source,
+                layout.byte_count(),
+            )?;
         }
         NativeValueLayout::Token => {}
     }
@@ -5422,7 +6276,7 @@ fn write_zero_value_to_storage(
     builder: &mut FunctionBuilder<'_>,
     destination: Value,
     layout: &NativeValueLayout,
-) {
+) -> Result<(), CompilerError> {
     match layout {
         NativeValueLayout::Scalar(scalar) => {
             let zero = builder.ins().iconst(scalar.clif_type(), 0);
@@ -5439,23 +6293,12 @@ fn write_zero_value_to_storage(
                 );
             }
         }
-        NativeValueLayout::Array {
-            element,
-            element_count,
-        } => {
-            for index in 0..*element_count {
-                let child = pointer_at_offset(builder, destination, index * element.byte_count());
-                write_zero_value_to_storage(builder, child, element);
-            }
-        }
-        NativeValueLayout::Tuple { fields, .. } => {
-            for field in fields {
-                let child = pointer_at_offset(builder, destination, field.offset);
-                write_zero_value_to_storage(builder, child, field.layout.as_ref());
-            }
+        NativeValueLayout::Array { .. } | NativeValueLayout::Tuple { .. } => {
+            emit_memory_zero(builder, destination, layout.byte_count())?;
         }
         NativeValueLayout::Token => {}
     }
+    Ok(())
 }
 
 fn write_selected_or_value_to_storage(
@@ -5473,7 +6316,8 @@ fn write_selected_or_value_to_storage(
             let current = builder
                 .ins()
                 .load(scalar.clif_type(), MemFlags::new(), destination, 0);
-            let combined = builder.ins().bor(current, expect_scalar(value)?);
+            let value = materialize_scalar(builder, value)?;
+            let combined = builder.ins().bor(current, value);
             let selected = builder.ins().select(condition, combined, current);
             builder
                 .ins()
@@ -5572,8 +6416,15 @@ fn clamped_array_element_pointer_for_bits(
         builder.ins().iconst(pointer_type, max_index as i64)
     } else {
         let max_start = max_index - additional_index;
-        let (bounded_start, _) =
-            bounded_array_index(builder, index, index_layout, max_start + 1, pointer_type)?;
+        let bounded_start = bounded_array_index(
+            builder,
+            index,
+            index_layout,
+            max_start + 1,
+            pointer_type,
+            false,
+        )?
+        .address_index;
         if additional_index == 0 {
             bounded_start
         } else {
@@ -5590,13 +6441,32 @@ fn clamped_array_element_pointer_for_bits(
     Ok(builder.ins().iadd(array_pointer, offset))
 }
 
+#[derive(Clone, Copy)]
+struct BoundedArrayIndex {
+    address_index: Value,
+    in_bounds: Option<Value>,
+}
+
+fn combine_optional_conditions(
+    builder: &mut FunctionBuilder<'_>,
+    lhs: Option<Value>,
+    rhs: Option<Value>,
+) -> Option<Value> {
+    match (lhs, rhs) {
+        (Some(lhs), Some(rhs)) => Some(builder.ins().band(lhs, rhs)),
+        (Some(condition), None) | (None, Some(condition)) => Some(condition),
+        (None, None) => None,
+    }
+}
+
 fn bounded_array_index(
     builder: &mut FunctionBuilder<'_>,
     index: ComputedValue,
     layout: &NativeValueLayout,
     element_count: usize,
     pointer_type: ClifType,
-) -> Result<(Value, Value), CompilerError> {
+    statically_in_bounds: bool,
+) -> Result<BoundedArrayIndex, CompilerError> {
     let max_index = element_count - 1;
     if max_index as u128 > i64::MAX as u128 {
         return Err(CompilerError::UnsupportedType(
@@ -5605,25 +6475,38 @@ fn bounded_array_index(
     }
     match layout {
         NativeValueLayout::Scalar(scalar) => {
-            let index = expect_scalar(index)?;
+            let index = materialize_scalar(builder, index)?;
             let address_index = resize_integer_type_unsigned(builder, index, *scalar, pointer_type);
-            if scalar.mask() <= max_index as u64 {
-                let in_bounds = builder.ins().icmp(IntCC::Equal, index, index);
-                return Ok((address_index, in_bounds));
+            if statically_in_bounds || scalar.mask() <= max_index as u64 {
+                return Ok(BoundedArrayIndex {
+                    address_index,
+                    in_bounds: None,
+                });
             }
             let in_bounds =
                 builder
                     .ins()
                     .icmp_imm(IntCC::UnsignedLessThan, index, element_count as i64);
             let final_index = builder.ins().iconst(pointer_type, max_index as i64);
-            Ok((
-                builder.ins().select(in_bounds, address_index, final_index),
-                in_bounds,
-            ))
+            Ok(BoundedArrayIndex {
+                address_index: builder.ins().select(in_bounds, address_index, final_index),
+                in_bounds: Some(in_bounds),
+            })
         }
         NativeValueLayout::WideBits(wide) => {
             let address = expect_address(index)?;
             let low = load_wide_limb(builder, address, 0);
+            let address_index = if pointer_type == types::I64 {
+                low
+            } else {
+                builder.ins().ireduce(pointer_type, low)
+            };
+            if statically_in_bounds {
+                return Ok(BoundedArrayIndex {
+                    address_index,
+                    in_bounds: None,
+                });
+            }
             let mut high = builder.ins().iconst(types::I64, 0);
             for limb in 1..wide.limb_count {
                 let next = load_wide_limb(builder, address, limb);
@@ -5635,16 +6518,11 @@ fn bounded_array_index(
                     .ins()
                     .icmp_imm(IntCC::UnsignedLessThan, low, element_count as i64);
             let in_bounds = builder.ins().band(high_is_zero, low_in_bounds);
-            let address_index = if pointer_type == types::I64 {
-                low
-            } else {
-                builder.ins().ireduce(pointer_type, low)
-            };
             let final_index = builder.ins().iconst(pointer_type, max_index as i64);
-            Ok((
-                builder.ins().select(in_bounds, address_index, final_index),
-                in_bounds,
-            ))
+            Ok(BoundedArrayIndex {
+                address_index: builder.ins().select(in_bounds, address_index, final_index),
+                in_bounds: Some(in_bounds),
+            })
         }
         _ => Err(CompilerError::InvalidFunction(
             "array index is not bits-typed".into(),
@@ -5679,7 +6557,7 @@ fn materialized_destination(
     let offset = scratch_plan
         .offsets
         .get(&node_ref)
-        .copied()
+        .cloned()
         .ok_or_else(|| {
             CompilerError::InvalidFunction(format!(
                 "materialized aggregate node {} has no scratch assignment",
@@ -5689,12 +6567,219 @@ fn materialized_destination(
     Ok(pointer_at_offset(builder, scratch_pointer, offset))
 }
 
+/// Returns the shared zero-valued backing storage used by memory-backed gates.
+fn gate_zero_pointer(
+    builder: &mut FunctionBuilder<'_>,
+    scratch_pointer: Value,
+    scratch_plan: &ScratchPlan,
+) -> Result<Value, CompilerError> {
+    let offset = scratch_plan.gate_zero_offset.ok_or_else(|| {
+        CompilerError::InvalidFunction("memory-backed gate has no zero scratch assignment".into())
+    })?;
+    Ok(pointer_at_offset(builder, scratch_pointer, offset))
+}
+
 fn pointer_at_offset(builder: &mut FunctionBuilder<'_>, pointer: Value, offset: usize) -> Value {
     if offset == 0 {
         pointer
     } else {
         builder.ins().iadd_imm(pointer, offset as i64)
     }
+}
+
+const INLINE_MEMORY_COPY_MAX_BYTE_COUNT: usize = 32;
+
+#[derive(Clone, Copy)]
+enum MemoryCopyOverlap {
+    MayOverlap,
+    NonOverlapping,
+}
+
+/// Emits an overlap-safe copy for one contiguous native storage region.
+fn emit_memory_copy(
+    builder: &mut FunctionBuilder<'_>,
+    destination: Value,
+    source: Value,
+    byte_count: usize,
+) -> Result<(), CompilerError> {
+    emit_memory_copy_with_overlap(
+        builder,
+        destination,
+        source,
+        byte_count,
+        MemoryCopyOverlap::MayOverlap,
+    )
+}
+
+/// Emits a copy for one contiguous native storage region known not to overlap.
+fn emit_nonoverlapping_memory_copy(
+    builder: &mut FunctionBuilder<'_>,
+    destination: Value,
+    source: Value,
+    byte_count: usize,
+) -> Result<(), CompilerError> {
+    emit_memory_copy_with_overlap(
+        builder,
+        destination,
+        source,
+        byte_count,
+        MemoryCopyOverlap::NonOverlapping,
+    )
+}
+
+/// Emits a fixed-size copy, inlining small regions and selecting the
+/// appropriate libc helper for larger ones.
+fn emit_memory_copy_with_overlap(
+    builder: &mut FunctionBuilder<'_>,
+    destination: Value,
+    source: Value,
+    byte_count: usize,
+    overlap: MemoryCopyOverlap,
+) -> Result<(), CompilerError> {
+    if byte_count == 0 {
+        return Ok(());
+    }
+    if byte_count <= INLINE_MEMORY_COPY_MAX_BYTE_COUNT {
+        return emit_inline_memory_copy(builder, destination, source, byte_count);
+    }
+    let pointer_type = builder.func.dfg.value_type(destination);
+    debug_assert_eq!(pointer_type, builder.func.dfg.value_type(source));
+    let byte_count = i64::try_from(byte_count).map_err(|_| {
+        CompilerError::UnsupportedType("native aggregate copy exceeds i64::MAX bytes".into())
+    })?;
+    let mut signature = Signature::new(builder.func.signature.call_conv);
+    signature.params.extend([
+        AbiParam::new(pointer_type),
+        AbiParam::new(pointer_type),
+        AbiParam::new(pointer_type),
+    ]);
+    signature.returns.push(AbiParam::new(pointer_type));
+    let signature = builder.import_signature(signature);
+    let libcall = match overlap {
+        MemoryCopyOverlap::MayOverlap => LibCall::Memmove,
+        MemoryCopyOverlap::NonOverlapping => LibCall::Memcpy,
+    };
+    let copy = builder.import_function(ExtFuncData {
+        name: ExternalName::LibCall(libcall),
+        signature,
+        colocated: false,
+        patchable: false,
+    });
+    let byte_count = builder.ins().iconst(pointer_type, byte_count);
+    builder.ins().call(copy, &[destination, source, byte_count]);
+    Ok(())
+}
+
+/// Emits an overlap-safe fixed-size copy by loading every source chunk before
+/// writing any destination chunk.
+fn emit_inline_memory_copy(
+    builder: &mut FunctionBuilder<'_>,
+    destination: Value,
+    source: Value,
+    byte_count: usize,
+) -> Result<(), CompilerError> {
+    debug_assert!(byte_count <= INLINE_MEMORY_COPY_MAX_BYTE_COUNT);
+    let mut chunks = Vec::new();
+    let mut offset = 0usize;
+    while offset < byte_count {
+        let remaining = byte_count - offset;
+        let ty = if remaining >= 8 {
+            types::I64
+        } else if remaining >= 4 {
+            types::I32
+        } else if remaining >= 2 {
+            types::I16
+        } else {
+            types::I8
+        };
+        let chunk_offset = i32::try_from(offset).map_err(|_| {
+            CompilerError::UnsupportedType("inline aggregate copy offset overflow".into())
+        })?;
+        chunks.push((
+            chunk_offset,
+            builder
+                .ins()
+                .load(ty, MemFlags::new(), source, chunk_offset),
+        ));
+        offset = offset.checked_add(ty.bytes() as usize).ok_or_else(|| {
+            CompilerError::UnsupportedType("inline aggregate copy size overflow".into())
+        })?;
+    }
+    for (offset, value) in chunks {
+        builder
+            .ins()
+            .store(MemFlags::new(), value, destination, offset);
+    }
+    Ok(())
+}
+
+/// Emits a libc zero-fill for one contiguous native storage region.
+fn emit_memory_zero(
+    builder: &mut FunctionBuilder<'_>,
+    destination: Value,
+    byte_count: usize,
+) -> Result<(), CompilerError> {
+    if byte_count == 0 {
+        return Ok(());
+    }
+    let pointer_type = builder.func.dfg.value_type(destination);
+    let byte_count = i64::try_from(byte_count).map_err(|_| {
+        CompilerError::UnsupportedType("native aggregate zero-fill exceeds i64::MAX bytes".into())
+    })?;
+    let mut signature = Signature::new(builder.func.signature.call_conv);
+    signature.params.extend([
+        AbiParam::new(pointer_type),
+        AbiParam::new(types::I32),
+        AbiParam::new(pointer_type),
+    ]);
+    signature.returns.push(AbiParam::new(pointer_type));
+    let signature = builder.import_signature(signature);
+    let memset = builder.import_function(ExtFuncData {
+        name: ExternalName::LibCall(LibCall::Memset),
+        signature,
+        colocated: false,
+        patchable: false,
+    });
+    let zero = builder.ins().iconst(types::I32, 0);
+    let byte_count = builder.ins().iconst(pointer_type, byte_count);
+    builder.ins().call(memset, &[destination, zero, byte_count]);
+    Ok(())
+}
+
+/// Emits one aggregate selection without recursively selecting every leaf.
+fn emit_selected_memory_copy(
+    builder: &mut FunctionBuilder<'_>,
+    destination: Value,
+    condition: Value,
+    true_source: Value,
+    false_source: Option<Value>,
+    byte_count: usize,
+) -> Result<(), CompilerError> {
+    if let Some(false_source) = false_source {
+        let source = builder.ins().select(condition, true_source, false_source);
+        return emit_memory_copy(builder, destination, source, byte_count);
+    }
+
+    let true_block = builder.create_block();
+    let false_block = builder.create_block();
+    let done_block = builder.create_block();
+    builder
+        .ins()
+        .brif(condition, true_block, &[], false_block, &[]);
+
+    builder.switch_to_block(true_block);
+    emit_memory_copy(builder, destination, true_source, byte_count)?;
+    builder.ins().jump(done_block, &[]);
+    builder.seal_block(true_block);
+
+    builder.switch_to_block(false_block);
+    emit_memory_zero(builder, destination, byte_count)?;
+    builder.ins().jump(done_block, &[]);
+    builder.seal_block(false_block);
+
+    builder.switch_to_block(done_block);
+    builder.seal_block(done_block);
+    Ok(())
 }
 
 fn load_value_from_storage(
@@ -5719,20 +6804,70 @@ fn load_value_from_storage(
     }
 }
 
+/// Returns a storage-backed value, deferring scalar loads until consumption.
+fn deferred_value_from_storage(pointer: Value, layout: &NativeValueLayout) -> ComputedValue {
+    if layout.byte_count() == 0 {
+        return ComputedValue::ZeroSized;
+    }
+    match layout {
+        NativeValueLayout::Scalar(scalar) => ComputedValue::ScalarAddress {
+            pointer,
+            offset: 0,
+            layout: *scalar,
+        },
+        NativeValueLayout::WideBits(_)
+        | NativeValueLayout::Array { .. }
+        | NativeValueLayout::Tuple { .. } => ComputedValue::Address(pointer),
+        NativeValueLayout::Token => ComputedValue::ZeroSized,
+    }
+}
+
 fn store_value_to_storage(
     builder: &mut FunctionBuilder<'_>,
     destination: Value,
     value: ComputedValue,
     layout: &NativeValueLayout,
 ) -> Result<(), CompilerError> {
+    store_value_to_storage_with_overlap(
+        builder,
+        destination,
+        value,
+        layout,
+        MemoryCopyOverlap::MayOverlap,
+    )
+}
+
+/// Stores a value when memory-backed source and destination regions are known
+/// not to overlap.
+fn store_nonoverlapping_value_to_storage(
+    builder: &mut FunctionBuilder<'_>,
+    destination: Value,
+    value: ComputedValue,
+    layout: &NativeValueLayout,
+) -> Result<(), CompilerError> {
+    store_value_to_storage_with_overlap(
+        builder,
+        destination,
+        value,
+        layout,
+        MemoryCopyOverlap::NonOverlapping,
+    )
+}
+
+fn store_value_to_storage_with_overlap(
+    builder: &mut FunctionBuilder<'_>,
+    destination: Value,
+    value: ComputedValue,
+    layout: &NativeValueLayout,
+    overlap: MemoryCopyOverlap,
+) -> Result<(), CompilerError> {
     if layout.byte_count() == 0 {
         return Ok(());
     }
     match layout {
         NativeValueLayout::Scalar(_) => {
-            builder
-                .ins()
-                .store(MemFlags::new(), expect_scalar(value)?, destination, 0);
+            let value = materialize_scalar(builder, value)?;
+            builder.ins().store(MemFlags::new(), value, destination, 0);
         }
         NativeValueLayout::WideBits(wide) => {
             let source = expect_address(value)?;
@@ -5746,27 +6881,15 @@ fn store_value_to_storage(
                     .store(MemFlags::new(), value, destination, offset);
             }
         }
-        NativeValueLayout::Array {
-            element,
-            element_count,
-        } => {
+        NativeValueLayout::Array { .. } | NativeValueLayout::Tuple { .. } => {
             let source = expect_address(value)?;
-            for index in 0..*element_count {
-                let offset = index * element.byte_count();
-                let source_element = pointer_at_offset(builder, source, offset);
-                let destination_element = pointer_at_offset(builder, destination, offset);
-                let child = load_value_from_storage(builder, source_element, element);
-                store_value_to_storage(builder, destination_element, child, element)?;
-            }
-        }
-        NativeValueLayout::Tuple { fields, .. } => {
-            let source = expect_address(value)?;
-            for field in fields {
-                let source_field = pointer_at_offset(builder, source, field.offset);
-                let destination_field = pointer_at_offset(builder, destination, field.offset);
-                let child = load_value_from_storage(builder, source_field, field.layout.as_ref());
-                store_value_to_storage(builder, destination_field, child, field.layout.as_ref())?;
-            }
+            emit_memory_copy_with_overlap(
+                builder,
+                destination,
+                source,
+                layout.byte_count(),
+                overlap,
+            )?;
         }
         NativeValueLayout::Token => {}
     }
@@ -5779,7 +6902,7 @@ fn computed_value_for(
 ) -> Result<ComputedValue, CompilerError> {
     values
         .get(node_ref.index)
-        .copied()
+        .cloned()
         .flatten()
         .ok_or_else(|| {
             CompilerError::InvalidFunction(format!(
@@ -5790,10 +6913,13 @@ fn computed_value_for(
 }
 
 fn scalar_value_for(
-    values: &[Option<ComputedValue>],
+    builder: &mut FunctionBuilder<'_>,
+    values: &mut [Option<ComputedValue>],
     node_ref: NodeRef,
 ) -> Result<Value, CompilerError> {
-    expect_scalar(computed_value_for(values, node_ref)?)
+    let value = materialize_scalar(builder, computed_value_for(values, node_ref)?)?;
+    values[node_ref.index] = Some(ComputedValue::Scalar(value));
+    Ok(value)
 }
 
 fn address_value_for(
@@ -5803,9 +6929,29 @@ fn address_value_for(
     expect_address(computed_value_for(values, node_ref)?)
 }
 
-fn expect_scalar(value: ComputedValue) -> Result<Value, CompilerError> {
+fn materialize_scalar(
+    builder: &mut FunctionBuilder<'_>,
+    value: ComputedValue,
+) -> Result<Value, CompilerError> {
     match value {
         ComputedValue::Scalar(value) => Ok(value),
+        ComputedValue::ScalarAddress {
+            pointer,
+            offset,
+            layout,
+        } => {
+            let (pointer, offset) = match i32::try_from(offset) {
+                Ok(offset) => (pointer, offset),
+                Err(_) => (pointer_at_offset(builder, pointer, offset), 0),
+            };
+            let value = builder
+                .ins()
+                .load(layout.clif_type(), MemFlags::new(), pointer, offset);
+            Ok(mask_value(builder, value, layout))
+        }
+        ComputedValue::ScalarArrayIndex(value) => {
+            materialize_deferred_scalar_array_index(builder, *value)
+        }
         ComputedValue::Address(_) | ComputedValue::ZeroSized => Err(
             CompilerError::InvalidFunction("array value used as a scalar".into()),
         ),
@@ -5815,7 +6961,10 @@ fn expect_scalar(value: ComputedValue) -> Result<Value, CompilerError> {
 fn expect_address(value: ComputedValue) -> Result<Value, CompilerError> {
     match value {
         ComputedValue::Address(value) => Ok(value),
-        ComputedValue::Scalar(_) | ComputedValue::ZeroSized => Err(CompilerError::InvalidFunction(
+        ComputedValue::Scalar(_)
+        | ComputedValue::ScalarAddress { .. }
+        | ComputedValue::ScalarArrayIndex(_)
+        | ComputedValue::ZeroSized => Err(CompilerError::InvalidFunction(
             "scalar value used as an array".into(),
         )),
     }
@@ -5872,4 +7021,92 @@ fn unsupported_node(node: &ir::Node) -> CompilerError {
         node.text_id,
         node.ty
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xlsynth_pir::ir_parser::Parser;
+    use xlsynth_pir::ir_utils::get_topological;
+
+    fn parse_function(ir: &str) -> ir::Fn {
+        Parser::new(ir)
+            .parse_and_validate_package()
+            .expect("test PIR should parse and validate")
+            .get_fn("f")
+            .expect("function f should exist")
+            .clone()
+    }
+
+    fn assert_is_topological(function: &ir::Fn, order: &[NodeRef]) {
+        let positions = order
+            .iter()
+            .enumerate()
+            .map(|(position, node_ref)| (*node_ref, position))
+            .collect::<HashMap<_, _>>();
+        for node_ref in order {
+            for operand in operands(&function.get_node(*node_ref).payload) {
+                assert!(
+                    positions[&operand] < positions[node_ref],
+                    "operand {} should precede user {}",
+                    operand.index,
+                    node_ref.index
+                );
+            }
+        }
+    }
+
+    fn peak_live_scalar_count(function: &ir::Fn, order: &[NodeRef]) -> usize {
+        let is_scalar = function
+            .nodes
+            .iter()
+            .map(|node| scheduling_is_scalar(&node.ty).unwrap())
+            .collect::<Vec<_>>();
+        let mut remaining_user_count = vec![0usize; function.nodes.len()];
+        for node_ref in order {
+            for operand in unique_operands(function, *node_ref) {
+                remaining_user_count[operand.index] += 1;
+            }
+        }
+        let mut live_weight = 0usize;
+        let mut peak = 0usize;
+        for node_ref in order {
+            live_weight += usize::from(is_scalar[node_ref.index]);
+            peak = peak.max(live_weight);
+            for operand in unique_operands(function, *node_ref) {
+                remaining_user_count[operand.index] -= 1;
+                if is_scalar[operand.index] && remaining_user_count[operand.index] == 0 {
+                    live_weight -= 1;
+                }
+            }
+        }
+        peak
+    }
+
+    #[test]
+    fn pressure_scheduler_delays_independent_parameter_chains() {
+        let function = parse_function(
+            r#"package test
+
+fn f(a: bits[32] id=1, b: bits[32] id=2, c: bits[32] id=3, d: bits[32] id=4, e: bits[32] id=5) -> bits[32] {
+  ab: bits[32] = add(a, b, id=6)
+  cd: bits[32] = add(c, d, id=7)
+  cde: bits[32] = add(cd, e, id=8)
+  ret result: bits[32] = add(ab, cde, id=9)
+}
+"#,
+        );
+        let original = get_topological(&function)
+            .into_iter()
+            .filter(|node_ref| node_ref.index != 0)
+            .collect::<Vec<_>>();
+        let scheduled = reachable_scheduled_order(&function).unwrap();
+        assert_is_topological(&function, &scheduled);
+        assert_eq!(scheduled, reachable_scheduled_order(&function).unwrap());
+        assert!(
+            peak_live_scalar_count(&function, &scheduled)
+                < peak_live_scalar_count(&function, &original),
+            "pressure-aware order should reduce the peak live scalar count"
+        );
+    }
 }
