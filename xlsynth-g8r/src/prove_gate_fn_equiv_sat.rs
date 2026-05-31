@@ -1038,6 +1038,33 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_repartitions_current_class_after_counterexample() {
+        let setup = setup_graph_with_redundancies();
+        let proposed_class = &[
+            EquivNode::Normal(setup.inner0.node),
+            EquivNode::Normal(setup.inner1.node),
+            EquivNode::Normal(setup.outer0.node),
+            EquivNode::Normal(setup.outer1.node),
+        ];
+
+        let result = validate_equivalence_classes(&setup.g, &[proposed_class]).unwrap();
+        assert_eq!(
+            canonical_proven_sets(&result),
+            vec![
+                vec![
+                    EquivNode::Normal(setup.inner0.node),
+                    EquivNode::Normal(setup.inner1.node),
+                ],
+                vec![
+                    EquivNode::Normal(setup.outer0.node),
+                    EquivNode::Normal(setup.outer1.node),
+                ],
+            ]
+        );
+        assert_eq!(result.cex_inputs.len(), 1);
+    }
+
+    #[test]
     fn test_cadical_matches_varisat_on_redundant_graph() {
         let setup = setup_graph_with_redundancies();
         let mut seeded_rng = rand::rngs::StdRng::seed_from_u64(0);

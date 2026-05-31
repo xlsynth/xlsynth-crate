@@ -116,6 +116,14 @@ It's acceptable (and encouraged) for fuzz targets to flag failures that are not 
 
 When adding a new fuzz target under `xlsynth-g8r/fuzz/fuzz_targets/`, you must also register it in `xlsynth-g8r/fuzz/Cargo.toml` by adding a `[[bin]]` entry with `name`, `path`, and `test/doc=false`. Otherwise `cargo fuzz run <target>` will fail with “no bin target named …”. Also add a short entry to `FUZZ.md` describing the target’s property and main failure modes.
 
+### Fuzz Campaign Sanitizer Policy
+
+Run routine and long-lived fuzz campaigns with `cargo fuzz run --sanitizer none`.
+The default AddressSanitizer quarantine can retain substantial freed allocation
+traffic in allocation-heavy targets and produce artificial RSS growth or OOM
+failures during long campaigns. Use sanitizer-enabled fuzz runs deliberately for
+short memory-safety investigations rather than as the default endurance mode.
+
 ## Library Routine Output Policy
 
 - Library functions (especially under `xlsynth-g8r/src/**`) should not print to stdout/stderr.
