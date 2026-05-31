@@ -1010,7 +1010,7 @@ impl Parser {
     fn pop_string_or_error(&mut self) -> Result<String, ParseError> {
         self.drop_whitespace_and_comments();
         self.drop_or_error("\"")?;
-        let mut string = String::new();
+        let mut bytes = Vec::new();
         let mut closed = false;
         while let Some(c) = self.peekc() {
             if c == '"' {
@@ -1023,13 +1023,113 @@ impl Parser {
                 // quote as unterminated.
                 return Err(ParseError::new("unterminated quoted string".to_string()));
             }
-            string.push(c);
-            self.dropc()?;
+            if c == '\\' {
+                self.dropc()?;
+                bytes.extend(self.pop_c_escape_bytes_or_error()?);
+            } else {
+                let mut utf8 = [0; 4];
+                bytes.extend(c.encode_utf8(&mut utf8).as_bytes());
+                self.dropc()?;
+            }
         }
         if !closed {
             return Err(ParseError::new("unterminated quoted string".to_string()));
         }
-        Ok(string)
+        String::from_utf8(bytes)
+            .map_err(|_| ParseError::new("quoted string is not valid UTF-8".to_string()))
+    }
+
+    /// Pops one C-style string escape and returns its UTF-8 bytes.
+    fn pop_c_escape_bytes_or_error(&mut self) -> Result<Vec<u8>, ParseError> {
+        let c = self
+            .popc()
+            .ok_or_else(|| ParseError::new("unterminated quoted string escape".to_string()))?;
+        let bytes = match c {
+            'a' => vec![b'\x07'],
+            'b' => vec![b'\x08'],
+            'f' => vec![b'\x0c'],
+            'n' => vec![b'\n'],
+            'r' => vec![b'\r'],
+            't' => vec![b'\t'],
+            'v' => vec![b'\x0b'],
+            '\\' => vec![b'\\'],
+            '\'' => vec![b'\''],
+            '"' => vec![b'"'],
+            '?' => vec![b'?'],
+            '0'..='7' => {
+                let mut value = c.to_digit(8).unwrap();
+                for _ in 0..2 {
+                    let Some(next) = self.peekc() else {
+                        break;
+                    };
+                    let Some(digit) = next.to_digit(8) else {
+                        break;
+                    };
+                    self.dropc()?;
+                    value = value * 8 + digit;
+                }
+                vec![value as u8]
+            }
+            'x' => vec![self.pop_hex_escape_byte_or_error()?],
+            'u' => self.pop_unicode_escape_bytes_or_error(4)?,
+            'U' => self.pop_unicode_escape_bytes_or_error(8)?,
+            _ => {
+                return Err(ParseError::new(format!(
+                    "invalid quoted string escape: \\{c}"
+                )));
+            }
+        };
+        Ok(bytes)
+    }
+
+    /// Pops a greedy hexadecimal byte escape such as `\x41`.
+    fn pop_hex_escape_byte_or_error(&mut self) -> Result<u8, ParseError> {
+        let mut value = 0u32;
+        let mut saw_digit = false;
+        while let Some(c) = self.peekc() {
+            let Some(digit) = c.to_digit(16) else {
+                break;
+            };
+            self.dropc()?;
+            saw_digit = true;
+            value = value
+                .checked_mul(16)
+                .and_then(|v| v.checked_add(digit))
+                .filter(|v| *v <= u8::MAX as u32)
+                .ok_or_else(|| {
+                    ParseError::new("hex quoted string escape exceeds one byte".to_string())
+                })?;
+        }
+        if !saw_digit {
+            return Err(ParseError::new(
+                "hex quoted string escape requires at least one digit".to_string(),
+            ));
+        }
+        Ok(value as u8)
+    }
+
+    /// Pops an exact-width Unicode escape and returns the encoded code point.
+    fn pop_unicode_escape_bytes_or_error(
+        &mut self,
+        digit_count: usize,
+    ) -> Result<Vec<u8>, ParseError> {
+        let mut value = 0u32;
+        for _ in 0..digit_count {
+            let c = self.popc().ok_or_else(|| {
+                ParseError::new("unterminated Unicode quoted string escape".to_string())
+            })?;
+            let digit = c.to_digit(16).ok_or_else(|| {
+                ParseError::new(
+                    "Unicode quoted string escape requires hexadecimal digits".to_string(),
+                )
+            })?;
+            value = value * 16 + digit;
+        }
+        let c = char::from_u32(value).ok_or_else(|| {
+            ParseError::new("Unicode quoted string escape is not a valid code point".to_string())
+        })?;
+        let mut utf8 = [0; 4];
+        Ok(c.encode_utf8(&mut utf8).as_bytes().to_vec())
     }
 
     /// Parses and preserves a raw `#[...]` or `#![...]` attribute.
@@ -1123,39 +1223,29 @@ impl Parser {
         if self.peek_is("0x") || self.peek_is("0X") {
             number.push(self.popc().unwrap());
             number.push(self.popc().unwrap());
-            while let Some(c) = self.peekc() {
-                if c.is_ascii_hexdigit() {
-                    number.push(c);
-                    self.popc();
-                } else if c == '_' {
-                    self.popc();
-                } else {
-                    break;
-                }
-            }
+            number.push_str(&self.pop_digits_with_internal_underscores(
+                ctx,
+                "hexadecimal",
+                |c| c.is_ascii_hexdigit(),
+            )?);
         } else if self.peek_is("0b") || self.peek_is("0B") {
             number.push(self.popc().unwrap());
             number.push(self.popc().unwrap());
-            while let Some(c) = self.peekc() {
-                if c == '0' || c == '1' {
-                    number.push(c);
-                    self.popc();
-                } else if c == '_' {
-                    self.popc();
-                } else {
-                    break;
-                }
-            }
+            number.push_str(
+                &self.pop_digits_with_internal_underscores(ctx, "binary", |c| {
+                    c == '0' || c == '1'
+                })?,
+            );
         } else {
-            while let Some(c) = self.peekc() {
-                if c.is_ascii_digit() {
-                    number.push(c);
-                    self.popc();
-                } else if c == '_' {
-                    self.popc();
-                } else {
-                    break;
-                }
+            number.push_str(
+                &self
+                    .pop_digits_with_internal_underscores(ctx, "decimal", |c| c.is_ascii_digit())?,
+            );
+            if number.len() > 1 && number.starts_with('0') {
+                return Err(ParseError::new(format!(
+                    "invalid leading-zero decimal number {:?} in {}; use 0b or 0x for radix-prefixed values",
+                    number, ctx
+                )));
             }
         }
 
@@ -1168,6 +1258,49 @@ impl Parser {
         } else {
             Ok(number)
         }
+    }
+
+    /// Pops digits while allowing underscores only between digits.
+    fn pop_digits_with_internal_underscores(
+        &mut self,
+        ctx: &str,
+        radix_name: &str,
+        is_digit: impl Fn(char) -> bool,
+    ) -> Result<String, ParseError> {
+        let mut digits = String::new();
+        let mut saw_digit = false;
+        let mut last_was_underscore = false;
+        while let Some(c) = self.peekc() {
+            if is_digit(c) {
+                digits.push(c);
+                saw_digit = true;
+                last_was_underscore = false;
+                self.popc();
+            } else if c == '_' {
+                if !saw_digit || last_was_underscore {
+                    return Err(ParseError::new(format!(
+                        "invalid underscore placement in {radix_name} number in {ctx}"
+                    )));
+                }
+                last_was_underscore = true;
+                self.popc();
+            } else {
+                break;
+            }
+        }
+        if !saw_digit {
+            return Err(ParseError::new(format!(
+                "expected {radix_name} number in {}; rest_of_line: {:?}",
+                ctx,
+                self.rest_of_line()
+            )));
+        }
+        if last_was_underscore {
+            return Err(ParseError::new(format!(
+                "invalid trailing underscore in {radix_name} number in {ctx}"
+            )));
+        }
+        Ok(digits)
     }
 
     fn pop_number_usize_or_error(&mut self, ctx: &str) -> Result<usize, ParseError> {
@@ -1418,6 +1551,12 @@ impl Parser {
     fn parse_file_number(&mut self, file_table: &mut FileTable) -> Result<(), ParseError> {
         self.drop_or_error("file_number")?;
         let id = self.pop_number_usize_or_error("file_number")?;
+        if id > i32::MAX as usize {
+            return Err(ParseError::new(format!(
+                "file number {id} exceeds the XLS maximum of {}",
+                i32::MAX
+            )));
+        }
         let path = self.pop_string_or_error()?;
         file_table.add(id, path)
     }
@@ -3723,7 +3862,9 @@ pub fn emit_fn_as_block(
         if let Some(reset) = &pi.reset {
             lines.push(format!(
                 "  #![reset(port=\"{}\", asynchronous={}, active_low={})]",
-                reset.port_name, reset.asynchronous, reset.active_low
+                ir::escape_xls_ir_string(&reset.port_name),
+                reset.asynchronous,
+                reset.active_low
             ));
         }
         for reg in &pi.registers {
@@ -3903,6 +4044,94 @@ fn bar(x: bits[8] id=3) -> bits[8] {
         let mut parser = Parser::new(input);
         let file_table = parser.parse_file_number(&mut FileTable::new()).unwrap();
         println!("{:?}", file_table);
+    }
+
+    #[test]
+    fn test_parse_file_number_rejects_leading_zero_decimal() {
+        let mut parser = Parser::new("file_number 00 \"foo.x\"");
+        let err = parser.parse_file_number(&mut FileTable::new()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid leading-zero decimal number \"00\"")
+        );
+    }
+
+    #[test]
+    fn test_parse_id_attribute_rejects_leading_zero_decimal() {
+        let mut parser = Parser::new("literal.1: bits[32] = literal(value=1, id=01)");
+        let err = parser.parse_node(&mut IrNodeEnv::new()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid leading-zero decimal number \"01\"")
+        );
+    }
+
+    #[test]
+    fn test_parse_file_number_rejects_leading_underscore() {
+        let mut parser = Parser::new("file_number ___2_ \"foo.x\"");
+        let err = parser.parse_file_number(&mut FileTable::new()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid underscore placement in decimal number")
+        );
+    }
+
+    #[test]
+    fn test_parse_file_number_rejects_trailing_underscore() {
+        let mut parser = Parser::new("file_number 2_ \"foo.x\"");
+        let err = parser.parse_file_number(&mut FileTable::new()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid trailing underscore in decimal number")
+        );
+    }
+
+    #[test]
+    fn test_parse_file_number_rejects_repeated_underscores() {
+        let mut parser = Parser::new("file_number 2__3 \"foo.x\"");
+        let err = parser.parse_file_number(&mut FileTable::new()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid underscore placement in decimal number")
+        );
+    }
+
+    #[test]
+    fn test_parse_file_number_rejects_i32_overflow() {
+        let mut parser = Parser::new("file_number 2147483648 \"foo.x\"");
+        let err = parser.parse_file_number(&mut FileTable::new()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("file number 2147483648 exceeds the XLS maximum of 2147483647")
+        );
+    }
+
+    #[test]
+    fn test_parse_file_number_decodes_c_escapes() {
+        let mut parser = Parser::new(r#"file_number 2 "a\"b\\c\n\141\u03bb""#);
+        let mut file_table = FileTable::new();
+        parser.parse_file_number(&mut file_table).unwrap();
+        assert_eq!(file_table.id_to_path[&2], "a\"b\\c\na\u{03bb}");
+    }
+
+    #[test]
+    fn test_parse_package_rejects_newline_after_escaped_quote() {
+        let mut parser = Parser::new("package l\nfile_number 1 \"act\\\"\nfile_number 2 \"d'\"\n");
+        let err = parser.parse_package().unwrap_err();
+        assert!(err.to_string().contains("unterminated quoted string"));
+    }
+
+    #[test]
+    fn test_package_file_number_c_escapes_round_trip() {
+        let mut parser = Parser::new(
+            r#"package p
+file_number 2 "a\"b\\c\n\141\u03bb"
+"#,
+        );
+        let pkg = parser.parse_package().unwrap();
+        let emitted = pkg.to_string();
+        assert!(emitted.contains(r#"file_number 2 "a\"b\\c\naλ""#));
+        xlsynth::IrPackage::parse_ir(&emitted, None).unwrap();
     }
 
     #[test]
@@ -4426,6 +4655,26 @@ fn f(x: bits[1]) -> bits[1] {
         let mut parser = Parser::new(&formatted);
         let pkg = parser.parse_package().expect("pir parse");
         assert_eq!(pkg.to_string(), formatted);
+    }
+
+    #[test]
+    fn test_event_metadata_c_escapes_round_trip() {
+        let input = r#"package test
+
+fn f(x: bits[1] id=1) -> token {
+  after_all.2: token = after_all(id=2)
+  trace.3: token = trace(after_all.2, x, format="line\nquote=\" slash=\\ bell=\a", data_operands=[], id=3)
+  cover.4: () = cover(x, label="cover\a\"\\", id=4)
+  ret assert.5: token = assert(trace.3, x, message="assert\a\"\\", label="label\a\"\\", id=5)
+}
+"#;
+
+        let mut parser = Parser::new(input);
+        let pkg = parser.parse_package().unwrap();
+        let emitted = pkg.to_string();
+        let mut emitted_parser = Parser::new(&emitted);
+        emitted_parser.parse_package().unwrap();
+        xlsynth::IrPackage::parse_ir(&emitted, None).unwrap();
     }
 
     #[test]

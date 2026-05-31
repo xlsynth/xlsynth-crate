@@ -1,5 +1,16 @@
 # xlsynth-vastly Fuzz Targets
 
+## `diff_refsim_4value`
+
+Generates bounded four-state Verilog expressions and environments, evaluates
+them with Vastly, and compares accepted expressions against an `iverilog`
+reference simulation. External compiler and simulator processes use a bounded
+polling watchdog so rejected expressions and oracle timeouts do not stall the
+campaign.
+
+Failures expose four-state expression parsing or evaluation drift relative to
+`iverilog`, excluding oracle-side rejection and timeout cases.
+
 ## `xls_ir_codegen_semantics`
 
 Generates bounded standard PIR directly with `xlsynth_pir::ir_random`, creates

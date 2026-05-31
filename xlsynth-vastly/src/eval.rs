@@ -736,10 +736,11 @@ fn eval_ast_with_calls_inner(
             };
             let branch_expected_width =
                 Some(expected_width.unwrap_or(0).max(tv0.width.max(fv0.width)));
-            let recontext_t =
-                branch_expected_width != expected_width && ternary_branch_needs_width_recontext(t);
-            let recontext_f =
-                branch_expected_width != expected_width && ternary_branch_needs_width_recontext(f);
+            let branch_expected_signedness = Some(merged_signedness(&tv0, &fv0));
+            let needs_branch_recontext = branch_expected_width != expected_width
+                || branch_expected_signedness != expected_signedness;
+            let recontext_t = needs_branch_recontext && ternary_branch_needs_width_recontext(t);
+            let recontext_f = needs_branch_recontext && ternary_branch_needs_width_recontext(f);
             let tv = if recontext_t {
                 if let Some(obs) = observer.as_deref_mut() {
                     eval_ast_with_calls_inner(
@@ -747,7 +748,7 @@ fn eval_ast_with_calls_inner(
                         env,
                         calls,
                         branch_expected_width,
-                        expected_signedness,
+                        branch_expected_signedness,
                         Some(obs),
                         context_span,
                     )?
@@ -757,7 +758,7 @@ fn eval_ast_with_calls_inner(
                         env,
                         calls,
                         branch_expected_width,
-                        expected_signedness,
+                        branch_expected_signedness,
                         None,
                         context_span,
                     )?
@@ -772,7 +773,7 @@ fn eval_ast_with_calls_inner(
                         env,
                         calls,
                         branch_expected_width,
-                        expected_signedness,
+                        branch_expected_signedness,
                         Some(obs),
                         context_span,
                     )?
@@ -782,7 +783,7 @@ fn eval_ast_with_calls_inner(
                         env,
                         calls,
                         branch_expected_width,
-                        expected_signedness,
+                        branch_expected_signedness,
                         None,
                         context_span,
                     )?
@@ -798,5 +799,36 @@ fn eval_ast_with_calls_inner(
                 expected_signedness,
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nested_signed_arithmetic_matches_verilog() {
+        let false_branch = eval_expr(
+            r#"(((32'sb00111011100110010001100001100110*32'sb00000000000000000000000000001000)%32'sb00000000000000000000000001100011)*32'sb00000000000011110100001000111111)"#,
+            &Env::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            false_branch.value.to_bit_string_msb_first(),
+            "11111111001110011010001011001101"
+        );
+    }
+
+    #[test]
+    fn unknown_ternary_recontexts_nested_branches_like_verilog() {
+        let value = eval_expr(
+            r#"((1'bx)?(((32'sb00000000000000000000000000001001)?(32'sb00000000000000000000000000001001):((32'sb00000000000000000000000000001001==32'sb00000000000000000000001111100111)))):((((32'sb00111011100110010001100001100110*32'sb00000000000000000000000000001000)%32'sb00000000000000000000000001100011)*32'sb00000000000011110100001000111111)))"#,
+            &Env::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            value.value.to_bit_string_msb_first(),
+            "00000x0x0x0xxx0x0x00x0x000x0xxxx"
+        );
     }
 }

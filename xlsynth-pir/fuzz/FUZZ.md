@@ -82,6 +82,9 @@ Early returns justification:
 - Samples that hit explicit `UnsupportedType` / `UnsupportedNode` translation
   errors are skipped because this target is currently scoped to the MVP
   translator contract.
+- External XLS equivalence checks that exceed the fuzz-only five-second
+  watchdog are skipped because solver cost is not a translation-soundness
+  failure for the sample.
 
 Main failure modes surfaced:
 

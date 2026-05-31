@@ -55,8 +55,10 @@ Generates upstream-standard PIR directly, including `gate` and arbitrary-width
 multiply forms but excluding product-pair operations until prover translation
 supports them, loads it into libxls, optimizes it through XLS, parses the
 optimized result into PIR, and proves original-versus-optimized equivalence.
-Failures expose optimizer semantic regressions or incompatibility between
-generated PIR text and XLS-produced optimized IR.
+Enabled in-process SMT backends perform the proofs; this target does not require
+the external XLS equivalence binary. Failures expose optimizer semantic
+regressions or incompatibility between generated PIR text and XLS-produced
+optimized IR.
 
 ## `fuzz_ir_eval_interp_equiv`
 

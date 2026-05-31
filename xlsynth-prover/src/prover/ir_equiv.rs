@@ -1414,6 +1414,24 @@ pub mod test_utils {
         );
     }
 
+    pub fn test_ir_array_slice_narrow_start_does_not_truncate_last_index<S: Solver>(
+        solver_config: &S::Config,
+    ) {
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            r#"fn f(input: bits[1][3] id=1, start: bits[1] id=2) -> bits[1][1] {
+                ret s: bits[1][1] = array_slice(input, start, width=1, id=3)
+            }"#,
+            |solver: &mut S, inputs: &FnInputs<S::Term>| {
+                let input_bv = inputs.inputs.get("input").unwrap().bitvec.clone();
+                let start_bv = inputs.inputs.get("start").unwrap().bitvec.clone();
+                let lane_0 = solver.extract(&input_bv, 0, 0);
+                let lane_1 = solver.extract(&input_bv, 1, 1);
+                solver.ite(&start_bv, &lane_1, &lane_0)
+            },
+        );
+    }
+
     pub fn test_gate_bits_equiv_sel<S: Solver>(solver_config: &S::Config) {
         assert_ir_fn_equiv::<S>(
             solver_config,
@@ -1738,6 +1756,34 @@ pub mod test_utils {
                 let with_mid = solver.concat(&val, &pre);
                 let post = solver.extract(&array, 15, 8);
                 solver.concat(&post, &with_mid)
+            },
+        );
+    }
+
+    pub fn test_array_update_narrow_index_does_not_alias_unreachable_lanes<S: Solver>(
+        solver_config: &S::Config,
+    ) {
+        use crate::prover::ir_equiv::test_utils::assert_smt_fn_eq;
+        assert_smt_fn_eq::<S>(
+            solver_config,
+            r#"fn f(input: bits[1][4] id=1, val: bits[1] id=2, idx: bits[1] id=3) -> bits[1][4] {
+                ret upd: bits[1][4] = array_update(input, val, indices=[idx], id=4)
+            }"#,
+            |solver: &mut S, inputs: &FnInputs<S::Term>| {
+                let array = inputs.inputs.get("input").unwrap().bitvec.clone();
+                let val = inputs.inputs.get("val").unwrap().bitvec.clone();
+                let idx = inputs.inputs.get("idx").unwrap().bitvec.clone();
+                let lane_0 = solver.extract(&array, 0, 0);
+                let lane_1 = solver.extract(&array, 1, 1);
+                let upper_lanes = solver.extract(&array, 3, 2);
+                let zero = solver.zero(1);
+                let one = solver.one(1);
+                let idx_is_0 = solver.eq(&idx, &zero);
+                let idx_is_1 = solver.eq(&idx, &one);
+                let updated_lane_0 = solver.ite(&idx_is_0, &val, &lane_0);
+                let updated_lane_1 = solver.ite(&idx_is_1, &val, &lane_1);
+                let updated_lower_lanes = solver.concat(&updated_lane_1, &updated_lane_0);
+                solver.concat(&upper_lanes, &updated_lower_lanes)
             },
         );
     }
@@ -2803,6 +2849,12 @@ macro_rules! test_with_solver {
                 test_utils::test_ir_array_slice_basic::<$solver_type>($solver_config);
             }
             #[test]
+            fn test_ir_array_slice_narrow_start_does_not_truncate_last_index() {
+                test_utils::test_ir_array_slice_narrow_start_does_not_truncate_last_index::<
+                    $solver_type,
+                >($solver_config);
+            }
+            #[test]
             fn test_gate_bits_equiv_sel() {
                 test_utils::test_gate_bits_equiv_sel::<$solver_type>($solver_config);
             }
@@ -3070,6 +3122,12 @@ macro_rules! test_with_solver {
             #[test]
             fn test_array_update_inbound_value() {
                 test_utils::test_array_update_inbound_value::<$solver_type>($solver_config);
+            }
+            #[test]
+            fn test_array_update_narrow_index_does_not_alias_unreachable_lanes() {
+                test_utils::test_array_update_narrow_index_does_not_alias_unreachable_lanes::<
+                    $solver_type,
+                >($solver_config);
             }
             #[test]
             fn test_array_update_nested() {

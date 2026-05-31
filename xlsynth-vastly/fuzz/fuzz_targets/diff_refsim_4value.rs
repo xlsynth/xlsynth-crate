@@ -5,12 +5,11 @@
 use arbitrary::Arbitrary;
 use arbitrary::Unstructured;
 use libfuzzer_sys::fuzz_target;
-use wait_timeout::ChildExt;
-
 use std::io::Write;
 use std::process::Command;
 use std::process::Stdio;
 use std::time::Duration;
+use std::time::Instant;
 use std::time::SystemTime;
 
 use xlsynth_vastly::ast::Expr;
@@ -657,20 +656,26 @@ fn run_cmd_timeout(mut cmd: Command, timeout: Duration) -> CmdOutcome {
         Err(_) => return CmdOutcome::Err,
     };
 
-    match child.wait_timeout(timeout) {
-        Ok(Some(_status)) => match child.wait_with_output() {
-            Ok(out) => CmdOutcome::Ok(out),
-            Err(_) => CmdOutcome::Err,
-        },
-        Ok(None) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            CmdOutcome::TimedOut
-        }
-        Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            CmdOutcome::Err
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                return match child.wait_with_output() {
+                    Ok(out) => CmdOutcome::Ok(out),
+                    Err(_) => CmdOutcome::Err,
+                };
+            }
+            Ok(None) if start.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return CmdOutcome::TimedOut;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(1)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return CmdOutcome::Err;
+            }
         }
     }
 }

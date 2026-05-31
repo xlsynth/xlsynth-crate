@@ -2,7 +2,6 @@
 
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use xlsynth_g8r::check_equivalence;
 #[cfg(feature = "has-bitwuzla")]
 use xlsynth_g8r_fuzz::fuzz_bitwuzla_options;
 use xlsynth_pir::ir_parser;
@@ -18,10 +17,8 @@ use xlsynth_prover::solver::boolector::{Boolector, BoolectorConfig};
 #[cfg(feature = "has-easy-smt")]
 use xlsynth_prover::solver::easy_smt::{EasySmtConfig, EasySmtSolver};
 
-// Insert helper that checks consistency among the external tool, a primary
-// solver result, and an optional per-bit parallel solver result.
+// Checks that an enabled solver proves the optimizer preserved semantics.
 fn validate_equiv_result(
-    ext_equiv: Result<(), String>,
     solver_result: EquivResult,
     solver_name: &str,
     orig_ir: &str,
@@ -31,46 +28,28 @@ fn validate_equiv_result(
         log::debug!("{solver_name} equivalence inconclusive: {msg}");
         return false;
     }
-    match ext_equiv {
-        Ok(()) => {
-            // External tool says equivalent – solver must prove equivalence.
-            if let EquivResult::Disproved {
-                lhs_inputs,
-                rhs_inputs,
-                ..
-            } = solver_result
-            {
-                log::info!("==== IR disagreement detected ====");
-                log::info!("Original IR:\n{}", orig_ir);
-                log::info!("Optimized IR:\n{}", opt_ir);
-                panic!(
-                    "Disagreement: external tool says equivalent, but {} solver disproves: lhs_inputs={:?} rhs_inputs={:?}",
-                    solver_name, lhs_inputs, rhs_inputs
-                );
-            }
+    match solver_result {
+        EquivResult::Proved => true,
+        EquivResult::Disproved {
+            lhs_inputs,
+            rhs_inputs,
+            ..
+        } => {
+            log::info!("==== IR disagreement detected ====");
+            log::info!("Original IR:\n{}", orig_ir);
+            log::info!("Optimized IR:\n{}", opt_ir);
+            panic!(
+                "Optimizer equivalence failed under {}: lhs_inputs={:?} rhs_inputs={:?}",
+                solver_name, lhs_inputs, rhs_inputs
+            );
         }
-        Err(ext_err) => {
-            // External tool says not equivalent – solver should also find inequivalence.
-            if let EquivResult::Proved = solver_result {
-                log::info!("==== IR disagreement detected ====");
-                log::info!("Original IR:\n{}", orig_ir);
-                log::info!("Optimized IR:\n{}", opt_ir);
-                panic!(
-                    "Disagreement: external tool says NOT equivalent, but {} solver proves equivalence. External error: {}",
-                    solver_name, ext_err
-                );
-            }
+        EquivResult::Error(msg) => {
+            panic!("{solver_name} optimizer equivalence check failed to run: {msg}");
         }
     }
-    true
 }
 
 fuzz_target!(|data: &[u8]| {
-    // Ensure XLSYNTH_TOOLS is set for equivalence checking
-    if std::env::var("XLSYNTH_TOOLS").is_err() {
-        panic!("XLSYNTH_TOOLS environment variable must be set for fuzzing.");
-    }
-
     let _ = env_logger::builder().is_test(true).try_init();
 
     // Construct valid PIR directly, then load it through libxls because this
@@ -126,13 +105,7 @@ fuzz_target!(|data: &[u8]| {
     let orig_fn = orig_pkg.get_top_fn().unwrap();
     let opt_fn = opt_pkg.get_top_fn().unwrap();
 
-    // Check equivalence using the external tool first, specifying the top function
     let opt_ir = optimized_pkg.to_string();
-    let ext_equiv = check_equivalence::check_equivalence_with_top_via_toolchain(
-        &orig_ir,
-        &opt_ir,
-        Some(top_fn_name),
-    );
     #[cfg(feature = "has-bitwuzla")]
     {
         let bitwuzla_result = prove_ir_fn_equiv::<Bitwuzla>(
@@ -144,7 +117,6 @@ fuzz_target!(|data: &[u8]| {
             false,
         );
         if !validate_equiv_result(
-            ext_equiv.clone(),
             bitwuzla_result,
             "Bitwuzla",
             &orig_ir,
@@ -167,7 +139,6 @@ fuzz_target!(|data: &[u8]| {
             false,
         );
         if !validate_equiv_result(
-            ext_equiv.clone(),
             boolector_result,
             "Boolector",
             &orig_ir,
@@ -189,7 +160,6 @@ fuzz_target!(|data: &[u8]| {
             false,
         );
         if !validate_equiv_result(
-            ext_equiv.clone(),
             boolector_result,
             "Boolector binary",
             &orig_ir,
@@ -211,7 +181,6 @@ fuzz_target!(|data: &[u8]| {
             false,
         );
         if !validate_equiv_result(
-            ext_equiv.clone(),
             bitwuzla_result,
             "Bitwuzla binary",
             &orig_ir,
@@ -232,7 +201,7 @@ fuzz_target!(|data: &[u8]| {
             None,
             false,
         );
-        if !validate_equiv_result(ext_equiv.clone(), z3_result, "Z3 binary", &orig_ir, &opt_ir) {
+        if !validate_equiv_result(z3_result, "Z3 binary", &orig_ir, &opt_ir) {
             // An inconclusive solver result is not an optimizer failure.
             return;
         }
@@ -251,7 +220,6 @@ fuzz_target!(|data: &[u8]| {
                 false,
             );
             if !validate_equiv_result(
-                ext_equiv,
                 bitwuzla_parallel_result,
                 "Bitwuzla-parallel",
                 &orig_ir,
