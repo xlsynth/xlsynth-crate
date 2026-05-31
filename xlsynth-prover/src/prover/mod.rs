@@ -24,6 +24,27 @@ use self::types::{
 };
 use crate::solver::SolverConfig;
 use std::str::FromStr;
+
+/// Optional resource limits for solver-backed proofs.
+///
+/// Limits default to disabled. The in-process Bitwuzla backend currently
+/// enforces both fields per satisfiability check.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SolverLimits {
+    pub time_limit_per_ms: Option<u64>,
+    pub memory_limit_mb: Option<u64>,
+}
+
+impl SolverLimits {
+    /// Creates limits with a per-satisfiability-check time limit.
+    pub fn with_time_limit_per_ms(time_limit_per_ms: u64) -> Self {
+        Self {
+            time_limit_per_ms: Some(time_limit_per_ms),
+            memory_limit_mb: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SolverChoice {
@@ -282,10 +303,19 @@ impl<S: SolverConfig> Prover for S {
 }
 
 pub fn auto_selected_prover() -> Box<dyn Prover> {
+    auto_selected_prover_with_limits(SolverLimits::default())
+}
+
+/// Selects an appropriate prover and applies backend-supported resource limits.
+pub fn auto_selected_prover_with_limits(limits: SolverLimits) -> Box<dyn Prover> {
+    #[cfg(not(feature = "has-bitwuzla"))]
+    let _ = limits;
     #[cfg(feature = "has-bitwuzla")]
     {
         use crate::solver::bitwuzla::BitwuzlaOptions;
-        return Box::new(BitwuzlaOptions::new());
+        let mut options = BitwuzlaOptions::new();
+        apply_bitwuzla_limits(&mut options, limits);
+        return Box::new(options);
     }
     #[cfg(all(feature = "has-boolector", not(feature = "has-bitwuzla")))]
     {
@@ -404,10 +434,23 @@ pub fn prove_dslx_quickcheck(
 }
 
 pub fn prover_for_choice(choice: SolverChoice, tool_path: Option<&Path>) -> Box<dyn Prover> {
+    prover_for_choice_with_limits(choice, tool_path, SolverLimits::default())
+}
+
+/// Creates the requested prover and applies backend-supported resource limits.
+pub fn prover_for_choice_with_limits(
+    choice: SolverChoice,
+    tool_path: Option<&Path>,
+    limits: SolverLimits,
+) -> Box<dyn Prover> {
     match choice {
-        SolverChoice::Auto => auto_selected_prover(),
+        SolverChoice::Auto => auto_selected_prover_with_limits(limits),
         #[cfg(feature = "has-bitwuzla")]
-        SolverChoice::Bitwuzla => Box::new(crate::solver::bitwuzla::BitwuzlaOptions::new()),
+        SolverChoice::Bitwuzla => {
+            let mut options = crate::solver::bitwuzla::BitwuzlaOptions::new();
+            apply_bitwuzla_limits(&mut options, limits);
+            Box::new(options)
+        }
         #[cfg(feature = "has-boolector")]
         SolverChoice::Boolector => Box::new(crate::solver::boolector::BoolectorConfig::new()),
         #[cfg(feature = "has-easy-smt")]
@@ -431,5 +474,18 @@ pub fn prover_for_choice(choice: SolverChoice, tool_path: Option<&Path>) -> Box<
             }
             None => Box::new(ExternalProver::Toolchain),
         },
+    }
+}
+
+#[cfg(feature = "has-bitwuzla")]
+fn apply_bitwuzla_limits(
+    options: &mut crate::solver::bitwuzla::BitwuzlaOptions,
+    limits: SolverLimits,
+) {
+    if let Some(time_limit_per_ms) = limits.time_limit_per_ms {
+        options.set_time_limit_per(time_limit_per_ms);
+    }
+    if let Some(memory_limit_mb) = limits.memory_limit_mb {
+        options.set_memory_limit(memory_limit_mb);
     }
 }

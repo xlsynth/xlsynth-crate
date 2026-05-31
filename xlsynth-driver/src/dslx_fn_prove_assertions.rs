@@ -205,14 +205,14 @@ pub fn handle_dslx_fn_prove_assertions(
             }),
             error_str: None,
         },
-        BoolPropertyResult::ToolchainDisproved(msg) | BoolPropertyResult::Error(msg) => {
-            AssertionsOutcome {
-                success: false,
-                time_micros: report.duration.as_micros(),
-                counterexample: None,
-                error_str: Some(msg),
-            }
-        }
+        BoolPropertyResult::Inconclusive(msg)
+        | BoolPropertyResult::ToolchainDisproved(msg)
+        | BoolPropertyResult::Error(msg) => AssertionsOutcome {
+            success: false,
+            time_micros: report.duration.as_micros(),
+            counterexample: None,
+            error_str: Some(msg),
+        },
     };
 
     emit_outcome_and_exit(outcome, output_json);

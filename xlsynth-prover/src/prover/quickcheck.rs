@@ -191,7 +191,9 @@ where
 
             BoolPropertyResult::Disproved { inputs, output }
         }
-        Response::Unknown => panic!("Solver returned unknown"),
+        Response::Unknown => {
+            BoolPropertyResult::Inconclusive("solver returned unknown".to_string())
+        }
     }
 }
 

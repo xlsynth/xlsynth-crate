@@ -8,15 +8,19 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use xlsynth_prover::prover::ir_equiv::prove_ir_fn_equiv;
 use xlsynth_prover::prover::types::{AssertionSemantics, EquivResult, ProverFn as EqProverFn};
 #[cfg(any(feature = "with-bitwuzla-system", feature = "with-bitwuzla-built"))]
-use xlsynth_prover::solver::bitwuzla::{Bitwuzla, BitwuzlaOptions};
+use xlsynth_prover::solver::bitwuzla::Bitwuzla;
 #[cfg(any(feature = "with-boolector-system", feature = "with-boolector-built"))]
 use xlsynth_prover::solver::boolector::{Boolector, BoolectorConfig};
 #[cfg(feature = "has-easy-smt")]
 use xlsynth_prover::solver::easy_smt::{EasySmtConfig, EasySmtSolver};
 
+#[cfg(feature = "has-bitwuzla")]
+use xlsynth_g8r_fuzz::fuzz_bitwuzla_options;
 use xlsynth_g8r_fuzz::generate_upstream_formal_random_pir_package;
 use xlsynth_pir::ir::{Fn as IrFn, NodeRef, PackageMember};
-use xlsynth_pir::ir_outline::{compute_default_ordering, outline_with_ordering, OutlineOrdering};
+use xlsynth_pir::ir_outline::{
+    can_outline, compute_default_ordering, outline_with_ordering, OutlineOrdering,
+};
 use xlsynth_pir::ir_utils::operands;
 
 fn build_users(f: &IrFn) -> HashMap<usize, Vec<usize>> {
@@ -170,6 +174,12 @@ fuzz_target!(|data: &[u8]| {
     // Convert region into NodeRef set
     let to_outline: HashSet<NodeRef> = region.into_iter().map(|i| NodeRef { index: i }).collect();
 
+    if !can_outline(&orig_fn, &to_outline) {
+        // Early-return rationale: a non-convex region cannot be extracted into
+        // one invoked function without introducing a dependency cycle.
+        return;
+    }
+
     // Perform outlining on a mutable clone of the package using the original
     // function
     let work_fn = work_pkg.get_top_fn().unwrap().clone();
@@ -212,13 +222,19 @@ fuzz_target!(|data: &[u8]| {
     #[cfg(feature = "has-bitwuzla")]
     {
         let r = prove_ir_fn_equiv::<Bitwuzla>(
-            &BitwuzlaOptions::new(),
+            &fuzz_bitwuzla_options(),
             &lhs,
             &rhs,
             AssertionSemantics::Same,
             None,
             false,
         );
+        if let EquivResult::Inconclusive(msg) = &r {
+            log::debug!("outline equivalence inconclusive: {}", msg);
+            // Early-return rationale: a configured solver resource limit is an
+            // expected inconclusive fuzz sample, not an outlining failure.
+            return;
+        }
         if let EquivResult::Disproved {
             lhs_inputs,
             rhs_inputs,

@@ -11,10 +11,14 @@ use xlsynth_pir::ir::{
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_random::{
     DepletableBytes, FunctionSignature, GenerationError, OperationSet, RandomFnOptions,
-    RandomOperation, RngEntropy, StopPolicy, generate_arguments, generate_fn,
-    generate_fn_with_signature, generate_same_signature_pair, generate_value,
+    RandomOperation, RngEntropy, StopPolicy, generate_fn, generate_fn_with_signature,
+    generate_same_signature_pair,
 };
 use xlsynth_pir::ir_verify::verify_package;
+use xlsynth_pir::random_inputs::{
+    generate_argument_sets_from_seed, generate_biased_arguments, generate_biased_value,
+    generate_uniform_value,
+};
 
 fn validate_generated(function: &xlsynth_pir::ir::Fn) {
     function.check_pir_layout_invariants().unwrap();
@@ -333,8 +337,64 @@ fn constrained_empty_tuple_result_is_supported_without_array_zero_lengths() {
 #[test]
 fn zero_width_generated_values_use_the_unique_zero_representation() {
     let mut entropy = DepletableBytes::new(&[]);
-    let value = generate_value(&mut entropy, &Type::Bits(0));
+    let value = generate_uniform_value(&mut entropy, &Type::Bits(0));
     assert_eq!(value.to_string(), "bits[0]:0");
+}
+
+#[test]
+fn biased_generated_bits_include_corner_patterns() {
+    fn generate(width: usize, words: &[u64]) -> String {
+        let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let mut entropy = DepletableBytes::new(&bytes);
+        generate_biased_value(&mut entropy, &Type::Bits(width)).to_string()
+    }
+
+    assert_eq!(generate(8, &[0]), "bits[8]:0");
+    assert_eq!(generate(8, &[1]), "bits[8]:255");
+    assert_eq!(generate(8, &[2]), "bits[8]:128");
+    assert_eq!(generate(8, &[3]), "bits[8]:127");
+    assert_eq!(generate(8, &[4, 3]), "bits[8]:8");
+    assert_eq!(generate(8, &[5, 3]), "bits[8]:7");
+    assert_eq!(generate(8, &[6, 3]), "bits[8]:224");
+    assert_eq!(generate(8, &[7, 0x5a]), "bits[8]:90");
+
+    for selector in 0..=6 {
+        assert_eq!(generate(0, &[selector, 3]), "bits[0]:0");
+    }
+}
+
+#[test]
+fn argument_sets_start_with_whole_input_corner_patterns() {
+    let signature = FunctionSignature {
+        params: vec![Type::Bits(8), Type::Bits(3)],
+        return_type: Type::Bits(8),
+    };
+    let options = RandomFnOptions {
+        max_params: 2,
+        max_nodes: 3,
+        max_bit_width: 8,
+        ..RandomFnOptions::default()
+    };
+    let mut entropy = DepletableBytes::new(&[]);
+    let generated = generate_fn_with_signature(
+        &mut entropy,
+        &options,
+        StopPolicy::ExactBodyNodes(0),
+        &signature,
+    )
+    .unwrap();
+
+    let sets = generate_argument_sets_from_seed(&generated.function, 0x1234, 3);
+    assert_eq!(sets.len(), 3);
+    assert_eq!(
+        sets[0].iter().map(ToString::to_string).collect::<Vec<_>>(),
+        ["bits[8]:0", "bits[3]:0"]
+    );
+    assert_eq!(
+        sets[1].iter().map(ToString::to_string).collect::<Vec<_>>(),
+        ["bits[8]:255", "bits[3]:7"]
+    );
+    assert!(generate_argument_sets_from_seed(&generated.function, 0x1234, 0).is_empty());
 }
 
 #[test]
@@ -1284,7 +1344,7 @@ fn probabilistic_expanded_standard_generation_matches_libxls_interpreter() {
             generate_fn(&mut graph_entropy, &options, StopPolicy::ExactBodyNodes(40)).unwrap();
         let package = generated.into_top_package(format!("expanded_eval_{sample}"));
         let function = package.get_top_fn().unwrap();
-        let args = generate_arguments(&mut value_entropy, function);
+        let args = generate_biased_arguments(&mut value_entropy, function);
         let ir_text = package.to_string();
         let xls_package = xlsynth::IrPackage::parse_ir(&ir_text, None)
             .unwrap_or_else(|error| panic!("libxls rejected generated PIR:\n{ir_text}\n{error}"));

@@ -55,7 +55,6 @@ use xlsynth_mcmc::metropolis_accept;
 use xlsynth_mcmc::multichain::{ChainRole, ChainStrategy, SegmentOutcome, SegmentRunParams};
 use xlsynth_mcmc::multichain::{SegmentRunner, run_multichain};
 use xlsynth_pir::desugar_extensions::{self, ExtensionEmitMode};
-use xlsynth_pir::fuzz_utils::arbitrary_irbits;
 use xlsynth_pir::ir::FileTable as PirFileTable;
 use xlsynth_pir::ir::Fn as IrFn;
 use xlsynth_pir::ir::Package as PirPackage;
@@ -66,6 +65,7 @@ use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_assuming_node_index_topological
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_utils::compact_and_toposort_in_place;
 use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;
+use xlsynth_pir::random_inputs::generate_biased_irbits_with_rng;
 use xlsynth_pir::structural_similarity::collect_structural_entries;
 
 pub mod driver_cli;
@@ -2312,7 +2312,7 @@ fn arbitrary_value_for_type<R: Rng>(rng: &mut R, ty: &PirType) -> Result<IrValue
     match ty {
         PirType::Token => Ok(IrValue::make_token()),
         PirType::Bits(width) => {
-            let bits = arbitrary_irbits(rng, *width);
+            let bits = generate_biased_irbits_with_rng(rng, *width);
             Ok(IrValue::from_bits(&bits))
         }
         PirType::Tuple(elem_types) => {
@@ -2419,6 +2419,15 @@ fn pir_equiv_oracle<R: Rng>(
             match prove_ir_fn_equiv(lhs, rhs) {
                 EquivResult::Proved => true,
                 EquivResult::Disproved { .. } | EquivResult::ToolchainDisproved(_) => false,
+                EquivResult::Inconclusive(msg) => {
+                    log::warn!(
+                        "[pir-mcmc] formal oracle inconclusive for '{}' vs '{}': {}; rejecting candidate",
+                        lhs.name,
+                        rhs.name,
+                        msg
+                    );
+                    false
+                }
                 EquivResult::Error(msg) => {
                     log::warn!(
                         "[pir-mcmc] formal oracle error for '{}' vs '{}': {}; rejecting candidate",

@@ -460,13 +460,8 @@ impl Solver for EasySmtSolver {
                 ir_value_from_lsb0_bits_with_layout(ty, &bits)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
             }
-            BitVec::ZeroWidth => {
-                if matches!(ty, ir::Type::Token) {
-                    Ok(xlsynth::IrValue::make_token())
-                } else {
-                    panic!("Cannot get value of zero-width bitvector for type {:?}", ty)
-                }
-            }
+            BitVec::ZeroWidth => ir_value_from_lsb0_bits_with_layout(ty, &[])
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
         }
     }
 

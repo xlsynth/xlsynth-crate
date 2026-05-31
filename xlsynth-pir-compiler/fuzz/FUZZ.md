@@ -1,22 +1,26 @@
-# PIR Function JIT vs Evaluator Fuzz Target
+# PIR Function Compiler vs Evaluator Fuzz Targets
 
-Target name: `fuzz_pir_function_jit_eval_equiv`
+Target name: `fuzz_pir_function_compiler_eval_equiv`
 
 Run:
 
 ```bash
-cargo fuzz run fuzz_pir_function_jit_eval_equiv
+cargo fuzz run fuzz_pir_function_compiler_eval_equiv
 ```
 
 This target uses `xlsynth_pir::ir_random` to construct typed scalar PIR
 functions directly from the fuzzer byte stream, with widths limited to the
 current native-value execution boundary. It evaluates the same generated
 arguments through `xlsynth_pir::ir_eval` and through `xlsynth-pir-compiler`,
-then requires identical returned values.
+then requires identical returned values. Each compiled graph is exercised with
+32 reproducible argument sets rather than decoding arguments directly from the
+coverage-guided graph byte stream. These begin with whole-input zero and
+all-ones cases, then use pseudorandom leaves biased toward useful bitvector
+corner patterns.
 
 Essential property under test:
 
-- Any generated PIR function within the configured JIT subset has the
+- Any generated PIR function within the configured compiler subset has the
   same semantics under generated native code and the PIR evaluator.
 
 Main failure modes surfaced:
@@ -26,12 +30,12 @@ Main failure modes surfaced:
 - Incorrect masking of padded native carrier bits.
 - Divergence in native argument/result access versus PIR evaluation.
 
-Target name: `fuzz_pir_function_jit_aggregate_eval_equiv`
+Target name: `fuzz_pir_function_compiler_aggregate_eval_equiv`
 
 Run:
 
 ```bash
-cargo fuzz run fuzz_pir_function_jit_aggregate_eval_equiv
+cargo fuzz run fuzz_pir_function_compiler_aggregate_eval_equiv
 ```
 
 This target expands the same differential property to native aggregates and
@@ -45,6 +49,8 @@ Generated array operations also exercise `assumed_in_bounds=true` and compare
 reported out-of-bounds assumption violations.
 Observable event results are compared as unordered multisets because independent
 event nodes are not semantically ordered unless their token dependencies require it.
+Each compiled graph is exercised with the same 32 reproducible, corner-biased
+argument sets.
 
 Main additional failure modes surfaced:
 
@@ -70,6 +76,8 @@ graphs as well as genuinely large values. It also generates token-based
 runtime results. It also generates `assumed_in_bounds=true` array operations
 and compares reported out-of-bounds violations. The target enables every
 operation provided by the random PIR function generator.
+Each compiled graph is exercised with the same 32 reproducible, corner-biased
+argument sets.
 
 Main additional failure modes surfaced:
 

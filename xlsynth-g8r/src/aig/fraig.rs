@@ -22,9 +22,13 @@ use crate::aig::bulk_replace::{SubstitutionMap, bulk_replace};
 use crate::aig::get_summary_stats::{GateDepthStats, get_gate_depth};
 use crate::aig::{AigOperand, AigRef, GateFn};
 use crate::{
-    gate_builder::GateBuilderOptions, propose_equiv::EquivNode,
-    propose_equiv::propose_equivalence_classes, prove_gate_fn_equiv_common::GateFormalBackend,
-    prove_gate_fn_equiv_sat::validate_equivalence_classes_presorted_with_backend,
+    gate_builder::GateBuilderOptions,
+    propose_equiv::EquivNode,
+    propose_equiv::propose_equivalence_classes,
+    prove_gate_fn_equiv_common::GateFormalBackend,
+    prove_gate_fn_equiv_sat::{
+        GateFormalOptions, validate_equivalence_classes_presorted_with_backend_and_options,
+    },
 };
 
 /// Number of proposed equivalence classes validated before applying
@@ -212,6 +216,25 @@ pub fn fraig_optimize_with_backend(
     validation_backend: GateFormalBackend,
     rng: &mut impl Rng,
 ) -> Result<(GateFn, DidConverge, Vec<FraigIterationStat>), Box<dyn Error>> {
+    fraig_optimize_with_backend_and_options(
+        f,
+        input_sample_count,
+        iteration_bounds,
+        validation_backend,
+        GateFormalOptions::default(),
+        rng,
+    )
+}
+
+/// Runs FRAIG with backend-specific formal proof limits.
+pub fn fraig_optimize_with_backend_and_options(
+    f: &GateFn,
+    input_sample_count: usize,
+    iteration_bounds: IterationBounds,
+    validation_backend: GateFormalBackend,
+    gate_formal_options: GateFormalOptions,
+    rng: &mut impl Rng,
+) -> Result<(GateFn, DidConverge, Vec<FraigIterationStat>), Box<dyn Error>> {
     let mut iteration_count = 0;
     let mut current_fn = f.clone();
     let mut counterexample_seen: HashSet<Vec<IrBits>> = HashSet::new();
@@ -266,11 +289,13 @@ pub fn fraig_optimize_with_backend(
                 );
             }
             let equiv_classes_vec: Vec<&[EquivNode]> = batch.iter().map(|v| v.as_slice()).collect();
-            let validation_result = validate_equivalence_classes_presorted_with_backend(
-                &current_fn,
-                &equiv_classes_vec,
-                validation_backend,
-            )?;
+            let validation_result =
+                validate_equivalence_classes_presorted_with_backend_and_options(
+                    &current_fn,
+                    &equiv_classes_vec,
+                    validation_backend,
+                    gate_formal_options,
+                )?;
 
             let mut new_counterexample_count = 0usize;
             for cex in validation_result.cex_inputs {

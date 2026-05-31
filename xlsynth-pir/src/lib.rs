@@ -46,6 +46,7 @@ pub mod matching_ged;
 pub mod math;
 pub mod node_hashing;
 pub mod prove_equiv_via_toolchain;
+pub mod random_inputs;
 pub mod simple_rebase;
 pub mod structural_similarity;
 

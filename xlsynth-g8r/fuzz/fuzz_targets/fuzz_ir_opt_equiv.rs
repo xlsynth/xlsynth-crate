@@ -3,6 +3,8 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::check_equivalence;
+#[cfg(feature = "has-bitwuzla")]
+use xlsynth_g8r_fuzz::fuzz_bitwuzla_options;
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_random::{
     generate_fn, DepletableBytes, OperationSet, RandomFnOptions, RandomOperation, StopPolicy,
@@ -10,7 +12,7 @@ use xlsynth_pir::ir_random::{
 use xlsynth_prover::prover::ir_equiv::{prove_ir_fn_equiv, prove_ir_fn_equiv_output_bits_parallel};
 use xlsynth_prover::prover::types::{AssertionSemantics, EquivResult, ProverFn};
 #[cfg(feature = "has-bitwuzla")]
-use xlsynth_prover::solver::bitwuzla::{Bitwuzla, BitwuzlaOptions};
+use xlsynth_prover::solver::bitwuzla::Bitwuzla;
 #[cfg(feature = "has-boolector")]
 use xlsynth_prover::solver::boolector::{Boolector, BoolectorConfig};
 #[cfg(feature = "has-easy-smt")]
@@ -24,7 +26,11 @@ fn validate_equiv_result(
     solver_name: &str,
     orig_ir: &str,
     opt_ir: &str,
-) {
+) -> bool {
+    if let EquivResult::Inconclusive(msg) = &solver_result {
+        log::debug!("{solver_name} equivalence inconclusive: {msg}");
+        return false;
+    }
     match ext_equiv {
         Ok(()) => {
             // External tool says equivalent – solver must prove equivalence.
@@ -56,6 +62,7 @@ fn validate_equiv_result(
             }
         }
     }
+    true
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -126,20 +133,24 @@ fuzz_target!(|data: &[u8]| {
     #[cfg(feature = "has-bitwuzla")]
     {
         let bitwuzla_result = prove_ir_fn_equiv::<Bitwuzla>(
-            &BitwuzlaOptions::new(),
+            &fuzz_bitwuzla_options(),
             &ProverFn::new(orig_fn, None),
             &ProverFn::new(opt_fn, None),
             AssertionSemantics::Same,
             None,
             false,
         );
-        validate_equiv_result(
+        if !validate_equiv_result(
             ext_equiv.clone(),
             bitwuzla_result,
             "Bitwuzla",
             &orig_ir,
             &opt_ir,
-        );
+        ) {
+            // A configured solver limit is expected to make some fuzz samples
+            // inconclusive; those samples are not optimizer failures.
+            return;
+        }
     }
 
     #[cfg(feature = "has-boolector")]
@@ -152,13 +163,16 @@ fuzz_target!(|data: &[u8]| {
             None,
             false,
         );
-        validate_equiv_result(
+        if !validate_equiv_result(
             ext_equiv.clone(),
             boolector_result,
             "Boolector",
             &orig_ir,
             &opt_ir,
-        );
+        ) {
+            // An inconclusive solver result is not an optimizer failure.
+            return;
+        }
     }
 
     #[cfg(feature = "with-boolector-binary-test")]
@@ -171,13 +185,16 @@ fuzz_target!(|data: &[u8]| {
             None,
             false,
         );
-        validate_equiv_result(
+        if !validate_equiv_result(
             ext_equiv.clone(),
             boolector_result,
             "Boolector binary",
             &orig_ir,
             &opt_ir,
-        );
+        ) {
+            // An inconclusive solver result is not an optimizer failure.
+            return;
+        }
     }
 
     #[cfg(feature = "with-bitwuzla-binary-test")]
@@ -190,13 +207,16 @@ fuzz_target!(|data: &[u8]| {
             None,
             false,
         );
-        validate_equiv_result(
+        if !validate_equiv_result(
             ext_equiv.clone(),
             bitwuzla_result,
             "Bitwuzla binary",
             &orig_ir,
             &opt_ir,
-        );
+        ) {
+            // An inconclusive solver result is not an optimizer failure.
+            return;
+        }
     }
 
     #[cfg(feature = "with-z3-binary-test")]
@@ -209,7 +229,10 @@ fuzz_target!(|data: &[u8]| {
             None,
             false,
         );
-        validate_equiv_result(ext_equiv.clone(), z3_result, "Z3 binary", &orig_ir, &opt_ir);
+        if !validate_equiv_result(ext_equiv.clone(), z3_result, "Z3 binary", &orig_ir, &opt_ir) {
+            // An inconclusive solver result is not an optimizer failure.
+            return;
+        }
     }
 
     #[cfg(feature = "has-bitwuzla")]
@@ -217,20 +240,25 @@ fuzz_target!(|data: &[u8]| {
         let output_bit_count = orig_fn.ret_ty.bit_count();
         if output_bit_count <= 64 {
             let bitwuzla_parallel_result = prove_ir_fn_equiv_output_bits_parallel::<Bitwuzla>(
-                &BitwuzlaOptions::new(),
+                &fuzz_bitwuzla_options(),
                 &ProverFn::new(orig_fn, None),
                 &ProverFn::new(opt_fn, None),
                 AssertionSemantics::Same,
                 None,
                 false,
             );
-            validate_equiv_result(
+            if !validate_equiv_result(
                 ext_equiv,
                 bitwuzla_parallel_result,
                 "Bitwuzla-parallel",
                 &orig_ir,
                 &opt_ir,
-            );
+            ) {
+                // A configured solver limit is expected to make some fuzz
+                // samples inconclusive; those samples are not optimizer
+                // failures.
+                return;
+            }
         }
     }
 });

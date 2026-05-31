@@ -6,7 +6,7 @@ use crate::ir_utils;
 use crate::prover::types::{
     AssertionSemantics, EquivParallelism, EquivReport, EquivResult, ParamDomains, ProverFn,
 };
-use crate::prover::{SolverChoice, prover_for_choice};
+use crate::prover::{SolverChoice, SolverLimits, prover_for_choice_with_limits};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
@@ -84,6 +84,7 @@ pub struct IrEquivRequest<'a> {
     pub assertion_semantics: AssertionSemantics,
     pub assert_label_filter: Option<&'a str>,
     pub solver: Option<SolverChoice>,
+    pub solver_limits: SolverLimits,
     pub tool_path: Option<&'a Path>,
 }
 
@@ -99,6 +100,7 @@ impl<'a> IrEquivRequest<'a> {
             assertion_semantics: AssertionSemantics::Ignore,
             assert_label_filter: None,
             solver: None,
+            solver_limits: SolverLimits::default(),
             tool_path: None,
         }
     }
@@ -133,6 +135,12 @@ impl<'a> IrEquivRequest<'a> {
         self
     }
 
+    /// Applies resource limits supported by the selected solver backend.
+    pub fn with_solver_limits(mut self, solver_limits: SolverLimits) -> Self {
+        self.solver_limits = solver_limits;
+        self
+    }
+
     pub fn with_tool_path(mut self, tool_path: Option<&'a Path>) -> Self {
         self.tool_path = tool_path;
         self
@@ -142,7 +150,7 @@ impl<'a> IrEquivRequest<'a> {
 /// Dispatches an IR equivalence comparison using the requested solver.
 pub fn run_ir_equiv(request: &IrEquivRequest<'_>) -> Result<EquivReport, String> {
     let choice = request.solver.unwrap_or(SolverChoice::Auto);
-    let prover = prover_for_choice(choice, request.tool_path);
+    let prover = prover_for_choice_with_limits(choice, request.tool_path, request.solver_limits);
     let (lhs_pkg, lhs_fn_dropped) = ir_utils::parse_package_and_drop_params(
         request.lhs.source,
         request.lhs.top,

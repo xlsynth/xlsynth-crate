@@ -8,14 +8,16 @@ use xlsynth_pir::localized_eco2;
 use crate::ir_equiv::{dispatch_ir_equiv, IrEquivRequest, IrModule};
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
-use rand::Rng;
 use rand::SeedableRng;
 use std::path::Path;
-use xlsynth::{IrBits, IrValue};
+use xlsynth::IrValue;
 use xlsynth_g8r::check_equivalence;
 use xlsynth_pir::ir::Type;
 use xlsynth_pir::ir::{self as ir_mod, BlockMetadata, MemberType, PackageMember};
 use xlsynth_pir::ir_parser::{self, emit_fn_as_block};
+use xlsynth_pir::random_inputs::{
+    generate_biased_arguments_with_rng, generate_pattern_arguments, BitValuePattern,
+};
 
 #[derive(serde::Serialize)]
 struct AddedOpsSummaryItem {
@@ -661,91 +663,20 @@ fn compute_package_text_diffs(
     (text_diff_chars, rtl_diff_chars)
 }
 
-fn type_zero_value(ty: &Type) -> IrValue {
-    match ty {
-        Type::Bits(w) => IrValue::from_bits(&IrBits::zero(*w)),
-        Type::Tuple(elems) => {
-            let elements: Vec<IrValue> = elems.iter().map(|t| type_zero_value(t)).collect();
-            IrValue::make_tuple(&elements)
-        }
-        Type::Array(arr) => {
-            let elements: Vec<IrValue> = (0..arr.element_count)
-                .map(|_| type_zero_value(&arr.element_type))
-                .collect();
-            IrValue::make_array(&elements).expect("zero array elements must share a type")
-        }
-        Type::Token => IrValue::make_token(),
-    }
-}
-
-fn type_ones_value(ty: &Type) -> IrValue {
-    match ty {
-        Type::Bits(w) => IrValue::from_bits(&IrBits::all_ones(*w)),
-        Type::Tuple(elems) => {
-            let elements: Vec<IrValue> = elems.iter().map(|t| type_ones_value(t)).collect();
-            IrValue::make_tuple(&elements)
-        }
-        Type::Array(arr) => {
-            let elements: Vec<IrValue> = (0..arr.element_count)
-                .map(|_| type_ones_value(&arr.element_type))
-                .collect();
-            IrValue::make_array(&elements).expect("ones array elements must share a type")
-        }
-        Type::Token => IrValue::make_token(),
-    }
-}
-
-fn random_bits_for_width(rng: &mut rand::rngs::StdRng, width: usize) -> IrBits {
-    if width == 0 {
-        return IrBits::zero(0);
-    }
-    let mut bytes = vec![0u8; width.div_ceil(8)];
-    rng.fill(&mut bytes[..]);
-    let bit_remainder = width % 8;
-    if bit_remainder != 0 {
-        let mask = (1u8 << bit_remainder) - 1;
-        *bytes.last_mut().unwrap() &= mask;
-    }
-    IrBits::from_le_bytes(width, &bytes).expect("random bits must fit requested width")
-}
-
-fn type_random_value(ty: &Type, rng: &mut rand::rngs::StdRng) -> IrValue {
-    match ty {
-        Type::Bits(w) => IrValue::from_bits(&random_bits_for_width(rng, *w)),
-        Type::Tuple(elems) => {
-            let elements: Vec<IrValue> = elems.iter().map(|t| type_random_value(t, rng)).collect();
-            IrValue::make_tuple(&elements)
-        }
-        Type::Array(arr) => {
-            let element = type_random_value(&arr.element_type, rng);
-            let elements: Vec<IrValue> = (0..arr.element_count).map(|_| element.clone()).collect();
-            IrValue::make_array(&elements).expect("random array elements must share a type")
-        }
-        Type::Token => IrValue::make_token(),
-    }
-}
-
 fn has_token_param(f: &ir::Fn) -> bool {
     f.params.iter().any(|p| matches!(p.ty, Type::Token))
 }
 
 fn build_zero_args_value(f: &ir::Fn) -> IrValue {
-    let elements: Vec<IrValue> = f.params.iter().map(|p| type_zero_value(&p.ty)).collect();
-    IrValue::make_tuple(&elements)
+    IrValue::make_tuple(&generate_pattern_arguments(f, BitValuePattern::Zero))
 }
 
 fn build_ones_args_value(f: &ir::Fn) -> IrValue {
-    let elements: Vec<IrValue> = f.params.iter().map(|p| type_ones_value(&p.ty)).collect();
-    IrValue::make_tuple(&elements)
+    IrValue::make_tuple(&generate_pattern_arguments(f, BitValuePattern::AllOnes))
 }
 
 fn build_random_args_value(f: &ir::Fn, rng: &mut rand::rngs::StdRng) -> IrValue {
-    let elements: Vec<IrValue> = f
-        .params
-        .iter()
-        .map(|p| type_random_value(&p.ty, rng))
-        .collect();
-    IrValue::make_tuple(&elements)
+    IrValue::make_tuple(&generate_biased_arguments_with_rng(rng, f))
 }
 
 fn sanity_check_interpret(

@@ -10,9 +10,10 @@
 //! context-reuse testing; Z3 and IR backends are dispatched through the common
 //! gate-formal backend API where supported.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::ops::Not;
+use std::time::Duration;
 
 use crate::aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Output};
 use crate::aig::get_summary_stats::get_gate_depth;
@@ -72,6 +73,20 @@ impl std::fmt::Display for ValidationError {
 impl std::error::Error for ValidationError {}
 
 pub const CADICAL_CONFIG_ENV: &str = "XLSYNTH_G8R_CADICAL_CONFIG";
+
+/// Optional resource limits for gate-level formal proof backends.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GateFormalOptions {
+    pub cadical_timeout: Option<Duration>,
+}
+
+impl GateFormalOptions {
+    /// Applies a timeout to each CaDiCaL solve call.
+    pub fn with_cadical_timeout(mut self, timeout: Duration) -> Self {
+        self.cadical_timeout = Some(timeout);
+        self
+    }
+}
 
 fn resolve_equivalence_class_backend(
     backend: GateFormalBackend,
@@ -171,7 +186,11 @@ pub(crate) struct CadicalSat {
 
 impl CadicalSat {
     pub(crate) fn new() -> Result<Self, ValidationError> {
-        let solver = match env::var(CADICAL_CONFIG_ENV) {
+        Self::new_with_options(GateFormalOptions::default())
+    }
+
+    pub(crate) fn new_with_options(options: GateFormalOptions) -> Result<Self, ValidationError> {
+        let mut solver = match env::var(CADICAL_CONFIG_ENV) {
             Ok(config) => cadical::Solver::with_config(&config)
                 .map_err(|e| ValidationError::CadicalConfigError(format!("{config}: {e}")))?,
             Err(env::VarError::NotPresent) => cadical::Solver::new(),
@@ -181,6 +200,9 @@ impl CadicalSat {
                 ));
             }
         };
+        if let Some(timeout) = options.cadical_timeout {
+            solver.set_callbacks(Some(cadical::Timeout::new(timeout.as_secs_f32())));
+        }
         Ok(Self {
             solver,
             next_var: 1,
@@ -578,9 +600,19 @@ pub fn prove_gate_fn_equiv_with_backend(
     b: &GateFn,
     backend: GateFormalBackend,
 ) -> Result<EquivResult, ValidationError> {
+    prove_gate_fn_equiv_with_backend_and_options(a, b, backend, GateFormalOptions::default())
+}
+
+/// Checks equivalence with backend-specific resource limits.
+pub fn prove_gate_fn_equiv_with_backend_and_options(
+    a: &GateFn,
+    b: &GateFn,
+    backend: GateFormalBackend,
+    options: GateFormalOptions,
+) -> Result<EquivResult, ValidationError> {
     match backend {
         GateFormalBackend::Cadical => {
-            let mut solver = CadicalSat::new()?;
+            let mut solver = CadicalSat::new_with_options(options)?;
             prove_gate_fn_equiv_with_solver(a, b, &mut solver)
         }
         GateFormalBackend::Varisat => {
@@ -646,6 +678,21 @@ pub fn validate_equivalence_classes_with_backend(
     equiv_classes: &[&[EquivNode]],
     backend: GateFormalBackend,
 ) -> Result<ValidationResult, ValidationError> {
+    validate_equivalence_classes_with_backend_and_options(
+        gate_fn,
+        equiv_classes,
+        backend,
+        GateFormalOptions::default(),
+    )
+}
+
+/// Validates classes with backend-specific resource limits.
+pub fn validate_equivalence_classes_with_backend_and_options(
+    gate_fn: &GateFn,
+    equiv_classes: &[&[EquivNode]],
+    backend: GateFormalBackend,
+    options: GateFormalOptions,
+) -> Result<ValidationResult, ValidationError> {
     match resolve_equivalence_class_backend(backend)? {
         GateFormalBackend::Varisat => {
             let mut solver = varisat::Solver::new();
@@ -657,7 +704,7 @@ pub fn validate_equivalence_classes_with_backend(
             )
         }
         GateFormalBackend::Cadical => {
-            let mut solver = CadicalSat::new()?;
+            let mut solver = CadicalSat::new_with_options(options)?;
             validate_equivalence_classes_with_solver(
                 gate_fn,
                 equiv_classes,
@@ -671,6 +718,7 @@ pub fn validate_equivalence_classes_with_backend(
                 equiv_classes,
                 backend,
                 /* classes_are_depth_sorted= */ false,
+                options,
             )
         }
     }
@@ -680,6 +728,21 @@ pub fn validate_equivalence_classes_presorted_with_backend(
     gate_fn: &GateFn,
     equiv_classes: &[&[EquivNode]],
     backend: GateFormalBackend,
+) -> Result<ValidationResult, ValidationError> {
+    validate_equivalence_classes_presorted_with_backend_and_options(
+        gate_fn,
+        equiv_classes,
+        backend,
+        GateFormalOptions::default(),
+    )
+}
+
+/// Validates depth-sorted classes with backend-specific resource limits.
+pub fn validate_equivalence_classes_presorted_with_backend_and_options(
+    gate_fn: &GateFn,
+    equiv_classes: &[&[EquivNode]],
+    backend: GateFormalBackend,
+    options: GateFormalOptions,
 ) -> Result<ValidationResult, ValidationError> {
     match resolve_equivalence_class_backend(backend)? {
         GateFormalBackend::Varisat => {
@@ -692,7 +755,7 @@ pub fn validate_equivalence_classes_presorted_with_backend(
             )
         }
         GateFormalBackend::Cadical => {
-            let mut solver = CadicalSat::new()?;
+            let mut solver = CadicalSat::new_with_options(options)?;
             validate_equivalence_classes_with_solver(
                 gate_fn,
                 equiv_classes,
@@ -706,6 +769,7 @@ pub fn validate_equivalence_classes_presorted_with_backend(
                 equiv_classes,
                 backend,
                 /* classes_are_depth_sorted= */ true,
+                options,
             )
         }
     }
@@ -733,6 +797,7 @@ fn validate_equivalence_classes_pairwise_with_backend(
     equiv_classes: &[&[EquivNode]],
     backend: GateFormalBackend,
     classes_are_depth_sorted: bool,
+    options: GateFormalOptions,
 ) -> Result<ValidationResult, ValidationError> {
     let sorted_equiv_classes: Vec<Vec<EquivNode>> = if classes_are_depth_sorted {
         equiv_classes
@@ -772,7 +837,12 @@ fn validate_equivalence_classes_pairwise_with_backend(
             let representative_fn =
                 gate_fn_with_single_output(gate_fn, representative, "representative");
             let candidate_fn = gate_fn_with_single_output(gate_fn, candidate, "candidate");
-            match prove_gate_fn_equiv_with_backend(&representative_fn, &candidate_fn, backend)? {
+            match prove_gate_fn_equiv_with_backend_and_options(
+                &representative_fn,
+                &candidate_fn,
+                backend,
+                options,
+            )? {
                 EquivResult::Proved => known_equiv.push(candidate),
                 EquivResult::Disproved(cex) => {
                     if !cex.is_empty() {
@@ -856,14 +926,17 @@ fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
     // representative, so a representative-only check is sufficient by
     // transitivity and avoids adding redundant miter clauses as the bucket
     // grows. Before spending SAT work on a class, split it by counterexamples
-    // found in earlier classes. A new counterexample still stops the current
-    // original class, preserving the old per-class proof budget.
+    // found in earlier classes. When a solve finds a new counterexample,
+    // re-partition the current bucket with that model and continue with each
+    // non-singleton partition. This avoids losing valid equivalences that
+    // happened to follow a mismatching candidate in the simulation bucket.
     for equiv_class in sorted_equiv_classes {
-        let buckets =
-            presplit_by_counterexample_models(equiv_class, &counterexample_models, &aig_ref_to_lit);
-        let mut stop_class_after_new_counterexample = false;
-        for bucket in buckets {
+        let mut buckets: VecDeque<Vec<EquivNode>> =
+            presplit_by_counterexample_models(equiv_class, &counterexample_models, &aig_ref_to_lit)
+                .into();
+        while let Some(bucket) = buckets.pop_front() {
             let mut known_equiv = vec![bucket[0]];
+            let mut split_bucket = false;
             for &candidate in &bucket[1..] {
                 // Create a miter between this candidate and the class representative.
                 let representative = known_equiv[0];
@@ -887,17 +960,19 @@ fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
                         );
                         validation_result.cex_inputs.push(cex);
                         counterexample_models.push(model);
-                        stop_class_after_new_counterexample = true;
+                        buckets.extend(split_bucket_by_model(
+                            &bucket,
+                            counterexample_models.last().unwrap(),
+                            &aig_ref_to_lit,
+                        ));
+                        split_bucket = true;
                         break;
                     }
                 }
             }
 
-            if known_equiv.len() > 1 {
+            if !split_bucket && known_equiv.len() > 1 {
                 validation_result.proven_equiv_sets.push(known_equiv);
-            }
-            if stop_class_after_new_counterexample {
-                break;
             }
         }
     }
@@ -907,6 +982,8 @@ fn validate_equivalence_classes_with_solver<S: IncrementalSat>(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use rand::SeedableRng;
 
     use crate::{
@@ -915,8 +992,8 @@ mod tests {
     };
 
     use super::{
-        GateFormalBackend, ValidationResult, validate_equivalence_classes,
-        validate_equivalence_classes_with_backend,
+        CadicalSat, GateFormalBackend, GateFormalOptions, IncrementalSat, ValidationError,
+        ValidationResult, validate_equivalence_classes, validate_equivalence_classes_with_backend,
     };
     #[allow(unused_imports)]
     use crate::assert_within;
@@ -928,6 +1005,20 @@ mod tests {
         }
         sets.sort_unstable();
         sets
+    }
+
+    #[test]
+    fn test_cadical_timeout_is_reported_as_interrupted() {
+        let mut solver = CadicalSat::new_with_options(
+            GateFormalOptions::default().with_cadical_timeout(Duration::ZERO),
+        )
+        .unwrap();
+        let lit = solver.sat_new_lit();
+        solver.sat_add_clause(&[lit]);
+        assert!(matches!(
+            solver.sat_solve_assuming(&[lit]),
+            Err(ValidationError::CadicalSolveInterrupted)
+        ));
     }
 
     #[test]
@@ -944,6 +1035,33 @@ mod tests {
         let validation_result = validate_equivalence_classes(&setup.g, &classes).unwrap();
         // There are 2 redundancies and they have inverted pairs.
         assert_eq!(validation_result.proven_equiv_sets.len(), 4);
+    }
+
+    #[test]
+    fn test_validate_repartitions_current_class_after_counterexample() {
+        let setup = setup_graph_with_redundancies();
+        let proposed_class = &[
+            EquivNode::Normal(setup.inner0.node),
+            EquivNode::Normal(setup.inner1.node),
+            EquivNode::Normal(setup.outer0.node),
+            EquivNode::Normal(setup.outer1.node),
+        ];
+
+        let result = validate_equivalence_classes(&setup.g, &[proposed_class]).unwrap();
+        assert_eq!(
+            canonical_proven_sets(&result),
+            vec![
+                vec![
+                    EquivNode::Normal(setup.inner0.node),
+                    EquivNode::Normal(setup.inner1.node),
+                ],
+                vec![
+                    EquivNode::Normal(setup.outer0.node),
+                    EquivNode::Normal(setup.outer1.node),
+                ],
+            ]
+        );
+        assert_eq!(result.cex_inputs.len(), 1);
     }
 
     #[test]

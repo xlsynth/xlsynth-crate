@@ -10,7 +10,7 @@ use xlsynth_pir::ir::Fn;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_utils::operands;
-use xlsynth_pir_compiler::PirFunctionJit;
+use xlsynth_pir_compiler::PirFunctionCompiler;
 
 const LARGE_FUNCTION_INSTRUCTION_COUNT: usize = 10_000;
 
@@ -212,7 +212,8 @@ fn compiles_and_executes_varied_ten_thousand_node_function() {
         LARGE_FUNCTION_INSTRUCTION_COUNT
     );
 
-    let jit = PirFunctionJit::compile(function).expect("large PIR function should JIT compile");
+    let compiler =
+        PirFunctionCompiler::compile(function).expect("large PIR function should compile");
     for (x, y, index) in [
         (0_u64, 0_u64, 0_u64),
         (0x1234_5678_u64, 0x89ab_cdef_u64, 1_u64),
@@ -227,14 +228,14 @@ fn compiles_and_executes_varied_ten_thousand_node_function() {
             FnEvalResult::Success(success) => success.value,
             failure => panic!("PIR evaluator failed on large function: {failure:?}"),
         };
-        let actual = jit
+        let actual = compiler
             .run_ir_values(&args)
-            .expect("large JIT function should execute");
+            .expect("large compiled function should execute");
         assert_eq!(actual, expected);
     }
 }
 
-struct JitTiming {
+struct BackendTiming {
     compilation: Duration,
     execution: Duration,
     value: IrValue,
@@ -262,21 +263,22 @@ fn measure_varied_function_cranelift(instruction_count: usize, execution_count: 
 
     let timing = {
         let compilation_start = Instant::now();
-        let jit =
-            PirFunctionJit::compile(pir_function).expect("large PIR function should JIT compile");
+        let compiler =
+            PirFunctionCompiler::compile(pir_function).expect("large PIR function should compile");
         let compilation = compilation_start.elapsed();
-        let _ = jit
+        let _ = compiler
             .run_ir_values(&args)
             .expect("Cranelift warm-up execution should succeed");
         let execution_start = Instant::now();
         let mut value = None;
         for _ in 0..execution_count {
             value = Some(black_box(
-                jit.run_ir_values(black_box(&args))
+                compiler
+                    .run_ir_values(black_box(&args))
                     .expect("Cranelift timed execution should succeed"),
             ));
         }
-        JitTiming {
+        BackendTiming {
             compilation,
             execution: execution_start.elapsed(),
             value: value.expect("execution count should be nonzero"),
@@ -326,7 +328,7 @@ fn measure_varied_function_xls(instruction_count: usize, execution_count: usize)
                     .value,
             ));
         }
-        JitTiming {
+        BackendTiming {
             compilation,
             execution: execution_start.elapsed(),
             value: value.expect("execution count should be nonzero"),

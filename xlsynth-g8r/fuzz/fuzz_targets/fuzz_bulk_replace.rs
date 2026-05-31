@@ -3,9 +3,7 @@
 #![no_main]
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use rand::prelude::IteratorRandom;
 use rand::rngs::StdRng;
-use rand::Rng;
 use rand::SeedableRng;
 use std::collections::HashMap;
 use std::sync::Once;
@@ -15,7 +13,7 @@ use xlsynth_g8r::aig::dce::dce;
 use xlsynth_g8r::aig::{AigBitVector, AigOperand, AigRef, GateBuilder, GateBuilderOptions, GateFn};
 use xlsynth_g8r::aig_sim::gate_sim::{eval, Collect};
 
-use xlsynth_pir::fuzz_utils;
+use xlsynth_pir::random_inputs::generate_biased_irbits_with_rng;
 
 static LOGGER_INIT: Once = Once::new();
 
@@ -454,113 +452,41 @@ fuzz_target!(|data: (FuzzGateGraph, FuzzSubstitutions)| {
             input_node_ids.insert(input.bit_vector.get_lsb(i).node.id);
         }
     }
-    // Build a set of substitutions, avoiding chains and input/literal nodes
+    // Model the cone/cut replacements used by production callers. AIG node IDs
+    // are topological, so replacing a node only with an earlier node cannot
+    // introduce a dependency cycle.
     let mut targets = std::collections::HashSet::<usize>::new();
     let mut any_valid_sub = false;
-
-    // With some probability, generate a long chain substitution map (A->B, B->C,
-    // ..., Y->Z)
-    if rng.r#gen::<u8>() % 8 == 0 && node_count > 3 {
-        let max_chain = node_count.min(16);
-        let chain_len = (3..=max_chain).choose(&mut rng).unwrap_or(3);
-        if node_count <= chain_len + 1 {
-            // Not enough nodes for a valid chain, fall back to normal
-            // substitution logic
-        } else {
-            let start = rng.gen_range(1..(node_count - chain_len));
-            for i in 0..chain_len {
-                let from_idx = start + i;
-                let to_idx = start + i + 1;
-                // Skip input/literal nodes
-                if input_node_ids.contains(&from_idx) || from_idx == 0 {
-                    continue;
-                }
-                if input_node_ids.contains(&to_idx) || to_idx == 0 {
-                    continue;
-                }
-                let from_ref = AigRef { id: from_idx };
-                let to_op = AigOperand {
-                    node: AigRef { id: to_idx },
-                    negated: false,
-                };
-                subs_map.insert(from_ref, to_op);
-                targets.insert(from_idx);
-                any_valid_sub = true;
-            }
-            // If we did a chain, skip the normal substitution logic
-            if any_valid_sub {
-                // If all substitutions were vetoed, skip this fuzz case
-                if !any_valid_sub && !subs_map.is_empty() {
-                    return;
-                }
-                // Continue to bulk_replace
-            } else {
-                // If chain produced no valid subs, fall back to normal logic
-                for (from_idx, to_idx, negated) in &data.1.subs {
-                    if *from_idx as usize >= node_count || *to_idx as usize >= node_count {
-                        continue;
-                    }
-                    if input_node_ids.contains(&(*from_idx as usize)) {
-                        continue; // Don't substitute input nodes!
-                    }
-                    if *from_idx as usize == 0 {
-                        continue; // Don't substitute the constant literal node!
-                    }
-                    if from_idx == to_idx {
-                        continue;
-                    }
-                    let from_idx_usize = *from_idx as usize;
-                    let to_idx_usize = *to_idx as usize;
-                    if targets.contains(&from_idx_usize) {
-                        continue;
-                    }
-                    // Avoid chaining: don't substitute to a node that's also a target
-                    if targets.contains(&to_idx_usize) {
-                        continue;
-                    }
-                    let from_ref = AigRef { id: from_idx_usize };
-                    let to_op = AigOperand {
-                        node: AigRef { id: to_idx_usize },
-                        negated: *negated,
-                    };
-                    subs_map.insert(from_ref, to_op);
-                    targets.insert(from_idx_usize);
-                    any_valid_sub = true;
-                }
-            }
+    for (from_idx, to_idx, negated) in &data.1.subs {
+        if *from_idx as usize >= node_count || *to_idx as usize >= node_count {
+            continue;
         }
-    } else {
-        for (from_idx, to_idx, negated) in &data.1.subs {
-            if *from_idx as usize >= node_count || *to_idx as usize >= node_count {
-                continue;
-            }
-            if input_node_ids.contains(&(*from_idx as usize)) {
-                continue; // Don't substitute input nodes!
-            }
-            if *from_idx as usize == 0 {
-                continue; // Don't substitute the constant literal node!
-            }
-            if from_idx == to_idx {
-                continue;
-            }
-            let from_idx_usize = *from_idx as usize;
-            let to_idx_usize = *to_idx as usize;
-            if targets.contains(&from_idx_usize) {
-                continue;
-            }
-            // Avoid chaining: don't substitute to a node that's also a target
-            if targets.contains(&to_idx_usize) {
-                continue;
-            }
-            let from_ref = AigRef { id: from_idx_usize };
-            let to_op = AigOperand {
-                node: AigRef { id: to_idx_usize },
-                negated: *negated,
-            };
-            subs_map.insert(from_ref, to_op);
-            targets.insert(from_idx_usize);
-            any_valid_sub = true;
+        if input_node_ids.contains(&(*from_idx as usize)) {
+            continue; // Don't substitute input nodes!
         }
+        if *from_idx as usize == 0 {
+            continue; // Don't substitute the constant literal node!
+        }
+        let from_idx_usize = *from_idx as usize;
+        let to_idx_usize = *to_idx as usize;
+        if to_idx_usize >= from_idx_usize {
+            continue;
+        }
+        if targets.contains(&from_idx_usize) {
+            continue;
+        }
+        // Avoid chaining: don't substitute to a node that's also a target
+        if targets.contains(&to_idx_usize) {
+            continue;
+        }
+        let from_ref = AigRef { id: from_idx_usize };
+        let to_op = AigOperand {
+            node: AigRef { id: to_idx_usize },
+            negated: *negated,
+        };
+        subs_map.insert(from_ref, to_op);
+        targets.insert(from_idx_usize);
+        any_valid_sub = true;
     }
     // If all substitutions were vetoed, skip this fuzz case
     if !any_valid_sub && !subs_map.is_empty() {
@@ -651,7 +577,7 @@ fuzz_target!(|data: (FuzzGateGraph, FuzzSubstitutions)| {
             // zero-width or too big to fit in u64, skip this fuzz case
             return;
         }
-        let bits = fuzz_utils::arbitrary_irbits(&mut rng, width);
+        let bits = generate_biased_irbits_with_rng(&mut rng, width);
         input_vecs.push(bits);
     }
     let orig_sim = eval(&gate_fn, &input_vecs, Collect::None);

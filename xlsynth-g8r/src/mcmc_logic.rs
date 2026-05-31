@@ -42,6 +42,7 @@ use std::sync::mpsc;
 use std::thread;
 use xlsynth_mcmc::MIN_TEMPERATURE_RATIO;
 use xlsynth_pir::ir_parser;
+use xlsynth_pir::random_inputs::generate_flat_bitvector_argument_sets_with_rng;
 const STATS_PRINT_ITERATION_INTERVAL: u64 = 1000;
 const STATS_PRINT_TIME_INTERVAL_SECS: u64 = 10;
 
@@ -938,20 +939,24 @@ fn generate_simd_inputs(gate_fn: &GateFn, rng: &mut impl rand::Rng) -> Vec<Vec25
     const LANES: usize = 256;
     let total_bits: usize = gate_fn.inputs.iter().map(|i| i.get_bit_count()).sum();
     let mut words_per_bit = vec![[0u64; 4]; total_bits];
+    let input_widths: Vec<usize> = gate_fn
+        .inputs
+        .iter()
+        .map(|input| input.bit_vector.get_bit_count())
+        .collect();
+    let samples = generate_flat_bitvector_argument_sets_with_rng(rng, &input_widths, LANES);
 
-    for lane in 0..LANES {
+    for (lane, sample) in samples.iter().enumerate() {
         let mut bit_cursor = 0;
-        for input in &gate_fn.inputs {
-            let rand_val =
-                xlsynth_pir::fuzz_utils::arbitrary_irbits(rng, input.bit_vector.get_bit_count());
-            for bit_idx in 0..input.bit_vector.get_bit_count() {
-                if rand_val.get_bit(bit_idx).unwrap() {
+        for input_bits in sample {
+            for bit_idx in 0..input_bits.get_bit_count() {
+                if input_bits.get_bit(bit_idx).unwrap() {
                     let limb = lane / 64;
                     let offset = lane % 64;
                     words_per_bit[bit_cursor + bit_idx][limb] |= 1u64 << offset;
                 }
             }
-            bit_cursor += input.bit_vector.get_bit_count();
+            bit_cursor += input_bits.get_bit_count();
         }
     }
 

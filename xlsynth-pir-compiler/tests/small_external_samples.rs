@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use xlsynth::IrValue;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_parser::Parser;
-use xlsynth_pir_compiler::{PirFunctionJit, ScalarLayout};
+use xlsynth_pir_compiler::{PirFunctionCompiler, ScalarLayout};
 
 const SAMPLE_COUNT: usize = 10;
 
@@ -80,7 +80,7 @@ fn smallest_ir_samples(sample_dir: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
-fn jit_matches_pir_evaluator_on_ten_smallest_external_ir_samples() {
+fn compiler_matches_pir_evaluator_on_ten_smallest_external_ir_samples() {
     let Some(sample_dir) = std::env::var_os("XLSYNTH_PIR_COMPILER_SAMPLE_DIR") else {
         return;
     };
@@ -95,9 +95,9 @@ fn jit_matches_pir_evaluator_on_ten_smallest_external_ir_samples() {
         let function = package
             .get_top_fn()
             .unwrap_or_else(|| panic!("{} has no top function", path.display()));
-        let jit = PirFunctionJit::compile(function)
+        let compiler = PirFunctionCompiler::compile(function)
             .unwrap_or_else(|error| panic!("failed to compile {}: {error}", path.display()));
-        let scalar_param_layouts = jit
+        let scalar_param_layouts = compiler
             .param_layouts()
             .iter()
             .map(|layout| {
@@ -123,9 +123,9 @@ fn jit_matches_pir_evaluator_on_ten_smallest_external_ir_samples() {
                     integer_args
                 ),
             };
-            let actual = jit.run_ir_values(&ir_args).unwrap_or_else(|error| {
+            let actual = compiler.run_ir_values(&ir_args).unwrap_or_else(|error| {
                 panic!(
-                    "JIT execution failed for {} with args {:?}: {error}",
+                    "compiled execution failed for {} with args {:?}: {error}",
                     path.display(),
                     integer_args
                 )
@@ -133,7 +133,7 @@ fn jit_matches_pir_evaluator_on_ten_smallest_external_ir_samples() {
             assert_eq!(
                 actual,
                 expected,
-                "JIT mismatch for {} with args {:?}",
+                "compiler mismatch for {} with args {:?}",
                 path.display(),
                 integer_args
             );

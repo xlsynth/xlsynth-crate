@@ -221,6 +221,39 @@ fn bits_width(ty: &Type) -> Result<usize, IrFnToDslxError> {
     }
 }
 
+/// Returns the common tuple-element width for an XLS partial-product result.
+fn partial_product_result_width(ty: &Type) -> Result<usize, IrFnToDslxError> {
+    match ty {
+        Type::Tuple(elements) if elements.len() == 2 && elements[0] == elements[1] => {
+            bits_width(&elements[0])
+        }
+        _ => Err(IrFnToDslxError::UnsupportedType(format!(
+            "partial-product result must be (bits[N], bits[N]); got {}",
+            ty
+        ))),
+    }
+}
+
+/// Checks that an XLS partial-product operation can be spelled as a DSLX
+/// builtin without changing its observable tuple components.
+fn dslx_partial_product_widths(
+    func: &ir::Fn,
+    node: &ir::Node,
+    lhs: NodeRef,
+    rhs: NodeRef,
+) -> Result<(usize, usize), IrFnToDslxError> {
+    let lhs_w = bits_width(&func.get_node(lhs).ty)?;
+    let rhs_w = bits_width(&func.get_node(rhs).ty)?;
+    let out_w = partial_product_result_width(&node.ty)?;
+    if lhs_w != out_w || rhs_w != out_w {
+        return Err(IrFnToDslxError::UnsupportedNode(format!(
+            "DSLX partial-product builtins require operand and result widths to match; got lhs={}, rhs={}, result={}",
+            lhs_w, rhs_w, out_w
+        )));
+    }
+    Ok((lhs_w, rhs_w))
+}
+
 fn node_name(node_names: &[Option<String>], nr: NodeRef) -> Result<&str, IrFnToDslxError> {
     node_names[nr.index]
         .as_deref()
@@ -237,24 +270,115 @@ fn render_tuple_expr(elements: &[String]) -> String {
     }
 }
 
-fn render_array_index_expr(base: &str, indices: &[String]) -> String {
-    let mut expr = base.to_string();
-    for idx in indices {
-        expr.push_str(&format!("[{}]", idx));
-    }
-    expr
+struct RenderedArrayIndex {
+    expression: String,
+    in_bounds_condition: Option<String>,
 }
 
-fn render_array_update_expr(base: &str, indices: &[String], value: &str) -> String {
+/// Renders an XLS array index with explicit clamping when its bits type can
+/// represent out-of-bounds values.
+fn render_clamped_array_index(
+    index: &str,
+    index_ty: &Type,
+    element_count: usize,
+) -> Result<RenderedArrayIndex, IrFnToDslxError> {
+    if element_count == 0 {
+        return Err(IrFnToDslxError::UnsupportedNode(
+            "array operations on empty arrays are unsupported".to_string(),
+        ));
+    }
+    let index_width = bits_width(index_ty)?;
+    let can_be_oob = index_width >= usize::BITS as usize || element_count < (1usize << index_width);
+    if !can_be_oob {
+        return Ok(RenderedArrayIndex {
+            expression: index.to_string(),
+            in_bounds_condition: None,
+        });
+    }
+
+    let in_bounds_condition = format!("{} < uN[{}]:{}", index, index_width, element_count);
+    Ok(RenderedArrayIndex {
+        expression: format!(
+            "if {} {{ {} }} else {{ uN[{}]:{} }}",
+            in_bounds_condition,
+            index,
+            index_width,
+            element_count - 1
+        ),
+        in_bounds_condition: Some(in_bounds_condition),
+    })
+}
+
+/// Renders nested indexing with XLS's clamp-to-last-element semantics.
+fn render_array_index_expr(
+    func: &ir::Fn,
+    array: NodeRef,
+    base: &str,
+    indices: &[NodeRef],
+    node_names: &[Option<String>],
+) -> Result<String, IrFnToDslxError> {
+    let mut expr = base.to_string();
+    let mut ty = &func.get_node(array).ty;
+    for index in indices {
+        let data = match ty {
+            Type::Array(data) => data,
+            _ => {
+                return Err(IrFnToDslxError::UnsupportedType(format!(
+                    "array_index expected an array operand, got {}",
+                    ty
+                )));
+            }
+        };
+        let index_name = node_name(node_names, *index)?;
+        let rendered =
+            render_clamped_array_index(index_name, &func.get_node(*index).ty, data.element_count)?;
+        expr.push_str(&format!("[{}]", rendered.expression));
+        ty = &data.element_type;
+    }
+    Ok(expr)
+}
+
+/// Renders nested updates with XLS's no-op-on-out-of-bounds semantics.
+fn render_array_update_expr(
+    func: &ir::Fn,
+    array_ty: &Type,
+    base: &str,
+    indices: &[NodeRef],
+    value: &str,
+    node_names: &[Option<String>],
+) -> Result<String, IrFnToDslxError> {
     if indices.is_empty() {
-        return value.to_string();
+        return Ok(value.to_string());
     }
-    let mut update_expr = value.to_string();
-    for depth in (0..indices.len()).rev() {
-        let prefix = render_array_index_expr(base, &indices[..depth]);
-        update_expr = format!("update({}, {}, {})", prefix, indices[depth], update_expr);
-    }
-    update_expr
+    let data = match array_ty {
+        Type::Array(data) => data,
+        _ => {
+            return Err(IrFnToDslxError::UnsupportedType(format!(
+                "array_update expected an array operand, got {}",
+                array_ty
+            )));
+        }
+    };
+    let index = node_name(node_names, indices[0])?;
+    let rendered =
+        render_clamped_array_index(index, &func.get_node(indices[0]).ty, data.element_count)?;
+    let selected = format!("{}[{}]", base, rendered.expression);
+    let updated_element = render_array_update_expr(
+        func,
+        &data.element_type,
+        &selected,
+        &indices[1..],
+        value,
+        node_names,
+    )?;
+    let updated = format!(
+        "update({}, {}, {})",
+        base, rendered.expression, updated_element
+    );
+    Ok(match rendered.in_bounds_condition {
+        Some(condition) => format!("if {} {{ {} }} else {{ {} }}", condition, updated, base),
+        None => updated,
+    })
 }
 
 fn array_literal_expr_for_type(ty: &Type, elements: &[String]) -> Result<String, IrFnToDslxError> {
@@ -540,10 +664,12 @@ fn lower_node_payload(
                         lhs_name, lhs_w, rhs_name, out_w
                     ))
                 }
-                Binop::Umulp => Ok(format!("umulp({}, {})", lhs_name, rhs_name)),
+                Binop::Umulp => {
+                    dslx_partial_product_widths(func, node, *lhs, *rhs)?;
+                    Ok(format!("umulp({}, {})", lhs_name, rhs_name))
+                }
                 Binop::Smulp => {
-                    let lhs_w = bits_width(&func.get_node(*lhs).ty)?;
-                    let rhs_w = bits_width(&func.get_node(*rhs).ty)?;
+                    let (lhs_w, rhs_w) = dslx_partial_product_widths(func, node, *lhs, *rhs)?;
                     Ok(format!(
                         "smulp({} as sN[{}], {} as sN[{}])",
                         lhs_name, lhs_w, rhs_name, rhs_w
@@ -590,11 +716,7 @@ fn lower_node_payload(
         }
         NodePayload::ArrayIndex { array, indices, .. } => {
             let array_name = node_name(node_names, *array)?;
-            let indices = indices
-                .iter()
-                .map(|nr| node_name(node_names, *nr).map(|s| s.to_string()))
-                .collect::<Result<Vec<String>, IrFnToDslxError>>()?;
-            Ok(render_array_index_expr(array_name, &indices))
+            render_array_index_expr(func, *array, array_name, indices, node_names)
         }
         NodePayload::ArrayUpdate {
             array,
@@ -604,11 +726,14 @@ fn lower_node_payload(
         } => {
             let array_name = node_name(node_names, *array)?;
             let value_name = node_name(node_names, *value)?;
-            let indices = indices
-                .iter()
-                .map(|nr| node_name(node_names, *nr).map(|s| s.to_string()))
-                .collect::<Result<Vec<String>, IrFnToDslxError>>()?;
-            Ok(render_array_update_expr(array_name, &indices, value_name))
+            render_array_update_expr(
+                func,
+                &func.get_node(*array).ty,
+                array_name,
+                indices,
+                value_name,
+                node_names,
+            )
         }
         NodePayload::ArraySlice {
             array,
@@ -1206,16 +1331,56 @@ top fn f(a: bits[8][4] id=1, i: bits[2] id=2, v: bits[8] id=3) -> bits[8][2] {
     }
 
     #[test]
+    fn test_convert_array_index_clamps_static_oob_index() {
+        let ir_text = r#"package sample
+
+top fn f(a: bits[16][4] id=1) -> bits[16] {
+  a: bits[16][4] = param(name=a, id=1)
+  index: bits[64] = literal(value=63488, id=2)
+  ret out: bits[16] = array_index(a, indices=[index], id=3)
+}
+"#;
+        let result = roundtrip_ir_package_via_dslx_no_opt(ir_text);
+        assert!(
+            result
+                .dslx_text
+                .contains("a[if index < uN[64]:4 { index } else { uN[64]:3 }]")
+        );
+    }
+
+    #[test]
+    fn test_convert_nested_array_update_guards_static_oob_index() {
+        let ir_text = r#"package sample
+
+top fn f(a: bits[8][2][2] id=1, v: bits[8] id=2) -> bits[8][2][2] {
+  a: bits[8][2][2] = param(name=a, id=1)
+  v: bits[8] = param(name=v, id=2)
+  outer: bits[8] = literal(value=7, id=3)
+  inner: bits[8] = literal(value=1, id=4)
+  ret out: bits[8][2][2] = array_update(a, v, indices=[outer, inner], id=5)
+}
+"#;
+        let result = roundtrip_ir_package_via_dslx_no_opt(ir_text);
+        assert!(
+            result.dslx_text.contains(
+                "if outer < uN[8]:2 { update(a, if outer < uN[8]:2 { outer } else { uN[8]:1 }"
+            ),
+            "{}",
+            result.dslx_text
+        );
+    }
+
+    #[test]
     fn test_convert_reverse_gate_and_umulp() {
         let ir_text = r#"package sample
 
-top fn f(p: bits[1] id=1, x: bits[8] id=2, y: bits[8] id=3) -> (bits[16], bits[16]) {
+top fn f(p: bits[1] id=1, x: bits[8] id=2, y: bits[8] id=3) -> (bits[8], bits[8]) {
   p: bits[1] = param(name=p, id=1)
   x: bits[8] = param(name=x, id=2)
   y: bits[8] = param(name=y, id=3)
   g: bits[8] = gate(p, x, id=4)
   r: bits[8] = reverse(g, id=5)
-  ret out: (bits[16], bits[16]) = umulp(r, y, id=6)
+  ret out: (bits[8], bits[8]) = umulp(r, y, id=6)
 }
 "#;
         let result = convert_ir_package_fn_to_dslx(ir_text, None).unwrap();
@@ -1226,6 +1391,40 @@ top fn f(p: bits[1] id=1, x: bits[8] id=2, y: bits[8] id=3) -> (bits[16], bits[1
         );
         assert!(result.dslx_text.contains("rev(g)"));
         assert!(result.dslx_text.contains("umulp(r, y)"));
+    }
+
+    #[test]
+    fn test_convert_partial_products_with_matching_widths() {
+        let ir_text = r#"package sample
+
+top fn f(x: bits[8] id=1, y: bits[8] id=2) -> ((bits[8], bits[8]), (bits[8], bits[8])) {
+  x: bits[8] = param(name=x, id=1)
+  y: bits[8] = param(name=y, id=2)
+  unsigned: (bits[8], bits[8]) = umulp(x, y, id=3)
+  signed: (bits[8], bits[8]) = smulp(x, y, id=4)
+  ret out: ((bits[8], bits[8]), (bits[8], bits[8])) = tuple(unsigned, signed, id=5)
+}
+"#;
+        let result = roundtrip_ir_package_via_dslx_no_opt(ir_text);
+        assert!(result.dslx_text.contains("umulp(x, y)"));
+        assert!(result.dslx_text.contains("smulp(x as sN[8], y as sN[8])"));
+    }
+
+    #[test]
+    fn test_partial_product_with_distinct_result_width_is_reported_as_unsupported() {
+        let ir_text = r#"package sample
+
+top fn f(x: bits[8] id=1) -> (bits[16], bits[16]) {
+  x: bits[8] = param(name=x, id=1)
+  ret out: (bits[16], bits[16]) = umulp(x, x, id=2)
+}
+"#;
+        let err = convert_ir_package_fn_to_dslx(ir_text, None).unwrap_err();
+        assert!(matches!(err, IrFnToDslxError::UnsupportedNode(_)));
+        assert!(
+            err.to_string()
+                .contains("require operand and result widths to match")
+        );
     }
 
     #[test]

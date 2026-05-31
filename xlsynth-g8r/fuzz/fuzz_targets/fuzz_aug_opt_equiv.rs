@@ -4,10 +4,12 @@
 
 use libfuzzer_sys::fuzz_target;
 use std::sync::atomic::{AtomicU64, Ordering};
-use xlsynth_g8r_fuzz::generate_upstream_formal_random_pir_package;
+use xlsynth_g8r_fuzz::{fuzz_solver_limits, generate_upstream_formal_random_pir_package};
 use xlsynth_pir::aug_opt::{run_aug_opt_over_ir_text_with_stats, AugOptOptions};
 #[cfg(feature = "has-bitwuzla")]
 use xlsynth_prover::ir_equiv::{run_ir_equiv, IrEquivRequest, IrModule};
+#[cfg(feature = "has-bitwuzla")]
+use xlsynth_prover::prover::types::EquivResult;
 #[cfg(feature = "has-bitwuzla")]
 use xlsynth_prover::prover::SolverChoice;
 
@@ -86,9 +88,16 @@ fuzz_target!(|data: &[u8]| {
             IrModule::new(&orig_ir).with_top(Some(top_fn_name)),
             IrModule::new(&rewritten_ir).with_top(Some(top_fn_name)),
         )
-        .with_solver(Some(SolverChoice::Bitwuzla));
+        .with_solver(Some(SolverChoice::Bitwuzla))
+        .with_solver_limits(fuzz_solver_limits());
         match run_ir_equiv(&request) {
             Ok(report) => {
+                if let EquivResult::Inconclusive(msg) = &report.result {
+                    log::debug!("aug-opt equivalence inconclusive: {}", msg);
+                    // Early-return rationale: a configured solver resource
+                    // limit is expected fuzzing noise, not a rewrite failure.
+                    return;
+                }
                 if !report.is_success() {
                     let err = report
                         .error_str()

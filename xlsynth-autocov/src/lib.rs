@@ -26,9 +26,10 @@ use xlsynth_pir::ir_eval::{
 };
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_value_utils::{ir_bits_from_value_with_type, ir_value_from_bits_with_type};
+use xlsynth_pir::random_inputs::{generate_biased_irbits_with_rng, generate_corner_irbits};
 use xlsynth_prover::ir_equiv::{IrEquivRequest, IrModule, run_ir_equiv};
-use xlsynth_prover::prover::SolverChoice;
 use xlsynth_prover::prover::types::{AssertionSemantics, EquivParallelism, EquivResult};
+use xlsynth_prover::prover::{SolverChoice, SolverLimits};
 
 mod ir_fn_autocov_runner;
 pub use ir_fn_autocov_runner::{
@@ -245,6 +246,7 @@ pub fn relevant_in_pkg(
                 assertion_semantics: AssertionSemantics::Same,
                 assert_label_filter: None,
                 solver: Some(solver),
+                solver_limits: SolverLimits::default(),
                 tool_path: tool_path.as_deref(),
             };
             let report = run_ir_equiv(&request)?;
@@ -259,7 +261,7 @@ pub fn relevant_in_pkg(
                         detail: RelevanceDetail::DisprovedEquivalent { equiv: other },
                     })
                 }
-                EquivResult::Error(msg) => Err(msg),
+                EquivResult::Inconclusive(msg) | EquivResult::Error(msg) => Err(msg),
             }
         }
         RelevanceCheckMethod::ExhaustiveBitsParams { max_total_arg_bits } => {
@@ -1668,16 +1670,13 @@ impl AutocovEngine {
         let mut added = 0usize;
         let n = self.args_bit_count;
 
-        // Always seed all-zeros and all-ones.
-        added += self.force_add_seed_bits(self.make_all_zeros_bits(), sink_ptr) as usize;
-        added += self.force_add_seed_bits(self.make_all_ones_bits(), sink_ptr) as usize;
-
-        // One-hot.
-        for i in 0..n {
+        // Seed reusable corner patterns: zero, all-ones, signed extrema,
+        // alternating bits, one-hot, and low/high masks.
+        for bits in generate_corner_irbits(n) {
             if self.max_corpus_len_reached() {
                 break;
             }
-            added += self.force_add_seed_bits(self.make_one_hot_bits(i), sink_ptr) as usize;
+            added += self.force_add_seed_bits(bits, sink_ptr) as usize;
         }
 
         // Two-hot (can be quadratic).
@@ -2071,7 +2070,7 @@ impl AutocovEngine {
 
     fn generate_proposal(&mut self) -> IrBits {
         if self.corpus.is_empty() {
-            return self.random_bits(self.args_bit_count);
+            return self.biased_random_bits(self.args_bit_count);
         }
 
         // Mutation/crossover strategy mix (single-threaded, deterministic via PRNG).
@@ -2086,7 +2085,7 @@ impl AutocovEngine {
         let roll = (self.rng.next_u64() % 100) as u8;
         match roll {
             // 10%: fully random resample
-            0..=9 => self.random_bits(self.args_bit_count),
+            0..=9 => self.biased_random_bits(self.args_bit_count),
             // 10%: dictionary overwrite (IR literal constants -> input slices)
             10..=19 => {
                 let parent = self.pick_parent().clone();
@@ -2122,18 +2121,8 @@ impl AutocovEngine {
         &self.corpus[idx]
     }
 
-    fn random_bits(&mut self, bit_count: usize) -> IrBits {
-        let mut bits: Vec<bool> = Vec::with_capacity(bit_count);
-        let mut remaining = bit_count;
-        while remaining > 0 {
-            let word = self.rng.next_u64();
-            let take = std::cmp::min(64, remaining);
-            for i in 0..take {
-                bits.push(((word >> i) & 1) != 0);
-            }
-            remaining -= take;
-        }
-        IrBits::from_lsb_is_0(&bits)
+    fn biased_random_bits(&mut self, bit_count: usize) -> IrBits {
+        generate_biased_irbits_with_rng(&mut self.rng, bit_count)
     }
 
     fn bits_to_vec_lsb_is_0(&self, bits: &IrBits) -> Vec<bool> {
@@ -2142,23 +2131,6 @@ impl AutocovEngine {
             v.push(bits.get_bit(i).unwrap());
         }
         v
-    }
-
-    fn make_all_zeros_bits(&self) -> IrBits {
-        let v: Vec<bool> = vec![false; self.args_bit_count];
-        IrBits::from_lsb_is_0(&v)
-    }
-
-    fn make_all_ones_bits(&self) -> IrBits {
-        let v: Vec<bool> = vec![true; self.args_bit_count];
-        IrBits::from_lsb_is_0(&v)
-    }
-
-    fn make_one_hot_bits(&self, idx: usize) -> IrBits {
-        assert!(idx < self.args_bit_count);
-        let mut v: Vec<bool> = vec![false; self.args_bit_count];
-        v[idx] = true;
-        IrBits::from_lsb_is_0(&v)
     }
 
     fn make_two_hot_bits(&self, i: usize, j: usize) -> IrBits {
@@ -2787,7 +2759,7 @@ fn f(x: bits[16] id=1) -> bits[16] {
             },
         )
         .unwrap();
-        let base = engine.random_bits(engine.args_bit_count);
+        let base = engine.biased_random_bits(engine.args_bit_count);
         assert_eq!(base.get_bit_count(), engine.args_bit_count);
 
         let a = engine.mutate_flip_bit(base.clone());
@@ -2846,7 +2818,16 @@ fn f(x: bits[4] id=1) -> bits[4] {
         let n = engine.args_bit_count;
         assert_eq!(n, 4);
         let added = engine.seed_structured_corpus(/* two_hot_max_bits= */ 64, None);
-        let expected = 2 + n + (n * (n - 1) / 2);
+        let mut expected_bits = generate_corner_irbits(n);
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let bits = engine.make_two_hot_bits(i, j);
+                if !expected_bits.contains(&bits) {
+                    expected_bits.push(bits);
+                }
+            }
+        }
+        let expected = expected_bits.len();
         assert_eq!(added, expected);
         assert_eq!(engine.corpus.len(), expected);
     }

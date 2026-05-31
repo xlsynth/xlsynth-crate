@@ -20,14 +20,14 @@ xlsynth-pir-compiler = { path = "..", version = "0.53.0" }
 xlsynth-pir = { path = "../../xlsynth-pir", version = "0.53.0" }
 
 [[bin]]
-name = "fuzz_pir_function_jit_eval_equiv"
-path = "fuzz_targets/fuzz_pir_function_jit_eval_equiv.rs"
+name = "fuzz_pir_function_compiler_eval_equiv"
+path = "fuzz_targets/fuzz_pir_function_compiler_eval_equiv.rs"
 test = false
 doc = false
 
 [[bin]]
-name = "fuzz_pir_function_jit_aggregate_eval_equiv"
-path = "fuzz_targets/fuzz_pir_function_jit_aggregate_eval_equiv.rs"
+name = "fuzz_pir_function_compiler_aggregate_eval_equiv"
+path = "fuzz_targets/fuzz_pir_function_compiler_aggregate_eval_equiv.rs"
 test = false
 doc = false
 

@@ -18,9 +18,9 @@ use xlsynth::IrValue;
 use xlsynth::XlsynthError;
 use xlsynth_autocov::{generate_ir_fn_corpus_from_ir_text_with_replay, IrFnAutocovGenerateConfig};
 use xlsynth_pir::ir_random::{
-    generate_arguments, generate_fn, DepletableBytes, OperationSet, RandomFnOptions,
-    RandomOperation, StopPolicy,
+    generate_fn, DepletableBytes, OperationSet, RandomFnOptions, RandomOperation, StopPolicy,
 };
+use xlsynth_pir::random_inputs::generate_biased_arguments_from_seed;
 use xlsynth_vastly::LogicBit;
 use xlsynth_vastly::Signedness;
 use xlsynth_vastly::Value4;
@@ -68,8 +68,7 @@ fuzz_target!(|data: &[u8]| {
         // Non-packable signatures are outside this target's current simulation harness.
         None => return,
     };
-    let mut arg_entropy = DepletableBytes::new(data);
-    let base_args = generate_arguments(&mut arg_entropy, &pir_top);
+    let base_args = generate_biased_arguments_from_seed(&pir_top, stable_hash_bytes(data));
     let stimuli = match generate_stimuli(base_args, &pir_top, &ir_text, data) {
         Ok(v) => v,
         Err(e) => {

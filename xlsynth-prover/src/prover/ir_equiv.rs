@@ -282,7 +282,7 @@ fn check_aligned_fn_equiv_internal<'a, S: Solver>(
             }
         }
         Response::Unsat => EquivResult::Proved,
-        Response::Unknown => panic!("Solver returned unknown result"),
+        Response::Unknown => EquivResult::Inconclusive("solver returned unknown".to_string()),
     }
 }
 
@@ -466,11 +466,17 @@ pub fn prove_ir_fn_equiv_output_bits_parallel<'a, S: Solver>(
                         assert_label_include,
                         allow_flatten,
                     );
-                    if let EquivResult::Disproved { .. } = &res {
-                        let mut guard = cex_cl.lock().unwrap();
-                        *guard = Some(res.clone());
-                        found_cl.store(true, Ordering::SeqCst);
-                        break;
+                    match &res {
+                        EquivResult::Proved => {}
+                        EquivResult::Disproved { .. }
+                        | EquivResult::Inconclusive(_)
+                        | EquivResult::ToolchainDisproved(_)
+                        | EquivResult::Error(_) => {
+                            let mut guard = cex_cl.lock().unwrap();
+                            *guard = Some(res.clone());
+                            found_cl.store(true, Ordering::SeqCst);
+                            break;
+                        }
                     }
                 }
             });
@@ -554,13 +560,16 @@ pub fn prove_ir_fn_equiv_split_input_bit<'a, S: Solver>(
         let eq_bv = solver.eq(&bit_bv, &val_bv);
         solver.assert(&eq_bv).unwrap();
 
-        check_aligned_fn_equiv_internal(
+        let result = check_aligned_fn_equiv_internal(
             &mut solver,
             &smt_lhs,
             &smt_rhs,
             assertion_semantics,
             assert_label_include,
         );
+        if !matches!(result, EquivResult::Proved) {
+            return result;
+        }
     }
 
     EquivResult::Proved

@@ -2,32 +2,16 @@
 
 use xlsynth::ir_value::IrBits;
 
-/// Generates an arbitrary IrBits value of the given width using the provided
-/// random number generator.
+use crate::random_inputs::generate_uniform_irbits_with_rng;
+
+/// Generates uniformly distributed bits using the provided RNG.
+///
+/// Prefer `random_inputs::generate_biased_irbits_with_rng` for semantic
+/// checking.
+/// Uniform samples remain useful for workload-oriented measurements such as
+/// toggle estimation.
 pub fn arbitrary_irbits<R: rand::Rng>(rng: &mut R, width: usize) -> IrBits {
-    if width == 0 {
-        return IrBits::make_ubits(0, 0).unwrap();
-    }
-    if width <= 64 {
-        let value = rng.r#gen::<u64>();
-        let value_masked = if width == u64::BITS as usize {
-            value
-        } else {
-            value & ((1u64 << width) - 1)
-        };
-        // Unwrapping is safe since we masked the value to fit in the width.
-        IrBits::make_ubits(width, value_masked).unwrap()
-    } else {
-        let mut bytes = vec![0; width.div_ceil(8)];
-        rng.fill(&mut bytes[..]);
-        let bit_remainder = width % 8;
-        if bit_remainder != 0 {
-            bytes
-                .last_mut()
-                .map(|byte| *byte &= (1u8 << bit_remainder) - 1);
-        }
-        IrBits::from_le_bytes(width, &bytes).unwrap()
-    }
+    generate_uniform_irbits_with_rng(rng, width)
 }
 
 #[cfg(test)]

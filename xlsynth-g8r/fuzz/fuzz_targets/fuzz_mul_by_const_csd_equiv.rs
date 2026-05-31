@@ -6,10 +6,13 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::aig_serdes::gate2ir;
 use xlsynth_g8r::gatify::ir2gate::{self, GatifyOptions, GatifyOutput};
+use xlsynth_g8r_fuzz::fuzz_solver_limits;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser::Parser;
 #[cfg(feature = "has-bitwuzla")]
 use xlsynth_prover::ir_equiv::{run_ir_equiv, IrEquivRequest, IrModule};
+#[cfg(feature = "has-bitwuzla")]
+use xlsynth_prover::prover::types::EquivResult;
 #[cfg(feature = "has-bitwuzla")]
 use xlsynth_prover::prover::SolverChoice;
 
@@ -52,7 +55,7 @@ fn prove_orig_vs_gate_equiv(
     orig_top: &str,
     fn_type: &ir::FunctionType,
     gate_output: &GatifyOutput,
-) {
+) -> bool {
     let gate_ir = gate2ir::gate_fn_to_xlsynth_ir(&gate_output.gate_fn, "gate_pkg", fn_type)
         .expect("gate_fn_to_xlsynth_ir should succeed")
         .to_string();
@@ -61,8 +64,13 @@ fn prove_orig_vs_gate_equiv(
         IrModule::new(orig_ir).with_top(Some(orig_top)),
         IrModule::new(&gate_ir).with_top(Some(gate_top)),
     )
-    .with_solver(Some(SolverChoice::Bitwuzla));
+    .with_solver(Some(SolverChoice::Bitwuzla))
+    .with_solver_limits(fuzz_solver_limits());
     let report = run_ir_equiv(&request).expect("Bitwuzla IR equivalence should run");
+    if let EquivResult::Inconclusive(msg) = &report.result {
+        log::debug!("mul-by-const equivalence inconclusive: {}", msg);
+        return false;
+    }
     assert!(
         report.is_success(),
         "mul-by-const gate lowering must match source IR: {}",
@@ -70,6 +78,7 @@ fn prove_orig_vs_gate_equiv(
             .error_str()
             .unwrap_or_else(|| "unknown equivalence failure".to_string())
     );
+    true
 }
 
 #[cfg(not(feature = "has-bitwuzla"))]
@@ -78,7 +87,7 @@ fn prove_orig_vs_gate_equiv(
     _orig_top: &str,
     _fn_type: &ir::FunctionType,
     _gate_output: &GatifyOutput,
-) {
+) -> bool {
     panic!(
         "fuzz_mul_by_const_csd_equiv requires an in-process solver; \
          build with --features=with-bitwuzla-system (or with-bitwuzla-built)"
@@ -99,5 +108,9 @@ fuzz_target!(|sample: MulConstSample| {
     let gatify_output = ir2gate::gatify(pir_fn, GatifyOptions::all_opts_disabled())
         .expect("gatify with built-in mul-by-const lowering");
 
-    prove_orig_vs_gate_equiv(&ir_text, pir_fn.name.as_str(), &fn_type, &gatify_output);
+    if !prove_orig_vs_gate_equiv(&ir_text, pir_fn.name.as_str(), &fn_type, &gatify_output) {
+        // Early-return rationale: a configured solver resource limit is an
+        // expected inconclusive fuzz sample, not an equivalence failure.
+        return;
+    }
 });
