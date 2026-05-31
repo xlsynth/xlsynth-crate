@@ -3,6 +3,7 @@
 //! Runtime ABI and observable-event collection for compiled PIR functions.
 
 use std::ffi::c_void;
+use std::fmt;
 use std::marker::PhantomData;
 use std::ptr;
 
@@ -21,6 +22,155 @@ pub type CompiledEntrypoint = unsafe extern "C" fn(
 pub struct RawExecutionContext {
     private_state: *mut c_void,
 }
+
+/// Error returned by generated native-compiler entrypoint wrappers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunError(pub String);
+
+impl fmt::Display for RunError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RunError {}
+
+/// Output and observable events produced by one generated wrapper invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunResult<T> {
+    pub output: T,
+    pub events: ExecutionResult,
+}
+
+macro_rules! define_native_bits {
+    ($name:ident, $carrier:ty, $carrier_bits:expr) => {
+        #[repr(transparent)]
+        #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+        pub struct $name<const BIT_COUNT: usize>($carrier);
+
+        impl<const BIT_COUNT: usize> $name<BIT_COUNT> {
+            fn validate_width() -> Result<(), RunError> {
+                if BIT_COUNT == 0 || BIT_COUNT > $carrier_bits {
+                    Err(RunError(format!(
+                        "bits[{BIT_COUNT}] cannot use a {}-bit native carrier",
+                        $carrier_bits
+                    )))
+                } else {
+                    Ok(())
+                }
+            }
+
+            const fn mask() -> $carrier {
+                if BIT_COUNT == $carrier_bits {
+                    <$carrier>::MAX
+                } else {
+                    ((1 as $carrier) << BIT_COUNT) - 1
+                }
+            }
+
+            /// Constructs a canonical bitvector value, rejecting excess high bits.
+            pub fn new(value: $carrier) -> Result<Self, RunError> {
+                Self::validate_width()?;
+                if value & !Self::mask() != 0 {
+                    Err(RunError(format!(
+                        "value {value} does not fit in bits[{BIT_COUNT}]"
+                    )))
+                } else {
+                    Ok(Self(value))
+                }
+            }
+
+            /// Constructs a canonical bitvector by truncating high bits.
+            pub const fn wrapping(value: $carrier) -> Self {
+                assert!(
+                    BIT_COUNT > 0 && BIT_COUNT <= $carrier_bits,
+                    "invalid native bits carrier width"
+                );
+                Self(value & Self::mask())
+            }
+
+            /// Returns the native carrier value.
+            pub const fn get(self) -> $carrier {
+                self.0
+            }
+
+            /// Returns the value widened to `u64`.
+            pub const fn to_u64(self) -> u64 {
+                self.0 as u64
+            }
+        }
+    };
+}
+
+define_native_bits!(Bits8, u8, 8);
+define_native_bits!(Bits16, u16, 16);
+define_native_bits!(Bits32, u32, 32);
+define_native_bits!(Bits64, u64, 64);
+
+/// Native least-significant-first limb storage for a bitvector wider than 64
+/// bits.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WideBits<const BIT_COUNT: usize, const LIMB_COUNT: usize>([u64; LIMB_COUNT]);
+
+impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> WideBits<BIT_COUNT, LIMB_COUNT> {
+    fn validate_layout() -> Result<(), RunError> {
+        if BIT_COUNT <= 64 || LIMB_COUNT != BIT_COUNT.div_ceil(64) {
+            Err(RunError(format!(
+                "bits[{BIT_COUNT}] cannot use {LIMB_COUNT} native wide limb(s)"
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn high_mask() -> u64 {
+        let high_width = BIT_COUNT % 64;
+        if high_width == 0 {
+            u64::MAX
+        } else {
+            (1u64 << high_width) - 1
+        }
+    }
+
+    /// Constructs a canonical wide bitvector, rejecting excess high bits.
+    pub fn from_limbs(limbs: [u64; LIMB_COUNT]) -> Result<Self, RunError> {
+        Self::validate_layout()?;
+        if limbs[LIMB_COUNT - 1] & !Self::high_mask() != 0 {
+            Err(RunError(format!(
+                "high limb does not fit in bits[{BIT_COUNT}]"
+            )))
+        } else {
+            Ok(Self(limbs))
+        }
+    }
+
+    /// Constructs a canonical wide bitvector by truncating excess high bits.
+    pub fn wrapping_limbs(mut limbs: [u64; LIMB_COUNT]) -> Self {
+        assert!(
+            BIT_COUNT > 64 && LIMB_COUNT == BIT_COUNT.div_ceil(64),
+            "invalid native wide bits layout"
+        );
+        limbs[LIMB_COUNT - 1] &= Self::high_mask();
+        Self(limbs)
+    }
+
+    /// Returns the least-significant-first limb representation.
+    pub const fn limbs(&self) -> &[u64; LIMB_COUNT] {
+        &self.0
+    }
+}
+
+impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> Default for WideBits<BIT_COUNT, LIMB_COUNT> {
+    fn default() -> Self {
+        Self([0; LIMB_COUNT])
+    }
+}
+
+/// Zero-sized native representation of a PIR token value.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Token;
 
 /// Kind of observable PIR event described by an event site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -995,6 +1145,26 @@ impl TraceValueLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_bits_wrappers_enforce_semantic_widths() {
+        let value = Bits64::<42>::new((1u64 << 41) | 7).expect("value fits in bits[42]");
+        assert_eq!(value.to_u64(), (1u64 << 41) | 7);
+        assert!(Bits64::<42>::new(1u64 << 42).is_err());
+        assert_eq!(Bits16::<9>::wrapping(0xffff).get(), 0x1ff);
+        assert!(Bits8::<9>::new(0).is_err());
+    }
+
+    #[test]
+    fn wide_bits_wrappers_use_lsb_first_limbs_and_mask_high_bits() {
+        let value =
+            WideBits::<65, 2>::from_limbs([0x0123_4567_89ab_cdef, 1]).expect("canonical value");
+        assert_eq!(value.limbs(), &[0x0123_4567_89ab_cdef, 1]);
+        assert!(WideBits::<65, 2>::from_limbs([0, 2]).is_err());
+        assert_eq!(WideBits::<65, 2>::wrapping_limbs([7, 3]).limbs(), &[7, 1]);
+        assert!(WideBits::<65, 3>::from_limbs([0, 0, 0]).is_err());
+        assert_eq!(std::mem::size_of::<Token>(), 0);
+    }
 
     fn metadata() -> CompiledFunctionMetadata {
         CompiledFunctionMetadata {

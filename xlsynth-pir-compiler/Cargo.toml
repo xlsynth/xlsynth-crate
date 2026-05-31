@@ -17,8 +17,11 @@ cranelift-codegen = "0.132.0"
 cranelift-frontend = "0.132.0"
 cranelift-jit = "0.132.0"
 cranelift-module = "0.132.0"
+cranelift-native = "0.132.0"
+cranelift-object = "0.132.0"
+cc = "1"
 thiserror = "1"
-xlsynth = { path = "../xlsynth", version = "0.55.0" }
+xlsynth = { path = "../xlsynth", version = "0.55.0", features = ["pir-compiler-dslx-aot"] }
 xlsynth-pir = { path = "../xlsynth-pir", version = "0.55.0" }
 xlsynth-pir-compiler-runtime = { path = "../xlsynth-pir-compiler-runtime", version = "0.55.0" }
 

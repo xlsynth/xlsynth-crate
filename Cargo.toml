@@ -12,6 +12,7 @@ members = [
     "xlsynth-g8r",
     "xlsynth-pir-compiler-runtime",
     "xlsynth-pir-compiler",
+    "xlsynth-pir-compiler/tests/aot-test-crate",
     "xlsynth-pir",
     "xlsynth-prover",
     "xlsynth-autocov",

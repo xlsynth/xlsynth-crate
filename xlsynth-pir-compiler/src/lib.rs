@@ -3,6 +3,8 @@
 //! Native compilation and in-memory execution for the supported subset of PIR
 //! functions.
 
+pub mod aot;
+
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ptr;
@@ -12,9 +14,11 @@ use cranelift_codegen::ir::{
     AbiParam, ExtFuncData, ExternalName, FuncRef, InstBuilder, LibCall, MemFlags, Signature,
     Type as ClifType, Value, types,
 };
+use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
+use cranelift_object::{ObjectBuilder, ObjectModule};
 use thiserror::Error;
 use xlsynth::{IrBits, IrValue};
 use xlsynth_pir::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
@@ -346,6 +350,26 @@ struct PlannedFunction<'a> {
     order: Vec<NodeRef>,
     scratch_plan: ScratchPlan,
     event_sites: HashMap<NodeRef, u32>,
+}
+
+/// Relocatable native object code and calling-contract metadata for one PIR
+/// function.
+#[derive(Debug, Clone)]
+pub struct AotArtifact {
+    /// Relocatable object bytes containing the exported compiled entrypoint.
+    pub object_code: Vec<u8>,
+    /// Exported symbol naming the compiled entrypoint in `object_code`.
+    pub entrypoint_symbol: String,
+    /// Native parameter layouts accepted by the entrypoint.
+    pub param_layouts: Vec<NativeValueLayout>,
+    /// Native result layout written by the entrypoint.
+    pub result_layout: NativeValueLayout,
+    /// Static event-site metadata consumed by the execution context.
+    pub metadata: CompiledFunctionMetadata,
+    /// Bytes required for caller-owned temporary storage.
+    pub scratch_byte_count: usize,
+    /// Alignment required for caller-owned temporary storage.
+    pub scratch_alignment: usize,
 }
 
 impl PirFunctionCompiler {
@@ -885,6 +909,105 @@ fn referenced_function_postorder(
         &mut postorder,
     )?;
     Ok(postorder)
+}
+
+/// Compiles one PIR function into a relocatable native object for the host
+/// target.
+///
+/// The emitted function uses [`CompiledEntrypoint`] and imports helper symbols
+/// exported by `xlsynth-pir-compiler-runtime` when runtime-backed operations or
+/// observable events are present.
+pub fn compile_aot(
+    function: &ir::Fn,
+    entrypoint_symbol: &str,
+) -> Result<AotArtifact, CompilerError> {
+    if entrypoint_symbol.is_empty() {
+        return Err(CompilerError::InvalidArgument(
+            "AOT entrypoint symbol must not be empty".into(),
+        ));
+    }
+    function
+        .check_pir_layout_invariants()
+        .map_err(CompilerError::InvalidFunction)?;
+    xlsynth_pir::ir_verify::verify_function(function)
+        .map_err(|e| CompilerError::InvalidFunction(e.to_string()))?;
+
+    let param_layouts = function
+        .params
+        .iter()
+        .map(|param| NativeValueLayout::from_type(&param.ty))
+        .collect::<Result<Vec<_>, _>>()?;
+    let function_param_layouts = HashMap::from([(function.name.clone(), param_layouts.clone())]);
+    let result_layout = NativeValueLayout::from_type(&function.ret_ty)?;
+    let order = reachable_scheduled_order(function)?;
+    for node_ref in &order {
+        NativeValueLayout::from_type(&function.get_node(*node_ref).ty)?;
+    }
+    let scratch_plan = ScratchPlan::for_function(function, &order, &function_param_layouts)?;
+    let mut metadata = CompiledFunctionMetadata::default();
+    let event_sites = append_event_metadata(function, &order, &mut metadata)?;
+
+    let isa_builder =
+        cranelift_native::builder().map_err(|error| CompilerError::Backend(error.to_string()))?;
+    let mut flags_builder = settings::builder();
+    flags_builder
+        .enable("is_pic")
+        .map_err(|error| CompilerError::Backend(error.to_string()))?;
+    flags_builder
+        .set("opt_level", "speed")
+        .map_err(|error| CompilerError::Backend(error.to_string()))?;
+    let isa = isa_builder
+        .finish(settings::Flags::new(flags_builder))
+        .map_err(|error| CompilerError::Backend(error.to_string()))?;
+    let object_builder = ObjectBuilder::new(isa, entrypoint_symbol, default_libcall_names())
+        .map_err(|error| CompilerError::Backend(error.to_string()))?;
+    let mut module = ObjectModule::new(object_builder);
+    let pointer_type = module.target_config().pointer_type();
+    let signature = compiled_function_signature(&mut module, pointer_type);
+
+    let function_id = module
+        .declare_function(entrypoint_symbol, Linkage::Export, &signature)
+        .map_err(|error| CompilerError::Backend(error.to_string()))?;
+    let mut context = module.make_context();
+    context.func.signature = signature;
+    let runtime_callbacks =
+        declare_runtime_callbacks(&mut module, &mut context.func, pointer_type)?;
+    let mut function_builder_context = FunctionBuilderContext::new();
+    {
+        let mut function_builder =
+            FunctionBuilder::new(&mut context.func, &mut function_builder_context);
+        let function_targets = HashMap::new();
+        lower_function(
+            function,
+            &order,
+            &param_layouts,
+            &scratch_plan,
+            &event_sites,
+            &function_param_layouts,
+            &function_targets,
+            runtime_callbacks,
+            pointer_type,
+            &mut function_builder,
+        )?;
+        function_builder.finalize();
+    }
+    module
+        .define_function(function_id, &mut context)
+        .map_err(|error| CompilerError::Backend(error.to_string()))?;
+    module.clear_context(&mut context);
+    let object_code = module
+        .finish()
+        .emit()
+        .map_err(|error| CompilerError::Backend(error.to_string()))?;
+    Ok(AotArtifact {
+        object_code,
+        entrypoint_symbol: entrypoint_symbol.to_string(),
+        param_layouts,
+        result_layout,
+        metadata,
+        scratch_byte_count: scratch_plan.byte_count,
+        scratch_alignment: scratch_plan.alignment,
+    })
 }
 
 impl Drop for PirFunctionCompiler {
