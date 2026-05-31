@@ -94,7 +94,7 @@ fn gatify_without_prep(pir_fn: &ir::Fn) -> GateFn {
 fn assert_ir_fns_equivalent(orig_fn: &ir::Fn, prepared_fn: &ir::Fn, label: &str) {
     let orig_pkg_text = format!("package orig\n\ntop {}", orig_fn);
     let prepared_pkg_text = format!("package prepared\n\ntop {}", prepared_fn);
-    check_equivalence::check_equivalence_via_toolchain(&orig_pkg_text, &prepared_pkg_text)
+    check_equivalence::check_equivalence(&orig_pkg_text, &prepared_pkg_text)
         .unwrap_or_else(|e| panic!("PIR equivalence failed for {label}: {e}"));
 }
 
@@ -301,9 +301,9 @@ fn assert_rewrites_and_proves(case: &AffineShiftCase, prove_gates: bool) {
     if prove_gates {
         let gate_old = gatify_without_prep(&pir_fn);
         let gate_new = gatify_without_prep(&prepared);
-        check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&gate_old, &gate_new)
+        check_equivalence::prove_same_gate_fn_via_ir(&gate_old, &gate_new)
             .unwrap_or_else(|e| panic!("gate equivalence failed for {label}: {e}"));
-        check_equivalence::validate_same_fn_via_toolchain(&pir_fn, &gate_new)
+        check_equivalence::validate_same_fn(&pir_fn, &gate_new)
             .unwrap_or_else(|e| panic!("rewritten gate validation failed for {label}: {e}"));
     }
 }

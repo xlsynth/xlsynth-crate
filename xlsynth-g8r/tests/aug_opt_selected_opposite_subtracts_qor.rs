@@ -4,9 +4,7 @@ use xlsynth_g8r::aig::get_summary_stats::get_aig_stats;
 use xlsynth_g8r::gatify::ir2gate::{GatifyOptions, gatify_prepared_fn};
 use xlsynth_g8r::ir2gate_utils::AdderMapping;
 use xlsynth_g8r::prove_gate_fn_equiv_common::EquivResult;
-use xlsynth_g8r::prove_gate_fn_equiv_sat::{
-    Ctx as VarisatCtx, prove_gate_fn_equiv as prove_gate_fn_equiv_sat,
-};
+use xlsynth_g8r::prove_gate_fn_equiv_sat::{VarisatCtx, prove_gate_fn_equiv_varisat};
 use xlsynth_pir::aug_opt::{AugOptMode, AugOptOptions, run_aug_opt_over_ir_text_with_stats};
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
@@ -93,7 +91,7 @@ fn assert_gate_equiv_via_sat(
     context: &str,
 ) {
     let mut ctx = VarisatCtx::new();
-    match prove_gate_fn_equiv_sat(lhs, rhs, &mut ctx) {
+    match prove_gate_fn_equiv_varisat(lhs, rhs, &mut ctx) {
         EquivResult::Proved => {}
         EquivResult::Disproved(cex) => {
             panic!("gate equivalence failed for {context}; counterexample inputs: {cex:?}");

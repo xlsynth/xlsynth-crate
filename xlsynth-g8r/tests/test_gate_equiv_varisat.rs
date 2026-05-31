@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
-use xlsynth_g8r::prove_gate_fn_equiv_sat::{Ctx, EquivResult, prove_gate_fn_equiv};
+use xlsynth_g8r::prove_gate_fn_equiv_sat::{EquivResult, VarisatCtx, prove_gate_fn_equiv_varisat};
 
 #[test]
 fn test_simple_equivalence() {
@@ -12,8 +12,11 @@ fn test_simple_equivalence() {
     gb.add_output("out".to_string(), x.into());
     let g1 = gb.build();
 
-    let mut ctx = Ctx::new();
-    assert_eq!(prove_gate_fn_equiv(&g1, &g1, &mut ctx), EquivResult::Proved);
+    let mut ctx = VarisatCtx::new();
+    assert_eq!(
+        prove_gate_fn_equiv_varisat(&g1, &g1, &mut ctx),
+        EquivResult::Proved
+    );
 }
 
 #[test]
@@ -32,8 +35,8 @@ fn test_simple_inequivalence() {
     gb2.add_output("out".to_string(), y.into());
     let g2 = gb2.build();
 
-    let mut ctx = Ctx::new();
-    match prove_gate_fn_equiv(&g1, &g2, &mut ctx) {
+    let mut ctx = VarisatCtx::new();
+    match prove_gate_fn_equiv_varisat(&g1, &g2, &mut ctx) {
         EquivResult::Proved => panic!("Expected inequivalent"),
         EquivResult::Disproved(_) => (),
     }

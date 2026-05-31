@@ -4,8 +4,9 @@ use xlsynth_g8r::aig::gate::{AigBitVector, AigOperand};
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
 use xlsynth_g8r::ir_aig_sharing::{
-    CandidateProofResult, IrAigCandidateRhs, IrAigSharingOptions, get_equivalences,
-    prove_equivalence_candidates_cadical, prove_equivalence_candidates_varisat,
+    CandidateProofResult, IrAigCandidateRhs, IrAigSharingOptions,
+    confirm_or_deny_candidate_equivalence, get_equivalences, prove_equivalence_candidates_cadical,
+    prove_equivalence_candidates_varisat,
 };
 use xlsynth_pir::ir_parser::Parser as PirParser;
 
@@ -47,10 +48,13 @@ top fn main(a: bits[1] id=1, b: bits[1] id=2) -> bits[1] {
         !hits.is_empty(),
         "expected at least one candidate for pir node id=3"
     );
+    let matching_candidate = hits
+        .iter()
+        .find(|c| c.rhs == IrAigCandidateRhs::AigOperand(AigOperand::from(and_ref)))
+        .expect("expected a candidate mapping to the AND node");
     assert!(
-        hits.iter()
-            .any(|c| c.rhs == IrAigCandidateRhs::AigOperand(AigOperand::from(and_ref))),
-        "expected a candidate mapping to the AND node"
+        confirm_or_deny_candidate_equivalence(pir_fn, &gate_fn, matching_candidate)
+            .expect("confirm candidate equivalence with default backend")
     );
 
     let gatify_opts = GatifyOptions::all_opts_disabled();

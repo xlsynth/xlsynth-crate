@@ -24,11 +24,11 @@ use varisat::ExtendFormula;
 use xlsynth::IrBits;
 
 /// Context holding a SAT solver so clause memory can be reused across calls.
-pub struct Ctx<'a> {
+pub struct VarisatCtx<'a> {
     pub(crate) solver: varisat::Solver<'a>,
 }
 
-impl<'a> Ctx<'a> {
+impl<'a> VarisatCtx<'a> {
     pub fn new() -> Self {
         Self {
             solver: varisat::Solver::new(),
@@ -649,7 +649,11 @@ pub fn prove_gate_fn_equiv_with_backend_and_options(
 }
 
 /// Checks equivalence of two gate functions using a Varisat context.
-pub fn prove_gate_fn_equiv<'a>(a: &GateFn, b: &GateFn, ctx: &mut Ctx<'a>) -> EquivResult {
+pub fn prove_gate_fn_equiv_varisat<'a>(
+    a: &GateFn,
+    b: &GateFn,
+    ctx: &mut VarisatCtx<'a>,
+) -> EquivResult {
     prove_gate_fn_equiv_with_solver(a, b, &mut ctx.solver).expect("solver error")
 }
 

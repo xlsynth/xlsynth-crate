@@ -450,6 +450,7 @@ pub fn prover_for_choice_with_limits(
             #[cfg(feature = "has-bitwuzla")]
             {
                 let mut options = crate::solver::bitwuzla::BitwuzlaOptions::new();
+                options.set_sat_solver(crate::solver::bitwuzla::BitwuzlaSatSolver::CaDiCaL);
                 apply_bitwuzla_limits(&mut options, limits);
                 Box::new(options)
             }

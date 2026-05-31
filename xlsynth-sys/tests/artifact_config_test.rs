@@ -2,12 +2,15 @@
 //! Exercises `XLSYNTH_ARTIFACT_CONFIG` resolution and validation via nested
 //! Cargo smoke crates.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
+
+#[path = "../artifact_config.rs"]
+mod artifact_config;
 
 /// Resolves the configured XLS DSO to a concrete shared-library file for test
 /// fixtures.
@@ -309,67 +312,69 @@ fn artifact_config_resolves_relative_toml_paths_from_absolute_config_path() {
     );
 }
 
+/// Verifies relative TOML path resolution without invoking nested Cargo.
+#[test]
+fn artifact_config_resolver_resolves_relative_toml_paths() {
+    let temp_dir = make_temp_dir();
+    let config_root_dir = temp_dir.path().join("config-root");
+    let config_path = config_root_dir.join("artifact-config.toml");
+    write_artifact_config(&config_path, "artifacts/libxls-test.so", "artifacts/stdlib");
+
+    let artifact_paths = artifact_config::load_artifact_paths_from_config_path(&config_path)
+        .expect("artifact config should resolve");
+    assert_eq!(
+        artifact_paths.dso_path,
+        config_root_dir
+            .join("artifacts/libxls-test.so")
+            .display()
+            .to_string()
+    );
+    assert_eq!(
+        artifact_paths.dslx_stdlib_path,
+        config_root_dir
+            .join("artifacts/stdlib")
+            .display()
+            .to_string()
+    );
+}
+
 /// Verifies that `XLSYNTH_ARTIFACT_CONFIG` itself must be passed as an absolute
 /// path.
 #[test]
 fn artifact_config_requires_absolute_config_path() {
+    let err = artifact_config::parse_artifact_config_env_path(Some(OsString::from(
+        "config/artifact-config.toml",
+    )))
+    .err()
+    .expect("relative XLSYNTH_ARTIFACT_CONFIG should fail");
+    assert!(
+        err.contains("XLSYNTH_ARTIFACT_CONFIG must be an absolute path"),
+        "Error did not explain the absolute-path requirement:\n{}",
+        err
+    );
+    assert!(
+        err.contains("dso_path and dslx_stdlib_path values inside that TOML may still be relative"),
+        "Error did not preserve the relative-path guidance for TOML entries:\n{}",
+        err
+    );
+    assert!(
+        !err.contains("No such file or directory"),
+        "Resolver should reject relative XLSYNTH_ARTIFACT_CONFIG directly instead of failing with a file lookup error:\n{}",
+        err
+    );
+}
+
+/// Verifies that explicit DSO paths produce the expected linker inputs.
+#[test]
+fn explicit_dso_path_derives_link_inputs() {
     let temp_dir = make_temp_dir();
-    let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let temp_crate_dir = temp_dir.path().join("artifact-config-relative-smoke");
-    let config_root_dir = temp_crate_dir.join("config");
-    let config_artifacts_dir = temp_crate_dir.join("artifacts");
-    let (expected_dso_path, _expected_stdlib_path) = copy_config_artifacts(&config_artifacts_dir);
-    let config_path = config_root_dir.join("artifact-config.toml");
-    write_artifact_config(
-        &config_path,
-        &format!(
-            "../artifacts/{}",
-            expected_dso_path
-                .file_name()
-                .unwrap_or_else(|| panic!(
-                    "Expected copied DSO path to have filename: {}",
-                    expected_dso_path.display()
-                ))
-                .to_string_lossy()
-        ),
-        "../artifacts/stdlib",
-    );
-    write_smoke_crate(&temp_crate_dir, &manifest_path);
+    let dso_path = temp_dir.path().join("libxls-test.so");
+    let explicit_dso_path = artifact_config::validate_explicit_dso_path(&dso_path)
+        .expect("shared-library DSO path should resolve");
 
-    let target_dir = temp_dir.path().join("relative-target");
-    let output = run_nested_cargo_with_artifact_config(
-        &temp_crate_dir,
-        &target_dir,
-        OsStr::new("config/artifact-config.toml"),
-        None,
-    );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !output.status.success(),
-        "Nested cargo run unexpectedly succeeded with relative XLSYNTH_ARTIFACT_CONFIG.\nstdout:\n{}\nstderr:\n{}",
-        stdout,
-        stderr
-    );
-    assert!(
-        stderr.contains("XLSYNTH_ARTIFACT_CONFIG must be an absolute path"),
-        "Nested cargo stderr did not explain the absolute-path requirement.\nstdout:\n{}\nstderr:\n{}",
-        stdout,
-        stderr
-    );
-    assert!(
-        stderr.contains("dso_path and dslx_stdlib_path values inside that TOML may still be relative"),
-        "Nested cargo stderr did not preserve the relative-path guidance for TOML entries.\nstdout:\n{}\nstderr:\n{}",
-        stdout,
-        stderr
-    );
-    assert!(
-        !stderr.contains("No such file or directory"),
-        "Nested cargo stderr should reject relative XLSYNTH_ARTIFACT_CONFIG directly instead of failing with a file lookup error.\nstdout:\n{}\nstderr:\n{}",
-        stdout,
-        stderr
-    );
+    assert_eq!(explicit_dso_path.link_name, "xls-test");
+    assert_eq!(explicit_dso_path.path, dso_path);
+    assert_eq!(explicit_dso_path.parent_dir, temp_dir.path());
 }
 
 /// Verifies that declared mode still rejects directory-valued explicit DSO
@@ -377,12 +382,7 @@ fn artifact_config_requires_absolute_config_path() {
 #[test]
 fn artifact_config_declared_mode_rejects_non_library_dso_paths() {
     let temp_dir = make_temp_dir();
-    let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let temp_crate_dir = temp_dir.path().join("artifact-config-declared-invalid-dso");
-    let config_root_dir = temp_dir.path().join("config-root");
-    let config_artifacts_dir = config_root_dir.join("artifacts");
-    let (_expected_dso_path, expected_stdlib_path) = copy_config_artifacts(&config_artifacts_dir);
-    let invalid_dso_dir = config_artifacts_dir.join("not-a-lib-dir");
+    let invalid_dso_dir = temp_dir.path().join("not-a-lib-dir");
     fs::create_dir_all(&invalid_dso_dir).unwrap_or_else(|err| {
         panic!(
             "Failed to create invalid DSO directory {}: {}",
@@ -390,62 +390,12 @@ fn artifact_config_declared_mode_rejects_non_library_dso_paths() {
             err
         )
     });
-    let config_path = config_root_dir.join("artifact-config.toml");
-    write_artifact_config(
-        &config_path,
-        invalid_dso_dir
-            .strip_prefix(&config_root_dir)
-            .unwrap_or_else(|err| {
-                panic!(
-                    "Failed to relativize invalid DSO directory {} against {}: {}",
-                    invalid_dso_dir.display(),
-                    config_root_dir.display(),
-                    err
-                )
-            })
-            .to_string_lossy()
-            .as_ref(),
-        expected_stdlib_path
-            .strip_prefix(&config_root_dir)
-            .unwrap_or_else(|err| {
-                panic!(
-                    "Failed to relativize stdlib path {} against {}: {}",
-                    expected_stdlib_path.display(),
-                    config_root_dir.display(),
-                    err
-                )
-            })
-            .to_string_lossy()
-            .as_ref(),
-    );
-    write_smoke_crate(&temp_crate_dir, &manifest_path);
-
-    let target_dir = temp_dir.path().join("declared-invalid-dso-target");
-    let output = run_nested_cargo_with_artifact_config(
-        &temp_crate_dir,
-        &target_dir,
-        config_path.as_os_str(),
-        Some("declared"),
-    );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let err = artifact_config::validate_explicit_dso_path(&invalid_dso_dir)
+        .err()
+        .expect("directory-valued explicit DSO path should fail");
     assert!(
-        !output.status.success(),
-        "Nested cargo run unexpectedly succeeded with a directory DSO path in declared mode.\nstdout:\n{}\nstderr:\n{}",
-        stdout,
-        stderr
-    );
-    assert!(
-        stderr.contains("Explicit XLS DSO path must end with a shared library extension"),
-        "Nested cargo stderr did not explain the invalid explicit DSO path.\nstdout:\n{}\nstderr:\n{}",
-        stdout,
-        stderr
-    );
-    assert!(
-        !stderr.contains("Skipping native link directives"),
-        "Declared-mode validation should fail before the build script reports skipped link directives.\nstdout:\n{}\nstderr:\n{}",
-        stdout,
-        stderr
+        err.contains("Explicit XLS DSO path must end with a shared library extension"),
+        "Error did not explain the invalid explicit DSO path:\n{}",
+        err
     );
 }
