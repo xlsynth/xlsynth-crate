@@ -13,7 +13,7 @@ use xlsynth_g8r::mcmc_logic::{
 };
 use xlsynth_g8r::prove_gate_fn_equiv_common::GateFormalBackend;
 use xlsynth_g8r::transforms::get_all_transforms;
-use xlsynth_pir::fuzz_utils;
+use xlsynth_pir::random_inputs::generate_flat_bitvector_argument_sets_with_rng;
 
 fn benchmark_mcmc_iteration(c: &mut Criterion) {
     let start_gfn = match load_start("sample://bf16_add") {
@@ -48,21 +48,27 @@ fn benchmark_mcmc_iteration(c: &mut Criterion) {
                     let total_bits: usize =
                         start_gfn.inputs.iter().map(|i| i.get_bit_count()).sum();
                     let mut words_per_bit = vec![[0u64; 4]; total_bits];
-                    for lane in 0..256 {
+                    let input_widths: Vec<usize> = start_gfn
+                        .inputs
+                        .iter()
+                        .map(|input| input.bit_vector.get_bit_count())
+                        .collect();
+                    let samples = generate_flat_bitvector_argument_sets_with_rng(
+                        &mut rng,
+                        &input_widths,
+                        256,
+                    );
+                    for (lane, sample) in samples.iter().enumerate() {
                         let mut bit_cursor = 0;
-                        for input in &start_gfn.inputs {
-                            let rand_bits = fuzz_utils::arbitrary_irbits(
-                                &mut rng,
-                                input.bit_vector.get_bit_count(),
-                            );
-                            for bit_idx in 0..input.bit_vector.get_bit_count() {
+                        for rand_bits in sample {
+                            for bit_idx in 0..rand_bits.get_bit_count() {
                                 if rand_bits.get_bit(bit_idx).unwrap() {
                                     let limb = lane / 64;
                                     let offset = lane % 64;
                                     words_per_bit[bit_cursor + bit_idx][limb] |= 1u64 << offset;
                                 }
                             }
-                            bit_cursor += input.bit_vector.get_bit_count();
+                            bit_cursor += rand_bits.get_bit_count();
                         }
                     }
                     words_per_bit

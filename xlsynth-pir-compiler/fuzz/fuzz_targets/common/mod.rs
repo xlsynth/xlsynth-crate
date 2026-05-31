@@ -1,19 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use rand::SeedableRng;
-use rand_pcg::Pcg64Mcg;
-use xlsynth_pir::ir_random::RngEntropy;
+use xlsynth::IrValue;
+use xlsynth_pir::ir::Fn;
+use xlsynth_pir::random_inputs::generate_argument_sets_from_seed;
 
 pub const RANDOM_ARGUMENT_TRIALS: usize = 32;
 
-/// Creates a reproducible pseudorandom argument stream independent of graph
-/// decoding.
-pub fn random_argument_entropy(data: &[u8], trial: usize) -> RngEntropy<Pcg64Mcg> {
+/// Generates reproducible argument sets independent of graph decoding.
+pub fn random_argument_sets(data: &[u8], function: &Fn) -> Vec<Vec<IrValue>> {
     let mut seed = 0xcbf2_9ce4_8422_2325_u64;
     for byte in data {
         seed ^= u64::from(*byte);
         seed = seed.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    seed ^= (trial as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    RngEntropy::new(Pcg64Mcg::seed_from_u64(seed))
+    generate_argument_sets_from_seed(function, seed, RANDOM_ARGUMENT_TRIALS)
 }

@@ -13,6 +13,10 @@ use xlsynth_pir::ir::{
 };
 use xlsynth_pir::ir_eval::{eval_fn_in_package, FnEvalResult};
 use xlsynth_pir::ir_verify;
+use xlsynth_pir::random_inputs::{
+    BitValuePattern, generate_corner_irbits, generate_flat_bitvector_argument_sets_with_rng,
+    generate_pattern_irbits,
+};
 
 const PACKAGE_NAME: &str = "sample";
 const FUNCTION_NAME: &str = "main";
@@ -247,58 +251,59 @@ fn build_ext_nary_add_eval_corpus(sample: &ExtNaryAddFnSample, ir_text: &str) ->
     }
 
     let mut corpus = Vec::new();
+    let input_widths = sample
+        .params
+        .iter()
+        .map(|param| param.width)
+        .collect::<Vec<_>>();
     let zeros = sample
         .params
         .iter()
-        .map(|param| make_bits_value(param.width, 0))
+        .map(|param| {
+            IrValue::from_bits(&generate_pattern_irbits(
+                param.width,
+                BitValuePattern::Zero,
+            ))
+        })
         .collect::<Vec<IrValue>>();
-    push_unique_tuple(&mut corpus, zeros.clone());
-    push_unique_tuple(
-        &mut corpus,
-        sample
-            .params
-            .iter()
-            .map(|param| make_bits_value(param.width, width_mask_u64(param.width)))
-            .collect(),
-    );
-    push_unique_tuple(
-        &mut corpus,
-        sample
-            .params
-            .iter()
-            .map(|param| make_bits_value(param.width, signed_min_value(param.width)))
-            .collect(),
-    );
-    push_unique_tuple(
-        &mut corpus,
-        sample
-            .params
-            .iter()
-            .map(|param| make_bits_value(param.width, signed_max_value(param.width)))
-            .collect(),
-    );
+    for pattern in [
+        BitValuePattern::Zero,
+        BitValuePattern::AllOnes,
+        BitValuePattern::SignedMin,
+        BitValuePattern::SignedMax,
+    ] {
+        push_unique_tuple(
+            &mut corpus,
+            sample
+                .params
+                .iter()
+                .map(|param| IrValue::from_bits(&generate_pattern_irbits(param.width, pattern)))
+                .collect(),
+        );
+    }
 
     for (param_index, param) in sample.params.iter().enumerate() {
-        for value in edge_values_for_width(param.width) {
+        for bits in generate_corner_irbits(param.width) {
             let mut tuple = zeros.clone();
-            tuple[param_index] = make_bits_value(param.width, value);
+            tuple[param_index] = IrValue::from_bits(&bits);
             push_unique_tuple(&mut corpus, tuple);
         }
     }
 
     let mut rng = StdRng::seed_from_u64(sample.value_seed ^ stable_hash_u64(ir_text));
-    for _ in 0..RANDOM_TUPLE_COUNT {
-        let tuple = sample
-            .params
-            .iter()
-            .map(|param| {
-                make_bits_value(
-                    param.width,
-                    u64::from(rng.r#gen::<u8>()) & width_mask_u64(param.width),
-                )
-            })
-            .collect::<Vec<IrValue>>();
-        push_unique_tuple(&mut corpus, tuple);
+    let random_sets = generate_flat_bitvector_argument_sets_with_rng(
+        &mut rng,
+        &input_widths,
+        RANDOM_TUPLE_COUNT + 2,
+    );
+    for tuple in random_sets.into_iter().skip(2) {
+        push_unique_tuple(
+            &mut corpus,
+            tuple
+                .iter()
+                .map(IrValue::from_bits)
+                .collect::<Vec<IrValue>>(),
+        );
     }
 
     corpus
@@ -334,56 +339,6 @@ fn width_mask_u64(width: usize) -> u64 {
     } else {
         (1u64 << width) - 1
     }
-}
-
-fn signed_min_value(width: usize) -> u64 {
-    if width == 0 {
-        0
-    } else {
-        1u64 << (width - 1)
-    }
-}
-
-fn signed_max_value(width: usize) -> u64 {
-    if width == 0 {
-        0
-    } else {
-        (1u64 << (width - 1)) - 1
-    }
-}
-
-fn alternating_pattern(width: usize, lsb_is_one: bool) -> u64 {
-    let mut value = 0u64;
-    for bit_index in 0..width {
-        let bit_is_one = if lsb_is_one {
-            bit_index % 2 == 0
-        } else {
-            bit_index % 2 == 1
-        };
-        if bit_is_one {
-            value |= 1u64 << bit_index;
-        }
-    }
-    value
-}
-
-fn edge_values_for_width(width: usize) -> Vec<u64> {
-    let mut values = Vec::new();
-    for candidate in [
-        0,
-        width_mask_u64(width),
-        if width == 0 { 0 } else { 1 },
-        if width == 0 { 0 } else { 1u64 << (width - 1) },
-        alternating_pattern(width, /* lsb_is_one= */ true),
-        alternating_pattern(width, /* lsb_is_one= */ false),
-        signed_min_value(width),
-        signed_max_value(width),
-    ] {
-        if !values.contains(&candidate) {
-            values.push(candidate);
-        }
-    }
-    values
 }
 
 fn stable_hash_u64(text: &str) -> u64 {

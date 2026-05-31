@@ -5,6 +5,7 @@
 use crate::aig::{AigNode, AigRef, GateFn};
 use crate::aig_sim::gate_simd::{self, Vec256};
 use xlsynth::IrBits;
+use xlsynth_pir::random_inputs::generate_flat_bitvector_argument_sets_with_rng;
 
 use rand::Rng;
 use std::cmp::min;
@@ -157,19 +158,25 @@ fn random_simd_inputs(
     rng: &mut impl Rng,
 ) -> Vec<Vec256> {
     assert!(lane_count <= SIMD_LANES);
-    let valid_lane_mask = lane_mask(lane_count);
-    let mut result = Vec::with_capacity(total_input_bits(input_widths));
-    for &input_width in input_widths {
-        for _ in 0..input_width {
-            result.push(Vec256::from_words([
-                rng.r#gen::<u64>() & valid_lane_mask[0],
-                rng.r#gen::<u64>() & valid_lane_mask[1],
-                rng.r#gen::<u64>() & valid_lane_mask[2],
-                rng.r#gen::<u64>() & valid_lane_mask[3],
-            ]));
+    let mut words_per_input_bit = vec![[0u64; 4]; total_input_bits(input_widths)];
+    let samples = generate_flat_bitvector_argument_sets_with_rng(rng, input_widths, lane_count);
+    for (lane, sample) in samples.iter().enumerate() {
+        let limb = lane / 64;
+        let offset = lane % 64;
+        let mut bit_cursor = 0;
+        for bits in sample {
+            for bit_idx in 0..bits.get_bit_count() {
+                if bits.get_bit(bit_idx).unwrap() {
+                    words_per_input_bit[bit_cursor + bit_idx][limb] |= 1u64 << offset;
+                }
+            }
+            bit_cursor += bits.get_bit_count();
         }
     }
-    result
+    words_per_input_bit
+        .into_iter()
+        .map(Vec256::from_words)
+        .collect()
 }
 
 fn counterexample_simd_inputs(

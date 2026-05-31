@@ -5,20 +5,20 @@
 //! These are intentionally deterministic: helpers use fixed RNG seeds so tests
 //! are reproducible.
 
-use rand::RngCore;
 use rand_pcg::Pcg64Mcg;
 
 use crate::ir;
 use crate::ir_eval::{FnEvalResult, eval_fn};
 use crate::ir_parser;
-use xlsynth::IrValue;
+use crate::random_inputs::{
+    BitValuePattern, generate_biased_irbits_with_rng, generate_pattern_irbits,
+};
+use xlsynth::{IrBits, IrValue};
 
 /// Deterministically "quickchecks" equivalence of two PIR functions by
 /// evaluating both on a mixture of edge cases and pseudo-random samples.
 ///
 /// Notes:
-/// - Only supports unsigned bit-vector parameters up to 64 bits (because
-///   `IrValue::make_ubits` takes a `u64`).
 /// - Intended for small/fast regression checks in unit tests.
 fn quickcheck_fn_equivalence_ubits_le64(
     f0: &ir::Fn,
@@ -30,16 +30,16 @@ fn quickcheck_fn_equivalence_ubits_le64(
 
     let mut samples_run = 0usize;
 
-    let mut run_case = |case: &[u64]| {
+    let mut run_case = |case: &[IrBits]| {
         assert_eq!(
             case.len(),
             param_widths.len(),
             "test bug: case arity mismatch"
         );
         let mut args: Vec<IrValue> = Vec::with_capacity(case.len());
-        for (&w, &v) in param_widths.iter().zip(case.iter()) {
-            assert!(w <= 64, "quickcheck only supports widths <= 64 (got {w})");
-            args.push(IrValue::make_ubits(w, v).unwrap());
+        for (&w, bits) in param_widths.iter().zip(case.iter()) {
+            assert_eq!(bits.get_bit_count(), w, "test bug: case width mismatch");
+            args.push(IrValue::from_bits(bits));
         }
 
         let got0 = match eval_fn(f0, &args) {
@@ -54,44 +54,25 @@ fn quickcheck_fn_equivalence_ubits_le64(
         samples_run += 1;
     };
 
-    // Edge cases: all-zeros and all-ones (per width), plus a few simple patterns.
-    {
-        let zeros: Vec<u64> = vec![0; param_widths.len()];
-        run_case(&zeros);
-
-        let ones: Vec<u64> = param_widths
+    for pattern in [
+        BitValuePattern::Zero,
+        BitValuePattern::AllOnes,
+        BitValuePattern::Alternating { lsb_is_one: true },
+        BitValuePattern::Alternating { lsb_is_one: false },
+    ] {
+        let case: Vec<IrBits> = param_widths
             .iter()
-            .map(|&w| if w == 64 { u64::MAX } else { (1u64 << w) - 1 })
+            .map(|width| generate_pattern_irbits(*width, pattern))
             .collect();
-        run_case(&ones);
-
-        // Alternating patterns for each arg.
-        let alt_a: Vec<u64> = param_widths
-            .iter()
-            .map(|&w| {
-                let v = 0xAAAA_AAAA_AAAA_AAAAu64;
-                if w == 64 { v } else { v & ((1u64 << w) - 1) }
-            })
-            .collect();
-        run_case(&alt_a);
-        let alt_5: Vec<u64> = param_widths
-            .iter()
-            .map(|&w| {
-                let v = 0x5555_5555_5555_5555u64;
-                if w == 64 { v } else { v & ((1u64 << w) - 1) }
-            })
-            .collect();
-        run_case(&alt_5);
+        run_case(&case);
     }
 
-    // Deterministic pseudo-random sampling.
+    // Deterministic corner-biased pseudo-random sampling.
     for _ in 0..random_samples {
-        let mut case: Vec<u64> = Vec::with_capacity(param_widths.len());
-        for &w in param_widths {
-            let v = rng.next_u64();
-            let masked = if w == 64 { v } else { v & ((1u64 << w) - 1) };
-            case.push(masked);
-        }
+        let case: Vec<IrBits> = param_widths
+            .iter()
+            .map(|width| generate_biased_irbits_with_rng(&mut rng, *width))
+            .collect();
         run_case(&case);
     }
 

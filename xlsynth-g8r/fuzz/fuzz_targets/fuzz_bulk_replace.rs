@@ -15,7 +15,7 @@ use xlsynth_g8r::aig::dce::dce;
 use xlsynth_g8r::aig::{AigBitVector, AigOperand, AigRef, GateBuilder, GateBuilderOptions, GateFn};
 use xlsynth_g8r::aig_sim::gate_sim::{eval, Collect};
 
-use xlsynth_pir::fuzz_utils;
+use xlsynth_pir::random_inputs::generate_biased_irbits_with_rng;
 
 static LOGGER_INIT: Once = Once::new();
 
@@ -651,7 +651,7 @@ fuzz_target!(|data: (FuzzGateGraph, FuzzSubstitutions)| {
             // zero-width or too big to fit in u64, skip this fuzz case
             return;
         }
-        let bits = fuzz_utils::arbitrary_irbits(&mut rng, width);
+        let bits = generate_biased_irbits_with_rng(&mut rng, width);
         input_vecs.push(bits);
     }
     let orig_sim = eval(&gate_fn, &input_vecs, Collect::None);

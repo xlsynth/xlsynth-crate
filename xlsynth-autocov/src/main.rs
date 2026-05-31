@@ -54,8 +54,8 @@ struct Args {
     #[arg(long)]
     threads: Option<usize>,
 
-    /// Seed the corpus with structured bit patterns: all-zeros, all-ones, all
-    /// one-hot, and all two-hot (subject to --seed-two-hot-max-bits).
+    /// Seed the corpus with structured corner patterns and all two-hot values
+    /// (subject to --seed-two-hot-max-bits).
     #[arg(long, default_value_t = true)]
     seed_structured: bool,
 

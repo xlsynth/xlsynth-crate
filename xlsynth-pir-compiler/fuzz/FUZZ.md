@@ -13,8 +13,10 @@ functions directly from the fuzzer byte stream, with widths limited to the
 current native-value execution boundary. It evaluates the same generated
 arguments through `xlsynth_pir::ir_eval` and through `xlsynth-pir-compiler`,
 then requires identical returned values. Each compiled graph is exercised with
-32 reproducible pseudorandom argument sets rather than decoding arguments
-directly from the coverage-guided graph byte stream.
+32 reproducible argument sets rather than decoding arguments directly from the
+coverage-guided graph byte stream. These begin with whole-input zero and
+all-ones cases, then use pseudorandom leaves biased toward useful bitvector
+corner patterns.
 
 Essential property under test:
 
@@ -47,8 +49,8 @@ Generated array operations also exercise `assumed_in_bounds=true` and compare
 reported out-of-bounds assumption violations.
 Observable event results are compared as unordered multisets because independent
 event nodes are not semantically ordered unless their token dependencies require it.
-Each compiled graph is exercised with 32 reproducible pseudorandom argument
-sets.
+Each compiled graph is exercised with the same 32 reproducible, corner-biased
+argument sets.
 
 Main additional failure modes surfaced:
 
@@ -74,8 +76,8 @@ graphs as well as genuinely large values. It also generates token-based
 runtime results. It also generates `assumed_in_bounds=true` array operations
 and compares reported out-of-bounds violations. The target enables every
 operation provided by the random PIR function generator.
-Each compiled graph is exercised with 32 reproducible pseudorandom argument
-sets.
+Each compiled graph is exercised with the same 32 reproducible, corner-biased
+argument sets.
 
 Main additional failure modes surfaced:
 

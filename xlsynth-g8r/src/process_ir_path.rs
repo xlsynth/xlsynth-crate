@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use crate::gatify::prep_for_gatify::{PrepForGatifyOptions, prep_for_gatify};
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
+use xlsynth_pir::random_inputs::generate_uniform_irbits_with_rng;
 
 use crate::aig::SequentialGateFn;
 use crate::aig::cut_db_rewrite;
@@ -757,7 +758,7 @@ pub fn process_ir_text_with_gatefn(
         for _ in 0..options.toggle_sample_count {
             let mut input_vec = Vec::with_capacity(input_widths.len());
             for &width in &input_widths {
-                let bits = xlsynth_pir::fuzz_utils::arbitrary_irbits(&mut rng, width);
+                let bits = generate_uniform_irbits_with_rng(&mut rng, width);
                 input_vec.push(bits);
             }
             batch_inputs.push(input_vec);

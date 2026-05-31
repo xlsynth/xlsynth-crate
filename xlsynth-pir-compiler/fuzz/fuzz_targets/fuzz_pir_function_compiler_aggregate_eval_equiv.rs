@@ -4,11 +4,11 @@
 
 mod common;
 
-use common::{RANDOM_ARGUMENT_TRIALS, random_argument_entropy};
+use common::random_argument_sets;
 use libfuzzer_sys::fuzz_target;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
 use xlsynth_pir::ir_random::{
-    DepletableBytes, OperationSet, RandomFnOptions, StopPolicy, generate_arguments, generate_fn,
+    DepletableBytes, OperationSet, RandomFnOptions, StopPolicy, generate_fn,
 };
 use xlsynth_pir_compiler::PirFunctionCompiler;
 
@@ -48,9 +48,7 @@ fuzz_target!(|data: &[u8]| {
     let compiler = PirFunctionCompiler::compile(function).unwrap_or_else(|error| {
         panic!("compiled-function compilation failed for generated IR:\n{ir_text}\n{error}")
     });
-    for trial in 0..RANDOM_ARGUMENT_TRIALS {
-        let mut argument_entropy = random_argument_entropy(data, trial);
-        let args = generate_arguments(&mut argument_entropy, function);
+    for args in random_argument_sets(data, function) {
         let expected = eval_fn(function, &args);
         let actual = compiler
             .run_ir_values_with_events(&args)

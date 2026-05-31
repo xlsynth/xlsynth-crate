@@ -16,7 +16,6 @@ use std::collections::HashMap;
 use std::ops::Not;
 
 use rand_xoshiro::Xoshiro256PlusPlus;
-use rand_xoshiro::rand_core::RngCore;
 use rand_xoshiro::rand_core::SeedableRng;
 
 use xlsynth::IrBits;
@@ -26,6 +25,7 @@ use xlsynth_pir::ir;
 use xlsynth_pir::ir_eval;
 use xlsynth_pir::ir_utils::is_structural_payload;
 use xlsynth_pir::ir_value_utils::flatten_ir_value_to_lsb0_bits_for_type;
+use xlsynth_pir::random_inputs::generate_biased_irbits_with_rng;
 
 use crate::aig::gate::{AigBitVector, AigNode, AigOperand, AigRef, GateFn, Output, PirNodeIds};
 use crate::aig::topo::topo_sort_refs;
@@ -924,7 +924,10 @@ fn make_random_args_for_both(
         // Generate the *flat* bitvector first, then unflatten into an IrValue.
         // This ensures the PIR evaluator and the GateFn see identical bit patterns
         // in the same flattened order for tuple/array parameters.
-        let flat_bits = random_bool_vec(rng, param.ty.bit_count());
+        let random_bits = generate_biased_irbits_with_rng(rng, param.ty.bit_count());
+        let flat_bits: Vec<bool> = (0..random_bits.get_bit_count())
+            .map(|bit_index| random_bits.get_bit(bit_index).unwrap())
+            .collect();
         let v = unflatten_ir_value_from_lsb0_bits(&param.ty, &flat_bits)?;
         if flat_bits.len() != gate_input.get_bit_count() {
             return Err(format!(
@@ -939,14 +942,6 @@ fn make_random_args_for_both(
     }
 
     Ok((pir_args, gate_inputs))
-}
-
-fn random_bool_vec(rng: &mut impl RngCore, width: usize) -> Vec<bool> {
-    let mut bits: Vec<bool> = Vec::with_capacity(width);
-    for _ in 0..width {
-        bits.push((rng.next_u32() & 1) != 0);
-    }
-    bits
 }
 
 fn unflatten_ir_value_from_lsb0_bits(ty: &ir::Type, flat_bits: &[bool]) -> Result<IrValue, String> {

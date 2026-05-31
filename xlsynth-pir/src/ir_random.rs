@@ -7,7 +7,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 
 use rand::RngCore;
-use xlsynth::{IrBits, IrValue};
+use xlsynth::IrValue;
 
 use crate::ir::{
     Binop, ExtNaryAddArchitecture, ExtNaryAddTerm, FileTable, Fn, MemberType, NaryOp, Node,
@@ -15,6 +15,7 @@ use crate::ir::{
 };
 use crate::ir_utils::{is_observable_effect_root, operands};
 use crate::math::ceil_log2;
+use crate::random_inputs::generate_uniform_value;
 
 const TRACE_FORMAT_SPECIFIERS: [&str; 9] = [
     "{}", "{:u}", "{:d}", "{:x}", "{:0x}", "{:#x}", "{:b}", "{:0b}", "{:#b}",
@@ -643,37 +644,6 @@ pub fn generate_same_signature_pair<S1: EntropySource, S2: EntropySource>(
     Ok((first, second))
 }
 
-/// Generates an arbitrary typed value, useful for evaluating generated function
-/// inputs.
-pub fn generate_value<S: EntropySource>(source: &mut S, ty: &Type) -> IrValue {
-    match ty {
-        Type::Token => IrValue::make_token(),
-        Type::Bits(width) => generate_bits_value(source, *width),
-        Type::Tuple(elements) => {
-            let values: Vec<IrValue> = elements
-                .iter()
-                .map(|element| generate_value(source, element))
-                .collect();
-            IrValue::make_tuple(&values)
-        }
-        Type::Array(array) => {
-            let values: Vec<IrValue> = (0..array.element_count)
-                .map(|_| generate_value(source, &array.element_type))
-                .collect();
-            IrValue::make_array(&values).expect("generated array values have identical types")
-        }
-    }
-}
-
-/// Generates inputs matching the parameters of a generated function.
-pub fn generate_arguments<S: EntropySource>(source: &mut S, function: &Fn) -> Vec<IrValue> {
-    function
-        .params
-        .iter()
-        .map(|param| generate_value(source, &param.ty))
-        .collect()
-}
-
 fn validate_stop_policy(stop_policy: StopPolicy) -> Result<(), GenerationError> {
     match stop_policy {
         StopPolicy::WhenEntropyDepleted | StopPolicy::ExactBodyNodes(_) => Ok(()),
@@ -941,25 +911,6 @@ fn required_materialization_nodes(
     Ok(nodes)
 }
 
-fn generate_bits_value<S: EntropySource>(source: &mut S, width: usize) -> IrValue {
-    if width == 0 {
-        return IrValue::from_bits(
-            &IrBits::make_ubits(0, 0).expect("bits[0] zero literal must construct"),
-        );
-    }
-    let mut bytes = vec![0_u8; width.div_ceil(8)];
-    for chunk in bytes.chunks_mut(8) {
-        let word = source.take_u64().to_le_bytes();
-        chunk.copy_from_slice(&word[..chunk.len()]);
-    }
-    if !width.is_multiple_of(8) {
-        let mask = (1_u8 << (width % 8)) - 1;
-        *bytes.last_mut().expect("nonzero bit width has storage") &= mask;
-    }
-    let bits = IrBits::from_le_bytes(width, &bytes).expect("valid generated bit representation");
-    IrValue::from_bits(&bits)
-}
-
 struct FunctionGenerator<'a> {
     options: &'a RandomFnOptions,
     params: Vec<Param>,
@@ -1160,7 +1111,7 @@ impl<'a> FunctionGenerator<'a> {
                 let ty = random_type(source, self.options, 0);
                 Ok(self.add_node(
                     ty.clone(),
-                    NodePayload::Literal(generate_value(source, &ty)),
+                    NodePayload::Literal(generate_uniform_value(source, &ty)),
                     None,
                 ))
             }
@@ -2201,7 +2152,7 @@ impl<'a> FunctionGenerator<'a> {
         }
         self.add_node(
             Type::Bits(width),
-            NodePayload::Literal(generate_bits_value(source, width)),
+            NodePayload::Literal(generate_uniform_value(source, &Type::Bits(width))),
             None,
         )
     }

@@ -5,10 +5,11 @@ use std::path::Path;
 
 use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
-use xlsynth::{IrBits, IrValue};
+use xlsynth::IrValue;
 
 use crate::ir::{self, PackageMember, Type};
 use crate::ir_parser::Parser;
+use crate::random_inputs::generate_uniform_value_with_rng;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FloatFormat {
@@ -131,7 +132,7 @@ pub fn generate_ir_fn_inputs_from_ir_text(
                 if let Some(spec) = float_params.get(&param.name) {
                     random_float_value(spec, &mut rng)
                 } else {
-                    random_value_for_type(&param.ty, &mut rng)
+                    Ok(generate_uniform_value_with_rng(&mut rng, &param.ty))
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -266,39 +267,6 @@ fn parse_float_distribution(s: &str) -> Result<FloatDistribution, String> {
         mean: mean.ok_or_else(|| "gaussian is missing mean".to_string())?,
         stddev: stddev.ok_or_else(|| "gaussian is missing stddev".to_string())?,
     })
-}
-
-fn random_value_for_type(ty: &Type, rng: &mut StdRng) -> Result<IrValue, String> {
-    match ty {
-        Type::Token => Ok(IrValue::make_token()),
-        Type::Bits(width) => Ok(IrValue::from_bits(&random_bits(*width, rng))),
-        Type::Tuple(members) => {
-            let values = members
-                .iter()
-                .map(|member| random_value_for_type(member, rng))
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(IrValue::make_tuple(&values))
-        }
-        Type::Array(array) => {
-            let values = (0..array.element_count)
-                .map(|_| random_value_for_type(&array.element_type, rng))
-                .collect::<Result<Vec<_>, _>>()?;
-            IrValue::make_array(&values).map_err(|e| e.to_string())
-        }
-    }
-}
-
-fn random_bits(width: usize, rng: &mut StdRng) -> IrBits {
-    let mut bits = Vec::with_capacity(width);
-    while bits.len() < width {
-        let word = rng.next_u64();
-        let remaining = width - bits.len();
-        let take = remaining.min(u64::BITS as usize);
-        for bit_index in 0..take {
-            bits.push(((word >> bit_index) & 1) != 0);
-        }
-    }
-    IrBits::from_lsb_is_0(&bits)
 }
 
 fn random_float_value(spec: &FloatParamSpec, rng: &mut StdRng) -> Result<IrValue, String> {
