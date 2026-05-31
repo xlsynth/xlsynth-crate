@@ -2419,6 +2419,15 @@ fn pir_equiv_oracle<R: Rng>(
             match prove_ir_fn_equiv(lhs, rhs) {
                 EquivResult::Proved => true,
                 EquivResult::Disproved { .. } | EquivResult::ToolchainDisproved(_) => false,
+                EquivResult::Inconclusive(msg) => {
+                    log::warn!(
+                        "[pir-mcmc] formal oracle inconclusive for '{}' vs '{}': {}; rejecting candidate",
+                        lhs.name,
+                        rhs.name,
+                        msg
+                    );
+                    false
+                }
                 EquivResult::Error(msg) => {
                     log::warn!(
                         "[pir-mcmc] formal oracle error for '{}' vs '{}': {}; rejecting candidate",

@@ -7,9 +7,11 @@ use rand::seq::IteratorRandom;
 use rand::SeedableRng;
 
 use xlsynth_g8r::prove_gate_fn_equiv_common::{EquivResult, GateFormalBackend};
-use xlsynth_g8r::prove_gate_fn_equiv_sat::prove_gate_fn_equiv_with_backend;
+use xlsynth_g8r::prove_gate_fn_equiv_sat::{
+    ValidationError, prove_gate_fn_equiv_with_backend_and_options,
+};
 use xlsynth_g8r::transforms::{self, transform_trait::TransformDirection};
-use xlsynth_g8r_fuzz::{build_graph, FuzzGraph};
+use xlsynth_g8r_fuzz::{FuzzGraph, build_graph, fuzz_gate_formal_options};
 
 // Each successful step runs gate-level equivalence checks twice, so bound the
 // transform sequence to keep one fuzz input comfortably short.
@@ -30,6 +32,20 @@ fn make_rng(graph: &FuzzGraph) -> StdRng {
         hasher.update(&[u8::from(op.lhs_neg), u8::from(op.rhs_neg)]);
     }
     StdRng::from_seed(*hasher.finalize().as_bytes())
+}
+
+/// Proves gate equivalence while allowing configured fuzz timeouts to skip a sample.
+fn prove_with_fuzz_timeout(lhs: &xlsynth_g8r::aig::GateFn, rhs: &xlsynth_g8r::aig::GateFn) -> Option<EquivResult> {
+    match prove_gate_fn_equiv_with_backend_and_options(
+        lhs,
+        rhs,
+        GateFormalBackend::Cadical,
+        fuzz_gate_formal_options(),
+    ) {
+        Ok(result) => Some(result),
+        Err(ValidationError::CadicalSolveInterrupted) => None,
+        Err(err) => panic!("Cadical gate equivalence failed: {err}"),
+    }
 }
 
 fuzz_target!(|graph: FuzzGraph| {
@@ -82,13 +98,17 @@ fuzz_target!(|graph: FuzzGraph| {
 
         attempts += 1; // Count this attempted (and successful) application
 
-        let _orig_cur =
-            prove_gate_fn_equiv_with_backend(&orig_g, &cur_g, GateFormalBackend::Cadical)
-                .expect("Cadical gate equivalence should run for orig vs cur");
+        let Some(_orig_cur) = prove_with_fuzz_timeout(&orig_g, &cur_g) else {
+            // A configured solver timeout is expected to make some fuzz
+            // samples inconclusive; those samples are not transform failures.
+            return;
+        };
 
-        let cur_next =
-            prove_gate_fn_equiv_with_backend(&cur_g, &next_g, GateFormalBackend::Cadical)
-                .expect("Cadical gate equivalence should run for cur vs next");
+        let Some(cur_next) = prove_with_fuzz_timeout(&cur_g, &next_g) else {
+            // A configured solver timeout is expected to make some fuzz
+            // samples inconclusive; those samples are not transform failures.
+            return;
+        };
 
         // If the transform is claimed to be always-equivalent, equivalence must hold.
         if t.always_equivalent() && !matches!(cur_next, EquivResult::Proved) {

@@ -28,8 +28,8 @@ use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_value_utils::{ir_bits_from_value_with_type, ir_value_from_bits_with_type};
 use xlsynth_pir::random_inputs::{generate_biased_irbits_with_rng, generate_corner_irbits};
 use xlsynth_prover::ir_equiv::{IrEquivRequest, IrModule, run_ir_equiv};
-use xlsynth_prover::prover::SolverChoice;
 use xlsynth_prover::prover::types::{AssertionSemantics, EquivParallelism, EquivResult};
+use xlsynth_prover::prover::{SolverChoice, SolverLimits};
 
 mod ir_fn_autocov_runner;
 pub use ir_fn_autocov_runner::{
@@ -246,6 +246,7 @@ pub fn relevant_in_pkg(
                 assertion_semantics: AssertionSemantics::Same,
                 assert_label_filter: None,
                 solver: Some(solver),
+                solver_limits: SolverLimits::default(),
                 tool_path: tool_path.as_deref(),
             };
             let report = run_ir_equiv(&request)?;
@@ -260,7 +261,7 @@ pub fn relevant_in_pkg(
                         detail: RelevanceDetail::DisprovedEquivalent { equiv: other },
                     })
                 }
-                EquivResult::Error(msg) => Err(msg),
+                EquivResult::Inconclusive(msg) | EquivResult::Error(msg) => Err(msg),
             }
         }
         RelevanceCheckMethod::ExhaustiveBitsParams { max_total_arg_bits } => {

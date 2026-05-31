@@ -1149,6 +1149,16 @@ macro_rules! test_solver {
             );
 
             #[test]
+            fn test_get_value_empty_tuple() {
+                let mut solver = $solver;
+                let zero_width = solver.zero_width();
+                let actual = solver
+                    .get_value(&zero_width, &ir::Type::Tuple(vec![]))
+                    .unwrap();
+                assert_eq!(actual, IrValue::make_tuple(&[]));
+            }
+
+            #[test]
             fn test_constants() {
                 let mut solver = $solver;
                 test_utils::test_constants(&mut solver);

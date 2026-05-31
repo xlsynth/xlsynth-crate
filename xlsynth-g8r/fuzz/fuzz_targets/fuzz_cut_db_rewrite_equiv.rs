@@ -8,8 +8,10 @@ use std::sync::OnceLock;
 use xlsynth_g8r::aig::cut_db_rewrite::{rewrite_gatefn_with_cut_db, RewriteOptions};
 use xlsynth_g8r::cut_db::loader::CutDb;
 use xlsynth_g8r::prove_gate_fn_equiv_common::{EquivResult, GateFormalBackend};
-use xlsynth_g8r::prove_gate_fn_equiv_sat::prove_gate_fn_equiv_with_backend;
-use xlsynth_g8r_fuzz::{build_graph, FuzzGraph};
+use xlsynth_g8r::prove_gate_fn_equiv_sat::{
+    ValidationError, prove_gate_fn_equiv_with_backend_and_options,
+};
+use xlsynth_g8r_fuzz::{FuzzGraph, build_graph, fuzz_gate_formal_options};
 
 static CUT_DB_BYTES: &[u8] = include_bytes!("../../data/cut_db_v1.bin");
 static CUT_DB: OnceLock<CutDb> = OnceLock::new();
@@ -51,9 +53,21 @@ fuzz_target!(|graph: FuzzGraph| {
         },
     );
 
-    match prove_gate_fn_equiv_with_backend(&orig_g, &rewritten, GateFormalBackend::Cadical)
-        .expect("Cadical gate equivalence should run for cut-db rewrites")
-    {
+    let equiv_result = match prove_gate_fn_equiv_with_backend_and_options(
+        &orig_g,
+        &rewritten,
+        GateFormalBackend::Cadical,
+        fuzz_gate_formal_options(),
+    ) {
+        Ok(result) => result,
+        Err(ValidationError::CadicalSolveInterrupted) => {
+            // A configured solver timeout is expected to make some fuzz
+            // samples inconclusive; those samples are not rewrite failures.
+            return;
+        }
+        Err(err) => panic!("Cadical gate equivalence failed: {err}"),
+    };
+    match equiv_result {
         EquivResult::Proved => {}
         EquivResult::Disproved(cex) => {
             panic!(

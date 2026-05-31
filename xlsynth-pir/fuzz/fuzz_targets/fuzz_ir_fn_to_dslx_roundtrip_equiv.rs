@@ -44,7 +44,12 @@ fuzz_target!(|data: &[u8]| {
         Path::new("fuzz_ir_fn_to_dslx_roundtrip.x"),
         &DslxConvertOptions::default(),
     )
-    .expect("DSLX->IR conversion failed");
+    .unwrap_or_else(|e| {
+        panic!(
+            "DSLX->IR conversion failed: {}\n=== INPUT_IR ===\n{}\n=== DSLX ===\n{}",
+            e, ir_in, translated.dslx_text
+        )
+    });
 
     let mut lhs_pkg_with_top =
         xlsynth::IrPackage::parse_ir(&ir_in, None).expect("parse generated lhs IR");

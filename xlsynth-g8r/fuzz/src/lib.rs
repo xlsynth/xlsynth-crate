@@ -1,11 +1,38 @@
 // SPDX-License-Identifier: Apache-2.0
+use std::time::Duration;
+
 use arbitrary::Arbitrary;
 use xlsynth_g8r::aig::{AigBitVector, GateBuilder, GateBuilderOptions, GateFn};
+use xlsynth_g8r::prove_gate_fn_equiv_sat::GateFormalOptions;
 use xlsynth_pir::ir::{Fn as IrFn, Package};
 use xlsynth_pir::ir_random::{
     generate_fn, generate_same_signature_pair, DepletableBytes, OperationSet, RandomFnOptions,
     RandomOperation, StopPolicy,
 };
+use xlsynth_prover::prover::SolverLimits;
+#[cfg(feature = "has-bitwuzla")]
+use xlsynth_prover::solver::bitwuzla::BitwuzlaOptions;
+
+pub const FUZZ_SOLVER_TIME_LIMIT_PER_MS: u64 = 10_000;
+
+/// Returns solver limits that keep individual fuzz samples responsive.
+pub fn fuzz_solver_limits() -> SolverLimits {
+    SolverLimits::with_time_limit_per_ms(FUZZ_SOLVER_TIME_LIMIT_PER_MS)
+}
+
+/// Returns gate-formal options that keep individual fuzz samples responsive.
+pub fn fuzz_gate_formal_options() -> GateFormalOptions {
+    GateFormalOptions::default()
+        .with_cadical_timeout(Duration::from_millis(FUZZ_SOLVER_TIME_LIMIT_PER_MS))
+}
+
+/// Returns Bitwuzla options with the fuzzing per-query time limit applied.
+#[cfg(feature = "has-bitwuzla")]
+pub fn fuzz_bitwuzla_options() -> BitwuzlaOptions {
+    let mut options = BitwuzlaOptions::new();
+    options.set_time_limit_per(FUZZ_SOLVER_TIME_LIMIT_PER_MS);
+    options
+}
 
 #[derive(Debug, Clone, Arbitrary)]
 pub struct FuzzOp {

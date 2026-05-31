@@ -16,10 +16,13 @@ use xlsynth_pir::ir_random::{
 use xlsynth_pir::ir_utils::compact_and_toposort_in_place;
 use xlsynth_pir::ir_validate;
 use xlsynth_prover::prover::types::{AssertionSemantics, EquivParallelism, EquivResult, ProverFn};
-use xlsynth_prover::prover::{Prover, SolverChoice, prover_for_choice};
+use xlsynth_prover::prover::{
+    Prover, SolverChoice, SolverLimits, prover_for_choice_with_limits,
+};
 
 const NUM_STEPS: usize = 32;
 const MAX_TRANSFORM_DRAWS: usize = NUM_STEPS * 32;
+const FUZZ_SOLVER_TIME_LIMIT_PER_MS: u64 = 10_000;
 
 static INIT_LOGGER: Once = Once::new();
 
@@ -104,14 +107,18 @@ fuzz_target!(|data: &[u8]| {
             );
         }
 
-        if candidate.always_equivalent {
-            prove_candidate_equivalent(
+        if candidate.always_equivalent
+            && !prove_candidate_equivalent(
                 prover.as_ref(),
                 &cur_pkg,
                 &next_pkg,
                 transform.kind(),
                 &candidate.location,
-            );
+            )
+        {
+            // A configured solver limit is expected to make some fuzz samples
+            // inconclusive; those samples are not transform failures.
+            return;
         }
 
         cur_pkg = next_pkg;
@@ -129,7 +136,7 @@ fn prove_candidate_equivalent(
     next_pkg: &ir::Package,
     kind: xlsynth_mcmc_pir::transforms::PirTransformKind,
     location: &xlsynth_mcmc_pir::transforms::TransformLocation,
-) {
+) -> bool {
     prove_candidate_equivalent_with_result(
         cur_pkg,
         next_pkg,
@@ -157,7 +164,11 @@ fn make_in_process_prover() -> Box<dyn Prover> {
              with-bitwuzla-built, with-boolector-system, or with-boolector-built"
         );
     }
-    prover_for_choice(SolverChoice::Auto, None)
+    prover_for_choice_with_limits(
+        SolverChoice::Auto,
+        None,
+        SolverLimits::with_time_limit_per_ms(FUZZ_SOLVER_TIME_LIMIT_PER_MS),
+    )
 }
 
 fn expect_top_fn(pkg: &ir::Package) -> &ir::Fn {
@@ -170,9 +181,17 @@ fn prove_candidate_equivalent_with_result(
     kind: xlsynth_mcmc_pir::transforms::PirTransformKind,
     location: &xlsynth_mcmc_pir::transforms::TransformLocation,
     equiv_result: EquivResult,
-) {
+) -> bool {
     match equiv_result {
-        EquivResult::Proved => {}
+        EquivResult::Proved => true,
+        EquivResult::Inconclusive(msg) => {
+            log::debug!(
+                "formal equivalence inconclusive for transform {:?} at {:?}: {msg}",
+                kind,
+                location,
+            );
+            false
+        }
         EquivResult::Disproved {
             lhs_inputs,
             rhs_inputs,

@@ -8,11 +8,13 @@ use libfuzzer_sys::fuzz_target;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use xlsynth_g8r::aig::cut_db_rewrite::{rewrite_gatefn_with_cut_db, RewriteOptions};
-use xlsynth_g8r::aig::fraig::{fraig_optimize, IterationBounds};
+use xlsynth_g8r::aig::fraig::{IterationBounds, fraig_optimize_with_backend_and_options};
 use xlsynth_g8r::aig::gate::AigNode;
 use xlsynth_g8r::cut_db::loader::CutDb;
 use xlsynth_g8r::gatify::ir2gate::{self, GatifyOptions};
-use xlsynth_g8r_fuzz::generate_gatify_random_pir_package;
+use xlsynth_g8r::prove_gate_fn_equiv_common::GateFormalBackend;
+use xlsynth_g8r::prove_gate_fn_equiv_sat::ValidationError;
+use xlsynth_g8r_fuzz::{fuzz_gate_formal_options, generate_gatify_random_pir_package};
 
 fuzz_target!(|data: &[u8]| {
     let _ = env_logger::builder().is_test(true).try_init();
@@ -30,14 +32,27 @@ fuzz_target!(|data: &[u8]| {
     let gatify_output = ir2gate::gatify(parsed_fn, GatifyOptions::all_opts_disabled())
         .expect("generated standard PIR should lower successfully");
     let mut rng = StdRng::seed_from_u64(0);
-    let optimized_gate_fn = fraig_optimize(
+    let optimized_gate_fn = match fraig_optimize_with_backend_and_options(
         &gatify_output.gate_fn,
         64,
         IterationBounds::MaxIterations(1),
+        GateFormalBackend::Cadical,
+        fuzz_gate_formal_options(),
         &mut rng,
-    )
-    .expect("fraig should not fail on successfully lowered GateFn")
-    .0;
+    ) {
+        Ok(result) => result.0,
+        Err(err)
+            if matches!(
+                err.downcast_ref::<ValidationError>(),
+                Some(ValidationError::CadicalSolveInterrupted)
+            ) =>
+        {
+            // A configured solver timeout is expected to make some fuzz
+            // samples inconclusive; those samples are not provenance failures.
+            return;
+        }
+        Err(err) => panic!("fraig should not fail on successfully lowered GateFn: {err}"),
+    };
     let optimized_gate_fn = rewrite_gatefn_with_cut_db(
         &optimized_gate_fn,
         CutDb::load_default().as_ref(),

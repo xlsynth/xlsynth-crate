@@ -317,7 +317,7 @@ pub fn handle_prove_enum_in_bound(matches: &clap::ArgMatches, config: &Option<To
             }
             std::process::exit(1);
         }
-        BoolPropertyResult::Error(msg) => {
+        BoolPropertyResult::Inconclusive(msg) | BoolPropertyResult::Error(msg) => {
             report_cli_error_and_exit(&msg, Some(SUBCOMMAND), Vec::new());
         }
     }

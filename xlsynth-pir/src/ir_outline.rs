@@ -122,6 +122,32 @@ fn compute_inputs_and_boundary(
     (inputs_ext, outputs_boundary)
 }
 
+/// Returns whether `to_outline` can be extracted into a single invoked
+/// function without introducing a dependency cycle.
+pub fn can_outline(outer: &IrFn, to_outline: &HashSet<NodeRef>) -> bool {
+    if to_outline.iter().any(|nr| nr.index >= outer.nodes.len()) {
+        return false;
+    }
+    let to_outline_set: HashSet<usize> = to_outline.iter().map(|r| r.index).collect();
+    let (inputs_ext, outputs_boundary) = compute_inputs_and_boundary(outer, &to_outline_set);
+    let mut visited: HashSet<usize> = HashSet::new();
+    let mut stack: Vec<usize> = inputs_ext.into_iter().collect();
+    while let Some(idx) = stack.pop() {
+        if !visited.insert(idx) {
+            continue;
+        }
+        if outputs_boundary.contains(&idx) {
+            return false;
+        }
+        stack.extend(
+            operands(&outer.nodes[idx].payload)
+                .into_iter()
+                .map(|r| r.index),
+        );
+    }
+    true
+}
+
 pub fn compute_default_ordering(outer: &IrFn, to_outline: &HashSet<NodeRef>) -> OutlineOrdering {
     for nr in to_outline.iter() {
         assert!(
@@ -130,6 +156,10 @@ pub fn compute_default_ordering(outer: &IrFn, to_outline: &HashSet<NodeRef>) -> 
             nr
         );
     }
+    assert!(
+        can_outline(outer, to_outline),
+        "outline selection is non-convex and cannot be extracted into a single invoke"
+    );
     let to_outline_set: HashSet<usize> = to_outline.iter().map(|r| r.index).collect();
     let (inputs_ext, outputs_boundary) = compute_inputs_and_boundary(outer, &to_outline_set);
 
@@ -238,6 +268,10 @@ pub fn outline_with_ordering(
             nr
         );
     }
+    assert!(
+        can_outline(outer, to_outline),
+        "outline selection is non-convex and cannot be extracted into a single invoke"
+    );
 
     // Stable sets for boundary analysis
     let to_outline_set: HashSet<usize> = to_outline.iter().map(|r| r.index).collect();
@@ -1183,5 +1217,26 @@ fn h_inner(a: bits[8] id=1, b: bits[8] id=2) -> (bits[8], bits[8]) {
 
         // Equivalence: original vs outlined outer
         assert_equiv_pkg(&f, &res.outer, Some(&res.inner));
+    }
+
+    #[test]
+    fn non_convex_region_cannot_be_outlined_as_single_invoke() {
+        let ir = r#"fn f(a: bits[8] id=1) -> bits[8] {
+  add.2: bits[8] = add(a, a, id=2)
+  not.3: bits[8] = not(add.2, id=3)
+  ret add.4: bits[8] = add(not.3, a, id=4)
+}"#;
+        let (_pkg, f) = parse_single_fn(ir);
+        let to_outline = f
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| {
+                matches!(node.payload, NodePayload::Binop(ir::Binop::Add, _, _))
+                    .then_some(NodeRef { index })
+            })
+            .collect();
+
+        assert!(!can_outline(&f, &to_outline));
     }
 }

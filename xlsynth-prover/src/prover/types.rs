@@ -333,6 +333,9 @@ impl std::fmt::Display for FnOutput {
 #[derive(Debug, PartialEq, Clone)]
 pub enum EquivResult {
     Proved,
+    /// The solver stopped without proving or disproving equivalence, for
+    /// example because a configured resource limit was reached.
+    Inconclusive(String),
     Disproved {
         lhs_inputs: Vec<FnInput>,
         rhs_inputs: Vec<FnInput>,
@@ -357,6 +360,7 @@ impl EquivReport {
     pub fn error_str(&self) -> Option<String> {
         match &self.result {
             EquivResult::Proved => None,
+            EquivResult::Inconclusive(msg) => Some(msg.clone()),
             EquivResult::Disproved {
                 lhs_inputs,
                 rhs_inputs,
@@ -400,6 +404,9 @@ pub enum BoolPropertyResult {
     /// The solver proved that the function returns `true` for **all** possible
     /// inputs (w.r.t. the chosen `assertion_semantics`).
     Proved,
+    /// The solver stopped without proving or disproving the property, for
+    /// example because a configured resource limit was reached.
+    Inconclusive(String),
     /// The solver found a counter-example – a concrete set of inputs for which
     /// the function does **not** return `true` (or violates the assertion
     /// semantics).

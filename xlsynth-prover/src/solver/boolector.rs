@@ -9,6 +9,7 @@ use std::{
     sync::Arc,
 };
 
+use super::{BitVec, Response, Solver, SolverConfig, Uf};
 use boolector_sys::{
     BTOR_OPT_INCREMENTAL, BTOR_OPT_MODEL_GEN, BoolectorNode, Btor, BtorOption, boolector_add,
     boolector_and, boolector_apply, boolector_assert, boolector_bitvec_sort,
@@ -22,9 +23,6 @@ use boolector_sys::{
     boolector_uf, boolector_ugt, boolector_ugte, boolector_ult, boolector_ulte,
     boolector_unsigned_int, boolector_urem, boolector_var, boolector_xor, boolector_zero,
 };
-use xlsynth::IrValue;
-
-use super::{BitVec, Response, Solver, SolverConfig, Uf};
 use xlsynth_pir::{ir, ir_value_utils::ir_value_from_lsb0_bits_with_layout};
 
 // Low-level wrapper for the Boolector solver context.
@@ -379,13 +377,8 @@ impl Solver for Boolector {
                 ir_value_from_lsb0_bits_with_layout(ty, &bits)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
             },
-            BitVec::ZeroWidth => {
-                if matches!(ty, ir::Type::Token) {
-                    Ok(IrValue::make_token())
-                } else {
-                    panic!("Cannot get value of zero-width bitvector for type {:?}", ty)
-                }
-            }
+            BitVec::ZeroWidth => ir_value_from_lsb0_bits_with_layout(ty, &[])
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
         }
     }
 

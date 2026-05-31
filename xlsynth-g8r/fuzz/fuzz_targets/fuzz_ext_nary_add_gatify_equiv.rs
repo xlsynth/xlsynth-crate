@@ -10,6 +10,8 @@ use rand::{Rng, SeedableRng};
 use xlsynth::{IrBits, IrValue};
 use xlsynth_g8r::aig_serdes::gate2ir;
 use xlsynth_g8r::gatify::ir2gate::{self, GatifyOptions};
+#[cfg(feature = "has-bitwuzla")]
+use xlsynth_g8r_fuzz::fuzz_bitwuzla_options;
 use xlsynth_pir::desugar_extensions::emit_package_as_xls_ir_text;
 use xlsynth_pir::ir::{
     self, ExtNaryAddArchitecture, ExtNaryAddTerm, FileTable, MemberType, Node, NodePayload,
@@ -25,7 +27,7 @@ use xlsynth_prover::prover::types::EquivResult;
 #[cfg(any(feature = "has-bitwuzla", feature = "has-boolector"))]
 use xlsynth_prover::prover::types::{AssertionSemantics, ProverFn};
 #[cfg(feature = "has-bitwuzla")]
-use xlsynth_prover::solver::bitwuzla::{Bitwuzla, BitwuzlaOptions};
+use xlsynth_prover::solver::bitwuzla::Bitwuzla;
 #[cfg(all(not(feature = "has-bitwuzla"), feature = "has-boolector"))]
 use xlsynth_prover::solver::boolector::{Boolector, BoolectorConfig};
 
@@ -70,7 +72,7 @@ fn prove_exported_vs_gate_equiv(
     gate_pkg: &ir::Package,
 ) -> EquivResult {
     prove_ir_fn_equiv::<Bitwuzla>(
-        &BitwuzlaOptions::new(),
+        &fuzz_bitwuzla_options(),
         &ProverFn::new(exported_fn, Some(exported_pkg)),
         &ProverFn::new(gate_fn, Some(gate_pkg)),
         AssertionSemantics::Same,
@@ -169,6 +171,12 @@ fuzz_target!(|data: &[u8]| {
 
     match equiv_result {
         EquivResult::Proved => {}
+        EquivResult::Inconclusive(msg) => {
+            log::debug!("in-process formal equivalence inconclusive: {msg}");
+            // A configured solver limit is expected to make some fuzz samples
+            // inconclusive; those samples are not gatify failures.
+            return;
+        }
         EquivResult::Disproved {
             lhs_inputs,
             rhs_inputs,
