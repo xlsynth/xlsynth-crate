@@ -118,6 +118,7 @@ fn benchmark_mcmc_iteration(c: &mut Criterion) {
                     initial_temp,
                     objective,
                     false,
+                    false,
                     &simd_inputs,
                     &baseline_outputs,
                 )

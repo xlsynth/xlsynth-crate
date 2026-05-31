@@ -107,7 +107,7 @@ pub fn handle_prove_enum_in_bound(matches: &clap::ArgMatches, config: &Option<To
     let solver_choice = matches
         .get_one::<String>("solver")
         .map(|s| s.parse().unwrap())
-        .unwrap_or(SolverChoice::Auto);
+        .unwrap_or(SolverChoice::Bitwuzla);
 
     if let SolverChoice::Toolchain = solver_choice {
         report_cli_error_and_exit(

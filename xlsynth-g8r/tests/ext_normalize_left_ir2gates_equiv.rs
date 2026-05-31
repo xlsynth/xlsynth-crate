@@ -34,7 +34,7 @@ top fn ext_normalize_left_4b(input: bits[4] id=1) -> (bits[8], bits[3]) {
 
     let gate_ext = gatify_for_test(&pir_fn);
     let gate_desugared = gatify_for_test(&desugared_fn);
-    check_equivalence::prove_same_gate_fn_via_ir(&gate_ext, &gate_desugared)
+    check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&gate_ext, &gate_desugared)
         .expect("direct ext_normalize_left lowering should match desugared semantics");
 }
 
@@ -53,7 +53,7 @@ top fn ext_normalize_left_5b(input: bits[5] id=1) -> (bits[7], bits[4]) {
 
     let gate_ext = gatify_for_test(&pir_fn);
     let gate_desugared = gatify_for_test(&desugared_fn);
-    check_equivalence::prove_same_gate_fn_via_ir(&gate_ext, &gate_desugared)
+    check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&gate_ext, &gate_desugared)
         .expect("direct ext_normalize_left lowering should match desugared semantics");
 }
 
@@ -72,7 +72,7 @@ top fn ext_normalize_left_zeroed(input: bits[4] id=1) -> bits[8] {
 
     let gate_ext = gatify_for_test(&pir_fn);
     let gate_desugared = gatify_for_test(&desugared_fn);
-    check_equivalence::prove_same_gate_fn_via_ir(&gate_ext, &gate_desugared)
+    check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&gate_ext, &gate_desugared)
         .expect("large-offset ext_normalize_left lowering should match desugared semantics");
 }
 

@@ -28,7 +28,7 @@ cargo run -p xlsynth-autocov --bin relevant -- \
   --node-text-id 123
 ```
 
-By default it uses `--solver auto`. You can also select a solver explicitly:
+By default it uses `--solver bitwuzla`. You can also select a solver explicitly:
 
 ```bash
 cargo run -p xlsynth-autocov --bin relevant -- \

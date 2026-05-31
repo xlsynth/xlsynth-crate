@@ -94,7 +94,7 @@ fn direct_ext_clz_matches_desugared_semantics_width_sweep() {
                 continue;
             }
 
-            check_equivalence::prove_same_gate_fn_via_ir(&gate_ext, &gate_desugared).unwrap_or_else(
+            check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&gate_ext, &gate_desugared).unwrap_or_else(
             |e| {
                 panic!(
                     "expected direct ext_clz lowering to match desugared semantics for bit_count={bit_count} offset={offset}: {e}"
@@ -178,7 +178,7 @@ fn gate_graph_equivalence_old_vs_clz_rewrite_width_sweep() {
         let gate_old = gatify_for_test(&pir_fn, /* enable_rewrite_prio_encode= */ false);
         let gate_new = gatify_for_test(&pir_fn, /* enable_rewrite_prio_encode= */ true);
 
-        check_equivalence::prove_same_gate_fn_via_ir(&gate_old, &gate_new).unwrap_or_else(|e| {
+        check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&gate_old, &gate_new).unwrap_or_else(|e| {
             panic!(
                 "expected old vs rewritten CLZ lowering to be equivalent for bit_count={bit_count}: {e}"
             )

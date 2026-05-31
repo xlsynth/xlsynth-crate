@@ -149,7 +149,7 @@ impl<'a> IrEquivRequest<'a> {
 
 /// Dispatches an IR equivalence comparison using the requested solver.
 pub fn run_ir_equiv(request: &IrEquivRequest<'_>) -> Result<EquivReport, String> {
-    let choice = request.solver.unwrap_or(SolverChoice::Auto);
+    let choice = request.solver.unwrap_or(SolverChoice::Bitwuzla);
     let prover = prover_for_choice_with_limits(choice, request.tool_path, request.solver_limits);
     let (lhs_pkg, lhs_fn_dropped) = ir_utils::parse_package_and_drop_params(
         request.lhs.source,

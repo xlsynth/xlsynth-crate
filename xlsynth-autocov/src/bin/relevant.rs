@@ -10,9 +10,6 @@ use xlsynth_prover::prover::SolverChoice;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "kebab-case")]
 enum SolverArg {
-    /// Let the library select an appropriate prover based on available
-    /// features.
-    Auto,
     /// Use the external XLS tool-chain binaries (configured via tool_path or
     /// environment).
     Toolchain,
@@ -22,7 +19,6 @@ enum SolverArg {
     BitwuzlaBinary,
     #[cfg(feature = "has-easy-smt")]
     BoolectorBinary,
-    #[cfg(feature = "has-bitwuzla")]
     Bitwuzla,
     #[cfg(feature = "has-boolector")]
     Boolector,
@@ -30,7 +26,6 @@ enum SolverArg {
 
 fn solver_choice_from_arg(arg: SolverArg) -> SolverChoice {
     match arg {
-        SolverArg::Auto => SolverChoice::Auto,
         SolverArg::Toolchain => SolverChoice::Toolchain,
         #[cfg(feature = "has-easy-smt")]
         SolverArg::Z3Binary => SolverChoice::Z3Binary,
@@ -38,7 +33,6 @@ fn solver_choice_from_arg(arg: SolverArg) -> SolverChoice {
         SolverArg::BitwuzlaBinary => SolverChoice::BitwuzlaBinary,
         #[cfg(feature = "has-easy-smt")]
         SolverArg::BoolectorBinary => SolverChoice::BoolectorBinary,
-        #[cfg(feature = "has-bitwuzla")]
         SolverArg::Bitwuzla => SolverChoice::Bitwuzla,
         #[cfg(feature = "has-boolector")]
         SolverArg::Boolector => SolverChoice::Boolector,
@@ -65,9 +59,9 @@ struct Args {
 
     /// Solver selection for equivalence checking.
     ///
-    /// Values match `xlsynth-prover`'s `SolverChoice` strings (e.g. `auto`,
-    /// `toolchain`, `bitwuzla` when enabled).
-    #[arg(long, value_enum, default_value_t = SolverArg::Auto)]
+    /// Values match `xlsynth-prover`'s `SolverChoice` strings (e.g.
+    /// `bitwuzla`, `toolchain`).
+    #[arg(long, value_enum, default_value_t = SolverArg::Bitwuzla)]
     solver: SolverArg,
 
     /// Optional toolchain path (used only with `--solver toolchain`).

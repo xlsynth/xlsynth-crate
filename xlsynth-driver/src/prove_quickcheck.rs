@@ -231,7 +231,7 @@ pub fn handle_prove_quickcheck(matches: &clap::ArgMatches, config: &Option<Toolc
             .collect()
     }
 
-    let solver_choice = solver_choice_opt.unwrap_or(SolverChoice::Auto);
+    let solver_choice = solver_choice_opt.unwrap_or(SolverChoice::Bitwuzla);
     let tool_path = config.as_ref().and_then(|c| c.tool_path.as_deref());
     let prover = xlsynth_prover::prover::prover_for_choice(
         solver_choice,

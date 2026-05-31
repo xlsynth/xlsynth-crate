@@ -403,7 +403,7 @@ mod tests {
         );
 
         // Outputs should be equivalent
-        check_equivalence::prove_same_gate_fn_via_ir(&test_graph.g, &optimized_fn)
+        check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&test_graph.g, &optimized_fn)
             .expect("fraig optimization should preserve equivalence");
     }
 
@@ -433,7 +433,7 @@ mod tests {
                 .expect("fraig_optimize should not panic on dead redundant nodes");
 
         // The optimized function must remain equivalent to the original.
-        crate::check_equivalence::prove_same_gate_fn_via_ir(&gate_fn, &optimized_fn)
+        crate::check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&gate_fn, &optimized_fn)
             .expect("optimized function should be equivalent to original");
 
         // Ensure the optimized function still respects basic invariants.

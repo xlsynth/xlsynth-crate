@@ -340,9 +340,30 @@ pub fn confirm_or_deny_candidate_equivalence(
     gate_fn: &GateFn,
     candidate: &IrAigEquivalenceCandidate,
 ) -> Result<bool, String> {
+    confirm_or_deny_candidate_equivalence_with_backend(
+        pir_fn,
+        gate_fn,
+        candidate,
+        GateFormalBackend::default(),
+    )
+}
+
+/// Confirms or denies one candidate using the selected gate-formal backend.
+pub fn confirm_or_deny_candidate_equivalence_with_backend(
+    pir_fn: &ir::Fn,
+    gate_fn: &GateFn,
+    candidate: &IrAigEquivalenceCandidate,
+    backend: GateFormalBackend,
+) -> Result<bool, String> {
     let opts = GatifyOptions::all_opts_disabled();
-    let proofs =
-        prove_equivalence_candidates_varisat(pir_fn, gate_fn, &[candidate.clone()], &opts)?;
+    let proofs = prove_equivalence_candidates_with_backend_streaming(
+        pir_fn,
+        gate_fn,
+        &[candidate.clone()],
+        &opts,
+        backend,
+        |_proof| {},
+    )?;
     match &proofs[0].result {
         CandidateProofResult::Proved => Ok(true),
         CandidateProofResult::Disproved { .. } => Ok(false),

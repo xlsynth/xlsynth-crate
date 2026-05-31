@@ -261,7 +261,7 @@ pub fn run_dslx_equiv(request: &DslxEquivRequest<'_>) -> Result<EquivReport, Str
     .map_err(|err| map_prepare_error(err, request.rhs.path))?;
 
     let prover = prover_for_choice(
-        request.solver.unwrap_or(SolverChoice::Auto),
+        request.solver.unwrap_or(SolverChoice::Bitwuzla),
         request.options.tool_path,
     );
     let assert_label_filter = request.assert_label_filter;
@@ -518,7 +518,7 @@ mod tests {
         let request = DslxEquivRequest::new(lhs_module, rhs_module)
             .with_drop_params(&drop_params)
             .with_parallelism(EquivParallelism::SingleThreaded)
-            .with_solver(Some(SolverChoice::Auto))
+            .with_solver(Some(SolverChoice::Bitwuzla))
             .with_assume_enum_in_bound(true)
             .with_optimize(true);
 

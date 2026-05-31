@@ -6,10 +6,9 @@ use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r_fuzz::generate_upstream_formal_random_pir_pair;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_verify::verify_function_in_package;
-use xlsynth_pir::prove_equiv_via_toolchain::{
-    prove_ir_fn_equiv_via_toolchain, ToolchainEquivResult,
-};
 use xlsynth_pir::simple_rebase::rebase_onto;
+use xlsynth_prover::prover::types::EquivResult;
+use xlsynth_prover::prover::{SolverChoice, prover_for_choice};
 
 fn max_text_id(f: &ir::Fn) -> usize {
     f.nodes.iter().map(|n| n.text_id).max().unwrap_or(0)
@@ -52,14 +51,13 @@ fuzz_target!(|data: &[u8]| {
         panic!("rebased IR failed verification: {}", e);
     }
 
-    match prove_ir_fn_equiv_via_toolchain(&desired, &rebased) {
-        ToolchainEquivResult::Proved => {}
+    match prover_for_choice(SolverChoice::Toolchain, None).prove_ir_fn_equiv(&desired, &rebased) {
+        EquivResult::Proved => {}
         other => {
-            // Treat tool infra failure as non-sample failure; but equivalence disproved
-            // must panic.
+            // Early-return rationale: tool interruption or infrastructure failure
+            // is not a property of this sample; an equivalence disproof must panic.
             match other {
-                ToolchainEquivResult::Error(_) => return,
-                // No other variant currently, but keep match exhaustive for clarity.
+                EquivResult::Inconclusive(_) | EquivResult::Error(_) => return,
                 _ => panic!("rebase_onto failed equivalence: {:?}", other),
             }
         }

@@ -43,7 +43,7 @@ def find_fuzz_dirs(repo_root: Path) -> list[Path]:
         if not child.is_dir():
             continue
         fuzz_dir = child / "fuzz"
-        if fuzz_dir.exists():
+        if (fuzz_dir / "Cargo.toml").is_file():
             fuzz_dirs.append(fuzz_dir)
     return fuzz_dirs
 

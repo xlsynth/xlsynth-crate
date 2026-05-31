@@ -13,6 +13,8 @@ use std::collections::BTreeMap;
 pub enum EngineResult {
     Equiv,
     NotEquiv(Option<String>),
+    TimedOutOrInterrupted,
+    Error(String),
 }
 
 impl EngineResult {
@@ -40,19 +42,29 @@ pub fn prove_gate_fn_equiv_report(lhs: &GateFn, rhs: &GateFn) -> EquivReport {
         results.insert("z3".to_string(), res);
     }
 
-    let ir_checker = match check_equivalence::prove_same_gate_fn_via_ir_status(lhs, rhs) {
-        IrCheckResult::Equivalent => EngineResult::Equiv,
-        IrCheckResult::NotEquivalent => EngineResult::NotEquiv(None),
-        IrCheckResult::TimedOutOrInterrupted => {
-            EngineResult::NotEquiv(Some("TimedOutOrInterrupted".to_string()))
-        }
-        IrCheckResult::OtherProcessError(msg) => EngineResult::NotEquiv(Some(msg)),
-    };
+    let ir_checker =
+        match check_equivalence::prove_same_gate_fn_via_ir_status_via_toolchain(lhs, rhs) {
+            IrCheckResult::Equivalent => EngineResult::Equiv,
+            IrCheckResult::NotEquivalent => EngineResult::NotEquiv(None),
+            IrCheckResult::TimedOutOrInterrupted => EngineResult::TimedOutOrInterrupted,
+            IrCheckResult::OtherProcessError(msg) => EngineResult::Error(msg),
+        };
     results.insert("ir".to_string(), ir_checker);
 
+    let cadical = match prove_gate_fn_equiv_sat::prove_gate_fn_equiv_with_backend(
+        lhs,
+        rhs,
+        prove_gate_fn_equiv_sat::GateFormalBackend::Cadical,
+    ) {
+        Ok(EquivResult::Proved) => EngineResult::Equiv,
+        Ok(EquivResult::Disproved(cex)) => EngineResult::NotEquiv(Some(format!("{:?}", cex))),
+        Err(e) => EngineResult::Error(e.to_string()),
+    };
+    results.insert("cadical".to_string(), cadical);
+
     let varisat = {
-        let mut ctx = prove_gate_fn_equiv_sat::Ctx::new();
-        match prove_gate_fn_equiv_sat::prove_gate_fn_equiv(lhs, rhs, &mut ctx) {
+        let mut ctx = prove_gate_fn_equiv_sat::VarisatCtx::new();
+        match prove_gate_fn_equiv_sat::prove_gate_fn_equiv_varisat(lhs, rhs, &mut ctx) {
             EquivResult::Proved => EngineResult::Equiv,
             EquivResult::Disproved(cex) => EngineResult::NotEquiv(Some(format!("{:?}", cex))),
         }

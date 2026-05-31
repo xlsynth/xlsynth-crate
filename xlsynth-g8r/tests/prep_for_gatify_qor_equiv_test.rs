@@ -17,7 +17,7 @@ fn parse_top_fn(ir_text: &str) -> ir::Fn {
 fn assert_ir_fns_equivalent(orig_fn: &ir::Fn, prepared_fn: &ir::Fn) {
     let orig_pkg_text = format!("package orig\n\ntop {}", orig_fn);
     let prepared_pkg_text = format!("package prepared\n\ntop {}", prepared_fn);
-    check_equivalence::check_equivalence(&orig_pkg_text, &prepared_pkg_text)
+    check_equivalence::check_equivalence_via_toolchain(&orig_pkg_text, &prepared_pkg_text)
         .expect("prepared PIR should be equivalent to original PIR");
 }
 
@@ -71,9 +71,9 @@ top fn shift_sel(data_hi: bits[9] id=1, data_lo: bits[3] id=2, pred: bits[1] id=
     let (gate_old, stats_old) = gatify_without_prep(&pir_fn);
     let (gate_new, stats_new) = gatify_without_prep(&prepared);
 
-    check_equivalence::prove_same_gate_fn_via_ir(&gate_old, &gate_new)
+    check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&gate_old, &gate_new)
         .expect("old vs rewritten shift_sel lowerings should be equivalent");
-    check_equivalence::validate_same_fn(&pir_fn, &gate_new)
+    check_equivalence::validate_same_fn_via_toolchain(&pir_fn, &gate_new)
         .expect("rewritten shift_sel lowering should match source PIR");
 
     assert_eq!(
@@ -121,9 +121,9 @@ top fn shift_priority(data_hi: bits[8] id=1, data_lo: bits[4] id=2, p0: bits[1] 
     let (gate_old, stats_old) = gatify_without_prep(&pir_fn);
     let (gate_new, stats_new) = gatify_without_prep(&prepared);
 
-    check_equivalence::prove_same_gate_fn_via_ir(&gate_old, &gate_new)
+    check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&gate_old, &gate_new)
         .expect("old vs rewritten shift_priority lowerings should be equivalent");
-    check_equivalence::validate_same_fn(&pir_fn, &gate_new)
+    check_equivalence::validate_same_fn_via_toolchain(&pir_fn, &gate_new)
         .expect("rewritten shift_priority lowering should match source PIR");
 
     assert_eq!(
@@ -172,9 +172,9 @@ top fn add_xor_and(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
     let (gate_old, stats_old) = gatify_without_prep(&pir_fn);
     let (gate_new, stats_new) = gatify_without_prep(&prepared);
 
-    check_equivalence::prove_same_gate_fn_via_ir(&gate_old, &gate_new)
+    check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&gate_old, &gate_new)
         .expect("old vs rewritten add_xor_and lowerings should be equivalent");
-    check_equivalence::validate_same_fn(&pir_fn, &gate_new)
+    check_equivalence::validate_same_fn_via_toolchain(&pir_fn, &gate_new)
         .expect("rewritten add_xor_and lowering should match source PIR");
 
     assert_eq!(

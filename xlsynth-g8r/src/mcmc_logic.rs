@@ -24,6 +24,9 @@ use crate::aig::gate::GateFn;
 use crate::aig::{dce, get_summary_stats};
 use crate::aig_serdes::g8r::{emit_g8r, encode_g8r_binary, load_gate_fn_from_path};
 use crate::aig_sim::gate_simd::{self, Vec256};
+use crate::check_equivalence::{
+    IrCheckResult, prove_same_gate_fn_via_ir_status, prove_same_gate_fn_via_ir_status_via_toolchain,
+};
 use crate::gatify::ir2gate::{self, GatifyOptions};
 use crate::prove_gate_fn_equiv_common::{EquivResult, GateFormalBackend};
 use crate::prove_gate_fn_equiv_sat::{ValidationError, prove_gate_fn_equiv_with_backend};
@@ -124,6 +127,7 @@ pub fn mcmc_iteration(
     temp: f64,
     objective: Objective,
     paranoid: bool,
+    xls_cross_check: bool,
     simd_inputs: &[Vec256],
     baseline_outputs: &Vec<Vec256>,
 ) -> std::result::Result<McmcIterationOutput, ValidationError> {
@@ -218,16 +222,43 @@ pub fn mcmc_iteration(
                     context.gate_formal_backend,
                 )?;
                 if paranoid {
-                    let external_res = crate::check_equivalence::prove_same_gate_fn_via_ir(
-                        &current_gfn,
-                        &candidate_gfn,
-                    )
-                    .is_ok();
-                    if sat_res != external_res {
+                    let native_ir_status =
+                        prove_same_gate_fn_via_ir_status(&current_gfn, &candidate_gfn);
+                    let native_ir_res = match native_ir_status {
+                        IrCheckResult::Equivalent => true,
+                        IrCheckResult::NotEquivalent => false,
+                        other => {
+                            return Err(ValidationError::IrEquivalenceError(format!(
+                                "native IR equivalence checker failed: {other:?}"
+                            )));
+                        }
+                    };
+                    if sat_res != native_ir_res {
                         panic!(
-                            "[mcmc] ERROR: SAT oracle and external check_equivalence_with_top DISAGREE in mcmc_iteration: SAT oracle: {}, external: {}",
-                            sat_res, external_res
+                            "[mcmc] ERROR: gate-level SAT oracle and native IR Bitwuzla checker DISAGREE in mcmc_iteration: gate-level SAT oracle: {}, native IR Bitwuzla: {}",
+                            sat_res, native_ir_res
                         );
+                    }
+                    if xls_cross_check {
+                        let xls_ir_status = prove_same_gate_fn_via_ir_status_via_toolchain(
+                            &current_gfn,
+                            &candidate_gfn,
+                        );
+                        let xls_ir_res = match xls_ir_status {
+                            IrCheckResult::Equivalent => true,
+                            IrCheckResult::NotEquivalent => false,
+                            other => {
+                                return Err(ValidationError::IrEquivalenceError(format!(
+                                    "XLS IR equivalence checker failed: {other:?}"
+                                )));
+                            }
+                        };
+                        if sat_res != xls_ir_res {
+                            panic!(
+                                "[mcmc] ERROR: gate-level SAT oracle and XLS IR checker DISAGREE in mcmc_iteration: gate-level SAT oracle: {}, XLS IR: {}",
+                                sat_res, xls_ir_res
+                            );
+                        }
                     }
                 }
                 sat_res
@@ -314,6 +345,7 @@ pub fn mcmc(
     objective: Objective,
     periodic_dump_dir: Option<PathBuf>,
     paranoid: bool,
+    xls_cross_check: bool,
     checkpoint_interval: u64,
     progress_interval: u64,
     shared_best: Option<Arc<Best>>,
@@ -488,6 +520,7 @@ pub fn mcmc(
             current_temp,
             objective,
             paranoid,
+            xls_cross_check,
             &simd_inputs,
             &baseline_outputs,
         )?;
@@ -656,6 +689,7 @@ pub fn mcmc(
                         global_iter,
                         "Iter checkpoint",
                         gate_formal_backend,
+                        xls_cross_check,
                     )?;
                 }
             }
@@ -679,6 +713,7 @@ pub fn mcmc(
             options.start_iteration + iterations_count,
             "Final checkpoint",
             gate_formal_backend,
+            xls_cross_check,
         )?;
         if progress_interval > 0 {
             let elapsed_secs = start_time.elapsed().as_secs_f64();
@@ -834,15 +869,30 @@ fn write_checkpoint(
     iter: u64,
     context: &str,
     gate_formal_backend: GateFormalBackend,
+    xls_cross_check: bool,
 ) -> Result<()> {
     // Cross-check equivalence
     let equiv_ok_sat = oracle_equiv_sat_with_backend(original_gfn, best_gfn, gate_formal_backend)?;
-    use crate::check_equivalence::{IrCheckResult, prove_same_gate_fn_via_ir_status};
 
-    let ir_status = prove_same_gate_fn_via_ir_status(original_gfn, best_gfn);
-    let equiv_ok_external = matches!(ir_status, IrCheckResult::Equivalent);
+    let native_ir_status = prove_same_gate_fn_via_ir_status(original_gfn, best_gfn);
+    let equiv_ok_native_ir = matches!(native_ir_status, IrCheckResult::Equivalent);
+    let xls_ir_status = if xls_cross_check {
+        Some(prove_same_gate_fn_via_ir_status_via_toolchain(
+            original_gfn,
+            best_gfn,
+        ))
+    } else {
+        None
+    };
+    let xls_ir_disagrees = match xls_ir_status.as_ref() {
+        Some(IrCheckResult::Equivalent) => !equiv_ok_sat,
+        Some(IrCheckResult::NotEquivalent) => equiv_ok_sat,
+        Some(IrCheckResult::TimedOutOrInterrupted | IrCheckResult::OtherProcessError(_)) | None => {
+            false
+        }
+    };
 
-    if equiv_ok_sat != equiv_ok_external || !equiv_ok_sat {
+    if equiv_ok_sat != equiv_ok_native_ir || xls_ir_disagrees || !equiv_ok_sat {
         // Ensure we persist the disagreeing pair for offline triage.
         if let Some(parent_dir) = g8r_path.parent() {
             let dump_dir = parent_dir.join("equiv_failures");
@@ -873,27 +923,38 @@ fn write_checkpoint(
         }
 
         return Err(anyhow::anyhow!(
-            "[mcmc] ERROR: Equivalence disagreement at iter {} (sat:{}, external:{})",
+            "[mcmc] ERROR: Equivalence disagreement at iter {} (gate SAT:{}, native IR Bitwuzla:{}, XLS IR:{:?})",
             iter,
             equiv_ok_sat,
-            equiv_ok_external
+            equiv_ok_native_ir,
+            xls_ir_status
         ));
     }
-    match ir_status {
+    match native_ir_status {
         IrCheckResult::Equivalent => {}
-        IrCheckResult::TimedOutOrInterrupted => {
+        other => {
+            return Err(anyhow::anyhow!(
+                "[mcmc] ERROR: Native IR Bitwuzla equivalence checker failed at iter {}: {:?}",
+                iter,
+                other
+            ));
+        }
+    }
+    match xls_ir_status {
+        Some(IrCheckResult::Equivalent) | None => {}
+        Some(IrCheckResult::TimedOutOrInterrupted) => {
             eprintln!(
-                "[mcmc] Warning: External IR equivalence check timed out or was interrupted (iteration {}). Proceeding with SAT oracle result only.",
+                "[mcmc] Warning: XLS IR equivalence check timed out or was interrupted (iteration {}). Proceeding with native proof results only.",
                 iter
             );
         }
-        IrCheckResult::OtherProcessError(ref msg) => {
+        Some(IrCheckResult::OtherProcessError(ref msg)) => {
             eprintln!(
-                "[mcmc] Warning: External IR equivalence checker failed at iter {}: {}",
+                "[mcmc] Warning: XLS IR equivalence checker failed at iter {}: {}",
                 iter, msg
             );
         }
-        IrCheckResult::NotEquivalent => {}
+        Some(IrCheckResult::NotEquivalent) => {}
     }
     let best_design = SequentialGateFn::from_gate_fn(best_gfn.clone());
     if let Err(e) = std::fs::write(g8r_path, emit_g8r(&best_design)) {

@@ -154,18 +154,14 @@ fn prove_candidate_equivalent(
 }
 
 fn make_in_process_prover() -> Box<dyn Prover> {
-    if cfg!(not(any(
-        feature = "has-bitwuzla",
-        feature = "has-boolector"
-    ))) {
+    if cfg!(not(feature = "has-bitwuzla")) {
         panic!(
-            "fuzz_pir_transform_arbitrary refuses SolverChoice::Auto when it \
-             would fall back to Toolchain; enable with-bitwuzla-system, \
-             with-bitwuzla-built, with-boolector-system, or with-boolector-built"
+            "fuzz_pir_transform_arbitrary requires in-process Bitwuzla; enable \
+             with-bitwuzla-system or with-bitwuzla-built"
         );
     }
     prover_for_choice_with_limits(
-        SolverChoice::Auto,
+        SolverChoice::Bitwuzla,
         None,
         SolverLimits::with_time_limit_per_ms(FUZZ_SOLVER_TIME_LIMIT_PER_MS),
     )

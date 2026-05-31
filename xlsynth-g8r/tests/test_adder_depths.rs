@@ -101,9 +101,9 @@ fn adder_depths() {
         let bk = make_brent_kung(bits);
         let cs = make_carry_select(bits, &default_parts(bits));
 
-        check_equivalence::prove_same_gate_fn_via_ir(&ripple, &ks).unwrap();
-        check_equivalence::prove_same_gate_fn_via_ir(&ripple, &bk).unwrap();
-        check_equivalence::prove_same_gate_fn_via_ir(&ripple, &cs).unwrap();
+        check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&ripple, &ks).unwrap();
+        check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&ripple, &bk).unwrap();
+        check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&ripple, &cs).unwrap();
 
         let rd = depth(&ripple);
         let ksd = depth(&ks);

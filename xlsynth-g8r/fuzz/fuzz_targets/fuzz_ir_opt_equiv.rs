@@ -128,8 +128,11 @@ fuzz_target!(|data: &[u8]| {
 
     // Check equivalence using the external tool first, specifying the top function
     let opt_ir = optimized_pkg.to_string();
-    let ext_equiv =
-        check_equivalence::check_equivalence_with_top(&orig_ir, &opt_ir, Some(top_fn_name), false);
+    let ext_equiv = check_equivalence::check_equivalence_with_top_via_toolchain(
+        &orig_ir,
+        &opt_ir,
+        Some(top_fn_name),
+    );
     #[cfg(feature = "has-bitwuzla")]
     {
         let bitwuzla_result = prove_ir_fn_equiv::<Bitwuzla>(

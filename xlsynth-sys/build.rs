@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod artifact_config;
+
+use artifact_config::{ArtifactPaths, ExplicitDsoPath};
 use sha2::Digest;
 use std::io::BufRead;
 #[cfg(unix)]
@@ -10,17 +13,6 @@ use std::process::Command;
 
 const RELEASE_LIB_VERSION_TAG: &str = "v0.50.1";
 const MAX_DOWNLOAD_ATTEMPTS: u32 = 6;
-
-struct ArtifactPaths {
-    dso_path: String,
-    dslx_stdlib_path: String,
-}
-
-struct ExplicitDsoPath {
-    link_name: String,
-    path: PathBuf,
-    parent_dir: PathBuf,
-}
 
 #[derive(Clone, Copy)]
 enum LinkDirectiveMode {
@@ -545,135 +537,17 @@ fn write_artifact_paths_rs(out_dir: &Path, artifact_paths: &ArtifactPaths) {
     });
 }
 
-fn parse_artifact_config_string(
-    config_table: &toml::Table,
-    config_path: &Path,
-    key: &str,
-) -> String {
-    config_table
-        .get(key)
-        .and_then(toml::Value::as_str)
-        .unwrap_or_else(|| {
-            panic!(
-                "XLSYNTH_ARTIFACT_CONFIG {} must define string key {:?}",
-                config_path.display(),
-                key
-            )
-        })
-        .to_string()
-}
-
-fn resolve_artifact_config_dir(config_path: &Path) -> &Path {
-    config_path.parent().unwrap_or_else(|| {
-        panic!(
-            "XLSYNTH_ARTIFACT_CONFIG should have a parent directory: {}",
-            config_path.display()
-        )
-    })
-}
-
-fn parse_artifact_config_env_path() -> Option<PathBuf> {
-    let config_path = PathBuf::from(std::env::var_os("XLSYNTH_ARTIFACT_CONFIG")?);
-    if config_path.is_absolute() {
-        Some(config_path)
-    } else {
-        panic!(
-            concat!(
-                "XLSYNTH_ARTIFACT_CONFIG must be an absolute path; got relative path: {}.\n",
-                "The dso_path and dslx_stdlib_path values inside that TOML may still be relative ",
-                "to the TOML file's directory."
-            ),
-            config_path.display()
-        );
-    }
-}
-
-fn parse_artifact_config_path(config_table: &toml::Table, config_path: &Path, key: &str) -> String {
-    let raw_path = PathBuf::from(parse_artifact_config_string(config_table, config_path, key));
-    let resolved_path = if raw_path.is_absolute() {
-        raw_path
-    } else {
-        resolve_artifact_config_dir(config_path).join(raw_path)
-    };
-    resolved_path.display().to_string()
-}
-
 fn load_artifact_paths_from_config() -> Option<ArtifactPaths> {
-    let config_path = parse_artifact_config_env_path()?;
+    let config_path = artifact_config::parse_artifact_config_env_path(std::env::var_os(
+        "XLSYNTH_ARTIFACT_CONFIG",
+    ))
+    .unwrap_or_else(|err| panic!("{}", err))?;
     println!("cargo:rerun-if-changed={}", config_path.display());
 
-    let config_contents = std::fs::read_to_string(&config_path).unwrap_or_else(|err| {
-        panic!(
-            "Failed to read XLSYNTH_ARTIFACT_CONFIG {}: {}",
-            config_path.display(),
-            err
-        )
-    });
-    let config_value: toml::Value = toml::from_str(&config_contents).unwrap_or_else(|err| {
-        panic!(
-            "Failed to parse XLSYNTH_ARTIFACT_CONFIG {} as TOML: {}",
-            config_path.display(),
-            err
-        )
-    });
-    let config_table = config_value.as_table().unwrap_or_else(|| {
-        panic!(
-            "XLSYNTH_ARTIFACT_CONFIG {} must contain a top-level TOML table",
-            config_path.display()
-        )
-    });
-
-    Some(ArtifactPaths {
-        dso_path: parse_artifact_config_path(config_table, &config_path, "dso_path"),
-        dslx_stdlib_path: parse_artifact_config_path(
-            config_table,
-            &config_path,
-            "dslx_stdlib_path",
-        ),
-    })
-}
-
-fn validate_explicit_dso_path(dso_path: &Path) -> ExplicitDsoPath {
-    let dso_dir = dso_path.parent().unwrap_or_else(|| {
-        panic!(
-            "Explicit XLS DSO path must have a parent directory: {}",
-            dso_path.display()
-        )
-    });
-    let dso_name = dso_path.file_name().unwrap_or_else(|| {
-        panic!(
-            "Explicit XLS DSO path must name a shared library file: {}",
-            dso_path.display()
-        )
-    });
-    let dso_name = dso_name.to_str().unwrap_or_else(|| {
-        panic!(
-            "Explicit XLS DSO path must be valid UTF-8: {}",
-            dso_path.display()
-        )
-    });
-    let (dso_name, ext) = dso_name.rsplit_once('.').unwrap_or_else(|| {
-        panic!(
-            "Explicit XLS DSO path must end with a shared library extension: {}",
-            dso_path.display()
-        )
-    });
-    match ext {
-        "dylib" | "so" => {}
-        _ => {
-            panic!("Expected shared library extension: {:?}", ext);
-        }
-    }
-    assert!(
-        dso_name.starts_with("lib"),
-        "DSO name should start with 'lib'; dso_name: {:?}",
-        dso_name
-    );
-    ExplicitDsoPath {
-        link_name: dso_name[3..].to_string(),
-        path: dso_path.to_path_buf(),
-        parent_dir: dso_dir.to_path_buf(),
-    }
+    Some(
+        artifact_config::load_artifact_paths_from_config_path(&config_path)
+            .unwrap_or_else(|err| panic!("{}", err)),
+    )
 }
 
 fn emit_link_directives_for_explicit_dso(dso_path: &ExplicitDsoPath) {
@@ -700,7 +574,8 @@ fn emit_explicit_artifact_override(
         source_name, artifact_paths.dso_path, artifact_paths.dslx_stdlib_path
     );
     write_artifact_paths_rs(out_dir, artifact_paths);
-    let dso_path = validate_explicit_dso_path(Path::new(&artifact_paths.dso_path));
+    let dso_path = artifact_config::validate_explicit_dso_path(Path::new(&artifact_paths.dso_path))
+        .unwrap_or_else(|err| panic!("{}", err));
     match link_directive_mode {
         LinkDirectiveMode::Native => emit_link_directives_for_explicit_dso(&dso_path),
         LinkDirectiveMode::Declared => {

@@ -450,7 +450,7 @@ mod tests {
 
         log::info!("Replaced function:\n{}", replaced_fn.to_string());
 
-        check_equivalence::prove_same_gate_fn_via_ir(original_fn, &replaced_fn)
+        check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(original_fn, &replaced_fn)
             .expect("original and replaced functions should be equivalent");
 
         let stats: SummaryStats = get_summary_stats(&replaced_fn);
@@ -505,9 +505,10 @@ mod tests {
             replaced_fn.to_string()
         );
 
-        check_equivalence::prove_same_gate_fn_via_ir(original_fn, &replaced_fn).expect(
-            "original and replaced functions should be equivalent after multiple substitutions",
-        );
+        check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(original_fn, &replaced_fn)
+            .expect(
+                "original and replaced functions should be equivalent after multiple substitutions",
+            );
 
         let stats: SummaryStats = get_summary_stats(&replaced_fn);
         let original_stats: SummaryStats = get_summary_stats(original_fn);
@@ -540,7 +541,7 @@ mod tests {
             replaced_fn.to_string()
         );
 
-        check_equivalence::prove_same_gate_fn_via_ir(original_fn, &replaced_fn)
+        check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(original_fn, &replaced_fn)
             .expect("Replacing AND(true, true) with true should preserve equivalence");
 
         assert_eq!(replaced_fn.outputs.len(), 1);

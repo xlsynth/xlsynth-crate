@@ -288,9 +288,10 @@ mod tests {
             let loaded = load_aiger_binary(&aiger, GateBuilderOptions::no_opt()).unwrap();
             let schema = GateFnInterfaceSchema::from_pir_fn(&sample.g8r_fn).unwrap();
             let repacked = repack_gate_fn_interface_with_schema(loaded.gate_fn, &schema).unwrap();
-            check_equivalence::validate_same_fn(&sample.g8r_fn, &repacked).unwrap_or_else(|e| {
-                panic!("binary AIGER roundtrip failed for {}: {}", case.name, e)
-            });
+            check_equivalence::validate_same_fn_via_toolchain(&sample.g8r_fn, &repacked)
+                .unwrap_or_else(|e| {
+                    panic!("binary AIGER roundtrip failed for {}: {}", case.name, e)
+                });
         }
     }
 

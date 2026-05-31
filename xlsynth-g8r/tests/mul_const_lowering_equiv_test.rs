@@ -135,12 +135,14 @@ fn prove_case(width: usize, case: &ConstantCase, literal_side: LiteralSide) {
             width, case.name, case.value, literal_side, e
         )
     });
-    check_equivalence::validate_same_fn(pir_fn, &output.gate_fn).unwrap_or_else(|e| {
-        panic!(
-            "equivalence proof failed for width={} case={} constant={} side={:?}: {}",
-            width, case.name, case.value, literal_side, e
-        )
-    });
+    check_equivalence::validate_same_fn_via_toolchain(pir_fn, &output.gate_fn).unwrap_or_else(
+        |e| {
+            panic!(
+                "equivalence proof failed for width={} case={} constant={} side={:?}: {}",
+                width, case.name, case.value, literal_side, e
+            )
+        },
+    );
 }
 
 #[test]

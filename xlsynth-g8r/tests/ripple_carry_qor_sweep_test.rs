@@ -73,7 +73,7 @@ fn gather_ripple_carry_qor_rows() -> Vec<RippleCarryQorRow> {
     for bit_count in [1usize, 2, 3, 4, 5, 8, 16, 32, 64] {
         let old = make_ripple_carry_old(bit_count);
         let public = make_ripple_carry_public(bit_count);
-        check_equivalence::prove_same_gate_fn_via_ir(&old, &public)
+        check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&old, &public)
             .expect("old and public ripple-carry lowerings should be equivalent");
         let old_stats = stats_for_gate_fn(&old);
         let public_stats = stats_for_gate_fn(&public);

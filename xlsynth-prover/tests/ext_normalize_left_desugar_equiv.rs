@@ -62,13 +62,6 @@ fn ext_normalize_left_equivalent_to_desugared_export_form_and_exports_to_upstrea
         );
         match res {
             EquivResult::Proved => {}
-            EquivResult::ToolchainDisproved(msg)
-                if msg.contains("Unknown operation")
-                    && msg.contains("ext_normalize_left")
-                    && msg.contains("string-to-op conversion") =>
-            {
-                return;
-            }
             _ => panic!(
                 "formal equivalence failed at input_width={} normalized_bit_count={} shift_offset={} clz_bit_count={:?}: {:?}",
                 input_width, normalized_bit_count, shift_offset, clz_bit_count, res

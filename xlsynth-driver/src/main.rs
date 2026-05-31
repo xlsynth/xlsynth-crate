@@ -143,6 +143,28 @@ use xlsynth_prover::prover::types::QuickCheckAssertionSemantics;
 static DEFAULT_ADDER_MAPPING: Lazy<String> =
     Lazy::new(|| xlsynth_g8r::ir2gate_utils::AdderMapping::default().to_string());
 
+/// Builds the shared solver-selection argument used by formal subcommands.
+fn solver_arg(help: &'static str) -> Arg {
+    Arg::new("solver")
+        .long("solver")
+        .value_name("SOLVER")
+        .help(help)
+        .value_parser([
+            #[cfg(feature = "has-easy-smt")]
+            "z3-binary",
+            #[cfg(feature = "has-easy-smt")]
+            "bitwuzla-binary",
+            #[cfg(feature = "has-easy-smt")]
+            "boolector-binary",
+            "bitwuzla",
+            #[cfg(feature = "has-boolector")]
+            "boolector",
+            "toolchain",
+        ])
+        .default_value("bitwuzla")
+        .action(ArgAction::Set)
+}
+
 #[derive(Deserialize)]
 struct XlsynthToolchain {
     toolchain: ToolchainConfig,
@@ -720,28 +742,7 @@ fn main() {
             clap::Command::new("dslx-fn-prove-assertions")
                 .about("Prove that assertions reachable from a DSLX function cannot fail")
                 .add_dslx_input_args(true)
-                .arg(
-                    clap::Arg::new("solver")
-                        .long("solver")
-                        .value_name("SOLVER")
-                        .help("Select solver backend")
-                        .value_parser([
-                            "auto",
-                            #[cfg(feature = "has-easy-smt")]
-                            "z3-binary",
-                            #[cfg(feature = "has-easy-smt")]
-                            "bitwuzla-binary",
-                            #[cfg(feature = "has-easy-smt")]
-                            "boolector-binary",
-                            #[cfg(feature = "has-bitwuzla")]
-                            "bitwuzla",
-                            #[cfg(feature = "has-boolector")]
-                            "boolector",
-                            "toolchain",
-                        ])
-                        .default_value("auto")
-                        .action(clap::ArgAction::Set),
-                )
+                .arg(solver_arg("Select solver backend"))
                 .arg(
                     clap::Arg::new("assert_label_filter")
                         .long("assert-label-filter")
@@ -1129,28 +1130,9 @@ fn main() {
                         .long("rhs_ir_top")
                         .help("The top-level entry point for the right-hand side IR"),
                 )
-                .arg(
-                    Arg::new("solver")
-                        .long("solver")
-                        .value_name("SOLVER")
-                        .help("Use the specified solver for equivalence checking (requires --features=with-easy-smt)")
-                        .value_parser([
-                            "auto",
-                            #[cfg(feature = "has-easy-smt")]
-                            "z3-binary",
-                            #[cfg(feature = "has-easy-smt")]
-                            "bitwuzla-binary",
-                            #[cfg(feature = "has-easy-smt")]
-                            "boolector-binary",
-                            #[cfg(feature = "has-bitwuzla")]
-                            "bitwuzla",
-                            #[cfg(feature = "has-boolector")]
-                            "boolector",
-                            "toolchain",
-                        ])
-                        .default_value("auto")
-                        .action(ArgAction::Set),
-                )
+                .arg(solver_arg(
+                    "Use the specified solver for equivalence checking",
+                ))
                 .add_bool_arg(
                     "flatten_aggregates",
                     "Flatten tuple and array types to bits for equivalence checking",
@@ -1232,28 +1214,9 @@ fn main() {
                         .long("top")
                         .help("Top-level block name for both IRs"),
                 )
-                .arg(
-                    Arg::new("solver")
-                        .long("solver")
-                        .value_name("SOLVER")
-                        .help("Use the specified solver for equivalence checking (requires --features=with-easy-smt)")
-                        .value_parser([
-                            "auto",
-                            #[cfg(feature = "has-easy-smt")]
-                            "z3-binary",
-                            #[cfg(feature = "has-easy-smt")]
-                            "bitwuzla-binary",
-                            #[cfg(feature = "has-easy-smt")]
-                            "boolector-binary",
-                            #[cfg(feature = "has-bitwuzla")]
-                            "bitwuzla",
-                            #[cfg(feature = "has-boolector")]
-                            "boolector",
-                            "toolchain",
-                        ])
-                        .default_value("auto")
-                        .action(ArgAction::Set),
-                )
+                .arg(solver_arg(
+                    "Use the specified solver for equivalence checking",
+                ))
                 .add_bool_arg(
                     "flatten_aggregates",
                     "Flatten tuple and array types to bits for equivalence checking",
@@ -1525,6 +1488,9 @@ fn main() {
                         .value_name("DIR")
                         .help("Directory to write outputs (original IR copies). If omitted, a temp directory is created and printed."),
                 )
+                .arg(solver_arg(
+                    "Use the specified solver for equivalence checking",
+                ))
                 .add_bool_arg(
                     "show_discrepancies",
                     "Show per-depth discrepancy signatures in verbose form",
@@ -1567,6 +1533,9 @@ fn main() {
                         .value_name("DIR")
                         .help("Directory to write outputs (JSON, patched .ir). If omitted, a temp directory is created and printed."),
                 )
+                .arg(solver_arg(
+                    "Use the specified solver for equivalence checking",
+                ))
                 .arg(
                     Arg::new("compute_text_diff")
                         .long("compute-text-diff")
@@ -2388,28 +2357,9 @@ fn main() {
                         .required(true)
                         .index(2),
                 )
-                .arg(
-                    Arg::new("solver")
-                        .long("solver")
-                        .value_name("SOLVER")
-                        .help("Use the specified solver for equivalence checking")
-                        .value_parser([
-                            "auto",
-                            #[cfg(feature = "has-easy-smt")]
-                            "z3-binary",
-                            #[cfg(feature = "has-easy-smt")]
-                            "bitwuzla-binary",
-                            #[cfg(feature = "has-easy-smt")]
-                            "boolector-binary",
-                            #[cfg(feature = "has-bitwuzla")]
-                            "bitwuzla",
-                            #[cfg(feature = "has-boolector")]
-                            "boolector",
-                            "toolchain",
-                        ])
-                        .default_value("auto")
-                        .action(ArgAction::Set),
-                )
+                .arg(solver_arg(
+                    "Use the specified solver for equivalence checking",
+                ))
                 .arg(
                     clap::Arg::new("output_json")
                         .long("output_json")
@@ -2434,28 +2384,9 @@ fn main() {
                         .index(2),
                 )
                 .add_ir_top_arg(false)
-                .arg(
-                    Arg::new("solver")
-                        .long("solver")
-                        .value_name("SOLVER")
-                        .help("Use the specified solver for equivalence checking")
-                        .value_parser([
-                            "auto",
-                            #[cfg(feature = "has-easy-smt")]
-                            "z3-binary",
-                            #[cfg(feature = "has-easy-smt")]
-                            "bitwuzla-binary",
-                            #[cfg(feature = "has-easy-smt")]
-                            "boolector-binary",
-                            #[cfg(feature = "has-bitwuzla")]
-                            "bitwuzla",
-                            #[cfg(feature = "has-boolector")]
-                            "boolector",
-                            "toolchain",
-                        ])
-                        .default_value("auto")
-                        .action(ArgAction::Set),
-                )
+                .arg(solver_arg(
+                    "Use the specified solver for equivalence checking",
+                ))
                 .add_bool_arg(
                     "flatten_aggregates",
                     "Flatten tuple and array types to bits for equivalence checking",
@@ -2582,28 +2513,9 @@ fn main() {
                         .required(true)
                         .index(2),
                 )
-                .arg(
-                    Arg::new("solver")
-                        .long("solver")
-                        .value_name("SOLVER")
-                        .help("Use the specified solver for equivalence checking")
-                        .value_parser([
-                            "auto",
-                            #[cfg(feature = "has-easy-smt")]
-                            "z3-binary",
-                            #[cfg(feature = "has-easy-smt")]
-                            "bitwuzla-binary",
-                            #[cfg(feature = "has-easy-smt")]
-                            "boolector-binary",
-                            #[cfg(feature = "has-bitwuzla")]
-                            "bitwuzla",
-                            #[cfg(feature = "has-boolector")]
-                            "boolector",
-                            "toolchain",
-                        ])
-                        .default_value("auto")
-                        .action(ArgAction::Set),
-                )
+                .arg(solver_arg(
+                    "Use the specified solver for equivalence checking",
+                ))
                 .arg(
                     clap::Arg::new("output_json")
                         .long("output_json")
@@ -2635,28 +2547,9 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                         .index(2),
                 )
                 .add_ir_top_arg(false)
-                .arg(
-                    Arg::new("solver")
-                        .long("solver")
-                        .value_name("SOLVER")
-                        .help("Use the specified solver for equivalence checking (requires --features=with-easy-smt)")
-                        .value_parser([
-                            "auto",
-                            #[cfg(feature = "has-easy-smt")]
-                            "z3-binary",
-                            #[cfg(feature = "has-easy-smt")]
-                            "bitwuzla-binary",
-                            #[cfg(feature = "has-easy-smt")]
-                            "boolector-binary",
-                            #[cfg(feature = "has-bitwuzla")]
-                            "bitwuzla",
-                            #[cfg(feature = "has-boolector")]
-                            "boolector",
-                            "toolchain",
-                        ])
-                        .default_value("auto")
-                        .action(ArgAction::Set),
-                )
+                .arg(solver_arg(
+                    "Use the specified solver for equivalence checking",
+                ))
                 .add_bool_arg(
                     "flatten_aggregates",
                     "Flatten tuple and array types to bits for equivalence checking",
@@ -3271,28 +3164,7 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                         .value_name("FILTER")
                         .help("Regular expression; prove only quickcheck functions whose name fully matches the pattern"),
                 )
-                .arg(
-                    clap::Arg::new("solver")
-                        .long("solver")
-                        .value_name("SOLVER")
-                        .help("Select solver backend")
-                        .value_parser([
-                            "auto",
-                            #[cfg(feature = "has-easy-smt")]
-                            "z3-binary",
-                            #[cfg(feature = "has-easy-smt")]
-                            "bitwuzla-binary",
-                            #[cfg(feature = "has-easy-smt")]
-                            "boolector-binary",
-                            #[cfg(feature = "has-bitwuzla")]
-                            "bitwuzla",
-                            #[cfg(feature = "has-boolector")]
-                            "boolector",
-                            "toolchain",
-                        ])
-                        .default_value("auto")
-                        .action(clap::ArgAction::Set),
-                )
+                .arg(solver_arg("Select solver backend"))
                 .arg(
                     clap::Arg::new("assertion_semantics")
                         .long("assertion-semantics")
@@ -3336,28 +3208,7 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                         .required(true)
                         .action(clap::ArgAction::Append),
                 )
-                .arg(
-                    clap::Arg::new("solver")
-                        .long("solver")
-                        .value_name("SOLVER")
-                        .help("Select solver backend")
-                        .value_parser([
-                            "auto",
-                            #[cfg(feature = "has-easy-smt")]
-                            "z3-binary",
-                            #[cfg(feature = "has-easy-smt")]
-                            "bitwuzla-binary",
-                            #[cfg(feature = "has-easy-smt")]
-                            "boolector-binary",
-                            #[cfg(feature = "has-bitwuzla")]
-                            "bitwuzla",
-                            #[cfg(feature = "has-boolector")]
-                            "boolector",
-                            "toolchain",
-                        ])
-                        .default_value("auto")
-                        .action(clap::ArgAction::Set),
-                )
+                .arg(solver_arg("Select solver backend"))
                 .arg(
                     clap::Arg::new("output_json")
                         .long("output_json")
@@ -3456,30 +3307,9 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                     "type_inference_v2",
                     "Enable the experimental type-inference v2 algorithm (external toolchain only)",
                 )
-                .arg(
-                    clap::Arg::new("solver")
-                        .long("solver")
-                        .value_name("SOLVER")
-                        .help("Use the specified solver for equivalence checking")
-                        .value_parser([
-                            "auto",
-                            #[cfg(feature = "has-easy-smt")]
-                            "z3-binary",
-                            #[cfg(feature = "has-easy-smt")]
-                            "bitwuzla-binary",
-                            #[cfg(feature = "has-easy-smt")]
-                            "boolector-binary",
-                            #[cfg(feature = "has-bitwuzla")]
-                            "bitwuzla",
-                            #[cfg(feature = "has-boolector")]
-                            "boolector",
-                            #[cfg(feature = "has-boolector")]
-                            "boolector-legacy",
-                            "toolchain",
-                        ])
-                        .default_value("auto")
-                        .action(clap::ArgAction::Set),
-                )
+                .arg(solver_arg(
+                    "Use the specified solver for equivalence checking",
+                ))
                 .add_bool_arg(
                     "flatten_aggregates",
                     "Flatten tuple and array types to bits for equivalence checking",

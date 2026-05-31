@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Compare two `.g8r` GateFn descriptions for equivalence using all available
-//! equivalence checkers (SAT/Z3 oracle + IR-based checker).
+//! equivalence checkers (CaDiCaL, Varisat, and an XLS IR-based checker).
 //!
 //! Exit status:
 //!   0 – all checkers agree the GateFns are equivalent
@@ -49,31 +49,32 @@ fn main() {
         }
     };
 
-    // Checker 1: SAT/Z3 oracle (fast path)
+    // Checker 1: CaDiCaL gate-level oracle (fast path)
     let sat_equiv = match oracle_equiv_sat(&lhs, &rhs) {
         Ok(equiv) => equiv,
         Err(e) => {
-            eprintln!("SAT/Z3 oracle error: {}", e);
+            eprintln!("CaDiCaL oracle error: {}", e);
             exit(2);
         }
     };
-    println!("SAT/Z3 oracle: {}", sat_equiv);
+    println!("CaDiCaL oracle: {}", sat_equiv);
 
     // Checker 2: IR-based equivalence.
-    let ir_equiv = match xlsynth_g8r::check_equivalence::prove_same_gate_fn_via_ir(&lhs, &rhs) {
-        Ok(_) => true,
-        Err(e) => {
-            eprintln!("IR equivalence checker error: {}", e);
-            false
-        }
-    };
+    let ir_equiv =
+        match xlsynth_g8r::check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&lhs, &rhs) {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!("IR equivalence checker error: {}", e);
+                false
+            }
+        };
     println!("IR checker: {}", ir_equiv);
 
     // Checker 3: Varisat-based SAT prover (structural)
     let varisat_equiv = {
-        let mut ctx = prove_gate_fn_equiv_sat::Ctx::new();
+        let mut ctx = prove_gate_fn_equiv_sat::VarisatCtx::new();
         matches!(
-            prove_gate_fn_equiv_sat::prove_gate_fn_equiv(&lhs, &rhs, &mut ctx),
+            prove_gate_fn_equiv_sat::prove_gate_fn_equiv_varisat(&lhs, &rhs, &mut ctx),
             EquivResult::Proved
         )
     };

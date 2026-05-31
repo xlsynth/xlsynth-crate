@@ -57,7 +57,7 @@ top fn main(a0: bits[8] id=1, a1: bits[8] id=2, a2: bits[8] id=3, a3: bits[8] id
         },
     )
     .unwrap();
-    check_equivalence::validate_same_fn(&pir_fn, &spec.gate_fn).unwrap();
+    check_equivalence::validate_same_fn_via_toolchain(&pir_fn, &spec.gate_fn).unwrap();
     let spec_stats = get_summary_stats(&spec.gate_fn);
 
     assert_eq!(

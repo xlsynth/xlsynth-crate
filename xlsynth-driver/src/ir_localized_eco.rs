@@ -18,6 +18,7 @@ use xlsynth_pir::ir_parser::{self, emit_fn_as_block};
 use xlsynth_pir::random_inputs::{
     generate_biased_arguments_with_rng, generate_pattern_arguments, BitValuePattern,
 };
+use xlsynth_prover::prover::SolverChoice;
 
 #[derive(serde::Serialize)]
 struct AddedOpsSummaryItem {
@@ -39,6 +40,15 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
     let new_path = std::path::Path::new(matches.get_one::<String>("new_ir_file").unwrap());
     let old_ir_top = matches.get_one::<String>("old_ir_top");
     let new_ir_top = matches.get_one::<String>("new_ir_top");
+    let solver: SolverChoice = matches
+        .get_one::<String>("solver")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let tool_path = config
+        .as_ref()
+        .and_then(|c| c.tool_path.as_deref())
+        .map(Path::new);
 
     // Read inputs to detect whether they are package IR or standalone block IR.
     let old_text = match std::fs::read_to_string(old_path) {
@@ -121,6 +131,8 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
             old_ports,
             new_block_fn,
             new_ports,
+            solver,
+            tool_path,
         );
     }
 
@@ -305,64 +317,49 @@ pub fn handle_ir_localized_eco(matches: &ArgMatches, config: &Option<ToolchainCo
             }
         }
     }
-    // Optional: Prove old vs new equivalence using toolchain if available.
-    // Determine tool_path: prefer --toolchain config; otherwise use XLSYNTH_TOOLS
-    // env var if set.
-    let mut tool_path_opt: Option<String> = config.as_ref().and_then(|c| c.tool_path.clone());
-    if tool_path_opt.is_none() {
-        if let Ok(env_tools) = std::env::var("XLSYNTH_TOOLS") {
-            if !env_tools.trim().is_empty() {
-                tool_path_opt = Some(env_tools);
-            }
-        }
-    }
+    // Prove: patched_old.ir ≡ new.ir using the selected solver.
+    let patched_ir_text = std::fs::read_to_string(&patched_ir_path).unwrap();
+    let new_ir_text = std::fs::read_to_string(new_path).unwrap();
+    // Use the new function's name as the top on both sides (patched equals new
+    // package text).
+    let lhs_top = Some(new_fn.name.as_str());
+    let rhs_top = Some(new_fn.name.as_str());
+    println!(
+        "  Starting equivalence proof using solver '{}': patched='{}' top='{}' vs new='{}' top='{}'",
+        solver,
+        patched_ir_path.display(),
+        lhs_top.unwrap_or(""),
+        new_path.display(),
+        rhs_top.unwrap_or("")
+    );
+    let request = IrEquivRequest::new(
+        IrModule::new(&patched_ir_text)
+            .with_path(Some(patched_ir_path.as_path()))
+            .with_top(lhs_top),
+        IrModule::new(&new_ir_text)
+            .with_path(Some(new_path))
+            .with_top(rhs_top),
+    )
+    .with_solver(Some(solver))
+    .with_tool_path(tool_path);
 
-    if let Some(tool_path) = tool_path_opt.as_deref() {
-        // Prove: patched_old.ir ≡ new.ir
-        let patched_ir_text = std::fs::read_to_string(&patched_ir_path).unwrap();
-        let new_ir_text = std::fs::read_to_string(new_path).unwrap();
-        // Use the new function's name as the top on both sides (patched equals new
-        // package text).
-        let lhs_top = Some(new_fn.name.as_str());
-        let rhs_top = Some(new_fn.name.as_str());
-        println!(
-            "  Starting equivalence proof using toolchain at {}: patched='{}' top='{}' vs new='{}' top='{}'",
-            tool_path,
-            patched_ir_path.display(),
-            lhs_top.unwrap_or(""),
-            new_path.display(),
-            rhs_top.unwrap_or("")
-        );
-        let request = IrEquivRequest::new(
-            IrModule::new(&patched_ir_text)
-                .with_path(Some(patched_ir_path.as_path()))
-                .with_top(lhs_top),
-            IrModule::new(&new_ir_text)
-                .with_path(Some(new_path))
-                .with_top(rhs_top),
-        )
-        .with_tool_path(Some(Path::new(tool_path)));
-
-        let outcome = dispatch_ir_equiv(&request, "ir-localized-eco");
-        let dur = std::time::Duration::from_micros(outcome.time_micros as u64);
-        if outcome.success {
-            println!("  Equivalence: proved (patched(old) ≡ new) in {:?}", dur);
-        } else {
-            println!("  Equivalence: FAILED (patched(old) vs new) in {:?}", dur);
-            if let Some(err) = outcome.error_str.as_ref() {
-                println!("    error: {}", err);
-                // Attempt to replay the counterexample via interpreter.
-                if let Some(input_idx) = err.find("input:") {
-                    let arg_text = err[input_idx + "input:".len()..].trim();
-                    match try_interpret_cex(&new_ir_text, new_fn, &patched_ir_path, arg_text) {
-                        Ok(()) => {}
-                        Err(e) => println!("    interpreter replay: skipped ({})", e),
-                    }
+    let outcome = dispatch_ir_equiv(&request, "ir-localized-eco");
+    let dur = std::time::Duration::from_micros(outcome.time_micros as u64);
+    if outcome.success {
+        println!("  Equivalence: proved (patched(old) ≡ new) in {:?}", dur);
+    } else {
+        println!("  Equivalence: FAILED (patched(old) vs new) in {:?}", dur);
+        if let Some(err) = outcome.error_str.as_ref() {
+            println!("    error: {}", err);
+            // Attempt to replay the counterexample via interpreter.
+            if let Some(input_idx) = err.find("input:") {
+                let arg_text = err[input_idx + "input:".len()..].trim();
+                match try_interpret_cex(&new_ir_text, new_fn, &patched_ir_path, arg_text) {
+                    Ok(()) => {}
+                    Err(e) => println!("    interpreter replay: skipped ({})", e),
                 }
             }
         }
-    } else {
-        println!("  Equivalence: skipped (no --toolchain config and no XLSYNTH_TOOLS env var)");
     }
 }
 
@@ -446,6 +443,8 @@ fn handle_ir_localized_eco_blocks_in_packages(
     old_ports: &BlockMetadata,
     new_fn: &ir_mod::Fn,
     new_ports: &BlockMetadata,
+    solver: SolverChoice,
+    tool_path: Option<&Path>,
 ) {
     // Summaries (rebase-based): will compute added_count after building applied.
     let added_ops: Vec<AddedOpsSummaryItem> = Vec::new();
@@ -535,21 +534,15 @@ fn handle_ir_localized_eco_blocks_in_packages(
     println!("  Done.");
 
     // Attempt equivalence by wrapping the functions into minimal packages and
-    // invoking the external checker, if tools are configured.
-    match std::env::var("XLSYNTH_TOOLS") {
-        Ok(p) if !p.trim().is_empty() => {
-            let lhs_pkg = format!("package lhs\n\ntop {}", applied.to_string());
-            let rhs_pkg = format!("package rhs\n\ntop {}", new_fn.to_string());
-            let top_name = Some(new_fn.name.as_str());
-            match check_equivalence::check_equivalence_with_top(&lhs_pkg, &rhs_pkg, top_name, false)
-            {
-                Ok(()) => println!("  Equivalence: proved (patched(old) ≡ new)"),
-                Err(e) => println!("  Equivalence: FAILED: {}", e),
-            }
-        }
-        _ => {
-            println!("  Equivalence: skipped (no XLSYNTH_TOOLS env var)");
-        }
+    // using the selected solver.
+    let lhs_pkg = format!("package lhs\n\ntop {}", applied.to_string());
+    let rhs_pkg = format!("package rhs\n\ntop {}", new_fn.to_string());
+    let top_name = Some(new_fn.name.as_str());
+    match check_equivalence::check_equivalence_with_top_and_solver(
+        &lhs_pkg, &rhs_pkg, top_name, solver, tool_path,
+    ) {
+        Ok(()) => println!("  Equivalence: proved (patched(old) ≡ new)"),
+        Err(e) => println!("  Equivalence: FAILED: {}", e),
     }
 }
 

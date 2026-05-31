@@ -12,11 +12,6 @@ use xlsynth_pir::ir::{self, Node, NodePayload, NodeRef, PackageMember, ParamId, 
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_utils::next_text_id;
 
-#[cfg(any(
-    feature = "has-bitwuzla",
-    feature = "has-boolector",
-    feature = "has-easy-smt"
-))]
 use crate::prover::prover_for_choice;
 use crate::prover::types::{
     BoolPropertyResult, ParamDomains, ProverFn, QuickCheckAssertionSemantics,
@@ -161,99 +156,11 @@ fn clone_param_with_new_id(param: &ir::Param, id: usize) -> ir::Param {
     }
 }
 
-#[cfg(feature = "has-bitwuzla")]
-fn auto_prover_for_assertions() -> Result<Box<dyn Prover>, String> {
-    use crate::solver::bitwuzla::BitwuzlaOptions;
-    Ok(Box::new(BitwuzlaOptions::new()))
-}
-
-#[cfg(all(feature = "has-boolector", not(feature = "has-bitwuzla")))]
-fn auto_prover_for_assertions() -> Result<Box<dyn Prover>, String> {
-    use crate::solver::boolector::BoolectorConfig;
-    Ok(Box::new(BoolectorConfig::new()))
-}
-
-#[cfg(all(
-    feature = "has-easy-smt",
-    not(feature = "has-bitwuzla"),
-    not(feature = "has-boolector")
-))]
-fn auto_prover_for_assertions() -> Result<Box<dyn Prover>, String> {
-    use crate::solver::{
-        Response, Solver,
-        easy_smt::{EasySmtConfig, EasySmtSolver},
-    };
-
-    fn is_usable(config: &EasySmtConfig) -> bool {
-        match EasySmtSolver::new(config) {
-            Ok(mut solver) => {
-                if solver.declare("probe_x", 1).is_err() {
-                    return false;
-                }
-                let one = solver.one(1);
-                let numerical_one = solver.numerical(1, 1);
-                let eq = solver.eq(&one, &numerical_one);
-                if solver.assert(&eq).is_err() {
-                    return false;
-                }
-                matches!(solver.check(), Ok(Response::Sat))
-            }
-            Err(_) => false,
-        }
-    }
-
-    for cfg in [
-        EasySmtConfig::z3(),
-        EasySmtConfig::boolector(),
-        EasySmtConfig::bitwuzla(),
-    ] {
-        if is_usable(&cfg) {
-            return Ok(Box::new(cfg));
-        }
-    }
-
-    missing_in_process_prover_error()
-}
-
-#[cfg(not(any(
-    feature = "has-bitwuzla",
-    feature = "has-boolector",
-    feature = "has-easy-smt"
-)))]
-fn auto_prover_for_assertions() -> Result<Box<dyn Prover>, String> {
-    missing_in_process_prover_error()
-}
-
-#[cfg(any(
-    all(
-        feature = "has-easy-smt",
-        not(feature = "has-bitwuzla"),
-        not(feature = "has-boolector")
-    ),
-    not(any(
-        feature = "has-bitwuzla",
-        feature = "has-boolector",
-        feature = "has-easy-smt"
-    ))
-))]
-fn missing_in_process_prover_error<T>() -> Result<T, String> {
-    Err(
-        "No supported in-process SMT backend is available for dslx-fn-prove-assertions; rebuild with an in-process solver feature or pass an explicit supported --solver"
-            .to_string(),
-    )
-}
-
 fn prover_for_assertions(choice: SolverChoice) -> Result<Box<dyn Prover>, String> {
     match choice {
-        SolverChoice::Auto => auto_prover_for_assertions(),
         SolverChoice::Toolchain => {
             Err("Solver 'toolchain' is not supported for dslx-fn-prove-assertions".to_string())
         }
-        #[cfg(any(
-            feature = "has-bitwuzla",
-            feature = "has-boolector",
-            feature = "has-easy-smt"
-        ))]
         other => Ok(prover_for_choice(other, None)),
     }
 }
@@ -409,7 +316,7 @@ pub fn run_dslx_assertions(
         .with_domains(top_domains)
         .with_uf_map(request.uf_map.clone());
 
-    let prover = prover_for_assertions(request.solver.unwrap_or(SolverChoice::Auto))?;
+    let prover = prover_for_assertions(request.solver.unwrap_or(SolverChoice::Bitwuzla))?;
     let start = Instant::now();
     let result = prover.prove_ir_quickcheck(
         &prover_fn,

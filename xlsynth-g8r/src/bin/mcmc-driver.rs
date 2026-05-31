@@ -102,6 +102,10 @@ struct CliArgs {
     #[clap(long)]
     paranoid: bool,
 
+    /// Also cross-check native formal results with the XLS IR checker binary.
+    #[clap(long)]
+    xls_cross_check: bool,
+
     /// Iterations between checkpoints written to disk (0 to disable).
     #[clap(long, value_parser, default_value_t = 5000)]
     checkpoint_iters: u64,
@@ -150,6 +154,7 @@ fn run_chain_segment(
         cfg.metric,
         periodic_dump_dir,
         cfg.paranoid,
+        cfg.xls_cross_check,
         0,
         progress_interval,
         Some(best),
