@@ -30,6 +30,7 @@ fn validate_equiv_result(
     }
     match solver_result {
         EquivResult::Proved => true,
+        EquivResult::Inconclusive(_) => false,
         EquivResult::Disproved {
             lhs_inputs,
             rhs_inputs,
@@ -45,6 +46,9 @@ fn validate_equiv_result(
         }
         EquivResult::Error(msg) => {
             panic!("{solver_name} optimizer equivalence check failed to run: {msg}");
+        }
+        EquivResult::ToolchainDisproved(msg) => {
+            panic!("{solver_name} unexpectedly returned a toolchain result: {msg}");
         }
     }
 }
