@@ -667,7 +667,7 @@ mod tests {
             dslx_top: "main".into(),
             dslx_path: Some(vec!["a".into(), "b".into()]),
             dslx_stdlib_path: Some("stdlib".into()),
-            solver: Some(SolverChoice::Auto),
+            solver: Some(SolverChoice::Bitwuzla),
             assert_label_filter: Some("red|blue".into()),
             assume_enum_in_bound: Some(false),
             uf: Some(vec!["helper:F".into()]),
@@ -686,7 +686,7 @@ mod tests {
                 "--dslx_stdlib_path",
                 "stdlib",
                 "--solver",
-                "auto",
+                "bitwuzla",
                 "--assert-label-filter",
                 "red|blue",
                 "--assume-enum-in-bound",
@@ -748,7 +748,7 @@ mod tests {
             "kind": "dslx-fn-prove-assertions",
             "dslx_input_file": "assertions.x",
             "dslx_top": "main",
-            "solver": "auto"
+            "solver": "bitwuzla"
           }
         ]"#;
         let tasks: Vec<ProverTask> = serde_json::from_str(json).unwrap();

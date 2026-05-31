@@ -53,22 +53,6 @@ fn ext_carry_out_equivalent_to_desugared_export_form_and_exports_to_upstream() {
         );
         match res {
             EquivResult::Proved => {}
-            EquivResult::ToolchainDisproved(msg)
-                if msg.contains("Unknown operation")
-                    && msg.contains("ext_carry_out")
-                    && msg.contains("string-to-op conversion") =>
-            {
-                // Not a sample failure: when no SMT backend is enabled,
-                // `xlsynth-prover` falls back to the external XLS toolchain
-                // prover, and upstream XLS does not understand PIR extension ops
-                // like `ext_carry_out`.
-                //
-                // This test provides strong coverage when an SMT backend is
-                // available; in toolchain-only configurations we rely on
-                // `xlsynth-pir`'s interpreter/roundtrip tests for extension-op
-                // semantics.
-                return;
-            }
             _ => panic!("formal equivalence failed at w={}: {:?}", w, res),
         }
     }

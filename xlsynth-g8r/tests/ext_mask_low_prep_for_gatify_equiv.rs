@@ -23,7 +23,7 @@ fn assert_ir_fns_equivalent(orig_fn: &ir::Fn, prepared_fn: &ir::Fn) {
     desugar_extensions_in_fn(&mut prepared_desugared).expect("desugar prepared PIR");
     let orig_pkg_text = format!("package orig\n\ntop {}", orig_desugared);
     let prepared_pkg_text = format!("package prepared\n\ntop {}", prepared_desugared);
-    check_equivalence::check_equivalence(&orig_pkg_text, &prepared_pkg_text)
+    check_equivalence::check_equivalence_via_toolchain(&orig_pkg_text, &prepared_pkg_text)
         .expect("prepared PIR should be equivalent to original PIR");
 }
 
@@ -614,7 +614,7 @@ fn gate_graph_equivalence_old_vs_mask_low_rewrite() {
         let pir_fn = parse_top_fn(&ir_text);
         let gate_old = gatify_for_test(&pir_fn, /* enable_rewrite_mask_low= */ false);
         let gate_new = gatify_for_test(&pir_fn, /* enable_rewrite_mask_low= */ true);
-        check_equivalence::prove_same_gate_fn_via_ir(&gate_old, &gate_new)
+        check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&gate_old, &gate_new)
             .expect("expected old vs rewritten mask-low lowering to be equivalent");
     }
 }
@@ -644,7 +644,7 @@ fn gate_graph_equivalence_shifted_all_ones_rewrite_sweep() {
         let pir_fn = parse_top_fn(&ir_text);
         let gate_old = gatify_for_test(&pir_fn, /* enable_rewrite_mask_low= */ false);
         let gate_new = gatify_for_test(&pir_fn, /* enable_rewrite_mask_low= */ true);
-        check_equivalence::prove_same_gate_fn_via_ir(&gate_old, &gate_new).unwrap_or_else(|e| {
+        check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&gate_old, &gate_new).unwrap_or_else(|e| {
             panic!(
                 "expected shifted-all-ones rewrite to be equivalent for source_width={source_width} count_width={count_width} start={start} width={width}: {e}"
             )

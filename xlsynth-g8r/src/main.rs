@@ -14,6 +14,7 @@ use xlsynth_g8r::process_ir_path::{
 };
 use xlsynth_g8r::prove_gate_fn_equiv_common::GateFormalBackend;
 use xlsynth_g8r::result_proto;
+use xlsynth_prover::prover::SolverChoice;
 
 /// Simple program to parse an XLS IR file and emit a Verilog netlist.
 #[derive(Parser, Debug)]
@@ -56,6 +57,10 @@ struct Args {
     #[arg(long, default_value_t = true)]
     #[arg(action = clap::ArgAction::Set)]
     check_equivalence: bool,
+
+    /// Solver backend used for optional IR equivalence checking.
+    #[arg(long, default_value = "bitwuzla")]
+    solver: String,
 
     /// Whether to opt into lowering XLS gate ops.
     #[arg(long = "unsafe-gatify-gate-operation", default_value_t = false)]
@@ -113,10 +118,12 @@ fn main() {
         .expect("validated by clap value_parser");
     let cut_db_rewrite_mode =
         CutDbRewriteMode::parse(&args.cut_db_rewrite_mode).expect("validated by clap value_parser");
+    let equivalence_solver: SolverChoice = args.solver.parse().expect("invalid --solver value");
     let cut_db = Some(xlsynth_g8r::cut_db::loader::CutDb::load_default());
 
     let options = Options {
         check_equivalence: args.check_equivalence,
+        equivalence_solver,
         fold: args.fold,
         hash: args.hash,
         enable_rewrite_carry_out: false,

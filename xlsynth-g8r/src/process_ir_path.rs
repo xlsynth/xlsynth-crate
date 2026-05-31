@@ -33,6 +33,7 @@ use crate::use_count::get_id_to_use_count;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_range_info::IrRangeInfo;
 use xlsynth_pir::ir_utils;
+use xlsynth_prover::prover::SolverChoice;
 
 pub const DEFAULT_MAX_FRAIG_SIM_SAMPLES: usize = 8 * 1024;
 
@@ -142,6 +143,7 @@ impl Into<crate::result_proto::Ir2GatesSummaryStats> for Ir2GatesSummaryStats {
 
 pub struct Options {
     pub check_equivalence: bool,
+    pub equivalence_solver: SolverChoice,
     pub fold: bool,
     pub hash: bool,
     pub enable_rewrite_carry_out: bool,
@@ -279,6 +281,7 @@ impl CanonicalG8rOptions {
     ) -> Options {
         Options {
             check_equivalence: false,
+            equivalence_solver: SolverChoice::Bitwuzla,
             fold: self.fold,
             hash: self.hash,
             enable_rewrite_carry_out: self.enable_rewrite_carry_out,
@@ -333,6 +336,7 @@ impl From<&Options> for ir2gates::Ir2GatesOptions {
             fold: options.fold,
             hash: options.hash,
             check_equivalence: false, // check is done below if requested
+            equivalence_solver: options.equivalence_solver,
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
             enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
             enable_rewrite_nary_add: options.enable_rewrite_nary_add,
@@ -353,6 +357,7 @@ impl From<&CanonicalG8rOptions> for ir2gates::Ir2GatesOptions {
             fold: options.fold,
             hash: options.hash,
             check_equivalence: false,
+            equivalence_solver: SolverChoice::Bitwuzla,
             enable_rewrite_carry_out: options.enable_rewrite_carry_out,
             enable_rewrite_prio_encode: options.enable_rewrite_prio_encode,
             enable_rewrite_nary_add: options.enable_rewrite_nary_add,
@@ -720,7 +725,12 @@ pub fn process_ir_text_with_gatefn(
     if options.check_equivalence {
         println!("== Checking equivalence...");
         let start = std::time::Instant::now();
-        let eq = check_equivalence::validate_same_fn(&ir_top, &gate_fn);
+        let eq = check_equivalence::validate_same_fn_with_solver(
+            &ir_top,
+            &gate_fn,
+            options.equivalence_solver,
+            None,
+        );
         let duration = start.elapsed();
         println!("Equivalence check took {:?}.", duration);
         println!("Equivalence: {:?}", eq);

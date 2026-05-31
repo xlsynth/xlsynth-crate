@@ -7,11 +7,13 @@ use xlsynth_pir::desugar_extensions;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_range_info::IrRangeInfo;
+use xlsynth_prover::prover::SolverChoice;
 
 pub struct Ir2GatesOptions {
     pub fold: bool,
     pub hash: bool,
     pub check_equivalence: bool,
+    pub equivalence_solver: SolverChoice,
     pub enable_rewrite_carry_out: bool,
     pub enable_rewrite_prio_encode: bool,
     pub enable_rewrite_nary_add: bool,
@@ -31,6 +33,7 @@ impl Ir2GatesOptions {
             fold: true,
             hash: true,
             check_equivalence: false,
+            equivalence_solver: SolverChoice::Bitwuzla,
             enable_rewrite_carry_out: prep_defaults.enable_rewrite_carry_out,
             enable_rewrite_prio_encode: prep_defaults.enable_rewrite_prio_encode,
             enable_rewrite_nary_add: prep_defaults.enable_rewrite_nary_add,
@@ -50,6 +53,7 @@ impl Ir2GatesOptions {
             fold: true,
             hash: true,
             check_equivalence: false,
+            equivalence_solver: SolverChoice::Bitwuzla,
             enable_rewrite_carry_out: prep_defaults.enable_rewrite_carry_out,
             enable_rewrite_prio_encode: prep_defaults.enable_rewrite_prio_encode,
             enable_rewrite_nary_add: prep_defaults.enable_rewrite_nary_add,
@@ -182,6 +186,7 @@ pub fn ir2gates_from_ir_text(
             fold: options.fold,
             hash: options.hash,
             check_equivalence: options.check_equivalence,
+            equivalence_solver: options.equivalence_solver,
             adder_mapping: options.adder_mapping,
             mul_adder_mapping: options.mul_adder_mapping,
             range_info: Some(range_info.clone()),

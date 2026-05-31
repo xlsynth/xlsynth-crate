@@ -48,17 +48,6 @@ fn ext_clz_equivalent_to_desugared_export_form_and_exports_to_upstream() {
         );
         match res {
             EquivResult::Proved => {}
-            EquivResult::ToolchainDisproved(msg)
-                if msg.contains("Unknown operation")
-                    && msg.contains("ext_clz")
-                    && msg.contains("string-to-op conversion") =>
-            {
-                // Not a sample failure: when no SMT backend is enabled,
-                // `xlsynth-prover` falls back to the external XLS toolchain
-                // prover, and upstream XLS does not understand PIR extension ops
-                // like `ext_clz`.
-                return;
-            }
             _ => panic!("formal equivalence failed at w={}: {:?}", w, res),
         }
     }

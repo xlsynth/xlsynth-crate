@@ -726,20 +726,18 @@ fn main() {
                         .value_name("SOLVER")
                         .help("Select solver backend")
                         .value_parser([
-                            "auto",
                             #[cfg(feature = "has-easy-smt")]
                             "z3-binary",
                             #[cfg(feature = "has-easy-smt")]
                             "bitwuzla-binary",
                             #[cfg(feature = "has-easy-smt")]
                             "boolector-binary",
-                            #[cfg(feature = "has-bitwuzla")]
                             "bitwuzla",
                             #[cfg(feature = "has-boolector")]
                             "boolector",
                             "toolchain",
                         ])
-                        .default_value("auto")
+                        .default_value("bitwuzla")
                         .action(clap::ArgAction::Set),
                 )
                 .arg(
@@ -1135,20 +1133,18 @@ fn main() {
                         .value_name("SOLVER")
                         .help("Use the specified solver for equivalence checking (requires --features=with-easy-smt)")
                         .value_parser([
-                            "auto",
                             #[cfg(feature = "has-easy-smt")]
                             "z3-binary",
                             #[cfg(feature = "has-easy-smt")]
                             "bitwuzla-binary",
                             #[cfg(feature = "has-easy-smt")]
                             "boolector-binary",
-                            #[cfg(feature = "has-bitwuzla")]
                             "bitwuzla",
                             #[cfg(feature = "has-boolector")]
                             "boolector",
                             "toolchain",
                         ])
-                        .default_value("auto")
+                        .default_value("bitwuzla")
                         .action(ArgAction::Set),
                 )
                 .add_bool_arg(
@@ -1238,20 +1234,18 @@ fn main() {
                         .value_name("SOLVER")
                         .help("Use the specified solver for equivalence checking (requires --features=with-easy-smt)")
                         .value_parser([
-                            "auto",
                             #[cfg(feature = "has-easy-smt")]
                             "z3-binary",
                             #[cfg(feature = "has-easy-smt")]
                             "bitwuzla-binary",
                             #[cfg(feature = "has-easy-smt")]
                             "boolector-binary",
-                            #[cfg(feature = "has-bitwuzla")]
                             "bitwuzla",
                             #[cfg(feature = "has-boolector")]
                             "boolector",
                             "toolchain",
                         ])
-                        .default_value("auto")
+                        .default_value("bitwuzla")
                         .action(ArgAction::Set),
                 )
                 .add_bool_arg(
@@ -1525,6 +1519,26 @@ fn main() {
                         .value_name("DIR")
                         .help("Directory to write outputs (original IR copies). If omitted, a temp directory is created and printed."),
                 )
+                .arg(
+                    Arg::new("solver")
+                        .long("solver")
+                        .value_name("SOLVER")
+                        .help("Use the specified solver for equivalence checking")
+                        .value_parser([
+                            #[cfg(feature = "has-easy-smt")]
+                            "z3-binary",
+                            #[cfg(feature = "has-easy-smt")]
+                            "bitwuzla-binary",
+                            #[cfg(feature = "has-easy-smt")]
+                            "boolector-binary",
+                            "bitwuzla",
+                            #[cfg(feature = "has-boolector")]
+                            "boolector",
+                            "toolchain",
+                        ])
+                        .default_value("bitwuzla")
+                        .action(ArgAction::Set),
+                )
                 .add_bool_arg(
                     "show_discrepancies",
                     "Show per-depth discrepancy signatures in verbose form",
@@ -1566,6 +1580,26 @@ fn main() {
                         .long("output_dir")
                         .value_name("DIR")
                         .help("Directory to write outputs (JSON, patched .ir). If omitted, a temp directory is created and printed."),
+                )
+                .arg(
+                    Arg::new("solver")
+                        .long("solver")
+                        .value_name("SOLVER")
+                        .help("Use the specified solver for equivalence checking")
+                        .value_parser([
+                            #[cfg(feature = "has-easy-smt")]
+                            "z3-binary",
+                            #[cfg(feature = "has-easy-smt")]
+                            "bitwuzla-binary",
+                            #[cfg(feature = "has-boolector")]
+                            "boolector-binary",
+                            "bitwuzla",
+                            #[cfg(feature = "has-boolector")]
+                            "boolector",
+                            "toolchain",
+                        ])
+                        .default_value("bitwuzla")
+                        .action(ArgAction::Set),
                 )
                 .arg(
                     Arg::new("compute_text_diff")
@@ -2394,20 +2428,18 @@ fn main() {
                         .value_name("SOLVER")
                         .help("Use the specified solver for equivalence checking")
                         .value_parser([
-                            "auto",
                             #[cfg(feature = "has-easy-smt")]
                             "z3-binary",
                             #[cfg(feature = "has-easy-smt")]
                             "bitwuzla-binary",
                             #[cfg(feature = "has-easy-smt")]
                             "boolector-binary",
-                            #[cfg(feature = "has-bitwuzla")]
                             "bitwuzla",
                             #[cfg(feature = "has-boolector")]
                             "boolector",
                             "toolchain",
                         ])
-                        .default_value("auto")
+                        .default_value("bitwuzla")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2440,20 +2472,18 @@ fn main() {
                         .value_name("SOLVER")
                         .help("Use the specified solver for equivalence checking")
                         .value_parser([
-                            "auto",
                             #[cfg(feature = "has-easy-smt")]
                             "z3-binary",
                             #[cfg(feature = "has-easy-smt")]
                             "bitwuzla-binary",
                             #[cfg(feature = "has-easy-smt")]
                             "boolector-binary",
-                            #[cfg(feature = "has-bitwuzla")]
                             "bitwuzla",
                             #[cfg(feature = "has-boolector")]
                             "boolector",
                             "toolchain",
                         ])
-                        .default_value("auto")
+                        .default_value("bitwuzla")
                         .action(ArgAction::Set),
                 )
                 .add_bool_arg(
@@ -2588,20 +2618,18 @@ fn main() {
                         .value_name("SOLVER")
                         .help("Use the specified solver for equivalence checking")
                         .value_parser([
-                            "auto",
                             #[cfg(feature = "has-easy-smt")]
                             "z3-binary",
                             #[cfg(feature = "has-easy-smt")]
                             "bitwuzla-binary",
                             #[cfg(feature = "has-easy-smt")]
                             "boolector-binary",
-                            #[cfg(feature = "has-bitwuzla")]
                             "bitwuzla",
                             #[cfg(feature = "has-boolector")]
                             "boolector",
                             "toolchain",
                         ])
-                        .default_value("auto")
+                        .default_value("bitwuzla")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -2641,20 +2669,18 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                         .value_name("SOLVER")
                         .help("Use the specified solver for equivalence checking (requires --features=with-easy-smt)")
                         .value_parser([
-                            "auto",
                             #[cfg(feature = "has-easy-smt")]
                             "z3-binary",
                             #[cfg(feature = "has-easy-smt")]
                             "bitwuzla-binary",
                             #[cfg(feature = "has-easy-smt")]
                             "boolector-binary",
-                            #[cfg(feature = "has-bitwuzla")]
                             "bitwuzla",
                             #[cfg(feature = "has-boolector")]
                             "boolector",
                             "toolchain",
                         ])
-                        .default_value("auto")
+                        .default_value("bitwuzla")
                         .action(ArgAction::Set),
                 )
                 .add_bool_arg(
@@ -3277,20 +3303,18 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                         .value_name("SOLVER")
                         .help("Select solver backend")
                         .value_parser([
-                            "auto",
                             #[cfg(feature = "has-easy-smt")]
                             "z3-binary",
                             #[cfg(feature = "has-easy-smt")]
                             "bitwuzla-binary",
                             #[cfg(feature = "has-easy-smt")]
                             "boolector-binary",
-                            #[cfg(feature = "has-bitwuzla")]
                             "bitwuzla",
                             #[cfg(feature = "has-boolector")]
                             "boolector",
                             "toolchain",
                         ])
-                        .default_value("auto")
+                        .default_value("bitwuzla")
                         .action(clap::ArgAction::Set),
                 )
                 .arg(
@@ -3342,20 +3366,18 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                         .value_name("SOLVER")
                         .help("Select solver backend")
                         .value_parser([
-                            "auto",
                             #[cfg(feature = "has-easy-smt")]
                             "z3-binary",
                             #[cfg(feature = "has-easy-smt")]
                             "bitwuzla-binary",
                             #[cfg(feature = "has-easy-smt")]
                             "boolector-binary",
-                            #[cfg(feature = "has-bitwuzla")]
                             "bitwuzla",
                             #[cfg(feature = "has-boolector")]
                             "boolector",
                             "toolchain",
                         ])
-                        .default_value("auto")
+                        .default_value("bitwuzla")
                         .action(clap::ArgAction::Set),
                 )
                 .arg(
@@ -3462,14 +3484,12 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                         .value_name("SOLVER")
                         .help("Use the specified solver for equivalence checking")
                         .value_parser([
-                            "auto",
                             #[cfg(feature = "has-easy-smt")]
                             "z3-binary",
                             #[cfg(feature = "has-easy-smt")]
                             "bitwuzla-binary",
                             #[cfg(feature = "has-easy-smt")]
                             "boolector-binary",
-                            #[cfg(feature = "has-bitwuzla")]
                             "bitwuzla",
                             #[cfg(feature = "has-boolector")]
                             "boolector",
@@ -3477,7 +3497,7 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
                             "boolector-legacy",
                             "toolchain",
                         ])
-                        .default_value("auto")
+                        .default_value("bitwuzla")
                         .action(clap::ArgAction::Set),
                 )
                 .add_bool_arg(

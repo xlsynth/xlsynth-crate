@@ -1,74 +1,70 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::time::Instant;
+use std::path::Path;
 
 use crate::{aig::GateFn, aig_serdes::gate2ir};
 use xlsynth_pir::ir;
+use xlsynth_prover::prover::types::EquivResult;
+use xlsynth_prover::prover::{SolverChoice, prover_for_choice};
 
 pub fn check_equivalence(orig_package: &str, gate_package: &str) -> Result<(), String> {
-    check_equivalence_with_top(orig_package, gate_package, None, false)
+    check_equivalence_with_top_and_solver(
+        orig_package,
+        gate_package,
+        None,
+        SolverChoice::Bitwuzla,
+        None,
+    )
 }
 
-pub fn check_equivalence_with_top(
+/// Checks package equivalence using an explicitly selected solver backend.
+pub fn check_equivalence_with_top_and_solver(
     orig_package: &str,
     gate_package: &str,
     top_fn_name: Option<&str>,
-    keep_temp_dir: bool,
+    solver: SolverChoice,
+    tool_path: Option<&Path>,
 ) -> Result<(), String> {
-    let tempdir = tempfile::tempdir().unwrap();
-    let dirpath = if keep_temp_dir {
-        tempdir.keep()
-    } else {
-        tempdir.path().to_path_buf()
-    };
-    let orig_path = dirpath.join("orig.ir");
-    let gate_path = dirpath.join("gate.ir");
-    std::fs::write(orig_path.clone(), orig_package).unwrap();
-    std::fs::write(gate_path.clone(), gate_package).unwrap();
-    let tools_dir_str =
-        std::env::var("XLSYNTH_TOOLS").expect("XLSYNTH_TOOLS env var should be set");
-    let tools_dirpath = std::path::PathBuf::from(tools_dir_str);
-    assert!(
-        tools_dirpath.exists(),
-        "XLSYNTH_TOOLS environment variable does not exist"
-    );
-    let check_ir_equivalence_main_path = tools_dirpath.join("check_ir_equivalence_main");
-    assert!(
-        check_ir_equivalence_main_path.exists(),
-        "check_ir_equivalence_main not found in XLSYNTH_TOOLS"
-    );
+    let prover = prover_for_choice(solver, tool_path);
+    match prover.prove_ir_pkg_text_equiv(orig_package, gate_package, top_fn_name) {
+        EquivResult::Proved => Ok(()),
+        EquivResult::Inconclusive(msg) => Err(format!("inconclusive: {msg}")),
+        EquivResult::Disproved {
+            lhs_inputs,
+            rhs_inputs,
+            lhs_output,
+            rhs_output,
+        } => Err(format!(
+            "not equivalent: lhs_inputs={lhs_inputs:?} rhs_inputs={rhs_inputs:?} \
+             lhs_output={lhs_output:?} rhs_output={rhs_output:?}"
+        )),
+        EquivResult::ToolchainDisproved(msg) | EquivResult::Error(msg) => Err(msg),
+    }
+}
 
-    let mut command = std::process::Command::new(check_ir_equivalence_main_path);
-    // Optional: a flag like "--alsologtostderr" is useful while debugging to mirror
-    // logs to stderr, but not required for functionality.
-    command.arg(orig_path.to_str().unwrap());
-    command.arg(gate_path.to_str().unwrap());
-    if let Some(top) = top_fn_name {
-        command.arg("--top");
-        command.arg(top);
-    }
-    log::info!("check_equivalence_with_top; running command: {:?}", command);
-    let start = Instant::now();
-    let output = command.output().unwrap();
-    let elapsed = start.elapsed();
-    if !output.status.success() {
-        let stderr_str = String::from_utf8_lossy(&output.stderr);
-        let stdout_str = String::from_utf8_lossy(&output.stdout);
-        let err_kind = if stderr_str.contains("DEADLINE_EXCEEDED")
-            || stderr_str.contains("SIGINT")
-            || stderr_str.contains("interrupted")
-        {
-            "TimedOutOrInterrupted"
-        } else {
-            "SolverFailed"
-        };
-        return Err(format!(
-            "{}: check_ir_equivalence_main failed with retcode {}\nstdout: {:?}\nstderr: {:?}",
-            err_kind, output.status, stdout_str, stderr_str
-        ));
-    }
-    log::info!("check_equivalence_with_top; successful in {:?}", elapsed);
-    Ok(())
+/// Checks package equivalence with the explicitly selected XLS toolchain
+/// oracle.
+pub fn check_equivalence_with_top_via_toolchain(
+    orig_package: &str,
+    gate_package: &str,
+    top_fn_name: Option<&str>,
+) -> Result<(), String> {
+    check_equivalence_with_top_and_solver(
+        orig_package,
+        gate_package,
+        top_fn_name,
+        SolverChoice::Toolchain,
+        None,
+    )
+}
+
+/// Checks package equivalence with the explicitly selected XLS toolchain
+/// oracle.
+pub fn check_equivalence_via_toolchain(
+    orig_package: &str,
+    gate_package: &str,
+) -> Result<(), String> {
+    check_equivalence_with_top_via_toolchain(orig_package, gate_package, None)
 }
 
 fn get_fn_signature(f: &ir::Fn) -> String {
@@ -107,6 +103,16 @@ pub fn validate_same_signature(orig_fn: &ir::Fn, gate_fn: &GateFn) -> Result<(),
 /// conversion from "gate IR" to "XLS IR" to use the original function's
 /// signature so we can check XLS IR equivalence directly.
 pub fn validate_same_fn(orig_fn: &ir::Fn, gate_fn: &GateFn) -> Result<(), String> {
+    validate_same_fn_with_solver(orig_fn, gate_fn, SolverChoice::Bitwuzla, None)
+}
+
+/// Checks a PIR function and a GateFn using an explicitly selected solver.
+pub fn validate_same_fn_with_solver(
+    orig_fn: &ir::Fn,
+    gate_fn: &GateFn,
+    solver: SolverChoice,
+    tool_path: Option<&Path>,
+) -> Result<(), String> {
     let orig_ir_fn_text: String = orig_fn.to_string();
     let xlsynth_package_ir: String =
         gate2ir::gate_fn_to_xlsynth_ir(gate_fn, "gate", &orig_fn.get_type())
@@ -114,8 +120,18 @@ pub fn validate_same_fn(orig_fn: &ir::Fn, gate_fn: &GateFn) -> Result<(), String
             .to_string();
     log::info!("xlsynth_package_ir:\n{}", xlsynth_package_ir);
     let orig_ir_pkg_text: String = format!("package orig\n\ntop {}", orig_ir_fn_text);
-    let result = check_equivalence(&orig_ir_pkg_text, &xlsynth_package_ir);
-    result
+    check_equivalence_with_top_and_solver(
+        &orig_ir_pkg_text,
+        &xlsynth_package_ir,
+        None,
+        solver,
+        tool_path,
+    )
+}
+
+/// Checks a PIR function and GateFn with the explicitly selected XLS oracle.
+pub fn validate_same_fn_via_toolchain(orig_fn: &ir::Fn, gate_fn: &GateFn) -> Result<(), String> {
+    validate_same_fn_with_solver(orig_fn, gate_fn, SolverChoice::Toolchain, None)
 }
 
 /// Structured result for IR-level equivalence checking.
@@ -138,72 +154,29 @@ impl IrCheckResult {
     }
 }
 
-/// Run the external `check_ir_equivalence_main` tool and get a structured
-/// result. This is similar to the logic inside `check_equivalence_with_top`
-/// but returns an `IrCheckResult` instead of `Result<(), String>`.
-fn run_external_ir_tool(orig_pkg: &str, gate_pkg: &str) -> IrCheckResult {
-    let tempdir = tempfile::tempdir().unwrap();
-    let dirpath = tempdir.path();
-    let orig_path = dirpath.join("orig.ir");
-    let gate_path = dirpath.join("gate.ir");
-    if std::fs::write(&orig_path, orig_pkg).is_err() {
-        return IrCheckResult::OtherProcessError("failed to write orig temp file".to_string());
-    }
-    if std::fs::write(&gate_path, gate_pkg).is_err() {
-        return IrCheckResult::OtherProcessError("failed to write gate temp file".to_string());
-    }
-
-    let tools_dir = match std::env::var("XLSYNTH_TOOLS") {
-        Ok(p) => std::path::PathBuf::from(p),
-        Err(_) => {
-            return IrCheckResult::OtherProcessError("XLSYNTH_TOOLS env var not set".to_string());
+fn map_equiv_result(result: EquivResult) -> IrCheckResult {
+    match result {
+        EquivResult::Proved => IrCheckResult::Equivalent,
+        EquivResult::Inconclusive(_) => IrCheckResult::TimedOutOrInterrupted,
+        EquivResult::Disproved { .. } | EquivResult::ToolchainDisproved(_) => {
+            IrCheckResult::NotEquivalent
         }
-    };
-    let exe = tools_dir.join("check_ir_equivalence_main");
-    if !exe.exists() {
-        return IrCheckResult::OtherProcessError(format!(
-            "check_ir_equivalence_main not found in {}",
-            tools_dir.display()
-        ));
+        EquivResult::Error(msg) => IrCheckResult::OtherProcessError(msg),
     }
-
-    let output = std::process::Command::new(exe)
-        // Optional debug flag can mirror logs to stderr; not required for functionality.
-        .arg(orig_path)
-        .arg(gate_path)
-        .output();
-
-    let output = match output {
-        Ok(o) => o,
-        Err(e) => return IrCheckResult::OtherProcessError(format!("failed to spawn process: {e}")),
-    };
-
-    if output.status.success() {
-        return IrCheckResult::Equivalent;
-    }
-
-    let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
-
-    if stderr_str.contains("DEADLINE_EXCEEDED")
-        || stderr_str.contains("SIGINT")
-        || stderr_str.contains("interrupted")
-    {
-        return IrCheckResult::TimedOutOrInterrupted;
-    }
-
-    // Heuristic: if the tool reports a counterexample it usually exits 1 and prints
-    // something like "NOT EQUIVALENT" or "counterexample".
-    if stderr_str.to_lowercase().contains("not equivalent")
-        || stderr_str.to_lowercase().contains("counterexample")
-    {
-        return IrCheckResult::NotEquivalent;
-    }
-
-    IrCheckResult::OtherProcessError(format!("retcode {} stderr: {}", output.status, stderr_str))
 }
 
 /// Structured variant of `prove_same_gate_fn_via_ir`.
 pub fn prove_same_gate_fn_via_ir_status(lhs: &GateFn, rhs: &GateFn) -> IrCheckResult {
+    prove_same_gate_fn_via_ir_status_with_solver(lhs, rhs, SolverChoice::Bitwuzla, None)
+}
+
+/// Checks two GateFns using an explicitly selected IR solver backend.
+pub fn prove_same_gate_fn_via_ir_status_with_solver(
+    lhs: &GateFn,
+    rhs: &GateFn,
+    solver: SolverChoice,
+    tool_path: Option<&Path>,
+) -> IrCheckResult {
     let lhs_type = lhs.get_flat_type();
     let rhs_type = rhs.get_flat_type();
     if lhs_type != rhs_type {
@@ -212,13 +185,29 @@ pub fn prove_same_gate_fn_via_ir_status(lhs: &GateFn, rhs: &GateFn) -> IrCheckRe
     let lhs_ir: xlsynth::IrPackage = gate2ir::gate_fn_to_xlsynth_ir(lhs, "lhs", &lhs_type).unwrap();
     let rhs_ir: xlsynth::IrPackage = gate2ir::gate_fn_to_xlsynth_ir(rhs, "rhs", &rhs_type).unwrap();
 
-    run_external_ir_tool(&lhs_ir.to_string(), &rhs_ir.to_string())
+    let prover = prover_for_choice(solver, tool_path);
+    map_equiv_result(prover.prove_ir_pkg_text_equiv(&lhs_ir.to_string(), &rhs_ir.to_string(), None))
+}
+
+/// Checks two GateFns with the explicitly selected XLS toolchain oracle.
+pub fn prove_same_gate_fn_via_ir_status_via_toolchain(lhs: &GateFn, rhs: &GateFn) -> IrCheckResult {
+    prove_same_gate_fn_via_ir_status_with_solver(lhs, rhs, SolverChoice::Toolchain, None)
 }
 
 /// Backwards-compatibility wrapper that preserves the original
 /// Result<(),String> behaviour used elsewhere in the codebase.
 pub fn prove_same_gate_fn_via_ir(lhs: &GateFn, rhs: &GateFn) -> Result<(), String> {
     match prove_same_gate_fn_via_ir_status(lhs, rhs) {
+        IrCheckResult::Equivalent => Ok(()),
+        IrCheckResult::NotEquivalent => Err("not equivalent".to_string()),
+        IrCheckResult::TimedOutOrInterrupted => Err("TimedOutOrInterrupted".to_string()),
+        IrCheckResult::OtherProcessError(msg) => Err(msg),
+    }
+}
+
+/// Checks two GateFns with the explicitly selected XLS toolchain oracle.
+pub fn prove_same_gate_fn_via_ir_via_toolchain(lhs: &GateFn, rhs: &GateFn) -> Result<(), String> {
+    match prove_same_gate_fn_via_ir_status_via_toolchain(lhs, rhs) {
         IrCheckResult::Equivalent => Ok(()),
         IrCheckResult::NotEquivalent => Err("not equivalent".to_string()),
         IrCheckResult::TimedOutOrInterrupted => Err("TimedOutOrInterrupted".to_string()),

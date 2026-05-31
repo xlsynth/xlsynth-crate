@@ -218,11 +218,12 @@ pub fn mcmc_iteration(
                     context.gate_formal_backend,
                 )?;
                 if paranoid {
-                    let external_res = crate::check_equivalence::prove_same_gate_fn_via_ir(
-                        &current_gfn,
-                        &candidate_gfn,
-                    )
-                    .is_ok();
+                    let external_res =
+                        crate::check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(
+                            &current_gfn,
+                            &candidate_gfn,
+                        )
+                        .is_ok();
                     if sat_res != external_res {
                         panic!(
                             "[mcmc] ERROR: SAT oracle and external check_equivalence_with_top DISAGREE in mcmc_iteration: SAT oracle: {}, external: {}",
@@ -837,9 +838,9 @@ fn write_checkpoint(
 ) -> Result<()> {
     // Cross-check equivalence
     let equiv_ok_sat = oracle_equiv_sat_with_backend(original_gfn, best_gfn, gate_formal_backend)?;
-    use crate::check_equivalence::{IrCheckResult, prove_same_gate_fn_via_ir_status};
+    use crate::check_equivalence::{IrCheckResult, prove_same_gate_fn_via_ir_status_via_toolchain};
 
-    let ir_status = prove_same_gate_fn_via_ir_status(original_gfn, best_gfn);
+    let ir_status = prove_same_gate_fn_via_ir_status_via_toolchain(original_gfn, best_gfn);
     let equiv_ok_external = matches!(ir_status, IrCheckResult::Equivalent);
 
     if equiv_ok_sat != equiv_ok_external || !equiv_ok_sat {

@@ -51,7 +51,7 @@ fn direct_ext_mask_low_matches_desugared_semantics_width_sweep() {
             continue;
         }
 
-        check_equivalence::prove_same_gate_fn_via_ir(&gate_ext, &gate_desugared).unwrap_or_else(
+        check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&gate_ext, &gate_desugared).unwrap_or_else(
             |e| {
                 panic!(
                     "expected direct ext_mask_low lowering to match desugared semantics for output_width={output_width} count_width={count_width}: {e}"
@@ -71,7 +71,7 @@ fn direct_ext_mask_low_matches_desugared_for_non_power_of_two_widths() {
 
         let gate_ext = gatify_for_test(&pir_fn);
         let gate_desugared = gatify_for_test(&desugared_fn);
-        check_equivalence::prove_same_gate_fn_via_ir(&gate_ext, &gate_desugared).unwrap_or_else(
+        check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&gate_ext, &gate_desugared).unwrap_or_else(
             |e| {
                 panic!(
                     "expected non-power-of-two ext_mask_low lowering to match desugared semantics for output_width={output_width}: {e}"

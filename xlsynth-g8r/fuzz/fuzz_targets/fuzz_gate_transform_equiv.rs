@@ -31,7 +31,7 @@ fuzz_target!(|graph: FuzzGraph| {
     {
         return;
     }
-    if let Err(e) = check_equivalence::prove_same_gate_fn_via_ir(&g, &new_g) {
+    if let Err(e) = check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&g, &new_g) {
         panic!("Transform {} broke equivalence: {}", t.display_name(), e);
     }
 });

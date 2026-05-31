@@ -30,7 +30,7 @@ Proves two IR functions to be equivalent or provides a counterexample to their e
 Key flags:
 
 - `--top <NAME>` or per-side `--lhs_ir_top <NAME>` / `--rhs_ir_top <NAME>` to select entry points.
-- `--solver <auto|toolchain|bitwuzla|boolector|z3-binary|bitwuzla-binary|boolector-binary>`
+- `--solver <bitwuzla|toolchain|boolector|z3-binary|bitwuzla-binary|boolector-binary>`
 - `--flatten_aggregates=<BOOL>`
 - `--drop_params <CSV>`
 - `--parallelism-strategy <single-threaded|output-bits|input-bit-split>`
@@ -46,7 +46,7 @@ Proves two IR blocks to be equivalent by selecting block members from package-fo
 Key flags:
 
 - `--lhs_top <NAME>` / `--rhs_top <NAME>` or shared `--top <NAME>` to select block entry points (by block name in each package). If omitted, the package `top` block is used when present; otherwise the first block member is selected.
-- `--solver <auto|toolchain|bitwuzla|boolector|z3-binary|bitwuzla-binary|boolector-binary>`
+- `--solver <bitwuzla|toolchain|boolector|z3-binary|bitwuzla-binary|boolector-binary>`
 - `--flatten_aggregates=<BOOL>`
 - `--drop_params <CSV>`
 - `--parallelism-strategy <single-threaded|output-bits|input-bit-split>`
@@ -1645,6 +1645,7 @@ Notes:
 
 - Structural hashing ignores position metadata, assertion/trace strings, and parameter text ids (params are keyed by ordinal position in the signature). It includes node kinds, types, selected attributes (e.g., widths), and child structure.
 - Opcode summaries group discrepancies by operator per depth to make eyeballing easier; detailed signatures include operand/attribute types for precise diagnosis.
+- `--solver <bitwuzla|toolchain|boolector|z3-binary|bitwuzla-binary|boolector-binary>` selects the backend used for the emitted equivalence checks. The default is `bitwuzla`.
 
 ### `ir-localized-eco`
 
@@ -1659,6 +1660,7 @@ Computes a localized ECO diff (old → new) between two IR functions and emits a
   - `--sanity-samples <N>` – if > 0, run N randomized interpreter samples (in addition to all-zeros and all-ones) to sanity-check that patched(old) ≡ new.
   - `--sanity-seed <SEED>` – seed for randomized interpreter samples.
   - `--compute-text-diff=<BOOL>` – compute IR/RTL text diffs (expensive). Defaults to `false`.
+  - `--solver <bitwuzla|toolchain|boolector|z3-binary|bitwuzla-binary|boolector-binary>` – backend for the final equivalence proof. Defaults to `bitwuzla`.
 
 Example:
 
@@ -1998,8 +2000,8 @@ running the same prover-backed flow as `ir-equiv`.
 
 - Positional arguments: `<lhs_g8r_file> <rhs_g8r_file>`
 - Solver selection:
-  - `--solver auto|z3-binary|bitwuzla-binary|boolector-binary|bitwuzla|boolector|toolchain`
-  - Default: `auto`
+  - `--solver bitwuzla|z3-binary|bitwuzla-binary|boolector-binary|boolector|toolchain`
+  - Default: `bitwuzla`
 - Optional JSON output:
   - `--output_json <path>` writes the structured result to a file
 
@@ -2019,7 +2021,7 @@ function-equivalence command.
   - `--top <NAME>` selects the entry function in `<rhs_ir_file>`.
   - The GateFn side uses the GateFn's own name as its lifted IR top.
 - Proving flags (same shape as `ir-equiv`):
-  - `--solver <auto|toolchain|bitwuzla|boolector|z3-binary|bitwuzla-binary|boolector-binary>`
+  - `--solver <bitwuzla|toolchain|boolector|z3-binary|bitwuzla-binary|boolector-binary>`
   - `--flatten_aggregates=<BOOL>`
   - `--drop_params <CSV>`
   - `--parallelism-strategy <single-threaded|output-bits|input-bit-split>`
@@ -2048,8 +2050,8 @@ same prover-backed flow as `ir-equiv`.
 
 - Positional arguments: `<lhs_aig_file> <rhs_aig_file>`
 - Solver selection:
-  - `--solver auto|z3-binary|bitwuzla-binary|boolector-binary|bitwuzla|boolector|toolchain`
-  - Default: `auto`
+  - `--solver bitwuzla|z3-binary|bitwuzla-binary|boolector-binary|boolector|toolchain`
+  - Default: `bitwuzla`
 - Optional JSON output:
   - `--output_json <path>` writes the structured result to a file
 
@@ -2085,7 +2087,7 @@ lifting the AIGER into IR and then running the same IR equivalence flow as
   for the canonical flattening rule.
 - No AIGER-side regrouping is inferred from symbol names or suffixes.
 - Proving flags (same shape as `ir-equiv`):
-  - `--solver <auto|toolchain|bitwuzla|boolector|z3-binary|bitwuzla-binary|boolector-binary>`
+  - `--solver <bitwuzla|toolchain|boolector|z3-binary|bitwuzla-binary|boolector-binary>`
   - `--flatten_aggregates=<BOOL>`
   - `--drop_params <CSV>`
   - `--parallelism-strategy <single-threaded|output-bits|input-bit-split>`
@@ -2135,7 +2137,7 @@ Checks two DSLX functions for functional equivalence. By default it converts bot
 - Entry-point selection: either `--dslx_top <NAME>` or both `--lhs_dslx_top <NAME>` and `--rhs_dslx_top <NAME>`.
 - Search paths: `--dslx_path <P1;P2;...>` and `--dslx_stdlib_path <PATH>`.
 - Behavior flags:
-  - `--solver <auto|toolchain|bitwuzla|boolector|z3-binary|bitwuzla-binary|boolector-binary>`
+  - `--solver <bitwuzla|toolchain|boolector|z3-binary|bitwuzla-binary|boolector-binary>`
   - `--flatten_aggregates=<BOOL>`
   - `--drop_params <CSV>`
   - `--parallelism-strategy <single-threaded|output-bits|input-bit-split>`
@@ -2369,7 +2371,7 @@ xlsynth-driver dslx-fn-prove-assertions \
 ```
 
 - Inputs: `--dslx_input_file <FILE>` and `--dslx_top <FUNC>` select the DSLX module and entry point.
-- Backend: `--solver <...>` selects the SMT backend. `auto` chooses only supported in-process SMT backends and errors when none are available. `toolchain` mode is not currently supported for this command because the flow proves an IR-level wrapper with fixed implicit activation.
+- Backend: `--solver <...>` selects the SMT backend. The default is `bitwuzla`, which requires an in-process Bitwuzla build feature. `toolchain` mode is not currently supported for this command because the flow proves an IR-level wrapper with fixed implicit activation.
 - Assertion filter: `--assert-label-filter <REGEX>` includes only assertions whose label matches the regex.
 - Enum inputs: `--assume-enum-in-bound <BOOL>` defaults to `true`, constraining enum-typed top parameters to declared enum members instead of all lowered bit patterns.
 - UF mapping: repeat `--uf <func_name:uf_name>` to treat helper functions as uninterpreted. Assertions inside UF-mapped functions are ignored during proving.
@@ -2409,7 +2411,7 @@ Proves that DSLX `#[quickcheck]` functions always return true.
 - Inputs: `--dslx_input_file <FILE>` plus optional DSLX search paths.
 - Scripts: `--tactic_json <PATH>` (`--tactic_jsonl <PATH>` for JSONL) switches to the tactic/script-driven workflow so you can edit QuickCheck obligations before solving.
 - Filters: `--test_filter <REGEX>` restricts which quickcheck functions are proved.
-- Backend: `--solver <...>` selects the solver/toolchain (`auto` defers to the library's feature-based default).
+- Backend: `--solver <...>` selects the solver/toolchain. The default is `bitwuzla`.
 - Semantics: `--assertion-semantics <ignore|never|assume>` (defaults to `never`; external toolchain supports only `never`).
 - Assertion filter: `--assert-label-filter <REGEX>` – include only assertions whose label matches this regex (use `|` to combine multiple labels).
 - UF mapping: `--uf <func_name:uf_name>` may be specified multiple times to treat functions as uninterpreted.
@@ -2632,7 +2634,7 @@ Schema details
   - Optional:
     - `dslx_path`: array of paths (joined with `;`)
     - `dslx_stdlib_path`: path
-    - `solver`: same values as above, except `toolchain` is rejected by this command. `auto` requires an available in-process SMT backend for this task.
+    - `solver`: same values as above, except `toolchain` is rejected by this command. The default `bitwuzla` backend requires an in-process Bitwuzla build feature.
     - `assert_label_filter`: string (regex)
     - `assume_enum_in_bound`: bool
     - `uf`: array of strings, each "`<func_name>:<uf_name>`". Functions sharing the same `uf_name` are assumed equivalent; assertions inside them are ignored.

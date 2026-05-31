@@ -49,13 +49,6 @@ fn ext_prio_encode_equivalent_to_desugared_export_form_and_exports_to_upstream()
             );
             match res {
                 EquivResult::Proved => {}
-                EquivResult::ToolchainDisproved(msg)
-                    if msg.contains("Unknown operation")
-                        && msg.contains("ext_prio_encode")
-                        && msg.contains("string-to-op conversion") =>
-                {
-                    return;
-                }
                 _ => panic!(
                     "formal equivalence failed at w={} lsb_prio={}: {:?}",
                     w, lsb_prio, res

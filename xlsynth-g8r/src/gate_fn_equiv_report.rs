@@ -40,14 +40,15 @@ pub fn prove_gate_fn_equiv_report(lhs: &GateFn, rhs: &GateFn) -> EquivReport {
         results.insert("z3".to_string(), res);
     }
 
-    let ir_checker = match check_equivalence::prove_same_gate_fn_via_ir_status(lhs, rhs) {
-        IrCheckResult::Equivalent => EngineResult::Equiv,
-        IrCheckResult::NotEquivalent => EngineResult::NotEquiv(None),
-        IrCheckResult::TimedOutOrInterrupted => {
-            EngineResult::NotEquiv(Some("TimedOutOrInterrupted".to_string()))
-        }
-        IrCheckResult::OtherProcessError(msg) => EngineResult::NotEquiv(Some(msg)),
-    };
+    let ir_checker =
+        match check_equivalence::prove_same_gate_fn_via_ir_status_via_toolchain(lhs, rhs) {
+            IrCheckResult::Equivalent => EngineResult::Equiv,
+            IrCheckResult::NotEquivalent => EngineResult::NotEquiv(None),
+            IrCheckResult::TimedOutOrInterrupted => {
+                EngineResult::NotEquiv(Some("TimedOutOrInterrupted".to_string()))
+            }
+            IrCheckResult::OtherProcessError(msg) => EngineResult::NotEquiv(Some(msg)),
+        };
     results.insert("ir".to_string(), ir_checker);
 
     let varisat = {

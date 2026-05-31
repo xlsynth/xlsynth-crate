@@ -23,7 +23,7 @@ fn assert_ir_fns_equivalent(orig_fn: &ir::Fn, prepared_fn: &ir::Fn) {
     desugar_extensions_in_fn(&mut prepared_desugared).expect("desugar prepared PIR");
     let orig_pkg_text = format!("package orig\n\ntop {}", orig_desugared);
     let prepared_pkg_text = format!("package prepared\n\ntop {}", prepared_desugared);
-    check_equivalence::check_equivalence(&orig_pkg_text, &prepared_pkg_text)
+    check_equivalence::check_equivalence_via_toolchain(&orig_pkg_text, &prepared_pkg_text)
         .expect("prepared PIR should be equivalent to original PIR");
 }
 
@@ -108,7 +108,8 @@ top fn cone(x: bits[8] id=1, y: bits[8] id=2) -> bits[1] {
     .expect("gatify");
 
     // Double-check explicitly (gatify also checks when check_equivalence=true).
-    check_equivalence::validate_same_fn(&pir_fn, &gatify_output.gate_fn).expect("equiv");
+    check_equivalence::validate_same_fn_via_toolchain(&pir_fn, &gatify_output.gate_fn)
+        .expect("equiv");
 }
 
 #[test]
@@ -153,7 +154,8 @@ fn carry_out_rewrite_sweep_up_to_4_bits_only_triggers_for_msb_slice() {
                 },
             )
             .expect("gatify");
-            check_equivalence::validate_same_fn(&pir_fn, &gatify_output.gate_fn).expect("equiv");
+            check_equivalence::validate_same_fn_via_toolchain(&pir_fn, &gatify_output.gate_fn)
+                .expect("equiv");
         }
     }
 }
@@ -203,7 +205,8 @@ top fn cone(a: bits[9] id=1, b: bits[9] id=2) -> bits[1] {
     )
     .expect("gatify");
 
-    check_equivalence::validate_same_fn(&pir_fn, &gatify_output.gate_fn).expect("equiv");
+    check_equivalence::validate_same_fn_via_toolchain(&pir_fn, &gatify_output.gate_fn)
+        .expect("equiv");
 }
 
 #[test]
@@ -254,5 +257,6 @@ top fn cone(p0: bits[9] id=1, p1: bits[9] id=2) -> bits[1] {
     )
     .expect("gatify");
 
-    check_equivalence::validate_same_fn(&pir_fn, &gatify_output.gate_fn).expect("equiv");
+    check_equivalence::validate_same_fn_via_toolchain(&pir_fn, &gatify_output.gate_fn)
+        .expect("equiv");
 }

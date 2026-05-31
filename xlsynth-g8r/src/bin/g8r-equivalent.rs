@@ -60,13 +60,14 @@ fn main() {
     println!("SAT/Z3 oracle: {}", sat_equiv);
 
     // Checker 2: IR-based equivalence.
-    let ir_equiv = match xlsynth_g8r::check_equivalence::prove_same_gate_fn_via_ir(&lhs, &rhs) {
-        Ok(_) => true,
-        Err(e) => {
-            eprintln!("IR equivalence checker error: {}", e);
-            false
-        }
-    };
+    let ir_equiv =
+        match xlsynth_g8r::check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&lhs, &rhs) {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!("IR equivalence checker error: {}", e);
+                false
+            }
+        };
     println!("IR checker: {}", ir_equiv);
 
     // Checker 3: Varisat-based SAT prover (structural)

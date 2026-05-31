@@ -42,6 +42,23 @@ fn resolve_tool_path(prover: &ExternalProver, exe_name: &str) -> Result<PathBuf,
 }
 
 impl Prover for ExternalProver {
+    fn prove_ir_fn_equiv(
+        self: &Self,
+        lhs: &xlsynth_pir::ir::Fn,
+        rhs: &xlsynth_pir::ir::Fn,
+    ) -> EquivResult {
+        let lhs = ProverFn::new(lhs, None);
+        let rhs = ProverFn::new(rhs, None);
+        self.prove_ir_equiv(
+            &lhs,
+            &rhs,
+            EquivParallelism::SingleThreaded,
+            AssertionSemantics::Ignore,
+            None,
+            false,
+        )
+    }
+
     fn prove_ir_pkg_text_equiv(
         self: &Self,
         lhs_pkg_text: &str,
@@ -279,6 +296,7 @@ impl From<ToolchainEquivResult> for EquivResult {
         match result {
             ToolchainEquivResult::Proved => EquivResult::Proved,
             ToolchainEquivResult::Disproved(msg) => EquivResult::ToolchainDisproved(msg),
+            ToolchainEquivResult::TimedOutOrInterrupted(msg) => EquivResult::Inconclusive(msg),
             ToolchainEquivResult::Error(msg) => EquivResult::Error(msg),
         }
     }
@@ -300,4 +318,30 @@ fn unify_toolchain_tops<'a>(
     let unified = lhs_top.to_string();
     let rhs_rewritten = rhs_ir.replace(rhs_top, &unified);
     (Cow::Borrowed(lhs_ir), Cow::Owned(rhs_rewritten), unified)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xlsynth_pir::ir_parser::Parser;
+
+    #[test]
+    fn fn_equiv_convenience_uses_supported_assertion_semantics() {
+        let ir = r#"package test
+
+fn f(x: bits[1] id=1) -> bits[1] {
+  ret identity.2: bits[1] = identity(x, id=2)
+}
+"#;
+        let pkg = Parser::new(ir).parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap();
+        let tool_dir = tempfile::tempdir().unwrap();
+        let prover = ExternalProver::ToolDir(tool_dir.path().to_path_buf());
+
+        let result = prover.prove_ir_fn_equiv(f, f);
+        assert!(matches!(
+            result,
+            EquivResult::Error(msg) if msg.contains("check_ir_equivalence_main not found")
+        ));
+    }
 }

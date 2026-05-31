@@ -16,7 +16,9 @@ use xlsynth_pir::{
 use crate::toolchain_config::ToolchainConfig;
 use comfy_table::presets::ASCII_MARKDOWN;
 use comfy_table::{ContentArrangement, Table};
+use std::path::Path;
 use xlsynth_g8r::check_equivalence;
+use xlsynth_prover::prover::SolverChoice;
 
 fn find_node_signature_by_textual_id(f: &ir::Fn, text: &str) -> Option<String> {
     for (i, _n) in f.nodes.iter().enumerate() {
@@ -69,25 +71,42 @@ fn ir_fn_to_table(f: &ir::Fn, diff_region: &std::collections::HashSet<ir::NodeRe
     table.to_string()
 }
 
-fn print_equiv_result(label: &str, lhs_pkg_text: &str, rhs_pkg_text: &str, top_name: &str) {
-    match check_equivalence::check_equivalence_with_top(
+fn print_equiv_result(
+    label: &str,
+    lhs_pkg_text: &str,
+    rhs_pkg_text: &str,
+    top_name: &str,
+    solver: SolverChoice,
+    tool_path: Option<&Path>,
+) {
+    match check_equivalence::check_equivalence_with_top_and_solver(
         lhs_pkg_text,
         rhs_pkg_text,
         Some(top_name),
-        false,
+        solver,
+        tool_path,
     ) {
         Ok(()) => println!("  Equiv ({}): OK", label),
         Err(e) => println!("  Equiv ({}): FAILED: {}", label, e),
     }
 }
 
-pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<ToolchainConfig>) {
+pub fn handle_ir_structural_similarity(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
     let lhs = matches.get_one::<String>("lhs_ir_file").unwrap();
     let lhs_path = std::path::Path::new(lhs);
     let rhs = matches.get_one::<String>("rhs_ir_file").unwrap();
     let rhs_path = std::path::Path::new(rhs);
     let lhs_ir_top = matches.get_one::<String>("lhs_ir_top");
     let rhs_ir_top = matches.get_one::<String>("rhs_ir_top");
+    let solver: SolverChoice = matches
+        .get_one::<String>("solver")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let tool_path = config
+        .as_ref()
+        .and_then(|c| c.tool_path.as_deref())
+        .map(Path::new);
 
     // Prepare output directory: user-provided or a kept temp directory.
     let out_dir = if let Some(dir_str) = matches.get_one::<String>("output_dir") {
@@ -421,6 +440,8 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
                 &lhs_diff_pkg,
                 &lhs_orig_text,
                 lhs_outline.outer.name.as_str(),
+                solver,
+                tool_path,
             );
         }
         Err(e) => println!("  Equiv (lhs_diff ≡ lhs_orig): skipped (read error: {})", e),
@@ -439,6 +460,8 @@ pub fn handle_ir_structural_similarity(matches: &ArgMatches, _config: &Option<To
                 &rhs_diff_pkg,
                 &rhs_orig_text,
                 lhs_outline.outer.name.as_str(),
+                solver,
+                tool_path,
             );
         }
         Err(e) => println!("  Equiv (rhs_diff ≡ rhs_orig): skipped (read error: {})", e),

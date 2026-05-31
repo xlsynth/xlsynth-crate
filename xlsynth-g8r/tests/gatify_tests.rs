@@ -44,7 +44,7 @@ fn do_test_ir_conversion_with_top(
     )
     .unwrap();
 
-    check_equivalence::validate_same_fn(&ir_fn, &gatify_output.gate_fn)
+    check_equivalence::validate_same_fn_via_toolchain(&ir_fn, &gatify_output.gate_fn)
         .expect("should validate IR to gate function equivalence");
 
     get_summary_stats(&gatify_output.gate_fn)

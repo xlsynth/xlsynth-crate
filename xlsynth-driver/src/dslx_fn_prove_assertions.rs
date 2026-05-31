@@ -139,7 +139,7 @@ pub fn handle_dslx_fn_prove_assertions(
     let solver = matches
         .get_one::<String>("solver")
         .map(|s| s.parse().unwrap())
-        .unwrap_or(SolverChoice::Auto);
+        .unwrap_or(SolverChoice::Bitwuzla);
     if solver == SolverChoice::Toolchain {
         report_cli_error_and_exit(
             "Solver 'toolchain' is not supported for this command",

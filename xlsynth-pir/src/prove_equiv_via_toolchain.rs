@@ -13,6 +13,7 @@ use crate::ir::Fn;
 pub enum ToolchainEquivResult {
     Proved,
     Disproved(String),
+    TimedOutOrInterrupted(String),
     Error(String),
 }
 
@@ -64,7 +65,15 @@ pub fn prove_ir_pkg_equiv_with_tool_exe<P: AsRef<std::path::Path>>(
                 msg.push_str(": ");
                 msg.push_str(&snippet);
             }
-            ToolchainEquivResult::Disproved(msg)
+            let lowered = msg.to_ascii_lowercase();
+            if lowered.contains("deadline_exceeded")
+                || lowered.contains("sigint")
+                || lowered.contains("interrupted")
+            {
+                ToolchainEquivResult::TimedOutOrInterrupted(msg)
+            } else {
+                ToolchainEquivResult::Disproved(msg)
+            }
         }
         Err(e) => ToolchainEquivResult::Error(format!("spawn failed: {}", e)),
     }

@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 xlsynth = { path = "../xlsynth", version = "0.53.0" }
 xlsynth-pir = { path = "../xlsynth-pir", version = "0.53.0" }
+xlsynth-prover = { path = "../xlsynth-prover", version = "0.53.0" }
 xlsynth-mcmc = { path = "../xlsynth-mcmc", version = "0.53.0" }
 env_logger = "0.11"
 log = "0.4"
@@ -67,6 +68,9 @@ prost-build = "0.12"
 
 [features]
 default = []
+has-bitwuzla = ["xlsynth-prover/has-bitwuzla"]
+with-bitwuzla-system = ["xlsynth-prover/with-bitwuzla-system", "has-bitwuzla"]
+with-bitwuzla-built = ["xlsynth-prover/with-bitwuzla-built", "has-bitwuzla"]
 with-z3-system = ["dep:z3"]
 with-z3-built = ["dep:z3", "z3/static-link-z3"]
 

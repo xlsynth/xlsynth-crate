@@ -64,17 +64,6 @@ fn ext_mask_low_equivalent_to_desugared_export_form_and_exports_to_upstream() {
         );
         match res {
             EquivResult::Proved => {}
-            EquivResult::ToolchainDisproved(msg)
-                if msg.contains("Unknown operation")
-                    && msg.contains("ext_mask_low")
-                    && msg.contains("string-to-op conversion") =>
-            {
-                // Not a sample failure: when no SMT backend is enabled,
-                // `xlsynth-prover` falls back to the external XLS toolchain
-                // prover, and upstream XLS does not understand PIR extension ops
-                // like `ext_mask_low`.
-                return;
-            }
             _ => panic!(
                 "formal equivalence failed at output_width={} count_width={}: {:?}",
                 output_width, count_width, res

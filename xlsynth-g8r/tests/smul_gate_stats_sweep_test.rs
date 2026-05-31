@@ -168,8 +168,11 @@ fn gather_smul_widening_rows() -> Vec<SmulWideningRow> {
 
         validate_smul_by_simulation(&native_signed, operand_width, output_width);
         if operand_width <= 3 {
-            check_equivalence::prove_same_gate_fn_via_ir(&sign_extend, &native_signed)
-                .expect("sign-extend and native signed multiply lowerings should be equivalent");
+            check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(
+                &sign_extend,
+                &native_signed,
+            )
+            .expect("sign-extend and native signed multiply lowerings should be equivalent");
         }
 
         let sign_extend_stats = stats_for_gate_fn(&sign_extend);

@@ -49,13 +49,6 @@ fn f(a: bits[3] id=1, b: bits[5] id=2, c: bits[9] id=3) -> bits[6] {
     );
     match res {
         EquivResult::Proved => {}
-        EquivResult::ToolchainDisproved(msg)
-            if msg.contains("Unknown operation")
-                && msg.contains("ext_nary_add")
-                && msg.contains("string-to-op conversion") =>
-        {
-            return;
-        }
         _ => panic!("formal equivalence failed: {:?}", res),
     }
 }

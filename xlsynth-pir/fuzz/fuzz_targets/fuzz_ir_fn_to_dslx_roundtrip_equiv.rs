@@ -7,10 +7,9 @@ use std::path::Path;
 use std::sync::Once;
 use xlsynth::DslxConvertOptions;
 use xlsynth_pir::ir_fn_to_dslx::IrFnToDslxError;
-use xlsynth_pir::prove_equiv_via_toolchain::{
-    prove_ir_pkg_equiv_with_tool_dir, ToolchainEquivResult,
-};
 use xlsynth_pir_fuzz::generate_standard_random_pir_package;
+use xlsynth_prover::prover::types::EquivResult;
+use xlsynth_prover::prover::{SolverChoice, prover_for_choice};
 
 static INIT_LOGGER: Once = Once::new();
 
@@ -68,13 +67,20 @@ fuzz_target!(|data: &[u8]| {
         .expect("set top on roundtrip rhs package");
     let rhs_ir_with_top = rhs_pkg_with_top.to_string();
 
-    let tools_dir = std::env::var("XLSYNTH_TOOLS").expect("XLSYNTH_TOOLS must be set");
-    match prove_ir_pkg_equiv_with_tool_dir(&lhs_ir_with_top, &rhs_ir_with_top, None, tools_dir) {
-        ToolchainEquivResult::Proved => {}
-        ToolchainEquivResult::Disproved(msg) => panic!(
+    match prover_for_choice(SolverChoice::Toolchain, None).prove_ir_pkg_text_equiv(
+        &lhs_ir_with_top,
+        &rhs_ir_with_top,
+        None,
+    ) {
+        EquivResult::Proved => {}
+        EquivResult::ToolchainDisproved(msg) => panic!(
             "IR equivalence disproved: {}\n=== INPUT_IR ===\n{}\n=== DSLX ===\n{}\n=== ROUNDTRIP_IR ===\n{}",
             msg, lhs_ir_with_top, translated.dslx_text, rhs_ir_with_top
         ),
-        ToolchainEquivResult::Error(msg) => panic!("IR equivalence tooling error: {}", msg),
+        // Early-return rationale: interruption or timeout of the external oracle
+        // is not a translation-soundness failure for this sample.
+        EquivResult::Inconclusive(_) => return,
+        EquivResult::Error(msg) => panic!("IR equivalence tooling error: {}", msg),
+        other => panic!("unexpected toolchain equivalence result: {other:?}"),
     }
 });

@@ -93,9 +93,12 @@ fn row_for_case(case: AffineShiftQorCase) -> AffineShiftQorRow {
 
     let gate_dynamic_shift = gatify_gate_fn(&pir_fn);
     let gate_affine_select = gatify_gate_fn(&prepared);
-    check_equivalence::prove_same_gate_fn_via_ir(&gate_dynamic_shift, &gate_affine_select)
-        .unwrap_or_else(|e| panic!("gate equivalence failed for {case:?}: {e}"));
-    check_equivalence::validate_same_fn(&pir_fn, &gate_affine_select)
+    check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(
+        &gate_dynamic_shift,
+        &gate_affine_select,
+    )
+    .unwrap_or_else(|e| panic!("gate equivalence failed for {case:?}: {e}"));
+    check_equivalence::validate_same_fn_via_toolchain(&pir_fn, &gate_affine_select)
         .unwrap_or_else(|e| panic!("rewritten gate validation failed for {case:?}: {e}"));
 
     let dynamic_shift = get_aig_stats(&gate_dynamic_shift);

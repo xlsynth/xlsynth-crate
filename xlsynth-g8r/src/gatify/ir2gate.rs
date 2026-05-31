@@ -15,6 +15,7 @@ use xlsynth_pir::ir::{self, ParamId, StartAndLimit};
 use xlsynth_pir::ir_range_info::IrRangeInfo;
 use xlsynth_pir::ir_utils;
 use xlsynth_pir::ir_verify;
+use xlsynth_prover::prover::SolverChoice;
 
 use crate::ir2gate_utils::{
     AdderMapping, Direction, array_add_with_carry_out, gatify_add_brent_kung,
@@ -2670,6 +2671,10 @@ fn gatify_decode(
 
     // For every possible output value...
     for i in 0..output_bit_count {
+        if input_count < usize::BITS as usize && i >= (1usize << input_count) {
+            outputs.push(gb.get_false());
+            continue;
+        }
         let mut terms = Vec::with_capacity(input_count);
         // For each bit in the input, choose whether to use the bit directly or its
         // inversion.
@@ -4126,6 +4131,7 @@ pub struct GatifyOptions {
     pub fold: bool,
     pub hash: bool,
     pub check_equivalence: bool,
+    pub equivalence_solver: SolverChoice,
     pub adder_mapping: crate::ir2gate_utils::AdderMapping,
     pub mul_adder_mapping: Option<crate::ir2gate_utils::AdderMapping>,
     pub range_info: Option<Arc<IrRangeInfo>>,
@@ -4146,6 +4152,7 @@ impl GatifyOptions {
             fold: true,
             hash: true,
             check_equivalence: false,
+            equivalence_solver: SolverChoice::Bitwuzla,
             adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
             mul_adder_mapping: None,
             range_info: None,
@@ -4166,6 +4173,7 @@ impl GatifyOptions {
             fold: true,
             hash: true,
             check_equivalence: false,
+            equivalence_solver: SolverChoice::Bitwuzla,
             adder_mapping: crate::ir2gate_utils::AdderMapping::default(),
             mul_adder_mapping: None,
             range_info: None,
@@ -4253,7 +4261,12 @@ fn gatify_lower_prepared_fn(
 
     if options.check_equivalence {
         log::info!("checking equivalence of IR function and gate function...");
-        check_equivalence::validate_same_fn(equiv_fn, &gate_fn)?;
+        check_equivalence::validate_same_fn_with_solver(
+            equiv_fn,
+            &gate_fn,
+            options.equivalence_solver,
+            None,
+        )?;
     }
     Ok(GatifyOutput {
         gate_fn,
@@ -5186,8 +5199,11 @@ fn f(x: bits[2] id=1, selector: bits[2] id=2) -> bits[2] {
     ) {
         let reference_gate_fn = build_cmp_gate_fn_for_qor_test(width, binop, reference_lowering);
         let comparison_gate_fn = build_cmp_gate_fn_for_qor_test(width, binop, comparison_lowering);
-        check_equivalence::prove_same_gate_fn_via_ir(&reference_gate_fn, &comparison_gate_fn)
-            .expect("comparison lowerings should be equivalent");
+        check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(
+            &reference_gate_fn,
+            &comparison_gate_fn,
+        )
+        .expect("comparison lowerings should be equivalent");
     }
 
     fn gather_cmp_qor_rows() -> Vec<CmpRecursiveBitTreeQorRow> {
@@ -6380,6 +6396,48 @@ top fn f(start: bits[4], a: bits[8], b: bits[8]) -> bits[8][1] {
         gatify(&ir_fn, GatifyOptions::all_opts_disabled())
             .unwrap()
             .gate_fn
+    }
+
+    #[test]
+    fn test_decode_narrow_selector_marks_unrepresentable_outputs_false() {
+        let mut gb = GateBuilder::new("decode_narrow".to_string(), GateBuilderOptions::no_opt());
+        let input = gb.add_input("input".to_string(), 1);
+        let decoded = super::gatify_decode(&mut gb, 4, &input);
+
+        assert_eq!(decoded.get_bit_count(), 4);
+        assert!(gb.is_known_false(*decoded.get_lsb(2)));
+        assert!(gb.is_known_false(*decoded.get_lsb(3)));
+    }
+
+    #[test]
+    fn test_array_index_narrow_selector_does_not_alias_unrepresentable_cases() {
+        let gate_fn = gatify_ir_text(
+            r#"package sample
+
+top fn f(a: bits[5][4] id=1, index: bits[1] id=2) -> bits[5] {
+  ret selected: bits[5] = array_index(a, indices=[index], id=3)
+}
+"#,
+        );
+        let array_ty = ir::Type::new_array(ir::Type::Bits(5), 4);
+        let array_value = IrValue::make_array(&[
+            IrValue::make_ubits(5, 0).unwrap(),
+            IrValue::make_ubits(5, 30).unwrap(),
+            IrValue::make_ubits(5, 0).unwrap(),
+            IrValue::make_ubits(5, 31).unwrap(),
+        ])
+        .unwrap();
+        let got = gate_sim::eval(
+            &gate_fn,
+            &[
+                ir_value_to_gate_bits(&array_value, &array_ty),
+                IrBits::make_ubits(1, 1).unwrap(),
+            ],
+            gate_sim::Collect::None,
+        )
+        .outputs[0]
+            .clone();
+        assert_eq!(got, IrBits::make_ubits(5, 30).unwrap());
     }
 
     fn gatify_ir_text_with_gate_opt_in(ir_text: &str) -> Result<GateFn, String> {

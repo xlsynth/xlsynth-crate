@@ -37,6 +37,9 @@ top fn add_{n}_bits(a: bits[{n}] id=1, b: bits[{n}] id=2) -> bits[{n}] {{
             .unwrap();
     let gate_package_ir_text = gate_package.to_string();
 
-    let result = check_equivalence::check_equivalence(&orig_package_ir_text, &gate_package_ir_text);
+    let result = check_equivalence::check_equivalence_via_toolchain(
+        &orig_package_ir_text,
+        &gate_package_ir_text,
+    );
     assert!(result.is_ok(), "{}", result.unwrap_err());
 }

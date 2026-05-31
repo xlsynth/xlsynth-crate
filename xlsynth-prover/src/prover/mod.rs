@@ -48,9 +48,6 @@ impl SolverLimits {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SolverChoice {
-    /// Let the library select an appropriate prover based on available
-    /// features.
-    Auto,
     #[cfg(feature = "has-easy-smt")]
     Z3Binary,
     #[cfg(feature = "has-easy-smt")]
@@ -58,7 +55,9 @@ pub enum SolverChoice {
     #[cfg(feature = "has-easy-smt")]
     BoolectorBinary,
 
-    #[cfg(feature = "has-bitwuzla")]
+    /// Use the preferred in-process Bitwuzla backend.
+    ///
+    /// This intentionally does not fall back to slower solvers or XLS tools.
     Bitwuzla,
 
     #[cfg(feature = "has-boolector")]
@@ -72,14 +71,12 @@ pub enum SolverChoice {
 impl fmt::Display for SolverChoice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let s = match self {
-            SolverChoice::Auto => "auto",
             #[cfg(feature = "has-easy-smt")]
             SolverChoice::Z3Binary => "z3-binary",
             #[cfg(feature = "has-easy-smt")]
             SolverChoice::BitwuzlaBinary => "bitwuzla-binary",
             #[cfg(feature = "has-easy-smt")]
             SolverChoice::BoolectorBinary => "boolector-binary",
-            #[cfg(feature = "has-bitwuzla")]
             SolverChoice::Bitwuzla => "bitwuzla",
             #[cfg(feature = "has-boolector")]
             SolverChoice::Boolector => "boolector",
@@ -93,7 +90,6 @@ impl FromStr for SolverChoice {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "auto" => Ok(Self::Auto),
             #[cfg(feature = "has-easy-smt")]
             "z3-binary" => Ok(Self::Z3Binary),
             #[cfg(feature = "has-easy-smt")]
@@ -101,7 +97,6 @@ impl FromStr for SolverChoice {
             #[cfg(feature = "has-easy-smt")]
             "boolector-binary" => Ok(Self::BoolectorBinary),
 
-            #[cfg(feature = "has-bitwuzla")]
             "bitwuzla" => Ok(Self::Bitwuzla),
 
             #[cfg(feature = "has-boolector")]
@@ -165,6 +160,73 @@ pub trait Prover {
         assert_label_filter: Option<&str>,
         uf_map: &HashMap<String, String>,
     ) -> Vec<QuickCheckRunResult>;
+}
+
+#[cfg(not(feature = "has-bitwuzla"))]
+struct UnavailableProver {
+    message: String,
+}
+
+#[cfg(not(feature = "has-bitwuzla"))]
+impl UnavailableProver {
+    fn for_bitwuzla_selection() -> Self {
+        Self {
+            message: "--solver=bitwuzla requires in-process Bitwuzla support; rebuild with \
+                      --features with-bitwuzla-system or --features with-bitwuzla-built, or select \
+                      an alternate solver explicitly"
+                .to_string(),
+        }
+    }
+}
+
+#[cfg(not(feature = "has-bitwuzla"))]
+impl Prover for UnavailableProver {
+    fn prove_ir_pkg_text_equiv(
+        self: &Self,
+        _lhs_pkg_text: &str,
+        _rhs_pkg_text: &str,
+        _top: Option<&str>,
+    ) -> EquivResult {
+        EquivResult::Error(self.message.clone())
+    }
+
+    fn prove_ir_equiv<'a>(
+        self: &Self,
+        _lhs: &ProverFn<'a>,
+        _rhs: &ProverFn<'a>,
+        _strategy: EquivParallelism,
+        _assertion_semantics: AssertionSemantics,
+        _assert_label_filter: Option<&str>,
+        _allow_flatten: bool,
+    ) -> EquivResult {
+        EquivResult::Error(self.message.clone())
+    }
+
+    fn prove_ir_quickcheck<'a>(
+        self: &Self,
+        _prover_fn: &ProverFn<'a>,
+        _assertion_semantics: QuickCheckAssertionSemantics,
+        _assert_label_filter: Option<&str>,
+    ) -> BoolPropertyResult {
+        BoolPropertyResult::Error(self.message.clone())
+    }
+
+    fn prove_dslx_quickcheck(
+        &self,
+        _entry_file: &std::path::Path,
+        _dslx_stdlib_path: Option<&std::path::Path>,
+        _additional_search_paths: &[&std::path::Path],
+        _test_filter: Option<&str>,
+        _assertion_semantics: QuickCheckAssertionSemantics,
+        _assert_label_filter: Option<&str>,
+        _uf_map: &HashMap<String, String>,
+    ) -> Vec<QuickCheckRunResult> {
+        vec![QuickCheckRunResult {
+            name: "solver-selection".to_string(),
+            duration: std::time::Duration::ZERO,
+            result: BoolPropertyResult::Error(self.message.clone()),
+        }]
+    }
 }
 
 impl<S: SolverConfig> Prover for S {
@@ -302,77 +364,17 @@ impl<S: SolverConfig> Prover for S {
     }
 }
 
-pub fn auto_selected_prover() -> Box<dyn Prover> {
-    auto_selected_prover_with_limits(SolverLimits::default())
+pub fn default_prover() -> Box<dyn Prover> {
+    default_prover_with_limits(SolverLimits::default())
 }
 
-/// Selects an appropriate prover and applies backend-supported resource limits.
-pub fn auto_selected_prover_with_limits(limits: SolverLimits) -> Box<dyn Prover> {
-    #[cfg(not(feature = "has-bitwuzla"))]
-    let _ = limits;
-    #[cfg(feature = "has-bitwuzla")]
-    {
-        use crate::solver::bitwuzla::BitwuzlaOptions;
-        let mut options = BitwuzlaOptions::new();
-        apply_bitwuzla_limits(&mut options, limits);
-        return Box::new(options);
-    }
-    #[cfg(all(feature = "has-boolector", not(feature = "has-bitwuzla")))]
-    {
-        use crate::solver::boolector::BoolectorConfig;
-        return Box::new(BoolectorConfig::new());
-    }
-    #[cfg(all(
-        feature = "has-easy-smt",
-        not(feature = "has-bitwuzla"),
-        not(feature = "has-boolector")
-    ))]
-    {
-        use crate::solver::{
-            Response, Solver,
-            easy_smt::{EasySmtConfig, EasySmtSolver},
-        };
-
-        fn is_usable(config: &EasySmtConfig) -> bool {
-            match EasySmtSolver::new(config) {
-                Ok(mut solver) => {
-                    // Minimal sanity: declare a symbol, assert a trivial constraint, check SAT.
-                    if solver.declare("probe_x", 1).is_err() {
-                        return false;
-                    }
-                    let one = solver.one(1);
-                    let a = solver.numerical(1, 1);
-                    let eq = solver.eq(&one, &a);
-                    if solver.assert(&eq).is_err() {
-                        return false;
-                    }
-                    match solver.check() {
-                        Ok(Response::Sat) => true,
-                        _ => false,
-                    }
-                }
-                Err(_) => false,
-            }
-        }
-
-        let candidates = [
-            EasySmtConfig::z3(),
-            EasySmtConfig::boolector(),
-            EasySmtConfig::bitwuzla(),
-        ];
-
-        for cfg in candidates.into_iter() {
-            if is_usable(&cfg) {
-                return Box::new(cfg);
-            }
-        }
-    }
-    #[cfg(all(not(feature = "has-bitwuzla"), not(feature = "has-boolector")))]
-    Box::new(ExternalProver::Toolchain)
+/// Creates the preferred Bitwuzla prover and applies supported resource limits.
+pub fn default_prover_with_limits(limits: SolverLimits) -> Box<dyn Prover> {
+    prover_for_choice_with_limits(SolverChoice::Bitwuzla, None, limits)
 }
 
 pub fn prove_ir_fn_equiv(lhs: &ir::Fn, rhs: &ir::Fn) -> EquivResult {
-    auto_selected_prover().prove_ir_fn_equiv(lhs, rhs)
+    default_prover().prove_ir_fn_equiv(lhs, rhs)
 }
 
 pub fn prove_ir_pkg_text_equiv(
@@ -380,7 +382,7 @@ pub fn prove_ir_pkg_text_equiv(
     rhs_pkg_text: &str,
     top: Option<&str>,
 ) -> EquivResult {
-    auto_selected_prover().prove_ir_pkg_text_equiv(lhs_pkg_text, rhs_pkg_text, top)
+    default_prover().prove_ir_pkg_text_equiv(lhs_pkg_text, rhs_pkg_text, top)
 }
 
 pub fn prove_ir_equiv<'a>(
@@ -391,7 +393,7 @@ pub fn prove_ir_equiv<'a>(
     assert_label_filter: Option<&str>,
     allow_flatten: bool,
 ) -> EquivResult {
-    auto_selected_prover().prove_ir_equiv(
+    default_prover().prove_ir_equiv(
         lhs,
         rhs,
         strategy,
@@ -402,7 +404,7 @@ pub fn prove_ir_equiv<'a>(
 }
 
 pub fn prove_ir_fn_quickcheck(ir_fn: &ProverFn<'_>) -> BoolPropertyResult {
-    auto_selected_prover().prove_ir_fn_quickcheck(ir_fn)
+    default_prover().prove_ir_fn_quickcheck(ir_fn)
 }
 
 pub fn prove_ir_quickcheck(
@@ -410,7 +412,7 @@ pub fn prove_ir_quickcheck(
     assertion_semantics: QuickCheckAssertionSemantics,
     assert_label_filter: Option<&str>,
 ) -> BoolPropertyResult {
-    auto_selected_prover().prove_ir_quickcheck(prover_fn, assertion_semantics, assert_label_filter)
+    default_prover().prove_ir_quickcheck(prover_fn, assertion_semantics, assert_label_filter)
 }
 
 pub fn prove_dslx_quickcheck(
@@ -422,7 +424,7 @@ pub fn prove_dslx_quickcheck(
     assert_label_filter: Option<&str>,
     uf_map: &HashMap<String, String>,
 ) -> Vec<QuickCheckRunResult> {
-    auto_selected_prover().prove_dslx_quickcheck(
+    default_prover().prove_dslx_quickcheck(
         entry_file,
         dslx_stdlib_path,
         additional_search_paths,
@@ -444,12 +446,18 @@ pub fn prover_for_choice_with_limits(
     limits: SolverLimits,
 ) -> Box<dyn Prover> {
     match choice {
-        SolverChoice::Auto => auto_selected_prover_with_limits(limits),
-        #[cfg(feature = "has-bitwuzla")]
         SolverChoice::Bitwuzla => {
-            let mut options = crate::solver::bitwuzla::BitwuzlaOptions::new();
-            apply_bitwuzla_limits(&mut options, limits);
-            Box::new(options)
+            #[cfg(feature = "has-bitwuzla")]
+            {
+                let mut options = crate::solver::bitwuzla::BitwuzlaOptions::new();
+                apply_bitwuzla_limits(&mut options, limits);
+                Box::new(options)
+            }
+            #[cfg(not(feature = "has-bitwuzla"))]
+            {
+                let _ = limits;
+                Box::new(UnavailableProver::for_bitwuzla_selection())
+            }
         }
         #[cfg(feature = "has-boolector")]
         SolverChoice::Boolector => Box::new(crate::solver::boolector::BoolectorConfig::new()),
@@ -487,5 +495,29 @@ fn apply_bitwuzla_limits(
     }
     if let Some(memory_limit_mb) = limits.memory_limit_mb {
         options.set_memory_limit(memory_limit_mb);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bitwuzla_choice_roundtrips_through_cli_spelling() {
+        assert_eq!(SolverChoice::Bitwuzla.to_string(), "bitwuzla");
+        assert_eq!(
+            "bitwuzla".parse::<SolverChoice>().unwrap(),
+            SolverChoice::Bitwuzla
+        );
+    }
+
+    #[cfg(not(feature = "has-bitwuzla"))]
+    #[test]
+    fn default_prover_reports_missing_bitwuzla_feature() {
+        let result = default_prover().prove_ir_pkg_text_equiv("", "", None);
+        assert!(matches!(
+            result,
+            EquivResult::Error(msg) if msg.contains("--solver=bitwuzla requires")
+        ));
     }
 }

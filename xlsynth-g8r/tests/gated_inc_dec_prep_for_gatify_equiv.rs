@@ -119,9 +119,9 @@ fn assert_direct_and_helper_match(kind: GatedIncDecKind) {
         direct_stats, helper_stats,
         "expected direct and helper {kind:?} forms to have identical gate stats"
     );
-    check_equivalence::prove_same_gate_fn_via_ir(&direct_gate, &helper_gate)
+    check_equivalence::prove_same_gate_fn_via_ir_via_toolchain(&direct_gate, &helper_gate)
         .expect("direct and helper gates should be equivalent");
-    check_equivalence::validate_same_fn(&direct_fn, &helper_gate)
+    check_equivalence::validate_same_fn_via_toolchain(&direct_fn, &helper_gate)
         .expect("helper gate should match direct PIR");
 }
 

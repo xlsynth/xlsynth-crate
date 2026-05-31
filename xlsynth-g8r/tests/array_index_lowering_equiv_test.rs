@@ -61,7 +61,7 @@ fn assert_strategy_matches_ir(ir_text: &str, strategy: ArrayIndexLoweringStrateg
     let ir_package = parser.parse_and_validate_package().expect("parse package");
     let ir_fn = ir_package.get_top_fn().expect("top fn");
     let gate_fn = gatify_ir_text_with_strategy(ir_text, strategy);
-    check_equivalence::validate_same_fn(&ir_fn, &gate_fn)
+    check_equivalence::validate_same_fn_via_toolchain(&ir_fn, &gate_fn)
         .expect("strategy should preserve IR semantics");
 }
 
