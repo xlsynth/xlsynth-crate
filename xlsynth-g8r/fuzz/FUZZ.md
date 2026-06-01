@@ -65,9 +65,7 @@ optimized result into PIR, and proves original-versus-optimized equivalence.
 Enabled in-process SMT backends perform the proofs; this target does not require
 the external XLS equivalence binary. Failures expose optimizer semantic
 regressions or incompatibility between generated PIR text and XLS-produced
-optimized IR. The target currently skips division and modulus with a `shll`
-divisor because libxls misoptimizes some valid overflow cases; other divisor
-forms remain enabled.
+optimized IR.
 
 ## `fuzz_ir_eval_interp_equiv`
 
