@@ -157,14 +157,14 @@ This repository publishes crates to crates.io via the GitHub Actions workflow in
 
 Treat every pushed release tag as immutable. The publish workflow is restartable after a partial release: it skips an exact crate version that is already present in the crates.io sparse index and continues with missing crates. Never move or reuse a pushed release tag for different source. Fix forward with a new patch version instead.
 
-Important: the version for the next release is often already "waiting" in the repository. After a successful mainline `.0` release, the workflow pushes two follow-up commits:
+Important: the version for the next release is often already "waiting" in the repository. After every successful release, the workflow regenerates the version compatibility metadata. For releases from `0.49.0` onward, the metadata includes only releases for which every crate declared in that release tag's `publish_order.toml` is visible in the crates.io sparse index. Older cached metadata remains preserved. After a successful mainline `.0` release, the workflow also bumps the workspace manifests to the next minor version. A `.0` release therefore produces both follow-up commits:
 
 - `Bump version numbers after successful publish`
 - `Update version metadata after successful publish`
 
 For example, after publishing `v0.33.0`, the automation bumped the workspace manifests to `0.34.0`. That means the next mainline tag should usually be `v0.34.0` (unless you intentionally prepare a different release), not `v0.33.1`.
 
-If you intentionally release a patch version (`Z != 0`), first make the checked-in crate versions match that patch tag. The current workflow only performs the automatic post-publish version bump and version-metadata update for `.0` tags.
+If you intentionally release a patch version (`Z != 0`), first make the checked-in crate versions match that patch tag. The workflow updates version metadata after a successful patch release, but it performs the automatic post-publish version bump only for `.0` tags.
 
 ### Developer note: xlsynth DSO/dylib release versioning
 

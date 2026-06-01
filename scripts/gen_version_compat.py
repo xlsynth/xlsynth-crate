@@ -32,12 +32,19 @@ import os
 import subprocess
 import sys
 import json
+import tomllib
 from dataclasses import dataclass
-from typing import Optional, List, Dict, Tuple
+from functools import lru_cache
+from typing import Optional, List, Dict, FrozenSet, Tuple
 
 from datetime import datetime, timezone, tzinfo
 
-from crates_io_index import crate_version_is_published
+from crates_io_index import get_published_versions
+
+
+# Preserve older cached metadata; complete tagged release-set validation starts here.
+COMPLETE_RELEASE_VALIDATION_MIN_VERSION = (0, 49, 0)
+PUBLISH_ORDER_PATH = "publish_order.toml"
 
 # Prefer stdlib zoneinfo (Python ≥3.9) for accurate TZ handling; fall back to a fixed offset if unavailable.
 try:
@@ -179,9 +186,60 @@ def get_all_tags() -> List[str]:
         return []
 
 
-def crate_published(crate_version: str) -> bool:
-    """Check if the given xlsynth crate version is published on crates.io."""
-    return crate_version_is_published("xlsynth", crate_version)
+def _version_tuple(crate_version: str) -> Tuple[int, int, int]:
+    """Return the numeric components of an xlsynth-crate semantic version."""
+    return tuple(int(component) for component in crate_version.split("."))  # type: ignore[return-value]
+
+
+@lru_cache(maxsize=None)
+def _published_versions(crate_name: str) -> FrozenSet[str]:
+    """Return the crate's sparse-index versions, caching one lookup per generator run."""
+    return frozenset(get_published_versions(crate_name))
+
+
+def _get_publish_order_at_tag(tag: str) -> Optional[List[str]]:
+    """Return the crate publication order declared by tag, if that tag has one."""
+    content = get_file_content_at_commit(tag, PUBLISH_ORDER_PATH)
+    if content is None:
+        return None
+    data = tomllib.loads(content)
+    crates = data.get("crates")
+    if (
+        not isinstance(crates, list)
+        or not crates
+        or not all(isinstance(crate, str) for crate in crates)
+    ):
+        raise ValueError(
+            f"{tag}:{PUBLISH_ORDER_PATH} must contain a non-empty crates array"
+        )
+    return crates
+
+
+def _get_release_ineligibility_reason(tag: str, crate_version: str) -> Optional[str]:
+    """Return why a release cannot enter generated compatibility metadata."""
+    publish_order = _get_publish_order_at_tag(tag)
+    if publish_order is None:
+        if _version_tuple(crate_version) >= COMPLETE_RELEASE_VALIDATION_MIN_VERSION:
+            return f"{tag} does not contain {PUBLISH_ORDER_PATH}"
+        publish_order = ["xlsynth"]
+
+    missing = [
+        crate
+        for crate in publish_order
+        if crate_version not in _published_versions(crate)
+    ]
+    if missing:
+        return f"missing crate publications: {', '.join(missing)}"
+    return None
+
+
+def _get_cached_mapping_ineligibility_reason(
+    tag: str, crate_version: str
+) -> Optional[str]:
+    """Return why a cached row must be removed, without probing legacy rows."""
+    if _version_tuple(crate_version) < COMPLETE_RELEASE_VALIDATION_MIN_VERSION:
+        return None
+    return _get_release_ineligibility_reason(tag, crate_version)
 
 
 def _load_existing_mappings(json_path: str) -> Dict[str, VersionMapping]:
@@ -220,11 +278,21 @@ def get_version_mapping(recompute_all_entries: bool) -> List[VersionMapping]:
         print(f"Processing tag {tag}...", flush=True)
         crate_version = tag.lstrip("v")
         if not recompute_all_entries and crate_version in existing:
-            mappings.append(existing[crate_version])
-            print(
-                f"  Reused existing mapping for crate version {crate_version}",
-                flush=True,
+            ineligibility_reason = _get_cached_mapping_ineligibility_reason(
+                tag, crate_version
             )
+            if ineligibility_reason is None:
+                mappings.append(existing[crate_version])
+                print(
+                    f"  Reused existing mapping for crate version {crate_version}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"  Removed cached mapping for crate version {crate_version}: {ineligibility_reason}.",
+                    flush=True,
+                )
+                skipped_unpublished += 1
             continue
         content = get_file_content_at_commit(tag, file_path)
         if not content:
@@ -235,9 +303,10 @@ def get_version_mapping(recompute_all_entries: bool) -> List[VersionMapping]:
             print(f"  Skipped tag {tag}: no lib version extracted.", flush=True)
             continue
         release_dt = get_tag_datetime(tag) or "Unknown"
-        if not crate_published(crate_version):
+        ineligibility_reason = _get_release_ineligibility_reason(tag, crate_version)
+        if ineligibility_reason is not None:
             print(
-                f"  Skipped tag {tag}: crate version {crate_version} not published on crates.io.",
+                f"  Skipped tag {tag}: {ineligibility_reason}.",
                 flush=True,
             )
             skipped_unpublished += 1
@@ -254,7 +323,7 @@ def get_version_mapping(recompute_all_entries: bool) -> List[VersionMapping]:
             flush=True,
         )
     print(
-        f"Skipped {skipped_unpublished} tag(s) due to unpublished crate versions.",
+        f"Skipped {skipped_unpublished} tag(s) due to incomplete crate publications.",
         flush=True,
     )
     return mappings
@@ -301,9 +370,10 @@ def get_single_version_mapping(crate_version: str) -> Optional[VersionMapping]:
     if not lib_version:
         print(f"  Skipped tag {tag}: no lib version extracted.", flush=True)
         return None
-    if not crate_published(crate_version):
+    ineligibility_reason = _get_release_ineligibility_reason(tag, crate_version)
+    if ineligibility_reason is not None:
         print(
-            f"  Skipped tag {tag}: crate version {crate_version} not published on crates.io.",
+            f"  Skipped tag {tag}: {ineligibility_reason}.",
             flush=True,
         )
         return None
