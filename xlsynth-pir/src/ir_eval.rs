@@ -973,7 +973,9 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
             let arg_bits: IrBits = operand_values[0].to_bits().unwrap();
             let bit_count = arg_bits.get_bit_count();
             assert!(
-                start + width <= bit_count,
+                start
+                    .checked_add(width)
+                    .is_some_and(|end| end <= bit_count),
                 "BitSlice OOB: start={} width={} arg_width={}",
                 start,
                 width,
@@ -1338,10 +1340,10 @@ pub struct FnEvalSuccess {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnEvalFailure {
-    /// Computed return value when evaluation completed despite contract-event
-    /// failures. Malformed IR failures that stop evaluation early have no
-    /// value.
-    pub value: Option<IrValue>,
+    /// Computed return value after recoverable runtime contract-event failures.
+    ///
+    /// Malformed IR is an evaluator precondition violation and panics.
+    pub value: IrValue,
     pub assertion_failures: Vec<AssertionFailure>,
     pub assumption_failures: Vec<AssumptionFailure>,
     pub trace_messages: Vec<TraceMessage>,
@@ -2098,7 +2100,6 @@ fn eval_fn_impl<'a>(
                         success.value
                     }
                     FnEvalResult::Failure(fail) => {
-                        let callee_value = fail.value;
                         assertion_failures.extend(fail.assertion_failures);
                         assumption_failures.extend(fail.assumption_failures);
                         trace_messages.extend(fail.trace_messages);
@@ -2109,48 +2110,9 @@ fn eval_fn_impl<'a>(
                                 cover_count,
                             );
                         }
-                        let Some(callee_value) = callee_value else {
-                            return FnEvalResult::Failure(FnEvalFailure {
-                                value: None,
-                                assertion_failures,
-                                assumption_failures,
-                                trace_messages,
-                                cover_counts,
-                            });
-                        };
-                        callee_value
+                        fail.value
                     }
                 }
-            }
-            P::BitSlice { arg, start, width } => {
-                // Guard against OOB; return Failure instead of panicking.
-                let arg_bits = env
-                    .get(arg)
-                    .expect("arg must be evaluated")
-                    .to_bits()
-                    .unwrap();
-                let bit_count = arg_bits.get_bit_count();
-                if start + width > bit_count {
-                    if let Some(observer) = observer {
-                        unsafe {
-                            (&mut *observer).on_failure_event(FailureEvent {
-                                node_ref: nr,
-                                node_text_id: node.text_id,
-                                kind: FailureKind::BitSliceOob,
-                                tag: 0,
-                            });
-                        }
-                    }
-                    return FnEvalResult::Failure(FnEvalFailure {
-                        value: None,
-                        assertion_failures,
-                        assumption_failures,
-                        trace_messages,
-                        cover_counts,
-                    });
-                }
-                let r = arg_bits.width_slice(*start as i64, *width as i64);
-                IrValue::from_bits(&r)
             }
             P::DynamicBitSlice { arg, start, width } => {
                 let arg_bits = env
@@ -2473,7 +2435,7 @@ fn eval_fn_impl<'a>(
         })
     } else {
         FnEvalResult::Failure(FnEvalFailure {
-            value: Some(ret_value),
+            value: ret_value,
             assertion_failures,
             assumption_failures,
             trace_messages,
@@ -4133,7 +4095,7 @@ fn f(a: bits[8][2] id=10, i: bits[2] id=11) -> bits[8] {
         let FnEvalResult::Failure(failure) = eval_fn_in_package(&pkg, f, &args) else {
             panic!("out-of-bounds assumptions should fail");
         };
-        assert_eq!(failure.value, Some(IrValue::make_ubits(8, 11).unwrap()));
+        assert_eq!(failure.value, IrValue::make_ubits(8, 11).unwrap());
         assert_eq!(
             failure.assumption_failures,
             vec![
@@ -4422,9 +4384,10 @@ fn f(x: bits[6] id=1) -> bits[3] {
     }
 
     #[test]
-    fn test_eval_fn_oob_bit_slice_early_fail_for_unvalidated_fn() {
-        // OOB static bit_slice is invalid XLS IR. Keep evaluation defensive
-        // for callers that construct or parse a function without validation.
+    #[should_panic(expected = "BitSlice OOB")]
+    fn test_eval_fn_oob_bit_slice_panics_for_unvalidated_fn() {
+        // OOB static bit_slice is invalid XLS IR. Evaluation assumes verification
+        // has already produced the user-facing diagnostic.
         let ir_text = r#"package test
 
 fn f(x: bits[3] id=1) -> bits[1] {
@@ -4439,14 +4402,7 @@ fn f(x: bits[3] id=1) -> bits[1] {
         };
 
         let x = IrValue::make_ubits(3, 0).unwrap();
-        let res = eval_fn(&f, &[x]);
-        match res {
-            FnEvalResult::Failure(fail) => {
-                // No assertion failures expected; this is an early-return guard.
-                assert!(fail.assertion_failures.is_empty());
-            }
-            other => panic!("unexpected result: {:?}", other),
-        }
+        let _ = eval_fn(&f, &[x]);
     }
 
     #[test]
