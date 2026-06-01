@@ -48,12 +48,13 @@ impl ScalarLayout {
         let Type::Bits(bit_count) = ty else {
             return Err(CompilerError::UnsupportedType(ty.to_string()));
         };
-        if !(1..=64).contains(bit_count) {
+        if *bit_count > 64 {
             return Err(CompilerError::UnsupportedType(format!(
                 "bits[{bit_count}] is not a native scalar"
             )));
         }
         let byte_count = match bit_count {
+            0 => 0,
             1..=8 => 1,
             9..=16 => 2,
             17..=32 => 4,
@@ -68,6 +69,7 @@ impl ScalarLayout {
 
     fn clif_type(self) -> ClifType {
         match self.byte_count {
+            0 => types::I8,
             1 => types::I8,
             2 => types::I16,
             4 => types::I32,
@@ -177,9 +179,6 @@ impl NativeValueLayout {
     /// Constructs the native representation for a currently supported PIR type.
     pub fn from_type(ty: &Type) -> Result<Self, CompilerError> {
         match ty {
-            Type::Bits(bit_count) if *bit_count == 0 => Err(CompilerError::UnsupportedType(
-                "bits[0] native storage is unsupported".into(),
-            )),
             Type::Bits(bit_count) if *bit_count <= 64 => {
                 Ok(Self::Scalar(ScalarLayout::from_type(ty)?))
             }
@@ -250,7 +249,7 @@ impl NativeValueLayout {
     /// Returns this layout's native alignment in bytes.
     pub fn alignment(&self) -> usize {
         match self {
-            Self::Scalar(layout) => layout.byte_count,
+            Self::Scalar(layout) => layout.byte_count.max(1),
             Self::WideBits(_) => std::mem::align_of::<u64>(),
             Self::Array { element, .. } => element.alignment(),
             Self::Tuple { alignment, .. } => *alignment,
@@ -319,10 +318,10 @@ impl CompilerError {
 /// Executable native code for one supported PIR function.
 ///
 /// Bits values through width 64 use native integer carrier storage sized to
-/// the next one of `u8`, `u16`, `u32`, or `u64`; wider bits values use
-/// least-significant-first native `u64` limbs. Arrays of supported values use
-/// native contiguous array storage; tuples use `#[repr(C)]`-compatible struct
-/// storage.
+/// the next one of `u8`, `u16`, `u32`, or `u64`; `bits[0]` occupies zero
+/// bytes. Wider bits values use least-significant-first native `u64` limbs.
+/// Arrays of supported values use native contiguous array storage; tuples use
+/// `#[repr(C)]`-compatible struct storage.
 pub struct PirFunctionCompiler {
     module: Option<JITModule>,
     entrypoint: NativeEntrypoint,
@@ -720,6 +719,7 @@ fn require_scalar_layout(layout: &NativeValueLayout) -> Result<ScalarLayout, Com
 }
 
 enum NativeScalar {
+    Zero,
     U8(u8),
     U16(u16),
     U32(u32),
@@ -776,6 +776,9 @@ unsafe fn write_ir_value_to_native(
                     scalar.bit_count,
                     bits.get_bit_count()
                 )));
+            }
+            if scalar.bit_count == 0 {
+                return Ok(());
             }
             let integer = bits
                 .to_u64()
@@ -875,6 +878,10 @@ unsafe fn read_ir_value_from_native(
 ) -> Result<IrValue, CompilerError> {
     match layout {
         NativeValueLayout::Scalar(scalar) => {
+            if scalar.bit_count == 0 {
+                return IrValue::make_ubits(0, 0)
+                    .map_err(|error| CompilerError::Value(error.to_string()));
+            }
             let mut bytes = [0u8; std::mem::size_of::<u64>()];
             // SAFETY: the caller provides readable storage for this scalar layout.
             unsafe {
@@ -942,6 +949,7 @@ impl NativeScalar {
     fn new(layout: ScalarLayout, value: u64) -> Result<Self, CompilerError> {
         layout.validate_value(value)?;
         Ok(match layout.byte_count {
+            0 => Self::Zero,
             1 => Self::U8(value as u8),
             2 => Self::U16(value as u16),
             4 => Self::U32(value as u32),
@@ -952,6 +960,7 @@ impl NativeScalar {
 
     fn as_ptr(&self) -> *const u8 {
         match self {
+            Self::Zero => ptr::null(),
             Self::U8(value) => ptr::from_ref(value).cast(),
             Self::U16(value) => ptr::from_ref(value).cast(),
             Self::U32(value) => ptr::from_ref(value).cast(),
@@ -961,6 +970,7 @@ impl NativeScalar {
 
     fn as_mut_ptr(&mut self) -> *mut u8 {
         match self {
+            Self::Zero => ptr::null_mut(),
             Self::U8(value) => ptr::from_mut(value).cast(),
             Self::U16(value) => ptr::from_mut(value).cast(),
             Self::U32(value) => ptr::from_mut(value).cast(),
@@ -970,6 +980,7 @@ impl NativeScalar {
 
     fn value(&self) -> u64 {
         match self {
+            Self::Zero => 0,
             Self::U8(value) => u64::from(*value),
             Self::U16(value) => u64::from(*value),
             Self::U32(value) => u64::from(*value),
@@ -1412,7 +1423,16 @@ enum ComputedValue {
     },
     ScalarArrayIndex(Box<DeferredScalarArrayIndex>),
     Address(Value),
+    ZeroSizedBits,
     ZeroSized,
+}
+
+/// Returns the storage-free value representation appropriate for `layout`.
+fn zero_sized_computed_value(layout: &NativeValueLayout) -> ComputedValue {
+    match layout {
+        NativeValueLayout::Scalar(scalar) if scalar.bit_count == 0 => ComputedValue::ZeroSizedBits,
+        _ => ComputedValue::ZeroSized,
+    }
 }
 
 #[derive(Clone)]
@@ -3105,6 +3125,7 @@ fn lower_trace_operand_pointers(
                 pointer
             }
             ComputedValue::Address(pointer) => pointer,
+            ComputedValue::ZeroSizedBits => builder.ins().iconst(pointer_type, 0),
             ComputedValue::ZeroSized => builder.ins().iconst(pointer_type, 0),
         };
         builder.ins().store(
@@ -3768,6 +3789,9 @@ fn bit_sign_condition(
     layout: &NativeValueLayout,
 ) -> Result<Value, CompilerError> {
     let bit_count = bits_bit_count(layout)?;
+    if bit_count == 0 {
+        return Ok(builder.ins().iconst(types::I8, 0));
+    }
     let limb = load_raw_bits_limb(builder, value, layout, (bit_count - 1) / 64)?;
     let mask = 1u64 << ((bit_count - 1) % 64);
     let masked = builder.ins().band_imm(limb, mask as i64);
@@ -4657,6 +4681,9 @@ fn lower_shift(
     rhs_layout: ScalarLayout,
     op: Binop,
 ) -> Value {
+    if lhs_layout.bit_count == 0 {
+        return builder.ins().iconst(lhs_layout.clif_type(), 0);
+    }
     let out_of_bounds = builder.ins().icmp_imm(
         IntCC::UnsignedGreaterThanOrEqual,
         rhs,
@@ -4695,6 +4722,9 @@ fn lower_divmod(
     layout: ScalarLayout,
     op: Binop,
 ) -> Value {
+    if layout.bit_count == 0 {
+        return builder.ins().iconst(layout.clif_type(), 0);
+    }
     let zero = builder.ins().iconst(layout.clif_type(), 0);
     let one = builder.ins().iconst(layout.clif_type(), 1);
     let divisor_is_zero = builder.ins().icmp_imm(IntCC::Equal, rhs, 0);
@@ -4765,9 +4795,6 @@ fn lower_concat(
     values: &mut [Option<ComputedValue>],
     layout: ScalarLayout,
 ) -> Result<Value, CompilerError> {
-    if args.is_empty() {
-        return Err(unsupported_node(node));
-    }
     let mut remaining_width = layout.bit_count;
     let mut result = builder.ins().iconst(layout.clif_type(), 0);
     for arg in args {
@@ -4922,6 +4949,9 @@ fn lower_logical_clz(
     arg: Value,
     arg_layout: ScalarLayout,
 ) -> Value {
+    if arg_layout.bit_count == 0 {
+        return builder.ins().iconst(arg_layout.clif_type(), 0);
+    }
     let clz = builder.ins().clz(arg);
     let padding = arg_layout.storage_bit_count() - arg_layout.bit_count;
     if padding == 0 {
@@ -5197,7 +5227,9 @@ fn lower_array_index(
         }
         return Ok(value);
     }
-    if let NativeValueLayout::Scalar(layout) = layout {
+    if let NativeValueLayout::Scalar(layout) = layout
+        && layout.byte_count != 0
+    {
         let value = deferred_scalar_array_index(
             function,
             node,
@@ -5279,7 +5311,7 @@ fn lower_array_index(
     }
     match pointer {
         Some(pointer) => Ok(load_value_from_storage(builder, pointer, layout)),
-        None => Ok(ComputedValue::ZeroSized),
+        None => Ok(zero_sized_computed_value(layout)),
     }
 }
 
@@ -5407,6 +5439,9 @@ fn lower_scalar_literal(
     literal: &IrValue,
     layout: ScalarLayout,
 ) -> Result<Value, CompilerError> {
+    if layout.bit_count == 0 {
+        return Ok(builder.ins().iconst(layout.clif_type(), 0));
+    }
     let value = literal
         .to_u64()
         .map_err(|error| CompilerError::Value(error.to_string()))?;
@@ -5420,6 +5455,9 @@ fn lower_literal_to_storage(
     literal: &IrValue,
     layout: &NativeValueLayout,
 ) -> Result<(), CompilerError> {
+    if layout.byte_count() == 0 {
+        return Ok(());
+    }
     match layout {
         NativeValueLayout::Scalar(scalar) => {
             let value = lower_scalar_literal(builder, literal, *scalar)?;
@@ -5596,7 +5634,7 @@ fn lower_tuple_index(
         )));
     }
     if result_layout.byte_count() == 0 {
-        return Ok(ComputedValue::ZeroSized);
+        return Ok(zero_sized_computed_value(result_layout));
     }
     let tuple_pointer = address_value_for(values, tuple)?;
     if let NativeValueLayout::Scalar(layout) = result_layout {
@@ -6050,7 +6088,7 @@ fn lower_one_hot_sel(
     let selector_value = scalar_value_for(builder, values, selector)?;
     let selector_layout = ScalarLayout::from_type(&function.get_node(selector).ty)?;
     if layout.byte_count() == 0 {
-        return Ok(ComputedValue::ZeroSized);
+        return Ok(zero_sized_computed_value(layout));
     }
     match layout {
         NativeValueLayout::Scalar(scalar) => {
@@ -6177,7 +6215,7 @@ fn selected_value(
     layout: &NativeValueLayout,
 ) -> Result<ComputedValue, CompilerError> {
     if layout.byte_count() == 0 {
-        return Ok(ComputedValue::ZeroSized);
+        return Ok(zero_sized_computed_value(layout));
     }
     match layout {
         NativeValueLayout::Scalar(scalar) => {
@@ -6277,6 +6315,9 @@ fn write_zero_value_to_storage(
     destination: Value,
     layout: &NativeValueLayout,
 ) -> Result<(), CompilerError> {
+    if layout.byte_count() == 0 {
+        return Ok(());
+    }
     match layout {
         NativeValueLayout::Scalar(scalar) => {
             let zero = builder.ins().iconst(scalar.clif_type(), 0);
@@ -6536,6 +6577,9 @@ fn resize_integer_type_unsigned(
     from: ScalarLayout,
     to: ClifType,
 ) -> Value {
+    if from.clif_type() == to {
+        return value;
+    }
     match from.byte_count.cmp(&(to.bytes() as usize)) {
         std::cmp::Ordering::Less => builder.ins().uextend(to, value),
         std::cmp::Ordering::Equal => value,
@@ -6788,7 +6832,7 @@ fn load_value_from_storage(
     layout: &NativeValueLayout,
 ) -> ComputedValue {
     if layout.byte_count() == 0 {
-        return ComputedValue::ZeroSized;
+        return zero_sized_computed_value(layout);
     }
     match layout {
         NativeValueLayout::Scalar(scalar) => {
@@ -6807,7 +6851,7 @@ fn load_value_from_storage(
 /// Returns a storage-backed value, deferring scalar loads until consumption.
 fn deferred_value_from_storage(pointer: Value, layout: &NativeValueLayout) -> ComputedValue {
     if layout.byte_count() == 0 {
-        return ComputedValue::ZeroSized;
+        return zero_sized_computed_value(layout);
     }
     match layout {
         NativeValueLayout::Scalar(scalar) => ComputedValue::ScalarAddress {
@@ -6952,6 +6996,7 @@ fn materialize_scalar(
         ComputedValue::ScalarArrayIndex(value) => {
             materialize_deferred_scalar_array_index(builder, *value)
         }
+        ComputedValue::ZeroSizedBits => Ok(builder.ins().iconst(types::I8, 0)),
         ComputedValue::Address(_) | ComputedValue::ZeroSized => Err(
             CompilerError::InvalidFunction("array value used as a scalar".into()),
         ),
@@ -6964,6 +7009,7 @@ fn expect_address(value: ComputedValue) -> Result<Value, CompilerError> {
         ComputedValue::Scalar(_)
         | ComputedValue::ScalarAddress { .. }
         | ComputedValue::ScalarArrayIndex(_)
+        | ComputedValue::ZeroSizedBits
         | ComputedValue::ZeroSized => Err(CompilerError::InvalidFunction(
             "scalar value used as an array".into(),
         )),
@@ -6971,6 +7017,9 @@ fn expect_address(value: ComputedValue) -> Result<Value, CompilerError> {
 }
 
 fn mask_value(builder: &mut FunctionBuilder<'_>, value: Value, layout: ScalarLayout) -> Value {
+    if layout.bit_count == 0 {
+        return builder.ins().iconst(layout.clif_type(), 0);
+    }
     if layout.bit_count == layout.storage_bit_count() {
         value
     } else {
@@ -6979,6 +7028,9 @@ fn mask_value(builder: &mut FunctionBuilder<'_>, value: Value, layout: ScalarLay
 }
 
 fn signed_value(builder: &mut FunctionBuilder<'_>, value: Value, layout: ScalarLayout) -> Value {
+    if layout.bit_count == 0 {
+        return builder.ins().iconst(layout.clif_type(), 0);
+    }
     let padding = layout.storage_bit_count() - layout.bit_count;
     if padding == 0 {
         value
@@ -6994,6 +7046,12 @@ fn resize_unsigned(
     from: ScalarLayout,
     to: ScalarLayout,
 ) -> Value {
+    if to.bit_count == 0 {
+        return builder.ins().iconst(to.clif_type(), 0);
+    }
+    if from.clif_type() == to.clif_type() {
+        return value;
+    }
     match from.byte_count.cmp(&to.byte_count) {
         std::cmp::Ordering::Less => builder.ins().uextend(to.clif_type(), value),
         std::cmp::Ordering::Equal => value,
@@ -7007,6 +7065,12 @@ fn resize_signed(
     from: ScalarLayout,
     to: ScalarLayout,
 ) -> Value {
+    if to.bit_count == 0 {
+        return builder.ins().iconst(to.clif_type(), 0);
+    }
+    if from.clif_type() == to.clif_type() {
+        return value;
+    }
     match from.byte_count.cmp(&to.byte_count) {
         std::cmp::Ordering::Less => builder.ins().sextend(to.clif_type(), value),
         std::cmp::Ordering::Equal => value,

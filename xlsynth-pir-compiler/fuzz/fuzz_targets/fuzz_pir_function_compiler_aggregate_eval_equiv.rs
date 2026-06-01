@@ -26,6 +26,7 @@ fn options() -> RandomFnOptions {
         allow_tuples: true,
         allow_gate: true,
         allow_extension_ops: true,
+        allow_zero_width_bits: true,
         allow_arbitrary_width_multiply: true,
         allow_empty_case_sel: true,
         allow_events: true,

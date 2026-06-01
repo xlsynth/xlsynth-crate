@@ -180,6 +180,124 @@ fn f(x: bits[1] id=1) -> () {
 }
 
 #[test]
+fn compiles_zero_width_bits_without_native_storage() {
+    let compiler = compile(
+        r#"package test
+
+fn f(x: bits[0] id=1) -> bits[0] {
+  ret value: bits[0] = identity(x, id=2)
+}
+"#,
+    );
+    assert_eq!(
+        compiler.result_layout(),
+        &NativeValueLayout::Scalar(ScalarLayout {
+            bit_count: 0,
+            byte_count: 0,
+        })
+    );
+    assert_eq!(compiler.scratch_byte_count(), 0);
+    assert_eq!(compiler.run_u64(&[0]).expect("execute"), 0);
+    assert_eq!(
+        compiler
+            .run_ir_values(&[bits(0, 0)])
+            .expect("execute dynamic value adapter"),
+        bits(0, 0)
+    );
+
+    let inputs = [std::ptr::null::<u8>()];
+    // SAFETY: `bits[0]` has no native bytes, so null input and output pointers
+    // satisfy the published zero-sized storage contract.
+    unsafe {
+        compiler
+            .run_native(&inputs, std::ptr::null_mut())
+            .expect("execute against zero-sized native storage");
+    }
+}
+
+#[test]
+fn zero_width_bits_feed_nonzero_results() {
+    assert_matches_evaluator(
+        r#"package test
+
+fn f(x: bits[0] id=1, c_in: bits[1] id=2, y: bits[8] id=3) -> (bits[8], bits[8], bits[1], bits[1], bits[1], bits[1], bits[0], bits[0]) {
+  widened: bits[8] = zero_ext(x, new_bit_count=8, id=4)
+  joined: bits[8] = concat(x, y, id=5)
+  equal: bits[1] = eq(x, x, id=6)
+  reduced: bits[1] = and_reduce(x, id=7)
+  carry: bits[1] = ext_carry_out(x, x, c_in, id=8)
+  decoded: bits[1] = decode(x, width=1, id=9)
+  empty_concat: bits[0] = concat(id=10)
+  empty_slice: bits[0] = bit_slice(y, start=4, width=0, id=11)
+  ret result: (bits[8], bits[8], bits[1], bits[1], bits[1], bits[1], bits[0], bits[0]) = tuple(widened, joined, equal, reduced, carry, decoded, empty_concat, empty_slice, id=12)
+}
+"#,
+        &[vec![bits(0, 0), bits(1, 1), bits(8, 0xa5)]],
+    );
+}
+
+#[test]
+fn zero_width_array_elements_flow_through_native_layout() {
+    let zero_array = IrValue::make_array(&[bits(0, 0), bits(0, 0)]).unwrap();
+    assert_matches_evaluator(
+        r#"package test
+
+fn f(values: bits[0][2] id=1, index: bits[2] id=2) -> bits[8] {
+  selected: bits[0] = array_index(values, indices=[index], id=3)
+  ret widened: bits[8] = zero_ext(selected, new_bit_count=8, id=4)
+}
+"#,
+        &[
+            vec![zero_array.clone(), bits(2, 0)],
+            vec![zero_array, bits(2, 3)],
+        ],
+    );
+}
+
+#[test]
+fn compiled_trace_formats_zero_width_bits() {
+    let compiler = compile(
+        r#"package test
+
+fn f(x: bits[0] id=1, emit: bits[1] id=2) -> token {
+  t: token = after_all(id=3)
+  ret tr: token = trace(t, emit, format="x={}", data_operands=[x], id=4)
+}
+"#,
+    );
+    let execution = compiler
+        .run_ir_values_with_events(&[bits(0, 0), bits(1, 1)])
+        .expect("execute");
+    assert_eq!(execution.events.trace_messages.len(), 1);
+    assert_eq!(execution.events.trace_messages[0].message, "x=0");
+}
+
+#[test]
+fn zero_width_bits_match_evaluator_across_scalar_operation_forms() {
+    assert_matches_evaluator(
+        r#"package test
+
+fn f(x: bits[0] id=1, count: bits[0] id=2, update: bits[8] id=3) -> (bits[0], bits[0], bits[0], bits[0], bits[0], bits[0], bits[0], bits[0], bits[8], bits[0], bits[0], (bits[0], bits[0])) {
+  sum: bits[0] = add(x, x, id=4)
+  signed_product: bits[0] = smul(x, x, id=5)
+  arithmetic_shift: bits[0] = shra(x, count, id=6)
+  signed_quotient: bits[0] = sdiv(x, x, id=7)
+  encoded: bits[0] = encode(x, id=8)
+  sliced: bits[0] = dynamic_bit_slice(x, count, width=0, id=9)
+  updated: bits[0] = bit_slice_update(x, count, update, id=10)
+  priority: bits[0] = ext_prio_encode(x, lsb_prio=true, id=11)
+  zeroes: bits[8] = ext_clz(x, offset=2, new_bit_count=8, id=12)
+  mask: bits[0] = ext_mask_low(count, id=13)
+  nary_sum: bits[0] = ext_nary_add(x, signed=[true], negated=[false], arch=ripple_carry, id=14)
+  parts: (bits[0], bits[0]) = smulp(x, x, id=15)
+  ret result: (bits[0], bits[0], bits[0], bits[0], bits[0], bits[0], bits[0], bits[0], bits[8], bits[0], bits[0], (bits[0], bits[0])) = tuple(sum, signed_product, arithmetic_shift, signed_quotient, encoded, sliced, updated, priority, zeroes, mask, nary_sum, parts, id=16)
+}
+"#,
+        &[vec![bits(0, 0), bits(0, 0), bits(8, 0xa5)]],
+    );
+}
+
+#[test]
 fn caller_owned_context_accumulates_cover_counts() {
     let compiler = compile(
         r#"package test

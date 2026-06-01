@@ -21,6 +21,7 @@ fn options() -> RandomFnOptions {
         allow_tuples: false,
         allow_gate: true,
         allow_extension_ops: true,
+        allow_zero_width_bits: true,
         allow_arbitrary_width_multiply: true,
         enabled_operations: OperationSet::new([
             RandomOperation::Literal,

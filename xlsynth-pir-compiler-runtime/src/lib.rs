@@ -582,7 +582,9 @@ pub unsafe extern "C" fn xlsynth_pir_runtime_wide_binop(
         WideBinaryOp::Sdiv | WideBinaryOp::Smod => {
             let lhs_signed = as_signed(lhs_unsigned, lhs_bit_count);
             let rhs_signed = as_signed(rhs_unsigned, rhs_bit_count);
-            if rhs_signed == BigInt::from(0u8) {
+            if dst_bit_count == 0 {
+                BigUint::from(0u8)
+            } else if rhs_signed == BigInt::from(0u8) {
                 if operation == WideBinaryOp::Smod {
                     BigUint::from(0u8)
                 } else if lhs_signed.sign() == Sign::Minus {
@@ -1253,6 +1255,33 @@ mod tests {
             );
         }
         assert_eq!(output, [1u64 << 63, 1]);
+    }
+
+    #[test]
+    fn wide_runtime_helpers_accept_zero_width_storage() {
+        // SAFETY: zero-width values contain no limbs, so null pointers satisfy
+        // the callback storage contract.
+        unsafe {
+            xlsynth_pir_runtime_wide_binop(
+                ptr::null_mut(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                WideBinaryOp::Sdiv as u32,
+            );
+            xlsynth_pir_runtime_wide_mulp(
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                0,
+            );
+        }
     }
 
     #[test]
