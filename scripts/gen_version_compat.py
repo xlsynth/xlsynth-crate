@@ -42,8 +42,6 @@ from datetime import datetime, timezone, tzinfo
 from crates_io_index import get_published_versions
 
 
-# Preserve older cached metadata; complete tagged release-set validation starts here.
-COMPLETE_RELEASE_VALIDATION_MIN_VERSION = (0, 49, 0)
 PUBLISH_ORDER_PATH = "publish_order.toml"
 
 # Prefer stdlib zoneinfo (Python ≥3.9) for accurate TZ handling; fall back to a fixed offset if unavailable.
@@ -186,11 +184,6 @@ def get_all_tags() -> List[str]:
         return []
 
 
-def _version_tuple(crate_version: str) -> Tuple[int, int, int]:
-    """Return the numeric components of an xlsynth-crate semantic version."""
-    return tuple(int(component) for component in crate_version.split("."))  # type: ignore[return-value]
-
-
 @lru_cache(maxsize=None)
 def _published_versions(crate_name: str) -> FrozenSet[str]:
     """Return the crate's sparse-index versions, caching one lookup per generator run."""
@@ -219,9 +212,7 @@ def _get_release_ineligibility_reason(tag: str, crate_version: str) -> Optional[
     """Return why a release cannot enter generated compatibility metadata."""
     publish_order = _get_publish_order_at_tag(tag)
     if publish_order is None:
-        if _version_tuple(crate_version) >= COMPLETE_RELEASE_VALIDATION_MIN_VERSION:
-            return f"{tag} does not contain {PUBLISH_ORDER_PATH}"
-        publish_order = ["xlsynth"]
+        return f"{tag} does not contain {PUBLISH_ORDER_PATH}"
 
     missing = [
         crate
@@ -231,15 +222,6 @@ def _get_release_ineligibility_reason(tag: str, crate_version: str) -> Optional[
     if missing:
         return f"missing crate publications: {', '.join(missing)}"
     return None
-
-
-def _get_cached_mapping_ineligibility_reason(
-    tag: str, crate_version: str
-) -> Optional[str]:
-    """Return why a cached row must be removed, without probing legacy rows."""
-    if _version_tuple(crate_version) < COMPLETE_RELEASE_VALIDATION_MIN_VERSION:
-        return None
-    return _get_release_ineligibility_reason(tag, crate_version)
 
 
 def _load_existing_mappings(json_path: str) -> Dict[str, VersionMapping]:
@@ -278,21 +260,11 @@ def get_version_mapping(recompute_all_entries: bool) -> List[VersionMapping]:
         print(f"Processing tag {tag}...", flush=True)
         crate_version = tag.lstrip("v")
         if not recompute_all_entries and crate_version in existing:
-            ineligibility_reason = _get_cached_mapping_ineligibility_reason(
-                tag, crate_version
+            mappings.append(existing[crate_version])
+            print(
+                f"  Reused existing mapping for crate version {crate_version}",
+                flush=True,
             )
-            if ineligibility_reason is None:
-                mappings.append(existing[crate_version])
-                print(
-                    f"  Reused existing mapping for crate version {crate_version}",
-                    flush=True,
-                )
-            else:
-                print(
-                    f"  Removed cached mapping for crate version {crate_version}: {ineligibility_reason}.",
-                    flush=True,
-                )
-                skipped_unpublished += 1
             continue
         content = get_file_content_at_commit(tag, file_path)
         if not content:
@@ -457,33 +429,33 @@ def main() -> None:
     print(f"JSON mapping written to {json_output_path}")
 
 
-def test_mapping_for_v0_0_101() -> None:
-    mapping = get_single_version_mapping("0.0.101")
-    assert mapping is not None, "Mapping for xlsynth-crate v0.0.101 not found"
+def test_mapping_for_v0_49_0() -> None:
+    mapping = get_single_version_mapping("0.49.0")
+    assert mapping is not None, "Mapping for xlsynth-crate v0.49.0 not found"
     assert (
-        mapping.crate_version == "0.0.101"
-    ), f"Expected crate version '0.0.101', got {mapping.crate_version}"
+        mapping.crate_version == "0.49.0"
+    ), f"Expected crate version '0.49.0', got {mapping.crate_version}"
     assert (
-        mapping.lib_version == "0.0.173"
-    ), f"Expected lib version '0.0.173', got {mapping.lib_version}"
-    expected_dt = get_tag_datetime("v0.0.101")
-    assert expected_dt is not None, "Could not determine expected datetime for v0.0.101"
+        mapping.lib_version == "0.45.0"
+    ), f"Expected lib version '0.45.0', got {mapping.lib_version}"
+    expected_dt = get_tag_datetime("v0.49.0")
+    assert expected_dt is not None, "Could not determine expected datetime for v0.49.0"
     assert (
         mapping.crate_release_datetime == expected_dt
     ), f"Expected datetime '{expected_dt}', got {mapping.crate_release_datetime}"
 
 
-def test_mapping_for_v0_0_100() -> None:
-    mapping = get_single_version_mapping("0.0.100")
-    assert mapping is not None, "Mapping for xlsynth-crate v0.0.100 not found"
+def test_mapping_for_v0_48_0() -> None:
+    mapping = get_single_version_mapping("0.48.0")
+    assert mapping is not None, "Mapping for xlsynth-crate v0.48.0 not found"
     assert (
-        mapping.crate_version == "0.0.100"
-    ), f"Expected crate version '0.0.100', got {mapping.crate_version}"
+        mapping.crate_version == "0.48.0"
+    ), f"Expected crate version '0.48.0', got {mapping.crate_version}"
     assert (
-        mapping.lib_version == "0.0.173"
-    ), f"Expected lib version '0.0.173', got {mapping.lib_version}"
-    expected_dt = get_tag_datetime("v0.0.100")
-    assert expected_dt is not None, "Could not determine expected datetime for v0.0.100"
+        mapping.lib_version == "0.45.0"
+    ), f"Expected lib version '0.45.0', got {mapping.lib_version}"
+    expected_dt = get_tag_datetime("v0.48.0")
+    assert expected_dt is not None, "Could not determine expected datetime for v0.48.0"
     assert (
         mapping.crate_release_datetime == expected_dt
     ), f"Expected datetime '{expected_dt}', got {mapping.crate_release_datetime}"
