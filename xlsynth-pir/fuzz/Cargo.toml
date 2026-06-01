@@ -20,6 +20,8 @@ pretty_assertions = "1.4.1"
 # Local crates
 xlsynth-pir = { path = ".." }
 xlsynth = { path = "../../xlsynth" }
+xlsynth-autocov = { path = "../../xlsynth-autocov" }
+xlsynth-prover = { path = "../../xlsynth-prover" }
 tempfile = "3"
 
 # Fuzz targets
@@ -58,3 +60,59 @@ name = "fuzz_ext_nary_add_eval_equiv"
 path = "fuzz_targets/fuzz_ext_nary_add_eval_equiv.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_ir_roundtrip"
+path = "fuzz_targets/fuzz_ir_roundtrip.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_ir_eval_interp_equiv"
+path = "fuzz_targets/fuzz_ir_eval_interp_equiv.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_ir_same_sig_pair"
+path = "fuzz_targets/fuzz_ir_same_sig_pair.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_ir_rebase_equiv"
+path = "fuzz_targets/fuzz_ir_rebase_equiv.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_ir_outline_equiv"
+path = "fuzz_targets/fuzz_ir_outline_equiv.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_aug_opt_equiv"
+path = "fuzz_targets/fuzz_aug_opt_equiv.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_ir_opt_equiv"
+path = "fuzz_targets/fuzz_ir_opt_equiv.rs"
+test = false
+doc = false
+
+[features]
+default = []
+has-boolector = ["xlsynth-prover/has-boolector"]
+has-easy-smt = ["xlsynth-prover/has-easy-smt"]
+has-bitwuzla = ["xlsynth-prover/has-bitwuzla"]
+with-easy-smt = ["xlsynth-prover/with-easy-smt", "has-easy-smt"]
+with-boolector-binary-test = ["has-easy-smt", "xlsynth-prover/with-boolector-binary-test"]
+with-bitwuzla-binary-test = ["has-easy-smt", "xlsynth-prover/with-bitwuzla-binary-test"]
+with-z3-binary-test = ["has-easy-smt", "xlsynth-prover/with-z3-binary-test"]
+with-bitwuzla-system = ["has-bitwuzla", "xlsynth-prover/with-bitwuzla-system"]
+with-bitwuzla-built = ["has-bitwuzla", "xlsynth-prover/with-bitwuzla-built"]
+with-boolector-system = ["has-boolector", "xlsynth-prover/with-boolector-system"]
+with-boolector-built = ["has-boolector", "xlsynth-prover/with-boolector-built"]

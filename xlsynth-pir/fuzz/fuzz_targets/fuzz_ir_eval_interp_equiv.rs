@@ -4,7 +4,7 @@
 use libfuzzer_sys::fuzz_target;
 
 use xlsynth_autocov::{generate_ir_fn_corpus_from_ir_text, IrFnAutocovGenerateConfig};
-use xlsynth_g8r_fuzz::generate_upstream_eval_random_pir_package;
+use xlsynth_pir_fuzz::generate_upstream_eval_random_pir_package;
 use xlsynth_pir::ir_eval::{eval_fn_in_package, FnEvalResult};
 
 const AUTOCOV_MAX_ITERS: u64 = 256;

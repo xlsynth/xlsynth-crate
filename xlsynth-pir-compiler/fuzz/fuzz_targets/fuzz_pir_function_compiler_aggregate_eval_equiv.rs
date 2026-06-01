@@ -8,7 +8,7 @@ use common::random_argument_sets;
 use libfuzzer_sys::fuzz_target;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_random::{
-    DepletableBytes, OperationSet, RandomFnOptions, StopPolicy, generate_package,
+    DepletableBytes, OperationSet, RandomFnOptions, RandomOperation, StopPolicy, generate_package,
 };
 use xlsynth_pir_compiler::PirFunctionCompiler;
 
@@ -31,7 +31,11 @@ fn options() -> RandomFnOptions {
         allow_empty_case_sel: true,
         allow_events: true,
         allow_assumed_in_bounds: true,
-        enabled_operations: OperationSet::all_supported(),
+        enabled_operations: OperationSet::new(
+            OperationSet::all_supported()
+                .iter()
+                .filter(|operation| *operation != RandomOperation::CountedFor),
+        ),
         ..RandomFnOptions::default()
     }
 }

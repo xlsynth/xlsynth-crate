@@ -15,8 +15,8 @@ use xlsynth_prover::solver::boolector::{Boolector, BoolectorConfig};
 use xlsynth_prover::solver::easy_smt::{EasySmtConfig, EasySmtSolver};
 
 #[cfg(feature = "has-bitwuzla")]
-use xlsynth_g8r_fuzz::fuzz_bitwuzla_options;
-use xlsynth_g8r_fuzz::generate_upstream_formal_random_pir_package;
+use xlsynth_pir_fuzz::fuzz_bitwuzla_options;
+use xlsynth_pir_fuzz::generate_upstream_formal_random_pir_package;
 use xlsynth_pir::ir::{Fn as IrFn, NodeRef, PackageMember};
 use xlsynth_pir::ir_outline::{
     can_outline, compute_default_ordering, outline_with_ordering, OutlineOrdering,
@@ -158,12 +158,14 @@ fuzz_target!(|data: &[u8]| {
     // Aim for a small connected region size in [1, min(n-1, 16)]
     let max_region = std::cmp::min(n.saturating_sub(1), 16usize);
     if max_region == 0 {
+        // Early-return rationale: there is no nontrivial region size to try.
         return;
     }
     let target = 1 + ((h.rotate_left(13) as usize) % max_region);
 
     let region = pick_connected_region(&orig_fn, seed, target);
     if region.is_empty() {
+        // Early-return rationale: no connected region was selected to outline.
         return;
     }
     if !has_boundary_output(&orig_fn, &region) {

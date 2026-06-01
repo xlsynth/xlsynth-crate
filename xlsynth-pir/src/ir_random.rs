@@ -92,6 +92,7 @@ pub enum RandomOperation {
     Assert,
     Trace,
     Invoke,
+    CountedFor,
 }
 
 impl RandomOperation {
@@ -164,6 +165,7 @@ impl RandomOperation {
             Self::Assert,
             Self::Trace,
             Self::Invoke,
+            Self::CountedFor,
         ]
     }
 
@@ -237,6 +239,7 @@ impl RandomOperation {
             Self::Assert => "assert",
             Self::Trace => "trace",
             Self::Invoke => "invoke",
+            Self::CountedFor => "counted_for",
         }
     }
 }
@@ -330,6 +333,18 @@ pub struct RandomFnOptions {
     pub max_functions: usize,
     /// Maximum number of invoke nodes emitted in any one generated function.
     pub max_invokes_per_function: usize,
+    /// Maximum number of `counted_for` nodes emitted in any one generated
+    /// function.
+    pub max_counted_fors_per_function: usize,
+    /// Maximum static trip count generated for a `counted_for` node.
+    pub max_counted_for_trip_count: usize,
+    /// Maximum non-negative static stride generated for a `counted_for` node.
+    pub max_counted_for_stride: usize,
+    /// Maximum product of `counted_for` trip counts along any nested call path.
+    ///
+    /// This bounds execution expansion while still permitting multiple
+    /// sequential loops in one function.
+    pub max_nested_counted_for_iterations: usize,
     pub enabled_operations: OperationSet,
 }
 
@@ -355,6 +370,10 @@ impl Default for RandomFnOptions {
             allow_assumed_in_bounds: false,
             max_functions: 5,
             max_invokes_per_function: 3,
+            max_counted_fors_per_function: 3,
+            max_counted_for_trip_count: 8,
+            max_counted_for_stride: 8,
+            max_nested_counted_for_iterations: 64,
             enabled_operations: OperationSet::default(),
         }
     }
@@ -396,6 +415,21 @@ impl RandomFnOptions {
         if self.max_functions == 0 {
             return Err(GenerationError::InvalidOptions(
                 "max_functions must be nonzero".to_string(),
+            ));
+        }
+        if self.max_counted_for_trip_count > i64::MAX as usize {
+            return Err(GenerationError::InvalidOptions(
+                "max_counted_for_trip_count must fit in an XLS int64 attribute".to_string(),
+            ));
+        }
+        if self.max_counted_for_stride > i64::MAX as usize {
+            return Err(GenerationError::InvalidOptions(
+                "max_counted_for_stride must fit in an XLS int64 attribute".to_string(),
+            ));
+        }
+        if self.max_nested_counted_for_iterations == 0 {
+            return Err(GenerationError::InvalidOptions(
+                "max_nested_counted_for_iterations must be nonzero".to_string(),
             ));
         }
         Ok(())
@@ -609,13 +643,13 @@ pub fn generate_fn<S: EntropySource>(
     Ok(GeneratedFn { function, stats })
 }
 
-/// Generates an acyclic package with functions created on demand by invokes.
+/// Generates an acyclic package with functions created on demand by calls.
 ///
 /// Each function body is generated node by node. An ordinary node request
-/// occasionally emits an invoke to a completed function or recursively creates
-/// a new callee with an independently generated signature. Functions under
-/// construction are never eligible callees, so the resulting call graph is
-/// acyclic by construction.
+/// occasionally emits an `invoke` or `counted_for` to a completed function or
+/// recursively creates a new callee with an independently generated signature.
+/// Functions under construction are never eligible callees, so the resulting
+/// call graph is acyclic by construction.
 pub fn generate_package<S: EntropySource>(
     source: &mut S,
     options: &RandomFnOptions,
@@ -630,7 +664,7 @@ struct PackageGenerator<'a, S> {
     source: &'a mut S,
     options: &'a RandomFnOptions,
     stop_policy: StopPolicy,
-    completed_functions: Vec<Fn>,
+    completed_functions: Vec<CompletedFunction>,
     function_stats: Vec<GeneratedFnStats>,
     next_function_index: usize,
     next_text_id: usize,
@@ -651,11 +685,14 @@ impl<'a, S: EntropySource> PackageGenerator<'a, S> {
 
     fn generate(mut self) -> Result<GeneratedPackage, GenerationError> {
         let top_name = self.allocate_function_name();
-        self.generate_unconstrained_function(top_name.clone())?;
+        self.generate_unconstrained_function(
+            top_name.clone(),
+            self.options.max_nested_counted_for_iterations,
+        )?;
         let members = self
             .completed_functions
             .into_iter()
-            .map(PackageMember::Function)
+            .map(|completed| PackageMember::Function(completed.function))
             .collect();
         let package = Package {
             name: "random_package".to_string(),
@@ -677,7 +714,11 @@ impl<'a, S: EntropySource> PackageGenerator<'a, S> {
         name
     }
 
-    fn generate_unconstrained_function(&mut self, name: String) -> Result<(), GenerationError> {
+    fn generate_unconstrained_function(
+        &mut self,
+        name: String,
+        nested_iteration_budget: usize,
+    ) -> Result<(), GenerationError> {
         let mut generator = FunctionGenerator::new(self.options);
         let max_params = self
             .options
@@ -692,10 +733,16 @@ impl<'a, S: EntropySource> PackageGenerator<'a, S> {
         let body_capacity = self.options.max_nodes - generator.params.len();
         let mut body_nodes = 0;
         let mut invoke_count = 0;
+        let mut counted_for_count = 0;
         while body_nodes < body_capacity
             && (body_nodes == 0 || should_add_node(self.source, self.stop_policy, body_nodes))
         {
-            self.add_random_body_node(&mut generator, &mut invoke_count)?;
+            self.add_random_body_node(
+                &mut generator,
+                &mut invoke_count,
+                &mut counted_for_count,
+                nested_iteration_budget,
+            )?;
             body_nodes += 1;
         }
         let function = generator.finish()?;
@@ -707,6 +754,7 @@ impl<'a, S: EntropySource> PackageGenerator<'a, S> {
         &mut self,
         name: String,
         signature: &FunctionSignature,
+        nested_iteration_budget: usize,
     ) -> Result<(), GenerationError> {
         validate_signature(signature, self.options)?;
         let mut generator = FunctionGenerator::new(self.options);
@@ -727,10 +775,16 @@ impl<'a, S: EntropySource> PackageGenerator<'a, S> {
         let body_capacity = self.options.max_nodes - required_node_count;
         let mut body_nodes = 0;
         let mut invoke_count = 0;
+        let mut counted_for_count = 0;
         while body_nodes < body_capacity
             && should_add_node(self.source, self.stop_policy, body_nodes)
         {
-            self.add_random_body_node(&mut generator, &mut invoke_count)?;
+            self.add_random_body_node(
+                &mut generator,
+                &mut invoke_count,
+                &mut counted_for_count,
+                nested_iteration_budget,
+            )?;
             body_nodes += 1;
         }
         let ret_node_ref =
@@ -751,18 +805,31 @@ impl<'a, S: EntropySource> PackageGenerator<'a, S> {
             .unwrap_or(self.next_text_id)
             .saturating_add(1);
         self.function_stats.push(gather_stats(&function));
-        self.completed_functions.push(function);
+        let max_nested_counted_for_iterations =
+            self.function_max_nested_counted_for_iterations(&function);
+        self.completed_functions.push(CompletedFunction {
+            function,
+            max_nested_counted_for_iterations,
+        });
     }
 
     fn add_random_body_node(
         &mut self,
         generator: &mut FunctionGenerator<'_>,
         invoke_count: &mut usize,
+        counted_for_count: &mut usize,
+        nested_iteration_budget: usize,
     ) -> Result<NodeRef, GenerationError> {
         let mut applicable = generator.applicable_operations();
-        if *invoke_count < self.options.max_invokes_per_function && self.can_emit_invoke(generator)
+        if *invoke_count < self.options.max_invokes_per_function
+            && self.can_emit_invoke(generator, nested_iteration_budget)
         {
             applicable.push(RandomOperation::Invoke);
+        }
+        if *counted_for_count < self.options.max_counted_fors_per_function
+            && self.can_emit_counted_for(generator)
+        {
+            applicable.push(RandomOperation::CountedFor);
         }
         if applicable.is_empty() {
             return Err(GenerationError::Construction(
@@ -773,22 +840,35 @@ impl<'a, S: EntropySource> PackageGenerator<'a, S> {
         if operation == RandomOperation::Invoke {
             *invoke_count += 1;
             return Ok(self
-                .try_emit_invoke(generator)?
+                .try_emit_invoke(generator, nested_iteration_budget)?
                 .expect("invoke was selected only after checking applicability"));
+        }
+        if operation == RandomOperation::CountedFor {
+            *counted_for_count += 1;
+            return Ok(self
+                .try_emit_counted_for(generator, nested_iteration_budget)?
+                .expect("counted_for was selected only after checking applicability"));
         }
         generator.emit_operation(self.source, operation)
     }
 
-    fn can_emit_invoke(&self, generator: &FunctionGenerator<'_>) -> bool {
+    fn can_emit_invoke(
+        &self,
+        generator: &FunctionGenerator<'_>,
+        nested_iteration_budget: usize,
+    ) -> bool {
         self.next_function_index < self.options.max_functions
-            || !self.callable_completed_functions(generator).is_empty()
+            || !self
+                .callable_completed_functions(generator, nested_iteration_budget)
+                .is_empty()
     }
 
     fn try_emit_invoke(
         &mut self,
         generator: &mut FunctionGenerator<'_>,
+        nested_iteration_budget: usize,
     ) -> Result<Option<NodeRef>, GenerationError> {
-        let existing = self.callable_completed_functions(generator);
+        let existing = self.callable_completed_functions(generator, nested_iteration_budget);
         let can_create = self.next_function_index < self.options.max_functions;
         if existing.is_empty() && !can_create {
             return Ok(None);
@@ -797,8 +877,15 @@ impl<'a, S: EntropySource> PackageGenerator<'a, S> {
         let signature = if create_new {
             let signature = self.random_callable_signature(generator);
             let name = self.allocate_function_name();
-            self.generate_function_with_signature(name.clone(), &signature)?;
-            CallableFunction { name, signature }
+            self.generate_function_with_signature(
+                name.clone(),
+                &signature,
+                nested_iteration_budget,
+            )?;
+            let completed = self
+                .completed_function(&name)
+                .expect("newly generated callee is complete");
+            CallableFunction::from_completed(completed)
         } else {
             existing[choose_count(self.source, existing.len())].clone()
         };
@@ -816,6 +903,169 @@ impl<'a, S: EntropySource> PackageGenerator<'a, S> {
             },
             None,
         )))
+    }
+
+    fn can_emit_counted_for(&self, generator: &FunctionGenerator<'_>) -> bool {
+        if !self
+            .options
+            .enabled_operations
+            .contains(RandomOperation::CountedFor)
+            || generator.nodes_by_type.is_empty()
+        {
+            return false;
+        }
+        self.can_create_counted_for_body()
+            || !self.reusable_counted_for_bodies(generator).is_empty()
+    }
+
+    fn can_create_counted_for_body(&self) -> bool {
+        self.next_function_index < self.options.max_functions
+            && self.options.max_params >= 2
+            && self.options.max_nodes >= 2
+    }
+
+    fn try_emit_counted_for(
+        &mut self,
+        generator: &mut FunctionGenerator<'_>,
+        nested_iteration_budget: usize,
+    ) -> Result<Option<NodeRef>, GenerationError> {
+        let existing = self.reusable_counted_for_bodies(generator);
+        let can_create = self.can_create_counted_for_body();
+        if existing.is_empty() && !can_create {
+            return Ok(None);
+        }
+        let create_new = can_create && (existing.is_empty() || self.source.take_u64() & 1 == 0);
+        let emission = if create_new {
+            self.create_counted_for_body(generator, nested_iteration_budget)?
+        } else {
+            let body_index = choose_count(self.source, existing.len());
+            self.reuse_counted_for_body(generator, &existing[body_index], nested_iteration_budget)
+        };
+        let ty = generator.get_node(emission.init).ty.clone();
+        Ok(Some(generator.add_node(
+            ty,
+            NodePayload::CountedFor {
+                init: emission.init,
+                trip_count: emission.trip_count,
+                stride: emission.stride,
+                body: emission.body,
+                invariant_args: emission.invariant_args,
+            },
+            None,
+        )))
+    }
+
+    fn create_counted_for_body(
+        &mut self,
+        generator: &FunctionGenerator<'_>,
+        nested_iteration_budget: usize,
+    ) -> Result<CountedForEmission, GenerationError> {
+        let attributes = self.random_new_counted_for_attributes(nested_iteration_budget);
+        let init = generator.choose_any_ref(self.source);
+        let max_invariant_args = self
+            .options
+            .max_params
+            .min(self.options.max_nodes)
+            .saturating_sub(2);
+        let invariant_args: Vec<NodeRef> = (0..choose_count(self.source, max_invariant_args + 1))
+            .map(|_| generator.choose_any_ref(self.source))
+            .collect();
+        let mut params = vec![
+            Type::Bits(attributes.induction_width),
+            generator.get_node(init).ty.clone(),
+        ];
+        params.extend(
+            invariant_args
+                .iter()
+                .map(|node_ref| generator.get_node(*node_ref).ty.clone()),
+        );
+        let signature = FunctionSignature {
+            return_type: generator.get_node(init).ty.clone(),
+            params,
+        };
+        let body = self.allocate_function_name();
+        let body_budget = nested_iteration_budget / attributes.trip_count.max(1);
+        self.generate_function_with_signature(body.clone(), &signature, body_budget)?;
+        Ok(CountedForEmission {
+            body,
+            init,
+            invariant_args,
+            trip_count: attributes.trip_count,
+            stride: attributes.stride,
+        })
+    }
+
+    fn reuse_counted_for_body(
+        &mut self,
+        generator: &FunctionGenerator<'_>,
+        body: &CallableFunction,
+        nested_iteration_budget: usize,
+    ) -> CountedForEmission {
+        let Type::Bits(induction_width) = &body.signature.params[0] else {
+            unreachable!("reusable counted_for bodies have bits-typed induction parameters")
+        };
+        let max_trip_count = if body.max_nested_counted_for_iterations > nested_iteration_budget {
+            0
+        } else {
+            self.options
+                .max_counted_for_trip_count
+                .min(nested_iteration_budget / body.max_nested_counted_for_iterations)
+        };
+        let trip_count = random_biased_bounded(self.source, max_trip_count);
+        let stride = self.random_counted_for_stride(trip_count, *induction_width);
+        let init = generator.choose_ref_for_type(self.source, &body.signature.params[1]);
+        let invariant_args = body.signature.params[2..]
+            .iter()
+            .map(|ty| generator.choose_ref_for_type(self.source, ty))
+            .collect();
+        CountedForEmission {
+            body: body.name.clone(),
+            init,
+            invariant_args,
+            trip_count,
+            stride,
+        }
+    }
+
+    fn random_new_counted_for_attributes(
+        &mut self,
+        nested_iteration_budget: usize,
+    ) -> CountedForAttributes {
+        let max_trip_count = self
+            .options
+            .max_counted_for_trip_count
+            .min(nested_iteration_budget);
+        let trip_count = random_biased_bounded(self.source, max_trip_count);
+        let mut stride = random_biased_bounded(self.source, self.options.max_counted_for_stride);
+        let mut minimum_width = counted_for_minimum_induction_width(trip_count, stride);
+        if minimum_width.is_none_or(|width| width > self.options.max_bit_width) {
+            stride = 0;
+            minimum_width = counted_for_minimum_induction_width(trip_count, stride);
+        }
+        let minimum_width = minimum_width
+            .expect("zero stride always has a representable induction range")
+            .max(usize::from(!self.options.allow_zero_width_bits));
+        let induction_width = if self.source.take_u64() & 1 == 0 {
+            minimum_width
+        } else {
+            choose_between(self.source, minimum_width, self.options.max_bit_width)
+        };
+        CountedForAttributes {
+            trip_count,
+            stride,
+            induction_width,
+        }
+    }
+
+    fn random_counted_for_stride(&mut self, trip_count: usize, induction_width: usize) -> usize {
+        let stride = random_biased_bounded(self.source, self.options.max_counted_for_stride);
+        if counted_for_minimum_induction_width(trip_count, stride)
+            .is_some_and(|width| width <= induction_width)
+        {
+            stride
+        } else {
+            0
+        }
     }
 
     fn random_callable_signature(
@@ -859,27 +1109,104 @@ impl<'a, S: EntropySource> PackageGenerator<'a, S> {
     fn callable_completed_functions(
         &self,
         generator: &FunctionGenerator<'_>,
+        nested_iteration_budget: usize,
     ) -> Vec<CallableFunction> {
         self.completed_functions
             .iter()
-            .filter(|function| {
-                function
-                    .params
-                    .iter()
-                    .all(|param| generator.nodes_by_type.contains_key(&param.ty))
+            .filter(|completed| {
+                completed.max_nested_counted_for_iterations <= nested_iteration_budget
+                    && completed
+                        .function
+                        .params
+                        .iter()
+                        .all(|param| generator.nodes_by_type.contains_key(&param.ty))
             })
-            .map(|function| CallableFunction {
-                name: function.name.clone(),
-                signature: FunctionSignature::from_fn(function),
-            })
+            .map(CallableFunction::from_completed)
             .collect()
     }
+
+    fn reusable_counted_for_bodies(
+        &self,
+        generator: &FunctionGenerator<'_>,
+    ) -> Vec<CallableFunction> {
+        self.completed_functions
+            .iter()
+            .filter(|completed| {
+                let function = &completed.function;
+                matches!(function.params.first(), Some(Param { ty: Type::Bits(width), .. }) if *width > 0)
+                    && function.params.len() >= 2
+                    && function.ret_ty == function.params[1].ty
+                    && function.params[1..]
+                        .iter()
+                        .all(|param| generator.nodes_by_type.contains_key(&param.ty))
+            })
+            .map(CallableFunction::from_completed)
+            .collect()
+    }
+
+    fn completed_function(&self, name: &str) -> Option<&CompletedFunction> {
+        self.completed_functions
+            .iter()
+            .find(|completed| completed.function.name == name)
+    }
+
+    fn function_max_nested_counted_for_iterations(&self, function: &Fn) -> usize {
+        function.nodes.iter().fold(1, |maximum, node| {
+            let expansion = match &node.payload {
+                NodePayload::Invoke { to_apply, .. } => {
+                    self.completed_function(to_apply)
+                        .expect("invoke callee is complete before caller")
+                        .max_nested_counted_for_iterations
+                }
+                NodePayload::CountedFor {
+                    trip_count, body, ..
+                } => trip_count.saturating_mul(
+                    self.completed_function(body)
+                        .expect("counted_for body is complete before caller")
+                        .max_nested_counted_for_iterations,
+                ),
+                _ => 1,
+            };
+            maximum.max(expansion)
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CompletedFunction {
+    function: Fn,
+    max_nested_counted_for_iterations: usize,
 }
 
 #[derive(Debug, Clone)]
 struct CallableFunction {
     name: String,
     signature: FunctionSignature,
+    max_nested_counted_for_iterations: usize,
+}
+
+struct CountedForEmission {
+    body: String,
+    init: NodeRef,
+    invariant_args: Vec<NodeRef>,
+    trip_count: usize,
+    stride: usize,
+}
+
+struct CountedForAttributes {
+    trip_count: usize,
+    stride: usize,
+    induction_width: usize,
+}
+
+impl CallableFunction {
+    fn from_completed(completed: &CompletedFunction) -> Self {
+        Self {
+            name: completed.function.name.clone(),
+            signature: FunctionSignature::from_fn(&completed.function),
+            max_nested_counted_for_iterations: completed.max_nested_counted_for_iterations,
+        }
+    }
 }
 
 /// Generates a typed PIR function with exactly the requested parameter and
@@ -1081,6 +1408,31 @@ fn choose_count<S: EntropySource>(source: &mut S, exclusive_limit: usize) -> usi
 fn choose_between<S: EntropySource>(source: &mut S, minimum: usize, maximum: usize) -> usize {
     debug_assert!(minimum <= maximum);
     minimum + choose_count(source, maximum - minimum + 1)
+}
+
+fn random_biased_bounded<S: EntropySource>(source: &mut S, maximum: usize) -> usize {
+    match source.take_u64() & 7 {
+        0 => 0,
+        1 => 1.min(maximum),
+        2 => 2.min(maximum),
+        3 => maximum,
+        _ => choose_between(source, 0, maximum),
+    }
+}
+
+fn counted_for_minimum_induction_width(trip_count: usize, stride: usize) -> Option<usize> {
+    if trip_count <= 1 {
+        return Some(1);
+    }
+    let max_induction_value = stride.checked_mul(trip_count - 1)?;
+    if max_induction_value > i64::MAX as usize {
+        return None;
+    }
+    if max_induction_value == 0 {
+        Some(0)
+    } else {
+        Some(usize::BITS as usize - max_induction_value.leading_zeros() as usize)
+    }
 }
 
 fn random_width<S: EntropySource>(source: &mut S, max_bit_width: usize) -> usize {
@@ -1397,7 +1749,7 @@ impl<'a> FunctionGenerator<'a> {
                     && self.nodes_by_type.contains_key(&Type::Token)
                     && self.nodes_by_type.contains_key(&Type::Bits(1))
             }
-            RandomOperation::Invoke => false,
+            RandomOperation::Invoke | RandomOperation::CountedFor => false,
         }
     }
 
@@ -2042,8 +2394,8 @@ impl<'a> FunctionGenerator<'a> {
                     None,
                 ))
             }
-            RandomOperation::Invoke => {
-                unreachable!("package generation emits invoke with package-level call-graph state")
+            RandomOperation::Invoke | RandomOperation::CountedFor => {
+                unreachable!("package generation emits calls with package-level call-graph state")
             }
         }
     }
@@ -2128,6 +2480,16 @@ impl<'a> FunctionGenerator<'a> {
             .get(ty)
             .expect("selected generated type has values");
         refs[choose_count(source, refs.len())]
+    }
+
+    fn choose_any_ref<S: EntropySource>(&self, source: &mut S) -> NodeRef {
+        let types: Vec<&Type> = self.nodes_by_type.keys().collect();
+        let ty = types[choose_count(source, types.len())];
+        self.choose_ref_for_type(source, ty)
+    }
+
+    fn get_node(&self, node_ref: NodeRef) -> &Node {
+        &self.nodes[node_ref.index]
     }
 
     fn token_refs(&self) -> Vec<NodeRef> {

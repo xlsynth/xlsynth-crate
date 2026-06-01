@@ -3,7 +3,7 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
-use xlsynth_g8r_fuzz::generate_upstream_formal_random_pir_pair;
+use xlsynth_pir_fuzz::generate_upstream_formal_random_pir_pair;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_verify::verify_function_in_package;
 use xlsynth_pir::simple_rebase::rebase_onto;

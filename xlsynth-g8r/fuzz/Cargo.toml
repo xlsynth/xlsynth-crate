@@ -17,7 +17,6 @@ xlsynth = { path = "../../xlsynth", version = "0.53.0" }
 rand = "0.8"
 xlsynth-test-helpers = { path = "../../xlsynth-test-helpers" }
 xlsynth-pir = { path = "../../xlsynth-pir" }
-xlsynth-autocov = { path = "../../xlsynth-autocov" }
 xlsynth-g8r = { path = "../../xlsynth-g8r" }
 xlsynth-prover = { path = "../../xlsynth-prover" }
 xlsynth-vastly = { path = "../../xlsynth-vastly", package = "xlsynth-vastly" }
@@ -46,12 +45,6 @@ test = false
 doc = false
 
 [[bin]]
-name = "fuzz_ir_opt_equiv"
-path = "fuzz_targets/fuzz_ir_opt_equiv.rs"
-test = false
-doc = false
-
-[[bin]]
 name = "fuzz_gate_fn_roundtrip"
 path = "fuzz_targets/fuzz_gate_fn_roundtrip.rs"
 test = false
@@ -76,36 +69,6 @@ test = false
 doc = false
 
 [[bin]]
-name = "fuzz_ir_roundtrip"
-path = "fuzz_targets/fuzz_ir_roundtrip.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "fuzz_ir_same_sig_pair"
-path = "fuzz_targets/fuzz_ir_same_sig_pair.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "fuzz_ir_rebase_equiv"
-path = "fuzz_targets/fuzz_ir_rebase_equiv.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "fuzz_ir_outline_equiv"
-path = "fuzz_targets/fuzz_ir_outline_equiv.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "fuzz_ir_eval_interp_equiv"
-path = "fuzz_targets/fuzz_ir_eval_interp_equiv.rs"
-test = false
-doc = false
-
-[[bin]]
 name = "fuzz_netlist_scanner"
 path = "fuzz_targets/fuzz_netlist_scanner.rs"
 test = false
@@ -114,12 +77,6 @@ doc = false
 [[bin]]
 name = "fuzz_cut_db_rewrite_equiv"
 path = "fuzz_targets/fuzz_cut_db_rewrite_equiv.rs"
-test = false
-doc = false
-
-[[bin]]
-name = "fuzz_aug_opt_equiv"
-path = "fuzz_targets/fuzz_aug_opt_equiv.rs"
 test = false
 doc = false
 

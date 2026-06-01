@@ -22,7 +22,8 @@ use xlsynth_pir::corners::{
 };
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_eval::{
-    BoolNodeEvent, EvalObserver, FnEvalResult, SelectEvent, SelectKind, eval_fn_with_observer,
+    BoolNodeEvent, EvalObserver, FnEvalResult, SelectEvent, SelectKind,
+    eval_fn_in_package_with_observer, eval_fn_with_observer,
 };
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir::ir_value_utils::{ir_bits_from_value_with_type, ir_value_from_bits_with_type};
@@ -985,6 +986,7 @@ impl EvalObserver for CollectingMuxObserver {
 }
 
 pub struct AutocovEngine {
+    pkg: ir::Package,
     f: ir::Fn,
     args_tuple_type: ir::Type,
     args_bit_count: usize,
@@ -1102,7 +1104,7 @@ impl AutocovEngine {
         let args_tuple_value = ir_value_from_bits_with_type(cand, &self.args_tuple_type);
         let args = args_tuple_value.get_elements().unwrap();
         let mut obs = CollectingMuxObserver::new();
-        let r = xlsynth_pir::ir_eval::eval_fn_with_observer(&self.f, &args, Some(&mut obs));
+        let r = eval_fn_in_package_with_observer(&self.pkg, &self.f, &args, Some(&mut obs));
         let features = obs.finish();
         CandidateObservation {
             ok: matches!(r, FnEvalResult::Success(_)),
@@ -1141,7 +1143,7 @@ impl AutocovEngine {
         let mut obs = CornerOnlyObserver {
             events: BTreeSet::new(),
         };
-        let r = xlsynth_pir::ir_eval::eval_fn_with_observer(&self.f, &args, Some(&mut obs));
+        let r = eval_fn_in_package_with_observer(&self.pkg, &self.f, &args, Some(&mut obs));
         let ok = matches!(r, FnEvalResult::Success(_));
         (ok, obs.events)
     }
@@ -1172,7 +1174,7 @@ impl AutocovEngine {
         let mut obs = BoolOnlyObserver {
             events: BTreeSet::new(),
         };
-        let r = xlsynth_pir::ir_eval::eval_fn_with_observer(&self.f, &args, Some(&mut obs));
+        let r = eval_fn_in_package_with_observer(&self.pkg, &self.f, &args, Some(&mut obs));
         let ok = matches!(r, FnEvalResult::Success(_));
         (ok, obs.events)
     }
@@ -1456,6 +1458,7 @@ impl AutocovEngine {
 
         let stop = Arc::new(AtomicBool::new(false));
         let mut engine = Self {
+            pkg,
             f,
             args_tuple_type,
             args_bit_count,
@@ -1908,11 +1911,13 @@ impl AutocovEngine {
         let (work_tx, work_rx): (SyncSender<WorkItem>, Receiver<WorkItem>) = sync_channel(work_cap);
         let (res_tx, res_rx) = sync_channel::<WorkResult>(work_cap);
 
+        let pkg = Arc::new(self.pkg.clone());
         let f = Arc::new(self.f.clone());
         let args_tuple_type = Arc::new(self.args_tuple_type.clone());
         let work_rx = Arc::new(Mutex::new(work_rx));
 
         fn spawn_worker(
+            pkg: Arc<ir::Package>,
             f: Arc<ir::Fn>,
             args_tuple_type: Arc<ir::Type>,
             work_rx: Arc<Mutex<Receiver<WorkItem>>>,
@@ -1933,7 +1938,8 @@ impl AutocovEngine {
                             ir_value_from_bits_with_type(&item.bits, args_tuple_type.as_ref());
                         let args = tuple_value.get_elements().unwrap();
                         let mut obs = CollectingMuxObserver::new();
-                        let _ = xlsynth_pir::ir_eval::eval_fn_with_observer(
+                        let _ = eval_fn_in_package_with_observer(
+                            pkg.as_ref(),
                             f.as_ref(),
                             &args,
                             Some(&mut obs),
@@ -1953,6 +1959,7 @@ impl AutocovEngine {
         let mut workers: Vec<JoinHandle<()>> = Vec::with_capacity(threads);
         for _ in 0..threads {
             workers.push(spawn_worker(
+                pkg.clone(),
                 f.clone(),
                 args_tuple_type.clone(),
                 work_rx.clone(),
@@ -2284,7 +2291,7 @@ impl AutocovEngine {
         let args_tuple_value = ir_value_from_bits_with_type(cand, &self.args_tuple_type);
         let args = args_tuple_value.get_elements().unwrap();
         let mut obs = CollectingMuxObserver::new();
-        let _ = xlsynth_pir::ir_eval::eval_fn_with_observer(&self.f, &args, Some(&mut obs));
+        let _ = eval_fn_in_package_with_observer(&self.pkg, &self.f, &args, Some(&mut obs));
         obs.finish()
     }
 
@@ -2723,6 +2730,33 @@ fn f(selidx: bits[2] id=1, a: bits[8] id=2, b: bits[8] id=3, d: bits[8] id=4) ->
 
         let f2 = engine.evaluate_candidate_features(&bits);
         assert!(engine.maybe_add_to_corpus(bits, &f2, None).is_none());
+    }
+
+    #[test]
+    fn package_invoke_is_observed_in_single_and_parallel_modes() {
+        let ir_text = r#"package test
+
+fn g(x: bits[8] id=1) -> bits[8] {
+  one: bits[8] = literal(value=1, id=2)
+  ret y: bits[8] = add(x, one, id=3)
+}
+
+fn f(x: bits[8] id=10) -> bits[8] {
+  ret y: bits[8] = invoke(x, to_apply=g, id=11)
+}
+"#;
+        let cfg = AutocovConfig {
+            seed: 0,
+            max_iters: Some(4),
+            max_corpus_len: None,
+        };
+        let mut single = AutocovEngine::from_ir_text(ir_text, None, "f", cfg.clone()).unwrap();
+        let bits = IrBits::from_lsb_is_0(&[true, false, true, false, false, false, false, false]);
+        assert!(single.observe_candidate(&bits));
+
+        let mut parallel = AutocovEngine::from_ir_text(ir_text, None, "f", cfg).unwrap();
+        let report = parallel.run_parallel_with_sinks(2, None, None, None);
+        assert!(report.iters > 0);
     }
 
     #[test]

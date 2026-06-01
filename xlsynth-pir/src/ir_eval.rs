@@ -1329,6 +1329,33 @@ fn accumulate_cover_count(
     }
 }
 
+/// Merges one nested function evaluation into its caller and returns the
+/// nested function's computed value.
+fn absorb_nested_eval_result(
+    nested_result: FnEvalResult,
+    assertion_failures: &mut Vec<AssertionFailure>,
+    assumption_failures: &mut Vec<AssumptionFailure>,
+    trace_messages: &mut Vec<TraceMessage>,
+    cover_counts: &mut Vec<CoverCount>,
+    cover_index_by_text_id: &mut HashMap<usize, usize>,
+) -> IrValue {
+    let (value, nested_trace_messages, nested_cover_counts) = match nested_result {
+        FnEvalResult::Success(success) => {
+            (success.value, success.trace_messages, success.cover_counts)
+        }
+        FnEvalResult::Failure(failure) => {
+            assertion_failures.extend(failure.assertion_failures);
+            assumption_failures.extend(failure.assumption_failures);
+            (failure.value, failure.trace_messages, failure.cover_counts)
+        }
+    };
+    trace_messages.extend(nested_trace_messages);
+    for cover_count in nested_cover_counts {
+        accumulate_cover_count(cover_counts, cover_index_by_text_id, cover_count);
+    }
+    value
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnEvalSuccess {
     pub value: IrValue,
@@ -2083,34 +2110,65 @@ fn eval_fn_impl<'a>(
                     })
                     .collect();
 
-                let callee_result =
-                    eval_fn_impl(Some(pkg), callee, &callee_args, observer, order_policy);
-                match callee_result {
-                    FnEvalResult::Success(success) => {
-                        trace_messages.extend(success.trace_messages);
-                        for cover_count in success.cover_counts {
-                            accumulate_cover_count(
-                                &mut cover_counts,
-                                &mut cover_index_by_text_id,
-                                cover_count,
-                            );
-                        }
-                        success.value
-                    }
-                    FnEvalResult::Failure(fail) => {
-                        assertion_failures.extend(fail.assertion_failures);
-                        assumption_failures.extend(fail.assumption_failures);
-                        trace_messages.extend(fail.trace_messages);
-                        for cover_count in fail.cover_counts {
-                            accumulate_cover_count(
-                                &mut cover_counts,
-                                &mut cover_index_by_text_id,
-                                cover_count,
-                            );
-                        }
-                        fail.value
-                    }
+                absorb_nested_eval_result(
+                    eval_fn_impl(Some(pkg), callee, &callee_args, observer, order_policy),
+                    &mut assertion_failures,
+                    &mut assumption_failures,
+                    &mut trace_messages,
+                    &mut cover_counts,
+                    &mut cover_index_by_text_id,
+                )
+            }
+            P::CountedFor {
+                init,
+                trip_count,
+                stride,
+                body,
+                invariant_args,
+            } => {
+                let pkg = pkg.expect("CountedFor requires package context for body resolution");
+                let body_fn = pkg
+                    .get_fn(body)
+                    .expect("CountedFor body must exist in package");
+                let induction_width = match &body_fn.params[0].ty {
+                    ir::Type::Bits(width) => *width,
+                    _ => panic!("CountedFor induction parameter must be bits[N]"),
+                };
+                let invariant_values: Vec<IrValue> = invariant_args
+                    .iter()
+                    .map(|r| {
+                        env.get(r)
+                            .expect("counted_for invariant arg must be evaluated")
+                            .clone()
+                    })
+                    .collect();
+                let mut carry = env
+                    .get(init)
+                    .expect("counted_for init must be evaluated")
+                    .clone();
+                for iteration in 0..*trip_count {
+                    let induction_value = iteration
+                        .checked_mul(*stride)
+                        .expect("verified counted_for induction value must fit usize");
+                    let induction_value = u64::try_from(induction_value)
+                        .expect("verified counted_for induction value must fit u64");
+                    let mut body_args = Vec::with_capacity(body_fn.params.len());
+                    body_args.push(
+                        IrValue::make_ubits(induction_width, induction_value)
+                            .expect("verified counted_for induction value must fit body type"),
+                    );
+                    body_args.push(carry);
+                    body_args.extend(invariant_values.iter().cloned());
+                    carry = absorb_nested_eval_result(
+                        eval_fn_impl(Some(pkg), body_fn, &body_args, observer, order_policy),
+                        &mut assertion_failures,
+                        &mut assumption_failures,
+                        &mut trace_messages,
+                        &mut cover_counts,
+                        &mut cover_index_by_text_id,
+                    );
                 }
+                carry
             }
             P::DynamicBitSlice { arg, start, width } => {
                 let arg_bits = env
@@ -4297,6 +4355,111 @@ fn f(x: bits[8] id=10) -> bits[8] {
             }
             other => panic!("unexpected result: {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_eval_fn_in_package_counted_for_accumulates_carry_and_invariants() {
+        let ir_text = r#"package test
+
+fn body(i: bits[3] id=1, carry: bits[8] id=2, invariant: bits[8] id=3) -> bits[8] {
+  i_ext: bits[8] = zero_ext(i, new_bit_count=8, id=4)
+  with_i: bits[8] = add(carry, i_ext, id=5)
+  ret with_invariant: bits[8] = add(with_i, invariant, id=6)
+}
+
+fn f(init: bits[8] id=10, invariant: bits[8] id=11) -> bits[8] {
+  ret loop: bits[8] = counted_for(init, trip_count=3, stride=2, body=body, invariant_args=[invariant], id=12)
+}
+"#;
+        let pkg = Parser::new(ir_text).parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap();
+        let args = vec![
+            IrValue::make_ubits(8, 1).unwrap(),
+            IrValue::make_ubits(8, 10).unwrap(),
+        ];
+        let FnEvalResult::Success(success) = eval_fn_in_package(&pkg, f, &args) else {
+            panic!("counted_for should evaluate successfully");
+        };
+        assert_eq!(success.value, IrValue::make_ubits(8, 37).unwrap());
+    }
+
+    #[test]
+    fn test_eval_fn_in_package_counted_for_propagates_body_events() {
+        let ir_text = r#"package test
+
+fn body(i: bits[2] id=1, carry: bits[1] id=2) -> bits[1] {
+  t: token = after_all(id=3)
+  _covered: () = cover(carry, label="hit", id=4)
+  _traced: token = trace(t, carry, format="i={}", data_operands=[i], id=5)
+  ret same: bits[1] = identity(carry, id=6)
+}
+
+fn f() -> bits[1] {
+  init: bits[1] = literal(value=1, id=10)
+  ret loop: bits[1] = counted_for(init, trip_count=3, stride=1, body=body, id=11)
+}
+"#;
+        let pkg = Parser::new(ir_text).parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap();
+        let FnEvalResult::Success(success) = eval_fn_in_package(&pkg, f, &[]) else {
+            panic!("counted_for should evaluate successfully");
+        };
+        assert_eq!(success.value, IrValue::make_ubits(1, 1).unwrap());
+        assert_eq!(
+            success.trace_messages,
+            vec![
+                TraceMessage {
+                    message: "i=0".to_string(),
+                    verbosity: 0,
+                },
+                TraceMessage {
+                    message: "i=1".to_string(),
+                    verbosity: 0,
+                },
+                TraceMessage {
+                    message: "i=2".to_string(),
+                    verbosity: 0,
+                },
+            ]
+        );
+        assert_eq!(
+            success.cover_counts,
+            vec![CoverCount {
+                node_text_id: 4,
+                label: "hit".to_string(),
+                count: 3,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_eval_fn_in_package_counted_for_continues_after_body_failure() {
+        let ir_text = r#"package test
+
+fn body(i: bits[1] id=1, carry: bits[1] id=2) -> bits[1] {
+  t: token = after_all(id=3)
+  _asserted: token = assert(t, carry, message="carry must be set", label="carry_set", id=4)
+  ret next: bits[1] = not(carry, id=5)
+}
+
+fn f() -> bits[1] {
+  init: bits[1] = literal(value=0, id=10)
+  ret loop: bits[1] = counted_for(init, trip_count=2, stride=1, body=body, id=11)
+}
+"#;
+        let pkg = Parser::new(ir_text).parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap();
+        let FnEvalResult::Failure(failure) = eval_fn_in_package(&pkg, f, &[]) else {
+            panic!("counted_for should report body assertion failure");
+        };
+        assert_eq!(failure.value, IrValue::make_ubits(1, 0).unwrap());
+        assert_eq!(
+            failure.assertion_failures,
+            vec![AssertionFailure {
+                message: "carry must be set".to_string(),
+                label: "carry_set".to_string(),
+            }]
+        );
     }
 
     #[test]

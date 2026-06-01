@@ -3,11 +3,11 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use xlsynth_pir::ir_parser;
-use xlsynth_pir::ir_random::{generate_fn, DepletableBytes, RandomFnOptions, StopPolicy};
+use xlsynth_pir::ir_random::{generate_package, DepletableBytes, RandomFnOptions, StopPolicy};
 use xlsynth_pir::structural_similarity::structurally_equivalent_ir;
 
 fuzz_target!(|data: &[u8]| {
-    log::debug!("Testing random PIR function through libxls IR roundtrip");
+    log::debug!("Testing random PIR package through libxls IR roundtrip");
     let _ = env_logger::builder().is_test(true).try_init();
 
     // 1) Generate valid PIR directly, then parse and re-emit it through
@@ -20,13 +20,14 @@ fuzz_target!(|data: &[u8]| {
         allow_assumed_in_bounds: true,
         ..RandomFnOptions::default()
     };
-    let generated = generate_fn(
+    let mut generated = generate_package(
         &mut entropy,
         &options,
         StopPolicy::WhenEntropyDepleted,
     )
-    .expect("fixed random PIR options should construct a valid function");
-    let pir_text = generated.into_top_package("fuzz_pkg").to_string();
+    .expect("fixed random PIR options should construct a valid package");
+    generated.package.name = "fuzz_pkg".to_string();
+    let pir_text = generated.package.to_string();
     let xls_pkg = xlsynth::IrPackage::parse_ir(&pir_text, None)
         .expect("PIR-emitted standard XLS IR should parse in libxls");
     let pkg_text = xls_pkg.to_string();
