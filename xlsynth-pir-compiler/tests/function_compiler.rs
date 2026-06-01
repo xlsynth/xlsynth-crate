@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use xlsynth::IrValue;
-use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
+use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn, eval_fn_in_package};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir_compiler::{
     AssumptionFailureKind, CompilerError, ExecutionContext, NativeTupleFieldLayout,
@@ -14,6 +14,13 @@ fn compile(ir: &str) -> PirFunctionCompiler {
         .expect("test PIR should parse and validate");
     let function = package.get_fn("f").expect("function f should exist");
     PirFunctionCompiler::compile(function).expect("function should compile")
+}
+
+fn compile_package(ir: &str) -> PirFunctionCompiler {
+    let package = Parser::new(ir)
+        .parse_and_validate_package()
+        .expect("test PIR package should parse and validate");
+    PirFunctionCompiler::compile_package(&package).expect("package should compile")
 }
 
 fn assert_matches_evaluator(ir: &str, argument_sets: &[Vec<IrValue>]) {
@@ -85,6 +92,95 @@ fn f(x: bits[8] id=1, y: bits[7] id=2) -> bits[8] {
         error,
         CompilerError::InvalidFunction(message) if message.contains("right operand")
     ));
+}
+
+#[test]
+fn package_compiler_lowers_nested_scalar_invokes() {
+    let compiler = compile_package(
+        r#"package test
+
+fn add_one(x: bits[8] id=1) -> bits[8] {
+  one: bits[8] = literal(value=1, id=2)
+  ret result: bits[8] = add(x, one, id=3)
+}
+
+fn through(x: bits[8] id=4) -> bits[8] {
+  ret result: bits[8] = invoke(x, to_apply=add_one, id=5)
+}
+
+top fn f(x: bits[8] id=6) -> bits[8] {
+  ret result: bits[8] = invoke(x, to_apply=through, id=7)
+}
+"#,
+    );
+    assert_eq!(compiler.run_u64(&[41]).expect("execute"), 42);
+    assert!(compiler.scratch_byte_count() > 0);
+}
+
+#[test]
+fn package_compiler_passes_aggregate_invokes_by_native_address() {
+    let ir = r#"package test
+
+fn preserve(values: bits[8][2] id=1) -> bits[8][2] {
+  ret result: bits[8][2] = identity(values, id=2)
+}
+
+top fn f(values: bits[8][2] id=3) -> bits[8][2] {
+  ret result: bits[8][2] = invoke(values, to_apply=preserve, id=4)
+}
+"#;
+    let package = Parser::new(ir)
+        .parse_and_validate_package()
+        .expect("test PIR package should parse and validate");
+    let compiler = PirFunctionCompiler::compile_package(&package).expect("package should compile");
+    let values = array(8, &[0x12, 0xa5]);
+    let expected =
+        match eval_fn_in_package(&package, package.get_top_fn().unwrap(), &[values.clone()]) {
+            FnEvalResult::Success(success) => success.value,
+            other => panic!("PIR evaluation failed: {other:?}"),
+        };
+    assert_eq!(
+        compiler
+            .run_ir_values(&[values.clone()])
+            .expect("execute aggregate invoke"),
+        expected
+    );
+}
+
+#[test]
+fn package_compiler_accumulates_repeated_callee_events() {
+    let compiler = compile_package(
+        r#"package test
+
+fn observed(x: bits[1] id=1) -> bits[1] {
+  c: () = cover(x, label="callee_cover", id=2)
+  t: token = after_all(id=3)
+  tr: token = trace(t, x, format="x={}", data_operands=[x], id=4)
+  ret result: bits[1] = identity(x, id=5)
+}
+
+top fn f(x: bits[1] id=6) -> bits[1] {
+  first: bits[1] = invoke(x, to_apply=observed, id=7)
+  ret second: bits[1] = invoke(first, to_apply=observed, id=8)
+}
+"#,
+    );
+    let result = compiler
+        .run_ir_values_with_events(&[bits(1, 1)])
+        .expect("execute repeated invokes");
+    assert_eq!(result.value, bits(1, 1));
+    assert_eq!(result.events.cover_counts.len(), 1);
+    assert_eq!(result.events.cover_counts[0].node_text_id, 2);
+    assert_eq!(result.events.cover_counts[0].count, 2);
+    assert_eq!(
+        result
+            .events
+            .trace_messages
+            .iter()
+            .map(|trace| trace.message.as_str())
+            .collect::<Vec<_>>(),
+        vec!["x=1", "x=1"]
+    );
 }
 
 #[test]

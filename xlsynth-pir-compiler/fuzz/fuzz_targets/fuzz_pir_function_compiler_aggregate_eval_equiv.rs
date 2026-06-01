@@ -6,9 +6,9 @@ mod common;
 
 use common::random_argument_sets;
 use libfuzzer_sys::fuzz_target;
-use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
+use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_random::{
-    DepletableBytes, OperationSet, RandomFnOptions, StopPolicy, generate_fn,
+    DepletableBytes, OperationSet, RandomFnOptions, StopPolicy, generate_package,
 };
 use xlsynth_pir_compiler::PirFunctionCompiler;
 
@@ -38,19 +38,20 @@ fn options() -> RandomFnOptions {
 
 fuzz_target!(|data: &[u8]| {
     let mut graph_entropy = DepletableBytes::new(data);
-    let generated = generate_fn(
+    let generated = generate_package(
         &mut graph_entropy,
         &options(),
         StopPolicy::WhenEntropyDepleted,
     )
-    .expect("aggregate fuzz generator options should always construct a PIR function");
-    let function = &generated.function;
-    let ir_text = function.to_string();
-    let compiler = PirFunctionCompiler::compile(function).unwrap_or_else(|error| {
+    .expect("aggregate fuzz generator options should always construct a PIR package");
+    let package = &generated.package;
+    let function = package.get_top_fn().expect("generated package has a top");
+    let ir_text = package.to_string();
+    let compiler = PirFunctionCompiler::compile_package(package).unwrap_or_else(|error| {
         panic!("compiled-function compilation failed for generated IR:\n{ir_text}\n{error}")
     });
     for args in random_argument_sets(data, function) {
-        let expected = eval_fn(function, &args);
+        let expected = eval_fn_in_package(package, function, &args);
         let actual = compiler
             .run_ir_values_with_events(&args)
             .unwrap_or_else(|error| {

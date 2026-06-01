@@ -14,7 +14,7 @@ use cranelift_codegen::ir::{
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{Linkage, Module, default_libcall_names};
+use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use thiserror::Error;
 use xlsynth::{IrBits, IrValue};
 use xlsynth_pir::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
@@ -339,6 +339,15 @@ pub struct IrExecutionResult {
     pub events: ExecutionResult,
 }
 
+struct PlannedFunction<'a> {
+    function: &'a ir::Fn,
+    param_layouts: Vec<NativeValueLayout>,
+    result_layout: NativeValueLayout,
+    order: Vec<NodeRef>,
+    scratch_plan: ScratchPlan,
+    event_sites: HashMap<NodeRef, u32>,
+}
+
 impl PirFunctionCompiler {
     /// Compiles the reachable portion of a PIR function into native host code.
     pub fn compile(function: &ir::Fn) -> Result<Self, CompilerError> {
@@ -347,19 +356,73 @@ impl PirFunctionCompiler {
             .map_err(CompilerError::InvalidFunction)?;
         xlsynth_pir::ir_verify::verify_function(function)
             .map_err(|e| CompilerError::InvalidFunction(e.to_string()))?;
+        Self::compile_functions(None, function)
+    }
 
-        let param_layouts = function
-            .params
-            .iter()
-            .map(|param| NativeValueLayout::from_type(&param.ty))
-            .collect::<Result<Vec<_>, _>>()?;
-        let result_layout = NativeValueLayout::from_type(&function.ret_ty)?;
-        let order = reachable_scheduled_order(function)?;
-        for node_ref in &order {
-            NativeValueLayout::from_type(&function.get_node(*node_ref).ty)?;
+    /// Compiles a package's selected top function and its invoked callees.
+    pub fn compile_package(package: &ir::Package) -> Result<Self, CompilerError> {
+        let top = package.get_top_fn().ok_or_else(|| {
+            CompilerError::InvalidFunction("package has no top-level function".into())
+        })?;
+        Self::compile_package_function(package, &top.name)
+    }
+
+    /// Compiles the named package function and its invoked callees.
+    pub fn compile_package_function(
+        package: &ir::Package,
+        function_name: &str,
+    ) -> Result<Self, CompilerError> {
+        xlsynth_pir::ir_verify::verify_package(package)
+            .map_err(|e| CompilerError::InvalidFunction(e.to_string()))?;
+        let function = package.get_fn(function_name).ok_or_else(|| {
+            CompilerError::InvalidFunction(format!(
+                "package has no function named '{function_name}'"
+            ))
+        })?;
+        Self::compile_functions(Some(package), function)
+    }
+
+    fn compile_functions(
+        package: Option<&ir::Package>,
+        top: &ir::Fn,
+    ) -> Result<Self, CompilerError> {
+        let function_names = invoked_function_postorder(package, top)?;
+        let mut scratch_requirements = HashMap::new();
+        let mut plans = HashMap::new();
+        let mut metadata = CompiledFunctionMetadata::default();
+        for function_name in &function_names {
+            let function = resolve_function(package, top, function_name)?;
+            let param_layouts = function
+                .params
+                .iter()
+                .map(|param| NativeValueLayout::from_type(&param.ty))
+                .collect::<Result<Vec<_>, _>>()?;
+            let result_layout = NativeValueLayout::from_type(&function.ret_ty)?;
+            let order = reachable_scheduled_order(function)?;
+            for node_ref in &order {
+                NativeValueLayout::from_type(&function.get_node(*node_ref).ty)?;
+            }
+            let scratch_plan = ScratchPlan::for_function(function, &order, &scratch_requirements)?;
+            scratch_requirements.insert(
+                function_name.clone(),
+                (scratch_plan.byte_count, scratch_plan.alignment),
+            );
+            let event_sites = append_event_metadata(function, &order, &mut metadata)?;
+            plans.insert(
+                function_name.clone(),
+                PlannedFunction {
+                    function,
+                    param_layouts,
+                    result_layout,
+                    order,
+                    scratch_plan,
+                    event_sites,
+                },
+            );
         }
-        let scratch_plan = ScratchPlan::for_function(function, &order)?;
-        let (metadata, event_sites) = build_event_metadata(function, &order)?;
+        let top_plan = plans.get(&top.name).ok_or_else(|| {
+            CompilerError::InvalidFunction(format!("missing compilation plan for '{}'", top.name))
+        })?;
 
         let mut builder = JITBuilder::new(default_libcall_names())
             .map_err(|error| CompilerError::Backend(error.to_string()))?;
@@ -401,46 +464,64 @@ impl PirFunctionCompiler {
         );
         let mut module = JITModule::new(builder);
         let pointer_type = module.target_config().pointer_type();
-        let mut signature = module.make_signature();
-        signature.params.push(AbiParam::new(pointer_type));
-        signature.params.push(AbiParam::new(pointer_type));
-        signature.params.push(AbiParam::new(pointer_type));
-        signature.params.push(AbiParam::new(pointer_type));
-        signature.returns.push(AbiParam::new(types::I32));
-
-        let function_id = module
-            .declare_function("xlsynth_pir_entry", Linkage::Export, &signature)
-            .map_err(|error| CompilerError::Backend(error.to_string()))?;
-        let mut context = module.make_context();
-        context.func.signature = signature;
-        let runtime_callbacks =
-            declare_runtime_callbacks(&mut module, &mut context.func, pointer_type)?;
-
-        let mut function_builder_context = FunctionBuilderContext::new();
-        {
-            let mut function_builder =
-                FunctionBuilder::new(&mut context.func, &mut function_builder_context);
-            lower_function(
-                function,
-                &order,
-                &param_layouts,
-                &scratch_plan,
-                &event_sites,
-                runtime_callbacks,
-                pointer_type,
-                &mut function_builder,
-            )?;
-            function_builder.finalize();
+        let signature = compiled_function_signature(&mut module, pointer_type);
+        let mut function_ids = HashMap::new();
+        for (index, function_name) in function_names.iter().enumerate() {
+            let is_top = function_name == &top.name;
+            let symbol = if is_top {
+                "xlsynth_pir_entry".to_string()
+            } else {
+                format!("xlsynth_pir_fn_{index}")
+            };
+            let function_id = module
+                .declare_function(
+                    &symbol,
+                    if is_top {
+                        Linkage::Export
+                    } else {
+                        Linkage::Local
+                    },
+                    &signature,
+                )
+                .map_err(|error| CompilerError::Backend(error.to_string()))?;
+            function_ids.insert(function_name.clone(), function_id);
         }
+        for function_name in &function_names {
+            let plan = &plans[function_name];
+            let mut context = module.make_context();
+            context.func.signature = signature.clone();
+            let runtime_callbacks =
+                declare_runtime_callbacks(&mut module, &mut context.func, pointer_type)?;
+            let invoke_targets =
+                declare_invoke_targets(&mut module, &mut context.func, &function_ids);
 
-        module
-            .define_function(function_id, &mut context)
-            .map_err(|error| CompilerError::Backend(error.to_string()))?;
-        module.clear_context(&mut context);
+            let mut function_builder_context = FunctionBuilderContext::new();
+            {
+                let mut function_builder =
+                    FunctionBuilder::new(&mut context.func, &mut function_builder_context);
+                lower_function(
+                    plan.function,
+                    &plan.order,
+                    &plan.param_layouts,
+                    &plan.scratch_plan,
+                    &plan.event_sites,
+                    &invoke_targets,
+                    runtime_callbacks,
+                    pointer_type,
+                    &mut function_builder,
+                )?;
+                function_builder.finalize();
+            }
+            module
+                .define_function(function_ids[function_name], &mut context)
+                .map_err(|error| CompilerError::Backend(error.to_string()))?;
+            module.clear_context(&mut context);
+        }
         module
             .finalize_definitions()
             .map_err(|error| CompilerError::Backend(error.to_string()))?;
 
+        let function_id = function_ids[&top.name];
         let entrypoint_ptr = module.get_finalized_function(function_id);
         // SAFETY: `entrypoint_ptr` denotes the finalized function just defined
         // with the exact `NativeEntrypoint` signature above.
@@ -448,11 +529,11 @@ impl PirFunctionCompiler {
         Ok(Self {
             module: Some(module),
             entrypoint,
-            param_layouts,
-            result_layout,
+            param_layouts: top_plan.param_layouts.clone(),
+            result_layout: top_plan.result_layout.clone(),
             metadata,
-            scratch_byte_count: scratch_plan.byte_count,
-            scratch_alignment: scratch_plan.alignment,
+            scratch_byte_count: top_plan.scratch_plan.byte_count,
+            scratch_alignment: top_plan.scratch_plan.alignment,
         })
     }
 
@@ -699,6 +780,90 @@ impl PirFunctionCompiler {
             events: context.result(),
         })
     }
+}
+
+fn compiled_function_signature<M: Module>(module: &mut M, pointer_type: ClifType) -> Signature {
+    let mut signature = module.make_signature();
+    signature.params.push(AbiParam::new(pointer_type));
+    signature.params.push(AbiParam::new(pointer_type));
+    signature.params.push(AbiParam::new(pointer_type));
+    signature.params.push(AbiParam::new(pointer_type));
+    signature.returns.push(AbiParam::new(types::I32));
+    signature
+}
+
+fn declare_invoke_targets<M: Module>(
+    module: &mut M,
+    function: &mut cranelift_codegen::ir::Function,
+    function_ids: &HashMap<String, FuncId>,
+) -> HashMap<String, FuncRef> {
+    function_ids
+        .iter()
+        .map(|(name, id)| (name.clone(), module.declare_func_in_func(*id, function)))
+        .collect()
+}
+
+fn resolve_function<'a>(
+    package: Option<&'a ir::Package>,
+    top: &'a ir::Fn,
+    function_name: &str,
+) -> Result<&'a ir::Fn, CompilerError> {
+    if function_name == top.name {
+        return Ok(top);
+    }
+    package
+        .and_then(|package| package.get_fn(function_name))
+        .ok_or_else(|| {
+            CompilerError::InvalidFunction(format!(
+                "function '{}' invokes unknown function '{function_name}'",
+                top.name
+            ))
+        })
+}
+
+/// Returns callees before callers for the top-reachable invoke graph.
+fn invoked_function_postorder(
+    package: Option<&ir::Package>,
+    top: &ir::Fn,
+) -> Result<Vec<String>, CompilerError> {
+    fn visit(
+        package: Option<&ir::Package>,
+        top: &ir::Fn,
+        function_name: &str,
+        active: &mut HashSet<String>,
+        visited: &mut HashSet<String>,
+        postorder: &mut Vec<String>,
+    ) -> Result<(), CompilerError> {
+        if visited.contains(function_name) {
+            return Ok(());
+        }
+        if !active.insert(function_name.to_string()) {
+            return Err(CompilerError::InvalidFunction(format!(
+                "recursive invoke graph through function '{function_name}' is not valid XLS IR"
+            )));
+        }
+        let function = resolve_function(package, top, function_name)?;
+        for node in &function.nodes {
+            if let NodePayload::Invoke { to_apply, .. } = &node.payload {
+                visit(package, top, to_apply, active, visited, postorder)?;
+            }
+        }
+        active.remove(function_name);
+        visited.insert(function_name.to_string());
+        postorder.push(function_name.to_string());
+        Ok(())
+    }
+
+    let mut postorder = Vec::new();
+    visit(
+        package,
+        top,
+        &top.name,
+        &mut HashSet::new(),
+        &mut HashSet::new(),
+        &mut postorder,
+    )?;
+    Ok(postorder)
 }
 
 impl Drop for PirFunctionCompiler {
@@ -995,11 +1160,20 @@ struct ScratchPlan {
     in_place_array_updates: HashSet<NodeRef>,
     gate_zero_offset: Option<usize>,
     gate_zero_byte_count: usize,
+    invoke_sites: HashMap<NodeRef, InvokeScratchPlan>,
     trace_sites: HashMap<NodeRef, TraceScratchPlan>,
     runtime_scalar_offsets: HashMap<NodeRef, usize>,
     runtime_temporary_offsets: [Option<usize>; 2],
     byte_count: usize,
     alignment: usize,
+}
+
+#[derive(Debug)]
+struct InvokeScratchPlan {
+    pointer_array_offset: Option<usize>,
+    scalar_operand_offsets: Vec<Option<usize>>,
+    output_offset: Option<usize>,
+    callee_scratch_offset: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -1022,11 +1196,16 @@ struct ActiveScratchSlot {
 
 impl ScratchPlan {
     /// Assigns reusable native scratch slots for materialized intermediates.
-    fn for_function(function: &ir::Fn, order: &[NodeRef]) -> Result<Self, CompilerError> {
+    fn for_function(
+        function: &ir::Fn,
+        order: &[NodeRef],
+        callee_scratch_requirements: &HashMap<String, (usize, usize)>,
+    ) -> Result<Self, CompilerError> {
         let (offsets, in_place_array_updates, mut byte_count, mut alignment) =
             assign_materialized_scratch_offsets(function, order)?;
         let (gate_zero_offset, gate_zero_byte_count) =
             reserve_gate_zero_storage(function, order, &mut byte_count, &mut alignment)?;
+        let mut invoke_sites = HashMap::new();
         let mut trace_sites = HashMap::new();
         let mut runtime_scalar_offsets = HashMap::new();
         let mut runtime_temporary_offsets = [None; 2];
@@ -1092,11 +1271,94 @@ impl ScratchPlan {
                 alignment = alignment.max(std::mem::align_of::<u64>());
             }
         }
+        for node_ref in order {
+            let NodePayload::Invoke { to_apply, operands } = &function.get_node(*node_ref).payload
+            else {
+                continue;
+            };
+            let mut scalar_operand_offsets = Vec::with_capacity(operands.len());
+            for operand in operands {
+                let layout = NativeValueLayout::from_type(&function.get_node(*operand).ty)?;
+                let offset =
+                    if matches!(layout, NativeValueLayout::Scalar(_)) && layout.byte_count() != 0 {
+                        Some(reserve_scratch_region(
+                            &mut byte_count,
+                            &mut alignment,
+                            layout.byte_count(),
+                            layout.alignment(),
+                            "invoke scalar argument scratch size overflow",
+                        )?)
+                    } else {
+                        None
+                    };
+                scalar_operand_offsets.push(offset);
+            }
+            let pointer_array_offset = if operands.is_empty() {
+                None
+            } else {
+                let pointer_array_byte_count = operands
+                    .len()
+                    .checked_mul(std::mem::size_of::<*const u8>())
+                    .ok_or_else(|| {
+                        CompilerError::UnsupportedType(
+                            "invoke pointer array scratch size overflow".into(),
+                        )
+                    })?;
+                Some(reserve_scratch_region(
+                    &mut byte_count,
+                    &mut alignment,
+                    pointer_array_byte_count,
+                    std::mem::align_of::<*const u8>(),
+                    "invoke pointer array scratch size overflow",
+                )?)
+            };
+            let result_layout = NativeValueLayout::from_type(&function.get_node(*node_ref).ty)?;
+            let output_offset = if result_layout.byte_count() == 0 {
+                None
+            } else {
+                Some(reserve_scratch_region(
+                    &mut byte_count,
+                    &mut alignment,
+                    result_layout.byte_count(),
+                    result_layout.alignment(),
+                    "invoke output scratch size overflow",
+                )?)
+            };
+            let (callee_scratch_byte_count, callee_scratch_alignment) = callee_scratch_requirements
+                .get(to_apply)
+                .copied()
+                .ok_or_else(|| {
+                    CompilerError::InvalidFunction(format!(
+                        "missing scratch plan for invoked function '{to_apply}'"
+                    ))
+                })?;
+            let callee_scratch_offset = if callee_scratch_byte_count == 0 {
+                None
+            } else {
+                Some(reserve_scratch_region(
+                    &mut byte_count,
+                    &mut alignment,
+                    callee_scratch_byte_count,
+                    callee_scratch_alignment,
+                    "invoked function scratch size overflow",
+                )?)
+            };
+            invoke_sites.insert(
+                *node_ref,
+                InvokeScratchPlan {
+                    pointer_array_offset,
+                    scalar_operand_offsets,
+                    output_offset,
+                    callee_scratch_offset,
+                },
+            );
+        }
         Ok(Self {
             offsets,
             in_place_array_updates,
             gate_zero_offset,
             gate_zero_byte_count,
+            invoke_sites,
             trace_sites,
             runtime_scalar_offsets,
             runtime_temporary_offsets,
@@ -1104,6 +1366,22 @@ impl ScratchPlan {
             alignment,
         })
     }
+}
+
+fn reserve_scratch_region(
+    byte_count: &mut usize,
+    alignment: &mut usize,
+    region_byte_count: usize,
+    region_alignment: usize,
+    overflow_message: &'static str,
+) -> Result<usize, CompilerError> {
+    *byte_count = align_up(*byte_count, region_alignment)?;
+    let offset = *byte_count;
+    *byte_count = byte_count
+        .checked_add(region_byte_count)
+        .ok_or_else(|| CompilerError::UnsupportedType(overflow_message.into()))?;
+    *alignment = (*alignment).max(region_alignment);
+    Ok(offset)
 }
 
 /// Assigns overlapping scratch offsets to materialized values with disjoint
@@ -1561,11 +1839,11 @@ fn array_indices_are_statically_in_bounds(
     true
 }
 
-fn build_event_metadata(
+fn append_event_metadata(
     function: &ir::Fn,
     order: &[NodeRef],
-) -> Result<(CompiledFunctionMetadata, HashMap<NodeRef, u32>), CompilerError> {
-    let mut event_sites = Vec::new();
+    metadata: &mut CompiledFunctionMetadata,
+) -> Result<HashMap<NodeRef, u32>, CompilerError> {
     let mut site_ids = HashMap::new();
     for node_ref in order {
         let node = function.get_node(*node_ref);
@@ -1642,13 +1920,13 @@ fn build_event_metadata(
             _ => None,
         };
         if let Some(site) = site {
-            let site_id = u32::try_from(event_sites.len())
+            let site_id = u32::try_from(metadata.event_sites.len())
                 .map_err(|_| CompilerError::UnsupportedType("too many event sites".into()))?;
             site_ids.insert(*node_ref, site_id);
-            event_sites.push(site);
+            metadata.event_sites.push(site);
         }
     }
-    Ok((CompiledFunctionMetadata { event_sites }, site_ids))
+    Ok(site_ids)
 }
 
 /// Returns the reachable nodes in a pressure-aware topological lowering order.
@@ -1933,6 +2211,7 @@ fn lower_function(
     param_layouts: &[NativeValueLayout],
     scratch_plan: &ScratchPlan,
     event_sites: &HashMap<NodeRef, u32>,
+    invoke_targets: &HashMap<String, FuncRef>,
     runtime_callbacks: RuntimeCallbacks,
     pointer_type: ClifType,
     builder: &mut FunctionBuilder<'_>,
@@ -2068,6 +2347,20 @@ fn lower_function(
                 );
                 ComputedValue::ZeroSized
             }
+            NodePayload::Invoke { to_apply, operands } => lower_invoke(
+                builder,
+                function,
+                *node_ref,
+                to_apply,
+                operands,
+                &values,
+                &layout,
+                scratch_pointer,
+                execution_context,
+                scratch_plan,
+                invoke_targets,
+                pointer_type,
+            )?,
             NodePayload::Unop(Unop::Identity, arg) if layout.is_memory_backed() => {
                 computed_value_for(&values, *arg)?
             }
@@ -3028,6 +3321,122 @@ fn lower_function(
     let success = builder.ins().iconst(types::I32, 0);
     builder.ins().return_(&[success]);
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_invoke(
+    builder: &mut FunctionBuilder<'_>,
+    function: &ir::Fn,
+    node_ref: NodeRef,
+    to_apply: &str,
+    operands: &[NodeRef],
+    values: &[Option<ComputedValue>],
+    result_layout: &NativeValueLayout,
+    scratch_pointer: Value,
+    execution_context: Value,
+    scratch_plan: &ScratchPlan,
+    invoke_targets: &HashMap<String, FuncRef>,
+    pointer_type: ClifType,
+) -> Result<ComputedValue, CompilerError> {
+    let plan = scratch_plan.invoke_sites.get(&node_ref).ok_or_else(|| {
+        CompilerError::InvalidFunction(format!(
+            "invoke node {} has no scratch assignment",
+            function.get_node(node_ref).text_id
+        ))
+    })?;
+    let inputs_pointer = plan
+        .pointer_array_offset
+        .map(|offset| pointer_at_offset(builder, scratch_pointer, offset))
+        .unwrap_or_else(|| builder.ins().iconst(pointer_type, 0));
+    for (index, operand) in operands.iter().enumerate() {
+        let layout = NativeValueLayout::from_type(&function.get_node(*operand).ty)?;
+        let pointer = invoke_operand_pointer(
+            builder,
+            computed_value_for(values, *operand)?,
+            &layout,
+            plan.scalar_operand_offsets[index],
+            scratch_pointer,
+            pointer_type,
+        )?;
+        builder.ins().store(
+            MemFlags::new(),
+            pointer,
+            inputs_pointer,
+            (index * std::mem::size_of::<*const u8>()) as i32,
+        );
+    }
+    let output_pointer = plan
+        .output_offset
+        .map(|offset| pointer_at_offset(builder, scratch_pointer, offset))
+        .unwrap_or_else(|| builder.ins().iconst(pointer_type, 0));
+    let callee_scratch_pointer = plan
+        .callee_scratch_offset
+        .map(|offset| pointer_at_offset(builder, scratch_pointer, offset))
+        .unwrap_or_else(|| builder.ins().iconst(pointer_type, 0));
+    let target = invoke_targets.get(to_apply).copied().ok_or_else(|| {
+        CompilerError::InvalidFunction(format!("missing lowered invoke target '{to_apply}'"))
+    })?;
+    let call = builder.ins().call(
+        target,
+        &[
+            inputs_pointer,
+            output_pointer,
+            callee_scratch_pointer,
+            execution_context,
+        ],
+    );
+    let status = builder.inst_results(call)[0];
+    let failed = builder.ins().icmp_imm(IntCC::NotEqual, status, 0);
+    let return_status = builder.create_block();
+    let after = builder.create_block();
+    builder.set_cold_block(return_status);
+    builder.ins().brif(failed, return_status, &[], after, &[]);
+    builder.switch_to_block(return_status);
+    builder.seal_block(return_status);
+    builder.ins().return_(&[status]);
+    builder.switch_to_block(after);
+    builder.seal_block(after);
+    Ok(load_value_from_storage(
+        builder,
+        output_pointer,
+        result_layout,
+    ))
+}
+
+fn invoke_operand_pointer(
+    builder: &mut FunctionBuilder<'_>,
+    value: ComputedValue,
+    layout: &NativeValueLayout,
+    scalar_operand_offset: Option<usize>,
+    scratch_pointer: Value,
+    pointer_type: ClifType,
+) -> Result<Value, CompilerError> {
+    match value {
+        ComputedValue::Scalar(value) => {
+            let Some(offset) = scalar_operand_offset else {
+                return Ok(builder.ins().iconst(pointer_type, 0));
+            };
+            let pointer = pointer_at_offset(builder, scratch_pointer, offset);
+            store_value_to_storage(builder, pointer, ComputedValue::Scalar(value), layout)?;
+            Ok(pointer)
+        }
+        ComputedValue::ScalarAddress {
+            pointer, offset, ..
+        } => Ok(pointer_at_offset(builder, pointer, offset)),
+        ComputedValue::ScalarArrayIndex(value) => {
+            let value = materialize_scalar(builder, ComputedValue::ScalarArrayIndex(value))?;
+            let Some(offset) = scalar_operand_offset else {
+                return Ok(builder.ins().iconst(pointer_type, 0));
+            };
+            let pointer = pointer_at_offset(builder, scratch_pointer, offset);
+            store_value_to_storage(builder, pointer, ComputedValue::Scalar(value), layout)?;
+            Ok(pointer)
+        }
+        ComputedValue::Address(pointer) => Ok(pointer),
+        ComputedValue::ZeroSizedBits | ComputedValue::ZeroSized => {
+            Ok(builder.ins().iconst(pointer_type, 0))
+        }
+    }
 }
 
 fn event_site_id(

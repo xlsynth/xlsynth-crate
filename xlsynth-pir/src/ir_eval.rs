@@ -1338,6 +1338,10 @@ pub struct FnEvalSuccess {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnEvalFailure {
+    /// Computed return value when evaluation completed despite contract-event
+    /// failures. Malformed IR failures that stop evaluation early have no
+    /// value.
+    pub value: Option<IrValue>,
     pub assertion_failures: Vec<AssertionFailure>,
     pub assumption_failures: Vec<AssumptionFailure>,
     pub trace_messages: Vec<TraceMessage>,
@@ -2094,6 +2098,7 @@ fn eval_fn_impl<'a>(
                         success.value
                     }
                     FnEvalResult::Failure(fail) => {
+                        let callee_value = fail.value;
                         assertion_failures.extend(fail.assertion_failures);
                         assumption_failures.extend(fail.assumption_failures);
                         trace_messages.extend(fail.trace_messages);
@@ -2104,12 +2109,16 @@ fn eval_fn_impl<'a>(
                                 cover_count,
                             );
                         }
-                        return FnEvalResult::Failure(FnEvalFailure {
-                            assertion_failures,
-                            assumption_failures,
-                            trace_messages,
-                            cover_counts,
-                        });
+                        let Some(callee_value) = callee_value else {
+                            return FnEvalResult::Failure(FnEvalFailure {
+                                value: None,
+                                assertion_failures,
+                                assumption_failures,
+                                trace_messages,
+                                cover_counts,
+                            });
+                        };
+                        callee_value
                     }
                 }
             }
@@ -2133,6 +2142,7 @@ fn eval_fn_impl<'a>(
                         }
                     }
                     return FnEvalResult::Failure(FnEvalFailure {
+                        value: None,
                         assertion_failures,
                         assumption_failures,
                         trace_messages,
@@ -2463,6 +2473,7 @@ fn eval_fn_impl<'a>(
         })
     } else {
         FnEvalResult::Failure(FnEvalFailure {
+            value: Some(ret_value),
             assertion_failures,
             assumption_failures,
             trace_messages,
@@ -4093,6 +4104,48 @@ fn f() -> bits[1] {
                 label: "hit".to_string(),
                 count: 1,
             }]
+        );
+    }
+
+    #[test]
+    fn test_eval_fn_in_package_accumulates_repeated_callee_assumption_failures() {
+        let ir_text = r#"package test
+
+fn g(a: bits[8][2] id=1, i: bits[2] id=2) -> bits[8] {
+  ret selected: bits[8] = array_index(a, indices=[i], assumed_in_bounds=true, id=3)
+}
+
+fn f(a: bits[8][2] id=10, i: bits[2] id=11) -> bits[8] {
+  first: bits[8] = invoke(a, i, to_apply=g, id=12)
+  ret second: bits[8] = invoke(a, i, to_apply=g, id=13)
+}
+"#;
+        let pkg = Parser::new(ir_text).parse_and_validate_package().unwrap();
+        let f = pkg.get_fn("f").unwrap();
+        let args = vec![
+            IrValue::make_array(&[
+                IrValue::make_ubits(8, 10).unwrap(),
+                IrValue::make_ubits(8, 11).unwrap(),
+            ])
+            .unwrap(),
+            IrValue::make_ubits(2, 3).unwrap(),
+        ];
+        let FnEvalResult::Failure(failure) = eval_fn_in_package(&pkg, f, &args) else {
+            panic!("out-of-bounds assumptions should fail");
+        };
+        assert_eq!(failure.value, Some(IrValue::make_ubits(8, 11).unwrap()));
+        assert_eq!(
+            failure.assumption_failures,
+            vec![
+                AssumptionFailure {
+                    node_text_id: 3,
+                    kind: AssumptionFailureKind::ArrayIndexOutOfBounds,
+                },
+                AssumptionFailure {
+                    node_text_id: 3,
+                    kind: AssumptionFailureKind::ArrayIndexOutOfBounds,
+                },
+            ]
         );
     }
 
