@@ -1601,9 +1601,7 @@ pub(crate) fn escape_xls_ir_string(value: &str) -> String {
             '\t' => escaped.push_str("\\t"),
             '\x0b' => escaped.push_str("\\v"),
             '\\' => escaped.push_str("\\\\"),
-            '\'' => escaped.push_str("\\'"),
             '"' => escaped.push_str("\\\""),
-            '?' => escaped.push_str("\\?"),
             c if c.is_ascii_control() => escaped.push_str(&format!("\\{:03o}", c as u32)),
             _ => escaped.push(c),
         }

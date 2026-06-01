@@ -505,7 +505,7 @@ mod tests {
             dslx_stdlib_path: None,
             dslx_paths: vec![],
             solver: None,
-            timeout_ms: Some(5000),
+            timeout_ms: None,
         };
         cfg.solver = Some(SolverChoice::Bitwuzla);
         cfg

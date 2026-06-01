@@ -36,6 +36,7 @@ DEFAULT_FUZZ_BIN_ARGS: str = "-max_total_time=5 -timeout=60"
 DEFAULT_THREADS: int = 4
 DONE_RUNS_RE = re.compile(r"^Done ([0-9]+) runs in ([0-9]+) second\(s\)$")
 
+
 def find_fuzz_dirs(repo_root: Path) -> list[Path]:
     """Return paths to top-level <crate>/fuzz/ directories."""
     fuzz_dirs: list[Path] = []
@@ -249,9 +250,13 @@ def main() -> int:
                         runs, seconds = summary
                         run_summaries.append((runs, seconds, fuzz_dir, target))
                     if returncode == 0:
-                        print(f"\n--- Passed {target} in {fuzz_dir} ---", file=sys.stderr)
+                        print(
+                            f"\n--- Passed {target} in {fuzz_dir} ---", file=sys.stderr
+                        )
                     else:
-                        print(f"\n--- Failed {target} in {fuzz_dir} ---", file=sys.stderr)
+                        print(
+                            f"\n--- Failed {target} in {fuzz_dir} ---", file=sys.stderr
+                        )
                         replay_log(log_path)
                         failed_targets.append((fuzz_dir, target))
                 finally:

@@ -4999,7 +4999,7 @@ fn f(x: bits[1]) -> bits[1] {
 
 fn f(x: bits[1] id=1) -> token {
   after_all.2: token = after_all(id=2)
-  trace.3: token = trace(after_all.2, x, format="line\nquote=\" slash=\\ bell=\a", data_operands=[], id=3)
+  trace.3: token = trace(after_all.2, x, format="line\nquote=\" slash=\\ bell=\a apostrophe=' question=?", data_operands=[], id=3)
   cover.4: () = cover(x, label="cover\a\"\\", id=4)
   ret assert.5: token = assert(trace.3, x, message="assert\a\"\\", label="label\a\"\\", id=5)
 }
@@ -5008,6 +5008,7 @@ fn f(x: bits[1] id=1) -> token {
         let mut parser = Parser::new(input);
         let pkg = parser.parse_package().unwrap();
         let emitted = pkg.to_string();
+        assert_eq!(emitted, input);
         let mut emitted_parser = Parser::new(&emitted);
         emitted_parser.parse_package().unwrap();
         xlsynth::IrPackage::parse_ir(&emitted, None).unwrap();
