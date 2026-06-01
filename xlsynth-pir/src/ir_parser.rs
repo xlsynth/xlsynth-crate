@@ -1148,6 +1148,7 @@ impl Parser {
         let mut bracket_depth = 1usize;
         let mut in_string = false;
         let mut in_triple_quoted_string = false;
+        let mut in_backticked_string = false;
         let mut escaped = false;
 
         while self.offset < self.chars.len() {
@@ -1184,6 +1185,25 @@ impl Parser {
                 continue;
             }
 
+            if in_backticked_string {
+                let c = self.popc().ok_or_else(|| {
+                    ParseError::new("unterminated backticked attribute string".to_string())
+                })?;
+                attr.push(c);
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if c == '\\' {
+                    escaped = true;
+                    continue;
+                }
+                if c == '`' {
+                    in_backticked_string = false;
+                }
+                continue;
+            }
+
             if self.peek_is("\"\"\"") {
                 attr.push_str("\"\"\"");
                 self.offset += 3;
@@ -1198,6 +1218,7 @@ impl Parser {
 
             match c {
                 '"' => in_string = true,
+                '`' => in_backticked_string = true,
                 '[' => bracket_depth = bracket_depth.saturating_add(1),
                 ']' => {
                     bracket_depth = bracket_depth.saturating_sub(1);
@@ -1238,6 +1259,7 @@ impl Parser {
                 parser.drop_or_error(")")?;
                 parser.expect_attribute_eof(&name)
             }
+            "fuzz_test" => parser.validate_fuzz_test_attribute(),
             "channel_ports" => parser.validate_channel_ports_attribute(),
             "reset" => parser.validate_reset_attribute(),
             "provenance" => parser.validate_provenance_attribute(),
@@ -1273,7 +1295,39 @@ impl Parser {
         self.drop_or_error("\"\"\"")
     }
 
-    /// Validates a keyword-argument list using an attribute-specific value parser.
+    /// Pops an XLS IR backticked attribute string without interpreting its
+    /// contents.
+    fn pop_attribute_backticked_string_or_error(&mut self, ctx: &str) -> Result<(), ParseError> {
+        self.drop_whitespace_and_comments();
+        self.drop_or_error("`")?;
+        let mut escaped = false;
+        while let Some(c) = self.popc() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if c == '\\' {
+                escaped = true;
+                continue;
+            }
+            if c == '`' {
+                return Ok(());
+            }
+            if c == '\n' || c == '\r' {
+                return Err(ParseError::new(format!(
+                    "unterminated backticked string in {}",
+                    ctx
+                )));
+            }
+        }
+        Err(ParseError::new(format!(
+            "unterminated backticked string in {}",
+            ctx
+        )))
+    }
+
+    /// Validates a keyword-argument list using an attribute-specific value
+    /// parser.
     fn validate_attribute_keyword_args(
         &mut self,
         attr_name: &str,
@@ -1310,6 +1364,20 @@ impl Parser {
             }
         }
         self.expect_attribute_eof(attr_name)
+    }
+
+    /// Validates a preserved `fuzz_test` attribute.
+    fn validate_fuzz_test_attribute(&mut self) -> Result<(), ParseError> {
+        if self.at_eof() {
+            return Ok(());
+        }
+        self.validate_attribute_keyword_args("fuzz_test", &[], |key, parser| match key {
+            "domains" => parser.pop_attribute_backticked_string_or_error("fuzz_test domains"),
+            _ => Err(ParseError::new(format!(
+                "unknown fuzz_test attribute key: {}",
+                key
+            ))),
+        })
     }
 
     /// Validates a preserved `channel_ports` attribute.
@@ -1392,10 +1460,8 @@ impl Parser {
 
     /// Validates a preserved `provenance` attribute.
     fn validate_provenance_attribute(&mut self) -> Result<(), ParseError> {
-        self.validate_attribute_keyword_args(
-            "provenance",
-            &["name", "kind"],
-            |key, parser| match key {
+        self.validate_attribute_keyword_args("provenance", &["name", "kind"], |key, parser| {
+            match key {
                 "name" => {
                     parser.pop_string_or_error()?;
                     Ok(())
@@ -1414,8 +1480,8 @@ impl Parser {
                     "unknown provenance attribute key: {}",
                     key
                 ))),
-            },
-        )
+            }
+        })
     }
 
     fn pop_number_string_or_error(&mut self, ctx: &str) -> Result<String, ParseError> {
@@ -4530,6 +4596,48 @@ fn ffi_callee(x: bits[8] id=1) -> bits[8] {
     }
 
     #[test]
+    fn test_parse_outer_fuzz_test_attributes_round_trip() {
+        let input = r#"package fuzz_attr
+
+#[fuzz_test]
+fn bare(x: bits[32] id=1) -> bits[32] {
+  ret x: bits[32] = param(name=x, id=1)
+}
+
+#[fuzz_test(domains = `parameter_domains { arbitrary: true }`)]
+fn with_domains(x: bits[32] id=2) -> bits[32] {
+  ret x: bits[32] = param(name=x, id=2)
+}
+"#;
+
+        xlsynth::IrPackage::parse_ir(input, None).expect("xls parse");
+        let mut parser = Parser::new(input);
+        let package = parser.parse_package().expect("pir parse");
+        assert_eq!(
+            package.get_fn("bare").unwrap().outer_attrs,
+            vec!["#[fuzz_test]"]
+        );
+        assert_eq!(
+            package.get_fn("with_domains").unwrap().outer_attrs,
+            vec!["#[fuzz_test(domains = `parameter_domains { arbitrary: true }`)]"]
+        );
+        assert_eq!(package.to_string(), input);
+    }
+
+    #[test]
+    fn test_parse_package_rejects_quoted_fuzz_test_domains() {
+        let mut parser = Parser::new(
+            "package p\n#[fuzz_test(domains = \"u32:0..100\")]\nfn f() -> bits[1] {\n  ret literal.1: bits[1] = literal(value=0, id=1)\n}\n",
+        );
+        let err = parser.parse_package().unwrap_err();
+        assert!(
+            err.msg.contains("expected \"`\""),
+            "unexpected error: {:?}",
+            err
+        );
+    }
+
+    #[test]
     fn test_parse_package_rejects_empty_outer_attribute() {
         let mut parser = Parser::new("package p\n#[]\nblock b() {}\n");
         let err = parser.parse_package().unwrap_err();
@@ -4567,7 +4675,8 @@ fn ffi_callee(x: bits[8] id=1) -> bits[8] {
         let mut parser = Parser::new("package p\n#[non_synth(12)]\nblock b() {}\n");
         let err = parser.parse_package().unwrap_err();
         assert!(
-            err.msg.contains("unexpected trailing text in non_synth attribute"),
+            err.msg
+                .contains("unexpected trailing text in non_synth attribute"),
             "unexpected error: {:?}",
             err
         );
@@ -4586,9 +4695,8 @@ fn ffi_callee(x: bits[8] id=1) -> bits[8] {
 
     #[test]
     fn test_parse_package_rejects_incomplete_reset_attribute() {
-        let mut parser = Parser::new(
-            "package p\nblock b() {\n#![reset(port=\"rst\", asynchronous=true)]\n}\n",
-        );
+        let mut parser =
+            Parser::new("package p\nblock b() {\n#![reset(port=\"rst\", asynchronous=true)]\n}\n");
         let err = parser.parse_package().unwrap_err();
         assert!(
             err.msg.contains("reset attribute missing active_low"),
