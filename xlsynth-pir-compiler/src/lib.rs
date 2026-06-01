@@ -387,7 +387,8 @@ impl PirFunctionCompiler {
         top: &ir::Fn,
     ) -> Result<Self, CompilerError> {
         let function_names = invoked_function_postorder(package, top)?;
-        let mut scratch_requirements = HashMap::new();
+        let mut scratch_byte_count = 0usize;
+        let mut scratch_alignment = 1usize;
         let mut plans = HashMap::new();
         let mut metadata = CompiledFunctionMetadata::default();
         for function_name in &function_names {
@@ -402,11 +403,16 @@ impl PirFunctionCompiler {
             for node_ref in &order {
                 NativeValueLayout::from_type(&function.get_node(*node_ref).ty)?;
             }
-            let scratch_plan = ScratchPlan::for_function(function, &order, &scratch_requirements)?;
-            scratch_requirements.insert(
-                function_name.clone(),
-                (scratch_plan.byte_count, scratch_plan.alignment),
-            );
+            let mut scratch_plan = ScratchPlan::for_function(function, &order)?;
+            scratch_byte_count = align_up(scratch_byte_count, scratch_plan.alignment)?;
+            let scratch_base = scratch_byte_count;
+            scratch_byte_count = scratch_byte_count
+                .checked_add(scratch_plan.byte_count)
+                .ok_or_else(|| {
+                    CompilerError::UnsupportedType("package scratch size overflow".into())
+                })?;
+            scratch_alignment = scratch_alignment.max(scratch_plan.alignment);
+            scratch_plan.rebase_offsets(scratch_base)?;
             let event_sites = append_event_metadata(function, &order, &mut metadata)?;
             plans.insert(
                 function_name.clone(),
@@ -532,8 +538,8 @@ impl PirFunctionCompiler {
             param_layouts: top_plan.param_layouts.clone(),
             result_layout: top_plan.result_layout.clone(),
             metadata,
-            scratch_byte_count: top_plan.scratch_plan.byte_count,
-            scratch_alignment: top_plan.scratch_plan.alignment,
+            scratch_byte_count,
+            scratch_alignment,
         })
     }
 
@@ -1173,7 +1179,6 @@ struct InvokeScratchPlan {
     pointer_array_offset: Option<usize>,
     scalar_operand_offsets: Vec<Option<usize>>,
     output_offset: Option<usize>,
-    callee_scratch_offset: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -1196,11 +1201,7 @@ struct ActiveScratchSlot {
 
 impl ScratchPlan {
     /// Assigns reusable native scratch slots for materialized intermediates.
-    fn for_function(
-        function: &ir::Fn,
-        order: &[NodeRef],
-        callee_scratch_requirements: &HashMap<String, (usize, usize)>,
-    ) -> Result<Self, CompilerError> {
+    fn for_function(function: &ir::Fn, order: &[NodeRef]) -> Result<Self, CompilerError> {
         let (offsets, in_place_array_updates, mut byte_count, mut alignment) =
             assign_materialized_scratch_offsets(function, order)?;
         let (gate_zero_offset, gate_zero_byte_count) =
@@ -1272,8 +1273,7 @@ impl ScratchPlan {
             }
         }
         for node_ref in order {
-            let NodePayload::Invoke { to_apply, operands } = &function.get_node(*node_ref).payload
-            else {
+            let NodePayload::Invoke { operands, .. } = &function.get_node(*node_ref).payload else {
                 continue;
             };
             let mut scalar_operand_offsets = Vec::with_capacity(operands.len());
@@ -1324,32 +1324,12 @@ impl ScratchPlan {
                     "invoke output scratch size overflow",
                 )?)
             };
-            let (callee_scratch_byte_count, callee_scratch_alignment) = callee_scratch_requirements
-                .get(to_apply)
-                .copied()
-                .ok_or_else(|| {
-                    CompilerError::InvalidFunction(format!(
-                        "missing scratch plan for invoked function '{to_apply}'"
-                    ))
-                })?;
-            let callee_scratch_offset = if callee_scratch_byte_count == 0 {
-                None
-            } else {
-                Some(reserve_scratch_region(
-                    &mut byte_count,
-                    &mut alignment,
-                    callee_scratch_byte_count,
-                    callee_scratch_alignment,
-                    "invoked function scratch size overflow",
-                )?)
-            };
             invoke_sites.insert(
                 *node_ref,
                 InvokeScratchPlan {
                     pointer_array_offset,
                     scalar_operand_offsets,
                     output_offset,
-                    callee_scratch_offset,
                 },
             );
         }
@@ -1365,6 +1345,46 @@ impl ScratchPlan {
             byte_count,
             alignment,
         })
+    }
+
+    /// Rebases this function's local scratch offsets into the package slab.
+    fn rebase_offsets(&mut self, base: usize) -> Result<(), CompilerError> {
+        let rebase = |offset: &mut usize| -> Result<(), CompilerError> {
+            *offset = offset.checked_add(base).ok_or_else(|| {
+                CompilerError::UnsupportedType("package scratch offset overflow".into())
+            })?;
+            Ok(())
+        };
+        for offset in self.offsets.values_mut() {
+            rebase(offset)?;
+        }
+        if let Some(offset) = &mut self.gate_zero_offset {
+            rebase(offset)?;
+        }
+        for plan in self.invoke_sites.values_mut() {
+            if let Some(offset) = &mut plan.pointer_array_offset {
+                rebase(offset)?;
+            }
+            for offset in plan.scalar_operand_offsets.iter_mut().flatten() {
+                rebase(offset)?;
+            }
+            if let Some(offset) = &mut plan.output_offset {
+                rebase(offset)?;
+            }
+        }
+        for plan in self.trace_sites.values_mut() {
+            rebase(&mut plan.pointer_array_offset)?;
+            for offset in plan.scalar_operand_offsets.iter_mut().flatten() {
+                rebase(offset)?;
+            }
+        }
+        for offset in self.runtime_scalar_offsets.values_mut() {
+            rebase(offset)?;
+        }
+        for offset in self.runtime_temporary_offsets.iter_mut().flatten() {
+            rebase(offset)?;
+        }
+        Ok(())
     }
 }
 
@@ -3369,10 +3389,6 @@ fn lower_invoke(
         .output_offset
         .map(|offset| pointer_at_offset(builder, scratch_pointer, offset))
         .unwrap_or_else(|| builder.ins().iconst(pointer_type, 0));
-    let callee_scratch_pointer = plan
-        .callee_scratch_offset
-        .map(|offset| pointer_at_offset(builder, scratch_pointer, offset))
-        .unwrap_or_else(|| builder.ins().iconst(pointer_type, 0));
     let target = invoke_targets.get(to_apply).copied().ok_or_else(|| {
         CompilerError::InvalidFunction(format!("missing lowered invoke target '{to_apply}'"))
     })?;
@@ -3381,7 +3397,7 @@ fn lower_invoke(
         &[
             inputs_pointer,
             output_pointer,
-            callee_scratch_pointer,
+            scratch_pointer,
             execution_context,
         ],
     );

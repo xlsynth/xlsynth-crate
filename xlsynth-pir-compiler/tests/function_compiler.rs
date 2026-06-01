@@ -118,6 +118,29 @@ top fn f(x: bits[8] id=6) -> bits[8] {
 }
 
 #[test]
+fn package_compiler_reuses_static_callee_scratch_across_invoke_sites() {
+    let compiler = compile_package(
+        r#"package test
+
+fn select_first(x: bits[8] id=1) -> bits[8] {
+  values: bits[8][32] = array(x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, id=2)
+  zero: bits[5] = literal(value=0, id=3)
+  ret selected: bits[8] = array_index(values, indices=[zero], id=4)
+}
+
+top fn f(x: bits[8] id=5) -> bits[8] {
+  first: bits[8] = invoke(x, to_apply=select_first, id=6)
+  ret second: bits[8] = invoke(first, to_apply=select_first, id=7)
+}
+"#,
+    );
+    // The callee uses one 32-byte aggregate slot. The caller uses 33 bytes for
+    // its two invoke sites. Both calls share the callee's package-global slot.
+    assert_eq!(compiler.scratch_byte_count(), 65);
+    assert_eq!(compiler.run_u64(&[42]).expect("execute"), 42);
+}
+
+#[test]
 fn package_compiler_passes_aggregate_invokes_by_native_address() {
     let ir = r#"package test
 
