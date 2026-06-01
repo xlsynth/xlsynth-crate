@@ -4,6 +4,7 @@ use crate::ir_verify::VerifyError;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ErrorCategory {
+    DuplicateMemberName,
     UnknownCallee,
     NodeTypeMismatch,
     OperandOutOfBounds,
@@ -22,6 +23,7 @@ pub enum ErrorCategory {
 pub fn categorize_pir_error(err: &VerifyError) -> ErrorCategory {
     use ErrorCategory::*;
     match err {
+        VerifyError::DuplicateMemberName(_) => DuplicateMemberName,
         VerifyError::UnknownCallee { .. } => UnknownCallee,
         VerifyError::NodeTypeMismatch { .. } => NodeTypeMismatch,
         VerifyError::OperandOutOfBounds { .. } => OperandOutOfBounds,
@@ -41,6 +43,9 @@ pub fn categorize_pir_error(err: &VerifyError) -> ErrorCategory {
 pub fn categorize_xls_error_text(s: &str) -> ErrorCategory {
     use ErrorCategory::*;
     let lower = s.to_lowercase();
+    if lower.contains("not unique within package") || lower.contains("duplicate member name") {
+        return DuplicateMemberName;
+    }
     if lower.contains("unknown callee")
         || lower.contains("unknown function")
         || lower.contains("cannot find function")

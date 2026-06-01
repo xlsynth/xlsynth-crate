@@ -8,6 +8,13 @@ gatify with and without folding, and proves that each generated gate function
 remains equivalent to the original PIR function. Product-pair operations and
 the opt-in XLS `gate` operation remain excluded from this target.
 
+## `fuzz_bulk_replace`
+
+Generates bounded AIG graphs and production-style acyclic cone/cut
+substitutions, applies bulk replacement, checks graph invariants and output
+shape, and compares evaluations before and after replacement. Failures expose
+unsound substitutions, accidental cycles, or malformed rebuilt graphs.
+
 ## `fuzz_node_provenance`
 
 Generates gatify-supported PIR directly, including PIR extension operations,
@@ -58,7 +65,9 @@ optimized result into PIR, and proves original-versus-optimized equivalence.
 Enabled in-process SMT backends perform the proofs; this target does not require
 the external XLS equivalence binary. Failures expose optimizer semantic
 regressions or incompatibility between generated PIR text and XLS-produced
-optimized IR.
+optimized IR. The target currently skips division and modulus with a `shll`
+divisor because libxls misoptimizes some valid overflow cases; other divisor
+forms remain enabled.
 
 ## `fuzz_ir_eval_interp_equiv`
 

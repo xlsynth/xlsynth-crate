@@ -89,6 +89,19 @@ fn id(x: bits[8] id=1) -> bits[8] {
 }
 
 #[test]
+fn cross_validate_distinct_empty_block_names() {
+    let ir = r#"package test
+
+block i() {
+}
+
+block RRRRb() {
+}
+"#;
+    assert_cross_validates_same(ir);
+}
+
+#[test]
 fn cross_validate_oob_static_bit_slice_fails() {
     let ir = r#"package test
 

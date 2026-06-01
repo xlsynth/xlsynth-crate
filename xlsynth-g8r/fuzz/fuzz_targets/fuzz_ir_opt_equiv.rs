@@ -4,7 +4,7 @@
 use libfuzzer_sys::fuzz_target;
 #[cfg(feature = "has-bitwuzla")]
 use xlsynth_g8r_fuzz::fuzz_bitwuzla_options;
-use xlsynth_pir::ir_parser;
+use xlsynth_pir::{ir, ir_parser};
 use xlsynth_pir::ir_random::{
     generate_fn, DepletableBytes, OperationSet, RandomFnOptions, RandomOperation, StopPolicy,
 };
@@ -84,6 +84,23 @@ fuzz_target!(|data: &[u8]| {
         StopPolicy::WhenEntropyDepleted,
     )
     .expect("fixed random PIR options should construct a valid function");
+    if generated.function.nodes.iter().any(|node| {
+        let ir::NodePayload::Binop(op, _, rhs) = &node.payload else {
+            return false;
+        };
+        matches!(
+            op,
+            ir::Binop::Sdiv | ir::Binop::Udiv | ir::Binop::Smod | ir::Binop::Umod
+        ) && matches!(
+            generated.function.get_node(*rhs).payload,
+            ir::NodePayload::Binop(ir::Binop::Shll, _, _)
+        )
+    }) {
+        // Early-return rationale: libxls currently misoptimizes some valid
+        // div/mod-by-`shll` forms when the shift overflows and changes the
+        // divisor. Keep exercising div/mod with other divisor shapes.
+        return;
+    }
     let orig_ir = generated.into_top_package("fuzz_pkg").to_string();
     let pkg = xlsynth::IrPackage::parse_ir(&orig_ir, None)
         .expect("PIR-emitted standard XLS IR should parse in libxls");

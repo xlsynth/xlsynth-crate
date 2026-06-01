@@ -1202,6 +1202,7 @@ impl Parser {
                 ']' => {
                     bracket_depth = bracket_depth.saturating_sub(1);
                     if bracket_depth == 0 {
+                        Self::validate_raw_attribute_name(&attr, prefix)?;
                         return Ok(attr);
                     }
                 }
@@ -1213,6 +1214,208 @@ impl Parser {
             "unterminated attribute starting with {:?}",
             prefix
         )))
+    }
+
+    /// Validates the name of a preserved IR attribute against XLS's parser.
+    fn validate_raw_attribute_name(attr: &str, prefix: &str) -> Result<(), ParseError> {
+        let body = attr
+            .strip_prefix(prefix)
+            .and_then(|s| s.strip_suffix(']'))
+            .ok_or_else(|| ParseError::new(format!("malformed attribute: {:?}", attr)))?;
+        let mut parser = Parser::new(body);
+        let name = parser.pop_identifier_or_error("attribute name")?;
+        match name.as_str() {
+            "non_synth" => parser.expect_attribute_eof(&name),
+            "initiation_interval" => {
+                parser.drop_or_error("(")?;
+                parser.pop_number_i64_or_error("initiation_interval")?;
+                parser.drop_or_error(")")?;
+                parser.expect_attribute_eof(&name)
+            }
+            "ffi_proto" | "signature" => {
+                parser.drop_or_error("(")?;
+                parser.pop_attribute_quoted_string_or_error(&name)?;
+                parser.drop_or_error(")")?;
+                parser.expect_attribute_eof(&name)
+            }
+            "channel_ports" => parser.validate_channel_ports_attribute(),
+            "reset" => parser.validate_reset_attribute(),
+            "provenance" => parser.validate_provenance_attribute(),
+            _ => Err(ParseError::new(format!("unknown attribute: {}", name))),
+        }
+    }
+
+    /// Rejects trailing tokens after a recognized preserved attribute.
+    fn expect_attribute_eof(&mut self, attr_name: &str) -> Result<(), ParseError> {
+        if self.at_eof() {
+            Ok(())
+        } else {
+            Err(ParseError::new(format!(
+                "unexpected trailing text in {} attribute: {:?}",
+                attr_name,
+                self.rest()
+            )))
+        }
+    }
+
+    /// Pops an XLS IR attribute string, including the triple-quoted proto form.
+    fn pop_attribute_quoted_string_or_error(&mut self, ctx: &str) -> Result<(), ParseError> {
+        self.drop_whitespace_and_comments();
+        if !self.try_drop("\"\"\"") {
+            self.pop_string_or_error()?;
+            return Ok(());
+        }
+        while !self.peek_is("\"\"\"") {
+            self.popc().ok_or_else(|| {
+                ParseError::new(format!("unterminated triple-quoted string in {}", ctx))
+            })?;
+        }
+        self.drop_or_error("\"\"\"")
+    }
+
+    /// Validates a keyword-argument list using an attribute-specific value parser.
+    fn validate_attribute_keyword_args(
+        &mut self,
+        attr_name: &str,
+        mandatory_keys: &[&str],
+        mut parse_value: impl FnMut(&str, &mut Self) -> Result<(), ParseError>,
+    ) -> Result<(), ParseError> {
+        self.drop_or_error("(")?;
+        let mut seen = BTreeSet::new();
+        loop {
+            if self.try_drop(")") {
+                break;
+            }
+            let key = self.pop_identifier_or_error(&format!("{} attribute key", attr_name))?;
+            if !seen.insert(key.clone()) {
+                return Err(ParseError::new(format!(
+                    "duplicate {} attribute key: {}",
+                    attr_name, key
+                )));
+            }
+            self.drop_or_error("=")?;
+            parse_value(&key, self)?;
+            if self.try_drop(",") {
+                continue;
+            }
+            self.drop_or_error(")")?;
+            break;
+        }
+        for key in mandatory_keys {
+            if !seen.contains(*key) {
+                return Err(ParseError::new(format!(
+                    "{} attribute missing {}",
+                    attr_name, key
+                )));
+            }
+        }
+        self.expect_attribute_eof(attr_name)
+    }
+
+    /// Validates a preserved `channel_ports` attribute.
+    fn validate_channel_ports_attribute(&mut self) -> Result<(), ParseError> {
+        self.validate_attribute_keyword_args(
+            "channel_ports",
+            &["name", "type", "direction", "kind"],
+            |key, parser| match key {
+                "name" | "data_port" | "ready_port" | "valid_port" => {
+                    parser.pop_identifier_or_error(&format!("channel_ports {}", key))?;
+                    Ok(())
+                }
+                "type" => {
+                    parser.parse_type()?;
+                    Ok(())
+                }
+                "direction" => {
+                    let value =
+                        parser.pop_identifier_or_error("channel_ports direction attribute")?;
+                    match value.as_str() {
+                        "receive" | "send" => Ok(()),
+                        _ => Err(ParseError::new(format!(
+                            "invalid channel_ports direction: {}",
+                            value
+                        ))),
+                    }
+                }
+                "kind" => {
+                    let value = parser.pop_identifier_or_error("channel_ports kind attribute")?;
+                    match value.as_str() {
+                        "streaming" | "single_value" => Ok(()),
+                        _ => Err(ParseError::new(format!(
+                            "invalid channel_ports kind: {}",
+                            value
+                        ))),
+                    }
+                }
+                "flop" => {
+                    let value = parser.pop_identifier_or_error("channel_ports flop attribute")?;
+                    match value.as_str() {
+                        "none" | "flop" | "skid" | "zero_latency" => Ok(()),
+                        _ => Err(ParseError::new(format!(
+                            "invalid channel_ports flop: {}",
+                            value
+                        ))),
+                    }
+                }
+                "stage" => {
+                    parser.pop_number_i64_or_error("channel_ports stage")?;
+                    Ok(())
+                }
+                _ => Err(ParseError::new(format!(
+                    "unknown channel_ports attribute key: {}",
+                    key
+                ))),
+            },
+        )
+    }
+
+    /// Validates a preserved `reset` attribute.
+    fn validate_reset_attribute(&mut self) -> Result<(), ParseError> {
+        self.validate_attribute_keyword_args(
+            "reset",
+            &["port", "asynchronous", "active_low"],
+            |key, parser| match key {
+                "port" => {
+                    parser.pop_string_or_error()?;
+                    Ok(())
+                }
+                "asynchronous" | "active_low" => {
+                    parser.pop_bool_literal_or_error(&format!("reset {}", key))
+                }
+                _ => Err(ParseError::new(format!(
+                    "unknown reset attribute key: {}",
+                    key
+                ))),
+            },
+        )
+    }
+
+    /// Validates a preserved `provenance` attribute.
+    fn validate_provenance_attribute(&mut self) -> Result<(), ParseError> {
+        self.validate_attribute_keyword_args(
+            "provenance",
+            &["name", "kind"],
+            |key, parser| match key {
+                "name" => {
+                    parser.pop_string_or_error()?;
+                    Ok(())
+                }
+                "kind" => {
+                    let value = parser.pop_string_or_error()?;
+                    match value.as_str() {
+                        "proc" | "function" => Ok(()),
+                        _ => Err(ParseError::new(format!(
+                            "invalid provenance kind: {}",
+                            value
+                        ))),
+                    }
+                }
+                _ => Err(ParseError::new(format!(
+                    "unknown provenance attribute key: {}",
+                    key
+                ))),
+            },
+        )
     }
 
     fn pop_number_string_or_error(&mut self, ctx: &str) -> Result<String, ParseError> {
@@ -1310,6 +1513,34 @@ impl Parser {
             Err(e) => Err(ParseError::new(format!(
                 "in {} expected unsigned integer, got {:?}: {}",
                 ctx, number, e
+            ))),
+        }
+    }
+
+    fn pop_number_i64_or_error(&mut self, ctx: &str) -> Result<i64, ParseError> {
+        self.drop_whitespace_and_comments();
+        let negative = self.try_drop("-");
+        let magnitude = self.pop_number_string_or_error(ctx)?;
+        let number = if negative {
+            format!("-{}", magnitude)
+        } else {
+            magnitude
+        };
+        number.parse::<i64>().map_err(|e| {
+            ParseError::new(format!(
+                "in {} expected signed integer, got {:?}: {}",
+                ctx, number, e
+            ))
+        })
+    }
+
+    fn pop_bool_literal_or_error(&mut self, ctx: &str) -> Result<(), ParseError> {
+        let value = self.pop_identifier_or_error(ctx)?;
+        match value.as_str() {
+            "true" | "false" => Ok(()),
+            _ => Err(ParseError::new(format!(
+                "expected boolean literal in {}, got {:?}",
+                ctx, value
             ))),
         }
     }
@@ -3677,6 +3908,9 @@ impl Parser {
                 self.drop_whitespace_and_comments();
             }
             if self.try_drop_keyword("top") {
+                if top.is_some() {
+                    return Err(ParseError::new("top declared more than once".to_string()));
+                }
                 // Allow whitespace/comments between `top` and the next keyword.
                 self.drop_whitespace_and_comments();
                 if self.peek_keyword_is("fn") {
@@ -3714,6 +3948,11 @@ impl Parser {
                     self.rest()
                 )));
             } else if self.peek_keyword_is("file_number") {
+                if !pending_outer_attrs.is_empty() {
+                    return Err(ParseError::new(
+                        "attributes are not supported on file_number declarations".to_string(),
+                    ));
+                }
                 self.parse_file_number(&mut file_table)?;
             } else {
                 return Err(ParseError::new(format!(
@@ -4115,6 +4354,35 @@ fn bar(x: bits[8] id=3) -> bits[8] {
     }
 
     #[test]
+    fn test_parse_package_rejects_outer_attribute_on_file_number() {
+        let mut parser = Parser::new(
+            r#"package p
+#[non_synth]
+file_number 2 "foo.x"
+"#,
+        );
+        let err = parser.parse_package().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("attributes are not supported on file_number declarations")
+        );
+    }
+
+    #[test]
+    fn test_parse_package_rejects_multiple_top_declarations() {
+        let input = r#"package test
+
+top block first() {
+}
+
+top block second() {
+}
+"#;
+        let err = Parser::new(input).parse_package().unwrap_err();
+        assert_eq!(err.msg, "top declared more than once");
+    }
+
+    #[test]
     fn test_parse_package_rejects_newline_after_escaped_quote() {
         let mut parser = Parser::new("package l\nfile_number 1 \"act\\\"\nfile_number 2 \"d'\"\n");
         let err = parser.parse_package().unwrap_err();
@@ -4259,6 +4527,74 @@ fn ffi_callee(x: bits[8] id=1) -> bits[8] {
             f.outer_attrs
         );
         assert_eq!(package.to_string(), input);
+    }
+
+    #[test]
+    fn test_parse_package_rejects_empty_outer_attribute() {
+        let mut parser = Parser::new("package p\n#[]\nblock b() {}\n");
+        let err = parser.parse_package().unwrap_err();
+        assert!(
+            err.msg.contains("expected identifier"),
+            "unexpected error: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_package_rejects_unknown_outer_attribute() {
+        let mut parser = Parser::new("package p\n#[unknown]\nblock b() {}\n");
+        let err = parser.parse_package().unwrap_err();
+        assert!(
+            err.msg.contains("unknown attribute: unknown"),
+            "unexpected error: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_package_rejects_unknown_inner_attribute() {
+        let mut parser = Parser::new("package p\nblock b() {\n#![unknown]\n}\n");
+        let err = parser.parse_package().unwrap_err();
+        assert!(
+            err.msg.contains("unknown attribute: unknown"),
+            "unexpected error: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_package_rejects_payload_on_non_synth_attribute() {
+        let mut parser = Parser::new("package p\n#[non_synth(12)]\nblock b() {}\n");
+        let err = parser.parse_package().unwrap_err();
+        assert!(
+            err.msg.contains("unexpected trailing text in non_synth attribute"),
+            "unexpected error: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_package_rejects_missing_initiation_interval_payload() {
+        let mut parser = Parser::new("package p\n#[initiation_interval]\nblock b() {}\n");
+        let err = parser.parse_package().unwrap_err();
+        assert!(
+            err.msg.contains("expected \"(\""),
+            "unexpected error: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_package_rejects_incomplete_reset_attribute() {
+        let mut parser = Parser::new(
+            "package p\nblock b() {\n#![reset(port=\"rst\", asynchronous=true)]\n}\n",
+        );
+        let err = parser.parse_package().unwrap_err();
+        assert!(
+            err.msg.contains("reset attribute missing active_low"),
+            "unexpected error: {:?}",
+            err
+        );
     }
 
     #[test]

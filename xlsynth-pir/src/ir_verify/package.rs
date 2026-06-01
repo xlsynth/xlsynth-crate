@@ -650,13 +650,27 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
     // Enforce package-wide uniqueness of node text ids (including parameter nodes).
     let mut seen_ids: HashSet<usize> = HashSet::new();
     for member in &p.members {
-        let f = match member {
-            PackageMember::Function(f) => f,
-            PackageMember::Block { func, .. } => func,
+        let (f, synthetic_block_ret) = match member {
+            PackageMember::Function(f) => (f, None),
+            PackageMember::Block { func, metadata } => (
+                func,
+                if metadata.output_names.len() != 1 {
+                    func.ret_node_ref
+                } else {
+                    None
+                },
+            ),
         };
-        for node in f.nodes.iter() {
+        for (node_index, node) in f.nodes.iter().enumerate() {
             // Skip synthetic Nil node at index 0 which is never emitted to IR text.
             if matches!(node.payload, NodePayload::Nil) {
+                continue;
+            }
+            // Multi-output and output-less blocks use an internal tuple return
+            // node that is not emitted to XLS IR text.
+            if synthetic_block_ret == Some(crate::ir::NodeRef { index: node_index })
+                && matches!(node.payload, NodePayload::Tuple(_))
+            {
                 continue;
             }
             if !seen_ids.insert(node.text_id) {

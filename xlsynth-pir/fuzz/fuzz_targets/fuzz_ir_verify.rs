@@ -80,15 +80,17 @@ fuzz_target!(|ir_text: String| {
                 // that our parser permits contextually. Not a semantic mismatch.
                 return;
             }
-            if msg.to_lowercase().contains("expected 'ret' in function") {
-                // Map upstream parse error for missing return into our MissingReturnNode
-                // category so parity can be checked at a coarse level.
-                Err(ErrorCategory::MissingReturnNode)
-            } else {
+            let category = categorize_xls_error_text(&msg);
+            if category == ErrorCategory::Other {
                 panic!(
                     "xlsynth parse failed for IR that PIR parses:\n{}\nerror: {}",
                     ir_text, msg
                 )
+            } else {
+                // XLS parsing runs verification before returning a package.
+                // Compare recognized semantic rejections against PIR verification
+                // instead of treating the API-boundary difference as a failure.
+                Err(category)
             }
         }
     };

@@ -3,6 +3,7 @@
 #![no_main]
 
 use std::sync::Once;
+use std::time::{Duration, Instant};
 
 use libfuzzer_sys::fuzz_target;
 use rand::SeedableRng;
@@ -23,6 +24,8 @@ use xlsynth_prover::prover::{
 const NUM_STEPS: usize = 32;
 const MAX_TRANSFORM_DRAWS: usize = NUM_STEPS * 32;
 const FUZZ_SOLVER_TIME_LIMIT_PER_MS: u64 = 10_000;
+const FUZZ_SOLVER_MEMORY_LIMIT_MB: u64 = 512;
+const FUZZ_SAMPLE_TIME_LIMIT_MS: u64 = 10_000;
 
 static INIT_LOGGER: Once = Once::new();
 
@@ -57,9 +60,15 @@ fuzz_target!(|data: &[u8]| {
     }
     let mut rng = make_rng(&initial_ir_text);
     let prover = make_in_process_prover();
+    let sample_start = Instant::now();
 
     let mut successful_steps = 0usize;
     for _ in 0..MAX_TRANSFORM_DRAWS {
+        if sample_start.elapsed() >= Duration::from_millis(FUZZ_SAMPLE_TIME_LIMIT_MS) {
+            // Early-return rationale: multiple individually bounded solver calls
+            // can otherwise make one valid sample monopolize the fuzz campaign.
+            return;
+        }
         if successful_steps >= NUM_STEPS {
             break;
         }
@@ -107,15 +116,19 @@ fuzz_target!(|data: &[u8]| {
             );
         }
 
-        if candidate.always_equivalent
-            && !prove_candidate_equivalent(
-                prover.as_ref(),
-                &cur_pkg,
-                &next_pkg,
-                transform.kind(),
-                &candidate.location,
-            )
-        {
+        if !candidate.always_equivalent {
+            // Arbitrary proposals are still applied and verified structurally,
+            // but retaining them would make later formal checks prove through
+            // an unbounded chain of intentionally semantics-changing edits.
+            continue;
+        }
+        if !prove_candidate_equivalent(
+            prover.as_ref(),
+            &cur_pkg,
+            &next_pkg,
+            transform.kind(),
+            &candidate.location,
+        ) {
             // A configured solver limit is expected to make some fuzz samples
             // inconclusive; those samples are not transform failures.
             return;
@@ -163,7 +176,10 @@ fn make_in_process_prover() -> Box<dyn Prover> {
     prover_for_choice_with_limits(
         SolverChoice::Bitwuzla,
         None,
-        SolverLimits::with_time_limit_per_ms(FUZZ_SOLVER_TIME_LIMIT_PER_MS),
+        SolverLimits {
+            time_limit_per_ms: Some(FUZZ_SOLVER_TIME_LIMIT_PER_MS),
+            memory_limit_mb: Some(FUZZ_SOLVER_MEMORY_LIMIT_MB),
+        },
     )
 }
 

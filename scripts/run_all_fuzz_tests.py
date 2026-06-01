@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 import concurrent.futures
+import re
 import shlex
 import subprocess
 import sys
@@ -22,19 +23,18 @@ import tempfile
 import tomllib
 from pathlib import Path
 
+# Optional solver comparison backends can be requested with --features.
 DEFAULT_FEATURES: list[str] = [
-    "with-z3-binary-test",
-    "with-boolector-system",
     "with-bitwuzla-system",
-    "with-z3-system",
 ]
 DEFAULT_FUZZ_RUN_ARGS: str = ""
-DEFAULT_FUZZ_BIN_ARGS: str = "-max_total_time=5 -timeout=5"
+# Formal fuzz targets apply a 10-second per-query solver limit internally. Some
+# samples issue multiple queries, so leave headroom for the outer libFuzzer
+# watchdog to catch genuinely stuck executions without misclassifying expected
+# solver timeouts.
+DEFAULT_FUZZ_BIN_ARGS: str = "-max_total_time=5 -timeout=60"
 DEFAULT_THREADS: int = 4
-
-# Targets which are known to fail.
-SKIP_TARGETS: list[str] = ["fuzz_bulk_replace", "fuzz_ir_outline_equiv"]
-
+DONE_RUNS_RE = re.compile(r"^Done ([0-9]+) runs in ([0-9]+) second\(s\)$")
 
 def find_fuzz_dirs(repo_root: Path) -> list[Path]:
     """Return paths to top-level <crate>/fuzz/ directories."""
@@ -81,6 +81,17 @@ def replay_log(log_path: Path) -> None:
     with open(log_path, encoding="utf-8", errors="replace") as f:
         while chunk := f.read(1024 * 1024):
             sys.stdout.write(chunk)
+
+
+def read_run_summary(log_path: Path) -> tuple[int, int] | None:
+    """Return the last libFuzzer sample-count summary in a captured log."""
+    summary: tuple[int, int] | None = None
+    with open(log_path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            match = DONE_RUNS_RE.match(line.rstrip("\n"))
+            if match:
+                summary = (int(match.group(1)), int(match.group(2)))
+    return summary
 
 
 def get_crate_features(crate_path: Path) -> list[str]:
@@ -190,10 +201,6 @@ def main() -> int:
             ["--features", ",".join(supported_features)] if supported_features else []
         )
         for target in targets:
-            if target in SKIP_TARGETS:
-                print(f"Skipping {target} in {fuzz_dir}.", file=sys.stderr)
-                continue
-
             run_jobs.append(
                 (
                     fuzz_dir,
@@ -221,23 +228,47 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="run_all_fuzz_tests_logs_") as log_dir_text:
         log_dir = Path(log_dir_text)
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
-            futures = [
-                executor.submit(run_cmd_captured, cmd, log_dir)
-                for _, _, cmd in run_jobs
-            ]
-            for (fuzz_dir, target, cmd), future in zip(run_jobs, futures):
-                print(f"\n--- Running {target} in {fuzz_dir} ---", file=sys.stderr)
+            future_to_job = {}
+            for fuzz_dir, target, cmd in run_jobs:
+                print(f"\n--- Starting {target} in {fuzz_dir} ---", file=sys.stderr)
                 print(
                     "  => " + " ".join(shlex.quote(part) for part in cmd),
                     file=sys.stderr,
                 )
+                future = executor.submit(run_cmd_captured, cmd, log_dir)
+                future_to_job[future] = (fuzz_dir, target)
+
+            failed_targets: list[tuple[Path, str]] = []
+            run_summaries: list[tuple[int, int, Path, str]] = []
+            for future in concurrent.futures.as_completed(future_to_job):
+                fuzz_dir, target = future_to_job[future]
                 returncode, log_path = future.result()
                 try:
-                    replay_log(log_path)
+                    summary = read_run_summary(log_path)
+                    if summary is not None:
+                        runs, seconds = summary
+                        run_summaries.append((runs, seconds, fuzz_dir, target))
+                    if returncode == 0:
+                        print(f"\n--- Passed {target} in {fuzz_dir} ---", file=sys.stderr)
+                    else:
+                        print(f"\n--- Failed {target} in {fuzz_dir} ---", file=sys.stderr)
+                        replay_log(log_path)
+                        failed_targets.append((fuzz_dir, target))
                 finally:
                     log_path.unlink(missing_ok=True)
-                if returncode != 0:
-                    return returncode
+            if run_summaries:
+                print("\n=== Fuzz target sample counts ===", file=sys.stderr)
+                for runs, seconds, fuzz_dir, target in sorted(run_summaries):
+                    rate = runs / seconds if seconds else 0.0
+                    print(
+                        f"  {runs:>12} runs  {rate:>10.1f} runs/s  {fuzz_dir}: {target}",
+                        file=sys.stderr,
+                    )
+            if failed_targets:
+                print("\n=== Failed fuzz targets ===", file=sys.stderr)
+                for fuzz_dir, target in failed_targets:
+                    print(f"  {fuzz_dir}: {target}", file=sys.stderr)
+                return 1
     return 0
 
 
