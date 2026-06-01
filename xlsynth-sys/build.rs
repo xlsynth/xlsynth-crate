@@ -11,7 +11,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
-const RELEASE_LIB_VERSION_TAG: &str = "v0.50.1";
+const RELEASE_LIB_VERSION_TAG: &str = "v0.51.0";
 const MAX_DOWNLOAD_ATTEMPTS: u32 = 6;
 
 #[derive(Clone, Copy)]
