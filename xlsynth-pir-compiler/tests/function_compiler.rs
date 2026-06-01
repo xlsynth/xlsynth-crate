@@ -118,6 +118,133 @@ top fn f(x: bits[8] id=6) -> bits[8] {
 }
 
 #[test]
+fn package_compiler_lowers_scalar_counted_for_with_invariants() {
+    let compiler = compile_package(
+        r#"package test
+
+fn body(i: bits[8] id=1, carry: bits[8] id=2, invariant: bits[8] id=3) -> bits[8] {
+  with_i: bits[8] = add(carry, i, id=4)
+  ret result: bits[8] = add(with_i, invariant, id=5)
+}
+
+top fn f(init: bits[8] id=6, invariant: bits[8] id=7) -> bits[8] {
+  ret result: bits[8] = counted_for(init, trip_count=3, stride=2, body=body, invariant_args=[invariant], id=8)
+}
+"#,
+    );
+    assert_eq!(compiler.run_u64(&[10, 1]).expect("execute"), 19);
+}
+
+#[test]
+fn package_compiler_lowers_aggregate_counted_for_carry() {
+    let ir = r#"package test
+
+fn body(i: bits[8] id=1, carry: bits[8][2] id=2, invariant: bits[8] id=3) -> bits[8][2] {
+  zero: bits[1] = literal(value=0, id=4)
+  current: bits[8] = array_index(carry, indices=[zero], id=5)
+  with_i: bits[8] = add(current, i, id=6)
+  updated: bits[8] = add(with_i, invariant, id=7)
+  ret result: bits[8][2] = array_update(carry, updated, indices=[zero], id=8)
+}
+
+top fn f(init: bits[8][2] id=9, invariant: bits[8] id=10) -> bits[8][2] {
+  ret result: bits[8][2] = counted_for(init, trip_count=3, stride=1, body=body, invariant_args=[invariant], id=11)
+}
+"#;
+    let package = Parser::new(ir)
+        .parse_and_validate_package()
+        .expect("test PIR package should parse and validate");
+    let function = package.get_top_fn().expect("top function should exist");
+    let compiler = PirFunctionCompiler::compile_package(&package).expect("package should compile");
+    let args = [array(8, &[1, 20]), bits(8, 1)];
+    let expected = match eval_fn_in_package(&package, function, &args) {
+        FnEvalResult::Success(success) => success.value,
+        other => panic!("PIR evaluation failed: {other:?}"),
+    };
+    assert_eq!(
+        compiler.run_ir_values(&args).expect("execute counted_for"),
+        expected
+    );
+}
+
+#[test]
+fn package_compiler_lowers_wide_induction_counted_for() {
+    let compiler = compile_package(
+        r#"package test
+
+fn body(i: bits[65] id=1, carry: bits[8] id=2) -> bits[8] {
+  low_i: bits[8] = bit_slice(i, start=0, width=8, id=3)
+  ret result: bits[8] = add(carry, low_i, id=4)
+}
+
+top fn f(init: bits[8] id=5) -> bits[8] {
+  ret result: bits[8] = counted_for(init, trip_count=3, stride=2, body=body, id=6)
+}
+"#,
+    );
+    assert_eq!(compiler.run_u64(&[0]).expect("execute"), 6);
+}
+
+#[test]
+fn package_compiler_skips_zero_trip_counted_for_body() {
+    let compiler = compile_package(
+        r#"package test
+
+fn observed(i: bits[1] id=1, carry: bits[1] id=2) -> bits[1] {
+  c: () = cover(carry, label="body_cover", id=3)
+  ret result: bits[1] = not(carry, id=4)
+}
+
+top fn f(x: bits[1] id=5) -> bits[1] {
+  ret result: bits[1] = counted_for(x, trip_count=0, stride=0, body=observed, id=6)
+}
+"#,
+    );
+    let result = compiler
+        .run_ir_values_with_events(&[bits(1, 1)])
+        .expect("execute zero-trip counted_for");
+    assert_eq!(result.value, bits(1, 1));
+    assert_eq!(result.events.cover_counts.len(), 1);
+    assert_eq!(result.events.cover_counts[0].node_text_id, 3);
+    assert_eq!(result.events.cover_counts[0].count, 0);
+}
+
+#[test]
+fn package_compiler_accumulates_counted_for_body_events() {
+    let compiler = compile_package(
+        r#"package test
+
+fn observed(i: bits[0] id=1, carry: bits[1] id=2) -> bits[1] {
+  c: () = cover(carry, label="body_cover", id=3)
+  t: token = after_all(id=4)
+  tr: token = trace(t, carry, format="carry={}", data_operands=[carry], id=5)
+  ret result: bits[1] = identity(carry, id=6)
+}
+
+top fn f(x: bits[1] id=7) -> bits[1] {
+  ret result: bits[1] = counted_for(x, trip_count=2, stride=0, body=observed, id=8)
+}
+"#,
+    );
+    let result = compiler
+        .run_ir_values_with_events(&[bits(1, 1)])
+        .expect("execute counted_for events");
+    assert_eq!(result.value, bits(1, 1));
+    assert_eq!(result.events.cover_counts.len(), 1);
+    assert_eq!(result.events.cover_counts[0].node_text_id, 3);
+    assert_eq!(result.events.cover_counts[0].count, 2);
+    assert_eq!(
+        result
+            .events
+            .trace_messages
+            .iter()
+            .map(|trace| trace.message.as_str())
+            .collect::<Vec<_>>(),
+        vec!["carry=1", "carry=1"]
+    );
+}
+
+#[test]
 fn package_compiler_reuses_static_callee_scratch_across_invoke_sites() {
     let compiler = compile_package(
         r#"package test

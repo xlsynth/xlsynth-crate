@@ -359,7 +359,7 @@ impl PirFunctionCompiler {
         Self::compile_functions(None, function)
     }
 
-    /// Compiles a package's selected top function and its invoked callees.
+    /// Compiles a package's selected top function and its referenced callees.
     pub fn compile_package(package: &ir::Package) -> Result<Self, CompilerError> {
         let top = package.get_top_fn().ok_or_else(|| {
             CompilerError::InvalidFunction("package has no top-level function".into())
@@ -367,7 +367,7 @@ impl PirFunctionCompiler {
         Self::compile_package_function(package, &top.name)
     }
 
-    /// Compiles the named package function and its invoked callees.
+    /// Compiles the named package function and its referenced callees.
     pub fn compile_package_function(
         package: &ir::Package,
         function_name: &str,
@@ -386,24 +386,33 @@ impl PirFunctionCompiler {
         package: Option<&ir::Package>,
         top: &ir::Fn,
     ) -> Result<Self, CompilerError> {
-        let function_names = invoked_function_postorder(package, top)?;
+        let function_names = referenced_function_postorder(package, top)?;
+        let function_param_layouts = function_names
+            .iter()
+            .map(|function_name| {
+                let function = resolve_function(package, top, function_name)?;
+                let param_layouts = function
+                    .params
+                    .iter()
+                    .map(|param| NativeValueLayout::from_type(&param.ty))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok((function_name.clone(), param_layouts))
+            })
+            .collect::<Result<HashMap<_, _>, CompilerError>>()?;
         let mut scratch_byte_count = 0usize;
         let mut scratch_alignment = 1usize;
         let mut plans = HashMap::new();
         let mut metadata = CompiledFunctionMetadata::default();
         for function_name in &function_names {
             let function = resolve_function(package, top, function_name)?;
-            let param_layouts = function
-                .params
-                .iter()
-                .map(|param| NativeValueLayout::from_type(&param.ty))
-                .collect::<Result<Vec<_>, _>>()?;
+            let param_layouts = function_param_layouts[function_name].clone();
             let result_layout = NativeValueLayout::from_type(&function.ret_ty)?;
             let order = reachable_scheduled_order(function)?;
             for node_ref in &order {
                 NativeValueLayout::from_type(&function.get_node(*node_ref).ty)?;
             }
-            let mut scratch_plan = ScratchPlan::for_function(function, &order)?;
+            let mut scratch_plan =
+                ScratchPlan::for_function(function, &order, &function_param_layouts)?;
             scratch_byte_count = align_up(scratch_byte_count, scratch_plan.alignment)?;
             let scratch_base = scratch_byte_count;
             scratch_byte_count = scratch_byte_count
@@ -498,8 +507,8 @@ impl PirFunctionCompiler {
             context.func.signature = signature.clone();
             let runtime_callbacks =
                 declare_runtime_callbacks(&mut module, &mut context.func, pointer_type)?;
-            let invoke_targets =
-                declare_invoke_targets(&mut module, &mut context.func, &function_ids);
+            let function_targets =
+                declare_function_targets(&mut module, &mut context.func, &function_ids);
 
             let mut function_builder_context = FunctionBuilderContext::new();
             {
@@ -511,7 +520,8 @@ impl PirFunctionCompiler {
                     &plan.param_layouts,
                     &plan.scratch_plan,
                     &plan.event_sites,
-                    &invoke_targets,
+                    &function_param_layouts,
+                    &function_targets,
                     runtime_callbacks,
                     pointer_type,
                     &mut function_builder,
@@ -798,7 +808,7 @@ fn compiled_function_signature<M: Module>(module: &mut M, pointer_type: ClifType
     signature
 }
 
-fn declare_invoke_targets<M: Module>(
+fn declare_function_targets<M: Module>(
     module: &mut M,
     function: &mut cranelift_codegen::ir::Function,
     function_ids: &HashMap<String, FuncId>,
@@ -821,14 +831,14 @@ fn resolve_function<'a>(
         .and_then(|package| package.get_fn(function_name))
         .ok_or_else(|| {
             CompilerError::InvalidFunction(format!(
-                "function '{}' invokes unknown function '{function_name}'",
+                "function '{}' references unknown function '{function_name}'",
                 top.name
             ))
         })
 }
 
-/// Returns callees before callers for the top-reachable invoke graph.
-fn invoked_function_postorder(
+/// Returns callees before callers for the top-reachable function graph.
+fn referenced_function_postorder(
     package: Option<&ir::Package>,
     top: &ir::Fn,
 ) -> Result<Vec<String>, CompilerError> {
@@ -845,13 +855,18 @@ fn invoked_function_postorder(
         }
         if !active.insert(function_name.to_string()) {
             return Err(CompilerError::InvalidFunction(format!(
-                "recursive invoke graph through function '{function_name}' is not valid XLS IR"
+                "recursive function graph through function '{function_name}' is not valid XLS IR"
             )));
         }
         let function = resolve_function(package, top, function_name)?;
         for node in &function.nodes {
-            if let NodePayload::Invoke { to_apply, .. } = &node.payload {
-                visit(package, top, to_apply, active, visited, postorder)?;
+            let callee = match &node.payload {
+                NodePayload::Invoke { to_apply, .. } => Some(to_apply),
+                NodePayload::CountedFor { body, .. } => Some(body),
+                _ => None,
+            };
+            if let Some(callee) = callee {
+                visit(package, top, callee, active, visited, postorder)?;
             }
         }
         active.remove(function_name);
@@ -1167,6 +1182,7 @@ struct ScratchPlan {
     gate_zero_offset: Option<usize>,
     gate_zero_byte_count: usize,
     invoke_sites: HashMap<NodeRef, InvokeScratchPlan>,
+    counted_for_sites: HashMap<NodeRef, CountedForScratchPlan>,
     trace_sites: HashMap<NodeRef, TraceScratchPlan>,
     runtime_scalar_offsets: HashMap<NodeRef, usize>,
     runtime_temporary_offsets: [Option<usize>; 2],
@@ -1177,6 +1193,14 @@ struct ScratchPlan {
 #[derive(Debug)]
 struct InvokeScratchPlan {
     pointer_array_offset: Option<usize>,
+    scalar_operand_offsets: Vec<Option<usize>>,
+    output_offset: Option<usize>,
+}
+
+#[derive(Debug)]
+struct CountedForScratchPlan {
+    pointer_array_offset: usize,
+    induction_offset: Option<usize>,
     scalar_operand_offsets: Vec<Option<usize>>,
     output_offset: Option<usize>,
 }
@@ -1201,12 +1225,17 @@ struct ActiveScratchSlot {
 
 impl ScratchPlan {
     /// Assigns reusable native scratch slots for materialized intermediates.
-    fn for_function(function: &ir::Fn, order: &[NodeRef]) -> Result<Self, CompilerError> {
+    fn for_function(
+        function: &ir::Fn,
+        order: &[NodeRef],
+        function_param_layouts: &HashMap<String, Vec<NativeValueLayout>>,
+    ) -> Result<Self, CompilerError> {
         let (offsets, in_place_array_updates, mut byte_count, mut alignment) =
             assign_materialized_scratch_offsets(function, order)?;
         let (gate_zero_offset, gate_zero_byte_count) =
             reserve_gate_zero_storage(function, order, &mut byte_count, &mut alignment)?;
         let mut invoke_sites = HashMap::new();
+        let mut counted_for_sites = HashMap::new();
         let mut trace_sites = HashMap::new();
         let mut runtime_scalar_offsets = HashMap::new();
         let mut runtime_temporary_offsets = [None; 2];
@@ -1333,12 +1362,97 @@ impl ScratchPlan {
                 },
             );
         }
+        for node_ref in order {
+            let NodePayload::CountedFor {
+                init,
+                body,
+                invariant_args,
+                ..
+            } = &function.get_node(*node_ref).payload
+            else {
+                continue;
+            };
+            let body_param_layouts = function_param_layouts.get(body).ok_or_else(|| {
+                CompilerError::InvalidFunction(format!(
+                    "counted_for body '{body}' has no compiled parameter layouts"
+                ))
+            })?;
+            let induction_layout = body_param_layouts.first().ok_or_else(|| {
+                CompilerError::InvalidFunction(format!(
+                    "counted_for body '{body}' has no induction parameter"
+                ))
+            })?;
+            let induction_offset = if induction_layout.byte_count() == 0 {
+                None
+            } else {
+                Some(reserve_scratch_region(
+                    &mut byte_count,
+                    &mut alignment,
+                    induction_layout.byte_count(),
+                    induction_layout.alignment(),
+                    "counted_for induction scratch size overflow",
+                )?)
+            };
+            let mut scalar_operand_offsets = Vec::with_capacity(1 + invariant_args.len());
+            for operand in std::iter::once(init).chain(invariant_args.iter()) {
+                let layout = NativeValueLayout::from_type(&function.get_node(*operand).ty)?;
+                let offset =
+                    if matches!(layout, NativeValueLayout::Scalar(_)) && layout.byte_count() != 0 {
+                        Some(reserve_scratch_region(
+                            &mut byte_count,
+                            &mut alignment,
+                            layout.byte_count(),
+                            layout.alignment(),
+                            "counted_for scalar argument scratch size overflow",
+                        )?)
+                    } else {
+                        None
+                    };
+                scalar_operand_offsets.push(offset);
+            }
+            let pointer_array_byte_count = (2 + invariant_args.len())
+                .checked_mul(std::mem::size_of::<*const u8>())
+                .ok_or_else(|| {
+                    CompilerError::UnsupportedType(
+                        "counted_for pointer array scratch size overflow".into(),
+                    )
+                })?;
+            let pointer_array_offset = reserve_scratch_region(
+                &mut byte_count,
+                &mut alignment,
+                pointer_array_byte_count,
+                std::mem::align_of::<*const u8>(),
+                "counted_for pointer array scratch size overflow",
+            )?;
+            let result_layout = NativeValueLayout::from_type(&function.get_node(*node_ref).ty)?;
+            let output_offset = if result_layout.byte_count() == 0 {
+                None
+            } else {
+                Some(reserve_scratch_region(
+                    &mut byte_count,
+                    &mut alignment,
+                    result_layout.byte_count(),
+                    result_layout.alignment(),
+                    "counted_for output scratch size overflow",
+                )?)
+            };
+            counted_for_sites.insert(
+                *node_ref,
+                CountedForScratchPlan {
+                    pointer_array_offset,
+                    induction_offset,
+                    scalar_operand_offsets,
+                    output_offset,
+                },
+            );
+        }
         Ok(Self {
             offsets,
             in_place_array_updates,
             gate_zero_offset,
             gate_zero_byte_count,
             invoke_sites,
+            counted_for_sites,
             trace_sites,
             runtime_scalar_offsets,
             runtime_temporary_offsets,
@@ -1363,6 +1477,18 @@ impl ScratchPlan {
         }
         for plan in self.invoke_sites.values_mut() {
             if let Some(offset) = &mut plan.pointer_array_offset {
+                rebase(offset)?;
+            }
+            for offset in plan.scalar_operand_offsets.iter_mut().flatten() {
+                rebase(offset)?;
+            }
+            if let Some(offset) = &mut plan.output_offset {
+                rebase(offset)?;
+            }
+        }
+        for plan in self.counted_for_sites.values_mut() {
+            rebase(&mut plan.pointer_array_offset)?;
+            if let Some(offset) = &mut plan.induction_offset {
                 rebase(offset)?;
             }
             for offset in plan.scalar_operand_offsets.iter_mut().flatten() {
@@ -2231,7 +2357,8 @@ fn lower_function(
     param_layouts: &[NativeValueLayout],
     scratch_plan: &ScratchPlan,
     event_sites: &HashMap<NodeRef, u32>,
-    invoke_targets: &HashMap<String, FuncRef>,
+    function_param_layouts: &HashMap<String, Vec<NativeValueLayout>>,
+    function_targets: &HashMap<String, FuncRef>,
     runtime_callbacks: RuntimeCallbacks,
     pointer_type: ClifType,
     builder: &mut FunctionBuilder<'_>,
@@ -2378,7 +2505,31 @@ fn lower_function(
                 scratch_pointer,
                 execution_context,
                 scratch_plan,
-                invoke_targets,
+                function_targets,
+                pointer_type,
+            )?,
+            NodePayload::CountedFor {
+                init,
+                trip_count,
+                stride,
+                body,
+                invariant_args,
+            } => lower_counted_for(
+                builder,
+                function,
+                *node_ref,
+                *init,
+                *trip_count,
+                *stride,
+                body,
+                invariant_args,
+                &values,
+                &layout,
+                scratch_pointer,
+                execution_context,
+                scratch_plan,
+                function_param_layouts,
+                function_targets,
                 pointer_type,
             )?,
             NodePayload::Unop(Unop::Identity, arg) if layout.is_memory_backed() => {
@@ -3355,7 +3506,7 @@ fn lower_invoke(
     scratch_pointer: Value,
     execution_context: Value,
     scratch_plan: &ScratchPlan,
-    invoke_targets: &HashMap<String, FuncRef>,
+    function_targets: &HashMap<String, FuncRef>,
     pointer_type: ClifType,
 ) -> Result<ComputedValue, CompilerError> {
     let plan = scratch_plan.invoke_sites.get(&node_ref).ok_or_else(|| {
@@ -3389,9 +3540,167 @@ fn lower_invoke(
         .output_offset
         .map(|offset| pointer_at_offset(builder, scratch_pointer, offset))
         .unwrap_or_else(|| builder.ins().iconst(pointer_type, 0));
-    let target = invoke_targets.get(to_apply).copied().ok_or_else(|| {
-        CompilerError::InvalidFunction(format!("missing lowered invoke target '{to_apply}'"))
+    let target = function_targets.get(to_apply).copied().ok_or_else(|| {
+        CompilerError::InvalidFunction(format!("missing lowered function target '{to_apply}'"))
     })?;
+    emit_checked_compiled_function_call(
+        builder,
+        target,
+        inputs_pointer,
+        output_pointer,
+        scratch_pointer,
+        execution_context,
+    );
+    Ok(load_value_from_storage(
+        builder,
+        output_pointer,
+        result_layout,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_counted_for(
+    builder: &mut FunctionBuilder<'_>,
+    function: &ir::Fn,
+    node_ref: NodeRef,
+    init: NodeRef,
+    trip_count: usize,
+    stride: usize,
+    body: &str,
+    invariant_args: &[NodeRef],
+    values: &[Option<ComputedValue>],
+    result_layout: &NativeValueLayout,
+    scratch_pointer: Value,
+    execution_context: Value,
+    scratch_plan: &ScratchPlan,
+    function_param_layouts: &HashMap<String, Vec<NativeValueLayout>>,
+    function_targets: &HashMap<String, FuncRef>,
+    pointer_type: ClifType,
+) -> Result<ComputedValue, CompilerError> {
+    if trip_count == 0 {
+        return computed_value_for(values, init);
+    }
+    let plan = scratch_plan
+        .counted_for_sites
+        .get(&node_ref)
+        .ok_or_else(|| {
+            CompilerError::InvalidFunction(format!(
+                "counted_for node {} has no scratch assignment",
+                function.get_node(node_ref).text_id
+            ))
+        })?;
+    let body_param_layouts = function_param_layouts.get(body).ok_or_else(|| {
+        CompilerError::InvalidFunction(format!("missing counted_for body layouts for '{body}'"))
+    })?;
+    let induction_layout = body_param_layouts.first().ok_or_else(|| {
+        CompilerError::InvalidFunction(format!("counted_for body '{body}' has no induction input"))
+    })?;
+    let inputs_pointer = pointer_at_offset(builder, scratch_pointer, plan.pointer_array_offset);
+    let induction_pointer = plan
+        .induction_offset
+        .map(|offset| pointer_at_offset(builder, scratch_pointer, offset))
+        .unwrap_or_else(|| builder.ins().iconst(pointer_type, 0));
+    builder
+        .ins()
+        .store(MemFlags::new(), induction_pointer, inputs_pointer, 0);
+    let init_layout = NativeValueLayout::from_type(&function.get_node(init).ty)?;
+    let initial_carry_pointer = invoke_operand_pointer(
+        builder,
+        computed_value_for(values, init)?,
+        &init_layout,
+        plan.scalar_operand_offsets[0],
+        scratch_pointer,
+        pointer_type,
+    )?;
+    for (index, invariant) in invariant_args.iter().enumerate() {
+        let layout = NativeValueLayout::from_type(&function.get_node(*invariant).ty)?;
+        let pointer = invoke_operand_pointer(
+            builder,
+            computed_value_for(values, *invariant)?,
+            &layout,
+            plan.scalar_operand_offsets[index + 1],
+            scratch_pointer,
+            pointer_type,
+        )?;
+        builder.ins().store(
+            MemFlags::new(),
+            pointer,
+            inputs_pointer,
+            ((index + 2) * std::mem::size_of::<*const u8>()) as i32,
+        );
+    }
+    let output_pointer = plan
+        .output_offset
+        .map(|offset| pointer_at_offset(builder, scratch_pointer, offset))
+        .unwrap_or_else(|| builder.ins().iconst(pointer_type, 0));
+    let target = function_targets.get(body).copied().ok_or_else(|| {
+        CompilerError::InvalidFunction(format!("missing lowered function target '{body}'"))
+    })?;
+
+    let loop_header = builder.create_block();
+    let loop_body = builder.create_block();
+    let loop_done = builder.create_block();
+    let iteration = builder.append_block_param(loop_header, types::I64);
+    let carry_pointer = builder.append_block_param(loop_header, pointer_type);
+    let zero = builder.ins().iconst(types::I64, 0);
+    builder
+        .ins()
+        .jump(loop_header, &[zero.into(), initial_carry_pointer.into()]);
+
+    builder.switch_to_block(loop_header);
+    let continue_loop =
+        builder
+            .ins()
+            .icmp_imm(IntCC::UnsignedLessThan, iteration, trip_count as i64);
+    builder
+        .ins()
+        .brif(continue_loop, loop_body, &[], loop_done, &[]);
+
+    builder.switch_to_block(loop_body);
+    builder.seal_block(loop_body);
+    let induction = if stride == 0 {
+        builder.ins().iconst(types::I64, 0)
+    } else {
+        builder.ins().imul_imm(iteration, stride as i64)
+    };
+    store_unsigned_i64_to_bits_storage(builder, induction_pointer, induction, induction_layout)?;
+    builder.ins().store(
+        MemFlags::new(),
+        carry_pointer,
+        inputs_pointer,
+        std::mem::size_of::<*const u8>() as i32,
+    );
+    emit_checked_compiled_function_call(
+        builder,
+        target,
+        inputs_pointer,
+        output_pointer,
+        scratch_pointer,
+        execution_context,
+    );
+    let next_iteration = builder.ins().iadd_imm(iteration, 1);
+    builder
+        .ins()
+        .jump(loop_header, &[next_iteration.into(), output_pointer.into()]);
+    builder.seal_block(loop_header);
+
+    builder.switch_to_block(loop_done);
+    builder.seal_block(loop_done);
+    Ok(load_value_from_storage(
+        builder,
+        output_pointer,
+        result_layout,
+    ))
+}
+
+fn emit_checked_compiled_function_call(
+    builder: &mut FunctionBuilder<'_>,
+    target: FuncRef,
+    inputs_pointer: Value,
+    output_pointer: Value,
+    scratch_pointer: Value,
+    execution_context: Value,
+) {
     let call = builder.ins().call(
         target,
         &[
@@ -3412,11 +3721,6 @@ fn lower_invoke(
     builder.ins().return_(&[status]);
     builder.switch_to_block(after);
     builder.seal_block(after);
-    Ok(load_value_from_storage(
-        builder,
-        output_pointer,
-        result_layout,
-    ))
 }
 
 fn invoke_operand_pointer(
@@ -7304,6 +7608,49 @@ fn store_value_to_storage(
         layout,
         MemoryCopyOverlap::MayOverlap,
     )
+}
+
+/// Stores a non-negative `i64` value as one native bits value.
+fn store_unsigned_i64_to_bits_storage(
+    builder: &mut FunctionBuilder<'_>,
+    destination: Value,
+    value: Value,
+    layout: &NativeValueLayout,
+) -> Result<(), CompilerError> {
+    if layout.byte_count() == 0 {
+        return Ok(());
+    }
+    match layout {
+        NativeValueLayout::Scalar(scalar) => {
+            let widened_layout = ScalarLayout {
+                bit_count: 64,
+                byte_count: std::mem::size_of::<u64>(),
+            };
+            let value = resize_unsigned(builder, value, widened_layout, *scalar);
+            let value = mask_value(builder, value, *scalar);
+            builder.ins().store(MemFlags::new(), value, destination, 0);
+        }
+        NativeValueLayout::WideBits(wide) => {
+            builder.ins().store(MemFlags::new(), value, destination, 0);
+            let zero = builder.ins().iconst(types::I64, 0);
+            for limb in 1..wide.limb_count {
+                builder.ins().store(
+                    MemFlags::new(),
+                    zero,
+                    destination,
+                    (limb * std::mem::size_of::<u64>()) as i32,
+                );
+            }
+        }
+        NativeValueLayout::Array { .. }
+        | NativeValueLayout::Tuple { .. }
+        | NativeValueLayout::Token => {
+            return Err(CompilerError::InvalidFunction(
+                "counted_for induction value is not bits-typed".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Stores a value when memory-backed source and destination regions are known
