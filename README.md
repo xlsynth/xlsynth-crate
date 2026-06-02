@@ -157,14 +157,14 @@ This repository publishes crates to crates.io via the GitHub Actions workflow in
 
 Treat every pushed release tag as immutable. The publish workflow is restartable after a partial release: it skips an exact crate version that is already present in the crates.io sparse index and continues with missing crates. Never move or reuse a pushed release tag for different source. Fix forward with a new patch version instead.
 
-Important: the version for the next release is often already "waiting" in the repository. After a successful mainline `.0` release, the workflow pushes two follow-up commits:
+Important: the version for the next release is often already "waiting" in the repository. After every successful release, the workflow regenerates the version compatibility metadata. Ordinary regeneration preserves existing compatibility rows and does not backfill historical gaps for tags without `publish_order.toml`. When a newly discovered release tag contains `publish_order.toml`, the release is included only when every crate declared in that historical file is visible in the crates.io sparse index. A tag without `publish_order.toml` is not made ineligible by that absence and does not trigger a crates.io release-set check; `scripts/gen_version_compat.py --recompute-all-entries` may reconstruct those rows during an intentional full audit. Each tag's historical crate list is authoritative, so crates introduced later do not retroactively change older release requirements. If a known-broken cached row is discovered, remove it explicitly as a data correction. After a successful mainline `.0` release, the workflow also bumps the workspace manifests to the next minor version. A `.0` release therefore produces both follow-up commits:
 
 - `Bump version numbers after successful publish`
 - `Update version metadata after successful publish`
 
 For example, after publishing `v0.33.0`, the automation bumped the workspace manifests to `0.34.0`. That means the next mainline tag should usually be `v0.34.0` (unless you intentionally prepare a different release), not `v0.33.1`.
 
-If you intentionally release a patch version (`Z != 0`), first make the checked-in crate versions match that patch tag. The current workflow only performs the automatic post-publish version bump and version-metadata update for `.0` tags.
+If you intentionally release a patch version (`Z != 0`), first make the checked-in crate versions match that patch tag. The workflow updates version metadata after a successful patch release, but it performs the automatic post-publish version bump only for `.0` tags.
 
 ### Developer note: xlsynth DSO/dylib release versioning
 
