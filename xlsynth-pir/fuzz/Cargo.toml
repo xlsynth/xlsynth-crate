@@ -20,7 +20,6 @@ pretty_assertions = "1.4.1"
 # Local crates
 xlsynth-pir = { path = ".." }
 xlsynth = { path = "../../xlsynth" }
-xlsynth-prover = { path = "../../xlsynth-prover" }
 tempfile = "3"
 
 # Fuzz targets

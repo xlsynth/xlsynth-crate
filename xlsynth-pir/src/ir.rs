@@ -879,8 +879,8 @@ impl NodePayload {
             } => vec![
                 format_operand(*token),
                 format_operand(*activate),
-                format!("message={:?}", message),
-                format!("label={:?}", label),
+                format!("message=\"{}\"", escape_xls_ir_string(message)),
+                format!("label=\"{}\"", escape_xls_ir_string(label)),
             ],
             NodePayload::Trace {
                 token,
@@ -890,7 +890,7 @@ impl NodePayload {
             } => vec![
                 format_operand(*token),
                 format_operand(*activated),
-                format!("format={:?}", format),
+                format!("format=\"{}\"", escape_xls_ir_string(format)),
                 format!("data_operands=[{}]", format_operands(operands).join(", ")),
             ],
             NodePayload::InstantiationInput {
@@ -968,7 +968,10 @@ impl NodePayload {
                 parts
             }
             NodePayload::Cover { predicate, label } => {
-                vec![format_operand(*predicate), format!("label={:?}", label)]
+                vec![
+                    format_operand(*predicate),
+                    format!("label=\"{}\"", escape_xls_ir_string(label)),
+                ]
             }
             NodePayload::Decode { arg, width } => {
                 vec![format_operand(*arg), format!("width={}", width)]
@@ -1545,7 +1548,11 @@ where
     sorted_file_ids.sort();
     for file_id in sorted_file_ids {
         let path = pkg.file_table.id_to_path[file_id].as_str();
-        out.push_str(&format!("file_number {} \"{}\"\n", file_id, path));
+        out.push_str(&format!(
+            "file_number {} \"{}\"\n",
+            file_id,
+            escape_xls_ir_string(path)
+        ));
     }
     if !pkg.file_table.id_to_path.is_empty() {
         out.push('\n');
@@ -1579,6 +1586,27 @@ where
     }
 
     out
+}
+
+/// Escapes a UTF-8 string for an XLS IR double-quoted string literal.
+pub(crate) fn escape_xls_ir_string(value: &str) -> String {
+    let mut escaped = String::new();
+    for c in value.chars() {
+        match c {
+            '\x07' => escaped.push_str("\\a"),
+            '\x08' => escaped.push_str("\\b"),
+            '\x0c' => escaped.push_str("\\f"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\x0b' => escaped.push_str("\\v"),
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            c if c.is_ascii_control() => escaped.push_str(&format!("\\{:03o}", c as u32)),
+            _ => escaped.push(c),
+        }
+    }
+    escaped
 }
 
 /// Emits a function as text, allowing an optional end-of-line comment per node.

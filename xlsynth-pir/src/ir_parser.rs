@@ -1010,7 +1010,7 @@ impl Parser {
     fn pop_string_or_error(&mut self) -> Result<String, ParseError> {
         self.drop_whitespace_and_comments();
         self.drop_or_error("\"")?;
-        let mut string = String::new();
+        let mut bytes = Vec::new();
         let mut closed = false;
         while let Some(c) = self.peekc() {
             if c == '"' {
@@ -1023,13 +1023,113 @@ impl Parser {
                 // quote as unterminated.
                 return Err(ParseError::new("unterminated quoted string".to_string()));
             }
-            string.push(c);
-            self.dropc()?;
+            if c == '\\' {
+                self.dropc()?;
+                bytes.extend(self.pop_c_escape_bytes_or_error()?);
+            } else {
+                let mut utf8 = [0; 4];
+                bytes.extend(c.encode_utf8(&mut utf8).as_bytes());
+                self.dropc()?;
+            }
         }
         if !closed {
             return Err(ParseError::new("unterminated quoted string".to_string()));
         }
-        Ok(string)
+        String::from_utf8(bytes)
+            .map_err(|_| ParseError::new("quoted string is not valid UTF-8".to_string()))
+    }
+
+    /// Pops one C-style string escape and returns its UTF-8 bytes.
+    fn pop_c_escape_bytes_or_error(&mut self) -> Result<Vec<u8>, ParseError> {
+        let c = self
+            .popc()
+            .ok_or_else(|| ParseError::new("unterminated quoted string escape".to_string()))?;
+        let bytes = match c {
+            'a' => vec![b'\x07'],
+            'b' => vec![b'\x08'],
+            'f' => vec![b'\x0c'],
+            'n' => vec![b'\n'],
+            'r' => vec![b'\r'],
+            't' => vec![b'\t'],
+            'v' => vec![b'\x0b'],
+            '\\' => vec![b'\\'],
+            '\'' => vec![b'\''],
+            '"' => vec![b'"'],
+            '?' => vec![b'?'],
+            '0'..='7' => {
+                let mut value = c.to_digit(8).unwrap();
+                for _ in 0..2 {
+                    let Some(next) = self.peekc() else {
+                        break;
+                    };
+                    let Some(digit) = next.to_digit(8) else {
+                        break;
+                    };
+                    self.dropc()?;
+                    value = value * 8 + digit;
+                }
+                vec![value as u8]
+            }
+            'x' => vec![self.pop_hex_escape_byte_or_error()?],
+            'u' => self.pop_unicode_escape_bytes_or_error(4)?,
+            'U' => self.pop_unicode_escape_bytes_or_error(8)?,
+            _ => {
+                return Err(ParseError::new(format!(
+                    "invalid quoted string escape: \\{c}"
+                )));
+            }
+        };
+        Ok(bytes)
+    }
+
+    /// Pops a greedy hexadecimal byte escape such as `\x41`.
+    fn pop_hex_escape_byte_or_error(&mut self) -> Result<u8, ParseError> {
+        let mut value = 0u32;
+        let mut saw_digit = false;
+        while let Some(c) = self.peekc() {
+            let Some(digit) = c.to_digit(16) else {
+                break;
+            };
+            self.dropc()?;
+            saw_digit = true;
+            value = value
+                .checked_mul(16)
+                .and_then(|v| v.checked_add(digit))
+                .filter(|v| *v <= u8::MAX as u32)
+                .ok_or_else(|| {
+                    ParseError::new("hex quoted string escape exceeds one byte".to_string())
+                })?;
+        }
+        if !saw_digit {
+            return Err(ParseError::new(
+                "hex quoted string escape requires at least one digit".to_string(),
+            ));
+        }
+        Ok(value as u8)
+    }
+
+    /// Pops an exact-width Unicode escape and returns the encoded code point.
+    fn pop_unicode_escape_bytes_or_error(
+        &mut self,
+        digit_count: usize,
+    ) -> Result<Vec<u8>, ParseError> {
+        let mut value = 0u32;
+        for _ in 0..digit_count {
+            let c = self.popc().ok_or_else(|| {
+                ParseError::new("unterminated Unicode quoted string escape".to_string())
+            })?;
+            let digit = c.to_digit(16).ok_or_else(|| {
+                ParseError::new(
+                    "Unicode quoted string escape requires hexadecimal digits".to_string(),
+                )
+            })?;
+            value = value * 16 + digit;
+        }
+        let c = char::from_u32(value).ok_or_else(|| {
+            ParseError::new("Unicode quoted string escape is not a valid code point".to_string())
+        })?;
+        let mut utf8 = [0; 4];
+        Ok(c.encode_utf8(&mut utf8).as_bytes().to_vec())
     }
 
     /// Parses and preserves a raw `#[...]` or `#![...]` attribute.
@@ -1048,6 +1148,7 @@ impl Parser {
         let mut bracket_depth = 1usize;
         let mut in_string = false;
         let mut in_triple_quoted_string = false;
+        let mut in_backticked_string = false;
         let mut escaped = false;
 
         while self.offset < self.chars.len() {
@@ -1084,6 +1185,25 @@ impl Parser {
                 continue;
             }
 
+            if in_backticked_string {
+                let c = self.popc().ok_or_else(|| {
+                    ParseError::new("unterminated backticked attribute string".to_string())
+                })?;
+                attr.push(c);
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if c == '\\' {
+                    escaped = true;
+                    continue;
+                }
+                if c == '`' {
+                    in_backticked_string = false;
+                }
+                continue;
+            }
+
             if self.peek_is("\"\"\"") {
                 attr.push_str("\"\"\"");
                 self.offset += 3;
@@ -1098,10 +1218,12 @@ impl Parser {
 
             match c {
                 '"' => in_string = true,
+                '`' => in_backticked_string = true,
                 '[' => bracket_depth = bracket_depth.saturating_add(1),
                 ']' => {
                     bracket_depth = bracket_depth.saturating_sub(1);
                     if bracket_depth == 0 {
+                        Self::validate_raw_attribute_name(&attr, prefix)?;
                         return Ok(attr);
                     }
                 }
@@ -1115,6 +1237,253 @@ impl Parser {
         )))
     }
 
+    /// Validates the name of a preserved IR attribute against XLS's parser.
+    fn validate_raw_attribute_name(attr: &str, prefix: &str) -> Result<(), ParseError> {
+        let body = attr
+            .strip_prefix(prefix)
+            .and_then(|s| s.strip_suffix(']'))
+            .ok_or_else(|| ParseError::new(format!("malformed attribute: {:?}", attr)))?;
+        let mut parser = Parser::new(body);
+        let name = parser.pop_identifier_or_error("attribute name")?;
+        match name.as_str() {
+            "non_synth" => parser.expect_attribute_eof(&name),
+            "initiation_interval" => {
+                parser.drop_or_error("(")?;
+                parser.pop_number_i64_or_error("initiation_interval")?;
+                parser.drop_or_error(")")?;
+                parser.expect_attribute_eof(&name)
+            }
+            "ffi_proto" | "signature" => {
+                parser.drop_or_error("(")?;
+                parser.pop_attribute_quoted_string_or_error(&name)?;
+                parser.drop_or_error(")")?;
+                parser.expect_attribute_eof(&name)
+            }
+            "fuzz_test" => parser.validate_fuzz_test_attribute(),
+            "channel_ports" => parser.validate_channel_ports_attribute(),
+            "reset" => parser.validate_reset_attribute(),
+            "provenance" => parser.validate_provenance_attribute(),
+            _ => Err(ParseError::new(format!("unknown attribute: {}", name))),
+        }
+    }
+
+    /// Rejects trailing tokens after a recognized preserved attribute.
+    fn expect_attribute_eof(&mut self, attr_name: &str) -> Result<(), ParseError> {
+        if self.at_eof() {
+            Ok(())
+        } else {
+            Err(ParseError::new(format!(
+                "unexpected trailing text in {} attribute: {:?}",
+                attr_name,
+                self.rest()
+            )))
+        }
+    }
+
+    /// Pops an XLS IR attribute string, including the triple-quoted proto form.
+    fn pop_attribute_quoted_string_or_error(&mut self, ctx: &str) -> Result<(), ParseError> {
+        self.drop_whitespace_and_comments();
+        if !self.try_drop("\"\"\"") {
+            self.pop_string_or_error()?;
+            return Ok(());
+        }
+        while !self.peek_is("\"\"\"") {
+            self.popc().ok_or_else(|| {
+                ParseError::new(format!("unterminated triple-quoted string in {}", ctx))
+            })?;
+        }
+        self.drop_or_error("\"\"\"")
+    }
+
+    /// Pops an XLS IR backticked attribute string without interpreting its
+    /// contents.
+    fn pop_attribute_backticked_string_or_error(&mut self, ctx: &str) -> Result<(), ParseError> {
+        self.drop_whitespace_and_comments();
+        self.drop_or_error("`")?;
+        let mut escaped = false;
+        while let Some(c) = self.popc() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if c == '\\' {
+                escaped = true;
+                continue;
+            }
+            if c == '`' {
+                return Ok(());
+            }
+            if c == '\n' || c == '\r' {
+                return Err(ParseError::new(format!(
+                    "unterminated backticked string in {}",
+                    ctx
+                )));
+            }
+        }
+        Err(ParseError::new(format!(
+            "unterminated backticked string in {}",
+            ctx
+        )))
+    }
+
+    /// Validates a keyword-argument list using an attribute-specific value
+    /// parser.
+    fn validate_attribute_keyword_args(
+        &mut self,
+        attr_name: &str,
+        mandatory_keys: &[&str],
+        mut parse_value: impl FnMut(&str, &mut Self) -> Result<(), ParseError>,
+    ) -> Result<(), ParseError> {
+        self.drop_or_error("(")?;
+        let mut seen = BTreeSet::new();
+        loop {
+            if self.try_drop(")") {
+                break;
+            }
+            let key = self.pop_identifier_or_error(&format!("{} attribute key", attr_name))?;
+            if !seen.insert(key.clone()) {
+                return Err(ParseError::new(format!(
+                    "duplicate {} attribute key: {}",
+                    attr_name, key
+                )));
+            }
+            self.drop_or_error("=")?;
+            parse_value(&key, self)?;
+            if self.try_drop(",") {
+                continue;
+            }
+            self.drop_or_error(")")?;
+            break;
+        }
+        for key in mandatory_keys {
+            if !seen.contains(*key) {
+                return Err(ParseError::new(format!(
+                    "{} attribute missing {}",
+                    attr_name, key
+                )));
+            }
+        }
+        self.expect_attribute_eof(attr_name)
+    }
+
+    /// Validates a preserved `fuzz_test` attribute.
+    fn validate_fuzz_test_attribute(&mut self) -> Result<(), ParseError> {
+        if self.at_eof() {
+            return Ok(());
+        }
+        self.validate_attribute_keyword_args("fuzz_test", &[], |key, parser| match key {
+            "domains" => parser.pop_attribute_backticked_string_or_error("fuzz_test domains"),
+            _ => Err(ParseError::new(format!(
+                "unknown fuzz_test attribute key: {}",
+                key
+            ))),
+        })
+    }
+
+    /// Validates a preserved `channel_ports` attribute.
+    fn validate_channel_ports_attribute(&mut self) -> Result<(), ParseError> {
+        self.validate_attribute_keyword_args(
+            "channel_ports",
+            &["name", "type", "direction", "kind"],
+            |key, parser| match key {
+                "name" | "data_port" | "ready_port" | "valid_port" => {
+                    parser.pop_identifier_or_error(&format!("channel_ports {}", key))?;
+                    Ok(())
+                }
+                "type" => {
+                    parser.parse_type()?;
+                    Ok(())
+                }
+                "direction" => {
+                    let value =
+                        parser.pop_identifier_or_error("channel_ports direction attribute")?;
+                    match value.as_str() {
+                        "receive" | "send" => Ok(()),
+                        _ => Err(ParseError::new(format!(
+                            "invalid channel_ports direction: {}",
+                            value
+                        ))),
+                    }
+                }
+                "kind" => {
+                    let value = parser.pop_identifier_or_error("channel_ports kind attribute")?;
+                    match value.as_str() {
+                        "streaming" | "single_value" => Ok(()),
+                        _ => Err(ParseError::new(format!(
+                            "invalid channel_ports kind: {}",
+                            value
+                        ))),
+                    }
+                }
+                "flop" => {
+                    let value = parser.pop_identifier_or_error("channel_ports flop attribute")?;
+                    match value.as_str() {
+                        "none" | "flop" | "skid" | "zero_latency" => Ok(()),
+                        _ => Err(ParseError::new(format!(
+                            "invalid channel_ports flop: {}",
+                            value
+                        ))),
+                    }
+                }
+                "stage" => {
+                    parser.pop_number_i64_or_error("channel_ports stage")?;
+                    Ok(())
+                }
+                _ => Err(ParseError::new(format!(
+                    "unknown channel_ports attribute key: {}",
+                    key
+                ))),
+            },
+        )
+    }
+
+    /// Validates a preserved `reset` attribute.
+    fn validate_reset_attribute(&mut self) -> Result<(), ParseError> {
+        self.validate_attribute_keyword_args(
+            "reset",
+            &["port", "asynchronous", "active_low"],
+            |key, parser| match key {
+                "port" => {
+                    parser.pop_string_or_error()?;
+                    Ok(())
+                }
+                "asynchronous" | "active_low" => {
+                    parser.pop_bool_literal_or_error(&format!("reset {}", key))
+                }
+                _ => Err(ParseError::new(format!(
+                    "unknown reset attribute key: {}",
+                    key
+                ))),
+            },
+        )
+    }
+
+    /// Validates a preserved `provenance` attribute.
+    fn validate_provenance_attribute(&mut self) -> Result<(), ParseError> {
+        self.validate_attribute_keyword_args("provenance", &["name", "kind"], |key, parser| {
+            match key {
+                "name" => {
+                    parser.pop_string_or_error()?;
+                    Ok(())
+                }
+                "kind" => {
+                    let value = parser.pop_string_or_error()?;
+                    match value.as_str() {
+                        "proc" | "function" => Ok(()),
+                        _ => Err(ParseError::new(format!(
+                            "invalid provenance kind: {}",
+                            value
+                        ))),
+                    }
+                }
+                _ => Err(ParseError::new(format!(
+                    "unknown provenance attribute key: {}",
+                    key
+                ))),
+            }
+        })
+    }
+
     fn pop_number_string_or_error(&mut self, ctx: &str) -> Result<String, ParseError> {
         self.drop_whitespace_and_comments();
         let mut number = String::new();
@@ -1123,39 +1492,29 @@ impl Parser {
         if self.peek_is("0x") || self.peek_is("0X") {
             number.push(self.popc().unwrap());
             number.push(self.popc().unwrap());
-            while let Some(c) = self.peekc() {
-                if c.is_ascii_hexdigit() {
-                    number.push(c);
-                    self.popc();
-                } else if c == '_' {
-                    self.popc();
-                } else {
-                    break;
-                }
-            }
+            number.push_str(&self.pop_digits_with_internal_underscores(
+                ctx,
+                "hexadecimal",
+                |c| c.is_ascii_hexdigit(),
+            )?);
         } else if self.peek_is("0b") || self.peek_is("0B") {
             number.push(self.popc().unwrap());
             number.push(self.popc().unwrap());
-            while let Some(c) = self.peekc() {
-                if c == '0' || c == '1' {
-                    number.push(c);
-                    self.popc();
-                } else if c == '_' {
-                    self.popc();
-                } else {
-                    break;
-                }
-            }
+            number.push_str(
+                &self.pop_digits_with_internal_underscores(ctx, "binary", |c| {
+                    c == '0' || c == '1'
+                })?,
+            );
         } else {
-            while let Some(c) = self.peekc() {
-                if c.is_ascii_digit() {
-                    number.push(c);
-                    self.popc();
-                } else if c == '_' {
-                    self.popc();
-                } else {
-                    break;
-                }
+            number.push_str(
+                &self
+                    .pop_digits_with_internal_underscores(ctx, "decimal", |c| c.is_ascii_digit())?,
+            );
+            if number.len() > 1 && number.starts_with('0') {
+                return Err(ParseError::new(format!(
+                    "invalid leading-zero decimal number {:?} in {}; use 0b or 0x for radix-prefixed values",
+                    number, ctx
+                )));
             }
         }
 
@@ -1170,6 +1529,49 @@ impl Parser {
         }
     }
 
+    /// Pops digits while allowing underscores only between digits.
+    fn pop_digits_with_internal_underscores(
+        &mut self,
+        ctx: &str,
+        radix_name: &str,
+        is_digit: impl Fn(char) -> bool,
+    ) -> Result<String, ParseError> {
+        let mut digits = String::new();
+        let mut saw_digit = false;
+        let mut last_was_underscore = false;
+        while let Some(c) = self.peekc() {
+            if is_digit(c) {
+                digits.push(c);
+                saw_digit = true;
+                last_was_underscore = false;
+                self.popc();
+            } else if c == '_' {
+                if !saw_digit || last_was_underscore {
+                    return Err(ParseError::new(format!(
+                        "invalid underscore placement in {radix_name} number in {ctx}"
+                    )));
+                }
+                last_was_underscore = true;
+                self.popc();
+            } else {
+                break;
+            }
+        }
+        if !saw_digit {
+            return Err(ParseError::new(format!(
+                "expected {radix_name} number in {}; rest_of_line: {:?}",
+                ctx,
+                self.rest_of_line()
+            )));
+        }
+        if last_was_underscore {
+            return Err(ParseError::new(format!(
+                "invalid trailing underscore in {radix_name} number in {ctx}"
+            )));
+        }
+        Ok(digits)
+    }
+
     fn pop_number_usize_or_error(&mut self, ctx: &str) -> Result<usize, ParseError> {
         let number = self.pop_number_string_or_error(ctx)?;
         match number.parse::<usize>() {
@@ -1177,6 +1579,34 @@ impl Parser {
             Err(e) => Err(ParseError::new(format!(
                 "in {} expected unsigned integer, got {:?}: {}",
                 ctx, number, e
+            ))),
+        }
+    }
+
+    fn pop_number_i64_or_error(&mut self, ctx: &str) -> Result<i64, ParseError> {
+        self.drop_whitespace_and_comments();
+        let negative = self.try_drop("-");
+        let magnitude = self.pop_number_string_or_error(ctx)?;
+        let number = if negative {
+            format!("-{}", magnitude)
+        } else {
+            magnitude
+        };
+        number.parse::<i64>().map_err(|e| {
+            ParseError::new(format!(
+                "in {} expected signed integer, got {:?}: {}",
+                ctx, number, e
+            ))
+        })
+    }
+
+    fn pop_bool_literal_or_error(&mut self, ctx: &str) -> Result<(), ParseError> {
+        let value = self.pop_identifier_or_error(ctx)?;
+        match value.as_str() {
+            "true" | "false" => Ok(()),
+            _ => Err(ParseError::new(format!(
+                "expected boolean literal in {}, got {:?}",
+                ctx, value
             ))),
         }
     }
@@ -1418,6 +1848,12 @@ impl Parser {
     fn parse_file_number(&mut self, file_table: &mut FileTable) -> Result<(), ParseError> {
         self.drop_or_error("file_number")?;
         let id = self.pop_number_usize_or_error("file_number")?;
+        if id > i32::MAX as usize {
+            return Err(ParseError::new(format!(
+                "file number {id} exceeds the XLS maximum of {}",
+                i32::MAX
+            )));
+        }
         let path = self.pop_string_or_error()?;
         file_table.add(id, path)
     }
@@ -3538,6 +3974,9 @@ impl Parser {
                 self.drop_whitespace_and_comments();
             }
             if self.try_drop_keyword("top") {
+                if top.is_some() {
+                    return Err(ParseError::new("top declared more than once".to_string()));
+                }
                 // Allow whitespace/comments between `top` and the next keyword.
                 self.drop_whitespace_and_comments();
                 if self.peek_keyword_is("fn") {
@@ -3575,6 +4014,11 @@ impl Parser {
                     self.rest()
                 )));
             } else if self.peek_keyword_is("file_number") {
+                if !pending_outer_attrs.is_empty() {
+                    return Err(ParseError::new(
+                        "attributes are not supported on file_number declarations".to_string(),
+                    ));
+                }
                 self.parse_file_number(&mut file_table)?;
             } else {
                 return Err(ParseError::new(format!(
@@ -3723,7 +4167,9 @@ pub fn emit_fn_as_block(
         if let Some(reset) = &pi.reset {
             lines.push(format!(
                 "  #![reset(port=\"{}\", asynchronous={}, active_low={})]",
-                reset.port_name, reset.asynchronous, reset.active_low
+                ir::escape_xls_ir_string(&reset.port_name),
+                reset.asynchronous,
+                reset.active_low
             ));
         }
         for reg in &pi.registers {
@@ -3906,6 +4352,123 @@ fn bar(x: bits[8] id=3) -> bits[8] {
     }
 
     #[test]
+    fn test_parse_file_number_rejects_leading_zero_decimal() {
+        let mut parser = Parser::new("file_number 00 \"foo.x\"");
+        let err = parser.parse_file_number(&mut FileTable::new()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid leading-zero decimal number \"00\"")
+        );
+    }
+
+    #[test]
+    fn test_parse_id_attribute_rejects_leading_zero_decimal() {
+        let mut parser = Parser::new("literal.1: bits[32] = literal(value=1, id=01)");
+        let err = parser.parse_node(&mut IrNodeEnv::new()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid leading-zero decimal number \"01\"")
+        );
+    }
+
+    #[test]
+    fn test_parse_file_number_rejects_leading_underscore() {
+        let mut parser = Parser::new("file_number ___2_ \"foo.x\"");
+        let err = parser.parse_file_number(&mut FileTable::new()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid underscore placement in decimal number")
+        );
+    }
+
+    #[test]
+    fn test_parse_file_number_rejects_trailing_underscore() {
+        let mut parser = Parser::new("file_number 2_ \"foo.x\"");
+        let err = parser.parse_file_number(&mut FileTable::new()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid trailing underscore in decimal number")
+        );
+    }
+
+    #[test]
+    fn test_parse_file_number_rejects_repeated_underscores() {
+        let mut parser = Parser::new("file_number 2__3 \"foo.x\"");
+        let err = parser.parse_file_number(&mut FileTable::new()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid underscore placement in decimal number")
+        );
+    }
+
+    #[test]
+    fn test_parse_file_number_rejects_i32_overflow() {
+        let mut parser = Parser::new("file_number 2147483648 \"foo.x\"");
+        let err = parser.parse_file_number(&mut FileTable::new()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("file number 2147483648 exceeds the XLS maximum of 2147483647")
+        );
+    }
+
+    #[test]
+    fn test_parse_file_number_decodes_c_escapes() {
+        let mut parser = Parser::new(r#"file_number 2 "a\"b\\c\n\141\u03bb""#);
+        let mut file_table = FileTable::new();
+        parser.parse_file_number(&mut file_table).unwrap();
+        assert_eq!(file_table.id_to_path[&2], "a\"b\\c\na\u{03bb}");
+    }
+
+    #[test]
+    fn test_parse_package_rejects_outer_attribute_on_file_number() {
+        let mut parser = Parser::new(
+            r#"package p
+#[non_synth]
+file_number 2 "foo.x"
+"#,
+        );
+        let err = parser.parse_package().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("attributes are not supported on file_number declarations")
+        );
+    }
+
+    #[test]
+    fn test_parse_package_rejects_multiple_top_declarations() {
+        let input = r#"package test
+
+top block first() {
+}
+
+top block second() {
+}
+"#;
+        let err = Parser::new(input).parse_package().unwrap_err();
+        assert_eq!(err.msg, "top declared more than once");
+    }
+
+    #[test]
+    fn test_parse_package_rejects_newline_after_escaped_quote() {
+        let mut parser = Parser::new("package l\nfile_number 1 \"act\\\"\nfile_number 2 \"d'\"\n");
+        let err = parser.parse_package().unwrap_err();
+        assert!(err.to_string().contains("unterminated quoted string"));
+    }
+
+    #[test]
+    fn test_package_file_number_c_escapes_round_trip() {
+        let mut parser = Parser::new(
+            r#"package p
+file_number 2 "a\"b\\c\n\141\u03bb"
+"#,
+        );
+        let pkg = parser.parse_package().unwrap();
+        let emitted = pkg.to_string();
+        assert!(emitted.contains(r#"file_number 2 "a\"b\\c\naλ""#));
+        xlsynth::IrPackage::parse_ir(&emitted, None).unwrap();
+    }
+
+    #[test]
     fn test_parse_literal_node_with_id() {
         let _ = env_logger::builder().is_test(true).try_init();
         let input = "literal.1: bits[32] = literal(value=1, id=1)";
@@ -4030,6 +4593,116 @@ fn ffi_callee(x: bits[8] id=1) -> bits[8] {
             f.outer_attrs
         );
         assert_eq!(package.to_string(), input);
+    }
+
+    #[test]
+    fn test_parse_outer_fuzz_test_attributes_round_trip() {
+        let input = r#"package fuzz_attr
+
+#[fuzz_test]
+fn bare(x: bits[32] id=1) -> bits[32] {
+  ret x: bits[32] = param(name=x, id=1)
+}
+
+#[fuzz_test(domains = `parameter_domains { arbitrary: true }`)]
+fn with_domains(x: bits[32] id=2) -> bits[32] {
+  ret x: bits[32] = param(name=x, id=2)
+}
+"#;
+
+        xlsynth::IrPackage::parse_ir(input, None).expect("xls parse");
+        let mut parser = Parser::new(input);
+        let package = parser.parse_package().expect("pir parse");
+        assert_eq!(
+            package.get_fn("bare").unwrap().outer_attrs,
+            vec!["#[fuzz_test]"]
+        );
+        assert_eq!(
+            package.get_fn("with_domains").unwrap().outer_attrs,
+            vec!["#[fuzz_test(domains = `parameter_domains { arbitrary: true }`)]"]
+        );
+        assert_eq!(package.to_string(), input);
+    }
+
+    #[test]
+    fn test_parse_package_rejects_quoted_fuzz_test_domains() {
+        let mut parser = Parser::new(
+            "package p\n#[fuzz_test(domains = \"u32:0..100\")]\nfn f() -> bits[1] {\n  ret literal.1: bits[1] = literal(value=0, id=1)\n}\n",
+        );
+        let err = parser.parse_package().unwrap_err();
+        assert!(
+            err.msg.contains("expected \"`\""),
+            "unexpected error: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_package_rejects_empty_outer_attribute() {
+        let mut parser = Parser::new("package p\n#[]\nblock b() {}\n");
+        let err = parser.parse_package().unwrap_err();
+        assert!(
+            err.msg.contains("expected identifier"),
+            "unexpected error: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_package_rejects_unknown_outer_attribute() {
+        let mut parser = Parser::new("package p\n#[unknown]\nblock b() {}\n");
+        let err = parser.parse_package().unwrap_err();
+        assert!(
+            err.msg.contains("unknown attribute: unknown"),
+            "unexpected error: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_package_rejects_unknown_inner_attribute() {
+        let mut parser = Parser::new("package p\nblock b() {\n#![unknown]\n}\n");
+        let err = parser.parse_package().unwrap_err();
+        assert!(
+            err.msg.contains("unknown attribute: unknown"),
+            "unexpected error: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_package_rejects_payload_on_non_synth_attribute() {
+        let mut parser = Parser::new("package p\n#[non_synth(12)]\nblock b() {}\n");
+        let err = parser.parse_package().unwrap_err();
+        assert!(
+            err.msg
+                .contains("unexpected trailing text in non_synth attribute"),
+            "unexpected error: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_package_rejects_missing_initiation_interval_payload() {
+        let mut parser = Parser::new("package p\n#[initiation_interval]\nblock b() {}\n");
+        let err = parser.parse_package().unwrap_err();
+        assert!(
+            err.msg.contains("expected \"(\""),
+            "unexpected error: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_parse_package_rejects_incomplete_reset_attribute() {
+        let mut parser =
+            Parser::new("package p\nblock b() {\n#![reset(port=\"rst\", asynchronous=true)]\n}\n");
+        let err = parser.parse_package().unwrap_err();
+        assert!(
+            err.msg.contains("reset attribute missing active_low"),
+            "unexpected error: {:?}",
+            err
+        );
     }
 
     #[test]
@@ -4426,6 +5099,27 @@ fn f(x: bits[1]) -> bits[1] {
         let mut parser = Parser::new(&formatted);
         let pkg = parser.parse_package().expect("pir parse");
         assert_eq!(pkg.to_string(), formatted);
+    }
+
+    #[test]
+    fn test_event_metadata_c_escapes_round_trip() {
+        let input = r#"package test
+
+fn f(x: bits[1] id=1) -> token {
+  after_all.2: token = after_all(id=2)
+  trace.3: token = trace(after_all.2, x, format="line\nquote=\" slash=\\ bell=\a apostrophe=' question=?", data_operands=[], id=3)
+  cover.4: () = cover(x, label="cover\a\"\\", id=4)
+  ret assert.5: token = assert(trace.3, x, message="assert\a\"\\", label="label\a\"\\", id=5)
+}
+"#;
+
+        let mut parser = Parser::new(input);
+        let pkg = parser.parse_package().unwrap();
+        let emitted = pkg.to_string();
+        assert_eq!(emitted, input);
+        let mut emitted_parser = Parser::new(&emitted);
+        emitted_parser.parse_package().unwrap();
+        xlsynth::IrPackage::parse_ir(&emitted, None).unwrap();
     }
 
     #[test]

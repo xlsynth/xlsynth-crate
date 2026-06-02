@@ -571,6 +571,7 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                     // Precompute index comparison helpers.
                     let index_bv = indices[0];
                     let index_width = index_bv.bitvec.get_width();
+                    let max_selectable = get_num_indexable_elements::<S>(index_bv, elem_cnt);
 
                     // Iterate over elements, build updated slice.
                     let mut concatenated = BitVec::ZeroWidth;
@@ -591,11 +592,16 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                             new_value,
                         );
 
-                        // cond = (indices[0] == i)
-                        let idx_val = solver.numerical(index_width, i as u64);
-                        let cond = solver.eq(&index_bv.bitvec, &idx_val);
-
-                        let selected_slice = solver.ite(&cond, &updated_child.bitvec, &orig_slice);
+                        let selected_slice = if (i as usize) < max_selectable {
+                            // cond = (indices[0] == i)
+                            let idx_val = solver.numerical(index_width, i as u64);
+                            let cond = solver.eq(&index_bv.bitvec, &idx_val);
+                            solver.ite(&cond, &updated_child.bitvec, &orig_slice)
+                        } else {
+                            // This lane is unreachable for the index width. Comparing a
+                            // truncated lane number would alias a representable lane.
+                            orig_slice
+                        };
 
                         concatenated = solver.concat(&concatenated, &selected_slice);
                     }
@@ -707,10 +713,18 @@ fn compute_smt_env_and_assertions<'ir, 'inputs, S: Solver>(
                 // last element, matching the piecewise definition (and avoids relying on
                 // oversized padding when the start width allows larger values).
                 let start_width = start_bv.bitvec.get_width();
-                let last_idx_const =
-                    solver.numerical(start_width, (elem_cnt.saturating_sub(1)) as u64);
-                let start_le_last = solver.ule(&start_bv.bitvec, &last_idx_const);
-                let clamped_start = solver.ite(&start_le_last, &start_bv.bitvec, &last_idx_const);
+                let needs_clamp =
+                    start_width >= usize::BITS as usize || (1usize << start_width) > elem_cnt;
+                let clamped_start = if needs_clamp {
+                    let last_idx_const =
+                        solver.numerical(start_width, (elem_cnt.saturating_sub(1)) as u64);
+                    let start_le_last = solver.ule(&start_bv.bitvec, &last_idx_const);
+                    solver.ite(&start_le_last, &start_bv.bitvec, &last_idx_const)
+                } else {
+                    // Every value representable by the start operand is in bounds.
+                    // Encoding the last array index at this narrower width would truncate it.
+                    start_bv.bitvec.clone()
+                };
 
                 // 1) Build a padding prefix of (width-1) copies of the last element.
                 let last_idx = (elem_cnt as i32) - 1;

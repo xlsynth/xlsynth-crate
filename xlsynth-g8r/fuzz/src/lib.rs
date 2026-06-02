@@ -14,10 +14,13 @@ use xlsynth_prover::prover::SolverLimits;
 use xlsynth_prover::solver::bitwuzla::BitwuzlaOptions;
 
 pub const FUZZ_SOLVER_TIME_LIMIT_PER_MS: u64 = 10_000;
+pub const FUZZ_SOLVER_MEMORY_LIMIT_MB: u64 = 512;
 
 /// Returns solver limits that keep individual fuzz samples responsive.
 pub fn fuzz_solver_limits() -> SolverLimits {
-    SolverLimits::with_time_limit_per_ms(FUZZ_SOLVER_TIME_LIMIT_PER_MS)
+    let mut limits = SolverLimits::with_time_limit_per_ms(FUZZ_SOLVER_TIME_LIMIT_PER_MS);
+    limits.memory_limit_mb = Some(FUZZ_SOLVER_MEMORY_LIMIT_MB);
+    limits
 }
 
 /// Returns gate-formal options that keep individual fuzz samples responsive.
@@ -31,6 +34,7 @@ pub fn fuzz_gate_formal_options() -> GateFormalOptions {
 pub fn fuzz_bitwuzla_options() -> BitwuzlaOptions {
     let mut options = BitwuzlaOptions::new();
     options.set_time_limit_per(FUZZ_SOLVER_TIME_LIMIT_PER_MS);
+    options.set_memory_limit(FUZZ_SOLVER_MEMORY_LIMIT_MB);
     options
 }
 

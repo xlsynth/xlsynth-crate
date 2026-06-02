@@ -5,13 +5,35 @@
 use libfuzzer_sys::fuzz_target;
 use std::path::Path;
 use std::sync::Once;
+use std::time::Duration;
 use xlsynth::DslxConvertOptions;
 use xlsynth_pir::ir_fn_to_dslx::IrFnToDslxError;
+use xlsynth_pir::prove_equiv_via_toolchain::{
+    ToolchainEquivResult, prove_ir_pkg_equiv_with_tool_exe_and_timeout,
+};
 use xlsynth_pir_fuzz::generate_standard_random_pir_package;
-use xlsynth_prover::prover::types::EquivResult;
-use xlsynth_prover::prover::{SolverChoice, prover_for_choice};
 
 static INIT_LOGGER: Once = Once::new();
+const FUZZ_TOOLCHAIN_EQUIV_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Proves roundtrip equivalence without allowing an expensive sample to stall fuzzing.
+fn prove_roundtrip_equiv(lhs_pkg_text: &str, rhs_pkg_text: &str) -> ToolchainEquivResult {
+    let tool_dir = match std::env::var("XLSYNTH_TOOLS") {
+        Ok(tool_dir) => tool_dir,
+        Err(_) => {
+            return ToolchainEquivResult::Error(
+                "XLSYNTH_TOOLS is not set; cannot run toolchain equivalence".to_string(),
+            );
+        }
+    };
+    prove_ir_pkg_equiv_with_tool_exe_and_timeout(
+        lhs_pkg_text,
+        rhs_pkg_text,
+        None,
+        Path::new(&tool_dir).join("check_ir_equivalence_main"),
+        FUZZ_TOOLCHAIN_EQUIV_TIMEOUT,
+    )
+}
 
 fuzz_target!(|data: &[u8]| {
     INIT_LOGGER.call_once(|| {
@@ -67,20 +89,15 @@ fuzz_target!(|data: &[u8]| {
         .expect("set top on roundtrip rhs package");
     let rhs_ir_with_top = rhs_pkg_with_top.to_string();
 
-    match prover_for_choice(SolverChoice::Toolchain, None).prove_ir_pkg_text_equiv(
-        &lhs_ir_with_top,
-        &rhs_ir_with_top,
-        None,
-    ) {
-        EquivResult::Proved => {}
-        EquivResult::ToolchainDisproved(msg) => panic!(
+    match prove_roundtrip_equiv(&lhs_ir_with_top, &rhs_ir_with_top) {
+        ToolchainEquivResult::Proved => {}
+        ToolchainEquivResult::Disproved(msg) => panic!(
             "IR equivalence disproved: {}\n=== INPUT_IR ===\n{}\n=== DSLX ===\n{}\n=== ROUNDTRIP_IR ===\n{}",
             msg, lhs_ir_with_top, translated.dslx_text, rhs_ir_with_top
         ),
         // Early-return rationale: interruption or timeout of the external oracle
         // is not a translation-soundness failure for this sample.
-        EquivResult::Inconclusive(_) => return,
-        EquivResult::Error(msg) => panic!("IR equivalence tooling error: {}", msg),
-        other => panic!("unexpected toolchain equivalence result: {other:?}"),
+        ToolchainEquivResult::TimedOutOrInterrupted(_) => return,
+        ToolchainEquivResult::Error(msg) => panic!("IR equivalence tooling error: {}", msg),
     }
 });
