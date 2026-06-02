@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use rand::RngCore;
 use rand_pcg::Pcg64Mcg;
@@ -173,6 +173,32 @@ fn assert_signature(function: &xlsynth_pir::ir::Fn, signature: &FunctionSignatur
     assert_eq!(function.ret_ty, signature.return_type);
 }
 
+fn max_nested_counted_for_iterations(
+    package: &Package,
+    function_name: &str,
+    memo: &mut HashMap<String, usize>,
+) -> usize {
+    if let Some(maximum) = memo.get(function_name) {
+        return *maximum;
+    }
+    let function = package.get_fn(function_name).unwrap();
+    let mut maximum = 1;
+    for node in &function.nodes {
+        let expansion = match &node.payload {
+            NodePayload::Invoke { to_apply, .. } => {
+                max_nested_counted_for_iterations(package, to_apply, memo)
+            }
+            NodePayload::CountedFor {
+                trip_count, body, ..
+            } => trip_count.saturating_mul(max_nested_counted_for_iterations(package, body, memo)),
+            _ => 1,
+        };
+        maximum = maximum.max(expansion);
+    }
+    memo.insert(function_name.to_string(), maximum);
+    maximum
+}
+
 #[test]
 fn depleted_entropy_constructs_a_minimal_deterministic_function() {
     let options = RandomFnOptions {
@@ -258,6 +284,130 @@ fn random_package_generation_is_bounded_acyclic_and_reaches_configured_maximum()
     assert!(observed_maximum_function_count);
     assert!(observed_non_wrapper_signature);
     assert!(observed_reused_callee);
+}
+
+#[test]
+fn random_package_counted_for_generation_is_bounded_and_covers_forms() {
+    let options = RandomFnOptions {
+        max_params: 5,
+        max_nodes: 24,
+        max_bit_width: 16,
+        allow_zero_width_bits: true,
+        max_functions: 8,
+        max_invokes_per_function: 0,
+        max_counted_fors_per_function: 3,
+        max_counted_for_trip_count: 5,
+        max_counted_for_stride: 4,
+        max_nested_counted_for_iterations: 12,
+        enabled_operations: OperationSet::new([
+            RandomOperation::Literal,
+            RandomOperation::CountedFor,
+        ]),
+        ..RandomFnOptions::default()
+    };
+    let mut entropy = RngEntropy::new(Pcg64Mcg::new(0xc0a7_edf0));
+    let mut saw_trip_count_zero = false;
+    let mut saw_trip_count_one = false;
+    let mut saw_trip_count_many = false;
+    let mut saw_stride_zero = false;
+    let mut saw_stride_one = false;
+    let mut saw_stride_many = false;
+    let mut saw_no_invariant_args = false;
+    let mut saw_invariant_args = false;
+    let mut saw_aggregate_carry = false;
+    let mut saw_zero_width_induction = false;
+    let mut saw_nested_loop = false;
+    for _ in 0..100 {
+        let generated =
+            generate_package(&mut entropy, &options, StopPolicy::ExactBodyNodes(16)).unwrap();
+        verify_package(&generated.package).unwrap();
+        let ir_text = generated.package.to_string();
+        xlsynth::IrPackage::parse_ir(&ir_text, None)
+            .unwrap_or_else(|error| panic!("libxls rejected generated PIR:\n{ir_text}\n{error}"));
+
+        let mut memo = HashMap::new();
+        for member in &generated.package.members {
+            let PackageMember::Function(function) = member else {
+                unreachable!("generated packages contain only functions")
+            };
+            assert!(
+                max_nested_counted_for_iterations(&generated.package, &function.name, &mut memo)
+                    <= options.max_nested_counted_for_iterations
+            );
+            let mut function_counted_for_count = 0;
+            for node in &function.nodes {
+                let NodePayload::CountedFor {
+                    init,
+                    trip_count,
+                    stride,
+                    body,
+                    invariant_args,
+                } = &node.payload
+                else {
+                    continue;
+                };
+                function_counted_for_count += 1;
+                saw_trip_count_zero |= *trip_count == 0;
+                saw_trip_count_one |= *trip_count == 1;
+                saw_trip_count_many |= *trip_count > 1;
+                saw_stride_zero |= *stride == 0;
+                saw_stride_one |= *stride == 1;
+                saw_stride_many |= *stride > 1;
+                saw_no_invariant_args |= invariant_args.is_empty();
+                saw_invariant_args |= !invariant_args.is_empty();
+                saw_aggregate_carry |=
+                    matches!(function.get_node(*init).ty, Type::Array(_) | Type::Tuple(_));
+
+                let body_fn = generated.package.get_fn(body).unwrap();
+                saw_zero_width_induction |= body_fn.params[0].ty == Type::Bits(0);
+                saw_nested_loop |= body_fn
+                    .nodes
+                    .iter()
+                    .any(|node| matches!(node.payload, NodePayload::CountedFor { .. }));
+            }
+            assert!(function_counted_for_count <= options.max_counted_fors_per_function);
+        }
+    }
+    assert!(saw_trip_count_zero);
+    assert!(saw_trip_count_one);
+    assert!(saw_trip_count_many);
+    assert!(saw_stride_zero);
+    assert!(saw_stride_one);
+    assert!(saw_stride_many);
+    assert!(saw_no_invariant_args);
+    assert!(saw_invariant_args);
+    assert!(saw_aggregate_carry);
+    assert!(saw_zero_width_induction);
+    assert!(saw_nested_loop);
+}
+
+#[test]
+fn max_counted_fors_per_function_zero_excludes_counted_for_nodes() {
+    let options = RandomFnOptions {
+        max_params: 5,
+        max_nodes: 24,
+        max_functions: 8,
+        max_counted_fors_per_function: 0,
+        enabled_operations: OperationSet::new([
+            RandomOperation::Literal,
+            RandomOperation::CountedFor,
+        ]),
+        ..RandomFnOptions::default()
+    };
+    let mut entropy = RngEntropy::new(Pcg64Mcg::new(0x0ff1_ce00));
+    for _ in 0..25 {
+        let generated =
+            generate_package(&mut entropy, &options, StopPolicy::ExactBodyNodes(16)).unwrap();
+        assert!(generated.package.members.iter().all(|member| {
+            let PackageMember::Function(function) = member else {
+                unreachable!("generated packages contain only functions")
+            };
+            function
+                .nodes
+                .iter()
+                .all(|node| !matches!(node.payload, NodePayload::CountedFor { .. }))
+        }));
+    }
 }
 
 #[test]

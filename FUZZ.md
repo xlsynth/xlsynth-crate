@@ -2,14 +2,15 @@
 
 This document lists the fuzz targets in the repository and summarizes what each one exercises at a high level. Each entry describes the essential property under test and the major failure modes it is intended to surface. Per-target early-return rationales are documented inline in the target source above the relevant condition, not here.
 
-### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ir_roundtrip.rs
+### xlsynth-pir/fuzz/fuzz_targets/fuzz_ir_roundtrip.rs
 
-Generates an upstream-standard random function directly as PIR, including
-`gate`, arbitrary-width multiply, product-pair, token, and event forms
-(`after_all`, `assert`, `trace`, and `cover`), parses and re-emits it through
-libxls, then reparses with the Rust parser and checks IR-level structural
-equivalence across the PIR roundtrip. Panics if either implementation rejects
-the emitted IR or if the top function is missing.
+Generates an upstream-standard acyclic random package directly as PIR, including
+helper functions, `invoke`, `counted_for`, `gate`, arbitrary-width multiply,
+product-pair, token, and event forms (`after_all`, `assert`, `trace`, and
+`cover`), parses and re-emits it through libxls, then reparses with the Rust
+parser and checks IR-level structural equivalence across the PIR roundtrip.
+Panics if either implementation rejects the emitted IR or if the top function
+is missing.
 
 Primarily tests:
 
@@ -17,7 +18,7 @@ Primarily tests:
 - Function/package pretty-printer roundtrip soundness
 - Structural equivalence stability across roundtrip, including event metadata
 
-### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ir_opt_equiv.rs
+### xlsynth-pir/fuzz/fuzz_targets/fuzz_ir_opt_equiv.rs
 
 Builds an XLS IR package from an upstream-standard random sample, including
 `gate` and arbitrary-width multiply but excluding product-pair operations
@@ -30,7 +31,7 @@ Primarily tests:
 - Optimization preserves semantics
 - Cross-engine equivalence consistency (external tool vs SMT backends)
 
-### xlsynth-g8r/fuzz/fuzz_targets/fuzz_aug_opt_equiv.rs
+### xlsynth-pir/fuzz/fuzz_targets/fuzz_aug_opt_equiv.rs
 
 Generates an upstream-standard random XLS IR function, including `gate` and
 arbitrary-width multiply but excluding product-pair operations pending formal
@@ -112,11 +113,11 @@ Primarily tests:
 - AIGER emission/load stay structurally aligned once the intended interface is
   imposed explicitly
 
-### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ir_eval_interp_equiv.rs
+### xlsynth-pir/fuzz/fuzz_targets/fuzz_ir_eval_interp_equiv.rs
 
-Differentially compares our Rust IR function interpreter with the xlsynth C++ interpreter on the same directly generated PIR function, but instead of checking a single arbitrary argument tuple it uses autocov to grow a bounded corpus of interesting typed inputs.
+Differentially compares our Rust IR function interpreter with the xlsynth C++ interpreter on the same directly generated acyclic PIR package, but instead of checking a single arbitrary argument tuple it uses autocov to grow a bounded corpus of interesting typed inputs.
 
-- Generates an upstream-standard random PIR function, including `gate` and arbitrary-width multiply, via `xlsynth_pir::ir_random`, then parses its emitted IR through libxls for the reference interpreter.
+- Generates an upstream-standard random PIR package, including helper functions, `invoke`, `counted_for`, `gate`, and arbitrary-width multiply, via `xlsynth_pir::ir_random`, then parses its emitted IR through libxls for the reference interpreter.
 - Runs autocov on the generated IR text to synthesize a small corpus of semantically interesting input tuples.
 - Evaluates every corpus sample with both engines and asserts the results are equal, including division/modulus edge cases and composite-valued `one_hot_sel` cases.
 
@@ -296,7 +297,7 @@ Primarily tests:
 - Bulk replace operations and invariants
 - Stability of large-scale rewrites
 
-### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ir_same_sig_pair.rs
+### xlsynth-pir/fuzz/fuzz_targets/fuzz_ir_same_sig_pair.rs
 
 Builds two PIR functions across the full function-level random-generator
 surface, including token values and event operations, with
@@ -309,7 +310,7 @@ Primarily tests:
 - `generate_same_signature_pair` produces paired samples with matching function signatures
 - IR validation succeeds for both generated functions
 
-### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ir_rebase_equiv.rs
+### xlsynth-pir/fuzz/fuzz_targets/fuzz_ir_rebase_equiv.rs
 
 Generates two upstream-standard PIR functions with the same signature,
 including `gate` and arbitrary-width multiply but excluding product-pair
@@ -322,7 +323,7 @@ Primarily tests:
 - `rebase_onto` preserves semantics and IDs stability constraints across random graphs
 - Integration of `rebase_onto` with parser/pretty printer and toolchain equivalence
 
-### xlsynth-g8r/fuzz/fuzz_targets/fuzz_ir_outline_equiv.rs
+### xlsynth-pir/fuzz/fuzz_targets/fuzz_ir_outline_equiv.rs
 
 Generates an upstream-standard random function directly as PIR, including
 `gate` and arbitrary-width multiply but excluding product-pair operations,

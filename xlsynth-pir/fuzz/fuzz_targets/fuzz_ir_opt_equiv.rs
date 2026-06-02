@@ -3,7 +3,7 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 #[cfg(feature = "has-bitwuzla")]
-use xlsynth_g8r_fuzz::fuzz_bitwuzla_options;
+use xlsynth_pir_fuzz::fuzz_bitwuzla_options;
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_random::{
     generate_fn, DepletableBytes, OperationSet, RandomFnOptions, RandomOperation, StopPolicy,
@@ -94,6 +94,8 @@ fuzz_target!(|data: &[u8]| {
         Ok(p) => p,
         Err(e) => {
             log::error!("optimize_ir failed: {}", e);
+            // Early-return rationale: this target flags semantic optimizer
+            // mismatches; a libxls optimizer rejection is not a disproof.
             return;
         }
     };

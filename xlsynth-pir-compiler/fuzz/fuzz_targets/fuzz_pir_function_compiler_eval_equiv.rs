@@ -77,6 +77,7 @@ fn options() -> RandomFnOptions {
             RandomOperation::ExtNormalizeLeft,
             RandomOperation::ExtMaskLow,
             RandomOperation::ExtNaryAdd,
+            RandomOperation::CountedFor,
         ]),
         ..RandomFnOptions::default()
     }
