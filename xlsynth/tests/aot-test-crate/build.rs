@@ -2,11 +2,11 @@
 
 use std::path::PathBuf;
 
-use xlsynth::aot_builder::{
-    emit_aot_module_from_ir_text, emit_typed_dslx_aot_module_from_file, AotBuildSpec,
-    TypedDslxAotBuildSpec, TypedDslxAotPackageBuilder,
-};
 use xlsynth::DslxConvertOptions;
+use xlsynth::aot_builder::{
+    AotBuildSpec, TypedDslxAotBuildSpec, TypedDslxAotPackageBuilder, emit_aot_module_from_ir_text,
+    emit_typed_dslx_aot_module_from_file,
+};
 
 fn main() {
     // Describes one IR-only AOT wrapper generated for integration tests.

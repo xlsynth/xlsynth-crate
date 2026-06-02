@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 
 use crate::{
+    XlsynthError,
     ir_value::IrFormatPreference,
     vast::{Expr, GenerateLoop, IndexableExpr, VastFile, VastModule},
-    XlsynthError,
 };
 
 use crate::vast_helpers_options::{CodegenOptions, TemplateVariable};

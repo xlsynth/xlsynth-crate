@@ -7,9 +7,9 @@ use clap::ArgMatches;
 use serde::{Deserialize, Serialize};
 use xlsynth_g8r::process_ir_path::CanonicalG8rOptions;
 use xlsynth_mcmc_pir::{
-    canonical_g8r_scoring_input_for_pir_fn,
+    Cost, G8rEvaluationMode, Objective, canonical_g8r_scoring_input_for_pir_fn,
     cost_with_effort_options_toggle_stimulus_extension_mode_evaluator_and_g8r_options,
-    lower_toggle_stimulus_for_fn, parse_irvals_tuple_file, Cost, G8rEvaluationMode, Objective,
+    lower_toggle_stimulus_for_fn, parse_irvals_tuple_file,
 };
 use xlsynth_pir::ir_parser;
 

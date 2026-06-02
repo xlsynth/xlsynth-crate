@@ -17,8 +17,8 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::prover_config::{GroupKind, ProverPlan, ProverTask, ToDriverCommand};

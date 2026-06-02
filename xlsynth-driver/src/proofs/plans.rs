@@ -7,8 +7,8 @@ use crate::prover_config::{
     DslxEquivConfig, GroupKind, ProveQuickcheckConfig, ProverPlan, ProverTask,
 };
 use regex::escape;
-use xlsynth_prover::prover::types::AssertionSemantics;
 use xlsynth_prover::prover::SolverChoice;
+use xlsynth_prover::prover::types::AssertionSemantics;
 
 fn write_text(
     dir: &tempfile::TempDir,

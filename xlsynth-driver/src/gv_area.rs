@@ -3,7 +3,7 @@
 use clap::ArgMatches;
 use std::path::Path;
 use xlsynth_g8r::netlist::io::{load_liberty_from_path, parse_netlist_from_path};
-use xlsynth_g8r::netlist::report::{build_area_report, select_module, NetlistAreaReport};
+use xlsynth_g8r::netlist::report::{NetlistAreaReport, build_area_report, select_module};
 
 const SUBCOMMAND: &str = "gv-area";
 

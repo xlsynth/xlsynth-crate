@@ -5,11 +5,11 @@ use clap::ArgMatches;
 use serde::Serialize;
 use std::io::Write;
 use xlsynth_pir::ir_bool_cones::{
-    enumerate_bool_cone_specs, extract_bool_cone, is_trivial_literal_return_cone,
-    is_trivial_param_return_cone, BoolConeConfig,
+    BoolConeConfig, enumerate_bool_cone_specs, extract_bool_cone, is_trivial_literal_return_cone,
+    is_trivial_param_return_cone,
 };
 use xlsynth_pir::ir_parser;
-use xlsynth_pir::ir_utils::{classify_trivial_fn_body, TrivialFnBody};
+use xlsynth_pir::ir_utils::{TrivialFnBody, classify_trivial_fn_body};
 
 #[derive(Serialize)]
 struct ConeManifestLine {

@@ -98,7 +98,7 @@ mod tests {
     use xlsynth_aot_runtime::{AotError, UBits};
 
     use super::widget_frob_aot::widget_types::{
-        new_runner, FrobNibbles, SignedWidgetMode, Widget, WidgetMode, WidgetOutcome, WidgetTuning,
+        FrobNibbles, SignedWidgetMode, Widget, WidgetMode, WidgetOutcome, WidgetTuning, new_runner,
     };
 
     fn ub<const BIT_COUNT: usize>(value: u64) -> UBits<BIT_COUNT> {
@@ -174,10 +174,10 @@ mod tests {
     // Verifies: same-module aliases resolve to the canonical generated type.
     // Catches: self-alias regressions that emit redundant local type aliases.
     #[test]
-    fn widget_handle_signature_uses_canonical_bridge_type_without_self_alias(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        use super::self_alias_widget_aot::self_alias_widget::{new_runner, WidgetHandle};
+    fn widget_handle_signature_uses_canonical_bridge_type_without_self_alias()
+    -> Result<(), Box<dyn std::error::Error>> {
         use super::self_alias_widget_aot::UBits;
+        use super::self_alias_widget_aot::self_alias_widget::{WidgetHandle, new_runner};
 
         let widget = WidgetHandle {
             widget_id: UBits::from_u64(9)?,
@@ -199,8 +199,8 @@ mod tests {
     #[test]
     fn parametric_box_aot_uses_concrete_generated_struct() -> Result<(), Box<dyn std::error::Error>>
     {
-        use super::parametric_box_aot::parametric_box::{new_runner, Box8};
         use super::parametric_box_aot::UBits;
+        use super::parametric_box_aot::parametric_box::{Box8, new_runner};
 
         let input = Box8 {
             value: UBits::from_u64(42)?,
@@ -222,8 +222,8 @@ mod tests {
     // Catches: regressions in concrete struct naming or per-field lowering.
     #[test]
     fn parametric_shapes_aot_executes_concrete_aliases() -> Result<(), Box<dyn std::error::Error>> {
-        use super::parametric_shapes_aot::parametric_shapes::{new_runner, Box16, Box8, Matrix2x3};
         use super::parametric_shapes_aot::UBits;
+        use super::parametric_shapes_aot::parametric_shapes::{Box8, Box16, Matrix2x3, new_runner};
 
         let box8 = Box8 {
             value: UBits::from_u64(8)?,
@@ -260,12 +260,12 @@ mod tests {
     // end through the typed AOT wrapper.
     // Catches: recursive decode regressions that construct unspecialized `Box`.
     #[test]
-    fn parametric_arrays_aot_executes_alias_to_parametric_array(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        use super::parametric_arrays_aot::parametric_arrays::{
-            new_runner, ArrayBox4, Box8Array4, Box__N_16, Box__N_8, OuterBox,
-        };
+    fn parametric_arrays_aot_executes_alias_to_parametric_array()
+    -> Result<(), Box<dyn std::error::Error>> {
         use super::parametric_arrays_aot::UBits;
+        use super::parametric_arrays_aot::parametric_arrays::{
+            ArrayBox4, Box__N_8, Box__N_16, Box8Array4, OuterBox, new_runner,
+        };
 
         let array_box = ArrayBox4 {
             items: [
@@ -313,10 +313,10 @@ mod tests {
     // Catches: concrete-name support that compiles but fails AOT conversion.
     #[test]
     fn parametric_values_aot_executes_value_kinds() -> Result<(), Box<dyn std::error::Error>> {
-        use super::parametric_values_aot::parametric_values::{
-            new_runner, ExprBox8, HugeTag, NegativeTag,
-        };
         use super::parametric_values_aot::UBits;
+        use super::parametric_values_aot::parametric_values::{
+            ExprBox8, HugeTag, NegativeTag, new_runner,
+        };
 
         let expr_box = ExprBox8 {
             value: UBits::from_u64(77)?,
@@ -410,8 +410,8 @@ mod tests {
     // Verifies: duplicate imported type names use canonical nested paths.
     // Catches: bare-name resolution that confuses sibling DSLX modules.
     #[test]
-    fn duplicate_widget_modules_use_canonical_nested_paths(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn duplicate_widget_modules_use_canonical_nested_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
         use super::duplicate_widget_aot::UBits;
         use super::duplicate_widget_aot::{bar, foo, frobber};
 

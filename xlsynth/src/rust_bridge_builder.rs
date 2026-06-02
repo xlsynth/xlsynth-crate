@@ -8,10 +8,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    dslx,
+    IrValue, XlsynthError, dslx,
     dslx_bridge::{BridgeBuilder, FunctionParamData, StructMemberData},
     ir_value::IrFormatPreference,
-    IrValue, XlsynthError,
 };
 
 /// Emits Rust source that mirrors DSLX public type declarations.
@@ -771,11 +770,7 @@ fn sanitize_type_parametric_segment(segment: &str) -> String {
         }
         out.push(ch);
     }
-    if out.is_empty() {
-        "P".to_string()
-    } else {
-        out
-    }
+    if out.is_empty() { "P".to_string() } else { out }
 }
 
 fn rust_type_parametric_value_suffix(
@@ -811,11 +806,7 @@ fn sanitize_type_parametric_value_atom(value: &str) -> String {
             }
         })
         .collect::<String>();
-    if out.is_empty() {
-        "P".to_string()
-    } else {
-        out
-    }
+    if out.is_empty() { "P".to_string() } else { out }
 }
 
 #[cfg(test)]
@@ -1395,9 +1386,11 @@ pub struct Box__N_8 {
 
         let mut builder = RustBridgeBuilder::new();
         let error = convert_imported_module(&importer_typechecked, &mut builder).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("direct imported parametric struct instantiation"));
+        assert!(
+            error
+                .to_string()
+                .contains("direct imported parametric struct instantiation")
+        );
         assert!(error.to_string().contains("concrete type alias"));
     }
 }

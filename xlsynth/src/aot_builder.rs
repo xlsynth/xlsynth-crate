@@ -12,19 +12,19 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::aot_entrypoint_metadata::{
-    get_entrypoint_function_signature, get_entrypoint_runtime_features, AotEntrypointMetadata,
-    AotFunctionSignature, AotRuntimeFeature, AotType, AotTypeLayout,
+    AotEntrypointMetadata, AotFunctionSignature, AotRuntimeFeature, AotType, AotTypeLayout,
+    get_entrypoint_function_signature, get_entrypoint_runtime_features,
 };
 use crate::aot_lib::{AotCompiled, AotResult};
-use crate::dslx_bridge::{convert_imported_module, BridgeBuilder};
+use crate::dslx_bridge::{BridgeBuilder, convert_imported_module};
 use crate::rust_bridge_builder::{
-    render_rust_module_fragments, render_standalone_runtime_imports,
-    rust_type_path_between_dslx_modules, RustBridgeBuilder, RustModuleFragment,
+    RustBridgeBuilder, RustModuleFragment, render_rust_module_fragments,
+    render_standalone_runtime_imports, rust_type_path_between_dslx_modules,
 };
 use crate::xlsynth_error::XlsynthError;
 use crate::{
-    convert_dslx_to_ir_text, dslx, dslx_path_to_module_name,
-    mangle_dslx_name_with_calling_convention, DslxCallingConvention, DslxConvertOptions,
+    DslxCallingConvention, DslxConvertOptions, convert_dslx_to_ir_text, dslx,
+    dslx_path_to_module_name, mangle_dslx_name_with_calling_convention,
 };
 
 /// ABI version emitted into standalone runtime artifacts and checked by the
@@ -3937,9 +3937,11 @@ top fn traced(tok: token, x: bits[8]) -> bits[8] {
 
         let error = compile_ir_to_standalone_aot(ir_text, "traced", "traced").unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("AOT standalone runtime does not support `trace` nodes"));
+        assert!(
+            error
+                .to_string()
+                .contains("AOT standalone runtime does not support `trace` nodes")
+        );
     }
 
     // Verifies: unsupported ops in dead package members do not reject a pure
@@ -3983,9 +3985,11 @@ top fn calls_traced(tok: token, x: bits[8]) -> bits[8] {
         let error =
             compile_ir_to_standalone_aot(ir_text, "calls_traced", "calls_traced").unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("AOT standalone runtime does not support `trace` nodes"));
+        assert!(
+            error
+                .to_string()
+                .contains("AOT standalone runtime does not support `trace` nodes")
+        );
     }
 
     // Verifies: first-landing standalone artifacts reject unsupported cover-bearing
@@ -4072,9 +4076,11 @@ top fn covered(x: bits[1]) -> bits[1] {
 
         let error =
             validate_typed_dslx_type_matches_aot("return", &typed_dslx_type, &aot).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("AOT typed DSLX type mismatch for return"));
+        assert!(
+            error
+                .to_string()
+                .contains("AOT typed DSLX type mismatch for return")
+        );
     }
 
     // Verifies: typed DSLX AOT dependency tracking follows transitive DSLX imports.

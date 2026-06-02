@@ -8,13 +8,13 @@ use crate::lib_support::{self, c_str_to_rust, xls_function_jit_run, xls_make_fun
 pub use crate::lib_support::{RunResult, TraceMessage};
 use crate::xlsynth_error::XlsynthError;
 use crate::{
+    IrValue,
     lib_support::{
         xls_function_get_name, xls_function_get_type, xls_function_to_string,
         xls_function_type_to_string, xls_interpret_function, xls_package_free,
         xls_package_get_function, xls_package_get_functions, xls_package_get_type_for_value,
         xls_package_to_string, xls_parse_ir_package, xls_type_to_string,
     },
-    IrValue,
 };
 use xlsynth_sys::{CIrFunction, CIrPackage, CScheduleAndCodegenResult};
 

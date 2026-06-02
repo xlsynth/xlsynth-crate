@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::ir_equiv::{dispatch_ir_equiv, IrEquivRequest, IrModule};
+use crate::ir_equiv::{IrEquivRequest, IrModule, dispatch_ir_equiv};
 use crate::toolchain_config::ToolchainConfig;
 use xlsynth_prover::prover::types::EquivParallelism;
 
@@ -8,8 +8,8 @@ use xlsynth_pir::ir::{
     self as ir_mod, BlockMetadata, FileTable, MemberType, Package, PackageMember,
 };
 use xlsynth_pir::ir_parser;
-use xlsynth_prover::prover::types::AssertionSemantics;
 use xlsynth_prover::prover::SolverChoice;
+use xlsynth_prover::prover::types::AssertionSemantics;
 
 use std::path::Path;
 

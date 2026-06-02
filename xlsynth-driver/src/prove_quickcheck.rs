@@ -9,17 +9,17 @@ use crate::proofs::obligations::{
     FileWithHistory, ObligationPayload, ProverObligation, QcObligation,
 };
 use crate::proofs::script::{
-    execute_script, read_script_steps_from_json_path, read_script_steps_from_jsonl_path, OblTree,
-    OblTreeConfig,
+    OblTree, OblTreeConfig, execute_script, read_script_steps_from_json_path,
+    read_script_steps_from_jsonl_path,
 };
 use crate::report_cli_error::report_cli_error_and_exit;
-use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConfig};
+use crate::toolchain_config::{ToolchainConfig, get_dslx_path, get_dslx_stdlib_path};
 
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use xlsynth_prover::prover::types::{BoolPropertyResult, QuickCheckAssertionSemantics};
-use xlsynth_prover::prover::{discover_quickcheck_tests, Prover, SolverChoice};
+use xlsynth_prover::prover::{Prover, SolverChoice, discover_quickcheck_tests};
 
 const SUBCOMMAND: &str = "prove-quickcheck";
 

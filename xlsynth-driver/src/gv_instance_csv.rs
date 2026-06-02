@@ -4,8 +4,8 @@
 //! instance/cell-type pairs in a netlist as csv.gz.
 
 use clap::ArgMatches;
-use flate2::write::GzEncoder;
 use flate2::Compression;
+use flate2::write::GzEncoder;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::Path;

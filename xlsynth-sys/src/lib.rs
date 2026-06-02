@@ -653,7 +653,7 @@ unsafe extern "C" {
     pub fn xls_bits_shift_left_logical(bits: *const CIrBits, shift_amount: i64) -> *mut CIrBits;
     pub fn xls_bits_shift_right_logical(bits: *const CIrBits, shift_amount: i64) -> *mut CIrBits;
     pub fn xls_bits_shift_right_arithmetic(bits: *const CIrBits, shift_amount: i64)
-        -> *mut CIrBits;
+    -> *mut CIrBits;
 
     // struct xls_bits* xls_bits_width_slice(const struct xls_bits* bits, int64_t
     // start, int64_t width);
@@ -1434,7 +1434,7 @@ unsafe extern "C" {
     pub fn xls_dslx_module_get_member_count(module: *const CDslxModule) -> i64;
 
     pub fn xls_dslx_module_get_member(module: *const CDslxModule, i: i64)
-        -> *mut CDslxModuleMember;
+    -> *mut CDslxModuleMember;
 
     pub fn xls_dslx_module_get_type_definition_kind(
         module: *const CDslxModule,
@@ -1611,7 +1611,7 @@ unsafe extern "C" {
     ) -> *mut std::os::raw::c_char;
 
     pub fn xls_dslx_constant_def_get_value(constant_def: *const CDslxConstantDef)
-        -> *mut CDslxExpr;
+    -> *mut CDslxExpr;
 
     // -- TypeAlias
 
@@ -1755,7 +1755,7 @@ unsafe extern "C" {
     ) -> bool;
     pub fn xls_dslx_parametric_env_free(env: *mut CDslxParametricEnv);
     pub fn xls_dslx_parametric_env_clone(env: *const CDslxParametricEnv)
-        -> *mut CDslxParametricEnv;
+    -> *mut CDslxParametricEnv;
     pub fn xls_dslx_parametric_env_equals(
         lhs: *const CDslxParametricEnv,
         rhs: *const CDslxParametricEnv,
@@ -1821,7 +1821,7 @@ unsafe extern "C" {
 
     // Stringification for DSLX AST nodes
     pub fn xls_dslx_function_to_string(function: *const CDslxFunction)
-        -> *mut std::os::raw::c_char;
+    -> *mut std::os::raw::c_char;
     pub fn xls_dslx_struct_def_to_string(
         struct_def: *const CDslxStructDef,
     ) -> *mut std::os::raw::c_char;
@@ -1882,7 +1882,7 @@ unsafe extern "C" {
     pub fn xls_dslx_type_get_struct_def(ty: *const CDslxType) -> *mut CDslxStructDef;
     pub fn xls_dslx_type_struct_get_member_count(ty: *const CDslxType) -> i64;
     pub fn xls_dslx_type_struct_get_member_type(ty: *const CDslxType, index: i64)
-        -> *mut CDslxType;
+    -> *mut CDslxType;
 
     pub fn xls_dslx_type_array_get_element_type(ty: *const CDslxType) -> *mut CDslxType;
     pub fn xls_dslx_type_array_get_size(ty: *const CDslxType) -> *mut CDslxTypeDim;
@@ -2519,7 +2519,7 @@ unsafe extern "C" {
     ) -> *mut CDslxAttribute;
     pub fn xls_dslx_param_get_name(param: *const CDslxParam) -> *mut std::os::raw::c_char;
     pub fn xls_dslx_param_get_type_annotation(param: *const CDslxParam)
-        -> *mut CDslxTypeAnnotation;
+    -> *mut CDslxTypeAnnotation;
     pub fn xls_dslx_attribute_get_kind(attribute: *const CDslxAttribute) -> DslxAttributeKind;
     pub fn xls_dslx_attribute_get_argument_count(attribute: *const CDslxAttribute) -> i64;
     pub fn xls_dslx_attribute_get_argument_kind(

@@ -6,7 +6,7 @@ use clap::ArgMatches;
 use xlsynth::{IrBits, IrValue};
 use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::aig_serdes::gate2ir::{
-    repack_gate_fn_interface_with_schema, GateFnInterfaceSchema,
+    GateFnInterfaceSchema, repack_gate_fn_interface_with_schema,
 };
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::aig_sim::count_toggles;

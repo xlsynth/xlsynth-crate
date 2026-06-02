@@ -6,7 +6,7 @@ use clap::ArgMatches;
 
 use crate::toolchain_config::ToolchainConfig;
 use xlsynth::{IrBits, IrValue};
-use xlsynth_pir::block2fn::{block_package_to_fn, Block2FnOptions};
+use xlsynth_pir::block2fn::{Block2FnOptions, block_package_to_fn};
 use xlsynth_pir::ir::{FileTable, MemberType, Package, PackageMember};
 use xlsynth_pir::ir_parser::Parser;
 

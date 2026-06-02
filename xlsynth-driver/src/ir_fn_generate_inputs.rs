@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use clap::ArgMatches;
 use xlsynth_pir::ir_fn_generate_inputs::{
-    generate_ir_fn_inputs_from_ir_path, FloatParamSpec, IrFnGenerateInputsConfig,
+    FloatParamSpec, IrFnGenerateInputsConfig, generate_ir_fn_inputs_from_ir_path,
 };
 
 use crate::report_cli_error::report_cli_error_and_exit;

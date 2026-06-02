@@ -5,9 +5,9 @@ use std::process;
 use clap::ArgMatches;
 
 use crate::common::{
-    enforce_extern_verilog_codegen_policy, extract_codegen_flags, extract_pipeline_spec,
-    parse_bool_flag, parse_bool_flag_or, pipeline_codegen_flags_proto, resolve_type_inference_v2,
-    scheduling_options_proto, CodegenFlags, PipelineSpec, DEFAULT_WARNINGS_AS_ERRORS,
+    CodegenFlags, DEFAULT_WARNINGS_AS_ERRORS, PipelineSpec, enforce_extern_verilog_codegen_policy,
+    extract_codegen_flags, extract_pipeline_spec, parse_bool_flag, parse_bool_flag_or,
+    pipeline_codegen_flags_proto, resolve_type_inference_v2, scheduling_options_proto,
 };
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;

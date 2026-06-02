@@ -7,7 +7,7 @@
 //! module and generate corresponding Rust code that can be `use`'d into a Rust
 //! module.
 
-use crate::{dslx, IrValue, XlsynthError};
+use crate::{IrValue, XlsynthError, dslx};
 
 /// Encapsulates information that the bridge builder gets about a struct member
 /// -- the name, type annotation AST node, and deduced concrete type that the

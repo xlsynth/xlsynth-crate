@@ -14,8 +14,8 @@ use std::{
 };
 
 use crate::{
-    c_str_to_rust, ir_value::IrFormatPreference, lib_support::xls_format_preference_from_string,
-    xls_parse_typed_value, XlsynthError,
+    XlsynthError, c_str_to_rust, ir_value::IrFormatPreference,
+    lib_support::xls_format_preference_from_string, xls_parse_typed_value,
 };
 
 // No additional imports needed.

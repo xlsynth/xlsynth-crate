@@ -3,8 +3,8 @@
 use std::path::Path;
 
 use clap::ArgMatches;
-use xlsynth::{mangle_dslx_name, DslxConvertOptions};
-use xlsynth_prover::ir_equiv::{run_ir_equiv, IrEquivRequest, IrModule};
+use xlsynth::{DslxConvertOptions, mangle_dslx_name};
+use xlsynth_prover::ir_equiv::{IrEquivRequest, IrModule, run_ir_equiv};
 
 use crate::common::parse_bool_flag_or;
 use crate::report_cli_error::report_cli_error_and_exit;

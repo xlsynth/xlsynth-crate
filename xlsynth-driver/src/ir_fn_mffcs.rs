@@ -6,11 +6,11 @@ use clap::ArgMatches;
 use serde::Serialize;
 use std::io::Write;
 use xlsynth_pir::ir_fn_mffcs::{
-    enumerate_all_mffc_specs, extract_mffc, has_nonlocal_callee_refs, rank_and_select_mffc_specs,
-    MffcConfig,
+    MffcConfig, enumerate_all_mffc_specs, extract_mffc, has_nonlocal_callee_refs,
+    rank_and_select_mffc_specs,
 };
 use xlsynth_pir::ir_parser;
-use xlsynth_pir::ir_utils::{classify_trivial_fn_body, TrivialFnBody};
+use xlsynth_pir::ir_utils::{TrivialFnBody, classify_trivial_fn_body};
 
 #[derive(Serialize)]
 struct MffcManifestLine {

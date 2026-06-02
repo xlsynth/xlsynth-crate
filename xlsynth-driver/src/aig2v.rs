@@ -3,13 +3,13 @@
 use std::path::Path;
 
 use xlsynth_g8r::aig::{
-    add_input_registers, add_output_registers, ClockPort, GateFn, SequentialGateFn,
+    ClockPort, GateFn, SequentialGateFn, add_input_registers, add_output_registers,
 };
 use xlsynth_g8r::aig_serdes::emit_netlist::{
-    emit_netlist, emit_netlist_with_version_and_port_style, NetlistPortStyle,
+    NetlistPortStyle, emit_netlist, emit_netlist_with_version_and_port_style,
 };
 use xlsynth_g8r::aig_serdes::gate2ir::{
-    repack_gate_fn_interface_with_schema, GateFnInterfacePort, GateFnInterfaceSchema,
+    GateFnInterfacePort, GateFnInterfaceSchema, repack_gate_fn_interface_with_schema,
 };
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;

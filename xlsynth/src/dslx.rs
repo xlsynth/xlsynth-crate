@@ -16,7 +16,7 @@ use std::{
 use log::debug;
 use xlsynth_sys::{self as sys, CDslxImportData};
 
-use crate::{c_str_to_rust, c_str_to_rust_no_dealloc, IrValue, XlsynthError};
+use crate::{IrValue, XlsynthError, c_str_to_rust, c_str_to_rust_no_dealloc};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum TypeDefinitionKind {
@@ -791,11 +791,7 @@ impl Quickcheck {
     pub fn get_count(&self) -> Option<i64> {
         let mut result: i64 = 0;
         let has_count = unsafe { sys::xls_dslx_quickcheck_get_count(self.ptr, &mut result) };
-        if has_count {
-            Some(result)
-        } else {
-            None
-        }
+        if has_count { Some(result) } else { None }
     }
 }
 
@@ -1929,7 +1925,7 @@ impl fmt::Display for ParametricEnv {
 #[cfg(test)]
 mod param_env_and_interp_value_tests {
     use super::*;
-    use crate::{mangle_dslx_name_with_env, DslxCallingConvention, IrBits, IrValue};
+    use crate::{DslxCallingConvention, IrBits, IrValue, mangle_dslx_name_with_env};
 
     #[test]
     fn test_interp_value_make_bits_and_convert() {
@@ -2854,12 +2850,16 @@ fn without_assert(a: u32, b: u32) -> u32 {
         let with_assert_fn = with_assert_fn.expect("with_assert fn found");
         let without_assert_fn = without_assert_fn.expect("without_assert fn found");
 
-        assert!(type_info
-            .requires_implicit_token(&with_assert_fn)
-            .expect("requires_implicit_token success (with_assert)"));
-        assert!(!type_info
-            .requires_implicit_token(&without_assert_fn)
-            .expect("requires_implicit_token success (without_assert)"));
+        assert!(
+            type_info
+                .requires_implicit_token(&with_assert_fn)
+                .expect("requires_implicit_token success (with_assert)")
+        );
+        assert!(
+            !type_info
+                .requires_implicit_token(&without_assert_fn)
+                .expect("requires_implicit_token success (without_assert)")
+        );
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use clap::ArgMatches;
 use xlsynth_autocov::{
-    resolve_entry_fn_from_ir_path, run_ir_fn_autocov_with_writers, IrFnAutocovRunConfig,
+    IrFnAutocovRunConfig, resolve_entry_fn_from_ir_path, run_ir_fn_autocov_with_writers,
 };
 
 use crate::common::parse_bool_flag_or;

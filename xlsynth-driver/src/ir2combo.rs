@@ -8,12 +8,12 @@ use clap::ArgMatches;
 use std::process;
 
 use crate::common::{
-    enforce_extern_verilog_codegen_policy, extract_codegen_flags, parse_bool_flag_or, CodegenFlags,
+    CodegenFlags, enforce_extern_verilog_codegen_policy, extract_codegen_flags, parse_bool_flag_or,
 };
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::{run_codegen_combinational, run_opt_main};
-use xlsynth_pir::{run_aug_opt_over_ir_text, AugOptOptions};
+use xlsynth_pir::{AugOptOptions, run_aug_opt_over_ir_text};
 
 /// Entry point invoked from `main.rs` when the `ir2combo` subcommand is used.
 pub fn handle_ir2combo(matches: &ArgMatches, config: &Option<ToolchainConfig>) {

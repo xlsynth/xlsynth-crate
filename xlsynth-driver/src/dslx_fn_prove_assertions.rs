@@ -4,13 +4,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use xlsynth_prover::dslx_assertions::{run_dslx_assertions, DslxAssertionsRequest};
-use xlsynth_prover::prover::types::{BoolPropertyResult, FnInput, FnOutput};
+use xlsynth_prover::dslx_assertions::{DslxAssertionsRequest, run_dslx_assertions};
 use xlsynth_prover::prover::SolverChoice;
+use xlsynth_prover::prover::types::{BoolPropertyResult, FnInput, FnOutput};
 
 use crate::common::{parse_bool_flag_or, parse_uf_spec};
 use crate::report_cli_error::report_cli_error_and_exit;
-use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConfig};
+use crate::toolchain_config::{ToolchainConfig, get_dslx_path, get_dslx_stdlib_path};
 
 const SUBCOMMAND: &str = "dslx-fn-prove-assertions";
 const IMPLICIT_TOKEN_RUNTIME_PARAM_COUNT: usize = 2;

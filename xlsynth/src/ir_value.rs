@@ -1066,11 +1066,12 @@ mod tests {
             bits.get_bit(32).is_err(),
             "Expected an error for out of bounds index"
         );
-        assert!(bits
-            .get_bit(32)
-            .unwrap_err()
-            .to_string()
-            .contains("Index 32 out of bounds for bits[32]:0b00000000000000000000000000101010"));
+        assert!(
+            bits.get_bit(32)
+                .unwrap_err()
+                .to_string()
+                .contains("Index 32 out of bounds for bits[32]:0b00000000000000000000000000101010")
+        );
 
         let debug_fmt = format!("{bits:?}");
         assert_eq!(debug_fmt, "0b00000000000000000000000000101010");

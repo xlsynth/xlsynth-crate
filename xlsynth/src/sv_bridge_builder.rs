@@ -6,10 +6,9 @@
 use std::collections::HashSet;
 
 use crate::{
-    dslx,
+    IrValue, XlsynthError, dslx,
     dslx_bridge::{BridgeBuilder, StructMemberData},
     ir_value::IrFormatPreference,
-    IrValue, XlsynthError,
 };
 
 /// The suffix used when we typedef logic to a type name.

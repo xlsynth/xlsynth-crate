@@ -5,7 +5,7 @@ use xlsynth_pir::ir;
 use xlsynth_pir::ir_verify;
 use xlsynth_pir::localized_eco2;
 
-use crate::ir_equiv::{dispatch_ir_equiv, IrEquivRequest, IrModule};
+use crate::ir_equiv::{IrEquivRequest, IrModule, dispatch_ir_equiv};
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 use rand::SeedableRng;
@@ -16,7 +16,7 @@ use xlsynth_pir::ir::Type;
 use xlsynth_pir::ir::{self as ir_mod, BlockMetadata, MemberType, PackageMember};
 use xlsynth_pir::ir_parser::{self, emit_fn_as_block};
 use xlsynth_pir::random_inputs::{
-    generate_biased_arguments_with_rng, generate_pattern_arguments, BitValuePattern,
+    BitValuePattern, generate_biased_arguments_with_rng, generate_pattern_arguments,
 };
 use xlsynth_prover::prover::SolverChoice;
 

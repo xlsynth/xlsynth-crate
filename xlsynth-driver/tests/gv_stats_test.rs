@@ -223,8 +223,7 @@ fn gv_area_and_gv_stats_emit_expected_text_and_json() {
         0
     );
     assert_eq!(
-        stats_json["timing_query_diagnostic_counts"]
-            ["delay_slew_single_above_max_extrapolation_count"],
+        stats_json["timing_query_diagnostic_counts"]["delay_slew_single_above_max_extrapolation_count"],
         0
     );
     assert_eq!(
@@ -308,8 +307,7 @@ fn gv_stats_reports_registered_pipeline_stages() {
         0
     );
     assert_eq!(
-        stats_json["timing_query_diagnostic_counts"]
-            ["delay_slew_single_above_max_extrapolation_count"],
+        stats_json["timing_query_diagnostic_counts"]["delay_slew_single_above_max_extrapolation_count"],
         0
     );
     assert_eq!(

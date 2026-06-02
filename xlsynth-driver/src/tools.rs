@@ -3,7 +3,7 @@
 //! Helper functions for running tools from the XLS toolchain directory that can
 //! be provided to the driver.
 
-use crate::common::{add_codegen_flags, CodegenFlags, PipelineSpec};
+use crate::common::{CodegenFlags, PipelineSpec, add_codegen_flags};
 use std::process;
 use std::process::Command;
 

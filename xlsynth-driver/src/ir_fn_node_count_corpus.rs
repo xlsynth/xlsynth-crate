@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
 use clap::ArgMatches;
@@ -85,25 +85,27 @@ pub fn handle_ir_fn_node_count_corpus(matches: &ArgMatches, _config: &Option<Too
         let jobs = Arc::clone(&jobs);
         let tx = tx.clone();
         let top = top.clone();
-        handles.push(thread::spawn(move || loop {
-            let next_job = {
-                let mut jobs = jobs.lock().expect("job queue mutex poisoned");
-                jobs.pop_front()
-            };
-            let Some((index, path)) = next_job else {
-                break;
-            };
+        handles.push(thread::spawn(move || {
+            loop {
+                let next_job = {
+                    let mut jobs = jobs.lock().expect("job queue mutex poisoned");
+                    jobs.pop_front()
+                };
+                let Some((index, path)) = next_job else {
+                    break;
+                };
 
-            let result = count_nodes_in_file(&path, top.as_deref());
-            if tx
-                .send(WorkResult {
-                    index,
-                    path,
-                    result,
-                })
-                .is_err()
-            {
-                break;
+                let result = count_nodes_in_file(&path, top.as_deref());
+                if tx
+                    .send(WorkResult {
+                        index,
+                        path,
+                        result,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
             }
         }));
     }

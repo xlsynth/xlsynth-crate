@@ -4,15 +4,15 @@ use crate::common::{parse_uf_spec, resolve_type_inference_v2};
 use crate::ir_equiv::outcome_from_report;
 use crate::proofs::obligations::{LecObligation, LecSide, ObligationPayload, ProverObligation};
 use crate::proofs::script::{
-    execute_script, read_script_steps_from_json_path, read_script_steps_from_jsonl_path, OblTree,
-    OblTreeConfig, ScriptStep,
+    OblTree, OblTreeConfig, ScriptStep, execute_script, read_script_steps_from_json_path,
+    read_script_steps_from_jsonl_path,
 };
-use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConfig};
+use crate::toolchain_config::{ToolchainConfig, get_dslx_path, get_dslx_stdlib_path};
 use std::path::{Path, PathBuf};
-use xlsynth_prover::dslx_equiv::{run_dslx_equiv, DslxEquivRequest, DslxModule};
+use xlsynth_prover::dslx_equiv::{DslxEquivRequest, DslxModule, run_dslx_equiv};
 use xlsynth_prover::dslx_specializer::specialize_dslx_module;
-use xlsynth_prover::prover::types::{AssertionSemantics, EquivParallelism};
 use xlsynth_prover::prover::SolverChoice;
+use xlsynth_prover::prover::types::{AssertionSemantics, EquivParallelism};
 
 const SUBCOMMAND: &str = "dslx-equiv";
 

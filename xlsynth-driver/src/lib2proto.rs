@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::Write;
 use xlsynth_g8r::liberty::descriptor::liberty_descriptor_pool;
 use xlsynth_g8r::liberty::liberty_to_proto::{
-    parse_liberty_files_to_proto_with_vt_rules, ThresholdVoltageGroupRule,
+    ThresholdVoltageGroupRule, parse_liberty_files_to_proto_with_vt_rules,
 };
 
 fn parse_vt_group_rule(raw: &str) -> Result<ThresholdVoltageGroupRule, String> {

@@ -6,7 +6,7 @@ use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::aig_serdes::gate2ir::gate_fn_to_xlsynth_ir;
 use xlsynth_prover::prover::SolverChoice;
 
-use crate::ir_equiv::{dispatch_ir_equiv, EquivOutcome, IrEquivRequest, IrModule};
+use crate::ir_equiv::{EquivOutcome, IrEquivRequest, IrModule, dispatch_ir_equiv};
 
 /// Proves equivalence between two gate functions by lifting both sides to IR
 /// and then dispatching through the normal IR equivalence flow.

@@ -2,19 +2,19 @@
 
 use crate::common::get_function_enum_param_domains;
 use crate::report_cli_error::report_cli_error_and_exit;
-use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConfig};
+use crate::toolchain_config::{ToolchainConfig, get_dslx_path, get_dslx_stdlib_path};
 
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use xlsynth::dslx::ImportData;
 use xlsynth::{
-    mangle_dslx_name_with_calling_convention, DslxCallingConvention, DslxConvertOptions,
+    DslxCallingConvention, DslxConvertOptions, mangle_dslx_name_with_calling_convention,
 };
 use xlsynth_pir::ir_parser::Parser;
-use xlsynth_prover::prover::enum_in_bound::{prove_enum_in_bound, ASSERT_LABEL_PREFIX};
+use xlsynth_prover::prover::enum_in_bound::{ASSERT_LABEL_PREFIX, prove_enum_in_bound};
 use xlsynth_prover::prover::types::{BoolPropertyResult, FnInput, FnOutput};
-use xlsynth_prover::prover::{prover_for_choice, SolverChoice};
+use xlsynth_prover::prover::{SolverChoice, prover_for_choice};
 
 const SUBCOMMAND: &str = "prove-enum-in-bound";
 

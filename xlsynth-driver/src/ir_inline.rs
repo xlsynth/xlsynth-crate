@@ -2,7 +2,7 @@
 
 use clap::ArgMatches;
 use std::path::PathBuf;
-use xlsynth_pir::{run_ir_inline_over_ir_text, IrInlineBackend, IrInlineOptions};
+use xlsynth_pir::{IrInlineBackend, IrInlineOptions, run_ir_inline_over_ir_text};
 
 use crate::toolchain_config::ToolchainConfig;
 

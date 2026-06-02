@@ -19,13 +19,13 @@ use xlsynth_g8r::aig_serdes::g8r::{emit_g8r, encode_g8r_binary, parse_g8r};
 use xlsynth_g8r::gate_builder::{GateBuilder, GateBuilderOptions};
 use xlsynth_g8r::test_utils::interesting_ir_roundtrip_cases;
 use xlsynth_pir::ir_parser;
-use xlsynth_vastly::compile_pipeline_module;
-use xlsynth_vastly::pipeline_cycle_from_irvalue;
-use xlsynth_vastly::run_pipeline_and_collect_outputs;
 use xlsynth_vastly::PipelineCycle;
 use xlsynth_vastly::PipelineStimulus;
 use xlsynth_vastly::Signedness;
 use xlsynth_vastly::Value4;
+use xlsynth_vastly::compile_pipeline_module;
+use xlsynth_vastly::pipeline_cycle_from_irvalue;
+use xlsynth_vastly::run_pipeline_and_collect_outputs;
 
 use test_case::test_case;
 
@@ -288,8 +288,10 @@ top fn main(x: bits[1] id=1) -> bits[1] {
         .output()
         .unwrap();
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr)
-        .contains("does not support toggle-dependent objective g8r-post-weighted-switching"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("does not support toggle-dependent objective g8r-post-weighted-switching")
+    );
 }
 
 fn assert_value4_matches_ir_bits(actual: &Value4, expected_bits: &IrBits) {
@@ -477,8 +479,10 @@ fn run_ir2pipeline_and_simulate_output(ir_text: &str, input_value: &str) -> Stri
     let input_value = IrValue::parse_typed(input_value).expect("input value should parse");
     let stimulus = PipelineStimulus {
         half_period: 5,
-        cycles: vec![pipeline_cycle_from_irvalue(&pipeline, &input_value)
-            .expect("typed XLS input should map to one pipeline cycle")],
+        cycles: vec![
+            pipeline_cycle_from_irvalue(&pipeline, &input_value)
+                .expect("typed XLS input should map to one pipeline cycle"),
+        ],
     };
     let outputs =
         run_pipeline_and_collect_outputs(&pipeline, &stimulus, &pipeline.initial_state_x())
@@ -4634,9 +4638,11 @@ block pipe(clk: clock, data: bits[1], le: bits[1], out: bits[1]) {
     assert_eq!(design.clock.as_ref().unwrap().name, "clk");
     assert_eq!(design.registers.len(), 1);
     assert_eq!(design.registers[0].name, "state");
-    assert!(std::fs::read(&bin_path)
-        .unwrap()
-        .starts_with(b"g8rbin_v2\n"));
+    assert!(
+        std::fs::read(&bin_path)
+            .unwrap()
+            .starts_with(b"g8rbin_v2\n")
+    );
     let netlist = std::fs::read_to_string(&netlist_path).unwrap();
     assert!(netlist.contains("always_ff @ (posedge clk)"));
     assert!(netlist.contains("state <="));
@@ -4700,8 +4706,10 @@ top block pipe(clk: clock, data: bits[1], out: bits[1]) {
         .output()
         .unwrap();
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr)
-        .contains("--aiger-out requires a clockless, register-free design"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("--aiger-out requires a clockless, register-free design")
+    );
     assert!(!aiger_path.exists());
 }
 
@@ -9920,10 +9928,12 @@ fn prove_enum_in_bound_failure_for_solver(solver: &str) {
     let counterexample = json["counterexample"].as_object().unwrap();
     assert_eq!(json["assert_label_prefix"], "enum-in-bound");
     assert!(counterexample["inputs"].as_array().unwrap().len() > 0);
-    assert!(counterexample["output"]["assertion_label"]
-        .as_str()
-        .unwrap()
-        .starts_with("enum-in-bound::"));
+    assert!(
+        counterexample["output"]["assertion_label"]
+            .as_str()
+            .unwrap()
+            .starts_with("enum-in-bound::")
+    );
 }
 
 macro_rules! test_prove_enum_in_bound_solver {
