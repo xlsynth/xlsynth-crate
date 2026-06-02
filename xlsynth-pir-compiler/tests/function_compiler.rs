@@ -168,6 +168,39 @@ top fn f(init: bits[8][2] id=9, invariant: bits[8] id=10) -> bits[8][2] {
 }
 
 #[test]
+fn package_compiler_keeps_counted_for_aggregate_carry_input_disjoint_from_output() {
+    let ir = r#"package test
+
+fn body(i: bits[1] id=1, carry: bits[8][2][2] id=2) -> bits[8][2][2] {
+  zero: bits[1] = literal(value=0, id=3)
+  one: bits[1] = literal(value=1, id=4)
+  first: bits[8][2] = array_index(carry, indices=[zero], id=5)
+  second: bits[8][2] = array_index(carry, indices=[one], id=6)
+  ret swapped: bits[8][2][2] = array(second, first, id=7)
+}
+
+top fn f(init: bits[8][2][2] id=8) -> bits[8][2][2] {
+  ret result: bits[8][2][2] = counted_for(init, trip_count=2, stride=0, body=body, id=9)
+}
+"#;
+    let package = Parser::new(ir)
+        .parse_and_validate_package()
+        .expect("test PIR package should parse and validate");
+    let function = package.get_top_fn().expect("top function should exist");
+    let compiler = PirFunctionCompiler::compile_package(&package).expect("package should compile");
+    let args = [IrValue::make_array(&[array(8, &[1, 2]), array(8, &[3, 4])])
+        .expect("nested array should construct")];
+    let expected = match eval_fn_in_package(&package, function, &args) {
+        FnEvalResult::Success(success) => success.value,
+        other => panic!("PIR evaluation failed: {other:?}"),
+    };
+    assert_eq!(
+        compiler.run_ir_values(&args).expect("execute counted_for"),
+        expected
+    );
+}
+
+#[test]
 fn package_compiler_lowers_wide_induction_counted_for() {
     let compiler = compile_package(
         r#"package test

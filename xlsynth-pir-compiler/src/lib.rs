@@ -1201,6 +1201,7 @@ struct InvokeScratchPlan {
 struct CountedForScratchPlan {
     pointer_array_offset: usize,
     induction_offset: Option<usize>,
+    carry_offset: Option<usize>,
     scalar_operand_offsets: Vec<Option<usize>>,
     output_offset: Option<usize>,
 }
@@ -1364,7 +1365,6 @@ impl ScratchPlan {
         }
         for node_ref in order {
             let NodePayload::CountedFor {
-                init,
                 body,
                 invariant_args,
                 ..
@@ -1393,8 +1393,20 @@ impl ScratchPlan {
                     "counted_for induction scratch size overflow",
                 )?)
             };
-            let mut scalar_operand_offsets = Vec::with_capacity(1 + invariant_args.len());
-            for operand in std::iter::once(init).chain(invariant_args.iter()) {
+            let result_layout = NativeValueLayout::from_type(&function.get_node(*node_ref).ty)?;
+            let carry_offset = if result_layout.byte_count() == 0 {
+                None
+            } else {
+                Some(reserve_scratch_region(
+                    &mut byte_count,
+                    &mut alignment,
+                    result_layout.byte_count(),
+                    result_layout.alignment(),
+                    "counted_for carry scratch size overflow",
+                )?)
+            };
+            let mut scalar_operand_offsets = Vec::with_capacity(invariant_args.len());
+            for operand in invariant_args {
                 let layout = NativeValueLayout::from_type(&function.get_node(*operand).ty)?;
                 let offset =
                     if matches!(layout, NativeValueLayout::Scalar(_)) && layout.byte_count() != 0 {
@@ -1424,7 +1436,6 @@ impl ScratchPlan {
                 std::mem::align_of::<*const u8>(),
                 "counted_for pointer array scratch size overflow",
             )?;
-            let result_layout = NativeValueLayout::from_type(&function.get_node(*node_ref).ty)?;
             let output_offset = if result_layout.byte_count() == 0 {
                 None
             } else {
@@ -1441,6 +1452,7 @@ impl ScratchPlan {
                 CountedForScratchPlan {
                     pointer_array_offset,
                     induction_offset,
+                    carry_offset,
                     scalar_operand_offsets,
                     output_offset,
                 },
@@ -3604,21 +3616,29 @@ fn lower_counted_for(
         .ins()
         .store(MemFlags::new(), induction_pointer, inputs_pointer, 0);
     let init_layout = NativeValueLayout::from_type(&function.get_node(init).ty)?;
-    let initial_carry_pointer = invoke_operand_pointer(
+    let carry_pointer = plan
+        .carry_offset
+        .map(|offset| pointer_at_offset(builder, scratch_pointer, offset))
+        .unwrap_or_else(|| builder.ins().iconst(pointer_type, 0));
+    store_nonoverlapping_value_to_storage(
         builder,
+        carry_pointer,
         computed_value_for(values, init)?,
         &init_layout,
-        plan.scalar_operand_offsets[0],
-        scratch_pointer,
-        pointer_type,
     )?;
+    builder.ins().store(
+        MemFlags::new(),
+        carry_pointer,
+        inputs_pointer,
+        std::mem::size_of::<*const u8>() as i32,
+    );
     for (index, invariant) in invariant_args.iter().enumerate() {
         let layout = NativeValueLayout::from_type(&function.get_node(*invariant).ty)?;
         let pointer = invoke_operand_pointer(
             builder,
             computed_value_for(values, *invariant)?,
             &layout,
-            plan.scalar_operand_offsets[index + 1],
+            plan.scalar_operand_offsets[index],
             scratch_pointer,
             pointer_type,
         )?;
@@ -3641,11 +3661,8 @@ fn lower_counted_for(
     let loop_body = builder.create_block();
     let loop_done = builder.create_block();
     let iteration = builder.append_block_param(loop_header, types::I64);
-    let carry_pointer = builder.append_block_param(loop_header, pointer_type);
     let zero = builder.ins().iconst(types::I64, 0);
-    builder
-        .ins()
-        .jump(loop_header, &[zero.into(), initial_carry_pointer.into()]);
+    builder.ins().jump(loop_header, &[zero.into()]);
 
     builder.switch_to_block(loop_header);
     let continue_loop =
@@ -3664,12 +3681,6 @@ fn lower_counted_for(
         builder.ins().imul_imm(iteration, stride as i64)
     };
     store_unsigned_i64_to_bits_storage(builder, induction_pointer, induction, induction_layout)?;
-    builder.ins().store(
-        MemFlags::new(),
-        carry_pointer,
-        inputs_pointer,
-        std::mem::size_of::<*const u8>() as i32,
-    );
     emit_checked_compiled_function_call(
         builder,
         target,
@@ -3678,10 +3689,10 @@ fn lower_counted_for(
         scratch_pointer,
         execution_context,
     );
+    let next_carry = load_value_from_storage(builder, output_pointer, result_layout);
+    store_nonoverlapping_value_to_storage(builder, carry_pointer, next_carry, result_layout)?;
     let next_iteration = builder.ins().iadd_imm(iteration, 1);
-    builder
-        .ins()
-        .jump(loop_header, &[next_iteration.into(), output_pointer.into()]);
+    builder.ins().jump(loop_header, &[next_iteration.into()]);
     builder.seal_block(loop_header);
 
     builder.switch_to_block(loop_done);
