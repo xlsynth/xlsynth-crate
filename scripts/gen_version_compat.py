@@ -59,6 +59,12 @@ class VersionMapping:
     crate_release_datetime: str
 
 
+@dataclass(frozen=True)
+class ReleaseSetEligibility:
+    publish_order_present: bool
+    ineligibility_reason: Optional[str]
+
+
 def get_file_content_at_commit(commit: str, file_path: str) -> Optional[str]:
     """Return content of file at a specific commit. Returns None if an error occurs."""
     try:
@@ -208,11 +214,14 @@ def _get_publish_order_at_tag(tag: str) -> Optional[List[str]]:
     return crates
 
 
-def _get_release_ineligibility_reason(tag: str, crate_version: str) -> Optional[str]:
-    """Return why a release cannot enter generated compatibility metadata."""
+def _get_release_set_eligibility(tag: str, crate_version: str) -> ReleaseSetEligibility:
+    """Return declared release-set validation state for a tag."""
     publish_order = _get_publish_order_at_tag(tag)
     if publish_order is None:
-        return f"{tag} does not contain {PUBLISH_ORDER_PATH}"
+        return ReleaseSetEligibility(
+            publish_order_present=False,
+            ineligibility_reason=None,
+        )
 
     missing = [
         crate
@@ -220,8 +229,14 @@ def _get_release_ineligibility_reason(tag: str, crate_version: str) -> Optional[
         if crate_version not in _published_versions(crate)
     ]
     if missing:
-        return f"missing crate publications: {', '.join(missing)}"
-    return None
+        return ReleaseSetEligibility(
+            publish_order_present=True,
+            ineligibility_reason=f"missing crate publications: {', '.join(missing)}",
+        )
+    return ReleaseSetEligibility(
+        publish_order_present=True,
+        ineligibility_reason=None,
+    )
 
 
 def _load_existing_mappings(json_path: str) -> Dict[str, VersionMapping]:
@@ -253,6 +268,7 @@ def get_version_mapping(recompute_all_entries: bool) -> List[VersionMapping]:
     all_tags = get_all_tags()
     print(f"Found {len(all_tags)} tags. Processing...", flush=True)
     mappings: List[VersionMapping] = []
+    skipped_without_publish_order = 0
     skipped_unpublished = 0
     existing_path = "generated_version_compat.json"
     existing = {} if recompute_all_entries else _load_existing_mappings(existing_path)
@@ -274,15 +290,23 @@ def get_version_mapping(recompute_all_entries: bool) -> List[VersionMapping]:
         if not lib_version:
             print(f"  Skipped tag {tag}: no lib version extracted.", flush=True)
             continue
-        release_dt = get_tag_datetime(tag) or "Unknown"
-        ineligibility_reason = _get_release_ineligibility_reason(tag, crate_version)
-        if ineligibility_reason is not None:
+        eligibility = _get_release_set_eligibility(tag, crate_version)
+        if not recompute_all_entries and not eligibility.publish_order_present:
             print(
-                f"  Skipped tag {tag}: {ineligibility_reason}.",
+                f"  Skipped tag {tag}: ordinary generation does not backfill "
+                f"tags without {PUBLISH_ORDER_PATH}.",
+                flush=True,
+            )
+            skipped_without_publish_order += 1
+            continue
+        if eligibility.ineligibility_reason is not None:
+            print(
+                f"  Skipped tag {tag}: {eligibility.ineligibility_reason}.",
                 flush=True,
             )
             skipped_unpublished += 1
             continue
+        release_dt = get_tag_datetime(tag) or "Unknown"
         mappings.append(
             VersionMapping(
                 crate_version=crate_version,
@@ -296,6 +320,11 @@ def get_version_mapping(recompute_all_entries: bool) -> List[VersionMapping]:
         )
     print(
         f"Skipped {skipped_unpublished} tag(s) due to incomplete crate publications.",
+        flush=True,
+    )
+    print(
+        f"Skipped {skipped_without_publish_order} tag(s) without {PUBLISH_ORDER_PATH} "
+        "to preserve ordinary-generation historical gaps.",
         flush=True,
     )
     return mappings
@@ -342,10 +371,10 @@ def get_single_version_mapping(crate_version: str) -> Optional[VersionMapping]:
     if not lib_version:
         print(f"  Skipped tag {tag}: no lib version extracted.", flush=True)
         return None
-    ineligibility_reason = _get_release_ineligibility_reason(tag, crate_version)
-    if ineligibility_reason is not None:
+    eligibility = _get_release_set_eligibility(tag, crate_version)
+    if eligibility.ineligibility_reason is not None:
         print(
-            f"  Skipped tag {tag}: {ineligibility_reason}.",
+            f"  Skipped tag {tag}: {eligibility.ineligibility_reason}.",
             flush=True,
         )
         return None
