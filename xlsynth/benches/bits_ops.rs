@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 use xlsynth::{IrBits, IrValue};
 

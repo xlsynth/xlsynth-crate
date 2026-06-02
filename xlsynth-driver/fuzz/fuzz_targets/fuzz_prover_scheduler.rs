@@ -27,7 +27,7 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use xlsynth_driver::prover::{run_prover_plan, ProverReportNode, TaskOutcome};
+use xlsynth_driver::prover::{ProverReportNode, TaskOutcome, run_prover_plan};
 use xlsynth_driver::prover_config::ProverPlan;
 use xlsynth_driver_fuzz::eval_fuzz;
 

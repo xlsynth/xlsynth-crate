@@ -3,7 +3,7 @@
 use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::test_utils::structurally_equivalent;
-use xlsynth_g8r_fuzz::{build_graph, FuzzGraph};
+use xlsynth_g8r_fuzz::{FuzzGraph, build_graph};
 
 fuzz_target!(|graph: FuzzGraph| {
     let _ = env_logger::builder().is_test(true).try_init();

@@ -5,13 +5,13 @@ use std::path::Path;
 use clap::ArgMatches;
 use serde::Serialize;
 use xlsynth_g8r::aig::GateFn;
-use xlsynth_g8r::aig_serdes::gate2ir::{repack_gate_fn_inputs_with_schema, GateFnInterfaceSchema};
+use xlsynth_g8r::aig_serdes::gate2ir::{GateFnInterfaceSchema, repack_gate_fn_inputs_with_schema};
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
 use xlsynth_g8r::ir_aig_sharing::{
-    get_equivalences, prove_equivalence_candidates_with_backend_streaming, CandidateProofResult,
-    IrAigCandidateRhs, IrAigSharingOptions,
+    CandidateProofResult, IrAigCandidateRhs, IrAigSharingOptions, get_equivalences,
+    prove_equivalence_candidates_with_backend_streaming,
 };
 use xlsynth_g8r::prove_gate_fn_equiv_common::GateFormalBackend;
 use xlsynth_pir::ir;

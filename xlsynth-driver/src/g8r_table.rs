@@ -5,12 +5,12 @@ use std::path::Path;
 
 use comfy_table::presets::ASCII_MARKDOWN;
 use comfy_table::{CellAlignment, ContentArrangement, Table};
-use xlsynth_g8r::aig::table::{
-    build_area_table_report, build_critical_path_area_table_report,
-    build_critical_path_opcode_area_table_report, build_opcode_area_table_report, AreaTableReport,
-    OpcodeAreaTableReport, UnattributedAreaTableRow,
-};
 use xlsynth_g8r::aig::GateFn;
+use xlsynth_g8r::aig::table::{
+    AreaTableReport, OpcodeAreaTableReport, UnattributedAreaTableRow, build_area_table_report,
+    build_critical_path_area_table_report, build_critical_path_opcode_area_table_report,
+    build_opcode_area_table_report,
+};
 use xlsynth_g8r::aig_serdes::g8r::load_gate_fn_from_path;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
@@ -456,13 +456,13 @@ fn handle_g8r_attribution_table(
 #[cfg(test)]
 mod tests {
     use tempfile::Builder;
-    use xlsynth_g8r::aig::table::{AreaTableReport, AreaTableRow, UnattributedAreaTableRow};
     use xlsynth_g8r::aig::SequentialGateFn;
+    use xlsynth_g8r::aig::table::{AreaTableReport, AreaTableRow, UnattributedAreaTableRow};
     use xlsynth_g8r::aig_serdes::g8r::emit_g8r;
     use xlsynth_g8r::test_utils::setup_simple_graph;
 
     use super::{
-        load_gate_fn, render_pir_node_table, truncate_for_table, TableMetric, AREA_SUBCOMMAND,
+        AREA_SUBCOMMAND, TableMetric, load_gate_fn, render_pir_node_table, truncate_for_table,
     };
 
     #[test]

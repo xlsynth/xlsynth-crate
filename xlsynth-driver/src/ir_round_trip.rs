@@ -3,7 +3,7 @@
 use clap::ArgMatches;
 use xlsynth_pir::{
     ir,
-    ir_parser::{self, emit_fn_as_block, Parser},
+    ir_parser::{self, Parser, emit_fn_as_block},
 };
 
 /// Implements the "ir-round-trip" subcommand: parse IR and write it back to

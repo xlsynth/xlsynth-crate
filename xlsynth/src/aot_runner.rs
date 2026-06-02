@@ -5,7 +5,7 @@
 //! C ABI expected by the generated AOT function, and exposes helper routines
 //! for packing/unpacking input and output data.
 
-use std::alloc::{alloc_zeroed, dealloc, Layout};
+use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::ffi::c_void;
 use std::ptr::NonNull;
 

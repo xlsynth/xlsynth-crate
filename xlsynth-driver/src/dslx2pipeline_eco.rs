@@ -3,8 +3,8 @@
 use clap::ArgMatches;
 
 use crate::common::{
-    extract_codegen_flags, extract_pipeline_spec, parse_bool_flag, resolve_type_inference_v2,
-    CodegenFlags, PipelineSpec,
+    CodegenFlags, PipelineSpec, extract_codegen_flags, extract_pipeline_spec, parse_bool_flag,
+    resolve_type_inference_v2,
 };
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::{

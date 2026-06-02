@@ -16,7 +16,7 @@ use std::{
 use log::debug;
 use xlsynth_sys::{self as sys, CDslxImportData};
 
-use crate::{c_str_to_rust, c_str_to_rust_no_dealloc, IrValue, XlsynthError};
+use crate::{IrValue, XlsynthError, c_str_to_rust, c_str_to_rust_no_dealloc};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum TypeDefinitionKind {
@@ -791,11 +791,7 @@ impl Quickcheck {
     pub fn get_count(&self) -> Option<i64> {
         let mut result: i64 = 0;
         let has_count = unsafe { sys::xls_dslx_quickcheck_get_count(self.ptr, &mut result) };
-        if has_count {
-            Some(result)
-        } else {
-            None
-        }
+        if has_count { Some(result) } else { None }
     }
 }
 
@@ -1929,7 +1925,7 @@ impl fmt::Display for ParametricEnv {
 #[cfg(test)]
 mod param_env_and_interp_value_tests {
     use super::*;
-    use crate::{mangle_dslx_name_with_env, DslxCallingConvention, IrBits, IrValue};
+    use crate::{DslxCallingConvention, IrBits, IrValue, mangle_dslx_name_with_env};
 
     #[test]
     fn test_interp_value_make_bits_and_convert() {
@@ -2854,12 +2850,16 @@ fn without_assert(a: u32, b: u32) -> u32 {
         let with_assert_fn = with_assert_fn.expect("with_assert fn found");
         let without_assert_fn = without_assert_fn.expect("without_assert fn found");
 
-        assert!(type_info
-            .requires_implicit_token(&with_assert_fn)
-            .expect("requires_implicit_token success (with_assert)"));
-        assert!(!type_info
-            .requires_implicit_token(&without_assert_fn)
-            .expect("requires_implicit_token success (without_assert)"));
+        assert!(
+            type_info
+                .requires_implicit_token(&with_assert_fn)
+                .expect("requires_implicit_token success (with_assert)")
+        );
+        assert!(
+            !type_info
+                .requires_implicit_token(&without_assert_fn)
+                .expect("requires_implicit_token success (without_assert)")
+        );
     }
 
     #[test]
@@ -2973,24 +2973,24 @@ fn main() -> u32 {
         let type_info = tcm.get_type_info();
         let mut found = false;
         for i in 0..module.get_member_count() {
-            if let Some(MatchableModuleMember::Function(f)) = module.get_member(i).to_matchable() {
-                if f.get_identifier() == "f" {
-                    found = true;
-                    assert_eq!(f.get_param_count(), 2);
-                    let p0 = f.get_param(0);
-                    assert_eq!(p0.get_name(), "a");
-                    let p0_ty = type_info
-                        .get_type_for_type_annotation(&p0.get_type_annotation())
-                        .unwrap();
-                    assert!(p0_ty.is_bits_like().is_some());
+            if let Some(MatchableModuleMember::Function(f)) = module.get_member(i).to_matchable()
+                && f.get_identifier() == "f"
+            {
+                found = true;
+                assert_eq!(f.get_param_count(), 2);
+                let p0 = f.get_param(0);
+                assert_eq!(p0.get_name(), "a");
+                let p0_ty = type_info
+                    .get_type_for_type_annotation(&p0.get_type_annotation())
+                    .unwrap();
+                assert!(p0_ty.is_bits_like().is_some());
 
-                    let p1 = f.get_param(1);
-                    assert_eq!(p1.get_name(), "b");
-                    let p1_ty = type_info
-                        .get_type_for_type_annotation(&p1.get_type_annotation())
-                        .unwrap();
-                    assert!(p1_ty.is_enum());
-                }
+                let p1 = f.get_param(1);
+                assert_eq!(p1.get_name(), "b");
+                let p1_ty = type_info
+                    .get_type_for_type_annotation(&p1.get_type_annotation())
+                    .unwrap();
+                assert!(p1_ty.is_enum());
             }
         }
         assert!(found, "function f not found");
@@ -3231,11 +3231,10 @@ fn plain_fn(x: u32) -> u32 { x }
         for i in 0..main_module.get_member_count() {
             if let Some(MatchableModuleMember::Function(f)) =
                 main_module.get_member(i).to_matchable()
+                && f.get_identifier() == "f"
             {
-                if f.get_identifier() == "f" {
-                    f_opt = Some(f);
-                    break;
-                }
+                f_opt = Some(f);
+                break;
             }
         }
         let f = f_opt.expect("function f found");

@@ -8,10 +8,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    dslx,
+    IrValue, XlsynthError, dslx,
     dslx_bridge::{BridgeBuilder, FunctionParamData, StructMemberData},
     ir_value::IrFormatPreference,
-    IrValue, XlsynthError,
 };
 
 /// Emits Rust source that mirrors DSLX public type declarations.
@@ -215,28 +214,28 @@ impl RustBridgeBuilder {
         ty: &dslx::Type,
     ) -> Result<String, XlsynthError> {
         if let Some(type_annotation) = type_annotation {
-            if let Some(array_annotation) = type_annotation.to_array_type_annotation() {
-                if ty.is_array() {
-                    let element_annotation = array_annotation.get_element_type();
-                    let element_ty = ty.get_array_element_type();
-                    let rust_ty = Self::convert_type_with_annotation(
-                        current_module_path,
-                        type_info,
-                        Some(&element_annotation),
-                        &element_ty,
-                    )?;
-                    return Ok(format!("[{rust_ty}; {}]", ty.get_array_size()));
-                }
+            if let Some(array_annotation) = type_annotation.to_array_type_annotation()
+                && ty.is_array()
+            {
+                let element_annotation = array_annotation.get_element_type();
+                let element_ty = ty.get_array_element_type();
+                let rust_ty = Self::convert_type_with_annotation(
+                    current_module_path,
+                    type_info,
+                    Some(&element_annotation),
+                    &element_ty,
+                )?;
+                return Ok(format!("[{rust_ty}; {}]", ty.get_array_size()));
             }
-            if let Some(type_ref_annotation) = type_annotation.to_type_ref_type_annotation() {
-                if let Some(rust_ty) = Self::convert_type_ref_annotation(
+            if let Some(type_ref_annotation) = type_annotation.to_type_ref_type_annotation()
+                && let Some(rust_ty) = Self::convert_type_ref_annotation(
                     current_module_path,
                     type_info,
                     &type_ref_annotation,
                     ty,
-                )? {
-                    return Ok(rust_ty);
-                }
+                )?
+            {
+                return Ok(rust_ty);
             }
         }
         if let Some((is_signed, bit_count)) = ty.is_bits_like() {
@@ -366,17 +365,17 @@ impl RustBridgeBuilder {
         ty: &dslx::Type,
     ) -> Result<(), XlsynthError> {
         if let Some(type_annotation) = type_annotation {
-            if let Some(array_annotation) = type_annotation.to_array_type_annotation() {
-                if ty.is_array() {
-                    let element_annotation = array_annotation.get_element_type();
-                    let element_ty = ty.get_array_element_type();
-                    self.emit_concrete_parametric_types_for_type(
-                        type_info,
-                        Some(&element_annotation),
-                        &element_ty,
-                    )?;
-                    return Ok(());
-                }
+            if let Some(array_annotation) = type_annotation.to_array_type_annotation()
+                && ty.is_array()
+            {
+                let element_annotation = array_annotation.get_element_type();
+                let element_ty = ty.get_array_element_type();
+                self.emit_concrete_parametric_types_for_type(
+                    type_info,
+                    Some(&element_annotation),
+                    &element_ty,
+                )?;
+                return Ok(());
             }
             if let Some(type_ref_annotation) = type_annotation.to_type_ref_type_annotation() {
                 self.emit_concrete_parametric_struct_for_type_ref(
@@ -771,11 +770,7 @@ fn sanitize_type_parametric_segment(segment: &str) -> String {
         }
         out.push(ch);
     }
-    if out.is_empty() {
-        "P".to_string()
-    } else {
-        out
-    }
+    if out.is_empty() { "P".to_string() } else { out }
 }
 
 fn rust_type_parametric_value_suffix(
@@ -811,11 +806,7 @@ fn sanitize_type_parametric_value_atom(value: &str) -> String {
             }
         })
         .collect::<String>();
-    if out.is_empty() {
-        "P".to_string()
-    } else {
-        out
-    }
+    if out.is_empty() { "P".to_string() } else { out }
 }
 
 #[cfg(test)]
@@ -1395,9 +1386,11 @@ pub struct Box__N_8 {
 
         let mut builder = RustBridgeBuilder::new();
         let error = convert_imported_module(&importer_typechecked, &mut builder).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("direct imported parametric struct instantiation"));
+        assert!(
+            error
+                .to_string()
+                .contains("direct imported parametric struct instantiation")
+        );
         assert!(error.to_string().contains("concrete type alias"));
     }
 }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use xlsynth::ir_value::{IrFormatPreference, IrValue};
 
 fn bench_to_u64_old(c: &mut Criterion) {

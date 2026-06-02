@@ -18,8 +18,8 @@ use xlsynth_sys::{
 };
 
 use crate::{
-    ir_package::{IrPackagePtr, IrType, ScheduleAndCodegenResult},
     IrBits, IrFunction, IrValue, XlsynthError,
+    ir_package::{IrPackagePtr, IrType, ScheduleAndCodegenResult},
 };
 
 // Wrapper around the raw pointer that frees (i.e. when the wrapping refcount
@@ -135,7 +135,7 @@ pub(crate) unsafe fn c_str_to_rust_no_dealloc(xls_c_str: *mut std::os::raw::c_ch
     if xls_c_str.is_null() {
         String::new()
     } else {
-        let c_str: &CStr = CStr::from_ptr(xls_c_str);
+        let c_str: &CStr = unsafe { CStr::from_ptr(xls_c_str) };
         String::from_utf8_lossy(c_str.to_bytes()).to_string()
     }
 }
@@ -143,13 +143,15 @@ pub(crate) unsafe fn c_str_to_rust_no_dealloc(xls_c_str: *mut std::os::raw::c_ch
 /// Converts a C string that was given from the XLS library into a Rust string
 /// and deallocates the original C string.
 pub(crate) unsafe fn c_str_to_rust(xls_c_str: *mut std::os::raw::c_char) -> String {
-    let result = c_str_to_rust_no_dealloc(xls_c_str);
+    let result = unsafe { c_str_to_rust_no_dealloc(xls_c_str) };
 
     // We release the C string via a call to the XLS library so that it can use the
     // same allocator it used to allocate the string for deallocation and we don't
     // need to assume the Rust code and dynmic library are using the same underlying
     // allocator.
-    xlsynth_sys::xls_c_str_free(xls_c_str);
+    unsafe {
+        xlsynth_sys::xls_c_str_free(xls_c_str);
+    }
     result
 }
 
@@ -887,7 +889,9 @@ unsafe fn trace_messages_to_rust(
             verbosity: trace_message.verbosity,
         });
     }
-    xlsynth_sys::xls_trace_messages_free(c_trace_messages, count);
+    unsafe {
+        xlsynth_sys::xls_trace_messages_free(c_trace_messages, count);
+    }
     trace_messages
 }
 
@@ -898,7 +902,7 @@ pub(crate) unsafe fn c_strs_to_rust(
     let mut result: Vec<String> = Vec::new();
     for i in 0..count {
         let xls_c_str: *mut std::os::raw::c_char = unsafe { *c_strs.wrapping_add(i) };
-        result.push(c_str_to_rust_no_dealloc(xls_c_str));
+        result.push(unsafe { c_str_to_rust_no_dealloc(xls_c_str) });
     }
     if !c_strs.is_null() && count > 0 {
         unsafe {

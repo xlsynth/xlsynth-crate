@@ -10,7 +10,7 @@ use clap::ArgMatches;
 use xlsynth_g8r::aig::gate::GateFn;
 use xlsynth_g8r::aig::get_summary_stats::get_aig_stats;
 use xlsynth_g8r::aig::graph_logical_effort::{
-    analyze_graph_logical_effort, GraphLogicalEffortOptions,
+    GraphLogicalEffortOptions, analyze_graph_logical_effort,
 };
 use xlsynth_g8r::aig::logical_effort::{self, compute_logical_effort_min_delay};
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;

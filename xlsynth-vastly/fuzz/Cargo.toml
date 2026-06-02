@@ -2,7 +2,7 @@
 name = "xlsynth-vastly-fuzz"
 version = "0.53.0"
 publish = false
-edition = "2021"
+edition = "2024"
 
 [package.metadata]
 cargo-fuzz = true

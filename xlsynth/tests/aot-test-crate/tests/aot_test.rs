@@ -119,14 +119,18 @@ fn generated_wrappers_match_golden_references() {
 fn generated_wrappers_preserve_detailed_error_docs() {
     let ir_only_wrapper =
         fs::read_to_string(env!("XLSYNTH_AOT_ADD_ONE_RS")).expect("IR wrapper should exist");
-    assert!(ir_only_wrapper
-        .contains("Returns an error if the standalone artifact metadata cannot initialize"));
+    assert!(
+        ir_only_wrapper
+            .contains("Returns an error if the standalone artifact metadata cannot initialize")
+    );
     assert!(ir_only_wrapper.contains("the ABI buffers required by the generated entrypoint."));
 
     let typed_wrapper =
         fs::read_to_string(env!("XLSYNTH_AOT_WIDGET_FROB_RS")).expect("typed wrapper should exist");
-    assert!(typed_wrapper
-        .contains("Returns an error if input packing, AOT execution, output decoding, or"));
+    assert!(
+        typed_wrapper
+            .contains("Returns an error if input packing, AOT execution, output decoding, or")
+    );
     assert!(typed_wrapper.contains("an XLS assertion fails."));
 }
 
@@ -369,8 +373,8 @@ fn direct_runtime_runner(
 // Catches: standalone/direct-runtime execution drift that packaging-only tests
 // cannot observe.
 #[test]
-fn standalone_and_direct_runtime_runners_match_for_direct_calls(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn standalone_and_direct_runtime_runners_match_for_direct_calls()
+-> Result<(), Box<dyn std::error::Error>> {
     let mut standalone = add_one_aot::new_runner()?;
     let standalone_output = standalone.run(&41)?;
 
@@ -392,8 +396,8 @@ fn standalone_and_direct_runtime_runners_match_for_direct_calls(
 // Catches: callback or assertion-surface drift that direct-call-only parity
 // tests miss.
 #[test]
-fn standalone_and_direct_runtime_runners_match_for_assertions(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn standalone_and_direct_runtime_runners_match_for_assertions()
+-> Result<(), Box<dyn std::error::Error>> {
     let token = assert_pair_aot::Token {};
     let pair = assert_pair_aot::Input1 {
         field0: 2,

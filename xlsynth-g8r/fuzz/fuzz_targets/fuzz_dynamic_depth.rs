@@ -7,7 +7,7 @@ use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::aig::dynamic_depth::DynamicDepthState;
 use xlsynth_g8r::aig::dynamic_structural_hash::{DynamicStructuralHash, EdgeRef};
 use xlsynth_g8r::aig::{AigNode, AigOperand, AigRef};
-use xlsynth_g8r_fuzz::{build_graph, FuzzGraph};
+use xlsynth_g8r_fuzz::{FuzzGraph, build_graph};
 
 const MAX_STEPS: usize = 128;
 

@@ -5,12 +5,12 @@ use std::cmp::Reverse;
 use std::path::Path;
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
-use xlsynth_g8r::liberty::cell_formula::{parse_formula, Term};
+use xlsynth_g8r::liberty::cell_formula::{Term, parse_formula};
 use xlsynth_g8r::liberty_proto::{Cell, Library, PinDirection};
 use xlsynth_g8r::netlist::emit::emit_module_as_netlist_text;
 use xlsynth_g8r::netlist::io::load_liberty_with_timing_data_from_path;
 use xlsynth_g8r::netlist::sta::validate_output_pin_for_basic_sta;
-use xlsynth_g8r::netlist::techmap::{map_gatefn_to_structural_netlist, StructuralTechMapOptions};
+use xlsynth_g8r::netlist::techmap::{StructuralTechMapOptions, map_gatefn_to_structural_netlist};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CellPolicy {

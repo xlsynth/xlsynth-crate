@@ -2,8 +2,8 @@
 //! AOT compilation and execution-context helpers built on the `xlsynth_sys`
 //! FFI.
 
-use crate::aot_entrypoint_metadata::get_entrypoint_metadata;
 pub use crate::aot_entrypoint_metadata::AotEntrypointMetadata;
+use crate::aot_entrypoint_metadata::get_entrypoint_metadata;
 use crate::ir_package::{IrPackage, TraceMessage};
 use crate::xlsynth_error::XlsynthError;
 

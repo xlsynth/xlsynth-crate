@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::IrFunction;
+use crate::IrValue;
+use crate::XlsynthError;
 use crate::ir_package::IrPackage;
 use crate::ir_package::IrPackagePtr;
 use crate::ir_package::IrType;
 use crate::lib_support;
 use crate::lib_support::{BValuePtr, IrFnBuilderPtr};
-use crate::IrFunction;
-use crate::IrValue;
-use crate::XlsynthError;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::RwLockReadGuard;
@@ -540,7 +540,7 @@ impl FnBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ir_value::IrFormatPreference, IrValue};
+    use crate::{IrValue, ir_value::IrFormatPreference};
     use pretty_assertions::assert_eq;
 
     #[test]

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth::aot_builder::{emit_aot_module_from_ir_text, AotBuildSpec};
+use xlsynth::aot_builder::{AotBuildSpec, emit_aot_module_from_ir_text};
 
 fn main() {
     let add_one_ir = r#"package standalone_aot_tests

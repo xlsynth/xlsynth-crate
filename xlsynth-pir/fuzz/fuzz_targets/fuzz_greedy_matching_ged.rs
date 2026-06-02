@@ -7,8 +7,8 @@ use log::{debug, info};
 use xlsynth_pir::dce::remove_dead_nodes;
 use xlsynth_pir::greedy_matching_ged::GreedyMatchSelector;
 use xlsynth_pir::matching_ged::{
-    apply_fn_edits, compute_fn_edit, compute_fn_match, convert_match_set_to_edit_set,
-    format_ir_edits, format_match_actions, IrMatchSet, MatchAction,
+    IrMatchSet, MatchAction, apply_fn_edits, compute_fn_edit, compute_fn_match,
+    convert_match_set_to_edit_set, format_ir_edits, format_match_actions,
 };
 use xlsynth_pir::node_hashing::functions_structurally_equivalent;
 use xlsynth_pir_fuzz::equiv::{

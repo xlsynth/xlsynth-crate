@@ -7,11 +7,11 @@ use std::path::Path;
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use xlsynth_g8r::dslx_stitch_pipeline::{stitch_pipeline, StitchPipelineOptions};
+use xlsynth_g8r::dslx_stitch_pipeline::{StitchPipelineOptions, stitch_pipeline};
 use xlsynth_g8r::verilog_version::VerilogVersion;
 use xlsynth_vastly::{
-    compile_pipeline_module, run_pipeline_and_collect_outputs, LogicBit, PipelineCycle,
-    PipelineStimulus, Signedness, Value4,
+    LogicBit, PipelineCycle, PipelineStimulus, Signedness, Value4, compile_pipeline_module,
+    run_pipeline_and_collect_outputs,
 };
 
 #[derive(Arbitrary, Debug)]

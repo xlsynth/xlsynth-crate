@@ -3,11 +3,11 @@
 use clap::ArgMatches;
 
 use crate::common::resolve_type_inference_v2;
-use crate::toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConfig};
+use crate::toolchain_config::{ToolchainConfig, get_dslx_path, get_dslx_stdlib_path};
 use crate::tools::{run_ir_converter_main, run_opt_main};
 use tempfile::NamedTempFile;
 use xlsynth::DslxConvertOptions;
-use xlsynth_g8r::process_ir_path::{process_ir_path_for_cli, Options as G8rOptions};
+use xlsynth_g8r::process_ir_path::{Options as G8rOptions, process_ir_path_for_cli};
 
 pub fn handle_dslx_g8r_stats(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
     let input_file = matches.get_one::<String>("dslx_input_file").unwrap();

@@ -2,7 +2,7 @@
 
 use clap::ArgMatches;
 use xlsynth::IrPackage;
-use xlsynth_pir::{run_aug_opt_over_ir_text, AugOptOptions};
+use xlsynth_pir::{AugOptOptions, run_aug_opt_over_ir_text};
 
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::run_opt_main;

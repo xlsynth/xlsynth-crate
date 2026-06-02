@@ -2,15 +2,15 @@
 
 use std::path::Path;
 
-use crate::ir_equiv::{dispatch_ir_equiv, IrEquivRequest, IrModule};
+use crate::ir_equiv::{IrEquivRequest, IrModule, dispatch_ir_equiv};
 use crate::toolchain_config::ToolchainConfig;
 use xlsynth_g8r::aig::GateFn;
 use xlsynth_g8r::aig_serdes::g8r::load_gate_fn_from_path;
 use xlsynth_g8r::aig_serdes::gate2ir::gate_fn_to_xlsynth_ir;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser;
-use xlsynth_prover::prover::types::{AssertionSemantics, EquivParallelism};
 use xlsynth_prover::prover::SolverChoice;
+use xlsynth_prover::prover::types::{AssertionSemantics, EquivParallelism};
 
 const SUBCOMMAND: &str = "g8r-ir-equiv";
 

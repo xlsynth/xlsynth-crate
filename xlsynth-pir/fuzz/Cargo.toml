@@ -2,7 +2,7 @@
 
 [package]
 name = "xlsynth-pir-fuzz"
-edition = "2021"
+edition = "2024"
 publish = false
 
 [package.metadata]

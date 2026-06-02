@@ -5,9 +5,9 @@
 use std::collections::HashSet;
 
 use libfuzzer_sys::fuzz_target;
-use rand::rngs::StdRng;
 use rand::SeedableRng;
-use xlsynth_g8r::aig::cut_db_rewrite::{rewrite_gatefn_with_cut_db, RewriteOptions};
+use rand::rngs::StdRng;
+use xlsynth_g8r::aig::cut_db_rewrite::{RewriteOptions, rewrite_gatefn_with_cut_db};
 use xlsynth_g8r::aig::fraig::{IterationBounds, fraig_optimize_with_backend_and_options};
 use xlsynth_g8r::aig::gate::AigNode;
 use xlsynth_g8r::cut_db::loader::CutDb;

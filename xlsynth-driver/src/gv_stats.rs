@@ -3,7 +3,7 @@
 use clap::ArgMatches;
 use std::path::Path;
 use xlsynth_g8r::netlist::io::{load_liberty_with_timing_data_from_path, parse_netlist_from_path};
-use xlsynth_g8r::netlist::report::{build_netlist_report, select_module, NetlistReport};
+use xlsynth_g8r::netlist::report::{NetlistReport, build_netlist_report, select_module};
 use xlsynth_g8r::netlist::sta::StaOptions;
 use xlsynth_g8r::netlist::stages::StagePartitionStatus;
 
@@ -345,8 +345,10 @@ mod tests {
         assert!(render_netlist_report(&report).contains(
             "timing_query_diagnostic_counts:\n  delay_slew_below_min_clamp_count: 1\n  delay_slew_single_above_max_extrapolation_count: 2\n  delay_slew_multiple_above_max_clamp_count: 3\n  setup_below_min_clamp_count: 4\n  setup_above_max_clamp_count: 5\n"
         ));
-        assert!(render_netlist_report(&report)
-            .contains("stage 0 max_delay=2.000000 combinational_cell_area=2.000000\n"));
+        assert!(
+            render_netlist_report(&report)
+                .contains("stage 0 max_delay=2.000000 combinational_cell_area=2.000000\n")
+        );
         assert!(render_netlist_report(&report).contains(
             "stage 0 max_delay=2.000000 combinational_cell_area=2.000000\n  clock_to_output_delay: 0.500000\n  combinational_delay: 1.250000\n  setup_delay: 0.250000\n"
         ));

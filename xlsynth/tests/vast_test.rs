@@ -522,13 +522,13 @@ fn test_generate_loop_with_localparam_and_empty_always_blocks() {
 
     let zero = file.make_plain_literal(0, &IrFormatPreference::UnsignedDecimal);
     let two = file.make_plain_literal(2, &IrFormatPreference::UnsignedDecimal);
-    let mut gen = module.add_generate_loop("i", &zero, &two, Some("G"));
+    let mut gen_loop = module.add_generate_loop("i", &zero, &two, Some("G"));
 
     let five = file.make_plain_literal(5, &IrFormatPreference::UnsignedDecimal);
-    gen.add_localparam("LP", &five);
+    gen_loop.add_localparam("LP", &five);
 
-    gen.add_always_comb().unwrap();
-    gen.add_always_ff(&[]).unwrap();
+    gen_loop.add_always_comb().unwrap();
+    gen_loop.add_always_ff(&[]).unwrap();
 
     let verilog = file.emit();
     let want = r#"module gen_empty_blocks;
@@ -1178,20 +1178,20 @@ fn test_generate_loop_with_inline_and_macro() {
     // for (genvar i = 0; i < 1; ++i) begin : G
     let zero = file.make_plain_literal(0, &IrFormatPreference::UnsignedDecimal);
     let one = file.make_plain_literal(1, &IrFormatPreference::UnsignedDecimal);
-    let mut gen = module.add_generate_loop("i", &zero, &one, Some("G"));
+    let mut gen_loop = module.add_generate_loop("i", &zero, &one, Some("G"));
 
     // Comment, blank line, and macro statements inside the loop.
     let comment = file.make_comment("inside");
-    gen.add_comment(&comment);
-    gen.add_blank_line();
+    gen_loop.add_comment(&comment);
+    gen_loop.add_blank_line();
     let mref = file.make_macro_ref("DO_SOMETHING");
     let mstmt = file.make_macro_statement(&mref, true);
-    gen.add_macro_statement(&mstmt);
+    gen_loop.add_macro_statement(&mstmt);
     // Macro with arguments.
     let three = file.make_plain_literal(3, &IrFormatPreference::UnsignedDecimal);
     let mref_args = file.make_macro_ref_with_args("DO_THING", &[&three]);
     let mstmt_args = file.make_macro_statement(&mref_args, false);
-    gen.add_macro_statement(&mstmt_args);
+    gen_loop.add_macro_statement(&mstmt_args);
 
     let verilog = file.emit();
     let want = r#"module gen_with_macros;
@@ -1361,16 +1361,16 @@ fn test_generate_loop_conditional_assignments() {
     // for (genvar i = 0; i < 3; i = i + 1) begin : g
     let zero = file.make_plain_literal(0, &IrFormatPreference::UnsignedDecimal);
     let three = file.make_plain_literal(3, &IrFormatPreference::UnsignedDecimal);
-    let mut gen = module.add_generate_loop("i", &zero, &three, Some("g"));
+    let mut gen_loop = module.add_generate_loop("i", &zero, &three, Some("g"));
 
-    let i_ref = gen.get_genvar();
+    let i_ref = gen_loop.get_genvar();
     let i_expr = i_ref.to_expr();
     let zero_cond = file.make_plain_literal(0, &IrFormatPreference::UnsignedDecimal);
     let one_cond = file.make_plain_literal(1, &IrFormatPreference::UnsignedDecimal);
 
     let cond0 = file.make_eq(&i_expr, &zero_cond);
     let cond1 = file.make_eq(&i_expr, &one_cond);
-    let cond = gen.add_conditional(&cond0);
+    let cond = gen_loop.add_conditional(&cond0);
     let mut then_block = cond.then_block();
 
     let out_indexable = out.to_indexable_expr();

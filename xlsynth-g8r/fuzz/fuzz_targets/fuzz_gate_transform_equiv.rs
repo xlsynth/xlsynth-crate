@@ -4,7 +4,7 @@ use libfuzzer_sys::fuzz_target;
 use rand::seq::IteratorRandom;
 use xlsynth_g8r::check_equivalence;
 use xlsynth_g8r::transforms::{self, transform_trait::TransformDirection};
-use xlsynth_g8r_fuzz::{build_graph, FuzzGraph};
+use xlsynth_g8r_fuzz::{FuzzGraph, build_graph};
 
 fuzz_target!(|graph: FuzzGraph| {
     if std::env::var("XLSYNTH_TOOLS").is_err() {

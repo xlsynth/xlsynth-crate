@@ -16,7 +16,8 @@ use xlsynth_pir_fuzz::generate_standard_random_pir_package;
 static INIT_LOGGER: Once = Once::new();
 const FUZZ_TOOLCHAIN_EQUIV_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Proves roundtrip equivalence without allowing an expensive sample to stall fuzzing.
+/// Proves roundtrip equivalence without allowing an expensive sample to stall
+/// fuzzing.
 fn prove_roundtrip_equiv(lhs_pkg_text: &str, rhs_pkg_text: &str) -> ToolchainEquivResult {
     let tool_dir = match std::env::var("XLSYNTH_TOOLS") {
         Ok(tool_dir) => tool_dir,

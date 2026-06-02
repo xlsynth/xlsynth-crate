@@ -152,9 +152,11 @@ fn test_equal_patch_is_rejected_without_publish_version() {
         validate_local_version_against_latest_patches("0.52.0", &latest_patches(0, 52, 0), None)
             .unwrap_err();
 
-    assert!(error
-        .to_string()
-        .contains("Local version 0.52.0 must have a patch greater"));
+    assert!(
+        error
+            .to_string()
+            .contains("Local version 0.52.0 must have a patch greater")
+    );
 }
 
 #[test]

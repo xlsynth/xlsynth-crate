@@ -6,8 +6,8 @@ use crate::toolchain_config::ToolchainConfig;
 use clap::ArgMatches;
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_rewrite::{
-    apply_rule_to_package, MatchPattern, MatchRewritePackageError, MatchRewriteRule,
-    RewriteApplyMode, RewriteTarget, RewriteTemplate,
+    MatchPattern, MatchRewritePackageError, MatchRewriteRule, RewriteApplyMode, RewriteTarget,
+    RewriteTemplate, apply_rule_to_package,
 };
 
 fn extract_error_byte_offset(msg: &str) -> Option<usize> {

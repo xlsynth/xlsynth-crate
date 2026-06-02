@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::path::Path;
-use xlsynth_g8r::netlist::gv2ir::{convert_gv2ir_paths_with_options, Gv2IrOptions};
+use xlsynth_g8r::netlist::gv2ir::{Gv2IrOptions, convert_gv2ir_paths_with_options};
 
 pub fn handle_gv2ir(matches: &clap::ArgMatches) {
     let netlist_path = matches.get_one::<String>("netlist").unwrap();

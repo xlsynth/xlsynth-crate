@@ -10,11 +10,11 @@ use xlsynth_g8r_fuzz::fuzz_solver_limits;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_parser::Parser;
 #[cfg(feature = "has-bitwuzla")]
-use xlsynth_prover::ir_equiv::{run_ir_equiv, IrEquivRequest, IrModule};
-#[cfg(feature = "has-bitwuzla")]
-use xlsynth_prover::prover::types::EquivResult;
+use xlsynth_prover::ir_equiv::{IrEquivRequest, IrModule, run_ir_equiv};
 #[cfg(feature = "has-bitwuzla")]
 use xlsynth_prover::prover::SolverChoice;
+#[cfg(feature = "has-bitwuzla")]
+use xlsynth_prover::prover::types::EquivResult;
 
 #[derive(Debug, Clone, Arbitrary)]
 struct MulConstSample {

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use xlsynth_prover::prover::types::{BoolPropertyResult, QuickCheckAssertionSemantics};
-use xlsynth_prover::prover::{prover_for_choice, SolverChoice};
+use xlsynth_prover::prover::{SolverChoice, prover_for_choice};
 
 /// Returns `XLSYNTH_TOOLS`, or the local checkout convention under `$HOME`.
 pub fn default_xlsynth_tools_path() -> PathBuf {

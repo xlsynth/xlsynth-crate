@@ -2,9 +2,9 @@
 
 #![no_main]
 use libfuzzer_sys::fuzz_target;
+use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
-use rand::SeedableRng;
 
 use xlsynth_g8r::prove_gate_fn_equiv_common::{EquivResult, GateFormalBackend};
 use xlsynth_g8r::prove_gate_fn_equiv_sat::{
@@ -34,8 +34,12 @@ fn make_rng(graph: &FuzzGraph) -> StdRng {
     StdRng::from_seed(*hasher.finalize().as_bytes())
 }
 
-/// Proves gate equivalence while allowing configured fuzz timeouts to skip a sample.
-fn prove_with_fuzz_timeout(lhs: &xlsynth_g8r::aig::GateFn, rhs: &xlsynth_g8r::aig::GateFn) -> Option<EquivResult> {
+/// Proves gate equivalence while allowing configured fuzz timeouts to skip a
+/// sample.
+fn prove_with_fuzz_timeout(
+    lhs: &xlsynth_g8r::aig::GateFn,
+    rhs: &xlsynth_g8r::aig::GateFn,
+) -> Option<EquivResult> {
     match prove_gate_fn_equiv_with_backend_and_options(
         lhs,
         rhs,

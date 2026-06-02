@@ -826,8 +826,7 @@ fn main() {
     {
         panic!(
             "No macOS x64 (x86_64) DSO is available for XLS {}.\nPlease use a different architecture (e.g., arm64) or a different XLS version.\nSee: https://github.com/xlsynth/xlsynth/releases/tag/{} for available assets.",
-            RELEASE_LIB_VERSION_TAG,
-            RELEASE_LIB_VERSION_TAG
+            RELEASE_LIB_VERSION_TAG, RELEASE_LIB_VERSION_TAG
         );
     }
 
@@ -867,8 +866,7 @@ fn main() {
                 "XLS_DSO_PATH={} ",
                 "DSLX_STDLIB_PATH={}"
             ),
-            xls_dso_path,
-            dslx_stdlib_path
+            xls_dso_path, dslx_stdlib_path
         );
     }
 

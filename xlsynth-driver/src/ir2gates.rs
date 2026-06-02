@@ -16,7 +16,7 @@ use xlsynth_g8r::block2sequential::block_package_to_sequential_gate_fn;
 use xlsynth_g8r::gatify::ir2gate::GatifyOptions;
 use xlsynth_g8r::process_ir_path;
 use xlsynth_g8r::process_ir_path::{
-    canonical_ir_text_to_g8r_lowering_artifacts, CanonicalG8rOptions, Ir2GatesSummaryStats,
+    CanonicalG8rOptions, Ir2GatesSummaryStats, canonical_ir_text_to_g8r_lowering_artifacts,
 };
 use xlsynth_pir::ir::{MemberType, Package, PackageMember};
 use xlsynth_pir::ir_parser::Parser;

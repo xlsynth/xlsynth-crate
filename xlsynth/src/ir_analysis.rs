@@ -2,6 +2,7 @@
 
 use std::sync::{Arc, RwLock};
 
+use crate::IrBits;
 use crate::ir_package::IrPackagePtr;
 use crate::lib_support::{
     xls_interval_set_get_interval_bounds, xls_ir_analysis_at_least_one_bit_true,
@@ -11,7 +12,6 @@ use crate::lib_support::{
     xls_ir_analysis_known_not_equals,
 };
 use crate::xlsynth_error::XlsynthError;
-use crate::IrBits;
 use xlsynth_sys::{CIrAnalysis, CIrIntervalSet};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

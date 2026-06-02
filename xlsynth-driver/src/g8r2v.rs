@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use xlsynth_g8r::aig::{add_input_registers, add_output_registers, ClockPort};
+use xlsynth_g8r::aig::{ClockPort, add_input_registers, add_output_registers};
 use xlsynth_g8r::aig_serdes::g8r::load_sequential_gate_fn_from_path;
 
 pub fn handle_g8r2v(matches: &clap::ArgMatches) -> Result<(), String> {

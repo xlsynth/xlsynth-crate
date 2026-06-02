@@ -17,9 +17,7 @@ use xlsynth_pir::ir_random::{
 use xlsynth_pir::ir_utils::compact_and_toposort_in_place;
 use xlsynth_pir::ir_validate;
 use xlsynth_prover::prover::types::{AssertionSemantics, EquivParallelism, EquivResult, ProverFn};
-use xlsynth_prover::prover::{
-    Prover, SolverChoice, SolverLimits, prover_for_choice_with_limits,
-};
+use xlsynth_prover::prover::{Prover, SolverChoice, SolverLimits, prover_for_choice_with_limits};
 
 const NUM_STEPS: usize = 32;
 const MAX_TRANSFORM_DRAWS: usize = NUM_STEPS * 32;
@@ -39,11 +37,9 @@ fuzz_target!(|data: &[u8]| {
     let options = RandomFnOptions {
         max_nodes: 20,
         max_bit_width: 8,
-        enabled_operations: OperationSet::new(
-            OperationSet::all_supported().iter().filter(|operation| {
-                !matches!(operation, RandomOperation::Umulp | RandomOperation::Smulp)
-            }),
-        ),
+        enabled_operations: OperationSet::new(OperationSet::all_supported().iter().filter(
+            |operation| !matches!(operation, RandomOperation::Umulp | RandomOperation::Smulp),
+        )),
         ..RandomFnOptions::default()
     };
     let mut entropy = DepletableBytes::new(data);

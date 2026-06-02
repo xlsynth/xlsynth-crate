@@ -6,7 +6,7 @@ use libfuzzer_sys::fuzz_target;
 use std::sync::Once;
 use xlsynth_pir::ir;
 use xlsynth_pir::ir_verify_parity::{
-    categorize_pir_error, categorize_xls_error_text, ErrorCategory,
+    ErrorCategory, categorize_pir_error, categorize_xls_error_text,
 };
 
 static INIT_LOGGER: Once = Once::new();

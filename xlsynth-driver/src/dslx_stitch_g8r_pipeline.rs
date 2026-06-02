@@ -3,7 +3,7 @@
 use clap::ArgMatches;
 use xlsynth_g8r::aig_serdes::g8r::{emit_g8r, encode_g8r_binary};
 use xlsynth_g8r::dslx_stitch_pipeline::g8r_pipeline::{
-    stitch_g8r_pipeline, StitchG8rPipelineOptions,
+    StitchG8rPipelineOptions, stitch_g8r_pipeline,
 };
 
 use crate::common::{get_dslx_paths, write_stdout};

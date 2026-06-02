@@ -88,7 +88,9 @@ fn test_dslx2pipeline_output_ir_files(use_tool_path: bool) {
     let ir_top = xlsynth::mangle_dslx_name(module_name, "main").unwrap();
 
     if !cfg!(feature = "has-bitwuzla") && !use_tool_path {
-        println!("Skipping ir-equiv test because bitwuzla is not available and toolchain path is not used");
+        println!(
+            "Skipping ir-equiv test because bitwuzla is not available and toolchain path is not used"
+        );
         return;
     }
 

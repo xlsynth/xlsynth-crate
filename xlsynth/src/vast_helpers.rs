@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 
 use crate::{
+    XlsynthError,
     ir_value::IrFormatPreference,
     vast::{Expr, GenerateLoop, IndexableExpr, VastFile, VastModule},
-    XlsynthError,
 };
 
 use crate::vast_helpers_options::{CodegenOptions, TemplateVariable};
@@ -107,8 +107,8 @@ pub fn add_registers<'a>(
         );
     }
 
-    if let Some(opts) = options {
-        if [
+    if let Some(opts) = options
+        && [
             &opts.reg_template,
             &opts.reg_with_en_template,
             &opts.reg_with_reset_template,
@@ -116,9 +116,8 @@ pub fn add_registers<'a>(
         ]
         .iter()
         .any(|t| t.is_some())
-        {
-            return emit_registers_with_templates(clk, reset, registers, file, scope, opts);
-        }
+    {
+        return emit_registers_with_templates(clk, reset, registers, file, scope, opts);
     }
 
     // Build a single always_ff block for all registers

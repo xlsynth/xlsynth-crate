@@ -3,11 +3,11 @@
 use std::io::Write;
 use std::path::Path;
 
-use xlsynth_g8r::aig::get_summary_stats::get_aig_stats;
 use xlsynth_g8r::aig::get_summary_stats::AigStats;
+use xlsynth_g8r::aig::get_summary_stats::get_aig_stats;
 use xlsynth_g8r::aig_serdes::emit_aiger::emit_aiger;
 use xlsynth_g8r::aig_serdes::emit_aiger_binary::emit_aiger_binary;
-use xlsynth_g8r::netlist::gv2aig::{convert_gv2aig_paths_with_optional_liberty, Gv2AigOptions};
+use xlsynth_g8r::netlist::gv2aig::{Gv2AigOptions, convert_gv2aig_paths_with_optional_liberty};
 
 fn format_fanout_histogram(stats: &AigStats) -> String {
     let mut s = String::new();

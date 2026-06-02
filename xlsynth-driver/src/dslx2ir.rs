@@ -2,11 +2,11 @@
 
 use clap::ArgMatches;
 use xlsynth::{DslxConvertOptions, IrPackage};
-use xlsynth_pir::{run_aug_opt_over_ir_text, AugOptOptions};
+use xlsynth_pir::{AugOptOptions, run_aug_opt_over_ir_text};
 
 use crate::{
     common::{parse_bool_flag_or, resolve_type_inference_v2},
-    toolchain_config::{get_dslx_path, get_dslx_stdlib_path, ToolchainConfig},
+    toolchain_config::{ToolchainConfig, get_dslx_path, get_dslx_stdlib_path},
     tools::{run_ir_converter_main, run_opt_main},
 };
 

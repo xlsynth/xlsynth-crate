@@ -94,11 +94,10 @@ pub fn build_graph(sample: &FuzzGraph) -> Option<GateFn> {
 }
 
 fn gatify_random_pir_options(max_nodes: usize) -> RandomFnOptions {
-    let operations = OperationSet::new(
-        OperationSet::all_supported()
-            .iter()
-            .filter(|operation| !matches!(operation, RandomOperation::Umulp | RandomOperation::Smulp)),
-    );
+    let operations =
+        OperationSet::new(OperationSet::all_supported().iter().filter(|operation| {
+            !matches!(operation, RandomOperation::Umulp | RandomOperation::Smulp)
+        }));
     RandomFnOptions {
         max_nodes,
         max_bit_width: 8,

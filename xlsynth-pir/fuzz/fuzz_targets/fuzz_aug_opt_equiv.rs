@@ -7,11 +7,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use xlsynth_pir_fuzz::{fuzz_solver_limits, generate_upstream_formal_random_pir_package};
 use xlsynth_pir::aug_opt::{run_aug_opt_over_ir_text_with_stats, AugOptOptions};
 #[cfg(feature = "has-bitwuzla")]
-use xlsynth_prover::ir_equiv::{run_ir_equiv, IrEquivRequest, IrModule};
-#[cfg(feature = "has-bitwuzla")]
-use xlsynth_prover::prover::types::EquivResult;
+use xlsynth_prover::ir_equiv::{IrEquivRequest, IrModule, run_ir_equiv};
 #[cfg(feature = "has-bitwuzla")]
 use xlsynth_prover::prover::SolverChoice;
+#[cfg(feature = "has-bitwuzla")]
+use xlsynth_prover::prover::types::EquivResult;
 
 static RUN_COUNT: AtomicU64 = AtomicU64::new(0);
 static TOTAL_REWRITES: AtomicU64 = AtomicU64::new(0);

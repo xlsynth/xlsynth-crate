@@ -7,9 +7,9 @@ use std::io::Read;
 use std::path::PathBuf;
 
 use crate::proofs::obligations::ProverObligation;
-use crate::proofs::plans::{build_plan_from_obligations, ObligationPlan};
+use crate::proofs::plans::{ObligationPlan, build_plan_from_obligations};
 use crate::proofs::tactics::{IsTactic, Tactic};
-use crate::prover::{run_prover_plan, ProverReport, ProverReportNode, TaskOutcome};
+use crate::prover::{ProverReport, ProverReportNode, TaskOutcome, run_prover_plan};
 use serde::{Deserialize, Serialize};
 use xlsynth_prover::prover::SolverChoice;
 

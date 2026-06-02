@@ -5,7 +5,7 @@ use serde::Serialize;
 use std::path::Path;
 use xlsynth_g8r::netlist::io::{load_liberty_with_timing_data_from_path, parse_netlist_from_path};
 use xlsynth_g8r::netlist::report::{
-    build_sta_report, select_module, NetlistStaReport, OutputTimingRow,
+    NetlistStaReport, OutputTimingRow, build_sta_report, select_module,
 };
 use xlsynth_g8r::netlist::sta::StaOptions;
 

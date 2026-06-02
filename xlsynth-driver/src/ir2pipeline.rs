@@ -3,14 +3,14 @@
 use clap::ArgMatches;
 
 use crate::common::{
-    enforce_extern_verilog_codegen_policy, extract_codegen_flags, extract_pipeline_spec,
-    parse_bool_flag_or, pipeline_codegen_flags_proto, scheduling_options_proto, CodegenFlags,
-    PipelineSpec,
+    CodegenFlags, PipelineSpec, enforce_extern_verilog_codegen_policy, extract_codegen_flags,
+    extract_pipeline_spec, parse_bool_flag_or, pipeline_codegen_flags_proto,
+    scheduling_options_proto,
 };
 use crate::report_cli_error::report_cli_error_and_exit;
 use crate::toolchain_config::ToolchainConfig;
 use crate::tools::{run_codegen_pipeline, run_opt_main};
-use xlsynth_pir::{run_aug_opt_over_ir_text, AugOptOptions};
+use xlsynth_pir::{AugOptOptions, run_aug_opt_over_ir_text};
 
 pub fn handle_ir2pipeline(matches: &ArgMatches, config: &Option<ToolchainConfig>) {
     let input_file = matches.get_one::<String>("ir_input_file").unwrap();

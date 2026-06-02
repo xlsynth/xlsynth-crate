@@ -6,7 +6,7 @@ use libfuzzer_sys::fuzz_target;
 use xlsynth_pir_fuzz::fuzz_bitwuzla_options;
 use xlsynth_pir::ir_parser;
 use xlsynth_pir::ir_random::{
-    generate_fn, DepletableBytes, OperationSet, RandomFnOptions, RandomOperation, StopPolicy,
+    DepletableBytes, OperationSet, RandomFnOptions, RandomOperation, StopPolicy, generate_fn,
 };
 use xlsynth_prover::prover::ir_equiv::{prove_ir_fn_equiv, prove_ir_fn_equiv_output_bits_parallel};
 use xlsynth_prover::prover::types::{AssertionSemantics, EquivResult, ProverFn};
@@ -78,12 +78,8 @@ fuzz_target!(|data: &[u8]| {
         ..RandomFnOptions::default()
     };
     let mut entropy = DepletableBytes::new(data);
-    let generated = generate_fn(
-        &mut entropy,
-        &options,
-        StopPolicy::WhenEntropyDepleted,
-    )
-    .expect("fixed random PIR options should construct a valid function");
+    let generated = generate_fn(&mut entropy, &options, StopPolicy::WhenEntropyDepleted)
+        .expect("fixed random PIR options should construct a valid function");
     let orig_ir = generated.into_top_package("fuzz_pkg").to_string();
     let pkg = xlsynth::IrPackage::parse_ir(&orig_ir, None)
         .expect("PIR-emitted standard XLS IR should parse in libxls");
@@ -122,12 +118,7 @@ fuzz_target!(|data: &[u8]| {
             None,
             false,
         );
-        if !validate_equiv_result(
-            bitwuzla_result,
-            "Bitwuzla",
-            &orig_ir,
-            &opt_ir,
-        ) {
+        if !validate_equiv_result(bitwuzla_result, "Bitwuzla", &orig_ir, &opt_ir) {
             // A configured solver limit is expected to make some fuzz samples
             // inconclusive; those samples are not optimizer failures.
             return;
@@ -144,12 +135,7 @@ fuzz_target!(|data: &[u8]| {
             None,
             false,
         );
-        if !validate_equiv_result(
-            boolector_result,
-            "Boolector",
-            &orig_ir,
-            &opt_ir,
-        ) {
+        if !validate_equiv_result(boolector_result, "Boolector", &orig_ir, &opt_ir) {
             // An inconclusive solver result is not an optimizer failure.
             return;
         }
@@ -165,12 +151,7 @@ fuzz_target!(|data: &[u8]| {
             None,
             false,
         );
-        if !validate_equiv_result(
-            boolector_result,
-            "Boolector binary",
-            &orig_ir,
-            &opt_ir,
-        ) {
+        if !validate_equiv_result(boolector_result, "Boolector binary", &orig_ir, &opt_ir) {
             // An inconclusive solver result is not an optimizer failure.
             return;
         }
@@ -186,12 +167,7 @@ fuzz_target!(|data: &[u8]| {
             None,
             false,
         );
-        if !validate_equiv_result(
-            bitwuzla_result,
-            "Bitwuzla binary",
-            &orig_ir,
-            &opt_ir,
-        ) {
+        if !validate_equiv_result(bitwuzla_result, "Bitwuzla binary", &orig_ir, &opt_ir) {
             // An inconclusive solver result is not an optimizer failure.
             return;
         }
