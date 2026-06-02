@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use xlsynth::IrValue;
-use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
+use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn, eval_fn_in_package};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir_compiler::{
     AssumptionFailureKind, CompilerError, ExecutionContext, NativeTupleFieldLayout,
@@ -14,6 +14,13 @@ fn compile(ir: &str) -> PirFunctionCompiler {
         .expect("test PIR should parse and validate");
     let function = package.get_fn("f").expect("function f should exist");
     PirFunctionCompiler::compile(function).expect("function should compile")
+}
+
+fn compile_package(ir: &str) -> PirFunctionCompiler {
+    let package = Parser::new(ir)
+        .parse_and_validate_package()
+        .expect("test PIR package should parse and validate");
+    PirFunctionCompiler::compile_package(&package).expect("package should compile")
 }
 
 fn assert_matches_evaluator(ir: &str, argument_sets: &[Vec<IrValue>]) {
@@ -85,6 +92,118 @@ fn f(x: bits[8] id=1, y: bits[7] id=2) -> bits[8] {
         error,
         CompilerError::InvalidFunction(message) if message.contains("right operand")
     ));
+}
+
+#[test]
+fn package_compiler_lowers_nested_scalar_invokes() {
+    let compiler = compile_package(
+        r#"package test
+
+fn add_one(x: bits[8] id=1) -> bits[8] {
+  one: bits[8] = literal(value=1, id=2)
+  ret result: bits[8] = add(x, one, id=3)
+}
+
+fn through(x: bits[8] id=4) -> bits[8] {
+  ret result: bits[8] = invoke(x, to_apply=add_one, id=5)
+}
+
+top fn f(x: bits[8] id=6) -> bits[8] {
+  ret result: bits[8] = invoke(x, to_apply=through, id=7)
+}
+"#,
+    );
+    assert_eq!(compiler.run_u64(&[41]).expect("execute"), 42);
+    assert!(compiler.scratch_byte_count() > 0);
+}
+
+#[test]
+fn package_compiler_reuses_static_callee_scratch_across_invoke_sites() {
+    let compiler = compile_package(
+        r#"package test
+
+fn select_first(x: bits[8] id=1) -> bits[8] {
+  values: bits[8][32] = array(x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, id=2)
+  zero: bits[5] = literal(value=0, id=3)
+  ret selected: bits[8] = array_index(values, indices=[zero], id=4)
+}
+
+top fn f(x: bits[8] id=5) -> bits[8] {
+  first: bits[8] = invoke(x, to_apply=select_first, id=6)
+  ret second: bits[8] = invoke(first, to_apply=select_first, id=7)
+}
+"#,
+    );
+    // The callee uses one 32-byte aggregate slot. The caller uses 33 bytes for
+    // its two invoke sites. Both calls share the callee's package-global slot.
+    assert_eq!(compiler.scratch_byte_count(), 65);
+    assert_eq!(compiler.run_u64(&[42]).expect("execute"), 42);
+}
+
+#[test]
+fn package_compiler_passes_aggregate_invokes_by_native_address() {
+    let ir = r#"package test
+
+fn preserve(values: bits[8][2] id=1) -> bits[8][2] {
+  ret result: bits[8][2] = identity(values, id=2)
+}
+
+top fn f(values: bits[8][2] id=3) -> bits[8][2] {
+  ret result: bits[8][2] = invoke(values, to_apply=preserve, id=4)
+}
+"#;
+    let package = Parser::new(ir)
+        .parse_and_validate_package()
+        .expect("test PIR package should parse and validate");
+    let compiler = PirFunctionCompiler::compile_package(&package).expect("package should compile");
+    let values = array(8, &[0x12, 0xa5]);
+    let expected =
+        match eval_fn_in_package(&package, package.get_top_fn().unwrap(), &[values.clone()]) {
+            FnEvalResult::Success(success) => success.value,
+            other => panic!("PIR evaluation failed: {other:?}"),
+        };
+    assert_eq!(
+        compiler
+            .run_ir_values(&[values.clone()])
+            .expect("execute aggregate invoke"),
+        expected
+    );
+}
+
+#[test]
+fn package_compiler_accumulates_repeated_callee_events() {
+    let compiler = compile_package(
+        r#"package test
+
+fn observed(x: bits[1] id=1) -> bits[1] {
+  c: () = cover(x, label="callee_cover", id=2)
+  t: token = after_all(id=3)
+  tr: token = trace(t, x, format="x={}", data_operands=[x], id=4)
+  ret result: bits[1] = identity(x, id=5)
+}
+
+top fn f(x: bits[1] id=6) -> bits[1] {
+  first: bits[1] = invoke(x, to_apply=observed, id=7)
+  ret second: bits[1] = invoke(first, to_apply=observed, id=8)
+}
+"#,
+    );
+    let result = compiler
+        .run_ir_values_with_events(&[bits(1, 1)])
+        .expect("execute repeated invokes");
+    assert_eq!(result.value, bits(1, 1));
+    assert_eq!(result.events.cover_counts.len(), 1);
+    assert_eq!(result.events.cover_counts[0].node_text_id, 2);
+    assert_eq!(result.events.cover_counts[0].count, 2);
+    assert_eq!(
+        result
+            .events
+            .trace_messages
+            .iter()
+            .map(|trace| trace.message.as_str())
+            .collect::<Vec<_>>(),
+        vec!["x=1", "x=1"]
+    );
 }
 
 #[test]
@@ -177,6 +296,124 @@ fn f(x: bits[1] id=1) -> () {
     assert_eq!(execution.events.cover_counts.len(), 1);
     assert_eq!(execution.events.cover_counts[0].label, "hit");
     assert_eq!(execution.events.cover_counts[0].count, 1);
+}
+
+#[test]
+fn compiles_zero_width_bits_without_native_storage() {
+    let compiler = compile(
+        r#"package test
+
+fn f(x: bits[0] id=1) -> bits[0] {
+  ret value: bits[0] = identity(x, id=2)
+}
+"#,
+    );
+    assert_eq!(
+        compiler.result_layout(),
+        &NativeValueLayout::Scalar(ScalarLayout {
+            bit_count: 0,
+            byte_count: 0,
+        })
+    );
+    assert_eq!(compiler.scratch_byte_count(), 0);
+    assert_eq!(compiler.run_u64(&[0]).expect("execute"), 0);
+    assert_eq!(
+        compiler
+            .run_ir_values(&[bits(0, 0)])
+            .expect("execute dynamic value adapter"),
+        bits(0, 0)
+    );
+
+    let inputs = [std::ptr::null::<u8>()];
+    // SAFETY: `bits[0]` has no native bytes, so null input and output pointers
+    // satisfy the published zero-sized storage contract.
+    unsafe {
+        compiler
+            .run_native(&inputs, std::ptr::null_mut())
+            .expect("execute against zero-sized native storage");
+    }
+}
+
+#[test]
+fn zero_width_bits_feed_nonzero_results() {
+    assert_matches_evaluator(
+        r#"package test
+
+fn f(x: bits[0] id=1, c_in: bits[1] id=2, y: bits[8] id=3) -> (bits[8], bits[8], bits[1], bits[1], bits[1], bits[1], bits[0], bits[0]) {
+  widened: bits[8] = zero_ext(x, new_bit_count=8, id=4)
+  joined: bits[8] = concat(x, y, id=5)
+  equal: bits[1] = eq(x, x, id=6)
+  reduced: bits[1] = and_reduce(x, id=7)
+  carry: bits[1] = ext_carry_out(x, x, c_in, id=8)
+  decoded: bits[1] = decode(x, width=1, id=9)
+  empty_concat: bits[0] = concat(id=10)
+  empty_slice: bits[0] = bit_slice(y, start=4, width=0, id=11)
+  ret result: (bits[8], bits[8], bits[1], bits[1], bits[1], bits[1], bits[0], bits[0]) = tuple(widened, joined, equal, reduced, carry, decoded, empty_concat, empty_slice, id=12)
+}
+"#,
+        &[vec![bits(0, 0), bits(1, 1), bits(8, 0xa5)]],
+    );
+}
+
+#[test]
+fn zero_width_array_elements_flow_through_native_layout() {
+    let zero_array = IrValue::make_array(&[bits(0, 0), bits(0, 0)]).unwrap();
+    assert_matches_evaluator(
+        r#"package test
+
+fn f(values: bits[0][2] id=1, index: bits[2] id=2) -> bits[8] {
+  selected: bits[0] = array_index(values, indices=[index], id=3)
+  ret widened: bits[8] = zero_ext(selected, new_bit_count=8, id=4)
+}
+"#,
+        &[
+            vec![zero_array.clone(), bits(2, 0)],
+            vec![zero_array, bits(2, 3)],
+        ],
+    );
+}
+
+#[test]
+fn compiled_trace_formats_zero_width_bits() {
+    let compiler = compile(
+        r#"package test
+
+fn f(x: bits[0] id=1, emit: bits[1] id=2) -> token {
+  t: token = after_all(id=3)
+  ret tr: token = trace(t, emit, format="x={}", data_operands=[x], id=4)
+}
+"#,
+    );
+    let execution = compiler
+        .run_ir_values_with_events(&[bits(0, 0), bits(1, 1)])
+        .expect("execute");
+    assert_eq!(execution.events.trace_messages.len(), 1);
+    assert_eq!(execution.events.trace_messages[0].message, "x=0");
+}
+
+#[test]
+fn zero_width_bits_match_evaluator_across_scalar_operation_forms() {
+    assert_matches_evaluator(
+        r#"package test
+
+fn f(x: bits[0] id=1, count: bits[0] id=2, update: bits[8] id=3) -> (bits[0], bits[0], bits[0], bits[0], bits[0], bits[0], bits[0], bits[0], bits[8], bits[0], bits[0], (bits[0], bits[0])) {
+  sum: bits[0] = add(x, x, id=4)
+  signed_product: bits[0] = smul(x, x, id=5)
+  arithmetic_shift: bits[0] = shra(x, count, id=6)
+  signed_quotient: bits[0] = sdiv(x, x, id=7)
+  encoded: bits[0] = encode(x, id=8)
+  sliced: bits[0] = dynamic_bit_slice(x, count, width=0, id=9)
+  updated: bits[0] = bit_slice_update(x, count, update, id=10)
+  priority: bits[0] = ext_prio_encode(x, lsb_prio=true, id=11)
+  zeroes: bits[8] = ext_clz(x, offset=2, new_bit_count=8, id=12)
+  mask: bits[0] = ext_mask_low(count, id=13)
+  nary_sum: bits[0] = ext_nary_add(x, signed=[true], negated=[false], arch=ripple_carry, id=14)
+  parts: (bits[0], bits[0]) = smulp(x, x, id=15)
+  ret result: (bits[0], bits[0], bits[0], bits[0], bits[0], bits[0], bits[0], bits[0], bits[8], bits[0], bits[0], (bits[0], bits[0])) = tuple(sum, signed_product, arithmetic_shift, signed_quotient, encoded, sliced, updated, priority, zeroes, mask, nary_sum, parts, id=16)
+}
+"#,
+        &[vec![bits(0, 0), bits(0, 0), bits(8, 0xa5)]],
+    );
 }
 
 #[test]

@@ -6,9 +6,9 @@ mod common;
 
 use common::random_argument_sets;
 use libfuzzer_sys::fuzz_target;
-use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn};
+use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_random::{
-    DepletableBytes, OperationSet, RandomFnOptions, RandomOperation, StopPolicy, generate_fn,
+    DepletableBytes, OperationSet, RandomFnOptions, RandomOperation, StopPolicy, generate_package,
 };
 use xlsynth_pir_compiler::PirFunctionCompiler;
 
@@ -21,6 +21,7 @@ fn options() -> RandomFnOptions {
         allow_tuples: false,
         allow_gate: true,
         allow_extension_ops: true,
+        allow_zero_width_bits: true,
         allow_arbitrary_width_multiply: true,
         enabled_operations: OperationSet::new([
             RandomOperation::Literal,
@@ -83,19 +84,20 @@ fn options() -> RandomFnOptions {
 
 fuzz_target!(|data: &[u8]| {
     let mut graph_entropy = DepletableBytes::new(data);
-    let generated = generate_fn(
+    let generated = generate_package(
         &mut graph_entropy,
         &options(),
         StopPolicy::WhenEntropyDepleted,
     )
-    .expect("the scalar fuzz generator options should always construct a PIR function");
-    let function = &generated.function;
-    let ir_text = function.to_string();
-    let compiler = PirFunctionCompiler::compile(function).unwrap_or_else(|error| {
+    .expect("the scalar fuzz generator options should always construct a PIR package");
+    let package = &generated.package;
+    let function = package.get_top_fn().expect("generated package has a top");
+    let ir_text = package.to_string();
+    let compiler = PirFunctionCompiler::compile_package(package).unwrap_or_else(|error| {
         panic!("compiled-function compilation failed for generated IR:\n{ir_text}\n{error}")
     });
     for args in random_argument_sets(data, function) {
-        let expected = match eval_fn(function, &args) {
+        let expected = match eval_fn_in_package(package, function, &args) {
             FnEvalResult::Success(success) => success.value,
             other => panic!("PIR evaluator failed for generated IR:\n{ir_text}\n{other:?}"),
         };

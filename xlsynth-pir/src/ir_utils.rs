@@ -1275,6 +1275,13 @@ mod tests {
         pkg.get_fn(fn_name).unwrap().clone()
     }
 
+    fn parse_fn_named_without_validation(pkg_body: &str, fn_name: &str) -> Fn {
+        let pkg_text = format!("package test\n\n{}\n", pkg_body);
+        let mut p = Parser::new(&pkg_text);
+        let pkg = p.parse_package().unwrap();
+        pkg.get_fn(fn_name).unwrap().clone()
+    }
+
     fn verify_topo_property(f: &Fn, order: &[NodeRef]) {
         // Build position map
         let mut pos: Vec<usize> = vec![0; f.nodes.len()];
@@ -1319,7 +1326,7 @@ fn main(x: bits[8] id=1) -> bits[8] {
 
     #[test]
     fn external_function_references_ignores_self_references() {
-        let f = parse_fn_named(
+        let f = parse_fn_named_without_validation(
             r#"fn main(index: bits[8] id=1, x: bits[8] id=2) -> bits[8] {
   invoked: bits[8] = invoke(index, x, to_apply=main, id=3)
   ret loop: bits[8] = counted_for(invoked, trip_count=2, stride=1, body=main, id=4)

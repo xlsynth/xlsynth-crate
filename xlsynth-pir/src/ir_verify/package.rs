@@ -57,6 +57,8 @@ pub enum ValidationError {
     /// The function refers to another function that does not exist in the
     /// package.
     UnknownCallee { func: String, callee: String },
+    /// Function references form a recursive call graph, which XLS forbids.
+    RecursiveFunctionReference { cycle: Vec<String> },
     /// A standalone-function verification attempted to check an operation
     /// whose contract requires package context.
     RequiresPackageContext {
@@ -298,6 +300,13 @@ impl std::fmt::Display for ValidationError {
                     f,
                     "function '{}' references undefined callee '{}'",
                     func, callee
+                )
+            }
+            ValidationError::RecursiveFunctionReference { cycle } => {
+                write!(
+                    f,
+                    "recursive function references are not valid XLS IR: {}",
+                    cycle.join(" -> ")
                 )
             }
             ValidationError::RequiresPackageContext {
@@ -646,6 +655,7 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
             PackageMember::Block { func, metadata } => validate_block(func, metadata, p, idx)?,
         }
     }
+    validate_function_call_graph(p)?;
 
     // Enforce package-wide uniqueness of node text ids (including parameter nodes).
     let mut seen_ids: HashSet<usize> = HashSet::new();
@@ -682,6 +692,57 @@ pub fn validate_package(p: &Package) -> Result<(), ValidationError> {
         }
     }
 
+    Ok(())
+}
+
+fn validate_function_call_graph(p: &Package) -> Result<(), ValidationError> {
+    fn visit(
+        p: &Package,
+        function_name: &str,
+        visited: &mut HashSet<String>,
+        active: &mut Vec<String>,
+    ) -> Result<(), ValidationError> {
+        if let Some(cycle_start) = active.iter().position(|name| name == function_name) {
+            let mut cycle = active[cycle_start..].to_vec();
+            cycle.push(function_name.to_string());
+            return Err(ValidationError::RecursiveFunctionReference { cycle });
+        }
+        if visited.contains(function_name) {
+            return Ok(());
+        }
+        active.push(function_name.to_string());
+        let function = p
+            .get_fn(function_name)
+            .expect("callee existence is validated before call-graph traversal");
+        let mut callees = std::collections::BTreeSet::new();
+        for node in &function.nodes {
+            match &node.payload {
+                NodePayload::Invoke { to_apply, .. } => {
+                    callees.insert(to_apply.as_str());
+                }
+                NodePayload::CountedFor { body, .. } => {
+                    callees.insert(body.as_str());
+                }
+                _ => {
+                    // All other node kinds do not reference functions.
+                }
+            }
+        }
+        for callee in callees {
+            visit(p, callee, visited, active)?;
+        }
+        active.pop();
+        visited.insert(function_name.to_string());
+        Ok(())
+    }
+
+    let mut visited = HashSet::new();
+    for member in &p.members {
+        let PackageMember::Function(function) = member else {
+            continue;
+        };
+        visit(p, &function.name, &mut visited, &mut Vec::new())?;
+    }
     Ok(())
 }
 
@@ -1831,6 +1892,27 @@ mod tests {
             ValidationError::NodeTypeMismatch { .. } => {}
             other => panic!("expected NodeTypeMismatch, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn package_level_recursive_invoke_fails() {
+        let ir = r#"
+        package test
+
+        fn first(x: bits[1] id=1) -> bits[1] {
+          ret invoke.2: bits[1] = invoke(x, to_apply=second, id=2)
+        }
+
+        fn second(x: bits[1] id=3) -> bits[1] {
+          ret invoke.4: bits[1] = invoke(x, to_apply=first, id=4)
+        }
+        "#;
+        let mut parser = Parser::new(ir);
+        let pkg = parser.parse_package().unwrap();
+        assert!(matches!(
+            validate_package(&pkg),
+            Err(ValidationError::RecursiveFunctionReference { .. })
+        ));
     }
 
     #[test]

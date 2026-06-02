@@ -13,6 +13,7 @@ use crate::ir::{
     Binop, ExtNaryAddArchitecture, ExtNaryAddTerm, FileTable, Fn, MemberType, NaryOp, Node,
     NodePayload, NodeRef, Package, PackageMember, Param, ParamId, Type, Unop,
 };
+use crate::ir_rebase_ids::rebase_fn_ids;
 use crate::ir_utils::{is_observable_effect_root, operands};
 use crate::math::ceil_log2;
 use crate::random_inputs::generate_uniform_value;
@@ -90,6 +91,7 @@ pub enum RandomOperation {
     Cover,
     Assert,
     Trace,
+    Invoke,
 }
 
 impl RandomOperation {
@@ -161,6 +163,7 @@ impl RandomOperation {
             Self::Cover,
             Self::Assert,
             Self::Trace,
+            Self::Invoke,
         ]
     }
 
@@ -233,6 +236,7 @@ impl RandomOperation {
             Self::Cover => "cover",
             Self::Assert => "assert",
             Self::Trace => "trace",
+            Self::Invoke => "invoke",
         }
     }
 }
@@ -321,6 +325,11 @@ pub struct RandomFnOptions {
     /// An out-of-bounds execution of such a node reports an assumption
     /// violation in evaluator/compiler event results.
     pub allow_assumed_in_bounds: bool,
+    /// Maximum total number of generated functions, including the top, when
+    /// constructing a package.
+    pub max_functions: usize,
+    /// Maximum number of invoke nodes emitted in any one generated function.
+    pub max_invokes_per_function: usize,
     pub enabled_operations: OperationSet,
 }
 
@@ -344,6 +353,8 @@ impl Default for RandomFnOptions {
             allow_extension_ops: false,
             allow_events: false,
             allow_assumed_in_bounds: false,
+            max_functions: 5,
+            max_invokes_per_function: 3,
             enabled_operations: OperationSet::default(),
         }
     }
@@ -380,6 +391,11 @@ impl RandomFnOptions {
             return Err(GenerationError::InvalidOptions(
                 "literal must be enabled so zero-parameter functions can be constructed"
                     .to_string(),
+            ));
+        }
+        if self.max_functions == 0 {
+            return Err(GenerationError::InvalidOptions(
+                "max_functions must be nonzero".to_string(),
             ));
         }
         Ok(())
@@ -533,6 +549,13 @@ impl GeneratedFn {
     }
 }
 
+/// A directly constructed acyclic PIR package and per-function statistics.
+#[derive(Debug, Clone)]
+pub struct GeneratedPackage {
+    pub package: Package,
+    pub function_stats: Vec<GeneratedFnStats>,
+}
+
 /// Parameter and return types required for constrained random function
 /// generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -584,6 +607,279 @@ pub fn generate_fn<S: EntropySource>(
     let function = generator.finish()?;
     let stats = gather_stats(&function);
     Ok(GeneratedFn { function, stats })
+}
+
+/// Generates an acyclic package with functions created on demand by invokes.
+///
+/// Each function body is generated node by node. An ordinary node request
+/// occasionally emits an invoke to a completed function or recursively creates
+/// a new callee with an independently generated signature. Functions under
+/// construction are never eligible callees, so the resulting call graph is
+/// acyclic by construction.
+pub fn generate_package<S: EntropySource>(
+    source: &mut S,
+    options: &RandomFnOptions,
+    stop_policy: StopPolicy,
+) -> Result<GeneratedPackage, GenerationError> {
+    options.validate()?;
+    validate_stop_policy(stop_policy)?;
+    PackageGenerator::new(source, options, stop_policy).generate()
+}
+
+struct PackageGenerator<'a, S> {
+    source: &'a mut S,
+    options: &'a RandomFnOptions,
+    stop_policy: StopPolicy,
+    completed_functions: Vec<Fn>,
+    function_stats: Vec<GeneratedFnStats>,
+    next_function_index: usize,
+    next_text_id: usize,
+}
+
+impl<'a, S: EntropySource> PackageGenerator<'a, S> {
+    fn new(source: &'a mut S, options: &'a RandomFnOptions, stop_policy: StopPolicy) -> Self {
+        Self {
+            source,
+            options,
+            stop_policy,
+            completed_functions: Vec::new(),
+            function_stats: Vec::new(),
+            next_function_index: 0,
+            next_text_id: 1,
+        }
+    }
+
+    fn generate(mut self) -> Result<GeneratedPackage, GenerationError> {
+        let top_name = self.allocate_function_name();
+        self.generate_unconstrained_function(top_name.clone())?;
+        let members = self
+            .completed_functions
+            .into_iter()
+            .map(PackageMember::Function)
+            .collect();
+        let package = Package {
+            name: "random_package".to_string(),
+            file_table: FileTable::new(),
+            members,
+            top: Some((top_name, MemberType::Function)),
+        };
+        crate::ir_verify::verify_package(&package)
+            .map_err(|error| GenerationError::Construction(error.to_string()))?;
+        Ok(GeneratedPackage {
+            package,
+            function_stats: self.function_stats,
+        })
+    }
+
+    fn allocate_function_name(&mut self) -> String {
+        let name = format!("random_fn_{}", self.next_function_index);
+        self.next_function_index += 1;
+        name
+    }
+
+    fn generate_unconstrained_function(&mut self, name: String) -> Result<(), GenerationError> {
+        let mut generator = FunctionGenerator::new(self.options);
+        let max_params = self
+            .options
+            .max_params
+            .min(self.options.max_nodes.saturating_sub(1));
+        let param_count = choose_count(self.source, max_params + 1);
+        for _ in 0..param_count {
+            let ty = random_type(self.source, self.options, 0);
+            generator.add_param(ty);
+        }
+
+        let body_capacity = self.options.max_nodes - generator.params.len();
+        let mut body_nodes = 0;
+        let mut invoke_count = 0;
+        while body_nodes < body_capacity
+            && (body_nodes == 0 || should_add_node(self.source, self.stop_policy, body_nodes))
+        {
+            self.add_random_body_node(&mut generator, &mut invoke_count)?;
+            body_nodes += 1;
+        }
+        let function = generator.finish()?;
+        self.finish_function(name, function);
+        Ok(())
+    }
+
+    fn generate_function_with_signature(
+        &mut self,
+        name: String,
+        signature: &FunctionSignature,
+    ) -> Result<(), GenerationError> {
+        validate_signature(signature, self.options)?;
+        let mut generator = FunctionGenerator::new(self.options);
+        for ty in &signature.params {
+            generator.add_param(ty.clone());
+        }
+
+        let terminal_node_budget =
+            generator.minimum_materialization_nodes(&signature.return_type)?;
+        let required_node_count = generator.params.len() + terminal_node_budget;
+        if required_node_count > self.options.max_nodes {
+            return Err(GenerationError::InvalidSignature(format!(
+                "signature requires at least {required_node_count} nodes but max_nodes is {}",
+                self.options.max_nodes
+            )));
+        }
+
+        let body_capacity = self.options.max_nodes - required_node_count;
+        let mut body_nodes = 0;
+        let mut invoke_count = 0;
+        while body_nodes < body_capacity
+            && should_add_node(self.source, self.stop_policy, body_nodes)
+        {
+            self.add_random_body_node(&mut generator, &mut invoke_count)?;
+            body_nodes += 1;
+        }
+        let ret_node_ref =
+            generator.pick_or_generate_value_of_type(self.source, &signature.return_type)?;
+        let function = generator.finish_with_return(ret_node_ref)?;
+        self.finish_function(name, function);
+        Ok(())
+    }
+
+    fn finish_function(&mut self, name: String, mut function: Fn) {
+        function.name = name;
+        let function = rebase_fn_ids(&function, self.next_text_id);
+        self.next_text_id = function
+            .nodes
+            .iter()
+            .map(|node| node.text_id)
+            .max()
+            .unwrap_or(self.next_text_id)
+            .saturating_add(1);
+        self.function_stats.push(gather_stats(&function));
+        self.completed_functions.push(function);
+    }
+
+    fn add_random_body_node(
+        &mut self,
+        generator: &mut FunctionGenerator<'_>,
+        invoke_count: &mut usize,
+    ) -> Result<NodeRef, GenerationError> {
+        let mut applicable = generator.applicable_operations();
+        if *invoke_count < self.options.max_invokes_per_function && self.can_emit_invoke(generator)
+        {
+            applicable.push(RandomOperation::Invoke);
+        }
+        if applicable.is_empty() {
+            return Err(GenerationError::Construction(
+                "no operation can be emitted from the available values".to_string(),
+            ));
+        }
+        let operation = applicable[choose_count(self.source, applicable.len())];
+        if operation == RandomOperation::Invoke {
+            *invoke_count += 1;
+            return Ok(self
+                .try_emit_invoke(generator)?
+                .expect("invoke was selected only after checking applicability"));
+        }
+        generator.emit_operation(self.source, operation)
+    }
+
+    fn can_emit_invoke(&self, generator: &FunctionGenerator<'_>) -> bool {
+        self.next_function_index < self.options.max_functions
+            || !self.callable_completed_functions(generator).is_empty()
+    }
+
+    fn try_emit_invoke(
+        &mut self,
+        generator: &mut FunctionGenerator<'_>,
+    ) -> Result<Option<NodeRef>, GenerationError> {
+        let existing = self.callable_completed_functions(generator);
+        let can_create = self.next_function_index < self.options.max_functions;
+        if existing.is_empty() && !can_create {
+            return Ok(None);
+        }
+        let create_new = can_create && (existing.is_empty() || self.source.take_u64() & 1 == 0);
+        let signature = if create_new {
+            let signature = self.random_callable_signature(generator);
+            let name = self.allocate_function_name();
+            self.generate_function_with_signature(name.clone(), &signature)?;
+            CallableFunction { name, signature }
+        } else {
+            existing[choose_count(self.source, existing.len())].clone()
+        };
+        let operands = signature
+            .signature
+            .params
+            .iter()
+            .map(|ty| generator.choose_ref_for_type(self.source, ty))
+            .collect();
+        Ok(Some(generator.add_node(
+            signature.signature.return_type,
+            NodePayload::Invoke {
+                to_apply: signature.name,
+                operands,
+            },
+            None,
+        )))
+    }
+
+    fn random_callable_signature(
+        &mut self,
+        generator: &FunctionGenerator<'_>,
+    ) -> FunctionSignature {
+        let available_types: Vec<Type> = generator.nodes_by_type.keys().cloned().collect();
+        let max_params = self
+            .options
+            .max_params
+            .min(self.options.max_nodes.saturating_sub(1));
+        let param_count = if available_types.is_empty() {
+            0
+        } else {
+            choose_count(self.source, max_params + 1)
+        };
+        let params: Vec<Type> = (0..param_count)
+            .map(|_| available_types[choose_count(self.source, available_types.len())].clone())
+            .collect();
+        let return_type = self.random_materializable_return_type(&params);
+        FunctionSignature {
+            params,
+            return_type,
+        }
+    }
+
+    fn random_materializable_return_type(&mut self, params: &[Type]) -> Type {
+        let available_node_budget = self.options.max_nodes - params.len();
+        for _ in 0..4 {
+            let ty = random_type(self.source, self.options, 0);
+            let mut available_types: BTreeSet<Type> = params.iter().cloned().collect();
+            if required_materialization_nodes(&mut available_types, &ty)
+                .is_ok_and(|count| count <= available_node_budget)
+            {
+                return ty;
+            }
+        }
+        Type::Bits(random_width(self.source, self.options.max_bit_width))
+    }
+
+    fn callable_completed_functions(
+        &self,
+        generator: &FunctionGenerator<'_>,
+    ) -> Vec<CallableFunction> {
+        self.completed_functions
+            .iter()
+            .filter(|function| {
+                function
+                    .params
+                    .iter()
+                    .all(|param| generator.nodes_by_type.contains_key(&param.ty))
+            })
+            .map(|function| CallableFunction {
+                name: function.name.clone(),
+                signature: FunctionSignature::from_fn(function),
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CallableFunction {
+    name: String,
+    signature: FunctionSignature,
 }
 
 /// Generates a typed PIR function with exactly the requested parameter and
@@ -965,12 +1261,7 @@ impl<'a> FunctionGenerator<'a> {
         &mut self,
         source: &mut S,
     ) -> Result<NodeRef, GenerationError> {
-        let applicable: Vec<RandomOperation> = self
-            .options
-            .enabled_operations
-            .iter()
-            .filter(|operation| self.operation_is_applicable(*operation))
-            .collect();
+        let applicable = self.applicable_operations();
         if applicable.is_empty() {
             return Err(GenerationError::Construction(
                 "no operation can be emitted from the available values".to_string(),
@@ -978,6 +1269,14 @@ impl<'a> FunctionGenerator<'a> {
         }
         let operation = applicable[choose_count(source, applicable.len())];
         self.emit_operation(source, operation)
+    }
+
+    fn applicable_operations(&self) -> Vec<RandomOperation> {
+        self.options
+            .enabled_operations
+            .iter()
+            .filter(|operation| self.operation_is_applicable(*operation))
+            .collect()
     }
 
     fn operation_is_applicable(&self, operation: RandomOperation) -> bool {
@@ -1098,6 +1397,7 @@ impl<'a> FunctionGenerator<'a> {
                     && self.nodes_by_type.contains_key(&Type::Token)
                     && self.nodes_by_type.contains_key(&Type::Bits(1))
             }
+            RandomOperation::Invoke => false,
         }
     }
 
@@ -1741,6 +2041,9 @@ impl<'a> FunctionGenerator<'a> {
                     },
                     None,
                 ))
+            }
+            RandomOperation::Invoke => {
+                unreachable!("package generation emits invoke with package-level call-graph state")
             }
         }
     }

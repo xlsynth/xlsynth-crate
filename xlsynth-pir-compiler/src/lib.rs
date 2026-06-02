@@ -14,7 +14,7 @@ use cranelift_codegen::ir::{
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{Linkage, Module, default_libcall_names};
+use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use thiserror::Error;
 use xlsynth::{IrBits, IrValue};
 use xlsynth_pir::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
@@ -48,12 +48,13 @@ impl ScalarLayout {
         let Type::Bits(bit_count) = ty else {
             return Err(CompilerError::UnsupportedType(ty.to_string()));
         };
-        if !(1..=64).contains(bit_count) {
+        if *bit_count > 64 {
             return Err(CompilerError::UnsupportedType(format!(
                 "bits[{bit_count}] is not a native scalar"
             )));
         }
         let byte_count = match bit_count {
+            0 => 0,
             1..=8 => 1,
             9..=16 => 2,
             17..=32 => 4,
@@ -68,6 +69,7 @@ impl ScalarLayout {
 
     fn clif_type(self) -> ClifType {
         match self.byte_count {
+            0 => types::I8,
             1 => types::I8,
             2 => types::I16,
             4 => types::I32,
@@ -177,9 +179,6 @@ impl NativeValueLayout {
     /// Constructs the native representation for a currently supported PIR type.
     pub fn from_type(ty: &Type) -> Result<Self, CompilerError> {
         match ty {
-            Type::Bits(bit_count) if *bit_count == 0 => Err(CompilerError::UnsupportedType(
-                "bits[0] native storage is unsupported".into(),
-            )),
             Type::Bits(bit_count) if *bit_count <= 64 => {
                 Ok(Self::Scalar(ScalarLayout::from_type(ty)?))
             }
@@ -250,7 +249,7 @@ impl NativeValueLayout {
     /// Returns this layout's native alignment in bytes.
     pub fn alignment(&self) -> usize {
         match self {
-            Self::Scalar(layout) => layout.byte_count,
+            Self::Scalar(layout) => layout.byte_count.max(1),
             Self::WideBits(_) => std::mem::align_of::<u64>(),
             Self::Array { element, .. } => element.alignment(),
             Self::Tuple { alignment, .. } => *alignment,
@@ -319,10 +318,10 @@ impl CompilerError {
 /// Executable native code for one supported PIR function.
 ///
 /// Bits values through width 64 use native integer carrier storage sized to
-/// the next one of `u8`, `u16`, `u32`, or `u64`; wider bits values use
-/// least-significant-first native `u64` limbs. Arrays of supported values use
-/// native contiguous array storage; tuples use `#[repr(C)]`-compatible struct
-/// storage.
+/// the next one of `u8`, `u16`, `u32`, or `u64`; `bits[0]` occupies zero
+/// bytes. Wider bits values use least-significant-first native `u64` limbs.
+/// Arrays of supported values use native contiguous array storage; tuples use
+/// `#[repr(C)]`-compatible struct storage.
 pub struct PirFunctionCompiler {
     module: Option<JITModule>,
     entrypoint: NativeEntrypoint,
@@ -340,6 +339,15 @@ pub struct IrExecutionResult {
     pub events: ExecutionResult,
 }
 
+struct PlannedFunction<'a> {
+    function: &'a ir::Fn,
+    param_layouts: Vec<NativeValueLayout>,
+    result_layout: NativeValueLayout,
+    order: Vec<NodeRef>,
+    scratch_plan: ScratchPlan,
+    event_sites: HashMap<NodeRef, u32>,
+}
+
 impl PirFunctionCompiler {
     /// Compiles the reachable portion of a PIR function into native host code.
     pub fn compile(function: &ir::Fn) -> Result<Self, CompilerError> {
@@ -348,19 +356,79 @@ impl PirFunctionCompiler {
             .map_err(CompilerError::InvalidFunction)?;
         xlsynth_pir::ir_verify::verify_function(function)
             .map_err(|e| CompilerError::InvalidFunction(e.to_string()))?;
+        Self::compile_functions(None, function)
+    }
 
-        let param_layouts = function
-            .params
-            .iter()
-            .map(|param| NativeValueLayout::from_type(&param.ty))
-            .collect::<Result<Vec<_>, _>>()?;
-        let result_layout = NativeValueLayout::from_type(&function.ret_ty)?;
-        let order = reachable_scheduled_order(function)?;
-        for node_ref in &order {
-            NativeValueLayout::from_type(&function.get_node(*node_ref).ty)?;
+    /// Compiles a package's selected top function and its invoked callees.
+    pub fn compile_package(package: &ir::Package) -> Result<Self, CompilerError> {
+        let top = package.get_top_fn().ok_or_else(|| {
+            CompilerError::InvalidFunction("package has no top-level function".into())
+        })?;
+        Self::compile_package_function(package, &top.name)
+    }
+
+    /// Compiles the named package function and its invoked callees.
+    pub fn compile_package_function(
+        package: &ir::Package,
+        function_name: &str,
+    ) -> Result<Self, CompilerError> {
+        xlsynth_pir::ir_verify::verify_package(package)
+            .map_err(|e| CompilerError::InvalidFunction(e.to_string()))?;
+        let function = package.get_fn(function_name).ok_or_else(|| {
+            CompilerError::InvalidFunction(format!(
+                "package has no function named '{function_name}'"
+            ))
+        })?;
+        Self::compile_functions(Some(package), function)
+    }
+
+    fn compile_functions(
+        package: Option<&ir::Package>,
+        top: &ir::Fn,
+    ) -> Result<Self, CompilerError> {
+        let function_names = invoked_function_postorder(package, top)?;
+        let mut scratch_byte_count = 0usize;
+        let mut scratch_alignment = 1usize;
+        let mut plans = HashMap::new();
+        let mut metadata = CompiledFunctionMetadata::default();
+        for function_name in &function_names {
+            let function = resolve_function(package, top, function_name)?;
+            let param_layouts = function
+                .params
+                .iter()
+                .map(|param| NativeValueLayout::from_type(&param.ty))
+                .collect::<Result<Vec<_>, _>>()?;
+            let result_layout = NativeValueLayout::from_type(&function.ret_ty)?;
+            let order = reachable_scheduled_order(function)?;
+            for node_ref in &order {
+                NativeValueLayout::from_type(&function.get_node(*node_ref).ty)?;
+            }
+            let mut scratch_plan = ScratchPlan::for_function(function, &order)?;
+            scratch_byte_count = align_up(scratch_byte_count, scratch_plan.alignment)?;
+            let scratch_base = scratch_byte_count;
+            scratch_byte_count = scratch_byte_count
+                .checked_add(scratch_plan.byte_count)
+                .ok_or_else(|| {
+                    CompilerError::UnsupportedType("package scratch size overflow".into())
+                })?;
+            scratch_alignment = scratch_alignment.max(scratch_plan.alignment);
+            scratch_plan.rebase_offsets(scratch_base)?;
+            let event_sites = append_event_metadata(function, &order, &mut metadata)?;
+            plans.insert(
+                function_name.clone(),
+                PlannedFunction {
+                    function,
+                    param_layouts,
+                    result_layout,
+                    order,
+                    scratch_plan,
+                    event_sites,
+                },
+            );
         }
-        let scratch_plan = ScratchPlan::for_function(function, &order)?;
-        let (metadata, event_sites) = build_event_metadata(function, &order)?;
+        let top_plan = plans.get(&top.name).ok_or_else(|| {
+            CompilerError::InvalidFunction(format!("missing compilation plan for '{}'", top.name))
+        })?;
 
         let mut builder = JITBuilder::new(default_libcall_names())
             .map_err(|error| CompilerError::Backend(error.to_string()))?;
@@ -402,46 +470,64 @@ impl PirFunctionCompiler {
         );
         let mut module = JITModule::new(builder);
         let pointer_type = module.target_config().pointer_type();
-        let mut signature = module.make_signature();
-        signature.params.push(AbiParam::new(pointer_type));
-        signature.params.push(AbiParam::new(pointer_type));
-        signature.params.push(AbiParam::new(pointer_type));
-        signature.params.push(AbiParam::new(pointer_type));
-        signature.returns.push(AbiParam::new(types::I32));
-
-        let function_id = module
-            .declare_function("xlsynth_pir_entry", Linkage::Export, &signature)
-            .map_err(|error| CompilerError::Backend(error.to_string()))?;
-        let mut context = module.make_context();
-        context.func.signature = signature;
-        let runtime_callbacks =
-            declare_runtime_callbacks(&mut module, &mut context.func, pointer_type)?;
-
-        let mut function_builder_context = FunctionBuilderContext::new();
-        {
-            let mut function_builder =
-                FunctionBuilder::new(&mut context.func, &mut function_builder_context);
-            lower_function(
-                function,
-                &order,
-                &param_layouts,
-                &scratch_plan,
-                &event_sites,
-                runtime_callbacks,
-                pointer_type,
-                &mut function_builder,
-            )?;
-            function_builder.finalize();
+        let signature = compiled_function_signature(&mut module, pointer_type);
+        let mut function_ids = HashMap::new();
+        for (index, function_name) in function_names.iter().enumerate() {
+            let is_top = function_name == &top.name;
+            let symbol = if is_top {
+                "xlsynth_pir_entry".to_string()
+            } else {
+                format!("xlsynth_pir_fn_{index}")
+            };
+            let function_id = module
+                .declare_function(
+                    &symbol,
+                    if is_top {
+                        Linkage::Export
+                    } else {
+                        Linkage::Local
+                    },
+                    &signature,
+                )
+                .map_err(|error| CompilerError::Backend(error.to_string()))?;
+            function_ids.insert(function_name.clone(), function_id);
         }
+        for function_name in &function_names {
+            let plan = &plans[function_name];
+            let mut context = module.make_context();
+            context.func.signature = signature.clone();
+            let runtime_callbacks =
+                declare_runtime_callbacks(&mut module, &mut context.func, pointer_type)?;
+            let invoke_targets =
+                declare_invoke_targets(&mut module, &mut context.func, &function_ids);
 
-        module
-            .define_function(function_id, &mut context)
-            .map_err(|error| CompilerError::Backend(error.to_string()))?;
-        module.clear_context(&mut context);
+            let mut function_builder_context = FunctionBuilderContext::new();
+            {
+                let mut function_builder =
+                    FunctionBuilder::new(&mut context.func, &mut function_builder_context);
+                lower_function(
+                    plan.function,
+                    &plan.order,
+                    &plan.param_layouts,
+                    &plan.scratch_plan,
+                    &plan.event_sites,
+                    &invoke_targets,
+                    runtime_callbacks,
+                    pointer_type,
+                    &mut function_builder,
+                )?;
+                function_builder.finalize();
+            }
+            module
+                .define_function(function_ids[function_name], &mut context)
+                .map_err(|error| CompilerError::Backend(error.to_string()))?;
+            module.clear_context(&mut context);
+        }
         module
             .finalize_definitions()
             .map_err(|error| CompilerError::Backend(error.to_string()))?;
 
+        let function_id = function_ids[&top.name];
         let entrypoint_ptr = module.get_finalized_function(function_id);
         // SAFETY: `entrypoint_ptr` denotes the finalized function just defined
         // with the exact `NativeEntrypoint` signature above.
@@ -449,11 +535,11 @@ impl PirFunctionCompiler {
         Ok(Self {
             module: Some(module),
             entrypoint,
-            param_layouts,
-            result_layout,
+            param_layouts: top_plan.param_layouts.clone(),
+            result_layout: top_plan.result_layout.clone(),
             metadata,
-            scratch_byte_count: scratch_plan.byte_count,
-            scratch_alignment: scratch_plan.alignment,
+            scratch_byte_count,
+            scratch_alignment,
         })
     }
 
@@ -702,6 +788,90 @@ impl PirFunctionCompiler {
     }
 }
 
+fn compiled_function_signature<M: Module>(module: &mut M, pointer_type: ClifType) -> Signature {
+    let mut signature = module.make_signature();
+    signature.params.push(AbiParam::new(pointer_type));
+    signature.params.push(AbiParam::new(pointer_type));
+    signature.params.push(AbiParam::new(pointer_type));
+    signature.params.push(AbiParam::new(pointer_type));
+    signature.returns.push(AbiParam::new(types::I32));
+    signature
+}
+
+fn declare_invoke_targets<M: Module>(
+    module: &mut M,
+    function: &mut cranelift_codegen::ir::Function,
+    function_ids: &HashMap<String, FuncId>,
+) -> HashMap<String, FuncRef> {
+    function_ids
+        .iter()
+        .map(|(name, id)| (name.clone(), module.declare_func_in_func(*id, function)))
+        .collect()
+}
+
+fn resolve_function<'a>(
+    package: Option<&'a ir::Package>,
+    top: &'a ir::Fn,
+    function_name: &str,
+) -> Result<&'a ir::Fn, CompilerError> {
+    if function_name == top.name {
+        return Ok(top);
+    }
+    package
+        .and_then(|package| package.get_fn(function_name))
+        .ok_or_else(|| {
+            CompilerError::InvalidFunction(format!(
+                "function '{}' invokes unknown function '{function_name}'",
+                top.name
+            ))
+        })
+}
+
+/// Returns callees before callers for the top-reachable invoke graph.
+fn invoked_function_postorder(
+    package: Option<&ir::Package>,
+    top: &ir::Fn,
+) -> Result<Vec<String>, CompilerError> {
+    fn visit(
+        package: Option<&ir::Package>,
+        top: &ir::Fn,
+        function_name: &str,
+        active: &mut HashSet<String>,
+        visited: &mut HashSet<String>,
+        postorder: &mut Vec<String>,
+    ) -> Result<(), CompilerError> {
+        if visited.contains(function_name) {
+            return Ok(());
+        }
+        if !active.insert(function_name.to_string()) {
+            return Err(CompilerError::InvalidFunction(format!(
+                "recursive invoke graph through function '{function_name}' is not valid XLS IR"
+            )));
+        }
+        let function = resolve_function(package, top, function_name)?;
+        for node in &function.nodes {
+            if let NodePayload::Invoke { to_apply, .. } = &node.payload {
+                visit(package, top, to_apply, active, visited, postorder)?;
+            }
+        }
+        active.remove(function_name);
+        visited.insert(function_name.to_string());
+        postorder.push(function_name.to_string());
+        Ok(())
+    }
+
+    let mut postorder = Vec::new();
+    visit(
+        package,
+        top,
+        &top.name,
+        &mut HashSet::new(),
+        &mut HashSet::new(),
+        &mut postorder,
+    )?;
+    Ok(postorder)
+}
+
 impl Drop for PirFunctionCompiler {
     fn drop(&mut self) {
         let Some(module) = self.module.take() else {
@@ -720,6 +890,7 @@ fn require_scalar_layout(layout: &NativeValueLayout) -> Result<ScalarLayout, Com
 }
 
 enum NativeScalar {
+    Zero,
     U8(u8),
     U16(u16),
     U32(u32),
@@ -776,6 +947,9 @@ unsafe fn write_ir_value_to_native(
                     scalar.bit_count,
                     bits.get_bit_count()
                 )));
+            }
+            if scalar.bit_count == 0 {
+                return Ok(());
             }
             let integer = bits
                 .to_u64()
@@ -875,6 +1049,10 @@ unsafe fn read_ir_value_from_native(
 ) -> Result<IrValue, CompilerError> {
     match layout {
         NativeValueLayout::Scalar(scalar) => {
+            if scalar.bit_count == 0 {
+                return IrValue::make_ubits(0, 0)
+                    .map_err(|error| CompilerError::Value(error.to_string()));
+            }
             let mut bytes = [0u8; std::mem::size_of::<u64>()];
             // SAFETY: the caller provides readable storage for this scalar layout.
             unsafe {
@@ -942,6 +1120,7 @@ impl NativeScalar {
     fn new(layout: ScalarLayout, value: u64) -> Result<Self, CompilerError> {
         layout.validate_value(value)?;
         Ok(match layout.byte_count {
+            0 => Self::Zero,
             1 => Self::U8(value as u8),
             2 => Self::U16(value as u16),
             4 => Self::U32(value as u32),
@@ -952,6 +1131,7 @@ impl NativeScalar {
 
     fn as_ptr(&self) -> *const u8 {
         match self {
+            Self::Zero => ptr::null(),
             Self::U8(value) => ptr::from_ref(value).cast(),
             Self::U16(value) => ptr::from_ref(value).cast(),
             Self::U32(value) => ptr::from_ref(value).cast(),
@@ -961,6 +1141,7 @@ impl NativeScalar {
 
     fn as_mut_ptr(&mut self) -> *mut u8 {
         match self {
+            Self::Zero => ptr::null_mut(),
             Self::U8(value) => ptr::from_mut(value).cast(),
             Self::U16(value) => ptr::from_mut(value).cast(),
             Self::U32(value) => ptr::from_mut(value).cast(),
@@ -970,6 +1151,7 @@ impl NativeScalar {
 
     fn value(&self) -> u64 {
         match self {
+            Self::Zero => 0,
             Self::U8(value) => u64::from(*value),
             Self::U16(value) => u64::from(*value),
             Self::U32(value) => u64::from(*value),
@@ -984,11 +1166,19 @@ struct ScratchPlan {
     in_place_array_updates: HashSet<NodeRef>,
     gate_zero_offset: Option<usize>,
     gate_zero_byte_count: usize,
+    invoke_sites: HashMap<NodeRef, InvokeScratchPlan>,
     trace_sites: HashMap<NodeRef, TraceScratchPlan>,
     runtime_scalar_offsets: HashMap<NodeRef, usize>,
     runtime_temporary_offsets: [Option<usize>; 2],
     byte_count: usize,
     alignment: usize,
+}
+
+#[derive(Debug)]
+struct InvokeScratchPlan {
+    pointer_array_offset: Option<usize>,
+    scalar_operand_offsets: Vec<Option<usize>>,
+    output_offset: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -1016,6 +1206,7 @@ impl ScratchPlan {
             assign_materialized_scratch_offsets(function, order)?;
         let (gate_zero_offset, gate_zero_byte_count) =
             reserve_gate_zero_storage(function, order, &mut byte_count, &mut alignment)?;
+        let mut invoke_sites = HashMap::new();
         let mut trace_sites = HashMap::new();
         let mut runtime_scalar_offsets = HashMap::new();
         let mut runtime_temporary_offsets = [None; 2];
@@ -1081,11 +1272,73 @@ impl ScratchPlan {
                 alignment = alignment.max(std::mem::align_of::<u64>());
             }
         }
+        for node_ref in order {
+            let NodePayload::Invoke { operands, .. } = &function.get_node(*node_ref).payload else {
+                continue;
+            };
+            let mut scalar_operand_offsets = Vec::with_capacity(operands.len());
+            for operand in operands {
+                let layout = NativeValueLayout::from_type(&function.get_node(*operand).ty)?;
+                let offset =
+                    if matches!(layout, NativeValueLayout::Scalar(_)) && layout.byte_count() != 0 {
+                        Some(reserve_scratch_region(
+                            &mut byte_count,
+                            &mut alignment,
+                            layout.byte_count(),
+                            layout.alignment(),
+                            "invoke scalar argument scratch size overflow",
+                        )?)
+                    } else {
+                        None
+                    };
+                scalar_operand_offsets.push(offset);
+            }
+            let pointer_array_offset = if operands.is_empty() {
+                None
+            } else {
+                let pointer_array_byte_count = operands
+                    .len()
+                    .checked_mul(std::mem::size_of::<*const u8>())
+                    .ok_or_else(|| {
+                        CompilerError::UnsupportedType(
+                            "invoke pointer array scratch size overflow".into(),
+                        )
+                    })?;
+                Some(reserve_scratch_region(
+                    &mut byte_count,
+                    &mut alignment,
+                    pointer_array_byte_count,
+                    std::mem::align_of::<*const u8>(),
+                    "invoke pointer array scratch size overflow",
+                )?)
+            };
+            let result_layout = NativeValueLayout::from_type(&function.get_node(*node_ref).ty)?;
+            let output_offset = if result_layout.byte_count() == 0 {
+                None
+            } else {
+                Some(reserve_scratch_region(
+                    &mut byte_count,
+                    &mut alignment,
+                    result_layout.byte_count(),
+                    result_layout.alignment(),
+                    "invoke output scratch size overflow",
+                )?)
+            };
+            invoke_sites.insert(
+                *node_ref,
+                InvokeScratchPlan {
+                    pointer_array_offset,
+                    scalar_operand_offsets,
+                    output_offset,
+                },
+            );
+        }
         Ok(Self {
             offsets,
             in_place_array_updates,
             gate_zero_offset,
             gate_zero_byte_count,
+            invoke_sites,
             trace_sites,
             runtime_scalar_offsets,
             runtime_temporary_offsets,
@@ -1093,6 +1346,62 @@ impl ScratchPlan {
             alignment,
         })
     }
+
+    /// Rebases this function's local scratch offsets into the package slab.
+    fn rebase_offsets(&mut self, base: usize) -> Result<(), CompilerError> {
+        let rebase = |offset: &mut usize| -> Result<(), CompilerError> {
+            *offset = offset.checked_add(base).ok_or_else(|| {
+                CompilerError::UnsupportedType("package scratch offset overflow".into())
+            })?;
+            Ok(())
+        };
+        for offset in self.offsets.values_mut() {
+            rebase(offset)?;
+        }
+        if let Some(offset) = &mut self.gate_zero_offset {
+            rebase(offset)?;
+        }
+        for plan in self.invoke_sites.values_mut() {
+            if let Some(offset) = &mut plan.pointer_array_offset {
+                rebase(offset)?;
+            }
+            for offset in plan.scalar_operand_offsets.iter_mut().flatten() {
+                rebase(offset)?;
+            }
+            if let Some(offset) = &mut plan.output_offset {
+                rebase(offset)?;
+            }
+        }
+        for plan in self.trace_sites.values_mut() {
+            rebase(&mut plan.pointer_array_offset)?;
+            for offset in plan.scalar_operand_offsets.iter_mut().flatten() {
+                rebase(offset)?;
+            }
+        }
+        for offset in self.runtime_scalar_offsets.values_mut() {
+            rebase(offset)?;
+        }
+        for offset in self.runtime_temporary_offsets.iter_mut().flatten() {
+            rebase(offset)?;
+        }
+        Ok(())
+    }
+}
+
+fn reserve_scratch_region(
+    byte_count: &mut usize,
+    alignment: &mut usize,
+    region_byte_count: usize,
+    region_alignment: usize,
+    overflow_message: &'static str,
+) -> Result<usize, CompilerError> {
+    *byte_count = align_up(*byte_count, region_alignment)?;
+    let offset = *byte_count;
+    *byte_count = byte_count
+        .checked_add(region_byte_count)
+        .ok_or_else(|| CompilerError::UnsupportedType(overflow_message.into()))?;
+    *alignment = (*alignment).max(region_alignment);
+    Ok(offset)
 }
 
 /// Assigns overlapping scratch offsets to materialized values with disjoint
@@ -1412,7 +1721,16 @@ enum ComputedValue {
     },
     ScalarArrayIndex(Box<DeferredScalarArrayIndex>),
     Address(Value),
+    ZeroSizedBits,
     ZeroSized,
+}
+
+/// Returns the storage-free value representation appropriate for `layout`.
+fn zero_sized_computed_value(layout: &NativeValueLayout) -> ComputedValue {
+    match layout {
+        NativeValueLayout::Scalar(scalar) if scalar.bit_count == 0 => ComputedValue::ZeroSizedBits,
+        _ => ComputedValue::ZeroSized,
+    }
 }
 
 #[derive(Clone)]
@@ -1541,11 +1859,11 @@ fn array_indices_are_statically_in_bounds(
     true
 }
 
-fn build_event_metadata(
+fn append_event_metadata(
     function: &ir::Fn,
     order: &[NodeRef],
-) -> Result<(CompiledFunctionMetadata, HashMap<NodeRef, u32>), CompilerError> {
-    let mut event_sites = Vec::new();
+    metadata: &mut CompiledFunctionMetadata,
+) -> Result<HashMap<NodeRef, u32>, CompilerError> {
     let mut site_ids = HashMap::new();
     for node_ref in order {
         let node = function.get_node(*node_ref);
@@ -1622,13 +1940,13 @@ fn build_event_metadata(
             _ => None,
         };
         if let Some(site) = site {
-            let site_id = u32::try_from(event_sites.len())
+            let site_id = u32::try_from(metadata.event_sites.len())
                 .map_err(|_| CompilerError::UnsupportedType("too many event sites".into()))?;
             site_ids.insert(*node_ref, site_id);
-            event_sites.push(site);
+            metadata.event_sites.push(site);
         }
     }
-    Ok((CompiledFunctionMetadata { event_sites }, site_ids))
+    Ok(site_ids)
 }
 
 /// Returns the reachable nodes in a pressure-aware topological lowering order.
@@ -1913,6 +2231,7 @@ fn lower_function(
     param_layouts: &[NativeValueLayout],
     scratch_plan: &ScratchPlan,
     event_sites: &HashMap<NodeRef, u32>,
+    invoke_targets: &HashMap<String, FuncRef>,
     runtime_callbacks: RuntimeCallbacks,
     pointer_type: ClifType,
     builder: &mut FunctionBuilder<'_>,
@@ -2048,6 +2367,20 @@ fn lower_function(
                 );
                 ComputedValue::ZeroSized
             }
+            NodePayload::Invoke { to_apply, operands } => lower_invoke(
+                builder,
+                function,
+                *node_ref,
+                to_apply,
+                operands,
+                &values,
+                &layout,
+                scratch_pointer,
+                execution_context,
+                scratch_plan,
+                invoke_targets,
+                pointer_type,
+            )?,
             NodePayload::Unop(Unop::Identity, arg) if layout.is_memory_backed() => {
                 computed_value_for(&values, *arg)?
             }
@@ -3010,6 +3343,118 @@ fn lower_function(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn lower_invoke(
+    builder: &mut FunctionBuilder<'_>,
+    function: &ir::Fn,
+    node_ref: NodeRef,
+    to_apply: &str,
+    operands: &[NodeRef],
+    values: &[Option<ComputedValue>],
+    result_layout: &NativeValueLayout,
+    scratch_pointer: Value,
+    execution_context: Value,
+    scratch_plan: &ScratchPlan,
+    invoke_targets: &HashMap<String, FuncRef>,
+    pointer_type: ClifType,
+) -> Result<ComputedValue, CompilerError> {
+    let plan = scratch_plan.invoke_sites.get(&node_ref).ok_or_else(|| {
+        CompilerError::InvalidFunction(format!(
+            "invoke node {} has no scratch assignment",
+            function.get_node(node_ref).text_id
+        ))
+    })?;
+    let inputs_pointer = plan
+        .pointer_array_offset
+        .map(|offset| pointer_at_offset(builder, scratch_pointer, offset))
+        .unwrap_or_else(|| builder.ins().iconst(pointer_type, 0));
+    for (index, operand) in operands.iter().enumerate() {
+        let layout = NativeValueLayout::from_type(&function.get_node(*operand).ty)?;
+        let pointer = invoke_operand_pointer(
+            builder,
+            computed_value_for(values, *operand)?,
+            &layout,
+            plan.scalar_operand_offsets[index],
+            scratch_pointer,
+            pointer_type,
+        )?;
+        builder.ins().store(
+            MemFlags::new(),
+            pointer,
+            inputs_pointer,
+            (index * std::mem::size_of::<*const u8>()) as i32,
+        );
+    }
+    let output_pointer = plan
+        .output_offset
+        .map(|offset| pointer_at_offset(builder, scratch_pointer, offset))
+        .unwrap_or_else(|| builder.ins().iconst(pointer_type, 0));
+    let target = invoke_targets.get(to_apply).copied().ok_or_else(|| {
+        CompilerError::InvalidFunction(format!("missing lowered invoke target '{to_apply}'"))
+    })?;
+    let call = builder.ins().call(
+        target,
+        &[
+            inputs_pointer,
+            output_pointer,
+            scratch_pointer,
+            execution_context,
+        ],
+    );
+    let status = builder.inst_results(call)[0];
+    let failed = builder.ins().icmp_imm(IntCC::NotEqual, status, 0);
+    let return_status = builder.create_block();
+    let after = builder.create_block();
+    builder.set_cold_block(return_status);
+    builder.ins().brif(failed, return_status, &[], after, &[]);
+    builder.switch_to_block(return_status);
+    builder.seal_block(return_status);
+    builder.ins().return_(&[status]);
+    builder.switch_to_block(after);
+    builder.seal_block(after);
+    Ok(load_value_from_storage(
+        builder,
+        output_pointer,
+        result_layout,
+    ))
+}
+
+fn invoke_operand_pointer(
+    builder: &mut FunctionBuilder<'_>,
+    value: ComputedValue,
+    layout: &NativeValueLayout,
+    scalar_operand_offset: Option<usize>,
+    scratch_pointer: Value,
+    pointer_type: ClifType,
+) -> Result<Value, CompilerError> {
+    match value {
+        ComputedValue::Scalar(value) => {
+            let Some(offset) = scalar_operand_offset else {
+                return Ok(builder.ins().iconst(pointer_type, 0));
+            };
+            let pointer = pointer_at_offset(builder, scratch_pointer, offset);
+            store_value_to_storage(builder, pointer, ComputedValue::Scalar(value), layout)?;
+            Ok(pointer)
+        }
+        ComputedValue::ScalarAddress {
+            pointer, offset, ..
+        } => Ok(pointer_at_offset(builder, pointer, offset)),
+        ComputedValue::ScalarArrayIndex(value) => {
+            let value = materialize_scalar(builder, ComputedValue::ScalarArrayIndex(value))?;
+            let Some(offset) = scalar_operand_offset else {
+                return Ok(builder.ins().iconst(pointer_type, 0));
+            };
+            let pointer = pointer_at_offset(builder, scratch_pointer, offset);
+            store_value_to_storage(builder, pointer, ComputedValue::Scalar(value), layout)?;
+            Ok(pointer)
+        }
+        ComputedValue::Address(pointer) => Ok(pointer),
+        ComputedValue::ZeroSizedBits | ComputedValue::ZeroSized => {
+            Ok(builder.ins().iconst(pointer_type, 0))
+        }
+    }
+}
+
 fn event_site_id(
     event_sites: &HashMap<NodeRef, u32>,
     node_ref: NodeRef,
@@ -3105,6 +3550,7 @@ fn lower_trace_operand_pointers(
                 pointer
             }
             ComputedValue::Address(pointer) => pointer,
+            ComputedValue::ZeroSizedBits => builder.ins().iconst(pointer_type, 0),
             ComputedValue::ZeroSized => builder.ins().iconst(pointer_type, 0),
         };
         builder.ins().store(
@@ -3768,6 +4214,9 @@ fn bit_sign_condition(
     layout: &NativeValueLayout,
 ) -> Result<Value, CompilerError> {
     let bit_count = bits_bit_count(layout)?;
+    if bit_count == 0 {
+        return Ok(builder.ins().iconst(types::I8, 0));
+    }
     let limb = load_raw_bits_limb(builder, value, layout, (bit_count - 1) / 64)?;
     let mask = 1u64 << ((bit_count - 1) % 64);
     let masked = builder.ins().band_imm(limb, mask as i64);
@@ -4657,6 +5106,9 @@ fn lower_shift(
     rhs_layout: ScalarLayout,
     op: Binop,
 ) -> Value {
+    if lhs_layout.bit_count == 0 {
+        return builder.ins().iconst(lhs_layout.clif_type(), 0);
+    }
     let out_of_bounds = builder.ins().icmp_imm(
         IntCC::UnsignedGreaterThanOrEqual,
         rhs,
@@ -4695,6 +5147,9 @@ fn lower_divmod(
     layout: ScalarLayout,
     op: Binop,
 ) -> Value {
+    if layout.bit_count == 0 {
+        return builder.ins().iconst(layout.clif_type(), 0);
+    }
     let zero = builder.ins().iconst(layout.clif_type(), 0);
     let one = builder.ins().iconst(layout.clif_type(), 1);
     let divisor_is_zero = builder.ins().icmp_imm(IntCC::Equal, rhs, 0);
@@ -4765,9 +5220,6 @@ fn lower_concat(
     values: &mut [Option<ComputedValue>],
     layout: ScalarLayout,
 ) -> Result<Value, CompilerError> {
-    if args.is_empty() {
-        return Err(unsupported_node(node));
-    }
     let mut remaining_width = layout.bit_count;
     let mut result = builder.ins().iconst(layout.clif_type(), 0);
     for arg in args {
@@ -4922,6 +5374,9 @@ fn lower_logical_clz(
     arg: Value,
     arg_layout: ScalarLayout,
 ) -> Value {
+    if arg_layout.bit_count == 0 {
+        return builder.ins().iconst(arg_layout.clif_type(), 0);
+    }
     let clz = builder.ins().clz(arg);
     let padding = arg_layout.storage_bit_count() - arg_layout.bit_count;
     if padding == 0 {
@@ -5197,7 +5652,9 @@ fn lower_array_index(
         }
         return Ok(value);
     }
-    if let NativeValueLayout::Scalar(layout) = layout {
+    if let NativeValueLayout::Scalar(layout) = layout
+        && layout.byte_count != 0
+    {
         let value = deferred_scalar_array_index(
             function,
             node,
@@ -5279,7 +5736,7 @@ fn lower_array_index(
     }
     match pointer {
         Some(pointer) => Ok(load_value_from_storage(builder, pointer, layout)),
-        None => Ok(ComputedValue::ZeroSized),
+        None => Ok(zero_sized_computed_value(layout)),
     }
 }
 
@@ -5407,6 +5864,9 @@ fn lower_scalar_literal(
     literal: &IrValue,
     layout: ScalarLayout,
 ) -> Result<Value, CompilerError> {
+    if layout.bit_count == 0 {
+        return Ok(builder.ins().iconst(layout.clif_type(), 0));
+    }
     let value = literal
         .to_u64()
         .map_err(|error| CompilerError::Value(error.to_string()))?;
@@ -5420,6 +5880,9 @@ fn lower_literal_to_storage(
     literal: &IrValue,
     layout: &NativeValueLayout,
 ) -> Result<(), CompilerError> {
+    if layout.byte_count() == 0 {
+        return Ok(());
+    }
     match layout {
         NativeValueLayout::Scalar(scalar) => {
             let value = lower_scalar_literal(builder, literal, *scalar)?;
@@ -5596,7 +6059,7 @@ fn lower_tuple_index(
         )));
     }
     if result_layout.byte_count() == 0 {
-        return Ok(ComputedValue::ZeroSized);
+        return Ok(zero_sized_computed_value(result_layout));
     }
     let tuple_pointer = address_value_for(values, tuple)?;
     if let NativeValueLayout::Scalar(layout) = result_layout {
@@ -6050,7 +6513,7 @@ fn lower_one_hot_sel(
     let selector_value = scalar_value_for(builder, values, selector)?;
     let selector_layout = ScalarLayout::from_type(&function.get_node(selector).ty)?;
     if layout.byte_count() == 0 {
-        return Ok(ComputedValue::ZeroSized);
+        return Ok(zero_sized_computed_value(layout));
     }
     match layout {
         NativeValueLayout::Scalar(scalar) => {
@@ -6177,7 +6640,7 @@ fn selected_value(
     layout: &NativeValueLayout,
 ) -> Result<ComputedValue, CompilerError> {
     if layout.byte_count() == 0 {
-        return Ok(ComputedValue::ZeroSized);
+        return Ok(zero_sized_computed_value(layout));
     }
     match layout {
         NativeValueLayout::Scalar(scalar) => {
@@ -6277,6 +6740,9 @@ fn write_zero_value_to_storage(
     destination: Value,
     layout: &NativeValueLayout,
 ) -> Result<(), CompilerError> {
+    if layout.byte_count() == 0 {
+        return Ok(());
+    }
     match layout {
         NativeValueLayout::Scalar(scalar) => {
             let zero = builder.ins().iconst(scalar.clif_type(), 0);
@@ -6536,6 +7002,9 @@ fn resize_integer_type_unsigned(
     from: ScalarLayout,
     to: ClifType,
 ) -> Value {
+    if from.clif_type() == to {
+        return value;
+    }
     match from.byte_count.cmp(&(to.bytes() as usize)) {
         std::cmp::Ordering::Less => builder.ins().uextend(to, value),
         std::cmp::Ordering::Equal => value,
@@ -6788,7 +7257,7 @@ fn load_value_from_storage(
     layout: &NativeValueLayout,
 ) -> ComputedValue {
     if layout.byte_count() == 0 {
-        return ComputedValue::ZeroSized;
+        return zero_sized_computed_value(layout);
     }
     match layout {
         NativeValueLayout::Scalar(scalar) => {
@@ -6807,7 +7276,7 @@ fn load_value_from_storage(
 /// Returns a storage-backed value, deferring scalar loads until consumption.
 fn deferred_value_from_storage(pointer: Value, layout: &NativeValueLayout) -> ComputedValue {
     if layout.byte_count() == 0 {
-        return ComputedValue::ZeroSized;
+        return zero_sized_computed_value(layout);
     }
     match layout {
         NativeValueLayout::Scalar(scalar) => ComputedValue::ScalarAddress {
@@ -6952,6 +7421,7 @@ fn materialize_scalar(
         ComputedValue::ScalarArrayIndex(value) => {
             materialize_deferred_scalar_array_index(builder, *value)
         }
+        ComputedValue::ZeroSizedBits => Ok(builder.ins().iconst(types::I8, 0)),
         ComputedValue::Address(_) | ComputedValue::ZeroSized => Err(
             CompilerError::InvalidFunction("array value used as a scalar".into()),
         ),
@@ -6964,6 +7434,7 @@ fn expect_address(value: ComputedValue) -> Result<Value, CompilerError> {
         ComputedValue::Scalar(_)
         | ComputedValue::ScalarAddress { .. }
         | ComputedValue::ScalarArrayIndex(_)
+        | ComputedValue::ZeroSizedBits
         | ComputedValue::ZeroSized => Err(CompilerError::InvalidFunction(
             "scalar value used as an array".into(),
         )),
@@ -6971,6 +7442,9 @@ fn expect_address(value: ComputedValue) -> Result<Value, CompilerError> {
 }
 
 fn mask_value(builder: &mut FunctionBuilder<'_>, value: Value, layout: ScalarLayout) -> Value {
+    if layout.bit_count == 0 {
+        return builder.ins().iconst(layout.clif_type(), 0);
+    }
     if layout.bit_count == layout.storage_bit_count() {
         value
     } else {
@@ -6979,6 +7453,9 @@ fn mask_value(builder: &mut FunctionBuilder<'_>, value: Value, layout: ScalarLay
 }
 
 fn signed_value(builder: &mut FunctionBuilder<'_>, value: Value, layout: ScalarLayout) -> Value {
+    if layout.bit_count == 0 {
+        return builder.ins().iconst(layout.clif_type(), 0);
+    }
     let padding = layout.storage_bit_count() - layout.bit_count;
     if padding == 0 {
         value
@@ -6994,6 +7471,12 @@ fn resize_unsigned(
     from: ScalarLayout,
     to: ScalarLayout,
 ) -> Value {
+    if to.bit_count == 0 {
+        return builder.ins().iconst(to.clif_type(), 0);
+    }
+    if from.clif_type() == to.clif_type() {
+        return value;
+    }
     match from.byte_count.cmp(&to.byte_count) {
         std::cmp::Ordering::Less => builder.ins().uextend(to.clif_type(), value),
         std::cmp::Ordering::Equal => value,
@@ -7007,6 +7490,12 @@ fn resize_signed(
     from: ScalarLayout,
     to: ScalarLayout,
 ) -> Value {
+    if to.bit_count == 0 {
+        return builder.ins().iconst(to.clif_type(), 0);
+    }
+    if from.clif_type() == to.clif_type() {
+        return value;
+    }
     match from.byte_count.cmp(&to.byte_count) {
         std::cmp::Ordering::Less => builder.ins().sextend(to.clif_type(), value),
         std::cmp::Ordering::Equal => value,

@@ -12,7 +12,7 @@ use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_random::{
     DepletableBytes, FunctionSignature, GenerationError, OperationSet, RandomFnOptions,
     RandomOperation, RngEntropy, StopPolicy, generate_fn, generate_fn_with_signature,
-    generate_same_signature_pair,
+    generate_package, generate_same_signature_pair,
 };
 use xlsynth_pir::ir_verify::verify_package;
 use xlsynth_pir::random_inputs::{
@@ -203,6 +203,61 @@ fn depleted_entropy_constructs_a_minimal_deterministic_function() {
         second.function.nodes[1].ty.to_string()
     );
     assert_eq!(first.stats, second.stats);
+}
+
+#[test]
+fn random_package_generation_is_bounded_acyclic_and_reaches_configured_maximum() {
+    let options = RandomFnOptions {
+        max_params: 4,
+        max_nodes: 24,
+        max_functions: 5,
+        max_invokes_per_function: 3,
+        enabled_operations: OperationSet::new([RandomOperation::Literal, RandomOperation::Invoke]),
+        ..RandomFnOptions::default()
+    };
+    let mut entropy = RngEntropy::new(Pcg64Mcg::new(0x1a70_ca11));
+    let mut observed_maximum_function_count = false;
+    let mut observed_non_wrapper_signature = false;
+    let mut observed_reused_callee = false;
+    for _ in 0..100 {
+        let generated =
+            generate_package(&mut entropy, &options, StopPolicy::ExactBodyNodes(16)).unwrap();
+        verify_package(&generated.package).unwrap();
+        let function_count = generated.package.members.len();
+        observed_maximum_function_count |= function_count == options.max_functions;
+        assert!((1..=options.max_functions).contains(&function_count));
+        assert_eq!(generated.function_stats.len(), function_count);
+        assert!(
+            generated
+                .function_stats
+                .iter()
+                .all(|stats| stats.emitted_node_count <= options.max_nodes)
+        );
+        let mut called_names = HashSet::new();
+        let mut invoke_count = 0;
+        for member in &generated.package.members {
+            let PackageMember::Function(function) = member else {
+                unreachable!("generated packages contain only functions")
+            };
+            let mut function_invoke_count = 0;
+            for node in &function.nodes {
+                let NodePayload::Invoke { to_apply, .. } = &node.payload else {
+                    continue;
+                };
+                function_invoke_count += 1;
+                invoke_count += 1;
+                observed_reused_callee |= !called_names.insert(to_apply.clone());
+                let callee = generated.package.get_fn(to_apply).unwrap();
+                observed_non_wrapper_signature |=
+                    FunctionSignature::from_fn(function) != FunctionSignature::from_fn(callee);
+            }
+            assert!(function_invoke_count <= options.max_invokes_per_function);
+        }
+        assert!(invoke_count > 0);
+    }
+    assert!(observed_maximum_function_count);
+    assert!(observed_non_wrapper_signature);
+    assert!(observed_reused_callee);
 }
 
 #[test]
