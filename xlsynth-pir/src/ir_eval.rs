@@ -973,9 +973,7 @@ fn eval_pure(n: &ir::Node, operand_values: &[&IrValue]) -> IrValue {
             let arg_bits: IrBits = operand_values[0].to_bits().unwrap();
             let bit_count = arg_bits.get_bit_count();
             assert!(
-                start
-                    .checked_add(width)
-                    .is_some_and(|end| end <= bit_count),
+                start.checked_add(width).is_some_and(|end| end <= bit_count),
                 "BitSlice OOB: start={} width={} arg_width={}",
                 start,
                 width,
