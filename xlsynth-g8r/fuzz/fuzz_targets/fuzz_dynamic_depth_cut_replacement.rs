@@ -9,7 +9,7 @@ use libfuzzer_sys::fuzz_target;
 use xlsynth_g8r::aig::dynamic_depth::DynamicDepthState;
 use xlsynth_g8r::aig::dynamic_structural_hash::DynamicStructuralHash;
 use xlsynth_g8r::aig::{AigNode, AigOperand, AigRef};
-use xlsynth_g8r_fuzz::{build_graph, FuzzGraph};
+use xlsynth_g8r_fuzz::{FuzzGraph, build_graph};
 
 const MAX_STEPS: usize = 32;
 const MAX_CUT_EXPANSIONS: usize = 8;
@@ -40,11 +40,7 @@ struct FragmentOp {
 }
 
 fn maybe_negate(op: AigOperand, negate: bool) -> AigOperand {
-    if negate {
-        op.negate()
-    } else {
-        op
-    }
+    if negate { op.negate() } else { op }
 }
 
 fn expand_leaf_once(

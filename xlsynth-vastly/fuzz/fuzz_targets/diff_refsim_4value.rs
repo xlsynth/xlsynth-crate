@@ -12,11 +12,11 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 
-use xlsynth_vastly::ast::Expr;
 use xlsynth_vastly::Env;
 use xlsynth_vastly::LogicBit;
 use xlsynth_vastly::Signedness;
 use xlsynth_vastly::Value4;
+use xlsynth_vastly::ast::Expr;
 
 const MAX_BASED_LITERAL_WIDTH: u32 = 384;
 const MAX_EXPR_AST_DEPTH: usize = 16;

@@ -8,16 +8,16 @@ use vastly_fuzz::codegen_semantics::pack_ir_value_to_value4;
 use vastly_fuzz::codegen_semantics::packed_signature;
 use vastly_fuzz::codegen_semantics::parse_pir_top_fn;
 use xlsynth::IrValue;
+use xlsynth_vastly::LogicBit;
+use xlsynth_vastly::Signedness;
+use xlsynth_vastly::Value4;
+use xlsynth_vastly::Vcd;
 use xlsynth_vastly::compile_combo_module;
 use xlsynth_vastly::eval_combo;
 use xlsynth_vastly::eval_yosys_cxxrtl_combo;
 use xlsynth_vastly::has_yosys_cxxrtl_toolchain;
 use xlsynth_vastly::plan_combo_eval;
 use xlsynth_vastly::run_iverilog_combo_and_collect_vcd;
-use xlsynth_vastly::LogicBit;
-use xlsynth_vastly::Signedness;
-use xlsynth_vastly::Value4;
-use xlsynth_vastly::Vcd;
 
 const COMPOUND_SHAPES_IR: &str = r#"package aot_tests
 

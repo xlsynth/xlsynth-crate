@@ -208,11 +208,18 @@ mod tests {
 
     #[test]
     fn crashing_scheduler_artifact_single_success_task_regression() {
-        let bytes = [0x27, 0x27, 0x27, 0x27, 0x32, 0x27, 0x0b, 0x27, 0x27, 0x27, 0x0b];
+        let bytes = [
+            0x27, 0x27, 0x27, 0x27, 0x32, 0x27, 0x0b, 0x27, 0x27, 0x27, 0x0b,
+        ];
         let root = decode_fuzz_plan_node(&bytes).expect("decode");
         let mut budget = 64usize;
         let root = root.clamp(&mut budget, 5).expect("clamp");
-        assert_eq!(eval_fuzz(&root), super::Eval { outcome: Some(true) });
+        assert_eq!(
+            eval_fuzz(&root),
+            super::Eval {
+                outcome: Some(true)
+            }
+        );
         let plan = build_plan_from_fuzz(root);
         for cores in 1..=4 {
             let report = run_prover_plan(plan.clone(), cores).expect("run");

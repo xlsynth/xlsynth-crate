@@ -8,11 +8,11 @@ use xlsynth_g8r_fuzz::{fuzz_solver_limits, generate_gatify_random_pir_package};
 use xlsynth_pir::desugar_extensions::emit_package_as_xls_ir_text;
 use xlsynth_pir::ir;
 #[cfg(feature = "has-bitwuzla")]
-use xlsynth_prover::ir_equiv::{run_ir_equiv, IrEquivRequest, IrModule};
-#[cfg(feature = "has-bitwuzla")]
-use xlsynth_prover::prover::types::EquivResult;
+use xlsynth_prover::ir_equiv::{IrEquivRequest, IrModule, run_ir_equiv};
 #[cfg(feature = "has-bitwuzla")]
 use xlsynth_prover::prover::SolverChoice;
+#[cfg(feature = "has-bitwuzla")]
+use xlsynth_prover::prover::types::EquivResult;
 
 #[cfg(feature = "has-bitwuzla")]
 fn prove_orig_vs_gate_equiv(

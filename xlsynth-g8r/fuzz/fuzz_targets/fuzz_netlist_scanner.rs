@@ -71,11 +71,7 @@ fn sanitize_key(s: &str) -> String {
             out.push('_');
         }
     }
-    if out.is_empty() {
-        "k".to_string()
-    } else {
-        out
-    }
+    if out.is_empty() { "k".to_string() } else { out }
 }
 
 fn sanitize_identifier(s: &str) -> String {

@@ -16,9 +16,9 @@ use vastly_fuzz::codegen_semantics::packed_signature;
 use vastly_fuzz::codegen_semantics::parse_pir_top_fn;
 use xlsynth::IrValue;
 use xlsynth::XlsynthError;
-use xlsynth_autocov::{generate_ir_fn_corpus_from_ir_text_with_replay, IrFnAutocovGenerateConfig};
+use xlsynth_autocov::{IrFnAutocovGenerateConfig, generate_ir_fn_corpus_from_ir_text_with_replay};
 use xlsynth_pir::ir_random::{
-    generate_fn, DepletableBytes, OperationSet, RandomFnOptions, RandomOperation, StopPolicy,
+    DepletableBytes, OperationSet, RandomFnOptions, RandomOperation, StopPolicy, generate_fn,
 };
 use xlsynth_pir::random_inputs::generate_biased_arguments_from_seed;
 use xlsynth_vastly::LogicBit;
@@ -1044,10 +1044,14 @@ fn quiet_xls_warnings() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         if std::env::var_os("GLOG_minloglevel").is_none() {
-            std::env::set_var("GLOG_minloglevel", "2");
+            // SAFETY: libFuzzer invokes this target serially within one
+            // process, and this runs before the target calls into XLS.
+            unsafe { std::env::set_var("GLOG_minloglevel", "2") };
         }
         if std::env::var_os("GLOG_stderrthreshold").is_none() {
-            std::env::set_var("GLOG_stderrthreshold", "2");
+            // SAFETY: libFuzzer invokes this target serially within one
+            // process, and this runs before the target calls into XLS.
+            unsafe { std::env::set_var("GLOG_stderrthreshold", "2") };
         }
     });
 }
@@ -1192,7 +1196,9 @@ fn install_panic_context_hook() {
 
 fn maybe_enable_backtrace_on_failure() {
     if env_truthy("VASTLY_FUZZ_BACKTRACE_ON_FAILURE") {
-        std::env::set_var("RUST_BACKTRACE", "1");
+        // SAFETY: libFuzzer invokes this target serially within one process;
+        // this only changes the current process's panic diagnostics.
+        unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
     }
 }
 

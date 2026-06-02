@@ -19,7 +19,7 @@ use xlsynth_pir_fuzz::fuzz_bitwuzla_options;
 use xlsynth_pir_fuzz::generate_upstream_formal_random_pir_package;
 use xlsynth_pir::ir::{Fn as IrFn, NodeRef, PackageMember};
 use xlsynth_pir::ir_outline::{
-    can_outline, compute_default_ordering, outline_with_ordering, OutlineOrdering,
+    OutlineOrdering, can_outline, compute_default_ordering, outline_with_ordering,
 };
 use xlsynth_pir::ir_utils::operands;
 

@@ -11,7 +11,7 @@ use xlsynth_pir::ir::{
     self, ExtNaryAddArchitecture, ExtNaryAddTerm, FileTable, MemberType, Node, NodePayload,
     Package, PackageMember, Param, ParamId, Type,
 };
-use xlsynth_pir::ir_eval::{eval_fn_in_package, FnEvalResult};
+use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_verify;
 use xlsynth_pir::random_inputs::{
     BitValuePattern, generate_corner_irbits, generate_flat_bitvector_argument_sets_with_rng,
@@ -260,10 +260,7 @@ fn build_ext_nary_add_eval_corpus(sample: &ExtNaryAddFnSample, ir_text: &str) ->
         .params
         .iter()
         .map(|param| {
-            IrValue::from_bits(&generate_pattern_irbits(
-                param.width,
-                BitValuePattern::Zero,
-            ))
+            IrValue::from_bits(&generate_pattern_irbits(param.width, BitValuePattern::Zero))
         })
         .collect::<Vec<IrValue>>();
     for pattern in [

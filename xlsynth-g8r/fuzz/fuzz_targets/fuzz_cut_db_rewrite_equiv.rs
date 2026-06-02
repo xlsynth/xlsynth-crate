@@ -5,7 +5,7 @@ use libfuzzer_sys::fuzz_target;
 
 use std::sync::OnceLock;
 
-use xlsynth_g8r::aig::cut_db_rewrite::{rewrite_gatefn_with_cut_db, RewriteOptions};
+use xlsynth_g8r::aig::cut_db_rewrite::{RewriteOptions, rewrite_gatefn_with_cut_db};
 use xlsynth_g8r::cut_db::loader::CutDb;
 use xlsynth_g8r::prove_gate_fn_equiv_common::{EquivResult, GateFormalBackend};
 use xlsynth_g8r::prove_gate_fn_equiv_sat::{

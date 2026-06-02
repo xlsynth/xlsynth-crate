@@ -3,15 +3,15 @@
 #![no_main]
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use rand::rngs::StdRng;
 use rand::SeedableRng;
+use rand::rngs::StdRng;
 use std::collections::HashMap;
 use std::sync::Once;
 
-use xlsynth_g8r::aig::bulk_replace::{bulk_replace, SubstitutionMap};
+use xlsynth_g8r::aig::bulk_replace::{SubstitutionMap, bulk_replace};
 use xlsynth_g8r::aig::dce::dce;
 use xlsynth_g8r::aig::{AigBitVector, AigOperand, AigRef, GateBuilder, GateBuilderOptions, GateFn};
-use xlsynth_g8r::aig_sim::gate_sim::{eval, Collect};
+use xlsynth_g8r::aig_sim::gate_sim::{Collect, eval};
 
 use xlsynth_pir::random_inputs::generate_biased_irbits_with_rng;
 
@@ -411,7 +411,9 @@ fn make_rng(graph: &FuzzGateGraph, substitutions: &FuzzSubstitutions) -> StdRng 
 fuzz_target!(|data: (FuzzGateGraph, FuzzSubstitutions)| {
     // Ensure XLSYNTH_TOOLS is set up front for equivalence checking
     if std::env::var("XLSYNTH_TOOLS").is_err() {
-        panic!("XLSYNTH_TOOLS environment variable must be set for equivalence checking in this fuzz target");
+        panic!(
+            "XLSYNTH_TOOLS environment variable must be set for equivalence checking in this fuzz target"
+        );
     }
     LOGGER_INIT.call_once(|| {
         let _ = env_logger::Builder::from_env(env_logger::Env::default())

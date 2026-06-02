@@ -13,7 +13,7 @@ use xlsynth_pir::ir::Fn;
 use xlsynth_pir::ir::NodeRef;
 use xlsynth_pir::ir_utils::{get_topological, operands};
 use xlsynth_pir::node_hashing::{
-    compute_node_backward_structural_hash, compute_node_structural_hash, BwdHash, FwdHash,
+    BwdHash, FwdHash, compute_node_backward_structural_hash, compute_node_structural_hash,
 };
 
 #[derive(Debug, Clone)]
