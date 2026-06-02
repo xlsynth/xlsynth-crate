@@ -159,16 +159,16 @@ fn get_extern_type_ref(
         // Inspect whether the type definition is a colon-reference where the subject is
         // another module.
         let type_definition: dslx::TypeDefinition = type_ref.get_type_definition();
-        if let Some(colon_ref) = type_definition.to_colon_ref() {
-            if let Some(import) = colon_ref.resolve_import_subject() {
-                // It is a reference to a type defined in another module -- refer to its in
-                // its external module.
-                let pkg_name = import_to_pkg_name(&import);
-                let extern_ref =
-                    convert_extern_type(&pkg_name, Some(&colon_ref.get_attr()), concrete_ty, None)
-                        .unwrap();
-                return Some(extern_ref);
-            }
+        if let Some(colon_ref) = type_definition.to_colon_ref()
+            && let Some(import) = colon_ref.resolve_import_subject()
+        {
+            // It is a reference to a type defined in another module -- refer to its in
+            // its external module.
+            let pkg_name = import_to_pkg_name(&import);
+            let extern_ref =
+                convert_extern_type(&pkg_name, Some(&colon_ref.get_attr()), concrete_ty, None)
+                    .unwrap();
+            return Some(extern_ref);
         }
     }
     None

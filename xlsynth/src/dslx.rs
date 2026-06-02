@@ -2973,24 +2973,24 @@ fn main() -> u32 {
         let type_info = tcm.get_type_info();
         let mut found = false;
         for i in 0..module.get_member_count() {
-            if let Some(MatchableModuleMember::Function(f)) = module.get_member(i).to_matchable() {
-                if f.get_identifier() == "f" {
-                    found = true;
-                    assert_eq!(f.get_param_count(), 2);
-                    let p0 = f.get_param(0);
-                    assert_eq!(p0.get_name(), "a");
-                    let p0_ty = type_info
-                        .get_type_for_type_annotation(&p0.get_type_annotation())
-                        .unwrap();
-                    assert!(p0_ty.is_bits_like().is_some());
+            if let Some(MatchableModuleMember::Function(f)) = module.get_member(i).to_matchable()
+                && f.get_identifier() == "f"
+            {
+                found = true;
+                assert_eq!(f.get_param_count(), 2);
+                let p0 = f.get_param(0);
+                assert_eq!(p0.get_name(), "a");
+                let p0_ty = type_info
+                    .get_type_for_type_annotation(&p0.get_type_annotation())
+                    .unwrap();
+                assert!(p0_ty.is_bits_like().is_some());
 
-                    let p1 = f.get_param(1);
-                    assert_eq!(p1.get_name(), "b");
-                    let p1_ty = type_info
-                        .get_type_for_type_annotation(&p1.get_type_annotation())
-                        .unwrap();
-                    assert!(p1_ty.is_enum());
-                }
+                let p1 = f.get_param(1);
+                assert_eq!(p1.get_name(), "b");
+                let p1_ty = type_info
+                    .get_type_for_type_annotation(&p1.get_type_annotation())
+                    .unwrap();
+                assert!(p1_ty.is_enum());
             }
         }
         assert!(found, "function f not found");
@@ -3231,11 +3231,10 @@ fn plain_fn(x: u32) -> u32 { x }
         for i in 0..main_module.get_member_count() {
             if let Some(MatchableModuleMember::Function(f)) =
                 main_module.get_member(i).to_matchable()
+                && f.get_identifier() == "f"
             {
-                if f.get_identifier() == "f" {
-                    f_opt = Some(f);
-                    break;
-                }
+                f_opt = Some(f);
+                break;
             }
         }
         let f = f_opt.expect("function f found");

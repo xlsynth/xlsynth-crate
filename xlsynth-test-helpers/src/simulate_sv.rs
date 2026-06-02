@@ -112,12 +112,12 @@ impl From<std::io::Error> for SimulateSvError {
 fn find_iverilog() -> Option<PathBuf> {
     // Probe the user's PATH for an `iverilog` executable without introducing
     // any additional dependencies.
-    if let Ok(output) = StdCommand::new("which").arg("iverilog").output() {
-        if output.status.success() {
-            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path_str.is_empty() {
-                return Some(PathBuf::from(path_str));
-            }
+    if let Ok(output) = StdCommand::new("which").arg("iverilog").output()
+        && output.status.success()
+    {
+        let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path_str.is_empty() {
+            return Some(PathBuf::from(path_str));
         }
     }
     None
@@ -233,14 +233,14 @@ pub fn simulate_sv_flist(
     let vcd = std::fs::read_to_string(&vcd_path).map_err(SimulateSvError::Io)?;
 
     // Optionally copy VCD to user-specified directory for debugging.
-    if let Ok(dir) = std::env::var("XLSYNTH_WAVE_DIR") {
-        if !dir.is_empty() {
-            let target = std::path::Path::new(&dir).join(vcd_name);
-            // Best-effort copy; ignore errors.
-            let _ = std::fs::create_dir_all(&dir);
-            let _ = std::fs::write(&target, &vcd);
-            log::info!("Saved wave dump to {}", target.display());
-        }
+    if let Ok(dir) = std::env::var("XLSYNTH_WAVE_DIR")
+        && !dir.is_empty()
+    {
+        let target = std::path::Path::new(&dir).join(vcd_name);
+        // Best-effort copy; ignore errors.
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(&target, &vcd);
+        log::info!("Saved wave dump to {}", target.display());
     }
 
     Ok(vcd)
