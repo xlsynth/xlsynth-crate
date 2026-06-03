@@ -58,7 +58,7 @@ fn publish_order_is_topological_for_publish_time_dependencies() {
         .packages
         .iter()
         .filter(|package| workspace_member_ids.contains(&package.id))
-        .map(|package| (package.name.clone(), package))
+        .map(|package| (package.name.to_string(), package))
         .collect::<BTreeMap<_, _>>();
 
     let publishable_workspace_crates = workspace_packages
