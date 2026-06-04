@@ -18,6 +18,10 @@
 //! - In combinational-only analysis, rejects sequential output pins.
 //! - Uses Liberty `when` predicates when known scalar constants make an arc
 //!   provably false; arcs with true or unknown predicates remain possible.
+//! - Treats arc-less output pins with constant Liberty functions as zero-delay
+//!   sources, covering tie-high and tie-low cells without cell-name matching.
+//! - Supports acyclic combinational timing dependencies between output pins of
+//!   the same cell, including dependencies through unconnected outputs.
 //! - Repairs non-monotone delay/slew tables during lookup with a conservative
 //!   coordinatewise upper envelope, because later frontier reduction relies on
 //!   larger transition/load queries not producing smaller delay/slew values.
@@ -382,6 +386,10 @@ impl<'a> StaLibraryIndex<'a> {
         let pin_idx = *self.pin_by_cell.get(cell_idx)?.get(pin_name)?;
         self.library.cells.get(cell_idx)?.pins.get(pin_idx)
     }
+
+    fn pin_index(&self, cell_idx: usize, pin_name: &str) -> Option<usize> {
+        self.pin_by_cell.get(cell_idx)?.get(pin_name).copied()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -581,6 +589,7 @@ fn analyze_max_arrival_proto_with_mode(
         Vec::with_capacity(instance_count);
     let mut instance_timing_related_input_pins: Vec<HashSet<String>> =
         Vec::with_capacity(instance_count);
+    let mut instance_output_pin_orders: Vec<Vec<usize>> = Vec::with_capacity(instance_count);
     let mut instance_is_sequential: Vec<bool> = Vec::with_capacity(instance_count);
 
     let mut bit_drivers: Vec<Vec<NetEndpoint>> = vec![Vec::new(); bit_count];
@@ -619,15 +628,17 @@ fn analyze_max_arrival_proto_with_mode(
                                 related_pin_name
                             )
                         })?;
-                        if related_pin.direction != PinDirection::Input as i32 {
+                        if related_pin.direction == PinDirection::Input as i32 {
+                            timing_related_input_pins.insert(related_pin_name.to_string());
+                        } else if related_pin.direction != PinDirection::Output as i32 {
                             return Err(anyhow!(
-                                "cell '{}' output pin '{}' has unsupported non-input related pin '{}'; basic STA only supports input-related combinational arcs",
+                                "cell '{}' output pin '{}' has timing arc related pin '{}' with unsupported direction value {}",
                                 cell_name,
                                 output_pin.name,
-                                related_pin_name
+                                related_pin_name,
+                                related_pin.direction
                             ));
                         }
-                        timing_related_input_pins.insert(related_pin_name.to_string());
                     }
                 }
             }
@@ -720,9 +731,24 @@ fn analyze_max_arrival_proto_with_mode(
             }
             pin_sources.insert(pin_name, pin_bit_sources);
         }
+        let output_pin_order = if analysis_mode.uses_register_boundaries() && is_sequential {
+            lib.library.cells[cell_idx]
+                .pins
+                .iter()
+                .enumerate()
+                .filter(|(_, pin)| {
+                    pin.direction == PinDirection::Output as i32
+                        && pin_sources.contains_key(pin.name.as_str())
+                })
+                .map(|(pin_idx, _)| pin_idx)
+                .collect()
+        } else {
+            combinational_output_pin_evaluation_order(&lib, cell_idx, &pin_sources)?
+        };
         instance_pin_sources.push(pin_sources);
         instance_known_pin_values.push(known_pin_values);
         instance_timing_related_input_pins.push(timing_related_input_pins);
+        instance_output_pin_orders.push(output_pin_order);
     }
 
     let mut module_output_bits: Vec<usize> = Vec::new();
@@ -917,37 +943,32 @@ fn analyze_max_arrival_proto_with_mode(
         let instance_name = resolve_symbol(interner, instance.instance_name, "instance name")
             .unwrap_or_else(|_| "<unknown>".to_string());
 
-        for pin in &lib.library.cells[cell_idx].pins {
-            if pin.direction != PinDirection::Output as i32 {
-                continue;
-            }
-            let Some(output_sources) = inst_pin_map.get(pin.name.as_str()) else {
-                continue;
-            };
-            if output_sources.is_empty() {
-                continue;
-            }
+        let mut local_output_timing_sets: HashMap<String, SignalTimingSet> = HashMap::new();
+        for pin_idx in &instance_output_pin_orders[inst_idx] {
+            let pin = &lib.library.cells[cell_idx].pins[*pin_idx];
+            let output_sources = inst_pin_map.get(pin.name.as_str());
             if analysis_mode.uses_register_boundaries() && instance_is_sequential[inst_idx] {
                 if analysis_mode.launches_register(inst_idx) {
-                    for output_source in output_sources {
-                        if let PinBitSource::Bit(output_bit_idx) = *output_source {
-                            let output_load = bit_load_capacitance[output_bit_idx];
-                            bit_timing_sets[output_bit_idx] =
-                                Some(evaluate_register_launch_output_set(
-                                    lib.library,
-                                    cell_name,
-                                    pin,
-                                    known_pin_values,
-                                    output_load,
-                                    &mut validated_timing_tables,
-                                    &mut timing_query_diagnostic_counts,
-                                    &format!(
-                                        "{}.{} (instance '{}') clock-to-output",
-                                        cell_name, pin.name, instance_name
-                                    ),
-                                )?);
+                    let output_bit_idx = match output_sources.and_then(|sources| sources.first()) {
+                        Some(PinBitSource::Bit(output_bit_idx)) => *output_bit_idx,
+                        Some(PinBitSource::Literal(_) | PinBitSource::Unknown) | None => {
+                            unreachable!("connected sequential output pins have net bit sources")
                         }
-                    }
+                    };
+                    let output_load = bit_load_capacitance[output_bit_idx];
+                    bit_timing_sets[output_bit_idx] = Some(evaluate_register_launch_output_set(
+                        lib.library,
+                        cell_name,
+                        pin,
+                        known_pin_values,
+                        output_load,
+                        &mut validated_timing_tables,
+                        &mut timing_query_diagnostic_counts,
+                        &format!(
+                            "{}.{} (instance '{}') clock-to-output",
+                            cell_name, pin.name, instance_name
+                        ),
+                    )?);
                 }
                 continue;
             }
@@ -969,6 +990,40 @@ fn analyze_max_arrival_proto_with_mode(
                 .iter()
                 .filter(|arc| StaTimingType::from_raw(arc.timing_type.as_str()).is_combinational())
                 .collect();
+            let output_bit_idx = match output_sources.and_then(|sources| sources.first()) {
+                Some(PinBitSource::Bit(output_bit_idx)) => Some(*output_bit_idx),
+                Some(PinBitSource::Literal(_) | PinBitSource::Unknown) => {
+                    unreachable!("connected output pins have net bit sources")
+                }
+                None => None,
+            };
+            let output_net_name = output_bit_idx
+                .map(|output_bit_idx| normalized.render_bit(output_bit_idx, nets, interner))
+                .unwrap_or_else(|| format!("<unconnected {}.{}>", instance_name, pin.name));
+            if combinational_arcs.is_empty() {
+                if let Some(constant_value) = constant_output_function_value(cell_name, pin)? {
+                    sta_trace(|| {
+                        format!(
+                            "inst={} cell={} out_pin={} out_net={} constant_source={}",
+                            instance_name, cell_name, pin.name, output_net_name, constant_value,
+                        )
+                    });
+                    store_output_timing_set(
+                        &mut local_output_timing_sets,
+                        &mut bit_timing_sets,
+                        pin.name.as_str(),
+                        output_bit_idx,
+                        literal_source_timing_set.clone(),
+                    );
+                    continue;
+                }
+                return Err(anyhow!(
+                    "basic STA only supports combinational or constant-source output pins; instance '{}' output pin '{}.{}' has no combinational timing arcs and no constant function",
+                    instance_name,
+                    cell_name,
+                    pin.name
+                ));
+            }
             validate_timing_tables_once(
                 lib.library,
                 cell_name,
@@ -976,47 +1031,73 @@ fn analyze_max_arrival_proto_with_mode(
                 combinational_arcs.as_slice(),
                 &mut validated_timing_tables,
             )?;
-            if combinational_arcs.is_empty() {
-                return Err(anyhow!(
-                    "basic STA only supports combinational output pins; instance '{}' output pin '{}.{}' has no combinational timing arcs",
-                    instance_name,
-                    cell_name,
-                    pin.name
-                ));
-            }
-            for output_source in output_sources {
-                let PinBitSource::Bit(output_bit_idx) = *output_source else {
-                    continue;
-                };
-                let output_load = bit_load_capacitance[output_bit_idx];
-                let output_net_name = normalized.render_bit(output_bit_idx, nets, interner);
-                let mut accumulated: Option<SignalTimingSet> = None;
+            let output_load = output_bit_idx
+                .map(|output_bit_idx| bit_load_capacitance[output_bit_idx])
+                .unwrap_or_default();
+            let mut accumulated: Option<SignalTimingSet> = None;
 
-                for arc in &combinational_arcs {
-                    let arc_context = format!(
-                        "cell '{}' output pin '{}' timing arc related_pin '{}'",
-                        cell_name, pin.name, arc.related_pin
-                    );
-                    if !arc_when_may_apply(arc, known_pin_values, arc_context.as_str())? {
-                        sta_trace(|| {
-                            format!(
-                                "inst={} cell={} out_pin={} when={} skipped=true",
-                                instance_name, cell_name, pin.name, arc.when,
+            for arc in &combinational_arcs {
+                let arc_context = format!(
+                    "cell '{}' output pin '{}' timing arc related_pin '{}'",
+                    cell_name, pin.name, arc.related_pin
+                );
+                if !arc_when_may_apply(arc, known_pin_values, arc_context.as_str())? {
+                    sta_trace(|| {
+                        format!(
+                            "inst={} cell={} out_pin={} when={} skipped=true",
+                            instance_name, cell_name, pin.name, arc.when,
+                        )
+                    });
+                    continue;
+                }
+                for related_pin_name in split_related_pin_names(arc.related_pin.as_str()) {
+                    let related_pin = lib.pin(cell_idx, related_pin_name).ok_or_else(|| {
+                            anyhow!(
+                                "cell '{}' output pin '{}' has timing arc with unknown related pin '{}'",
+                                cell_name,
+                                pin.name,
+                                related_pin_name
                             )
-                        });
-                        continue;
-                    }
-                    for related_pin_name in split_related_pin_names(arc.related_pin.as_str()) {
+                        })?;
+                    let mut related_timing_sets: Vec<(&SignalTimingSet, String)> = Vec::new();
+                    if related_pin.direction == PinDirection::Output as i32 {
+                        let Some(timing) = local_output_timing_sets.get(related_pin_name) else {
+                            if analysis_mode.uses_register_boundaries() {
+                                continue;
+                            }
+                            return Err(anyhow!(
+                                "missing intra-cell source timing for output pin '{}.{}' feeding '{}.{}' in instance '{}'",
+                                cell_name,
+                                related_pin_name,
+                                cell_name,
+                                pin.name,
+                                instance_name
+                            ));
+                        };
+                        let related_net_name = inst_pin_map
+                            .get(related_pin_name)
+                            .and_then(|sources| sources.first())
+                            .and_then(|source| match source {
+                                PinBitSource::Bit(related_bit_idx) => {
+                                    Some(normalized.render_bit(*related_bit_idx, nets, interner))
+                                }
+                                PinBitSource::Literal(_) | PinBitSource::Unknown => None,
+                            })
+                            .unwrap_or_else(|| {
+                                format!("<unconnected {}.{}>", instance_name, related_pin_name)
+                            });
+                        related_timing_sets.push((timing, related_net_name));
+                    } else {
                         let related_sources =
-                            inst_pin_map.get(related_pin_name).ok_or_else(|| {
-                                anyhow!(
-                                    "instance '{}' output pin '{}.{}' requires timing-related input pin '{}' to be connected",
-                                    instance_name,
-                                    cell_name,
-                                    pin.name,
-                                    related_pin_name
-                                )
-                            })?;
+                                inst_pin_map.get(related_pin_name).ok_or_else(|| {
+                                    anyhow!(
+                                        "instance '{}' output pin '{}.{}' requires timing-related input pin '{}' to be connected",
+                                        instance_name,
+                                        cell_name,
+                                        pin.name,
+                                        related_pin_name
+                                    )
+                                })?;
                         if related_sources.is_empty() {
                             return Err(anyhow!(
                                 "instance '{}' output pin '{}.{}' has unconnected timing-related input pin '{}'",
@@ -1060,82 +1141,87 @@ fn analyze_max_arrival_proto_with_mode(
                                     (&literal_source_timing_set, "1'bx".to_string())
                                 }
                             };
-                            let context = format!(
-                                "{}.{} (instance '{}') related_pin '{}'",
-                                cell_name, pin.name, instance_name, related_pin_name
-                            );
-                            let candidate = evaluate_arc_set(
-                                lib.library,
-                                arc,
-                                input_timing_set,
-                                output_load,
-                                &mut timing_query_diagnostic_counts,
-                                &context,
-                            )?;
-                            sta_trace(|| {
-                                format!(
-                                    "inst={} cell={} out_pin={} out_net={} related_pin={} related_net={} when={} sense={} type={} rise_candidates={} fall_candidates={} rise_pick={} fall_pick={}",
-                                    instance_name,
-                                    cell_name,
-                                    pin.name,
-                                    output_net_name,
-                                    related_pin_name,
-                                    related_net_name,
-                                    if arc.when.is_empty() {
-                                        "<empty>"
-                                    } else {
-                                        arc.when.as_str()
-                                    },
-                                    arc.timing_sense,
-                                    arc.timing_type,
-                                    format_edge_timing_set(&candidate.rise),
-                                    format_edge_timing_set(&candidate.fall),
-                                    format_optional_edge_timing(candidate.rise.max_arrival_edge()),
-                                    format_optional_edge_timing(candidate.fall.max_arrival_edge()),
-                                )
-                            });
-                            accumulated = Some(match accumulated {
-                                Some(prev) => prev.merge(&candidate),
-                                None => candidate,
-                            });
+                            related_timing_sets.push((input_timing_set, related_net_name));
                         }
                     }
-                }
-
-                let Some(mut out_timing_set) = accumulated else {
-                    if analysis_mode.uses_register_boundaries() {
-                        continue;
+                    for (input_timing_set, related_net_name) in related_timing_sets {
+                        let context = format!(
+                            "{}.{} (instance '{}') related_pin '{}'",
+                            cell_name, pin.name, instance_name, related_pin_name
+                        );
+                        let candidate = evaluate_arc_set(
+                            lib.library,
+                            arc,
+                            input_timing_set,
+                            output_load,
+                            &mut timing_query_diagnostic_counts,
+                            &context,
+                        )?;
+                        sta_trace(|| {
+                            format!(
+                                "inst={} cell={} out_pin={} out_net={} related_pin={} related_net={} when={} sense={} type={} rise_candidates={} fall_candidates={} rise_pick={} fall_pick={}",
+                                instance_name,
+                                cell_name,
+                                pin.name,
+                                output_net_name,
+                                related_pin_name,
+                                related_net_name,
+                                if arc.when.is_empty() {
+                                    "<empty>"
+                                } else {
+                                    arc.when.as_str()
+                                },
+                                arc.timing_sense,
+                                arc.timing_type,
+                                format_edge_timing_set(&candidate.rise),
+                                format_edge_timing_set(&candidate.fall),
+                                format_optional_edge_timing(candidate.rise.max_arrival_edge()),
+                                format_optional_edge_timing(candidate.fall.max_arrival_edge()),
+                            )
+                        });
+                        accumulated = Some(match accumulated {
+                            Some(prev) => prev.merge(&candidate),
+                            None => candidate,
+                        });
                     }
-                    return Err(anyhow!(
-                        "no usable combinational timing arcs for instance '{}' pin '{}.{}'",
-                        instance_name,
-                        cell_name,
-                        pin.name
-                    ));
-                };
-                // Use a conservative per-edge envelope: max arrival and max
-                // transition may come from different source candidates.
-                collapse_signal_timing_set_to_envelope(&mut out_timing_set);
-                sta_trace(|| {
-                    format!(
-                        "inst={} cell={} out_pin={} out_net={} envelope_rise={} envelope_fall={} envelope_rise_pick={} envelope_fall_pick={}",
-                        instance_name,
-                        cell_name,
-                        pin.name,
-                        output_net_name,
-                        format_edge_timing_set(&out_timing_set.rise),
-                        format_edge_timing_set(&out_timing_set.fall),
-                        format_optional_edge_timing(out_timing_set.rise.max_arrival_edge()),
-                        format_optional_edge_timing(out_timing_set.fall.max_arrival_edge()),
-                    )
-                });
-
-                bit_timing_sets[output_bit_idx] =
-                    Some(match bit_timing_sets[output_bit_idx].as_ref() {
-                        Some(prev) => prev.clone().merge(&out_timing_set),
-                        None => out_timing_set,
-                    });
+                }
             }
+
+            let Some(mut out_timing_set) = accumulated else {
+                if analysis_mode.uses_register_boundaries() {
+                    continue;
+                }
+                return Err(anyhow!(
+                    "no usable combinational timing arcs for instance '{}' pin '{}.{}'",
+                    instance_name,
+                    cell_name,
+                    pin.name
+                ));
+            };
+            // Use a conservative per-edge envelope: max arrival and max
+            // transition may come from different source candidates.
+            collapse_signal_timing_set_to_envelope(&mut out_timing_set);
+            sta_trace(|| {
+                format!(
+                    "inst={} cell={} out_pin={} out_net={} envelope_rise={} envelope_fall={} envelope_rise_pick={} envelope_fall_pick={}",
+                    instance_name,
+                    cell_name,
+                    pin.name,
+                    output_net_name,
+                    format_edge_timing_set(&out_timing_set.rise),
+                    format_edge_timing_set(&out_timing_set.fall),
+                    format_optional_edge_timing(out_timing_set.rise.max_arrival_edge()),
+                    format_optional_edge_timing(out_timing_set.fall.max_arrival_edge()),
+                )
+            });
+
+            store_output_timing_set(
+                &mut local_output_timing_sets,
+                &mut bit_timing_sets,
+                pin.name.as_str(),
+                output_bit_idx,
+                out_timing_set,
+            );
         }
 
         for succ in &successors[inst_idx] {
@@ -1535,6 +1621,121 @@ fn split_related_pin_names(related_pin: &str) -> impl Iterator<Item = &str> {
     related_pin.split_whitespace()
 }
 
+/// Returns the Boolean value of an output function when it is constant without
+/// any input bindings.
+fn constant_output_function_value(cell_name: &str, pin: &Pin) -> Result<Option<bool>> {
+    if pin.function.trim().is_empty() {
+        return Ok(None);
+    }
+    let function = parse_formula(pin.function.as_str()).map_err(|e| {
+        anyhow!(
+            "cell '{}' output pin '{}' has invalid function='{}': {}",
+            cell_name,
+            pin.name,
+            pin.function,
+            e
+        )
+    })?;
+    Ok(function.evaluate_partial(&HashMap::new()))
+}
+
+/// Stores one instance-output timing set for local and net-level propagation.
+fn store_output_timing_set(
+    local_output_timing_sets: &mut HashMap<String, SignalTimingSet>,
+    bit_timing_sets: &mut [Option<SignalTimingSet>],
+    pin_name: &str,
+    output_bit_idx: Option<usize>,
+    out_timing_set: SignalTimingSet,
+) {
+    local_output_timing_sets.insert(pin_name.to_string(), out_timing_set.clone());
+    if let Some(output_bit_idx) = output_bit_idx {
+        bit_timing_sets[output_bit_idx] = Some(match bit_timing_sets[output_bit_idx].as_ref() {
+            Some(prev) => prev.clone().merge(&out_timing_set),
+            None => out_timing_set,
+        });
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum OutputPinVisitState {
+    #[default]
+    Unvisited,
+    Visiting,
+    Done,
+}
+
+/// Orders connected outputs and their output-pin dependencies for local STA.
+fn combinational_output_pin_evaluation_order(
+    lib: &StaLibraryIndex<'_>,
+    cell_idx: usize,
+    pin_sources: &HashMap<String, Vec<PinBitSource>>,
+) -> Result<Vec<usize>> {
+    let cell = &lib.library.cells[cell_idx];
+    let mut visit_states = vec![OutputPinVisitState::Unvisited; cell.pins.len()];
+    let mut order = Vec::new();
+    for (pin_idx, pin) in cell.pins.iter().enumerate() {
+        if pin.direction == PinDirection::Output as i32
+            && pin_sources.contains_key(pin.name.as_str())
+        {
+            visit_combinational_output_pin(lib, cell_idx, pin_idx, &mut visit_states, &mut order)?;
+        }
+    }
+    Ok(order)
+}
+
+/// Adds one output pin after recursively ordering its output-pin dependencies.
+fn visit_combinational_output_pin(
+    lib: &StaLibraryIndex<'_>,
+    cell_idx: usize,
+    pin_idx: usize,
+    visit_states: &mut [OutputPinVisitState],
+    order: &mut Vec<usize>,
+) -> Result<()> {
+    let cell = &lib.library.cells[cell_idx];
+    let pin = &cell.pins[pin_idx];
+    match visit_states[pin_idx] {
+        OutputPinVisitState::Visiting => {
+            return Err(anyhow!(
+                "cell '{}' has a combinational output-pin dependency cycle involving '{}'; basic STA only supports acyclic output-related timing arcs",
+                cell.name,
+                pin.name
+            ));
+        }
+        OutputPinVisitState::Done => return Ok(()),
+        OutputPinVisitState::Unvisited => {}
+    }
+    visit_states[pin_idx] = OutputPinVisitState::Visiting;
+    for arc in pin
+        .timing_arcs
+        .iter()
+        .filter(|arc| StaTimingType::from_raw(arc.timing_type.as_str()).is_combinational())
+    {
+        for related_pin_name in split_related_pin_names(arc.related_pin.as_str()) {
+            let related_pin_idx = lib.pin_index(cell_idx, related_pin_name).ok_or_else(|| {
+                anyhow!(
+                    "cell '{}' output pin '{}' has timing arc with unknown related pin '{}'",
+                    cell.name,
+                    pin.name,
+                    related_pin_name
+                )
+            })?;
+            let related_pin = &cell.pins[related_pin_idx];
+            if related_pin.direction == PinDirection::Output as i32 {
+                visit_combinational_output_pin(
+                    lib,
+                    cell_idx,
+                    related_pin_idx,
+                    visit_states,
+                    order,
+                )?;
+            }
+        }
+    }
+    visit_states[pin_idx] = OutputPinVisitState::Done;
+    order.push(pin_idx);
+    Ok(())
+}
+
 /// Validates that one cell output pin is fully usable by the limited-scope STA
 /// engine for the requested related input pins.
 pub fn validate_output_pin_for_basic_sta(
@@ -1550,9 +1751,9 @@ pub fn validate_output_pin_for_basic_sta(
             pin.name
         ));
     }
-    if pin.timing_arcs.is_empty() {
+    if pin.timing_arcs.is_empty() && constant_output_function_value(cell_name, pin)?.is_none() {
         return Err(anyhow!(
-            "cell '{}' output pin '{}' has no timing arcs",
+            "cell '{}' output pin '{}' has no timing arcs and no constant function",
             cell_name,
             pin.name
         ));
@@ -3174,6 +3375,117 @@ endmodule
     }
 
     #[test]
+    fn sta_accepts_constant_function_tie_cells() {
+        let src = r#"
+module top (y_hi, y_lo, z);
+  output y_hi;
+  output y_lo;
+  output z;
+  wire y_hi;
+  wire y_lo;
+  wire z;
+  TIEHI tie_hi (.H(y_hi));
+  TIELO tie_lo (.L(y_lo));
+  INV inv (.A(y_hi), .Y(z));
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let mut lib = scalar_inv_library();
+        lib.cells.extend([
+            Cell {
+                name: "TIEHI".to_string(),
+                pins: vec![Pin {
+                    direction: PinDirection::Output as i32,
+                    function: "1".to_string(),
+                    name: "H".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            Cell {
+                name: "TIELO".to_string(),
+                pins: vec![Pin {
+                    direction: PinDirection::Output as i32,
+                    function: "0".to_string(),
+                    name: "L".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        ]);
+
+        let report = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &lib,
+            StaOptions::default(),
+        )
+        .expect("constant-function tie cells should be supported");
+        assert_close(report.worst_output_arrival, 3.0);
+        for name in ["y_hi", "y_lo"] {
+            let timing = report
+                .timing_for_net(find_net_index(&nets, &interner, name))
+                .unwrap_or_else(|| panic!("timing for {}", name));
+            assert_close(timing.rise.arrival, 0.0);
+            assert_close(timing.fall.arrival, 0.0);
+        }
+        let z_timing = report
+            .timing_for_net(find_net_index(&nets, &interner, "z"))
+            .expect("timing for z");
+        assert_close(z_timing.rise.arrival, 2.0);
+        assert_close(z_timing.fall.arrival, 3.0);
+    }
+
+    #[test]
+    fn sta_rejects_arcless_nonconstant_output_pin() {
+        let src = r#"
+module top (a, y);
+  input a;
+  output y;
+  wire a;
+  wire y;
+  BUF u0 (.A(a), .Y(y));
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let lib = crate::liberty_proto::Library {
+            cells: vec![Cell {
+                name: "BUF".to_string(),
+                pins: vec![
+                    Pin {
+                        direction: PinDirection::Input as i32,
+                        name: "A".to_string(),
+                        ..Default::default()
+                    },
+                    Pin {
+                        direction: PinDirection::Output as i32,
+                        function: "A".to_string(),
+                        name: "Y".to_string(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let error = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &lib,
+            StaOptions::default(),
+        )
+        .expect_err("arc-less nonconstant outputs should still be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("has no combinational timing arcs and no constant function")
+        );
+    }
+
+    #[test]
     fn sta_accepts_scalar_alias_output_assigns() {
         let src = r#"
 module top (a, y);
@@ -3732,7 +4044,7 @@ endmodule
     }
 
     #[test]
-    fn sta_rejects_non_input_related_pins() {
+    fn sta_propagates_output_related_timing_arcs_before_library_pin_order() {
         let src = r#"
 module top (a, y0, y1);
   input a;
@@ -3756,6 +4068,37 @@ endmodule
                     },
                     Pin {
                         direction: PinDirection::Output as i32,
+                        name: "Y1".to_string(),
+                        timing_arcs: vec![
+                            TimingArc {
+                                related_pin: "A".to_string(),
+                                timing_sense: "positive_unate".to_string(),
+                                timing_type: "combinational".to_string(),
+                                tables: vec![
+                                    scalar_table("cell_rise", 3.0),
+                                    scalar_table("cell_fall", 3.0),
+                                    scalar_table("rise_transition", 0.1),
+                                    scalar_table("fall_transition", 0.1),
+                                ],
+                                ..Default::default()
+                            },
+                            TimingArc {
+                                related_pin: "Y0".to_string(),
+                                timing_sense: "positive_unate".to_string(),
+                                timing_type: "combinational".to_string(),
+                                tables: vec![
+                                    scalar_table("cell_rise", 1.0),
+                                    scalar_table("cell_fall", 1.0),
+                                    scalar_table("rise_transition", 0.1),
+                                    scalar_table("fall_transition", 0.1),
+                                ],
+                                ..Default::default()
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                    Pin {
+                        direction: PinDirection::Output as i32,
                         name: "Y0".to_string(),
                         timing_arcs: vec![TimingArc {
                             related_pin: "A".to_string(),
@@ -3769,6 +4112,62 @@ endmodule
                             ],
                             ..Default::default()
                         }],
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let report = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &lib,
+            StaOptions::default(),
+        )
+        .expect("acyclic output-related arcs should be propagated");
+        let y0_idx = find_net_index(&nets, &interner, "y0");
+        let y1_idx = find_net_index(&nets, &interner, "y1");
+        assert_close(
+            report
+                .timing_for_net(y0_idx)
+                .expect("timing for y0")
+                .rise
+                .arrival,
+            1.0,
+        );
+        assert_close(
+            report
+                .timing_for_net(y1_idx)
+                .expect("timing for y1")
+                .rise
+                .arrival,
+            3.0,
+        );
+        assert_close(report.worst_output_arrival, 3.0);
+    }
+
+    #[test]
+    fn sta_propagates_output_related_timing_arcs_through_unconnected_outputs() {
+        let src = r#"
+module top (a, y);
+  input a;
+  output y;
+  wire a;
+  wire y;
+  DUALOUT u0 (.A(a), .Y1(y));
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let lib = crate::liberty_proto::Library {
+            cells: vec![Cell {
+                name: "DUALOUT".to_string(),
+                pins: vec![
+                    Pin {
+                        direction: PinDirection::Input as i32,
+                        name: "A".to_string(),
                         ..Default::default()
                     },
                     Pin {
@@ -3788,6 +4187,74 @@ endmodule
                         }],
                         ..Default::default()
                     },
+                    Pin {
+                        direction: PinDirection::Output as i32,
+                        name: "Y0".to_string(),
+                        timing_arcs: vec![TimingArc {
+                            related_pin: "A".to_string(),
+                            timing_sense: "positive_unate".to_string(),
+                            timing_type: "combinational".to_string(),
+                            tables: vec![
+                                scalar_table("cell_rise", 1.0),
+                                scalar_table("cell_fall", 1.0),
+                                scalar_table("rise_transition", 0.1),
+                                scalar_table("fall_transition", 0.1),
+                            ],
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let report = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &lib,
+            StaOptions::default(),
+        )
+        .expect("unconnected output dependencies should use local timing");
+        assert_close(report.worst_output_arrival, 2.0);
+    }
+
+    #[test]
+    fn sta_rejects_output_related_timing_arc_cycles() {
+        let src = r#"
+module top (y);
+  output y;
+  wire y;
+  DUALOUT u0 (.Y0(y));
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let lib = crate::liberty_proto::Library {
+            cells: vec![Cell {
+                name: "DUALOUT".to_string(),
+                pins: vec![
+                    Pin {
+                        direction: PinDirection::Output as i32,
+                        name: "Y0".to_string(),
+                        timing_arcs: vec![TimingArc {
+                            related_pin: "Y1".to_string(),
+                            timing_type: "combinational".to_string(),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                    Pin {
+                        direction: PinDirection::Output as i32,
+                        name: "Y1".to_string(),
+                        timing_arcs: vec![TimingArc {
+                            related_pin: "Y0".to_string(),
+                            timing_type: "combinational".to_string(),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
                 ],
                 ..Default::default()
             }],
@@ -3801,11 +4268,11 @@ endmodule
             &lib,
             StaOptions::default(),
         )
-        .expect_err("non-input related pins should be rejected");
+        .expect_err("cyclic output-related arcs should be rejected");
         assert!(
             error
                 .to_string()
-                .contains("unsupported non-input related pin 'Y0'")
+                .contains("combinational output-pin dependency cycle")
         );
     }
 
