@@ -80,6 +80,7 @@ mod gv_area;
 mod gv_dump_cone;
 mod gv_instance_csv;
 mod gv_read_stats;
+mod gv_resize;
 mod gv_sta;
 mod gv_stats;
 mod ir2combo;
@@ -2145,6 +2146,136 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new("gv-resize")
+                .about("Resizes equivalent standard cells for delay or constrained area")
+                .arg(
+                    Arg::new("netlist")
+                        .long("netlist")
+                        .help("Input mapped gate-level netlist (.gv, .v, or .gv.gz)")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("liberty_proto")
+                        .long("liberty_proto")
+                        .help("Timing-enabled Liberty proto (.proto or .textproto)")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("netlist_out")
+                        .long("netlist_out")
+                        .value_name("PATH")
+                        .help("Path for the resized mapped netlist")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("objective")
+                        .long("objective")
+                        .value_name("OBJECTIVE")
+                        .default_value("delay")
+                        .value_parser(["delay", "area-under-delay"])
+                        .help("Optimization objective: delay or area-under-delay")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("module_name")
+                        .long("module_name")
+                        .value_name("MODULE")
+                        .help("Optional module name to select when netlist contains multiple modules")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("primary_input_transition")
+                        .long("primary_input_transition")
+                        .value_name("VALUE")
+                        .default_value("0.01")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("Transition applied at primary inputs")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("module_output_load")
+                        .long("module_output_load")
+                        .value_name("VALUE")
+                        .default_value("0.0")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("Additional load capacitance added to module outputs")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("max_iterations")
+                        .long("max_iterations")
+                        .default_value("25")
+                        .value_parser(clap::value_parser!(usize))
+                        .help("Maximum number of accepted cell substitutions")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("max_candidate_paths")
+                        .long("max_candidate_paths")
+                        .default_value("8")
+                        .value_parser(clap::value_parser!(usize))
+                        .help("Number of slowest register endpoint paths searched per iteration")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("max_evaluations_per_iteration")
+                        .long("max_evaluations_per_iteration")
+                        .default_value("128")
+                        .value_parser(clap::value_parser!(usize))
+                        .help("Maximum full-STA trial substitutions per iteration")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("max_cell_candidates_per_instance")
+                        .long("max_cell_candidates_per_instance")
+                        .default_value("4")
+                        .value_parser(clap::value_parser!(usize))
+                        .help("Maximum equivalent replacement cells tried per instance")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("improvement_epsilon")
+                        .long("improvement_epsilon")
+                        .default_value("1e-9")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("Timing difference treated as numerically equal")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("area_epsilon")
+                        .long("area_epsilon")
+                        .default_value("1e-12")
+                        .value_parser(clap::value_parser!(f64))
+                        .help("Area difference treated as numerically equal")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("resize_sequential_cells")
+                        .long("resize_sequential_cells")
+                        .default_value("true")
+                        .value_parser(clap::value_parser!(bool))
+                        .help("Allow equivalent sequential standard-cell substitutions")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("dont_use")
+                        .long("dont_use")
+                        .value_name("PATTERN")
+                        .help("Wildcard cell-name pattern to exclude; may be repeated")
+                        .action(ArgAction::Append),
+                )
+                .arg(
+                    Arg::new("json_out")
+                        .long("json_out")
+                        .value_name("PATH")
+                        .help("Optional path to write the resizing summary as JSON")
+                        .action(ArgAction::Set),
+                ),
+        )
+        .subcommand(
             clap::Command::new("gv-read-stats")
                 .about("Reads a gate-level netlist and prints summary statistics")
                 .arg(
@@ -3673,6 +3804,12 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("gv-stats", subm)) => {
             gv_stats::handle_gv_stats(subm);
+        }
+        Some(("gv-resize", subm)) => {
+            if let Err(error) = gv_resize::handle_gv_resize(subm) {
+                let message = format!("{:#}", error);
+                report_cli_error::report_cli_error_and_exit(&message, Some("gv-resize"), vec![]);
+            }
         }
         Some(("gv-read-stats", subm)) => {
             gv_read_stats::handle_gv_read_stats(subm);

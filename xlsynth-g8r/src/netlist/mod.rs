@@ -15,6 +15,7 @@ pub mod io;
 pub mod normalized;
 pub mod parse;
 pub mod report;
+pub mod resize;
 pub mod sta;
 pub mod stages;
 pub mod stats;

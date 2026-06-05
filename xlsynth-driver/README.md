@@ -302,6 +302,70 @@ Key flags:
 - `--module_output_load <VALUE>`: extra load capacitance added at module outputs (default: `0.0`).
 - `--json_out <PATH>`: optional JSON report output path.
 
+### `gv-resize`: standard-cell resizing
+
+Reads an already mapped gate-level netlist and replaces instances with
+functionally compatible cells from the same timing-enabled Liberty proto. The
+default `delay` objective minimizes the lexicographically ordered
+register-to-register endpoint delays reported by the `gv-stats` timing model.
+It searches cells on the slowest register paths. The `area-under-delay`
+objective instead fixes the input netlist's initial worst register-to-register
+delay as a hard cap and hill-climbs toward lower cell area. Every accepted area
+move must remain under that original cap, preventing cumulative timing drift.
+Both objectives rerun full static timing analysis for every trial substitution.
+They do not change connectivity, insert buffers, retime registers, model hold
+timing, or use physical wire parasitics.
+
+Equivalent combinational cells must have the same pin interface and output
+functions. Equivalent sequential cells additionally require identical
+next-state, clock, clear, preset, and output semantics. Use repeated
+`--dont_use` wildcard patterns to exclude cells prohibited by the synthesis
+flow.
+
+```shell
+xlsynth-driver gv-resize \
+  --netlist my_design.mapped.v \
+  --liberty_proto ~/timing-enabled.liberty.proto \
+  --netlist_out my_design.resized.v \
+  --objective delay \
+  --max_iterations 25 \
+  --dont_use '*_FAX*' \
+  --dont_use 'P*EN*_*' \
+  --json_out resize.json
+```
+
+To recover area after delay optimization without exceeding the optimized
+netlist's starting delay:
+
+```shell
+xlsynth-driver gv-resize \
+  --netlist my_design.delay-resized.v \
+  --liberty_proto ~/timing-enabled.liberty.proto \
+  --netlist_out my_design.area-resized.v \
+  --objective area-under-delay \
+  --max_iterations 100 \
+  --json_out area-resize.json
+```
+
+Key flags:
+
+- `--netlist <PATH>`: mapped gate-level netlist. Required.
+- `--liberty_proto <PATH>`: timing-enabled Liberty proto. Required.
+- `--netlist_out <PATH>`: resized mapped-netlist output. Required.
+- `--objective <OBJECTIVE>`: `delay` or `area-under-delay` (default: `delay`).
+- `--module_name <MODULE>`: optional module selection for multi-module inputs.
+- `--primary_input_transition <VALUE>`: source transition for primary inputs (default: `0.01`).
+- `--module_output_load <VALUE>`: extra module-output capacitance (default: `0.0`).
+- `--max_iterations <N>`: maximum accepted substitutions (default: `25`).
+- `--max_candidate_paths <N>`: slow endpoint paths searched per delay-objective iteration; ignored by `area-under-delay` (default: `8`).
+- `--max_evaluations_per_iteration <N>`: full-STA trials per iteration (default: `128`).
+- `--max_cell_candidates_per_instance <N>`: replacement cells tried per instance (default: `4`).
+- `--improvement_epsilon <VALUE>`: timing comparison epsilon, including the area objective's fixed delay cap (default: `1e-9`).
+- `--area_epsilon <VALUE>`: area values within this difference compare equal (default: `1e-12`).
+- `--resize_sequential_cells <BOOL>`: permit sequential-cell substitutions (default: `true`).
+- `--dont_use <PATTERN>`: wildcard cell-name exclusion; may be repeated.
+- `--json_out <PATH>`: optional JSON optimization summary.
+
 ### `gv-read-stats`: netlist statistics
 
 Reads a gate-level netlist (optionally gzipped) and prints summary statistics such as

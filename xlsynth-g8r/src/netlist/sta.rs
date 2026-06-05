@@ -89,10 +89,11 @@ pub struct RegisterPathDelayBreakdown {
     pub setup_delay: f64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct EdgeTimingCandidate {
     timing: EdgeTiming,
     register_path_breakdown: Option<RegisterPathDelayBreakdown>,
+    path_instances: Vec<usize>,
 }
 
 impl EdgeTimingCandidate {
@@ -100,16 +101,18 @@ impl EdgeTimingCandidate {
         Self {
             timing,
             register_path_breakdown: None,
+            path_instances: Vec::new(),
         }
     }
 
-    fn from_register_launch(timing: EdgeTiming) -> Self {
+    fn from_register_launch(timing: EdgeTiming, launch_instance: usize) -> Self {
         Self {
             register_path_breakdown: Some(RegisterPathDelayBreakdown {
                 clock_to_output_delay: timing.arrival,
                 ..Default::default()
             }),
             timing,
+            path_instances: vec![launch_instance],
         }
     }
 
@@ -117,7 +120,17 @@ impl EdgeTimingCandidate {
         Self {
             timing,
             register_path_breakdown: Some(RegisterPathDelayBreakdown::default()),
+            path_instances: Vec::new(),
         }
+    }
+
+    fn propagated_through(mut self, instance: Option<usize>) -> Self {
+        if let Some(instance) = instance
+            && self.path_instances.last().copied() != Some(instance)
+        {
+            self.path_instances.push(instance);
+        }
+        self
     }
 }
 
@@ -175,14 +188,14 @@ impl EdgeTimingSet {
 
     fn extend_from(&mut self, rhs: &Self) {
         for edge in &rhs.values {
-            self.insert(*edge);
+            self.insert(edge.clone());
         }
     }
 
     fn max_arrival_candidate(&self) -> Option<EdgeTimingCandidate> {
         self.values
             .iter()
-            .copied()
+            .cloned()
             .reduce(choose_worse_edge_timing_candidate_by_arrival)
     }
 
@@ -192,7 +205,7 @@ impl EdgeTimingSet {
     }
 
     fn iter(&self) -> impl Iterator<Item = EdgeTimingCandidate> + '_ {
-        self.values.iter().copied()
+        self.values.iter().cloned()
     }
 }
 
@@ -332,6 +345,8 @@ pub struct StaReport {
     pub worst_register_input_breakdown: Option<RegisterPathDelayBreakdown>,
     pub register_input_arrivals: Vec<Option<f64>>,
     pub register_input_breakdowns: Vec<Option<RegisterPathDelayBreakdown>>,
+    pub register_input_critical_paths: Vec<Vec<usize>>,
+    pub worst_register_input_critical_path: Vec<usize>,
     pub timing_query_diagnostic_counts: TimingQueryDiagnosticCounts,
     pub cell_levels: usize,
 }
@@ -992,6 +1007,7 @@ fn analyze_max_arrival_proto_with_mode(
                         pin,
                         known_pin_values,
                         output_load,
+                        inst_idx,
                         &mut validated_timing_tables,
                         &mut timing_query_diagnostic_counts,
                         &format!(
@@ -1184,6 +1200,7 @@ fn analyze_max_arrival_proto_with_mode(
                             arc,
                             input_timing_set,
                             output_load,
+                            Some(inst_idx),
                             &mut timing_query_diagnostic_counts,
                             &context,
                         )?;
@@ -1359,6 +1376,7 @@ fn analyze_max_arrival_proto_with_mode(
                         setup_arcs.as_slice(),
                         &instance_known_pin_values[inst_idx],
                         timing_set,
+                        inst_idx,
                         &mut timing_query_diagnostic_counts,
                         &format!(
                             "{}.{} (instance '{}') setup",
@@ -1376,13 +1394,14 @@ fn analyze_max_arrival_proto_with_mode(
                         continue;
                     };
                     register_input_timings[inst_idx] =
-                        Some(match register_input_timings[inst_idx] {
-                            Some(current) => {
-                                choose_worse_register_capture_timing(current, capture_timing)
-                            }
-                            None => capture_timing,
+                        Some(match register_input_timings[inst_idx].clone() {
+                            Some(current) => choose_worse_register_capture_timing(
+                                current,
+                                capture_timing.clone(),
+                            ),
+                            None => capture_timing.clone(),
                         });
-                    worst_register_input = Some(match worst_register_input {
+                    worst_register_input = Some(match worst_register_input.clone() {
                         Some(current) => {
                             choose_worse_register_capture_timing(current, capture_timing)
                         }
@@ -1402,26 +1421,48 @@ fn analyze_max_arrival_proto_with_mode(
     );
     let register_input_arrivals = register_input_timings
         .iter()
-        .map(|timing| timing.map(|timing| timing.arrival))
+        .map(|timing| timing.as_ref().map(|timing| timing.arrival))
         .collect();
     let register_input_breakdowns = register_input_timings
         .iter()
-        .map(|timing| timing.and_then(|timing| timing.register_path_breakdown))
+        .map(|timing| {
+            timing
+                .as_ref()
+                .and_then(|timing| timing.register_path_breakdown)
+        })
+        .collect();
+    let register_input_critical_paths = register_input_timings
+        .iter()
+        .map(|timing| {
+            timing
+                .as_ref()
+                .map(|timing| timing.path_instances.clone())
+                .unwrap_or_default()
+        })
         .collect();
 
     Ok(StaReport {
         net_timing,
         worst_output_arrival: worst_output
+            .as_ref()
             .map(|timing| timing.timing.arrival)
             .unwrap_or(0.0),
-        worst_output_breakdown: worst_output.and_then(|timing| timing.register_path_breakdown),
+        worst_output_breakdown: worst_output
+            .as_ref()
+            .and_then(|timing| timing.register_path_breakdown),
         worst_register_input_arrival: worst_register_input
+            .as_ref()
             .map(|timing| timing.arrival)
             .unwrap_or(0.0),
         worst_register_input_breakdown: worst_register_input
+            .as_ref()
             .and_then(|timing| timing.register_path_breakdown),
         register_input_arrivals,
         register_input_breakdowns,
+        register_input_critical_paths,
+        worst_register_input_critical_path: worst_register_input
+            .map(|timing| timing.path_instances)
+            .unwrap_or_default(),
         timing_query_diagnostic_counts,
         cell_levels,
     })
@@ -2086,6 +2127,7 @@ fn evaluate_arc(
             rise: output_load,
             fall: output_load,
         },
+        None,
         &mut timing_query_diagnostic_counts,
         context,
     )?;
@@ -2099,6 +2141,7 @@ fn evaluate_arc_set(
     arc: &TimingArc,
     input_timing: &SignalTimingSet,
     output_load: EdgeLoadCapacitance,
+    propagated_instance: Option<usize>,
     timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
     context: &str,
 ) -> Result<SignalTimingSet> {
@@ -2137,6 +2180,7 @@ fn evaluate_arc_set(
             rise_transition,
             source_edges(true)?,
             output_load.rise,
+            propagated_instance,
             timing_query_diagnostic_counts,
             context,
             StaTimingTableKind::CellRise,
@@ -2152,6 +2196,7 @@ fn evaluate_arc_set(
             fall_transition,
             source_edges(false)?,
             output_load.fall,
+            propagated_instance,
             timing_query_diagnostic_counts,
             context,
             StaTimingTableKind::CellFall,
@@ -2167,6 +2212,7 @@ fn evaluate_output_edge_set(
     slew_table: &TimingTable,
     source_edges: &EdgeTimingSet,
     output_load: f64,
+    propagated_instance: Option<usize>,
     timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
     context: &str,
     delay_kind: StaTimingTableKind,
@@ -2203,16 +2249,22 @@ fn evaluate_output_edge_set(
                 arrival
             ));
         }
-        outputs.insert(EdgeTimingCandidate {
-            timing: EdgeTiming {
-                arrival,
-                transition,
-            },
-            register_path_breakdown: source_edge.register_path_breakdown.map(|mut breakdown| {
-                breakdown.combinational_delay += delay;
-                breakdown
-            }),
-        });
+        outputs.insert(
+            EdgeTimingCandidate {
+                timing: EdgeTiming {
+                    arrival,
+                    transition,
+                },
+                register_path_breakdown: source_edge.register_path_breakdown.map(
+                    |mut breakdown| {
+                        breakdown.combinational_delay += delay;
+                        breakdown
+                    },
+                ),
+                path_instances: source_edge.path_instances,
+            }
+            .propagated_through(propagated_instance),
+        );
     }
 
     if outputs.values.is_empty() {
@@ -2233,6 +2285,7 @@ fn evaluate_register_launch_output_set(
     pin: &Pin,
     known_pin_values: &HashMap<String, bool>,
     output_load: EdgeLoadCapacitance,
+    launch_instance: usize,
     validated_tables: &mut HashSet<*const TimingTable>,
     timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
     context: &str,
@@ -2276,17 +2329,20 @@ fn evaluate_register_launch_output_set(
             )?;
             output
                 .rise
-                .insert(EdgeTimingCandidate::from_register_launch(EdgeTiming {
-                    arrival,
-                    transition: evaluate_table_with_query_and_diagnostics(
-                        library,
-                        transition,
-                        query,
-                        timing_query_diagnostic_counts,
-                        &format!("{context} {}", StaTimingTableKind::RiseTransition.as_raw()),
-                    )?
-                    .max(0.0),
-                }));
+                .insert(EdgeTimingCandidate::from_register_launch(
+                    EdgeTiming {
+                        arrival,
+                        transition: evaluate_table_with_query_and_diagnostics(
+                            library,
+                            transition,
+                            query,
+                            timing_query_diagnostic_counts,
+                            &format!("{context} {}", StaTimingTableKind::RiseTransition.as_raw()),
+                        )?
+                        .max(0.0),
+                    },
+                    launch_instance,
+                ));
         }
         if let Some((delay, transition)) = find_optional_delay_slew_tables(
             arc,
@@ -2304,17 +2360,20 @@ fn evaluate_register_launch_output_set(
             )?;
             output
                 .fall
-                .insert(EdgeTimingCandidate::from_register_launch(EdgeTiming {
-                    arrival,
-                    transition: evaluate_table_with_query_and_diagnostics(
-                        library,
-                        transition,
-                        query,
-                        timing_query_diagnostic_counts,
-                        &format!("{context} {}", StaTimingTableKind::FallTransition.as_raw()),
-                    )?
-                    .max(0.0),
-                }));
+                .insert(EdgeTimingCandidate::from_register_launch(
+                    EdgeTiming {
+                        arrival,
+                        transition: evaluate_table_with_query_and_diagnostics(
+                            library,
+                            transition,
+                            query,
+                            timing_query_diagnostic_counts,
+                            &format!("{context} {}", StaTimingTableKind::FallTransition.as_raw()),
+                        )?
+                        .max(0.0),
+                    },
+                    launch_instance,
+                ));
         }
     }
     if output.rise.values.is_empty() || output.fall.values.is_empty() {
@@ -2326,10 +2385,11 @@ fn evaluate_register_launch_output_set(
     Ok(output)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct RegisterCaptureTimingCandidate {
     arrival: f64,
     register_path_breakdown: Option<RegisterPathDelayBreakdown>,
+    path_instances: Vec<usize>,
 }
 
 /// Returns the worst data arrival plus setup requirement at one capture pin.
@@ -2338,6 +2398,7 @@ fn evaluate_register_setup_capture_arrival(
     setup_arcs: &[&TimingArc],
     known_pin_values: &HashMap<String, bool>,
     data_timing: &SignalTimingSet,
+    capture_instance: usize,
     timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
     context: &str,
 ) -> Result<Option<RegisterCaptureTimingCandidate>> {
@@ -2366,7 +2427,8 @@ fn evaluate_register_setup_capture_arrival(
                         capture_arrival
                     ));
                 }
-                let candidate = register_capture_timing_candidate(data_edge, setup);
+                let candidate =
+                    register_capture_timing_candidate(data_edge, setup, capture_instance);
                 worst_timing = Some(match worst_timing {
                     Some(current) => choose_worse_register_capture_timing(current, candidate),
                     None => candidate,
@@ -2393,7 +2455,8 @@ fn evaluate_register_setup_capture_arrival(
                         capture_arrival
                     ));
                 }
-                let candidate = register_capture_timing_candidate(data_edge, setup);
+                let candidate =
+                    register_capture_timing_candidate(data_edge, setup, capture_instance);
                 worst_timing = Some(match worst_timing {
                     Some(current) => choose_worse_register_capture_timing(current, candidate),
                     None => candidate,
@@ -2407,13 +2470,16 @@ fn evaluate_register_setup_capture_arrival(
 fn register_capture_timing_candidate(
     data_edge: EdgeTimingCandidate,
     setup: f64,
+    capture_instance: usize,
 ) -> RegisterCaptureTimingCandidate {
+    let data_edge = data_edge.propagated_through(Some(capture_instance));
     RegisterCaptureTimingCandidate {
         arrival: data_edge.timing.arrival + setup,
         register_path_breakdown: data_edge.register_path_breakdown.map(|mut breakdown| {
             breakdown.setup_delay += setup;
             breakdown
         }),
+        path_instances: data_edge.path_instances,
     }
 }
 
@@ -6279,6 +6345,7 @@ endmodule
             &slew_table,
             &input_timing,
             0.0,
+            None,
             &mut timing_query_diagnostic_counts,
             "negative_transition",
             StaTimingTableKind::CellRise,
@@ -6310,6 +6377,7 @@ endmodule
             &slew_table,
             &input_timing,
             0.0,
+            None,
             &mut timing_query_diagnostic_counts,
             "overflow_arrival",
             StaTimingTableKind::CellRise,
