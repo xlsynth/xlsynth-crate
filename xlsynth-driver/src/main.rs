@@ -70,6 +70,7 @@ mod g8r2v;
 mod g8r_cli;
 mod g8r_equiv;
 mod g8r_ir_equiv;
+mod g8r_stitch_pipeline;
 mod g8r_table;
 mod gate_ir_equiv;
 mod gv2aig;
@@ -702,6 +703,65 @@ fn main() {
                 )
                 .add_bool_arg("reset_active_low", "Reset is active low")
                 .add_g8r_lowering_flags()
+                .arg(
+                    Arg::new("bin_out")
+                        .long("bin-out")
+                        .value_name("PATH")
+                        .help("Path to write the .g8rbin file")
+                        .action(ArgAction::Set),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("g8r-stitch-pipeline")
+                .about("Stitches combinational .g8r stages into a native sequential .g8r design")
+                .arg(
+                    Arg::new("g8r_input_files")
+                        .value_name("G8R_INPUT_FILE")
+                        .help("Ordered combinational .g8r or .g8rbin pipeline stage file(s)")
+                        .required(true)
+                        .num_args(1..),
+                )
+                .arg(
+                    Arg::new("output_design_name")
+                        .long("output_design_name")
+                        .value_name("NAME")
+                        .help("Sequential g8r design name")
+                        .required(true),
+                )
+                .arg(
+                    Arg::new("clock_name")
+                        .long("clock_name")
+                        .value_name("NAME")
+                        .help("Clock port name for inserted registers (default clk)")
+                        .action(ArgAction::Set),
+                )
+                .add_bool_arg(
+                    "flop_inputs",
+                    "Whether to insert input pipeline flops (default true)",
+                )
+                .add_bool_arg(
+                    "flop_outputs",
+                    "Whether to insert output pipeline flops (default true)",
+                )
+                .arg(
+                    Arg::new("input_valid_signal")
+                        .long("input_valid_signal")
+                        .value_name("INPUT_VALID_SIGNAL")
+                        .help("Load enable signal for pipeline registers"),
+                )
+                .arg(
+                    Arg::new("output_valid_signal")
+                        .long("output_valid_signal")
+                        .value_name("OUTPUT_VALID_SIGNAL")
+                        .help("Output port holding pipelined valid signal"),
+                )
+                .arg(
+                    Arg::new("reset")
+                        .long("reset")
+                        .value_name("RESET")
+                        .help("Synchronous reset signal for valid pipeline registers"),
+                )
+                .add_bool_arg("reset_active_low", "Reset is active low")
                 .arg(
                     Arg::new("bin_out")
                         .long("bin-out")
@@ -3474,6 +3534,15 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("dslx-stitch-g8r-pipeline", subm)) => {
             dslx_stitch_g8r_pipeline::handle_dslx_stitch_g8r_pipeline(subm, &config);
+        }
+        Some(("g8r-stitch-pipeline", subm)) => {
+            if let Err(e) = g8r_stitch_pipeline::handle_g8r_stitch_pipeline(subm) {
+                report_cli_error::report_cli_error_and_exit(
+                    &e,
+                    Some("g8r-stitch-pipeline"),
+                    vec![],
+                );
+            }
         }
         Some(("dslx2ir", subm)) => {
             dslx2ir::handle_dslx2ir(subm, &config);
