@@ -2748,6 +2748,46 @@ xlsynth-driver dslx-stitch-g8r-pipeline \
   --reset=rst --bin-out=foo.g8rbin > foo.g8r
 ```
 
+### `g8r-stitch-pipeline`: Stitch combinational g8r stages into sequential g8r
+
+Stitches ordered combinational `.g8r` or `.g8rbin` stage designs into one
+sequential `SequentialGateFn`. This is the persisted-artifact stitch step used
+by `dslx-stitch-g8r-pipeline` after its selected DSLX stages have been lowered
+individually.
+
+Each input stage must be clockless and register-free. Adjacent stage outputs
+are flattened LSB-first and partitioned across the next stage inputs in their
+declared order; this command checks the resulting flat widths, but DSLX-only
+checks such as `_cycleN` discovery, parametric-stage rejection, and DSLX type
+identity must happen before lowering to g8r.
+
+Positional arguments:
+
+- `<g8r_input_file>...` - ordered input `.g8r` or `.g8rbin` stage files.
+
+Pipeline flags:
+
+- `--output_design_name=<NAME>` - required output sequential g8r design name.
+- `--clock_name=<NAME>` - inserted-register clock name, default `clk`.
+- `--flop_inputs=<BOOL>` and `--flop_outputs=<BOOL>` - add external register
+  layers; both default to `true`.
+- `--input_valid_signal=<NAME>` - add a valid pipeline and make each data
+  register load-enabled by the current valid bit.
+- `--output_valid_signal=<NAME>` - expose the final valid bit; requires
+  `--input_valid_signal`.
+- `--reset=<NAME>` and `--reset_active_low=<BOOL>` - synchronously clear valid
+  registers; reset requires `--input_valid_signal`. Data registers hold/load
+  according to valid rather than being reset.
+- `--bin-out=<PATH>` - also write the binary `.g8rbin` encoding.
+
+```shell
+xlsynth-driver g8r-stitch-pipeline \
+  foo_cycle0.g8r foo_cycle1.g8rbin foo_cycle2.g8r \
+  --output_design_name=foo \
+  --input_valid_signal=in_valid --output_valid_signal=out_valid \
+  --reset=rst --bin-out=foo.g8rbin > foo.g8r
+```
+
 ### `run-verilog-pipeline` *(experimental)*
 
 Runs a synthesized *pipelined* SystemVerilog module through a throw-away, automatically-generated test-bench and prints the value(s) that appear on the data output port(s).
