@@ -7280,6 +7280,34 @@ fn foo_cycle1(a: u64, b: u32) -> u64 { a + b as u64 }"#;
     );
 }
 
+#[test]
+fn test_dslx_stitch_g8r_pipeline_signature_mismatch() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let dslx = r#"fn foo_cycle0(x: u32, y: u64) -> (u32, u64) { (x, y) }
+fn foo_cycle1(a: u64, b: u32) -> u64 { a + b as u64 }"#;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dslx_path = temp_dir.path().join("foo.x");
+    std::fs::write(&dslx_path, dslx).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("dslx-stitch-g8r-pipeline")
+        .arg("--dslx_input_file")
+        .arg(dslx_path.to_str().unwrap())
+        .arg("--dslx_top")
+        .arg("foo")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "command should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("does not match"),
+        "unexpected stderr: {}",
+        stderr
+    );
+}
+
 fn run_dslx_stitch_pipeline_error_case_with_args(
     dslx: &str,
     extra_args: &[&str],
@@ -7621,6 +7649,31 @@ fn test_g8r_stitch_pipeline_rejects_sequential_stage() {
     assert!(stderr.contains("g8r-stitch-pipeline"));
     assert!(stderr.contains("must be clockless and register-free"));
     assert!(stderr.contains("contains 1 register(s) and clock 'clk'"));
+}
+
+#[test]
+fn test_g8r_stitch_pipeline_rejects_mismatched_stage_widths() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let stage0_path = temp_dir.path().join("stage0.g8r");
+    let stage0 = two_input_gate_fn("stage0", |a, b, builder| builder.add_and_binary(a, b));
+    write_g8r_file(&stage0_path, &stage0);
+    let stage1_path = temp_dir.path().join("stage1.g8r");
+    let stage1 = two_input_gate_fn("stage1", |a, b, builder| builder.add_and_binary(a, b));
+    write_g8r_file(&stage1_path, &stage1);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xlsynth-driver"))
+        .arg("g8r-stitch-pipeline")
+        .arg(stage0_path.to_str().unwrap())
+        .arg(stage1_path.to_str().unwrap())
+        .arg("--output_design_name")
+        .arg("pipe")
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "command should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("g8r-stitch-pipeline"));
+    assert!(stderr.contains("cannot stitch stages 0 and 1"));
+    assert!(stderr.contains("output width 1 does not match input width 2"));
 }
 
 #[test_case(true; "with_tool_path")]
