@@ -521,10 +521,8 @@ use xlsynth_aot_runtime::{
 /// Renders the runtime imports shared by generated native compiler bridges.
 pub(crate) fn render_pir_compiler_native_runtime_imports() -> &'static str {
     r#"pub use xlsynth_pir_compiler_runtime::{
-    Bits8 as NativeBits8, Bits16 as NativeBits16, Bits32 as NativeBits32,
-    Bits64 as NativeBits64, Token as NativeToken, WideBits as NativeWideBits,
+    BitsInU8, BitsInU16, BitsInU32, BitsInU64, Token, WideBits,
 };
-pub type Token = NativeToken;
 "#
 }
 
@@ -553,11 +551,11 @@ fn bits_rust_type(target: RustBridgeTarget, is_signed: bool, bit_count: usize) -
 /// Returns the native compiler runtime carrier for one DSLX bits value.
 pub(crate) fn native_bits_rust_type(bit_count: usize) -> String {
     match bit_count {
-        1..=8 => format!("NativeBits8<{bit_count}>"),
-        9..=16 => format!("NativeBits16<{bit_count}>"),
-        17..=32 => format!("NativeBits32<{bit_count}>"),
-        33..=64 => format!("NativeBits64<{bit_count}>"),
-        _ => format!("NativeWideBits<{bit_count}, {}>", bit_count.div_ceil(64)),
+        1..=8 => format!("BitsInU8<{bit_count}>"),
+        9..=16 => format!("BitsInU16<{bit_count}>"),
+        17..=32 => format!("BitsInU32<{bit_count}>"),
+        33..=64 => format!("BitsInU64<{bit_count}>"),
+        _ => format!("WideBits<{bit_count}, {}>", bit_count.div_ceil(64)),
     }
 }
 
@@ -594,9 +592,7 @@ impl BridgeBuilder for RustBridgeBuilder {
         let imports = if root.is_empty() {
             String::new()
         } else if self.target == RustBridgeTarget::PirCompilerNative {
-            format!(
-                "use {root}::{{NativeBits8, NativeBits16, NativeBits32, NativeBits64, NativeToken, NativeWideBits, Token}};\n"
-            )
+            format!("use {root}::{{BitsInU8, BitsInU16, BitsInU32, BitsInU64, Token, WideBits}};\n")
         } else {
             format!(
                 "use {root}::{{read_leaf_element, write_leaf_element, AotArtifactMetadata, AotElementLayout, AotError, AotRunResult, AotRunnerLayout, SBits, StandaloneRunner, UBits}};\n"

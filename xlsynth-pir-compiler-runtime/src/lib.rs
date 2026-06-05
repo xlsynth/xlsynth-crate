@@ -102,10 +102,10 @@ macro_rules! define_native_bits {
     };
 }
 
-define_native_bits!(Bits8, u8, 8);
-define_native_bits!(Bits16, u16, 16);
-define_native_bits!(Bits32, u32, 32);
-define_native_bits!(Bits64, u64, 64);
+define_native_bits!(BitsInU8, u8, 8);
+define_native_bits!(BitsInU16, u16, 16);
+define_native_bits!(BitsInU32, u32, 32);
+define_native_bits!(BitsInU64, u64, 64);
 
 /// Native least-significant-first limb storage for a bitvector wider than 64
 /// bits.
@@ -1148,11 +1148,11 @@ mod tests {
 
     #[test]
     fn native_bits_wrappers_enforce_semantic_widths() {
-        let value = Bits64::<42>::new((1u64 << 41) | 7).expect("value fits in bits[42]");
+        let value = BitsInU64::<42>::new((1u64 << 41) | 7).expect("value fits in bits[42]");
         assert_eq!(value.to_u64(), (1u64 << 41) | 7);
-        assert!(Bits64::<42>::new(1u64 << 42).is_err());
-        assert_eq!(Bits16::<9>::wrapping(0xffff).get(), 0x1ff);
-        assert!(Bits8::<9>::new(0).is_err());
+        assert!(BitsInU64::<42>::new(1u64 << 42).is_err());
+        assert_eq!(BitsInU16::<9>::wrapping(0xffff).get(), 0x1ff);
+        assert!(BitsInU8::<9>::new(0).is_err());
     }
 
     #[test]

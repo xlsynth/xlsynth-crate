@@ -398,37 +398,19 @@ fn render_generated_module(
     function: &xlsynth_pir::ir::Fn,
     artifact: &AotArtifact,
 ) -> Result<String, CompilerError> {
-    let mut widths = BTreeSet::new();
     let mut declarations = Vec::new();
     let mut input_type_names = Vec::new();
     for (index, param) in function.params.iter().enumerate() {
         let name = format!("Input{index}");
-        let value_type = render_value_type(&param.ty, &name, &mut widths, &mut declarations)?;
-        if value_type != name {
-            declarations.push(format!("pub type {name} = {value_type};\n"));
-        }
-        input_type_names.push(name);
+        let value_type = render_value_type(&param.ty, &name, &mut declarations)?;
+        input_type_names.push(value_type);
     }
-    let output_type =
-        render_value_type(&function.ret_ty, "Output", &mut widths, &mut declarations)?;
-    if output_type != "Output" {
-        declarations.push(format!("pub type Output = {output_type};\n"));
-    }
-
-    let bit_aliases = widths
-        .iter()
-        .map(|width| {
-            let storage = match width {
-                1..=8 => format!("NativeBits8<{width}>"),
-                9..=16 => format!("NativeBits16<{width}>"),
-                17..=32 => format!("NativeBits32<{width}>"),
-                33..=64 => format!("NativeBits64<{width}>"),
-                _ => format!("NativeWideBits<{width}, {}>", width.div_ceil(64)),
-            };
-            format!("pub type Bits{width} = {storage};\n")
-        })
-        .collect::<String>();
-    let type_declarations = format!("{bit_aliases}{}", declarations.concat());
+    let output_type = render_value_type(&function.ret_ty, "Output", &mut declarations)?;
+    let type_declarations = if declarations.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", declarations.concat())
+    };
     let param_names = function
         .params
         .iter()
@@ -440,7 +422,7 @@ fn render_generated_module(
             artifact,
             &param_names,
             &input_type_names,
-            "Output",
+            &output_type,
             &type_declarations,
             true,
         )
@@ -478,18 +460,12 @@ fn render_runner_items(
     };
     let public_runtime_imports = if emit_native_value_types {
         r#"pub use xlsynth_pir_compiler_runtime::{
-    Bits8 as NativeBits8, Bits16 as NativeBits16, Bits32 as NativeBits32,
-    Bits64 as NativeBits64, ExecutionResult, RunError, RunResult, Token as NativeToken,
-    WideBits as NativeWideBits,
+    BitsInU8, BitsInU16, BitsInU32, BitsInU64, ExecutionResult, RunError, RunResult, Token,
+    WideBits,
 };
 "#
     } else {
         "pub use xlsynth_pir_compiler_runtime::{ExecutionResult, RunError, RunResult};\n"
-    };
-    let token_alias = if emit_native_value_types {
-        "pub type Token = NativeToken;\n"
-    } else {
-        ""
     };
 
     format!(
@@ -522,8 +498,7 @@ const SCRATCH_ALIGNMENT: usize = {scratch_alignment};
 static FUNCTION_METADATA: LazyLock<CompiledFunctionMetadata> =
     LazyLock::new(|| {metadata});
 
-{token_alias}{type_declarations}
-fn ensure_runtime_symbols_linked() {{
+{type_declarations}fn ensure_runtime_symbols_linked() {{
     std::hint::black_box([
         xlsynth_pir_record_assert as *const () as usize,
         xlsynth_pir_record_assumption_failure as *const () as usize,
@@ -635,7 +610,6 @@ pub fn new_runner() -> Result<Runner, RunError> {{
         metadata = metadata,
         type_declarations = type_declarations,
         public_runtime_imports = public_runtime_imports,
-        token_alias = token_alias,
         output_type_name = output_type_name,
         signature_inputs = signature_inputs,
         pointer_entries = pointer_entries,
@@ -655,7 +629,6 @@ fn render_call_args(args: &[String], with_trailing_comma: bool) -> String {
 fn render_value_type(
     ty: &Type,
     name: &str,
-    widths: &mut BTreeSet<usize>,
     declarations: &mut Vec<String>,
 ) -> Result<String, CompilerError> {
     match ty {
@@ -666,24 +639,19 @@ fn render_value_type(
                     "bits[0] wrapper storage is unsupported".into(),
                 ));
             }
-            widths.insert(*width);
-            Ok(format!("Bits{width}"))
+            Ok(render_native_bits_type(*width))
         }
         Type::Array(array) => {
             let element_name = format!("{name}Element");
-            let element = render_value_type(
-                array.element_type.as_ref(),
-                &element_name,
-                widths,
-                declarations,
-            )?;
+            let element =
+                render_value_type(array.element_type.as_ref(), &element_name, declarations)?;
             Ok(format!("[{element}; {}]", array.element_count))
         }
         Type::Tuple(fields) => {
             let mut rendered_fields = Vec::new();
             for (index, field) in fields.iter().enumerate() {
                 let field_name = format!("{name}Field{index}");
-                let rendered = render_value_type(field, &field_name, widths, declarations)?;
+                let rendered = render_value_type(field, &field_name, declarations)?;
                 rendered_fields.push(format!("    pub field{index}: {rendered},\n"));
             }
             declarations.push(format!(
@@ -692,6 +660,16 @@ fn render_value_type(
             ));
             Ok(name.to_string())
         }
+    }
+}
+
+fn render_native_bits_type(width: usize) -> String {
+    match width {
+        1..=8 => format!("BitsInU8<{width}>"),
+        9..=16 => format!("BitsInU16<{width}>"),
+        17..=32 => format!("BitsInU32<{width}>"),
+        33..=64 => format!("BitsInU64<{width}>"),
+        _ => format!("WideBits<{width}, {}>", width.div_ceil(64)),
     }
 }
 
