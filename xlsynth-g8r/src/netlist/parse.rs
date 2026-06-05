@@ -261,7 +261,7 @@ fn is_simple_identifier(s: &str) -> bool {
         Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
         _ => return false,
     }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
 impl fmt::Display for AnnotationValue {
@@ -379,8 +379,24 @@ pub struct TokenScanner<R: Read + 'static> {
 impl<R: Read + 'static> TokenScanner<R> {
     /// Construct a TokenScanner with a custom line lookup callback.
     pub fn with_line_lookup(reader: R, line_lookup: Box<dyn Fn(u32) -> Option<String>>) -> Self {
+        Self::with_buf_reader(BufReader::new(reader), line_lookup)
+    }
+
+    /// Construct a TokenScanner with an explicit internal read-buffer capacity.
+    fn with_line_lookup_and_capacity(
+        reader: R,
+        line_lookup: Box<dyn Fn(u32) -> Option<String>>,
+        capacity: usize,
+    ) -> Self {
+        Self::with_buf_reader(BufReader::with_capacity(capacity, reader), line_lookup)
+    }
+
+    fn with_buf_reader(
+        reader: BufReader<R>,
+        line_lookup: Box<dyn Fn(u32) -> Option<String>>,
+    ) -> Self {
         Self {
-            reader: BufReader::new(reader),
+            reader,
             pos: Pos {
                 lineno: 1,
                 colno: 1,
@@ -414,9 +430,17 @@ impl<'a> TokenScanner<std::io::Cursor<&'a [u8]>> {
     /// Construct a TokenScanner for a string (for tests), using a Vec<String>
     /// for line lookup.
     pub fn from_str(input: &'a str) -> Self {
+        Self::from_str_with_capacity(input, 8192)
+    }
+
+    fn from_str_with_capacity(input: &'a str, capacity: usize) -> Self {
         let lines: Vec<String> = input.lines().map(|s| s.to_string()).collect();
         let lookup = move |lineno: u32| lines.get((lineno - 1) as usize).cloned();
-        Self::with_line_lookup(std::io::Cursor::new(input.as_bytes()), Box::new(lookup))
+        Self::with_line_lookup_and_capacity(
+            std::io::Cursor::new(input.as_bytes()),
+            Box::new(lookup),
+            capacity,
+        )
     }
 }
 
@@ -532,10 +556,16 @@ impl<R: Read + 'static> TokenScanner<R> {
         }
     }
 
-    fn pop_annotation(&mut self, start: Pos) -> Result<Token, ScanError> {
-        // We have already seen '(', next should be '*'
-        assert_eq!(self.popb(), Some(b'('));
-        assert_eq!(self.popb(), Some(b'*'));
+    fn pop_annotation_after_open_paren(&mut self, start: Pos) -> Result<Token, ScanError> {
+        if self.popb() != Some(b'*') {
+            return Err(self.error_with_context(
+                "Expected '*' after '(' to open annotation",
+                Span {
+                    start,
+                    limit: self.pos,
+                },
+            ));
+        }
         // Skip whitespace
         while let Some(b) = self.peekb() {
             let c = b as char;
@@ -566,7 +596,15 @@ impl<R: Read + 'static> TokenScanner<R> {
             }
         }
         // Expect '='
-        assert_eq!(self.popb(), Some(b'='));
+        if self.popb() != Some(b'=') {
+            return Err(self.error_with_context(
+                "Expected '=' after annotation key",
+                Span {
+                    start,
+                    limit: self.pos,
+                },
+            ));
+        }
         // Skip whitespace
         while let Some(b) = self.peekb() {
             let c = b as char;
@@ -686,7 +724,7 @@ impl<R: Read + 'static> TokenScanner<R> {
             }
             Some(b) if b == b'-' => {
                 let mut num = String::new();
-                num.push('-');
+                num.push(self.popb().unwrap() as char);
                 while let Some(b2) = self.peekb() {
                     if (b2 as char).is_ascii_digit() {
                         self.popb();
@@ -695,7 +733,16 @@ impl<R: Read + 'static> TokenScanner<R> {
                         break;
                     }
                 }
-                AnnotationValue::I64(num.parse().unwrap())
+                let value = num.parse().map_err(|_| {
+                    self.error_with_context(
+                        "Expected integer annotation value after '-'",
+                        Span {
+                            start,
+                            limit: self.pos,
+                        },
+                    )
+                })?;
+                AnnotationValue::I64(value)
             }
             _ => {
                 return Err(self.error_with_context(
@@ -761,7 +808,7 @@ impl<R: Read + 'static> TokenScanner<R> {
                 ident.push(c);
             }
         } else {
-            // Regular identifier: one or more [A-Za-z0-9_]. These identifiers
+            // Regular identifier: one or more [A-Za-z0-9_$]. These identifiers
             // are ASCII-only, so we can scan chunks directly from the
             // BufReader buffer and advance by byte count.
             loop {
@@ -777,7 +824,7 @@ impl<R: Read + 'static> TokenScanner<R> {
                         let mut consumed = 0usize;
                         for &b in buf {
                             let c = b as char;
-                            if c.is_alphanumeric() || c == '_' {
+                            if c.is_ascii_alphanumeric() || c == '_' || c == '$' {
                                 ident.push(c);
                                 consumed += 1;
                             } else {
@@ -874,13 +921,18 @@ impl<R: Read + 'static> TokenScanner<R> {
                 ));
             }
         }
-        // Handle annotation: use non-consuming two-byte lookahead for "(*"
+        // Handle annotation. Consume '(' before looking for '*' so annotation
+        // recognition remains independent of internal BufReader chunk edges.
         if b == b'(' {
-            if let Ok(buf) = self.reader.fill_buf() {
-                if buf.len() >= 2 && buf[0] == b'(' && buf[1] == b'*' {
-                    return self.pop_annotation(start).map(Some);
-                }
+            self.popb();
+            if self.peekb() == Some(b'*') {
+                return self.pop_annotation_after_open_paren(start).map(Some);
             }
+            let limit = self.pos;
+            return Ok(Some(Token {
+                payload: TokenPayload::OParen,
+                span: Span { start, limit },
+            }));
         }
         // Handle identifier/keyword
         //
@@ -1037,10 +1089,6 @@ impl<R: Read + 'static> TokenScanner<R> {
         }
         // Handle punctuation
         let payload = match b {
-            b'(' => {
-                self.popb();
-                TokenPayload::OParen
-            }
             b')' => {
                 self.popb();
                 TokenPayload::CParen
@@ -1807,13 +1855,14 @@ impl<R: Read + 'static> Parser<R> {
                             log::trace!("parse_file: skipping comment/annotation at top level");
                             self.scanner.popt()?;
                         }
-                        // Unexpected token at file scope: stop.
                         _ => {
-                            log::trace!(
-                                "parse_file: stopping on unexpected top-level token: {:?}",
-                                tok.payload
-                            );
-                            break;
+                            return Err(ScanError {
+                                message: format!(
+                                    "unexpected token at file scope: {:?}",
+                                    tok.payload
+                                ),
+                                span: tok.span,
+                            });
                         }
                     }
                 }
@@ -1987,11 +2036,21 @@ impl<R: Read + 'static> Parser<R> {
                         self.scanner.popt()?;
                     }
                     _ => {
-                        // Unexpected token
-                        break;
+                        return Err(ScanError {
+                            message: format!("unexpected token in module body: {:?}", tok.payload),
+                            span: tok.span,
+                        });
                     }
                 },
-                None => break,
+                None => {
+                    return Err(ScanError {
+                        message: "unexpected EOF before 'endmodule'".to_string(),
+                        span: Span {
+                            start: self.scanner.pos,
+                            limit: self.scanner.pos,
+                        },
+                    });
+                }
             }
         }
         // Preserve top-level port order from the module header list, even when
@@ -2980,6 +3039,80 @@ endmodule
     }
 
     #[test]
+    fn test_token_scanner_annotation_opener_crosses_default_buffer_boundary() {
+        let input =
+            Box::leak(format!("{}(* src = \"foo.sv\" *)", " ".repeat(8191)).into_boxed_str());
+        let mut scanner = TokenScanner::from_str(input);
+        let t = scanner.popt().expect("no scan error").unwrap();
+        assert!(matches!(
+            t.payload,
+            TokenPayload::Annotation {
+                ref key,
+                value: AnnotationValue::String(ref value),
+            } if key == "src" && value == "foo.sv"
+        ));
+        assert!(scanner.popt().expect("no scan error").is_none());
+    }
+
+    #[test]
+    fn test_token_scanner_multibyte_constructs_with_one_byte_buffer() {
+        let input = r#"(* src = "foo.sv" *) ( ) // line comment
+/* block comment */ \escaped-name ; 8'hFF"#;
+        let mut scanner = TokenScanner::from_str_with_capacity(input, 1);
+        let annotation = scanner.popt().expect("no scan error").unwrap();
+        assert!(matches!(
+            annotation.payload,
+            TokenPayload::Annotation {
+                ref key,
+                value: AnnotationValue::String(ref value),
+            } if key == "src" && value == "foo.sv"
+        ));
+        assert!(matches!(
+            scanner.popt().expect("no scan error").unwrap().payload,
+            TokenPayload::OParen
+        ));
+        assert!(matches!(
+            scanner.popt().expect("no scan error").unwrap().payload,
+            TokenPayload::CParen
+        ));
+        assert!(matches!(
+            scanner.popt().expect("no scan error").unwrap().payload,
+            TokenPayload::Comment(ref value) if value == " line comment"
+        ));
+        assert!(matches!(
+            scanner.popt().expect("no scan error").unwrap().payload,
+            TokenPayload::Identifier(ref value) if value == "escaped-name"
+        ));
+        assert!(matches!(
+            scanner.popt().expect("no scan error").unwrap().payload,
+            TokenPayload::Semi
+        ));
+        assert!(matches!(
+            scanner.popt().expect("no scan error").unwrap().payload,
+            TokenPayload::VerilogInt {
+                width: Some(8),
+                ref value,
+            } if value.to_string() == "bits[8]:255"
+        ));
+        assert!(scanner.popt().expect("no scan error").is_none());
+    }
+
+    #[test]
+    fn test_token_scanner_negative_integer_annotation() {
+        let input = "(* offset = -42 *)";
+        let mut scanner = TokenScanner::from_str_with_capacity(input, 1);
+        let t = scanner.popt().expect("no scan error").unwrap();
+        assert!(matches!(
+            t.payload,
+            TokenPayload::Annotation {
+                ref key,
+                value: AnnotationValue::I64(-42),
+            } if key == "offset"
+        ));
+        assert!(scanner.popt().expect("no scan error").is_none());
+    }
+
+    #[test]
     fn test_token_scanner_keyword() {
         let input = "module";
         let mut scanner = TokenScanner::from_str(input);
@@ -2994,6 +3127,17 @@ endmodule
         let mut scanner = TokenScanner::from_str(input);
         let t = scanner.popt().expect("no scan error").unwrap();
         assert!(matches!(t.payload, TokenPayload::Identifier(ref s) if s == "foo_bar123"));
+        assert!(scanner.popt().expect("no scan error").is_none());
+    }
+
+    #[test]
+    fn test_token_scanner_identifier_with_dollar() {
+        let input = "output_value_0$_DFF_P_";
+        let mut scanner = TokenScanner::from_str(input);
+        let t = scanner.popt().expect("no scan error").unwrap();
+        assert!(
+            matches!(t.payload, TokenPayload::Identifier(ref s) if s == "output_value_0$_DFF_P_")
+        );
         assert!(scanner.popt().expect("no scan error").is_none());
     }
 
@@ -3176,6 +3320,34 @@ endmodule
         let mut parser = Parser::new(TokenScanner::from_str(src));
         let modules = parser.parse_file().expect("parse ok");
         assert_eq!(modules.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_file_rejects_unexpected_file_scope_token() {
+        let src = "module m(); endmodule\n(";
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let err = parser
+            .parse_file()
+            .expect_err("unexpected token should fail");
+        assert_eq!(err.message, "unexpected token at file scope: OParen");
+    }
+
+    #[test]
+    fn test_parse_module_rejects_unexpected_body_token() {
+        let src = "module m();\n(\nendmodule\n";
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let err = parser
+            .parse_file()
+            .expect_err("unexpected token should fail");
+        assert_eq!(err.message, "unexpected token in module body: OParen");
+    }
+
+    #[test]
+    fn test_parse_module_rejects_eof_before_endmodule() {
+        let src = "module m();\n";
+        let mut parser = Parser::new(TokenScanner::from_str(src));
+        let err = parser.parse_file().expect_err("premature EOF should fail");
+        assert_eq!(err.message, "unexpected EOF before 'endmodule'");
     }
 
     #[test]
