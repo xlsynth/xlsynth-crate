@@ -594,6 +594,7 @@ fn analyze_max_arrival_proto_with_mode(
 
     let mut bit_drivers: Vec<Vec<NetEndpoint>> = vec![Vec::new(); bit_count];
     let mut bit_loads: Vec<Vec<NetEndpoint>> = vec![Vec::new(); bit_count];
+    let mut bit_constant_values: Vec<Option<bool>> = vec![None; bit_count];
 
     for (inst_idx, inst) in normalized.instances.iter().enumerate() {
         let cell_name = resolve_symbol(interner, inst.type_name, "cell type")?;
@@ -701,10 +702,16 @@ fn analyze_max_arrival_proto_with_mode(
             for source in &pin_bit_sources {
                 match pin.direction {
                     d if d == PinDirection::Output as i32 => match source {
-                        PinBitSource::Bit(bit_idx) => bit_drivers[*bit_idx].push(NetEndpoint {
-                            inst_idx,
-                            pin_name: pin_name.clone(),
-                        }),
+                        PinBitSource::Bit(bit_idx) => {
+                            bit_drivers[*bit_idx].push(NetEndpoint {
+                                inst_idx,
+                                pin_name: pin_name.clone(),
+                            });
+                            if pin.timing_arcs.is_empty() {
+                                bit_constant_values[*bit_idx] =
+                                    constant_output_function_value(cell_name.as_str(), pin)?;
+                            }
+                        }
                         PinBitSource::Literal(_) | PinBitSource::Unknown => unreachable!(),
                     },
                     d if d == PinDirection::Input as i32 => match source {
@@ -749,6 +756,29 @@ fn analyze_max_arrival_proto_with_mode(
         instance_known_pin_values.push(known_pin_values);
         instance_timing_related_input_pins.push(timing_related_input_pins);
         instance_output_pin_orders.push(output_pin_order);
+    }
+
+    // Populate condition inputs before timing evaluation because pins used only
+    // in `when` predicates do not create topological timing dependencies.
+    for (inst_idx, (pin_sources, known_pin_values)) in instance_pin_sources
+        .iter()
+        .zip(instance_known_pin_values.iter_mut())
+        .enumerate()
+    {
+        for (pin_name, sources) in pin_sources {
+            let pin = lib
+                .pin(instance_cell_indices[inst_idx], pin_name.as_str())
+                .expect("instance pin sources were validated above");
+            if pin.direction != PinDirection::Input as i32 {
+                continue;
+            }
+            let [PinBitSource::Bit(bit_idx)] = sources.as_slice() else {
+                continue;
+            };
+            if let Some(value) = bit_constant_values[*bit_idx] {
+                known_pin_values.insert(pin_name.clone(), value);
+            }
+        }
     }
 
     let mut module_output_bits: Vec<usize> = Vec::new();
@@ -5645,6 +5675,83 @@ endmodule
             StaOptions::default(),
         )
         .expect("sta should skip conditional arcs that are provably false");
+
+        assert_close(report.worst_output_arrival, 3.0);
+    }
+
+    #[test]
+    fn sta_skips_conditional_timing_arcs_when_tie_cell_output_is_known_false() {
+        let src = r#"
+module top (a, y);
+  input a;
+  output y;
+  wire a;
+  wire en;
+  wire y;
+  BUF_EN u0 (.A(a), .EN(en), .Y(y));
+  TIELO tie_lo (.Y(en));
+endmodule
+"#;
+        let (module, nets, interner) = parse_single_module(src);
+        let arc = |when: &str, cell_rise: f64, cell_fall: f64| TimingArc {
+            related_pin: "A".to_string(),
+            timing_sense: "positive_unate".to_string(),
+            timing_type: "combinational".to_string(),
+            when: when.to_string(),
+            tables: vec![
+                scalar_table("cell_rise", cell_rise),
+                scalar_table("cell_fall", cell_fall),
+                scalar_table("rise_transition", 0.0),
+                scalar_table("fall_transition", 0.0),
+            ],
+            ..Default::default()
+        };
+        let lib = crate::liberty_proto::Library {
+            cells: vec![
+                Cell {
+                    name: "BUF_EN".to_string(),
+                    pins: vec![
+                        Pin {
+                            direction: PinDirection::Input as i32,
+                            name: "A".to_string(),
+                            ..Default::default()
+                        },
+                        Pin {
+                            direction: PinDirection::Input as i32,
+                            name: "EN".to_string(),
+                            ..Default::default()
+                        },
+                        Pin {
+                            direction: PinDirection::Output as i32,
+                            name: "Y".to_string(),
+                            timing_arcs: vec![arc("EN", 10.0, 10.0), arc("!EN", 2.0, 3.0)],
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+                Cell {
+                    name: "TIELO".to_string(),
+                    pins: vec![Pin {
+                        direction: PinDirection::Output as i32,
+                        function: "0".to_string(),
+                        name: "Y".to_string(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let report = analyze_combinational_max_arrival_proto(
+            &module,
+            &nets,
+            &interner,
+            &lib,
+            StaOptions::default(),
+        )
+        .expect("sta should use tie-cell values in conditional timing predicates");
 
         assert_close(report.worst_output_arrival, 3.0);
     }
