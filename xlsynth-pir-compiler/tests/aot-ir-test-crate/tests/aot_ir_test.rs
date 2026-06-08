@@ -2,43 +2,18 @@
 
 use std::{fs, path::Path, process::Command};
 
-use xlsynth_pir_compiler_aot_ir_test_crate::{
-    add_inputs_aot, add_one_aot, assumed_in_bounds_aot, compound_shapes_aot, empty_tuple_aot,
-    events_aot, wide_runtime_ops_aot,
-};
+use xlsynth_pir_compiler_aot_ir_test_crate::native_aot_tests_aot;
+use xlsynth_pir_compiler_aot_ir_test_crate::native_aot_tests_aot::native_aot_tests;
 use xlsynth_pir_compiler_runtime::{AssumptionFailureKind, ExecutionResult, WideBits};
 
 fn generated_wrapper_golden_cases() -> Vec<(&'static str, &'static str)> {
-    vec![
-        (
-            concat!(env!("OUT_DIR"), "/add_one_pir_aot_wrapper.rs"),
-            "tests/goldens/add_one_wrapper.golden.txt",
+    vec![(
+        concat!(
+            env!("OUT_DIR"),
+            "/native_aot_tests_typed_ir_pir_aot_package.rs"
         ),
-        (
-            concat!(env!("OUT_DIR"), "/add_inputs_pir_aot_wrapper.rs"),
-            "tests/goldens/add_inputs_wrapper.golden.txt",
-        ),
-        (
-            concat!(env!("OUT_DIR"), "/compound_shapes_pir_aot_wrapper.rs"),
-            "tests/goldens/compound_shapes_wrapper.golden.txt",
-        ),
-        (
-            concat!(env!("OUT_DIR"), "/empty_tuple_pir_aot_wrapper.rs"),
-            "tests/goldens/empty_tuple_wrapper.golden.txt",
-        ),
-        (
-            concat!(env!("OUT_DIR"), "/wide_runtime_ops_pir_aot_wrapper.rs"),
-            "tests/goldens/wide_runtime_ops_wrapper.golden.txt",
-        ),
-        (
-            concat!(env!("OUT_DIR"), "/events_pir_aot_wrapper.rs"),
-            "tests/goldens/events_wrapper.golden.txt",
-        ),
-        (
-            concat!(env!("OUT_DIR"), "/assumed_in_bounds_pir_aot_wrapper.rs"),
-            "tests/goldens/assumed_in_bounds_wrapper.golden.txt",
-        ),
-    ]
+        "tests/goldens/native_aot_tests_typed_ir_package.golden.txt",
+    )]
 }
 
 fn compare_golden_text(generated: &str, golden_path: &str) {
@@ -113,12 +88,12 @@ fn generated_pir_wrappers_match_golden_references() {
 // linked Cranelift AOT object code.
 #[test]
 fn scalar_generated_runner_executes() -> Result<(), Box<dyn std::error::Error>> {
-    let mut runner = add_one_aot::new_runner()?;
-    let input = add_one_aot::BitsInU64::<42>::new(41)?;
+    let mut runner = native_aot_tests::aot_add_one::new_runner()?;
+    let input = native_aot_tests_aot::BitsInU64::<42>::new(41)?;
     let output = runner.run(&input)?;
     assert_eq!(output.to_u64(), 42);
 
-    let mut caller_owned_output = add_one_aot::BitsInU64::<42>::default();
+    let mut caller_owned_output = native_aot_tests_aot::BitsInU64::<42>::default();
     runner.run_into(&input, &mut caller_owned_output)?;
     assert_eq!(caller_owned_output.to_u64(), 42);
     Ok(())
@@ -128,9 +103,9 @@ fn scalar_generated_runner_executes() -> Result<(), Box<dyn std::error::Error>> 
 // downstream crate without symbol collisions.
 #[test]
 fn multiple_generated_entrypoints_link_and_run() -> Result<(), Box<dyn std::error::Error>> {
-    let mut runner = add_inputs_aot::new_runner()?;
-    let lhs = add_inputs_aot::BitsInU8::<8>::new(10)?;
-    let rhs = add_inputs_aot::BitsInU8::<8>::new(20)?;
+    let mut runner = native_aot_tests::aot_add_inputs::new_runner()?;
+    let lhs = native_aot_tests_aot::BitsInU8::<8>::new(10)?;
+    let rhs = native_aot_tests_aot::BitsInU8::<8>::new(20)?;
     assert_eq!(runner.run(&lhs, &rhs)?.to_u64(), 30);
     Ok(())
 }
@@ -140,29 +115,32 @@ fn multiple_generated_entrypoints_link_and_run() -> Result<(), Box<dyn std::erro
 #[test]
 fn generated_runner_accepts_native_aggregates_and_wide_bits()
 -> Result<(), Box<dyn std::error::Error>> {
-    let input = compound_shapes_aot::Input0 {
-        field0: compound_shapes_aot::BitsInU64::<42>::new(100)?,
-        field1: [
-            compound_shapes_aot::WideBits::<65, 2>::from_limbs([0x0123_4567_89ab_cdef, 1])?,
-            compound_shapes_aot::WideBits::<65, 2>::from_limbs([0xfedc_ba98_7654_3210, 0])?,
+    let input = native_aot_tests::CompoundInput {
+        base: native_aot_tests_aot::BitsInU64::<42>::new(100)?,
+        limbs: [
+            native_aot_tests_aot::WideBits::<65, 2>::from_limbs([0x0123_4567_89ab_cdef, 1])?,
+            native_aot_tests_aot::WideBits::<65, 2>::from_limbs([0xfedc_ba98_7654_3210, 0])?,
         ],
     };
-    let increment = compound_shapes_aot::BitsInU64::<42>::new(23)?;
-    let mut runner = compound_shapes_aot::new_runner()?;
+    let increment = native_aot_tests_aot::BitsInU64::<42>::new(23)?;
+    let mut runner = native_aot_tests::aot_compound_shapes::new_runner()?;
     let output = runner.run(&input, &increment)?;
 
-    assert_eq!(output.field0.to_u64(), 123);
-    assert_eq!(output.field1, input.field1);
-    assert_eq!(std::mem::offset_of!(compound_shapes_aot::Input0, field1), 8);
-    assert_eq!(std::mem::size_of::<compound_shapes_aot::Input0>(), 40);
+    assert_eq!(output.sum.to_u64(), 123);
+    assert_eq!(output.limbs, input.limbs);
+    assert_eq!(
+        std::mem::offset_of!(native_aot_tests::CompoundInput, limbs),
+        8
+    );
+    assert_eq!(std::mem::size_of::<native_aot_tests::CompoundInput>(), 40);
     Ok(())
 }
 
 // Verifies: a zero-sized PIR value has a usable native generated interface.
 #[test]
 fn generated_runner_supports_empty_tuple_output() -> Result<(), Box<dyn std::error::Error>> {
-    let mut runner = empty_tuple_aot::new_runner()?;
-    assert_eq!(runner.run()?, empty_tuple_aot::Output {});
+    let mut runner = native_aot_tests::aot_empty_tuple::new_runner()?;
+    assert_eq!(runner.run()?, native_aot_tests::EmptyOutput {});
     Ok(())
 }
 
@@ -171,37 +149,37 @@ fn generated_runner_supports_empty_tuple_output() -> Result<(), Box<dyn std::err
 #[test]
 fn generated_runner_executes_runtime_backed_wide_operations()
 -> Result<(), Box<dyn std::error::Error>> {
-    let x = wide_runtime_ops_aot::WideBits::<129, 3>::from_limbs([3, 0, 0])?;
-    let y = wide_runtime_ops_aot::WideBits::<129, 3>::from_limbs([5, 0, 0])?;
-    let shift = wide_runtime_ops_aot::BitsInU8::<8>::new(1)?;
-    let replacement = wide_runtime_ops_aot::WideBits::<73, 2>::from_limbs([0x55, 0])?;
-    let mut runner = wide_runtime_ops_aot::new_runner()?;
+    let x = native_aot_tests_aot::WideBits::<129, 3>::from_limbs([3, 0, 0])?;
+    let y = native_aot_tests_aot::WideBits::<129, 3>::from_limbs([5, 0, 0])?;
+    let shift = native_aot_tests_aot::BitsInU8::<8>::new(1)?;
+    let replacement = native_aot_tests_aot::WideBits::<73, 2>::from_limbs([0x55, 0])?;
+    let mut runner = native_aot_tests::aot_wide_runtime_ops::new_runner()?;
     let output = runner.run(&x, &y, &shift, &replacement)?;
 
-    assert_wide_limbs(&output.field0, [15, 0, 0]);
-    assert_wide_limbs(&output.field1, [15, 0, 0]);
-    assert_wide_limbs(&output.field2, [0, 0, 0]);
-    assert_wide_limbs(&output.field3, [6, 0, 0]);
-    assert_wide_limbs(&output.field4, [1, 0, 0]);
-    assert_wide_limbs(&output.field5, [1, 0]);
-    assert_eq!(output.field6.to_u64(), 1);
-    assert_wide_limbs(&output.field7, [0xab, 0, 0]);
-    assert_wide_limbs(&output.field8, [15, 0, 0]);
-    assert_wide_limbs(&output.field9, [15, 0, 0]);
-    assert_wide_limbs(&output.field10, [1, 0, 0]);
-    assert_eq!(output.field11.to_u64(), 0);
-    assert_wide_limbs(&output.field12, [2, 0, 0]);
+    assert_wide_limbs(&output.product, [15, 0, 0]);
+    assert_wide_limbs(&output.signed_product, [15, 0, 0]);
+    assert_wide_limbs(&output.quotient, [0, 0, 0]);
+    assert_wide_limbs(&output.left, [6, 0, 0]);
+    assert_wide_limbs(&output.right, [1, 0, 0]);
+    assert_wide_limbs(&output.slice, [1, 0]);
+    assert_eq!(output.low_slice.to_u64(), 1);
+    assert_wide_limbs(&output.updated, [0xab, 0, 0]);
+    assert_wide_limbs(&output.unsigned_sum, [15, 0, 0]);
+    assert_wide_limbs(&output.signed_sum, [15, 0, 0]);
+    assert_wide_limbs(&output.hot, [1, 0, 0]);
+    assert_eq!(output.encoded.to_u64(), 0);
+    assert_wide_limbs(&output.decoded, [2, 0, 0]);
 
     let negative_x =
-        wide_runtime_ops_aot::WideBits::<129, 3>::from_limbs([u64::MAX - 7, u64::MAX, 1])?;
+        native_aot_tests_aot::WideBits::<129, 3>::from_limbs([u64::MAX - 7, u64::MAX, 1])?;
     let arithmetic = runner.run(
         &negative_x,
         &y,
-        &wide_runtime_ops_aot::BitsInU8::<8>::new(2)?,
+        &native_aot_tests_aot::BitsInU8::<8>::new(2)?,
         &replacement,
     )?;
-    assert_wide_limbs(&arithmetic.field1, [u64::MAX - 39, u64::MAX, 1]);
-    assert_wide_limbs(&arithmetic.field4, [u64::MAX - 1, u64::MAX, 1]);
+    assert_wide_limbs(&arithmetic.signed_product, [u64::MAX - 39, u64::MAX, 1]);
+    assert_wide_limbs(&arithmetic.right, [u64::MAX - 1, u64::MAX, 1]);
     Ok(())
 }
 
@@ -209,13 +187,13 @@ fn generated_runner_executes_runtime_backed_wide_operations()
 // records in the Rust runtime while direct output remains native storage.
 #[test]
 fn generated_runner_collects_events() -> Result<(), Box<dyn std::error::Error>> {
-    let mut runner = events_aot::new_runner()?;
-    let x = events_aot::BitsInU8::<8>::new(0xa5)?;
-    let y = events_aot::BitsInU8::<8>::new(0x3c)?;
-    let emit = events_aot::BitsInU8::<1>::new(1)?;
-    let suppress = events_aot::BitsInU8::<1>::new(0)?;
-    let passed = events_aot::BitsInU8::<1>::new(1)?;
-    let failed = events_aot::BitsInU8::<1>::new(0)?;
+    let mut runner = native_aot_tests::aot_events::new_runner()?;
+    let x = native_aot_tests_aot::BitsInU8::<8>::new(0xa5)?;
+    let y = native_aot_tests_aot::BitsInU8::<8>::new(0x3c)?;
+    let emit = native_aot_tests_aot::BitsInU8::<1>::new(1)?;
+    let suppress = native_aot_tests_aot::BitsInU8::<1>::new(0)?;
+    let passed = native_aot_tests_aot::BitsInU8::<1>::new(1)?;
+    let failed = native_aot_tests_aot::BitsInU8::<1>::new(0)?;
 
     let successful = runner.run_with_events(&x, &y, &passed, &emit)?;
     assert_eq!(successful.output.to_u64(), 0xe1);
@@ -277,13 +255,13 @@ fn generated_runner_collects_events() -> Result<(), Box<dyn std::error::Error>> 
 #[test]
 fn generated_runner_reports_assumed_in_bounds_failures() -> Result<(), Box<dyn std::error::Error>> {
     let values = [
-        assumed_in_bounds_aot::BitsInU8::<8>::new(10)?,
-        assumed_in_bounds_aot::BitsInU8::<8>::new(11)?,
+        native_aot_tests_aot::BitsInU8::<8>::new(10)?,
+        native_aot_tests_aot::BitsInU8::<8>::new(11)?,
     ];
-    let value = assumed_in_bounds_aot::BitsInU8::<8>::new(99)?;
-    let in_bounds = assumed_in_bounds_aot::BitsInU8::<2>::new(1)?;
-    let out_of_bounds = assumed_in_bounds_aot::BitsInU8::<2>::new(3)?;
-    let mut runner = assumed_in_bounds_aot::new_runner()?;
+    let value = native_aot_tests_aot::BitsInU8::<8>::new(99)?;
+    let in_bounds = native_aot_tests_aot::BitsInU8::<2>::new(1)?;
+    let out_of_bounds = native_aot_tests_aot::BitsInU8::<2>::new(3)?;
+    let mut runner = native_aot_tests::aot_assumed_in_bounds::new_runner()?;
 
     let safe = runner.run_with_events(&values, &value, &in_bounds)?;
     assert_eq!(safe.output.to_u64(), 99);
@@ -306,7 +284,7 @@ fn generated_runner_reports_assumed_in_bounds_failures() -> Result<(), Box<dyn s
         ]
     );
 
-    let mut caller_owned_output = assumed_in_bounds_aot::BitsInU8::<8>::default();
+    let mut caller_owned_output = native_aot_tests_aot::BitsInU8::<8>::default();
     let events =
         runner.run_into_with_events(&values, &value, &out_of_bounds, &mut caller_owned_output)?;
     assert_eq!(caller_owned_output.to_u64(), 99);
@@ -320,6 +298,17 @@ fn generated_runner_reports_assumed_in_bounds_failures() -> Result<(), Box<dyn s
                 "compiled assumed-in-bounds condition failed at node 5: ArrayUpdateOutOfBounds"
             )
     );
+    Ok(())
+}
+
+// Verifies: AOT object emission links reachable package callees used by
+// ordinary invokes and DSLX-for-loop `counted_for` bodies.
+#[test]
+fn generated_runner_executes_invokes_and_counted_for() -> Result<(), Box<dyn std::error::Error>> {
+    let init = native_aot_tests_aot::BitsInU8::<8>::new(10)?;
+    let increment = native_aot_tests_aot::BitsInU8::<8>::new(1)?;
+    let mut runner = native_aot_tests::aot_invokes_and_counted_for::new_runner()?;
+    assert_eq!(runner.run(&init, &increment)?.to_u64(), 20);
     Ok(())
 }
 

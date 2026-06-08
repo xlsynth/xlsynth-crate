@@ -343,6 +343,7 @@ pub struct IrExecutionResult {
     pub events: ExecutionResult,
 }
 
+/// Per-function lowering work prepared before native code emission.
 struct PlannedFunction<'a> {
     function: &'a ir::Fn,
     param_layouts: Vec<NativeValueLayout>,
@@ -350,6 +351,16 @@ struct PlannedFunction<'a> {
     order: Vec<NodeRef>,
     scratch_plan: ScratchPlan,
     event_sites: HashMap<NodeRef, u32>,
+}
+
+/// Package-reachable lowering work shared by JIT and AOT compilation.
+struct PlannedFunctions<'a> {
+    function_names: Vec<String>,
+    function_param_layouts: HashMap<String, Vec<NativeValueLayout>>,
+    plans: HashMap<String, PlannedFunction<'a>>,
+    metadata: CompiledFunctionMetadata,
+    scratch_byte_count: usize,
+    scratch_alignment: usize,
 }
 
 /// Relocatable native object code and calling-contract metadata for one PIR
@@ -410,56 +421,8 @@ impl PirFunctionCompiler {
         package: Option<&ir::Package>,
         top: &ir::Fn,
     ) -> Result<Self, CompilerError> {
-        let function_names = referenced_function_postorder(package, top)?;
-        let function_param_layouts = function_names
-            .iter()
-            .map(|function_name| {
-                let function = resolve_function(package, top, function_name)?;
-                let param_layouts = function
-                    .params
-                    .iter()
-                    .map(|param| NativeValueLayout::from_type(&param.ty))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok((function_name.clone(), param_layouts))
-            })
-            .collect::<Result<HashMap<_, _>, CompilerError>>()?;
-        let mut scratch_byte_count = 0usize;
-        let mut scratch_alignment = 1usize;
-        let mut plans = HashMap::new();
-        let mut metadata = CompiledFunctionMetadata::default();
-        for function_name in &function_names {
-            let function = resolve_function(package, top, function_name)?;
-            let param_layouts = function_param_layouts[function_name].clone();
-            let result_layout = NativeValueLayout::from_type(&function.ret_ty)?;
-            let order = reachable_scheduled_order(function)?;
-            for node_ref in &order {
-                NativeValueLayout::from_type(&function.get_node(*node_ref).ty)?;
-            }
-            let mut scratch_plan =
-                ScratchPlan::for_function(function, &order, &function_param_layouts)?;
-            scratch_byte_count = align_up(scratch_byte_count, scratch_plan.alignment)?;
-            let scratch_base = scratch_byte_count;
-            scratch_byte_count = scratch_byte_count
-                .checked_add(scratch_plan.byte_count)
-                .ok_or_else(|| {
-                    CompilerError::UnsupportedType("package scratch size overflow".into())
-                })?;
-            scratch_alignment = scratch_alignment.max(scratch_plan.alignment);
-            scratch_plan.rebase_offsets(scratch_base)?;
-            let event_sites = append_event_metadata(function, &order, &mut metadata)?;
-            plans.insert(
-                function_name.clone(),
-                PlannedFunction {
-                    function,
-                    param_layouts,
-                    result_layout,
-                    order,
-                    scratch_plan,
-                    event_sites,
-                },
-            );
-        }
-        let top_plan = plans.get(&top.name).ok_or_else(|| {
+        let planned = plan_reachable_functions(package, top)?;
+        let top_plan = planned.plans.get(&top.name).ok_or_else(|| {
             CompilerError::InvalidFunction(format!("missing compilation plan for '{}'", top.name))
         })?;
 
@@ -505,7 +468,7 @@ impl PirFunctionCompiler {
         let pointer_type = module.target_config().pointer_type();
         let signature = compiled_function_signature(&mut module, pointer_type);
         let mut function_ids = HashMap::new();
-        for (index, function_name) in function_names.iter().enumerate() {
+        for (index, function_name) in planned.function_names.iter().enumerate() {
             let is_top = function_name == &top.name;
             let symbol = if is_top {
                 "xlsynth_pir_entry".to_string()
@@ -525,8 +488,8 @@ impl PirFunctionCompiler {
                 .map_err(|error| CompilerError::Backend(error.to_string()))?;
             function_ids.insert(function_name.clone(), function_id);
         }
-        for function_name in &function_names {
-            let plan = &plans[function_name];
+        for function_name in &planned.function_names {
+            let plan = &planned.plans[function_name];
             let mut context = module.make_context();
             context.func.signature = signature.clone();
             let runtime_callbacks =
@@ -544,7 +507,7 @@ impl PirFunctionCompiler {
                     &plan.param_layouts,
                     &plan.scratch_plan,
                     &plan.event_sites,
-                    &function_param_layouts,
+                    &planned.function_param_layouts,
                     &function_targets,
                     runtime_callbacks,
                     pointer_type,
@@ -571,9 +534,9 @@ impl PirFunctionCompiler {
             entrypoint,
             param_layouts: top_plan.param_layouts.clone(),
             result_layout: top_plan.result_layout.clone(),
-            metadata,
-            scratch_byte_count,
-            scratch_alignment,
+            metadata: planned.metadata,
+            scratch_byte_count: planned.scratch_byte_count,
+            scratch_alignment: planned.scratch_alignment,
         })
     }
 
@@ -911,6 +874,69 @@ fn referenced_function_postorder(
     Ok(postorder)
 }
 
+fn plan_reachable_functions<'a>(
+    package: Option<&'a ir::Package>,
+    top: &'a ir::Fn,
+) -> Result<PlannedFunctions<'a>, CompilerError> {
+    let function_names = referenced_function_postorder(package, top)?;
+    let function_param_layouts = function_names
+        .iter()
+        .map(|function_name| {
+            let function = resolve_function(package, top, function_name)?;
+            let param_layouts = function
+                .params
+                .iter()
+                .map(|param| NativeValueLayout::from_type(&param.ty))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((function_name.clone(), param_layouts))
+        })
+        .collect::<Result<HashMap<_, _>, CompilerError>>()?;
+    let mut scratch_byte_count = 0usize;
+    let mut scratch_alignment = 1usize;
+    let mut plans = HashMap::new();
+    let mut metadata = CompiledFunctionMetadata::default();
+    for function_name in &function_names {
+        let function = resolve_function(package, top, function_name)?;
+        let param_layouts = function_param_layouts[function_name].clone();
+        let result_layout = NativeValueLayout::from_type(&function.ret_ty)?;
+        let order = reachable_scheduled_order(function)?;
+        for node_ref in &order {
+            NativeValueLayout::from_type(&function.get_node(*node_ref).ty)?;
+        }
+        let mut scratch_plan =
+            ScratchPlan::for_function(function, &order, &function_param_layouts)?;
+        scratch_byte_count = align_up(scratch_byte_count, scratch_plan.alignment)?;
+        let scratch_base = scratch_byte_count;
+        scratch_byte_count = scratch_byte_count
+            .checked_add(scratch_plan.byte_count)
+            .ok_or_else(|| {
+                CompilerError::UnsupportedType("package scratch size overflow".into())
+            })?;
+        scratch_alignment = scratch_alignment.max(scratch_plan.alignment);
+        scratch_plan.rebase_offsets(scratch_base)?;
+        let event_sites = append_event_metadata(function, &order, &mut metadata)?;
+        plans.insert(
+            function_name.clone(),
+            PlannedFunction {
+                function,
+                param_layouts,
+                result_layout,
+                order,
+                scratch_plan,
+                event_sites,
+            },
+        );
+    }
+    Ok(PlannedFunctions {
+        function_names,
+        function_param_layouts,
+        plans,
+        metadata,
+        scratch_byte_count,
+        scratch_alignment,
+    })
+}
+
 /// Compiles one PIR function into a relocatable native object for the host
 /// target.
 ///
@@ -921,32 +947,43 @@ pub fn compile_aot(
     function: &ir::Fn,
     entrypoint_symbol: &str,
 ) -> Result<AotArtifact, CompilerError> {
-    if entrypoint_symbol.is_empty() {
-        return Err(CompilerError::InvalidArgument(
-            "AOT entrypoint symbol must not be empty".into(),
-        ));
-    }
     function
         .check_pir_layout_invariants()
         .map_err(CompilerError::InvalidFunction)?;
     xlsynth_pir::ir_verify::verify_function(function)
         .map_err(|e| CompilerError::InvalidFunction(e.to_string()))?;
+    compile_reachable_aot(None, function, entrypoint_symbol)
+}
 
-    let param_layouts = function
-        .params
-        .iter()
-        .map(|param| NativeValueLayout::from_type(&param.ty))
-        .collect::<Result<Vec<_>, _>>()?;
-    let function_param_layouts = HashMap::from([(function.name.clone(), param_layouts.clone())]);
-    let result_layout = NativeValueLayout::from_type(&function.ret_ty)?;
-    let order = reachable_scheduled_order(function)?;
-    for node_ref in &order {
-        NativeValueLayout::from_type(&function.get_node(*node_ref).ty)?;
+/// Compiles a package function and its reachable callees into a relocatable
+/// native object for the host target.
+pub fn compile_package_aot(
+    package: &ir::Package,
+    function_name: &str,
+    entrypoint_symbol: &str,
+) -> Result<AotArtifact, CompilerError> {
+    xlsynth_pir::ir_verify::verify_package(package)
+        .map_err(|e| CompilerError::InvalidFunction(e.to_string()))?;
+    let function = package.get_fn(function_name).ok_or_else(|| {
+        CompilerError::InvalidFunction(format!("package has no function named '{function_name}'"))
+    })?;
+    compile_reachable_aot(Some(package), function, entrypoint_symbol)
+}
+
+fn compile_reachable_aot(
+    package: Option<&ir::Package>,
+    top: &ir::Fn,
+    entrypoint_symbol: &str,
+) -> Result<AotArtifact, CompilerError> {
+    if entrypoint_symbol.is_empty() {
+        return Err(CompilerError::InvalidArgument(
+            "AOT entrypoint symbol must not be empty".into(),
+        ));
     }
-    let scratch_plan = ScratchPlan::for_function(function, &order, &function_param_layouts)?;
-    let mut metadata = CompiledFunctionMetadata::default();
-    let event_sites = append_event_metadata(function, &order, &mut metadata)?;
-
+    let planned = plan_reachable_functions(package, top)?;
+    let top_plan = planned.plans.get(&top.name).ok_or_else(|| {
+        CompilerError::InvalidFunction(format!("missing compilation plan for '{}'", top.name))
+    })?;
     let isa_builder =
         cranelift_native::builder().map_err(|error| CompilerError::Backend(error.to_string()))?;
     let mut flags_builder = settings::builder();
@@ -965,36 +1002,59 @@ pub fn compile_aot(
     let pointer_type = module.target_config().pointer_type();
     let signature = compiled_function_signature(&mut module, pointer_type);
 
-    let function_id = module
-        .declare_function(entrypoint_symbol, Linkage::Export, &signature)
-        .map_err(|error| CompilerError::Backend(error.to_string()))?;
-    let mut context = module.make_context();
-    context.func.signature = signature;
-    let runtime_callbacks =
-        declare_runtime_callbacks(&mut module, &mut context.func, pointer_type)?;
-    let mut function_builder_context = FunctionBuilderContext::new();
-    {
-        let mut function_builder =
-            FunctionBuilder::new(&mut context.func, &mut function_builder_context);
-        let function_targets = HashMap::new();
-        lower_function(
-            function,
-            &order,
-            &param_layouts,
-            &scratch_plan,
-            &event_sites,
-            &function_param_layouts,
-            &function_targets,
-            runtime_callbacks,
-            pointer_type,
-            &mut function_builder,
-        )?;
-        function_builder.finalize();
+    let mut function_ids = HashMap::new();
+    for (index, function_name) in planned.function_names.iter().enumerate() {
+        let is_top = function_name == &top.name;
+        let symbol = if is_top {
+            entrypoint_symbol.to_string()
+        } else {
+            format!("{entrypoint_symbol}__xlsynth_pir_fn_{index}")
+        };
+        let function_id = module
+            .declare_function(
+                &symbol,
+                if is_top {
+                    Linkage::Export
+                } else {
+                    Linkage::Local
+                },
+                &signature,
+            )
+            .map_err(|error| CompilerError::Backend(error.to_string()))?;
+        function_ids.insert(function_name.clone(), function_id);
     }
-    module
-        .define_function(function_id, &mut context)
-        .map_err(|error| CompilerError::Backend(error.to_string()))?;
-    module.clear_context(&mut context);
+
+    for function_name in &planned.function_names {
+        let plan = &planned.plans[function_name];
+        let mut context = module.make_context();
+        context.func.signature = signature.clone();
+        let runtime_callbacks =
+            declare_runtime_callbacks(&mut module, &mut context.func, pointer_type)?;
+        let function_targets =
+            declare_function_targets(&mut module, &mut context.func, &function_ids);
+        let mut function_builder_context = FunctionBuilderContext::new();
+        {
+            let mut function_builder =
+                FunctionBuilder::new(&mut context.func, &mut function_builder_context);
+            lower_function(
+                plan.function,
+                &plan.order,
+                &plan.param_layouts,
+                &plan.scratch_plan,
+                &plan.event_sites,
+                &planned.function_param_layouts,
+                &function_targets,
+                runtime_callbacks,
+                pointer_type,
+                &mut function_builder,
+            )?;
+            function_builder.finalize();
+        }
+        module
+            .define_function(function_ids[function_name], &mut context)
+            .map_err(|error| CompilerError::Backend(error.to_string()))?;
+        module.clear_context(&mut context);
+    }
     let object_code = module
         .finish()
         .emit()
@@ -1002,11 +1062,11 @@ pub fn compile_aot(
     Ok(AotArtifact {
         object_code,
         entrypoint_symbol: entrypoint_symbol.to_string(),
-        param_layouts,
-        result_layout,
-        metadata,
-        scratch_byte_count: scratch_plan.byte_count,
-        scratch_alignment: scratch_plan.alignment,
+        param_layouts: top_plan.param_layouts.clone(),
+        result_layout: top_plan.result_layout.clone(),
+        metadata: planned.metadata,
+        scratch_byte_count: planned.scratch_byte_count,
+        scratch_alignment: planned.scratch_alignment,
     })
 }
 

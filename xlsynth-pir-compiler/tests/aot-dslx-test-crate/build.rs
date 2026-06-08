@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use xlsynth_pir_compiler::aot::{
     DslxConvertOptions, TypedDslxAotBuildSpec, TypedDslxAotPackageBuilder,
-    emit_aot_module_from_dslx_file,
+    build_native_typed_dslx_aot_package_metadata, emit_aot_module_from_dslx_file,
 };
 
 fn main() {
@@ -29,6 +29,16 @@ fn main() {
         type_module_paths: vec![],
     })
     .expect("native parametric forms DSLX AOT compilation should succeed");
+
+    let invokes_and_loop = source_dir.join("invokes_and_loop.x");
+    emit_aot_module_from_dslx_file(&TypedDslxAotBuildSpec {
+        name: "invokes_and_loop",
+        dslx_path: &invokes_and_loop,
+        top: "exercise_invokes_and_loop",
+        dslx_options: DslxConvertOptions::default(),
+        type_module_paths: vec![],
+    })
+    .expect("native invoke-and-loop DSLX AOT compilation should succeed");
 
     let parametric_imports = source_dir.join("parametric_imports.x");
     let parametric_lib = source_dir.join("parametric_lib.x");
@@ -66,8 +76,8 @@ fn main() {
     let namespaced_doodle_types = source_dir.join("types/shared_types.x");
     let namespaced_doodle_echo = source_dir.join("foo/my_file.x");
     let namespaced_doodle_bump = source_dir.join("bar/your_file.x");
-    TypedDslxAotPackageBuilder::new("namespaced_doodle_package")
-        .add_entrypoint(TypedDslxAotBuildSpec {
+    let namespaced_doodle_specs = [
+        TypedDslxAotBuildSpec {
             name: "namespaced_package_echo",
             dslx_path: &namespaced_doodle_echo,
             top: "echo_doodle",
@@ -76,8 +86,8 @@ fn main() {
                 ..DslxConvertOptions::default()
             },
             type_module_paths: vec![namespaced_doodle_types.as_path()],
-        })
-        .add_entrypoint(TypedDslxAotBuildSpec {
+        },
+        TypedDslxAotBuildSpec {
             name: "namespaced_package_bump",
             dslx_path: &namespaced_doodle_bump,
             top: "bump_doodle",
@@ -86,7 +96,24 @@ fn main() {
                 ..DslxConvertOptions::default()
             },
             type_module_paths: vec![namespaced_doodle_types.as_path()],
-        })
+        },
+    ];
+    let metadata = build_native_typed_dslx_aot_package_metadata(&namespaced_doodle_specs)
+        .expect("native namespaced doodle DSLX AOT metadata generation should succeed");
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let metadata_file = out_dir.join("namespaced_doodle_package_aot_metadata.json");
+    fs::write(
+        metadata_file,
+        metadata
+            .to_json_pretty()
+            .expect("native namespaced doodle metadata should serialize"),
+    )
+    .expect("native namespaced doodle metadata should write");
+    let mut package_builder = TypedDslxAotPackageBuilder::new("namespaced_doodle_package");
+    for spec in namespaced_doodle_specs {
+        package_builder = package_builder.add_entrypoint(spec);
+    }
+    package_builder
         .build()
         .expect("native namespaced doodle DSLX AOT package compilation should succeed");
 

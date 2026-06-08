@@ -1,0 +1,100 @@
+{
+  "format_version": 1,
+  "modules": [
+    {
+      "path": [
+        "types",
+        "shared_types"
+      ],
+      "declarations": [
+        {
+          "kind": "struct",
+          "name": "Doodle",
+          "fields": [
+            {
+              "name": "doodle_id",
+              "ty": {
+                "kind": "bits",
+                "bit_count": 8
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": [
+        "foo",
+        "my_file"
+      ],
+      "declarations": []
+    },
+    {
+      "path": [
+        "bar",
+        "your_file"
+      ],
+      "declarations": []
+    }
+  ],
+  "entrypoints": [
+    {
+      "name": "namespaced_package_echo",
+      "ir_top": "__my_file__echo_doodle",
+      "owning_module": [
+        "foo",
+        "my_file"
+      ],
+      "params": [
+        {
+          "name": "doodle",
+          "ty": {
+            "kind": "type_ref",
+            "module": [
+              "types",
+              "shared_types"
+            ],
+            "name": "Doodle"
+          }
+        }
+      ],
+      "return_type": {
+        "kind": "type_ref",
+        "module": [
+          "types",
+          "shared_types"
+        ],
+        "name": "Doodle"
+      }
+    },
+    {
+      "name": "namespaced_package_bump",
+      "ir_top": "__your_file__bump_doodle",
+      "owning_module": [
+        "bar",
+        "your_file"
+      ],
+      "params": [
+        {
+          "name": "doodle",
+          "ty": {
+            "kind": "type_ref",
+            "module": [
+              "types",
+              "shared_types"
+            ],
+            "name": "Doodle"
+          }
+        }
+      ],
+      "return_type": {
+        "kind": "type_ref",
+        "module": [
+          "types",
+          "shared_types"
+        ],
+        "name": "Doodle"
+      }
+    }
+  ]
+}

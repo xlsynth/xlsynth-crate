@@ -3,17 +3,14 @@
 use std::{fs, path::Path, process::Command};
 
 use xlsynth_pir_compiler_aot_dslx_test_crate::{
-    duplicate_widget_aot, gizmo_frob_aot, namespaced_doodle_package_aot,
+    duplicate_widget_aot, gizmo_frob_aot, invokes_and_loop_aot, namespaced_doodle_package_aot,
     parametric_forms_aot, parametric_imports_aot,
 };
 
 fn generated_wrapper_golden_cases() -> Vec<(&'static str, &'static str)> {
     vec![
         (
-            concat!(
-                env!("OUT_DIR"),
-                "/gizmo_frob_typed_dslx_pir_aot_wrapper.rs"
-            ),
+            concat!(env!("OUT_DIR"), "/gizmo_frob_typed_dslx_pir_aot_wrapper.rs"),
             "tests/goldens/gizmo_frob_wrapper.golden.txt",
         ),
         (
@@ -43,6 +40,13 @@ fn generated_wrapper_golden_cases() -> Vec<(&'static str, &'static str)> {
                 "/namespaced_doodle_package_typed_dslx_pir_aot_package.rs"
             ),
             "tests/goldens/namespaced_doodle_package.golden.txt",
+        ),
+        (
+            concat!(
+                env!("OUT_DIR"),
+                "/namespaced_doodle_package_aot_metadata.json"
+            ),
+            "tests/goldens/namespaced_doodle_package_aot_metadata.golden.json",
         ),
     ]
 }
@@ -204,6 +208,17 @@ fn typed_dslx_parametric_forms_runner_executes() -> Result<(), Box<dyn std::erro
     assert_eq!(result.negative.payload.to_u64(), 88);
     assert_eq!(result.huge.payload.to_u64(), 99);
     assert_eq!(result.wide_pair, wide_pair);
+    Ok(())
+}
+
+// Verifies: DSLX-started AOT follows helper calls and `for` loop bodies through
+// package-level invokes when emitting the native object.
+#[test]
+fn typed_dslx_invokes_and_for_loop_runner_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let init = invokes_and_loop_aot::BitsInU8::<8>::new(10)?;
+    let increment = invokes_and_loop_aot::BitsInU8::<8>::new(1)?;
+    let mut runner = invokes_and_loop_aot::invokes_and_loop::new_runner()?;
+    assert_eq!(runner.run(&init, &increment)?.to_u64(), 18);
     Ok(())
 }
 

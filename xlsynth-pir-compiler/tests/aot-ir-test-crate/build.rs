@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth_pir_compiler::aot::{AotBuildSpec, emit_aot_module_from_pir_text};
+use std::path::PathBuf;
+
+use xlsynth_pir_compiler::aot::{
+    TypedAotPackageMetadata, TypedIrAotBuildSpec, TypedIrAotPackageBuilder,
+};
 
 struct AotCase {
     name: &'static str,
@@ -9,6 +13,12 @@ struct AotCase {
 }
 
 fn main() {
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let metadata_path = manifest_dir.join("src/native_aot_tests_aot_metadata.json");
+    println!("cargo:rerun-if-changed={}", metadata_path.display());
+    let metadata = TypedAotPackageMetadata::from_json_file(&metadata_path)
+        .expect("typed IR AOT metadata should parse");
+
     let cases = [
         AotCase {
             name: "add_one",
@@ -111,21 +121,44 @@ fn assumed_in_bounds(a: bits[8][2] id=1, v: bits[8] id=2, i: bits[2] id=3) -> bi
 }
 "#,
         },
+        AotCase {
+            name: "invokes_and_counted_for",
+            top: "invokes_and_counted_for",
+            pir_text: r#"package native_aot_tests
+
+fn add_one(x: bits[8] id=1) -> bits[8] {
+  one: bits[8] = literal(value=1, id=2)
+  ret result: bits[8] = add(x, one, id=3)
+}
+
+fn through(x: bits[8] id=4) -> bits[8] {
+  ret result: bits[8] = invoke(x, to_apply=add_one, id=5)
+}
+
+fn loop_body(i: bits[8] id=6, carry: bits[8] id=7, increment: bits[8] id=8) -> bits[8] {
+  with_i: bits[8] = add(carry, i, id=9)
+  ret result: bits[8] = add(with_i, increment, id=10)
+}
+
+fn invokes_and_counted_for(init: bits[8] id=11, increment: bits[8] id=12) -> bits[8] {
+  invoked: bits[8] = invoke(init, to_apply=through, id=13)
+  ret result: bits[8] = counted_for(invoked, trip_count=3, stride=2, body=loop_body, invariant_args=[increment], id=14)
+}
+"#,
+        },
     ];
 
+    let mut builder = TypedIrAotPackageBuilder::new("native_aot_tests", metadata);
     for case in cases {
-        emit_aot_module_from_pir_text(&AotBuildSpec {
+        builder = builder.add_entrypoint(TypedIrAotBuildSpec {
             name: case.name,
             pir_text: case.pir_text,
             top: case.top,
-        })
-        .unwrap_or_else(|error| {
-            panic!(
-                "native PIR AOT compilation for {} should succeed: {error}",
-                case.top
-            )
         });
     }
+    builder
+        .build()
+        .unwrap_or_else(|error| panic!("typed native PIR AOT package should build: {error}"));
 
     println!("cargo:rerun-if-changed=build.rs");
 }

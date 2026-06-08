@@ -16,6 +16,13 @@ pub mod parametric_forms_aot {
     ));
 }
 
+pub mod invokes_and_loop_aot {
+    include!(concat!(
+        env!("OUT_DIR"),
+        "/invokes_and_loop_typed_dslx_pir_aot_wrapper.rs"
+    ));
+}
+
 pub mod parametric_imports_aot {
     include!(concat!(
         env!("OUT_DIR"),
