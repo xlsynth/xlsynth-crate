@@ -1928,6 +1928,29 @@ fn typecheck_typed_dslx_package_modules(
     Ok(TypedDslxPackageTypecheckedModules { modules })
 }
 
+fn find_typed_dslx_package_top_module<'a>(
+    typechecked: &'a TypedDslxPackageTypecheckedModules,
+    spec: &TypedDslxAotBuildSpec<'_>,
+) -> AotResult<&'a dslx::TypecheckedModule> {
+    let canonical_top_path = std::fs::canonicalize(spec.dslx_path).map_err(|e| {
+        XlsynthError(format!(
+            "AOT I/O failed while resolving DSLX package top {}: {e}",
+            spec.dslx_path.display()
+        ))
+    })?;
+    typechecked
+        .modules
+        .iter()
+        .find(|module| module.canonical_path == canonical_top_path)
+        .map(|module| &module.typechecked)
+        .ok_or_else(|| {
+            XlsynthError(format!(
+                "AOT typed DSLX package could not find top module for {}",
+                spec.dslx_path.display()
+            ))
+        })
+}
+
 /// Collects the module-local type definitions needed for typed AOT lowering.
 ///
 /// The result deliberately records struct definitions, not only names, because
@@ -2954,23 +2977,7 @@ fn typed_aot_entrypoint_from_dslx_spec(
     typechecked: &TypedDslxPackageTypecheckedModules,
     spec: &TypedDslxAotBuildSpec<'_>,
 ) -> AotResult<TypedAotEntrypoint> {
-    let canonical_top_path = std::fs::canonicalize(spec.dslx_path).map_err(|e| {
-        XlsynthError(format!(
-            "AOT I/O failed while resolving DSLX package top {}: {e}",
-            spec.dslx_path.display()
-        ))
-    })?;
-    let top_module = typechecked
-        .modules
-        .iter()
-        .find(|module| module.canonical_path == canonical_top_path)
-        .map(|module| &module.typechecked)
-        .ok_or_else(|| {
-            XlsynthError(format!(
-                "AOT typed DSLX metadata could not find top module for {}",
-                spec.dslx_path.display()
-            ))
-        })?;
+    let top_module = find_typed_dslx_package_top_module(typechecked, spec)?;
     let top_module_name = top_module.get_module().get_name();
     let base_name = sanitize_identifier(spec.name);
     let runner_module_name = format!("{top_module_name}.aot_{base_name}");
@@ -4263,23 +4270,7 @@ pub fn render_native_typed_dslx_package_generated_module(
     }
 
     for (index, spec) in specs.iter().enumerate() {
-        let canonical_top_path = std::fs::canonicalize(spec.dslx_path).map_err(|e| {
-            XlsynthError(format!(
-                "AOT I/O failed while resolving DSLX package top {}: {e}",
-                spec.dslx_path.display()
-            ))
-        })?;
-        let top_module = typechecked
-            .modules
-            .iter()
-            .find(|module| module.canonical_path == canonical_top_path)
-            .map(|module| &module.typechecked)
-            .ok_or_else(|| {
-                XlsynthError(format!(
-                    "AOT typed DSLX package could not find top module for {}",
-                    spec.dslx_path.display()
-                ))
-            })?;
+        let top_module = find_typed_dslx_package_top_module(&typechecked, spec)?;
         let top_module_name = top_module.get_module().get_name();
         let runner_module_name =
             format!("{top_module_name}.aot_{}", sanitize_identifier(spec.name));
@@ -4379,23 +4370,7 @@ fn emit_typed_dslx_aot_package_with_out_dir(
     }
 
     for entrypoint in &compiled {
-        let canonical_top_path = std::fs::canonicalize(entrypoint.spec.dslx_path).map_err(|e| {
-            XlsynthError(format!(
-                "AOT I/O failed while resolving DSLX package top {}: {e}",
-                entrypoint.spec.dslx_path.display()
-            ))
-        })?;
-        let top_module = typechecked
-            .modules
-            .iter()
-            .find(|module| module.canonical_path == canonical_top_path)
-            .map(|module| &module.typechecked)
-            .ok_or_else(|| {
-                XlsynthError(format!(
-                    "AOT typed DSLX package could not find top module for {}",
-                    entrypoint.spec.dslx_path.display()
-                ))
-            })?;
+        let top_module = find_typed_dslx_package_top_module(&typechecked, entrypoint.spec)?;
         let top_module_name = top_module.get_module().get_name();
         let runner_module_name = format!("{top_module_name}.aot_{}", entrypoint.base_name);
         let typed_signature = build_typed_dslx_function_signature(

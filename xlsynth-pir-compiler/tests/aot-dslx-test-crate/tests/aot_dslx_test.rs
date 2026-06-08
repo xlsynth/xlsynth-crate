@@ -2,51 +2,21 @@
 
 use std::{fs, path::Path, process::Command};
 
-use xlsynth_pir_compiler_aot_dslx_test_crate::{
-    duplicate_widget_aot, gizmo_frob_aot, invokes_and_loop_aot, namespaced_doodle_package_aot,
-    parametric_forms_aot, parametric_imports_aot,
-};
+use xlsynth_pir_compiler_aot_dslx_test_crate::native_dslx_tests_aot as dslx_aot;
+use xlsynth_pir_compiler_runtime::ExecutionResult;
 
-fn generated_wrapper_golden_cases() -> Vec<(&'static str, &'static str)> {
+fn generated_package_golden_cases() -> Vec<(&'static str, &'static str)> {
     vec![
         (
-            concat!(env!("OUT_DIR"), "/gizmo_frob_typed_dslx_pir_aot_wrapper.rs"),
-            "tests/goldens/gizmo_frob_wrapper.golden.txt",
-        ),
-        (
             concat!(
                 env!("OUT_DIR"),
-                "/parametric_forms_typed_dslx_pir_aot_wrapper.rs"
+                "/native_dslx_tests_typed_dslx_pir_aot_package.rs"
             ),
-            "tests/goldens/parametric_forms_wrapper.golden.txt",
+            "tests/goldens/native_dslx_tests_package.golden.txt",
         ),
         (
-            concat!(
-                env!("OUT_DIR"),
-                "/parametric_imports_typed_dslx_pir_aot_wrapper.rs"
-            ),
-            "tests/goldens/parametric_imports_wrapper.golden.txt",
-        ),
-        (
-            concat!(
-                env!("OUT_DIR"),
-                "/duplicate_widget_typed_dslx_pir_aot_wrapper.rs"
-            ),
-            "tests/goldens/duplicate_widget_wrapper.golden.txt",
-        ),
-        (
-            concat!(
-                env!("OUT_DIR"),
-                "/namespaced_doodle_package_typed_dslx_pir_aot_package.rs"
-            ),
-            "tests/goldens/namespaced_doodle_package.golden.txt",
-        ),
-        (
-            concat!(
-                env!("OUT_DIR"),
-                "/namespaced_doodle_package_aot_metadata.json"
-            ),
-            "tests/goldens/namespaced_doodle_package_aot_metadata.golden.json",
+            concat!(env!("OUT_DIR"), "/native_dslx_tests_aot_metadata.json"),
+            "tests/goldens/native_dslx_tests_aot_metadata.golden.json",
         ),
     ]
 }
@@ -61,6 +31,15 @@ fn compare_golden_text(generated: &str, golden_path: &str) {
         generated, golden,
         "Golden mismatch; run with XLSYNTH_UPDATE_GOLDEN=1 to update."
     );
+}
+
+fn cover_count(events: &ExecutionResult, label: &str) -> u64 {
+    events
+        .cover_counts
+        .iter()
+        .find(|cover| cover.label == label)
+        .unwrap_or_else(|| panic!("missing cover count for label {label}"))
+        .count
 }
 
 fn assert_consumer_binary_has_no_runtime_libxls_dependency() {
@@ -92,14 +71,14 @@ fn assert_consumer_binary_has_no_runtime_libxls_dependency() {
     );
 }
 
-// Verifies: generated DSLX-started native AOT wrapper source matches checked-in
+// Verifies: generated DSLX-started native AOT package source matches checked-in
 // goldens.
 // Catches: unreviewed public API, layout, metadata, or runtime glue changes.
 #[test]
-fn generated_dslx_wrappers_match_golden_references() {
+fn generated_dslx_package_matches_golden_references() {
     fs::create_dir_all(Path::new("tests/goldens")).expect("goldens directory should exist");
-    for (generated_path, golden_path) in generated_wrapper_golden_cases() {
-        let generated = fs::read_to_string(generated_path).expect("generated wrapper should exist");
+    for (generated_path, golden_path) in generated_package_golden_cases() {
+        let generated = fs::read_to_string(generated_path).expect("generated package should exist");
         compare_golden_text(&generated, golden_path);
     }
 }
@@ -110,30 +89,30 @@ fn generated_dslx_wrappers_match_golden_references() {
 #[test]
 fn typed_dslx_gizmo_runner_executes_without_marshalling() -> Result<(), Box<dyn std::error::Error>>
 {
-    use gizmo_frob_aot::gizmo_types::{Gizmo, GizmoMode, GizmoTuning, SignedGizmoMode};
+    use dslx_aot::gizmo_types::{Gizmo, GizmoMode, GizmoTuning, SignedGizmoMode};
 
     let gizmo = Gizmo {
-        gizmo_id: gizmo_frob_aot::BitsInU8::new(9)?,
+        gizmo_id: dslx_aot::BitsInU8::new(9)?,
         mode: GizmoMode::Frob,
         frobs: [
-            gizmo_frob_aot::BitsInU8::new(1)?,
-            gizmo_frob_aot::BitsInU8::new(2)?,
-            gizmo_frob_aot::BitsInU8::new(3)?,
+            dslx_aot::BitsInU8::new(1)?,
+            dslx_aot::BitsInU8::new(2)?,
+            dslx_aot::BitsInU8::new(3)?,
         ],
         tuning: GizmoTuning {
-            frob_bias: gizmo_frob_aot::BitsInU8::new(4)?,
-            wobble_trim: gizmo_frob_aot::BitsInU8::wrapping(15),
+            frob_bias: dslx_aot::BitsInU8::new(4)?,
+            wobble_trim: dslx_aot::BitsInU8::wrapping(15),
         },
-        wobble: gizmo_frob_aot::BitsInU8::new(3)?,
+        wobble: dslx_aot::BitsInU8::new(3)?,
         signed_mode: SignedGizmoMode::Negative,
     };
     let garnish = [
-        gizmo_frob_aot::BitsInU8::new(5)?,
-        gizmo_frob_aot::BitsInU8::new(6)?,
-        gizmo_frob_aot::BitsInU8::new(7)?,
+        dslx_aot::BitsInU8::new(5)?,
+        dslx_aot::BitsInU8::new(6)?,
+        dslx_aot::BitsInU8::new(7)?,
     ];
 
-    let mut runner = gizmo_frob_aot::gizmo_types::new_runner()?;
+    let mut runner = dslx_aot::gizmo_types::aot_gizmo_frob::new_runner()?;
     let output = runner.run(&gizmo, &garnish)?;
     assert_eq!(output.next_gizmo_id.to_u64(), 10);
     assert_eq!(output.selected_frob.to_u64(), 13);
@@ -148,32 +127,32 @@ fn typed_dslx_gizmo_runner_executes_without_marshalling() -> Result<(), Box<dyn 
 // one generated native AOT wrapper.
 #[test]
 fn typed_dslx_parametric_forms_runner_executes() -> Result<(), Box<dyn std::error::Error>> {
-    use parametric_forms_aot::parametric_forms::{
+    use dslx_aot::parametric_forms::{
         ArrayBox4, Box__N_8, Box8, Box8Array4, Box16, ExprBox8, HugeTag, Matrix2x3, NegativeTag,
         WidePair,
     };
 
     let box8 = Box8 {
-        value: parametric_forms_aot::BitsInU8::new(8)?,
+        value: dslx_aot::BitsInU8::new(8)?,
     };
     let box16 = Box16 {
-        value: parametric_forms_aot::BitsInU16::new(16)?,
+        value: dslx_aot::BitsInU16::new(16)?,
     };
     let matrix = Matrix2x3 {
         rows: [
             [
-                parametric_forms_aot::BitsInU8::new(1)?,
-                parametric_forms_aot::BitsInU8::new(2)?,
-                parametric_forms_aot::BitsInU8::new(3)?,
+                dslx_aot::BitsInU8::new(1)?,
+                dslx_aot::BitsInU8::new(2)?,
+                dslx_aot::BitsInU8::new(3)?,
             ],
             [
-                parametric_forms_aot::BitsInU8::new(4)?,
-                parametric_forms_aot::BitsInU8::new(5)?,
-                parametric_forms_aot::BitsInU8::new(6)?,
+                dslx_aot::BitsInU8::new(4)?,
+                dslx_aot::BitsInU8::new(5)?,
+                dslx_aot::BitsInU8::new(6)?,
             ],
         ],
     };
-    let bits8 = parametric_forms_aot::BitsInU8::<8>::new;
+    let bits8 = dslx_aot::BitsInU8::<8>::new;
     let array_box = ArrayBox4 {
         items: [bits8(10)?, bits8(11)?, bits8(12)?, bits8(13)?],
     };
@@ -191,10 +170,10 @@ fn typed_dslx_parametric_forms_runner_executes() -> Result<(), Box<dyn std::erro
         payload: bits8(99)?,
     };
     let wide_pair = WidePair {
-        unsigned_value: parametric_forms_aot::WideBits::from_limbs([0x0123_4567_89ab_cdef, 1])?,
-        signed_value: parametric_forms_aot::WideBits::from_limbs([u64::MAX, 1])?,
+        unsigned_value: dslx_aot::WideBits::from_limbs([0x0123_4567_89ab_cdef, 1])?,
+        signed_value: dslx_aot::WideBits::from_limbs([u64::MAX, 1])?,
     };
-    let mut runner = parametric_forms_aot::parametric_forms::new_runner()?;
+    let mut runner = dslx_aot::parametric_forms::aot_parametric_forms::new_runner()?;
     let result = runner.run(
         &box8, &box16, &matrix, &array_box, &box_array, &expr_box, &negative, &huge, &wide_pair,
     )?;
@@ -215,10 +194,83 @@ fn typed_dslx_parametric_forms_runner_executes() -> Result<(), Box<dyn std::erro
 // package-level invokes when emitting the native object.
 #[test]
 fn typed_dslx_invokes_and_for_loop_runner_executes() -> Result<(), Box<dyn std::error::Error>> {
-    let init = invokes_and_loop_aot::BitsInU8::<8>::new(10)?;
-    let increment = invokes_and_loop_aot::BitsInU8::<8>::new(1)?;
-    let mut runner = invokes_and_loop_aot::invokes_and_loop::new_runner()?;
+    let init = dslx_aot::BitsInU8::<8>::new(10)?;
+    let increment = dslx_aot::BitsInU8::<8>::new(1)?;
+    let mut runner = dslx_aot::invokes_and_loop::aot_invokes_and_loop::new_runner()?;
     assert_eq!(runner.run(&init, &increment)?.to_u64(), 18);
+    Ok(())
+}
+
+// Verifies: DSLX-started AOT preserves DSLX trace/assert/cover builtins through
+// IR lowering and records them through the generated native runner.
+#[test]
+fn typed_dslx_event_runner_collects_trace_assert_and_cover()
+-> Result<(), Box<dyn std::error::Error>> {
+    let x = dslx_aot::BitsInU8::<8>::new(0xa5)?;
+    let y = dslx_aot::BitsInU8::<8>::new(0x3c)?;
+    let emit = dslx_aot::BitsInU8::<1>::new(1)?;
+    let suppress = dslx_aot::BitsInU8::<1>::new(0)?;
+    let passed = dslx_aot::BitsInU8::<1>::new(1)?;
+    let failed = dslx_aot::BitsInU8::<1>::new(0)?;
+    let mut runner = dslx_aot::events::aot_events::new_runner()?;
+
+    let successful = runner.run_with_events(&x, &y, &passed, &emit)?;
+    assert_eq!(successful.output.to_u64(), 0xe1);
+    assert!(successful.events.assertion_failures.is_empty());
+    assert_eq!(cover_count(&successful.events, "covered"), 1);
+    assert_eq!(cover_count(&successful.events, "accepted"), 1);
+    assert_eq!(
+        successful
+            .events
+            .trace_messages
+            .iter()
+            .map(|trace| trace.message.as_str())
+            .collect::<Vec<_>>(),
+        vec!["accepted x=165", "x=165 y=3c"]
+    );
+
+    let suppressed = runner.run_with_events(&x, &y, &passed, &suppress)?;
+    assert_eq!(cover_count(&suppressed.events, "covered"), 0);
+    assert_eq!(cover_count(&suppressed.events, "accepted"), 1);
+    assert_eq!(
+        suppressed
+            .events
+            .trace_messages
+            .iter()
+            .map(|trace| trace.message.as_str())
+            .collect::<Vec<_>>(),
+        vec!["accepted x=165"]
+    );
+
+    let with_failure = runner.run_with_events(&x, &y, &failed, &emit)?;
+    assert_eq!(with_failure.output.to_u64(), 0xe1);
+    assert!(
+        with_failure.events.assertion_failures[0]
+            .message
+            .contains("Assertion failure via assert!")
+    );
+    assert_eq!(
+        with_failure.events.assertion_failures[0].label,
+        "bad_condition"
+    );
+    assert_eq!(cover_count(&with_failure.events, "covered"), 1);
+    assert_eq!(cover_count(&with_failure.events, "accepted"), 0);
+    assert_eq!(
+        with_failure
+            .events
+            .trace_messages
+            .iter()
+            .map(|trace| trace.message.as_str())
+            .collect::<Vec<_>>(),
+        vec!["x=165 y=3c"]
+    );
+    assert!(
+        runner
+            .run(&x, &y, &failed, &emit)
+            .unwrap_err()
+            .to_string()
+            .contains("Assertion failure via assert!")
+    );
     Ok(())
 }
 
@@ -227,17 +279,17 @@ fn typed_dslx_invokes_and_for_loop_runner_executes() -> Result<(), Box<dyn std::
 #[test]
 fn typed_dslx_imported_parametric_structs_execute_without_marshalling()
 -> Result<(), Box<dyn std::error::Error>> {
-    use parametric_imports_aot::{parametric_imports, parametric_lib};
+    use dslx_aot::{parametric_imports, parametric_lib};
 
-    let bits8 = parametric_imports_aot::BitsInU8::<8>::new;
+    let bits8 = dslx_aot::BitsInU8::<8>::new;
     let remote = parametric_lib::RemotePlain { id: bits8(40)? };
     let imported_direct = parametric_lib::RemoteBox__N_8 { value: bits8(60)? };
     let imported_pair = parametric_lib::RemotePair__A_8__B_23 {
         left: bits8(61)?,
-        right: parametric_imports_aot::BitsInU32::<23>::new(62)?,
+        right: dslx_aot::BitsInU32::<23>::new(62)?,
     };
 
-    let mut runner = parametric_imports::new_runner()?;
+    let mut runner = parametric_imports::aot_parametric_imports::new_runner()?;
     let result = runner.run(&remote, &imported_direct, &imported_pair)?;
 
     assert_eq!(result.remote.id.to_u64(), 40);
@@ -252,10 +304,10 @@ fn typed_dslx_imported_parametric_structs_execute_without_marshalling()
 #[test]
 fn typed_dslx_duplicate_imported_names_use_canonical_paths()
 -> Result<(), Box<dyn std::error::Error>> {
-    let widget = duplicate_widget_aot::foo::widget::Widget {
-        widget_id: duplicate_widget_aot::BitsInU8::new(41)?,
+    let widget = dslx_aot::foo::widget::Widget {
+        widget_id: dslx_aot::BitsInU8::new(41)?,
     };
-    let mut runner = duplicate_widget_aot::frobber::new_runner()?;
+    let mut runner = dslx_aot::frobber::aot_duplicate_widget::new_runner()?;
     assert_eq!(runner.run(&widget)?.widget_id.to_u64(), 42);
     Ok(())
 }
@@ -265,13 +317,11 @@ fn typed_dslx_duplicate_imported_names_use_canonical_paths()
 #[test]
 fn typed_dslx_namespaced_package_runners_preserve_module_paths()
 -> Result<(), Box<dyn std::error::Error>> {
-    let doodle = namespaced_doodle_package_aot::types::shared_types::Doodle {
-        doodle_id: namespaced_doodle_package_aot::BitsInU8::new(51)?,
+    let doodle = dslx_aot::types::shared_types::Doodle {
+        doodle_id: dslx_aot::BitsInU8::new(51)?,
     };
-    let mut echo =
-        namespaced_doodle_package_aot::foo::my_file::aot_namespaced_package_echo::new_runner()?;
-    let mut bump =
-        namespaced_doodle_package_aot::bar::your_file::aot_namespaced_package_bump::new_runner()?;
+    let mut echo = dslx_aot::foo::my_file::aot_namespaced_package_echo::new_runner()?;
+    let mut bump = dslx_aot::bar::your_file::aot_namespaced_package_bump::new_runner()?;
     let echoed = echo.run(&doodle)?;
     let bumped = bump.run(&echoed)?;
     assert_eq!(bumped.doodle_id.to_u64(), 52);

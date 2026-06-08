@@ -1,0 +1,5 @@
+package native_aot_tests
+
+fn add_inputs(a: bits[8] id=1, b: bits[8] id=2) -> bits[8] {
+  ret out: bits[8] = add(a, b, id=3)
+}

@@ -1,0 +1,24 @@
+package native_aot_tests
+
+fn wide_runtime_ops(x: bits[129] id=1, y: bits[129] id=2, shift: bits[8] id=3, replacement: bits[73] id=4) -> (bits[129], bits[129], bits[129], bits[129], bits[129], bits[96], bits[32], bits[129], bits[130], bits[130], bits[130], bits[8], bits[130]) {
+  product: bits[129] = umul(x, y, id=5)
+  signed_product: bits[129] = smul(x, y, id=6)
+  quotient: bits[129] = udiv(x, y, id=7)
+  left: bits[129] = shll(x, shift, id=8)
+  right: bits[129] = shra(x, shift, id=9)
+  slice: bits[96] = dynamic_bit_slice(x, shift, width=96, id=10)
+  low_slice: bits[32] = dynamic_bit_slice(x, shift, width=32, id=11)
+  updated: bits[129] = bit_slice_update(x, shift, replacement, id=12)
+  unsigned_parts: (bits[130], bits[130]) = umulp(x, y, id=13)
+  unsigned_lhs: bits[130] = tuple_index(unsigned_parts, index=0, id=14)
+  unsigned_rhs: bits[130] = tuple_index(unsigned_parts, index=1, id=15)
+  unsigned_sum: bits[130] = add(unsigned_lhs, unsigned_rhs, id=16)
+  signed_parts: (bits[130], bits[130]) = smulp(x, y, id=17)
+  signed_lhs: bits[130] = tuple_index(signed_parts, index=0, id=18)
+  signed_rhs: bits[130] = tuple_index(signed_parts, index=1, id=19)
+  signed_sum: bits[130] = add(signed_lhs, signed_rhs, id=20)
+  hot: bits[130] = one_hot(x, lsb_prio=true, id=21)
+  encoded: bits[8] = encode(hot, id=22)
+  decoded: bits[130] = decode(shift, width=130, id=23)
+  ret out: (bits[129], bits[129], bits[129], bits[129], bits[129], bits[96], bits[32], bits[129], bits[130], bits[130], bits[130], bits[8], bits[130]) = tuple(product, signed_product, quotient, left, right, slice, low_slice, updated, unsigned_sum, signed_sum, hot, encoded, decoded, id=24)
+}

@@ -6,7 +6,7 @@ use xlsynth_pir_compiler_aot_ir_test_crate::native_aot_tests_aot;
 use xlsynth_pir_compiler_aot_ir_test_crate::native_aot_tests_aot::native_aot_tests;
 use xlsynth_pir_compiler_runtime::{AssumptionFailureKind, ExecutionResult, WideBits};
 
-fn generated_wrapper_golden_cases() -> Vec<(&'static str, &'static str)> {
+fn generated_package_golden_cases() -> Vec<(&'static str, &'static str)> {
     vec![(
         concat!(
             env!("OUT_DIR"),
@@ -73,13 +73,13 @@ fn assert_consumer_binary_has_no_runtime_libxls_dependency() {
     );
 }
 
-// Verifies: generated PIR native AOT wrapper source matches checked-in goldens.
+// Verifies: generated PIR native AOT package source matches checked-in goldens.
 // Catches: unreviewed public API, layout, metadata, or runtime glue changes.
 #[test]
-fn generated_pir_wrappers_match_golden_references() {
+fn generated_pir_package_matches_golden_references() {
     fs::create_dir_all(Path::new("tests/goldens")).expect("goldens directory should exist");
-    for (generated_path, golden_path) in generated_wrapper_golden_cases() {
-        let generated = fs::read_to_string(generated_path).expect("generated wrapper should exist");
+    for (generated_path, golden_path) in generated_package_golden_cases() {
+        let generated = fs::read_to_string(generated_path).expect("generated package should exist");
         compare_golden_text(&generated, golden_path);
     }
 }

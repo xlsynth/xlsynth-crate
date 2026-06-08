@@ -20,7 +20,7 @@ use xlsynth::{
     DslxCallingConvention, convert_dslx_to_ir_text, dslx_path_to_module_name,
     mangle_dslx_name_with_calling_convention,
 };
-use xlsynth_pir::ir::Type;
+use xlsynth_pir::ir::{PackageMember, Type};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir_compiler_runtime::{
     AssumptionFailureKind, EventKind, EventSiteMetadata, TraceTupleFieldLayout, TraceValueLayout,
@@ -45,18 +45,10 @@ pub struct GeneratedAotModule {
     pub artifact: AotArtifact,
 }
 
-/// Inputs required to compile one checked-in IR entrypoint with typed metadata.
-pub struct TypedIrAotBuildSpec<'a> {
-    pub name: &'a str,
-    pub pir_text: &'a str,
-    pub top: &'a str,
-}
-
-/// Collects checked-in IR entrypoints into one metadata-backed shared wrapper.
+/// Builds one metadata-backed shared wrapper from checked-in IR files.
 pub struct TypedIrAotPackageBuilder<'a> {
     name: &'a str,
-    metadata: TypedAotPackageMetadata,
-    specs: Vec<TypedIrAotBuildSpec<'a>>,
+    metadata_path: PathBuf,
 }
 
 /// Output files and artifacts produced for a typed IR AOT package.
@@ -67,19 +59,15 @@ pub struct GeneratedTypedIrAotPackage {
 }
 
 impl<'a> TypedIrAotPackageBuilder<'a> {
-    /// Creates an empty typed IR AOT package backed by checked-in metadata.
-    pub fn new(name: &'a str, metadata: TypedAotPackageMetadata) -> Self {
+    /// Creates a typed IR AOT package backed by a metadata JSON file.
+    ///
+    /// IR file paths in the metadata are resolved relative to the metadata
+    /// file's parent directory.
+    pub fn new(name: &'a str, metadata_path: impl Into<PathBuf>) -> Self {
         Self {
             name,
-            metadata,
-            specs: Vec::new(),
+            metadata_path: metadata_path.into(),
         }
-    }
-
-    /// Adds one checked-in IR top-level function.
-    pub fn add_entrypoint(mut self, spec: TypedIrAotBuildSpec<'a>) -> Self {
-        self.specs.push(spec);
-        self
     }
 
     /// Emits a shared wrapper and linked objects into Cargo's `OUT_DIR`.
@@ -100,19 +88,28 @@ impl<'a> TypedIrAotPackageBuilder<'a> {
                 "AOT package name must not be empty".into(),
             ));
         }
-        if self.specs.is_empty() {
+        let metadata = TypedAotPackageMetadata::from_json_file(&self.metadata_path)
+            .map_err(|error| CompilerError::InvalidArgument(error.to_string()))?;
+        let metadata_dir = self.metadata_path.parent().ok_or_else(|| {
+            CompilerError::InvalidArgument(format!(
+                "typed AOT metadata path `{}` has no parent directory",
+                self.metadata_path.display()
+            ))
+        })?;
+        println!("cargo:rerun-if-changed={}", self.metadata_path.display());
+        if metadata.entrypoints.is_empty() {
             return Err(CompilerError::InvalidArgument(
                 "AOT package must contain at least one entrypoint".into(),
             ));
         }
-        let typed_package = ValidatedTypedAotPackage::new(&self.metadata)?;
-        let mut artifacts_by_name = BTreeMap::new();
+        let typed_package = ValidatedTypedAotPackage::new(&metadata)?;
+        let mut ordered_artifacts = Vec::with_capacity(metadata.entrypoints.len());
         let mut entrypoint_names = BTreeSet::new();
-        for spec in &self.specs {
-            let base_name = sanitize_identifier(spec.name);
+        for entrypoint in &metadata.entrypoints {
+            let base_name = sanitize_identifier(&entrypoint.name);
             if base_name.is_empty() {
                 return Err(CompilerError::InvalidArgument(
-                    "AOT build spec name must contain an identifier character".into(),
+                    "AOT entrypoint name must contain an identifier character".into(),
                 ));
             }
             if !entrypoint_names.insert(base_name.clone()) {
@@ -120,30 +117,28 @@ impl<'a> TypedIrAotPackageBuilder<'a> {
                     "AOT package contains duplicate entrypoint name '{base_name}'"
                 )));
             }
-            let entrypoint = typed_package.entrypoint(spec.name)?;
-            if entrypoint.ir_top != spec.top {
-                return Err(CompilerError::InvalidArgument(format!(
-                    "typed AOT metadata entrypoint '{}' names IR top '{}', but build spec uses '{}'",
-                    spec.name, entrypoint.ir_top, spec.top
-                )));
-            }
-            let package = Parser::new(spec.pir_text)
-                .parse_and_validate_package()
-                .map_err(|error| CompilerError::InvalidFunction(error.to_string()))?;
-            let entrypoint_symbol = format!("__xlsynth_pir_aot_{base_name}");
-            let artifact = compile_package_aot(&package, spec.top, &entrypoint_symbol)?;
-            typed_package.validate_entrypoint_layout(entrypoint, &artifact)?;
-            artifacts_by_name.insert(spec.name.to_string(), (base_name, artifact));
-        }
-        let mut ordered_artifacts = Vec::with_capacity(self.metadata.entrypoints.len());
-        for entrypoint in &self.metadata.entrypoints {
-            let artifact = artifacts_by_name.remove(&entrypoint.name).ok_or_else(|| {
+            let ir_file = entrypoint.ir_file.as_ref().ok_or_else(|| {
                 CompilerError::InvalidArgument(format!(
-                    "typed AOT metadata entrypoint `{}` was not provided as an IR build spec",
+                    "typed AOT metadata entrypoint `{}` must specify ir_file",
                     entrypoint.name
                 ))
             })?;
-            ordered_artifacts.push(artifact);
+            let ir_path = metadata_dir.join(ir_file);
+            println!("cargo:rerun-if-changed={}", ir_path.display());
+            let pir_text = fs::read_to_string(&ir_path).map_err(|error| {
+                CompilerError::Backend(format!(
+                    "failed to read IR file {} for typed AOT entrypoint `{}`: {error}",
+                    ir_path.display(),
+                    entrypoint.name
+                ))
+            })?;
+            let package = Parser::new(&pir_text)
+                .parse_and_validate_package()
+                .map_err(|error| CompilerError::InvalidFunction(error.to_string()))?;
+            let entrypoint_symbol = format!("__xlsynth_pir_aot_{base_name}");
+            let artifact = compile_package_aot(&package, &entrypoint.ir_top, &entrypoint_symbol)?;
+            typed_package.validate_entrypoint_layout(entrypoint, &artifact)?;
+            ordered_artifacts.push((base_name, artifact));
         }
 
         fs::create_dir_all(out_dir).map_err(|error| CompilerError::Backend(error.to_string()))?;
@@ -151,14 +146,7 @@ impl<'a> TypedIrAotPackageBuilder<'a> {
         let rust_file = out_dir.join(format!("{package_name}_typed_ir_pir_aot_package.rs"));
         fs::write(
             &rust_file,
-            render_typed_ir_aot_package(
-                self.name,
-                &typed_package,
-                &ordered_artifacts
-                    .iter()
-                    .map(|(_, artifact)| artifact.clone())
-                    .collect::<Vec<_>>(),
-            )?,
+            render_typed_ir_aot_package(self.name, &typed_package, &ordered_artifacts)?,
         )
         .map_err(|error| CompilerError::Backend(error.to_string()))?;
 
@@ -406,19 +394,136 @@ fn compile_dslx_artifact(
     } else {
         DslxCallingConvention::Typical
     };
-    let top = mangle_dslx_name_with_calling_convention(
+    let dslx_top = mangle_dslx_name_with_calling_convention(
         dslx_path_to_module_name(spec.dslx_path)
             .map_err(|error| CompilerError::Backend(error.to_string()))?,
         spec.top,
         calling_convention,
     )
     .map_err(|error| CompilerError::Backend(error.to_string()))?;
+    let (pir_text, top) = if spec.dslx_options.force_implicit_token_calling_convention {
+        let wrapper_top = format!("__xlsynth_pir_aot_{base_name}_dslx_entry");
+        (
+            append_implicit_token_entrypoint_wrapper(&pir_text, &dslx_top, &wrapper_top)?,
+            wrapper_top,
+        )
+    } else {
+        (pir_text, dslx_top)
+    };
     let package = Parser::new(&pir_text)
         .parse_and_validate_package()
         .map_err(|error| CompilerError::InvalidFunction(error.to_string()))?;
     let entrypoint_symbol = format!("__xlsynth_pir_aot_{base_name}");
     let artifact = compile_package_aot(&package, &top, &entrypoint_symbol)?;
     Ok((dslx_text, artifact))
+}
+
+/// Appends a user-signature wrapper around a DSLX implicit-token entrypoint.
+fn append_implicit_token_entrypoint_wrapper(
+    pir_text: &str,
+    implicit_top: &str,
+    wrapper_top: &str,
+) -> Result<String, CompilerError> {
+    let package = Parser::new(pir_text)
+        .parse_and_validate_package()
+        .map_err(|error| CompilerError::InvalidFunction(error.to_string()))?;
+    let callee = package
+        .members
+        .iter()
+        .find_map(|member| match member {
+            PackageMember::Function(function) if function.name == implicit_top => Some(function),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            CompilerError::InvalidFunction(format!(
+                "implicit-token DSLX top `{implicit_top}` not found in converted PIR package"
+            ))
+        })?;
+    if callee.params.len() < 2 {
+        return Err(CompilerError::InvalidFunction(format!(
+            "implicit-token DSLX top `{implicit_top}` has {} parameters, expected token, activation, and user parameters",
+            callee.params.len()
+        )));
+    }
+    if callee.params[0].ty != Type::Token {
+        return Err(CompilerError::InvalidFunction(format!(
+            "implicit-token DSLX top `{implicit_top}` first parameter must be token, got {}",
+            callee.params[0].ty
+        )));
+    }
+    if callee.params[1].ty != Type::Bits(1) {
+        return Err(CompilerError::InvalidFunction(format!(
+            "implicit-token DSLX top `{implicit_top}` second parameter must be bits[1] activation, got {}",
+            callee.params[1].ty
+        )));
+    }
+    let Type::Tuple(return_elements) = &callee.ret_ty else {
+        return Err(CompilerError::InvalidFunction(format!(
+            "implicit-token DSLX top `{implicit_top}` must return (token, value), got {}",
+            callee.ret_ty
+        )));
+    };
+    if return_elements.len() != 2 || return_elements[0].as_ref() != &Type::Token {
+        return Err(CompilerError::InvalidFunction(format!(
+            "implicit-token DSLX top `{implicit_top}` must return (token, value), got {}",
+            callee.ret_ty
+        )));
+    }
+
+    let user_params = &callee.params[2..];
+    let user_return_type = return_elements[1].as_ref();
+    let first_wrapper_id = package_max_text_id(&package) + 1;
+    let params = user_params
+        .iter()
+        .enumerate()
+        .map(|(index, param)| {
+            format!(
+                "{}: {} id={}",
+                param.name,
+                param.ty,
+                first_wrapper_id + index
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let user_args = user_params
+        .iter()
+        .map(|param| param.name.as_str())
+        .collect::<Vec<_>>();
+    let invoke_args = std::iter::once("__xlsynth_token")
+        .chain(std::iter::once("__xlsynth_activated"))
+        .chain(user_args.iter().copied())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let token_id = first_wrapper_id + user_params.len();
+    let activated_id = first_wrapper_id + user_params.len() + 1;
+    let invoke_id = first_wrapper_id + user_params.len() + 2;
+    let return_id = first_wrapper_id + user_params.len() + 3;
+    let wrapper = format!(
+        r#"fn {wrapper_top}({params}) -> {user_return_type} {{
+  __xlsynth_token: token = after_all(id={token_id})
+  __xlsynth_activated: bits[1] = literal(value=1, id={activated_id})
+  __xlsynth_result: {callee_return_type} = invoke({invoke_args}, to_apply={implicit_top}, id={invoke_id})
+  ret __xlsynth_output: {user_return_type} = tuple_index(__xlsynth_result, index=1, id={return_id})
+}}"#,
+        callee_return_type = callee.ret_ty,
+    );
+
+    Ok(format!("{pir_text}\n\n{wrapper}\n"))
+}
+
+/// Returns the maximum package-wide node text ID used by emitted PIR members.
+fn package_max_text_id(package: &xlsynth_pir::ir::Package) -> usize {
+    package
+        .members
+        .iter()
+        .flat_map(|member| match member {
+            PackageMember::Function(function) => function.nodes.iter(),
+            PackageMember::Block { func, .. } => func.nodes.iter(),
+        })
+        .map(|node| node.text_id)
+        .max()
+        .unwrap_or(0)
 }
 
 fn render_typed_dslx_runner_items(
@@ -525,7 +630,6 @@ fn validate_native_typed_dslx_type(
 struct ValidatedTypedAotPackage<'a> {
     metadata: &'a TypedAotPackageMetadata,
     decls: BTreeMap<TypedAotDeclKey, &'a TypedAotDecl>,
-    entrypoints: BTreeMap<String, &'a TypedAotEntrypoint>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -571,7 +675,7 @@ impl<'a> ValidatedTypedAotPackage<'a> {
                 );
             }
         }
-        let mut entrypoints = BTreeMap::new();
+        let mut entrypoint_names = BTreeSet::new();
         for entrypoint in &metadata.entrypoints {
             validate_type_name(&entrypoint.name)?;
             if let Some(ir_file) = &entrypoint.ir_file {
@@ -585,21 +689,14 @@ impl<'a> ValidatedTypedAotPackage<'a> {
                     render_module_path_for_error(&entrypoint.owning_module)
                 )));
             }
-            if entrypoints
-                .insert(entrypoint.name.clone(), entrypoint)
-                .is_some()
-            {
+            if !entrypoint_names.insert(entrypoint.name.clone()) {
                 return Err(CompilerError::InvalidArgument(format!(
                     "typed AOT metadata contains duplicate entrypoint `{}`",
                     entrypoint.name
                 )));
             }
         }
-        let package = Self {
-            metadata,
-            decls,
-            entrypoints,
-        };
+        let package = Self { metadata, decls };
         for module in &metadata.modules {
             for decl in &module.declarations {
                 package.validate_decl(&module.path, decl)?;
@@ -608,19 +705,11 @@ impl<'a> ValidatedTypedAotPackage<'a> {
         for entrypoint in &metadata.entrypoints {
             for param in &entrypoint.params {
                 validate_value_name(&param.name)?;
-                package.validate_type(&param.ty, &mut Vec::new())?;
+                package.lower_type_to_layout(&param.ty, &mut Vec::new())?;
             }
-            package.validate_type(&entrypoint.return_type, &mut Vec::new())?;
+            package.lower_type_to_layout(&entrypoint.return_type, &mut Vec::new())?;
         }
         Ok(package)
-    }
-
-    fn entrypoint(&self, name: &str) -> Result<&'a TypedAotEntrypoint, CompilerError> {
-        self.entrypoints.get(name).copied().ok_or_else(|| {
-            CompilerError::InvalidArgument(format!(
-                "typed AOT metadata has no entrypoint named `{name}`"
-            ))
-        })
     }
 
     fn validate_entrypoint_layout(
@@ -677,7 +766,7 @@ impl<'a> ValidatedTypedAotPackage<'a> {
                             field.name
                         )));
                     }
-                    self.validate_type(&field.ty, &mut Vec::new())?;
+                    self.lower_type_to_layout(&field.ty, &mut Vec::new())?;
                 }
             }
             TypedAotDecl::Enum {
@@ -712,69 +801,7 @@ impl<'a> ValidatedTypedAotPackage<'a> {
                 }
             }
             TypedAotDecl::Alias { target, .. } => {
-                self.validate_type(target, &mut Vec::new())?;
-            }
-        }
-        Ok(())
-    }
-
-    fn validate_type(
-        &self,
-        ty: &TypedAotType,
-        active_refs: &mut Vec<TypedAotDeclKey>,
-    ) -> Result<(), CompilerError> {
-        match ty {
-            TypedAotType::Bits { bit_count } => {
-                if *bit_count == 0 {
-                    return Err(CompilerError::InvalidArgument(
-                        "typed AOT metadata bits type must have nonzero width".into(),
-                    ));
-                }
-            }
-            TypedAotType::Token => {}
-            TypedAotType::Array { size, element } => {
-                if *size == 0 {
-                    return Err(CompilerError::InvalidArgument(
-                        "typed AOT metadata arrays must have nonzero size".into(),
-                    ));
-                }
-                self.validate_type(element, active_refs)?;
-            }
-            TypedAotType::Tuple { elements } => {
-                for element in elements {
-                    self.validate_type(element, active_refs)?;
-                }
-            }
-            TypedAotType::TypeRef { module, name } => {
-                let key = TypedAotDeclKey {
-                    module: module.clone(),
-                    name: name.clone(),
-                };
-                let decl = self.decls.get(&key).ok_or_else(|| {
-                    CompilerError::InvalidArgument(format!(
-                        "typed AOT metadata references unknown type `{}`",
-                        render_type_path_for_error(module, name)
-                    ))
-                })?;
-                if active_refs.contains(&key) {
-                    return Err(CompilerError::InvalidArgument(format!(
-                        "typed AOT metadata contains cyclic type reference through `{}`",
-                        render_type_path_for_error(module, name)
-                    )));
-                }
-                active_refs.push(key);
-                match decl {
-                    TypedAotDecl::Struct { fields, .. } => {
-                        for field in fields {
-                            self.validate_type(&field.ty, active_refs)?;
-                        }
-                    }
-                    TypedAotDecl::Enum { .. } => {}
-                    TypedAotDecl::Alias { target, .. } => {
-                        self.validate_type(target, active_refs)?;
-                    }
-                }
-                active_refs.pop();
+                self.lower_type_to_layout(target, &mut Vec::new())?;
             }
         }
         Ok(())
@@ -786,12 +813,26 @@ impl<'a> ValidatedTypedAotPackage<'a> {
         active_refs: &mut Vec<TypedAotDeclKey>,
     ) -> Result<NativeValueLayout, CompilerError> {
         match ty {
-            TypedAotType::Bits { bit_count } => Ok(native_bits_layout(*bit_count)),
+            TypedAotType::Bits { bit_count } => {
+                if *bit_count == 0 {
+                    return Err(CompilerError::InvalidArgument(
+                        "typed AOT metadata bits type must have nonzero width".into(),
+                    ));
+                }
+                Ok(native_bits_layout(*bit_count))
+            }
             TypedAotType::Token => Ok(NativeValueLayout::Token),
-            TypedAotType::Array { size, element } => Ok(NativeValueLayout::Array {
-                element: Box::new(self.lower_type_to_layout(element, active_refs)?),
-                element_count: *size,
-            }),
+            TypedAotType::Array { size, element } => {
+                if *size == 0 {
+                    return Err(CompilerError::InvalidArgument(
+                        "typed AOT metadata arrays must have nonzero size".into(),
+                    ));
+                }
+                Ok(NativeValueLayout::Array {
+                    element: Box::new(self.lower_type_to_layout(element, active_refs)?),
+                    element_count: *size,
+                })
+            }
             TypedAotType::Tuple { elements } => self.lower_fields_to_tuple_layout(
                 elements
                     .iter()
@@ -870,7 +911,7 @@ struct RenderModuleNode {
 fn render_typed_ir_aot_package(
     package_name: &str,
     package: &ValidatedTypedAotPackage<'_>,
-    artifacts: &[AotArtifact],
+    artifacts: &[(String, AotArtifact)],
 ) -> Result<String, CompilerError> {
     if package.metadata.entrypoints.len() != artifacts.len() {
         return Err(CompilerError::InvalidArgument(format!(
@@ -891,7 +932,7 @@ fn render_typed_ir_aot_package(
         }
         insert_render_module_items(&mut root, &module.path, items)?;
     }
-    for (entrypoint, artifact) in package.metadata.entrypoints.iter().zip(artifacts.iter()) {
+    for (entrypoint, (_, artifact)) in package.metadata.entrypoints.iter().zip(artifacts.iter()) {
         let runner_module_name = format!("aot_{}", sanitize_identifier(&entrypoint.name));
         let mut runner_path = entrypoint.owning_module.clone();
         runner_path.push(runner_module_name);
