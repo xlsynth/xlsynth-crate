@@ -1,5 +1,5 @@
 {
-  "format_version": 1,
+  "format_version": 2,
   "modules": [
     {
       "path": [
@@ -14,6 +14,7 @@
               "name": "value",
               "ty": {
                 "kind": "bits",
+                "signedness": "unsigned",
                 "bit_count": 8
               }
             }
@@ -27,6 +28,7 @@
               "name": "left",
               "ty": {
                 "kind": "bits",
+                "signedness": "unsigned",
                 "bit_count": 8
               }
             },
@@ -34,6 +36,7 @@
               "name": "right",
               "ty": {
                 "kind": "bits",
+                "signedness": "unsigned",
                 "bit_count": 23
               }
             }
@@ -47,6 +50,7 @@
               "name": "id",
               "ty": {
                 "kind": "bits",
+                "signedness": "unsigned",
                 "bit_count": 8
               }
             }
@@ -68,6 +72,7 @@
               "name": "widget_id",
               "ty": {
                 "kind": "bits",
+                "signedness": "unsigned",
                 "bit_count": 8
               }
             }
@@ -89,6 +94,7 @@
               "name": "widget_id",
               "ty": {
                 "kind": "bits",
+                "signedness": "unsigned",
                 "bit_count": 8
               }
             }
@@ -110,6 +116,7 @@
               "name": "doodle_id",
               "ty": {
                 "kind": "bits",
+                "signedness": "unsigned",
                 "bit_count": 8
               }
             }
@@ -125,6 +132,7 @@
         {
           "kind": "enum",
           "name": "GizmoMode",
+          "signedness": "unsigned",
           "bit_count": 2,
           "variants": [
             {
@@ -144,6 +152,7 @@
         {
           "kind": "enum",
           "name": "SignedGizmoMode",
+          "signedness": "signed",
           "bit_count": 2,
           "variants": [
             {
@@ -168,6 +177,7 @@
             "size": 3,
             "element": {
               "kind": "bits",
+              "signedness": "unsigned",
               "bit_count": 4
             }
           }
@@ -180,6 +190,7 @@
               "name": "frob_bias",
               "ty": {
                 "kind": "bits",
+                "signedness": "unsigned",
                 "bit_count": 4
               }
             },
@@ -187,6 +198,7 @@
               "name": "wobble_trim",
               "ty": {
                 "kind": "bits",
+                "signedness": "signed",
                 "bit_count": 4
               }
             }
@@ -200,6 +212,7 @@
               "name": "gizmo_id",
               "ty": {
                 "kind": "bits",
+                "signedness": "unsigned",
                 "bit_count": 8
               }
             },
@@ -220,6 +233,7 @@
                 "size": 3,
                 "element": {
                   "kind": "bits",
+                  "signedness": "unsigned",
                   "bit_count": 4
                 }
               }
@@ -238,6 +252,7 @@
               "name": "wobble",
               "ty": {
                 "kind": "bits",
+                "signedness": "signed",
                 "bit_count": 4
               }
             },
@@ -261,6 +276,7 @@
               "name": "next_gizmo_id",
               "ty": {
                 "kind": "bits",
+                "signedness": "unsigned",
                 "bit_count": 8
               }
             },
@@ -268,6 +284,7 @@
               "name": "selected_frob",
               "ty": {
                 "kind": "bits",
+                "signedness": "unsigned",
                 "bit_count": 4
               }
             },
@@ -285,6 +302,7 @@
               "name": "adjusted_wobble",
               "ty": {
                 "kind": "bits",
+                "signedness": "signed",
                 "bit_count": 4
               }
             },
@@ -315,6 +333,7 @@
               "name": "value",
               "ty": {
                 "kind": "bits",
+                "signedness": "unsigned",
                 "bit_count": 8
               }
             }
@@ -328,6 +347,7 @@
               "name": "value",
               "ty": {
                 "kind": "bits",
+                "signedness": "unsigned",
                 "bit_count": 16
               }
             }
@@ -347,6 +367,7 @@
                   "size": 3,
                   "element": {
                     "kind": "bits",
+                    "signedness": "unsigned",
                     "bit_count": 8
                   }
                 }
@@ -365,6 +386,7 @@
                 "size": 4,
                 "element": {
                   "kind": "bits",
+                  "signedness": "unsigned",
                   "bit_count": 8
                 }
               }
@@ -379,6 +401,7 @@
               "name": "value",
               "ty": {
                 "kind": "bits",
+                "signedness": "unsigned",
                 "bit_count": 8
               }
             }
@@ -392,6 +415,7 @@
               "name": "payload",
               "ty": {
                 "kind": "bits",
+                "signedness": "unsigned",
                 "bit_count": 8
               }
             }
@@ -405,6 +429,7 @@
               "name": "payload",
               "ty": {
                 "kind": "bits",
+                "signedness": "unsigned",
                 "bit_count": 8
               }
             }
@@ -510,6 +535,7 @@
               "name": "unsigned_value",
               "ty": {
                 "kind": "bits",
+                "signedness": "unsigned",
                 "bit_count": 65
               }
             },
@@ -517,6 +543,7 @@
               "name": "signed_value",
               "ty": {
                 "kind": "bits",
+                "signedness": "signed",
                 "bit_count": 65
               }
             }
@@ -713,8 +740,7 @@
           "ty": {
             "kind": "type_ref",
             "module": [
-              "gizmo_types",
-              "aot_gizmo_frob"
+              "gizmo_types"
             ],
             "name": "Gizmo"
           }
@@ -726,6 +752,7 @@
             "size": 3,
             "element": {
               "kind": "bits",
+              "signedness": "unsigned",
               "bit_count": 4
             }
           }
@@ -734,8 +761,7 @@
       "return_type": {
         "kind": "type_ref",
         "module": [
-          "gizmo_types",
-          "aot_gizmo_frob"
+          "gizmo_types"
         ],
         "name": "GizmoOutcome"
       }
@@ -752,8 +778,7 @@
           "ty": {
             "kind": "type_ref",
             "module": [
-              "parametric_forms",
-              "aot_parametric_forms"
+              "parametric_forms"
             ],
             "name": "Box8"
           }
@@ -763,8 +788,7 @@
           "ty": {
             "kind": "type_ref",
             "module": [
-              "parametric_forms",
-              "aot_parametric_forms"
+              "parametric_forms"
             ],
             "name": "Box16"
           }
@@ -774,8 +798,7 @@
           "ty": {
             "kind": "type_ref",
             "module": [
-              "parametric_forms",
-              "aot_parametric_forms"
+              "parametric_forms"
             ],
             "name": "Matrix2x3"
           }
@@ -785,8 +808,7 @@
           "ty": {
             "kind": "type_ref",
             "module": [
-              "parametric_forms",
-              "aot_parametric_forms"
+              "parametric_forms"
             ],
             "name": "ArrayBox4"
           }
@@ -799,8 +821,7 @@
             "element": {
               "kind": "type_ref",
               "module": [
-                "parametric_forms",
-                "aot_parametric_forms"
+                "parametric_forms"
               ],
               "name": "Box8"
             }
@@ -811,8 +832,7 @@
           "ty": {
             "kind": "type_ref",
             "module": [
-              "parametric_forms",
-              "aot_parametric_forms"
+              "parametric_forms"
             ],
             "name": "ExprBox8"
           }
@@ -822,8 +842,7 @@
           "ty": {
             "kind": "type_ref",
             "module": [
-              "parametric_forms",
-              "aot_parametric_forms"
+              "parametric_forms"
             ],
             "name": "NegativeTag"
           }
@@ -833,8 +852,7 @@
           "ty": {
             "kind": "type_ref",
             "module": [
-              "parametric_forms",
-              "aot_parametric_forms"
+              "parametric_forms"
             ],
             "name": "HugeTag"
           }
@@ -844,8 +862,7 @@
           "ty": {
             "kind": "type_ref",
             "module": [
-              "parametric_forms",
-              "aot_parametric_forms"
+              "parametric_forms"
             ],
             "name": "WidePair"
           }
@@ -854,8 +871,7 @@
       "return_type": {
         "kind": "type_ref",
         "module": [
-          "parametric_forms",
-          "aot_parametric_forms"
+          "parametric_forms"
         ],
         "name": "ParametricFormsResult"
       }
@@ -871,6 +887,7 @@
           "name": "init",
           "ty": {
             "kind": "bits",
+            "signedness": "unsigned",
             "bit_count": 8
           }
         },
@@ -878,12 +895,14 @@
           "name": "increment",
           "ty": {
             "kind": "bits",
+            "signedness": "unsigned",
             "bit_count": 8
           }
         }
       ],
       "return_type": {
         "kind": "bits",
+        "signedness": "unsigned",
         "bit_count": 8
       }
     },
@@ -898,6 +917,7 @@
           "name": "x",
           "ty": {
             "kind": "bits",
+            "signedness": "unsigned",
             "bit_count": 8
           }
         },
@@ -905,6 +925,7 @@
           "name": "y",
           "ty": {
             "kind": "bits",
+            "signedness": "unsigned",
             "bit_count": 8
           }
         },
@@ -912,6 +933,7 @@
           "name": "ok",
           "ty": {
             "kind": "bits",
+            "signedness": "unsigned",
             "bit_count": 1
           }
         },
@@ -919,12 +941,14 @@
           "name": "emit",
           "ty": {
             "kind": "bits",
+            "signedness": "unsigned",
             "bit_count": 1
           }
         }
       ],
       "return_type": {
         "kind": "bits",
+        "signedness": "unsigned",
         "bit_count": 8
       }
     },
@@ -969,8 +993,7 @@
       "return_type": {
         "kind": "type_ref",
         "module": [
-          "parametric_imports",
-          "aot_parametric_imports"
+          "parametric_imports"
         ],
         "name": "ParametricImportsResult"
       }

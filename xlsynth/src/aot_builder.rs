@@ -98,6 +98,7 @@ pub enum TypedAotDecl {
     },
     Enum {
         name: String,
+        signedness: TypedAotSignedness,
         bit_count: usize,
         variants: Vec<TypedAotEnumVariant>,
     },
@@ -121,11 +122,30 @@ pub struct TypedAotEnumVariant {
     pub value: u128,
 }
 
+/// Signedness of a public DSLX-style bits value in typed AOT metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TypedAotSignedness {
+    Unsigned,
+    Signed,
+}
+
+impl TypedAotSignedness {
+    fn from_is_signed(is_signed: bool) -> Self {
+        if is_signed {
+            Self::Signed
+        } else {
+            Self::Unsigned
+        }
+    }
+}
+
 /// Serializable public type expression for typed AOT metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TypedAotType {
     Bits {
+        signedness: TypedAotSignedness,
         bit_count: usize,
     },
     Token,
@@ -2834,7 +2854,7 @@ pub fn build_native_typed_dslx_aot_package_metadata(
     }
 
     Ok(TypedAotPackageMetadata {
-        format_version: 1,
+        format_version: 2,
         modules,
         entrypoints,
     })
@@ -2945,7 +2965,7 @@ fn typed_aot_enum_decl_from_dslx(
                 enum_def.get_identifier()
             ))
         })?;
-    let (_, bit_count) = underlying.is_bits_like().ok_or_else(|| {
+    let (is_signed, bit_count) = underlying.is_bits_like().ok_or_else(|| {
         XlsynthError(format!(
             "AOT typed DSLX metadata expected enum `{}` to have bits-like underlying type",
             enum_def.get_identifier()
@@ -2967,6 +2987,7 @@ fn typed_aot_enum_decl_from_dslx(
         .collect::<AotResult<Vec<_>>>()?;
     Ok(TypedAotDecl::Enum {
         name: enum_def.get_identifier(),
+        signedness: TypedAotSignedness::from_is_signed(is_signed),
         bit_count,
         variants,
     })
@@ -2980,10 +3001,9 @@ fn typed_aot_entrypoint_from_dslx_spec(
     let top_module = find_typed_dslx_package_top_module(typechecked, spec)?;
     let top_module_name = top_module.get_module().get_name();
     let base_name = sanitize_identifier(spec.name);
-    let runner_module_name = format!("{top_module_name}.aot_{base_name}");
-    let runner_path = rust_module_path_from_dslx_module_name(&runner_module_name);
+    let owning_module_path = rust_module_path_from_dslx_module_name(&top_module_name);
     let typed_signature =
-        build_typed_dslx_function_signature(context, top_module, spec.top, &runner_module_name)?;
+        build_typed_dslx_function_signature(context, top_module, spec.top, &top_module_name)?;
     let calling_convention = if spec.dslx_options.force_implicit_token_calling_convention {
         DslxCallingConvention::ImplicitToken
     } else {
@@ -3005,12 +3025,12 @@ fn typed_aot_entrypoint_from_dslx_spec(
             .map(|param| {
                 Ok(TypedAotParam {
                     name: param.name.clone(),
-                    ty: typed_aot_type_from_lowered_dslx_type(&runner_path, &param.ty)?,
+                    ty: typed_aot_type_from_lowered_dslx_type(&owning_module_path, &param.ty)?,
                 })
             })
             .collect::<AotResult<Vec<_>>>()?,
         return_type: typed_aot_type_from_lowered_dslx_type(
-            &runner_path,
+            &owning_module_path,
             &typed_signature.return_type,
         )?,
     })
@@ -3045,10 +3065,12 @@ fn typed_aot_type_from_lowered_dslx_type(
     match ty {
         TypedDslxType::Bits {
             rust_type,
+            is_signed,
             bit_count,
             ..
         } => Ok(typed_aot_type_ref_from_rust_type_path(current_module_path, rust_type)
             .unwrap_or(TypedAotType::Bits {
+                signedness: TypedAotSignedness::from_is_signed(*is_signed),
                 bit_count: *bit_count,
             })),
         TypedDslxType::Enum { rust_type, .. } | TypedDslxType::Struct { rust_type, .. } => {

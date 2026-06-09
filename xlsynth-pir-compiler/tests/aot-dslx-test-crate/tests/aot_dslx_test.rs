@@ -92,24 +92,24 @@ fn typed_dslx_gizmo_runner_executes_without_marshalling() -> Result<(), Box<dyn 
     use dslx_aot::gizmo_types::{Gizmo, GizmoMode, GizmoTuning, SignedGizmoMode};
 
     let gizmo = Gizmo {
-        gizmo_id: dslx_aot::BitsInU8::new(9)?,
+        gizmo_id: dslx_aot::U8::new(9)?,
         mode: GizmoMode::Frob,
         frobs: [
-            dslx_aot::BitsInU8::new(1)?,
-            dslx_aot::BitsInU8::new(2)?,
-            dslx_aot::BitsInU8::new(3)?,
+            dslx_aot::U4::new(1)?,
+            dslx_aot::U4::new(2)?,
+            dslx_aot::U4::new(3)?,
         ],
         tuning: GizmoTuning {
-            frob_bias: dslx_aot::BitsInU8::new(4)?,
-            wobble_trim: dslx_aot::BitsInU8::wrapping(15),
+            frob_bias: dslx_aot::U4::new(4)?,
+            wobble_trim: dslx_aot::S4::new(-1)?,
         },
-        wobble: dslx_aot::BitsInU8::new(3)?,
+        wobble: dslx_aot::S4::new(3)?,
         signed_mode: SignedGizmoMode::Negative,
     };
     let garnish = [
-        dslx_aot::BitsInU8::new(5)?,
-        dslx_aot::BitsInU8::new(6)?,
-        dslx_aot::BitsInU8::new(7)?,
+        dslx_aot::U4::new(5)?,
+        dslx_aot::U4::new(6)?,
+        dslx_aot::U4::new(7)?,
     ];
 
     let mut runner = dslx_aot::gizmo_types::aot_gizmo_frob::new_runner()?;
@@ -117,7 +117,7 @@ fn typed_dslx_gizmo_runner_executes_without_marshalling() -> Result<(), Box<dyn 
     assert_eq!(output.next_gizmo_id.to_u64(), 10);
     assert_eq!(output.selected_frob.to_u64(), 13);
     assert_eq!(output.mode, GizmoMode::Frob);
-    assert_eq!(output.adjusted_wobble.to_u64(), 4);
+    assert_eq!(output.adjusted_wobble.to_i64(), 4);
     assert_eq!(output.signed_mode, SignedGizmoMode::Negative);
     Ok(())
 }
@@ -133,26 +133,26 @@ fn typed_dslx_parametric_forms_runner_executes() -> Result<(), Box<dyn std::erro
     };
 
     let box8 = Box8 {
-        value: dslx_aot::BitsInU8::new(8)?,
+        value: dslx_aot::U8::new(8)?,
     };
     let box16 = Box16 {
-        value: dslx_aot::BitsInU16::new(16)?,
+        value: dslx_aot::U16::new(16)?,
     };
     let matrix = Matrix2x3 {
         rows: [
             [
-                dslx_aot::BitsInU8::new(1)?,
-                dslx_aot::BitsInU8::new(2)?,
-                dslx_aot::BitsInU8::new(3)?,
+                dslx_aot::U8::new(1)?,
+                dslx_aot::U8::new(2)?,
+                dslx_aot::U8::new(3)?,
             ],
             [
-                dslx_aot::BitsInU8::new(4)?,
-                dslx_aot::BitsInU8::new(5)?,
-                dslx_aot::BitsInU8::new(6)?,
+                dslx_aot::U8::new(4)?,
+                dslx_aot::U8::new(5)?,
+                dslx_aot::U8::new(6)?,
             ],
         ],
     };
-    let bits8 = dslx_aot::BitsInU8::<8>::new;
+    let bits8 = dslx_aot::U8::new;
     let array_box = ArrayBox4 {
         items: [bits8(10)?, bits8(11)?, bits8(12)?, bits8(13)?],
     };
@@ -170,8 +170,8 @@ fn typed_dslx_parametric_forms_runner_executes() -> Result<(), Box<dyn std::erro
         payload: bits8(99)?,
     };
     let wide_pair = WidePair {
-        unsigned_value: dslx_aot::WideBits::from_limbs([0x0123_4567_89ab_cdef, 1])?,
-        signed_value: dslx_aot::WideBits::from_limbs([u64::MAX, 1])?,
+        unsigned_value: dslx_aot::U65::from_limbs([0x0123_4567_89ab_cdef, 1])?,
+        signed_value: dslx_aot::S65::from_limbs([u64::MAX, 1])?,
     };
     let mut runner = dslx_aot::parametric_forms::aot_parametric_forms::new_runner()?;
     let result = runner.run(
@@ -194,8 +194,8 @@ fn typed_dslx_parametric_forms_runner_executes() -> Result<(), Box<dyn std::erro
 // package-level invokes when emitting the native object.
 #[test]
 fn typed_dslx_invokes_and_for_loop_runner_executes() -> Result<(), Box<dyn std::error::Error>> {
-    let init = dslx_aot::BitsInU8::<8>::new(10)?;
-    let increment = dslx_aot::BitsInU8::<8>::new(1)?;
+    let init = dslx_aot::U8::new(10)?;
+    let increment = dslx_aot::U8::new(1)?;
     let mut runner = dslx_aot::invokes_and_loop::aot_invokes_and_loop::new_runner()?;
     assert_eq!(runner.run(&init, &increment)?.to_u64(), 18);
     Ok(())
@@ -206,12 +206,12 @@ fn typed_dslx_invokes_and_for_loop_runner_executes() -> Result<(), Box<dyn std::
 #[test]
 fn typed_dslx_event_runner_collects_trace_assert_and_cover()
 -> Result<(), Box<dyn std::error::Error>> {
-    let x = dslx_aot::BitsInU8::<8>::new(0xa5)?;
-    let y = dslx_aot::BitsInU8::<8>::new(0x3c)?;
-    let emit = dslx_aot::BitsInU8::<1>::new(1)?;
-    let suppress = dslx_aot::BitsInU8::<1>::new(0)?;
-    let passed = dslx_aot::BitsInU8::<1>::new(1)?;
-    let failed = dslx_aot::BitsInU8::<1>::new(0)?;
+    let x = dslx_aot::U8::new(0xa5)?;
+    let y = dslx_aot::U8::new(0x3c)?;
+    let emit = dslx_aot::U1::new(1)?;
+    let suppress = dslx_aot::U1::new(0)?;
+    let passed = dslx_aot::U1::new(1)?;
+    let failed = dslx_aot::U1::new(0)?;
     let mut runner = dslx_aot::events::aot_events::new_runner()?;
 
     let successful = runner.run_with_events(&x, &y, &passed, &emit)?;
@@ -281,12 +281,12 @@ fn typed_dslx_imported_parametric_structs_execute_without_marshalling()
 -> Result<(), Box<dyn std::error::Error>> {
     use dslx_aot::{parametric_imports, parametric_lib};
 
-    let bits8 = dslx_aot::BitsInU8::<8>::new;
+    let bits8 = dslx_aot::U8::new;
     let remote = parametric_lib::RemotePlain { id: bits8(40)? };
     let imported_direct = parametric_lib::RemoteBox__N_8 { value: bits8(60)? };
     let imported_pair = parametric_lib::RemotePair__A_8__B_23 {
         left: bits8(61)?,
-        right: dslx_aot::BitsInU32::<23>::new(62)?,
+        right: dslx_aot::U23::new(62)?,
     };
 
     let mut runner = parametric_imports::aot_parametric_imports::new_runner()?;
@@ -305,7 +305,7 @@ fn typed_dslx_imported_parametric_structs_execute_without_marshalling()
 fn typed_dslx_duplicate_imported_names_use_canonical_paths()
 -> Result<(), Box<dyn std::error::Error>> {
     let widget = dslx_aot::foo::widget::Widget {
-        widget_id: dslx_aot::BitsInU8::new(41)?,
+        widget_id: dslx_aot::U8::new(41)?,
     };
     let mut runner = dslx_aot::frobber::aot_duplicate_widget::new_runner()?;
     assert_eq!(runner.run(&widget)?.widget_id.to_u64(), 42);
@@ -318,7 +318,7 @@ fn typed_dslx_duplicate_imported_names_use_canonical_paths()
 fn typed_dslx_namespaced_package_runners_preserve_module_paths()
 -> Result<(), Box<dyn std::error::Error>> {
     let doodle = dslx_aot::types::shared_types::Doodle {
-        doodle_id: dslx_aot::BitsInU8::new(51)?,
+        doodle_id: dslx_aot::U8::new(51)?,
     };
     let mut echo = dslx_aot::foo::my_file::aot_namespaced_package_echo::new_runner()?;
     let mut bump = dslx_aot::bar::your_file::aot_namespaced_package_bump::new_runner()?;

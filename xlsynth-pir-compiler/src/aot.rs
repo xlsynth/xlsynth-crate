@@ -9,12 +9,12 @@ use std::path::{Path, PathBuf};
 pub use xlsynth::DslxConvertOptions;
 use xlsynth::aot_builder::{
     NativeTypedDslxFunctionSignature, NativeTypedDslxType, collect_typed_dslx_aot_dependencies,
-    render_native_typed_dslx_generated_module, render_native_typed_dslx_package_generated_module,
+    render_native_typed_dslx_generated_module,
 };
 pub use xlsynth::aot_builder::{
     TypedAotDecl, TypedAotEntrypoint, TypedAotEnumVariant, TypedAotField, TypedAotModule,
-    TypedAotPackageMetadata, TypedAotParam, TypedAotType, TypedDslxAotBuildSpec,
-    build_native_typed_dslx_aot_package_metadata,
+    TypedAotPackageMetadata, TypedAotParam, TypedAotSignedness, TypedAotType,
+    TypedDslxAotBuildSpec, build_native_typed_dslx_aot_package_metadata,
 };
 use xlsynth::{
     DslxCallingConvention, convert_dslx_to_ir_text, dslx_path_to_module_name,
@@ -146,7 +146,12 @@ impl<'a> TypedIrAotPackageBuilder<'a> {
         let rust_file = out_dir.join(format!("{package_name}_typed_ir_pir_aot_package.rs"));
         fs::write(
             &rust_file,
-            render_typed_ir_aot_package(self.name, &typed_package, &ordered_artifacts)?,
+            render_typed_aot_package(
+                self.name,
+                &typed_package,
+                &ordered_artifacts,
+                "typed IR AOT package",
+            )?,
         )
         .map_err(|error| CompilerError::Backend(error.to_string()))?;
 
@@ -223,7 +228,7 @@ impl<'a> TypedDslxAotPackageBuilder<'a> {
                 "AOT package must contain at least one entrypoint".into(),
             ));
         }
-        let mut artifacts = Vec::with_capacity(self.specs.len());
+        let mut ordered_artifacts = Vec::with_capacity(self.specs.len());
         let mut entrypoint_names = BTreeSet::new();
         for spec in &self.specs {
             let base_name = sanitize_identifier(spec.name);
@@ -237,18 +242,22 @@ impl<'a> TypedDslxAotPackageBuilder<'a> {
                     "AOT package contains duplicate entrypoint name '{base_name}'"
                 )));
             }
-            artifacts.push(compile_dslx_artifact(spec, &base_name)?.1);
+            let artifact = compile_dslx_artifact(spec, &base_name)?.1;
+            ordered_artifacts.push((base_name, artifact));
         }
-        let generated_source = render_native_typed_dslx_package_generated_module(
+        let metadata = build_native_typed_dslx_aot_package_metadata(&self.specs)
+            .map_err(|error| CompilerError::Backend(error.to_string()))?;
+        let typed_package = ValidatedTypedAotPackage::new(&metadata)?;
+        for (entrypoint, (_, artifact)) in metadata.entrypoints.iter().zip(ordered_artifacts.iter())
+        {
+            typed_package.validate_entrypoint_layout(entrypoint, artifact)?;
+        }
+        let generated_source = render_typed_aot_package(
             self.name,
-            &self.specs,
-            |index, signature| {
-                validate_native_typed_dslx_signature(signature, &artifacts[index])
-                    .map_err(|error| xlsynth::XlsynthError(error.to_string()))?;
-                Ok(render_typed_dslx_runner_items(signature, &artifacts[index]))
-            },
-        )
-        .map_err(|error| CompilerError::Backend(error.to_string()))?;
+            &typed_package,
+            &ordered_artifacts,
+            "typed DSLX AOT package",
+        )?;
 
         fs::create_dir_all(out_dir).map_err(|error| CompilerError::Backend(error.to_string()))?;
         let package_name = sanitize_identifier(self.name);
@@ -256,8 +265,7 @@ impl<'a> TypedDslxAotPackageBuilder<'a> {
         fs::write(&rust_file, generated_source)
             .map_err(|error| CompilerError::Backend(error.to_string()))?;
         let mut object_files = Vec::with_capacity(self.specs.len());
-        for (spec, artifact) in self.specs.iter().zip(artifacts.iter()) {
-            let base_name = sanitize_identifier(spec.name);
+        for (base_name, artifact) in &ordered_artifacts {
             let object_file = out_dir.join(format!("{base_name}.pir_aot.o"));
             fs::write(&object_file, &artifact.object_code)
                 .map_err(|error| CompilerError::Backend(error.to_string()))?;
@@ -270,7 +278,10 @@ impl<'a> TypedDslxAotPackageBuilder<'a> {
         Ok(GeneratedTypedDslxAotPackage {
             rust_file,
             object_files,
-            artifacts,
+            artifacts: ordered_artifacts
+                .into_iter()
+                .map(|(_, artifact)| artifact)
+                .collect(),
         })
     }
 }
@@ -640,9 +651,9 @@ struct TypedAotDeclKey {
 
 impl<'a> ValidatedTypedAotPackage<'a> {
     fn new(metadata: &'a TypedAotPackageMetadata) -> Result<Self, CompilerError> {
-        if metadata.format_version != 1 {
+        if metadata.format_version != 2 {
             return Err(CompilerError::InvalidArgument(format!(
-                "unsupported typed AOT metadata format_version {}; expected 1",
+                "unsupported typed AOT metadata format_version {}; expected 2",
                 metadata.format_version
             )));
         }
@@ -770,6 +781,7 @@ impl<'a> ValidatedTypedAotPackage<'a> {
                 }
             }
             TypedAotDecl::Enum {
+                signedness,
                 bit_count,
                 variants,
                 ..
@@ -780,6 +792,7 @@ impl<'a> ValidatedTypedAotPackage<'a> {
                         render_type_path_for_error(module_path, typed_aot_decl_name(decl))
                     )));
                 }
+                validate_scalar_bit_count(*signedness, *bit_count)?;
                 let mut variant_names = BTreeSet::new();
                 for variant in variants {
                     validate_type_name(&variant.name)?;
@@ -813,12 +826,16 @@ impl<'a> ValidatedTypedAotPackage<'a> {
         active_refs: &mut Vec<TypedAotDeclKey>,
     ) -> Result<NativeValueLayout, CompilerError> {
         match ty {
-            TypedAotType::Bits { bit_count } => {
+            TypedAotType::Bits {
+                signedness,
+                bit_count,
+            } => {
                 if *bit_count == 0 {
                     return Err(CompilerError::InvalidArgument(
                         "typed AOT metadata bits type must have nonzero width".into(),
                     ));
                 }
+                validate_scalar_bit_count(*signedness, *bit_count)?;
                 Ok(native_bits_layout(*bit_count))
             }
             TypedAotType::Token => Ok(NativeValueLayout::Token),
@@ -908,10 +925,11 @@ struct RenderModuleNode {
     children: BTreeMap<String, RenderModuleNode>,
 }
 
-fn render_typed_ir_aot_package(
+fn render_typed_aot_package(
     package_name: &str,
     package: &ValidatedTypedAotPackage<'_>,
     artifacts: &[(String, AotArtifact)],
+    source_kind: &str,
 ) -> Result<String, CompilerError> {
     if package.metadata.entrypoints.len() != artifacts.len() {
         return Err(CompilerError::InvalidArgument(format!(
@@ -925,7 +943,6 @@ fn render_typed_ir_aot_package(
         let mut items = vec![
             "#![allow(dead_code)]".to_string(),
             "#![allow(unused_imports)]".to_string(),
-            "use super::{BitsInU8, BitsInU16, BitsInU32, BitsInU64, Token, WideBits};".to_string(),
         ];
         for decl in &module.declarations {
             items.push(render_typed_aot_decl(package, &module.path, decl)?);
@@ -966,18 +983,24 @@ fn render_typed_ir_aot_package(
         )?;
     }
 
-    Ok(format!(
-        "// SPDX-License-Identifier: Apache-2.0\n// Generated by xlsynth_pir_compiler::aot from typed IR AOT package {package_name:?}.\n\n{}{}",
-        render_typed_ir_runtime_imports(),
+    Ok(trim_trailing_line_whitespace(format!(
+        "// SPDX-License-Identifier: Apache-2.0\n// Generated by xlsynth_pir_compiler::aot from {source_kind} {package_name:?}.\n\n{}{}",
+        render_typed_aot_runtime_items(package),
         render_module_node_children(&root, 0),
-    ))
+    )))
 }
 
-fn render_typed_ir_runtime_imports() -> &'static str {
-    r#"pub use xlsynth_pir_compiler_runtime::{
-    BitsInU8, BitsInU16, BitsInU32, BitsInU64, Token, WideBits,
-};
-"#
+fn render_typed_aot_runtime_items(package: &ValidatedTypedAotPackage<'_>) -> String {
+    let mut output = "pub use xlsynth_pir_compiler_runtime::Token;\n".to_string();
+    for (signedness, bit_count) in collect_scalar_aliases(package) {
+        output.push_str(&format!(
+            "pub type {} = {};\n",
+            scalar_alias_name(signedness, bit_count),
+            scalar_runtime_type(signedness, bit_count)
+        ));
+    }
+    output.push('\n');
+    output
 }
 
 fn insert_render_module_items(
@@ -1024,6 +1047,133 @@ fn render_module_node(name: &str, node: &RenderModuleNode, indent: usize) -> Str
     output
 }
 
+fn trim_trailing_line_whitespace(text: String) -> String {
+    let mut output = String::with_capacity(text.len());
+    for line in text.lines() {
+        output.push_str(line.trim_end());
+        output.push('\n');
+    }
+    output
+}
+
+fn collect_scalar_aliases(
+    package: &ValidatedTypedAotPackage<'_>,
+) -> BTreeSet<(TypedAotSignedness, usize)> {
+    let mut aliases = BTreeSet::new();
+    for module in &package.metadata.modules {
+        for decl in &module.declarations {
+            collect_scalar_aliases_from_decl(decl, &mut aliases);
+        }
+    }
+    for entrypoint in &package.metadata.entrypoints {
+        for param in &entrypoint.params {
+            collect_scalar_aliases_from_type(&param.ty, &mut aliases);
+        }
+        collect_scalar_aliases_from_type(&entrypoint.return_type, &mut aliases);
+    }
+    aliases
+}
+
+fn collect_scalar_aliases_from_decl(
+    decl: &TypedAotDecl,
+    aliases: &mut BTreeSet<(TypedAotSignedness, usize)>,
+) {
+    match decl {
+        TypedAotDecl::Struct { fields, .. } => {
+            for field in fields {
+                collect_scalar_aliases_from_type(&field.ty, aliases);
+            }
+        }
+        TypedAotDecl::Enum {
+            signedness,
+            bit_count,
+            ..
+        } => {
+            aliases.insert((*signedness, *bit_count));
+        }
+        TypedAotDecl::Alias { target, .. } => {
+            collect_scalar_aliases_from_type(target, aliases);
+        }
+    }
+}
+
+fn collect_scalar_aliases_from_type(
+    ty: &TypedAotType,
+    aliases: &mut BTreeSet<(TypedAotSignedness, usize)>,
+) {
+    match ty {
+        TypedAotType::Bits {
+            signedness,
+            bit_count,
+        } => {
+            aliases.insert((*signedness, *bit_count));
+        }
+        TypedAotType::Token | TypedAotType::TypeRef { .. } => {}
+        TypedAotType::Array { element, .. } => collect_scalar_aliases_from_type(element, aliases),
+        TypedAotType::Tuple { elements } => {
+            for element in elements {
+                collect_scalar_aliases_from_type(element, aliases);
+            }
+        }
+    }
+}
+
+fn scalar_alias_name(signedness: TypedAotSignedness, bit_count: usize) -> String {
+    match signedness {
+        TypedAotSignedness::Unsigned => format!("U{bit_count}"),
+        TypedAotSignedness::Signed => format!("S{bit_count}"),
+    }
+}
+
+fn scalar_runtime_type(signedness: TypedAotSignedness, bit_count: usize) -> String {
+    let (unsigned_prefix, signed_prefix) = match bit_count {
+        1..=8 => ("UnsignedBitsInU8", "SignedBitsInU8"),
+        9..=16 => ("UnsignedBitsInU16", "SignedBitsInU16"),
+        17..=32 => ("UnsignedBitsInU32", "SignedBitsInU32"),
+        33..=64 => ("UnsignedBitsInU64", "SignedBitsInU64"),
+        _ => {
+            let limb_count = bit_count.div_ceil(64);
+            return match signedness {
+                TypedAotSignedness::Unsigned => {
+                    format!(
+                        "xlsynth_pir_compiler_runtime::UnsignedWideBits<{bit_count}, {limb_count}>"
+                    )
+                }
+                TypedAotSignedness::Signed => {
+                    format!(
+                        "xlsynth_pir_compiler_runtime::SignedWideBits<{bit_count}, {limb_count}>"
+                    )
+                }
+            };
+        }
+    };
+    let type_name = match signedness {
+        TypedAotSignedness::Unsigned => unsigned_prefix,
+        TypedAotSignedness::Signed => signed_prefix,
+    };
+    format!("xlsynth_pir_compiler_runtime::{type_name}<{bit_count}>")
+}
+
+fn render_scalar_alias_type(
+    current_module_path: &[String],
+    signedness: TypedAotSignedness,
+    bit_count: usize,
+) -> String {
+    render_root_item_path(
+        current_module_path,
+        &scalar_alias_name(signedness, bit_count),
+    )
+}
+
+fn render_root_item_path(current_module_path: &[String], name: &str) -> String {
+    if current_module_path.is_empty() {
+        return name.to_string();
+    }
+    let mut segments = vec!["super".to_string(); current_module_path.len()];
+    segments.push(name.to_string());
+    segments.join("::")
+}
+
 fn render_typed_aot_decl(
     package: &ValidatedTypedAotPackage<'_>,
     module_path: &[String],
@@ -1048,6 +1198,7 @@ fn render_typed_aot_decl(
         }
         TypedAotDecl::Enum {
             name,
+            signedness,
             bit_count,
             variants,
         } => {
@@ -1057,12 +1208,12 @@ fn render_typed_aot_decl(
                     render_type_path_for_error(module_path, name)
                 )));
             }
-            let bits_type = render_native_bits_type(*bit_count);
+            let bits_type = render_scalar_alias_type(module_path, *signedness, *bit_count);
             let constants = variants
                 .iter()
                 .map(|variant| {
                     format!(
-                        "    #[allow(non_upper_case_globals)]\n    pub const {}: Self = Self({bits_type}::wrapping({}));\n",
+                        "    #[allow(non_upper_case_globals)]\n    pub const {}: Self = Self({bits_type}::from_raw_bits({}));\n",
                         sanitize_identifier(&variant.name),
                         variant.value
                     )
@@ -1086,8 +1237,15 @@ fn render_typed_aot_type(
     current_module_path: &[String],
 ) -> Result<String, CompilerError> {
     match ty {
-        TypedAotType::Bits { bit_count } => Ok(render_native_bits_type(*bit_count)),
-        TypedAotType::Token => Ok("Token".to_string()),
+        TypedAotType::Bits {
+            signedness,
+            bit_count,
+        } => Ok(render_scalar_alias_type(
+            current_module_path,
+            *signedness,
+            *bit_count,
+        )),
+        TypedAotType::Token => Ok(render_root_item_path(current_module_path, "Token")),
         TypedAotType::Array { size, element } => Ok(format!(
             "[{}; {size}]",
             render_typed_aot_type(package, element, current_module_path)?
@@ -1157,6 +1315,22 @@ fn native_bits_layout(bit_count: usize) -> NativeValueLayout {
             limb_count: bit_count.div_ceil(64),
         })
     }
+}
+
+fn validate_scalar_bit_count(
+    signedness: TypedAotSignedness,
+    bit_count: usize,
+) -> Result<(), CompilerError> {
+    if bit_count == 0 {
+        let prefix = match signedness {
+            TypedAotSignedness::Unsigned => "u",
+            TypedAotSignedness::Signed => "s",
+        };
+        return Err(CompilerError::InvalidArgument(format!(
+            "typed AOT metadata {prefix}{bit_count} type must have nonzero width"
+        )));
+    }
+    Ok(())
 }
 
 fn align_up_local(value: usize, alignment: usize) -> Result<usize, CompilerError> {
