@@ -653,6 +653,12 @@
     },
     {
       "path": [
+        "tuple_shapes"
+      ],
+      "declarations": []
+    },
+    {
+      "path": [
         "invokes_and_loop"
       ],
       "declarations": []
@@ -880,6 +886,59 @@
           "parametric_forms"
         ],
         "name": "ParametricFormsResult"
+      }
+    },
+    {
+      "name": "tuple_shapes",
+      "source": {
+        "kind": "generated_ir",
+        "ir_top": "__xlsynth_pir_aot_tuple_shapes_dslx_entry"
+      },
+      "owning_module": [
+        "tuple_shapes"
+      ],
+      "params": [
+        {
+          "name": "pair",
+          "ty": {
+            "kind": "tuple",
+            "elements": [
+              {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 8
+              },
+              {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 16
+              }
+            ]
+          }
+        },
+        {
+          "name": "increment",
+          "ty": {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 8
+          }
+        }
+      ],
+      "return_type": {
+        "kind": "tuple",
+        "elements": [
+          {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 8
+          },
+          {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 16
+          }
+        ]
       }
     },
     {

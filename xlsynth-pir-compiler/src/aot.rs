@@ -992,6 +992,24 @@ fn validate_native_typed_dslx_type(
             }
             Ok(())
         }
+        (
+            NativeTypedDslxType::Tuple { elements },
+            NativeValueLayout::Tuple {
+                fields: native_fields,
+                ..
+            },
+        ) if elements.len() == native_fields.len() => {
+            for (index, (element, native_field)) in
+                elements.iter().zip(native_fields.iter()).enumerate()
+            {
+                validate_native_typed_dslx_type(
+                    &format!("{label}.{index}"),
+                    element,
+                    &native_field.layout,
+                )?;
+            }
+            Ok(())
+        }
         _ => Err(CompilerError::InvalidFunction(format!(
             "typed DSLX native layout mismatch for {label}: DSLX has {dslx_type:?}, compiled PIR has {layout:?}"
         ))),
@@ -1297,6 +1315,110 @@ struct RenderModuleNode {
     children: BTreeMap<String, RenderModuleNode>,
 }
 
+#[derive(Debug)]
+struct GeneratedTupleType {
+    name: String,
+    elements: Vec<PirAotType>,
+}
+
+#[derive(Debug, Default)]
+struct GeneratedTupleTypes {
+    types: Vec<GeneratedTupleType>,
+    reserved_root_names: BTreeSet<String>,
+}
+
+impl GeneratedTupleTypes {
+    fn collect(package: &ValidatedPirAotPackage<'_>) -> Self {
+        let mut registry = Self::with_reserved_root_names(package);
+        for module in &package.metadata.modules {
+            for decl in &module.declarations {
+                registry.collect_from_decl(decl);
+            }
+        }
+        for entrypoint in &package.metadata.entrypoints {
+            for param in &entrypoint.params {
+                registry.collect_from_type(&param.ty);
+            }
+            registry.collect_from_type(&entrypoint.return_type);
+        }
+        registry
+    }
+
+    fn with_reserved_root_names(package: &ValidatedPirAotPackage<'_>) -> Self {
+        let mut reserved_root_names = BTreeSet::from(["Token".to_string()]);
+        for module in &package.metadata.modules {
+            if let Some(root_name) = module.path.first() {
+                reserved_root_names.insert(root_name.clone());
+            }
+        }
+        for (signedness, bit_count) in collect_scalar_aliases(package) {
+            reserved_root_names.insert(scalar_alias_name(signedness, bit_count));
+        }
+        Self {
+            types: Vec::new(),
+            reserved_root_names,
+        }
+    }
+
+    fn collect_from_decl(&mut self, decl: &PirAotDecl) {
+        match decl {
+            PirAotDecl::Struct { fields, .. } => {
+                for field in fields {
+                    self.collect_from_type(&field.ty);
+                }
+            }
+            PirAotDecl::Enum { .. } => {}
+            PirAotDecl::Alias { target, .. } => self.collect_from_type(target),
+        }
+    }
+
+    fn collect_from_type(&mut self, ty: &PirAotType) {
+        match ty {
+            PirAotType::Bits { .. } | PirAotType::Token | PirAotType::TypeRef { .. } => {}
+            PirAotType::Array { element, .. } => self.collect_from_type(element),
+            PirAotType::Tuple { elements } => {
+                for element in elements {
+                    self.collect_from_type(element);
+                }
+                self.intern(elements);
+            }
+        }
+    }
+
+    fn intern(&mut self, elements: &[PirAotType]) {
+        if self.type_name(elements).is_some() {
+            return;
+        }
+        let name = self.allocate_name();
+        self.types.push(GeneratedTupleType {
+            name,
+            elements: elements.to_vec(),
+        });
+    }
+
+    fn allocate_name(&mut self) -> String {
+        let mut index = self.types.len();
+        loop {
+            let candidate = format!("XlsynthPirAotTuple{index}");
+            if self.reserved_root_names.insert(candidate.clone()) {
+                return candidate;
+            }
+            index += 1;
+        }
+    }
+
+    fn type_name(&self, elements: &[PirAotType]) -> Option<&str> {
+        self.types
+            .iter()
+            .find(|tuple_type| tuple_type.elements == elements)
+            .map(|tuple_type| tuple_type.name.as_str())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.types.is_empty()
+    }
+}
+
 fn render_pir_aot_package(
     package_name: &str,
     package: &ValidatedPirAotPackage<'_>,
@@ -1310,6 +1432,7 @@ fn render_pir_aot_package(
             entrypoint_artifacts.len()
         )));
     }
+    let tuple_types = GeneratedTupleTypes::collect(package);
     let mut root = RenderModuleNode::default();
     for module in &package.metadata.modules {
         let mut items = vec![
@@ -1317,7 +1440,12 @@ fn render_pir_aot_package(
             "#![allow(unused_imports)]".to_string(),
         ];
         for decl in &module.declarations {
-            items.push(render_pir_aot_decl(package, &module.path, decl)?);
+            items.push(render_pir_aot_decl(
+                package,
+                &tuple_types,
+                &module.path,
+                decl,
+            )?);
         }
         insert_render_module_items(&mut root, &module.path, items)?;
     }
@@ -1338,9 +1466,10 @@ fn render_pir_aot_package(
         let param_types = entrypoint
             .params
             .iter()
-            .map(|param| render_pir_aot_type(package, &param.ty, &runner_path))
+            .map(|param| render_pir_aot_type(package, &tuple_types, &param.ty, &runner_path))
             .collect::<Result<Vec<_>, _>>()?;
-        let output_type = render_pir_aot_type(package, &entrypoint.return_type, &runner_path)?;
+        let output_type =
+            render_pir_aot_type(package, &tuple_types, &entrypoint.return_type, &runner_path)?;
         insert_render_module_items(
             &mut root,
             &runner_path,
@@ -1362,12 +1491,15 @@ fn render_pir_aot_package(
 
     Ok(trim_trailing_line_whitespace(format!(
         "// SPDX-License-Identifier: Apache-2.0\n// Generated by xlsynth_pir_compiler::aot from {source_kind} {package_name:?}.\n\n{}{}",
-        render_pir_aot_runtime_items(package),
+        render_pir_aot_runtime_items(package, &tuple_types)?,
         render_module_node_children(&root, 0),
     )))
 }
 
-fn render_pir_aot_runtime_items(package: &ValidatedPirAotPackage<'_>) -> String {
+fn render_pir_aot_runtime_items(
+    package: &ValidatedPirAotPackage<'_>,
+    tuple_types: &GeneratedTupleTypes,
+) -> Result<String, CompilerError> {
     let mut output = "pub use xlsynth_pir_compiler_runtime::Token;\n".to_string();
     for (signedness, bit_count) in collect_scalar_aliases(package) {
         output.push_str(&format!(
@@ -1376,8 +1508,42 @@ fn render_pir_aot_runtime_items(package: &ValidatedPirAotPackage<'_>) -> String 
             scalar_runtime_type(signedness, bit_count)
         ));
     }
+    if !tuple_types.is_empty() {
+        output.push('\n');
+        for tuple_type in &tuple_types.types {
+            output.push_str(&render_generated_tuple_type(
+                package,
+                tuple_types,
+                tuple_type,
+            )?);
+            output.push('\n');
+        }
+    }
     output.push('\n');
-    output
+    Ok(output)
+}
+
+fn render_generated_tuple_type(
+    package: &ValidatedPirAotPackage<'_>,
+    tuple_types: &GeneratedTupleTypes,
+    tuple_type: &GeneratedTupleType,
+) -> Result<String, CompilerError> {
+    let fields = tuple_type
+        .elements
+        .iter()
+        .enumerate()
+        .map(|(index, element)| {
+            Ok(format!(
+                "    pub field{index}: {},\n",
+                render_pir_aot_type(package, tuple_types, element, &[])?
+            ))
+        })
+        .collect::<Result<Vec<_>, CompilerError>>()?
+        .concat();
+    Ok(format!(
+        "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {} {{\n{fields}}}\n",
+        tuple_type.name
+    ))
 }
 
 fn insert_render_module_items(
@@ -1553,6 +1719,7 @@ fn render_root_item_path(current_module_path: &[String], name: &str) -> String {
 
 fn render_pir_aot_decl(
     package: &ValidatedPirAotPackage<'_>,
+    tuple_types: &GeneratedTupleTypes,
     module_path: &[String],
     decl: &PirAotDecl,
 ) -> Result<String, CompilerError> {
@@ -1564,7 +1731,7 @@ fn render_pir_aot_decl(
                     Ok(format!(
                         "    pub {}: {},\n",
                         sanitize_identifier(&field.name),
-                        render_pir_aot_type(package, &field.ty, module_path)?
+                        render_pir_aot_type(package, tuple_types, &field.ty, module_path)?
                     ))
                 })
                 .collect::<Result<Vec<_>, CompilerError>>()?
@@ -1597,13 +1764,14 @@ fn render_pir_aot_decl(
         }
         PirAotDecl::Alias { name, target } => Ok(format!(
             "pub type {name} = {};\n",
-            render_pir_aot_type(package, target, module_path)?
+            render_pir_aot_type(package, tuple_types, target, module_path)?
         )),
     }
 }
 
 fn render_pir_aot_type(
     package: &ValidatedPirAotPackage<'_>,
+    tuple_types: &GeneratedTupleTypes,
     ty: &PirAotType,
     current_module_path: &[String],
 ) -> Result<String, CompilerError> {
@@ -1619,19 +1787,16 @@ fn render_pir_aot_type(
         PirAotType::Token => Ok(render_root_item_path(current_module_path, "Token")),
         PirAotType::Array { size, element } => Ok(format!(
             "[{}; {size}]",
-            render_pir_aot_type(package, element, current_module_path)?
+            render_pir_aot_type(package, tuple_types, element, current_module_path)?
         )),
-        PirAotType::Tuple { elements } => {
-            let rendered = elements
-                .iter()
-                .map(|element| render_pir_aot_type(package, element, current_module_path))
-                .collect::<Result<Vec<_>, _>>()?;
-            if rendered.len() == 1 {
-                Ok(format!("({},)", rendered[0]))
-            } else {
-                Ok(format!("({})", rendered.join(", ")))
-            }
-        }
+        PirAotType::Tuple { elements } => tuple_types
+            .type_name(elements)
+            .map(|name| render_root_item_path(current_module_path, name))
+            .ok_or_else(|| {
+                CompilerError::InvalidArgument(
+                    "PIR AOT tuple type was not registered for rendering".into(),
+                )
+            }),
         PirAotType::TypeRef { module, name } => {
             let key = PirAotDeclKey {
                 module: module.clone(),
@@ -2244,5 +2409,92 @@ mod tests {
                 .contains("enum values are currently limited to 64 bits"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn pir_aot_tuple_metadata_renders_repr_c_tuple_wrappers() {
+        let u8_ty = PirAotType::Bits {
+            signedness: PirAotSignedness::Unsigned,
+            bit_count: 8,
+        };
+        let u16_ty = PirAotType::Bits {
+            signedness: PirAotSignedness::Unsigned,
+            bit_count: 16,
+        };
+        let pair_ty = PirAotType::Tuple {
+            elements: vec![u8_ty.clone(), u16_ty.clone()],
+        };
+        let nested_ty = PirAotType::Tuple {
+            elements: vec![pair_ty.clone(), u8_ty.clone()],
+        };
+        let metadata = PirAotPackageMetadata {
+            format_version: PIR_AOT_METADATA_FORMAT_VERSION,
+            modules: vec![PirAotModule {
+                path: vec!["m".to_string()],
+                declarations: vec![
+                    PirAotDecl::Struct {
+                        name: "Holder".to_string(),
+                        fields: vec![PirAotField {
+                            name: "pair".to_string(),
+                            ty: pair_ty.clone(),
+                        }],
+                    },
+                    PirAotDecl::Alias {
+                        name: "PairAlias".to_string(),
+                        target: pair_ty.clone(),
+                    },
+                    PirAotDecl::Alias {
+                        name: "NestedAlias".to_string(),
+                        target: nested_ty.clone(),
+                    },
+                ],
+            }],
+            entrypoints: vec![PirAotEntrypoint {
+                name: "entry".to_string(),
+                source: PirAotEntrypointSource::GeneratedIr {
+                    ir_top: "entry".to_string(),
+                },
+                owning_module: vec!["m".to_string()],
+                params: vec![PirAotParam {
+                    name: "pair".to_string(),
+                    ty: pair_ty,
+                }],
+                return_type: PirAotType::Array {
+                    size: 2,
+                    element: Box::new(nested_ty),
+                },
+            }],
+        };
+        let package = ValidatedPirAotPackage::new(&metadata).expect("metadata should validate");
+        let artifact = AotEntrypointArtifact {
+            entrypoint_symbol: "__xlsynth_pir_aot_entry".to_string(),
+            param_layouts: Vec::new(),
+            result_layout: NativeValueLayout::Token,
+            metadata: Default::default(),
+            scratch_byte_count: 0,
+            scratch_alignment: 1,
+        };
+        let rendered = render_pir_aot_package(
+            "tuple_test",
+            &package,
+            &[("entry".to_string(), artifact)],
+            "test package",
+        )
+        .expect("package should render");
+
+        assert!(rendered.contains(
+            "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct XlsynthPirAotTuple0"
+        ));
+        assert!(rendered.contains("pub field0: U8,"));
+        assert!(rendered.contains("pub field1: U16,"));
+        assert!(rendered.contains(
+            "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct XlsynthPirAotTuple1"
+        ));
+        assert!(rendered.contains("pub field0: XlsynthPirAotTuple0,"));
+        assert!(rendered.contains("pub type PairAlias = super::XlsynthPirAotTuple0;"));
+        assert!(rendered.contains("pub pair: super::XlsynthPirAotTuple0,"));
+        assert!(rendered.contains("pair: &super::super::XlsynthPirAotTuple0"));
+        assert!(rendered.contains("RunResult<[super::super::XlsynthPirAotTuple1; 2]>"));
+        assert!(!rendered.contains("(U8, U16)"));
     }
 }

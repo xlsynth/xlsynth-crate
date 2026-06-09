@@ -18,6 +18,7 @@ fn main() {
 
     let gizmo_types = source_dir.join("gizmo_types.x");
     let parametric_forms = source_dir.join("parametric_forms.x");
+    let tuple_shapes = source_dir.join("tuple_shapes.x");
     let invokes_and_loop = source_dir.join("invokes_and_loop.x");
     let events = source_dir.join("events.x");
     let parametric_imports = source_dir.join("parametric_imports.x");
@@ -41,6 +42,13 @@ fn main() {
             name: "parametric_forms",
             dslx_path: &parametric_forms,
             top: "exercise_parametric_forms",
+            dslx_options: common_dslx_options.clone(),
+            type_module_paths: vec![],
+        },
+        TypedDslxAotBuildSpec {
+            name: "tuple_shapes",
+            dslx_path: &tuple_shapes,
+            top: "exercise_tuple_shapes",
             dslx_options: common_dslx_options.clone(),
             type_module_paths: vec![],
         },
