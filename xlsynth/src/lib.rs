@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#[cfg(feature = "standalone-aot")]
+#[cfg(any(feature = "standalone-aot", feature = "pir-compiler-dslx-aot"))]
 pub mod aot_builder;
 pub mod aot_entrypoint_metadata;
 pub mod aot_lib;

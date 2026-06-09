@@ -1,0 +1,431 @@
+{
+  "_spdx": "SPDX-License-Identifier: Apache-2.0",
+  "format_version": 2,
+  "modules": [
+    {
+      "path": ["native_aot_tests"],
+      "declarations": [
+        {
+          "kind": "struct",
+          "name": "CompoundInput",
+          "fields": [
+            {
+              "name": "base",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 42
+              }
+            },
+            {
+              "name": "limbs",
+              "ty": {
+                "kind": "array",
+                "size": 2,
+                "element": {
+                  "kind": "bits",
+                  "signedness": "unsigned",
+                  "bit_count": 65
+                }
+              }
+            }
+          ]
+        },
+        {
+          "kind": "struct",
+          "name": "CompoundOutput",
+          "fields": [
+            {
+              "name": "sum",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 42
+              }
+            },
+            {
+              "name": "limbs",
+              "ty": {
+                "kind": "array",
+                "size": 2,
+                "element": {
+                  "kind": "bits",
+                  "signedness": "unsigned",
+                  "bit_count": 65
+                }
+              }
+            }
+          ]
+        },
+        {
+          "kind": "struct",
+          "name": "EmptyOutput",
+          "fields": []
+        },
+        {
+          "kind": "struct",
+          "name": "WideRuntimeOutput",
+          "fields": [
+            {
+              "name": "product",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 129
+              }
+            },
+            {
+              "name": "signed_product",
+              "ty": {
+                "kind": "bits",
+                "signedness": "signed",
+                "bit_count": 129
+              }
+            },
+            {
+              "name": "quotient",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 129
+              }
+            },
+            {
+              "name": "left",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 129
+              }
+            },
+            {
+              "name": "right",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 129
+              }
+            },
+            {
+              "name": "slice",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 96
+              }
+            },
+            {
+              "name": "low_slice",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 32
+              }
+            },
+            {
+              "name": "updated",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 129
+              }
+            },
+            {
+              "name": "unsigned_sum",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 130
+              }
+            },
+            {
+              "name": "signed_sum",
+              "ty": {
+                "kind": "bits",
+                "signedness": "signed",
+                "bit_count": 130
+              }
+            },
+            {
+              "name": "hot",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 130
+              }
+            },
+            {
+              "name": "encoded",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 8
+              }
+            },
+            {
+              "name": "decoded",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 130
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "entrypoints": [
+    {
+      "name": "add_one",
+      "ir_file": "ir/add_one.ir",
+      "ir_top": "add_one",
+      "owning_module": ["native_aot_tests"],
+      "params": [
+        {
+          "name": "x",
+          "ty": {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 42
+          }
+        }
+      ],
+      "return_type": {
+        "kind": "bits",
+        "signedness": "unsigned",
+        "bit_count": 42
+      }
+    },
+    {
+      "name": "add_inputs",
+      "ir_file": "ir/add_inputs.ir",
+      "ir_top": "add_inputs",
+      "owning_module": ["native_aot_tests"],
+      "params": [
+        {
+          "name": "a",
+          "ty": {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 8
+          }
+        },
+        {
+          "name": "b",
+          "ty": {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 8
+          }
+        }
+      ],
+      "return_type": {
+        "kind": "bits",
+        "signedness": "unsigned",
+        "bit_count": 8
+      }
+    },
+    {
+      "name": "compound_shapes",
+      "ir_file": "ir/compound_shapes.ir",
+      "ir_top": "compound_shapes",
+      "owning_module": ["native_aot_tests"],
+      "params": [
+        {
+          "name": "input",
+          "ty": {
+            "kind": "type_ref",
+            "module": ["native_aot_tests"],
+            "name": "CompoundInput"
+          }
+        },
+        {
+          "name": "increment",
+          "ty": {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 42
+          }
+        }
+      ],
+      "return_type": {
+        "kind": "type_ref",
+        "module": ["native_aot_tests"],
+        "name": "CompoundOutput"
+      }
+    },
+    {
+      "name": "empty_tuple",
+      "ir_file": "ir/empty_tuple.ir",
+      "ir_top": "empty_tuple",
+      "owning_module": ["native_aot_tests"],
+      "params": [],
+      "return_type": {
+        "kind": "type_ref",
+        "module": ["native_aot_tests"],
+        "name": "EmptyOutput"
+      }
+    },
+    {
+      "name": "wide_runtime_ops",
+      "ir_file": "ir/wide_runtime_ops.ir",
+      "ir_top": "wide_runtime_ops",
+      "owning_module": ["native_aot_tests"],
+      "params": [
+        {
+          "name": "x",
+          "ty": {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 129
+          }
+        },
+        {
+          "name": "y",
+          "ty": {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 129
+          }
+        },
+        {
+          "name": "shift",
+          "ty": {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 8
+          }
+        },
+        {
+          "name": "replacement",
+          "ty": {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 73
+          }
+        }
+      ],
+      "return_type": {
+        "kind": "type_ref",
+        "module": ["native_aot_tests"],
+        "name": "WideRuntimeOutput"
+      }
+    },
+    {
+      "name": "events",
+      "ir_file": "ir/events.ir",
+      "ir_top": "events",
+      "owning_module": ["native_aot_tests"],
+      "params": [
+        {
+          "name": "x",
+          "ty": {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 8
+          }
+        },
+        {
+          "name": "y",
+          "ty": {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 8
+          }
+        },
+        {
+          "name": "ok",
+          "ty": {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 1
+          }
+        },
+        {
+          "name": "emit",
+          "ty": {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 1
+          }
+        }
+      ],
+      "return_type": {
+        "kind": "bits",
+        "signedness": "unsigned",
+        "bit_count": 8
+      }
+    },
+    {
+      "name": "assumed_in_bounds",
+      "ir_file": "ir/assumed_in_bounds.ir",
+      "ir_top": "assumed_in_bounds",
+      "owning_module": ["native_aot_tests"],
+      "params": [
+        {
+          "name": "a",
+          "ty": {
+            "kind": "array",
+            "size": 2,
+            "element": {
+              "kind": "bits",
+              "signedness": "unsigned",
+              "bit_count": 8
+            }
+          }
+        },
+        {
+          "name": "v",
+          "ty": {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 8
+          }
+        },
+        {
+          "name": "i",
+          "ty": {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 2
+          }
+        }
+      ],
+      "return_type": {
+        "kind": "bits",
+        "signedness": "unsigned",
+        "bit_count": 8
+      }
+    },
+    {
+      "name": "invokes_and_counted_for",
+      "ir_file": "ir/invokes_and_counted_for.ir",
+      "ir_top": "invokes_and_counted_for",
+      "owning_module": ["native_aot_tests"],
+      "params": [
+        {
+          "name": "init",
+          "ty": {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 8
+          }
+        },
+        {
+          "name": "increment",
+          "ty": {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 8
+          }
+        }
+      ],
+      "return_type": {
+        "kind": "bits",
+        "signedness": "unsigned",
+        "bit_count": 8
+      }
+    }
+  ]
+}

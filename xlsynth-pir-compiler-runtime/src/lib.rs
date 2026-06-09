@@ -3,6 +3,7 @@
 //! Runtime ABI and observable-event collection for compiled PIR functions.
 
 use std::ffi::c_void;
+use std::fmt;
 use std::marker::PhantomData;
 use std::ptr;
 
@@ -21,6 +22,387 @@ pub type CompiledEntrypoint = unsafe extern "C" fn(
 pub struct RawExecutionContext {
     private_state: *mut c_void,
 }
+
+/// Error returned by generated native-compiler entrypoint wrappers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunError(pub String);
+
+impl fmt::Display for RunError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RunError {}
+
+/// Output and observable events produced by one generated wrapper invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunResult<T> {
+    pub output: T,
+    pub events: ExecutionResult,
+}
+
+macro_rules! define_native_bits {
+    ($name:ident, $carrier:ty, $carrier_bits:expr) => {
+        #[repr(transparent)]
+        #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+        pub struct $name<const BIT_COUNT: usize>($carrier);
+
+        impl<const BIT_COUNT: usize> $name<BIT_COUNT> {
+            fn validate_width() -> Result<(), RunError> {
+                if BIT_COUNT == 0 || BIT_COUNT > $carrier_bits {
+                    Err(RunError(format!(
+                        "bits[{BIT_COUNT}] cannot use a {}-bit native carrier",
+                        $carrier_bits
+                    )))
+                } else {
+                    Ok(())
+                }
+            }
+
+            const fn mask() -> $carrier {
+                if BIT_COUNT == $carrier_bits {
+                    <$carrier>::MAX
+                } else {
+                    ((1 as $carrier) << BIT_COUNT) - 1
+                }
+            }
+
+            /// Constructs a canonical bitvector value, rejecting excess high bits.
+            pub fn new(value: $carrier) -> Result<Self, RunError> {
+                Self::validate_width()?;
+                if value & !Self::mask() != 0 {
+                    Err(RunError(format!(
+                        "value {value} does not fit in bits[{BIT_COUNT}]"
+                    )))
+                } else {
+                    Ok(Self(value))
+                }
+            }
+
+            /// Constructs a canonical bitvector by truncating high bits.
+            pub const fn wrapping(value: $carrier) -> Self {
+                assert!(
+                    BIT_COUNT > 0 && BIT_COUNT <= $carrier_bits,
+                    "invalid native bits carrier width"
+                );
+                Self(value & Self::mask())
+            }
+
+            /// Returns the native carrier value.
+            pub const fn get(self) -> $carrier {
+                self.0
+            }
+
+            /// Returns the value widened to `u64`.
+            pub const fn to_u64(self) -> u64 {
+                self.0 as u64
+            }
+        }
+    };
+}
+
+define_native_bits!(BitsInU8, u8, 8);
+define_native_bits!(BitsInU16, u16, 16);
+define_native_bits!(BitsInU32, u32, 32);
+define_native_bits!(BitsInU64, u64, 64);
+
+macro_rules! define_public_bits_wrappers {
+    (
+        $unsigned_name:ident,
+        $signed_name:ident,
+        $raw_name:ident,
+        $unsigned_carrier:ty,
+        $signed_carrier:ty,
+        $carrier_bits:expr
+    ) => {
+        #[repr(transparent)]
+        #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+        pub struct $unsigned_name<const BIT_COUNT: usize>($raw_name<BIT_COUNT>);
+
+        impl<const BIT_COUNT: usize> $unsigned_name<BIT_COUNT> {
+            const fn mask() -> $unsigned_carrier {
+                if BIT_COUNT == $carrier_bits {
+                    <$unsigned_carrier>::MAX
+                } else {
+                    ((1 as $unsigned_carrier) << BIT_COUNT) - 1
+                }
+            }
+
+            /// Constructs an unsigned DSLX-style bit value, rejecting excess high bits.
+            pub fn new(value: $unsigned_carrier) -> Result<Self, RunError> {
+                Ok(Self($raw_name::<BIT_COUNT>::new(value)?))
+            }
+
+            /// Constructs an unsigned DSLX-style bit value by truncating high bits.
+            pub const fn wrapping(value: $unsigned_carrier) -> Self {
+                Self($raw_name::<BIT_COUNT>::wrapping(value))
+            }
+
+            /// Constructs an unsigned DSLX-style bit value from raw ABI bits.
+            pub const fn from_raw_bits(value: $unsigned_carrier) -> Self {
+                assert!(
+                    BIT_COUNT > 0 && BIT_COUNT <= $carrier_bits,
+                    "invalid raw bit carrier width"
+                );
+                assert!(
+                    value & !Self::mask() == 0,
+                    "raw bits do not fit target width"
+                );
+                Self($raw_name::<BIT_COUNT>::wrapping(value))
+            }
+
+            /// Returns the unsigned native carrier value.
+            /// Returns the unsigned value widened to `u64`.
+            pub const fn to_u64(self) -> u64 {
+                self.0.to_u64()
+            }
+
+            /// Returns the raw ABI bits in the native carrier.
+            pub const fn raw_bits(self) -> $unsigned_carrier {
+                self.0.get()
+            }
+        }
+
+        #[repr(transparent)]
+        #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+        pub struct $signed_name<const BIT_COUNT: usize>($raw_name<BIT_COUNT>);
+
+        impl<const BIT_COUNT: usize> $signed_name<BIT_COUNT> {
+            fn validate_signed_value(value: $signed_carrier) -> Result<(), RunError> {
+                if BIT_COUNT == 0 || BIT_COUNT > $carrier_bits {
+                    return Err(RunError(format!(
+                        "s{BIT_COUNT} cannot use a {}-bit native carrier",
+                        $carrier_bits
+                    )));
+                }
+                let min = -(1i128 << (BIT_COUNT - 1));
+                let max = (1i128 << (BIT_COUNT - 1)) - 1;
+                let value = value as i128;
+                if value < min || value > max {
+                    Err(RunError(format!(
+                        "value {value} does not fit in s{BIT_COUNT}"
+                    )))
+                } else {
+                    Ok(())
+                }
+            }
+
+            const fn mask() -> $unsigned_carrier {
+                if BIT_COUNT == $carrier_bits {
+                    <$unsigned_carrier>::MAX
+                } else {
+                    ((1 as $unsigned_carrier) << BIT_COUNT) - 1
+                }
+            }
+
+            /// Constructs a signed DSLX-style bit value, rejecting out-of-range values.
+            pub fn new(value: $signed_carrier) -> Result<Self, RunError> {
+                Self::validate_signed_value(value)?;
+                Ok(Self($raw_name::<BIT_COUNT>::wrapping(
+                    value as $unsigned_carrier,
+                )))
+            }
+
+            /// Constructs a signed DSLX-style bit value by truncating to the target width.
+            pub const fn wrapping(value: $signed_carrier) -> Self {
+                Self($raw_name::<BIT_COUNT>::wrapping(
+                    value as $unsigned_carrier,
+                ))
+            }
+
+            /// Constructs a signed DSLX-style bit value from raw ABI bits.
+            pub const fn from_raw_bits(value: $unsigned_carrier) -> Self {
+                assert!(
+                    BIT_COUNT > 0 && BIT_COUNT <= $carrier_bits,
+                    "invalid raw bit carrier width"
+                );
+                assert!(
+                    value & !Self::mask() == 0,
+                    "raw bits do not fit target width"
+                );
+                Self($raw_name::<BIT_COUNT>::wrapping(value))
+            }
+
+            /// Returns the sign-extended native signed carrier value.
+            fn to_signed_carrier(self) -> $signed_carrier {
+                let raw = self.0.get();
+                let sign_bit = 1 as $unsigned_carrier << (BIT_COUNT - 1);
+                if raw & sign_bit == 0 {
+                    raw as $signed_carrier
+                } else {
+                    (raw | !Self::mask()) as $signed_carrier
+                }
+            }
+
+            /// Returns the sign-extended value widened to `i64`.
+            pub fn to_i64(self) -> i64 {
+                self.to_signed_carrier() as i64
+            }
+
+            /// Returns the raw ABI bits in the native carrier.
+            pub const fn raw_bits(self) -> $unsigned_carrier {
+                self.0.get()
+            }
+        }
+    };
+}
+
+define_public_bits_wrappers!(UnsignedBitsInU8, SignedBitsInU8, BitsInU8, u8, i8, 8);
+define_public_bits_wrappers!(UnsignedBitsInU16, SignedBitsInU16, BitsInU16, u16, i16, 16);
+define_public_bits_wrappers!(UnsignedBitsInU32, SignedBitsInU32, BitsInU32, u32, i32, 32);
+define_public_bits_wrappers!(UnsignedBitsInU64, SignedBitsInU64, BitsInU64, u64, i64, 64);
+
+/// Native least-significant-first limb storage for a bitvector wider than 64
+/// bits.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WideBits<const BIT_COUNT: usize, const LIMB_COUNT: usize>([u64; LIMB_COUNT]);
+
+impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> WideBits<BIT_COUNT, LIMB_COUNT> {
+    fn validate_layout() -> Result<(), RunError> {
+        if BIT_COUNT <= 64 || LIMB_COUNT != BIT_COUNT.div_ceil(64) {
+            Err(RunError(format!(
+                "bits[{BIT_COUNT}] cannot use {LIMB_COUNT} native wide limb(s)"
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn high_mask() -> u64 {
+        let high_width = BIT_COUNT % 64;
+        if high_width == 0 {
+            u64::MAX
+        } else {
+            (1u64 << high_width) - 1
+        }
+    }
+
+    /// Constructs a canonical wide bitvector, rejecting excess high bits.
+    pub fn from_limbs(limbs: [u64; LIMB_COUNT]) -> Result<Self, RunError> {
+        Self::validate_layout()?;
+        if limbs[LIMB_COUNT - 1] & !Self::high_mask() != 0 {
+            Err(RunError(format!(
+                "high limb does not fit in bits[{BIT_COUNT}]"
+            )))
+        } else {
+            Ok(Self(limbs))
+        }
+    }
+
+    /// Constructs a canonical wide bitvector by truncating excess high bits.
+    pub fn wrapping_limbs(mut limbs: [u64; LIMB_COUNT]) -> Self {
+        assert!(
+            BIT_COUNT > 64 && LIMB_COUNT == BIT_COUNT.div_ceil(64),
+            "invalid native wide bits layout"
+        );
+        limbs[LIMB_COUNT - 1] &= Self::high_mask();
+        Self(limbs)
+    }
+
+    /// Returns the least-significant-first limb representation.
+    pub const fn limbs(&self) -> &[u64; LIMB_COUNT] {
+        &self.0
+    }
+}
+
+impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> Default for WideBits<BIT_COUNT, LIMB_COUNT> {
+    fn default() -> Self {
+        Self([0; LIMB_COUNT])
+    }
+}
+
+/// Public unsigned DSLX-style wrapper for a wide native bitvector.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnsignedWideBits<const BIT_COUNT: usize, const LIMB_COUNT: usize>(
+    WideBits<BIT_COUNT, LIMB_COUNT>,
+);
+
+impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> UnsignedWideBits<BIT_COUNT, LIMB_COUNT> {
+    /// Constructs a canonical wide unsigned bitvector, rejecting excess high
+    /// bits.
+    pub fn from_limbs(limbs: [u64; LIMB_COUNT]) -> Result<Self, RunError> {
+        Ok(Self(WideBits::<BIT_COUNT, LIMB_COUNT>::from_limbs(limbs)?))
+    }
+
+    /// Constructs a canonical wide unsigned bitvector by truncating excess high
+    /// bits.
+    pub fn wrapping_limbs(limbs: [u64; LIMB_COUNT]) -> Self {
+        Self(WideBits::<BIT_COUNT, LIMB_COUNT>::wrapping_limbs(limbs))
+    }
+
+    /// Returns the least-significant-first raw ABI limb representation.
+    pub const fn limbs(&self) -> &[u64; LIMB_COUNT] {
+        self.0.limbs()
+    }
+
+    /// Returns the unsigned value as a big integer.
+    pub fn to_biguint(&self) -> BigUint {
+        let mut bytes = Vec::with_capacity(LIMB_COUNT * std::mem::size_of::<u64>());
+        for limb in self.limbs() {
+            bytes.extend_from_slice(&limb.to_le_bytes());
+        }
+        BigUint::from_bytes_le(&bytes)
+    }
+}
+
+impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> Default
+    for UnsignedWideBits<BIT_COUNT, LIMB_COUNT>
+{
+    fn default() -> Self {
+        Self(WideBits::default())
+    }
+}
+
+/// Public signed DSLX-style wrapper for a wide native bitvector.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignedWideBits<const BIT_COUNT: usize, const LIMB_COUNT: usize>(
+    WideBits<BIT_COUNT, LIMB_COUNT>,
+);
+
+impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> SignedWideBits<BIT_COUNT, LIMB_COUNT> {
+    /// Constructs a canonical wide signed bitvector from raw ABI limbs.
+    pub fn from_limbs(limbs: [u64; LIMB_COUNT]) -> Result<Self, RunError> {
+        Ok(Self(WideBits::<BIT_COUNT, LIMB_COUNT>::from_limbs(limbs)?))
+    }
+
+    /// Constructs a canonical wide signed bitvector by truncating excess high
+    /// bits.
+    pub fn wrapping_limbs(limbs: [u64; LIMB_COUNT]) -> Self {
+        Self(WideBits::<BIT_COUNT, LIMB_COUNT>::wrapping_limbs(limbs))
+    }
+
+    /// Returns the least-significant-first raw ABI limb representation.
+    pub const fn limbs(&self) -> &[u64; LIMB_COUNT] {
+        self.0.limbs()
+    }
+
+    /// Returns the sign-extended value as a big integer.
+    pub fn to_bigint(&self) -> BigInt {
+        let unsigned = UnsignedWideBits::<BIT_COUNT, LIMB_COUNT>(self.0).to_biguint();
+        if BIT_COUNT == 0 || !unsigned.bit((BIT_COUNT - 1) as u64) {
+            BigInt::from_biguint(Sign::Plus, unsigned)
+        } else {
+            BigInt::from_biguint(Sign::Plus, unsigned) - (BigInt::from(1u8) << BIT_COUNT)
+        }
+    }
+}
+
+impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> Default
+    for SignedWideBits<BIT_COUNT, LIMB_COUNT>
+{
+    fn default() -> Self {
+        Self(WideBits::default())
+    }
+}
+
+/// Zero-sized native representation of a PIR token value.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Token;
 
 /// Kind of observable PIR event described by an event site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -995,6 +1377,47 @@ impl TraceValueLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_bits_wrappers_enforce_semantic_widths() {
+        let value = BitsInU64::<42>::new((1u64 << 41) | 7).expect("value fits in bits[42]");
+        assert_eq!(value.to_u64(), (1u64 << 41) | 7);
+        assert!(BitsInU64::<42>::new(1u64 << 42).is_err());
+        assert_eq!(BitsInU16::<9>::wrapping(0xffff).get(), 0x1ff);
+        assert!(BitsInU8::<9>::new(0).is_err());
+    }
+
+    #[test]
+    fn public_signed_and_unsigned_bits_wrappers_preserve_raw_abi_bits() {
+        let unsigned = UnsignedBitsInU8::<4>::new(15).expect("u4 max");
+        assert_eq!(unsigned.to_u64(), 15);
+        assert_eq!(unsigned.raw_bits(), 15);
+        assert!(UnsignedBitsInU8::<4>::new(16).is_err());
+        assert!(std::panic::catch_unwind(|| UnsignedBitsInU8::<4>::from_raw_bits(16)).is_err());
+
+        let signed = SignedBitsInU8::<4>::new(-1).expect("s4 -1");
+        assert_eq!(signed.to_i64(), -1);
+        assert_eq!(signed.raw_bits(), 15);
+        assert!(SignedBitsInU8::<4>::new(8).is_err());
+        assert!(SignedBitsInU8::<4>::new(-9).is_err());
+        assert!(std::panic::catch_unwind(|| SignedBitsInU8::<4>::from_raw_bits(16)).is_err());
+        assert_eq!(SignedBitsInU16::<9>::from_raw_bits(0x101).to_i64(), -255);
+
+        let wide = SignedWideBits::<65, 2>::from_limbs([u64::MAX, 1]).expect("s65 -1");
+        assert_eq!(wide.to_bigint(), BigInt::from(-1));
+        assert_eq!(wide.limbs(), &[u64::MAX, 1]);
+    }
+
+    #[test]
+    fn wide_bits_wrappers_use_lsb_first_limbs_and_mask_high_bits() {
+        let value =
+            WideBits::<65, 2>::from_limbs([0x0123_4567_89ab_cdef, 1]).expect("canonical value");
+        assert_eq!(value.limbs(), &[0x0123_4567_89ab_cdef, 1]);
+        assert!(WideBits::<65, 2>::from_limbs([0, 2]).is_err());
+        assert_eq!(WideBits::<65, 2>::wrapping_limbs([7, 3]).limbs(), &[7, 1]);
+        assert!(WideBits::<65, 3>::from_limbs([0, 0, 0]).is_err());
+        assert_eq!(std::mem::size_of::<Token>(), 0);
+    }
 
     fn metadata() -> CompiledFunctionMetadata {
         CompiledFunctionMetadata {

@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package native_aot_tests
+
+fn add_one(x: bits[8] id=1) -> bits[8] {
+  one: bits[8] = literal(value=1, id=2)
+  ret result: bits[8] = add(x, one, id=3)
+}
+
+fn through(x: bits[8] id=4) -> bits[8] {
+  ret result: bits[8] = invoke(x, to_apply=add_one, id=5)
+}
+
+fn loop_body(i: bits[8] id=6, carry: bits[8] id=7, increment: bits[8] id=8) -> bits[8] {
+  with_i: bits[8] = add(carry, i, id=9)
+  ret result: bits[8] = add(with_i, increment, id=10)
+}
+
+fn invokes_and_counted_for(init: bits[8] id=11, increment: bits[8] id=12) -> bits[8] {
+  invoked: bits[8] = invoke(init, to_apply=through, id=13)
+  ret result: bits[8] = counted_for(invoked, trip_count=3, stride=2, body=loop_body, invariant_args=[increment], id=14)
+}

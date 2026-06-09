@@ -1,0 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package native_aot_tests
+
+fn compound_shapes(input: (bits[42], bits[65][2]) id=1, increment: bits[42] id=2) -> (bits[42], bits[65][2]) {
+  base: bits[42] = tuple_index(input, index=0, id=3)
+  limbs: bits[65][2] = tuple_index(input, index=1, id=4)
+  sum: bits[42] = add(base, increment, id=5)
+  ret out: (bits[42], bits[65][2]) = tuple(sum, limbs, id=6)
+}
