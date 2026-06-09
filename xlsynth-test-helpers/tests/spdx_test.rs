@@ -200,6 +200,24 @@ fn test_accepts_vimscript_spdx_comment() {
 }
 
 #[test]
+fn test_accepts_json_spdx_field() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let json_file = temp_dir.path().join("metadata.json");
+    fs::write(
+        json_file,
+        "{\n  \"_spdx\": \"SPDX-License-Identifier: Apache-2.0\"\n}\n",
+    )
+    .unwrap();
+
+    let missing_spdx_files = find_missing_spdx_files(temp_dir.path());
+    assert!(
+        missing_spdx_files.is_empty(),
+        "unexpected missing SPDX files: {:?}",
+        missing_spdx_files
+    );
+}
+
+#[test]
 fn check_all_rust_files_for_spdx() {
     // Use cargo_metadata to get the workspace root
     let metadata = MetadataCommand::new().exec().unwrap();

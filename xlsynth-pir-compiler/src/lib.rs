@@ -14,11 +14,13 @@ use cranelift_codegen::ir::{
     AbiParam, ExtFuncData, ExternalName, FuncRef, InstBuilder, LibCall, MemFlags, Signature,
     Type as ClifType, Value, types,
 };
+use cranelift_codegen::isa;
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use cranelift_object::{ObjectBuilder, ObjectModule};
+use target_lexicon::{OperatingSystem, Triple, Vendor};
 use thiserror::Error;
 use xlsynth::{IrBits, IrValue};
 use xlsynth_pir::ir::{self, Binop, NaryOp, NodePayload, NodeRef, Type, Unop};
@@ -984,8 +986,7 @@ fn compile_reachable_aot(
     let top_plan = planned.plans.get(&top.name).ok_or_else(|| {
         CompilerError::InvalidFunction(format!("missing compilation plan for '{}'", top.name))
     })?;
-    let isa_builder =
-        cranelift_native::builder().map_err(|error| CompilerError::Backend(error.to_string()))?;
+    let isa_builder = host_aot_isa_builder()?;
     let mut flags_builder = settings::builder();
     flags_builder
         .enable("is_pic")
@@ -1068,6 +1069,30 @@ fn compile_reachable_aot(
         scratch_byte_count: planned.scratch_byte_count,
         scratch_alignment: planned.scratch_alignment,
     })
+}
+
+fn host_aot_isa_builder() -> Result<isa::Builder, CompilerError> {
+    let mut isa_builder = isa::lookup(normalized_host_aot_triple())
+        .map_err(|error| CompilerError::Backend(error.to_string()))?;
+    cranelift_native::infer_native_flags(&mut isa_builder)
+        .map_err(|error| CompilerError::Backend(error.to_string()))?;
+    Ok(isa_builder)
+}
+
+fn normalized_host_aot_triple() -> Triple {
+    normalize_host_aot_triple(Triple::host())
+}
+
+fn normalize_host_aot_triple(mut triple: Triple) -> Triple {
+    if triple.vendor == Vendor::Apple
+        && matches!(triple.operating_system, OperatingSystem::Darwin(_))
+    {
+        // `target-lexicon` reports macOS hosts as `*-apple-darwin`.
+        // Cranelift's object backend emits Mach-O PLATFORM_UNKNOWN for Darwin,
+        // which Apple ld rejects, so use the concrete macOS platform instead.
+        triple.operating_system = OperatingSystem::MacOSX(None);
+    }
+    triple
 }
 
 impl Drop for PirFunctionCompiler {
@@ -8056,6 +8081,9 @@ fn unsupported_node(node: &ir::Node) -> CompilerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use target_lexicon::{
+        Architecture, BinaryFormat, DeploymentTarget, Environment, OperatingSystem, Vendor,
+    };
     use xlsynth_pir::ir_parser::Parser;
     use xlsynth_pir::ir_utils::get_topological;
 
@@ -8111,6 +8139,29 @@ mod tests {
             }
         }
         peak
+    }
+
+    #[test]
+    fn test_normalizes_apple_darwin_host_triple_to_macosx() {
+        let triple = Triple {
+            architecture: Architecture::X86_64,
+            vendor: Vendor::Apple,
+            operating_system: OperatingSystem::Darwin(Some(DeploymentTarget {
+                major: 23,
+                minor: 0,
+                patch: 0,
+            })),
+            environment: Environment::Unknown,
+            binary_format: BinaryFormat::Macho,
+        };
+
+        let normalized = normalize_host_aot_triple(triple.clone());
+
+        assert_eq!(normalized.architecture, triple.architecture);
+        assert_eq!(normalized.vendor, triple.vendor);
+        assert_eq!(normalized.operating_system, OperatingSystem::MacOSX(None));
+        assert_eq!(normalized.environment, triple.environment);
+        assert_eq!(normalized.binary_format, triple.binary_format);
     }
 
     #[test]
