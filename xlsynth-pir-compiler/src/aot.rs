@@ -51,6 +51,89 @@ pub struct GeneratedAotModule {
     pub artifact: AotArtifact,
 }
 
+/// Cargo build-script environment used for DSLX-to-PIR AOT conversion.
+pub struct CargoDslxEnv {
+    dslx_stdlib_path: PathBuf,
+    additional_search_paths: Vec<PathBuf>,
+}
+
+impl CargoDslxEnv {
+    /// Creates a DSLX build environment from the standard Cargo/Bazel vars.
+    pub fn new() -> Result<Self, CompilerError> {
+        println!("cargo:rerun-if-env-changed=DSLX_STDLIB_PATH");
+        println!("cargo:rerun-if-env-changed=XLSYNTH_ARTIFACT_CONFIG");
+        let dslx_stdlib_path = if let Some(path) = std::env::var_os("DSLX_STDLIB_PATH") {
+            PathBuf::from(path)
+        } else if let Some(config_path) = std::env::var_os("XLSYNTH_ARTIFACT_CONFIG") {
+            let config_path = PathBuf::from(config_path);
+            config_path
+                .parent()
+                .ok_or_else(|| {
+                    CompilerError::InvalidArgument(format!(
+                        "XLSYNTH_ARTIFACT_CONFIG has no parent directory: {}",
+                        config_path.display()
+                    ))
+                })?
+                .join("dslx_stdlib")
+        } else {
+            xlsynth::default_dslx_stdlib_path().to_path_buf()
+        };
+        Ok(Self {
+            dslx_stdlib_path,
+            additional_search_paths: Vec::new(),
+        })
+    }
+
+    /// Adds a DSLX import search root.
+    pub fn with_search_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.additional_search_paths.push(path.into());
+        self
+    }
+
+    /// Returns the DSLX standard library path selected for this build.
+    pub fn dslx_stdlib_path(&self) -> &Path {
+        &self.dslx_stdlib_path
+    }
+
+    /// Returns conversion options borrowing the selected stdlib and search
+    /// paths.
+    pub fn dslx_options(&self) -> DslxConvertOptions<'_> {
+        DslxConvertOptions {
+            dslx_stdlib_path: Some(&self.dslx_stdlib_path),
+            additional_search_paths: self
+                .additional_search_paths
+                .iter()
+                .map(PathBuf::as_path)
+                .collect(),
+            ..Default::default()
+        }
+    }
+}
+
+/// One DSLX function exposed by a typed AOT package.
+#[derive(Clone, Copy)]
+pub struct DslxAotEntrypoint<'a> {
+    pub name: &'a str,
+    pub top: &'a str,
+}
+
+impl<'a> DslxAotEntrypoint<'a> {
+    /// Creates an entrypoint whose generated module name and DSLX top match.
+    pub const fn new(name: &'a str, top: &'a str) -> Self {
+        Self { name, top }
+    }
+}
+
+fn export_generated_rust_file(env_var: &str, rust_file: &Path) -> Result<(), CompilerError> {
+    if env_var.is_empty() {
+        return Err(CompilerError::InvalidArgument(
+            "AOT generated Rust env var must not be empty".into(),
+        ));
+    }
+    println!("cargo:rustc-env={env_var}={}", rust_file.display());
+    Ok(())
+}
+
 /// Builds PIR AOT package metadata from typed DSLX entrypoint specs.
 pub fn build_pir_aot_package_metadata_from_dslx_specs(
     specs: &[TypedDslxAotBuildSpec<'_>],
@@ -256,6 +339,17 @@ impl<'a> TypedIrAotPackageBuilder<'a> {
         self.build_with_out_dir(Path::new(&out_dir))
     }
 
+    /// Emits a shared wrapper and exports its Rust file path in a rustc env
+    /// var.
+    pub fn build_and_export_env(
+        &self,
+        env_var: &str,
+    ) -> Result<GeneratedTypedIrAotPackage, CompilerError> {
+        let output = self.build()?;
+        export_generated_rust_file(env_var, &output.rust_file)?;
+        Ok(output)
+    }
+
     /// Emits a shared wrapper and linked package object into `out_dir`.
     pub fn build_with_out_dir(
         &self,
@@ -409,12 +503,44 @@ impl<'a> TypedDslxAotPackageBuilder<'a> {
         self
     }
 
+    /// Adds multiple entrypoints from the same DSLX file and type bridge set.
+    pub fn add_dslx_file(
+        mut self,
+        dslx_path: &'a Path,
+        dslx_options: DslxConvertOptions<'a>,
+        type_module_paths: impl IntoIterator<Item = &'a Path>,
+        entrypoints: impl IntoIterator<Item = DslxAotEntrypoint<'a>>,
+    ) -> Self {
+        let type_module_paths = type_module_paths.into_iter().collect::<Vec<_>>();
+        for entrypoint in entrypoints {
+            self.specs.push(TypedDslxAotBuildSpec {
+                name: entrypoint.name,
+                dslx_path,
+                top: entrypoint.top,
+                dslx_options: dslx_options.clone(),
+                type_module_paths: type_module_paths.clone(),
+            });
+        }
+        self
+    }
+
     /// Emits a shared wrapper and linked package object into Cargo's `OUT_DIR`.
     pub fn build(&self) -> Result<GeneratedTypedDslxAotPackage, CompilerError> {
         let out_dir = std::env::var_os("OUT_DIR").ok_or_else(|| {
             CompilerError::Backend("OUT_DIR is required while emitting an AOT package".into())
         })?;
         self.build_with_out_dir(Path::new(&out_dir))
+    }
+
+    /// Emits a shared wrapper and exports its Rust file path in a rustc env
+    /// var.
+    pub fn build_and_export_env(
+        &self,
+        env_var: &str,
+    ) -> Result<GeneratedTypedDslxAotPackage, CompilerError> {
+        let output = self.build()?;
+        export_generated_rust_file(env_var, &output.rust_file)?;
+        Ok(output)
     }
 
     /// Emits a shared wrapper and linked package object into `out_dir`.
@@ -1898,6 +2024,31 @@ impl Runner {{
 /// Creates a reusable runner for this native AOT entrypoint.
 pub fn new_runner() -> Result<Runner, RunError> {{
     Runner::new()
+}}
+
+std::thread_local! {{
+    static THREAD_LOCAL_RUNNER: std::cell::RefCell<Option<Runner>> =
+        const {{ std::cell::RefCell::new(None) }};
+}}
+
+/// Runs a closure with this thread's cached runner.
+pub fn with_thread_local_runner<T>(
+    f: impl FnOnce(&mut Runner) -> T,
+) -> Result<T, RunError> {{
+    THREAD_LOCAL_RUNNER.with(|runner_cell| {{
+        let mut runner_slot = runner_cell.borrow_mut();
+        if runner_slot.is_none() {{
+            runner_slot.replace(new_runner()?);
+        }}
+        Ok(f(runner_slot.as_mut().expect("runner was initialized")))
+    }})
+}}
+
+/// Runs a fallible closure with this thread's cached runner.
+pub fn try_with_thread_local_runner<T>(
+    f: impl FnOnce(&mut Runner) -> Result<T, RunError>,
+) -> Result<T, RunError> {{
+    with_thread_local_runner(f)?
 }}
 "#,
         symbol = artifact.entrypoint_symbol,

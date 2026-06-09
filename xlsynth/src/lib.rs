@@ -55,6 +55,11 @@ pub fn dslx_path_to_module_name(path: &std::path::Path) -> Result<&str, XlsynthE
     }
 }
 
+/// Returns the bundled DSLX standard library path used by default conversions.
+pub fn default_dslx_stdlib_path() -> &'static std::path::Path {
+    std::path::Path::new(xlsynth_sys::DSLX_STDLIB_PATH)
+}
+
 #[derive(Clone, Default, Eq, PartialEq)]
 pub struct DslxConvertOptions<'a> {
     pub dslx_stdlib_path: Option<&'a std::path::Path>,
