@@ -200,6 +200,31 @@ pub mod native_aot_tests {
             Runner::new()
         }
 
+        std::thread_local! {
+            static THREAD_LOCAL_RUNNER: std::cell::RefCell<Option<Runner>> =
+                const { std::cell::RefCell::new(None) };
+        }
+
+        /// Runs a closure with this thread's cached runner.
+        pub fn with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> T,
+        ) -> Result<T, RunError> {
+            THREAD_LOCAL_RUNNER.with(|runner_cell| {
+                let mut runner_slot = runner_cell.borrow_mut();
+                if runner_slot.is_none() {
+                    runner_slot.replace(new_runner()?);
+                }
+                Ok(f(runner_slot.as_mut().expect("runner was initialized")))
+            })
+        }
+
+        /// Runs a fallible closure with this thread's cached runner.
+        pub fn try_with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> Result<T, RunError>,
+        ) -> Result<T, RunError> {
+            with_thread_local_runner(f)?
+        }
+
     }
     pub mod aot_add_one {
         #![allow(dead_code)]
@@ -342,6 +367,31 @@ pub mod native_aot_tests {
         /// Creates a reusable runner for this native AOT entrypoint.
         pub fn new_runner() -> Result<Runner, RunError> {
             Runner::new()
+        }
+
+        std::thread_local! {
+            static THREAD_LOCAL_RUNNER: std::cell::RefCell<Option<Runner>> =
+                const { std::cell::RefCell::new(None) };
+        }
+
+        /// Runs a closure with this thread's cached runner.
+        pub fn with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> T,
+        ) -> Result<T, RunError> {
+            THREAD_LOCAL_RUNNER.with(|runner_cell| {
+                let mut runner_slot = runner_cell.borrow_mut();
+                if runner_slot.is_none() {
+                    runner_slot.replace(new_runner()?);
+                }
+                Ok(f(runner_slot.as_mut().expect("runner was initialized")))
+            })
+        }
+
+        /// Runs a fallible closure with this thread's cached runner.
+        pub fn try_with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> Result<T, RunError>,
+        ) -> Result<T, RunError> {
+            with_thread_local_runner(f)?
         }
 
     }
@@ -488,6 +538,31 @@ pub mod native_aot_tests {
             Runner::new()
         }
 
+        std::thread_local! {
+            static THREAD_LOCAL_RUNNER: std::cell::RefCell<Option<Runner>> =
+                const { std::cell::RefCell::new(None) };
+        }
+
+        /// Runs a closure with this thread's cached runner.
+        pub fn with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> T,
+        ) -> Result<T, RunError> {
+            THREAD_LOCAL_RUNNER.with(|runner_cell| {
+                let mut runner_slot = runner_cell.borrow_mut();
+                if runner_slot.is_none() {
+                    runner_slot.replace(new_runner()?);
+                }
+                Ok(f(runner_slot.as_mut().expect("runner was initialized")))
+            })
+        }
+
+        /// Runs a fallible closure with this thread's cached runner.
+        pub fn try_with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> Result<T, RunError>,
+        ) -> Result<T, RunError> {
+            with_thread_local_runner(f)?
+        }
+
     }
     pub mod aot_compound_shapes {
         #![allow(dead_code)]
@@ -630,6 +705,31 @@ pub mod native_aot_tests {
         /// Creates a reusable runner for this native AOT entrypoint.
         pub fn new_runner() -> Result<Runner, RunError> {
             Runner::new()
+        }
+
+        std::thread_local! {
+            static THREAD_LOCAL_RUNNER: std::cell::RefCell<Option<Runner>> =
+                const { std::cell::RefCell::new(None) };
+        }
+
+        /// Runs a closure with this thread's cached runner.
+        pub fn with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> T,
+        ) -> Result<T, RunError> {
+            THREAD_LOCAL_RUNNER.with(|runner_cell| {
+                let mut runner_slot = runner_cell.borrow_mut();
+                if runner_slot.is_none() {
+                    runner_slot.replace(new_runner()?);
+                }
+                Ok(f(runner_slot.as_mut().expect("runner was initialized")))
+            })
+        }
+
+        /// Runs a fallible closure with this thread's cached runner.
+        pub fn try_with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> Result<T, RunError>,
+        ) -> Result<T, RunError> {
+            with_thread_local_runner(f)?
         }
 
     }
@@ -776,6 +876,31 @@ pub mod native_aot_tests {
             Runner::new()
         }
 
+        std::thread_local! {
+            static THREAD_LOCAL_RUNNER: std::cell::RefCell<Option<Runner>> =
+                const { std::cell::RefCell::new(None) };
+        }
+
+        /// Runs a closure with this thread's cached runner.
+        pub fn with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> T,
+        ) -> Result<T, RunError> {
+            THREAD_LOCAL_RUNNER.with(|runner_cell| {
+                let mut runner_slot = runner_cell.borrow_mut();
+                if runner_slot.is_none() {
+                    runner_slot.replace(new_runner()?);
+                }
+                Ok(f(runner_slot.as_mut().expect("runner was initialized")))
+            })
+        }
+
+        /// Runs a fallible closure with this thread's cached runner.
+        pub fn try_with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> Result<T, RunError>,
+        ) -> Result<T, RunError> {
+            with_thread_local_runner(f)?
+        }
+
     }
     pub mod aot_events {
         #![allow(dead_code)]
@@ -918,6 +1043,31 @@ pub mod native_aot_tests {
         /// Creates a reusable runner for this native AOT entrypoint.
         pub fn new_runner() -> Result<Runner, RunError> {
             Runner::new()
+        }
+
+        std::thread_local! {
+            static THREAD_LOCAL_RUNNER: std::cell::RefCell<Option<Runner>> =
+                const { std::cell::RefCell::new(None) };
+        }
+
+        /// Runs a closure with this thread's cached runner.
+        pub fn with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> T,
+        ) -> Result<T, RunError> {
+            THREAD_LOCAL_RUNNER.with(|runner_cell| {
+                let mut runner_slot = runner_cell.borrow_mut();
+                if runner_slot.is_none() {
+                    runner_slot.replace(new_runner()?);
+                }
+                Ok(f(runner_slot.as_mut().expect("runner was initialized")))
+            })
+        }
+
+        /// Runs a fallible closure with this thread's cached runner.
+        pub fn try_with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> Result<T, RunError>,
+        ) -> Result<T, RunError> {
+            with_thread_local_runner(f)?
         }
 
     }
@@ -1064,6 +1214,31 @@ pub mod native_aot_tests {
             Runner::new()
         }
 
+        std::thread_local! {
+            static THREAD_LOCAL_RUNNER: std::cell::RefCell<Option<Runner>> =
+                const { std::cell::RefCell::new(None) };
+        }
+
+        /// Runs a closure with this thread's cached runner.
+        pub fn with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> T,
+        ) -> Result<T, RunError> {
+            THREAD_LOCAL_RUNNER.with(|runner_cell| {
+                let mut runner_slot = runner_cell.borrow_mut();
+                if runner_slot.is_none() {
+                    runner_slot.replace(new_runner()?);
+                }
+                Ok(f(runner_slot.as_mut().expect("runner was initialized")))
+            })
+        }
+
+        /// Runs a fallible closure with this thread's cached runner.
+        pub fn try_with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> Result<T, RunError>,
+        ) -> Result<T, RunError> {
+            with_thread_local_runner(f)?
+        }
+
     }
     pub mod aot_wide_runtime_ops {
         #![allow(dead_code)]
@@ -1206,6 +1381,31 @@ pub mod native_aot_tests {
         /// Creates a reusable runner for this native AOT entrypoint.
         pub fn new_runner() -> Result<Runner, RunError> {
             Runner::new()
+        }
+
+        std::thread_local! {
+            static THREAD_LOCAL_RUNNER: std::cell::RefCell<Option<Runner>> =
+                const { std::cell::RefCell::new(None) };
+        }
+
+        /// Runs a closure with this thread's cached runner.
+        pub fn with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> T,
+        ) -> Result<T, RunError> {
+            THREAD_LOCAL_RUNNER.with(|runner_cell| {
+                let mut runner_slot = runner_cell.borrow_mut();
+                if runner_slot.is_none() {
+                    runner_slot.replace(new_runner()?);
+                }
+                Ok(f(runner_slot.as_mut().expect("runner was initialized")))
+            })
+        }
+
+        /// Runs a fallible closure with this thread's cached runner.
+        pub fn try_with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> Result<T, RunError>,
+        ) -> Result<T, RunError> {
+            with_thread_local_runner(f)?
         }
 
     }

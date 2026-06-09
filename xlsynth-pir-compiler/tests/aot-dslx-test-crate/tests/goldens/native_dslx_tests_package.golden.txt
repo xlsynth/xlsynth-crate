@@ -13,6 +13,14 @@ pub type S2 = xlsynth_pir_compiler_runtime::SignedBitsInU8<2>;
 pub type S4 = xlsynth_pir_compiler_runtime::SignedBitsInU8<4>;
 pub type S65 = xlsynth_pir_compiler_runtime::SignedWideBits<65, 2>;
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct XlsynthPirAotTuple0 {
+    pub field0: U8,
+    pub field1: U16,
+}
+
+
 pub mod bar {
     pub mod widget {
         #![allow(dead_code)]
@@ -174,6 +182,31 @@ pub mod bar {
                 Runner::new()
             }
 
+            std::thread_local! {
+                static THREAD_LOCAL_RUNNER: std::cell::RefCell<Option<Runner>> =
+                    const { std::cell::RefCell::new(None) };
+            }
+
+            /// Runs a closure with this thread's cached runner.
+            pub fn with_thread_local_runner<T>(
+                f: impl FnOnce(&mut Runner) -> T,
+            ) -> Result<T, RunError> {
+                THREAD_LOCAL_RUNNER.with(|runner_cell| {
+                    let mut runner_slot = runner_cell.borrow_mut();
+                    if runner_slot.is_none() {
+                        runner_slot.replace(new_runner()?);
+                    }
+                    Ok(f(runner_slot.as_mut().expect("runner was initialized")))
+                })
+            }
+
+            /// Runs a fallible closure with this thread's cached runner.
+            pub fn try_with_thread_local_runner<T>(
+                f: impl FnOnce(&mut Runner) -> Result<T, RunError>,
+            ) -> Result<T, RunError> {
+                with_thread_local_runner(f)?
+            }
+
         }
     }
 }
@@ -325,6 +358,31 @@ pub mod events {
             Runner::new()
         }
 
+        std::thread_local! {
+            static THREAD_LOCAL_RUNNER: std::cell::RefCell<Option<Runner>> =
+                const { std::cell::RefCell::new(None) };
+        }
+
+        /// Runs a closure with this thread's cached runner.
+        pub fn with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> T,
+        ) -> Result<T, RunError> {
+            THREAD_LOCAL_RUNNER.with(|runner_cell| {
+                let mut runner_slot = runner_cell.borrow_mut();
+                if runner_slot.is_none() {
+                    runner_slot.replace(new_runner()?);
+                }
+                Ok(f(runner_slot.as_mut().expect("runner was initialized")))
+            })
+        }
+
+        /// Runs a fallible closure with this thread's cached runner.
+        pub fn try_with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> Result<T, RunError>,
+        ) -> Result<T, RunError> {
+            with_thread_local_runner(f)?
+        }
+
     }
 }
 pub mod foo {
@@ -474,6 +532,31 @@ pub mod foo {
             /// Creates a reusable runner for this native AOT entrypoint.
             pub fn new_runner() -> Result<Runner, RunError> {
                 Runner::new()
+            }
+
+            std::thread_local! {
+                static THREAD_LOCAL_RUNNER: std::cell::RefCell<Option<Runner>> =
+                    const { std::cell::RefCell::new(None) };
+            }
+
+            /// Runs a closure with this thread's cached runner.
+            pub fn with_thread_local_runner<T>(
+                f: impl FnOnce(&mut Runner) -> T,
+            ) -> Result<T, RunError> {
+                THREAD_LOCAL_RUNNER.with(|runner_cell| {
+                    let mut runner_slot = runner_cell.borrow_mut();
+                    if runner_slot.is_none() {
+                        runner_slot.replace(new_runner()?);
+                    }
+                    Ok(f(runner_slot.as_mut().expect("runner was initialized")))
+                })
+            }
+
+            /// Runs a fallible closure with this thread's cached runner.
+            pub fn try_with_thread_local_runner<T>(
+                f: impl FnOnce(&mut Runner) -> Result<T, RunError>,
+            ) -> Result<T, RunError> {
+                with_thread_local_runner(f)?
             }
 
         }
@@ -637,6 +720,31 @@ pub mod frobber {
         /// Creates a reusable runner for this native AOT entrypoint.
         pub fn new_runner() -> Result<Runner, RunError> {
             Runner::new()
+        }
+
+        std::thread_local! {
+            static THREAD_LOCAL_RUNNER: std::cell::RefCell<Option<Runner>> =
+                const { std::cell::RefCell::new(None) };
+        }
+
+        /// Runs a closure with this thread's cached runner.
+        pub fn with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> T,
+        ) -> Result<T, RunError> {
+            THREAD_LOCAL_RUNNER.with(|runner_cell| {
+                let mut runner_slot = runner_cell.borrow_mut();
+                if runner_slot.is_none() {
+                    runner_slot.replace(new_runner()?);
+                }
+                Ok(f(runner_slot.as_mut().expect("runner was initialized")))
+            })
+        }
+
+        /// Runs a fallible closure with this thread's cached runner.
+        pub fn try_with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> Result<T, RunError>,
+        ) -> Result<T, RunError> {
+            with_thread_local_runner(f)?
         }
 
     }
@@ -843,6 +951,31 @@ pub mod gizmo_types {
             Runner::new()
         }
 
+        std::thread_local! {
+            static THREAD_LOCAL_RUNNER: std::cell::RefCell<Option<Runner>> =
+                const { std::cell::RefCell::new(None) };
+        }
+
+        /// Runs a closure with this thread's cached runner.
+        pub fn with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> T,
+        ) -> Result<T, RunError> {
+            THREAD_LOCAL_RUNNER.with(|runner_cell| {
+                let mut runner_slot = runner_cell.borrow_mut();
+                if runner_slot.is_none() {
+                    runner_slot.replace(new_runner()?);
+                }
+                Ok(f(runner_slot.as_mut().expect("runner was initialized")))
+            })
+        }
+
+        /// Runs a fallible closure with this thread's cached runner.
+        pub fn try_with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> Result<T, RunError>,
+        ) -> Result<T, RunError> {
+            with_thread_local_runner(f)?
+        }
+
     }
 }
 pub mod invokes_and_loop {
@@ -991,6 +1124,31 @@ pub mod invokes_and_loop {
         /// Creates a reusable runner for this native AOT entrypoint.
         pub fn new_runner() -> Result<Runner, RunError> {
             Runner::new()
+        }
+
+        std::thread_local! {
+            static THREAD_LOCAL_RUNNER: std::cell::RefCell<Option<Runner>> =
+                const { std::cell::RefCell::new(None) };
+        }
+
+        /// Runs a closure with this thread's cached runner.
+        pub fn with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> T,
+        ) -> Result<T, RunError> {
+            THREAD_LOCAL_RUNNER.with(|runner_cell| {
+                let mut runner_slot = runner_cell.borrow_mut();
+                if runner_slot.is_none() {
+                    runner_slot.replace(new_runner()?);
+                }
+                Ok(f(runner_slot.as_mut().expect("runner was initialized")))
+            })
+        }
+
+        /// Runs a fallible closure with this thread's cached runner.
+        pub fn try_with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> Result<T, RunError>,
+        ) -> Result<T, RunError> {
+            with_thread_local_runner(f)?
         }
 
     }
@@ -1222,6 +1380,31 @@ pub mod parametric_forms {
             Runner::new()
         }
 
+        std::thread_local! {
+            static THREAD_LOCAL_RUNNER: std::cell::RefCell<Option<Runner>> =
+                const { std::cell::RefCell::new(None) };
+        }
+
+        /// Runs a closure with this thread's cached runner.
+        pub fn with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> T,
+        ) -> Result<T, RunError> {
+            THREAD_LOCAL_RUNNER.with(|runner_cell| {
+                let mut runner_slot = runner_cell.borrow_mut();
+                if runner_slot.is_none() {
+                    runner_slot.replace(new_runner()?);
+                }
+                Ok(f(runner_slot.as_mut().expect("runner was initialized")))
+            })
+        }
+
+        /// Runs a fallible closure with this thread's cached runner.
+        pub fn try_with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> Result<T, RunError>,
+        ) -> Result<T, RunError> {
+            with_thread_local_runner(f)?
+        }
+
     }
 }
 pub mod parametric_imports {
@@ -1380,6 +1563,31 @@ pub mod parametric_imports {
             Runner::new()
         }
 
+        std::thread_local! {
+            static THREAD_LOCAL_RUNNER: std::cell::RefCell<Option<Runner>> =
+                const { std::cell::RefCell::new(None) };
+        }
+
+        /// Runs a closure with this thread's cached runner.
+        pub fn with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> T,
+        ) -> Result<T, RunError> {
+            THREAD_LOCAL_RUNNER.with(|runner_cell| {
+                let mut runner_slot = runner_cell.borrow_mut();
+                if runner_slot.is_none() {
+                    runner_slot.replace(new_runner()?);
+                }
+                Ok(f(runner_slot.as_mut().expect("runner was initialized")))
+            })
+        }
+
+        /// Runs a fallible closure with this thread's cached runner.
+        pub fn try_with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> Result<T, RunError>,
+        ) -> Result<T, RunError> {
+            with_thread_local_runner(f)?
+        }
+
     }
 }
 pub mod parametric_lib {
@@ -1406,6 +1614,181 @@ pub mod parametric_lib {
         pub id: super::U8,
     }
 
+}
+pub mod tuple_shapes {
+    #![allow(dead_code)]
+
+    #![allow(unused_imports)]
+
+    pub mod aot_tuple_shapes {
+        #![allow(dead_code)]
+
+        #![allow(unused_imports)]
+
+        use super::*;
+
+        // Generated by xlsynth_pir_compiler::aot.
+
+        pub use xlsynth_pir_compiler_runtime::{ExecutionResult, RunError, RunResult};
+        use std::sync::LazyLock;
+        #[allow(unused_imports)]
+        use xlsynth_pir_compiler_runtime::{
+            AssumptionFailureKind, CompiledFunctionMetadata, EventKind, EventSiteMetadata,
+            ExecutionContext, RawExecutionContext, TraceTupleFieldLayout, TraceValueLayout,
+            xlsynth_pir_record_assert, xlsynth_pir_record_assumption_failure,
+            xlsynth_pir_record_cover, xlsynth_pir_record_trace,
+            xlsynth_pir_runtime_wide_binop, xlsynth_pir_runtime_wide_bit_slice_update,
+            xlsynth_pir_runtime_wide_dynamic_bit_slice, xlsynth_pir_runtime_wide_mulp,
+            xlsynth_pir_runtime_wide_unary_op,
+        };
+
+        unsafe extern "C" {
+            #[link_name = "__xlsynth_pir_aot_tuple_shapes"]
+            fn linked_entrypoint(
+                inputs: *const *const u8,
+                output: *mut u8,
+                scratch: *mut u8,
+                context: *mut RawExecutionContext,
+            ) -> i32;
+        }
+
+        const SCRATCH_BYTE_COUNT: usize = 52;
+        const SCRATCH_ALIGNMENT: usize = 8;
+        static FUNCTION_METADATA: LazyLock<CompiledFunctionMetadata> =
+            LazyLock::new(|| CompiledFunctionMetadata { event_sites: vec![] });
+
+        fn ensure_runtime_symbols_linked() {
+            std::hint::black_box([
+                xlsynth_pir_record_assert as *const () as usize,
+                xlsynth_pir_record_assumption_failure as *const () as usize,
+                xlsynth_pir_record_cover as *const () as usize,
+                xlsynth_pir_record_trace as *const () as usize,
+                xlsynth_pir_runtime_wide_binop as *const () as usize,
+                xlsynth_pir_runtime_wide_dynamic_bit_slice as *const () as usize,
+                xlsynth_pir_runtime_wide_bit_slice_update as *const () as usize,
+                xlsynth_pir_runtime_wide_unary_op as *const () as usize,
+                xlsynth_pir_runtime_wide_mulp as *const () as usize,
+            ]);
+        }
+
+        /// Reusable runner for the generated native AOT entrypoint.
+        pub struct Runner {
+            scratch: Vec<u64>,
+            context: ExecutionContext<'static>,
+        }
+
+        impl Runner {
+            /// Creates a runner with reusable scratch storage and an event collector.
+            pub fn new() -> Result<Self, RunError> {
+                ensure_runtime_symbols_linked();
+                if SCRATCH_ALIGNMENT > std::mem::align_of::<u64>() {
+                    return Err(RunError(format!(
+                        "unsupported AOT scratch alignment: {SCRATCH_ALIGNMENT}"
+                    )));
+                }
+                Ok(Self {
+                    scratch: vec![0u64; SCRATCH_BYTE_COUNT.div_ceil(std::mem::size_of::<u64>())],
+                    context: ExecutionContext::new(&*FUNCTION_METADATA),
+                })
+            }
+
+            fn invoke(&mut self, inputs: &[*const u8], output: *mut u8) -> Result<(), RunError> {
+                self.context.clear();
+                let scratch = if self.scratch.is_empty() {
+                    std::ptr::null_mut()
+                } else {
+                    self.scratch.as_mut_ptr().cast::<u8>()
+                };
+                let mut raw_context = self.context.raw_context();
+                let status = unsafe {
+                    linked_entrypoint(inputs.as_ptr(), output, scratch, &mut raw_context)
+                };
+                if status == 0 {
+                    Ok(())
+                } else {
+                    Err(RunError(format!("compiled AOT entrypoint returned status {status}")))
+                }
+            }
+
+            fn reject_failures(events: &ExecutionResult) -> Result<(), RunError> {
+                if let Some(failure) = events.assertion_failures.first() {
+                    return Err(RunError(format!(
+                        "compiled assertion failed at node {}: {}",
+                        failure.node_text_id, failure.message
+                    )));
+                }
+                if let Some(failure) = events.assumption_failures.first() {
+                    return Err(RunError(format!(
+                        "compiled assumed-in-bounds condition failed at node {}: {:?}",
+                        failure.node_text_id, failure.kind
+                    )));
+                }
+                Ok(())
+            }
+
+            /// Runs into caller-owned output storage and returns observable events.
+            pub fn run_into_with_events(&mut self, pair: &super::super::XlsynthPirAotTuple0, increment: &super::super::U8, output: &mut super::super::XlsynthPirAotTuple0) -> Result<ExecutionResult, RunError> {
+                let input_pointers = [std::ptr::from_ref(pair).cast::<u8>(), std::ptr::from_ref(increment).cast::<u8>()];
+                self.invoke(&input_pointers, std::ptr::from_mut(output).cast::<u8>())?;
+                Ok(self.context.result())
+            }
+
+            /// Runs into caller-owned output storage, rejecting assertion/assumption failures.
+            pub fn run_into(&mut self, pair: &super::super::XlsynthPirAotTuple0, increment: &super::super::U8, output: &mut super::super::XlsynthPirAotTuple0) -> Result<(), RunError> {
+                let events = self.run_into_with_events(pair, increment, output)?;
+                Self::reject_failures(&events)
+            }
+
+            /// Runs and returns output together with observable event records.
+            pub fn run_with_events(&mut self, pair: &super::super::XlsynthPirAotTuple0, increment: &super::super::U8) -> Result<RunResult<super::super::XlsynthPirAotTuple0>, RunError> {
+                let input_pointers = [std::ptr::from_ref(pair).cast::<u8>(), std::ptr::from_ref(increment).cast::<u8>()];
+                let mut output = std::mem::MaybeUninit::<super::super::XlsynthPirAotTuple0>::uninit();
+                self.invoke(&input_pointers, output.as_mut_ptr().cast::<u8>())?;
+                Ok(RunResult {
+                    output: unsafe { output.assume_init() },
+                    events: self.context.result(),
+                })
+            }
+
+            /// Runs and returns only output, rejecting assertion/assumption failures.
+            pub fn run(&mut self, pair: &super::super::XlsynthPirAotTuple0, increment: &super::super::U8) -> Result<super::super::XlsynthPirAotTuple0, RunError> {
+                let result = self.run_with_events(pair, increment)?;
+                Self::reject_failures(&result.events)?;
+                Ok(result.output)
+            }
+        }
+
+        /// Creates a reusable runner for this native AOT entrypoint.
+        pub fn new_runner() -> Result<Runner, RunError> {
+            Runner::new()
+        }
+
+        std::thread_local! {
+            static THREAD_LOCAL_RUNNER: std::cell::RefCell<Option<Runner>> =
+                const { std::cell::RefCell::new(None) };
+        }
+
+        /// Runs a closure with this thread's cached runner.
+        pub fn with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> T,
+        ) -> Result<T, RunError> {
+            THREAD_LOCAL_RUNNER.with(|runner_cell| {
+                let mut runner_slot = runner_cell.borrow_mut();
+                if runner_slot.is_none() {
+                    runner_slot.replace(new_runner()?);
+                }
+                Ok(f(runner_slot.as_mut().expect("runner was initialized")))
+            })
+        }
+
+        /// Runs a fallible closure with this thread's cached runner.
+        pub fn try_with_thread_local_runner<T>(
+            f: impl FnOnce(&mut Runner) -> Result<T, RunError>,
+        ) -> Result<T, RunError> {
+            with_thread_local_runner(f)?
+        }
+
+    }
 }
 pub mod types {
     pub mod shared_types {

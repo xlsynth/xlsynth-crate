@@ -108,7 +108,7 @@ fn scalar_generated_runner_executes() -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
-// Verifies: separately generated object entrypoints can coexist in one
+// Verifies: multiple generated package entrypoints can coexist in one
 // downstream crate without symbol collisions.
 #[test]
 fn multiple_generated_entrypoints_link_and_run() -> Result<(), Box<dyn std::error::Error>> {

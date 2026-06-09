@@ -385,6 +385,53 @@ pub struct AotArtifact {
     pub scratch_alignment: usize,
 }
 
+/// Calling-contract metadata for one exported AOT entrypoint.
+#[derive(Debug, Clone)]
+pub struct AotEntrypointArtifact {
+    /// Exported symbol naming the compiled entrypoint.
+    pub entrypoint_symbol: String,
+    /// Native parameter layouts accepted by the entrypoint.
+    pub param_layouts: Vec<NativeValueLayout>,
+    /// Native result layout written by the entrypoint.
+    pub result_layout: NativeValueLayout,
+    /// Static event-site metadata consumed by the execution context.
+    pub metadata: CompiledFunctionMetadata,
+    /// Bytes required for caller-owned temporary storage.
+    pub scratch_byte_count: usize,
+    /// Alignment required for caller-owned temporary storage.
+    pub scratch_alignment: usize,
+}
+
+impl From<&AotArtifact> for AotEntrypointArtifact {
+    fn from(artifact: &AotArtifact) -> Self {
+        Self {
+            entrypoint_symbol: artifact.entrypoint_symbol.clone(),
+            param_layouts: artifact.param_layouts.clone(),
+            result_layout: artifact.result_layout.clone(),
+            metadata: artifact.metadata.clone(),
+            scratch_byte_count: artifact.scratch_byte_count,
+            scratch_alignment: artifact.scratch_alignment,
+        }
+    }
+}
+
+/// One exported function to compile into an AOT package object.
+pub struct AotPackageEntrypoint<'a> {
+    pub package: &'a ir::Package,
+    pub function_name: &'a str,
+    pub entrypoint_symbol: &'a str,
+}
+
+/// Relocatable native object code and per-entrypoint metadata for an AOT
+/// package.
+#[derive(Debug, Clone)]
+pub struct AotPackageArtifact {
+    /// Relocatable object bytes containing all exported compiled entrypoints.
+    pub object_code: Vec<u8>,
+    /// Calling-contract metadata for each exported entrypoint, in input order.
+    pub entrypoints: Vec<AotEntrypointArtifact>,
+}
+
 impl PirFunctionCompiler {
     /// Compiles the reachable portion of a PIR function into native host code.
     pub fn compile(function: &ir::Fn) -> Result<Self, CompilerError> {
@@ -972,6 +1019,193 @@ pub fn compile_package_aot(
     compile_reachable_aot(Some(package), function, entrypoint_symbol)
 }
 
+/// Compiles multiple package entrypoints into one relocatable native object for
+/// the host target.
+pub fn compile_aot_package(
+    object_name: &str,
+    entrypoints: &[AotPackageEntrypoint<'_>],
+) -> Result<AotPackageArtifact, CompilerError> {
+    if object_name.is_empty() {
+        return Err(CompilerError::InvalidArgument(
+            "AOT package object name must not be empty".into(),
+        ));
+    }
+    if entrypoints.is_empty() {
+        return Err(CompilerError::InvalidArgument(
+            "AOT package must contain at least one entrypoint".into(),
+        ));
+    }
+
+    let mut entrypoint_symbols = HashSet::new();
+    let mut planned_entrypoints = Vec::with_capacity(entrypoints.len());
+    for entrypoint in entrypoints {
+        if entrypoint.entrypoint_symbol.is_empty() {
+            return Err(CompilerError::InvalidArgument(
+                "AOT entrypoint symbol must not be empty".into(),
+            ));
+        }
+        if !entrypoint_symbols.insert(entrypoint.entrypoint_symbol.to_string()) {
+            return Err(CompilerError::InvalidArgument(format!(
+                "AOT package contains duplicate entrypoint symbol `{}`",
+                entrypoint.entrypoint_symbol
+            )));
+        }
+        xlsynth_pir::ir_verify::verify_package(entrypoint.package)
+            .map_err(|e| CompilerError::InvalidFunction(e.to_string()))?;
+        let function = entrypoint
+            .package
+            .get_fn(entrypoint.function_name)
+            .ok_or_else(|| {
+                CompilerError::InvalidFunction(format!(
+                    "package has no function named '{}'",
+                    entrypoint.function_name
+                ))
+            })?;
+        planned_entrypoints.push(PlannedAotEntrypoint {
+            top_name: function.name.clone(),
+            entrypoint_symbol: entrypoint.entrypoint_symbol.to_string(),
+            planned: plan_reachable_functions(Some(entrypoint.package), function)?,
+        });
+    }
+
+    let isa_builder = host_aot_isa_builder()?;
+    let mut flags_builder = settings::builder();
+    flags_builder
+        .enable("is_pic")
+        .map_err(|error| CompilerError::Backend(error.to_string()))?;
+    flags_builder
+        .set("opt_level", "speed")
+        .map_err(|error| CompilerError::Backend(error.to_string()))?;
+    let isa = isa_builder
+        .finish(settings::Flags::new(flags_builder))
+        .map_err(|error| CompilerError::Backend(error.to_string()))?;
+    let object_builder = ObjectBuilder::new(isa, object_name, default_libcall_names())
+        .map_err(|error| CompilerError::Backend(error.to_string()))?;
+    let mut module = ObjectModule::new(object_builder);
+    let pointer_type = module.target_config().pointer_type();
+    let signature = compiled_function_signature(&mut module, pointer_type);
+
+    let mut all_function_ids = Vec::with_capacity(planned_entrypoints.len());
+    for planned_entrypoint in &planned_entrypoints {
+        let mut function_ids = HashMap::new();
+        for (index, function_name) in planned_entrypoint.planned.function_names.iter().enumerate() {
+            let is_top = function_name == &planned_entrypoint.top_name;
+            let symbol = if is_top {
+                planned_entrypoint.entrypoint_symbol.clone()
+            } else {
+                format!(
+                    "{}__xlsynth_pir_fn_{index}",
+                    planned_entrypoint.entrypoint_symbol
+                )
+            };
+            let function_id = module
+                .declare_function(
+                    &symbol,
+                    if is_top {
+                        Linkage::Export
+                    } else {
+                        Linkage::Local
+                    },
+                    &signature,
+                )
+                .map_err(|error| CompilerError::Backend(error.to_string()))?;
+            function_ids.insert(function_name.clone(), function_id);
+        }
+        all_function_ids.push(function_ids);
+    }
+
+    for (planned_entrypoint, function_ids) in planned_entrypoints.iter().zip(&all_function_ids) {
+        for function_name in &planned_entrypoint.planned.function_names {
+            define_object_function(
+                &mut module,
+                pointer_type,
+                &signature,
+                function_ids[function_name],
+                &planned_entrypoint.planned,
+                function_name,
+                function_ids,
+            )?;
+        }
+    }
+
+    let object_code = module
+        .finish()
+        .emit()
+        .map_err(|error| CompilerError::Backend(error.to_string()))?;
+    let entrypoints = planned_entrypoints
+        .into_iter()
+        .map(|planned_entrypoint| {
+            let top_plan = planned_entrypoint
+                .planned
+                .plans
+                .get(&planned_entrypoint.top_name)
+                .ok_or_else(|| {
+                    CompilerError::InvalidFunction(format!(
+                        "missing compilation plan for '{}'",
+                        planned_entrypoint.top_name
+                    ))
+                })?;
+            Ok(AotEntrypointArtifact {
+                entrypoint_symbol: planned_entrypoint.entrypoint_symbol,
+                param_layouts: top_plan.param_layouts.clone(),
+                result_layout: top_plan.result_layout.clone(),
+                metadata: planned_entrypoint.planned.metadata,
+                scratch_byte_count: planned_entrypoint.planned.scratch_byte_count,
+                scratch_alignment: planned_entrypoint.planned.scratch_alignment,
+            })
+        })
+        .collect::<Result<Vec<_>, CompilerError>>()?;
+    Ok(AotPackageArtifact {
+        object_code,
+        entrypoints,
+    })
+}
+
+struct PlannedAotEntrypoint<'a> {
+    top_name: String,
+    entrypoint_symbol: String,
+    planned: PlannedFunctions<'a>,
+}
+
+fn define_object_function(
+    module: &mut ObjectModule,
+    pointer_type: ClifType,
+    signature: &Signature,
+    function_id: FuncId,
+    planned: &PlannedFunctions<'_>,
+    function_name: &str,
+    function_ids: &HashMap<String, FuncId>,
+) -> Result<(), CompilerError> {
+    let plan = &planned.plans[function_name];
+    let mut context = module.make_context();
+    context.func.signature = signature.clone();
+    let runtime_callbacks = declare_runtime_callbacks(module, &mut context.func, pointer_type)?;
+    let function_targets = declare_function_targets(module, &mut context.func, function_ids);
+    let mut function_builder_context = FunctionBuilderContext::new();
+    {
+        let mut function_builder =
+            FunctionBuilder::new(&mut context.func, &mut function_builder_context);
+        lower_function(
+            plan.function,
+            &plan.order,
+            &plan.param_layouts,
+            &plan.scratch_plan,
+            &plan.event_sites,
+            &planned.function_param_layouts,
+            &function_targets,
+            runtime_callbacks,
+            pointer_type,
+            &mut function_builder,
+        )?;
+        function_builder.finalize();
+    }
+    module
+        .define_function(function_id, &mut context)
+        .map_err(|error| CompilerError::Backend(error.to_string()))?;
+    module.clear_context(&mut context);
+    Ok(())
+}
+
 fn compile_reachable_aot(
     package: Option<&ir::Package>,
     top: &ir::Fn,
@@ -1026,35 +1260,15 @@ fn compile_reachable_aot(
     }
 
     for function_name in &planned.function_names {
-        let plan = &planned.plans[function_name];
-        let mut context = module.make_context();
-        context.func.signature = signature.clone();
-        let runtime_callbacks =
-            declare_runtime_callbacks(&mut module, &mut context.func, pointer_type)?;
-        let function_targets =
-            declare_function_targets(&mut module, &mut context.func, &function_ids);
-        let mut function_builder_context = FunctionBuilderContext::new();
-        {
-            let mut function_builder =
-                FunctionBuilder::new(&mut context.func, &mut function_builder_context);
-            lower_function(
-                plan.function,
-                &plan.order,
-                &plan.param_layouts,
-                &plan.scratch_plan,
-                &plan.event_sites,
-                &planned.function_param_layouts,
-                &function_targets,
-                runtime_callbacks,
-                pointer_type,
-                &mut function_builder,
-            )?;
-            function_builder.finalize();
-        }
-        module
-            .define_function(function_ids[function_name], &mut context)
-            .map_err(|error| CompilerError::Backend(error.to_string()))?;
-        module.clear_context(&mut context);
+        define_object_function(
+            &mut module,
+            pointer_type,
+            &signature,
+            function_ids[function_name],
+            &planned,
+            function_name,
+            &function_ids,
+        )?;
     }
     let object_code = module
         .finish()
@@ -1709,6 +1923,9 @@ impl ScratchPlan {
         for plan in self.counted_for_sites.values_mut() {
             rebase(&mut plan.pointer_array_offset)?;
             if let Some(offset) = &mut plan.induction_offset {
+                rebase(offset)?;
+            }
+            if let Some(offset) = &mut plan.carry_offset {
                 rebase(offset)?;
             }
             for offset in plan.scalar_operand_offsets.iter_mut().flatten() {

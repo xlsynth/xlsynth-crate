@@ -20,7 +20,8 @@ use crate::aot_entrypoint_metadata::{
 use crate::aot_lib::{AotCompiled, AotResult};
 use crate::dslx_bridge::{BridgeBuilder, convert_imported_module};
 use crate::rust_bridge_builder::{
-    RustBridgeBuilder, RustModuleFragment, native_bits_rust_type,
+    ConcreteDslxTypeShape, RustBridgeBuilder, RustBridgeTarget, RustModuleFragment,
+    native_bits_rust_type, parse_concrete_dslx_type_shape,
     render_pir_compiler_native_runtime_imports, render_rust_module_fragments,
     render_standalone_runtime_imports, rust_module_path_from_dslx_module_name,
     rust_type_path_between_dslx_modules,
@@ -225,6 +226,9 @@ pub enum NativeTypedDslxType {
     Enum { bit_count: usize },
     /// A DSLX struct represented by a C-compatible Rust struct.
     Struct { fields: Vec<NativeTypedDslxField> },
+    /// An anonymous DSLX tuple represented structurally by a C-compatible
+    /// generated Rust wrapper in the PIR compiler path.
+    Tuple { elements: Vec<NativeTypedDslxType> },
     /// A fixed-size DSLX array represented by a native Rust array.
     Array {
         size: usize,
@@ -1475,6 +1479,13 @@ enum TypedDslxType {
         /// Struct fields in DSLX declaration order.
         fields: Vec<TypedDslxField>,
     },
+    /// An anonymous DSLX tuple represented structurally.
+    Tuple {
+        /// Rust tuple spelling used in generated signatures and helpers.
+        rust_type: String,
+        /// Tuple elements in positional order.
+        elements: Vec<TypedDslxType>,
+    },
     /// A fixed-size DSLX array represented by a Rust array.
     Array {
         /// Rust bridge array type spelling used in generated signatures.
@@ -1619,6 +1630,7 @@ impl TypedDslxType {
             TypedDslxType::Bits { rust_type, .. }
             | TypedDslxType::Enum { rust_type, .. }
             | TypedDslxType::Struct { rust_type, .. }
+            | TypedDslxType::Tuple { rust_type, .. }
             | TypedDslxType::Array { rust_type, .. } => rust_type,
         }
     }
@@ -2392,9 +2404,14 @@ impl TypedDslxTypeContext {
                 self.rust_type_for_concrete_type(local_module_name, current_type_info, &element)?;
             Ok(format!("[{element_rust_type}; {}]", ty.get_array_size()))
         } else {
+            let ty_text = ty.to_string()?;
+            if ty_text.trim_start().starts_with('(') {
+                return Ok(parse_concrete_dslx_type_shape(&ty_text)?
+                    .rust_type(RustBridgeTarget::StandaloneAot));
+            }
             Err(XlsynthError(format!(
                 "AOT typed DSLX type lowering does not support DSLX type `{}`",
-                ty.to_string()?
+                ty_text
             )))
         }
     }
@@ -2761,6 +2778,12 @@ fn project_native_typed_dslx_type(ty: &TypedDslxType) -> NativeTypedDslxType {
                 })
                 .collect(),
         },
+        TypedDslxType::Tuple { elements, .. } => NativeTypedDslxType::Tuple {
+            elements: elements
+                .iter()
+                .map(project_native_typed_dslx_type)
+                .collect(),
+        },
         TypedDslxType::Array { size, element, .. } => NativeTypedDslxType::Array {
             size: *size,
             element: Box::new(project_native_typed_dslx_type(element)),
@@ -3088,6 +3111,12 @@ fn typed_aot_type_from_lowered_dslx_type(
                 ))
             })
         }
+        TypedDslxType::Tuple { elements, .. } => Ok(TypedAotType::Tuple {
+            elements: elements
+                .iter()
+                .map(|element| typed_aot_type_from_lowered_dslx_type(current_module_path, element))
+                .collect::<AotResult<Vec<_>>>()?,
+        }),
         TypedDslxType::Array { size, element, .. } => Ok(TypedAotType::Array {
             size: *size,
             element: Box::new(typed_aot_type_from_lowered_dslx_type(
@@ -3121,6 +3150,42 @@ fn typed_aot_type_ref_from_rust_type_path(
     let name = tail.pop()?;
     module.extend(tail);
     Some(TypedAotType::TypeRef { module, name })
+}
+
+fn lower_concrete_dslx_type_shape(
+    shape: &ConcreteDslxTypeShape,
+    rust_type: String,
+) -> TypedDslxType {
+    match shape {
+        ConcreteDslxTypeShape::Bits {
+            is_signed,
+            bit_count,
+        } => TypedDslxType::Bits {
+            rust_type,
+            is_signed: *is_signed,
+            bit_count: *bit_count,
+        },
+        ConcreteDslxTypeShape::Tuple { elements } => TypedDslxType::Tuple {
+            rust_type,
+            elements: elements
+                .iter()
+                .map(|element| {
+                    lower_concrete_dslx_type_shape(
+                        element,
+                        element.rust_type(RustBridgeTarget::StandaloneAot),
+                    )
+                })
+                .collect(),
+        },
+        ConcreteDslxTypeShape::Array { size, element } => TypedDslxType::Array {
+            rust_type,
+            size: *size,
+            element: Box::new(lower_concrete_dslx_type_shape(
+                element,
+                element.rust_type(RustBridgeTarget::StandaloneAot),
+            )),
+        },
+    }
 }
 
 /// Lowers one DSLX type into the semantic model used by typed AOT generation.
@@ -3275,9 +3340,16 @@ fn lower_typed_dslx_type(
             )?),
         })
     } else {
+        let ty_text = ty.to_string()?;
+        if ty_text.trim_start().starts_with('(') {
+            return Ok(lower_concrete_dslx_type_shape(
+                &parse_concrete_dslx_type_shape(&ty_text)?,
+                rust_type,
+            ));
+        }
         Err(XlsynthError(format!(
             "AOT typed DSLX type lowering does not support DSLX type `{}`",
-            ty.to_string()?
+            ty_text
         )))
     }
 }
@@ -3404,6 +3476,7 @@ fn typed_dslx_rust_type_name(ty: &TypedDslxType) -> &str {
         TypedDslxType::Bits { rust_type, .. }
         | TypedDslxType::Enum { rust_type, .. }
         | TypedDslxType::Struct { rust_type, .. }
+        | TypedDslxType::Tuple { rust_type, .. }
         | TypedDslxType::Array { rust_type, .. } => rust_type,
     }
 }
@@ -3420,6 +3493,7 @@ fn typed_dslx_leaf_count(ty: &TypedDslxType) -> usize {
             .iter()
             .map(|field| typed_dslx_leaf_count(&field.ty))
             .sum(),
+        TypedDslxType::Tuple { elements, .. } => elements.iter().map(typed_dslx_leaf_count).sum(),
         TypedDslxType::Array { size, element, .. } => {
             size.saturating_mul(typed_dslx_leaf_count(element))
         }
@@ -3442,6 +3516,12 @@ fn flatten_typed_dslx_type_to_aot_type(ty: &TypedDslxType) -> AotType {
             elements: fields
                 .iter()
                 .map(|field| flatten_typed_dslx_type_to_aot_type(&field.ty))
+                .collect(),
+        },
+        TypedDslxType::Tuple { elements, .. } => AotType::Tuple {
+            elements: elements
+                .iter()
+                .map(flatten_typed_dslx_type_to_aot_type)
                 .collect(),
         },
         TypedDslxType::Array { size, element, .. } => AotType::Array {
@@ -3584,6 +3664,26 @@ fn emit_typed_dslx_pack_statements(
                     next_loop_index,
                 );
                 offset = offset.saturating_add(typed_dslx_leaf_count(&field.ty));
+            }
+        }
+        TypedDslxType::Tuple { elements, .. } => {
+            let mut offset = 0usize;
+            for (index, element) in elements.iter().enumerate() {
+                let element_leaf_base = if offset == 0 {
+                    leaf_index_expr.to_string()
+                } else {
+                    format!("{leaf_index_expr} + {offset}")
+                };
+                emit_typed_dslx_pack_statements(
+                    element,
+                    &format!("({value_expr}).{index}"),
+                    layout_name,
+                    dst_name,
+                    &element_leaf_base,
+                    lines,
+                    next_loop_index,
+                );
+                offset = offset.saturating_add(typed_dslx_leaf_count(element));
             }
         }
         TypedDslxType::Array { size, element, .. } => {
@@ -3791,6 +3891,36 @@ fn emit_typed_dslx_decode_statements(
                 push_line(lines, format!("    {field_name}: {field_value},"));
             }
             push_line(lines, "};");
+            value_name
+        }
+        TypedDslxType::Tuple { elements, .. } => {
+            let element_values = elements
+                .iter()
+                .scan(0usize, |offset, element| {
+                    let element_leaf_base = if *offset == 0 {
+                        leaf_index_expr.to_string()
+                    } else {
+                        format!("{leaf_index_expr} + {}", *offset)
+                    };
+                    *offset = offset.saturating_add(typed_dslx_leaf_count(element));
+                    Some(emit_typed_dslx_decode_statements(
+                        element,
+                        layout_name,
+                        src_name,
+                        &element_leaf_base,
+                        lines,
+                        next_loop_index,
+                        next_temp_index,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            let value_name = next_temp("decoded_value", next_temp_index);
+            let tuple_expr = match element_values.as_slice() {
+                [] => "()".to_string(),
+                [element] => format!("({element},)"),
+                _ => format!("({})", element_values.join(", ")),
+            };
+            push_line(lines, format!("let {value_name} = {tuple_expr};"));
             value_name
         }
         TypedDslxType::Array {

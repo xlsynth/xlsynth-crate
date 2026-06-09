@@ -190,6 +190,28 @@ fn typed_dslx_parametric_forms_runner_executes() -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
+// Verifies: anonymous DSLX tuple params and returns lower to generated C-layout
+// public Rust wrapper structs instead of Rust tuple ABI.
+#[test]
+fn typed_dslx_tuple_runner_executes() -> Result<(), Box<dyn std::error::Error>> {
+    let pair = dslx_aot::XlsynthPirAotTuple0 {
+        field0: dslx_aot::U8::new(10)?,
+        field1: dslx_aot::U16::new(1000)?,
+    };
+    let increment = dslx_aot::U8::new(7)?;
+    let mut runner = dslx_aot::tuple_shapes::aot_tuple_shapes::new_runner()?;
+    let output = runner.run(&pair, &increment)?;
+
+    assert_eq!(output.field0.to_u64(), 17);
+    assert_eq!(output.field1.to_u64(), 1007);
+    assert_eq!(
+        std::mem::offset_of!(dslx_aot::XlsynthPirAotTuple0, field1),
+        2
+    );
+    assert_eq!(std::mem::size_of::<dslx_aot::XlsynthPirAotTuple0>(), 4);
+    Ok(())
+}
+
 // Verifies: DSLX-started AOT follows helper calls and `for` loop bodies through
 // package-level invokes when emitting the native object.
 #[test]

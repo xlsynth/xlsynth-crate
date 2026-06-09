@@ -4,7 +4,7 @@ use std::{fs, path::PathBuf};
 
 use xlsynth_pir_compiler::aot::{
     DslxConvertOptions, TypedDslxAotBuildSpec, TypedDslxAotPackageBuilder,
-    build_native_typed_dslx_aot_package_metadata,
+    build_pir_aot_package_metadata_from_dslx_specs,
 };
 
 fn main() {
@@ -18,6 +18,7 @@ fn main() {
 
     let gizmo_types = source_dir.join("gizmo_types.x");
     let parametric_forms = source_dir.join("parametric_forms.x");
+    let tuple_shapes = source_dir.join("tuple_shapes.x");
     let invokes_and_loop = source_dir.join("invokes_and_loop.x");
     let events = source_dir.join("events.x");
     let parametric_imports = source_dir.join("parametric_imports.x");
@@ -41,6 +42,13 @@ fn main() {
             name: "parametric_forms",
             dslx_path: &parametric_forms,
             top: "exercise_parametric_forms",
+            dslx_options: common_dslx_options.clone(),
+            type_module_paths: vec![],
+        },
+        TypedDslxAotBuildSpec {
+            name: "tuple_shapes",
+            dslx_path: &tuple_shapes,
+            top: "exercise_tuple_shapes",
             dslx_options: common_dslx_options.clone(),
             type_module_paths: vec![],
         },
@@ -90,7 +98,7 @@ fn main() {
             type_module_paths: vec![namespaced_doodle_types.as_path()],
         },
     ];
-    let metadata = build_native_typed_dslx_aot_package_metadata(&specs)
+    let metadata = build_pir_aot_package_metadata_from_dslx_specs(&specs)
         .expect("native DSLX AOT package metadata generation should succeed");
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let metadata_file = out_dir.join("native_dslx_tests_aot_metadata.json");
@@ -105,9 +113,13 @@ fn main() {
     for spec in specs {
         package_builder = package_builder.add_entrypoint(spec);
     }
-    package_builder
+    let generated = package_builder
         .build()
         .expect("native DSLX AOT package compilation should succeed");
+    assert!(
+        generated.object_file.is_file(),
+        "typed DSLX AOT package should emit one native object"
+    );
 
     println!("cargo:rerun-if-changed=build.rs");
 }

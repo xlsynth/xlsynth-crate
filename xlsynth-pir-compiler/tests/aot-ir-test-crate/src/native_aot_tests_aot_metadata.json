@@ -1,6 +1,6 @@
 {
   "_spdx": "SPDX-License-Identifier: Apache-2.0",
-  "format_version": 2,
+  "format_version": 3,
   "modules": [
     {
       "path": ["native_aot_tests"],
@@ -178,8 +178,11 @@
   "entrypoints": [
     {
       "name": "add_one",
-      "ir_file": "ir/add_one.ir",
-      "ir_top": "add_one",
+      "source": {
+        "kind": "ir_file",
+        "ir_file": "ir/add_one.ir",
+        "ir_top": "add_one"
+      },
       "owning_module": ["native_aot_tests"],
       "params": [
         {
@@ -199,8 +202,11 @@
     },
     {
       "name": "add_inputs",
-      "ir_file": "ir/add_inputs.ir",
-      "ir_top": "add_inputs",
+      "source": {
+        "kind": "ir_file",
+        "ir_file": "ir/add_inputs.ir",
+        "ir_top": "add_inputs"
+      },
       "owning_module": ["native_aot_tests"],
       "params": [
         {
@@ -228,8 +234,11 @@
     },
     {
       "name": "compound_shapes",
-      "ir_file": "ir/compound_shapes.ir",
-      "ir_top": "compound_shapes",
+      "source": {
+        "kind": "ir_file",
+        "ir_file": "ir/compound_shapes.ir",
+        "ir_top": "compound_shapes"
+      },
       "owning_module": ["native_aot_tests"],
       "params": [
         {
@@ -257,8 +266,11 @@
     },
     {
       "name": "empty_tuple",
-      "ir_file": "ir/empty_tuple.ir",
-      "ir_top": "empty_tuple",
+      "source": {
+        "kind": "ir_file",
+        "ir_file": "ir/empty_tuple.ir",
+        "ir_top": "empty_tuple"
+      },
       "owning_module": ["native_aot_tests"],
       "params": [],
       "return_type": {
@@ -269,8 +281,11 @@
     },
     {
       "name": "wide_runtime_ops",
-      "ir_file": "ir/wide_runtime_ops.ir",
-      "ir_top": "wide_runtime_ops",
+      "source": {
+        "kind": "ir_file",
+        "ir_file": "ir/wide_runtime_ops.ir",
+        "ir_top": "wide_runtime_ops"
+      },
       "owning_module": ["native_aot_tests"],
       "params": [
         {
@@ -314,8 +329,11 @@
     },
     {
       "name": "events",
-      "ir_file": "ir/events.ir",
-      "ir_top": "events",
+      "source": {
+        "kind": "ir_file",
+        "ir_file": "ir/events.ir",
+        "ir_top": "events"
+      },
       "owning_module": ["native_aot_tests"],
       "params": [
         {
@@ -359,8 +377,11 @@
     },
     {
       "name": "assumed_in_bounds",
-      "ir_file": "ir/assumed_in_bounds.ir",
-      "ir_top": "assumed_in_bounds",
+      "source": {
+        "kind": "ir_file",
+        "ir_file": "ir/assumed_in_bounds.ir",
+        "ir_top": "assumed_in_bounds"
+      },
       "owning_module": ["native_aot_tests"],
       "params": [
         {
@@ -400,8 +421,11 @@
     },
     {
       "name": "invokes_and_counted_for",
-      "ir_file": "ir/invokes_and_counted_for.ir",
-      "ir_top": "invokes_and_counted_for",
+      "source": {
+        "kind": "ir_file",
+        "ir_file": "ir/invokes_and_counted_for.ir",
+        "ir_top": "invokes_and_counted_for"
+      },
       "owning_module": ["native_aot_tests"],
       "params": [
         {

@@ -290,9 +290,13 @@ impl RustBridgeBuilder {
             )?;
             Ok(format!("[{rust_ty}; {array_size}]"))
         } else {
+            let ty_text = ty.to_string()?;
+            if ty_text.trim_start().starts_with('(') {
+                return Ok(parse_concrete_dslx_type_shape(&ty_text)?.rust_type(target));
+            }
             Err(XlsynthError(format!(
                 "Unsupported type for conversion from DSLX to Rust: {:?}",
-                ty.to_string()?
+                ty_text
             )))
         }
     }
@@ -556,6 +560,227 @@ pub(crate) fn native_bits_rust_type(bit_count: usize) -> String {
         17..=32 => format!("BitsInU32<{bit_count}>"),
         33..=64 => format!("BitsInU64<{bit_count}>"),
         _ => format!("WideBits<{bit_count}, {}>", bit_count.div_ceil(64)),
+    }
+}
+
+/// Concrete structural DSLX type spellings that currently lack direct FFI
+/// accessors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ConcreteDslxTypeShape {
+    Bits {
+        is_signed: bool,
+        bit_count: usize,
+    },
+    Tuple {
+        elements: Vec<ConcreteDslxTypeShape>,
+    },
+    Array {
+        size: usize,
+        element: Box<ConcreteDslxTypeShape>,
+    },
+}
+
+impl ConcreteDslxTypeShape {
+    pub(crate) fn rust_type(&self, target: RustBridgeTarget) -> String {
+        match self {
+            ConcreteDslxTypeShape::Bits {
+                is_signed,
+                bit_count,
+            } => bits_rust_type(target, *is_signed, *bit_count),
+            ConcreteDslxTypeShape::Tuple { elements } => match elements.as_slice() {
+                [] => "()".to_string(),
+                [element] => format!("({},)", element.rust_type(target)),
+                _ => format!(
+                    "({})",
+                    elements
+                        .iter()
+                        .map(|element| element.rust_type(target))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            },
+            ConcreteDslxTypeShape::Array { size, element } => {
+                format!("[{}; {size}]", element.rust_type(target))
+            }
+        }
+    }
+}
+
+/// Parses concrete DSLX type strings for structural tuple lowering.
+///
+/// The DSLX bindings expose helpers for bits, arrays, structs, and enums but
+/// not tuple members. This parser is intentionally narrow: it accepts only the
+/// fully concrete bits/array/tuple spellings emitted by
+/// `dslx::Type::to_string`.
+pub(crate) fn parse_concrete_dslx_type_shape(
+    text: &str,
+) -> Result<ConcreteDslxTypeShape, XlsynthError> {
+    let mut parser = ConcreteDslxTypeShapeParser { text, offset: 0 };
+    let shape = parser.parse_type()?;
+    parser.skip_ws();
+    if parser.is_eof() {
+        Ok(shape)
+    } else {
+        Err(XlsynthError(format!(
+            "unsupported concrete DSLX type shape near `{}` in `{text}`",
+            &text[parser.offset..]
+        )))
+    }
+}
+
+struct ConcreteDslxTypeShapeParser<'a> {
+    text: &'a str,
+    offset: usize,
+}
+
+impl ConcreteDslxTypeShapeParser<'_> {
+    fn is_eof(&self) -> bool {
+        self.offset >= self.text.len()
+    }
+
+    fn skip_ws(&mut self) {
+        while self
+            .text
+            .as_bytes()
+            .get(self.offset)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            self.offset += 1;
+        }
+    }
+
+    fn peek(&mut self) -> Option<u8> {
+        self.skip_ws();
+        self.text.as_bytes().get(self.offset).copied()
+    }
+
+    fn consume_char(&mut self, expected: u8) -> bool {
+        self.skip_ws();
+        if self.text.as_bytes().get(self.offset).copied() == Some(expected) {
+            self.offset += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn consume_str(&mut self, expected: &str) -> bool {
+        self.skip_ws();
+        if self.text[self.offset..].starts_with(expected) {
+            self.offset += expected.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expect_char(&mut self, expected: u8) -> Result<(), XlsynthError> {
+        if self.consume_char(expected) {
+            Ok(())
+        } else {
+            Err(XlsynthError(format!(
+                "expected `{}` while parsing concrete DSLX type shape `{}`",
+                expected as char, self.text
+            )))
+        }
+    }
+
+    fn parse_usize(&mut self) -> Result<usize, XlsynthError> {
+        self.skip_ws();
+        let start = self.offset;
+        while self
+            .text
+            .as_bytes()
+            .get(self.offset)
+            .is_some_and(u8::is_ascii_digit)
+        {
+            self.offset += 1;
+        }
+        if self.offset == start {
+            return Err(XlsynthError(format!(
+                "expected decimal number while parsing concrete DSLX type shape `{}`",
+                self.text
+            )));
+        }
+        self.text[start..self.offset]
+            .parse::<usize>()
+            .map_err(|error| {
+                XlsynthError(format!(
+                    "invalid decimal number `{}` in concrete DSLX type shape `{}`: {error}",
+                    &self.text[start..self.offset],
+                    self.text
+                ))
+            })
+    }
+
+    fn parse_type(&mut self) -> Result<ConcreteDslxTypeShape, XlsynthError> {
+        let mut shape = self.parse_atom()?;
+        while self.consume_char(b'[') {
+            let size = self.parse_usize()?;
+            self.expect_char(b']')?;
+            shape = ConcreteDslxTypeShape::Array {
+                size,
+                element: Box::new(shape),
+            };
+        }
+        Ok(shape)
+    }
+
+    fn parse_atom(&mut self) -> Result<ConcreteDslxTypeShape, XlsynthError> {
+        if self.consume_char(b'(') {
+            let mut elements = Vec::new();
+            if self.consume_char(b')') {
+                return Ok(ConcreteDslxTypeShape::Tuple { elements });
+            }
+            loop {
+                elements.push(self.parse_type()?);
+                if self.consume_char(b')') {
+                    break;
+                }
+                self.expect_char(b',')?;
+                if self.consume_char(b')') {
+                    break;
+                }
+            }
+            return Ok(ConcreteDslxTypeShape::Tuple { elements });
+        }
+
+        if self.consume_str("uN") {
+            return self.parse_bits(/* is_signed= */ false);
+        }
+        if self.consume_str("sN") {
+            return self.parse_bits(/* is_signed= */ true);
+        }
+        if self.consume_str("bits") {
+            return self.parse_bits(/* is_signed= */ false);
+        }
+        if self.peek() == Some(b'u') || self.peek() == Some(b's') {
+            let is_signed = self.consume_char(b's');
+            if !is_signed {
+                self.expect_char(b'u')?;
+            }
+            let bit_count = self.parse_usize()?;
+            return Ok(ConcreteDslxTypeShape::Bits {
+                is_signed,
+                bit_count,
+            });
+        }
+
+        Err(XlsynthError(format!(
+            "unsupported concrete DSLX type shape near `{}` in `{}`",
+            &self.text[self.offset..],
+            self.text
+        )))
+    }
+
+    fn parse_bits(&mut self, is_signed: bool) -> Result<ConcreteDslxTypeShape, XlsynthError> {
+        self.expect_char(b'[')?;
+        let bit_count = self.parse_usize()?;
+        self.expect_char(b']')?;
+        Ok(ConcreteDslxTypeShape::Bits {
+            is_signed,
+            bit_count,
+        })
     }
 }
 
@@ -923,6 +1148,22 @@ mod tests {
     use crate::dslx_bridge::{convert_imported_module, convert_leaf_module};
 
     use super::*;
+
+    // Verifies: concrete DSLX tuple type strings lower to Rust tuple spellings
+    // for structural AOT metadata paths that do not have tuple FFI accessors.
+    #[test]
+    fn concrete_dslx_type_shape_parses_nested_tuple_arrays() {
+        let shape = parse_concrete_dslx_type_shape("(uN[8], (sN[4], bits[1])[2])").unwrap();
+
+        assert_eq!(
+            shape.rust_type(RustBridgeTarget::StandaloneAot),
+            "(UBits<8>, [(SBits<4>, UBits<1>); 2])"
+        );
+        assert_eq!(
+            shape.rust_type(RustBridgeTarget::PirCompilerNative),
+            "(BitsInU8<8>, [(BitsInU8<4>, BitsInU8<1>); 2])"
+        );
+    }
 
     // Verifies: enum-only DSLX modules emit Rust enums with DSLX discriminants.
     // Catches: regressions in enum discriminant rendering.

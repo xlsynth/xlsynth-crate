@@ -2,19 +2,24 @@
 
 //! Build-script helpers for emitting standalone native PIR AOT wrappers.
 
+pub mod metadata;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub use xlsynth::DslxConvertOptions;
-use xlsynth::aot_builder::{
-    NativeTypedDslxFunctionSignature, NativeTypedDslxType, collect_typed_dslx_aot_dependencies,
-    render_native_typed_dslx_generated_module, typed_dslx_implicit_token_entrypoint_wrapper_top,
+pub use metadata::{
+    PIR_AOT_METADATA_FORMAT_VERSION, PirAotDecl, PirAotEntrypoint, PirAotEntrypointSource,
+    PirAotEnumVariant, PirAotField, PirAotModule, PirAotPackageMetadata, PirAotParam,
+    PirAotSignedness, PirAotType,
 };
-pub use xlsynth::aot_builder::{
-    TypedAotDecl, TypedAotEntrypoint, TypedAotEnumVariant, TypedAotField, TypedAotModule,
-    TypedAotPackageMetadata, TypedAotParam, TypedAotSignedness, TypedAotType,
-    TypedDslxAotBuildSpec, build_native_typed_dslx_aot_package_metadata,
+pub use xlsynth::DslxConvertOptions;
+use xlsynth::aot_builder as xlsynth_aot_builder;
+pub use xlsynth::aot_builder::TypedDslxAotBuildSpec;
+use xlsynth::aot_builder::{
+    NativeTypedDslxFunctionSignature, NativeTypedDslxType,
+    build_native_typed_dslx_aot_package_metadata, collect_typed_dslx_aot_dependencies,
+    render_native_typed_dslx_generated_module, typed_dslx_implicit_token_entrypoint_wrapper_top,
 };
 use xlsynth::{
     DslxCallingConvention, convert_dslx_to_ir_text, dslx_path_to_module_name,
@@ -27,8 +32,9 @@ use xlsynth_pir_compiler_runtime::{
 };
 
 use crate::{
-    AotArtifact, CompilerError, NativeTupleFieldLayout, NativeValueLayout, ScalarLayout,
-    WideBitsLayout, compile_package_aot,
+    AotArtifact, AotEntrypointArtifact, AotPackageEntrypoint, CompilerError,
+    NativeTupleFieldLayout, NativeValueLayout, ScalarLayout, WideBitsLayout, compile_aot_package,
+    compile_package_aot,
 };
 
 /// Inputs required to emit one generated native AOT wrapper from PIR text.
@@ -45,17 +51,272 @@ pub struct GeneratedAotModule {
     pub artifact: AotArtifact,
 }
 
+/// Cargo build-script environment used for DSLX-to-PIR AOT conversion.
+pub struct CargoDslxEnv {
+    dslx_stdlib_path: PathBuf,
+    additional_search_paths: Vec<PathBuf>,
+}
+
+impl CargoDslxEnv {
+    /// Creates a DSLX build environment from the standard Cargo/Bazel vars.
+    pub fn new() -> Result<Self, CompilerError> {
+        println!("cargo:rerun-if-env-changed=DSLX_STDLIB_PATH");
+        println!("cargo:rerun-if-env-changed=XLSYNTH_ARTIFACT_CONFIG");
+        let dslx_stdlib_path = if let Some(path) = std::env::var_os("DSLX_STDLIB_PATH") {
+            PathBuf::from(path)
+        } else if let Some(config_path) = std::env::var_os("XLSYNTH_ARTIFACT_CONFIG") {
+            let config_path = PathBuf::from(config_path);
+            config_path
+                .parent()
+                .ok_or_else(|| {
+                    CompilerError::InvalidArgument(format!(
+                        "XLSYNTH_ARTIFACT_CONFIG has no parent directory: {}",
+                        config_path.display()
+                    ))
+                })?
+                .join("dslx_stdlib")
+        } else {
+            xlsynth::default_dslx_stdlib_path().to_path_buf()
+        };
+        Ok(Self {
+            dslx_stdlib_path,
+            additional_search_paths: Vec::new(),
+        })
+    }
+
+    /// Adds a DSLX import search root.
+    pub fn with_search_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.additional_search_paths.push(path.into());
+        self
+    }
+
+    /// Returns the DSLX standard library path selected for this build.
+    pub fn dslx_stdlib_path(&self) -> &Path {
+        &self.dslx_stdlib_path
+    }
+
+    /// Returns conversion options borrowing the selected stdlib and search
+    /// paths.
+    pub fn dslx_options(&self) -> DslxConvertOptions<'_> {
+        DslxConvertOptions {
+            dslx_stdlib_path: Some(&self.dslx_stdlib_path),
+            additional_search_paths: self
+                .additional_search_paths
+                .iter()
+                .map(PathBuf::as_path)
+                .collect(),
+            ..Default::default()
+        }
+    }
+}
+
+/// One DSLX function exposed by a typed AOT package.
+#[derive(Clone, Copy)]
+pub struct DslxAotEntrypoint<'a> {
+    pub name: &'a str,
+    pub top: &'a str,
+}
+
+impl<'a> DslxAotEntrypoint<'a> {
+    /// Creates an entrypoint whose generated module name and DSLX top match.
+    pub const fn new(name: &'a str, top: &'a str) -> Self {
+        Self { name, top }
+    }
+}
+
+fn export_generated_rust_file(env_var: &str, rust_file: &Path) -> Result<(), CompilerError> {
+    if env_var.is_empty() {
+        return Err(CompilerError::InvalidArgument(
+            "AOT generated Rust env var must not be empty".into(),
+        ));
+    }
+    println!("cargo:rustc-env={env_var}={}", rust_file.display());
+    Ok(())
+}
+
+/// Builds PIR AOT package metadata from typed DSLX entrypoint specs.
+pub fn build_pir_aot_package_metadata_from_dslx_specs(
+    specs: &[TypedDslxAotBuildSpec<'_>],
+) -> Result<PirAotPackageMetadata, CompilerError> {
+    build_native_typed_dslx_aot_package_metadata(specs)
+        .map_err(|error| CompilerError::Backend(error.to_string()))
+        .and_then(pir_aot_package_metadata_from_dslx_bridge_metadata)
+}
+
+fn pir_aot_package_metadata_from_dslx_bridge_metadata(
+    metadata: xlsynth_aot_builder::TypedAotPackageMetadata,
+) -> Result<PirAotPackageMetadata, CompilerError> {
+    Ok(PirAotPackageMetadata {
+        format_version: PIR_AOT_METADATA_FORMAT_VERSION,
+        modules: metadata
+            .modules
+            .into_iter()
+            .map(pir_aot_module_from_dslx_bridge_metadata)
+            .collect::<Result<Vec<_>, _>>()?,
+        entrypoints: metadata
+            .entrypoints
+            .into_iter()
+            .map(pir_aot_entrypoint_from_dslx_bridge_metadata)
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn pir_aot_module_from_dslx_bridge_metadata(
+    module: xlsynth_aot_builder::TypedAotModule,
+) -> Result<PirAotModule, CompilerError> {
+    Ok(PirAotModule {
+        path: module.path,
+        declarations: module
+            .declarations
+            .into_iter()
+            .map(pir_aot_decl_from_dslx_bridge_metadata)
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn pir_aot_decl_from_dslx_bridge_metadata(
+    decl: xlsynth_aot_builder::TypedAotDecl,
+) -> Result<PirAotDecl, CompilerError> {
+    Ok(match decl {
+        xlsynth_aot_builder::TypedAotDecl::Struct { name, fields } => PirAotDecl::Struct {
+            name,
+            fields: fields
+                .into_iter()
+                .map(pir_aot_field_from_dslx_bridge_metadata)
+                .collect(),
+        },
+        xlsynth_aot_builder::TypedAotDecl::Enum {
+            name,
+            signedness,
+            bit_count,
+            variants,
+        } => PirAotDecl::Enum {
+            name,
+            signedness: pir_aot_signedness_from_dslx_bridge_metadata(signedness),
+            bit_count,
+            variants: variants
+                .into_iter()
+                .map(pir_aot_enum_variant_from_dslx_bridge_metadata)
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        xlsynth_aot_builder::TypedAotDecl::Alias { name, target } => PirAotDecl::Alias {
+            name,
+            target: pir_aot_type_from_dslx_bridge_metadata(target),
+        },
+    })
+}
+
+fn pir_aot_field_from_dslx_bridge_metadata(
+    field: xlsynth_aot_builder::TypedAotField,
+) -> PirAotField {
+    PirAotField {
+        name: field.name,
+        ty: pir_aot_type_from_dslx_bridge_metadata(field.ty),
+    }
+}
+
+fn pir_aot_enum_variant_from_dslx_bridge_metadata(
+    variant: xlsynth_aot_builder::TypedAotEnumVariant,
+) -> Result<PirAotEnumVariant, CompilerError> {
+    let value = u64::try_from(variant.value).map_err(|_| {
+        CompilerError::InvalidArgument(format!(
+            "PIR AOT enum variant `{}` value {} exceeds the current 64-bit metadata limit",
+            variant.name, variant.value
+        ))
+    })?;
+    Ok(PirAotEnumVariant {
+        name: variant.name,
+        value,
+    })
+}
+
+fn pir_aot_signedness_from_dslx_bridge_metadata(
+    signedness: xlsynth_aot_builder::TypedAotSignedness,
+) -> PirAotSignedness {
+    match signedness {
+        xlsynth_aot_builder::TypedAotSignedness::Unsigned => PirAotSignedness::Unsigned,
+        xlsynth_aot_builder::TypedAotSignedness::Signed => PirAotSignedness::Signed,
+    }
+}
+
+fn pir_aot_type_from_dslx_bridge_metadata(ty: xlsynth_aot_builder::TypedAotType) -> PirAotType {
+    match ty {
+        xlsynth_aot_builder::TypedAotType::Bits {
+            signedness,
+            bit_count,
+        } => PirAotType::Bits {
+            signedness: pir_aot_signedness_from_dslx_bridge_metadata(signedness),
+            bit_count,
+        },
+        xlsynth_aot_builder::TypedAotType::Token => PirAotType::Token,
+        xlsynth_aot_builder::TypedAotType::Array { size, element } => PirAotType::Array {
+            size,
+            element: Box::new(pir_aot_type_from_dslx_bridge_metadata(*element)),
+        },
+        xlsynth_aot_builder::TypedAotType::Tuple { elements } => PirAotType::Tuple {
+            elements: elements
+                .into_iter()
+                .map(pir_aot_type_from_dslx_bridge_metadata)
+                .collect(),
+        },
+        xlsynth_aot_builder::TypedAotType::TypeRef { module, name } => {
+            PirAotType::TypeRef { module, name }
+        }
+    }
+}
+
+fn pir_aot_entrypoint_from_dslx_bridge_metadata(
+    entrypoint: xlsynth_aot_builder::TypedAotEntrypoint,
+) -> Result<PirAotEntrypoint, CompilerError> {
+    let source = match entrypoint.ir_file {
+        Some(ir_file) => PirAotEntrypointSource::IrFile {
+            ir_file,
+            ir_top: entrypoint.ir_top,
+        },
+        None => PirAotEntrypointSource::GeneratedIr {
+            ir_top: entrypoint.ir_top,
+        },
+    };
+    Ok(PirAotEntrypoint {
+        name: entrypoint.name,
+        source,
+        owning_module: entrypoint.owning_module,
+        params: entrypoint
+            .params
+            .into_iter()
+            .map(pir_aot_param_from_dslx_bridge_metadata)
+            .collect(),
+        return_type: pir_aot_type_from_dslx_bridge_metadata(entrypoint.return_type),
+    })
+}
+
+fn pir_aot_param_from_dslx_bridge_metadata(
+    param: xlsynth_aot_builder::TypedAotParam,
+) -> PirAotParam {
+    PirAotParam {
+        name: param.name,
+        ty: pir_aot_type_from_dslx_bridge_metadata(param.ty),
+    }
+}
+
 /// Builds one metadata-backed shared wrapper from checked-in IR files.
 pub struct TypedIrAotPackageBuilder<'a> {
     name: &'a str,
     metadata_path: PathBuf,
 }
 
-/// Output files and artifacts produced for a typed IR AOT package.
+/// Output files and entrypoint metadata produced for a typed IR AOT package.
 pub struct GeneratedTypedIrAotPackage {
     pub rust_file: PathBuf,
-    pub object_files: Vec<PathBuf>,
-    pub artifacts: Vec<AotArtifact>,
+    pub object_file: PathBuf,
+    pub entrypoints: Vec<AotEntrypointArtifact>,
+}
+
+struct PreparedPackageEntrypoint {
+    base_name: String,
+    entrypoint_symbol: String,
+    package: xlsynth_pir::ir::Package,
+    top: String,
 }
 
 impl<'a> TypedIrAotPackageBuilder<'a> {
@@ -70,7 +331,7 @@ impl<'a> TypedIrAotPackageBuilder<'a> {
         }
     }
 
-    /// Emits a shared wrapper and linked objects into Cargo's `OUT_DIR`.
+    /// Emits a shared wrapper and linked package object into Cargo's `OUT_DIR`.
     pub fn build(&self) -> Result<GeneratedTypedIrAotPackage, CompilerError> {
         let out_dir = std::env::var_os("OUT_DIR").ok_or_else(|| {
             CompilerError::Backend("OUT_DIR is required while emitting an AOT package".into())
@@ -78,7 +339,18 @@ impl<'a> TypedIrAotPackageBuilder<'a> {
         self.build_with_out_dir(Path::new(&out_dir))
     }
 
-    /// Emits a shared wrapper and linked objects into `out_dir`.
+    /// Emits a shared wrapper and exports its Rust file path in a rustc env
+    /// var.
+    pub fn build_and_export_env(
+        &self,
+        env_var: &str,
+    ) -> Result<GeneratedTypedIrAotPackage, CompilerError> {
+        let output = self.build()?;
+        export_generated_rust_file(env_var, &output.rust_file)?;
+        Ok(output)
+    }
+
+    /// Emits a shared wrapper and linked package object into `out_dir`.
     pub fn build_with_out_dir(
         &self,
         out_dir: &Path,
@@ -88,11 +360,10 @@ impl<'a> TypedIrAotPackageBuilder<'a> {
                 "AOT package name must not be empty".into(),
             ));
         }
-        let metadata = TypedAotPackageMetadata::from_json_file(&self.metadata_path)
-            .map_err(|error| CompilerError::InvalidArgument(error.to_string()))?;
+        let metadata = PirAotPackageMetadata::from_json_file(&self.metadata_path)?;
         let metadata_dir = self.metadata_path.parent().ok_or_else(|| {
             CompilerError::InvalidArgument(format!(
-                "typed AOT metadata path `{}` has no parent directory",
+                "PIR AOT metadata path `{}` has no parent directory",
                 self.metadata_path.display()
             ))
         })?;
@@ -102,8 +373,8 @@ impl<'a> TypedIrAotPackageBuilder<'a> {
                 "AOT package must contain at least one entrypoint".into(),
             ));
         }
-        let typed_package = ValidatedTypedAotPackage::new(&metadata)?;
-        let mut ordered_artifacts = Vec::with_capacity(metadata.entrypoints.len());
+        let typed_package = ValidatedPirAotPackage::new(&metadata)?;
+        let mut prepared_entrypoints = Vec::with_capacity(metadata.entrypoints.len());
         let mut entrypoint_names = BTreeSet::new();
         for entrypoint in &metadata.entrypoints {
             let base_name = sanitize_identifier(&entrypoint.name);
@@ -117,17 +388,17 @@ impl<'a> TypedIrAotPackageBuilder<'a> {
                     "AOT package contains duplicate entrypoint name '{base_name}'"
                 )));
             }
-            let ir_file = entrypoint.ir_file.as_ref().ok_or_else(|| {
-                CompilerError::InvalidArgument(format!(
-                    "typed AOT metadata entrypoint `{}` must specify ir_file",
+            let PirAotEntrypointSource::IrFile { ir_file, ir_top } = &entrypoint.source else {
+                return Err(CompilerError::InvalidArgument(format!(
+                    "PIR AOT metadata entrypoint `{}` must use source.kind `ir_file` for an IR-backed package",
                     entrypoint.name
-                ))
-            })?;
+                )));
+            };
             let ir_path = metadata_dir.join(ir_file);
             println!("cargo:rerun-if-changed={}", ir_path.display());
             let pir_text = fs::read_to_string(&ir_path).map_err(|error| {
                 CompilerError::Backend(format!(
-                    "failed to read IR file {} for typed AOT entrypoint `{}`: {error}",
+                    "failed to read IR file {} for PIR AOT entrypoint `{}`: {error}",
                     ir_path.display(),
                     entrypoint.name
                 ))
@@ -136,58 +407,85 @@ impl<'a> TypedIrAotPackageBuilder<'a> {
                 .parse_and_validate_package()
                 .map_err(|error| CompilerError::InvalidFunction(error.to_string()))?;
             let entrypoint_symbol = format!("__xlsynth_pir_aot_{base_name}");
-            let artifact = compile_package_aot(&package, &entrypoint.ir_top, &entrypoint_symbol)?;
-            typed_package.validate_entrypoint_layout(entrypoint, &artifact)?;
-            ordered_artifacts.push((base_name, artifact));
+            prepared_entrypoints.push(PreparedPackageEntrypoint {
+                base_name,
+                entrypoint_symbol,
+                package,
+                top: ir_top.clone(),
+            });
+        }
+        let package_name = sanitize_identifier(self.name);
+        let package_object_name = format!("xlsynth_pir_aot_package_{package_name}");
+        let package_entrypoints = prepared_entrypoints
+            .iter()
+            .map(|entrypoint| AotPackageEntrypoint {
+                package: &entrypoint.package,
+                function_name: &entrypoint.top,
+                entrypoint_symbol: &entrypoint.entrypoint_symbol,
+            })
+            .collect::<Vec<_>>();
+        let package_artifact = compile_aot_package(&package_object_name, &package_entrypoints)?;
+        let ordered_entrypoints = prepared_entrypoints
+            .iter()
+            .map(|entrypoint| entrypoint.base_name.clone())
+            .zip(package_artifact.entrypoints)
+            .collect::<Vec<_>>();
+        for (entrypoint, (_, entrypoint_artifact)) in
+            metadata.entrypoints.iter().zip(&ordered_entrypoints)
+        {
+            typed_package.validate_entrypoint_layout(entrypoint, entrypoint_artifact)?;
         }
 
         fs::create_dir_all(out_dir).map_err(|error| CompilerError::Backend(error.to_string()))?;
-        let package_name = sanitize_identifier(self.name);
         let rust_file = out_dir.join(format!("{package_name}_typed_ir_pir_aot_package.rs"));
         fs::write(
             &rust_file,
-            render_typed_aot_package(
+            render_pir_aot_package(
                 self.name,
                 &typed_package,
-                &ordered_artifacts,
+                &ordered_entrypoints,
                 "typed IR AOT package",
             )?,
         )
         .map_err(|error| CompilerError::Backend(error.to_string()))?;
 
-        let mut object_files = Vec::with_capacity(ordered_artifacts.len());
-        let mut artifacts = Vec::with_capacity(ordered_artifacts.len());
-        for (base_name, artifact) in ordered_artifacts {
-            let object_file = out_dir.join(format!("{base_name}.pir_aot.o"));
-            fs::write(&object_file, &artifact.object_code)
-                .map_err(|error| CompilerError::Backend(error.to_string()))?;
-            cc::Build::new()
-                .cargo_metadata(true)
-                .object(&object_file)
-                .compile(&format!("xlsynth_pir_aot_{base_name}"));
-            object_files.push(object_file);
-            artifacts.push(artifact);
-        }
+        let object_file = out_dir.join(format!("{package_name}.pir_aot.o"));
+        fs::write(&object_file, &package_artifact.object_code)
+            .map_err(|error| CompilerError::Backend(error.to_string()))?;
+        cc::Build::new()
+            .cargo_metadata(true)
+            .object(&object_file)
+            .compile(&package_object_name);
+        let entrypoints = ordered_entrypoints
+            .into_iter()
+            .map(|(_, entrypoint_artifact)| entrypoint_artifact)
+            .collect();
 
         Ok(GeneratedTypedIrAotPackage {
             rust_file,
-            object_files,
-            artifacts,
+            object_file,
+            entrypoints,
         })
     }
 }
 
-/// Collects independently compiled DSLX entrypoints into one shared wrapper.
+/// Collects DSLX entrypoints into one shared wrapper and package object.
 pub struct TypedDslxAotPackageBuilder<'a> {
     name: &'a str,
     specs: Vec<TypedDslxAotBuildSpec<'a>>,
 }
 
-/// Output files and artifacts produced for a typed DSLX AOT package.
+/// Output files and entrypoint metadata produced for a typed DSLX AOT package.
 pub struct GeneratedTypedDslxAotPackage {
     pub rust_file: PathBuf,
-    pub object_files: Vec<PathBuf>,
-    pub artifacts: Vec<AotArtifact>,
+    pub object_file: PathBuf,
+    pub entrypoints: Vec<AotEntrypointArtifact>,
+}
+
+struct PreparedDslxAotEntrypoint {
+    dslx_text: String,
+    package: xlsynth_pir::ir::Package,
+    top: String,
 }
 
 impl<'a> TypedDslxAotPackageBuilder<'a> {
@@ -199,13 +497,34 @@ impl<'a> TypedDslxAotPackageBuilder<'a> {
         }
     }
 
-    /// Adds one independently compiled top-level DSLX function.
+    /// Adds one top-level DSLX function to the generated AOT package.
     pub fn add_entrypoint(mut self, spec: TypedDslxAotBuildSpec<'a>) -> Self {
         self.specs.push(spec);
         self
     }
 
-    /// Emits a shared wrapper and linked objects into Cargo's `OUT_DIR`.
+    /// Adds multiple entrypoints from the same DSLX file and type bridge set.
+    pub fn add_dslx_file(
+        mut self,
+        dslx_path: &'a Path,
+        dslx_options: DslxConvertOptions<'a>,
+        type_module_paths: impl IntoIterator<Item = &'a Path>,
+        entrypoints: impl IntoIterator<Item = DslxAotEntrypoint<'a>>,
+    ) -> Self {
+        let type_module_paths = type_module_paths.into_iter().collect::<Vec<_>>();
+        for entrypoint in entrypoints {
+            self.specs.push(TypedDslxAotBuildSpec {
+                name: entrypoint.name,
+                dslx_path,
+                top: entrypoint.top,
+                dslx_options: dslx_options.clone(),
+                type_module_paths: type_module_paths.clone(),
+            });
+        }
+        self
+    }
+
+    /// Emits a shared wrapper and linked package object into Cargo's `OUT_DIR`.
     pub fn build(&self) -> Result<GeneratedTypedDslxAotPackage, CompilerError> {
         let out_dir = std::env::var_os("OUT_DIR").ok_or_else(|| {
             CompilerError::Backend("OUT_DIR is required while emitting an AOT package".into())
@@ -213,7 +532,18 @@ impl<'a> TypedDslxAotPackageBuilder<'a> {
         self.build_with_out_dir(Path::new(&out_dir))
     }
 
-    /// Emits a shared wrapper and linked objects into `out_dir`.
+    /// Emits a shared wrapper and exports its Rust file path in a rustc env
+    /// var.
+    pub fn build_and_export_env(
+        &self,
+        env_var: &str,
+    ) -> Result<GeneratedTypedDslxAotPackage, CompilerError> {
+        let output = self.build()?;
+        export_generated_rust_file(env_var, &output.rust_file)?;
+        Ok(output)
+    }
+
+    /// Emits a shared wrapper and linked package object into `out_dir`.
     pub fn build_with_out_dir(
         &self,
         out_dir: &Path,
@@ -228,7 +558,7 @@ impl<'a> TypedDslxAotPackageBuilder<'a> {
                 "AOT package must contain at least one entrypoint".into(),
             ));
         }
-        let mut ordered_artifacts = Vec::with_capacity(self.specs.len());
+        let mut prepared_entrypoints = Vec::with_capacity(self.specs.len());
         let mut entrypoint_names = BTreeSet::new();
         for spec in &self.specs {
             let base_name = sanitize_identifier(spec.name);
@@ -242,45 +572,62 @@ impl<'a> TypedDslxAotPackageBuilder<'a> {
                     "AOT package contains duplicate entrypoint name '{base_name}'"
                 )));
             }
-            let artifact = compile_dslx_artifact(spec, &base_name)?.1;
-            ordered_artifacts.push((base_name, artifact));
+            let prepared = prepare_dslx_aot_entrypoint(spec, &base_name)?;
+            let entrypoint_symbol = format!("__xlsynth_pir_aot_{base_name}");
+            prepared_entrypoints.push(PreparedPackageEntrypoint {
+                base_name,
+                entrypoint_symbol,
+                package: prepared.package,
+                top: prepared.top,
+            });
         }
-        let metadata = build_native_typed_dslx_aot_package_metadata(&self.specs)
-            .map_err(|error| CompilerError::Backend(error.to_string()))?;
-        let typed_package = ValidatedTypedAotPackage::new(&metadata)?;
-        for (entrypoint, (_, artifact)) in metadata.entrypoints.iter().zip(ordered_artifacts.iter())
+        let metadata = build_pir_aot_package_metadata_from_dslx_specs(&self.specs)?;
+        let typed_package = ValidatedPirAotPackage::new(&metadata)?;
+        let package_name = sanitize_identifier(self.name);
+        let package_object_name = format!("xlsynth_pir_aot_package_{package_name}");
+        let package_entrypoints = prepared_entrypoints
+            .iter()
+            .map(|entrypoint| AotPackageEntrypoint {
+                package: &entrypoint.package,
+                function_name: &entrypoint.top,
+                entrypoint_symbol: &entrypoint.entrypoint_symbol,
+            })
+            .collect::<Vec<_>>();
+        let package_artifact = compile_aot_package(&package_object_name, &package_entrypoints)?;
+        let ordered_entrypoints = prepared_entrypoints
+            .iter()
+            .map(|entrypoint| entrypoint.base_name.clone())
+            .zip(package_artifact.entrypoints)
+            .collect::<Vec<_>>();
+        for (entrypoint, (_, entrypoint_artifact)) in
+            metadata.entrypoints.iter().zip(&ordered_entrypoints)
         {
-            typed_package.validate_entrypoint_layout(entrypoint, artifact)?;
+            typed_package.validate_entrypoint_layout(entrypoint, entrypoint_artifact)?;
         }
-        let generated_source = render_typed_aot_package(
+        let generated_source = render_pir_aot_package(
             self.name,
             &typed_package,
-            &ordered_artifacts,
+            &ordered_entrypoints,
             "typed DSLX AOT package",
         )?;
 
         fs::create_dir_all(out_dir).map_err(|error| CompilerError::Backend(error.to_string()))?;
-        let package_name = sanitize_identifier(self.name);
         let rust_file = out_dir.join(format!("{package_name}_typed_dslx_pir_aot_package.rs"));
         fs::write(&rust_file, generated_source)
             .map_err(|error| CompilerError::Backend(error.to_string()))?;
-        let mut object_files = Vec::with_capacity(self.specs.len());
-        for (base_name, artifact) in &ordered_artifacts {
-            let object_file = out_dir.join(format!("{base_name}.pir_aot.o"));
-            fs::write(&object_file, &artifact.object_code)
-                .map_err(|error| CompilerError::Backend(error.to_string()))?;
-            cc::Build::new()
-                .cargo_metadata(true)
-                .object(&object_file)
-                .compile(&format!("xlsynth_pir_aot_{base_name}"));
-            object_files.push(object_file);
-        }
+        let object_file = out_dir.join(format!("{package_name}.pir_aot.o"));
+        fs::write(&object_file, &package_artifact.object_code)
+            .map_err(|error| CompilerError::Backend(error.to_string()))?;
+        cc::Build::new()
+            .cargo_metadata(true)
+            .object(&object_file)
+            .compile(&package_object_name);
         Ok(GeneratedTypedDslxAotPackage {
             rust_file,
-            object_files,
-            artifacts: ordered_artifacts
+            object_file,
+            entrypoints: ordered_entrypoints
                 .into_iter()
-                .map(|(_, artifact)| artifact)
+                .map(|(_, entrypoint_artifact)| entrypoint_artifact)
                 .collect(),
         })
     }
@@ -390,6 +737,16 @@ fn compile_dslx_artifact(
     spec: &TypedDslxAotBuildSpec<'_>,
     base_name: &str,
 ) -> Result<(String, AotArtifact), CompilerError> {
+    let prepared = prepare_dslx_aot_entrypoint(spec, base_name)?;
+    let entrypoint_symbol = format!("__xlsynth_pir_aot_{base_name}");
+    let artifact = compile_package_aot(&prepared.package, &prepared.top, &entrypoint_symbol)?;
+    Ok((prepared.dslx_text, artifact))
+}
+
+fn prepare_dslx_aot_entrypoint(
+    spec: &TypedDslxAotBuildSpec<'_>,
+    base_name: &str,
+) -> Result<PreparedDslxAotEntrypoint, CompilerError> {
     for dependency in collect_typed_dslx_aot_dependencies(spec)
         .map_err(|error| CompilerError::Backend(error.to_string()))?
     {
@@ -424,9 +781,11 @@ fn compile_dslx_artifact(
     let package = Parser::new(&pir_text)
         .parse_and_validate_package()
         .map_err(|error| CompilerError::InvalidFunction(error.to_string()))?;
-    let entrypoint_symbol = format!("__xlsynth_pir_aot_{base_name}");
-    let artifact = compile_package_aot(&package, &top, &entrypoint_symbol)?;
-    Ok((dslx_text, artifact))
+    Ok(PreparedDslxAotEntrypoint {
+        dslx_text,
+        package,
+        top,
+    })
 }
 
 /// Appends a user-signature wrapper around a DSLX implicit-token entrypoint.
@@ -541,6 +900,7 @@ fn render_typed_dslx_runner_items(
     signature: &NativeTypedDslxFunctionSignature,
     artifact: &AotArtifact,
 ) -> String {
+    let entrypoint_artifact = AotEntrypointArtifact::from(artifact);
     let param_names = signature
         .params
         .iter()
@@ -552,7 +912,7 @@ fn render_typed_dslx_runner_items(
         .map(|param| param.rust_type.clone())
         .collect::<Vec<_>>();
     render_runner_items(
-        artifact,
+        &entrypoint_artifact,
         &param_names,
         &param_types,
         &signature.return_rust_type,
@@ -632,29 +992,47 @@ fn validate_native_typed_dslx_type(
             }
             Ok(())
         }
+        (
+            NativeTypedDslxType::Tuple { elements },
+            NativeValueLayout::Tuple {
+                fields: native_fields,
+                ..
+            },
+        ) if elements.len() == native_fields.len() => {
+            for (index, (element, native_field)) in
+                elements.iter().zip(native_fields.iter()).enumerate()
+            {
+                validate_native_typed_dslx_type(
+                    &format!("{label}.{index}"),
+                    element,
+                    &native_field.layout,
+                )?;
+            }
+            Ok(())
+        }
         _ => Err(CompilerError::InvalidFunction(format!(
             "typed DSLX native layout mismatch for {label}: DSLX has {dslx_type:?}, compiled PIR has {layout:?}"
         ))),
     }
 }
 
-struct ValidatedTypedAotPackage<'a> {
-    metadata: &'a TypedAotPackageMetadata,
-    decls: BTreeMap<TypedAotDeclKey, &'a TypedAotDecl>,
+struct ValidatedPirAotPackage<'a> {
+    metadata: &'a PirAotPackageMetadata,
+    decls: BTreeMap<PirAotDeclKey, &'a PirAotDecl>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct TypedAotDeclKey {
+struct PirAotDeclKey {
     module: Vec<String>,
     name: String,
 }
 
-impl<'a> ValidatedTypedAotPackage<'a> {
-    fn new(metadata: &'a TypedAotPackageMetadata) -> Result<Self, CompilerError> {
-        if metadata.format_version != 2 {
+impl<'a> ValidatedPirAotPackage<'a> {
+    fn new(metadata: &'a PirAotPackageMetadata) -> Result<Self, CompilerError> {
+        if metadata.format_version != PIR_AOT_METADATA_FORMAT_VERSION {
             return Err(CompilerError::InvalidArgument(format!(
-                "unsupported typed AOT metadata format_version {}; expected 2",
-                metadata.format_version
+                "unsupported PIR AOT metadata format_version {}; expected {}",
+                metadata.format_version, PIR_AOT_METADATA_FORMAT_VERSION
             )));
         }
         let mut module_paths = BTreeSet::new();
@@ -663,22 +1041,22 @@ impl<'a> ValidatedTypedAotPackage<'a> {
             validate_module_path(&module.path)?;
             if !module_paths.insert(module.path.clone()) {
                 return Err(CompilerError::InvalidArgument(format!(
-                    "typed AOT metadata contains duplicate module path `{}`",
+                    "PIR AOT metadata contains duplicate module path `{}`",
                     render_module_path_for_error(&module.path)
                 )));
             }
             let mut module_decl_names = BTreeSet::new();
             for decl in &module.declarations {
-                let name = typed_aot_decl_name(decl);
+                let name = pir_aot_decl_name(decl);
                 validate_type_name(name)?;
                 if !module_decl_names.insert(name.to_string()) {
                     return Err(CompilerError::InvalidArgument(format!(
-                        "typed AOT metadata module `{}` contains duplicate declaration `{name}`",
+                        "PIR AOT metadata module `{}` contains duplicate declaration `{name}`",
                         render_module_path_for_error(&module.path)
                     )));
                 }
                 decls.insert(
-                    TypedAotDeclKey {
+                    PirAotDeclKey {
                         module: module.path.clone(),
                         name: name.to_string(),
                     },
@@ -689,20 +1067,26 @@ impl<'a> ValidatedTypedAotPackage<'a> {
         let mut entrypoint_names = BTreeSet::new();
         for entrypoint in &metadata.entrypoints {
             validate_type_name(&entrypoint.name)?;
-            if let Some(ir_file) = &entrypoint.ir_file {
-                validate_ir_file_path(ir_file)?;
+            match &entrypoint.source {
+                PirAotEntrypointSource::IrFile { ir_file, ir_top } => {
+                    validate_ir_file_path(ir_file)?;
+                    validate_ir_top(ir_top)?;
+                }
+                PirAotEntrypointSource::GeneratedIr { ir_top } => {
+                    validate_ir_top(ir_top)?;
+                }
             }
             validate_module_path(&entrypoint.owning_module)?;
             if !module_paths.contains(&entrypoint.owning_module) {
                 return Err(CompilerError::InvalidArgument(format!(
-                    "typed AOT metadata entrypoint `{}` uses unknown owning module `{}`",
+                    "PIR AOT metadata entrypoint `{}` uses unknown owning module `{}`",
                     entrypoint.name,
                     render_module_path_for_error(&entrypoint.owning_module)
                 )));
             }
             if !entrypoint_names.insert(entrypoint.name.clone()) {
                 return Err(CompilerError::InvalidArgument(format!(
-                    "typed AOT metadata contains duplicate entrypoint `{}`",
+                    "PIR AOT metadata contains duplicate entrypoint `{}`",
                     entrypoint.name
                 )));
             }
@@ -725,12 +1109,12 @@ impl<'a> ValidatedTypedAotPackage<'a> {
 
     fn validate_entrypoint_layout(
         &self,
-        entrypoint: &TypedAotEntrypoint,
-        artifact: &AotArtifact,
+        entrypoint: &PirAotEntrypoint,
+        artifact: &AotEntrypointArtifact,
     ) -> Result<(), CompilerError> {
         if entrypoint.params.len() != artifact.param_layouts.len() {
             return Err(CompilerError::InvalidFunction(format!(
-                "typed AOT metadata entrypoint `{}` parameter count {} does not match compiled PIR parameter count {}",
+                "PIR AOT metadata entrypoint `{}` parameter count {} does not match compiled PIR parameter count {}",
                 entrypoint.name,
                 entrypoint.params.len(),
                 artifact.param_layouts.len()
@@ -745,7 +1129,7 @@ impl<'a> ValidatedTypedAotPackage<'a> {
             let expected = self.lower_type_to_layout(&param.ty, &mut Vec::new())?;
             if &expected != actual {
                 return Err(CompilerError::InvalidFunction(format!(
-                    "typed AOT metadata layout mismatch for entrypoint `{}` parameter {index} `{}`: metadata has {expected:?}, compiled PIR has {actual:?}",
+                    "PIR AOT metadata layout mismatch for entrypoint `{}` parameter {index} `{}`: metadata has {expected:?}, compiled PIR has {actual:?}",
                     entrypoint.name, param.name
                 )));
             }
@@ -753,7 +1137,7 @@ impl<'a> ValidatedTypedAotPackage<'a> {
         let expected = self.lower_type_to_layout(&entrypoint.return_type, &mut Vec::new())?;
         if expected != artifact.result_layout {
             return Err(CompilerError::InvalidFunction(format!(
-                "typed AOT metadata layout mismatch for entrypoint `{}` return value: metadata has {expected:?}, compiled PIR has {:?}",
+                "PIR AOT metadata layout mismatch for entrypoint `{}` return value: metadata has {expected:?}, compiled PIR has {:?}",
                 entrypoint.name, artifact.result_layout
             )));
         }
@@ -763,24 +1147,24 @@ impl<'a> ValidatedTypedAotPackage<'a> {
     fn validate_decl(
         &self,
         module_path: &[String],
-        decl: &TypedAotDecl,
+        decl: &PirAotDecl,
     ) -> Result<(), CompilerError> {
         match decl {
-            TypedAotDecl::Struct { fields, .. } => {
+            PirAotDecl::Struct { fields, .. } => {
                 let mut field_names = BTreeSet::new();
                 for field in fields {
                     validate_value_name(&field.name)?;
                     if !field_names.insert(field.name.clone()) {
                         return Err(CompilerError::InvalidArgument(format!(
-                            "typed AOT metadata struct `{}` has duplicate field `{}`",
-                            render_type_path_for_error(module_path, typed_aot_decl_name(decl)),
+                            "PIR AOT metadata struct `{}` has duplicate field `{}`",
+                            render_type_path_for_error(module_path, pir_aot_decl_name(decl)),
                             field.name
                         )));
                     }
                     self.lower_type_to_layout(&field.ty, &mut Vec::new())?;
                 }
             }
-            TypedAotDecl::Enum {
+            PirAotDecl::Enum {
                 signedness,
                 bit_count,
                 variants,
@@ -788,8 +1172,14 @@ impl<'a> ValidatedTypedAotPackage<'a> {
             } => {
                 if *bit_count == 0 {
                     return Err(CompilerError::InvalidArgument(format!(
-                        "typed AOT metadata enum `{}` has zero bit width",
-                        render_type_path_for_error(module_path, typed_aot_decl_name(decl))
+                        "PIR AOT metadata enum `{}` has zero bit width",
+                        render_type_path_for_error(module_path, pir_aot_decl_name(decl))
+                    )));
+                }
+                if *bit_count > 64 {
+                    return Err(CompilerError::UnsupportedType(format!(
+                        "PIR AOT enum `{}` uses bits[{bit_count}], but enum values are currently limited to 64 bits",
+                        render_type_path_for_error(module_path, pir_aot_decl_name(decl))
                     )));
                 }
                 validate_scalar_bit_count(*signedness, *bit_count)?;
@@ -798,22 +1188,22 @@ impl<'a> ValidatedTypedAotPackage<'a> {
                     validate_type_name(&variant.name)?;
                     if !variant_names.insert(variant.name.clone()) {
                         return Err(CompilerError::InvalidArgument(format!(
-                            "typed AOT metadata enum `{}` has duplicate variant `{}`",
-                            render_type_path_for_error(module_path, typed_aot_decl_name(decl)),
+                            "PIR AOT metadata enum `{}` has duplicate variant `{}`",
+                            render_type_path_for_error(module_path, pir_aot_decl_name(decl)),
                             variant.name
                         )));
                     }
-                    if *bit_count < 128 && variant.value >= (1u128 << *bit_count) {
+                    if *bit_count < 64 && variant.value >= (1u64 << *bit_count) {
                         return Err(CompilerError::InvalidArgument(format!(
-                            "typed AOT metadata enum variant `{}::{}` value {} does not fit bits[{bit_count}]",
-                            render_type_path_for_error(module_path, typed_aot_decl_name(decl)),
+                            "PIR AOT metadata enum variant `{}::{}` value {} does not fit bits[{bit_count}]",
+                            render_type_path_for_error(module_path, pir_aot_decl_name(decl)),
                             variant.name,
                             variant.value
                         )));
                     }
                 }
             }
-            TypedAotDecl::Alias { target, .. } => {
+            PirAotDecl::Alias { target, .. } => {
                 self.lower_type_to_layout(target, &mut Vec::new())?;
             }
         }
@@ -822,27 +1212,27 @@ impl<'a> ValidatedTypedAotPackage<'a> {
 
     fn lower_type_to_layout(
         &self,
-        ty: &TypedAotType,
-        active_refs: &mut Vec<TypedAotDeclKey>,
+        ty: &PirAotType,
+        active_refs: &mut Vec<PirAotDeclKey>,
     ) -> Result<NativeValueLayout, CompilerError> {
         match ty {
-            TypedAotType::Bits {
+            PirAotType::Bits {
                 signedness,
                 bit_count,
             } => {
                 if *bit_count == 0 {
                     return Err(CompilerError::InvalidArgument(
-                        "typed AOT metadata bits type must have nonzero width".into(),
+                        "PIR AOT metadata bits type must have nonzero width".into(),
                     ));
                 }
                 validate_scalar_bit_count(*signedness, *bit_count)?;
                 Ok(native_bits_layout(*bit_count))
             }
-            TypedAotType::Token => Ok(NativeValueLayout::Token),
-            TypedAotType::Array { size, element } => {
+            PirAotType::Token => Ok(NativeValueLayout::Token),
+            PirAotType::Array { size, element } => {
                 if *size == 0 {
                     return Err(CompilerError::InvalidArgument(
-                        "typed AOT metadata arrays must have nonzero size".into(),
+                        "PIR AOT metadata arrays must have nonzero size".into(),
                     ));
                 }
                 Ok(NativeValueLayout::Array {
@@ -850,39 +1240,39 @@ impl<'a> ValidatedTypedAotPackage<'a> {
                     element_count: *size,
                 })
             }
-            TypedAotType::Tuple { elements } => self.lower_fields_to_tuple_layout(
+            PirAotType::Tuple { elements } => self.lower_fields_to_tuple_layout(
                 elements
                     .iter()
                     .map(|element| self.lower_type_to_layout(element, active_refs))
                     .collect::<Result<Vec<_>, _>>()?,
             ),
-            TypedAotType::TypeRef { module, name } => {
-                let key = TypedAotDeclKey {
+            PirAotType::TypeRef { module, name } => {
+                let key = PirAotDeclKey {
                     module: module.clone(),
                     name: name.clone(),
                 };
                 if active_refs.contains(&key) {
                     return Err(CompilerError::InvalidArgument(format!(
-                        "typed AOT metadata contains cyclic type reference through `{}`",
+                        "PIR AOT metadata contains cyclic type reference through `{}`",
                         render_type_path_for_error(module, name)
                     )));
                 }
                 let decl = self.decls.get(&key).ok_or_else(|| {
                     CompilerError::InvalidArgument(format!(
-                        "typed AOT metadata references unknown type `{}`",
+                        "PIR AOT metadata references unknown type `{}`",
                         render_type_path_for_error(module, name)
                     ))
                 })?;
                 active_refs.push(key);
                 let result = match decl {
-                    TypedAotDecl::Struct { fields, .. } => self.lower_fields_to_tuple_layout(
+                    PirAotDecl::Struct { fields, .. } => self.lower_fields_to_tuple_layout(
                         fields
                             .iter()
                             .map(|field| self.lower_type_to_layout(&field.ty, active_refs))
                             .collect::<Result<Vec<_>, _>>()?,
                     ),
-                    TypedAotDecl::Enum { bit_count, .. } => Ok(native_bits_layout(*bit_count)),
-                    TypedAotDecl::Alias { target, .. } => {
+                    PirAotDecl::Enum { bit_count, .. } => Ok(native_bits_layout(*bit_count)),
+                    PirAotDecl::Alias { target, .. } => {
                         self.lower_type_to_layout(target, active_refs)
                     }
                 };
@@ -906,7 +1296,7 @@ impl<'a> ValidatedTypedAotPackage<'a> {
                 offset: byte_count,
             });
             byte_count = byte_count.checked_add(layout.byte_count()).ok_or_else(|| {
-                CompilerError::UnsupportedType("typed AOT tuple layout size overflow".into())
+                CompilerError::UnsupportedType("PIR AOT tuple layout size overflow".into())
             })?;
             alignment = alignment.max(layout.alignment());
         }
@@ -925,19 +1315,124 @@ struct RenderModuleNode {
     children: BTreeMap<String, RenderModuleNode>,
 }
 
-fn render_typed_aot_package(
+#[derive(Debug)]
+struct GeneratedTupleType {
+    name: String,
+    elements: Vec<PirAotType>,
+}
+
+#[derive(Debug, Default)]
+struct GeneratedTupleTypes {
+    types: Vec<GeneratedTupleType>,
+    reserved_root_names: BTreeSet<String>,
+}
+
+impl GeneratedTupleTypes {
+    fn collect(package: &ValidatedPirAotPackage<'_>) -> Self {
+        let mut registry = Self::with_reserved_root_names(package);
+        for module in &package.metadata.modules {
+            for decl in &module.declarations {
+                registry.collect_from_decl(decl);
+            }
+        }
+        for entrypoint in &package.metadata.entrypoints {
+            for param in &entrypoint.params {
+                registry.collect_from_type(&param.ty);
+            }
+            registry.collect_from_type(&entrypoint.return_type);
+        }
+        registry
+    }
+
+    fn with_reserved_root_names(package: &ValidatedPirAotPackage<'_>) -> Self {
+        let mut reserved_root_names = BTreeSet::from(["Token".to_string()]);
+        for module in &package.metadata.modules {
+            if let Some(root_name) = module.path.first() {
+                reserved_root_names.insert(root_name.clone());
+            }
+        }
+        for (signedness, bit_count) in collect_scalar_aliases(package) {
+            reserved_root_names.insert(scalar_alias_name(signedness, bit_count));
+        }
+        Self {
+            types: Vec::new(),
+            reserved_root_names,
+        }
+    }
+
+    fn collect_from_decl(&mut self, decl: &PirAotDecl) {
+        match decl {
+            PirAotDecl::Struct { fields, .. } => {
+                for field in fields {
+                    self.collect_from_type(&field.ty);
+                }
+            }
+            PirAotDecl::Enum { .. } => {}
+            PirAotDecl::Alias { target, .. } => self.collect_from_type(target),
+        }
+    }
+
+    fn collect_from_type(&mut self, ty: &PirAotType) {
+        match ty {
+            PirAotType::Bits { .. } | PirAotType::Token | PirAotType::TypeRef { .. } => {}
+            PirAotType::Array { element, .. } => self.collect_from_type(element),
+            PirAotType::Tuple { elements } => {
+                for element in elements {
+                    self.collect_from_type(element);
+                }
+                self.intern(elements);
+            }
+        }
+    }
+
+    fn intern(&mut self, elements: &[PirAotType]) {
+        if self.type_name(elements).is_some() {
+            return;
+        }
+        let name = self.allocate_name();
+        self.types.push(GeneratedTupleType {
+            name,
+            elements: elements.to_vec(),
+        });
+    }
+
+    fn allocate_name(&mut self) -> String {
+        let mut index = self.types.len();
+        loop {
+            let candidate = format!("XlsynthPirAotTuple{index}");
+            if self.reserved_root_names.insert(candidate.clone()) {
+                return candidate;
+            }
+            index += 1;
+        }
+    }
+
+    fn type_name(&self, elements: &[PirAotType]) -> Option<&str> {
+        self.types
+            .iter()
+            .find(|tuple_type| tuple_type.elements == elements)
+            .map(|tuple_type| tuple_type.name.as_str())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.types.is_empty()
+    }
+}
+
+fn render_pir_aot_package(
     package_name: &str,
-    package: &ValidatedTypedAotPackage<'_>,
-    artifacts: &[(String, AotArtifact)],
+    package: &ValidatedPirAotPackage<'_>,
+    entrypoint_artifacts: &[(String, AotEntrypointArtifact)],
     source_kind: &str,
 ) -> Result<String, CompilerError> {
-    if package.metadata.entrypoints.len() != artifacts.len() {
+    if package.metadata.entrypoints.len() != entrypoint_artifacts.len() {
         return Err(CompilerError::InvalidArgument(format!(
-            "typed AOT metadata has {} entrypoints, but build has {} artifacts",
+            "PIR AOT metadata has {} entrypoints, but build has {} entrypoint artifacts",
             package.metadata.entrypoints.len(),
-            artifacts.len()
+            entrypoint_artifacts.len()
         )));
     }
+    let tuple_types = GeneratedTupleTypes::collect(package);
     let mut root = RenderModuleNode::default();
     for module in &package.metadata.modules {
         let mut items = vec![
@@ -945,11 +1440,21 @@ fn render_typed_aot_package(
             "#![allow(unused_imports)]".to_string(),
         ];
         for decl in &module.declarations {
-            items.push(render_typed_aot_decl(package, &module.path, decl)?);
+            items.push(render_pir_aot_decl(
+                package,
+                &tuple_types,
+                &module.path,
+                decl,
+            )?);
         }
         insert_render_module_items(&mut root, &module.path, items)?;
     }
-    for (entrypoint, (_, artifact)) in package.metadata.entrypoints.iter().zip(artifacts.iter()) {
+    for (entrypoint, (_, entrypoint_artifact)) in package
+        .metadata
+        .entrypoints
+        .iter()
+        .zip(entrypoint_artifacts.iter())
+    {
         let runner_module_name = format!("aot_{}", sanitize_identifier(&entrypoint.name));
         let mut runner_path = entrypoint.owning_module.clone();
         runner_path.push(runner_module_name);
@@ -961,9 +1466,10 @@ fn render_typed_aot_package(
         let param_types = entrypoint
             .params
             .iter()
-            .map(|param| render_typed_aot_type(package, &param.ty, &runner_path))
+            .map(|param| render_pir_aot_type(package, &tuple_types, &param.ty, &runner_path))
             .collect::<Result<Vec<_>, _>>()?;
-        let output_type = render_typed_aot_type(package, &entrypoint.return_type, &runner_path)?;
+        let output_type =
+            render_pir_aot_type(package, &tuple_types, &entrypoint.return_type, &runner_path)?;
         insert_render_module_items(
             &mut root,
             &runner_path,
@@ -972,7 +1478,7 @@ fn render_typed_aot_package(
                 "#![allow(unused_imports)]".to_string(),
                 "use super::*;".to_string(),
                 render_runner_items(
-                    artifact,
+                    entrypoint_artifact,
                     &param_names,
                     &param_types,
                     &output_type,
@@ -985,12 +1491,15 @@ fn render_typed_aot_package(
 
     Ok(trim_trailing_line_whitespace(format!(
         "// SPDX-License-Identifier: Apache-2.0\n// Generated by xlsynth_pir_compiler::aot from {source_kind} {package_name:?}.\n\n{}{}",
-        render_typed_aot_runtime_items(package),
+        render_pir_aot_runtime_items(package, &tuple_types)?,
         render_module_node_children(&root, 0),
     )))
 }
 
-fn render_typed_aot_runtime_items(package: &ValidatedTypedAotPackage<'_>) -> String {
+fn render_pir_aot_runtime_items(
+    package: &ValidatedPirAotPackage<'_>,
+    tuple_types: &GeneratedTupleTypes,
+) -> Result<String, CompilerError> {
     let mut output = "pub use xlsynth_pir_compiler_runtime::Token;\n".to_string();
     for (signedness, bit_count) in collect_scalar_aliases(package) {
         output.push_str(&format!(
@@ -999,8 +1508,42 @@ fn render_typed_aot_runtime_items(package: &ValidatedTypedAotPackage<'_>) -> Str
             scalar_runtime_type(signedness, bit_count)
         ));
     }
+    if !tuple_types.is_empty() {
+        output.push('\n');
+        for tuple_type in &tuple_types.types {
+            output.push_str(&render_generated_tuple_type(
+                package,
+                tuple_types,
+                tuple_type,
+            )?);
+            output.push('\n');
+        }
+    }
     output.push('\n');
-    output
+    Ok(output)
+}
+
+fn render_generated_tuple_type(
+    package: &ValidatedPirAotPackage<'_>,
+    tuple_types: &GeneratedTupleTypes,
+    tuple_type: &GeneratedTupleType,
+) -> Result<String, CompilerError> {
+    let fields = tuple_type
+        .elements
+        .iter()
+        .enumerate()
+        .map(|(index, element)| {
+            Ok(format!(
+                "    pub field{index}: {},\n",
+                render_pir_aot_type(package, tuple_types, element, &[])?
+            ))
+        })
+        .collect::<Result<Vec<_>, CompilerError>>()?
+        .concat();
+    Ok(format!(
+        "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {} {{\n{fields}}}\n",
+        tuple_type.name
+    ))
 }
 
 fn insert_render_module_items(
@@ -1057,8 +1600,8 @@ fn trim_trailing_line_whitespace(text: String) -> String {
 }
 
 fn collect_scalar_aliases(
-    package: &ValidatedTypedAotPackage<'_>,
-) -> BTreeSet<(TypedAotSignedness, usize)> {
+    package: &ValidatedPirAotPackage<'_>,
+) -> BTreeSet<(PirAotSignedness, usize)> {
     let mut aliases = BTreeSet::new();
     for module in &package.metadata.modules {
         for decl in &module.declarations {
@@ -1075,42 +1618,42 @@ fn collect_scalar_aliases(
 }
 
 fn collect_scalar_aliases_from_decl(
-    decl: &TypedAotDecl,
-    aliases: &mut BTreeSet<(TypedAotSignedness, usize)>,
+    decl: &PirAotDecl,
+    aliases: &mut BTreeSet<(PirAotSignedness, usize)>,
 ) {
     match decl {
-        TypedAotDecl::Struct { fields, .. } => {
+        PirAotDecl::Struct { fields, .. } => {
             for field in fields {
                 collect_scalar_aliases_from_type(&field.ty, aliases);
             }
         }
-        TypedAotDecl::Enum {
+        PirAotDecl::Enum {
             signedness,
             bit_count,
             ..
         } => {
             aliases.insert((*signedness, *bit_count));
         }
-        TypedAotDecl::Alias { target, .. } => {
+        PirAotDecl::Alias { target, .. } => {
             collect_scalar_aliases_from_type(target, aliases);
         }
     }
 }
 
 fn collect_scalar_aliases_from_type(
-    ty: &TypedAotType,
-    aliases: &mut BTreeSet<(TypedAotSignedness, usize)>,
+    ty: &PirAotType,
+    aliases: &mut BTreeSet<(PirAotSignedness, usize)>,
 ) {
     match ty {
-        TypedAotType::Bits {
+        PirAotType::Bits {
             signedness,
             bit_count,
         } => {
             aliases.insert((*signedness, *bit_count));
         }
-        TypedAotType::Token | TypedAotType::TypeRef { .. } => {}
-        TypedAotType::Array { element, .. } => collect_scalar_aliases_from_type(element, aliases),
-        TypedAotType::Tuple { elements } => {
+        PirAotType::Token | PirAotType::TypeRef { .. } => {}
+        PirAotType::Array { element, .. } => collect_scalar_aliases_from_type(element, aliases),
+        PirAotType::Tuple { elements } => {
             for element in elements {
                 collect_scalar_aliases_from_type(element, aliases);
             }
@@ -1118,14 +1661,14 @@ fn collect_scalar_aliases_from_type(
     }
 }
 
-fn scalar_alias_name(signedness: TypedAotSignedness, bit_count: usize) -> String {
+fn scalar_alias_name(signedness: PirAotSignedness, bit_count: usize) -> String {
     match signedness {
-        TypedAotSignedness::Unsigned => format!("U{bit_count}"),
-        TypedAotSignedness::Signed => format!("S{bit_count}"),
+        PirAotSignedness::Unsigned => format!("U{bit_count}"),
+        PirAotSignedness::Signed => format!("S{bit_count}"),
     }
 }
 
-fn scalar_runtime_type(signedness: TypedAotSignedness, bit_count: usize) -> String {
+fn scalar_runtime_type(signedness: PirAotSignedness, bit_count: usize) -> String {
     let (unsigned_prefix, signed_prefix) = match bit_count {
         1..=8 => ("UnsignedBitsInU8", "SignedBitsInU8"),
         9..=16 => ("UnsignedBitsInU16", "SignedBitsInU16"),
@@ -1134,12 +1677,12 @@ fn scalar_runtime_type(signedness: TypedAotSignedness, bit_count: usize) -> Stri
         _ => {
             let limb_count = bit_count.div_ceil(64);
             return match signedness {
-                TypedAotSignedness::Unsigned => {
+                PirAotSignedness::Unsigned => {
                     format!(
                         "xlsynth_pir_compiler_runtime::UnsignedWideBits<{bit_count}, {limb_count}>"
                     )
                 }
-                TypedAotSignedness::Signed => {
+                PirAotSignedness::Signed => {
                     format!(
                         "xlsynth_pir_compiler_runtime::SignedWideBits<{bit_count}, {limb_count}>"
                     )
@@ -1148,15 +1691,15 @@ fn scalar_runtime_type(signedness: TypedAotSignedness, bit_count: usize) -> Stri
         }
     };
     let type_name = match signedness {
-        TypedAotSignedness::Unsigned => unsigned_prefix,
-        TypedAotSignedness::Signed => signed_prefix,
+        PirAotSignedness::Unsigned => unsigned_prefix,
+        PirAotSignedness::Signed => signed_prefix,
     };
     format!("xlsynth_pir_compiler_runtime::{type_name}<{bit_count}>")
 }
 
 fn render_scalar_alias_type(
     current_module_path: &[String],
-    signedness: TypedAotSignedness,
+    signedness: PirAotSignedness,
     bit_count: usize,
 ) -> String {
     render_root_item_path(
@@ -1174,20 +1717,21 @@ fn render_root_item_path(current_module_path: &[String], name: &str) -> String {
     segments.join("::")
 }
 
-fn render_typed_aot_decl(
-    package: &ValidatedTypedAotPackage<'_>,
+fn render_pir_aot_decl(
+    package: &ValidatedPirAotPackage<'_>,
+    tuple_types: &GeneratedTupleTypes,
     module_path: &[String],
-    decl: &TypedAotDecl,
+    decl: &PirAotDecl,
 ) -> Result<String, CompilerError> {
     match decl {
-        TypedAotDecl::Struct { name, fields } => {
+        PirAotDecl::Struct { name, fields } => {
             let rendered_fields = fields
                 .iter()
                 .map(|field| {
                     Ok(format!(
                         "    pub {}: {},\n",
                         sanitize_identifier(&field.name),
-                        render_typed_aot_type(package, &field.ty, module_path)?
+                        render_pir_aot_type(package, tuple_types, &field.ty, module_path)?
                     ))
                 })
                 .collect::<Result<Vec<_>, CompilerError>>()?
@@ -1196,18 +1740,12 @@ fn render_typed_aot_decl(
                 "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {name} {{\n{rendered_fields}}}\n"
             ))
         }
-        TypedAotDecl::Enum {
+        PirAotDecl::Enum {
             name,
             signedness,
             bit_count,
             variants,
         } => {
-            if *bit_count > 64 {
-                return Err(CompilerError::UnsupportedType(format!(
-                    "typed AOT enum `{}` uses bits[{bit_count}], but generated enum constants currently support widths up to 64",
-                    render_type_path_for_error(module_path, name)
-                )));
-            }
             let bits_type = render_scalar_alias_type(module_path, *signedness, *bit_count);
             let constants = variants
                 .iter()
@@ -1224,20 +1762,21 @@ fn render_typed_aot_decl(
                 "#[repr(transparent)]\n#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]\npub struct {name}(pub {bits_type});\nimpl {name} {{\n{constants}}}\n"
             ))
         }
-        TypedAotDecl::Alias { name, target } => Ok(format!(
+        PirAotDecl::Alias { name, target } => Ok(format!(
             "pub type {name} = {};\n",
-            render_typed_aot_type(package, target, module_path)?
+            render_pir_aot_type(package, tuple_types, target, module_path)?
         )),
     }
 }
 
-fn render_typed_aot_type(
-    package: &ValidatedTypedAotPackage<'_>,
-    ty: &TypedAotType,
+fn render_pir_aot_type(
+    package: &ValidatedPirAotPackage<'_>,
+    tuple_types: &GeneratedTupleTypes,
+    ty: &PirAotType,
     current_module_path: &[String],
 ) -> Result<String, CompilerError> {
     match ty {
-        TypedAotType::Bits {
+        PirAotType::Bits {
             signedness,
             bit_count,
         } => Ok(render_scalar_alias_type(
@@ -1245,30 +1784,27 @@ fn render_typed_aot_type(
             *signedness,
             *bit_count,
         )),
-        TypedAotType::Token => Ok(render_root_item_path(current_module_path, "Token")),
-        TypedAotType::Array { size, element } => Ok(format!(
+        PirAotType::Token => Ok(render_root_item_path(current_module_path, "Token")),
+        PirAotType::Array { size, element } => Ok(format!(
             "[{}; {size}]",
-            render_typed_aot_type(package, element, current_module_path)?
+            render_pir_aot_type(package, tuple_types, element, current_module_path)?
         )),
-        TypedAotType::Tuple { elements } => {
-            let rendered = elements
-                .iter()
-                .map(|element| render_typed_aot_type(package, element, current_module_path))
-                .collect::<Result<Vec<_>, _>>()?;
-            if rendered.len() == 1 {
-                Ok(format!("({},)", rendered[0]))
-            } else {
-                Ok(format!("({})", rendered.join(", ")))
-            }
-        }
-        TypedAotType::TypeRef { module, name } => {
-            let key = TypedAotDeclKey {
+        PirAotType::Tuple { elements } => tuple_types
+            .type_name(elements)
+            .map(|name| render_root_item_path(current_module_path, name))
+            .ok_or_else(|| {
+                CompilerError::InvalidArgument(
+                    "PIR AOT tuple type was not registered for rendering".into(),
+                )
+            }),
+        PirAotType::TypeRef { module, name } => {
+            let key = PirAotDeclKey {
                 module: module.clone(),
                 name: name.clone(),
             };
             package.decls.get(&key).ok_or_else(|| {
                 CompilerError::InvalidArgument(format!(
-                    "typed AOT metadata references unknown type `{}`",
+                    "PIR AOT metadata references unknown type `{}`",
                     render_type_path_for_error(module, name)
                 ))
             })?;
@@ -1318,16 +1854,16 @@ fn native_bits_layout(bit_count: usize) -> NativeValueLayout {
 }
 
 fn validate_scalar_bit_count(
-    signedness: TypedAotSignedness,
+    signedness: PirAotSignedness,
     bit_count: usize,
 ) -> Result<(), CompilerError> {
     if bit_count == 0 {
         let prefix = match signedness {
-            TypedAotSignedness::Unsigned => "u",
-            TypedAotSignedness::Signed => "s",
+            PirAotSignedness::Unsigned => "u",
+            PirAotSignedness::Signed => "s",
         };
         return Err(CompilerError::InvalidArgument(format!(
-            "typed AOT metadata {prefix}{bit_count} type must have nonzero width"
+            "PIR AOT metadata {prefix}{bit_count} type must have nonzero width"
         )));
     }
     Ok(())
@@ -1338,21 +1874,21 @@ fn align_up_local(value: usize, alignment: usize) -> Result<usize, CompilerError
     value
         .checked_add(alignment - 1)
         .map(|value| value & !(alignment - 1))
-        .ok_or_else(|| CompilerError::UnsupportedType("typed AOT layout size overflow".into()))
+        .ok_or_else(|| CompilerError::UnsupportedType("PIR AOT layout size overflow".into()))
 }
 
-fn typed_aot_decl_name(decl: &TypedAotDecl) -> &str {
+fn pir_aot_decl_name(decl: &PirAotDecl) -> &str {
     match decl {
-        TypedAotDecl::Struct { name, .. }
-        | TypedAotDecl::Enum { name, .. }
-        | TypedAotDecl::Alias { name, .. } => name,
+        PirAotDecl::Struct { name, .. }
+        | PirAotDecl::Enum { name, .. }
+        | PirAotDecl::Alias { name, .. } => name,
     }
 }
 
 fn validate_module_path(path: &[String]) -> Result<(), CompilerError> {
     if path.is_empty() {
         return Err(CompilerError::InvalidArgument(
-            "typed AOT metadata module path must not be empty".into(),
+            "PIR AOT metadata module path must not be empty".into(),
         ));
     }
     for segment in path {
@@ -1372,13 +1908,13 @@ fn validate_value_name(name: &str) -> Result<(), CompilerError> {
 fn validate_ir_file_path(path: &str) -> Result<(), CompilerError> {
     if path.is_empty() {
         return Err(CompilerError::InvalidArgument(
-            "typed AOT metadata ir_file must not be empty".into(),
+            "PIR AOT metadata ir_file must not be empty".into(),
         ));
     }
     let path = Path::new(path);
     if path.is_absolute() {
         return Err(CompilerError::InvalidArgument(
-            "typed AOT metadata ir_file must be relative".into(),
+            "PIR AOT metadata ir_file must be relative".into(),
         ));
     }
     for component in path.components() {
@@ -1386,7 +1922,7 @@ fn validate_ir_file_path(path: &str) -> Result<(), CompilerError> {
             std::path::Component::Normal(_) => {}
             _ => {
                 return Err(CompilerError::InvalidArgument(
-                    "typed AOT metadata ir_file must be a relative path without `..`".into(),
+                    "PIR AOT metadata ir_file must be a relative path without `..`".into(),
                 ));
             }
         }
@@ -1394,15 +1930,24 @@ fn validate_ir_file_path(path: &str) -> Result<(), CompilerError> {
     Ok(())
 }
 
+fn validate_ir_top(name: &str) -> Result<(), CompilerError> {
+    if name.is_empty() {
+        return Err(CompilerError::InvalidArgument(
+            "PIR AOT metadata ir_top must not be empty".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_identifier(name: &str, label: &str) -> Result<(), CompilerError> {
     if name.is_empty() {
         return Err(CompilerError::InvalidArgument(format!(
-            "typed AOT metadata {label} must not be empty"
+            "PIR AOT metadata {label} must not be empty"
         )));
     }
     if sanitize_identifier(name) != name {
         return Err(CompilerError::InvalidArgument(format!(
-            "typed AOT metadata {label} `{name}` is not a supported Rust identifier"
+            "PIR AOT metadata {label} `{name}` is not a supported Rust identifier"
         )));
     }
     Ok(())
@@ -1439,6 +1984,7 @@ fn render_generated_module(
     function: &xlsynth_pir::ir::Fn,
     artifact: &AotArtifact,
 ) -> Result<String, CompilerError> {
+    let entrypoint_artifact = AotEntrypointArtifact::from(artifact);
     let mut declarations = Vec::new();
     let mut input_type_names = Vec::new();
     for (index, param) in function.params.iter().enumerate() {
@@ -1460,7 +2006,7 @@ fn render_generated_module(
     Ok(format!(
         "// SPDX-License-Identifier: Apache-2.0\n{}",
         render_runner_items(
-            artifact,
+            &entrypoint_artifact,
             &param_names,
             &input_type_names,
             &output_type,
@@ -1471,7 +2017,7 @@ fn render_generated_module(
 }
 
 fn render_runner_items(
-    artifact: &AotArtifact,
+    artifact: &AotEntrypointArtifact,
     param_names: &[String],
     input_type_names: &[String],
     output_type_name: &str,
@@ -1644,6 +2190,31 @@ impl Runner {{
 pub fn new_runner() -> Result<Runner, RunError> {{
     Runner::new()
 }}
+
+std::thread_local! {{
+    static THREAD_LOCAL_RUNNER: std::cell::RefCell<Option<Runner>> =
+        const {{ std::cell::RefCell::new(None) }};
+}}
+
+/// Runs a closure with this thread's cached runner.
+pub fn with_thread_local_runner<T>(
+    f: impl FnOnce(&mut Runner) -> T,
+) -> Result<T, RunError> {{
+    THREAD_LOCAL_RUNNER.with(|runner_cell| {{
+        let mut runner_slot = runner_cell.borrow_mut();
+        if runner_slot.is_none() {{
+            runner_slot.replace(new_runner()?);
+        }}
+        Ok(f(runner_slot.as_mut().expect("runner was initialized")))
+    }})
+}}
+
+/// Runs a fallible closure with this thread's cached runner.
+pub fn try_with_thread_local_runner<T>(
+    f: impl FnOnce(&mut Runner) -> Result<T, RunError>,
+) -> Result<T, RunError> {{
+    with_thread_local_runner(f)?
+}}
 "#,
         symbol = artifact.entrypoint_symbol,
         scratch_bytes = artifact.scratch_byte_count,
@@ -1804,4 +2375,126 @@ fn render_trace_tuple_field(field: &TraceTupleFieldLayout) -> String {
         render_trace_layout(field.layout.as_ref()),
         field.offset
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pir_aot_metadata_rejects_wide_enum_values() {
+        let metadata = PirAotPackageMetadata {
+            format_version: PIR_AOT_METADATA_FORMAT_VERSION,
+            modules: vec![PirAotModule {
+                path: vec!["m".to_string()],
+                declarations: vec![PirAotDecl::Enum {
+                    name: "WideEnum".to_string(),
+                    signedness: PirAotSignedness::Unsigned,
+                    bit_count: 65,
+                    variants: vec![PirAotEnumVariant {
+                        name: "Zero".to_string(),
+                        value: 0,
+                    }],
+                }],
+            }],
+            entrypoints: vec![],
+        };
+        let error = match ValidatedPirAotPackage::new(&metadata) {
+            Ok(_) => panic!("wide enum metadata should be rejected"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("enum values are currently limited to 64 bits"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn pir_aot_tuple_metadata_renders_repr_c_tuple_wrappers() {
+        let u8_ty = PirAotType::Bits {
+            signedness: PirAotSignedness::Unsigned,
+            bit_count: 8,
+        };
+        let u16_ty = PirAotType::Bits {
+            signedness: PirAotSignedness::Unsigned,
+            bit_count: 16,
+        };
+        let pair_ty = PirAotType::Tuple {
+            elements: vec![u8_ty.clone(), u16_ty.clone()],
+        };
+        let nested_ty = PirAotType::Tuple {
+            elements: vec![pair_ty.clone(), u8_ty.clone()],
+        };
+        let metadata = PirAotPackageMetadata {
+            format_version: PIR_AOT_METADATA_FORMAT_VERSION,
+            modules: vec![PirAotModule {
+                path: vec!["m".to_string()],
+                declarations: vec![
+                    PirAotDecl::Struct {
+                        name: "Holder".to_string(),
+                        fields: vec![PirAotField {
+                            name: "pair".to_string(),
+                            ty: pair_ty.clone(),
+                        }],
+                    },
+                    PirAotDecl::Alias {
+                        name: "PairAlias".to_string(),
+                        target: pair_ty.clone(),
+                    },
+                    PirAotDecl::Alias {
+                        name: "NestedAlias".to_string(),
+                        target: nested_ty.clone(),
+                    },
+                ],
+            }],
+            entrypoints: vec![PirAotEntrypoint {
+                name: "entry".to_string(),
+                source: PirAotEntrypointSource::GeneratedIr {
+                    ir_top: "entry".to_string(),
+                },
+                owning_module: vec!["m".to_string()],
+                params: vec![PirAotParam {
+                    name: "pair".to_string(),
+                    ty: pair_ty,
+                }],
+                return_type: PirAotType::Array {
+                    size: 2,
+                    element: Box::new(nested_ty),
+                },
+            }],
+        };
+        let package = ValidatedPirAotPackage::new(&metadata).expect("metadata should validate");
+        let artifact = AotEntrypointArtifact {
+            entrypoint_symbol: "__xlsynth_pir_aot_entry".to_string(),
+            param_layouts: Vec::new(),
+            result_layout: NativeValueLayout::Token,
+            metadata: Default::default(),
+            scratch_byte_count: 0,
+            scratch_alignment: 1,
+        };
+        let rendered = render_pir_aot_package(
+            "tuple_test",
+            &package,
+            &[("entry".to_string(), artifact)],
+            "test package",
+        )
+        .expect("package should render");
+
+        assert!(rendered.contains(
+            "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct XlsynthPirAotTuple0"
+        ));
+        assert!(rendered.contains("pub field0: U8,"));
+        assert!(rendered.contains("pub field1: U16,"));
+        assert!(rendered.contains(
+            "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct XlsynthPirAotTuple1"
+        ));
+        assert!(rendered.contains("pub field0: XlsynthPirAotTuple0,"));
+        assert!(rendered.contains("pub type PairAlias = super::XlsynthPirAotTuple0;"));
+        assert!(rendered.contains("pub pair: super::XlsynthPirAotTuple0,"));
+        assert!(rendered.contains("pair: &super::super::XlsynthPirAotTuple0"));
+        assert!(rendered.contains("RunResult<[super::super::XlsynthPirAotTuple1; 2]>"));
+        assert!(!rendered.contains("(U8, U16)"));
+    }
 }

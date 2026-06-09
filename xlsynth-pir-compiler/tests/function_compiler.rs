@@ -118,6 +118,150 @@ top fn f(x: bits[8] id=6) -> bits[8] {
 }
 
 #[test]
+fn package_compiler_selects_between_aggregate_invoke_results() {
+    let compiler = compile_package(
+        r#"package test
+
+fn local() -> (bits[14], bits[6], bits[1], bits[2]) {
+  ret result: (bits[14], bits[6], bits[1], bits[2]) = literal(value=(42, 3, 0, 0), id=1)
+}
+
+fn global() -> (bits[14], bits[6], bits[1], bits[2]) {
+  ret result: (bits[14], bits[6], bits[1], bits[2]) = literal(value=(0, 0, 0, 0), id=2)
+}
+
+top fn f(use_global: bits[1] id=3) -> bits[14] {
+  local_route: (bits[14], bits[6], bits[1], bits[2]) = invoke(to_apply=local, id=4)
+  global_route: (bits[14], bits[6], bits[1], bits[2]) = invoke(to_apply=global, id=5)
+  selected: (bits[14], bits[6], bits[1], bits[2]) = sel(use_global, cases=[local_route, global_route], id=6)
+  ret router_port: bits[14] = tuple_index(selected, index=0, id=7)
+}
+"#,
+    );
+    assert_eq!(
+        compiler
+            .run_ir_values(&[bits(1, 0)])
+            .expect("selector zero should choose local"),
+        bits(14, 42)
+    );
+    assert_eq!(
+        compiler
+            .run_ir_values(&[bits(1, 1)])
+            .expect("selector one should choose global"),
+        bits(14, 0)
+    );
+}
+
+#[test]
+fn package_compiler_counted_for_updates_array_of_tuples() {
+    let ir = r#"package test
+
+fn body(i: bits[32] id=1, carry: (bits[1], bits[6], bits[1], bits[1], bits[1])[4] id=2, entries: (bits[1], bits[2], bits[16], bits[1])[4] id=3) -> (bits[1], bits[6], bits[1], bits[1], bits[1])[4] {
+  zero: bits[32] = literal(value=0, id=4)
+  index: bits[32] = add(i, zero, id=5)
+  entry: (bits[1], bits[2], bits[16], bits[1]) = array_index(entries, indices=[index], id=6)
+  valid: bits[1] = tuple_index(entry, index=0, id=7)
+  mask: bits[16] = tuple_index(entry, index=2, id=8)
+  destination_tray: bits[1] = tuple_index(entry, index=3, id=9)
+  any_mask: bits[1] = or_reduce(mask, id=10)
+  is_local: bits[1] = not(any_mask, id=11)
+  rni_port: bits[6] = literal(value=0, id=12)
+  no_valid_remote: bits[1] = not(any_mask, id=13)
+  selected: (bits[1], bits[6], bits[1], bits[1], bits[1]) = tuple(valid, rni_port, is_local, destination_tray, no_valid_remote, id=14)
+  ret updated: (bits[1], bits[6], bits[1], bits[1], bits[1])[4] = array_update(carry, selected, indices=[index], id=15)
+}
+
+top fn f(entries: (bits[1], bits[2], bits[16], bits[1])[4] id=16) -> (bits[1], bits[6], bits[1], bits[1], bits[1]) {
+  init: (bits[1], bits[6], bits[1], bits[1], bits[1])[4] = literal(value=[(0, 0, 0, 0, 0), (0, 0, 0, 0, 0), (0, 0, 0, 0, 0), (0, 0, 0, 0, 0)], id=17)
+  selected: (bits[1], bits[6], bits[1], bits[1], bits[1])[4] = counted_for(init, trip_count=4, stride=1, body=body, invariant_args=[entries], id=18)
+  zero: bits[32] = literal(value=0, id=19)
+  ret first: (bits[1], bits[6], bits[1], bits[1], bits[1]) = array_index(selected, indices=[zero], id=20)
+}
+"#;
+    let package = Parser::new(ir)
+        .parse_and_validate_package()
+        .expect("test PIR package should parse and validate");
+    let function = package.get_top_fn().expect("top function should exist");
+    let compiler = PirFunctionCompiler::compile_package(&package).expect("package should compile");
+    let args = [IrValue::make_array(&[
+        tuple(&[bits(1, 1), bits(2, 0), bits(16, 0), bits(1, 0)]),
+        tuple(&[bits(1, 0), bits(2, 0), bits(16, 1), bits(1, 0)]),
+        tuple(&[bits(1, 0), bits(2, 0), bits(16, 2), bits(1, 0)]),
+        tuple(&[bits(1, 0), bits(2, 0), bits(16, 4), bits(1, 0)]),
+    ])
+    .expect("entries should construct")];
+    let expected = match eval_fn_in_package(&package, function, &args) {
+        FnEvalResult::Success(success) => success.value,
+        other => panic!("PIR evaluation failed: {other:?}"),
+    };
+    assert_eq!(
+        compiler.run_ir_values(&args).expect("execute counted_for"),
+        expected
+    );
+    assert_eq!(
+        expected,
+        tuple(&[bits(1, 1), bits(6, 0), bits(1, 1), bits(1, 0), bits(1, 1)])
+    );
+}
+
+#[test]
+fn package_compiler_preserves_counted_for_carry_across_nested_counted_for_invoke() {
+    let ir = r#"package test
+
+fn inner_body(i: bits[32] id=1, carry: bits[8] id=2) -> bits[8] {
+  zero: bits[8] = literal(value=0, id=3)
+  ret result: bits[8] = add(carry, zero, id=4)
+}
+
+fn helper(x: bits[8] id=5) -> bits[8] {
+  ret result: bits[8] = counted_for(x, trip_count=2, stride=1, body=inner_body, id=6)
+}
+
+fn outer_body(i: bits[32] id=7, carry: bits[8][4] id=8) -> bits[8][4] {
+  zero: bits[8] = literal(value=0, id=9)
+  helper_value: bits[8] = invoke(zero, to_apply=helper, id=10)
+  low_i: bits[8] = bit_slice(i, start=0, width=8, id=11)
+  value: bits[8] = add(low_i, helper_value, id=12)
+  ret updated: bits[8][4] = array_update(carry, value, indices=[i], id=13)
+}
+
+top fn f() -> bits[8][4] {
+  init: bits[8][4] = literal(value=[0, 0, 0, 0], id=14)
+  ret result: bits[8][4] = counted_for(init, trip_count=4, stride=1, body=outer_body, id=15)
+}
+"#;
+    let package = Parser::new(ir)
+        .parse_and_validate_package()
+        .expect("test PIR package should parse and validate");
+    let helper = package
+        .get_fn("helper")
+        .expect("helper function should exist");
+    let helper_compiler = PirFunctionCompiler::compile_package_function(&package, "helper")
+        .expect("helper should compile");
+    let helper_args = [bits(8, 0)];
+    let helper_expected = match eval_fn_in_package(&package, helper, &helper_args) {
+        FnEvalResult::Success(success) => success.value,
+        other => panic!("PIR helper evaluation failed: {other:?}"),
+    };
+    assert_eq!(
+        helper_compiler
+            .run_ir_values(&helper_args)
+            .expect("execute helper"),
+        helper_expected
+    );
+    let function = package.get_top_fn().expect("top function should exist");
+    let compiler = PirFunctionCompiler::compile_package(&package).expect("package should compile");
+    let expected = match eval_fn_in_package(&package, function, &[]) {
+        FnEvalResult::Success(success) => success.value,
+        other => panic!("PIR evaluation failed: {other:?}"),
+    };
+    assert_eq!(
+        compiler.run_ir_values(&[]).expect("execute counted_for"),
+        expected
+    );
+}
+
+#[test]
 fn package_compiler_lowers_scalar_counted_for_with_invariants() {
     let compiler = compile_package(
         r#"package test
