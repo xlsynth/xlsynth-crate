@@ -207,6 +207,15 @@ impl TypedAotPackageMetadata {
     }
 }
 
+/// Returns the PIR wrapper top used for an implicit-token DSLX AOT entrypoint.
+///
+/// `base_name` is the sanitized AOT entrypoint name. The wrapper has the
+/// user-visible DSLX signature; it creates the implicit token/activation values
+/// and invokes the converted `__itok__...` function internally.
+pub fn typed_dslx_implicit_token_entrypoint_wrapper_top(base_name: &str) -> String {
+    format!("__xlsynth_pir_aot_{base_name}_dslx_entry")
+}
+
 /// Native structural shape of one DSLX type exposed by a compiler AOT wrapper.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeTypedDslxType {
@@ -3004,16 +3013,15 @@ fn typed_aot_entrypoint_from_dslx_spec(
     let owning_module_path = rust_module_path_from_dslx_module_name(&top_module_name);
     let typed_signature =
         build_typed_dslx_function_signature(context, top_module, spec.top, &top_module_name)?;
-    let calling_convention = if spec.dslx_options.force_implicit_token_calling_convention {
-        DslxCallingConvention::ImplicitToken
+    let ir_top = if spec.dslx_options.force_implicit_token_calling_convention {
+        typed_dslx_implicit_token_entrypoint_wrapper_top(&base_name)
     } else {
-        DslxCallingConvention::Typical
+        mangle_dslx_name_with_calling_convention(
+            dslx_path_to_module_name(spec.dslx_path)?,
+            spec.top,
+            DslxCallingConvention::Typical,
+        )?
     };
-    let ir_top = mangle_dslx_name_with_calling_convention(
-        dslx_path_to_module_name(spec.dslx_path)?,
-        spec.top,
-        calling_convention,
-    )?;
     Ok(TypedAotEntrypoint {
         name: base_name,
         ir_file: None,

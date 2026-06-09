@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package native_aot_tests
 
 fn events(x: bits[8] id=1, y: bits[8] id=2, ok: bits[1] id=3, emit: bits[1] id=4) -> bits[8] {

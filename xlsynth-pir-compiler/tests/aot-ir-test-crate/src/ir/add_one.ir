@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package native_aot_tests
 
 fn add_one(x: bits[42] id=1) -> bits[42] {

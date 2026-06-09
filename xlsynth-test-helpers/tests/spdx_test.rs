@@ -7,6 +7,20 @@ use std::path::{Path, PathBuf};
 
 fn check_spdx_identifier(file_path: &Path) -> bool {
     let filename = file_path.file_name().unwrap().to_str().unwrap();
+    if filename.ends_with(".json") {
+        let file = fs::File::open(file_path).unwrap();
+        let json: serde_json::Value = serde_json::from_reader(file).unwrap();
+        let ok = json
+            .get("_spdx")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| value == "SPDX-License-Identifier: Apache-2.0");
+        if ok {
+            println!("Found SPDX identifier in JSON file: {file_path:?}");
+        } else {
+            eprintln!("Missing SPDX identifier in JSON file: {file_path:?}");
+        }
+        return ok;
+    }
     let comment_prefix = if filename.ends_with(".yml")
         || filename.ends_with(".yaml")
         || filename.ends_with(".py")

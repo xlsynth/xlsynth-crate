@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package native_aot_tests
 
 fn wide_runtime_ops(x: bits[129] id=1, y: bits[129] id=2, shift: bits[8] id=3, replacement: bits[73] id=4) -> (bits[129], bits[129], bits[129], bits[129], bits[129], bits[96], bits[32], bits[129], bits[130], bits[130], bits[130], bits[8], bits[130]) {

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 pub use xlsynth::DslxConvertOptions;
 use xlsynth::aot_builder::{
     NativeTypedDslxFunctionSignature, NativeTypedDslxType, collect_typed_dslx_aot_dependencies,
-    render_native_typed_dslx_generated_module,
+    render_native_typed_dslx_generated_module, typed_dslx_implicit_token_entrypoint_wrapper_top,
 };
 pub use xlsynth::aot_builder::{
     TypedAotDecl, TypedAotEntrypoint, TypedAotEnumVariant, TypedAotField, TypedAotModule,
@@ -413,7 +413,7 @@ fn compile_dslx_artifact(
     )
     .map_err(|error| CompilerError::Backend(error.to_string()))?;
     let (pir_text, top) = if spec.dslx_options.force_implicit_token_calling_convention {
-        let wrapper_top = format!("__xlsynth_pir_aot_{base_name}_dslx_entry");
+        let wrapper_top = typed_dslx_implicit_token_entrypoint_wrapper_top(base_name);
         (
             append_implicit_token_entrypoint_wrapper(&pir_text, &dslx_top, &wrapper_top)?,
             wrapper_top,

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 package native_aot_tests
 
 fn compound_shapes(input: (bits[42], bits[65][2]) id=1, increment: bits[42] id=2) -> (bits[42], bits[65][2]) {
