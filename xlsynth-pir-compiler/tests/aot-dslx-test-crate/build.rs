@@ -4,7 +4,7 @@ use std::{fs, path::PathBuf};
 
 use xlsynth_pir_compiler::aot::{
     DslxConvertOptions, TypedDslxAotBuildSpec, TypedDslxAotPackageBuilder,
-    build_native_typed_dslx_aot_package_metadata,
+    build_pir_aot_package_metadata_from_dslx_specs,
 };
 
 fn main() {
@@ -90,7 +90,7 @@ fn main() {
             type_module_paths: vec![namespaced_doodle_types.as_path()],
         },
     ];
-    let metadata = build_native_typed_dslx_aot_package_metadata(&specs)
+    let metadata = build_pir_aot_package_metadata_from_dslx_specs(&specs)
         .expect("native DSLX AOT package metadata generation should succeed");
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let metadata_file = out_dir.join("native_dslx_tests_aot_metadata.json");
@@ -105,9 +105,13 @@ fn main() {
     for spec in specs {
         package_builder = package_builder.add_entrypoint(spec);
     }
-    package_builder
+    let generated = package_builder
         .build()
         .expect("native DSLX AOT package compilation should succeed");
+    assert!(
+        generated.object_file.is_file(),
+        "typed DSLX AOT package should emit one native object"
+    );
 
     println!("cargo:rerun-if-changed=build.rs");
 }

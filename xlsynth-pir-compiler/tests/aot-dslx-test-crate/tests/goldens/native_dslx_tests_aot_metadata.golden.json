@@ -1,5 +1,5 @@
 {
-  "format_version": 2,
+  "format_version": 3,
   "modules": [
     {
       "path": [
@@ -730,7 +730,10 @@
   "entrypoints": [
     {
       "name": "gizmo_frob",
-      "ir_top": "__xlsynth_pir_aot_gizmo_frob_dslx_entry",
+      "source": {
+        "kind": "generated_ir",
+        "ir_top": "__xlsynth_pir_aot_gizmo_frob_dslx_entry"
+      },
       "owning_module": [
         "gizmo_types"
       ],
@@ -768,7 +771,10 @@
     },
     {
       "name": "parametric_forms",
-      "ir_top": "__xlsynth_pir_aot_parametric_forms_dslx_entry",
+      "source": {
+        "kind": "generated_ir",
+        "ir_top": "__xlsynth_pir_aot_parametric_forms_dslx_entry"
+      },
       "owning_module": [
         "parametric_forms"
       ],
@@ -878,7 +884,10 @@
     },
     {
       "name": "invokes_and_loop",
-      "ir_top": "__xlsynth_pir_aot_invokes_and_loop_dslx_entry",
+      "source": {
+        "kind": "generated_ir",
+        "ir_top": "__xlsynth_pir_aot_invokes_and_loop_dslx_entry"
+      },
       "owning_module": [
         "invokes_and_loop"
       ],
@@ -908,7 +917,10 @@
     },
     {
       "name": "events",
-      "ir_top": "__xlsynth_pir_aot_events_dslx_entry",
+      "source": {
+        "kind": "generated_ir",
+        "ir_top": "__xlsynth_pir_aot_events_dslx_entry"
+      },
       "owning_module": [
         "events"
       ],
@@ -954,7 +966,10 @@
     },
     {
       "name": "parametric_imports",
-      "ir_top": "__xlsynth_pir_aot_parametric_imports_dslx_entry",
+      "source": {
+        "kind": "generated_ir",
+        "ir_top": "__xlsynth_pir_aot_parametric_imports_dslx_entry"
+      },
       "owning_module": [
         "parametric_imports"
       ],
@@ -1000,7 +1015,10 @@
     },
     {
       "name": "duplicate_widget",
-      "ir_top": "__xlsynth_pir_aot_duplicate_widget_dslx_entry",
+      "source": {
+        "kind": "generated_ir",
+        "ir_top": "__xlsynth_pir_aot_duplicate_widget_dslx_entry"
+      },
       "owning_module": [
         "frobber"
       ],
@@ -1028,7 +1046,10 @@
     },
     {
       "name": "namespaced_package_echo",
-      "ir_top": "__xlsynth_pir_aot_namespaced_package_echo_dslx_entry",
+      "source": {
+        "kind": "generated_ir",
+        "ir_top": "__xlsynth_pir_aot_namespaced_package_echo_dslx_entry"
+      },
       "owning_module": [
         "foo",
         "my_file"
@@ -1057,7 +1078,10 @@
     },
     {
       "name": "namespaced_package_bump",
-      "ir_top": "__xlsynth_pir_aot_namespaced_package_bump_dslx_entry",
+      "source": {
+        "kind": "generated_ir",
+        "ir_top": "__xlsynth_pir_aot_namespaced_package_bump_dslx_entry"
+      },
       "owning_module": [
         "bar",
         "your_file"
