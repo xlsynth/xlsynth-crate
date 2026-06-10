@@ -1,6 +1,6 @@
 [package]
 name = "xlsynth"
-version = "0.55.0"
+version = "0.56.0"
 edition = "2024"
 authors = ["Christopher D. Leary <cdleary@gmail.com>"]
 description = "Accelerated Hardware Synthesis (XLS/XLSynth) via Rust"
@@ -22,8 +22,8 @@ standalone-aot = ["dep:xlsynth-aot-runtime"]
 pir-compiler-dslx-aot = []
 
 [dependencies]
-xlsynth-aot-runtime = {path = "../xlsynth-aot-runtime", version = "0.55.0", optional = true}
-xlsynth-sys = {path = "../xlsynth-sys", version = "0.55.0"}
+xlsynth-aot-runtime = {path = "../xlsynth-aot-runtime", version = "0.56.0", optional = true}
+xlsynth-sys = {path = "../xlsynth-sys", version = "0.56.0"}
 cargo_metadata = "0.18"
 thiserror = "1"
 clap = { version = "4.5.21", features = ["derive"], optional = true }
