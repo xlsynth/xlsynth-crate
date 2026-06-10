@@ -14,21 +14,10 @@ fn bench_generated_scalar_runner(c: &mut Criterion) {
     c.bench_function("pir_aot_generated_runner_run", |b| {
         let mut runner =
             native_aot_tests::aot_add_inputs::new_runner().expect("runner should initialize");
-        b.iter(|| {
-            let output = runner
-                .run(black_box(&lhs), black_box(&rhs))
-                .expect("benchmark execution should succeed");
-            black_box(output);
-        });
-    });
-
-    c.bench_function("pir_aot_generated_runner_run_into", |b| {
-        let mut runner =
-            native_aot_tests::aot_add_inputs::new_runner().expect("runner should initialize");
         let mut output = native_aot_tests_aot::U8::default();
         b.iter(|| {
             runner
-                .run_into(black_box(&lhs), black_box(&rhs), black_box(&mut output))
+                .run(black_box(&lhs), black_box(&rhs), black_box(&mut output))
                 .expect("benchmark execution should succeed");
             black_box(output);
         });
@@ -44,13 +33,15 @@ fn bench_generated_event_runner(c: &mut Criterion) {
     c.bench_function("pir_aot_generated_runner_event_sites_run", |b| {
         let mut runner =
             native_aot_tests::aot_events::new_runner().expect("runner should initialize");
+        let mut output = native_aot_tests_aot::U8::default();
         b.iter(|| {
-            let output = runner
+            runner
                 .run(
                     black_box(&x),
                     black_box(&y),
                     black_box(&passed),
                     black_box(&emit),
+                    black_box(&mut output),
                 )
                 .expect("benchmark execution should succeed");
             black_box(output);
@@ -60,17 +51,20 @@ fn bench_generated_event_runner(c: &mut Criterion) {
     c.bench_function("pir_aot_generated_runner_event_sites_collect_all", |b| {
         let mut runner =
             native_aot_tests::aot_events::new_runner().expect("runner should initialize");
+        let mut output = native_aot_tests_aot::U8::default();
         b.iter(|| {
-            let output = runner
+            let events = runner
                 .run_with_events(
                     black_box(&x),
                     black_box(&y),
                     black_box(&passed),
                     black_box(&emit),
+                    black_box(&mut output),
                     ExecutionOptions::collect_all(),
                 )
                 .expect("benchmark execution should succeed");
             black_box(output);
+            black_box(events);
         });
     });
 }

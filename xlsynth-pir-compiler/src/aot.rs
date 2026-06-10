@@ -1542,7 +1542,7 @@ fn render_generated_tuple_type(
         .collect::<Result<Vec<_>, CompilerError>>()?
         .concat();
     Ok(format!(
-        "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {} {{\n{fields}}}\n",
+        "#[repr(C)]\n#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]\npub struct {} {{\n{fields}}}\n",
         tuple_type.name
     ))
 }
@@ -1738,7 +1738,7 @@ fn render_pir_aot_decl(
                 .collect::<Result<Vec<_>, CompilerError>>()?
                 .concat();
             Ok(format!(
-                "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {name} {{\n{rendered_fields}}}\n"
+                "#[repr(C)]\n#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]\npub struct {name} {{\n{rendered_fields}}}\n"
             ))
         }
         PirAotDecl::Enum {
@@ -2049,11 +2049,11 @@ fn render_runner_items(
     let public_runtime_imports = if emit_native_value_types {
         r#"pub use xlsynth_pir_compiler_runtime::{
     BitsInU8, BitsInU16, BitsInU32, BitsInU64, ExecutionOptions, ExecutionResult, RunError,
-    RunResult, Token, WideBits,
+    Token, WideBits,
 };
 "#
     } else {
-        "pub use xlsynth_pir_compiler_runtime::{ExecutionOptions, ExecutionResult, RunError, RunResult};\n"
+        "pub use xlsynth_pir_compiler_runtime::{ExecutionOptions, ExecutionResult, RunError};\n"
     };
 
     format!(
@@ -2161,14 +2161,14 @@ impl Runner {{
     }}
 
     /// Runs into caller-owned output storage and returns observable events.
-    pub fn run_into_with_events(&mut self{signature_inputs}, output: &mut {output_type_name}, options: ExecutionOptions) -> Result<ExecutionResult, RunError> {{
+    pub fn run_with_events(&mut self{signature_inputs}, output: &mut {output_type_name}, options: ExecutionOptions) -> Result<ExecutionResult, RunError> {{
         let input_pointers = [{pointer_entries}];
         self.invoke(&input_pointers, std::ptr::from_mut(output).cast::<u8>(), options)?;
         Ok(self.context.result())
     }}
 
     /// Runs into caller-owned output storage, rejecting assertion/assumption failures.
-    pub fn run_into(&mut self{signature_inputs}, output: &mut {output_type_name}) -> Result<(), RunError> {{
+    pub fn run(&mut self{signature_inputs}, output: &mut {output_type_name}) -> Result<(), RunError> {{
         let input_pointers = [{pointer_entries}];
         self.invoke(
             &input_pointers,
@@ -2176,30 +2176,6 @@ impl Runner {{
             ExecutionOptions::NO_EVENTS,
         )?;
         Self::reject_failures(&self.context)
-    }}
-
-    /// Runs and returns output together with observable event records.
-    pub fn run_with_events(&mut self{signature_inputs}, options: ExecutionOptions) -> Result<RunResult<{output_type_name}>, RunError> {{
-        let input_pointers = [{pointer_entries}];
-        let mut output = std::mem::MaybeUninit::<{output_type_name}>::uninit();
-        self.invoke(&input_pointers, output.as_mut_ptr().cast::<u8>(), options)?;
-        Ok(RunResult {{
-            output: unsafe {{ output.assume_init() }},
-            events: self.context.result(),
-        }})
-    }}
-
-    /// Runs and returns only output, rejecting assertion/assumption failures.
-    pub fn run(&mut self{signature_inputs}) -> Result<{output_type_name}, RunError> {{
-        let input_pointers = [{pointer_entries}];
-        let mut output = std::mem::MaybeUninit::<{output_type_name}>::uninit();
-        self.invoke(
-            &input_pointers,
-            output.as_mut_ptr().cast::<u8>(),
-            ExecutionOptions::NO_EVENTS,
-        )?;
-        Self::reject_failures(&self.context)?;
-        Ok(unsafe {{ output.assume_init() }})
     }}
 }}
 
@@ -2491,18 +2467,18 @@ mod tests {
         .expect("package should render");
 
         assert!(rendered.contains(
-            "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct XlsynthPirAotTuple0"
+            "#[repr(C)]\n#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]\npub struct XlsynthPirAotTuple0"
         ));
         assert!(rendered.contains("pub field0: U8,"));
         assert!(rendered.contains("pub field1: U16,"));
         assert!(rendered.contains(
-            "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct XlsynthPirAotTuple1"
+            "#[repr(C)]\n#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]\npub struct XlsynthPirAotTuple1"
         ));
         assert!(rendered.contains("pub field0: XlsynthPirAotTuple0,"));
         assert!(rendered.contains("pub type PairAlias = super::XlsynthPirAotTuple0;"));
         assert!(rendered.contains("pub pair: super::XlsynthPirAotTuple0,"));
         assert!(rendered.contains("pair: &super::super::XlsynthPirAotTuple0"));
-        assert!(rendered.contains("RunResult<[super::super::XlsynthPirAotTuple1; 2]>"));
+        assert!(rendered.contains("output: &mut [super::super::XlsynthPirAotTuple1; 2]"));
         assert!(!rendered.contains("(U8, U16)"));
     }
 }

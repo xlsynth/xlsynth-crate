@@ -35,13 +35,6 @@ impl fmt::Display for RunError {
 
 impl std::error::Error for RunError {}
 
-/// Output and observable events produced by one generated wrapper invocation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunResult<T> {
-    pub output: T,
-    pub events: ExecutionResult,
-}
-
 macro_rules! define_native_bits {
     ($name:ident, $carrier:ty, $carrier_bits:expr) => {
         #[repr(transparent)]
