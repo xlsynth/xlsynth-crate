@@ -298,6 +298,7 @@ pub fn operands(payload: &NodePayload) -> Vec<NodeRef> {
             token,
             activated,
             format: _,
+            verbosity: _,
             operands,
         } => {
             let mut deps = vec![*token, *activated];
@@ -1076,11 +1077,13 @@ where
             token,
             activated,
             format,
+            verbosity,
             operands,
         } => NodePayload::Trace {
             token: map((0, *token)),
             activated: map((1, *activated)),
             format: format.clone(),
+            verbosity: *verbosity,
             operands: operands
                 .iter()
                 .enumerate()

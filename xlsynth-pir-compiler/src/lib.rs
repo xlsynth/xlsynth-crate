@@ -28,8 +28,8 @@ use xlsynth_pir::ir_utils::{is_observable_effect_root, operands};
 pub use xlsynth_pir_compiler_runtime::{
     AssertionFailure, AssumptionFailure, AssumptionFailureKind, CompiledEntrypoint,
     CompiledFunctionMetadata, CoverCount, EventKind, EventSiteMetadata, ExecutionContext,
-    ExecutionResult, RawExecutionContext, TraceMessage, TraceTupleFieldLayout, TraceValueLayout,
-    WideBinaryOp, WideUnaryOp,
+    ExecutionOptions, ExecutionResult, RawExecutionContext, TraceMessage, TraceTupleFieldLayout,
+    TraceValueLayout, WideBinaryOp, WideUnaryOp,
 };
 use xlsynth_pir_compiler_runtime::{
     xlsynth_pir_record_assert, xlsynth_pir_record_assumption_failure, xlsynth_pir_record_cover,
@@ -798,13 +798,16 @@ impl PirFunctionCompiler {
     /// Transitional dynamic-value adapter used by differential tests and
     /// fuzzing.
     pub fn run_ir_values(&self, args: &[IrValue]) -> Result<IrValue, CompilerError> {
-        Ok(self.run_ir_values_with_events(args)?.value)
+        Ok(self
+            .run_ir_values_with_events(args, ExecutionOptions::default())?
+            .value)
     }
 
     /// Runs dynamic PIR values and returns the value plus observable events.
     pub fn run_ir_values_with_events(
         &self,
         args: &[IrValue],
+        options: ExecutionOptions,
     ) -> Result<IrExecutionResult, CompilerError> {
         if args.len() != self.param_layouts.len() {
             return Err(CompilerError::InvalidArgument(format!(
@@ -823,7 +826,7 @@ impl PirFunctionCompiler {
             .map(NativeValueStorage::as_ptr)
             .collect::<Vec<_>>();
         let mut output = NativeValueStorage::zeroed(&self.result_layout);
-        let mut context = ExecutionContext::new(&self.metadata);
+        let mut context = ExecutionContext::new_with_options(&self.metadata, options);
         // SAFETY: each `NativeValueStorage` owns aligned storage with exactly
         // the corresponding published native layout and lives across the call.
         unsafe { self.run_native_with_context(&pointers, output.as_mut_ptr(), &mut context)? };
@@ -2437,6 +2440,7 @@ fn append_event_metadata(
                 label: Some(label.clone()),
                 message: None,
                 format: None,
+                verbosity: 0,
                 operand_layouts: Vec::new(),
             }),
             NodePayload::Assert { message, label, .. } => Some(EventSiteMetadata {
@@ -2445,6 +2449,7 @@ fn append_event_metadata(
                 label: Some(label.clone()),
                 message: Some(message.clone()),
                 format: None,
+                verbosity: 0,
                 operand_layouts: Vec::new(),
             }),
             NodePayload::ArrayIndex {
@@ -2458,6 +2463,7 @@ fn append_event_metadata(
                     label: None,
                     message: None,
                     format: None,
+                    verbosity: 0,
                     operand_layouts: Vec::new(),
                 })
             }
@@ -2473,6 +2479,7 @@ fn append_event_metadata(
                     label: None,
                     message: None,
                     format: None,
+                    verbosity: 0,
                     operand_layouts: Vec::new(),
                 })
             }
@@ -2485,13 +2492,17 @@ fn append_event_metadata(
                 ..
             } => None,
             NodePayload::Trace {
-                format, operands, ..
+                format,
+                verbosity,
+                operands,
+                ..
             } => Some(EventSiteMetadata {
                 node_text_id: node.text_id,
                 kind: EventKind::Trace,
                 label: None,
                 message: None,
                 format: Some(format.clone()),
+                verbosity: *verbosity,
                 operand_layouts: operands
                     .iter()
                     .map(|operand| {
@@ -2908,6 +2919,7 @@ fn lower_function(
                 operands,
                 token: _,
                 format: _,
+                verbosity: _,
             } => {
                 let site_id = event_site_id(event_sites, *node_ref, node)?;
                 let operand_pointers = lower_trace_operand_pointers(

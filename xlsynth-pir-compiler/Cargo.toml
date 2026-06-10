@@ -28,6 +28,13 @@ xlsynth = { path = "../xlsynth", version = "0.55.0", features = ["pir-compiler-d
 xlsynth-pir = { path = "../xlsynth-pir", version = "0.55.0" }
 xlsynth-pir-compiler-runtime = { path = "../xlsynth-pir-compiler-runtime", version = "0.55.0" }
 
+[dev-dependencies]
+criterion = "0.5"
+
 [lib]
 name = "xlsynth_pir_compiler"
 path = "src/lib.rs"
+
+[[bench]]
+name = "aot_performance"
+harness = false

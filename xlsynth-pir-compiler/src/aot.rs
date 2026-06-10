@@ -1500,7 +1500,8 @@ fn render_pir_aot_runtime_items(
     package: &ValidatedPirAotPackage<'_>,
     tuple_types: &GeneratedTupleTypes,
 ) -> Result<String, CompilerError> {
-    let mut output = "pub use xlsynth_pir_compiler_runtime::Token;\n".to_string();
+    let mut output =
+        "pub use xlsynth_pir_compiler_runtime::{ExecutionOptions, Token};\n".to_string();
     for (signedness, bit_count) in collect_scalar_aliases(package) {
         output.push_str(&format!(
             "pub type {} = {};\n",
@@ -1540,9 +1541,21 @@ fn render_generated_tuple_type(
         })
         .collect::<Result<Vec<_>, CompilerError>>()?
         .concat();
+    let defaults = tuple_type
+        .elements
+        .iter()
+        .enumerate()
+        .map(|(index, element)| {
+            Ok(format!(
+                "            field{index}: {},\n",
+                render_pir_aot_default_expr(package, tuple_types, element, &[])?
+            ))
+        })
+        .collect::<Result<Vec<_>, CompilerError>>()?
+        .concat();
     Ok(format!(
-        "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {} {{\n{fields}}}\n",
-        tuple_type.name
+        "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {name} {{\n{fields}}}\n#[allow(clippy::derivable_impls)]\nimpl Default for {name} {{\n    fn default() -> Self {{\n        Self {{\n{defaults}        }}\n    }}\n}}\n",
+        name = tuple_type.name,
     ))
 }
 
@@ -1736,8 +1749,19 @@ fn render_pir_aot_decl(
                 })
                 .collect::<Result<Vec<_>, CompilerError>>()?
                 .concat();
+            let defaults = fields
+                .iter()
+                .map(|field| {
+                    Ok(format!(
+                        "            {}: {},\n",
+                        sanitize_identifier(&field.name),
+                        render_pir_aot_default_expr(package, tuple_types, &field.ty, module_path)?
+                    ))
+                })
+                .collect::<Result<Vec<_>, CompilerError>>()?
+                .concat();
             Ok(format!(
-                "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {name} {{\n{rendered_fields}}}\n"
+                "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {name} {{\n{rendered_fields}}}\n#[allow(clippy::derivable_impls)]\nimpl Default for {name} {{\n    fn default() -> Self {{\n        Self {{\n{defaults}        }}\n    }}\n}}\n"
             ))
         }
         PirAotDecl::Enum {
@@ -1810,6 +1834,21 @@ fn render_pir_aot_type(
             })?;
             Ok(render_relative_type_path(current_module_path, module, name))
         }
+    }
+}
+
+fn render_pir_aot_default_expr(
+    package: &ValidatedPirAotPackage<'_>,
+    tuple_types: &GeneratedTupleTypes,
+    ty: &PirAotType,
+    current_module_path: &[String],
+) -> Result<String, CompilerError> {
+    match ty {
+        PirAotType::Array { element, .. } => Ok(format!(
+            "std::array::from_fn(|_| {})",
+            render_pir_aot_default_expr(package, tuple_types, element, current_module_path)?
+        )),
+        _ => Ok("Default::default()".to_string()),
     }
 }
 
@@ -2047,12 +2086,12 @@ fn render_runner_items(
     };
     let public_runtime_imports = if emit_native_value_types {
         r#"pub use xlsynth_pir_compiler_runtime::{
-    BitsInU8, BitsInU16, BitsInU32, BitsInU64, ExecutionResult, RunError, RunResult, Token,
-    WideBits,
+    BitsInU8, BitsInU16, BitsInU32, BitsInU64, ExecutionOptions, ExecutionResult, RunError,
+    Token, WideBits,
 };
 "#
     } else {
-        "pub use xlsynth_pir_compiler_runtime::{ExecutionResult, RunError, RunResult};\n"
+        "pub use xlsynth_pir_compiler_runtime::{ExecutionOptions, ExecutionResult, RunError};\n"
     };
 
     format!(
@@ -2120,8 +2159,13 @@ impl Runner {{
         }})
     }}
 
-    fn invoke(&mut self, inputs: &[*const u8], output: *mut u8) -> Result<(), RunError> {{
-        self.context.clear();
+    fn invoke(
+        &mut self,
+        inputs: &[*const u8],
+        output: *mut u8,
+        options: ExecutionOptions,
+    ) -> Result<(), RunError> {{
+        self.context.clear_with_options(options);
         let scratch = if self.scratch.is_empty() {{
             std::ptr::null_mut()
         }} else {{
@@ -2138,14 +2182,14 @@ impl Runner {{
         }}
     }}
 
-    fn reject_failures(events: &ExecutionResult) -> Result<(), RunError> {{
-        if let Some(failure) = events.assertion_failures.first() {{
+    fn reject_failures(context: &ExecutionContext<'_>) -> Result<(), RunError> {{
+        if let Some(failure) = context.assertion_failures().first() {{
             return Err(RunError(format!(
                 "compiled assertion failed at node {{}}: {{}}",
                 failure.node_text_id, failure.message
             )));
         }}
-        if let Some(failure) = events.assumption_failures.first() {{
+        if let Some(failure) = context.assumption_failures().first() {{
             return Err(RunError(format!(
                 "compiled assumed-in-bounds condition failed at node {{}}: {{:?}}",
                 failure.node_text_id, failure.kind
@@ -2155,34 +2199,21 @@ impl Runner {{
     }}
 
     /// Runs into caller-owned output storage and returns observable events.
-    pub fn run_into_with_events(&mut self{signature_inputs}, output: &mut {output_type_name}) -> Result<ExecutionResult, RunError> {{
+    pub fn run_with_events(&mut self{signature_inputs}, output: &mut {output_type_name}, options: ExecutionOptions) -> Result<ExecutionResult, RunError> {{
         let input_pointers = [{pointer_entries}];
-        self.invoke(&input_pointers, std::ptr::from_mut(output).cast::<u8>())?;
+        self.invoke(&input_pointers, std::ptr::from_mut(output).cast::<u8>(), options)?;
         Ok(self.context.result())
     }}
 
     /// Runs into caller-owned output storage, rejecting assertion/assumption failures.
-    pub fn run_into(&mut self{signature_inputs}, output: &mut {output_type_name}) -> Result<(), RunError> {{
-        let events = self.run_into_with_events({arg_calls}output)?;
-        Self::reject_failures(&events)
-    }}
-
-    /// Runs and returns output together with observable event records.
-    pub fn run_with_events(&mut self{signature_inputs}) -> Result<RunResult<{output_type_name}>, RunError> {{
+    pub fn run(&mut self{signature_inputs}, output: &mut {output_type_name}) -> Result<(), RunError> {{
         let input_pointers = [{pointer_entries}];
-        let mut output = std::mem::MaybeUninit::<{output_type_name}>::uninit();
-        self.invoke(&input_pointers, output.as_mut_ptr().cast::<u8>())?;
-        Ok(RunResult {{
-            output: unsafe {{ output.assume_init() }},
-            events: self.context.result(),
-        }})
-    }}
-
-    /// Runs and returns only output, rejecting assertion/assumption failures.
-    pub fn run(&mut self{signature_inputs}) -> Result<{output_type_name}, RunError> {{
-        let result = self.run_with_events({arg_calls_no_output})?;
-        Self::reject_failures(&result.events)?;
-        Ok(result.output)
+        self.invoke(
+            &input_pointers,
+            std::ptr::from_mut(output).cast::<u8>(),
+            ExecutionOptions::NO_EVENTS,
+        )?;
+        Self::reject_failures(&self.context)
     }}
 }}
 
@@ -2225,17 +2256,7 @@ pub fn try_with_thread_local_runner<T>(
         output_type_name = output_type_name,
         signature_inputs = signature_inputs,
         pointer_entries = pointer_entries,
-        arg_calls = render_call_args(&args, true),
-        arg_calls_no_output = render_call_args(&args, false),
     )
-}
-
-fn render_call_args(args: &[String], with_trailing_comma: bool) -> String {
-    if args.is_empty() {
-        return String::new();
-    }
-    let suffix = if with_trailing_comma { ", " } else { "" };
-    format!("{}{suffix}", args.join(", "))
 }
 
 fn render_value_type(
@@ -2261,17 +2282,33 @@ fn render_value_type(
         }
         Type::Tuple(fields) => {
             let mut rendered_fields = Vec::new();
+            let mut defaults = Vec::new();
             for (index, field) in fields.iter().enumerate() {
                 let field_name = format!("{name}Field{index}");
                 let rendered = render_value_type(field, &field_name, declarations)?;
                 rendered_fields.push(format!("    pub field{index}: {rendered},\n"));
+                defaults.push(format!(
+                    "            field{index}: {},\n",
+                    render_value_default_expr(field)?
+                ));
             }
             declarations.push(format!(
-                "#[repr(C)]\n#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]\npub struct {name} {{\n{}}}\n",
-                rendered_fields.concat()
+                "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {name} {{\n{fields}}}\n#[allow(clippy::derivable_impls)]\nimpl Default for {name} {{\n    fn default() -> Self {{\n        Self {{\n{defaults}        }}\n    }}\n}}\n",
+                fields = rendered_fields.concat(),
+                defaults = defaults.concat()
             ));
             Ok(name.to_string())
         }
+    }
+}
+
+fn render_value_default_expr(ty: &Type) -> Result<String, CompilerError> {
+    match ty {
+        Type::Array(array) => Ok(format!(
+            "std::array::from_fn(|_| {})",
+            render_value_default_expr(array.element_type.as_ref())?
+        )),
+        _ => Ok("Default::default()".to_string()),
     }
 }
 
@@ -2296,12 +2333,13 @@ fn render_function_metadata(sites: &[EventSiteMetadata]) -> String {
 
 fn render_event_site(site: &EventSiteMetadata) -> String {
     format!(
-        "EventSiteMetadata {{ node_text_id: {}, kind: {}, label: {}, message: {}, format: {}, operand_layouts: vec![{}] }}",
+        "EventSiteMetadata {{ node_text_id: {}, kind: {}, label: {}, message: {}, format: {}, verbosity: {}, operand_layouts: vec![{}] }}",
         site.node_text_id,
         render_event_kind(site.kind),
         render_optional_string(&site.label),
         render_optional_string(&site.message),
         render_optional_string(&site.format),
+        site.verbosity,
         site.operand_layouts
             .iter()
             .map(render_trace_layout)
@@ -2487,14 +2525,18 @@ mod tests {
         ));
         assert!(rendered.contains("pub field0: U8,"));
         assert!(rendered.contains("pub field1: U16,"));
+        assert!(rendered.contains("impl Default for XlsynthPirAotTuple0"));
+        assert!(rendered.contains("field0: Default::default(),"));
+        assert!(rendered.contains("field1: Default::default(),"));
         assert!(rendered.contains(
             "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct XlsynthPirAotTuple1"
         ));
         assert!(rendered.contains("pub field0: XlsynthPirAotTuple0,"));
+        assert!(rendered.contains("impl Default for XlsynthPirAotTuple1"));
         assert!(rendered.contains("pub type PairAlias = super::XlsynthPirAotTuple0;"));
         assert!(rendered.contains("pub pair: super::XlsynthPirAotTuple0,"));
         assert!(rendered.contains("pair: &super::super::XlsynthPirAotTuple0"));
-        assert!(rendered.contains("RunResult<[super::super::XlsynthPirAotTuple1; 2]>"));
+        assert!(rendered.contains("output: &mut [super::super::XlsynthPirAotTuple1; 2]"));
         assert!(!rendered.contains("(U8, U16)"));
     }
 }

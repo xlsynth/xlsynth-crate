@@ -2389,6 +2389,7 @@ impl<'a> FunctionGenerator<'a> {
                         token,
                         activated,
                         format,
+                        verbosity: 0,
                         operands,
                     },
                     None,
