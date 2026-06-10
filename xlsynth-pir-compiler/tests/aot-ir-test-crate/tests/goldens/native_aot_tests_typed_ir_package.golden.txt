@@ -21,26 +21,51 @@ pub mod native_aot_tests {
     #![allow(unused_imports)]
 
     #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct CompoundInput {
         pub base: super::U42,
         pub limbs: [super::U65; 2],
     }
+    #[allow(clippy::derivable_impls)]
+    impl Default for CompoundInput {
+        fn default() -> Self {
+            Self {
+                base: Default::default(),
+                limbs: std::array::from_fn(|_| Default::default()),
+            }
+        }
+    }
 
     #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct CompoundOutput {
         pub sum: super::U42,
         pub limbs: [super::U65; 2],
     }
-
-    #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-    pub struct EmptyOutput {
+    #[allow(clippy::derivable_impls)]
+    impl Default for CompoundOutput {
+        fn default() -> Self {
+            Self {
+                sum: Default::default(),
+                limbs: std::array::from_fn(|_| Default::default()),
+            }
+        }
     }
 
     #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct EmptyOutput {
+    }
+    #[allow(clippy::derivable_impls)]
+    impl Default for EmptyOutput {
+        fn default() -> Self {
+            Self {
+            }
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct WideRuntimeOutput {
         pub product: super::U129,
         pub signed_product: super::S129,
@@ -55,6 +80,26 @@ pub mod native_aot_tests {
         pub hot: super::U130,
         pub encoded: super::U8,
         pub decoded: super::U130,
+    }
+    #[allow(clippy::derivable_impls)]
+    impl Default for WideRuntimeOutput {
+        fn default() -> Self {
+            Self {
+                product: Default::default(),
+                signed_product: Default::default(),
+                quotient: Default::default(),
+                left: Default::default(),
+                right: Default::default(),
+                slice: Default::default(),
+                low_slice: Default::default(),
+                updated: Default::default(),
+                unsigned_sum: Default::default(),
+                signed_sum: Default::default(),
+                hot: Default::default(),
+                encoded: Default::default(),
+                decoded: Default::default(),
+            }
+        }
     }
 
     pub mod aot_add_inputs {

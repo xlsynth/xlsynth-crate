@@ -1554,7 +1554,7 @@ fn render_generated_tuple_type(
         .collect::<Result<Vec<_>, CompilerError>>()?
         .concat();
     Ok(format!(
-        "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {name} {{\n{fields}}}\nimpl Default for {name} {{\n    fn default() -> Self {{\n        Self {{\n{defaults}        }}\n    }}\n}}\n",
+        "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {name} {{\n{fields}}}\n#[allow(clippy::derivable_impls)]\nimpl Default for {name} {{\n    fn default() -> Self {{\n        Self {{\n{defaults}        }}\n    }}\n}}\n",
         name = tuple_type.name,
     ))
 }
@@ -1761,7 +1761,7 @@ fn render_pir_aot_decl(
                 .collect::<Result<Vec<_>, CompilerError>>()?
                 .concat();
             Ok(format!(
-                "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {name} {{\n{rendered_fields}}}\nimpl Default for {name} {{\n    fn default() -> Self {{\n        Self {{\n{defaults}        }}\n    }}\n}}\n"
+                "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {name} {{\n{rendered_fields}}}\n#[allow(clippy::derivable_impls)]\nimpl Default for {name} {{\n    fn default() -> Self {{\n        Self {{\n{defaults}        }}\n    }}\n}}\n"
             ))
         }
         PirAotDecl::Enum {
@@ -2293,7 +2293,7 @@ fn render_value_type(
                 ));
             }
             declarations.push(format!(
-                "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {name} {{\n{fields}}}\nimpl Default for {name} {{\n    fn default() -> Self {{\n        Self {{\n{defaults}        }}\n    }}\n}}\n",
+                "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {name} {{\n{fields}}}\n#[allow(clippy::derivable_impls)]\nimpl Default for {name} {{\n    fn default() -> Self {{\n        Self {{\n{defaults}        }}\n    }}\n}}\n",
                 fields = rendered_fields.concat(),
                 defaults = defaults.concat()
             ));
@@ -2521,14 +2521,18 @@ mod tests {
         .expect("package should render");
 
         assert!(rendered.contains(
-            "#[repr(C)]\n#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]\npub struct XlsynthPirAotTuple0"
+            "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct XlsynthPirAotTuple0"
         ));
         assert!(rendered.contains("pub field0: U8,"));
         assert!(rendered.contains("pub field1: U16,"));
+        assert!(rendered.contains("impl Default for XlsynthPirAotTuple0"));
+        assert!(rendered.contains("field0: Default::default(),"));
+        assert!(rendered.contains("field1: Default::default(),"));
         assert!(rendered.contains(
-            "#[repr(C)]\n#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]\npub struct XlsynthPirAotTuple1"
+            "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct XlsynthPirAotTuple1"
         ));
         assert!(rendered.contains("pub field0: XlsynthPirAotTuple0,"));
+        assert!(rendered.contains("impl Default for XlsynthPirAotTuple1"));
         assert!(rendered.contains("pub type PairAlias = super::XlsynthPirAotTuple0;"));
         assert!(rendered.contains("pub pair: super::XlsynthPirAotTuple0,"));
         assert!(rendered.contains("pair: &super::super::XlsynthPirAotTuple0"));

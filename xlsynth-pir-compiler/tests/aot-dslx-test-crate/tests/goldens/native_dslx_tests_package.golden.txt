@@ -14,10 +14,19 @@ pub type S4 = xlsynth_pir_compiler_runtime::SignedBitsInU8<4>;
 pub type S65 = xlsynth_pir_compiler_runtime::SignedWideBits<65, 2>;
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct XlsynthPirAotTuple0 {
     pub field0: U8,
     pub field1: U16,
+}
+#[allow(clippy::derivable_impls)]
+impl Default for XlsynthPirAotTuple0 {
+    fn default() -> Self {
+        Self {
+            field0: Default::default(),
+            field1: Default::default(),
+        }
+    }
 }
 
 
@@ -28,9 +37,17 @@ pub mod bar {
         #![allow(unused_imports)]
 
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub struct Widget {
             pub widget_id: super::super::U8,
+        }
+        #[allow(clippy::derivable_impls)]
+        impl Default for Widget {
+            fn default() -> Self {
+                Self {
+                    widget_id: Default::default(),
+                }
+            }
         }
 
     }
@@ -543,9 +560,17 @@ pub mod foo {
         #![allow(unused_imports)]
 
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub struct Widget {
             pub widget_id: super::super::U8,
+        }
+        #[allow(clippy::derivable_impls)]
+        impl Default for Widget {
+            fn default() -> Self {
+                Self {
+                    widget_id: Default::default(),
+                }
+            }
         }
 
     }
@@ -749,14 +774,23 @@ pub mod gizmo_types {
     pub type FrobNibbles = [super::U4; 3];
 
     #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct GizmoTuning {
         pub frob_bias: super::U4,
         pub wobble_trim: super::S4,
     }
+    #[allow(clippy::derivable_impls)]
+    impl Default for GizmoTuning {
+        fn default() -> Self {
+            Self {
+                frob_bias: Default::default(),
+                wobble_trim: Default::default(),
+            }
+        }
+    }
 
     #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Gizmo {
         pub gizmo_id: super::U8,
         pub mode: GizmoMode,
@@ -765,15 +799,40 @@ pub mod gizmo_types {
         pub wobble: super::S4,
         pub signed_mode: SignedGizmoMode,
     }
+    #[allow(clippy::derivable_impls)]
+    impl Default for Gizmo {
+        fn default() -> Self {
+            Self {
+                gizmo_id: Default::default(),
+                mode: Default::default(),
+                frobs: std::array::from_fn(|_| Default::default()),
+                tuning: Default::default(),
+                wobble: Default::default(),
+                signed_mode: Default::default(),
+            }
+        }
+    }
 
     #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct GizmoOutcome {
         pub next_gizmo_id: super::U8,
         pub selected_frob: super::U4,
         pub mode: GizmoMode,
         pub adjusted_wobble: super::S4,
         pub signed_mode: SignedGizmoMode,
+    }
+    #[allow(clippy::derivable_impls)]
+    impl Default for GizmoOutcome {
+        fn default() -> Self {
+            Self {
+                next_gizmo_id: Default::default(),
+                selected_frob: Default::default(),
+                mode: Default::default(),
+                adjusted_wobble: Default::default(),
+                signed_mode: Default::default(),
+            }
+        }
     }
 
     pub mod aot_gizmo_frob {
@@ -1111,45 +1170,101 @@ pub mod parametric_forms {
     #![allow(unused_imports)]
 
     #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Box__N_8 {
         pub value: super::U8,
     }
+    #[allow(clippy::derivable_impls)]
+    impl Default for Box__N_8 {
+        fn default() -> Self {
+            Self {
+                value: Default::default(),
+            }
+        }
+    }
 
     #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Box__N_16 {
         pub value: super::U16,
     }
+    #[allow(clippy::derivable_impls)]
+    impl Default for Box__N_16 {
+        fn default() -> Self {
+            Self {
+                value: Default::default(),
+            }
+        }
+    }
 
     #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Matrix__R_2__C_3 {
         pub rows: [[super::U8; 3]; 2],
     }
+    #[allow(clippy::derivable_impls)]
+    impl Default for Matrix__R_2__C_3 {
+        fn default() -> Self {
+            Self {
+                rows: std::array::from_fn(|_| std::array::from_fn(|_| Default::default())),
+            }
+        }
+    }
 
     #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct ArrayBox__N_4 {
         pub items: [super::U8; 4],
     }
+    #[allow(clippy::derivable_impls)]
+    impl Default for ArrayBox__N_4 {
+        fn default() -> Self {
+            Self {
+                items: std::array::from_fn(|_| Default::default()),
+            }
+        }
+    }
 
     #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct ExprBox__N_8 {
         pub value: super::U8,
     }
-
-    #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-    pub struct SignedTag__S_m3 {
-        pub payload: super::U8,
+    #[allow(clippy::derivable_impls)]
+    impl Default for ExprBox__N_8 {
+        fn default() -> Self {
+            Self {
+                value: Default::default(),
+            }
+        }
     }
 
     #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct SignedTag__S_m3 {
+        pub payload: super::U8,
+    }
+    #[allow(clippy::derivable_impls)]
+    impl Default for SignedTag__S_m3 {
+        fn default() -> Self {
+            Self {
+                payload: Default::default(),
+            }
+        }
+    }
+
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct WideTag__W_18446744073709551616 {
         pub payload: super::U8,
+    }
+    #[allow(clippy::derivable_impls)]
+    impl Default for WideTag__W_18446744073709551616 {
+        fn default() -> Self {
+            Self {
+                payload: Default::default(),
+            }
+        }
     }
 
     pub type Box8 = Box__N_8;
@@ -1169,14 +1284,23 @@ pub mod parametric_forms {
     pub type HugeTag = WideTag__W_18446744073709551616;
 
     #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct WidePair {
         pub unsigned_value: super::U65,
         pub signed_value: super::S65,
     }
+    #[allow(clippy::derivable_impls)]
+    impl Default for WidePair {
+        fn default() -> Self {
+            Self {
+                unsigned_value: Default::default(),
+                signed_value: Default::default(),
+            }
+        }
+    }
 
     #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct ParametricFormsResult {
         pub box8: Box8,
         pub box16: Box16,
@@ -1187,6 +1311,22 @@ pub mod parametric_forms {
         pub negative: NegativeTag,
         pub huge: HugeTag,
         pub wide_pair: WidePair,
+    }
+    #[allow(clippy::derivable_impls)]
+    impl Default for ParametricFormsResult {
+        fn default() -> Self {
+            Self {
+                box8: Default::default(),
+                box16: Default::default(),
+                matrix: Default::default(),
+                array_box: Default::default(),
+                box_array: std::array::from_fn(|_| Default::default()),
+                expr_box: Default::default(),
+                negative: Default::default(),
+                huge: Default::default(),
+                wide_pair: Default::default(),
+            }
+        }
     }
 
     pub mod aot_parametric_forms {
@@ -1357,11 +1497,21 @@ pub mod parametric_imports {
     #![allow(unused_imports)]
 
     #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct ParametricImportsResult {
         pub remote: super::parametric_lib::RemotePlain,
         pub imported_direct: super::parametric_lib::RemoteBox__N_8,
         pub imported_pair: super::parametric_lib::RemotePair__A_8__B_23,
+    }
+    #[allow(clippy::derivable_impls)]
+    impl Default for ParametricImportsResult {
+        fn default() -> Self {
+            Self {
+                remote: Default::default(),
+                imported_direct: Default::default(),
+                imported_pair: Default::default(),
+            }
+        }
     }
 
     pub mod aot_parametric_imports {
@@ -1532,22 +1682,47 @@ pub mod parametric_lib {
     #![allow(unused_imports)]
 
     #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct RemoteBox__N_8 {
         pub value: super::U8,
     }
+    #[allow(clippy::derivable_impls)]
+    impl Default for RemoteBox__N_8 {
+        fn default() -> Self {
+            Self {
+                value: Default::default(),
+            }
+        }
+    }
 
     #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct RemotePair__A_8__B_23 {
         pub left: super::U8,
         pub right: super::U23,
     }
+    #[allow(clippy::derivable_impls)]
+    impl Default for RemotePair__A_8__B_23 {
+        fn default() -> Self {
+            Self {
+                left: Default::default(),
+                right: Default::default(),
+            }
+        }
+    }
 
     #[repr(C)]
-    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct RemotePlain {
         pub id: super::U8,
+    }
+    #[allow(clippy::derivable_impls)]
+    impl Default for RemotePlain {
+        fn default() -> Self {
+            Self {
+                id: Default::default(),
+            }
+        }
     }
 
 }
@@ -1725,9 +1900,17 @@ pub mod types {
         #![allow(unused_imports)]
 
         #[repr(C)]
-        #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub struct Doodle {
             pub doodle_id: super::super::U8,
+        }
+        #[allow(clippy::derivable_impls)]
+        impl Default for Doodle {
+            fn default() -> Self {
+                Self {
+                    doodle_id: Default::default(),
+                }
+            }
         }
 
     }
