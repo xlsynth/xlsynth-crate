@@ -16,5 +16,12 @@ workspace = true
 [dependencies]
 xlsynth-pir-compiler-runtime = { path = "../../../xlsynth-pir-compiler-runtime" }
 
+[dev-dependencies]
+criterion = "0.5"
+
 [build-dependencies]
 xlsynth-pir-compiler = { path = "../.." }
+
+[[bench]]
+name = "generated_runner_performance"
+harness = false

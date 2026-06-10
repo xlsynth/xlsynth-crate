@@ -55,7 +55,7 @@ top fn f(x: bits[32] id=1, y: bits[32] id=2) -> bits[32] {
     let mut context =
         ExecutionContext::new_with_options(compiler.metadata(), ExecutionOptions::NO_EVENTS);
 
-    c.bench_function("pir_aot_run_no_events", |b| {
+    c.bench_function("pir_aot_run_no_event_sites", |b| {
         b.iter(|| {
             context.clear_with_options(ExecutionOptions::NO_EVENTS);
             // SAFETY: inputs/output are native `bits[32]` carriers matching the
