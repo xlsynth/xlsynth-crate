@@ -1541,9 +1541,21 @@ fn render_generated_tuple_type(
         })
         .collect::<Result<Vec<_>, CompilerError>>()?
         .concat();
+    let defaults = tuple_type
+        .elements
+        .iter()
+        .enumerate()
+        .map(|(index, element)| {
+            Ok(format!(
+                "            field{index}: {},\n",
+                render_pir_aot_default_expr(package, tuple_types, element, &[])?
+            ))
+        })
+        .collect::<Result<Vec<_>, CompilerError>>()?
+        .concat();
     Ok(format!(
-        "#[repr(C)]\n#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]\npub struct {} {{\n{fields}}}\n",
-        tuple_type.name
+        "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {name} {{\n{fields}}}\nimpl Default for {name} {{\n    fn default() -> Self {{\n        Self {{\n{defaults}        }}\n    }}\n}}\n",
+        name = tuple_type.name,
     ))
 }
 
@@ -1737,8 +1749,19 @@ fn render_pir_aot_decl(
                 })
                 .collect::<Result<Vec<_>, CompilerError>>()?
                 .concat();
+            let defaults = fields
+                .iter()
+                .map(|field| {
+                    Ok(format!(
+                        "            {}: {},\n",
+                        sanitize_identifier(&field.name),
+                        render_pir_aot_default_expr(package, tuple_types, &field.ty, module_path)?
+                    ))
+                })
+                .collect::<Result<Vec<_>, CompilerError>>()?
+                .concat();
             Ok(format!(
-                "#[repr(C)]\n#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]\npub struct {name} {{\n{rendered_fields}}}\n"
+                "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {name} {{\n{rendered_fields}}}\nimpl Default for {name} {{\n    fn default() -> Self {{\n        Self {{\n{defaults}        }}\n    }}\n}}\n"
             ))
         }
         PirAotDecl::Enum {
@@ -1811,6 +1834,21 @@ fn render_pir_aot_type(
             })?;
             Ok(render_relative_type_path(current_module_path, module, name))
         }
+    }
+}
+
+fn render_pir_aot_default_expr(
+    package: &ValidatedPirAotPackage<'_>,
+    tuple_types: &GeneratedTupleTypes,
+    ty: &PirAotType,
+    current_module_path: &[String],
+) -> Result<String, CompilerError> {
+    match ty {
+        PirAotType::Array { element, .. } => Ok(format!(
+            "std::array::from_fn(|_| {})",
+            render_pir_aot_default_expr(package, tuple_types, element, current_module_path)?
+        )),
+        _ => Ok("Default::default()".to_string()),
     }
 }
 
@@ -2244,17 +2282,33 @@ fn render_value_type(
         }
         Type::Tuple(fields) => {
             let mut rendered_fields = Vec::new();
+            let mut defaults = Vec::new();
             for (index, field) in fields.iter().enumerate() {
                 let field_name = format!("{name}Field{index}");
                 let rendered = render_value_type(field, &field_name, declarations)?;
                 rendered_fields.push(format!("    pub field{index}: {rendered},\n"));
+                defaults.push(format!(
+                    "            field{index}: {},\n",
+                    render_value_default_expr(field)?
+                ));
             }
             declarations.push(format!(
-                "#[repr(C)]\n#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]\npub struct {name} {{\n{}}}\n",
-                rendered_fields.concat()
+                "#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct {name} {{\n{fields}}}\nimpl Default for {name} {{\n    fn default() -> Self {{\n        Self {{\n{defaults}        }}\n    }}\n}}\n",
+                fields = rendered_fields.concat(),
+                defaults = defaults.concat()
             ));
             Ok(name.to_string())
         }
+    }
+}
+
+fn render_value_default_expr(ty: &Type) -> Result<String, CompilerError> {
+    match ty {
+        Type::Array(array) => Ok(format!(
+            "std::array::from_fn(|_| {})",
+            render_value_default_expr(array.element_type.as_ref())?
+        )),
+        _ => Ok("Default::default()".to_string()),
     }
 }
 
