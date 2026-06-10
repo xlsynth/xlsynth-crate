@@ -1500,7 +1500,8 @@ fn render_pir_aot_runtime_items(
     package: &ValidatedPirAotPackage<'_>,
     tuple_types: &GeneratedTupleTypes,
 ) -> Result<String, CompilerError> {
-    let mut output = "pub use xlsynth_pir_compiler_runtime::Token;\n".to_string();
+    let mut output =
+        "pub use xlsynth_pir_compiler_runtime::{ExecutionOptions, Token};\n".to_string();
     for (signedness, bit_count) in collect_scalar_aliases(package) {
         output.push_str(&format!(
             "pub type {} = {};\n",
@@ -2047,12 +2048,12 @@ fn render_runner_items(
     };
     let public_runtime_imports = if emit_native_value_types {
         r#"pub use xlsynth_pir_compiler_runtime::{
-    BitsInU8, BitsInU16, BitsInU32, BitsInU64, ExecutionResult, RunError, RunResult, Token,
-    WideBits,
+    BitsInU8, BitsInU16, BitsInU32, BitsInU64, ExecutionOptions, ExecutionResult, RunError,
+    RunResult, Token, WideBits,
 };
 "#
     } else {
-        "pub use xlsynth_pir_compiler_runtime::{ExecutionResult, RunError, RunResult};\n"
+        "pub use xlsynth_pir_compiler_runtime::{ExecutionOptions, ExecutionResult, RunError, RunResult};\n"
     };
 
     format!(
@@ -2120,8 +2121,13 @@ impl Runner {{
         }})
     }}
 
-    fn invoke(&mut self, inputs: &[*const u8], output: *mut u8) -> Result<(), RunError> {{
-        self.context.clear();
+    fn invoke(
+        &mut self,
+        inputs: &[*const u8],
+        output: *mut u8,
+        options: ExecutionOptions,
+    ) -> Result<(), RunError> {{
+        self.context.clear_with_options(options);
         let scratch = if self.scratch.is_empty() {{
             std::ptr::null_mut()
         }} else {{
@@ -2138,14 +2144,14 @@ impl Runner {{
         }}
     }}
 
-    fn reject_failures(events: &ExecutionResult) -> Result<(), RunError> {{
-        if let Some(failure) = events.assertion_failures.first() {{
+    fn reject_failures(context: &ExecutionContext<'_>) -> Result<(), RunError> {{
+        if let Some(failure) = context.assertion_failures().first() {{
             return Err(RunError(format!(
                 "compiled assertion failed at node {{}}: {{}}",
                 failure.node_text_id, failure.message
             )));
         }}
-        if let Some(failure) = events.assumption_failures.first() {{
+        if let Some(failure) = context.assumption_failures().first() {{
             return Err(RunError(format!(
                 "compiled assumed-in-bounds condition failed at node {{}}: {{:?}}",
                 failure.node_text_id, failure.kind
@@ -2155,23 +2161,28 @@ impl Runner {{
     }}
 
     /// Runs into caller-owned output storage and returns observable events.
-    pub fn run_into_with_events(&mut self{signature_inputs}, output: &mut {output_type_name}) -> Result<ExecutionResult, RunError> {{
+    pub fn run_into_with_events(&mut self{signature_inputs}, output: &mut {output_type_name}, options: ExecutionOptions) -> Result<ExecutionResult, RunError> {{
         let input_pointers = [{pointer_entries}];
-        self.invoke(&input_pointers, std::ptr::from_mut(output).cast::<u8>())?;
+        self.invoke(&input_pointers, std::ptr::from_mut(output).cast::<u8>(), options)?;
         Ok(self.context.result())
     }}
 
     /// Runs into caller-owned output storage, rejecting assertion/assumption failures.
     pub fn run_into(&mut self{signature_inputs}, output: &mut {output_type_name}) -> Result<(), RunError> {{
-        let events = self.run_into_with_events({arg_calls}output)?;
-        Self::reject_failures(&events)
+        let input_pointers = [{pointer_entries}];
+        self.invoke(
+            &input_pointers,
+            std::ptr::from_mut(output).cast::<u8>(),
+            ExecutionOptions::NO_EVENTS,
+        )?;
+        Self::reject_failures(&self.context)
     }}
 
     /// Runs and returns output together with observable event records.
-    pub fn run_with_events(&mut self{signature_inputs}) -> Result<RunResult<{output_type_name}>, RunError> {{
+    pub fn run_with_events(&mut self{signature_inputs}, options: ExecutionOptions) -> Result<RunResult<{output_type_name}>, RunError> {{
         let input_pointers = [{pointer_entries}];
         let mut output = std::mem::MaybeUninit::<{output_type_name}>::uninit();
-        self.invoke(&input_pointers, output.as_mut_ptr().cast::<u8>())?;
+        self.invoke(&input_pointers, output.as_mut_ptr().cast::<u8>(), options)?;
         Ok(RunResult {{
             output: unsafe {{ output.assume_init() }},
             events: self.context.result(),
@@ -2180,9 +2191,15 @@ impl Runner {{
 
     /// Runs and returns only output, rejecting assertion/assumption failures.
     pub fn run(&mut self{signature_inputs}) -> Result<{output_type_name}, RunError> {{
-        let result = self.run_with_events({arg_calls_no_output})?;
-        Self::reject_failures(&result.events)?;
-        Ok(result.output)
+        let input_pointers = [{pointer_entries}];
+        let mut output = std::mem::MaybeUninit::<{output_type_name}>::uninit();
+        self.invoke(
+            &input_pointers,
+            output.as_mut_ptr().cast::<u8>(),
+            ExecutionOptions::NO_EVENTS,
+        )?;
+        Self::reject_failures(&self.context)?;
+        Ok(unsafe {{ output.assume_init() }})
     }}
 }}
 
@@ -2225,17 +2242,7 @@ pub fn try_with_thread_local_runner<T>(
         output_type_name = output_type_name,
         signature_inputs = signature_inputs,
         pointer_entries = pointer_entries,
-        arg_calls = render_call_args(&args, true),
-        arg_calls_no_output = render_call_args(&args, false),
     )
-}
-
-fn render_call_args(args: &[String], with_trailing_comma: bool) -> String {
-    if args.is_empty() {
-        return String::new();
-    }
-    let suffix = if with_trailing_comma { ", " } else { "" };
-    format!("{}{suffix}", args.join(", "))
 }
 
 fn render_value_type(
@@ -2296,12 +2303,13 @@ fn render_function_metadata(sites: &[EventSiteMetadata]) -> String {
 
 fn render_event_site(site: &EventSiteMetadata) -> String {
     format!(
-        "EventSiteMetadata {{ node_text_id: {}, kind: {}, label: {}, message: {}, format: {}, operand_layouts: vec![{}] }}",
+        "EventSiteMetadata {{ node_text_id: {}, kind: {}, label: {}, message: {}, format: {}, verbosity: {}, operand_layouts: vec![{}] }}",
         site.node_text_id,
         render_event_kind(site.kind),
         render_optional_string(&site.label),
         render_optional_string(&site.message),
         render_optional_string(&site.format),
+        site.verbosity,
         site.operand_layouts
             .iter()
             .map(render_trace_layout)

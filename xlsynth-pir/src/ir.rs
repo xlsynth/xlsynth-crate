@@ -511,6 +511,7 @@ pub enum NodePayload {
         token: NodeRef,
         activated: NodeRef,
         format: String,
+        verbosity: i64,
         operands: Vec<NodeRef>,
     },
     InstantiationInput {
@@ -886,13 +887,18 @@ impl NodePayload {
                 token,
                 activated,
                 format,
+                verbosity,
                 operands,
-            } => vec![
-                format_operand(*token),
-                format_operand(*activated),
-                format!("format=\"{}\"", escape_xls_ir_string(format)),
-                format!("data_operands=[{}]", format_operands(operands).join(", ")),
-            ],
+            } => {
+                let mut attrs = vec![
+                    format_operand(*token),
+                    format_operand(*activated),
+                    format!("format=\"{}\"", escape_xls_ir_string(format)),
+                    format!("data_operands=[{}]", format_operands(operands).join(", ")),
+                ];
+                attrs.push(format!("verbosity={verbosity}"));
+                attrs
+            }
             NodePayload::InstantiationInput {
                 instantiation,
                 port_name,

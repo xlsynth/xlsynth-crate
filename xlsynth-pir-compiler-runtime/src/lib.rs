@@ -510,6 +510,7 @@ pub struct EventSiteMetadata {
     pub label: Option<String>,
     pub message: Option<String>,
     pub format: Option<String>,
+    pub verbosity: i64,
     pub operand_layouts: Vec<TraceValueLayout>,
 }
 
@@ -566,6 +567,43 @@ pub struct ExecutionResult {
     pub cover_counts: Vec<CoverCount>,
 }
 
+/// Runtime options controlling which observable events are collected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecutionOptions {
+    pub trace_verbosity: Option<i64>,
+    pub collect_covers: bool,
+}
+
+impl ExecutionOptions {
+    /// Disables trace and cover collection while still recording failures.
+    pub const NO_EVENTS: Self = Self {
+        trace_verbosity: None,
+        collect_covers: false,
+    };
+
+    /// Collects covers and traces whose site verbosity is at most `verbosity`.
+    pub const fn new(trace_verbosity: Option<i64>, collect_covers: bool) -> Self {
+        Self {
+            trace_verbosity,
+            collect_covers,
+        }
+    }
+
+    /// Collects all traces and all covers.
+    pub const fn collect_all() -> Self {
+        Self {
+            trace_verbosity: Some(i64::MAX),
+            collect_covers: true,
+        }
+    }
+}
+
+impl Default for ExecutionOptions {
+    fn default() -> Self {
+        Self::NO_EVENTS
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TraceFormatPreference {
     Default,
@@ -593,10 +631,11 @@ const TRACE_FORMAT_SPECIFIERS: [(&str, TraceFormatPreference); 9] = [
 
 struct ContextState {
     metadata: *const CompiledFunctionMetadata,
+    options: ExecutionOptions,
     assertion_failures: Vec<AssertionFailure>,
     assumption_failures: Vec<AssumptionFailure>,
     trace_messages: Vec<TraceMessage>,
-    event_counts: Vec<u64>,
+    event_counts: Option<Vec<u64>>,
 }
 
 /// Rust-owned event collector used for one or more compiled executions.
@@ -612,13 +651,25 @@ pub struct ExecutionContext<'metadata> {
 impl<'metadata> ExecutionContext<'metadata> {
     /// Creates an empty collector for the supplied function metadata.
     pub fn new(metadata: &'metadata CompiledFunctionMetadata) -> Self {
+        Self::new_with_options(metadata, ExecutionOptions::default())
+    }
+
+    /// Creates an empty collector with explicit event collection options.
+    pub fn new_with_options(
+        metadata: &'metadata CompiledFunctionMetadata,
+        options: ExecutionOptions,
+    ) -> Self {
+        let event_counts = options
+            .collect_covers
+            .then(|| vec![0; metadata.event_sites.len()]);
         Self {
             state: Box::new(ContextState {
                 metadata,
+                options,
                 assertion_failures: Vec::new(),
                 assumption_failures: Vec::new(),
                 trace_messages: Vec::new(),
-                event_counts: vec![0; metadata.event_sites.len()],
+                event_counts,
             }),
             marker: PhantomData,
         }
@@ -635,17 +686,24 @@ impl<'metadata> ExecutionContext<'metadata> {
     /// Resolves all currently recorded events into ordinary Rust values.
     pub fn result(&self) -> ExecutionResult {
         let metadata = self.metadata();
-        let cover_counts = metadata
-            .event_sites
-            .iter()
-            .zip(&self.state.event_counts)
-            .filter(|(site, _)| site.kind == EventKind::Cover)
-            .map(|(site, count)| CoverCount {
-                node_text_id: site.node_text_id,
-                label: site.label.clone().unwrap_or_default(),
-                count: *count,
+        let cover_counts = self
+            .state
+            .event_counts
+            .as_ref()
+            .map(|event_counts| {
+                metadata
+                    .event_sites
+                    .iter()
+                    .zip(event_counts)
+                    .filter(|(site, _)| site.kind == EventKind::Cover)
+                    .map(|(site, count)| CoverCount {
+                        node_text_id: site.node_text_id,
+                        label: site.label.clone().unwrap_or_default(),
+                        count: *count,
+                    })
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
         ExecutionResult {
             assertion_failures: self.state.assertion_failures.clone(),
             assumption_failures: self.state.assumption_failures.clone(),
@@ -654,12 +712,39 @@ impl<'metadata> ExecutionContext<'metadata> {
         }
     }
 
+    /// Returns currently recorded assertion failures without cloning.
+    pub fn assertion_failures(&self) -> &[AssertionFailure] {
+        &self.state.assertion_failures
+    }
+
+    /// Returns currently recorded assumption failures without cloning.
+    pub fn assumption_failures(&self) -> &[AssumptionFailure] {
+        &self.state.assumption_failures
+    }
+
     /// Clears all event records and accumulated cover counters.
     pub fn clear(&mut self) {
+        self.clear_with_options(self.state.options);
+    }
+
+    /// Clears all event records and switches to the supplied collection
+    /// options.
+    pub fn clear_with_options(&mut self, options: ExecutionOptions) {
         self.state.assertion_failures.clear();
         self.state.assumption_failures.clear();
         self.state.trace_messages.clear();
-        self.state.event_counts.fill(0);
+        self.state.options = options;
+        if options.collect_covers {
+            match &mut self.state.event_counts {
+                Some(event_counts) => event_counts.fill(0),
+                None => {
+                    let site_count = self.metadata().event_sites.len();
+                    self.state.event_counts = Some(vec![0; site_count]);
+                }
+            }
+        } else {
+            self.state.event_counts = None;
+        }
     }
 
     fn metadata(&self) -> &CompiledFunctionMetadata {
@@ -752,10 +837,15 @@ pub unsafe extern "C" fn xlsynth_pir_record_assumption_failure(
 pub unsafe extern "C" fn xlsynth_pir_record_cover(context: *mut RawExecutionContext, site_id: u32) {
     // SAFETY: forwarded from the caller's ABI contract.
     let state = unsafe { state_from_raw(context) };
-    if site(state, site_id, EventKind::Cover).is_some() {
-        if let Some(count) = state.event_counts.get_mut(site_id as usize) {
-            *count = count.saturating_add(1);
-        }
+    if state.event_counts.is_none() || site(state, site_id, EventKind::Cover).is_none() {
+        return;
+    }
+    if let Some(count) = state
+        .event_counts
+        .as_mut()
+        .and_then(|event_counts| event_counts.get_mut(site_id as usize))
+    {
+        *count = count.saturating_add(1);
     }
 }
 
@@ -775,9 +865,15 @@ pub unsafe extern "C" fn xlsynth_pir_record_trace(
 ) {
     // SAFETY: forwarded from the caller's ABI contract.
     let state = unsafe { state_from_raw(context) };
-    let Some(site) = site(state, site_id, EventKind::Trace).cloned() else {
+    let Some(max_verbosity) = state.options.trace_verbosity else {
         return;
     };
+    let Some(site) = site(state, site_id, EventKind::Trace) else {
+        return;
+    };
+    if site.verbosity > max_verbosity {
+        return;
+    }
     if !site.operand_layouts.is_empty() && operand_ptrs.is_null() {
         return;
     }
@@ -791,7 +887,7 @@ pub unsafe extern "C" fn xlsynth_pir_record_trace(
                 operand_ptrs,
             )
         },
-        verbosity: 0,
+        verbosity: site.verbosity,
     });
 }
 
@@ -1428,6 +1524,7 @@ mod tests {
                     label: Some("covered".to_string()),
                     message: None,
                     format: None,
+                    verbosity: 0,
                     operand_layouts: Vec::new(),
                 },
                 EventSiteMetadata {
@@ -1436,6 +1533,7 @@ mod tests {
                     label: Some("assert_label".to_string()),
                     message: Some("failed".to_string()),
                     format: None,
+                    verbosity: 0,
                     operand_layouts: Vec::new(),
                 },
                 EventSiteMetadata {
@@ -1444,6 +1542,7 @@ mod tests {
                     label: None,
                     message: None,
                     format: Some("x={} arr={}".to_string()),
+                    verbosity: 1,
                     operand_layouts: vec![
                         TraceValueLayout::Bits {
                             bit_count: 8,
@@ -1464,6 +1563,7 @@ mod tests {
                     label: None,
                     message: None,
                     format: None,
+                    verbosity: 0,
                     operand_layouts: Vec::new(),
                 },
             ],
@@ -1473,7 +1573,8 @@ mod tests {
     #[test]
     fn cover_and_assert_callbacks_collect_rust_owned_results() {
         let metadata = metadata();
-        let mut context = ExecutionContext::new(&metadata);
+        let mut context =
+            ExecutionContext::new_with_options(&metadata, ExecutionOptions::collect_all());
         let mut raw = context.raw_context();
         // SAFETY: `raw` points into `context` for these immediate calls.
         unsafe {
@@ -1499,7 +1600,8 @@ mod tests {
     #[test]
     fn trace_callback_decodes_values_before_native_storage_changes() {
         let metadata = metadata();
-        let mut context = ExecutionContext::new(&metadata);
+        let mut context =
+            ExecutionContext::new_with_options(&metadata, ExecutionOptions::collect_all());
         let mut raw = context.raw_context();
         let mut scalar = 7u8;
         let mut array = [2u8, 3u8];
@@ -1530,7 +1632,8 @@ mod tests {
                 message: None,
                 format: Some(
                     "literal={{ default={} u={:u} d={:d} x={:x} 0x={:0x} #x={:#x} b={:b} 0b={:0b} #b={:#b} wide={} wide_u={:u}".to_string(),
-                ),
+                    ),
+                verbosity: 0,
                 operand_layouts: vec![
                     twelve_bits.clone(),
                     twelve_bits.clone(),
@@ -1555,7 +1658,8 @@ mod tests {
                 ],
             }],
         };
-        let mut context = ExecutionContext::new(&metadata);
+        let mut context =
+            ExecutionContext::new_with_options(&metadata, ExecutionOptions::collect_all());
         let mut raw = context.raw_context();
         let twelve = 43u16;
         let negative = 251u8;
@@ -1584,7 +1688,8 @@ mod tests {
     #[test]
     fn clear_resets_accumulated_event_results() {
         let metadata = metadata();
-        let mut context = ExecutionContext::new(&metadata);
+        let mut context =
+            ExecutionContext::new_with_options(&metadata, ExecutionOptions::collect_all());
         let mut raw = context.raw_context();
         // SAFETY: `raw` points into `context` for this immediate call.
         unsafe { xlsynth_pir_record_cover(&mut raw, 0) };
@@ -1594,6 +1699,55 @@ mod tests {
         assert!(result.assumption_failures.is_empty());
         assert!(result.trace_messages.is_empty());
         assert_eq!(result.cover_counts[0].count, 0);
+    }
+
+    #[test]
+    fn default_context_does_not_collect_traces_or_covers() {
+        let metadata = metadata();
+        let mut context = ExecutionContext::new(&metadata);
+        let mut raw = context.raw_context();
+        let scalar = 7u8;
+        let array = [2u8, 3u8];
+        let operands = [
+            ptr::from_ref(&scalar).cast::<u8>(),
+            ptr::from_ref(&array).cast::<u8>(),
+        ];
+        // SAFETY: `raw` and operands point to valid test storage.
+        unsafe {
+            xlsynth_pir_record_cover(&mut raw, 0);
+            xlsynth_pir_record_trace(&mut raw, 2, operands.as_ptr());
+        }
+        let result = context.result();
+        assert!(result.cover_counts.is_empty());
+        assert!(result.trace_messages.is_empty());
+    }
+
+    #[test]
+    fn trace_callback_respects_runtime_verbosity() {
+        let metadata = metadata();
+        let scalar = 7u8;
+        let array = [2u8, 3u8];
+        let operands = [
+            ptr::from_ref(&scalar).cast::<u8>(),
+            ptr::from_ref(&array).cast::<u8>(),
+        ];
+        let mut context = ExecutionContext::new_with_options(
+            &metadata,
+            ExecutionOptions::new(Some(0), /* collect_covers= */ false),
+        );
+        let mut raw = context.raw_context();
+        // SAFETY: `raw` and operands point to valid test storage.
+        unsafe { xlsynth_pir_record_trace(&mut raw, 2, operands.as_ptr()) };
+        assert!(context.result().trace_messages.is_empty());
+
+        context.clear_with_options(ExecutionOptions::new(
+            Some(1),
+            /* collect_covers= */ false,
+        ));
+        let mut raw = context.raw_context();
+        // SAFETY: `raw` and operands point to valid test storage.
+        unsafe { xlsynth_pir_record_trace(&mut raw, 2, operands.as_ptr()) };
+        assert_eq!(context.result().trace_messages[0].message, "x=7 arr=[2, 3]");
     }
 
     #[test]

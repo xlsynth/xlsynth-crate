@@ -5,7 +5,7 @@ use std::{fs, path::Path, process::Command};
 use xlsynth_pir_compiler_aot_ir_test_crate::native_aot_tests_aot;
 use xlsynth_pir_compiler_aot_ir_test_crate::native_aot_tests_aot::native_aot_tests;
 use xlsynth_pir_compiler_runtime::{
-    AssumptionFailureKind, ExecutionResult, SignedWideBits, UnsignedWideBits,
+    AssumptionFailureKind, ExecutionOptions, ExecutionResult, SignedWideBits, UnsignedWideBits,
 };
 
 fn generated_package_golden_cases() -> Vec<(&'static str, &'static str)> {
@@ -203,7 +203,8 @@ fn generated_runner_collects_events() -> Result<(), Box<dyn std::error::Error>> 
     let passed = native_aot_tests_aot::U1::new(1)?;
     let failed = native_aot_tests_aot::U1::new(0)?;
 
-    let successful = runner.run_with_events(&x, &y, &passed, &emit)?;
+    let successful =
+        runner.run_with_events(&x, &y, &passed, &emit, ExecutionOptions::collect_all())?;
     assert_eq!(successful.output.to_u64(), 0xe1);
     assert!(successful.events.assertion_failures.is_empty());
     assert_eq!(cover_count(&successful.events, "covered"), 1);
@@ -218,7 +219,8 @@ fn generated_runner_collects_events() -> Result<(), Box<dyn std::error::Error>> 
         vec!["x=165 y=3c", "ok=1"]
     );
 
-    let suppressed = runner.run_with_events(&x, &y, &passed, &suppress)?;
+    let suppressed =
+        runner.run_with_events(&x, &y, &passed, &suppress, ExecutionOptions::collect_all())?;
     assert_eq!(cover_count(&suppressed.events, "covered"), 0);
     assert_eq!(cover_count(&suppressed.events, "accepted"), 1);
     assert_eq!(
@@ -231,7 +233,8 @@ fn generated_runner_collects_events() -> Result<(), Box<dyn std::error::Error>> 
         vec!["ok=1"]
     );
 
-    let with_failure = runner.run_with_events(&x, &y, &failed, &emit)?;
+    let with_failure =
+        runner.run_with_events(&x, &y, &failed, &emit, ExecutionOptions::collect_all())?;
     assert_eq!(
         with_failure.events.assertion_failures[0].message,
         "bad condition"
@@ -271,11 +274,17 @@ fn generated_runner_reports_assumed_in_bounds_failures() -> Result<(), Box<dyn s
     let out_of_bounds = native_aot_tests_aot::U2::new(3)?;
     let mut runner = native_aot_tests::aot_assumed_in_bounds::new_runner()?;
 
-    let safe = runner.run_with_events(&values, &value, &in_bounds)?;
+    let safe =
+        runner.run_with_events(&values, &value, &in_bounds, ExecutionOptions::collect_all())?;
     assert_eq!(safe.output.to_u64(), 99);
     assert!(safe.events.assumption_failures.is_empty());
 
-    let failed = runner.run_with_events(&values, &value, &out_of_bounds)?;
+    let failed = runner.run_with_events(
+        &values,
+        &value,
+        &out_of_bounds,
+        ExecutionOptions::collect_all(),
+    )?;
     assert_eq!(failed.output.to_u64(), 99);
     let mut failures = failed
         .events
@@ -293,8 +302,13 @@ fn generated_runner_reports_assumed_in_bounds_failures() -> Result<(), Box<dyn s
     );
 
     let mut caller_owned_output = native_aot_tests_aot::U8::default();
-    let events =
-        runner.run_into_with_events(&values, &value, &out_of_bounds, &mut caller_owned_output)?;
+    let events = runner.run_into_with_events(
+        &values,
+        &value,
+        &out_of_bounds,
+        &mut caller_owned_output,
+        ExecutionOptions::collect_all(),
+    )?;
     assert_eq!(caller_owned_output.to_u64(), 99);
     assert_eq!(events.assumption_failures.len(), 2);
     assert!(

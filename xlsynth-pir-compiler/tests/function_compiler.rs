@@ -4,8 +4,8 @@ use xlsynth::IrValue;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn, eval_fn_in_package};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir_compiler::{
-    AssumptionFailureKind, CompilerError, ExecutionContext, NativeTupleFieldLayout,
-    NativeValueLayout, PirFunctionCompiler, ScalarLayout, WideBitsLayout,
+    AssumptionFailureKind, CompilerError, ExecutionContext, ExecutionOptions,
+    NativeTupleFieldLayout, NativeValueLayout, PirFunctionCompiler, ScalarLayout, WideBitsLayout,
 };
 
 fn compile(ir: &str) -> PirFunctionCompiler {
@@ -378,7 +378,7 @@ top fn f(x: bits[1] id=5) -> bits[1] {
 "#,
     );
     let result = compiler
-        .run_ir_values_with_events(&[bits(1, 1)])
+        .run_ir_values_with_events(&[bits(1, 1)], ExecutionOptions::collect_all())
         .expect("execute zero-trip counted_for");
     assert_eq!(result.value, bits(1, 1));
     assert_eq!(result.events.cover_counts.len(), 1);
@@ -394,7 +394,7 @@ fn package_compiler_accumulates_counted_for_body_events() {
 fn observed(i: bits[0] id=1, carry: bits[1] id=2) -> bits[1] {
   c: () = cover(carry, label="body_cover", id=3)
   t: token = after_all(id=4)
-  tr: token = trace(t, carry, format="carry={}", data_operands=[carry], id=5)
+  tr: token = trace(t, carry, format="carry={}", data_operands=[carry], verbosity=0, id=5)
   ret result: bits[1] = identity(carry, id=6)
 }
 
@@ -404,7 +404,7 @@ top fn f(x: bits[1] id=7) -> bits[1] {
 "#,
     );
     let result = compiler
-        .run_ir_values_with_events(&[bits(1, 1)])
+        .run_ir_values_with_events(&[bits(1, 1)], ExecutionOptions::collect_all())
         .expect("execute counted_for events");
     assert_eq!(result.value, bits(1, 1));
     assert_eq!(result.events.cover_counts.len(), 1);
@@ -482,7 +482,7 @@ fn package_compiler_accumulates_repeated_callee_events() {
 fn observed(x: bits[1] id=1) -> bits[1] {
   c: () = cover(x, label="callee_cover", id=2)
   t: token = after_all(id=3)
-  tr: token = trace(t, x, format="x={}", data_operands=[x], id=4)
+  tr: token = trace(t, x, format="x={}", data_operands=[x], verbosity=0, id=4)
   ret result: bits[1] = identity(x, id=5)
 }
 
@@ -493,7 +493,7 @@ top fn f(x: bits[1] id=6) -> bits[1] {
 "#,
     );
     let result = compiler
-        .run_ir_values_with_events(&[bits(1, 1)])
+        .run_ir_values_with_events(&[bits(1, 1)], ExecutionOptions::collect_all())
         .expect("execute repeated invokes");
     assert_eq!(result.value, bits(1, 1));
     assert_eq!(result.events.cover_counts.len(), 1);
@@ -594,7 +594,7 @@ fn f(x: bits[1] id=1) -> () {
         }
     );
     let execution = cover_compiler
-        .run_ir_values_with_events(&[bits(1, 1)])
+        .run_ir_values_with_events(&[bits(1, 1)], ExecutionOptions::collect_all())
         .expect("unit-valued cover execution");
     assert_eq!(execution.value, IrValue::make_tuple(&[]));
     assert_eq!(execution.events.cover_counts.len(), 1);
@@ -684,12 +684,12 @@ fn compiled_trace_formats_zero_width_bits() {
 
 fn f(x: bits[0] id=1, emit: bits[1] id=2) -> token {
   t: token = after_all(id=3)
-  ret tr: token = trace(t, emit, format="x={}", data_operands=[x], id=4)
+  ret tr: token = trace(t, emit, format="x={}", data_operands=[x], verbosity=0, id=4)
 }
 "#,
     );
     let execution = compiler
-        .run_ir_values_with_events(&[bits(0, 0), bits(1, 1)])
+        .run_ir_values_with_events(&[bits(0, 0), bits(1, 1)], ExecutionOptions::collect_all())
         .expect("execute");
     assert_eq!(execution.events.trace_messages.len(), 1);
     assert_eq!(execution.events.trace_messages[0].message, "x=0");
@@ -731,7 +731,8 @@ fn f(x: bits[1] id=1) -> bits[1] {
 }
 "#,
     );
-    let mut context = ExecutionContext::new(compiler.metadata());
+    let mut context =
+        ExecutionContext::new_with_options(compiler.metadata(), ExecutionOptions::collect_all());
     let mut output: u8 = 0;
     for input in [1u8, 1u8, 0u8] {
         let inputs = [std::ptr::from_ref(&input).cast::<u8>()];
@@ -760,7 +761,7 @@ fn f(x: bits[8] id=1, ok: bits[1] id=2, emit: bits[1] id=3) -> bits[8] {
   t: token = after_all(id=4)
   cv: () = cover(emit, label="covered", id=5)
   a: token = assert(t, ok, message="bad condition", label="A", id=6)
-  tr: token = trace(a, emit, format="x={}", data_operands=[x], id=7)
+  tr: token = trace(a, emit, format="x={}", data_operands=[x], verbosity=0, id=7)
   ret identity.8: bits[8] = identity(x, id=8)
 }
 "#;
@@ -777,7 +778,7 @@ fn f(x: bits[8] id=1, ok: bits[1] id=2, emit: bits[1] id=3) -> bits[8] {
     ] {
         let expected = eval_fn(function, &args);
         let actual = compiler
-            .run_ir_values_with_events(&args)
+            .run_ir_values_with_events(&args, ExecutionOptions::collect_all())
             .expect("compiled execution should succeed");
         match expected {
             FnEvalResult::Success(expected) => {
@@ -883,10 +884,10 @@ fn f(emit: bits[1] id=1) -> token {
   unit: () = tuple(id=2)
   units: ()[1] = array(unit, id=3)
   t: token = after_all(id=4)
-  tr0: token = trace(t, emit, format="zero", data_operands=[], id=5)
-  tr1: token = trace(tr0, emit, format="one={}", data_operands=[unit], id=6)
-  tr2: token = trace(tr1, emit, format="two={},{}", data_operands=[unit, units], id=7)
-  ret tr3: token = trace(tr2, emit, format="three={},{},{}", data_operands=[unit, units, emit], id=8)
+  tr0: token = trace(t, emit, format="zero", data_operands=[], verbosity=0, id=5)
+  tr1: token = trace(tr0, emit, format="one={}", data_operands=[unit], verbosity=0, id=6)
+  tr2: token = trace(tr1, emit, format="two={},{}", data_operands=[unit, units], verbosity=0, id=7)
+  ret tr3: token = trace(tr2, emit, format="three={},{},{}", data_operands=[unit, units, emit], verbosity=0, id=8)
 }
 "#;
     let package = Parser::new(ir)
@@ -900,7 +901,7 @@ fn f(emit: bits[1] id=1) -> token {
         FnEvalResult::Failure(_) => panic!("traces should not cause evaluation failure"),
     };
     let actual = compiler
-        .run_ir_values_with_events(&args)
+        .run_ir_values_with_events(&args, ExecutionOptions::collect_all())
         .expect("compiled execution should succeed");
     assert_eq!(
         actual
@@ -924,7 +925,7 @@ fn compiled_trace_formats_match_evaluator_and_xls_syntax() {
 fn f(x: bits[12] id=1, neg: bits[8] id=2) -> token {
   t: token = after_all(id=3)
   one: bits[1] = literal(value=1, id=4)
-  ret tr: token = trace(t, one, format="literal={{ default={} u={:u} d={:d} x={:x} 0x={:0x} #x={:#x} b={:b} 0b={:0b} #b={:#b}", data_operands=[x, x, neg, x, x, x, x, x, x], id=5)
+  ret tr: token = trace(t, one, format="literal={{ default={} u={:u} d={:d} x={:x} 0x={:0x} #x={:#x} b={:b} 0b={:0b} #b={:#b}", data_operands=[x, x, neg, x, x, x, x, x, x], verbosity=0, id=5)
 }
 "#;
     let package = Parser::new(ir)
@@ -934,7 +935,7 @@ fn f(x: bits[12] id=1, neg: bits[8] id=2) -> token {
     let compiler = PirFunctionCompiler::compile(function).expect("function should compile");
     let args = vec![bits(12, 43), bits(8, 251)];
     let actual = compiler
-        .run_ir_values_with_events(&args)
+        .run_ir_values_with_events(&args, ExecutionOptions::collect_all())
         .expect("compiled execution should succeed");
     let expected = match eval_fn(function, &args) {
         FnEvalResult::Success(success) => success,
@@ -1306,12 +1307,18 @@ fn f(a: bits[8][2] id=1, v: bits[8] id=2, i: bits[2] id=3) -> bits[8] {
     );
     let values = array(8, &[10, 11]);
     let in_bounds = compiler
-        .run_ir_values_with_events(&[values.clone(), bits(8, 99), bits(2, 1)])
+        .run_ir_values_with_events(
+            &[values.clone(), bits(8, 99), bits(2, 1)],
+            ExecutionOptions::collect_all(),
+        )
         .expect("in-bounds execution");
     assert!(in_bounds.events.assumption_failures.is_empty());
 
     let out_of_bounds = compiler
-        .run_ir_values_with_events(&[values, bits(8, 99), bits(2, 3)])
+        .run_ir_values_with_events(
+            &[values, bits(8, 99), bits(2, 3)],
+            ExecutionOptions::collect_all(),
+        )
         .expect("out-of-bounds execution remains safe");
     assert_eq!(out_of_bounds.value, bits(8, 99));
     assert_eq!(

@@ -613,6 +613,7 @@ pub(crate) fn verify_node_xls_semantics(f: &Fn, node_index: usize) -> Result<(),
             activated,
             format,
             operands,
+            ..
         } => {
             expect_type(ty(*token), &Type::Token, "trace token operand")?;
             expect_type(ty(*activated), &Type::Bits(1), "trace condition")?;

@@ -10,7 +10,7 @@ use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn_in_package};
 use xlsynth_pir::ir_random::{
     DepletableBytes, OperationSet, RandomFnOptions, StopPolicy, generate_package,
 };
-use xlsynth_pir_compiler::PirFunctionCompiler;
+use xlsynth_pir_compiler::{ExecutionOptions, PirFunctionCompiler};
 
 fn sorted<T: Ord>(mut values: Vec<T>) -> Vec<T> {
     values.sort();
@@ -53,7 +53,7 @@ fuzz_target!(|data: &[u8]| {
     for args in random_argument_sets(data, function) {
         let expected = eval_fn_in_package(package, function, &args);
         let actual = compiler
-            .run_ir_values_with_events(&args)
+            .run_ir_values_with_events(&args, ExecutionOptions::collect_all())
             .unwrap_or_else(|error| {
                 panic!("compiled-function execution failed:\n{ir_text}\n{error}")
             });

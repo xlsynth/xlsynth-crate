@@ -3,7 +3,7 @@
 use std::{fs, path::Path, process::Command};
 
 use xlsynth_pir_compiler_aot_dslx_test_crate::native_dslx_tests_aot as dslx_aot;
-use xlsynth_pir_compiler_runtime::ExecutionResult;
+use xlsynth_pir_compiler_runtime::{ExecutionOptions, ExecutionResult};
 
 fn generated_package_golden_cases() -> Vec<(&'static str, &'static str)> {
     vec![
@@ -236,7 +236,8 @@ fn typed_dslx_event_runner_collects_trace_assert_and_cover()
     let failed = dslx_aot::U1::new(0)?;
     let mut runner = dslx_aot::events::aot_events::new_runner()?;
 
-    let successful = runner.run_with_events(&x, &y, &passed, &emit)?;
+    let successful =
+        runner.run_with_events(&x, &y, &passed, &emit, ExecutionOptions::collect_all())?;
     assert_eq!(successful.output.to_u64(), 0xe1);
     assert!(successful.events.assertion_failures.is_empty());
     assert_eq!(cover_count(&successful.events, "covered"), 1);
@@ -251,7 +252,8 @@ fn typed_dslx_event_runner_collects_trace_assert_and_cover()
         vec!["accepted x=165", "x=165 y=3c"]
     );
 
-    let suppressed = runner.run_with_events(&x, &y, &passed, &suppress)?;
+    let suppressed =
+        runner.run_with_events(&x, &y, &passed, &suppress, ExecutionOptions::collect_all())?;
     assert_eq!(cover_count(&suppressed.events, "covered"), 0);
     assert_eq!(cover_count(&suppressed.events, "accepted"), 1);
     assert_eq!(
@@ -264,7 +266,8 @@ fn typed_dslx_event_runner_collects_trace_assert_and_cover()
         vec!["accepted x=165"]
     );
 
-    let with_failure = runner.run_with_events(&x, &y, &failed, &emit)?;
+    let with_failure =
+        runner.run_with_events(&x, &y, &failed, &emit, ExecutionOptions::collect_all())?;
     assert_eq!(with_failure.output.to_u64(), 0xe1);
     assert!(
         with_failure.events.assertion_failures[0]

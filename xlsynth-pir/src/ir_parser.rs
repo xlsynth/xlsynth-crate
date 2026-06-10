@@ -2032,6 +2032,12 @@ impl Parser {
         self.pop_number_usize_or_error(&format!("usize attribute: {}", attr_name))
     }
 
+    fn parse_i64_attribute(&mut self, attr_name: &str) -> Result<i64, ParseError> {
+        self.drop_or_error(attr_name)?;
+        self.drop_or_error("=")?;
+        self.pop_number_i64_or_error(&format!("i64 attribute: {}", attr_name))
+    }
+
     fn parse_bool_attribute(&mut self, attr_name: &str) -> Result<bool, ParseError> {
         self.drop_or_error(attr_name)?;
         self.drop_or_error("=")?;
@@ -2747,30 +2753,78 @@ impl Parser {
                 let token = self.parse_node_ref(&node_env, "trace token")?;
                 self.drop_or_error(",")?;
                 let activated = self.parse_node_ref(&node_env, "trace activated")?;
-                self.drop_or_error(",")?;
-                let format = self.parse_string_attribute("format")?;
-                self.drop_or_error(",")?;
-                let operands = self.parse_node_ref_array_attribute(
-                    "data_operands",
-                    &node_env,
-                    "trace data_operands",
-                )?;
-                if self.peek_is(",") {
-                    self.dropc()?;
-                    let id_attr = self.parse_id_attribute()?;
-                    maybe_id = Some(id_attr);
+                let mut format: Option<String> = None;
+                let mut operands: Option<Vec<ir::NodeRef>> = None;
+                let mut verbosity: Option<i64> = None;
+                loop {
+                    self.drop_or_error(",")?;
+                    self.drop_whitespace_and_comments();
+                    if self.peek_is("format=") {
+                        if format.is_some() {
+                            return Err(ParseError::new(format!(
+                                "duplicate trace format attribute; rest_of_line: {:?}",
+                                self.rest_of_line()
+                            )));
+                        }
+                        format = Some(self.parse_string_attribute("format")?);
+                    } else if self.peek_is("data_operands=") {
+                        if operands.is_some() {
+                            return Err(ParseError::new(format!(
+                                "duplicate trace data_operands attribute; rest_of_line: {:?}",
+                                self.rest_of_line()
+                            )));
+                        }
+                        operands = Some(self.parse_node_ref_array_attribute(
+                            "data_operands",
+                            &node_env,
+                            "trace data_operands",
+                        )?);
+                    } else if self.peek_is("verbosity=") {
+                        if verbosity.is_some() {
+                            return Err(ParseError::new(format!(
+                                "duplicate trace verbosity attribute; rest_of_line: {:?}",
+                                self.rest_of_line()
+                            )));
+                        }
+                        verbosity = Some(self.parse_i64_attribute("verbosity")?);
+                    } else if self.peek_is("id=") {
+                        let id_attr = self.parse_id_attribute()?;
+                        maybe_id = Some(id_attr);
+                        break;
+                    } else {
+                        return Err(ParseError::new(format!(
+                            "unexpected trace attribute; rest_of_line: {:?}",
+                            self.rest_of_line()
+                        )));
+                    }
+                    self.drop_whitespace_and_comments();
+                    if !self.peek_is(",") {
+                        break;
+                    }
                 }
                 if maybe_id.is_none() {
                     return Err(ParseError::new(format!(
                         "expected id for trace; rest_of_line: {:?}",
                         self.rest_of_line()
                     )));
-                }                (
+                }
+                (
                     ir::NodePayload::Trace {
                         token,
                         activated,
-                        format,
-                        operands,
+                        format: format.ok_or_else(|| {
+                            ParseError::new(format!(
+                                "trace missing format attribute; rest_of_line: {:?}",
+                                self.rest_of_line()
+                            ))
+                        })?,
+                        verbosity: verbosity.unwrap_or(0),
+                        operands: operands.ok_or_else(|| {
+                            ParseError::new(format!(
+                                "trace missing data_operands attribute; rest_of_line: {:?}",
+                                self.rest_of_line()
+                            ))
+                        })?,
                     },
                     maybe_id.unwrap(),
                 )
@@ -5083,7 +5137,7 @@ top fn main(t: token id=1) -> token {
 fn f(x: bits[1]) -> bits[1] {
   literal.1: bits[1] = literal(value=1, id=1)
   after_all.2: token = after_all(id=2)
-  trace.3: token = trace(after_all.2, x, format="x={}", data_operands=[x], id=3)
+  trace.3: token = trace(after_all.2, x, format="x={}", data_operands=[x], verbosity=0, id=3)
   cover.4: () = cover(x, label="x_is_one", id=4)
   ret literal.5: bits[1] = literal(value=1, id=5)
 }
@@ -5094,11 +5148,15 @@ fn f(x: bits[1]) -> bits[1] {
         let cxx_pkg = xlsynth::IrPackage::parse_ir(input, None).expect("xls parse");
         let formatted = cxx_pkg.to_string();
 
-        // Now ensure our parser accepts the canonical form and our formatter matches it
-        // exactly.
+        // Now ensure our parser accepts the canonical form and our formatter
+        // restores explicit trace verbosity even with older libxls formatters
+        // that omit it.
         let mut parser = Parser::new(&formatted);
         let pkg = parser.parse_package().expect("pir parse");
-        assert_eq!(pkg.to_string(), formatted);
+        let emitted = pkg.to_string();
+        assert!(emitted.contains("verbosity=0"));
+        let reparsed = Parser::new(&emitted).parse_package().expect("pir parse");
+        assert_eq!(reparsed.to_string(), emitted);
     }
 
     #[test]
@@ -5107,7 +5165,7 @@ fn f(x: bits[1]) -> bits[1] {
 
 fn f(x: bits[1] id=1) -> token {
   after_all.2: token = after_all(id=2)
-  trace.3: token = trace(after_all.2, x, format="line\nquote=\" slash=\\ bell=\a apostrophe=' question=?", data_operands=[], id=3)
+  trace.3: token = trace(after_all.2, x, format="line\nquote=\" slash=\\ bell=\a apostrophe=' question=?", data_operands=[], verbosity=0, id=3)
   cover.4: () = cover(x, label="cover\a\"\\", id=4)
   ret assert.5: token = assert(trace.3, x, message="assert\a\"\\", label="label\a\"\\", id=5)
 }

@@ -205,7 +205,7 @@ top fn main(t: token id=1, x: bits[1] id=2) -> token {
 
 top fn main(t: token id=1, x: bits[1] id=2) -> token {
   assert.3: token = assert(t, x, message="m", label="L", id=3)
-  ret trace.4: token = trace(assert.3, x, format="x={}", data_operands=[x], id=4)
+  ret trace.4: token = trace(assert.3, x, format="x={}", data_operands=[x], verbosity=0, id=4)
 }
 "#,
         );
