@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package native_aot_tests
+
+fn zero_bit_input(value: bits[0] id=1) -> bits[1] {
+  ret is_zero: bits[1] = eq(value, value, id=2)
+}

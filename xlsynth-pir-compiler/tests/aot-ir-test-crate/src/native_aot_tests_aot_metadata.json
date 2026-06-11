@@ -233,6 +233,30 @@
       }
     },
     {
+      "name": "zero_bit_input",
+      "source": {
+        "kind": "ir_file",
+        "ir_file": "ir/zero_bit_input.ir",
+        "ir_top": "zero_bit_input"
+      },
+      "owning_module": ["native_aot_tests"],
+      "params": [
+        {
+          "name": "value",
+          "ty": {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 0
+          }
+        }
+      ],
+      "return_type": {
+        "kind": "bits",
+        "signedness": "unsigned",
+        "bit_count": 1
+      }
+    },
+    {
       "name": "compound_shapes",
       "source": {
         "kind": "ir_file",

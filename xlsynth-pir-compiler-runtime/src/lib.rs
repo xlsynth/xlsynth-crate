@@ -100,6 +100,81 @@ define_native_bits!(BitsInU16, u16, 16);
 define_native_bits!(BitsInU32, u32, 32);
 define_native_bits!(BitsInU64, u64, 64);
 
+/// Zero-sized native representation of a `bits[0]` value.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Bits0;
+
+/// Public unsigned DSLX-style wrapper for a `bits[0]` value.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UnsignedBits0;
+
+impl UnsignedBits0 {
+    /// Constructs the sole canonical raw `bits[0]` representation.
+    pub const fn from_raw_bits(value: u64) -> Self {
+        assert!(value == 0, "raw bits do not fit target width");
+        Self
+    }
+
+    /// Returns the sole unsigned `bits[0]` value widened to `u64`.
+    pub const fn to_u64(self) -> u64 {
+        0
+    }
+
+    /// Returns the raw ABI bits widened to `u64`.
+    pub const fn raw_bits(self) -> u64 {
+        0
+    }
+}
+
+impl TryFrom<u64> for UnsignedBits0 {
+    type Error = RunError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        if value == 0 {
+            Ok(Self)
+        } else {
+            Err(RunError(format!("value {value} does not fit in bits[0]")))
+        }
+    }
+}
+
+/// Public signed DSLX-style wrapper for an `sbits[0]` value.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SignedBits0;
+
+impl SignedBits0 {
+    /// Constructs the sole canonical raw `sbits[0]` representation.
+    pub const fn from_raw_bits(value: u64) -> Self {
+        assert!(value == 0, "raw bits do not fit target width");
+        Self
+    }
+
+    /// Returns the sole signed `sbits[0]` value widened to `i64`.
+    pub const fn to_i64(self) -> i64 {
+        0
+    }
+
+    /// Returns the raw ABI bits widened to `u64`.
+    pub const fn raw_bits(self) -> u64 {
+        0
+    }
+}
+
+impl TryFrom<i64> for SignedBits0 {
+    type Error = RunError;
+
+    fn try_from(value: i64) -> Result<Self, Self::Error> {
+        if value == 0 {
+            Ok(Self)
+        } else {
+            Err(RunError(format!("value {value} does not fit in s0")))
+        }
+    }
+}
+
 macro_rules! define_public_bits_wrappers {
     (
         $unsigned_name:ident,
@@ -154,6 +229,19 @@ macro_rules! define_public_bits_wrappers {
             /// Returns the raw ABI bits in the native carrier.
             pub const fn raw_bits(self) -> $unsigned_carrier {
                 self.0.get()
+            }
+        }
+
+        impl<const BIT_COUNT: usize> TryFrom<u64> for $unsigned_name<BIT_COUNT> {
+            type Error = RunError;
+
+            fn try_from(value: u64) -> Result<Self, Self::Error> {
+                let carrier = <$unsigned_carrier>::try_from(value).map_err(|_| {
+                    RunError(format!(
+                        "value {value} does not fit in bits[{BIT_COUNT}]"
+                    ))
+                })?;
+                Self::new(carrier)
             }
         }
 
@@ -236,6 +324,17 @@ macro_rules! define_public_bits_wrappers {
             /// Returns the raw ABI bits in the native carrier.
             pub const fn raw_bits(self) -> $unsigned_carrier {
                 self.0.get()
+            }
+        }
+
+        impl<const BIT_COUNT: usize> TryFrom<i64> for $signed_name<BIT_COUNT> {
+            type Error = RunError;
+
+            fn try_from(value: i64) -> Result<Self, Self::Error> {
+                let carrier = <$signed_carrier>::try_from(value).map_err(|_| {
+                    RunError(format!("value {value} does not fit in s{BIT_COUNT}"))
+                })?;
+                Self::new(carrier)
             }
         }
     };
@@ -1495,6 +1594,80 @@ mod tests {
         let wide = SignedWideBits::<65, 2>::from_limbs([u64::MAX, 1]).expect("s65 -1");
         assert_eq!(wide.to_bigint(), BigInt::from(-1));
         assert_eq!(wide.limbs(), &[u64::MAX, 1]);
+    }
+
+    #[test]
+    fn public_bits_wrappers_try_from_widened_integers() {
+        assert_eq!(std::mem::size_of::<Bits0>(), 0);
+        assert_eq!(std::mem::size_of::<UnsignedBits0>(), 0);
+        assert_eq!(std::mem::size_of::<SignedBits0>(), 0);
+
+        let unsigned_zero = UnsignedBits0::try_from(0_u64).expect("0 fits in u0");
+        assert_eq!(unsigned_zero.to_u64(), 0);
+        assert_eq!(unsigned_zero.raw_bits(), 0);
+        assert!(UnsignedBits0::try_from(1_u64).is_err());
+        assert!(std::panic::catch_unwind(|| UnsignedBits0::from_raw_bits(1)).is_err());
+
+        let signed_zero = SignedBits0::try_from(0_i64).expect("0 fits in s0");
+        assert_eq!(signed_zero.to_i64(), 0);
+        assert_eq!(signed_zero.raw_bits(), 0);
+        assert!(SignedBits0::try_from(-1_i64).is_err());
+        assert!(SignedBits0::try_from(1_i64).is_err());
+        assert!(std::panic::catch_unwind(|| SignedBits0::from_raw_bits(1)).is_err());
+
+        assert_eq!(
+            UnsignedBitsInU8::<4>::try_from(15_u64)
+                .expect("15 fits in u4")
+                .to_u64(),
+            15
+        );
+        assert!(UnsignedBitsInU8::<4>::try_from(16_u64).is_err());
+        assert!(UnsignedBitsInU8::<8>::try_from(256_u64).is_err());
+        assert_eq!(
+            UnsignedBitsInU16::<9>::try_from(0x1ff_u64)
+                .expect("0x1ff fits in u9")
+                .to_u64(),
+            0x1ff
+        );
+        assert_eq!(
+            UnsignedBitsInU32::<17>::try_from(0x1ffff_u64)
+                .expect("0x1ffff fits in u17")
+                .to_u64(),
+            0x1ffff
+        );
+        assert_eq!(
+            UnsignedBitsInU64::<33>::try_from(0x1ffffffff_u64)
+                .expect("0x1ffffffff fits in u33")
+                .to_u64(),
+            0x1ffffffff
+        );
+
+        assert_eq!(
+            SignedBitsInU8::<4>::try_from(-8_i64)
+                .expect("-8 fits in s4")
+                .to_i64(),
+            -8
+        );
+        assert!(SignedBitsInU8::<4>::try_from(-9_i64).is_err());
+        assert!(SignedBitsInU8::<8>::try_from(128_i64).is_err());
+        assert_eq!(
+            SignedBitsInU16::<9>::try_from(-256_i64)
+                .expect("-256 fits in s9")
+                .to_i64(),
+            -256
+        );
+        assert_eq!(
+            SignedBitsInU32::<17>::try_from(-65_536_i64)
+                .expect("-65536 fits in s17")
+                .to_i64(),
+            -65_536
+        );
+        assert_eq!(
+            SignedBitsInU64::<33>::try_from(-4_294_967_296_i64)
+                .expect("-4294967296 fits in s33")
+                .to_i64(),
+            -4_294_967_296
+        );
     }
 
     #[test]

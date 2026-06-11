@@ -1216,18 +1216,7 @@ impl<'a> ValidatedPirAotPackage<'a> {
         active_refs: &mut Vec<PirAotDeclKey>,
     ) -> Result<NativeValueLayout, CompilerError> {
         match ty {
-            PirAotType::Bits {
-                signedness,
-                bit_count,
-            } => {
-                if *bit_count == 0 {
-                    return Err(CompilerError::InvalidArgument(
-                        "PIR AOT metadata bits type must have nonzero width".into(),
-                    ));
-                }
-                validate_scalar_bit_count(*signedness, *bit_count)?;
-                Ok(native_bits_layout(*bit_count))
-            }
+            PirAotType::Bits { bit_count, .. } => Ok(native_bits_layout(*bit_count)),
             PirAotType::Token => Ok(NativeValueLayout::Token),
             PirAotType::Array { size, element } => {
                 if *size == 0 {
@@ -1683,6 +1672,14 @@ fn scalar_alias_name(signedness: PirAotSignedness, bit_count: usize) -> String {
 
 fn scalar_runtime_type(signedness: PirAotSignedness, bit_count: usize) -> String {
     let (unsigned_prefix, signed_prefix) = match bit_count {
+        0 => {
+            return match signedness {
+                PirAotSignedness::Unsigned => {
+                    "xlsynth_pir_compiler_runtime::UnsignedBits0".to_string()
+                }
+                PirAotSignedness::Signed => "xlsynth_pir_compiler_runtime::SignedBits0".to_string(),
+            };
+        }
         1..=8 => ("UnsignedBitsInU8", "SignedBitsInU8"),
         9..=16 => ("UnsignedBitsInU16", "SignedBitsInU16"),
         17..=32 => ("UnsignedBitsInU32", "SignedBitsInU32"),
@@ -2086,8 +2083,8 @@ fn render_runner_items(
     };
     let public_runtime_imports = if emit_native_value_types {
         r#"pub use xlsynth_pir_compiler_runtime::{
-    BitsInU8, BitsInU16, BitsInU32, BitsInU64, ExecutionOptions, ExecutionResult, RunError,
-    Token, WideBits,
+    Bits0, BitsInU8, BitsInU16, BitsInU32, BitsInU64, ExecutionOptions, ExecutionResult,
+    RunError, Token, WideBits,
 };
 "#
     } else {
@@ -2266,14 +2263,7 @@ fn render_value_type(
 ) -> Result<String, CompilerError> {
     match ty {
         Type::Token => Ok("Token".into()),
-        Type::Bits(width) => {
-            if *width == 0 {
-                return Err(CompilerError::UnsupportedType(
-                    "bits[0] wrapper storage is unsupported".into(),
-                ));
-            }
-            Ok(render_native_bits_type(*width))
-        }
+        Type::Bits(width) => Ok(render_native_bits_type(*width)),
         Type::Array(array) => {
             let element_name = format!("{name}Element");
             let element =
@@ -2314,6 +2304,7 @@ fn render_value_default_expr(ty: &Type) -> Result<String, CompilerError> {
 
 fn render_native_bits_type(width: usize) -> String {
     match width {
+        0 => "Bits0".to_string(),
         1..=8 => format!("BitsInU8<{width}>"),
         9..=16 => format!("BitsInU16<{width}>"),
         17..=32 => format!("BitsInU32<{width}>"),
@@ -2538,5 +2529,25 @@ mod tests {
         assert!(rendered.contains("pair: &super::super::XlsynthPirAotTuple0"));
         assert!(rendered.contains("output: &mut [super::super::XlsynthPirAotTuple1; 2]"));
         assert!(!rendered.contains("(U8, U16)"));
+    }
+
+    #[test]
+    fn zero_bit_aot_types_use_zero_sized_runtime_wrappers() {
+        assert_eq!(
+            scalar_runtime_type(PirAotSignedness::Unsigned, 0),
+            "xlsynth_pir_compiler_runtime::UnsignedBits0"
+        );
+        assert_eq!(
+            scalar_runtime_type(PirAotSignedness::Signed, 0),
+            "xlsynth_pir_compiler_runtime::SignedBits0"
+        );
+
+        let mut declarations = Vec::new();
+        assert_eq!(
+            render_value_type(&Type::Bits(0), "ZeroBits", &mut declarations)
+                .expect("bits[0] should render"),
+            "Bits0"
+        );
+        assert!(declarations.is_empty());
     }
 }
