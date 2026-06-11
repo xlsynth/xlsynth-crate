@@ -122,6 +122,21 @@ fn multiple_generated_entrypoints_link_and_run() -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
+// Verifies: a generated AOT runner accepts zero-byte native input storage and
+// executes an operation over the sole bits[0] value.
+#[test]
+fn generated_runner_accepts_zero_bit_input() -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(std::mem::size_of::<native_aot_tests_aot::U0>(), 0);
+    let input = native_aot_tests_aot::U0::try_from(0_u64)?;
+    assert!(native_aot_tests_aot::U0::try_from(1_u64).is_err());
+
+    let mut runner = native_aot_tests::aot_zero_bit_input::new_runner()?;
+    let mut output = native_aot_tests_aot::U1::default();
+    runner.run(&input, &mut output)?;
+    assert_eq!(output.to_u64(), 1);
+    Ok(())
+}
+
 // Verifies: public aggregate types have C layout and allow caller-owned native
 // arrays and wide-bit limbs to be passed without packing buffers.
 #[test]
