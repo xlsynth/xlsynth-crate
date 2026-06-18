@@ -209,6 +209,92 @@ When `--liberty_proto` is omitted, the accepted Verilog subset is intentionally 
 
 `gv2ir` and `gv2block` are unchanged in this release and still require Liberty input.
 
+### `gv-eval`: evaluate a combinational gate-level netlist
+
+Projects a Liberty-backed standard-cell netlist into one labeled AIG and
+evaluates either one typed input tuple or an ordered `.irvals` stimulus file.
+Inputs are supplied in module-header order. A module with one output prints a
+bits value; multiple outputs print a tuple in module-header order.
+
+```shell
+xlsynth-driver gv-eval \
+  --netlist /path/to/design.gv \
+  --liberty_proto /path/to/cells.textproto \
+  '(bits[8]:7, bits[8]:13)'
+```
+
+Ordered batch evaluation prints one typed result per input line:
+
+```shell
+xlsynth-driver gv-eval \
+  --netlist /path/to/design.gv \
+  --liberty_proto /path/to/cells.textproto \
+  --input-irvals /path/to/stimulus.irvals \
+  --toggle-output-json /path/to/activity.json
+```
+
+Flags:
+
+- `--netlist <PATH>`: gate-level netlist (`.gv`, `.v`, or `.gv.gz`). Required.
+- `--liberty_proto <PATH>`: Liberty proto (`.proto` or `.textproto`). Required.
+- `--module_name <MODULE>`: optional module selection when the netlist contains multiple modules.
+- Exactly one positional typed argument tuple or `--input-irvals <PATH>` is required.
+- `--toggle-output-json <PATH>`: with `--input-irvals`, write source-labeled
+  toggle activity JSON. At least two input samples are required.
+
+The toggle JSON has this structure:
+
+```json
+{
+  "module_name": "top",
+  "sample_count": 3,
+  "transition_count": 2,
+  "aggregate": {
+    "module_input_toggles": 2,
+    "module_output_toggles": 1,
+    "cell_input_pin_toggles": 3,
+    "cell_output_pin_toggles": 2
+  },
+  "module_ports": [
+    {
+      "port_name": "a",
+      "direction": "input",
+      "bits_lsb_to_msb": [
+        { "bit_number": 0, "toggle_count": 1, "toggle_rate": 0.5 }
+      ]
+    }
+  ],
+  "instances": [
+    {
+      "instance_name": "u_and",
+      "cell_type": "AND2",
+      "pins": [
+        {
+          "pin_name": "A",
+          "direction": "input",
+          "connection": { "kind": "net", "net_name": "a", "bit_number": 0 },
+          "toggle_count": 1,
+          "toggle_rate": 0.5
+        }
+      ]
+    }
+  ]
+}
+```
+
+Counts are transitions between consecutive samples, and rates divide each
+count by `transition_count`. Aggregate cell counts count each external pin use,
+so a signal connected to two pins contributes its toggles twice. Module ports,
+instances, pins, and port bits retain deterministic source/Liberty/LSb-to-MSb
+ordering. Connections use `kind: "net"`, `kind: "literal"`, or
+`kind: "unconnected"`. Internal Liberty nodes and AIG implementation nodes are
+not included.
+
+The initial implementation supports combinational cells with scalar external
+pins. It rejects sequential cells, module `inout` ports, unconnected input
+pins, non-scalar standard-cell pin connections, and unresolved combinational
+cycles. It does not collapse or simulate sequential state.
+
 ### `aig-tech-map`: AIGER to structural gate netlist
 
 Structurally maps an input AIGER graph to a cell-instance netlist using a simple decomposition:
