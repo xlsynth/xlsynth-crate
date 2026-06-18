@@ -78,6 +78,7 @@ mod gv2block;
 mod gv2ir;
 mod gv_area;
 mod gv_dump_cone;
+mod gv_eval;
 mod gv_instance_csv;
 mod gv_read_stats;
 mod gv_sta;
@@ -1971,6 +1972,57 @@ fn main() {
                 ),
         )
         .subcommand(
+            clap::Command::new("gv-eval")
+                .about("Evaluates a combinational Liberty-backed gate-level netlist")
+                .arg(
+                    Arg::new("netlist")
+                        .long("netlist")
+                        .help("Input gate-level netlist (.gv, .v, or .gv.gz)")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("liberty_proto")
+                        .long("liberty_proto")
+                        .help("Input Liberty proto (.proto or .textproto)")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("module_name")
+                        .long("module_name")
+                        .value_name("MODULE")
+                        .help("Optional module name to select when the netlist contains multiple modules")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("arg_tuple")
+                        .help("Tuple of typed IR values in module-input order")
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("input_irvals")
+                        .long("input-irvals")
+                        .value_name("IRVALS_PATH")
+                        .help("Path to an .irvals file with one typed IR tuple per line")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("toggle_output_json")
+                        .long("toggle-output-json")
+                        .value_name("PATH")
+                        .help("Write module-port and external standard-cell pin toggle activity JSON; requires --input-irvals")
+                        .requires("input_irvals")
+                        .action(ArgAction::Set),
+                )
+                .group(
+                    clap::ArgGroup::new("gv_eval_input")
+                        .args(["arg_tuple", "input_irvals"])
+                        .required(true)
+                        .multiple(false),
+                ),
+        )
+        .subcommand(
             clap::Command::new("aig-tech-map")
                 .about("Structurally maps an AIGER file to a gate-level netlist using INV/NAND2 cells")
                 .arg(
@@ -3661,6 +3713,12 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("gv2aig", subm)) => {
             gv2aig::handle_gv2aig(subm);
+        }
+        Some(("gv-eval", subm)) => {
+            if let Err(e) = gv_eval::handle_gv_eval(subm) {
+                eprintln!("gv-eval error: {e}");
+                std::process::exit(1);
+            }
         }
         Some(("aig-tech-map", subm)) => {
             aig_tech_map::handle_aig_tech_map(subm);

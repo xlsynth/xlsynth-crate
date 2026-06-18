@@ -1,0 +1,115 @@
+{
+  "module_name": "top",
+  "sample_count": 3,
+  "transition_count": 2,
+  "aggregate": {
+    "module_input_toggles": 2,
+    "module_output_toggles": 1,
+    "cell_input_pin_toggles": 3,
+    "cell_output_pin_toggles": 2
+  },
+  "module_ports": [
+    {
+      "port_name": "a",
+      "direction": "input",
+      "bits_lsb_to_msb": [
+        {
+          "bit_number": 0,
+          "toggle_count": 1,
+          "toggle_rate": 0.5
+        }
+      ]
+    },
+    {
+      "port_name": "b",
+      "direction": "input",
+      "bits_lsb_to_msb": [
+        {
+          "bit_number": 0,
+          "toggle_count": 1,
+          "toggle_rate": 0.5
+        }
+      ]
+    },
+    {
+      "port_name": "y",
+      "direction": "output",
+      "bits_lsb_to_msb": [
+        {
+          "bit_number": 0,
+          "toggle_count": 1,
+          "toggle_rate": 0.5
+        }
+      ]
+    }
+  ],
+  "instances": [
+    {
+      "instance_name": "u_and",
+      "cell_type": "AND2",
+      "pins": [
+        {
+          "pin_name": "A",
+          "direction": "input",
+          "connection": {
+            "kind": "net",
+            "net_name": "a",
+            "bit_number": 0
+          },
+          "toggle_count": 1,
+          "toggle_rate": 0.5
+        },
+        {
+          "pin_name": "B",
+          "direction": "input",
+          "connection": {
+            "kind": "net",
+            "net_name": "b",
+            "bit_number": 0
+          },
+          "toggle_count": 1,
+          "toggle_rate": 0.5
+        },
+        {
+          "pin_name": "Y",
+          "direction": "output",
+          "connection": {
+            "kind": "net",
+            "net_name": "n",
+            "bit_number": 0
+          },
+          "toggle_count": 1,
+          "toggle_rate": 0.5
+        }
+      ]
+    },
+    {
+      "instance_name": "u_inv",
+      "cell_type": "INV",
+      "pins": [
+        {
+          "pin_name": "A",
+          "direction": "input",
+          "connection": {
+            "kind": "net",
+            "net_name": "n",
+            "bit_number": 0
+          },
+          "toggle_count": 1,
+          "toggle_rate": 0.5
+        },
+        {
+          "pin_name": "Y",
+          "direction": "output",
+          "connection": {
+            "kind": "net",
+            "net_name": "y",
+            "bit_number": 0
+          },
+          "toggle_count": 1,
+          "toggle_rate": 0.5
+        }
+      ]
+    }
+  ]
+}
