@@ -58,7 +58,7 @@
 use crate::liberty::LibraryWithTimingData;
 use crate::liberty::cell_formula::parse_formula;
 use crate::liberty::timing_table::TimingTableArrayView;
-use crate::liberty_proto::{LuTableTemplate, Pin, PinDirection, TimingArc, TimingTable};
+use crate::liberty_model::{LuTableTemplate, Pin, PinDirection, TimingArc, TimingTable};
 use crate::netlist::normalized::{BitExpr, BitSource, NormalizedNetlistModule};
 use crate::netlist::parse::{Net, NetIndex, NetlistModule, PortDirection};
 use anyhow::{Result, anyhow};
@@ -343,13 +343,13 @@ impl StaReport {
 }
 
 struct StaLibraryIndex<'a> {
-    library: &'a crate::liberty_proto::Library,
+    library: &'a crate::liberty_model::Library,
     cell_by_name: HashMap<String, usize>,
     pin_by_cell: Vec<HashMap<String, usize>>,
 }
 
 impl<'a> StaLibraryIndex<'a> {
-    fn new(library: &'a crate::liberty_proto::Library) -> Result<Self> {
+    fn new(library: &'a crate::liberty_model::Library) -> Result<Self> {
         let mut cell_by_name = HashMap::new();
         let mut pin_by_cell = Vec::with_capacity(library.cells.len());
         for (cell_idx, cell) in library.cells.iter().enumerate() {
@@ -446,7 +446,7 @@ pub fn analyze_combinational_max_arrival(
     library: &LibraryWithTimingData,
     options: StaOptions,
 ) -> Result<StaReport> {
-    analyze_combinational_max_arrival_proto(module, nets, interner, library.as_proto(), options)
+    analyze_combinational_max_arrival_proto(module, nets, interner, library.as_model(), options)
 }
 
 /// Analyzes combinational segments launched by primary inputs and/or selected
@@ -466,7 +466,7 @@ pub fn analyze_register_boundary_max_arrival(
         module,
         nets,
         interner,
-        library.as_proto(),
+        library.as_model(),
         options,
         StaAnalysisMode::RegisterBoundaries {
             launch_primary_inputs,
@@ -477,7 +477,7 @@ pub fn analyze_register_boundary_max_arrival(
 
 /// Returns whether a cell should form a timing boundary for register-aware
 /// segment analysis.
-pub(crate) fn is_sequential_boundary_cell(cell: &crate::liberty_proto::Cell) -> bool {
+pub(crate) fn is_sequential_boundary_cell(cell: &crate::liberty_model::Cell) -> bool {
     !cell.sequential.is_empty()
         || cell.pins.iter().any(|pin| {
             pin.direction == PinDirection::Output as i32
@@ -526,7 +526,7 @@ fn analyze_combinational_max_arrival_proto(
     module: &NetlistModule,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
-    library: &crate::liberty_proto::Library,
+    library: &crate::liberty_model::Library,
     options: StaOptions,
 ) -> Result<StaReport> {
     analyze_max_arrival_proto_with_mode(
@@ -543,7 +543,7 @@ fn analyze_max_arrival_proto_with_mode(
     module: &NetlistModule,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
-    library: &crate::liberty_proto::Library,
+    library: &crate::liberty_model::Library,
     options: StaOptions,
     analysis_mode: StaAnalysisMode<'_>,
 ) -> Result<StaReport> {
@@ -1769,7 +1769,7 @@ fn visit_combinational_output_pin(
 /// Validates that one cell output pin is fully usable by the limited-scope STA
 /// engine for the requested related input pins.
 pub fn validate_output_pin_for_basic_sta(
-    library: &crate::liberty_proto::Library,
+    library: &crate::liberty_model::Library,
     cell_name: &str,
     pin: &Pin,
     required_related_pins: &[String],
@@ -2071,7 +2071,7 @@ fn arc_when_may_apply(
 
 #[cfg(test)]
 fn evaluate_arc(
-    library: &crate::liberty_proto::Library,
+    library: &crate::liberty_model::Library,
     arc: &TimingArc,
     input_timing: SignalTiming,
     output_load: f64,
@@ -2095,7 +2095,7 @@ fn evaluate_arc(
 }
 
 fn evaluate_arc_set(
-    library: &crate::liberty_proto::Library,
+    library: &crate::liberty_model::Library,
     arc: &TimingArc,
     input_timing: &SignalTimingSet,
     output_load: EdgeLoadCapacitance,
@@ -2162,7 +2162,7 @@ fn evaluate_arc_set(
 }
 
 fn evaluate_output_edge_set(
-    library: &crate::liberty_proto::Library,
+    library: &crate::liberty_model::Library,
     delay_table: &TimingTable,
     slew_table: &TimingTable,
     source_edges: &EdgeTimingSet,
@@ -2228,7 +2228,7 @@ fn evaluate_output_edge_set(
 
 /// Evaluates a register output launched by an ideal clock edge.
 fn evaluate_register_launch_output_set(
-    library: &crate::liberty_proto::Library,
+    library: &crate::liberty_model::Library,
     cell_name: &str,
     pin: &Pin,
     known_pin_values: &HashMap<String, bool>,
@@ -2334,7 +2334,7 @@ struct RegisterCaptureTimingCandidate {
 
 /// Returns the worst data arrival plus setup requirement at one capture pin.
 fn evaluate_register_setup_capture_arrival(
-    library: &crate::liberty_proto::Library,
+    library: &crate::liberty_model::Library,
     setup_arcs: &[&TimingArc],
     known_pin_values: &HashMap<String, bool>,
     data_timing: &SignalTimingSet,
@@ -2519,7 +2519,7 @@ struct TimingTableLayout<'a> {
 /// Resolves template-backed table axes and variables without evaluating a
 /// query.
 fn timing_table_layout<'a>(
-    library: &'a crate::liberty_proto::Library,
+    library: &'a crate::liberty_model::Library,
     table: &'a TimingTable,
     context: &str,
 ) -> Result<TimingTableLayout<'a>> {
@@ -2565,7 +2565,7 @@ fn timing_table_layout<'a>(
 /// Validates table shape, axes, and numeric payload without imposing delay
 /// monotonicity requirements.
 fn validate_timing_table_structure(
-    library: &crate::liberty_proto::Library,
+    library: &crate::liberty_model::Library,
     table: &TimingTable,
     context: &str,
 ) -> Result<()> {
@@ -2615,7 +2615,7 @@ fn validate_timing_table_structure(
 /// Validates query-invariant delay/slew table structure once before STA
 /// propagation. Non-monotone values are repaired conservatively during lookup.
 fn validate_timing_table_payload(
-    library: &crate::liberty_proto::Library,
+    library: &crate::liberty_model::Library,
     table: &TimingTable,
     context: &str,
 ) -> Result<()> {
@@ -2624,7 +2624,7 @@ fn validate_timing_table_payload(
 
 /// Validates each queried delay/slew table at most once during an STA run.
 fn validate_timing_tables_once(
-    library: &crate::liberty_proto::Library,
+    library: &crate::liberty_model::Library,
     cell_name: &str,
     pin_name: &str,
     arcs: &[&TimingArc],
@@ -2663,7 +2663,7 @@ fn validate_timing_tables_once(
 /// the monotonicity rule used for combinational delay/slew propagation does not
 /// apply.
 fn validate_constraint_tables_once(
-    library: &crate::liberty_proto::Library,
+    library: &crate::liberty_model::Library,
     cell_name: &str,
     pin_name: &str,
     arcs: &[&TimingArc],
@@ -2744,7 +2744,7 @@ impl TimingTableQuery {
 
 #[cfg(test)]
 fn evaluate_table(
-    library: &crate::liberty_proto::Library,
+    library: &crate::liberty_model::Library,
     table: &TimingTable,
     input_transition: f64,
     output_load: f64,
@@ -2762,7 +2762,7 @@ fn evaluate_table(
 }
 
 fn evaluate_table_with_diagnostics(
-    library: &crate::liberty_proto::Library,
+    library: &crate::liberty_model::Library,
     table: &TimingTable,
     input_transition: f64,
     output_load: f64,
@@ -2779,7 +2779,7 @@ fn evaluate_table_with_diagnostics(
 }
 
 fn evaluate_table_with_query_and_diagnostics(
-    library: &crate::liberty_proto::Library,
+    library: &crate::liberty_model::Library,
     table: &TimingTable,
     query: TimingTableQuery,
     timing_query_diagnostic_counts: &mut TimingQueryDiagnosticCounts,
@@ -3169,7 +3169,7 @@ fn resolve_symbol(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::liberty_proto::{Cell, Pin, TimingArc, TimingTable};
+    use crate::liberty_model::{Cell, Pin, TimingArc, TimingTable};
     use crate::netlist::bench_synth_netlist;
     use crate::netlist::parse::{Parser, TokenScanner};
 
@@ -3246,7 +3246,7 @@ mod tests {
 
     #[test]
     fn ideal_clock_queries_select_minimum_characterized_slew_without_diagnostic() {
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             lu_table_templates: vec![
                 LuTableTemplate {
                     kind: "lu_table_template".to_string(),
@@ -3348,8 +3348,8 @@ mod tests {
         );
     }
 
-    fn scalar_inv_library() -> crate::liberty_proto::Library {
-        crate::liberty_proto::Library {
+    fn scalar_inv_library() -> crate::liberty_model::Library {
+        crate::liberty_model::Library {
             cells: vec![Cell {
                 name: "INV".to_string(),
                 pins: vec![
@@ -3479,7 +3479,7 @@ module top (a, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             cells: vec![Cell {
                 name: "BUF".to_string(),
                 pins: vec![
@@ -3933,7 +3933,7 @@ module top (a, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             cells: vec![Cell {
                 name: "NAND2".to_string(),
                 pins: vec![
@@ -4011,7 +4011,7 @@ module top (a, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             cells: vec![Cell {
                 name: "NAND2".to_string(),
                 pins: vec![
@@ -4087,7 +4087,7 @@ module top (a, y0, y1);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             cells: vec![Cell {
                 name: "DUALOUT".to_string(),
                 pins: vec![
@@ -4191,7 +4191,7 @@ module top (a, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             cells: vec![Cell {
                 name: "DUALOUT".to_string(),
                 pins: vec![
@@ -4261,7 +4261,7 @@ module top (y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             cells: vec![Cell {
                 name: "DUALOUT".to_string(),
                 pins: vec![
@@ -4416,7 +4416,7 @@ module top (a, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             cells: vec![Cell {
                 name: "INV".to_string(),
                 pins: vec![
@@ -4490,7 +4490,7 @@ module top (a, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             cells: vec![Cell {
                 name: "INV".to_string(),
                 pins: vec![
@@ -4551,7 +4551,7 @@ module top (a, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             cells: vec![
                 Cell {
                     name: "PASS_WITH_EN".to_string(),
@@ -4620,7 +4620,7 @@ module top (a, b, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             cells: vec![Cell {
                 name: "NAND2".to_string(),
                 pins: vec![
@@ -4682,7 +4682,7 @@ module top (d, clk, q);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             cells: vec![Cell {
                 name: "DFF".to_string(),
                 pins: vec![
@@ -4741,7 +4741,7 @@ module top (a, en, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             cells: vec![Cell {
                 name: "BUF_EN".to_string(),
                 pins: vec![
@@ -4804,7 +4804,7 @@ module top (a, clk, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             cells: vec![Cell {
                 name: "MIXED".to_string(),
                 pins: vec![
@@ -4933,7 +4933,7 @@ endmodule
             values,
             ..Default::default()
         };
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             lu_table_templates: vec![LuTableTemplate {
                 kind: "lu_table_template".to_string(),
                 name: "tmpl_2d".to_string(),
@@ -5003,7 +5003,7 @@ endmodule
     fn sta_inv_chain_propagates_arrival_and_transition() {
         let src = bench_synth_netlist::make_chain_netlist(2);
         let (module, nets, interner) = parse_single_module(src.as_str());
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             cells: vec![Cell {
                 name: "INV".to_string(),
                 pins: vec![
@@ -5108,7 +5108,7 @@ endmodule
             ],
             ..Default::default()
         };
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             cells: vec![
                 Cell {
                     name: "INV".to_string(),
@@ -5174,7 +5174,7 @@ endmodule
 
     #[test]
     fn sta_non_unate_keeps_arrival_and_transition_correlated_per_source_edge() {
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             lu_table_templates: vec![LuTableTemplate {
                 kind: "lu_table_template".to_string(),
                 name: "tmpl_1d_transition".to_string(),
@@ -5253,7 +5253,7 @@ endmodule
             ..Default::default()
         };
 
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             lu_table_templates: vec![LuTableTemplate {
                 kind: "lu_table_template".to_string(),
                 name: "tmpl_1d_transition".to_string(),
@@ -5385,7 +5385,7 @@ endmodule
             ..Default::default()
         };
 
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             lu_table_templates: vec![LuTableTemplate {
                 kind: "lu_table_template".to_string(),
                 name: "tmpl_1d_transition".to_string(),
@@ -5528,7 +5528,7 @@ module top (a, y);
 endmodule
 "#;
         let (module, nets, interner) = parse_single_module(src);
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             lu_table_templates: vec![LuTableTemplate {
                 kind: "lu_table_template".to_string(),
                 name: "tmpl_2d".to_string(),
@@ -5641,7 +5641,7 @@ endmodule
             ],
             ..Default::default()
         };
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             cells: vec![Cell {
                 name: "BUF_EN".to_string(),
                 pins: vec![
@@ -5706,7 +5706,7 @@ endmodule
             ],
             ..Default::default()
         };
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             cells: vec![
                 Cell {
                     name: "BUF_EN".to_string(),
@@ -5778,7 +5778,7 @@ endmodule
             ..Default::default()
         };
 
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             lu_table_templates: vec![LuTableTemplate {
                 kind: "lu_table_template".to_string(),
                 name: "tmpl_1d_load".to_string(),
@@ -5854,7 +5854,7 @@ endmodule
 
     #[test]
     fn evaluate_table_does_not_duplicate_weight_on_singleton_axes() {
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             lu_table_templates: vec![LuTableTemplate {
                 kind: "lu_table_template".to_string(),
                 name: "tmpl_singleton_x_axis".to_string(),
@@ -5883,7 +5883,7 @@ endmodule
 
     #[test]
     fn evaluate_table_clamps_below_axis_range() {
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             lu_table_templates: vec![LuTableTemplate {
                 kind: "lu_table_template".to_string(),
                 name: "tmpl_2d_extrap".to_string(),
@@ -5909,7 +5909,7 @@ endmodule
 
     #[test]
     fn evaluate_table_counts_clamp_categories() {
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             lu_table_templates: vec![
                 LuTableTemplate {
                     kind: "lu_table_template".to_string(),
@@ -6057,7 +6057,7 @@ endmodule
 
     #[test]
     fn evaluate_table_rejects_axis_dimension_mismatch() {
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             lu_table_templates: vec![LuTableTemplate {
                 kind: "lu_table_template".to_string(),
                 name: "tmpl_bad_extent".to_string(),
@@ -6082,7 +6082,7 @@ endmodule
 
     #[test]
     fn evaluate_table_rejects_axis_rank_mismatch() {
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             lu_table_templates: vec![LuTableTemplate {
                 kind: "lu_table_template".to_string(),
                 name: "tmpl_bad_rank".to_string(),
@@ -6109,7 +6109,7 @@ endmodule
 
     #[test]
     fn evaluate_table_rejects_non_finite_axes_and_values() {
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             lu_table_templates: vec![LuTableTemplate {
                 kind: "lu_table_template".to_string(),
                 name: "tmpl_non_finite_axis".to_string(),
@@ -6140,7 +6140,7 @@ endmodule
             ..Default::default()
         };
         let value_error = validate_timing_table_payload(
-            &crate::liberty_proto::Library::default(),
+            &crate::liberty_model::Library::default(),
             &value_table,
             "bad_value",
         )
@@ -6154,7 +6154,7 @@ endmodule
 
     #[test]
     fn evaluate_table_rejects_duplicate_axis_points() {
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             lu_table_templates: vec![LuTableTemplate {
                 kind: "lu_table_template".to_string(),
                 name: "tmpl_duplicate_axis".to_string(),
@@ -6183,7 +6183,7 @@ endmodule
 
     #[test]
     fn evaluate_table_repairs_non_monotone_delay_values_with_upper_envelope() {
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             lu_table_templates: vec![LuTableTemplate {
                 kind: "lu_table_template".to_string(),
                 name: "tmpl_non_monotone".to_string(),
@@ -6211,7 +6211,7 @@ endmodule
 
     #[test]
     fn evaluate_table_repairs_two_dimensional_delay_values_coordinatewise() {
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             lu_table_templates: vec![LuTableTemplate {
                 kind: "lu_table_template".to_string(),
                 name: "tmpl_non_monotone_2d".to_string(),
@@ -6239,7 +6239,7 @@ endmodule
 
     #[test]
     fn evaluate_table_repairs_small_characterization_noise() {
-        let lib = crate::liberty_proto::Library {
+        let lib = crate::liberty_model::Library {
             lu_table_templates: vec![LuTableTemplate {
                 kind: "lu_table_template".to_string(),
                 name: "tmpl_characterization_noise".to_string(),
@@ -6274,7 +6274,7 @@ endmodule
         let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
 
         let output = evaluate_output_edge_set(
-            &crate::liberty_proto::Library::default(),
+            &crate::liberty_model::Library::default(),
             &delay_table,
             &slew_table,
             &input_timing,
@@ -6305,7 +6305,7 @@ endmodule
         let mut timing_query_diagnostic_counts = TimingQueryDiagnosticCounts::default();
 
         let error = evaluate_output_edge_set(
-            &crate::liberty_proto::Library::default(),
+            &crate::liberty_model::Library::default(),
             &delay_table,
             &slew_table,
             &input_timing,
@@ -6325,7 +6325,7 @@ endmodule
 
     #[test]
     fn sta_rejects_duplicate_library_cells_and_pins() {
-        let duplicate_cells = crate::liberty_proto::Library {
+        let duplicate_cells = crate::liberty_model::Library {
             cells: vec![
                 Cell {
                     name: "INV".to_string(),
@@ -6348,7 +6348,7 @@ endmodule
                 .contains("defines cell 'INV' more than once")
         );
 
-        let duplicate_pins = crate::liberty_proto::Library {
+        let duplicate_pins = crate::liberty_model::Library {
             cells: vec![Cell {
                 name: "INV".to_string(),
                 pins: vec![

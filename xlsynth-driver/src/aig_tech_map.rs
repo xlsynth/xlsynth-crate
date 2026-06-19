@@ -6,7 +6,7 @@ use std::path::Path;
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
 use xlsynth_g8r::liberty::cell_formula::{Term, parse_formula};
-use xlsynth_g8r::liberty_proto::{Cell, Library, PinDirection};
+use xlsynth_g8r::liberty_model::{Cell, Library, PinDirection};
 use xlsynth_g8r::netlist::emit::emit_module_as_netlist_text;
 use xlsynth_g8r::netlist::io::load_liberty_with_timing_data_from_path;
 use xlsynth_g8r::netlist::sta::validate_output_pin_for_basic_sta;
@@ -309,7 +309,7 @@ fn selected_binding_for_name(
 }
 
 fn select_inv_cell(
-    lib: &xlsynth_g8r::liberty_proto::Library,
+    lib: &xlsynth_g8r::liberty_model::Library,
     policy: CellPolicy,
 ) -> Result<SelectedCellBinding, String> {
     let candidates: Vec<&Cell> = lib
@@ -327,7 +327,7 @@ fn select_inv_cell(
 }
 
 fn select_nand2_cell(
-    lib: &xlsynth_g8r::liberty_proto::Library,
+    lib: &xlsynth_g8r::liberty_model::Library,
     policy: CellPolicy,
 ) -> Result<SelectedCellBinding, String> {
     let candidates: Vec<&Cell> = lib
@@ -473,7 +473,7 @@ pub fn handle_aig_tech_map(matches: &ArgMatches) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlsynth_g8r::liberty_proto::{Pin, TimingTable};
+    use xlsynth_g8r::liberty_model::{Pin, TimingTable};
 
     fn make_pin(name: &str, direction: PinDirection, function: &str) -> Pin {
         Pin {
@@ -491,7 +491,7 @@ mod tests {
             function: function.to_string(),
             timing_arcs: related_pins
                 .iter()
-                .map(|related_pin| xlsynth_g8r::liberty_proto::TimingArc {
+                .map(|related_pin| xlsynth_g8r::liberty_model::TimingArc {
                     related_pin: (*related_pin).to_string(),
                     timing_type: "combinational".to_string(),
                     tables: vec![
@@ -569,7 +569,7 @@ mod tests {
 
     #[test]
     fn select_prefers_exact_base_names_in_small_normal_vt_mode() {
-        let lib = xlsynth_g8r::liberty_proto::Library {
+        let lib = xlsynth_g8r::liberty_model::Library {
             cells: vec![
                 make_inv_cell("INV", 1),
                 make_inv_cell("INVx1_nominal", 1),
@@ -593,7 +593,7 @@ mod tests {
 
     #[test]
     fn select_prefers_x1_nominal_when_no_exact_base_in_small_normal_vt_mode() {
-        let lib = xlsynth_g8r::liberty_proto::Library {
+        let lib = xlsynth_g8r::liberty_model::Library {
             cells: vec![
                 make_inv_cell("INVx2_fast", 2),
                 make_inv_cell("INVx1_nominal", 1),
@@ -622,7 +622,7 @@ mod tests {
 
     #[test]
     fn select_prefers_max_drive_in_fastest_vt_in_max_speed_mode() {
-        let lib = xlsynth_g8r::liberty_proto::Library {
+        let lib = xlsynth_g8r::liberty_model::Library {
             cells: vec![
                 make_inv_cell("INVx1_nominal", 1),
                 make_inv_cell("INVx2_faster", 3),
@@ -652,7 +652,7 @@ mod tests {
 
     #[test]
     fn select_uses_drive_strength_with_fractional_suffix_in_max_speed_mode() {
-        let lib = xlsynth_g8r::liberty_proto::Library {
+        let lib = xlsynth_g8r::liberty_model::Library {
             cells: vec![
                 make_inv_cell("INVxp75_faster", 1),
                 make_inv_cell("INVx1_faster", 1),
@@ -676,7 +676,7 @@ mod tests {
 
     #[test]
     fn select_uses_default_threshold_voltage_group() {
-        let lib = xlsynth_g8r::liberty_proto::Library {
+        let lib = xlsynth_g8r::liberty_model::Library {
             cells: vec![
                 make_inv_cell("INVx1_default", 0),
                 make_inv_cell("INVx2_fast", 2),
@@ -700,7 +700,7 @@ mod tests {
 
     #[test]
     fn select_discovers_nonstandard_pin_names() {
-        let lib = xlsynth_g8r::liberty_proto::Library {
+        let lib = xlsynth_g8r::liberty_model::Library {
             cells: vec![
                 make_inv_cell_with_pins("INV", 0, "I", "ZN"),
                 make_nand2_cell_with_pins("NAND2", 0, ["I0", "I1"], "ZN"),
@@ -728,7 +728,7 @@ mod tests {
 
     #[test]
     fn select_rejects_family_name_with_wrong_formula() {
-        let lib = xlsynth_g8r::liberty_proto::Library {
+        let lib = xlsynth_g8r::liberty_model::Library {
             cells: vec![
                 Cell {
                     name: "INV".to_string(),
@@ -757,7 +757,7 @@ mod tests {
 
     #[test]
     fn select_accepts_demorgan_nand2_formula() {
-        let lib = xlsynth_g8r::liberty_proto::Library {
+        let lib = xlsynth_g8r::liberty_model::Library {
             cells: vec![Cell {
                 name: "NAND2".to_string(),
                 pins: vec![
@@ -778,7 +778,7 @@ mod tests {
 
     #[test]
     fn select_is_deterministic_without_vt_metadata() {
-        let lib = xlsynth_g8r::liberty_proto::Library {
+        let lib = xlsynth_g8r::liberty_model::Library {
             cells: vec![
                 make_inv_cell("INVx2", 0),
                 make_inv_cell("INVx1", 0),
@@ -808,7 +808,7 @@ mod tests {
 
     #[test]
     fn select_rejects_candidate_missing_timing_for_one_functional_input() {
-        let lib = xlsynth_g8r::liberty_proto::Library {
+        let lib = xlsynth_g8r::liberty_model::Library {
             cells: vec![Cell {
                 name: "NAND2".to_string(),
                 pins: vec![
@@ -834,7 +834,7 @@ mod tests {
             .expect("output pin")
             .timing_arcs[0]
             .timing_type = "rising_edge".to_string();
-        let lib = xlsynth_g8r::liberty_proto::Library {
+        let lib = xlsynth_g8r::liberty_model::Library {
             cells: vec![invalid_fast, make_nand2_cell("NAND2x1_nominal", 1)],
             threshold_voltage_groups: vec!["nominal".to_string(), "fast".to_string()],
             threshold_voltage_group_class_indices: vec![0, 1],
@@ -849,7 +849,7 @@ mod tests {
 
     #[test]
     fn select_rejects_mixed_ordered_and_unordered_vt_metadata() {
-        let lib = xlsynth_g8r::liberty_proto::Library {
+        let lib = xlsynth_g8r::liberty_model::Library {
             cells: vec![
                 make_inv_cell("INVx1_nominal", 1),
                 make_inv_cell("INVx2_unclassified", 0),

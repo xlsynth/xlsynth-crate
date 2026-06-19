@@ -2,7 +2,7 @@
 
 //! Structural register-stage partitioning and complete area accounting.
 
-use crate::liberty_proto::{Library, PinDirection};
+use crate::liberty_model::{Library, PinDirection};
 use crate::netlist::normalized::{BitExpr, BitSource, NormalizedNetlistModule};
 use crate::netlist::parse::{Net, NetlistModule, PortDirection};
 use crate::netlist::sta::is_sequential_boundary_cell;

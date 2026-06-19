@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use prost::Message;
-use prost_reflect::DynamicMessage;
 use std::fs::File;
 use std::io::Write;
-use xlsynth_g8r::liberty::descriptor::liberty_descriptor_pool;
-use xlsynth_g8r::liberty::liberty_to_proto::{
-    ThresholdVoltageGroupRule, parse_liberty_files_to_proto_with_vt_rules,
-};
+use std::path::Path;
+use xlsynth_g8r::liberty::CellFilterPolicy;
+use xlsynth_g8r::liberty::descriptor::liberty_proto_bytes_to_pretty_textproto;
+use xlsynth_g8r::liberty::model::{library_to_proto, strip_power_data, strip_timing_data};
+use xlsynth_g8r::liberty::parser::{ThresholdVoltageGroupRule, parse_liberty_files_with_vt_rules};
 
 fn parse_vt_group_rule(raw: &str) -> Result<ThresholdVoltageGroupRule, String> {
     let mut parts = raw.splitn(3, ':');
@@ -72,8 +72,42 @@ pub fn handle_lib2proto(matches: &clap::ArgMatches) {
         .unwrap_or_else(|e| panic!("{e}"))
         .unwrap_or_default();
 
-    let proto = parse_liberty_files_to_proto_with_vt_rules(&liberty_files, &vt_group_rules)
+    let mut proto = parse_liberty_files_with_vt_rules(&liberty_files, &vt_group_rules)
         .expect("Failed to parse Liberty files");
+    proto.provenance = matches
+        .get_one::<String>("provenance")
+        .cloned()
+        .unwrap_or_default();
+    proto.source_files = liberty_files
+        .iter()
+        .map(|path| {
+            Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(path)
+                .to_string()
+        })
+        .collect();
+    if let Some(policy_path) = matches.get_one::<String>("cell_filter_policy") {
+        let policy = CellFilterPolicy::from_path(Path::new(policy_path))
+            .unwrap_or_else(|e| panic!("Failed to load cell-filter policy: {e:#}"));
+        let stats = policy.apply(&mut proto);
+        log::info!(
+            "Applied {} cell-filter rules: input={} native_dont_use={} retained={} removed={}",
+            policy.rules().len(),
+            stats.input_cells,
+            stats.native_dont_use_cells,
+            stats.retained_cells,
+            stats.removed_cells
+        );
+    }
+    if !matches.get_flag("include_timing") {
+        strip_timing_data(&mut proto);
+    }
+    if !matches.get_flag("include_power") {
+        strip_power_data(&mut proto);
+    }
+    let proto = library_to_proto(proto).expect("Failed to encode Liberty LUT data");
 
     if output.ends_with(".proto") {
         let mut f = File::create(output).expect("Failed to create output file");
@@ -82,18 +116,11 @@ pub fn handle_lib2proto(matches: &clap::ArgMatches) {
         log::info!("Writing proto...");
         f.write_all(&bytes).expect("Failed to write proto");
     } else if output.ends_with(".textproto") {
-        // Use prost-reflect to emit textproto
-        let descriptor_pool = liberty_descriptor_pool();
-        let msg_desc = descriptor_pool
-            .get_message_by_name("liberty.Library")
-            .unwrap();
-        let mut dyn_msg = DynamicMessage::new(msg_desc);
         log::info!("Encoding proto...");
         let encoded = proto.encode_to_vec();
-        log::info!("Merging proto...");
-        dyn_msg.merge(&encoded[..]).unwrap();
+        let text = liberty_proto_bytes_to_pretty_textproto(&encoded)
+            .expect("Failed to format Liberty textproto");
         log::info!("Writing textproto...");
-        let text = dyn_msg.to_text_format();
         let mut f = File::create(output).expect("Failed to create output file");
         f.write_all(text.as_bytes())
             .expect("Failed to write textproto");

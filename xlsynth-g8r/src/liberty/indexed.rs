@@ -2,13 +2,13 @@
 
 //! Indexed view over a Liberty `Library`.
 //!
-//! This module provides a small wrapper around the prost-generated
-//! `crate::liberty_proto::Library` that adds lazily constructed indices for
+//! This module provides a small wrapper around the normalized
+//! `crate::liberty_model::Library` that adds lazily constructed indices for
 //! fast lookup by cell name and for grouping pins by direction. The underlying
 //! `Library` remains the single source of truth; indices are derived from it
 //! on demand.
 
-use crate::liberty_proto::{Cell, Library as ProtoLibrary, Pin, PinDirection};
+use crate::liberty_model::{Cell, Library as ModelLibrary, Pin, PinDirection};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -25,7 +25,7 @@ struct CellPinsByDir {
 
 /// Owning wrapper around a `Library` with lazily built indices for fast lookup.
 pub struct IndexedLibrary {
-    proto: ProtoLibrary,
+    proto: ModelLibrary,
     /// Map from cell name to index in `proto.cells`.
     cell_by_name: RefCell<Option<HashMap<String, usize>>>,
     /// Map from cell index to directional pin groupings.
@@ -34,7 +34,7 @@ pub struct IndexedLibrary {
 
 impl IndexedLibrary {
     /// Constructs a new indexed view over the given `Library`.
-    pub fn new<T: Into<ProtoLibrary>>(proto: T) -> Self {
+    pub fn new<T: Into<ModelLibrary>>(proto: T) -> Self {
         let proto = proto.into();
         IndexedLibrary {
             proto,
@@ -44,7 +44,7 @@ impl IndexedLibrary {
     }
 
     /// Returns a shared reference to the underlying `Library`.
-    pub fn library(&self) -> &ProtoLibrary {
+    pub fn library(&self) -> &ModelLibrary {
         &self.proto
     }
 
@@ -159,7 +159,7 @@ impl IndexedLibrary {
         cell_name: &str,
         output_pin_name: &str,
         related_pin_name: &str,
-    ) -> Option<&crate::liberty_proto::TimingArc> {
+    ) -> Option<&crate::liberty_model::TimingArc> {
         self.timing_arc_for_pin_filtered(
             cell_name,
             output_pin_name,
@@ -183,7 +183,7 @@ impl IndexedLibrary {
         timing_type: Option<&str>,
         timing_sense: Option<&str>,
         when: Option<&str>,
-    ) -> Option<&crate::liberty_proto::TimingArc> {
+    ) -> Option<&crate::liberty_model::TimingArc> {
         let pin = self.pin_by_name(cell_name, output_pin_name)?;
         if pin.direction != PinDirection::Output as i32 {
             return None;
@@ -221,7 +221,7 @@ impl IndexedLibrary {
         &self,
         cell_name: &str,
         output_pin_name: &str,
-    ) -> Option<&[crate::liberty_proto::TimingArc]> {
+    ) -> Option<&[crate::liberty_model::TimingArc]> {
         let pin = self.pin_by_name(cell_name, output_pin_name)?;
         if pin.direction != PinDirection::Output as i32 {
             return None;
@@ -237,7 +237,7 @@ impl IndexedLibrary {
         &self,
         template_kind: &str,
         template_name: &str,
-    ) -> Option<&crate::liberty_proto::LuTableTemplate> {
+    ) -> Option<&crate::liberty_model::LuTableTemplate> {
         let mut matches = self
             .proto
             .lu_table_templates
@@ -256,7 +256,7 @@ impl IndexedLibrary {
         &self,
         template_id: u32,
         template_kind: &str,
-    ) -> Option<&crate::liberty_proto::LuTableTemplate> {
+    ) -> Option<&crate::liberty_model::LuTableTemplate> {
         if template_id == 0 {
             return None;
         }
@@ -276,7 +276,7 @@ impl IndexedLibrary {
 mod tests {
     use super::*;
     use crate::liberty::test_utils::make_test_library;
-    use crate::liberty_proto::{LuTableTemplate, TimingArc, TimingTable};
+    use crate::liberty_model::{LuTableTemplate, TimingArc, TimingTable};
 
     #[test]
     fn get_cell_finds_by_name() {
@@ -332,7 +332,7 @@ mod tests {
 
     #[test]
     fn timing_lookup_finds_arc_and_template() {
-        let lib = ProtoLibrary {
+        let lib = ModelLibrary {
             cells: vec![Cell {
                 name: "NAND2".to_string(),
                 pins: vec![
@@ -369,6 +369,7 @@ mod tests {
                                 index_3: vec![],
                                 values: vec![1.0, 2.0, 3.0, 4.0],
                                 dimensions: vec![2, 2],
+                                ..Default::default()
                             }],
                         }],
                         ..Default::default()
@@ -378,6 +379,7 @@ mod tests {
                 sequential: vec![],
                 clock_gate: None,
                 threshold_voltage_group_id: 0,
+                dont_use: None,
             }],
             units: None,
             lu_table_templates: vec![LuTableTemplate {
@@ -389,10 +391,14 @@ mod tests {
                 index_1: vec![0.01, 0.02],
                 index_2: vec![0.1, 0.2],
                 index_3: vec![],
+                ..Default::default()
             }],
             threshold_voltage_groups: vec![],
             default_threshold_voltage_group_id: 0,
             threshold_voltage_group_class_indices: vec![],
+            nominal_voltage: None,
+            provenance: String::new(),
+            source_files: vec![],
         };
         let indexed = IndexedLibrary::new(lib);
 
@@ -430,7 +436,7 @@ mod tests {
 
     #[test]
     fn template_lookup_is_kind_aware_under_name_collisions() {
-        let lib = ProtoLibrary {
+        let lib = ModelLibrary {
             cells: vec![],
             units: None,
             lu_table_templates: vec![
@@ -443,6 +449,7 @@ mod tests {
                     index_1: vec![0.01, 0.02],
                     index_2: vec![0.1, 0.2],
                     index_3: vec![],
+                    ..Default::default()
                 },
                 LuTableTemplate {
                     kind: "power_lut_template".to_string(),
@@ -453,11 +460,15 @@ mod tests {
                     index_1: vec![1.0, 2.0],
                     index_2: vec![3.0, 4.0],
                     index_3: vec![],
+                    ..Default::default()
                 },
             ],
             threshold_voltage_groups: vec![],
             default_threshold_voltage_group_id: 0,
             threshold_voltage_group_class_indices: vec![],
+            nominal_voltage: None,
+            provenance: String::new(),
+            source_files: vec![],
         };
         let indexed = IndexedLibrary::new(lib);
 
@@ -487,7 +498,7 @@ mod tests {
 
     #[test]
     fn template_lookup_by_name_returns_none_for_ambiguous_same_kind_name() {
-        let lib = ProtoLibrary {
+        let lib = ModelLibrary {
             cells: vec![],
             units: None,
             lu_table_templates: vec![
@@ -500,6 +511,7 @@ mod tests {
                     index_1: vec![0.01, 0.02],
                     index_2: vec![0.1, 0.2],
                     index_3: vec![],
+                    ..Default::default()
                 },
                 LuTableTemplate {
                     kind: "lu_table_template".to_string(),
@@ -510,11 +522,15 @@ mod tests {
                     index_1: vec![0.05],
                     index_2: vec![0.9, 1.1, 1.3],
                     index_3: vec![],
+                    ..Default::default()
                 },
             ],
             threshold_voltage_groups: vec![],
             default_threshold_voltage_group_id: 0,
             threshold_voltage_group_class_indices: vec![],
+            nominal_voltage: None,
+            provenance: String::new(),
+            source_files: vec![],
         };
         let indexed = IndexedLibrary::new(lib);
         assert!(
@@ -526,7 +542,7 @@ mod tests {
 
     #[test]
     fn timing_arc_lookup_avoids_ambiguous_related_pin_matches() {
-        let lib = ProtoLibrary {
+        let lib = ModelLibrary {
             cells: vec![Cell {
                 name: "NAND2".to_string(),
                 pins: vec![
@@ -565,12 +581,16 @@ mod tests {
                 sequential: vec![],
                 clock_gate: None,
                 threshold_voltage_group_id: 0,
+                dont_use: None,
             }],
             units: None,
             lu_table_templates: vec![],
             threshold_voltage_groups: vec![],
             default_threshold_voltage_group_id: 0,
             threshold_voltage_group_class_indices: vec![],
+            nominal_voltage: None,
+            provenance: String::new(),
+            source_files: vec![],
         };
         let indexed = IndexedLibrary::new(lib);
 
@@ -607,7 +627,7 @@ mod tests {
 
     #[test]
     fn timing_arc_lookup_requires_output_pin() {
-        let lib = ProtoLibrary {
+        let lib = ModelLibrary {
             cells: vec![Cell {
                 name: "U1".to_string(),
                 pins: vec![
@@ -644,12 +664,16 @@ mod tests {
                 sequential: vec![],
                 clock_gate: None,
                 threshold_voltage_group_id: 0,
+                dont_use: None,
             }],
             units: None,
             lu_table_templates: vec![],
             threshold_voltage_groups: vec![],
             default_threshold_voltage_group_id: 0,
             threshold_voltage_group_class_indices: vec![],
+            nominal_voltage: None,
+            provenance: String::new(),
+            source_files: vec![],
         };
         let indexed = IndexedLibrary::new(lib);
 

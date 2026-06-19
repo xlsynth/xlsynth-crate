@@ -5,6 +5,7 @@ use tempfile::NamedTempFile;
 use xlsynth_g8r::netlist::gv2block::convert_gv2block_paths_to_string;
 
 const LIBERTY_TEXTPROTO: &str = r#"
+format_magic: 5496997758161146447
 cells: {
   name: "INV"
   pins: { name: "A" direction: INPUT }
@@ -38,6 +39,21 @@ cells: {
     next_state: "D"
     clock_expr: "CLK"
     kind: SEQUENTIAL_KIND_FF
+  }
+}
+cells: {
+  name: "DFFQN"
+  pins: { name: "D" direction: INPUT }
+  pins: { name: "CLK" direction: INPUT is_clocking_pin: true }
+  pins: { name: "Q" direction: OUTPUT function: "IQ" }
+  pins: { name: "QN" direction: OUTPUT function: "IQN" }
+  area: 1.0
+  sequential: {
+    state_var: "IQ"
+    next_state: "D"
+    clock_expr: "CLK"
+    kind: SEQUENTIAL_KIND_FF
+    complementary_state_var: "IQN"
   }
 }
 cells: {
@@ -166,6 +182,53 @@ top block top(clk: clock, d: bits[1], q: bits[1]) {
   u1_Q: bits[1] = instantiation_output(instantiation=u1, port_name=Q, id=2)
   u1_D: () = instantiation_input(d, instantiation=u1, port_name=D, id=3)
   q: () = output_port(u1_Q, name=q, id=4)
+}
+"#;
+    assert_eq!(got, want);
+}
+
+#[test]
+fn test_gv2block_dff_complementary_output_uses_inverted_register() {
+    let netlist = r#"
+module top (d, clk, q, qn);
+  input d;
+  input clk;
+  output q;
+  output qn;
+  wire d;
+  wire clk;
+  wire q;
+  wire qn;
+  DFFQN u1 (.D(d), .CLK(clk), .Q(q), .QN(qn));
+endmodule
+"#;
+    let mut liberty_file = NamedTempFile::new().unwrap();
+    write!(liberty_file, "{}", LIBERTY_TEXTPROTO).unwrap();
+    let mut netlist_file = NamedTempFile::new().unwrap();
+    write!(netlist_file, "{}", netlist).unwrap();
+
+    let got = convert_gv2block_paths_to_string(netlist_file.path(), liberty_file.path()).unwrap();
+
+    let want = r#"package top
+
+block DFFQN(CLK: clock, D: bits[1], Q: bits[1], QN: bits[1]) {
+  reg IQ_reg(bits[1])
+  D: bits[1] = input_port(name=D, id=1)
+  IQ_q: bits[1] = register_read(register=IQ_reg, id=2)
+  IQN_q: bits[1] = not(IQ_q, id=3)
+  IQ_d: () = register_write(D, register=IQ_reg, id=4)
+  Q: () = output_port(IQ_q, name=Q, id=6)
+  QN: () = output_port(IQN_q, name=QN, id=7)
+}
+
+top block top(clk: clock, d: bits[1], q: bits[1], qn: bits[1]) {
+  instantiation u1(block=DFFQN, kind=block)
+  d: bits[1] = input_port(name=d, id=1)
+  u1_Q: bits[1] = instantiation_output(instantiation=u1, port_name=Q, id=2)
+  u1_QN: bits[1] = instantiation_output(instantiation=u1, port_name=QN, id=3)
+  u1_D: () = instantiation_input(d, instantiation=u1, port_name=D, id=4)
+  q: () = output_port(u1_Q, name=q, id=6)
+  qn: () = output_port(u1_QN, name=qn, id=7)
 }
 "#;
     assert_eq!(got, want);

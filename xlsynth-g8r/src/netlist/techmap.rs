@@ -578,7 +578,7 @@ mod tests {
     use super::*;
     use crate::aig_sim::gate_sim::{Collect, eval};
     use crate::gate_builder::{GateBuilder, GateBuilderOptions};
-    use crate::liberty_proto::{Cell, Library as LibertyLibrary, Pin, PinDirection};
+    use crate::liberty_model::{Cell, Library as LibertyLibrary, Pin, PinDirection};
     use crate::netlist::gatefn_from_netlist::project_gatefn_from_netlist_and_liberty;
     use std::collections::HashSet;
 

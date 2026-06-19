@@ -121,6 +121,7 @@ mod ir_strip_pos_data;
 mod ir_structural_similarity;
 mod lib2proto;
 mod lib_query;
+mod liberty_proto_info;
 mod proofs;
 mod prove_enum_in_bound;
 mod prove_quickcheck;
@@ -1809,6 +1810,43 @@ fn main() {
                         .long("vt-group")
                         .help("Fill missing Liberty VT groups with NAME:CLASS_INDEX:REGEX cell-name rules; may be repeated")
                         .action(ArgAction::Append),
+                )
+                .arg(
+                    Arg::new("provenance")
+                        .long("provenance")
+                        .value_name("TEXT")
+                        .help("Attach free-form source-collateral provenance to the output library")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("cell_filter_policy")
+                        .long("cell-filter-policy")
+                        .value_name("PATH")
+                        .help("Apply ordered include/exclude cell-name regex rules from PATH")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("include_timing")
+                        .long("include-timing")
+                        .help("Include timing arcs, evaluator timing tables, and timing LUT templates")
+                        .action(ArgAction::SetTrue),
+                )
+                .arg(
+                    Arg::new("include_power")
+                        .long("include-power")
+                        .help("Include nominal voltage, internal-power groups, and power LUT templates")
+                        .action(ArgAction::SetTrue),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("liberty-proto-info")
+                .about("Reports metadata and structural counts for a Liberty proto")
+                .arg(
+                    Arg::new("liberty_proto")
+                        .value_name("LIBERTY_PROTO")
+                        .help("Input Liberty proto (.proto, .textproto, or either with .gz)")
+                        .required(true)
+                        .action(ArgAction::Set),
                 ),
         )
         .subcommand(
@@ -1885,7 +1923,7 @@ fn main() {
                 .arg(
                     Arg::new("liberty_proto")
                         .long("liberty_proto")
-                        .help("Input Liberty proto (.proto or .textproto)")
+                        .help("Input Liberty proto (.proto, .textproto, or either with .gz)")
                         .required(true)
                         .action(ArgAction::Set),
                 ),
@@ -1903,7 +1941,7 @@ fn main() {
                 .arg(
                     Arg::new("liberty_proto")
                         .long("liberty_proto")
-                        .help("Input Liberty proto (.proto or .textproto)")
+                        .help("Input Liberty proto (.proto, .textproto, or either with .gz)")
                         .required(true)
                         .action(ArgAction::Set),
                 )
@@ -1943,7 +1981,7 @@ fn main() {
                 .arg(
                     Arg::new("liberty_proto")
                         .long("liberty_proto")
-                        .help("Optional Liberty proto (.proto or .textproto). Omit this for assign-only structural netlists that use only ~, &, |, and ^.")
+                        .help("Optional Liberty proto (.proto, .textproto, or either with .gz). Omit this for assign-only structural netlists that use only ~, &, |, and ^.")
                         .action(ArgAction::Set),
                 )
                 .arg(
@@ -1984,7 +2022,7 @@ fn main() {
                 .arg(
                     Arg::new("liberty_proto")
                         .long("liberty_proto")
-                        .help("Input Liberty proto (.proto or .textproto)")
+                        .help("Input Liberty proto (.proto, .textproto, or either with .gz)")
                         .required(true)
                         .action(ArgAction::Set),
                 )
@@ -2034,7 +2072,7 @@ fn main() {
                 .arg(
                     Arg::new("liberty_proto")
                         .long("liberty_proto")
-                        .help("Timing-enabled Liberty proto (.proto or .textproto); used to auto-select mapping cells")
+                        .help("Timing-enabled Liberty proto (.proto, .textproto, or either with .gz); used to auto-select mapping cells")
                         .required(true)
                         .action(ArgAction::Set),
                 )
@@ -2077,7 +2115,7 @@ fn main() {
                 .arg(
                     Arg::new("liberty_proto")
                         .long("liberty_proto")
-                        .help("Timing-enabled Liberty proto (.proto or .textproto)")
+                        .help("Timing-enabled Liberty proto (.proto, .textproto, or either with .gz)")
                         .required(true)
                         .action(ArgAction::Set),
                 )
@@ -2127,7 +2165,7 @@ fn main() {
                 .arg(
                     Arg::new("liberty_proto")
                         .long("liberty_proto")
-                        .help("Liberty proto (.proto or .textproto)")
+                        .help("Liberty proto (.proto, .textproto, or either with .gz)")
                         .required(true)
                         .action(ArgAction::Set),
                 )
@@ -2159,7 +2197,7 @@ fn main() {
                 .arg(
                     Arg::new("liberty_proto")
                         .long("liberty_proto")
-                        .help("Timing-enabled Liberty proto (.proto or .textproto)")
+                        .help("Timing-enabled Liberty proto (.proto, .textproto, or either with .gz)")
                         .required(true)
                         .action(ArgAction::Set),
                 )
@@ -2219,7 +2257,7 @@ fn main() {
                     clap::Arg::new("liberty_proto")
                         .long("liberty_proto")
                         .value_name("LIBERTY_PROTO")
-                        .help("Liberty proto (.proto or .textproto) describing the cell library used by the netlist")
+                        .help("Liberty proto (.proto, .textproto, or either with .gz) describing the cell library used by the netlist")
                         .required(true)
                         .action(ArgAction::Set),
                 )
@@ -3698,6 +3736,12 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("lib2proto", subm)) => {
             lib2proto::handle_lib2proto(subm);
+        }
+        Some(("liberty-proto-info", subm)) => {
+            if let Err(e) = liberty_proto_info::handle_liberty_proto_info(subm) {
+                eprintln!("liberty-proto-info error: {e}");
+                std::process::exit(1);
+            }
         }
         Some(("lib-query", subm)) => {
             lib_query::handle_lib_query(subm, &config);

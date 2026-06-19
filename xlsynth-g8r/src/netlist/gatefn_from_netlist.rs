@@ -5,7 +5,7 @@
 use crate::aig::gate::{AigBitVector, AigOperand, GateFn};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use crate::liberty::cell_formula::Term;
-use crate::liberty_proto::{Cell, Library, PinDirection, SequentialKind};
+use crate::liberty_model::{Cell, Library, PinDirection, SequentialKind};
 use crate::netlist::normalized::{
     BitExpr, BitIndex, BitSource, NormalizedConnection, NormalizedInstance, NormalizedNetlistModule,
 };
@@ -115,13 +115,16 @@ fn build_cell_formula_map(
         let state_vars: HashSet<String> = cell
             .sequential
             .iter()
-            .map(|seq| seq.state_var.clone())
+            .flat_map(|seq| {
+                std::iter::once(seq.state_var.clone())
+                    .chain(seq.complementary_state_var.iter().cloned())
+            })
             .collect();
         let mut sequential_terms: HashMap<String, (crate::liberty::cell_formula::Term, String)> =
             HashMap::new();
         if collapse_for_cell {
             for seq in &cell.sequential {
-                if seq.kind == crate::liberty_proto::SequentialKind::Latch as i32
+                if seq.kind == crate::liberty_model::SequentialKind::Latch as i32
                     && !seq.clock_expr.is_empty()
                 {
                     return Err(format!(
@@ -129,7 +132,7 @@ fn build_cell_formula_map(
                         cell.name, seq.state_var, seq.clock_expr
                     ));
                 }
-                if seq.kind == crate::liberty_proto::SequentialKind::Ff as i32
+                if seq.kind == crate::liberty_model::SequentialKind::Ff as i32
                     && (!seq.clear_expr.is_empty() || !seq.preset_expr.is_empty())
                 {
                     return Err(format!(
@@ -181,16 +184,23 @@ fn build_cell_formula_map(
                         seq.next_state
                     ));
                 }
-                let mut term = term;
-                let mut next_state_string = seq.next_state.clone();
-                if let Some(base_var) = seq.state_var.strip_suffix('N') {
-                    if state_vars.contains(base_var) {
-                        // Common Liberty convention: IQN is the complement of IQ.
-                        term = crate::liberty::cell_formula::Term::Negate(Box::new(term));
-                        next_state_string = format!("!({})", seq.next_state);
-                    }
+                sequential_terms.insert(
+                    seq.state_var.clone(),
+                    (term.clone(), seq.next_state.clone()),
+                );
+                if let Some(complementary_state_var) = seq
+                    .complementary_state_var
+                    .as_ref()
+                    .filter(|name| !name.is_empty())
+                {
+                    sequential_terms.insert(
+                        complementary_state_var.clone(),
+                        (
+                            crate::liberty::cell_formula::Term::Negate(Box::new(term)),
+                            format!("!({})", seq.next_state),
+                        ),
+                    );
                 }
-                sequential_terms.insert(seq.state_var.clone(), (term, next_state_string));
             }
         }
         for pin in &cell.pins {
@@ -1420,7 +1430,7 @@ This indicates missing drivers or a DFF classification mismatch; re-run with RUS
 mod tests {
     use super::*;
     use crate::aig_sim::gate_sim::{self, Collect};
-    use crate::liberty_proto::{Cell, Library, Pin, PinDirection};
+    use crate::liberty_model::{Cell, Library, Pin, PinDirection};
     use crate::netlist::parse::{
         Net, NetIndex, NetRef, NetlistInstance, NetlistModule, NetlistPort, Parser, PortDirection,
         TokenScanner,
@@ -1771,18 +1781,18 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_proto::Library {
-            cells: vec![crate::liberty_proto::Cell {
+        let liberty_lib = crate::liberty_model::Library {
+            cells: vec![crate::liberty_model::Cell {
                 name: "INV".to_string(),
                 pins: vec![
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "A".to_string(),
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "Y".to_string(),
                         direction: 1,
                         function: "(!A)".to_string(),
@@ -1858,18 +1868,18 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_proto::Library {
-            cells: vec![crate::liberty_proto::Cell {
+        let liberty_lib = crate::liberty_model::Library {
+            cells: vec![crate::liberty_model::Cell {
                 name: "INV".to_string(),
                 pins: vec![
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "A".to_string(),
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "Y".to_string(),
                         direction: 1,
                         function: "(!A)".to_string(),
@@ -1934,25 +1944,25 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_proto::Library {
-            cells: vec![crate::liberty_proto::Cell {
+        let liberty_lib = crate::liberty_model::Library {
+            cells: vec![crate::liberty_model::Cell {
                 name: "AND2".to_string(),
                 pins: vec![
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "A".to_string(),
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "B".to_string(),
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "Y".to_string(),
                         direction: 1,
                         function: "(A & B)".to_string(),
@@ -2035,18 +2045,18 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_proto::Library {
-            cells: vec![crate::liberty_proto::Cell {
+        let liberty_lib = crate::liberty_model::Library {
+            cells: vec![crate::liberty_model::Cell {
                 name: "BUF".to_string(),
                 pins: vec![
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "A".to_string(),
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "Y".to_string(),
                         direction: 1,
                         function: "A".to_string(),
@@ -2505,18 +2515,18 @@ endmodule
             instances,
         };
         // Liberty with a DFF cell having pins D (input) and Q (output)
-        let liberty_lib = crate::liberty_proto::Library {
-            cells: vec![crate::liberty_proto::Cell {
+        let liberty_lib = crate::liberty_model::Library {
+            cells: vec![crate::liberty_model::Cell {
                 name: "DFF".to_string(),
                 pins: vec![
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "D".to_string(),
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "Q".to_string(),
                         direction: 1,
                         function: "Q".to_string(),
@@ -2609,18 +2619,18 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_proto::Library {
-            cells: vec![crate::liberty_proto::Cell {
+        let liberty_lib = crate::liberty_model::Library {
+            cells: vec![crate::liberty_model::Cell {
                 name: "DFF".to_string(),
                 pins: vec![
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "D".to_string(),
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "Q".to_string(),
                         direction: 1,
                         function: "Q".to_string(),
@@ -2704,18 +2714,18 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_proto::Library {
-            cells: vec![crate::liberty_proto::Cell {
+        let liberty_lib = crate::liberty_model::Library {
+            cells: vec![crate::liberty_model::Cell {
                 name: "DFF".to_string(),
                 pins: vec![
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "d".to_string(),
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "q".to_string(),
                         direction: 1,
                         function: "d".to_string(),
@@ -2804,18 +2814,18 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_proto::Library {
-            cells: vec![crate::liberty_proto::Cell {
+        let liberty_lib = crate::liberty_model::Library {
+            cells: vec![crate::liberty_model::Cell {
                 name: "DFFN".to_string(),
                 pins: vec![
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "D".to_string(),
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "QN".to_string(),
                         direction: 1,
                         function: "IQN".to_string(),
@@ -2897,18 +2907,18 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_proto::Library {
-            cells: vec![crate::liberty_proto::Cell {
+        let liberty_lib = crate::liberty_model::Library {
+            cells: vec![crate::liberty_model::Cell {
                 name: "DFFN".to_string(),
                 pins: vec![
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "D".to_string(),
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "QN".to_string(),
                         direction: 1,
                         function: "IQN".to_string(),
@@ -2993,18 +3003,18 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_proto::Library {
-            cells: vec![crate::liberty_proto::Cell {
+        let liberty_lib = crate::liberty_model::Library {
+            cells: vec![crate::liberty_model::Cell {
                 name: "DFFN".to_string(),
                 pins: vec![
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "D".to_string(),
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "QN".to_string(),
                         direction: 1,
                         function: "IQN".to_string(),
@@ -3097,25 +3107,25 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_proto::Library {
-            cells: vec![crate::liberty_proto::Cell {
+        let liberty_lib = crate::liberty_model::Library {
+            cells: vec![crate::liberty_model::Cell {
                 name: "DFFX".to_string(),
                 pins: vec![
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "D".to_string(),
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "Q".to_string(),
                         direction: 1,
                         function: "IQ".to_string(),
                         is_clocking_pin: false,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "QN".to_string(),
                         direction: 1,
                         function: "IQN".to_string(),
@@ -3124,24 +3134,15 @@ endmodule
                     },
                 ],
                 area: 1.0,
-                sequential: vec![
-                    crate::liberty_proto::Sequential {
-                        state_var: "IQ".to_string(),
-                        next_state: "D".to_string(),
-                        clock_expr: "CLK".to_string(),
-                        kind: crate::liberty_proto::SequentialKind::Ff as i32,
-                        clear_expr: String::new(),
-                        preset_expr: String::new(),
-                    },
-                    crate::liberty_proto::Sequential {
-                        state_var: "IQN".to_string(),
-                        next_state: "D".to_string(),
-                        clock_expr: "CLK".to_string(),
-                        kind: crate::liberty_proto::SequentialKind::Ff as i32,
-                        clear_expr: String::new(),
-                        preset_expr: String::new(),
-                    },
-                ],
+                sequential: vec![crate::liberty_model::Sequential {
+                    state_var: "IQ".to_string(),
+                    next_state: "D".to_string(),
+                    clock_expr: "CLK".to_string(),
+                    kind: crate::liberty_model::SequentialKind::Ff as i32,
+                    clear_expr: String::new(),
+                    preset_expr: String::new(),
+                    complementary_state_var: Some("IQN".to_string()),
+                }],
                 clock_gate: None,
                 ..Default::default()
             }],
@@ -3230,19 +3231,19 @@ endmodule
         };
         // Include an unsupported sequential cell in the library, but do not instantiate
         // it.
-        let liberty_lib = crate::liberty_proto::Library {
+        let liberty_lib = crate::liberty_model::Library {
             cells: vec![
-                crate::liberty_proto::Cell {
+                crate::liberty_model::Cell {
                     name: "INV".to_string(),
                     pins: vec![
-                        crate::liberty_proto::Pin {
+                        crate::liberty_model::Pin {
                             name: "A".to_string(),
                             direction: 2,
                             function: String::new(),
                             is_clocking_pin: false,
                             ..Default::default()
                         },
-                        crate::liberty_proto::Pin {
+                        crate::liberty_model::Pin {
                             name: "Y".to_string(),
                             direction: 1,
                             function: "!A".to_string(),
@@ -3255,31 +3256,31 @@ endmodule
                     clock_gate: None,
                     ..Default::default()
                 },
-                crate::liberty_proto::Cell {
+                crate::liberty_model::Cell {
                     name: "DFFEN".to_string(),
                     pins: vec![
-                        crate::liberty_proto::Pin {
+                        crate::liberty_model::Pin {
                             name: "D".to_string(),
                             direction: 2,
                             function: String::new(),
                             is_clocking_pin: false,
                             ..Default::default()
                         },
-                        crate::liberty_proto::Pin {
+                        crate::liberty_model::Pin {
                             name: "EN".to_string(),
                             direction: 2,
                             function: String::new(),
                             is_clocking_pin: false,
                             ..Default::default()
                         },
-                        crate::liberty_proto::Pin {
+                        crate::liberty_model::Pin {
                             name: "CLK".to_string(),
                             direction: 2,
                             function: String::new(),
                             is_clocking_pin: true,
                             ..Default::default()
                         },
-                        crate::liberty_proto::Pin {
+                        crate::liberty_model::Pin {
                             name: "Q".to_string(),
                             direction: 1,
                             function: "IQ".to_string(),
@@ -3288,13 +3289,14 @@ endmodule
                         },
                     ],
                     area: 1.0,
-                    sequential: vec![crate::liberty_proto::Sequential {
+                    sequential: vec![crate::liberty_model::Sequential {
                         state_var: "IQ".to_string(),
                         next_state: "(!EN * IQ) + (EN * D)".to_string(),
                         clock_expr: "CLK".to_string(),
-                        kind: crate::liberty_proto::SequentialKind::Ff as i32,
+                        kind: crate::liberty_model::SequentialKind::Ff as i32,
                         clear_expr: String::new(),
                         preset_expr: String::new(),
+                        complementary_state_var: None,
                     }],
                     clock_gate: None,
                     ..Default::default()
@@ -3377,32 +3379,32 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_proto::Library {
-            cells: vec![crate::liberty_proto::Cell {
+        let liberty_lib = crate::liberty_model::Library {
+            cells: vec![crate::liberty_model::Cell {
                 name: "DFFAR".to_string(),
                 pins: vec![
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "D".to_string(),
                         direction: 2,
                         function: String::new(),
                         is_clocking_pin: false,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "RN".to_string(),
                         direction: 2,
                         function: String::new(),
                         is_clocking_pin: false,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "CLK".to_string(),
                         direction: 2,
                         function: String::new(),
                         is_clocking_pin: true,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "Q".to_string(),
                         direction: 1,
                         function: "IQ".to_string(),
@@ -3411,13 +3413,14 @@ endmodule
                     },
                 ],
                 area: 1.0,
-                sequential: vec![crate::liberty_proto::Sequential {
+                sequential: vec![crate::liberty_model::Sequential {
                     state_var: "IQ".to_string(),
                     next_state: "D".to_string(),
                     clock_expr: "CLK".to_string(),
-                    kind: crate::liberty_proto::SequentialKind::Ff as i32,
+                    kind: crate::liberty_model::SequentialKind::Ff as i32,
                     clear_expr: "!RN".to_string(),
                     preset_expr: String::new(),
+                    complementary_state_var: None,
                 }],
                 clock_gate: None,
                 ..Default::default()
@@ -3500,25 +3503,25 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_proto::Library {
-            cells: vec![crate::liberty_proto::Cell {
+        let liberty_lib = crate::liberty_model::Library {
+            cells: vec![crate::liberty_model::Cell {
                 name: "LATCH".to_string(),
                 pins: vec![
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "D".to_string(),
                         direction: 2,
                         function: String::new(),
                         is_clocking_pin: false,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "CLK".to_string(),
                         direction: 2,
                         function: String::new(),
                         is_clocking_pin: true,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "Q".to_string(),
                         direction: 1,
                         function: "IQ".to_string(),
@@ -3527,13 +3530,14 @@ endmodule
                     },
                 ],
                 area: 1.0,
-                sequential: vec![crate::liberty_proto::Sequential {
+                sequential: vec![crate::liberty_model::Sequential {
                     state_var: "IQ".to_string(),
                     next_state: "D".to_string(),
                     clock_expr: "CLK".to_string(),
-                    kind: crate::liberty_proto::SequentialKind::Latch as i32,
+                    kind: crate::liberty_model::SequentialKind::Latch as i32,
                     clear_expr: String::new(),
                     preset_expr: String::new(),
+                    complementary_state_var: None,
                 }],
                 clock_gate: None,
                 ..Default::default()
@@ -3616,32 +3620,32 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_proto::Library {
-            cells: vec![crate::liberty_proto::Cell {
+        let liberty_lib = crate::liberty_model::Library {
+            cells: vec![crate::liberty_model::Cell {
                 name: "DFFEN".to_string(),
                 pins: vec![
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "D".to_string(),
                         direction: 2,
                         function: String::new(),
                         is_clocking_pin: false,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "EN".to_string(),
                         direction: 2,
                         function: String::new(),
                         is_clocking_pin: false,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "CLK".to_string(),
                         direction: 2,
                         function: String::new(),
                         is_clocking_pin: true,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "Q".to_string(),
                         direction: 1,
                         function: "IQ".to_string(),
@@ -3650,13 +3654,14 @@ endmodule
                     },
                 ],
                 area: 1.0,
-                sequential: vec![crate::liberty_proto::Sequential {
+                sequential: vec![crate::liberty_model::Sequential {
                     state_var: "IQ".to_string(),
                     next_state: "(!EN * IQ) + (EN * D)".to_string(),
                     clock_expr: "CLK".to_string(),
-                    kind: crate::liberty_proto::SequentialKind::Ff as i32,
+                    kind: crate::liberty_model::SequentialKind::Ff as i32,
                     clear_expr: String::new(),
                     preset_expr: String::new(),
+                    complementary_state_var: None,
                 }],
                 clock_gate: None,
                 ..Default::default()
@@ -3729,25 +3734,25 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_proto::Library {
-            cells: vec![crate::liberty_proto::Cell {
+        let liberty_lib = crate::liberty_model::Library {
+            cells: vec![crate::liberty_model::Cell {
                 name: "DFFNP".to_string(),
                 pins: vec![
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "D".to_string(),
                         direction: 2,
                         function: String::new(),
                         is_clocking_pin: false,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "CLK".to_string(),
                         direction: 2,
                         function: String::new(),
                         is_clocking_pin: true,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "Q".to_string(),
                         direction: 1,
                         function: "IQ".to_string(),
@@ -3756,13 +3761,14 @@ endmodule
                     },
                 ],
                 area: 1.0,
-                sequential: vec![crate::liberty_proto::Sequential {
+                sequential: vec![crate::liberty_model::Sequential {
                     state_var: "IQ".to_string(),
                     next_state: "D & FOO".to_string(),
                     clock_expr: "CLK".to_string(),
-                    kind: crate::liberty_proto::SequentialKind::Ff as i32,
+                    kind: crate::liberty_model::SequentialKind::Ff as i32,
                     clear_expr: String::new(),
                     preset_expr: String::new(),
+                    complementary_state_var: None,
                 }],
                 clock_gate: None,
                 ..Default::default()
@@ -3820,18 +3826,18 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_proto::Library {
-            cells: vec![crate::liberty_proto::Cell {
+        let liberty_lib = crate::liberty_model::Library {
+            cells: vec![crate::liberty_model::Cell {
                 name: "DFF".to_string(),
                 pins: vec![
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "D".to_string(),
                         direction: 2,
                         function: String::new(),
                         is_clocking_pin: false,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "Q".to_string(),
                         direction: 1,
                         function: "IQ".to_string(),
@@ -3918,25 +3924,25 @@ endmodule
             assigns: vec![],
             instances,
         };
-        let liberty_lib = crate::liberty_proto::Library {
-            cells: vec![crate::liberty_proto::Cell {
+        let liberty_lib = crate::liberty_model::Library {
+            cells: vec![crate::liberty_model::Cell {
                 name: "AND2".to_string(),
                 pins: vec![
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "A".to_string(),
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "B".to_string(),
                         direction: 2,
                         function: "".to_string(),
                         is_clocking_pin: false,
                         ..Default::default()
                     },
-                    crate::liberty_proto::Pin {
+                    crate::liberty_model::Pin {
                         name: "Y".to_string(),
                         direction: 1,
                         function: "(A & B)".to_string(),

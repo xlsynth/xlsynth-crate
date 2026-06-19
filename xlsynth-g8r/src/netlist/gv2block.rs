@@ -4,7 +4,7 @@
 
 use crate::liberty::cell_formula::{EmitContext as FormulaEmitContext, Term, parse_formula};
 use crate::liberty::indexed::IndexedLibrary;
-use crate::liberty_proto::{Cell, PinDirection, SequentialKind};
+use crate::liberty_model::{Cell, PinDirection, SequentialKind};
 use crate::netlist::io::{ParsedNetlist, load_liberty_from_path, parse_netlist_from_path};
 use crate::netlist::normalized::{
     BitExpr, BitIndex, BitSource, NormalizedInstance, NormalizedNetlistModule,
@@ -800,7 +800,9 @@ fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<(PirFn,
     let mut registers: Vec<Register> = Vec::new();
     let mut reset_meta: Option<BlockResetMetadata> = None;
     let mut state_var_name: Option<String> = None;
+    let mut complementary_state_var_name: Option<String> = None;
     let mut state_ref: Option<NodeRef> = None;
+    let mut complementary_state_ref: Option<NodeRef> = None;
     let mut reset_node_ref: Option<NodeRef> = None;
 
     if let Some(seq) = cell.sequential.first() {
@@ -827,6 +829,20 @@ fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<(PirFn,
         );
         state_ref = Some(reg_read);
         input_map.insert(state_var.clone(), reg_read);
+        if let Some(complementary_state_var) = seq
+            .complementary_state_var
+            .as_ref()
+            .filter(|name| !name.is_empty())
+        {
+            let inverted_reg_read = b.add_node(
+                NodePayload::Unop(Unop::Not, reg_read),
+                Type::Bits(1),
+                Some(&format!("{}_q", complementary_state_var)),
+            );
+            complementary_state_var_name = Some(complementary_state_var.clone());
+            complementary_state_ref = Some(inverted_reg_read);
+            input_map.insert(complementary_state_var.clone(), inverted_reg_read);
+        }
 
         if !seq.clear_expr.is_empty() || !seq.preset_expr.is_empty() {
             let (expr, reset_value) = if !seq.clear_expr.is_empty() {
@@ -914,6 +930,11 @@ fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<(PirFn,
         } else if let (Some(state_var), Some(state_ref)) = (&state_var_name, state_ref) {
             if pin.name == *state_var {
                 state_ref
+            } else if complementary_state_var_name
+                .as_ref()
+                .is_some_and(|name| pin.name == *name)
+            {
+                complementary_state_ref.expect("complementary state name has a node")
             } else {
                 return Err(anyhow!(format!(
                     "cell '{}' output pin '{}' missing function",

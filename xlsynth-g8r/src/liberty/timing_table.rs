@@ -6,7 +6,7 @@
 //! dimensions vector. This wrapper validates shape consistency and offers safe
 //! N-D indexing.
 
-use crate::liberty_proto::TimingTable;
+use crate::liberty_model::TimingTable;
 use std::fmt;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

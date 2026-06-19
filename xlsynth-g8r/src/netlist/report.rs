@@ -3,7 +3,7 @@
 //! Area, timing, and level summaries for parsed gate-level netlists.
 
 use crate::liberty::LibraryWithTimingData;
-use crate::liberty_proto::Library;
+use crate::liberty_model::Library;
 pub use crate::netlist::io::{resolve_symbol, select_module};
 use crate::netlist::parse::{Net, NetlistModule, PortDirection};
 use crate::netlist::sta::{
@@ -252,8 +252,8 @@ pub fn build_netlist_report(
     library: &LibraryWithTimingData,
     options: StaOptions,
 ) -> Result<NetlistReport> {
-    let area = build_area_report(module, interner, library.as_proto())?;
-    let stages = analyze_register_stages(module, nets, interner, library.as_proto())?;
+    let area = build_area_report(module, interner, library.as_model())?;
+    let stages = analyze_register_stages(module, nets, interner, library.as_model())?;
     if stages.register_indices.is_empty() {
         let sta = build_sta_report(module, nets, interner, library, options)?;
         return Ok(NetlistReport {
@@ -378,7 +378,7 @@ pub fn build_netlist_report(
 mod tests {
     use super::{build_area_report, build_netlist_report, select_module};
     use crate::liberty::LibraryWithTimingData;
-    use crate::liberty_proto::{
+    use crate::liberty_model::{
         Cell, Library, Pin, PinDirection, Sequential, SequentialKind, TimingArc, TimingTable,
     };
     use crate::netlist::io::ParsedNetlist;
@@ -640,7 +640,7 @@ endmodule
 "#,
         );
         let module = select_module(&parsed, None).expect("select only module");
-        let library = LibraryWithTimingData::from_proto(inv_nand_library());
+        let library = LibraryWithTimingData::from_model(inv_nand_library());
         let report = build_netlist_report(
             module,
             &parsed.nets,
@@ -672,7 +672,7 @@ endmodule
 "#,
         );
         let module = select_module(&parsed, None).expect("select only module");
-        let library = LibraryWithTimingData::from_proto(inv_nand_library());
+        let library = LibraryWithTimingData::from_model(inv_nand_library());
         let report = build_netlist_report(
             module,
             &parsed.nets,
@@ -703,7 +703,7 @@ endmodule
 "#,
         );
         let module = select_module(&parsed, None).expect("select only module");
-        let library = LibraryWithTimingData::from_proto(inv_nand_library());
+        let library = LibraryWithTimingData::from_model(inv_nand_library());
         let report = build_netlist_report(
             module,
             &parsed.nets,
@@ -742,7 +742,7 @@ endmodule
 "#,
         );
         let module = select_module(&parsed, None).expect("select only module");
-        let library = LibraryWithTimingData::from_proto(inv_nand_library());
+        let library = LibraryWithTimingData::from_model(inv_nand_library());
         let report = build_netlist_report(
             module,
             &parsed.nets,
@@ -823,7 +823,7 @@ endmodule
 "#,
         );
         let module = select_module(&parsed, None).expect("select only module");
-        let library = LibraryWithTimingData::from_proto(inv_nand_library());
+        let library = LibraryWithTimingData::from_model(inv_nand_library());
         let report = build_netlist_report(
             module,
             &parsed.nets,
@@ -863,7 +863,7 @@ endmodule
 "#,
         );
         let module = select_module(&parsed, None).expect("select only module");
-        let library = LibraryWithTimingData::from_proto(inv_nand_library());
+        let library = LibraryWithTimingData::from_model(inv_nand_library());
         let report = build_netlist_report(
             module,
             &parsed.nets,
@@ -909,7 +909,7 @@ endmodule
 "#,
         );
         let module = select_module(&parsed, None).expect("select only module");
-        let library = LibraryWithTimingData::from_proto(inv_nand_library());
+        let library = LibraryWithTimingData::from_model(inv_nand_library());
         let report = build_netlist_report(
             module,
             &parsed.nets,
@@ -951,7 +951,7 @@ endmodule
 "#,
         );
         let module = select_module(&parsed, None).expect("select only module");
-        let library = LibraryWithTimingData::from_proto(inv_nand_library());
+        let library = LibraryWithTimingData::from_model(inv_nand_library());
         let report = build_netlist_report(
             module,
             &parsed.nets,

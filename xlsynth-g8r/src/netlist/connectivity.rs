@@ -8,7 +8,7 @@
 //! consumers walk the graph.
 
 use crate::liberty::IndexedLibrary;
-use crate::liberty_proto::PinDirection;
+use crate::liberty_model::PinDirection;
 use crate::netlist::normalized::{BitIndex, BitSource, NormalizedNetlistModule};
 use crate::netlist::parse::{InstIndex, Net, NetIndex, NetlistModule, PortDirection, PortId};
 use anyhow::Result;
@@ -389,7 +389,7 @@ fn resolve_to_string(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::liberty_proto::{Cell, Library, Pin};
+    use crate::liberty_model::{Cell, Library, Pin};
     use crate::netlist::parse::{
         Net, NetRef, NetlistInstance, NetlistModule, NetlistPort, PortDirection,
     };

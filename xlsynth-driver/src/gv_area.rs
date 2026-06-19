@@ -40,7 +40,7 @@ pub fn handle_gv_area(matches: &ArgMatches) {
         std::process::exit(1)
     });
     let report =
-        build_area_report(module, &parsed.interner, liberty.as_proto()).unwrap_or_else(|e| {
+        build_area_report(module, &parsed.interner, liberty.as_model()).unwrap_or_else(|e| {
             eprintln!("{} error: failed to compute cell area: {:#}", SUBCOMMAND, e);
             std::process::exit(1)
         });

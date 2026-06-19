@@ -1,23 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod ascii_stream;
+pub mod cell_filter;
 pub mod cell_formula;
 pub mod descriptor;
 pub mod indexed;
 pub mod liberty_parser;
-pub mod liberty_to_proto;
 pub mod load;
+pub mod model;
+pub mod parser;
+pub mod proto_info;
 pub mod query;
 pub mod timing_table;
 pub mod util;
+pub use cell_filter::{CellFilterAction, CellFilterPolicy, CellFilterRule, CellFilterStats};
 pub use indexed::IndexedLibrary;
 pub use liberty_parser::{CharReader, LibertyParser};
 pub use load::{Library, LibraryWithTimingData};
+pub use model::{library_from_proto, library_to_proto};
+pub use proto_info::{LibertyProtoInfo, liberty_proto_info_from_path};
 pub use timing_table::{TimingTableArrayError, TimingTableArrayView};
 
 #[cfg(test)]
 pub mod test_utils {
-    use crate::liberty_proto::{Cell, Library, Pin, PinDirection};
+    use crate::liberty_model::{Cell, Library, Pin, PinDirection};
 
     /// Small test Liberty library used across unit tests. Contains:
     /// - `INV` with pins `A` (input) and `Y` (output).

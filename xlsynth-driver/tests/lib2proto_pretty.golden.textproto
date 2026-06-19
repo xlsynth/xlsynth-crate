@@ -1,0 +1,64 @@
+# proto-file: xlsynth-g8r/proto/liberty.proto
+# proto-message: liberty.Library
+
+format_magic: 5496997758161146447
+cells: [{
+  name: "INV"
+  pins: [{
+    direction: INPUT
+    name: "A"
+    capacitance: 0.1
+    internal_power: [{
+      related_pg_pin: "VDD"
+      tables: [{
+        transition: POWER_TRANSITION_RISE
+        template_id: 2
+        values: [0.2]
+        dimensions: [1]
+      }, {
+        transition: POWER_TRANSITION_FALL
+        template_id: 2
+        values: [0.3]
+        dimensions: [1]
+      }]
+    }]
+  }, {
+    direction: OUTPUT
+    function: "!A"
+    name: "Y"
+    timing_arcs: [{
+      related_pin: "A"
+      timing_sense: "negative_unate"
+      timing_type: "combinational"
+      tables: [{
+        kind: "cell_rise"
+        template_id: 1
+        values: [0.4]
+        dimensions: [1]
+      }]
+    }]
+  }]
+  area: 1.0
+}]
+units {
+  time_unit: "1ns"
+  capacitance_unit: "1pf"
+  voltage_unit: "1V"
+}
+lu_table_templates: [{
+  kind: "lu_table_template"
+  name: "timing_tmpl"
+  variable_1: "input_net_transition"
+  index_1_id: 1
+}, {
+  kind: "power_lut_template"
+  name: "power_tmpl"
+  variable_1: "input_transition_time"
+  index_1_id: 1
+}]
+nominal_voltage: 0.7
+provenance: "asap7 commit abcde1234, generated locally"
+source_files: ["test.lib"]
+lut_axes: [{
+  values: [0.1]
+}]

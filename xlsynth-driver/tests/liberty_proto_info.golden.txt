@@ -1,0 +1,17 @@
+Size: 357 bytes (0.00 MiB)
+SHA-256: 0e3fecbaa8acac72b0cdae42f0636e40ec6695ba3215c822adfae713350005a0
+Provenance: asap7 commit abcde1234, generated locally
+Source files (1):
+  - test.lib
+Cells: 1
+  Combinational: 1
+  Sequential: 0
+  Native dont-use: 0
+LUT templates: 2
+Timing arcs: 1
+Internal-power groups: 1
+Rise power tables: 1
+Fall power tables: 1
+Both-direction power tables: 0
+Unknown-direction power tables: 0
+Nominal voltage: 0.7 V

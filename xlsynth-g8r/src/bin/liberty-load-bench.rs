@@ -11,7 +11,9 @@ use xlsynth_g8r::liberty::load::{
     TimingTableSummary, count_timing_tables, count_timing_values,
     decode_timing_table_summary_skip_values_from_bytes,
 };
-use xlsynth_g8r::liberty_proto::Library;
+use xlsynth_g8r::liberty::model::library_from_proto;
+use xlsynth_g8r::liberty_model::Library;
+use xlsynth_g8r::liberty_proto::Library as WireLibrary;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -65,7 +67,9 @@ fn read_library_binary(path: &Path) -> Result<Vec<u8>, String> {
 
 fn decode_full_library(path: &Path) -> Result<Library, String> {
     let buf = read_library_binary(path)?;
-    Library::decode(&buf[..]).map_err(|e| format!("decoding '{}': {e}", path.display()))
+    let wire =
+        WireLibrary::decode(&buf[..]).map_err(|e| format!("decoding '{}': {e}", path.display()))?;
+    library_from_proto(wire).map_err(|e| format!("expanding '{}': {e:#}", path.display()))
 }
 
 fn decode_library_skip_timing_payload(path: &Path) -> Result<TimingTableSummary, String> {

@@ -5,9 +5,9 @@ use crate::liberty::liberty_parser::{Block, BlockMember, Value};
 use crate::liberty::timing_table::TimingTableArrayView;
 use crate::liberty::util::human_readable_size;
 use crate::liberty::{CharReader, LibertyParser};
-use crate::liberty_proto::{
-    Cell, ClockGate, Library, LibraryUnits, LuTableTemplate, Pin, PinDirection, Sequential,
-    SequentialKind, TimingArc, TimingTable,
+use crate::liberty_model::{
+    Cell, ClockGate, InternalPower, Library, LibraryUnits, LuTableTemplate, Pin, PinDirection,
+    PowerTable, PowerTransition, Sequential, SequentialKind, TimingArc, TimingTable,
 };
 use flate2::bufread::GzDecoder;
 use regex::Regex;
@@ -201,6 +201,40 @@ fn parse_library_units(block: &Block) -> LibraryUnits {
     units
 }
 
+/// Returns the library-level nominal voltage when declared in the source.
+fn parse_nominal_voltage(block: &Block) -> Result<Option<f64>, String> {
+    let mut nominal_voltage = None;
+    for member in &block.members {
+        let BlockMember::BlockAttr(attr) = member else {
+            continue;
+        };
+        if attr.attr_name != "nom_voltage" {
+            continue;
+        }
+        let Some(incoming) = value_to_optional_f64(&attr.value) else {
+            return Err(format!(
+                "Could not parse nom_voltage value {:?} as a number",
+                value_to_attr_string(&attr.value)
+            ));
+        };
+        if !incoming.is_finite() || incoming <= 0.0 {
+            return Err(format!(
+                "nom_voltage must be finite and positive, got {incoming}"
+            ));
+        }
+        match nominal_voltage {
+            Some(existing) if existing != incoming => {
+                return Err(format!(
+                    "Liberty library contains conflicting nom_voltage declarations: {existing} and {incoming}"
+                ));
+            }
+            Some(_) => {}
+            None => nominal_voltage = Some(incoming),
+        }
+    }
+    Ok(nominal_voltage)
+}
+
 /// Returns the library-level default VT group when declared in the source.
 fn parse_default_threshold_voltage_group(block: &Block) -> Option<String> {
     for member in &block.members {
@@ -328,7 +362,7 @@ impl ThresholdVoltageGroupInterner {
         Ok(id)
     }
 
-    fn class_indices_proto(&self) -> Vec<i32> {
+    fn class_indices(&self) -> Vec<i32> {
         if self.class_indices.iter().all(Option::is_none) {
             return vec![];
         }
@@ -574,6 +608,61 @@ fn parse_timing_table(block: &Block) -> Option<TimingTable> {
     Some(table)
 }
 
+/// Parses a Liberty rise/fall/common power table.
+fn parse_power_table(block: &Block) -> Option<PowerTable> {
+    let transition = match block.block_type.as_str() {
+        "rise_power" => PowerTransition::Rise,
+        "fall_power" => PowerTransition::Fall,
+        "power" => PowerTransition::Both,
+        _ => return None,
+    };
+    let table = parse_timing_table(block)?;
+    Some(PowerTable {
+        transition: transition as i32,
+        template_id: table.template_id,
+        index_1: table.index_1,
+        index_2: table.index_2,
+        index_3: table.index_3,
+        values: table.values,
+        dimensions: table.dimensions,
+        template_name: table.template_name,
+        ..Default::default()
+    })
+}
+
+/// Parses one Liberty `internal_power` group owned by a pin.
+fn parse_internal_power(block: &Block) -> InternalPower {
+    let mut internal_power = InternalPower::default();
+    for member in &block.members {
+        match member {
+            BlockMember::BlockAttr(attr) => match attr.attr_name.as_str() {
+                "related_pin" => {
+                    internal_power.related_pins.extend(
+                        value_to_attr_string(&attr.value)
+                            .split_whitespace()
+                            .map(str::to_owned),
+                    );
+                }
+                "when" => internal_power.when = value_to_attr_string(&attr.value),
+                "related_pg_pin" => {
+                    internal_power.related_pg_pin = value_to_attr_string(&attr.value)
+                }
+                _ => {
+                    // Keep only typed internal-power selector fields.
+                }
+            },
+            BlockMember::SubBlock(sub_block) => {
+                if let Some(table) = parse_power_table(sub_block) {
+                    internal_power.tables.push(table);
+                }
+            }
+        }
+    }
+    internal_power.related_pins.sort();
+    internal_power.tables.sort_by_key(|table| table.transition);
+    internal_power
+}
+
 fn parse_timing_arc(block: &Block) -> TimingArc {
     let mut arc = TimingArc::default();
     for member in &block.members {
@@ -648,14 +737,91 @@ fn axis_rank(index_1: &[f64], index_2: &[f64], index_3: &[f64]) -> usize {
 }
 
 fn normalize_dimensions_for_expected_rank(dimensions: &mut Vec<u32>, expected_rank: usize) {
-    // Liberty values("a, b") parses as a 1-element tuple around a CSV row.
-    // For genuine rank-1 tables this should be dimensions [N], not [1, N].
-    if expected_rank > 0 && dimensions.len() == expected_rank + 1 && dimensions[0] == 1 {
+    // Liberty values("a, b") parses as a 1-element tuple around a CSV row. For
+    // genuine rank-1 tables this should be dimensions [N], not [1, N]. Scalar
+    // tables can have multiple parser-only singleton wrappers, for example
+    // ASAP7's multiline values("0") form parses with dimensions [1, 1].
+    while dimensions.len() > expected_rank && dimensions.first() == Some(&1) {
         dimensions.remove(0);
     }
 }
 
-fn canonicalize_timing_table_references(library: &mut Library) {
+#[derive(Default)]
+struct TableCanonicalizationCounts {
+    resolved_template_refs: usize,
+    elided_index_1: usize,
+    elided_index_2: usize,
+    elided_index_3: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn canonicalize_table_reference(
+    table_label: &str,
+    expected_template_kind: &str,
+    context: &str,
+    template_id: &mut u32,
+    template_name: &mut String,
+    index_1: &mut Vec<f64>,
+    index_2: &mut Vec<f64>,
+    index_3: &mut Vec<f64>,
+    dimensions: &mut Vec<u32>,
+    template_id_by_kind_name: &HashMap<(String, String), u32>,
+    ambiguous_keys: &HashSet<(String, String)>,
+    template_axes: &[(Vec<f64>, Vec<f64>, Vec<f64>)],
+    counts: &mut TableCanonicalizationCounts,
+) {
+    if *template_id == 0 && !template_name.is_empty() {
+        let key = (expected_template_kind.to_string(), template_name.clone());
+        if let Some(resolved_id) = template_id_by_kind_name.get(&key) {
+            *template_id = *resolved_id;
+        } else if !ambiguous_keys.contains(&key) {
+            log::warn!(
+                "Could not resolve table template kind='{}' name='{}' for {} {}; keeping legacy name",
+                expected_template_kind,
+                template_name,
+                context,
+                table_label
+            );
+        }
+    }
+    if *template_id == 0 {
+        let explicit_rank = axis_rank(index_1, index_2, index_3);
+        normalize_dimensions_for_expected_rank(dimensions, explicit_rank);
+        return;
+    }
+    let template_idx = (*template_id - 1) as usize;
+    let Some((tmpl_index_1, tmpl_index_2, tmpl_index_3)) = template_axes.get(template_idx) else {
+        log::warn!(
+            "Table {} has out-of-range template_id={} for {}",
+            table_label,
+            template_id,
+            context
+        );
+        return;
+    };
+    counts.resolved_template_refs += 1;
+    let explicit_rank = axis_rank(index_1, index_2, index_3);
+    let template_rank = axis_rank(tmpl_index_1, tmpl_index_2, tmpl_index_3);
+    // A table may override only a subset of template axes. Preserve inherited
+    // template rank so singleton axes are not dropped.
+    let expected_rank = std::cmp::max(explicit_rank, template_rank);
+    normalize_dimensions_for_expected_rank(dimensions, expected_rank);
+    if *index_1 == *tmpl_index_1 && !index_1.is_empty() {
+        index_1.clear();
+        counts.elided_index_1 += 1;
+    }
+    if *index_2 == *tmpl_index_2 && !index_2.is_empty() {
+        index_2.clear();
+        counts.elided_index_2 += 1;
+    }
+    if *index_3 == *tmpl_index_3 && !index_3.is_empty() {
+        index_3.clear();
+        counts.elided_index_3 += 1;
+    }
+    template_name.clear();
+}
+
+fn canonicalize_table_references(library: &mut Library) {
     let (template_id_by_kind_name, ambiguous_keys) =
         build_template_id_map_by_kind_and_name(&library.lu_table_templates);
     for (template_kind, template_name) in &ambiguous_keys {
@@ -678,80 +844,59 @@ fn canonicalize_timing_table_references(library: &mut Library) {
         })
         .collect();
 
-    let mut resolved_template_refs = 0usize;
-    let mut elided_index_1 = 0usize;
-    let mut elided_index_2 = 0usize;
-    let mut elided_index_3 = 0usize;
+    let mut counts = TableCanonicalizationCounts::default();
     for cell in &mut library.cells {
         for pin in &mut cell.pins {
             for arc in &mut pin.timing_arcs {
                 for table in &mut arc.tables {
-                    if table.template_id == 0 && !table.template_name.is_empty() {
-                        let expected_kind = expected_template_kind_for_timing_table(table);
-                        let key = (expected_kind.to_string(), table.template_name.clone());
-                        if let Some(template_id) = template_id_by_kind_name.get(&key) {
-                            table.template_id = *template_id;
-                        } else if !ambiguous_keys.contains(&key) {
-                            log::warn!(
-                                "Could not resolve timing table template kind='{}' name='{}' for {}.{}; keeping legacy name",
-                                expected_kind,
-                                table.template_name,
-                                cell.name,
-                                pin.name
-                            );
-                        }
-                    }
-                    if table.template_id == 0 {
-                        let explicit_rank =
-                            axis_rank(&table.index_1, &table.index_2, &table.index_3);
-                        normalize_dimensions_for_expected_rank(
-                            &mut table.dimensions,
-                            explicit_rank,
-                        );
-                        continue;
-                    }
-                    let template_idx = (table.template_id - 1) as usize;
-                    if template_idx >= template_axes.len() {
-                        log::warn!(
-                            "Timing table {} has out-of-range template_id={} for {}.{}",
-                            table.kind,
-                            table.template_id,
-                            cell.name,
-                            pin.name
-                        );
-                        continue;
-                    }
-                    resolved_template_refs += 1;
-                    let (tmpl_index_1, tmpl_index_2, tmpl_index_3) = &template_axes[template_idx];
-                    let explicit_rank = axis_rank(&table.index_1, &table.index_2, &table.index_3);
-                    let template_rank = axis_rank(tmpl_index_1, tmpl_index_2, tmpl_index_3);
-                    // A table may override only a subset of template axes.
-                    // Preserve inherited template rank so singleton axes are not dropped.
-                    let expected_rank = std::cmp::max(explicit_rank, template_rank);
-                    normalize_dimensions_for_expected_rank(&mut table.dimensions, expected_rank);
-                    if table.index_1 == *tmpl_index_1 && !table.index_1.is_empty() {
-                        table.index_1.clear();
-                        elided_index_1 += 1;
-                    }
-                    if table.index_2 == *tmpl_index_2 && !table.index_2.is_empty() {
-                        table.index_2.clear();
-                        elided_index_2 += 1;
-                    }
-                    if table.index_3 == *tmpl_index_3 && !table.index_3.is_empty() {
-                        table.index_3.clear();
-                        elided_index_3 += 1;
-                    }
-                    table.template_name.clear();
+                    let expected_kind = expected_template_kind_for_timing_table(table);
+                    let context = format!("{}.{} timing", cell.name, pin.name);
+                    canonicalize_table_reference(
+                        &table.kind,
+                        expected_kind,
+                        &context,
+                        &mut table.template_id,
+                        &mut table.template_name,
+                        &mut table.index_1,
+                        &mut table.index_2,
+                        &mut table.index_3,
+                        &mut table.dimensions,
+                        &template_id_by_kind_name,
+                        &ambiguous_keys,
+                        &template_axes,
+                        &mut counts,
+                    );
+                }
+            }
+            for (power_i, internal_power) in pin.internal_power.iter_mut().enumerate() {
+                for table in &mut internal_power.tables {
+                    let context = format!("{}.{} internal_power #{}", cell.name, pin.name, power_i);
+                    let table_label = format!("transition={}", table.transition);
+                    canonicalize_table_reference(
+                        &table_label,
+                        "power_lut_template",
+                        &context,
+                        &mut table.template_id,
+                        &mut table.template_name,
+                        &mut table.index_1,
+                        &mut table.index_2,
+                        &mut table.index_3,
+                        &mut table.dimensions,
+                        &template_id_by_kind_name,
+                        &ambiguous_keys,
+                        &template_axes,
+                        &mut counts,
+                    );
                 }
             }
         }
     }
     log::info!(
-        "Canonicalized {} timing tables: elided index_1={} index_2={} index_3={}",
-        resolved_template_refs,
-        elided_index_1,
-        elided_index_2,
-        elided_index_3
+        "Canonicalized {} LUT tables: elided index_1={} index_2={} index_3={}",
+        counts.resolved_template_refs,
+        counts.elided_index_1,
+        counts.elided_index_2,
+        counts.elided_index_3
     );
 }
 
@@ -810,21 +955,20 @@ fn extract_sequential_blocks(
             continue;
         }
 
-        for state_var in state_vars {
-            sequential.push(Sequential {
-                state_var,
-                next_state: next_state.clone(),
-                clock_expr: clock_expr.clone(),
-                kind,
-                clear_expr: clear_expr.clone(),
-                preset_expr: preset_expr.clone(),
-            });
-        }
+        sequential.push(Sequential {
+            state_var: state_vars[0].clone(),
+            next_state,
+            clock_expr,
+            kind,
+            clear_expr,
+            preset_expr,
+            complementary_state_var: state_vars.get(1).cloned(),
+        });
     }
     sequential
 }
 
-fn block_to_proto_cells(
+fn block_to_model_cells(
     block: &Block,
     threshold_voltage_group_interner: &mut ThresholdVoltageGroupInterner,
 ) -> Result<Vec<Cell>, String> {
@@ -843,6 +987,7 @@ fn block_to_proto_cells(
             .unwrap_or_default();
         let mut area = 0.0;
         let mut threshold_voltage_group_id = 0;
+        let mut dont_use = None;
         let mut clocking_pins: HashSet<String> = HashSet::new();
         let sequential = extract_sequential_blocks(cell_block);
 
@@ -855,6 +1000,8 @@ fn block_to_proto_cells(
                 } else if attr.attr_name == "threshold_voltage_group" {
                     threshold_voltage_group_id = threshold_voltage_group_interner
                         .intern(value_to_attr_string(&attr.value), None)?;
+                } else if attr.attr_name == "dont_use" {
+                    dont_use = value_to_bool(&attr.value);
                 }
             }
         }
@@ -878,7 +1025,7 @@ fn block_to_proto_cells(
             }
         }
 
-        // Second pass: build Pin protos, marking pins that are referred to by any
+        // Second pass: build Pin models, marking pins that are referred to by any
         // clocked_on attribute in an ff block as clocking pins.
         let mut pins = Vec::new();
         let mut clock_gate_clock_pins = Vec::new();
@@ -904,6 +1051,7 @@ fn block_to_proto_cells(
             let mut pin_is_clock_gate_enable = false;
             let mut pin_is_clock_gate_test = false;
             let mut timing_arcs = Vec::new();
+            let mut internal_power = Vec::new();
             let mut capacitance = None;
             let mut rise_capacitance = None;
             let mut fall_capacitance = None;
@@ -939,6 +1087,8 @@ fn block_to_proto_cells(
                     BlockMember::SubBlock(sub_block) => {
                         if sub_block.block_type == "timing" {
                             timing_arcs.push(parse_timing_arc(sub_block));
+                        } else if sub_block.block_type == "internal_power" {
+                            internal_power.push(parse_internal_power(sub_block));
                         }
                     }
                 }
@@ -962,6 +1112,12 @@ fn block_to_proto_cells(
                     .then(a.timing_type.cmp(&b.timing_type))
                     .then(a.timing_sense.cmp(&b.timing_sense))
             });
+            internal_power.sort_by(|a, b| {
+                a.related_pins
+                    .cmp(&b.related_pins)
+                    .then(a.when.cmp(&b.when))
+                    .then(a.related_pg_pin.cmp(&b.related_pg_pin))
+            });
             pins.push(Pin {
                 direction,
                 function,
@@ -972,6 +1128,7 @@ fn block_to_proto_cells(
                 fall_capacitance,
                 max_capacitance,
                 timing_arcs,
+                internal_power,
             });
         }
         let has_clock_gate_roles = !clock_gate_clock_pins.is_empty()
@@ -1015,6 +1172,7 @@ fn block_to_proto_cells(
             sequential,
             clock_gate,
             threshold_voltage_group_id,
+            dont_use,
         });
     }
     cells.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1034,6 +1192,13 @@ fn apply_template_id_offset(cells: &mut [Cell], offset: u32) {
                     }
                 }
             }
+            for internal_power in &mut pin.internal_power {
+                for table in &mut internal_power.tables {
+                    if table.template_id != 0 {
+                        table.template_id += offset;
+                    }
+                }
+            }
         }
     }
 }
@@ -1048,7 +1213,105 @@ fn axes_are_contiguous(index_1: &[f64], index_2: &[f64], index_3: &[f64]) -> boo
     true
 }
 
+#[allow(clippy::too_many_arguments)]
+fn validate_table_payload(
+    context: &str,
+    expected_template_kind: &str,
+    template_id: u32,
+    index_1: &[f64],
+    index_2: &[f64],
+    index_3: &[f64],
+    dimensions: &[u32],
+    values: &[f64],
+    templates: &[LuTableTemplate],
+) -> Result<(), String> {
+    if let Err(e) = TimingTableArrayView::from_parts(dimensions, values) {
+        return Err(format!("{context} has invalid values/dimensions: {e}"));
+    }
+
+    let template = if template_id == 0 {
+        None
+    } else {
+        let template_idx = (template_id - 1) as usize;
+        let Some(tmpl) = templates.get(template_idx) else {
+            return Err(format!(
+                "{context} references out-of-range template_id={template_id}"
+            ));
+        };
+        if tmpl.kind != expected_template_kind {
+            return Err(format!(
+                "{context} template_id={template_id} resolves to kind='{}', expected '{}'",
+                tmpl.kind, expected_template_kind
+            ));
+        }
+        Some(tmpl)
+    };
+
+    let effective_index_1 = if !index_1.is_empty() {
+        index_1
+    } else if let Some(tmpl) = template {
+        tmpl.index_1.as_slice()
+    } else {
+        &[]
+    };
+    let effective_index_2 = if !index_2.is_empty() {
+        index_2
+    } else if let Some(tmpl) = template {
+        tmpl.index_2.as_slice()
+    } else {
+        &[]
+    };
+    let effective_index_3 = if !index_3.is_empty() {
+        index_3
+    } else if let Some(tmpl) = template {
+        tmpl.index_3.as_slice()
+    } else {
+        &[]
+    };
+
+    if !axes_are_contiguous(effective_index_1, effective_index_2, effective_index_3) {
+        return Err(format!(
+            "{context} has non-contiguous effective axes (index_1={}, index_2={}, index_3={})",
+            effective_index_1.len(),
+            effective_index_2.len(),
+            effective_index_3.len()
+        ));
+    }
+
+    let expected_rank = axis_rank(effective_index_1, effective_index_2, effective_index_3);
+    if dimensions.len() != expected_rank {
+        return Err(format!(
+            "{context} has dimension rank {} but expected {} from effective axes",
+            dimensions.len(),
+            expected_rank
+        ));
+    }
+    for (axis, (dimension, index)) in dimensions
+        .iter()
+        .zip([effective_index_1, effective_index_2, effective_index_3])
+        .enumerate()
+    {
+        if *dimension as usize != index.len() {
+            return Err(format!(
+                "{context} axis-{} dimension {} does not match effective index_{} length {}",
+                axis + 1,
+                dimension,
+                axis + 1,
+                index.len()
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_library_consistency(library: &Library) -> Result<(), String> {
+    if let Some(nominal_voltage) = library.nominal_voltage {
+        if !nominal_voltage.is_finite() || nominal_voltage <= 0.0 {
+            return Err(format!(
+                "nominal_voltage must be finite and positive, got {nominal_voltage}"
+            ));
+        }
+    }
     if !library.threshold_voltage_group_class_indices.is_empty()
         && library.threshold_voltage_group_class_indices.len()
             != library.threshold_voltage_groups.len()
@@ -1131,96 +1394,93 @@ pub fn validate_library_consistency(library: &Library) -> Result<(), String> {
                         "Cell '{}' pin '{}' arc related_pin='{}' table '{}'",
                         cell.name, pin.name, related_pin, table.kind
                     );
-                    if let Err(e) = TimingTableArrayView::from_timing_table(table) {
-                        return Err(format!("{context} has invalid values/dimensions: {e}"));
-                    }
+                    validate_table_payload(
+                        &context,
+                        expected_template_kind_for_timing_table(table),
+                        table.template_id,
+                        &table.index_1,
+                        &table.index_2,
+                        &table.index_3,
+                        &table.dimensions,
+                        &table.values,
+                        &library.lu_table_templates,
+                    )?;
+                }
+            }
 
-                    let template = if table.template_id == 0 {
-                        None
-                    } else {
-                        let template_idx = (table.template_id - 1) as usize;
-                        let Some(tmpl) = library.lu_table_templates.get(template_idx) else {
-                            return Err(format!(
-                                "{context} references out-of-range template_id={}",
-                                table.template_id
-                            ));
-                        };
-                        let expected_kind = expected_template_kind_for_timing_table(table);
-                        if tmpl.kind != expected_kind {
-                            return Err(format!(
-                                "{context} template_id={} resolves to kind='{}', expected '{}'",
-                                table.template_id, tmpl.kind, expected_kind
-                            ));
-                        }
-                        Some(tmpl)
-                    };
-
-                    let effective_index_1 = if !table.index_1.is_empty() {
-                        table.index_1.as_slice()
-                    } else if let Some(tmpl) = template {
-                        tmpl.index_1.as_slice()
-                    } else {
-                        &[]
-                    };
-                    let effective_index_2 = if !table.index_2.is_empty() {
-                        table.index_2.as_slice()
-                    } else if let Some(tmpl) = template {
-                        tmpl.index_2.as_slice()
-                    } else {
-                        &[]
-                    };
-                    let effective_index_3 = if !table.index_3.is_empty() {
-                        table.index_3.as_slice()
-                    } else if let Some(tmpl) = template {
-                        tmpl.index_3.as_slice()
-                    } else {
-                        &[]
-                    };
-
-                    if !axes_are_contiguous(effective_index_1, effective_index_2, effective_index_3)
-                    {
+            for (power_i, internal_power) in pin.internal_power.iter().enumerate() {
+                let mut related_pins = HashSet::new();
+                for related_pin in &internal_power.related_pins {
+                    if related_pin.is_empty() {
                         return Err(format!(
-                            "{context} has non-contiguous effective axes (index_1={}, index_2={}, index_3={})",
-                            effective_index_1.len(),
-                            effective_index_2.len(),
-                            effective_index_3.len()
+                            "Cell '{}' pin '{}' internal_power #{} has an empty related pin",
+                            cell.name, pin.name, power_i
                         ));
                     }
+                    if !related_pins.insert(related_pin) {
+                        return Err(format!(
+                            "Cell '{}' pin '{}' internal_power #{} repeats related pin '{}'",
+                            cell.name, pin.name, power_i, related_pin
+                        ));
+                    }
+                    if !pin_direction_by_name.contains_key(related_pin) {
+                        return Err(format!(
+                            "Cell '{}' pin '{}' internal_power #{} references unknown related pin '{}'",
+                            cell.name, pin.name, power_i, related_pin
+                        ));
+                    }
+                }
+                if internal_power.tables.is_empty() {
+                    return Err(format!(
+                        "Cell '{}' pin '{}' internal_power #{} has no power tables",
+                        cell.name, pin.name, power_i
+                    ));
+                }
 
-                    let expected_rank =
-                        axis_rank(effective_index_1, effective_index_2, effective_index_3);
-                    if table.dimensions.len() != expected_rank {
+                let mut transitions = HashSet::new();
+                for table in &internal_power.tables {
+                    let transition = PowerTransition::try_from(table.transition).map_err(|_| {
+                        format!(
+                            "Cell '{}' pin '{}' internal_power #{} has invalid transition value {}",
+                            cell.name, pin.name, power_i, table.transition
+                        )
+                    })?;
+                    if transition == PowerTransition::Unknown {
                         return Err(format!(
-                            "{context} has dimension rank {} but expected {} from effective axes",
-                            table.dimensions.len(),
-                            expected_rank
+                            "Cell '{}' pin '{}' internal_power #{} has an unknown power transition",
+                            cell.name, pin.name, power_i
                         ));
                     }
-
-                    if expected_rank >= 1 && table.dimensions[0] as usize != effective_index_1.len()
-                    {
+                    if !transitions.insert(transition as i32) {
                         return Err(format!(
-                            "{context} axis-1 dimension {} does not match effective index_1 length {}",
-                            table.dimensions[0],
-                            effective_index_1.len()
+                            "Cell '{}' pin '{}' internal_power #{} repeats power transition {:?}",
+                            cell.name, pin.name, power_i, transition
                         ));
                     }
-                    if expected_rank >= 2 && table.dimensions[1] as usize != effective_index_2.len()
-                    {
-                        return Err(format!(
-                            "{context} axis-2 dimension {} does not match effective index_2 length {}",
-                            table.dimensions[1],
-                            effective_index_2.len()
-                        ));
-                    }
-                    if expected_rank >= 3 && table.dimensions[2] as usize != effective_index_3.len()
-                    {
-                        return Err(format!(
-                            "{context} axis-3 dimension {} does not match effective index_3 length {}",
-                            table.dimensions[2],
-                            effective_index_3.len()
-                        ));
-                    }
+                    let context = format!(
+                        "Cell '{}' pin '{}' internal_power #{} transition {:?}",
+                        cell.name, pin.name, power_i, transition
+                    );
+                    validate_table_payload(
+                        &context,
+                        "power_lut_template",
+                        table.template_id,
+                        &table.index_1,
+                        &table.index_2,
+                        &table.index_3,
+                        &table.dimensions,
+                        &table.values,
+                        &library.lu_table_templates,
+                    )?;
+                }
+                if transitions.contains(&(PowerTransition::Both as i32))
+                    && (transitions.contains(&(PowerTransition::Rise as i32))
+                        || transitions.contains(&(PowerTransition::Fall as i32)))
+                {
+                    return Err(format!(
+                        "Cell '{}' pin '{}' internal_power #{} mixes common `power` with direction-specific power tables",
+                        cell.name, pin.name, power_i
+                    ));
                 }
             }
         }
@@ -1228,7 +1488,7 @@ pub fn validate_library_consistency(library: &Library) -> Result<(), String> {
     Ok(())
 }
 
-fn parse_liberty_files_to_proto_impl<P: AsRef<Path>>(
+fn parse_liberty_files_impl<P: AsRef<Path>>(
     paths: &[P],
     validate_timing: bool,
     threshold_voltage_group_rules: &[ThresholdVoltageGroupRule],
@@ -1272,23 +1532,28 @@ fn parse_liberty_files_to_proto_impl<P: AsRef<Path>>(
     let mut all_cells = Vec::new();
     let mut all_table_templates = Vec::new();
     let mut units: Option<LibraryUnits> = None;
+    let mut nominal_voltage: Option<f64> = None;
     let mut default_threshold_voltage_group: Option<String> = None;
     let mut saw_library_with_default_threshold_voltage_group = false;
     let mut saw_no_default_library_with_implicit_threshold_voltage_group = false;
     let mut threshold_voltage_group_interner = ThresholdVoltageGroupInterner::default();
     for lib in &libraries {
         let parsed_default_threshold_voltage_group = parse_default_threshold_voltage_group(lib);
+        let parsed_nominal_voltage = parse_nominal_voltage(lib)?;
         if parsed_default_threshold_voltage_group.is_some() {
             saw_library_with_default_threshold_voltage_group = true;
         }
         let mut per_library = Library {
-            cells: block_to_proto_cells(lib, &mut threshold_voltage_group_interner)?,
+            cells: block_to_model_cells(lib, &mut threshold_voltage_group_interner)?,
             units: None,
             // Field name is historical; this stores all parsed template kinds.
             lu_table_templates: parse_table_templates(lib),
             threshold_voltage_groups: vec![],
             default_threshold_voltage_group_id: 0,
             threshold_voltage_group_class_indices: vec![],
+            nominal_voltage: parsed_nominal_voltage,
+            provenance: String::new(),
+            source_files: vec![],
         };
         if parsed_default_threshold_voltage_group.is_none()
             && per_library
@@ -1315,7 +1580,7 @@ fn parse_liberty_files_to_proto_impl<P: AsRef<Path>>(
             &compiled_threshold_voltage_group_rules,
             &mut threshold_voltage_group_interner,
         )?;
-        canonicalize_timing_table_references(&mut per_library);
+        canonicalize_table_references(&mut per_library);
 
         let template_id_offset = all_table_templates.len() as u32;
         apply_template_id_offset(&mut per_library.cells, template_id_offset);
@@ -1334,6 +1599,18 @@ fn parse_liberty_files_to_proto_impl<P: AsRef<Path>>(
                 }
             } else {
                 units = Some(parsed_units);
+            }
+        }
+
+        if let Some(incoming) = parsed_nominal_voltage {
+            match nominal_voltage {
+                Some(existing) if existing != incoming => {
+                    return Err(format!(
+                        "Multiple Liberty libraries provided conflicting nom_voltage declarations; existing value: {existing}, incoming value: {incoming}"
+                    ));
+                }
+                Some(_) => {}
+                None => nominal_voltage = Some(incoming),
             }
         }
 
@@ -1363,8 +1640,7 @@ fn parse_liberty_files_to_proto_impl<P: AsRef<Path>>(
         .map(|name| threshold_voltage_group_interner.intern(name, None))
         .transpose()?
         .unwrap_or(0);
-    let threshold_voltage_group_class_indices =
-        threshold_voltage_group_interner.class_indices_proto();
+    let threshold_voltage_group_class_indices = threshold_voltage_group_interner.class_indices();
     let library = Library {
         cells: all_cells,
         units,
@@ -1373,6 +1649,9 @@ fn parse_liberty_files_to_proto_impl<P: AsRef<Path>>(
         threshold_voltage_groups: threshold_voltage_group_interner.names,
         default_threshold_voltage_group_id,
         threshold_voltage_group_class_indices,
+        nominal_voltage,
+        provenance: String::new(),
+        source_files: vec![],
     };
     if validate_timing {
         validate_library_consistency(&library)?;
@@ -1380,17 +1659,17 @@ fn parse_liberty_files_to_proto_impl<P: AsRef<Path>>(
     Ok(library)
 }
 
-pub fn parse_liberty_files_to_proto<P: AsRef<Path>>(paths: &[P]) -> Result<Library, String> {
-    parse_liberty_files_to_proto_with_vt_rules(paths, &[])
+pub fn parse_liberty_files<P: AsRef<Path>>(paths: &[P]) -> Result<Library, String> {
+    parse_liberty_files_with_vt_rules(paths, &[])
 }
 
 /// Parses Liberty files and fills missing VT-group metadata with explicit regex
 /// rules.
-pub fn parse_liberty_files_to_proto_with_vt_rules<P: AsRef<Path>>(
+pub fn parse_liberty_files_with_vt_rules<P: AsRef<Path>>(
     paths: &[P],
     threshold_voltage_group_rules: &[ThresholdVoltageGroupRule],
 ) -> Result<Library, String> {
-    parse_liberty_files_to_proto_impl(
+    parse_liberty_files_impl(
         paths,
         /* validate_timing= */ true,
         threshold_voltage_group_rules,
@@ -1401,10 +1680,10 @@ pub fn parse_liberty_files_to_proto_with_vt_rules<P: AsRef<Path>>(
 ///
 /// This is intended for `--no-timing-data` conversion paths where timing
 /// payloads are stripped from the final output.
-pub fn parse_liberty_files_to_proto_without_timing_validation<P: AsRef<Path>>(
+pub fn parse_liberty_files_without_timing_validation<P: AsRef<Path>>(
     paths: &[P],
 ) -> Result<Library, String> {
-    parse_liberty_files_to_proto_impl(paths, /* validate_timing= */ false, &[])
+    parse_liberty_files_impl(paths, /* validate_timing= */ false, &[])
 }
 
 #[cfg(test)]
@@ -1412,13 +1691,14 @@ mod tests {
     use super::*;
     use crate::liberty::descriptor::LIBERTY_DESCRIPTOR;
     use crate::liberty::load::strip_timing_data;
+    use crate::liberty::model::library_to_proto;
     use prost::Message;
     use prost_reflect::{DescriptorPool, DynamicMessage};
     use std::io::Write;
     use tempfile::NamedTempFile;
 
     #[test]
-    fn test_parse_liberty_files_to_proto_and_pretty_print() {
+    fn test_parse_liberty_files_and_pretty_print() {
         let liberty_text = r#"
         library (my_library) {
             cell (my_and) {
@@ -1438,7 +1718,7 @@ mod tests {
         "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", liberty_text).unwrap();
-        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        let lib = parse_liberty_files(&[tmp.path()]).unwrap();
         assert_eq!(lib.cells.len(), 1);
         assert!(lib.units.is_none());
         assert_eq!(lib.cells[0].name, "my_and");
@@ -1453,12 +1733,252 @@ mod tests {
             .get_message_by_name("liberty.Library")
             .unwrap();
         let mut buf = Vec::new();
-        lib.encode(&mut buf).unwrap();
+        library_to_proto(lib).unwrap().encode(&mut buf).unwrap();
         let dyn_msg = DynamicMessage::decode(msg_desc, &*buf).unwrap();
         let textproto = dyn_msg.to_text_format();
         println!("Pretty-printed textproto:\n{}", textproto);
         assert!(textproto.contains("cells:["));
         assert!(textproto.contains("name:\"my_and\""));
+    }
+
+    #[test]
+    fn test_native_cell_dont_use_is_captured() {
+        let liberty_text = r#"
+        library (dont_use_library) {
+            cell (INV) {
+                area : 1.0;
+                dont_use : true;
+                pin (Y) {
+                    direction : output;
+                    function : "!A";
+                }
+                pin (A) { direction : input; }
+            }
+            cell (BUF) {
+                area : 1.0;
+                dont_use : false;
+                pin (Y) {
+                    direction : output;
+                    function : "A";
+                }
+                pin (A) { direction : input; }
+            }
+            cell (AND2) {
+                area : 1.0;
+                pin (Y) {
+                    direction : output;
+                    function : "A * B";
+                }
+                pin (A) { direction : input; }
+                pin (B) { direction : input; }
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+
+        let lib = parse_liberty_files(&[tmp.path()]).unwrap();
+
+        assert_eq!(lib.cells[0].name, "AND2");
+        assert_eq!(lib.cells[0].dont_use, None);
+        assert_eq!(lib.cells[1].name, "BUF");
+        assert_eq!(lib.cells[1].dont_use, Some(false));
+        assert_eq!(lib.cells[2].name, "INV");
+        assert_eq!(lib.cells[2].dont_use, Some(true));
+    }
+
+    #[test]
+    fn test_internal_power_tables_and_nominal_voltage_are_captured() {
+        let liberty_text = r#"
+        library (power_library) {
+            nom_voltage : 0.585;
+            voltage_unit : "1V";
+            capacitive_load_unit (1, pf);
+            lu_table_template (shared_name) {
+                variable_1 : input_net_transition;
+                index_1 ("0.01, 0.02");
+            }
+            power_lut_template (pwr_1d) {
+                variable_1 : input_transition_time;
+                index_1 ("0.01, 0.02");
+            }
+            power_lut_template (shared_name) {
+                variable_1 : input_transition_time;
+                variable_2 : total_output_net_capacitance;
+                index_1 ("0.01, 0.02");
+                index_2 ("0.10, 0.20");
+            }
+            cell (NAND2) {
+                area : 1.0;
+                pin (A) {
+                    direction : input;
+                    internal_power () {
+                        related_pg_pin : VDD;
+                        power (scalar) {
+                            values ( \
+                                "0.75" \
+                            );
+                        }
+                    }
+                }
+                pin (B) {
+                    direction : input;
+                }
+                pin (Y) {
+                    direction : output;
+                    function : "!(A * B)";
+                    internal_power () {
+                        related_pin : "B A";
+                        when : "B";
+                        related_pg_pin : VDD;
+                        rise_power (shared_name) {
+                            index_1 ("0.01, 0.02");
+                            index_2 ("0.10, 0.20");
+                            values ("0.10, 0.20", "0.30, 0.40");
+                        }
+                        fall_power (pwr_1d) {
+                            values ("0.50, 0.60");
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+
+        let lib = parse_liberty_files(&[tmp.path()]).unwrap();
+        assert_eq!(lib.nominal_voltage, Some(0.585));
+        assert_eq!(lib.units.as_ref().unwrap().voltage_unit, "1V");
+        assert_eq!(lib.units.as_ref().unwrap().capacitance_unit, "1pf");
+
+        let cell = &lib.cells[0];
+        let input_power = &cell
+            .pins
+            .iter()
+            .find(|pin| pin.name == "A")
+            .unwrap()
+            .internal_power[0];
+        assert!(input_power.related_pins.is_empty());
+        assert_eq!(input_power.related_pg_pin, "VDD");
+        assert_eq!(input_power.tables.len(), 1);
+        let common = &input_power.tables[0];
+        assert_eq!(common.transition, PowerTransition::Both as i32);
+        assert_eq!(common.template_id, 0);
+        assert_eq!(common.template_name, "scalar");
+        assert!(common.dimensions.is_empty());
+        assert_eq!(common.values, vec![0.75]);
+
+        let output_power = &cell
+            .pins
+            .iter()
+            .find(|pin| pin.name == "Y")
+            .unwrap()
+            .internal_power[0];
+        assert_eq!(output_power.related_pins, vec!["A", "B"]);
+        assert_eq!(output_power.when, "B");
+        assert_eq!(output_power.related_pg_pin, "VDD");
+        assert_eq!(output_power.tables.len(), 2);
+
+        let rise = output_power
+            .tables
+            .iter()
+            .find(|table| table.transition == PowerTransition::Rise as i32)
+            .unwrap();
+        let rise_template = &lib.lu_table_templates[(rise.template_id - 1) as usize];
+        assert_eq!(rise_template.kind, "power_lut_template");
+        assert_eq!(rise_template.name, "shared_name");
+        assert!(rise.template_name.is_empty());
+        assert!(rise.index_1.is_empty());
+        assert!(rise.index_2.is_empty());
+        assert_eq!(rise.dimensions, vec![2, 2]);
+        assert_eq!(rise.values, vec![0.10, 0.20, 0.30, 0.40]);
+
+        let fall = output_power
+            .tables
+            .iter()
+            .find(|table| table.transition == PowerTransition::Fall as i32)
+            .unwrap();
+        let fall_template = &lib.lu_table_templates[(fall.template_id - 1) as usize];
+        assert_eq!(fall_template.kind, "power_lut_template");
+        assert_eq!(fall_template.name, "pwr_1d");
+        assert_eq!(fall.dimensions, vec![2]);
+        assert_eq!(fall.values, vec![0.50, 0.60]);
+    }
+
+    #[test]
+    fn test_power_template_ids_are_offset_across_input_libraries() {
+        let lib_a = r#"
+        library (lib_a) {
+            power_lut_template (shared) {
+                variable_1 : input_transition_time;
+                index_1 ("0.01, 0.02");
+            }
+            cell (BUF_A) {
+                pin (A) {
+                    direction : input;
+                    internal_power () {
+                        rise_power (shared) { values ("0.10, 0.20"); }
+                    }
+                }
+            }
+        }
+        "#;
+        let lib_b = r#"
+        library (lib_b) {
+            power_lut_template (shared) {
+                variable_1 : input_transition_time;
+                index_1 ("0.05, 0.10, 0.15");
+            }
+            cell (BUF_B) {
+                pin (A) {
+                    direction : input;
+                    internal_power () {
+                        rise_power (shared) { values ("0.30, 0.40, 0.50"); }
+                    }
+                }
+            }
+        }
+        "#;
+        let mut tmp_a = NamedTempFile::new().unwrap();
+        write!(tmp_a, "{}", lib_a).unwrap();
+        let mut tmp_b = NamedTempFile::new().unwrap();
+        write!(tmp_b, "{}", lib_b).unwrap();
+
+        let lib = parse_liberty_files(&[tmp_a.path(), tmp_b.path()]).unwrap();
+        let table_for = |cell_name: &str| {
+            &lib.cells
+                .iter()
+                .find(|cell| cell.name == cell_name)
+                .unwrap()
+                .pins[0]
+                .internal_power[0]
+                .tables[0]
+        };
+        let table_a = table_for("BUF_A");
+        let table_b = table_for("BUF_B");
+        assert_ne!(table_a.template_id, 0);
+        assert_ne!(table_b.template_id, 0);
+        assert_ne!(table_a.template_id, table_b.template_id);
+        assert_eq!(
+            lib.lu_table_templates[(table_a.template_id - 1) as usize].index_1,
+            vec![0.01, 0.02]
+        );
+        assert_eq!(
+            lib.lu_table_templates[(table_b.template_id - 1) as usize].index_1,
+            vec![0.05, 0.10, 0.15]
+        );
+    }
+
+    #[test]
+    fn test_conflicting_nominal_voltages_are_rejected() {
+        let mut tmp_a = NamedTempFile::new().unwrap();
+        write!(tmp_a, "library (a) {{ nom_voltage : 0.585; }}").unwrap();
+        let mut tmp_b = NamedTempFile::new().unwrap();
+        write!(tmp_b, "library (b) {{ nom_voltage : 0.750; }}").unwrap();
+
+        let err = parse_liberty_files(&[tmp_a.path(), tmp_b.path()]).unwrap_err();
+        assert!(err.contains("conflicting nom_voltage"));
     }
 
     #[test]
@@ -1506,7 +2026,7 @@ mod tests {
         "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", liberty_text).unwrap();
-        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        let lib = parse_liberty_files(&[tmp.path()]).unwrap();
         let units = lib.units.as_ref().expect("units should be present");
         assert_eq!(units.time_unit, "1ns");
         assert_eq!(units.capacitance_unit, "1pf");
@@ -1548,6 +2068,43 @@ mod tests {
     }
 
     #[test]
+    fn test_parser_preserves_unknown_timing_tables_and_proto_omits_them() {
+        let liberty_text = r#"
+        library (timing_table_filter) {
+            lu_table_template (tmpl) {
+                variable_1 : input_net_transition;
+                index_1 ("0.1");
+            }
+            cell (INV) {
+                area : 1.0;
+                pin (A) { direction : input; }
+                pin (Y) {
+                    direction : output;
+                    function : "!A";
+                    timing () {
+                        related_pin : "A";
+                        cell_rise (tmpl) { values ("0.10"); }
+                        random_table_alpha (tmpl) { values ("0.20"); }
+                        random_table_beta (tmpl) { values ("0.30"); }
+                    }
+                }
+            }
+        }
+        "#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", liberty_text).unwrap();
+
+        let parsed = parse_liberty_files(&[tmp.path()]).unwrap();
+        let parsed_tables = &parsed.cells[0].pins[1].timing_arcs[0].tables;
+        assert_eq!(parsed_tables.len(), 3);
+
+        let proto = library_to_proto(parsed).unwrap();
+        let proto_tables = &proto.cells[0].pins[1].timing_arcs[0].tables;
+        assert_eq!(proto_tables.len(), 1);
+        assert_eq!(proto_tables[0].kind, "cell_rise");
+    }
+
+    #[test]
     fn test_capacitive_load_unit_maps_to_capacitance_unit() {
         let liberty_text = r#"
         library (my_library) {
@@ -1567,7 +2124,7 @@ mod tests {
         "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", liberty_text).unwrap();
-        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        let lib = parse_liberty_files(&[tmp.path()]).unwrap();
         let units = lib.units.as_ref().expect("units should be present");
         assert_eq!(units.time_unit, "1ns");
         assert_eq!(units.capacitance_unit, "1pf");
@@ -1591,7 +2148,7 @@ mod tests {
         let mut tmp2 = NamedTempFile::new().unwrap();
         write!(tmp2, "{}", lib2).unwrap();
 
-        let lib = parse_liberty_files_to_proto(&[tmp1.path(), tmp2.path()]).unwrap();
+        let lib = parse_liberty_files(&[tmp1.path(), tmp2.path()]).unwrap();
         let units = lib.units.as_ref().expect("units should be present");
         assert_eq!(units.time_unit, "1ns");
         assert_eq!(units.capacitance_unit, "1pf");
@@ -1617,7 +2174,7 @@ mod tests {
         let mut tmp2 = NamedTempFile::new().unwrap();
         write!(tmp2, "{}", lib2).unwrap();
 
-        let err = parse_liberty_files_to_proto(&[tmp1.path(), tmp2.path()]).unwrap_err();
+        let err = parse_liberty_files(&[tmp1.path(), tmp2.path()]).unwrap_err();
         assert!(err.contains("conflicting unit declarations"));
         assert!(err.contains("time_unit"));
     }
@@ -1653,7 +2210,7 @@ mod tests {
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", liberty_text).unwrap();
 
-        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        let lib = parse_liberty_files(&[tmp.path()]).unwrap();
         assert_eq!(lib.threshold_voltage_groups, vec!["LVT", "RVT"]);
         assert_eq!(lib.default_threshold_voltage_group_id, 2);
         let inv = lib.cells.iter().find(|cell| cell.name == "INV").unwrap();
@@ -1683,7 +2240,7 @@ mod tests {
         let mut tmp2 = NamedTempFile::new().unwrap();
         write!(tmp2, "{}", lib2).unwrap();
 
-        let lib = parse_liberty_files_to_proto(&[tmp1.path(), tmp2.path()]).unwrap();
+        let lib = parse_liberty_files(&[tmp1.path(), tmp2.path()]).unwrap();
         assert_eq!(lib.threshold_voltage_groups, vec!["RVT"]);
         assert_eq!(lib.default_threshold_voltage_group_id, 1);
     }
@@ -1705,7 +2262,7 @@ mod tests {
         let mut tmp2 = NamedTempFile::new().unwrap();
         write!(tmp2, "{}", lib2).unwrap();
 
-        let err = parse_liberty_files_to_proto(&[tmp1.path(), tmp2.path()]).unwrap_err();
+        let err = parse_liberty_files(&[tmp1.path(), tmp2.path()]).unwrap_err();
         assert!(err.contains("conflicting default_threshold_voltage_group"));
     }
 
@@ -1728,7 +2285,7 @@ mod tests {
         let mut tmp2 = NamedTempFile::new().unwrap();
         write!(tmp2, "{}", lib2).unwrap();
 
-        let err = parse_liberty_files_to_proto(&[tmp1.path(), tmp2.path()]).unwrap_err();
+        let err = parse_liberty_files(&[tmp1.path(), tmp2.path()]).unwrap_err();
         assert!(err.contains("mixed presence of default_threshold_voltage_group"));
     }
 
@@ -1755,7 +2312,7 @@ mod tests {
         let mut tmp2 = NamedTempFile::new().unwrap();
         write!(tmp2, "{}", lib2).unwrap();
 
-        let lib = parse_liberty_files_to_proto(&[tmp1.path(), tmp2.path()]).unwrap();
+        let lib = parse_liberty_files(&[tmp1.path(), tmp2.path()]).unwrap();
         assert_eq!(lib.threshold_voltage_groups, vec!["LVT", "RVT"]);
         assert_eq!(lib.default_threshold_voltage_group_id, 2);
         let buf = lib.cells.iter().find(|cell| cell.name == "BUF").unwrap();
@@ -1795,7 +2352,7 @@ mod tests {
                 cell_name_regex: r"_L$".to_string(),
             },
         ];
-        let lib = parse_liberty_files_to_proto_with_vt_rules(&[tmp.path()], &rules).unwrap();
+        let lib = parse_liberty_files_with_vt_rules(&[tmp.path()], &rules).unwrap();
         assert_eq!(lib.threshold_voltage_groups, vec!["LVT", "RVT"]);
         assert_eq!(lib.threshold_voltage_group_class_indices, vec![1, 0]);
         let inv_l = lib.cells.iter().find(|cell| cell.name == "INV_L").unwrap();
@@ -1825,7 +2382,7 @@ mod tests {
             class_index: 0,
             cell_name_regex: r"_R$".to_string(),
         }];
-        let err = parse_liberty_files_to_proto_with_vt_rules(&[tmp.path()], &rules).unwrap_err();
+        let err = parse_liberty_files_with_vt_rules(&[tmp.path()], &rules).unwrap_err();
         assert!(err.contains("cannot combine supplied threshold-voltage regex rules"));
     }
 
@@ -1847,7 +2404,7 @@ mod tests {
             class_index: 0,
             cell_name_regex: r"_R$".to_string(),
         }];
-        let err = parse_liberty_files_to_proto_with_vt_rules(&[tmp.path()], &rules).unwrap_err();
+        let err = parse_liberty_files_with_vt_rules(&[tmp.path()], &rules).unwrap_err();
         assert!(err.contains("cannot combine supplied threshold-voltage regex rules"));
     }
 
@@ -1868,7 +2425,7 @@ mod tests {
             class_index: 0,
             cell_name_regex: r"_R$".to_string(),
         }];
-        let err = parse_liberty_files_to_proto_with_vt_rules(&[tmp.path()], &rules).unwrap_err();
+        let err = parse_liberty_files_with_vt_rules(&[tmp.path()], &rules).unwrap_err();
         assert!(err.contains("has no threshold-voltage group"));
     }
 
@@ -1896,7 +2453,7 @@ mod tests {
                 cell_name_regex: r"INV_".to_string(),
             },
         ];
-        let err = parse_liberty_files_to_proto_with_vt_rules(&[tmp.path()], &rules).unwrap_err();
+        let err = parse_liberty_files_with_vt_rules(&[tmp.path()], &rules).unwrap_err();
         assert!(err.contains("matches multiple threshold-voltage group regex rules"));
     }
 
@@ -1924,7 +2481,7 @@ mod tests {
                 cell_name_regex: r"INV_".to_string(),
             },
         ];
-        let err = parse_liberty_files_to_proto_with_vt_rules(&[tmp.path()], &rules).unwrap_err();
+        let err = parse_liberty_files_with_vt_rules(&[tmp.path()], &rules).unwrap_err();
         assert!(err.contains("duplicate threshold-voltage group rule name"));
     }
 
@@ -1964,7 +2521,7 @@ mod tests {
         "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", liberty_text).unwrap();
-        let err = parse_liberty_files_to_proto(&[tmp.path()]).unwrap_err();
+        let err = parse_liberty_files(&[tmp.path()]).unwrap_err();
         assert!(err.contains("expected 0 from effective axes"));
     }
 
@@ -2001,7 +2558,7 @@ mod tests {
         "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", liberty_text).unwrap();
-        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        let lib = parse_liberty_files(&[tmp.path()]).unwrap();
         let cell = lib.cells.iter().find(|c| c.name == "BUF").unwrap();
         let pin_y = cell.pins.iter().find(|p| p.name == "Y").unwrap();
         let arc = pin_y
@@ -2047,7 +2604,7 @@ mod tests {
         "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", liberty_text).unwrap();
-        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        let lib = parse_liberty_files(&[tmp.path()]).unwrap();
         let cell = lib.cells.iter().find(|c| c.name == "BUF").unwrap();
         let pin_y = cell.pins.iter().find(|p| p.name == "Y").unwrap();
         let arc = pin_y
@@ -2095,7 +2652,7 @@ mod tests {
         "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", liberty_text).unwrap();
-        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        let lib = parse_liberty_files(&[tmp.path()]).unwrap();
         let cell = lib.cells.iter().find(|c| c.name == "BUF").unwrap();
         let pin_y = cell.pins.iter().find(|p| p.name == "Y").unwrap();
         let arc = pin_y
@@ -2155,7 +2712,7 @@ mod tests {
         "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", liberty_text).unwrap();
-        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        let lib = parse_liberty_files(&[tmp.path()]).unwrap();
 
         let cell = lib.cells.iter().find(|c| c.name == "NAND2").unwrap();
         let pin_y = cell.pins.iter().find(|p| p.name == "Y").unwrap();
@@ -2203,9 +2760,8 @@ mod tests {
                 pin (Y) {
                     direction: output;
                     function: "!A";
-                    timing () {
+                    internal_power () {
                         related_pin : "A";
-                        timing_type : combinational;
                         rise_power (shared_tmpl) {
                             values ("0.20, 0.30");
                         }
@@ -2216,16 +2772,11 @@ mod tests {
         "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", liberty_text).unwrap();
-        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        let lib = parse_liberty_files(&[tmp.path()]).unwrap();
 
         let cell = lib.cells.iter().find(|c| c.name == "INV").unwrap();
         let pin_y = cell.pins.iter().find(|p| p.name == "Y").unwrap();
-        let arc = pin_y
-            .timing_arcs
-            .iter()
-            .find(|a| a.related_pin == "A")
-            .unwrap();
-        let table = arc.tables.iter().find(|t| t.kind == "rise_power").unwrap();
+        let table = &pin_y.internal_power[0].tables[0];
 
         assert_ne!(table.template_id, 0);
         let resolved_template = &lib.lu_table_templates[(table.template_id - 1) as usize];
@@ -2235,7 +2786,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_liberty_files_to_proto_errors_on_missing_related_pin() {
+    fn test_parse_liberty_files_errors_on_missing_related_pin() {
         let liberty_text = r#"
         library (my_library) {
             lu_table_template (tmpl_1d) {
@@ -2260,12 +2811,12 @@ mod tests {
         "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", liberty_text).unwrap();
-        let err = parse_liberty_files_to_proto(&[tmp.path()]).unwrap_err();
+        let err = parse_liberty_files(&[tmp.path()]).unwrap_err();
         assert!(err.contains("references unknown related_pin 'A'"));
     }
 
     #[test]
-    fn test_parse_liberty_files_to_proto_errors_on_multi_pin_related_pin_selector() {
+    fn test_parse_liberty_files_errors_on_multi_pin_related_pin_selector() {
         let liberty_text = r#"
         library (my_library) {
             lu_table_template (tmpl_1d) {
@@ -2296,7 +2847,7 @@ mod tests {
         "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", liberty_text).unwrap();
-        let err = parse_liberty_files_to_proto(&[tmp.path()]).unwrap_err();
+        let err = parse_liberty_files(&[tmp.path()]).unwrap_err();
         assert!(err.contains("unsupported multi-pin related_pin selector 'A B'"));
     }
     #[test]
@@ -2325,11 +2876,10 @@ mod tests {
         "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", liberty_text).unwrap();
-        let err = parse_liberty_files_to_proto(&[tmp.path()]).unwrap_err();
+        let err = parse_liberty_files(&[tmp.path()]).unwrap_err();
         assert!(err.contains("references unknown related_pin"));
 
-        let mut lib =
-            parse_liberty_files_to_proto_without_timing_validation(&[tmp.path()]).unwrap();
+        let mut lib = parse_liberty_files_without_timing_validation(&[tmp.path()]).unwrap();
         let pin = lib
             .cells
             .iter()
@@ -2383,7 +2933,7 @@ mod tests {
         "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", liberty_text).unwrap();
-        let mut lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        let mut lib = parse_liberty_files(&[tmp.path()]).unwrap();
         lib.cells[0].pins[1].timing_arcs[0].tables[0].template_id = 999;
         let err = validate_library_consistency(&lib).unwrap_err();
         assert!(err.contains("out-of-range template_id=999"));
@@ -2420,7 +2970,7 @@ mod tests {
         "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", liberty_text).unwrap();
-        let mut lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        let mut lib = parse_liberty_files(&[tmp.path()]).unwrap();
         lib.cells[0].pins[1].timing_arcs[0].tables[0].dimensions = vec![2];
         let err = validate_library_consistency(&lib).unwrap_err();
         assert!(err.contains("dimension rank 1 but expected 2"));
@@ -2487,7 +3037,7 @@ mod tests {
         let mut tmp2 = NamedTempFile::new().unwrap();
         write!(tmp2, "{}", lib2).unwrap();
 
-        let lib = parse_liberty_files_to_proto(&[tmp1.path(), tmp2.path()]).unwrap();
+        let lib = parse_liberty_files(&[tmp1.path(), tmp2.path()]).unwrap();
         assert_eq!(lib.lu_table_templates.len(), 2);
 
         let cell_a = lib.cells.iter().find(|c| c.name == "BUF_A").unwrap();
@@ -2577,7 +3127,7 @@ mod tests {
         let mut tmp2 = NamedTempFile::new().unwrap();
         write!(tmp2, "{}", lib_with_template).unwrap();
 
-        let lib = parse_liberty_files_to_proto(&[tmp1.path(), tmp2.path()]).unwrap();
+        let lib = parse_liberty_files(&[tmp1.path(), tmp2.path()]).unwrap();
         let cell = lib.cells.iter().find(|c| c.name == "BUF_MISS").unwrap();
         let table = cell
             .pins
@@ -2680,8 +3230,8 @@ mod tests {
             )
         };
 
-        let lib_ab = parse_liberty_files_to_proto(&[tmp_a.path(), tmp_b.path()]).unwrap();
-        let lib_ba = parse_liberty_files_to_proto(&[tmp_b.path(), tmp_a.path()]).unwrap();
+        let lib_ab = parse_liberty_files(&[tmp_a.path(), tmp_b.path()]).unwrap();
+        let lib_ba = parse_liberty_files(&[tmp_b.path(), tmp_a.path()]).unwrap();
 
         let (a_i1_ab, a_i2_ab, a_id_ab) = resolve_axes(&lib_ab, "BUF_A");
         let (b_i1_ab, b_i2_ab, b_id_ab) = resolve_axes(&lib_ab, "BUF_B");
@@ -2764,7 +3314,7 @@ mod tests {
         let mut tmp2 = NamedTempFile::new().unwrap();
         write!(tmp2, "{}", lib2).unwrap();
 
-        let lib = parse_liberty_files_to_proto(&[tmp1.path(), tmp2.path()]).unwrap();
+        let lib = parse_liberty_files(&[tmp1.path(), tmp2.path()]).unwrap();
         assert_eq!(lib.lu_table_templates.len(), 2);
 
         let table_for = |cell_name: &str| {
@@ -2827,7 +3377,7 @@ mod tests {
         "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", liberty_text).unwrap();
-        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        let lib = parse_liberty_files(&[tmp.path()]).unwrap();
         assert_eq!(lib.cells.len(), 1);
         let cell = &lib.cells[0];
         assert_eq!(cell.name, "my_ff");
@@ -2874,7 +3424,7 @@ mod tests {
         "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", liberty_text).unwrap();
-        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        let lib = parse_liberty_files(&[tmp.path()]).unwrap();
         assert_eq!(lib.cells.len(), 1);
         let cell = &lib.cells[0];
         assert_eq!(cell.name, "my_ff");
@@ -2930,31 +3480,20 @@ mod tests {
         "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", liberty_text).unwrap();
-        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        let lib = parse_liberty_files(&[tmp.path()]).unwrap();
         let cell = &lib.cells[0];
         assert_eq!(cell.name, "my_scan_ff");
-        assert_eq!(cell.sequential.len(), 2);
-        let mut iq = None;
-        let mut iqn = None;
-        for seq in &cell.sequential {
-            match seq.state_var.as_str() {
-                "IQ" => iq = Some(seq),
-                "IQN" => iqn = Some(seq),
-                other => panic!("Unexpected state var in test: {}", other),
-            }
-        }
-        let iq = iq.expect("missing IQ state");
-        let iqn = iqn.expect("missing IQN state");
-        assert_eq!(iq.next_state, "(!D * !SE) + (SE * SI)");
-        assert_eq!(iq.clock_expr, "CLK");
-        assert_eq!(iq.kind, SequentialKind::Ff as i32);
-        assert_eq!(iqn.next_state, "(!D * !SE) + (SE * SI)");
-        assert_eq!(iqn.clock_expr, "CLK");
-        assert_eq!(iqn.kind, SequentialKind::Ff as i32);
+        assert_eq!(cell.sequential.len(), 1);
+        let seq = &cell.sequential[0];
+        assert_eq!(seq.state_var, "IQ");
+        assert_eq!(seq.complementary_state_var.as_deref(), Some("IQN"));
+        assert_eq!(seq.next_state, "(!D * !SE) + (SE * SI)");
+        assert_eq!(seq.clock_expr, "CLK");
+        assert_eq!(seq.kind, SequentialKind::Ff as i32);
     }
 
     #[test]
-    fn test_ff_multiple_state_vars_are_captured() {
+    fn test_ff_complementary_state_var_is_folded_into_primary_state() {
         // Mirrors ASAP7 `DFFLQNx1_ASAP7_75t_R` with `ff (IQ,IQN)`.
         let liberty_text = r#"
         library (my_library) {
@@ -2984,27 +3523,16 @@ mod tests {
         "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", liberty_text).unwrap();
-        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        let lib = parse_liberty_files(&[tmp.path()]).unwrap();
         let cell = &lib.cells[0];
         assert_eq!(cell.name, "my_ff");
-        assert_eq!(cell.sequential.len(), 2);
-        let mut iq = None;
-        let mut iqn = None;
-        for seq in &cell.sequential {
-            match seq.state_var.as_str() {
-                "IQ" => iq = Some(seq),
-                "IQN" => iqn = Some(seq),
-                other => panic!("Unexpected state var in test: {}", other),
-            }
-        }
-        let iq = iq.expect("missing IQ state");
-        let iqn = iqn.expect("missing IQN state");
-        assert_eq!(iq.next_state, "D");
-        assert_eq!(iq.clock_expr, "CLK");
-        assert_eq!(iq.kind, SequentialKind::Ff as i32);
-        assert_eq!(iqn.next_state, "D");
-        assert_eq!(iqn.clock_expr, "CLK");
-        assert_eq!(iqn.kind, SequentialKind::Ff as i32);
+        assert_eq!(cell.sequential.len(), 1);
+        let seq = &cell.sequential[0];
+        assert_eq!(seq.state_var, "IQ");
+        assert_eq!(seq.complementary_state_var.as_deref(), Some("IQN"));
+        assert_eq!(seq.next_state, "D");
+        assert_eq!(seq.clock_expr, "CLK");
+        assert_eq!(seq.kind, SequentialKind::Ff as i32);
     }
 
     #[test]
@@ -3034,28 +3562,17 @@ mod tests {
         "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", liberty_text).unwrap();
-        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        let lib = parse_liberty_files(&[tmp.path()]).unwrap();
         assert_eq!(lib.cells.len(), 1);
         let cell = &lib.cells[0];
         assert_eq!(cell.name, "my_latch");
-        assert_eq!(cell.sequential.len(), 2);
-        let mut iq = None;
-        let mut iqn = None;
-        for seq in &cell.sequential {
-            match seq.state_var.as_str() {
-                "IQ" => iq = Some(seq),
-                "IQN" => iqn = Some(seq),
-                other => panic!("Unexpected state var in test: {}", other),
-            }
-        }
-        let iq = iq.expect("missing IQ state");
-        let iqn = iqn.expect("missing IQN state");
-        assert_eq!(iq.next_state, "D");
-        assert_eq!(iq.clock_expr, "CLK");
-        assert_eq!(iq.kind, SequentialKind::Latch as i32);
-        assert_eq!(iqn.next_state, "D");
-        assert_eq!(iqn.clock_expr, "CLK");
-        assert_eq!(iqn.kind, SequentialKind::Latch as i32);
+        assert_eq!(cell.sequential.len(), 1);
+        let seq = &cell.sequential[0];
+        assert_eq!(seq.state_var, "IQ");
+        assert_eq!(seq.complementary_state_var.as_deref(), Some("IQN"));
+        assert_eq!(seq.next_state, "D");
+        assert_eq!(seq.clock_expr, "CLK");
+        assert_eq!(seq.kind, SequentialKind::Latch as i32);
         let mut clk_is_clocking = None;
         let mut d_is_clocking = None;
         let mut q_is_clocking = None;
@@ -3100,7 +3617,7 @@ mod tests {
         "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", liberty_text).unwrap();
-        let lib = parse_liberty_files_to_proto(&[tmp.path()]).unwrap();
+        let lib = parse_liberty_files(&[tmp.path()]).unwrap();
         assert_eq!(lib.cells.len(), 1);
         let cell = &lib.cells[0];
         assert_eq!(cell.name, "my_icg");

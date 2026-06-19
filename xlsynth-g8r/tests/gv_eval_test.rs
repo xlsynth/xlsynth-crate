@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use xlsynth::{IrBits, IrValue};
-use xlsynth_g8r::liberty_proto::PinDirection;
+use xlsynth_g8r::liberty_model::PinDirection;
 use xlsynth_g8r::netlist::gv_eval::{
     GvEvalOptions, GvToggleAggregate, PinConnection, TogglePinConnection, load_labeled_netlist_aig,
 };

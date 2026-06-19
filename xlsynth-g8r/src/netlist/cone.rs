@@ -15,7 +15,7 @@
 //! deterministic order.
 
 use crate::liberty::IndexedLibrary;
-use crate::liberty_proto::PinDirection;
+use crate::liberty_model::PinDirection;
 use crate::netlist::connectivity::NetlistConnectivity;
 use crate::netlist::normalized::BitIndex;
 use crate::netlist::parse::{InstIndex, Net, NetlistModule, PortId};
@@ -537,7 +537,7 @@ where
 mod tests {
     use super::*;
     use crate::liberty::{IndexedLibrary, test_utils::make_test_library};
-    use crate::liberty_proto::Library;
+    use crate::liberty_model::Library;
     use crate::netlist::parse::{
         Net, NetIndex, NetRef, NetlistInstance, NetlistModule, NetlistPort, PortDirection,
     };
@@ -731,25 +731,25 @@ mod tests {
 
         // Liberty library with INV (from common test utils) and AND2 cell.
         let mut lib: Library = make_test_library();
-        lib.cells.push(crate::liberty_proto::Cell {
+        lib.cells.push(crate::liberty_model::Cell {
             name: "AND2".to_string(),
             pins: vec![
-                crate::liberty_proto::Pin {
-                    direction: crate::liberty_proto::PinDirection::Input as i32,
+                crate::liberty_model::Pin {
+                    direction: crate::liberty_model::PinDirection::Input as i32,
                     function: "".to_string(),
                     name: "A".to_string(),
                     is_clocking_pin: false,
                     ..Default::default()
                 },
-                crate::liberty_proto::Pin {
-                    direction: crate::liberty_proto::PinDirection::Input as i32,
+                crate::liberty_model::Pin {
+                    direction: crate::liberty_model::PinDirection::Input as i32,
                     function: "".to_string(),
                     name: "B".to_string(),
                     is_clocking_pin: false,
                     ..Default::default()
                 },
-                crate::liberty_proto::Pin {
-                    direction: crate::liberty_proto::PinDirection::Output as i32,
+                crate::liberty_model::Pin {
+                    direction: crate::liberty_model::PinDirection::Output as i32,
                     function: "(A*B)".to_string(),
                     name: "Y".to_string(),
                     is_clocking_pin: false,

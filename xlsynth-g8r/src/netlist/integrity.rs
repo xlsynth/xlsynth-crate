@@ -12,7 +12,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 
-use crate::liberty_proto::{Library, PinDirection};
+use crate::liberty_model::{Library, PinDirection};
 use crate::netlist::parse::{
     AssignExpr, Net, NetIndex, NetRef, NetlistInstance, NetlistModule, NetlistPort, PortDirection,
 };

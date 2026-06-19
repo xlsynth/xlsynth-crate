@@ -9,7 +9,7 @@ use std::{fs::File, path::PathBuf};
 use xlsynth_g8r::liberty::cell_formula::{self, Term};
 
 // Use the crate's prost-generated proto module
-use xlsynth_g8r::liberty_proto;
+use xlsynth_g8r::liberty_model;
 
 use xlsynth_g8r::aig_serdes::gate2ir::gate_fn_to_xlsynth_ir;
 use xlsynth_g8r::netlist::io::load_liberty_from_path;
@@ -24,8 +24,8 @@ struct Args {
     liberty_proto: PathBuf,
 }
 
-fn load_cell_formula_map(liberty_lib: &liberty_proto::Library) -> HashMap<String, Term> {
-    use crate::liberty_proto::PinDirection;
+fn load_cell_formula_map(liberty_lib: &liberty_model::Library) -> HashMap<String, Term> {
+    use crate::liberty_model::PinDirection;
     let mut map = HashMap::new();
     for cell in &liberty_lib.cells {
         // Find the output pin with a function
