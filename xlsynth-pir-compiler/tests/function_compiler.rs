@@ -4,8 +4,8 @@ use xlsynth::IrValue;
 use xlsynth_pir::ir_eval::{FnEvalResult, eval_fn, eval_fn_in_package};
 use xlsynth_pir::ir_parser::Parser;
 use xlsynth_pir_compiler::{
-    AssumptionFailureKind, CompilerError, ExecutionContext, NativeTupleFieldLayout,
-    NativeValueLayout, PirFunctionCompiler, ScalarLayout, WideBitsLayout,
+    AssumptionFailureKind, CompilerError, ExecutionContext, ExecutionOptions,
+    NativeTupleFieldLayout, NativeValueLayout, PirFunctionCompiler, ScalarLayout, WideBitsLayout,
 };
 
 fn compile(ir: &str) -> PirFunctionCompiler {
@@ -115,6 +115,150 @@ top fn f(x: bits[8] id=6) -> bits[8] {
     );
     assert_eq!(compiler.run_u64(&[41]).expect("execute"), 42);
     assert!(compiler.scratch_byte_count() > 0);
+}
+
+#[test]
+fn package_compiler_selects_between_aggregate_invoke_results() {
+    let compiler = compile_package(
+        r#"package test
+
+fn local() -> (bits[14], bits[6], bits[1], bits[2]) {
+  ret result: (bits[14], bits[6], bits[1], bits[2]) = literal(value=(42, 3, 0, 0), id=1)
+}
+
+fn global() -> (bits[14], bits[6], bits[1], bits[2]) {
+  ret result: (bits[14], bits[6], bits[1], bits[2]) = literal(value=(0, 0, 0, 0), id=2)
+}
+
+top fn f(use_global: bits[1] id=3) -> bits[14] {
+  local_route: (bits[14], bits[6], bits[1], bits[2]) = invoke(to_apply=local, id=4)
+  global_route: (bits[14], bits[6], bits[1], bits[2]) = invoke(to_apply=global, id=5)
+  selected: (bits[14], bits[6], bits[1], bits[2]) = sel(use_global, cases=[local_route, global_route], id=6)
+  ret router_port: bits[14] = tuple_index(selected, index=0, id=7)
+}
+"#,
+    );
+    assert_eq!(
+        compiler
+            .run_ir_values(&[bits(1, 0)])
+            .expect("selector zero should choose local"),
+        bits(14, 42)
+    );
+    assert_eq!(
+        compiler
+            .run_ir_values(&[bits(1, 1)])
+            .expect("selector one should choose global"),
+        bits(14, 0)
+    );
+}
+
+#[test]
+fn package_compiler_counted_for_updates_array_of_tuples() {
+    let ir = r#"package test
+
+fn body(i: bits[32] id=1, carry: (bits[1], bits[6], bits[1], bits[1], bits[1])[4] id=2, entries: (bits[1], bits[2], bits[16], bits[1])[4] id=3) -> (bits[1], bits[6], bits[1], bits[1], bits[1])[4] {
+  zero: bits[32] = literal(value=0, id=4)
+  index: bits[32] = add(i, zero, id=5)
+  entry: (bits[1], bits[2], bits[16], bits[1]) = array_index(entries, indices=[index], id=6)
+  valid: bits[1] = tuple_index(entry, index=0, id=7)
+  mask: bits[16] = tuple_index(entry, index=2, id=8)
+  destination_tray: bits[1] = tuple_index(entry, index=3, id=9)
+  any_mask: bits[1] = or_reduce(mask, id=10)
+  is_local: bits[1] = not(any_mask, id=11)
+  rni_port: bits[6] = literal(value=0, id=12)
+  no_valid_remote: bits[1] = not(any_mask, id=13)
+  selected: (bits[1], bits[6], bits[1], bits[1], bits[1]) = tuple(valid, rni_port, is_local, destination_tray, no_valid_remote, id=14)
+  ret updated: (bits[1], bits[6], bits[1], bits[1], bits[1])[4] = array_update(carry, selected, indices=[index], id=15)
+}
+
+top fn f(entries: (bits[1], bits[2], bits[16], bits[1])[4] id=16) -> (bits[1], bits[6], bits[1], bits[1], bits[1]) {
+  init: (bits[1], bits[6], bits[1], bits[1], bits[1])[4] = literal(value=[(0, 0, 0, 0, 0), (0, 0, 0, 0, 0), (0, 0, 0, 0, 0), (0, 0, 0, 0, 0)], id=17)
+  selected: (bits[1], bits[6], bits[1], bits[1], bits[1])[4] = counted_for(init, trip_count=4, stride=1, body=body, invariant_args=[entries], id=18)
+  zero: bits[32] = literal(value=0, id=19)
+  ret first: (bits[1], bits[6], bits[1], bits[1], bits[1]) = array_index(selected, indices=[zero], id=20)
+}
+"#;
+    let package = Parser::new(ir)
+        .parse_and_validate_package()
+        .expect("test PIR package should parse and validate");
+    let function = package.get_top_fn().expect("top function should exist");
+    let compiler = PirFunctionCompiler::compile_package(&package).expect("package should compile");
+    let args = [IrValue::make_array(&[
+        tuple(&[bits(1, 1), bits(2, 0), bits(16, 0), bits(1, 0)]),
+        tuple(&[bits(1, 0), bits(2, 0), bits(16, 1), bits(1, 0)]),
+        tuple(&[bits(1, 0), bits(2, 0), bits(16, 2), bits(1, 0)]),
+        tuple(&[bits(1, 0), bits(2, 0), bits(16, 4), bits(1, 0)]),
+    ])
+    .expect("entries should construct")];
+    let expected = match eval_fn_in_package(&package, function, &args) {
+        FnEvalResult::Success(success) => success.value,
+        other => panic!("PIR evaluation failed: {other:?}"),
+    };
+    assert_eq!(
+        compiler.run_ir_values(&args).expect("execute counted_for"),
+        expected
+    );
+    assert_eq!(
+        expected,
+        tuple(&[bits(1, 1), bits(6, 0), bits(1, 1), bits(1, 0), bits(1, 1)])
+    );
+}
+
+#[test]
+fn package_compiler_preserves_counted_for_carry_across_nested_counted_for_invoke() {
+    let ir = r#"package test
+
+fn inner_body(i: bits[32] id=1, carry: bits[8] id=2) -> bits[8] {
+  zero: bits[8] = literal(value=0, id=3)
+  ret result: bits[8] = add(carry, zero, id=4)
+}
+
+fn helper(x: bits[8] id=5) -> bits[8] {
+  ret result: bits[8] = counted_for(x, trip_count=2, stride=1, body=inner_body, id=6)
+}
+
+fn outer_body(i: bits[32] id=7, carry: bits[8][4] id=8) -> bits[8][4] {
+  zero: bits[8] = literal(value=0, id=9)
+  helper_value: bits[8] = invoke(zero, to_apply=helper, id=10)
+  low_i: bits[8] = bit_slice(i, start=0, width=8, id=11)
+  value: bits[8] = add(low_i, helper_value, id=12)
+  ret updated: bits[8][4] = array_update(carry, value, indices=[i], id=13)
+}
+
+top fn f() -> bits[8][4] {
+  init: bits[8][4] = literal(value=[0, 0, 0, 0], id=14)
+  ret result: bits[8][4] = counted_for(init, trip_count=4, stride=1, body=outer_body, id=15)
+}
+"#;
+    let package = Parser::new(ir)
+        .parse_and_validate_package()
+        .expect("test PIR package should parse and validate");
+    let helper = package
+        .get_fn("helper")
+        .expect("helper function should exist");
+    let helper_compiler = PirFunctionCompiler::compile_package_function(&package, "helper")
+        .expect("helper should compile");
+    let helper_args = [bits(8, 0)];
+    let helper_expected = match eval_fn_in_package(&package, helper, &helper_args) {
+        FnEvalResult::Success(success) => success.value,
+        other => panic!("PIR helper evaluation failed: {other:?}"),
+    };
+    assert_eq!(
+        helper_compiler
+            .run_ir_values(&helper_args)
+            .expect("execute helper"),
+        helper_expected
+    );
+    let function = package.get_top_fn().expect("top function should exist");
+    let compiler = PirFunctionCompiler::compile_package(&package).expect("package should compile");
+    let expected = match eval_fn_in_package(&package, function, &[]) {
+        FnEvalResult::Success(success) => success.value,
+        other => panic!("PIR evaluation failed: {other:?}"),
+    };
+    assert_eq!(
+        compiler.run_ir_values(&[]).expect("execute counted_for"),
+        expected
+    );
 }
 
 #[test]
@@ -234,7 +378,7 @@ top fn f(x: bits[1] id=5) -> bits[1] {
 "#,
     );
     let result = compiler
-        .run_ir_values_with_events(&[bits(1, 1)])
+        .run_ir_values_with_events(&[bits(1, 1)], ExecutionOptions::collect_all())
         .expect("execute zero-trip counted_for");
     assert_eq!(result.value, bits(1, 1));
     assert_eq!(result.events.cover_counts.len(), 1);
@@ -250,7 +394,7 @@ fn package_compiler_accumulates_counted_for_body_events() {
 fn observed(i: bits[0] id=1, carry: bits[1] id=2) -> bits[1] {
   c: () = cover(carry, label="body_cover", id=3)
   t: token = after_all(id=4)
-  tr: token = trace(t, carry, format="carry={}", data_operands=[carry], id=5)
+  tr: token = trace(t, carry, format="carry={}", data_operands=[carry], verbosity=0, id=5)
   ret result: bits[1] = identity(carry, id=6)
 }
 
@@ -260,7 +404,7 @@ top fn f(x: bits[1] id=7) -> bits[1] {
 "#,
     );
     let result = compiler
-        .run_ir_values_with_events(&[bits(1, 1)])
+        .run_ir_values_with_events(&[bits(1, 1)], ExecutionOptions::collect_all())
         .expect("execute counted_for events");
     assert_eq!(result.value, bits(1, 1));
     assert_eq!(result.events.cover_counts.len(), 1);
@@ -338,7 +482,7 @@ fn package_compiler_accumulates_repeated_callee_events() {
 fn observed(x: bits[1] id=1) -> bits[1] {
   c: () = cover(x, label="callee_cover", id=2)
   t: token = after_all(id=3)
-  tr: token = trace(t, x, format="x={}", data_operands=[x], id=4)
+  tr: token = trace(t, x, format="x={}", data_operands=[x], verbosity=0, id=4)
   ret result: bits[1] = identity(x, id=5)
 }
 
@@ -349,7 +493,7 @@ top fn f(x: bits[1] id=6) -> bits[1] {
 "#,
     );
     let result = compiler
-        .run_ir_values_with_events(&[bits(1, 1)])
+        .run_ir_values_with_events(&[bits(1, 1)], ExecutionOptions::collect_all())
         .expect("execute repeated invokes");
     assert_eq!(result.value, bits(1, 1));
     assert_eq!(result.events.cover_counts.len(), 1);
@@ -450,7 +594,7 @@ fn f(x: bits[1] id=1) -> () {
         }
     );
     let execution = cover_compiler
-        .run_ir_values_with_events(&[bits(1, 1)])
+        .run_ir_values_with_events(&[bits(1, 1)], ExecutionOptions::collect_all())
         .expect("unit-valued cover execution");
     assert_eq!(execution.value, IrValue::make_tuple(&[]));
     assert_eq!(execution.events.cover_counts.len(), 1);
@@ -540,12 +684,12 @@ fn compiled_trace_formats_zero_width_bits() {
 
 fn f(x: bits[0] id=1, emit: bits[1] id=2) -> token {
   t: token = after_all(id=3)
-  ret tr: token = trace(t, emit, format="x={}", data_operands=[x], id=4)
+  ret tr: token = trace(t, emit, format="x={}", data_operands=[x], verbosity=0, id=4)
 }
 "#,
     );
     let execution = compiler
-        .run_ir_values_with_events(&[bits(0, 0), bits(1, 1)])
+        .run_ir_values_with_events(&[bits(0, 0), bits(1, 1)], ExecutionOptions::collect_all())
         .expect("execute");
     assert_eq!(execution.events.trace_messages.len(), 1);
     assert_eq!(execution.events.trace_messages[0].message, "x=0");
@@ -587,7 +731,8 @@ fn f(x: bits[1] id=1) -> bits[1] {
 }
 "#,
     );
-    let mut context = ExecutionContext::new(compiler.metadata());
+    let mut context =
+        ExecutionContext::new_with_options(compiler.metadata(), ExecutionOptions::collect_all());
     let mut output: u8 = 0;
     for input in [1u8, 1u8, 0u8] {
         let inputs = [std::ptr::from_ref(&input).cast::<u8>()];
@@ -616,7 +761,7 @@ fn f(x: bits[8] id=1, ok: bits[1] id=2, emit: bits[1] id=3) -> bits[8] {
   t: token = after_all(id=4)
   cv: () = cover(emit, label="covered", id=5)
   a: token = assert(t, ok, message="bad condition", label="A", id=6)
-  tr: token = trace(a, emit, format="x={}", data_operands=[x], id=7)
+  tr: token = trace(a, emit, format="x={}", data_operands=[x], verbosity=0, id=7)
   ret identity.8: bits[8] = identity(x, id=8)
 }
 "#;
@@ -633,7 +778,7 @@ fn f(x: bits[8] id=1, ok: bits[1] id=2, emit: bits[1] id=3) -> bits[8] {
     ] {
         let expected = eval_fn(function, &args);
         let actual = compiler
-            .run_ir_values_with_events(&args)
+            .run_ir_values_with_events(&args, ExecutionOptions::collect_all())
             .expect("compiled execution should succeed");
         match expected {
             FnEvalResult::Success(expected) => {
@@ -739,10 +884,10 @@ fn f(emit: bits[1] id=1) -> token {
   unit: () = tuple(id=2)
   units: ()[1] = array(unit, id=3)
   t: token = after_all(id=4)
-  tr0: token = trace(t, emit, format="zero", data_operands=[], id=5)
-  tr1: token = trace(tr0, emit, format="one={}", data_operands=[unit], id=6)
-  tr2: token = trace(tr1, emit, format="two={},{}", data_operands=[unit, units], id=7)
-  ret tr3: token = trace(tr2, emit, format="three={},{},{}", data_operands=[unit, units, emit], id=8)
+  tr0: token = trace(t, emit, format="zero", data_operands=[], verbosity=0, id=5)
+  tr1: token = trace(tr0, emit, format="one={}", data_operands=[unit], verbosity=0, id=6)
+  tr2: token = trace(tr1, emit, format="two={},{}", data_operands=[unit, units], verbosity=0, id=7)
+  ret tr3: token = trace(tr2, emit, format="three={},{},{}", data_operands=[unit, units, emit], verbosity=0, id=8)
 }
 "#;
     let package = Parser::new(ir)
@@ -756,7 +901,7 @@ fn f(emit: bits[1] id=1) -> token {
         FnEvalResult::Failure(_) => panic!("traces should not cause evaluation failure"),
     };
     let actual = compiler
-        .run_ir_values_with_events(&args)
+        .run_ir_values_with_events(&args, ExecutionOptions::collect_all())
         .expect("compiled execution should succeed");
     assert_eq!(
         actual
@@ -780,7 +925,7 @@ fn compiled_trace_formats_match_evaluator_and_xls_syntax() {
 fn f(x: bits[12] id=1, neg: bits[8] id=2) -> token {
   t: token = after_all(id=3)
   one: bits[1] = literal(value=1, id=4)
-  ret tr: token = trace(t, one, format="literal={{ default={} u={:u} d={:d} x={:x} 0x={:0x} #x={:#x} b={:b} 0b={:0b} #b={:#b}", data_operands=[x, x, neg, x, x, x, x, x, x], id=5)
+  ret tr: token = trace(t, one, format="literal={{ default={} u={:u} d={:d} x={:x} 0x={:0x} #x={:#x} b={:b} 0b={:0b} #b={:#b}", data_operands=[x, x, neg, x, x, x, x, x, x], verbosity=0, id=5)
 }
 "#;
     let package = Parser::new(ir)
@@ -790,7 +935,7 @@ fn f(x: bits[12] id=1, neg: bits[8] id=2) -> token {
     let compiler = PirFunctionCompiler::compile(function).expect("function should compile");
     let args = vec![bits(12, 43), bits(8, 251)];
     let actual = compiler
-        .run_ir_values_with_events(&args)
+        .run_ir_values_with_events(&args, ExecutionOptions::collect_all())
         .expect("compiled execution should succeed");
     let expected = match eval_fn(function, &args) {
         FnEvalResult::Success(success) => success,
@@ -1162,12 +1307,18 @@ fn f(a: bits[8][2] id=1, v: bits[8] id=2, i: bits[2] id=3) -> bits[8] {
     );
     let values = array(8, &[10, 11]);
     let in_bounds = compiler
-        .run_ir_values_with_events(&[values.clone(), bits(8, 99), bits(2, 1)])
+        .run_ir_values_with_events(
+            &[values.clone(), bits(8, 99), bits(2, 1)],
+            ExecutionOptions::collect_all(),
+        )
         .expect("in-bounds execution");
     assert!(in_bounds.events.assumption_failures.is_empty());
 
     let out_of_bounds = compiler
-        .run_ir_values_with_events(&[values, bits(8, 99), bits(2, 3)])
+        .run_ir_values_with_events(
+            &[values, bits(8, 99), bits(2, 3)],
+            ExecutionOptions::collect_all(),
+        )
         .expect("out-of-bounds execution remains safe");
     assert_eq!(out_of_bounds.value, bits(8, 99));
     assert_eq!(

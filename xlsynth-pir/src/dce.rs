@@ -218,7 +218,7 @@ mod tests {
             r#"fn f(x: bits[1] id=1) -> bits[1] {
   x: bits[1] = param(name=x, id=1)
   tok: token = after_all(id=2)
-  tr: token = trace(tok, x, format="x={}", data_operands=[x], id=3)
+  tr: token = trace(tok, x, format="x={}", data_operands=[x], verbosity=0, id=3)
   cv: () = cover(x, label="hit", id=4)
   as: token = assert(tr, x, message="failed", label="a", id=5)
   dead: bits[1] = not(x, id=6)

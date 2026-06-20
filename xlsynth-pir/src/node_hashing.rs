@@ -31,6 +31,10 @@ fn update_hash_u64(hasher: &mut blake3::Hasher, x: u64) {
     hasher.update(&x.to_le_bytes());
 }
 
+fn update_hash_i64(hasher: &mut blake3::Hasher, x: i64) {
+    hasher.update(&x.to_le_bytes());
+}
+
 fn update_hash_bool(hasher: &mut blake3::Hasher, x: bool) {
     update_hash_u64(hasher, if x { 1 } else { 0 });
 }
@@ -160,8 +164,11 @@ fn hash_payload_attributes(f: &Fn, payload: &NodePayload, hasher: &mut blake3::H
             update_hash_string_attribute(hasher, "message", message);
             update_hash_string_attribute(hasher, "label", label);
         }
-        NodePayload::Trace { format, .. } => {
+        NodePayload::Trace {
+            format, verbosity, ..
+        } => {
             update_hash_string_attribute(hasher, "format", format);
+            update_hash_i64(hasher, *verbosity);
         }
         NodePayload::InstantiationInput {
             instantiation,
@@ -366,7 +373,12 @@ pub fn node_structural_signature_string(f: &Fn, node_ref: NodeRef) -> String {
             attrs.push(format!("message={message:?}"));
             attrs.push(format!("label={label:?}"));
         }
-        NodePayload::Trace { format, .. } => attrs.push(format!("format={format:?}")),
+        NodePayload::Trace {
+            format, verbosity, ..
+        } => {
+            attrs.push(format!("format={format:?}"));
+            attrs.push(format!("verbosity={verbosity}"));
+        }
         NodePayload::AfterAll(nodes) => attrs.push(format!("len={}", nodes.len())),
         NodePayload::PrioritySel { cases, default, .. } => {
             attrs.push(format!("len={}", cases.len()));
@@ -700,11 +712,11 @@ top fn f(tok: token, p: bits[1]) -> token {
             (
                 r#"package p
 top fn f(tok: token, p: bits[1]) -> token {
-  ret t: token = trace(tok, p, format="p={}", data_operands=[p], id=3)
+  ret t: token = trace(tok, p, format="p={}", data_operands=[p], verbosity=0, id=3)
 }"#,
                 r#"package q
 top fn f(tok: token, p: bits[1]) -> token {
-  ret t: token = trace(tok, p, format="other={}", data_operands=[p], id=3)
+  ret t: token = trace(tok, p, format="other={}", data_operands=[p], verbosity=0, id=3)
 }"#,
             ),
             (
@@ -742,7 +754,7 @@ top fn f(x: bits[1]) -> bits[1] {
             r#"package q
 top fn f(x: bits[1]) -> bits[1] {
   tok: token = after_all(id=2)
-  tr: token = trace(tok, x, format="x={}", data_operands=[x], id=3)
+  tr: token = trace(tok, x, format="x={}", data_operands=[x], verbosity=0, id=3)
   ret out: bits[1] = identity(x, id=4)
 }"#,
         );

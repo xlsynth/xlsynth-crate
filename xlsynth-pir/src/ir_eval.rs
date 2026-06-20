@@ -2056,6 +2056,7 @@ fn eval_fn_impl<'a>(
                 token,
                 activated,
                 format,
+                verbosity,
                 operands,
             } => {
                 let _token_val = env.get(token).cloned().unwrap_or_else(IrValue::make_token);
@@ -2067,8 +2068,7 @@ fn eval_fn_impl<'a>(
                 if is_active {
                     trace_messages.push(TraceMessage {
                         message: format_trace_message(format, operands, f, &env),
-                        // XLS trace nodes in this IR do not carry verbosity; use 0.
-                        verbosity: 0,
+                        verbosity: *verbosity,
                     });
                 }
                 // The result of trace is a token.
@@ -3954,7 +3954,7 @@ fn f(a: bits[5][4] id=1, v: bits[5] id=2, i: bits[80] id=3) -> bits[5][4] {
 
 fn f(x: bits[1] id=1) -> bits[1] {
   t: token = after_all(id=2)
-  _tr: token = trace(t, x, format="x={} done", data_operands=[x], id=3)
+  _tr: token = trace(t, x, format="x={} done", data_operands=[x], verbosity=0, id=3)
   _a: token = assert(t, x, message="boom", label="L", id=4)
   ret literal.5: bits[1] = literal(value=1, id=5)
 }
@@ -3999,7 +3999,7 @@ fn f(x: bits[1] id=1) -> bits[1] {
 fn f(x: bits[12] id=1, neg: bits[8] id=2, wide: bits[72] id=3) -> token {
   t: token = after_all(id=4)
   one: bits[1] = literal(value=1, id=5)
-  ret tr: token = trace(t, one, format="literal={{ default={} u={:u} d={:d} x={:x} 0x={:0x} #x={:#x} b={:b} 0b={:0b} #b={:#b} wide={} wide_u={:u}", data_operands=[x, x, neg, x, x, x, x, x, x, wide, wide], id=6)
+  ret tr: token = trace(t, one, format="literal={{ default={} u={:u} d={:d} x={:x} 0x={:0x} #x={:#x} b={:b} 0b={:0b} #b={:#b} wide={} wide_u={:u}", data_operands=[x, x, neg, x, x, x, x, x, x, wide, wide], verbosity=0, id=6)
 }
 "#;
         let mut p = Parser::new(ir_text);
@@ -4331,7 +4331,7 @@ fn f(x: bits[8] id=10) -> bits[8] {
 fn g(x: bits[8] id=1) -> bits[8] {
   t: token = after_all(id=2)
   literal.3: bits[1] = literal(value=1, id=3)
-  trace.4: token = trace(t, literal.3, format="in g x={}", data_operands=[x], id=4)
+  trace.4: token = trace(t, literal.3, format="in g x={}", data_operands=[x], verbosity=0, id=4)
   ret identity.5: bits[8] = identity(x, id=5)
 }
 
@@ -4390,7 +4390,7 @@ fn f(init: bits[8] id=10, invariant: bits[8] id=11) -> bits[8] {
 fn body(i: bits[2] id=1, carry: bits[1] id=2) -> bits[1] {
   t: token = after_all(id=3)
   _covered: () = cover(carry, label="hit", id=4)
-  _traced: token = trace(t, carry, format="i={}", data_operands=[i], id=5)
+  _traced: token = trace(t, carry, format="i={}", data_operands=[i], verbosity=0, id=5)
   ret same: bits[1] = identity(carry, id=6)
 }
 

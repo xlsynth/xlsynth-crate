@@ -27,6 +27,16 @@ pub struct RustBridgeBuilder {
     leading_items: Vec<String>,
     emitted_parametric_structs: BTreeSet<String>,
     defer_parametric_struct_emission: bool,
+    target: RustBridgeTarget,
+}
+
+/// Runtime representation selected for generated Rust bridge values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RustBridgeTarget {
+    /// Packing-oriented bridge values used by the LLVM standalone AOT path.
+    StandaloneAot,
+    /// Native bridge values passed directly to PIR compiler entrypoints.
+    PirCompilerNative,
 }
 
 /// Rust items generated for one DSLX module, before parent modules are
@@ -111,14 +121,22 @@ impl RustBridgeBuilder {
             leading_items: vec![],
             emitted_parametric_structs: BTreeSet::new(),
             defer_parametric_struct_emission: false,
+            target: RustBridgeTarget::StandaloneAot,
         }
+    }
+
+    /// Selects native PIR compiler storage for emitted bridge values.
+    #[cfg(any(feature = "standalone-aot", feature = "pir-compiler-dslx-aot"))]
+    pub(crate) fn with_pir_compiler_native_target(mut self) -> Self {
+        self.target = RustBridgeTarget::PirCompilerNative;
+        self
     }
 
     /// Appends raw Rust items immediately before the generated module closes.
     ///
     /// This is used by AOT generation to place `Runner` beside the typed DSLX
     /// definitions for the top function.
-    #[cfg(feature = "standalone-aot")]
+    #[cfg(any(feature = "standalone-aot", feature = "pir-compiler-dslx-aot"))]
     pub(crate) fn with_runner_items(mut self, runner_items: impl Into<String>) -> Self {
         self.runner_items = Some(runner_items.into());
         self
@@ -130,7 +148,7 @@ impl RustBridgeBuilder {
     /// bridge rendering. Callers should pass items that are already valid in
     /// the target module's namespace; inserting cross-module paths here
     /// would make generated code depend on the wrong ownership context.
-    #[cfg(feature = "standalone-aot")]
+    #[cfg(any(feature = "standalone-aot", feature = "pir-compiler-dslx-aot"))]
     pub(crate) fn with_leading_items(
         mut self,
         leading_items: impl IntoIterator<Item = String>,
@@ -144,7 +162,7 @@ impl RustBridgeBuilder {
     /// Typed DSLX AOT generation uses this when it renders several modules
     /// together and has already collected the concrete specializations that
     /// should be emitted in their defining modules.
-    #[cfg(feature = "standalone-aot")]
+    #[cfg(any(feature = "standalone-aot", feature = "pir-compiler-dslx-aot"))]
     pub(crate) fn with_deferred_parametric_struct_emission(mut self) -> Self {
         self.defer_parametric_struct_emission = true;
         self
@@ -160,7 +178,7 @@ impl RustBridgeBuilder {
         render_rust_module_fragments([
             RustModuleFragment {
                 path: vec![],
-                body: render_standalone_runtime_imports().to_string(),
+                body: render_runtime_imports(self.target).to_string(),
             },
             self.module_fragment(),
         ])
@@ -188,7 +206,13 @@ impl RustBridgeBuilder {
         type_annotation: Option<&dslx::TypeAnnotation>,
         ty: &dslx::Type,
     ) -> Result<String, XlsynthError> {
-        Self::convert_type_with_annotation(&[], None, type_annotation, ty)
+        Self::convert_type_with_annotation(
+            RustBridgeTarget::StandaloneAot,
+            &[],
+            None,
+            type_annotation,
+            ty,
+        )
     }
 
     /// Returns the Rust bridge type name for a DSLX type in one module.
@@ -196,7 +220,7 @@ impl RustBridgeBuilder {
     /// Typed callers use this path so imported type references stay canonical
     /// while bits-like values map to the standalone `UBits` and `SBits`
     /// runtime types.
-    #[cfg(feature = "standalone-aot")]
+    #[cfg(any(feature = "standalone-aot", feature = "pir-compiler-dslx-aot"))]
     pub(crate) fn rust_type_name_from_dslx_module(
         current_module_name: &str,
         type_info: &dslx::TypeInfo,
@@ -204,10 +228,17 @@ impl RustBridgeBuilder {
         ty: &dslx::Type,
     ) -> Result<String, XlsynthError> {
         let module_path = rust_module_path_from_dslx_module_name(current_module_name);
-        Self::convert_type_with_annotation(&module_path, Some(type_info), type_annotation, ty)
+        Self::convert_type_with_annotation(
+            RustBridgeTarget::StandaloneAot,
+            &module_path,
+            Some(type_info),
+            type_annotation,
+            ty,
+        )
     }
 
     fn convert_type_with_annotation(
+        target: RustBridgeTarget,
         current_module_path: &[String],
         type_info: Option<&dslx::TypeInfo>,
         type_annotation: Option<&dslx::TypeAnnotation>,
@@ -220,6 +251,7 @@ impl RustBridgeBuilder {
                 let element_annotation = array_annotation.get_element_type();
                 let element_ty = ty.get_array_element_type();
                 let rust_ty = Self::convert_type_with_annotation(
+                    target,
                     current_module_path,
                     type_info,
                     Some(&element_annotation),
@@ -239,7 +271,7 @@ impl RustBridgeBuilder {
             }
         }
         if let Some((is_signed, bit_count)) = ty.is_bits_like() {
-            Ok(standalone_bits_rust_type(is_signed, bit_count))
+            Ok(bits_rust_type(target, is_signed, bit_count))
         } else if ty.is_enum() {
             let enum_def = ty.get_enum_def()?;
             Ok(enum_def.get_identifier().to_string())
@@ -250,6 +282,7 @@ impl RustBridgeBuilder {
             let array_ty = ty.get_array_element_type();
             let array_size = ty.get_array_size();
             let rust_ty = Self::convert_type_with_annotation(
+                target,
                 current_module_path,
                 type_info,
                 None,
@@ -257,9 +290,13 @@ impl RustBridgeBuilder {
             )?;
             Ok(format!("[{rust_ty}; {array_size}]"))
         } else {
+            let ty_text = ty.to_string()?;
+            if ty_text.trim_start().starts_with('(') {
+                return Ok(parse_concrete_dslx_type_shape(&ty_text)?.rust_type(target));
+            }
             Err(XlsynthError(format!(
                 "Unsupported type for conversion from DSLX to Rust: {:?}",
-                ty.to_string()?
+                ty_text
             )))
         }
     }
@@ -441,6 +478,7 @@ impl RustBridgeBuilder {
                 &field_ty,
             )?;
             let field_rust_ty = Self::convert_type_with_annotation(
+                self.target,
                 &self.module_path,
                 Some(type_info),
                 Some(&field_annotation),
@@ -450,12 +488,25 @@ impl RustBridgeBuilder {
         }
         self.lines
             .push("#[allow(non_camel_case_types)]".to_string());
-        self.lines
-            .push("#[derive(Debug, Clone, PartialEq, Eq)]".to_string());
+        self.push_struct_representation();
         self.lines.push(format!("pub struct {rust_ty} {{"));
         self.lines.extend(field_lines);
         self.lines.push("}\n".to_string());
         Ok(())
+    }
+}
+
+impl RustBridgeBuilder {
+    /// Adds representation attributes suitable for this bridge target.
+    fn push_struct_representation(&mut self) {
+        if self.target == RustBridgeTarget::PirCompilerNative {
+            self.lines.push("#[repr(C)]".to_string());
+            self.lines
+                .push("#[derive(Debug, Clone, Copy, PartialEq, Eq)]".to_string());
+        } else {
+            self.lines
+                .push("#[derive(Debug, Clone, PartialEq, Eq)]".to_string());
+        }
     }
 }
 
@@ -471,13 +522,265 @@ use xlsynth_aot_runtime::{
 "#
 }
 
+/// Renders the runtime imports shared by generated native compiler bridges.
+pub(crate) fn render_pir_compiler_native_runtime_imports() -> &'static str {
+    r#"pub use xlsynth_pir_compiler_runtime::{
+    BitsInU8, BitsInU16, BitsInU32, BitsInU64, Token, WideBits,
+};
+"#
+}
+
+fn render_runtime_imports(target: RustBridgeTarget) -> &'static str {
+    match target {
+        RustBridgeTarget::StandaloneAot => render_standalone_runtime_imports(),
+        RustBridgeTarget::PirCompilerNative => render_pir_compiler_native_runtime_imports(),
+    }
+}
+
 /// Returns the smallest runtime-neutral Rust type that can hold one DSLX bits
 /// value.
-fn standalone_bits_rust_type(is_signed: bool, bit_count: usize) -> String {
-    if is_signed {
-        format!("SBits<{bit_count}>")
+fn bits_rust_type(target: RustBridgeTarget, is_signed: bool, bit_count: usize) -> String {
+    match target {
+        RustBridgeTarget::StandaloneAot => {
+            if is_signed {
+                format!("SBits<{bit_count}>")
+            } else {
+                format!("UBits<{bit_count}>")
+            }
+        }
+        RustBridgeTarget::PirCompilerNative => native_bits_rust_type(bit_count),
+    }
+}
+
+/// Returns the native compiler runtime carrier for one DSLX bits value.
+pub(crate) fn native_bits_rust_type(bit_count: usize) -> String {
+    match bit_count {
+        1..=8 => format!("BitsInU8<{bit_count}>"),
+        9..=16 => format!("BitsInU16<{bit_count}>"),
+        17..=32 => format!("BitsInU32<{bit_count}>"),
+        33..=64 => format!("BitsInU64<{bit_count}>"),
+        _ => format!("WideBits<{bit_count}, {}>", bit_count.div_ceil(64)),
+    }
+}
+
+/// Concrete structural DSLX type spellings that currently lack direct FFI
+/// accessors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ConcreteDslxTypeShape {
+    Bits {
+        is_signed: bool,
+        bit_count: usize,
+    },
+    Tuple {
+        elements: Vec<ConcreteDslxTypeShape>,
+    },
+    Array {
+        size: usize,
+        element: Box<ConcreteDslxTypeShape>,
+    },
+}
+
+impl ConcreteDslxTypeShape {
+    pub(crate) fn rust_type(&self, target: RustBridgeTarget) -> String {
+        match self {
+            ConcreteDslxTypeShape::Bits {
+                is_signed,
+                bit_count,
+            } => bits_rust_type(target, *is_signed, *bit_count),
+            ConcreteDslxTypeShape::Tuple { elements } => match elements.as_slice() {
+                [] => "()".to_string(),
+                [element] => format!("({},)", element.rust_type(target)),
+                _ => format!(
+                    "({})",
+                    elements
+                        .iter()
+                        .map(|element| element.rust_type(target))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            },
+            ConcreteDslxTypeShape::Array { size, element } => {
+                format!("[{}; {size}]", element.rust_type(target))
+            }
+        }
+    }
+}
+
+/// Parses concrete DSLX type strings for structural tuple lowering.
+///
+/// The DSLX bindings expose helpers for bits, arrays, structs, and enums but
+/// not tuple members. This parser is intentionally narrow: it accepts only the
+/// fully concrete bits/array/tuple spellings emitted by
+/// `dslx::Type::to_string`.
+pub(crate) fn parse_concrete_dslx_type_shape(
+    text: &str,
+) -> Result<ConcreteDslxTypeShape, XlsynthError> {
+    let mut parser = ConcreteDslxTypeShapeParser { text, offset: 0 };
+    let shape = parser.parse_type()?;
+    parser.skip_ws();
+    if parser.is_eof() {
+        Ok(shape)
     } else {
-        format!("UBits<{bit_count}>")
+        Err(XlsynthError(format!(
+            "unsupported concrete DSLX type shape near `{}` in `{text}`",
+            &text[parser.offset..]
+        )))
+    }
+}
+
+struct ConcreteDslxTypeShapeParser<'a> {
+    text: &'a str,
+    offset: usize,
+}
+
+impl ConcreteDslxTypeShapeParser<'_> {
+    fn is_eof(&self) -> bool {
+        self.offset >= self.text.len()
+    }
+
+    fn skip_ws(&mut self) {
+        while self
+            .text
+            .as_bytes()
+            .get(self.offset)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            self.offset += 1;
+        }
+    }
+
+    fn peek(&mut self) -> Option<u8> {
+        self.skip_ws();
+        self.text.as_bytes().get(self.offset).copied()
+    }
+
+    fn consume_char(&mut self, expected: u8) -> bool {
+        self.skip_ws();
+        if self.text.as_bytes().get(self.offset).copied() == Some(expected) {
+            self.offset += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn consume_str(&mut self, expected: &str) -> bool {
+        self.skip_ws();
+        if self.text[self.offset..].starts_with(expected) {
+            self.offset += expected.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expect_char(&mut self, expected: u8) -> Result<(), XlsynthError> {
+        if self.consume_char(expected) {
+            Ok(())
+        } else {
+            Err(XlsynthError(format!(
+                "expected `{}` while parsing concrete DSLX type shape `{}`",
+                expected as char, self.text
+            )))
+        }
+    }
+
+    fn parse_usize(&mut self) -> Result<usize, XlsynthError> {
+        self.skip_ws();
+        let start = self.offset;
+        while self
+            .text
+            .as_bytes()
+            .get(self.offset)
+            .is_some_and(u8::is_ascii_digit)
+        {
+            self.offset += 1;
+        }
+        if self.offset == start {
+            return Err(XlsynthError(format!(
+                "expected decimal number while parsing concrete DSLX type shape `{}`",
+                self.text
+            )));
+        }
+        self.text[start..self.offset]
+            .parse::<usize>()
+            .map_err(|error| {
+                XlsynthError(format!(
+                    "invalid decimal number `{}` in concrete DSLX type shape `{}`: {error}",
+                    &self.text[start..self.offset],
+                    self.text
+                ))
+            })
+    }
+
+    fn parse_type(&mut self) -> Result<ConcreteDslxTypeShape, XlsynthError> {
+        let mut shape = self.parse_atom()?;
+        while self.consume_char(b'[') {
+            let size = self.parse_usize()?;
+            self.expect_char(b']')?;
+            shape = ConcreteDslxTypeShape::Array {
+                size,
+                element: Box::new(shape),
+            };
+        }
+        Ok(shape)
+    }
+
+    fn parse_atom(&mut self) -> Result<ConcreteDslxTypeShape, XlsynthError> {
+        if self.consume_char(b'(') {
+            let mut elements = Vec::new();
+            if self.consume_char(b')') {
+                return Ok(ConcreteDslxTypeShape::Tuple { elements });
+            }
+            loop {
+                elements.push(self.parse_type()?);
+                if self.consume_char(b')') {
+                    break;
+                }
+                self.expect_char(b',')?;
+                if self.consume_char(b')') {
+                    break;
+                }
+            }
+            return Ok(ConcreteDslxTypeShape::Tuple { elements });
+        }
+
+        if self.consume_str("uN") {
+            return self.parse_bits(/* is_signed= */ false);
+        }
+        if self.consume_str("sN") {
+            return self.parse_bits(/* is_signed= */ true);
+        }
+        if self.consume_str("bits") {
+            return self.parse_bits(/* is_signed= */ false);
+        }
+        if self.peek() == Some(b'u') || self.peek() == Some(b's') {
+            let is_signed = self.consume_char(b's');
+            if !is_signed {
+                self.expect_char(b'u')?;
+            }
+            let bit_count = self.parse_usize()?;
+            return Ok(ConcreteDslxTypeShape::Bits {
+                is_signed,
+                bit_count,
+            });
+        }
+
+        Err(XlsynthError(format!(
+            "unsupported concrete DSLX type shape near `{}` in `{}`",
+            &self.text[self.offset..],
+            self.text
+        )))
+    }
+
+    fn parse_bits(&mut self, is_signed: bool) -> Result<ConcreteDslxTypeShape, XlsynthError> {
+        self.expect_char(b'[')?;
+        let bit_count = self.parse_usize()?;
+        self.expect_char(b']')?;
+        Ok(ConcreteDslxTypeShape::Bits {
+            is_signed,
+            bit_count,
+        })
     }
 }
 
@@ -513,6 +816,8 @@ impl BridgeBuilder for RustBridgeBuilder {
             .join("::");
         let imports = if root.is_empty() {
             String::new()
+        } else if self.target == RustBridgeTarget::PirCompilerNative {
+            format!("use {root}::{{BitsInU8, BitsInU16, BitsInU32, BitsInU64, Token, WideBits}};\n")
         } else {
             format!(
                 "use {root}::{{read_leaf_element, write_leaf_element, AotArtifactMetadata, AotElementLayout, AotError, AotRunResult, AotRunnerLayout, SBits, StandaloneRunner, UBits}};\n"
@@ -540,9 +845,34 @@ impl BridgeBuilder for RustBridgeBuilder {
         &mut self,
         dslx_name: &str,
         is_signed: bool,
-        _underlying_bit_count: usize,
+        underlying_bit_count: usize,
         members: &[(String, IrValue)],
     ) -> Result<(), XlsynthError> {
+        if self.target == RustBridgeTarget::PirCompilerNative {
+            if !(1..=64).contains(&underlying_bit_count) {
+                return Err(XlsynthError(format!(
+                    "DSLX Rust bridge does not yet support native enum `{dslx_name}` with bits[{underlying_bit_count}] storage"
+                )));
+            }
+            let carrier = native_bits_rust_type(underlying_bit_count);
+            let carrier_expr = carrier.replacen('<', "::<", 1);
+            self.lines.push("#[repr(transparent)]".to_string());
+            self.lines
+                .push("#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]".to_string());
+            self.lines
+                .push(format!("pub struct {dslx_name}(pub {carrier});"));
+            self.lines.push(format!("impl {dslx_name} {{"));
+            for (name, value) in members {
+                let value = value.to_bits()?.to_u64()?;
+                self.lines
+                    .push("    #[allow(non_upper_case_globals)]".to_string());
+                self.lines.push(format!(
+                    "    pub const {name}: Self = Self({carrier_expr}::wrapping({value}));"
+                ));
+            }
+            self.lines.push("}\n".to_string());
+            return Ok(());
+        }
         let value_to_string = |value: &IrValue| -> Result<String, XlsynthError> {
             if is_signed {
                 value.to_i64().map(|v| v.to_string())
@@ -567,11 +897,11 @@ impl BridgeBuilder for RustBridgeBuilder {
         dslx_name: &str,
         members: &[StructMemberData],
     ) -> Result<(), XlsynthError> {
-        self.lines
-            .push("#[derive(Debug, Clone, PartialEq, Eq)]".to_string());
+        self.push_struct_representation();
         self.lines.push(format!("pub struct {dslx_name} {{"));
         for member in members {
             let rust_ty = Self::convert_type_with_annotation(
+                self.target,
                 &self.module_path,
                 None,
                 Some(&member.type_annotation),
@@ -597,11 +927,11 @@ impl BridgeBuilder for RustBridgeBuilder {
                 &member.concrete_type,
             )?;
         }
-        self.lines
-            .push("#[derive(Debug, Clone, PartialEq, Eq)]".to_string());
+        self.push_struct_representation();
         self.lines.push(format!("pub struct {dslx_name} {{"));
         for member in members {
             let rust_ty = Self::convert_type_with_annotation(
+                self.target,
                 &self.module_path,
                 Some(type_info),
                 Some(&member.type_annotation),
@@ -621,6 +951,7 @@ impl BridgeBuilder for RustBridgeBuilder {
         concrete_type: &dslx::Type,
     ) -> Result<(), XlsynthError> {
         let rust_ty = Self::convert_type_with_annotation(
+            self.target,
             &self.module_path,
             None,
             Some(type_annotation),
@@ -644,6 +975,7 @@ impl BridgeBuilder for RustBridgeBuilder {
             concrete_type,
         )?;
         let rust_ty = Self::convert_type_with_annotation(
+            self.target,
             &self.module_path,
             Some(type_info),
             Some(type_annotation),
@@ -714,7 +1046,7 @@ fn rust_module_path_from_import(import: &dslx::Import) -> Vec<String> {
 ///
 /// The result uses `super` segments when needed, so callers should pass DSLX
 /// module names rather than already-qualified Rust paths.
-#[cfg(feature = "standalone-aot")]
+#[cfg(any(feature = "standalone-aot", feature = "pir-compiler-dslx-aot"))]
 pub(crate) fn rust_type_path_between_dslx_modules(
     current_module_name: &str,
     target_module_name: &str,
@@ -816,6 +1148,22 @@ mod tests {
     use crate::dslx_bridge::{convert_imported_module, convert_leaf_module};
 
     use super::*;
+
+    // Verifies: concrete DSLX tuple type strings lower to Rust tuple spellings
+    // for structural AOT metadata paths that do not have tuple FFI accessors.
+    #[test]
+    fn concrete_dslx_type_shape_parses_nested_tuple_arrays() {
+        let shape = parse_concrete_dslx_type_shape("(uN[8], (sN[4], bits[1])[2])").unwrap();
+
+        assert_eq!(
+            shape.rust_type(RustBridgeTarget::StandaloneAot),
+            "(UBits<8>, [(SBits<4>, UBits<1>); 2])"
+        );
+        assert_eq!(
+            shape.rust_type(RustBridgeTarget::PirCompilerNative),
+            "(BitsInU8<8>, [(BitsInU8<4>, BitsInU8<1>); 2])"
+        );
+    }
 
     // Verifies: enum-only DSLX modules emit Rust enums with DSLX discriminants.
     // Catches: regressions in enum discriminant rendering.

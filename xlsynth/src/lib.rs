@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#[cfg(feature = "standalone-aot")]
+#[cfg(any(feature = "standalone-aot", feature = "pir-compiler-dslx-aot"))]
 pub mod aot_builder;
 pub mod aot_entrypoint_metadata;
 pub mod aot_lib;
@@ -53,6 +53,11 @@ pub fn dslx_path_to_module_name(path: &std::path::Path) -> Result<&str, XlsynthE
         )),
         Some(stem) => Ok(stem.to_str().unwrap()),
     }
+}
+
+/// Returns the bundled DSLX standard library path used by default conversions.
+pub fn default_dslx_stdlib_path() -> &'static std::path::Path {
+    std::path::Path::new(xlsynth_sys::DSLX_STDLIB_PATH)
 }
 
 #[derive(Clone, Default, Eq, PartialEq)]

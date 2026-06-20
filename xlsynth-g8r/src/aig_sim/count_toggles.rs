@@ -230,22 +230,29 @@ fn count_primary_input_toggles(batch_inputs: &[Vec<IrBits>]) -> usize {
     primary_input_toggles
 }
 
-/// Counts output-reachable node transitions across an ordered stimulus batch.
-fn count_live_node_toggles_simd(
+/// Counts transitions for a fanin-closed set of nodes across an ordered batch.
+fn count_selected_node_toggles_simd(
     gate_fn: &GateFn,
     batch_inputs: &[Vec<IrBits>],
+    live_nodes: Vec<bool>,
 ) -> Result<LiveNodeToggleCounts, String> {
     validate_toggle_batch_inputs(gate_fn, batch_inputs)?;
-    let live_nodes = collect_output_reachable_nodes(gate_fn);
+    assert_eq!(live_nodes.len(), gate_fn.gates.len());
     let mut per_node_toggles = vec![0usize; gate_fn.gates.len()];
     let mut previous_chunk_last_values = vec![false; gate_fn.gates.len()];
     let mut has_previous_chunk = false;
+    let mut all_values = Vec::new();
 
     for (chunk_index, chunk) in batch_inputs.chunks(256).enumerate() {
         let chunk_start = chunk_index * 256;
         let packed_inputs =
             gate_simd::pack_ordered_input_chunk(gate_fn, batch_inputs, chunk_start, chunk.len());
-        let all_values = gate_simd::eval_all_node_values(gate_fn, &packed_inputs);
+        gate_simd::eval_live_node_values_dense_into(
+            gate_fn,
+            &packed_inputs,
+            &live_nodes,
+            &mut all_values,
+        );
 
         for (node_index, &is_live) in live_nodes.iter().enumerate() {
             if !is_live {
@@ -265,6 +272,29 @@ fn count_live_node_toggles_simd(
         live_nodes,
         per_node_toggles,
     })
+}
+
+/// Counts output-reachable node transitions across an ordered stimulus batch.
+fn count_live_node_toggles_simd(
+    gate_fn: &GateFn,
+    batch_inputs: &[Vec<IrBits>],
+) -> Result<LiveNodeToggleCounts, String> {
+    count_selected_node_toggles_simd(
+        gate_fn,
+        batch_inputs,
+        collect_output_reachable_nodes(gate_fn),
+    )
+}
+
+/// Counts transitions for every node, including nodes outside primary outputs.
+pub(crate) fn count_all_node_toggles_simd(
+    gate_fn: &GateFn,
+    batch_inputs: &[Vec<IrBits>],
+) -> Result<Vec<usize>, String> {
+    Ok(
+        count_selected_node_toggles_simd(gate_fn, batch_inputs, vec![true; gate_fn.gates.len()])?
+            .per_node_toggles,
+    )
 }
 
 fn aggregate_toggle_stats(

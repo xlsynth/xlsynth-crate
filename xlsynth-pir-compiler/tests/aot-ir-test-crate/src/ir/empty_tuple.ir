@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package native_aot_tests
+
+fn empty_tuple() -> () {
+  ret out: () = tuple(id=1)
+}

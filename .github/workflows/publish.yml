@@ -61,6 +61,21 @@ jobs:
           echo "XLS_AOT_RUNTIME_PATH=${XLSYNTH_TOOLS}/libxls_aot_runtime.a" >> "$GITHUB_ENV"
           echo "XLS_AOT_RUNTIME_LINK_CONFIG_PATH=${XLSYNTH_TOOLS}/libxls_aot_runtime_link.toml" >> "$GITHUB_ENV"
 
+      - name: Download Bitwuzla shared library (macOS arm64)
+        run: |
+          sudo mkdir -p /usr/local/lib
+          BASE_URL="https://github.com/xlsynth/boolector-build/releases/download/bitwuzla-binaries-b29041fbbe6318cb4c19a6e11c7616efc4cb4d32"
+          for lib in bitwuzla bitwuzlabb bitwuzlabv bitwuzlals cadical; do
+            src="lib${lib}-osx-arm64.dylib"
+            python3 scripts/download_and_verify_shared_lib.py dylib "${src}" "${BASE_URL}/${src}"
+            sudo install -m 0644 "${src}" "/usr/local/lib/lib${lib}.dylib"
+            sudo install_name_tool -id "@rpath/lib${lib}.dylib" "/usr/local/lib/lib${lib}.dylib"
+            sudo rm -f "${src}"
+          done
+          echo "DYLD_FALLBACK_LIBRARY_PATH=/usr/local/lib:$DYLD_FALLBACK_LIBRARY_PATH" >> "$GITHUB_ENV"
+          echo "LIBRARY_PATH=/usr/local/lib:$LIBRARY_PATH" >> "$GITHUB_ENV"
+          echo "LDFLAGS=-L/usr/local/lib $LDFLAGS" >> "$GITHUB_ENV"
+
       - name: Install protobuf compiler
         run: |
           curl -L --retry 5 --retry-delay 2 --retry-connrefused -o protoc-29.1-osx-aarch_64.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-osx-aarch_64.zip
@@ -86,7 +101,8 @@ jobs:
       - name: Build and test
         env:
           XLSYNTH_PUBLISH_VERSION: ${{ steps.version_vars.outputs.version_no_v }}
-        run: cargo test --workspace
+          DYLD_LIBRARY_PATH: /usr/local/lib
+        run: cargo test --features with-bitwuzla-system --workspace
 
       - name: Publish crates in dependency order
         env:
@@ -95,7 +111,6 @@ jobs:
 
   post-publish:
     needs: publish
-    if: ${{ needs.publish.outputs.patch == '0' }}
     runs-on: macos-latest
 
     steps:
@@ -106,6 +121,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up post-publish version variables
+        if: ${{ needs.publish.outputs.patch == '0' }}
         id: post_publish_vars
         run: |
           RELEASED_VERSION="${{ needs.publish.outputs.version_no_v }}"
@@ -116,6 +132,7 @@ jobs:
           echo "next_version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Check current repository version
+        if: ${{ needs.publish.outputs.patch == '0' }}
         id: repo_version_state
         run: |
           RELEASED_VERSION="${{ steps.post_publish_vars.outputs.released_version }}"
@@ -130,21 +147,21 @@ jobs:
           fi
 
       - name: Bump version numbers (minor bump for mainline release)
-        if: ${{ steps.repo_version_state.outputs.state == 'needs_bump' }}
+        if: ${{ needs.publish.outputs.patch == '0' && steps.repo_version_state.outputs.state == 'needs_bump' }}
         run: |
           cargo clean
           python scripts/bump_version_numbers.py bump-minor
           cargo generate-lockfile
 
       - name: Validate post-bump version equals expected next minor
-        if: ${{ steps.repo_version_state.outputs.state == 'needs_bump' }}
+        if: ${{ needs.publish.outputs.patch == '0' && steps.repo_version_state.outputs.state == 'needs_bump' }}
         run: |
           NEXT_VERSION="${{ steps.post_publish_vars.outputs.next_version }}"
           echo "Expecting post-bump version: $NEXT_VERSION"
           python3 scripts/check_version_is.py "$NEXT_VERSION"
 
       - name: Commit bumped version numbers
-        if: ${{ steps.repo_version_state.outputs.state == 'needs_bump' }}
+        if: ${{ needs.publish.outputs.patch == '0' && steps.repo_version_state.outputs.state == 'needs_bump' }}
         env:
           MY_PAT: ${{ secrets.MY_PAT }}
         run: |

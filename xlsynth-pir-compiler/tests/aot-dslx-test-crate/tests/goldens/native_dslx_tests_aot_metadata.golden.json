@@ -1,0 +1,1171 @@
+{
+  "format_version": 3,
+  "modules": [
+    {
+      "path": [
+        "parametric_lib"
+      ],
+      "declarations": [
+        {
+          "kind": "struct",
+          "name": "RemoteBox__N_8",
+          "fields": [
+            {
+              "name": "value",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 8
+              }
+            }
+          ]
+        },
+        {
+          "kind": "struct",
+          "name": "RemotePair__A_8__B_23",
+          "fields": [
+            {
+              "name": "left",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 8
+              }
+            },
+            {
+              "name": "right",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 23
+              }
+            }
+          ]
+        },
+        {
+          "kind": "struct",
+          "name": "RemotePlain",
+          "fields": [
+            {
+              "name": "id",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 8
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": [
+        "foo",
+        "widget"
+      ],
+      "declarations": [
+        {
+          "kind": "struct",
+          "name": "Widget",
+          "fields": [
+            {
+              "name": "widget_id",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 8
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": [
+        "bar",
+        "widget"
+      ],
+      "declarations": [
+        {
+          "kind": "struct",
+          "name": "Widget",
+          "fields": [
+            {
+              "name": "widget_id",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 8
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": [
+        "types",
+        "shared_types"
+      ],
+      "declarations": [
+        {
+          "kind": "struct",
+          "name": "Doodle",
+          "fields": [
+            {
+              "name": "doodle_id",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 8
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": [
+        "gizmo_types"
+      ],
+      "declarations": [
+        {
+          "kind": "enum",
+          "name": "GizmoMode",
+          "signedness": "unsigned",
+          "bit_count": 2,
+          "variants": [
+            {
+              "name": "Idle",
+              "value": 0
+            },
+            {
+              "name": "Frob",
+              "value": 1
+            },
+            {
+              "name": "Quux",
+              "value": 2
+            }
+          ]
+        },
+        {
+          "kind": "enum",
+          "name": "SignedGizmoMode",
+          "signedness": "signed",
+          "bit_count": 2,
+          "variants": [
+            {
+              "name": "Negative",
+              "value": 3
+            },
+            {
+              "name": "Neutral",
+              "value": 0
+            },
+            {
+              "name": "Positive",
+              "value": 1
+            }
+          ]
+        },
+        {
+          "kind": "alias",
+          "name": "FrobNibbles",
+          "target": {
+            "kind": "array",
+            "size": 3,
+            "element": {
+              "kind": "bits",
+              "signedness": "unsigned",
+              "bit_count": 4
+            }
+          }
+        },
+        {
+          "kind": "struct",
+          "name": "GizmoTuning",
+          "fields": [
+            {
+              "name": "frob_bias",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 4
+              }
+            },
+            {
+              "name": "wobble_trim",
+              "ty": {
+                "kind": "bits",
+                "signedness": "signed",
+                "bit_count": 4
+              }
+            }
+          ]
+        },
+        {
+          "kind": "struct",
+          "name": "Gizmo",
+          "fields": [
+            {
+              "name": "gizmo_id",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 8
+              }
+            },
+            {
+              "name": "mode",
+              "ty": {
+                "kind": "type_ref",
+                "module": [
+                  "gizmo_types"
+                ],
+                "name": "GizmoMode"
+              }
+            },
+            {
+              "name": "frobs",
+              "ty": {
+                "kind": "array",
+                "size": 3,
+                "element": {
+                  "kind": "bits",
+                  "signedness": "unsigned",
+                  "bit_count": 4
+                }
+              }
+            },
+            {
+              "name": "tuning",
+              "ty": {
+                "kind": "type_ref",
+                "module": [
+                  "gizmo_types"
+                ],
+                "name": "GizmoTuning"
+              }
+            },
+            {
+              "name": "wobble",
+              "ty": {
+                "kind": "bits",
+                "signedness": "signed",
+                "bit_count": 4
+              }
+            },
+            {
+              "name": "signed_mode",
+              "ty": {
+                "kind": "type_ref",
+                "module": [
+                  "gizmo_types"
+                ],
+                "name": "SignedGizmoMode"
+              }
+            }
+          ]
+        },
+        {
+          "kind": "struct",
+          "name": "GizmoOutcome",
+          "fields": [
+            {
+              "name": "next_gizmo_id",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 8
+              }
+            },
+            {
+              "name": "selected_frob",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 4
+              }
+            },
+            {
+              "name": "mode",
+              "ty": {
+                "kind": "type_ref",
+                "module": [
+                  "gizmo_types"
+                ],
+                "name": "GizmoMode"
+              }
+            },
+            {
+              "name": "adjusted_wobble",
+              "ty": {
+                "kind": "bits",
+                "signedness": "signed",
+                "bit_count": 4
+              }
+            },
+            {
+              "name": "signed_mode",
+              "ty": {
+                "kind": "type_ref",
+                "module": [
+                  "gizmo_types"
+                ],
+                "name": "SignedGizmoMode"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": [
+        "parametric_forms"
+      ],
+      "declarations": [
+        {
+          "kind": "struct",
+          "name": "Box__N_8",
+          "fields": [
+            {
+              "name": "value",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 8
+              }
+            }
+          ]
+        },
+        {
+          "kind": "struct",
+          "name": "Box__N_16",
+          "fields": [
+            {
+              "name": "value",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 16
+              }
+            }
+          ]
+        },
+        {
+          "kind": "struct",
+          "name": "Matrix__R_2__C_3",
+          "fields": [
+            {
+              "name": "rows",
+              "ty": {
+                "kind": "array",
+                "size": 2,
+                "element": {
+                  "kind": "array",
+                  "size": 3,
+                  "element": {
+                    "kind": "bits",
+                    "signedness": "unsigned",
+                    "bit_count": 8
+                  }
+                }
+              }
+            }
+          ]
+        },
+        {
+          "kind": "struct",
+          "name": "ArrayBox__N_4",
+          "fields": [
+            {
+              "name": "items",
+              "ty": {
+                "kind": "array",
+                "size": 4,
+                "element": {
+                  "kind": "bits",
+                  "signedness": "unsigned",
+                  "bit_count": 8
+                }
+              }
+            }
+          ]
+        },
+        {
+          "kind": "struct",
+          "name": "ExprBox__N_8",
+          "fields": [
+            {
+              "name": "value",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 8
+              }
+            }
+          ]
+        },
+        {
+          "kind": "struct",
+          "name": "SignedTag__S_m3",
+          "fields": [
+            {
+              "name": "payload",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 8
+              }
+            }
+          ]
+        },
+        {
+          "kind": "struct",
+          "name": "WideTag__W_18446744073709551616",
+          "fields": [
+            {
+              "name": "payload",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 8
+              }
+            }
+          ]
+        },
+        {
+          "kind": "alias",
+          "name": "Box8",
+          "target": {
+            "kind": "type_ref",
+            "module": [
+              "parametric_forms"
+            ],
+            "name": "Box__N_8"
+          }
+        },
+        {
+          "kind": "alias",
+          "name": "Box16",
+          "target": {
+            "kind": "type_ref",
+            "module": [
+              "parametric_forms"
+            ],
+            "name": "Box__N_16"
+          }
+        },
+        {
+          "kind": "alias",
+          "name": "Box8Array4",
+          "target": {
+            "kind": "array",
+            "size": 4,
+            "element": {
+              "kind": "type_ref",
+              "module": [
+                "parametric_forms"
+              ],
+              "name": "Box8"
+            }
+          }
+        },
+        {
+          "kind": "alias",
+          "name": "Matrix2x3",
+          "target": {
+            "kind": "type_ref",
+            "module": [
+              "parametric_forms"
+            ],
+            "name": "Matrix__R_2__C_3"
+          }
+        },
+        {
+          "kind": "alias",
+          "name": "ArrayBox4",
+          "target": {
+            "kind": "type_ref",
+            "module": [
+              "parametric_forms"
+            ],
+            "name": "ArrayBox__N_4"
+          }
+        },
+        {
+          "kind": "alias",
+          "name": "ExprBox8",
+          "target": {
+            "kind": "type_ref",
+            "module": [
+              "parametric_forms"
+            ],
+            "name": "ExprBox__N_8"
+          }
+        },
+        {
+          "kind": "alias",
+          "name": "NegativeTag",
+          "target": {
+            "kind": "type_ref",
+            "module": [
+              "parametric_forms"
+            ],
+            "name": "SignedTag__S_m3"
+          }
+        },
+        {
+          "kind": "alias",
+          "name": "HugeTag",
+          "target": {
+            "kind": "type_ref",
+            "module": [
+              "parametric_forms"
+            ],
+            "name": "WideTag__W_18446744073709551616"
+          }
+        },
+        {
+          "kind": "struct",
+          "name": "WidePair",
+          "fields": [
+            {
+              "name": "unsigned_value",
+              "ty": {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 65
+              }
+            },
+            {
+              "name": "signed_value",
+              "ty": {
+                "kind": "bits",
+                "signedness": "signed",
+                "bit_count": 65
+              }
+            }
+          ]
+        },
+        {
+          "kind": "struct",
+          "name": "ParametricFormsResult",
+          "fields": [
+            {
+              "name": "box8",
+              "ty": {
+                "kind": "type_ref",
+                "module": [
+                  "parametric_forms"
+                ],
+                "name": "Box8"
+              }
+            },
+            {
+              "name": "box16",
+              "ty": {
+                "kind": "type_ref",
+                "module": [
+                  "parametric_forms"
+                ],
+                "name": "Box16"
+              }
+            },
+            {
+              "name": "matrix",
+              "ty": {
+                "kind": "type_ref",
+                "module": [
+                  "parametric_forms"
+                ],
+                "name": "Matrix2x3"
+              }
+            },
+            {
+              "name": "array_box",
+              "ty": {
+                "kind": "type_ref",
+                "module": [
+                  "parametric_forms"
+                ],
+                "name": "ArrayBox4"
+              }
+            },
+            {
+              "name": "box_array",
+              "ty": {
+                "kind": "array",
+                "size": 4,
+                "element": {
+                  "kind": "type_ref",
+                  "module": [
+                    "parametric_forms"
+                  ],
+                  "name": "Box8"
+                }
+              }
+            },
+            {
+              "name": "expr_box",
+              "ty": {
+                "kind": "type_ref",
+                "module": [
+                  "parametric_forms"
+                ],
+                "name": "ExprBox8"
+              }
+            },
+            {
+              "name": "negative",
+              "ty": {
+                "kind": "type_ref",
+                "module": [
+                  "parametric_forms"
+                ],
+                "name": "NegativeTag"
+              }
+            },
+            {
+              "name": "huge",
+              "ty": {
+                "kind": "type_ref",
+                "module": [
+                  "parametric_forms"
+                ],
+                "name": "HugeTag"
+              }
+            },
+            {
+              "name": "wide_pair",
+              "ty": {
+                "kind": "type_ref",
+                "module": [
+                  "parametric_forms"
+                ],
+                "name": "WidePair"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": [
+        "tuple_shapes"
+      ],
+      "declarations": []
+    },
+    {
+      "path": [
+        "invokes_and_loop"
+      ],
+      "declarations": []
+    },
+    {
+      "path": [
+        "events"
+      ],
+      "declarations": []
+    },
+    {
+      "path": [
+        "parametric_imports"
+      ],
+      "declarations": [
+        {
+          "kind": "struct",
+          "name": "ParametricImportsResult",
+          "fields": [
+            {
+              "name": "remote",
+              "ty": {
+                "kind": "type_ref",
+                "module": [
+                  "parametric_lib"
+                ],
+                "name": "RemotePlain"
+              }
+            },
+            {
+              "name": "imported_direct",
+              "ty": {
+                "kind": "type_ref",
+                "module": [
+                  "parametric_lib"
+                ],
+                "name": "RemoteBox__N_8"
+              }
+            },
+            {
+              "name": "imported_pair",
+              "ty": {
+                "kind": "type_ref",
+                "module": [
+                  "parametric_lib"
+                ],
+                "name": "RemotePair__A_8__B_23"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": [
+        "frobber"
+      ],
+      "declarations": []
+    },
+    {
+      "path": [
+        "foo",
+        "my_file"
+      ],
+      "declarations": []
+    },
+    {
+      "path": [
+        "bar",
+        "your_file"
+      ],
+      "declarations": []
+    }
+  ],
+  "entrypoints": [
+    {
+      "name": "gizmo_frob",
+      "source": {
+        "kind": "generated_ir",
+        "ir_top": "__xlsynth_pir_aot_gizmo_frob_dslx_entry"
+      },
+      "owning_module": [
+        "gizmo_types"
+      ],
+      "params": [
+        {
+          "name": "gizmo",
+          "ty": {
+            "kind": "type_ref",
+            "module": [
+              "gizmo_types"
+            ],
+            "name": "Gizmo"
+          }
+        },
+        {
+          "name": "garnish",
+          "ty": {
+            "kind": "array",
+            "size": 3,
+            "element": {
+              "kind": "bits",
+              "signedness": "unsigned",
+              "bit_count": 4
+            }
+          }
+        }
+      ],
+      "return_type": {
+        "kind": "type_ref",
+        "module": [
+          "gizmo_types"
+        ],
+        "name": "GizmoOutcome"
+      }
+    },
+    {
+      "name": "parametric_forms",
+      "source": {
+        "kind": "generated_ir",
+        "ir_top": "__xlsynth_pir_aot_parametric_forms_dslx_entry"
+      },
+      "owning_module": [
+        "parametric_forms"
+      ],
+      "params": [
+        {
+          "name": "box8",
+          "ty": {
+            "kind": "type_ref",
+            "module": [
+              "parametric_forms"
+            ],
+            "name": "Box8"
+          }
+        },
+        {
+          "name": "box16",
+          "ty": {
+            "kind": "type_ref",
+            "module": [
+              "parametric_forms"
+            ],
+            "name": "Box16"
+          }
+        },
+        {
+          "name": "matrix",
+          "ty": {
+            "kind": "type_ref",
+            "module": [
+              "parametric_forms"
+            ],
+            "name": "Matrix2x3"
+          }
+        },
+        {
+          "name": "array_box",
+          "ty": {
+            "kind": "type_ref",
+            "module": [
+              "parametric_forms"
+            ],
+            "name": "ArrayBox4"
+          }
+        },
+        {
+          "name": "box_array",
+          "ty": {
+            "kind": "array",
+            "size": 4,
+            "element": {
+              "kind": "type_ref",
+              "module": [
+                "parametric_forms"
+              ],
+              "name": "Box8"
+            }
+          }
+        },
+        {
+          "name": "expr_box",
+          "ty": {
+            "kind": "type_ref",
+            "module": [
+              "parametric_forms"
+            ],
+            "name": "ExprBox8"
+          }
+        },
+        {
+          "name": "negative",
+          "ty": {
+            "kind": "type_ref",
+            "module": [
+              "parametric_forms"
+            ],
+            "name": "NegativeTag"
+          }
+        },
+        {
+          "name": "huge",
+          "ty": {
+            "kind": "type_ref",
+            "module": [
+              "parametric_forms"
+            ],
+            "name": "HugeTag"
+          }
+        },
+        {
+          "name": "wide_pair",
+          "ty": {
+            "kind": "type_ref",
+            "module": [
+              "parametric_forms"
+            ],
+            "name": "WidePair"
+          }
+        }
+      ],
+      "return_type": {
+        "kind": "type_ref",
+        "module": [
+          "parametric_forms"
+        ],
+        "name": "ParametricFormsResult"
+      }
+    },
+    {
+      "name": "tuple_shapes",
+      "source": {
+        "kind": "generated_ir",
+        "ir_top": "__xlsynth_pir_aot_tuple_shapes_dslx_entry"
+      },
+      "owning_module": [
+        "tuple_shapes"
+      ],
+      "params": [
+        {
+          "name": "pair",
+          "ty": {
+            "kind": "tuple",
+            "elements": [
+              {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 8
+              },
+              {
+                "kind": "bits",
+                "signedness": "unsigned",
+                "bit_count": 16
+              }
+            ]
+          }
+        },
+        {
+          "name": "increment",
+          "ty": {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 8
+          }
+        }
+      ],
+      "return_type": {
+        "kind": "tuple",
+        "elements": [
+          {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 8
+          },
+          {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 16
+          }
+        ]
+      }
+    },
+    {
+      "name": "invokes_and_loop",
+      "source": {
+        "kind": "generated_ir",
+        "ir_top": "__xlsynth_pir_aot_invokes_and_loop_dslx_entry"
+      },
+      "owning_module": [
+        "invokes_and_loop"
+      ],
+      "params": [
+        {
+          "name": "init",
+          "ty": {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 8
+          }
+        },
+        {
+          "name": "increment",
+          "ty": {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 8
+          }
+        }
+      ],
+      "return_type": {
+        "kind": "bits",
+        "signedness": "unsigned",
+        "bit_count": 8
+      }
+    },
+    {
+      "name": "events",
+      "source": {
+        "kind": "generated_ir",
+        "ir_top": "__xlsynth_pir_aot_events_dslx_entry"
+      },
+      "owning_module": [
+        "events"
+      ],
+      "params": [
+        {
+          "name": "x",
+          "ty": {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 8
+          }
+        },
+        {
+          "name": "y",
+          "ty": {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 8
+          }
+        },
+        {
+          "name": "ok",
+          "ty": {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 1
+          }
+        },
+        {
+          "name": "emit",
+          "ty": {
+            "kind": "bits",
+            "signedness": "unsigned",
+            "bit_count": 1
+          }
+        }
+      ],
+      "return_type": {
+        "kind": "bits",
+        "signedness": "unsigned",
+        "bit_count": 8
+      }
+    },
+    {
+      "name": "parametric_imports",
+      "source": {
+        "kind": "generated_ir",
+        "ir_top": "__xlsynth_pir_aot_parametric_imports_dslx_entry"
+      },
+      "owning_module": [
+        "parametric_imports"
+      ],
+      "params": [
+        {
+          "name": "remote",
+          "ty": {
+            "kind": "type_ref",
+            "module": [
+              "parametric_lib"
+            ],
+            "name": "RemotePlain"
+          }
+        },
+        {
+          "name": "imported_direct",
+          "ty": {
+            "kind": "type_ref",
+            "module": [
+              "parametric_lib"
+            ],
+            "name": "RemoteBox__N_8"
+          }
+        },
+        {
+          "name": "imported_pair",
+          "ty": {
+            "kind": "type_ref",
+            "module": [
+              "parametric_lib"
+            ],
+            "name": "RemotePair__A_8__B_23"
+          }
+        }
+      ],
+      "return_type": {
+        "kind": "type_ref",
+        "module": [
+          "parametric_imports"
+        ],
+        "name": "ParametricImportsResult"
+      }
+    },
+    {
+      "name": "duplicate_widget",
+      "source": {
+        "kind": "generated_ir",
+        "ir_top": "__xlsynth_pir_aot_duplicate_widget_dslx_entry"
+      },
+      "owning_module": [
+        "frobber"
+      ],
+      "params": [
+        {
+          "name": "widget",
+          "ty": {
+            "kind": "type_ref",
+            "module": [
+              "foo",
+              "widget"
+            ],
+            "name": "Widget"
+          }
+        }
+      ],
+      "return_type": {
+        "kind": "type_ref",
+        "module": [
+          "bar",
+          "widget"
+        ],
+        "name": "Widget"
+      }
+    },
+    {
+      "name": "namespaced_package_echo",
+      "source": {
+        "kind": "generated_ir",
+        "ir_top": "__xlsynth_pir_aot_namespaced_package_echo_dslx_entry"
+      },
+      "owning_module": [
+        "foo",
+        "my_file"
+      ],
+      "params": [
+        {
+          "name": "doodle",
+          "ty": {
+            "kind": "type_ref",
+            "module": [
+              "types",
+              "shared_types"
+            ],
+            "name": "Doodle"
+          }
+        }
+      ],
+      "return_type": {
+        "kind": "type_ref",
+        "module": [
+          "types",
+          "shared_types"
+        ],
+        "name": "Doodle"
+      }
+    },
+    {
+      "name": "namespaced_package_bump",
+      "source": {
+        "kind": "generated_ir",
+        "ir_top": "__xlsynth_pir_aot_namespaced_package_bump_dslx_entry"
+      },
+      "owning_module": [
+        "bar",
+        "your_file"
+      ],
+      "params": [
+        {
+          "name": "doodle",
+          "ty": {
+            "kind": "type_ref",
+            "module": [
+              "types",
+              "shared_types"
+            ],
+            "name": "Doodle"
+          }
+        }
+      ],
+      "return_type": {
+        "kind": "type_ref",
+        "module": [
+          "types",
+          "shared_types"
+        ],
+        "name": "Doodle"
+      }
+    }
+  ]
+}

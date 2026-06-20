@@ -3,6 +3,7 @@
 //! Runtime ABI and observable-event collection for compiled PIR functions.
 
 use std::ffi::c_void;
+use std::fmt;
 use std::marker::PhantomData;
 use std::ptr;
 
@@ -21,6 +22,479 @@ pub type CompiledEntrypoint = unsafe extern "C" fn(
 pub struct RawExecutionContext {
     private_state: *mut c_void,
 }
+
+/// Error returned by generated native-compiler entrypoint wrappers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunError(pub String);
+
+impl fmt::Display for RunError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RunError {}
+
+macro_rules! define_native_bits {
+    ($name:ident, $carrier:ty, $carrier_bits:expr) => {
+        #[repr(transparent)]
+        #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+        pub struct $name<const BIT_COUNT: usize>($carrier);
+
+        impl<const BIT_COUNT: usize> $name<BIT_COUNT> {
+            fn validate_width() -> Result<(), RunError> {
+                if BIT_COUNT == 0 || BIT_COUNT > $carrier_bits {
+                    Err(RunError(format!(
+                        "bits[{BIT_COUNT}] cannot use a {}-bit native carrier",
+                        $carrier_bits
+                    )))
+                } else {
+                    Ok(())
+                }
+            }
+
+            const fn mask() -> $carrier {
+                if BIT_COUNT == $carrier_bits {
+                    <$carrier>::MAX
+                } else {
+                    ((1 as $carrier) << BIT_COUNT) - 1
+                }
+            }
+
+            /// Constructs a canonical bitvector value, rejecting excess high bits.
+            pub fn new(value: $carrier) -> Result<Self, RunError> {
+                Self::validate_width()?;
+                if value & !Self::mask() != 0 {
+                    Err(RunError(format!(
+                        "value {value} does not fit in bits[{BIT_COUNT}]"
+                    )))
+                } else {
+                    Ok(Self(value))
+                }
+            }
+
+            /// Constructs a canonical bitvector by truncating high bits.
+            pub const fn wrapping(value: $carrier) -> Self {
+                assert!(
+                    BIT_COUNT > 0 && BIT_COUNT <= $carrier_bits,
+                    "invalid native bits carrier width"
+                );
+                Self(value & Self::mask())
+            }
+
+            /// Returns the native carrier value.
+            pub const fn get(self) -> $carrier {
+                self.0
+            }
+
+            /// Returns the value widened to `u64`.
+            pub const fn to_u64(self) -> u64 {
+                self.0 as u64
+            }
+        }
+    };
+}
+
+define_native_bits!(BitsInU8, u8, 8);
+define_native_bits!(BitsInU16, u16, 16);
+define_native_bits!(BitsInU32, u32, 32);
+define_native_bits!(BitsInU64, u64, 64);
+
+/// Zero-sized native representation of a `bits[0]` value.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Bits0;
+
+/// Public unsigned DSLX-style wrapper for a `bits[0]` value.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UnsignedBits0;
+
+impl UnsignedBits0 {
+    /// Constructs the sole canonical raw `bits[0]` representation.
+    pub const fn from_raw_bits(value: u64) -> Self {
+        assert!(value == 0, "raw bits do not fit target width");
+        Self
+    }
+
+    /// Returns the sole unsigned `bits[0]` value widened to `u64`.
+    pub const fn to_u64(self) -> u64 {
+        0
+    }
+
+    /// Returns the raw ABI bits widened to `u64`.
+    pub const fn raw_bits(self) -> u64 {
+        0
+    }
+}
+
+impl TryFrom<u64> for UnsignedBits0 {
+    type Error = RunError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        if value == 0 {
+            Ok(Self)
+        } else {
+            Err(RunError(format!("value {value} does not fit in bits[0]")))
+        }
+    }
+}
+
+/// Public signed DSLX-style wrapper for an `sbits[0]` value.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SignedBits0;
+
+impl SignedBits0 {
+    /// Constructs the sole canonical raw `sbits[0]` representation.
+    pub const fn from_raw_bits(value: u64) -> Self {
+        assert!(value == 0, "raw bits do not fit target width");
+        Self
+    }
+
+    /// Returns the sole signed `sbits[0]` value widened to `i64`.
+    pub const fn to_i64(self) -> i64 {
+        0
+    }
+
+    /// Returns the raw ABI bits widened to `u64`.
+    pub const fn raw_bits(self) -> u64 {
+        0
+    }
+}
+
+impl TryFrom<i64> for SignedBits0 {
+    type Error = RunError;
+
+    fn try_from(value: i64) -> Result<Self, Self::Error> {
+        if value == 0 {
+            Ok(Self)
+        } else {
+            Err(RunError(format!("value {value} does not fit in s0")))
+        }
+    }
+}
+
+macro_rules! define_public_bits_wrappers {
+    (
+        $unsigned_name:ident,
+        $signed_name:ident,
+        $raw_name:ident,
+        $unsigned_carrier:ty,
+        $signed_carrier:ty,
+        $carrier_bits:expr
+    ) => {
+        #[repr(transparent)]
+        #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+        pub struct $unsigned_name<const BIT_COUNT: usize>($raw_name<BIT_COUNT>);
+
+        impl<const BIT_COUNT: usize> $unsigned_name<BIT_COUNT> {
+            const fn mask() -> $unsigned_carrier {
+                if BIT_COUNT == $carrier_bits {
+                    <$unsigned_carrier>::MAX
+                } else {
+                    ((1 as $unsigned_carrier) << BIT_COUNT) - 1
+                }
+            }
+
+            /// Constructs an unsigned DSLX-style bit value, rejecting excess high bits.
+            pub fn new(value: $unsigned_carrier) -> Result<Self, RunError> {
+                Ok(Self($raw_name::<BIT_COUNT>::new(value)?))
+            }
+
+            /// Constructs an unsigned DSLX-style bit value by truncating high bits.
+            pub const fn wrapping(value: $unsigned_carrier) -> Self {
+                Self($raw_name::<BIT_COUNT>::wrapping(value))
+            }
+
+            /// Constructs an unsigned DSLX-style bit value from raw ABI bits.
+            pub const fn from_raw_bits(value: $unsigned_carrier) -> Self {
+                assert!(
+                    BIT_COUNT > 0 && BIT_COUNT <= $carrier_bits,
+                    "invalid raw bit carrier width"
+                );
+                assert!(
+                    value & !Self::mask() == 0,
+                    "raw bits do not fit target width"
+                );
+                Self($raw_name::<BIT_COUNT>::wrapping(value))
+            }
+
+            /// Returns the unsigned native carrier value.
+            /// Returns the unsigned value widened to `u64`.
+            pub const fn to_u64(self) -> u64 {
+                self.0.to_u64()
+            }
+
+            /// Returns the raw ABI bits in the native carrier.
+            pub const fn raw_bits(self) -> $unsigned_carrier {
+                self.0.get()
+            }
+        }
+
+        impl<const BIT_COUNT: usize> TryFrom<u64> for $unsigned_name<BIT_COUNT> {
+            type Error = RunError;
+
+            fn try_from(value: u64) -> Result<Self, Self::Error> {
+                let carrier = <$unsigned_carrier>::try_from(value).map_err(|_| {
+                    RunError(format!(
+                        "value {value} does not fit in bits[{BIT_COUNT}]"
+                    ))
+                })?;
+                Self::new(carrier)
+            }
+        }
+
+        #[repr(transparent)]
+        #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+        pub struct $signed_name<const BIT_COUNT: usize>($raw_name<BIT_COUNT>);
+
+        impl<const BIT_COUNT: usize> $signed_name<BIT_COUNT> {
+            fn validate_signed_value(value: $signed_carrier) -> Result<(), RunError> {
+                if BIT_COUNT == 0 || BIT_COUNT > $carrier_bits {
+                    return Err(RunError(format!(
+                        "s{BIT_COUNT} cannot use a {}-bit native carrier",
+                        $carrier_bits
+                    )));
+                }
+                let min = -(1i128 << (BIT_COUNT - 1));
+                let max = (1i128 << (BIT_COUNT - 1)) - 1;
+                let value = value as i128;
+                if value < min || value > max {
+                    Err(RunError(format!(
+                        "value {value} does not fit in s{BIT_COUNT}"
+                    )))
+                } else {
+                    Ok(())
+                }
+            }
+
+            const fn mask() -> $unsigned_carrier {
+                if BIT_COUNT == $carrier_bits {
+                    <$unsigned_carrier>::MAX
+                } else {
+                    ((1 as $unsigned_carrier) << BIT_COUNT) - 1
+                }
+            }
+
+            /// Constructs a signed DSLX-style bit value, rejecting out-of-range values.
+            pub fn new(value: $signed_carrier) -> Result<Self, RunError> {
+                Self::validate_signed_value(value)?;
+                Ok(Self($raw_name::<BIT_COUNT>::wrapping(
+                    value as $unsigned_carrier,
+                )))
+            }
+
+            /// Constructs a signed DSLX-style bit value by truncating to the target width.
+            pub const fn wrapping(value: $signed_carrier) -> Self {
+                Self($raw_name::<BIT_COUNT>::wrapping(
+                    value as $unsigned_carrier,
+                ))
+            }
+
+            /// Constructs a signed DSLX-style bit value from raw ABI bits.
+            pub const fn from_raw_bits(value: $unsigned_carrier) -> Self {
+                assert!(
+                    BIT_COUNT > 0 && BIT_COUNT <= $carrier_bits,
+                    "invalid raw bit carrier width"
+                );
+                assert!(
+                    value & !Self::mask() == 0,
+                    "raw bits do not fit target width"
+                );
+                Self($raw_name::<BIT_COUNT>::wrapping(value))
+            }
+
+            /// Returns the sign-extended native signed carrier value.
+            fn to_signed_carrier(self) -> $signed_carrier {
+                let raw = self.0.get();
+                let sign_bit = 1 as $unsigned_carrier << (BIT_COUNT - 1);
+                if raw & sign_bit == 0 {
+                    raw as $signed_carrier
+                } else {
+                    (raw | !Self::mask()) as $signed_carrier
+                }
+            }
+
+            /// Returns the sign-extended value widened to `i64`.
+            pub fn to_i64(self) -> i64 {
+                self.to_signed_carrier() as i64
+            }
+
+            /// Returns the raw ABI bits in the native carrier.
+            pub const fn raw_bits(self) -> $unsigned_carrier {
+                self.0.get()
+            }
+        }
+
+        impl<const BIT_COUNT: usize> TryFrom<i64> for $signed_name<BIT_COUNT> {
+            type Error = RunError;
+
+            fn try_from(value: i64) -> Result<Self, Self::Error> {
+                let carrier = <$signed_carrier>::try_from(value).map_err(|_| {
+                    RunError(format!("value {value} does not fit in s{BIT_COUNT}"))
+                })?;
+                Self::new(carrier)
+            }
+        }
+    };
+}
+
+define_public_bits_wrappers!(UnsignedBitsInU8, SignedBitsInU8, BitsInU8, u8, i8, 8);
+define_public_bits_wrappers!(UnsignedBitsInU16, SignedBitsInU16, BitsInU16, u16, i16, 16);
+define_public_bits_wrappers!(UnsignedBitsInU32, SignedBitsInU32, BitsInU32, u32, i32, 32);
+define_public_bits_wrappers!(UnsignedBitsInU64, SignedBitsInU64, BitsInU64, u64, i64, 64);
+
+/// Native least-significant-first limb storage for a bitvector wider than 64
+/// bits.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WideBits<const BIT_COUNT: usize, const LIMB_COUNT: usize>([u64; LIMB_COUNT]);
+
+impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> WideBits<BIT_COUNT, LIMB_COUNT> {
+    fn validate_layout() -> Result<(), RunError> {
+        if BIT_COUNT <= 64 || LIMB_COUNT != BIT_COUNT.div_ceil(64) {
+            Err(RunError(format!(
+                "bits[{BIT_COUNT}] cannot use {LIMB_COUNT} native wide limb(s)"
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn high_mask() -> u64 {
+        let high_width = BIT_COUNT % 64;
+        if high_width == 0 {
+            u64::MAX
+        } else {
+            (1u64 << high_width) - 1
+        }
+    }
+
+    /// Constructs a canonical wide bitvector, rejecting excess high bits.
+    pub fn from_limbs(limbs: [u64; LIMB_COUNT]) -> Result<Self, RunError> {
+        Self::validate_layout()?;
+        if limbs[LIMB_COUNT - 1] & !Self::high_mask() != 0 {
+            Err(RunError(format!(
+                "high limb does not fit in bits[{BIT_COUNT}]"
+            )))
+        } else {
+            Ok(Self(limbs))
+        }
+    }
+
+    /// Constructs a canonical wide bitvector by truncating excess high bits.
+    pub fn wrapping_limbs(mut limbs: [u64; LIMB_COUNT]) -> Self {
+        assert!(
+            BIT_COUNT > 64 && LIMB_COUNT == BIT_COUNT.div_ceil(64),
+            "invalid native wide bits layout"
+        );
+        limbs[LIMB_COUNT - 1] &= Self::high_mask();
+        Self(limbs)
+    }
+
+    /// Returns the least-significant-first limb representation.
+    pub const fn limbs(&self) -> &[u64; LIMB_COUNT] {
+        &self.0
+    }
+}
+
+impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> Default for WideBits<BIT_COUNT, LIMB_COUNT> {
+    fn default() -> Self {
+        Self([0; LIMB_COUNT])
+    }
+}
+
+/// Public unsigned DSLX-style wrapper for a wide native bitvector.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnsignedWideBits<const BIT_COUNT: usize, const LIMB_COUNT: usize>(
+    WideBits<BIT_COUNT, LIMB_COUNT>,
+);
+
+impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> UnsignedWideBits<BIT_COUNT, LIMB_COUNT> {
+    /// Constructs a canonical wide unsigned bitvector, rejecting excess high
+    /// bits.
+    pub fn from_limbs(limbs: [u64; LIMB_COUNT]) -> Result<Self, RunError> {
+        Ok(Self(WideBits::<BIT_COUNT, LIMB_COUNT>::from_limbs(limbs)?))
+    }
+
+    /// Constructs a canonical wide unsigned bitvector by truncating excess high
+    /// bits.
+    pub fn wrapping_limbs(limbs: [u64; LIMB_COUNT]) -> Self {
+        Self(WideBits::<BIT_COUNT, LIMB_COUNT>::wrapping_limbs(limbs))
+    }
+
+    /// Returns the least-significant-first raw ABI limb representation.
+    pub const fn limbs(&self) -> &[u64; LIMB_COUNT] {
+        self.0.limbs()
+    }
+
+    /// Returns the unsigned value as a big integer.
+    pub fn to_biguint(&self) -> BigUint {
+        let mut bytes = Vec::with_capacity(LIMB_COUNT * std::mem::size_of::<u64>());
+        for limb in self.limbs() {
+            bytes.extend_from_slice(&limb.to_le_bytes());
+        }
+        BigUint::from_bytes_le(&bytes)
+    }
+}
+
+impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> Default
+    for UnsignedWideBits<BIT_COUNT, LIMB_COUNT>
+{
+    fn default() -> Self {
+        Self(WideBits::default())
+    }
+}
+
+/// Public signed DSLX-style wrapper for a wide native bitvector.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignedWideBits<const BIT_COUNT: usize, const LIMB_COUNT: usize>(
+    WideBits<BIT_COUNT, LIMB_COUNT>,
+);
+
+impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> SignedWideBits<BIT_COUNT, LIMB_COUNT> {
+    /// Constructs a canonical wide signed bitvector from raw ABI limbs.
+    pub fn from_limbs(limbs: [u64; LIMB_COUNT]) -> Result<Self, RunError> {
+        Ok(Self(WideBits::<BIT_COUNT, LIMB_COUNT>::from_limbs(limbs)?))
+    }
+
+    /// Constructs a canonical wide signed bitvector by truncating excess high
+    /// bits.
+    pub fn wrapping_limbs(limbs: [u64; LIMB_COUNT]) -> Self {
+        Self(WideBits::<BIT_COUNT, LIMB_COUNT>::wrapping_limbs(limbs))
+    }
+
+    /// Returns the least-significant-first raw ABI limb representation.
+    pub const fn limbs(&self) -> &[u64; LIMB_COUNT] {
+        self.0.limbs()
+    }
+
+    /// Returns the sign-extended value as a big integer.
+    pub fn to_bigint(&self) -> BigInt {
+        let unsigned = UnsignedWideBits::<BIT_COUNT, LIMB_COUNT>(self.0).to_biguint();
+        if BIT_COUNT == 0 || !unsigned.bit((BIT_COUNT - 1) as u64) {
+            BigInt::from_biguint(Sign::Plus, unsigned)
+        } else {
+            BigInt::from_biguint(Sign::Plus, unsigned) - (BigInt::from(1u8) << BIT_COUNT)
+        }
+    }
+}
+
+impl<const BIT_COUNT: usize, const LIMB_COUNT: usize> Default
+    for SignedWideBits<BIT_COUNT, LIMB_COUNT>
+{
+    fn default() -> Self {
+        Self(WideBits::default())
+    }
+}
+
+/// Zero-sized native representation of a PIR token value.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Token;
 
 /// Kind of observable PIR event described by an event site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +602,7 @@ pub struct EventSiteMetadata {
     pub label: Option<String>,
     pub message: Option<String>,
     pub format: Option<String>,
+    pub verbosity: i64,
     pub operand_layouts: Vec<TraceValueLayout>,
 }
 
@@ -184,6 +659,43 @@ pub struct ExecutionResult {
     pub cover_counts: Vec<CoverCount>,
 }
 
+/// Runtime options controlling which observable events are collected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecutionOptions {
+    pub trace_verbosity: Option<i64>,
+    pub collect_covers: bool,
+}
+
+impl ExecutionOptions {
+    /// Disables trace and cover collection while still recording failures.
+    pub const NO_EVENTS: Self = Self {
+        trace_verbosity: None,
+        collect_covers: false,
+    };
+
+    /// Collects covers and traces whose site verbosity is at most `verbosity`.
+    pub const fn new(trace_verbosity: Option<i64>, collect_covers: bool) -> Self {
+        Self {
+            trace_verbosity,
+            collect_covers,
+        }
+    }
+
+    /// Collects all traces and all covers.
+    pub const fn collect_all() -> Self {
+        Self {
+            trace_verbosity: Some(i64::MAX),
+            collect_covers: true,
+        }
+    }
+}
+
+impl Default for ExecutionOptions {
+    fn default() -> Self {
+        Self::NO_EVENTS
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TraceFormatPreference {
     Default,
@@ -211,10 +723,11 @@ const TRACE_FORMAT_SPECIFIERS: [(&str, TraceFormatPreference); 9] = [
 
 struct ContextState {
     metadata: *const CompiledFunctionMetadata,
+    options: ExecutionOptions,
     assertion_failures: Vec<AssertionFailure>,
     assumption_failures: Vec<AssumptionFailure>,
     trace_messages: Vec<TraceMessage>,
-    event_counts: Vec<u64>,
+    event_counts: Option<Vec<u64>>,
 }
 
 /// Rust-owned event collector used for one or more compiled executions.
@@ -230,13 +743,25 @@ pub struct ExecutionContext<'metadata> {
 impl<'metadata> ExecutionContext<'metadata> {
     /// Creates an empty collector for the supplied function metadata.
     pub fn new(metadata: &'metadata CompiledFunctionMetadata) -> Self {
+        Self::new_with_options(metadata, ExecutionOptions::default())
+    }
+
+    /// Creates an empty collector with explicit event collection options.
+    pub fn new_with_options(
+        metadata: &'metadata CompiledFunctionMetadata,
+        options: ExecutionOptions,
+    ) -> Self {
+        let event_counts = options
+            .collect_covers
+            .then(|| vec![0; metadata.event_sites.len()]);
         Self {
             state: Box::new(ContextState {
                 metadata,
+                options,
                 assertion_failures: Vec::new(),
                 assumption_failures: Vec::new(),
                 trace_messages: Vec::new(),
-                event_counts: vec![0; metadata.event_sites.len()],
+                event_counts,
             }),
             marker: PhantomData,
         }
@@ -253,17 +778,24 @@ impl<'metadata> ExecutionContext<'metadata> {
     /// Resolves all currently recorded events into ordinary Rust values.
     pub fn result(&self) -> ExecutionResult {
         let metadata = self.metadata();
-        let cover_counts = metadata
-            .event_sites
-            .iter()
-            .zip(&self.state.event_counts)
-            .filter(|(site, _)| site.kind == EventKind::Cover)
-            .map(|(site, count)| CoverCount {
-                node_text_id: site.node_text_id,
-                label: site.label.clone().unwrap_or_default(),
-                count: *count,
+        let cover_counts = self
+            .state
+            .event_counts
+            .as_ref()
+            .map(|event_counts| {
+                metadata
+                    .event_sites
+                    .iter()
+                    .zip(event_counts)
+                    .filter(|(site, _)| site.kind == EventKind::Cover)
+                    .map(|(site, count)| CoverCount {
+                        node_text_id: site.node_text_id,
+                        label: site.label.clone().unwrap_or_default(),
+                        count: *count,
+                    })
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
         ExecutionResult {
             assertion_failures: self.state.assertion_failures.clone(),
             assumption_failures: self.state.assumption_failures.clone(),
@@ -272,12 +804,39 @@ impl<'metadata> ExecutionContext<'metadata> {
         }
     }
 
+    /// Returns currently recorded assertion failures without cloning.
+    pub fn assertion_failures(&self) -> &[AssertionFailure] {
+        &self.state.assertion_failures
+    }
+
+    /// Returns currently recorded assumption failures without cloning.
+    pub fn assumption_failures(&self) -> &[AssumptionFailure] {
+        &self.state.assumption_failures
+    }
+
     /// Clears all event records and accumulated cover counters.
     pub fn clear(&mut self) {
+        self.clear_with_options(self.state.options);
+    }
+
+    /// Clears all event records and switches to the supplied collection
+    /// options.
+    pub fn clear_with_options(&mut self, options: ExecutionOptions) {
         self.state.assertion_failures.clear();
         self.state.assumption_failures.clear();
         self.state.trace_messages.clear();
-        self.state.event_counts.fill(0);
+        self.state.options = options;
+        if options.collect_covers {
+            match &mut self.state.event_counts {
+                Some(event_counts) => event_counts.fill(0),
+                None => {
+                    let site_count = self.metadata().event_sites.len();
+                    self.state.event_counts = Some(vec![0; site_count]);
+                }
+            }
+        } else {
+            self.state.event_counts = None;
+        }
     }
 
     fn metadata(&self) -> &CompiledFunctionMetadata {
@@ -370,10 +929,15 @@ pub unsafe extern "C" fn xlsynth_pir_record_assumption_failure(
 pub unsafe extern "C" fn xlsynth_pir_record_cover(context: *mut RawExecutionContext, site_id: u32) {
     // SAFETY: forwarded from the caller's ABI contract.
     let state = unsafe { state_from_raw(context) };
-    if site(state, site_id, EventKind::Cover).is_some() {
-        if let Some(count) = state.event_counts.get_mut(site_id as usize) {
-            *count = count.saturating_add(1);
-        }
+    if state.event_counts.is_none() || site(state, site_id, EventKind::Cover).is_none() {
+        return;
+    }
+    if let Some(count) = state
+        .event_counts
+        .as_mut()
+        .and_then(|event_counts| event_counts.get_mut(site_id as usize))
+    {
+        *count = count.saturating_add(1);
     }
 }
 
@@ -393,9 +957,15 @@ pub unsafe extern "C" fn xlsynth_pir_record_trace(
 ) {
     // SAFETY: forwarded from the caller's ABI contract.
     let state = unsafe { state_from_raw(context) };
-    let Some(site) = site(state, site_id, EventKind::Trace).cloned() else {
+    let Some(max_verbosity) = state.options.trace_verbosity else {
         return;
     };
+    let Some(site) = site(state, site_id, EventKind::Trace) else {
+        return;
+    };
+    if site.verbosity > max_verbosity {
+        return;
+    }
     if !site.operand_layouts.is_empty() && operand_ptrs.is_null() {
         return;
     }
@@ -409,7 +979,7 @@ pub unsafe extern "C" fn xlsynth_pir_record_trace(
                 operand_ptrs,
             )
         },
-        verbosity: 0,
+        verbosity: site.verbosity,
     });
 }
 
@@ -996,6 +1566,121 @@ impl TraceValueLayout {
 mod tests {
     use super::*;
 
+    #[test]
+    fn native_bits_wrappers_enforce_semantic_widths() {
+        let value = BitsInU64::<42>::new((1u64 << 41) | 7).expect("value fits in bits[42]");
+        assert_eq!(value.to_u64(), (1u64 << 41) | 7);
+        assert!(BitsInU64::<42>::new(1u64 << 42).is_err());
+        assert_eq!(BitsInU16::<9>::wrapping(0xffff).get(), 0x1ff);
+        assert!(BitsInU8::<9>::new(0).is_err());
+    }
+
+    #[test]
+    fn public_signed_and_unsigned_bits_wrappers_preserve_raw_abi_bits() {
+        let unsigned = UnsignedBitsInU8::<4>::new(15).expect("u4 max");
+        assert_eq!(unsigned.to_u64(), 15);
+        assert_eq!(unsigned.raw_bits(), 15);
+        assert!(UnsignedBitsInU8::<4>::new(16).is_err());
+        assert!(std::panic::catch_unwind(|| UnsignedBitsInU8::<4>::from_raw_bits(16)).is_err());
+
+        let signed = SignedBitsInU8::<4>::new(-1).expect("s4 -1");
+        assert_eq!(signed.to_i64(), -1);
+        assert_eq!(signed.raw_bits(), 15);
+        assert!(SignedBitsInU8::<4>::new(8).is_err());
+        assert!(SignedBitsInU8::<4>::new(-9).is_err());
+        assert!(std::panic::catch_unwind(|| SignedBitsInU8::<4>::from_raw_bits(16)).is_err());
+        assert_eq!(SignedBitsInU16::<9>::from_raw_bits(0x101).to_i64(), -255);
+
+        let wide = SignedWideBits::<65, 2>::from_limbs([u64::MAX, 1]).expect("s65 -1");
+        assert_eq!(wide.to_bigint(), BigInt::from(-1));
+        assert_eq!(wide.limbs(), &[u64::MAX, 1]);
+    }
+
+    #[test]
+    fn public_bits_wrappers_try_from_widened_integers() {
+        assert_eq!(std::mem::size_of::<Bits0>(), 0);
+        assert_eq!(std::mem::size_of::<UnsignedBits0>(), 0);
+        assert_eq!(std::mem::size_of::<SignedBits0>(), 0);
+
+        let unsigned_zero = UnsignedBits0::try_from(0_u64).expect("0 fits in u0");
+        assert_eq!(unsigned_zero.to_u64(), 0);
+        assert_eq!(unsigned_zero.raw_bits(), 0);
+        assert!(UnsignedBits0::try_from(1_u64).is_err());
+        assert!(std::panic::catch_unwind(|| UnsignedBits0::from_raw_bits(1)).is_err());
+
+        let signed_zero = SignedBits0::try_from(0_i64).expect("0 fits in s0");
+        assert_eq!(signed_zero.to_i64(), 0);
+        assert_eq!(signed_zero.raw_bits(), 0);
+        assert!(SignedBits0::try_from(-1_i64).is_err());
+        assert!(SignedBits0::try_from(1_i64).is_err());
+        assert!(std::panic::catch_unwind(|| SignedBits0::from_raw_bits(1)).is_err());
+
+        assert_eq!(
+            UnsignedBitsInU8::<4>::try_from(15_u64)
+                .expect("15 fits in u4")
+                .to_u64(),
+            15
+        );
+        assert!(UnsignedBitsInU8::<4>::try_from(16_u64).is_err());
+        assert!(UnsignedBitsInU8::<8>::try_from(256_u64).is_err());
+        assert_eq!(
+            UnsignedBitsInU16::<9>::try_from(0x1ff_u64)
+                .expect("0x1ff fits in u9")
+                .to_u64(),
+            0x1ff
+        );
+        assert_eq!(
+            UnsignedBitsInU32::<17>::try_from(0x1ffff_u64)
+                .expect("0x1ffff fits in u17")
+                .to_u64(),
+            0x1ffff
+        );
+        assert_eq!(
+            UnsignedBitsInU64::<33>::try_from(0x1ffffffff_u64)
+                .expect("0x1ffffffff fits in u33")
+                .to_u64(),
+            0x1ffffffff
+        );
+
+        assert_eq!(
+            SignedBitsInU8::<4>::try_from(-8_i64)
+                .expect("-8 fits in s4")
+                .to_i64(),
+            -8
+        );
+        assert!(SignedBitsInU8::<4>::try_from(-9_i64).is_err());
+        assert!(SignedBitsInU8::<8>::try_from(128_i64).is_err());
+        assert_eq!(
+            SignedBitsInU16::<9>::try_from(-256_i64)
+                .expect("-256 fits in s9")
+                .to_i64(),
+            -256
+        );
+        assert_eq!(
+            SignedBitsInU32::<17>::try_from(-65_536_i64)
+                .expect("-65536 fits in s17")
+                .to_i64(),
+            -65_536
+        );
+        assert_eq!(
+            SignedBitsInU64::<33>::try_from(-4_294_967_296_i64)
+                .expect("-4294967296 fits in s33")
+                .to_i64(),
+            -4_294_967_296
+        );
+    }
+
+    #[test]
+    fn wide_bits_wrappers_use_lsb_first_limbs_and_mask_high_bits() {
+        let value =
+            WideBits::<65, 2>::from_limbs([0x0123_4567_89ab_cdef, 1]).expect("canonical value");
+        assert_eq!(value.limbs(), &[0x0123_4567_89ab_cdef, 1]);
+        assert!(WideBits::<65, 2>::from_limbs([0, 2]).is_err());
+        assert_eq!(WideBits::<65, 2>::wrapping_limbs([7, 3]).limbs(), &[7, 1]);
+        assert!(WideBits::<65, 3>::from_limbs([0, 0, 0]).is_err());
+        assert_eq!(std::mem::size_of::<Token>(), 0);
+    }
+
     fn metadata() -> CompiledFunctionMetadata {
         CompiledFunctionMetadata {
             event_sites: vec![
@@ -1005,6 +1690,7 @@ mod tests {
                     label: Some("covered".to_string()),
                     message: None,
                     format: None,
+                    verbosity: 0,
                     operand_layouts: Vec::new(),
                 },
                 EventSiteMetadata {
@@ -1013,6 +1699,7 @@ mod tests {
                     label: Some("assert_label".to_string()),
                     message: Some("failed".to_string()),
                     format: None,
+                    verbosity: 0,
                     operand_layouts: Vec::new(),
                 },
                 EventSiteMetadata {
@@ -1021,6 +1708,7 @@ mod tests {
                     label: None,
                     message: None,
                     format: Some("x={} arr={}".to_string()),
+                    verbosity: 1,
                     operand_layouts: vec![
                         TraceValueLayout::Bits {
                             bit_count: 8,
@@ -1041,6 +1729,7 @@ mod tests {
                     label: None,
                     message: None,
                     format: None,
+                    verbosity: 0,
                     operand_layouts: Vec::new(),
                 },
             ],
@@ -1050,7 +1739,8 @@ mod tests {
     #[test]
     fn cover_and_assert_callbacks_collect_rust_owned_results() {
         let metadata = metadata();
-        let mut context = ExecutionContext::new(&metadata);
+        let mut context =
+            ExecutionContext::new_with_options(&metadata, ExecutionOptions::collect_all());
         let mut raw = context.raw_context();
         // SAFETY: `raw` points into `context` for these immediate calls.
         unsafe {
@@ -1076,7 +1766,8 @@ mod tests {
     #[test]
     fn trace_callback_decodes_values_before_native_storage_changes() {
         let metadata = metadata();
-        let mut context = ExecutionContext::new(&metadata);
+        let mut context =
+            ExecutionContext::new_with_options(&metadata, ExecutionOptions::collect_all());
         let mut raw = context.raw_context();
         let mut scalar = 7u8;
         let mut array = [2u8, 3u8];
@@ -1107,7 +1798,8 @@ mod tests {
                 message: None,
                 format: Some(
                     "literal={{ default={} u={:u} d={:d} x={:x} 0x={:0x} #x={:#x} b={:b} 0b={:0b} #b={:#b} wide={} wide_u={:u}".to_string(),
-                ),
+                    ),
+                verbosity: 0,
                 operand_layouts: vec![
                     twelve_bits.clone(),
                     twelve_bits.clone(),
@@ -1132,7 +1824,8 @@ mod tests {
                 ],
             }],
         };
-        let mut context = ExecutionContext::new(&metadata);
+        let mut context =
+            ExecutionContext::new_with_options(&metadata, ExecutionOptions::collect_all());
         let mut raw = context.raw_context();
         let twelve = 43u16;
         let negative = 251u8;
@@ -1161,7 +1854,8 @@ mod tests {
     #[test]
     fn clear_resets_accumulated_event_results() {
         let metadata = metadata();
-        let mut context = ExecutionContext::new(&metadata);
+        let mut context =
+            ExecutionContext::new_with_options(&metadata, ExecutionOptions::collect_all());
         let mut raw = context.raw_context();
         // SAFETY: `raw` points into `context` for this immediate call.
         unsafe { xlsynth_pir_record_cover(&mut raw, 0) };
@@ -1171,6 +1865,55 @@ mod tests {
         assert!(result.assumption_failures.is_empty());
         assert!(result.trace_messages.is_empty());
         assert_eq!(result.cover_counts[0].count, 0);
+    }
+
+    #[test]
+    fn default_context_does_not_collect_traces_or_covers() {
+        let metadata = metadata();
+        let mut context = ExecutionContext::new(&metadata);
+        let mut raw = context.raw_context();
+        let scalar = 7u8;
+        let array = [2u8, 3u8];
+        let operands = [
+            ptr::from_ref(&scalar).cast::<u8>(),
+            ptr::from_ref(&array).cast::<u8>(),
+        ];
+        // SAFETY: `raw` and operands point to valid test storage.
+        unsafe {
+            xlsynth_pir_record_cover(&mut raw, 0);
+            xlsynth_pir_record_trace(&mut raw, 2, operands.as_ptr());
+        }
+        let result = context.result();
+        assert!(result.cover_counts.is_empty());
+        assert!(result.trace_messages.is_empty());
+    }
+
+    #[test]
+    fn trace_callback_respects_runtime_verbosity() {
+        let metadata = metadata();
+        let scalar = 7u8;
+        let array = [2u8, 3u8];
+        let operands = [
+            ptr::from_ref(&scalar).cast::<u8>(),
+            ptr::from_ref(&array).cast::<u8>(),
+        ];
+        let mut context = ExecutionContext::new_with_options(
+            &metadata,
+            ExecutionOptions::new(Some(0), /* collect_covers= */ false),
+        );
+        let mut raw = context.raw_context();
+        // SAFETY: `raw` and operands point to valid test storage.
+        unsafe { xlsynth_pir_record_trace(&mut raw, 2, operands.as_ptr()) };
+        assert!(context.result().trace_messages.is_empty());
+
+        context.clear_with_options(ExecutionOptions::new(
+            Some(1),
+            /* collect_covers= */ false,
+        ));
+        let mut raw = context.raw_context();
+        // SAFETY: `raw` and operands point to valid test storage.
+        unsafe { xlsynth_pir_record_trace(&mut raw, 2, operands.as_ptr()) };
+        assert_eq!(context.result().trace_messages[0].message, "x=7 arr=[2, 3]");
     }
 
     #[test]

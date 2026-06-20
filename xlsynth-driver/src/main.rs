@@ -70,6 +70,7 @@ mod g8r2v;
 mod g8r_cli;
 mod g8r_equiv;
 mod g8r_ir_equiv;
+mod g8r_stitch_pipeline;
 mod g8r_table;
 mod gate_ir_equiv;
 mod gv2aig;
@@ -77,6 +78,7 @@ mod gv2block;
 mod gv2ir;
 mod gv_area;
 mod gv_dump_cone;
+mod gv_eval;
 mod gv_instance_csv;
 mod gv_read_stats;
 mod gv_sta;
@@ -702,6 +704,65 @@ fn main() {
                 )
                 .add_bool_arg("reset_active_low", "Reset is active low")
                 .add_g8r_lowering_flags()
+                .arg(
+                    Arg::new("bin_out")
+                        .long("bin-out")
+                        .value_name("PATH")
+                        .help("Path to write the .g8rbin file")
+                        .action(ArgAction::Set),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("g8r-stitch-pipeline")
+                .about("Stitches combinational .g8r stages into a native sequential .g8r design")
+                .arg(
+                    Arg::new("g8r_input_files")
+                        .value_name("G8R_INPUT_FILE")
+                        .help("Ordered combinational .g8r or .g8rbin pipeline stage file(s)")
+                        .required(true)
+                        .num_args(1..),
+                )
+                .arg(
+                    Arg::new("output_design_name")
+                        .long("output_design_name")
+                        .value_name("NAME")
+                        .help("Sequential g8r design name")
+                        .required(true),
+                )
+                .arg(
+                    Arg::new("clock_name")
+                        .long("clock_name")
+                        .value_name("NAME")
+                        .help("Clock port name for inserted registers (default clk)")
+                        .action(ArgAction::Set),
+                )
+                .add_bool_arg(
+                    "flop_inputs",
+                    "Whether to insert input pipeline flops (default true)",
+                )
+                .add_bool_arg(
+                    "flop_outputs",
+                    "Whether to insert output pipeline flops (default true)",
+                )
+                .arg(
+                    Arg::new("input_valid_signal")
+                        .long("input_valid_signal")
+                        .value_name("INPUT_VALID_SIGNAL")
+                        .help("Load enable signal for pipeline registers"),
+                )
+                .arg(
+                    Arg::new("output_valid_signal")
+                        .long("output_valid_signal")
+                        .value_name("OUTPUT_VALID_SIGNAL")
+                        .help("Output port holding pipelined valid signal"),
+                )
+                .arg(
+                    Arg::new("reset")
+                        .long("reset")
+                        .value_name("RESET")
+                        .help("Synchronous reset signal for valid pipeline registers"),
+                )
+                .add_bool_arg("reset_active_low", "Reset is active low")
                 .arg(
                     Arg::new("bin_out")
                         .long("bin-out")
@@ -1908,6 +1969,57 @@ fn main() {
                         .value_parser(clap::value_parser!(bool))
                         .help("If true, collapse sequential state variables by substituting next_state.")
                         .action(ArgAction::Set),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("gv-eval")
+                .about("Evaluates a combinational Liberty-backed gate-level netlist")
+                .arg(
+                    Arg::new("netlist")
+                        .long("netlist")
+                        .help("Input gate-level netlist (.gv, .v, or .gv.gz)")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("liberty_proto")
+                        .long("liberty_proto")
+                        .help("Input Liberty proto (.proto or .textproto)")
+                        .required(true)
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("module_name")
+                        .long("module_name")
+                        .value_name("MODULE")
+                        .help("Optional module name to select when the netlist contains multiple modules")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("arg_tuple")
+                        .help("Tuple of typed IR values in module-input order")
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("input_irvals")
+                        .long("input-irvals")
+                        .value_name("IRVALS_PATH")
+                        .help("Path to an .irvals file with one typed IR tuple per line")
+                        .action(ArgAction::Set),
+                )
+                .arg(
+                    Arg::new("toggle_output_json")
+                        .long("toggle-output-json")
+                        .value_name("PATH")
+                        .help("Write module-port and external standard-cell pin toggle activity JSON; requires --input-irvals")
+                        .requires("input_irvals")
+                        .action(ArgAction::Set),
+                )
+                .group(
+                    clap::ArgGroup::new("gv_eval_input")
+                        .args(["arg_tuple", "input_irvals"])
+                        .required(true)
+                        .multiple(false),
                 ),
         )
         .subcommand(
@@ -3475,6 +3587,15 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         Some(("dslx-stitch-g8r-pipeline", subm)) => {
             dslx_stitch_g8r_pipeline::handle_dslx_stitch_g8r_pipeline(subm, &config);
         }
+        Some(("g8r-stitch-pipeline", subm)) => {
+            if let Err(e) = g8r_stitch_pipeline::handle_g8r_stitch_pipeline(subm) {
+                report_cli_error::report_cli_error_and_exit(
+                    &e,
+                    Some("g8r-stitch-pipeline"),
+                    vec![],
+                );
+            }
+        }
         Some(("dslx2ir", subm)) => {
             dslx2ir::handle_dslx2ir(subm, &config);
         }
@@ -3592,6 +3713,12 @@ interpreted before lift. See docs/bit_blasted_output_ordering.md, section
         }
         Some(("gv2aig", subm)) => {
             gv2aig::handle_gv2aig(subm);
+        }
+        Some(("gv-eval", subm)) => {
+            if let Err(e) = gv_eval::handle_gv_eval(subm) {
+                eprintln!("gv-eval error: {e}");
+                std::process::exit(1);
+            }
         }
         Some(("aig-tech-map", subm)) => {
             aig_tech_map::handle_aig_tech_map(subm);

@@ -5,7 +5,7 @@
 use crate::aig::gate::{AigBitVector, AigOperand, GateFn};
 use crate::gate_builder::{GateBuilder, GateBuilderOptions};
 use crate::liberty::cell_formula::Term;
-use crate::liberty_proto::Library;
+use crate::liberty_proto::{Cell, Library, PinDirection, SequentialKind};
 use crate::netlist::normalized::{
     BitExpr, BitIndex, BitSource, NormalizedConnection, NormalizedInstance, NormalizedNetlistModule,
 };
@@ -14,6 +14,55 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use string_interner::symbol::SymbolU32;
 use string_interner::{StringInterner, backend::StringBackend};
+
+/// A combinational netlist projected into one AIG with source-level labels.
+#[derive(Debug, Clone)]
+pub struct LabeledNetlistAig {
+    pub module_name: String,
+    pub gate_fn: GateFn,
+    pub module_ports: Vec<ModulePortAigBinding>,
+    pub instances: Vec<InstanceAigBinding>,
+}
+
+/// One module-port bundle bound to AIG operands in LSb-to-MSb order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModulePortAigBinding {
+    pub name: String,
+    pub direction: PortDirection,
+    pub bits_lsb_to_msb: Vec<LabeledAigBit>,
+}
+
+/// One named Verilog bit bound to an AIG operand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LabeledAigBit {
+    pub bit_number: u32,
+    pub operand: AigOperand,
+}
+
+/// One standard-cell instance and its explicitly connected external pins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstanceAigBinding {
+    pub instance_name: String,
+    pub cell_type: String,
+    pub pins: Vec<InstancePinAigBinding>,
+}
+
+/// One scalar standard-cell pin bound to its signal in the global AIG.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstancePinAigBinding {
+    pub pin_name: String,
+    pub direction: PinDirection,
+    pub operand: AigOperand,
+    pub connection: PinConnection,
+}
+
+/// The source-level connection attached to one scalar standard-cell pin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PinConnection {
+    Net { net_name: String, bit_number: u32 },
+    Literal(bool),
+    Unconnected,
+}
 
 fn substitute_state_vars_in_term(
     term: &Term,
@@ -411,8 +460,9 @@ fn process_instance_outputs(
     cell_formula_map: &HashMap<(String, String), (crate::liberty::cell_formula::Term, String)>,
     input_map: &HashMap<String, AigOperand>,
     port_map: &HashMap<String, String>,
-) -> Result<bool, String> {
+) -> Result<ProcessedInstanceOutputs, String> {
     let mut processed_any_output = false;
+    let mut output_operands = HashMap::new();
     for connection in &inst.connections {
         let port_name = interner.resolve(connection.port).unwrap();
         let pin_dir = *pin_directions.get(port_name).unwrap_or(&0); // 1=OUTPUT, 2=INPUT
@@ -452,13 +502,22 @@ fn process_instance_outputs(
                         type_name, inst_name, port_name, e
                     )
                 })?;
+            output_operands.insert(port_name.to_string(), out_op);
             let src_bv = AigBitVector::from_bit(out_op);
             let output_bits = output_target_bits(connection)?;
             resolved.write_bits(output_bits.as_slice(), &src_bv, normalized, nets, interner)?;
             processed_any_output = true;
         }
     }
-    Ok(processed_any_output)
+    Ok(ProcessedInstanceOutputs {
+        processed_any_output,
+        output_operands,
+    })
+}
+
+struct ProcessedInstanceOutputs {
+    processed_any_output: bool,
+    output_operands: HashMap<String, AigOperand>,
 }
 
 pub fn project_gatefn_from_netlist_and_liberty(
@@ -489,6 +548,18 @@ pub struct GateFnProjectOptions {
     pub collapse_sequential: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectionMode {
+    GateFnOnly,
+    LabeledEval,
+}
+
+struct GateFnProjection {
+    gate_fn: GateFn,
+    module_ports: Vec<ModulePortAigBinding>,
+    instances: Vec<InstanceAigBinding>,
+}
+
 pub fn project_gatefn_from_netlist_and_liberty_with_options(
     module: &NetlistModule,
     nets: &[Net],
@@ -498,8 +569,67 @@ pub fn project_gatefn_from_netlist_and_liberty_with_options(
     dff_cells_inverted: &std::collections::HashSet<String>,
     options: &GateFnProjectOptions,
 ) -> Result<GateFn, String> {
+    project_gatefn_from_netlist_and_liberty_internal(
+        module,
+        nets,
+        interner,
+        liberty_lib,
+        dff_cells_identity,
+        dff_cells_inverted,
+        options,
+        ProjectionMode::GateFnOnly,
+    )
+    .map(|projection| projection.gate_fn)
+}
+
+/// Projects a combinational Liberty-backed netlist into one labeled AIG.
+pub fn project_labeled_netlist_aig(
+    module: &NetlistModule,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    liberty_lib: &Library,
+) -> Result<LabeledNetlistAig, String> {
+    let empty_dff_cells = HashSet::new();
+    let projection = project_gatefn_from_netlist_and_liberty_internal(
+        module,
+        nets,
+        interner,
+        liberty_lib,
+        &empty_dff_cells,
+        &empty_dff_cells,
+        &GateFnProjectOptions {
+            collapse_sequential: false,
+        },
+        ProjectionMode::LabeledEval,
+    )?;
+    let module_name = interner
+        .resolve(module.name)
+        .ok_or_else(|| "could not resolve module name".to_string())?
+        .to_string();
+    Ok(LabeledNetlistAig {
+        module_name,
+        gate_fn: projection.gate_fn,
+        module_ports: projection.module_ports,
+        instances: projection.instances,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn project_gatefn_from_netlist_and_liberty_internal(
+    module: &NetlistModule,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    liberty_lib: &Library,
+    dff_cells_identity: &HashSet<String>,
+    dff_cells_inverted: &HashSet<String>,
+    options: &GateFnProjectOptions,
+    projection_mode: ProjectionMode,
+) -> Result<GateFnProjection, String> {
     let normalized =
         NormalizedNetlistModule::new(module, nets, interner).map_err(|e| e.to_string())?;
+    if projection_mode == ProjectionMode::LabeledEval {
+        validate_labeled_eval_module(&normalized, nets, interner, liberty_lib)?;
+    }
     let used_cell_names: HashSet<String> = module
         .instances
         .iter()
@@ -518,6 +648,11 @@ pub fn project_gatefn_from_netlist_and_liberty_with_options(
     collect_module_io_bits(&normalized, nets, interner, &mut gb, &mut resolved)?;
     let module_output_bits = collect_module_output_bits(&normalized);
     let mut pending_assigns = build_pending_assign_bits(&normalized);
+    let mut labeled_instances = if projection_mode == ProjectionMode::LabeledEval {
+        vec![None; normalized.instances.len()]
+    } else {
+        Vec::new()
+    };
     let mut used_as_input = HashSet::new();
     let mut driven = HashSet::new();
     for port in &normalized.ports {
@@ -619,7 +754,21 @@ pub fn project_gatefn_from_netlist_and_liberty_with_options(
                 &input_map,
                 &port_map,
             )?;
-            if processed {
+            if processed.processed_any_output {
+                if projection_mode == ProjectionMode::LabeledEval {
+                    let binding = build_instance_aig_binding(
+                        inst,
+                        cell,
+                        type_name,
+                        inst_name,
+                        interner,
+                        nets,
+                        &normalized,
+                        &input_map,
+                        &processed.output_operands,
+                    )?;
+                    labeled_instances[inst.raw_index.0] = Some(binding);
+                }
                 unprocessed.remove(i);
                 processed_any = true;
             } else {
@@ -728,6 +877,11 @@ pub fn project_gatefn_from_netlist_and_liberty_with_options(
             return Err(msg);
         }
     }
+    let module_ports = if projection_mode == ProjectionMode::LabeledEval {
+        build_module_port_aig_bindings(&normalized, nets, interner, &resolved)?
+    } else {
+        Vec::new()
+    };
     for port in &normalized.ports {
         if port.direction == PortDirection::Output {
             let net_name = interner.resolve(port.name).unwrap();
@@ -741,7 +895,292 @@ pub fn project_gatefn_from_netlist_and_liberty_with_options(
             gb.add_output(net_name.to_string(), bv);
         }
     }
-    Ok(gb.build())
+    let instances = if projection_mode == ProjectionMode::LabeledEval {
+        labeled_instances
+            .into_iter()
+            .enumerate()
+            .map(|(instance_index, binding)| {
+                binding.ok_or_else(|| {
+                    format!(
+                        "internal error: no labeled AIG binding was produced for instance index {}",
+                        instance_index
+                    )
+                })
+            })
+            .collect::<Result<Vec<InstanceAigBinding>, String>>()?
+    } else {
+        Vec::new()
+    };
+    Ok(GateFnProjection {
+        gate_fn: gb.build(),
+        module_ports,
+        instances,
+    })
+}
+
+/// Validates the narrower combinational standard-cell subset used by gv-eval.
+fn validate_labeled_eval_module(
+    normalized: &NormalizedNetlistModule<'_>,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    liberty_lib: &Library,
+) -> Result<(), String> {
+    let module_name = interner.resolve(normalized.raw.name).unwrap_or("<unknown>");
+    if normalized
+        .ports
+        .iter()
+        .any(|port| port.direction == PortDirection::Inout)
+    {
+        return Err(format!(
+            "module '{}' has an inout port; gv-eval supports only input and output module ports",
+            module_name
+        ));
+    }
+    if !normalized
+        .ports
+        .iter()
+        .any(|port| port.direction == PortDirection::Output)
+    {
+        return Err(format!(
+            "module '{}' has no output ports to evaluate",
+            module_name
+        ));
+    }
+
+    for inst in &normalized.instances {
+        let type_name = interner.resolve(inst.type_name).unwrap_or("<unknown>");
+        let instance_name = interner.resolve(inst.instance_name).unwrap_or("<unknown>");
+        let cell = liberty_lib
+            .cells
+            .iter()
+            .find(|cell| cell.name == type_name)
+            .ok_or_else(|| {
+                format!(
+                    "cell '{}' used by instance '{}' was not found in Liberty data",
+                    type_name, instance_name
+                )
+            })?;
+        if let Some(sequential) = cell.sequential.first() {
+            let kind = match sequential.kind {
+                value if value == SequentialKind::Ff as i32 => "ff",
+                value if value == SequentialKind::Latch as i32 => "latch",
+                _ => "unknown",
+            };
+            return Err(format!(
+                "sequential cell '{}' instance '{}' at {}:{} is not supported by gv-eval (kind: {})",
+                type_name, instance_name, inst.inst_lineno, inst.inst_colno, kind
+            ));
+        }
+
+        let mut connected_pin_names = HashSet::new();
+        let mut connected_output_count = 0usize;
+        for connection in &inst.connections {
+            let pin_name = interner.resolve(connection.port).unwrap_or("<unknown>");
+            if !connected_pin_names.insert(pin_name.to_string()) {
+                return Err(format!(
+                    "cell '{}' instance '{}' connects pin '{}' more than once",
+                    type_name, instance_name, pin_name
+                ));
+            }
+            let pin = cell
+                .pins
+                .iter()
+                .find(|pin| pin.name == pin_name)
+                .ok_or_else(|| {
+                    format!(
+                        "cell '{}' instance '{}' connects unknown Liberty pin '{}'",
+                        type_name, instance_name, pin_name
+                    )
+                })?;
+            let direction = checked_pin_direction(type_name, pin_name, pin.direction)?;
+            match direction {
+                PinDirection::Input => {
+                    if connection.bits.len() != 1 {
+                        return Err(format!(
+                            "cell '{}' instance '{}' input pin '{}' must have exactly one connected bit; got {} ({})",
+                            type_name,
+                            instance_name,
+                            pin_name,
+                            connection.bits.len(),
+                            normalized.render_sources(connection.bits.as_slice(), nets, interner)
+                        ));
+                    }
+                    if matches!(connection.bits[0], BitSource::Unknown) {
+                        return Err(format!(
+                            "cell '{}' instance '{}' input pin '{}' is connected to an unknown literal",
+                            type_name, instance_name, pin_name
+                        ));
+                    }
+                }
+                PinDirection::Output => {
+                    connected_output_count += 1;
+                    if connection.bits.len() > 1 {
+                        return Err(format!(
+                            "cell '{}' instance '{}' output pin '{}' must connect to at most one bit; got {} ({})",
+                            type_name,
+                            instance_name,
+                            pin_name,
+                            connection.bits.len(),
+                            normalized.render_sources(connection.bits.as_slice(), nets, interner)
+                        ));
+                    }
+                    if matches!(
+                        connection.bits.first(),
+                        Some(BitSource::Literal(_) | BitSource::Unknown)
+                    ) {
+                        return Err(format!(
+                            "cell '{}' instance '{}' output pin '{}' must drive a net bit or be unconnected",
+                            type_name, instance_name, pin_name
+                        ));
+                    }
+                    if pin.function.is_empty() {
+                        return Err(format!(
+                            "cell '{}' instance '{}' output pin '{}' has no Liberty function",
+                            type_name, instance_name, pin_name
+                        ));
+                    }
+                    crate::liberty::cell_formula::parse_formula(&pin.function).map_err(|e| {
+                        format!(
+                            "failed to parse Liberty function for cell '{}' instance '{}' output pin '{}' (function \"{}\"): {}",
+                            type_name, instance_name, pin_name, pin.function, e
+                        )
+                    })?;
+                }
+                PinDirection::Invalid => unreachable!("checked_pin_direction rejects invalid"),
+            }
+        }
+        if connected_output_count == 0 {
+            return Err(format!(
+                "cell '{}' instance '{}' has no explicitly connected output pins",
+                type_name, instance_name
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn checked_pin_direction(
+    cell_name: &str,
+    pin_name: &str,
+    raw_direction: i32,
+) -> Result<PinDirection, String> {
+    match raw_direction {
+        value if value == PinDirection::Input as i32 => Ok(PinDirection::Input),
+        value if value == PinDirection::Output as i32 => Ok(PinDirection::Output),
+        _ => Err(format!(
+            "cell '{}' pin '{}' has invalid Liberty direction value {}",
+            cell_name, pin_name, raw_direction
+        )),
+    }
+}
+
+fn build_module_port_aig_bindings(
+    normalized: &NormalizedNetlistModule<'_>,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    resolved: &ResolvedBitValues,
+) -> Result<Vec<ModulePortAigBinding>, String> {
+    normalized
+        .ports
+        .iter()
+        .map(|port| {
+            let name = interner
+                .resolve(port.name)
+                .ok_or_else(|| "could not resolve module port name".to_string())?
+                .to_string();
+            let bits_lsb_to_msb = port
+                .bits
+                .iter()
+                .map(|bit_idx| {
+                    let bit = normalized.bit(*bit_idx);
+                    let operand = resolved.resolve_bit(*bit_idx).ok_or_else(|| {
+                        format!(
+                            "module port bit '{}' is unresolved after AIG projection",
+                            normalized.render_bit(*bit_idx, nets, interner)
+                        )
+                    })?;
+                    Ok(LabeledAigBit {
+                        bit_number: bit.bit_number,
+                        operand,
+                    })
+                })
+                .collect::<Result<Vec<LabeledAigBit>, String>>()?;
+            Ok(ModulePortAigBinding {
+                name,
+                direction: port.direction.clone(),
+                bits_lsb_to_msb,
+            })
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_instance_aig_binding(
+    inst: &NormalizedInstance,
+    cell: &Cell,
+    type_name: &str,
+    instance_name: &str,
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+    nets: &[Net],
+    normalized: &NormalizedNetlistModule<'_>,
+    input_operands: &HashMap<String, AigOperand>,
+    output_operands: &HashMap<String, AigOperand>,
+) -> Result<InstanceAigBinding, String> {
+    let mut pins = Vec::new();
+    for pin in &cell.pins {
+        let Some(connection) = inst
+            .connections
+            .iter()
+            .find(|connection| interner.resolve(connection.port) == Some(pin.name.as_str()))
+        else {
+            continue;
+        };
+        let direction = checked_pin_direction(type_name, &pin.name, pin.direction)?;
+        let operand = match direction {
+            PinDirection::Input => input_operands.get(&pin.name),
+            PinDirection::Output => output_operands.get(&pin.name),
+            PinDirection::Invalid => unreachable!("checked_pin_direction rejects invalid"),
+        }
+        .copied()
+        .ok_or_else(|| {
+            format!(
+                "internal error: no AIG operand was produced for cell '{}' instance '{}' pin '{}'",
+                type_name, instance_name, pin.name
+            )
+        })?;
+        pins.push(InstancePinAigBinding {
+            pin_name: pin.name.clone(),
+            direction,
+            operand,
+            connection: build_pin_connection(connection, normalized, nets, interner)?,
+        });
+    }
+    Ok(InstanceAigBinding {
+        instance_name: instance_name.to_string(),
+        cell_type: type_name.to_string(),
+        pins,
+    })
+}
+
+fn build_pin_connection(
+    connection: &NormalizedConnection,
+    normalized: &NormalizedNetlistModule<'_>,
+    nets: &[Net],
+    interner: &StringInterner<StringBackend<SymbolU32>>,
+) -> Result<PinConnection, String> {
+    match connection.bits.as_slice() {
+        [] => Ok(PinConnection::Unconnected),
+        [BitSource::Bit(bit_idx)] => {
+            let bit = normalized.bit(*bit_idx);
+            Ok(PinConnection::Net {
+                net_name: crate::netlist::bit_ref::net_name(bit.net, nets, interner),
+                bit_number: bit.bit_number,
+            })
+        }
+        [BitSource::Literal(value)] => Ok(PinConnection::Literal(*value)),
+        [BitSource::Unknown] => Err("unknown literal pin connection is not supported".to_string()),
+        _ => Err("standard-cell pin connections must be scalar".to_string()),
+    }
 }
 
 fn collect_module_io_bits(

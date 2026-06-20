@@ -209,6 +209,92 @@ When `--liberty_proto` is omitted, the accepted Verilog subset is intentionally 
 
 `gv2ir` and `gv2block` are unchanged in this release and still require Liberty input.
 
+### `gv-eval`: evaluate a combinational gate-level netlist
+
+Projects a Liberty-backed standard-cell netlist into one labeled AIG and
+evaluates either one typed input tuple or an ordered `.irvals` stimulus file.
+Inputs are supplied in module-header order. A module with one output prints a
+bits value; multiple outputs print a tuple in module-header order.
+
+```shell
+xlsynth-driver gv-eval \
+  --netlist /path/to/design.gv \
+  --liberty_proto /path/to/cells.textproto \
+  '(bits[8]:7, bits[8]:13)'
+```
+
+Ordered batch evaluation prints one typed result per input line:
+
+```shell
+xlsynth-driver gv-eval \
+  --netlist /path/to/design.gv \
+  --liberty_proto /path/to/cells.textproto \
+  --input-irvals /path/to/stimulus.irvals \
+  --toggle-output-json /path/to/activity.json
+```
+
+Flags:
+
+- `--netlist <PATH>`: gate-level netlist (`.gv`, `.v`, or `.gv.gz`). Required.
+- `--liberty_proto <PATH>`: Liberty proto (`.proto` or `.textproto`). Required.
+- `--module_name <MODULE>`: optional module selection when the netlist contains multiple modules.
+- Exactly one positional typed argument tuple or `--input-irvals <PATH>` is required.
+- `--toggle-output-json <PATH>`: with `--input-irvals`, write source-labeled
+  toggle activity JSON. At least two input samples are required.
+
+The toggle JSON has this structure:
+
+```json
+{
+  "module_name": "top",
+  "sample_count": 3,
+  "transition_count": 2,
+  "aggregate": {
+    "module_input_toggles": 2,
+    "module_output_toggles": 1,
+    "cell_input_pin_toggles": 3,
+    "cell_output_pin_toggles": 2
+  },
+  "module_ports": [
+    {
+      "port_name": "a",
+      "direction": "input",
+      "bits_lsb_to_msb": [
+        { "bit_number": 0, "toggle_count": 1, "toggle_rate": 0.5 }
+      ]
+    }
+  ],
+  "instances": [
+    {
+      "instance_name": "u_and",
+      "cell_type": "AND2",
+      "pins": [
+        {
+          "pin_name": "A",
+          "direction": "input",
+          "connection": { "kind": "net", "net_name": "a", "bit_number": 0 },
+          "toggle_count": 1,
+          "toggle_rate": 0.5
+        }
+      ]
+    }
+  ]
+}
+```
+
+Counts are transitions between consecutive samples, and rates divide each
+count by `transition_count`. Aggregate cell counts count each external pin use,
+so a signal connected to two pins contributes its toggles twice. Module ports,
+instances, pins, and port bits retain deterministic source/Liberty/LSb-to-MSb
+ordering. Connections use `kind: "net"`, `kind: "literal"`, or
+`kind: "unconnected"`. Internal Liberty nodes and AIG implementation nodes are
+not included.
+
+The initial implementation supports combinational cells with scalar external
+pins. It rejects sequential cells, module `inout` ports, unconnected input
+pins, non-scalar standard-cell pin connections, and unresolved combinational
+cycles. It does not collapse or simulate sequential state.
+
 ### `aig-tech-map`: AIGER to structural gate netlist
 
 Structurally maps an input AIGER graph to a cell-instance netlist using a simple decomposition:
@@ -279,7 +365,7 @@ Key flags:
 
 ### `gv-stats`: gate-level mapped area + timing summary
 
-Reports mapped standard-cell area, combinational input-to-output max-arrival delay, instance count, and combinational cell levels for one selected gate-level netlist module. For modules containing sequential cells it also reports maximum input-to-register, register-to-register, and register-to-output delays. Register launches include Liberty clock-to-Q/QN delay and output slew; register captures include Liberty setup constraints. Propagation-delay and output-transition NLDM lookups conservatively repair non-monotone characterization points with a coordinatewise upper envelope. Below-minimum timing-table queries are clamped. An output with zero modeled load is evaluated at each table's minimum characterized load coordinate. A delay/slew query with exactly one above-maximum axis is linearly extrapolated from its final characterized interval; a delay/slew query with multiple above-maximum axes is held at the upper characterized boundaries instead of applying raw multilinear extrapolation. Setup queries remain clamped to characterized bounds. The sequential model assumes an ideal clock edge evaluated at the minimum characterized clock transition in each applicable table, and does not model hold, skew, jitter, or physical clock delivery.
+Reports mapped standard-cell area, combinational input-to-output max-arrival delay, instance count, and combinational cell levels for one selected gate-level netlist module. For modules containing sequential cells it also reports maximum input-to-register, register-to-register, and register-to-output delays. Register launches include Liberty clock-to-Q/QN delay and output slew; register captures include Liberty setup constraints. Acyclic combinational timing dependencies between output pins of the same cell are propagated, including dependencies through unconnected outputs. Propagation-delay and output-transition NLDM lookups conservatively repair non-monotone characterization points with a coordinatewise upper envelope. Below-minimum timing-table queries are clamped. An output with zero modeled load is evaluated at each table's minimum characterized load coordinate. A delay/slew query with exactly one above-maximum axis is linearly extrapolated from its final characterized interval; a delay/slew query with multiple above-maximum axes is held at the upper characterized boundaries instead of applying raw multilinear extrapolation. Setup queries remain clamped to characterized bounds. The sequential model assumes an ideal clock edge evaluated at the minimum characterized clock transition in each applicable table, and does not model hold, skew, jitter, or physical clock delivery.
 
 `max_input_to_register_delay` includes capture setup, `max_register_to_register_delay` includes launch clock-to-Q/QN plus combinational logic plus capture setup, and `max_register_to_output_delay` includes launch clock-to-Q/QN plus combinational logic. A path-class maximum with no path in the selected module is reported as `n/a` in text and `null` in JSON. In text output, each present maximum is followed by indented applicable component values: input-to-register reports combinational/setup, register-to-register reports clock-to-output/combinational/setup, and register-to-output reports clock-to-output/combinational. JSON represents these as the corresponding `*_breakdown` objects. When register dependencies admit an unambiguous adjacent-stage partition, each stage row is followed by matching indented register-to-register component lines; JSON represents these as the stage's `max_delay_breakdown`. Cycle-closing register dependencies may be treated as feedback; an ambiguous or non-partitionable register graph is reported without stage rows. Area is always completely accounted for as `cell_area = sequential_cell_area + non_stage_combinational_cell_area + sum(stage combinational_cell_area)`, with shared, boundary, and feedback combinational logic included in `non_stage_combinational_cell_area`.
 
@@ -2743,6 +2829,46 @@ xlsynth-driver dslx-stitch-g8r-pipeline \
 xlsynth-driver dslx-stitch-g8r-pipeline \
   --dslx_input_file my_design.x \
   --stages=foo_cycle0,foo_cycle1,foo_cycle2 \
+  --output_design_name=foo \
+  --input_valid_signal=in_valid --output_valid_signal=out_valid \
+  --reset=rst --bin-out=foo.g8rbin > foo.g8r
+```
+
+### `g8r-stitch-pipeline`: Stitch combinational g8r stages into sequential g8r
+
+Stitches ordered combinational `.g8r` or `.g8rbin` stage designs into one
+sequential `SequentialGateFn`. This is the persisted-artifact stitch step used
+by `dslx-stitch-g8r-pipeline` after its selected DSLX stages have been lowered
+individually.
+
+Each input stage must be clockless and register-free. Adjacent stage outputs
+are flattened LSB-first and partitioned across the next stage inputs in their
+declared order; this command checks the resulting flat widths, but DSLX-only
+checks such as `_cycleN` discovery, parametric-stage rejection, and DSLX type
+identity must happen before lowering to g8r.
+
+Positional arguments:
+
+- `<g8r_input_file>...` - ordered input `.g8r` or `.g8rbin` stage files.
+
+Pipeline flags:
+
+- `--output_design_name=<NAME>` - required output sequential g8r design name.
+- `--clock_name=<NAME>` - inserted-register clock name, default `clk`.
+- `--flop_inputs=<BOOL>` and `--flop_outputs=<BOOL>` - add external register
+  layers; both default to `true`.
+- `--input_valid_signal=<NAME>` - add a valid pipeline and make each data
+  register load-enabled by the current valid bit.
+- `--output_valid_signal=<NAME>` - expose the final valid bit; requires
+  `--input_valid_signal`.
+- `--reset=<NAME>` and `--reset_active_low=<BOOL>` - synchronously clear valid
+  registers; reset requires `--input_valid_signal`. Data registers hold/load
+  according to valid rather than being reset.
+- `--bin-out=<PATH>` - also write the binary `.g8rbin` encoding.
+
+```shell
+xlsynth-driver g8r-stitch-pipeline \
+  foo_cycle0.g8r foo_cycle1.g8rbin foo_cycle2.g8r \
   --output_design_name=foo \
   --input_valid_signal=in_valid --output_valid_signal=out_valid \
   --reset=rst --bin-out=foo.g8rbin > foo.g8r

@@ -11,6 +11,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 use crate::aot_entrypoint_metadata::{
     AotEntrypointMetadata, AotFunctionSignature, AotRuntimeFeature, AotType, AotTypeLayout,
     get_entrypoint_function_signature, get_entrypoint_runtime_features,
@@ -18,8 +20,11 @@ use crate::aot_entrypoint_metadata::{
 use crate::aot_lib::{AotCompiled, AotResult};
 use crate::dslx_bridge::{BridgeBuilder, convert_imported_module};
 use crate::rust_bridge_builder::{
-    RustBridgeBuilder, RustModuleFragment, render_rust_module_fragments,
-    render_standalone_runtime_imports, rust_type_path_between_dslx_modules,
+    ConcreteDslxTypeShape, RustBridgeBuilder, RustBridgeTarget, RustModuleFragment,
+    native_bits_rust_type, parse_concrete_dslx_type_shape,
+    render_pir_compiler_native_runtime_imports, render_rust_module_fragments,
+    render_standalone_runtime_imports, rust_module_path_from_dslx_module_name,
+    rust_type_path_between_dslx_modules,
 };
 use crate::xlsynth_error::XlsynthError;
 use crate::{
@@ -29,7 +34,10 @@ use crate::{
 
 /// ABI version emitted into standalone runtime artifacts and checked by the
 /// linked standalone runtime before first use.
+#[cfg(feature = "standalone-aot")]
 const STANDALONE_AOT_ABI_VERSION: u32 = xlsynth_aot_runtime::SUPPORTED_ARTIFACT_ABI_VERSION;
+#[cfg(not(feature = "standalone-aot"))]
+const STANDALONE_AOT_ABI_VERSION: u32 = 0;
 
 #[derive(Debug, Clone)]
 /// Inputs required to compile one XLS IR function into generated AOT wrapper
@@ -64,6 +72,191 @@ pub struct TypedDslxAotBuildSpec<'a> {
     /// DSLX modules whose public types should be emitted beside the top module
     /// wrapper.
     pub type_module_paths: Vec<&'a Path>,
+}
+
+/// Serializable type/API metadata for a typed AOT package.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedAotPackageMetadata {
+    pub format_version: u32,
+    pub modules: Vec<TypedAotModule>,
+    pub entrypoints: Vec<TypedAotEntrypoint>,
+}
+
+/// One generated public module containing type declarations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedAotModule {
+    pub path: Vec<String>,
+    pub declarations: Vec<TypedAotDecl>,
+}
+
+/// One public type declaration in typed AOT metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TypedAotDecl {
+    Struct {
+        name: String,
+        fields: Vec<TypedAotField>,
+    },
+    Enum {
+        name: String,
+        signedness: TypedAotSignedness,
+        bit_count: usize,
+        variants: Vec<TypedAotEnumVariant>,
+    },
+    Alias {
+        name: String,
+        target: TypedAotType,
+    },
+}
+
+/// One public field in a metadata-backed generated struct.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedAotField {
+    pub name: String,
+    pub ty: TypedAotType,
+}
+
+/// One public enum-like constant in a metadata-backed generated enum wrapper.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedAotEnumVariant {
+    pub name: String,
+    pub value: u128,
+}
+
+/// Signedness of a public DSLX-style bits value in typed AOT metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TypedAotSignedness {
+    Unsigned,
+    Signed,
+}
+
+impl TypedAotSignedness {
+    fn from_is_signed(is_signed: bool) -> Self {
+        if is_signed {
+            Self::Signed
+        } else {
+            Self::Unsigned
+        }
+    }
+}
+
+/// Serializable public type expression for typed AOT metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TypedAotType {
+    Bits {
+        signedness: TypedAotSignedness,
+        bit_count: usize,
+    },
+    Token,
+    Array {
+        size: usize,
+        element: Box<TypedAotType>,
+    },
+    Tuple {
+        elements: Vec<TypedAotType>,
+    },
+    TypeRef {
+        module: Vec<String>,
+        name: String,
+    },
+}
+
+/// One typed IR AOT entrypoint exposed as a generated runner module.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedAotEntrypoint {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ir_file: Option<String>,
+    pub ir_top: String,
+    pub owning_module: Vec<String>,
+    pub params: Vec<TypedAotParam>,
+    pub return_type: TypedAotType,
+}
+
+/// One typed public parameter in a generated AOT runner signature.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypedAotParam {
+    pub name: String,
+    pub ty: TypedAotType,
+}
+
+impl TypedAotPackageMetadata {
+    /// Reads typed AOT metadata from a JSON file.
+    pub fn from_json_file(path: &Path) -> Result<Self, XlsynthError> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|error| XlsynthError(format!("failed to read {}: {error}", path.display())))?;
+        serde_json::from_str(&text).map_err(|error| {
+            XlsynthError(format!(
+                "failed to parse typed AOT metadata {}: {error}",
+                path.display()
+            ))
+        })
+    }
+
+    /// Serializes typed AOT metadata as deterministic pretty JSON.
+    pub fn to_json_pretty(&self) -> Result<String, XlsynthError> {
+        serde_json::to_string_pretty(self)
+            .map(|mut json| {
+                json.push('\n');
+                json
+            })
+            .map_err(|error| {
+                XlsynthError(format!("failed to serialize typed AOT metadata: {error}"))
+            })
+    }
+}
+
+/// Returns the PIR wrapper top used for an implicit-token DSLX AOT entrypoint.
+///
+/// `base_name` is the sanitized AOT entrypoint name. The wrapper has the
+/// user-visible DSLX signature; it creates the implicit token/activation values
+/// and invokes the converted `__itok__...` function internally.
+pub fn typed_dslx_implicit_token_entrypoint_wrapper_top(base_name: &str) -> String {
+    format!("__xlsynth_pir_aot_{base_name}_dslx_entry")
+}
+
+/// Native structural shape of one DSLX type exposed by a compiler AOT wrapper.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeTypedDslxType {
+    /// A signed or unsigned DSLX bits value with identical native storage.
+    Bits { bit_count: usize },
+    /// A DSLX enum represented by its underlying native bits carrier.
+    Enum { bit_count: usize },
+    /// A DSLX struct represented by a C-compatible Rust struct.
+    Struct { fields: Vec<NativeTypedDslxField> },
+    /// An anonymous DSLX tuple represented structurally by a C-compatible
+    /// generated Rust wrapper in the PIR compiler path.
+    Tuple { elements: Vec<NativeTypedDslxType> },
+    /// A fixed-size DSLX array represented by a native Rust array.
+    Array {
+        size: usize,
+        element: Box<NativeTypedDslxType>,
+    },
+}
+
+/// One field of a native DSLX struct wrapper.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeTypedDslxField {
+    pub name: String,
+    pub ty: NativeTypedDslxType,
+}
+
+/// One parameter of a typed native DSLX compiler entrypoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeTypedDslxParam {
+    pub name: String,
+    pub rust_type: String,
+    pub ty: NativeTypedDslxType,
+}
+
+/// Typed native DSLX signature passed to the compiler-side runner renderer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeTypedDslxFunctionSignature {
+    pub params: Vec<NativeTypedDslxParam>,
+    pub return_rust_type: String,
+    pub return_type: NativeTypedDslxType,
 }
 
 /// Collects several typed DSLX AOT entrypoints into one generated Rust package.
@@ -1286,6 +1479,13 @@ enum TypedDslxType {
         /// Struct fields in DSLX declaration order.
         fields: Vec<TypedDslxField>,
     },
+    /// An anonymous DSLX tuple represented structurally.
+    Tuple {
+        /// Rust tuple spelling used in generated signatures and helpers.
+        rust_type: String,
+        /// Tuple elements in positional order.
+        elements: Vec<TypedDslxType>,
+    },
     /// A fixed-size DSLX array represented by a Rust array.
     Array {
         /// Rust bridge array type spelling used in generated signatures.
@@ -1430,6 +1630,7 @@ impl TypedDslxType {
             TypedDslxType::Bits { rust_type, .. }
             | TypedDslxType::Enum { rust_type, .. }
             | TypedDslxType::Struct { rust_type, .. }
+            | TypedDslxType::Tuple { rust_type, .. }
             | TypedDslxType::Array { rust_type, .. } => rust_type,
         }
     }
@@ -1485,7 +1686,7 @@ impl DslxImportSubject {
 /// generated object/proto/wrapper artifacts. The roots are the top DSLX module
 /// and every generated bridge module, then imports are followed through the
 /// same search roots that DSLX conversion uses.
-fn collect_typed_dslx_aot_dependencies(
+pub fn collect_typed_dslx_aot_dependencies(
     spec: &TypedDslxAotBuildSpec<'_>,
 ) -> AotResult<BTreeSet<PathBuf>> {
     let mut dependencies = BTreeSet::new();
@@ -1766,6 +1967,29 @@ fn typecheck_typed_dslx_package_modules(
     }
 
     Ok(TypedDslxPackageTypecheckedModules { modules })
+}
+
+fn find_typed_dslx_package_top_module<'a>(
+    typechecked: &'a TypedDslxPackageTypecheckedModules,
+    spec: &TypedDslxAotBuildSpec<'_>,
+) -> AotResult<&'a dslx::TypecheckedModule> {
+    let canonical_top_path = std::fs::canonicalize(spec.dslx_path).map_err(|e| {
+        XlsynthError(format!(
+            "AOT I/O failed while resolving DSLX package top {}: {e}",
+            spec.dslx_path.display()
+        ))
+    })?;
+    typechecked
+        .modules
+        .iter()
+        .find(|module| module.canonical_path == canonical_top_path)
+        .map(|module| &module.typechecked)
+        .ok_or_else(|| {
+            XlsynthError(format!(
+                "AOT typed DSLX package could not find top module for {}",
+                spec.dslx_path.display()
+            ))
+        })
 }
 
 /// Collects the module-local type definitions needed for typed AOT lowering.
@@ -2180,9 +2404,14 @@ impl TypedDslxTypeContext {
                 self.rust_type_for_concrete_type(local_module_name, current_type_info, &element)?;
             Ok(format!("[{element_rust_type}; {}]", ty.get_array_size()))
         } else {
+            let ty_text = ty.to_string()?;
+            if ty_text.trim_start().starts_with('(') {
+                return Ok(parse_concrete_dslx_type_shape(&ty_text)?
+                    .rust_type(RustBridgeTarget::StandaloneAot));
+            }
             Err(XlsynthError(format!(
                 "AOT typed DSLX type lowering does not support DSLX type `{}`",
-                ty.to_string()?
+                ty_text
             )))
         }
     }
@@ -2517,6 +2746,448 @@ fn render_typed_concrete_parametric_struct(
     lines.join("\n")
 }
 
+/// Rewrites packing-oriented bits spellings into direct native runtime types.
+fn native_runtime_type_spelling(rust_type: &str) -> String {
+    let regex = regex::Regex::new(r"[US]Bits<([0-9]+)>").expect("static regex should compile");
+    regex
+        .replace_all(rust_type, |captures: &regex::Captures<'_>| {
+            native_bits_rust_type(
+                captures[1]
+                    .parse::<usize>()
+                    .expect("captured bit count should parse"),
+            )
+        })
+        .into_owned()
+}
+
+/// Projects the internal typed DSLX model onto the compiler-facing native ABI.
+fn project_native_typed_dslx_type(ty: &TypedDslxType) -> NativeTypedDslxType {
+    match ty {
+        TypedDslxType::Bits { bit_count, .. } => NativeTypedDslxType::Bits {
+            bit_count: *bit_count,
+        },
+        TypedDslxType::Enum { bit_count, .. } => NativeTypedDslxType::Enum {
+            bit_count: *bit_count,
+        },
+        TypedDslxType::Struct { fields, .. } => NativeTypedDslxType::Struct {
+            fields: fields
+                .iter()
+                .map(|field| NativeTypedDslxField {
+                    name: field.name.clone(),
+                    ty: project_native_typed_dslx_type(&field.ty),
+                })
+                .collect(),
+        },
+        TypedDslxType::Tuple { elements, .. } => NativeTypedDslxType::Tuple {
+            elements: elements
+                .iter()
+                .map(project_native_typed_dslx_type)
+                .collect(),
+        },
+        TypedDslxType::Array { size, element, .. } => NativeTypedDslxType::Array {
+            size: *size,
+            element: Box::new(project_native_typed_dslx_type(element)),
+        },
+    }
+}
+
+fn project_native_typed_dslx_signature(
+    signature: &TypedAotFunctionSignature,
+) -> NativeTypedDslxFunctionSignature {
+    NativeTypedDslxFunctionSignature {
+        params: signature
+            .params
+            .iter()
+            .map(|param| NativeTypedDslxParam {
+                name: param.name.clone(),
+                rust_type: native_runtime_type_spelling(&param.rust_type),
+                ty: project_native_typed_dslx_type(&param.ty),
+            })
+            .collect(),
+        return_rust_type: native_runtime_type_spelling(&signature.return_rust_type),
+        return_type: project_native_typed_dslx_type(&signature.return_type),
+    }
+}
+
+fn render_native_typed_concrete_parametric_struct(
+    concrete_struct: &TypedConcreteParametricStruct,
+) -> String {
+    let mut lines = vec![
+        "#[allow(non_camel_case_types)]".to_string(),
+        "#[repr(C)]".to_string(),
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq)]".to_string(),
+        format!("pub struct {} {{", concrete_struct.rust_name),
+    ];
+    lines.extend(concrete_struct.fields.iter().map(|field| {
+        format!(
+            "    pub {}: {},",
+            field.name,
+            native_runtime_type_spelling(field.ty.rust_type())
+        )
+    }));
+    lines.push("}\n".to_string());
+    lines.join("\n")
+}
+
+/// Builds serializable typed AOT metadata from typed DSLX package specs.
+///
+/// The result preserves the same public module paths, type names, aliases, and
+/// entrypoint ownership that native typed DSLX AOT wrapper generation uses.
+pub fn build_native_typed_dslx_aot_package_metadata(
+    specs: &[TypedDslxAotBuildSpec<'_>],
+) -> AotResult<TypedAotPackageMetadata> {
+    ensure_package_specs_compatible(specs)?;
+    let typechecked = typecheck_typed_dslx_package_modules(specs)?;
+    let context = TypedDslxTypeContext::from_modules(
+        typechecked.modules.iter().map(|module| &module.typechecked),
+    );
+    let concrete_parametric_structs = collect_typed_concrete_parametric_structs_from_modules(
+        &context,
+        typechecked.modules.iter().map(|module| &module.typechecked),
+    )?;
+    let mut concrete_structs_by_module =
+        concrete_parametric_structs
+            .into_iter()
+            .fold(BTreeMap::new(), |mut by_module, item| {
+                by_module
+                    .entry(item.defining_module_name.clone())
+                    .or_insert_with(Vec::new)
+                    .push(item);
+                by_module
+            });
+
+    let mut modules = Vec::with_capacity(typechecked.modules.len());
+    for module in &typechecked.modules {
+        let module_name = module.typechecked.get_module().get_name();
+        modules.push(TypedAotModule {
+            path: rust_module_path_from_dslx_module_name(&module_name),
+            declarations: typed_aot_declarations_from_dslx_module(
+                &context,
+                &module.typechecked,
+                concrete_structs_by_module
+                    .remove(&module_name)
+                    .unwrap_or_default(),
+            )?,
+        });
+    }
+    if let Some((module_name, _)) = concrete_structs_by_module.into_iter().next() {
+        return Err(XlsynthError(format!(
+            "AOT typed DSLX metadata collection requires package module `{module_name}` to be emitted"
+        )));
+    }
+
+    let mut entrypoints = Vec::with_capacity(specs.len());
+    for spec in specs {
+        entrypoints.push(typed_aot_entrypoint_from_dslx_spec(
+            &context,
+            &typechecked,
+            spec,
+        )?);
+    }
+
+    Ok(TypedAotPackageMetadata {
+        format_version: 2,
+        modules,
+        entrypoints,
+    })
+}
+
+fn typed_aot_declarations_from_dslx_module(
+    context: &TypedDslxTypeContext,
+    typechecked_module: &dslx::TypecheckedModule,
+    concrete_structs: Vec<TypedConcreteParametricStruct>,
+) -> AotResult<Vec<TypedAotDecl>> {
+    let module = typechecked_module.get_module();
+    let type_info = typechecked_module.get_type_info();
+    let module_name = module.get_name();
+    let module_path = rust_module_path_from_dslx_module_name(&module_name);
+    let mut declarations = Vec::new();
+
+    for concrete_struct in concrete_structs {
+        declarations.push(TypedAotDecl::Struct {
+            name: concrete_struct.rust_name,
+            fields: concrete_struct
+                .fields
+                .iter()
+                .map(|field| {
+                    Ok(TypedAotField {
+                        name: field.name.clone(),
+                        ty: typed_aot_type_from_lowered_dslx_type(&module_path, &field.ty)?,
+                    })
+                })
+                .collect::<AotResult<Vec<_>>>()?,
+        });
+    }
+
+    for index in 0..module.get_member_count() {
+        let Some(member) = module.get_member(index).to_matchable() else {
+            continue;
+        };
+        match member {
+            dslx::MatchableModuleMember::EnumDef(enum_def) => {
+                declarations.push(typed_aot_enum_decl_from_dslx(&enum_def, &type_info)?);
+            }
+            dslx::MatchableModuleMember::StructDef(struct_def) => {
+                if struct_def.is_parametric() {
+                    continue;
+                }
+                let fields = (0..struct_def.get_member_count())
+                    .map(|field_index| {
+                        let member = struct_def.get_member(field_index);
+                        let annotation = member.get_type();
+                        let concrete_type = type_info.get_type_for_struct_member(&member);
+                        Ok(TypedAotField {
+                            name: member.get_name(),
+                            ty: typed_aot_type_from_dslx_type(
+                                context,
+                                &module_name,
+                                &module_path,
+                                &type_info,
+                                Some(&annotation),
+                                &concrete_type,
+                            )?,
+                        })
+                    })
+                    .collect::<AotResult<Vec<_>>>()?;
+                declarations.push(TypedAotDecl::Struct {
+                    name: struct_def.get_identifier(),
+                    fields,
+                });
+            }
+            dslx::MatchableModuleMember::TypeAlias(type_alias) => {
+                let annotation = type_alias.get_type_annotation();
+                let concrete_type = type_info
+                    .get_type_for_type_annotation(&annotation)
+                    .ok_or_else(|| {
+                        XlsynthError(format!(
+                            "AOT typed DSLX metadata could not resolve alias `{}`",
+                            type_alias.get_identifier()
+                        ))
+                    })?;
+                declarations.push(TypedAotDecl::Alias {
+                    name: type_alias.get_identifier(),
+                    target: typed_aot_type_from_dslx_type(
+                        context,
+                        &module_name,
+                        &module_path,
+                        &type_info,
+                        Some(&annotation),
+                        &concrete_type,
+                    )?,
+                });
+            }
+            dslx::MatchableModuleMember::ConstantDef(_)
+            | dslx::MatchableModuleMember::Function(_)
+            | dslx::MatchableModuleMember::Quickcheck(_) => {}
+        }
+    }
+
+    Ok(declarations)
+}
+
+fn typed_aot_enum_decl_from_dslx(
+    enum_def: &dslx::EnumDef,
+    type_info: &dslx::TypeInfo,
+) -> AotResult<TypedAotDecl> {
+    let underlying = type_info
+        .get_type_for_type_annotation(&enum_def.get_underlying())
+        .ok_or_else(|| {
+            XlsynthError(format!(
+                "AOT typed DSLX metadata could not resolve enum `{}` underlying type",
+                enum_def.get_identifier()
+            ))
+        })?;
+    let (is_signed, bit_count) = underlying.is_bits_like().ok_or_else(|| {
+        XlsynthError(format!(
+            "AOT typed DSLX metadata expected enum `{}` to have bits-like underlying type",
+            enum_def.get_identifier()
+        ))
+    })?;
+    let variants = (0..enum_def.get_member_count())
+        .map(|index| {
+            let member = enum_def.get_member(index);
+            let value = type_info
+                .get_const_expr(&member.get_value())?
+                .convert_to_ir()?
+                .to_bits()?
+                .to_u64()? as u128;
+            Ok(TypedAotEnumVariant {
+                name: member.get_name(),
+                value,
+            })
+        })
+        .collect::<AotResult<Vec<_>>>()?;
+    Ok(TypedAotDecl::Enum {
+        name: enum_def.get_identifier(),
+        signedness: TypedAotSignedness::from_is_signed(is_signed),
+        bit_count,
+        variants,
+    })
+}
+
+fn typed_aot_entrypoint_from_dslx_spec(
+    context: &TypedDslxTypeContext,
+    typechecked: &TypedDslxPackageTypecheckedModules,
+    spec: &TypedDslxAotBuildSpec<'_>,
+) -> AotResult<TypedAotEntrypoint> {
+    let top_module = find_typed_dslx_package_top_module(typechecked, spec)?;
+    let top_module_name = top_module.get_module().get_name();
+    let base_name = sanitize_identifier(spec.name);
+    let owning_module_path = rust_module_path_from_dslx_module_name(&top_module_name);
+    let typed_signature =
+        build_typed_dslx_function_signature(context, top_module, spec.top, &top_module_name)?;
+    let ir_top = if spec.dslx_options.force_implicit_token_calling_convention {
+        typed_dslx_implicit_token_entrypoint_wrapper_top(&base_name)
+    } else {
+        mangle_dslx_name_with_calling_convention(
+            dslx_path_to_module_name(spec.dslx_path)?,
+            spec.top,
+            DslxCallingConvention::Typical,
+        )?
+    };
+    Ok(TypedAotEntrypoint {
+        name: base_name,
+        ir_file: None,
+        ir_top,
+        owning_module: rust_module_path_from_dslx_module_name(&top_module_name),
+        params: typed_signature
+            .params
+            .iter()
+            .map(|param| {
+                Ok(TypedAotParam {
+                    name: param.name.clone(),
+                    ty: typed_aot_type_from_lowered_dslx_type(&owning_module_path, &param.ty)?,
+                })
+            })
+            .collect::<AotResult<Vec<_>>>()?,
+        return_type: typed_aot_type_from_lowered_dslx_type(
+            &owning_module_path,
+            &typed_signature.return_type,
+        )?,
+    })
+}
+
+fn typed_aot_type_from_dslx_type(
+    context: &TypedDslxTypeContext,
+    module_name: &str,
+    module_path: &[String],
+    type_info: &dslx::TypeInfo,
+    type_annotation: Option<&dslx::TypeAnnotation>,
+    ty: &dslx::Type,
+) -> AotResult<TypedAotType> {
+    let type_info = context.type_context_for_resolved_type(type_info, type_annotation, ty)?;
+    let rust_type =
+        context.rust_type_path_for_resolved_type(module_name, type_info, type_annotation, ty)?;
+    let lowered = lower_typed_dslx_type(
+        context,
+        module_name,
+        type_info,
+        type_annotation,
+        ty,
+        rust_type,
+    )?;
+    typed_aot_type_from_lowered_dslx_type(module_path, &lowered)
+}
+
+fn typed_aot_type_from_lowered_dslx_type(
+    current_module_path: &[String],
+    ty: &TypedDslxType,
+) -> AotResult<TypedAotType> {
+    match ty {
+        TypedDslxType::Bits {
+            rust_type,
+            is_signed,
+            bit_count,
+            ..
+        } => Ok(typed_aot_type_ref_from_rust_type_path(current_module_path, rust_type)
+            .unwrap_or(TypedAotType::Bits {
+                signedness: TypedAotSignedness::from_is_signed(*is_signed),
+                bit_count: *bit_count,
+            })),
+        TypedDslxType::Enum { rust_type, .. } | TypedDslxType::Struct { rust_type, .. } => {
+            typed_aot_type_ref_from_rust_type_path(current_module_path, rust_type).ok_or_else(|| {
+                XlsynthError(format!(
+                    "AOT typed DSLX metadata could not resolve generated type path `{rust_type}`"
+                ))
+            })
+        }
+        TypedDslxType::Tuple { elements, .. } => Ok(TypedAotType::Tuple {
+            elements: elements
+                .iter()
+                .map(|element| typed_aot_type_from_lowered_dslx_type(current_module_path, element))
+                .collect::<AotResult<Vec<_>>>()?,
+        }),
+        TypedDslxType::Array { size, element, .. } => Ok(TypedAotType::Array {
+            size: *size,
+            element: Box::new(typed_aot_type_from_lowered_dslx_type(
+                current_module_path,
+                element,
+            )?),
+        }),
+    }
+}
+
+fn typed_aot_type_ref_from_rust_type_path(
+    current_module_path: &[String],
+    rust_type: &str,
+) -> Option<TypedAotType> {
+    let rust_type = rust_type.trim();
+    if rust_type.starts_with('[') || rust_type.starts_with('(') || rust_type.contains('<') {
+        return None;
+    }
+    let mut module = current_module_path.to_vec();
+    let mut tail = Vec::new();
+    for segment in rust_type.split("::") {
+        match segment {
+            "" | "crate" => return None,
+            "self" => {}
+            "super" => {
+                module.pop()?;
+            }
+            segment => tail.push(segment.to_string()),
+        }
+    }
+    let name = tail.pop()?;
+    module.extend(tail);
+    Some(TypedAotType::TypeRef { module, name })
+}
+
+fn lower_concrete_dslx_type_shape(
+    shape: &ConcreteDslxTypeShape,
+    rust_type: String,
+) -> TypedDslxType {
+    match shape {
+        ConcreteDslxTypeShape::Bits {
+            is_signed,
+            bit_count,
+        } => TypedDslxType::Bits {
+            rust_type,
+            is_signed: *is_signed,
+            bit_count: *bit_count,
+        },
+        ConcreteDslxTypeShape::Tuple { elements } => TypedDslxType::Tuple {
+            rust_type,
+            elements: elements
+                .iter()
+                .map(|element| {
+                    lower_concrete_dslx_type_shape(
+                        element,
+                        element.rust_type(RustBridgeTarget::StandaloneAot),
+                    )
+                })
+                .collect(),
+        },
+        ConcreteDslxTypeShape::Array { size, element } => TypedDslxType::Array {
+            rust_type,
+            size: *size,
+            element: Box::new(lower_concrete_dslx_type_shape(
+                element,
+                element.rust_type(RustBridgeTarget::StandaloneAot),
+            )),
+        },
+    }
+}
+
 /// Lowers one DSLX type into the semantic model used by typed AOT generation.
 ///
 /// The caller supplies the Rust bridge type spelling for the outer type so
@@ -2669,9 +3340,16 @@ fn lower_typed_dslx_type(
             )?),
         })
     } else {
+        let ty_text = ty.to_string()?;
+        if ty_text.trim_start().starts_with('(') {
+            return Ok(lower_concrete_dslx_type_shape(
+                &parse_concrete_dslx_type_shape(&ty_text)?,
+                rust_type,
+            ));
+        }
         Err(XlsynthError(format!(
             "AOT typed DSLX type lowering does not support DSLX type `{}`",
-            ty.to_string()?
+            ty_text
         )))
     }
 }
@@ -2798,6 +3476,7 @@ fn typed_dslx_rust_type_name(ty: &TypedDslxType) -> &str {
         TypedDslxType::Bits { rust_type, .. }
         | TypedDslxType::Enum { rust_type, .. }
         | TypedDslxType::Struct { rust_type, .. }
+        | TypedDslxType::Tuple { rust_type, .. }
         | TypedDslxType::Array { rust_type, .. } => rust_type,
     }
 }
@@ -2814,6 +3493,7 @@ fn typed_dslx_leaf_count(ty: &TypedDslxType) -> usize {
             .iter()
             .map(|field| typed_dslx_leaf_count(&field.ty))
             .sum(),
+        TypedDslxType::Tuple { elements, .. } => elements.iter().map(typed_dslx_leaf_count).sum(),
         TypedDslxType::Array { size, element, .. } => {
             size.saturating_mul(typed_dslx_leaf_count(element))
         }
@@ -2836,6 +3516,12 @@ fn flatten_typed_dslx_type_to_aot_type(ty: &TypedDslxType) -> AotType {
             elements: fields
                 .iter()
                 .map(|field| flatten_typed_dslx_type_to_aot_type(&field.ty))
+                .collect(),
+        },
+        TypedDslxType::Tuple { elements, .. } => AotType::Tuple {
+            elements: elements
+                .iter()
+                .map(flatten_typed_dslx_type_to_aot_type)
                 .collect(),
         },
         TypedDslxType::Array { size, element, .. } => AotType::Array {
@@ -2978,6 +3664,26 @@ fn emit_typed_dslx_pack_statements(
                     next_loop_index,
                 );
                 offset = offset.saturating_add(typed_dslx_leaf_count(&field.ty));
+            }
+        }
+        TypedDslxType::Tuple { elements, .. } => {
+            let mut offset = 0usize;
+            for (index, element) in elements.iter().enumerate() {
+                let element_leaf_base = if offset == 0 {
+                    leaf_index_expr.to_string()
+                } else {
+                    format!("{leaf_index_expr} + {offset}")
+                };
+                emit_typed_dslx_pack_statements(
+                    element,
+                    &format!("({value_expr}).{index}"),
+                    layout_name,
+                    dst_name,
+                    &element_leaf_base,
+                    lines,
+                    next_loop_index,
+                );
+                offset = offset.saturating_add(typed_dslx_leaf_count(element));
             }
         }
         TypedDslxType::Array { size, element, .. } => {
@@ -3185,6 +3891,36 @@ fn emit_typed_dslx_decode_statements(
                 push_line(lines, format!("    {field_name}: {field_value},"));
             }
             push_line(lines, "};");
+            value_name
+        }
+        TypedDslxType::Tuple { elements, .. } => {
+            let element_values = elements
+                .iter()
+                .scan(0usize, |offset, element| {
+                    let element_leaf_base = if *offset == 0 {
+                        leaf_index_expr.to_string()
+                    } else {
+                        format!("{leaf_index_expr} + {}", *offset)
+                    };
+                    *offset = offset.saturating_add(typed_dslx_leaf_count(element));
+                    Some(emit_typed_dslx_decode_statements(
+                        element,
+                        layout_name,
+                        src_name,
+                        &element_leaf_base,
+                        lines,
+                        next_loop_index,
+                        next_temp_index,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            let value_name = next_temp("decoded_value", next_temp_index);
+            let tuple_expr = match element_values.as_slice() {
+                [] => "()".to_string(),
+                [element] => format!("({element},)"),
+                _ => format!("({})", element_values.join(", ")),
+            };
+            push_line(lines, format!("let {value_name} = {tuple_expr};"));
             value_name
         }
         TypedDslxType::Array {
@@ -3560,6 +4296,172 @@ fn render_typed_dslx_generated_module(
     )
 }
 
+/// Renders native DSLX bridge types around a PIR compiler-provided runner.
+///
+/// The DSLX front end remains responsible for imports, aliases, nominal type
+/// paths, and concrete parametric struct discovery. The caller supplies runner
+/// items after checking the projected native signature against its compiled
+/// artifact.
+pub fn render_native_typed_dslx_generated_module(
+    spec: &TypedDslxAotBuildSpec<'_>,
+    top_dslx_text: &str,
+    runner_renderer: impl FnOnce(&NativeTypedDslxFunctionSignature) -> AotResult<String>,
+) -> AotResult<String> {
+    let typechecked = typecheck_typed_dslx_modules(spec, top_dslx_text)?;
+    let context = TypedDslxTypeContext::new(&typechecked);
+    let top_module_name = typechecked.top_module.get_module().get_name();
+    let typed_signature = build_typed_dslx_function_signature(
+        &context,
+        &typechecked.top_module,
+        spec.top,
+        &top_module_name,
+    )?;
+    let runner_epilogue = runner_renderer(&project_native_typed_dslx_signature(&typed_signature))?;
+    let concrete_parametric_structs =
+        collect_typed_concrete_parametric_structs(&context, &typechecked)?;
+    let mut leading_items_by_module =
+        concrete_parametric_structs
+            .into_iter()
+            .fold(BTreeMap::new(), |mut items, item| {
+                items
+                    .entry(item.defining_module_name.clone())
+                    .or_insert_with(Vec::new)
+                    .push(render_native_typed_concrete_parametric_struct(&item));
+                items
+            });
+
+    let mut modules = Vec::with_capacity(spec.type_module_paths.len() + 2);
+    modules.push(RustModuleFragment {
+        path: vec![],
+        body: render_pir_compiler_native_runtime_imports().to_string(),
+    });
+    for bridge_module in &typechecked.bridge_modules {
+        let module_name = bridge_module.get_module().get_name();
+        let mut builder = RustBridgeBuilder::new()
+            .with_pir_compiler_native_target()
+            .with_leading_items(
+                leading_items_by_module
+                    .remove(&module_name)
+                    .unwrap_or_default(),
+            )
+            .with_deferred_parametric_struct_emission();
+        convert_imported_module(bridge_module, &mut builder)?;
+        modules.push(builder.module_fragment());
+    }
+
+    let mut top_builder = RustBridgeBuilder::new()
+        .with_pir_compiler_native_target()
+        .with_leading_items(
+            leading_items_by_module
+                .remove(&top_module_name)
+                .unwrap_or_default(),
+        )
+        .with_deferred_parametric_struct_emission()
+        .with_runner_items(runner_epilogue);
+    convert_imported_module(&typechecked.top_module, &mut top_builder)?;
+    modules.push(top_builder.module_fragment());
+    if let Some((module_name, _)) = leading_items_by_module.into_iter().next() {
+        return Err(XlsynthError(format!(
+            "AOT typed DSLX specialization collection requires bridge module `{module_name}` to be emitted"
+        )));
+    }
+
+    render_canonical_generated_source(
+        &format!(
+            "// SPDX-License-Identifier: Apache-2.0\n// Generated by xlsynth::aot_builder for xlsynth-pir-compiler from DSLX build spec {:?}.",
+            spec.name
+        ),
+        &render_rust_module_fragments(modules),
+    )
+}
+
+/// Renders one native DSLX bridge package with shared nominal Rust types.
+///
+/// Each runner is emitted beneath its owning DSLX module while all
+/// participating DSLX type modules are emitted once. The callback receives
+/// signatures in the same order as `specs`.
+pub fn render_native_typed_dslx_package_generated_module(
+    package_name: &str,
+    specs: &[TypedDslxAotBuildSpec<'_>],
+    mut runner_renderer: impl FnMut(usize, &NativeTypedDslxFunctionSignature) -> AotResult<String>,
+) -> AotResult<String> {
+    ensure_package_specs_compatible(specs)?;
+    let typechecked = typecheck_typed_dslx_package_modules(specs)?;
+    let context = TypedDslxTypeContext::from_modules(
+        typechecked.modules.iter().map(|module| &module.typechecked),
+    );
+    let concrete_parametric_structs = collect_typed_concrete_parametric_structs_from_modules(
+        &context,
+        typechecked.modules.iter().map(|module| &module.typechecked),
+    )?;
+    let mut leading_items_by_module =
+        concrete_parametric_structs
+            .into_iter()
+            .fold(BTreeMap::new(), |mut items, item| {
+                items
+                    .entry(item.defining_module_name.clone())
+                    .or_insert_with(Vec::new)
+                    .push(render_native_typed_concrete_parametric_struct(&item));
+                items
+            });
+
+    let mut modules = Vec::with_capacity(typechecked.modules.len() + specs.len() + 1);
+    modules.push(RustModuleFragment {
+        path: vec![],
+        body: render_pir_compiler_native_runtime_imports().to_string(),
+    });
+    for module in &typechecked.modules {
+        let module_name = module.typechecked.get_module().get_name();
+        let mut builder = RustBridgeBuilder::new()
+            .with_pir_compiler_native_target()
+            .with_leading_items(
+                leading_items_by_module
+                    .remove(&module_name)
+                    .unwrap_or_default(),
+            )
+            .with_deferred_parametric_struct_emission();
+        convert_imported_module(&module.typechecked, &mut builder)?;
+        modules.push(builder.module_fragment());
+    }
+    if let Some((module_name, _)) = leading_items_by_module.into_iter().next() {
+        return Err(XlsynthError(format!(
+            "AOT typed DSLX specialization collection requires package module `{module_name}` to be emitted"
+        )));
+    }
+
+    for (index, spec) in specs.iter().enumerate() {
+        let top_module = find_typed_dslx_package_top_module(&typechecked, spec)?;
+        let top_module_name = top_module.get_module().get_name();
+        let runner_module_name =
+            format!("{top_module_name}.aot_{}", sanitize_identifier(spec.name));
+        let typed_signature = build_typed_dslx_function_signature(
+            &context,
+            top_module,
+            spec.top,
+            &runner_module_name,
+        )?;
+        let runner_epilogue = runner_renderer(
+            index,
+            &project_native_typed_dslx_signature(&typed_signature),
+        )?;
+        let mut runner_builder = RustBridgeBuilder::new()
+            .with_pir_compiler_native_target()
+            .with_leading_items(["use super::*;".to_string()])
+            .with_runner_items(runner_epilogue);
+        runner_builder.start_module(&runner_module_name)?;
+        runner_builder.end_module(&runner_module_name)?;
+        modules.push(runner_builder.module_fragment());
+    }
+
+    render_canonical_generated_source(
+        &format!(
+            "// SPDX-License-Identifier: Apache-2.0\n// Generated by xlsynth::aot_builder for xlsynth-pir-compiler from typed DSLX AOT package {:?}.",
+            package_name
+        ),
+        &render_rust_module_fragments(modules),
+    )
+}
+
 fn emit_typed_dslx_aot_package_with_out_dir(
     builder: &TypedDslxAotPackageBuilder<'_>,
     out_dir: &Path,
@@ -3628,23 +4530,7 @@ fn emit_typed_dslx_aot_package_with_out_dir(
     }
 
     for entrypoint in &compiled {
-        let canonical_top_path = std::fs::canonicalize(entrypoint.spec.dslx_path).map_err(|e| {
-            XlsynthError(format!(
-                "AOT I/O failed while resolving DSLX package top {}: {e}",
-                entrypoint.spec.dslx_path.display()
-            ))
-        })?;
-        let top_module = typechecked
-            .modules
-            .iter()
-            .find(|module| module.canonical_path == canonical_top_path)
-            .map(|module| &module.typechecked)
-            .ok_or_else(|| {
-                XlsynthError(format!(
-                    "AOT typed DSLX package could not find top module for {}",
-                    entrypoint.spec.dslx_path.display()
-                ))
-            })?;
+        let top_module = find_typed_dslx_package_top_module(&typechecked, entrypoint.spec)?;
         let top_module_name = top_module.get_module().get_name();
         let runner_module_name = format!("{top_module_name}.aot_{}", entrypoint.base_name);
         let typed_signature = build_typed_dslx_function_signature(
