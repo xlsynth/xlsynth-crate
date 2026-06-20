@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use xlsynth::{IrBits, IrValue};
-use xlsynth_g8r::liberty_proto::PinDirection;
+use xlsynth_g8r::liberty_model::PinDirection;
 use xlsynth_g8r::netlist::gv_eval::{
     GvEvalOptions, GvToggleAggregate, PinConnection, TogglePinConnection, load_labeled_netlist_aig,
 };
@@ -22,17 +22,19 @@ fn write_fixture(
 #[test]
 fn labeled_netlist_aig_evaluates_and_preserves_external_pin_labels() {
     let liberty = r#"
+format_magic: 5496997758177923663
 cells: {
   name: "AND2"
-  pins: { name: "A" direction: INPUT }
-  pins: { name: "B" direction: INPUT }
-  pins: { name: "Y" direction: OUTPUT function: "A & B" }
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: INPUT }
+  pins: { name_string_id: 3 direction: OUTPUT function_string_id: 4 }
 }
 cells: {
   name: "INV"
-  pins: { name: "A" direction: INPUT }
-  pins: { name: "Y" direction: OUTPUT function: "!A" }
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 3 direction: OUTPUT function_string_id: 5 }
 }
+interned_strings: ["A", "B", "Y", "A & B", "!A"]
 "#;
     let netlist = r#"
 module top (a, b, y);
@@ -108,11 +110,13 @@ endmodule
 #[test]
 fn module_port_labels_preserve_original_bit_numbers() {
     let liberty = r#"
+format_magic: 5496997758177923663
 cells: {
   name: "BUF"
-  pins: { name: "A" direction: INPUT }
-  pins: { name: "Y" direction: OUTPUT function: "A" }
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: OUTPUT function_string_id: 1 }
 }
+interned_strings: ["A", "Y"]
 "#;
     let netlist = r#"
 module top (a, y);
@@ -153,11 +157,13 @@ endmodule
 #[test]
 fn toggle_activity_counts_external_pins_outside_the_primary_output_cone() {
     let liberty = r#"
+format_magic: 5496997758177923663
 cells: {
   name: "BUF"
-  pins: { name: "A" direction: INPUT }
-  pins: { name: "Y" direction: OUTPUT function: "A" }
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: OUTPUT function_string_id: 1 }
 }
+interned_strings: ["A", "Y"]
 "#;
     let netlist = r#"
 module top (a, y);
@@ -202,11 +208,12 @@ endmodule
 #[test]
 fn sequential_cells_are_rejected_before_projection() {
     let liberty = r#"
+format_magic: 5496997758177923663
 cells: {
   name: "DFF"
-  pins: { name: "D" direction: INPUT }
-  pins: { name: "CLK" direction: INPUT is_clocking_pin: true }
-  pins: { name: "Q" direction: OUTPUT function: "IQ" }
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: INPUT is_clocking_pin: true }
+  pins: { name_string_id: 3 direction: OUTPUT function_string_id: 4 }
   sequential: {
     state_var: "IQ"
     next_state: "D"
@@ -214,6 +221,7 @@ cells: {
     kind: SEQUENTIAL_KIND_FF
   }
 }
+interned_strings: ["D", "CLK", "Q", "IQ"]
 "#;
     let netlist = r#"
 module top (d, clk, q);

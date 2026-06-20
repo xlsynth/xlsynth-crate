@@ -5,17 +5,19 @@ use std::process::{Command, Output};
 use xlsynth_test_helpers::compare_golden_text;
 
 const COMBINATIONAL_LIBERTY: &str = r#"
+format_magic: 5496997758177923663
 cells: {
   name: "AND2"
-  pins: { name: "A" direction: INPUT }
-  pins: { name: "B" direction: INPUT }
-  pins: { name: "Y" direction: OUTPUT function: "A & B" }
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: INPUT }
+  pins: { name_string_id: 3 direction: OUTPUT function_string_id: 4 }
 }
 cells: {
   name: "INV"
-  pins: { name: "A" direction: INPUT }
-  pins: { name: "Y" direction: OUTPUT function: "!A" }
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 3 direction: OUTPUT function_string_id: 5 }
 }
+interned_strings: ["A", "B", "Y", "A & B", "!A"]
 "#;
 
 fn write_fixture(netlist: &str, liberty: &str) -> tempfile::TempDir {
@@ -129,11 +131,12 @@ endmodule
 #[test]
 fn gv_eval_rejects_sequential_cells() {
     let liberty = r#"
+format_magic: 5496997758177923663
 cells: {
   name: "DFF"
-  pins: { name: "D" direction: INPUT }
-  pins: { name: "CLK" direction: INPUT is_clocking_pin: true }
-  pins: { name: "Q" direction: OUTPUT function: "IQ" }
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: INPUT is_clocking_pin: true }
+  pins: { name_string_id: 3 direction: OUTPUT function_string_id: 4 }
   sequential: {
     state_var: "IQ"
     next_state: "D"
@@ -141,6 +144,7 @@ cells: {
     kind: SEQUENTIAL_KIND_FF
   }
 }
+interned_strings: ["D", "CLK", "Q", "IQ"]
 "#;
     let netlist = r#"
 module top (d, clk, q);

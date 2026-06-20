@@ -39,11 +39,10 @@ pub fn handle_gv_area(matches: &ArgMatches) {
         );
         std::process::exit(1)
     });
-    let report =
-        build_area_report(module, &parsed.interner, liberty.as_proto()).unwrap_or_else(|e| {
-            eprintln!("{} error: failed to compute cell area: {:#}", SUBCOMMAND, e);
-            std::process::exit(1)
-        });
+    let report = build_area_report(module, &parsed.interner, &liberty).unwrap_or_else(|e| {
+        eprintln!("{} error: failed to compute cell area: {:#}", SUBCOMMAND, e);
+        std::process::exit(1)
+    });
 
     print!("{}", render_area_report(&report));
     if let Some(json_path) = json_out {

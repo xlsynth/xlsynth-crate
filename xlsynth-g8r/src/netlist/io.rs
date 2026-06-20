@@ -9,9 +9,8 @@
 //! - Producing the parsed modules together with the global `nets` array and
 //!   `StringInterner`.
 
-use crate::liberty::load::{
-    Library, LibraryWithTimingData, load_library_from_path, load_library_with_timing_data_from_path,
-};
+use crate::liberty::Library;
+use crate::liberty::load::{load_library_from_path, load_library_with_timing_data_from_path};
 use crate::netlist::parse::{Net, NetlistModule, Parser as NetlistParser, PortId, TokenScanner};
 use anyhow::{Result, anyhow};
 use flate2::read::MultiGzDecoder;
@@ -148,6 +147,6 @@ pub fn load_liberty_from_path(path: &Path) -> Result<Library> {
 }
 
 /// Load a Liberty proto (binary or textproto) with full timing payloads.
-pub fn load_liberty_with_timing_data_from_path(path: &Path) -> Result<LibraryWithTimingData> {
+pub fn load_liberty_with_timing_data_from_path(path: &Path) -> Result<Library> {
     load_library_with_timing_data_from_path(path)
 }

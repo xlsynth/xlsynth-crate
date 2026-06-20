@@ -12,7 +12,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 
-use crate::liberty_proto::{Library, PinDirection};
+use crate::liberty_model::{Library, PinDirection};
 use crate::netlist::parse::{
     AssignExpr, Net, NetIndex, NetRef, NetlistInstance, NetlistModule, NetlistPort, PortDirection,
 };
@@ -1054,7 +1054,7 @@ pub fn check_module(
     for cell in &lib.cells {
         let mut pins = HashMap::new();
         for pin in &cell.pins {
-            pins.insert(pin.name.as_str(), pin.direction);
+            pins.insert(lib.resolve_string(&pin.name), pin.direction);
         }
         dir_map.insert(cell.name.as_str(), pins);
     }

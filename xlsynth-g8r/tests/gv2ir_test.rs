@@ -7,12 +7,14 @@ use xlsynth_g8r::netlist::gv2ir::{
 };
 
 const LIBERTY_TEXTPROTO: &str = r#"
+format_magic: 5496997758177923663
 cells: {
   name: "BUF"
-  pins: { name: "A" direction: INPUT }
-  pins: { name: "Y" direction: OUTPUT function: "A" }
+  pins: { name_string_id: 1 direction: INPUT }
+  pins: { name_string_id: 2 direction: OUTPUT function_string_id: 1 }
   area: 1.0
 }
+interned_strings: ["A", "Y"]
 "#;
 
 #[test]

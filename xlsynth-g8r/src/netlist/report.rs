@@ -2,8 +2,7 @@
 
 //! Area, timing, and level summaries for parsed gate-level netlists.
 
-use crate::liberty::LibraryWithTimingData;
-use crate::liberty_proto::Library;
+use crate::liberty_model::Library;
 pub use crate::netlist::io::{resolve_symbol, select_module};
 use crate::netlist::parse::{Net, NetlistModule, PortDirection};
 use crate::netlist::sta::{
@@ -166,7 +165,7 @@ pub fn build_sta_report(
     module: &NetlistModule,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
-    library: &LibraryWithTimingData,
+    library: &Library,
     options: StaOptions,
 ) -> Result<NetlistStaReport> {
     let module_name = resolve_symbol(interner, module.name, "module name")?;
@@ -249,11 +248,12 @@ pub fn build_netlist_report(
     module: &NetlistModule,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
-    library: &LibraryWithTimingData,
+    library: &Library,
     options: StaOptions,
 ) -> Result<NetlistReport> {
-    let area = build_area_report(module, interner, library.as_proto())?;
-    let stages = analyze_register_stages(module, nets, interner, library.as_proto())?;
+    let metadata = library;
+    let area = build_area_report(module, interner, metadata)?;
+    let stages = analyze_register_stages(module, nets, interner, metadata)?;
     if stages.register_indices.is_empty() {
         let sta = build_sta_report(module, nets, interner, library, options)?;
         return Ok(NetlistReport {
@@ -377,9 +377,9 @@ pub fn build_netlist_report(
 #[cfg(test)]
 mod tests {
     use super::{build_area_report, build_netlist_report, select_module};
-    use crate::liberty::LibraryWithTimingData;
-    use crate::liberty_proto::{
-        Cell, Library, Pin, PinDirection, Sequential, SequentialKind, TimingArc, TimingTable,
+    use crate::liberty_model::{
+        Cell, Library, LibraryBuilder, Pin, PinDirection, Sequential, SequentialKind, TimingArc,
+        TimingTable,
     };
     use crate::netlist::io::ParsedNetlist;
     use crate::netlist::parse::{Parser as NetlistParser, TokenScanner};
@@ -397,194 +397,215 @@ mod tests {
         }
     }
 
-    fn timing_arc(related_pin: &str, rise: f64, fall: f64) -> TimingArc {
-        TimingArc {
-            related_pin: related_pin.to_string(),
-            timing_sense: "positive_unate".to_string(),
-            timing_type: "combinational".to_string(),
-            tables: vec![
-                TimingTable {
-                    kind: "cell_rise".to_string(),
-                    values: vec![rise],
-                    ..Default::default()
-                },
-                TimingTable {
-                    kind: "cell_fall".to_string(),
-                    values: vec![fall],
-                    ..Default::default()
-                },
-                TimingTable {
-                    kind: "rise_transition".to_string(),
-                    values: vec![0.1],
-                    ..Default::default()
-                },
-                TimingTable {
-                    kind: "fall_transition".to_string(),
-                    values: vec![0.1],
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        }
+    fn scalar_table(
+        builder: &mut LibraryBuilder,
+        kind: crate::liberty_proto::TimingTableKind,
+        value: f64,
+    ) -> TimingTable {
+        builder
+            .add_timing_table_f64(kind, 0, vec![], vec![], vec![], vec![value], vec![], "")
+            .unwrap()
     }
 
-    fn clock_to_output_arc() -> TimingArc {
-        TimingArc {
-            related_pin: "CLK".to_string(),
-            timing_sense: "non_unate".to_string(),
-            timing_type: "rising_edge".to_string(),
-            tables: vec![
-                TimingTable {
-                    kind: "cell_rise".to_string(),
-                    values: vec![0.5],
-                    ..Default::default()
-                },
-                TimingTable {
-                    kind: "cell_fall".to_string(),
-                    values: vec![0.5],
-                    ..Default::default()
-                },
-                TimingTable {
-                    kind: "rise_transition".to_string(),
-                    values: vec![0.1],
-                    ..Default::default()
-                },
-                TimingTable {
-                    kind: "fall_transition".to_string(),
-                    values: vec![0.1],
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        }
+    fn timing_arc(
+        builder: &mut LibraryBuilder,
+        related_pin: &str,
+        rise: f64,
+        fall: f64,
+    ) -> TimingArc {
+        let tables = vec![
+            scalar_table(
+                builder,
+                crate::liberty_proto::TimingTableKind::CellRise,
+                rise,
+            ),
+            scalar_table(
+                builder,
+                crate::liberty_proto::TimingTableKind::CellFall,
+                fall,
+            ),
+            scalar_table(
+                builder,
+                crate::liberty_proto::TimingTableKind::RiseTransition,
+                0.1,
+            ),
+            scalar_table(
+                builder,
+                crate::liberty_proto::TimingTableKind::FallTransition,
+                0.1,
+            ),
+        ];
+        builder
+            .add_timing_arc(related_pin, "positive_unate", "combinational", "", tables)
+            .unwrap()
     }
 
-    fn setup_arc() -> TimingArc {
-        TimingArc {
-            related_pin: "CLK".to_string(),
-            timing_type: "setup_rising".to_string(),
-            tables: vec![
-                TimingTable {
-                    kind: "rise_constraint".to_string(),
-                    values: vec![0.25],
-                    ..Default::default()
-                },
-                TimingTable {
-                    kind: "fall_constraint".to_string(),
-                    values: vec![0.25],
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        }
+    fn clock_to_output_arc(builder: &mut LibraryBuilder) -> TimingArc {
+        let tables = vec![
+            scalar_table(
+                builder,
+                crate::liberty_proto::TimingTableKind::CellRise,
+                0.5,
+            ),
+            scalar_table(
+                builder,
+                crate::liberty_proto::TimingTableKind::CellFall,
+                0.5,
+            ),
+            scalar_table(
+                builder,
+                crate::liberty_proto::TimingTableKind::RiseTransition,
+                0.1,
+            ),
+            scalar_table(
+                builder,
+                crate::liberty_proto::TimingTableKind::FallTransition,
+                0.1,
+            ),
+        ];
+        builder
+            .add_timing_arc("CLK", "non_unate", "rising_edge", "", tables)
+            .unwrap()
+    }
+
+    fn setup_arc(builder: &mut LibraryBuilder) -> TimingArc {
+        let tables = vec![
+            scalar_table(
+                builder,
+                crate::liberty_proto::TimingTableKind::RiseConstraint,
+                0.25,
+            ),
+            scalar_table(
+                builder,
+                crate::liberty_proto::TimingTableKind::FallConstraint,
+                0.25,
+            ),
+        ];
+        builder
+            .add_timing_arc("CLK", "", "setup_rising", "", tables)
+            .unwrap()
     }
 
     fn inv_nand_library() -> Library {
-        Library {
-            cells: vec![
-                Cell {
-                    name: "INV".to_string(),
-                    pins: vec![
-                        Pin {
-                            name: "A".to_string(),
-                            direction: PinDirection::Input as i32,
-                            capacitance: Some(0.0),
-                            ..Default::default()
-                        },
-                        Pin {
-                            name: "Y".to_string(),
-                            direction: PinDirection::Output as i32,
-                            function: "!A".to_string(),
-                            timing_arcs: vec![timing_arc("A", 1.0, 1.0)],
-                            ..Default::default()
-                        },
-                    ],
-                    area: 1.0,
-                    ..Default::default()
-                },
-                Cell {
-                    name: "BUF".to_string(),
-                    pins: vec![
-                        Pin {
-                            name: "A".to_string(),
-                            direction: PinDirection::Input as i32,
-                            capacitance: Some(0.0),
-                            ..Default::default()
-                        },
-                        Pin {
-                            name: "Y".to_string(),
-                            direction: PinDirection::Output as i32,
-                            function: "A".to_string(),
-                            timing_arcs: vec![timing_arc("A", 1.0, 1.0)],
-                            ..Default::default()
-                        },
-                    ],
-                    area: 1.0,
-                    ..Default::default()
-                },
-                Cell {
-                    name: "NAND2".to_string(),
-                    pins: vec![
-                        Pin {
-                            name: "A".to_string(),
-                            direction: PinDirection::Input as i32,
-                            capacitance: Some(0.0),
-                            ..Default::default()
-                        },
-                        Pin {
-                            name: "B".to_string(),
-                            direction: PinDirection::Input as i32,
-                            capacitance: Some(0.0),
-                            ..Default::default()
-                        },
-                        Pin {
-                            name: "Y".to_string(),
-                            direction: PinDirection::Output as i32,
-                            function: "!(A*B)".to_string(),
-                            timing_arcs: vec![timing_arc("A", 2.0, 2.0), timing_arc("B", 2.0, 2.0)],
-                            ..Default::default()
-                        },
-                    ],
-                    area: 2.0,
-                    ..Default::default()
-                },
-                Cell {
-                    name: "DFF".to_string(),
-                    pins: vec![
-                        Pin {
-                            name: "D".to_string(),
-                            direction: PinDirection::Input as i32,
-                            capacitance: Some(0.0),
-                            timing_arcs: vec![setup_arc()],
-                            ..Default::default()
-                        },
-                        Pin {
-                            name: "CLK".to_string(),
-                            direction: PinDirection::Input as i32,
-                            is_clocking_pin: true,
-                            capacitance: Some(0.0),
-                            ..Default::default()
-                        },
-                        Pin {
-                            name: "Q".to_string(),
-                            direction: PinDirection::Output as i32,
-                            timing_arcs: vec![clock_to_output_arc()],
-                            ..Default::default()
-                        },
-                    ],
-                    area: 4.0,
-                    sequential: vec![Sequential {
-                        state_var: "IQ".to_string(),
-                        next_state: "D".to_string(),
-                        clock_expr: "CLK".to_string(),
-                        kind: SequentialKind::Ff as i32,
+        let mut builder = LibraryBuilder::new();
+        let a = builder.intern_string("A").unwrap();
+        let b = builder.intern_string("B").unwrap();
+        let d = builder.intern_string("D").unwrap();
+        let clk = builder.intern_string("CLK").unwrap();
+        let q = builder.intern_string("Q").unwrap();
+        let y = builder.intern_string("Y").unwrap();
+        let not_a = builder.intern_string("!A").unwrap();
+        let identity_a = builder.intern_string("A").unwrap();
+        let nand = builder.intern_string("!(A*B)").unwrap();
+        let inv_arc = timing_arc(&mut builder, "A", 1.0, 1.0);
+        let buf_arc = timing_arc(&mut builder, "A", 1.0, 1.0);
+        let nand_a_arc = timing_arc(&mut builder, "A", 2.0, 2.0);
+        let nand_b_arc = timing_arc(&mut builder, "B", 2.0, 2.0);
+        let setup = setup_arc(&mut builder);
+        let clock_to_output = clock_to_output_arc(&mut builder);
+        builder.cells = vec![
+            Cell {
+                name: "INV".to_string().into(),
+                pins: vec![
+                    Pin {
+                        name: a,
+                        direction: PinDirection::Input as i32,
+                        capacitance: Some(0.0),
                         ..Default::default()
-                    }],
+                    },
+                    Pin {
+                        name: y,
+                        direction: PinDirection::Output as i32,
+                        function: not_a,
+                        timing_arcs: vec![inv_arc],
+                        ..Default::default()
+                    },
+                ],
+                area: 1.0,
+                ..Default::default()
+            },
+            Cell {
+                name: "BUF".to_string().into(),
+                pins: vec![
+                    Pin {
+                        name: a,
+                        direction: PinDirection::Input as i32,
+                        capacitance: Some(0.0),
+                        ..Default::default()
+                    },
+                    Pin {
+                        name: y,
+                        direction: PinDirection::Output as i32,
+                        function: identity_a,
+                        timing_arcs: vec![buf_arc],
+                        ..Default::default()
+                    },
+                ],
+                area: 1.0,
+                ..Default::default()
+            },
+            Cell {
+                name: "NAND2".to_string().into(),
+                pins: vec![
+                    Pin {
+                        name: a,
+                        direction: PinDirection::Input as i32,
+                        capacitance: Some(0.0),
+                        ..Default::default()
+                    },
+                    Pin {
+                        name: b,
+                        direction: PinDirection::Input as i32,
+                        capacitance: Some(0.0),
+                        ..Default::default()
+                    },
+                    Pin {
+                        name: y,
+                        direction: PinDirection::Output as i32,
+                        function: nand,
+                        timing_arcs: vec![nand_a_arc, nand_b_arc],
+                        ..Default::default()
+                    },
+                ],
+                area: 2.0,
+                ..Default::default()
+            },
+            Cell {
+                name: "DFF".to_string().into(),
+                pins: vec![
+                    Pin {
+                        name: d,
+                        direction: PinDirection::Input as i32,
+                        capacitance: Some(0.0),
+                        timing_arcs: vec![setup],
+                        ..Default::default()
+                    },
+                    Pin {
+                        name: clk,
+                        direction: PinDirection::Input as i32,
+                        is_clocking_pin: true,
+                        capacitance: Some(0.0),
+                        ..Default::default()
+                    },
+                    Pin {
+                        name: q,
+                        direction: PinDirection::Output as i32,
+                        timing_arcs: vec![clock_to_output],
+                        ..Default::default()
+                    },
+                ],
+                area: 4.0,
+                sequential: vec![Sequential {
+                    state_var: "IQ".to_string().into(),
+                    next_state: "D".to_string().into(),
+                    clock_expr: "CLK".to_string().into(),
+                    kind: SequentialKind::Ff as i32,
                     ..Default::default()
-                },
-            ],
-            ..Default::default()
-        }
+                }],
+                ..Default::default()
+            },
+        ];
+        builder.finish()
     }
 
     #[test]
@@ -640,7 +661,7 @@ endmodule
 "#,
         );
         let module = select_module(&parsed, None).expect("select only module");
-        let library = LibraryWithTimingData::from_proto(inv_nand_library());
+        let library = inv_nand_library();
         let report = build_netlist_report(
             module,
             &parsed.nets,
@@ -672,7 +693,7 @@ endmodule
 "#,
         );
         let module = select_module(&parsed, None).expect("select only module");
-        let library = LibraryWithTimingData::from_proto(inv_nand_library());
+        let library = inv_nand_library();
         let report = build_netlist_report(
             module,
             &parsed.nets,
@@ -703,7 +724,7 @@ endmodule
 "#,
         );
         let module = select_module(&parsed, None).expect("select only module");
-        let library = LibraryWithTimingData::from_proto(inv_nand_library());
+        let library = inv_nand_library();
         let report = build_netlist_report(
             module,
             &parsed.nets,
@@ -742,7 +763,7 @@ endmodule
 "#,
         );
         let module = select_module(&parsed, None).expect("select only module");
-        let library = LibraryWithTimingData::from_proto(inv_nand_library());
+        let library = inv_nand_library();
         let report = build_netlist_report(
             module,
             &parsed.nets,
@@ -823,7 +844,7 @@ endmodule
 "#,
         );
         let module = select_module(&parsed, None).expect("select only module");
-        let library = LibraryWithTimingData::from_proto(inv_nand_library());
+        let library = inv_nand_library();
         let report = build_netlist_report(
             module,
             &parsed.nets,
@@ -863,7 +884,7 @@ endmodule
 "#,
         );
         let module = select_module(&parsed, None).expect("select only module");
-        let library = LibraryWithTimingData::from_proto(inv_nand_library());
+        let library = inv_nand_library();
         let report = build_netlist_report(
             module,
             &parsed.nets,
@@ -909,7 +930,7 @@ endmodule
 "#,
         );
         let module = select_module(&parsed, None).expect("select only module");
-        let library = LibraryWithTimingData::from_proto(inv_nand_library());
+        let library = inv_nand_library();
         let report = build_netlist_report(
             module,
             &parsed.nets,
@@ -951,7 +972,7 @@ endmodule
 "#,
         );
         let module = select_module(&parsed, None).expect("select only module");
-        let library = LibraryWithTimingData::from_proto(inv_nand_library());
+        let library = inv_nand_library();
         let report = build_netlist_report(
             module,
             &parsed.nets,

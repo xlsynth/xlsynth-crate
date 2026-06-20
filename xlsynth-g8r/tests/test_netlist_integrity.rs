@@ -1,36 +1,38 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use xlsynth_g8r::liberty_proto::{Cell, Library, Pin, PinDirection};
+use xlsynth_g8r::liberty_model::{Cell, Library, LibraryBuilder, Pin, PinDirection};
 use xlsynth_g8r::netlist::integrity::{IntegrityFinding, IntegritySummary, check_module};
 use xlsynth_g8r::netlist::parse::{Parser as NetlistParser, TokenScanner};
 
 fn build_simple_lib() -> Library {
-    Library {
-        cells: vec![Cell {
-            name: "INV".to_string(),
-            area: 1.0,
-            pins: vec![
-                Pin {
-                    name: "A".to_string(),
-                    direction: PinDirection::Input as i32,
-                    function: String::new(),
-                    is_clocking_pin: false,
-                    ..Default::default()
-                },
-                Pin {
-                    name: "Y".to_string(),
-                    direction: PinDirection::Output as i32,
-                    function: String::new(),
-                    is_clocking_pin: false,
-                    ..Default::default()
-                },
-            ],
-            sequential: vec![],
-            clock_gate: None,
-            ..Default::default()
-        }],
+    let mut builder = LibraryBuilder::new();
+    let a = builder.intern_string("A").unwrap();
+    let y = builder.intern_string("Y").unwrap();
+    let empty = builder.intern_string("").unwrap();
+    builder.cells = vec![Cell {
+        name: "INV".to_string(),
+        area: 1.0,
+        pins: vec![
+            Pin {
+                name: a,
+                direction: PinDirection::Input as i32,
+                function: empty,
+                is_clocking_pin: false,
+                ..Default::default()
+            },
+            Pin {
+                name: y,
+                direction: PinDirection::Output as i32,
+                function: empty,
+                is_clocking_pin: false,
+                ..Default::default()
+            },
+        ],
+        sequential: vec![],
+        clock_gate: None,
         ..Default::default()
-    }
+    }];
+    builder.finish()
 }
 
 #[test]

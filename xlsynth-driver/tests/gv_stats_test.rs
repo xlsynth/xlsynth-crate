@@ -6,50 +6,51 @@ use xlsynth_test_helpers::compare_golden_text;
 
 fn make_timing_enabled_inv_nand2_liberty_textproto() -> &'static str {
     r#"
+format_magic: 5496997758177923663
 cells: {
   name: "INV"
-  pins: { name: "A" direction: INPUT capacitance: 0.0 }
+  pins: { name_string_id: 1 direction: INPUT capacitance: 0.0 }
   pins: {
-    name: "Y"
+    name_string_id: 2
     direction: OUTPUT
-    function: "!A"
+    function_string_id: 3
     timing_arcs: {
-      related_pin: "A"
-      timing_sense: "negative_unate"
-      timing_type: "combinational"
-      tables: { kind: "cell_rise" values: 1.0 }
-      tables: { kind: "cell_fall" values: 1.0 }
-      tables: { kind: "rise_transition" values: 0.1 }
-      tables: { kind: "fall_transition" values: 0.1 }
+      related_pin_string_id: 1
+      timing_sense: TIMING_SENSE_NEGATIVE_UNATE
+      timing_type: TIMING_TYPE_COMBINATIONAL
+      tables: { kind: TIMING_TABLE_KIND_CELL_RISE shape_id: 1 values: 1.0 }
+      tables: { kind: TIMING_TABLE_KIND_CELL_FALL shape_id: 1 values: 1.0 }
+      tables: { kind: TIMING_TABLE_KIND_RISE_TRANSITION shape_id: 1 values: 0.1 }
+      tables: { kind: TIMING_TABLE_KIND_FALL_TRANSITION shape_id: 1 values: 0.1 }
     }
   }
   area: 1.0
 }
 cells: {
   name: "NAND2"
-  pins: { name: "A" direction: INPUT capacitance: 0.0 }
-  pins: { name: "B" direction: INPUT capacitance: 0.0 }
+  pins: { name_string_id: 1 direction: INPUT capacitance: 0.0 }
+  pins: { name_string_id: 4 direction: INPUT capacitance: 0.0 }
   pins: {
-    name: "Y"
+    name_string_id: 2
     direction: OUTPUT
-    function: "!(A*B)"
+    function_string_id: 8
     timing_arcs: {
-      related_pin: "A"
-      timing_sense: "negative_unate"
-      timing_type: "combinational"
-      tables: { kind: "cell_rise" values: 2.0 }
-      tables: { kind: "cell_fall" values: 2.0 }
-      tables: { kind: "rise_transition" values: 0.1 }
-      tables: { kind: "fall_transition" values: 0.1 }
+      related_pin_string_id: 1
+      timing_sense: TIMING_SENSE_NEGATIVE_UNATE
+      timing_type: TIMING_TYPE_COMBINATIONAL
+      tables: { kind: TIMING_TABLE_KIND_CELL_RISE shape_id: 1 values: 2.0 }
+      tables: { kind: TIMING_TABLE_KIND_CELL_FALL shape_id: 1 values: 2.0 }
+      tables: { kind: TIMING_TABLE_KIND_RISE_TRANSITION shape_id: 1 values: 0.1 }
+      tables: { kind: TIMING_TABLE_KIND_FALL_TRANSITION shape_id: 1 values: 0.1 }
     }
     timing_arcs: {
-      related_pin: "B"
-      timing_sense: "negative_unate"
-      timing_type: "combinational"
-      tables: { kind: "cell_rise" values: 2.0 }
-      tables: { kind: "cell_fall" values: 2.0 }
-      tables: { kind: "rise_transition" values: 0.1 }
-      tables: { kind: "fall_transition" values: 0.1 }
+      related_pin_string_id: 4
+      timing_sense: TIMING_SENSE_NEGATIVE_UNATE
+      timing_type: TIMING_TYPE_COMBINATIONAL
+      tables: { kind: TIMING_TABLE_KIND_CELL_RISE shape_id: 1 values: 2.0 }
+      tables: { kind: TIMING_TABLE_KIND_CELL_FALL shape_id: 1 values: 2.0 }
+      tables: { kind: TIMING_TABLE_KIND_RISE_TRANSITION shape_id: 1 values: 0.1 }
+      tables: { kind: TIMING_TABLE_KIND_FALL_TRANSITION shape_id: 1 values: 0.1 }
     }
   }
   area: 2.0
@@ -57,29 +58,29 @@ cells: {
 cells: {
   name: "DFF"
   pins: {
-    name: "D"
+    name_string_id: 6
     direction: INPUT
     capacitance: 0.0
     timing_arcs: {
-      related_pin: "CLK"
-      timing_type: "setup_rising"
-      tables: { kind: "rise_constraint" values: 0.25 }
-      tables: { kind: "fall_constraint" values: 0.25 }
+      related_pin_string_id: 5
+      timing_type: TIMING_TYPE_SETUP_RISING
+      tables: { kind: TIMING_TABLE_KIND_RISE_CONSTRAINT shape_id: 1 values: 0.25 }
+      tables: { kind: TIMING_TABLE_KIND_FALL_CONSTRAINT shape_id: 1 values: 0.25 }
     }
   }
-  pins: { name: "CLK" direction: INPUT is_clocking_pin: true capacitance: 0.0 }
+  pins: { name_string_id: 5 direction: INPUT is_clocking_pin: true capacitance: 0.0 }
   pins: {
-    name: "Q"
+    name_string_id: 7
     direction: OUTPUT
-    function: "Q"
+    function_string_id: 7
     timing_arcs: {
-      related_pin: "CLK"
-      timing_sense: "non_unate"
-      timing_type: "rising_edge"
-      tables: { kind: "cell_rise" values: 0.5 }
-      tables: { kind: "cell_fall" values: 0.5 }
-      tables: { kind: "rise_transition" values: 0.1 }
-      tables: { kind: "fall_transition" values: 0.1 }
+      related_pin_string_id: 5
+      timing_sense: TIMING_SENSE_NON_UNATE
+      timing_type: TIMING_TYPE_RISING_EDGE
+      tables: { kind: TIMING_TABLE_KIND_CELL_RISE shape_id: 1 values: 0.5 }
+      tables: { kind: TIMING_TABLE_KIND_CELL_FALL shape_id: 1 values: 0.5 }
+      tables: { kind: TIMING_TABLE_KIND_RISE_TRANSITION shape_id: 1 values: 0.1 }
+      tables: { kind: TIMING_TABLE_KIND_FALL_TRANSITION shape_id: 1 values: 0.1 }
     }
   }
   area: 4.0
@@ -91,6 +92,8 @@ cells: {
   }
 }
 units: { time_unit: "1ps" capacitance_unit: "1pf" }
+interned_strings: ["A", "Y", "!A", "B", "CLK", "D", "Q", "!(A*B)"]
+lut_shapes: {}
 "#
 }
 

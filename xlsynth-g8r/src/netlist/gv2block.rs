@@ -4,7 +4,7 @@
 
 use crate::liberty::cell_formula::{EmitContext as FormulaEmitContext, Term, parse_formula};
 use crate::liberty::indexed::IndexedLibrary;
-use crate::liberty_proto::{Cell, PinDirection, SequentialKind};
+use crate::liberty_model::{Cell, Library, PinDirection, SequentialKind};
 use crate::netlist::io::{ParsedNetlist, load_liberty_from_path, parse_netlist_from_path};
 use crate::netlist::normalized::{
     BitExpr, BitIndex, BitSource, NormalizedInstance, NormalizedNetlistModule,
@@ -303,7 +303,10 @@ impl BitDrivers {
     }
 }
 
-fn get_clock_gate_passthrough_spec(cell: &Cell) -> Result<Option<ClockGatePassthroughSpec>> {
+fn get_clock_gate_passthrough_spec(
+    cell: &Cell,
+    library: &Library,
+) -> Result<Option<ClockGatePassthroughSpec>> {
     let Some(clock_gate) = cell.clock_gate.as_ref() else {
         return Ok(None);
     };
@@ -315,7 +318,7 @@ fn get_clock_gate_passthrough_spec(cell: &Cell) -> Result<Option<ClockGatePassth
             .pins
             .iter()
             .filter(|p| p.is_clocking_pin)
-            .map(|p| p.name.clone())
+            .map(|p| library.resolve_string(&p.name).to_string())
             .collect();
         match candidates.as_slice() {
             [pin] => pin.clone(),
@@ -341,7 +344,7 @@ fn get_clock_gate_passthrough_spec(cell: &Cell) -> Result<Option<ClockGatePassth
             .pins
             .iter()
             .filter(|p| p.direction == PinDirection::Output as i32)
-            .map(|p| p.name.clone())
+            .map(|p| library.resolve_string(&p.name).to_string())
             .collect();
         match candidates.as_slice() {
             [pin] => pin.clone(),
@@ -360,10 +363,9 @@ fn get_clock_gate_passthrough_spec(cell: &Cell) -> Result<Option<ClockGatePassth
         }
     };
 
-    let clock_pin_ok = cell
-        .pins
-        .iter()
-        .any(|p| p.name == clock_pin && p.direction == PinDirection::Input as i32);
+    let clock_pin_ok = cell.pins.iter().any(|p| {
+        library.resolve_string(&p.name) == clock_pin && p.direction == PinDirection::Input as i32
+    });
     if !clock_pin_ok {
         return Err(anyhow!(format!(
             "cell '{}' clock_gate clock pin '{}' is missing or not INPUT",
@@ -371,10 +373,9 @@ fn get_clock_gate_passthrough_spec(cell: &Cell) -> Result<Option<ClockGatePassth
         )));
     }
 
-    let output_pin_ok = cell
-        .pins
-        .iter()
-        .any(|p| p.name == output_pin && p.direction == PinDirection::Output as i32);
+    let output_pin_ok = cell.pins.iter().any(|p| {
+        library.resolve_string(&p.name) == output_pin && p.direction == PinDirection::Output as i32
+    });
     if !output_pin_ok {
         return Err(anyhow!(format!(
             "cell '{}' clock_gate output pin '{}' is missing or not OUTPUT",
@@ -500,7 +501,7 @@ fn collect_clock_gate_passthroughs(
         let cell = lib_indexed
             .get_cell(cell_name)
             .ok_or_else(|| anyhow!(format!("cell '{}' not found in Liberty", cell_name)))?;
-        let Some(spec) = get_clock_gate_passthrough_spec(cell)? else {
+        let Some(spec) = get_clock_gate_passthrough_spec(cell, lib_indexed.library())? else {
             continue;
         };
 
@@ -646,7 +647,7 @@ fn build_package_from_normalized_netlist(
         let cell = lib_indexed
             .get_cell(cell_name)
             .ok_or_else(|| anyhow!(format!("cell '{}' not found in Liberty proto", cell_name)))?;
-        if get_clock_gate_passthrough_spec(cell)?.is_some() {
+        if get_clock_gate_passthrough_spec(cell, lib_indexed.library())?.is_some() {
             continue;
         }
         let (f, meta) = build_cell_block(cell, lib_indexed)?;
@@ -751,6 +752,7 @@ impl PirFnBuilder {
 }
 
 fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<(PirFn, BlockMetadata)> {
+    let library = lib_indexed.library();
     let mut b = PirFnBuilder::new(&cell.name);
     let mut input_map: HashMap<String, NodeRef> = HashMap::new();
     let mut output_names: Vec<String> = Vec::new();
@@ -778,9 +780,9 @@ fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<(PirFn,
     let clock_pin_from_pin = inputs
         .iter()
         .find(|p| p.is_clocking_pin)
-        .map(|p| p.name.clone());
+        .map(|p| library.resolve_string(&p.name).to_string());
     if let (Some(a), Some(b)) = (&clock_pin_from_seq, &clock_pin_from_pin) {
-        if a != b {
+        if a.as_str() != b.as_str() {
             return Err(anyhow!(format!(
                 "cell '{}' clock pin mismatch: seq '{}' vs pin '{}'",
                 cell.name, a, b
@@ -790,17 +792,20 @@ fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<(PirFn,
     let clock_pin = clock_pin_from_seq.or(clock_pin_from_pin);
 
     for pin in inputs.iter() {
-        if clock_pin.as_ref().is_some_and(|c| c == &pin.name) {
+        let pin_name = library.resolve_string(&pin.name);
+        if clock_pin.as_ref().is_some_and(|clock| clock == pin_name) {
             continue;
         }
-        let nr = b.add_param(&pin.name, Type::Bits(1));
-        input_map.insert(pin.name.clone(), nr);
+        let nr = b.add_param(pin_name, Type::Bits(1));
+        input_map.insert(pin_name.to_string(), nr);
     }
 
     let mut registers: Vec<Register> = Vec::new();
     let mut reset_meta: Option<BlockResetMetadata> = None;
     let mut state_var_name: Option<String> = None;
+    let mut complementary_state_var_name: Option<String> = None;
     let mut state_ref: Option<NodeRef> = None;
+    let mut complementary_state_ref: Option<NodeRef> = None;
     let mut reset_node_ref: Option<NodeRef> = None;
 
     if let Some(seq) = cell.sequential.first() {
@@ -827,6 +832,20 @@ fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<(PirFn,
         );
         state_ref = Some(reg_read);
         input_map.insert(state_var.clone(), reg_read);
+        if let Some(complementary_state_var) = seq
+            .complementary_state_var
+            .as_ref()
+            .filter(|name| !name.is_empty())
+        {
+            let inverted_reg_read = b.add_node(
+                NodePayload::Unop(Unop::Not, reg_read),
+                Type::Bits(1),
+                Some(&format!("{}_q", complementary_state_var)),
+            );
+            complementary_state_var_name = Some(complementary_state_var.clone());
+            complementary_state_ref = Some(inverted_reg_read);
+            input_map.insert(complementary_state_var.clone(), inverted_reg_read);
+        }
 
         if !seq.clear_expr.is_empty() || !seq.preset_expr.is_empty() {
             let (expr, reset_value) = if !seq.clear_expr.is_empty() {
@@ -893,11 +912,13 @@ fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<(PirFn,
 
     let mut output_nodes: Vec<NodeRef> = Vec::new();
     for pin in outputs.iter() {
-        output_names.push(pin.name.clone());
-        let term = if pin.function.is_empty() {
+        let pin_name = library.resolve_string(&pin.name);
+        let function = library.resolve_string(&pin.function);
+        output_names.push(pin_name.to_string());
+        let term = if function.is_empty() {
             None
         } else {
-            Some(parse_formula(&pin.function).map_err(|e| anyhow!(e))?)
+            Some(parse_formula(function).map_err(|e| anyhow!(e))?)
         };
         let node = if let Some(t) = term {
             emit_term_as_pir(
@@ -906,24 +927,29 @@ fn build_cell_block(cell: &Cell, lib_indexed: &IndexedLibrary) -> Result<(PirFn,
                 &input_map,
                 &FormulaEmitContext {
                     cell_name: &cell.name,
-                    original_formula: &pin.function,
+                    original_formula: function,
                     instance_name: None,
                     port_map: None,
                 },
             )?
         } else if let (Some(state_var), Some(state_ref)) = (&state_var_name, state_ref) {
-            if pin.name == *state_var {
+            if pin_name == state_var {
                 state_ref
+            } else if complementary_state_var_name
+                .as_ref()
+                .is_some_and(|name| pin_name == name)
+            {
+                complementary_state_ref.expect("complementary state name has a node")
             } else {
                 return Err(anyhow!(format!(
                     "cell '{}' output pin '{}' missing function",
-                    cell.name, pin.name
+                    cell.name, pin_name
                 )));
             }
         } else {
             return Err(anyhow!(format!(
                 "cell '{}' output pin '{}' missing function",
-                cell.name, pin.name
+                cell.name, pin_name
             )));
         };
         output_nodes.push(node);
@@ -1138,7 +1164,8 @@ fn build_top_block(
             if seq.kind == SequentialKind::Ff as i32 {
                 for pin in &cell.pins {
                     if pin.is_clocking_pin {
-                        dff_clock_pins.push(pin.name.clone());
+                        dff_clock_pins
+                            .push(lib_indexed.library().resolve_string(&pin.name).to_string());
                     }
                 }
                 if !seq.clock_expr.is_empty() {
@@ -1266,16 +1293,17 @@ fn build_top_block(
             .unwrap_or_default();
         let mut output_refs = Vec::new();
         for pin in outputs {
-            let output_node_name = format!("{}_{}", inst_name, pin.name);
+            let pin_name = lib_indexed.library().resolve_string(&pin.name);
+            let output_node_name = format!("{}_{}", inst_name, pin_name);
             let nr = b.add_node(
                 NodePayload::InstantiationOutput {
                     instantiation: inst_name.clone(),
-                    port_name: pin.name.clone(),
+                    port_name: pin_name.to_string(),
                 },
                 Type::Bits(1),
                 Some(&output_node_name),
             );
-            output_refs.push((pin.name.clone(), nr));
+            output_refs.push((pin_name.to_string(), nr));
         }
         instance_outputs.push((inst_name_raw, inst_name, output_refs));
     }
@@ -1342,12 +1370,15 @@ fn build_top_block(
         let inputs = lib_indexed
             .pins_for_dir(&cell_name, PinDirection::Input)
             .unwrap_or_default();
-        let input_pin_names: HashSet<String> = inputs.iter().map(|pin| pin.name.clone()).collect();
+        let input_pin_names: HashSet<String> = inputs
+            .iter()
+            .map(|pin| lib_indexed.library().resolve_string(&pin.name).to_string())
+            .collect();
 
         let mut clock_pin_names: HashSet<String> = inputs
             .iter()
             .filter(|pin| pin.is_clocking_pin)
-            .map(|pin| pin.name.clone())
+            .map(|pin| lib_indexed.library().resolve_string(&pin.name).to_string())
             .collect();
         if let Some(seq) = cell.sequential.first() {
             if !seq.clock_expr.is_empty() {

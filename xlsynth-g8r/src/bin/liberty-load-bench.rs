@@ -11,7 +11,8 @@ use xlsynth_g8r::liberty::load::{
     TimingTableSummary, count_timing_tables, count_timing_values,
     decode_timing_table_summary_skip_values_from_bytes,
 };
-use xlsynth_g8r::liberty_proto::Library;
+use xlsynth_g8r::liberty_model::Library;
+use xlsynth_g8r::liberty_proto::Library as WireLibrary;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -31,8 +32,8 @@ struct Args {
     #[arg(long, default_value_t = 20)]
     iters: usize,
 
-    /// Controls whether timing table payloads are skipped, decoded, or fully
-    /// materialized.
+    /// Controls whether timing table payloads are skipped or decoded into the
+    /// fully populated runtime model.
     #[arg(long, value_enum, default_value_t = TimingTableLoading::Decode)]
     timing_table_loading: TimingTableLoading,
 }
@@ -43,8 +44,6 @@ enum TimingTableLoading {
     Skip,
     /// Decode timing table fields as stored in the protobuf.
     Decode,
-    /// Decode and materialize timing table values for all tables.
-    Materialize,
 }
 
 fn read_library_binary(path: &Path) -> Result<Vec<u8>, String> {
@@ -63,9 +62,12 @@ fn read_library_binary(path: &Path) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
-fn decode_full_library(path: &Path) -> Result<Library, String> {
+fn decode_runtime_library(path: &Path) -> Result<Library, String> {
     let buf = read_library_binary(path)?;
-    Library::decode(&buf[..]).map_err(|e| format!("decoding '{}': {e}", path.display()))
+    let wire =
+        WireLibrary::decode(&buf[..]).map_err(|e| format!("decoding '{}': {e}", path.display()))?;
+    xlsynth_g8r::liberty::library_from_proto(wire)
+        .map_err(|e| format!("building runtime model '{}': {e:#}", path.display()))
 }
 
 fn decode_library_skip_timing_payload(path: &Path) -> Result<TimingTableSummary, String> {
@@ -105,11 +107,7 @@ fn run_one(
                 let _ = decode_library_skip_timing_payload(path)?;
             }
             TimingTableLoading::Decode => {
-                let _ = decode_full_library(path)?;
-            }
-            TimingTableLoading::Materialize => {
-                let lib = decode_full_library(path)?;
-                let _ = count_timing_values(&lib);
+                let _ = decode_runtime_library(path)?;
             }
         }
     }
@@ -122,11 +120,7 @@ fn run_one(
                 let _ = decode_library_skip_timing_payload(path)?;
             }
             TimingTableLoading::Decode => {
-                let _ = decode_full_library(path)?;
-            }
-            TimingTableLoading::Materialize => {
-                let lib = decode_full_library(path)?;
-                let _ = count_timing_values(&lib);
+                let _ = decode_runtime_library(path)?;
             }
         }
         samples.push(start.elapsed());
@@ -143,15 +137,7 @@ fn run_one(
             }
         }
         TimingTableLoading::Decode => {
-            let lib = decode_full_library(path)?;
-            BenchSummary {
-                cells: lib.cells.len(),
-                timing_tables: count_timing_tables(&lib),
-                timing_values: 0,
-            }
-        }
-        TimingTableLoading::Materialize => {
-            let lib = decode_full_library(path)?;
+            let lib = decode_runtime_library(path)?;
             BenchSummary {
                 cells: lib.cells.len(),
                 timing_tables: count_timing_tables(&lib),
@@ -188,7 +174,6 @@ fn run_one(
         match timing_table_loading {
             TimingTableLoading::Skip => "skip",
             TimingTableLoading::Decode => "decode",
-            TimingTableLoading::Materialize => "materialize",
         }
     );
     println!(

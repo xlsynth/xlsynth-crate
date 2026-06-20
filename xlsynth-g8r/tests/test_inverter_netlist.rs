@@ -6,34 +6,39 @@ use prost::Message;
 use std::fs::File;
 use std::io::Write;
 use tempfile::NamedTempFile;
-use xlsynth_g8r::liberty_proto::Library;
+use xlsynth_g8r::liberty::model::library_from_proto;
+use xlsynth_g8r::liberty_proto::Library as WireLibrary;
 use xlsynth_g8r::netlist::gatefn_from_netlist::project_gatefn_from_netlist_and_liberty;
 use xlsynth_g8r::netlist::parse::{Parser as NetlistParser, TokenScanner};
 
 const LIBERTY_INVERTER_AND_BUF_TEXTPROTO: &str = r#"
+format_magic: 5496997758177923663
+interned_strings: "A"
+interned_strings: "Y"
+interned_strings: "(!A)"
 cells: {
   name: "INV"
   pins: {
-    name: "A"
+    name_string_id: 1
     direction: INPUT
   }
   pins: {
-    name: "Y"
+    name_string_id: 2
     direction: OUTPUT
-    function: "(!A)"
+    function_string_id: 3
   }
   area: 1.0
 }
 cells: {
   name: "BUF"
   pins: {
-    name: "A"
+    name_string_id: 1
     direction: INPUT
   }
   pins: {
-    name: "Y"
+    name_string_id: 2
     direction: OUTPUT
-    function: "A"
+    function_string_id: 1
   }
   area: 1.0
 }
@@ -93,7 +98,7 @@ endmodule
     let module = &modules[0];
 
     // Parse Liberty proto
-    let liberty_lib = Library::decode(&*liberty_bin).unwrap();
+    let liberty_lib = library_from_proto(WireLibrary::decode(&*liberty_bin).unwrap()).unwrap();
 
     // Use the helper to build the GateFn
     let gate_fn = project_gatefn_from_netlist_and_liberty(
@@ -167,7 +172,7 @@ endmodule
     let module = &modules[0];
 
     // Parse Liberty proto
-    let liberty_lib = xlsynth_g8r::liberty_proto::Library::decode(&*liberty_bin).unwrap();
+    let liberty_lib = library_from_proto(WireLibrary::decode(&*liberty_bin).unwrap()).unwrap();
 
     // Use the helper to build the GateFn
     let gate_fn =

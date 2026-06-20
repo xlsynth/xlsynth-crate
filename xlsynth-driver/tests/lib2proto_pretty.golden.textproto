@@ -1,0 +1,70 @@
+# SPDX-License-Identifier: Apache-2.0
+# proto-file: xlsynth-g8r/proto/liberty.proto
+# proto-message: liberty.Library
+
+format_magic: 5496997758177923663
+cells: [{
+  name: "INV"
+  pins: [{
+    direction: INPUT
+    name_string_id: 1
+    capacitance: 0.1
+    internal_power: [{
+      related_pg_pin_string_id: 3
+      tables: [{
+        transition: POWER_TRANSITION_RISE
+        shape_id: 1
+        values: [0.2]
+      }, {
+        transition: POWER_TRANSITION_FALL
+        shape_id: 1
+        values: [0.3]
+      }]
+    }]
+  }, {
+    direction: OUTPUT
+    function_string_id: 2
+    name_string_id: 4
+    timing_arcs: [{
+      related_pin_string_id: 1
+      timing_sense: TIMING_SENSE_NEGATIVE_UNATE
+      timing_type: TIMING_TYPE_COMBINATIONAL
+      tables: [{
+        kind: TIMING_TABLE_KIND_CELL_RISE
+        shape_id: 2
+        values: [0.4]
+      }]
+    }]
+  }]
+  area: 1.0
+}]
+units {
+  time_unit: "1ns"
+  capacitance_unit: "1pf"
+  voltage_unit: "1V"
+}
+lu_table_templates: [{
+  kind: LUT_TEMPLATE_KIND_TIMING
+  name: "timing_tmpl"
+  variable_1: LUT_VARIABLE_INPUT_NET_TRANSITION
+  index_1_id: 1
+}, {
+  kind: LUT_TEMPLATE_KIND_POWER
+  name: "power_tmpl"
+  variable_1: LUT_VARIABLE_INPUT_TRANSITION_TIME
+  index_1_id: 1
+}]
+nominal_voltage: 0.7
+provenance: "asap7 commit abcde1234, generated locally"
+source_files: ["test.lib"]
+lut_axes: [{
+  values: [0.1]
+}]
+interned_strings: ["A", "!A", "VDD", "Y"]
+lut_shapes: [{
+  template_id: 2
+  dimensions: [1]
+}, {
+  template_id: 1
+  dimensions: [1]
+}]

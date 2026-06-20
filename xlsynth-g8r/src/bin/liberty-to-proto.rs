@@ -4,7 +4,6 @@
 
 use clap::Parser;
 use prost::Message;
-use prost_reflect::DescriptorPool;
 use std::{fs::File, path::PathBuf};
 
 // Import the generated proto code.
@@ -12,10 +11,11 @@ pub mod liberty_proto {
     include!(concat!(env!("OUT_DIR"), "/liberty.rs"));
 }
 
-use xlsynth_g8r::liberty::liberty_to_proto::{
-    parse_liberty_files_to_proto, parse_liberty_files_to_proto_without_timing_validation,
+use xlsynth_g8r::liberty::descriptor::liberty_proto_bytes_to_pretty_textproto;
+use xlsynth_g8r::liberty::model::library_to_proto;
+use xlsynth_g8r::liberty::parser::{
+    LibertyPayloadOptions, parse_liberty_files_with_payload_options,
 };
-use xlsynth_g8r::liberty::load::strip_timing_data;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -35,31 +35,21 @@ fn main() {
     let _ = env_logger::builder().try_init();
     let args = Args::parse();
     println!("Parsing and consolidating cells from all libraries...");
-    let mut proto_lib = if args.no_timing_data {
-        parse_liberty_files_to_proto_without_timing_validation(&args.inputs).unwrap()
-    } else {
-        parse_liberty_files_to_proto(&args.inputs).unwrap()
-    };
-    if args.no_timing_data {
-        strip_timing_data(&mut proto_lib);
-    }
+    let proto_lib = parse_liberty_files_with_payload_options(
+        &args.inputs,
+        LibertyPayloadOptions {
+            include_timing: !args.no_timing_data,
+            include_power: true,
+        },
+    )
+    .unwrap();
+    let proto_lib = library_to_proto(proto_lib).expect("encode Liberty LUT data");
     println!("Writing output to {}...", args.output.display());
     let output_path = args.output.display().to_string();
     if output_path.ends_with(".textproto") {
         println!("Writing as textproto...");
-        // Use prost-reflect to get a dynamic message and text format
-        let descriptor_pool = DescriptorPool::decode(include_bytes!(concat!(
-            env!("OUT_DIR"),
-            "/liberty.bin"
-        )) as &[u8])
-        .unwrap();
-        let msg_desc = descriptor_pool
-            .get_message_by_name("liberty.Library")
-            .unwrap();
-        let mut buf = Vec::new();
-        proto_lib.encode(&mut buf).unwrap();
-        let dyn_msg = prost_reflect::DynamicMessage::decode(msg_desc, &*buf).unwrap();
-        let textproto = dyn_msg.to_text_format();
+        let textproto = liberty_proto_bytes_to_pretty_textproto(&proto_lib.encode_to_vec())
+            .expect("format Liberty textproto");
         std::fs::write(&args.output, textproto).unwrap();
     } else {
         println!("Writing as binary proto...");
@@ -79,14 +69,15 @@ mod tests {
     fn test_proto_structure() {
         let mut lib = Library {
             cells: vec![],
+            interned_strings: vec!["A".to_string()],
             ..Default::default()
         };
         lib.cells.push(Cell {
             area: 1.0,
             pins: vec![Pin {
-                name: "A".to_string(),
+                name_string_id: 1,
                 direction: PinDirection::Input as i32,
-                function: "A".to_string(),
+                function_string_id: 1,
                 is_clocking_pin: false,
                 ..Default::default()
             }],

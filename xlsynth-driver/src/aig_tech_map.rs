@@ -6,7 +6,7 @@ use std::path::Path;
 use xlsynth_g8r::aig_serdes::load_aiger_auto::load_aiger_auto_from_path;
 use xlsynth_g8r::gate_builder::GateBuilderOptions;
 use xlsynth_g8r::liberty::cell_formula::{Term, parse_formula};
-use xlsynth_g8r::liberty_proto::{Cell, Library, PinDirection};
+use xlsynth_g8r::liberty_model::{Cell, Library, PinDirection};
 use xlsynth_g8r::netlist::emit::emit_module_as_netlist_text;
 use xlsynth_g8r::netlist::io::load_liberty_with_timing_data_from_path;
 use xlsynth_g8r::netlist::sta::validate_output_pin_for_basic_sta;
@@ -45,33 +45,40 @@ struct SelectedCellBinding {
     output_pin_name: String,
 }
 
-fn input_pin_names(cell: &Cell) -> Vec<String> {
+fn input_pin_names(lib: &Library, cell: &Cell) -> Vec<String> {
     let mut names = cell
         .pins
         .iter()
         .filter(|p| p.direction == PinDirection::Input as i32)
-        .map(|p| p.name.clone())
+        .map(|p| lib.resolve_string(&p.name).to_string())
         .collect::<Vec<_>>();
     names.sort();
     names
 }
 
-fn timed_output_pin_names(cell: &Cell) -> Vec<String> {
+fn timed_output_pin_names(lib: &Library, cell: &Cell) -> Vec<String> {
     let mut names = cell
         .pins
         .iter()
         .filter(|p| p.direction == PinDirection::Output as i32 && !p.timing_arcs.is_empty())
-        .map(|p| p.name.clone())
+        .map(|p| lib.resolve_string(&p.name).to_string())
         .collect::<Vec<_>>();
     names.sort();
     names
 }
 
-fn output_pin_function<'a>(cell: &'a Cell, output_pin_name: &str) -> Option<&'a str> {
+fn output_pin_function<'a>(
+    lib: &'a Library,
+    cell: &'a Cell,
+    output_pin_name: &str,
+) -> Option<&'a str> {
     cell.pins
         .iter()
-        .find(|p| p.name == output_pin_name && p.direction == PinDirection::Output as i32)
-        .map(|p| p.function.as_str())
+        .find(|p| {
+            lib.resolve_string(&p.name) == output_pin_name
+                && p.direction == PinDirection::Output as i32
+        })
+        .map(|p| lib.resolve_string(&p.function))
 }
 
 fn is_inv_formula(term: &Term, input_pin_name: &str) -> bool {
@@ -115,13 +122,13 @@ fn cell_binding_if_shape_matches(
     if !cell.name.starts_with(family_prefix) {
         return None;
     }
-    let input_pin_names = input_pin_names(cell);
-    let output_pin_names = timed_output_pin_names(cell);
+    let input_pin_names = input_pin_names(lib, cell);
+    let output_pin_names = timed_output_pin_names(lib, cell);
     if input_pin_names.len() != expected_input_count || output_pin_names.len() != 1 {
         return None;
     }
     let output_pin_name = &output_pin_names[0];
-    let output_function = output_pin_function(cell, output_pin_name)?;
+    let output_function = output_pin_function(lib, cell, output_pin_name)?;
     let output_term = parse_formula(output_function).ok()?;
     let formula_matches = match family_prefix {
         "INV" => is_inv_formula(&output_term, &input_pin_names[0]),
@@ -134,7 +141,7 @@ fn cell_binding_if_shape_matches(
     let output_pin = cell
         .pins
         .iter()
-        .find(|pin| pin.name == *output_pin_name)
+        .find(|pin| lib.resolve_string(&pin.name) == output_pin_name)
         .expect("timed output pin should still be present");
     if let Err(err) =
         validate_output_pin_for_basic_sta(lib, cell.name.as_str(), output_pin, &input_pin_names)
@@ -309,7 +316,7 @@ fn selected_binding_for_name(
 }
 
 fn select_inv_cell(
-    lib: &xlsynth_g8r::liberty_proto::Library,
+    lib: &xlsynth_g8r::liberty_model::Library,
     policy: CellPolicy,
 ) -> Result<SelectedCellBinding, String> {
     let candidates: Vec<&Cell> = lib
@@ -327,7 +334,7 @@ fn select_inv_cell(
 }
 
 fn select_nand2_cell(
-    lib: &xlsynth_g8r::liberty_proto::Library,
+    lib: &xlsynth_g8r::liberty_model::Library,
     policy: CellPolicy,
 ) -> Result<SelectedCellBinding, String> {
     let candidates: Vec<&Cell> = lib
@@ -473,65 +480,86 @@ pub fn handle_aig_tech_map(matches: &ArgMatches) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xlsynth_g8r::liberty_proto::{Pin, TimingTable};
+    use xlsynth_g8r::liberty_model::{LibraryBuilder, Pin, TimingTable};
 
-    fn make_pin(name: &str, direction: PinDirection, function: &str) -> Pin {
+    fn make_pin(
+        library: &mut LibraryBuilder,
+        name: &str,
+        direction: PinDirection,
+        function: &str,
+    ) -> Pin {
         Pin {
-            name: name.to_string(),
+            name: library.intern_string(name).unwrap(),
             direction: direction as i32,
-            function: function.to_string(),
+            function: library.intern_string(function).unwrap(),
             ..Default::default()
         }
     }
 
-    fn make_timed_output_pin(name: &str, function: &str, related_pins: &[&str]) -> Pin {
+    fn make_timed_output_pin(
+        library: &mut LibraryBuilder,
+        name: &str,
+        function: &str,
+        related_pins: &[&str],
+    ) -> Pin {
+        let mut timing_arcs = Vec::with_capacity(related_pins.len());
+        for related_pin in related_pins {
+            let tables = vec![
+                scalar_table(library, "cell_rise", 1.0),
+                scalar_table(library, "cell_fall", 1.0),
+                scalar_table(library, "rise_transition", 0.1),
+                scalar_table(library, "fall_transition", 0.1),
+            ];
+            timing_arcs.push(
+                library
+                    .add_timing_arc(related_pin, "", "combinational", "", tables)
+                    .unwrap(),
+            );
+        }
         Pin {
-            name: name.to_string(),
+            name: library.intern_string(name).unwrap(),
             direction: PinDirection::Output as i32,
-            function: function.to_string(),
-            timing_arcs: related_pins
-                .iter()
-                .map(|related_pin| xlsynth_g8r::liberty_proto::TimingArc {
-                    related_pin: (*related_pin).to_string(),
-                    timing_type: "combinational".to_string(),
-                    tables: vec![
-                        scalar_table("cell_rise", 1.0),
-                        scalar_table("cell_fall", 1.0),
-                        scalar_table("rise_transition", 0.1),
-                        scalar_table("fall_transition", 0.1),
-                    ],
-                    ..Default::default()
-                })
-                .collect(),
+            function: library.intern_string(function).unwrap(),
+            timing_arcs,
             ..Default::default()
         }
     }
 
-    fn scalar_table(kind: &str, value: f64) -> TimingTable {
-        TimingTable {
-            kind: kind.to_string(),
-            values: vec![value],
-            dimensions: vec![],
-            ..Default::default()
-        }
+    fn scalar_table(library: &mut LibraryBuilder, kind: &str, value: f64) -> TimingTable {
+        let kind = match kind {
+            "cell_rise" => xlsynth_g8r::liberty_proto::TimingTableKind::CellRise,
+            "cell_fall" => xlsynth_g8r::liberty_proto::TimingTableKind::CellFall,
+            "rise_transition" => xlsynth_g8r::liberty_proto::TimingTableKind::RiseTransition,
+            "fall_transition" => xlsynth_g8r::liberty_proto::TimingTableKind::FallTransition,
+            other => panic!("unsupported test timing-table kind {other}"),
+        };
+        library
+            .add_timing_table_f64(kind, 0, vec![], vec![], vec![], vec![value], vec![], "")
+            .unwrap()
     }
 
-    fn make_inv_cell(name: &str, threshold_voltage_group_id: u32) -> Cell {
-        make_inv_cell_with_pins(name, threshold_voltage_group_id, "A", "Y")
+    fn make_inv_cell(
+        library: &mut LibraryBuilder,
+        name: &str,
+        threshold_voltage_group_id: u32,
+    ) -> Cell {
+        make_inv_cell_with_pins(library, name, threshold_voltage_group_id, "A", "Y")
     }
 
     fn make_inv_cell_with_pins(
+        library: &mut LibraryBuilder,
         name: &str,
         threshold_voltage_group_id: u32,
         input_pin_name: &str,
         output_pin_name: &str,
     ) -> Cell {
         Cell {
-            name: name.to_string(),
+            name: name.to_string().into(),
             threshold_voltage_group_id,
             pins: vec![
-                make_pin(input_pin_name, PinDirection::Input, ""),
+                make_pin(library, input_pin_name, PinDirection::Input, ""),
                 make_timed_output_pin(
+                    library,
                     output_pin_name,
                     format!("!{}", input_pin_name).as_str(),
                     &[input_pin_name],
@@ -541,23 +569,29 @@ mod tests {
         }
     }
 
-    fn make_nand2_cell(name: &str, threshold_voltage_group_id: u32) -> Cell {
-        make_nand2_cell_with_pins(name, threshold_voltage_group_id, ["A", "B"], "Y")
+    fn make_nand2_cell(
+        library: &mut LibraryBuilder,
+        name: &str,
+        threshold_voltage_group_id: u32,
+    ) -> Cell {
+        make_nand2_cell_with_pins(library, name, threshold_voltage_group_id, ["A", "B"], "Y")
     }
 
     fn make_nand2_cell_with_pins(
+        library: &mut LibraryBuilder,
         name: &str,
         threshold_voltage_group_id: u32,
         input_pin_names: [&str; 2],
         output_pin_name: &str,
     ) -> Cell {
         Cell {
-            name: name.to_string(),
+            name: name.to_string().into(),
             threshold_voltage_group_id,
             pins: vec![
-                make_pin(input_pin_names[0], PinDirection::Input, ""),
-                make_pin(input_pin_names[1], PinDirection::Input, ""),
+                make_pin(library, input_pin_names[0], PinDirection::Input, ""),
+                make_pin(library, input_pin_names[1], PinDirection::Input, ""),
                 make_timed_output_pin(
+                    library,
                     output_pin_name,
                     format!("!({}*{})", input_pin_names[0], input_pin_names[1]).as_str(),
                     &input_pin_names,
@@ -567,19 +601,26 @@ mod tests {
         }
     }
 
+    fn make_library_with_cells(
+        build_cells: impl FnOnce(&mut LibraryBuilder) -> Vec<Cell>,
+    ) -> xlsynth_g8r::liberty_model::Library {
+        let mut library = LibraryBuilder::new();
+        library.cells = build_cells(&mut library);
+        library.finish()
+    }
+
     #[test]
     fn select_prefers_exact_base_names_in_small_normal_vt_mode() {
-        let lib = xlsynth_g8r::liberty_proto::Library {
-            cells: vec![
-                make_inv_cell("INV", 1),
-                make_inv_cell("INVx1_nominal", 1),
-                make_nand2_cell("NAND2", 1),
-                make_nand2_cell("NAND2x1_nominal", 1),
-            ],
-            threshold_voltage_groups: vec!["nominal".to_string()],
-            threshold_voltage_group_class_indices: vec![0],
-            ..Default::default()
-        };
+        let mut lib = make_library_with_cells(|library| {
+            vec![
+                make_inv_cell(library, "INV", 1),
+                make_inv_cell(library, "INVx1_nominal", 1),
+                make_nand2_cell(library, "NAND2", 1),
+                make_nand2_cell(library, "NAND2x1_nominal", 1),
+            ]
+        });
+        lib.threshold_voltage_groups = vec!["nominal".to_string()];
+        lib.threshold_voltage_group_class_indices = vec![0];
 
         assert_eq!(
             select_inv_cell_name(&lib, CellPolicy::SmallNormalVt).unwrap(),
@@ -593,22 +634,21 @@ mod tests {
 
     #[test]
     fn select_prefers_x1_nominal_when_no_exact_base_in_small_normal_vt_mode() {
-        let lib = xlsynth_g8r::liberty_proto::Library {
-            cells: vec![
-                make_inv_cell("INVx2_fast", 2),
-                make_inv_cell("INVx1_nominal", 1),
-                make_inv_cell("INVx1_faster", 3),
-                make_nand2_cell("NAND2x2_fast", 2),
-                make_nand2_cell("NAND2x1_nominal", 1),
-            ],
-            threshold_voltage_groups: vec![
-                "nominal".to_string(),
-                "fast".to_string(),
-                "faster".to_string(),
-            ],
-            threshold_voltage_group_class_indices: vec![0, 1, 2],
-            ..Default::default()
-        };
+        let mut lib = make_library_with_cells(|library| {
+            vec![
+                make_inv_cell(library, "INVx2_fast", 2),
+                make_inv_cell(library, "INVx1_nominal", 1),
+                make_inv_cell(library, "INVx1_faster", 3),
+                make_nand2_cell(library, "NAND2x2_fast", 2),
+                make_nand2_cell(library, "NAND2x1_nominal", 1),
+            ]
+        });
+        lib.threshold_voltage_groups = vec![
+            "nominal".to_string(),
+            "fast".to_string(),
+            "faster".to_string(),
+        ];
+        lib.threshold_voltage_group_class_indices = vec![0, 1, 2];
 
         assert_eq!(
             select_inv_cell_name(&lib, CellPolicy::SmallNormalVt).unwrap(),
@@ -622,23 +662,22 @@ mod tests {
 
     #[test]
     fn select_prefers_max_drive_in_fastest_vt_in_max_speed_mode() {
-        let lib = xlsynth_g8r::liberty_proto::Library {
-            cells: vec![
-                make_inv_cell("INVx1_nominal", 1),
-                make_inv_cell("INVx2_faster", 3),
-                make_inv_cell("INVx4_faster", 3),
-                make_nand2_cell("NAND2x1_nominal", 1),
-                make_nand2_cell("NAND2x2_fast", 2),
-                make_nand2_cell("NAND2x4_faster", 3),
-            ],
-            threshold_voltage_groups: vec![
-                "nominal".to_string(),
-                "fast".to_string(),
-                "faster".to_string(),
-            ],
-            threshold_voltage_group_class_indices: vec![0, 1, 2],
-            ..Default::default()
-        };
+        let mut lib = make_library_with_cells(|library| {
+            vec![
+                make_inv_cell(library, "INVx1_nominal", 1),
+                make_inv_cell(library, "INVx2_faster", 3),
+                make_inv_cell(library, "INVx4_faster", 3),
+                make_nand2_cell(library, "NAND2x1_nominal", 1),
+                make_nand2_cell(library, "NAND2x2_fast", 2),
+                make_nand2_cell(library, "NAND2x4_faster", 3),
+            ]
+        });
+        lib.threshold_voltage_groups = vec![
+            "nominal".to_string(),
+            "fast".to_string(),
+            "faster".to_string(),
+        ];
+        lib.threshold_voltage_group_class_indices = vec![0, 1, 2];
 
         assert_eq!(
             select_inv_cell_name(&lib, CellPolicy::MaxSpeed).unwrap(),
@@ -652,17 +691,16 @@ mod tests {
 
     #[test]
     fn select_uses_drive_strength_with_fractional_suffix_in_max_speed_mode() {
-        let lib = xlsynth_g8r::liberty_proto::Library {
-            cells: vec![
-                make_inv_cell("INVxp75_faster", 1),
-                make_inv_cell("INVx1_faster", 1),
-                make_nand2_cell("NAND2xp33_faster", 1),
-                make_nand2_cell("NAND2x1_faster", 1),
-            ],
-            threshold_voltage_groups: vec!["faster".to_string()],
-            threshold_voltage_group_class_indices: vec![2],
-            ..Default::default()
-        };
+        let mut lib = make_library_with_cells(|library| {
+            vec![
+                make_inv_cell(library, "INVxp75_faster", 1),
+                make_inv_cell(library, "INVx1_faster", 1),
+                make_nand2_cell(library, "NAND2xp33_faster", 1),
+                make_nand2_cell(library, "NAND2x1_faster", 1),
+            ]
+        });
+        lib.threshold_voltage_groups = vec!["faster".to_string()];
+        lib.threshold_voltage_group_class_indices = vec![2];
 
         assert_eq!(
             select_inv_cell_name(&lib, CellPolicy::MaxSpeed).unwrap(),
@@ -676,17 +714,16 @@ mod tests {
 
     #[test]
     fn select_uses_default_threshold_voltage_group() {
-        let lib = xlsynth_g8r::liberty_proto::Library {
-            cells: vec![
-                make_inv_cell("INVx1_default", 0),
-                make_inv_cell("INVx2_fast", 2),
-                make_nand2_cell("NAND2x1_default", 0),
-            ],
-            threshold_voltage_groups: vec!["nominal".to_string(), "fast".to_string()],
-            default_threshold_voltage_group_id: 1,
-            threshold_voltage_group_class_indices: vec![0, 1],
-            ..Default::default()
-        };
+        let mut lib = make_library_with_cells(|library| {
+            vec![
+                make_inv_cell(library, "INVx1_default", 0),
+                make_inv_cell(library, "INVx2_fast", 2),
+                make_nand2_cell(library, "NAND2x1_default", 0),
+            ]
+        });
+        lib.threshold_voltage_groups = vec!["nominal".to_string(), "fast".to_string()];
+        lib.default_threshold_voltage_group_id = 1;
+        lib.threshold_voltage_group_class_indices = vec![0, 1];
 
         assert_eq!(
             select_inv_cell_name(&lib, CellPolicy::SmallNormalVt).unwrap(),
@@ -700,56 +737,54 @@ mod tests {
 
     #[test]
     fn select_discovers_nonstandard_pin_names() {
-        let lib = xlsynth_g8r::liberty_proto::Library {
-            cells: vec![
-                make_inv_cell_with_pins("INV", 0, "I", "ZN"),
-                make_nand2_cell_with_pins("NAND2", 0, ["I0", "I1"], "ZN"),
-            ],
-            ..Default::default()
-        };
+        let lib = make_library_with_cells(|library| {
+            vec![
+                make_inv_cell_with_pins(library, "INV", 0, "I", "ZN"),
+                make_nand2_cell_with_pins(library, "NAND2", 0, ["I0", "I1"], "ZN"),
+            ]
+        });
 
         assert_eq!(
             select_inv_cell(&lib, CellPolicy::SmallNormalVt).unwrap(),
             SelectedCellBinding {
-                cell_name: "INV".to_string(),
+                cell_name: "INV".to_string().into(),
                 input_pin_names: vec!["I".to_string()],
-                output_pin_name: "ZN".to_string(),
+                output_pin_name: "ZN".to_string().into(),
             }
         );
         assert_eq!(
             select_nand2_cell(&lib, CellPolicy::SmallNormalVt).unwrap(),
             SelectedCellBinding {
-                cell_name: "NAND2".to_string(),
+                cell_name: "NAND2".to_string().into(),
                 input_pin_names: vec!["I0".to_string(), "I1".to_string()],
-                output_pin_name: "ZN".to_string(),
+                output_pin_name: "ZN".to_string().into(),
             }
         );
     }
 
     #[test]
     fn select_rejects_family_name_with_wrong_formula() {
-        let lib = xlsynth_g8r::liberty_proto::Library {
-            cells: vec![
+        let lib = make_library_with_cells(|library| {
+            vec![
                 Cell {
-                    name: "INV".to_string(),
+                    name: "INV".to_string().into(),
                     pins: vec![
-                        make_pin("A", PinDirection::Input, ""),
-                        make_timed_output_pin("Y", "A", &["A"]),
+                        make_pin(library, "A", PinDirection::Input, ""),
+                        make_timed_output_pin(library, "Y", "A", &["A"]),
                     ],
                     ..Default::default()
                 },
                 Cell {
-                    name: "NAND2".to_string(),
+                    name: "NAND2".to_string().into(),
                     pins: vec![
-                        make_pin("A", PinDirection::Input, ""),
-                        make_pin("B", PinDirection::Input, ""),
-                        make_timed_output_pin("Y", "A*B", &["A", "B"]),
+                        make_pin(library, "A", PinDirection::Input, ""),
+                        make_pin(library, "B", PinDirection::Input, ""),
+                        make_timed_output_pin(library, "Y", "A*B", &["A", "B"]),
                     ],
                     ..Default::default()
                 },
-            ],
-            ..Default::default()
-        };
+            ]
+        });
 
         assert!(select_inv_cell(&lib, CellPolicy::SmallNormalVt).is_err());
         assert!(select_nand2_cell(&lib, CellPolicy::SmallNormalVt).is_err());
@@ -757,18 +792,17 @@ mod tests {
 
     #[test]
     fn select_accepts_demorgan_nand2_formula() {
-        let lib = xlsynth_g8r::liberty_proto::Library {
-            cells: vec![Cell {
-                name: "NAND2".to_string(),
+        let lib = make_library_with_cells(|library| {
+            vec![Cell {
+                name: "NAND2".to_string().into(),
                 pins: vec![
-                    make_pin("A", PinDirection::Input, ""),
-                    make_pin("B", PinDirection::Input, ""),
-                    make_timed_output_pin("Y", "(!A)+(!B)", &["A", "B"]),
+                    make_pin(library, "A", PinDirection::Input, ""),
+                    make_pin(library, "B", PinDirection::Input, ""),
+                    make_timed_output_pin(library, "Y", "(!A)+(!B)", &["A", "B"]),
                 ],
                 ..Default::default()
-            }],
-            ..Default::default()
-        };
+            }]
+        });
 
         assert_eq!(
             select_nand2_cell_name(&lib, CellPolicy::SmallNormalVt).unwrap(),
@@ -778,15 +812,14 @@ mod tests {
 
     #[test]
     fn select_is_deterministic_without_vt_metadata() {
-        let lib = xlsynth_g8r::liberty_proto::Library {
-            cells: vec![
-                make_inv_cell("INVx2", 0),
-                make_inv_cell("INVx1", 0),
-                make_nand2_cell("NAND2x2", 0),
-                make_nand2_cell("NAND2x1", 0),
-            ],
-            ..Default::default()
-        };
+        let lib = make_library_with_cells(|library| {
+            vec![
+                make_inv_cell(library, "INVx2", 0),
+                make_inv_cell(library, "INVx1", 0),
+                make_nand2_cell(library, "NAND2x2", 0),
+                make_nand2_cell(library, "NAND2x1", 0),
+            ]
+        });
 
         assert_eq!(
             select_inv_cell_name(&lib, CellPolicy::SmallNormalVt).unwrap(),
@@ -808,38 +841,39 @@ mod tests {
 
     #[test]
     fn select_rejects_candidate_missing_timing_for_one_functional_input() {
-        let lib = xlsynth_g8r::liberty_proto::Library {
-            cells: vec![Cell {
-                name: "NAND2".to_string(),
+        let lib = make_library_with_cells(|library| {
+            vec![Cell {
+                name: "NAND2".to_string().into(),
                 pins: vec![
-                    make_pin("A", PinDirection::Input, ""),
-                    make_pin("B", PinDirection::Input, ""),
-                    make_timed_output_pin("Y", "!(A*B)", &["A"]),
+                    make_pin(library, "A", PinDirection::Input, ""),
+                    make_pin(library, "B", PinDirection::Input, ""),
+                    make_timed_output_pin(library, "Y", "!(A*B)", &["A"]),
                 ],
                 ..Default::default()
-            }],
-            ..Default::default()
-        };
+            }]
+        });
 
         assert!(select_nand2_cell(&lib, CellPolicy::SmallNormalVt).is_err());
     }
 
     #[test]
     fn select_skips_sta_incompatible_candidate_and_uses_valid_alternative() {
-        let mut invalid_fast = make_nand2_cell("NAND2x2_fast", 2);
-        invalid_fast
+        let mut builder = LibraryBuilder::new();
+        let mut invalid_fast = make_nand2_cell(&mut builder, "NAND2x2_fast", 2);
+        let output_pin_idx = invalid_fast
             .pins
-            .iter_mut()
-            .find(|pin| pin.name == "Y")
-            .expect("output pin")
-            .timing_arcs[0]
-            .timing_type = "rising_edge".to_string();
-        let lib = xlsynth_g8r::liberty_proto::Library {
-            cells: vec![invalid_fast, make_nand2_cell("NAND2x1_nominal", 1)],
-            threshold_voltage_groups: vec!["nominal".to_string(), "fast".to_string()],
-            threshold_voltage_group_class_indices: vec![0, 1],
-            ..Default::default()
-        };
+            .iter()
+            .position(|pin| builder.resolve_string(&pin.name) == "Y")
+            .expect("output pin");
+        let tables = std::mem::take(&mut invalid_fast.pins[output_pin_idx].timing_arcs[0].tables);
+        invalid_fast.pins[output_pin_idx].timing_arcs[0] = builder
+            .add_timing_arc("A", "", "rising_edge", "", tables)
+            .unwrap();
+        let nominal = make_nand2_cell(&mut builder, "NAND2x1_nominal", 1);
+        builder.cells = vec![invalid_fast, nominal];
+        builder.threshold_voltage_groups = vec!["nominal".to_string(), "fast".to_string()];
+        builder.threshold_voltage_group_class_indices = vec![0, 1];
+        let lib = builder.finish();
 
         assert_eq!(
             select_nand2_cell_name(&lib, CellPolicy::MaxSpeed).unwrap(),
@@ -849,15 +883,14 @@ mod tests {
 
     #[test]
     fn select_rejects_mixed_ordered_and_unordered_vt_metadata() {
-        let lib = xlsynth_g8r::liberty_proto::Library {
-            cells: vec![
-                make_inv_cell("INVx1_nominal", 1),
-                make_inv_cell("INVx2_unclassified", 0),
-            ],
-            threshold_voltage_groups: vec!["nominal".to_string()],
-            threshold_voltage_group_class_indices: vec![0],
-            ..Default::default()
-        };
+        let mut lib = make_library_with_cells(|library| {
+            vec![
+                make_inv_cell(library, "INVx1_nominal", 1),
+                make_inv_cell(library, "INVx2_unclassified", 0),
+            ]
+        });
+        lib.threshold_voltage_groups = vec!["nominal".to_string()];
+        lib.threshold_voltage_group_class_indices = vec![0];
 
         let err = select_inv_cell_name(&lib, CellPolicy::MaxSpeed).unwrap_err();
         assert!(err.contains("mix ordered and unordered threshold-voltage metadata"));

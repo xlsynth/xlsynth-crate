@@ -8,19 +8,21 @@ fn gv_dump_cone_basic_csv_output() {
 
     // Minimal Liberty textproto with a single inverter cell.
     let liberty_text = r#"
+format_magic: 5496997758177923663
 cells: {
   name: "INV"
   pins: {
-    name: "A"
+    name_string_id: 1
     direction: INPUT
   }
   pins: {
-    name: "Y"
+    name_string_id: 2
     direction: OUTPUT
-    function: "(!A)"
+    function_string_id: 3
   }
   area: 1.0
 }
+interned_strings: ["A", "Y", "(!A)"]
 "#;
 
     // Minimal netlist: a -> INV u1 -> n1 -> INV u2 -> y
@@ -82,19 +84,21 @@ fn gv_dump_cone_traverses_preserved_assigns() {
     let driver = env!("CARGO_BIN_EXE_xlsynth-driver");
 
     let liberty_text = r#"
+format_magic: 5496997758177923663
 cells: {
   name: "BUF"
   pins: {
-    name: "A"
+    name_string_id: 1
     direction: INPUT
   }
   pins: {
-    name: "Y"
+    name_string_id: 2
     direction: OUTPUT
-    function: "A"
+    function_string_id: 1
   }
   area: 1.0
 }
+interned_strings: ["A", "Y"]
 "#;
 
     let netlist_text = r#"

@@ -61,9 +61,78 @@ for streamlined querying, e.g. by the `gv2ir` subcommand.
 
 ```shell
 xlsynth-driver lib2proto \
-  --output ~/asap7.proto \
+  --output /tmp/asap7.notiming.nopower.proto \
   ~/src/asap7/asap7sc7p5t_28/LIB/NLDM/*TT*.lib
 ```
+
+Use `--provenance <TEXT>` to attach a free-form source identifier to the
+generated library, for example a PDK release name or source-control commit.
+The value is preserved verbatim in `Library.provenance`:
+
+```shell
+xlsynth-driver lib2proto \
+  --output /tmp/asap7.proto \
+  --provenance 'asap7 commit abcde1234' \
+  /path/to/asap7/LIB/NLDM/SS/*_RVT_SS_*.lib
+```
+
+Timing and dynamic-power payloads are independently excluded by default. Pass
+`--include-timing` to preserve timing arcs, the nominal delay/transition and
+constraint tables consumed by the deterministic evaluator, and
+`lu_table_template` definitions. Pass `--include-power` to preserve `nom_voltage`,
+`internal_power` groups, and `power_lut_template` definitions.
+For example, the two standard variants are:
+
+```shell
+xlsynth-driver lib2proto \
+  --output /tmp/asap7.notiming.nopower.proto \
+  /path/to/asap7/LIB/NLDM/SS/*_RVT_SS_*.lib
+
+xlsynth-driver lib2proto \
+  --output /tmp/asap7.timing.power.proto \
+  --include-timing \
+  --include-power \
+  /path/to/asap7/LIB/NLDM/SS/*_RVT_SS_*.lib
+```
+
+The flags are independent, so timing-only and power-only payloads can also be
+generated when needed.
+
+`lib2proto` emits the `liberty.Library` format defined in
+`xlsynth-g8r/proto/liberty.proto`. The wire format uses float32 table values,
+typed enums for standard Liberty vocabularies, and library-wide interned
+strings, axis vectors, and table shapes. Loaders expand it to strings, float64
+values, and inline table geometry for the in-memory evaluator API. This is a
+breaking wire-format change, and older Liberty proto files must be regenerated.
+In Rust, `xlsynth_g8r::liberty_proto` contains the generated wire types, while
+`xlsynth_g8r::liberty_model` contains the normalized evaluator-facing types.
+
+Use `--cell-filter-policy <PATH>` to remove unavailable cells while generating
+the proto. Policy files contain ordered `exclude REGEX` and `include REGEX`
+rules, with blank lines and lines beginning with `#` ignored. Each cell starts
+with its native Liberty `dont_use` value, then matching rules are applied in
+file order; the last matching rule wins. This permits a later `include` rule to
+re-enable an intentional exception:
+
+```text
+exclude ^FILLER.*
+exclude ^DECAP.*
+include ^INVx1_ASAP7_75t_R$
+```
+
+```shell
+xlsynth-driver lib2proto \
+  --cell-filter-policy /path/to/asap7.policy \
+  --output /tmp/asap7.usable.notiming.nopower.proto \
+  /path/to/asap7/LIB/NLDM/SS/*_RVT_SS_*.lib
+```
+
+Unfiltered protos preserve native cell-level `dont_use` metadata. Filtered
+protos omit cells whose final policy state is `dont_use` and record retained
+cells with `dont_use: false`.
+
+Outputs ending in `.textproto` use indented multiline protobuf text format and
+include comments identifying the schema file and message type.
 
 When Liberty files omit native `threshold_voltage_group` metadata, use repeated
 `--vt-group <NAME:CLASS_INDEX:REGEX>` rules to classify cell names and define
@@ -85,6 +154,27 @@ xlsynth-driver lib2proto \
   /path/to/asap7/LIB/NLDM/TT/*_LVT_TT_*.lib \
   /path/to/asap7/LIB/NLDM/TT/*_SLVT_TT_*.lib
 ```
+
+### `liberty-proto-info`: inspect a Liberty proto
+
+Reports file identity, generation metadata, and structural counts for a binary
+Liberty proto or textproto. Inputs may be gzip-compressed by appending `.gz`.
+For compressed inputs, size and SHA-256 describe the stored compressed file.
+Newly generated protos list the source Liberty basenames in their original
+parsing order.
+
+```shell
+xlsynth-driver liberty-proto-info /path/to/asap7.proto
+xlsynth-driver liberty-proto-info /path/to/asap7.proto.gz
+```
+
+The report includes file size and SHA-256, provenance, source files, total,
+combinational, sequential, and native `dont_use` cell counts, LUT templates,
+timing arcs, internal-power groups and tables, and nominal voltage.
+
+All `xlsynth-driver` subcommands that consume a Liberty proto accept `.proto`,
+`.textproto`, `.proto.gz`, and `.textproto.gz`. `lib2proto` itself emits
+uncompressed `.proto` or `.textproto` files.
 
 ### `lib-query`: query Liberty AST blocks
 
@@ -236,7 +326,7 @@ xlsynth-driver gv-eval \
 Flags:
 
 - `--netlist <PATH>`: gate-level netlist (`.gv`, `.v`, or `.gv.gz`). Required.
-- `--liberty_proto <PATH>`: Liberty proto (`.proto` or `.textproto`). Required.
+- `--liberty_proto <PATH>`: Liberty proto, optionally gzip-compressed. Required.
 - `--module_name <MODULE>`: optional module selection when the netlist contains multiple modules.
 - Exactly one positional typed argument tuple or `--input-irvals <PATH>` is required.
 - `--toggle-output-json <PATH>`: with `--input-irvals`, write source-labeled
@@ -314,7 +404,7 @@ xlsynth-driver aig-tech-map my_design.aag \
 
 Key flags:
 
-- `--liberty_proto <PATH>`: timing-enabled Liberty proto (`.proto` or `.textproto`). Required.
+- `--liberty_proto <PATH>`: timing-enabled Liberty proto, optionally gzip-compressed. Required.
 - `--netlist_out <PATH>`: output mapped netlist path; use `-` for stdout. Required.
 - `--module_name <MODULE>`: optional override for emitted module name.
 - `--cell_policy <small-normal-vt|max-speed>`: auto-selection policy for INV/NAND2 cells (default: `small-normal-vt`).
@@ -337,7 +427,7 @@ xlsynth-driver gv-sta \
 Key flags:
 
 - `--netlist <PATH>`: gate-level netlist (`.gv`, `.v`, or `.gv.gz`). Required.
-- `--liberty_proto <PATH>`: timing-enabled Liberty proto (`.proto` or `.textproto`). Required.
+- `--liberty_proto <PATH>`: timing-enabled Liberty proto, optionally gzip-compressed. Required.
 - `--module_name <MODULE>`: optional module selection when netlist has multiple modules.
 - `--primary_input_transition <VALUE>`: source transition for primary inputs (default: `0.01`).
 - `--module_output_load <VALUE>`: extra load capacitance added at module outputs (default: `0.0`).
@@ -359,7 +449,7 @@ xlsynth-driver gv-area \
 Key flags:
 
 - `--netlist <PATH>`: gate-level netlist (`.gv`, `.v`, or `.gv.gz`). Required.
-- `--liberty_proto <PATH>`: Liberty proto (`.proto` or `.textproto`). Required.
+- `--liberty_proto <PATH>`: Liberty proto, optionally gzip-compressed. Required.
 - `--module_name <MODULE>`: optional module selection when netlist has multiple modules.
 - `--json_out <PATH>`: optional JSON area summary output path.
 
@@ -382,7 +472,7 @@ xlsynth-driver gv-stats \
 Key flags:
 
 - `--netlist <PATH>`: gate-level netlist (`.gv`, `.v`, or `.gv.gz`). Required.
-- `--liberty_proto <PATH>`: timing-enabled Liberty proto (`.proto` or `.textproto`). Required.
+- `--liberty_proto <PATH>`: timing-enabled Liberty proto, optionally gzip-compressed. Required.
 - `--module_name <MODULE>`: optional module selection when netlist has multiple modules.
 - `--primary_input_transition <VALUE>`: source transition for primary inputs (default: `0.01`).
 - `--module_output_load <VALUE>`: extra load capacitance added at module outputs (default: `0.0`).
@@ -417,7 +507,7 @@ xlsynth-driver gv-dump-cone \
 
 Key flags:
 
-- `--liberty_proto <LIBERTY_PROTO>`: Liberty proto (.proto or .textproto) describing the cell library used by the netlist. Required.
+- `--liberty_proto <LIBERTY_PROTO>`: Liberty proto, optionally gzip-compressed, describing the cell library used by the netlist. Required.
 - `--instance <INSTANCE>`: Instance name at the cone center. Required.
 - `--traverse <fanin|fanout>`: Traversal direction from the center instance. Required.
 - One of (exactly one is required):

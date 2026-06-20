@@ -2,13 +2,13 @@
 
 //! Indexed view over a Liberty `Library`.
 //!
-//! This module provides a small wrapper around the prost-generated
-//! `crate::liberty_proto::Library` that adds lazily constructed indices for
+//! This module provides a small wrapper around the normalized
+//! `crate::liberty_model::Library` that adds lazily constructed indices for
 //! fast lookup by cell name and for grouping pins by direction. The underlying
 //! `Library` remains the single source of truth; indices are derived from it
 //! on demand.
 
-use crate::liberty_proto::{Cell, Library as ProtoLibrary, Pin, PinDirection};
+use crate::liberty_model::{Cell, Library as ModelLibrary, Pin, PinDirection};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -25,8 +25,8 @@ struct CellPinsByDir {
 
 /// Owning wrapper around a `Library` with lazily built indices for fast lookup.
 pub struct IndexedLibrary {
-    proto: ProtoLibrary,
-    /// Map from cell name to index in `proto.cells`.
+    library: ModelLibrary,
+    /// Map from cell name to index in `library.cells`.
     cell_by_name: RefCell<Option<HashMap<String, usize>>>,
     /// Map from cell index to directional pin groupings.
     pins_by_dir: RefCell<Option<HashMap<usize, CellPinsByDir>>>,
@@ -34,27 +34,27 @@ pub struct IndexedLibrary {
 
 impl IndexedLibrary {
     /// Constructs a new indexed view over the given `Library`.
-    pub fn new<T: Into<ProtoLibrary>>(proto: T) -> Self {
-        let proto = proto.into();
+    pub fn new<T: Into<ModelLibrary>>(library: T) -> Self {
+        let library = library.into();
         IndexedLibrary {
-            proto,
+            library,
             cell_by_name: RefCell::new(None),
             pins_by_dir: RefCell::new(None),
         }
     }
 
     /// Returns a shared reference to the underlying `Library`.
-    pub fn library(&self) -> &ProtoLibrary {
-        &self.proto
+    pub fn library(&self) -> &ModelLibrary {
+        &self.library
     }
 
-    /// Returns the index of the cell with the given name in `proto.cells`.
+    /// Returns the index of the cell with the given name in `library.cells`.
     fn get_cell_index(&self, name: &str) -> Option<usize> {
         let idx_opt = {
             let mut opt_map = self.cell_by_name.borrow_mut();
             if opt_map.is_none() {
                 let mut map: HashMap<String, usize> = HashMap::new();
-                for (i, cell) in self.proto.cells.iter().enumerate() {
+                for (i, cell) in self.library.cells.iter().enumerate() {
                     map.insert(cell.name.clone(), i);
                 }
                 *opt_map = Some(map);
@@ -67,7 +67,7 @@ impl IndexedLibrary {
     /// Looks up a cell by name.
     pub fn get_cell(&self, name: &str) -> Option<&Cell> {
         let idx = self.get_cell_index(name)?;
-        Some(&self.proto.cells[idx])
+        Some(&self.library.cells[idx])
     }
 
     /// Returns the pins for the given cell index grouped by direction.
@@ -84,11 +84,11 @@ impl IndexedLibrary {
             }
         }
 
-        if cell_idx >= self.proto.cells.len() {
+        if cell_idx >= self.library.cells.len() {
             return None;
         }
 
-        let cell = &self.proto.cells[cell_idx];
+        let cell = &self.library.cells[cell_idx];
         let mut input_pins: Vec<usize> = Vec::new();
         let mut output_pins: Vec<usize> = Vec::new();
         for (i, pin) in cell.pins.iter().enumerate() {
@@ -124,7 +124,7 @@ impl IndexedLibrary {
     pub fn pins_for_dir(&self, cell_name: &str, dir: PinDirection) -> Option<Vec<&Pin>> {
         let cell_idx = self.get_cell_index(cell_name)?;
         let grouped = self.pins_by_dir_for_index(cell_idx)?;
-        let cell = &self.proto.cells[cell_idx];
+        let cell = &self.library.cells[cell_idx];
 
         let indices = match dir {
             PinDirection::Input => &grouped.input_pins,
@@ -144,9 +144,9 @@ impl IndexedLibrary {
     /// Looks up a pin by cell name and pin name.
     pub fn pin_by_name(&self, cell_name: &str, pin_name: &str) -> Option<&Pin> {
         let cell_idx = self.get_cell_index(cell_name)?;
-        let cell = &self.proto.cells[cell_idx];
+        let cell = &self.library.cells[cell_idx];
         for pin in &cell.pins {
-            if pin.name == pin_name {
+            if self.library.resolve_string(&pin.name) == pin_name {
                 return Some(pin);
             }
         }
@@ -159,7 +159,7 @@ impl IndexedLibrary {
         cell_name: &str,
         output_pin_name: &str,
         related_pin_name: &str,
-    ) -> Option<&crate::liberty_proto::TimingArc> {
+    ) -> Option<&crate::liberty_model::TimingArc> {
         self.timing_arc_for_pin_filtered(
             cell_name,
             output_pin_name,
@@ -183,27 +183,27 @@ impl IndexedLibrary {
         timing_type: Option<&str>,
         timing_sense: Option<&str>,
         when: Option<&str>,
-    ) -> Option<&crate::liberty_proto::TimingArc> {
+    ) -> Option<&crate::liberty_model::TimingArc> {
         let pin = self.pin_by_name(cell_name, output_pin_name)?;
         if pin.direction != PinDirection::Output as i32 {
             return None;
         }
         let mut matches = pin.timing_arcs.iter().filter(|arc| {
-            if arc.related_pin != related_pin_name {
+            if self.library.resolve_string(&arc.related_pin) != related_pin_name {
                 return false;
             }
             if let Some(v) = timing_type {
-                if arc.timing_type != v {
+                if arc.timing_type_str(&self.library) != v {
                     return false;
                 }
             }
             if let Some(v) = timing_sense {
-                if arc.timing_sense != v {
+                if arc.timing_sense_str(&self.library) != v {
                     return false;
                 }
             }
             if let Some(v) = when {
-                if arc.when != v {
+                if self.library.resolve_string(&arc.when) != v {
                     return false;
                 }
             }
@@ -221,7 +221,7 @@ impl IndexedLibrary {
         &self,
         cell_name: &str,
         output_pin_name: &str,
-    ) -> Option<&[crate::liberty_proto::TimingArc]> {
+    ) -> Option<&[crate::liberty_model::TimingArc]> {
         let pin = self.pin_by_name(cell_name, output_pin_name)?;
         if pin.direction != PinDirection::Output as i32 {
             return None;
@@ -237,12 +237,10 @@ impl IndexedLibrary {
         &self,
         template_kind: &str,
         template_name: &str,
-    ) -> Option<&crate::liberty_proto::LuTableTemplate> {
-        let mut matches = self
-            .proto
-            .lu_table_templates
-            .iter()
-            .filter(|tmpl| tmpl.kind == template_kind && tmpl.name == template_name);
+    ) -> Option<&crate::liberty_model::LuTableTemplate> {
+        let mut matches = self.library.lu_table_templates.iter().filter(|tmpl| {
+            tmpl.kind_str(&self.library) == template_kind && tmpl.name == template_name
+        });
         let first = matches.next()?;
         if matches.next().is_some() {
             return None;
@@ -256,15 +254,15 @@ impl IndexedLibrary {
         &self,
         template_id: u32,
         template_kind: &str,
-    ) -> Option<&crate::liberty_proto::LuTableTemplate> {
+    ) -> Option<&crate::liberty_model::LuTableTemplate> {
         if template_id == 0 {
             return None;
         }
         let tmpl = self
-            .proto
+            .library
             .lu_table_templates
             .get((template_id - 1) as usize)?;
-        if tmpl.kind == template_kind {
+        if tmpl.kind_str(&self.library) == template_kind {
             Some(tmpl)
         } else {
             None
@@ -276,7 +274,23 @@ impl IndexedLibrary {
 mod tests {
     use super::*;
     use crate::liberty::test_utils::make_test_library;
-    use crate::liberty_proto::{LuTableTemplate, TimingArc, TimingTable};
+    use crate::liberty_model::{LibraryBuilder, LuTableTemplate, TimingArc};
+
+    fn pin(
+        builder: &mut LibraryBuilder,
+        direction: PinDirection,
+        name: &str,
+        function: &str,
+        timing_arcs: Vec<TimingArc>,
+    ) -> Pin {
+        Pin {
+            direction: direction as i32,
+            function: builder.intern_string(function).unwrap(),
+            name: builder.intern_string(name).unwrap(),
+            timing_arcs,
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn get_cell_finds_by_name() {
@@ -303,17 +317,17 @@ mod tests {
             .expect("outputs for INV");
 
         assert_eq!(inputs.len(), 1);
-        assert_eq!(inputs[0].name, "A");
+        assert_eq!(indexed.library().resolve_string(&inputs[0].name), "A");
 
         assert_eq!(outputs.len(), 1);
-        assert_eq!(outputs[0].name, "Y");
+        assert_eq!(indexed.library().resolve_string(&outputs[0].name), "Y");
 
         // Second call exercises cached indices.
         let inputs_again = indexed
             .pins_for_dir("INV", PinDirection::Input)
             .expect("inputs for INV (cached)");
         assert_eq!(inputs_again.len(), 1);
-        assert_eq!(inputs_again[0].name, "A");
+        assert_eq!(indexed.library().resolve_string(&inputs_again[0].name), "A");
     }
 
     #[test]
@@ -324,7 +338,7 @@ mod tests {
         let y = indexed
             .pin_by_name("INV", "Y")
             .expect("Y pin should exist on INV");
-        assert_eq!(y.name, "Y");
+        assert_eq!(indexed.library().resolve_string(&y.name), "Y");
 
         assert!(indexed.pin_by_name("INV", "NO_SUCH_PIN").is_none());
         assert!(indexed.pin_by_name("NO_SUCH_CELL", "Y").is_none());
@@ -332,69 +346,53 @@ mod tests {
 
     #[test]
     fn timing_lookup_finds_arc_and_template() {
-        let lib = ProtoLibrary {
-            cells: vec![Cell {
-                name: "NAND2".to_string(),
-                pins: vec![
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        function: "".to_string(),
-                        name: "A".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        function: "".to_string(),
-                        name: "B".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Output as i32,
-                        function: "!(A * B)".to_string(),
-                        name: "Y".to_string(),
-                        is_clocking_pin: false,
-                        timing_arcs: vec![TimingArc {
-                            related_pin: "A".to_string(),
-                            timing_sense: "negative_unate".to_string(),
-                            timing_type: "combinational".to_string(),
-                            when: String::new(),
-                            tables: vec![TimingTable {
-                                kind: "cell_rise".to_string(),
-                                template_id: 1,
-                                template_name: String::new(),
-                                index_1: vec![0.01, 0.02],
-                                index_2: vec![0.1, 0.2],
-                                index_3: vec![],
-                                values: vec![1.0, 2.0, 3.0, 4.0],
-                                dimensions: vec![2, 2],
-                            }],
-                        }],
-                        ..Default::default()
-                    },
-                ],
-                area: 1.0,
-                sequential: vec![],
-                clock_gate: None,
-                threshold_voltage_group_id: 0,
-            }],
-            units: None,
-            lu_table_templates: vec![LuTableTemplate {
-                kind: "lu_table_template".to_string(),
-                name: "tmpl_2x2".to_string(),
-                variable_1: "input_net_transition".to_string(),
-                variable_2: "total_output_net_capacitance".to_string(),
-                variable_3: String::new(),
-                index_1: vec![0.01, 0.02],
-                index_2: vec![0.1, 0.2],
-                index_3: vec![],
-            }],
-            threshold_voltage_groups: vec![],
-            default_threshold_voltage_group_id: 0,
-            threshold_voltage_group_class_indices: vec![],
-        };
-        let indexed = IndexedLibrary::new(lib);
+        let mut builder = LibraryBuilder::new();
+        let table = builder
+            .add_timing_table_f64(
+                crate::liberty_proto::TimingTableKind::CellRise,
+                1,
+                vec![0.01, 0.02],
+                vec![0.1, 0.2],
+                vec![],
+                vec![1.0, 2.0, 3.0, 4.0],
+                vec![2, 2],
+                "",
+            )
+            .unwrap();
+        let arc = builder
+            .add_timing_arc("A", "negative_unate", "combinational", "", vec![table])
+            .unwrap();
+        builder.cells = vec![Cell {
+            name: "NAND2".to_string().into(),
+            pins: vec![
+                pin(&mut builder, PinDirection::Input, "A", "", vec![]),
+                pin(&mut builder, PinDirection::Input, "B", "", vec![]),
+                pin(
+                    &mut builder,
+                    PinDirection::Output,
+                    "Y",
+                    "!(A * B)",
+                    vec![arc],
+                ),
+            ],
+            area: 1.0,
+            sequential: vec![],
+            clock_gate: None,
+            threshold_voltage_group_id: 0,
+            dont_use: None,
+        }];
+        builder.lu_table_templates = vec![LuTableTemplate {
+            kind: "lu_table_template".to_string().into(),
+            name: "tmpl_2x2".to_string().into(),
+            variable_1: "input_net_transition".to_string().into(),
+            variable_2: "total_output_net_capacitance".to_string().into(),
+            variable_3: String::new().into(),
+            index_1: vec![0.01, 0.02],
+            index_2: vec![0.1, 0.2],
+            index_3: vec![],
+            ..Default::default()
+        }];
+        let indexed = IndexedLibrary::new(builder.finish());
 
         let arcs = indexed
             .timing_arcs_for_pin("NAND2", "Y")
@@ -404,14 +402,20 @@ mod tests {
         let arc = indexed
             .timing_arc_for_pin("NAND2", "Y", "A")
             .expect("arc for related pin A should exist");
-        assert_eq!(arc.timing_sense, "negative_unate");
+        assert_eq!(arc.timing_sense_str(indexed.library()), "negative_unate");
         assert_eq!(arc.tables.len(), 1);
-        assert_eq!(arc.tables[0].template_id, 1);
+        assert_eq!(
+            indexed
+                .library()
+                .timing_table_shape(&arc.tables[0])
+                .template_id,
+            1
+        );
 
         let tmpl = indexed
             .lu_table_template_by_name("lu_table_template", "tmpl_2x2")
             .expect("template should exist");
-        assert_eq!(tmpl.kind, "lu_table_template");
+        assert_eq!(tmpl.kind_str(indexed.library()), "lu_table_template");
         let tmpl_by_id = indexed
             .lu_table_template_by_id(1, "lu_table_template")
             .expect("template should exist by id");
@@ -430,45 +434,51 @@ mod tests {
 
     #[test]
     fn template_lookup_is_kind_aware_under_name_collisions() {
-        let lib = ProtoLibrary {
+        let lib = ModelLibrary {
             cells: vec![],
             units: None,
             lu_table_templates: vec![
                 LuTableTemplate {
-                    kind: "lu_table_template".to_string(),
-                    name: "shared".to_string(),
-                    variable_1: "input_net_transition".to_string(),
-                    variable_2: "total_output_net_capacitance".to_string(),
-                    variable_3: String::new(),
+                    kind: "lu_table_template".to_string().into(),
+                    name: "shared".to_string().into(),
+                    variable_1: "input_net_transition".to_string().into(),
+                    variable_2: "total_output_net_capacitance".to_string().into(),
+                    variable_3: String::new().into(),
                     index_1: vec![0.01, 0.02],
                     index_2: vec![0.1, 0.2],
                     index_3: vec![],
+                    ..Default::default()
                 },
                 LuTableTemplate {
-                    kind: "power_lut_template".to_string(),
-                    name: "shared".to_string(),
-                    variable_1: "input_transition_time".to_string(),
-                    variable_2: "total_output_net_capacitance".to_string(),
-                    variable_3: String::new(),
+                    kind: "power_lut_template".to_string().into(),
+                    name: "shared".to_string().into(),
+                    variable_1: "input_transition_time".to_string().into(),
+                    variable_2: "total_output_net_capacitance".to_string().into(),
+                    variable_3: String::new().into(),
                     index_1: vec![1.0, 2.0],
                     index_2: vec![3.0, 4.0],
                     index_3: vec![],
+                    ..Default::default()
                 },
             ],
             threshold_voltage_groups: vec![],
             default_threshold_voltage_group_id: 0,
             threshold_voltage_group_class_indices: vec![],
+            nominal_voltage: None,
+            provenance: String::new().into(),
+            source_files: vec![],
+            ..Default::default()
         };
         let indexed = IndexedLibrary::new(lib);
 
         let lu = indexed
             .lu_table_template_by_name("lu_table_template", "shared")
             .expect("lu template should resolve by kind and name");
-        assert_eq!(lu.kind, "lu_table_template");
+        assert_eq!(lu.kind_str(indexed.library()), "lu_table_template");
         let power = indexed
             .lu_table_template_by_name("power_lut_template", "shared")
             .expect("power template should resolve by kind and name");
-        assert_eq!(power.kind, "power_lut_template");
+        assert_eq!(power.kind_str(indexed.library()), "power_lut_template");
 
         let lu_by_id = indexed
             .lu_table_template_by_id(1, "lu_table_template")
@@ -487,34 +497,40 @@ mod tests {
 
     #[test]
     fn template_lookup_by_name_returns_none_for_ambiguous_same_kind_name() {
-        let lib = ProtoLibrary {
+        let lib = ModelLibrary {
             cells: vec![],
             units: None,
             lu_table_templates: vec![
                 LuTableTemplate {
-                    kind: "lu_table_template".to_string(),
-                    name: "shared".to_string(),
-                    variable_1: "input_net_transition".to_string(),
-                    variable_2: "total_output_net_capacitance".to_string(),
-                    variable_3: String::new(),
+                    kind: "lu_table_template".to_string().into(),
+                    name: "shared".to_string().into(),
+                    variable_1: "input_net_transition".to_string().into(),
+                    variable_2: "total_output_net_capacitance".to_string().into(),
+                    variable_3: String::new().into(),
                     index_1: vec![0.01, 0.02],
                     index_2: vec![0.1, 0.2],
                     index_3: vec![],
+                    ..Default::default()
                 },
                 LuTableTemplate {
-                    kind: "lu_table_template".to_string(),
-                    name: "shared".to_string(),
-                    variable_1: "input_net_transition".to_string(),
-                    variable_2: "total_output_net_capacitance".to_string(),
-                    variable_3: String::new(),
+                    kind: "lu_table_template".to_string().into(),
+                    name: "shared".to_string().into(),
+                    variable_1: "input_net_transition".to_string().into(),
+                    variable_2: "total_output_net_capacitance".to_string().into(),
+                    variable_3: String::new().into(),
                     index_1: vec![0.05],
                     index_2: vec![0.9, 1.1, 1.3],
                     index_3: vec![],
+                    ..Default::default()
                 },
             ],
             threshold_voltage_groups: vec![],
             default_threshold_voltage_group_id: 0,
             threshold_voltage_group_class_indices: vec![],
+            nominal_voltage: None,
+            provenance: String::new().into(),
+            source_files: vec![],
+            ..Default::default()
         };
         let indexed = IndexedLibrary::new(lib);
         assert!(
@@ -526,53 +542,32 @@ mod tests {
 
     #[test]
     fn timing_arc_lookup_avoids_ambiguous_related_pin_matches() {
-        let lib = ProtoLibrary {
-            cells: vec![Cell {
-                name: "NAND2".to_string(),
-                pins: vec![
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        function: "".to_string(),
-                        name: "A".to_string(),
-                        is_clocking_pin: false,
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Output as i32,
-                        function: "!(A)".to_string(),
-                        name: "Y".to_string(),
-                        is_clocking_pin: false,
-                        timing_arcs: vec![
-                            TimingArc {
-                                related_pin: "A".to_string(),
-                                timing_sense: "negative_unate".to_string(),
-                                timing_type: "combinational".to_string(),
-                                when: String::new(),
-                                tables: vec![],
-                            },
-                            TimingArc {
-                                related_pin: "A".to_string(),
-                                timing_sense: "positive_unate".to_string(),
-                                timing_type: "setup_rising".to_string(),
-                                when: "B".to_string(),
-                                tables: vec![],
-                            },
-                        ],
-                        ..Default::default()
-                    },
-                ],
-                area: 1.0,
-                sequential: vec![],
-                clock_gate: None,
-                threshold_voltage_group_id: 0,
-            }],
-            units: None,
-            lu_table_templates: vec![],
-            threshold_voltage_groups: vec![],
-            default_threshold_voltage_group_id: 0,
-            threshold_voltage_group_class_indices: vec![],
-        };
-        let indexed = IndexedLibrary::new(lib);
+        let mut builder = LibraryBuilder::new();
+        let comb = builder
+            .add_timing_arc("A", "negative_unate", "combinational", "", vec![])
+            .unwrap();
+        let setup = builder
+            .add_timing_arc("A", "positive_unate", "setup_rising", "B", vec![])
+            .unwrap();
+        builder.cells = vec![Cell {
+            name: "NAND2".to_string().into(),
+            pins: vec![
+                pin(&mut builder, PinDirection::Input, "A", "", vec![]),
+                pin(
+                    &mut builder,
+                    PinDirection::Output,
+                    "Y",
+                    "!(A)",
+                    vec![comb, setup],
+                ),
+            ],
+            area: 1.0,
+            sequential: vec![],
+            clock_gate: None,
+            threshold_voltage_group_id: 0,
+            dont_use: None,
+        }];
+        let indexed = IndexedLibrary::new(builder.finish());
 
         assert!(indexed.timing_arc_for_pin("NAND2", "Y", "A").is_none());
 
@@ -586,9 +581,9 @@ mod tests {
                 Some(""),
             )
             .expect("combinational arc should resolve uniquely");
-        assert_eq!(comb.timing_type, "combinational");
-        assert_eq!(comb.timing_sense, "negative_unate");
-        assert_eq!(comb.when, "");
+        assert_eq!(comb.timing_type_str(indexed.library()), "combinational");
+        assert_eq!(comb.timing_sense_str(indexed.library()), "negative_unate");
+        assert_eq!(indexed.library().resolve_string(&comb.when), "");
 
         let setup = indexed
             .timing_arc_for_pin_filtered(
@@ -600,58 +595,33 @@ mod tests {
                 Some("B"),
             )
             .expect("setup arc should resolve uniquely");
-        assert_eq!(setup.timing_type, "setup_rising");
-        assert_eq!(setup.timing_sense, "positive_unate");
-        assert_eq!(setup.when, "B");
+        assert_eq!(setup.timing_type_str(indexed.library()), "setup_rising");
+        assert_eq!(setup.timing_sense_str(indexed.library()), "positive_unate");
+        assert_eq!(indexed.library().resolve_string(&setup.when), "B");
     }
 
     #[test]
     fn timing_arc_lookup_requires_output_pin() {
-        let lib = ProtoLibrary {
-            cells: vec![Cell {
-                name: "U1".to_string(),
-                pins: vec![
-                    Pin {
-                        direction: PinDirection::Input as i32,
-                        function: "".to_string(),
-                        name: "A".to_string(),
-                        is_clocking_pin: false,
-                        timing_arcs: vec![TimingArc {
-                            related_pin: "CLK".to_string(),
-                            timing_sense: "non_unate".to_string(),
-                            timing_type: "setup_rising".to_string(),
-                            when: String::new(),
-                            tables: vec![],
-                        }],
-                        ..Default::default()
-                    },
-                    Pin {
-                        direction: PinDirection::Output as i32,
-                        function: "A".to_string(),
-                        name: "Y".to_string(),
-                        is_clocking_pin: false,
-                        timing_arcs: vec![TimingArc {
-                            related_pin: "A".to_string(),
-                            timing_sense: "positive_unate".to_string(),
-                            timing_type: "combinational".to_string(),
-                            when: String::new(),
-                            tables: vec![],
-                        }],
-                        ..Default::default()
-                    },
-                ],
-                area: 1.0,
-                sequential: vec![],
-                clock_gate: None,
-                threshold_voltage_group_id: 0,
-            }],
-            units: None,
-            lu_table_templates: vec![],
-            threshold_voltage_groups: vec![],
-            default_threshold_voltage_group_id: 0,
-            threshold_voltage_group_class_indices: vec![],
-        };
-        let indexed = IndexedLibrary::new(lib);
+        let mut builder = LibraryBuilder::new();
+        let setup = builder
+            .add_timing_arc("CLK", "non_unate", "setup_rising", "", vec![])
+            .unwrap();
+        let comb = builder
+            .add_timing_arc("A", "positive_unate", "combinational", "", vec![])
+            .unwrap();
+        builder.cells = vec![Cell {
+            name: "U1".to_string().into(),
+            pins: vec![
+                pin(&mut builder, PinDirection::Input, "A", "", vec![setup]),
+                pin(&mut builder, PinDirection::Output, "Y", "A", vec![comb]),
+            ],
+            area: 1.0,
+            sequential: vec![],
+            clock_gate: None,
+            threshold_voltage_group_id: 0,
+            dont_use: None,
+        }];
+        let indexed = IndexedLibrary::new(builder.finish());
 
         assert!(indexed.timing_arcs_for_pin("U1", "A").is_none());
         assert!(indexed.timing_arc_for_pin("U1", "A", "CLK").is_none());
@@ -671,6 +641,6 @@ mod tests {
         let arc = indexed
             .timing_arc_for_pin("U1", "Y", "A")
             .expect("output combinational arc should still be found");
-        assert_eq!(arc.timing_type, "combinational");
+        assert_eq!(arc.timing_type_str(indexed.library()), "combinational");
     }
 }

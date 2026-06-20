@@ -4,34 +4,33 @@ syntax = "proto3";
 
 package liberty;
 
-// Design policy:
-// This schema prefers explicit typed fields for data consumed by algorithms.
-// We intentionally avoid a generic key/value "attributes" bag.
-// If new Liberty data is needed, add explicit typed fields where consumed.
-//
-// Validation policy:
-// `parse_liberty_files_to_proto()` validates consistency before returning.
-// Protos produced by that path are expected to satisfy the invariants noted
-// below. If consuming third-party protos, run the same validator before
-// relying on those invariants.
-
+// Compact, evaluator-oriented Liberty wire representation. LUT values use
+// float32 and axis vectors are interned library-wide. Rust consumers expand
+// this into the normalized in-memory model before evaluation.
 message Library {
-  // In validated payloads:
-  // - cell pin names are unique per cell.
-  // - timing arcs reference existing related_pin names.
-  // - timing-table/template axes are contiguous (no index_2 without index_1).
-  repeated Cell cells = 1;
-  LibraryUnits units = 2;
-  repeated LuTableTemplate lu_table_templates = 3;
-  // Interned native Liberty threshold-voltage group names.
-  repeated string threshold_voltage_groups = 4;
-  // Nonzero IDs are 1-based references into threshold_voltage_groups:
-  // ID 1 refers to threshold_voltage_groups[0]. ID 0 means "unset".
-  uint32 default_threshold_voltage_group_id = 5;
-  // Optional VT speed classes parallel to threshold_voltage_groups. When
-  // populated, element i gives the speed class for threshold_voltage_groups[i]:
-  // 0 is nominal, larger values are faster, and smaller values are slower.
-  repeated sint32 threshold_voltage_group_class_indices = 6;
+  // Wire-format discriminator. Old Liberty proto encodings use a message at
+  // tag 1, so their incompatible wire type is rejected rather than silently
+  // misdecoded.
+  fixed64 format_magic = 1;
+  repeated Cell cells = 2;
+  LibraryUnits units = 3;
+  repeated LuTableTemplate lu_table_templates = 4;
+  repeated string threshold_voltage_groups = 5;
+  uint32 default_threshold_voltage_group_id = 6;
+  repeated sint32 threshold_voltage_group_class_indices = 7;
+  // Liberty `nom_voltage`, used by single-rail switching-energy models.
+  optional double nominal_voltage = 8;
+  // Free-form, user-supplied source-collateral identity.
+  string provenance = 9;
+  // Basenames of source Liberty files in parsing order.
+  repeated string source_files = 10;
+  // Nonzero axis IDs are 1-based references into this list.
+  repeated LutAxis lut_axes = 11;
+  // Nonzero string IDs are 1-based references into this list. Frequently used
+  // strings receive lower IDs to minimize protobuf varint sizes.
+  repeated string interned_strings = 12;
+  // Nonzero shape IDs are 1-based references into this list.
+  repeated LutShape lut_shapes = 13;
 }
 
 message Cell {
@@ -40,9 +39,9 @@ message Cell {
   double area = 3;
   repeated Sequential sequential = 4;
   ClockGate clock_gate = 5;
-  // Nonzero IDs are 1-based references into Library.threshold_voltage_groups:
-  // ID 1 refers to Library.threshold_voltage_groups[0]. ID 0 means "unset".
   uint32 threshold_voltage_group_id = 6;
+  // Native Liberty `dont_use`, before any external filtering policy.
+  optional bool dont_use = 7;
 }
 
 enum PinDirection {
@@ -53,14 +52,15 @@ enum PinDirection {
 
 message Pin {
   PinDirection direction = 1;
-  string function = 2;
-  string name = 3;
+  uint32 function_string_id = 2;
+  uint32 name_string_id = 3;
   bool is_clocking_pin = 4;
   optional double capacitance = 5;
   optional double rise_capacitance = 6;
   optional double fall_capacitance = 7;
   optional double max_capacitance = 8;
   repeated TimingArc timing_arcs = 9;
+  repeated InternalPower internal_power = 10;
 }
 
 message ClockGate {
@@ -80,47 +80,165 @@ message LibraryUnits {
   string leakage_power_unit = 7;
 }
 
+enum LutTemplateKind {
+  LUT_TEMPLATE_KIND_UNKNOWN = 0;
+  LUT_TEMPLATE_KIND_TIMING = 1;
+  LUT_TEMPLATE_KIND_POWER = 2;
+  LUT_TEMPLATE_KIND_OTHER = 3;
+}
+
+enum LutVariable {
+  LUT_VARIABLE_UNSPECIFIED = 0;
+  LUT_VARIABLE_INPUT_NET_TRANSITION = 1;
+  LUT_VARIABLE_INPUT_TRANSITION_TIME = 2;
+  LUT_VARIABLE_TOTAL_OUTPUT_NET_CAPACITANCE = 3;
+  LUT_VARIABLE_RELATED_PIN_TRANSITION = 4;
+  LUT_VARIABLE_CONSTRAINED_PIN_TRANSITION = 5;
+  LUT_VARIABLE_OUTPUT_NET_LENGTH = 6;
+  LUT_VARIABLE_OUTPUT_NET_WIRE_CAP = 7;
+  LUT_VARIABLE_OUTPUT_NET_PIN_CAP = 8;
+  LUT_VARIABLE_RELATED_OUT_TOTAL_OUTPUT_NET_CAPACITANCE = 9;
+  LUT_VARIABLE_RELATED_OUT_OUTPUT_NET_LENGTH = 10;
+  LUT_VARIABLE_RELATED_OUT_OUTPUT_NET_WIRE_CAP = 11;
+  LUT_VARIABLE_RELATED_OUT_OUTPUT_NET_PIN_CAP = 12;
+  LUT_VARIABLE_CONNECT_DELAY = 13;
+  LUT_VARIABLE_TIME = 14;
+  LUT_VARIABLE_INPUT_VOLTAGE = 15;
+  LUT_VARIABLE_OUTPUT_VOLTAGE = 16;
+  LUT_VARIABLE_PATH_DEPTH = 17;
+  LUT_VARIABLE_PATH_DISTANCE = 18;
+  LUT_VARIABLE_NORMALIZED_VOLTAGE = 19;
+  LUT_VARIABLE_TEMPERATURE = 20;
+  LUT_VARIABLE_OTHER = 21;
+}
+
 message LuTableTemplate {
-  // E.g. "lu_table_template", "power_lut_template".
-  string kind = 1;
+  LutTemplateKind kind = 1;
   string name = 2;
-  string variable_1 = 3;
-  string variable_2 = 4;
-  string variable_3 = 5;
-  repeated double index_1 = 6;
-  repeated double index_2 = 7;
-  repeated double index_3 = 8;
+  LutVariable variable_1 = 3;
+  LutVariable variable_2 = 4;
+  LutVariable variable_3 = 5;
+  uint32 index_1_id = 6;
+  uint32 index_2_id = 7;
+  uint32 index_3_id = 8;
+  // Fallbacks used only when the corresponding enum is OTHER.
+  uint32 kind_string_id = 9;
+  uint32 variable_1_string_id = 10;
+  uint32 variable_2_string_id = 11;
+  uint32 variable_3_string_id = 12;
+}
+
+message LutAxis {
+  repeated double values = 1;
+}
+
+enum TimingSense {
+  TIMING_SENSE_UNSPECIFIED = 0;
+  TIMING_SENSE_POSITIVE_UNATE = 1;
+  TIMING_SENSE_NEGATIVE_UNATE = 2;
+  TIMING_SENSE_NON_UNATE = 3;
+  TIMING_SENSE_OTHER = 4;
+}
+
+enum TimingType {
+  TIMING_TYPE_UNSPECIFIED = 0;
+  TIMING_TYPE_COMBINATIONAL = 1;
+  TIMING_TYPE_COMBINATIONAL_RISE = 2;
+  TIMING_TYPE_COMBINATIONAL_FALL = 3;
+  TIMING_TYPE_RISING_EDGE = 4;
+  TIMING_TYPE_FALLING_EDGE = 5;
+  TIMING_TYPE_PRESET = 6;
+  TIMING_TYPE_CLEAR = 7;
+  TIMING_TYPE_HOLD_RISING = 8;
+  TIMING_TYPE_HOLD_FALLING = 9;
+  TIMING_TYPE_SETUP_RISING = 10;
+  TIMING_TYPE_SETUP_FALLING = 11;
+  TIMING_TYPE_RECOVERY_RISING = 12;
+  TIMING_TYPE_RECOVERY_FALLING = 13;
+  TIMING_TYPE_REMOVAL_RISING = 14;
+  TIMING_TYPE_REMOVAL_FALLING = 15;
+  TIMING_TYPE_SKEW_RISING = 16;
+  TIMING_TYPE_SKEW_FALLING = 17;
+  TIMING_TYPE_MIN_PULSE_WIDTH = 18;
+  TIMING_TYPE_MINIMUM_PERIOD = 19;
+  TIMING_TYPE_THREE_STATE_ENABLE = 20;
+  TIMING_TYPE_THREE_STATE_DISABLE = 21;
+  TIMING_TYPE_THREE_STATE_ENABLE_RISE = 22;
+  TIMING_TYPE_THREE_STATE_ENABLE_FALL = 23;
+  TIMING_TYPE_THREE_STATE_DISABLE_RISE = 24;
+  TIMING_TYPE_THREE_STATE_DISABLE_FALL = 25;
+  TIMING_TYPE_NON_SEQ_SETUP_RISING = 26;
+  TIMING_TYPE_NON_SEQ_SETUP_FALLING = 27;
+  TIMING_TYPE_NON_SEQ_HOLD_RISING = 28;
+  TIMING_TYPE_NON_SEQ_HOLD_FALLING = 29;
+  TIMING_TYPE_NOCHANGE_HIGH_HIGH = 30;
+  TIMING_TYPE_NOCHANGE_HIGH_LOW = 31;
+  TIMING_TYPE_NOCHANGE_LOW_HIGH = 32;
+  TIMING_TYPE_NOCHANGE_LOW_LOW = 33;
+  TIMING_TYPE_OTHER = 34;
 }
 
 message TimingArc {
-  string related_pin = 1;
-  string timing_sense = 2;
-  string timing_type = 3;
-  string when = 4;
+  uint32 related_pin_string_id = 1;
+  TimingSense timing_sense = 2;
+  TimingType timing_type = 3;
+  uint32 when_string_id = 4;
   repeated TimingTable tables = 5;
+  // Fallbacks used only when the corresponding enum is OTHER.
+  uint32 timing_sense_string_id = 6;
+  uint32 timing_type_string_id = 7;
+}
+
+enum TimingTableKind {
+  TIMING_TABLE_KIND_UNKNOWN = 0;
+  TIMING_TABLE_KIND_CELL_RISE = 1;
+  TIMING_TABLE_KIND_CELL_FALL = 2;
+  TIMING_TABLE_KIND_RISE_TRANSITION = 3;
+  TIMING_TABLE_KIND_FALL_TRANSITION = 4;
+  TIMING_TABLE_KIND_RISE_CONSTRAINT = 5;
+  TIMING_TABLE_KIND_FALL_CONSTRAINT = 6;
 }
 
 message TimingTable {
-  // E.g. "cell_rise", "cell_fall", "rise_transition", "fall_transition".
-  string kind = 1;
-  // Compact reference into `Library.lu_table_templates`, using 1-based IDs.
-  // 0 means "unset".
-  // In validated payloads, nonzero IDs are in-range and kind-compatible.
-  uint32 template_id = 2;
-  // Axes are only populated when this table overrides template axes.
-  repeated double index_1 = 3;
-  repeated double index_2 = 4;
-  repeated double index_3 = 5;
-  // Flattened numeric payload in row-major order.
-  repeated double values = 6;
-  // Shape for `values` payload.
-  // In validated payloads:
-  // - rank matches effective table axes (explicit index_* or template defaults).
-  // - each extent matches the corresponding effective axis length.
-  // - `values.len()` equals the product of extents.
-  repeated uint32 dimensions = 7;
-  // Legacy fallback for compatibility when template_id cannot be resolved.
-  string template_name = 8;
+  TimingTableKind kind = 1;
+  uint32 shape_id = 2;
+  repeated float values = 3;
+}
+
+message InternalPower {
+  // Empty means the owning pin is the event source.
+  repeated uint32 related_pin_string_ids = 1;
+  uint32 when_string_id = 2;
+  uint32 related_pg_pin_string_id = 3;
+  repeated PowerTable tables = 4;
+}
+
+enum PowerTransition {
+  POWER_TRANSITION_UNKNOWN = 0;
+  POWER_TRANSITION_RISE = 1;
+  POWER_TRANSITION_FALL = 2;
+  // Liberty `power`, applicable to either direction.
+  POWER_TRANSITION_BOTH = 3;
+}
+
+message PowerTable {
+  PowerTransition transition = 1;
+  uint32 shape_id = 2;
+  // Flattened row-major values. The energy scale is voltage_unit squared
+  // times capacitance_unit; nominal_voltage is not another multiplier.
+  repeated float values = 3;
+}
+
+// Shared metadata describing a timing or power table's coordinate grid.
+message LutShape {
+  // 1-based reference into Library.lu_table_templates; 0 means unset.
+  uint32 template_id = 1;
+  uint32 index_1_id = 2;
+  uint32 index_2_id = 3;
+  uint32 index_3_id = 4;
+  repeated uint32 dimensions = 5;
+  // Used only for an unresolved legacy template reference.
+  uint32 template_name_string_id = 6;
 }
 
 enum SequentialKind {
@@ -132,16 +250,13 @@ enum SequentialKind {
 // Represents sequential behavior specified via `ff (...) { ... }` or
 // `latch (...) { ... }` blocks in Liberty.
 message Sequential {
-  // The state variable name (e.g. IQ / IQN) referenced by pin functions.
   string state_var = 1;
-  // The next-state boolean formula (e.g. scan muxing or fused logic).
   string next_state = 2;
-  // The clock/enable expression when present (e.g. clocked_on / enable).
   string clock_expr = 3;
-  // The originating Liberty block kind: ff or latch.
   SequentialKind kind = 4;
-  // Async clear expression when present on flops.
   string clear_expr = 5;
-  // Async preset expression when present on flops.
   string preset_expr = 6;
+  // Liberty's optional second ff/latch qualifier, which is the logical
+  // complement of state_var (for example, IQN for IQ).
+  optional string complementary_state_var = 7;
 }

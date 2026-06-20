@@ -24,6 +24,17 @@ pub mod verilog_version;
 pub mod liberty_proto {
     include!(concat!(env!("OUT_DIR"), "/liberty.rs"));
 }
+/// Normalized in-memory Liberty model used by evaluators and transforms.
+pub mod liberty_model {
+    pub use crate::liberty::model::{
+        AxisId, Cell, InternalPower, Library, LibraryBuilder, LuTableTemplate, LutShape,
+        LutTemplateKind, LutValueRange, LutVariable, Pin, PowerTable, StringId, TimingArc,
+        TimingSense, TimingTable, TimingType,
+    };
+    pub use crate::liberty_proto::{
+        ClockGate, LibraryUnits, PinDirection, PowerTransition, Sequential, SequentialKind,
+    };
+}
 pub mod result_proto {
     include!(concat!(env!("OUT_DIR"), "/g8r_results.rs"));
 }

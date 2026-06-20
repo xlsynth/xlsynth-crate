@@ -7,137 +7,140 @@ use xlsynth_g8r::netlist::io::parse_netlist_from_path;
 use xlsynth_g8r::netlist::sta::{StaOptions, analyze_combinational_max_arrival};
 
 const SYNTHETIC_TIMING_LIBRARY: &str = r#"
+format_magic: 5496997758177923663
 cells: {
   name: "INV"
-  pins: { name: "A" direction: INPUT capacitance: 1.0 }
+  pins: { name_string_id: 1 direction: INPUT capacitance: 1.0 }
   pins: {
-    name: "Y"
+    name_string_id: 2
     direction: OUTPUT
-    function: "!A"
+    function_string_id: 3
     timing_arcs: {
-      related_pin: "A"
-      timing_sense: "negative_unate"
-      timing_type: "combinational"
-      tables: { kind: "cell_rise" values: 2.0 }
-      tables: { kind: "cell_fall" values: 3.0 }
-      tables: { kind: "rise_transition" values: 0.2 }
-      tables: { kind: "fall_transition" values: 0.3 }
+      related_pin_string_id: 1
+      timing_sense: TIMING_SENSE_NEGATIVE_UNATE
+      timing_type: TIMING_TYPE_COMBINATIONAL
+      tables: { kind: TIMING_TABLE_KIND_CELL_RISE shape_id: 1 values: 2.0 }
+      tables: { kind: TIMING_TABLE_KIND_CELL_FALL shape_id: 1 values: 3.0 }
+      tables: { kind: TIMING_TABLE_KIND_RISE_TRANSITION shape_id: 1 values: 0.2 }
+      tables: { kind: TIMING_TABLE_KIND_FALL_TRANSITION shape_id: 1 values: 0.3 }
     }
   }
 }
 cells: {
   name: "NAND2"
-  pins: { name: "A" direction: INPUT capacitance: 2.0 }
-  pins: { name: "B" direction: INPUT capacitance: 2.0 }
+  pins: { name_string_id: 1 direction: INPUT capacitance: 2.0 }
+  pins: { name_string_id: 4 direction: INPUT capacitance: 2.0 }
   pins: {
-    name: "Y"
+    name_string_id: 2
     direction: OUTPUT
-    function: "!(A*B)"
+    function_string_id: 5
     timing_arcs: {
-      related_pin: "A"
-      timing_sense: "negative_unate"
-      timing_type: "combinational"
-      tables: { kind: "cell_rise" values: 4.0 }
-      tables: { kind: "cell_fall" values: 5.0 }
-      tables: { kind: "rise_transition" values: 0.4 }
-      tables: { kind: "fall_transition" values: 0.5 }
+      related_pin_string_id: 1
+      timing_sense: TIMING_SENSE_NEGATIVE_UNATE
+      timing_type: TIMING_TYPE_COMBINATIONAL
+      tables: { kind: TIMING_TABLE_KIND_CELL_RISE shape_id: 1 values: 4.0 }
+      tables: { kind: TIMING_TABLE_KIND_CELL_FALL shape_id: 1 values: 5.0 }
+      tables: { kind: TIMING_TABLE_KIND_RISE_TRANSITION shape_id: 1 values: 0.4 }
+      tables: { kind: TIMING_TABLE_KIND_FALL_TRANSITION shape_id: 1 values: 0.5 }
     }
     timing_arcs: {
-      related_pin: "B"
-      timing_sense: "negative_unate"
-      timing_type: "combinational"
-      tables: { kind: "cell_rise" values: 4.0 }
-      tables: { kind: "cell_fall" values: 5.0 }
-      tables: { kind: "rise_transition" values: 0.4 }
-      tables: { kind: "fall_transition" values: 0.5 }
+      related_pin_string_id: 4
+      timing_sense: TIMING_SENSE_NEGATIVE_UNATE
+      timing_type: TIMING_TYPE_COMBINATIONAL
+      tables: { kind: TIMING_TABLE_KIND_CELL_RISE shape_id: 1 values: 4.0 }
+      tables: { kind: TIMING_TABLE_KIND_CELL_FALL shape_id: 1 values: 5.0 }
+      tables: { kind: TIMING_TABLE_KIND_RISE_TRANSITION shape_id: 1 values: 0.4 }
+      tables: { kind: TIMING_TABLE_KIND_FALL_TRANSITION shape_id: 1 values: 0.5 }
     }
   }
 }
 cells: {
   name: "NOR2"
-  pins: { name: "A" direction: INPUT capacitance: 2.0 }
-  pins: { name: "B" direction: INPUT capacitance: 2.0 }
+  pins: { name_string_id: 1 direction: INPUT capacitance: 2.0 }
+  pins: { name_string_id: 4 direction: INPUT capacitance: 2.0 }
   pins: {
-    name: "Y"
+    name_string_id: 2
     direction: OUTPUT
-    function: "!(A+B)"
+    function_string_id: 6
     timing_arcs: {
-      related_pin: "A"
-      timing_sense: "negative_unate"
-      timing_type: "combinational"
-      tables: { kind: "cell_rise" values: 6.0 }
-      tables: { kind: "cell_fall" values: 7.0 }
-      tables: { kind: "rise_transition" values: 0.6 }
-      tables: { kind: "fall_transition" values: 0.7 }
+      related_pin_string_id: 1
+      timing_sense: TIMING_SENSE_NEGATIVE_UNATE
+      timing_type: TIMING_TYPE_COMBINATIONAL
+      tables: { kind: TIMING_TABLE_KIND_CELL_RISE shape_id: 1 values: 6.0 }
+      tables: { kind: TIMING_TABLE_KIND_CELL_FALL shape_id: 1 values: 7.0 }
+      tables: { kind: TIMING_TABLE_KIND_RISE_TRANSITION shape_id: 1 values: 0.6 }
+      tables: { kind: TIMING_TABLE_KIND_FALL_TRANSITION shape_id: 1 values: 0.7 }
     }
     timing_arcs: {
-      related_pin: "B"
-      timing_sense: "negative_unate"
-      timing_type: "combinational"
-      tables: { kind: "cell_rise" values: 6.0 }
-      tables: { kind: "cell_fall" values: 7.0 }
-      tables: { kind: "rise_transition" values: 0.6 }
-      tables: { kind: "fall_transition" values: 0.7 }
+      related_pin_string_id: 4
+      timing_sense: TIMING_SENSE_NEGATIVE_UNATE
+      timing_type: TIMING_TYPE_COMBINATIONAL
+      tables: { kind: TIMING_TABLE_KIND_CELL_RISE shape_id: 1 values: 6.0 }
+      tables: { kind: TIMING_TABLE_KIND_CELL_FALL shape_id: 1 values: 7.0 }
+      tables: { kind: TIMING_TABLE_KIND_RISE_TRANSITION shape_id: 1 values: 0.6 }
+      tables: { kind: TIMING_TABLE_KIND_FALL_TRANSITION shape_id: 1 values: 0.7 }
     }
   }
 }
 cells: {
   name: "XOR2"
-  pins: { name: "A" direction: INPUT capacitance: 2.0 }
-  pins: { name: "B" direction: INPUT capacitance: 2.0 }
+  pins: { name_string_id: 1 direction: INPUT capacitance: 2.0 }
+  pins: { name_string_id: 4 direction: INPUT capacitance: 2.0 }
   pins: {
-    name: "Y"
+    name_string_id: 2
     direction: OUTPUT
-    function: "(A*!B)+(!A*B)"
+    function_string_id: 7
     timing_arcs: {
-      related_pin: "A"
-      timing_sense: "non_unate"
-      timing_type: "combinational"
-      tables: { kind: "cell_rise" values: 8.0 }
-      tables: { kind: "cell_fall" values: 9.0 }
-      tables: { kind: "rise_transition" values: 0.8 }
-      tables: { kind: "fall_transition" values: 0.9 }
+      related_pin_string_id: 1
+      timing_sense: TIMING_SENSE_NON_UNATE
+      timing_type: TIMING_TYPE_COMBINATIONAL
+      tables: { kind: TIMING_TABLE_KIND_CELL_RISE shape_id: 1 values: 8.0 }
+      tables: { kind: TIMING_TABLE_KIND_CELL_FALL shape_id: 1 values: 9.0 }
+      tables: { kind: TIMING_TABLE_KIND_RISE_TRANSITION shape_id: 1 values: 0.8 }
+      tables: { kind: TIMING_TABLE_KIND_FALL_TRANSITION shape_id: 1 values: 0.9 }
     }
     timing_arcs: {
-      related_pin: "B"
-      timing_sense: "non_unate"
-      timing_type: "combinational"
-      tables: { kind: "cell_rise" values: 8.0 }
-      tables: { kind: "cell_fall" values: 9.0 }
-      tables: { kind: "rise_transition" values: 0.8 }
-      tables: { kind: "fall_transition" values: 0.9 }
+      related_pin_string_id: 4
+      timing_sense: TIMING_SENSE_NON_UNATE
+      timing_type: TIMING_TYPE_COMBINATIONAL
+      tables: { kind: TIMING_TABLE_KIND_CELL_RISE shape_id: 1 values: 8.0 }
+      tables: { kind: TIMING_TABLE_KIND_CELL_FALL shape_id: 1 values: 9.0 }
+      tables: { kind: TIMING_TABLE_KIND_RISE_TRANSITION shape_id: 1 values: 0.8 }
+      tables: { kind: TIMING_TABLE_KIND_FALL_TRANSITION shape_id: 1 values: 0.9 }
     }
   }
 }
 cells: {
   name: "XNOR2"
-  pins: { name: "A" direction: INPUT capacitance: 2.0 }
-  pins: { name: "B" direction: INPUT capacitance: 2.0 }
+  pins: { name_string_id: 1 direction: INPUT capacitance: 2.0 }
+  pins: { name_string_id: 4 direction: INPUT capacitance: 2.0 }
   pins: {
-    name: "Y"
+    name_string_id: 2
     direction: OUTPUT
-    function: "(A*B)+(!A*!B)"
+    function_string_id: 8
     timing_arcs: {
-      related_pin: "A"
-      timing_sense: "non_unate"
-      timing_type: "combinational"
-      tables: { kind: "cell_rise" values: 10.0 }
-      tables: { kind: "cell_fall" values: 11.0 }
-      tables: { kind: "rise_transition" values: 1.0 }
-      tables: { kind: "fall_transition" values: 1.1 }
+      related_pin_string_id: 1
+      timing_sense: TIMING_SENSE_NON_UNATE
+      timing_type: TIMING_TYPE_COMBINATIONAL
+      tables: { kind: TIMING_TABLE_KIND_CELL_RISE shape_id: 1 values: 10.0 }
+      tables: { kind: TIMING_TABLE_KIND_CELL_FALL shape_id: 1 values: 11.0 }
+      tables: { kind: TIMING_TABLE_KIND_RISE_TRANSITION shape_id: 1 values: 1.0 }
+      tables: { kind: TIMING_TABLE_KIND_FALL_TRANSITION shape_id: 1 values: 1.1 }
     }
     timing_arcs: {
-      related_pin: "B"
-      timing_sense: "non_unate"
-      timing_type: "combinational"
-      tables: { kind: "cell_rise" values: 10.0 }
-      tables: { kind: "cell_fall" values: 11.0 }
-      tables: { kind: "rise_transition" values: 1.0 }
-      tables: { kind: "fall_transition" values: 1.1 }
+      related_pin_string_id: 4
+      timing_sense: TIMING_SENSE_NON_UNATE
+      timing_type: TIMING_TYPE_COMBINATIONAL
+      tables: { kind: TIMING_TABLE_KIND_CELL_RISE shape_id: 1 values: 10.0 }
+      tables: { kind: TIMING_TABLE_KIND_CELL_FALL shape_id: 1 values: 11.0 }
+      tables: { kind: TIMING_TABLE_KIND_RISE_TRANSITION shape_id: 1 values: 1.0 }
+      tables: { kind: TIMING_TABLE_KIND_FALL_TRANSITION shape_id: 1 values: 1.1 }
     }
   }
 }
 units: { time_unit: "1ps" capacitance_unit: "1pf" }
+interned_strings: ["A", "Y", "!A", "B", "!(A*B)", "!(A+B)", "(A*!B)+(!A*B)", "(A*B)+(!A*!B)"]
+lut_shapes: {}
 "#;
 
 struct StaCase {
