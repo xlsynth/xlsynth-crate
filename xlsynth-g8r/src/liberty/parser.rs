@@ -21,6 +21,29 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 
+/// Selects optional Liberty payload classes while converting source files.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LibertyPayloadOptions {
+    pub include_timing: bool,
+    pub include_power: bool,
+}
+
+impl LibertyPayloadOptions {
+    /// Includes every supported payload class.
+    pub const fn all() -> Self {
+        Self {
+            include_timing: true,
+            include_power: true,
+        }
+    }
+}
+
+impl Default for LibertyPayloadOptions {
+    fn default() -> Self {
+        Self::all()
+    }
+}
+
 fn value_to_f64(value: &crate::liberty::liberty_parser::Value) -> f64 {
     match value {
         crate::liberty::liberty_parser::Value::Number(n) => *n,
@@ -451,13 +474,22 @@ fn merge_library_units(existing: &mut LibraryUnits, incoming: &LibraryUnits) -> 
     conflicts
 }
 
-fn parse_table_templates(block: &Block, builder: &mut LibraryBuilder) -> Vec<LuTableTemplate> {
+fn parse_table_templates(
+    block: &Block,
+    builder: &mut LibraryBuilder,
+    payload_options: LibertyPayloadOptions,
+) -> Vec<LuTableTemplate> {
     let mut out = Vec::new();
     for member in &block.members {
         let BlockMember::SubBlock(sub_block) = member else {
             continue;
         };
         if !sub_block.block_type.ends_with("template") {
+            continue;
+        }
+        if (sub_block.block_type == "lu_table_template" && !payload_options.include_timing)
+            || (sub_block.block_type == "power_lut_template" && !payload_options.include_power)
+        {
             continue;
         }
         let mut tmpl = LuTableTemplate {
@@ -1098,6 +1130,7 @@ fn block_to_model_cells(
     block: &Block,
     threshold_voltage_group_interner: &mut ThresholdVoltageGroupInterner,
     builder: &mut LibraryBuilder,
+    payload_options: LibertyPayloadOptions,
 ) -> Result<Vec<Cell>, String> {
     let mut cells = Vec::new();
     for member in &block.members {
@@ -1212,9 +1245,11 @@ fn block_to_model_cells(
                         }
                     }
                     BlockMember::SubBlock(sub_block) => {
-                        if sub_block.block_type == "timing" {
+                        if sub_block.block_type == "timing" && payload_options.include_timing {
                             timing_arcs.push(parse_timing_arc(sub_block, builder));
-                        } else if sub_block.block_type == "internal_power" {
+                        } else if sub_block.block_type == "internal_power"
+                            && payload_options.include_power
+                        {
                             internal_power.push(parse_internal_power(sub_block, builder));
                         }
                     }
@@ -1617,7 +1652,7 @@ pub fn validate_library_consistency(library: &Library) -> Result<(), String> {
 
 fn parse_liberty_files_impl<P: AsRef<Path>>(
     paths: &[P],
-    validate_payloads: bool,
+    payload_options: LibertyPayloadOptions,
     threshold_voltage_group_rules: &[ThresholdVoltageGroupRule],
 ) -> Result<Library, String> {
     let compiled_threshold_voltage_group_rules =
@@ -1665,16 +1700,25 @@ fn parse_liberty_files_impl<P: AsRef<Path>>(
     let mut threshold_voltage_group_interner = ThresholdVoltageGroupInterner::default();
     for lib in &libraries {
         let parsed_default_threshold_voltage_group = parse_default_threshold_voltage_group(lib);
-        let parsed_nominal_voltage = parse_nominal_voltage(lib)?;
+        let parsed_nominal_voltage = if payload_options.include_power {
+            parse_nominal_voltage(lib)?
+        } else {
+            None
+        };
         if parsed_default_threshold_voltage_group.is_some() {
             saw_library_with_default_threshold_voltage_group = true;
         }
         let mut builder = LibraryBuilder::new();
         builder.library_mut().nominal_voltage = parsed_nominal_voltage;
         // Field name is historical; this stores all parsed template kinds.
-        let templates = parse_table_templates(lib, &mut builder);
+        let templates = parse_table_templates(lib, &mut builder, payload_options);
         builder.library_mut().lu_table_templates = templates;
-        let cells = block_to_model_cells(lib, &mut threshold_voltage_group_interner, &mut builder)?;
+        let cells = block_to_model_cells(
+            lib,
+            &mut threshold_voltage_group_interner,
+            &mut builder,
+            payload_options,
+        )?;
         builder.library_mut().cells = cells;
         let mut per_library = builder.finish();
         if parsed_default_threshold_voltage_group.is_none()
@@ -1769,10 +1813,7 @@ fn parse_liberty_files_impl<P: AsRef<Path>>(
     merged_library.default_threshold_voltage_group_id = default_threshold_voltage_group_id;
     merged_library.threshold_voltage_group_class_indices = threshold_voltage_group_class_indices;
     merged_library.nominal_voltage = nominal_voltage;
-    merged_library.compact_reference_pools();
-    if validate_payloads {
-        validate_library_consistency(&merged_library)?;
-    }
+    validate_library_consistency(&merged_library)?;
     Ok(merged_library)
 }
 
@@ -1788,41 +1829,32 @@ pub fn parse_liberty_files_with_vt_rules<P: AsRef<Path>>(
 ) -> Result<Library, String> {
     parse_liberty_files_impl(
         paths,
-        /* validate_payloads= */ true,
+        LibertyPayloadOptions::all(),
         threshold_voltage_group_rules,
     )
 }
 
-/// Parses Liberty files without validating timing or power payloads.
-///
-/// Callers must strip unrequested payload classes and then call
-/// [`validate_library_consistency`] before serializing or evaluating the data.
-pub fn parse_liberty_files_with_vt_rules_without_payload_validation<P: AsRef<Path>>(
+/// Parses Liberty files while materializing only the selected payload classes.
+pub fn parse_liberty_files_with_vt_rules_and_payload_options<P: AsRef<Path>>(
     paths: &[P],
     threshold_voltage_group_rules: &[ThresholdVoltageGroupRule],
+    payload_options: LibertyPayloadOptions,
 ) -> Result<Library, String> {
-    parse_liberty_files_impl(
-        paths,
-        /* validate_payloads= */ false,
-        threshold_voltage_group_rules,
-    )
+    parse_liberty_files_impl(paths, payload_options, threshold_voltage_group_rules)
 }
 
-/// Parses Liberty files without validating timing or power payloads.
-///
-/// This compatibility wrapper is intended for conversion paths that strip
-/// payloads before explicitly validating the retained data.
-pub fn parse_liberty_files_without_timing_validation<P: AsRef<Path>>(
+/// Parses Liberty files while materializing only the selected payload classes.
+pub fn parse_liberty_files_with_payload_options<P: AsRef<Path>>(
     paths: &[P],
+    payload_options: LibertyPayloadOptions,
 ) -> Result<Library, String> {
-    parse_liberty_files_with_vt_rules_without_payload_validation(paths, &[])
+    parse_liberty_files_with_vt_rules_and_payload_options(paths, &[], payload_options)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::liberty::descriptor::LIBERTY_DESCRIPTOR;
-    use crate::liberty::load::strip_timing_data;
     use crate::liberty::model::library_to_proto;
     use prost::Message;
     use prost_reflect::{DescriptorPool, DynamicMessage};
@@ -3063,7 +3095,7 @@ mod tests {
         assert!(err.contains("unsupported multi-pin related_pin selector 'A B'"));
     }
     #[test]
-    fn test_parse_without_timing_validation_allows_strip_no_timing_data_path() {
+    fn test_payload_options_skip_unrequested_invalid_payloads() {
         let liberty_text = r#"
         library (my_library) {
             lu_table_template (tmpl_1d) {
@@ -3082,6 +3114,8 @@ mod tests {
                             values ("0.10, 0.20");
                         }
                     }
+                    internal_power () {
+                    }
                 }
             }
         }
@@ -3091,19 +3125,14 @@ mod tests {
         let err = parse_liberty_files(&[tmp.path()]).unwrap_err();
         assert!(err.contains("references unknown related_pin"));
 
-        let mut lib = parse_liberty_files_without_timing_validation(&[tmp.path()]).unwrap();
-        let pin = lib
-            .cells
-            .iter()
-            .find(|c| c.name == "BUF")
-            .unwrap()
-            .pins
-            .iter()
-            .find(|p| lib.resolve_string(&p.name) == "Y")
-            .unwrap();
-        assert_eq!(pin.timing_arcs.len(), 1);
-
-        strip_timing_data(&mut lib);
+        let lib = parse_liberty_files_with_payload_options(
+            &[tmp.path()],
+            LibertyPayloadOptions {
+                include_timing: false,
+                include_power: false,
+            },
+        )
+        .unwrap();
         let pin = lib
             .cells
             .iter()
@@ -3114,6 +3143,20 @@ mod tests {
             .find(|p| lib.resolve_string(&p.name) == "Y")
             .unwrap();
         assert!(pin.timing_arcs.is_empty());
+        assert!(pin.internal_power.is_empty());
+        assert!(lib.lu_table_templates.is_empty());
+        assert!(lib.lut_shapes.is_empty());
+        assert!(lib.lut_values.is_empty());
+
+        let power_error = parse_liberty_files_with_payload_options(
+            &[tmp.path()],
+            LibertyPayloadOptions {
+                include_timing: false,
+                include_power: true,
+            },
+        )
+        .unwrap_err();
+        assert!(power_error.contains("has no power tables"));
     }
 
     #[test]

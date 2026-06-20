@@ -107,7 +107,7 @@ pub fn load_labeled_netlist_aig(
     let parsed = parse_netlist_from_path(netlist_path)?;
     let module = select_module(&parsed, options.module_name.as_deref())?;
     let liberty = load_liberty_from_path(liberty_proto_path)?;
-    project_labeled_netlist_aig(module, &parsed.nets, &parsed.interner, liberty.as_model())
+    project_labeled_netlist_aig(module, &parsed.nets, &parsed.interner, &liberty)
         .map_err(|e| anyhow!(e))
 }
 

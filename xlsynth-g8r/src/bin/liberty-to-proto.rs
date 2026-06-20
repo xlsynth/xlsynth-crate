@@ -12,10 +12,9 @@ pub mod liberty_proto {
 }
 
 use xlsynth_g8r::liberty::descriptor::liberty_proto_bytes_to_pretty_textproto;
-use xlsynth_g8r::liberty::model::{library_to_proto, strip_timing_data};
+use xlsynth_g8r::liberty::model::library_to_proto;
 use xlsynth_g8r::liberty::parser::{
-    parse_liberty_files, parse_liberty_files_without_timing_validation,
-    validate_library_consistency,
+    LibertyPayloadOptions, parse_liberty_files_with_payload_options,
 };
 
 #[derive(Parser, Debug)]
@@ -36,15 +35,14 @@ fn main() {
     let _ = env_logger::builder().try_init();
     let args = Args::parse();
     println!("Parsing and consolidating cells from all libraries...");
-    let mut proto_lib = if args.no_timing_data {
-        parse_liberty_files_without_timing_validation(&args.inputs).unwrap()
-    } else {
-        parse_liberty_files(&args.inputs).unwrap()
-    };
-    if args.no_timing_data {
-        strip_timing_data(&mut proto_lib);
-        validate_library_consistency(&proto_lib).expect("validate retained Liberty data");
-    }
+    let proto_lib = parse_liberty_files_with_payload_options(
+        &args.inputs,
+        LibertyPayloadOptions {
+            include_timing: !args.no_timing_data,
+            include_power: true,
+        },
+    )
+    .unwrap();
     let proto_lib = library_to_proto(proto_lib).expect("encode Liberty LUT data");
     println!("Writing output to {}...", args.output.display());
     let output_path = args.output.display().to_string();

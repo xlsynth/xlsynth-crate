@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::liberty::descriptor::liberty_descriptor_pool;
-pub use crate::liberty::model::strip_timing_data;
 use crate::liberty::model::{LIBERTY_FORMAT_MAGIC, library_from_proto};
 use crate::liberty_model;
 use crate::liberty_proto;
@@ -11,96 +10,7 @@ use prost::Message;
 use prost_reflect::DynamicMessage;
 use std::fs::File;
 use std::io::{BufReader, Read};
-use std::ops::Deref;
 use std::path::Path;
-
-#[derive(Debug)]
-pub struct Library {
-    proto: liberty_model::Library,
-}
-
-#[derive(Debug)]
-pub struct LibraryWithTimingData {
-    proto: liberty_model::Library,
-}
-
-impl Library {
-    /// Wraps Liberty model data after dropping timing payloads.
-    pub fn from_model(mut model: liberty_model::Library) -> Self {
-        strip_timing_data(&mut model);
-        Self { proto: model }
-    }
-
-    pub fn as_model(&self) -> &liberty_model::Library {
-        &self.proto
-    }
-
-    pub fn into_model(self) -> liberty_model::Library {
-        self.proto
-    }
-}
-
-impl LibraryWithTimingData {
-    /// Wraps fully populated Liberty model data while preserving timing
-    /// payloads.
-    pub fn from_model(model: liberty_model::Library) -> Self {
-        Self { proto: model }
-    }
-
-    pub fn as_model(&self) -> &liberty_model::Library {
-        &self.proto
-    }
-
-    pub fn into_model(self) -> liberty_model::Library {
-        self.proto
-    }
-}
-
-impl Deref for Library {
-    type Target = liberty_model::Library;
-
-    fn deref(&self) -> &Self::Target {
-        &self.proto
-    }
-}
-
-impl Deref for LibraryWithTimingData {
-    type Target = liberty_model::Library;
-
-    fn deref(&self) -> &Self::Target {
-        self.as_model()
-    }
-}
-
-impl AsRef<liberty_model::Library> for Library {
-    fn as_ref(&self) -> &liberty_model::Library {
-        &self.proto
-    }
-}
-
-impl AsRef<liberty_model::Library> for LibraryWithTimingData {
-    fn as_ref(&self) -> &liberty_model::Library {
-        self.as_model()
-    }
-}
-
-impl From<Library> for liberty_model::Library {
-    fn from(value: Library) -> Self {
-        value.proto
-    }
-}
-
-impl From<LibraryWithTimingData> for liberty_model::Library {
-    fn from(value: LibraryWithTimingData) -> Self {
-        value.into_model()
-    }
-}
-
-impl From<LibraryWithTimingData> for Library {
-    fn from(value: LibraryWithTimingData) -> Self {
-        Library::from_model(value.into_model())
-    }
-}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TimingTableSummary {
@@ -219,17 +129,14 @@ pub fn decode_timing_table_summary_skip_values_from_bytes(
     })
 }
 
-fn decode_library_from_bytes(bytes: &[u8], source_name: &str) -> Result<Library> {
-    Ok(Library::from_model(decode_library_binary_or_text(
-        bytes,
-        source_name,
-    )?))
+fn decode_library_from_bytes(bytes: &[u8], source_name: &str) -> Result<liberty_model::Library> {
+    decode_library_binary_or_text(bytes, source_name)
 }
 
 fn decode_library_with_timing_data_from_bytes(
     bytes: &[u8],
     source_name: &str,
-) -> Result<LibraryWithTimingData> {
+) -> Result<liberty_model::Library> {
     let model = decode_library_binary_or_text(bytes, source_name)?;
     if count_timing_tables(&model) == 0 {
         return Err(anyhow!(
@@ -237,7 +144,7 @@ fn decode_library_with_timing_data_from_bytes(
             source_name
         ));
     }
-    Ok(LibraryWithTimingData::from_model(model))
+    Ok(model)
 }
 
 /// Reads a binary proto or textproto, transparently decompressing `.gz` inputs.
@@ -257,12 +164,12 @@ pub fn read_liberty_proto_bytes_from_path(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-pub fn load_library_from_path(path: &Path) -> Result<Library> {
+pub fn load_library_from_path(path: &Path) -> Result<liberty_model::Library> {
     let bytes = read_liberty_proto_bytes_from_path(path)?;
     decode_library_from_bytes(&bytes, &path.display().to_string())
 }
 
-pub fn load_library_with_timing_data_from_path(path: &Path) -> Result<LibraryWithTimingData> {
+pub fn load_library_with_timing_data_from_path(path: &Path) -> Result<liberty_model::Library> {
     let bytes = read_liberty_proto_bytes_from_path(path)?;
     decode_library_with_timing_data_from_bytes(&bytes, &path.display().to_string())
 }
@@ -448,23 +355,34 @@ mod tests {
     }
 
     #[test]
-    fn non_timing_loader_strips_timing_and_remaps_templates() {
+    fn generic_loader_preserves_all_proto_payloads() {
         let wire = library_to_proto(make_payload()).unwrap();
         let loaded = decode_library_from_bytes(&wire.encode_to_vec(), "unit-test").unwrap();
 
-        assert!(loaded.cells[0].pins[0].timing_arcs.is_empty());
-        assert_eq!(loaded.lu_table_templates.len(), 1);
+        assert_eq!(loaded.cells[0].pins[0].timing_arcs.len(), 1);
+        assert_eq!(loaded.cells[0].pins[0].internal_power.len(), 1);
+        assert_eq!(loaded.lu_table_templates.len(), 2);
         assert_eq!(
             loaded.lu_table_templates[0].kind_str(&loaded),
+            "lu_table_template"
+        );
+        assert_eq!(
+            loaded.lu_table_templates[1].kind_str(&loaded),
             "power_lut_template"
         );
-        assert_eq!(loaded.lut_shapes.len(), 1);
-        assert_eq!(loaded.lut_values, vec![0.5_f32]);
+        assert_eq!(loaded.lut_shapes.len(), 2);
+        assert_eq!(loaded.lut_values, vec![0.25_f32, 0.5_f32]);
+        assert_eq!(
+            loaded
+                .timing_table_shape(&loaded.cells[0].pins[0].timing_arcs[0].tables[0])
+                .template_id,
+            1
+        );
         assert_eq!(
             loaded
                 .power_table_shape(&loaded.cells[0].pins[0].internal_power[0].tables[0])
                 .template_id,
-            1
+            2
         );
     }
 }

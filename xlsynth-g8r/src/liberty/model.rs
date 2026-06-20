@@ -123,131 +123,6 @@ impl Library {
             .expect("validated LUT axis ID")
     }
 
-    /// Removes unreferenced pool entries, coalesces duplicates, and remaps IDs.
-    pub(crate) fn compact_reference_pools(&mut self) {
-        fn mark_string(id: StringId, used: &mut [bool]) {
-            if !id.is_unset() {
-                used[(id.id - 1) as usize] = true;
-            }
-        }
-
-        fn remap_string(id: &mut StringId, remap: &[StringId]) {
-            if !id.is_unset() {
-                *id = remap[(id.id - 1) as usize];
-            }
-        }
-
-        let mut used_strings = vec![false; self.strings.len()];
-        for template in &self.lu_table_templates {
-            mark_string(template.kind.other, &mut used_strings);
-            mark_string(template.variable_1.other, &mut used_strings);
-            mark_string(template.variable_2.other, &mut used_strings);
-            mark_string(template.variable_3.other, &mut used_strings);
-        }
-        for shape in &self.lut_shapes {
-            mark_string(shape.template_name, &mut used_strings);
-        }
-        for cell in &self.cells {
-            for pin in &cell.pins {
-                mark_string(pin.function, &mut used_strings);
-                mark_string(pin.name, &mut used_strings);
-                for arc in &pin.timing_arcs {
-                    mark_string(arc.related_pin, &mut used_strings);
-                    mark_string(arc.timing_sense.other, &mut used_strings);
-                    mark_string(arc.timing_type.other, &mut used_strings);
-                    mark_string(arc.when, &mut used_strings);
-                }
-                for group in &pin.internal_power {
-                    for related_pin in &group.related_pins {
-                        mark_string(*related_pin, &mut used_strings);
-                    }
-                    mark_string(group.when, &mut used_strings);
-                    mark_string(group.related_pg_pin, &mut used_strings);
-                }
-            }
-        }
-
-        let old_strings = std::mem::take(&mut self.strings);
-        let mut string_remap = vec![StringId::default(); old_strings.len()];
-        let mut string_id_by_value = HashMap::new();
-        for (old_index, value) in old_strings.into_iter().enumerate() {
-            if !used_strings[old_index] {
-                continue;
-            }
-            let id = if let Some(id) = string_id_by_value.get(value.as_ref()) {
-                *id
-            } else {
-                let id = StringId::from_pool_id(self.strings.len() as u32 + 1);
-                string_id_by_value.insert(value.to_string(), id);
-                self.strings.push(value);
-                id
-            };
-            string_remap[old_index] = id;
-        }
-        for template in &mut self.lu_table_templates {
-            remap_string(&mut template.kind.other, &string_remap);
-            remap_string(&mut template.variable_1.other, &string_remap);
-            remap_string(&mut template.variable_2.other, &string_remap);
-            remap_string(&mut template.variable_3.other, &string_remap);
-        }
-        for shape in &mut self.lut_shapes {
-            remap_string(&mut shape.template_name, &string_remap);
-        }
-        for cell in &mut self.cells {
-            for pin in &mut cell.pins {
-                remap_string(&mut pin.function, &string_remap);
-                remap_string(&mut pin.name, &string_remap);
-                for arc in &mut pin.timing_arcs {
-                    remap_string(&mut arc.related_pin, &string_remap);
-                    remap_string(&mut arc.timing_sense.other, &string_remap);
-                    remap_string(&mut arc.timing_type.other, &string_remap);
-                    remap_string(&mut arc.when, &string_remap);
-                }
-                for group in &mut pin.internal_power {
-                    for related_pin in &mut group.related_pins {
-                        remap_string(related_pin, &string_remap);
-                    }
-                    remap_string(&mut group.when, &string_remap);
-                    remap_string(&mut group.related_pg_pin, &string_remap);
-                }
-            }
-        }
-
-        let mut used_axes = vec![false; self.lut_axes.len()];
-        for shape in &self.lut_shapes {
-            for id in [shape.index_1, shape.index_2, shape.index_3] {
-                if !id.is_unset() {
-                    used_axes[(id.0 - 1) as usize] = true;
-                }
-            }
-        }
-        let old_axes = std::mem::take(&mut self.lut_axes);
-        let mut axis_remap = vec![AxisId::default(); old_axes.len()];
-        let mut axis_id_by_value = HashMap::new();
-        for (old_index, axis) in old_axes.into_iter().enumerate() {
-            if !used_axes[old_index] {
-                continue;
-            }
-            let key = axis_key(&axis);
-            let id = if let Some(id) = axis_id_by_value.get(&key) {
-                *id
-            } else {
-                let id = AxisId(self.lut_axes.len() as u32 + 1);
-                axis_id_by_value.insert(key, id);
-                self.lut_axes.push(axis);
-                id
-            };
-            axis_remap[old_index] = id;
-        }
-        for shape in &mut self.lut_shapes {
-            for id in [&mut shape.index_1, &mut shape.index_2, &mut shape.index_3] {
-                if !id.is_unset() {
-                    *id = axis_remap[(id.0 - 1) as usize];
-                }
-            }
-        }
-    }
-
     fn lut_shape(&self, shape_id: u32) -> &LutShape {
         self.lut_shapes
             .get((shape_id - 1) as usize)
@@ -320,8 +195,7 @@ impl LibraryBuilder {
     }
 
     /// Resumes construction from an existing pooled model.
-    pub fn from_library(mut library: Library) -> Self {
-        library.compact_reference_pools();
+    pub fn from_library(library: Library) -> Self {
         let string_id_by_value = library
             .strings
             .iter()
@@ -341,19 +215,13 @@ impl LibraryBuilder {
         }
     }
 
-    /// Returns the model under construction.
-    pub fn library(&self) -> &Library {
-        &self.library
-    }
-
     /// Returns mutable non-pool model data under construction.
     pub fn library_mut(&mut self) -> &mut Library {
         &mut self.library
     }
 
     /// Finishes construction and discards interning state.
-    pub fn finish(mut self) -> Library {
-        self.library.compact_reference_pools();
+    pub fn finish(self) -> Library {
         self.library
     }
 
@@ -613,66 +481,6 @@ impl Library {
         self.lut_values.append(&mut other.lut_values);
         Ok(())
     }
-
-    fn compact_lut_pools(&mut self) {
-        fn compact_table(
-            shape_id: &mut u32,
-            values: &mut LutValueRange,
-            old_shapes: &[LutShape],
-            old_values: &[f32],
-            new_shapes: &mut Vec<LutShape>,
-            new_shape_id_by_old: &mut HashMap<u32, u32>,
-            new_values: &mut Vec<f32>,
-        ) {
-            let new_shape_id = *new_shape_id_by_old.entry(*shape_id).or_insert_with(|| {
-                new_shapes.push(old_shapes[(*shape_id - 1) as usize].clone());
-                new_shapes.len() as u32
-            });
-            *shape_id = new_shape_id;
-            let old_start = values.start as usize;
-            let old_end = old_start + values.len as usize;
-            values.start = new_values.len() as u32;
-            new_values.extend_from_slice(&old_values[old_start..old_end]);
-        }
-
-        let old_shapes = std::mem::take(&mut self.lut_shapes);
-        let old_values = std::mem::take(&mut self.lut_values);
-        let mut new_shapes = Vec::new();
-        let mut new_shape_id_by_old = HashMap::new();
-        let mut new_values = Vec::new();
-        for cell in &mut self.cells {
-            for pin in &mut cell.pins {
-                for arc in &mut pin.timing_arcs {
-                    for table in &mut arc.tables {
-                        compact_table(
-                            &mut table.shape_id,
-                            &mut table.values,
-                            &old_shapes,
-                            &old_values,
-                            &mut new_shapes,
-                            &mut new_shape_id_by_old,
-                            &mut new_values,
-                        );
-                    }
-                }
-                for group in &mut pin.internal_power {
-                    for table in &mut group.tables {
-                        compact_table(
-                            &mut table.shape_id,
-                            &mut table.values,
-                            &old_shapes,
-                            &old_values,
-                            &mut new_shapes,
-                            &mut new_shape_id_by_old,
-                            &mut new_values,
-                        );
-                    }
-                }
-            }
-        }
-        self.lut_shapes = new_shapes;
-        self.lut_values = new_values;
-    }
 }
 
 /// Normalized cell data.
@@ -925,11 +733,6 @@ impl PowerTable {
     pub fn shape_id(&self) -> u32 {
         self.shape_id
     }
-
-    /// Returns this table's range in the library-owned value allocation.
-    pub fn value_range(&self) -> LutValueRange {
-        self.values
-    }
 }
 
 fn enum_string<'a, E: Copy + PartialEq>(
@@ -1077,73 +880,8 @@ pub fn timing_table_kind_str(value: wire::TimingTableKind) -> &'static str {
     }
 }
 
-fn retain_templates_and_remap_ids(
-    library: &mut Library,
-    mut keep: impl FnMut(&LuTableTemplate) -> bool,
-) {
-    let old_templates = std::mem::take(&mut library.lu_table_templates);
-    let mut id_remap = vec![0u32; old_templates.len() + 1];
-    for (old_index, template) in old_templates.into_iter().enumerate() {
-        if keep(&template) {
-            let new_id = library.lu_table_templates.len() as u32 + 1;
-            id_remap[old_index + 1] = new_id;
-            library.lu_table_templates.push(template);
-        }
-    }
-    let remap = |id: &mut u32| {
-        if *id != 0 {
-            *id = id_remap.get(*id as usize).copied().unwrap_or(0);
-        }
-    };
-    for shape in &mut library.lut_shapes {
-        remap(&mut shape.template_id);
-    }
-}
-
-/// Removes timing arcs and timing templates from normalized library data.
-pub fn strip_timing_data(library: &mut Library) {
-    for cell in &mut library.cells {
-        for pin in &mut cell.pins {
-            pin.timing_arcs.clear();
-        }
-    }
-    library.compact_lut_pools();
-    retain_templates_and_remap_ids(library, |template| {
-        template.kind.wire_value() != wire::LutTemplateKind::Timing
-    });
-    library.compact_reference_pools();
-}
-
-/// Removes dynamic-power payloads and templates from normalized library data.
-pub fn strip_power_data(library: &mut Library) {
-    library.nominal_voltage = None;
-    for cell in &mut library.cells {
-        for pin in &mut cell.pins {
-            pin.internal_power.clear();
-        }
-    }
-    library.compact_lut_pools();
-    retain_templates_and_remap_ids(library, |template| {
-        template.kind.wire_value() != wire::LutTemplateKind::Power
-    });
-    library.compact_reference_pools();
-}
-
 /// Wire-format discriminator stored in every serialized Liberty library.
 pub const LIBERTY_FORMAT_MAGIC: u64 = 0x4c49_4256_3350_524f;
-
-/// Returns whether a timing-table kind is consumed by the deterministic STA.
-pub fn is_evaluator_timing_table_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "cell_rise"
-            | "cell_fall"
-            | "rise_transition"
-            | "fall_transition"
-            | "rise_constraint"
-            | "fall_constraint"
-    )
-}
 
 /// Returns whether a decoded library has the expected wire-format magic.
 pub fn has_valid_header(library: &wire::Library) -> bool {
@@ -2051,105 +1789,6 @@ mod tests {
         fn assert_copy<T: Copy>() {}
         assert_copy::<StringId>();
         assert_eq!(std::mem::size_of::<StringId>(), 4);
-    }
-
-    #[test]
-    fn stripping_payloads_compacts_string_and_axis_pools() {
-        let mut builder = LibraryBuilder::new();
-        let timing = builder
-            .add_timing_table_f64(
-                wire::TimingTableKind::CellRise,
-                1,
-                vec![1.0, 2.0],
-                vec![],
-                vec![],
-                vec![3.0, 4.0],
-                vec![2],
-                "timing_template",
-            )
-            .unwrap();
-        let power = builder
-            .add_power_table_f64(
-                wire::PowerTransition::Rise,
-                2,
-                vec![5.0, 6.0],
-                vec![],
-                vec![],
-                vec![7.0, 8.0],
-                vec![2],
-                "power_template",
-            )
-            .unwrap();
-        let arc = builder
-            .add_timing_arc(
-                "TIMING_SOURCE",
-                "positive_unate",
-                "combinational",
-                "",
-                vec![timing],
-            )
-            .unwrap();
-        let power_source = builder.intern_string("POWER_SOURCE").unwrap();
-        let pin_name = builder.intern_string("Y").unwrap();
-        let timing_kind = LutTemplateKind::from_raw_in(&mut builder, "lu_table_template").unwrap();
-        let power_kind = LutTemplateKind::from_raw_in(&mut builder, "power_lut_template").unwrap();
-        builder.lu_table_templates = vec![
-            LuTableTemplate {
-                kind: timing_kind,
-                ..Default::default()
-            },
-            LuTableTemplate {
-                kind: power_kind,
-                ..Default::default()
-            },
-        ];
-        builder.cells = vec![Cell {
-            pins: vec![Pin {
-                name: pin_name,
-                timing_arcs: vec![arc],
-                internal_power: vec![InternalPower {
-                    related_pins: vec![power_source],
-                    tables: vec![power],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-            ..Default::default()
-        }];
-        let mut library = builder.finish();
-
-        assert_eq!(library.lut_axes.len(), 2);
-        assert!(
-            library
-                .strings
-                .iter()
-                .any(|value| value.as_ref() == "TIMING_SOURCE")
-        );
-        strip_timing_data(&mut library);
-        assert_eq!(library.lut_axes.len(), 1);
-        assert_eq!(
-            library.resolve_axis(library.lut_shapes[0].index_1),
-            &[5.0, 6.0]
-        );
-        assert!(
-            !library
-                .strings
-                .iter()
-                .any(|value| value.as_ref() == "TIMING_SOURCE")
-        );
-        assert!(
-            library
-                .strings
-                .iter()
-                .any(|value| value.as_ref() == "POWER_SOURCE")
-        );
-
-        strip_power_data(&mut library);
-        assert!(library.lut_axes.is_empty());
-        assert!(library.lut_shapes.is_empty());
-        assert!(library.lut_values.is_empty());
-        assert_eq!(library.strings.len(), 1);
-        assert_eq!(library.resolve_string(&library.cells[0].pins[0].name), "Y");
     }
 
     #[test]

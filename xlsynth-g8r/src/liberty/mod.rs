@@ -16,8 +16,7 @@ pub mod util;
 pub use cell_filter::{CellFilterAction, CellFilterPolicy, CellFilterRule, CellFilterStats};
 pub use indexed::IndexedLibrary;
 pub use liberty_parser::{CharReader, LibertyParser};
-pub use load::{Library, LibraryWithTimingData};
-pub use model::{library_from_proto, library_to_proto};
+pub use model::{Library, library_from_proto, library_to_proto};
 pub use proto_info::{LibertyProtoInfo, liberty_proto_info_from_path};
 pub use timing_table::{TimingTableArrayError, TimingTableArrayView};
 

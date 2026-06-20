@@ -24,7 +24,8 @@ pub fn liberty_proto_bytes_to_pretty_textproto(bytes: &[u8]) -> Result<String, p
     let message = DynamicMessage::decode(message_descriptor, bytes)?;
     let body = message.to_text_format_with_options(&FormatOptions::new().pretty(true));
     Ok(format!(
-        "# proto-file: xlsynth-g8r/proto/liberty.proto\n\
+        "# SPDX-License-Identifier: Apache-2.0\n\
+         # proto-file: xlsynth-g8r/proto/liberty.proto\n\
          # proto-message: liberty.Library\n\n\
          {body}\n"
     ))

@@ -6,10 +6,10 @@ use std::io::Write;
 use std::path::Path;
 use xlsynth_g8r::liberty::CellFilterPolicy;
 use xlsynth_g8r::liberty::descriptor::liberty_proto_bytes_to_pretty_textproto;
-use xlsynth_g8r::liberty::model::{library_to_proto, strip_power_data, strip_timing_data};
+use xlsynth_g8r::liberty::model::library_to_proto;
 use xlsynth_g8r::liberty::parser::{
-    ThresholdVoltageGroupRule, parse_liberty_files_with_vt_rules_without_payload_validation,
-    validate_library_consistency,
+    LibertyPayloadOptions, ThresholdVoltageGroupRule,
+    parse_liberty_files_with_vt_rules_and_payload_options,
 };
 
 fn parse_vt_group_rule(raw: &str) -> Result<ThresholdVoltageGroupRule, String> {
@@ -75,16 +75,21 @@ pub fn handle_lib2proto(matches: &clap::ArgMatches) {
         .unwrap_or_else(|e| panic!("{e}"))
         .unwrap_or_default();
 
-    let mut proto = parse_liberty_files_with_vt_rules_without_payload_validation(
+    let payload_options = LibertyPayloadOptions {
+        include_timing: matches.get_flag("include_timing"),
+        include_power: matches.get_flag("include_power"),
+    };
+    let mut library = parse_liberty_files_with_vt_rules_and_payload_options(
         &liberty_files,
         &vt_group_rules,
+        payload_options,
     )
     .expect("Failed to parse Liberty files");
-    proto.provenance = matches
+    library.provenance = matches
         .get_one::<String>("provenance")
         .cloned()
         .unwrap_or_default();
-    proto.source_files = liberty_files
+    library.source_files = liberty_files
         .iter()
         .map(|path| {
             Path::new(path)
@@ -97,7 +102,7 @@ pub fn handle_lib2proto(matches: &clap::ArgMatches) {
     if let Some(policy_path) = matches.get_one::<String>("cell_filter_policy") {
         let policy = CellFilterPolicy::from_path(Path::new(policy_path))
             .unwrap_or_else(|e| panic!("Failed to load cell-filter policy: {e:#}"));
-        let stats = policy.apply(&mut proto);
+        let stats = policy.apply(&mut library);
         log::info!(
             "Applied {} cell-filter rules: input={} native_dont_use={} retained={} removed={}",
             policy.rules().len(),
@@ -107,15 +112,7 @@ pub fn handle_lib2proto(matches: &clap::ArgMatches) {
             stats.removed_cells
         );
     }
-    if !matches.get_flag("include_timing") {
-        strip_timing_data(&mut proto);
-    }
-    if !matches.get_flag("include_power") {
-        strip_power_data(&mut proto);
-    }
-    validate_library_consistency(&proto)
-        .unwrap_or_else(|e| panic!("Failed to validate retained Liberty data: {e}"));
-    let proto = library_to_proto(proto).expect("Failed to encode Liberty LUT data");
+    let proto = library_to_proto(library).expect("Failed to encode Liberty LUT data");
 
     if output.ends_with(".proto") {
         let mut f = File::create(output).expect("Failed to create output file");

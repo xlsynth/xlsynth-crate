@@ -25,6 +25,7 @@ fn check_spdx_identifier(file_path: &Path) -> bool {
         || filename.ends_with(".yaml")
         || filename.ends_with(".py")
         || filename.ends_with(".sh")
+        || filename.ends_with(".textproto")
         || filename == "requirements.txt"
     {
         "#"
@@ -190,6 +191,24 @@ fn test_accepts_vimscript_spdx_comment() {
     let temp_dir = tempfile::tempdir().unwrap();
     let vim_file = temp_dir.path().join("syntax.vim");
     fs::write(vim_file.clone(), "\" SPDX-License-Identifier: Apache-2.0\n").unwrap();
+
+    let missing_spdx_files = find_missing_spdx_files(temp_dir.path());
+    assert!(
+        missing_spdx_files.is_empty(),
+        "unexpected missing SPDX files: {:?}",
+        missing_spdx_files
+    );
+}
+
+#[test]
+fn test_accepts_textproto_spdx_comment() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let textproto_file = temp_dir.path().join("message.textproto");
+    fs::write(
+        textproto_file,
+        "# SPDX-License-Identifier: Apache-2.0\nfield: 42\n",
+    )
+    .unwrap();
 
     let missing_spdx_files = find_missing_spdx_files(temp_dir.path());
     assert!(

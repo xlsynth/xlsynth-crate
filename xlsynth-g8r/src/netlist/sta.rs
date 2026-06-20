@@ -55,7 +55,7 @@
 //!    set to its conservative envelope: maximum arrival and maximum transition.
 //! 6. Report the maximum rise/fall arrival observed at module outputs.
 
-use crate::liberty::LibraryWithTimingData;
+use crate::liberty::Library;
 use crate::liberty::cell_formula::parse_formula;
 use crate::liberty::timing_table::TimingTableArrayView;
 use crate::liberty_model::{LuTableTemplate, Pin, PinDirection, TimingArc, TimingTable};
@@ -444,10 +444,10 @@ pub fn analyze_combinational_max_arrival(
     module: &NetlistModule,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
-    library: &LibraryWithTimingData,
+    library: &Library,
     options: StaOptions,
 ) -> Result<StaReport> {
-    analyze_combinational_max_arrival_proto(module, nets, interner, library.as_model(), options)
+    analyze_combinational_max_arrival_proto(module, nets, interner, library, options)
 }
 
 /// Analyzes combinational segments launched by primary inputs and/or selected
@@ -456,7 +456,7 @@ pub fn analyze_register_boundary_max_arrival(
     module: &NetlistModule,
     nets: &[Net],
     interner: &StringInterner<StringBackend<SymbolU32>>,
-    library: &LibraryWithTimingData,
+    library: &Library,
     options: StaOptions,
     launch_primary_inputs: bool,
     launch_register_instances: &[usize],
@@ -467,7 +467,7 @@ pub fn analyze_register_boundary_max_arrival(
         module,
         nets,
         interner,
-        library.as_model(),
+        library,
         options,
         StaAnalysisMode::RegisterBoundaries {
             launch_primary_inputs,
